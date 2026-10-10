@@ -1,0 +1,49 @@
+name: Checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  catalog:
+    runs-on: ubuntu-latest
+    outputs:
+      plugins: ${{ steps.plugins.outputs.names }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plugins
+        run: echo "names=$(node -e 'console.log(JSON.stringify(require("./source-pins.json").plugins.map(p => p.name)))')" >> "$GITHUB_OUTPUT"
+  loader-and-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            site/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm ci
+        working-directory: site
+      - run: npm run check && npm run build
+        working-directory: site
+  component:
+    needs: catalog
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: ${{ fromJSON(needs.catalog.outputs.plugins) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: packages/${{ matrix.plugin }}/package-lock.json
+      - run: npm ci && npm run check
+        working-directory: packages/${{ matrix.plugin }}

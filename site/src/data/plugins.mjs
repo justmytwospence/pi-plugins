@@ -1,0 +1,31 @@
+// Public navigation and catalog; check-docs compares this list to the suite manifest.
+export const groups = [
+  { title: "Run & coordinate", eyebrow: "01 / Execution", description: "Keep long-running work visible. Delegate bounded tasks without losing the thread.", plugins: [
+    { name: "pi-bg", label: "Background work", description: "Jobs, services, logs and waiting that stays inside the turn." },
+    { name: "pi-subagents", label: "Subagents", description: "Separate Pi processes, parallel tasks and conversations you can inspect." },
+    { name: "pi-herdr", label: "Herdr", description: "Pane metadata, interactive children and a shared event-bus bridge." },
+    { name: "pi-marimo", label: "Notebooks", description: "Live notebook state alongside your conversation, without taking over the kernel." },
+  ] },
+  { title: "Think & review", eyebrow: "02 / Decisions", description: "Make the decision explicit, compare plans, and review the actual changes.", plugins: [
+    { name: "pi-plan-mode", label: "Plan mode", description: "One or two read-only planners, then implementation on your terms." },
+    { name: "pi-ask-user-question", label: "Ask a question", description: "Structured choices with previews, notes and room for your own answer." },
+    { name: "pi-diff-review", label: "Diff review", description: "Line comments and suggested edits, sent back to the agent together." },
+    { name: "pi-rewind", label: "Rewind", description: "Offer to restore working-tree files when you rewind the conversation." },
+    { name: "pi-tool-gate", label: "Tool gate", description: "Rules and classifier-assisted approval for tool calls. Not a sandbox." },
+  ] },
+  { title: "Context & cost", eyebrow: "03 / Awareness", description: "See what the session is using and choose when to spend more reasoning or context.", plugins: [
+    { name: "pi-cache-guard", label: "Cache guard", description: "Cache-expiry warnings, a cache clock and optional Jev context trimming." },
+    { name: "pi-auto-effort", label: "Auto effort", description: "Classifier-guided reasoning levels, bounded by your manual ceiling." },
+    { name: "pi-status-footer", label: "Status footer", description: "Context, Git and provider-aware usage in one responsive footer." },
+  ] },
+  { title: "Make it yours", eyebrow: "04 / Terminal craft", description: "Small, focused improvements to the place you spend your working day.", plugins: [
+    { name: "pi-copy", label: "Copy picker", description: "Pick useful fragments from the session instead of copying a whole reply." },
+    { name: "pi-next-prompt", label: "Next prompt", description: "An optional next step in the editor. Accept it; never auto-send it." },
+    { name: "pi-prose-width", label: "Prose width", description: "Readable paragraphs without narrowing code blocks and tables." },
+    { name: "pi-select-nav", label: "Picker navigation", description: "Consistent list movement that leaves text entry alone." },
+    { name: "pi-clear-screen", label: "Clear screen", description: "Move the fullscreen transcript out of view, not out of context." },
+    { name: "pi-appearance-resync", label: "Appearance resync", description: "Retry terminal color reports when the multiplexer answers too early." },
+    { name: "pi-herdr-scrollbar-width", label: "Scrollbar width", description: "A focused fix for fullscreen exit wrapping inside Herdr." },
+  ] },
+];
+export const plugins = groups.flatMap((group) => group.plugins);

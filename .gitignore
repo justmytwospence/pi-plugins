@@ -4,3 +4,8 @@ node_modules/
 .DS_Store
 coverage/
 *.tsbuildinfo
+.vercel/
+site/dist/
+site/.astro/
+.vercel
+.env*

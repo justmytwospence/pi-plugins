@@ -1,6 +1,8 @@
 # Pi Plugins
 
-A modular Pi extension suite: use any component on its own, or combine them into an integrated workflow. One Git package, independently selected extensions, one suite version. This is an experimental consolidation, not a fork of Pi.
+A modular Pi extension suite: use any component on its own, or combine them into an integrated workflow. One Git package, independently selected extensions, one suite version—not a fork of Pi.
+
+**[Documentation and landing page](https://pi-plugins.vercel.app)** · **[Personal project overview](https://www.spencerboucher.com/projects/pi-plugins)**
 
 ## Install
 
@@ -45,9 +47,23 @@ npm run check
 
 For a check against an already installed Pi SDK, set `PI_TEST_SDK` to its `dist/index.js` file URL or absolute path. `PI_ORIGINAL_ROOT` optionally enables registration parity checks against retained standalone checkouts.
 
-## Trial and rollback
+## Documentation
 
-See [the trial procedure](docs/trial.md). Original repositories are not deleted, archived, or modified. Shared helpers remain unchanged in this first trial; no behavior refactor is bundled with the packaging migration.
+The static documentation site lives in `site/`, with its own package manifest and lockfile. It is not part of Pi's runtime resource manifest.
+
+```sh
+cd site
+npm ci
+npm run check
+npm run build
+npm run dev
+```
+
+See the documentation for component reference pages, setup recipes, requirements, integration protocols, and troubleshooting. Each original component README remains available under `packages/`.
+
+## Migration and rollback
+
+See [the migration procedure](docs/trial.md). The consolidation passed component checks, individual and combined resource loading, registration parity, a fresh Git install/RPC startup, and a manual reload trial. Original repositories remain available and are not deleted or archived. Shared helpers are unchanged; no behavior refactor is bundled with the packaging migration.
 
 ## License
 

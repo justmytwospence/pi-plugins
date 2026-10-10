@@ -1,0 +1,36 @@
+---
+import { groups } from "../data/plugins.mjs";
+---
+<div class="pp-landing">
+  <div class="pp-principles" aria-label="Suite at a glance">
+    <div><strong>19</strong><span>focused extensions</span></div>
+    <div><strong>01</strong><span>Git pin for the suite</span></div>
+    <div><strong>Your call</strong><span>enable only what you need</span></div>
+  </div>
+  <section class="pp-section" aria-labelledby="work-your-way">
+    <div class="pp-section-heading"><p class="pp-eyebrow">The collection</p><h2 id="work-your-way">Less friction.<br /><em>More intention.</em></h2><p>Not a new agent. A set of small, composable extensions for the Pi you already use.</p></div>
+    <div class="pp-group-grid">
+      {groups.map((group) => (
+        <article class="pp-group-card">
+          <p class="pp-eyebrow">{group.eyebrow}</p>
+          <h3>{group.title}</h3>
+          <p>{group.description}</p>
+          <ul>{group.plugins.map((plugin) => <li><a href={"/plugins/" + plugin.name + "/"}>{plugin.label}<span aria-hidden="true">↗</span></a></li>)}</ul>
+        </article>
+      ))}
+    </div>
+  </section>
+  <section class="pp-section pp-workflows" aria-labelledby="in-practice">
+    <div class="pp-section-heading"><p class="pp-eyebrow">In practice</p><h2 id="in-practice">A few good<br /><em>ways to work.</em></h2><p>Start with a workflow, then choose the pieces that serve it.</p></div>
+    <div class="pp-recipe-list">
+      <a href="/recipes/background-work/"><span class="pp-recipe-number">01</span><div><h3>Do useful work while the tests run</h3><p>Shell jobs and headless subagents, in one place.</p></div><span aria-hidden="true">↗</span></a>
+      <a href="/recipes/plan-review/"><span class="pp-recipe-number">02</span><div><h3>Think first. Review what changed.</h3><p>Plan, choose an implementation, leave line-level feedback.</p></div><span aria-hidden="true">↗</span></a>
+      <a href="/recipes/notebooks/"><span class="pp-recipe-number">03</span><div><h3>Stay with the notebook</h3><p>Follow cells, wait for the kernel, keep the browser yours.</p></div><span aria-hidden="true">↗</span></a>
+      <a href="/recipes/cache-cost/"><span class="pp-recipe-number">04</span><div><h3>Know what the next turn costs</h3><p>Understand cache warnings, reasoning effort and estimates.</p></div><span aria-hidden="true">↗</span></a>
+    </div>
+  </section>
+  <aside class="pp-honesty">
+    <div><p class="pp-eyebrow">Small pieces, clear boundaries</p><h2>Pick the tools.<br />Know the trade-offs.</h2></div>
+    <div><p>Some features use paid classifier calls. Some need Git, Herdr or marimo. Terminal patches have compatibility limits. Every reference page spells out its requirements.</p><a class="pp-text-link" href="/guides/requirements/">Read the requirements <span aria-hidden="true">→</span></a></div>
+  </aside>
+</div>

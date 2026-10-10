@@ -1,0 +1,10 @@
+---
+import { groups } from "../data/plugins.mjs";
+---
+<div class="pp-catalog">
+  {groups.map((group) => <section>
+    <h2 id={group.title.toLowerCase().replace(/[^a-z]+/g, "-")}>{group.title}</h2>
+    <p>{group.description}</p>
+    <div class="pp-catalog-grid">{group.plugins.map((plugin) => <a class="pp-catalog-card" href={"/plugins/" + plugin.name + "/"}><strong>{plugin.name}</strong><span>{plugin.description}</span><span class="pp-catalog-more">Read reference <span aria-hidden="true">↗</span></span></a>)}</div>
+  </section>)}
+</div>
