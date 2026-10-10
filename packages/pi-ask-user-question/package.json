@@ -1,0 +1,40 @@
+{
+  "name": "@justmytwospence/pi-ask-user-question",
+  "version": "0.1.0",
+  "description": "The ask_user_question tool for Pi: a Claude Code-style question dialog (tabs, multi-select, free text, notes, previews) that reports itself to herdr as blocked.",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "check": "npm run typecheck && npm test",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/justmytwospence/pi-ask-user-question"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.87.1",
+    "@earendil-works/pi-tui": "^0.87.1",
+    "@types/node": "^22.20.4",
+    "typebox": "^1.3.34",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.2"
+  }
+}

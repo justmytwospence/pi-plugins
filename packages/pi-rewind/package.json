@@ -1,0 +1,38 @@
+{
+  "name": "@justmytwospence/pi-rewind",
+  "version": "0.1.0",
+  "description": "Restore files alongside pi's conversation rewinds (/tree and /fork).",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "rewind",
+    "undo",
+    "git"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "check": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.87.1",
+    "@earendil-works/pi-tui": ">=0.87.1",
+    "@types/node": "^22.0.0",
+    "typescript": "^7.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/justmytwospence/pi-rewind"
+  }
+}

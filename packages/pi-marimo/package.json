@@ -1,0 +1,39 @@
+{
+  "name": "@justmytwospence/pi-marimo",
+  "version": "0.1.0",
+  "description": "Pi follows your live marimo notebook: what is running in the footer, the notebook's current state in context.",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "marimo",
+    "notebook"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "check": "npm run typecheck && npm test",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.87.1",
+    "@types/node": "^22.0.0",
+    "typescript": "^7.0.0",
+    "vitest": "^5.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/justmytwospence/pi-marimo"
+  }
+}

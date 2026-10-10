@@ -1,0 +1,51 @@
+{
+  "name": "@justmytwospence/pi-plugins",
+  "version": "0.1.0",
+  "description": "A modular Pi extension suite: independently enabled components, one tested Git release.",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/justmytwospence/pi-plugins"
+  },
+  "pi": {
+    "extensions": [
+      "./packages/pi-ask-user-question/src/index.ts",
+      "./packages/pi-plan-mode/src/index.ts",
+      "./packages/pi-status-footer/src/index.ts",
+      "./packages/pi-rewind/src/index.ts",
+      "./packages/pi-clear-screen/src/index.ts",
+      "./packages/pi-select-nav/src/index.ts",
+      "./packages/pi-herdr-scrollbar-width/src/index.ts",
+      "./packages/pi-herdr/src/index.ts",
+      "./packages/pi-subagents/src/index.ts",
+      "./packages/pi-tool-gate/src/index.ts",
+      "./packages/pi-bg/src/index.ts",
+      "./packages/pi-auto-effort/src/index.ts",
+      "./packages/pi-appearance-resync/src/index.ts",
+      "./packages/pi-copy/src/index.ts",
+      "./packages/pi-marimo/src/index.ts",
+      "./packages/pi-cache-guard/src/index.ts",
+      "./packages/pi-next-prompt/src/index.ts",
+      "./packages/pi-diff-review/src/index.ts",
+      "./packages/pi-prose-width/src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.1.0"
+  },
+  "scripts": {
+    "test": "node scripts/test-loader.mjs",
+    "check": "npm test && node scripts/check-components.mjs"
+  }
+}

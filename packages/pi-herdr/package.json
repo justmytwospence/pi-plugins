@@ -1,0 +1,39 @@
+{
+  "name": "@justmytwospence/pi-herdr",
+  "version": "0.1.0",
+  "description": "Pi inside herdr: pending background work and the session's task and model in herdr's sidebar, interactive pi children in herdr tabs, splits or worktrees, PR status on worktree spaces, and one event-bus bridge other extensions use instead of talking to herdr themselves.",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "herdr"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "check": "npm run typecheck && npm test",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/justmytwospence/pi-herdr"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^1.1.0",
+    "@types/node": "^22.20.4",
+    "typebox": "^1.3.34",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.2"
+  }
+}
