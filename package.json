@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-plugins",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A modular Pi extension suite: independently enabled components, one tested Git release.",
   "private": true,
   "type": "module",

@@ -41,7 +41,12 @@ export function git(
 			out.push(d);
 		});
 		child.stderr.on("data", (d) => (stderr += d));
-		child.on("error", (e) => done({ code: -1, stdout: "", stderr: String(e) }));
+		const fail = (e: Error) => done({ code: -1, stdout: "", stderr: String(e) });
+		child.on("error", fail);
+		child.stdin.on("error", (e: NodeJS.ErrnoException) => {
+			// Git can exit without reading stdin. Keep its exit code and diagnostics.
+			if (e.code !== "EPIPE") fail(e);
+		});
 		child.on("close", (code) =>
 			done({
 				code: truncated ? -2 : (code ?? -1),
