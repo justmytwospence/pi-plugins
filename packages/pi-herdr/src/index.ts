@@ -45,10 +45,10 @@ const Params = Type.Object({
   name: Type.Optional(Type.String({ description: "spawn: a short name (lowercase, dashes); otherwise from the task. send/read/interrupt/close: which child" })),
   where: Type.Optional(
     Type.Union([Type.Literal("tab"), Type.Literal("split"), Type.Literal("worktree")], {
-      description: "spawn: a new tab in this space (default), a split beside this pane, or a new worktree's own space (needs branch)",
+      description: "spawn: tab in this space for a persistent session sharing this checkout (default); split for side-by-side interaction; worktree for a user-requested independent branch/checkout in its own space (needs branch)",
     }),
   ),
-  branch: Type.Optional(Type.String({ description: "spawn with where=worktree: the branch (checked out, tracked or created from HEAD)" })),
+  branch: Type.Optional(Type.String({ description: "spawn with where=worktree: the user-requested independent branch (checked out, tracked or created from HEAD); do not create a worktree without the user's request" })),
   model: Type.Optional(Type.String({ description: "spawn: provider/model; default this session's" })),
   thinking: Type.Optional(Type.String({ description: "spawn: off|minimal|low|medium|high|xhigh|max; default this session's" })),
   focus: Type.Optional(Type.Boolean({ description: "spawn: switch to the child's pane (default false)" })),
@@ -226,10 +226,13 @@ export default function piHerdr(pi: ExtensionAPI) {
     name: TOOL,
     label: "Herdr child",
     description:
-      "Start and talk to herdr children: interactive pi sessions in their own herdr pane (a new tab, a split beside this pane, or a new git worktree's space) that the user can watch, type to and take over, and that outlive this turn. action=spawn takes `task` (plus optional name, where, branch, model, thinking, focus); the child's reply to each message arrives as a message, so do not poll. action=send (name, message), read (name), list, interrupt (name), close (name).",
-    promptSnippet: "Start interactive pi children in herdr panes or worktrees and exchange messages with them",
+      "Start and talk to persistent, human-led pi sessions in herdr, for an explicit interactive-session request or a clear handoff to the user. Not for delegated work whose purpose is to report back to this session: use a headless subagent instead, even for long or multi-step tasks. A tab shares this checkout in the existing space; a split is for side-by-side interaction; a worktree gets its own space and requires a user-requested independent branch/checkout. action=spawn takes `task` (plus optional name, where, branch, model, thinking, focus); replies arrive as messages, so do not poll. action=send (name, message), read (name), list, interrupt (name), close (name).",
+    promptSnippet: "Start persistent human-led pi sessions in herdr for interactive requests or user handoffs, not report-back subagents",
     promptGuidelines: [
-      "Use a subagent for a bounded task that only needs to return a result. Use herdr_child when the work is long or open-ended, belongs on its own branch (where=worktree), or the user may want to watch, steer or take it over.",
+      "Default to a headless subagent for delegated work that reports back to this session, even when long, multi-step, or parallel. Duration, complexity, and the possibility the user might want to watch are not reasons to create a Herdr pane.",
+      "Use herdr_child only for an explicit interactive-session request or a clear persistent, human-led handoff that the user will continue independently. A child's ability to report back does not make it a substitute for a headless subagent.",
+      "For an interactive handoff sharing the current checkout and branch, use where=tab in the existing Herdr space. Tabs and splits share files; do not treat them as isolated parallel editors. Use where=split only for deliberate side-by-side interaction or when requested, and preserve focus unless asked to switch.",
+      "Use where=worktree for an independent branch/checkout only when the user requests a worktree or branch isolation; otherwise ask before creating one. It opens the checkout in its own Herdr space (or adds a tab there if already open). Do not create a new space or worktree merely because work is delegated, long, or parallel.",
       "Give a herdr child a complete, self-contained task: it cannot see this conversation.",
       "A herdr child's reply arrives as a message when its turn ends; end your turn instead of polling, and use action=send for follow-ups.",
     ],

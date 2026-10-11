@@ -60,11 +60,30 @@ reports. Turns the user starts by typing in the child's pane are not sent back. 
 pending the parent holds `herdr:background`, so its `$bg` token names the child. Children are
 saved as session entries, so `list`, `send` and pending replies survive a restart or `/resume`.
 
-Herdr children vs [pi-subagents](https://github.com/justmytwospence/pi-subagents): a subagent is a
-headless `pi --mode rpc` child that lives for one call and returns a result, which suits bounded
-tasks. A herdr child is an ordinary pi you can watch, type to and take over, that keeps going after
-the parent's turn, and can have a branch of its own: long or open-ended work, or anything the user
-may want to steer.
+### Choose delegation, then layout
+
+Use [pi-subagents](https://github.com/justmytwospence/pi-subagents) for delegated work that reports
+back to the parent. These headless `pi --mode rpc` children create no panes. Long, multi-step, and
+parallel tasks are still subagent work; duration and a hypothetical desire to watch are not
+reasons to open interactive sessions.
+
+Use a Herdr child only for an explicit interactive-session request or a clear persistent,
+human-led handoff that the user will continue independently. It is an ordinary pi session, not
+a disposable worker. Its ability to send replies back is coordination support, not a reason to
+choose it over a subagent.
+
+Once an interactive session is appropriate:
+
+| Layout | When to use it |
+|---|---|
+| `tab` (default) | Persistent session sharing the current checkout and branch, in the existing Herdr space. |
+| `split` | Deliberate side-by-side interaction, or a requested split. |
+| `worktree` | User-requested independent branch/checkout, in that checkout's own space; an already-open space gets a tab. |
+
+Tabs and splits share files and are not isolated parallel editors. A separate feature or PR may
+benefit from a worktree, but ask first unless the user requested a worktree or branch isolation.
+Never create a new space or checkout merely because work is delegated, long, or parallel. Keep
+the user's focus unchanged unless asked to switch.
 
 ## The event-bus bridge
 

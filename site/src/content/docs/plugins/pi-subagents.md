@@ -18,8 +18,8 @@ Children need a working Pi runtime and access to their selected model providers.
 
 `action: "run"` is the default. Choose one task shape:
 
-- `task`: one self-contained assignment, with optional `agent`, `model`, and `thinking`.
-- `tasks`: parallel task objects, each accepting `task`, `agent`, `cwd`, `model`, and `thinking`. Defaults allow eight tasks with four executing concurrently.
+- `task`: one self-contained assignment, with optional `label`, `agent`, `model`, and `thinking`.
+- `tasks`: parallel task objects, each accepting `task`, `label`, `agent`, `cwd`, `model`, and `thinking`. Defaults allow eight tasks with four executing concurrently.
 - `chain`: sequential task objects. `{previous}` inserts the preceding output; the chain stops on its first failed step.
 
 Example arguments for independent read-only reconnaissance:
@@ -58,7 +58,7 @@ Control an existing run with `action: "status"`, `"result"`, `"stop"`, or `"stee
 
 ## Agent definitions and settings
 
-Agent definitions live in `~/.pi/agent/agents/*.md` and the nearest project's `.pi/agents/*.md`; project definitions win. A built-in `general` agent is always available. Definitions use frontmatter for `name`, `description`, optional `tools`, `model`, `thinking`, and `maxTurns` (also `max_turns`); the body extends the child's system prompt.
+Agent definitions live in `~/.pi/agent/agents/*.md` and the nearest project's `.pi/agents/*.md`; project definitions win. Built-in `general`, `explorer`, and `reviewer` agents are available. Explorer traces code paths and reports findings; reviewer checks changes for concrete bugs and regressions. Their no-edit policies are instructions, not filesystem sandboxes. Definitions use frontmatter for `name`, `description`, optional `tools`, `model`, `thinking`, and `maxTurns` (also `max_turns`); the body extends the child's system prompt.
 
 At a turn limit, the child is asked to finish without further tools. If it continues calling tools, it is stopped with potentially partial output. A role description calling an agent read-only is not an operating-system sandbox.
 
@@ -83,7 +83,7 @@ Optional `tiers` maps `fast`, `balanced`, and `strong` to configured `provider/m
 
 `/subagents` lists live and recorded runs. `/subagents <id>` opens a conversation, `/subagents stop <id>` stops a run, and `/subagents stop all` stops running children.
 
-In the TUI fleet list, Enter opens a child, `x` twice stops it, and `b` moves a foreground run to the background. In its conversation viewer, Enter opens a steering composer, `m` cycles Markdown rendering, and Esc returns to the main session. Child approval dialogs can be forwarded to your UI with an agent-name prefix.
+In the TUI fleet list, Enter opens a child, `x` twice stops it, and `b` moves a foreground run to the background. In its conversation viewer, Enter opens a steering composer, `m` cycles Markdown rendering, and Esc returns to the main session. Optional `label` names a task in lists and headings; when omitted, a short label is derived from the task text. Child approval dialogs can be forwarded to your UI with a task-label-plus-agent prefix.
 
 Returned replies are capped at 2000 lines or 50 KB. Full output is saved under `~/.pi/agent/subagents/<id>/output.md`, alongside `messages.jsonl`. Recorded transcripts remain inspectable after reload or resume; this is not a promise that a live child survives session teardown.
 

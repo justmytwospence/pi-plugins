@@ -60,6 +60,8 @@
       "name": "pi-herdr",
       "source": "git:github.com/justmytwospence/pi-herdr@0729e65c4a9837e966f29c1427a69e45123f8a45",
       "commit": "0729e65c4a9837e966f29c1427a69e45123f8a45",
+      "currentSource": "git:github.com/justmytwospence/pi-herdr@1fb99abea8862cd2bd096886f6df75aab21949b2",
+      "currentCommit": "1fb99abea8862cd2bd096886f6df75aab21949b2",
       "extensions": [
         "./src/index.ts"
       ]
@@ -68,6 +70,8 @@
       "name": "pi-subagents",
       "source": "git:github.com/justmytwospence/pi-subagents@0e0c62f0c2603daab9eb347476b67b66591a3c3d",
       "commit": "0e0c62f0c2603daab9eb347476b67b66591a3c3d",
+      "currentSource": "git:github.com/justmytwospence/pi-subagents@07a4959f4baf70c3dd5fb3479b3beaf5b4d30578",
+      "currentCommit": "07a4959f4baf70c3dd5fb3479b3beaf5b4d30578",
       "extensions": [
         "./src/index.ts"
       ]
