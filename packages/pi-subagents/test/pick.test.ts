@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import { GENERAL, parseAgent } from "../src/agents.ts";
-import { DEFAULT_TIER_DESCRIPTIONS, pickQuestions, readPicks, resolve } from "../src/pick.ts";
+import { DEFAULT_TIER_DESCRIPTIONS, pickQuestions, providerTiers, readPicks, resolve } from "../src/pick.ts";
 
 const scout = parseAgent("---\nname: scout\ndescription: Fast recon\ntools: read, grep\nmodel: anthropic/claude-haiku-5\n---\nYou are a scout.", "user")!;
 const reviewer = parseAgent("---\nname: reviewer\ndescription: Code review\nthinking: high\n---\nReview carefully.", "project")!;
@@ -32,6 +32,39 @@ test("readPicks applies the confidence floors", () => {
     }),
   ).toEqual({ agent: "reviewer", tier: "balanced", thinking: "xhigh" });
   expect(readPicks({ role: { type: "choice", choice: "scout", probabilities: {}, confidence: 0.2 } })).toEqual({});
+});
+
+test("implicit models stay on the parent's provider, explicit models may cross providers", () => {
+  const openai = { model: "openai-codex/gpt-6.1-sol", thinking: "high" };
+  expect(resolve({}, agents, { tier: "strong" }, tiers, openai)).toMatchObject({ model: openai.model, byJev: { model: false } });
+  expect(resolve({ agent: "scout" }, agents, { tier: "fast" }, tiers, openai)).toMatchObject({ model: openai.model });
+  expect(resolve({ model: "anthropic/claude-opus-5-5" }, agents, undefined, tiers, openai)).toMatchObject({ model: "anthropic/claude-opus-5-5" });
+});
+
+test("provider tiers prefer scoped config, then matching legacy config, then registered Sol/Luna", () => {
+  const model = "openai-codex/gpt-6.1-sol";
+  const available = [
+    { provider: "openai-codex", id: "gpt-6.1-luna" },
+    { provider: "openai-codex", id: "gpt-6.1-sol" },
+    { provider: "openai", id: "gpt-6.1-luna" },
+  ];
+  expect(providerTiers(model, tiers.models, {}, available)).toEqual({
+    fast: "openai-codex/gpt-6.1-luna", balanced: model, strong: model,
+  });
+  expect(providerTiers(model, { fast: model }, { "openai-codex": { strong: "openai-codex/custom" } }, available)).toEqual({
+    fast: model, balanced: model, strong: "openai-codex/custom",
+  });
+  expect(providerTiers(model, {}, {}, [
+    { provider: "openai-codex", id: "gpt-5.6-luna" },
+    { provider: "openai-codex", id: "gpt-6-luna" },
+    { provider: "openai-codex", id: "gpt-6-sol" },
+    { provider: "openai-codex", id: "gpt-6.1-sol" },
+  ])).toEqual({ fast: "openai-codex/gpt-6-luna", balanced: model, strong: model });
+  expect(providerTiers(model, tiers.models)).toEqual({});
+  expect(providerTiers(parent.model, tiers.models, {}, available)).toEqual(tiers.models);
+  expect(providerTiers("other/model", tiers.models, {}, available)).toEqual({});
+  expect(providerTiers(model, {}, { "openai-codex": { fast: "anthropic/wrong" } }, [])).toEqual({});
+  expect(providerTiers(model, {}, {}, [available[1]!])).toEqual({ balanced: model, strong: model });
 });
 
 test("precedence: arguments, agent file, Jev, defaults", () => {

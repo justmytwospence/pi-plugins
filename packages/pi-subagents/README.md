@@ -142,8 +142,9 @@ Quote descriptions that contain a colon.
 
 For the agent, the model, and the thinking level separately: explicit arguments, then the agent
 file, then Jev, then the defaults (`general`, the balanced tier, the parent's model and thinking
-level). Jev picks the agent when its confidence is at least 0.5, a model tier (fast, balanced,
-strong) when tiers are configured (below 0.4 confidence: balanced), and the effort (0-3 to low,
+level). Implicit model choices always stay on the parent's provider: an agent-file model or tier
+from another provider is ignored. Pass an explicit `model` argument to cross providers. Jev picks the agent when its confidence is at least 0.5, a model tier (fast, balanced,
+strong) when provider-compatible tiers are available (below 0.4 confidence: balanced), and the effort (0-3 to low,
 medium, high, xhigh). Children always get an explicit `--thinking`, so pi-auto-effort stays off in
 them. Without Jev, the defaults apply.
 
@@ -170,7 +171,31 @@ On 15 tasks across six agents, Jev picked the expected agent every time, in abou
 }
 ```
 
-A tier left out uses the parent's model. `tierDescriptions` overrides what Jev reads for each tier.
+`tiers` remains supported, but only entries matching the current parent's provider apply.
+Use `providerTiers` to configure multiple subscriptions without changing settings when you switch:
+
+```json
+{
+  "providerTiers": {
+    "anthropic": {
+      "fast": "anthropic/claude-haiku-5",
+      "balanced": "anthropic/claude-sonnet-5-5",
+      "strong": "anthropic/claude-opus-5-5"
+    },
+    "openai-codex": {
+      "fast": "openai-codex/gpt-6-luna",
+      "balanced": "openai-codex/gpt-6.1-sol",
+      "strong": "openai-codex/gpt-6.1-sol"
+    }
+  }
+}
+```
+
+Provider-specific tiers take precedence over matching legacy `tiers`. For `openai-codex`, missing
+tiers automatically use registered Luna models for fast tasks and Sol models for balanced/strong
+tasks, preferring the parent's matching generation, otherwise the newest registered generation. These defaults only use models present in Pi's
+registry; otherwise a missing tier uses the parent's model. Other providers inherit the parent
+unless configured. `tierDescriptions` overrides what Jev reads for each tier.
 `widget` is `"off"` (default), `"background"` (async runs only), or `"all"`; `fleetView: false` turns the
 list below the editor off. `maxDepth` is how many levels of subagents may run below the main
 session: with 2, a subagent can start subagents of its own, but theirs get no `subagent` tool. Requires Pi 0.99 or newer for classifier models.

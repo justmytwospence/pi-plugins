@@ -10,6 +10,34 @@ export interface TierConfig {
   descriptions: Record<Tier, string>;
 }
 
+/** Resolve defaults only within the parent's provider. Explicit call models bypass this policy. */
+export function providerTiers(
+  parentModel: string,
+  configured: Partial<Record<Tier, string>>,
+  byProvider: Record<string, Partial<Record<Tier, string>>> = {},
+  available: readonly { provider: string; id: string }[] = [],
+): Partial<Record<Tier, string>> {
+  const provider = parentModel.split("/")[0];
+  const sameProvider = (model: string | undefined) => model?.startsWith(`${provider}/`) ? model : undefined;
+  const models: Partial<Record<Tier, string>> = {};
+  // Prefer the matching Sol/Luna generation, and never invent a model absent from the registry.
+  const parentId = parentModel.slice(provider.length + 1);
+  const sibling = (name: string) => {
+    const candidates = available.filter((m) => m.provider === provider && m.id.endsWith(`-${name}`))
+      .sort((a, b) => b.id.localeCompare(a.id, "en", { numeric: true }));
+    return candidates.find((m) => m.id === parentId.replace(/-(sol|luna)$/u, `-${name}`)) ?? candidates[0];
+  };
+  const sol = provider === "openai-codex" ? sibling("sol") : undefined;
+  const luna = provider === "openai-codex" ? sibling("luna") : undefined;
+  for (const tier of ["fast", "balanced", "strong"] as const) {
+    const preset = tier === "fast" ? luna : sol;
+    const model = sameProvider(byProvider[provider]?.[tier]) ?? sameProvider(configured[tier]) ??
+      (preset ? `${provider}/${preset.id}` : undefined);
+    if (model) models[tier] = model;
+  }
+  return models;
+}
+
 export const DEFAULT_TIER_DESCRIPTIONS: Record<Tier, string> = {
   fast: "Quick lookups, searches, mechanical edits, summarizing, simple scripted work",
   balanced: "Ordinary implementation, debugging with clear symptoms, reviews, research",
@@ -103,12 +131,16 @@ export function resolve(
   const agent = agents.find((a) => a.name === agentName);
   if (!agent) return { error: `Unknown agent "${agentName}". Available: ${agents.map((a) => a.name).join(", ")}.` };
 
-  let model = given.model ?? agent.model;
+  // Agent files are defaults too: switching the main session's provider must not silently
+  // launch children against a different subscription. Only an explicit call model may do that.
+  const agentModel = agent.model?.startsWith(`${parent.model.split("/")[0]}/`) ? agent.model : undefined;
+  let model = given.model ?? agentModel;
   let tier: Tier | undefined;
   if (!model) {
     tier = picks?.tier ?? "balanced";
-    model = tiers.models[tier] ?? parent.model;
-    byJev.model = picks?.tier !== undefined && tiers.models[tier] !== undefined;
+    const tierModel = tiers.models[tier]?.startsWith(`${parent.model.split("/")[0]}/`) ? tiers.models[tier] : undefined;
+    model = tierModel ?? parent.model;
+    byJev.model = picks?.tier !== undefined && tierModel !== undefined;
   }
   let thinking = given.thinking ?? agent.thinking;
   if (!thinking && picks?.thinking) {

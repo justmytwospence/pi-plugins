@@ -20,7 +20,7 @@ import { agentDir, loadConfig } from "./config.ts";
 import { Conversation, type Message, readTranscript, transcriptWriter } from "./conversation.ts";
 import { type JevConfig, askJev } from "./jev.ts";
 import { runLabel, taskLabel } from "./label.ts";
-import { DEFAULT_TIER_DESCRIPTIONS, type Given, type Resolved, type Tier, pickQuestions, readPicks, resolve } from "./pick.ts";
+import { DEFAULT_TIER_DESCRIPTIONS, type Given, type Resolved, type Tier, pickQuestions, providerTiers, readPicks, resolve } from "./pick.ts";
 import { type Run, displayTokens, transcriptPath } from "./run.ts";
 import { clip, recentTexts } from "./transcript.ts";
 import { FleetView, SUCCESS_HINT_MS } from "./ui/fleet.ts";
@@ -30,8 +30,10 @@ import { RunsWidget, WIDGET_MODES, type WidgetMode } from "./ui/widget.ts";
 
 export interface SubagentsConfig extends Record<string, unknown> {
   jev: JevConfig;
-  /** `provider/model` per tier; unset tiers use the parent's model. */
+  /** Legacy tier defaults; only entries matching the parent's provider apply. */
   tiers: Partial<Record<Tier, string>>;
+  /** Provider-specific tier defaults, selected using the current parent model. */
+  providerTiers: Record<string, Partial<Record<Tier, string>>>;
   tierDescriptions: Record<Tier, string>;
   maxParallel: number;
   concurrency: number;
@@ -46,6 +48,7 @@ export interface SubagentsConfig extends Record<string, unknown> {
 export const DEFAULT_CONFIG: SubagentsConfig = {
   jev: { enabled: true, provider: "typesafe", model: "jev-latest", timeoutMs: 3_000 },
   tiers: {},
+  providerTiers: {},
   tierDescriptions: DEFAULT_TIER_DESCRIPTIONS,
   maxParallel: 8,
   concurrency: 4,
@@ -63,7 +66,7 @@ const TaskItem = Type.Object({
   task: Type.String({ description: "The complete, self-contained task" }),
   label: Type.Optional(Type.String({ description: "Short task name for lists and headings; omit to derive from the task" })),
   cwd: Type.Optional(Type.String({ description: "Working directory for this task" })),
-  model: Type.Optional(Type.String({ description: "provider/model; omit to use the agent's or Jev's tier" })),
+  model: Type.Optional(Type.String({ description: "provider/model; omit for the agent's or Jev's tier on the parent's provider; explicit models may cross providers" })),
   thinking: Type.Optional(Type.String({ description: "off|minimal|low|medium|high|xhigh|max; omit to let Jev choose" })),
 });
 
@@ -82,7 +85,7 @@ const Params = Type.Object({
   context: Type.Optional(Type.Union([Type.Literal("fresh"), Type.Literal("fork")], { description: "fresh (default) or fork this conversation" })),
   worktree: Type.Optional(Type.Boolean({ description: "Run each task in a new git worktree, only when the user requests a worktree or branch isolation; otherwise ask (default false)" })),
   cwd: Type.Optional(Type.String({ description: "Working directory (default: the session's)" })),
-  model: Type.Optional(Type.String({ description: "provider/model for a single task" })),
+  model: Type.Optional(Type.String({ description: "provider/model for a single task; explicit models may cross providers" })),
   thinking: Type.Optional(Type.String({ description: "Thinking level for a single task" })),
   id: Type.Optional(Type.String({ description: "Run id (or prefix) for status, steer, stop, result" })),
   message: Type.Optional(Type.String({ description: "Steering message for steer" })),
@@ -430,8 +433,11 @@ export default function subagents(pi: ExtensionAPI) {
   /** Jev's picks for the gaps in each item, one request per item, in parallel. */
   const plan = async (ctx: ExtensionContext, items: Item[], agents: AgentDef[], signal: AbortSignal | undefined) => {
     const parent = { model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "", thinking: pi.getThinkingLevel() };
-    const tiers = { models: config.tiers, descriptions: config.tierDescriptions };
-    const askTier = Object.values(config.tiers).some(Boolean);
+    const tiers = {
+      models: providerTiers(parent.model, config.tiers, config.providerTiers, ctx.modelRegistry?.getAll?.() ?? []),
+      descriptions: config.tierDescriptions,
+    };
+    const askTier = Object.values(tiers.models).some(Boolean);
     const parentRequest = clip(recentTexts(ctx.sessionManager.getBranch()).user, 2_000);
     return Promise.all(
       items.map(async (item) => {
@@ -561,7 +567,7 @@ export default function subagents(pi: ExtensionAPI) {
     name: "subagent",
     label: "Subagent",
     description:
-      "Delegate report-back work to headless subagents by default, including long or multistep tasks; each is a separate Pi with its own context window. action=run (default): a single `task`, parallel `tasks`, or a `chain` whose steps can use {previous}. Omit agent, model, or thinking to let Jev choose them. `async: true` returns run ids at once and delivers each result as a message. action=status|steer|stop|result take `id` (steer also `message`).",
+      "Delegate report-back work to headless subagents by default, including long or multistep tasks; each is a separate Pi with its own context window. action=run (default): a single `task`, parallel `tasks`, or a `chain` whose steps can use {previous}. Omit agent, model, or thinking to let Jev choose them; implicit models stay on the parent session's provider. `async: true` returns run ids at once and delivers each result as a message. action=status|steer|stop|result take `id` (steer also `message`).",
     promptSnippet: "Delegate self-contained tasks to subagents with their own context windows",
     promptGuidelines: [
       "Use headless subagents by default for delegated work that returns a result to this session, even when long or multistep. Use an interactive Herdr child only when explicitly requested or for a clearly persistent human-led session or handoff.",

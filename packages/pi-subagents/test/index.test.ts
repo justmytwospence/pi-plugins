@@ -1,9 +1,9 @@
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, test } from "vitest";
 import subagents, { truncateOutput } from "../src/index.ts";
-import { harness } from "./harness.ts";
+import { fakeJev, harness } from "./harness.ts";
 import { fakeUI } from "./ui-helpers.ts";
 
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(path.join(tmpdir(), "subagents-agent-"));
@@ -103,6 +103,35 @@ test("b in FleetView moves a foreground call to the background; its result arriv
     await h.commands.get("subagents").handler("stop all", ctx);
     await new Promise((r) => setTimeout(r, 200));
     expect(h.messages[0]?.message.content).toMatch(/^Subagent single finished:\n\n\[loop forever · general · p\/m · high · stopped\]/u);
+    await h.emit("session_shutdown", { type: "session_shutdown" }, ctx);
+  } finally {
+    setPiInvocation(undefined);
+  }
+});
+
+test.each(["fast", "strong"])("a Sol parent routes Jev's %s tier within OpenAI despite legacy Anthropic defaults", async (tier) => {
+  const { setPiInvocation } = await import("../src/child.ts");
+  setPiInvocation({ command: process.execPath, args: [path.join(import.meta.dirname, "fixtures", "fake-pi-loop.mjs")] });
+  try {
+    const cwd = mkdtempSync(path.join(tmpdir(), "subagents-routing-"));
+    mkdirSync(path.join(cwd, ".pi"));
+    writeFileSync(path.join(cwd, ".pi", "pi-subagents.json"), JSON.stringify({
+      tiers: { fast: "anthropic/claude-haiku-5", balanced: "anthropic/claude-fable-5-1", strong: "anthropic/claude-opus-5-5" },
+    }));
+    const jev = fakeJev(() => ({ tier: { type: "choice", choice: tier, confidence: 1, probabilities: {} } }));
+    const h = harness();
+    let tool: any;
+    h.pi.registerTool = (t: unknown) => void (tool = t);
+    subagents(h.pi);
+    const ctx = h.ctx({ cwd, ui: fakeUI(), model: { provider: "openai-codex", id: "gpt-6.1-sol" },
+      modelRegistry: { ...jev.registry as object, getAll: () => [
+        { provider: "openai-codex", id: "gpt-6.1-sol" }, { provider: "openai-codex", id: "gpt-6.1-luna" },
+      ] },
+    });
+    await h.emit("session_start", { type: "session_start" }, ctx);
+    const result = await tool.execute("t1", { task: "route me", async: true }, undefined, undefined, ctx);
+    expect(jev.calls[0]?.questions).toHaveProperty("tier");
+    expect(result.content[0].text).toContain(`openai-codex/gpt-6.1-${tier === "fast" ? "luna" : "sol"}`);
     await h.emit("session_shutdown", { type: "session_shutdown" }, ctx);
   } finally {
     setPiInvocation(undefined);
