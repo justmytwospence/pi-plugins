@@ -50,22 +50,23 @@ export class PillView {
   private registered = false;
   private selected = false;
   private unsubscribe: (() => void) | undefined;
+  private generation = 0;
 
   constructor(private readonly source: PillSource) {}
 
   /** Bind to a session's UI, or to none (outside the TUI, or while another extension hosts the pill). */
   setUI(ui: PillUI | undefined): void {
     if (ui === this.ui) return;
-    this.hide();
-    this.unsubscribe?.();
-    this.unsubscribe = undefined;
+    this.dispose();
+    const generation = this.generation;
     this.ui = ui;
-    if (ui) this.unsubscribe = ui.onTerminalInput((data) => this.handleKey(data));
+    if (ui) this.unsubscribe = ui.onTerminalInput((data) => generation === this.generation ? this.handleKey(data) : undefined);
   }
 
   update(): void {
     const ui = this.ui;
     if (!ui) return;
+    const generation = this.generation;
     if (!this.source.pill(Date.now())) {
       this.hide();
       return;
@@ -77,11 +78,11 @@ export class PillView {
     ui.setWidget(
       KEY,
       (tui, factoryTheme: Theme) => {
-        this.tui = tui;
+        if (generation === this.generation) this.tui = tui;
         return {
-          render: (width: number) => renderPill(this.source.pill(Date.now()), this.selected, width, ui.theme ?? factoryTheme),
+          render: (width: number) => generation === this.generation ? renderPill(this.source.pill(Date.now()), this.selected, width, ui.theme ?? factoryTheme) : [],
           handleMouse: (e: TuiMouseEvent): TuiMouseEventResult | undefined => {
-            if (e.button !== "left") return undefined;
+            if (generation !== this.generation || e.button !== "left") return undefined;
             // pi turns a press and release into a click only for the component that took the press.
             if (e.type === "press") return { handled: true, render: false };
             if (e.type !== "click") return undefined;
@@ -156,16 +157,28 @@ export class PillView {
   }
 
   private hide(): void {
+    const registered = this.registered;
     this.selected = false;
-    if (this.registered) this.ui?.setWidget(KEY, undefined);
     this.registered = false;
     this.tui = undefined;
+    if (registered) this.ui?.setWidget(KEY, undefined);
   }
 
   dispose(): void {
-    this.hide();
-    this.unsubscribe?.();
-    this.unsubscribe = undefined;
+    const ui = this.ui;
+    const registered = this.registered;
+    const unsubscribe = this.unsubscribe;
+    // Forget all session-bound state before touching a possibly invalidated UI.
+    this.generation++;
     this.ui = undefined;
+    this.unsubscribe = undefined;
+    this.selected = false;
+    this.registered = false;
+    this.tui = undefined;
+    try {
+      if (registered) ui?.setWidget(KEY, undefined);
+    } finally {
+      unsubscribe?.();
+    }
   }
 }

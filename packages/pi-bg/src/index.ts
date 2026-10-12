@@ -147,6 +147,8 @@ export default function piBg(pi: ExtensionAPI) {
   let attached = false;
   let unsubscribe: (() => void) | undefined;
   let statusTimer: ReturnType<typeof setInterval> | undefined;
+  let startupWake: ReturnType<typeof setImmediate> | undefined;
+  let sessionGeneration = 0;
   let lastStatus: string | undefined;
   let herdrActive = false;
   /** The running jobs the agent started: what bg_wait without an id waits for. */
@@ -565,7 +567,42 @@ export default function piBg(pi: ExtensionAPI) {
 
   // ---- lifecycle ----
 
+  const detachSession = () => {
+    const wasAttached = attached;
+    // Invalidate saved/queued callbacks and drop the context before calling any session UI.
+    attached = false;
+    ctx = undefined;
+    sessionGeneration++;
+    if (statusTimer) clearInterval(statusTimer);
+    statusTimer = undefined;
+    if (startupWake) clearImmediate(startupWake);
+    startupWake = undefined;
+    const off = unsubscribe;
+    unsubscribe = undefined;
+    hosts.clear();
+    yieldedTo.clear();
+    for (const w of [...waiters]) w.resolve("aborted");
+    const activeHolds = [...holds];
+    holds.clear();
+    try {
+      off?.();
+    } catch {
+      // The subscription's owner may already be gone.
+    }
+    try {
+      pill.dispose();
+    } catch {
+      // Invalidated UI must not prevent the remaining session cleanup.
+    }
+    if (wasAttached) emit(ACTIVITY_GONE, { id: section.id });
+    releaseGuests();
+    for (const id of activeHolds) emit("herdr:background", { active: false, id: `bg:${id}` });
+  };
+
   pi.on("session_start", async (event, c) => {
+    // A repeated start must retire the previous session even if its UI can no longer be disposed.
+    detachSession();
+    const generation = sessionGeneration;
     ctx = c;
     attached = true;
     lastStatus = undefined;
@@ -580,19 +617,25 @@ export default function piBg(pi: ExtensionAPI) {
     bindPill();
     offerSection();
     startHosting();
-    unsubscribe?.();
-    unsubscribe = reg.subscribe(onTask);
+    unsubscribe = reg.subscribe((e) => {
+      if (attached && generation === sessionGeneration) onTask(e);
+    });
     oweFromState();
-    // Once the session is set up.
-    setImmediate(() => flushOwed());
+    // Once the session is set up; a queued callback from an earlier session is inert.
+    startupWake = setImmediate(() => {
+      if (!attached || generation !== sessionGeneration) return;
+      startupWake = undefined;
+      flushOwed();
+    });
     herdrActive = false;
     emit("herdr:probe", {
       reply: () => {
         herdrActive = true;
       },
     });
-    if (statusTimer) clearInterval(statusTimer);
-    statusTimer = setInterval(updateStatus, 1_000);
+    statusTimer = setInterval(() => {
+      if (generation === sessionGeneration) updateStatus();
+    }, 1_000);
     statusTimer.unref?.();
     refresh();
   });
@@ -613,25 +656,13 @@ export default function piBg(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (event) => {
-    if (statusTimer) clearInterval(statusTimer);
-    statusTimer = undefined;
-    pill.dispose();
-    const wasAttached = attached;
-    attached = false;
-    if (wasAttached) emit(ACTIVITY_GONE, { id: section.id });
-    hosts.clear();
-    yieldedTo.clear();
-    releaseGuests();
-    for (const w of [...waiters]) w.resolve("aborted");
-    for (const id of holds) emit("herdr:background", { active: false, id: `bg:${id}` });
-    holds.clear();
-    if (event.reason !== "reload") await reg.killAll("session");
-    // Quitting: kept services stay listed for a later pi to adopt.
-    if (event.reason === "quit") reg.release();
-    unsubscribe?.();
-    unsubscribe = undefined;
-    attached = false;
-    ctx = undefined;
+    detachSession();
+    try {
+      if (event.reason !== "reload") await reg.killAll("session");
+    } finally {
+      // Quitting: kept services stay listed for a later pi to adopt, even if killing failed.
+      if (event.reason === "quit") reg.release();
+    }
   });
 
   // ---- tools ----
@@ -707,6 +738,7 @@ export default function piBg(pi: ExtensionAPI) {
       return new Text(`${theme.fg("toolTitle", theme.bold("bg_wait"))} ${theme.fg("accent", a.id ? (reg.find(a.id)?.name ?? a.id) : "next job")}`, 0, 0);
     },
     async execute(_id, params, signal, _onUpdate, c) {
+      const generation = sessionGeneration;
       const timeoutS = Math.min(Math.max(1, Math.round(params.timeout ?? WAIT_DEFAULT_S)), WAIT_MAX_S);
       const targets = new Set<string>();
       let any = false;
@@ -757,19 +789,19 @@ export default function piBg(pi: ExtensionAPI) {
       };
       const started = Date.now();
       const setWorking = () => {
-        if (c.hasUI) c.ui.setWorkingMessage(`Waiting on ${label()}… (type to interrupt)`);
+        if (attached && generation === sessionGeneration && c.hasUI) c.ui.setWorkingMessage(`Waiting on ${label()}… (type to interrupt)`);
       };
       setWorking();
       let ticks = 0;
       const { waiter, done } = waitFor({ targets, any, silent: false }, timeoutS * 1000, () => {
-        if (signal?.aborted) return "aborted";
+        if (!attached || generation !== sessionGeneration || signal?.aborted) return "aborted";
         if (c.hasPendingMessages()) return "message";
         if (++ticks % 4 === 0) setWorking();
         return undefined;
       });
       refresh();
       const reason = await done;
-      if (c.hasUI) c.ui.setWorkingMessage();
+      if (attached && generation === sessionGeneration && c.hasUI) c.ui.setWorkingMessage();
       refresh();
       const out: string[] = [];
       for (const t of waiter.finished) out.push(report(t));

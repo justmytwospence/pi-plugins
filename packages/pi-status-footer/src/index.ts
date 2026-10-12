@@ -700,10 +700,12 @@ export default function statusFooter(pi: ExtensionAPI): void {
   let active = false, enabled = true, showAll = false, generation = 0;
   let timer: ReturnType<typeof setInterval> | undefined;
   let requestRender: (() => void) | undefined;
+  let releaseFooter: (() => void) | undefined;
   let git: GitInfo = { ...emptyGit(), unavailable: true }, gitBusy = false, gitChecked = 0;
   let quotaBusy = false, quotaChecked = 0;
   let borderGauge = false;
   let codexBusy = false, codexChecked = 0, codexAbort: AbortController | undefined;
+  let codexTimeout: ReturnType<typeof setTimeout> | undefined;
   let claude: Quota | undefined, codex: Quota | undefined;
   let phase: string | undefined;
   let totals = collectTotals([], Date.now()), cacheHit: number | undefined;
@@ -785,7 +787,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     } catch { /* keep the last good cache */ } finally { await rmdir(lock).catch(() => undefined); }
   };
   const account = () => {
-    if (!ctx) return;
+    if (!active || !ctx) return;
     totals = collectTotals(ctx.sessionManager.getEntries(), Date.now());
     cacheHit = latestCacheHit(ctx.sessionManager.getBranch(), ctx.model?.provider ?? "", ctx.model?.id ?? "");
   };
@@ -847,7 +849,10 @@ export default function statusFooter(pi: ExtensionAPI): void {
     codexBusy = true; codexChecked = Date.now();
     const epoch = generation, controller = new AbortController();
     codexAbort = controller;
-    const timeout = setTimeout(() => controller.abort(), 5_000);
+    const timeout = setTimeout(() => {
+      if (active && epoch === generation && codexAbort === controller) controller.abort();
+    }, 5_000);
+    codexTimeout = timeout;
     try {
       const token = await ctx.modelRegistry.getApiKeyForProvider("openai-codex");
       const account = token ? codexAccountId(token) : undefined;
@@ -861,6 +866,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       if (active && epoch === generation && parsed.windows.length) { codex = parsed; requestRender?.(); }
     } catch { /* Keep last good snapshot; its timestamp makes staleness visible. */ } finally {
       clearTimeout(timeout);
+      if (codexTimeout === timeout) codexTimeout = undefined;
       if (codexAbort === controller) codexAbort = undefined;
       if (epoch === generation) codexBusy = false;
     }
@@ -896,14 +902,26 @@ export default function statusFooter(pi: ExtensionAPI): void {
   const attach = () => {
     if (!active || !ctx) return;
     if (!enabled) { ctx.ui.setFooter(undefined); return; }
+    const epoch = generation;
     ctx.ui.setFooter((tui, theme, footerData) => {
-      const render = () => tui.requestRender();
+      if (!active || epoch !== generation) return { render: () => [], invalidate() {} };
+      let disposed = false;
+      const current = () => !disposed && active && epoch === generation;
+      const render = () => { if (current()) tui.requestRender(); };
+      const unsubscribe = footerData.onBranchChange(() => { if (current()) { void updateGit(true); render(); } });
+      const dispose = () => {
+        if (disposed) return;
+        disposed = true;
+        if (requestRender === render) requestRender = undefined;
+        if (releaseFooter === dispose) releaseFooter = undefined;
+        unsubscribe();
+      };
       requestRender = render;
-      const unsubscribe = footerData.onBranchChange(() => { void updateGit(true); render(); });
+      releaseFooter = dispose;
       return {
-        render(width: number) { return renderFooter(snapshot(footerData.getGitBranch(), footerData.getExtensionStatuses()), width, liftAccent(theme)); },
+        render(width: number) { return current() ? renderFooter(snapshot(footerData.getGitBranch(), footerData.getExtensionStatuses()), width, liftAccent(theme)) : []; },
         invalidate() {}, // Colors are evaluated on every render, never cached.
-        dispose() { unsubscribe(); if (requestRender === render) requestRender = undefined; },
+        dispose,
       };
     });
   };
@@ -925,32 +943,51 @@ export default function statusFooter(pi: ExtensionAPI): void {
   const wrapEditor = (context: ExtensionContext) => {
     const current = context.ui.getEditorComponent() as (EditorFactory & { [ORIGINAL_BORDERS]?: EditorFactory | null }) | undefined;
     const previous = current && ORIGINAL_BORDERS in current ? current[ORIGINAL_BORDERS] ?? undefined : current;
+    const epoch = generation;
+    const currentSession = () => active && epoch === generation;
     const factory: EditorFactory & { [ORIGINAL_BORDERS]?: EditorFactory | null } = (tui, theme, keybindings) => {
+      // A foreign factory may itself capture the outgoing context.
+      if (!currentSession()) return new CustomEditor(tui, theme, keybindings);
       const editor = previous?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings);
       borderGauge = drawGaugeOnBorders(editor,
-        () => active && enabled && ctx ? ctx.getContextUsage()?.percent ?? null : null,
-        () => ctx ? liftAccent(ctx.ui.theme) : undefined);
+        () => currentSession() && enabled && ctx ? ctx.getContextUsage()?.percent ?? null : null,
+        () => currentSession() && ctx ? liftAccent(ctx.ui.theme) : undefined);
       return editor;
     };
     factory[ORIGINAL_BORDERS] = previous ?? null;
-    context.ui.setEditorComponent(factory);
     releaseEditor = () => {
       if (context.ui.getEditorComponent() === factory) context.ui.setEditorComponent(previous);
     };
+    context.ui.setEditorComponent(factory);
   };
   const stop = () => {
+    // Invalidate and detach everything locally before any cleanup can throw or
+    // re-enter us. Saved callbacks must stay inert even after another start.
+    const context = ctx, interval = timer, timeout = codexTimeout, controller = codexAbort;
+    const footer = releaseFooter, editor = releaseEditor, processes = [...children];
     active = false; generation++;
-    releaseEditor?.(); releaseEditor = undefined;
-    if (timer) clearInterval(timer);
-    timer = undefined;
-    codexAbort?.abort(); codexAbort = undefined;
-    for (const child of children) child.kill();
+    ctx = undefined; requestRender = undefined;
+    timer = undefined; codexTimeout = undefined; codexAbort = undefined;
+    releaseFooter = undefined; releaseEditor = undefined;
     children.clear();
-    requestRender = undefined;
-    ctx = undefined;
+
+    const errors: unknown[] = [];
+    const cleanup = (run: () => void) => { try { run(); } catch (error) { errors.push(error); } };
+    if (interval !== undefined) cleanup(() => clearInterval(interval));
+    if (timeout !== undefined) cleanup(() => clearTimeout(timeout));
+    if (controller) cleanup(() => controller.abort());
+    for (const child of processes) cleanup(() => { child.kill(); });
+    // Own disposal too: setFooter may throw before Pi calls dispose().
+    if (footer) cleanup(footer);
+    if (context) cleanup(() => context.ui.setFooter(undefined));
+    if (editor) cleanup(editor);
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, "Status footer cleanup failed");
   };
   pi.on("session_start", (_event, context) => {
-    stop();
+    // Retiring UI can already be invalidated on replacement. stop() completes
+    // local cleanup before reporting errors; those must not block a fresh start.
+    try { stop(); } catch { /* Shutdown still reports teardown errors. */ }
     if (context.mode !== "tui") return;
     ctx = context; active = true;
     git = { ...emptyGit(), unavailable: true }; claude = undefined; codex = undefined;
@@ -959,10 +996,14 @@ export default function statusFooter(pi: ExtensionAPI): void {
     restorePreferences(context);
     account(); wrapEditor(context); attach();
     void updateGit(true); void updateQuota(true); void updateCodex(0);
-    timer = setInterval(() => { account(); void updateGit(); void updateQuota(); void updateCodex(); requestRender?.(); }, TICK_MS);
+    const epoch = generation;
+    timer = setInterval(() => {
+      if (!active || epoch !== generation) return;
+      account(); void updateGit(); void updateQuota(); void updateCodex(); requestRender?.();
+    }, TICK_MS);
     timer.unref();
   });
-  pi.on("session_shutdown", () => { if (active) ctx?.ui.setFooter(undefined); stop(); });
+  pi.on("session_shutdown", stop);
   pi.on("model_select", (_event, context) => {
     if (!active) return;
     // Codex limits are per account, not per model; keep them across switches.

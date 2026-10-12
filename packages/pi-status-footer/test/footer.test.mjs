@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { ChildProcess, execFileSync } from "node:child_process";
 import { mkdtemp, mkdir, writeFile, rm, realpath } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -579,6 +579,256 @@ test("factory is inert in non-TUI modes and does not replace the editor", async 
     await h.handlers.get("turn_start")({}, h.ctx);
     await h.handlers.get("session_shutdown")({}, h.ctx);
   }
+});
+
+// Hold OAuth lookup open so shutdown must cancel both owned timer handles.
+// All quota IO is isolated; saved callbacks can be invoked after cancellation.
+async function withLifecycleHost(run) {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "pi-footer-cleanup-"));
+  const oldHome = process.env.HOME, oldCache = process.env.CLAUDE_STATUSLINE_CACHE_DIR;
+  const real = {
+    setInterval: globalThis.setInterval, clearInterval: globalThis.clearInterval,
+    setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout, fetch: globalThis.fetch,
+  };
+  const intervals = new Set(), timeouts = new Set(), savedIntervals = [], savedTimeouts = [], branches = [];
+  const steps = [], failures = new Map(), contexts = [], tokenResolvers = [], fetches = [];
+  const aborted = new Set(), killed = new Set();
+  const cleanup = (step) => { steps.push(step); if (failures.has(step)) throw failures.get(step); };
+  process.env.HOME = dir; process.env.CLAUDE_STATUSLINE_CACHE_DIR = dir;
+  globalThis.setInterval = (callback) => {
+    const timer = { callback, unref() {} };
+    intervals.add(timer); savedIntervals.push(timer); return timer;
+  };
+  globalThis.clearInterval = (timer) => { intervals.delete(timer); cleanup("interval"); };
+  globalThis.setTimeout = (callback, ms, ...args) => {
+    if (ms !== 5_000) return real.setTimeout(callback, ms, ...args);
+    const timer = { callback };
+    timeouts.add(timer); savedTimeouts.push(timer); return timer;
+  };
+  globalThis.clearTimeout = (timer) => {
+    if (!savedTimeouts.includes(timer)) return real.clearTimeout(timer);
+    timeouts.delete(timer); cleanup("timeout");
+  };
+  globalThis.fetch = async (...args) => { fetches.push(args); throw new Error("Unexpected quota fetch"); };
+  const realAbort = AbortController.prototype.abort, realKill = ChildProcess.prototype.kill;
+  const abortSpy = vi.spyOn(AbortController.prototype, "abort").mockImplementation(function (...args) {
+    aborted.add(this); realAbort.apply(this, args); cleanup("abort");
+  });
+  const killSpy = vi.spyOn(ChildProcess.prototype, "kill").mockImplementation(function (...args) {
+    killed.add(this); const result = realKill.apply(this, args); cleanup("child"); return result;
+  });
+  const h = host([], dir);
+  class Editor {
+    borderColor = (text) => text;
+    renderTopBorder() { return "original-top"; }
+    renderBottomBorder() { return "original-bottom"; }
+  }
+  const originalEditor = () => new Editor();
+  h.editorFactory = originalEditor;
+  h.ctx.getContextUsage = () => ({ tokens: 100000, percent: 50, contextWindow: 200000 });
+  h.ctx.modelRegistry.getApiKeyForProvider = () => new Promise((resolve) => tokenResolvers.push(resolve));
+  const { setFooter, getEditorComponent, setEditorComponent } = h.ctx.ui;
+  h.ctx.ui.setFooter = (factory) => {
+    if (!factory) cleanup("footer");
+    setFooter(factory && ((tui, paint, data) => factory(tui, paint, {
+      ...data,
+      onBranchChange(callback) {
+        branches.push(callback);
+        const unsubscribe = data.onBranchChange(callback);
+        return () => { cleanup("dispose"); unsubscribe(); };
+      },
+    })));
+  };
+  h.ctx.ui.getEditorComponent = () => { cleanup("getEditor"); return getEditorComponent(); };
+  h.ctx.ui.setEditorComponent = (factory) => { cleanup("setEditor"); setEditorComponent(factory); };
+  const newContext = () => {
+    const state = { valid: true, reads: 0 };
+    contexts.push(state);
+    const ctx = new Proxy(h.ctx, {
+      get(target, key, receiver) {
+        state.reads++;
+        if (!state.valid) throw new Error("invalidated ctx");
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    return { ctx, state };
+  };
+  try {
+    await run({ h, newContext, originalEditor, intervals, timeouts, savedIntervals, savedTimeouts, branches, steps, failures, aborted, killed, tokenResolvers, fetches });
+  } finally {
+    failures.clear();
+    for (const state of contexts) state.valid = true;
+    try { h.handlers.get("session_shutdown")({}, h.ctx); } finally {
+      for (const resolve of tokenResolvers) resolve(undefined);
+      await new Promise((resolve) => setImmediate(resolve));
+      abortSpy.mockRestore(); killSpy.mockRestore();
+      Object.assign(globalThis, real);
+      for (const [key, value] of [["HOME", oldHome], ["CLAUDE_STATUSLINE_CACHE_DIR", oldCache]]) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+}
+
+function savedLifecycleCallbacks(f) {
+  const factory = f.h.editorFactory, editor = factory(), footer = f.h.footer;
+  const tick = f.savedIntervals.at(-1).callback, timeout = f.savedTimeouts.at(-1).callback;
+  const branch = f.branches.at(-1);
+  return () => {
+    tick(); timeout(); branch();
+    assert.deepEqual(footer.render(120), []);
+    footer.dispose();
+    assert.equal(editor.renderTopBorder(10, 0), "original-top");
+    assert.equal(editor.renderBottomBorder(10, 0), "original-bottom");
+    const fallback = factory({ requestRender() {} }, { borderColor: (text) => text }, { matches: () => false });
+    assert.equal(fallback.renderTopBorder(10, 0), "──────────");
+  };
+}
+
+for (const fault of ["dispose", "footer", "getEditor", "setEditor", "all"]) {
+  test(`shutdown completes remaining cleanup after ${fault} errors and leaves saved callbacks inert`, async () => {
+    await withLifecycleHost(async (f) => {
+      const { h, intervals, timeouts, steps, failures, aborted, killed } = f;
+      const old = f.newContext();
+      h.handlers.get("session_start")({}, old.ctx);
+      const invokeSaved = savedLifecycleCallbacks(f);
+      assert.equal(intervals.size, 1); assert.equal(timeouts.size, 1);
+      const failing = fault === "all" ? ["abort", "child", "dispose", "footer", "setEditor"] : [fault];
+      for (const step of failing) failures.set(step, new Error(`${step} failed`));
+      steps.length = 0;
+      const expectedSteps = ["interval", "timeout", "abort", "child", "child", "child", "dispose", "footer", "getEditor"];
+      if (fault !== "getEditor") expectedSteps.push("setEditor");
+      const expectedErrors = expectedSteps.filter((step) => failures.has(step)).map((step) => failures.get(step));
+      assert.throws(() => h.handlers.get("session_shutdown")({}, old.ctx), (error) => {
+        if (expectedErrors.length === 1) assert.equal(error, expectedErrors[0]);
+        else { assert.ok(error instanceof AggregateError); assert.deepEqual(error.errors, expectedErrors); }
+        return true;
+      });
+      assert.deepEqual(steps, expectedSteps, "timers cancel before every fallible cleanup attempt");
+      assert.equal(intervals.size, 0); assert.equal(timeouts.size, 0);
+      assert.equal(aborted.size, 1); assert.equal(killed.size, 3);
+      if (!["getEditor", "setEditor", "all"].includes(fault)) assert.equal(h.editorFactory, f.originalEditor);
+      old.state.valid = false;
+      steps.length = 0;
+      const reads = old.state.reads, paints = h.paints;
+      assert.doesNotThrow(invokeSaved);
+      assert.doesNotThrow(() => h.handlers.get("session_compact")({}, old.ctx));
+      assert.doesNotThrow(() => h.handlers.get("session_shutdown")({}, old.ctx));
+      assert.equal(old.state.reads, reads); assert.equal(h.paints, paints);
+      assert.deepEqual(steps, [], "failed disposal and repeated shutdown are one-shot");
+      failures.clear();
+      const fresh = f.newContext();
+      h.handlers.get("session_start")({}, fresh.ctx);
+      const freshReads = fresh.state.reads, freshPaints = h.paints, freshAborts = aborted.size, freshKills = killed.size;
+      steps.length = 0;
+      assert.doesNotThrow(invokeSaved);
+      assert.equal(old.state.reads, reads); assert.equal(fresh.state.reads, freshReads);
+      assert.equal(h.paints, freshPaints); assert.equal(aborted.size, freshAborts); assert.equal(killed.size, freshKills);
+      assert.deepEqual(steps, [], "stale timeouts cannot abort their old controller again");
+      assert.equal(intervals.size, 1); assert.equal(timeouts.size, 1);
+      assert.ok(h.footer.render(120).length > 0);
+    });
+  });
+}
+
+for (const invalidated of [false, true]) {
+  test(`session_start activates a fresh context despite prior disposal failure${invalidated ? " and invalidated UI" : ""}`, async () => {
+    await withLifecycleHost(async (f) => {
+      const old = f.newContext();
+      f.h.handlers.get("session_start")({}, old.ctx);
+      const invokeSaved = savedLifecycleCallbacks(f);
+      old.state.valid = !invalidated;
+      const failure = new Error("prior disposal failed");
+      f.failures.set("dispose", failure);
+      f.steps.length = 0;
+      const fresh = f.newContext();
+      assert.doesNotThrow(() => f.h.handlers.get("session_start")({}, fresh.ctx));
+      assert.equal(f.intervals.size, 1); assert.equal(f.timeouts.size, 1);
+      assert.equal(f.aborted.size, 1); assert.equal(f.killed.size, 3);
+      assert.equal(f.h.disposed, 0, "prior unsubscribe threw, but its local disposer detached first");
+      assert.ok(f.h.footer.render(120).length > 0);
+      const reads = old.state.reads, freshReads = fresh.state.reads, paints = f.h.paints, cleanupSteps = f.steps.slice();
+      assert.doesNotThrow(invokeSaved);
+      assert.equal(old.state.reads, reads); assert.equal(fresh.state.reads, freshReads); assert.equal(f.h.paints, paints);
+      assert.deepEqual(f.steps, cleanupSteps);
+      assert.deepEqual(f.steps.slice(0, 2), ["interval", "timeout"]);
+      f.failures.clear();
+      f.h.handlers.get("session_shutdown")({}, fresh.ctx);
+      assert.equal(f.intervals.size, 0); assert.equal(f.timeouts.size, 0);
+      assert.equal(f.h.footer, undefined); assert.equal(f.h.editorFactory, f.originalEditor);
+    });
+  });
+}
+
+test("a saved editor wrapper never invokes a foreign factory bound to an invalidated context", async () => {
+  await withLifecycleHost(async (f) => {
+    const old = f.newContext();
+    f.h.editorFactory = () => { old.ctx.getContextUsage(); return f.originalEditor(); };
+    f.h.handlers.get("session_start")({}, old.ctx);
+    const invokeSaved = savedLifecycleCallbacks(f);
+    f.h.handlers.get("session_shutdown")({}, old.ctx);
+    old.state.valid = false;
+    const reads = old.state.reads;
+    assert.doesNotThrow(invokeSaved);
+    assert.equal(old.state.reads, reads);
+    const fresh = f.newContext();
+    f.h.handlers.get("session_start")({}, fresh.ctx);
+    const freshReads = fresh.state.reads;
+    assert.doesNotThrow(invokeSaved);
+    assert.equal(old.state.reads, reads); assert.equal(fresh.state.reads, freshReads);
+  });
+});
+
+test("an old OAuth lookup resolving after reload cannot fetch or clear the fresh timeout/controller", async () => {
+  await withLifecycleHost(async (f) => {
+    const old = f.newContext();
+    f.h.handlers.get("session_start")({}, old.ctx);
+    const oldTimeout = f.savedTimeouts.at(-1);
+    f.h.handlers.get("session_shutdown")({}, old.ctx);
+    old.state.valid = false;
+    const fresh = f.newContext();
+    f.h.handlers.get("session_start")({}, fresh.ctx);
+    const currentTimeout = f.savedTimeouts.at(-1);
+    f.tokenResolvers[0](jwt({ "https://api.openai.com/auth": { chatgpt_account_id: "old-account" } }));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(f.fetches, []);
+    assert.equal(f.timeouts.size, 1); assert.ok(f.timeouts.has(currentTimeout));
+    assert.ok(!f.timeouts.has(oldTimeout));
+    assert.equal(f.intervals.size, 1);
+    assert.equal(f.aborted.size, 1);
+    currentTimeout.callback();
+    assert.equal(f.aborted.size, 2, "the fresh controller remains owned after old finally runs");
+    f.h.handlers.get("session_shutdown")({}, fresh.ctx);
+    assert.equal(f.timeouts.size, 0); assert.equal(f.intervals.size, 0);
+  });
+});
+
+test("normal repeated shutdown and reload leave one fresh timer pair and no stale callbacks", async () => {
+  await withLifecycleHost(async (f) => {
+    const saved = [];
+    for (let cycle = 0; cycle < 3; cycle++) {
+      const current = f.newContext();
+      f.h.handlers.get("session_start")({}, current.ctx);
+      assert.equal(f.intervals.size, 1); assert.equal(f.timeouts.size, 1);
+      const reads = current.state.reads, paints = f.h.paints, aborts = f.aborted.size, cleanupSteps = f.steps.slice();
+      for (const invoke of saved) assert.doesNotThrow(invoke);
+      assert.equal(current.state.reads, reads); assert.equal(f.h.paints, paints); assert.equal(f.aborted.size, aborts);
+      assert.deepEqual(f.steps, cleanupSteps);
+      f.savedIntervals.at(-1).callback();
+      assert.ok(current.state.reads > reads); assert.ok(f.h.paints > paints, "current timer still works");
+      saved.push(savedLifecycleCallbacks(f));
+      f.h.handlers.get("session_shutdown")({}, current.ctx);
+      assert.equal(f.intervals.size, 0); assert.equal(f.timeouts.size, 0);
+      assert.equal(f.h.footer, undefined); assert.equal(f.h.editorFactory, f.originalEditor);
+      current.state.valid = false;
+      const stoppedReads = current.state.reads, stoppedPaints = f.h.paints;
+      assert.doesNotThrow(() => f.h.handlers.get("session_shutdown")({}, current.ctx));
+      for (const invoke of saved) assert.doesNotThrow(invoke);
+      assert.equal(current.state.reads, stoppedReads); assert.equal(f.h.paints, stoppedPaints);
+      assert.equal(f.h.disposed, cycle + 1);
+    }
+  });
 });
 
 test("lifecycle: native fallback, mode persistence, provider isolation, reload and cleanup", async () => {
