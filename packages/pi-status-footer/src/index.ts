@@ -160,6 +160,11 @@ export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: {
     if (marimo) { result.marimo = marimo; continue; }
     const bg = key === "bg" ? parseBgStatus(plainText) : undefined;
     if (bg) { result.bg = bg; continue; }
+    const plan = key === "plan" ? /^plan: (.+) \(\/plan\)$/.exec(plainText) : null;
+    if (plan) {
+      result.rest.push(`Plan ${plan[1].replaceAll("cut off (resume in /plan)", "cut off · resume in /plan")} · /plan`);
+      continue;
+    }
     // Normalize our companion's label without rewriting arbitrary publishers.
     if (key === "tool-gate" && /^gate: (?:off|\d+ auto · \d+ pushed back · \d+ asked)$/.test(plainText)) {
       result.rest.push(plainText.replace(/^gate: /, "Gate "));
@@ -576,7 +581,7 @@ function marimoRow(m: MarimoStatus, width: number, theme: Paint): string {
   const time = run?.elapsed ? theme.fg("dim", ` ${run.elapsed}`) : "";
   const deepest = run?.section.split(" › ").pop() ?? "";
   return fitSegments([
-    { text: `${theme.fg("muted", "marimo")} ${theme.bold(theme.fg("accent", m.notebook))}`, short: theme.bold(theme.fg("accent", m.notebook)), priority: 90 },
+    { text: `${theme.fg("muted", "Marimo")} ${theme.bold(theme.fg("accent", m.notebook))}`, short: theme.bold(theme.fg("accent", m.notebook)), priority: 90 },
     { text: run ? `${theme.fg("warning", "running")} ${run.section}${time}` : "",
       short: run ? `${theme.fg("warning", "running")} ${truncateToWidth(deepest, 30)}${time}` : "", priority: 100 },
     { text: m.queued ? theme.fg("muted", `${m.queued} queued`) : "", priority: 30 },
@@ -592,15 +597,15 @@ function marimoRow(m: MarimoStatus, width: number, theme: Paint): string {
 // pi-bg's tasks: running jobs with their time, services with their state, then
 // what ended in the last minute. Running and failed work wins when narrow.
 function bgRow(items: BgItem[], width: number, theme: Paint): string {
-  const segments: Segment[] = [{ text: theme.fg("muted", "bg"), priority: 110 }];
+  const segments: Segment[] = [{ text: theme.fg("muted", "Background"), short: theme.fg("muted", "Bg"), separatorAfter: " ", priority: 110 }];
   for (const item of items) {
     if (item.kind === "job") segments.push({ text: `${theme.fg("accent", item.name)} ${theme.fg("dim", item.elapsed)}`, short: theme.fg("accent", item.name), priority: 100 });
     else if (item.kind === "service") {
       const state = theme.fg(item.state === "starting" ? "warning" : "success", item.state);
-      segments.push({ text: `${item.name} ${state}${item.kept ? theme.fg("dim", " kept") : ""}`, short: item.name, priority: 70 });
+      segments.push({ text: `${item.name} ${state}${item.kept ? theme.fg("dim", " kept") : ""}`, short: `${item.name} ${state}`, priority: 70 });
     } else if (item.kind === "ended") {
       const mark = item.mark === "✓" ? theme.fg("success", "✓") : item.mark === "✗" ? theme.fg("error", "✗") : theme.fg("muted", "■");
-      segments.push({ text: `${theme.fg("dim", item.name)} ${mark}`, priority: item.mark === "✗" ? 90 : 40 });
+      segments.push({ text: `${theme.fg("dim", item.name)} ${mark}`, priority: item.mark === "✗" ? 105 : 40 });
     } else segments.push({ text: theme.fg("dim", `+${item.count}`), priority: 20 });
   }
   return fitSegments(segments, width, theme);
@@ -652,13 +657,16 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
 
   const context = s.context.percent;
   const ctxValue = context === null ? theme.fg("muted", "unknown") : theme.bold(theme.fg(context < 70 ? "muted" : heat(context), percent(context)));
+  const cache = s.cache ? clean(s.cache) : "";
+  const cacheNote = cache === "cold (model)" ? "model changed" : cache === "cold?" ? "unconfirmed" : "";
+  const cacheValue = cacheNote ? "cold" : cache;
   const ctxShort = `${theme.fg("muted", "Context")} ${ctxValue}`;
   const ctxLong = `${label("Context")}${ctxValue}${context === null ? "" : theme.fg("dim", " used")}${context === null || s.borderGauge ? "" : ` ${gauge(theme, context)}`}`;
   rows.push(fitSegments([
     { text: ctxLong, short: ctxShort, priority: 100 },
     { text: s.lean ? theme.fg("muted", `Lean ${clean(s.lean)}`) : "", priority: 20 },
     // Green denotes a warm cache; cold means the next prompt re-caches the whole history.
-    { text: s.cache ? `${theme.fg("muted", "Cache")} ${theme.fg(s.cache.startsWith("cold") ? "warning" : "success", clean(s.cache))}` : "", priority: 30 },
+    { text: cache ? `${theme.fg("muted", "Cache")} ${theme.fg(cache.startsWith("cold") ? "warning" : "success", cacheValue)}${cacheNote ? `${sep}${theme.fg("dim", cacheNote)}` : ""}` : "", priority: 30 },
   ], width, theme));
   if (s.marimo) rows.push(marimoRow(s.marimo, width, theme));
   if (s.bg?.length) rows.push(bgRow(s.bg, width, theme));
@@ -677,7 +685,8 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     const stale = age >= QUOTA_STALE_MS || expired;
     const windows = quota.windows.map((w): Segment => {
       let reset = "";
-      if (w.reset !== undefined) reset = w.reset <= s.now ? theme.fg("warning", " reset due") : `${sep}${theme.fg("dim", `resets in ${duration(w.reset - s.now)}`)}`;
+      // Expired windows share the row's reset-due alert; do not repeat it.
+      if (w.reset !== undefined && w.reset > s.now) reset = `${sep}${theme.fg("dim", `resets in ${duration(w.reset - s.now)}`)}`;
       const color = stale || w.used < 70 ? "muted" : heat(w.used);
       const val = `${theme.fg("muted", clean(w.label))} ${theme.bold(theme.fg(color, percent(w.used)))}${theme.fg("dim", " used")}`;
       // Text-only quota windows keep account rows quiet at every width.
@@ -695,11 +704,11 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
       }
     }
     const extraColor = extra?.enabled ? "warning" : "dim";
-    const staleText = `stale ${duration(age)}${expired ? " / reset due" : ""}`;
+    const staleText = `stale ${duration(age)}${expired ? " · reset due" : ""}`;
     const billed = quota.source === "Claude acct" ? s.extraBilled : undefined;
     const segments: Segment[] = [
       { text: label(quota.source), short: label(quota.source), separatorAfter: "", priority: 200 },
-      { text: stale ? theme.fg("warning", staleText) : "", short: stale ? theme.fg("warning", "stale") : "", priority: 210 },
+      { text: stale ? theme.fg("warning", staleText) : "", short: stale ? theme.fg("warning", expired ? "stale · reset due" : "stale") : "", priority: 210 },
       ...windows,
       { text: extraText ? theme.fg(extraColor, extraText) : "", short: extra?.enabled ? "extra on" : "", priority: extra?.enabled ? 75 : 5 },
       { text: billed ? theme.fg("error", `${billed} request${billed === 1 ? "" : "s"} billed to extra usage`) : "",

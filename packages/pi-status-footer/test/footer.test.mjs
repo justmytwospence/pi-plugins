@@ -347,6 +347,8 @@ test("unknown context and quota do not become zero; stale/reset-due limits remai
   s.quotas[0].updated = now;
   s.quotas[0].windows[0].reset = now - 1;
   assert.match(mod.renderFooter(s, 160, theme)[3], /reset due/);
+  assert.equal((mod.renderFooter(s, 160, theme)[3].match(/reset due/g) ?? []).length, 1);
+  assert.match(mod.renderFooter(s, 40, theme)[3], /reset due/);
   s.quotas = []; s.unavailableQuota = "Codex acct";
   assert.match(mod.renderFooter(s, 80, theme)[3], /Codex\s+limits unavailable/);
 });
@@ -367,7 +369,7 @@ test("companion extension statuses fold into their rows, and degrade when absent
   ]);
   const absorbed = mod.absorbStatuses(statuses, { claudeRow: true });
   assert.deepEqual(absorbed, { autoEffort: true, lean: "\u221212k tok", cache: "4:12", extraBilled: 3,
-    rest: ["plan: A working (/plan)", "Gate 2 auto \u00b7 0 pushed back \u00b7 1 asked"] });
+    rest: ["Plan A working · /plan", "Gate 2 auto \u00b7 0 pushed back \u00b7 1 asked"] });
 
   const s = { ...fixture(), thinking: "medium", statuses: absorbed.rest, autoEffort: true, lean: absorbed.lean, cache: absorbed.cache, extraBilled: 3 };
   const rows = mod.renderFooter(s, 200, theme).map(plain);
@@ -380,7 +382,7 @@ test("companion extension statuses fold into their rows, and degrade when absent
   assert.deepEqual(mod.absorbStatuses(new Map([["cache-guard", "cache is weird"]]), { claudeRow: false }).rest, ["cache is weird"]);
   assert.match(rows.at(-1), /3 requests billed to extra usage/);
   assert.doesNotMatch(rows.join("\n"), /effort:|lean:|extra usage x3|cache-guard/);
-  assert.match(rows[3], /plan: A working.* Gate /);
+  assert.match(rows[3], /Plan A working.* Gate /);
   // The model never drops for a companion's segment, and every row fits.
   for (let width = 1; width <= 160; width++) assert.ok(mod.renderFooter(s, width, theme).every((row) => visibleWidth(row) <= width));
   assert.match(plain(mod.renderFooter(s, 50, theme).at(-1)), /extra x3/);
@@ -425,6 +427,68 @@ test("a stashed prompt gets its own row under the editor, with a preview when re
   assert.deepEqual(mod.absorbStatuses(new Map([["prompt-stash", "2 prompts stashed"]]), { claudeRow: true }).rest, ["2 prompts stashed"]);
 });
 
+test("optional companions share label style and preserve meaningful qualifiers", () => {
+  const absorbed = mod.absorbStatuses(new Map([
+    ["plan", "plan: A working · B cut off (resume in /plan) (/plan)"],
+    ["tool-gate", "gate: off"],
+    ["marimo", "marimo: fit.py · disconnected"],
+    ["bg", "bg: vite starting (kept) · lint ✗ · fmt ■"],
+  ]), { claudeRow: false });
+  assert.deepEqual(absorbed.rest, ["Plan A working · B cut off · resume in /plan · /plan", "Gate off"]);
+  const s = { ...fixture(), borderGauge: true, ...absorbed, statuses: absorbed.rest, cache: "cold (model)" };
+  const rows = mod.renderFooter(s, 200, theme);
+  assert.equal(rows[2], " Context 28% used · Cache cold · model changed");
+  assert.equal(rows[3], " Marimo fit.py · disconnected");
+  assert.equal(rows[4], " Background vite starting kept · lint ✗ · fmt ■");
+  assert.match(rows[5], /^ Plan /);
+  assert.match(mod.renderFooter({ ...s, cache: "cold?" }, 200, theme)[2], /Cache cold · unconfirmed/);
+  assert.deepEqual(mod.absorbStatuses(new Map([["plan", "plan: new format"]]), { claudeRow: false }).rest, ["plan: new format"]);
+  assert.deepEqual(mod.absorbStatuses(new Map([["third-party", "widget: Mixed CASE (keep me)"]]), { claudeRow: false }).rest, ["widget: Mixed CASE (keep me)"]);
+});
+
+test("all optional footer rows fit both themes at every width, alone and combined", () => {
+  const companions = mod.absorbStatuses(new Map([
+    ["auto-effort", "effort: high (auto ↑, limited: 5h 84%)"],
+    ["lean-context", "lean: −12k tok"], ["cache-guard", "cache cold (model)"],
+    ["anthropic-billing", "extra usage x3"], ["prompt-stash", "prompt stashed"],
+    ["marimo", "marimo: 診断.py · running Data › Model fit (12s) · 2 queued · 1 error · also prep.py, plots.py"],
+    ["bg", "bg: tests 2:14 · vite starting (kept) · lint ✗ · fmt ✓ · stopped ■ · +2"],
+    ["plan", "plan: A asking you · B failed (/plan)"],
+    ["tool-gate", "gate: 2 auto · 1 pushed back · 1 asked"],
+    ["mcp", "\x1b[36m🔌 MCP: 5 connected\x1b[39m"],
+    ["unknown", "診断: 問題なし (unchanged)"],
+  ]), { claudeRow: true });
+  const combined = { ...fixture(), ...companions, statuses: companions.rest, borderGauge: true,
+    stash: { text: "review the optional components\nthen check terminal widths" },
+    unavailableQuota: "Codex acct", phase: "error", queued: true, sessionName: "UI review",
+  };
+  combined.quotas[0].extra = { enabled: true, used: 12.5, limit: 50, currency: "USD" };
+  combined.quotas[0].windows[0].reset = now - 1;
+  const variants = [combined, ...["stash", "marimo", "bg", "cache", "lean", "autoEffort", "extraBilled"].map((key) => ({ ...fixture(), [key]: combined[key] })),
+    { ...fixture(), stash: {} },
+    ...["4:12", "1h05m", "cold", "cold?"].map((cache) => ({ ...fixture(), cache })),
+    ...["marimo: idle.py", "marimo: queued.py · 2 queued", "marimo: broken.py · 2 errors · not open", "marimo: older.py · +3 open", "marimo: /marimo to pick one"].map((text) => ({ ...fixture(), marimo: mod.parseMarimoStatus(text) })),
+    { ...fixture(), bg: mod.parseBgStatus("bg: api up · vite ready · lint ✗") },
+    { ...fixture(), context: { percent: null, tokens: null, contextWindow: 200_000 }, quotas: [], unavailableQuota: "Claude acct" },
+    { ...fixture(), quotas: [{ source: "Claude acct", updated: now, windows: [{ label: "named model pool", used: 99 }], extra: { enabled: true, used: 12.5, currency: "EUR" } }] },
+  ];
+  for (const name of ["light", "dark"]) {
+    const paint = mod.liftAccent(getThemeByName(name));
+    for (const s of variants) {
+      for (let width = 1; width <= 240; width++) {
+        const rows = mod.renderFooter(s, width, paint);
+        assert.ok(rows.every((row) => visibleWidth(row) <= width), `${name}, width ${width}`);
+        assert.ok(rows.every((row) => !/[\r\n\t]/.test(plain(row))));
+      }
+    }
+    const text = mod.renderFooter(combined, 240, paint).map(plain).join("\n");
+    for (const notice of ["Stashed", "Marimo", "Background", "lint ✗", "Plan", "Gate", "MCP", "reset due", "extra usage on", "3 requests billed", "limits unavailable"]) {
+      assert.ok(text.includes(notice), notice);
+    }
+    assert.match(plain(mod.renderFooter(combined, 22, paint).find((row) => plain(row).startsWith("Bg "))), /lint ✗/);
+  }
+});
+
 test("pi-bg's tasks get their own row under the context row", () => {
   const absorbed = mod.absorbStatuses(new Map([["bg", "bg: tests 2:14 \u00b7 vite ready (kept) \u00b7 lint \u2717 \u00b7 fmt \u2713 \u00b7 +1"]]), { claudeRow: true });
   assert.deepEqual(absorbed.bg, [
@@ -437,9 +501,9 @@ test("pi-bg's tasks get their own row under the context row", () => {
   assert.deepEqual(absorbed.rest, []);
   const s = { ...fixture(), statuses: absorbed.rest, bg: absorbed.bg };
   const rows = mod.renderFooter(s, 160, theme).map(plain);
-  assert.equal(rows[3], " bg \u00b7 tests 2:14 \u00b7 vite ready kept \u00b7 lint \u2717 \u00b7 fmt \u2713 \u00b7 +1");
+  assert.equal(rows[3], " Background tests 2:14 \u00b7 vite ready kept \u00b7 lint \u2717 \u00b7 fmt \u2713 \u00b7 +1");
   // Narrow: what ended fine and the count go first; running and failed work stays.
-  assert.equal(plain(mod.renderFooter(s, 34, theme)[3]), "bg \u00b7 tests 2:14 \u00b7 vite \u00b7 lint \u2717");
+  assert.equal(plain(mod.renderFooter(s, 34, theme)[3]), "Bg tests · vite ready · lint ✗");
   // Another shape stays in the status row.
   assert.deepEqual(mod.absorbStatuses(new Map([["bg", "bg: something new happened"]]), { claudeRow: true }).rest, ["bg: something new happened"]);
 });
@@ -453,10 +517,10 @@ test("pi-marimo's notebook gets its own row under the context row", () => {
   const s = { ...fixture(), statuses: absorbed.rest, marimo: absorbed.marimo };
   const rows = mod.renderFooter(s, 160, theme).map(plain);
   assert.match(rows[2], /^ Context/);
-  assert.equal(rows[3], " marimo fit.py \u00b7 running Data loading \u203a Model fit 12s \u00b7 2 queued \u00b7 1 error \u00b7 also prep.py, plots.py");
+  assert.equal(rows[3], " Marimo fit.py \u00b7 running Data loading \u203a Model fit 12s \u00b7 2 queued \u00b7 1 error \u00b7 also prep.py, plots.py");
   // Narrower: queued goes first, then the other notebooks become a count, then the label goes and the
   // section shortens to its deepest heading; which notebook is current and how many others never go.
-  assert.equal(plain(mod.renderFooter(s, 90, theme)[3]), " marimo fit.py \u00b7 running Data loading \u203a Model fit 12s \u00b7 1 error \u00b7 also prep.py, plots.py");
+  assert.equal(plain(mod.renderFooter(s, 90, theme)[3]), " Marimo fit.py \u00b7 running Data loading \u203a Model fit 12s \u00b7 1 error \u00b7 also prep.py, plots.py");
   assert.equal(plain(mod.renderFooter(s, 58, theme)[3]), "fit.py \u00b7 running Model fit 12s \u00b7 1 error \u00b7 +2 more");
   // An older pi-marimo sent only a count.
   assert.deepEqual(mod.absorbStatuses(new Map([["marimo", "marimo: fit.py \u00b7 +3 open"]]), { claudeRow: true }).marimo, { notebook: "fit.py", others: 3, notes: [] });

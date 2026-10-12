@@ -72,14 +72,18 @@ instead of the status row:
 | pi-cache-guard (Jev trimming, key `lean-context`) | `lean: −12k tok` | `Lean −12k tok` on the context row |
 | anthropic-billing-guard | `extra usage x3` | `3 requests billed to extra usage` on the Claude limits row |
 | @saadjs/pi-stash | `prompt stashed` | `› Stashed · "first line…" +2 lines · ctrl+s to restore` as the top row, just under the editor |
-| pi-marimo | `marimo: fit.py · running Data loading › Model fit (12s) · 1 error · also prep.py, plots.py` | its own row under the context row: the current notebook (bold) and its kernel, then the other notebooks it follows; when narrow, the others become a count and the section its deepest heading |
-| pi-bg | `bg: tests 2:14 · vite ready · lint ✗` | its own row under that: running jobs with their time, services with their state, then what ended in the last minute; when narrow, what ended fine goes first |
+| pi-marimo | `marimo: fit.py · running Data loading › Model fit (12s) · 1 error · also prep.py, plots.py` | `Marimo fit.py · …` on its own row under the context row: the current notebook (bold) and its kernel, then the other notebooks it follows; when narrow, the others become a count and the section its deepest heading |
+| pi-bg | `bg: tests 2:14 · vite ready · lint ✗` | `Background tests 2:14 · vite ready · lint ✗` on its own row under that: running jobs with their time, services with their state, then what ended in the last minute; when narrow, what ended fine goes first |
 
 Without them nothing changes. A status whose text no longer has the expected shape,
 or a billing notice with no Claude limits row to attach to, stays in the status row
 unchanged, so a notice is never lost. pi-plan-mode, pi-tool-gate and MCP statuses
 always stay in the status row. The recognized tool-gate status displays as
-`Gate 2 auto · 0 pushed back · 1 asked` (example), or `Gate off`.
+`Gate 2 auto · 0 pushed back · 1 asked` (example), or `Gate off`. Recognized
+plan-mode notices use `Plan A working · /plan` (example). Model-change and
+unconfirmed cache states display as `Cache cold · model changed` and
+`Cache cold · unconfirmed`. Background rows shorten their label to `Bg` when
+needed, preserve service states, and prioritize failed tasks over routine work.
 
 Estimated session cost, cache reuse, raw token counts, Git line counts, OAuth details, age and compaction
 counts are available through `/status details`, not crowded into the footer.
