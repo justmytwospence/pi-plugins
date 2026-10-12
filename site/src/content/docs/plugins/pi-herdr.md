@@ -22,7 +22,7 @@ Additional requirements depend on the feature:
 
 ## Pane and space metadata
 
-The `$bg` pane token summarizes background holds such as async subagents or pending child replies. Its 90-second TTL is refreshed while held. A pane may correctly show idle while `$bg` names unfinished work; the token is not a replacement working-state flag.
+The `$bg` pane token uses compact icon/count badges: `⑂ 2` for pending subagents, `≡ 1` for planner holds, `↳ 1` for awaited child replies, and `⌘ 1` for jobs/other background holds (examples). Counts of the same kind are combined, without task names or parentheses. Its 90-second TTL is refreshed while held. A pane may correctly show idle while `$bg` counts unfinished work; the token is not a replacement working-state flag.
 
 The session name, or the first prompt's first line, becomes the pane title and `$task`. The displayed agent name includes model and effort. `$pr` is a space token describing the checkout branch's PR, refreshed at session start, after turns, and every three minutes. Set `PI_HERDR_PR=0` to disable PR reporting.
 

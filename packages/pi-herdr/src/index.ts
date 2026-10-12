@@ -20,7 +20,8 @@ import { execFile } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION } from "./activity.ts";
-import { ACTIVITY_CHANNELS, Activity, type HoldEvent } from "./core/activity.ts";
+import { ACTIVITY_CHANNELS, type HoldEvent } from "./core/activity.ts";
+import { ActivityBadges } from "./activity-badges.ts";
 import { Bridge, type NotifyEvent, type SplitEvent, type TokenEvent } from "./bridge.ts";
 import { ChildrenActivity } from "./children-activity.ts";
 import { type ChildRecord, Children, type Exec, type Where } from "./core/children.ts";
@@ -80,7 +81,7 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
   const run = dependencies.exec ?? exec;
   const pane = new PaneReporter(call, target.paneId);
   const bridge = new Bridge(call, pane);
-  const activity = new Activity();
+  const activity = new ActivityBadges();
   /** Tokens other extensions set before the session started. */
   const pendingTokens = new Map<string, TokenEvent>();
 

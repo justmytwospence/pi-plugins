@@ -368,7 +368,7 @@ test("repeated session_start cancels refresh/PR timers and releases old holds be
   const holds = p.emitted.filter(([c]) => c === "herdr:background").map(([, d]) => d);
   expect(holds.slice(-2)).toEqual([{ active: false, id: "child:new" }, { active: true, label: "child new", id: "child:new" }]);
   const bg = x.f.of("pane.report_metadata").filter((c) => c.params.tokens && "bg" in c.params.tokens).at(-1);
-  expect(bg?.params.tokens.bg).toBe("child new"); // no old hold or duplicate same-name hold
+  expect(bg?.params.tokens.bg).toBe("↳ 1"); // no old hold or duplicate same-name hold
   await p.emit("session_shutdown");
   expect(vi.getTimerCount()).toBe(0);
   const calls = x.f.log.length;
