@@ -470,9 +470,22 @@ export function fitSegments(segments: Segment[], width: number, theme: Paint): s
   return truncateToWidth(join(), Math.max(0, width), "…");
 }
 
-function gauge(theme: Paint, used: number, cells = 8): string {
+function thinkingColor(level: string): Parameters<Paint["fg"]>[0] {
+  switch (level) {
+    case "off": return "thinkingOff";
+    case "minimal": return "thinkingMinimal";
+    case "low": return "thinkingLow";
+    case "medium": return "thinkingMedium";
+    case "high": return "thinkingHigh";
+    case "xhigh": return "thinkingXhigh";
+    case "max": return "thinkingMax";
+    default: return "muted";
+  }
+}
+
+function gauge(theme: Paint, used: number, cells = 8, healthy: "accent" | "success" = "accent"): string {
   const filled = Math.round(Math.min(100, Math.max(0, used)) * cells / 100);
-  return theme.fg(heat(used), "━".repeat(filled)) + theme.fg("dim", "─".repeat(cells - filled));
+  return theme.fg(used < 70 ? healthy : heat(used), "━".repeat(filled)) + theme.fg("dim", "─".repeat(cells - filled));
 }
 const percent = (value: number): string => `${+value.toFixed(1)}%`;
 
@@ -576,9 +589,9 @@ function marimoRow(m: MarimoStatus, width: number, theme: Paint): string {
 function bgRow(items: BgItem[], width: number, theme: Paint): string {
   const segments: Segment[] = [{ text: theme.fg("muted", "bg"), priority: 110 }];
   for (const item of items) {
-    if (item.kind === "job") segments.push({ text: `${item.name} ${theme.fg("dim", item.elapsed)}`, short: item.name, priority: 100 });
+    if (item.kind === "job") segments.push({ text: `${theme.fg("accent", item.name)} ${theme.fg("dim", item.elapsed)}`, short: theme.fg("accent", item.name), priority: 100 });
     else if (item.kind === "service") {
-      const state = theme.fg(item.state === "starting" ? "warning" : "muted", item.state);
+      const state = theme.fg(item.state === "starting" ? "warning" : "success", item.state);
       segments.push({ text: `${item.name} ${state}${item.kept ? theme.fg("dim", " kept") : ""}`, short: item.name, priority: 70 });
     } else if (item.kind === "ended") {
       const mark = item.mark === "✓" ? theme.fg("success", "✓") : item.mark === "✗" ? theme.fg("error", "✗") : theme.fg("muted", "■");
@@ -601,7 +614,7 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     visibleWidth(clean(s.unavailableQuota ?? "")))) : 0;
   const label = (text: string) => {
     const value = clean(text);
-    return theme.fg("muted", value) + " ".repeat(Math.max(1, labelWidth - visibleWidth(value) + 2));
+    return theme.fg("accent", value) + " ".repeat(Math.max(1, labelWidth - visibleWidth(value) + 2));
   };
   const rows: string[] = [];
   const sep = theme.fg("dim", " · ");
@@ -623,8 +636,10 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   const phaseText = s.phase ? theme.fg(s.phase === "error" ? "error" : "warning", s.phase) : "";
   const model = theme.bold(theme.fg("accent", shortModel(s.model)));
   const auto = s.autoEffort ? ` (auto${s.autoEffortDetail ? ` ${clean(s.autoEffortDetail)}` : ""})` : "";
-  const reasoning = s.thinking ? `reasoning ${s.thinking}${auto}` : "";
-  const identity = `${model}${reasoning ? `${sep}${theme.fg("muted", reasoning)}` : ""}`;
+  const reasoning = s.thinking
+    ? `${theme.fg("muted", "reasoning")} ${theme.bold(theme.fg(thinkingColor(s.thinking), clean(s.thinking)))}${theme.fg("dim", auto)}`
+    : "";
+  const identity = `${model}${reasoning ? `${sep}${reasoning}` : ""}`;
   rows.push(fitSegments([
     { text: project, priority: 60 },
     { text: branch, short: branchShort, priority: g.conflicts ? 110 : 70 },
@@ -637,14 +652,14 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   ], width, theme));
 
   const context = s.context.percent;
-  const ctxValue = context === null ? theme.fg("muted", "unknown") : theme.fg(heat(context), percent(context));
-  const ctxShort = `${theme.fg("muted", "Context")} ${ctxValue}`;
+  const ctxValue = context === null ? theme.fg("muted", "unknown") : theme.bold(theme.fg(heat(context), percent(context)));
+  const ctxShort = `${theme.fg("accent", "Context")} ${ctxValue}`;
   const ctxLong = `${label("Context")}${ctxValue}${context === null ? "" : theme.fg("dim", " used")}${context === null || s.borderGauge ? "" : ` ${gauge(theme, context)}`}`;
   rows.push(fitSegments([
     { text: ctxLong, short: ctxShort, priority: 100 },
     { text: s.lean ? theme.fg("muted", `lean ${clean(s.lean)}`) : "", priority: 20 },
-    // Warm is the quiet state; cold means the next prompt re-caches the whole history.
-    { text: s.cache ? `${theme.fg("muted", "cache")} ${theme.fg(s.cache.startsWith("cold") ? "warning" : "muted", clean(s.cache))}` : "", priority: 30 },
+    // Green denotes a warm cache; cold means the next prompt re-caches the whole history.
+    { text: s.cache ? `${theme.fg("muted", "cache")} ${theme.fg(s.cache.startsWith("cold") ? "warning" : "success", clean(s.cache))}` : "", priority: 30 },
   ], width, theme));
   if (s.marimo) rows.push(marimoRow(s.marimo, width, theme));
   if (s.bg?.length) rows.push(bgRow(s.bg, width, theme));
@@ -664,8 +679,11 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     const windows = quota.windows.map((w): Segment => {
       let reset = "";
       if (w.reset !== undefined) reset = w.reset <= s.now ? theme.fg("warning", " reset due") : theme.fg("dim", ` (resets in ${duration(w.reset - s.now)})`);
-      const val = `${theme.fg("muted", clean(w.label))} ${theme.fg(stale ? "muted" : heat(w.used), percent(w.used))}${theme.fg("dim", " used")}`;
-      return { text: `${val}${reset}`, short: val,
+      const color = stale ? "muted" : w.used < 70 ? "success" : heat(w.used);
+      const val = `${theme.fg("muted", clean(w.label))} ${theme.bold(theme.fg(color, percent(w.used)))}${theme.fg("dim", " used")}`;
+      // Meters are secondary: compact forms keep the reading, never a stale gauge.
+      const meter = !stale && width >= 98 ? ` ${gauge(theme, w.used, 4, "success")}` : "";
+      return { text: `${val}${meter}${reset}`, short: val,
         priority: 50 + Math.min(100, w.used) };
     });
     const extra = quota.extra;
@@ -682,7 +700,7 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     const staleText = `stale ${duration(age)}${expired ? " / reset due" : ""}`;
     const billed = quota.source === "Claude acct" ? s.extraBilled : undefined;
     const segments: Segment[] = [
-      { text: label(quota.source), short: `${theme.fg("muted", clean(quota.source))} `, separatorAfter: "", priority: 200 },
+      { text: label(quota.source), short: `${theme.fg("accent", clean(quota.source))} `, separatorAfter: "", priority: 200 },
       { text: stale ? theme.fg("warning", staleText) : "", short: stale ? theme.fg("warning", "stale") : "", priority: 210 },
       ...windows,
       { text: extraText ? theme.fg(extraColor, extraText) : "", short: extra?.enabled ? "extra on" : "", priority: extra?.enabled ? 75 : 5 },

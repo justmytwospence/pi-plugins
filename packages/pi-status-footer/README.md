@@ -68,7 +68,7 @@ instead of the status row:
 | Extension | Status | Shown as |
 | --- | --- | --- |
 | pi-auto-effort | `effort: high (auto ↑)` | `reasoning high (auto ↑)` on the model row (arrow and any `limited:` note kept) |
-| pi-cache-guard | `cache 4:12`, `cache cold` | `cache 4:12` on the context row (cold in the warning color) |
+| pi-cache-guard | `cache 4:12`, `cache cold` | `cache 4:12` on the context row (warm in green, cold in the warning color) |
 | pi-cache-guard (Jev trimming, key `lean-context`) | `lean: −12k tok` | `lean −12k tok` on the context row |
 | anthropic-billing-guard | `extra usage x3` | `3 requests billed to extra usage` on the Claude limits row |
 | @saadjs/pi-stash | `prompt stashed` | `› Stashed · "first line…" +2 lines · ctrl+s to restore` as the top row, just under the editor |
@@ -85,8 +85,12 @@ counts are available through `/status details`, not crowded into the footer.
 
 At 60 columns and up, all rows have a one-cell inset and context/account readings
 share a label column. Narrower terminals omit that padding. Project and model
-anchor the display; labels, Git identity and reset countdowns are quieter, while
-warnings retain their semantic colors. The model row is separate from the project
+anchor the display; aligned section labels share their accent, while Git identity,
+secondary labels and reset countdowns are quieter. Reasoning levels use Pi's native
+thinking colors. Context and quota percentages are bold; healthy account readings,
+warm caches and ready services are green, while warnings and errors retain their
+semantic colors. At 100 columns and up, fresh quota windows get four-cell meters;
+they shorten away before readings and never appear for stale data. The model row is separate from the project
 row; no background blocks are added.
 
 Rows shorten and drop lower-priority segments to fit actual terminal cell width.

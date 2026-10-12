@@ -243,8 +243,8 @@ test("dashboard aligns readings, keeps identity left-aligned and insets every ro
   assert.equal(rows[1], " opus-5.5 · reasoning xhigh");
   assert.equal(rows[2], " Context      28% used");
   assert.equal(rows[3], " PLAN mode");
-  assert.equal(rows[4], " Claude acct  5h 32% used");
-  assert.equal(rows[5], " Codex acct   week 41% used");
+  assert.equal(rows[4], " Claude acct  5h 32% used ━───");
+  assert.equal(rows[5], " Codex acct   week 41% used ━━──");
   assert.equal(rows[2].indexOf("28%"), rows[4].indexOf("5h"));
   assert.equal(rows[4].indexOf("5h"), rows[5].indexOf("week"));
   assert.ok(rows.every((row) => row.startsWith(" ") && !row.endsWith(" ")));
@@ -252,17 +252,54 @@ test("dashboard aligns readings, keeps identity left-aligned and insets every ro
   assert.match(mod.renderFooter(s, 20, theme)[2], /^Context 28% used$/);
 });
 
-test("dashboard hierarchy quiets labels and countdowns, not alerts", () => {
+test("dashboard hierarchy accents sections and quiets countdowns, not alerts", () => {
   const calls = [];
   const paint = { fg: (color, value) => { calls.push([color, value]); return value; }, bold: (value) => value };
   const s = fixture();
   s.quotas[0].windows[0].used = 95;
   s.cache = "cold";
   mod.renderFooter(s, 160, paint);
-  for (const pair of [["muted", "Context"], ["muted", "main"], ["muted", "5h"],
+  for (const pair of [["accent", "Context"], ["accent", "Claude acct"], ["muted", "main"], ["muted", "5h"],
     ["dim", " used"], ["dim", " (resets in 2h14m)"], ["error", "95%"], ["warning", "cold"]]) {
     assert.ok(calls.some(([color, value]) => color === pair[0] && value === pair[1]), pair.join(": "));
   }
+});
+
+test("semantic colors distinguish thinking, healthy readings, cache and service states", () => {
+  const calls = [];
+  const paint = { fg: (color, value) => { calls.push([color, value]); return value; }, bold: (value) => value };
+  const s = fixture();
+  s.cache = "4:12";
+  s.bg = [
+    { kind: "service", name: "vite", state: "ready", kept: false },
+    { kind: "service", name: "api", state: "starting", kept: false },
+  ];
+  mod.renderFooter(s, 160, paint);
+  for (const [color, value] of [["thinkingXhigh", "xhigh"], ["accent", "28%"],
+    ["success", "32%"], ["success", "4:12"], ["success", "ready"], ["warning", "starting"]]) {
+    assert.ok(calls.some(([c, v]) => c === color && v === value), `${color}: ${value}`);
+  }
+  for (const [level, color] of [["off", "thinkingOff"], ["minimal", "thinkingMinimal"],
+    ["low", "thinkingLow"], ["medium", "thinkingMedium"], ["high", "thinkingHigh"],
+    ["max", "thinkingMax"], ["future", "muted"]]) {
+    calls.length = 0;
+    s.thinking = level;
+    mod.renderFooter(s, 160, paint);
+    assert.ok(calls.some(([c, v]) => c === color && v === level));
+  }
+});
+
+test("quota meters stay secondary and disappear for stale readings", () => {
+  const s = fixture();
+  s.borderGauge = true;
+  s.quotas[0].windows = [{ label: "5h", used: 75 }];
+  assert.match(mod.renderFooter(s, 120, theme)[3], /75% used ━━━─/);
+  assert.doesNotMatch(mod.renderFooter(s, 80, theme)[3], /[━─]/);
+  s.quotas[0].updated = now - 11 * 60_000;
+  const calls = [];
+  const paint = { fg: (c, v) => { calls.push([c, v]); return v; }, bold: (v) => v };
+  assert.doesNotMatch(mod.renderFooter(s, 120, paint)[3], /[━─]/);
+  assert.ok(calls.some(([c, v]) => c === "muted" && v === "75%"));
 });
 
 test("dashboard label alignment measures wide characters and bounds long names", () => {
@@ -926,7 +963,7 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
     assert.equal(fetches.length, 1);
     assert.equal(fetches[0].url, "https://chatgpt.com/backend-api/wham/usage");
     assert.equal(fetches[0].headers["chatgpt-account-id"], "acct-1");
-    assert.match(h.footer.render(120).join("\n"), /Codex acct\s+week 25% used \(resets in 1d0h\) · gpt-reserve 0% used/);
+    assert.match(h.footer.render(120).join("\n"), /Codex acct\s+week 25% used ━─── \(resets in 1d0h\) · gpt-reserve 0% used/);
     assert.doesNotMatch(h.footer.render(120).join("\n"), /Claude acct/);
     await h.handlers.get("after_provider_response")({ headers: {
       "x-codex-primary-used-percent": "45", "x-codex-primary-window-minutes": "10080" } }, h.ctx);
