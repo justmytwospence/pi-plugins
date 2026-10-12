@@ -6,14 +6,14 @@ import { KeybindingsManager } from '../node_modules/@earendil-works/pi-coding-ag
 setKeybindings(new KeybindingsManager());
 function setup() {
   const handlers = new Map(); let shortcut;
-  clearScreen({ on: (name, fn) => handlers.set(name, fn), registerShortcut: (key, def) => { assert.equal(key, 'ctrl+l'); shortcut = def; } });
+  clearScreen({ on: (name, fn) => handlers.set(name, fn), registerCommand() {}, registerShortcut: (key, def) => { assert.equal(key, 'ctrl+l'); shortcut = def; } });
   const chat = { children: [], render: () => chat.children.flatMap(c => c.render()), addChild: c => chat.children.push(c), removeChild: c => { chat.children = chat.children.filter(v => v !== c); } };
   const doc = { children: [chat], render: () => ['history', ...chat.render()] };
   const original = doc.render;
   const scroll = { child: doc, viewportHeight: 10, scrollToEnd() {} };
   const tui = { children: [doc], layoutRoot: { entries: [{ component: scroll }] }, requestRender() {} };
   const notices = [];
-  const ctx = { mode: 'tui', ui: { notify: text => notices.push(text), setWidget: (key, factory) => factory?.(tui) } };
+  const ctx = { sessionManager: {}, mode: 'tui', ui: { notify: text => notices.push(text), setWidget: (key, factory) => factory?.(tui) } };
   handlers.get('session_start')({}, ctx);
   return { handlers, shortcut, ctx, doc, original, notices };
 }
@@ -22,7 +22,7 @@ test('clear keeps original transcript and releases its own renderer', () => {
   h.shortcut.handler(h.ctx);
   assert.equal(h.doc.render(80)[0], 'history');
   assert.equal(h.doc.render(80).length, 11);
-  h.handlers.get('session_shutdown')();
+  h.handlers.get('session_shutdown')({}, h.ctx);
   assert.equal(h.doc.render, h.original);
   assert.deepEqual(h.doc.render(80), ['history']);
 });
@@ -31,7 +31,7 @@ test('teardown does not overwrite a newer renderer wrapper', () => {
   const old = h.doc.render;
   const newer = width => old(width);
   h.doc.render = newer;
-  h.handlers.get('session_shutdown')();
+  h.handlers.get('session_shutdown')({}, h.ctx);
   assert.equal(h.doc.render, newer);
   assert.deepEqual(h.doc.render(80), ['history']);
 });

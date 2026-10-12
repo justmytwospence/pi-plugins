@@ -14,7 +14,13 @@ Entry: `packages/pi-clear-screen/src/index.ts`.
 
 Use [Install & select](/guides/install/) to enable the entry from the suite. Every suite entry loads by default, and all selected components use one Git pin. You do not need a separate package source for this feature.
 
-The extension provides a keyboard shortcut, not a slash command or model-callable tool. Because nothing is submitted, clearing adds no entry to the prompt history, and the handler does not touch the editor: a half-written draft stays exactly as it was. Its behavior is intentionally close to clearing a shell's visible screen while retaining scrollback, but it operates on Pi's application-owned fullscreen transcript rather than issuing a general terminal scrollback-erasure command.
+The extension provides Ctrl+L and the `/clear` and `/exit` commands, but no model-callable tool. Because nothing is submitted, clearing adds no entry to the prompt history, and the handler does not touch the editor: a half-written draft stays exactly as it was. Its behavior is intentionally close to clearing a shell's visible screen while retaining scrollback, but it operates on Pi's application-owned fullscreen transcript rather than issuing a general terminal scrollback-erasure command.
+
+## Session commands
+
+`/clear` starts a fresh session while preserving the active provider, model and thinking level, including a selection different from the startup model. It clears conversation context; Ctrl+L only clears the view. `/new` keeps Pi's normal behavior. `/exit` exits Pi.
+
+With `pi-cc-extensions`, set `"enableAliases": false` in `~/.pi/agent/pi-cc-extensions.json` so only this component registers `/clear` and `/exit`. Enable the updated component before applying that setting.
 
 ## Requirements and shortcut setup
 

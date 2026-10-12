@@ -15,6 +15,10 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getKeybindings } from "@earendil-works/pi-tui";
 
+// setup runs before the replacement's session_start. Carry plain data, never stale APIs.
+type Selection = { provider: string; modelId: string; thinkingLevel: ExtensionContext["thinkingLevel"] };
+const RESTORE_ENTRY = "clear-screen:model-restore";
+
 const KEY = "ctrl+l";
 const SENTINEL = "\u0000pi-clear-screen\u0000";
 
@@ -59,8 +63,20 @@ export default function (pi: ExtensionAPI) {
   let release: (() => void) | undefined;
   const cleanup = () => { release?.(); release = undefined; marker = undefined; tui = undefined; };
 
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     cleanup();
+    if (event.reason === "new") {
+      const entry = ctx.sessionManager.getBranch().find((entry) => entry.type === "custom" && entry.customType === RESTORE_ENTRY);
+      const selection = entry?.type === "custom" ? entry.data as Selection : undefined;
+      if (selection) {
+        const model = ctx.modelRegistry.find(selection.provider, selection.modelId);
+        if (!model || !(await pi.setModel(model))) {
+          ctx.ui.notify(`Could not preserve ${selection.provider}/${selection.modelId} after /clear`, "error");
+        } else if (selection.thinkingLevel !== undefined) {
+          pi.setThinkingLevel(selection.thinkingLevel);
+        }
+      }
+    }
     if (ctx.mode !== "tui") return;
     tui = grabTui(ctx);
     if (getKeybindings().getKeys("app.model.select").includes(KEY)) {
@@ -68,6 +84,26 @@ export default function (pi: ExtensionAPI) {
     }
   });
   pi.on("session_shutdown", cleanup);
+
+  pi.registerCommand("clear", {
+    description: "Start a fresh session, keeping the current model and thinking level",
+    handler: async (_args, ctx) => {
+      const selection = ctx.model && {
+        provider: ctx.model.provider,
+        modelId: ctx.model.id,
+        thinkingLevel: ctx.thinkingLevel,
+      };
+      await ctx.newSession({
+        setup: async (manager) => {
+          if (selection) manager.appendCustomEntry(RESTORE_ENTRY, selection);
+        },
+      });
+    },
+  });
+  pi.registerCommand("exit", {
+    description: "Exit Pi",
+    handler: async (_args, ctx) => { ctx.shutdown(); },
+  });
 
   pi.registerShortcut(KEY, {
     description: "Clear screen (keeps history; scroll up to see it)",
