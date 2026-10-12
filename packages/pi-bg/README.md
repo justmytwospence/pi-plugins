@@ -65,7 +65,7 @@ In the TUI the pill reads `1 shell`, `2 shells`, plus `· 1 failed` in the error
 | Enter, `l`, `→`, or a mouse click | open the background-tasks view |
 | Esc, `↑`, `k`, `h`, `←` | back to the prompt |
 
-`↓` does not leave the prompt while autocomplete is showing or a history entry is being browsed. Any other key returns to the editor.
+`↓` does not leave the prompt while autocomplete is showing or a history entry is being browsed. With pi-select-nav, Tab selects this pill when no next-prompt is accepted; a draft stays untouched. Repeated Tab keeps the pill selected. Enter opens the view and Esc returns to the editor. Other editing keys return to the editor.
 
 ### Background-tasks view
 

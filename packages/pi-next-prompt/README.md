@@ -57,6 +57,11 @@ The accept keys (`acceptKeys`, default `tab` and `right`) are taken only when al
 
 Accepting puts the text in the editor without submitting it. If the editor offers the suite's insert hook (pi-vim), it then enters Insert mode at the end of the text. After any other key reaches the main editor, the suggestion is hidden while the editor holds text and shown again once it is empty.
 
+With pi-select-nav enabled, Tab accepts explicit `@`/`/` completion first, then a
+next-prompt in an empty editor, then selects available task panels. While a panel
+is selected, Tab cycles entries; Enter opens one and Esc returns to the editor.
+Existing drafts are preserved, and no available target means Tab does nothing.
+
 ## Commands
 
 - `/next-prompt` or `/next-prompt status`: on/off, instruction injection, the latest assistant's valid/invalid/omitted tag, settlement events, Jev approval/veto, terminal UI availability, current focus/draft blockers, and ghost/fallback/concealed offer. Approval is not the same as display. Diagnostics reset on a new run or session invalidation; they are memory-only and make no model calls. An omitted tag can be deliberate abstention, not necessarily an error.

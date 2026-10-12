@@ -262,8 +262,14 @@ export class FleetView {
     this.registered = true;
   }
 
+  /** Optional select-nav routing, without depending on that extension. */
+  tab(activeOnly = false): boolean {
+    if (activeOnly && !this.active) return false;
+    return this.handleKey("\t", true)?.consume === true;
+  }
+
   /** `{ consume: true }` for the keys the list takes; undefined lets a key through. */
-  handleKey(data: string): KeyResult {
+  handleKey(data: string, enterWithTab = false): KeyResult {
     if (!this.ui || !this.source.enabled() || isKeyRelease(data)) return undefined;
     // The viewer owns the keyboard while it is open.
     if (this.closeViewer) return undefined;
@@ -287,7 +293,8 @@ export class FleetView {
       // Without a view of the editor, only an empty prompt is safe to leave.
       const down = focused ? leavesPromptDown(focused, data, matchesKey(data, "down"), data === "j" && modal?.state === "normal") : matchesKey(data, "down") && this.ui.getEditorText() === "";
       const left = matchesKey(data, "left") && this.ui.getEditorText() === "";
-      if (!down && !left) return undefined;
+      const tab = enterWithTab && matchesKey(data, "tab");
+      if (!down && !left && !tab) return undefined;
       const roster = this.roster();
       if (roster.length > 0) {
         this.active = true;
@@ -299,7 +306,7 @@ export class FleetView {
       return undefined;
     }
     // Insert and plain nonmodal editors retain text/edit keys while a row is highlighted.
-    if (modal?.state !== "normal" && !["up", "down", "enter", "escape", "pageUp", "pageDown"].some((key) => matchesKey(data, key as never))) {
+    if (modal?.state !== "normal" && !["up", "down", "enter", "escape", "pageUp", "pageDown", "tab"].some((key) => matchesKey(data, key as never))) {
       this.deactivate();
       return undefined;
     }
@@ -332,6 +339,9 @@ export class FleetView {
       const page = Math.min(MAX_ROWS, roster.length);
       const step = matchesKey(data, "ctrl+u") || matchesKey(data, "ctrl+d") ? Math.max(1, Math.floor(page / 2)) : page;
       this.select(roster, Math.max(0, Math.min(roster.length - 1, this.selected + direction * step)));
+    } else if (matchesKey(data, "tab")) {
+      const first = this.firstRow(roster);
+      this.select(roster, this.selected + 1 >= roster.length ? first : this.selected + 1);
     } else if (matchesKey(data, "down") || matchesKey(data, "j")) {
       this.select(roster, Math.min(roster.length - 1, this.selected + 1));
     } else if (matchesKey(data, "up") || matchesKey(data, "k")) {

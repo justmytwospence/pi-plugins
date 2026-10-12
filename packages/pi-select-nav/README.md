@@ -35,13 +35,29 @@ pi -e ./packages/pi-select-nav
 
 No `npm install` is needed to run it: the package.json has no `dependencies`; Pi supplies its peer dependencies.
 
+## Contextual Tab in the main prompt
+
+Tab accepts a visible completion only after an explicit `@` mention or `/` command.
+It never starts implicit file-path completion. Otherwise it fills an empty editor
+with an available pi-next-prompt suggestion (without submitting), or selects the
+available subagent/background-task panel. A selected panel keeps Tab for cycling;
+Enter opens an entry and Esc returns to the editor. Drafts are preserved. With no
+suggestion or tasks, Tab does nothing. Shift+Tab retains Pi's thinking shortcut.
+
+These integrations use optional synchronous event-bus requests:
+`prompt:accept-next { handled }` and `activity:prompt-tab { handled, phase }`.
+The task phase is `active` for an already-selected panel, or `enter` to select it.
+Only the current activity host handles the request; the other extensions are not
+required. Dialogs, embedded editors, and pending/Visual/EX modal operations keep
+owning their keys. Key releases and pasted text are not treated as Tab presses.
+
 ## How it works
 
 At `session_start` in TUI mode, the extension borrows Pi's TUI through a probe widget that is removed at once and subscribes to terminal input. For each key it looks at the focused component (`routeInput` in `src/index.ts`) and decides in this order:
 
 1. Key releases (reported separately by kitty-protocol terminals) pass through unchanged; rewriting them would move twice per key.
 2. A component that declares an input context, a function at `Symbol.for("pi-plugins.input-context.v1")` (exported as `INPUT_CONTEXT`), is left alone entirely. Such components implement their own bindings; the extension neither rewrites their keys nor renders or inspects their children.
-3. If the focused component is itself an editor (the main prompt editor, or a bare editor dialog), or holds an active nested editor, every key passes through: there `ctrl+j` is a newline and `ctrl+k` deletes to the end of the line. A nested editor counts as active unless its `focused` property is explicitly `false`.
+3. If the focused component is itself an editor (the main prompt editor, or a bare editor dialog), or holds an active nested editor, list-navigation keys pass through: there `ctrl+j` is a newline and `ctrl+k` deletes to the end of the line. A nested editor counts as active unless its `focused` property is explicitly `false`.
 4. `ctrl+j` and `ctrl+k` are rewritten to Down and Up.
 5. `j` and `k` are rewritten to Down and Up unless:
    - the component's constructor name is in `J_K_DENYLIST` (empty by default), for letter bindings the source check below cannot see;

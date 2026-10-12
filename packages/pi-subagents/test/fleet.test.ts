@@ -74,6 +74,24 @@ function setup() {
   return { ui, runs, fleet, steered, stopped, disable: () => (enabled = false) };
 }
 
+test("Tab routing selects and cycles tasks without main-row stops or draft replacement", () => {
+  const { ui, fleet, runs } = setup();
+  ui.editorText = "keep this draft";
+  expect(fleet.tab(true)).toBe(false);
+  expect(fleet.tab()).toBe(true);
+  expect(ui.render("subagents-fleet")[2]).toMatch(/● Find config/u);
+  expect(ui.press("\t")).toBe(true);
+  expect(ui.render("subagents-fleet")[3]).toMatch(/● Fix config/u);
+  expect(ui.press("\t")).toBe(true);
+  expect(ui.render("subagents-fleet")[2]).toMatch(/● Find config/u);
+  expect(ui.editorText).toBe("keep this draft");
+  expect(ui.press(KEY.escape)).toBe(true);
+  expect(fleet.tab(true)).toBe(false);
+  runs.length = 0; fleet.update();
+  expect(fleet.tab()).toBe(false);
+  fleet.dispose();
+});
+
 test("↓ at an empty prompt enters the list; arrows select; Esc or ↑ past main leaves", () => {
   const { ui, fleet } = setup();
   expect(ui.widgets.get("subagents-fleet")?.placement).toBe("belowEditor");

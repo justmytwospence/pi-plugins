@@ -83,7 +83,7 @@ Optional `providerTiers` maps provider names to `fast`, `balanced`, and `strong`
 
 `/subagents` lists live and recorded runs. `/subagents <id>` opens a conversation, `/subagents stop <id>` stops a run, and `/subagents stop all` stops running children.
 
-In the TUI fleet list, Enter opens a child, `x` twice stops it, and `b` moves a foreground run to the background. In its conversation viewer, Enter opens a steering composer, `m` cycles Markdown rendering, and Esc returns to the main session. Optional `label` names a task in lists and headings; when omitted, a short label is derived from the task text. Child approval dialogs can be forwarded to your UI with a task-label-plus-agent prefix.
+With [pi-select-nav](/plugins/pi-select-nav/), Tab selects the fleet panel when no next-prompt is accepted, then cycles runs and hosted pills while preserving drafts. Esc returns to the editor. In the TUI fleet list, Enter opens a child, `x` twice stops it, and `b` moves a foreground run to the background. In its conversation viewer, Enter opens a steering composer, `m` cycles Markdown rendering, and Esc returns to the main session. Optional `label` names a task in lists and headings; when omitted, a short label is derived from the task text. Child approval dialogs can be forwarded to your UI with a task-label-plus-agent prefix.
 
 Returned replies are capped at 2000 lines or 50 KB. Full output is saved under `~/.pi/agent/subagents/<id>/output.md`, alongside `messages.jsonl`. Recorded transcripts remain inspectable after reload or resume; this is not a promise that a live child survives session teardown.
 

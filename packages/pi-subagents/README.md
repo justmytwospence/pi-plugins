@@ -81,7 +81,7 @@ Claude Code's subagent panel, below the prompt: `main` and every running subagen
 | `b` | move a foreground run to the background: the tool call returns and the result arrives later as a message, as with `async` |
 | Esc, `h`, or `↑`/`k` past the first row | back to the prompt |
 
-`↓` does not leave the prompt while autocomplete is showing or a history entry is being browsed. Any other key returns to the editor.
+`↓` does not leave the prompt while autocomplete is showing or a history entry is being browsed. With pi-select-nav, Tab selects this panel when no next-prompt is accepted, preserving any draft. Repeated Tab cycles runs and hosted pills, skipping the main row and wrapping at the end. Enter opens the selection and Esc returns to the editor. Other editing keys return to the editor.
 
 ### Conversation viewer
 

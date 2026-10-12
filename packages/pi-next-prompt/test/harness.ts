@@ -26,6 +26,7 @@ export function usage(input: number) {
 
 export function harness(options: { tools?: any[]; exec?: (cmd: string, args: string[]) => any } = {}) {
   const handlers = new Map<string, Handler[]>();
+  const eventHandlers = new Map<string, Set<(data: any) => void>>();
   const commands = new Map<string, any>();
   const shortcuts = new Map<string, any>();
   const entries: Array<{ customType: string; data: unknown }> = [];
@@ -54,7 +55,14 @@ export function harness(options: { tools?: any[]; exec?: (cmd: string, args: str
       thinkingChanges.push(level);
       void emit("thinking_level_select", { type: "thinking_level_select", level, previousLevel: "?" });
     },
-    events: { emit: () => undefined, on: () => () => undefined },
+    events: {
+      emit: (channel: string, data: any) => { for (const handler of eventHandlers.get(channel) ?? []) handler(data); },
+      on: (channel: string, handler: (data: any) => void) => {
+        const listeners = eventHandlers.get(channel) ?? new Set();
+        listeners.add(handler); eventHandlers.set(channel, listeners);
+        return () => listeners.delete(handler);
+      },
+    },
   };
   async function emit(event: string, payload: any, ctx?: any) {
     let result: unknown;

@@ -98,8 +98,14 @@ export class PillView {
     this.registered = true;
   }
 
+  /** Optional select-nav routing; a selected single pill stays selected on Tab. */
+  tab(activeOnly = false): boolean {
+    if (activeOnly && !this.selected) return false;
+    return this.handleKey("\t", true)?.consume === true;
+  }
+
   /** `{ consume: true }` for the keys the pill takes; undefined lets a key through. */
-  handleKey(data: string): KeyResult {
+  handleKey(data: string, enterWithTab = false): KeyResult {
     if (!this.ui || !this.registered || isKeyRelease(data)) return undefined;
     if (!this.editorFocused()) {
       this.deselect();
@@ -109,7 +115,11 @@ export class PillView {
       const focused = this.focused();
       // Without a view of the editor, only an empty prompt is safe to leave.
       const down = focused ? leavesPromptDown(focused, data, matchesKey(data, "down"), data === "j") : matchesKey(data, "down") && this.ui.getEditorText() === "";
-      if (down) {
+      const mode = readEditorMode(focused);
+      const tab = enterWithTab && matchesKey(data, "tab") && !mode?.autocomplete
+        && !(focused as { isShowingAutocomplete?: () => boolean } | undefined)?.isShowingAutocomplete?.()
+        && (!mode || mode.state === "normal" || mode.state === "insert");
+      if (down || tab) {
         this.selected = true;
         this.tui?.requestRender();
         return { consume: true };
@@ -117,7 +127,7 @@ export class PillView {
       return undefined;
     }
     const modal = readEditorMode(this.focused());
-    const navigation = ["enter", "escape", "up", "down", "left", "right"].some((key) => matchesKey(data, key as never));
+    const navigation = ["enter", "escape", "up", "down", "left", "right", "tab"].some((key) => matchesKey(data, key as never));
     if ((modal && (modal.autocomplete || (modal.state !== "normal" && modal.state !== "insert"))) || (modal?.state !== "normal" && !navigation)) {
       this.deselect();
       return undefined;
@@ -131,7 +141,7 @@ export class PillView {
       this.deselect();
       return { consume: true };
     }
-    if (matchesKey(data, "down") || matchesKey(data, "j")) return { consume: true };
+    if (matchesKey(data, "down") || matchesKey(data, "j") || matchesKey(data, "tab")) return { consume: true };
     // Anything else goes back to the editor.
     this.deselect();
     return undefined;

@@ -8,7 +8,7 @@ import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION, type 
 import subagents from "../src/index.ts";
 import { RunsWidget } from "../src/ui/widget.ts";
 import { harness } from "./harness.ts";
-import { fakeRun, fakeUI } from "./ui-helpers.ts";
+import { fakeRun, fakeUI, normalFocus } from "./ui-helpers.ts";
 
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(path.join(tmpdir(), "subagents-agent-"));
 afterEach(() => vi.useRealTimers());
@@ -72,6 +72,28 @@ test("hosting: a source offered before or after our session start ends FleetView
   await h.emit("session_shutdown", { type: "session_shutdown" }, ctx);
   expect(shells.calls.hosted).toEqual([true, true, false]);
   expect(emitted.some(([c, d]) => c === ACTIVITY_GONE && d.id === "subagents")).toBe(true);
+});
+
+test("prompt Tab reaches the hosted background pill and stops at shutdown", async () => {
+  const { h } = withBus(); subagents(h.pi);
+  const ui = fakeUI(); normalFocus(ui); ui.editorText = "preserved draft";
+  const ctx = h.ctx({ ui, sessionManager: { getBranch: () => [], getSessionId: () => "s" } });
+  await h.emit("session_start", {}, ctx);
+  const shells = fakeShells();
+  h.pi.events.emit(ACTIVITY_SECTION, { section: shells.section });
+  const request = { handled: false, phase: "enter" };
+  h.pi.events.emit("activity:prompt-tab", request);
+  expect(request.handled).toBe(true);
+  expect(ui.render("subagents-fleet")[0]).toContain("\x1b[7m");
+  expect(ui.editorText).toBe("preserved draft");
+  expect(ui.press("\t")).toBe(true);
+  expect(ui.press("\r")).toBe(true);
+  await Promise.resolve();
+  expect(shells.calls.dialogs).toBe(1);
+  await h.emit("session_shutdown", {}, ctx);
+  const stale = { handled: false, phase: "enter" };
+  h.pi.events.emit("activity:prompt-tab", stale);
+  expect(stale.handled).toBe(false);
 });
 
 test("our runs are a source for pi-bg's dialog: entries, open, stop, dismiss", async () => {

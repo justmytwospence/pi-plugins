@@ -353,6 +353,10 @@ export default function subagents(pi: ExtensionAPI) {
       announce();
     }
   });
+  pi.events.on("activity:prompt-tab", (data) => {
+    const request = data as { handled?: boolean; phase?: string } | undefined;
+    if (request && !request.handled && hosting && yieldedTo.size === 0) request.handled = fleet.tab(request.phase === "active");
+  });
   pi.events.on(ACTIVITY_CHANGED, (data) => {
     if (sections.has((data as { id?: string } | undefined)?.id ?? "")) refreshUI();
   });

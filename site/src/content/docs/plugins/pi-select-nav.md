@@ -10,11 +10,19 @@ plugin: pi-select-nav
 
 Entry: `packages/pi-select-nav/src/index.ts`. Follow [Install & select](/guides/install/) to choose this suite entry. The suite loads every entry by default, and every selected entry shares one Git pin.
 
-The main prompt editor is exempt. So is a focused component that is itself a multiline editor, detected through its text getter and setter. In those contexts, Ctrl+J remains available for a newline and Ctrl+K for deleting to the end of the line. The extension is therefore not a global replacement of those editing actions throughout Pi.
+The main prompt editor is exempt from these list-navigation rewrites. So is a focused component that is itself a multiline editor, detected through its text getter and setter. In those contexts, Ctrl+J remains available for a newline and Ctrl+K for deleting to the end of the line. The extension is therefore not a global replacement of those editing actions throughout Pi.
 
 An editor nested inside a dialog owns its keys too. If the focused dialog contains an editor that is active, or whose focus state cannot be determined, Ctrl+J and Ctrl+K pass through unchanged. Only an embedded editor that explicitly reports `focused: false` leaves the surrounding list eligible, as in a question dialog whose free-text row is not selected. Behavior therefore depends on which component actually owns focus. The extension does not add new selection actions to a component; it relies on that component already understanding arrow input.
 
-Suite components can declare their input context through the shared `Symbol.for("pi-plugins.input-context.v1")` method. When the focused component has that method, select-nav neither renders it nor rewrites any key: the component implements its own resolved bindings. The copy picker is one example. See [keyboard & focus](/guides/keyboard/).
+Suite components can declare their input context through the shared `Symbol.for("pi-plugins.input-context.v1")` method. For list navigation, when the focused component has that method, select-nav neither renders it nor rewrites those keys: the component implements its own resolved bindings. The copy picker is one example. See [keyboard & focus](/guides/keyboard/).
+
+## Contextual Tab
+
+In the main prompt, Tab accepts a visible completion only after an explicit `@` mention or `/` command. It does not start implicit file browsing. Otherwise, it inserts an available [next-prompt suggestion](/plugins/pi-next-prompt/) into an empty editor without sending it, or selects the available [subagent](/plugins/pi-subagents/) or [background-task](/plugins/pi-bg/) panel. Drafts are never replaced. When a panel is selected, Tab cycles its entries, Enter opens one and Esc returns to the editor. A single background pill stays selected on repeated Tab presses.
+
+With no suggestion or tasks, Tab does nothing. Shift+Tab keeps Pi's thinking-level shortcut. Dialogs and embedded editors retain their own Tab behavior, as do pending, Visual and EX modal operations. Key releases and pasted text are not routed as Tab presses.
+
+These companions remain optional and load order does not choose the priority. The synchronous requests `prompt:accept-next { handled }` and `activity:prompt-tab { handled, phase }` coordinate acceptance and the active activity host. The task phase is `active` when cycling an already-selected panel and `enter` when first selecting it.
 
 ## Requirements, configuration, and costs
 

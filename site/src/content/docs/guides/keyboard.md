@@ -16,7 +16,8 @@ Pi sends each key to the component that has focus: the prompt editor, a dialog, 
 | Ctrl+L | [pi-clear-screen](/plugins/pi-clear-screen/) | Clears the fullscreen transcript view. Conflicts with Pi's model selector; see [below](#ctrll). |
 | Ctrl+Shift+X | [pi-copy](/plugins/pi-copy/) | Opens the `/yank` picker. Configurable with `shortcut`. |
 | Ctrl+S | [pi-stash](/plugins/pi-stash/) | Stashes, restores or swaps the main prompt draft. Only when the main editor has focus. |
-| Tab, Right | [pi-next-prompt](/plugins/pi-next-prompt/) | Accepts a shown suggestion into the empty, focused main editor. Configurable with `acceptKeys`. |
+| Tab | [pi-select-nav](/plugins/pi-select-nav/) | Accept explicit completion, then an empty-editor next-prompt, then select/cycle available task panels; otherwise nothing. Drafts are preserved. |
+| Right (also Tab without select-nav) | [pi-next-prompt](/plugins/pi-next-prompt/) | Accepts a shown suggestion into the empty, focused main editor. Configurable with `acceptKeys`. |
 | Ctrl+J, Ctrl+K; j, k | [pi-select-nav](/plugins/pi-select-nav/) | Move down and up in lists and pickers that do not own those keys. |
 | Alt+/, Super+/, Ctrl+Alt+W | [pi-btw](/plugins/pi-btw/) | Move focus between the BTW overlay and the main editor. `PI_BTW_FOCUS_KEYS` replaces them. |
 | Alt+W | [pi-btw](/plugins/pi-btw/) | Toggles the BTW overlay between window and full width. |
@@ -35,7 +36,7 @@ Suite components declare what kind of input they own through a shared method key
 | `list` | A selection list | pi-bg's `/tasks` dialog, a question dialog while choosing |
 | `viewer` | Read-only scrolling content | pi-bg log viewer, subagent conversation viewer, marimo notebook view |
 
-Global listeners leave a component that declares a context alone; it implements its own bindings. pi-select-nav, for example, neither inspects nor rewrites such a component. A component without the declaration, such as another package's picker, has an unknown context, and select-nav falls back to heuristics that protect text entry. See the [pi-select-nav reference](/plugins/pi-select-nav/).
+Global list-navigation listeners leave a component that declares a context alone; it implements its own bindings. pi-select-nav, for example, neither inspects nor rewrites its list keys. Its contextual Tab routing is a separate, main-prompt-only action. A component without the declaration, such as another package's picker, has an unknown context, and select-nav falls back to heuristics that protect text entry. See the [pi-select-nav reference](/plugins/pi-select-nav/).
 
 ## Ctrl+L
 

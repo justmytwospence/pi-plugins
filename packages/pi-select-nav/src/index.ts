@@ -5,7 +5,8 @@
 // pi's keybindings. Many plugins hardcode the arrow keys instead, so this listener rewrites the
 // keys into arrow keys before the focused component sees them.
 //
-// Left alone:
+// Tab in the main prompt uses contextual suggestion/task routing (prompt-tab.ts).
+// The list-navigation rewrites leave these alone:
 //   - the main prompt editor, or any other editor that is itself the focused component
 //     (ctrl+j = newline, ctrl+k = kill line), including active nested prose editors
 //   - key releases, which kitty-protocol terminals report separately: rewriting them would move
@@ -18,6 +19,7 @@
 //   - components listed in J_K_DENYLIST, for letter bindings the source check cannot see
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CURSOR_MARKER, isKeyRelease, matchesKey } from "@earendil-works/pi-tui";
+import { routePromptTab } from "./prompt-tab.ts";
 
 export const INPUT_CONTEXT = Symbol.for("pi-plugins.input-context.v1");
 
@@ -151,7 +153,12 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify("select-nav: focus inspection unavailable; using each component's own controls", "warning");
       return;
     }
-    unsubscribe = ctx.ui.onTerminalInput((data) => routeInput(data, tui.getFocusedComponent(), tui.terminal?.columns ?? 80));
+    const main = tui.getFocusedComponent();
+    unsubscribe = ctx.ui.onTerminalInput((data) => {
+      const focused = tui.getFocusedComponent();
+      return routePromptTab(data, focused, main, (channel, request) => pi.events.emit(channel, request))
+        ?? routeInput(data, focused, tui.terminal?.columns ?? 80);
+    });
   });
   pi.on("session_shutdown", () => { unsubscribe?.(); unsubscribe = undefined; });
 }

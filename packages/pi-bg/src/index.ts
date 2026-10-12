@@ -328,6 +328,10 @@ export default function piBg(pi: ExtensionAPI) {
     pill.update();
   });
   // A guest's content changed: our pill shows it.
+  pi.events.on("activity:prompt-tab", (data) => {
+    const request = data as { handled?: boolean; phase?: string } | undefined;
+    if (request && !request.handled) request.handled = pill.tab(request.phase === "active");
+  });
   pi.events.on(ACTIVITY_CHANGED, (data) => {
     if (guests.has((data as { id?: string } | undefined)?.id ?? "")) pill.update();
   });

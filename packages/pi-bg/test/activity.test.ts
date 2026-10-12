@@ -159,6 +159,28 @@ it("scrolls shell logs a half page with Ctrl-U/D and a full page with Page keys"
   } finally { view.dispose(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+it("Tab can select a background pill with a draft, cycle safely and return with Esc", () => {
+  const editor = new Editor(tui as any, { borderColor: (s: string) => s } as any);
+  editor.setText("keep this draft");
+  const c = fakeCtx("/w"); const open = vi.fn();
+  const pill = new PillView({ pill: () => ({ label: "1 shell" }), open });
+  pill.setUI(c.ctx.ui as any); pill.update();
+  c.widgets.get("pi-bg-pill")({ ...tui, getFocusedComponent: () => editor }, theme).render(100);
+  try {
+    expect(pill.tab(true)).toBe(false);
+    expect(pill.tab()).toBe(true);
+    expect(pill.handleKey("\t")).toEqual({ consume: true });
+    expect(pill.isSelected).toBe(true);
+    expect(pill.handleKey("\x1b")).toEqual({ consume: true });
+    expect(pill.tab(true)).toBe(false);
+    expect(editor.getText()).toBe("keep this draft");
+    pill.tab(); pill.handleKey("\r");
+    expect(open).toHaveBeenCalledOnce();
+    expect(editor.getText()).toBe("keep this draft");
+    pill.dispose(); expect(pill.tab()).toBe(false);
+  } finally { pill.dispose(); }
+});
+
 it("both pills leave typed navigation letters to the native editor", async () => {
   const { PillView: NotebookPill } = await import(new URL("../../pi-marimo/src/ui/pill.ts", import.meta.url).href);
   for (const [View, widgetKey] of [[PillView, "pi-bg-pill"], [NotebookPill, "pi-marimo-pill"]] as const) {

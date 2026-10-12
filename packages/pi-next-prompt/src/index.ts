@@ -257,6 +257,11 @@ export default function nextPrompt(pi: ExtensionAPI) {
 
   const onKey = (data: string) => {
     if (offered === undefined || !ui || isKeyRelease(data) || !mainFocused()) return undefined;
+    if (matchesKey(data, "tab")) {
+      const navigation = { handled: false, phase: "active" };
+      pi.events.emit("activity:prompt-tab", navigation);
+      if (navigation.handled) return { consume: true };
+    }
     const accept = config.acceptKeys.some((key) => matchesKey(data, key as KeyId));
     if (accept && shown !== undefined && ui.getEditorText() === "") {
       const text = shown;
@@ -278,6 +283,13 @@ export default function nextPrompt(pi: ExtensionAPI) {
     }, 0);
     return undefined;
   };
+
+  // Synchronous optional integration: select-nav can accept the offer before
+  // handing Tab to task panels, independent of terminal-listener load order.
+  pi.events.on("prompt:accept-next", (data) => {
+    const request = data as { handled?: boolean } | undefined;
+    if (request && !request.handled) request.handled = onKey("\t")?.consume === true;
+  });
 
   const attach = (ctx: ExtensionContext) => {
     unsubscribe?.();
