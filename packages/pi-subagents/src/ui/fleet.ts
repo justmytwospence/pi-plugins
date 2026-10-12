@@ -93,7 +93,7 @@ export function renderFleet({ roster, selected, active, stopArmed, canBackground
     const stoppable = normalKeys && chosen?.kind === "run" && chosen.run.state.status === "running";
     const dismissable = normalKeys && chosen?.kind === "run" && chosen.run.state.status !== "running";
     const hint = !active
-      ? theme.fg("dim", "↓ or ← for subagents")
+      ? undefined
       : stopArmed && stoppable
         ? theme.fg("error", `x again to stop ${runLabel(chosen.run)}`)
         : chosen?.kind === "pill"
@@ -102,7 +102,7 @@ export function renderFleet({ roster, selected, active, stopArmed, canBackground
               "dim",
               `${normalKeys ? "j/k select · l/enter view" : "↑/↓ select · enter view"}${stoppable ? " · x stop" : ""}${dismissable ? " · x dismiss" : ""}${stoppable && canBackground ? " · b background" : ""} · ${normalKeys ? "h/esc" : "esc"} back`,
             );
-    lines.push(truncateToWidth(` ${hint}`, width));
+    if (hint !== undefined) lines.push(truncateToWidth(` ${hint}`, width));
     lines.push(truncateToWidth(` ${bullet(0)} ${active && sel === 0 ? theme.fg("text", "main") : "main"}`, width));
     // Runs are roster rows 1..runs.length; scroll so the selected one shows.
     const visible = Math.min(MAX_ROWS, runs.length);

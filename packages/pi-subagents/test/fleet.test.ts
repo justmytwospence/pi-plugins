@@ -32,12 +32,12 @@ test("rows: the selection, stats flush right, a status icon once finished, and s
   const b = fakeRun({ agent: "reviewer", task: "Review the diff", state: { status: "failed", startedAt: 5_000, endedAt: 57_000 } });
   const roster = fleetRoster([a, b], 60_000, undefined, [], 0);
   const idle = renderFleet({ roster, selected: 0, active: false, now: 60_000, width: 80, theme: plain });
-  expect(idle).toHaveLength(5);
-  expect(idle.slice(0, 2)).toEqual([" ↓ or ← for subagents", " ○ main"]);
-  expect(idle[2]).toMatch(/^ ○ Find where the config is loaded {2}scout +1m00s · ↓ 13\.1k tokens$/u);
-  expect(idle[3]).toMatch(/^ ○ Review the diff {2}reviewer +✗ 52s · ↓ 0 tokens$/u);
-  expect(idle[4]).toBe("");
-  expect(idle.slice(2, 4).map(visibleWidth)).toEqual([80, 80]);
+  expect(idle).toHaveLength(4);
+  expect(idle[0]).toBe(" ○ main");
+  expect(idle[1]).toMatch(/^ ○ Find where the config is loaded {2}scout +1m00s · ↓ 13\.1k tokens$/u);
+  expect(idle[2]).toMatch(/^ ○ Review the diff {2}reviewer +✗ 52s · ↓ 0 tokens$/u);
+  expect(idle[3]).toBe("");
+  expect(idle.slice(1, 3).map(visibleWidth)).toEqual([80, 80]);
   const active = renderFleet({ roster, selected: 2, active: true, now: 60_000, width: 80, theme: plain });
   expect(active[0]).toContain("j/k select · l/enter view · x dismiss · h/esc back");
   expect(active[1]).toBe(" ○ main");
@@ -108,7 +108,7 @@ test("↓ at an empty prompt enters the list; arrows select; Esc or ↑ past mai
   expect(ui.press(KEY.up)).toBe(true);
   expect(ui.render("subagents-fleet")[1]).toBe(" ● main");
   expect(ui.press(KEY.up)).toBe(true);
-  expect(ui.render("subagents-fleet")[0]).toContain("↓ or ← for subagents");
+  expect(ui.render("subagents-fleet")[0]).toBe(" ○ main");
   expect(ui.press(KEY.up)).toBe(false);
   // ← also enters; Esc leaves; typing leaves and reaches the editor.
   expect(ui.press(KEY.left)).toBe(true);
@@ -116,7 +116,7 @@ test("↓ at an empty prompt enters the list; arrows select; Esc or ↑ past mai
   expect(ui.press(KEY.escape)).toBe(false);
   expect(ui.press(KEY.left)).toBe(true);
   expect(ui.press("a")).toBe(false);
-  expect(ui.render("subagents-fleet")[0]).toContain("↓ or ←");
+  expect(ui.render("subagents-fleet")[0]).toBe(" ○ main");
   // A dialog has the keyboard: hands off.
   ui.tui.focused = { handleInput: () => undefined };
   expect(ui.press(KEY.down)).toBe(false);
