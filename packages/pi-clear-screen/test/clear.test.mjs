@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import clearScreen from '../src/index.ts';
 import { getKeybindings, setKeybindings } from '@earendil-works/pi-tui';
-import { KeybindingsManager } from '../../../node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js';
+import { KeybindingsManager } from '../node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js';
 setKeybindings(new KeybindingsManager());
 function setup() {
   const handlers = new Map(); let shortcut;
