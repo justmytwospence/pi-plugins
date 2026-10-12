@@ -7,20 +7,42 @@ export const SIDE_BY_SIDE_MIN_WIDTH = 100;
 export const SIDE_ROWS = 15;
 export const STACKED_ROWS = 10;
 const MIN_LEFT = 30;
+const MIN_BOX = 24;
 const GAP = 2;
+/** Box borders and padding around the preview content. */
+export const BOX_CHROME = 4;
 
 export function sideBySide(width: number): boolean {
   return width >= SIDE_BY_SIDE_MIN_WIDTH;
 }
 
-/** The options column: as wide as its widest row, at least 30 columns, at most half the width. */
-export function leftWidth(width: number, natural: number): number {
-  return Math.max(MIN_LEFT, Math.min(Math.floor(width / 2), natural));
+/** Natural (unwrapped) widths of the two columns' content. */
+export interface Natural {
+  /** The widest option label row. */
+  labels: number;
+  /** The widest option row, label or description. */
+  options: number;
+  /** The widest preview content row, without the box. */
+  preview: number;
 }
 
-/** The preview box's width beside a left column of `left` columns. */
-export function rightWidth(width: number, left: number): number {
-  return width - left - GAP;
+/**
+ * Widths of the options column and the preview box. The box is only as wide as its content
+ * needs, so descriptions get the rest instead of wrapping into a narrow column beside a mostly
+ * empty box. The options column always fits its labels and, when the preview is wide, still keeps
+ * up to 40% of the width for descriptions; the box wraps to fit the remainder.
+ */
+export function split(width: number, natural: Natural): { left: number; right: number } {
+  const room = width - GAP;
+  const keep = Math.min(Math.floor(width / 2), Math.max(MIN_LEFT, natural.labels, Math.min(natural.options, Math.floor(width * 0.4))));
+  const right = Math.min(room - keep, Math.max(MIN_BOX, natural.preview + BOX_CHROME));
+  const left = Math.min(room - right, Math.max(keep, natural.options));
+  return { left, right };
+}
+
+/** The widest row of rendered (padded, styled) lines. */
+export function contentWidth(lines: readonly string[]): number {
+  return Math.max(0, ...lines.map((line) => visibleWidth(line.replace(/\x1b\[[0-9;]*m/gu, "").trimEnd())));
 }
 
 /** Two columns side by side; the left one padded to its width. */

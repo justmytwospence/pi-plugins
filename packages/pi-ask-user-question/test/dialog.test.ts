@@ -1,5 +1,6 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, test } from "vitest";
+import { split } from "../src/preview.ts";
 import { dialog, KEYS, q } from "./harness.ts";
 
 const { up, down, right, left, enter, esc, tab, shiftTab, space } = KEYS;
@@ -212,6 +213,25 @@ describe("previews", () => {
     expect(text).toContain("Your answer:");
     expect(text).not.toContain("No preview for this option");
     expect(text).not.toContain("┌");
+  });
+
+  test("a narrow preview leaves the room to the descriptions", () => {
+    const wordy = q("Which?", "Wordy", ["Mac banners", "Toasts"]);
+    wordy.options[0]!.description = "A description long enough that a narrow options column would wrap it over many rows.";
+    wordy.options[0]!.preview = "Current:\n\n**bold line**\nplain line";
+    wordy.options[1]!.preview = "Other";
+    const lines = dialog([wordy], [], { columns: 200 }).frames[0]!;
+    const descRows = lines.filter((line) => /long enough|many rows/u.test(line));
+    expect(descRows).toHaveLength(1);
+    const top = lines.find((line) => line.includes("┌"))!;
+    expect(visibleWidth(top.slice(top.indexOf("┌")))).toBeLessThanOrEqual(30);
+  });
+
+  test("a wide preview still keeps room for descriptions", () => {
+    expect(split(200, { labels: 20, options: 120, preview: 300 })).toEqual({ left: 80, right: 118 });
+    expect(split(200, { labels: 20, options: 40, preview: 300 })).toEqual({ left: 40, right: 158 });
+    expect(split(200, { labels: 20, options: 40, preview: 10 })).toEqual({ left: 40, right: 24 });
+    expect(split(100, { labels: 70, options: 90, preview: 80 })).toEqual({ left: 50, right: 48 });
   });
 
   test("a long preview is cut with a count", () => {

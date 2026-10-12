@@ -19,12 +19,13 @@ import {
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { type EditorCreator, type ProseEditor, beginComposition, compositionState, editorOwnsCancel } from "./editor.ts";
-import { box, columns, leftWidth, rightWidth, SIDE_ROWS, sideBySide, STACKED_ROWS } from "./preview.ts";
+import { BOX_CHROME, box, columns, contentWidth, type Natural, SIDE_ROWS, sideBySide, split, STACKED_ROWS } from "./preview.ts";
 import { type Answer, type Choice, type DialogResult, makeAnswer } from "./result.ts";
 import { type Question, TYPE_SOMETHING } from "./schema.ts";
 
 /** Longest header shown in a tab or chip before it is cut with "…". */
 export const HEADER_WIDTH = 16;
+const NO_PREVIEW = "No preview for this option";
 
 interface Slot {
   /** The highlighted row: an option, or the "Type something." row after them. */
@@ -360,8 +361,8 @@ export class QuestionDialog implements Component, Focusable {
 
     const hasPreview = !q.multiSelect && slot.cursor < q.options.length && q.options.some((o) => o.preview);
     if (hasPreview && sideBySide(width)) {
-      const left = leftWidth(width, this.naturalWidth(q));
-      out.push(...columns(this.options(q, slot, left), this.preview(slot, rightWidth(width, left), SIDE_ROWS), left));
+      const { left, right } = split(width, this.natural(q, slot, width));
+      out.push(...columns(this.options(q, slot, left), this.preview(slot, right, SIDE_ROWS), left));
     } else out.push(...this.options(q, slot, width));
     if (this.editing === "custom") {
       out.push(` ${t.fg("accent", "Your answer:")}`, ...indent(slot.custom.render(Math.max(1, width - 4)), 4));
@@ -397,16 +398,26 @@ export class QuestionDialog implements Component, Focusable {
     return out;
   }
 
-  private naturalWidth(q: Question): number {
+  /**
+   * Unwrapped widths of the option rows and of every option's preview (all of them, so the
+   * columns do not shift as the highlight moves).
+   */
+  private natural(q: Question, slot: Slot, width: number): Natural {
     const boxW = q.multiSelect ? 4 : 0;
-    const labels = [...q.options.map((o) => o.label), TYPE_SOMETHING];
-    return Math.max(...labels.map((label, i) => 5 + `${i + 1}.`.length + boxW + visibleWidth(label) + 2)) + 2;
+    const rows = [...q.options, { label: TYPE_SOMETHING, description: "" }].map((o, i) => {
+      const prefix = 5 + `${i + 1}.`.length + boxW;
+      return { label: prefix + visibleWidth(o.label) + 4, description: prefix + visibleWidth(o.description ?? "") + 2 };
+    });
+    const labels = Math.max(...rows.map((r) => r.label));
+    const inner = Math.max(1, width - 2 - BOX_CHROME);
+    const previews = slot.previews.map((md) => (md ? contentWidth(md.render(inner)) : visibleWidth(NO_PREVIEW)));
+    return { labels, options: Math.max(labels, ...rows.map((r) => r.description)), preview: Math.max(0, ...previews) };
   }
 
   private preview(slot: Slot, width: number, rows: number): string[] {
     const t = this.theme;
     const md = slot.previews[slot.cursor];
-    const content = md ? md.render(Math.max(1, width - 4)) : [t.fg("muted", t.italic("No preview for this option"))];
+    const content = md ? md.render(Math.max(1, width - BOX_CHROME)) : [t.fg("muted", t.italic(NO_PREVIEW))];
     return box(
       content,
       width,
