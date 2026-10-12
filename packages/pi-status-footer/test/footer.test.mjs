@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { stripVTControlCharacters as plain } from "node:util";
-import { test } from "vitest";
+import { test, vi } from "vitest";
 
 const modules = fileURLToPath(new URL("../node_modules/@earendil-works/", import.meta.url));
 const root = path.join(modules, "pi-coding-agent");
@@ -23,7 +23,7 @@ const fixture = () => ({
   cwd: "/home/me/dotfiles", model: "claude-opus-5-5", provider: "anthropic", thinking: "xhigh", oauth: true,
   queued: false, context: { tokens: 56_000, contextWindow: 200_000, percent: 28 },
   totals: { input: 23000, output: 1500, cacheRead: 90000, cacheWrite: 400, cost: 1.24, compactions: 1, started: now - 80 * 60_000 },
-  cacheHit: 94, git: { branch: "main", project: "dotfiles", staged: 0, changed: 2, untracked: 1, conflicts: 0, ahead: 2, behind: 0, added: 25, removed: 4 },
+  cacheHit: 94, git: { branch: "main", upstream: "origin/main", project: "dotfiles", staged: 0, unstaged: 2, changed: 3, untracked: 1, conflicts: 0, ahead: 2, behind: 0, added: 25, removed: 4 },
   quotas: [{ source: "Claude acct", updated: now, windows: [
     { label: "5h", used: 32, reset: now + 134 * 60_000 },
     { label: "week", used: 41, reset: now + 3 * 86400_000 },
@@ -124,11 +124,12 @@ test("Codex account id comes from Pi's token claim; header snapshots keep named 
 
 test("Git parser distinguishes staged, unstaged, untracked, conflicts and rename paths", () => {
   const result = mod.parseGitStatus([
-    "# branch.oid aabbccddeeff", "# branch.head feat/test", "# branch.ab +2 -3",
-    "1 M. N... fields file", "1 .M N... fields file", "? untracked\nfile",
-    "2 R. N... fields renamed", "? this-is-a-rename-source-not-an-untracked-file", "u UU N... fields conflict", "",
+    "# branch.oid aabbccddeeff", "# branch.head feat/test", "# branch.upstream origin/feat/test", "# branch.ab +2 -3",
+    "1 MM N... 100644 100644 100644 aabbccd aabbccd file", "? untracked\nfile",
+    "2 R. N... 100644 100644 100644 aabbccd aabbccd R100 renamed", "? this-is-a-rename-source-not-an-untracked-file",
+    "u UU N... 100644 100644 100644 100644 aabbccd aabbccd aabbccd conflict", "",
   ].join("\0"));
-  assert.deepEqual(result, { branch: "feat/test", staged: 2, changed: 1, untracked: 1, conflicts: 1, ahead: 2, behind: 3, added: 0, removed: 0 });
+  assert.deepEqual(result, { branch: "feat/test", upstream: "origin/feat/test", staged: 2, unstaged: 1, changed: 4, untracked: 1, conflicts: 1, ahead: 2, behind: 3, added: 0, removed: 0 });
   assert.equal(mod.parseGitStatus("# branch.oid aabbccddeeff\0# branch.head (detached)\0").branch, "detached:aabbccd");
   assert.equal(mod.parseGitStatus("# branch.oid (initial)\0# branch.head main\0").branch, "main");
 });
@@ -138,7 +139,7 @@ test("real Git porcelain output parses, including an unborn repository", async (
   try {
     execFileSync("git", ["init", "-b", "main", dir], { stdio: "ignore" });
     await writeFile(path.join(dir, "new.txt"), "hello");
-    const result = mod.parseGitStatus(execFileSync("git", ["status", "--porcelain=v2", "--branch", "-z"], { cwd: dir, encoding: "utf8" }));
+    const result = mod.parseGitStatus(execFileSync("git", ["--no-optional-locks", "status", "--porcelain=v2", "--branch", "--untracked-files=all", "-z"], { cwd: dir, encoding: "utf8" }));
     assert.equal(result.branch, "main"); assert.equal(result.untracked, 1);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
@@ -171,17 +172,56 @@ test("narrow layout protects model, context and the most-used quota", () => {
   assert.doesNotMatch(rows.join("\n"), /diff|compact/);
 });
 
-test("git status uses the shared [wt ]branch ✖N ● ↑N ↓N format", () => {
+test("git status uses minimal suffix and hides zero terms", () => {
   const s = fixture();
-  s.git = { ...s.git, branch: "feat/x", worktree: true, conflicts: 2, ahead: 1, behind: 3 };
-  assert.match(plain(mod.renderFooter(s, 160, theme)[0]), /dotfiles · wt feat\/x ✖2 ● ↑1 ↓3/);
-  s.git = { ...s.git, worktree: false, conflicts: 0, staged: 0, changed: 0, untracked: 0, ahead: 0, behind: 0 };
+  s.git = { ...s.git, branch: "feat/x", worktree: true, changed: 5, conflicts: 2, ahead: 1, behind: 3 };
+  assert.match(plain(mod.renderFooter(s, 160, theme)[0]), /dotfiles · feat\/x \* ↑1 ↓3 !/);
+  s.git = { ...s.git, worktree: false, conflicts: 0, staged: 0, unstaged: 0, changed: 0, untracked: 0, ahead: 0, behind: 0 };
   assert.match(plain(mod.renderFooter(s, 160, theme)[0]), /dotfiles · feat\/x\s{2,}/);
+  s.git.upstream = undefined;
+  assert.match(mod.renderFooter(s, 160, theme)[0], /feat\/x\s{2,}/);
+  s.git.changed = 2; s.git.conflicts = 1;
+  assert.match(mod.renderFooter(s, 160, theme)[0], /feat\/x \* !/);
+  s.git.unavailable = true;
+  assert.match(mod.renderFooter(s, 160, theme)[0], /!/);
+  assert.doesNotMatch(mod.renderFooter(s, 160, theme)[0], /no upstream|changed|conflict|wt /);
+});
+
+test("minimal Git suffix covers each dirty dimension, quiet tracking and unreadable identity", () => {
+  const s = fixture();
+  const clean = { ...s.git, changed: 0, staged: 0, unstaged: 0, untracked: 0,
+    conflicts: 0, ahead: 0, behind: 0 };
+  const cases = [
+    [{}, "main"], [{ worktree: true }, "main"],
+    [{ upstream: undefined }, "main"], [{ upstreamMissing: true }, "main"],
+    [{ staged: 1 }, "main *"], [{ unstaged: 1 }, "main *"],
+    [{ untracked: 1 }, "main *"], [{ changed: 1 }, "main *"],
+    [{ conflicts: 1 }, "main * !"],
+    [{ conflicts: 2, ahead: 2, behind: 3 }, "main * ↑2 ↓3 !"],
+    [{ ahead: 2 }, "main ↑2"], [{ behind: 3 }, "main ↓3"],
+    [{ operation: true }, "main !"],
+    [{ operation: true, conflicts: 1, ahead: 2, behind: 1 }, "main * ↑2 ↓1 !"],
+    [{ operation: true, unavailable: true }, "main !"],
+    [{ unavailable: true }, "main !"],
+    [{ branch: undefined, unavailable: true }, "!"],
+    [{ branch: "detached:aabbccd", untracked: 1 }, "detached:aabbccd *"],
+  ];
+  for (const [state, expected] of cases) {
+    s.git = { ...clean, ...state };
+    const row = plain(mod.renderFooter(s, 160, theme)[0]);
+    assert.ok(row.includes(`dotfiles · ${expected}  `), row);
+    assert.doesNotMatch(row, /changed|conflicts|staged|untracked|upstream|wt /);
+    for (const width of [20, 40, 80, 160]) {
+      const rows = mod.renderFooter(s, width, theme);
+      assert.equal(rows.length, mod.renderFooter(s, 160, theme).length);
+      assert.ok(rows.every((line) => visibleWidth(line) <= width));
+    }
+  }
 });
 
 test("wide layout uses explicit labels without reintroducing secondary metrics", () => {
   const rows = mod.renderFooter(fixture(), 160, theme);
-  assert.match(rows[0], /dotfiles · main ● ↑2\s{2,}opus-5\.5 · reasoning xhigh/);
+  assert.match(rows[0], /dotfiles · main \* ↑2\s{2,}opus-5\.5 · reasoning xhigh/);
   assert.match(rows[1], /Context 28% used [━─]{8}/);
   assert.doesNotMatch(rows[1], /cost/);
   assert.doesNotMatch(rows.slice(0, 2).join("\n"), /cache|OAuth|diff|compact|56k\/200k/);
@@ -335,7 +375,7 @@ test("external text is sanitized and over-100 gauges are bounded", () => {
   assert.equal(mod.shortModel("claude-sonnet-4-5-20250929"), "sonnet-4.5");
 });
 
-function host(entries = [], cwd = os.tmpdir(), mode = "tui") {
+function host(entries = [], cwd = os.tmpdir(), mode = "tui", nativeBranch = null) {
   const handlers = new Map(), commands = new Map(), statuses = new Map(), notices = [];
   let footer, editorFactory, disposed = 0, paints = 0, name = "";
   const pi = {
@@ -359,7 +399,7 @@ function host(entries = [], cwd = os.tmpdir(), mode = "tui") {
       setFooter(factory) {
         footer?.dispose();
         footer = factory?.({ requestRender() { paints++; } }, theme, {
-          getGitBranch: () => null, getExtensionStatuses: () => statuses,
+          getGitBranch: () => nativeBranch, getExtensionStatuses: () => statuses,
           onBranchChange: () => () => { disposed++; },
         });
       },
@@ -375,6 +415,161 @@ function host(entries = [], cwd = os.tmpdir(), mode = "tui") {
     get footer() { return footer; }, get disposed() { return disposed; }, get paints() { return paints; },
   };
 }
+
+test("Git polling exposes staging details and outside Git stays quiet without a native branch fallback", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "pi-footer-git-poll-"));
+  const oldHome = process.env.HOME;
+  process.env.HOME = dir;
+  let h;
+  try {
+    execFileSync("git", ["init", "-b", "main", dir], { stdio: "ignore" });
+    await writeFile(path.join(dir, "staged"), "hello");
+    execFileSync("git", ["add", "staged"], { cwd: dir });
+    await writeFile(path.join(dir, "staged"), "changed again");
+    await mkdir(path.join(dir, "nested"));
+    await writeFile(path.join(dir, "nested", "one"), "one");
+    await writeFile(path.join(dir, "nested", "two"), "two");
+    h = host([], dir, "tui", "fallback");
+    h.ctx.model = { provider: "test", id: "test", contextWindow: 1000 };
+    await h.handlers.get("session_start")({}, h.ctx);
+    assert.match(h.footer.render(160)[0], /!/);
+    await vi.waitFor(() => assert.match(h.footer.render(160)[0], /main \*/));
+    await h.commands.get("status").handler("details", h.ctx);
+    assert.match(h.notices.at(-1), /3 changed paths; 1 staged, 1 unstaged, 2 untracked, 0 conflicts/);
+    assert.match(h.notices.at(-1), /Upstream: no upstream/);
+    await h.handlers.get("session_shutdown")({}, h.ctx);
+    await rm(path.join(dir, ".git"), { recursive: true, force: true });
+    await h.handlers.get("session_start")({}, h.ctx);
+    await vi.waitFor(() => assert.doesNotMatch(h.footer.render(160)[0], /!/));
+    assert.match(h.footer.render(160)[0], new RegExp(path.basename(dir)));
+    assert.doesNotMatch(h.footer.render(160)[0], /!|fallback|no upstream|changed/);
+    await h.commands.get("status").handler("details", h.ctx);
+    assert.match(h.notices.at(-1), /Git status: outside a Git repository/);
+  } finally {
+    await h?.handlers.get("session_shutdown")?.({}, h.ctx);
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a real linked worktree with broken common metadata is unavailable, not outside Git", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "pi-footer-broken-worktree-"));
+  const main = path.join(dir, "main"), linked = path.join(dir, "linked");
+  const oldGitDir = process.env.GIT_DIR;
+  let h;
+  try {
+    execFileSync("git", ["init", "-b", "main", main], { stdio: "ignore" });
+    execFileSync("git", ["-c", "user.name=Footer test", "-c", "user.email=footer@example.invalid", "-c", "commit.gpgSign=false", "-c", `core.hooksPath=${os.devNull}`, "commit", "--allow-empty", "-m", "base"], { cwd: main, stdio: "ignore" });
+    execFileSync("git", ["worktree", "add", "-b", "linked", linked], { cwd: main, stdio: "ignore" });
+    h = host([], linked, "tui", "fallback");
+    h.ctx.model = { provider: "test", id: "test", contextWindow: 1000 };
+    await h.handlers.get("session_start")({}, h.ctx);
+    await vi.waitFor(() => assert.match(h.footer.render(160)[0], /linked\s{2,}/));
+    // Explicit admin-directory selection reproduces Git's non-discovery fatal;
+    // the worktree still points at real but now invalid common metadata.
+    process.env.GIT_DIR = path.join(main, ".git", "worktrees", "linked");
+    await rm(path.join(main, ".git", "objects"), { recursive: true });
+    assert.throws(() => execFileSync("git", ["status"], { cwd: linked, env: { ...process.env, LC_ALL: "C" }, stdio: ["ignore", "pipe", "pipe"] }),
+      (error) => error.status === 128 && /fatal: not a git repository: .*worktrees/.test(error.stderr.toString()));
+    await h.handlers.get("agent_settled")({}, h.ctx);
+    await vi.waitFor(() => assert.match(h.footer.render(160)[0], /!/));
+    assert.doesNotMatch(h.footer.render(160)[0], /no upstream|changed/);
+    await h.commands.get("status").handler("details", h.ctx);
+    assert.match(h.notices.at(-1), /Git status: git unavailable/);
+  } finally {
+    await h?.handlers.get("session_shutdown")?.({}, h.ctx);
+    if (oldGitDir === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = oldGitDir;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("production polling preserves raw path bytes and UTF-8 tracking headers", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "pi-footer-raw-status-"));
+  const oldPath = process.env.PATH, oldHome = process.env.HOME;
+  let h;
+  try {
+    const output = Buffer.concat([
+      Buffer.from("# branch.oid aabbccddeeff\0# branch.head café/日本\0# branch.upstream origin/café/日本\0? "),
+      Buffer.from([0xff, 0, 0x3f, 0x20, 0xfe, 0]),
+    ]);
+    await writeFile(path.join(dir, "git"), `#!${process.execPath}\nif (process.argv.includes("status")) {\nconst expected = ["--no-optional-locks", "status", "--porcelain=v2", "--branch", "--ahead-behind", "--untracked-files=all", "-z"];\nif (JSON.stringify(process.argv.slice(2)) !== JSON.stringify(expected) || process.env.LC_ALL !== "C" || process.env.GIT_OPTIONAL_LOCKS !== "0") process.exit(99);\nprocess.stdout.write(Buffer.from(${JSON.stringify(output.toString("base64"))}, "base64"));\n} else process.exit(1);\n`, { mode: 0o755 });
+    process.env.PATH = dir; process.env.HOME = dir;
+    h = host([], dir);
+    h.ctx.model = { provider: "test", id: "test", contextWindow: 1000 };
+    await h.handlers.get("session_start")({}, h.ctx);
+    await vi.waitFor(() => assert.match(h.footer.render(240)[0], /café\/日本 \*/));
+    await h.commands.get("status").handler("details", h.ctx);
+    assert.match(h.notices.at(-1), /2 changed paths; 0 staged, 0 unstaged, 2 untracked/);
+    assert.match(h.notices.at(-1), /Upstream: upstream missing \(origin\/café\/日本;/);
+    assert.doesNotMatch(h.notices.at(-1), /0 ahead|no upstream/);
+  } finally {
+    await h?.handlers.get("session_shutdown")?.({}, h.ctx);
+    for (const [key, value] of [["PATH", oldPath], ["HOME", oldHome]]) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("Git polling distinguishes explicit non-repository errors from actual failures", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "pi-footer-git-errors-"));
+  const oldPath = process.env.PATH, oldHome = process.env.HOME, oldLocale = process.env.LC_ALL;
+  process.env.HOME = dir; process.env.LC_ALL = "fr_FR.UTF-8";
+  let h;
+  try {
+    const bin = path.join(dir, "bin");
+    await mkdir(bin);
+    process.env.PATH = bin;
+    for (const [stderr, code, quiet] of [
+      [undefined, 0, false], // Missing executable.
+      ["fatal: permission denied\n", 128, false],
+      ["fatal: not a git repository: /tmp/main/.git/worktrees/linked\n", 128, false],
+      ["fatal: not a git repository (or any of the parent directories): .git\n", 1, false],
+      ["fatal: not a git repository (or any of the parent directories): .git\n", 128, true],
+      ["fatal: not a git repository (or any parent up to mount point /Volumes/test)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n", 128, true],
+      ["", 0, false], // Successful but empty/malformed status.
+    ]) {
+      const executable = path.join(bin, "git");
+      const stub = async (message, exitCode) => {
+        if (message === undefined) await rm(executable, { force: true });
+        else await writeFile(executable, `#!${process.execPath}\nif (process.env.LC_ALL !== "C" && process.argv.includes("status")) process.exit(99);\nprocess.stderr.write(${JSON.stringify(message)}); process.exit(${exitCode});\n`, { mode: 0o755 });
+      };
+      // Start from the opposite measured state so initial unavailable/other
+      // async paints cannot satisfy the outcome assertion prematurely.
+      await stub("fatal: not a git repository (or any of the parent directories): .git\n", 128);
+      h = host([], dir, "tui", "fallback");
+      h.ctx.model = { provider: "test", id: "test", contextWindow: 1000 };
+      await h.handlers.get("session_start")({}, h.ctx);
+      await vi.waitFor(() => assert.doesNotMatch(h.footer.render(160)[0], /!/));
+      if (quiet) {
+        await stub(undefined, 0);
+        await h.handlers.get("agent_settled")({}, h.ctx);
+        await vi.waitFor(() => assert.match(h.footer.render(160)[0], /!/));
+      }
+      await stub(stderr, code);
+      await h.handlers.get("agent_settled")({}, h.ctx);
+      await vi.waitFor(() => {
+        if (quiet) assert.doesNotMatch(h.footer.render(160)[0], /!/);
+        else assert.match(h.footer.render(160)[0], /!/);
+      });
+      const row = h.footer.render(160)[0];
+      assert.match(row, new RegExp(path.basename(dir)));
+      assert.doesNotMatch(row, /no upstream|changed|conflict/);
+      if (quiet) assert.doesNotMatch(row, /!/);
+      else assert.match(row, /!/);
+      await h.commands.get("status").handler("details", h.ctx);
+      assert.match(h.notices.at(-1), quiet ? /outside a Git repository/ : /Git status: git unavailable/);
+      await h.handlers.get("session_shutdown")({}, h.ctx);
+      h = undefined;
+    }
+  } finally {
+    await h?.handlers.get("session_shutdown")?.({}, h.ctx);
+    for (const [key, value] of [["PATH", oldPath], ["HOME", oldHome], ["LC_ALL", oldLocale]]) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 test("factory is inert in non-TUI modes and does not replace the editor", async () => {
   for (const mode of ["print", "json", "rpc"]) {
@@ -422,6 +617,7 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
       }
     }
     assert.match(h.footer.render(120).join("\n"), /PLAN mode/);
+    assert.match(h.footer.render(120)[0], /!/, "unmeasured Git state is not clean");
     assert.doesNotMatch(plain(h.footer.render(120)[0]), /\(auto\)/);
     h.statuses.set("auto-effort", "effort: xhigh (auto)");
     assert.match(plain(h.footer.render(120)[0]), /reasoning xhigh \(auto\)/);
@@ -463,6 +659,7 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
     h.entries.push({ type: "usage", usage: usage(4) });
     for (const timer of timers) timer.callback();
     assert.doesNotMatch(h.footer.render(120).join("\n"), /cost/);
+    await vi.waitFor(() => assert.doesNotMatch(h.footer.render(120)[0], /!/));
     await h.commands.get("status").handler("details", h.ctx);
     const details = h.notices.at(-1);
     assert.match(details, /Context: unknown of 200k tokens; usage unknown/);
@@ -470,6 +667,7 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
     assert.match(details, /Estimated session cost: \$4\.00/);
     assert.match(details, /Recorded tokens: 100 input, 20 output, 300 cache reads, 100 cache writes/);
     assert.match(details, /Tracked Git changes:/);
+    assert.match(details, /Git status: outside a Git repository/);
     await h.handlers.get("session_shutdown")({}, h.ctx);
     assert.equal(timers.size, 0); assert.equal(h.footer, undefined);
     const paints = h.paints;

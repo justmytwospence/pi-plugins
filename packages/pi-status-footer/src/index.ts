@@ -42,10 +42,14 @@ export interface Quota {
   extra?: { enabled: boolean; used?: number; limit?: number; currency?: string };
 }
 export interface GitInfo {
-  branch?: string; project?: string; worktree?: boolean;
-  staged: number; changed: number; untracked: number; conflicts: number;
+  branch?: string; project?: string; worktree?: boolean; upstream?: string;
+  upstreamMissing?: boolean;
+  operation?: boolean;
+  /** Unique uncommitted paths; staged/unstaged can overlap and conflicts are included. */
+  changed: number; staged: number; unstaged: number; untracked: number; conflicts: number;
   ahead: number; behind: number; added: number; removed: number;
   unavailable?: boolean;
+  notRepository?: boolean;
 }
 export interface Snapshot {
   cwd: string; model: string; provider: string; thinking?: string; oauth: boolean;
@@ -227,7 +231,7 @@ function heat(pct: number): "accent" | "warning" | "error" {
   if (pct >= 70) return "warning";
   return "accent";
 }
-const emptyGit = (): GitInfo => ({ staged: 0, changed: 0, untracked: 0, conflicts: 0, ahead: 0, behind: 0, added: 0, removed: 0 });
+const emptyGit = (): GitInfo => ({ staged: 0, unstaged: 0, changed: 0, untracked: 0, conflicts: 0, ahead: 0, behind: 0, added: 0, removed: 0 });
 
 // Match Pi's whole-session accounting, including abandoned branches and usage
 // that never becomes a message (warming), plus tool and summary usage.
@@ -381,28 +385,66 @@ export function parseCodexHeaders(headers: Record<string, string>, now: number):
   return windows.length ? { source: "Codex acct", updated: now, windows } : undefined;
 }
 
-export function parseGitStatus(output: string): GitInfo {
+// Operation state belongs to the actual per-worktree admin directory, not common-dir.
+export async function detectGitOperation(gitDir: string): Promise<boolean> {
+  const markers = ["MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer", "BISECT_LOG"];
+  const found = await Promise.all(markers.map(async (marker) => {
+    try { await stat(path.join(gitDir, marker)); return true; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+  }));
+  return found.some(Boolean);
+}
+
+export function parseGitStatus(output: string | Buffer): GitInfo {
+  // Latin-1 maps each path byte one-to-one; UTF-8 would merge invalid filenames.
+  // Only human-readable headers are decoded as UTF-8 in raw production output.
+  const raw = Buffer.isBuffer(output);
+  const header = (text: string): string => raw ? Buffer.from(text, "latin1").toString("utf8") : text;
+  output = Buffer.isBuffer(output) ? output.toString("latin1") : output;
   const git = emptyGit();
-  const fields = output.split("\0");
+  const unavailable = (): GitInfo => ({ ...emptyGit(), unavailable: true });
+  // NUL records preserve spaces/newlines in paths. Rename sources are separate
+  // records, not another changed path (even when they look like status records).
+  if (!output.endsWith("\0")) return unavailable();
+  const fields = output.slice(0, -1).split("\0");
+  const paths = new Set<string>();
+  let oid: string | undefined;
+  let hasDivergence = false;
   for (let i = 0; i < fields.length; i++) {
     const line = fields[i];
-    if (line.startsWith("# branch.head ")) git.branch = line.slice(14);
-    else if (line.startsWith("# branch.oid ") && !git.branch) git.branch = line.slice(13, 20);
+    if (line.startsWith("# branch.head ")) git.branch = header(line.slice(14));
+    else if (line.startsWith("# branch.oid ")) oid = line.slice(13);
+    else if (line.startsWith("# branch.upstream ")) git.upstream = header(line.slice(18));
     else if (line.startsWith("# branch.ab ")) {
-      const match = /\+(\d+) -(\d+)/.exec(line);
-      if (match) { git.ahead = +match[1]; git.behind = +match[2]; }
-    } else if (line.startsWith("? ")) git.untracked++;
-    else if (/^[12u] /.test(line)) {
-      const xy = line.split(" ")[1];
+      const match = /^# branch\.ab \+(\d+) -(\d+)$/.exec(line);
+      if (!match) return unavailable();
+      git.ahead = +match[1]; git.behind = +match[2];
+      hasDivergence = true;
+    } else if (line.startsWith("# ")) continue; // Future porcelain headers.
+    else if (line.startsWith("? ") && line.length > 2) {
+      git.untracked++; paths.add(line.slice(2));
+    } else {
+      const count = line[0] === "1" ? 6 : line[0] === "2" ? 7 : line[0] === "u" ? 8 : 0;
+      const match = count && new RegExp(`^[12u] ([.MADRCUT]{2}) (?:[^ \\0]+ ){${count}}([\\s\\S]+)$`).exec(line);
+      if (!match) return unavailable();
+      const [, xy, file] = match;
+      paths.add(file);
       if (line[0] === "u") git.conflicts++;
-      else { if (xy[0] !== ".") git.staged++; if (xy[1] !== ".") git.changed++; }
-      if (line[0] === "2") i++; // A rename includes an extra NUL-delimited path.
+      else { if (xy[0] !== ".") git.staged++; if (xy[1] !== ".") git.unstaged++; }
+      if (line[0] === "2" && !fields[++i]) return unavailable();
     }
   }
+  if (!git.branch || !oid || (oid !== "(initial)" && !/^[0-9a-f]{7,64}$/.test(oid))) return unavailable();
   if (git.branch === "(detached)") {
-    const oid = fields.find((line) => line.startsWith("# branch.oid "))?.slice(13, 20);
-    git.branch = `detached:${oid ?? "HEAD"}`;
+    if (oid === "(initial)") return unavailable();
+    git.branch = `detached:${oid.slice(0, 7)}`;
   }
+  if (!git.upstream && (git.ahead || git.behind)) return unavailable();
+  if (git.upstream && !hasDivergence && oid !== "(initial)" && !git.branch.startsWith("detached:")) git.upstreamMissing = true;
+  git.changed = paths.size;
   return git;
 }
 
@@ -558,17 +600,20 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   const rows: string[] = [];
   const sep = theme.fg("dim", " · ");
   if (s.stash) rows.push(stashRow(s.stash.text, width, theme));
-  // The git status every prompt and footer shares (zsh, Claude Code, opencode, herdr):
-  // [wt ]<branch> ✖N ● ↑N ↓N for conflicts, any change, ahead, behind.
-  const marks = [g.conflicts ? theme.fg("error", `✖${g.conflicts}`) : "",
-    g.staged + g.changed + g.untracked ? theme.fg("warning", "●") : "",
-    g.ahead ? theme.fg("success", `↑${g.ahead}`) : "",
-    g.behind ? theme.fg("error", `↓${g.behind}`) : ""].filter(Boolean).join(" ");
+  // Minimal suffix; path, staging and tracking details stay in /status.
+  const outsideGit = g.notRepository && !g.unavailable;
+  const available = !g.unavailable && !outsideGit && Boolean(g.branch);
+  const dirty = [g.changed, g.staged, g.unstaged, g.untracked, g.conflicts].some((n) => n > 0);
+  const marks = [
+    dirty ? theme.fg("warning", "*") : "",
+    available && g.ahead ? theme.fg("success", `↑${g.ahead}`) : "",
+    available && g.behind ? theme.fg("error", `↓${g.behind}`) : "",
+    g.conflicts || g.operation || !available ? theme.fg("error", "!") : "",
+  ].filter(Boolean).join(" ");
   const project = theme.fg("accent", clean(g.project ?? (path.basename(s.cwd) || s.cwd)));
-  const tag = g.worktree ? `${theme.fg("dim", "wt")} ` : "";
-  let branch = g.unavailable ? "Git unavailable" : "";
-  if (g.branch) branch = `${tag}${clean(g.branch)}${marks ? ` ${marks}` : ""}`;
-  const branchShort = g.branch ? `${tag}${truncateToWidth(clean(g.branch), 14)}${marks ? ` ${marks}` : ""}` : branch;
+  const suffix = marks ? `${g.branch ? " " : ""}${marks}` : "";
+  const branch = outsideGit ? "" : `${clean(g.branch ?? "")}${suffix}`;
+  const branchShort = outsideGit ? "" : `${truncateToWidth(clean(g.branch ?? ""), 14)}${suffix}`;
   const phaseText = s.phase ? theme.fg(s.phase === "error" ? "error" : "warning", s.phase) : "";
   const model = theme.bold(theme.fg("accent", shortModel(s.model)));
   const auto = s.autoEffort ? ` (auto${s.autoEffortDetail ? ` ${clean(s.autoEffortDetail)}` : ""})` : "";
@@ -655,7 +700,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
   let active = false, enabled = true, showAll = false, generation = 0;
   let timer: ReturnType<typeof setInterval> | undefined;
   let requestRender: (() => void) | undefined;
-  let git = emptyGit(), gitBusy = false, gitChecked = 0;
+  let git: GitInfo = { ...emptyGit(), unavailable: true }, gitBusy = false, gitChecked = 0;
   let quotaBusy = false, quotaChecked = 0;
   let borderGauge = false;
   let codexBusy = false, codexChecked = 0, codexAbort: AbortController | undefined;
@@ -671,6 +716,19 @@ export default function statusFooter(pi: ExtensionAPI): void {
       children.delete(child);
       resolve(error ? undefined : stdout);
     });
+    children.add(child);
+  });
+  // Keep Git status errors structured without changing other exec callers.
+  type GitRead = { kind: "ok"; stdout: Buffer } | { kind: "not-repository" | "unavailable" };
+  const readGitStatus = (cwd: string): Promise<GitRead> => new Promise((resolve) => {
+    const child = execFile("git", ["--no-optional-locks", "status", "--porcelain=v2", "--branch", "--ahead-behind", "--untracked-files=all", "-z"],
+      { cwd, encoding: "buffer", timeout: 4_000, maxBuffer: 2 * 1024 * 1024, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", LC_ALL: "C" } },
+      (error, stdout, stderr) => {
+        children.delete(child);
+        if (!error) resolve({ kind: "ok", stdout });
+        else resolve({ kind: error.code === 128 && !error.killed && /^fatal: not a git repository \(or any (?:of the parent directories\):[^\r\n]*|parent up to mount point [^\r\n]+\)(?::[^\r\n]*)?)(?:\r?\n|$)/.test(stderr.toString("utf8"))
+          ? "not-repository" : "unavailable" });
+      });
     children.add(child);
   });
   // Claude Code's OAuth token: Keychain on macOS, else its credentials file.
@@ -737,12 +795,22 @@ export default function statusFooter(pi: ExtensionAPI): void {
     const epoch = generation, cwd = ctx.cwd;
     try {
       const [status, roots, diff] = await Promise.all([
-        exec("git", ["--no-optional-locks", "status", "--porcelain=v2", "--branch", "-z"], cwd),
+        readGitStatus(cwd),
         exec("git", ["rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-common-dir"], cwd),
         exec("git", ["diff", "--shortstat", "HEAD", "--"], cwd),
       ]);
+      const gitDir = roots?.trim().split("\n")[1];
+      let operation = false, operationUnreadable = false;
+      if (gitDir) {
+        try { operation = await detectGitOperation(path.resolve(cwd, gitDir)); }
+        catch { operationUnreadable = true; }
+      }
       if (!active || epoch !== generation) return;
-      git = status === undefined ? { ...emptyGit(), unavailable: roots !== undefined } : parseGitStatus(status);
+      git = status.kind === "ok" ? parseGitStatus(status.stdout)
+        : status.kind === "not-repository" ? { ...emptyGit(), notRepository: true }
+        : { ...emptyGit(), unavailable: true };
+      git.operation = operation;
+      if (operationUnreadable) git.unavailable = true;
       if (roots) {
         const [root, gitDir, commonDir] = roots.trim().split("\n");
         git.worktree = path.resolve(cwd, commonDir) !== path.resolve(cwd, gitDir);
@@ -872,7 +940,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     stop();
     if (context.mode !== "tui") return;
     ctx = context; active = true;
-    git = emptyGit(); claude = undefined; codex = undefined;
+    git = { ...emptyGit(), unavailable: true }; claude = undefined; codex = undefined;
     gitBusy = quotaBusy = codexBusy = false; gitChecked = quotaChecked = codexChecked = 0;
     enabled = true; showAll = false; phase = undefined;
     for (const raw of context.sessionManager.getBranch()) {
@@ -933,6 +1001,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
           `Cache reuse: ${cacheHit === undefined ? "not measured" : percent(cacheHit)} of the latest measured prompt on this branch/model.`,
           `Estimated session cost: ${money(totals.cost)} across recorded assistant, tool, summary and warming usage on all branches. This is not an invoice.`,
           `Recorded tokens: ${tokens(totals.input)} input, ${tokens(totals.output)} output, ${tokens(totals.cacheRead)} cache reads, ${tokens(totals.cacheWrite)} cache writes.`,
+          git.unavailable ? "Git status: git unavailable." : git.notRepository ? "Git status: outside a Git repository." : !git.branch ? "Git status: git unavailable." : `Git status: ${git.changed} changed paths; ${git.staged} staged, ${git.unstaged} unstaged, ${git.untracked} untracked, ${git.conflicts} conflicts (counts can overlap). ${git.branch.startsWith("detached:") ? "" : git.upstreamMissing ? "Upstream: upstream missing (" + git.upstream + "; cached ref unavailable, no fetch)." : `Upstream: ${git.upstream ?? "no upstream"}; ${git.ahead} ahead, ${git.behind} behind (cached, no fetch).`}`,
           `Tracked Git changes: ${git.added} lines added, ${git.removed} removed. Session age: ${duration(Date.now() - totals.started)}; compactions: ${totals.compactions}.`,
           "OAuth identifies the authentication method, not guaranteed subscription billing. Git diff covers all uncommitted tracked changes, not just this agent.",
           "Claude acct comes from the shared Claude Code account cache (which can differ from Pi's account). Values are percent used; stale means >10m old or reset due.",

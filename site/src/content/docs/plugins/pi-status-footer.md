@@ -27,6 +27,24 @@ The mode is stored in session metadata, excluded from model context, and survive
 
 The first row combines project and Git state with the model and reasoning level. Context follows. Where supported, the editor's top and bottom borders become the usage gauge while retaining its mode colors and scroll markers. An editor without compatible border hooks keeps its borders and gets a footer gauge instead.
 
+Git uses `branch * ↑N ↓N !` (example; suffix terms are optional), with single
+spaces between the branch and each mark. `*` appears iff any staged, unstaged,
+untracked or conflicted work exists. `↑N`/`↓N` show nonzero commit divergence;
+`!` comes last iff conflicts or an unfinished Git operation exist, or status
+is unreadable. Unknown status without a known branch shows only `!`;
+a known branch identity remains visible. Clean/zero terms, worktree markers,
+no-upstream and upstream-missing labels are hidden. No file, hunk or staging
+counts appear in the compact UI.
+
+Detailed `/status` retains unique changed-path and staged/unstaged/untracked/conflict
+counts, known upstreams and errors. Staged-and-unstaged paths and renames each
+count once. Untracked directories expand to individual files
+(`--untracked-files=all`), excluding ignored files. Ahead/behind use the cached
+upstream without fetching, with explicit `--ahead-behind`; a missing cached ref
+does not imply zero divergence. Detached HEAD uses `detached:<sha7>`; unborn
+repositories retain their branch name. Outside a Git repository, the project
+remains without a Git segment. Polling retains `--no-optional-locks`.
+
 Extension notices wrap onto their own row. Account limits appear last and explicitly show percent **used**. Narrow terminals shorten secondary segments rather than treating display width as a character count. Warning and error colors begin at 70% and 90% used.
 
 A useful inspection sequence is `/status all`, followed by `/status details` to check where each account reading came from, then `/status on` to return to the compact active-provider view.
@@ -35,7 +53,7 @@ A useful inspection sequence is `/status all`, followed by `/status details` to 
 
 Context is Pi's estimate against the actual model window. An unknown value, including immediately after compaction, is not zero usage. Cache reuse in details measures the last assistant prompt on the current branch/model; it does not predict the next cache hit. See [Cache and cost](/recipes/cache-cost/).
 
-Estimated session cost uses recorded token-price usage, including tool, summary and warming records and abandoned branches. It is not an invoice or proof of subscription billing. Unreported external-agent work cannot be counted. Git line counts cover all uncommitted tracked changes against HEAD, not only this agent's edits; untracked files affect the dirty indicator but not those counts.
+Estimated session cost uses recorded token-price usage, including tool, summary and warming records and abandoned branches. It is not an invoice or proof of subscription billing. Unreported external-agent work cannot be counted. Git line counts cover all uncommitted tracked changes against HEAD, not only this agent's edits; untracked files affect the changed-path summary but not those counts.
 
 Quota data becomes stale after ten minutes or when its reset time passes. Failed refreshes preserve the last reading and do not invent a reset to zero. Other providers retain ordinary session rows without fabricated quota information.
 

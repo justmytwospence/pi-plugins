@@ -33,9 +33,16 @@ readings fresh.
 
 ## Layout
 
-1. Project and git status, `[wt ]<branch> ✖N ● ↑N ↓N`: `wt` in a linked
-   worktree, then red `✖N` unmerged paths, yellow `●` any staged, modified or
-   untracked file, green `↑N` ahead and red `↓N` behind upstream. Model and
+1. Project and Git summary, `branch * ↑N ↓N !` (example; optional suffix terms):
+   single spaces separate the branch and every mark. Yellow `*` appears iff any
+   staged, unstaged, untracked or conflicted work exists; green `↑N` and red `↓N` for nonzero commit divergence;
+   red `!` last iff conflicts or an unfinished Git operation exist, or Git status is unreadable. Unknown status
+   without a known branch shows only `!`; a known branch identity remains visible.
+   Clean/zero terms, worktree markers and absent/missing-upstream labels are hidden.
+   No path, hunk or staging counts appear in the compact UI. Detailed `/status`
+   retains counts, known upstreams and errors. Unborn repositories keep their
+   branch name; detached HEAD shows `detached:<sha7>`. Outside a Git repository,
+   the Git summary stays quiet and the project remains visible. Model and
    labeled reasoning level on the right. Waiting/errors take priority.
 2. `Context 32% used`. The gauge itself is the editor's border lines, above and
    below the prompt: the used share of the width in heavy rule (accent, then the
@@ -92,8 +99,16 @@ for stale account data.
   standalone usage records (including warming). Like Pi's native footer, the
   totals include recorded abandoned branches. Unreported external-agent usage
   cannot be counted. OAuth describes authentication, not billing.
-- **Tracked Git changes (details):** all uncommitted tracked changes against HEAD, not edits attributed to
-  this agent. Untracked files affect the dirty mark but not line counts.
+- **Git measurements:** the detailed `changed` count measures unique uncommitted paths, including staged,
+  unstaged, untracked and conflicted paths. A staged-and-unstaged path counts once;
+  a rename counts once. Untracked directories are expanded to individual files
+  (`--untracked-files=all`); ignored files are excluded. Status explicitly requests
+  `--ahead-behind` to compare against the cached upstream; no fetch is performed.
+  Status uses `--no-optional-locks` so polling does not take the index lock.
+- **Git details:** staged, unstaged, untracked and conflict counts remain available
+  in `/status details`; these categories can overlap. Tracked line counts cover
+  all uncommitted tracked changes against HEAD, not edits attributed to this
+  agent. Untracked files affect the summary but not line counts.
 - **Claude acct:** reads the shared Claude Code OAuth usage cache at
   `${CLAUDE_STATUSLINE_CACHE_DIR:-${XDG_CACHE_HOME:-~/.cache}/claude-statusline}/oauth-usage.json`.
   The Claude Code account may differ from Pi's account. Model-scoped weekly limits
