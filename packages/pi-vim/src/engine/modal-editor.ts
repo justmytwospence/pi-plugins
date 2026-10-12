@@ -4488,9 +4488,9 @@ export class ModalEditor extends CustomEditor {
         c.l = lastLine;
         c.w = contentWidth;
         c.label = label;
-        // Replace only the leftmost label span, keeping host indicators at
+        // Replace only the rightmost label span, keeping host indicators at
         // their original columns in the remaining border.
-        c.result = label + sliceByColumn(lastLine, visibleWidth(rawLabel), contentWidth);
+        c.result = sliceByColumn(lastLine, 0, contentWidth) + label;
       }
       lines[last] = c.result;
     } else {

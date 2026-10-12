@@ -1174,7 +1174,7 @@ describe("ex mini-mode", () => {
 
     sendKeys(session.editor, ["2", ":"]);
 
-    assert.ok(session.editor.render(80).at(-1)?.startsWith(" EX :_ "));
+    assert.ok(session.editor.render(80).at(-1)?.endsWith(" EX :_ "));
 
     sendKeys(session.editor, ["\x1b", "x"]);
 
@@ -1226,7 +1226,7 @@ describe("ex mini-mode", () => {
 
     assert.deepEqual(calls, ["ex: EX :_ "]);
     assert.ok(footer.includes(" EX :_ "));
-    assert.ok(footer.startsWith("\x1b[36m EX :_ \x1b[39m"));
+    assert.ok(footer.endsWith("\x1b[36m EX :_ \x1b[39m"));
   });
 
   it("renders VISUAL and V-LINE labels with the visual colorizer", () => {
@@ -1253,8 +1253,8 @@ describe("ex mini-mode", () => {
     sendKeys(editor, ["V"]);
     const vLineFooter = editor.render(80).at(-1) ?? "";
 
-    assert.ok(visualFooter.startsWith("<visual> VISUAL </visual>"));
-    assert.ok(vLineFooter.startsWith("<visual> V-LINE </visual>"));
+    assert.ok(visualFooter.endsWith("<visual> VISUAL </visual>"));
+    assert.ok(vLineFooter.endsWith("<visual> V-LINE </visual>"));
     // Visual modes use the visual colorizer, never collapsing to normal.
     assert.deepEqual(calls, ["visual: VISUAL ", "visual: V-LINE "]);
   });
@@ -1436,7 +1436,7 @@ describe("ex mini-mode", () => {
     sendKeys(session.editor, [":", "\x1b[200~tree\x1b[201~\r"]);
 
     assert.deepEqual(dispatched, []);
-    assert.ok(session.editor.render(80).at(-1)?.startsWith(" EX :tree_ "));
+    assert.ok(session.editor.render(80).at(-1)?.endsWith(" EX :tree_ "));
 
     sendKeys(session.editor, ["\r"]);
     assert.deepEqual(dispatched, ["/tree"]);
@@ -1453,7 +1453,7 @@ describe("ex mini-mode", () => {
     sendKeys(session.editor, [":", "\x1b[200~tree", "\x1b", "[201~\r"]);
 
     assert.deepEqual(dispatched, []);
-    assert.ok(session.editor.render(80).at(-1)?.startsWith(" EX :tree_ "));
+    assert.ok(session.editor.render(80).at(-1)?.endsWith(" EX :tree_ "));
 
     sendKeys(session.editor, ["\r"]);
     assert.deepEqual(dispatched, ["/tree"]);
@@ -1475,7 +1475,7 @@ describe("ex mini-mode", () => {
     ]);
 
     assert.deepEqual(dispatched, []);
-    assert.ok(session.editor.render(80).at(-1)?.startsWith(" EX :tree_ "));
+    assert.ok(session.editor.render(80).at(-1)?.endsWith(" EX :tree_ "));
 
     sendKeys(session.editor, ["\r"]);
     assert.deepEqual(dispatched, ["/tree"]);
@@ -1497,7 +1497,7 @@ describe("ex mini-mode", () => {
     ]);
 
     assert.deepEqual(dispatched, []);
-    assert.ok(session.editor.render(80).at(-1)?.startsWith(" EX :tree_ "));
+    assert.ok(session.editor.render(80).at(-1)?.endsWith(" EX :tree_ "));
 
     sendKeys(session.editor, ["\r"]);
     assert.deepEqual(dispatched, ["/tree"]);
@@ -1533,7 +1533,7 @@ describe("ex mini-mode", () => {
     sendKeys(session.editor, [":", "\x1b[200~q!\n\x1b[201~"]);
 
     assert.equal(session.quitCalls, 0);
-    assert.ok(pendingExLabel(session)?.startsWith(" EX :q!_ "));
+    assert.ok(pendingExLabel(session)?.endsWith(" EX :q!_ "));
     assert.equal(session.editor.getText(), "hello");
     assert.deepEqual(session.notifications, []);
   });
@@ -1555,7 +1555,7 @@ describe("ex mini-mode", () => {
     sendKeys(session.editor, [":", "\x1b[200~q\nall!\x1b[201~"]);
 
     assert.equal(session.quitCalls, 0);
-    assert.ok(pendingExLabel(session)?.startsWith(" EX :q_ "));
+    assert.ok(pendingExLabel(session)?.endsWith(" EX :q_ "));
   });
 
   it("pasted newline in a split paste waits for a typed enter", () => {
@@ -1579,7 +1579,7 @@ describe("ex mini-mode", () => {
 
       assert.equal(session.quitCalls, 0);
       assert.equal(forwardedEscapeCount, 0);
-      assert.ok(pendingExLabel(session)?.startsWith(" EX :q!_ "));
+      assert.ok(pendingExLabel(session)?.endsWith(" EX :q!_ "));
 
       sendKeys(session.editor, ["\r"]);
 
@@ -1605,7 +1605,7 @@ describe("ex mini-mode", () => {
     ]);
 
     assert.equal(session.quitCalls, 0);
-    assert.ok(pendingExLabel(session)?.startsWith(" EX :qa!_ "));
+    assert.ok(pendingExLabel(session)?.endsWith(" EX :qa!_ "));
 
     sendKeys(session.editor, ["\r"]);
     assert.equal(session.quitCalls, 1);
@@ -1618,7 +1618,7 @@ describe("ex mini-mode", () => {
     sendKeys(session.editor, [":", "\x1b[200~\nq!\x1b[201~"]);
 
     assert.equal(session.quitCalls, 0);
-    assert.ok(pendingExLabel(session)?.startsWith(" EX :_ "));
+    assert.ok(pendingExLabel(session)?.endsWith(" EX :_ "));
   });
 
   it("typing continues after a discarded paste tail", () => {
@@ -1642,7 +1642,7 @@ describe("ex mini-mode", () => {
     sendKeys(session.editor, [":", "\x1b[200~q!\r\nrest\x1b[201~"]);
 
     assert.equal(session.quitCalls, 0);
-    assert.ok(pendingExLabel(session)?.startsWith(" EX :q!_ "));
+    assert.ok(pendingExLabel(session)?.endsWith(" EX :q!_ "));
   });
 
   it("each paste contributes its own first line", () => {
@@ -1654,7 +1654,7 @@ describe("ex mini-mode", () => {
       "\x1b[200~a!\nY\x1b[201~",
     ]);
 
-    assert.ok(pendingExLabel(session)?.startsWith(" EX :qa!_ "));
+    assert.ok(pendingExLabel(session)?.endsWith(" EX :qa!_ "));
 
     sendKeys(session.editor, ["\r"]);
     assert.equal(session.quitCalls, 1);
@@ -2342,7 +2342,7 @@ describe("ex pi-command bridge", () => {
     sendKeys(session.editor, [":", "\x1b[200~!rm -rf .\nrest\x1b[201~"]);
 
     assert.deepEqual(session.dispatched, []);
-    assert.ok(session.editor.render(80).at(-1)?.startsWith(" EX :!rm -rf ._ "));
+    assert.ok(session.editor.render(80).at(-1)?.endsWith(" EX :!rm -rf ._ "));
 
     sendKeys(session.editor, ["\r"]);
 
@@ -2355,7 +2355,7 @@ describe("ex pi-command bridge", () => {
     sendKeys(session.editor, [":", "\x1b[200~tree\nrest\x1b[201~"]);
 
     assert.deepEqual(session.dispatched, []);
-    assert.ok(session.editor.render(80).at(-1)?.startsWith(" EX :tree_ "));
+    assert.ok(session.editor.render(80).at(-1)?.endsWith(" EX :tree_ "));
 
     sendKeys(session.editor, ["\r"]);
 
@@ -9684,17 +9684,17 @@ describe("visual mode — footer label", () => {
   it("shows VISUAL and V-LINE", () => {
     const { editor } = createEditorWithSpy("hello");
     sendKeys(editor, ["v"]);
-    assert.ok(editor.render(80).at(-1)?.startsWith(" VISUAL "));
+    assert.ok(editor.render(80).at(-1)?.endsWith(" VISUAL "));
     sendKeys(editor, ["V"]);
-    assert.ok(editor.render(80).at(-1)?.startsWith(" V-LINE "));
+    assert.ok(editor.render(80).at(-1)?.endsWith(" V-LINE "));
   });
 
   it("echoes a pending count and a pending char motion", () => {
     const { editor } = createEditorWithSpy("hello");
     sendKeys(editor, ["v", "2"]);
-    assert.ok(editor.render(80).at(-1)?.startsWith(" VISUAL 2_ "));
+    assert.ok(editor.render(80).at(-1)?.endsWith(" VISUAL 2_ "));
     sendKeys(editor, ["l", "f"]);
-    assert.ok(editor.render(80).at(-1)?.startsWith(" VISUAL f_ "));
+    assert.ok(editor.render(80).at(-1)?.endsWith(" VISUAL f_ "));
   });
 });
 
@@ -9755,7 +9755,7 @@ describe("visual mode — inert normal-mode commands", () => {
   it(": does not open the EX mini-mode", () => {
     const editor = stays([":"]);
     assert.equal(editor.getMode(), "visual");
-    assert.ok(editor.render(80).at(-1)?.startsWith(" VISUAL "));
+    assert.ok(editor.render(80).at(-1)?.endsWith(" VISUAL "));
   });
 
   it("printable keys are swallowed rather than typed into the buffer", () => {

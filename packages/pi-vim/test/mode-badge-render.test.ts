@@ -24,20 +24,20 @@ class GaugeEditor extends ModalEditor {
   }
 }
 
-describe("left mode badge rendering", () => {
-  it("replaces exactly the left label span without changing other editor lines", () => {
+describe("right mode badge rendering", () => {
+  it("replaces exactly the right label span without changing other editor lines", () => {
     const editor = new ModalEditor(stubTui, stubTheme, stubKeybindings);
     editor.setText("hello");
     const native = CustomEditor.prototype.render.call(editor, 40);
     const rendered = editor.render(40);
 
     assert.deepEqual(rendered.slice(0, -1), native.slice(0, -1));
-    assert.equal(rendered.at(-1), " INSERT " + "─".repeat(32));
+    assert.equal(rendered.at(-1), "─".repeat(32) + " INSERT ");
     sendKeys(editor, ["\x1b"]);
-    assert.equal(footer(editor, 40), " NORMAL " + "─".repeat(32));
+    assert.equal(footer(editor, 40), "─".repeat(32) + " NORMAL ");
   });
 
-  it("preserves the centered native scroll hint and right border suffix", () => {
+  it("preserves the centered native scroll hint and left border prefix", () => {
     const editor = new ModalEditor(stubTui, stubTheme, stubKeybindings);
     editor.setText(Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n"));
     setInternalCursor(editor, 0);
@@ -46,12 +46,12 @@ describe("left mode badge rendering", () => {
     const hint = / ↓ \d+ more /.exec(native)?.[0];
 
     assert.ok(hint, "fixture must have hidden lines below");
-    assert.equal(rendered, " INSERT " + native.slice(8));
+    assert.equal(rendered, native.slice(0, -8) + " INSERT ");
     assert.equal(rendered.indexOf(hint), native.indexOf(hint));
     assert.equal(visibleWidth(rendered), 80);
   });
 
-  it("preserves ANSI border colors, centered hint and a host context gauge at their columns", () => {
+  it("preserves ANSI border colors and centered hint while replacing the rightmost host span", () => {
     const colorize = (text: string): string => `\x1b[35m\x1b[7m${text}\x1b[27m\x1b[39m`;
     const editor = new GaugeEditor(stubTui, stubTheme, stubKeybindings, {
       labelColorizers: { insert: colorize, normal: colorize, visual: colorize, ex: colorize },
@@ -66,11 +66,10 @@ describe("left mode badge rendering", () => {
     const hint = / ↓ \d+ more /.exec(nativeText)?.[0];
 
     assert.ok(hint);
-    assert.ok(rendered.startsWith(colorize(" INSERT ") + "\x1b[32m"));
-    assert.equal(renderedText, " INSERT " + nativeText.slice(8));
+    assert.ok(rendered.endsWith(colorize(" INSERT ")));
+    assert.equal(renderedText, nativeText.slice(0, -8) + " INSERT ");
     assert.equal(renderedText.indexOf(hint), nativeText.indexOf(hint));
-    assert.equal(renderedText.indexOf(" 42% "), 75);
-    assert.ok(rendered.includes("\x1b[36m 42% "));
+    assert.ok(!renderedText.includes(" 42% "));
     assert.equal(visibleWidth(rendered), 80);
   });
 
@@ -89,8 +88,8 @@ describe("left mode badge rendering", () => {
     const native = stripTerminalSequences(nativeFooter(editor, 80));
     const rendered = footer(editor, 80);
 
-    assert.equal(stripTerminalSequences(rendered), " INSERT " + native.slice(8));
-    assert.ok(rendered.startsWith(" INSERT \x1b[32m" + "━".repeat(25) + "\x1b[90m"));
+    assert.equal(stripTerminalSequences(rendered), native.slice(0, -8) + " INSERT ");
+    assert.ok(rendered.startsWith("\x1b[32m" + "━".repeat(33) + "\x1b[90m"));
     assert.equal(visibleWidth(rendered), 80);
   });
 
@@ -103,15 +102,15 @@ describe("left mode badge rendering", () => {
       const rendered = footer(editor, width);
 
       assert.ok(native.includes("↓"), "fixture must have a scroll hint");
-      // Narrow hints can overlap the replaced span: preserve their suffix,
+      // Narrow hints can overlap the replaced span: preserve their prefix,
       // rather than shifting the whole hint to make room for the badge.
-      assert.equal(rendered, " INSERT " + native.slice(8));
+      assert.equal(rendered, native.slice(0, -8) + " INSERT ");
       assert.equal(visibleWidth(rendered), width);
     });
   }
 
   for (const width of [0, 1, 4, 7, 8, 9, 12, 20]) {
-    it(`fits labels and preserves the available suffix at width ${width}`, () => {
+    it(`fits labels and preserves the available prefix at width ${width}`, () => {
       const editor = new ModalEditor(stubTui, stubTheme, stubKeybindings);
       for (const [keys, rawLabel] of [
         [[], " INSERT "],
@@ -126,9 +125,9 @@ describe("left mode badge rendering", () => {
         const native = nativeFooter(editor, width);
         const rendered = footer(editor, width);
 
-        assert.ok(rendered.startsWith(label));
+        assert.ok(rendered.endsWith(label));
         assert.equal(stripTerminalSequences(rendered),
-          stripTerminalSequences(label) + stripTerminalSequences(native).slice(labelWidth));
+          stripTerminalSequences(native).slice(0, width - labelWidth) + stripTerminalSequences(label));
         assert.equal(visibleWidth(rendered), width);
       }
     });
@@ -156,14 +155,14 @@ describe("left mode badge rendering", () => {
     assert.equal(visibleWidth(footer(editor, 41)), 41);
     assert.equal(compositions, 2);
     sendKeys(editor, ["\x1b"]);
-    assert.ok(footer(editor, 41).startsWith(colorize(" NORMAL ")));
+    assert.ok(footer(editor, 41).endsWith(colorize(" NORMAL ")));
     assert.equal(compositions, 3);
     labelColor = "\x1b[33m";
-    assert.ok(footer(editor, 41).startsWith(colorize(" NORMAL ")));
+    assert.ok(footer(editor, 41).endsWith(colorize(" NORMAL ")));
     assert.equal(compositions, 4);
     editor.gauge = " 43% ";
     const changed = footer(editor, 41);
-    assert.ok(changed.includes("\x1b[36m 43% "));
+    assert.ok(changed.endsWith(colorize(" NORMAL ")));
     assert.equal(compositions, 5);
     assert.equal(footer(editor, 41), changed);
     assert.equal(compositions, 5);
