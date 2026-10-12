@@ -100,6 +100,28 @@ test("large output is trimmed to the needed blocks and saved in full", async () 
   expect(reg.calls).toHaveLength(1);
 });
 
+test("codemode trims final batched output but preserves nested results and script intent", async () => {
+  const { reg, emit } = setup(keepErrors);
+  await emit("session_start", {});
+  const input = { code: 'text(await tools.bash({ command: "npm test" }));' };
+  const event = { ...toolResult("code1"), toolName: "codemode", input };
+  expect(await emit("tool_result", { ...event, parentToolCallId: "outer" })).toBeUndefined();
+  expect(reg.calls).toHaveLength(0);
+  const out: any = await emit("tool_result", event);
+  expect(out.content[0].text).toContain("Error: expected 3 retries, got 1");
+  expect(out.content[0].text.length).toBeLessThan(big.length / 5);
+  expect(reg.calls[0].state.intent).toMatchObject({ tool: "codemode", arguments: JSON.stringify(input) });
+  const full = /Full output: (\S+)/u.exec(out.content[0].text)?.[1] as string;
+  expect(readFileSync(full, "utf8")).toBe(big);
+});
+
+test("codemode preserves final output when the script needs it all", async () => {
+  const { emit } = setup((q, st) => ({ ...keepErrors(q, st), needs_all: { type: "bool", probability: 0.9 } }));
+  await emit("session_start", {});
+  const out: any = await emit("tool_result", { ...toolResult(), toolName: "codemode" });
+  expect(out.content).toBeUndefined();
+});
+
 test("no trim when the agent needs it all, when most would be kept, or Jev fails", async () => {
   const needsAll = setup((q, st) => ({ ...keepErrors(q, st), needs_all: { type: "bool", probability: 0.9 } }));
   await needsAll.emit("session_start", {});

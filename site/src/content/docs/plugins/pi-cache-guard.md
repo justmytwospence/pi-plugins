@@ -55,7 +55,7 @@ With empty `jev.provider` and `jev.model`, discovery checks configured providers
 
 Trimming sends the latest user request, assistant text, tool name, arguments and output blocks to Jev. Default thresholds are over 12,000 characters for supported command, MCP and web outputs, and over 50,000 for `read`. Large outputs are bounded before classification. Kept blocks retain their order, with head and tail lines and omission markers.
 
-Full trimmed text is saved locally under `~/.pi/agent/cache-guard/tool-output/<session>/`; the result points to that file for rereading with `offset` and `limit`. Treat those files as potentially sensitive. Nested codemode results are not trimmed. Repeating the same trimmed call within the same turn returns the full result, and Jev can elect to keep everything.
+Full trimmed text is saved locally under `~/.pi/agent/cache-guard/tool-output/<session>/`; the result points to that file for rereading with `offset` and `limit`. Treat those files as potentially sensitive. Final codemode output is eligible for trimming at `trim.minChars`; intermediate nested results remain untouched so scripts can process them. Repeating the same trimmed call within the same turn returns the full result, and Jev can elect to keep everything.
 
 Compaction sends textual conversation units and the current goal to Jev, in batches. It classifies units as verbatim, summarize or drop. Classifier-only compaction assembles a summary in code; it still sends history to a model for judgment, just not to a generative summarizer. Ordinary `/compact` and automatic threshold compaction can instead run Pi's summarizer on filtered history. Set `compact.filter` to `false` to leave those paths to Pi.
 

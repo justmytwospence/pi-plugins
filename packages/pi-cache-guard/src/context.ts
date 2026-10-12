@@ -70,7 +70,7 @@ export interface Lean {
 export function trimFloor(tool: string, limits: TrimLimits): number | undefined {
   if (tool === "edit" || tool === "write") return undefined;
   if (tool === "read") return limits.readMinChars;
-  if (["bash", "grep", "find", "ls"].includes(tool) || tool.startsWith("mcp__")) return limits.minChars;
+  if (["bash", "grep", "find", "ls", "codemode"].includes(tool) || tool.startsWith("mcp__")) return limits.minChars;
   if (/web|fetch|search|content/iu.test(tool)) return limits.minChars;
   return undefined;
 }

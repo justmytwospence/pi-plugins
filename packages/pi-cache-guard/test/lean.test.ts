@@ -52,6 +52,7 @@ test("trimVerdict: trims only when the agent wants parts and most can go", () =>
 
 test("trimFloor: which tools are trimmed and from what size", () => {
   expect(trimFloor("bash", TRIM)).toBe(12_000);
+  expect(trimFloor("codemode", TRIM)).toBe(12_000);
   expect(trimFloor("read", TRIM)).toBe(50_000);
   expect(trimFloor("mcp__context7__query_docs", TRIM)).toBe(12_000);
   expect(trimFloor("fetch_content", TRIM)).toBe(12_000);

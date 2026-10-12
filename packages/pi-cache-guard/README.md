@@ -66,7 +66,7 @@ The `cache-guard` status reads `cache 4:12` (time left), `cache cold`, `cache co
 
 ## Trimming tool output (Jev)
 
-Large text results are trimmed before they enter the context, so the prompt cache is never disturbed: over `trim.minChars` (12,000) characters from `bash`, `grep`, `find`, `ls`, MCP tools (`mcp__*`) and tools whose name contains `web`, `fetch`, `search` or `content`; over `trim.readMinChars` (50,000) from `read`. `edit` and `write` results are never trimmed.
+Large text results are trimmed before they enter the context, so the prompt cache is never disturbed: over `trim.minChars` (12,000) characters from `bash`, `grep`, `find`, `ls`, final `codemode` output (not intermediate nested results), MCP tools (`mcp__*`) and tools whose name contains `web`, `fetch`, `search` or `content`; over `trim.readMinChars` (50,000) from `read`. `edit` and `write` results are never trimmed.
 
 Jev reads your last request, what the agent last said, the tool call and the output, split into at most `trim.maxBlocks` (150) blocks, and says which blocks hold what the agent needs: errors, failures, warnings, requested values, results. The kept blocks plus the first `trim.headLines` (5) and last `trim.tailLines` (20) lines stay, in order, with `[… N lines omitted …]` markers, and a footer points at the full output saved under `~/.pi/agent/cache-guard/tool-output/<session>/<toolCallId>.txt`, to read with `offset`/`limit`.
 

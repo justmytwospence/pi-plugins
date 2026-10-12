@@ -49,7 +49,7 @@ Options:
 
 `action: "status" | "steer" | "stop" | "result"` take an `id` (or a unique prefix). `steer` also takes `message`, delivered to the running child as a steering message. `status` without an id lists this session's runs.
 
-Use headless subagents by default for delegated work that reports back to the parent, even when it is long or multistep. An interactive Herdr child ([pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/)) is for an explicit request or a clearly persistent, human-led session or handoff.
+Prefer direct work for routine investigation, diagnosis, and verification. Delegate only genuinely independent tasks with a clear payoff or when requested, not merely because work is long or multistep, and avoid redundant audits. When delegating report-back work, use headless subagents. An interactive Herdr child ([pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/)) is for an explicit request or a clearly persistent, human-led session or handoff.
 
 **Labels.** `label` is a short task name, not an agent role (for example `"Audit cache invalidation"` with `agent: "reviewer"`). Lists, headings and forwarded dialogs show the task label first and the role second. Labels are whitespace-normalized and stripped of terminal control characters, without a fixed length cap. A missing or blank label uses the task's first nonempty line (without a Markdown heading or list prefix), with no model call. Each chain step gets its label before `{previous}` is expanded. The full task is still sent to the child and saved in run records.
 
