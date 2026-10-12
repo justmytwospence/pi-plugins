@@ -166,7 +166,7 @@ test("narrow layout protects model, context and the most-used quota", () => {
   s.quotas[0].windows[2].used = 99;
   const rows = mod.renderFooter(s, 40, theme);
   assert.match(rows[0], /opus-5\.5/);
-  assert.match(rows[1], /Context 28%/);
+  assert.match(rows[1], /Context\s+28%/);
   assert.match(rows[2], /Claude acct/);
   assert.match(rows[2], /Fable 99%/);
   assert.doesNotMatch(rows.join("\n"), /diff|compact/);
@@ -177,9 +177,9 @@ test("git status uses minimal suffix and hides zero terms", () => {
   s.git = { ...s.git, branch: "feat/x", worktree: true, changed: 5, conflicts: 2, ahead: 1, behind: 3 };
   assert.match(plain(mod.renderFooter(s, 160, theme)[0]), /dotfiles · feat\/x \* ↑1 ↓3 !/);
   s.git = { ...s.git, worktree: false, conflicts: 0, staged: 0, unstaged: 0, changed: 0, untracked: 0, ahead: 0, behind: 0 };
-  assert.match(plain(mod.renderFooter(s, 160, theme)[0]), /dotfiles · feat\/x\s{2,}/);
+  assert.match(plain(mod.renderFooter(s, 160, theme)[0]), /dotfiles · feat\/x · /);
   s.git.upstream = undefined;
-  assert.match(mod.renderFooter(s, 160, theme)[0], /feat\/x\s{2,}/);
+  assert.match(mod.renderFooter(s, 160, theme)[0], /feat\/x · /);
   s.git.changed = 2; s.git.conflicts = 1;
   assert.match(mod.renderFooter(s, 160, theme)[0], /feat\/x \* !/);
   s.git.unavailable = true;
@@ -209,7 +209,7 @@ test("minimal Git suffix covers each dirty dimension, quiet tracking and unreada
   for (const [state, expected] of cases) {
     s.git = { ...clean, ...state };
     const row = plain(mod.renderFooter(s, 160, theme)[0]);
-    assert.ok(row.includes(`dotfiles · ${expected}  `), row);
+    assert.ok(row.includes(`dotfiles · ${expected} · `), row);
     assert.doesNotMatch(row, /changed|conflicts|staged|untracked|upstream|wt /);
     for (const width of [20, 40, 80, 160]) {
       const rows = mod.renderFooter(s, width, theme);
@@ -221,17 +221,63 @@ test("minimal Git suffix covers each dirty dimension, quiet tracking and unreada
 
 test("wide layout uses explicit labels without reintroducing secondary metrics", () => {
   const rows = mod.renderFooter(fixture(), 160, theme);
-  assert.match(rows[0], /dotfiles · main \* ↑2\s{2,}opus-5\.5 · reasoning xhigh/);
-  assert.match(rows[1], /Context 28% used [━─]{8}/);
+  assert.match(rows[0], /dotfiles · main \* ↑2 · opus-5\.5 · reasoning xhigh/);
+  assert.match(rows[1], /Context\s+28% used [━─]{8}/);
   assert.doesNotMatch(rows[1], /cost/);
   assert.doesNotMatch(rows.slice(0, 2).join("\n"), /cache|OAuth|diff|compact|56k\/200k/);
   assert.match(rows[2], /5h 32% used/);
   assert.doesNotMatch(rows[2], /extra off/);
 });
 
+test("dashboard aligns readings, keeps identity left-aligned and insets every row", () => {
+  const s = fixture();
+  s.borderGauge = true;
+  s.quotas = [
+    { source: "Claude acct", updated: now, windows: [{ label: "5h", used: 32 }] },
+    { source: "Codex acct", updated: now, windows: [{ label: "week", used: 41 }] },
+  ];
+  s.statuses = ["PLAN mode"];
+  const rows = mod.renderFooter(s, 160, theme);
+  assert.equal(rows[0], " dotfiles · main * ↑2 · opus-5.5 · reasoning xhigh");
+  assert.equal(rows[1], " Context      28% used");
+  assert.equal(rows[2], " PLAN mode");
+  assert.equal(rows[3], " Claude acct  5h 32% used");
+  assert.equal(rows[4], " Codex acct   week 41% used");
+  assert.equal(rows[1].indexOf("28%"), rows[3].indexOf("5h"));
+  assert.equal(rows[3].indexOf("5h"), rows[4].indexOf("week"));
+  assert.ok(rows.every((row) => row.startsWith(" ") && !row.endsWith(" ")));
+  // Padding is cosmetic, never a reason to lose context on small terminals.
+  assert.match(mod.renderFooter(s, 20, theme)[1], /^Context 28% used$/);
+});
+
+test("dashboard hierarchy quiets labels and countdowns, not alerts", () => {
+  const calls = [];
+  const paint = { fg: (color, value) => { calls.push([color, value]); return value; }, bold: (value) => value };
+  const s = fixture();
+  s.quotas[0].windows[0].used = 95;
+  s.cache = "cold";
+  mod.renderFooter(s, 160, paint);
+  for (const pair of [["muted", "Context"], ["muted", "main"], ["muted", "5h"],
+    ["dim", " used"], ["dim", " (resets in 2h14m)"], ["error", "95%"], ["warning", "cold"]]) {
+    assert.ok(calls.some(([color, value]) => color === pair[0] && value === pair[1]), pair.join(": "));
+  }
+});
+
+test("dashboard label alignment measures wide characters and bounds long names", () => {
+  const s = fixture();
+  s.quotas[0].source = "日本語 acct";
+  const rows = mod.renderFooter(s, 160, theme);
+  assert.equal(visibleWidth(rows[1].split("28%")[0]), visibleWidth(rows[2].split("5h")[0]));
+  s.quotas[0].source = "a very long account label that must shrink";
+  s.statuses = ["診断: 問題なし ".repeat(20)];
+  for (let width = 1; width <= 240; width++) {
+    assert.ok(mod.renderFooter(s, width, theme).every((row) => visibleWidth(row) <= width));
+  }
+});
+
 test("medium layout retains the labeled context gauge without cost", () => {
   const row = mod.renderFooter(fixture(), 80, theme)[1];
-  assert.match(row, /Context 28% used [━─]{8}/);
+  assert.match(row, /Context\s+28% used [━─]{8}/);
   assert.doesNotMatch(row, /cost/);
 });
 
@@ -240,14 +286,14 @@ test("unknown context and quota do not become zero; stale/reset-due limits remai
   s.context = { tokens: null, percent: null, contextWindow: 200_000 };
   s.cacheHit = undefined;
   s.quotas[0].updated = now - 20 * 60_000;
-  assert.match(mod.renderFooter(s, 120, theme)[1], /Context unknown/);
-  assert.doesNotMatch(mod.renderFooter(s, 120, theme)[1], /Context 0%/);
+  assert.match(mod.renderFooter(s, 120, theme)[1], /Context\s+unknown/);
+  assert.doesNotMatch(mod.renderFooter(s, 120, theme)[1], /Context\s+0%/);
   assert.match(mod.renderFooter(s, 60, theme)[2], /stale/);
   s.quotas[0].updated = now;
   s.quotas[0].windows[0].reset = now - 1;
   assert.match(mod.renderFooter(s, 160, theme)[2], /reset due/);
   s.quotas = []; s.unavailableQuota = "Codex acct";
-  assert.match(mod.renderFooter(s, 80, theme)[2], /Codex acct · limits unavailable/);
+  assert.match(mod.renderFooter(s, 80, theme)[2], /Codex acct\s+limits unavailable/);
 });
 
 test("extension statuses wrap without losing notices or ANSI, no duplicate task UI", () => {
@@ -311,15 +357,15 @@ test("a stashed prompt gets its own row under the editor, with a preview when re
   assert.deepEqual(absorbed, { autoEffort: false, stashed: true, rest: [] });
   const s = { ...fixture(), statuses: absorbed.rest, stash: { text: "refactor the quota poller\n\nso that it backs off\non 429" } };
   const rows = mod.renderFooter(s, 120, theme).map(plain);
-  assert.equal(rows[0], '\u203a Stashed \u00b7 "refactor the quota poller" +2 lines \u00b7 ctrl+s to restore');
-  assert.match(rows[1], /^dotfiles/);
+  assert.equal(rows[0], ' \u203a Stashed \u00b7 "refactor the quota poller" +2 lines \u00b7 ctrl+s to restore');
+  assert.match(rows[1], /^ dotfiles/);
   assert.doesNotMatch(rows.join("\n"), /prompt stashed/);
   // Narrow: the preview shrinks, then goes, then the hint shortens; the label stays.
-  assert.match(plain(mod.renderFooter(s, 60, theme)[0]), /^\u203a Stashed \u00b7 "refactor the q[^"]*\u2026" \+2 lines \u00b7 ctrl\+s to restore$/);
+  assert.match(plain(mod.renderFooter(s, 60, theme)[0]), /^ \u203a Stashed \u00b7 "refactor the [^"]*\u2026" \+2 lines \u00b7 ctrl\+s to restore$/);
   assert.equal(plain(mod.renderFooter(s, 20, theme)[0]), "\u203a Stashed \u00b7 ctrl+s");
   for (let width = 1; width <= 160; width++) assert.ok(mod.renderFooter(s, width, theme).every((row) => visibleWidth(row) <= width));
   // pi-stash's internals unreadable: still a row, just without the preview.
-  assert.equal(plain(mod.renderFooter({ ...s, stash: {} }, 120, theme)[0]), "\u203a Stashed \u00b7 ctrl+s to restore");
+  assert.equal(plain(mod.renderFooter({ ...s, stash: {} }, 120, theme)[0]), " \u203a Stashed \u00b7 ctrl+s to restore");
   // Unrecognized text from the stash extension stays in the status row.
   assert.deepEqual(mod.absorbStatuses(new Map([["prompt-stash", "2 prompts stashed"]]), { claudeRow: true }).rest, ["2 prompts stashed"]);
 });
@@ -336,7 +382,7 @@ test("pi-bg's tasks get their own row under the context row", () => {
   assert.deepEqual(absorbed.rest, []);
   const s = { ...fixture(), statuses: absorbed.rest, bg: absorbed.bg };
   const rows = mod.renderFooter(s, 160, theme).map(plain);
-  assert.equal(rows[2], "bg \u00b7 tests 2:14 \u00b7 vite ready kept \u00b7 lint \u2717 \u00b7 fmt \u2713 \u00b7 +1");
+  assert.equal(rows[2], " bg \u00b7 tests 2:14 \u00b7 vite ready kept \u00b7 lint \u2717 \u00b7 fmt \u2713 \u00b7 +1");
   // Narrow: what ended fine and the count go first; running and failed work stays.
   assert.equal(plain(mod.renderFooter(s, 34, theme)[2]), "bg \u00b7 tests 2:14 \u00b7 vite \u00b7 lint \u2717");
   // Another shape stays in the status row.
@@ -351,11 +397,11 @@ test("pi-marimo's notebook gets its own row under the context row", () => {
   assert.deepEqual(absorbed.rest, []);
   const s = { ...fixture(), statuses: absorbed.rest, marimo: absorbed.marimo };
   const rows = mod.renderFooter(s, 160, theme).map(plain);
-  assert.match(rows[1], /^Context/);
-  assert.equal(rows[2], "marimo fit.py \u00b7 running Data loading \u203a Model fit 12s \u00b7 2 queued \u00b7 1 error \u00b7 also prep.py, plots.py");
+  assert.match(rows[1], /^ Context/);
+  assert.equal(rows[2], " marimo fit.py \u00b7 running Data loading \u203a Model fit 12s \u00b7 2 queued \u00b7 1 error \u00b7 also prep.py, plots.py");
   // Narrower: queued goes first, then the other notebooks become a count, then the label goes and the
   // section shortens to its deepest heading; which notebook is current and how many others never go.
-  assert.equal(plain(mod.renderFooter(s, 90, theme)[2]), "marimo fit.py \u00b7 running Data loading \u203a Model fit 12s \u00b7 1 error \u00b7 also prep.py, plots.py");
+  assert.equal(plain(mod.renderFooter(s, 90, theme)[2]), " marimo fit.py \u00b7 running Data loading \u203a Model fit 12s \u00b7 1 error \u00b7 also prep.py, plots.py");
   assert.equal(plain(mod.renderFooter(s, 58, theme)[2]), "fit.py \u00b7 running Model fit 12s \u00b7 1 error \u00b7 +2 more");
   // An older pi-marimo sent only a count.
   assert.deepEqual(mod.absorbStatuses(new Map([["marimo", "marimo: fit.py \u00b7 +3 open"]]), { claudeRow: true }).marimo, { notebook: "fit.py", others: 3, notes: [] });
@@ -464,7 +510,7 @@ test("a real linked worktree with broken common metadata is unavailable, not out
     h = host([], linked, "tui", "fallback");
     h.ctx.model = { provider: "test", id: "test", contextWindow: 1000 };
     await h.handlers.get("session_start")({}, h.ctx);
-    await vi.waitFor(() => assert.match(h.footer.render(160)[0], /linked\s{2,}/));
+    await vi.waitFor(() => assert.match(h.footer.render(160)[0], /linked · /));
     // Explicit admin-directory selection reproduces Git's non-discovery fatal;
     // the worktree still points at real but now invalid common metadata.
     process.env.GIT_DIR = path.join(main, ".git", "worktrees", "linked");
@@ -878,18 +924,18 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
     assert.equal(fetches.length, 1);
     assert.equal(fetches[0].url, "https://chatgpt.com/backend-api/wham/usage");
     assert.equal(fetches[0].headers["chatgpt-account-id"], "acct-1");
-    assert.match(h.footer.render(120).join("\n"), /Codex acct · week 25% used \(resets in 1d0h\) · gpt-reserve 0% used/);
+    assert.match(h.footer.render(120).join("\n"), /Codex acct\s+week 25% used \(resets in 1d0h\) · gpt-reserve 0% used/);
     assert.doesNotMatch(h.footer.render(120).join("\n"), /Claude acct/);
     await h.handlers.get("after_provider_response")({ headers: {
       "x-codex-primary-used-percent": "45", "x-codex-primary-window-minutes": "10080" } }, h.ctx);
-    assert.match(h.footer.render(120).join("\n"), /Codex acct · week 45% used.*gpt-reserve 0%/);
+    assert.match(h.footer.render(120).join("\n"), /Codex acct\s+week 45% used.*gpt-reserve 0%/);
     for (const timer of timers) timer.callback();
     await settle();
     assert.equal(fetches.length, 1, "usage endpoint is throttled");
     await h.handlers.get("model_select")({}, h.ctx);
     assert.match(h.footer.render(120).join("\n"), /week 45%/, "account limits survive a model switch");
     await h.commands.get("status").handler("all", h.ctx);
-    assert.match(h.footer.render(120).join("\n"), /Claude acct · limits unavailable/);
+    assert.match(h.footer.render(120).join("\n"), /Claude acct\s+limits unavailable/);
     await h.commands.get("status").handler("native", h.ctx);
     assert.equal(h.footer, undefined);
     assert.ok(h.disposed >= 2);
@@ -904,7 +950,7 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
     await h.handlers.get("model_select")({}, h.ctx);
     assert.doesNotMatch(h.footer.render(120).join("\n"), /Claude acct|Codex|45%/);
     await h.commands.get("status").handler("all", h.ctx);
-    assert.match(h.footer.render(120).join("\n"), /Codex acct · week/, "/status all shows Codex on other providers");
+    assert.match(h.footer.render(120).join("\n"), /Codex acct\s+week/, "/status all shows Codex on other providers");
     await h.commands.get("status").handler("on", h.ctx);
     h.entries.push({ type: "usage", usage: usage(4) });
     for (const timer of timers) timer.callback();
@@ -1003,7 +1049,7 @@ test("border hooks fall back to the editor's own until a percentage is known", (
 
 test("the context row drops its own gauge when the editor borders draw it", () => {
   const row = mod.renderFooter({ ...fixture(), borderGauge: true }, 160, theme)[1];
-  assert.match(row, /Context 28% used/);
+  assert.match(row, /Context\s+28% used/);
   assert.doesNotMatch(row, /[━─]/);
 });
 

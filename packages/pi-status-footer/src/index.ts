@@ -448,13 +448,13 @@ export function parseGitStatus(output: string | Buffer): GitInfo {
   return git;
 }
 
-interface Segment { text: string; short?: string; priority: number; align?: boolean }
+interface Segment { text: string; short?: string; priority: number; separatorAfter?: string }
 // Drop secondary statistics before shrinking the important gauges. Ordering
 // remains stable; every final line is cell-bounded.
 export function fitSegments(segments: Segment[], width: number, theme: Paint): string {
   const items = segments.filter((s) => s.text).map((s) => ({ ...s }));
   const separator = theme.fg("dim", " · ");
-  const join = () => items.map((s) => s.text).join(separator);
+  const join = () => items.map((s, i) => s.text + (i < items.length - 1 ? s.separatorAfter ?? separator : "")).join("");
   for (const item of [...items].sort((a, b) => a.priority - b.priority)) {
     if (visibleWidth(join()) <= width || item.priority >= 50) break;
     if (items.length > 1) items.splice(items.indexOf(item), 1);
@@ -466,12 +466,6 @@ export function fitSegments(segments: Segment[], width: number, theme: Paint): s
   while (visibleWidth(join()) > width && items.length > 1) {
     const least = Math.min(...items.map((s) => s.priority));
     items.splice(items.findIndex((s) => s.priority === least), 1);
-  }
-  const split = items.findIndex((item) => item.align);
-  if (split > 0 && visibleWidth(join()) <= width) {
-    const left = items.slice(0, split).map((s) => s.text).join(separator);
-    const right = items.slice(split).map((s) => s.text).join(separator);
-    return left + " ".repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(right))) + right;
   }
   return truncateToWidth(join(), Math.max(0, width), "…");
 }
@@ -597,6 +591,18 @@ function bgRow(items: BgItem[], width: number, theme: Paint): string {
 export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): string[] {
   if (width <= 0) return [];
   const s = snapshot, g = s.git;
+  // A little breathing room on normal terminals; compact widths spend every cell
+  // on content. Label padding is bounded so an unfamiliar account name cannot
+  // push the readings out of view. All measurements are terminal columns.
+  const inset = width >= 60 ? 1 : 0;
+  width -= inset * 2;
+  const labelWidth = inset ? Math.min(16, Math.max(visibleWidth("Context"),
+    ...s.quotas.map((q) => visibleWidth(clean(q.source))),
+    visibleWidth(clean(s.unavailableQuota ?? "")))) : 0;
+  const label = (text: string) => {
+    const value = clean(text);
+    return theme.fg("muted", value) + " ".repeat(Math.max(1, labelWidth - visibleWidth(value) + 2));
+  };
   const rows: string[] = [];
   const sep = theme.fg("dim", " · ");
   if (s.stash) rows.push(stashRow(s.stash.text, width, theme));
@@ -610,32 +616,33 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     available && g.behind ? theme.fg("error", `↓${g.behind}`) : "",
     g.conflicts || g.operation || !available ? theme.fg("error", "!") : "",
   ].filter(Boolean).join(" ");
-  const project = theme.fg("accent", clean(g.project ?? (path.basename(s.cwd) || s.cwd)));
+  const project = theme.bold(theme.fg("accent", clean(g.project ?? (path.basename(s.cwd) || s.cwd))));
   const suffix = marks ? `${g.branch ? " " : ""}${marks}` : "";
-  const branch = outsideGit ? "" : `${clean(g.branch ?? "")}${suffix}`;
-  const branchShort = outsideGit ? "" : `${truncateToWidth(clean(g.branch ?? ""), 14)}${suffix}`;
+  const branch = outsideGit ? "" : `${theme.fg("muted", clean(g.branch ?? ""))}${suffix}`;
+  const branchShort = outsideGit ? "" : `${theme.fg("muted", truncateToWidth(clean(g.branch ?? ""), 14))}${suffix}`;
   const phaseText = s.phase ? theme.fg(s.phase === "error" ? "error" : "warning", s.phase) : "";
   const model = theme.bold(theme.fg("accent", shortModel(s.model)));
   const auto = s.autoEffort ? ` (auto${s.autoEffortDetail ? ` ${clean(s.autoEffortDetail)}` : ""})` : "";
   const reasoning = s.thinking ? `reasoning ${s.thinking}${auto}` : "";
-  const identity = `${model}${reasoning ? ` · ${theme.fg("muted", reasoning)}` : ""}`;
+  const identity = `${model}${reasoning ? `${sep}${theme.fg("muted", reasoning)}` : ""}`;
   rows.push(fitSegments([
     { text: project, priority: 60 },
     { text: branch, short: branchShort, priority: g.conflicts ? 110 : 70 },
     { text: s.sessionName ? theme.fg("dim", clean(s.sessionName)) : "", priority: 10 },
-    { text: identity, short: model, priority: 100, align: true },
+    { text: identity, short: model, priority: 100 },
     { text: phaseText, priority: 120 },
     { text: s.queued ? theme.fg("warning", "queued") : "", priority: 115 },
   ], width, theme));
 
   const context = s.context.percent;
-  const ctxShort = `Context ${context === null ? "unknown" : theme.fg(heat(context), percent(context))}`;
-  const ctxLong = `${ctxShort}${context === null ? "" : s.borderGauge ? " used" : ` used ${gauge(theme, context)}`}`;
+  const ctxValue = context === null ? theme.fg("muted", "unknown") : theme.fg(heat(context), percent(context));
+  const ctxShort = `${theme.fg("muted", "Context")} ${ctxValue}`;
+  const ctxLong = `${label("Context")}${ctxValue}${context === null ? "" : theme.fg("dim", " used")}${context === null || s.borderGauge ? "" : ` ${gauge(theme, context)}`}`;
   rows.push(fitSegments([
     { text: ctxLong, short: ctxShort, priority: 100 },
     { text: s.lean ? theme.fg("muted", `lean ${clean(s.lean)}`) : "", priority: 20 },
     // Warm is the quiet state; cold means the next prompt re-caches the whole history.
-    { text: s.cache ? `cache ${theme.fg(s.cache.startsWith("cold") ? "warning" : "muted", clean(s.cache))}` : "", priority: 30 },
+    { text: s.cache ? `${theme.fg("muted", "cache")} ${theme.fg(s.cache.startsWith("cold") ? "warning" : "muted", clean(s.cache))}` : "", priority: 30 },
   ], width, theme));
   if (s.marimo) rows.push(marimoRow(s.marimo, width, theme));
   if (s.bg?.length) rows.push(bgRow(s.bg, width, theme));
@@ -654,8 +661,8 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     const stale = age >= QUOTA_STALE_MS || expired;
     const windows = quota.windows.map((w): Segment => {
       let reset = "";
-      if (w.reset !== undefined) reset = w.reset <= s.now ? " reset due" : ` (resets in ${duration(w.reset - s.now)})`;
-      const val = `${clean(w.label)} ${theme.fg(stale ? "muted" : heat(w.used), percent(w.used))} used`;
+      if (w.reset !== undefined) reset = w.reset <= s.now ? theme.fg("warning", " reset due") : theme.fg("dim", ` (resets in ${duration(w.reset - s.now)})`);
+      const val = `${theme.fg("muted", clean(w.label))} ${theme.fg(stale ? "muted" : heat(w.used), percent(w.used))}${theme.fg("dim", " used")}`;
       return { text: `${val}${reset}`, short: val,
         priority: 50 + Math.min(100, w.used) };
     });
@@ -673,7 +680,7 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     const staleText = `stale ${duration(age)}${expired ? " / reset due" : ""}`;
     const billed = quota.source === "Claude acct" ? s.extraBilled : undefined;
     const segments: Segment[] = [
-      { text: theme.fg("muted", quota.source), priority: 200 },
+      { text: label(quota.source), short: `${theme.fg("muted", clean(quota.source))} `, separatorAfter: "", priority: 200 },
       { text: stale ? theme.fg("warning", staleText) : "", short: stale ? theme.fg("warning", "stale") : "", priority: 210 },
       ...windows,
       { text: extraText ? theme.fg(extraColor, extraText) : "", short: extra?.enabled ? "extra on" : "", priority: extra?.enabled ? 75 : 5 },
@@ -682,8 +689,8 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     ];
     rows.push(fitSegments(segments, width, theme));
   }
-  if (s.unavailableQuota) rows.push(truncateToWidth(theme.fg("dim", `${s.unavailableQuota} · limits unavailable`), width));
-  return rows.map((row) => truncateToWidth(row, width));
+  if (s.unavailableQuota) rows.push(truncateToWidth(`${label(s.unavailableQuota)}${theme.fg("dim", "limits unavailable")}`, width));
+  return rows.map((row) => " ".repeat(inset) + truncateToWidth(row, width));
 }
 
 // pi-stash keeps its prompt in a process-global PromptStash under this symbol.
