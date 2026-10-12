@@ -25,7 +25,7 @@ The footer runs in Pi's terminal UI; print, JSON and RPC sessions do not start i
 
 The mode is stored in session metadata, excluded from model context, and survives reload/resume. New sessions start with the custom footer. Native mode restores the display but still keeps cached account readings fresh; unload the extension if you do not want its background work.
 
-The first row combines project and Git state with the model and reasoning level, all left-aligned. At 60 columns and up, a one-cell inset gives every row breathing room and context/account labels align their readings. Project and model stand out; labels and reset countdowns stay subdued. Narrow terminals omit the decorative padding. Context follows. Where supported, the editor's top and bottom borders become the usage gauge while retaining its mode colors and scroll markers. An editor without compatible border hooks keeps its borders and gets a footer gauge instead.
+The first row shows project and Git state. Model and reasoning level have their own left-aligned row immediately below. At 60 columns and up, a one-cell inset gives every row breathing room and context/account labels align their readings. Project and model stand out; labels and reset countdowns stay subdued. Narrow terminals omit the decorative padding. Context follows. Where supported, the editor's top and bottom borders become the usage gauge while retaining its mode colors and scroll markers. An editor without compatible border hooks keeps its borders and gets a footer gauge instead.
 
 Git uses `branch * ↑N ↓N !` (example; suffix terms are optional), with single
 spaces between the branch and each mark. `*` appears iff any staged, unstaged,

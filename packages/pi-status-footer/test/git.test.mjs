@@ -65,7 +65,7 @@ test("real paused rebase with no changed filenames marks only the actual worktre
     const result = mod.parseGitStatus(run("status", "--porcelain=v2", "--branch", "-z"));
     assertCounts(result, { changed: 0, staged: 0, unstaged: 0, untracked: 0, conflicts: 0 });
     const text = row({ ...result, operation: await mod.detectGitOperation(actual) });
-    assert.ok(text.includes(`${result.branch} ! · `), text);
+    assert.ok(text.includes(`${result.branch} !`), text);
     assert.doesNotMatch(text, /\*/);
     run("rebase", "--abort");
     assert.equal(await mod.detectGitOperation(actual), false);
@@ -89,19 +89,19 @@ test("operation metadata markers are detected without adding dirty paths", async
 test("real clean, unborn, no-upstream and detached states have minimal suffixes", async () => {
   await repo(async ({ git, status, file, commit }) => {
     assertCounts(status(), { branch: "main", changed: 0 });
-    assert.match(row(status()), /main · /);
+    assert.match(row(status()), /main$/);
     await file("first\nfile", "base\n");
     assertCounts(status(), { changed: 1, untracked: 1 });
     assert.match(row(status()), /main \*/);
     commit("base");
-    assert.match(row(status()), /main · /);
+    assert.match(row(status()), /main$/);
     git("update-ref", "refs/remotes/origin/main", "HEAD");
     // The remote is deliberately inaccessible: measurements only use cached refs.
     git("config", "remote.origin.url", "/nonexistent/footer-test-remote");
     git("config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*");
     git("branch", "--set-upstream-to=origin/main", "main");
     assertCounts(status(), { upstream: "origin/main", changed: 0, ahead: 0, behind: 0 });
-    assert.match(row(status()), /project · main · test/);
+    assert.match(row(status()), /^ project · main$/);
     assert.doesNotMatch(row(status()), /changed|conflicts|no upstream|[●✖↑↓]/);
     git("checkout", "--detach");
     const detached = `detached:${git("rev-parse", "--short=7", "HEAD").trim()}`;
@@ -339,5 +339,5 @@ test("missing, malformed or truncated porcelain is unavailable, never falsely cl
     assert.match(text, /fallback \* !/);
     assert.doesNotMatch(text, /no upstream|changed|conflict/);
   }
-  assert.match(row({}), /project · ! · test/);
+  assert.match(row({}), /^ project · !$/);
 });

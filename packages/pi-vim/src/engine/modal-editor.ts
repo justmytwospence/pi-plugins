@@ -10,7 +10,7 @@ import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import {
   Key,
   matchesKey,
-  truncateToWidth,
+  sliceByColumn,
   visibleWidth,
 } from "@earendil-works/pi-tui";
 import type {
@@ -4488,7 +4488,9 @@ export class ModalEditor extends CustomEditor {
         c.l = lastLine;
         c.w = contentWidth;
         c.label = label;
-        c.result = truncateToWidth(lastLine, contentWidth, "") + label;
+        // Replace only the leftmost label span, keeping host indicators at
+        // their original columns in the remaining border.
+        c.result = label + sliceByColumn(lastLine, visibleWidth(rawLabel), contentWidth);
       }
       lines[last] = c.result;
     } else {

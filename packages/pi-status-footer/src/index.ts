@@ -629,6 +629,8 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     { text: project, priority: 60 },
     { text: branch, short: branchShort, priority: g.conflicts ? 110 : 70 },
     { text: s.sessionName ? theme.fg("dim", clean(s.sessionName)) : "", priority: 10 },
+  ], width, theme));
+  rows.push(fitSegments([
     { text: identity, short: model, priority: 100 },
     { text: phaseText, priority: 120 },
     { text: s.queued ? theme.fg("warning", "queued") : "", priority: 115 },

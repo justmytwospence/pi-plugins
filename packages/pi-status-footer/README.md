@@ -46,7 +46,8 @@ readings fresh.
    retains counts, known upstreams and errors. Unborn repositories keep their
    branch name; detached HEAD shows `detached:<sha7>`. Outside a Git repository,
    the Git summary stays quiet and the project remains visible. Model and labeled
-   reasoning level follow on the left, without a right-aligned gap. Waiting/errors take priority.
+   reasoning level get their own left-aligned row immediately below. Waiting/errors
+   appear on that model row and take priority.
 2. `Context 32% used`. The gauge itself is the editor's border lines, above and
    below the prompt: the used share of the width in heavy rule (accent, then the
    warning and error colors), the rest in the editor's own border color, so pi-vim's
@@ -85,7 +86,8 @@ counts are available through `/status details`, not crowded into the footer.
 At 60 columns and up, all rows have a one-cell inset and context/account readings
 share a label column. Narrower terminals omit that padding. Project and model
 anchor the display; labels, Git identity and reset countdowns are quieter, while
-warnings retain their semantic colors. No extra rows or background blocks are added.
+warnings retain their semantic colors. The model row is separate from the project
+row; no background blocks are added.
 
 Rows shorten and drop lower-priority segments to fit actual terminal cell width.
 Model/context and the most-used quota win over secondary statistics. At extremely
