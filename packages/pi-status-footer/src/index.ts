@@ -130,7 +130,7 @@ export interface AbsorbedStatuses { autoEffort: boolean; autoEffortDetail?: stri
 // rows they describe. Each is optional: absent extensions publish nothing, and a
 // status whose text no longer matches the expected shape falls through to the
 // generic status row unchanged, so a format change never hides a notice.
-//   auto-effort       (pi-auto-effort)          "effort: high (auto ↑)" -> "reasoning high (auto ↑)"
+//   auto-effort       (pi-auto-effort)          "effort: high (auto ↑)" -> "reasoning high · auto ↑"
 //                                               (also the older "(auto)", and ", limited: 5h 84%")
 //   lean-context      (pi-cache-guard's Jev)    "lean: −12k tok"       -> context row
 //   cache-guard       (pi-cache-guard)          "cache 4:12"           -> context row
@@ -160,6 +160,11 @@ export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: {
     if (marimo) { result.marimo = marimo; continue; }
     const bg = key === "bg" ? parseBgStatus(plainText) : undefined;
     if (bg) { result.bg = bg; continue; }
+    // Normalize our companion's label without rewriting arbitrary publishers.
+    if (key === "tool-gate" && /^gate: (?:off|\d+ auto · \d+ pushed back · \d+ asked)$/.test(plainText)) {
+      result.rest.push(plainText.replace(/^gate: /, "Gate "));
+      continue;
+    }
     // Use the flat Nerd Font plug for MCP; preserve its theme color and text.
     result.rest.push(key === "mcp" ? text.replace(/\u{1f50c}[\ufe0e\ufe0f]?/u, "\uf1e6") : text);
   }
@@ -604,18 +609,11 @@ function bgRow(items: BgItem[], width: number, theme: Paint): string {
 export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): string[] {
   if (width <= 0) return [];
   const s = snapshot, g = s.git;
-  // A little breathing room on normal terminals; compact widths spend every cell
-  // on content. Label padding is bounded so an unfamiliar account name cannot
-  // push the readings out of view. All measurements are terminal columns.
+  // Shared inset, but natural spacing rather than padded label columns.
   const inset = width >= 60 ? 1 : 0;
   width -= inset * 2;
-  const labelWidth = inset ? Math.min(16, Math.max(visibleWidth("Context"),
-    ...s.quotas.map((q) => visibleWidth(clean(q.source))),
-    visibleWidth(clean(s.unavailableQuota ?? "")))) : 0;
-  const label = (text: string) => {
-    const value = clean(text);
-    return theme.fg("muted", value) + " ".repeat(Math.max(1, labelWidth - visibleWidth(value) + 2));
-  };
+  const accountLabel = (text: string) => clean(text).replace(/^(Claude|Codex) acct$/, "$1");
+  const label = (text: string) => `${theme.fg("muted", accountLabel(text))} `;
   const rows: string[] = [];
   const sep = theme.fg("dim", " · ");
   if (s.stash) rows.push(stashRow(s.stash.text, width, theme));
@@ -636,13 +634,13 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   const branchShort = outsideGit ? "" : `${branchIcon}${theme.fg("muted", truncateToWidth(clean(g.branch ?? ""), 14))}${suffix}`;
   const phaseText = s.phase ? theme.fg(s.phase === "error" ? "error" : "warning", s.phase) : "";
   const model = theme.bold(theme.fg("accent", shortModel(s.model)));
-  const auto = s.autoEffort ? ` (auto${s.autoEffortDetail ? ` ${clean(s.autoEffortDetail)}` : ""})` : "";
+  const auto = s.autoEffort ? `${sep}${theme.fg("dim", `auto${s.autoEffortDetail ? ` ${clean(s.autoEffortDetail)}` : ""}`)}` : "";
   const reasoning = s.thinking
-    ? `${theme.fg("muted", "reasoning")} ${theme.bold(theme.fg(thinkingColor(s.thinking), clean(s.thinking)))}${theme.fg("dim", auto)}`
+    ? `${theme.fg("muted", "reasoning")} ${theme.bold(theme.fg(thinkingColor(s.thinking), clean(s.thinking)))}${auto}`
     : "";
   const identity = `${model}${reasoning ? `${sep}${reasoning}` : ""}`;
   rows.push(fitSegments([
-    { text: project, priority: 60, separatorAfter: "  " },
+    { text: project, priority: 60 },
     { text: branch, short: branchShort, priority: g.conflicts ? 110 : 70 },
     { text: s.sessionName ? theme.fg("dim", clean(s.sessionName)) : "", priority: 10 },
   ], width, theme));
@@ -658,9 +656,9 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   const ctxLong = `${label("Context")}${ctxValue}${context === null ? "" : theme.fg("dim", " used")}${context === null || s.borderGauge ? "" : ` ${gauge(theme, context)}`}`;
   rows.push(fitSegments([
     { text: ctxLong, short: ctxShort, priority: 100 },
-    { text: s.lean ? theme.fg("muted", `lean ${clean(s.lean)}`) : "", priority: 20 },
+    { text: s.lean ? theme.fg("muted", `Lean ${clean(s.lean)}`) : "", priority: 20 },
     // Green denotes a warm cache; cold means the next prompt re-caches the whole history.
-    { text: s.cache ? `${theme.fg("muted", "cache")} ${theme.fg(s.cache.startsWith("cold") ? "warning" : "success", clean(s.cache))}` : "", priority: 30 },
+    { text: s.cache ? `${theme.fg("muted", "Cache")} ${theme.fg(s.cache.startsWith("cold") ? "warning" : "success", clean(s.cache))}` : "", priority: 30 },
   ], width, theme));
   if (s.marimo) rows.push(marimoRow(s.marimo, width, theme));
   if (s.bg?.length) rows.push(bgRow(s.bg, width, theme));
@@ -679,12 +677,12 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     const stale = age >= QUOTA_STALE_MS || expired;
     const windows = quota.windows.map((w): Segment => {
       let reset = "";
-      if (w.reset !== undefined) reset = w.reset <= s.now ? theme.fg("warning", " reset due") : theme.fg("dim", ` (resets in ${duration(w.reset - s.now)})`);
+      if (w.reset !== undefined) reset = w.reset <= s.now ? theme.fg("warning", " reset due") : `${sep}${theme.fg("dim", `resets in ${duration(w.reset - s.now)}`)}`;
       const color = stale || w.used < 70 ? "muted" : heat(w.used);
       const val = `${theme.fg("muted", clean(w.label))} ${theme.bold(theme.fg(color, percent(w.used)))}${theme.fg("dim", " used")}`;
       // Text-only quota windows keep account rows quiet at every width.
       return { text: `${val}${reset}`, short: val,
-        separatorAfter: theme.fg("dim", "  │  "), priority: 50 + Math.min(100, w.used) };
+        priority: 50 + Math.min(100, w.used) };
     });
     const extra = quota.extra;
     // An exhausted historical extra-usage pool is not an alert if extra is off.
@@ -700,7 +698,7 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     const staleText = `stale ${duration(age)}${expired ? " / reset due" : ""}`;
     const billed = quota.source === "Claude acct" ? s.extraBilled : undefined;
     const segments: Segment[] = [
-      { text: label(quota.source), short: `${theme.fg("muted", clean(quota.source))} `, separatorAfter: "", priority: 200 },
+      { text: label(quota.source), short: label(quota.source), separatorAfter: "", priority: 200 },
       { text: stale ? theme.fg("warning", staleText) : "", short: stale ? theme.fg("warning", "stale") : "", priority: 210 },
       ...windows,
       { text: extraText ? theme.fg(extraColor, extraText) : "", short: extra?.enabled ? "extra on" : "", priority: extra?.enabled ? 75 : 5 },

@@ -167,7 +167,7 @@ test("narrow layout protects model, context and the most-used quota", () => {
   const rows = mod.renderFooter(s, 40, theme);
   assert.match(rows[1], /opus-5\.5/);
   assert.match(rows[2], /Context\s+28%/);
-  assert.match(rows[3], /Claude acct/);
+  assert.match(rows[3], /Claude/);
   assert.match(rows[3], /Fable 99%/);
   assert.doesNotMatch(rows.join("\n"), /diff|compact/);
 });
@@ -175,9 +175,9 @@ test("narrow layout protects model, context and the most-used quota", () => {
 test("git status uses minimal suffix and hides zero terms", () => {
   const s = fixture();
   s.git = { ...s.git, branch: "feat/x", worktree: true, changed: 5, conflicts: 2, ahead: 1, behind: 3 };
-  assert.match(plain(mod.renderFooter(s, 160, theme)[0]), /dotfiles  ⎇ feat\/x \* ↑1 ↓3 !/);
+  assert.match(plain(mod.renderFooter(s, 160, theme)[0]), /dotfiles · ⎇ feat\/x \* ↑1 ↓3 !/);
   s.git = { ...s.git, worktree: false, conflicts: 0, staged: 0, unstaged: 0, changed: 0, untracked: 0, ahead: 0, behind: 0 };
-  assert.match(plain(mod.renderFooter(s, 160, theme)[0]), /dotfiles  ⎇ feat\/x$/);
+  assert.match(plain(mod.renderFooter(s, 160, theme)[0]), /dotfiles · ⎇ feat\/x$/);
   s.git.upstream = undefined;
   assert.match(mod.renderFooter(s, 160, theme)[0], /feat\/x$/);
   s.git.changed = 2; s.git.conflicts = 1;
@@ -209,7 +209,7 @@ test("minimal Git suffix covers each dirty dimension, quiet tracking and unreada
   for (const [state, expected] of cases) {
     s.git = { ...clean, ...state };
     const row = plain(mod.renderFooter(s, 160, theme)[0]);
-    assert.ok(row.includes(`dotfiles  ${s.git.branch ? "⎇ " : ""}${expected}`), row);
+    assert.ok(row.includes(`dotfiles · ${s.git.branch ? "⎇ " : ""}${expected}`), row);
     assert.doesNotMatch(row, /changed|conflicts|staged|untracked|upstream|wt /);
     for (const width of [20, 40, 80, 160]) {
       const rows = mod.renderFooter(s, width, theme);
@@ -221,7 +221,7 @@ test("minimal Git suffix covers each dirty dimension, quiet tracking and unreada
 
 test("wide layout uses explicit labels without reintroducing secondary metrics", () => {
   const rows = mod.renderFooter(fixture(), 160, theme);
-  assert.match(rows[0], /^ dotfiles  ⎇ main \* ↑2$/);
+  assert.match(rows[0], /^ dotfiles · ⎇ main \* ↑2$/);
   assert.match(rows[1], /^ opus-5\.5 · reasoning xhigh$/);
   assert.match(rows[2], /Context\s+28% used [━─]{8}/);
   assert.doesNotMatch(rows[2], /cost/);
@@ -230,7 +230,7 @@ test("wide layout uses explicit labels without reintroducing secondary metrics",
   assert.doesNotMatch(rows[3], /extra off/);
 });
 
-test("dashboard aligns readings, keeps identity left-aligned and insets every row", () => {
+test("footer uses natural spacing and a consistent inset without label columns", () => {
   const s = fixture();
   s.borderGauge = true;
   s.quotas = [
@@ -239,17 +239,32 @@ test("dashboard aligns readings, keeps identity left-aligned and insets every ro
   ];
   s.statuses = ["PLAN mode"];
   const rows = mod.renderFooter(s, 160, theme);
-  assert.equal(rows[0], " dotfiles  ⎇ main * ↑2");
+  assert.equal(rows[0], " dotfiles · ⎇ main * ↑2");
   assert.equal(rows[1], " opus-5.5 · reasoning xhigh");
-  assert.equal(rows[2], " Context      28% used");
+  assert.equal(rows[2], " Context 28% used");
   assert.equal(rows[3], " PLAN mode");
-  assert.equal(rows[4], " Claude acct  5h 32% used");
-  assert.equal(rows[5], " Codex acct   week 41% used");
-  assert.equal(rows[2].indexOf("28%"), rows[4].indexOf("5h"));
-  assert.equal(rows[4].indexOf("5h"), rows[5].indexOf("week"));
+  assert.equal(rows[4], " Claude 5h 32% used");
+  assert.equal(rows[5], " Codex week 41% used");
+  assert.ok(rows.every((row) => !/ {2}/.test(row)));
   assert.ok(rows.every((row) => row.startsWith(" ") && !row.endsWith(" ")));
   // Padding is cosmetic, never a reason to lose context on small terminals.
   assert.match(mod.renderFooter(s, 20, theme)[2], /^Context 28% used$/);
+});
+
+test("footer lines share separators, concise labels and unparenthesized qualifiers", () => {
+  const s = fixture();
+  s.borderGauge = true;
+  s.autoEffort = true;
+  s.autoEffortDetail = "→";
+  s.statuses = mod.absorbStatuses(new Map([["tool-gate", "gate: 0 auto · 0 pushed back · 0 asked"]]), { claudeRow: false }).rest;
+  s.quotas = [{ source: "Codex acct", updated: now, windows: [{ label: "week", used: 39, reset: now + 86400_000 }] }];
+  const rows = mod.renderFooter(s, 160, theme);
+  assert.equal(rows[1], " opus-5.5 · reasoning xhigh · auto →");
+  assert.equal(rows[2], " Context 28% used");
+  assert.equal(rows[3], " Gate 0 auto · 0 pushed back · 0 asked");
+  assert.equal(rows[4], " Codex week 39% used · resets in 1d0h");
+  assert.deepEqual(mod.absorbStatuses(new Map([["tool-gate", "gate: off"]]), { claudeRow: false }).rest, ["Gate off"]);
+  assert.deepEqual(mod.absorbStatuses(new Map([["tool-gate", "gate: new format"]]), { claudeRow: false }).rest, ["gate: new format"]);
 });
 
 test("dashboard hierarchy accents sections and quiets countdowns, not alerts", () => {
@@ -259,8 +274,8 @@ test("dashboard hierarchy accents sections and quiets countdowns, not alerts", (
   s.quotas[0].windows[0].used = 95;
   s.cache = "cold";
   mod.renderFooter(s, 160, paint);
-  for (const pair of [["muted", "Context"], ["muted", "Claude acct"], ["muted", "main"], ["muted", "5h"],
-    ["dim", " used"], ["dim", " (resets in 2h14m)"], ["error", "95%"], ["warning", "cold"]]) {
+  for (const pair of [["muted", "Context"], ["muted", "Claude"], ["muted", "main"], ["muted", "5h"],
+    ["dim", " used"], ["dim", "resets in 2h14m"], ["error", "95%"], ["warning", "cold"]]) {
     assert.ok(calls.some(([color, value]) => color === pair[0] && value === pair[1]), pair.join(": "));
   }
 });
@@ -303,11 +318,11 @@ test("quota rows stay text-only at every width and mute stale readings", () => {
   assert.ok(calls.some(([c, v]) => c === "muted" && v === "75%"));
 });
 
-test("dashboard label alignment measures wide characters and bounds long names", () => {
+test("natural labels preserve wide characters and fit long names", () => {
   const s = fixture();
   s.quotas[0].source = "日本語 acct";
   const rows = mod.renderFooter(s, 160, theme);
-  assert.equal(visibleWidth(rows[2].split("28%")[0]), visibleWidth(rows[3].split("5h")[0]));
+  assert.match(rows[3], /^ 日本語 acct 5h/);
   s.quotas[0].source = "a very long account label that must shrink";
   s.statuses = ["診断: 問題なし ".repeat(20)];
   for (let width = 1; width <= 240; width++) {
@@ -333,7 +348,7 @@ test("unknown context and quota do not become zero; stale/reset-due limits remai
   s.quotas[0].windows[0].reset = now - 1;
   assert.match(mod.renderFooter(s, 160, theme)[3], /reset due/);
   s.quotas = []; s.unavailableQuota = "Codex acct";
-  assert.match(mod.renderFooter(s, 80, theme)[3], /Codex acct\s+limits unavailable/);
+  assert.match(mod.renderFooter(s, 80, theme)[3], /Codex\s+limits unavailable/);
 });
 
 test("extension statuses wrap without losing notices or ANSI, no duplicate task UI", () => {
@@ -352,30 +367,30 @@ test("companion extension statuses fold into their rows, and degrade when absent
   ]);
   const absorbed = mod.absorbStatuses(statuses, { claudeRow: true });
   assert.deepEqual(absorbed, { autoEffort: true, lean: "\u221212k tok", cache: "4:12", extraBilled: 3,
-    rest: ["plan: A working (/plan)", "gate: 2 auto \u00b7 0 pushed back \u00b7 1 asked"] });
+    rest: ["plan: A working (/plan)", "Gate 2 auto \u00b7 0 pushed back \u00b7 1 asked"] });
 
   const s = { ...fixture(), thinking: "medium", statuses: absorbed.rest, autoEffort: true, lean: absorbed.lean, cache: absorbed.cache, extraBilled: 3 };
   const rows = mod.renderFooter(s, 200, theme).map(plain);
-  assert.match(rows[1], /reasoning medium \(auto\)/);
-  assert.match(rows[2], /lean \u221212k tok/);
-  assert.match(rows[2], /cache 4:12/);
+  assert.match(rows[1], /reasoning medium · auto/);
+  assert.match(rows[2], /Lean \u221212k tok/);
+  assert.match(rows[2], /Cache 4:12/);
   for (const text of ["cache cold", "cache cold (model)", "cache cold?", "cache 1h05m"]) {
     assert.equal(mod.absorbStatuses(new Map([["cache-guard", text]]), { claudeRow: false }).cache, text.slice(6));
   }
   assert.deepEqual(mod.absorbStatuses(new Map([["cache-guard", "cache is weird"]]), { claudeRow: false }).rest, ["cache is weird"]);
   assert.match(rows.at(-1), /3 requests billed to extra usage/);
   assert.doesNotMatch(rows.join("\n"), /effort:|lean:|extra usage x3|cache-guard/);
-  assert.match(rows[3], /plan: A working.* gate: /);
+  assert.match(rows[3], /plan: A working.* Gate /);
   // The model never drops for a companion's segment, and every row fits.
   for (let width = 1; width <= 160; width++) assert.ok(mod.renderFooter(s, width, theme).every((row) => visibleWidth(row) <= width));
   assert.match(plain(mod.renderFooter(s, 50, theme).at(-1)), /extra x3/);
 
-  // The trend arrow and a limit note ride along inside the parentheses.
+  // The trend arrow and limit note follow the same dot separator.
   for (const [text, shown] of [["effort: low (auto \u2192)", "auto \u2192"], ["effort: medium (auto \u2193, limited: 5h 84%)", "auto \u2193, limited: 5h 84%"]]) {
     const a = mod.absorbStatuses(new Map([["auto-effort", text]]), { claudeRow: false });
     assert.deepEqual(a.rest, []);
     const row = plain(mod.renderFooter({ ...fixture(), thinking: "low", statuses: a.rest, autoEffort: a.autoEffort, autoEffortDetail: a.autoEffortDetail }, 200, theme)[1]);
-    assert.ok(row.includes(`reasoning low (${shown})`), row);
+    assert.ok(row.includes(`reasoning low · ${shown}`), row);
   }
 
   // Companions not installed (no statuses): the plain footer.
@@ -550,7 +565,7 @@ test("a real linked worktree with broken common metadata is unavailable, not out
     h = host([], linked, "tui", "fallback");
     h.ctx.model = { provider: "test", id: "test", contextWindow: 1000 };
     await h.handlers.get("session_start")({}, h.ctx);
-    await vi.waitFor(() => assert.match(h.footer.render(160)[0], /linked  ⎇ /));
+    await vi.waitFor(() => assert.match(h.footer.render(160)[0], /linked · ⎇ /));
     // Explicit admin-directory selection reproduces Git's non-discovery fatal;
     // the worktree still points at real but now invalid common metadata.
     process.env.GIT_DIR = path.join(main, ".git", "worktrees", "linked");
@@ -956,7 +971,7 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
     assert.match(h.footer.render(120)[0], /!/, "unmeasured Git state is not clean");
     assert.doesNotMatch(plain(h.footer.render(120)[1]), /\(auto\)/);
     h.statuses.set("auto-effort", "effort: xhigh (auto)");
-    assert.match(plain(h.footer.render(120)[1]), /reasoning xhigh \(auto\)/);
+    assert.match(plain(h.footer.render(120)[1]), /reasoning xhigh · auto/);
     assert.doesNotMatch(h.footer.render(120).join("\n"), /effort:/);
     h.statuses.delete("auto-effort");
     assert.doesNotMatch(plain(h.footer.render(120)[1]), /\(auto\)/);
@@ -964,18 +979,18 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
     assert.equal(fetches.length, 1);
     assert.equal(fetches[0].url, "https://chatgpt.com/backend-api/wham/usage");
     assert.equal(fetches[0].headers["chatgpt-account-id"], "acct-1");
-    assert.match(h.footer.render(120).join("\n"), /Codex acct\s+week 25% used \(resets in 1d0h\)  │  gpt-reserve 0% used/);
-    assert.doesNotMatch(h.footer.render(120).join("\n"), /Claude acct/);
+    assert.match(h.footer.render(120).join("\n"), /Codex\s+week 25% used · resets in 1d0h · gpt-reserve 0% used/);
+    assert.doesNotMatch(h.footer.render(120).join("\n"), /Claude/);
     await h.handlers.get("after_provider_response")({ headers: {
       "x-codex-primary-used-percent": "45", "x-codex-primary-window-minutes": "10080" } }, h.ctx);
-    assert.match(h.footer.render(120).join("\n"), /Codex acct\s+week 45% used.*gpt-reserve 0%/);
+    assert.match(h.footer.render(120).join("\n"), /Codex\s+week 45% used.*gpt-reserve 0%/);
     for (const timer of timers) timer.callback();
     await settle();
     assert.equal(fetches.length, 1, "usage endpoint is throttled");
     await h.handlers.get("model_select")({}, h.ctx);
     assert.match(h.footer.render(120).join("\n"), /week 45%/, "account limits survive a model switch");
     await h.commands.get("status").handler("all", h.ctx);
-    assert.match(h.footer.render(120).join("\n"), /Claude acct\s+limits unavailable/);
+    assert.match(h.footer.render(120).join("\n"), /Claude\s+limits unavailable/);
     await h.commands.get("status").handler("native", h.ctx);
     assert.equal(h.footer, undefined);
     assert.ok(h.disposed >= 2);
@@ -988,9 +1003,9 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
     assert.ok(h.footer);
     h.ctx.model = { provider: "radius", id: "balanced", reasoning: false };
     await h.handlers.get("model_select")({}, h.ctx);
-    assert.doesNotMatch(h.footer.render(120).join("\n"), /Claude acct|Codex|45%/);
+    assert.doesNotMatch(h.footer.render(120).join("\n"), /Claude|Codex|45%/);
     await h.commands.get("status").handler("all", h.ctx);
-    assert.match(h.footer.render(120).join("\n"), /Codex acct\s+week/, "/status all shows Codex on other providers");
+    assert.match(h.footer.render(120).join("\n"), /Codex\s+week/, "/status all shows Codex on other providers");
     await h.commands.get("status").handler("on", h.ctx);
     h.entries.push({ type: "usage", usage: usage(4) });
     for (const timer of timers) timer.callback();

@@ -67,9 +67,9 @@ instead of the status row:
 
 | Extension | Status | Shown as |
 | --- | --- | --- |
-| pi-auto-effort | `effort: high (auto ↑)` | `reasoning high (auto ↑)` on the model row (arrow and any `limited:` note kept) |
-| pi-cache-guard | `cache 4:12`, `cache cold` | `cache 4:12` on the context row (warm in green, cold in the warning color) |
-| pi-cache-guard (Jev trimming, key `lean-context`) | `lean: −12k tok` | `lean −12k tok` on the context row |
+| pi-auto-effort | `effort: high (auto ↑)` | `reasoning high · auto ↑` on the model row (arrow and any `limited:` note kept) |
+| pi-cache-guard | `cache 4:12`, `cache cold` | `Cache 4:12` on the context row (warm in green, cold in the warning color) |
+| pi-cache-guard (Jev trimming, key `lean-context`) | `lean: −12k tok` | `Lean −12k tok` on the context row |
 | anthropic-billing-guard | `extra usage x3` | `3 requests billed to extra usage` on the Claude limits row |
 | @saadjs/pi-stash | `prompt stashed` | `› Stashed · "first line…" +2 lines · ctrl+s to restore` as the top row, just under the editor |
 | pi-marimo | `marimo: fit.py · running Data loading › Model fit (12s) · 1 error · also prep.py, plots.py` | its own row under the context row: the current notebook (bold) and its kernel, then the other notebooks it follows; when narrow, the others become a count and the section its deepest heading |
@@ -78,19 +78,21 @@ instead of the status row:
 Without them nothing changes. A status whose text no longer has the expected shape,
 or a billing notice with no Claude limits row to attach to, stays in the status row
 unchanged, so a notice is never lost. pi-plan-mode, pi-tool-gate and MCP statuses
-always stay in the status row.
+always stay in the status row. The recognized tool-gate status displays as
+`Gate 2 auto · 0 pushed back · 1 asked` (example), or `Gate off`.
 
 Estimated session cost, cache reuse, raw token counts, Git line counts, OAuth details, age and compaction
 counts are available through `/status details`, not crowded into the footer.
 
-At 60 columns and up, all rows have a one-cell inset and context/account readings
-share a label column. Narrower terminals omit that padding. Project and model
-anchor the display with accent color; aligned section labels and ordinary readings
-stay neutral. A terminal-safe `⎇` marks the branch without requiring a Nerd Font.
+At 60 columns and up, all rows have a one-cell inset. Narrower terminals omit
+that padding. Labels use natural single-space spacing, not aligned columns.
+Project and model anchor the display with accent color; section labels and
+ordinary readings stay neutral. A terminal-safe `⎇` marks the branch without requiring a Nerd Font.
 Reasoning levels use Pi's native thinking colors. Context and quota percentages
 are bold; warm caches and ready services are green, while warnings and errors
-retain their semantic colors. Quota windows are text-only, separated by a dim
-`│`, with quiet reset countdowns. The model row is separate from the project row;
+retain their semantic colors. Distinct pieces of information use a dim `·`;
+auto reasoning and reset countdowns have no parentheses. Quota windows are
+text-only, labeled `Claude` or `Codex`, with quiet reset countdowns. The model row is separate from the project row;
 no background blocks are added.
 
 Rows shorten and drop lower-priority segments to fit actual terminal cell width.
