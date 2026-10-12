@@ -85,21 +85,21 @@ counts are available through `/status details`, not crowded into the footer.
 
 At 60 columns and up, all rows have a one-cell inset and context/account readings
 share a label column. Narrower terminals omit that padding. Project and model
-anchor the display; aligned section labels share their accent, while Git identity,
-secondary labels and reset countdowns are quieter. Reasoning levels use Pi's native
-thinking colors. Context and quota percentages are bold; healthy account readings,
-warm caches and ready services are green, while warnings and errors retain their
-semantic colors. At 100 columns and up, fresh quota windows get four-cell meters;
-they shorten away before readings and never appear for stale data. The model row is separate from the project
-row; no background blocks are added.
+anchor the display with accent color; aligned section labels and ordinary readings
+stay neutral. A terminal-safe `⎇` marks the branch without requiring a Nerd Font.
+Reasoning levels use Pi's native thinking colors. Context and quota percentages
+are bold; warm caches and ready services are green, while warnings and errors
+retain their semantic colors. Quota windows are text-only, separated by a dim
+`│`, with quiet reset countdowns. The model row is separate from the project row;
+no background blocks are added.
 
 Rows shorten and drop lower-priority segments to fit actual terminal cell width.
 Model/context and the most-used quota win over secondary statistics. At extremely
 small widths any remaining text is safely truncated. Colors come from the active
 Pi theme, except that the accent (project, model, gauges) is lifted halfway toward the
 theme's body text so it stands out from muted text (same hue; pi >= 1.1). Warnings
-start at 70% used, errors at 90%. No fresh-looking gauge is drawn
-for stale account data.
+start at 70% used, errors at 90%. Stale account readings are muted and explicitly
+labeled.
 
 ## What the numbers mean
 

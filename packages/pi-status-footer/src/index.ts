@@ -614,7 +614,7 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     visibleWidth(clean(s.unavailableQuota ?? "")))) : 0;
   const label = (text: string) => {
     const value = clean(text);
-    return theme.fg("accent", value) + " ".repeat(Math.max(1, labelWidth - visibleWidth(value) + 2));
+    return theme.fg("muted", value) + " ".repeat(Math.max(1, labelWidth - visibleWidth(value) + 2));
   };
   const rows: string[] = [];
   const sep = theme.fg("dim", " · ");
@@ -631,8 +631,9 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   ].filter(Boolean).join(" ");
   const project = theme.bold(theme.fg("accent", clean(g.project ?? (path.basename(s.cwd) || s.cwd))));
   const suffix = marks ? `${g.branch ? " " : ""}${marks}` : "";
-  const branch = outsideGit ? "" : `${theme.fg("muted", clean(g.branch ?? ""))}${suffix}`;
-  const branchShort = outsideGit ? "" : `${theme.fg("muted", truncateToWidth(clean(g.branch ?? ""), 14))}${suffix}`;
+  const branchIcon = g.branch ? theme.fg("dim", "⎇ ") : "";
+  const branch = outsideGit ? "" : `${branchIcon}${theme.fg("muted", clean(g.branch ?? ""))}${suffix}`;
+  const branchShort = outsideGit ? "" : `${branchIcon}${theme.fg("muted", truncateToWidth(clean(g.branch ?? ""), 14))}${suffix}`;
   const phaseText = s.phase ? theme.fg(s.phase === "error" ? "error" : "warning", s.phase) : "";
   const model = theme.bold(theme.fg("accent", shortModel(s.model)));
   const auto = s.autoEffort ? ` (auto${s.autoEffortDetail ? ` ${clean(s.autoEffortDetail)}` : ""})` : "";
@@ -641,7 +642,7 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     : "";
   const identity = `${model}${reasoning ? `${sep}${reasoning}` : ""}`;
   rows.push(fitSegments([
-    { text: project, priority: 60 },
+    { text: project, priority: 60, separatorAfter: "  " },
     { text: branch, short: branchShort, priority: g.conflicts ? 110 : 70 },
     { text: s.sessionName ? theme.fg("dim", clean(s.sessionName)) : "", priority: 10 },
   ], width, theme));
@@ -652,8 +653,8 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   ], width, theme));
 
   const context = s.context.percent;
-  const ctxValue = context === null ? theme.fg("muted", "unknown") : theme.bold(theme.fg(heat(context), percent(context)));
-  const ctxShort = `${theme.fg("accent", "Context")} ${ctxValue}`;
+  const ctxValue = context === null ? theme.fg("muted", "unknown") : theme.bold(theme.fg(context < 70 ? "muted" : heat(context), percent(context)));
+  const ctxShort = `${theme.fg("muted", "Context")} ${ctxValue}`;
   const ctxLong = `${label("Context")}${ctxValue}${context === null ? "" : theme.fg("dim", " used")}${context === null || s.borderGauge ? "" : ` ${gauge(theme, context)}`}`;
   rows.push(fitSegments([
     { text: ctxLong, short: ctxShort, priority: 100 },
@@ -679,12 +680,11 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     const windows = quota.windows.map((w): Segment => {
       let reset = "";
       if (w.reset !== undefined) reset = w.reset <= s.now ? theme.fg("warning", " reset due") : theme.fg("dim", ` (resets in ${duration(w.reset - s.now)})`);
-      const color = stale ? "muted" : w.used < 70 ? "success" : heat(w.used);
+      const color = stale || w.used < 70 ? "muted" : heat(w.used);
       const val = `${theme.fg("muted", clean(w.label))} ${theme.bold(theme.fg(color, percent(w.used)))}${theme.fg("dim", " used")}`;
-      // Meters are secondary: compact forms keep the reading, never a stale gauge.
-      const meter = !stale && width >= 98 ? ` ${gauge(theme, w.used, 4, "success")}` : "";
-      return { text: `${val}${meter}${reset}`, short: val,
-        priority: 50 + Math.min(100, w.used) };
+      // Text-only quota windows keep account rows quiet at every width.
+      return { text: `${val}${reset}`, short: val,
+        separatorAfter: theme.fg("dim", "  │  "), priority: 50 + Math.min(100, w.used) };
     });
     const extra = quota.extra;
     // An exhausted historical extra-usage pool is not an alert if extra is off.
@@ -700,7 +700,7 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     const staleText = `stale ${duration(age)}${expired ? " / reset due" : ""}`;
     const billed = quota.source === "Claude acct" ? s.extraBilled : undefined;
     const segments: Segment[] = [
-      { text: label(quota.source), short: `${theme.fg("accent", clean(quota.source))} `, separatorAfter: "", priority: 200 },
+      { text: label(quota.source), short: `${theme.fg("muted", clean(quota.source))} `, separatorAfter: "", priority: 200 },
       { text: stale ? theme.fg("warning", staleText) : "", short: stale ? theme.fg("warning", "stale") : "", priority: 210 },
       ...windows,
       { text: extraText ? theme.fg(extraColor, extraText) : "", short: extra?.enabled ? "extra on" : "", priority: extra?.enabled ? 75 : 5 },
