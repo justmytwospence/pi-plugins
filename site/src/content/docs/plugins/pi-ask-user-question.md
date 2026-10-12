@@ -56,15 +56,24 @@ The questionnaire replaces the editor while leaving the transcript above it. Mul
 
 | Key | Action |
 | --- | --- |
-| Up/Down or `j`/`k` | Move through rows, wrapping at either end. |
-| `1`–`9` | Highlight a row without submitting it. |
+| Up/Down | Move through rows, wrapping at either end. |
+| `j`/`k` or `1`–`9` on offered options | Navigate or highlight a row without submitting it. |
+| Typing or paste on `Type something.` | Start an answer immediately; `n`, `j`, `k`, and digits are text here. |
 | Enter | Choose a single answer, open free-text entry, or finish a multi-select question. |
 | Space | Toggle a checkbox in multi-select. |
-| `n` | Add a note to the answer. |
+| `n` on an offered option, or Ctrl+G on any row | Add a note, distinct from the free-text answer. |
 | Tab / Shift+Tab or Left/Right | Move between question tabs. |
 | Esc | Leave an editor while retaining its draft; otherwise decline the questionnaire. |
 
-In text and note editors, Enter saves and Shift+Enter inserts a newline. Multi-select accepts checked choices plus a typed answer. If nothing is checked when Enter finishes a multi-select question, the highlighted option is used alone. On Review, Enter submits; unanswered questions remain explicitly unanswered.
+In text and note editors, Enter saves and Shift+Enter inserts a newline. An empty answer keeps the editor open with guidance. Multi-select accepts checked choices plus a typed answer; a typed answer alone is also valid. The answer field uses the full width without a preview box. If nothing is checked when Enter finishes a multi-select question, the highlighted option is used alone. On Review, Enter submits; unanswered questions remain explicitly unanswered. Unsaved answer and note drafts are visible, and Enter returns to the first unfinished field before submitting.
+
+With pi-vim enabled, opening or reopening a field starts in Insert mode. The footer shows the editor state; in Normal mode it also shows `i` to resume typing. Escape first leaves Insert/Visual mode, then returns to the list while retaining the draft. Autocomplete likewise gets Escape before the questionnaire does.
+
+### Interaction design
+
+This suite-owned component keeps Claude Code-compatible tool arguments without duplicating another `ask_user_question` provider. Its interaction design draws on [Claude Code's printable-text routing](https://code.claude.com/docs/en/keybindings#text-fields), [Codex's inline custom-answer flow](https://github.com/openai/codex/blob/rust-v0.162.1/codex-rs/tui/src/bottom_pane/async_questions/input.rs), and [OpenCode's separate composition and confirmation states](https://github.com/anomalyco/opencode/blob/v1.19.0/packages/tui/src/routes/session/question.tsx).
+
+For our terminal setup, text owns its keys, highlights do not submit, batches retain Review, and Vim fields reopen ready to type. Notes remain supplementary, never a substitute for an answer. These are this plugin's choices, not a claim that every harness variant behaves identically.
 
 ## Results and host differences
 

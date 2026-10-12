@@ -2,10 +2,12 @@ import type { ExtensionAPI, KeybindingsManager } from "@earendil-works/pi-coding
 import { Editor, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
 
 const EDITOR_MODE = Symbol.for("pi-plugins.editor-mode.v1");
+const EDITOR_INSERT = Symbol.for("pi-plugins.editor-insert.v1");
 /** Optional structural protocol: no runtime import from a sibling package. */
 export type ProseEditor = Pick<Editor, "focused" | "getText" | "setText" | "onSubmit" | "render" | "handleInput" | "invalidate" | "isShowingAutocomplete"> & {
   dispose?(): void;
   [EDITOR_MODE]?: () => { state: string };
+  [EDITOR_INSERT]?: () => void;
 };
 export type EditorCreator = (tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager, onSubmit: (text: string) => void, onCancel: () => void) => ProseEditor;
 
@@ -14,11 +16,20 @@ export function embeddedEditorFactory(pi: ExtensionAPI): EditorCreator {
     const request: { version: 1; factory?: (options: unknown) => ProseEditor } = { version: 1 };
     try { pi.events.emit("pi-plugins.editor-factory.v1", request); } catch { /* Optional providers cannot disable native composition. */ }
     let editor: ProseEditor | undefined;
-    try { editor = request.factory?.({ surface: "embedded", tui, theme, keybindings, onSubmit, onCancel }); } catch { /* Native fallback for an incompatible provider. */ }
+    try { editor = request.factory?.({ surface: "embedded", initialMode: "insert", tui, theme, keybindings, onSubmit, onCancel }); } catch { /* Native fallback for an incompatible provider. */ }
     editor ??= new Editor(tui, theme);
     editor.onSubmit = onSubmit;
     return editor;
   };
+}
+
+/** Explicitly opening a composition field must not resume a modal editor in Normal mode. */
+export function beginComposition(editor: ProseEditor): void {
+  editor[EDITOR_INSERT]?.();
+}
+
+export function compositionState(editor: ProseEditor): string | undefined {
+  return editor[EDITOR_MODE]?.().state;
 }
 
 /** A modal editor's first cancellation key belongs to its active input substate. */

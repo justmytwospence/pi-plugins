@@ -68,15 +68,16 @@ It takes the place of the editor, like Claude Code's: the transcript stays visib
 
 | Key | Does |
 |---|---|
-| Your `tui.select.up`/`tui.select.down` keys, `k`/`j`, Ctrl+K/Ctrl+J | move, wrapping |
-| 1-9 | highlight that row (does not choose it) |
+| Your `tui.select.up`/`tui.select.down` keys, Ctrl+K/Ctrl+J | move, wrapping |
+| `k`/`j`, 1-9 | navigate or highlight without choosing; on the free-text row, start typing an answer instead |
 | Enter (`tui.select.confirm`) | choose the highlighted option; on `Type something.` open the editor; in multi-select, finish the question (with nothing checked, the highlighted option alone) |
 | Space | check or uncheck an option (multi-select); on `Type something.` open the editor if nothing is typed yet |
-| `n` | add a note to the question's answer |
+| Typing or paste on `Type something.` | open the answer field and retain the first character, including `n`, `j`, `k`, or digits |
+| `n` on an offered option, or Ctrl+G on any row | add a note to the question's answer |
 | Tab, Shift+Tab, Right, Left | next or previous question or Review (several questions only) |
 | Esc (`tui.select.cancel`) | in an editor, leave it keeping the draft; otherwise decline the questionnaire |
 
-In the `Type something.` and notes editors, Enter saves and Shift+Enter starts a new line. Saving typed text answers a single-select question, or checks the text and finishes a multi-select one. If the editor is showing autocomplete, or is a modal editor (from an editor provider, below) that is not in its normal mode, Esc goes to the editor first. On the Review tab, Enter submits and Esc declines; questions left blank are reported as unanswered. If the tool call is aborted, the dialog closes as declined.
+In the `Type something.` and notes editors, Enter saves and Shift+Enter starts a new line. A free-text answer needs no offered option, including in multi-select. Empty answer submission keeps the editor open with guidance. Saving typed text answers a single-select question, or checks the text and finishes a multi-select one. Free-text composition uses the full width, without an irrelevant preview box. If the editor is showing autocomplete, or is a modal editor (from an editor provider, below) that is not in its normal mode, Esc goes to the editor first. On the Review tab, Enter submits and Esc declines; questions left blank are reported as unanswered. Unsaved answer/note drafts are shown on Review; Enter returns to the first unfinished field instead of silently dropping it. If the tool call is aborted, the dialog closes as declined.
 
 ## Hosts
 
@@ -95,7 +96,7 @@ Nothing external: no network access, no model calls, no files read or written.
 ## Optional integrations
 
 - **Herdr**: while the user is being asked (terminal dialog or native dialogs), the tool emits `herdr:blocked` on Pi's event bus: `{ active: true, label }` when the dialog opens and `{ active: false }` when it closes, however it closes. The label is the question headers (or questions) joined by ` · `, cut to 60 characters. Herdr's Pi integration shows the pane as blocked for as long as the hold lasts. Outside Herdr nothing listens.
-- **Editor providers** (for example pi-vim): the `Type something.` and notes editors ask for an editor on the `pi-plugins.editor-factory.v1` event channel; a provider that answers supplies the editor, otherwise Pi's standard editor is used.
+- **Editor providers** (for example pi-vim): the `Type something.` and notes editors ask for an editor on the `pi-plugins.editor-factory.v1` event channel; a provider that answers supplies the editor, otherwise Pi's standard editor is used. Opening or reopening a field requests Insert mode through the optional editor protocol. The footer shows modal state, `i` in Normal mode, and whether Enter uses an answer or saves a note.
 - **pi-subagents**: forwards a subagent child's native dialogs to you.
 - **pi-tool-gate**: `ask_user_question` is on its default allow list.
 
@@ -112,7 +113,7 @@ npm ci
 npm run check
 ```
 
-`npm run check` runs `tsc --noEmit` and the vitest unit tests. For the full suite, the repository root's `npm run check` runs every component's check after the root loader test.
+`npm run check` runs `tsc --noEmit` and the vitest unit tests. Root `npm test` also checks composition with real native and Vim editors through regular/fullscreen TUI keyboard routing, including drafts, re-entry and custom-only multi-select. These component integration checks are not full session-lifecycle tests. Root `npm run check` additionally runs every component's check.
 
 ## License
 

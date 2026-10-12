@@ -57,6 +57,22 @@ describe("single question", () => {
     expect(d.result?.answers[0]).toMatchObject({ kind: "custom", answer: "draft" });
   });
 
+  test.each(["n", "j", "k", "1", " ", "é", "你好", "𝛼", "\x1b[110u", "\x1b[200~pasted answer\x1b[201~"])("typing on the custom row starts an answer, not a list action: %j", (first) => {
+    const d = dialog([library], ["3", first, ...type("answer"), enter]);
+    const prefix = first === "\x1b[110u" ? "n" : first.startsWith("\x1b[200~") ? "pasted answer" : first;
+    expect(d.result?.answers[0]).toMatchObject({ kind: "custom", answer: `${prefix}answer`.trim() });
+    expect(d.result?.answers[0]?.notes).toBeUndefined();
+  });
+
+  test("an empty typed answer stays in the editor with guidance", () => {
+    const d = dialog([library], ["3", enter, enter]);
+    expect(d.result).toBeUndefined();
+    expect(screen(d.frames.at(-1))).toContain("Write an answer before continuing.");
+    d.dialog.handleInput("n");
+    d.dialog.handleInput(enter);
+    expect(d.result?.answers[0]).toMatchObject({ kind: "custom", answer: "n" });
+  });
+
   test("an empty typed answer is no answer", () => {
     const d = dialog([library], ["3", enter, enter]);
     expect(d.result).toBeUndefined();
@@ -67,6 +83,16 @@ describe("single question", () => {
     expect(screen(d.frames[2])).toMatch(/Notes:/u);
     expect(screen(d.frames.at(-2))).toMatch(/note: only if small/u);
     expect(d.result?.answers[0]).toMatchObject({ answer: "date-fns", notes: "only if small" });
+  });
+
+  test("Ctrl+G adds a note on the custom row without stealing answer characters", () => {
+    const d = dialog([library], ["3", "\x07", ...type("context"), enter, "n", ...type("one of these"), enter]);
+    expect(d.result?.answers[0]).toMatchObject({ kind: "custom", answer: "none of these", notes: "context" });
+  });
+
+  test("arrows leave the highlighted custom row without opening an editor", () => {
+    const d = dialog([library], ["3", up, enter]);
+    expect(d.result?.answers[0]).toMatchObject({ kind: "option", answer: "dayjs" });
   });
 
   test("Esc cancels", () => {
@@ -92,6 +118,11 @@ describe("multi-select", () => {
 
   test("Enter with nothing checked picks the highlighted option", () => {
     expect(dialog([features], [down, enter]).result?.answers[0]).toMatchObject({ selected: ["Billing"] });
+  });
+
+  test("a custom answer alone needs no offered option", () => {
+    const d = dialog([features], ["4", "n", ...type("one of these"), enter]);
+    expect(d.result?.answers[0]).toMatchObject({ kind: "multi", selected: ["none of these"] });
   });
 
   test("typed text is one more selected item", () => {
@@ -128,6 +159,20 @@ describe("several questions", () => {
     expect(d.result?.answers.map((a) => a.kind)).toEqual(["unanswered", "unanswered"]);
   });
 
+  test.each(["custom", "notes"])("Review exposes unsaved %s and returns to it before submission", (kind) => {
+    const keys = kind === "custom" ? ["3", "n"] : ["n", "n"];
+    const d = dialog(both, [...keys, ...type("draft"), esc, shiftTab]);
+    expect(screen(d.frames.at(-1))).toContain(`unsaved ${kind === "custom" ? "answer" : "note"}: ndraft`);
+    d.dialog.handleInput(enter);
+    expect(screen(d.dialog.render(100))).toContain(kind === "custom" ? "Your answer:" : "Notes:");
+    expect(d.result).toBeUndefined();
+    d.dialog.handleInput(enter);
+    if (kind === "notes") d.dialog.handleInput(enter);
+    d.dialog.handleInput(enter);
+    d.dialog.handleInput(enter);
+    expect(d.result?.answers[0]).toMatchObject(kind === "custom" ? { kind: "custom", answer: "ndraft" } : { answer: "date-fns", notes: "ndraft" });
+  });
+
   test("tabs do not switch while an editor is open", () => {
     const d = dialog(both, ["n", tab]);
     expect(screen(d.frames.at(-1))).toMatch(/Which date library/u);
@@ -159,6 +204,14 @@ describe("previews", () => {
     const typeRow = lines.findIndex((line) => line.includes("Type something."));
     expect(top).toBeGreaterThan(typeRow);
     expect(lines[top]).not.toMatch(/Sidebar/u);
+  });
+
+  test("a custom answer gets the full width instead of an irrelevant preview", () => {
+    const d = dialog([layouts], ["3", "n"], { columns: 120 });
+    const text = screen(d.frames.at(-1));
+    expect(text).toContain("Your answer:");
+    expect(text).not.toContain("No preview for this option");
+    expect(text).not.toContain("┌");
   });
 
   test("a long preview is cut with a count", () => {

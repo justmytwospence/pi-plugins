@@ -18,7 +18,7 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { type EditorCreator, type ProseEditor, editorOwnsCancel } from "./editor.ts";
+import { type EditorCreator, type ProseEditor, beginComposition, compositionState, editorOwnsCancel } from "./editor.ts";
 import { box, columns, leftWidth, rightWidth, SIDE_ROWS, sideBySide, STACKED_ROWS } from "./preview.ts";
 import { type Answer, type Choice, type DialogResult, makeAnswer } from "./result.ts";
 import { type Question, TYPE_SOMETHING } from "./schema.ts";
@@ -60,6 +60,7 @@ export class QuestionDialog implements Component, Focusable {
   /** The open tab: a question, or `questions.length` for Review. */
   private tab = 0;
   private editing: Editing | undefined;
+  private emptyAnswer = false;
   private finished = false;
   private hasFocus = false;
   private cache: { width: number; lines: string[] } | undefined;
@@ -119,6 +120,7 @@ export class QuestionDialog implements Component, Focusable {
   private input(data: string): void {
     const kb = this.keybindings;
     if (this.editing) {
+      this.emptyAnswer = false;
       const editor = this.editor();
       if (editor && kb.matches(data, "tui.select.cancel") && !editorOwnsCancel(editor)) this.closeEditor();
       else editor?.handleInput(data);
@@ -129,7 +131,7 @@ export class QuestionDialog implements Component, Focusable {
     if (!reserved && many && (matchesKey(data, Key.tab) || matchesKey(data, Key.right))) return this.go(1);
     if (!reserved && many && (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left))) return this.go(-1);
     if (this.onReview()) {
-      if (kb.matches(data, "tui.select.confirm")) this.finish(false);
+      if (kb.matches(data, "tui.select.confirm")) this.submitReview();
       else if (kb.matches(data, "tui.select.cancel")) this.finish(true);
       return;
     }
@@ -139,6 +141,14 @@ export class QuestionDialog implements Component, Focusable {
     const key = printable(data);
     if (kb.matches(data, "tui.select.confirm")) return this.confirm(q, slot);
     if (kb.matches(data, "tui.select.cancel")) return this.finish(true);
+    // A highlighted text row is a composition target: printable input and paste
+    // belong to the answer, before n/j/k/digits can become list commands.
+    if (!reserved && slot.cursor === q.options.length && (isTextInput(data) || (key === " " && (!q.multiSelect || !slot.typed)))) {
+      this.openEditor("custom");
+      slot.custom.handleInput(data);
+      return;
+    }
+    if (matchesKey(data, "ctrl+g")) return this.openEditor("notes");
     if (kb.matches(data, "tui.select.up") || matchesKey(data, "ctrl+k") || key === "k") slot.cursor = (slot.cursor - 1 + rows) % rows;
     else if (kb.matches(data, "tui.select.down") || matchesKey(data, "ctrl+j") || key === "j") slot.cursor = (slot.cursor + 1) % rows;
     else if (key && /^[1-9]$/u.test(key)) {
@@ -180,19 +190,25 @@ export class QuestionDialog implements Component, Focusable {
     const q = this.questions[index]!;
     const slot = this.slots[index]!;
     const text = raw.trim();
+    if (!text) {
+      slot.custom.setText(raw);
+      slot.typed = "";
+      if (q.multiSelect) {
+        slot.typedChecked = false;
+        this.updateMulti(q, slot);
+      } else if (slot.choice?.kind === "custom") slot.choice = undefined;
+      this.emptyAnswer = true;
+      beginComposition(slot.custom);
+      return;
+    }
     slot.custom.setText(text); // submitting empties the editor; keep the text as the draft
     slot.typed = text;
     this.closeEditor();
     if (q.multiSelect) {
-      slot.typedChecked = text.length > 0;
+      slot.typedChecked = true;
       this.updateMulti(q, slot);
-      if (text) this.advance();
-      return;
-    }
-    if (text) {
-      slot.choice = { kind: "custom", text };
-      this.advance();
-    } else if (slot.choice?.kind === "custom") slot.choice = undefined;
+    } else slot.choice = { kind: "custom", text };
+    this.advance();
   }
 
   private saveNote(index: number, raw: string): void {
@@ -206,11 +222,14 @@ export class QuestionDialog implements Component, Focusable {
     const slot = this.slots[this.tab]!;
     if (kind === "custom") slot.cursor = this.questions[this.tab]!.options.length;
     this.editing = kind;
+    this.emptyAnswer = false;
+    beginComposition(kind === "custom" ? slot.custom : slot.notes);
     this.syncFocus();
   }
 
   private closeEditor(): void {
     this.editing = undefined;
+    this.emptyAnswer = false;
     this.syncFocus();
   }
 
@@ -246,6 +265,20 @@ export class QuestionDialog implements Component, Focusable {
   private go(direction: 1 | -1): void {
     const tabs = this.questions.length + 1;
     this.tab = (this.tab + direction + tabs) % tabs;
+  }
+
+  /** Review never silently drops text left behind with Escape. */
+  private submitReview(): void {
+    for (let i = 0; i < this.slots.length; i++) {
+      const slot = this.slots[i]!;
+      const kind = slot.custom.getText().trim() !== slot.typed ? "custom" : slot.notes.getText().trim() !== slot.note ? "notes" : undefined;
+      if (kind) {
+        this.tab = i;
+        this.openEditor(kind);
+        return;
+      }
+    }
+    this.finish(false);
   }
 
   private onReview(): boolean {
@@ -325,12 +358,15 @@ export class QuestionDialog implements Component, Focusable {
     const hint = q.multiSelect ? t.fg("muted", " (select all that apply)") : "";
     out.push(...hang(" ", `${chip}${t.bold(t.fg("text", q.question))}${hint}`, width), "");
 
-    const hasPreview = !q.multiSelect && q.options.some((o) => o.preview);
+    const hasPreview = !q.multiSelect && slot.cursor < q.options.length && q.options.some((o) => o.preview);
     if (hasPreview && sideBySide(width)) {
       const left = leftWidth(width, this.naturalWidth(q));
       out.push(...columns(this.options(q, slot, left), this.preview(slot, rightWidth(width, left), SIDE_ROWS), left));
     } else out.push(...this.options(q, slot, width));
-    if (this.editing === "custom") out.push(...indent(slot.custom.render(Math.max(1, width - 4)), 4));
+    if (this.editing === "custom") {
+      out.push(` ${t.fg("accent", "Your answer:")}`, ...indent(slot.custom.render(Math.max(1, width - 4)), 4));
+      if (this.emptyAnswer) out.push(...hang("   ", t.fg("warning", "Write an answer before continuing."), width));
+    }
     if (hasPreview && !sideBySide(width) && width >= 8) out.push("", ...indent(this.preview(slot, width - 2, STACKED_ROWS), 1));
 
     if (this.editing === "notes") out.push("", ` ${t.fg("accent", "Notes:")}`, ...indent(slot.notes.render(Math.max(1, width - 2)), 1));
@@ -392,6 +428,9 @@ export class QuestionDialog implements Component, Focusable {
           : `${a.kind === "custom" ? t.fg("muted", "(wrote) ") : ""}${t.fg("text", oneLine(a.answer ?? ""))}`;
       out.push(...hang(` ${t.fg("accent", clipHeader(q.header || `Q${i + 1}`))}${t.fg("muted", " → ")}`, value, width));
       if (a.notes) out.push(...hang("   ", t.fg("dim", `note: ${oneLine(a.notes)}`), width));
+      for (const [draft, saved, label] of [[slot.custom.getText().trim(), slot.typed, "answer"], [slot.notes.getText().trim(), slot.note, "note"]] as const) {
+        if (draft !== saved) out.push(...hang("   ", t.fg("warning", `unsaved ${label}: ${oneLine(draft) || "(cleared)"}`), width));
+      }
     });
     return out;
   }
@@ -400,20 +439,40 @@ export class QuestionDialog implements Component, Focusable {
     const hint = (action: "tui.select.confirm" | "tui.select.cancel" | "tui.input.submit" | "tui.input.newLine", label: string) => rawKeyHint(this.keybindings.getKeys(action).join("/") || "unbound", label);
     const many = this.questions.length > 1;
     if (this.editing) {
-      return [hint("tui.input.submit", "save"), hint("tui.input.newLine", "newline"), hint("tui.select.cancel", "back")].join("  ");
+      const state = compositionState(this.editor()!);
+      const action = this.editing === "custom" ? "use answer" : "save note";
+      return [
+        ...(state ? [state.toUpperCase()] : []),
+        ...(state === "normal" ? [rawKeyHint("i", "insert")] : []),
+        hint("tui.input.submit", action),
+        hint("tui.input.newLine", "newline"),
+        hint("tui.select.cancel", state && state !== "normal" ? "normal mode" : "back (keep draft)"),
+      ].join("  ");
     }
     if (this.onReview()) {
-      return [hint("tui.select.confirm", "submit"), rawKeyHint("tab", "questions"), hint("tui.select.cancel", "cancel")].join("  ");
+      const drafts = this.slots.some((s) => s.custom.getText().trim() !== s.typed || s.notes.getText().trim() !== s.note);
+      return [hint("tui.select.confirm", drafts ? "finish unsaved draft" : "submit"), rawKeyHint("tab", "questions"), hint("tui.select.cancel", "cancel")].join("  ");
     }
-    const multi = this.questions[this.tab]!.multiSelect;
+    const q = this.questions[this.tab]!;
+    const multi = q.multiSelect;
+    const custom = this.slots[this.tab]!.cursor === q.options.length;
     return [
       `${this.keybindings.getKeys("tui.select.up").join("/")}/${this.keybindings.getKeys("tui.select.down").join("/")} navigate`,
-      ...(multi ? [rawKeyHint("space", "toggle"), hint("tui.select.confirm", "done")] : [hint("tui.select.confirm", "select")]),
-      rawKeyHint("n", "notes"),
+      ...(custom
+        ? ["type or paste your answer", hint("tui.select.confirm", "edit answer"), ...(multi ? [rawKeyHint("space", "toggle/edit answer")] : [])]
+        : multi ? [rawKeyHint("space", "toggle"), hint("tui.select.confirm", "done")] : [hint("tui.select.confirm", "select")]),
+      rawKeyHint(custom ? "ctrl+g" : "n/ctrl+g", "notes"),
       ...(many ? [rawKeyHint("tab", "next question")] : []),
       hint("tui.select.cancel", "cancel"),
     ].join("  ");
   }
+}
+
+/** Text input, not control keys: preserve the original bytes for the editor. */
+function isTextInput(data: string): boolean {
+  if (data.startsWith("\x1b[200~")) return true;
+  const text = printable(data) ?? data;
+  return text.length > 0 && !/[\u0000-\u001f\u007f]/u.test(text) && text !== " ";
 }
 
 /** A plain character typed, from a legacy or a kitty-protocol terminal. */
