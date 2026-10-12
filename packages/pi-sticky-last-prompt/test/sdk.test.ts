@@ -1,10 +1,11 @@
 import { Container, ScrollView, TuiAltScreen, VStack, type Component, type Terminal, type TUI } from "@earendil-works/pi-tui";
-import { initTheme, UserMessageComponent, type ExtensionAPI, type ExtensionContext, type SessionStartEvent, type SessionShutdownEvent, type Theme } from "@earendil-works/pi-coding-agent";
+import { getMarkdownTheme, initTheme, SkillInvocationMessageComponent, UserMessageComponent, type ExtensionAPI, type ExtensionContext, type SessionStartEvent, type SessionShutdownEvent, type Theme } from "@earendil-works/pi-coding-agent";
 import { expect, test, vi } from "vitest";
 // Test the actual pinned SDK proxy, not an approximation with extra reflection traps.
 import { createInteractiveTuiReference } from "../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/tui-renderer.js";
+import { InteractiveMode } from "../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js";
 import { renderLayoutFrame } from "../node_modules/@earendil-works/pi-tui/dist/layout.js";
-import stickyLastPrompt, { CLEAR_SENTINEL, OWNER, PinBar, WRAPPER_TAG } from "../src/index.ts";
+import stickyLastPrompt, { CLEAR_SENTINEL, OWNER, PinBar, WRAPPER_TAG, classifyPiComponent, collectAnchors, type AnchorIndex } from "../src/index.ts";
 
 const theme = {
   fg: (_token: string, text: string) => text,
@@ -89,6 +90,164 @@ function transcript(renderer: TuiAltScreen) {
   return { chat, message, document, scroll, root };
 }
 
+test.each(["string", "text/image blocks"])("SDK transcript classification is backend-independent for normalized %s user messages", (shape) => {
+  initTheme("dark", false);
+  const chat = new Container();
+  // Run the actual SDK role-based transcript builder without starting InteractiveMode.
+  // Native and CC-origin messages share this path after normalization to Pi's user role;
+  // this does not exercise an external CC bridge or authenticate either backend.
+  const mode = Object.assign(Object.create(InteractiveMode.prototype), {
+    chatContainer: chat,
+    outputPad: 1,
+    toolOutputExpanded: false,
+    getMarkdownThemeWithSettings: getMarkdownTheme,
+    getMarkdownTransformers: () => [],
+  }) as { addMessageToChat(message: { role: "user"; content: unknown; timestamp: number }): void };
+  const add = (text: string) => mode.addMessageToChat({
+    role: "user", timestamp: 0,
+    content: shape === "string" ? text : [
+      { type: "text", text }, { type: "image", mimeType: "image/png", data: "unused" },
+    ],
+  });
+  add("ordinary  prompt");
+  add('<skill name="review" location="/fixture/SKILL.md">\nreview body\n</skill>');
+  add('<skill name="review-tail" location="/fixture/SKILL.md">\nbody\n</skill>\n\nextra instructions');
+  const prompts = chat.children.filter((child) => classifyPiComponent(child));
+  expect(prompts[0]).toBeInstanceOf(UserMessageComponent);
+  expect(prompts[1]).toBeInstanceOf(SkillInvocationMessageComponent);
+  expect(prompts[2]).toBeInstanceOf(SkillInvocationMessageComponent);
+  expect(prompts[3]).toBeInstanceOf(UserMessageComponent);
+  expect(prompts.map(classifyPiComponent)).toEqual([
+    { kind: "user", text: "ordinary  prompt" },
+    { kind: "skill", name: "review" },
+    { kind: "skill", name: "review-tail" },
+    { kind: "user", text: "extra instructions" },
+  ]);
+  const measure = () => {
+    const index: AnchorIndex = { anchors: [], horizons: [] };
+    const height = collectAnchors([chat], 40, 0, index);
+    expect(height).toBe(chat.render(40).length);
+    expect(index.anchors.map(({ text }) => text)).toEqual([
+      "ordinary prompt", "[skill] review", "[skill] review-tail", "extra instructions",
+    ]);
+    return index;
+  };
+  const collapsed = measure();
+  (prompts[1] as SkillInvocationMessageComponent).setExpanded(true);
+  const expanded = measure();
+  expect(expanded.anchors[1]!.end - expanded.anchors[1]!.start).toBeGreaterThan(
+    collapsed.anchors[1]!.end - collapsed.anchors[1]!.start,
+  );
+});
+
+/** Relevant lifecycle from retained npm pi-sticky-last-prompt@0.1.1, unchanged in shape. */
+function legacySticky(reference: TUI) {
+  const screen = reference as TUI & {
+    overlayStack: Array<{ component: Component; hidden?: boolean }>;
+    isOverlayVisible(entry: unknown): boolean;
+  };
+  const bar: Component = { render: () => ["legacy prompt"], invalidate() {} };
+  const originalHasOverlay = screen.hasOverlay.bind(screen);
+  screen.hasOverlay = () => {
+    const stack = screen.overlayStack;
+    if (!Array.isArray(stack)) return originalHasOverlay();
+    for (const entry of stack) {
+      if (!screen.isOverlayVisible(entry)) continue;
+      if (entry.component !== bar) return originalHasOverlay();
+    }
+    return false;
+  };
+  const overlay = screen.showOverlay(bar, { anchor: "top-left", row: 0, col: 0, width: "100%", nonCapturing: true });
+  return {
+    shutdown() {
+      // SDK Proxy has no deleteProperty trap: this deletes on its empty target only.
+      delete (screen as { hasOverlay?: () => boolean }).hasOverlay;
+      overlay.hide();
+    },
+    overlay,
+  };
+}
+
+test("legacy npm -> suite reload through the actual SDK proxy preserves scrolling and cleanup", async () => {
+  const h = setup();
+  const { scroll, root } = transcript(h.renderer);
+  const legacy = legacySticky(h.reference);
+  const descriptor = Object.getOwnPropertyDescriptor(h.renderer, "hasOverlay")!;
+  expect(Object.hasOwn(h.reference, "hasOverlay")).toBe(false);
+  expect(descriptor.value).toBeTypeOf("function");
+  legacy.shutdown();
+  expect(h.internals.overlayStack).toEqual([]);
+  expect(Object.getOwnPropertyDescriptor(h.renderer, "hasOverlay")).toEqual(descriptor);
+
+  // Two new lifecycles on the same renderer, as with a second /reload.
+  for (let reload = 0; reload < 2; reload++) {
+    await h.emit("session_start");
+    expect(h.notes).toEqual([]);
+    expect(h.internals.overlayStack).toHaveLength(1);
+    const pin = h.internals.overlayStack[0]!.component;
+    const layout = renderLayoutFrame(root, 40, 5, () => {});
+    h.internals.currentLayout = layout;
+    scroll.scrollTo(10);
+    expect(h.internals.compositeOverlays(layout.lines, 40, 5)[0]).toContain("the real SDK prompt");
+    expect(h.reference.hasOverlay()).toBe(false); // scrollbar/selection gate stays open
+    const jump = vi.spyOn(scroll, "scrollTo");
+    h.internals.handleMouseEvent({ button: 0, x: 1, y: 0, release: false });
+    h.internals.handleMouseEvent({ button: 0, x: 1, y: 0, release: true });
+    expect(jump).toHaveBeenCalledWith(0, { disableFollow: true });
+    jump.mockRestore();
+    const dialog = h.renderer.showOverlay({ render: () => ["dialog"], invalidate() {} });
+    expect(h.reference.hasOverlay()).toBe(true);
+    dialog.hide();
+    await h.emit("session_shutdown");
+    expect(pin.render(40)).toEqual([]);
+    expect(h.internals.overlayStack).toEqual([]);
+    expect(Object.getOwnPropertyDescriptor(h.renderer, "hasOverlay")).toEqual(descriptor);
+    expect(Object.getOwnPropertySymbols(h.renderer)).toEqual(h.symbols);
+  }
+  h.render.mockRestore();
+});
+
+test("an active tagged duplicate is rejected on the real SDK receiver, not the proxy", async () => {
+  const first = setup();
+  await first.emit("session_start");
+  const descriptor = Object.getOwnPropertyDescriptor(first.renderer, "hasOverlay");
+  const second = setup();
+  second.switchRenderer(first.renderer);
+  await second.emit("session_start");
+  expect(second.notes).toHaveLength(1);
+  expect(second.notes[0]).toMatch(/another copy already wraps/);
+  expect(first.internals.overlayStack).toHaveLength(1);
+  await second.emit("session_shutdown");
+  expect(Object.getOwnPropertyDescriptor(first.renderer, "hasOverlay")).toEqual(descriptor);
+  await first.emit("session_shutdown");
+  expect(Object.hasOwn(first.renderer, "hasOverlay")).toBe(false);
+  first.render.mockRestore();
+  second.render.mockRestore();
+});
+
+test("an untagged live legacy top bar hides this bar and warns once until removed", async () => {
+  const h = setup();
+  const { scroll, root } = transcript(h.renderer);
+  const legacy = legacySticky(h.reference);
+  await h.emit("session_start");
+  expect(h.internals.overlayStack).toHaveLength(2);
+  const pin = h.internals.overlayStack[1]!.component;
+  renderLayoutFrame(root, 40, 5, () => {});
+  scroll.scrollTo(10);
+  expect(pin.render(40)).toEqual([]);
+  expect(pin.render(40)).toEqual([]);
+  expect(h.notes).toHaveLength(1);
+  expect(h.notes[0]).toMatch(/another top prompt bar/);
+  legacy.overlay.setHidden(true);
+  expect(pin.render(40)[0]).toContain("the real SDK prompt");
+  expect(h.reference.hasOverlay()).toBe(false);
+  legacy.shutdown();
+  expect(pin.render(40)[0]).toContain("the real SDK prompt");
+  expect((h.renderer.hasOverlay as typeof h.renderer.hasOverlay & { [WRAPPER_TAG]?: string })[WRAPPER_TAG]).toBe(OWNER);
+  await h.emit("session_shutdown");
+  h.render.mockRestore();
+});
+
 test("SDK 1.1 proxy: install on the real receiver, route press/release to click, restore prototype", async () => {
   const h = setup();
   const { scroll, root, message } = transcript(h.renderer);
@@ -140,10 +299,18 @@ test("SDK proxy teardown leaves a later wrapper and its chain alive", async () =
   h.renderer.hasOverlay = later;
   await h.emit("session_shutdown");
   expect(h.renderer.hasOverlay).toBe(later);
+  expect((own as typeof own & { [WRAPPER_TAG]?: string })[WRAPPER_TAG]).toBeUndefined();
   const other = h.renderer.showOverlay({ render: () => ["new owner"], invalidate() {} });
   expect(h.reference.hasOverlay()).toBe(true);
   other.hide();
   expect(h.reference.hasOverlay()).toBe(false);
+  // Reload can safely chain the surviving unknown wrapper, whose inner owner is dead.
+  await h.emit("session_start");
+  expect(h.notes).toEqual([]);
+  expect(h.internals.overlayStack).toHaveLength(1);
+  expect(h.reference.hasOverlay()).toBe(false);
+  await h.emit("session_shutdown");
+  expect(h.renderer.hasOverlay).toBe(later);
   h.render.mockRestore();
 });
 

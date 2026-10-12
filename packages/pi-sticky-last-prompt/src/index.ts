@@ -320,12 +320,15 @@ export default function stickyLastPrompt(pi: ExtensionAPI): void {
   function installPatch(target: AltScreen): boolean {
     const original = target.hasOverlay;
     if (typeof original !== "function") return false;
-    // A tag identifies provenance, not whether an owner is dead. Never replace an own
-    // method, including another active/stale copy with our tag; late teardown is unsafe.
-    if (Object.hasOwn(target, "hasOverlay")) {
-      notify?.("sticky-last-prompt: another extension already wraps the renderer's hasOverlay(); this copy stays inactive. Enable only one copy.");
+    // Legacy npm teardown deletes through the SDK Proxy, leaving an untagged own
+    // method on the renderer. Chain it (or any unknown wrapper), never discard it.
+    // Tagged owners yield no safe evidence of abandonment; released wrappers clear
+    // their tag below. Untagged live legacy copies are caught by duplicateBarVisible.
+    if ((original as HasOverlayWrapper)[WRAPPER_TAG] === OWNER) {
+      notify?.("sticky-last-prompt: another copy already wraps the renderer's hasOverlay(); this copy stays inactive. Enable only one copy.");
       return false;
     }
+    const descriptor = Object.getOwnPropertyDescriptor(target, "hasOverlay");
     let enabled = true;
     const wrapper: HasOverlayWrapper = () => {
       if (!enabled || !Array.isArray(target.overlayStack)) return original.call(target);
@@ -338,14 +341,22 @@ export default function stickyLastPrompt(pi: ExtensionAPI): void {
     };
     wrapper[WRAPPER_TAG] = OWNER;
     try {
-      Object.defineProperty(target, "hasOverlay", { value: wrapper, writable: true, configurable: true });
+      Object.defineProperty(target, "hasOverlay", {
+        value: wrapper, writable: true, configurable: true, enumerable: descriptor?.enumerable ?? false,
+      });
     } catch {
       return false;
     }
     releasePatch = () => {
       enabled = false;
+      delete wrapper[WRAPPER_TAG];
       // A later wrapper may call ours: disable our behavior, but leave their method intact.
-      if (target.hasOverlay === wrapper) Reflect.deleteProperty(target, "hasOverlay");
+      // Compare the own data slot, not a getter's result, before restoring exactly what
+      // we replaced (including accessors/flags), or exposing the inherited method again.
+      if (Object.getOwnPropertyDescriptor(target, "hasOverlay")?.value === wrapper) {
+        if (descriptor) Object.defineProperty(target, "hasOverlay", descriptor);
+        else Reflect.deleteProperty(target, "hasOverlay");
+      }
     };
     return true;
   }

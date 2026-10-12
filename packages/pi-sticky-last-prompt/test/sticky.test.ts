@@ -317,25 +317,68 @@ test("the pin re-derives after a transcript rebuild and a resize without polling
   expect(pin.render(20)[0]).toContain("new");
 });
 
-test("a foreign or merely tagged hasOverlay wrapper keeps this copy inactive", async () => {
+test.each(["data", "accessor"])("an untagged own %s wrapper is chained and its exact descriptor restored", async (kind) => {
   const h = harness();
-  const foreign = () => true;
-  h.screen.hasOverlay = foreign;
+  const receivers: unknown[] = [];
+  const foreign = function (this: FakeScreen) {
+    receivers.push(this);
+    return FakeScreen.prototype.hasOverlay.call(this);
+  };
+  Object.defineProperty(h.screen, "hasOverlay", kind === "data"
+    ? { value: foreign, writable: false, enumerable: true, configurable: true }
+    : { get: () => foreign, enumerable: true, configurable: true });
+  const descriptor = Object.getOwnPropertyDescriptor(h.screen, "hasOverlay");
+  stickyLastPrompt(h.pi);
+  await h.emit("session_start", h.ctx);
+  expect(h.notes).toEqual([]);
+  expect(bar(h.screen)).toBeDefined();
+  expect(h.screen.hasOverlay()).toBe(false);
+  const dialog = h.screen.showOverlay({ render: () => [] }, {});
+  expect(h.screen.hasOverlay()).toBe(true);
+  expect(receivers).toEqual([h.screen]); // call the previous method with the real receiver
+  dialog.hide();
+  await h.emit("session_shutdown", h.ctx);
+  expect(Object.getOwnPropertyDescriptor(h.screen, "hasOverlay")).toEqual(descriptor);
+  expect(h.screen.hasOverlay).toBe(foreign);
+});
+
+test("a wrapper bearing our owner tag keeps this copy inactive without changing it", async () => {
+  const h = harness();
+  const tagged = Object.assign(() => true, { [WRAPPER_TAG]: OWNER });
+  h.screen.hasOverlay = tagged;
+  const descriptor = Object.getOwnPropertyDescriptor(h.screen, "hasOverlay");
   stickyLastPrompt(h.pi);
   await h.emit("session_start", h.ctx);
   expect(h.notes.at(-1)?.type).toBe("warning");
-  expect(h.notes.at(-1)?.message).toMatch(/already wraps/);
+  expect(h.notes.at(-1)?.message).toMatch(/another copy already wraps/);
   expect(bar(h.screen)).toBeUndefined();
-  expect(h.screen.hasOverlay).toBe(foreign);
+  await h.emit("session_shutdown", h.ctx);
+  expect(Object.getOwnPropertyDescriptor(h.screen, "hasOverlay")).toEqual(descriptor);
+});
 
-  const h2 = harness();
-  const leftover = Object.assign(() => true, { [WRAPPER_TAG]: OWNER });
-  h2.screen.hasOverlay = leftover;
-  stickyLastPrompt(h2.pi);
-  await h2.emit("session_start", h2.ctx);
-  expect(h2.notes.at(-1)?.type).toBe("warning");
-  expect(h2.screen.hasOverlay).toBe(leftover);
-  expect(bar(h2.screen)).toBeUndefined();
+test("a non-configurable own wrapper is preserved without mounting a scroll-blocking bar", async () => {
+  const h = harness();
+  Object.defineProperty(h.screen, "hasOverlay", { value: () => true, configurable: false });
+  const descriptor = Object.getOwnPropertyDescriptor(h.screen, "hasOverlay");
+  stickyLastPrompt(h.pi);
+  await h.emit("session_start", h.ctx);
+  expect(bar(h.screen)).toBeUndefined();
+  await h.emit("session_shutdown", h.ctx);
+  expect(Object.getOwnPropertyDescriptor(h.screen, "hasOverlay")).toEqual(descriptor);
+});
+
+test("cleanup never replaces a later accessor even if it returns our wrapper", async () => {
+  const h = harness();
+  stickyLastPrompt(h.pi);
+  await h.emit("session_start", h.ctx);
+  const ours = h.screen.hasOverlay;
+  Object.defineProperty(h.screen, "hasOverlay", { get: () => ours, configurable: true });
+  const later = Object.getOwnPropertyDescriptor(h.screen, "hasOverlay");
+  await h.emit("session_shutdown", h.ctx);
+  expect(Object.getOwnPropertyDescriptor(h.screen, "hasOverlay")).toEqual(later);
+  expect((ours as unknown as Record<symbol, unknown>)[WRAPPER_TAG]).toBeUndefined();
+  h.screen.showOverlay({ render: () => [] }, {});
+  expect(h.screen.hasOverlay()).toBe(true);
 });
 
 test("a wrapper installed after ours is left in place on teardown and ours becomes pass-through", async () => {
@@ -531,6 +574,8 @@ test("an older copy's late teardown cannot remove a newer wrapper or widget", as
   stickyLastPrompt(newer.pi);
   await newer.emit("session_start", newer.ctx);
   expect(old.widgets.size).toBe(2); // duplicate owner yields, but has its own probe widget
+  expect(old.screen.overlayStack).toHaveLength(1);
+  expect(old.notes.at(-1)?.message).toMatch(/another copy already wraps/);
   const newerKey = [...old.widgets.keys()][1]!;
   const original = old.screen.hasOverlay;
   const later = () => original.call(old.screen);
