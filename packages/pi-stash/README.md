@@ -14,7 +14,15 @@ Automatic restoration never replaces a newly typed nonempty draft. The stash sta
 
 The optional version-1 editor snapshot protocol restores text, cursor, modal mode, selection anchor and in-process history with pi-vim. Without a snapshot provider, restoration uses text only. Symbols are copied structurally from `packages/pi-vim/src/contract.ts`; this package imports no sibling package.
 
-A process-global draft survives session replacement. Session-local callbacks and timers are invalidated on shutdown; editor factory teardown leaves newer owners alone. Duplicate stash instances are diagnosed rather than stacked. Do not enable the upstream package alongside this package. Editor-replacing extensions should load first.
+A process-global draft survives session replacement. Session-local callbacks and timers are invalidated on shutdown; editor factory teardown leaves newer owners alone. Duplicate suite instances are diagnosed rather than stacked. Do not enable the upstream package alongside this package. Editor-replacing extensions should load first.
+
+## Migrating from @saadjs/pi-stash
+
+Disable the upstream copy and **fully quit and restart Pi** before using this copy; do not hot-switch between these implementations in either direction. `/reload` and session replacement do not clear process-global state: `@saadjs/pi-stash@0.0.3` creates an untagged stash in its factory, even if no draft was ever stashed, and does not delete it on shutdown.
+
+An unrecognized global stash can therefore be retained state from a retired copy or belong to a still-loaded legacy copy. Pi's extension API does not expose a complete loaded-extension inventory, and configured or installed packages do not prove which handlers are running. This copy warns about that uncertainty, stays inactive and leaves the stash and current draft untouched. It does not claim that the legacy copy still owns Ctrl+S, or adopt its stash and risk conflicting handlers. Tagged suite instances continue to use their active-instance lease for duplicate detection.
+
+**Save current and stashed drafts outside Pi before disabling the legacy copy or quitting.** While the legacy copy is still active, restore its stash with Ctrl+S in an empty main editor and save the restored text. If its handlers are no longer available, this inactive suite copy cannot recover the retained stash through Ctrl+S. Leaving a stash untouched does not save it durably: stashes are in-memory only, a full process restart clears them, and there is no automatic cross-process draft migration. Removing the legacy copy from settings alone cannot resolve an already-retained global stash.
 
 ## Load independently
 
@@ -34,7 +42,7 @@ npm ci
 npm run check
 ```
 
-Offline tests cover stash/swap, optional snapshots, focus, autocomplete, shell/slash restoration, new drafts, replacement sessions, duplicate ownership and teardown. They do not establish a full interactive TUI smoke test.
+Offline tests cover stash/swap, optional snapshots, focus, autocomplete, shell/slash restoration, new drafts, replacement sessions, retained legacy state, live legacy duplicates, suite duplicate ownership and teardown. They do not establish a full interactive TUI smoke test.
 
 ## Origin
 

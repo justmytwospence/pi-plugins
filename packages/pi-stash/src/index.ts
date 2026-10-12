@@ -40,18 +40,27 @@ interface Session {
   factory?: EditorFactory;
 }
 
-/** Adopt the process-global stash, or report that another owner created it. */
-export function adoptStash(): { stash: PromptStash; foreign: boolean } {
+type StashAdoption = { status: "ready"; stash: PromptStash } | { status: "unknown" };
+
+/**
+ * Adopt only a suite-created stash. The legacy factory publishes an untagged stash
+ * even before session_start and retains it after shutdown. Its presence proves
+ * neither that legacy handlers are active nor that they have retired; ExtensionAPI
+ * exposes no complete loaded-extension inventory. Leave unknown state untouched
+ * rather than risk sharing incompatible stash APIs and conflicting Ctrl+S handlers.
+ * The separate LEASE checks whether another cooperating suite instance is active.
+ */
+export function adoptStash(): StashAdoption {
   const globals = globalThis as Record<symbol, unknown>;
   const existing = globals[STASH_KEY];
   if (existing !== null && typeof existing === "object") {
     const owned = (existing as Record<symbol, unknown>)[STASH_OWNER] === OWNER;
-    return { stash: existing as PromptStash, foreign: !owned };
+    return owned ? { status: "ready", stash: existing as PromptStash } : { status: "unknown" };
   }
   const created = new PromptStash();
   Object.defineProperty(created, STASH_OWNER, { value: OWNER, enumerable: false });
   globals[STASH_KEY] = created;
-  return { stash: created, foreign: false };
+  return { status: "ready", stash: created };
 }
 
 /**
@@ -265,9 +274,9 @@ export default function promptStash(pi: ExtensionAPI): void {
     stop();
     if (ctx.mode !== "tui" || !ctx.hasUI) return;
     const adopted = adoptStash();
-    if (adopted.foreign) {
+    if (adopted.status === "unknown") {
       ctx.ui.notify(
-        "pi-stash: another prompt stash (@saadjs/pi-stash?) already owns Ctrl+S in this process; this copy stays inactive. Enable only one copy.",
+        "pi-stash: found an unrecognized process-global stash (possibly retained from @saadjs/pi-stash). Cannot tell whether the legacy copy is still active; this copy stays inactive and leaves the stash untouched to avoid conflicting Ctrl+S handlers. Save any current/stashed drafts, disable other stash copies, then fully quit and restart Pi (not /reload).",
         "warning",
       );
       return;

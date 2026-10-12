@@ -223,17 +223,22 @@ test("a snapshot-capable editor gets cursor and mode back; failures fall back to
 
 // ─── ownership ───
 
-test("a stash created by another owner leaves this copy inactive with a warning", async () => {
-  globals[STASH_KEY] = new PromptStash();
+test("an unrecognized stash stays untouched without asserting an active owner", async () => {
+  const unknown = Object.freeze({ value: "unrecognized draft" });
+  globals[STASH_KEY] = unknown;
   const h = harness();
   promptStash(h.pi);
   const s = h.session();
   const before = s.factory();
   await h.emit("session_start", {}, s.ctx);
   expect(s.notes.at(-1)?.type).toBe("warning");
-  expect(s.notes.at(-1)?.message).toMatch(/another prompt stash/);
+  expect(s.notes.at(-1)?.message).toMatch(/unrecognized process-global stash/);
+  expect(s.notes.at(-1)?.message).not.toMatch(/already owns Ctrl\+S/);
   expect(s.factory()).toBe(before);
-  expect(adoptStash().foreign).toBe(true);
+  expect(adoptStash()).toEqual({ status: "unknown" });
+  expect(globals[STASH_KEY]).toBe(unknown);
+  expect(unknown.value).toBe("unrecognized draft");
+  expect(globals[LEASE]).toBeUndefined();
 });
 
 test("a tagged wrapper from another pi-stash instance is reported, not wrapped again", async () => {

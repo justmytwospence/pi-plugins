@@ -24,7 +24,7 @@ Entry: `packages/pi-stash/src/index.ts`. Follow [Install & select](/guides/insta
 }
 ```
 
-Remove `npm:@saadjs/pi-stash` from your settings first. If another prompt stash already owns Ctrl+S in the same process, this copy reports it and stays inactive rather than stacking a second wrapper.
+Remove `npm:@saadjs/pi-stash` from your settings first. When migrating from it, restore or copy any stashed draft, then fully quit and restart Pi: `/reload` leaves the upstream stash object in memory, even after the upstream extension is disabled. This copy cannot distinguish that retained object from a live upstream copy, so it preserves the object and stays inactive with a restart notice. Tagged duplicate suite instances are also reported rather than stacked.
 
 **Requirements and costs:** none beyond Pi's interactive terminal UI. There are no settings, external programs, credentials, network calls or model requests. The stash lives in memory only; it is not written to disk and does not survive restarting Pi. Print and RPC modes do nothing.
 
