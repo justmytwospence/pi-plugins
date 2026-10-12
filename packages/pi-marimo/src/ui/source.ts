@@ -7,6 +7,7 @@
 //   unseen; nothing for idle notebooks. A host draws it (pi-subagents' list, or pi-bg's pill);
 //   alone, pi-marimo draws its own, and Enter on it opens the busiest notebook.
 import { basename } from "../core/io.js";
+import { interruptKey, notebookKey } from "./identity.js";
 import { elapsed } from "../core/render.js";
 import type { Followed } from "../core/watcher.js";
 import { busy } from "../core/hold.js";
@@ -27,7 +28,7 @@ interface Ended {
 
 export interface SourceActions {
   followed(): Followed[];
-  open(path: string, ui: unknown): Promise<void>;
+  open(key: string, ui: unknown): Promise<void>;
   interrupt(f: Followed): Promise<void>;
   /** Something changed that whoever shows the source should redraw. */
   changed(): void;
@@ -51,9 +52,13 @@ export class NotebookSource {
       noun: "notebook",
       entries: (now) => this.entries(now),
       open: (key, ui) => this.actions.open(key, ui),
+      canStop: (key) => {
+        const f = this.actions.followed().find((o) => notebookKey(o) === key);
+        return !!f && f.connection === "connected" && busy(f);
+      },
       stop: (key) => {
-        const f = this.actions.followed().find((o) => o.attachment.path === key);
-        if (f) void this.actions.interrupt(f).catch(() => undefined);
+        const f = this.actions.followed().find((o) => notebookKey(o) === key);
+        if (f && f.connection === "connected" && busy(f)) return this.actions.interrupt(f);
       },
       dismiss: (key) => {
         this.dismissed.add(key);
@@ -66,8 +71,8 @@ export class NotebookSource {
       },
       setHosted: (on, host) => {
         const before = this.hosts.size > 0;
-        if (on) this.hosts.add(host ?? "host");
-        else this.hosts.delete(host ?? "host");
+        if (on) this.hosts.add(host ?? "subagents");
+        else this.hosts.delete(host ?? "subagents");
         if (before !== this.hosts.size > 0) this.actions.hostedChanged(this.hosts.size > 0);
       },
     };
@@ -89,9 +94,9 @@ export class NotebookSource {
 
   /** Tracks each notebook's runs from the latest state; tells the hosts when anything shown changed. */
   update(followed: Followed[], now = Date.now()): void {
-    const paths = new Set(followed.map((f) => f.attachment.path));
+    const paths = new Set(followed.map(notebookKey));
     for (const f of followed) {
-      const path = f.attachment.path;
+      const path = notebookKey(f);
       const run = this.runs.get(path);
       if (busy(f)) {
         if (!run) {
@@ -106,7 +111,7 @@ export class NotebookSource {
       this.ended.set(path, { at: now, ms: now - run.since, failed: broke > 0, summary: `ran ${elapsed(now - run.since)}${broke ? ` · ${broke} error${broke === 1 ? "" : "s"}` : ""}` });
     }
     for (const p of [...this.runs.keys(), ...this.ended.keys()]) if (!paths.has(p)) { this.runs.delete(p); this.ended.delete(p); }
-    const key = JSON.stringify([followed.map((f) => [f.attachment.path, f.connection, busy(f), kernelStateParts(f)]), this.pill(now)]);
+    const key = JSON.stringify([followed.map((f) => [notebookKey(f), f.connection, busy(f), kernelStateParts(f)]), this.pill(now)]);
     if (key !== this.lastKey) {
       this.lastKey = key;
       this.actions.changed();
@@ -120,14 +125,15 @@ export class NotebookSource {
 
   entries(now: number): ActivityEntry[] {
     return this.actions.followed().map((f) => {
-      const path = f.attachment.path;
+      const path = notebookKey(f);
       const run = this.runs.get(path);
       const ended = this.ended.get(path);
       const status: ActivityEntry["status"] = run ? "running" : this.alerting(path) ? "failed" : "done";
       const stats = run ? elapsed(now - run.since) : ended ? `${ended.summary} · ${elapsed(now - ended.at)} ago` : f.connection === "connected" ? "idle" : f.connection;
       return {
         key: path,
-        label: basename(path),
+        stopToken: interruptKey(f),
+        label: basename(f.attachment.path),
         detail: kernelStateParts(f).join(" · "),
         status,
         stats,
@@ -140,8 +146,8 @@ export class NotebookSource {
   pill(now: number): ActivityPill | undefined {
     void now;
     const followed = this.actions.followed();
-    const running = followed.filter((f) => this.runs.has(f.attachment.path)).length;
-    const failed = followed.filter((f) => this.alerting(f.attachment.path)).length;
+    const running = followed.filter((f) => this.runs.has(notebookKey(f))).length;
+    const failed = followed.filter((f) => this.alerting(notebookKey(f))).length;
     if (!running && !failed) return undefined;
     return { label: running ? `${running} notebook${running === 1 ? "" : "s"}` : "notebooks", ...(failed ? { alert: `${failed} failed` } : {}) };
   }
@@ -149,10 +155,7 @@ export class NotebookSource {
   /** The notebook to open from the pill: a running one, then a failed one, then the current one. */
   busiest(): string | undefined {
     const followed = this.actions.followed();
-    return (
-      followed.find((f) => this.runs.has(f.attachment.path)) ??
-      followed.find((f) => this.alerting(f.attachment.path)) ??
-      followed[0]
-    )?.attachment.path;
+    const selected = followed.find((f) => this.runs.has(notebookKey(f))) ?? followed.find((f) => this.alerting(notebookKey(f))) ?? followed[0];
+    return selected ? notebookKey(selected) : undefined;
   }
 }

@@ -115,6 +115,40 @@ test("the hook rewrites requests for listed models, persists the state, and rest
   expect(p3.input[4]).toEqual(cfg("high"));
 });
 
+test("tree navigation restores effort-update positions from only the selected branch", async () => {
+  const history = [user("a"), asst("b"), call("1"), out("1")];
+  const a = emptyState();
+  plan(a, history.slice(0, 1), "low");
+  plan(a, history, "high");
+  const b = emptyState();
+  plan(b, history.slice(0, 1), "medium");
+  plan(b, history, "xhigh");
+  const entry = (data: unknown) => ({ type: "custom", customType: "auto-effort:effort-updates", data });
+  let branch = [entry(a)];
+  const { h, ctx } = setup(astra);
+  ctx.sessionManager.getBranch = () => branch;
+  await h.emit("session_start", { type: "session_start" }, ctx);
+  const request = async (effort: string) => {
+    const payload = { model: astra.id, input: [...history], reasoning: { effort } };
+    await h.emit("before_provider_request", { type: "before_provider_request", payload }, ctx);
+    return payload;
+  };
+  expect(await request("high")).toMatchObject({ reasoning: { effort: "low" }, input: [...history, cfg("high")] });
+
+  // The identical wire history prevents a fingerprint mismatch from hiding a missed restore.
+  branch = [entry(a), entry(b)];
+  await h.emit("session_tree", { type: "session_tree", newLeafId: "b", oldLeafId: "a" }, ctx);
+  expect(await request("xhigh")).toMatchObject({ reasoning: { effort: "medium" }, input: [...history, cfg("xhigh")] });
+  expect(h.entries).toEqual([]);
+
+  branch = [];
+  await h.emit("session_tree", { type: "session_tree", newLeafId: null, oldLeafId: "b" }, ctx);
+  expect(await request("high")).toMatchObject({ reasoning: { effort: "high" }, input: history });
+  expect(h.entries).toHaveLength(1);
+  expect(a).toMatchObject({ base: "low", current: "high", transitions: [{ effort: "high" }] });
+  expect(b).toMatchObject({ base: "medium", current: "xhigh", transitions: [{ effort: "xhigh" }] });
+});
+
 test("the hook leaves unlisted models and mismatched payloads alone", async () => {
   for (const model of [{ provider: "openai-codex", id: "gpt-6-luna" }, { provider: "openai", id: "gpt-6-astra" }]) {
     const { h, ctx } = setup(model);

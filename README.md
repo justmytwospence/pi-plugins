@@ -1,8 +1,19 @@
 # Pi Plugins
 
-A modular Pi extension suite: use any component on its own, or combine them into an integrated workflow. One Git package, independently selected extensions, one suite version—not a fork of Pi.
+A modular suite of 23 extensions for [Pi](https://pi.dev): background work, subagents, planning, review, context awareness and terminal ergonomics. Every component can be enabled on its own; one Git ref versions the whole suite. It is not a fork of Pi.
 
-**[Documentation and landing page](https://pi-plugins.vercel.app)** · **[Personal project overview](https://www.spencerboucher.com/projects/pi-plugins)**
+**[Documentation](https://pi-plugins.vercel.app)** · [Personal project overview](https://www.spencerboucher.com/projects/pi-plugins)
+
+## Components
+
+| Area | Components |
+| --- | --- |
+| Run and coordinate | pi-bg, pi-subagents, pi-herdr, pi-marimo, pi-btw |
+| Think and review | pi-plan-mode, pi-ask-user-question, pi-diff-review, pi-rewind, pi-tool-gate |
+| Context and cost | pi-cache-guard, pi-auto-effort, pi-status-footer |
+| Terminal and editing | pi-vim, pi-stash, pi-copy, pi-next-prompt, pi-select-nav, pi-prose-width, pi-sticky-last-prompt, pi-clear-screen, pi-appearance-resync, pi-herdr-scrollbar-width |
+
+Each component has a [reference page](https://pi-plugins.vercel.app/guides/overview/) with its commands, keys, settings, requirements and costs. Some features make paid classifier requests, need Git, Herdr or marimo, or patch non-public TUI internals. Read [requirements and costs](https://pi-plugins.vercel.app/guides/requirements/) before enabling everything.
 
 ## Install
 
@@ -10,61 +21,68 @@ A modular Pi extension suite: use any component on its own, or combine them into
 pi install git:github.com/justmytwospence/pi-plugins
 ```
 
-All 19 extensions in the root manifest are enabled by default. Run `pi config` to disable unwanted extensions, then `/reload` to apply the selection. To enable only background jobs, use this package entry in Pi settings:
+This loads every component. Run `pi config` to keep only the ones you want, then `/reload`.
+
+To select exactly, put the suite in the `packages` array of `~/.pi/agent/settings.json` (or a trusted project's `.pi/settings.json`) as an object, merging it with your existing entries:
 
 ```json
 {
   "source": "git:github.com/justmytwospence/pi-plugins",
-  "extensions": ["packages/pi-bg/src/index.ts"],
+  "extensions": [
+    "packages/pi-bg/src/index.ts",
+    "packages/pi-diff-review/src/index.ts"
+  ],
   "skills": [],
   "prompts": [],
   "themes": []
 }
 ```
 
-A Git commit or tag pins the whole suite. Components cannot be independently version-pinned within one managed Git package. Disabling a component does not uninstall its files. `pi remove` removes the suite.
+- Entries are package-relative paths without a leading `./`. Copy them from each component's reference page.
+- Omitting `extensions` loads every entry; `[]` loads none. Filters narrow the root manifest; they cannot load undeclared files.
+- Pin with `git:github.com/justmytwospence/pi-plugins@<commit-or-tag>`. The ref applies to every selected component; components cannot be pinned separately.
+- There is no Git subdirectory source for a single component. Select it from the suite instead.
 
-Do not enable original standalone packages alongside their suite copies: Pi does not deduplicate different physical copies. Disable the old entries first, but keep their repos and checkouts for rollback.
+Never enable a second copy of a component alongside the suite: neither a retired standalone `pi-*` repository nor the upstream package a component was absorbed from. Pi does not deduplicate different packages that register the same tools, commands, shortcuts or editor. See [standalone compatibility](https://pi-plugins.vercel.app/guides/standalone/).
 
-## Components
+To load a single component from a checkout of this repository for one run:
 
-`source-pins.json` records the exact original revisions imported into this trial. Each directory under `packages/` retains its original README, license, package manifest, tests, and dependency lockfile. The 19 imported extensions are exactly the previously pinned `pi-*` Git packages; retired lean-context and unpinned plugins are not imported. Third-party extensions, tmux-agents, and anthropic-billing-guard remain separate.
+```sh
+pi -e ./packages/pi-bg
+```
 
-Some extensions require external services such as Jev, or offer optional Herdr/marimo integrations. See each component README. Individual operation does not imply that external services are unnecessary.
+Add `-ne` to disable your configured extensions for that run.
 
 ## Development
 
-Runtime installation does not need a build step. The root exposes each original TypeScript entry point directly, without a wrapper extension.
+Runtime loading needs no build step: the root `pi` manifest points at each component's TypeScript entry point.
 
 ```sh
-npm install
-# Install each component's development dependencies using its existing lockfile.
-for dir in packages/*; do (cd "$dir" && npm ci); done
+npm ci
+npm test
+for dir in packages/*/; do (cd "$dir" && npm ci); done
 npm run check
 ```
 
-`npm test` uses Pi's actual resource loader to verify the full suite, every individually selected extension, empty selection, registration parity, and duplicate names. It does not bind session lifecycle handlers, make model calls, or exercise the interactive TUI. `npm run check` additionally runs every component's original check command. Live TUI, reload, and integration behavior still need manual testing.
+`npm test` exercises Pi's real resource loader over the full suite, each individually selected entry, standalone component directories, and an empty selection, comparing registrations. It does not start sessions, make model calls or drive the interactive TUI, so focus, rendering, reload and integration behavior still need manual checks. `npm run check` runs the loader test and then every component's own `check`.
 
-For a check against an already installed Pi SDK, set `PI_TEST_SDK` to its `dist/index.js` file URL or absolute path. `PI_ORIGINAL_ROOT` optionally enables registration parity checks against retained standalone checkouts.
+Never run `npm run eval` without explicit authorization: evaluations make live, paid classifier calls.
 
-## Documentation
-
-The static documentation site lives in `site/`, with its own package manifest and lockfile. It is not part of Pi's runtime resource manifest.
+The documentation site in `site/` is a separate static Astro project with its own lockfile:
 
 ```sh
 cd site
 npm ci
 npm run check
 npm run build
-npm run dev
 ```
 
-See the documentation for component reference pages, setup recipes, requirements, integration protocols, and troubleshooting. Each original component README remains available under `packages/`.
+Develop components under `packages/<name>/`. Keep each one independently usable and sibling integrations optional. See [development and testing](https://pi-plugins.vercel.app/development/).
 
-## Migration and rollback
+## Provenance
 
-See [the migration procedure](docs/trial.md). The consolidation passed component checks, individual and combined resource loading, registration parity, a fresh Git install/RPC startup, and a manual reload trial. Original repositories remain available and are not deleted or archived. Shared helpers are unchanged; no behavior refactor is bundled with the packaging migration.
+[docs/trial.md](docs/trial.md) is the historical record of the original reversible consolidation of 19 standalone repositories; it is not current installation guidance. `source-pins.json` records the revisions first imported, not current component versions. Original repository history is preserved.
 
 ## License
 
-MIT. Component licenses and upstream attribution are retained in their original directories, including the plan-mode and subagents upstream credits. Nested repository/homepage metadata describes provenance during this trial, not a completed development migration.
+MIT. Each component keeps its own `LICENSE`. Upstream attribution is retained where components began elsewhere: pi-plan-mode (narumiruna/pi-extensions), the pi-subagents UI (tintinweb/pi-subagents), pi-vim (lajarre/pi-vim), pi-stash (`@saadjs/pi-stash` by Saad Bash), pi-sticky-last-prompt (tangentyh/pi-collections) and pi-btw (dbachelder/pi-btw). See [about and credits](https://pi-plugins.vercel.app/about/).

@@ -757,6 +757,25 @@ test("the context row drops its own gauge when the editor borders draw it", () =
   assert.doesNotMatch(row, /[━─]/);
 });
 
+test("startup retains foreign usage status and tree navigation restores destination preferences", async () => {
+  const entries = [{ type: "custom", customType: "personal-status-footer", data: { enabled: false, showAll: false } }];
+  const h = host(entries);
+  h.ctx.model = { provider: "test", id: "test", contextWindow: 1000 };
+  h.statuses.set("usage", "Another producer's usage notice");
+  try {
+    await h.handlers.get("session_start")({}, h.ctx);
+    assert.equal(h.statuses.get("usage"), "Another producer's usage notice");
+    assert.equal(h.footer, undefined);
+    h.ctx.sessionManager.getBranch = () => [];
+    await h.handlers.get("session_tree")({}, h.ctx);
+    assert.ok(h.footer, "destination branch without an override restores suite footer");
+    h.ctx.sessionManager.getBranch = () => entries;
+    await h.handlers.get("session_tree")({}, h.ctx);
+    assert.equal(h.footer, undefined, "destination branch with native override uses native footer");
+    assert.equal(h.statuses.get("usage"), "Another producer's usage notice");
+  } finally { await h.handlers.get("session_shutdown")({}, h.ctx); }
+});
+
 test("wraps the installed editor once per session instead of replacing it", async () => {
   const h = host();
   class Editor {

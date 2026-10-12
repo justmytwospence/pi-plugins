@@ -50,6 +50,13 @@ test("invalid files are skipped and unknown keys kept", () => {
   expect(loadConfig("x", defaults, cwd)).toEqual({ ...defaults, enabled: false, other: { harness: "opencode" } });
 });
 
+test("malformed known overrides retain valid lower-precedence values", () => {
+  const { cwd, root } = setup();
+  write(path.join(root, "pi", "x.json"), { enabled: false, list: ["valid"], jev: { model: "lower", timeoutMs: 20 } });
+  write(path.join(cwd, ".pi", "x.json"), { enabled: "yes", list: [12], jev: { model: {}, timeoutMs: "forever" } });
+  expect(loadConfig("x", defaults, cwd)).toEqual({ enabled: false, list: ["valid"], jev: { model: "lower", timeoutMs: 20 } });
+});
+
 test("sharedConfigDir honors XDG_CONFIG_HOME and defaults to ~/.config/agents", () => {
   process.env.XDG_CONFIG_HOME = "/tmp/xdg";
   expect(sharedConfigDir()).toBe(path.join("/tmp/xdg", "agents"));

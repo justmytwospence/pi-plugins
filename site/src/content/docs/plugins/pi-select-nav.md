@@ -8,11 +8,13 @@ plugin: pi-select-nav
 
 `pi-select-nav` translates familiar list-navigation keys into arrow-key input before the focused component handles them. **Ctrl+J** becomes down and **Ctrl+K** becomes up in eligible focused components. Plain **j** and **k** provide the same movement only when the extension does not detect text entry or an existing component-owned letter binding. The purpose is to reach pickers that hardcode arrows instead of consulting Pi's configurable selection bindings.
 
-Entry: `packages/pi-select-nav/src/index.ts`. Follow [Install & select](/guides/install/) to choose this suite entry. The suite loads all 19 extensions by default, and every selected entry shares one Git pin.
+Entry: `packages/pi-select-nav/src/index.ts`. Follow [Install & select](/guides/install/) to choose this suite entry. The suite loads every entry by default, and every selected entry shares one Git pin.
 
 The main prompt editor is exempt. So is a focused component that is itself a multiline editor, detected through its text getter and setter. In those contexts, Ctrl+J remains available for a newline and Ctrl+K for deleting to the end of the line. The extension is therefore not a global replacement of those editing actions throughout Pi.
 
-An editor nested inside a dialog is a different case: the dialog can remain eligible for control-key navigation while literal letters are protected for text entry. This distinction is useful in question dialogs that combine choices with a free-text row, but it also means behavior depends on which component actually owns focus. The extension does not add new selection actions to a component; it relies on that component already understanding arrow input.
+An editor nested inside a dialog owns its keys too. If the focused dialog contains an editor that is active, or whose focus state cannot be determined, Ctrl+J and Ctrl+K pass through unchanged. Only an embedded editor that explicitly reports `focused: false` leaves the surrounding list eligible, as in a question dialog whose free-text row is not selected. Behavior therefore depends on which component actually owns focus. The extension does not add new selection actions to a component; it relies on that component already understanding arrow input.
+
+Suite components can declare their input context through the shared `Symbol.for("pi-plugins.input-context.v1")` method. When the focused component has that method, select-nav neither renders it nor rewrites any key: the component implements its own resolved bindings. The copy picker is one example. See [keyboard & focus](/guides/keyboard/).
 
 ## Requirements, configuration, and costs
 
@@ -39,7 +41,7 @@ Plain j and k are intentionally more conservative than Ctrl+J and Ctrl+K. The ex
 
 The walk is bounded: it descends at most three levels and stops around a 400-node limit, while skipping common links such as the TUI, theme, parent, and session. These are practical heuristics, not a formal declaration from every plugin about whether it accepts text. Deeply nested or unusual components may therefore require separate investigation.
 
-For existing letter actions, the extension inspects function source on the focused component and its prototypes for literal j or k strings. Finding either preserves both letters. This protects patterns such as the `k` stop-task action described for background-task pickers. It can also be conservative: a literal appearing for another purpose may prevent navigation, while a binding hidden in an external helper or computed dynamically may escape detection.
+For existing letter actions, the extension inspects function source on the focused component and its prototypes for literal j or k strings. Finding either preserves both letters. This protects components that bind those letters themselves. It can also be conservative: a literal appearing for another purpose may prevent navigation, while a binding hidden in an external helper or computed dynamically may escape detection.
 
 Key-release events are left untouched, including releases reported by Kitty-protocol terminals, so a release is not rewritten into a second arrow press. This is a specific input safeguard, not a claim that every keyboard encoding has been tested. Ordinary arrows remain the useful fallback whenever a letter is deliberately preserved or a heuristic cannot identify the focused component correctly.
 
@@ -49,8 +51,8 @@ If Ctrl+J and Ctrl+K work in one picker but not another, first identify whether 
 
 If j or k types a letter instead of moving, inspect the presence of a search field or existing letter action before calling it a failure. Preserving typing is intentional. Conversely, if a letter is incorrectly consumed, reproduce with arrows and control keys, then identify the picker and its focus state. The bounded field walk and function-source inspection cannot promise safe handling of arbitrary custom components.
 
-`pi-copy` already supports Ctrl+J/Ctrl+K and does not require this entry. Its query field should continue receiving literal j and k. Question dialogs likewise need their free-text entry preserved. Other raw terminal-input listeners can interact with the rewritten data, so isolate input-handling extensions when diagnosing a conflict rather than assuming a universal load order fixes it.
+`pi-copy` already supports Ctrl+J/Ctrl+K, declares a filter context and does not require this entry. Its query field keeps receiving literal j and k. Question dialogs likewise need their free-text entry preserved. Other raw terminal-input listeners can interact with the rewritten data, so isolate input-handling extensions when diagnosing a conflict rather than assuming a universal load order fixes it.
 
-The implementation obtains the TUI through a temporary invisible widget and calls `getFocusedComponent`; changes to Pi's internal focus surface can affect compatibility. The package's check is typechecking, without a dedicated unit-test suite for every picker interaction. Report the exact picker, Pi version, terminal, key sequence, focus location, and whether plain arrows still work. That evidence is more useful than a broad claim that navigation fails everywhere.
+The implementation obtains the TUI through a temporary invisible widget and calls `getFocusedComponent`; it only listens in Pi's interactive TUI mode and unsubscribes on session shutdown. Changes to Pi's internal focus surface can affect compatibility. The package check runs typechecking and a small [input-routing test](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-select-nav/test/input.test.mjs) for nested editors, explicit contexts and key releases; it does not cover every picker interaction. Report the exact picker, Pi version, terminal, key sequence, focus location, and whether plain arrows still work. That evidence is more useful than a broad claim that navigation fails everywhere.
 
 [GitHub source](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-select-nav)

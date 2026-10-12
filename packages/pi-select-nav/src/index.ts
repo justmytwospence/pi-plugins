@@ -7,8 +7,7 @@
 //
 // Left alone:
 //   - the main prompt editor, or any other editor that is itself the focused component
-//     (ctrl+j = newline, ctrl+k = kill line); an editor inside a dialog (such as a question's
-//     "Type something" row) does not stop ctrl+j/ctrl+k from moving
+//     (ctrl+j = newline, ctrl+k = kill line), including active nested prose editors
 //   - key releases, which kitty-protocol terminals report separately: rewriting them would move
 //     twice per key
 //   - j/k while a text field is being typed into: a focused Input or Editor, a component that
@@ -20,6 +19,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CURSOR_MARKER, isKeyRelease, matchesKey } from "@earendil-works/pi-tui";
 
+export const INPUT_CONTEXT = Symbol.for("pi-plugins.input-context.v1");
+
 const UP = "\x1b[A";
 const DOWN = "\x1b[B";
 
@@ -30,7 +31,7 @@ const SKIP_FIELDS = new Set(["tui", "theme", "keybindings", "parent", "kb", "ctx
 const SEARCH_FIELD = /search|query|filter/i;
 const MAX_NODES = 400;
 
-type Obj = Record<string, unknown>;
+type Obj = Record<string, unknown> & { [INPUT_CONTEXT]?: () => string | undefined };
 type Tui = { getFocusedComponent(): Obj | null; terminal?: { columns?: number } };
 
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null;
@@ -119,24 +120,38 @@ function grabTui(ctx: ExtensionContext): Tui | undefined {
   return tui;
 }
 
+/** An ambiguous nested editor owns its keys; only an explicitly inactive editor is ignored. */
+export function hasActiveEditor(root: Obj): boolean {
+  return [...walk(root)].some((node) => isEditor(node) && node.focused !== false);
+}
+
+export function routeInput(data: string, focused: Obj | null, width = 80): { data: string } | undefined {
+  if (isKeyRelease(data) || !focused) return undefined;
+  // Suite components implement their resolved bindings themselves. Do not turn a remapped
+  // action into an unrelated arrow, or inspect/render their children to guess ownership.
+  if (typeof focused[INPUT_CONTEXT] === "function") return undefined;
+  if (isEditorRoot(focused) || hasActiveEditor(focused)) return undefined;
+  const control = matchesKey(data, "ctrl+j") ? DOWN : matchesKey(data, "ctrl+k") ? UP : undefined;
+  const letter = matchesKey(data, "j") ? DOWN : matchesKey(data, "k") ? UP : undefined;
+  if (!control && !letter) return undefined;
+  if (control) return { data: control };
+  if (J_K_DENYLIST.has(focused.constructor?.name ?? "")) return undefined;
+  if (isTypingText(focused, width) || bindsJK(focused)) return undefined;
+  return { data: letter! };
+}
+
 export default function (pi: ExtensionAPI) {
+  let unsubscribe: (() => void) | undefined;
   pi.on("session_start", (_event, ctx) => {
-    if (!ctx.hasUI) return;
+    unsubscribe?.();
+    unsubscribe = undefined;
+    if (ctx.mode !== "tui") return;
     const tui = grabTui(ctx);
-    if (!tui) return;
-    ctx.ui.onTerminalInput((data) => {
-      // Kitty-protocol terminals also report key releases, and matchesKey ignores the event type:
-      // rewriting a release into an arrow press would move twice per key.
-      if (isKeyRelease(data)) return undefined;
-      const control = matchesKey(data, "ctrl+j") ? DOWN : matchesKey(data, "ctrl+k") ? UP : undefined;
-      const letter = matchesKey(data, "j") ? DOWN : matchesKey(data, "k") ? UP : undefined;
-      if (!control && !letter) return undefined;
-      const focused = tui.getFocusedComponent();
-      if (!focused || isEditorRoot(focused)) return undefined;
-      if (control) return { data: control };
-      if (J_K_DENYLIST.has(focused.constructor?.name ?? "")) return undefined;
-      if (isTypingText(focused, tui.terminal?.columns ?? 80) || bindsJK(focused)) return undefined;
-      return { data: letter };
-    });
+    if (!tui || typeof tui.getFocusedComponent !== "function") {
+      ctx.ui.notify("select-nav: focus inspection unavailable; using each component's own controls", "warning");
+      return;
+    }
+    unsubscribe = ctx.ui.onTerminalInput((data) => routeInput(data, tui.getFocusedComponent(), tui.terminal?.columns ?? 80));
   });
+  pi.on("session_shutdown", () => { unsubscribe?.(); unsubscribe = undefined; });
 }

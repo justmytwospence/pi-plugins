@@ -5,7 +5,7 @@
 // With pi-subagents installed it draws nothing: pi-subagents' list under the prompt ends with the
 // same pill (activity.ts).
 import { type TUI, type TuiMouseEvent, type TuiMouseEventResult, isKeyRelease, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import { type ActivityPill, leavesPromptDown } from "./activity.ts";
+import { type ActivityPill, focusedComponent, leavesPromptDown, mainEditorFocused, readEditorMode } from "./activity.ts";
 
 const KEY = "pi-bg-pill";
 
@@ -21,7 +21,7 @@ export function renderPill(pill: ActivityPill | undefined, selected: boolean, wi
   const inverse = (s: string) => (theme.inverse ? theme.inverse(s) : `\x1b[7m${s}\x1b[27m`);
   const label = selected ? inverse(` ${pill.label} `) : theme.fg("muted", ` ${pill.label} `);
   const alert = pill.alert ? `${theme.fg("dim", "·")} ${theme.fg("error", pill.alert)}` : "";
-  const hint = selected ? theme.fg("dim", "  l/enter view · h/esc back") : "";
+  const hint = selected ? theme.fg("dim", "  enter view · esc back") : "";
   return [truncateToWidth(`${label}${alert ? ` ${alert}` : ""}${hint}`, width)];
 }
 
@@ -115,6 +115,12 @@ export class PillView {
       }
       return undefined;
     }
+    const modal = readEditorMode(this.focused());
+    const navigation = ["enter", "escape", "up", "down", "left", "right"].some((key) => matchesKey(data, key as never));
+    if ((modal && (modal.autocomplete || (modal.state !== "normal" && modal.state !== "insert"))) || (modal?.state !== "normal" && !navigation)) {
+      this.deselect();
+      return undefined;
+    }
     if (matchesKey(data, "enter") || matchesKey(data, "l") || matchesKey(data, "right")) {
       this.deselect();
       this.source.open();
@@ -141,16 +147,12 @@ export class PillView {
   }
 
   private focused(): unknown {
-    const tui = this.tui as unknown as { getFocusedComponent?: () => unknown; focusedComponent?: unknown } | undefined;
-    return typeof tui?.getFocusedComponent === "function" ? tui.getFocusedComponent() : tui?.focusedComponent;
+    return focusedComponent(this.tui);
   }
 
-  /** Pi's editor has `getText` and `setText`; its dialogs and overlays do not. Unknown focus counts as the editor. */
+  /** Whether the main prompt has the keyboard (activity.ts: the component's reported context, else pi's editor shape). */
   private editorFocused(): boolean {
-    const focused = this.focused();
-    if (focused == null) return true;
-    const c = focused as { getText?: unknown; setText?: unknown };
-    return typeof c.getText === "function" && typeof c.setText === "function";
+    return mainEditorFocused(this.focused());
   }
 
   private hide(): void {

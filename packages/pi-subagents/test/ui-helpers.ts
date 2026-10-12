@@ -85,4 +85,12 @@ export function fakeUI(tui = fakeTui()) {
   return ui;
 }
 
+export function normalFocus(ui: ReturnType<typeof fakeUI>): void {
+  ui.tui.focused = {
+    getText: () => ui.editorText,
+    setText: (text: string) => { ui.editorText = text; },
+    [Symbol.for("pi-plugins.editor-mode.v1")]: () => ({ state: "normal", mode: "normal", pending: "", ex: null, autocomplete: false }),
+  };
+}
+
 export const KEY = { up: "\x1b[A", down: "\x1b[B", left: "\x1b[D", enter: "\r", escape: "\x1b", backspace: "\x7f" };

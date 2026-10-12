@@ -1,0 +1,58 @@
+{
+  "name": "@justmytwospence/pi-sticky-last-prompt",
+  "version": "0.1.2",
+  "description": "Pins the last user prompt scrolled out of view to the top of Pi's fullscreen TUI; click the bar to jump to it.",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE",
+    "UPSTREAM.md",
+    "UPSTREAM-CHANGELOG.md"
+  ],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "tui",
+    "sticky",
+    "header",
+    "prompt",
+    "scrollback"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "check": "npm run typecheck && npm test",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.1.0",
+    "@earendil-works/pi-tui": "1.1.0",
+    "@types/node": "^22.20.4",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/justmytwospence/pi-plugins",
+    "directory": "packages/pi-sticky-last-prompt"
+  },
+  "homepage": "https://pi-plugins.vercel.app/plugins/pi-sticky-last-prompt/",
+  "bugs": {
+    "url": "https://github.com/justmytwospence/pi-plugins/issues"
+  }
+}

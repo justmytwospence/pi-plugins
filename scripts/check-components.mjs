@@ -3,7 +3,8 @@ import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const { plugins } = JSON.parse(readFileSync(resolve(root, 'source-pins.json')));
+const manifest = JSON.parse(readFileSync(resolve(root, 'package.json')));
+const plugins = manifest.pi.extensions.map(entry => ({ name: entry.split('/')[2] }));
 let failed = false;
 for (const plugin of plugins) {
   console.log(`\n=== ${plugin.name} ===`);

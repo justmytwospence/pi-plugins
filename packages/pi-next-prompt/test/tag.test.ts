@@ -36,3 +36,13 @@ test("the instruction is short", () => {
   expect(INSTRUCTION.length).toBeLessThan(800);
   expect(INSTRUCTION).toContain("<next>");
 });
+
+test("pending rollout is explicit without making suggestions unconditional", () => {
+  expect(INSTRUCTION).toContain("release a finished implementation when rollout is still pending");
+  expect(INSTRUCTION).toContain("if, and only if");
+  expect(INSTRUCTION).toContain("exactly one obvious, concrete step");
+  expect(INSTRUCTION).toContain("task is complete with nothing pending");
+  expect(INSTRUCTION).toContain("several next steps are equally plausible");
+  expect(INSTRUCTION).toContain("when you need information from the user");
+  expect(INSTRUCTION).toContain("response ended in an error");
+});

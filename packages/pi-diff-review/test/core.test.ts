@@ -4,7 +4,7 @@ import { intraline } from "../src/intraline.ts";
 import { anchorThread, layout, selectionFromRows } from "../src/model.ts";
 import { parseDiff, unquote } from "../src/parse.ts";
 import { parseScopeArgs } from "../src/scopes.ts";
-import { lastMark, lastThreads, MARK_ENTRY, REWIND_ENTRY, THREADS_ENTRY, turnsOnBranch } from "../src/session.ts";
+import { CHECKS_ENTRY, DRAFTS_ENTRY, fileKey, isChecked, lastChecks, lastDrafts, lastMark, lastThreads, MARK_ENTRY, pruneChecks, REWIND_ENTRY, THREADS_ENTRY, turnsOnBranch } from "../src/session.ts";
 import { buildPrompt, parseReplies, type Thread } from "../src/threads.ts";
 import { strip } from "./helpers.ts";
 
@@ -79,7 +79,7 @@ describe("parseDiff", () => {
 	});
 	it("marks no-newline, binary and renames", () => {
 		expect(files[1].hunks[0].lines[1].noNewline).toBe(true);
-		expect(files[3].binary).toBe(true);
+		expect(files[3]).toMatchObject({ binary: true, oldBlob: "5555555", newBlob: "6666666", oldMode: "100644", newMode: "100644" });
 		expect(files[4].oldPath).toBe("from.ts");
 		expect(files[4].hunks).toEqual([]);
 	});
@@ -224,6 +224,57 @@ describe("session", () => {
 		expect(lastMark(branch, root)?.tree).toBe("t1");
 		expect(lastThreads(branch, root)).toHaveLength(1);
 		expect(lastThreads(branch, "/elsewhere")).toHaveLength(0);
+	});
+	it("reads the last file checks for this root, and drops checks whose diff changed", () => {
+		const files = parseDiff(PATCH);
+		const a = files[0];
+		const withChecks = [
+			...branch,
+			{ id: "k1", type: "custom", customType: CHECKS_ENTRY, data: { root, checks: { "src/a.ts": "stale", "old.txt": fileKey(files[2]), bogus: 3 } } },
+			{ id: "k2", type: "custom", customType: CHECKS_ENTRY, data: { root: "/elsewhere", checks: { "src/a.ts": fileKey(a) } } },
+		];
+		const checks = lastChecks(withChecks, root);
+		expect([...checks.keys()]).toEqual(["src/a.ts", "old.txt"]);
+		expect(isChecked(checks, a)).toBe(false);
+		expect(isChecked(checks, files[2])).toBe(true);
+		expect(pruneChecks(checks, files)).toBe(true);
+		expect([...checks.keys()]).toEqual(["old.txt"]);
+		expect(pruneChecks(checks, files)).toBe(false);
+		// The key follows the diff's content, not just the path.
+		const other = parseDiff(PATCH.replace("+const c = 4;", "+const c = 5;"))[0];
+		expect(fileKey(other)).not.toBe(fileKey(a));
+		expect(fileKey(parseDiff(PATCH)[0])).toBe(fileKey(a));
+		expect(lastChecks(branch, root).size).toBe(0);
+	});
+
+	it("keys binary content, modes, paths and no-newline markers without collisions", () => {
+		const files = parseDiff(PATCH);
+		expect(fileKey(parseDiff(PATCH.replace("5555555..6666666", "5555555..9999999"))[3])).not.toBe(fileKey(files[3]));
+		expect(fileKey({ ...files[3], newMode: "100755" })).not.toBe(fileKey(files[3]));
+		expect(fileKey({ ...files[3], newPath: "other.bin" })).not.toBe(fileKey(files[3]));
+		const f = files[0];
+		const line = (text: string, noNewline: boolean) => ({ ...f, hunks: [{ ...f.hunks[0], lines: [{ kind: "add" as const, text, noNewline }] }] });
+		expect(fileKey(line("x\\", false))).not.toBe(fileKey(line("x", true)));
+	});
+
+	it("restores root/branch-local cancelled drafts, including empty suggestions", () => {
+		const entries = [
+			{ id: "d1", type: "custom", customType: DRAFTS_ENTRY, data: { root, drafts: { comment: "partial", suggestion: "", bad: 3 } } },
+			{ id: "d2", type: "custom", customType: DRAFTS_ENTRY, data: { root: "/elsewhere", drafts: { comment: "foreign" } } },
+		];
+		expect([...lastDrafts(entries, root)]).toEqual([["comment", "partial"], ["suggestion", ""]]);
+		expect(lastDrafts([], root).size).toBe(0);
+		expect(lastDrafts([...entries, { id: "d3", type: "custom", customType: DRAFTS_ENTRY, data: { root, drafts: {} } }], root).size).toBe(0);
+		const malformed = { id: "bad", type: "custom", data: { root, drafts: ["invalid"], checks: ["invalid"] } };
+		expect(lastDrafts([...entries, { ...malformed, customType: DRAFTS_ENTRY }], root).get("comment")).toBe("partial");
+		expect(lastChecks([{ ...malformed, customType: CHECKS_ENTRY }], root).size).toBe(0);
+	});
+
+	it("copies restored thread excerpts instead of mutating persisted branch entries", () => {
+		const restored = lastThreads(branch, root);
+		restored[0].body = "changed";
+		restored[0].excerpt.push("new line");
+		expect(lastThreads(branch, root)[0]).toEqual(thread());
 	});
 });
 

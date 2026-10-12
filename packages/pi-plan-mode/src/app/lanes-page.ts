@@ -37,6 +37,14 @@ export type LaneAgent = Pick<
   | "answer"
 >;
 
+import {
+  EDITOR_MODE,
+  EDITOR_SURFACE,
+  type EditorModeContext,
+  INPUT_CONTEXT,
+  idleNormal,
+  readEditorMode,
+} from "../editor-contract.js";
 import { matchingCommands } from "../lane-commands.js";
 import { formatCost, formatDuration, formatTokens } from "../planners.js";
 import type { PlanModeQuestionAnswer } from "../question-tool.js";
@@ -81,9 +89,58 @@ export interface MergerPane {
   waiting?: string;
 }
 
+/**
+ * A lane's input: pi's one-line Input, or the suite's embedded editor (pi-vim's) when a provider is
+ * loaded (editor-contract.ts). Navigation is available only outside an active edit; the editor
+ * owns Insert, Visual, EX, pending keys and autocomplete. With `ownsEnter`, Enter is the editor's (it calls the `submit` hook: Enter outside
+ * autocomplete, `:w`); otherwise the page submits on Enter.
+ */
+export interface LaneInput {
+  focused: boolean;
+  getValue(): string;
+  setValue(text: string): void;
+  handleInput(data: string): void;
+  /** Its lines: one for pi's input; a suite editor may wrap. */
+  render(width: number): string[];
+  ownsEnter: boolean;
+  [EDITOR_MODE]?(): EditorModeContext | undefined;
+  dispose?(): void;
+}
+
+export interface LaneInputHooks {
+  /** Enter (or `:w`): send what was typed, or answer the question. */
+  submit(text?: string): void;
+  /** `:q` or Escape in Normal mode: nothing to leave here; the page redraws. */
+  cancel(): void;
+  /** Ctrl+U/D from the editor: scroll the lane by half a page. */
+  scroll(direction: -1 | 1): void;
+}
+
+/** pi's one-line input as a lane input. */
+export function nativeLaneInput(input: Input): LaneInput {
+  return {
+    get focused() {
+      return input.focused;
+    },
+    set focused(value: boolean) {
+      input.focused = value;
+    },
+    getValue: () => input.getValue(),
+    setValue: (text) => input.setValue(text),
+    handleInput: (data) => input.handleInput(data),
+    render: (width) => [input.render(width)[0] ?? ""],
+    ownsEnter: false,
+  };
+}
+
+/** The most lines a lane's input takes (a suite editor's draft scrolls inside them). */
+const MAX_INPUT_LINES = 4;
+
 export interface LanesPageOptions {
   title: string;
   task: () => string;
+  /** Makes a lane's input (the suite's editor when a provider is loaded); undefined for pi's input. */
+  createInput?(id: string, hooks: LaneInputHooks): LaneInput | undefined;
   agents(): readonly LaneAgent[];
   /** The merger pane below the lanes, or undefined (one planner). */
   merger?(): MergerPane | undefined;
@@ -135,7 +192,7 @@ export class LanesPage {
   focus = 0;
   private actionIndex = 0;
   private modal: Modal | undefined;
-  private readonly inputs = new Map<string, Input>();
+  private readonly inputs = new Map<string, LaneInput>();
   private readonly showTrace = new Set<string>();
   /** The subagent each lane shows instead of its planner, by agent id. */
   private readonly subFocus = new Map<string, string>();
@@ -155,6 +212,7 @@ export class LanesPage {
   private lastAvailable = 0;
   private lastMergerRows = 0;
   private draggingDivider = false;
+  private editorScrolling = false;
 
   constructor(
     private readonly theme: Theme,
@@ -187,6 +245,19 @@ export class LanesPage {
   /** Go to the actions bar (e.g. when every plan is in). */
   focusActions() {
     this.focus = this.targets().length - 1;
+  }
+
+  readonly [EDITOR_SURFACE] = "embedded";
+
+  [INPUT_CONTEXT]() {
+    if (this.modal?.kind === "input") return "filter";
+    return this.modal || this.focusedTarget().kind === "actions" ? "list" : "editor";
+  }
+
+  [EDITOR_MODE]() {
+    const target = this.focusedTarget();
+    if (this.modal || target.kind === "actions") return undefined;
+    return readEditorMode(this.inputFor(target.kind === "lane" ? target.agent.id : MERGER_ID));
   }
 
   get typing() {
@@ -223,17 +294,93 @@ export class LanesPage {
     return this.inputFor(agent.id);
   }
 
-  private inputFor(id: string) {
+  private inputFor(id: string): LaneInput {
     let input = this.inputs.get(id);
     if (!input) {
-      input = new Input({
-        prompt: "",
-        placeholder: `talk to ${id}… (/ for commands)`,
-        placeholderStyle: placeholderStyle(this.theme),
-      });
+      const hooks: LaneInputHooks = {
+        submit: (text) => {
+          // Pi's submit path clears the editor before calling onSubmit.
+          if (text !== undefined) this.inputFor(id).setValue(text);
+          this.submitFor(id);
+          this.options.requestRender();
+        },
+        cancel: () => {
+          const agent = this.agentFor(id);
+          if (agent && this.selectedSub(agent)) this.subFocus.delete(agent.id);
+          else this.modal = { kind: "escape", choice: 0 };
+          this.options.requestRender();
+        },
+        scroll: (direction) => {
+          // The mode at dispatch owns the key, even if an editor cancels EX/pending first.
+          if (!this.editorScrolling) return;
+          const agent = this.agentFor(id);
+          if (agent)
+            this.scrollLane(agent, direction * Math.max(1, Math.floor((this.laneHeights.get(agent.id) ?? 10) / 2)));
+          this.options.requestRender();
+        },
+      };
+      let created: LaneInput | undefined;
+      try {
+        created = this.options.createInput?.(id, hooks);
+      } catch {
+        // A provider's bug must not take the lane's input away: pi's follows.
+      }
+      input =
+        created ??
+        nativeLaneInput(
+          new Input({
+            prompt: "",
+            placeholder: `talk to ${id}… (/ for commands)`,
+            placeholderStyle: placeholderStyle(this.theme),
+          }),
+        );
       this.inputs.set(id, input);
     }
     return input;
+  }
+
+  /** The agent a lane input talks to: a planner, or M once it has started. */
+  private agentFor(id: string): LaneAgent | undefined {
+    return this.everyone().find((agent) => agent.id === id);
+  }
+
+  private edit(input: LaneInput, data: string) {
+    this.editorScrolling = idleNormal(input);
+    try {
+      input.handleInput(data);
+    } finally {
+      this.editorScrolling = false;
+    }
+  }
+
+  /** Enter from an input that owns it (a suite editor): the same as the page's Enter there. */
+  private submitFor(id: string) {
+    if (this.modal) return;
+    const pane = this.pane();
+    if (id === MERGER_ID && pane && !pane.agent) return this.startMerger(pane);
+    const agent = this.agentFor(id);
+    if (agent) this.submit(agent, id === MERGER_ID);
+  }
+
+  /** A lane's input as lines: focused, the editor itself (several lines for a suite editor); else its first line, dim. */
+  private inputLines(input: LaneInput, focused: boolean, width: number, idle: string): string[] {
+    const theme = this.theme;
+    if (!focused) return [theme.fg("dim", `› ${input.getValue().split("\n")[0] || idle}`)];
+    const lines = input.render(Math.max(4, width - 2));
+    const shown = lines.length ? lines.slice(0, MAX_INPUT_LINES) : [""];
+    return shown.map((line, index) => `${index === 0 ? theme.fg("accent", "›") : " "} ${line}`);
+  }
+
+  /** Let the inputs go (a suite editor must be disposed when its screen closes). */
+  dispose() {
+    for (const input of this.inputs.values()) {
+      try {
+        input.dispose?.();
+      } catch {
+        // Already gone.
+      }
+    }
+    this.inputs.clear();
   }
 
   private viewKey(agent: LaneAgent) {
@@ -282,6 +429,25 @@ export class LanesPage {
     const focused = targets[this.focus];
     const laneAgent =
       focused?.kind === "lane" ? focused.agent : focused?.kind === "merger" ? focused.pane.agent : undefined;
+    const input = focused?.kind === "actions" || !focused ? undefined : this.inputFor(laneAgent?.id ?? MERGER_ID);
+    const mode = readEditorMode(input);
+    const modalEdit = mode && !idleNormal(input);
+    // Tab is an explicit pane switch, unless a popup or unfinished modal command owns it.
+    const switchPane =
+      is("tab", "shift+tab") && (!mode || (!mode.autocomplete && (mode.state === "normal" || mode.state === "insert")));
+    const draftEdit =
+      input &&
+      input.getValue() !== "" &&
+      !is("escape", "enter") &&
+      (!mode || !is("ctrl+u", "ctrl+d", "pageUp", "pageDown"));
+    if (input && !switchPane && (modalEdit || draftEdit)) {
+      this.edit(input, data);
+      return this.options.requestRender();
+    }
+    if (input?.ownsEnter && is("escape", "ctrl+u", "ctrl+d", "enter")) {
+      this.edit(input, data);
+      return this.options.requestRender();
+    }
     if (laneAgent && is("ctrl+e") && (this.showsPlan(laneAgent) || this.selectedSub(laneAgent))) return;
     if (laneAgent && is("ctrl+n", "ctrl+p")) {
       this.stepSub(laneAgent, is("ctrl+n") ? 1 : -1);
@@ -307,8 +473,9 @@ export class LanesPage {
     const target = targets[this.focus];
     if (!target || target.kind === "actions") return this.handleActions(is);
     if (target.kind === "merger" && !target.pane.agent) {
-      if (is("enter")) this.startMerger(target.pane);
-      else if (!is("up", "down", "ctrl+u", "ctrl+d", "ctrl+o")) this.inputFor(MERGER_ID).handleInput(data);
+      const input = this.inputFor(MERGER_ID);
+      if (is("enter") && !input.ownsEnter) this.startMerger(target.pane);
+      else if (!is("up", "down", "ctrl+u", "ctrl+d", "ctrl+o")) this.edit(input, data);
       return this.options.requestRender();
     }
     const agent = target.kind === "lane" ? target.agent : target.pane.agent;
@@ -316,6 +483,8 @@ export class LanesPage {
     const half = Math.max(1, Math.floor((this.laneHeights.get(agent.id) ?? 10) / 2));
     if (is("ctrl+u")) this.scrollLane(agent, -half);
     else if (is("ctrl+d")) this.scrollLane(agent, half);
+    else if (is("pageUp")) this.scrollLane(agent, -(this.laneHeights.get(agent.id) ?? 10));
+    else if (is("pageDown")) this.scrollLane(agent, this.laneHeights.get(agent.id) ?? 10);
     else if (is("ctrl+e")) {
       // Expand or collapse tool output, as ctrl+o does in pi.
       agent.chat.setExpanded(!agent.chat.isExpanded);
@@ -329,7 +498,7 @@ export class LanesPage {
       // With nothing typed, ←/backspace go back a question and → forward (as far as you have answered).
       const cursor = this.questionCursor(agent);
       if (is("right")) {
-        const reachable = cursor.answers.findIndex((answer) => answer === undefined);
+        const reachable = cursor.answers.indexOf(undefined);
         const last = reachable === -1 ? agent.pending.questions.length - 1 : reachable;
         if (cursor.question < last) this.moveToQuestion(agent, cursor, cursor.question + 1);
       } else if (cursor.question > 0) this.moveToQuestion(agent, cursor, cursor.question - 1);
@@ -340,8 +509,8 @@ export class LanesPage {
       cursor.option = (cursor.option + (is("up") ? -1 : 1) + count) % count;
     } else if (is("up")) this.scrollLane(agent, -1);
     else if (is("down")) this.scrollLane(agent, 1);
-    else if (is("enter")) this.submit(agent, target.kind === "merger");
-    else this.input(agent).handleInput(data);
+    else if (is("enter") && !this.input(agent).ownsEnter) this.submit(agent, target.kind === "merger");
+    else this.edit(this.input(agent), data);
     this.options.requestRender();
   }
 
@@ -669,19 +838,15 @@ export class LanesPage {
     const body = wrap(about, Math.max(10, width - 2)).map((line) => theme.fg("dim", ` ${line}`));
     const input = this.inputFor(MERGER_ID);
     input.focused = focused && this.modal === undefined;
-    const inputLine = focused
-      ? `${theme.fg("accent", "›")} ${input.render(Math.max(4, width - 2))[0] ?? ""}`
-      : theme.fg(
-          "dim",
-          pane.ready
-            ? `› ${input.getValue() || `tab here to talk to ${MERGER_ID}`}`
-            : "  M starts once both plans are in",
-        );
+    const inputLines =
+      focused || pane.ready
+        ? this.inputLines(input, focused, width, `tab here to talk to ${MERGER_ID}`)
+        : [theme.fg("dim", "  M starts once both plans are in")];
     return [
       head,
-      ...padLines(body, bodyHeight),
+      ...padLines(body, Math.max(1, bodyHeight - (inputLines.length - 1))),
       labeledRule(theme, width, theme.fg("dim", "chat"), "", color),
-      truncateToWidth(inputLine, width),
+      ...inputLines.map((line) => truncateToWidth(line, width)),
     ];
   }
 
@@ -712,10 +877,8 @@ export class LanesPage {
     const question = this.questionLines(agent, width, Math.max(1, rows - 1 - subagents.length - 2 - 2));
     const input = this.input(agent);
     input.focused = focused && this.modal === undefined;
-    const inputLine = focused
-      ? `${theme.fg("accent", "›")} ${input.render(Math.max(4, width - 2))[0] ?? ""}`
-      : theme.fg("dim", `› ${input.getValue() || `tab here to talk to ${agent.id}`}`);
-    const bodyHeight = Math.max(2, rows - 1 - subagents.length - question.length - 2);
+    const inputLines = this.inputLines(input, focused, width, `tab here to talk to ${agent.id}`);
+    const bodyHeight = Math.max(2, rows - 1 - subagents.length - question.length - 1 - inputLines.length);
     this.laneHeights.set(agent.id, bodyHeight);
     const key = this.viewKey(agent);
     const all = selected
@@ -742,7 +905,7 @@ export class LanesPage {
       ...padLines(body, bodyHeight),
       ...question,
       labeledRule(theme, width, position, "", focused ? "borderAccent" : "borderMuted"),
-      truncateToWidth(inputLine, width),
+      ...inputLines.map((line) => truncateToWidth(line, width)),
     ];
   }
 
@@ -1069,7 +1232,7 @@ export class LanesPage {
         : agent
           ? [{ key: "↑↓", label: "scroll" }]
           : []),
-      ...(agent ? [{ key: "^u/^d", label: "page" }] : []),
+      ...(agent ? [{ key: "^u/^d", label: "half page" }] : []),
       ...(agent && agent.subagents.agents.length > 0
         ? [{ key: "^n/^p", label: this.selectedSub(agent) ? "subagent" : "subagents" }]
         : []),

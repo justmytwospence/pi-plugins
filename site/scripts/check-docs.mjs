@@ -17,7 +17,7 @@ const manifest = JSON.parse(await readFile(path.join(root, "package.json"), "utf
 const entries = manifest.pi.extensions.map((entry) => entry.replace(/^\.\//, ""));
 const names = entries.map((entry) => entry.split("/")[1]).sort();
 const catalog = plugins.map((plugin) => plugin.name).sort();
-if (names.length !== 19) fail("Expected 19 suite entries; update the public count deliberately when the manifest changes.");
+if (names.length !== 23) fail("Expected 23 suite entries; update the public count deliberately when the manifest changes.");
 if (new Set(catalog).size !== catalog.length) fail("Duplicate plugin in catalog.");
 if (JSON.stringify(names) !== JSON.stringify(catalog)) fail("Catalog does not match the root suite manifest.");
 
@@ -42,7 +42,8 @@ for (const file of paths) {
     if (covered.has(data.plugin)) fail(relative + ": duplicate plugin reference.");
     covered.add(data.plugin);
     if (path.basename(file, path.extname(file)) !== data.plugin) fail(relative + ": filename must match plugin.");
-    if (!body.includes("packages/" + data.plugin + "/src/index.ts")) fail(relative + ": missing exact selection entry.");
+    const entry = entries.find((candidate) => candidate.split("/")[1] === data.plugin);
+    if (entry && !body.includes(entry)) fail(relative + ": missing exact selection entry " + entry + ".");
     if ((body.match(/^## /gm) || []).length < 4) fail(relative + ": reference needs useful sections.");
     if (body.split(/\s+/).length < 180) fail(relative + ": reference is too thin.");
     if (!/requirements|dependencies|costs/i.test(body)) fail(relative + ": spell out requirements/costs.");
@@ -50,6 +51,11 @@ for (const file of paths) {
   } else if (file.includes(path.sep + "plugins" + path.sep)) fail(relative + ": missing plugin frontmatter.");
 
   if (/\p{Extended_Pictographic}/u.test(body)) fail(relative + ": do not use emojis.");
+  for (const install of body.matchAll(/pi install\s+git:github\.com\/justmytwospence\/(pi-[\w-]+)/g)) {
+    if (install[1] !== "pi-plugins") fail(relative + ": retired component install source " + install[1]);
+  }
+  if (/all 19 (?:extensions|entries)|default is Shift\+Tab/i.test(body)) fail(relative + ": stale suite count or plan shortcut claim.");
+  if (data.plugin === "pi-diff-review" && /:mark[^\n]*and closes|:mark[^\n]*and close/i.test(body)) fail(relative + ": explicit marking must stay open.");
   for (const block of body.matchAll(/^```json[^\n]*\n([\s\S]*?)^```/gm)) {
     try {
       const value = JSON.parse(block[1]);
@@ -81,7 +87,7 @@ for (const file of paths) {
   }
 }
 for (const name of names) if (!covered.has(name)) fail("Missing reference for " + name);
-for (const required of ["/", "/guides/overview/", "/guides/install/", "/guides/releases/", "/guides/requirements/", "/guides/troubleshooting/", "/recipes/background-work/", "/recipes/notebooks/", "/recipes/plan-review/", "/recipes/cache-cost/", "/architecture/activity/", "/development/", "/about/"]) {
+for (const required of ["/", "/guides/overview/", "/guides/install/", "/guides/releases/", "/guides/requirements/", "/guides/keyboard/", "/guides/standalone/", "/guides/external/", "/guides/troubleshooting/", "/recipes/background-work/", "/recipes/notebooks/", "/recipes/plan-review/", "/recipes/cache-cost/", "/architecture/activity/", "/development/", "/about/"]) {
   if (!routes.has(required)) fail("Missing required page: " + required);
 }
 if (errors.length) { console.error(errors.join("\n")); process.exitCode = 1; }

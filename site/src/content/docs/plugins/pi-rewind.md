@@ -8,7 +8,7 @@ Rewind connects conversation navigation with local file state. Moving to an earl
 
 ## Enable and requirements
 
-Select `packages/pi-rewind/src/index.ts` through [Install & select](/guides/install/). The suite loads all 19 extensions by default, and every selected entry shares one Git pin.
+Select `packages/pi-rewind/src/index.ts` through [Install & select](/guides/install/). The suite loads every entry by default, and every selected entry shares one Git pin.
 
 A Git executable and a working Git repository are required. Outside a repository, the extension does not create checkpoints. Normal operation requires a UI; `PI_REWIND_ALWAYS=1` also enables snapshots in non-interactive modes, but does not supply a restoration dialog where no UI exists.
 

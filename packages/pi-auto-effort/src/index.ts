@@ -113,6 +113,7 @@ interface Entry {
   type?: string;
   customType?: string;
   data?: unknown;
+  thinkingLevel?: string;
   message?: { role?: string; content?: unknown; toolName?: string; isError?: boolean; [key: string]: unknown };
 }
 
@@ -195,6 +196,9 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
   // Request-level effort and configuration_update positions for this conversation.
   let updates = emptyState();
   const pinned = thinkingPinned();
+  // Bumped when a prompt, session, branch, model, manual level or gate replaces the state a
+  // Jev answer would apply to. Shutdown invalidates callbacks from the old runtime too.
+  let generation = 0;
 
   const active = () => sessionOn && config.enabled && !pinned;
 
@@ -213,6 +217,7 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
   };
 
   const manual = (level: string) => {
+    generation++;
     state = { ...state, ceiling: level, dwell: config.policy.minDwell };
     baseline = level;
     appliedLevel = level;
@@ -232,12 +237,19 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     return describeWindows(views, now()).map((line) => `limits: ${line}`);
   };
 
-  pi.on("session_start", (_event, ctx) => {
-    config = loadConfig("auto-effort", DEFAULT_CONFIG, ctx.cwd);
-    const saved = [...ctx.sessionManager.getBranch()]
-      .reverse()
-      .find((e) => (e as Entry).type === "custom" && (e as Entry).customType === STATE_ENTRY) as Entry | undefined;
-    const data = saved?.data as (Partial<EffortState> & { baseline?: unknown; level?: unknown }) | undefined;
+  /**
+   * Rebuild the policy state from the current branch: its last `auto-effort:state` entry and the
+   * effort-update positions. Called at session start and after /tree moves the leaf, since the
+   * entries of an abandoned branch describe another history.
+   */
+  const restoreFromBranch = (ctx: ExtensionContext) => {
+    generation++;
+    turnsSince = 0;
+    ownLevel = undefined;
+    firedWhileApplying = false;
+    const branch = ctx.sessionManager.getBranch() as Entry[];
+    const savedIndex = branch.findLastIndex((e) => e.type === "custom" && e.customType === STATE_ENTRY);
+    const data = branch[savedIndex]?.data as (Partial<EffortState> & { baseline?: unknown; level?: unknown; reason?: unknown }) | undefined;
     state =
       data && typeof data.ceiling === "string"
         ? { e: typeof data.e === "number" ? data.e : undefined, dwell: typeof data.dwell === "number" ? data.dwell : config.policy.minDwell, ceiling: data.ceiling }
@@ -245,13 +257,27 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     // An entry from before the limits stage has no baseline: its level was the baseline.
     appliedLevel = data && typeof data.level === "string" ? data.level : undefined;
     baseline = data && typeof data.baseline === "string" ? data.baseline : appliedLevel;
+    lastReason = data && typeof data.reason === "string" ? data.reason : "";
     pressure = NO_PRESSURE;
-    const savedUpdates = [...ctx.sessionManager.getBranch()]
-      .reverse()
-      .find((e) => (e as Entry).type === "custom" && (e as Entry).customType === UPDATES_ENTRY) as Entry | undefined;
+    // Own changes precede their state entry. Later thinking entries are manual choices whose
+    // ceiling must survive a reload or /tree move even if no new assessment was saved yet.
+    for (const entry of branch.slice(savedIndex + 1)) {
+      if (entry.type === "thinking_level_change" && typeof entry.thinkingLevel === "string") manual(entry.thinkingLevel);
+    }
+    const savedUpdates = [...branch].reverse().find((e) => e.type === "custom" && e.customType === UPDATES_ENTRY);
     updates = restoreState(savedUpdates?.data);
     status(ctx);
+  };
+
+  pi.on("session_start", (_event, ctx) => {
+    config = loadConfig("auto-effort", DEFAULT_CONFIG, ctx.cwd);
+    restoreFromBranch(ctx);
     pollCodex(ctx);
+  });
+
+  // /tree moved the leaf: the branch below it is the history now, with its own last state.
+  pi.on("session_tree", (_event, ctx) => {
+    restoreFromBranch(ctx);
   });
 
   // On models that take configuration_update items, any effort change (auto, manual, or another
@@ -266,8 +292,17 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     return event.payload;
   });
 
-  pi.on("model_select", (_event, ctx) => pollCodex(ctx));
+  pi.on("model_select", (_event, ctx) => {
+    generation++;
+    turnsSince = 0;
+    pollCodex(ctx);
+  });
   pi.on("agent_settled", (_event, ctx) => pollCodex(ctx));
+  pi.on("session_shutdown", () => {
+    generation++;
+    latestCtx = undefined;
+    ownLevel = undefined;
+  });
 
   pi.on("after_provider_response", (event, ctx) => {
     const provider = ctx.model?.provider;
@@ -339,10 +374,15 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
   pi.on("before_agent_start", async (event, ctx) => {
     config = loadConfig("auto-effort", DEFAULT_CONFIG, ctx.cwd);
     turnsSince = 0;
-    if (!active() || !event.prompt.trim()) return;
+    const mine = ++generation;
+    // ctx.signal can be a getter for the runtime's current operation. Keep this operation's
+    // signal across the await rather than checking a later run's signal when the answer arrives.
+    const signal = ctx.signal;
+    if (!active() || !event.prompt.trim() || signal?.aborted) return;
     // Codex usage refreshes alongside the Jev call; the prompt never waits for it.
     pollCodex(ctx);
-    const outcome = await askJev(ctx.modelRegistry, config.jev, effortState(event.prompt, ctx.sessionManager.getBranch()), QUESTIONS, ctx.signal);
+    const outcome = await askJev(ctx.modelRegistry, config.jev, effortState(event.prompt, ctx.sessionManager.getBranch()), QUESTIONS, signal);
+    if (mine !== generation || signal?.aborted || !active()) return;
     const depth = outcome.ok ? score(outcome.answers, "depth") : undefined;
     const ack = outcome.ok ? bool(outcome.answers, "ack") : undefined;
     const judgment = depth && ack !== undefined ? { score: depth.score, confidence: depth.confidence, ack } : undefined;
@@ -357,13 +397,15 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     if (!mid.enabled || !midRunSupported(ctx.model, [...mid.models, ...updateModels(config)])) return;
     const results = (event.toolResults ?? []) as Array<{ isError?: boolean }>;
     const stop = (event.message as { stopReason?: string } | undefined)?.stopReason;
+    const signal = ctx.signal;
     // A turn without tool results ends the run; an error or abort has no next request to change.
-    if (!results.length || stop === "error" || stop === "aborted" || ctx.signal?.aborted) return;
+    if (!results.length || stop === "error" || stop === "aborted" || signal?.aborted) return;
     turnsSince++;
     if (!shouldAssess(mid, turnsSince, results.filter((r) => r.isError).length)) return;
     turnsSince = 0;
-    const outcome = await askJev(ctx.modelRegistry, config.jev, runState(ctx.sessionManager.getBranch(), mid.steps), MID_RUN_QUESTIONS, ctx.signal);
-    if (ctx.signal?.aborted) return;
+    const mine = generation;
+    const outcome = await askJev(ctx.modelRegistry, config.jev, runState(ctx.sessionManager.getBranch(), mid.steps), MID_RUN_QUESTIONS, signal);
+    if (mine !== generation || signal?.aborted || !active()) return;
     const depth = outcome.ok ? score(outcome.answers, "depth") : undefined;
     // Mid-run there is no message to be a go-ahead.
     const judgment = depth ? { score: depth.score, confidence: depth.confidence, ack: 0 } : undefined;
@@ -378,6 +420,8 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
       const arg = args.trim();
       if (arg === "on" || arg === "off") {
         sessionOn = arg === "on";
+        // An assessment in flight must not apply after the gate was switched.
+        generation++;
         if (!sessionOn && levelDiffers(pi.getThinkingLevel(), state.ceiling)) {
           applying = true;
           try {

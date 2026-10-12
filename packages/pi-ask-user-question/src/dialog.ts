@@ -2,13 +2,14 @@
 // transcript stays visible above it. Several questions get a tab each plus a Review tab; every
 // question ends with a "Type something." row that opens a multiline editor, `n` adds a note, and
 // options with a Markdown preview show it beside the list (below it in narrow terminals).
-import { DynamicBorder, getMarkdownTheme, getSelectListTheme, type KeybindingsManager, keyHint, rawKeyHint, type Theme } from "@earendil-works/pi-coding-agent";
+import { DynamicBorder, getMarkdownTheme, getSelectListTheme, type KeybindingsManager, rawKeyHint, type Theme } from "@earendil-works/pi-coding-agent";
 import {
   type Component,
   decodeKittyPrintable,
   Editor,
   type EditorTheme,
   type Focusable,
+  isKeyRelease,
   Key,
   Markdown,
   matchesKey,
@@ -17,6 +18,7 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import { type EditorCreator, type ProseEditor, editorOwnsCancel } from "./editor.ts";
 import { box, columns, leftWidth, rightWidth, SIDE_ROWS, sideBySide, STACKED_ROWS } from "./preview.ts";
 import { type Answer, type Choice, type DialogResult, makeAnswer } from "./result.ts";
 import { type Question, TYPE_SOMETHING } from "./schema.ts";
@@ -35,8 +37,8 @@ interface Slot {
   /** The saved "Type something." text; the editor holds the draft. */
   typed: string;
   note: string;
-  custom: Editor;
-  notes: Editor;
+  custom: ProseEditor;
+  notes: ProseEditor;
   previews: Array<Markdown | undefined>;
 }
 
@@ -73,6 +75,7 @@ export class QuestionDialog implements Component, Focusable {
     questions: Question[],
     done: (result: DialogResult) => void,
     signal?: AbortSignal,
+    createEditor?: EditorCreator,
   ) {
     this.tui = tui;
     this.theme = theme;
@@ -83,10 +86,12 @@ export class QuestionDialog implements Component, Focusable {
     this.border = new DynamicBorder((s) => theme.fg("accent", s));
     const editorTheme: EditorTheme = { borderColor: (s) => theme.fg("accent", s), selectList: getSelectListTheme() };
     this.slots = questions.map((q, i) => {
-      const custom = new Editor(tui, editorTheme);
-      const notes = new Editor(tui, editorTheme);
-      custom.onSubmit = (text) => this.saveTyped(i, text);
-      notes.onSubmit = (text) => this.saveNote(i, text);
+      const saveCustom = (text: string) => this.saveTyped(i, text);
+      const saveNotes = (text: string) => this.saveNote(i, text);
+      const custom = createEditor?.(tui, editorTheme, keybindings, saveCustom, () => this.closeEditor()) ?? new Editor(tui, editorTheme) as ProseEditor;
+      const notes = createEditor?.(tui, editorTheme, keybindings, saveNotes, () => this.closeEditor()) ?? new Editor(tui, editorTheme) as ProseEditor;
+      custom.onSubmit = saveCustom;
+      notes.onSubmit = saveNotes;
       return { cursor: 0, checked: new Set(), typedChecked: false, typed: "", note: "", custom, notes, previews: this.previewsFor(q) };
     });
     signal?.addEventListener("abort", this.onAbort, { once: true });
@@ -101,10 +106,12 @@ export class QuestionDialog implements Component, Focusable {
     this.syncFocus();
   }
 
+  [Symbol.for("pi-plugins.input-context.v1")]() { return this.editing ? "editor" : "list"; }
+
   // --- input -------------------------------------------------------------------------------
 
   handleInput(data: string): void {
-    if (this.finished) return;
+    if (this.finished || isKeyRelease(data)) return;
     this.input(data);
     this.refresh();
   }
@@ -112,13 +119,15 @@ export class QuestionDialog implements Component, Focusable {
   private input(data: string): void {
     const kb = this.keybindings;
     if (this.editing) {
-      if (kb.matches(data, "tui.select.cancel")) this.closeEditor();
-      else this.editor()?.handleInput(data);
+      const editor = this.editor();
+      if (editor && kb.matches(data, "tui.select.cancel") && !editorOwnsCancel(editor)) this.closeEditor();
+      else editor?.handleInput(data);
       return;
     }
     const many = this.questions.length > 1;
-    if (many && (matchesKey(data, Key.tab) || matchesKey(data, Key.right))) return this.go(1);
-    if (many && (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left))) return this.go(-1);
+    const reserved = kb.matches(data, "tui.select.confirm") || kb.matches(data, "tui.select.cancel") || kb.matches(data, "tui.select.up") || kb.matches(data, "tui.select.down");
+    if (!reserved && many && (matchesKey(data, Key.tab) || matchesKey(data, Key.right))) return this.go(1);
+    if (!reserved && many && (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left))) return this.go(-1);
     if (this.onReview()) {
       if (kb.matches(data, "tui.select.confirm")) this.finish(false);
       else if (kb.matches(data, "tui.select.cancel")) this.finish(true);
@@ -128,14 +137,14 @@ export class QuestionDialog implements Component, Focusable {
     const slot = this.slots[this.tab]!;
     const rows = q.options.length + 1;
     const key = printable(data);
-    if (kb.matches(data, "tui.select.up") || key === "k") slot.cursor = (slot.cursor - 1 + rows) % rows;
-    else if (kb.matches(data, "tui.select.down") || key === "j") slot.cursor = (slot.cursor + 1) % rows;
+    if (kb.matches(data, "tui.select.confirm")) return this.confirm(q, slot);
+    if (kb.matches(data, "tui.select.cancel")) return this.finish(true);
+    if (kb.matches(data, "tui.select.up") || matchesKey(data, "ctrl+k") || key === "k") slot.cursor = (slot.cursor - 1 + rows) % rows;
+    else if (kb.matches(data, "tui.select.down") || matchesKey(data, "ctrl+j") || key === "j") slot.cursor = (slot.cursor + 1) % rows;
     else if (key && /^[1-9]$/u.test(key)) {
       if (Number(key) <= rows) slot.cursor = Number(key) - 1;
     } else if (key === " " && q.multiSelect) this.toggle(q, slot);
     else if (key === "n") this.openEditor("notes");
-    else if (kb.matches(data, "tui.select.confirm")) this.confirm(q, slot);
-    else if (kb.matches(data, "tui.select.cancel")) this.finish(true);
   }
 
   private confirm(q: Question, slot: Slot): void {
@@ -205,7 +214,7 @@ export class QuestionDialog implements Component, Focusable {
     this.syncFocus();
   }
 
-  private editor(): Editor | undefined {
+  private editor(): ProseEditor | undefined {
     const slot = this.slots[this.tab];
     if (!slot || !this.editing) return undefined;
     return this.editing === "custom" ? slot.custom : slot.notes;
@@ -247,6 +256,7 @@ export class QuestionDialog implements Component, Focusable {
     if (this.finished) return;
     this.finished = true;
     this.signal?.removeEventListener("abort", this.onAbort);
+    for (const slot of this.slots) { slot.custom.dispose?.(); slot.notes.dispose?.(); }
     const answers: Answer[] = [];
     this.slots.forEach((slot, i) => {
       if (cancelled && !slot.choice) return;
@@ -387,20 +397,21 @@ export class QuestionDialog implements Component, Focusable {
   }
 
   private hints(): string {
+    const hint = (action: "tui.select.confirm" | "tui.select.cancel" | "tui.input.submit" | "tui.input.newLine", label: string) => rawKeyHint(this.keybindings.getKeys(action).join("/") || "unbound", label);
     const many = this.questions.length > 1;
     if (this.editing) {
-      return [rawKeyHint("enter", "save"), rawKeyHint("shift+enter", "newline"), keyHint("tui.select.cancel", "back")].join("  ");
+      return [hint("tui.input.submit", "save"), hint("tui.input.newLine", "newline"), hint("tui.select.cancel", "back")].join("  ");
     }
     if (this.onReview()) {
-      return [keyHint("tui.select.confirm", "submit"), rawKeyHint("tab", "questions"), keyHint("tui.select.cancel", "cancel")].join("  ");
+      return [hint("tui.select.confirm", "submit"), rawKeyHint("tab", "questions"), hint("tui.select.cancel", "cancel")].join("  ");
     }
     const multi = this.questions[this.tab]!.multiSelect;
     return [
-      rawKeyHint("↑↓", "navigate"),
-      ...(multi ? [rawKeyHint("space", "toggle"), keyHint("tui.select.confirm", "done")] : [keyHint("tui.select.confirm", "select")]),
+      `${this.keybindings.getKeys("tui.select.up").join("/")}/${this.keybindings.getKeys("tui.select.down").join("/")} navigate`,
+      ...(multi ? [rawKeyHint("space", "toggle"), hint("tui.select.confirm", "done")] : [hint("tui.select.confirm", "select")]),
       rawKeyHint("n", "notes"),
       ...(many ? [rawKeyHint("tab", "next question")] : []),
-      keyHint("tui.select.cancel", "cancel"),
+      hint("tui.select.cancel", "cancel"),
     ].join("  ");
   }
 }

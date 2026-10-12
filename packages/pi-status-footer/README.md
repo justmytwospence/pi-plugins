@@ -5,15 +5,18 @@ It leaves the working indicator, task widgets and tool rendering alone, and keep
 whichever editor is installed (pi's, pi-vim's), redrawing only its two border lines
 as the context gauge. It uses pi's current theme, without background color blocks or animation.
 The MCP status uses a flat Nerd Font plug (U+F1E6), inheriting the status text color;
-it needs Nerd Font symbol support in the terminal. Other status text is preserved.
+Nerd Font support is only needed for that decorative glyph. The `MCP` label and status text remain readable without it. Other status text is preserved.
 
 ## Install
 
+Install the suite and select `packages/pi-status-footer/src/index.ts` with `pi config`:
+
 ```sh
-pi install git:github.com/justmytwospence/pi-status-footer
+pi install git:github.com/justmytwospence/pi-plugins
+pi config
 ```
 
-or add a checkout's path to `packages` in `~/.pi/agent/settings.json`.
+One Git revision versions every selected component. Never enable a second standalone copy of the footer. From a local suite checkout, `pi -e ./packages/pi-status-footer` loads this component's own manifest without requiring its siblings. See the [public reference](https://pi-plugins.vercel.app/plugins/pi-status-footer/) for exact subset settings and compatibility.
 
 ## Controls
 
@@ -42,8 +45,8 @@ readings fresh.
    No path, hunk or staging counts appear in the compact UI. Detailed `/status`
    retains counts, known upstreams and errors. Unborn repositories keep their
    branch name; detached HEAD shows `detached:<sha7>`. Outside a Git repository,
-   the Git summary stays quiet and the project remains visible. Model and
-   labeled reasoning level on the right. Waiting/errors take priority.
+   the Git summary stays quiet and the project remains visible. Model and labeled
+   reasoning level stay on the right. Waiting/errors take priority.
 2. `Context 32% used`. The gauge itself is the editor's border lines, above and
    below the prompt: the used share of the width in heavy rule (accent, then the
    warning and error colors), the rest in the editor's own border color, so pi-vim's
@@ -134,7 +137,7 @@ Other providers get the common session rows, without invented quota information.
 
 ## Performance and lifecycle
 
-Rendering performs no filesystem, subprocess or network operations. Git is fetched
+Rendering performs no filesystem, subprocess or network operations. Git is read
 asynchronously on startup, settlement and branch changes, with a three-second
 minimum ordinary refresh interval. A 15-second clock refreshes idle state; shared
 quota reads/refreshes run at most once per minute ordinarily. The Claude reading

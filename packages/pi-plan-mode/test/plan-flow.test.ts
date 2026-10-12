@@ -13,6 +13,8 @@ const flush = () => new Promise((resolve) => setTimeout(resolve, 10));
 /** Planner sessions that submit `# Plan from <model>` for any prompt (or, with `ask`, ask first). */
 function fakeSessions(ask = false, failFirst?: { model: string; error: string }) {
   const prompts: Array<{ model: string; text: string }> = [];
+  const disposed: string[] = [];
+  const emitters: Array<(event: unknown) => void> = [];
   const factory: PlannerSessionFactory = async (_host, options) => {
     const tools = new Map<string, { execute(...args: unknown[]): Promise<unknown> }>();
     (options.policy as (pi: unknown) => void)({
@@ -25,6 +27,7 @@ function fakeSessions(ask = false, failFirst?: { model: string; error: string })
     const emit = (event: unknown) => {
       for (const listener of listeners) listener(event);
     };
+    emitters.push(emit);
     return {
       session: {
         isStreaming: false,
@@ -77,10 +80,12 @@ function fakeSessions(ask = false, failFirst?: { model: string; error: string })
         listeners.add(listener as never);
         return () => listeners.delete(listener as never);
       },
-      dispose: () => undefined,
+      dispose: () => {
+        disposed.push(options.spec.modelId);
+      },
     };
   };
-  return { factory, prompts };
+  return { factory, prompts, disposed, emitters };
 }
 
 function setup(
@@ -92,7 +97,7 @@ function setup(
 ) {
   const mock = createMockPi({ thinkingLevel: "high" });
   const sessions = fakeSessions(options.ask, options.failFirst);
-  planMode(mock.pi, {
+  const ready = planMode(mock.pi, {
     ...(options.login ? { login: options.login } : {}),
     readSettings: async () => ({
       thinkingLevel: "inherit",
@@ -125,7 +130,7 @@ function setup(
     },
   });
   (context.ctx as { sendUserMessage?: unknown }).sendUserMessage = async (text: string) => sent.push(text);
-  return { mock, context, sessions, sent, harness: () => harness };
+  return { mock, context, sessions, sent, ready, harness: () => harness };
 }
 
 test("/plan opens on the settings, goes through tools, plans with one planner, adds a second, and implements", async () => {
@@ -397,8 +402,8 @@ test("a restored run keeps its deliveries and plan M, turns the tools back on, a
   await opened;
 });
 
-test("restoring a run resumes the turns a reload cut off or that had failed, and leaves the rest", async () => {
-  const { mock, context, sessions } = setup();
+test("restoring a run marks the turns a reload cut off or that had failed, and resumes one only on request", async () => {
+  const { mock, context, sessions, harness } = setup();
   mock.entries.push({
     customType: "plan-run",
     data: {
@@ -426,29 +431,57 @@ test("restoring a run resumes the turns a reload cut off or that had failed, and
   });
   for (const handler of mock.events.get("session_start") ?? []) await handler({}, context.ctx);
   await flush();
-  const resumed = sessions.prompts.map((prompt) => prompt.model);
-  assert.deepEqual(resumed.sort(), ["claude-opus-5-5", "claude-sonnet-5-5"]);
+  // Nothing starts a model call on its own: the planners are marked, and the status line says so.
+  assert.equal(sessions.prompts.length, 0);
+  assert.match(context.statuses.get("plan") ?? "", /A cut off \(resume in \/plan\) · B cut off \(resume in \/plan\)/u);
+  // The cut-off markers survive a save, so a later restore still offers to resume.
+  const stored = () => {
+    const entry = mock.entries.filter((entry) => entry.customType === "plan-run").at(-1);
+    assert.ok(entry);
+    return (entry.data as { planners: Array<{ id: string; turn?: string }> }).planners.map((planner) => [
+      planner.id,
+      planner.turn,
+    ]);
+  };
+  assert.deepEqual(stored(), [
+    ["A", "interrupted"],
+    ["B", "failed"],
+  ]);
+  // /plan offers to resume each; Resume A sends the resume message to A only.
+  const opened = mock.commands.get("plan")?.handler("", context.ctx);
+  await flush();
+  const app = harness();
+  assert.ok(app);
+  let screen = app.render().join("\n");
+  assert.match(screen, /Cut off: the session restarted mid-turn/u);
+  assert.match(screen, /Resume A/u);
+  assert.match(screen, /Resume B/u);
+  app.handleInput("\t");
+  app.handleInput("\t");
+  app.handleInput("\t");
+  app.handleInput("\r");
+  await flush();
+  assert.deepEqual(
+    sessions.prompts.map((prompt) => prompt.model),
+    ["claude-sonnet-5-5"],
+  );
   assert.match(
-    sessions.prompts.find((prompt) => prompt.model === "claude-sonnet-5-5")?.text ?? "",
+    sessions.prompts[0]?.text ?? "",
     /cut off because the user's pi session restarted.*Carry on from where you left off/su,
   );
-  assert.match(
-    sessions.prompts.find((prompt) => prompt.model === "claude-opus-5-5")?.text ?? "",
-    /previous turn failed with an error/u,
-  );
-  // Both finished their resumed turns; the saved run no longer marks them as cut off.
-  const stored = mock.entries.filter((entry) => entry.customType === "plan-run").at(-1)?.data as {
-    planners: Array<{ id: string; turn?: string; plan?: string }>;
-  };
-  assert.deepEqual(
-    stored.planners.map((planner) => [planner.id, planner.turn, Boolean(planner.plan)]),
-    [
-      ["A", undefined, true],
-      ["B", undefined, true],
-    ],
-  );
+  screen = app.render().join("\n");
+  assert.doesNotMatch(screen, /Resume A/u, "resumed: no longer offered");
+  assert.match(screen, /Resume B/u, "B is still waiting for you");
+  assert.deepEqual(stored(), [
+    ["A", undefined],
+    ["B", "failed"],
+  ]);
+  // Saying something to B resumes it too (its turn then runs): no marker left.
+  app.handleInput("\u001b");
+  app.handleInput("\r");
+  await opened;
 
-  // A planner that was idle (done, or stopped by you) is not resumed.
+  // A planner that was idle (done, or stopped by you) is not marked.
   const idle = setup();
   idle.mock.entries.push({
     customType: "plan-run",
@@ -472,10 +505,11 @@ test("restoring a run resumes the turns a reload cut off or that had failed, and
   for (const handler of idle.mock.events.get("session_start") ?? []) await handler({}, idle.context.ctx);
   await flush();
   assert.equal(idle.sessions.prompts.length, 0);
+  assert.doesNotMatch(idle.context.statuses.get("plan") ?? "", /cut off/u);
 });
 
 test("a planner asking you something shows in herdr as blocked until it stops asking", async () => {
-  const { mock, context } = setup({ ask: true });
+  const { mock, context, harness } = setup({ ask: true });
   const blocked: unknown[] = [];
   mock.eventBus.on("herdr:blocked", (data) => blocked.push(data));
   mock.entries.push({
@@ -492,7 +526,19 @@ test("a planner asking you something shows in herdr as blocked until it stops as
   });
   for (const handler of mock.events.get("session_start") ?? []) await handler({}, context.ctx);
   await flush();
+  // Restored, nothing runs, so nothing blocks; resuming A from /plan starts its turn, which asks.
+  assert.deepEqual(blocked, []);
+  const opened = mock.commands.get("plan")?.handler("", context.ctx);
+  await flush();
+  const app = harness();
+  assert.ok(app);
+  app.handleInput("\t");
+  app.handleInput("\r");
+  await flush();
   assert.deepEqual(blocked, [{ active: true, label: "Planner question" }]);
+  app.handleInput("\u001b");
+  app.handleInput("\r");
+  await opened;
   for (const handler of mock.events.get("session_shutdown") ?? []) await handler({}, context.ctx);
   await flush();
   assert.deepEqual(blocked, [{ active: true, label: "Planner question" }, { active: false }]);

@@ -6,7 +6,7 @@
 // dismisses an ended one; `r` reruns a shell; `f` follows a shell's log in a herdr split; Esc, q, ←
 // or h goes back.
 import { type Component, type TUI, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import type { ActivityEntry, ActivitySection } from "./activity.ts";
+import { type ActivityEntry, type ActivitySection, INPUT_CONTEXT, dismissable, stableKey, stopKey, stoppable } from "./activity.ts";
 import { banner, bottom, row as frameRow, rule as frameRule } from "./frame.ts";
 
 /** Banner, summary, rule, rule, hints, bottom border. */
@@ -40,9 +40,9 @@ type Row = { kind: "entry"; section: ActivitySection; entry: ActivityEntry };
 type TuiLike = Pick<TUI, "requestRender"> & { terminal: { rows: number } };
 
 /** Runs another source's code from a key handler, where a throw would escape into pi's input loop. */
-const guard = (fn: () => void) => {
+const guard = (fn: () => void | Promise<void>) => {
   try {
-    fn();
+    void Promise.resolve(fn()).catch(() => undefined);
   } catch {
     // Ignored: the source's own problem.
   }
@@ -75,7 +75,8 @@ export class TasksDialog implements Component {
   private rows: Row[] = [];
   private selected = 0;
   private scroll = 0;
-  private stopArmed = false;
+  /** The entry one `x` away from being stopped, by stable id: a second `x` stops only that entry. */
+  private armedKey: string | undefined;
   private closed = false;
   private readonly timer: ReturnType<typeof setInterval>;
 
@@ -87,7 +88,7 @@ export class TasksDialog implements Component {
   ) {
     this.refresh();
     if (options.initialKey) {
-      const i = this.entryRows().findIndex((r) => r.entry.key === options.initialKey);
+      const i = this.entryRows().findIndex((r) => stableKey(r.section.id, r.entry.key) === options.initialKey);
       if (i >= 0) this.selected = i;
     }
     this.timer = setInterval(() => {
@@ -99,10 +100,12 @@ export class TasksDialog implements Component {
   }
 
   private refresh(): void {
-    const key = this.current()?.entry.key;
+    const current = this.current();
+    const key = current && stableKey(current.section.id, current.entry.key);
     this.rows = dialogRows(this.options.sections(), Date.now());
     const entries = this.entryRows();
-    const kept = key ? entries.findIndex((r) => r.entry.key === key) : -1;
+    const kept = key ? entries.findIndex((r) => stableKey(r.section.id, r.entry.key) === key) : -1;
+    if (!entries.some((r) => stopKey(r.section.id, r.entry) === this.armedKey && stoppable(r.section, r.entry))) this.armedKey = undefined;
     this.selected = kept >= 0 ? kept : Math.min(this.selected, Math.max(0, entries.length - 1));
   }
 
@@ -114,22 +117,39 @@ export class TasksDialog implements Component {
     return this.entryRows()[this.selected];
   }
 
+  /** The dialog is a selection list: global listeners leave its keys alone. */
+  [INPUT_CONTEXT](): "list" {
+    return "list";
+  }
+
+  /** Whether the selected entry is armed: `x` was pressed on this very entry (not its row). */
+  private armed(cur: Row | undefined): boolean {
+    return cur !== undefined && this.armedKey === stopKey(cur.section.id, cur.entry);
+  }
+
   handleInput(data: string): void {
     if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || matchesKey(data, "q") || matchesKey(data, "left") || matchesKey(data, "h")) return this.close(undefined);
+    // The list may have moved under the selection since the last key: follow the entry, not the row.
+    this.refresh();
     const cur = this.current();
-    const armed = this.stopArmed;
-    this.stopArmed = false;
+    const armed = this.armed(cur);
+    this.armedKey = undefined;
     const count = this.entryRows().length;
     if (matchesKey(data, "up") || matchesKey(data, "k")) this.selected = Math.max(0, this.selected - 1);
     else if (matchesKey(data, "down") || matchesKey(data, "j")) this.selected = Math.min(Math.max(0, count - 1), this.selected + 1);
+    else if (matchesKey(data, "ctrl+u")) this.selected = Math.max(0, this.selected - Math.max(1, Math.floor(this.viewport() / 2)));
+    else if (matchesKey(data, "ctrl+d")) this.selected = Math.min(Math.max(0, count - 1), this.selected + Math.max(1, Math.floor(this.viewport() / 2)));
+    else if (matchesKey(data, "pageUp")) this.selected = Math.max(0, this.selected - this.viewport());
+    else if (matchesKey(data, "pageDown")) this.selected = Math.min(Math.max(0, count - 1), this.selected + this.viewport());
     else if ((matchesKey(data, "enter") || matchesKey(data, "right") || matchesKey(data, "l")) && cur) return this.close({ kind: "open", section: cur.section, key: cur.entry.key });
     else if (matchesKey(data, "x") && cur) {
       if (cur.entry.status === "running") {
-        if (!cur.section.stop) return;
-        // Two presses, so a stray x cannot kill a task.
+        if (!stoppable(cur.section, cur.entry)) return;
+        // Two presses on the same entry, so a stray x cannot kill a task, nor a row that moved in.
         if (armed) guard(() => cur.section.stop?.(cur.entry.key));
-        else this.stopArmed = true;
+        else this.armedKey = stopKey(cur.section.id, cur.entry);
       } else {
+        if (!dismissable(cur.section, cur.entry)) return;
         guard(() => cur.section.dismiss?.(cur.entry.key));
         this.refresh();
       }
@@ -194,8 +214,8 @@ export class TasksDialog implements Component {
     const hints: string[] = [];
     if (cur) {
       hints.push("j/k move · l/enter view");
-      if (cur.entry.status === "running" && cur.section.stop) hints.push(this.stopArmed ? th.fg("error", `x again to stop ${cur.entry.label}`) : "x stop");
-      else if (cur.entry.status !== "running" && cur.section.dismiss) hints.push("x dismiss");
+      if (stoppable(cur.section, cur.entry)) hints.push(this.armed(cur) ? th.fg("error", `x again to stop ${cur.entry.label}`) : "x stop");
+      else if (dismissable(cur.section, cur.entry)) hints.push("x dismiss");
       if (cur.section.id === this.options.ownId) {
         hints.push("r rerun");
         if (this.options.canFollow) hints.push("f follow in a split");

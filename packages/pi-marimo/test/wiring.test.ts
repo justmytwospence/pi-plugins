@@ -168,7 +168,7 @@ test("the notebooks as background work: a source for the hosts, its own pill alo
   const section = x.of("activity:section")[0]?.section;
   expect(section).toMatchObject({ id: "marimo", title: "notebooks", noun: "notebook" });
   const entries = section.entries(Date.now());
-  expect(entries).toEqual([expect.objectContaining({ key: `${CWD}/nb.py`, label: "nb.py", status: "running", detail: "running Slow model fit · 1 queued" })]);
+  expect(entries).toEqual([expect.objectContaining({ key: JSON.stringify([SERVER, `${CWD}/nb.py`]), label: "nb.py", status: "running", detail: "running Slow model fit · 1 queued" })]);
   // Alone, its own pill; hosted (by pi-bg, then pi-subagents too), none; the last host leaving brings it back.
   await until(() => /1 notebook/u.test(x.pillText() ?? ""));
   section.setHosted(true, "pi-bg");
@@ -176,10 +176,10 @@ test("the notebooks as background work: a source for the hosts, its own pill alo
   section.setHosted(true);
   section.setHosted(false, "pi-bg");
   expect(x.widgets.size).toBe(0);
-  section.setHosted(false);
+  x.pi.events.emit("activity:gone", { id: "subagents" });
   await until(() => /1 notebook/u.test(x.pillText() ?? ""));
   // The view: the outline, the running cell, and x twice interrupts the kernel.
-  await section.open(`${CWD}/nb.py`, x.ui);
+  await section.open(entries[0].key, x.ui);
   const view = x.customs.at(-1)?.view;
   expect(x.customs.at(-1)?.options).toMatchObject({ overlay: true, overlayOptions: { width: "100%" } });
   const screen = view.render(100).join("\n");
@@ -200,6 +200,9 @@ test("the notebooks as background work: a source for the hosts, its own pill alo
   await until(() => x.widgets.size === 0 || !/failed/u.test(x.pillText() ?? ""));
   expect(section.entries(Date.now())[0]).toMatchObject({ status: "done" });
   await x.fire("session_shutdown");
-  expect(x.of("activity:gone")).toEqual([{ id: "marimo" }]);
+  expect(x.of("activity:gone")).toEqual([{ id: "subagents" }, { id: "marimo" }]);
+  const offered = x.of("activity:section").length;
+  x.pi.events.emit("activity:host", {});
+  expect(x.of("activity:section")).toHaveLength(offered);
   vi.unstubAllGlobals();
 });

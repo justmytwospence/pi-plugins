@@ -29,7 +29,10 @@ function merge(base: Record<string, unknown>, over: Record<string, unknown>): Re
   const out: Record<string, unknown> = { ...base };
   for (const [key, value] of Object.entries(over)) {
     const current = out[key];
-    out[key] = isRecord(current) && isRecord(value) ? merge(current, value) : value;
+    if (isRecord(current)) { if (isRecord(value)) out[key] = merge(current, value); }
+    else if (Array.isArray(current)) {
+      if (Array.isArray(value) && (!current.length || value.every(item => typeof item === typeof current[0]))) out[key] = value;
+    } else if (current === undefined || (typeof value === typeof current && (typeof value !== "number" || Number.isFinite(value)))) out[key] = value;
   }
   return out;
 }

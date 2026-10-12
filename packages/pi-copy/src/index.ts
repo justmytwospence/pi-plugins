@@ -67,8 +67,8 @@ export default function piCopy(pi: ExtensionAPI) {
     void ranking.then((state) => picker?.update(model(state)));
 
     const chosen = await whileBlocked(pi.events, "Yank picker", () =>
-      ctx.ui.custom<Segment | undefined>((tui, theme, _keybindings, done) => {
-        picker = new Picker(model(pending.length ? "pending" : cache.size ? "done" : "unavailable"), theme as never, () => tui.requestRender(), done);
+      ctx.ui.custom<Segment | undefined>((tui, theme, keybindings, done) => {
+        picker = new Picker(model(pending.length ? "pending" : cache.size ? "done" : "unavailable"), theme as never, () => tui.requestRender(), done, keybindings);
         return picker;
       }),
     );
@@ -90,7 +90,10 @@ export default function piCopy(pi: ExtensionAPI) {
 
   pi.registerCommand("yank", {
     description: "Pick something from this session to copy: replies, code, commands, paths, URLs",
-    handler: async (_args, ctx) => open(ctx),
+    handler: async (args, ctx) => {
+      if (args.trim()) { ctx.ui.notify("Usage: /yank", "warning"); return; }
+      await open(ctx);
+    },
   });
 
   // Shortcuts are registered at load, from the global settings (a project file cannot change it).

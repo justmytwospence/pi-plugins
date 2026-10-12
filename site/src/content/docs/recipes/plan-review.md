@@ -60,7 +60,13 @@ Inside the viewer:
 3. Send all drafts together with `:w`, `:wq` or `ZZ`.
 4. Read the agent’s attached replies in the next review.
 
-A suggestion is feedback for the agent, not an immediate patch application. If the agent is busy, the message is queued as a follow-up. Ordinary `q`/Esc marks what you saw as reviewed in unreviewed/session scopes; `Q` or `:q!` leaves without doing so.
+A suggestion is feedback for the agent, not an immediate patch application. If the agent is busy, the message is queued as a follow-up.
+
+Marking is explicit. The review baseline, which decides where the next unreviewed diff starts, moves only when you type `:mark`. It records the snapshot on screen (not a fresh one, so changes made since the diff loaded stay unreviewed) and stays in the viewer with a confirmation. `:mark` works only in the live unreviewed and session scopes; elsewhere it explains why and stays open.
+
+Closing never marks. `q`, Esc, `Q`, `ZQ`, `:q` and `:q!` close and keep drafts and file checks; `:wq`, `:x` and `ZZ` send drafts first, then close, also without marking.
+
+Per-file `r` is separate from the baseline. It checks one file as reviewed, folds it and moves on. Checks are saved in the session and keyed to the diff you saw, so a check disappears when that file's changes change.
 
 ## Undo thoughtfully
 

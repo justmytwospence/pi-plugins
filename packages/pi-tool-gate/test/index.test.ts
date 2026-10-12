@@ -1,6 +1,20 @@
-import { describe, expect, test } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import toolGate, { DEFAULT_CONFIG } from "../src/index.ts";
 import { assistantEntry, fakeJev, harness, userEntry } from "./harness.ts";
+
+let configDir: string;
+beforeEach(() => {
+  configDir = mkdtempSync(path.join(tmpdir(), "pi-tool-gate-config-"));
+  vi.stubEnv("XDG_CONFIG_HOME", path.join(configDir, "xdg"));
+  vi.stubEnv("PI_CODING_AGENT_DIR", path.join(configDir, "pi"));
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
+  rmSync(configDir, { recursive: true, force: true });
+});
 
 const safe = {
   in_scope: { type: "bool", probability: 0.95 },
@@ -186,6 +200,29 @@ test("when Jev is unavailable, Pi's tool hints decide", async () => {
 
   const headless = setup({ stopReason: "error", errorMessage: "x", answers: {} }, { hasUI: false });
   expect(await headless.h.emit("tool_call", call("bash", { command: "npm test" }), headless.ctx)).toBeUndefined();
+});
+
+test.each([
+  "git branch -l new-feature",
+  "git config --show-origin user.name changed",
+  "curl -o/tmp/output https://example.com",
+  "docker compose --project-name config up",
+  "env -Srm",
+])("ambiguous/mutating shell calls reach judgment: %s", async (command) => {
+  const { h, jev, ctx } = setup(safe);
+  await h.emit("before_agent_start", { prompt: "x" }, ctx);
+  expect(await h.emit("tool_call", call("bash", { command }), ctx)).toBeUndefined();
+  expect(jev.calls).toHaveLength(1);
+  expect(jev.calls[0]?.state).toMatchObject({ tool_call: { arguments: command } });
+});
+
+test.each(["bash", "bg_run"])("%s remains fail-open headlessly when judgment is unavailable", async (tool) => {
+  const { h, ctx, jev } = setup({ stopReason: "error", errorMessage: "unavailable", answers: {} }, { hasUI: false });
+  await h.emit("before_agent_start", { prompt: "x" }, ctx);
+  expect(await h.emit("tool_call", call(tool, { command: "curl -o/tmp/out https://example.com", kind: "job" }), ctx)).toBeUndefined();
+  expect(jev.calls).toHaveLength(1);
+  expect(ctx.ui.selects).toHaveLength(0);
+  expect(ctx.ui.notes).toHaveLength(0);
 });
 
 test("/gate off disables the gate for the session", async () => {

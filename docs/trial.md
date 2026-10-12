@@ -1,5 +1,7 @@
 # Reversible consolidation trial
 
+> Historical record. This describes how the first 19 standalone components were consolidated into the suite. It is kept for provenance and is not current installation or development guidance; see the [README](../README.md) and the [documentation site](https://pi-plugins.vercel.app).
+
 This trial imports the 19 active, pinned pi-prefixed Git plugins without changing their implementation. The original development repositories and installed copies remain intact. Local, third-party, and cross-harness packages remain separate.
 
 ## Safety checks

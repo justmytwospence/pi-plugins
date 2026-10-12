@@ -159,6 +159,7 @@ export async function diffTrees(
 		"--no-ext-diff",
 		"--no-textconv",
 		"--no-color",
+		"--full-index",
 		"--find-renames",
 		"--src-prefix=a/",
 		"--dst-prefix=b/",

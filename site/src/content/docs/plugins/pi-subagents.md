@@ -8,7 +8,7 @@ pi-subagents gives the agent a `subagent` tool for work that should return a res
 
 ## Enable, requirements, and costs
 
-Select `packages/pi-subagents/src/index.ts` using the [suite installation guide](/guides/install/). The suite enables all 19 extensions by default and uses one Git pin for every selected component.
+Select `packages/pi-subagents/src/index.ts` using the [suite installation guide](/guides/install/). The suite enables every entry by default and uses one Git pin for every selected component.
 
 Children need a working Pi runtime and access to their selected model providers. The component documents Pi 0.99 or newer for classifier support; consult the installation guide for the suite's tested host version. Optional `worktree: true` additionally requires the `worktree` command and a suitable Git repository.
 

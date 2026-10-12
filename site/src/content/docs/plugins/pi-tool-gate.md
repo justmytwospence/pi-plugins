@@ -8,7 +8,7 @@ Tool gate reduces routine approval interruptions while escalating risky calls. I
 
 ## Enable and requirements
 
-Follow [Install & select](/guides/install/) and select `packages/pi-tool-gate/src/index.ts`. The suite loads all 19 extensions by default, with one Git pin covering the selected entries.
+Follow [Install & select](/guides/install/) and select `packages/pi-tool-gate/src/index.ts`. The suite loads every entry by default, with one Git pin covering the selected entries.
 
 Classifier judgments require Pi 0.99 or newer and credentials for the configured provider. Defaults use `typesafe/jev-latest` through Pi's model registry, with `TYPESAFE_API_KEY` and a 3,000 ms timeout. Fixed checks do not require Jev, but the unavailable-classifier fallback is less protective, especially without a UI.
 

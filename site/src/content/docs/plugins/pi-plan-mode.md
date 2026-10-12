@@ -8,7 +8,7 @@ pi-plan-mode separates researching a change from implementing it. `/plan` opens 
 
 ## Enable, requirements, and costs
 
-Select `packages/pi-plan-mode/src/index.ts` through [suite installation](/guides/install/). The suite loads all 19 extensions by default, and all selected components share one Git pin.
+Select `packages/pi-plan-mode/src/index.ts` through [suite installation](/guides/install/). The suite loads every entry by default, and all selected components share one Git pin.
 
 The planner requires Pi's interactive terminal UI and authenticated access to the chosen model providers. The component documents Pi 0.99 or newer; the installation guide identifies the suite's tested host version. Planners use providers registered in the main session. Their optional research helpers are separate Pi subprocesses and need the provider extensions required by their models; `providerExtensions` can override automatic provider-extension discovery.
 

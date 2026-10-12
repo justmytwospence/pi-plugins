@@ -78,6 +78,8 @@ const plain = (s: string) => s;
 /** A fake editor drawn like pi's: borders around one padded content line with the cursor. */
 function fakeEditor(ui: any) {
   return {
+    [Symbol.for("pi-plugins.editor-surface.v1")]: "main",
+    isShowingAutocomplete: () => false,
     getText: () => ui.editorText,
     render(width: number) {
       const body = ui.editorText === "" ? ` ${CUR}` : ` ${ui.editorText}${CUR}`;
@@ -89,11 +91,11 @@ function fakeEditor(ui: any) {
 /** Give the harness a TUI whose focused component is `editor`, handed to widget factories as pi does. */
 function withTui(ui: any, editor: any) {
   const tui = { terminal: { columns: 40 }, getFocusedComponent: () => editor, renders: 0, requestRender: () => tui.renders++ };
-  const setWidget = ui.setWidget;
   ui.theme = { fg: (_c: string, s: string) => s };
   ui.setWidget = (key: string, content: any, opts?: any) => {
     if (typeof content === "function") content(tui, ui.theme);
-    setWidget(key, content, opts);
+    if (content === undefined) ui.widgets.delete(key);
+    else ui.widgets.set(key, { content, opts });
   };
   return tui;
 }
@@ -235,7 +237,7 @@ test("key releases and non-typing keys keep the suggestion", async () => {
 });
 
 test("a new run, compaction and a new session clear it", async () => {
-  for (const event of ["agent_start", "session_compact", "session_start", "session_shutdown"]) {
+  for (const event of ["agent_start", "session_compact", "session_tree", "model_select", "session_start", "session_shutdown"]) {
     const { h, run, ui, ctx } = await setup();
     await run("go", ["Done.\n<next>Run the tests</next>"]);
     await h.emit(event, { type: event }, ctx);
@@ -251,6 +253,68 @@ test("/next-prompt off stops the instruction and the line", async () => {
   expect(ui.widgets.size).toBe(0);
   await h.commands.get("next-prompt").handler("status", ctx);
   expect(ui.notes.at(-1).message).toContain("next-prompt off");
+});
+
+async function status(s: Awaited<ReturnType<typeof setup>>) {
+  await s.h.commands.get("next-prompt").handler("status", s.ctx);
+  return s.ui.notes.at(-1).message as string;
+}
+
+test("status distinguishes model omission from a veto and clears a previous verdict", async () => {
+  const s = await setup(() => ({ useful: { type: "bool", probability: 0.1 } }));
+  await s.run("go", ["Done.\n<next>Run tests</next>"]);
+  expect(await status(s)).toContain("Vet: vetoed");
+  await s.run("go", ["Looking.\n<next>Stale</next>", "All done."]);
+  const diagnostic = await status(s);
+  expect(diagnostic).toContain("Instruction: injected");
+  expect(diagnostic).toContain("no tag emitted (model omission/abstention)");
+  expect(diagnostic).toContain("Settlement: completed; agent_settled observed");
+  expect(diagnostic).toContain("Vet: not run");
+  expect(diagnostic).toContain("Last suggestion: none yet");
+  expect(s.jev.calls).toHaveLength(1);
+});
+
+test("status distinguishes invalid tags and incomplete runs without classifying", async () => {
+  const s = await setup();
+  await s.run("go", [`Done.\n<next>${"x".repeat(111)}</next>`]);
+  expect(await status(s)).toContain("invalid tag (empty or over maxChars)");
+  await s.run("go", ["Partial.\n<next>Continue</next>"], "aborted");
+  expect(await status(s)).toContain("Settlement: aborted");
+  expect(await status(s)).toContain("Latest assistant: valid tag");
+  expect(s.jev.calls).toHaveLength(0);
+});
+
+test("approval is not reported as display when a draft blocks it", async () => {
+  const s = await setup();
+  s.ui.editorText = "existing draft";
+  await s.run("go", ["Done.\n<next>Run tests</next>"]);
+  const diagnostic = await status(s);
+  expect(diagnostic).toContain("Vet: approved");
+  expect(diagnostic).toContain("Editor: nonempty (display blocked)");
+  expect(diagnostic).toContain("Offer: none");
+  expect(diagnostic).not.toContain("shown");
+  expect(s.ui.widgets.size).toBe(0);
+});
+
+test("status exposes unobserved settlement boundaries rather than implying a veto", async () => {
+  const s = await setup();
+  await s.h.emit("agent_start", {}, s.ctx);
+  await s.h.emit("message_end", { message: assistant("Done.\n<next>Run tests</next>") }, s.ctx);
+  await s.h.emit("agent_end", {}, s.ctx);
+  expect(await status(s)).toContain("not observed (agent_before_settle); agent_settled not observed");
+  await s.h.emit("agent_before_settle", { outcome: "completed" }, s.ctx);
+  expect(await status(s)).toContain("Settlement: completed; agent_settled not observed");
+  expect(s.jev.calls).toHaveLength(0);
+});
+
+test("status reports fallback and ghost offers separately", async () => {
+  const s = await setup();
+  await s.run("go", ["Done.\n<next>Run tests</next>"]);
+  expect(await status(s)).toContain("Offer: fallback widget");
+  withTui(s.ui, fakeEditor(s.ui));
+  await s.run("go", ["Done.\n<next>Run tests</next>"]);
+  expect(await status(s)).toContain("Offer: ghost text");
+  expect(s.jev.calls).toHaveLength(2); // status never calls the classifier
 });
 
 test("processAssistant ignores other roles", () => {

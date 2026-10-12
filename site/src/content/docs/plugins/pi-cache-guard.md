@@ -8,7 +8,7 @@ Cache guard gives you a choice before sending a prompt that is likely to re-cach
 
 ## Enable and requirements
 
-Use [Install & select](/guides/install/) with `packages/pi-cache-guard/src/index.ts`. The suite enables all 19 entries by default; selected components share one Git pin. Interactive dialogs need a UI. Jev features require Pi 0.99 or newer, classifier credentials and permission to send conversation excerpts to that provider.
+Use [Install & select](/guides/install/) with `packages/pi-cache-guard/src/index.ts`. The suite enables every entry by default; selected components share one Git pin. Interactive dialogs need a UI. Jev features require Pi 0.99 or newer, classifier credentials and permission to send conversation excerpts to that provider.
 
 **Jev is paid**, including the connectivity check performed by `/cache-guard jev`. A summary produced by Pi also uses the configured summarization model. Menu estimates are not invoices or subscription charges, and an approximately zero dollar label does not mean the classifier is free. See [Cache and cost](/recipes/cache-cost/) before enabling automated context reduction.
 

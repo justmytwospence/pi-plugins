@@ -1,60 +1,120 @@
 # pi-copy
 
-A [pi](https://pi.dev) extension: `/yank` (or `ctrl+shift+x`) opens a scrollable picker of things you
-might want to copy from the session, and copies the one you pick.
+A Pi extension: `/yank` (or `ctrl+shift+x`) opens a scrollable picker of things you might want to copy from the session, and copies the one you pick to the clipboard.
 
-**What it finds** (in code, over the last 30 user turns): your messages and the agent's replies in
-full, and inside replies the logical groups of their Markdown, from a small block parser: sections
-(a heading and everything under it), fenced code blocks of any fence length (a ````-fenced prompt
-holding its own ``` blocks is one piece, and its own sections and lists are pieces too), lists
-together with the line that introduces them, list items that carry a nested list or code, tables,
-quotes, commit messages, and paragraphs. Also shell commands (from shell code blocks, unlabeled
-blocks that read as commands, inline code, and the agent's bash calls, with prompts and `\`
-continuations handled), other inline code worth copying (identifiers, versions, hashes), file
-paths (including ones with spaces written in parentheses), and URLs (templated ones like
-`http://127.0.0.1:<port>/x` are skipped). Lines that only introduce what follows ("Run this:") are
-not pieces of their own.
+The picker opens at once in recency order. If a classifier model is available, Jev then ranks the newest pieces by how likely you are to want to copy each one now, and the list reorders in place. Pi's built-in `/copy` (the last reply) and `ctrl+x` are left as they are.
 
-**How it ranks.** The picker opens at once in recency order, then [Jev](https://docs.typesafe.ai),
-called through Pi's own classifier models (`ctx.modelRegistry.classify`), judges up to 120 of the
-newest pieces in one request (about 100-300 ms): how likely you want to copy each one now, given
-your last messages, and whether each prose piece is something worth pasting elsewhere rather than
-explanation. Suggested is ordered by `0.6·(likelihood/3) + 0.4·recency`; prose Jev judges not
-worth pasting is left out of Suggested (it stays in All). The cursor stays on the same piece while
-the list reorders. Judgments are cached for the session. Without Jev, Suggested is recency order.
+Part of [Pi Plugins](https://github.com/justmytwospence/pi-plugins). Reference: <https://pi-plugins.vercel.app/plugins/pi-copy/>.
 
-**Keys.** ↑/↓ or ctrl+j/ctrl+k move, PageUp/PageDown page, typing filters (fuzzy), Tab switches
-between Suggested and All (everything, newest first), → (or Space with an empty filter) expands the
-preview, Enter copies and closes, Esc clears the filter or closes.
+## Install
 
-Pi's built-in `/copy` (the last reply) and ctrl+x stay as they are: Pi's interactive editor handles
-`/copy` before extension commands and reports an extension `/copy` as a conflict, so this extension
-uses its own name. Interactive terminal only.
+Install the suite and select only this component. Merge this object into the `packages` array of `~/.pi/agent/settings.json` (or a trusted project's `.pi/settings.json`):
 
-**herdr.** While the picker is open it holds `herdr:blocked` on pi's event bus
-(`{ active: true, label: "Yank picker" }`, then `{ active: false }` when it closes), so
-[herdr](https://herdr.dev) shows the pane as blocked. Outside herdr nothing listens and the events
-do nothing.
+```json
+{
+  "source": "git:github.com/justmytwospence/pi-plugins",
+  "extensions": ["packages/pi-copy/src/index.ts"],
+  "skills": [],
+  "prompts": [],
+  "themes": []
+}
+```
 
-## Settings
+Alternatively, `pi install git:github.com/justmytwospence/pi-plugins` loads every suite component; use `pi config` to keep only the ones you want, then `/reload`. One Git ref versions every selected component. Do not also enable a standalone copy of this component: Pi does not deduplicate different packages that register the same tools, commands or shortcuts.
 
-`~/.pi/agent/copy.json`, with `<project>/.pi/copy.json` merged on top:
+To try it alone from a checkout of the suite repository, for one run:
+
+```sh
+pi -e ./packages/pi-copy
+```
+
+No `npm install` is needed to run it: the package.json has no `dependencies`; Pi supplies its peer dependencies.
+
+## What it finds
+
+Pieces are found in code, over the last 30 user turns on the current branch (`maxTurns`):
+
+- Your messages and the agent's replies, in full.
+- Inside replies, the logical groups of their Markdown, from a small block parser: sections (a heading and everything under it); fenced code blocks of any fence length (a ````-fenced prompt holding its own ``` blocks is one piece, and its own sections and lists are pieces too); lists together with the line that introduces them; list items that carry a nested list or code; tables; quotes; commit messages; and paragraphs. Lines that only introduce what follows ("Run this:") are not pieces of their own.
+- Shell commands: from shell code blocks, unlabeled blocks that read as commands, inline code, and the agent's bash calls, with prompts and `\` continuations handled.
+- Other inline code worth copying (identifiers, versions, hashes).
+- File paths, including ones with spaces written in parentheses.
+- URLs. Templated ones such as `http://127.0.0.1:<port>/x` are skipped.
+
+Each row shows a badge (`you`, `reply`, `sect`, `code`, `cmd`, `snip`, `path`, `url`, `table`, `list`, `quote`, `commit`, `text`) and its age in user turns.
+
+## How it ranks
+
+[Jev](https://docs.typesafe.ai), called through Pi's classifier models (`ctx.modelRegistry.findOfType("classifier", ...)` and `ctx.modelRegistry.classify`), judges up to 120 of the newest pieces in one request (`rank.maxPieces`, also capped by `rank.stateBudgetChars` of state; each piece is clipped to `rank.pieceChars`). Its input is the pieces plus your last three user messages. For each piece it scores how likely you want to copy it now (0-3); for prose pieces (paragraphs, lists, sections, quotes, whole replies) it also judges whether the piece is something worth pasting elsewhere rather than explanation.
+
+- Suggested is ordered by `wantWeight * (score / 3) + (1 - wantWeight) * recency` (default `0.6` / `0.4`); unjudged pieces get the recency term alone.
+- Prose Jev judges below `rank.copyableThreshold` (default `0.3`) is left out of Suggested. It stays in All.
+- If you have moved or filtered, the cursor stays on the same piece while the list reorders; otherwise it goes to the top.
+- Judgments are cached by piece content for the session and cleared on `session_start`. Each successful request appends a `copy:decision` custom entry to the session (piece count, latency, input tokens).
+- Without Jev (off, no classifier model, no credentials, timeout or error), Suggested stays in recency order and the header shows `(recency order)`.
+
+## Keys
+
+The picker is always a search field: typing filters the current tab (fuzzy). It reports the suite's input context `filter`, so text-editing keys keep their text meaning.
+
+| Key | Action |
+| --- | --- |
+| Pi's `tui.select.up` / `tui.select.down` (default Up/Down), `ctrl+k` / `ctrl+j` | Move the selection |
+| PageUp / PageDown | Move by a page of rows (12) |
+| Typing, bracketed paste | Add to the filter (pasted control characters become spaces) |
+| Backspace | Delete the last character (grapheme) of the filter |
+| `ctrl+u` | Clear the filter |
+| `ctrl+d` | Delete forward at the end of the filter: does nothing |
+| Tab | Switch between Suggested and All (everything, newest first) |
+| Right, or Space with an empty filter | Toggle the expanded preview of the selected piece |
+| Left | Collapse the preview |
+| Pi's `tui.select.confirm` (default Enter) | Copy the selected piece and close |
+| Pi's `tui.select.cancel` (default Esc) | Clear a non-empty filter; with an empty filter, close |
+
+The footer hint shows the keys currently bound to the `tui.select.*` actions. After copying, a notification reports the kind, line count and character count.
+
+## Configuration
+
+`~/.pi/agent/copy.json` (or `$PI_CODING_AGENT_DIR/copy.json`), with `<project>/.pi/copy.json` merged on top. Objects merge key by key; other values replace only when the type matches. Unreadable or invalid files are ignored. Defaults:
 
 ```json
 {
   "jev": { "enabled": true, "provider": "typesafe", "model": "jev-latest", "timeoutMs": 3000 },
-  "rank": { "maxPieces": 120, "pieceChars": 600, "copyableThreshold": 0.3, "wantWeight": 0.6 },
+  "rank": { "maxPieces": 120, "pieceChars": 600, "stateBudgetChars": 60000, "copyableThreshold": 0.3, "wantWeight": 0.6 },
   "maxTurns": 30,
   "shortcut": "ctrl+shift+x"
 }
 ```
 
-`shortcut` is read from the global file at startup. Requires Pi 0.99 or newer for classifier
-models.
+Settings are reread each time the picker opens. `shortcut` is read once when the extension loads (the global file, plus `.pi/copy.json` in the directory Pi was started from); a change takes effect after `/reload` or a restart.
+
+## Requirements and costs
+
+- Interactive terminal UI only. In other modes `/yank` shows a warning and does nothing.
+- Copying uses Pi's clipboard helper (`copyToClipboard`). A failure is reported as `Copy failed: ...`.
+- Ranking is optional. It needs a Pi with classifier models (Pi 0.99 or newer) and a configured classifier model; Pi resolves the credentials (`TYPESAFE_API_KEY` for its `typesafe` provider). Each `/yank` with unjudged pieces makes one classifier request, which can be billed. Set `jev.enabled` to `false` to turn it off.
+- On disk it reads only the settings files above. It writes nothing outside the session, where it appends the `copy:decision` entries.
+
+## Optional integrations
+
+- [Herdr](https://herdr.dev): while the picker is open it emits `herdr:blocked` on Pi's event bus (`{ active: true, label: "Yank picker" }`, then `{ active: false }` when it closes), so Herdr shows the pane as blocked. Outside Herdr nothing listens and the events do nothing.
+- Suite key handlers such as pi-vim and pi-select-nav read the picker's `filter` input context and leave its text input alone. Neither is required.
+
+## Limitations
+
+- Pi's interactive editor handles `/copy` before extension commands and reports an extension `/copy` as a conflict, so this extension uses `/yank` instead.
+- Only the last `maxTurns` user turns of the current branch are covered, and only up to `rank.maxPieces` pieces are ranked per request.
 
 ## Development
 
 ```sh
-npm run check   # typecheck and unit tests
-npm run eval    # five sessions against live Jev through the installed Pi (needs TYPESAFE_API_KEY)
+cd packages/pi-copy
+npm ci
+npm run check
 ```
+
+`npm run check` runs `tsc --noEmit` and the Vitest unit tests (`vitest run`). `npm run eval` runs live evals in `eval/` against Jev through the Pi installation on `PATH` (or `PI_PACKAGE_DIR`); they are skipped without `TYPESAFE_API_KEY`. `npm run eval` makes live, paid classifier requests; run it only with explicit authorization. For the full suite, the repository root's `npm run check` runs every component's check after the root loader test.
+
+## License
+
+MIT. See [LICENSE](./LICENSE).

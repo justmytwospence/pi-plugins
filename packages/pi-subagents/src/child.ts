@@ -131,6 +131,7 @@ export class Child {
   private settle!: (state: ChildState) => void;
   private stderr = "";
   private stopping = false;
+  private started = false;
 
   constructor(private readonly options: ChildOptions) {
     this.state = { status: "running", output: "", usage: emptyUsage(), turns: 0, startedAt: Date.now() };
@@ -141,6 +142,9 @@ export class Child {
   }
 
   start(): this {
+    // stop-before-start and repeated starts must never create a late/duplicate process.
+    if (this.started || this.stopping || this.state.status !== "running") return this;
+    this.started = true;
     let promptFile: string | undefined;
     if (this.options.systemPrompt?.trim()) {
       const dir = mkdtempSync(path.join(tmpdir(), "pi-subagent-"));
@@ -184,6 +188,10 @@ export class Child {
   stop() {
     if (this.state.status !== "running") return;
     this.stopping = true;
+    if (!this.started) {
+      this.finish("stopped");
+      return;
+    }
     this.send({ type: "abort" });
     this.proc?.stdin?.end();
     const proc = this.proc;

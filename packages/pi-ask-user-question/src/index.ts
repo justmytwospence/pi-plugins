@@ -6,6 +6,7 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { QuestionDialog } from "./dialog.ts";
+import { embeddedEditorFactory } from "./editor.ts";
 import { whileBlocked } from "./herdr.ts";
 import { DESCRIPTION, PROMPT_GUIDELINES, PROMPT_SNIPPET } from "./prompt.ts";
 import { reconcile } from "./reconcile.ts";
@@ -37,7 +38,7 @@ export default function askUserQuestion(pi: ExtensionAPI) {
       const invalid = validate(questions);
       if (invalid) return errorResult(questions, invalid.error, invalid.message);
       if (signal?.aborted) return toolResult({ questions, answers: [], cancelled: true });
-      const result = await whileBlocked(pi.events, blockedLabel(questions), () => ask(ctx, questions, signal));
+      const result = await whileBlocked(pi.events, blockedLabel(questions), () => ask(pi, ctx, questions, signal));
       return toolResult({ questions, ...result });
     },
 
@@ -61,11 +62,11 @@ export default function askUserQuestion(pi: ExtensionAPI) {
 }
 
 /** The dialog in the terminal UI; native dialogs elsewhere, or if the terminal dialog cannot show. */
-async function ask(ctx: ExtensionContext, questions: Question[], signal: AbortSignal | undefined): Promise<DialogResult> {
+async function ask(pi: ExtensionAPI, ctx: ExtensionContext, questions: Question[], signal: AbortSignal | undefined): Promise<DialogResult> {
   if (ctx.mode === "tui") {
     try {
       const result = await ctx.ui.custom<DialogResult | undefined>(
-        (tui, theme, keybindings, done) => new QuestionDialog(tui, theme, keybindings, questions, done, signal),
+        (tui, theme, keybindings, done) => new QuestionDialog(tui, theme, keybindings, questions, done, signal, embeddedEditorFactory(pi)),
       );
       if (result) return result;
     } catch {

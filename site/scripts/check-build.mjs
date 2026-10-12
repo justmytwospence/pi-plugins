@@ -52,7 +52,7 @@ for (const [route, { $ }] of pages) {
 for (const asset of ["pagefind/pagefind.js", "sitemap-index.xml", "robots.txt", "favicon.svg", "social.svg"]) {
   try { await access(path.join(dist, asset)); } catch { errors.push("Missing build asset: " + asset); }
 }
-if (htmlFiles.length < 33) errors.push("Expected at least 32 authored pages and a 404 page.");
+if (htmlFiles.length < 40) errors.push("Expected at least 39 authored pages and a 404 page.");
 if (files.some((file) => /(?:^|\/)(?:\.env|auth\.json)$/.test(file))) errors.push("Unexpected credential file in build.");
 if (errors.length) { console.error(errors.join("\n")); process.exitCode = 1; }
 else console.log("PASS: " + htmlFiles.length + " static HTML pages; " + links + " local links/assets; fragments, canonical URLs, metadata and search index.");

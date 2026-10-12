@@ -8,7 +8,7 @@ Use pi-bg when a command needs to continue while the agent does something else. 
 
 ## Enable and requirements
 
-Follow the [suite installation guide](/guides/install/) and select `packages/pi-bg/src/index.ts`. The suite loads all 19 extensions by default; every selected extension shares one Git pin.
+Follow the [suite installation guide](/guides/install/) and select `packages/pi-bg/src/index.ts`. The suite loads every entry by default; every selected extension shares one Git pin.
 
 Commands run through `bash -c` in separate process groups. Bash and the programs named in your commands must be available, and the process needs permission to write its logs. This is process management, not a sandbox: commands inherit Pi's operating-system access.
 
@@ -76,9 +76,9 @@ Tasks survive `/reload`. Quitting or changing sessions through `/new`, `/resume`
 /stop
 ```
 
-A manually started task notifies you on completion rather than waking the agent. `/tasks clear` hides ended tasks; `/stop` stops tasks this Pi started.
+A manually started task notifies you on completion rather than waking the agent. `/tasks clear` hides ended tasks. `/stop` stops only pi-bg's running shell tasks that this Pi process started; it leaves kept services adopted from an earlier session alone and never stops subagents, notebooks, planners or Herdr children.
 
-In the view, use arrows or `j`/`k`, Enter for logs, `x` twice to stop running work, `x` once to dismiss ended work, and `r` to rerun. The prompt pill opens the same view. RPC hosts receive a footer status instead of the TUI controls.
+In the view, use arrows or `j`/`k`, Enter for logs, `x` twice to stop the selected running entry, `x` once to dismiss an ended one, and `r` to rerun a shell. Double-`x` works per entry for any listed source that supports stopping, such as a subagent run. The prompt pill opens the same view. In a log viewer, Ctrl+U/Ctrl+D scroll half a page; PageUp/PageDown remain optional full-page aliases. The viewer has no text field. RPC hosts receive a footer status instead of the TUI controls.
 
 There is no JSON settings file. Logs normally live at `~/.pi/agent/bg/<session>/<id>.log`; `PI_BG_DIR` changes the storage root. Logs exceeding 64 MB are reduced to their final megabyte, and logs older than a week are removed. Do not treat them as a durable archive or print secrets unnecessarily.
 

@@ -1,0 +1,396 @@
+// Derived from pi-sticky-last-prompt 0.1.1 (MIT, pi-collections contributors).
+// Exact artifact provenance and local changes: ../UPSTREAM.md.
+import { randomUUID } from "node:crypto";
+import {
+  SkillInvocationMessageComponent,
+  UserMessageComponent,
+  type ExtensionAPI,
+  type Theme,
+} from "@earendil-works/pi-coding-agent";
+import {
+  truncateToWidth,
+  visibleWidth,
+  type Component,
+  type OverlayHandle,
+  type OverlayOptions,
+  type TUI,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
+} from "@earendil-works/pi-tui";
+
+interface ScrollViewLike {
+  scrollTop: number;
+  child?: unknown;
+  getContentWidth?(width: number): number;
+  scrollTo(scrollTop: number, options?: { disableFollow?: boolean }): void;
+}
+
+interface OverlayEntryLike {
+  component?: unknown;
+  hidden?: boolean;
+  options?: OverlayOptions;
+}
+
+/** These renderer internals are optional; missing members leave the bar blank. */
+type AltScreen = TUI & {
+  layoutRoot?: { entries?: readonly { component?: unknown }[] | null } | null;
+  getPrimaryScrollView?: () => ScrollViewLike | undefined;
+  overlayStack?: readonly unknown[];
+  isOverlayVisible?: (entry: unknown) => boolean;
+};
+
+type HasOverlayWrapper = (() => boolean) & { [WRAPPER_TAG]?: string };
+
+export const WIDGET_ID = "sticky-last-prompt";
+export const WRAPPER_TAG = Symbol.for("pi-plugins.pi-sticky-last-prompt/has-overlay.v1");
+export const OWNER = "pi-plugins/pi-sticky-last-prompt";
+export const CLEAR_SENTINEL = "\u0000pi-clear-screen\u0000";
+const PIN_ICON = "\uf007"; // Upstream pin glyph; requires a font with this private-use character.
+
+export function collapseWhitespace(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function padToWidth(text: string, width: number): string {
+  return text + " ".repeat(Math.max(0, width - visibleWidth(text)));
+}
+
+function renderLines(component: unknown, width: number): string[] {
+  try {
+    const render = (component as { render?: (w: number) => unknown }).render;
+    const lines = typeof render === "function" ? render.call(component, width) : undefined;
+    return Array.isArray(lines) && lines.every((line) => typeof line === "string") ? lines : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Match only pi-clear-screen's marker, not arbitrary lines containing NUL. */
+export function isClearSentinel(lines: string[]): boolean {
+  return lines.length > 0 && lines.every((line) => line === CLEAR_SENTINEL);
+}
+
+/** Only plain Containers concatenate their children without padding or layout transforms. */
+function isPlainContainer(value: unknown): value is { children: readonly unknown[] } {
+  const name = (value as { constructor?: { name?: string } } | undefined)?.constructor?.name;
+  return name === "Container" && Array.isArray((value as { children?: unknown }).children);
+}
+
+export interface UserAnchor {
+  start: number;
+  /** Exclusive end in document rows. */
+  end: number;
+  text: string;
+  /** Live component identity: a click must not jump to an unseen replacement. */
+  source?: unknown;
+}
+
+export interface ClearHorizon {
+  row: number;
+}
+
+export interface AnchorIndex {
+  anchors: UserAnchor[];
+  horizons: ClearHorizon[];
+}
+
+export function extractUserText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  const parts: string[] = [];
+  for (const part of content) {
+    if (part && typeof part === "object" && (part as { type?: unknown }).type === "text" && typeof (part as { text?: unknown }).text === "string") {
+      parts.push((part as { text: string }).text);
+    }
+  }
+  return parts.join("\n");
+}
+
+type Classifier = (child: unknown) => { kind: "user"; text: string } | { kind: "skill"; name: string } | undefined;
+
+export const classifyPiComponent: Classifier = (child) => {
+  if (child instanceof UserMessageComponent) {
+    return { kind: "user", text: extractUserText((child as unknown as { text?: unknown }).text) };
+  }
+  if (child instanceof SkillInvocationMessageComponent) {
+    const name = (child as unknown as { skillBlock?: { name?: unknown } }).skillBlock?.name;
+    return { kind: "skill", name: typeof name === "string" ? name : "" };
+  }
+  return undefined;
+};
+
+/** Walk live document rows, including nested transcript rebuilds and zero-row clears. */
+export function collectAnchors(
+  children: readonly unknown[],
+  width: number,
+  offset: number,
+  index: AnchorIndex,
+  classify: Classifier = classifyPiComponent,
+): number {
+  for (const child of children) {
+    const kind = classify(child);
+    if (kind) {
+      const height = renderLines(child, width).length;
+      const text = kind.kind === "user" ? collapseWhitespace(kind.text) : collapseWhitespace(kind.name);
+      if (text && height > 0) {
+        index.anchors.push({ start: offset, end: offset + height, text: kind.kind === "skill" ? `[skill] ${text}` : text, source: child });
+      }
+      offset += height;
+    } else if (isPlainContainer(child)) {
+      offset = collectAnchors(child.children, width, offset, index, classify);
+    } else {
+      for (const line of renderLines(child, width)) {
+        if (line === CLEAR_SENTINEL) index.horizons.push({ row: offset });
+        else offset++;
+      }
+    }
+  }
+  return offset;
+}
+
+/** A prompt on the top boundary or straddling it blanks the bar rather than pinning an older one. */
+export function selectAnchor(index: AnchorIndex, scrollTop: number): UserAnchor | undefined {
+  if (!Number.isFinite(scrollTop) || scrollTop < 0) return undefined;
+  let floor = 0;
+  for (const horizon of index.horizons) if (horizon.row <= scrollTop) floor = Math.max(floor, horizon.row);
+  let selected: UserAnchor | undefined;
+  for (const anchor of index.anchors) if (anchor.start <= scrollTop && anchor.start >= floor) selected = anchor;
+  return selected && selected.end <= scrollTop ? selected : undefined;
+}
+
+const EMPTY_COMPONENT: Component = { render: () => [], invalidate: () => {} };
+
+export class PinBar implements Component {
+  renderedRows = 0;
+  private getTheme: (() => Theme) | undefined;
+
+  constructor(
+    private readonly getText: () => string,
+    private readonly onClick: () => void,
+  ) {}
+
+  setTheme(theme: Theme | (() => Theme)): void {
+    this.getTheme = typeof theme === "function" ? theme : () => theme;
+  }
+
+  reset(): void {
+    this.getTheme = undefined;
+    this.renderedRows = 0;
+  }
+
+  render(width: number): string[] {
+    width = Number.isFinite(width) ? Math.max(0, Math.floor(width)) : 0;
+    const theme = this.getTheme?.();
+    const text = this.getText();
+    if (!theme || !text || width === 0) {
+      this.renderedRows = 0;
+      return [];
+    }
+    const label = truncateToWidth(text, Math.max(0, width - 4), "…");
+    const line = truncateToWidth(` ${theme.fg("accent", PIN_ICON)} ${theme.fg("text", label)}`, width, "");
+    this.renderedRows = 1;
+    return [theme.bg("selectedBg", padToWidth(line, width))];
+  }
+
+  invalidate(): void {}
+
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (event.button !== "left" || this.renderedRows === 0 || event.y < 0 || event.y >= this.renderedRows || event.x < 0 || event.x >= event.width) return undefined;
+    if (event.type === "press") return { handled: true, render: false };
+    if (event.type === "click") {
+      this.onClick();
+      return { handled: true };
+    }
+    return undefined;
+  }
+}
+
+/**
+ * SDK 1.1 widget factories receive a stable Proxy, not the renderer instance. Its get trap
+ * wraps every method (losing function identity/tags), and it has no ownKeys/delete trap.
+ * A temporary symbol method lets that get trap supply the real receiver as `this`. Remove
+ * the probe from that receiver immediately, then do all ownership checks/cleanup on it.
+ */
+function rendererOf(reference: TUI): AltScreen | undefined {
+  const key = Symbol("sticky-last-prompt/renderer-probe");
+  const probe = function (this: AltScreen): AltScreen { return this; };
+  let screen: AltScreen | undefined;
+  try {
+    if (!Reflect.set(reference, key, probe)) return undefined;
+    screen = Reflect.apply(Reflect.get(reference, key), reference, []) as AltScreen;
+    return screen;
+  } catch {
+    return undefined;
+  } finally {
+    if (screen && Reflect.get(screen, key) === probe) Reflect.deleteProperty(screen, key);
+  }
+}
+
+export default function stickyLastPrompt(pi: ExtensionAPI): void {
+  // Per-instance keys keep late shutdown/disposal from removing a newer copy's widget.
+  const widgetId = `${WIDGET_ID}/${randomUUID()}`;
+  let screen: AltScreen | undefined;
+  let overlay: OverlayHandle | undefined;
+  let generation = 0;
+  let removeWidget: (() => void) | undefined;
+  let notify: ((message: string) => void) | undefined;
+  let warnedDuplicate = false;
+  let releasePatch: (() => void) | undefined;
+  let paintedAnchor: UserAnchor | undefined;
+
+  const bar = new PinBar(
+    () => {
+      paintedAnchor = currentSelection();
+      return paintedAnchor?.text ?? "";
+    },
+    () => {
+      const selected = currentSelection();
+      const sv = primaryScrollView();
+      if (!selected || !sv || !paintedAnchor || selected.source !== paintedAnchor.source || selected.text !== paintedAnchor.text) return;
+      sv.scrollTo(Math.max(0, selected.start - bar.renderedRows), { disableFollow: true });
+      screen?.requestRender();
+    },
+  );
+
+  function primaryScrollView(): ScrollViewLike | undefined {
+    if (!screen) return undefined;
+    const valid = (value: unknown): value is ScrollViewLike => {
+      const sv = value as Partial<ScrollViewLike> | undefined;
+      return !!sv && Number.isFinite(sv.scrollTop) && typeof sv.scrollTo === "function";
+    };
+    try {
+      const direct = screen.getPrimaryScrollView?.();
+      // Before the first layout, Pi returns an implicit scroll view without transcript children.
+      if (valid(direct) && Array.isArray((direct.child as { children?: unknown } | undefined)?.children)) return direct;
+    } catch {
+      // Fall back to the mounted primary scroll view.
+    }
+    const entries = screen.layoutRoot?.entries;
+    if (!Array.isArray(entries)) return undefined;
+    const found = entries.find((entry) => (entry?.component as { primary?: unknown } | undefined)?.primary === true)?.component;
+    return valid(found) ? found : undefined;
+  }
+
+  function isVisible(entry: OverlayEntryLike): boolean {
+    if (!screen) return false;
+    try {
+      return typeof screen.isOverlayVisible === "function" ? screen.isOverlayVisible(entry) : !entry.hidden;
+    } catch {
+      return true; // Conservative: retain stock suppression when visibility is uncertain.
+    }
+  }
+
+  function duplicateBarVisible(): boolean {
+    if (!Array.isArray(screen?.overlayStack)) return false;
+    for (const raw of screen.overlayStack) {
+      if (!raw || typeof raw !== "object") continue;
+      const entry = raw as OverlayEntryLike;
+      if (entry.component === bar || !isVisible(entry)) continue;
+      const options = entry.options;
+      if (options?.anchor === "top-left" && options.row === 0 && options.col === 0 && options.width === "100%" && options.nonCapturing) {
+        if (!warnedDuplicate) {
+          warnedDuplicate = true;
+          notify?.("sticky-last-prompt: another top prompt bar is shown; this copy stays hidden. Enable only one copy.");
+        }
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function currentSelection(): UserAnchor | undefined {
+    if (screen?.mode !== "fullscreen" || duplicateBarVisible()) return undefined;
+    const sv = primaryScrollView();
+    const children = (sv?.child as { children?: unknown } | undefined)?.children;
+    if (!sv || !Array.isArray(children)) return undefined;
+    try {
+      const termWidth = screen.terminal.columns;
+      const width = sv.getContentWidth?.(termWidth) ?? termWidth;
+      if (!Number.isFinite(width) || width < 1) return undefined;
+      // Outer children identity + total height cannot detect nested, in-place, same-height
+      // edits or skill expansion. Rewalk on each paint; component render caches still apply.
+      const index: AnchorIndex = { anchors: [], horizons: [] };
+      collectAnchors(children, Math.floor(width), 0, index);
+      return selectAnchor(index, sv.scrollTop);
+    } catch {
+      return undefined;
+    }
+  }
+
+  function installPatch(target: AltScreen): boolean {
+    const original = target.hasOverlay;
+    if (typeof original !== "function") return false;
+    // A tag identifies provenance, not whether an owner is dead. Never replace an own
+    // method, including another active/stale copy with our tag; late teardown is unsafe.
+    if (Object.hasOwn(target, "hasOverlay")) {
+      notify?.("sticky-last-prompt: another extension already wraps the renderer's hasOverlay(); this copy stays inactive. Enable only one copy.");
+      return false;
+    }
+    let enabled = true;
+    const wrapper: HasOverlayWrapper = () => {
+      if (!enabled || !Array.isArray(target.overlayStack)) return original.call(target);
+      for (const raw of target.overlayStack) {
+        if (!raw || typeof raw !== "object") return original.call(target);
+        const entry = raw as OverlayEntryLike;
+        if (isVisible(entry) && entry.component !== bar) return original.call(target);
+      }
+      return false;
+    };
+    wrapper[WRAPPER_TAG] = OWNER;
+    try {
+      Object.defineProperty(target, "hasOverlay", { value: wrapper, writable: true, configurable: true });
+    } catch {
+      return false;
+    }
+    releasePatch = () => {
+      enabled = false;
+      // A later wrapper may call ours: disable our behavior, but leave their method intact.
+      if (target.hasOverlay === wrapper) Reflect.deleteProperty(target, "hasOverlay");
+    };
+    return true;
+  }
+
+  function teardown(): void {
+    generation++;
+    const overlayHandle = overlay;
+    const cleanup = [releasePatch, overlayHandle ? () => overlayHandle.hide() : undefined, removeWidget];
+    removeWidget = undefined;
+    releasePatch = undefined;
+    overlay = undefined;
+    screen = undefined;
+    notify = undefined;
+    bar.reset();
+    paintedAnchor = undefined;
+    warnedDuplicate = false;
+    for (const release of cleanup) {
+      try {
+        release?.();
+      } catch {
+        // A dead terminal/UI must not prevent the remaining independent cleanup steps.
+      }
+    }
+  }
+
+  pi.on("session_start", (_event, ctx) => {
+    teardown();
+    if (ctx.mode !== "tui" || !ctx.hasUI) return;
+    const mine = generation;
+    notify = (message) => ctx.ui.notify(message, "warning");
+    removeWidget = () => ctx.ui.setWidget(widgetId, undefined);
+    try {
+      ctx.ui.setWidget(widgetId, (tui) => {
+        if (mine !== generation || tui.mode !== "fullscreen") return EMPTY_COMPONENT;
+        screen = rendererOf(tui);
+        if (!screen || !installPatch(screen)) return EMPTY_COMPONENT;
+        bar.setTheme(() => ctx.ui.theme);
+        overlay = screen.showOverlay(bar, { anchor: "top-left", row: 0, col: 0, width: "100%", nonCapturing: true });
+        return { ...EMPTY_COMPONENT, dispose: () => { if (mine === generation) teardown(); } };
+      });
+    } catch (error) {
+      teardown();
+      throw error;
+    }
+  });
+
+  pi.on("session_shutdown", () => teardown());
+}

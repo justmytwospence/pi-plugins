@@ -111,8 +111,8 @@ export default function piMarimo(pi: ExtensionAPI): void {
       }
     },
   };
-  const openView = (path: string, ui: unknown): Promise<void> =>
-    (ui as ExtensionContext["ui"]).custom<void>((tui, theme, _keys, done) => new NotebookView(tui, theme, path, viewActions, () => done(undefined)), FULL_SCREEN);
+  const openView = (key: string, ui: unknown): Promise<void> =>
+    (ui as ExtensionContext["ui"]).custom<void>((tui, theme, _keys, done) => new NotebookView(tui, theme, key, viewActions, () => done(undefined)), FULL_SCREEN);
   const source: NotebookSource = new NotebookSource({
     followed: viewActions.followed,
     open: openView,
@@ -138,6 +138,10 @@ export default function piMarimo(pi: ExtensionAPI): void {
     if (ctxRef?.mode === "tui") pi.events?.emit(ACTIVITY_SECTION, { section: source.section });
   };
   pi.events?.on(ACTIVITY_HOST, () => offer());
+  pi.events?.on(ACTIVITY_GONE, (data) => {
+    const id = (data as { id?: string } | undefined)?.id;
+    if (id && id !== source.section.id) source.section.setHosted?.(false, id);
+  });
 
   const statusLine = (): string | undefined => {
     if (!watcher) return undefined;
@@ -175,6 +179,7 @@ export default function piMarimo(pi: ExtensionAPI): void {
   };
 
   const schedule = (): void => {
+    if (!ctxRef) return;
     pending ??= setTimeout(render, 150);
   };
 
@@ -208,17 +213,20 @@ export default function piMarimo(pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", async () => {
+    const previousContext = ctxRef;
+    ctxRef = undefined;
+    const previousWatcher = watcher;
+    watcher = undefined;
     if (pending) clearTimeout(pending);
     if (ticker) clearInterval(ticker);
     pending = ticker = undefined;
     await herdr?.apply(hold.release());
     bg.stopAll();
-    if (ctxRef?.mode === "tui") pi.events?.emit(ACTIVITY_GONE, { id: source.section.id });
+    if (previousContext?.mode === "tui") pi.events?.emit(ACTIVITY_GONE, { id: source.section.id });
     ownPill.dispose();
     source.resetHosts();
-    await watcher?.stop();
-    watcher = undefined;
-    ctxRef?.ui.setStatus(STATUS_KEY, undefined);
+    await previousWatcher?.stop();
+    previousContext?.ui.setStatus(STATUS_KEY, undefined);
     lastStatus = undefined;
   });
 

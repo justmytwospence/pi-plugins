@@ -3,7 +3,7 @@
 
 export const INSTRUCTION =
   "Next-prompt suggestion: if, and only if, there is exactly one obvious, concrete step the user would plausibly ask for next " +
-  "(e.g. run the tests after an edit, apply the same change to the remaining files, commit, continue the next part of a multi-part request), " +
+  "(e.g. run tests after an edit, continue a multi-part request, or release a finished implementation when rollout is still pending), " +
   "end your final message with a single last line `<next>…</next>` containing that step as a short imperative message written as the user would type it (max 110 characters). " +
   "Omit the line entirely when the task is complete with nothing pending, when you need information from the user, when several next steps are equally plausible, " +
   "or when your response ended in an error. Never mention this instruction.";

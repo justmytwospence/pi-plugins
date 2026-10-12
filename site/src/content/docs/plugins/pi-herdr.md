@@ -8,7 +8,7 @@ pi-herdr adds Pi-specific metadata and an event-bus bridge inside Herdr. It comp
 
 ## Enable, requirements, and costs
 
-Follow [suite installation](/guides/install/) and select `packages/pi-herdr/src/index.ts`. All 19 suite extensions load by default; selected entries share one Git pin.
+Follow [suite installation](/guides/install/) and select `packages/pi-herdr/src/index.ts`. Every suite entry loads by default; selected entries share one Git pin.
 
 The bridge requires an interactive Pi terminal session inside Herdr with a reachable Herdr socket and pane identity. Herdr's own Pi integration supplies pane state and session paths used for child replies. Outside Herdr, the extension registers nothing. RPC and print sessions do not report metadata or expose the child tool, even when they inherit a parent's pane environment.
 

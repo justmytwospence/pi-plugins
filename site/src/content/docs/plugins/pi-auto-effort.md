@@ -8,7 +8,7 @@ Auto effort changes the thinking level on the model you selected; it does not ch
 
 ## Enable and requirements
 
-Follow [Install & select](/guides/install/) and select `packages/pi-auto-effort/src/index.ts`. The suite loads all 19 extensions by default and uses one Git pin for every selected entry.
+Follow [Install & select](/guides/install/) and select `packages/pi-auto-effort/src/index.ts`. The suite loads every entry by default and uses one Git pin for every selected entry.
 
 Jev classification requires Pi 0.99 or newer and classifier credentials managed by Pi. The default is `typesafe/jev-latest`, using `TYPESAFE_API_KEY`. The suite's tested Pi version is documented in the installation guide; this component's classifier minimum is not a suite-wide compatibility promise.
 

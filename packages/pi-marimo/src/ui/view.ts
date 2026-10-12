@@ -9,6 +9,8 @@ import { elapsed } from "../core/render.js";
 import { truncate } from "../core/notebook.js";
 import type { Followed } from "../core/watcher.js";
 import { kernelStateParts } from "../bg.js";
+import { INPUT_CONTEXT } from "../activity.js";
+import { interruptKey, notebookKey, notebookPath } from "./identity.js";
 import { banner, bottom, row as frameRow, rule as frameRule, type FrameTheme } from "./frame.js";
 
 /** Banner, two header lines, two rules, hints, bottom border. */
@@ -62,7 +64,7 @@ export function notebookLines(nb: NotebookState, theme: FrameTheme, now: number)
 export class NotebookView implements Component {
   private scroll = 0;
   private follow = true;
-  private stopArmed = false;
+  private armedTarget: string | undefined;
   private note: string | undefined;
   private closed = false;
   private readonly timer: ReturnType<typeof setInterval>;
@@ -70,25 +72,40 @@ export class NotebookView implements Component {
   constructor(
     private readonly tui: Pick<TUI, "requestRender"> & { terminal: { rows: number } },
     private readonly theme: FrameTheme,
-    private path: string,
+    private key: string,
     private readonly actions: ViewActions,
     private readonly done: () => void,
   ) {
     this.timer = setInterval(() => {
-      if (!this.closed) this.tui.requestRender();
+      if (!this.closed) {
+        this.syncConfirmation();
+        this.tui.requestRender();
+      }
     }, TICK_MS);
     this.timer.unref?.();
   }
 
   private current(): Followed | undefined {
-    return this.actions.followed().find((f) => f.attachment.path === this.path);
+    return this.actions.followed().find((f) => notebookKey(f) === this.key);
+  }
+
+  private syncConfirmation(): void {
+    const f = this.current();
+    if (!f || f.connection !== "connected" || (!f.notebook.running() && f.notebook.queued() === 0) || interruptKey(f) !== this.armedTarget) this.armedTarget = undefined;
   }
 
   private viewport(): number {
     return Math.max(3, this.tui.terminal.rows - CHROME);
   }
 
+  /** Read-only scrolling content: global listeners leave its keys alone. */
+  [INPUT_CONTEXT](): "viewer" {
+    return "viewer";
+  }
+
   handleInput(data: string): void {
+    if (this.closed) return;
+    this.syncConfirmation();
     const f = this.current();
     if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || matchesKey(data, "q") || matchesKey(data, "h") || matchesKey(data, "left")) {
       this.close();
@@ -96,29 +113,30 @@ export class NotebookView implements Component {
     }
     const page = this.viewport();
     if (matchesKey(data, "x")) {
-      const busy = f && (f.notebook.running() || f.notebook.queued() > 0);
+      const busy = f && f.connection === "connected" && (f.notebook.running() || f.notebook.queued() > 0);
       if (!f || !busy) {
+        this.armedTarget = undefined;
         this.note = "Nothing is running.";
-      } else if (!this.stopArmed) {
-        this.stopArmed = true;
+      } else if (this.armedTarget !== interruptKey(f)) {
+        this.armedTarget = interruptKey(f);
       } else {
-        this.stopArmed = false;
+        this.armedTarget = undefined;
         this.note = "Interrupting…";
         this.actions.interrupt(f).then(
-          () => { this.note = "Interrupted."; this.tui.requestRender(); },
-          (e: unknown) => { this.note = `Could not interrupt: ${e instanceof Error ? e.message : String(e)}`; this.tui.requestRender(); },
+          () => { if (!this.closed) { this.note = "Interrupted."; this.tui.requestRender(); } },
+          (e: unknown) => { if (!this.closed) { this.note = `Could not interrupt: ${e instanceof Error ? e.message : String(e)}`; this.tui.requestRender(); } },
         );
       }
       this.tui.requestRender();
       return;
     }
-    this.stopArmed = false;
+    this.armedTarget = undefined;
     if (matchesKey(data, "tab")) {
       const all = this.actions.followed();
-      const i = all.findIndex((o) => o.attachment.path === this.path);
+      const i = all.findIndex((o) => notebookKey(o) === this.key);
       const next = all[(i + 1) % Math.max(1, all.length)];
       if (next) {
-        this.path = next.attachment.path;
+        this.key = notebookKey(next);
         this.scroll = 0;
         this.follow = true;
         this.note = undefined;
@@ -128,6 +146,8 @@ export class NotebookView implements Component {
       this.note = "Opened in the browser.";
     } else if (matchesKey(data, "up") || matchesKey(data, "k")) this.move(-1);
     else if (matchesKey(data, "down") || matchesKey(data, "j")) this.move(1);
+    else if (matchesKey(data, "ctrl+u")) this.move(-Math.max(1, Math.floor(page / 2)));
+    else if (matchesKey(data, "ctrl+d")) this.move(Math.max(1, Math.floor(page / 2)));
     else if (matchesKey(data, "pageUp")) this.move(-page);
     else if (matchesKey(data, "pageDown") || matchesKey(data, "space")) this.move(page);
     else if (matchesKey(data, "home") || data === "g") this.move(-Infinity);
@@ -148,8 +168,9 @@ export class NotebookView implements Component {
     const th = this.theme;
     const row = (s: string) => frameRow(s, width, th);
     const rule = frameRule(width, th);
+    this.syncConfirmation();
     const f = this.current();
-    const file = basename(this.path);
+    const file = basename(f?.attachment.path ?? notebookPath(this.key));
     const out = [banner(`Notebook ${file}`, width, th)];
     const page = this.viewport();
     if (!f) {
@@ -170,11 +191,11 @@ export class NotebookView implements Component {
     }
     out.push(rule);
     const hints: string[] = [];
-    if (f && (f.notebook.running() || f.notebook.queued() > 0)) hints.push(this.stopArmed ? th.fg("error", "x again to interrupt") : "x interrupt");
+    if (f && f.connection === "connected" && (f.notebook.running() || f.notebook.queued() > 0)) hints.push(this.armedTarget ? th.fg("error", "x again to interrupt") : "x interrupt");
     if (f) hints.push("o open in browser");
     if (this.actions.followed().length > 1) hints.push("tab next notebook");
     const left = this.note ? `${th.fg("warning", this.note)}  ${th.fg("dim", hints.join(" · "))}` : th.fg("dim", hints.join(" · "));
-    const nav = th.fg("dim", "j/k PgUp/PgDn g/G · h/esc back");
+    const nav = th.fg("dim", "j/k ^U/^D g/G · h/esc back");
     const inner = width - 4;
     const gap = inner - visibleWidth(left) - visibleWidth(nav);
     out.push(row(gap >= 1 ? `${left}${" ".repeat(gap)}${nav}` : left));

@@ -1,15 +1,5 @@
-// Keeps pi's fullscreen exit transcript from wrapping inside herdr.
-//
-// With ui.pane_scrollbars on (the default), herdr gives a pane's main screen one
-// column less than its alt screen: the scrollbar gutter is reserved only outside
-// the alt screen. When fullscreen pi exits, it leaves the alt screen and at once
-// prints its transcript at the width it last saw. herdr's SIGWINCH for the
-// narrower main screen arrives too late, so every full-width line wraps.
-//
-// This watches pi's own stdout for the alt-screen exit and narrows
-// process.stdout.columns by that one column right away. When herdr's SIGWINCH
-// arrives it reports the same width, so Node emits no resize. Entering the alt
-// screen needs nothing: herdr widens the pane and the normal resize path re-renders.
+// Herdr reserves a scrollbar column on the main screen but not the alternate
+// screen. Pi prints its exit transcript before SIGWINCH can report that change.
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -17,8 +7,18 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const ENTER_ALT = "\x1b[?1049h";
 const EXIT_ALT = "\x1b[?1049l";
+const PATCHED = Symbol.for("pi-herdr-scrollbar-width");
 
-// herdr reads its config on the server, which is the host the pane runs on.
+type WidthOutput = Pick<NodeJS.WriteStream, "write" | "columns"> & { [PATCHED]?: Guard };
+interface Guard {
+  owners: Set<symbol>;
+  retiring: boolean;
+  active: boolean;
+  alt: boolean;
+  restore(): void;
+}
+
+// Herdr reads its config on the server, which is the host the pane runs on.
 function scrollbarsEnabled(): boolean {
   const file = process.env.HERDR_CONFIG_PATH || path.join(homedir(), ".config/herdr/config.toml");
   try {
@@ -28,24 +28,70 @@ function scrollbarsEnabled(): boolean {
   }
 }
 
-const PATCHED = Symbol.for("pi-herdr-scrollbar-width");
+/** A lease survives shutdown until the final alternate-screen exit is written. */
+export function installWidthGuard(out: WidthOutput): () => void {
+  let guard = out[PATCHED];
+  if (!guard) {
+    const write = out.write;
+    // Pi may have entered the alternate screen before extensions loaded.
+    guard = { owners: new Set(), retiring: false, active: true, alt: true, restore() {} };
+    const shared = guard;
+    let pending = "";
+    const patched = function (this: WidthOutput, chunk: unknown, ...rest: unknown[]) {
+      if (!shared.active) return (write as (...args: unknown[]) => boolean).call(this, chunk, ...rest);
+      const text = typeof chunk === "string" ? chunk
+        : chunk instanceof Uint8Array ? Buffer.from(chunk).toString("utf8") : "";
+      const input = pending + text;
+      for (const match of input.matchAll(/\x1b\[\?1049([hl])/g)) {
+        const leaving = match[1] === "l";
+        // Apply before delegating: even synchronous writers must see the new width.
+        if (leaving && shared.alt && out.columns > 4) out.columns -= 1;
+        shared.alt = !leaving;
+      }
+      // Retain only a possible incomplete escape sequence, never transcript data.
+      pending = "";
+      for (let length = ENTER_ALT.length - 1; length > 0; length--) {
+        const suffix = input.slice(-length);
+        if (ENTER_ALT.startsWith(suffix) || EXIT_ALT.startsWith(suffix)) {
+          pending = suffix;
+          break;
+        }
+      }
+      try {
+        return (write as (...args: unknown[]) => boolean).call(this, chunk, ...rest);
+      } finally {
+        if (shared.retiring && !shared.alt) shared.restore();
+      }
+    } as NodeJS.WriteStream["write"];
+    shared.restore = () => {
+      shared.active = false;
+      if (out.write === patched) out.write = write;
+      if (out[PATCHED] === shared) delete out[PATCHED];
+    };
+    out.write = patched;
+    out[PATCHED] = shared;
+  }
+  const shared = guard;
+  const owner = Symbol();
+  shared.owners.add(owner);
+  shared.retiring = false;
+  return () => {
+    if (!shared.owners.delete(owner) || shared.owners.size) return;
+    shared.retiring = true;
+    // Signal shutdown emits session_shutdown before Pi leaves the alt screen.
+    // Removing the patch here would reintroduce wrapping on actual quit.
+    if (!shared.alt) shared.restore();
+  };
+}
 
-export default function (_pi: ExtensionAPI) {
-  const out = process.stdout as typeof process.stdout & { [PATCHED]?: boolean };
-  if (process.env.HERDR_ENV !== "1" || !out.isTTY || out[PATCHED] || !scrollbarsEnabled()) return;
-  out[PATCHED] = true;
-
-  // Assume the alt screen until seen otherwise: pi may enter it before extensions load.
-  let alt = true;
-  const write = out.write;
-  out.write = function (this: typeof out, chunk: unknown, ...rest: unknown[]) {
-    const result = (write as (...a: unknown[]) => boolean).call(this, chunk, ...rest);
-    if (typeof chunk === "string" && chunk.includes("\x1b[?1049")) {
-      const leaving = chunk.lastIndexOf(EXIT_ALT) > chunk.lastIndexOf(ENTER_ALT);
-      // herdr keeps the full width for panes of 4 columns or fewer.
-      if (leaving && alt && out.columns > 4) out.columns -= 1;
-      alt = !leaving;
-    }
-    return result;
-  } as typeof out.write;
+export default function (pi: ExtensionAPI) {
+  let release: (() => void) | undefined;
+  pi.on("session_start", (_event, ctx) => {
+    if (ctx.mode !== "tui" || process.env.HERDR_ENV !== "1" || !process.stdout.isTTY || !scrollbarsEnabled()) return;
+    release ??= installWidthGuard(process.stdout);
+  });
+  pi.on("session_shutdown", () => {
+    release?.();
+    release = undefined;
+  });
 }

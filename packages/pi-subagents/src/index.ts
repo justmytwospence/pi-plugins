@@ -13,8 +13,9 @@ import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION, type ActivityEntry, type ActivitySection } from "./activity.ts";
+import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION, type ActivityEntry, type ActivitySection, FLEET_HOST_PRIORITY, hostOutranks, readHost } from "./activity.ts";
 import { type AgentDef, discoverAgents } from "./agents.ts";
+import { MENTION_TYPE, mentionGuidance, subagentAutocomplete } from "./mentions.ts";
 import { Child, type ChildState, subagentDepth, type DialogAnswer, type DialogRequest, type Usage, addUsage, emptyUsage } from "./child.ts";
 import { agentDir, loadConfig } from "./config.ts";
 import { Conversation, type Message, readTranscript, transcriptWriter } from "./conversation.ts";
@@ -213,6 +214,10 @@ export default function subagents(pi: ExtensionAPI) {
   /** Other extensions' sources whose pills end FleetView (pi-bg's shells), while we host them. */
   const sections = new Map<string, ActivitySection>();
   let hosting = false;
+  /** Our identity as a host (activity.ts): the list under the prompt, which outranks the pill host. */
+  const me = { host: "subagents", priority: FLEET_HOST_PRIORITY };
+  /** Hosts that outrank us and are present (none in this suite; the rule is still honored). */
+  const yieldedTo = new Set<string>();
   const hostedSections = () => [...sections.values()];
   /** When the user last sent a message: failed and stopped runs that ended before it leave the views. */
   let dismissedAt = 0;
@@ -226,7 +231,7 @@ export default function subagents(pi: ExtensionAPI) {
     open: (runId) => {
       const ui = boundUI;
       const run = runs.get(runId);
-      if (ui && run) void openViewer(ui, run, viewerActions(run, ui));
+      if (ui && run) void openViewer(ui, run, viewerActions(run, ui)).catch(() => undefined);
     },
   });
   /** Steer and stop for the viewer; only a live child takes either. */
@@ -238,6 +243,8 @@ export default function subagents(pi: ExtensionAPI) {
       run.child?.stop();
       ui.notify(`Stopping subagent ${runLabel(run)} · ${run.agent} (${run.id}).`, "info");
     },
+    // The composer asks for the suite's editor (pi-vim's) through the bus, falling back to pi's input.
+    events: { emit: (channel, data) => safely(() => pi.events.emit(channel, data)) },
   });
   let boundUI: ExtensionContext["ui"] | undefined;
   const fleet = new FleetView({
@@ -298,31 +305,53 @@ export default function subagents(pi: ExtensionAPI) {
     },
   };
 
-  /** Show a source's pill at the end of FleetView, if we host (an interactive session with FleetView on). */
+  /** Show a source's pill at the end of FleetView, if we host (an interactive session with FleetView on, outranked by no one). */
   const accept = (section: ActivitySection) => {
-    if (!hosting || section.id === ownSource.id) return;
+    if (!hosting || yieldedTo.size > 0 || section.id === ownSource.id) return;
     const previous = sections.get(section.id);
     // The same source offered again (it re-offers when a host announces itself) is already shown.
     if (previous === section) return;
-    previous?.setHosted?.(false);
+    previous?.setHosted?.(false, me.host);
     sections.set(section.id, section);
-    section.setHosted?.(true);
+    section.setHosted?.(true, me.host);
     refreshUI();
   };
-  const stopHosting = () => {
-    hosting = false;
+  /** Let every hosted source go (it draws its own pill again, or a lesser host counts it). */
+  const releaseSections = () => {
     for (const section of sections.values()) {
       try {
-        section.setHosted?.(false);
+        section.setHosted?.(false, me.host);
       } catch {
         // Its session may already be gone.
       }
     }
     sections.clear();
   };
+  const stopHosting = () => {
+    hosting = false;
+    yieldedTo.clear();
+    releaseSections();
+  };
+  /** Announce ourselves: sources offer themselves again, lesser hosts yield. */
+  const announce = () => {
+    if (hosting && yieldedTo.size === 0) safely(() => pi.events.emit(ACTIVITY_HOST, { ...me }));
+  };
   pi.events.on(ACTIVITY_SECTION, (data) => {
     const section = (data as { section?: ActivitySection } | undefined)?.section;
     if (section && typeof section.pill === "function" && typeof section.setHosted === "function") accept(section);
+  });
+  pi.events.on(ACTIVITY_HOST, (data) => {
+    const other = readHost(data);
+    if (other.host === me.host || !hosting) return;
+    if (hostOutranks(other, me)) {
+      // A greater host (none in this suite) takes the pills: we let ours go until it is gone.
+      yieldedTo.add(other.host);
+      releaseSections();
+      refreshUI();
+    } else {
+      // A lesser host (pi-bg's pill) announcing itself: it yields once it hears from us.
+      announce();
+    }
   });
   pi.events.on(ACTIVITY_CHANGED, (data) => {
     if (sections.has((data as { id?: string } | undefined)?.id ?? "")) refreshUI();
@@ -330,6 +359,8 @@ export default function subagents(pi: ExtensionAPI) {
   pi.events.on(ACTIVITY_GONE, (data) => {
     const id = (data as { id?: string } | undefined)?.id ?? "";
     if (sections.delete(id)) refreshUI();
+    // A greater host left: we host again, and say so.
+    if (yieldedTo.delete(id)) announce();
   });
   /**
    * Whether this runtime's session is live. After `session_shutdown` (a reload, /new, /resume) pi
@@ -337,6 +368,7 @@ export default function subagents(pi: ExtensionAPI) {
    * or the unhandled rejection takes pi down.
    */
   let live = false;
+  let lifetime = new AbortController();
   let sessionCtx: ExtensionContext | undefined;
   const safely = (fn: () => void) => {
     if (!live) return;
@@ -456,9 +488,9 @@ export default function subagents(pi: ExtensionAPI) {
     );
   };
 
-  const worktreeFor = async (cwd: string, task: string): Promise<string> => {
+  const worktreeFor = async (cwd: string, task: string, signal: AbortSignal): Promise<string> => {
     const branch = `subagent/${slug(task)}-${shortId()}`;
-    const result = await pi.exec("worktree", ["new", branch, "--no-open"], { cwd, timeout: 60_000 });
+    const result = await pi.exec("worktree", ["new", branch, "--no-open"], { cwd, timeout: 60_000, signal });
     const dir = result.stdout.trim().split("\n").at(-1)?.trim();
     if (result.code !== 0 || !dir) throw new Error(`worktree new ${branch} failed: ${(result.stderr || result.stdout).trim().slice(0, 300)}`);
     return dir;
@@ -468,7 +500,7 @@ export default function subagents(pi: ExtensionAPI) {
     ctx: ExtensionContext,
     item: Item,
     resolved: Resolved,
-    options: { cwd: string; fork?: string; async: boolean; onUpdate: () => void },
+    options: { cwd: string; fork?: string; async: boolean; owner: AbortSignal; onUpdate: () => void },
   ): Run => {
     const id = shortId();
     const outputPath = path.join(agentDir(), "subagents", id, "output.md");
@@ -519,8 +551,10 @@ export default function subagents(pi: ExtensionAPI) {
         // The output stays in memory.
       }
       run.child = undefined;
-      record(run);
-      refreshUI();
+      if (!options.owner.aborted) {
+        record(run);
+        refreshUI();
+      }
     });
     return run;
   };
@@ -533,24 +567,47 @@ export default function subagents(pi: ExtensionAPI) {
 
   const usageOf = (list: Run[]): Usage => list.reduce((sum, r) => addUsage(sum, r.state.usage), emptyUsage());
 
+  /** `@subagent:<name>` completes to a discovered agent; once per runtime (a reload clears pi's providers). */
+  let autocompleteAdded = false;
   pi.on("session_start", (_event, ctx) => {
+    lifetime.abort();
+    lifetime = new AbortController();
     live = true;
     sessionCtx = ctx;
     config = loadConfig("pi-subagents", DEFAULT_CONFIG, ctx.cwd);
     bindUI(ctx);
+    if (boundUI && !autocompleteAdded && typeof ctx.ui.addAutocompleteProvider === "function") {
+      autocompleteAdded = true;
+      try {
+        ctx.ui.addAutocompleteProvider((current) => subagentAutocomplete(current, () => discoverAgents(sessionCtx?.cwd ?? ctx.cwd)));
+      } catch {
+        // An older pi without the hook: mentions still guide the model.
+      }
+    }
     // Host other extensions' pills at the end of FleetView, when it is on.
     hosting = Boolean(boundUI) && config.fleetView !== false;
-    if (hosting) pi.events.emit(ACTIVITY_HOST, {});
+    yieldedTo.clear();
+    announce();
     // Our runs, for pi-bg's background-tasks dialog.
     if (boundUI) pi.events.emit(ACTIVITY_SECTION, { section: ownSource });
     refreshUI();
   });
 
+  // A prompt mentioning `@subagent:<name>`: tell the model which discovered agent that is and how to
+  // delegate to it (an unknown name is named as such, with the agents that exist).
+  pi.on("before_agent_start", (event, ctx) => {
+    const guidance = mentionGuidance(event.prompt, discoverAgents(ctx.cwd));
+    if (!guidance) return undefined;
+    return { message: { customType: MENTION_TYPE, content: guidance, display: false } };
+  });
+
   pi.on("session_shutdown", () => {
+    lifetime.abort();
     for (const run of runs.values()) run.child?.stop();
     stopHosting();
     safely(() => pi.events.emit(ACTIVITY_GONE, { id: ownSource.id }));
     live = false;
+    owedResults.length = 0;
     sessionCtx = undefined;
     boundUI = undefined;
     // The UI may already be gone; each part still lets go of its timers and listeners.
@@ -628,28 +685,59 @@ export default function subagents(pi: ExtensionAPI) {
       const fork = params.context === "fork" ? ctx.sessionManager.getSessionFile() : undefined;
       if (params.context === "fork" && !fork) throw new Error("context: fork needs a saved session; this one is not persisted.");
 
-      const agents = discoverAgents(ctx.cwd);
-      const resolvedAll = await plan(ctx, items, agents, signal);
+      /** Whether this call's runs are in the background: from the start (`async`), or once detached. */
+      const owner = lifetime;
+      const call = { async: Boolean(params.async), detach: undefined as (() => void) | undefined };
+      const preparation = new AbortController();
+      const abortPreparation = () => { if (!call.async) preparation.abort(); };
+      // Unlike turn cancellation, a session end always cancels background preparation too.
+      const prepSignal = AbortSignal.any([owner.signal, preparation.signal]);
+      // A foreground call the user already interrupted spawns nothing: not before Jev's picks, not
+      // after them. A deliberate `async` call is the user's background work and goes on regardless.
+      const cancelled = () => !call.async && Boolean(signal?.aborted);
+      if (cancelled()) throw new Error("Cancelled before any subagent started.");
+      if (!live || owner.signal.aborted) throw new Error("The session ended before any subagent started.");
+      signal?.addEventListener("abort", abortPreparation);
+      let resolvedAll: Awaited<ReturnType<typeof plan>>;
+      try {
+        resolvedAll = await plan(ctx, items, discoverAgents(ctx.cwd), prepSignal);
+      } catch (error) {
+        signal?.removeEventListener("abort", abortPreparation);
+        throw error;
+      }
+      if (cancelled() || owner.signal.aborted || !live) {
+        signal?.removeEventListener("abort", abortPreparation);
+        throw new Error(cancelled() ? "Cancelled before any subagent started." : "The session ended before any subagent started.");
+      }
       const failed = resolvedAll.find((r): r is { error: string } => "error" in r);
-      if (failed) throw new Error(failed.error);
+      if (failed) {
+        signal?.removeEventListener("abort", abortPreparation);
+        throw new Error(failed.error);
+      }
       const resolved = resolvedAll as Resolved[];
 
       const started: Run[] = [];
       const details = (): Details => ({ mode, runs: started.map((r) => view(r)) });
-      const update = () => onUpdate?.({ content: [{ type: "text", text: `${started.filter((r) => r.state.status === "running").length} running` }], details: details() });
+      const update = () => {
+        if (live && !owner.signal.aborted) onUpdate?.({ content: [{ type: "text", text: `${started.filter((r) => r.state.status === "running").length} running` }], details: details() });
+      };
 
       const cwdFor = async (item: Item) => {
         const base = path.resolve(ctx.cwd, item.cwd ?? params.cwd ?? ".");
-        return params.worktree ? worktreeFor(base, item.task) : base;
+        return params.worktree ? worktreeFor(base, item.task, prepSignal) : base;
       };
 
-      /** Whether this call's runs are in the background: from the start (`async`), or once detached. */
-      const call = { async: Boolean(params.async), detach: undefined as (() => void) | undefined };
-
-      const runOne = async (item: Item, r: Resolved, dequeue: () => void, chain?: { step: number; of: number }): Promise<Run> => {
+      /**
+       * Nothing queued spawns once the session is gone (a reload, /new: its result would reach no
+       * one), nor once a foreground call is cancelled; a deliberate async call keeps going.
+       */
+      const mayStart = () => live && !owner.signal.aborted && !prepSignal.aborted && !cancelled();
+      const runOne = async (item: Item, r: Resolved, dequeue: () => void, chain?: { step: number; of: number }): Promise<Run | undefined> => {
+        if (!mayStart()) return undefined;
         const cwd = await cwdFor(item);
+        if (!mayStart()) return undefined;
         dequeue();
-        const run = startRun(ctx, item, r, { cwd, ...(fork ? { fork } : {}), async: call.async, onUpdate: update });
+        const run = startRun(ctx, item, r, { cwd, ...(fork ? { fork } : {}), async: call.async, owner: owner.signal, onUpdate: update });
         started.push(run);
         if (call.async) external(run, chain);
         update();
@@ -658,12 +746,13 @@ export default function subagents(pi: ExtensionAPI) {
           if (!call.async) run.child?.stop();
         };
         signal?.addEventListener("abort", abort, { once: true });
+        if (signal?.aborted) abort();
         if (!call.async && call.detach) detachers.set(run.id, call.detach);
         await run.child?.done;
         signal?.removeEventListener("abort", abort);
         detachers.delete(run.id);
         // The chain stops at a step that did not succeed: that step is its last.
-        if (call.async) external(run, chain && run.state.status === "done" ? chain : undefined);
+        if (call.async && !owner.signal.aborted) external(run, chain && run.state.status === "done" ? chain : undefined);
         return run;
       };
 
@@ -682,6 +771,7 @@ export default function subagents(pi: ExtensionAPI) {
             const done: Run[] = [];
             for (const [index, item] of items.entries()) {
               const run = await runOne({ ...item, task: item.task.replaceAll("{previous}", previous) }, resolved[index] as Resolved, dequeue, { step: index + 1, of: items.length });
+              if (!run) break;
               done.push(run);
               if (run.state.status !== "done") break;
               previous = run.state.output;
@@ -689,16 +779,29 @@ export default function subagents(pi: ExtensionAPI) {
             return done;
           }
           const queue = items.map((item, index) => ({ item, index }));
-          const done: Run[] = new Array(items.length);
+          const done: Run[] = [];
           const worker = async () => {
-            for (let next = queue.shift(); next; next = queue.shift()) done[next.index] = await runOne(next.item, resolved[next.index] as Resolved, dequeue);
+            for (let next = queue.shift(); next; next = queue.shift()) {
+              try {
+                const run = await runOne(next.item, resolved[next.index] as Resolved, dequeue);
+                if (!run) break;
+                done[next.index] = run;
+              } catch (error) {
+                preparation.abort();
+                for (const run of started) run.child?.stop();
+                throw error;
+              }
+            }
           };
-          await Promise.all(Array.from({ length: Math.min(config.concurrency, items.length) }, worker));
-          return done;
+          const workers = await Promise.allSettled(Array.from({ length: Math.max(1, Math.min(Math.floor(config.concurrency), items.length)) }, worker));
+          const failure = workers.find((result) => result.status === "rejected");
+          if (failure?.status === "rejected") throw failure.reason;
+          return done.filter(Boolean);
         } finally {
           // A chain that stopped early leaves steps that will never run.
           queued[kind()] -= waiting;
           waiting = 0;
+          signal?.removeEventListener("abort", abortPreparation);
           refreshUI();
         }
       };
@@ -714,11 +817,13 @@ export default function subagents(pi: ExtensionAPI) {
             backgroundCount--;
             safely(() => pi.events.emit("herdr:background", { active: false, id: hold }));
             const text = list.filter(Boolean).map(resultText).join("\n\n---\n\n");
+            if (owner.signal.aborted) return;
             deliverResult(`Subagent ${mode} finished:\n\n${text}`, { mode, runs: list.filter(Boolean).map((r) => view(r, true)) });
           })
           .catch((error: unknown) => {
             backgroundCount--;
             safely(() => pi.events.emit("herdr:background", { active: false, id: hold }));
+            if (owner.signal.aborted) return;
             deliverResult(`Subagent ${mode} failed: ${error instanceof Error ? error.message : String(error)}`);
           });
       };
@@ -761,7 +866,9 @@ export default function subagents(pi: ExtensionAPI) {
         };
       }
       for (const r of started) detachers.delete(r.id);
-      const text = mode === "chain" ? resultText(done.at(-1) as Run) : done.map(resultText).join("\n\n---\n\n");
+      if (!done.length) throw new Error(signal?.aborted ? "Cancelled before any subagent started." : "No subagent started.");
+      const skipped = items.length - done.length;
+      const text = `${mode === "chain" ? resultText(done.at(-1) as Run) : done.map(resultText).join("\n\n---\n\n")}${skipped > 0 && signal?.aborted ? `\n\n[Cancelled: ${skipped} queued task${skipped === 1 ? "" : "s"} never started.]` : ""}`;
       const allFailed = done.every((r) => r.state.status !== "done");
       return {
         content: [{ type: "text", text }],

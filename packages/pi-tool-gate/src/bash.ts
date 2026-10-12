@@ -1,16 +1,21 @@
 import { homedir } from "node:os";
 import path from "node:path";
 
-/** Programs that only read, whatever their arguments (special cases are checked below). */
+/**
+ * Programs that only read, whatever their arguments (special cases are checked in
+ * `readsDespiteArgs`). The list is conservative: a program whose arguments can make it write,
+ * delete, run other programs or change the system is checked below, and anything it is unsure
+ * about goes to Jev rather than running unasked.
+ */
 const READ_ONLY_PROGRAMS = new Set([
   "ls", "cat", "head", "tail", "less", "more", "wc", "rg", "grep", "egrep", "fgrep", "ag", "fd", "find",
   "tree", "pwd", "echo", "printf", "which", "type", "whoami", "id", "date", "uname", "hostname", "env",
   "printenv", "stat", "file", "du", "df", "diff", "cmp", "sort", "uniq", "cut", "tr", "column", "nl", "jq",
   "yq", "basename", "dirname", "realpath", "readlink", "sha256sum", "shasum", "md5", "md5sum", "true",
   "false", "test", "ps", "uptime", "sed", "awk", "comm", "tac", "rev", "xxd", "od", "strings", "man",
-  "tldr", "history", "lsof", "cd", "sleep", "dig", "nslookup", "host", "ping", "traceroute", "ss",
-  "netstat", "ifconfig", "ip", "free", "vm_stat", "top", "htop", "pgrep", "nproc", "sysctl", "sw_vers",
-  "lsblk", "mount", "groups", "locale", "tput", "xxd", "base64", "sha1sum", "cksum", "column",
+  "history", "lsof", "cd", "sleep", "dig", "nslookup", "host", "ping", "traceroute", "ss",
+  "netstat", "ifconfig", "ip", "free", "vm_stat", "pgrep", "nproc", "sysctl", "sw_vers",
+  "lsblk", "mount", "groups", "locale", "xxd", "base64", "sha1sum", "cksum", "column",
 ]);
 
 /** `<tool> <sub>` subcommands of other CLIs that only read. */
@@ -28,27 +33,127 @@ const READ_ONLY_SUBCOMMANDS: Record<string, Set<string>> = {
 /** Words that make a CLI subcommand change something, e.g. `gh pr merge`, `docker network rm`. */
 const MUTATING_WORDS = /^(create|delete|rm|remove|merge|close|reopen|edit|comment|review|approve|apply|set|add|prune|kill|stop|start|restart|run|exec|cp|push|pull|login|logout|enable|disable|mask|unmask|reload|deploy|upload|download|clone|fork|rename|archive|transfer|sync|cancel|rerun|dispatch|use-context|set-context|delete-context|connect|disconnect|update|upgrade|install|uninstall|write|import|export|tag|untag|load|save|build|commit|attach|pause|unpause|scale|rollout|patch|replace|label|annotate|taint|drain|cordon|uncordon|expose|autoscale|certificate)$/u;
 
-/** A plain HTTP GET with curl or wget: no method, body, upload, or output file. */
-function isReadOnlyFetch(name: string, args: readonly string[]): boolean {
-  if (name === "curl") {
-    return !args.some(
-      (a, i) =>
-        /^-(X|d|F|T|o|O|K|c)$/u.test(a) ||
-        /^--(request|data.*|form.*|upload-file|output|remote-name.*|config|cookie-jar|json)(=|$)/u.test(a) ||
-        (/^-[a-zA-Z]+$/u.test(a) && /[XdFToOKc]/u.test(a.slice(1))) ||
-        (a === "-X" && args[i + 1] !== "GET"),
-    );
-  }
-  if (name === "wget") return args.some((a) => a === "-qO-" || a === "-O-" || a === "--spider") && !args.some((a) => /^--(post|method|body)/u.test(a));
-  return false;
+/** `kubectl config` verbs that only read; every other one (`use-context`, `set-*`, `delete-*`, `unset`) writes the kubeconfig. */
+const KUBECTL_CONFIG_READS = new Set(["view", "current-context", "get-contexts", "get-clusters", "get-users"]);
+
+/** Match short flags even when clustered or followed immediately by their value. */
+function shortOption(args: readonly string[], letters: string): boolean {
+  return args.some((a) => new RegExp(`^-[^-]*[${letters}]`, "u").test(a));
 }
 
-/** `git <sub>` subcommands that only read. */
+/** A plain HTTP GET with curl or wget. Unknown options go to judgment, not the read-only path. */
+function isReadOnlyFetch(name: string, args: readonly string[]): boolean {
+  const curl = name === "curl";
+  const flags = new Set(curl
+    ? ["--silent", "--show-error", "--fail", "--fail-with-body", "--location", "--head", "--include", "--verbose", "--compressed", "--globoff", "--no-buffer", "--disable", "--ipv4", "--ipv6"]
+    : ["--quiet", "--no-verbose", "--verbose", "--server-response", "--spider", "--no-check-certificate"]);
+  const values = new Set(curl
+    ? ["--url", "--header", "--user-agent", "--cookie", "--referer", "--max-time", "--connect-timeout", "--retry", "--user", "--proxy", "--request"]
+    : ["--header", "--user-agent", "--timeout", "--connect-timeout", "--tries", "--output-document"]);
+  const shortFlags = curl ? "sSfLIivNqg46" : "qvSd";
+  const shortValues = curl ? "HAbemuxX" : "OUT";
+  let stdout = curl;
+  let operands = false;
+  const valueAllowed = (option: string, value: string | undefined): boolean => {
+    if (value === undefined) return false;
+    if (option === "X" || option === "--request") return value === "GET";
+    if (option === "O" || option === "--output-document") {
+      stdout = value === "-";
+      return stdout;
+    }
+    return true;
+  };
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] as string;
+    if (a === "--" && !operands) { operands = true; continue; }
+    if (operands || !a.startsWith("-")) {
+      if (!/^https?:\/\//u.test(a)) return false;
+    } else if (a.startsWith("--")) {
+      const eq = a.indexOf("=");
+      const option = eq < 0 ? a : a.slice(0, eq);
+      if (flags.has(option) && eq < 0) {
+        if (option === "--spider") stdout = true;
+      } else if (values.has(option)) {
+        if (!valueAllowed(option, eq < 0 ? args[++i] : a.slice(eq + 1))) return false;
+      } else return false;
+    } else {
+      for (let j = 1; j < a.length; j++) {
+        const option = a[j] as string;
+        if (shortFlags.includes(option)) continue;
+        if (!shortValues.includes(option)) return false;
+        if (!valueAllowed(option, a.slice(j + 1) || args[++i])) return false;
+        break;
+      }
+      if (a === "-") return false;
+    }
+  }
+  return stdout;
+}
+
+/** `git <sub>` subcommands that only read (some need their own arguments checked, see `isReadOnlyGit`). */
 const READ_ONLY_GIT = new Set([
   "status", "diff", "log", "show", "branch", "rev-parse", "ls-files", "ls-tree", "blame", "describe",
   "shortlog", "reflog", "cat-file", "grep", "remote", "tag", "config", "worktree", "stash", "merge-base",
   "name-rev", "for-each-ref", "show-ref", "rev-list", "whatchanged", "check-ignore",
 ]);
+
+/** Git global options that take their value as the next token. */
+const GIT_GLOBAL_WITH_VALUE = new Set(["-C", "-c", "--config-env", "--git-dir", "--work-tree", "--namespace", "--attr-source"]);
+/** Git global options that change what runs: config overrides and the exec path. */
+const GIT_GLOBAL_UNSAFE = /^(-c|--config-env|--exec-path|--super-prefix)(=|$)|^-c./u;
+
+interface GitCommand {
+  sub: string;
+  /** Arguments after the subcommand. */
+  args: string[];
+  /** A `-c key=value` override, `--exec-path` or `--config-env`: the subcommand may not do what it says. */
+  unsafeGlobal: boolean;
+}
+
+/** The git subcommand and its arguments, past global options like `-C dir` and `--no-pager`. */
+export function gitCommand(args: readonly string[]): GitCommand | undefined {
+  let unsafeGlobal = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] as string;
+    if (!a.startsWith("-")) return { sub: a, args: args.slice(i + 1), unsafeGlobal };
+    if (GIT_GLOBAL_UNSAFE.test(a)) unsafeGlobal = true;
+    if (GIT_GLOBAL_WITH_VALUE.has(a)) i++;
+  }
+  return undefined;
+}
+
+/** Whether `git <sub> <args>` only reads. */
+function isReadOnlyGit(g: GitCommand): boolean {
+  const { sub, args } = g;
+  if (g.unsafeGlobal || !READ_ONLY_GIT.has(sub)) return false;
+  const positional = args.filter((a) => !a.startsWith("-"));
+  // `--output=<file>` writes the diff or log to a file; `-O` opens matches in a pager/editor.
+  if (args.some((a) => /^--(output|ext-diff|textconv|filters)(=|$)/u.test(a))) return false;
+  if (sub === "grep" && (shortOption(args, "O") || args.some((a) => a.startsWith("--open-files-in-pager")))) return false;
+  if (sub === "branch") {
+    if (shortOption(args, "dDmMcCufFt") || args.some((a) => /^--(delete|move|copy|force|track|set-upstream-to|unset-upstream|edit-description|create-reflog)(=|$)/u.test(a))) return false;
+    // `-l` is --create-reflog, NOT --list: `git branch -l name` creates a branch.
+    const listing = args.some((a) => /^(--list|--contains|--no-contains|--merged|--no-merged|--points-at)(=|$)/u.test(a));
+    return positional.length === 0 || listing;
+  }
+  if (sub === "tag") {
+    if (shortOption(args, "dDasfmFue") || args.some((a) => /^--(delete|annotate|sign|force|message|file|local-user|edit|cleanup|create-reflog)(=|$)/u.test(a))) return false;
+    // `git tag <name>` creates a tag; a name is only a pattern after a listing or verify option.
+    const listing = args.some((a) => /^(-l|-v|-n\d*|--list|--verify|--contains|--no-contains|--merged|--no-merged|--points-at)(=|$)/u.test(a));
+    return positional.length === 0 || listing;
+  }
+  if (sub === "remote") return !positional.some((a) => ["add", "remove", "rm", "rename", "set-url", "set-head", "set-branches", "prune", "update"].includes(a));
+  if (sub === "reflog") return positional.length === 0 || positional[0] === "show";
+  if (sub === "config") {
+    if (shortOption(args, "e") || args.some((a) => /^--(add|replace-all|unset|unset-all|rename-section|remove-section|edit)(=|$)/u.test(a))) return false;
+    if (["get", "list"].includes(positional[0] ?? "")) return true;
+    // --show-origin and --show-scope modify output, but do not select a read operation.
+    return args.some((a) => ["--get", "--list", "-l", "--get-all", "--get-regexp"].includes(a));
+  }
+  if (sub === "stash") return positional.length > 0 && ["list", "show"].includes(positional[0] as string);
+  if (sub === "worktree") return positional[0] === "list";
+  return true;
+}
 
 /** `<pm> <sub>` subcommands of package managers that only read. */
 const READ_ONLY_PM: Record<string, Set<string>> = {
@@ -85,7 +190,9 @@ export function splitCommand(command: string): string[][] {
     const c = command[i] as string;
     if (quote) {
       if (c === quote) quote = undefined;
-      else if (c === "\\" && quote === '"' && i + 1 < command.length) token += command[++i];
+      else if (c === "\\" && quote === '"' && /[$`"\\\n]/u.test(command[i + 1] ?? "")) {
+        if (command[++i] !== "\n") token += command[i];
+      }
       else token += c;
       continue;
     }
@@ -93,8 +200,7 @@ export function splitCommand(command: string): string[][] {
       quote = c;
       inToken = true;
     } else if (c === "\\" && i + 1 < command.length) {
-      token += command[++i];
-      inToken = true;
+      if (command[++i] !== "\n") { token += command[i]; inToken = true; }
     } else if (c === ";" || c === "\n" || c === "|" || c === "&") {
       // `2>&1` and `&>` stay inside the token stream as redirects, not separators.
       if (c === "&" && (command[i - 1] === ">" || command[i + 1] === ">")) {
@@ -115,83 +221,423 @@ export function splitCommand(command: string): string[][] {
   return parts;
 }
 
-/** Leading `FOO=bar` assignments and wrappers like `time`/`nice` are skipped. */
-function program(tokens: string[]): { name: string; args: string[] } | undefined {
+/**
+ * Environment variables that change what a program runs or where it reads and writes: a command
+ * that sets one of them is not read-only whatever the program is (`PAGER='sh -c ...' git log`).
+ */
+const UNSAFE_ENV = /^(PATH|LD_[A-Z_]*|DYLD_[A-Z_]*|GIT_[A-Z_]*|PAGER|MANPAGER|EDITOR|VISUAL|SHELL|HOME|BASH_ENV|ENV|IFS|CDPATH|LESS.*|RIPGREP_CONFIG_PATH|AWKPATH|AWKLIBPATH|CURL_HOME|WGETRC|PERL5OPT|PYTHONSTARTUP|NODE_OPTIONS|RUBYOPT|TMPDIR|XDG_CONFIG_HOME)$/u;
+
+/** Wrappers that run their last arguments as the real command, after options of their own. */
+const WRAPPERS = new Set(["time", "nice", "command", "builtin", "nohup", "exec", "env", "timeout", "stdbuf", "setsid", "caffeinate", "chronic", "unbuffer"]);
+/** Wrapper options that take their value as the next token. */
+const WRAPPER_OPTION_WITH_VALUE: Record<string, Set<string>> = {
+  nice: new Set(["-n", "--adjustment"]),
+  env: new Set(["-u", "--unset", "-C", "--chdir"]),
+  timeout: new Set(["-s", "--signal", "-k", "--kill-after"]),
+};
+
+/**
+ * The program a simple command runs and its arguments, past leading `FOO=bar` assignments and
+ * wrappers like `time`, `nice -n 10`, `env -i`, `nohup` and `timeout 5`. `unsafe` is set when an
+ * assignment or wrapper option can change what the program does (`PATH=…`, `env -S …`).
+ */
+function program(tokens: string[]): { name: string; args: string[]; unsafe: boolean } | undefined {
   let i = 0;
-  while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/u.test(tokens[i] as string)) i++;
-  while (i < tokens.length && ["time", "nice", "command", "builtin"].includes(tokens[i] as string)) i++;
+  let unsafe = false;
+  for (;;) {
+    while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/u.test(tokens[i] as string)) {
+      if (UNSAFE_ENV.test((tokens[i] as string).split("=", 1)[0] as string)) unsafe = true;
+      i++;
+    }
+    const head = tokens[i];
+    if (head === undefined || !WRAPPERS.has(head)) break;
+    i++;
+    // nohup can create nohup.out even when its child only reads. Other complex wrappers
+    // also need judgment; stripping them is only useful for the approval key/fixed holds.
+    if (!["time", "nice", "command", "builtin", "env", "timeout"].includes(head)) unsafe = true;
+    const withValue = WRAPPER_OPTION_WITH_VALUE[head];
+    while (i < tokens.length && (tokens[i] as string).startsWith("-")) {
+      const opt = tokens[i++] as string;
+      if (opt === "--") break;
+      const safeOption =
+        (head === "time" && opt === "-p") ||
+        (head === "nice" && /^(?:-n|--adjustment(?:=.+)?|-\d+)$/u.test(opt)) ||
+        (head === "command" && /^-[pvV]+$/u.test(opt)) ||
+        (head === "env" && ["-i", "--ignore-environment", "-u", "--unset"].includes(opt)) ||
+        (head === "timeout" && /^(?:-[sk]|--(?:signal|kill-after)(?:=.+)?|--preserve-status|--foreground|--verbose)$/u.test(opt));
+      if (!safeOption) unsafe = true;
+      if (head === "env" && (opt === "-u" || opt === "--unset") && UNSAFE_ENV.test(tokens[i] ?? "")) unsafe = true;
+      if (withValue?.has(opt)) i++;
+    }
+    // `timeout [options] DURATION command`.
+    if (head === "timeout" && i < tokens.length && /^\d+(\.\d+)?[smhd]?$/u.test(tokens[i] as string)) i++;
+  }
   const name = tokens[i];
-  return name === undefined ? undefined : { name: path.basename(name), args: tokens.slice(i + 1) };
+  if (name === undefined) return unsafe ? { name: "", args: [], unsafe } : undefined;
+  // A project script called ./ls is not the system ls.
+  if (name.includes("/") && !/^\/(?:usr\/)?bin\/[^/]+$/u.test(name)) unsafe = true;
+  return { name: path.basename(name), args: tokens.slice(i + 1), unsafe };
 }
 
-/** Output redirects other than to /dev/null or fd duplication, e.g. `> out.txt`, `>> log`. */
+/**
+ * Output redirects that write a file: `> out.txt`, `>> log`, `&> all`, `>| f`, `>& f`, `<> f`. Not
+ * `/dev/null` or fd duplication (`2>&1`, `>&-`).
+ */
 export function writeRedirects(command: string): string[] {
   const targets: string[] = [];
-  const re = /(?:^|[^<>&0-9])(?:[0-9]|&)?>>?\s*(?!&)([^\s;|&]+)/gu;
+  const re = /(?<![<>])(?:[0-9]*|&)(>>?|<>)\|?(&?)\s*([^\s;|&<>]*)/gu;
   for (const match of command.matchAll(re)) {
-    const target = match[1] as string;
-    if (target !== "/dev/null" && !/^&?\d$/u.test(target)) targets.push(target);
+    const dup = match[2] === "&";
+    const target = match[3] as string;
+    // `2>&1`, `>&-`: duplicating or closing a descriptor, not a file.
+    if (dup && (/^\d+$/u.test(target) || target === "-")) continue;
+    // A redirect with no target is a syntax error, or something this parser does not follow.
+    if (target === "") {
+      targets.push(">");
+      continue;
+    }
+    if (target !== "/dev/null") targets.push(target);
   }
   return targets;
 }
 
+/** Expansions can hide options or executable names. Only literal shell words are auto-approved. */
+function plainShell(command: string): boolean {
+  let quote: "'" | '"' | undefined;
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i];
+    if (quote === "'") { if (c === "'") quote = undefined; continue; }
+    if (c === "\\") { i++; continue; }
+    if (c === quote) { quote = undefined; continue; }
+    if (!quote && (c === "'" || c === '"')) { quote = c; continue; }
+    if (c === "$" || c === "`" || (!quote && (c === "(" || c === ")"))) return false;
+    if (!quote && c === "<" && command[i + 1] === "<") return false;
+  }
+  return quote === undefined;
+}
+
 /** True when every simple command in `command` only reads. */
 export function isReadOnlyBash(command: string, extra: readonly string[] = []): boolean {
-  if (/\$\(|`|<\(|>\(/u.test(command)) return false;
+  if (!plainShell(command)) return false;
   if (writeRedirects(command).length) return false;
   const parts = splitCommand(command);
   if (parts.length === 0) return false;
   return parts.every((tokens) => isReadOnlyPart(tokens, extra));
 }
 
+/** The sed scripts in `args`: the `-e`/`--expression` values, else the first operand. */
+function sedScripts(args: readonly string[]): { scripts: string[]; scriptFile: boolean } {
+  const scripts: string[] = [];
+  let scriptFile = false;
+  let first: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] as string;
+    if (a === "-e" || a === "--expression") scripts.push(args[++i] ?? "");
+    else if (/^-[a-zA-Z]*e./u.test(a)) scripts.push(a.slice(a.indexOf("e") + 1));
+    else if (a.startsWith("--expression=")) scripts.push(a.slice("--expression=".length));
+    else if (a === "-f" || a === "--file" || /^-[a-zA-Z]*f/u.test(a) || a.startsWith("--file")) scriptFile = true;
+    else if (a === "-l" || a === "--line-length") i++;
+    else if (!a.startsWith("-") && first === undefined) first = a;
+  }
+  if (!scripts.length && first !== undefined) scripts.push(first);
+  return { scripts, scriptFile };
+}
+
+/**
+ * Whether a sed script can write a file or run a command: the `w`/`W` commands, `s///w file`,
+ * and GNU sed's `e` command and `s///e` flag. The script is scanned command by command, so a
+ * `w` inside `s/new/word/`, appended text, a label or a comment is not a command. Conservative:
+ * anything the scanner cannot follow counts as writing.
+ */
+export function sedWrites(script: string): boolean {
+  const s = script;
+  const n = s.length;
+  let i = 0;
+  const at = () => s[i] ?? "";
+  /** Past a `<d>…<d>` operand whose opening delimiter was consumed; false when unterminated. */
+  const operand = (d: string): boolean => {
+    while (i < n) {
+      const c = s[i] as string;
+      if (c === "\\") {
+        i += 2;
+        continue;
+      }
+      i++;
+      if (c === d) return true;
+    }
+    return false;
+  };
+  const toLineEnd = () => {
+    while (i < n && s[i] !== "\n") i++;
+  };
+  /** One address (`12`, `$`, `3~2`, `/re/`, `\cREc`); false when it cannot be followed. */
+  const address = (): boolean => {
+    const c = at();
+    if (/[0-9]/u.test(c)) {
+      while (/[0-9]/u.test(at())) i++;
+      if (at() === "~") {
+        i++;
+        while (/[0-9]/u.test(at())) i++;
+      }
+      return true;
+    }
+    if (c === "$") {
+      i++;
+      return true;
+    }
+    if (c === "/") {
+      i++;
+      return operand("/");
+    }
+    if (c === "\\") {
+      i++;
+      const d = s[i++];
+      return d !== undefined && d !== "\n" && operand(d);
+    }
+    return true;
+  };
+  const startsAddress = (c: string) => /[0-9$/\\]/u.test(c);
+  while (i < n) {
+    const c = at();
+    if (/[\s;]/u.test(c)) {
+      i++;
+      continue;
+    }
+    if (c === "#") {
+      toLineEnd();
+      continue;
+    }
+    if (startsAddress(c)) {
+      if (!address()) return true;
+      while (/[ \t]/u.test(at())) i++;
+      if (at() === ",") {
+        i++;
+        while (/[ \t]/u.test(at())) i++;
+        if (at() === "+") i++;
+        if (!address()) return true;
+      }
+      while (/[ \t!]/u.test(at())) i++;
+    }
+    const cmd = s[i++];
+    switch (cmd) {
+      case "{":
+        // A block opens straight onto its first command.
+        continue;
+      case "}":
+      case "=":
+      case "d":
+      case "D":
+      case "g":
+      case "G":
+      case "h":
+      case "H":
+      case "n":
+      case "N":
+      case "p":
+      case "P":
+      case "x":
+      case "z":
+      case "F":
+        break;
+      case "l":
+      case "L":
+      case "q":
+      case "Q":
+      case "v":
+        while (/[0-9.]/u.test(at())) i++;
+        break;
+      case "s": {
+        const d = s[i++];
+        if (d === undefined || d === "\n" || d === "\\" || !operand(d) || !operand(d)) return true;
+        while (/[gpImM0-9]/u.test(at())) i++;
+        if (at() === "w" || at() === "e") return true;
+        break;
+      }
+      case "y": {
+        const d = s[i++];
+        if (d === undefined || d === "\n" || d === "\\" || !operand(d) || !operand(d)) return true;
+        break;
+      }
+      case "a":
+      case "i":
+      case "c":
+        // `a text`, or `a\` with the text on the following lines, each continued by a trailing `\`.
+        for (;;) {
+          toLineEnd();
+          if (s[i - 1] !== "\\" || i >= n) break;
+          i++;
+        }
+        break;
+      case "r":
+      case "R":
+        toLineEnd();
+        break;
+      case "b":
+      case "t":
+      case "T":
+      case ":":
+        while (i < n && s[i] !== "\n" && s[i] !== ";") i++;
+        break;
+      case "w":
+      case "W":
+      case "e":
+        return true;
+      default:
+        // Unknown command: not followed, so not trusted.
+        return true;
+    }
+    // A command ends at `;`, a newline, `}`, whitespace, a comment or the end of the script.
+    if (i < n && !/[\s;}#]/u.test(at())) return true;
+  }
+  return false;
+}
+
+/** Whether a `READ_ONLY_PROGRAMS` program with these arguments still only reads. */
+function readsDespiteArgs(name: string, args: readonly string[]): boolean {
+  const positional = args.filter((a) => !a.startsWith("-"));
+  const has = (...flags: string[]) => args.some((a) => flags.includes(a));
+  const cluster = (letters: string) => shortOption(args, letters);
+  switch (name) {
+    case "sed": {
+      // `-i`/`-I` edit in place; `-f` runs a script this cannot read; `w`, `W` and `e` write or execute.
+      if (cluster("iI") || args.some((a) => a.startsWith("--in-place"))) return false;
+      const { scripts, scriptFile } = sedScripts(args);
+      return !scriptFile && !scripts.some(sedWrites);
+    }
+    case "sort":
+      return !cluster("o") && !args.some((a) => /^--(output|compress-program)(=|$)/u.test(a));
+    case "find":
+      return !has("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls");
+    case "awk":
+      // Output redirection (`print > f`, `print | "cmd"`), `system()`, and script files are not followed.
+      return !args.some((a) => /system\s*\(|>|\||@(?:include|load)/u.test(a) || /^--(file|exec|load|dump-variables|profile|pretty-print)(=|$)/u.test(a)) && !cluster("fElop");
+    case "env":
+      return !args.some((a) => !a.startsWith("-") && !a.includes("="));
+    case "yq":
+      return !args.some((a) => /^--(inplace|in-place|split-exp|from-file)(=|$)/u.test(a)) && !cluster("is");
+    case "fd":
+      return !args.some((a) => /^--exec(?:-batch)?(=|$)/u.test(a)) && !cluster("xX");
+    case "rg":
+      return !args.some((a) => /^--(pre|hostname-bin)(=|$)/u.test(a));
+    case "ag":
+      return !args.some((a) => /^--pager(=|$)/u.test(a));
+    case "file":
+      return !cluster("C") && !has("--compile");
+    case "lsof":
+      return !cluster("D");
+    case "tree":
+      return !cluster("o");
+    case "uniq":
+      // `uniq in out` writes the second operand.
+      return positional.length < 2;
+    case "xxd":
+      // `xxd in out` writes the second operand.
+      return positional.length < 2;
+    case "base64":
+      return !cluster("o") && !args.some((a) => /^--output(=|$)/u.test(a));
+    case "date":
+      // `date -s`, `--set` and BSD's bare `date MMDDhhmm` set the clock.
+      return !cluster("s") && !args.some((a) => a.startsWith("--set")) && positional.every((a) => a.startsWith("+"));
+    case "hostname":
+      return positional.length === 0 && !cluster("bF") && !args.some((a) => /^--(boot|file)(=|$)/u.test(a));
+    case "sysctl":
+      return !args.some((a) => /^--(write|load|system)(=|$)/u.test(a)) && !cluster("wpf") && !positional.some((a) => a.includes("="));
+    case "ss":
+      return !args.some((a) => /^--(kill|diag)(=|$)/u.test(a)) && !cluster("KD");
+    case "ip": {
+      // `ip [options] OBJECT [COMMAND]`: the command defaults to `show`.
+      if (args.some((a) => a.startsWith("-") && !/^(?:-[46sdhjpor]+|--(?:oneline|details|statistics|json|pretty|resolve))$/u.test(a))) return false;
+      const verb = positional[1];
+      return verb === undefined || ["show", "list", "ls", "lst", "sh", "s", "l", "get", "help", "monitor"].includes(verb);
+    }
+    case "ifconfig":
+      // `ifconfig eth0 down`, `ifconfig eth0 10.0.0.1` configure the interface.
+      return positional.length <= 1 && !args.some((a) => a.startsWith("-") && !["-a", "-l", "-v", "-m", "-s"].includes(a)) && !(has("-a") && positional.length > 0);
+    case "mount": {
+      // Bare `mount` (or `mount -l`, `mount -t ext4`) lists; any operand or `-a` mounts.
+      const rest: string[] = [];
+      for (let i = 0; i < args.length; i++) {
+        if (args[i] === "-t" || args[i] === "--types") i++;
+        else rest.push(args[i] as string);
+      }
+      return rest.every((a) => ["-l", "-v", "--verbose", "--show-labels", "-h", "--help", "-V", "--version"].includes(a));
+    }
+    case "history":
+      return !cluster("cwardns");
+    case "man":
+      return !cluster("PHl") && !args.some((a) => /^--(pager|html|local-file|preprocessor)(=|$)/u.test(a));
+    case "less":
+    case "more":
+      // `less +cmd` runs a less command on start, which can be `!shell`.
+      return !args.some((a) => a.startsWith("+") || /^--(?:log-file|LOG-FILE|lesskey-file)(=|$)/u.test(a)) && !cluster("oOk");
+    default:
+      return true;
+  }
+}
+
 /** Whether one simple command (from `splitCommand`) only reads. */
 function isReadOnlyPart(tokens: string[], extra: readonly string[]): boolean {
-  {
-    const p = program(tokens);
-    if (!p) return true;
-    const { name, args } = p;
-    if (extra.includes(name)) return true;
-    if (name === "git") {
-      const sub = args.find((a) => !a.startsWith("-"));
-      if (!sub || !READ_ONLY_GIT.has(sub)) return false;
-      if (sub === "branch" && args.some((a) => /^-(d|D|m|M|c|C|-delete|-move|-copy)$/u.test(a))) return false;
-      if (sub === "remote" && args.some((a) => ["add", "remove", "rm", "rename", "set-url", "prune"].includes(a))) return false;
-      if (sub === "tag" && args.some((a) => /^-(d|a|s|f)$/u.test(a) || a === "--delete")) return false;
-      if (sub === "config" && !args.some((a) => ["--get", "--list", "-l", "--get-all", "--show-origin"].includes(a))) return false;
-      if (sub === "stash" && !args.some((a) => ["list", "show"].includes(a))) return false;
-      if (sub === "worktree" && !args.includes("list")) return false;
-      return true;
-    }
-    const pm = READ_ONLY_PM[name];
-    if (pm) {
-      const sub = args.find((a) => !a.startsWith("-"));
-      return sub !== undefined && pm.has(sub);
-    }
-    if (name === "curl" || name === "wget") return isReadOnlyFetch(name, args);
-    const cli = READ_ONLY_SUBCOMMANDS[name];
-    if (cli) {
-      if (name === "sqlite3") return args.includes("-readonly") && !args.some((a) => /^\.(output|once|save|import|backup|restore)\b/u.test(a));
-      if (name === "journalctl") return !args.some((a) => /^--(vacuum|rotate|flush|sync)/u.test(a));
-      if (name === "docker" && args[0] === "compose") {
-        const sub = args.slice(1).find((a) => !a.startsWith("-") && !/\.(ya?ml)$/u.test(a));
-        return sub !== undefined && ["ps", "logs", "config", "ls", "images", "top", "version"].includes(sub);
-      }
-      const words = args.filter((a) => !a.startsWith("-"));
-      const sub = words[0];
-      if (sub === undefined || !cli.has(sub)) return false;
-      // `gh pr view` reads, `gh pr merge` does not; `docker network ls` reads, `docker network rm` does not.
-      if (words.slice(1).some((w) => MUTATING_WORDS.test(w))) return false;
-      if (name === "gh" && !words.slice(1).some((w) => ["view", "list", "status", "diff", "checks", "watch"].includes(w)) && sub !== "status") return false;
-      if (name === "docker" && ["network", "volume", "context", "image"].includes(sub) && !words.slice(1).some((w) => ["ls", "inspect", "list"].includes(w))) return false;
-      return true;
-    }
-    if (!READ_ONLY_PROGRAMS.has(name)) return false;
-    if (name === "sed" && args.some((a) => /^-[a-zA-Z]*i/u.test(a) || a.startsWith("--in-place"))) return false;
-    if (name === "find" && args.some((a) => ["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fls"].includes(a))) return false;
-    if (name === "awk" && args.some((a) => /system\(|>\s*"/u.test(a))) return false;
-    if (name === "env" && args.some((a) => !a.startsWith("-") && !a.includes("="))) return false;
+  const p = program(tokens);
+  if (!p) return true;
+  const { name, args } = p;
+  if (p.unsafe) return false;
+  if (extra.includes(name)) return true;
+  if (name === "git") {
+    const g = gitCommand(args);
+    return g !== undefined && isReadOnlyGit(g);
+  }
+  const pm = READ_ONLY_PM[name];
+  if (pm) {
+    const positional = args.filter((a) => !a.startsWith("-"));
+    const sub = positional[0];
+    if (sub === undefined || !pm.has(sub)) return false;
+    // `npm config set` writes .npmrc.
+    if (name === "npm" && sub === "config") return ["get", "list", "ls"].includes(positional[1] ?? "");
     return true;
   }
+  if (name === "curl" || name === "wget") return isReadOnlyFetch(name, args);
+  const cli = READ_ONLY_SUBCOMMANDS[name];
+  if (cli) {
+    if (name === "sqlite3") {
+      return (
+        args.length === 3 && args[0] === "-readonly" && !args[1]?.startsWith("-") &&
+        (args[2] ?? "").split(";").every((sql) => !sql.trim() || /^\s*select\b/iu.test(sql)) &&
+        !args.some((a) => /(?:^|\n)\s*\.|\b(?:attach|load_extension|writefile|edit)\b/iu.test(a))
+      );
+    }
+    if (name === "journalctl") return !args.some((a) => /^--(vacuum|rotate|flush|sync|relinquish-var|smart-relinquish-var|setup-keys|update-catalog)/u.test(a));
+    if (name === "docker" && args[0] === "compose") {
+      let i = 1;
+      while (args[i]?.startsWith("-")) {
+        const opt = args[i++] as string;
+        if (["-f", "--file", "-p", "--project-name", "--profile", "--project-directory", "--env-file", "--parallel"].includes(opt)) i++;
+        else if (!/^--(?:file|project-name|profile|project-directory|env-file|parallel|ansi|progress)=/u.test(opt)) return false;
+      }
+      const sub = args[i];
+      return sub !== undefined && ["ps", "logs", "config", "ls", "images", "top", "version"].includes(sub) &&
+        !shortOption(args.slice(i + 1), "o") && !args.some((a) => /^--output(=|$)/u.test(a));
+    }
+    const words = args.filter((a) => !a.startsWith("-"));
+    const sub = words[0];
+    if (sub === undefined || !cli.has(sub)) return false;
+    // `gh pr view` reads, `gh pr merge` does not; `docker network ls` reads, `docker network rm` does not.
+    if (words.slice(1).some((w) => MUTATING_WORDS.test(w))) return false;
+    if (name === "gh") {
+      if (shortOption(args, "w") || args.some((a) => a === "--web" || a === "--browser")) return false;
+      const verbs: Record<string, readonly string[]> = {
+        pr: ["view", "list", "status", "diff", "checks"], issue: ["view", "list", "status"],
+        run: ["view", "list", "watch"], repo: ["view", "list"], release: ["view", "list"],
+        search: ["prs", "issues", "repos", "code", "commits"], workflow: ["view", "list"],
+      };
+      if (sub !== "status" && !verbs[sub]?.includes(words[1] ?? "")) return false;
+    }
+    if (name === "podman" && args.some((a) => /^--(?:logfile|log-file)(=|$)/u.test(a))) return false;
+    if (name === "docker" && ["network", "volume", "context", "image"].includes(sub) && !["ls", "inspect", "list"].includes(words[1] ?? "")) return false;
+    if (name === "kubectl" && sub === "config") return KUBECTL_CONFIG_READS.has(words[1] ?? "");
+    return true;
+  }
+  if (!READ_ONLY_PROGRAMS.has(name)) return false;
+  return readsDespiteArgs(name, args);
 }
 
 /**
@@ -230,6 +676,31 @@ export function expandHome(file: string): string {
   return file;
 }
 
+/** Shells whose `-c` argument is a command of its own, judged by the same fixed rules. */
+const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish"]);
+/** sudo options that take their value as the next token. */
+const SUDO_WITH_VALUE = new Set(["-u", "-g", "-p", "-C", "-D", "-h", "-r", "-t", "-T", "-U", "--user", "--group", "--prompt", "--chdir", "--host"]);
+
+/** The command `sudo`/`doas` runs, past their options; undefined when there is none (`sudo -i`). */
+function unwrapSudo(args: string[]): { name: string; args: string[]; unsafe: boolean } | undefined {
+  let i = 0;
+  while (i < args.length && (args[i] as string).startsWith("-")) {
+    const opt = args[i++] as string;
+    if (opt === "--") break;
+    if (SUDO_WITH_VALUE.has(opt)) i++;
+  }
+  return program(args.slice(i));
+}
+
+/** Commands nested in `sh -c '…'` and `eval …`, which the fixed rules check too. */
+function nestedCommands(p: { name: string; args: string[] }): string[] {
+  if (p.name === "eval") return p.args.length ? [p.args.join(" ")] : [];
+  if (!SHELLS.has(p.name)) return [];
+  const i = p.args.findIndex((a) => /^-[a-zA-Z]*c/u.test(a));
+  const script = i >= 0 ? p.args[i + 1] : undefined;
+  return script ? [script] : [];
+}
+
 /**
  * Reasons this bash command must be put to the user whatever Jev says, or [] when none apply.
  * `branch` is the current git branch, for force-pushes without an explicit refspec.
@@ -238,10 +709,15 @@ export function alwaysAskBash(command: string, cwd: string, branch?: string, ign
   const reasons: string[] = [];
   const parts = splitCommand(command);
   for (const tokens of parts) {
-    const p = program(tokens);
+    let p = program(tokens);
     if (!p) continue;
+    if (p.name === "sudo" || p.name === "doas") {
+      reasons.push("runs as root (sudo)");
+      // The command sudo runs is checked too: `sudo rm -rf /` deletes as well.
+      p = unwrapSudo(p.args);
+      if (!p) continue;
+    }
     const { name, args } = p;
-    if (name === "sudo" || name === "doas") reasons.push("runs as root (sudo)");
     if (name === "rm" || name === "rmdir" || name === "trash") {
       for (const target of args.filter((a) => !a.startsWith("-"))) {
         if (isProtectedDir(path.resolve(cwd, expandHome(target)), cwd)) {
@@ -250,19 +726,21 @@ export function alwaysAskBash(command: string, cwd: string, branch?: string, ign
         }
       }
     }
-    if (name === "git" && args.find((a) => !a.startsWith("-")) === "push") {
-      const force = args.some((a) => a === "-f" || a === "--force" || a.startsWith("--force-with-lease") || a === "--mirror" || /^\+/u.test(a));
-      const refs = args.filter((a) => !a.startsWith("-")).slice(1);
+    if (name === "git" && gitCommand(args)?.sub === "push") {
+      const pushArgs = gitCommand(args)!.args;
+      const force = pushArgs.some((a) => a === "-f" || a === "--force" || a.startsWith("--force-with-lease") || a === "--mirror" || /^\+/u.test(a));
+      const refs = pushArgs.filter((a) => !a.startsWith("-"));
       const mentionsMain = refs.some((a) => /(^|[:+/])(main|master)$/u.test(a));
       const onMain = refs.length <= 1 && (branch === "main" || branch === "master");
       if (force && (mentionsMain || onMain)) reasons.push("force-pushes main/master");
     }
+    for (const nested of nestedCommands(p)) reasons.push(...alwaysAskBash(nested, cwd, branch, ignored));
   }
   if (/\b(curl|wget)\b[^|;&]*\|\s*(sudo\s+)?(ba|z|da|k)?sh\b/u.test(command)) reasons.push("pipes a download into a shell");
   forEachPart(command, cwd, (tokens, dir) => {
     const p = program(tokens);
     if (p && SECRET_SAFE.has(p.name)) return;
-    const gitSub = p?.name === "git" ? p.args.find((a) => !a.startsWith("-")) : undefined;
+    const gitSub = p?.name === "git" ? gitCommand(p.args)?.sub : undefined;
     if (gitSub && GIT_SECRET_SAFE.has(gitSub)) return;
     const forcedAdd = gitSub === "add" && p!.args.some((a) => a === "-f" || a === "--force");
     for (const token of tokens) {
@@ -305,9 +783,11 @@ export function secretGitAdds(command: string, cwd: string): Map<string, string[
   const byDir = new Map<string, string[]>();
   forEachPart(command, cwd, (tokens, dir) => {
     const p = program(tokens);
-    if (p?.name !== "git" || p.args.find((a) => !a.startsWith("-")) !== "add") return;
-    if (p.args.some((a) => a === "-f" || a === "--force")) return;
-    for (const token of p.args) {
+    if (p?.name !== "git") return;
+    const g = gitCommand(p.args);
+    if (g?.sub !== "add") return;
+    if (g.args.some((a) => a === "-f" || a === "--force")) return;
+    for (const token of g.args) {
       if (!isCredentialPath(expandHome(token))) continue;
       byDir.set(dir, [...(byDir.get(dir) ?? []), path.resolve(dir, expandHome(token))]);
     }
@@ -365,8 +845,8 @@ function partKey(tokens: string[]): string | undefined {
   if (head === undefined || NOT_COMMANDS.has(head) || /\)$|\(\)\{?$/u.test(head)) return undefined;
   const p = program(rest);
   if (!p || SHELL_NOISE.has(p.name) || !/^[A-Za-z_][A-Za-z0-9_.+-]*$/u.test(p.name)) return undefined;
-  const positional = p.args.filter((a) => !a.startsWith("-"));
-  const first = positional[0];
+  const positional = (p.name === "git" ? (gitCommand(p.args)?.args ?? []) : p.args).filter((a) => !a.startsWith("-"));
+  const first = p.name === "git" ? gitCommand(p.args)?.sub : positional[0];
   // Project scripts (`bin/homelab status`) usually take subcommands too.
   const invoked = rest.find((t) => path.basename(t) === p.name) ?? "";
   const takesSubcommand = SUBCOMMAND_CLIS.has(p.name) || invoked.includes("/");
@@ -385,13 +865,16 @@ function partKey(tokens: string[]): string | undefined {
 export function bashKeys(command: string, extraReadOnly: readonly string[] = []): string[] {
   const parts = splitCommand(withoutSubstitutions(withoutHeredocBodies(command)));
   const keys = new Set<string>();
+  let unparsed = false;
   for (const tokens of parts) {
     if (isReadOnlyPart(tokens, extraReadOnly)) continue;
     const key = partKey(tokens);
     if (key) keys.add(key);
+    else if (!NOT_COMMANDS.has(tokens[0] ?? "")) unparsed = true;
   }
-  // Every command only reads, and a substitution or redirect is what kept the call from running
-  // unasked: one grant covers such calls.
+  // An opaque command is not a read: a grant for redirected reads must not cover env -S…
+  // or an executable hidden in an expansion. Such grants cover only the exact opaque call.
+  if (unparsed) keys.add(`unparsed shell: ${command.trim()}`);
   return keys.size ? [...keys].sort() : [READS_KEY];
 }
 

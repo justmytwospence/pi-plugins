@@ -18,9 +18,19 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type { Component, EditorTheme, TUI } from "@earendil-works/pi-tui";
+import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION } from "./activity.js";
 import { FULL_SCREEN } from "./app/frame.js";
-import { type LaneAction, LanesPage } from "./app/lanes-page.js";
+import { type LaneAction, type LaneInput, type LaneInputHooks, LanesPage } from "./app/lanes-page.js";
 import { type OptionRow, OptionsPage, type TextArea } from "./app/options-page.js";
+import {
+  EDITOR_MODE,
+  EDITOR_SURFACE,
+  INPUT_CONTEXT,
+  markEmbedded,
+  readEditorMode,
+  readInputContext,
+  requestEditorFactory,
+} from "./editor-contract.js";
 import { formatImplementationPrompt } from "./handoff.js";
 import { holdBlocked, holdWorking } from "./herdr-blocked.js";
 import {
@@ -57,6 +67,7 @@ import {
   writeMergedRequest,
 } from "./planner/prompt.js";
 import { inheritProviders, type PlannerSessionFactory } from "./planner/session.js";
+import { PlannerActivity } from "./planner-activity.js";
 import { buildPlannerTranscript } from "./planners.js";
 import { extensionsForProvider, resolveProviderExtensions } from "./provider-extensions.js";
 import {
@@ -164,13 +175,26 @@ interface Draft {
 
 type ThinkingLevel = NonNullable<ModelSpec["thinkingLevel"]>;
 
-export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = {}) {
+/**
+ * Registers everything synchronously, then loads the settings and registers the toggle shortcut
+ * (its key comes from the settings). Pi awaits the factory, so the shortcut exists before Pi binds
+ * the extensions' shortcuts; the returned promise resolves once that is done.
+ */
+export default async function plan(pi: ExtensionAPI, dependencies: PlanDependencies = {}): Promise<void> {
   let settings: PlanModeSettings = { thinkingLevel: "inherit" };
   let run: PlanRun | undefined;
   let app: { close(): void; render(): void } | undefined;
+  /**
+   * Planners a restart cut off (or that had failed) when the run was restored: nothing resumes them
+   * by itself; the planning screen offers to, and the status line says so.
+   */
+  const pendingResume = new Map<string, TurnState>();
   let releaseWorking: (() => void) | undefined;
   let releaseBlocked: (() => void) | undefined;
   let hostCtx: ExtensionContext | undefined;
+  let branchEpoch = 0;
+  let sessionReady: Promise<void> = Promise.resolve();
+  let runtimeActive = true;
   /** Where you dragged the divider above M (a share of the space), for the rest of this process. */
   let mergerShare: number | undefined;
   /** Plan versions and question sets you have been told about (or saw on screen). */
@@ -205,7 +229,9 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
       createdAt: current.createdAt,
       task: current.task,
       state,
-      planners: current.agents.map((agent) => storePlanner(agent, current.delivered.get(agent.id))),
+      planners: current.agents.map((agent) =>
+        storePlanner(agent, current.delivered.get(agent.id), pendingResume.get(agent.id)),
+      ),
       ...(current.merged ? { merged: current.merged } : {}),
     };
     pi.appendEntry(RUN_ENTRY, stored);
@@ -219,12 +245,15 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
     // it and resume the turns it cut off.
     let changed = deliver();
     for (const agent of run.agents) {
-      const signature = savedSignature(agent);
+      // Once a cut-off planner works again (you resumed it, or said something), it is no longer cut off.
+      if (agent.working && pendingResume.delete(agent.id)) changed = true;
+      const signature = savedSignature(agent, pendingResume.get(agent.id));
       if (saved.get(agent.id) === signature) continue;
       saved.set(agent.id, signature);
       changed = true;
     }
     if (changed) persistRun();
+    activity.refresh();
     const working = run.agents.some((agent) => agent.working);
     if (working && !releaseWorking) releaseWorking = holdWorking(pi.events, "Planning");
     if (!working && releaseWorking) {
@@ -306,7 +335,19 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
     else {
       const parts = run.agents.map(
         (agent) =>
-          `${agent.id} ${agent.status === "asking" ? "asking you" : agent.working ? "working" : agent.plan ? "ready" : agent.status === "failed" ? "failed" : "waiting"}`,
+          `${agent.id} ${
+            agent.status === "asking"
+              ? "asking you"
+              : agent.working
+                ? "working"
+                : pendingResume.has(agent.id)
+                  ? "cut off (resume in /plan)"
+                  : agent.plan
+                    ? "ready"
+                    : agent.status === "failed"
+                      ? "failed"
+                      : "waiting"
+          }`,
       );
       ctx.ui.setStatus(STATUS_KEY, `plan: ${parts.join(" · ")} (/plan)`);
     }
@@ -327,7 +368,7 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
     }
   };
 
-  /** Plan M from your main agent  /** Plan M from your main agent: recorded in the run, implemented or exported from /plan. */
+  /** Plan M from your main agent: recorded in the run, implemented or exported from /plan. */
   const submitMerged = (plan: string, ctx: ExtensionContext): MergedPlan | undefined => {
     if (!run) return undefined;
     const model = ctx.model;
@@ -354,8 +395,10 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
     run = undefined;
     saved.clear();
     notifiedPlans.clear();
+    pendingResume.clear();
     setMainToolsActive(pi, false);
     updateStatus();
+    activity.refresh();
   };
 
   const restoreRun = (ctx: ExtensionContext) => {
@@ -363,12 +406,14 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
     const latest = [...entries].reverse().find((entry) => entry.type === "custom" && entry.customType === RUN_ENTRY)
       ?.data as StoredRun | undefined;
     if (latest?.state !== "active" || !Array.isArray(latest.planners)) return;
+    const epoch = branchEpoch;
     const agents = latest.planners.flatMap((stored) => {
       const spec = parseModelSpec(stored.spec);
       if (!spec) return [];
       return [
         new PlannerAgent({
           id: stored.id,
+          restored: true,
           spec,
           name: stored.name,
           cwd: ctx.cwd,
@@ -378,7 +423,9 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
           seed: [],
           ...(stored.sessionFile ? { sessionFile: stored.sessionFile } : {}),
           ...(stored.plan ? { plan: stored.plan, revision: stored.revision ?? 1 } : {}),
-          onChange: onAgentChange,
+          onChange: () => {
+            if (epoch === branchEpoch) onAgentChange();
+          },
           ...(dependencies.createSession ? { createSession: dependencies.createSession } : {}),
         }),
       ];
@@ -400,20 +447,36 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
       if (agent.plan) notifiedPlans.set(agent.id, agent.revision);
     }
     setMainToolsActive(pi, true);
-    // Runs saved before plans were delivered to your main conversation deliver them now, once.
-    if (deliver()) persistRun();
-    // Turns a reload or restart cut off (or that had failed) carry on by themselves.
+    // Turns a reload or restart cut off (or that had failed) do not carry on by themselves: a
+    // restored session must not start model calls on its own. They are marked, and /plan offers to
+    // resume each (the status line says which).
     for (const agent of run.agents) {
       const turn = latest.planners.find((candidate) => candidate.id === agent.id)?.turn;
       if (!turn || !agent.sessionFile) continue;
-      void agent.say(
-        resumeMessage(turn),
-        ctx,
+      pendingResume.set(agent.id, turn);
+      agent.note(
         turn === "interrupted"
-          ? "continue (resumed: the session restarted mid-turn)"
-          : "try again (resumed after an error)",
+          ? "Cut off: the session restarted mid-turn. Resume it from the actions, or say something."
+          : "Failed last time. Try again from the actions, or say something.",
+        "warning",
       );
     }
+    // Record pending turns before delivery can save this run.
+    if (deliver()) persistRun();
+  };
+
+  /** Resume a planner a restart cut off (or that had failed): the one thing a restored run starts on request. */
+  const resumePlanner = (agent: PlannerAgent, ctx: ExtensionContext) => {
+    const turn = pendingResume.get(agent.id);
+    if (!turn) return;
+    pendingResume.delete(agent.id);
+    void agent.say(
+      resumeMessage(turn),
+      ctx,
+      turn === "interrupted"
+        ? "continue (resumed: the session restarted mid-turn)"
+        : "try again (resumed after an error)",
+    );
   };
 
   // --- Events ------------------------------------------------------------------------------------
@@ -455,61 +518,134 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
     submitMerged,
   });
 
-  pi.on("session_start", async (_event, ctx) => {
-    hostCtx = ctx;
+  // The planners and their scouts as a source for the suite's activity views (pi-bg's /tasks,
+  // pi-subagents' list under the prompt).
+  const safely = (fn: () => void) => {
+    try {
+      fn();
+    } catch {
+      // The runtime may be stale (after session_shutdown every pi.* call throws).
+    }
+  };
+  const activity = new PlannerActivity({
+    agents: () => run?.agents ?? [],
+    runId: () => run?.id,
+    task: () => run?.task ?? "",
+    open: async (ui) => {
+      const ctx = hostCtx;
+      const epoch = branchEpoch;
+      if (ctx?.mode !== "tui") return;
+      await loadSettings();
+      if (epoch !== branchEpoch || hostCtx !== ctx) return;
+      // The host's context with the caller's UI: the screen opens where the list is.
+      await openApp({ ...ctx, ui: ui as ExtensionContext["ui"] } as ExtensionCommandContext, "");
+    },
+    stop: (agent) => agent.stop(),
+    changed: () => safely(() => pi.events.emit(ACTIVITY_CHANGED, { id: activity.section.id })),
+  });
+  const offerActivity = () => {
+    if (activity.available && hostCtx?.mode === "tui")
+      safely(() => pi.events.emit(ACTIVITY_SECTION, { section: activity.section }));
+  };
+  pi.events.on(ACTIVITY_HOST, () => offerActivity());
+  pi.on("input", (event) => {
+    if ((event as { source?: string }).source === "interactive") activity.seen();
+  });
+
+  /** Stop old work without saving into the newly selected branch. */
+  const clearBranch = () => {
+    branchEpoch++;
+    const hadUI = hostCtx?.mode === "tui";
+    hostCtx = undefined;
+    activity.dispose();
+    app?.close();
     for (const agent of run?.agents ?? []) agent.dispose();
     run = undefined;
     saved.clear();
     notifiedPlans.clear();
-    setMainToolsActive(pi, false);
-    mainAgent.reset(ctx.sessionManager.getBranch());
-    await loadSettings();
-    await applyPendingRuntime(ctx);
-    restoreRun(ctx);
-    updateStatus();
-  });
-
-  pi.on("session_shutdown", () => {
-    for (const agent of run?.agents ?? []) agent.dispose();
+    pendingResume.clear();
     releaseWorking?.();
     releaseWorking = undefined;
     releaseBlocked?.();
     releaseBlocked = undefined;
+    if (hadUI) safely(() => pi.events.emit(ACTIVITY_GONE, { id: activity.section.id }));
+  };
+
+  const rebuildBranch = async (ctx: ExtensionContext) => {
+    clearBranch();
+    hostCtx = ctx;
+    const epoch = branchEpoch;
+    setMainToolsActive(pi, false);
+    mainAgent.reset(ctx.sessionManager.getBranch());
+    await loadSettings();
+    if (epoch !== branchEpoch) return;
+    await applyPendingRuntime(ctx);
+    if (epoch !== branchEpoch) return;
+    restoreRun(ctx);
+    updateStatus();
+    activity.reset();
+    offerActivity();
+  };
+  // Pi emits session_start for startup, reload, new/resume (switch) and fork.
+  const initializeSession = (ctx: ExtensionContext) => {
+    runtimeActive = true;
+    sessionReady = rebuildBranch(ctx);
+    return sessionReady;
+  };
+  pi.on("session_start", (_event, ctx) => initializeSession(ctx));
+  pi.on("session_tree", (_event, ctx) => initializeSession(ctx));
+  pi.on("session_shutdown", () => {
+    runtimeActive = false;
+    clearBranch();
   });
 
   pi.registerCommand("plan", {
     description: "Plan with one or two models in a full-screen planner, then implement",
     handler: async (args, ctx) => {
+      const epoch = branchEpoch;
+      await sessionReady;
+      if (!runtimeActive || epoch !== branchEpoch) return;
       hostCtx = ctx;
       if (ctx.mode !== "tui") {
         ctx.ui.notify("/plan needs the interactive terminal UI.", "warning");
         return;
       }
       await loadSettings();
+      if (!runtimeActive || epoch !== branchEpoch || hostCtx !== ctx) return;
       await openApp(ctx, args.trim());
     },
   });
 
-  // The shortcut opens /plan (a command, so the screen can start a fresh session later).
-  void (async () => {
+  // The shortcut opens /plan (a command, so the screen can start a fresh session later). Its key
+  // is in the settings, so the factory waits for them: Pi binds extension shortcuts once, after
+  // every factory has returned, and a shortcut registered later would never fire.
+  const initialized = (async () => {
     try {
       await loadSettings();
     } catch {
       // Defaults.
     }
-    const shortcut = configuredPlanModeToggleShortcut(settings);
-    if (!shortcut) return;
+  })();
+  await initialized;
+  const shortcut = configuredPlanModeToggleShortcut(settings);
+  if (shortcut) {
     pi.registerShortcut(shortcut, {
       description: "Open the planner (/plan)",
-      handler: () => {
+      handler: async () => {
+        const epoch = branchEpoch;
+        await initialized;
+        await sessionReady;
+        if (!runtimeActive || epoch !== branchEpoch) return;
         pi.sendUserMessage("/plan", { expandPromptTemplates: true });
       },
     });
-  })();
+  }
 
   // --- The app -----------------------------------------------------------------------------------
 
   async function openApp(ctx: ExtensionCommandContext, task: string) {
+    if (app) return;
+    const epoch = branchEpoch;
     await ctx.ui.custom<void>((tui, theme, keybindings, done) => {
       const rows = () => Math.max(12, (tui as unknown as { terminal?: { rows?: number } }).terminal?.rows ?? 40);
       const render = () => tui.requestRender();
@@ -518,8 +654,12 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
         if (run?.agents.some((agent) => agent.working)) render();
       }, 250);
       ticker.unref?.();
+      let closed = false;
       const close = () => {
+        if (closed) return;
+        closed = true;
         clearInterval(ticker);
+        (page as { dispose?(): void } | undefined)?.dispose?.();
         app = undefined;
         updateStatus();
         done();
@@ -528,8 +668,8 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
       updateStatus();
 
       /**
-       * The task editor: the one your main editor uses (an extension's, such as pi-vim's), else pi's
-       * own. It wraps and scrolls inside its borders.
+       * The task editor: an optional embedded provider, else Pi's native editor.
+       * It wraps and scrolls inside its borders.
        */
       const createTextArea = (): TextArea => {
         const editorTheme: EditorTheme = {
@@ -542,18 +682,77 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
             noMatch: (text) => theme.fg("dim", text),
           },
         };
-        const factory = ctx.ui.getEditorComponent?.();
-        const editor = factory
-          ? factory(tui, editorTheme, keybindings)
-          : new CustomEditor(tui, editorTheme, keybindings, { paddingX: 1 });
-        editor.setPaddingX?.(1);
-        // pi-vim's :q would quit pi; here it leaves the task.
-        const vim = editor as { setQuitFn?(fn: () => void): void; onEscape?: () => void };
-        vim.setQuitFn?.(() => vim.onEscape?.());
+        // The suite's editor (pi-vim's embedded surface) when a provider is loaded: Enter or :w
+        // submits, :q or Escape in Normal mode leaves the box.
+        const suite = requestEditorFactory(pi.events);
+        if (suite) {
+          try {
+            const editor = suite.factory({
+              surface: "embedded",
+              tui,
+              theme: editorTheme,
+              keybindings,
+              onSubmit: (text) => (editor as unknown as TextArea).onSubmit?.(text),
+              onCancel: () => (editor as unknown as TextArea).onEscape?.(),
+              notify: (message, type) => ctx.ui.notify(message, type),
+              paddingX: 1,
+            });
+            return editor as unknown as TextArea;
+          } catch {
+            // A provider's bug must not take the task box away: pi's editor follows.
+          }
+        }
+        // A main-editor factory may dispatch commands or quit Pi; never embed that surface.
+        const editor = markEmbedded(new CustomEditor(tui, editorTheme, keybindings, { paddingX: 1 }));
         return editor as unknown as TextArea;
       };
 
+      /** A lane's input: the suite's editor when a provider is loaded (Enter or :w sends), else pi's one-line input. */
+      const createLaneInput = (id: string, hooks: LaneInputHooks): LaneInput | undefined => {
+        const suite = requestEditorFactory(pi.events);
+        if (!suite) return undefined;
+        const editor = suite.factory({
+          surface: "embedded",
+          tui,
+          theme: {
+            borderColor: (text: string) => theme.fg("borderMuted", text),
+            selectList: {
+              selectedPrefix: (text: string) => theme.fg("accent", text),
+              selectedText: (text: string) => theme.fg("accent", text),
+              description: (text: string) => theme.fg("muted", text),
+              scrollInfo: (text: string) => theme.fg("dim", text),
+              noMatch: (text: string) => theme.fg("dim", text),
+            },
+          } satisfies EditorTheme,
+          keybindings,
+          onSubmit: (text) => hooks.submit(text),
+          onCancel: () => hooks.cancel(),
+          scrollViewport: (direction) => hooks.scroll(direction),
+          notify: (message, type) => ctx.ui.notify(`${id}: ${message}`, type),
+          initialMode: "insert",
+        });
+        return {
+          get focused() {
+            return editor.focused;
+          },
+          set focused(value: boolean) {
+            editor.focused = value;
+          },
+          getValue: () => editor.getText(),
+          setValue: (text) => editor.setText(text),
+          handleInput: (data) => editor.handleInput(data),
+          render: (width) => editor.render(width),
+          ownsEnter: true,
+          [EDITOR_MODE]: () => readEditorMode(editor),
+          dispose: () => editor.dispose(),
+        };
+      };
       const show = (next: Component) => {
+        if (closed || epoch !== branchEpoch) {
+          (next as { dispose?(): void }).dispose?.();
+          return;
+        }
+        (page as { dispose?(): void } | undefined)?.dispose?.();
         page = next;
         render();
       };
@@ -562,6 +761,7 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
         const lanesPage: LanesPage = new LanesPage(theme, {
           title: "Plan",
           task: () => run?.task ?? "",
+          createInput: createLaneInput,
           agents: () => run?.agents ?? [],
           // With two planners, M is your main agent: you can talk to it while they work.
           merger: () =>
@@ -572,9 +772,14 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
             const planner = run?.agents.find((candidate) => candidate.id === agent.id);
             if (!planner) return;
             // A slash command acts on the planner's session; `//text` sends "/text" as a message.
-            void runLaneCommand(text, planner, laneCommandHost).then((handled) => {
-              if (!handled) void planner.say(text.startsWith("//") ? text.slice(1) : text, ctx);
-            });
+            void runLaneCommand(text, planner, laneCommandHost)
+              .then((handled) => {
+                if (!handled && !closed && epoch === branchEpoch)
+                  return planner.say(text.startsWith("//") ? text.slice(1) : text, ctx);
+              })
+              .catch((error: unknown) => {
+                if (!closed && epoch === branchEpoch) planner.note(errorText(error), "error");
+              });
           },
           mergerShare: {
             get: () => mergerShare,
@@ -596,7 +801,7 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
           },
           hide: close,
           stopAll: () => {
-            for (const agent of run?.agents ?? []) void agent.stop();
+            for (const agent of run?.agents ?? []) void agent.stop().catch(() => undefined);
             if (mainAgent.working) ctx.abort();
           },
           rowsAvailable: rows,
@@ -645,6 +850,19 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
             : "Ask M to merge both plans and what you have discussed into plan M, which you can then implement or export.",
           toMerger: writeMergedRequest(merged !== undefined),
         };
+        // A planner a restart cut off (or that had failed): resume it, on request only.
+        for (const agent of agents) {
+          const turn = pendingResume.get(agent.id);
+          if (!turn || agent.working) continue;
+          actions.push({
+            id: `resume:${agent.id}`,
+            label: `Resume ${agent.id}`,
+            description:
+              turn === "interrupted"
+                ? `${agent.id}'s turn was cut off when the session restarted. Ask it to carry on from where it left off.`
+                : `${agent.id}'s last turn failed. Ask it to try again.`,
+          });
+        }
         // A planner its provider turned away for its credentials: log in again, here, and it retries.
         for (const agent of agents) {
           if (agent.status !== "failed" || !isAuthError(agent.error)) continue;
@@ -701,6 +919,7 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
         const back = lanes();
         try {
           await (dependencies.login ?? loginWithDialog)(providerId, (dialog) => show(dialog));
+          if (closed || epoch !== branchEpoch) return back.dispose();
           show(back);
           if (agent.status !== "failed") {
             agent.note(`Logged in to ${providerId}.`);
@@ -709,6 +928,7 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
           ctx.ui.notify(`Logged in to ${providerId}. Planner ${agent.id} is trying again.`, "info");
           void agent.say(resumeMessage("failed"), ctx, "try again (after logging in)");
         } catch (error: unknown) {
+          if (closed || epoch !== branchEpoch) return back.dispose();
           show(back);
           const message = errorText(error);
           if (message !== "Login cancelled") ctx.ui.notify(`Login to ${providerId} failed: ${message}`, "error");
@@ -762,6 +982,11 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
         if (kind === "login") {
           const agent = run?.agents.find((candidate) => candidate.id === sourceId);
           if (agent) void loginAndRetry(agent);
+          return;
+        }
+        if (kind === "resume") {
+          const agent = run?.agents.find((candidate) => candidate.id === sourceId);
+          if (agent) resumePlanner(agent, ctx);
           return;
         }
         if (kind === "add") return show(settingsPage("add"));
@@ -1191,6 +1416,8 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
           failuresReported: new Set(),
           launch: { roots: current.roots, others: current.others, seed },
         };
+        activity.reset();
+        offerActivity();
         setMainToolsActive(pi, true);
         const specs = draft.planners.filter((spec): spec is ModelSpec => spec !== undefined);
         const lanesPage = lanes();
@@ -1216,6 +1443,7 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
             scout?.provider,
           ),
         });
+        const epoch = branchEpoch;
         const agent = new PlannerAgent({
           id,
           spec,
@@ -1225,7 +1453,9 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
           timeoutMs: draft.timeLimit * 60_000,
           sessionDir: plannerSessionDir(),
           seed: run.launch.seed,
-          onChange: onAgentChange,
+          onChange: () => {
+            if (epoch === branchEpoch) onAgentChange();
+          },
           ...(dependencies.createSession ? { createSession: dependencies.createSession } : {}),
         });
         run.agents.push(agent);
@@ -1262,13 +1492,28 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
 
       // Open where you left off: the plans, or a new plan's settings.
       page = run ? lanes() : settingsPage("new");
-      const component: Component = {
-        render: (width) => page.render(width),
-        invalidate: () => page.invalidate?.(),
-        handleInput: (data) => page.handleInput?.(data),
+      const component: Component & {
+        dispose(): void;
+        [EDITOR_SURFACE]: string;
+        [INPUT_CONTEXT](): string;
+        [EDITOR_MODE](): unknown;
+      } = {
+        render: (width) => (!closed && epoch === branchEpoch ? page.render(width) : []),
+        invalidate: () => {
+          if (!closed && epoch === branchEpoch) page.invalidate?.();
+        },
+        handleInput: (data) => {
+          if (!closed && epoch === branchEpoch) page.handleInput?.(data);
+        },
+        dispose: close,
+        [EDITOR_SURFACE]: "embedded",
+        [INPUT_CONTEXT]: () => readInputContext(page) ?? "list",
+        [EDITOR_MODE]: () => readEditorMode(page),
       };
-      (component as { handleMouse?: unknown }).handleMouse = (event: unknown) =>
-        (page as { handleMouse?(event: unknown): unknown }).handleMouse?.(event);
+      (component as { handleMouse?: unknown }).handleMouse = (event: unknown) => {
+        if (!closed && epoch === branchEpoch)
+          return (page as { handleMouse?(event: unknown): unknown }).handleMouse?.(event);
+      };
       return component;
     }, FULL_SCREEN as never);
   }
@@ -1318,10 +1563,13 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
   }
 
   async function applyRuntime(ctx: ExtensionContext, target: ModelSpec) {
+    const epoch = branchEpoch;
     const current = ctx.model;
     if (!current || current.provider !== target.provider || current.id !== target.modelId) {
       const model = ctx.modelRegistry.find(target.provider, target.modelId);
-      if (!model || !(await pi.setModel(model))) {
+      const switched = model && (await pi.setModel(model));
+      if (epoch !== branchEpoch || !runtimeActive) return;
+      if (!switched) {
         ctx.ui.notify(
           `Could not switch to ${formatModelSpec(target)}; implementing with the current model.`,
           "warning",
@@ -1372,8 +1620,8 @@ function turnState(agent: PlannerAgent): TurnState | undefined {
   return agent.status === "failed" ? "failed" : undefined;
 }
 
-function savedSignature(agent: PlannerAgent) {
-  return `${agent.revision}|${agent.sessionFile ?? ""}|${turnState(agent) ?? ""}|${agent.label}`;
+function savedSignature(agent: PlannerAgent, pending?: TurnState) {
+  return `${agent.revision}|${agent.sessionFile ?? ""}|${turnState(agent) ?? pending ?? ""}|${agent.label}`;
 }
 
 /** A plan you can implement or export: a planner's, or M, the one your main agent merged. */
@@ -1396,8 +1644,9 @@ function otherPlannerLine(agent: PlannerAgent) {
   return `Planner ${agent.id} has no plan yet.`;
 }
 
-function storePlanner(agent: PlannerAgent, delivered: Delivered | undefined): StoredPlanner {
-  const turn = turnState(agent);
+/** `pending`: a cut-off turn not resumed yet, kept so a later restore still offers to resume it. */
+function storePlanner(agent: PlannerAgent, delivered: Delivered | undefined, pending?: TurnState): StoredPlanner {
+  const turn = turnState(agent) ?? pending;
   return {
     id: agent.id,
     spec: agent.label,

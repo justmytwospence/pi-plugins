@@ -6,6 +6,8 @@ import path from "node:path";
  * Shared `~/.config/agents/<name>.json`, then `~/.pi/agent/<name>.json`, then the project's
  * `.agents/<name>.json` and `.pi/<name>.json`, each on top of the last (objects merge, other
  * values replace). Unreadable or invalid files are ignored, so a typo never breaks the session.
+ * A value of the wrong type (a string where the default is a number, a scalar for an object, a
+ * mixed array) is ignored too, so a malformed field keeps the lower-precedence value.
  */
 export function loadConfig<T extends Record<string, unknown>>(name: string, defaults: T, cwd: string): T {
   const files = [
@@ -40,7 +42,10 @@ function merge(base: Record<string, unknown>, over: Record<string, unknown>): Re
   const out: Record<string, unknown> = { ...base };
   for (const [key, value] of Object.entries(over)) {
     const current = out[key];
-    out[key] = isRecord(current) && isRecord(value) ? merge(current, value) : value;
+    if (isRecord(current)) { if (isRecord(value)) out[key] = merge(current, value); }
+    else if (Array.isArray(current)) {
+      if (Array.isArray(value) && (!current.length || value.every(item => typeof item === typeof current[0]))) out[key] = value;
+    } else if (current === undefined || (typeof value === typeof current && (typeof value !== "number" || Number.isFinite(value)))) out[key] = value;
   }
   return out;
 }

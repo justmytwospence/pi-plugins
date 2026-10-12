@@ -21,6 +21,9 @@ export default defineConfig({
           { label: "Install & select", slug: "guides/install" },
           { label: "Pin, update & rollback", slug: "guides/releases" },
           { label: "Requirements & costs", slug: "guides/requirements" },
+          { label: "Keyboard & focus", slug: "guides/keyboard" },
+          { label: "Standalone & compatibility", slug: "guides/standalone" },
+          { label: "External packages", slug: "guides/external" },
           { label: "Troubleshooting & conflicts", slug: "guides/troubleshooting" },
         ] },
         { label: "Workflow recipes", items: [

@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-marimo",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Pi follows your live marimo notebook: what is running in the footer, the notebook's current state in context.",
   "type": "module",
   "license": "MIT",
@@ -24,16 +24,24 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*"
+    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.87.1",
+    "@earendil-works/pi-coding-agent": "1.1.0",
     "@types/node": "^22.0.0",
     "typescript": "^7.0.0",
     "vitest": "^5.0.0"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/justmytwospence/pi-marimo"
+    "url": "https://github.com/justmytwospence/pi-plugins",
+    "directory": "packages/pi-marimo"
+  },
+  "homepage": "https://pi-plugins.vercel.app/plugins/pi-marimo/",
+  "bugs": {
+    "url": "https://github.com/justmytwospence/pi-plugins/issues"
   }
 }

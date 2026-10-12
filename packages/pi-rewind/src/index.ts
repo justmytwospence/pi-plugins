@@ -11,7 +11,10 @@
  *   gc.pruneExpire (2 weeks by default).
  * - On /tree or /fork to a checkpointed entry, offers to restore files.
  *   Only differing files are rewritten; files created since are deleted.
- * - /rewind-undo restores the state saved just before the last restore.
+ *   Files that could not be deleted or written are reported by name.
+ * - /rewind-undo restores the state saved just before the last restore. The
+ *   undo slot belongs to the session and repository it was made in; after a
+ *   failed undo it is kept, so the undo can be retried.
  *
  * Only active in git repos and in interactive sessions (set
  * PI_REWIND_ALWAYS=1 to snapshot in non-interactive modes too).
@@ -19,7 +22,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
-import { copyFileSync, existsSync, mkdtempSync, rmdirSync, rmSync, unlinkSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, realpathSync, rmdirSync, rmSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -52,11 +55,14 @@ function git(cwd: string, args: string[], opts: { env?: Record<string, string>; 
 		child.stderr.on("data", (d) => (stderr += d));
 		child.on("error", (e) => done({ code: -1, stdout, stderr: String(e) }));
 		child.on("close", (code) => done({ code: code ?? -1, stdout, stderr }));
+		child.stdin.on("error", () => {
+			// Git may exit before reading all of stdin; the close event still reports the outcome.
+		});
 		child.stdin.end(opts.input ?? "");
 	});
 }
 
-async function repoRoot(cwd: string): Promise<string | undefined> {
+export async function repoRoot(cwd: string): Promise<string | undefined> {
 	const r = await git(cwd, ["rev-parse", "--show-toplevel"]);
 	return r.code === 0 ? r.stdout.trim() : undefined;
 }
@@ -71,7 +77,7 @@ async function withTempIndex<T>(fn: (index: string) => Promise<T>): Promise<T> {
 }
 
 /** Hash the working tree (respecting .gitignore) into a tree object. */
-async function snapshot(root: string): Promise<string | undefined> {
+export async function snapshot(root: string): Promise<string | undefined> {
 	return withTempIndex(async (index) => {
 		// Seed from the real index so unchanged files are not rehashed.
 		const p = await git(root, ["rev-parse", "--git-path", "index"]);
@@ -86,12 +92,17 @@ async function snapshot(root: string): Promise<string | undefined> {
 	});
 }
 
-interface Diff {
+/** Whether a tree object is still in the repository (unreferenced trees get garbage-collected). */
+export async function treeExists(root: string, tree: string): Promise<boolean> {
+	return (await git(root, ["cat-file", "-e", `${tree}^{tree}`])).code === 0;
+}
+
+export interface Diff {
 	remove: string[]; // present now, absent in target
 	write: string[]; // absent or different now
 }
 
-async function diffTrees(root: string, target: string, current: string): Promise<Diff | undefined> {
+export async function diffTrees(root: string, target: string, current: string): Promise<Diff | undefined> {
 	const r = await git(root, ["diff-tree", "-r", "-z", "--no-renames", "--name-status", target, current]);
 	if (r.code !== 0) return undefined;
 	const parts = r.stdout.split("\0").filter((s) => s.length > 0);
@@ -105,46 +116,142 @@ async function diffTrees(root: string, target: string, current: string): Promise
 	return diff;
 }
 
-async function applyTree(root: string, target: string, diff: Diff): Promise<string | undefined> {
-	for (const rel of diff.remove) {
-		const abs = join(root, rel);
-		try {
-			unlinkSync(abs);
-		} catch {
-			continue;
-		}
-		// Prune directories left empty.
-		for (let dir = dirname(abs); dir.startsWith(root + "/") && dir !== root; dir = dirname(dir)) {
-			try {
-				rmdirSync(dir);
-			} catch {
-				break;
-			}
-		}
+/** What applying a tree did: every requested file is either done or named among the failures. */
+export interface ApplyResult {
+	removed: string[];
+	failedRemoves: Array<{ path: string; error: string }>;
+	/** Files actually written, not just requested. */
+	written: string[];
+	failedWrites: Array<{ path: string; error: string }>;
+	/** An operational failure, for example creating or cleaning up the temporary index. */
+	error?: string;
+}
+
+export function applySucceeded(r: ApplyResult): boolean {
+	return r.failedRemoves.length === 0 && r.failedWrites.length === 0 && r.error === undefined;
+}
+
+/** Report partial outcomes and every failed filename, without claiming unattempted writes succeeded. */
+export function describeFailure(r: ApplyResult): string | undefined {
+	if (applySucceeded(r)) return undefined;
+	const parts: string[] = [];
+	for (const [kind, done, failures] of [
+		["deletions", r.removed, r.failedRemoves],
+		["writes", r.written, r.failedWrites],
+	] as const) {
+		if (!failures.length) continue;
+		const names = failures.map((f) => `${/[\r\n\t\x1b]/u.test(f.path) ? JSON.stringify(f.path) : f.path}: ${f.error}`);
+		parts.push(`${failures.length} of ${failures.length + done.length} ${kind} failed (${names.join("; ")})`);
 	}
-	if (diff.write.length === 0) return undefined;
-	return withTempIndex(async (index) => {
-		const env = { GIT_INDEX_FILE: index };
-		const rt = await git(root, ["read-tree", target], { env });
-		if (rt.code !== 0) return rt.stderr.trim() || "git read-tree failed";
-		const co = await git(root, ["checkout-index", "-f", "-z", "--stdin"], { env, input: diff.write.join("\0") });
-		return co.code === 0 ? undefined : co.stderr.trim() || "git checkout-index failed";
-	});
+	if (r.error !== undefined) parts.push(`operation failed: ${r.error}`);
+	return parts.join("; ");
+}
+
+function errorText(e: unknown): string {
+	if (e && typeof e === "object" && "code" in e && typeof (e as { code: unknown }).code === "string") return (e as { code: string }).code;
+	return e instanceof Error ? e.message : String(e);
+}
+
+/** Make the working tree match `target` for the files in `diff`, reporting every file it could not. */
+export async function applyTree(root: string, target: string, diff: Diff): Promise<ApplyResult> {
+	const result: ApplyResult = { removed: [], failedRemoves: [], written: [], failedWrites: [] };
+	const failRemaining = (error: string) => {
+		for (const rel of diff.remove) {
+			if (!result.removed.includes(rel) && !result.failedRemoves.some((f) => f.path === rel)) result.failedRemoves.push({ path: rel, error });
+		}
+		for (const rel of diff.write) {
+			if (!result.written.includes(rel) && !result.failedWrites.some((f) => f.path === rel)) result.failedWrites.push({ path: rel, error });
+		}
+	};
+	if (diff.remove.length + diff.write.length === 0) return result;
+	try {
+		await withTempIndex(async (index) => {
+			const env = { GIT_INDEX_FILE: index };
+			// Validate/read the target before deleting anything, including deletion-only restores.
+			const rt = await git(root, ["read-tree", target], { env });
+			if (rt.code !== 0) {
+				failRemaining(rt.stderr.trim() || "git read-tree failed");
+				return;
+			}
+			for (const rel of diff.remove) {
+				const abs = join(root, rel);
+				try {
+					unlinkSync(abs);
+				} catch (e) {
+					// Already gone counts as removed; anything else is reported.
+					if ((e as { code?: string })?.code === "ENOENT") result.removed.push(rel);
+					else result.failedRemoves.push({ path: rel, error: errorText(e) });
+					continue;
+				}
+				result.removed.push(rel);
+				// Prune directories left empty.
+				for (let dir = dirname(abs); dir.startsWith(root + "/") && dir !== root; dir = dirname(dir)) {
+					try {
+						rmdirSync(dir);
+					} catch {
+						break;
+					}
+				}
+			}
+			// Git can partially check out a batch before returning an error. One path per
+			// invocation makes success/failure exact, including names containing newlines.
+			for (const rel of diff.write) {
+				const co = await git(root, ["checkout-index", "-f", "-z", "--stdin"], { env, input: `${rel}\0` });
+				if (co.code === 0) result.written.push(rel);
+				else result.failedWrites.push({ path: rel, error: co.stderr.trim() || "git checkout-index failed" });
+			}
+		});
+	} catch (e) {
+		result.error = errorText(e);
+		failRemaining(result.error);
+	}
+	return result;
+}
+
+/** Whether two paths name the same directory, through symlinks (`/var` vs `/private/var` on macOS). */
+function sameDir(a: string | undefined, b: string): boolean {
+	if (!a) return false;
+	try {
+		return realpathSync(a) === realpathSync(b);
+	} catch {
+		return a === b;
+	}
+}
+
+/** The state /rewind-undo goes back to, valid for one session and repository. */
+export interface UndoSlot {
+	sessionId: string;
+	root: string;
+	tree: string;
+	/** State before the first failed undo, retained across retries for a complete redo. */
+	recoveryTree?: string;
 }
 
 export default function (pi: ExtensionAPI) {
 	const always = process.env.PI_REWIND_ALWAYS === "1";
-	let root: string | undefined;
-	let rootResolved = false;
-	let pending: { message: unknown; timestamp: unknown; tree: string }[] = [];
-	let lastUndo: { root: string; tree: string } | undefined;
+	let pending: { message: unknown; timestamp: unknown; root: string; tree: string; sessionId: string }[] = [];
+	let lastUndo: UndoSlot | undefined;
+	const sessionIds = new WeakMap<object, string>();
+	let nextSessionId = 0;
 
-	async function getRoot(cwd: string) {
-		if (!rootResolved) {
-			root = await repoRoot(cwd);
-			rootResolved = true;
+	function sessionId(ctx: any): string {
+		try {
+			const id = ctx.sessionManager?.getSessionId?.();
+			if (typeof id === "string" && id) return `id:${id}`;
+		} catch {
+			// An older Pi without getSessionId: fall back to the session file.
 		}
-		return root;
+		try {
+			const file = ctx.sessionManager?.getSessionFile?.();
+			if (typeof file === "string" && file) return `file:${file}`;
+		} catch {
+			// In-memory/older sessions can still be distinguished by their manager identity.
+		}
+		const manager = ctx.sessionManager;
+		if (!manager || typeof manager !== "object") return "";
+		let id = sessionIds.get(manager);
+		if (!id) { id = `manager:${++nextSessionId}`; sessionIds.set(manager, id); }
+		return id;
 	}
 
 	function checkpoints(ctx: any): Map<string, Checkpoint> {
@@ -169,8 +276,13 @@ export default function (pi: ExtensionAPI) {
 
 	async function offerRestore(ctx: any, cp: Checkpoint | undefined) {
 		if (!cp || !ctx.hasUI) return;
+		// Resolve the current cwd afresh: it can change without a session_start event.
+		if (!sameDir(await repoRoot(ctx.cwd), cp.root)) {
+			ctx.ui.notify(`Rewind: the checkpoint belongs to ${cp.root}, not this repository; files not restored`, "warning");
+			return;
+		}
 		if (!existsSync(cp.root)) return;
-		if ((await git(cp.root, ["cat-file", "-e", `${cp.tree}^{tree}`])).code !== 0) {
+		if (!(await treeExists(cp.root, cp.tree))) {
 			ctx.ui.notify("Rewind: file checkpoint was garbage-collected; files not restored", "warning");
 			return;
 		}
@@ -185,37 +297,40 @@ export default function (pi: ExtensionAPI) {
 			"Keep current files",
 		]);
 		if (choice !== "Restore files") return;
-		const err = await applyTree(cp.root, cp.tree, diff);
-		lastUndo = { root: cp.root, tree: current };
-		if (err) ctx.ui.notify(`Rewind: restore incomplete: ${err}`, "error");
+		// Save recovery before attempting any mutations, including a partial restore.
+		lastUndo = { sessionId: sessionId(ctx), root: cp.root, tree: current };
+		const result = await applyTree(cp.root, cp.tree, diff);
+		const failure = describeFailure(result);
+		if (failure) ctx.ui.notify(`Rewind: restore incomplete: ${failure}. Check the files named; /rewind-undo reverts what was restored.`, "error");
 		else ctx.ui.notify(`Rewind: restored ${n} file${n === 1 ? "" : "s"} (/rewind-undo to revert)`, "info");
 	}
 
 	pi.on("session_start", () => {
-		rootResolved = false;
 		pending = [];
+		lastUndo = undefined;
 	});
 
 	// Snapshot before the agent acts on each user message (prompts and queued messages).
 	pi.on("message_end", async (event, ctx) => {
 		if (event.message.role !== "user" || (!ctx.hasUI && !always)) return;
-		const r = await getRoot(ctx.cwd);
+		const r = await repoRoot(ctx.cwd);
 		if (!r) return;
 		const tree = await snapshot(r);
-		if (tree) pending.push({ message: event.message, timestamp: (event.message as any).timestamp, tree });
+		if (tree) pending.push({ message: event.message, timestamp: (event.message as any).timestamp, root: r, tree, sessionId: sessionId(ctx) });
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {
 		if (!ctx.hasUI && !always) return;
-		const r = await getRoot(ctx.cwd);
+		const r = await repoRoot(ctx.cwd);
 		if (!r) return;
 		const branch = ctx.sessionManager.getBranch();
 		const found: Checkpoint[] = [];
 		for (const p of pending) {
+			if (p.sessionId !== sessionId(ctx)) continue;
 			const entry = [...branch]
 				.reverse()
 				.find((e: any) => e.type === "message" && e.message?.role === "user" && (e.message === p.message || e.message?.timestamp === p.timestamp));
-			if (entry) found.push({ entryId: entry.id, kind: "pre", root: r, tree: p.tree });
+			if (entry) found.push({ entryId: entry.id, kind: "pre", root: p.root, tree: p.tree });
 		}
 		pending = [];
 		const leaf = ctx.sessionManager.getLeafEntry();
@@ -241,17 +356,42 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("Rewind: nothing to undo", "warning");
 				return;
 			}
+			if (!lastUndo.sessionId || lastUndo.sessionId !== sessionId(ctx)) {
+				ctx.ui.notify("Rewind: nothing to undo in this session (the last restore was made in another one)", "warning");
+				return;
+			}
+			if (!sameDir(await repoRoot(ctx.cwd), lastUndo.root)) {
+				ctx.ui.notify(`Rewind: the last restore was made in ${lastUndo.root}, not in this repository; nothing undone`, "warning");
+				return;
+			}
 			const { root: r, tree } = lastUndo;
+			if (!(await treeExists(r, tree))) {
+				ctx.ui.notify("Rewind: the undo snapshot was garbage-collected; nothing undone", "error");
+				return;
+			}
 			const current = await snapshot(r);
 			const diff = current ? await diffTrees(r, tree, current) : undefined;
 			if (!current || !diff) {
 				ctx.ui.notify("Rewind: could not compute undo", "error");
 				return;
 			}
-			const err = await applyTree(r, tree, diff);
-			lastUndo = { root: r, tree: current };
-			if (err) ctx.ui.notify(`Rewind: undo incomplete: ${err}`, "error");
-			else ctx.ui.notify(`Rewind: reverted ${diff.remove.length + diff.write.length} file(s)`, "info");
+			const n = diff.remove.length + diff.write.length;
+			if (n === 0) {
+				if (lastUndo.recoveryTree) lastUndo = { sessionId: lastUndo.sessionId, root: r, tree: lastUndo.recoveryTree };
+				ctx.ui.notify("Rewind: files already match the undo point", "info");
+				return;
+			}
+			const recoveryTree = lastUndo.recoveryTree ?? current;
+			const result = await applyTree(r, tree, diff);
+			const failure = describeFailure(result);
+			if (failure) {
+				// Keep both the target for retry and the original pre-attempt state for redo.
+				lastUndo.recoveryTree = recoveryTree;
+				ctx.ui.notify(`Rewind: undo incomplete: ${failure}. Check the files named and run /rewind-undo again; the state before this undo is git tree ${recoveryTree}.`, "error");
+				return;
+			}
+			lastUndo = { sessionId: lastUndo.sessionId, root: r, tree: recoveryTree }
+			ctx.ui.notify(`Rewind: reverted ${n} file${n === 1 ? "" : "s"} (/rewind-undo again redoes the restore)`, "info");
 		},
 	});
 }

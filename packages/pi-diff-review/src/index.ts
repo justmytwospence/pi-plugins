@@ -11,14 +11,21 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { copyToClipboard } from "@earendil-works/pi-coding-agent";
 import { type Config, loadConfig } from "./config.ts";
+import { embeddedEditorFactory } from "./editor.ts";
 import { diffTrees, repoRoot, snapshot } from "./git.ts";
 import { openInSplit, withZoom } from "./herdr.ts";
 import { parseDiff } from "./parse.ts";
 import { defaultScope, parseScopeArgs, resolveScope, type ScopeRequest } from "./scopes.ts";
 import {
 	CHECKPOINT_ENTRY,
+	CHECKS_ENTRY,
 	type Checkpoint,
+	DRAFTS_ENTRY,
+	type EditorDrafts,
 	type Entry,
+	type FileChecks,
+	lastChecks,
+	lastDrafts,
 	lastMark,
 	lastThreads,
 	MARK_ENTRY,
@@ -27,7 +34,7 @@ import {
 	turnsOnBranch,
 } from "./session.ts";
 import { buildPrompt, parseReplies, type Thread } from "./threads.ts";
-import { DiffViewer, type ReviewData, type ViewerResult } from "./viewer.ts";
+import { DiffViewer, type ReviewData } from "./viewer.ts";
 
 const SCOPE_COMPLETIONS = [
 	{ value: "unreviewed", label: "unreviewed", description: "everything since your last review (default)" },
@@ -45,10 +52,20 @@ export default function (pi: ExtensionAPI) {
 	/** Threads for the current root on the current branch; the viewer shares this array. */
 	const threads: Thread[] = [];
 	let savedThreads = "[]";
+	/** Files checked with `r`, keyed by the diff seen; the viewer shares this map. */
+	const checks: FileChecks = new Map();
+	let savedChecks = "{}";
+	const editorDrafts: EditorDrafts = new Map();
+	let savedDrafts = "{}";
+	const editor = embeddedEditorFactory(pi);
 	/** Without pi-rewind we record the turn checkpoints ourselves. */
 	let ownCheckpoints = true;
 	let pending: { message: unknown; timestamp: unknown; tree: string }[] = [];
 	let viewer: DiffViewer | undefined;
+
+	function disposeViewer(): void {
+		viewer?.dispose();
+	}
 
 	async function getRoot(cwd: string): Promise<string | undefined> {
 		if (!rootResolved) {
@@ -64,16 +81,36 @@ export default function (pi: ExtensionAPI) {
 
 	function loadThreads(ctx: ExtensionContext): void {
 		threads.length = 0;
-		if (root) threads.push(...lastThreads(branch(ctx), root));
+		checks.clear();
+		editorDrafts.clear();
+		if (root) {
+			threads.push(...lastThreads(branch(ctx), root));
+			for (const [k, v] of lastChecks(branch(ctx), root)) checks.set(k, v);
+			for (const [k, v] of lastDrafts(branch(ctx), root)) editorDrafts.set(k, v);
+		}
 		savedThreads = JSON.stringify(threads);
+		savedChecks = JSON.stringify(Object.fromEntries(checks));
+		savedDrafts = JSON.stringify(Object.fromEntries(editorDrafts));
 	}
 
+	/** Write immutable snapshots: Pi retains entry data in memory as well as on disk. */
 	function persist(): void {
 		if (!root) return;
 		const now = JSON.stringify(threads);
-		if (now === savedThreads) return;
-		savedThreads = now;
-		pi.appendEntry(THREADS_ENTRY, { root, threads });
+		if (now !== savedThreads) {
+			pi.appendEntry(THREADS_ENTRY, { root, threads: JSON.parse(now) });
+			savedThreads = now;
+		}
+		const checked = JSON.stringify(Object.fromEntries(checks));
+		if (checked !== savedChecks) {
+			pi.appendEntry(CHECKS_ENTRY, { root, checks: JSON.parse(checked) });
+			savedChecks = checked;
+		}
+		const drafts = JSON.stringify(Object.fromEntries(editorDrafts));
+		if (drafts !== savedDrafts) {
+			pi.appendEntry(DRAFTS_ENTRY, { root, drafts: JSON.parse(drafts) });
+			savedDrafts = drafts;
+		}
 	}
 
 	function inputs(ctx: ExtensionContext, r: string) {
@@ -172,6 +209,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async () => {
+		disposeViewer();
 		persist();
 	});
 
@@ -195,18 +233,26 @@ export default function (pi: ExtensionAPI) {
 		}
 		const host = {
 			threads,
+			checks,
+			editorDrafts,
+			editor,
 			config,
 			turns: () => inputs(ctx, r).turns,
 			load: (q: ScopeRequest) => load(ctx, r, q),
+			onMark: (scope: ReviewData["scope"]) => {
+				// Only :mark calls this: persist the snapshot on screen now, without closing or resnapshotting.
+				pi.appendEntry(MARK_ENTRY, { root: r, tree: scope.target, at: Date.now() });
+				for (const t of threads) if (t.status === "answered") t.status = "resolved";
+				persist();
+			},
 			send: (drafts: Thread[], label: string) => send(ctx, drafts, label),
 			persist,
 			open: (file: string, line: number | undefined) => openInSplit(pi.events, r, file, line),
 			copy: (text: string) => copyToClipboard(text),
 		};
-		let result: ViewerResult | undefined;
 		try {
-			result = await withZoom(pi.events, config.zoom, () =>
-				ctx.ui.custom<ViewerResult>(
+			await withZoom(pi.events, config.zoom, () =>
+				ctx.ui.custom<void>(
 					(tui, theme, keybindings, done) => {
 						viewer = new DiffViewer(tui, theme, keybindings, host, data, done);
 						return viewer;
@@ -215,13 +261,8 @@ export default function (pi: ExtensionAPI) {
 				),
 			);
 		} finally {
+			disposeViewer();
 			viewer = undefined;
-			persist();
-		}
-		if (result?.markReviewed) {
-			pi.appendEntry(MARK_ENTRY, { root: r, tree: result.scope.target, at: Date.now() });
-			// Answers you have now seen are done; drafts and unanswered comments stay.
-			for (const t of threads) if (t.status === "answered") t.status = "resolved";
 			persist();
 		}
 	}

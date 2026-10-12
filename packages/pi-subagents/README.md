@@ -1,126 +1,132 @@
 # pi-subagents
 
-A [pi](https://pi.dev) extension for delegating tasks to subagents. Each subagent is a separate
-`pi --mode rpc` process with its own context window. When a call leaves the agent, model, or effort
-open, [Jev](https://docs.typesafe.ai) (through Pi's own classifier models,
-`ctx.modelRegistry.classify`) picks them in one request per task.
+Delegates tasks to Pi subagents. Each subagent is a separate headless `pi --mode rpc` process with its own context window, started by the `subagent` tool: a single task, up to eight parallel tasks, or a chain whose steps receive the previous step's output, in the foreground or async, with fresh or forked context, optionally each in a new worktree. When a call leaves the agent role, model or thinking level open, Jev (through Pi's classifier models) picks them, one request per task.
+
+In the TUI, FleetView under the prompt lists the running subagents, and a full-screen viewer streams any run's conversation, laid out after Claude Code's subagent panel.
+
+Part of [Pi Plugins](https://github.com/justmytwospence/pi-plugins). Reference: <https://pi-plugins.vercel.app/plugins/pi-subagents/>.
+
+## Install
+
+Install the suite and select only this component. Merge this object into the `packages` array of `~/.pi/agent/settings.json` (or a trusted project's `.pi/settings.json`):
+
+```json
+{
+  "source": "git:github.com/justmytwospence/pi-plugins",
+  "extensions": ["packages/pi-subagents/src/index.ts"],
+  "skills": [],
+  "prompts": [],
+  "themes": []
+}
+```
+
+Alternatively, `pi install git:github.com/justmytwospence/pi-plugins` loads every suite component; use `pi config` to keep only the ones you want, then `/reload`. One Git ref versions every selected component. Do not also enable a standalone copy of this component: Pi does not deduplicate different packages that register the same tools, commands or shortcuts.
+
+To try it alone from a checkout of the suite repository, for one run:
+
+```sh
+pi -e ./packages/pi-subagents
+```
+
+Add `-ne` to disable your other discovered and configured extensions for that run (an explicit `-e` still loads). No `npm install` is needed to run it: the package.json has no `dependencies`; Pi supplies its peer dependencies.
 
 ## The `subagent` tool
 
 `action: "run"` (the default) takes one of:
 
 - `task` (with optional `label`, `agent`, `model`, `thinking`): a single task;
-- `tasks: [{ label?, agent?, task, cwd?, model?, thinking? }]`: up to 8 in parallel, 4 at a time;
-- `chain: [...]`: steps in order; `{previous}` in a step's task is replaced by the previous output,
-  and the chain stops at the first failed step.
+- `tasks: [{ label?, agent?, task, cwd?, model?, thinking? }]`: parallel tasks, at most `maxParallel` (8) per call, `concurrency` (4) at a time;
+- `chain: [...]`: steps in order; `{previous}` in a step's task is replaced by the previous step's output, and the chain stops at the first step that does not succeed.
 
-Use headless subagents by default for delegated work that reports back to the parent, even when
-long or multistep. An interactive Herdr child is for an explicit request or a clearly persistent,
-human-led session or handoff.
+Options:
 
-`label` is a short task name, not an agent role (for example, `"Audit cache invalidation"` with
-`agent: "reviewer"`). Lists, headings and forwarded approval dialogs show the task name first and the role second. Labels are
-whitespace-normalized and stripped of terminal controls, without a fixed length cap. FleetView and
-widget descriptions use the available width and wrap when necessary instead of dropping task text. A missing
-or blank label uses the task’s first nonempty line (without a Markdown heading/list prefix), without
-any model call. Each chain step gets its own stable label before `{previous}` is expanded. The full
-task is still sent to the child and saved in run records; older records derive a label when opened.
+| option | |
+|---|---|
+| `async` | default false. Return the run ids at once and deliver the results later as one `subagent-result` message that starts a turn |
+| `context` | `fresh` (default) or `fork`: start each child from this conversation (`--fork` of the session file; needs a saved session) |
+| `worktree` | run each task in a new checkout from `worktree new subagent/<slug>-<id> --no-open`. Set it only when the user requests a worktree or branch isolation; otherwise ask first. The child stays headless |
+| `cwd` | working directory (default: the session's); each task item may set its own |
 
-Options: `async` (default false) returns the run ids at once and delivers the results as a
-`subagent-result` message that starts a turn; `context: "fork"` starts children from this
-conversation (`--fork` of the session file) instead of fresh; `worktree: true` runs each task in a
-new checkout from `worktree new subagent/<slug>-<id> --no-open`; `cwd`. Set `worktree` only when the
-user requests a worktree or branch isolation; otherwise ask first. The child remains headless.
+`action: "status" | "steer" | "stop" | "result"` take an `id` (or a unique prefix). `steer` also takes `message`, delivered to the running child as a steering message. `status` without an id lists this session's runs.
 
-`action: "status" | "steer" | "stop" | "result"` take an `id` (or unique prefix); `steer` also takes
-`message`, delivered to the running child as a steering message. `status` without an id lists runs.
+Use headless subagents by default for delegated work that reports back to the parent, even when it is long or multistep. An interactive Herdr child ([pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/)) is for an explicit request or a clearly persistent, human-led session or handoff.
 
-The result is each child's final reply, cut to 2,000 lines or 50 KB, with the full text in
-`~/.pi/agent/subagents/<id>/output.md`. Each finished message of the child's conversation is
-appended to `messages.jsonl` beside it. The children's token usage and cost are added to the tool
-result, so they count in the session totals. The tool row shows each run's task label, agent role, model, effort
-(marked "(Jev)" where Jev chose), status, time, turns, cost, and current activity.
+**Labels.** `label` is a short task name, not an agent role (for example `"Audit cache invalidation"` with `agent: "reviewer"`). Lists, headings and forwarded dialogs show the task label first and the role second. Labels are whitespace-normalized and stripped of terminal control characters, without a fixed length cap. A missing or blank label uses the task's first nonempty line (without a Markdown heading or list prefix), with no model call. Each chain step gets its label before `{previous}` is expanded. The full task is still sent to the child and saved in run records.
 
-Dialogs a child's extensions open (for example a tool gate asking for approval) are forwarded to
-your UI, prefixed with the agent's name. Async runs hold `herdr:background` on pi's event bus
-while they run, which [pi-herdr](https://github.com/justmytwospence/pi-herdr) shows in herdr's sidebar. Run records are saved as `subagents:run` session entries.
+**Results.** A foreground call returns each child's final reply, cut to 2,000 lines or 50 KB, with the full text in `~/.pi/agent/subagents/<id>/output.md`; each finished message of the child's conversation is appended to `messages.jsonl` beside it. A foreground result also reports the children's combined token usage and cost. The tool row shows each run's task label, agent role, model and thinking level (each marked `(Jev)` where Jev chose it), status, time, turns, cost and current activity. Run records are saved as `subagents:run` session entries.
 
-## Watching subagents
+**Delivery.** An async result that comes due while the agent is working waits for the turn to settle before it is sent (a follow-up queued mid-turn would be dropped by Esc); several go out as one message. A run that ends after its session is gone (`/reload`, `/new`) calls nothing in Pi.
 
-The tool row only updates while its call is open, so an async run would otherwise go quiet until
-its result arrives. The views follow the children while they work (in the TUI only), laid out as
-in Claude Code (2.1.296):
+**Dialogs.** Dialogs a child's extensions open (`select`, `confirm`, `input`; for example a tool gate asking for approval) are forwarded to your UI, titled `[subagent <label> · <role>]`. Without a UI they are cancelled.
 
-- **FleetView**, Claude Code's subagent panel below the prompt: `main` and every running subagent,
-  with elapsed time and tokens. Press `↓` at the bottom of the prompt to move into it, even with a
-  draft in it (the first `↓` moves the cursor to the end of the draft, as in Claude Code; `j` in
-  pi-vim's normal mode does the same, and `←` works at an empty prompt), `↑`/`↓` or `k`/`j` to
-  select, `Enter` or `l` to open the selected run's conversation, `x` twice to stop it, `b` to move a
-  foreground run to the background (the tool call returns and the result arrives as a message,
-  like `async`), and `Esc` or `h` (or `↑` past `main`) to return to the prompt. As in Claude Code, a run
-  that succeeds leaves at once and a dim `/subagents to see subagents` (`/tasks ...` with pi-bg)
-  shows for 30 seconds; a failed or stopped run stays until your next message (one you type: a
-  message another extension sends does not count), or `x` dismisses it.
-  A run whose conversation is open stays until you close it. Selection and stop-arming follow the
-  row, not its position, so rows coming and going never move them onto another run.
-- **Conversation viewer**, full screen under an accent-colored banner (`◀ esc · Find config · scout ·
-  not your main session`), as in Claude Code and Codex: the child's conversation as it streams, with tool calls,
-  results, live tool output, queued steering messages and current activity. It follows new output
-  until you scroll up (`↑`/`↓`, `PgUp`/`PgDn`, `Home`/`End`). `Enter` opens a composer that steers
-  the child, `x` twice stops it, `b` moves a foreground run to the background, `m` cycles Markdown rendering (assistant text, tool results too,
-  or none), and `Esc` or `q` closes the viewer. It stays open when the run ends.
-- **Widget** above the editor, off by default (Claude Code has none): `"widget": "background"` (async
-  runs) or `"all"` turns it on. One row per running subagent with a spinner, the task label and agent role,
-  model and effort (Jev's picks marked "(Jev)"), turns, tokens, cost and elapsed time, and its
-  current tool or text beneath; queued tasks; a finished run for 8 seconds, a failed or stopped one
-  until your next message (several sharing one row). Double-click a row (fullscreen mode) to open
-  that run's conversation.
+**Stopping.** Stopping a run sends the child an abort, closes its input, and sends SIGTERM if it has not exited after 3 seconds. Ending the session stops every running child. A foreground run also stops when its tool call is aborted, unless it was moved to the background. A foreground call aborted before or during Jev's picks starts no child, and once it is aborted (or the session has ended) its queued tasks never start; the result says how many were skipped. An `async` call is not affected by the abort.
 
-A result that comes due while the agent is working waits for the turn to settle before it is sent
-(a follow-up queued mid-turn is dropped when you press Esc); several go out as one message. A run
-that ends after its session is gone (`/reload`, `/new`) calls nothing in pi.
+## `@subagent:<name>` mentions
 
-`/subagents` lists this session's runs, live or recorded, and opens the one you pick in the viewer;
-`/subagents <id>` (or a unique prefix) opens one directly. `/subagents stop <id>` stops a run, and
-`/subagents stop all` stops every running one. Runs from before a `/reload` or a
-resumed session open from their `messages.jsonl`.
+In a prompt, `@subagent:<name>` names an agent role. In the TUI, Pi's autocomplete lists the discovered agents after `@subagent:` (when the running Pi supports autocomplete providers). A prompt that mentions one gets a hidden message telling the model which agent that is (its description, tools, model and thinking level) and to delegate the relevant part of the task to it with the `subagent` tool; an unknown name is reported along with the agents that exist. A mention never starts a run by itself.
 
-The children stay `pi --mode rpc` processes: the views are rebuilt from their RPC event streams.
+## Watching subagents (TUI)
 
-## With pi-bg
+### FleetView
 
-Both work alone. With [pi-bg](https://github.com/justmytwospence/pi-bg) installed too, they work
-as one, as in Claude Code, through pi's event bus (the activity protocol in `src/activity.ts`,
-copied into both repos):
+Claude Code's subagent panel, below the prompt: `main` and every running subagent with elapsed time, tokens and cost, then the pills of other sources it hosts (see below). A run that succeeds leaves the list at once, and a dim `/subagents to see subagents` (`/tasks to see subagents` when it hosts pi-bg) shows for 30 seconds after an async run succeeds. A failed or stopped run stays until your next typed message (a message another extension sends does not count), or until `x` dismisses it. A run whose conversation is open stays until you close it. Selection and stop arming follow the row, not its position.
 
-- **One list under the prompt.** FleetView ends with pi-bg's pill (`2 shells`, `· 1 failed`); `↓`
-  moves through the subagents to it, and Enter opens pi-bg's background-tasks dialog. pi-bg draws
-  no pill of its own then. With FleetView off (`"fleetView": false`) or outside the TUI, pi-bg shows
-  its own.
-  pi-marimo's notebooks work the same way: FleetView ends with their pill (`1 notebook`) too, and
-  Enter on it opens the busiest notebook full screen.
-- **One list.** pi-bg's `/tasks` view lists this session's runs mixed in with its shells, tagged `agent`: Enter opens a
-  run's conversation, `x` twice stops it, `x` on an ended one dismisses it. Task labels are primary;
-  agent roles are secondary.
-- **Waiting on async runs.** Each async run is outside work pi-bg's `bg_wait subagent:<id>` can
-  wait on inside the turn, so the agent shows as working (in pi, herdr and tmux) until the run
-  ends; the async result names the ids. A chain's steps say the chain goes on. The result still
-  arrives as its own message.
+| key | action |
+|---|---|
+| `↓` (prompt empty, or cursor at the end of its last line), or `←` at an empty prompt | move into the list; `j` in pi-vim's idle Normal mode also works |
+| `↑`/`↓`, `k`/`j` | select |
+| Enter, `l` | open the selected run's conversation, or a pill's own view |
+| `x` twice | stop the selected running run |
+| `x` | dismiss the selected ended run |
+| `b` | move a foreground run to the background: the tool call returns and the result arrives later as a message, as with `async` |
+| Esc, `h`, or `↑`/`k` past the first row | back to the prompt |
+
+`↓` does not leave the prompt while autocomplete is showing or a history entry is being browsed. Any other key returns to the editor.
+
+### Conversation viewer
+
+Full screen under an accent-colored banner (for example `◀ esc · Find config · scout · not your main session`): the child's conversation as it streams, with tool calls, results (each kept up to 16,000 characters), the last lines of a running tool's output, queued steering messages and current activity. It follows new output until you scroll up, and stays open when the run ends.
+
+| key | action |
+|---|---|
+| `↑`/`↓`, `k`/`j` | scroll one line |
+| PgUp/PgDn, Shift+↑/Shift+↓ | scroll one page |
+| Ctrl+U/Ctrl+D | scroll half a page (this read-only viewer only) |
+| Home, End | top, end |
+| Enter | open a composer that steers the running child |
+| `x` twice | stop the run |
+| `b` | move a foreground run to the background |
+| `m` | cycle Markdown rendering: assistant text (default), tool results too, or none; the choice holds for every viewer in this Pi process |
+| Esc, `q`, `h`, Ctrl+C | close |
+
+The steering composer is the suite's editor when a provider such as pi-vim is loaded: it opens in Insert mode; Enter, `:w`, `:wq` or `:x` sends; `:q` or Esc in idle Normal mode cancels; and Ctrl+U/Ctrl+D in idle Normal mode scroll the conversation by half a page. Otherwise it is Pi's one-line input (Enter sends, Esc cancels). While the composer is open it owns every key.
+
+### Widget
+
+An optional widget above the editor, off by default (`"widget": "background"` for async runs, or `"all"`): one row per running subagent with a spinner, task label and role, model and thinking level (Jev's picks marked `(Jev)`), turns, tokens, cost and elapsed time, with its current tool or text beneath; queued tasks; a successful run for 8 seconds, and the latest failed or stopped run until your next message (several share one row). Double-clicking a row opens that run's conversation when Pi passes mouse events to widgets.
+
+### `/subagents`
+
+| command | |
+|---|---|
+| `/subagents` | pick one of this session's runs, live or recorded, and open it in the viewer; outside the TUI, a plain list |
+| `/subagents <id>` | open one run directly (id or unique prefix) |
+| `/subagents stop <id>` | stop a running run (with no id, the only running one) |
+| `/subagents stop all` | stop every running run |
+
+Runs from before a `/reload` or from a resumed session open from their `messages.jsonl` (or their saved output).
 
 ## Agents
 
 Built-in roles work without any agent files:
 
-- `general`: unrestricted general-purpose delegation;
-- `explorer`: reconnaissance without changes, returning relevant files and how they fit together;
-- `reviewer`: review without changes for bugs, regressions, missing tests and risks.
+- `general`: Pi's default tools, for any self-contained task;
+- `explorer`: codebase exploration without changes, returning findings with file and line references;
+- `reviewer`: independent review without changes for bugs, regressions, security risks and missing tests.
 
-`explorer` and `reviewer` have `read`, `grep`, `find`, `ls` and `bash`, but no pinned model or effort;
-Jev or the usual defaults choose those. Their no-change instructions are not a sandbox: `bash`
-can still modify files. Task labels identify the work; these names identify the role.
+`explorer` and `reviewer` get the tools `read`, `grep`, `find`, `ls` and `bash`, and no pinned model or thinking level. Their no-change instructions are not a sandbox: `bash` can still modify files.
 
-`~/.pi/agent/agents/*.md` and the nearest `<project>/.pi/agents/*.md` customize the roles
-(project files win, and agent files can override built-ins):
+Agent files in `~/.pi/agent/agents/*.md` and in the nearest `.pi/agents/` directory at or above the working directory add or override roles (project files win over user files, which win over built-ins). Example:
 
 ```markdown
 ---
@@ -133,27 +139,19 @@ thinking: low
 You are a scout. ...
 ```
 
-`tools`, `model`, `thinking` and `maxTurns` are optional; the body is appended to the child's
-system prompt. At `maxTurns` (also `max_turns`) turns the child is told to stop calling tools and
-answer; if it calls tools again, it is stopped with its output so far, marked as possibly partial.
-Quote descriptions that contain a colon.
+`name` and `description` are required; `tools`, `model`, `thinking` (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) and `maxTurns` (also `max_turns`) are optional. The body is appended to the child's system prompt. At `maxTurns` turns the child is told to stop calling tools and answer; if it calls tools again, it is stopped with its output so far, marked as possibly partial. Quote descriptions that contain a colon.
 
 ## How each choice is made
 
-For the agent, the model, and the thinking level separately: explicit arguments, then the agent
-file, then Jev, then the defaults (`general`, the balanced tier, the parent's model and thinking
-level). Implicit model choices always stay on the parent's provider: an agent-file model or tier
-from another provider is ignored. Pass an explicit `model` argument to cross providers. Jev picks the agent when its confidence is at least 0.5, a model tier (fast, balanced,
-strong) when provider-compatible tiers are available (below 0.4 confidence: balanced), and the effort (0-3 to low,
-medium, high, xhigh). Children always get an explicit `--thinking`, so pi-auto-effort stays off in
-them. Without Jev, the defaults apply.
+For the agent, the model and the thinking level separately: explicit arguments, then the agent file, then Jev, then the defaults (`general`, the `balanced` tier, the parent's model and thinking level).
 
-On 15 tasks across six agents, Jev picked the expected agent every time, in about 100-300 ms
-(`npm run eval`).
+- **Provider.** Implicit model choices always stay on the parent's provider: an agent-file model or tier model from another provider is ignored. Pass an explicit `model` argument to cross providers.
+- **Jev's picks.** Jev picks the agent when its confidence is at least 0.5; a model tier (`fast`, `balanced`, `strong`) when the parent's provider has at least one tier model, configured or from the `openai-codex` defaults below (below 0.4 confidence: `balanced`); and the thinking level from a 0-3 score mapped to `low`, `medium`, `high`, `xhigh`. Without Jev, or when its request fails, the defaults apply.
+- **Thinking.** Children always get an explicit `--thinking`, so [pi-auto-effort](https://pi-plugins.vercel.app/plugins/pi-auto-effort/) stays off in them.
 
-## Settings
+## Configuration
 
-`~/.pi/agent/pi-subagents.json`, with `<project>/.pi/pi-subagents.json` merged on top:
+`~/.pi/agent/pi-subagents.json` (or `$PI_CODING_AGENT_DIR/pi-subagents.json`), with `<cwd>/.pi/pi-subagents.json` merged on top; objects merge, other values replace, and invalid files or mistyped values are ignored. Example (model names are placeholders for your own):
 
 ```json
 {
@@ -171,8 +169,19 @@ On 15 tasks across six agents, Jev picked the expected agent every time, in abou
 }
 ```
 
-`tiers` remains supported, but only entries matching the current parent's provider apply.
-Use `providerTiers` to configure multiple subscriptions without changing settings when you switch:
+| key | default | |
+|---|---|---|
+| `tiers` | `{}` | legacy tier models; only entries on the parent's provider apply |
+| `providerTiers` | `{}` | tier models per provider (below); take precedence over matching `tiers` |
+| `tierDescriptions` | built in | what Jev reads for each tier |
+| `jev` | as above | `enabled`, classifier `provider` and `model`, `timeoutMs` |
+| `maxParallel` | 8 | most parallel tasks per call |
+| `concurrency` | 4 | parallel tasks running at once |
+| `widget` | `"off"` | `"off"`, `"background"` (async runs only) or `"all"` |
+| `fleetView` | true | `false` turns the list below the editor off |
+| `maxDepth` | 2 | levels of subagents below the main session: with 2, a subagent can start subagents of its own, but theirs get no `subagent` tool |
+
+`providerTiers` configures several subscriptions without editing settings when you switch the parent's provider:
 
 ```json
 {
@@ -191,24 +200,44 @@ Use `providerTiers` to configure multiple subscriptions without changing setting
 }
 ```
 
-Provider-specific tiers take precedence over matching legacy `tiers`. For `openai-codex`, missing
-tiers automatically use registered Luna models for fast tasks and Sol models for balanced/strong
-tasks, preferring the parent's matching generation, otherwise the newest registered generation. These defaults only use models present in Pi's
-registry; otherwise a missing tier uses the parent's model. Other providers inherit the parent
-unless configured. `tierDescriptions` overrides what Jev reads for each tier.
-`widget` is `"off"` (default), `"background"` (async runs only), or `"all"`; `fleetView: false` turns the
-list below the editor off. `maxDepth` is how many levels of subagents may run below the main
-session: with 2, a subagent can start subagents of its own, but theirs get no `subagent` tool. Requires Pi 0.99 or newer for classifier models.
+For `openai-codex`, missing tiers use registered models whose ids end in `-luna` (fast) or `-sol` (balanced and strong), preferring the parent's matching generation, otherwise the newest registered one. These defaults use only models present in Pi's registry. Other providers use the parent's model for any tier not configured.
+
+Children run with `PI_SUBAGENT=1` and `PI_SUBAGENT_DEPTH` set, which is how `maxDepth` is enforced.
+
+## Requirements and costs
+
+- Each subagent is a full Pi session using your configured models and credentials; its tokens and cost are billed like any other session's. Children run with `--no-session` unless forked (forked sessions go to `~/.pi/agent/subagents/sessions`).
+- Jev picks are optional classifier requests through Pi's classifier model API (Pi 0.99 or newer). The default `typesafe` provider needs Pi to have credentials for it (for example `TYPESAFE_API_KEY`); these requests can be billed. Set `"jev": { "enabled": false }` to turn them off; the defaults then apply.
+- `worktree: true` needs the `worktree` command on `PATH`.
+- On disk: run output and transcripts under `~/.pi/agent/subagents/<id>/`, and a temporary file for an agent's system prompt.
+
+## Optional integrations
+
+Each works alone; with a sibling loaded they work together through Pi's event bus and the activity protocol in `src/activity.ts` (copied verbatim into pi-bg, pi-subagents, pi-marimo, pi-herdr and pi-plan-mode).
+
+- **[pi-bg](https://pi-plugins.vercel.app/plugins/pi-bg/).** FleetView ends with pi-bg's pill (`2 shells`, `· 1 failed`); `↓` moves through the subagents to it, and Enter opens pi-bg's `/tasks` view, which lists this session's runs mixed in with its shells, tagged `agent` (Enter opens a run's conversation, `x` twice stops it, `x` on an ended one dismisses it). pi-bg then draws no pill of its own; with `"fleetView": false` it does. Each async run is outside work that pi-bg's `bg_wait subagent:<id>` can wait on inside the turn; the async result names the ids, and a chain's intermediate steps say the chain goes on. The result still arrives as its own message.
+- **[pi-marimo](https://pi-plugins.vercel.app/plugins/pi-marimo/).** FleetView ends with its pill (`1 notebook`) too; Enter on it opens the busiest notebook full screen.
+- **[pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/).** Async (or backgrounded) calls hold `herdr:background` while they run, which pi-herdr shows in the pane's `$bg` token.
+
+## Limitations
+
+- FleetView, the viewer and the widget exist only in the TUI; other modes get the tool and `/subagents` lists.
+- The tool row updates only while its call is open; async runs are followed through FleetView, the widget or `/subagents`.
+- Children are RPC processes; the views are rebuilt from their RPC event streams.
+- Agent roles' no-change instructions are instructions, not a filesystem sandbox.
 
 ## Development
 
 ```sh
-npm run check   # typecheck and unit tests (a fake RPC child stands in for pi)
-npm run eval    # 15 tasks against live Jev through the installed Pi (needs TYPESAFE_API_KEY)
+cd packages/pi-subagents
+npm ci
+npm run check
 ```
 
-## Credits
+`npm run check` runs `tsc --noEmit` and then `vitest run` (unit tests use a fake RPC child in place of Pi). `npm run eval` routes 15 tasks across six agents through live Jev via the installed Pi (skipped without `TYPESAFE_API_KEY`); it makes live, paid classifier requests, so run it only with explicit authorization. For the full suite, the repository root's `npm run check` runs every component's check after the root loader test.
 
-The widget, FleetView and conversation viewer are adapted from
-[@tintinweb/pi-subagents](https://github.com/tintinweb/pi-subagents) by tintinweb (MIT; see
-`LICENSE`), ported to this extension's RPC children, run records and Jev picks.
+## License
+
+MIT. See [LICENSE](./LICENSE).
+
+The widget, FleetView and conversation viewer are adapted from [@tintinweb/pi-subagents](https://github.com/tintinweb/pi-subagents) by tintinweb (MIT), ported to this extension's RPC children, run records and Jev picks.

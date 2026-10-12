@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-herdr",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Pi inside herdr: pending background work and the session's task and model in herdr's sidebar, interactive pi children in herdr tabs, splits or worktrees, PR status on worktree spaces, and one event-bus bridge other extensions use instead of talking to herdr themselves.",
   "type": "module",
   "license": "MIT",
@@ -23,17 +23,25 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
-    "typebox": "*"
+    "typebox": "*",
+    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/justmytwospence/pi-herdr"
+    "url": "https://github.com/justmytwospence/pi-plugins",
+    "directory": "packages/pi-herdr"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^1.1.0",
+    "@earendil-works/pi-coding-agent": "1.1.0",
     "@types/node": "^22.20.4",
     "typebox": "^1.3.34",
     "typescript": "^7.0.2",
     "vitest": "^5.0.2"
+  },
+  "homepage": "https://pi-plugins.vercel.app/plugins/pi-herdr/",
+  "bugs": {
+    "url": "https://github.com/justmytwospence/pi-plugins/issues"
   }
 }

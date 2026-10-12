@@ -895,8 +895,6 @@ export default function statusFooter(pi: ExtensionAPI): void {
   };
   const attach = () => {
     if (!active || !ctx) return;
-    // Retire the previous version's plain Anthropic-only status segment.
-    ctx.ui.setStatus("usage", undefined);
     if (!enabled) { ctx.ui.setFooter(undefined); return; }
     ctx.ui.setFooter((tui, theme, footerData) => {
       const render = () => tui.requestRender();
@@ -913,6 +911,17 @@ export default function statusFooter(pi: ExtensionAPI): void {
   // own) instead of replacing it. Extensions that install an editor without
   // chaining must load before this one. Our own earlier wrapper is unwrapped so
   // repeated sessions do not stack.
+  let releaseEditor: (() => void) | undefined;
+  const restorePreferences = (context: ExtensionContext) => {
+    enabled = true; showAll = false;
+    for (const raw of context.sessionManager.getBranch()) {
+      const entry = record(raw);
+      if (entry.type === "custom" && entry.customType === STATE_KEY) {
+        const data = record(entry.data);
+        enabled = data.enabled !== false; showAll = data.showAll === true;
+      }
+    }
+  };
   const wrapEditor = (context: ExtensionContext) => {
     const current = context.ui.getEditorComponent() as (EditorFactory & { [ORIGINAL_BORDERS]?: EditorFactory | null }) | undefined;
     const previous = current && ORIGINAL_BORDERS in current ? current[ORIGINAL_BORDERS] ?? undefined : current;
@@ -925,9 +934,13 @@ export default function statusFooter(pi: ExtensionAPI): void {
     };
     factory[ORIGINAL_BORDERS] = previous ?? null;
     context.ui.setEditorComponent(factory);
+    releaseEditor = () => {
+      if (context.ui.getEditorComponent() === factory) context.ui.setEditorComponent(previous);
+    };
   };
   const stop = () => {
     active = false; generation++;
+    releaseEditor?.(); releaseEditor = undefined;
     if (timer) clearInterval(timer);
     timer = undefined;
     codexAbort?.abort(); codexAbort = undefined;
@@ -942,14 +955,8 @@ export default function statusFooter(pi: ExtensionAPI): void {
     ctx = context; active = true;
     git = { ...emptyGit(), unavailable: true }; claude = undefined; codex = undefined;
     gitBusy = quotaBusy = codexBusy = false; gitChecked = quotaChecked = codexChecked = 0;
-    enabled = true; showAll = false; phase = undefined;
-    for (const raw of context.sessionManager.getBranch()) {
-      const entry = record(raw);
-      if (entry.type === "custom" && entry.customType === STATE_KEY) {
-        const data = record(entry.data);
-        enabled = data.enabled !== false; showAll = data.showAll === true;
-      }
-    }
+    phase = undefined;
+    restorePreferences(context);
     account(); wrapEditor(context); attach();
     void updateGit(true); void updateQuota(true); void updateCodex(0);
     timer = setInterval(() => { account(); void updateGit(); void updateQuota(); void updateCodex(); requestRender?.(); }, TICK_MS);
@@ -964,7 +971,11 @@ export default function statusFooter(pi: ExtensionAPI): void {
   });
   pi.on("thinking_level_select", () => requestRender?.());
   pi.on("session_info_changed", () => requestRender?.());
-  pi.on("session_tree", (_event, context) => { if (active) { ctx = context; account(); requestRender?.(); } });
+  pi.on("session_tree", (_event, context) => {
+    if (!active) return;
+    ctx = context; phase = undefined;
+    restorePreferences(context); account(); attach(); requestRender?.();
+  });
   pi.on("message_end", (event, context) => {
     if (!active) return;
     ctx = context; account();

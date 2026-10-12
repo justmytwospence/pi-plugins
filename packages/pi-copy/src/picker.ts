@@ -1,4 +1,5 @@
-import { Key, fuzzyFilter, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import type { KeybindingsManager } from "@earendil-works/pi-coding-agent";
+import { CURSOR_MARKER, Key, decodeKittyPrintable, isKeyRelease, fuzzyFilter, matchesKey, sliceByColumn, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { type Segment, preview } from "./segments.ts";
 
 export type Tab = "suggested" | "all";
@@ -49,13 +50,19 @@ export class Picker {
   expanded = false;
   /** Whether the user has moved or filtered; until then a new ranking puts the cursor at the top. */
   private touched = false;
-  private cached: string[] | undefined;
+  private cached: { width: number; lines: string[] } | undefined;
+  private paste: string | undefined;
+  private hasFocus = false;
+  get focused() { return this.hasFocus; }
+  set focused(value: boolean) { if (value !== this.hasFocus) this.cached = undefined; this.hasFocus = value; }
+  [Symbol.for("pi-plugins.input-context.v1")]() { return "filter"; }
 
   constructor(
     private model: PickerModel,
     private readonly theme: PickerTheme,
     private readonly requestRender: () => void,
     private readonly done: (segment: Segment | undefined) => void,
+    private readonly keybindings?: KeybindingsManager,
   ) {}
 
   /** The rows on the current tab, filtered. */
@@ -86,9 +93,31 @@ export class Picker {
   }
 
   handleInput(data: string) {
+    if (isKeyRelease(data)) return;
     this.touched = true;
-    if (matchesKey(data, Key.up) || matchesKey(data, "ctrl+k")) return this.move(-1);
-    if (matchesKey(data, Key.down) || matchesKey(data, "ctrl+j")) return this.move(1);
+    if (this.paste !== undefined || data.includes("\x1b[200~")) {
+      this.paste = (this.paste ?? "") + data.replace("\x1b[200~", "");
+      const end = this.paste.indexOf("\x1b[201~");
+      if (end < 0) return;
+      this.query += this.paste.slice(0, end).replace(/[\x00-\x1f\x7f]/g, " ");
+      this.paste = undefined;
+      this.cursor = 0;
+      return this.refresh();
+    }
+    const action = (name: "tui.select.up" | "tui.select.down" | "tui.select.confirm" | "tui.select.cancel", fallback: string) =>
+      this.keybindings ? this.keybindings.matches(data, name) : matchesKey(data, fallback as "up");
+    if (action("tui.select.confirm", "enter")) return this.done(this.items()[this.cursor]);
+    if (action("tui.select.cancel", "escape")) {
+      if (!this.query) return this.done(undefined);
+      this.query = "";
+      this.cursor = 0;
+      return this.refresh();
+    }
+    if (action("tui.select.up", "up") || matchesKey(data, "ctrl+k")) return this.move(-1);
+    if (action("tui.select.down", "down") || matchesKey(data, "ctrl+j")) return this.move(1);
+    // This surface is always a search field, not a read-only viewport.
+    if (matchesKey(data, "ctrl+u")) { this.query = ""; this.cursor = 0; return this.refresh(); }
+    if (matchesKey(data, "ctrl+d")) return; // delete-forward at the end of the query
     if (matchesKey(data, Key.pageUp)) return this.move(-VISIBLE_ROWS);
     if (matchesKey(data, Key.pageDown)) return this.move(VISIBLE_ROWS);
     if (matchesKey(data, Key.tab)) {
@@ -104,22 +133,15 @@ export class Picker {
       this.expanded = false;
       return this.refresh();
     }
-    if (matchesKey(data, Key.enter)) return this.done(this.items()[this.cursor]);
-    if (matchesKey(data, Key.escape)) {
-      if (this.query) {
-        this.query = "";
-        this.cursor = 0;
-        return this.refresh();
-      }
-      return this.done(undefined);
-    }
     if (matchesKey(data, Key.backspace)) {
-      this.query = this.query.slice(0, -1);
+      const parts = [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(this.query)];
+      this.query = this.query.slice(0, parts.at(-1)?.index ?? 0);
       this.cursor = 0;
       return this.refresh();
     }
-    if (data.length === 1 && data >= " " && data !== "\x7f") {
-      this.query += data;
+    const printable = decodeKittyPrintable(data) ?? data;
+    if (printable && !/[\x00-\x1f\x7f]/u.test(printable)) {
+      this.query += printable;
       this.cursor = 0;
       this.refresh();
     }
@@ -130,15 +152,18 @@ export class Picker {
   }
 
   render(width: number): string[] {
-    if (this.cached) return this.cached;
+    if (this.cached?.width === width) return this.cached.lines;
     const t = this.theme;
-    const w = Math.max(20, width);
+    const w = Math.max(1, width);
     const lines: string[] = [];
     const tab = (name: Tab, label: string) => (this.tab === name ? t.fg("accent", t.bold(`[${label}]`)) : t.fg("muted", ` ${label} `));
     const status = this.model.ranking === "pending" ? t.fg("dim", "  ranking…") : this.model.ranking === "unavailable" ? t.fg("dim", "  (recency order)") : "";
     lines.push(t.fg("accent", "─".repeat(w)));
     lines.push(truncateToWidth(` ${t.bold("Yank")}  ${tab("suggested", "Suggested")} ${tab("all", "All")}${status}`, w));
-    lines.push(truncateToWidth(` ${t.fg("muted", "filter:")} ${this.query}${t.fg("accent", "▏")}`, w));
+    const filterLabel = truncateToWidth(` ${t.fg("muted", "filter:")} `, Math.max(0, w - 1), "");
+    const filterRoom = Math.max(0, w - visibleWidth(filterLabel) - 1);
+    const queryTail = sliceByColumn(this.query, Math.max(0, visibleWidth(this.query) - filterRoom), filterRoom);
+    lines.push(`${filterLabel}${queryTail}${this.focused ? CURSOR_MARKER : ""}${t.fg("accent", "▏")}`);
 
     const items = this.items();
     const start = Math.max(0, Math.min(this.cursor - Math.floor(VISIBLE_ROWS / 2), items.length - VISIBLE_ROWS));
@@ -161,13 +186,14 @@ export class Picker {
     const current = items[this.cursor];
     if (this.expanded && current) {
       lines.push(t.fg("muted", "─".repeat(w)));
-      const wrapped = current.text.split("\n").flatMap((l) => wrapTextWithAnsi(l, w - 2));
+      const wrapped = current.text.split("\n").flatMap((l) => wrapTextWithAnsi(l, Math.max(1, w - 2)));
       for (const line of wrapped.slice(0, PREVIEW_LINES)) lines.push(` ${line}`);
       if (wrapped.length > PREVIEW_LINES) lines.push(t.fg("dim", `  … ${wrapped.length - PREVIEW_LINES} more lines`));
     }
-    lines.push(truncateToWidth(t.fg("dim", " ↑↓/ctrl+j,k move · type to filter · Tab suggested/all · → preview · Enter copy · Esc close"), w));
+    const keys = (action: "tui.select.up" | "tui.select.down" | "tui.select.confirm" | "tui.select.cancel", fallback: string) => this.keybindings?.getKeys(action).join("/") || fallback;
+    lines.push(truncateToWidth(t.fg("dim", ` ${keys("tui.select.up", "↑")}/${keys("tui.select.down", "↓")} move · type to filter · Tab suggested/all · → preview · ${keys("tui.select.confirm", "Enter")} copy · ${keys("tui.select.cancel", "Esc")} ${this.query ? "clear filter, then close" : "close"}`), w));
     lines.push(t.fg("accent", "─".repeat(w)));
-    this.cached = lines.map((l) => truncateToWidth(l, w));
-    return this.cached;
+    this.cached = { width, lines: lines.map((l) => truncateToWidth(l, w)) };
+    return this.cached.lines;
   }
 }

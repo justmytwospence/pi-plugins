@@ -8,7 +8,7 @@ pi-ask-user-question adds the `ask_user_question` tool for decisions the user sh
 
 ## Enable, requirements, and costs
 
-Choose `packages/pi-ask-user-question/src/index.ts` through the [suite installation guide](/guides/install/). All 19 extensions load by default; selected suite entries share one Git pin.
+Choose `packages/pi-ask-user-question/src/index.ts` through the [suite installation guide](/guides/install/). Every suite entry loads by default; selected suite entries share one Git pin.
 
 Keep only one extension registering `ask_user_question`. Duplicate providers are a configuration conflict, not an additional source of questions. This plugin has no settings file and no slash commands.
 

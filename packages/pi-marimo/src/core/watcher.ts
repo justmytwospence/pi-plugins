@@ -39,6 +39,8 @@ const consumerId = (): string => `pi-marimo-${Math.random().toString(36).slice(2
 /** A followed notebook, as the hosts see it. */
 export interface Followed {
   attachment: Attachment;
+  /** Canonical file identity used by the watcher, stable across browser session replacements. */
+  canonicalPath?: string;
   notebook: NotebookState;
   connection: Connection;
   current: boolean;
@@ -164,7 +166,7 @@ export class MarimoWatcher {
 
   /** Every followed notebook, the current one first, then by most recent use. */
   followed(): Followed[] {
-    return this.ranked().map((f, i) => ({ attachment: f.attachment, notebook: f.notebook, connection: f.connection, current: i === 0, touchedAt: f.touchedAt }));
+    return this.ranked().map((f, i) => ({ attachment: f.attachment, canonicalPath: f.target.real, notebook: f.notebook, connection: f.connection, current: i === 0, touchedAt: f.touchedAt }));
   }
 
   get notebook(): NotebookState {

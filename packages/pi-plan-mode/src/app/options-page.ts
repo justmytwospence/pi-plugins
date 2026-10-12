@@ -5,6 +5,7 @@
 // vim mode works there too).
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { Input, type KeyId, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { EDITOR_MODE, EDITOR_SURFACE, INPUT_CONTEXT, readEditorMode } from "../editor-contract.js";
 import {
   type Hint,
   hintLine,
@@ -50,6 +51,7 @@ export interface TextArea {
   getText(): string;
   handleInput(data: string): void;
   render(width: number): string[];
+  dispose?(): void;
 }
 
 /** Box indent: in line with the row labels. */
@@ -94,6 +96,27 @@ export class OptionsPage {
     if (index >= 0) this.cursor = index;
   }
 
+  readonly [EDITOR_SURFACE] = "embedded";
+
+  [INPUT_CONTEXT]() {
+    return this.boxFocus ? "editor" : this.editing ? "filter" : "list";
+  }
+
+  [EDITOR_MODE]() {
+    return this.boxFocus ? readEditorMode(this.areaFor(this.boxFocus)) : undefined;
+  }
+
+  dispose() {
+    for (const area of this.areas.values()) {
+      try {
+        area.dispose?.();
+      } catch {
+        // A broken optional provider must not prevent the rest of the screen closing.
+      }
+    }
+    this.areas.clear();
+  }
+
   get typing() {
     return this.editing !== undefined || this.boxFocus !== undefined;
   }
@@ -117,7 +140,7 @@ export class OptionsPage {
     const box = this.boxFocus;
     if (box) {
       if (box.hidden?.()) this.leaveBox();
-      else if (is("tab", "shift+tab")) this.leaveBox();
+      else if (is("tab", "shift+tab") && this.canLeaveBox(box)) this.leaveBox();
       else {
         const area = this.areaFor(box);
         area.handleInput(data);
@@ -148,6 +171,11 @@ export class OptionsPage {
       this.enterBox(first);
     } else return;
     this.options.requestRender();
+  }
+
+  private canLeaveBox(box: OptionRow) {
+    const mode = readEditorMode(this.areaFor(box));
+    return !mode || (!mode.autocomplete && (mode.state === "normal" || mode.state === "insert"));
   }
 
   /** The editor behind a box, made once so it keeps its undo history and vim mode. */

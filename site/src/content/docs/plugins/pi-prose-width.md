@@ -8,7 +8,7 @@ plugin: pi-prose-width
 
 `pi-prose-width` limits the reading width of Markdown prose while preserving the available width for content that benefits from longer lines. The default measure is **80 columns**. On a wide terminal, a paragraph wraps earlier, but a fenced command or a table can continue across the wider pane. On a terminal narrower than the configured measure, the terminal's available width still wins.
 
-Entry: `packages/pi-prose-width/src/index.ts`. Enable it through [Install & select](/guides/install/). All 19 suite extensions load by default; selected entries share one Git pin. The entry is independently selectable even though its version is tied to the suite revision.
+Entry: `packages/pi-prose-width/src/index.ts`. Enable it through [Install & select](/guides/install/). Every suite entry loads by default; selected entries share one Git pin. The entry is independently selectable even though its version is tied to the suite revision.
 
 The implementation patches the shared `Markdown` component from Pi's TUI package. Consequently, the scope is not limited to assistant replies: it includes user messages, thinking, and extension content when those surfaces use that Markdown component. It does not impose a global terminal width on every widget, list, editor, or plain-text tool renderer.
 

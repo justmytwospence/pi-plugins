@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import cacheGuard, { JEV_TIP, modelInfo, statusText } from "../src/index.ts";
@@ -310,6 +310,108 @@ describe("choices", () => {
     expect(await h.emit("input", input("a"))).toEqual({ action: "continue" });
     expect(await h.emit("input", input("b"))).toEqual({ action: "continue" });
     expect(h.ui.confirms.length).toBe(1);
+  });
+
+  test("status tells the truth about a muted or switched-off warning", async () => {
+    const h = cold();
+    await h.emit("session_start", {});
+    const status = async () => {
+      await h.commands.get("cache-guard").handler("status", h.ctx);
+      return h.ui.notes.at(-1) as string;
+    };
+    expect(await status()).toContain("The next prompt asks before sending.");
+    expect(await status()).toContain("Warning: on, from $0.50");
+
+    h.ui.answers = ["Send, and stop"];
+    await h.emit("input", input("a"));
+    const muted = await status();
+    expect(muted).toContain("The next prompt is sent without asking: the warning is muted for this session.");
+    expect(muted).toContain('Warning: muted for this session after "Send, and stop asking" (/cache-guard on turns it back on)');
+    expect(muted).not.toContain("Warning: on");
+    expect(h.ui.status.get("cache-guard")).toBe("cache cold");
+
+    await h.commands.get("cache-guard").handler("on", h.ctx);
+    expect(await status()).toContain("The next prompt asks before sending.");
+    await h.commands.get("cache-guard").handler("off", h.ctx);
+    const off = await status();
+    expect(off).toContain("Warning: off for this session (/cache-guard on turns it back on)");
+    expect(off).toContain("The next prompt is sent without asking: the warning is off.");
+    expect(off).not.toContain("muted for this session");
+    expect(h.ui.status.get("cache-guard")).toBeUndefined();
+    const asked = h.ui.confirms.length;
+    expect(await h.emit("input", input("while off"))).toEqual({ action: "continue" });
+    expect(h.ui.confirms).toHaveLength(asked);
+    await h.emit("session_start", { reason: "new" });
+    expect(await status()).toContain("Warning: on");
+  });
+
+  test("unknown subcommands and stray arguments are refused without side effects", async () => {
+    const registry = jevRegistry();
+    const h = harness([assistant(NOW - 900_000, 600_000)], opus, registry);
+    await h.emit("session_start", {});
+    h.ui.editor = "keep this prompt";
+    const run = async (args: string) => {
+      await h.commands.get("cache-guard").handler(args, h.ctx);
+      return h.ui.notes.at(-1) as string;
+    };
+    expect(await run("stats")).toBe('/cache-guard: unknown subcommand "stats". Use one of: status, on, off, fresh, compact, jev.');
+    for (const command of ["status", "on", "off", "fresh", "jev"]) {
+      expect(await run(`  ${command}  now  `)).toBe(`/cache-guard ${command} takes no argument (got "now").`);
+    }
+    expect(h.sessions).toEqual([]);
+    expect(h.sent).toEqual([]);
+    expect(h.ui.editor).toBe("keep this prompt");
+    expect(h.ui.compactions).toEqual([]);
+    expect(h.ui.menus).toEqual([]);
+    expect(registry.calls).toEqual([]);
+    expect(h.ui.status.get("cache-guard")).toBe("cache cold");
+    expect(await run("status")).toContain("The next prompt asks before sending.");
+    expect(await run(" \t ")).toContain("Last request:");
+    expect(h.ui.notes.filter((n) => n.includes("Last request:"))).toHaveLength(2);
+    await h.emit("input", input("still asks"));
+    expect(h.ui.confirms).toHaveLength(1);
+  });
+});
+
+describe("warning status", () => {
+  const userFile = () => path.join(process.env.PI_CODING_AGENT_DIR!, "cache-guard.json");
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(NOW); });
+  afterEach(() => { vi.useRealTimers(); rmSync(userFile(), { force: true }); });
+
+  test.each([
+    { patch: { enabled: false }, line: 'off ("enabled": false in settings)' },
+    { patch: { warn: { enabled: false } }, line: 'off ("warn.enabled": false in settings)' },
+  ])("does not call disabled settings a threshold miss: $line", async ({ patch, line }) => {
+    writeFileSync(userFile(), JSON.stringify(patch));
+    const h = harness([assistant(NOW - 900_000, 600_000)]);
+    await h.emit("session_start", {});
+    await h.commands.get("cache-guard").handler("status", h.ctx);
+    const status = h.ui.notes.at(-1)!;
+    expect(status).toContain(`Warning: ${line}`);
+    expect(status).toContain("The next prompt is sent without asking: the warning is off.");
+    expect(status).not.toContain("Below the warning threshold.");
+    expect(status).not.toContain("muted for this session");
+    expect(await h.emit("input", input("go"))).toEqual({ action: "continue" });
+    expect(h.ui.confirms).toEqual([]);
+  });
+
+  test("a small cold context really is below the threshold", async () => {
+    const h = harness([assistant(NOW - 900_000, 50_000)]);
+    await h.emit("session_start", {});
+    await h.commands.get("cache-guard").handler("status", h.ctx);
+    expect(h.ui.notes.at(-1)).toContain("Below the warning threshold.");
+    expect(h.ui.notes.at(-1)).toContain("Warning: on");
+  });
+
+  test("status does not promise a dialog without UI", async () => {
+    const h = harness([assistant(NOW - 900_000, 600_000)]);
+    h.ctx.hasUI = false;
+    await h.emit("session_start", {});
+    await h.commands.get("cache-guard").handler("status", h.ctx);
+    expect(h.ui.notes.at(-1)).toContain("The next prompt is sent without asking: no UI is available.");
+    expect(h.ui.notes.at(-1)).not.toContain("The next prompt asks before sending.");
+    expect(await h.emit("input", input("go"))).toEqual({ action: "continue" });
+    expect(h.ui.confirms).toEqual([]);
   });
 });
 

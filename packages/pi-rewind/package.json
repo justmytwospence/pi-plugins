@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-rewind",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Restore files alongside pi's conversation rewinds (/tree and /fork).",
   "type": "module",
   "license": "MIT",
@@ -19,20 +19,30 @@
     ]
   },
   "scripts": {
-    "check": "tsc --noEmit"
+    "check": "npm run typecheck && npm test",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test 'test/**/*.test.ts'"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*"
+    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.87.1",
-    "@earendil-works/pi-tui": ">=0.87.1",
+    "@earendil-works/pi-coding-agent": "1.1.0",
+    "@earendil-works/pi-tui": "1.1.0",
     "@types/node": "^22.0.0",
     "typescript": "^7.0.0"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/justmytwospence/pi-rewind"
+    "url": "https://github.com/justmytwospence/pi-plugins",
+    "directory": "packages/pi-rewind"
+  },
+  "homepage": "https://pi-plugins.vercel.app/plugins/pi-rewind/",
+  "bugs": {
+    "url": "https://github.com/justmytwospence/pi-plugins/issues"
   }
 }

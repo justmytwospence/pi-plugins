@@ -1,10 +1,15 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { fakeCtx, fakePi, until } from "./fake.ts";
 
 let dir: string;
+const cleanups = new Set<() => Promise<void>>();
+afterEach(async () => {
+  for (const cleanup of [...cleanups]) await cleanup();
+  cleanups.clear();
+});
 beforeAll(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-bg-ext-"));
   process.env.PI_BG_DIR = dir;
@@ -20,9 +25,12 @@ async function load() {
   const c = fakeCtx(dir);
   for (const h of f.handlers.get("session_start") ?? []) await h({ reason: "startup" }, c.ctx);
   const call = (tool: string, params: any, signal?: AbortSignal) => f.tools.get(tool).execute("call", params, signal, undefined, c.ctx);
+  const cleanup = () => shutdown();
   const shutdown = async (reason = "quit") => {
     for (const h of f.handlers.get("session_shutdown") ?? []) await h({ reason }, c.ctx);
+    if (reason !== "reload") cleanups.delete(cleanup);
   };
+  cleanups.add(cleanup);
   const textOf = (r: any) => r.content.map((p: any) => p.text).join("\n");
   return { ...f, ...c, call, shutdown, textOf };
 }
@@ -119,7 +127,7 @@ describe("pi-bg", () => {
     expect(x.widgetLines()).toEqual([" 1 shell "]);
     // ↓ at an empty prompt selects it; Enter opens the dialog.
     expect(x.press("\x1b[B")).toBe(true);
-    expect(x.widgetLines()?.[0]).toBe("[ 1 shell ]  l/enter view · h/esc back");
+    expect(x.widgetLines()?.[0]).toBe("[ 1 shell ]  enter view · esc back");
     expect(x.press("\r")).toBe(true);
     expect(x.opened).toHaveLength(1);
     const dialog = x.overlay(0);
@@ -358,7 +366,7 @@ describe("pi-bg", () => {
       setHosted: (on: boolean, host?: string) => void calls.push([on, host]),
     };
     x.pi.events.emit("activity:section", { section: guest });
-    expect(calls).toEqual([[true, "pi-bg"]]);
+    expect(calls).toEqual([[true, "bg"]]);
     expect(x.widgetLines()).toEqual([" 1 notebook "]);
     await x.call("bg_run", { command: "sleep 5", kind: "job", name: "s" });
     expect(x.widgetLines()).toEqual([" 1 shell · 1 notebook "]);
@@ -368,7 +376,7 @@ describe("pi-bg", () => {
     // pi-subagents hosts us: the guest goes back to it.
     const ours = x.emitted.filter((e) => e.channel === "activity:section").map((e) => e.data.section).find((s: any) => s.id === "bg");
     ours.setHosted(true);
-    expect(calls.at(-1)).toEqual([false, "pi-bg"]);
+    expect(calls.at(-1)).toEqual([false, "bg"]);
     await x.shutdown();
   });
 });

@@ -8,11 +8,13 @@ plugin: pi-copy
 
 Run **`/yank`**, or press **Ctrl+Shift+X** by default, to choose text from the current session branch. This is a separate command: Pi's built-in `/copy` and Ctrl+X retain their existing behavior. The picker requires the interactive terminal UI; RPC, JSON, and print workflows are not supported by this command. It does not register a model-callable copy tool.
 
-Entry: `packages/pi-copy/src/index.ts`. Follow [Install & select](/guides/install/) for suite selection. All 19 extensions load by default and selected components share one Git pin.
+Entry: `packages/pi-copy/src/index.ts`. Follow [Install & select](/guides/install/) for suite selection. Every suite entry loads by default and selected components share one Git pin.
 
 The default window covers the last 30 user turns. Whole user messages and assistant replies are available, alongside pieces extracted from replies: sections, fenced code, lists and their introductory lines, nested list items, tables, quotes, commit messages, and sufficiently long paragraphs. It also recognizes commands, useful inline snippets, paths, and URLs. Assistant `bash` tool-call commands are included; arbitrary tool results and thinking blocks are not treated as whole copyable messages.
 
-Use arrows or Ctrl+J/Ctrl+K to move, PageUp/PageDown to page, and typing to fuzzy-filter. Tab switches **Suggested** and **All**. Right arrow, or Space with an empty filter, toggles a preview; left arrow collapses it. Enter copies and closes. Escape first clears a nonempty filter, then closes on another press. Preview length is limited, but copying uses the selected piece's text, not the truncated preview. Extracted commands can omit shell prompts, and code pieces omit their enclosing fences: inspect the selected kind rather than assuming every piece is a byte-for-byte message copy.
+The picker is always a search field: printable keys, including `j` and `k`, go into a fuzzy filter. Move with Pi's configured `tui.select.up`/`tui.select.down` bindings (arrows by default) or Ctrl+K/Ctrl+J; PageUp/PageDown move by a page of rows. Tab switches **Suggested** and **All**. Right arrow, or Space with an empty filter, toggles a preview; left arrow collapses it. `tui.select.confirm` (Enter) copies and closes. `tui.select.cancel` (Escape) first clears a nonempty filter, then closes on another press.
+
+Because the filter is a text field, Ctrl+U and Ctrl+D keep text meanings: Ctrl+U clears the query, and Ctrl+D is delete-forward at the end of the query, which has nothing to delete. Neither scrolls the list. Backspace removes the last character; a bracketed paste goes into the filter with control characters replaced by spaces. Preview length is limited, but copying uses the selected piece's text, not the truncated preview. Extracted commands can omit shell prompts, and code pieces omit their enclosing fences: inspect the selected kind rather than assuming every piece is a byte-for-byte message copy.
 
 ## Requirements, privacy, and costs
 
@@ -66,7 +68,7 @@ If a wanted item is missing from Suggested, switch to All before changing extrac
 
 A missing classifier, absent credentials, timeout, or classification error does not prevent opening the picker. Without judgments it uses recency ordering; existing cached judgments can still influence Suggested. Closing the picker aborts the outstanding ranking request. Ranking updates preserve a piece you navigated to if it remains in the list; an untouched cursor stays at the top of the newly ordered results.
 
-While open, the picker emits paired `herdr:blocked` events with the label `Yank picker`. Herdr integration is optional; without a listener these events are inert. `pi-select-nav` is also optional because the picker already handles Ctrl+J/Ctrl+K, and its search field needs literal letters.
+While open, the picker emits paired `herdr:blocked` events with the label `Yank picker`. Herdr integration is optional; without a listener these events are inert. `pi-select-nav` is also optional: the picker handles Ctrl+J/Ctrl+K itself and declares a filter input context, so select-nav leaves its keys alone and literal letters reach the search field.
 
 `Nothing to copy yet` means extraction found no pieces. `Copy failed: ...` is a clipboard-backend error, not a Jev failure. Investigate display access, backend availability, and terminal clipboard permissions. A success notification confirms the helper returned, but an OSC 52 route cannot confirm the destination clipboard actually changed. No paid live evaluation is needed to use local recency mode.
 

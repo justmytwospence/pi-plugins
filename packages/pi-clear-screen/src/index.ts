@@ -13,10 +13,10 @@
 // Only fullscreen mode (tuiMode: "fullscreen") has an application-owned transcript; in regular
 // mode the terminal owns scrollback, so ctrl+l just says so.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getKeybindings } from "@earendil-works/pi-tui";
 
 const KEY = "ctrl+l";
 const SENTINEL = "\u0000pi-clear-screen\u0000";
-const PATCHED = Symbol.for("pi-clear-screen.patched");
 
 type Comp = { render(width: number): string[]; invalidate?(): void; children?: Comp[] };
 type Tui = Comp & {
@@ -56,11 +56,18 @@ function transcriptOf(tui: Tui, doc: Comp): ScrollLike | undefined {
 export default function (pi: ExtensionAPI) {
   let tui: Tui | undefined;
   let marker: ClearMarker | undefined;
+  let release: (() => void) | undefined;
+  const cleanup = () => { release?.(); release = undefined; marker = undefined; tui = undefined; };
 
   pi.on("session_start", (_event, ctx) => {
-    if (ctx.hasUI) tui = grabTui(ctx);
-    marker = undefined;
+    cleanup();
+    if (ctx.mode !== "tui") return;
+    tui = grabTui(ctx);
+    if (getKeybindings().getKeys("app.model.select").includes(KEY)) {
+      ctx.ui.notify('clear-screen: Ctrl+L conflicts with Pi model selection. Set "app.model.select": ["alt+p", "alt+m"] in keybindings.json, then reload.', "warning");
+    }
   });
+  pi.on("session_shutdown", cleanup);
 
   pi.registerShortcut(KEY, {
     description: "Clear screen (keeps history; scroll up to see it)",
@@ -71,19 +78,21 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       // documentContainer = [header, loadedResources, chat]; messages are appended to chat.
-      const doc = tui.children[0] as Comp & { [PATCHED]?: boolean };
-      const chat = doc?.children?.at(-1) as (Comp & { addChild(c: Comp): void; removeChild(c: Comp): void }) | undefined;
+      const doc = tui.children?.[0] as Comp;
+      const chat = (Array.isArray(doc?.children) ? doc.children.at(-1) : undefined) as (Comp & { addChild(c: Comp): void; removeChild(c: Comp): void }) | undefined;
       const scroll = doc && transcriptOf(tui, doc);
-      if (!chat || !scroll) {
+      if (!chat || !scroll || typeof chat.addChild !== "function" || typeof chat.removeChild !== "function" || typeof doc.render !== "function") {
         ctx.ui.notify("clear-screen: pi's transcript layout changed; extension needs updating", "warning");
         return;
       }
 
-      if (!doc[PATCHED]) {
-        doc[PATCHED] = true;
-        const render = doc.render.bind(doc);
-        doc.render = (width: number) => {
-          const lines = render(width);
+      if (!release) {
+        let active = true;
+        const render = doc.render;
+        const own = Object.hasOwn(doc, "render");
+        const wrapper = (width: number) => {
+          const lines = [...render.call(doc, width)];
+          if (!active) return lines;
           const at = lines.indexOf(SENTINEL);
           if (at < 0) return lines;
           lines.splice(at, 1);
@@ -93,6 +102,16 @@ export default function (pi: ExtensionAPI) {
           const height = scroll.viewportHeight || process.stdout.rows || 24;
           for (let n = at + height - lines.length; n > 0; n--) lines.push("");
           return lines;
+        };
+        doc.render = wrapper;
+        release = () => {
+          active = false;
+          if (marker) chat.removeChild(marker);
+          if (doc.render === wrapper) {
+            if (own) doc.render = render;
+            else delete (doc as Partial<Comp>).render;
+          }
+          tui?.requestRender();
         };
       }
 

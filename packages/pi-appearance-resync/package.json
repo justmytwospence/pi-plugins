@@ -1,6 +1,6 @@
 {
   "name": "@justmytwospence/pi-appearance-resync",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Keeps Pi's light/dark theme in step with the terminal inside multiplexers, such as herdr, that announce an appearance change before they report the new colors.",
   "type": "module",
   "license": "MIT",
@@ -23,16 +23,25 @@
     "test": "vitest run"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "typebox": "*"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/justmytwospence/pi-appearance-resync"
+    "url": "https://github.com/justmytwospence/pi-plugins",
+    "directory": "packages/pi-appearance-resync"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.87.1",
+    "@earendil-works/pi-coding-agent": "1.1.0",
     "@types/node": "^22.20.4",
     "typescript": "^7.0.2",
     "vitest": "^5.0.2"
+  },
+  "homepage": "https://pi-plugins.vercel.app/plugins/pi-appearance-resync/",
+  "bugs": {
+    "url": "https://github.com/justmytwospence/pi-plugins/issues"
   }
 }

@@ -57,7 +57,9 @@ export function ghostLine(line: string, text: string, width: number, dim: (s: st
   return clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped)));
 }
 
-type Renderable = { render(width: number): string[]; getText(): string };
+const SURFACE = Symbol.for("pi-plugins.editor-surface.v1");
+const MODE = Symbol.for("pi-plugins.editor-mode.v1");
+type Renderable = { render(width: number): string[]; getText(): string; isShowingAutocomplete?(): boolean; [SURFACE]?: string; [MODE]?: () => { state: string; autocomplete?: boolean } };
 
 export const QUESTIONS: Record<string, ClassifierQuestion> = {
   useful: {
@@ -128,21 +130,46 @@ export default function nextPrompt(pi: ExtensionAPI) {
   let userPrompt = "";
   let pending: Pending | undefined;
   let outcome: string | undefined;
+  let settled = false;
   /** The suggestion on offer until the next prompt is sent; `shown` is set while it is on screen. */
   let offered: string | undefined;
   let shown: string | undefined;
   let generation = 0;
   let lastVerdict = "";
-  let patched: { editor: Renderable; render: Renderable["render"]; own: boolean; tui: TUI } | undefined;
+  let lastTag = "none yet";
+  let instruction = "not evaluated yet";
+  let uiState = "not attached";
+  let vetState = "not run";
+  let mainEditor: Renderable | undefined;
+  let terminal: TUI | undefined;
+  let patched: { editor: Renderable; render: Renderable["render"]; wrapper: Renderable["render"]; own: boolean; tui: TUI; enabled: boolean } | undefined;
+
+  const focusedEditor = () => (terminal as (TUI & { getFocusedComponent?(): unknown }) | undefined)?.getFocusedComponent?.() as Renderable | undefined;
+  const focusState = () => {
+    const focused = focusedEditor();
+    if (!focused) return "unavailable";
+    if (focused[SURFACE] === "embedded") return "embedded editor";
+    if (focused !== mainEditor && focused[SURFACE] !== "main") return "not main editor";
+    if (focused.isShowingAutocomplete?.()) return "autocomplete";
+    const mode = focused[MODE]?.();
+    if (mode?.autocomplete) return "autocomplete";
+    if (mode && !["normal", "insert"].includes(mode.state)) return `editor mode ${mode.state}`;
+    return "main editor";
+  };
+  const mainFocused = (): Renderable | undefined => focusState() === "main editor" ? focusedEditor() : undefined;
 
   const active = () => sessionOn && config.enabled;
 
   const unpatch = () => {
     if (!patched) return;
-    const { editor, render, own, tui } = patched;
+    const patch = patched;
+    const { editor, render, wrapper, own, tui } = patch;
+    patch.enabled = false;
     patched = undefined;
-    if (own) editor.render = render;
-    else delete (editor as Partial<Renderable>).render;
+    if (editor.render === wrapper) {
+      if (own) editor.render = render;
+      else delete (editor as Partial<Renderable>).render;
+    }
     tui.requestRender();
   };
 
@@ -172,27 +199,30 @@ export default function nextPrompt(pi: ExtensionAPI) {
 
   /** Draw the suggestion inside the focused editor by wrapping its render. False if that is not possible. */
   const ghost = (target: ExtensionUIContext) => {
-    const tui = grabTui(target);
-    const editor = (tui as { getFocusedComponent?: () => unknown } | undefined)?.getFocusedComponent?.() as Partial<Renderable> | null | undefined;
+    terminal = grabTui(target) ?? terminal;
+    const tui = terminal;
+    const editor = mainFocused();
     if (!tui || !editor || typeof editor.render !== "function" || typeof editor.getText !== "function") return false;
     if (editor.getText() !== "") return false;
     const render = editor.render;
     const width = tui.terminal?.columns ?? 80;
     // An editor that draws no cursor at all gets the line below instead.
     if (!render.call(editor, width).some(hasCursor)) return false;
-    const theme = target.theme;
     const own = Object.prototype.hasOwnProperty.call(editor, "render");
-    editor.render = function (this: Renderable, w: number) {
+    const patch = { editor, render, wrapper: render, own, tui, enabled: true };
+    const wrapper = function (this: Renderable, w: number) {
       const lines = render.call(this, w);
-      if (shown === undefined || this.getText() !== "") return lines;
+      if (!patch.enabled || !mainFocused() || shown === undefined || this.getText() !== "") return lines;
       const i = lines.findIndex(hasCursor);
-      const line = i === -1 ? undefined : ghostLine(lines[i]!, shown, w, (s) => theme.fg("dim", s));
+      const line = i === -1 ? undefined : ghostLine(lines[i]!, shown, w, (s) => target.theme.fg("dim", s));
       if (line === undefined) return lines;
       const out = lines.slice();
       out[i] = line;
       return out;
     };
-    patched = { editor: editor as Renderable, render, own, tui };
+    editor.render = wrapper;
+    patch.wrapper = wrapper;
+    patched = patch;
     tui.requestRender();
     return true;
   };
@@ -201,6 +231,10 @@ export default function nextPrompt(pi: ExtensionAPI) {
     generation++;
     pending = undefined;
     outcome = undefined;
+    settled = false;
+    lastTag = "none yet";
+    lastVerdict = "";
+    vetState = "not run";
     hide();
   };
 
@@ -222,17 +256,22 @@ export default function nextPrompt(pi: ExtensionAPI) {
   };
 
   const onKey = (data: string) => {
-    if (offered === undefined || !ui || isKeyRelease(data)) return undefined;
+    if (offered === undefined || !ui || isKeyRelease(data) || !mainFocused()) return undefined;
     const accept = config.acceptKeys.some((key) => matchesKey(data, key as KeyId));
     if (accept && shown !== undefined && ui.getEditorText() === "") {
       const text = shown;
       hide();
       ui.setEditorText(text);
+      // The owned editor offers an optional local insertion hook; no submission occurs.
+      const editor = mainFocused() as (Renderable & { [key: symbol]: unknown }) | undefined;
+      const insert = editor?.[Symbol.for("pi-plugins.editor-insert.v1")];
+      if (typeof insert === "function") insert.call(editor);
       return { consume: true };
     }
     // Once the key has reached the editor: hide while it holds text, show again once it is empty.
+    const mine = generation;
     setTimeout(() => {
-      if (offered === undefined || !ui) return;
+      if (mine !== generation || offered === undefined || !ui || !mainFocused()) return;
       const empty = ui.getEditorText() === "";
       if (!empty) conceal();
       else if (shown === undefined) show(offered);
@@ -243,7 +282,17 @@ export default function nextPrompt(pi: ExtensionAPI) {
   const attach = (ctx: ExtensionContext) => {
     unsubscribe?.();
     unsubscribe = undefined;
-    ui = ctx.hasUI ? ctx.ui : undefined;
+    uiState = ctx.mode !== "tui" ? `not terminal UI (${ctx.mode})` : !ctx.hasUI ? "no UI" : "terminal UI";
+    ui = ctx.mode === "tui" && ctx.hasUI ? ctx.ui : undefined;
+    terminal = ui ? grabTui(ui) : undefined;
+    if (ui && typeof (terminal as (TUI & { getFocusedComponent?(): unknown }) | undefined)?.getFocusedComponent !== "function") {
+      uiState = "focus inspection unavailable";
+      ui.notify("next-prompt: focus inspection unavailable; suggestions disabled for this UI", "warning");
+      ui = undefined;
+      terminal = undefined;
+    }
+    const focused = (terminal as (TUI & { getFocusedComponent?(): unknown }) | undefined)?.getFocusedComponent?.() as Renderable | undefined;
+    mainEditor = focused && typeof focused.getText === "function" && focused[SURFACE] !== "embedded" ? focused : undefined;
     if (ui) unsubscribe = ui.onTerminalInput(onKey);
   };
 
@@ -258,11 +307,16 @@ export default function nextPrompt(pi: ExtensionAPI) {
     unsubscribe?.();
     unsubscribe = undefined;
     ui = undefined;
+    uiState = "session shut down";
+    mainEditor = undefined;
+    terminal = undefined;
   });
 
+  pi.on("session_tree", () => reset());
+  pi.on("model_select", () => reset());
   pi.on("session_compact", () => reset());
   pi.on("input", () => {
-    hide();
+    reset();
     return undefined;
   });
 
@@ -270,7 +324,8 @@ export default function nextPrompt(pi: ExtensionAPI) {
     config = loadConfig("next-prompt", DEFAULT_CONFIG, ctx.cwd);
     userPrompt = event.prompt;
     // Only interactive sessions get the instruction: print mode and subagents have nowhere to show it.
-    if (!active() || !ctx.hasUI) return undefined;
+    instruction = !active() ? "not injected (disabled)" : ctx.mode !== "tui" || !ctx.hasUI || !ui ? `not injected (${uiState})` : "injected";
+    if (instruction !== "injected") return undefined;
     event.systemPromptOptions.sections[SECTION] = INSTRUCTION;
     return undefined;
   });
@@ -281,6 +336,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
     const message = event.message as { role?: string; content?: unknown };
     if (message.role !== "assistant") return undefined;
     const { suggestion, replacement } = processAssistant(message, config.maxChars);
+    lastTag = suggestion ? "valid tag" : replacement ? "invalid tag (empty or over maxChars)" : "no tag emitted (model omission/abstention)";
     // The latest assistant message decides: a tag before a tool call is superseded by the final answer.
     pending = suggestion
       ? { suggestion, userPrompt, assistantTail: messageText((replacement ?? message).content) }
@@ -294,13 +350,17 @@ export default function nextPrompt(pi: ExtensionAPI) {
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
+    settled = true;
     const candidate = pending;
     pending = undefined;
     if (!candidate || outcome !== "completed" || !active() || !ui) return;
     const mine = ++generation;
+    vetState = "pending";
     const verdict = await vet(ctx.modelRegistry, config.jev, candidate);
-    lastVerdict = `"${candidate.suggestion}": ${verdict.show ? "shown" : "held back"} (${verdict.reason})`;
-    if (mine !== generation || !verdict.show || ui.getEditorText() !== "") return;
+    if (mine !== generation || !ui) return;
+    vetState = verdict.show ? "approved" : "vetoed";
+    lastVerdict = `"${candidate.suggestion}": ${vetState} (${verdict.reason})`;
+    if (!verdict.show || ui.getEditorText() !== "") return;
     show(candidate.suggestion);
   });
 
@@ -316,8 +376,16 @@ export default function nextPrompt(pi: ExtensionAPI) {
         ctx.ui.notify(`next-prompt ${arg} for this session`, "info");
         return;
       }
+      if (arg && arg !== "status") {
+        ctx.ui.notify("Usage: /next-prompt [status|on|off]", "warning");
+        return;
+      }
       ctx.ui.notify(
-        `next-prompt ${active() ? "on" : "off"}${shown ? `, showing "${shown}"` : ""}. Last suggestion: ${lastVerdict || "none yet"}.`,
+        `next-prompt ${active() ? "on" : "off"}. Instruction: ${instruction}. Latest assistant: ${lastTag}. ` +
+        `Settlement: ${outcome ?? "not observed (agent_before_settle)"}; agent_settled ${settled ? "observed" : "not observed"}. Vet: ${vetState}. ` +
+        `UI: ${uiState}. Focus: ${focusState()}${ui && !mainFocused() ? " (ghost/acceptance blocked)" : ""}. Editor: ${ui ? ui.getEditorText() === "" ? "empty" : "nonempty (display blocked)" : "unavailable"}. ` +
+        `Offer: ${shown ? patched ? "ghost text" : "fallback widget" : offered ? "concealed" : "none"}. ` +
+        `Last suggestion: ${lastVerdict || "none yet"}.`,
         "info",
       );
     },

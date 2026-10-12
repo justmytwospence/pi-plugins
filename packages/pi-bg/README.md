@@ -1,131 +1,182 @@
 # pi-bg
 
-Background jobs and services for [pi](https://pi.dev). It works on its own, and works with
-[herdr](https://herdr.dev) through [pi-herdr](https://github.com/justmytwospence/pi-herdr) when
-both are there.
+Background jobs and services for Pi. The agent starts a long command with `bg_run` and keeps working; a **job** (tests, builds, model fits, exports) wakes the agent with its outcome when it exits, and a **service** (a dev or notebook server, a tunnel, a watcher) wakes it once when a `ready` pattern matches a log line, or if it exits. When nothing is left but a job's result, the agent calls `bg_wait` instead of ending its turn, so the session stays "working" until the job ends; typing a message, Esc or the wait's timeout ends the wait, while the job keeps running and still wakes the agent.
 
-- A **job** is a finite command whose result the agent needs (tests, builds, model fits, exports).
-  It wakes the agent with its outcome when it exits, unless the agent waited for it with `bg_wait`.
-- A **service** keeps running (a dev or notebook server, a tunnel, a watcher). With a `ready`
-  pattern it wakes the agent once when a log line matches; it also wakes it if it exits.
-- **Waiting is part of the turn.** When nothing is left but a job's result, the agent calls
-  `bg_wait` instead of ending its turn, so pi, herdr and tmux show it as working until the job
-  ends. Typing a message stops the wait (the job keeps running and still wakes the agent), as do
-  Esc and the wait's timeout.
-- **The UI is Claude Code's**: a pill under the prompt and a background-tasks dialog (below), so it
-  feels the same as Claude Code, and close to Codex and Gemini CLI.
+In the TUI, a pill under the prompt counts running shells and a full-screen `/tasks` view lists every task, laid out after Claude Code's background-tasks panel. It works alone, and integrates with pi-subagents, pi-marimo and pi-herdr when they are loaded.
+
+Part of [Pi Plugins](https://github.com/justmytwospence/pi-plugins). Reference: <https://pi-plugins.vercel.app/plugins/pi-bg/>.
+
+## Install
+
+Install the suite and select only this component. Merge this object into the `packages` array of `~/.pi/agent/settings.json` (or a trusted project's `.pi/settings.json`):
+
+```json
+{
+  "source": "git:github.com/justmytwospence/pi-plugins",
+  "extensions": ["packages/pi-bg/src/index.ts"],
+  "skills": [],
+  "prompts": [],
+  "themes": []
+}
+```
+
+Alternatively, `pi install git:github.com/justmytwospence/pi-plugins` loads every suite component; use `pi config` to keep only the ones you want, then `/reload`. One Git ref versions every selected component. Do not also enable a standalone copy of this component: Pi does not deduplicate different packages that register the same tools, commands or shortcuts.
+
+To try it alone from a checkout of the suite repository, for one run:
+
+```sh
+pi -e ./packages/pi-bg
+```
+
+Add `-ne` to disable your other discovered and configured extensions for that run (an explicit `-e` still loads). No `npm install` is needed to run it: the package.json has no `dependencies`; Pi supplies its peer dependencies.
 
 ## Tools
 
-| tool | |
+| tool | parameters |
 |---|---|
-| `bg_run` | `command`, `kind` (`job` or `service`, required), `name`, `ready` (service: a regex, case-insensitive, or `/src/flags`), `timeout` (job: seconds), `keep` (service: outlive this pi session), `cwd` |
-| `bg_wait` | `id` (a task, or outside work; default the next job to end), `timeout` (seconds, default 1800, max 3600) |
-| `bg_logs` | `id` (omit to list every task), `lines`, `grep`, `head` |
-| `bg_kill` | `id`: SIGTERM to the process group, SIGKILL after 3 s |
+| `bg_run` | `command`, `kind` (`job` or `service`, required), `name`, `ready` (service only: a regex matched case-insensitively, or `/src/flags`), `timeout` (job only: seconds before it is killed), `keep` (service only: outlive this Pi session), `cwd` |
+| `bg_wait` | `id` (a task, or outside work another extension reports; default: whichever running agent job ends first), `timeout` (seconds, default 1800, max 3600) |
+| `bg_logs` | `id` (omit to list every task), `lines` (default 60, max 400), `grep`, `head` |
+| `bg_kill` | `id`: SIGTERM to the task's process group, SIGKILL after 3 seconds |
 
-Ids also accept a task's name or a unique id prefix. A command that fails within 1.5 s is reported
-in `bg_run`'s own result.
+Ids also accept a task's name (the most recent task with it) or a unique id prefix. `bg_run` waits 1.5 seconds before returning, so a command that fails at once (a typo, a missing file) is reported in its own result instead of as a wake-up. `bg_wait` returns at once, without waiting, when messages are already queued for the agent. `bg_wait` on a service without a `ready` pattern is an error: there is nothing to wait for until it exits.
 
-A wake-up goes out only while pi is idle: one that comes due during a turn waits for the turn to
-settle (a follow-up queued mid-turn is dropped when you press Esc), and several that pile up go out
-as one message. Whatever `bg_wait`, `bg_logs` or `bg_kill` has already shown the agent is no longer
-owed. A task that ends during `/reload` wakes the agent once the new session is up.
+**Wake-ups.** A wake-up is sent only while Pi is idle: one that comes due during a turn waits for the turn to settle (a follow-up queued mid-turn would be dropped by Esc), and several that pile up go out as one message. Whatever `bg_wait`, `bg_logs` or `bg_kill` has already shown the agent is no longer owed. A task that ends during `/reload` wakes the agent once the new session is up. A task you stop yourself does not wake the agent; it is told on its next turn instead.
 
 ## Processes and files
 
-Each task runs `bash -c <command>` in its own process group, stdout and stderr appended to
-`~/.pi/agent/bg/<session>/<id>.log` (nothing is written into the project; `PI_BG_DIR` moves it).
-A log past 64 MB is cut back to its last megabyte. Tasks survive `/reload` (the new code takes the
-running tasks over). Quitting, `/new`, `/resume` and `/fork` stop them, along with anything a task
-left running in its process group (`npm run dev &`), except services with `keep: true`: those keep
-running, and the next pi started in or above their directory adopts them (lists them, can stop
-them). Each pi records its running tasks in `~/.pi/agent/bg/state/<pid>.json`, so a pi that crashed
-has its leftovers killed by the next one; a pid is only signalled or adopted while it still runs the
-task's command, never when it has been reused. Logs older than a week are deleted.
+Each task runs `bash -c <command>` (`/bin/sh` when `/bin/bash` is missing) in its own process group, with `PI_BG_TASK_ID` set to its id and stdout and stderr appended to `~/.pi/agent/bg/<session-id>/<id>.log`. Nothing is written into the project. `PI_BG_DIR` moves the whole directory. A running task's log is cut back to its last megabyte once it passes 64 MB.
 
-## UI
+- **Reload.** Tasks survive `/reload`: the reloaded code takes the running tasks over.
+- **Session end.** Quitting, `/new`, `/resume` and `/fork` stop every task, along with anything a task left running in its process group (`npm run dev &`), except services started with `keep: true`.
+- **Kept services.** When Pi quits, kept services keep running and are recorded for later. The next Pi started in, above or below their directory adopts them at startup: it lists them and can stop them, and it notifies you when one ends.
+- **Crash cleanup.** Each Pi process records its running tasks in `~/.pi/agent/bg/state/<pid>.json`. At startup, a Pi kills the leftovers of a Pi process that is no longer running. A pid is signalled or adopted only while `ps` shows it still running the task's command, never after it has been reused.
+- **Old logs.** Session log directories older than seven days that no live task references are deleted at startup.
 
-Laid out the way Claude Code does it (2.1.296), with the same keys:
+## Usage
 
-- **Pill under the prompt**: `1 shell`, `2 shells`, and `· 1 failed` in the error color while a
-  failure you have not seen is there (until your next message, or `x` in the dialog). `↓` at the
-  bottom of the prompt selects it, even with a draft in it (the first `↓` moves the cursor to the
-  end of the draft, as in Claude Code), and so does `j` in pi-vim's normal mode; Enter, `l` (or a
-  click, in fullscreen mode) opens the view; Esc, `h`, `k` or `↑` goes back. Nothing above the prompt.
-- **Background-tasks view** (`/tasks`, also `/bashes`, `/ps`, `/bg`): it takes over the whole
-  screen, as Claude Code's and Codex's subagent views do, under an accent-colored banner
-  (`◀ esc · Background tasks · not your main session`); Esc goes back. Every task, running first,
-  then what ended (newest first), in one list even with pi-subagents' runs in it (each row then
-  tagged `shell` or `agent`), each with its command and state (`waiting` while a `bg_wait` is on
-  it, `ready` for a service). ↑↓ or j/k select; Enter opens the task's live log (↑↓ PgUp/PgDn g/G scroll,
-  `x` twice stops, Esc comes back to the dialog); `x` twice stops a running task, `x` on an ended one
-  dismisses it; `r` reruns; `f` follows the log in a herdr split; Esc or `h` goes back.
-- **Commands**: `/tasks run <command>` starts a job yourself (it notifies you when it ends and does
-  not wake the agent), `/tasks kill <id>`, `/tasks clear` hides ended tasks, and `/stop` (Codex's)
-  stops every task this pi started.
-- **Outside the TUI** (RPC), a footer status `bg: tests 2:14 · vite ready · lint ✗` instead, which
-  [pi-status-footer](https://github.com/justmytwospence/pi-status-footer) gives a row of its own.
+### Pill under the prompt
 
-## With pi-subagents
+In the TUI the pill reads `1 shell`, `2 shells`, plus `· 1 failed` in the error color while a failure you have not seen is there (until your next typed message, or until you dismiss it with `x` in `/tasks`). Nothing is drawn above the prompt.
 
-Both work alone. With [pi-subagents](https://github.com/justmytwospence/pi-subagents) installed
-too, they work as one, as in Claude Code (the activity protocol in `src/activity.ts`, copied into
-both repos):
+| key | action |
+|---|---|
+| `↓` (prompt empty, or cursor at the end of its last line) | select the pill; also `j` in pi-vim's idle Normal mode |
+| Enter, `l`, `→`, or a mouse click | open the background-tasks view |
+| Esc, `↑`, `k`, `h`, `←` | back to the prompt |
 
-- **One list under the prompt.** pi-subagents' list (Claude Code's subagent panel: `main` and the
-  subagents) ends with this pill; ↓ moves through the subagents to the pill, and Enter on it opens
-  the dialog. pi-bg draws no pill of its own then.
-- **Other sources' pills.** Without pi-subagents, the pill also counts other sources' work, such as
-  pi-marimo's busy notebooks: `2 shells · 1 notebook` (they draw no pill of their own then).
-- **One list in the view.** `/tasks` lists the subagents too, mixed in with the shells and tagged: Enter opens a run's
-  conversation, `x` twice stops it, `x` on an ended one dismisses it.
-- **Waiting on subagents.** Async subagent runs are outside work `bg_wait subagent:<id>` can wait
-  on inside the turn; the `subagent` tool's result names the ids. The run's result still arrives as
-  its own message.
+`↓` does not leave the prompt while autocomplete is showing or a history entry is being browsed. Any other key returns to the editor.
 
-## Other extensions
+### Background-tasks view
 
-All through `pi.events`; with nothing listening, nothing happens.
+`/tasks` (aliases `/bashes`, `/ps`, `/bg`), or Enter on the pill, opens a full-screen view under an accent-colored banner (`◀ esc · Background tasks · not your main session`). It lists every task in one list, running first (oldest first), then ended (newest first), each with its command, state and runtime: `waiting` while a `bg_wait` is on it, and for services `starting`, `ready` or `service`. With other activity sources loaded (pi-subagents runs, pi-marimo notebooks) their entries are mixed in, and while the list mixes sources each row is tagged with its kind (`shell`, `agent`, `notebook`).
+
+| key | action |
+|---|---|
+| `↑`/`↓`, `k`/`j` | select |
+| Enter, `→`, `l` | open the entry: a shell's live log, a run's conversation, a notebook; closing it returns here on the same entry |
+| `x` twice | stop a running entry whose source supports stopping (the second `x` must hit the same entry) |
+| `x` | dismiss an ended entry |
+| `r` | rerun a shell task as a new user task |
+| `f` | follow a shell task's log in a Herdr split (`tail -F`); offered only when pi-herdr is active |
+| Esc, `q`, `←`, `h`, Ctrl+C | back to the session |
+
+### Log viewer
+
+A shell task's log, full screen, refreshed every second. It follows new output until you scroll up; scrolling back to the end follows again.
+
+| key | action |
+|---|---|
+| `↑`/`↓`, `k`/`j` | scroll one line |
+| Ctrl+U/Ctrl+D | scroll half a page (this read-only viewer only) |
+| PgUp/PgDn | optional full-page scrolling aliases |
+| Home/`g`, End/`G` | top, end |
+| `x` twice | stop the task, while it runs |
+| Esc, `q`, `h`, `←`, Ctrl+C | back |
+
+### Commands
+
+| command | |
+|---|---|
+| `/tasks` (`/bashes`, `/ps`, `/bg`) | the view above; outside the TUI, a plain list |
+| `/tasks run <command>` | start a job yourself; it notifies you when it ends and does not wake the agent |
+| `/tasks kill <id>` | stop a running task |
+| `/tasks clear` | hide ended tasks |
+| `/stop` | stop every running shell task this Pi process started. It leaves alone kept services adopted from earlier Pi processes, subagent runs, plan-mode planners, marimo notebooks and Herdr children; stop those from `/tasks` or their own commands |
+
+### Outside the TUI
+
+When a UI exists but is not the TUI (RPC mode), pi-bg shows no pill and sets a footer status instead, for example `bg: tests 2:14 · vite ready · lint ✗` (running jobs, services, and tasks that ended in the last minute; up to four items, then `+N`). [pi-status-footer](https://pi-plugins.vercel.app/plugins/pi-status-footer/) gives it a row of its own.
+
+## Configuration
+
+There is no settings file. Environment:
+
+| variable | |
+|---|---|
+| `PI_BG_DIR` | base directory for logs and state files (default `~/.pi/agent/bg`) |
+| `PI_BG_TASK_ID` | set by pi-bg in each task's environment to its id |
+
+## Requirements and costs
+
+pi-bg needs no external service, credentials or network access, and makes no model or classifier calls of its own (wake-ups start ordinary agent turns). It runs commands through `bash` (or `/bin/sh`), signals POSIX process groups, and runs `ps` to confirm that a recorded pid still belongs to its task. It writes logs and state files under `~/.pi/agent/bg` (or `PI_BG_DIR`), never into the project.
+
+## Optional integrations
+
+Everything below goes through `pi.events`; each sibling is optional, and with nothing listening nothing happens.
+
+### pi-subagents
+
+- **One list under the prompt.** [pi-subagents](https://pi-plugins.vercel.app/plugins/pi-subagents/)' FleetView (`main` and the subagents) ends with this pill; `↓` moves through the subagents to the pill, and Enter on it opens `/tasks`. pi-bg draws no pill of its own then.
+- **One list in the view.** `/tasks` lists the subagent runs too, tagged `agent`: Enter opens a run's conversation, `x` twice stops it, `x` on an ended one dismisses it.
+- **Waiting on subagents.** Async subagent runs are outside work: `bg_wait subagent:<id>` waits on one inside the turn; the `subagent` tool's async result names the ids. The run's result still arrives as its own message.
+
+### pi-marimo and marimo
+
+- **Pills.** Without pi-subagents, pi-bg's pill also counts other sources' work, such as [pi-marimo](https://pi-plugins.vercel.app/plugins/pi-marimo/)'s busy notebooks: `2 shells · 1 notebook`; those sources then draw no pill of their own.
+- **marimo servers without pi-marimo.** A `bg_run` service whose command starts a marimo server (`marimo edit nb.py`, `uv run marimo edit --no-token nb.py`, `uvx marimo run app.py`, ...) is named `marimo nb.py` and is ready when marimo prints its URL, unless you give a `name` or a `ready` pattern.
+- **marimo-pair calls.** A marimo-pair `execute-code` call blocks until the cells it ran finish, so a long run fits a job (`bg_run` the call, then `bg_wait`). Stopping that job stops the client, not the cells; `bg_kill` says so for marimo-pair commands.
+- **With pi-marimo.** pi-marimo annotates tasks tied to a followed notebook: the server's row, and the row of a job whose marimo-pair calls target that notebook, show its kernel state (`nb.py: running Model fit · 2 queued`); `bg_logs` lists the notebook under that task; and `bg_wait` on a server that is up waits for the notebook's running cells instead of returning at once. A notebook's own `bg_wait` id is `marimo:` plus its path from the cwd; `marimo:<file>` also finds it when only one followed notebook has that name.
+
+### pi-herdr
+
+Inside Herdr with [pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/), pi-bg holds `herdr:background` while an agent job that will wake the agent runs, which pi-herdr shows as the pane token `$bg` after the agent ends its turn instead of waiting. A task you started with `/tasks run`, or a kept service, sends a Herdr notification when it ends (skipped while the pane is focused), and `f` in `/tasks` follows a log in a split. Herdr's own Pi integration still owns the pane's working/idle state.
+
+### Event-bus channels
 
 | channel | direction | payload | |
 |---|---|---|---|
-| `herdr:background` | emits | `{ active, label, id }` | held while an agent job runs that will wake the agent: pi-herdr shows it as the pane token `$bg` when the agent ends its turn instead of waiting |
-| `herdr:notify` | emits | `{ title, body, sound, unlessFocused }` | a task you started (or a kept service) ended |
-| `herdr:split` | emits | `{ command, cwd, done }` | the dialog's "follow in a split" (`tail -F` on the log), offered when pi-herdr answers `herdr:probe` |
-| `bg:tasks` | emits | `{ tasks }` | a snapshot after every change: id, name, kind, command, cwd, status, ready, origin, keep, `willWake`, logPath |
+| `herdr:background` | emits | `{ active, label, id }` | held while an agent job that will wake the agent runs (and while its wake-up is owed) |
+| `herdr:notify` | emits | `{ title, body, sound, unlessFocused }` | a `/tasks run` task or a kept service ended |
+| `herdr:split` | emits | `{ command, cwd, done }` | `f` in `/tasks`: `tail -n 200 -F` on the log |
+| `herdr:probe`, `herdr:ready` | emits / reads | `{ reply }`, `{}` | whether pi-herdr is active (enables `f`) |
+| `bg:tasks` | emits | `{ tasks }` | a snapshot after every change: `id`, `name`, `kind`, `command`, `cwd`, `status`, `ready`, `origin`, `keep`, `willWake`, `logPath` |
 | `bg:killed` | emits | `{ id, command, cwd }` | after a task is stopped |
-| `bg:external` | reads | `{ id, label, state, summary? }` | outside work `bg_wait <id>` can wait on (`state`: `running`, `done`, `failed`), e.g. a busy marimo notebook |
-| `bg:annotate` | reads | `{ task, by, detail?, wait? }` | what another extension knows about a task: `detail` goes in its row and under it in `bg_logs`; `wait` names outside work that `bg_wait <task>` waits for once the task is up (a server's notebook kernel). No `detail` clears it |
+| `bg:external` | reads | `{ id, label, state, summary? }` | outside work `bg_wait <id>` can wait on (`state`: `running`, `done`, `failed`); ended entries are kept 10 minutes for a late `bg_wait` |
+| `bg:annotate` | reads | `{ task, by, detail?, wait? }` | what another extension knows about a running task: `detail` shows in its row and under it in `bg_logs`; `wait` names outside work that `bg_wait <task>` waits for once the task is up. No `detail` clears it |
 | `bg:probe` | reads | `{ reply }` | `reply()` when pi-bg is loaded |
-| `activity:section`, `activity:changed`, `activity:gone` | both | `{ section }`, `{ id }` | sources of background work: ours (the pill, entries, the dialog) for a host to show under the prompt; others' (pi-subagents' runs) for the dialog; see `src/activity.ts` |
-| `activity:host` | reads | `{}` | a host is ready: offer our source again |
+| `activity:section`, `activity:changed`, `activity:gone`, `activity:host` | both | `{ section }`, `{ id }`, `{ id }`, `{ host, priority }` | the activity protocol below |
 
-herdr's pane state stays herdr's own (its pi integration): working while a turn runs, which
-`bg_wait` extends. When the agent ends its turn with a job running, the pane is idle or done and
-the `$bg` token names the job until it wakes the agent.
+### Activity protocol
 
-**marimo.** A marimo-pair `execute-code` call blocks until the cells it ran finish, so a long run
-is a job (`bg_run` the call, then `bg_wait`). Stopping that job stops the client, not the cells:
-`bg_kill` says so for marimo-pair commands. While it runs, other `execute-code` calls to the same
-notebook queue behind it.
+`src/activity.ts` is the activity protocol, copied verbatim into pi-bg, pi-subagents, pi-marimo, pi-herdr and pi-plan-mode; no sibling imports another's copy. Each extension offers its background work as a *source* (`activity:section { section }`) with entries keyed by a stable id, optional `stop`, `canStop` and `dismiss`, an optional pill, and `setHosted(on, host)`. A *host* draws the other sources' pills: pi-subagents' FleetView (priority 20) outranks pi-bg's pill (priority 10, host id `bg`; an `activity:host` payload of `{}` counts as the FleetView host), and a host that hears a higher-ranked `activity:host` releases its guests until `activity:gone` names that host. A source draws its own pill only while no host shows it. Hosts key selection and `x`-twice stop arming by `${section.id}\0${key}`, so rows coming and going never move either onto another entry. The `/tasks` view lists every offered source's entries; today those are pi-bg shells, pi-subagents runs and pi-marimo notebooks.
 
-A marimo server (`bg_run` of `marimo edit nb.py`, `uv run marimo edit --no-token nb.py`,
-`uvx marimo run app.py`, ...) as a service is named `marimo nb.py` and is ready when marimo prints
-its URL, unless you give a name or a `ready` pattern. With
-[pi-marimo](https://github.com/justmytwospence/pi-marimo) installed, pi-marimo takes over the rest:
-the server's row, and the row of a job whose marimo-pair calls target a followed notebook, shows
-its kernel (`nb.py: running Model fit · 2 queued`, `nb.py: idle · 1 error`); `bg_logs` lists the
-notebook under that task instead of on its own; and `bg_wait` on a server that is up waits for its
-running cells instead of returning at once. A notebook's `bg_wait` id is `marimo:` and its path
-from the cwd; `marimo:<file>` finds it too when only one followed notebook has that name.
+## Limitations
+
+- The pill, `/tasks` view and log viewer exist only in the TUI.
+- Herdr's pane state stays Herdr's own: `bg_wait` keeps a turn "working", but once the agent ends its turn with a job running, the pane shows idle or done, and only the `$bg` token says a job will wake it.
+- Kept services are adopted only by a Pi started in, above or below their directory, and only at startup.
 
 ## Development
 
 ```sh
-npm install
-npm run check   # typecheck + tests (real processes, no model calls)
-pi -ne -e . -e <provider extension>   # try it in a pi without other extensions
+cd packages/pi-bg
+npm ci
+npm run check
 ```
 
-MIT licensed.
+`npm run check` runs `tsc --noEmit` and then `vitest run`. For the full suite, the repository root's `npm run check` runs every component's check after the root loader test.
+
+## License
+
+MIT. See [LICENSE](./LICENSE).

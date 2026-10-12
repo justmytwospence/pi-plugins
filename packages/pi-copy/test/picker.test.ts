@@ -1,4 +1,5 @@
 import { expect, test } from "vitest";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { Picker } from "../src/picker.ts";
 import type { Segment } from "../src/segments.ts";
 
@@ -47,8 +48,26 @@ test("ranking updates keep the cursor on the same piece; Esc clears then closes"
   expect(chosen()).toBeUndefined();
 });
 
-test("every rendered line fits the width", () => {
+test("every rendered line fits the supplied width after resize", () => {
   const { picker } = make();
   picker.handleInput(" ");
-  for (const line of picker.render(30)) expect(line.length).toBeLessThanOrEqual(30 + 20);
+  for (const width of [80, 5, 1, 30, 9]) for (const line of picker.render(width)) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+});
+
+test("Kitty printable input and split bracketed paste are text; releases are ignored", () => {
+  const { picker } = make();
+  picker.handleInput("\x1b[106;1u");
+  expect(picker.query).toBe("j");
+  picker.handleInput("\x1b[106;1:3u");
+  expect(picker.query).toBe("j");
+  picker.handleInput("\x1b[200~你好");
+  picker.handleInput(" world\x1b[201~");
+  expect(picker.query).toBe("j你好 world");
+});
+
+test("backspace deletes one grapheme rather than half an emoji", () => {
+  const { picker } = make();
+  picker.handleInput("x\u{1f469}\u200d\u{1f4bb}");
+  picker.handleInput("\x7f");
+  expect(picker.query).toBe("x");
 });

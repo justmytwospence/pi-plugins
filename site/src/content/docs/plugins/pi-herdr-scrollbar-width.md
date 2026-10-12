@@ -12,7 +12,7 @@ Pi leaves the alternate screen and immediately prints its transcript using the t
 
 Entry: `packages/pi-herdr-scrollbar-width/src/index.ts`.
 
-Select it through [Install & select](/guides/install/). The suite loads all 19 extensions by default, with one Git pin shared by every selected component. This feature has no separate installation requirement beyond selecting its suite entry.
+Select it through [Install & select](/guides/install/). The suite loads every entry by default, with one Git pin shared by every selected component. This feature has no separate installation requirement beyond selecting its suite entry.
 
 Use it for the fullscreen-exit symptom, not as a general text-wrapping preference. It does not set a prose measure, alter Markdown parsing, or remove a scrollbar. If wrapping is already wrong during normal fullscreen use, or differs by more than the single reserved column, the described workaround may not address the underlying problem.
 

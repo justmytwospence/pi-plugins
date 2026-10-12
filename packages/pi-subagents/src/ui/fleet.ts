@@ -7,11 +7,12 @@
 // conversation viewer (Esc there comes back here) or the pill's dialog; x twice stops the selected
 // run, x on an ended run dismisses it; b moves a foreground run to the background; Esc, h, or ↑/k
 // past the first row, returns to the prompt. A run whose viewer is open stays until it closes.
-// Keys go through `onTerminalInput`, which sees them before the editor and can consume them, so
-// nothing changes for normal typing: only arrows at an empty prompt, with the editor focused.
+// Keys go through `onTerminalInput` before the editor. Letter shortcuts require positively
+// identified idle Normal mode; native and Insert editors keep their text/edit keys. A modal state
+// change, autocomplete or another focused surface releases the virtual selection immediately.
 // Adapted from tintinweb/pi-subagents (MIT): https://github.com/tintinweb/pi-subagents
 import { type TUI, isKeyRelease, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import { type ActivityPill, type ActivitySection, leavesPromptDown } from "../activity.ts";
+import { type ActivityPill, type ActivitySection, focusedComponent, leavesPromptDown, mainEditorFocused, readEditorMode } from "../activity.ts";
 import type { Run } from "../run.ts";
 import { runLabel } from "../label.ts";
 import { displayTokens } from "../run.ts";
@@ -71,6 +72,8 @@ export interface FleetFrame {
   stopArmed?: boolean;
   /** The selected run is in the foreground and can be moved to the background. */
   canBackground?: boolean;
+  /** Letter shortcuts belong only to positively identified idle Normal mode. */
+  normalKeys?: boolean;
   /** A dim line under the list: `/tasks to see subagents`. */
   note?: string;
   now: number;
@@ -78,7 +81,7 @@ export interface FleetFrame {
   theme: Theme & { inverse?(text: string): string };
 }
 
-export function renderFleet({ roster, selected, active, stopArmed, canBackground, note, now, width, theme }: FleetFrame): string[] {
+export function renderFleet({ roster, selected, active, stopArmed, canBackground, normalKeys = true, note, now, width, theme }: FleetFrame): string[] {
   if (!roster.length && !note) return [];
   const lines: string[] = [];
   const runs = roster.flatMap((e) => (e.kind === "run" ? [e.run] : []));
@@ -87,17 +90,17 @@ export function renderFleet({ roster, selected, active, stopArmed, canBackground
   const chosen = active ? roster[sel] : undefined;
   const bullet = (i: number) => (active && i === sel ? theme.fg("accent", "●") : theme.fg("dim", "○"));
   if (runs.length) {
-    const stoppable = chosen?.kind === "run" && chosen.run.state.status === "running";
-    const dismissable = chosen?.kind === "run" && chosen.run.state.status !== "running";
+    const stoppable = normalKeys && chosen?.kind === "run" && chosen.run.state.status === "running";
+    const dismissable = normalKeys && chosen?.kind === "run" && chosen.run.state.status !== "running";
     const hint = !active
       ? theme.fg("dim", "↓ or ← for subagents")
       : stopArmed && stoppable
         ? theme.fg("error", `x again to stop ${runLabel(chosen.run)}`)
         : chosen?.kind === "pill"
-          ? theme.fg("dim", "j/k select · l/enter view · h/esc back")
+          ? theme.fg("dim", normalKeys ? "j/k select · l/enter view · h/esc back" : "↑/↓ select · enter view · esc back")
           : theme.fg(
               "dim",
-              `j/k select · l/enter view${stoppable ? " · x stop" : ""}${dismissable ? " · x dismiss" : ""}${stoppable && canBackground ? " · b background" : ""} · h/esc back`,
+              `${normalKeys ? "j/k select · l/enter view" : "↑/↓ select · enter view"}${stoppable ? " · x stop" : ""}${dismissable ? " · x dismiss" : ""}${stoppable && canBackground ? " · b background" : ""} · ${normalKeys ? "h/esc" : "esc"} back`,
             );
     lines.push(truncateToWidth(` ${hint}`, width));
     lines.push(truncateToWidth(` ${bullet(0)} ${active && sel === 0 ? theme.fg("text", "main") : "main"}`, width));
@@ -127,7 +130,7 @@ export function renderFleet({ roster, selected, active, stopArmed, canBackground
     const on = active && i === sel;
     const label = on ? inverse(` ${e.pill.label} `) : theme.fg("muted", ` ${e.pill.label} `);
     const alert = e.pill.alert ? ` ${theme.fg("dim", "·")} ${theme.fg("error", e.pill.alert)}` : "";
-    const hint = on && !runs.length ? theme.fg("dim", "  l/enter view · h/esc back") : "";
+    const hint = on && !runs.length ? theme.fg("dim", normalKeys ? "  l/enter view · h/esc back" : "  enter view · esc back") : "";
     lines.push(truncateToWidth(`${label}${alert}${hint}`, width));
   }
   if (note) lines.push(truncateToWidth(` ${theme.fg("dim", note)}`, width));
@@ -154,7 +157,7 @@ export interface FleetSource {
   dismissedAt?(): number;
   /** Runs dismissed with `x`. */
   dismissed?(): ReadonlySet<string>;
-  dismiss?(runId: string): void;
+  dismiss?(runId: string): void | Promise<void>;
   /** The dim line under the list, if any (`/tasks to see subagents` after a success). */
   note?(now: number): string | undefined;
 }
@@ -168,11 +171,14 @@ export class FleetView {
   private registered = false;
   private timer: ReturnType<typeof setInterval> | undefined;
   private active = false;
+  private selectedMode: string | undefined;
   private selected = 0;
   /** The selected row by identity, so rows coming and going do not move the selection. */
   private selectedKey: string | undefined;
   /** The row one `x` away from being stopped. */
   private armedKey: string | undefined;
+  /** Confirmation belongs to the exact live child, not just its stable row id. */
+  private armedTarget: unknown;
   private viewing: string | undefined;
   private stopArmed = false;
   private closeViewer: (() => void) | undefined;
@@ -245,8 +251,8 @@ export class FleetView {
             const entry = roster[this.selected];
             const canBackground = entry?.kind === "run" && Boolean(this.source.actions(entry.run).canBackground?.());
             const now = Date.now();
-            const stopArmed = this.stopArmed && entry !== undefined && entryKey(entry) === this.armedKey;
-            return renderFleet({ roster, selected: this.selected, active: this.active, stopArmed, canBackground, note: this.source.note?.(now), now, width, theme: ui.theme ?? factoryTheme });
+            const stopArmed = this.stopArmed && entry?.kind === "run" && entryKey(entry) === this.armedKey && (entry.run.child ?? entry.run) === this.armedTarget;
+            return renderFleet({ roster, selected: this.selected, active: this.active, stopArmed, canBackground, normalKeys: readEditorMode(this.focused())?.state === "normal", note: this.source.note?.(now), now, width, theme: ui.theme ?? factoryTheme });
           },
           invalidate: () => undefined,
         };
@@ -266,44 +272,66 @@ export class FleetView {
       if (this.active) this.deactivate();
       return undefined;
     }
+    const focused = this.focused();
+    const modal = readEditorMode(focused);
+    const mode = modal?.state ?? "insert";
+    const autocomplete = modal?.autocomplete || (focused as { isShowingAutocomplete?: () => boolean } | undefined)?.isShowingAutocomplete?.();
+    // A virtually selected list must not keep keys after the prompt changes editing state.
+    if (this.active && (autocomplete || mode !== this.selectedMode || (mode !== "normal" && mode !== "insert"))) {
+      this.deactivate();
+      return undefined;
+    }
     if (!this.active) {
+      if (autocomplete || (mode !== "normal" && mode !== "insert")) return undefined;
       // ↓ (or vim's j) at the bottom of the prompt, ← at an empty one; nothing else needs the list worked out.
-      const focused = this.focused();
       // Without a view of the editor, only an empty prompt is safe to leave.
-      const down = focused ? leavesPromptDown(focused, data, matchesKey(data, "down"), data === "j") : matchesKey(data, "down") && this.ui.getEditorText() === "";
+      const down = focused ? leavesPromptDown(focused, data, matchesKey(data, "down"), data === "j" && modal?.state === "normal") : matchesKey(data, "down") && this.ui.getEditorText() === "";
       const left = matchesKey(data, "left") && this.ui.getEditorText() === "";
       if (!down && !left) return undefined;
       const roster = this.roster();
       if (roster.length > 0) {
         this.active = true;
+        this.selectedMode = mode;
         this.select(roster, this.firstRow(roster));
         this.update();
         return { consume: true };
       }
       return undefined;
     }
+    // Insert and plain nonmodal editors retain text/edit keys while a row is highlighted.
+    if (modal?.state !== "normal" && !["up", "down", "enter", "escape", "pageUp", "pageDown"].some((key) => matchesKey(data, key as never))) {
+      this.deactivate();
+      return undefined;
+    }
     const roster = this.roster();
     this.reselect(roster);
     const entry = roster[this.selected];
     // Armed only for the row that was selected when x was first pressed.
-    const armed = this.stopArmed && entry !== undefined && entryKey(entry) === this.armedKey;
+    const armed = this.stopArmed && entry?.kind === "run" && entryKey(entry) === this.armedKey && (entry.run.child ?? entry.run) === this.armedTarget;
     this.stopArmed = false;
     this.armedKey = undefined;
+    this.armedTarget = undefined;
     if (matchesKey(data, "x") && entry?.kind === "run" && entry.run.state.status === "running") {
       // Two presses, so a stray x cannot kill a run.
-      if (armed) this.source.actions(entry.run).stop?.();
+      if (armed) this.invoke(() => this.source.actions(entry.run).stop?.());
       else {
         this.stopArmed = true;
         this.armedKey = entryKey(entry);
+        this.armedTarget = entry.run.child ?? entry.run;
       }
     } else if (matchesKey(data, "x") && entry?.kind === "run") {
       // An ended run: dismissed now instead of at the user's next message.
-      this.source.dismiss?.(entry.run.id);
+      this.invoke(() => this.source.dismiss?.(entry.run.id));
       const left = this.roster();
       if (!left.length) this.active = false;
       this.select(left, Math.min(this.selected, Math.max(0, left.length - 1)));
     } else if (matchesKey(data, "b") && entry?.kind === "run" && this.source.actions(entry.run).canBackground?.()) {
       this.source.actions(entry.run).background?.();
+    } else if (matchesKey(data, "ctrl+u") || matchesKey(data, "ctrl+d") || matchesKey(data, "pageUp") || matchesKey(data, "pageDown")) {
+      const direction = matchesKey(data, "ctrl+u") || matchesKey(data, "pageUp") ? -1 : 1;
+      const page = Math.min(MAX_ROWS, roster.length);
+      const step = matchesKey(data, "ctrl+u") || matchesKey(data, "ctrl+d") ? Math.max(1, Math.floor(page / 2)) : page;
+      this.select(roster, Math.max(0, Math.min(roster.length - 1, this.selected + direction * step)));
     } else if (matchesKey(data, "down") || matchesKey(data, "j")) {
       this.select(roster, Math.min(roster.length - 1, this.selected + 1));
     } else if (matchesKey(data, "up") || matchesKey(data, "k")) {
@@ -323,17 +351,22 @@ export class FleetView {
     return { consume: true };
   }
 
-  private focused(): unknown {
-    const tui = this.tui as unknown as { getFocusedComponent?: () => unknown; focusedComponent?: unknown } | undefined;
-    return typeof tui?.getFocusedComponent === "function" ? tui.getFocusedComponent() : tui?.focusedComponent;
+  /** Input callbacks cannot await another source; contain synchronous and asynchronous failures. */
+  private invoke(action: () => void | Promise<void>): void {
+    try {
+      void Promise.resolve(action()).catch(() => undefined);
+    } catch {
+      // A source's failure must not take over the keyboard.
+    }
   }
 
-  /** Pi's editor has `getText` and `setText`; its dialogs and overlays do not. Unknown focus counts as the editor. */
+  private focused(): unknown {
+    return focusedComponent(this.tui);
+  }
+
+  /** Whether the main prompt has the keyboard (activity.ts: the component's reported context, else pi's editor shape). */
   private editorFocused(): boolean {
-    const focused = this.focused();
-    if (focused == null) return true;
-    const c = focused as { getText?: unknown; setText?: unknown };
-    return typeof c.getText === "function" && typeof c.setText === "function";
+    return mainEditorFocused(this.focused());
   }
 
   private deactivate() {

@@ -8,7 +8,7 @@ Status footer replaces Pi's footer, not its working indicator, task widgets or t
 
 ## Enable and requirements
 
-Select `packages/pi-status-footer/src/index.ts` using [Install & select](/guides/install/). All 19 suite entries load by default, and one Git pin versions the selected components together.
+Select `packages/pi-status-footer/src/index.ts` using [Install & select](/guides/install/). All 23 suite entries load by default, and one Git pin versions the selected components together.
 
 The footer runs in Pi's terminal UI; print, JSON and RPC sessions do not start its background work. Git supplies repository measurements. Nerd Font symbol support is needed for the MCP plug glyph, not for the rest of the status text. Use the suite's tested Pi version from the installation guide rather than assuming an older component minimum covers its current UI hooks.
 

@@ -9,9 +9,11 @@
     "types": [
       "node"
     ],
-    "rootDir": "."
+    "rootDir": ".",
+    "allowImportingTsExtensions": true
   },
   "include": [
-    "src/*.ts"
+    "src/*.ts",
+    "test/*.ts"
   ]
 }

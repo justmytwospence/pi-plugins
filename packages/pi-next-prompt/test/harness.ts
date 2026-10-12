@@ -86,6 +86,7 @@ export function harness(options: { tools?: any[]; exec?: (cmd: string, args: str
         ui.editorText = text;
       },
       setWidget: (key: string, content: any, opts?: any) => {
+        if (typeof content === "function") content(tui, { fg: (_c: string, s: string) => s, bold: (s: string) => s });
         if (content === undefined) ui.widgets.delete(key);
         else ui.widgets.set(key, { content, opts });
       },
@@ -111,6 +112,8 @@ export function harness(options: { tools?: any[]; exec?: (cmd: string, args: str
         return w.content({}, { fg: (_c: string, s: string) => s, bold: (s: string) => s }).render(width);
       },
     };
+    const editor = { getText: () => ui.editorText, render: () => [], isShowingAutocomplete: () => false, [Symbol.for("pi-plugins.editor-surface.v1")]: "main" };
+    const tui = { terminal: { columns: 80 }, getFocusedComponent: () => editor, requestRender: () => undefined };
     lastCtx = {
       cwd: "/Users/me/Projects/app",
       hasUI: true,

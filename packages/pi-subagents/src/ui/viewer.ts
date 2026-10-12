@@ -1,11 +1,14 @@
 // A live, auto-scrolling view of one subagent's conversation, full screen under a banner. Enter opens a composer
 // that steers the child; `x` twice stops it; `b` moves a foreground run to the background; `m` cycles what renders as Markdown; Esc (or q)
-// closes. It stays open when the run ends.
+// closes. It stays open when the run ends. ↑/↓ (j/k), PgUp/PgDn, Ctrl+U/Ctrl+D (half a page) and
+// Home/End scroll. The composer is the suite's editor (pi-vim's, when loaded: Enter or :w steers,
+// :q or Escape in Normal mode cancels, Ctrl+U/D scroll the conversation) or pi's one-line input.
 // Adapted from tintinweb/pi-subagents (MIT): https://github.com/tintinweb/pi-subagents
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { runLabel } from "../label.ts";
 import { type Component, Input, Markdown, type MarkdownTheme, type TUI, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { type Message, describeActivity, describeTool, messageText } from "../conversation.ts";
+import { type EmbeddedEditor, type EditorFactoryOptions, EDITOR_MODE, EDITOR_SURFACE, INPUT_CONTEXT, readEditorMode, requestEditorFactory } from "../editor-contract.ts";
 import type { Run } from "../run.ts";
 import { type Theme, dimAll, jev, modelAndEffort, runStats, statusIcon } from "./format.ts";
 
@@ -25,10 +28,12 @@ const MARKDOWN_LABELS: Record<MarkdownMode, string> = { assistant: "md", all: "m
 export interface ViewerActions {
   /** Send a steering message; false when the run can no longer be steered. */
   steer?: (message: string) => boolean;
-  stop?: () => void;
+  stop?: () => void | Promise<void>;
   /** Move a foreground run's tool call to the background, so the main agent can go on. */
   background?: () => void;
   canBackground?: () => boolean;
+  /** pi's event bus, to ask for the suite's editor factory for the composer (editor-contract.ts). */
+  events?: { emit(channel: string, data: unknown): void };
 }
 
 /** Pi's KeybindingsManager, structurally. */
@@ -71,7 +76,19 @@ export class ConversationViewer implements Component {
   private scroll = 0;
   private follow = true;
   private stopArmed = false;
-  private composer: Input | undefined;
+  private composer: EmbeddedEditor | undefined;
+  private hasFocus = false;
+
+  get focused(): boolean { return this.hasFocus; }
+  set focused(value: boolean) {
+    this.hasFocus = value;
+    if (this.composer) this.composer.focused = value;
+  }
+
+  readonly [EDITOR_SURFACE] = "embedded";
+  [EDITOR_MODE]() { return readEditorMode(this.composer); }
+  /** Lines the composer takes under the conversation (one for pi's input; a suite editor wraps). */
+  private composerLines: string[] = [];
   private width = 80;
   private closed = false;
   private readonly unsubscribe: () => void;
@@ -119,8 +136,23 @@ export class ConversationViewer implements Component {
     return this.keybindings ? this.keybindings.matches(data, id) : matchesKey(data, fallback as never);
   }
 
+  /** Read-only scrolling content (its composer is an editor of its own): global listeners leave its keys alone. */
+  [INPUT_CONTEXT](): "viewer" | "editor" {
+    return this.composer ? "editor" : "viewer";
+  }
+
+  /** Scroll by `lines` (negative up), as Ctrl+U/Ctrl+D do by half a page; follows again at the end. */
+  scrollBy(lines: number): void {
+    const total = this.contentLines(this.width).length;
+    const max = Math.max(0, total - this.viewport());
+    this.scroll = Math.max(0, Math.min(max, Math.min(this.scroll, max) + lines));
+    this.follow = this.scroll >= max;
+    this.tui.requestRender();
+  }
+
   handleInput(data: string): void {
     if (this.composer) {
+      // The composer owns every key while open (the suite's editor hands Ctrl+U/D back through scrollViewport).
       this.composer.handleInput(data);
       this.tui.requestRender();
       return;
@@ -152,7 +184,11 @@ export class ConversationViewer implements Component {
       if (this.canStop()) {
         if (this.stopArmed) {
           this.stopArmed = false;
-          this.actions.stop?.();
+          try {
+            void Promise.resolve(this.actions.stop?.()).catch(() => undefined);
+          } catch {
+            // An input callback cannot let a failed stop escape.
+          }
         } else this.stopArmed = true;
         this.tui.requestRender();
       }
@@ -162,10 +198,13 @@ export class ConversationViewer implements Component {
     const total = this.contentLines(this.width).length;
     const page = this.viewport();
     const max = Math.max(0, total - page);
+    const half = Math.max(1, Math.floor(page / 2));
     if (this.key(data, "tui.select.up", "up") || matchesKey(data, "k")) this.scroll = Math.max(0, Math.min(this.scroll, max) - 1);
     else if (this.key(data, "tui.select.down", "down") || matchesKey(data, "j")) this.scroll = Math.min(max, this.scroll + 1);
-    else if (this.key(data, "tui.select.pageUp", "pageUp") || matchesKey(data, "shift+up")) this.scroll = Math.max(0, Math.min(this.scroll, max) - page);
-    else if (this.key(data, "tui.select.pageDown", "pageDown") || matchesKey(data, "shift+down")) this.scroll = Math.min(max, this.scroll + page);
+    else if (matchesKey(data, "ctrl+u") || this.key(data, "tui.altScreen.halfPageUp", "ctrl+u")) this.scroll = Math.max(0, Math.min(this.scroll, max) - half);
+    else if (matchesKey(data, "ctrl+d") || this.key(data, "tui.altScreen.halfPageDown", "ctrl+d")) this.scroll = Math.min(max, this.scroll + half);
+    else if (this.key(data, "tui.select.pageUp", "pageUp") || matchesKey(data, "pageUp") || matchesKey(data, "shift+up")) this.scroll = Math.max(0, Math.min(this.scroll, max) - page);
+    else if (this.key(data, "tui.select.pageDown", "pageDown") || matchesKey(data, "pageDown") || matchesKey(data, "shift+down")) this.scroll = Math.min(max, this.scroll + page);
     else if (matchesKey(data, "home")) this.scroll = 0;
     else if (matchesKey(data, "end")) this.scroll = max;
     else return;
@@ -180,26 +219,77 @@ export class ConversationViewer implements Component {
   }
 
   private openComposer() {
-    const input = new Input();
-    input.focused = true;
-    input.onSubmit = (value) => {
-      this.composer = undefined;
+    const submit = (value: string) => {
+      this.closeComposer();
       const message = value.trim();
       if (message) this.actions.steer?.(message);
       this.follow = true;
       this.tui.requestRender();
     };
-    input.onEscape = () => {
-      this.composer = undefined;
+    const cancel = () => {
+      this.closeComposer();
       this.tui.requestRender();
     };
+    // The suite's editor (pi-vim's) when a provider is loaded: modal editing, :w steers, :q cancels.
+    const suite = requestEditorFactory(this.actions.events);
+    if (suite) {
+      try {
+        const editor = suite.factory!({
+          surface: "embedded",
+          tui: this.tui as EditorFactoryOptions["tui"],
+          theme: this.editorTheme(),
+          keybindings: this.keybindings as EditorFactoryOptions["keybindings"],
+          onSubmit: submit,
+          onCancel: cancel,
+          scrollViewport: (direction) => this.scrollBy(direction * Math.max(1, Math.floor(this.viewport() / 2))),
+          notify: () => undefined,
+          initialMode: "insert",
+        });
+        editor.focused = this.focused;
+        this.composer = editor;
+        this.tui.requestRender();
+        return;
+      } catch {
+        // A provider's bug must not take steering away: pi's input follows.
+      }
+    }
+    const input = new Input();
+    input.focused = this.focused;
+    input.onSubmit = submit;
+    input.onEscape = cancel;
     this.composer = input;
     this.tui.requestRender();
   }
 
+  private closeComposer() {
+    const composer = this.composer;
+    this.composer = undefined;
+    this.composerLines = [];
+    try {
+      composer?.dispose?.();
+    } catch {
+      // Already gone.
+    }
+  }
+
+  /** Pi's editor theme shape, from the viewer's theme. */
+  private editorTheme() {
+    const th = this.theme;
+    return {
+      borderColor: (text: string) => th.fg("accent", text),
+      selectList: {
+        selectedPrefix: (text: string) => th.fg("accent", text),
+        selectedText: (text: string) => th.fg("accent", text),
+        description: (text: string) => th.fg("muted", text),
+        scrollInfo: (text: string) => th.fg("dim", text),
+        noMatch: (text: string) => th.fg("dim", text),
+      },
+    };
+  }
+
   private viewport() {
     const rows = Math.floor((this.tui.terminal.rows * VIEWER_HEIGHT_PCT) / 100);
-    return Math.max(MIN_VIEWPORT, rows - CHROME_LINES - (this.composer ? 1 : 0));
+    return Math.max(MIN_VIEWPORT, rows - CHROME_LINES - (this.composer ? Math.max(1, this.composerLines.length) : 0));
   }
 
   render(width: number): string[] {
@@ -223,6 +313,16 @@ export class ConversationViewer implements Component {
     lines.push(row(dimAll(`  ↳ ${modelAndEffort(run, th, true)} · ${run.async ? "async" : "sync"} · ${run.id}${status}`, th)));
     lines.push(rule);
 
+    // The composer's lines come first: a suite editor may wrap, and the viewport makes room.
+    if (this.composer) {
+      let rendered: string[];
+      try {
+        rendered = this.composer.render(inner);
+      } catch {
+        rendered = [];
+      }
+      this.composerLines = rendered.length ? rendered.slice(0, Math.max(1, Math.floor(this.tui.terminal.rows / 3))) : [""];
+    }
     const content = this.contentLines(inner);
     const page = this.viewport();
     const max = Math.max(0, content.length - page);
@@ -232,7 +332,7 @@ export class ConversationViewer implements Component {
 
     lines.push(rule);
     if (this.composer) {
-      lines.push(row(this.composer.render(inner)[0] ?? ""));
+      for (const l of this.composerLines) lines.push(row(l));
       lines.push(row(spread(th.fg("accent", "✎ steer"), th.fg("dim", "Enter send · Esc cancel"), inner)));
     } else {
       const actions: string[] = [];
@@ -242,7 +342,7 @@ export class ConversationViewer implements Component {
       const position = content.length <= page ? "all" : `${Math.round(((start + page) / content.length) * 100)}%`;
       actions.push(th.fg("dim", `m ${MARKDOWN_LABELS[ConversationViewer.markdownMode]}`));
       const sep = th.fg("dim", " · ");
-      const nav = th.fg("dim", "j/k scroll · PgUp/PgDn · h/esc back");
+      const nav = th.fg("dim", "^U/^D half · j/k · PgUp/Dn · h/esc back");
       // The line count goes first when the footer is short of room.
       const withCount = [...actions, th.fg("dim", `${content.length} lines · ${position}`)].join(sep);
       const left = visibleWidth(withCount) + visibleWidth(nav) + 1 <= inner ? withCount : actions.join(sep);
@@ -350,6 +450,7 @@ export class ConversationViewer implements Component {
     this.closed = true;
     this.unsubscribe();
     clearInterval(this.timer);
+    this.closeComposer();
   }
 }
 

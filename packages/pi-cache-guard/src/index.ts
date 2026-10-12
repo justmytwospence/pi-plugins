@@ -155,6 +155,16 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
   let sessionOn = true;
   // "Send, and stop asking": the warning is off for this session, the clock and herdr stay on.
   let askOn = true;
+  /** Session and settings switches that allow a cold interactive prompt to ask. */
+  const warningOn = () => sessionOn && askOn && settings.enabled && settings.warn.enabled;
+  /** The warning's state for `/cache-guard status`, naming what turned it off. */
+  const warningLine = () => {
+    if (!settings.enabled) return "off (\"enabled\": false in settings)";
+    if (!settings.warn.enabled) return "off (\"warn.enabled\": false in settings)";
+    if (!sessionOn) return `off for this session (/${NAME} on turns it back on)`;
+    if (!askOn) return `muted for this session after "Send, and stop asking" (/${NAME} on turns it back on)`;
+    return `on, from ${formatCost(settings.warn.minCost)} (or ${formatTokens(settings.warn.minTokens)} tokens without prices)`;
+  };
   // A held prompt the `/cache-guard fresh` command carries into a new session.
   let pending: { text: string; images?: ImageContent[] } | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -266,6 +276,7 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
     const text = event.text.trim();
     if (!text || text.startsWith("/") || text.startsWith("!")) return { action: "continue" };
     settings = loadSettings(context.cwd);
+    if (!warningOn()) return { action: "continue" };
     const v = current(context);
     if (!v?.cold) return { action: "continue" };
     const cost = coldCost(v);
@@ -425,6 +436,14 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
     handler: async (args, context) => {
       const command = args.trim().split(/\s+/u)[0] || "status";
       const rest = args.trim().slice(command.length).trim();
+      if (!SUBCOMMANDS.includes(command)) {
+        context.ui.notify(`/${NAME}: unknown subcommand "${command}". Use one of: ${SUBCOMMANDS.join(", ")}.`, "warning");
+        return;
+      }
+      if (command !== "compact" && rest) {
+        context.ui.notify(`/${NAME} ${command} takes no argument (got "${rest}").`, "warning");
+        return;
+      }
       if (command === "jev") return jevCommand(context);
       if (command === "compact") return compactCommand(rest, context);
       if (command === "fresh") {
@@ -474,10 +493,17 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
         if (v.cold) {
           const cost = coldCost(v);
           lines.push(describeMiss(v.cold, v.last.tokens, cost));
-          lines.push(worthWarning(v.last.tokens, cost, settings) ? "The next prompt asks before sending." : "Below the warning threshold.");
+          if (!warningOn()) {
+            const reason = sessionOn && settings.enabled && settings.warn.enabled ? "muted for this session" : "off";
+            lines.push(`The next prompt is sent without asking: the warning is ${reason}.`);
+          } else if (!worthWarning(v.last.tokens, cost, settings)) {
+            lines.push("Below the warning threshold.");
+          } else {
+            lines.push(context.hasUI ? "The next prompt asks before sending." : "The next prompt is sent without asking: no UI is available.");
+          }
         }
       }
-      lines.push(`Warning: ${sessionOn && settings.enabled && settings.warn.enabled ? `on, from ${formatCost(settings.warn.minCost)} (or ${formatTokens(settings.warn.minTokens)} tokens without prices)` : "off"}. Keep-warm: Pi's cacheWarming setting (/session shows its next decision).`);
+      lines.push(`Warning: ${warningLine()}. Keep-warm: Pi's cacheWarming setting (/session shows its next decision).`);
       lines.push(jevLine(await lean.jev(context), settings, lean.savedChars()));
       context.ui.notify(lines.join("\n"), "info");
     },

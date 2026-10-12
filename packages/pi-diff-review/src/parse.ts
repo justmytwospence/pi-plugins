@@ -30,6 +30,9 @@ export interface FileDiff {
 	newPath: string;
 	status: FileStatus;
 	binary: boolean;
+	/** Blob identities from the index header, including binary content not shown as lines. */
+	oldBlob?: string;
+	newBlob?: string;
 	oldMode?: string;
 	newMode?: string;
 	similarity?: number;
@@ -165,7 +168,12 @@ export function parseDiff(patch: string): FileDiff[] {
 			continue;
 		}
 
-		if (line.startsWith("--- ")) {
+		const index = /^index ([0-9a-f]+)\.\.([0-9a-f]+)(?: (\d+))?$/.exec(line);
+		if (index) {
+			file.oldBlob = index[1];
+			file.newBlob = index[2];
+			if (index[3]) file.oldMode = file.newMode = index[3];
+		} else if (line.startsWith("--- ")) {
 			const p = line.slice(4);
 			if (p !== "/dev/null") file.oldPath = stripPrefix(p, "a/");
 		} else if (line.startsWith("+++ ")) {

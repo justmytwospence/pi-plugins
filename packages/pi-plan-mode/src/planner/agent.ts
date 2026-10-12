@@ -1,6 +1,7 @@
 // One planner: an in-process Pi session you can watch, talk to, and answer, from the planning
 // screen. The same class serves `/plan` with one planner and with two; nothing about it depends on
 // how many there are.
+import { randomUUID } from "node:crypto";
 import type { AgentSessionEvent, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { PiChat, piChatTheme } from "../app/pi-chat.js";
 import { formatModelSpec, type ModelSpec } from "../implementation-models.js";
@@ -80,6 +81,8 @@ export interface PlannerAgentOptions {
   /** A plan already submitted earlier (restored runs). */
   plan?: string;
   revision?: number;
+  /** Reconstructed branch state waits for explicit input, even before its session file was saved. */
+  restored?: boolean;
   onChange(): void;
   createSession?: PlannerSessionFactory;
 }
@@ -113,6 +116,9 @@ export class PlannerAgent {
   private softTimer: ReturnType<typeof setTimeout> | undefined;
   private hardTimer: ReturnType<typeof setTimeout> | undefined;
   private disposed = false;
+  private turnEpoch = 0;
+  private readonly operationId = randomUUID();
+  private readonly listeners = new Set<() => void>();
   /** Called when the current turn settles (or fails): consult() waits on them. */
   private settleWaiters: Array<() => void> = [];
 
@@ -133,12 +139,19 @@ export class PlannerAgent {
       this.status = "idle";
       this.stats.endedAt = this.stats.startedAt;
       this.record(`Plan ${this.id}${this.revision > 1 ? ` v${this.revision}` : ""} restored.`);
-    } else if (options.sessionFile) {
+    } else if (options.sessionFile || options.restored) {
       // Restored without a plan (e.g. mid-conversation): it waits for you, not starting.
       this.status = "idle";
       this.stats.endedAt = this.stats.startedAt;
       this.record(`${this.id} restored.`);
     }
+  }
+
+  /** Activity hosts subscribe independently of the planning screen. */
+  subscribe(listener: () => void): () => void {
+    if (this.disposed) return () => undefined;
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
   }
 
   get access() {
@@ -150,14 +163,20 @@ export class PlannerAgent {
     return formatModelSpec(this.spec);
   }
 
+  /** A stable row may receive another turn: confirmation must name this operation, not just A. */
+  get stopToken() {
+    return `${this.operationId}:${this.turnEpoch}`;
+  }
+
   get working() {
     return this.status === "starting" || this.status === "working" || this.status === "asking";
   }
 
   /** Start planning with `prompt` (the task and how to work). */
   async start(prompt: string, host: ExtensionContext) {
+    const epoch = this.turnEpoch;
     const handle = await this.open(host);
-    if (!handle) return;
+    if (!handle || epoch !== this.turnEpoch) return;
     this.send(prompt);
   }
 
@@ -172,10 +191,13 @@ export class PlannerAgent {
     this.trace.user(shown?.trim() || message, from);
     this.chat.user(shown?.trim() || message, from);
     this.changed();
+    const epoch = this.turnEpoch;
     const handle = await this.open(host);
-    if (!handle) return;
+    if (!handle || epoch !== this.turnEpoch) return;
     if (handle.session.isStreaming) {
-      void handle.session.steer(message).catch((error: unknown) => this.fail(error));
+      void handle.session.steer(message).catch((error: unknown) => {
+        if (epoch === this.turnEpoch) this.fail(error);
+      });
       return;
     }
     this.send(message);
@@ -242,10 +264,18 @@ export class PlannerAgent {
 
   /** Stop the current turn (the session stays, so you can keep talking). */
   async stop() {
+    if (this.disposed) return;
+    this.turnEpoch++;
     this.pending?.resolve(undefined);
     this.pending = undefined;
-    if (!this.handle?.session.isStreaming) return;
+    this.clearTimers();
+    this.subagents.cancel();
+    this.status = "stopped";
+    this.stats.endedAt = Date.now();
     this.record("Stopped by you.", "warning");
+    this.settle();
+    this.changed();
+    if (!this.handle?.session.isStreaming) return;
     try {
       await this.handle.session.abort();
     } catch {
@@ -261,6 +291,8 @@ export class PlannerAgent {
     this.pending?.resolve(undefined);
     this.pending = undefined;
     this.unsubscribe?.();
+    this.listeners.clear();
+    this.subagents.cancel();
     try {
       this.handle?.dispose();
     } catch {
@@ -271,6 +303,7 @@ export class PlannerAgent {
   }
 
   private open(host: ExtensionContext) {
+    if (this.disposed) return Promise.resolve(undefined);
     this.host = host;
     if (this.handle) return Promise.resolve(this.handle);
     this.opening ??= this.create(host);
@@ -278,6 +311,7 @@ export class PlannerAgent {
   }
 
   private async create(host: ExtensionContext) {
+    const epoch = this.turnEpoch;
     this.status = "starting";
     this.stats = { ...this.stats, startedAt: Date.now(), endedAt: undefined };
     this.changed();
@@ -287,6 +321,7 @@ export class PlannerAgent {
         ...this.options.access.policy,
         ask: (questions, signal) => this.ask(questions, signal),
         onPlan: (plan) => {
+          if (this.disposed) return;
           this.plan = plan;
           this.revision += 1;
           this.stats.lastActivity = "submitted plan";
@@ -313,24 +348,29 @@ export class PlannerAgent {
       this.handle = handle;
       this.sessionFile = handle.file ?? this.sessionFile;
       this.unsubscribe = handle.subscribe((event) => this.onEvent(event));
-      this.status = "idle";
+      if (epoch === this.turnEpoch) this.status = "idle";
       this.changed();
       return handle;
     } catch (error: unknown) {
       this.opening = undefined;
-      this.fail(error);
+      if (epoch === this.turnEpoch) this.fail(error);
       return undefined;
     }
   }
 
   private send(message: string) {
+    if (this.disposed) return;
     const session = this.handle?.session;
     if (!session) return;
     this.beginTurn();
-    session.prompt(message, { expandPromptTemplates: false }).catch((error: unknown) => this.fail(error));
+    const epoch = this.turnEpoch;
+    session.prompt(message, { expandPromptTemplates: false }).catch((error: unknown) => {
+      if (epoch === this.turnEpoch) this.fail(error);
+    });
   }
 
   private ask(questions: PlanModeQuestion[], signal: AbortSignal | undefined) {
+    if (this.disposed) return Promise.resolve(undefined);
     return new Promise<PlanModeQuestionAnswer[] | undefined>((resolve) => {
       const done = (answers: PlanModeQuestionAnswer[] | undefined) => {
         signal?.removeEventListener("abort", onAbort);
@@ -353,6 +393,7 @@ export class PlannerAgent {
   }
 
   private beginTurn() {
+    this.turnEpoch++;
     this.status = "working";
     this.error = undefined;
     this.stats = {
@@ -399,6 +440,7 @@ export class PlannerAgent {
   }
 
   private onEvent(event: AgentSessionEvent) {
+    if (this.disposed) return;
     const record = event as unknown as Record<string, unknown>;
     if (record.type === "tool_execution_update" && record.toolName === PLAN_SUBAGENTS_TOOL_NAME) {
       const partial = isRecord(record.partialResult) ? record.partialResult : undefined;
@@ -452,7 +494,8 @@ export class PlannerAgent {
       }
       case "agent_settled":
         this.clearTimers();
-        if (this.status !== "asking") this.status = this.error && !this.plan ? "failed" : "idle";
+        if (this.status !== "asking" && this.status !== "stopped")
+          this.status = this.error && !this.plan ? "failed" : "idle";
         this.stats.endedAt = Date.now();
         this.stats.lastActivity = this.plan ? "plan ready" : this.error ? "failed" : "waiting for you";
         this.settle();
@@ -470,6 +513,7 @@ export class PlannerAgent {
   }
 
   private fail(error: unknown) {
+    if (this.disposed) return;
     this.clearTimers();
     this.error = error instanceof Error ? error.message : String(error);
     this.status = "failed";
@@ -560,6 +604,14 @@ export class PlannerAgent {
   }
 
   private changed() {
+    if (this.disposed) return;
+    for (const listener of this.listeners) {
+      try {
+        listener();
+      } catch {
+        // An activity host must never break a planner.
+      }
+    }
     try {
       this.options.onChange();
     } catch {

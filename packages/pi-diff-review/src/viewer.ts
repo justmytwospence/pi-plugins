@@ -8,7 +8,6 @@ import {
 	type Component,
 	CURSOR_MARKER,
 	decodeKittyPrintable,
-	Editor,
 	type Focusable,
 	matchesKey,
 	type SelectItem,
@@ -21,11 +20,12 @@ import {
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import type { Config } from "./config.ts";
+import { type CommentEditor, type EditorCreator, editorHint, editorOwnsEscape, INPUT_CONTEXT, nativeEditor } from "./editor.ts";
 import { type Layout, layout, type Row, rowLineOn, selectionFromRows, type ViewMode } from "./model.ts";
 import { type FileDiff, filePath } from "./parse.ts";
 import { type FileState, Painter, type RowState } from "./render.ts";
-import type { ResolvedScope, ScopeRequest } from "./scopes.ts";
-import type { Turn } from "./session.ts";
+import { parseScopeArgs, type ResolvedScope, type ScopeRequest } from "./scopes.ts";
+import { type EditorDrafts, type FileChecks, fileKey, isChecked, pruneChecks, type Turn } from "./session.ts";
 import { newThreadId, type Thread } from "./threads.ts";
 
 export interface ReviewData {
@@ -37,9 +37,17 @@ export interface ReviewData {
 export interface ViewerHost {
 	/** Shared with the extension, which attaches the agent's replies while the viewer is open. */
 	threads: Thread[];
+	/** Files marked reviewed with `r`, keyed by the diff that was seen; shared and persisted like threads. */
+	checks: FileChecks;
+	/** Cancelled editor drafts, shared with the extension and persisted separately from sendable threads. */
+	editorDrafts: EditorDrafts;
+	/** Makes the comment editor; Pi's native editor when absent. */
+	editor?: EditorCreator;
 	config: Config;
 	turns(): Turn[];
 	load(req: ScopeRequest): Promise<ReviewData | string>;
+	/** Persist the displayed eligible live snapshot immediately; marking never closes the viewer. */
+	onMark(scope: ResolvedScope): void;
 	/** Send draft threads to the agent; returns a status message. */
 	send(threads: Thread[], scopeLabel: string): string;
 	persist(): void;
@@ -47,15 +55,9 @@ export interface ViewerHost {
 	copy(text: string): Promise<void>;
 }
 
-export interface ViewerResult {
-	/** Record the reviewed snapshot so the next "unreviewed" diff starts here. */
-	markReviewed: boolean;
-	scope: ResolvedScope;
-}
-
 type Panel =
 	| { kind: "none" }
-	| { kind: "editor"; editor: Editor; title: string; onSave: (text: string) => void }
+	| { kind: "editor"; editor: CommentEditor; title: string; cancel: () => void }
 	| { kind: "picker"; list: SelectList; title: string }
 	| { kind: "prompt"; prefix: "/" | ":"; text: string };
 
@@ -72,9 +74,8 @@ const HELP: Array<[string, string]> = [
 	["s", "suggest an edit to the line or selection"],
 	["e  x", "edit / delete the comment under the cursor"],
 	[":w  :wq  ZZ", "send drafts to the agent (and close)"],
-	["q  esc", "close, marking unreviewed changes as reviewed"],
-	["Q  :q!", "close without marking them reviewed"],
-	["r", "mark the file reviewed (folds it) / unmark"],
+	["q  esc  Q  :q!", "close; drafts and file checks are kept, nothing is marked reviewed"],
+	["r", "check the file as reviewed (folds it) / uncheck; checks persist until its diff changes"],
 	["za  enter", "fold / unfold the file; enter also expands large files"],
 	["zM zR", "fold / unfold all files"],
 	["S", "pick the scope: unreviewed, a turn, session, HEAD, staged, branch"],
@@ -84,7 +85,7 @@ const HELP: Array<[string, string]> = [
 	["o", "open the file at the line in $EDITOR (herdr split)"],
 	["y", "copy path:line"],
 	["R", "reload"],
-	[":mark", "mark everything shown as reviewed now"],
+	[":mark", "mark the snapshot shown as reviewed; stay open (unreviewed and session scopes)"],
 	[":scope <s>", "unreviewed | turn [n] | session | head | staged | branch [ref] | <ref>"],
 ];
 
@@ -99,7 +100,8 @@ export class DiffViewer implements Component, Focusable {
 	private visualFrom: number | undefined;
 	private folded = new Set<string>();
 	private expanded = new Set<string>();
-	private reviewedFiles = new Set<string>();
+	private disposed = false;
+	private loadGeneration = 0;
 	private sidebar: boolean;
 	private sidebarFocus = false;
 	private sidebarIndex = 0;
@@ -124,16 +126,23 @@ export class DiffViewer implements Component, Focusable {
 		private keybindings: KeybindingsManager,
 		private host: ViewerHost,
 		data: ReviewData,
-		private done: (r: ViewerResult) => void,
+		private done: () => void,
 	) {
 		this.data = data;
 		const cols = tui.terminal.columns;
 		this.mode = host.config.view === "auto" ? (cols >= host.config.splitMinWidth ? "split" : "unified") : host.config.view;
 		this.sidebar = host.config.fileList && cols >= 100;
 		this.painter = new Painter(theme, data.files, host.config.wrap);
+		this.applyChecks();
 		this.rebuild();
 		this.cursor = this.firstContentRow();
 		if (data.files.length === 0) this.flash(`No changes (${data.scope.label}). S picks another scope.`);
+	}
+
+	/** Drop checks whose file changed since, and start checked files folded. */
+	private applyChecks(): void {
+		pruneChecks(this.host.checks, this.data.files);
+		for (const f of this.data.files) if (isChecked(this.host.checks, f)) this.folded.add(filePath(f));
 	}
 
 	// ---- state ---------------------------------------------------------------------------------
@@ -190,7 +199,7 @@ export class DiffViewer implements Component, Focusable {
 		const path = f ? filePath(f) : "";
 		return {
 			folded: this.folded.has(path),
-			reviewed: this.reviewedFiles.has(path),
+			reviewed: f !== undefined && isChecked(this.host.checks, f),
 			comments: this.host.threads.filter((t) => t.file === path && t.status !== "resolved").length,
 		};
 	}
@@ -241,9 +250,43 @@ export class DiffViewer implements Component, Focusable {
 		this.tui.requestRender();
 	}
 
-	private close(markReviewed: boolean): void {
+	/** Release the embedded editor and save its draft even if Pi closes the overlay externally. */
+	dispose(): void {
+		if (this.disposed) return;
+		this.disposed = true;
+		this.closeEditor();
 		this.host.persist();
-		this.done({ markReviewed, scope: this.data.scope });
+	}
+
+	[INPUT_CONTEXT](): "editor" | "filter" | "list" | "viewer" {
+		if (this.panel.kind === "editor") return "editor";
+		if (this.panel.kind === "prompt") return "filter";
+		return this.panel.kind === "picker" || this.sidebarFocus ? "list" : "viewer";
+	}
+
+	/** Close without marking anything reviewed: drafts, checks and answers stay as they are. */
+	private close(): void {
+		if (this.disposed) return;
+		this.dispose();
+		this.done();
+	}
+
+	/** Whether `:mark` applies to what is shown: a live working tree in the unreviewed or session scope. */
+	private markable(): boolean {
+		const k = this.data.scope.request.kind;
+		return this.data.scope.live && (k === "unreviewed" || k === "session");
+	}
+
+	/** `:mark`: persist the snapshot on screen (not a fresh one), confirm, and stay open. */
+	private mark(): void {
+		if (this.disposed) return;
+		if (!this.markable()) {
+			this.flash(`:mark needs the unreviewed or session scope (this is ${this.data.scope.label})`, true);
+			return;
+		}
+		this.host.onMark(this.data.scope);
+		this.rebuild();
+		this.flash("displayed snapshot marked reviewed; review stays open");
 	}
 
 	// ---- rendering -----------------------------------------------------------------------------
@@ -308,7 +351,7 @@ export class DiffViewer implements Component, Focusable {
 		const p = this.panel;
 		if (p.kind === "editor") {
 			const title = t.fg("accent", ` ${p.title}`);
-			const hint = t.fg("dim", " enter save · shift+enter newline · esc cancel");
+			const hint = t.fg("dim", editorHint(p.editor));
 			p.editor.focused = this.focused;
 			return [truncateToWidth(title + hint, width, "…"), ...p.editor.render(width)];
 		}
@@ -516,18 +559,86 @@ export class DiffViewer implements Component, Focusable {
 		return undefined;
 	}
 
-	private openEditor(title: string, prefill: string, onSave: (text: string) => void): void {
-		const st = this.selectTheme();
-		const editor = new Editor(this.tui, { borderColor: (s) => this.theme.fg("borderAccent", s), selectList: st }, { paddingX: 1 });
-		editor.setText(prefill);
-		editor.onSubmit = (text) => {
+	/** Draft identities include the displayed file content, operation, side and anchor, not UI titles. */
+	private editorDraftKey(path: string, anchor: unknown[]): string {
+		const file = this.data.files.find((f) => filePath(f) === path);
+		return JSON.stringify([path, file ? fileKey(file) : null, ...anchor]);
+	}
+
+	/** Open an editor, restoring only the cancelled draft for this exact file content and anchor. */
+	private openEditor(
+		key: string,
+		title: string,
+		prefill: string,
+		onSave: (text: string) => void,
+		mode: "insert" | "normal" = "insert",
+	): void {
+		const held = this.host.editorDrafts.get(key);
+		const initialText = held ?? prefill;
+		let current: CommentEditor | undefined;
+		const active = () => this.panel.kind === "editor" && this.panel.editor === current;
+		const finish = (): boolean => {
+			if (!active()) return false;
 			this.panel = { kind: "none" };
-			onSave(text);
-			this.rebuild();
-			this.tui.requestRender();
+			try {
+				current?.dispose?.();
+			} catch {
+				// Optional editor cleanup must not lose the draft or prevent closing the review.
+			}
+			return true;
 		};
+		const request = {
+			tui: this.tui,
+			theme: { borderColor: (s: string) => this.theme.fg("borderAccent", s), selectList: this.selectTheme() },
+			keybindings: this.keybindings,
+			onSubmit: (text: string) => {
+				if (!finish()) return;
+				this.host.editorDrafts.delete(key);
+				onSave(text);
+				this.host.persist();
+				this.rebuild();
+				this.tui.requestRender();
+			},
+			onCancel: () => {
+				if (!active()) return;
+				const text = current?.getText() ?? "";
+				if (!finish()) return;
+				if (text !== prefill) {
+					this.host.editorDrafts.set(key, text);
+					this.flash("draft kept: it comes back when you comment here again");
+				} else this.host.editorDrafts.delete(key);
+				this.host.persist();
+				this.tui.requestRender();
+			},
+			scrollViewport: (direction: -1 | 1) => {
+				if (!active()) return;
+				this.moveTo(this.cursor + direction * Math.max(1, Math.floor(this.lastBodyHeight / 2)));
+				this.tui.requestRender();
+			},
+			notify: (message: string, type: "info" | "warning" | "error") => {
+				if (!active()) return;
+				this.flash(message, type === "error");
+				this.tui.requestRender();
+			},
+			initialText,
+			initialMode: mode,
+			paddingX: 1,
+		};
+		const editor = (this.host.editor ?? nativeEditor)(request);
+		current = editor;
 		editor.focused = true;
-		this.panel = { kind: "editor", editor, title, onSave };
+		this.panel = { kind: "editor", editor, title, cancel: request.onCancel };
+		if (held !== undefined) this.flash("continuing the draft you cancelled");
+	}
+
+	/** Escape in Pi's native editor: cancel, keeping typed text as a held draft. */
+	private cancelEditor(): void {
+		if (this.panel.kind === "editor") this.panel.cancel();
+	}
+
+	/** Close an open comment editor through its cancellation path, preserving changed text. */
+	private closeEditor(): void {
+		if (this.panel.kind === "editor") this.panel.cancel();
 	}
 
 	private comment(suggest: boolean): void {
@@ -555,7 +666,7 @@ export class DiffViewer implements Component, Focusable {
 		}
 		this.visualFrom = undefined;
 		if (fileLevel) {
-			this.openEditor(`Comment on ${path}`, "", (text) => {
+			this.openEditor(this.editorDraftKey(path, ["comment", "new", 0, 0]), `Comment on ${path}`, "", (text) => {
 				if (!text.trim()) return;
 				this.host.threads.push({
 					id: newThreadId(this.host.threads.map((t) => t.id)),
@@ -578,25 +689,32 @@ export class DiffViewer implements Component, Focusable {
 		this.visualFrom = undefined;
 		const where = sel.start === sel.end ? `L${sel.start}` : `L${sel.start}-${sel.end}`;
 		const lines = sel.excerpt.filter((l) => (sel.side === "new" ? !l.startsWith("- ") : !l.startsWith("+ "))).map((l) => l.slice(2));
-		this.openEditor(suggest ? `Suggest an edit to ${path} ${where}` : `Comment on ${path} ${where}`, suggest ? lines.join("\n") : "", (text) => {
-			if (!suggest && !text.trim()) return;
-			if (suggest && text === lines.join("\n")) {
-				this.flash("suggestion unchanged; discarded");
-				return;
-			}
-			this.host.threads.push({
-				id: newThreadId(this.host.threads.map((t) => t.id)),
-				file: path,
-				side: sel.side,
-				start: sel.start,
-				end: sel.end,
-				excerpt: sel.excerpt,
-				body: suggest ? "" : text,
-				suggestion: suggest ? text : undefined,
-				status: "draft",
-				createdAt: Date.now(),
-			});
-		});
+		this.openEditor(
+			this.editorDraftKey(path, [suggest ? "suggest" : "comment", sel.side, sel.start, sel.end, sel.excerpt]),
+			suggest ? `Suggest an edit to ${path} ${where}` : `Comment on ${path} ${where}`,
+			suggest ? lines.join("\n") : "",
+			(text) => {
+				if (!suggest && !text.trim()) return;
+				if (suggest && text === lines.join("\n")) {
+					this.flash("suggestion unchanged; discarded");
+					return;
+				}
+				this.host.threads.push({
+					id: newThreadId(this.host.threads.map((t) => t.id)),
+					file: path,
+					side: sel.side,
+					start: sel.start,
+					end: sel.end,
+					excerpt: sel.excerpt,
+					body: suggest ? "" : text,
+					suggestion: suggest ? text : undefined,
+					status: "draft",
+					createdAt: Date.now(),
+				});
+			},
+			// A suggestion starts from the lines as they are: a modal editor opens in Normal mode to move around them.
+			suggest ? "normal" : "insert",
+		);
 	}
 
 	private editThread(): void {
@@ -606,14 +724,20 @@ export class DiffViewer implements Component, Focusable {
 			return;
 		}
 		const isSuggest = th.suggestion !== undefined;
-		this.openEditor(isSuggest ? "Edit suggestion" : "Edit comment", isSuggest ? (th.suggestion ?? "") : th.body, (text) => {
-			if (isSuggest) th.suggestion = text;
-			else th.body = text;
-			if (th.status !== "draft") {
-				th.status = "draft";
-				th.reply = undefined;
-			}
-		});
+		const where = th.start ? ` L${th.start}${th.end !== th.start ? `-${th.end}` : ""}` : "";
+		this.openEditor(
+			this.editorDraftKey(th.file, ["edit", th.id, th.side, th.start, th.end, th.excerpt, th.body, th.suggestion]),
+			`${isSuggest ? "Edit suggestion" : "Edit comment"} on ${th.file}${where}`,
+			isSuggest ? (th.suggestion ?? "") : th.body,
+			(text) => {
+				if (isSuggest) th.suggestion = text;
+				else th.body = text;
+				if (th.status !== "draft") {
+					th.status = "draft";
+					th.reply = undefined;
+				}
+			},
+		);
 	}
 
 	private deleteThread(): void {
@@ -628,41 +752,45 @@ export class DiffViewer implements Component, Focusable {
 		this.rebuild();
 	}
 
+	/** Send the drafts; with `thenClose`, close afterwards. Neither marks anything reviewed. */
 	private sendDrafts(thenClose: boolean): void {
 		const drafts = this.drafts();
 		if (!drafts.length) {
 			this.flash("no draft comments to send");
-			if (thenClose) this.close(this.shouldMark());
+			if (thenClose) this.close();
 			return;
 		}
 		const msg = this.host.send(drafts, this.data.scope.label);
 		this.flash(msg);
 		this.rebuild();
-		if (thenClose) this.close(this.shouldMark());
-	}
-
-	private shouldMark(): boolean {
-		const k = this.data.scope.request.kind;
-		return this.data.scope.live && (k === "unreviewed" || k === "session");
+		if (thenClose) this.close();
 	}
 
 	// ---- scopes --------------------------------------------------------------------------------
 
 	private async switchScope(req: ScopeRequest): Promise<void> {
+		const generation = ++this.loadGeneration;
 		this.loading = true;
 		this.tui.requestRender();
-		const r = await this.host.load(req);
+		let r: ReviewData | string;
+		try {
+			r = await this.host.load(req);
+		} catch (error) {
+			r = `could not load diff: ${error instanceof Error ? error.message : String(error)}`;
+		}
+		if (this.disposed || generation !== this.loadGeneration) return;
 		this.loading = false;
 		if (typeof r === "string") {
 			this.flash(r, true);
 			this.tui.requestRender();
 			return;
 		}
+		this.closeEditor();
 		this.data = r;
 		this.painter = new Painter(this.theme, r.files, this.painter.wrap);
 		this.folded.clear();
 		this.expanded.clear();
-		this.reviewedFiles.clear();
+		this.applyChecks();
 		this.top = 0;
 		this.rebuild(undefined);
 		this.cursor = this.firstContentRow();
@@ -743,12 +871,10 @@ export class DiffViewer implements Component, Focusable {
 			case "x":
 				return this.sendDrafts(true);
 			case "q":
-				return this.close(this.shouldMark());
 			case "q!":
-				return this.close(false);
+				return this.close();
 			case "mark":
-				this.done({ markReviewed: true, scope: { ...this.data.scope, request: { kind: "unreviewed" }, live: true } });
-				return;
+				return this.mark();
 			case "split":
 			case "unified":
 				this.mode = c;
@@ -757,10 +883,8 @@ export class DiffViewer implements Component, Focusable {
 		}
 		const m = /^scope\s+(.+)$/.exec(c);
 		if (m) {
-			void import("./scopes.ts").then(({ parseScopeArgs }) => {
-				const req = parseScopeArgs(m[1]);
-				if (req) void this.switchScope(req);
-			});
+			const req = parseScopeArgs(m[1]);
+			if (req) void this.switchScope(req);
 			return;
 		}
 		this.flash(`unknown command: ${c}`, true);
@@ -769,6 +893,7 @@ export class DiffViewer implements Component, Focusable {
 	// ---- input ---------------------------------------------------------------------------------
 
 	handleMouse(e: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (this.disposed) return { handled: true };
 		if (this.panel.kind !== "none" || this.help) return { handled: true };
 		if (e.type === "wheel" && e.wheelDelta) {
 			const n = Math.sign(e.wheelDelta) * 3;
@@ -791,10 +916,12 @@ export class DiffViewer implements Component, Focusable {
 	}
 
 	handleInput(data: string): void {
+		if (this.disposed) return;
 		this.message = "";
 		const p = this.panel;
 		if (p.kind === "editor") {
-			if (matchesKey(data, "escape")) this.panel = { kind: "none" };
+			// A modal editor takes Escape itself (leaving Insert mode, or cancelling from Normal mode).
+			if (matchesKey(data, "escape") && !editorOwnsEscape(p.editor)) this.cancelEditor();
 			else p.editor.handleInput(data);
 			this.tui.requestRender();
 			return;
@@ -881,19 +1008,22 @@ export class DiffViewer implements Component, Focusable {
 		const f = this.data.files[fi];
 		if (!f) return;
 		const path = filePath(f);
-		if (this.reviewedFiles.has(path)) {
-			this.reviewedFiles.delete(path);
+		// Checks are written to the session with the threads when the viewer closes.
+		if (isChecked(this.host.checks, f)) {
+			this.host.checks.delete(path);
 			this.toggleFold(fi, false);
 			return;
 		}
-		this.reviewedFiles.add(path);
+		this.host.checks.set(path, fileKey(f));
 		this.toggleFold(fi, true);
 		// Move on to the next file still to review.
-		const next = this.data.files.findIndex((g, k) => k > fi && !this.reviewedFiles.has(filePath(g)));
+		const next = this.data.files.findIndex((g, k) => k > fi && !isChecked(this.host.checks, g));
 		if (next >= 0) {
 			this.cursor = this.lay.fileRows[next];
 			this.top = this.cursor;
-		} else if (this.reviewedFiles.size === this.data.files.length) this.flash("all files reviewed; q closes");
+		} else if (this.data.files.every((g) => isChecked(this.host.checks, g))) {
+			this.flash(this.markable() ? "all files checked; :mark marks them reviewed, q closes" : "all files checked; q closes");
+		}
 	}
 
 	private handleNormal(data: string): void {
@@ -935,7 +1065,7 @@ export class DiffViewer implements Component, Focusable {
 				case "ZZ":
 					return this.sendDrafts(true);
 				case "ZQ":
-					return this.close(false);
+					return this.close();
 				case "dd":
 					return this.deleteThread();
 			}
@@ -955,7 +1085,7 @@ export class DiffViewer implements Component, Focusable {
 				this.matches = [];
 				this.searchQuery = "";
 				this.cache.clear();
-			} else this.close(this.shouldMark());
+			} else this.close();
 			return;
 		}
 		if (matchesKey(data, "ctrl+d")) return this.moveTo(this.cursor + half * count);
@@ -1066,9 +1196,8 @@ export class DiffViewer implements Component, Focusable {
 				return;
 			}
 			case "q":
-				return this.close(this.shouldMark());
 			case "Q":
-				return this.close(false);
+				return this.close();
 		}
 	}
 }

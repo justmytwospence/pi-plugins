@@ -8,7 +8,7 @@ pi-marimo makes notebook state visible to Pi without asking the model to inspect
 
 ## Enable, requirements, and costs
 
-Select `packages/pi-marimo/src/index.ts` through [suite installation](/guides/install/). The suite loads all 19 entries by default, with one Git pin shared by whichever entries you select.
+Select `packages/pi-marimo/src/index.ts` through [suite installation](/guides/install/). The suite loads every entry by default, with one Git pin shared by whichever entries you select.
 
 You need a running marimo server with open notebook sessions and compatible session, registry, and SSE endpoints. Automatic discovery reads `$XDG_STATE_HOME/marimo/servers`, populated by servers started with `--no-token`, then queries their sessions. Token-protected connections use `MARIMO_TOKEN`; a token alone does not establish that a server will be discovered. No minimum marimo version is specified in the package reference, so verify attachment with your installed release rather than assuming universal compatibility.
 

@@ -12,7 +12,7 @@ After changing extension selection, restart Pi or use `/reload`. If an extension
 
 | Symptom | Check |
 | --- | --- |
-| Two copies of a tool or registration warnings | Keep either the suite entry or the standalone component, never both |
+| Two copies of a tool or registration warnings | Keep either the suite entry or the standalone component, never both. This includes `npm:pi-vim`, `npm:@saadjs/pi-stash`, `npm:pi-sticky-last-prompt` and `npm:pi-btw`, which the suite now contains |
 | `ask_user_question` collision | Disable any other extension registering the same tool, such as `@juicesharp/rpiv-ask-user-question` |
 | Unexpected background UI | Check whether another background-task extension is enabled alongside pi-bg |
 | `/copy` behaves differently than expected | It is Pi’s built-in last-reply command. Pi Plugins’ picker is `/yank` |
@@ -24,8 +24,9 @@ Do not “fix” collisions by enabling more copies. Select the smallest useful 
 
 [Status footer](/plugins/pi-status-footer/) replaces Pi’s footer and wraps the existing editor’s border hooks. It does not provide a vim editor.
 
-- If you use **pi-vim**, load it before pi-status-footer. A replacement editor loaded afterward can remove the wrapped border hooks.
+- **pi-vim** replaces the prompt editor and must load before pi-status-footer. A replacement editor loaded afterward can remove the wrapped border hooks. Selection filters do not change the suite's entry order.
 - **pi-stash** wraps the preceding editor; its order is not constrained in the same way.
+- Keep one editor replacement. Do not load an upstream vim package next to the suite's pi-vim.
 - Disable the competing footer in `~/.pi/agent/pi-cc-extensions.json` if you use that package. Another footer can replace this one on startup or reload.
 - Run `/status native` to compare against Pi’s built-in footer without uninstalling.
 - A missing plug glyph usually means your terminal font lacks Nerd Font symbols, not that MCP is disconnected.
@@ -36,15 +37,17 @@ Resource filters select from a manifest; do not assume reordering strings in the
 
 ### Ctrl+L opens the model picker
 
-Clear-screen registers Ctrl+L. Move Pi’s default model selector in `~/.pi/agent/keybindings.json`:
+Clear-screen registers Ctrl+L, which Pi also binds to `app.model.select` by default. In an interactive session, clear-screen warns at startup when that conflict is present. Move Pi’s default model selector in `~/.pi/agent/keybindings.json`:
 
 ```json
 {
-  "app.model.select": "alt+m"
+  "app.model.select": ["alt+p", "alt+m"]
 }
 ```
 
-It only clears the application-owned transcript in fullscreen mode. It never deletes conversation context.
+This is the binding the startup warning suggests; merge it with your existing bindings and `/reload`. On Windows and WSL, Pi's default `app.model.cycleBackward` also uses Alt+P, so keep only the keys that are free in your setup.
+
+Clear-screen only clears the application-owned transcript in fullscreen mode. It never deletes conversation context, adds nothing to prompt history and leaves the editor draft untouched. See [keyboard & focus](/guides/keyboard/) for every suite shortcut.
 
 ### Ctrl+J and Ctrl+K do not reach autocomplete
 
@@ -57,18 +60,23 @@ Select-nav rewrites keys in pickers. Pi’s autocomplete also needs the normal l
 }
 ```
 
-Plain `j`/`k` deliberately remain letters in search fields. Ctrl+J and Ctrl+K retain their editor meanings in the main/multiline editor. Task viewers have their own key maps; do not assume every `x` or `k` does the same thing.
+Plain `j`/`k` deliberately remain letters in search fields. Ctrl+J and Ctrl+K retain their editor meanings in the main editor and in any active editor nested in a dialog. Components that declare their own input context, such as the copy picker, are left alone by select-nav and implement their bindings themselves. Task viewers have their own key maps; do not assume every `x` or `k` does the same thing.
+
+### Ctrl+U or Ctrl+D edits text instead of scrolling
+
+That is intended. Ctrl+U and Ctrl+D scroll half a page only in read-only viewers and in pi-vim's idle Normal mode. In a text field they keep their editing meaning: in the copy picker's filter, Ctrl+U clears the query and Ctrl+D deletes forward. They are not global scrolling shortcuts. See [keyboard & focus](/guides/keyboard/#ctrlu-and-ctrld).
 
 ### Tab accepts a suggestion instead of completing
 
-Next-prompt takes Tab/Right only while a suggestion is shown in an empty editor. Change its `acceptKeys`, use `/next-prompt off`, or type normally to dismiss the ghost text. Accepting fills the editor; it does not submit.
+Next-prompt takes Tab/Right only while a suggestion is shown in the empty, focused main editor, outside autocomplete and outside dialogs. Change its `acceptKeys`, use `/next-prompt off`, or type normally to dismiss the ghost text. Accepting fills the editor; it does not submit.
 
-Plan mode’s configured toggle shortcut takes effect after `/reload`. Its default is Shift+Tab, which may compete with a shortcut in your setup.
+Plan mode registers no shortcut unless you set `toggleShortcut` (for example `shift+tab`) in its settings. The shortcut opens `/plan`, takes effect after `/reload`, and may compete with another binding in your setup.
 
 ## Background and notebook work
 
 - **No result yet:** use `bg_wait` while the agent still owns the turn, not a loop of log polls. An async completion that arrives mid-turn is held until settlement.
 - **Esc stopped the wait but not the task:** expected. Use `bg_kill` to stop a shell process group, or the relevant subagent stop action.
+- **`/stop` left a subagent, planner or notebook running:** expected. `/stop` stops only pi-bg's running shell tasks from this Pi process. Stop one listed entry with double-`x` in `/tasks`. Planners and Herdr children are not `/tasks` entries: stop planners from the plan screen (Esc, then Stop planning), and interrupt or close a Herdr child in its pane or through the `herdr_child` tool.
 - **A service disappeared on exit:** only services explicitly started with `keep: true` are intended to outlive the session.
 - **A notebook is missing:** check its server is running, registry discovery, cwd scope, hidden directories, and token access. `/marimo` pins notebooks outside automatic discovery’s set.
 - **The server is ready but a fit is still running:** readiness and kernel completion are different. With pi-marimo enabled, waiting on a recognized ready server can wait for its cells.

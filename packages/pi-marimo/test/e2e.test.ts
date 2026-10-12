@@ -1,4 +1,4 @@
-// Against a real marimo server: needs `marimo` on PATH (skipped otherwise).
+// Opt-in against a real marimo server: PI_MARIMO_LIVE_TEST=1 and `marimo` on PATH.
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -8,6 +8,7 @@ import { nodeIo } from "../src/core/node-io.js";
 import { MarimoWatcher } from "../src/core/watcher.js";
 
 const hasMarimo = (() => {
+  if (process.env.PI_MARIMO_LIVE_TEST !== "1") return false;
   try {
     execFileSync("marimo", ["--version"], { stdio: "ignore" });
     return true;

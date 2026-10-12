@@ -37,7 +37,19 @@ import { Type } from "typebox";
 import { elapsed, footerStatus, header, marimoNote, nameFromCommand, outcome, report, runtime, taskLine } from "./format.ts";
 import { bounded, grep, head, tail } from "./log.ts";
 import { type Kind, type Task, type TaskEvent, parsePattern, registry } from "./registry.ts";
-import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION, type ActivityEntry, type ActivityPill, type ActivitySection } from "./activity.ts";
+import {
+  ACTIVITY_CHANGED,
+  ACTIVITY_GONE,
+  ACTIVITY_HOST,
+  ACTIVITY_SECTION,
+  type ActivityEntry,
+  type ActivityPill,
+  type ActivitySection,
+  PILL_HOST_PRIORITY,
+  hostOutranks,
+  readHost,
+  stableKey,
+} from "./activity.ts";
 import { type DialogResult, TasksDialog } from "./dialog.ts";
 import { FULL_SCREEN } from "./frame.ts";
 import { PillView } from "./pill.ts";
@@ -153,16 +165,23 @@ export default function piBg(pi: ExtensionAPI) {
   let dismissedAt = 0;
   /** Other extensions' sources (pi-subagents' runs), listed in the dialog. */
   const others = new Map<string, ActivitySection>();
-  /** pi-subagents shows our pill at the end of its list under the prompt (activity.ts). */
-  let hosted = false;
-  /** Other sources whose pills ours counts while no one hosts us (pi-marimo's notebooks). */
+  /** The hosts showing our pill in their list under the prompt (pi-subagents' FleetView), by id. */
+  const hosts = new Set<string>();
+  const hosted = () => hosts.size > 0;
+  /** Our identity as a host (activity.ts): the pill host, which the FleetView host outranks. */
+  const me = { host: "bg", priority: PILL_HOST_PRIORITY };
+  /** Hosts that outrank us and are present: we host nothing until they are gone. */
+  const yieldedTo = new Set<string>();
+  /** Whether we host other sources' pills now: in the TUI, shown by no one, outranked by no one. */
+  const hosting = () => attached && tui() && !hosted() && yieldedTo.size === 0;
+  /** Other sources whose pills ours counts while we host (pi-marimo's notebooks). */
   const guests = new Map<string, ActivitySection>();
   const hostGuest = (s: ActivitySection) => {
-    if (hosted || !attached || !tui() || typeof s.pill !== "function" || typeof s.setHosted !== "function") return;
+    if (!hosting() || typeof s.pill !== "function" || typeof s.setHosted !== "function") return;
     if (guests.get(s.id) === s) return;
     guests.set(s.id, s);
     try {
-      s.setHosted(true, "pi-bg");
+      s.setHosted(true, me.host);
     } catch {
       guests.delete(s.id);
     }
@@ -170,12 +189,18 @@ export default function piBg(pi: ExtensionAPI) {
   const releaseGuests = () => {
     for (const s of guests.values()) {
       try {
-        s.setHosted?.(false, "pi-bg");
+        s.setHosted?.(false, me.host);
       } catch {
         // Its session may be gone.
       }
     }
     guests.clear();
+  };
+  /** Host the others' pills (when we may), announcing ourselves so sources offer themselves again. */
+  const startHosting = () => {
+    if (!hosting()) return;
+    for (const s of others.values()) hostGuest(s);
+    emit(ACTIVITY_HOST, { ...me });
   };
   const tui = () => ctx?.mode === "tui";
   /** Our pill and our guests': `2 shells · 1 notebook`. */
@@ -199,7 +224,7 @@ export default function piBg(pi: ExtensionAPI) {
       if (ctx) openDialog(ctx.ui).catch(() => undefined);
     },
   });
-  const bindPill = () => pill.setUI(attached && tui() && !hosted ? (ctx?.ui as any) : undefined);
+  const bindPill = () => pill.setUI(attached && tui() && !hosted() ? (ctx?.ui as any) : undefined);
 
   const entryStatus = (t: Task): ActivityEntry["status"] =>
     t.status === "running" ? "running" : t.status === "done" ? "done" : t.status === "killed" ? "stopped" : "failed";
@@ -236,7 +261,7 @@ export default function piBg(pi: ExtensionAPI) {
     },
     stop: (key) => {
       const t = reg.find(key);
-      if (t?.status === "running") void stopTask(t, "user");
+      if (t?.status === "running") return stopTask(t, "user");
     },
     dismiss: (key) => {
       const t = reg.find(key);
@@ -246,10 +271,14 @@ export default function piBg(pi: ExtensionAPI) {
     },
     pill: (now) => pillOf(now),
     openDialog: (ui) => openDialog(ui as ExtensionContext["ui"]),
-    setHosted: (on) => {
-      hosted = on;
+    setHosted: (on, host) => {
+      const id = host ?? "subagents";
+      const before = hosted();
+      if (on) hosts.add(id);
+      else hosts.delete(id);
+      if (before === hosted()) return;
       // Hosted, our pill sits beside the guests' in the host's list: they go back to it.
-      if (on) releaseGuests();
+      if (hosted()) releaseGuests();
       else for (const s of others.values()) hostGuest(s);
       bindPill();
       refresh();
@@ -258,7 +287,20 @@ export default function piBg(pi: ExtensionAPI) {
   const offerSection = () => {
     if (attached && tui()) emit(ACTIVITY_SECTION, { section });
   };
-  pi.events.on(ACTIVITY_HOST, () => offerSection());
+  pi.events.on(ACTIVITY_HOST, (data) => {
+    const other = readHost(data);
+    if (other.host === me.host) return;
+    offerSection();
+    if (hostOutranks(other, me)) {
+      // A host under the prompt takes over: our guests' pills belong in its list now.
+      yieldedTo.add(other.host);
+      releaseGuests();
+      pill.update();
+    } else if (hosting()) {
+      // A lesser host announcing itself yields to us once it hears from us.
+      emit(ACTIVITY_HOST, { ...me });
+    }
+  });
   // Other sources, for the dialog.
   pi.events.on(ACTIVITY_SECTION, (data) => {
     const s = (data as { section?: ActivitySection } | undefined)?.section;
@@ -272,6 +314,15 @@ export default function piBg(pi: ExtensionAPI) {
     const id = (data as { id?: string } | undefined)?.id ?? "";
     others.delete(id);
     guests.delete(id);
+    // A host that left: it no longer shows us, and no longer outranks us.
+    const wasHosted = hosted();
+    hosts.delete(id);
+    const resumed = yieldedTo.delete(id);
+    if (wasHosted !== hosted() || resumed) {
+      startHosting();
+      bindPill();
+      refresh();
+    }
     pill.update();
   });
   // A guest's content changed: our pill shows it.
@@ -524,10 +575,11 @@ export default function piBg(pi: ExtensionAPI) {
       const adopted = reg.sweep(c.cwd);
       if (adopted.length && c.hasUI) c.ui.notify(`bg: adopted kept service${adopted.length > 1 ? "s" : ""} ${adopted.map((t) => t.name).join(", ")}`, "info");
     }
-    hosted = false;
+    hosts.clear();
+    yieldedTo.clear();
     bindPill();
     offerSection();
-    for (const g of others.values()) hostGuest(g);
+    startHosting();
     unsubscribe?.();
     unsubscribe = reg.subscribe(onTask);
     oweFromState();
@@ -539,6 +591,7 @@ export default function piBg(pi: ExtensionAPI) {
         herdrActive = true;
       },
     });
+    if (statusTimer) clearInterval(statusTimer);
     statusTimer = setInterval(updateStatus, 1_000);
     statusTimer.unref?.();
     refresh();
@@ -563,8 +616,11 @@ export default function piBg(pi: ExtensionAPI) {
     if (statusTimer) clearInterval(statusTimer);
     statusTimer = undefined;
     pill.dispose();
-    if (attached) emit(ACTIVITY_GONE, { id: section.id });
-    hosted = false;
+    const wasAttached = attached;
+    attached = false;
+    if (wasAttached) emit(ACTIVITY_GONE, { id: section.id });
+    hosts.clear();
+    yieldedTo.clear();
     releaseGuests();
     for (const w of [...waiters]) w.resolve("aborted");
     for (const id of holds) emit("herdr:background", { active: false, id: `bg:${id}` });
@@ -828,7 +884,7 @@ export default function piBg(pi: ExtensionAPI) {
         FULL_SCREEN,
       );
       if (!picked) return;
-      initialKey = picked.key;
+      initialKey = stableKey(picked.kind === "open" ? picked.section.id : section.id, picked.key);
       if (picked.kind === "open") {
         // Another source's view (pi-subagents' conversation) may fail; the dialog comes back regardless.
         try {
@@ -839,7 +895,7 @@ export default function piBg(pi: ExtensionAPI) {
       }
       else if (picked.kind === "rerun") {
         const t = reg.find(picked.key);
-        if (t && ctx) initialKey = startUserTask(ctx, t.command).id;
+        if (t && ctx) initialKey = stableKey(section.id, startUserTask(ctx, t.command).id);
       } else if (picked.kind === "follow") {
         const t = reg.find(picked.key);
         if (t) follow({ ui }, t);
@@ -887,14 +943,16 @@ export default function piBg(pi: ExtensionAPI) {
   // Claude Code's /tasks and /bashes, Codex's /ps, and our own /bg.
   for (const name of ["tasks", "bashes", "ps", "bg"]) pi.registerCommand(name, tasksCommand);
 
-  // Codex's /stop: stop every background task this pi started (kept services from earlier sessions stay).
+  // Codex's /stop: stop every background shell this pi started (kept services from earlier sessions
+  // stay). Other sources' work (subagents, notebooks, herdr children) is stopped from its own
+  // commands or with x in /tasks, never from here.
   pi.registerCommand("stop", {
-    description: "Stop every background task (not kept services from earlier sessions)",
+    description: "Stop every background shell this session started (not kept services from earlier sessions; subagents, notebooks and herdr children are stopped from /tasks or their own commands)",
     handler: async (_args, c) => {
       const running = reg.running().filter((t) => !t.adopted);
-      if (!running.length) return c.ui.notify("No background tasks running.", "info");
+      if (!running.length) return c.ui.notify("No background shells running.", "info");
       await Promise.all(running.map((t) => stopTask(t, "user")));
-      c.ui.notify(`bg: stopped ${running.length} task${running.length === 1 ? "" : "s"}`, "info");
+      c.ui.notify(`bg: stopped ${running.length} shell${running.length === 1 ? "" : "s"}`, "info");
     },
   });
 }

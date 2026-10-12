@@ -8,7 +8,7 @@ pi-diff-review adds `/diff`, a full-screen review surface for inspecting changes
 
 ## Enable, requirements, and costs
 
-Select `packages/pi-diff-review/src/index.ts` using [suite installation](/guides/install/). The suite loads all 19 extensions by default; every selected entry shares one Git pin.
+Select `packages/pi-diff-review/src/index.ts` using [suite installation](/guides/install/). The suite loads every entry by default; every selected entry shares one Git pin.
 
 Review requires Git, a working directory inside a Git repository, and Pi's interactive terminal UI. RPC and print sessions cannot open the viewer. `$EDITOR` and an active pi-herdr bridge are needed only for opening a file in a separate editor pane, not for the review itself.
 
@@ -60,11 +60,11 @@ Use `za` or Enter to fold a file; Enter also expands an initially collapsed larg
 
 ## Send drafts and track replies
 
-`:w`, `:wq`, or `ZZ` sends drafts and closes the viewer. One user message contains the relevant hunks or replacement pairs and asks the agent to include a `[[dr:<id>]]` reply line per comment. If the agent is already working, this message is queued as a follow-up.
+`:w` sends drafts and keeps the viewer open; `:wq`, `:x` or `ZZ` sends them and closes it. One user message contains the relevant hunks or replacement pairs and asks the agent to include a `[[dr:<id>]]` reply line per comment. If the agent is already working, this message is queued as a follow-up.
 
 At the end of the agent's run, matching tagged replies attach to the corresponding threads as answered. An answer is not independent verification that the requested fix is correct; inspect the resulting diff. Missing or malformed reply tags can leave a thread without an attached answer even if the conversation contains prose about it.
 
-In unreviewed and session scopes, `q` or Esc closes the viewer and marks the displayed snapshot reviewed. `Q`, `:q!`, or `ZQ` closes without advancing the review mark. `:mark` explicitly marks reviewed. Advancing a review mark resolves answered threads; drafts and unanswered comments remain. These marks describe review progress, not Git commits or approvals on GitHub.
+Only `:mark` advances the review mark. It records the snapshot on screen, confirms the action and stays open, and it applies only to the live unreviewed and session scopes; in other scopes it reports why and stays open. Closing never marks: `q`, Esc, `Q`, `ZQ`, `:q` and `:q!` close with drafts and file checks kept, and `:wq`, `:x` or `ZZ` send drafts before closing. Per-file `r` is separate: it checks and folds one file, and the check is saved in the session keyed to that file's diff, so it is dropped when the file's changes change. Advancing a review mark resolves answered threads; drafts and unanswered comments remain. These marks describe review progress, not Git commits or approvals on GitHub.
 
 Threads and marks are stored in Pi's session branch, so tree navigation, forks, and resumes retrieve their corresponding state.
 

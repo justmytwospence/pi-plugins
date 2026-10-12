@@ -194,6 +194,15 @@ export class SubagentTracker {
     }
   }
 
+  /** Closing a planner cancels every outstanding scout owned by it. */
+  cancel() {
+    for (const view of this.agents) {
+      if (view.stats.state !== "running" && view.stats.state !== "starting") continue;
+      view.stats.state = "cancelled";
+      view.stats.endedAt = Date.now();
+    }
+  }
+
   private view(toolCallId: string, scout: SubagentMeta): SubagentView {
     const key = `${toolCallId}:${scout.index}`;
     let view = this.byKey.get(key);

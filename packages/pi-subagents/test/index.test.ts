@@ -4,7 +4,7 @@ import path from "node:path";
 import { expect, test } from "vitest";
 import subagents, { truncateOutput } from "../src/index.ts";
 import { fakeJev, harness } from "./harness.ts";
-import { fakeUI } from "./ui-helpers.ts";
+import { fakeUI, normalFocus } from "./ui-helpers.ts";
 
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(path.join(tmpdir(), "subagents-agent-"));
 
@@ -88,6 +88,7 @@ test("b in FleetView moves a foreground call to the background; its result arriv
     const cwd = mkdtempSync(path.join(tmpdir(), "subagents-cwd-"));
     const ctx = h.ctx({ ui, cwd, model: { provider: "p", id: "m" } });
     await h.emit("session_start", { type: "session_start" }, ctx);
+    normalFocus(ui);
     const call = tool.execute("t1", { task: "loop forever" }, undefined, undefined, ctx);
     await new Promise((r) => setTimeout(r, 100));
     expect(ui.press("\x1b[B")).toBe(true);

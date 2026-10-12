@@ -15,6 +15,8 @@
   },
   "pi": {
     "extensions": [
+      "./packages/pi-vim/src/index.ts",
+      "./packages/pi-stash/src/index.ts",
       "./packages/pi-ask-user-question/src/index.ts",
       "./packages/pi-plan-mode/src/index.ts",
       "./packages/pi-status-footer/src/index.ts",
@@ -33,10 +35,15 @@
       "./packages/pi-cache-guard/src/index.ts",
       "./packages/pi-next-prompt/src/index.ts",
       "./packages/pi-diff-review/src/index.ts",
-      "./packages/pi-prose-width/src/index.ts"
-    ]
+      "./packages/pi-prose-width/src/index.ts",
+      "./packages/pi-sticky-last-prompt/src/index.ts",
+      "./packages/pi-btw/src/index.ts"
+    ],
+    "skills": ["./packages/pi-btw/skills"]
   },
   "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
@@ -45,7 +52,7 @@
     "@earendil-works/pi-coding-agent": "1.1.0"
   },
   "scripts": {
-    "test": "node scripts/test-loader.mjs",
+    "test": "node scripts/test-loader.mjs && node scripts/test-shortcuts.mjs && node scripts/test-contracts.mjs",
     "check": "npm test && node scripts/check-components.mjs"
   }
 }

@@ -1,0 +1,14 @@
+{
+  "package": "@saadjs/pi-stash",
+  "version": "0.0.3",
+  "source": "npm:@saadjs/pi-stash@0.0.3",
+  "installedSource": "/Users/spencerboucher/.pi/agent/npm/node_modules/@saadjs/pi-stash",
+  "license": "MIT",
+  "sha256": {
+    "LICENSE": "e5b37ef50fb427a4ee838ff93e3a669f9192c1d002110bfb3ea50de6ab875008",
+    "README.md": "95ac79d8c99728b7545795903764334267a2c4034f6d89577e6dc5a223a8a4c6",
+    "core.ts": "78764072a1c6c3644cf36b79566880afb2dbfecdf56c6e369dd9b0ae5254dfaf",
+    "index.ts": "a14dc452f63bd0a4cc7b30312561947014ab2ddb6cfd8e5168252fce68676fca",
+    "package.json": "e6818b4fb43baa1e6f6a6f444e0735d8ba854526438f8c9fbd7711a628176e02"
+  }
+}

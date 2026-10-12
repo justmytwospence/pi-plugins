@@ -1,0 +1,49 @@
+{
+  "name": "@justmytwospence/pi-stash",
+  "version": "0.1.2",
+  "description": "Ctrl+S stashes the main editor draft, runs a slash or shell command, and restores the draft (cursor and mode too with pi-vim) without overwriting new text.",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "stash",
+    "draft",
+    "prompt"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "check": "npm run typecheck && npm test",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.1.0",
+    "@earendil-works/pi-tui": "1.1.0",
+    "@types/node": "^22.20.4",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/justmytwospence/pi-plugins",
+    "directory": "packages/pi-stash"
+  },
+  "homepage": "https://pi-plugins.vercel.app/plugins/pi-stash/",
+  "bugs": {
+    "url": "https://github.com/justmytwospence/pi-plugins/issues"
+  }
+}

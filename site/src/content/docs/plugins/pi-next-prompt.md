@@ -8,9 +8,9 @@ Next prompt offers a likely follow-up after a completed run. It is deliberately 
 
 ## Enable and requirements
 
-Use [Install & select](/guides/install/) and select `packages/pi-next-prompt/src/index.ts`. The suite loads all 19 entries by default and uses one Git pin for every selected component. This extension requires Pi 1.0 or newer; use the installation guide's tested version for the suite as a whole.
+Use [Install & select](/guides/install/) and select `packages/pi-next-prompt/src/index.ts`. The suite loads every entry by default and uses one Git pin for every selected component. This extension requires Pi 1.0 or newer; use the installation guide's tested version for the suite as a whole.
 
-Suggestions need an interactive editor. Print mode and ordinary headless subagents receive no suggestion instruction. No companion extension is required, and Jev is optional rather than a prerequisite for showing text.
+Suggestions need Pi's interactive terminal UI. Print mode, RPC hosts and ordinary headless subagents receive no suggestion instruction, even when an RPC host reports UI support. No companion extension is required, and Jev is optional rather than a prerequisite for showing text.
 
 The main model receives an additional prompt section of roughly 150 tokens and may emit roughly 20 extra output tokens for a suggestion. There is no separate generative request. **Optional Jev validation is a paid external classifier call**, however, so “no extra generation” does not mean “no extra model cost.”
 
@@ -18,17 +18,20 @@ The main model receives an additional prompt section of roughly 150 tokens and m
 
 A suggestion appears as dim text in an empty editor after a completed run. Press Tab or Right to copy it into the editor, then review, edit and send it normally. For example, a suggestion to run a specific test should remain an editable proposal, not permission to execute that test without your next message.
 
-Typing hides the suggestion. Deleting everything you typed brings it back until a prompt is sent. A new run, compaction or session switch clears it. Failed and aborted runs do not show suggestions. Tab and Right are intercepted only while a suggestion is visible and the editor is empty; otherwise the editor handles them normally.
+Typing hides the suggestion. Deleting everything you typed brings it back until a prompt is sent. A new run, a submitted prompt, compaction, tree navigation, a model change or a session switch clears it. Failed and aborted runs do not show suggestions.
 
-The extension wraps rendering rather than replacing the editor. Editors drawing Pi's software or hardware cursor, including pi-vim, can show inline ghost text. If no compatible cursor is drawn, the fallback is a dim line below the editor with an acceptance hint.
+The acceptance keys are intercepted only while a suggestion is offered, the editor is empty, and the focused component is the main prompt editor: not an editor embedded in a dialog, not while autocomplete is open, and, with pi-vim, only in an idle Insert or Normal state (not during a pending command, Visual mode or an EX line). Otherwise the focused component handles Tab and Right normally. With pi-vim, accepting also moves the editor to Insert mode at the end of the text; it still does not submit.
+
+The extension wraps rendering rather than replacing the editor. Editors drawing Pi's software or hardware cursor, including pi-vim, can show inline ghost text. If no compatible cursor is drawn, the fallback is a dim line below the editor with an acceptance hint naming the first configured key.
 
 ## Commands and configuration
 
 - `/next-prompt` or `/next-prompt status` reports enabled state and the last suggestion's verdict.
 - `/next-prompt on` enables suggestions for the session, subject to settings.
 - `/next-prompt off` clears the suggestion and stops adding the instruction for subsequent runs.
+- Any other argument shows a usage warning.
 
-Files merge in order: `~/.config/agents/next-prompt.json`, `~/.pi/agent/next-prompt.json`, `<project>/.agents/next-prompt.json`, then `<project>/.pi/next-prompt.json`. Shared user settings honor `$XDG_CONFIG_HOME`. Objects merge, while arrays and scalar values replace earlier values.
+Files merge in order: `~/.config/agents/next-prompt.json`, `~/.pi/agent/next-prompt.json`, `<project>/.agents/next-prompt.json`, then `<project>/.pi/next-prompt.json`. Shared user settings honor `$XDG_CONFIG_HOME`. Objects merge, while arrays and scalar values replace earlier values. A value whose type does not match the default (for example a string where a number belongs, or a non-finite number) is ignored.
 
 This project `.pi/next-prompt.json` keeps the default acceptance keys and length while disabling classifier validation:
 

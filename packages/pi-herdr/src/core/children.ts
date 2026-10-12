@@ -1,4 +1,4 @@
-// Shared verbatim by pi-herdr and opencode-herdr (src/core).
+// Herdr children core, originally shared with opencode-herdr (src/core).
 //
 // Herdr children: interactive agent sessions (pi children for pi, opencode children for opencode)
 // that this session starts in a herdr tab, a split beside it, or a new worktree's space, gives a
@@ -11,6 +11,7 @@
 // a new `completion_seq`), the host reads the reply from the child's session, which herdr's
 // integration for that agent reports (a pi session file, an opencode session id). Turns the user
 // starts in the child's pane are not sent back.
+import { randomUUID } from "node:crypto";
 import { type Call, errorText, splitDirection } from "./herdr.ts";
 
 export type Where = "tab" | "split" | "worktree";
@@ -28,6 +29,10 @@ export interface ChildRecord {
   createdAt: number;
   /** A turn the parent asked for is still running. */
   awaiting: boolean;
+  /** Stable identity of the turn, even when herdr does not expose sequence numbers. */
+  turnId?: string;
+  /** Completed reply not yet acknowledged by the parent; survives busy/idle and reload. */
+  pendingReply?: string;
   /** herdr's sequence numbers when that turn was asked for. */
   baseline?: { completionSeq?: number; stateSeq?: number };
   sawWorking?: boolean;
@@ -64,6 +69,8 @@ export interface ChildrenDeps {
   hold(rec: ChildRecord, active: boolean): void;
   pollMs?: number;
   readyPollMs?: number;
+  /** False after runtime shutdown or navigation away from the owning conversation branch. */
+  isCurrent?(): boolean;
 }
 
 export interface SpawnOptions {
@@ -117,10 +124,15 @@ interface AgentInfo {
   pane_id?: string;
 }
 
+class StaleChildOperation extends Error {
+  constructor() { super("The child's owning session or branch is no longer current."); }
+}
+
 export class Children {
   readonly records = new Map<string, ChildRecord>();
   private timer: ReturnType<typeof setInterval> | undefined;
   private ticking = false;
+  private generation = 0;
 
   private readonly deps: ChildrenDeps;
 
@@ -128,8 +140,34 @@ export class Children {
     this.deps = deps;
   }
 
+  /** Every async boundary rechecks runtime/branch ownership and record identity. */
+  private scope(rec?: ChildRecord) {
+    const generation = this.generation;
+    const turnId = rec?.turnId;
+    const assert = () => {
+      if (generation !== this.generation || this.deps.isCurrent?.() === false || (rec && (rec.turnId !== turnId || (this.records.has(rec.name) && this.records.get(rec.name) !== rec)))) throw new StaleChildOperation();
+    };
+    const call: Call = async (method, params, timeout) => {
+      assert();
+      const result = await this.deps.call(method, params, timeout);
+      assert();
+      return result;
+    };
+    const exec: Exec = async (cmd, args, cwd) => {
+      assert();
+      const result = await this.deps.exec(cmd, args, cwd);
+      assert();
+      return result;
+    };
+    return { assert, call, exec };
+  }
+
   restore(records: Iterable<ChildRecord>): void {
-    for (const rec of records) this.records.set(rec.name, { ...rec });
+    this.generation++;
+    this.stopLoop();
+    const saved = [...records];
+    this.records.clear();
+    for (const rec of saved) this.records.set(rec.name, { ...rec });
     for (const rec of this.records.values()) if (rec.awaiting && !rec.closed) this.deps.hold(rec, true);
     this.ensureLoop();
   }
@@ -149,20 +187,23 @@ export class Children {
   }
 
   private async liveNames(): Promise<Set<string>> {
-    const r = await this.deps.call<{ agents?: AgentInfo[] }>("agent.list", {});
+    const { call } = this.scope();
+    const r = await call<{ agents?: AgentInfo[] }>("agent.list", {});
     return new Set((r.result?.agents ?? []).map((a) => a.name).filter((n): n is string => !!n));
   }
 
   async uniqueName(wanted: string): Promise<string> {
     const base = NAME_RE.test(wanted) && wanted.length <= 28 ? wanted : slugName(wanted);
+    const { assert } = this.scope();
     const taken = await this.liveNames();
+    assert();
     for (const rec of this.records.values()) if (!rec.closed) taken.add(rec.name);
     if (!taken.has(base)) return base;
     for (let i = 2; ; i++) if (!taken.has(`${base}-${i}`)) return `${base}-${i}`;
   }
 
   private async worktreePane(opts: SpawnOptions, name: string): Promise<{ paneId: string; workspaceId?: string; cwd: string }> {
-    const { exec, call } = this.deps;
+    const { exec, call } = this.scope();
     if (!opts.branch) throw new Error("where=worktree needs `branch`.");
     const made = await exec("worktree", ["new", opts.branch, "--no-open"], opts.cwd);
     if (made.code !== 0) throw new Error(`worktree new failed: ${(made.stderr || made.stdout).trim()}`);
@@ -182,9 +223,11 @@ export class Children {
   }
 
   async spawn(opts: SpawnOptions): Promise<ChildRecord> {
-    const { call, selfPane } = this.deps;
+    const { call, assert } = this.scope();
+    const { selfPane } = this.deps;
     const where = opts.where ?? "tab";
     const name = await this.uniqueName(opts.name?.trim() || opts.task);
+    assert();
     const self = await call("pane.get", { pane_id: selfPane });
     const selfWorkspace: string | undefined = self.result?.pane?.workspace_id;
 
@@ -193,6 +236,7 @@ export class Children {
     let cwd = opts.cwd;
     if (where === "worktree") {
       ({ paneId, workspaceId, cwd } = await this.worktreePane(opts, name));
+      assert();
     } else if (where === "split") {
       const layout = await call("pane.layout", { pane_id: selfPane });
       const me = layout.result?.layout?.panes?.find((p: { pane_id: string }) => p.pane_id === selfPane);
@@ -236,14 +280,16 @@ export class Children {
     }
     // agent.start returns before the agent takes input (pi: its extensions still loading).
     await this.waitReady(rec);
+    assert();
     await this.prompt(rec, childPreamble(agent.kind, selfPane, rec) + opts.task);
     return rec;
   }
 
   private async waitReady(rec: ChildRecord, timeoutMs = 90_000): Promise<void> {
+    const { call } = this.scope(rec);
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-      const a = await this.deps.call<{ agent?: AgentInfo & { interactive_ready?: boolean } }>("agent.get", { target: rec.paneId });
+      const a = await call<{ agent?: AgentInfo & { interactive_ready?: boolean } }>("agent.get", { target: rec.paneId });
       const info = a.result?.agent;
       if (info?.agent_status === "blocked") {
         this.save(rec);
@@ -262,22 +308,26 @@ export class Children {
 
   /** Ask the child something; its reply arrives through deliver(). */
   async prompt(rec: ChildRecord, text: string): Promise<void> {
-    const { call } = this.deps;
+    const { call, assert } = this.scope(rec);
     if (rec.closed) throw new Error(`${rec.name} is closed.`);
     const a = await call<{ agent?: AgentInfo }>("agent.get", { target: rec.paneId });
     const info = a.result?.agent;
     if (!info) throw new Error(`${rec.name} is not running ${this.deps.agent.kind} any more (${errorText(a)}).`);
     if (info.agent_status === "blocked") throw new Error(`${rec.name} is waiting on a dialog in its pane (${rec.paneId}); the user has to answer it there first.`);
-    rec.baseline = { completionSeq: info.completion_seq, stateSeq: info.state_change_seq };
-    rec.sawWorking = info.agent_status === "working";
-    if (info.agent_session?.value) rec.session = info.agent_session.value;
+    const baseline = { completionSeq: info.completion_seq, stateSeq: info.state_change_seq };
     let r = await call("agent.prompt", { target: rec.paneId, text }, 15_000);
     for (let i = 0; r.error?.code === "agent_not_ready" && i < 10; i++) {
       await new Promise((res) => setTimeout(res, this.deps.readyPollMs ?? 500));
       r = await call("agent.prompt", { target: rec.paneId, text }, 15_000);
     }
     if (r.error) throw new Error(`herdr could not prompt ${rec.name}: ${errorText(r)}`);
+    rec.baseline = baseline;
+    rec.sawWorking = info.agent_status === "working";
+    if (info.agent_session?.value) rec.session = info.agent_session.value;
     if (!rec.awaiting) this.deps.hold(rec, true);
+    assert();
+    rec.turnId = randomUUID();
+    delete rec.pendingReply;
     rec.awaiting = true;
     this.save(rec);
     this.ensureLoop();
@@ -290,10 +340,14 @@ export class Children {
   }
 
   private finish(rec: ChildRecord, text: string, reply: string | undefined, closed = false): void {
+    const { assert } = this.scope(rec);
     if (rec.awaiting) this.deps.hold(rec, false);
+    assert();
     rec.awaiting = false;
     if (closed) rec.closed = true;
+    rec.pendingReply = text;
     this.save(rec);
+    assert();
     this.deps.deliver(rec, text, reply);
   }
 
@@ -304,7 +358,12 @@ export class Children {
     try {
       for (const rec of [...this.records.values()]) {
         if (!rec.awaiting || rec.closed) continue;
-        await this.check(rec);
+        try {
+          await this.check(rec);
+        } catch (error) {
+          if (error instanceof StaleChildOperation) break;
+          // Socket/read failures are retried on the next pass, never an unhandled rejection.
+        }
       }
     } finally {
       this.ticking = false;
@@ -313,7 +372,7 @@ export class Children {
   }
 
   private async check(rec: ChildRecord): Promise<void> {
-    const { call } = this.deps;
+    const { call, assert } = this.scope(rec);
     const a = await call<{ agent?: AgentInfo }>("agent.get", { target: rec.paneId });
     const info = a.result?.agent;
     if (!info) {
@@ -335,6 +394,8 @@ export class Children {
     const completed = (seq !== undefined && seq !== rec.baseline?.completionSeq) || rec.sawWorking;
     if (!completed) return;
     const reply = rec.session ? await this.deps.agent.reply(rec) : undefined;
+    assert();
+    if (!rec.awaiting || rec.closed) return;
     const where = rec.where === "worktree" && rec.branch ? `worktree ${rec.branch}` : rec.where;
     const text = reply
       ? `Herdr child "${rec.name}" (${where}, pane ${rec.paneId}) replied:\n\n${reply}`
@@ -344,12 +405,13 @@ export class Children {
 
   async read(name: string, lines = 80): Promise<string> {
     const rec = this.get(name);
-    const { call } = this.deps;
+    const { call, assert } = this.scope(rec);
     const a = await call<{ agent?: AgentInfo }>("agent.get", { target: rec.paneId });
     const status = a.result?.agent?.agent_status ?? (rec.closed ? "closed" : "gone");
     if (a.result?.agent?.agent_session?.value) rec.session = a.result.agent.agent_session.value;
     if (status === "idle" || status === "done" || status === "closed" || status === "gone") {
       const reply = rec.session ? await this.deps.agent.reply(rec) : undefined;
+      assert();
       return `${rec.name}: ${status}${rec.awaiting ? " (reply pending)" : ""}\n\n${reply ? `Last reply:\n${reply}` : "No reply yet."}`;
     }
     const r = await call("agent.read", { target: rec.paneId, source: "recent_unwrapped", lines: Math.min(Math.max(lines, 10), 400) });
@@ -358,11 +420,12 @@ export class Children {
 
   async list(): Promise<string> {
     if (!this.records.size) return "This session has started no herdr children.";
+    const { call } = this.scope();
     const rows: string[] = [];
     for (const rec of this.records.values()) {
       let status = rec.closed ? "closed" : "?";
       if (!rec.closed) {
-        const a = await this.deps.call<{ agent?: AgentInfo }>("agent.get", { target: rec.paneId });
+        const a = await call<{ agent?: AgentInfo }>("agent.get", { target: rec.paneId });
         status = a.result?.agent?.agent_status ?? "gone";
       }
       const where = rec.where === "worktree" && rec.branch ? `worktree ${rec.branch}` : rec.where;
@@ -373,14 +436,16 @@ export class Children {
 
   async interrupt(name: string): Promise<string> {
     const rec = this.get(name);
-    const r = await this.deps.call("agent.send_keys", { target: rec.paneId, keys: ["esc"] });
+    const { call } = this.scope(rec);
+    const r = await call("agent.send_keys", { target: rec.paneId, keys: ["esc"] });
     if (r.error) throw new Error(`herdr could not interrupt ${rec.name}: ${errorText(r)}`);
     return `Sent Escape to ${rec.name}; its interrupted turn still reports back when it settles.`;
   }
 
   async close(name: string): Promise<string> {
     const rec = this.get(name);
-    const r = await this.deps.call("pane.close", { pane_id: rec.paneId });
+    const { call } = this.scope(rec);
+    const r = await call("pane.close", { pane_id: rec.paneId });
     // Already gone (herdr says pane_not_found, not_found, ...): closing it is done.
     if (r.error && !/not_found$/u.test(r.error.code)) throw new Error(`herdr could not close ${rec.name}: ${errorText(r)}`);
     if (rec.awaiting) this.deps.hold(rec, false);
@@ -391,8 +456,16 @@ export class Children {
     return `Closed ${rec.name}'s pane; its ${this.deps.agent.kind} session stays${rec.session ? ` (${rec.session})` : ""}.${kept}`;
   }
 
+  /** A reply was successfully accepted by pi; save its acknowledgement on this branch. */
+  acknowledge(rec: ChildRecord): void {
+    this.scope(rec).assert();
+    delete rec.pendingReply;
+    this.save(rec);
+  }
+
   /** Release every hold (session end); the records stay saved. */
   shutdown(): void {
+    this.generation++;
     this.stopLoop();
     for (const rec of this.records.values()) if (rec.awaiting) this.deps.hold(rec, false);
   }

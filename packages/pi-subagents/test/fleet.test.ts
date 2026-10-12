@@ -2,7 +2,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { afterEach, expect, test, vi } from "vitest";
 import { emptyUsage } from "../src/child.ts";
 import { FleetView, SUCCESS_HINT_MS, fleetRoster, renderFleet } from "../src/ui/fleet.ts";
-import { KEY, fakeRun, fakeUI, plain } from "./ui-helpers.ts";
+import { KEY, fakeRun, fakeUI, normalFocus, plain } from "./ui-helpers.ts";
 
 afterEach(() => vi.useRealTimers());
 
@@ -63,6 +63,7 @@ test("rows: the selection, stats flush right, a status icon once finished, and s
 
 function setup() {
   const ui = fakeUI();
+  normalFocus(ui);
   const runs = [fakeRun({ agent: "scout", label: "Find config", child: {} as never, state: { startedAt: Date.now() } }), fakeRun({ agent: "worker", label: "Fix config", child: {} as never, state: { startedAt: Date.now() + 1 } })];
   let enabled = true;
   const steered: string[] = [];
@@ -171,9 +172,23 @@ test("stop arming follows the row: if it leaves, the second x does not stop the 
   fleet.dispose();
 });
 
+test("stop confirmation cannot survive replacing the child under the same stable row", () => {
+  const { ui, runs, fleet, stopped } = setup();
+  ui.press(KEY.down);
+  expect(ui.press("x")).toBe(true);
+  runs[0]!.child = {} as never;
+  expect(ui.render("subagents-fleet")[0]).not.toContain("x again");
+  expect(ui.press("x")).toBe(true);
+  expect(stopped).toEqual([]);
+  expect(ui.press("x")).toBe(true);
+  expect(stopped).toEqual(["scout"]);
+  fleet.dispose();
+});
+
 test("a success leaves at once with a note for 30 s; a failure stays until x; disabled, it never shows", () => {
   vi.useFakeTimers({ now: 1_000 });
   const ui = fakeUI();
+  normalFocus(ui);
   const runs = [fakeRun({ agent: "scout", child: {} as never, state: { startedAt: 0 } }), fakeRun({ agent: "worker", child: {} as never, state: { startedAt: 1 } })];
   let enabled = true;
   const dismissed = new Set<string>();
@@ -229,7 +244,7 @@ test("a pill: ↓ selects it when there are no runs; Enter opens its dialog, whi
   fleet.update();
   expect(ui.render("subagents-fleet")).toEqual([" 2 shells ", ""]);
   expect(ui.press(KEY.down)).toBe(true);
-  expect(ui.render("subagents-fleet")[0]).toBe("\x1b[7m 2 shells \x1b[27m  l/enter view · h/esc back");
+  expect(ui.render("subagents-fleet")[0]).toBe("\x1b[7m 2 shells \x1b[27m  enter view · esc back");
   expect(ui.press(KEY.enter)).toBe(true);
   await Promise.resolve();
   expect(opened).toBe(1);
@@ -251,6 +266,7 @@ test("↓ leaves a draft for the list once the cursor is at its end; vim's j doe
     getCursor: () => editor.cursor,
     historyIndex: -1,
     getMode: () => editor.mode,
+    [Symbol.for("pi-plugins.editor-mode.v1")]: () => ({ state: editor.mode, mode: editor.mode, pending: "", ex: null, autocomplete: false }),
   };
   ui.editorText = editor.text;
   // Mid-line: the editor moves the cursor first.
@@ -258,8 +274,8 @@ test("↓ leaves a draft for the list once the cursor is at its end; vim's j doe
   editor.cursor = { line: 0, col: 7 };
   expect(ui.press(KEY.down)).toBe(true);
   expect(ui.render("subagents-fleet")[2]).toMatch(/● Find config {2}scout/u);
-  // h goes back; ← with a draft stays in the editor.
-  expect(ui.press("h")).toBe(true);
+  // Escape goes back; insert-mode h remains typing; ← with a draft stays in the editor.
+  expect(ui.press(KEY.escape)).toBe(true);
   expect(ui.press(KEY.left)).toBe(false);
   // vim: j in insert mode is typing; in normal mode at the last character it enters.
   expect(ui.press("j")).toBe(false);

@@ -67,7 +67,8 @@ Do not poll with `sleep` and repeated `bg_logs`. A user message, Esc or timeout 
 
 - `/tasks` opens the combined shell/agent list when both plugins are enabled.
 - Enter opens a shell log or a child conversation.
-- Double-`x` stops a running entry. A single `x` dismisses an ended one.
+- Double-`x` stops the selected running entry, whichever plugin owns it. A single `x` dismisses an ended one.
+- `/stop` stops only pi-bg's shell tasks from this Pi process. It does not stop subagents, notebooks, planners or Herdr children.
 - `bg_logs` reads a shell task’s log; `subagent` with `action: "status"` inspects runs.
 - `subagent` with `action: "steer"`, an `id` and a `message` changes the child’s direction.
 - `bg_kill` stops a shell process group; it is not the command for stopping a subagent.

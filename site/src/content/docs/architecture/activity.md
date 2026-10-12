@@ -20,7 +20,15 @@ A section supplies `id`, `title`, `entries(now)` and `open(key, ui)`. Optional m
 | pi-marimo | State of followed notebook kernels | Notebook entries, detail views and an unhosted notebook pill |
 | pi-herdr | Herdr reporting and interactive child coordination | Pane tokens and bridge operations, not the shared activity list |
 
+Plan-mode planners and pi-herdr children are **not** activity sources. They appear in Herdr through `herdr:working` and `herdr:background` holds (below), not in FleetView or `/tasks`. Stop planners from the plan screen; interrupt or close a Herdr child through its pane or the `herdr_child` tool.
+
+## Stopping is per item and owner-specific
+
+In [pi-bg's `/tasks` dialog](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-bg/src/dialog.ts), `x` on a running entry arms a stop and a second `x` calls that entry's section `stop`; any other key disarms it. A source without `stop` ignores the key. `x` on an ended entry calls `dismiss`. The dialog guards each call, so one source's exception does not break the list.
+
 Calling a section's `stop` delegates to its owner. For example, the [notebook source](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-marimo/src/ui/source.ts) interrupts a kernel; it does not terminate the shell service that launched the notebook.
+
+`/stop` is not a stop-everything command. pi-bg's [`/stop`](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-bg/src/index.ts) stops only pi-bg's own running shell tasks that this Pi process started; kept services adopted from an earlier session, subagent runs, notebooks, planners and Herdr children are untouched.
 
 ## Request and offer handshake
 

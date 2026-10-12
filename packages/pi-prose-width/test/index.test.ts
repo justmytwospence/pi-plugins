@@ -2,8 +2,19 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Markdown, type MarkdownTheme, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
-import { beforeEach, describe, expect, test } from "vitest";
-import { configuredMeasure, install, parseMeasure } from "../src/index.ts";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import extension, { configuredMeasure, install as acquire, parseMeasure, type Installation } from "../src/index.ts";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+const leases: Installation[] = [];
+const install = (measure: number) => {
+  const lease = acquire(measure);
+  leases.push(lease);
+  return lease;
+};
+afterEach(() => {
+  for (const lease of leases.splice(0)) lease.dispose();
+});
 
 const id = (s: string) => s;
 const theme: MarkdownTheme = {
@@ -54,6 +65,84 @@ describe("rendering", () => {
     expect(widest(md.render(120))).toBeGreaterThan(72);
     install(40);
     expect(widest(md.render(120))).toBeLessThanOrEqual(40);
+  });
+});
+
+describe("ownership and lifecycle", () => {
+  test("last release restores prototypes and invalidates already-rendered Markdown", () => {
+    for (const lease of leases.splice(0)) lease.dispose();
+    const proto = Markdown.prototype as unknown as { render: Markdown["render"]; renderToken: unknown };
+    const originalRender = proto.render;
+    const originalToken = proto.renderToken;
+    const lease = install(40);
+    const md = new Markdown(LONG, 0, 0, theme);
+    expect(widest(md.render(120))).toBeLessThanOrEqual(40);
+    lease.dispose();
+    lease.dispose();
+    expect(proto.render).toBe(originalRender);
+    expect(proto.renderToken).toBe(originalToken);
+    expect(widest(md.render(120))).toBeGreaterThan(40);
+    install(50);
+    expect(widest(md.render(120))).toBeLessThanOrEqual(50);
+  });
+
+  test("an older owner cannot remove a newer runtime's patch", () => {
+    for (const lease of leases.splice(0)) lease.dispose();
+    const old = install(40);
+    const current = install(60);
+    old.dispose();
+    old.setMeasure(20);
+    expect(current.measure).toBe(60);
+    expect(widest(lines(LONG))).toBeGreaterThan(40);
+    expect(widest(lines(LONG))).toBeLessThanOrEqual(60);
+    current.dispose();
+    expect(widest(lines(LONG))).toBeGreaterThan(60);
+  });
+
+  test("does not clobber later wrappers and disables retained delegates", () => {
+    for (const lease of leases.splice(0)) lease.dispose();
+    const proto = Markdown.prototype as unknown as { render: Markdown["render"]; renderToken: (...args: unknown[]) => string[] };
+    const originalRender = proto.render;
+    const originalToken = proto.renderToken;
+    const lease = install(40);
+    const delegatedRender = proto.render;
+    const delegatedToken = proto.renderToken;
+    const render = function (this: Markdown, width: number) { return delegatedRender.call(this, width); };
+    const token = function (this: Markdown, ...args: unknown[]) { return delegatedToken.apply(this, args); };
+    proto.render = render;
+    proto.renderToken = token;
+    try {
+      const md = new Markdown(LONG, 0, 0, theme);
+      expect(widest(md.render(120))).toBeLessThanOrEqual(40);
+      lease.dispose();
+      expect(proto.render).toBe(render);
+      expect(proto.renderToken).toBe(token);
+      expect(widest(md.render(120))).toBeGreaterThan(40);
+    } finally {
+      proto.render = originalRender;
+      proto.renderToken = originalToken;
+    }
+  });
+
+  test("factory/headless load is inert and session shutdown releases the TUI lease", async () => {
+    for (const lease of leases.splice(0)) lease.dispose();
+    const render = Markdown.prototype.render;
+    const handlers = new Map<string, (...args: any[]) => any>();
+    let command: any;
+    extension({
+      on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler),
+      registerCommand: (_name: string, definition: any) => { command = definition; },
+    } as unknown as ExtensionAPI);
+    expect(Markdown.prototype.render).toBe(render);
+    handlers.get("session_start")!({}, { mode: "rpc" });
+    expect(Markdown.prototype.render).toBe(render);
+    handlers.get("session_start")!({}, { mode: "tui" });
+    expect(Markdown.prototype.render).not.toBe(render);
+    const notify = vi.fn();
+    await command.handler("45", { ui: { notify } });
+    expect(widest(lines(LONG))).toBeLessThanOrEqual(45);
+    handlers.get("session_shutdown")!();
+    expect(Markdown.prototype.render).toBe(render);
   });
 });
 

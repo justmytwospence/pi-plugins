@@ -12,7 +12,7 @@ The extension gives Pi several later opportunities to query those colors. It doe
 
 Entry: `packages/pi-appearance-resync/src/index.ts`.
 
-Follow [Install & select](/guides/install/) to select this entry from the suite. The suite loads all 19 extensions by default; selected entries share one Git pin, rather than separate component versions.
+Follow [Install & select](/guides/install/) to select this entry from the suite. The suite loads every entry by default; selected entries share one Git pin, rather than separate component versions.
 
 The package README identifies the notification-ordering problem in Herdr 0.9.3. That is the documented motivating case, not a claim that every later Herdr version needs this workaround or that every other multiplexer has been tested. The extension itself does not require a Herdr environment flag.
 

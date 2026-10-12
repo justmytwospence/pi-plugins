@@ -10,6 +10,7 @@ import {
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { pageHeader } from "./app/frame.js";
+import { INPUT_CONTEXT } from "./editor-contract.js";
 import { groupState, leaves, type ToolNode, toggle } from "./tool-tree.js";
 import { fieldLine, type Hint, hintLine, padLines, padVisible, rule, selectedRow, spinner } from "./ui-kit.js";
 
@@ -88,11 +89,20 @@ export class ToolTreeView implements Component {
           options.requestRender();
         },
         () => {
+          if (this.closed) return;
           this.jevStatus = { kind: "done", message: "Jev could not pick tools; using the defaults from settings." };
           options.requestRender();
         },
       );
     }
+  }
+
+  [INPUT_CONTEXT]() {
+    return "list";
+  }
+
+  dispose() {
+    this.closed = true;
   }
 
   invalidate() {}
@@ -132,8 +142,16 @@ export class ToolTreeView implements Component {
     if (is("enter")) this.confirming = true;
     else if (is("up", "k", "ctrl+p", "ctrl+k")) this.cursor = (this.cursor - 1 + rows.length) % rows.length;
     else if (is("down", "j", "ctrl+n", "ctrl+j")) this.cursor = (this.cursor + 1) % rows.length;
-    else if (is("ctrl+u")) this.cursor = Math.max(0, this.cursor - 10);
-    else if (is("ctrl+d")) this.cursor = Math.min(rows.length - 1, this.cursor + 10);
+    else if (is("ctrl+u", "pageUp"))
+      this.cursor = Math.max(
+        0,
+        this.cursor - Math.max(1, Math.floor((this.shownRows.length || 10) / (is("ctrl+u") ? 2 : 1))),
+      );
+    else if (is("ctrl+d", "pageDown"))
+      this.cursor = Math.min(
+        rows.length - 1,
+        this.cursor + Math.max(1, Math.floor((this.shownRows.length || 10) / (is("ctrl+d") ? 2 : 1))),
+      );
     else if (is("home", "g")) this.cursor = 0;
     else if (is("end", "shift+g")) this.cursor = rows.length - 1;
     else if (is("a")) {

@@ -1,6 +1,7 @@
 // A task's log, full screen (frame.ts): it follows the log as it grows. ↑↓ (or j/k), PgUp/PgDn, Home/End scroll
 // (scrolling to the end follows again); `x` twice stops a running task; Esc or q closes.
 import { type Component, type TUI, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { INPUT_CONTEXT } from "./activity.ts";
 import { header } from "./format.ts";
 import { banner, bottom, row as frameRow, rule as frameRule } from "./frame.ts";
 import { tail } from "./log.ts";
@@ -41,6 +42,11 @@ export class LogViewer implements Component {
     this.timer.unref?.();
   }
 
+  /** Read-only scrolling content: global listeners leave its keys alone. */
+  [INPUT_CONTEXT](): "viewer" {
+    return "viewer";
+  }
+
   private reload(): void {
     try {
       this.lines = tail(this.task.logPath, MAX_LINES);
@@ -73,8 +79,10 @@ export class LogViewer implements Component {
     const max = Math.max(0, this.lines.length - page);
     if (matchesKey(data, "up") || matchesKey(data, "k")) this.scroll = Math.max(0, Math.min(this.scroll, max) - 1);
     else if (matchesKey(data, "down") || matchesKey(data, "j")) this.scroll = Math.min(max, this.scroll + 1);
-    else if (matchesKey(data, "pageUp") || matchesKey(data, "ctrl+u")) this.scroll = Math.max(0, Math.min(this.scroll, max) - page);
-    else if (matchesKey(data, "pageDown") || matchesKey(data, "ctrl+d")) this.scroll = Math.min(max, this.scroll + page);
+    else if (matchesKey(data, "ctrl+u")) this.scroll = Math.max(0, Math.min(this.scroll, max) - Math.max(1, Math.floor(page / 2)));
+    else if (matchesKey(data, "ctrl+d")) this.scroll = Math.min(max, this.scroll + Math.max(1, Math.floor(page / 2)));
+    else if (matchesKey(data, "pageUp")) this.scroll = Math.max(0, Math.min(this.scroll, max) - page);
+    else if (matchesKey(data, "pageDown")) this.scroll = Math.min(max, this.scroll + page);
     else if (matchesKey(data, "home") || matchesKey(data, "g")) this.scroll = 0;
     else if (matchesKey(data, "end") || matchesKey(data, "shift+g")) this.scroll = max;
     else return;
@@ -111,7 +119,7 @@ export class LogViewer implements Component {
     const position = this.lines.length <= page ? "all" : `${Math.round(((start + page) / this.lines.length) * 100)}%`;
     actions.push(th.fg("dim", `${this.lines.length} lines · ${position}${this.follow && t.status === "running" ? " · following" : ""}`));
     const left = actions.join(th.fg("dim", " · "));
-    const nav = th.fg("dim", "j/k PgUp/PgDn g/G · h/esc back");
+    const nav = th.fg("dim", "j/k ^U/^D g/G · h/esc back");
     const gap = inner - visibleWidth(left) - visibleWidth(nav);
     out.push(row(gap >= 1 ? `${left}${" ".repeat(gap)}${nav}` : left));
     out.push(bottom(width, th));
