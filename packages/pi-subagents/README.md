@@ -65,6 +65,14 @@ Prefer direct work for routine investigation, diagnosis, and verification. Deleg
 
 In a prompt, `@subagent:<name>` names an agent role. In the TUI, Pi's autocomplete lists the discovered agents after `@subagent:` (when the running Pi supports autocomplete providers). A prompt that mentions one gets a hidden message telling the model which agent that is (its description, tools, model and thinking level) and to delegate the relevant part of the task to it with the `subagent` tool; an unknown name is reported along with the agents that exist. A mention never starts a run by itself.
 
+## `@run:<label-or-id>` references
+
+In a prompt, `@run:<label-or-id>` references one of this session's earlier subagent runs, live or known only from its `subagents:run` record (after a reload or `/resume`). In the TUI, Pi's autocomplete lists the runs after `@run:`, newest first, filtered by what is typed against the run's id, task label or agent role; completing one inserts the label as a slug (`@run:audit-cache-invalidation`) when no other run shares it, else the id (`@run:k3j2x1`). A token resolves by id, by unique id prefix, or by label slug (case-insensitive).
+
+A prompt that references a run gets a hidden message (not shown in the conversation) with, for each referenced run: its label, agent role, id, status, model and thinking level; its task; its final output (from memory or `output.md`); and a compact transcript rebuilt from `messages.jsonl` (user and assistant text, tool calls as `tool: bash: npm test`, tool results on one line; thinking is dropped and the task is not repeated). A run still running has no result yet and says so. The message calls the content untrusted background and tells the model not to repeat the run unless asked. An unknown token is reported along with the runs that exist; a token several runs share (two runs with the same label) lists their ids instead.
+
+Sizes are capped: 4,000 characters of task, 12,000 of output and 8,000 of transcript per run (400 per transcript line; a longer transcript keeps its start and its end, about a third and two thirds of the budget, with the middle left out), and 48,000 for all references in one prompt, after which further runs are left out and named as such. A reference never starts or repeats a run; only subagent runs can be referenced, not other Pi sessions.
+
 ## Watching subagents (TUI)
 
 ### FleetView

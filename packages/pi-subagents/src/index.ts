@@ -22,6 +22,7 @@ import { Conversation, type Message, readTranscript, transcriptWriter } from "./
 import { type JevConfig, askJev } from "./jev.ts";
 import { runLabel, taskLabel } from "./label.ts";
 import { DEFAULT_TIER_DESCRIPTIONS, type Given, type Resolved, type Tier, pickQuestions, providerTiers, readPicks, resolve } from "./pick.ts";
+import { REFERENCE_TYPE, type RunRef, referenceContext, runAutocomplete } from "./references.ts";
 import { type Run, displayTokens, transcriptPath } from "./run.ts";
 import { clip, recentTexts } from "./transcript.ts";
 import { FleetView, SUCCESS_HINT_MS } from "./ui/fleet.ts";
@@ -452,6 +453,21 @@ export default function subagents(pi: ExtensionAPI) {
     safely(() => pi.appendEntry(RUN_ENTRY, { ...view(run), outputPath: run.outputPath, async: run.async }));
   };
 
+  /** This session's runs, newest first: live ones, then those known only from their records (before a reload). */
+  const allRuns = (ctx: Pick<ExtensionContext, "sessionManager">): Array<{ view: RunView; run: () => Run }> => {
+    const latest = new Map<string, RecordedRun>();
+    for (const e of ctx.sessionManager.getBranch() as Array<{ type?: string; customType?: string; data?: RecordedRun }>) {
+      if (e.type === "custom" && e.customType === RUN_ENTRY && e.data && !runs.has(e.data.id)) latest.set(e.data.id, e.data);
+    }
+    return [
+      ...[...latest.values()].map((v) => ({ view: v, run: () => recordedRun(v) })),
+      ...[...runs.values()].map((r) => ({ view: view(r), run: () => r })),
+    ].reverse();
+  };
+  /** The same runs, as `@run:` references. */
+  const runRefs = (ctx: Pick<ExtensionContext, "sessionManager">): RunRef[] =>
+    allRuns(ctx).map((e) => ({ id: e.view.id, agent: e.view.agent, task: e.view.task, ...(e.view.label ? { label: e.view.label } : {}), status: e.view.status, model: e.view.model, run: e.run }));
+
   /** Forward a child's dialog (for example a tool gate's approval) to the parent's UI. */
   const dialogFor = (ctx: ExtensionContext, agent: string, label: string) => async (request: DialogRequest): Promise<DialogAnswer> => {
     if (!ctx.hasUI) return undefined;
@@ -575,7 +591,7 @@ export default function subagents(pi: ExtensionAPI) {
 
   const usageOf = (list: Run[]): Usage => list.reduce((sum, r) => addUsage(sum, r.state.usage), emptyUsage());
 
-  /** `@subagent:<name>` completes to a discovered agent; once per runtime (a reload clears pi's providers). */
+  /** `@subagent:<name>` completes to a discovered agent and `@run:` to this session's runs; once per runtime (a reload clears pi's providers). */
   let autocompleteAdded = false;
   pi.on("session_start", (_event, ctx) => {
     lifetime.abort();
@@ -587,7 +603,7 @@ export default function subagents(pi: ExtensionAPI) {
     if (boundUI && !autocompleteAdded && typeof ctx.ui.addAutocompleteProvider === "function") {
       autocompleteAdded = true;
       try {
-        ctx.ui.addAutocompleteProvider((current) => subagentAutocomplete(current, () => discoverAgents(sessionCtx?.cwd ?? ctx.cwd)));
+        ctx.ui.addAutocompleteProvider((current) => runAutocomplete(subagentAutocomplete(current, () => discoverAgents(sessionCtx?.cwd ?? ctx.cwd)), () => (sessionCtx ? runRefs(sessionCtx) : [])));
       } catch {
         // An older pi without the hook: mentions still guide the model.
       }
@@ -607,6 +623,14 @@ export default function subagents(pi: ExtensionAPI) {
     const guidance = mentionGuidance(event.prompt, discoverAgents(ctx.cwd));
     if (!guidance) return undefined;
     return { message: { customType: MENTION_TYPE, content: guidance, display: false } };
+  });
+
+  // A prompt referencing `@run:<label-or-id>`: give the model that run's task, result and a compact
+  // transcript (an unknown token is named as such, with the runs that exist).
+  pi.on("before_agent_start", (event, ctx) => {
+    const context = referenceContext(event.prompt, runRefs(ctx));
+    if (!context) return undefined;
+    return { message: { customType: REFERENCE_TYPE, content: context, display: false } };
   });
 
   pi.on("session_shutdown", () => {
@@ -921,18 +945,6 @@ export default function subagents(pi: ExtensionAPI) {
       return new Text(lines.join("\n"), 0, 0);
     },
   });
-
-  /** This session's runs, newest first: live ones, then those known only from their records (before a reload). */
-  const allRuns = (ctx: ExtensionContext): Array<{ view: RunView; run: () => Run }> => {
-    const latest = new Map<string, RecordedRun>();
-    for (const e of ctx.sessionManager.getBranch() as Array<{ type?: string; customType?: string; data?: RecordedRun }>) {
-      if (e.type === "custom" && e.customType === RUN_ENTRY && e.data && !runs.has(e.data.id)) latest.set(e.data.id, e.data);
-    }
-    return [
-      ...[...latest.values()].map((v) => ({ view: v, run: () => recordedRun(v) })),
-      ...[...runs.values()].map((r) => ({ view: view(r), run: () => r })),
-    ].reverse();
-  };
 
   pi.registerCommand("subagents", {
     description: "Browse this session's subagent runs and view their conversations (/subagents [id], /subagents stop [id|all])",
