@@ -13,13 +13,20 @@ import { mkdir, readFile, rename, rmdir, stat, writeFile } from "node:fs/promise
 import { homedir } from "node:os";
 import path from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import { CustomEditor, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, getAgentDir, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { builtinMcpOwnsCommand, connectedMcpServers, countMcp, McpConfigReader, MCP_STATUS_KEY, type McpCount } from "./mcp.ts";
+import { SHOW_TIMER_AFTER_MS, WORKING_REFRESH_MS, workingMessage, WorkingStats } from "./working.ts";
+
+export * from "./mcp.ts";
+export * from "./working.ts";
 
 const STATE_KEY = "personal-status-footer";
 const QUOTA_STALE_MS = 10 * 60_000;
 const GIT_TTL_MS = 3_000;
 const TICK_MS = 15_000;
+// Built-in MCP exposes no status; its tools and mcp.json are polled instead.
+const MCP_TICK_MS = 5_000;
 // Codex CLI's own /status source. Hardcoded so the token never follows a custom
 // provider baseUrl anywhere else.
 const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
@@ -65,6 +72,8 @@ export interface Snapshot {
   stash?: { text?: string };
   marimo?: MarimoStatus;
   bg?: BgItem[];
+  /** Built-in MCP servers, connected/configured, unless another extension publishes an `mcp` status. */
+  mcp?: McpCount;
   /** The editor's border lines draw the context gauge, so the context row leaves it out. */
   borderGauge?: boolean;
 }
@@ -127,7 +136,7 @@ export function parseMarimoStatus(text: string): MarimoStatus | undefined {
   return status;
 }
 
-export interface AbsorbedStatuses { autoEffort: boolean; autoEffortDetail?: string; lean?: string; cache?: string; extraBilled?: number; stashed?: boolean; marimo?: MarimoStatus; bg?: BgItem[]; rest: string[] }
+export interface AbsorbedStatuses { autoEffort: boolean; autoEffortDetail?: string; lean?: string; cache?: string; extraBilled?: number; stashed?: boolean; marimo?: MarimoStatus; bg?: BgItem[]; /** Another extension owns the `mcp` status. */ mcp?: boolean; rest: string[] }
 // Statuses from our own companion extensions that read better inside the footer
 // rows they describe. Each is optional: absent extensions publish nothing, and a
 // status whose text no longer matches the expected shape falls through to the
@@ -173,7 +182,8 @@ export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: {
       continue;
     }
     // Use the flat Nerd Font plug for MCP; preserve its theme color and text.
-    result.rest.push(key === "mcp" ? text.replace(/\u{1f50c}[\ufe0e\ufe0f]?/u, "\uf1e6") : text);
+    if (key === MCP_STATUS_KEY) result.mcp = true;
+    result.rest.push(key === MCP_STATUS_KEY ? text.replace(/\u{1f50c}[\ufe0e\ufe0f]?/u, "\uf1e6") : text);
   }
   return result;
 }
@@ -655,6 +665,11 @@ function bgRow(items: BgItem[], width: number, theme: Paint): string {
   return fitSegments(segments, width, theme);
 }
 
+function mcpChip(count: McpCount, theme: Paint): string {
+  const value = `${count.connected}/${count.total}`;
+  return `${theme.fg("muted", "\uf1e6 MCP")} ${count.connected < count.total ? theme.fg("warning", value) : value}`;
+}
+
 export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): string[] {
   if (width <= 0) return [];
   const s = snapshot, g = s.git;
@@ -716,8 +731,11 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   if (s.bg?.length) rows.push(bgRow(s.bg, width, theme));
   // Statuses remain owned by their publishers. Wrap instead of silently dropping
   // plan mode, background failures, or other extension notices at the right edge.
-  if (s.statuses.length) {
-    const text = s.statuses.map((status) => status.replace(/[\r\n\t]/g, " ")).join(sep);
+  // Our own MCP chip sits first among them, in the same muted-label style as the
+  // companion notices; a shortfall of connected servers takes the warning color.
+  const statuses = s.mcp ? [mcpChip(s.mcp, theme), ...s.statuses] : s.statuses;
+  if (statuses.length) {
+    const text = statuses.map((status) => status.replace(/[\r\n\t]/g, " ")).join(sep);
     rows.push(...wrapTextWithAnsi(text, width));
   }
 
@@ -776,7 +794,15 @@ function stashedPrompt(): string | undefined {
 export default function statusFooter(pi: ExtensionAPI): void {
   let ctx: ExtensionContext | undefined;
   let active = false, enabled = true, showAll = false, generation = 0;
+  let showWorking = true, showMcp = true;
   let timer: ReturnType<typeof setInterval> | undefined;
+  // Working-row statistics: pi's indicator message is replaced only while a run
+  // is in progress, and restored (undefined) the moment it ends.
+  const working = new WorkingStats();
+  let workingTimer: ReturnType<typeof setInterval> | undefined, runStarted = 0, workingShown: string | undefined;
+  // Built-in MCP chip: tools are in memory, mcp.json is read on its own slow poll.
+  const mcpConfig = new McpConfigReader();
+  let mcpTimer: ReturnType<typeof setInterval> | undefined, mcp: McpCount | undefined, mcpBusy = false;
   let requestRender: (() => void) | undefined;
   let releaseFooter: (() => void) | undefined;
   let git: GitInfo = { ...emptyGit(), unavailable: true }, gitBusy = false, gitChecked = 0;
@@ -1012,6 +1038,52 @@ export default function statusFooter(pi: ExtensionAPI): void {
       if (epoch === generation) codexBusy = false;
     }
   };
+  // pi's setWorkingMessage persists until cleared, so every path out of a run
+  // (turn end, agent end, shutdown, /status working off) restores the default.
+  const setWorking = (message: string | undefined) => {
+    if (!ctx || message === workingShown) return;
+    workingShown = message;
+    try { ctx.ui.setWorkingMessage(message); } catch { /* UI gone; nothing to restore */ }
+  };
+  const syncWorking = () => {
+    if (!active || !runStarted || !showWorking) return;
+    setWorking(workingMessage(working.tokens(), Date.now() - runStarted));
+  };
+  // A turn's end keeps the run's clock for the next turn; the run's end drops it.
+  const endTurn = () => {
+    if (workingTimer !== undefined) clearInterval(workingTimer);
+    workingTimer = undefined; working.reset();
+    setWorking(undefined);
+  };
+  const endRun = () => { endTurn(); runStarted = 0; };
+  const startRun = () => {
+    if (!active || !showWorking) return;
+    if (!runStarted) runStarted = Date.now();
+    if (workingTimer !== undefined) return;
+    const epoch = generation;
+    workingTimer = setInterval(() => {
+      if (!active || epoch !== generation) return;
+      // A throwing timer callback would take pi down; a decorative row just stops.
+      try { syncWorking(); } catch { endRun(); }
+    }, WORKING_REFRESH_MS);
+    workingTimer.unref();
+  };
+  const updateMcp = async () => {
+    if (!active || !ctx || !showMcp || mcpBusy) return;
+    mcpBusy = true;
+    const epoch = generation, context = ctx;
+    try {
+      let next: McpCount | undefined;
+      // The tool and command lists live on the API; the context gives cwd and trust.
+      if (builtinMcpOwnsCommand(pi.getCommands())) {
+        const connected = connectedMcpServers(pi.getAllTools());
+        const configured = await mcpConfig.configured({ agentDir: getAgentDir(), cwd: context.cwd, projectTrusted: context.isProjectTrusted() });
+        next = countMcp(connected, configured);
+      }
+      if (!active || epoch !== generation) return;
+      if (next?.connected !== mcp?.connected || next?.total !== mcp?.total) { mcp = next; requestRender?.(); }
+    } catch { /* The footer must not fail over a tool list or config read. */ } finally { if (epoch === generation) mcpBusy = false; }
+  };
   const snapshot = (branch: string | null, statuses: ReadonlyMap<string, string>): Snapshot => {
     if (!ctx) throw new Error("Footer rendered outside its session lifecycle");
     const current = ctx;
@@ -1037,6 +1109,8 @@ export default function statusFooter(pi: ExtensionAPI): void {
       statuses: absorbed.rest, autoEffort: absorbed.autoEffort, autoEffortDetail: absorbed.autoEffortDetail, lean: absorbed.lean, cache: absorbed.cache, extraBilled: absorbed.extraBilled,
       stash: absorbed.stashed ? { text: stashedPrompt() } : undefined,
       marimo: absorbed.marimo, bg: absorbed.bg, borderGauge,
+      // Yield to an extension that publishes its own mcp status (pi-mcp-adapter).
+      mcp: showMcp && !absorbed.mcp ? mcp : undefined,
       now: Date.now(),
     };
   };
@@ -1072,12 +1146,13 @@ export default function statusFooter(pi: ExtensionAPI): void {
   // repeated sessions do not stack.
   let releaseEditor: (() => void) | undefined;
   const restorePreferences = (context: ExtensionContext) => {
-    enabled = true; showAll = false;
+    enabled = true; showAll = false; showWorking = true; showMcp = true;
     for (const raw of context.sessionManager.getBranch()) {
       const entry = record(raw);
       if (entry.type === "custom" && entry.customType === STATE_KEY) {
         const data = record(entry.data);
         enabled = data.enabled !== false; showAll = data.showAll === true;
+        showWorking = data.working !== false; showMcp = data.mcp !== false;
       }
     }
   };
@@ -1106,16 +1181,22 @@ export default function statusFooter(pi: ExtensionAPI): void {
     // re-enter us. Saved callbacks must stay inert even after another start.
     const context = ctx, interval = timer, timeout = codexTimeout, controller = codexAbort;
     const footer = releaseFooter, editor = releaseEditor, processes = [...children];
+    const runInterval = workingTimer, mcpInterval = mcpTimer, shownWorking = workingShown;
     active = false; generation++;
     ctx = undefined; requestRender = undefined;
     timer = undefined; codexTimeout = undefined; codexAbort = undefined;
+    workingTimer = undefined; mcpTimer = undefined; runStarted = 0; workingShown = undefined; working.reset();
+    mcp = undefined; mcpBusy = false;
     releaseFooter = undefined; releaseEditor = undefined;
     children.clear();
 
     const errors: unknown[] = [];
     const cleanup = (run: () => void) => { try { run(); } catch (error) { errors.push(error); } };
     if (interval !== undefined) cleanup(() => clearInterval(interval));
+    if (runInterval !== undefined) cleanup(() => clearInterval(runInterval));
+    if (mcpInterval !== undefined) cleanup(() => clearInterval(mcpInterval));
     if (timeout !== undefined) cleanup(() => clearTimeout(timeout));
+    if (context && shownWorking !== undefined) cleanup(() => context.ui.setWorkingMessage());
     if (controller) cleanup(() => controller.abort());
     for (const child of processes) cleanup(() => { child.kill(); });
     // Own disposal too: setFooter may throw before Pi calls dispose().
@@ -1136,14 +1217,32 @@ export default function statusFooter(pi: ExtensionAPI): void {
     phase = undefined;
     restorePreferences(context);
     account(); wrapEditor(context); attach();
-    void updateGit(true); void updateQuota(true); void updateCodex(0);
+    void updateGit(true); void updateQuota(true); void updateCodex(0); void updateMcp();
     const epoch = generation;
+    mcpTimer = setInterval(() => { if (active && epoch === generation) void updateMcp(); }, MCP_TICK_MS);
+    mcpTimer.unref();
     timer = setInterval(() => {
       if (!active || epoch !== generation) return;
       account(); void updateGit(); void updateQuota(); void updateCodex(); requestRender?.();
     }, TICK_MS);
     timer.unref();
   });
+  pi.on("mcp_servers_change", () => { void updateMcp(); });
+  pi.on("before_agent_start", () => { if (active && showWorking && !runStarted) runStarted = Date.now(); });
+  pi.on("turn_start", (_event, context) => {
+    if (!active) return;
+    ctx = context; phase = undefined; working.reset(); startRun(); syncWorking();
+  });
+  pi.on("message_update", (event, context) => {
+    if (!active || !runStarted || !showWorking) return;
+    ctx = context;
+    const update = event.assistantMessageEvent;
+    if (!update) return;
+    working.apply(update); startRun(); syncWorking();
+  });
+  // Back to pi's idle text at once: no completion message lingers between turns.
+  pi.on("turn_end", () => { if (active) endTurn(); });
+  pi.on("agent_end", () => { if (active) endRun(); });
   pi.on("session_shutdown", stop);
   pi.on("model_select", (_event, context) => {
     if (!active) return;
@@ -1164,10 +1263,9 @@ export default function statusFooter(pi: ExtensionAPI): void {
     if (event.message.role === "assistant") phase = event.message.stopReason === "error" ? "error" : undefined;
     requestRender?.();
   });
-  pi.on("turn_start", () => { if (active) phase = undefined; });
   pi.on("agent_settled", (_event, context) => {
     if (!active) return;
-    ctx = context; account(); void updateGit(true); void updateQuota(); void updateCodex(CODEX_ACTIVE_TTL_MS);
+    ctx = context; account(); void updateGit(true); void updateQuota(); void updateCodex(CODEX_ACTIVE_TTL_MS); void updateMcp();
     requestRender?.();
   });
   pi.on("ui_prompt_start", () => { if (active) { phase = "waiting"; requestRender?.(); } });
@@ -1198,8 +1296,8 @@ export default function statusFooter(pi: ExtensionAPI): void {
     if (codexAccount) void writeCodexCache(codexAccount, updated, usage);
   });
   pi.registerCommand("status", {
-    description: "Personal footer: on, native, all (also show the other subscription account), details",
-    getArgumentCompletions: (prefix) => ["on", "native", "all", "details"].filter((value) => value.startsWith(prefix)).map((value) => ({ value, label: value })),
+    description: "Personal footer: on, native, all (also show the other subscription account), details, working on|off, mcp on|off",
+    getArgumentCompletions: (prefix) => ["on", "native", "all", "details", "working on", "working off", "mcp on", "mcp off"].filter((value) => value.startsWith(prefix)).map((value) => ({ value, label: value })),
     handler: async (args, context) => {
       if (context.mode !== "tui") return;
       const command = args.trim() || "details";
@@ -1216,13 +1314,25 @@ export default function statusFooter(pi: ExtensionAPI): void {
           "OAuth identifies the authentication method, not guaranteed subscription billing. Git diff covers all uncommitted tracked changes, not just this agent.",
           "Claude acct comes from Anthropic's usage endpoint (as Claude Code /status) using Pi's own Claude login, refreshed every 5m and by each response's limit headers; without a Pi subscription login, from Claude Code's account (which can differ). Values are percent used; stale means >10m old or reset due.",
           "Codex acct comes from ChatGPT's usage endpoint (as Codex CLI /status) using Pi's own Codex login, shared by all Pi sessions on the account; refreshed every 5m, or 1m around turns. Each request's streamed rate-limit event (or SSE headers) updates it in between.",
-          "/status on: active provider only; /status all: also show the other subscription account; /status native: restore Pi footer. Choice survives reload/resume in this session.",
+          `Working row: ${showWorking ? "on" : "off"} (streamed output tokens, estimated as chars/4 until the provider reports a count, and elapsed time after ${SHOW_TIMER_AFTER_MS / 1000}s). MCP chip: ${showMcp ? "on" : "off"} (built-in MCP servers with non-hidden tools over servers enabled in mcp.json; approximate, and absent when another extension publishes an mcp status).`,
+          "/status on: active provider only; /status all: also show the other subscription account; /status native: restore Pi footer; /status working on|off, /status mcp on|off. Choices survive reload/resume in this session.",
         ].join("\n"), "info");
         return;
       }
-      if (!["on", "native", "all"].includes(command)) { context.ui.notify("Usage: /status on|native|all|details", "warning"); return; }
+      const toggle = /^(working|mcp) (on|off)$/.exec(command);
+      if (toggle) {
+        ctx = context;
+        const on = toggle[2] === "on";
+        if (toggle[1] === "working") { showWorking = on; if (!on) endRun(); }
+        else { showMcp = on; if (on) void updateMcp(); }
+        pi.appendEntry(STATE_KEY, { enabled, showAll, working: showWorking, mcp: showMcp });
+        requestRender?.();
+        context.ui.notify(`${toggle[1] === "working" ? "Working row" : "MCP chip"} ${on ? "enabled" : "disabled"}`, "info");
+        return;
+      }
+      if (!["on", "native", "all"].includes(command)) { context.ui.notify("Usage: /status on|native|all|details|working on|off|mcp on|off", "warning"); return; }
       ctx = context; enabled = command !== "native"; showAll = command === "all";
-      pi.appendEntry(STATE_KEY, { enabled, showAll });
+      pi.appendEntry(STATE_KEY, { enabled, showAll, working: showWorking, mcp: showMcp });
       attach(); if (enabled) { void updateGit(true); void updateQuota(true); void updateCodex(0); }
       context.ui.notify(enabled ? "Custom footer enabled" : "Native footer restored", "info");
     },

@@ -1,11 +1,14 @@
 # pi-status-footer
 
 A [pi](https://pi.dev) extension that replaces only pi's footer using its public API.
-It leaves the working indicator, task widgets and tool rendering alone, and keeps
-whichever editor is installed (pi's, pi-vim's), redrawing only its two border lines
-as the context gauge. It uses pi's current theme, without background color blocks or animation.
-The MCP status uses a flat Nerd Font plug (U+F1E6), inheriting the status text color;
-Nerd Font support is only needed for that decorative glyph. The `MCP` label and status text remain readable without it. Other status text is preserved.
+It leaves task widgets and tool rendering alone, and keeps whichever editor is
+installed (pi's, pi-vim's), redrawing only its two border lines as the context
+gauge. It uses pi's current theme, without background color blocks or animation.
+While the agent runs, it adds streamed-output and elapsed-time statistics to
+pi's own working indicator message, keeping pi's spinner. The MCP status uses a
+flat Nerd Font plug (U+F1E6), inheriting the status text color; Nerd Font
+support is only needed for that decorative glyph. The `MCP` label and status
+text remain readable without it. Other status text is preserved.
 
 ## Install
 
@@ -20,19 +23,21 @@ One Git revision versions every selected component. Never enable a second standa
 
 ## Controls
 
-If `pi-cc-extensions` is installed, disable its competing footer in
-`~/.pi/agent/pi-cc-extensions.json`, or it can replace this one after startup or
-reload. Edits take effect with `/reload`.
+Do not enable `pi-cc-extensions` alongside this footer: its footer and working
+message replace this one after startup or reload. Its working-row stats and MCP
+chip are part of this component now.
 
 - `/status on`: custom footer, limits for the active provider only (default).
 - `/status all`: also keep the other subscription account's limits visible
   (Claude acct on Codex, Codex acct on Claude, both on other providers).
 - `/status native`: restore Pi's built-in footer immediately.
 - `/status` or `/status details`: show detailed measurements and explain sources.
+- `/status working on|off`: the working-row statistics (default on).
+- `/status mcp on|off`: the built-in MCP chip (default on).
 
-The selection persists in the session without entering model context. New sessions
-start with the custom footer. Native mode still keeps the cached account
-readings fresh.
+The selections persist in the session without entering model context. New sessions
+start with the custom footer and both extras on. Native mode still keeps the cached account
+readings fresh; the working row is independent of the footer mode.
 
 ## Layout
 
@@ -55,7 +60,8 @@ readings fresh.
    editor without pi's border hooks keeps its borders, and the gauge stays in the
    footer. An extension that installs an editor without wrapping the previous one
    (pi-vim) must load before this one; pi-stash wraps, so its order is free.
-3. Other extensions' status notices, only when present. Notices wrap rather than
+3. Other extensions' status notices, only when present, led by the MCP chip
+   (below) when pi's built-in MCP is in use. Notices wrap rather than
    disappearing at the right edge. Existing task widgets are not duplicated.
 4. Provider/account limits explicitly labeled as percent **used**, with reset
    countdowns when supported. Last, since they are usually the longest rows.
@@ -87,6 +93,37 @@ needed, preserve service states, and prioritize failed tasks over routine work.
 
 Estimated session cost, cache reuse, raw token counts, Git line counts, OAuth details, age and compaction
 counts are available through `/status details`, not crowded into the footer.
+
+### Working row
+
+While a run streams, pi's working indicator reads `Working (↓ 1,234 tokens · 12s)`
+(example) instead of `Working`: pi's spinner, color and base label are kept, and
+only the parenthesized statistics are added through `setWorkingMessage`. Tokens
+are the streamed text and thinking at four characters per token until the
+provider's stream reports `usage.output`, which then replaces the estimate.
+Elapsed time counts from the agent's start, across the run's turns, and shows
+once the run has lasted three seconds or as soon as there are tokens to show;
+before that pi's message is left alone. The message refreshes once a second
+only while a turn is in progress, and pi's default is restored the moment a
+turn or run ends, on shutdown or reload, and when the row is turned off. The
+count starts over with each turn. `/status working off` disables it.
+
+### MCP chip
+
+Pi's built-in MCP extension publishes no status: its connections are only
+visible in `/mcp`. The footer approximates them as `MCP 2/3` in the status
+row: servers whose tools (from `builtin:mcp`, exposure not `hidden`) are
+registered, over those plus the servers enabled in `mcp.json` (the user file,
+and the project's `.pi/mcp.json` when the project is trusted). A shortfall
+takes the warning color. It is an approximation: a dropped connection keeps
+its tools, a server with no tools is invisible, and needs-auth, failed and
+connecting are not told apart; `/mcp` remains the source of truth. The chip
+is absent when no built-in `/mcp` command exists, when another extension
+registers `/mcp`, and whenever any extension publishes an `mcp` status
+(pi-mcp-adapter), whose text is shown unchanged instead. Tools are reread
+from memory and `mcp.json` by modification time every five seconds, on
+`mcp_servers_change` and after each turn; rendering still reads nothing.
+`/status mcp off` disables it.
 
 At 60 columns and up, all rows have a one-cell inset. Narrower terminals omit
 that padding. Labels use natural single-space spacing, not aligned columns.
@@ -181,8 +218,10 @@ only holds a long-lived setup-token), set `PI_STATUS_FOOTER_CLAUDE_USAGE_CMD` to
 command that prints the usage JSON, such as `spoke usage claude`; its output fills
 the same cache.
 
-Timers, Git subscriptions and direct child processes are cleaned up on shutdown,
-reload and session replacement. Generation checks reject late asynchronous work.
+Timers (including the working row's one-second refresh and the MCP poll), Git
+subscriptions and direct child processes are cleaned up on shutdown, reload and
+session replacement, and pi's working message is restored. Generation checks
+reject late asynchronous work.
 Print, JSON and RPC modes do not start footer work. tmux window-tab state comes
 from the [tmux-agents](https://github.com/justmytwospence/tmux-agents) plugin, not from this footer.
 
@@ -196,7 +235,12 @@ npm run check   # tsc against pi's real types, then vitest
 Tests cover usage accounting, provider switches, unknown/stale data, the Codex usage
 response and header merging (with `fetch` and credentials stubbed), Git porcelain,
 ANSI/CJK display widths 1–240 in both built-in themes, status preservation, native
-fallback, reload/resume, cleanup, and loading with pi's actual extension loader. They
+fallback, reload/resume, cleanup, the working row's token estimate, provider
+usage switch, timer threshold and restoration, the MCP chip's counting, `mcp.json`
+reading, yielding and persistence, and loading with pi's actual extension loader.
+
+The working row and MCP chip are ported from
+[pi-cc-extensions](https://github.com/minuque/pi-cc-extensions) (MIT, see LICENSE). They
 make no model or network requests and touch no real credentials. The lifecycle
 fixture uses a temporary home and a non-Anthropic model to avoid invoking the real
 account refresher.

@@ -572,22 +572,25 @@ test("external text is sanitized and over-100 gauges are bounded", () => {
 });
 
 function host(entries = [], cwd = os.tmpdir(), mode = "tui", nativeBranch = null) {
-  const handlers = new Map(), commands = new Map(), statuses = new Map(), notices = [];
-  let footer, editorFactory, disposed = 0, paints = 0, name = "";
+  const handlers = new Map(), commands = new Map(), statuses = new Map(), notices = [], workingMessages = [];
+  const commandInfos = [], tools = [];
+  let footer, editorFactory, disposed = 0, paints = 0, name = "", trusted = false;
   const pi = {
     on(event, handler) { handlers.set(event, handler); },
     registerCommand(key, command) { commands.set(key, command); },
     getThinkingLevel: () => "xhigh", getSessionName: () => name,
     appendEntry(customType, data) { entries.push({ type: "custom", customType, data }); },
+    getCommands: () => commandInfos, getAllTools: () => tools,
   };
   const ctx = {
     mode, cwd, model: { provider: "openai-codex", id: "gpt-6-astra", contextWindow: 200000, reasoning: true },
     sessionManager: { getEntries: () => entries, getBranch: () => entries },
     modelRegistry: { isUsingOAuth: () => true,
       getApiKeyForProvider: async (p) => p === "openai-codex" ? jwt({ "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" } }) : undefined },
-    isIdle: () => true, hasPendingMessages: () => false,
+    isIdle: () => true, hasPendingMessages: () => false, isProjectTrusted: () => trusted,
     getContextUsage: () => ({ tokens: null, percent: null, contextWindow: 200000 }),
     ui: {
+      setWorkingMessage(message) { workingMessages.push(message); },
       setStatus(key, value) {
         if (value === undefined) statuses.delete(key);
         else statuses.set(key, value);
@@ -606,7 +609,8 @@ function host(entries = [], cwd = os.tmpdir(), mode = "tui", nativeBranch = null
     },
   };
   mod.default(pi);
-  return { handlers, commands, ctx, entries, statuses, notices, pi,
+  return { handlers, commands, ctx, entries, statuses, notices, pi, workingMessages, commandInfos, tools,
+    set trusted(value) { trusted = value; },
     get editorFactory() { return editorFactory; }, set editorFactory(f) { editorFactory = f; },
     get footer() { return footer; }, get disposed() { return disposed; }, get paints() { return paints; },
   };
@@ -889,11 +893,11 @@ for (const fault of ["dispose", "footer", "getEditor", "setEditor", "all"]) {
       const old = f.newContext();
       h.handlers.get("session_start")({}, old.ctx);
       const invokeSaved = savedLifecycleCallbacks(f);
-      assert.equal(intervals.size, 1); assert.equal(timeouts.size, 1);
+      assert.equal(intervals.size, 2); assert.equal(timeouts.size, 1);
       const failing = fault === "all" ? ["abort", "child", "dispose", "footer", "setEditor"] : [fault];
       for (const step of failing) failures.set(step, new Error(`${step} failed`));
       steps.length = 0;
-      const expectedSteps = ["interval", "timeout", "abort", "child", "child", "child", "dispose", "footer", "getEditor"];
+      const expectedSteps = ["interval", "interval", "timeout", "abort", "child", "child", "child", "dispose", "footer", "getEditor"];
       if (fault !== "getEditor") expectedSteps.push("setEditor");
       const expectedErrors = expectedSteps.filter((step) => failures.has(step)).map((step) => failures.get(step));
       assert.throws(() => h.handlers.get("session_shutdown")({}, old.ctx), (error) => {
@@ -922,7 +926,7 @@ for (const fault of ["dispose", "footer", "getEditor", "setEditor", "all"]) {
       assert.equal(old.state.reads, reads); assert.equal(fresh.state.reads, freshReads);
       assert.equal(h.paints, freshPaints); assert.equal(aborted.size, freshAborts); assert.equal(killed.size, freshKills);
       assert.deepEqual(steps, [], "stale timeouts cannot abort their old controller again");
-      assert.equal(intervals.size, 1); assert.equal(timeouts.size, 1);
+      assert.equal(intervals.size, 2); assert.equal(timeouts.size, 1);
       assert.ok(h.footer.render(120).length > 0);
     });
   });
@@ -940,7 +944,7 @@ for (const invalidated of [false, true]) {
       f.steps.length = 0;
       const fresh = f.newContext();
       assert.doesNotThrow(() => f.h.handlers.get("session_start")({}, fresh.ctx));
-      assert.equal(f.intervals.size, 1); assert.equal(f.timeouts.size, 1);
+      assert.equal(f.intervals.size, 2); assert.equal(f.timeouts.size, 1);
       assert.equal(f.aborted.size, 1); assert.equal(f.killed.size, 3);
       assert.equal(f.h.disposed, 0, "prior unsubscribe threw, but its local disposer detached first");
       assert.ok(f.h.footer.render(120).length > 0);
@@ -948,7 +952,7 @@ for (const invalidated of [false, true]) {
       assert.doesNotThrow(invokeSaved);
       assert.equal(old.state.reads, reads); assert.equal(fresh.state.reads, freshReads); assert.equal(f.h.paints, paints);
       assert.deepEqual(f.steps, cleanupSteps);
-      assert.deepEqual(f.steps.slice(0, 2), ["interval", "timeout"]);
+      assert.deepEqual(f.steps.slice(0, 3), ["interval", "interval", "timeout"]);
       f.failures.clear();
       f.h.handlers.get("session_shutdown")({}, fresh.ctx);
       assert.equal(f.intervals.size, 0); assert.equal(f.timeouts.size, 0);
@@ -991,7 +995,7 @@ test("an old OAuth lookup resolving after reload cannot fetch or clear the fresh
     assert.deepEqual(f.fetches, []);
     assert.equal(f.timeouts.size, 1); assert.ok(f.timeouts.has(currentTimeout));
     assert.ok(!f.timeouts.has(oldTimeout));
-    assert.equal(f.intervals.size, 1);
+    assert.equal(f.intervals.size, 2);
     assert.equal(f.aborted.size, 1);
     currentTimeout.callback();
     assert.equal(f.aborted.size, 2, "the fresh controller remains owned after old finally runs");
@@ -1000,13 +1004,13 @@ test("an old OAuth lookup resolving after reload cannot fetch or clear the fresh
   });
 });
 
-test("normal repeated shutdown and reload leave one fresh timer pair and no stale callbacks", async () => {
+test("normal repeated shutdown and reload leave fresh timers and no stale callbacks", async () => {
   await withLifecycleHost(async (f) => {
     const saved = [];
     for (let cycle = 0; cycle < 3; cycle++) {
       const current = f.newContext();
       f.h.handlers.get("session_start")({}, current.ctx);
-      assert.equal(f.intervals.size, 1); assert.equal(f.timeouts.size, 1);
+      assert.equal(f.intervals.size, 2); assert.equal(f.timeouts.size, 1);
       const reads = current.state.reads, paints = f.h.paints, aborts = f.aborted.size, cleanupSteps = f.steps.slice();
       for (const invoke of saved) assert.doesNotThrow(invoke);
       assert.equal(current.state.reads, reads); assert.equal(f.h.paints, paints); assert.equal(f.aborted.size, aborts);
@@ -1050,7 +1054,7 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
     h = host([], dir);
     h.statuses.set("plan", "PLAN mode");
     await h.handlers.get("session_start")({}, h.ctx);
-    assert.equal(timers.size, 1);
+    assert.equal(timers.size, 2, "the footer tick and the MCP poll");
     for (const variant of ["", "\ufe0e", "\ufe0f"]) {
       const status = `\x1b[36m\u{1f50c}${variant} MCP: 5 connected\x1b[39m`;
       h.statuses.set("mcp", status);
@@ -1092,7 +1096,7 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
     assert.equal(timers.size, 0);
     await h.handlers.get("session_start")({}, h.ctx);
     assert.equal(h.footer, undefined, "native mode restored from session state");
-    assert.equal(timers.size, 1);
+    assert.equal(timers.size, 2);
     await h.commands.get("status").handler("on", h.ctx);
     assert.ok(h.footer);
     h.ctx.model = { provider: "radius", id: "balanced", reasoning: false };
@@ -1311,4 +1315,234 @@ test("wraps the installed editor once per session instead of replacing it", asyn
     h.ctx.getContextUsage = () => ({ tokens: 100000, percent: 50, contextWindow: 200000 });
     assert.equal(plain(editor.renderTopBorder(10, 0)), "━━━━━─────");
   } finally { await h.handlers.get("session_shutdown")?.({}, h.ctx); }
+});
+
+test("working-row text: tokens with thousands separators, elapsed after the threshold, pi's default otherwise", () => {
+  assert.equal(mod.formatElapsed(0), "0s");
+  assert.equal(mod.formatElapsed(999), "0s");
+  assert.equal(mod.formatElapsed(12_400), "12s");
+  assert.equal(mod.formatElapsed(123_000), "2m 3s");
+  assert.equal(mod.formatElapsed(3_723_000), "1h 2m 3s");
+  assert.equal(mod.workingMessage(0, 0), undefined, "nothing to add leaves pi's own message");
+  assert.equal(mod.workingMessage(0, 2_999), undefined);
+  assert.equal(mod.workingMessage(0, 3_000), "Working (3s)");
+  assert.equal(mod.workingMessage(1234, 0), "Working (\u2193 1,234 tokens \u00b7 0s)", "any tokens bring the timer along");
+  assert.equal(mod.workingMessage(5, 12_000), "Working (\u2193 5 tokens \u00b7 12s)");
+  assert.equal(mod.workingMessage(1, 0), "Working (\u2193 1 token \u00b7 0s)");
+  assert.doesNotMatch(mod.workingMessage(5, 12_000), /\(.*\(/, "no nested parentheses");
+});
+
+test("working-row tokens: a chars/4 estimate of text and thinking until the provider reports output", () => {
+  const stats = new mod.WorkingStats();
+  const partial = (usage) => ({ content: [], usage });
+  assert.equal(stats.tokens(), 0);
+  stats.apply({ type: "start", partial: partial() });
+  stats.apply({ type: "thinking_start", contentIndex: 0, partial: partial() });
+  stats.apply({ type: "thinking_delta", contentIndex: 0, delta: "12345678", partial: partial() });
+  assert.equal(stats.tokens(), 2, "thinking counts");
+  stats.apply({ type: "text_start", contentIndex: 2, partial: partial() });
+  stats.apply({ type: "text_delta", contentIndex: 2, delta: "abcd", partial: partial() });
+  assert.equal(stats.tokens(), 3, "a tool call at index 1 leaves a sparse hole");
+  stats.apply({ type: "text_end", contentIndex: 2, content: "abcdefgh", partial: partial() });
+  assert.equal(stats.tokens(), 4, "the final text replaces the deltas instead of adding to them");
+  stats.apply({ type: "toolcall_delta", contentIndex: 3, delta: "{}", partial: partial({ output: 0 }) });
+  assert.equal(stats.tokens(), 4, "zero or absent usage keeps the estimate");
+  stats.apply({ type: "toolcall_delta", contentIndex: 3, delta: "{}", partial: partial({ output: 1234.4 }) });
+  assert.equal(stats.tokens(), 1234, "the provider's count wins once known");
+  stats.apply({ type: "text_delta", contentIndex: 2, delta: "more", partial: partial() });
+  assert.equal(stats.tokens(), 1234, "and is not lost on an update without usage");
+  stats.apply({ type: "done", reason: "stop", message: { content: [{ type: "text", text: "x".repeat(40) }, { type: "thinking", thinking: "y".repeat(8) }], usage: { output: 0 } } });
+  assert.equal(stats.tokens(), 12, "done restarts from the final message");
+  stats.apply({ type: "error", reason: "aborted", error: { content: [], usage: {} } });
+  assert.equal(stats.tokens(), 0);
+  stats.apply({ type: "start", partial: { content: [{ type: "text", text: "12345678" }], usage: { output: 9 } } });
+  assert.equal(stats.tokens(), 9, "a resumed partial restores both the estimate and the usage");
+  stats.reset();
+  assert.equal(stats.tokens(), 0);
+});
+
+test("working row drives pi's indicator only while a run streams, and restores the default on every exit", async () => {
+  const clock = vi.spyOn(Date, "now");
+  let t = now;
+  clock.mockImplementation(() => t);
+  const h = host();
+  const partial = (text, output) => ({ content: [{ type: "text", text }], usage: output === undefined ? {} : { output } });
+  try {
+    await h.handlers.get("session_start")({}, h.ctx);
+    await h.handlers.get("before_agent_start")({}, h.ctx);
+    await h.handlers.get("turn_start")({}, h.ctx);
+    assert.deepEqual(h.workingMessages, [], "no tokens and under the threshold: pi's own message stays");
+    t += 1_000;
+    await h.handlers.get("message_update")({ assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x".repeat(12), partial: partial("x".repeat(12)) } }, h.ctx);
+    assert.deepEqual(h.workingMessages, ["Working (\u2193 3 tokens \u00b7 1s)"]);
+    await h.handlers.get("message_update")({ assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "", partial: partial("x".repeat(12)) } }, h.ctx);
+    assert.equal(h.workingMessages.length, 1, "an unchanged message is not re-sent");
+    t += 11_000;
+    await h.handlers.get("message_update")({ assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "y", partial: partial("x".repeat(13), 1234) } }, h.ctx);
+    assert.equal(h.workingMessages.at(-1), "Working (\u2193 1,234 tokens \u00b7 12s)", "provider usage replaces the estimate; elapsed counts from the agent start");
+    await h.handlers.get("turn_end")({}, h.ctx);
+    assert.equal(h.workingMessages.at(-1), undefined, "the turn's end restores pi's default at once");
+    assert.equal(h.workingMessages.length, 3);
+    // The second turn of the same run keeps the run's clock and starts a fresh token count.
+    t += 4_000;
+    await h.handlers.get("turn_start")({}, h.ctx);
+    assert.equal(h.workingMessages.at(-1), "Working (16s)", "past the threshold the timer shows alone");
+    await h.handlers.get("agent_end")({}, h.ctx);
+    assert.equal(h.workingMessages.at(-1), undefined);
+    assert.equal(h.workingMessages.length, 5);
+    // A new run starts its clock over.
+    await h.handlers.get("before_agent_start")({}, h.ctx);
+    await h.handlers.get("turn_start")({}, h.ctx);
+    assert.equal(h.workingMessages.length, 5);
+    await h.handlers.get("message_update")({ assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "zzzz", partial: partial("zzzz") } }, h.ctx);
+    assert.equal(h.workingMessages.at(-1), "Working (\u2193 1 token \u00b7 0s)");
+    // Turning the row off mid-run restores pi's message and stays off across a reload.
+    await h.commands.get("status").handler("working off", h.ctx);
+    assert.equal(h.workingMessages.at(-1), undefined);
+    assert.match(h.notices.at(-1), /Working row disabled/);
+    const sent = h.workingMessages.length;
+    await h.handlers.get("message_update")({ assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "zzzz", partial: partial("zzzzzzzz") } }, h.ctx);
+    await h.handlers.get("turn_end")({}, h.ctx);
+    assert.equal(h.workingMessages.length, sent, "disabled: pi's indicator is left alone");
+    assert.deepEqual(h.entries.at(-1).data, { enabled: true, showAll: false, working: false, mcp: true });
+    await h.handlers.get("session_shutdown")({}, h.ctx);
+    await h.handlers.get("session_start")({}, h.ctx);
+    await h.handlers.get("before_agent_start")({}, h.ctx);
+    await h.handlers.get("turn_start")({}, h.ctx);
+    await h.handlers.get("message_update")({ assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "zzzz", partial: partial("zzzz") } }, h.ctx);
+    assert.equal(h.workingMessages.length, sent, "the preference survives reload");
+    await h.commands.get("status").handler("details", h.ctx);
+    assert.match(h.notices.at(-1), /Working row: off/);
+    await h.commands.get("status").handler("working on", h.ctx);
+    await h.handlers.get("turn_end")({}, h.ctx);
+    await h.handlers.get("turn_start")({}, h.ctx);
+    await h.handlers.get("message_update")({ assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "zzzz", partial: partial("zzzz") } }, h.ctx);
+    assert.equal(h.workingMessages.at(-1), "Working (\u2193 1 token \u00b7 0s)", "the next turn after re-enabling shows again");
+    // Shutdown mid-run also restores pi's message.
+    await h.handlers.get("session_shutdown")({}, h.ctx);
+    assert.equal(h.workingMessages.at(-1), undefined);
+    await h.commands.get("status").handler("bogus", h.ctx);
+    assert.match(h.notices.at(-1), /working on\|off\|mcp on\|off/);
+  } finally {
+    clock.mockRestore();
+    await h.handlers.get("session_shutdown")?.({}, h.ctx);
+  }
+});
+
+test("MCP counting: namespaces, hidden tools, built-in source precedence, name normalization and /mcp ownership", () => {
+  assert.equal(mod.mcpNamespaceServer("mcp__docs"), "docs");
+  assert.equal(mod.mcpNamespaceServer("mcp__"), undefined);
+  assert.equal(mod.mcpNamespaceServer("other"), undefined);
+  assert.equal(mod.normalizeMcpServerName(" my-db "), "my_db");
+  const builtin = { path: "builtin:mcp" }, foreign = { path: "/x/pi-mcp-adapter/index.ts" };
+  const tool = (namespace, sourceInfo, exposure = "codemode") => ({ namespace: { name: namespace }, sourceInfo, exposure });
+  assert.deepEqual(mod.connectedMcpServers([
+    tool("mcp__docs", builtin), tool("mcp__docs", builtin, "direct"), tool("mcp__my_db", builtin),
+    tool("mcp__secret", builtin, "hidden"), tool("mcp__adapter", foreign), { name: "read", sourceInfo: builtin },
+  ]), ["docs", "my_db"]);
+  assert.deepEqual(mod.connectedMcpServers([tool("mcp__a", foreign), tool("mcp__b", { path: undefined })]), ["a", "b"], "without a built-in source the namespace decides");
+  assert.deepEqual(mod.connectedMcpServers([]), []);
+  assert.deepEqual(mod.countMcp(["docs", "my_db"], ["docs", "my-db", "off"]), { connected: 2, total: 3 });
+  assert.deepEqual(mod.countMcp(["stray"], []), { connected: 1, total: 1 }, "a connected server missing from mcp.json still counts");
+  assert.equal(mod.countMcp([], []), undefined);
+  assert.equal(mod.formatMcpChip(mod.countMcp(["a"], ["a", "b"])), "MCP 1/2");
+  assert.equal(mod.formatMcpChip(undefined), undefined);
+  assert.equal(mod.builtinMcpOwnsCommand([{ name: "mcp", sourceInfo: builtin }, { name: "status", sourceInfo: foreign }]), true);
+  assert.equal(mod.builtinMcpOwnsCommand([{ name: "mcp", sourceInfo: builtin }, { name: "mcp", sourceInfo: foreign }]), false, "a takeover of /mcp yields");
+  assert.equal(mod.builtinMcpOwnsCommand([]), false, "no /mcp at all means no built-in MCP");
+});
+
+test("MCP configuration: enabled entries from the user file and the trusted project's, cached by mtime", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "pi-footer-mcp-"));
+  try {
+    const reader = new mod.McpConfigReader();
+    const file = path.join(dir, "mcp.json");
+    assert.equal(await reader.read(file), undefined, "missing file");
+    await writeFile(file, "{not json");
+    assert.equal(await reader.read(file), undefined, "broken file");
+    await writeFile(file, JSON.stringify({ mcpServers: { docs: { url: "https://x" }, "my-db": { command: "db" }, off: { enabled: false }, bad: null, list: [] } }));
+    assert.deepEqual(await reader.read(file), ["docs", "my-db"]);
+    await mkdir(path.join(dir, "project", ".pi"), { recursive: true });
+    await writeFile(path.join(dir, "project", ".pi", "mcp.json"), JSON.stringify({ mcpServers: { docs: {}, local: {} } }));
+    assert.deepEqual(await reader.configured({ agentDir: dir, cwd: path.join(dir, "project"), projectTrusted: false }), ["docs", "my-db"]);
+    assert.deepEqual(await reader.configured({ agentDir: dir, cwd: path.join(dir, "project"), projectTrusted: true }), ["docs", "my-db", "docs", "local"]);
+    assert.deepEqual(mod.countMcp([], await reader.configured({ agentDir: dir, cwd: path.join(dir, "project"), projectTrusted: true })), { connected: 0, total: 3 }, "a project override of a global server counts once");
+    assert.deepEqual(await reader.configured({ agentDir: dir, cwd: path.join(dir, "elsewhere"), projectTrusted: true }), ["docs", "my-db"], "no project file is fine");
+    const { utimes } = await import("node:fs/promises");
+    await writeFile(file, JSON.stringify({ mcpServers: { only: {} } }));
+    await utimes(file, new Date(now), new Date(now));
+    assert.deepEqual(await reader.read(file), ["only"]);
+    await writeFile(file, JSON.stringify({ mcpServers: { changed: {} } }));
+    await utimes(file, new Date(now), new Date(now));
+    assert.deepEqual(await reader.read(file), ["only"], "an unchanged mtime serves the cached names");
+    await utimes(file, new Date(now + 1000), new Date(now + 1000));
+    assert.deepEqual(await reader.read(file), ["changed"]);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("MCP chip: built-in servers in the status row, yielding to a published mcp status, project trust and /status mcp", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "pi-footer-mcp-chip-"));
+  const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  const project = path.join(dir, "project");
+  await mkdir(path.join(project, ".pi"), { recursive: true });
+  await writeFile(path.join(dir, "mcp.json"), JSON.stringify({ mcpServers: { docs: {}, "my-db": {}, off: { enabled: false } } }));
+  await writeFile(path.join(project, ".pi", "mcp.json"), JSON.stringify({ mcpServers: { local: {} } }));
+  const h = host([], project);
+  const tool = (namespace, exposure = "codemode") => ({ namespace: { name: namespace }, sourceInfo: { path: "builtin:mcp" }, exposure });
+  const statusRow = (width = 120) => h.footer.render(width).map(plain).find((row) => /MCP/.test(row)) ?? "";
+  try {
+    await h.handlers.get("session_start")({}, h.ctx);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(statusRow(), "", "no /mcp command: pi's built-in MCP is not loaded");
+    h.commandInfos.push({ name: "mcp", sourceInfo: { path: "builtin:mcp" } });
+    await h.handlers.get("agent_settled")({}, h.ctx);
+    await vi.waitFor(() => assert.match(statusRow(), /^ \uf1e6 MCP 0\/2$/), "configured but nothing connected yet");
+    h.tools.push(tool("mcp__docs"), tool("mcp__docs", "direct"), tool("mcp__my_db"), tool("mcp__hidden", "hidden"));
+    await h.handlers.get("mcp_servers_change")({}, h.ctx);
+    await vi.waitFor(() => assert.match(statusRow(), /^ \uf1e6 MCP 2\/2$/));
+    assert.equal(h.footer.render(120).filter((row) => /MCP/.test(row)).length, 1);
+    for (let width = 1; width <= 240; width++) assert.ok(h.footer.render(width).every((row) => visibleWidth(row) <= width));
+    h.trusted = true;
+    await h.handlers.get("agent_settled")({}, h.ctx);
+    await vi.waitFor(() => assert.match(statusRow(), /MCP 2\/3$/), "the trusted project's file adds its servers");
+    h.statuses.set("plan", "PLAN mode");
+    assert.match(statusRow(), /^ \uf1e6 MCP 2\/3 \u00b7 PLAN mode$/, "the chip leads the status row and shares its separator");
+    h.statuses.set("mcp", "\u{1f50c} MCP: 5 connected");
+    assert.equal(statusRow(), " \uf1e6 MCP: 5 connected \u00b7 PLAN mode", "another extension's mcp status replaces the chip");
+    h.statuses.delete("mcp"); h.statuses.delete("plan");
+    await h.commands.get("status").handler("mcp off", h.ctx);
+    assert.equal(statusRow(), "");
+    assert.match(h.notices.at(-1), /MCP chip disabled/);
+    assert.deepEqual(h.entries.at(-1).data, { enabled: true, showAll: false, working: true, mcp: false });
+    await h.handlers.get("session_shutdown")({}, h.ctx);
+    await h.handlers.get("session_start")({}, h.ctx);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(statusRow(), "", "the preference survives reload");
+    await h.commands.get("status").handler("details", h.ctx);
+    assert.match(h.notices.at(-1), /MCP chip: off/);
+    await h.commands.get("status").handler("mcp on", h.ctx);
+    await vi.waitFor(() => assert.match(statusRow(), /MCP 2\/3$/));
+    h.commandInfos.push({ name: "mcp", sourceInfo: { path: "/elsewhere/pi-mcp-adapter.ts" } });
+    await h.handlers.get("agent_settled")({}, h.ctx);
+    await vi.waitFor(() => assert.equal(statusRow(), ""), "an extension that took over /mcp owns the chip");
+  } finally {
+    await h.handlers.get("session_shutdown")?.({}, h.ctx);
+    if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("the MCP chip renders with the companion label style and warns on a shortfall", () => {
+  const paint = { fg: (color, text) => `<${color}>${text}</${color}>`, bold: (text) => text };
+  const rows = (mcp, statuses = []) => mod.renderFooter({ ...fixture(), mcp, statuses }, 120, paint).map((row) => row.trim());
+  assert.ok(rows({ connected: 2, total: 2 }).includes("<muted>\uf1e6 MCP</muted> 2/2"));
+  assert.ok(rows({ connected: 1, total: 3 }).includes("<muted>\uf1e6 MCP</muted> <warning>1/3</warning>"));
+  assert.ok(rows({ connected: 1, total: 3 }, ["Gate off"]).includes("<muted>\uf1e6 MCP</muted> <warning>1/3</warning><dim> \u00b7 </dim>Gate off"));
+  assert.ok(!rows(undefined).some((row) => /MCP/.test(row)));
+  for (const name of ["light", "dark"]) {
+    for (let width = 1; width <= 240; width++) {
+      assert.ok(mod.renderFooter({ ...fixture(), mcp: { connected: 1, total: 3 }, statuses: ["Gate off"] }, width, getThemeByName(name)).every((row) => visibleWidth(row) <= width));
+    }
+  }
 });
