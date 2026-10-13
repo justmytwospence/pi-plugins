@@ -71,7 +71,7 @@ That is intended. Ctrl+U and Ctrl+D scroll half a page only in read-only viewers
 
 Next-prompt takes Tab/Right only while a suggestion is shown in the empty, focused main editor, outside autocomplete and outside dialogs. Change its `acceptKeys`, use `/next-prompt off`, or type normally to dismiss the ghost text. Accepting fills the editor; it does not submit.
 
-Plan mode registers no shortcut unless you set `toggleShortcut` (for example `shift+tab`) in its settings. The shortcut opens `/plan`, takes effect after `/reload`, and may compete with another binding in your setup.
+Shift+Tab belongs to pi-tool-gate's permission-mode cycle when the gate is selected; Pi warns that it overrides the built-in thinking cycle until you rebind `app.thinking.cycle`. Plan mode registers no shortcut of its own unless you set `toggleShortcut`, which toggles plan mode (or, with the gate, cycles its modes), takes effect after `/reload`, and must not reuse the gate's key.
 
 ## Background and notebook work
 

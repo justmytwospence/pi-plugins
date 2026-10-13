@@ -1,10 +1,10 @@
 ---
 title: Tool gate
-description: Combine fixed checks, paid Jev judgments and human approval for uncertain or risky tool calls.
+description: Claude Code's permission modes on Shift+Tab; auto mode combines fixed checks, paid Jev judgments and human approval for risky tool calls.
 plugin: pi-tool-gate
 ---
 
-Tool gate reduces routine approval interruptions while escalating risky calls. It is an approval policy inside Pi, **not a sandbox**, a complete secret scanner or a guarantee that every dangerous operation will be caught.
+Tool gate brings Claude Code's permission modes to Pi and, in auto mode, reduces routine approval interruptions while escalating risky calls. It is an approval policy inside Pi, **not a sandbox**, a complete secret scanner or a guarantee that every dangerous operation will be caught.
 
 ## Enable and requirements
 
@@ -14,7 +14,21 @@ Classifier judgments require Pi 0.99 or newer and credentials for the configured
 
 **Jev calls are paid external requests.** Most gray-area calls require one judgment; an initially held call can make another request for a suggested workaround. Even a fixed-rule hold can use that workaround request. Classified calls add reported classifier usage to their tool result. Costs depend on volume and input, not just how many approval dialogs appear.
 
-## What runs and what is held
+## Permission modes
+
+Shift+Tab cycles the modes as in Claude Code (from auto: manual, accept edits, plan, auto); `/mode` switches directly or lists them. The footer shows the mode with Claude Code's labels.
+
+| Mode | Runs without asking |
+| --- | --- |
+| Manual (`manual mode on`) | Recognized reads only; every other call asks, with an "allow similar" option. No classifier requests. |
+| Accept edits (`accept edits on`) | Reads, edits and writes inside the project, and `mkdir`, `touch`, `rm`, `rmdir`, `mv`, `cp` and `sed` on files inside the project. Other commands ask. |
+| Plan (`plan mode on`) | With [pi-plan-mode](/plugins/pi-plan-mode/) only. Edits are blocked except to its plan file; commands are judged as in auto mode. Approving the plan picks the next mode. |
+| Auto (`auto mode on`) | The default: the checks and judgments below. |
+| Bypass (`bypass permissions on`) | Everything except removing `/`, top-level directories, home, the project or their parents. Opt in by adding `bypassPermissions` to `modes`, or use `/mode bypass`. |
+
+Without a UI, calls that would ask are blocked. Sessions remember their mode across resume; new sessions start in `defaultMode`. Pi's default Shift+Tab (thinking-level cycle) is overridden with a startup warning; rebind `app.thinking.cycle` or set `cycleShortcut`.
+
+## What runs and what is held in auto mode
 
 Recognized read-only tools and shell commands pass without classification. Examples include `read`, `grep`, `git status` and `git diff`, subject to credential-path and shell checks. Tools declaring `readOnlyHint` and names in `allowTools` also bypass judgment. These hints are declarations, not independently verified behavior.
 
@@ -30,9 +44,9 @@ The interactive dialog offers **Allow once**, **Allow similar for this session**
 
 Similar-call grants are broader than exact argument matches. Shell grants use program/subcommand keys and can apply across working directories. Edit/write grants are directory-scoped; other tools are keyed by name. Read the scope shown in the approval option before granting it.
 
-- `/gate` or `/gate status` shows counts, classifier settings, rules and grant counts.
-- `/gate on` enables the gate for this session, subject to configuration.
-- `/gate off` bypasses it for this session.
+- `/mode [manual|accept-edits|plan|auto|bypass]` switches the permission mode; with no argument it lists them.
+- `/gate` or `/gate status` shows the mode, counts, classifier settings, rules and grant counts.
+- `/gate on` switches to auto mode; `/gate off` to bypass mode.
 
 For example, after a held publish attempt, inspect the agent's explanation and proposed call before choosing Allow once. Do not interpret a retry as proof that the action is necessary.
 
@@ -55,6 +69,8 @@ This `.pi/tool-gate.json` keeps the standard checks but asks immediately instead
 }
 ```
 
+`defaultMode` (default `auto`) chooses the starting mode, `modes` the cycle (`["default", "acceptEdits", "plan", "auto"]`), and `cycleShortcut` its key (`shift+tab`; `""` for none, read after `/reload`). `enabled: false` starts sessions in bypass mode.
+
 Overriding `allowTools` replaces the entire default list. Adding a tool there bypasses its ordinary checks, so do not treat it as a cosmetic preference. `readOnlyCommands` similarly extends trusted shell programs. The default allowance for `codemode` relies on Pi gating its nested tool calls separately.
 
 Rules are top-level bullets read from project `.agents/tool-gate-rules.md`, project `.pi/tool-gate-rules.md`, shared user `tool-gate-rules.md`, then Pi user `tool-gate-rules.md`. Duplicate rules are dropped and at most 30 are loaded. For example:
@@ -72,4 +88,4 @@ Jev receives clipped recent user messages, the assistant message preceding the l
 
 When Jev is unavailable, gray-area calls use Pi's tool annotations: flagged calls ask in a UI, while other calls run. Without a UI, that unavailable-classifier path allows them. In contrast, fixed-rule holds and classifier-decided holds block retries when nobody can approve. Incomplete successful judgments can also allow a call. Do not use this extension as a fail-closed security boundary.
 
-Optional pi-subagents can forward approval questions. The `herdr:blocked` event marks an open dialog for a listening Herdr integration; without a listener it has no effect. Status footer preserves the gate's status notice, but is not required. See [Troubleshooting](/guides/troubleshooting/) and the [source and tests](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-tool-gate) for exact bypasses and fallback behavior.
+Optional pi-subagents can forward approval questions. The `herdr:blocked` event marks an open dialog for a listening Herdr integration; without a listener it has no effect. Status footer shows the mode on its model row and preserves the gate's status notice, but is not required. See [Troubleshooting](/guides/troubleshooting/) and the [source and tests](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-tool-gate) for exact bypasses and fallback behavior.

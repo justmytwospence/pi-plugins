@@ -1,28 +1,50 @@
 ---
 title: pi-plan-mode
-description: Research with one or two constrained planners, compare their plans, and choose the implementation model and context.
+description: Claude Code-style plan mode in your conversation, or two constrained planners side by side whose plans you compare, merge and implement.
 plugin: pi-plan-mode
 ---
 
-pi-plan-mode separates researching a change from implementing it. `/plan` opens a full-screen workflow with Settings, Tools, Planning, Review, and Implement steps. One or two planner sessions investigate the same task; you can steer them, answer questions, compare proposals, and explicitly choose the plan to implement.
+pi-plan-mode separates researching a change from implementing it, in two ways:
+
+- **Plan mode** (`/plan`, or Shift+Tab with [pi-tool-gate](/plugins/pi-tool-gate/)) works in your own conversation, as Claude Code's does: your agent researches read-only, writes a plan file, and asks you to approve it.
+- **`/planners`** opens a full-screen workflow with Settings, Tools, Planning, Review, and Implement steps. Two planner sessions investigate the same task; you can steer them, answer questions, compare proposals, and explicitly choose the plan to implement.
+
+## Plan mode
+
+```text
+/plan Add rate limiting to the public API
+```
+
+`/plan` turns plan mode on and sends the task, if given, as your next message. With pi-tool-gate, plan mode is one of the gate's [permission modes](/plugins/pi-tool-gate/#permission-modes) and Shift+Tab cycles to it; the footer shows `plan mode on`. Without the gate, `toggleShortcut` toggles it. Your agent can also enter plan mode itself through `enter_plan_mode` when a task deserves a plan first.
+
+While it is on, your agent writes its plan to a plan file, by default `~/.pi/agent/plans/<two-words>.md` (`plansDirectory`), one per session. `edit` and `write` are blocked except for that file. With pi-tool-gate, shell commands are judged as in auto mode; without it, only the read-only shell policy runs. Other extension and MCP tools are not blocked; your agent is only instructed not to change anything with them.
+
+When the plan is complete, your agent calls `exit_plan_mode`. The plan appears in the conversation and you choose:
+
+- **Yes, and use auto mode**, **Yes, auto-accept edits** or **Yes, manually approve edits** (with the gate; otherwise **Yes, implement it**): implement here, in that permission mode.
+- **Yes, in a fresh session with only the plan**: a child session starts with the plan once the current turn ends.
+- **Edit the plan first**: revise it in Pi's editor, then choose again.
+- **No, keep planning**: give feedback, or leave it empty and say it in the chat.
+
+Plan mode itself makes no extra model requests; your agent plans on the session's model.
 
 ## Enable, requirements, and costs
 
 Select `packages/pi-plan-mode/src/index.ts` through [suite installation](/guides/install/). The suite loads every entry by default, and all selected components share one Git pin.
 
-The planner requires Pi's interactive terminal UI and authenticated access to the chosen model providers. The component documents Pi 0.99 or newer; the installation guide identifies the suite's tested host version. Planners use providers registered in the main session. Their optional research helpers are separate Pi subprocesses and need the provider extensions required by their models; `providerExtensions` can override automatic provider-extension discovery.
+`/planners` requires Pi's interactive terminal UI and authenticated access to the chosen model providers. The component documents Pi 0.99 or newer; the installation guide identifies the suite's tested host version. Planners use providers registered in the main session. Their optional research helpers are separate Pi subprocesses and need the provider extensions required by their models; `providerExtensions` can override automatic provider-extension discovery.
 
-**Costs:** planners, helper agents, main-agent synthesis, and implementation all consume model usage. A second planner is another session, not a free comparison. Optional Jev tool selection uses Pi classifier models and can incur TypeSafe charges; selected research tools may also call paid services. Set `jevToolSelection: false` to choose tools manually without that classifier step. No pi-subagents or pi-ask-user-question installation is required for the planner's own helper and question tools.
+**Costs:** planners, helper agents, main-agent synthesis, and implementation all consume model usage. `/planners` always runs two planner sessions; use plan mode for a single plan. Optional Jev tool selection uses Pi classifier models and can incur TypeSafe charges; selected research tools may also call paid services. Set `jevToolSelection: false` to choose tools manually without that classifier step. No pi-subagents or pi-ask-user-question installation is required for the planner's own helper and question tools.
 
-## Start and guide research
+## Start the planners
 
 Start with a specific outcome:
 
 ```text
-/plan Add rate limiting to the public API, including tests and failure behavior
+/planners Add rate limiting to the public API, including tests and failure behavior
 ```
 
-With no task text, planning uses the conversation so far. The Settings step selects planner A, optional planner B, each planner's effort and helper model, and a per-turn time limit. A planner is asked to wrap up at 80% of its limit and stopped at the limit. Choose B as `none` for one planner.
+With no task text, planning uses the conversation so far. The Settings step selects planners A and B (B defaults to a different model), each planner's effort and helper model, and a per-turn time limit. A planner is asked to wrap up at 80% of its limit and stopped at the limit.
 
 The Tools step exposes Shell, Subagents, configured toolsets, MCP servers, and other extension tools. Select only what the investigation needs. Jev can preselect tools, but your manual choices take precedence. `alwaysOffer` keeps specified tools preselected regardless of their scores; unavailable names are ignored.
 
@@ -32,7 +54,7 @@ Lane commands act on that planner's session: `/login`, `/model`, `/thinking` (or
 
 ## Review and implement
 
-With two planners, **M is your existing main agent**, not a third isolated planner. Every submitted plan and revision is delivered to the main conversation. That delivery does not itself start a main-agent turn. You can discuss the plans with M while the planners are still researching.
+**M is your existing main agent**, not a third isolated planner. Every submitted plan and revision is delivered to the main conversation. That delivery does not itself start a main-agent turn. You can discuss the plans with M while the planners are still researching.
 
 While the run is active, M has two tools:
 
@@ -43,7 +65,7 @@ The **Write plan M** and **Revise plan M** actions request that synthesis for yo
 
 Choose **Implement A**, **Implement B**, or **Implement M** to review the implementation model, effort, and context before starting. Context can keep this conversation plus the plan, or start a fresh session with only the plan. `implementationModelMap` supplies defaults based on the model that authored the plan; otherwise the main session's model is used.
 
-Export actions write the selected plan to Markdown without initiating implementation. **Add a planner** can add the second opinion without discarding the first planner's research.
+Export actions write the selected plan to Markdown without initiating implementation.
 
 ## Settings and trusted capabilities
 
@@ -56,11 +78,11 @@ Settings normally live at `~/.pi/agent/pi-plan-mode.json`. Common options are ed
   "alwaysOffer": [],
   "defaultImplementationContext": "keep",
   "defaultPlanExportPath": "PLAN.md",
-  "toggleShortcut": "shift+tab"
+  "plansDirectory": "~/notes/plans"
 }
 ```
 
-Choose available models in the UI, or configure `planners`, `scoutModelMap`, and `implementationModelMap` using `provider/modelId` specifications with optional effort suffixes. `plannerToolsets` groups extension tools, `commandGrants` permits specified extra commands with associated skills, and `providerExtensions` controls helper authentication support. Shortcut changes take effect after `/reload`.
+Choose available models in the UI, or configure `planners`, `scoutModelMap`, and `implementationModelMap` using `provider/modelId` specifications with optional effort suffixes. `plannerToolsets` groups extension tools, `commandGrants` permits specified extra commands with associated skills, and `providerExtensions` controls helper authentication support. `toggleShortcut` toggles plan mode when pi-tool-gate is absent (with the gate it cycles the gate's modes; do not bind it to the gate's key); it takes effect after `/reload`. `plansDirectory` moves plan mode's plan files.
 
 Jev defaults to provider `typesafe`, model `jev-latest`, and selection threshold `0.5`. Default `alwaysOffer` names are `web`, `web_search`, `fetch_content`, `context7`, and `jev`; this neither installs those tools nor provides their credentials.
 
@@ -76,7 +98,7 @@ In particular, `safeSubcommands` fully trusts matching command prefixes and bypa
 
 M is only instructed to leave files alone during planning; it is not constrained by the planners' read-only tool policy. Implementation and exports intentionally write files.
 
-Esc offers Hide, Stop planning, or Back. Hiding leaves planners running; `/plan` reopens the screen. Sessions under `~/.pi/agent/plan-mode/planners/` retain research across reload or resume, and interrupted or failed turns can resume automatically. Remember that resumed work can incur further usage.
+Esc offers Hide, Stop planning, or Back. Hiding leaves planners running; `/planners` reopens the screen. Sessions under `~/.pi/agent/plan-mode/planners/` retain research across reload or resume, and interrupted or failed turns can resume automatically. Remember that resumed work can incur further usage.
 
 ## Optional integrations and next checks
 

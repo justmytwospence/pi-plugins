@@ -10,7 +10,15 @@ description: Compare plans deliberately, implement with a chosen context, then s
 /plan Add rate limiting to the public API
 ```
 
-Start with one planner for a focused problem. Add a second only if another approach is worth another model session. On the Settings screen, choose the real models available to your Pi installation and their effort levels.
+For a focused problem, plan mode in your own conversation is enough: your agent researches read-only, writes a plan file and asks you to approve it, and you pick how implementation proceeds (in auto, accept-edits or manual mode with [pi-tool-gate](/plugins/pi-tool-gate/), or in a fresh session). With the gate, Shift+Tab also cycles into plan mode.
+
+When another approach is worth a second model session, use the planners screen instead:
+
+```text
+/planners Add rate limiting to the public API
+```
+
+On the Settings screen, choose the two real models available to your Pi installation and their effort levels.
 
 On the Tools screen, review what planners may access. Jev can suggest a selection, but your choices win. Tools selected because of `alwaysOffer` remain preselected; “a classifier chose it” is not the same as an authorization review.
 
@@ -18,11 +26,11 @@ Planners have a read-only policy: ordinary file edits and writes are blocked, sh
 
 ## Compare before implementing
 
-With two planners, **M is your existing main agent**, not a third independent planner. Each plan arrives in the main conversation. You can ask M to compare trade-offs or question a planner using the active run’s tools.
+On the planners screen, **M is your existing main agent**, not a third independent planner. Each plan arrives in the main conversation. You can ask M to compare trade-offs or question a planner using the active run’s tools.
 
 Choose **Write plan M** to request a merged plan, then discuss and revise it. The main agent is instructed not to edit during planning, but is not forced into the planners’ read-only policy. If you need hard isolation, do not treat that instruction as an enforcement boundary.
 
-Esc offers Hide, Stop planning or Back. Hiding keeps planners running. Reopen with `/plan`; do not assume a closed screen has cancelled paid work.
+Esc offers Hide, Stop planning or Back. Hiding keeps planners running. Reopen with `/planners`; do not assume a closed screen has cancelled paid work.
 
 ## Choose the implementation context
 

@@ -8,11 +8,11 @@ export const groups = [
     { name: "pi-btw", label: "Side conversation", description: "Ask a side question in its own thread while the main run keeps going." },
   ] },
   { title: "Think & review", eyebrow: "02 / Decisions", description: "Make the decision explicit, compare plans, and review the actual changes.", plugins: [
-    { name: "pi-plan-mode", label: "Plan mode", description: "One or two read-only planners, then implementation on your terms." },
+    { name: "pi-plan-mode", label: "Plan mode", description: "Claude Code-style plan mode in your chat, or two read-only planners side by side." },
     { name: "pi-ask-user-question", label: "Ask a question", description: "Structured choices with previews, notes and room for your own answer." },
     { name: "pi-diff-review", label: "Diff review", description: "Line comments and suggested edits, sent back to the agent together." },
     { name: "pi-rewind", label: "Rewind", description: "Offer to restore working-tree files when you rewind the conversation." },
-    { name: "pi-tool-gate", label: "Tool gate", description: "Rules and classifier-assisted approval for tool calls. Not a sandbox." },
+    { name: "pi-tool-gate", label: "Tool gate", description: "Claude Code permission modes on Shift+Tab; classifier-assisted auto mode. Not a sandbox." },
   ] },
   { title: "Context & cost", eyebrow: "03 / Awareness", description: "See what the session is using and choose when to spend more reasoning or context.", plugins: [
     { name: "pi-cache-guard", label: "Cache guard", description: "Cache-expiry warnings, a cache clock and optional Jev context trimming." },
