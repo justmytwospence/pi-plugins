@@ -693,7 +693,8 @@ export const ICONS = {
   stash: "\uf187", // archive
   project: "\uf07b", // folder
   branch: "\ue725", // git branch
-  model: "\uee9c", // brain
+  model: "\uf2db", // microchip
+  reasoning: "\uee9c", // brain
   gate: "\uf510", // shield with check (pi-tool-gate)
   context: "\uf0e4", // tachometer
   marimo: "\uf02d", // book
@@ -749,7 +750,7 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   const model = theme.bold(theme.fg("accent", shortModel(s.model)));
   const auto = s.autoEffort ? `${sep}${theme.fg("dim", `auto${s.autoEffortDetail ? ` ${clean(s.autoEffortDetail)}` : ""}`)}` : "";
   const reasoning = s.thinking
-    ? `${theme.fg("muted", "reasoning")} ${theme.bold(theme.fg(thinkingColor(s.thinking), clean(s.thinking)))}${auto}`
+    ? `${theme.fg("dim", `${ICONS.reasoning} `)}${theme.fg("muted", "reasoning")} ${theme.bold(theme.fg(thinkingColor(s.thinking), clean(s.thinking)))}${auto}`
     : "";
   const identity = `${model}${reasoning ? `${sep}${reasoning}` : ""}`;
   const modeColor = s.mode ? MODE_COLORS[s.mode.kind] : "muted";

@@ -253,7 +253,7 @@ test("minimal Git suffix covers each dirty dimension, quiet tracking and unreada
 test("wide layout uses explicit labels without reintroducing secondary metrics", () => {
   const rows = mod.renderFooter(fixture(), 160, theme);
   assert.match(rows[0], /^ \uf07b dotfiles · \ue725 main \* ↑2$/);
-  assert.match(rows[1], /^ \uee9c opus-5\.5 · reasoning xhigh$/);
+  assert.match(rows[1], /^ \uf2db opus-5\.5 · \uee9c reasoning xhigh$/);
   assert.match(rows[2], /Context\s+28% used [━─]{8}/);
   assert.doesNotMatch(rows[2], /cost/);
   assert.doesNotMatch(rows.slice(0, 3).join("\n"), /cache|OAuth|diff|compact|56k\/200k/);
@@ -271,7 +271,7 @@ test("footer uses natural spacing and a consistent inset without label columns",
   s.statuses = ["PLAN mode"];
   const rows = mod.renderFooter(s, 160, theme);
   assert.equal(rows[0], " \uf07b dotfiles · \ue725 main * ↑2");
-  assert.equal(rows[1], " \uee9c opus-5.5 · reasoning xhigh");
+  assert.equal(rows[1], " \uf2db opus-5.5 · \uee9c reasoning xhigh");
   assert.equal(rows[2], " \uf0e4 Context 28% used");
   assert.equal(rows[3], " \uf0f3 PLAN mode");
   assert.equal(rows[4], " \uf252 Claude 5h 32% used");
@@ -290,7 +290,7 @@ test("footer lines share separators, concise labels and unparenthesized qualifie
   s.statuses = mod.absorbStatuses(new Map([["tool-gate", "gate: 0 auto · 0 pushed back · 0 asked"]]), { claudeRow: false }).rest;
   s.quotas = [{ source: "Codex acct", updated: now, windows: [{ label: "week", used: 39, reset: now + 86400_000 }] }];
   const rows = mod.renderFooter(s, 160, theme);
-  assert.equal(rows[1], " \uee9c opus-5.5 · reasoning xhigh · auto →");
+  assert.equal(rows[1], " \uf2db opus-5.5 · \uee9c reasoning xhigh · auto →");
   assert.equal(rows[2], " \uf0e4 Context 28% used");
   assert.equal(rows[3], " \uf510 Gate 0 auto · 0 pushed back · 0 asked");
   assert.equal(rows[4], " \uf252 Codex week 39% used · resets in 1d0h");
@@ -1556,7 +1556,7 @@ test("the permission mode joins the model row in its color; plan runs point at /
   assert.deepEqual(absorbed.rest, ["Plan A working · B cut off · resume in /planners · /planners"]);
   const s = { ...fixture(), mode: absorbed.mode, statuses: absorbed.rest };
   const rows = mod.renderFooter(s, 160, theme).map(plain);
-  assert.match(rows[1], /opus-5\.5 · reasoning xhigh · ⏵⏵ accept edits on \(shift\+tab to cycle\)$/);
+  assert.match(rows[1], /opus-5\.5 · \uee9c reasoning xhigh · ⏵⏵ accept edits on \(shift\+tab to cycle\)$/);
   // Narrow: the hint goes before the mode does.
   assert.match(plain(mod.renderFooter(s, 50, theme)[1]), /⏵⏵ accept edits on$/);
   assert.equal(mod.parseModeStatus("⏸ plan mode on").kind, "plan");

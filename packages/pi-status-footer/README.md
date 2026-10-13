@@ -6,8 +6,8 @@ installed (pi's, pi-vim's), redrawing only its two border lines as the context
 gauge. It uses pi's current theme, without background color blocks or animation.
 While the agent runs, it adds streamed-output and elapsed-time statistics to
 pi's own working indicator message, keeping pi's spinner. Every footer row
-leads with a dim Nerd Font icon: folder (project), git branch, brain
-(model), tachometer (context), book (marimo), cogs (background), archive
+leads with a dim Nerd Font icon: folder (project), git branch, microchip
+(model) with a brain before the reasoning level, tachometer (context), book (marimo), cogs (background), archive
 (stash), and hourglass (limits). In the notices row, the MCP plug and the tool
 gate's shield mark their own notices; the first notice's icon leads the row, a
 bell otherwise. Without a Nerd Font they draw as placeholders;
