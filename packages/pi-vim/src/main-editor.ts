@@ -5,7 +5,11 @@
  * scrolling on Ctrl+U / Ctrl+D in idle Normal mode.
  */
 import type { ModalEditorOptions } from "./engine/modal-editor.js";
+import { matchesKey } from "@earendil-works/pi-tui";
 import { SuiteModalEditor } from "./suite-editor.js";
+
+/** Like Vim's 'timeoutlen': how long `Ctrl-X` waits for its second key. */
+export const CTRL_X_TIMEOUT_MS = 1000;
 
 type EditorConstructorArgs = ConstructorParameters<typeof SuiteModalEditor>;
 
@@ -23,6 +27,57 @@ export class MainEditor extends SuiteModalEditor {
     options?: ModalEditorOptions,
   ) {
     super("main", tui, theme, keybindings, options);
+  }
+
+  private filePickerFn: (() => Promise<string | undefined>) | undefined;
+  private ctrlXTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** Enables Insert-mode `Ctrl-X Ctrl-F`; resolves to the text to insert. */
+  setFilePickerFn(fn: (() => Promise<string | undefined>) | undefined): void {
+    this.filePickerFn = fn;
+  }
+
+  /**
+   * Insert mode: `Ctrl-X` waits up to CTRL_X_TIMEOUT_MS for `Ctrl-F`, which
+   * opens the file picker. Any other key, or the timeout, replays `Ctrl-X`
+   * so Pi's own binding for it (copy) still works.
+   */
+  override handleInput(data: string): void {
+    if (this.ctrlXTimer !== undefined) {
+      clearTimeout(this.ctrlXTimer);
+      this.ctrlXTimer = undefined;
+      if (matchesKey(data, "ctrl+f")) {
+        void this.openFilePicker();
+        return;
+      }
+      super.handleInput("\x18");
+    } else if (
+      this.filePickerFn &&
+      matchesKey(data, "ctrl+x") &&
+      this.getModeContext().state === "insert" &&
+      !this.isShowingAutocomplete()
+    ) {
+      this.ctrlXTimer = setTimeout(() => {
+        this.ctrlXTimer = undefined;
+        if (!this.isDisposed()) super.handleInput("\x18");
+      }, CTRL_X_TIMEOUT_MS);
+      return;
+    }
+    super.handleInput(data);
+  }
+
+  private async openFilePicker(): Promise<void> {
+    const text = await this.filePickerFn?.();
+    if (text && !this.isDisposed()) {
+      this.insertTextAtCursor(text);
+      this.tui.requestRender();
+    }
+  }
+
+  override dispose(event?: { reason?: string }): void {
+    if (this.ctrlXTimer !== undefined) clearTimeout(this.ctrlXTimer);
+    this.ctrlXTimer = undefined;
+    super.dispose(event);
   }
 
   /**

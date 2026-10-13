@@ -22,6 +22,7 @@ import {
 import { EmbeddedEditor } from "./embedded-editor.js";
 import { EX_BUILTIN_COMMAND_NAMES } from "./engine/modal-editor.js";
 import { cancelModeChangeCommands } from "./engine/mode-change-command.js";
+import { FilePicker } from "./file-picker.js";
 import { MainEditor } from "./main-editor.js";
 import { resolveSessionConfig, type SessionConfig } from "./session.js";
 
@@ -170,6 +171,11 @@ export default function piVim(pi: ExtensionAPI) {
       if (options.initialText !== undefined) editor.setText(options.initialText);
       if (options.initialMode === "normal") editor.handleInput("\x1b");
       editor.setModeChangeFn(config.modeChangeFor("main"));
+      editor.setFilePickerFn(() =>
+        ctx.ui.custom<string | undefined>((tui, theme, _keybindings, done) =>
+          new FilePicker(ctx.cwd, theme as never, () => tui.requestRender(), done),
+        ),
+      );
       return editor;
     }
     const editor = new EmbeddedEditor(

@@ -102,6 +102,8 @@ These are **not** global scrolling shortcuts. In Pi's editor, Ctrl+U deletes to 
 | pi-diff-review viewer | Half page; an open comment editor owns the keys |
 | pi-bg log viewer | Half page; PageUp/PageDown remain optional full-page aliases |
 
+In pi-vim's Insert mode on the main prompt, Ctrl+X Ctrl+F opens a file finder that can also search outside the project; see [pi-vim](/plugins/pi-vim/#finding-files). A lone Ctrl+X reaches Pi after one second.
+
 "Idle" Normal mode means no count, operator, pending motion or EX line. In Visual mode and while a command is pending, pi-vim keeps its own behavior. Plan-mode screens have their own lane and tool-tree keys; see its reference.
 
 ## Escape and focus

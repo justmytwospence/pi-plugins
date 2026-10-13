@@ -36,6 +36,12 @@ The EX line on the main prompt is a bridge to Pi, not Vim's ex language. `:name 
 
 **Ctrl+U and Ctrl+D** scroll Pi's fullscreen transcript half a page, but only in idle Normal mode. In Insert mode they keep Pi's editing meanings (delete to line start; delete forward, or exit on an empty editor). In Visual mode and pending states they keep the engine's behavior. In regular, non-fullscreen mode there is no transcript viewport, so in idle Normal mode they are consumed and do nothing rather than deleting text or exiting.
 
+## Finding files
+
+In Insert mode on the main prompt, **Ctrl+X Ctrl+F** (Vim's file-name completion) opens a fuzzy file finder and inserts the chosen path as an `@` mention, the way Pi's `@` autocomplete does. A plain query searches the project with `fd`, respecting `.gitignore`. Start the query with `~/`, `/`, `./` or `../` to search below another directory (five levels deep), for example `~/Downloads/inv`. Up/Down (or Ctrl+P/N, Ctrl+K/J) move, Tab descends into a directory, Enter inserts and Escape cancels. Project paths are inserted relative to the project, others with `~/` or as absolute paths. Without `fd`, only one directory level is listed.
+
+Ctrl+X waits one second for the second key. Any other key, or the timeout, passes Ctrl+X on to Pi, so its default binding (`app.message.copy`) still works, after the delay.
+
 ## Embedded editors in suite dialogs
 
 pi-vim answers the `pi-plugins.editor-factory.v1` request on Pi's event bus while a session is active. A dialog that asks gets a multi-line modal editor; a dialog that gets no answer uses Pi's native editor. Current consumers include [pi-ask-user-question](/plugins/pi-ask-user-question/)'s free-text answer, [pi-diff-review](/plugins/pi-diff-review/)'s comment editor, the [pi-subagents](/plugins/pi-subagents/) conversation viewer's composer and [pi-btw](/plugins/pi-btw/)'s overlay.
