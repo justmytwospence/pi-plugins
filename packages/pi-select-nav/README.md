@@ -51,6 +51,10 @@ Only the current activity host handles the request; the other extensions are not
 required. Dialogs, embedded editors, and pending/Visual/EX modal operations keep
 owning their keys. Key releases and pasted text are not treated as Tab presses.
 
+## Todo toggle in dialogs
+
+Pi runs extension shortcuts only from the prompt editor, so a question, plan approval or other dialog swallows them. While a dialog has focus, `ctrl+t` and `ctrl+shift+t` (rpiv-todo's collapse key, as commonly rebound and by default) go to the extension shortcut handlers; the key is consumed only when one runs. Other keys stay with the dialog. The list is `DIALOG_SHORTCUTS` in `src/index.ts`.
+
 ## How it works
 
 At `session_start` in TUI mode, the extension borrows Pi's TUI through a probe widget that is removed at once and subscribes to terminal input. For each key it looks at the focused component (`routeInput` in `src/index.ts`) and decides in this order:
@@ -77,7 +81,7 @@ Also add the keys to Pi's own list bindings in `~/.pi/agent/keybindings.json`, s
 }
 ```
 
-There are no other settings. `J_K_DENYLIST` is a constant in the source.
+There are no other settings. `J_K_DENYLIST` and `DIALOG_SHORTCUTS` are constants in the source.
 
 ## Requirements and costs
 

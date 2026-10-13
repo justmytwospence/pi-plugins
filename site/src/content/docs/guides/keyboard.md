@@ -69,7 +69,7 @@ These are explicit preferences, not stock Pi defaults. Merge with existing bindi
 }
 ```
 
-pi-tool-gate binds Shift+Tab to its permission-mode cycle, which is why Alt+T takes the thinking cycle here. Without the gate, set plan-mode's `toggleShortcut` to `shift+tab` instead; never both. Ctrl+O still expands tool detail and Ctrl+G opens Pi's external editor. The retained todo package supplies personal Ctrl+T; todos are not process activities. Alt+T cycles effort; it is not a promise of identical Claude thinking semantics.
+pi-tool-gate binds Shift+Tab to its permission-mode cycle, which is why Alt+T takes the thinking cycle here. Without the gate, set plan-mode's `toggleShortcut` to `shift+tab` instead; never both. Ctrl+O still expands tool detail and Ctrl+G opens Pi's external editor. The retained todo package supplies personal Ctrl+T, which [pi-select-nav](/plugins/pi-select-nav/) keeps working while a dialog has focus; todos are not process activities. Alt+T cycles effort; it is not a promise of identical Claude thinking semantics.
 
 Do not assign Ctrl+U/D to `tui.altScreen.halfPageUp`/`halfPageDown`. Those fullscreen actions run before the editor and would steal Insert-mode editing. The owned editor handles the mode-sensitive path instead. Normal-mode `gg/G` in an editor retain Vim cursor motions; read-only viewers use their own document motions.
 

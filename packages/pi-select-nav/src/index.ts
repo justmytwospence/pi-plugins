@@ -142,6 +142,24 @@ export function routeInput(data: string, focused: Obj | null, width = 80): { dat
   return { data: letter! };
 }
 
+/**
+ * Extension shortcuts that keep working while a dialog has focus. Pi only dispatches extension
+ * shortcuts from the prompt editor, so a question or plan prompt would swallow them. Only panel
+ * toggles no dialog binds belong here (rpiv-todo's collapse key: its default and a common rebind).
+ */
+export const DIALOG_SHORTCUTS = ["ctrl+t", "ctrl+shift+t"] as const;
+
+type ShortcutEditor = Obj & { onExtensionShortcut?: (data: string) => boolean };
+
+/** Run a dialog-safe extension shortcut through the prompt editor when something else has focus. */
+export function routeShortcut(data: string, focused: Obj | null, main: ShortcutEditor | null): { consume: true } | undefined {
+  if (isKeyRelease(data) || !focused || !main || focused === main) return undefined;
+  // An editor wired to extension shortcuts (the prompt, or a swapped-in custom editor) runs them itself.
+  if (isFn((focused as ShortcutEditor).onExtensionShortcut)) return undefined;
+  if (!isFn(main.onExtensionShortcut) || !DIALOG_SHORTCUTS.some((key) => matchesKey(data, key))) return undefined;
+  return main.onExtensionShortcut!(data) ? { consume: true } : undefined;
+}
+
 export default function (pi: ExtensionAPI) {
   let unsubscribe: (() => void) | undefined;
   pi.on("session_start", (_event, ctx) => {
@@ -156,7 +174,8 @@ export default function (pi: ExtensionAPI) {
     const main = tui.getFocusedComponent();
     unsubscribe = ctx.ui.onTerminalInput((data) => {
       const focused = tui.getFocusedComponent();
-      return routePromptTab(data, focused, main, (channel, request) => pi.events.emit(channel, request))
+      return routeShortcut(data, focused, main)
+        ?? routePromptTab(data, focused, main, (channel, request) => pi.events.emit(channel, request))
         ?? routeInput(data, focused, tui.terminal?.columns ?? 80);
     });
   });

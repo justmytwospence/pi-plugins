@@ -24,6 +24,10 @@ With no suggestion or tasks, Tab does nothing. Shift+Tab keeps Pi's thinking-lev
 
 These companions remain optional and load order does not choose the priority. The synchronous requests `prompt:accept-next { handled }` and `activity:prompt-tab { handled, phase }` coordinate acceptance and the active activity host. The task phase is `active` when cycling an already-selected panel and `enter` when first selecting it.
 
+## Todo toggle in dialogs
+
+Pi runs extension shortcuts only from the prompt editor, so a question, plan approval or other dialog would otherwise swallow them. While such a dialog has focus, select-nav passes **Ctrl+T** and **Ctrl+Shift+T** (rpiv-todo's collapse key, as commonly rebound and by default) to the extension shortcut handlers and consumes the key only when one runs. Other keys stay with the dialog. The list is the `DIALOG_SHORTCUTS` constant in the source.
+
 ## Requirements, configuration, and costs
 
 The extension needs Pi's interactive terminal UI and access to its focused component. There are no external executables, credentials, network calls, model requests, or paid service costs. It does not depend on Herdr, a particular shell, or another suite component. The code uses Pi's terminal key parser rather than an operating-system-specific keyboard hook, but that does not establish universal terminal or third-party picker compatibility.
