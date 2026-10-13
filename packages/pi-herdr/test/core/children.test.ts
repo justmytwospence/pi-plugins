@@ -13,7 +13,7 @@ function testAgent(replies: Record<string, string>): ChildAgent {
 }
 
 /** A herdr with one parent pane and the child panes it creates; agent state is set by the test. */
-function world(opts: { liveNames?: string[]; startError?: { code: string; message: string } } = {}) {
+function world(opts: { liveNames?: string[]; startError?: { code: string; message: string }; worktrees?: string[] } = {}) {
   const session = "/sessions/child.jsonl";
   const agent = { agent: "pi", interactive_ready: true, agent_status: "idle", completion_seq: 1 as number | undefined, state_change_seq: 1, agent_session: { kind: "path", value: session } };
   const state = { agent, paneGone: false, agentGone: false };
@@ -24,6 +24,7 @@ function world(opts: { liveNames?: string[]; startError?: { code: string; messag
     "pane.layout": () => ({ result: { layout: { panes: [{ pane_id: "w1:p1", rect: { width: 200, height: 50 } }] } } }),
     "pane.split": () => ({ result: { pane: { pane_id: "w1:p3" } } }),
     "worktree.open": () => ({ result: { already_open: false, workspace: { workspace_id: "w9" }, root_pane: { pane_id: "w9:p1" } } }),
+    "worktree.create": () => ({ result: { workspace: { workspace_id: "w9" }, root_pane: { pane_id: "w9:p1" } } }),
     "agent.start": () => (opts.startError ? { error: opts.startError } : { result: { agent: { ...agent } } }),
     "agent.get": () => (state.paneGone || state.agentGone ? { error: { code: "not_found", message: "agent not found" } } : { result: { agent: { ...state.agent } } }),
     "agent.prompt": () => ({ result: {} }),
@@ -39,7 +40,7 @@ function world(opts: { liveNames?: string[]; startError?: { code: string; messag
     selfPane: "w1:p1",
     exec: async (cmd, args) => {
       execs.push([cmd, ...args]);
-      if (cmd === "worktree" && args[0] === "path") return { code: 0, stdout: "/repo/.worktrees/feat-x\n", stderr: "" };
+      if (cmd === "git" && args[0] === "worktree") return { code: 0, stdout: ["/repo", ...(opts.worktrees ?? [])].map((p) => `worktree ${p}\n`).join("\n"), stderr: "" };
       if (cmd === "git") return { code: 0, stdout: "/repo/.git\n", stderr: "" };
       return { code: 0, stdout: "", stderr: "" };
     },
@@ -117,17 +118,25 @@ describe("children", () => {
     expect(w.delivered).toHaveLength(1);
   });
 
-  it("splits beside the pane and opens worktrees through the worktree script", async () => {
+  it("splits beside the pane and creates worktrees in <repo>/.worktrees through herdr", async () => {
     const w = world();
     const s = await w.children.spawn({ task: "watch tests", name: "tests", where: "split", cwd: "/repo" });
     expect(s.paneId).toBe("w1:p3");
     expect(w.f.of("pane.split")[0]!.params).toMatchObject({ target_pane_id: "w1:p1", direction: "right" });
     const t = await w.children.spawn({ task: "build feature x", name: "feat", where: "worktree", branch: "feat/x", cwd: "/repo" });
-    expect(w.execs[0]).toEqual(["worktree", "new", "feat/x", "--no-open"]);
-    expect(w.f.of("worktree.open")[0]!.params).toMatchObject({ cwd: "/repo", path: "/repo/.worktrees/feat-x" });
+    expect(w.execs.some(([cmd]) => cmd === "worktree")).toBe(false);
+    expect(w.f.of("worktree.create")[0]!.params).toMatchObject({ cwd: "/repo", branch: "feat/x", path: "/repo/.worktrees/feat-x" });
+    expect(w.f.of("worktree.open")).toHaveLength(0);
     expect(t).toMatchObject({ paneId: "w9:p1", workspaceId: "w9", cwd: "/repo/.worktrees/feat-x", branch: "feat/x" });
     expect(w.f.of("agent.prompt").at(-1)!.params.text).toContain("on branch feat/x");
     await expect(w.children.spawn({ task: "x", where: "worktree", cwd: "/repo" })).rejects.toThrow(/needs `branch`/u);
+  });
+
+  it("opens an existing <repo>/.worktrees checkout instead of creating it", async () => {
+    const w = world({ worktrees: ["/repo/.worktrees/feat-x"] });
+    await w.children.spawn({ task: "build feature x", name: "feat", where: "worktree", branch: "feat/x", cwd: "/repo" });
+    expect(w.f.of("worktree.create")).toHaveLength(0);
+    expect(w.f.of("worktree.open")[0]!.params).toMatchObject({ cwd: "/repo", path: "/repo/.worktrees/feat-x" });
   });
 
   it("refuses to prompt a blocked child and reports a closed one", async () => {

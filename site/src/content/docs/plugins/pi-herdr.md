@@ -66,7 +66,7 @@ For a requested interactive handoff in the same checkout:
 }
 ```
 
-The default location is a new tab; `split` places it beside the parent. Both share the checkout. `worktree` requires `branch`, runs `worktree new <branch> --no-open`, and opens the checkout in its grouped Herdr space, reusing an existing space when available. Closing that child does not remove its checkout or branch.
+The default location is a new tab; `split` places it beside the parent. Both share the checkout. `worktree` requires `branch`: Herdr creates `<repo>/.worktrees/<branch>` (slashes as dashes) and opens it in its grouped space, reusing an existing checkout or space when available. Closing that child does not remove its checkout or branch.
 
 Model and thinking default to the parent's choices, and focus defaults to false. Give a complete task: the child cannot see the parent conversation.
 

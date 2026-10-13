@@ -106,9 +106,13 @@ test("a failed parallel preparation cancels other in-flight preparations and the
   const gates = [deferred<any>(), deferred<any>()];
   let preparing = 0;
   const entered = deferred<void>();
-  const x = await setup(2, () => { const gate = gates[preparing++]; if (preparing === 2) entered.resolve(); return gate!.promise; });
+  // rev-parse answers at once; each `git worktree add` waits on its gate.
+  const x = await setup(2, (_cmd: string, args: string[]) => {
+    if (args[0] === "rev-parse") return { code: 0, stdout: "/repo/.git\n", stderr: "" };
+    const gate = gates[preparing++]; if (preparing === 2) entered.resolve(); return gate!.promise;
+  });
   const work = x.run({ tasks: ["bad", "in flight", "queued"].map((task) => ({ ...explicit, task })), worktree: true });
-  const rejected = expect(work).rejects.toThrow(/worktree new/);
+  const rejected = expect(work).rejects.toThrow(/worktree/);
   await entered.promise;
   gates[0]!.resolve({ code: 1, stdout: "", stderr: "failure" });
   await Promise.resolve();

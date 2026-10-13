@@ -44,7 +44,7 @@ Options:
 |---|---|
 | `async` | default false. Return the run ids at once and deliver the results later as one `subagent-result` message that starts a turn |
 | `context` | `fresh` (default) or `fork`: start each child from this conversation (`--fork` of the session file; needs a saved session) |
-| `worktree` | run each task in a new checkout from `worktree new subagent/<slug>-<id> --no-open`. Set it only when the user requests a worktree or branch isolation; otherwise ask first. The child stays headless |
+| `worktree` | run each task in a new checkout, `git worktree add <repo>/.worktrees/subagent-<slug>-<id>` on branch `subagent/<slug>-<id>` from the current HEAD. Set it only when the user requests a worktree or branch isolation; otherwise ask first. The child stays headless |
 | `cwd` | working directory (default: the session's); each task item may set its own |
 
 `action: "status" | "steer" | "stop" | "result"` take an `id` (or a unique prefix). `steer` also takes `message`, delivered to the running child as a steering message. `status` without an id lists this session's runs.
@@ -218,7 +218,7 @@ Children run with `PI_SUBAGENT=1` and `PI_SUBAGENT_DEPTH` set, which is how `max
 
 - Each subagent is a full Pi session using your configured models and credentials; its tokens and cost are billed like any other session's. Children run with `--no-session` unless forked (forked sessions go to `~/.pi/agent/subagents/sessions`).
 - Jev picks are optional classifier requests through Pi's classifier model API (Pi 0.99 or newer). The default `typesafe` provider needs Pi to have credentials for it (for example `TYPESAFE_API_KEY`); these requests can be billed. Set `"jev": { "enabled": false }` to turn them off; the defaults then apply.
-- `worktree: true` needs the `worktree` command on `PATH`.
+- `worktree: true` needs `git`.
 - On disk: run output and transcripts under `~/.pi/agent/subagents/<id>/`, and a temporary file for an agent's system prompt.
 
 ## Optional integrations

@@ -205,14 +205,17 @@ export class Children {
   private async worktreePane(opts: SpawnOptions, name: string): Promise<{ paneId: string; workspaceId?: string; cwd: string }> {
     const { exec, call } = this.scope();
     if (!opts.branch) throw new Error("where=worktree needs `branch`.");
-    const made = await exec("worktree", ["new", opts.branch, "--no-open"], opts.cwd);
-    if (made.code !== 0) throw new Error(`worktree new failed: ${(made.stderr || made.stdout).trim()}`);
-    const p = await exec("worktree", ["path", opts.branch], opts.cwd);
-    const path = p.stdout.trim().split("\n").pop()?.trim();
-    if (p.code !== 0 || !path) throw new Error(`worktree path failed: ${(p.stderr || p.stdout).trim()}`);
+    // Checkouts live in <repo>/.worktrees/<branch, slashes as dashes>, the location every harness shares.
     const common = await exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], opts.cwd);
-    const root = common.code === 0 ? common.stdout.trim().replace(/\/\.git\/?$/u, "") : opts.cwd;
-    const open = await call("worktree.open", { cwd: root, path, focus: !!opts.focus }, 15_000);
+    if (common.code !== 0) throw new Error(`not in a git repository: ${opts.cwd}`);
+    const root = common.stdout.trim().replace(/\/\.git\/?$/u, "");
+    const path = `${root}/.worktrees/${opts.branch.replaceAll("/", "-")}`;
+    const list = await exec("git", ["worktree", "list", "--porcelain"], root);
+    const exists = list.stdout.split("\n").includes(`worktree ${path}`);
+    // herdr checks out an existing branch or creates it from the repo's HEAD.
+    const open = exists
+      ? await call("worktree.open", { cwd: root, path, focus: !!opts.focus }, 15_000)
+      : await call("worktree.create", { cwd: root, branch: opts.branch, path, focus: !!opts.focus }, 60_000);
     if (open.error) throw new Error(`herdr could not open the worktree: ${errorText(open)}`);
     const workspaceId: string | undefined = open.result?.workspace?.workspace_id;
     if (!open.result?.already_open && open.result?.root_pane?.pane_id) return { paneId: open.result.root_pane.pane_id, workspaceId, cwd: path };
@@ -452,7 +455,7 @@ export class Children {
     rec.awaiting = false;
     rec.closed = true;
     this.save(rec);
-    const kept = rec.where === "worktree" && rec.branch ? ` Its checkout and branch ${rec.branch} stay (worktree rm ${rec.branch} removes the checkout).` : "";
+    const kept = rec.where === "worktree" && rec.branch ? ` Its checkout and branch ${rec.branch} stay (git worktree remove ${rec.cwd} removes the checkout).` : "";
     return `Closed ${rec.name}'s pane; its ${this.deps.agent.kind} session stays${rec.session ? ` (${rec.session})` : ""}.${kept}`;
   }
 

@@ -54,7 +54,7 @@ Control an existing run with `action: "status"`, `"result"`, `"stop"`, or `"stee
 }
 ```
 
-`cwd` changes the working directory. `worktree: true` invokes `worktree new subagent/<slug>-<id> --no-open` for isolated task checkouts. Request that deliberately; a separate context alone is not an editing boundary.
+`cwd` changes the working directory. `worktree: true` runs `git worktree add` into `<repo>/.worktrees/subagent-<slug>-<id>` (branch `subagent/<slug>-<id>`) for isolated task checkouts. Request that deliberately; a separate context alone is not an editing boundary.
 
 ## Agent definitions and settings
 

@@ -513,9 +513,13 @@ export default function subagents(pi: ExtensionAPI) {
 
   const worktreeFor = async (cwd: string, task: string, signal: AbortSignal): Promise<string> => {
     const branch = `subagent/${slug(task)}-${shortId()}`;
-    const result = await pi.exec("worktree", ["new", branch, "--no-open"], { cwd, timeout: 60_000, signal });
-    const dir = result.stdout.trim().split("\n").at(-1)?.trim();
-    if (result.code !== 0 || !dir) throw new Error(`worktree new ${branch} failed: ${(result.stderr || result.stdout).trim().slice(0, 300)}`);
+    // <repo>/.worktrees/<branch, slashes as dashes>: the location every harness shares.
+    const common = await pi.exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd, timeout: 10_000, signal });
+    if (common.code !== 0) throw new Error(`worktree ${branch} failed: not in a git repository: ${cwd}`);
+    if (signal.aborted) throw new Error("Cancelled before any subagent started.");
+    const dir = `${common.stdout.trim().replace(/\/\.git\/?$/u, "")}/.worktrees/${branch.replaceAll("/", "-")}`;
+    const result = await pi.exec("git", ["worktree", "add", "-q", "-b", branch, dir, "HEAD"], { cwd, timeout: 60_000, signal });
+    if (result.code !== 0) throw new Error(`git worktree add ${branch} failed: ${(result.stderr || result.stdout).trim().slice(0, 300)}`);
     return dir;
   };
 

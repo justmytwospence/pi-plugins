@@ -66,11 +66,11 @@ The `herdr_child` tool starts an interactive Pi in its own Herdr pane and gives 
 
 **Starting.** A child runs `pi --name <name> [--model ...] [--thinking ...]` through Herdr. pi-herdr waits up to 90 seconds for it to accept input, then sends the task with a preamble telling it that it is a child and that its final reply to each parent message is sent back. If the child is blocked on a dialog, or never becomes ready, the task is not sent; the child is still recorded, so `send` works once the user has dealt with it.
 
-**Worktrees.** `where: "worktree"` runs `worktree new <branch> --no-open` and `worktree path <branch>`, then opens the checkout through Herdr as the repository's grouped child space, with the child in it; if that space is already open, the child gets a tab there.
+**Worktrees.** `where: "worktree"` uses `<repo>/.worktrees/<branch>` (slashes as dashes): Herdr's `worktree.create` makes it (checking out an existing branch or branching from the repository's HEAD) and opens it as the repository's grouped child space, with the child in it. An existing checkout there is opened with `worktree.open` instead; if its space is already open, the child gets a tab there.
 
 **Replies.** pi-herdr polls Herdr every 2 seconds for each child it is awaiting. When a turn the parent asked for (the task, or a `send`) settles, it reads the last assistant message from the child's session file, whose path Herdr's Pi integration reports, drops a trailing `<next>` suggestion, keeps the last 2,000 lines or 50 KB, and delivers it as a `herdr-child` message that starts a turn. Turns the user starts by typing in the child's pane are not sent back. While a reply is pending the parent holds `herdr:background`, so its `$bg` token counts the pending child reply. If the pane closes or Pi exits before replying, the parent is told so instead.
 
-**Lifecycle.** Children are ordinary Pi sessions that outlive the parent's turn. Records are saved as `pi-herdr:child` session entries, so `list`, `send` and pending replies survive a restart or `/resume`. When the parent session ends, pi-herdr releases its holds but does not stop or close the children: their panes keep running. A child's pane closes only with `close` (or when you close it in Herdr). `close` keeps the child's session file; a worktree's checkout and branch also stay (`worktree rm <branch>` removes the checkout).
+**Lifecycle.** Children are ordinary Pi sessions that outlive the parent's turn. Records are saved as `pi-herdr:child` session entries, so `list`, `send` and pending replies survive a restart or `/resume`. When the parent session ends, pi-herdr releases its holds but does not stop or close the children: their panes keep running. A child's pane closes only with `close` (or when you close it in Herdr). `close` keeps the child's session file; a worktree's checkout and branch also stay (`git worktree remove <path>` removes the checkout).
 
 ### Choose delegation, then layout
 
@@ -118,7 +118,7 @@ There is no settings file.
 - [Herdr](https://herdr.dev), with Pi running in a Herdr pane. pi-herdr talks to Herdr over its socket (`HERDR_SOCKET_PATH`).
 - Herdr's own Pi integration (`herdr integration install pi`) for reading children's replies (it reports their session files) and for the pane title and agent name to apply.
 - `gh`, authenticated for the repository, for the `$pr` token (optional).
-- The `worktree` command on `PATH` for `where: "worktree"`.
+- `git` for `where: "worktree"`.
 - Each Herdr child is a full interactive Pi session using your configured model and credentials, billed like any session. pi-herdr itself makes no model or classifier calls.
 - It writes nothing to disk except session entries (`pi-herdr:child`) in the current session.
 
