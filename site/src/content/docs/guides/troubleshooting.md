@@ -30,7 +30,7 @@ Do not “fix” collisions by enabling more copies. Select the smallest useful 
 - Keep one editor replacement. Do not load an upstream vim package next to the suite's pi-vim.
 - Disable any other footer or working-message extension. Another footer can replace this one on startup or reload. Do not enable pi-cc-extensions: it is superseded by [pi-cc-render](/plugins/pi-cc-render/), [pi-markdown-extras](/plugins/pi-markdown-extras/), [pi-context](/plugins/pi-context/) and this footer's working row and MCP chip, and pi-cc-render leaves the footer alone.
 - Run `/status native` to compare against Pi’s built-in footer without uninstalling.
-- A missing plug glyph usually means your terminal font lacks Nerd Font symbols, not that MCP is disconnected.
+- Missing footer icons (such as the MCP plug) usually mean your terminal font lacks Nerd Font symbols, not that anything is disconnected.
 
 Resource filters select from a manifest; do not assume reordering strings in the filter reorders extensions. For separately configured editor packages, arrange their load before the suite and verify on startup. For a difficult order-dependent reproduction, use explicit `-e` entries in the desired order.
 

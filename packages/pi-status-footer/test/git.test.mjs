@@ -101,7 +101,7 @@ test("real clean, unborn, no-upstream and detached states have minimal suffixes"
     git("config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*");
     git("branch", "--set-upstream-to=origin/main", "main");
     assertCounts(status(), { upstream: "origin/main", changed: 0, ahead: 0, behind: 0 });
-    assert.match(row(status()), /^ project · ⎇ main$/);
+    assert.match(row(status()), /^ \uf07b project · \ue725 main$/);
     assert.doesNotMatch(row(status()), /changed|conflicts|no upstream|[●✖↑↓]/);
     git("checkout", "--detach");
     const detached = `detached:${git("rev-parse", "--short=7", "HEAD").trim()}`;
@@ -339,5 +339,5 @@ test("missing, malformed or truncated porcelain is unavailable, never falsely cl
     assert.match(text, /fallback \* !/);
     assert.doesNotMatch(text, /no upstream|changed|conflict/);
   }
-  assert.match(row({}), /^ project · !$/);
+  assert.match(row({}), /^ \uf07b project · !$/);
 });

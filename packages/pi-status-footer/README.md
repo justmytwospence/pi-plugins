@@ -5,10 +5,12 @@ It leaves task widgets and tool rendering alone, and keeps whichever editor is
 installed (pi's, pi-vim's), redrawing only its two border lines as the context
 gauge. It uses pi's current theme, without background color blocks or animation.
 While the agent runs, it adds streamed-output and elapsed-time statistics to
-pi's own working indicator message, keeping pi's spinner. The MCP status uses a
-flat Nerd Font plug (U+F1E6), inheriting the status text color; Nerd Font
-support is only needed for that decorative glyph. The `MCP` label and status
-text remain readable without it. Other status text is preserved.
+pi's own working indicator message, keeping pi's spinner. Every footer row
+leads with a dim Nerd Font icon: folder (project), git branch, microchip
+(model), tachometer (context), book (marimo), cogs (background), archive
+(stash), plug (MCP, when its status leads the notices row) or bell (other
+notices), and hourglass (limits). Without a Nerd Font they draw as placeholders;
+all labels and readings remain readable. Other status text is preserved.
 
 ## Install
 
@@ -77,7 +79,7 @@ instead of the status row:
 | pi-cache-guard | `cache 4:12`, `cache cold` | `Cache 4:12` on the context row (warm in green, cold in the warning color) |
 | pi-cache-guard (Jev trimming, key `lean-context`) | `lean: −12k tok` | `Lean −12k tok` on the context row |
 | anthropic-billing-guard | `extra usage x3` | `3 requests billed to extra usage` on the Claude limits row |
-| @saadjs/pi-stash | `prompt stashed` | `› Stashed · "first line…" +2 lines · ctrl+s to restore` as the top row, just under the editor |
+| @saadjs/pi-stash | `prompt stashed` | `Stashed · "first line…" +2 lines · ctrl+s to restore` as the top row, just under the editor |
 | pi-marimo | `marimo: fit.py · running Data loading › Model fit (12s) · 1 error · also prep.py, plots.py` | `Marimo fit.py · …` on its own row under the context row: the current notebook (bold) and its kernel, then the other notebooks it follows; when narrow, the others become a count and the section its deepest heading |
 | pi-bg | `bg: tests 2:14 · vite ready · lint ✗` | `Background tests 2:14 · vite ready · lint ✗` on its own row under that: running jobs with their time, services with their state, then what ended in the last minute; when narrow, what ended fine goes first |
 
@@ -128,7 +130,7 @@ from memory and `mcp.json` by modification time every five seconds, on
 At 60 columns and up, all rows have a one-cell inset. Narrower terminals omit
 that padding. Labels use natural single-space spacing, not aligned columns.
 Project and model anchor the display with accent color; section labels and
-ordinary readings stay neutral. A terminal-safe `⎇` marks the branch without requiring a Nerd Font.
+ordinary readings stay neutral. Each row's leading icon identifies it at a glance; wrapped notice lines indent under the first.
 Reasoning levels use Pi's native thinking colors. Context and quota percentages
 are bold; warm caches and ready services are green, while warnings and errors
 retain their semantic colors. Distinct pieces of information use a dim `·`;

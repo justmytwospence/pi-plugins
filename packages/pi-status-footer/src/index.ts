@@ -611,7 +611,7 @@ export function shortModel(value: string): string {
 function stashRow(text: string | undefined, width: number, theme: Paint): string {
   const lines = text?.split("\n").map(clean).filter(Boolean) ?? [];
   const more = lines.length > 1 ? ` +${lines.length - 1} line${lines.length === 2 ? "" : "s"}` : "";
-  const label = `${theme.fg("accent", "\u203a")} ${theme.fg("muted", "Stashed")}`;
+  const label = theme.fg("muted", "Stashed");
   const hint = "ctrl+s to restore";
   // The preview gets what the label, line count and hint leave, up to 60 cells.
   const room = Math.min(60, width - visibleWidth(`${label} · ""${more} · ${hint}`));
@@ -665,9 +665,30 @@ function bgRow(items: BgItem[], width: number, theme: Paint): string {
   return fitSegments(segments, width, theme);
 }
 
+// Nerd Font (Font Awesome / Devicons, all in the BMP private-use area, one
+// cell wide) icons that lead each footer row. Without a Nerd Font they draw as
+// placeholders; the row text stays readable.
+export const ICONS = {
+  stash: "\uf187", // archive
+  project: "\uf07b", // folder
+  branch: "\ue725", // git branch
+  model: "\uf2db", // microchip
+  context: "\uf0e4", // tachometer
+  marimo: "\uf02d", // book
+  bg: "\uf085", // cogs
+  mcp: "\uf1e6", // plug
+  notices: "\uf0f3", // bell
+  limits: "\uf252", // hourglass half
+} as const;
+
+/** Prefix a row with its icon; `render` gets the width left after it. */
+function iconRow(icon: string, width: number, theme: Paint, render: (width: number) => string): string {
+  return `${theme.fg("dim", icon)} ${render(Math.max(0, width - 2))}`;
+}
+
 function mcpChip(count: McpCount, theme: Paint): string {
   const value = `${count.connected}/${count.total}`;
-  return `${theme.fg("muted", "\uf1e6 MCP")} ${count.connected < count.total ? theme.fg("warning", value) : value}`;
+  return `${theme.fg("muted", "MCP")} ${count.connected < count.total ? theme.fg("warning", value) : value}`;
 }
 
 export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): string[] {
@@ -680,7 +701,8 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   const label = (text: string) => `${theme.fg("muted", accountLabel(text))} `;
   const rows: string[] = [];
   const sep = theme.fg("dim", " · ");
-  if (s.stash) rows.push(stashRow(s.stash.text, width, theme));
+  const row = (icon: string, render: (width: number) => string) => iconRow(icon, width, theme, render);
+  if (s.stash) rows.push(row(ICONS.stash, (w) => stashRow(s.stash?.text, w, theme)));
   // Minimal suffix; path, staging and tracking details stay in /status.
   const outsideGit = g.notRepository && !g.unavailable;
   const available = !g.unavailable && !outsideGit && Boolean(g.branch);
@@ -693,7 +715,7 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   ].filter(Boolean).join(" ");
   const project = theme.bold(theme.fg("accent", clean(g.project ?? (path.basename(s.cwd) || s.cwd))));
   const suffix = marks ? `${g.branch ? " " : ""}${marks}` : "";
-  const branchIcon = g.branch ? theme.fg("dim", "⎇ ") : "";
+  const branchIcon = g.branch ? theme.fg("dim", `${ICONS.branch} `) : "";
   const branch = outsideGit ? "" : `${branchIcon}${theme.fg("muted", clean(g.branch ?? ""))}${suffix}`;
   const branchShort = outsideGit ? "" : `${branchIcon}${theme.fg("muted", truncateToWidth(clean(g.branch ?? ""), 14))}${suffix}`;
   const phaseText = s.phase ? theme.fg(s.phase === "error" ? "error" : "warning", s.phase) : "";
@@ -703,16 +725,16 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     ? `${theme.fg("muted", "reasoning")} ${theme.bold(theme.fg(thinkingColor(s.thinking), clean(s.thinking)))}${auto}`
     : "";
   const identity = `${model}${reasoning ? `${sep}${reasoning}` : ""}`;
-  rows.push(fitSegments([
+  rows.push(row(ICONS.project, (w) => fitSegments([
     { text: project, priority: 60 },
     { text: branch, short: branchShort, priority: g.conflicts ? 110 : 70 },
     { text: s.sessionName ? theme.fg("dim", clean(s.sessionName)) : "", priority: 10 },
-  ], width, theme));
-  rows.push(fitSegments([
+  ], w, theme)));
+  rows.push(row(ICONS.model, (w) => fitSegments([
     { text: identity, short: model, priority: 100 },
     { text: phaseText, priority: 120 },
     { text: s.queued ? theme.fg("warning", "queued") : "", priority: 115 },
-  ], width, theme));
+  ], w, theme)));
 
   const context = s.context.percent;
   const ctxValue = context === null ? theme.fg("muted", "unknown") : theme.bold(theme.fg(context < 70 ? "muted" : heat(context), percent(context)));
@@ -721,22 +743,28 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   const cacheValue = cacheNote ? "cold" : cache;
   const ctxShort = `${theme.fg("muted", "Context")} ${ctxValue}`;
   const ctxLong = `${label("Context")}${ctxValue}${context === null ? "" : theme.fg("dim", " used")}${context === null || s.borderGauge ? "" : ` ${gauge(theme, context)}`}`;
-  rows.push(fitSegments([
+  rows.push(row(ICONS.context, (w) => fitSegments([
     { text: ctxLong, short: ctxShort, priority: 100 },
     { text: s.lean ? theme.fg("muted", `Lean ${clean(s.lean)}`) : "", priority: 20 },
     // Green denotes a warm cache; cold means the next prompt re-caches the whole history.
     { text: cache ? `${theme.fg("muted", "Cache")} ${theme.fg(cache.startsWith("cold") ? "warning" : "success", cacheValue)}${cacheNote ? `${sep}${theme.fg("dim", cacheNote)}` : ""}` : "", priority: 30 },
-  ], width, theme));
-  if (s.marimo) rows.push(marimoRow(s.marimo, width, theme));
-  if (s.bg?.length) rows.push(bgRow(s.bg, width, theme));
+  ], w, theme)));
+  if (s.marimo) { const m = s.marimo; rows.push(row(ICONS.marimo, (w) => marimoRow(m, w, theme))); }
+  if (s.bg?.length) { const bg = s.bg; rows.push(row(ICONS.bg, (w) => bgRow(bg, w, theme))); }
   // Statuses remain owned by their publishers. Wrap instead of silently dropping
   // plan mode, background failures, or other extension notices at the right edge.
   // Our own MCP chip sits first among them, in the same muted-label style as the
   // companion notices; a shortfall of connected servers takes the warning color.
-  const statuses = s.mcp ? [mcpChip(s.mcp, theme), ...s.statuses] : s.statuses;
+  // The row's icon is the MCP plug when the chip leads it, a bell otherwise;
+  // wrapped lines are indented under the first.
+  let statuses = s.mcp ? [mcpChip(s.mcp, theme), ...s.statuses] : s.statuses;
+  // Pi's own MCP status already carries the plug (see above): lift it to the icon.
+  const plugFirst = Boolean(s.mcp) || stripVTControlCharacters(statuses[0] ?? "").startsWith(ICONS.mcp);
+  if (!s.mcp && plugFirst) statuses = [statuses[0].replace(`${ICONS.mcp} `, ""), ...statuses.slice(1)];
   if (statuses.length) {
     const text = statuses.map((status) => status.replace(/[\r\n\t]/g, " ")).join(sep);
-    rows.push(...wrapTextWithAnsi(text, width));
+    const lines = wrapTextWithAnsi(text, Math.max(1, width - 2));
+    rows.push(...lines.map((line, i) => i ? `  ${line}` : `${theme.fg("dim", plugFirst ? ICONS.mcp : ICONS.notices)} ${line}`));
   }
 
   // Subscription limits go last: they are usually the longest rows.
@@ -776,9 +804,12 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
       { text: billed ? theme.fg("error", `${billed} request${billed === 1 ? "" : "s"} billed to extra usage`) : "",
         short: billed ? theme.fg("error", `extra x${billed}`) : "", priority: 220 },
     ];
-    rows.push(fitSegments(segments, width, theme));
+    rows.push(row(ICONS.limits, (w) => fitSegments(segments, w, theme)));
   }
-  if (s.unavailableQuota) rows.push(truncateToWidth(`${label(s.unavailableQuota)}${theme.fg("dim", "limits unavailable")}`, width));
+  if (s.unavailableQuota) {
+    const text = `${label(s.unavailableQuota)}${theme.fg("dim", "limits unavailable")}`;
+    rows.push(row(ICONS.limits, (w) => truncateToWidth(text, w)));
+  }
   return rows.map((row) => " ".repeat(inset) + truncateToWidth(row, width));
 }
 
