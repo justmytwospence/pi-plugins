@@ -2,7 +2,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { ACTIVITY_SECTION, type ActivitySection } from "../src/activity.ts";
 import { setPiInvocation } from "../src/child.ts";
 import subagents, { recordedRun } from "../src/index.ts";
@@ -100,12 +100,13 @@ test("single, parallel and chain labels survive records and appear before roles 
     expect(tool.parameters.properties.label.type).toBe("string");
     expect(tool.parameters.properties.tasks.items.properties.label.type).toBe("string");
     expect(tool.parameters.properties.chain.items.properties.label.type).toBe("string");
+    vi.stubEnv("FAKE_NO_DIALOG", "1");
     const task = `Find config\n${"Full instructions. ".repeat(50)}`;
     const single = await tool.execute("single", { ...explicit, task, label: "  Config\n audit " }, undefined, undefined, ctx);
     expect(single.details.runs[0]).toMatchObject({ label: "Config audit", task, agent: "general" });
     expect(single.content[0].text).toMatch(/^\[Config audit · general ·/u);
     expect(single.content[0].text).toContain(`task=${task}`);
-    expect(ui.selects[0]?.title).toBe("[subagent Config audit · general] Allow?");
+    expect(ui.selects).toEqual([]);
     expect(source?.entries(Date.now())[0]).toMatchObject({ label: "Config audit", detail: "general" });
     const record = h.entries.at(-1)?.data as any;
     expect(record).toMatchObject({ task, label: "Config audit" });
@@ -133,5 +134,6 @@ test("single, parallel and chain labels survive records and appear before roles 
   } finally {
     await h.emit("session_shutdown", { type: "session_shutdown" }, ctx);
     setPiInvocation(undefined);
+    vi.unstubAllEnvs();
   }
 });

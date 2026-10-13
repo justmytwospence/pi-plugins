@@ -2,7 +2,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, test } from "vitest";
-import { Child, childArgs, childEnv, subagentDepth } from "../src/child.ts";
+import { Child, HEADLESS_EXCLUDED_TOOLS, childArgs, childEnv, subagentDepth } from "../src/child.ts";
 import { messageText, readTranscript, transcriptWriter } from "../src/conversation.ts";
 
 const fake = { command: process.execPath, args: [path.join(import.meta.dirname, "fixtures", "fake-pi.mjs")] };
@@ -26,7 +26,8 @@ test("a child runs the task over RPC, forwards its dialog, and reports usage", a
   }).start();
   const state = await child.done;
   expect(state.status).toBe("done");
-  expect(state.output).toBe("task=count lines answer=Allow once args=--mode rpc --no-session --model anthropic/claude-sonnet-5-5 --thinking low --tools read,bash");
+  expect(state.output).toContain("task=count lines answer=Allow once args=--mode rpc --no-session --model anthropic/claude-sonnet-5-5 --thinking low --tools read,bash --exclude-tools " + HEADLESS_EXCLUDED_TOOLS.join(","));
+  expect(state.output).toContain("--append-system-prompt");
   expect(dialogs).toEqual(["Allow?: Allow once/Block"]);
   expect(updates).toContain("bash: npm test");
   expect(state.usage.cost.total).toBeCloseTo(0.03);
@@ -51,17 +52,19 @@ test("a child keeps its conversation and saves each finished message", async () 
   expect(readTranscript(file)).toEqual(c.messages);
 });
 
-test("dialogs are cancelled without a handler; steering reaches the child", async () => {
+test("headless dialogs fail closed as blockers; steering reaches the child", async () => {
   const child = new Child({ task: "t", cwd: process.cwd(), model: "m", thinking: "high", sessionDir: "/tmp", invocation: fake }).start();
   child.steer("focus on tests");
   const state = await child.done;
+  expect(state.status).toBe("failed");
+  expect(state.error).toContain("Headless worker requires user interaction");
   expect(state.output).toMatch(/answer=cancelled/u);
   expect(state.output).toMatch(/steered=focus on tests/u);
 });
 
 test("childArgs: fork and system prompt", () => {
   expect(childArgs({ task: "t", cwd: "/", model: "m", thinking: "low", sessionDir: "/s", forkSession: "/x.jsonl" }, "/p.md")).toEqual([
-    "--mode", "rpc", "--fork", "/x.jsonl", "--session-dir", "/s", "--model", "m", "--thinking", "low", "--append-system-prompt", "/p.md",
+    "--mode", "rpc", "--fork", "/x.jsonl", "--session-dir", "/s", "--model", "m", "--thinking", "low", "--exclude-tools", HEADLESS_EXCLUDED_TOOLS.join(","), "--append-system-prompt", "/p.md",
   ]);
 });
 

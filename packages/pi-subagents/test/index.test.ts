@@ -151,9 +151,10 @@ test("a foreground call returns the child's answer and usage, and offers no deta
     const ctx = h.ctx({ ui, cwd: mkdtempSync(path.join(tmpdir(), "subagents-cwd-")), model: { provider: "p", id: "m" } });
     await h.emit("session_start", { type: "session_start" }, ctx);
     const result = await tool.execute("t1", { task: "count" }, undefined, undefined, ctx);
-    expect(result.content[0].text).toMatch(/^\[count · general · anthropic\/fake · high · done\]\ntask=count answer=cancelled/u);
+    expect(result.content[0].text).toContain("failed: Headless worker requires user interaction");
+    expect(result.content[0].text).toContain("task=count answer=cancelled");
     expect(result.usage.cost.total).toBeCloseTo(0.03);
-    expect(ui.selects[0]?.title).toBe("[subagent count · general] Allow?");
+    expect(ui.selects).toEqual([]);
     await h.emit("session_shutdown", { type: "session_shutdown" }, ctx);
   } finally {
     setPiInvocation(undefined);

@@ -1,7 +1,7 @@
 // One subagent: a `pi --mode rpc` child process with its own context window. The task is sent as a
 // prompt; the run ends at `agent_settled`, when stdin is closed so Pi shuts down in order. RPC keeps
 // the child steerable, and its extension dialogs (for example a tool gate asking for approval) are
-// forwarded to the parent. Every event also feeds the child's `Conversation`, which the viewer shows.
+// cancelled and reported as blockers instead of interrupting the user. Every event feeds the viewer.
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -128,12 +128,17 @@ export function piInvocation(): { command: string; args: string[] } {
   return { command: "pi", args: [] };
 }
 
+/** Human-led workflows must not be reachable by a report-back worker, even via codemode. */
+export const HEADLESS_EXCLUDED_TOOLS = ["enter_plan_mode", "exit_plan_mode", "ask_user_question", "herdr_child"];
+export const HEADLESS_PROMPT = "You are a headless report-back worker, not a human-led session. Execute the assigned task within its scope. Do not enter plan mode, request user approval, ask the user questions, or start interactive agents. If a decision or permission is needed, stop and report the blocker to the parent agent; never grant yourself permission. Return your findings and changes to the parent.";
+
 export function childArgs(options: ChildOptions, promptFile?: string): string[] {
   const args = ["--mode", "rpc"];
   if (options.forkSession) args.push("--fork", options.forkSession, "--session-dir", options.sessionDir);
   else args.push("--no-session");
   args.push("--model", options.model, "--thinking", options.thinking);
   if (options.tools?.length) args.push("--tools", options.tools.join(","));
+  args.push("--exclude-tools", HEADLESS_EXCLUDED_TOOLS.join(","));
   if (promptFile) args.push("--append-system-prompt", promptFile);
   return args;
 }
@@ -161,11 +166,9 @@ export class Child {
     if (this.started || this.stopping || this.state.status !== "running") return this;
     this.started = true;
     let promptFile: string | undefined;
-    if (this.options.systemPrompt?.trim()) {
-      const dir = mkdtempSync(path.join(tmpdir(), "pi-subagent-"));
-      promptFile = path.join(dir, "agent.md");
-      writeFileSync(promptFile, this.options.systemPrompt, { mode: 0o600 });
-    }
+    const dir = mkdtempSync(path.join(tmpdir(), "pi-subagent-"));
+    promptFile = path.join(dir, "agent.md");
+    writeFileSync(promptFile, [this.options.systemPrompt?.trim(), HEADLESS_PROMPT].filter(Boolean).join("\n\n"), { mode: 0o600 });
     const invocation = this.options.invocation ?? piInvocation();
     const proc = spawn(invocation.command, [...invocation.args, ...childArgs(this.options, promptFile)], {
       cwd: this.options.cwd,
@@ -277,7 +280,7 @@ export class Child {
         break;
       case "agent_settled":
         // After stop(), Pi settles the aborted run before it exits.
-        this.finishAndClose(this.stopping ? "stopped" : this.state.error && !this.state.output ? "failed" : "done");
+        this.finishAndClose(this.stopping ? "stopped" : this.state.error ? "failed" : "done");
         break;
       case "extension_ui_request":
         void this.answerDialog(event);
@@ -313,6 +316,7 @@ export class Child {
     const method = event.method;
     if (!["select", "confirm", "input", "editor"].includes(method)) return;
     let answer: DialogAnswer;
+    if (!this.options.onDialog) this.state.error = `Headless worker requires user interaction: ${event.title ?? method}. Return this blocker to the parent; no permission was granted.`;
     try {
       answer = await this.options.onDialog?.({
         method,

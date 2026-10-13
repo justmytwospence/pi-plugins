@@ -21,8 +21,9 @@ rl.on("line", (line) => {
     out({ type: "message_update", usage: zero, assistantMessageEvent: { type: "toolcall_end", contentIndex: 1, toolCall: call } });
     out({ type: "message_end", message: { role: "assistant", provider: "anthropic", model: "fake", content: [{ type: "text", text: "Running the tests" }, call], usage: zero, stopReason: "toolUse" } });
     out({ type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: { command: "npm test" } });
-    out({ type: "extension_ui_request", id: "d1", method: "select", title: "Allow?", options: ["Allow once", "Block"] });
     globalThis.task = cmd.message;
+    if (process.env.FAKE_NO_DIALOG) rl.emit("line", JSON.stringify({ type: "extension_ui_response", value: "no dialog" }));
+    else out({ type: "extension_ui_request", id: "d1", method: "select", title: "Allow?", options: ["Allow once", "Block"] });
   } else if (cmd.type === "abort") {
     out({ type: "agent_settled", aborted: true });
   } else if (cmd.type === "steer") {

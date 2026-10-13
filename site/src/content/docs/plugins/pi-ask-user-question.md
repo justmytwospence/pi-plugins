@@ -87,7 +87,7 @@ RPC uses one native dialog per question. Single-select offers numbered options f
 
 While a dialog is open, the tool emits a `herdr:blocked` hold, released on answer, decline, or error. Herdr's own Pi integration consumes this event; pi-herdr is not required to handle blocked state. Elsewhere it has no effect.
 
-pi-subagents can forward an RPC child's dialogs to the parent UI, so a delegated agent can ask without owning a terminal pane. That depends on the host providing dialog handling; it does not make unattended runs interactive.
+Headless pi-subagents cannot use this tool. Workers return decisions and permission blockers to their parent instead of opening user dialogs.
 
 This tool records a choice, not an enforcement policy. The model must still honor the answer, and a selected option does not automatically change files or authorize unrelated commands. See [planning and review](/recipes/plan-review/) for using decisions in a larger workflow and [troubleshooting](/guides/troubleshooting/) for duplicate tools or missing UI.
 

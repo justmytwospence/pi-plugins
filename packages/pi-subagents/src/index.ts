@@ -16,7 +16,7 @@ import { Type } from "typebox";
 import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION, type ActivityEntry, type ActivitySection, FLEET_HOST_PRIORITY, hostOutranks, readHost } from "./activity.ts";
 import { type AgentDef, discoverAgents } from "./agents.ts";
 import { MENTION_TYPE, mentionGuidance, subagentAutocomplete } from "./mentions.ts";
-import { CACHE_RETENTIONS, type CacheRetention, Child, type ChildState, subagentDepth, type DialogAnswer, type DialogRequest, type Usage, addUsage, emptyUsage } from "./child.ts";
+import { CACHE_RETENTIONS, type CacheRetention, Child, type ChildState, subagentDepth, type Usage, addUsage, emptyUsage } from "./child.ts";
 import { agentDir, loadConfig } from "./config.ts";
 import { Conversation, type Message, readTranscript, transcriptWriter } from "./conversation.ts";
 import { type JevConfig, askJev } from "./jev.ts";
@@ -468,23 +468,6 @@ export default function subagents(pi: ExtensionAPI) {
   const runRefs = (ctx: Pick<ExtensionContext, "sessionManager">): RunRef[] =>
     allRuns(ctx).map((e) => ({ id: e.view.id, agent: e.view.agent, task: e.view.task, ...(e.view.label ? { label: e.view.label } : {}), status: e.view.status, model: e.view.model, run: e.run }));
 
-  /** Forward a child's dialog (for example a tool gate's approval) to the parent's UI. */
-  const dialogFor = (ctx: ExtensionContext, agent: string, label: string) => async (request: DialogRequest): Promise<DialogAnswer> => {
-    if (!ctx.hasUI) return undefined;
-    const title = `[subagent ${label} · ${agent}] ${request.title ?? ""}`.trim();
-    try {
-      if (request.method === "select") {
-        const value = await ctx.ui.select(title, request.options ?? []);
-        return value === undefined ? undefined : { value };
-      }
-      if (request.method === "confirm") return { confirmed: await ctx.ui.confirm(title, request.message ?? "") };
-      const value = await ctx.ui.input(title, request.placeholder);
-      return value === undefined ? undefined : { value };
-    } catch {
-      return undefined;
-    }
-  };
-
   /** Jev's picks for the gaps in each item, one request per item, in parallel. */
   const plan = async (ctx: ExtensionContext, items: Item[], agents: AgentDef[], signal: AbortSignal | undefined) => {
     const parent = { model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "", thinking: pi.getThinkingLevel() };
@@ -546,7 +529,6 @@ export default function subagents(pi: ExtensionAPI) {
         run.state = state;
         options.onUpdate();
       },
-      onDialog: dialogFor(ctx, resolved.agent.name, taskLabel(item.task, item.label)),
       onMessage: transcriptWriter(transcriptPath(outputPath)),
     });
     const run: Run = {
