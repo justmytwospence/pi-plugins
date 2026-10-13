@@ -17,6 +17,7 @@ import { CustomEditor, getAgentDir, type ExtensionAPI, type ExtensionContext, ty
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { builtinMcpOwnsCommand, connectedMcpServers, countMcp, McpConfigReader, MCP_STATUS_KEY, type McpCount } from "./mcp.ts";
 import { SHOW_TIMER_AFTER_MS, WORKING_REFRESH_MS, workingMessage, WorkingStats } from "./working.ts";
+import { WORKING_MESSAGE_EVENT, type WorkingMessageClaim } from "./working-message.ts";
 
 export * from "./mcp.ts";
 export * from "./working.ts";
@@ -868,6 +869,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
   // is in progress, and restored (undefined) the moment it ends.
   const working = new WorkingStats();
   let workingTimer: ReturnType<typeof setInterval> | undefined, runStarted = 0, workingShown: string | undefined;
+  const workingClaims = new Map<string, string>();
   // Built-in MCP chip: tools are in memory, mcp.json is read on its own slow poll.
   const mcpConfig = new McpConfigReader();
   let mcpTimer: ReturnType<typeof setInterval> | undefined, mcp: McpCount | undefined, mcpBusy = false;
@@ -1109,6 +1111,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
   // pi's setWorkingMessage persists until cleared, so every path out of a run
   // (turn end, agent end, shutdown, /status working off) restores the default.
   const setWorking = (message: string | undefined) => {
+    message = [...workingClaims.values()].at(-1) ?? message;
     if (!ctx || message === workingShown) return;
     workingShown = message;
     try { ctx.ui.setWorkingMessage(message); } catch { /* UI gone; nothing to restore */ }
@@ -1117,6 +1120,14 @@ export default function statusFooter(pi: ExtensionAPI): void {
     if (!active || !runStarted || !showWorking) return;
     setWorking(workingMessage(working.tokens(), Date.now() - runStarted));
   };
+  pi.events?.on(WORKING_MESSAGE_EVENT, (data) => {
+    const claim = data as Partial<WorkingMessageClaim> | undefined;
+    if (!active || typeof claim?.owner !== "string") return;
+    if (typeof claim.message === "string") workingClaims.set(claim.owner, claim.message);
+    else if (!workingClaims.delete(claim.owner)) return;
+    if (runStarted && showWorking) syncWorking();
+    else setWorking(undefined);
+  });
   // A turn's end keeps the run's clock for the next turn; the run's end drops it.
   const endTurn = () => {
     if (workingTimer !== undefined) clearInterval(workingTimer);
@@ -1254,6 +1265,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     ctx = undefined; requestRender = undefined;
     timer = undefined; codexTimeout = undefined; codexAbort = undefined;
     workingTimer = undefined; mcpTimer = undefined; runStarted = 0; workingShown = undefined; working.reset();
+    workingClaims.clear();
     mcp = undefined; mcpBusy = false;
     releaseFooter = undefined; releaseEditor = undefined;
     children.clear();

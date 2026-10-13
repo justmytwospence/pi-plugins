@@ -29,10 +29,12 @@
 //
 // marimo without pi-marimo (marimo.ts): a `marimo edit nb.py` service is named `marimo nb.py` and is
 // ready when marimo prints its URL.
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { WORKING_MESSAGE_EVENT } from "./working-message.ts";
 import { Type } from "typebox";
 import { elapsed, footerStatus, header, marimoNote, nameFromCommand, outcome, report, runtime, taskLine } from "./format.ts";
 import { bounded, grep, head, tail } from "./log.ts";
@@ -143,6 +145,7 @@ export default function piBg(pi: ExtensionAPI) {
   /** A running task's annotation. */
   const noteOf = (t: Task): Annotation | undefined => (t.status === "running" ? annotations.get(t.id) : undefined);
   const waiters = new Set<Waiter>();
+  const waitingMessages = new Map<string, string>();
   /** Ids whose herdr:background hold is active. */
   const holds = new Set<string>();
   let ctx: ExtensionContext | undefined;
@@ -520,8 +523,12 @@ export default function piBg(pi: ExtensionAPI) {
     const timer = setTimeout(() => finish("timeout"), timeoutMs);
     const ticker = tick
       ? setInterval(() => {
-          const r = tick();
-          if (r) finish(r);
+          try {
+            const r = tick();
+            if (r) finish(r);
+          } catch {
+            finish("aborted");
+          }
         }, 250)
       : undefined;
     function finish(r: Reason) {
@@ -593,6 +600,8 @@ export default function piBg(pi: ExtensionAPI) {
     hosts.clear();
     yieldedTo.clear();
     for (const w of [...waiters]) w.resolve("aborted");
+    for (const owner of waitingMessages.keys()) emit(WORKING_MESSAGE_EVENT, { owner });
+    waitingMessages.clear();
     const activeHolds = [...holds];
     holds.clear();
     try {
@@ -799,20 +808,39 @@ export default function piBg(pi: ExtensionAPI) {
         return ts.map((t) => `${t.name} ${runtime(t)}`).join(" · ");
       };
       const started = Date.now();
+      const owner = `bg-wait/${randomUUID()}`;
+      const paintWaiting = () => c.ui.setWorkingMessage([...waitingMessages.values()].at(-1));
       const setWorking = () => {
-        if (attached && generation === sessionGeneration && c.hasUI) c.ui.setWorkingMessage(`Waiting on ${label()}… (type to interrupt)`);
+        if (!attached || generation !== sessionGeneration || !c.hasUI) return;
+        const message = `Waiting on ${label()}… (type to interrupt)`;
+        waitingMessages.set(owner, message);
+        // Standalone behavior remains native; an optional footer observes the same claim.
+        paintWaiting();
+        emit(WORKING_MESSAGE_EVENT, { owner, message });
       };
-      setWorking();
       let ticks = 0;
-      const { waiter, done } = waitFor({ targets, any, silent: false }, timeoutS * 1000, () => {
-        if (!attached || generation !== sessionGeneration || signal?.aborted) return "aborted";
-        if (c.hasPendingMessages()) return "message";
-        if (++ticks % 4 === 0) setWorking();
-        return undefined;
-      });
-      refresh();
-      const reason = await done;
-      if (attached && generation === sessionGeneration && c.hasUI) c.ui.setWorkingMessage();
+      let reason: Reason;
+      let waiter: Waiter;
+      let cancelWait: (() => void) | undefined;
+      try {
+        setWorking();
+        const waiting = waitFor({ targets, any, silent: false }, timeoutS * 1000, () => {
+          if (!attached || generation !== sessionGeneration || signal?.aborted) return "aborted";
+          if (c.hasPendingMessages()) return "message";
+          if (++ticks % 4 === 0) setWorking();
+          return undefined;
+        });
+        waiter = waiting.waiter;
+        cancelWait = () => waiter.resolve("aborted");
+        refresh();
+        reason = await waiting.done;
+      } finally {
+        cancelWait?.();
+        const owned = waitingMessages.delete(owner);
+        if (owned && attached && generation === sessionGeneration && c.hasUI) {
+          try { paintWaiting(); } finally { emit(WORKING_MESSAGE_EVENT, { owner }); }
+        }
+      }
       refresh();
       const out: string[] = [];
       for (const t of waiter.finished) out.push(report(t));
