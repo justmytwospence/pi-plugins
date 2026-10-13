@@ -18,6 +18,7 @@ export const groups = [
     { name: "pi-cache-guard", label: "Cache guard", description: "Cache-expiry warnings, a cache clock and optional Jev context trimming." },
     { name: "pi-auto-effort", label: "Auto effort", description: "Classifier-guided reasoning levels, bounded by your manual ceiling." },
     { name: "pi-status-footer", label: "Status footer", description: "Context, Git and provider-aware usage in one responsive footer." },
+    { name: "pi-context", label: "Context breakdown", description: "See what fills the context window, part by part, with previews." },
   ] },
   { title: "Make it yours", eyebrow: "04 / Terminal craft", description: "Small, focused improvements to the place you spend your working day.", plugins: [
     { name: "pi-vim", label: "Vim editing", description: "Modal editing for the prompt and for text fields inside suite dialogs." },
@@ -25,6 +26,8 @@ export const groups = [
     { name: "pi-copy", label: "Copy picker", description: "Pick useful fragments from the session instead of copying a whole reply." },
     { name: "pi-next-prompt", label: "Next prompt", description: "An optional next step in the editor. Accept it; never auto-send it." },
     { name: "pi-select-nav", label: "Picker navigation", description: "Consistent list movement that leaves text entry alone." },
+    { name: "pi-cc-render", label: "Claude Code rendering", description: "Tool cards, grouped calls, rich diffs and compact thinking." },
+    { name: "pi-markdown-extras", label: "Markdown extras", description: "Box-drawing diagrams, labeled admonitions and tidier links." },
     { name: "pi-prose-width", label: "Prose width", description: "Readable paragraphs without narrowing code blocks and tables." },
     { name: "pi-sticky-last-prompt", label: "Sticky prompt", description: "Keep the prompt you scrolled past in view, one click from the jump back." },
     { name: "pi-clear-screen", label: "Clear screen", description: "Move the fullscreen transcript out of view, not out of context." },

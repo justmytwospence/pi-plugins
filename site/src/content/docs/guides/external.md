@@ -3,27 +3,37 @@ title: External integrations
 description: Which capabilities the suite owns, which specialist packages remain separate, and their permission boundaries.
 ---
 
-The suite owns its core editor interactions: **Vim editing, prompt stash, sticky last prompt and side conversations**. Their upstream MIT attribution and import provenance remain with each component. Owning the integration does not mean replacing the mature Vim motion engine with a handful of mappings.
+The suite owns its core editor interactions: **Vim editing, prompt stash, sticky last prompt and side conversations**. It also owns Claude Code-style transcript rendering, Markdown extras and `/context`. Their upstream MIT attribution and import provenance remain with each component. Owning the integration does not mean replacing the mature Vim motion engine with a handful of mappings.
 
-Six previously used third-party packages remain external. They are optional, not bundled suite requirements. The versions below are the audit baseline, not upgrade instructions.
+Five previously used third-party packages remain external. They are optional, not bundled suite requirements. The versions below are the audit baseline, not upgrade instructions.
 
 | Package | Baseline | Why it stays separate |
 | --- | --- | --- |
-| `pi-cc-extensions` | 0.9.7 | Broad native-tool rendering, inline diffs, Markdown, thinking presentation, references and `/context` |
 | `@juicesharp/rpiv-todo` | 2.12.0 | A persistent logical task state machine with dependencies, checklist UI and `todo` tool |
 | `pi-web-access` | 0.33.0 | Search providers, extraction, browser credentials, media, SSRF protection and stored results |
 | `@gotgenes/pi-anthropic-auth` | 3.3.2 | Billing-sensitive authentication and request compatibility |
 | `pi-autoresearch` | 1.8.1 | Specialized experiments, benchmarks, checks, rollback and dashboards |
 | `@earendil-works/pi-radius` | 0.1.19 | A deprecated connector; migration to native/MCP routing is a separate task |
 
-## Rendering and agent mentions
+## Superseded: pi-cc-extensions
 
-When using CC extensions, keep its custom footer disabled and exclude suite-owned tool renderers plus `todo`. This preserves the suite's interaction-specific rendering while retaining CC's native-tool and Markdown features. Merge these settings into the existing `pi-cc-extensions.json`:
+`pi-cc-extensions` (MIT, minuque) is no longer recommended. Its useful parts from version 0.9.10 were ported into suite components, with upstream attribution kept in each ported component's `LICENSE`; a few features map to existing or newly written suite features instead:
+
+| Former feature | Suite component |
+| --- | --- |
+| Tool cards, grouping, rich diffs, compact thinking, turn summary, startup header, mouse support, `/ccstyle`, `cc-dark`/`cc-light` themes | [pi-cc-render](/plugins/pi-cc-render/) |
+| Mermaid dialects, admonitions, circled numbers, multi-line link cleanup | [pi-markdown-extras](/plugins/pi-markdown-extras/) |
+| `/context` | [pi-context](/plugins/pi-context/) |
+| Working message statistics and MCP status | [pi-status-footer](/plugins/pi-status-footer/) |
+| Subagent `@` references | `@subagent:` mentions and `@run:` references in [pi-subagents](/plugins/pi-subagents/) |
+| `/clear` and `/exit` aliases | [pi-clear-screen](/plugins/pi-clear-screen/) |
+
+**Do not enable pi-cc-extensions alongside pi-cc-render.** Both patch the same Pi components and register `/ccstyle`, and Pi does not deduplicate different packages. Remove it rather than disabling its features one by one. Its custom footer, bare-URL linkifier and references to other Pi sessions are deliberately not carried over; pi-subagents' mentions target its `subagent` tool rather than an `Agent` tool. pi-cc-render reads its own `~/.pi/agent/pi-cc-render.json`, not the old `pi-cc-extensions.json`.
+
+To keep suite-owned interactive tool renderers and the external `todo` tool out of the Claude Code-style restyling, list them in `excludeRenderers` in `pi-cc-render.json`:
 
 ```json
 {
-  "enableCustomFooter": false,
-  "enableSubagentAutocomplete": false,
   "excludeRenderers": [
     "ask_user_question", "subagent", "herdr_child",
     "bg_run", "bg_wait", "bg_logs", "bg_kill",
@@ -33,9 +43,7 @@ When using CC extensions, keep its custom footer disabled and exclude suite-owne
 }
 ```
 
-Use the actual registered tool names for your selected revision; do not interpret a renderer exclusion as disabling a tool. The managed personal profile checks this list against the suite source.
-
-CC's subagent reference feature produces guidance for an `Agent` tool with `subagent_type`. The suite uses `subagent({agent: ...})` instead. Its own agent mention/completion integration uses built-in, user and project agent discovery and does not require CC. Logical `/todos` remain distinct from the process activity inventory in `/tasks`.
+Use the actual registered tool names for your selected revision; do not interpret a renderer exclusion as disabling a tool. Logical `/todos` remain distinct from the process activity inventory in `/tasks`.
 
 ## Credentials and permission boundaries
 

@@ -1,6 +1,6 @@
 # Pi Plugins
 
-A modular suite of 23 extensions for [Pi](https://pi.dev): background work, subagents, planning, review, context awareness and terminal ergonomics. Every component can be enabled on its own; one Git ref versions the whole suite. It is not a fork of Pi.
+A modular suite of 26 extensions for [Pi](https://pi.dev): background work, subagents, planning, review, context awareness and terminal ergonomics. Every component can be enabled on its own; one Git ref versions the whole suite. It is not a fork of Pi.
 
 **[Documentation](https://pi-plugins.vercel.app)** · [Personal project overview](https://www.spencerboucher.com/projects/pi-plugins)
 
@@ -10,8 +10,8 @@ A modular suite of 23 extensions for [Pi](https://pi.dev): background work, suba
 | --- | --- |
 | Run and coordinate | pi-bg, pi-subagents, pi-herdr, pi-marimo, pi-btw |
 | Think and review | pi-plan-mode, pi-ask-user-question, pi-diff-review, pi-rewind, pi-tool-gate |
-| Context and cost | pi-cache-guard, pi-auto-effort, pi-status-footer |
-| Terminal and editing | pi-vim, pi-stash, pi-copy, pi-next-prompt, pi-select-nav, pi-prose-width, pi-sticky-last-prompt, pi-clear-screen, pi-appearance-resync, pi-herdr-scrollbar-width |
+| Context and cost | pi-cache-guard, pi-auto-effort, pi-status-footer, pi-context |
+| Terminal and editing | pi-vim, pi-stash, pi-copy, pi-next-prompt, pi-select-nav, pi-cc-render, pi-markdown-extras, pi-prose-width, pi-sticky-last-prompt, pi-clear-screen, pi-appearance-resync, pi-herdr-scrollbar-width |
 
 Each component has a [reference page](https://pi-plugins.vercel.app/guides/overview/) with its commands, keys, settings, requirements and costs. Some features make paid classifier requests, need Git, Herdr or marimo, or patch non-public TUI internals. Read [requirements and costs](https://pi-plugins.vercel.app/guides/requirements/) before enabling everything.
 
@@ -85,4 +85,4 @@ Develop components under `packages/<name>/`. Keep each one independently usable 
 
 ## License
 
-MIT. Each component keeps its own `LICENSE`. Upstream attribution is retained where components began elsewhere: pi-plan-mode (narumiruna/pi-extensions), the pi-subagents UI (tintinweb/pi-subagents), pi-vim (lajarre/pi-vim), pi-stash (`@saadjs/pi-stash` by Saad Bash), pi-sticky-last-prompt (tangentyh/pi-collections) and pi-btw (dbachelder/pi-btw). See [about and credits](https://pi-plugins.vercel.app/about/).
+MIT. Each component keeps its own `LICENSE`. Upstream attribution is retained where components began elsewhere: pi-plan-mode (narumiruna/pi-extensions), the pi-subagents UI (tintinweb/pi-subagents), pi-vim (lajarre/pi-vim), pi-stash (`@saadjs/pi-stash` by Saad Bash), pi-sticky-last-prompt (tangentyh/pi-collections), pi-btw (dbachelder/pi-btw), and pi-cc-render, pi-markdown-extras, pi-context and parts of pi-status-footer (pi-cc-extensions by minuque; pi-cc-render also credits tifandotme/pi-extensions and MasuRii/pi-tool-display). See [about and credits](https://pi-plugins.vercel.app/about/).

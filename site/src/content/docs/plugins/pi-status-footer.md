@@ -4,11 +4,11 @@ description: Read context, Git changes and provider usage without replacing your
 plugin: pi-status-footer
 ---
 
-Status footer replaces Pi's footer, not its working indicator, task widgets or tool rendering. It emphasizes the current project, model, context usage and account limits, leaving detailed accounting available on demand.
+Status footer replaces Pi's footer, not its task widgets or tool rendering. It keeps Pi's working indicator and only appends run statistics to its message. It emphasizes the current project, model, context usage and account limits, leaving detailed accounting available on demand.
 
 ## Enable and requirements
 
-Select `packages/pi-status-footer/src/index.ts` using [Install & select](/guides/install/). All 23 suite entries load by default, and one Git pin versions the selected components together.
+Select `packages/pi-status-footer/src/index.ts` using [Install & select](/guides/install/). All 26 suite entries load by default, and one Git pin versions the selected components together.
 
 The footer runs in Pi's terminal UI; print, JSON and RPC sessions do not start its background work. Git supplies repository measurements. Nerd Font symbol support is needed for the MCP plug glyph, not for the rest of the status text. Use the suite's tested Pi version from the installation guide rather than assuming an older component minimum covers its current UI hooks.
 
@@ -22,8 +22,10 @@ The footer runs in Pi's terminal UI; print, JSON and RPC sessions do not start i
 | `/status on` | Show the custom footer with active-provider limits only. |
 | `/status all` | Also show the other subscription account's limits. |
 | `/status native` | Immediately restore Pi's built-in footer. |
+| `/status working on` or `off` | Toggle the working-row statistics (default on). |
+| `/status mcp on` or `off` | Toggle the built-in MCP chip (default on). |
 
-The mode is stored in session metadata, excluded from model context, and survives reload/resume. New sessions start with the custom footer. Native mode restores the display but still keeps cached account readings fresh; unload the extension if you do not want its background work.
+The selections are stored in session metadata, excluded from model context, and survive reload/resume. New sessions start with the custom footer and both extras on. Native mode restores the display but still keeps cached account readings fresh; the working row is independent of the footer mode. Unload the extension if you do not want its background work.
 
 The first row shows project and Git state. Model and reasoning level have their own left-aligned row immediately below. At 60 columns and up, a one-cell inset gives every row breathing room without imposing aligned columns. Labels use natural single-space spacing. Project and model anchor the display with accent color; section labels, ordinary readings and reset countdowns stay subdued. A terminal-safe `⎇` identifies the branch without a Nerd Font. Bold readings and Pi's native thinking-level colors distinguish the model's reasoning setting. Warm caches and ready services are green; warnings and errors keep their semantic colors. Distinct pieces of information share a dim `·` separator; auto reasoning and reset countdowns have no parentheses. Quota windows stay text-only with concise `Claude` or `Codex` labels, and stale readings are muted and explicitly labeled. Recognized companion notices use sentence-case labels without colons: `Gate`, `Plan`, `Marimo`, and `Background` (`Bg` when narrow). Plan's `/plan` hint and cache qualifiers also use dot separators. Background rows preserve service states and prioritize failed tasks over routine work. Unfamiliar publisher formats and third-party notices remain unchanged. Narrow terminals omit the decorative padding. Context follows. Where supported, the editor's top and bottom borders become the usage gauge while retaining its mode colors and scroll markers. An editor without compatible border hooks keeps its borders and gets a footer gauge instead.
 
@@ -49,6 +51,14 @@ Extension notices wrap onto their own row. Account limits appear last and explic
 
 A useful inspection sequence is `/status all`, followed by `/status details` to check where each account reading came from, then `/status on` to return to the compact active-provider view.
 
+## Working row and MCP chip
+
+While a run streams, Pi's working indicator reads `Working (↓ 1,234 tokens · 12s)` (example) instead of `Working`. Pi's spinner, color and base label stay; only the parenthesized statistics are added through `setWorkingMessage`. Tokens are the streamed text and thinking at four characters per token until the provider's stream reports `usage.output`, which then replaces the estimate. Elapsed time counts from the agent's start across the run's turns and appears once the run has lasted three seconds, or as soon as there are tokens to show. The message refreshes once a second only while a turn is in progress. Pi's default message is restored when a turn or run ends, on shutdown or reload, and when the row is turned off. The token count starts over with each turn.
+
+Pi's built-in MCP extension publishes no status; its connections are only visible in `/mcp`. The footer approximates them as `MCP 2/3` (example) at the start of the status row: servers whose tools (from `builtin:mcp`, exposure not `hidden`) are registered, over those plus the servers enabled in `mcp.json` (the user file, and the project's `.pi/mcp.json` when the project is trusted). A shortfall uses the warning color. It is an approximation: a dropped connection keeps its tools, a server with no tools is invisible, and needs-auth, failed and connecting are not told apart, so `/mcp` remains the source of truth. The chip is absent when there is no built-in `/mcp` command, when another extension registers `/mcp`, and whenever an extension publishes an `mcp` status (such as pi-mcp-adapter), whose text is then shown unchanged. Tools and `mcp.json` (by modification time) are reread every five seconds, on `mcp_servers_change` and after each turn; rendering itself still reads nothing.
+
+Both features are ported from [pi-cc-extensions](https://github.com/minuque/pi-cc-extensions) by minuque (MIT); the component's `LICENSE` carries that notice.
+
 ## Understand the measurements
 
 Context is Pi's estimate against the actual model window. An unknown value, including immediately after compaction, is not zero usage. Cache reuse in details measures the last assistant prompt on the current branch/model; it does not predict the next cache hit. See [Cache and cost](/recipes/cache-cost/).
@@ -69,6 +79,6 @@ There is no plugin JSON settings file for the footer modes; use the commands abo
 
 No companion is required. Auto effort contributes reasoning status; cache guard contributes its clock and trimming estimate. Background work and notebook statuses receive dedicated rows. Stash can show a restoration hint, and anthropic-billing-guard can annotate the Claude limits row. Unrecognized status shapes remain unchanged rather than disappearing; tool-gate, plan-mode and MCP notices stay in the general status row.
 
-Load an editor replacement that does not wrap its predecessor, such as pi-vim, before this footer. A wrapping editor integration such as pi-stash does not have that ordering restriction. Disable competing footer ownership, including the footer from pi-cc-extensions if present, before using `/reload`.
+Load an editor replacement that does not wrap its predecessor, such as pi-vim, before this footer. A wrapping editor integration such as pi-stash does not have that ordering restriction. Disable any other extension that owns the footer or sets the working message before using `/reload`; otherwise it can replace this footer or working row after startup. pi-cc-extensions in particular is superseded by the suite and should not be enabled; [pi-cc-render](/plugins/pi-cc-render/) leaves the footer to this component.
 
 Rendering itself performs no filesystem, subprocess or network work; asynchronous refreshes supply its data. This separation does not make the whole extension offline. For conflicts and missing readings, see [Troubleshooting](/guides/troubleshooting/) and the [source and tests](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-status-footer).

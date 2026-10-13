@@ -80,6 +80,16 @@ Optional `providerTiers` maps provider names to `fast`, `balanced`, and `strong`
 
 `widget` accepts `off`, `background`, or `all`; `fleetView: false` disables the list below the prompt. `maxDepth: 2` allows children to delegate once more, but removes the tool from grandchildren. `childCacheRetention` sets each child's `PI_CACHE_RETENTION`: `short` (the default; 5 minutes on Anthropic), `long` (1 hour), or `inherit` to keep the parent's. Children run quick turns and are discarded when done, so the 1-hour tier's higher cache-write price rarely pays off for them even when the main session uses it.
 
+## Prompt mentions and run references
+
+In a prompt, `@subagent:<name>` names an agent role. Where the running Pi supports autocomplete providers, the TUI lists discovered agents after `@subagent:`. A mention adds a hidden message describing that agent (description, tools, model, thinking level) and asking the model to delegate the relevant part with the `subagent` tool. An unknown name is reported with the agents that exist. A mention never starts a run by itself.
+
+`@run:<label-or-id>` references one of this session's earlier runs, live or known only from its recorded run entry after a reload or `/resume`. Autocomplete after `@run:` lists runs newest first, filtered by id, task label or agent role. Completion inserts the label as a slug (`@run:audit-cache-invalidation`, example) when no other run shares it, otherwise the id. A token resolves by id, unique id prefix, or case-insensitive label slug.
+
+A referenced run is delivered as a hidden message, not shown in the conversation: its label, agent, id, status, model and thinking level; its task; its final output (from memory or `output.md`); and a compact transcript rebuilt from `messages.jsonl`, with thinking dropped and tool calls on one line. A still-running run says it has no result yet. The message marks the content as untrusted background and tells the model not to repeat the run unless asked. Unknown tokens list the runs that exist; a label shared by several runs lists their ids instead.
+
+Sizes are capped per run at 4,000 characters of task, 12,000 of output and 8,000 of transcript (400 per transcript line; a longer transcript keeps its start and end), and at 48,000 characters for all references in one prompt, after which further runs are named as left out. These characters do enter the model context of that prompt. A reference never starts or repeats a run, and only subagent runs can be referenced, not other Pi sessions.
+
 ## Inspect results and conversations
 
 `/subagents` lists live and recorded runs. `/subagents <id>` opens a conversation, `/subagents stop <id>` stops a run, and `/subagents stop all` stops running children.

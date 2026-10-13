@@ -17,7 +17,7 @@ const manifest = JSON.parse(await readFile(path.join(root, "package.json"), "utf
 const entries = manifest.pi.extensions.map((entry) => entry.replace(/^\.\//, ""));
 const names = entries.map((entry) => entry.split("/")[1]).sort();
 const catalog = plugins.map((plugin) => plugin.name).sort();
-if (names.length !== 23) fail("Expected 23 suite entries; update the public count deliberately when the manifest changes.");
+if (names.length !== 26) fail("Expected 26 suite entries; update the public count deliberately when the manifest changes.");
 if (new Set(catalog).size !== catalog.length) fail("Duplicate plugin in catalog.");
 if (JSON.stringify(names) !== JSON.stringify(catalog)) fail("Catalog does not match the root suite manifest.");
 

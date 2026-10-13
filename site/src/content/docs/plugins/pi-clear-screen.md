@@ -20,7 +20,7 @@ The extension provides Ctrl+L and the `/clear` and `/exit` commands, but no mode
 
 `/clear` starts a fresh session while preserving the active provider, model and thinking level, including a selection different from the startup model. It clears conversation context; Ctrl+L only clears the view. `/new` keeps Pi's normal behavior. `/exit` exits Pi.
 
-With `pi-cc-extensions`, set `"enableAliases": false` in `~/.pi/agent/pi-cc-extensions.json` so only this component registers `/clear` and `/exit`. Enable the updated component before applying that setting.
+Keep this component the only owner of `/clear` and `/exit`. The retired pi-cc-extensions package registered the same aliases; it is superseded by suite components such as [pi-cc-render](/plugins/pi-cc-render/), which do not register them, and should not be enabled alongside the suite.
 
 ## Requirements and shortcut setup
 

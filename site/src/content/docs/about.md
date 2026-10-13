@@ -8,7 +8,7 @@ Pi Plugins is maintained by [Spencer Boucher](https://github.com/justmytwospence
 
 This documentation covers the Pi suite at [justmytwospence/pi-plugins](https://github.com/justmytwospence/pi-plugins). It is an independent personal project, not the official Pi documentation. For Pi itself, start at [pi.dev](https://pi.dev).
 
-All 23 components are exposed as selectable entries from one Git package. They can be independently enabled, not independently version-pinned within the suite.
+All 26 components are exposed as selectable entries from one Git package. They can be independently enabled, not independently version-pinned within the suite.
 
 ## Source and attribution
 
@@ -16,6 +16,7 @@ The suite preserves original repository history and MIT attribution. Component l
 
 - **Plan mode** began as a fork of [narumiruna/pi-extensions’ plan-mode package](https://github.com/narumiruna/pi-extensions/tree/main/packages/pi-plan-mode), originally published as `@narumitw/pi-plan-mode`. Its planner was subsequently rebuilt around in-process Pi sessions.
 - **Subagent UI** adapts the widget, FleetView and conversation viewer from [tintinweb/pi-subagents](https://github.com/tintinweb/pi-subagents), ported to this component’s RPC children and run records.
+- **CC render, Markdown extras and context** are ports of [pi-cc-extensions](https://github.com/minuque/pi-cc-extensions) by minuque (MIT), as are status footer's working row and MCP chip. CC render's compact thinking forks pi-compact-thinking by tifandotme, and its rich diffs adapt [pi-tool-display](https://github.com/MasuRii/pi-tool-display) by MasuRii.
 - The documentation is built with [Astro](https://astro.build) and [Starlight](https://starlight.astro.build). Search is provided by [Pagefind](https://pagefind.app). Self-hosted fonts are DM Sans and IBM Plex Mono, distributed under the SIL Open Font License through Fontsource.
 
 See the [suite license](https://github.com/justmytwospence/pi-plugins/blob/main/LICENSE), individual `packages/<name>/LICENSE` files, and [initial source provenance](https://github.com/justmytwospence/pi-plugins/blob/main/source-pins.json).

@@ -155,6 +155,22 @@
       "extensions": [
         "./src/index.ts"
       ]
+    },
+    {
+      "name": "pi-cc-extensions",
+      "source": "npm:pi-cc-extensions@0.9.10",
+      "version": "0.9.10",
+      "license": "MIT (c) minuque",
+      "ported_into": [
+        "pi-cc-render",
+        "pi-markdown-extras",
+        "pi-context",
+        "pi-status-footer"
+      ],
+      "note": "Partial port, not a whole-repository import: the renderer and themes went to pi-cc-render, Markdown transforms to pi-markdown-extras, /context to pi-context, the working message and MCP chip to pi-status-footer. pi-subagents' @run references are a new implementation that replaces upstream subagent references, not ported code.",
+      "extensions": [
+        "./extensions/index.ts"
+      ]
     }
   ]
 }

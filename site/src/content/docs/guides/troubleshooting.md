@@ -13,6 +13,7 @@ After changing extension selection, restart Pi or use `/reload`. If an extension
 | Symptom | Check |
 | --- | --- |
 | Two copies of a tool or registration warnings | Keep either the suite entry or the standalone component, never both. This includes `npm:pi-vim`, `npm:@saadjs/pi-stash`, `npm:pi-sticky-last-prompt` and `npm:pi-btw`, which the suite now contains |
+| Duplicate `/ccstyle`, `/context`, `/clear` or doubled diagram rendering | Remove `npm:pi-cc-extensions`. Its parts now live in pi-cc-render, pi-markdown-extras, pi-context, pi-status-footer and pi-subagents, and it patches the same renderer |
 | `ask_user_question` collision | Disable any other extension registering the same tool, such as `@juicesharp/rpiv-ask-user-question` |
 | Unexpected background UI | Check whether another background-task extension is enabled alongside pi-bg |
 | `/copy` behaves differently than expected | It is Pi’s built-in last-reply command. Pi Plugins’ picker is `/yank` |
@@ -27,7 +28,7 @@ Do not “fix” collisions by enabling more copies. Select the smallest useful 
 - **pi-vim** replaces the prompt editor and must load before pi-status-footer. A replacement editor loaded afterward can remove the wrapped border hooks. Selection filters do not change the suite's entry order.
 - **pi-stash** wraps the preceding editor; its order is not constrained in the same way.
 - Keep one editor replacement. Do not load an upstream vim package next to the suite's pi-vim.
-- Disable the competing footer in `~/.pi/agent/pi-cc-extensions.json` if you use that package. Another footer can replace this one on startup or reload.
+- Disable any other footer or working-message extension. Another footer can replace this one on startup or reload. Do not enable pi-cc-extensions: it is superseded by [pi-cc-render](/plugins/pi-cc-render/), [pi-markdown-extras](/plugins/pi-markdown-extras/), [pi-context](/plugins/pi-context/) and this footer's working row and MCP chip, and pi-cc-render leaves the footer alone.
 - Run `/status native` to compare against Pi’s built-in footer without uninstalling.
 - A missing plug glyph usually means your terminal font lacks Nerd Font symbols, not that MCP is disconnected.
 
@@ -93,7 +94,7 @@ Use `/status details` to inspect quota sources. Unknown or stale data is not zer
 
 ## Compatibility patches
 
-Prose-width patches a private Markdown method and fails at load if the method disappears. Clear-screen reaches into transcript layout and reports incompatibility. Appearance-resync uses non-public color hooks and becomes a no-op if they disappear. Herdr scrollbar-width depends on the current main/alternate-screen gutter behavior.
+Prose-width patches a private Markdown method and fails at load if the method disappears. Clear-screen reaches into transcript layout and reports incompatibility. Appearance-resync uses non-public color hooks and becomes a no-op if they disappear. Herdr scrollbar-width depends on the current main/alternate-screen gutter behavior. CC render patches private tool, message and render members; a renamed member disables the affected feature rather than the whole extension. `/ccstyle off` restores Pi's native tool rendering for comparison.
 
 Disable the specific patch and retest on the same Pi version. Appearance-resync cannot help when no terminal appearance report arrives; a Herdr detach/reattach may restore forwarding.
 

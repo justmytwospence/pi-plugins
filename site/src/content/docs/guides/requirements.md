@@ -24,6 +24,8 @@ The suite is tested against Pi 1.1.0. Classifier-dependent components generally 
 | Notebook observation | A running marimo server with the registry/session/SSE interfaces the extension uses. Token-protected servers need `MARIMO_TOKEN`. Editing is a separate marimo-pair workflow. |
 | Status footer | Optional provider quota sources; its Nerd Font plug glyph needs terminal font support. Basic session rows do not require a Claude Code account. |
 | Clipboard picker | Pi’s clipboard support in your terminal environment. Optional Jev ranking. |
+| CC render | Optional `@shikijs/cli` for diff syntax highlighting; hover, click and wheel need fullscreen mode and SGR mouse reporting. Patches private Pi rendering members. |
+| Markdown extras | `grok-mermaid` (a suite dependency) for diagrams; without it diagram fences pass through unchanged. |
 | Terminal refinements | Relevant TUI hooks and terminal behavior; clear-screen needs fullscreen mode, scrollbar-width only acts inside Herdr. |
 
 The documentation does **not** assert a Windows compatibility matrix for the whole collection. Several components use POSIX shell/process behavior. Check each component’s implementation before adopting it in a different environment.

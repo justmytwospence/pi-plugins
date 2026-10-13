@@ -40,7 +40,7 @@ No `npm install` is needed to run it: the package.json has no `dependencies`; Pi
 
 `/clear` starts a fresh session while keeping the active provider, model and thinking level. Unlike Ctrl+L, it clears model context. `/new` retains Pi's normal startup-selection behavior. `/exit` exits Pi.
 
-If `pi-cc-extensions` is enabled, set `"enableAliases": false` in `~/.pi/agent/pi-cc-extensions.json` to avoid duplicate `/clear` and `/exit` commands. This component supplies both aliases instead.
+This component supplies both `/clear` and `/exit`. Do not enable pi-cc-extensions alongside it: that package, now superseded by suite components such as pi-cc-render, registers the same aliases. pi-cc-render does not.
 
 ## How it works
 
