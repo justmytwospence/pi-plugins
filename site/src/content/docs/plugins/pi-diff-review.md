@@ -4,6 +4,15 @@ description: Review working-tree changes in Pi, leave line comments and suggeste
 plugin: pi-diff-review
 ---
 
+## Quick reference
+
+- **Use it for:** Inspect actual changes, annotate lines and send a batch of revision requests.
+- **Enable:** Select `packages/pi-diff-review/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
+- **Controls:** `/diff [scope]`; no global shortcut. Viewer motions, comments, suggestions, send and explicit `:mark` below.
+- **Settings:** `diff-review.json`: auto split at 160 columns, wrapping/file list on, 3 context lines, 1500-line fold threshold, zoom on.
+- **Requirements, cost & privacy:** Git repository and TUI. Local viewing makes no inference calls; sent comments use normal model tokens. Checkpoints store file content in Git objects.
+- **Integrations & limits:** Optional rewind checkpoints, embedded Vim and Herdr editor split. Closing never marks reviewed; `:mark` stays open. Patch limit: 32 MB; not a staging or test tool.
+
 pi-diff-review adds `/diff`, a full-screen review surface for inspecting changes before asking the agent to revise them. Comments and suggested replacements remain drafts until you send them together. The resulting conversation is attached to review threads, so you can revisit both the changed lines and the agent's response.
 
 ## Enable, requirements, and costs

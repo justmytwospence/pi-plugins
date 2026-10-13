@@ -2,7 +2,7 @@
 
 Background jobs and services for Pi. The agent starts a long command with `bg_run` and keeps working; a **job** (tests, builds, model fits, exports) wakes the agent with its outcome when it exits, and a **service** (a dev or notebook server, a tunnel, a watcher) wakes it once when a `ready` pattern matches a log line, or if it exits. When nothing is left but a job's result, the agent calls `bg_wait` instead of ending its turn, so the session stays "working" until the job ends; typing a message, Esc or the wait's timeout ends the wait, while the job keeps running and still wakes the agent.
 
-In the TUI, a pill under the prompt counts running shells and a full-screen `/tasks` view lists every task, laid out after Claude Code's background-tasks panel. It works alone, and integrates with pi-subagents, pi-marimo and pi-herdr when they are loaded.
+In the TUI, a pill under the prompt counts running shells and a full-screen `/tasks` view lists every task, laid out after Claude Code's background-tasks panel. It works alone, and integrates with pi-subagents, pi-marimo, pi-plan-mode, pi-herdr and pi-status-footer when they are loaded.
 
 Part of [Pi Plugins](https://github.com/justmytwospence/pi-plugins). Reference: <https://pi-plugins.vercel.app/plugins/pi-bg/>.
 
@@ -69,7 +69,7 @@ In the TUI the pill reads `1 shell`, `2 shells`, plus `· 1 failed` in the error
 
 ### Background-tasks view
 
-`/tasks` (aliases `/bashes`, `/ps`, `/bg`), or Enter on the pill, opens a full-screen view under an accent-colored banner (`◀ esc · Background tasks · not your main session`). It lists every task in one list, running first (oldest first), then ended (newest first), each with its command, state and runtime: `waiting` while a `bg_wait` is on it, and for services `starting`, `ready` or `service`. With other activity sources loaded (pi-subagents runs, pi-marimo notebooks) their entries are mixed in, and while the list mixes sources each row is tagged with its kind (`shell`, `agent`, `notebook`).
+`/tasks` (aliases `/bashes`, `/ps`, `/bg`), or Enter on the pill, opens a full-screen view under an accent-colored banner (`◀ esc · Background tasks · not your main session`). It lists every task in one list, running first (oldest first), then ended (newest first), each with its command, state and runtime: `waiting` while a `bg_wait` is on it, and for services `starting`, `ready` or `service`. With other activity sources loaded (pi-subagents runs, pi-marimo notebooks, pi-plan-mode planners/scouts and pi-herdr children) their entries are mixed in, and while the list mixes sources each row is tagged with its kind (`shell`, `agent`, `notebook`).
 
 | key | action |
 |---|---|
@@ -160,7 +160,11 @@ Inside Herdr with [pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/), p
 
 ### Activity protocol
 
-`src/activity.ts` is the activity protocol, copied verbatim into pi-bg, pi-subagents, pi-marimo, pi-herdr and pi-plan-mode; no sibling imports another's copy. Each extension offers its background work as a *source* (`activity:section { section }`) with entries keyed by a stable id, optional `stop`, `canStop` and `dismiss`, an optional pill, and `setHosted(on, host)`. A *host* draws the other sources' pills: pi-subagents' FleetView (priority 20) outranks pi-bg's pill (priority 10, host id `bg`; an `activity:host` payload of `{}` counts as the FleetView host), and a host that hears a higher-ranked `activity:host` releases its guests until `activity:gone` names that host. A source draws its own pill only while no host shows it. Hosts key selection and `x`-twice stop arming by `${section.id}\0${key}`, so rows coming and going never move either onto another entry. The `/tasks` view lists every offered source's entries; today those are pi-bg shells, pi-subagents runs and pi-marimo notebooks.
+`src/activity.ts` is the activity protocol, copied verbatim into pi-bg, pi-subagents, pi-marimo, pi-herdr and pi-plan-mode; no sibling imports another's copy. Each extension offers its background work as a *source* (`activity:section { section }`) with entries keyed by a stable id, optional `stop`, `canStop` and `dismiss`, an optional pill, and `setHosted(on, host)`. A *host* draws the other sources' pills: pi-subagents' FleetView (priority 20) outranks pi-bg's pill (priority 10, host id `bg`; an `activity:host` payload of `{}` counts as the FleetView host), and a host that hears a higher-ranked `activity:host` releases its guests until `activity:gone` names that host. A source draws its own pill only while no host shows it. Hosts key selection and `x`-twice stop arming by `${section.id}\0${key}`, so rows coming and going never move either onto another entry. The `/tasks` view lists every offered source's entries; today those are pi-bg shells, pi-subagents runs, pi-marimo notebooks, pi-plan-mode planners/scouts and pi-herdr children. Per-entry stopping is owner-specific; a Herdr-child stop only interrupts an awaited turn and never closes the pane. `/stop` remains shell-only.
+
+### Working-message priority
+
+During `bg_wait`, the optional event `pi-plugins.working-message.v1` publishes `{ owner, message? }`. A message claims priority; omitting it releases that owner. pi-status-footer merges the newest active claim above its token/time decoration, so `Waiting on…` never alternates with `Working…` (example labels). Updating an existing claim preserves its priority; an older release cannot clear a newer wait. Claims release on completion, timeout, interruption, pending input, errors, shutdown and reload. pi-bg still paints Pi's native message directly without the footer, and both plugins work independently. The identical contract copies live in `src/working-message.ts` in each component.
 
 ## Limitations
 

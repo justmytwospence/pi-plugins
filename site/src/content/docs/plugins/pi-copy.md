@@ -4,6 +4,15 @@ description: Pick messages, Markdown fragments, commands, paths, and URLs to cop
 plugin: pi-copy
 ---
 
+## Quick reference
+
+- **Use it for:** Copy a message fragment, code block, command, path or URL instead of a whole response.
+- **Enable:** Select `packages/pi-copy/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
+- **Controls:** `/yank`, Ctrl+Shift+X; filter-local navigation and preview keys below. Pi `/copy` remains separate.
+- **Settings:** `copy.json` user/project layers; last 30 turns, 120-piece ceiling, paid Jev ranking on when available; `shortcut` registers at load.
+- **Requirements, cost & privacy:** TUI and Pi clipboard support. Local recency/filtering is free; optional ranking sends candidate excerpts and recent requests externally.
+- **Integrations & limits:** Optional Herdr blocked state; handles Ctrl+J/K itself. No judgments means recency; clipboard success cannot prove OSC 52 delivery.
+
 ## Picker and copied content
 
 Run **`/yank`**, or press **Ctrl+Shift+X** by default, to choose text from the current session branch. This is a separate command: Pi's built-in `/copy` and Ctrl+X retain their existing behavior. The picker requires the interactive terminal UI; RPC, JSON, and print workflows are not supported by this command. It does not register a model-callable copy tool.
@@ -22,7 +31,7 @@ Extraction, filtering, and recency ordering happen locally. **Jev ranking is opt
 
 Opening the picker can send candidate text and recent user messages to the classifier before you select anything. By default, each candidate is clipped to 600 characters for ranking; the last three nonempty user messages are clipped to 500 characters each. Candidates are limited by both a piece count and a character-budget estimate. Treat this as external processing of session content, not merely a local clipboard operation. Disable ranking before opening sensitive sessions if you do not want those requests.
 
-Clipboard writes use Pi's `copyToClipboard` helper, not a plugin-specific executable. In the inspected Pi 1.1.0 helper, platform fallbacks include `pbcopy` on macOS, `clip` on Windows, `wl-copy` on Wayland, and `xclip` or `xsel` on X11. These are fallback routes, not a list of programs everyone must install. Native clipboard availability and display access also matter. Remote or headless terminal copying may rely on OSC 52, whose delivery cannot be verified by Pi. This does not establish end-to-end support for every terminal, SSH setup, or multiplexer combination.
+Clipboard writes use Pi's `copyToClipboard` helper, not a plugin-specific executable. In the inspected Pi 1.2.0 helper, platform fallbacks include `pbcopy` on macOS, `clip` on Windows, `wl-copy` on Wayland, and `xclip` or `xsel` on X11. These are fallback routes, not a list of programs everyone must install. Native clipboard availability and display access also matter. Remote or headless terminal copying may rely on OSC 52, whose delivery cannot be verified by Pi. This does not establish end-to-end support for every terminal, SSH setup, or multiplexer combination.
 
 ## Settings and ranking
 

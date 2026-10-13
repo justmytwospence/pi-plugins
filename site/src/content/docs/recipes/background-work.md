@@ -43,7 +43,7 @@ Subagent arguments for the independent review:
 
 These are **tool arguments**, not shell commands. The child starts fresh unless `context: "fork"` is requested, so include the task’s constraints and success criteria. Omitting agent/model/thinking lets configuration and potentially Jev select them. Model and classifier use can be paid; see [requirements](/guides/requirements/).
 
-This example deliberately uses the same checkout for a read-only review. Parallel writers share files unless you arrange isolation. The optional `worktree: true` feature creates checkouts through an external CLI; it is not required for delegation.
+This example deliberately uses the same checkout for a read-only review. Parallel writers share files unless you arrange isolation. The optional `worktree: true` feature creates checkouts with Git directly; no external worktree helper is required. Herdr interactive worktree children instead use Herdr's socket create/open operations. Request isolation deliberately; ordinary delegation needs neither.
 
 ## Wait in the turn
 
@@ -59,15 +59,15 @@ with `bg_wait`. For the async child, use the ID returned by `subagent`:
 { "id": "subagent:RETURNED_ID" }
 ```
 
-Replace `RETURNED_ID` with the actual run ID. The child’s result still arrives as its own message; waiting keeps the parent’s turn working rather than ending it with unfinished work.
+Replace `RETURNED_ID` with the actual run ID. `bg_wait` returns the completed child's bounded output and consumes it, suppressing a duplicate completion message. Without a consuming wait or completed-result read, the child's normal result message still arrives. Inspect that returned result before concluding.
 
-Do not poll with `sleep` and repeated `bg_logs`. A user message, Esc or timeout can stop the wait without stopping the task.
+Do not poll with `sleep` and repeated `bg_logs`. A user message, Esc or timeout can stop the wait without stopping the task. With pi-status-footer, the wait's message takes priority over token/time decoration until it releases; `Waiting on…` should not flicker back to `Working…` (example labels). Neither plugin requires the other.
 
 ## Inspect or intervene
 
-- `/tasks` opens the combined shell/agent list when both plugins are enabled.
+- `/tasks` opens a combined activity list: shells, subagents, followed notebooks, planners/scouts and Herdr children, according to the plugins enabled.
 - Enter opens a shell log or a child conversation.
-- Double-`x` stops the selected running entry, whichever plugin owns it. A single `x` dismisses an ended one.
+- Double-`x` stops a stoppable selected running entry through its owner. A notebook interrupts its kernel; a working planner can be stopped (scouts are observed, not independently stoppable); a Herdr-child stop interrupts an awaited turn and **never closes the pane**. A single `x` dismisses an ended one.
 - `/stop` stops only pi-bg's shell tasks from this Pi process. It does not stop subagents, notebooks, planners or Herdr children.
 - `bg_logs` reads a shell task’s log; `subagent` with `action: "status"` inspects runs.
 - `subagent` with `action: "steer"`, an `id` and a `message` changes the child’s direction.
@@ -94,6 +94,6 @@ Readiness regexes are case-insensitive unless explicit `/pattern/flags` specify 
 
 ## What the optional integration changes
 
-With both plugins enabled, FleetView hosts the background pill and `/tasks` can show both kinds of work. Without a host, pi-bg draws its own pill. This is a UI composition protocol, not one plugin spawning the other.
+With both plugins enabled, FleetView hosts the background pill and `/tasks` can show both kinds of work. Without FleetView, pi-bg can aggregate other sources' pills; without either host, sources keep their own presentation. Planners/scouts and Herdr children participate too. This is a UI composition protocol, not one plugin spawning the other.
 
 Inside Herdr, background holds can show a `$bg` token after the turn ends. Herdr’s native Pi integration still owns working/idle state. [Activity architecture](/architecture/activity/) explains the boundary.

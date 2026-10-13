@@ -28,7 +28,7 @@ Do not “fix” collisions by enabling more copies. Select the smallest useful 
 - **pi-vim** replaces the prompt editor and must load before pi-status-footer. A replacement editor loaded afterward can remove the wrapped border hooks. Selection filters do not change the suite's entry order.
 - **pi-stash** wraps the preceding editor; its order is not constrained in the same way.
 - Keep one editor replacement. Do not load an upstream vim package next to the suite's pi-vim.
-- Disable any other footer or working-message extension. Another footer can replace this one on startup or reload. Do not enable pi-cc-extensions: it is superseded by [pi-cc-render](/plugins/pi-cc-render/), [pi-markdown-extras](/plugins/pi-markdown-extras/), [pi-context](/plugins/pi-context/) and this footer's working row and MCP chip, and pi-cc-render leaves the footer alone.
+- Disable any other footer or working-message extension. Another footer can replace this one on startup or reload. pi-bg's wait message is coordinated through an optional ownership event and safely takes priority over this footer's statistics; it is not a competing footer. Do not enable pi-cc-extensions: it is superseded by [pi-cc-render](/plugins/pi-cc-render/), [pi-markdown-extras](/plugins/pi-markdown-extras/), [pi-context](/plugins/pi-context/) and this footer's working row and MCP chip, and pi-cc-render leaves the footer alone.
 - Run `/status native` to compare against Pi’s built-in footer without uninstalling.
 - Missing footer icons (such as the MCP plug) usually mean your terminal font lacks Nerd Font symbols, not that anything is disconnected.
 
@@ -46,7 +46,9 @@ Clear-screen registers Ctrl+L, which Pi also binds to `app.model.select` by defa
 }
 ```
 
-This is the binding the startup warning suggests; merge it with your existing bindings and `/reload`. On Windows and WSL, Pi's default `app.model.cycleBackward` also uses Alt+P, so keep only the keys that are free in your setup.
+Current Pi skips the conflicting clear-screen shortcut; the warning does not mean it overrides the model selector. This is the binding the startup warning suggests; merge it with your existing bindings, `/reload`, then inspect `/hotkeys` and any “Skipping” diagnostic. On Windows and WSL, Pi's default `app.model.cycleBackward` also uses Alt+P, so keep only the keys that are free in your setup.
+
+For file-picker ordering, explicit `~/Downloads/` (including fuzzy `~/dl/`) and descendants sort newest modified first and retain recency while filtering. General project/home search still uses fuzzy ranking; reopening refreshes picker-lifetime metadata. See [finding files](/plugins/pi-vim/#finding-files).
 
 Clear-screen only clears the application-owned transcript in fullscreen mode. It never deletes conversation context, adds nothing to prompt history and leaves the editor draft untouched. See [keyboard & focus](/guides/keyboard/) for every suite shortcut.
 
@@ -65,19 +67,23 @@ Plain `j`/`k` deliberately remain letters in search fields. Ctrl+J and Ctrl+K re
 
 ### Ctrl+U or Ctrl+D edits text instead of scrolling
 
-That is intended. Ctrl+U and Ctrl+D scroll half a page only in read-only viewers and in pi-vim's idle Normal mode. In a text field they keep their editing meaning: in the copy picker's filter, Ctrl+U clears the query and Ctrl+D deletes forward. They are not global scrolling shortcuts. See [keyboard & focus](/guides/keyboard/#ctrlu-and-ctrld).
+That is intended. Ctrl+U and Ctrl+D scroll half a page only in read-only viewers and in pi-vim's idle Normal mode. In a text field they keep their editing meaning: in the copy picker's filter, Ctrl+U clears the query and Ctrl+D deletes forward. They are not global scrolling shortcuts. See [keyboard & focus](/guides/keyboard/#use-vim-on-the-main-prompt-or-in-a-dialog).
 
 ### Tab accepts a suggestion instead of completing
 
 Next-prompt takes Tab/Right only while a suggestion is shown in the empty, focused main editor, outside autocomplete and outside dialogs. Change its `acceptKeys`, use `/next-prompt off`, or type normally to dismiss the ghost text. Accepting fills the editor; it does not submit.
 
-Shift+Tab belongs to pi-tool-gate's permission-mode cycle when the gate is selected; Pi warns that it overrides the built-in thinking cycle until you rebind `app.thinking.cycle`. Plan mode registers no shortcut of its own unless you set `toggleShortcut`, which toggles plan mode (or, with the gate, cycles its modes), takes effect after `/reload`, and must not reuse the gate's key.
+### Shift+Tab still cycles effort
+
+Current Pi skips tool-gate's conflicting shortcut while stock `app.thinking.cycle` uses Shift+Tab; selecting the gate does **not** override it automatically. Move that stock action (for example to `alt+t` in `keybindings.json`), or change the gate's `cycleShortcut`, then `/reload` and inspect `/hotkeys` plus startup diagnostics. `/mode` can switch modes without the shortcut. Plan mode registers no shortcut of its own unless you set `toggleShortcut`, which toggles plan mode (or, with the gate, cycles its modes), takes effect after `/reload`, and must not reuse the gate's key.
 
 ## Background and notebook work
 
 - **No result yet:** use `bg_wait` while the agent still owns the turn, not a loop of log polls. An async completion that arrives mid-turn is held until settlement.
 - **Esc stopped the wait but not the task:** expected. Use `bg_kill` to stop a shell process group, or the relevant subagent stop action.
-- **`/stop` left a subagent, planner or notebook running:** expected. `/stop` stops only pi-bg's running shell tasks from this Pi process. Stop one listed entry with double-`x` in `/tasks`. Planners and Herdr children are not `/tasks` entries: stop planners from the plan screen (Esc, then Stop planning), and interrupt or close a Herdr child in its pane or through the `herdr_child` tool.
+- **`/stop` left a subagent, planner or notebook running:** expected. `/stop` stops only pi-bg's running shell tasks from this Pi process. `/tasks` and FleetView include planners/scouts and Herdr children as well as shells, subagents and notebooks. Double-`x` delegates a stoppable entry to its owner: notebook kernel interrupt, planner stop or awaited Herdr-child interrupt. **A Herdr-child activity stop never closes its pane.** Scout rows are observational, not independently stoppable from the list. Use the planning screen for whole-run controls or `herdr_child close` for explicit pane closure.
+- **No separate child completion after `bg_wait`:** expected when the wait returned its completed result. That consumes it and suppresses a duplicate follow-up; running snapshots or summary-only waits do not.
+- **Working and waiting messages alternate:** pi-bg and pi-status-footer now coordinate priority. Update both from the same suite revision and `/reload`; look for another uncoordinated working-message writer if it persists.
 - **A service disappeared on exit:** only services explicitly started with `keep: true` are intended to outlive the session.
 - **A notebook is missing:** check its server is running, registry discovery, cwd scope, hidden directories, and token access. `/marimo` pins notebooks outside automatic discovery’s set.
 - **The server is ready but a fit is still running:** readiness and kernel completion are different. With pi-marimo enabled, waiting on a recognized ready server can wait for its cells.

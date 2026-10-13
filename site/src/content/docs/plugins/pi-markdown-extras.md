@@ -4,6 +4,15 @@ description: Render Mermaid dialect fences as box-drawing diagrams, GitHub admon
 plugin: pi-markdown-extras
 ---
 
+## Quick reference
+
+- **Use it for:** Read diagrams, labeled admonitions and tidier links in transcript Markdown.
+- **Enable:** Select `packages/pi-markdown-extras/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
+- **Controls:** Automatic rendering; no command, tool or shortcut.
+- **Settings:** No plugin settings. Diagram cache: 50 sources; most transforms wait until the final render.
+- **Requirements, cost & privacy:** `grok-mermaid` is a suite dependency; missing/failed diagrams fall back to source. No disk, network or inference work.
+- **Integrations & limits:** Optional CC render/prose width. Stored messages/context are unchanged; diagram width/parse limits still apply. Do not stack the upstream transformer.
+
 ## Purpose and rendering scope
 
 `pi-markdown-extras` adds a few transforms to Pi's transcript Markdown. It registers a single `registerMarkdownTransformer` for user and assistant messages:
@@ -41,7 +50,7 @@ Diagram and admonition rewrites skip fenced code. The link fix and diagram rende
 
 When grok-mermaid cannot parse a diagram, or the art is wider than the available width, the source appears in a framed code block instead. A missing diagram is therefore usually a parse or width issue, not a failure of the extension. Widen the pane or simplify the diagram, then compare.
 
-The package tests run with Vitest against Pi 1.1.0's Markdown types. They cover the transforms and include a regression test for bold URLs. No live terminal is involved.
+The package tests run with Vitest against Pi 1.2.0's Markdown types. They cover the transforms and include a regression test for bold URLs. No live terminal is involved.
 
 ## Interactions and differences from upstream
 

@@ -13,6 +13,12 @@ The engine retains pi-vim 0.14.2's motions, operators, counts, text objects, Vis
 
 Terminal installation and discovery require `ctx.mode === "tui"`. RPC, JSON and print modes do not install terminal editors. A retained factory rejects use after its session ends.
 
+## File finder recency
+
+Ctrl+X Ctrl+F is main-prompt Insert-only; Ctrl+X Ctrl+E also works in idle Normal. Explicit browsing of `~/Downloads/` and descendants, including resolved fuzzy aliases such as `~/dl/`, lists newest **modified** first. Filtering keeps that order, while ordinary project/home ranking is unchanged. Timestamp reads are async, bounded to 16 concurrent calls and cached for the picker lifetime. Missing/unreadable times sort last; equal times sort alphabetically. The picker labels recency mode; reopen it to refresh metadata. Without `fd`, listing falls back to one directory level.
+
+For a practical [local motion cheatsheet](https://pi-plugins.vercel.app/plugins/pi-vim/#motion-cheatsheet) and main/embedded ownership comparisons, see the [keymap](https://pi-plugins.vercel.app/guides/keyboard/). The optional personal profile disables direct `app.editor.external` keys and uses Ctrl+G for the transcript tail; Ctrl+X Ctrl+E still invokes the external-editor action.
+
 ## Optional editor factory
 
 Consumers remain independently usable and do not import sibling packages. Copy the structural contract from [`src/contract.ts`](src/contract.ts), request a factory when opening the dialog, and fall back to Pi's native `Editor` when discovery is unanswered:
@@ -45,9 +51,9 @@ original index.ts SHA-256: 33fb11615c55a656f41f40b396d5706709445d50850fa5477b043
 
 [`provenance.json`](provenance.json) records exact original source/test SHA-256 values. These identify **upstream originals**, not modified destination files. [`LICENSE`](LICENSE) preserves upstream's MIT license and `Copyright (c) 2026 lajarre` verbatim.
 
-Upstream `index.ts` is split into `src/engine/modal-editor.ts`, `src/session.ts` and `src/index.ts`. Other engine modules retain their source, except the cursor-reset export. The modal editor adds integration state/snapshots/disposal, engine-local EX text-field controls and protected surface/cursor/EX seams; autocomplete Escape remains local in Insert. Suite wrappers add the ownership behavior described above. `src/viewport-input.ts` is a narrow SDK 1.1.0 compatibility adapter: the native fullscreen listener precedes public input listeners, so it wraps the dynamically called `handleViewportInput` method only for Ctrl+U/D with an explicitly marked editor focused. This prevents configured native half-page bindings from stealing Insert/EX/pending input. Unknown focus and other input contexts retain native routing; the adapter is released with the final editor. `src/tui-runtime.ts` resolves the SDK's stable TUI Proxy to its actual renderer so ownership and cleanup survive renderer replacement. This is an adapted port, not a claim that the entire engine is byte-identical.
+Upstream `index.ts` is split into `src/engine/modal-editor.ts`, `src/session.ts` and `src/index.ts`. Other engine modules retain their source, except the cursor-reset export. The modal editor adds integration state/snapshots/disposal, engine-local EX text-field controls and protected surface/cursor/EX seams; autocomplete Escape remains local in Insert. Suite wrappers add the ownership behavior described above. `src/viewport-input.ts` is a narrow SDK 1.2.0 compatibility adapter: the native fullscreen listener precedes public input listeners, so it wraps the dynamically called `handleViewportInput` method only for Ctrl+U/D with an explicitly marked editor focused. This prevents configured native half-page bindings from stealing Insert/EX/pending input. Unknown focus and other input contexts retain native routing; the adapter is released with the final editor. `src/tui-runtime.ts` resolves the SDK's stable TUI Proxy to its actual renderer so ownership and cleanup survive renderer replacement. This is an adapted port, not a claim that the entire engine is byte-identical.
 
-All upstream unit tests, Neovim parity tests and oracle support are retained. Test imports are relocated, the harness accepts structural input handlers, and the extension context includes SDK 1.1.0's TUI mode. Upstream mode-event assertions add the surface marker and exclude suite discovery events. Native autocomplete cursor expectations account for SDK 1.1.0. No upstream editing/parity assertions are removed; known upstream parity divergences remain explicitly skipped. Suite and actual-SDK integration tests are additional.
+All upstream unit tests, Neovim parity tests and oracle support are retained. Test imports are relocated, the harness accepts structural input handlers, and the extension context includes SDK 1.2.0's TUI mode. Upstream mode-event assertions add the surface marker and exclude suite discovery events. Native autocomplete cursor expectations account for SDK 1.2.0. No upstream editing/parity assertions are removed; known upstream parity divergences remain explicitly skipped. Suite and actual-SDK integration tests are additional.
 
 ## Checks
 
@@ -58,4 +64,4 @@ npm run check
 npm run test:nvim
 ```
 
-Development dependencies pin Pi coding-agent and TUI **1.1.0**. Neovim parity requires `nvim`; it runs only locally, without live model/classifier calls. Full PTY smoke is a separate coordinator check.
+Development dependencies pin Pi coding-agent and TUI **1.2.0**. Neovim parity requires `nvim`; it runs only locally, without live model/classifier calls. Full PTY smoke is a separate coordinator check.

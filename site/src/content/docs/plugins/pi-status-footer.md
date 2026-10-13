@@ -4,6 +4,15 @@ description: Read context, Git changes and provider usage without replacing your
 plugin: pi-status-footer
 ---
 
+## Quick reference
+
+- **Use it for:** See project, Git, model, context, notices and account usage without replacing the editor.
+- **Enable:** Select `packages/pi-status-footer/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
+- **Controls:** `/status` details/on/all/native/working/mcp. No global shortcut.
+- **Settings:** No JSON settings for modes; custom footer, active-provider limits, working stats and MCP chip on by default; selections persist in the session.
+- **Requirements, cost & privacy:** TUI; Git/quota sources optional, Nerd Font for icons. No inference calls. Authenticated usage requests send account credentials, not conversation text.
+- **Integrations & limits:** Optional companion notices and wait-message priority. Load Vim before the footer. Quota and token-cost estimates are not invoices; MCP chip is an approximation.
+
 Status footer replaces Pi's footer, not its task widgets or tool rendering. It keeps Pi's working indicator and only appends run statistics to its message. It emphasizes the current project, model, context usage and account limits, leaving detailed accounting available on demand.
 
 ## Enable and requirements
@@ -53,7 +62,9 @@ A useful inspection sequence is `/status all`, followed by `/status details` to 
 
 ## Working row and MCP chip
 
-While a run streams, Pi's working indicator reads `Working (↓ 1,234 tokens · 12s)` (example) instead of `Working`. Pi's spinner, color and base label stay; only the parenthesized statistics are added through `setWorkingMessage`. Tokens are the streamed text and thinking at four characters per token until the provider's stream reports `usage.output`, which then replaces the estimate. Elapsed time counts from the agent's start across the run's turns and appears once the run has lasted three seconds, or as soon as there are tokens to show. The message refreshes once a second only while a turn is in progress. Pi's default message is restored when a turn or run ends, on shutdown or reload, and when the row is turned off. The token count starts over with each turn.
+While a run streams, Pi's working indicator reads `Working (↓ 1,234 tokens · 12s)` (example) instead of `Working`. Pi's spinner, color and base label stay; only the parenthesized statistics are added through `setWorkingMessage`. Tokens are the streamed text and thinking at four characters per token until the provider's stream reports `usage.output`, which then replaces the estimate. Elapsed time counts from the agent's start across the run's turns and appears once the run has lasted three seconds, or as soon as there are tokens to show. The message refreshes once a second only while a turn is in progress. Normally Pi's default message is restored when a turn or run ends, on shutdown or reload, and when the row is turned off. An active wait override keeps priority until its owner releases. The token count starts over with each turn.
+
+With pi-bg enabled, `bg_wait` claims working-message priority through the optional `pi-plugins.working-message.v1` event. Its `Waiting on…` text (example) stays above token/time decoration, so the two timers do not alternate messages. The newest active claim wins, updates preserve its priority, and releases are owner-specific. On the final release, normal decoration resumes if a turn is still active. Both plugins work alone; no companion or new setting is required.
 
 Pi's built-in MCP extension publishes no status; its connections are only visible in `/mcp`. The footer approximates them as `MCP 2/3` (example) at the start of the status row: servers whose tools (from `builtin:mcp`, exposure not `hidden`) are registered, over those plus the servers enabled in `mcp.json` (the user file, and the project's `.pi/mcp.json` when the project is trusted). A shortfall uses the warning color. It is an approximation: a dropped connection keeps its tools, a server with no tools is invisible, and needs-auth, failed and connecting are not told apart, so `/mcp` remains the source of truth. The chip is absent when there is no built-in `/mcp` command, when another extension registers `/mcp`, and whenever an extension publishes an `mcp` status (such as pi-mcp-adapter), whose text is then shown unchanged. Tools and `mcp.json` (by modification time) are reread every five seconds, on `mcp_servers_change` and after each turn; rendering itself still reads nothing.
 
@@ -79,6 +90,6 @@ There is no plugin JSON settings file for the footer modes; use the commands abo
 
 No companion is required. Auto effort contributes reasoning status; cache guard contributes its clock and trimming estimate. Background work and notebook statuses receive dedicated rows. Stash can show a restoration hint, and anthropic-billing-guard can annotate the Claude limits row. Unrecognized status shapes remain unchanged rather than disappearing; the permission mode moves to the model row; tool-gate counts, planner-run and MCP notices stay in the general status row.
 
-Load an editor replacement that does not wrap its predecessor, such as pi-vim, before this footer. A wrapping editor integration such as pi-stash does not have that ordering restriction. Disable any other extension that owns the footer or sets the working message before using `/reload`; otherwise it can replace this footer or working row after startup. pi-cc-extensions in particular is superseded by the suite and should not be enabled; [pi-cc-render](/plugins/pi-cc-render/) leaves the footer to this component.
+Load an editor replacement that does not wrap its predecessor, such as pi-vim, before this footer. A wrapping editor integration such as pi-stash does not have that ordering restriction. Disable other footer owners or uncoordinated working-message writers before using `/reload`; pi-bg's wait messages are explicitly coordinated, not a conflict; otherwise it can replace this footer or working row after startup. pi-cc-extensions in particular is superseded by the suite and should not be enabled; [pi-cc-render](/plugins/pi-cc-render/) leaves the footer to this component.
 
 Rendering itself performs no filesystem, subprocess or network work; asynchronous refreshes supply its data. This separation does not make the whole extension offline. For conflicts and missing readings, see [Troubleshooting](/guides/troubleshooting/) and the [source and tests](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-status-footer).

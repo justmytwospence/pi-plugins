@@ -4,6 +4,15 @@ description: Clear the fullscreen transcript viewport with Ctrl+L while preservi
 plugin: pi-clear-screen
 ---
 
+## Quick reference
+
+- **Use it for:** Get a fresh fullscreen viewing area without discarding conversation history.
+- **Enable:** Select `packages/pi-clear-screen/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
+- **Controls:** Ctrl+L after remapping stock `app.model.select`; `/clear` starts a fresh session, `/exit` quits. No model tool.
+- **Settings:** No plugin settings; Ctrl+L fixed in source. Pi `tuiMode` must be fullscreen for view clearing.
+- **Requirements, cost & privacy:** Fullscreen/private layout hooks; no network, inference or external program. Clearing is not redaction or compaction.
+- **Integrations & limits:** Optional sticky-prompt horizon. Stock conflict skips the shortcut, not an automatic override. `/clear` changes context; Ctrl+L does not.
+
 ## Purpose and selection
 
 `pi-clear-screen` makes **Ctrl+L** move the visible transcript out of the way, giving you a fresh area for subsequent output. Use it when a long exchange or a large tool result makes the current view distracting, but you still want to continue the same conversation. Scroll upward to read the earlier content again. This is a presentation operation, not a conversation reset.
@@ -34,7 +43,7 @@ The clear action requires Pi's **fullscreen** TUI. Regular mode leaves scrollbac
 
 There are no external executables, API keys, network services, or paid classifier calls involved. The extension performs local layout work inside Pi. It does not depend on Herdr or on another suite component. It is not a screen-clearing service for RPC, JSON, or print-mode clients; its useful surface is the interactive fullscreen terminal interface.
 
-Resolve the shortcut conflict before using it. Pi binds **Ctrl+L** to the model selector (`app.model.select`) by default. At the start of an interactive TUI session, the extension checks Pi's effective bindings and shows a warning while `app.model.select` still includes `ctrl+l`. Move that built-in action elsewhere in `~/.pi/agent/keybindings.json`, merging with your existing bindings, then `/reload`. The warning suggests:
+Resolve the shortcut conflict before using it. Pi binds **Ctrl+L** to the model selector (`app.model.select`) by default. At the start of an interactive TUI session, the extension checks Pi's effective bindings and shows a warning while `app.model.select` still includes `ctrl+l`. Current Pi skips the conflicting extension shortcut rather than overriding the model selector. Move that built-in action elsewhere in `~/.pi/agent/keybindings.json`, merging with your existing bindings, then `/reload`. The warning suggests:
 
 ```json
 {

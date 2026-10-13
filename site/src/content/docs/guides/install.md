@@ -4,7 +4,7 @@ description: Install the Pi Plugins Git package, choose individual extension ent
 ---
 ## Before you install
 
-Use a working [Pi installation](https://pi.dev) with Git available. The suite’s loader tests target **Pi 1.1.0**; individual components have their own compatibility notes. A component’s older minimum version does not establish support for the entire suite.
+Use a working [Pi installation](https://pi.dev) with Git available. The suite's configured SDK tests target **Pi 1.2.0**, including local session lifecycle and memory TUI input, not live PTY proof; individual components have their own compatibility notes. A component’s older minimum version does not establish support for the entire suite.
 
 Extensions run with Pi’s operating-system permissions. Review the [source](https://github.com/justmytwospence/pi-plugins) and [requirements](/guides/requirements/) before loading them. This website needs no credentials; some plugin features do.
 

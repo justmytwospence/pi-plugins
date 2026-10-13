@@ -4,6 +4,15 @@ description: Adjust reasoning effort to the task while respecting your manual ce
 plugin: pi-auto-effort
 ---
 
+## Quick reference
+
+- **Use it for:** Adapt reasoning to task difficulty while retaining your model and manual ceiling.
+- **Enable:** Select `packages/pi-auto-effort/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
+- **Controls:** `/auto-effort` status/limits/on/off. No global shortcut; stock thinking controls remain Pi's.
+- **Settings:** `auto-effort.json` shared/user/project layers; low floor, 1500 ms Jev timeout, mid-run checks normally every 3 tool turns.
+- **Requirements, cost & privacy:** Optional paid Jev sees request/activity excerpts; unavailable judgments keep the baseline. Provider quota reads use credentials; reasoning changes affect cost/latency.
+- **Integrations & limits:** Optional footer; `--thinking` disables assessment. Explicit effort-update rewriting has its own switch; `/auto-effort off` does not disable it.
+
 Auto effort changes the thinking level on the model you selected; it does not choose a different model. Use it when a session alternates between routine edits and difficult reasoning, but you still want a manual upper bound.
 
 ## Enable and requirements

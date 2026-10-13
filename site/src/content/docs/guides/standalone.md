@@ -45,7 +45,7 @@ Embedded editors use local submit/cancel callbacks. Their EX commands cannot shu
 
 ## Compatibility boundaries
 
-The development and loader baseline is **Pi 1.1.0**. Host SDK packages are `*` peers, following Pi's package convention; that is not a claim that every older or future SDK works. Every component includes its own manifest, license, development dependencies and checks.
+The configured development/SDK test target is **Pi 1.2.0**. Tests cover local session lifecycle and memory TUI input, not a live PTY compatibility matrix. Host SDK packages are `*` peers, following Pi's package convention; that is not a claim that every older or future SDK works. Every component includes its own manifest, license, development dependencies and checks.
 
 Some visual features inspect private host layout or rendering APIs. Missing APIs produce a diagnostic or native/degraded behavior rather than making an optional feature a dependency. Fullscreen transcript clearing and mode-aware transcript scrolling need an application-owned viewport. Regular mode leaves scrollback to the terminal.
 

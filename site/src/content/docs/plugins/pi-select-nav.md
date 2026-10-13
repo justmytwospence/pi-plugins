@@ -4,6 +4,15 @@ description: Add consistent Ctrl+J/Ctrl+K picker navigation while preserving tex
 plugin: pi-select-nav
 ---
 
+## Quick reference
+
+- **Use it for:** Navigate eligible pickers and available task panels while protecting text fields.
+- **Enable:** Select `packages/pi-select-nav/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
+- **Controls:** Ctrl+J/K and sometimes j/k in lists; contextual Tab in the main prompt. No command or tool; no registered global shortcut.
+- **Settings:** No plugin settings. Add Ctrl+K/J to Pi's `tui.select.up/down` for keybinding-aware lists/autocomplete.
+- **Requirements, cost & privacy:** TUI/focus hooks only; no inference, network or external program. Focus heuristics inspect local component structure.
+- **Integrations & limits:** Optional next-prompt and activities; explicit input contexts keep their own keys. Optional todo dialog forwarding is not a bundled todo plugin. Shift+Tab remains stock unless explicitly remapped.
+
 ## Purpose and input behavior
 
 `pi-select-nav` translates familiar list-navigation keys into arrow-key input before the focused component handles them. **Ctrl+J** becomes down and **Ctrl+K** becomes up in eligible focused components. Plain **j** and **k** provide the same movement only when the extension does not detect text entry or an existing component-owned letter binding. The purpose is to reach pickers that hardcode arrows instead of consulting Pi's configurable selection bindings.

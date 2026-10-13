@@ -4,6 +4,15 @@ description: Pin the last prompt you scrolled past to the top of Pi's fullscreen
 plugin: pi-sticky-last-prompt
 ---
 
+## Quick reference
+
+- **Use it for:** Remember which prompt the scrolled transcript belongs to and jump back to it.
+- **Enable:** Select `packages/pi-sticky-last-prompt/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
+- **Controls:** Automatic bar; left-click jumps to the pinned prompt. No command, tool or shortcut.
+- **Settings:** No settings; derives the pin from the live transcript on paint.
+- **Requirements, cost & privacy:** Fullscreen TUI; reported mouse clicks for jumping, Nerd Font for pin icon. No network, inference or external program; shows prompt text locally.
+- **Integrations & limits:** Optional clear-screen horizon. Private renderer hooks may change; duplicate/wrapped overlay ownership makes it stay inactive.
+
 `pi-sticky-last-prompt` shows a one-line bar at the very top of Pi's fullscreen TUI with the most recent prompt that has scrolled completely out of view. Left-click the bar and the transcript scrolls so that prompt sits just below it. It began as [pi-sticky-last-prompt](https://github.com/tangentyh/pi-collections/tree/main/extensions/sticky-last-prompt) 0.1.1 (MIT, pi-collections contributors) and was adapted for the suite.
 
 ## Enable and requirements

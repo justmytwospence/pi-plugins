@@ -4,6 +4,15 @@ description: Retry terminal appearance reports so Pi can recover from delayed ba
 plugin: pi-appearance-resync
 ---
 
+## Quick reference
+
+- **Use it for:** Recover automatic light/dark themes when the terminal's first color report is stale.
+- **Enable:** Select `packages/pi-appearance-resync/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
+- **Controls:** Automatic; no command, tool or shortcut.
+- **Settings:** No plugin settings; replay after 250 ms, 1 s and 3 s. Optional `PI_APPEARANCE_RESYNC_LOG` diagnostic path.
+- **Requirements, cost & privacy:** Pi light/dark theme, forwarded appearance reports and private color hooks. No credentials, inference or network. Optional logs record reports, not prompts.
+- **Integrations & limits:** Independent of Herdr bridge. Cannot recover a missing report; missing hooks become a no-op. New reports cancel older replay timers.
+
 ## Purpose and selection
 
 Use this extension when Pi's automatic light/dark theme appears to lag behind the terminal's appearance. The characteristic symptom is a reversal: after switching the system to dark, Pi still looks light; after switching back, Pi looks dark. This can happen when a multiplexer forwards an appearance notification before it has obtained the terminal's updated colors. Pi receives the notification, asks for colors immediately, and gets the previous background.

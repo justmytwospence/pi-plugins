@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { plugins } from "../src/data/plugins.mjs";
+import { keymapSdkVersion, stockBindings } from "../src/data/keymap.mjs";
 
 const site = fileURLToPath(new URL("../", import.meta.url));
 const root = path.resolve(site, "..");
@@ -20,6 +21,51 @@ const catalog = plugins.map((plugin) => plugin.name).sort();
 if (names.length !== 26) fail("Expected 26 suite entries; update the public count deliberately when the manifest changes.");
 if (new Set(catalog).size !== catalog.length) fail("Duplicate plugin in catalog.");
 if (JSON.stringify(names) !== JSON.stringify(catalog)) fail("Catalog does not match the root suite manifest.");
+if (manifest.devDependencies?.["@earendil-works/pi-coding-agent"] !== keymapSdkVersion) fail("Re-audit the keymap baseline when the configured Pi SDK test target changes.");
+
+// The README is the linked front door, not a second unlinked plugin inventory.
+const readme = await readFile(path.join(root, "README.md"), "utf8");
+const readmeCatalog = [...readme.matchAll(/\| \[(pi-[\w-]+)\]\(https:\/\/pi-plugins\.vercel\.app\/plugins\/(pi-[\w-]+)\/\)/g)];
+for (const match of readmeCatalog) if (match[1] !== match[2]) fail("README catalog label/URL mismatch: " + match[1]);
+const readmeNames = readmeCatalog.map((match) => match[1]).sort();
+if (JSON.stringify(readmeNames) !== JSON.stringify(names)) fail("README needs one linked catalog row for each suite entry.");
+for (const route of ["guides/keyboard", "guides/requirements", "development"]) {
+  if (!readme.includes("https://pi-plugins.vercel.app/" + route + "/")) fail("README is missing a prominent " + route + " link.");
+}
+
+const knownActions = new Set(Object.keys(stockBindings));
+const normalizeKey = (key) => key.toLowerCase().split("+").sort().join("+");
+const normalizeKeys = (keys) => (Array.isArray(keys) ? keys : [keys]).map(normalizeKey).sort();
+const keyboard = await readFile(path.join(docs, "guides/keyboard.md"), "utf8");
+const stockRows = [...keyboard.matchAll(/^\| `((?:app|tui)\.[\w.]+)` \| ([^|]+) \|/gm)];
+const requiredKeymapActions = [
+  ...Object.keys(stockBindings).filter((action) => action.startsWith("tui.altScreen.")),
+  "tui.editor.historyPrevious", "tui.editor.historyNext", "tui.editor.deleteToLineStart",
+  "tui.editor.deleteToLineEnd", "tui.editor.deleteCharForward", "tui.input.newLine",
+  "tui.input.submit", "app.editor.external", "app.model.select", "app.thinking.cycle",
+  ...Object.keys(stockBindings).filter((action) => action.startsWith("tui.select.")),
+];
+for (const action of requiredKeymapActions) {
+  if (!stockRows.some((row) => row[1] === action)) fail("Missing task-critical stock keymap row: " + action);
+}
+const seenActions = new Set();
+for (const [, action, displayed] of stockRows) {
+  if (seenActions.has(action)) fail("Duplicate stock keymap row: " + action);
+  seenActions.add(action);
+  if (!knownActions.has(action)) { fail("Unknown stock keymap action: " + action); continue; }
+  const keys = displayed.trim() === "Unbound" ? [] : displayed.trim().split(" / ");
+  if (JSON.stringify(normalizeKeys(keys)) !== JSON.stringify(normalizeKeys(stockBindings[action]))) {
+    fail("Wrong stock default for " + action + ": " + displayed.trim());
+  }
+}
+const profileBlock = keyboard.split("## Optional personal profile")[1]?.match(/^```json\n([\s\S]*?)^```/m);
+try {
+  const profile = JSON.parse(profileBlock?.[1] ?? "null");
+  if (!profile || JSON.stringify(profile["app.editor.external"]) !== "[]" ||
+      JSON.stringify(profile["tui.altScreen.bottom"]) !== '["ctrl+g","ctrl+end"]') {
+    fail("Labeled personal profile must separate external-editor chord from Ctrl+G transcript tail.");
+  }
+} catch { fail("Invalid optional personal keymap profile."); }
 
 const paths = (await filesIn(docs)).filter((file) => /\.mdx?$/.test(file));
 const routeFor = (file) => "/" + path.relative(docs, file).replaceAll(path.sep, "/").replace(/\.mdx?$/, "").replace(/(^|\/)index$/, "") .replace(/\/$/, "") + "/";
@@ -44,13 +90,20 @@ for (const file of paths) {
     if (path.basename(file, path.extname(file)) !== data.plugin) fail(relative + ": filename must match plugin.");
     const entry = entries.find((candidate) => candidate.split("/")[1] === data.plugin);
     if (entry && !body.includes(entry)) fail(relative + ": missing exact selection entry " + entry + ".");
-    if ((body.match(/^## /gm) || []).length < 4) fail(relative + ": reference needs useful sections.");
-    if (body.split(/\s+/).length < 180) fail(relative + ": reference is too thin.");
-    if (!/requirements|dependencies|costs/i.test(body)) fail(relative + ": spell out requirements/costs.");
+    const quick = body.match(/^## Quick reference\n([\s\S]*?)(?=^## |$(?![\s\S]))/m)?.[1] ?? "";
+    for (const label of ["Use it for", "Enable", "Controls", "Settings", "Requirements, cost & privacy", "Integrations & limits"]) {
+      if (!quick.includes("- **" + label + ":** ")) fail(relative + ": missing Quick reference field " + label + ".");
+    }
+    if (entry && !quick.includes(entry)) fail(relative + ": Quick reference needs the exact selection entry.");
+    // No arbitrary word-count floor: small automatic plugins should state their boundaries,
+    // not pad a page or invent commands/shortcuts to satisfy a minimum.
     if (!body.includes("https://github.com/justmytwospence/pi-plugins/")) fail(relative + ": missing suite source link.");
   } else if (file.includes(path.sep + "plugins" + path.sep)) fail(relative + ": missing plugin frontmatter.");
 
   if (/\p{Extended_Pictographic}/u.test(body)) fail(relative + ": do not use emojis.");
+  for (const match of body.matchAll(/`((?:app|tui)\.[\w.]+)`/g)) {
+    if (!knownActions.has(match[1])) fail(relative + ": unknown Pi action ID " + match[1]);
+  }
   for (const install of body.matchAll(/pi install\s+git:github\.com\/justmytwospence\/(pi-[\w-]+)/g)) {
     if (install[1] !== "pi-plugins") fail(relative + ": retired component install source " + install[1]);
   }
@@ -59,6 +112,9 @@ for (const file of paths) {
   for (const block of body.matchAll(/^```json[^\n]*\n([\s\S]*?)^```/gm)) {
     try {
       const value = JSON.parse(block[1]);
+      for (const action of Object.keys(value)) {
+        if (/^(?:app|tui)\./.test(action) && !knownActions.has(action)) fail(relative + ": unknown JSON keybinding action " + action);
+      }
       for (const pkg of value.packages || []) {
         if (typeof pkg === "object") for (const entry of pkg.extensions || []) {
           if (entry.startsWith("./packages/")) fail(relative + ": selection paths must not start with ./");
@@ -91,4 +147,4 @@ for (const required of ["/", "/guides/overview/", "/guides/install/", "/guides/r
   if (!routes.has(required)) fail("Missing required page: " + required);
 }
 if (errors.length) { console.error(errors.join("\n")); process.exitCode = 1; }
-else console.log("PASS: " + paths.length + " authored pages; all " + covered.size + " suite references covered; frontmatter, JSON examples, selected entries and source links checked. Rendered fragments are checked by npm run build.");
+else console.log("PASS: " + paths.length + " authored pages; all " + covered.size + " suite references covered; uniform quick references, README catalog, audited keymap action IDs/defaults, frontmatter, JSON examples, selected entries and source links checked. Rendered fragments are checked by npm run build.");

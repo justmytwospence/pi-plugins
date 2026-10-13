@@ -1,8 +1,17 @@
 ---
 title: Tool gate
-description: Claude Code's permission modes on Shift+Tab; auto mode combines fixed checks, paid Jev judgments and human approval for risky tool calls.
+description: Choose permission modes with an explicitly remapped Shift+Tab; auto mode combines fixed checks, paid Jev judgments and human approval.
 plugin: pi-tool-gate
 ---
+
+## Quick reference
+
+- **Use it for:** Choose an approval policy for tool calls, escalating risky operations without treating the gate as a sandbox.
+- **Enable:** Select `packages/pi-tool-gate/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
+- **Controls:** `/mode`, `/gate`; Shift+Tab cycles only after remapping stock `app.thinking.cycle`, or choose another `cycleShortcut`.
+- **Settings:** `tool-gate.json` shared/user/project layers; default auto mode, paid Jev on, pushback on, 3000 ms classifier timeout.
+- **Requirements, cost & privacy:** Pi classifier/provider access for Jev; proposed arguments and clipped user intent can leave the machine. Fixed checks and manual mode are local.
+- **Integrations & limits:** Optional plan mode, footer and Herdr blocked state. The stock conflict skips shortcut registration; unavailable-classifier fallback is not fail-closed.
 
 Tool gate brings Claude Code's permission modes to Pi and, in auto mode, reduces routine approval interruptions while escalating risky calls. It is an approval policy inside Pi, **not a sandbox**, a complete secret scanner or a guarantee that every dangerous operation will be caught.
 
@@ -16,7 +25,7 @@ Classifier judgments require Pi 0.99 or newer and credentials for the configured
 
 ## Permission modes
 
-Shift+Tab cycles the modes as in Claude Code (from auto: manual, accept edits, plan, auto); `/mode` switches directly or lists them. The footer shows the mode with Claude Code's labels.
+After an [explicit stock-key remap](/guides/keyboard/#resolve-the-two-stock-conflicts), Shift+Tab cycles the modes as in Claude Code (from auto: manual, accept edits, plan, auto); `/mode` switches directly or lists them. The footer shows the mode with Claude Code's labels.
 
 | Mode | Runs without asking |
 | --- | --- |
@@ -26,7 +35,7 @@ Shift+Tab cycles the modes as in Claude Code (from auto: manual, accept edits, p
 | Auto (`auto mode on`) | The default: the checks and judgments below. |
 | Bypass (`bypass permissions on`) | Everything except removing `/`, top-level directories, home, the project or their parents. Opt in by adding `bypassPermissions` to `modes`, or use `/mode bypass`. |
 
-Without a UI, calls that would ask are blocked. Sessions remember their mode across resume; new sessions start in `defaultMode`. Pi's default Shift+Tab (thinking-level cycle) is overridden with a startup warning; rebind `app.thinking.cycle` or set `cycleShortcut`.
+Without a UI, calls that would ask are blocked. Sessions remember their mode across resume; new sessions start in `defaultMode`. Pi's stock Shift+Tab is reserved for `app.thinking.cycle`; current Pi **skips** the conflicting extension shortcut. It does not override that action automatically. Move the stock action, for example to `alt+t` in `~/.pi/agent/keybindings.json`, or choose a different `cycleShortcut`, then `/reload`. `/mode` remains available without a shortcut.
 
 ## What runs and what is held in auto mode
 

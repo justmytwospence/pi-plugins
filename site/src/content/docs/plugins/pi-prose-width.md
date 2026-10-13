@@ -4,6 +4,15 @@ description: Wrap Pi's Markdown prose at a readable measure without squeezing fe
 plugin: pi-prose-width
 ---
 
+## Quick reference
+
+- **Use it for:** Keep paragraphs readable without squeezing code blocks or tables.
+- **Enable:** Select `packages/pi-prose-width/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
+- **Controls:** `/prose-width [columns|off]`; no tool or shortcut.
+- **Settings:** `PROSE_WIDTH`, then `~/.config/agents/prose-width.json`, then 80 columns; 0/off disables. Session commands are not saved.
+- **Requirements, cost & privacy:** Compatible private Markdown hook; no external program, network or inference calls. Display-only, no file reformatting.
+- **Integrations & limits:** Optional renderers using Pi Markdown inherit it. Wide code can keep enclosing containers wide; restart for a fully unpatched baseline.
+
 ## Purpose and rendering scope
 
 `pi-prose-width` limits the reading width of Markdown prose while preserving the available width for content that benefits from longer lines. The default measure is **80 columns**. On a wide terminal, a paragraph wraps earlier, but a fenced command or a table can continue across the wider pane. On a terminal narrower than the configured measure, the terminal's available width still wins.
@@ -18,7 +27,7 @@ Paragraphs, headings, text tokens, lists, and blockquotes receive the narrower m
 
 The extension performs local rendering work only. It uses no external executable, credentials, network service, model request, or paid classifier call. It does not require Herdr, another multiplexer, or any of the sibling suite entries. The configuration path is shared by convention with other prose-width integrations, but those integrations are not dependencies and need not be installed.
 
-Compatibility depends on Pi's Markdown implementation. The package README records testing with **Pi 1.1.0**. The extension patches `Markdown.prototype.renderToken`, a private method outside the stable extension API. If that method is absent, loading throws `pi-tui's Markdown has no renderToken to patch`. This is intentionally different from silently claiming to have applied a measure when the renderer no longer exposes the needed hook.
+Compatibility depends on Pi's Markdown implementation. The package README records testing with **Pi 1.2.0**. The extension patches `Markdown.prototype.renderToken`, a private method outside the stable extension API. If that method is absent, loading throws `pi-tui's Markdown has no renderToken to patch`. This is intentionally different from silently claiming to have applied a measure when the renderer no longer exposes the needed hook.
 
 The patch also wraps Markdown rendering to invalidate cached lines when the measure changes. It is installed once per process, with shared state updated on later loads. That avoids repeatedly nesting the same patch during a reload, but it means disabling the entry is not identical to restoring the original prototype in an already running process. `/prose-width off` bypasses the width restriction; a fresh Pi process is the clean baseline for testing without the entry.
 

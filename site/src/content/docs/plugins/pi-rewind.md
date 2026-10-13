@@ -4,6 +4,15 @@ description: Restore checkpointed working-tree files when navigating earlier con
 plugin: pi-rewind
 ---
 
+## Quick reference
+
+- **Use it for:** Move local file state back when navigating to an earlier conversation checkpoint.
+- **Enable:** Select `packages/pi-rewind/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
+- **Controls:** Pi `/tree` or `/fork` triggers restoration offers; `/rewind-undo` reverses the last restore. No `/rewind` or global shortcut.
+- **Settings:** No JSON settings. `PI_REWIND_ALWAYS=1` permits non-UI snapshots; the undo slot is in memory.
+- **Requirements, cost & privacy:** Git repository; UI for restoration choices. No remote or inference calls. Snapshots include non-ignored untracked content and use local object-store space.
+- **Integrations & limits:** Optional diff-review checkpoint reuse. Does not undo remote effects, ignored untracked files or external paths; Git GC can remove snapshots.
+
 Rewind connects conversation navigation with local file state. Moving to an earlier message does not normally undo filesystem changes; this extension offers a separate restoration choice when that conversation point has a checkpoint.
 
 ## Enable and requirements

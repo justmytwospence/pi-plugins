@@ -4,6 +4,15 @@ description: Ask a side question in a separate Pi sub-session overlay while the 
 plugin: pi-btw
 ---
 
+## Quick reference
+
+- **Use it for:** Ask a separate side question while the main run continues; inject the thread only when useful.
+- **Enable:** Select `packages/pi-btw/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
+- **Controls:** `/btw` and related commands below; Alt+/, Super+/ or Ctrl+Alt+W switch focus, Alt+W changes width.
+- **Settings:** Model/effort inherit the main session unless overridden; `PI_BTW_FOCUS_KEYS` replaces focus keys. Thread state is stored per branch.
+- **Requirements, cost & privacy:** TUI for overlay; configured provider for every question. Each side turn costs tokens; summarize adds a model call. Contextual threads receive the main conversation.
+- **Integrations & limits:** Optional embedded Vim editor. Normal/tangent threads can edit the shared checkout; `/btw:ask` limits tools to reads, not an OS sandbox.
+
 `pi-btw` adds `/btw`, a side conversation that runs immediately, even while the main agent is busy. Each question goes to a real Pi agent session in a focused overlay with its own composer and transcript. The thread stays out of the main agent's context until you inject it. It began as [pi-btw](https://github.com/dbachelder/pi-btw) 0.6.1 (MIT, Dan Bachelder) and was adapted for the suite.
 
 ## Enable and requirements

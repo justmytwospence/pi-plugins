@@ -4,6 +4,15 @@ description: Connect interactive Pi sessions to Herdr metadata, notifications, p
 plugin: pi-herdr
 ---
 
+## Quick reference
+
+- **Use it for:** Add pane metadata and deliberate human-accessible child sessions inside Herdr.
+- **Enable:** Select `packages/pi-herdr/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
+- **Controls:** `herdr_child` spawn/send/read/list/interrupt/close. No global shortcut; child activities offer read-only inspection.
+- **Settings:** No plugin JSON settings. Child location: tab; focus: false; model/effort inherit the parent. `PI_HERDR_PR=0` disables PR polling.
+- **Requirements, cost & privacy:** Interactive Herdr socket/pane, Pi/provider access for children; Git for worktrees, `gh` for PRs. Herdr socket operations create/open checkouts; no external worktree CLI. Metadata is not inference; children are paid sessions.
+- **Integrations & limits:** Optional event-bus bridge and `/tasks`/FleetView child entries. An activity stop interrupts an awaited turn, never closes the pane. Herdr itself owns pane state.
+
 pi-herdr adds Pi-specific metadata and an event-bus bridge inside Herdr. It complements Herdr's own Pi integration rather than replacing it: Herdr's integration owns working, blocked, and idle state, while this plugin adds background labels, presentation, pull-request status, and interactive children.
 
 ## Enable, requirements, and costs
@@ -16,7 +25,7 @@ Additional requirements depend on the feature:
 
 - Pull-request metadata uses `gh pr view`, so it needs GitHub CLI access and appropriate authentication. Missing `gh` disables that reporting.
 - Interactive children need a runnable Pi and credentials for their chosen provider.
-- Worktree children need the `worktree` helper and a Git checkout.
+- Worktree children need Git and a checkout. The plugin calls Herdr's socket `worktree.create`/`worktree.open` operations; no external worktree helper or CLI is required.
 
 **Costs:** metadata and event bridging do not call a model. Children are normal Pi sessions with their own model usage, and delivered replies can start parent turns. PR refreshes also make GitHub API requests.
 
@@ -75,6 +84,10 @@ Model and thinking default to the parent's choices, and focus defaults to false.
 Each reply to a parent-sent task or `send` message arrives as a `herdr-child` message, read from the child's session file and triggering a parent turn. Do not poll the screen to discover completion. Messages the user types directly into the child's pane do not produce automatic parent replies.
 
 Pending replies hold `herdr:background`. Child records are saved in the parent session, allowing listing, sending, and pending-reply tracking after restart or resume. This is coordination state, not a guarantee that an externally closed pane can be recovered automatically.
+
+## Shared activity views
+
+Interactive children are also an activity source for `/tasks` and FleetView (or pi-bg's fallback pill). Enter opens a read-only detail view without focusing or raising the child's pane. Double-`x` is available only for a child with an awaited turn: it sends an interrupt, **never closes the pane**. `herdr_child close` is the explicit pane-closing action. `/stop` remains pi-bg's shell-only command. Metadata and coordination continue to work without an activity host.
 
 ## Optional bridge integrations
 

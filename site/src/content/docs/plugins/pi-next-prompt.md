@@ -4,6 +4,15 @@ description: Offer one concrete follow-up as editable ghost text, with optional 
 plugin: pi-next-prompt
 ---
 
+## Quick reference
+
+- **Use it for:** Offer one editable next step after a completed run, without a separate generation request.
+- **Enable:** Select `packages/pi-next-prompt/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
+- **Controls:** `/next-prompt` status/on/off; Tab/Right accept into an empty focused main editor, never submit.
+- **Settings:** `next-prompt.json` shared/user/project layers; enabled, Tab/Right, max 110 characters; Jev timeout 1500 ms, threshold 0.6.
+- **Requirements, cost & privacy:** Pi 1.0+ TUI; normal input/output tokens for suggestion instruction; optional paid Jev sees suggestion/request/answer excerpts.
+- **Integrations & limits:** Optional Vim/select-nav. Missing classifier shows unvetted text; no prompt after failed/aborted runs. Suggestions are not authorization.
+
 Next prompt offers a likely follow-up after a completed run. It is deliberately selective: a finished task, an unresolved question or several equally plausible directions should produce no suggestion. Accepting text never sends it automatically.
 
 ## Enable and requirements

@@ -12,7 +12,7 @@ export const groups = [
     { name: "pi-ask-user-question", label: "Ask a question", description: "Structured choices with previews, notes and room for your own answer." },
     { name: "pi-diff-review", label: "Diff review", description: "Line comments and suggested edits, sent back to the agent together." },
     { name: "pi-rewind", label: "Rewind", description: "Offer to restore working-tree files when you rewind the conversation." },
-    { name: "pi-tool-gate", label: "Tool gate", description: "Claude Code permission modes on Shift+Tab; classifier-assisted auto mode. Not a sandbox." },
+    { name: "pi-tool-gate", label: "Tool gate", description: "Permission modes after an explicit Shift+Tab remap; classifier-assisted auto mode. Not a sandbox." },
   ] },
   { title: "Context & cost", eyebrow: "03 / Awareness", description: "See what the session is using and choose when to spend more reasoning or context.", plugins: [
     { name: "pi-cache-guard", label: "Cache guard", description: "Cache-expiry warnings, a cache clock and optional Jev context trimming." },

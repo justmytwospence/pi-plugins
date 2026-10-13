@@ -4,6 +4,15 @@ description: Ask structured multiple-choice questions with optional previews, fr
 plugin: pi-ask-user-question
 ---
 
+## Quick reference
+
+- **Use it for:** Ask about a preference or trade-off that cannot be established from project files.
+- **Enable:** Select `packages/pi-ask-user-question/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
+- **Controls:** `ask_user_question`; no slash command or global shortcut. Local choice, note, free-text and Review controls below.
+- **Settings:** No settings file. 1–4 questions, 2–4 options each; `multiSelect` defaults to false; a custom-answer row is automatic.
+- **Requirements, cost & privacy:** TUI or RPC select/input support. No extra inference itself; answers enter normal model context. No user UI means no available questionnaire.
+- **Integrations & limits:** Optional embedded Vim and Herdr blocked state. Headless subagents report decisions as blockers; an answer is not an enforcement policy.
+
 pi-ask-user-question adds the `ask_user_question` tool for decisions the user should make. It is useful when proceeding would commit to a preference, scope, or trade-off that cannot be discovered from project files. The questionnaire supports both suggested choices and the user's own wording; selecting an offered answer is never mandatory.
 
 ## Enable, requirements, and costs

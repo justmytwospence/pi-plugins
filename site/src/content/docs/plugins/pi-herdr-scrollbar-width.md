@@ -4,6 +4,15 @@ description: Correct the one-column Herdr scrollbar width change when Pi prints 
 plugin: pi-herdr-scrollbar-width
 ---
 
+## Quick reference
+
+- **Use it for:** Fix one-column wrapping when Pi leaves fullscreen inside a Herdr pane with scrollbars.
+- **Enable:** Select `packages/pi-herdr-scrollbar-width/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
+- **Controls:** Automatic; no command, tool or shortcut.
+- **Settings:** No plugin settings. Reads `HERDR_CONFIG_PATH` or `~/.config/herdr/config.toml`; explicit `pane_scrollbars = false` disables.
+- **Requirements, cost & privacy:** `HERDR_ENV=1`, TTY stdout and enabled pane scrollbars. No credentials, network, inference or CLI helper; reads local Herdr config.
+- **Integrations & limits:** No pi-herdr dependency. Exit-transition fix only; process-wide stdout wrapper needs a fresh restart to remove.
+
 ## Purpose and selection
 
 This entry addresses a specific display problem: Pi looks correctly sized while running fullscreen inside Herdr, but its transcript wraps unexpectedly when Pi exits fullscreen. The cause described by the package is a one-column difference between Herdr's alternate screen and main screen when pane scrollbars are enabled. The scrollbar gutter is reserved on the main screen, not the alternate screen.

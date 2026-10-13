@@ -112,6 +112,8 @@ only while a turn is in progress, and pi's default is restored the moment a
 turn or run ends, on shutdown or reload, and when the row is turned off. The
 count starts over with each turn. `/status working off` disables it.
 
+With pi-bg enabled, a `bg_wait` message takes priority over these statistics through the optional `pi-plugins.working-message.v1` event. Its `{ owner, message? }` payload claims priority when a message exists and releases that owner when omitted. The newest active claim wins; updating it preserves priority, and releasing an older wait cannot clear a newer one. The footer merges the override above its normal message, so timer refreshes do not alternate `Waiting on…` and `Working…` (example labels). After the final release, normal decoration resumes if a turn is active. Neither plugin requires the other; pi-bg also paints its native message directly when standalone. Contract copies in both packages' `src/working-message.ts` stay identical.
+
 ### MCP chip
 
 Pi's built-in MCP extension publishes no status: its connections are only
@@ -232,7 +234,7 @@ from the [tmux-agents](https://github.com/justmytwospence/tmux-agents) plugin, n
 ## Development
 
 ```sh
-npm install
+npm ci
 npm run check   # tsc against pi's real types, then vitest
 ```
 

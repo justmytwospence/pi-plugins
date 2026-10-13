@@ -4,6 +4,15 @@ description: Stash a half-written prompt with Ctrl+S, run a slash or shell comma
 plugin: pi-stash
 ---
 
+## Quick reference
+
+- **Use it for:** Set a half-written main prompt aside, run a command and restore it without overwriting new text.
+- **Enable:** Select `packages/pi-stash/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
+- **Controls:** Ctrl+S stashes/restores/swaps only in the main editor. No slash command or model tool.
+- **Settings:** No settings; one in-memory slot. Text/cursor/modal snapshots when supported; no persistence across process restart.
+- **Requirements, cost & privacy:** TUI only; no network, inference or external program. Draft stays in memory; image attachments are not stashed.
+- **Integrations & limits:** Optional Vim snapshots/footer hint. Embedded fields are untouched. Migrating from the upstream stash requires a full restart after saving the draft.
+
 `pi-stash` gives the main prompt editor a single stash slot. Press **Ctrl+S** to set the current draft aside and clear the editor, run a slash command such as `/model` or a `!` shell command, and the draft comes back on its own. It began as [`@saadjs/pi-stash`](https://www.npmjs.com/package/@saadjs/pi-stash) 0.0.3 (MIT, Saad Bash) and was adapted for the suite.
 
 ## Enable and requirements

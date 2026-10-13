@@ -4,6 +4,15 @@ description: Review expensive cache misses and optionally reduce tool output and
 plugin: pi-cache-guard
 ---
 
+## Quick reference
+
+- **Use it for:** Review expensive cold-cache sends; optionally trim large tool output or compact history.
+- **Enable:** Select `packages/pi-cache-guard/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
+- **Controls:** `/cache-guard` status/compact/jev/fresh/on/off. No global shortcut; warning dialog keys below.
+- **Settings:** `cache-guard.json` shared/user/project layers; warning threshold 100,000 tokens, unknown-provider idle heuristic 180 min.
+- **Requirements, cost & privacy:** Optional paid Jev sends output/history excerpts; summaries use model tokens. Full trimmed output is saved locally. Warnings and clock work without Jev.
+- **Integrations & limits:** Optional footer/Herdr. `/cache-guard off` disables warnings, not classifier trimming. No cache warming; Pi owns warming and its costs.
+
 Cache guard gives you a choice before sending a prompt that is likely to re-cache an expensive conversation. Its clock and warnings work without a classifier. Optional Jev features trim incoming tool output and help compact history.
 
 ## Enable and requirements

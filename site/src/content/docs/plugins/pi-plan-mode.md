@@ -4,9 +4,18 @@ description: Claude Code-style plan mode in your conversation, or two constraine
 plugin: pi-plan-mode
 ---
 
+## Quick reference
+
+- **Use it for:** Research before implementation in the main conversation, or compare two constrained planners.
+- **Enable:** Select `packages/pi-plan-mode/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
+- **Controls:** `/plan`, `/planners`; enter/exit and active-run tools below. No standalone shortcut by default; gate Shift+Tab needs an explicit stock remap.
+- **Settings:** `pi-plan-mode.json`; `toggleShortcut` unset, implementation context keep, export `PLAN.md`; optional paid Jev tool selection on.
+- **Requirements, cost & privacy:** TUI and provider access for `/planners`; normal plan mode uses the main session. Planners/helpers each consume model usage; selected tools can send repository data externally.
+- **Integrations & limits:** Optional gate, activity views, footer and Herdr. Planner/scout entries join `/tasks` and FleetView; `/stop` remains shell-only. Read-only policies are not a sandbox.
+
 pi-plan-mode separates researching a change from implementing it, in two ways:
 
-- **Plan mode** (`/plan`, or Shift+Tab with [pi-tool-gate](/plugins/pi-tool-gate/)) works in your own conversation, as Claude Code's does: your agent researches read-only, writes a plan file, and asks you to approve it.
+- **Plan mode** (`/plan`, or Shift+Tab with [pi-tool-gate](/plugins/pi-tool-gate/) after an [explicit stock-key remap](/guides/keyboard/#resolve-the-two-stock-conflicts)) works in your own conversation, as Claude Code's does: your agent researches read-only, writes a plan file, and asks you to approve it.
 - **`/planners`** opens a full-screen workflow with Settings, Tools, Planning, Review, and Implement steps. Two planner sessions investigate the same task; you can steer them, answer questions, compare proposals, and explicitly choose the plan to implement.
 
 ## Plan mode
@@ -15,7 +24,7 @@ pi-plan-mode separates researching a change from implementing it, in two ways:
 /plan Add rate limiting to the public API
 ```
 
-`/plan` turns plan mode on and sends the task, if given, as your next message. With pi-tool-gate, plan mode is one of the gate's [permission modes](/plugins/pi-tool-gate/#permission-modes) and Shift+Tab cycles to it; the footer shows `plan mode on`. Without the gate, `toggleShortcut` toggles it. Your agent can also enter plan mode itself through `enter_plan_mode` when a task deserves a plan first.
+`/plan` turns plan mode on and sends the task, if given, as your next message. With pi-tool-gate, plan mode is one of the gate's [permission modes](/plugins/pi-tool-gate/#permission-modes) and its configured cycle key reaches it once the stock thinking-key conflict is resolved; the footer shows `plan mode on`. Without the gate, `toggleShortcut` toggles it. Your agent can also enter plan mode itself through `enter_plan_mode` when a task deserves a plan first.
 
 While it is on, your agent writes its plan to a plan file, by default `~/.pi/agent/plans/<two-words>.md` (`plansDirectory`), one per session. `edit` and `write` are blocked except for that file. With pi-tool-gate, shell commands are judged as in auto mode; without it, only the read-only shell policy runs. Other extension and MCP tools are not blocked; your agent is only instructed not to change anything with them.
 
@@ -103,6 +112,8 @@ M is only instructed to leave files alone during planning; it is not constrained
 Esc offers Hide, Stop planning, or Back. Hiding leaves planners running; `/planners` reopens the screen. Sessions under `~/.pi/agent/plan-mode/planners/` retain research across reload or resume, and interrupted or failed turns can resume automatically. Remember that resumed work can incur further usage.
 
 ## Optional integrations and next checks
+
+Planners and their research scouts offer activity entries to `/tasks` and pills to FleetView (or the pi-bg fallback host). Enter on an entry opens `/planners`; double-`x` stops a working planner row. Scout rows are observational, not independently stoppable from the list; stop their owning planner or use the planning screen. `/stop` still stops only pi-bg shell tasks. The planning screen remains available without any activity host.
 
 Web tools, MCP servers, classifier selection, and completion hooks are optional. With pi-herdr, planner work emits `herdr:working` holds for background visibility; without it, planning still works. Use pi-diff-review after implementation to inspect the actual changes rather than treating an accepted plan as proof of correct execution.
 

@@ -2,7 +2,7 @@
 
 A Pi extension with two ways to plan before anything changes:
 
-- **Plan mode**, as in Claude Code, in your own conversation: `/plan` (or Shift+Tab with [pi-tool-gate](../pi-tool-gate/)) turns it on, your agent researches read-only and writes its plan to a plan file, then shows you the plan and asks how to proceed.
+- **Plan mode**, as in Claude Code, in your own conversation: `/plan` (or Shift+Tab with [pi-tool-gate](../pi-tool-gate/) after an explicit stock thinking-key remap) turns it on, your agent researches read-only and writes its plan to a plan file, then shows you the plan and asks how to proceed.
 - **`/planners`**, a full-screen planner for two models at once: both plan the same task read-only while you watch, answer their questions, and talk to them. The pane below them is your own main agent, which gets every plan, talks them over with you, questions the planners, and writes the merged plan when you ask. Then you implement the plan you like, with the model, effort, and context you choose.
 
 It acts only while plan mode is on, when you run `/plan` or `/planners` (or press the shortcut you configured), while a planning run you started is alive, and when your agent calls `enter_plan_mode` or `exit_plan_mode`.
@@ -39,7 +39,7 @@ No `npm install` is needed to run it: the package.json has no `dependencies`; Pi
 /plan Add rate limiting to the public API
 ```
 
-`/plan` turns plan mode on and, with a task, sends it as your next message. With [pi-tool-gate](../pi-tool-gate/), plan mode is one of its permission modes: Shift+Tab steps through manual, accept edits, plan and auto, and the footer shows the mode (`⏸ plan mode on`). Without it, set `toggleShortcut` to toggle plan mode with a key. Your agent can also turn plan mode on itself with `enter_plan_mode` when a task deserves a plan first.
+`/plan` turns plan mode on and, with a task, sends it as your next message. With [pi-tool-gate](../pi-tool-gate/), plan mode is one of its permission modes: Shift+Tab steps through manual, accept edits, plan and auto after moving or disabling Pi's stock `app.thinking.cycle` in `keybindings.json` (current Pi otherwise skips the conflicting shortcut), and the footer shows the mode (`⏸ plan mode on`). Without it, set `toggleShortcut` to toggle plan mode with a key. Your agent can also turn plan mode on itself with `enter_plan_mode` when a task deserves a plan first.
 
 While plan mode is on:
 
@@ -142,7 +142,7 @@ The same row page: which plan, the **model**, its **effort**, and the **context*
 - **Stop planning** (only while something is working): stop every working planner, and abort your main agent's turn if it is running. The plans so far are kept.
 - **Back**: return to the screen.
 
-Planners are stopped from this screen (Stop planning, Discard, or implementing a plan, which ends the run) or by their time limit; they are also shut down when the Pi session ends or switches (a turn cut off that way resumes when the run is restored). They are not entries in the `/tasks` activity list, and `/stop` does not reach them.
+Planners are stopped from this screen (Stop planning, Discard, or implementing a plan, which ends the run) or by their time limit; they are also shut down when the Pi session ends or switches (a turn cut off that way resumes when the run is restored). Planners and their research scouts are entries in `/tasks` and contribute pills to FleetView or pi-bg's fallback host. Enter returns to the planning screen; double-`x` stops a working planner row. Scout rows are observational, not independently stoppable from the list; stop their owning planner or use the planning screen. `/stop` remains pi-bg's shell-only command and does not reach them.
 
 `/planners` reopens the screen where you left it, also after `/reload` or resuming the session: planners keep their sessions on disk, so you can keep talking to them. A planner whose turn the reload or restart cut off, or whose last turn failed, resumes by itself; its lane shows `continue (resumed …)` or `try again (resumed after an error)`.
 
@@ -235,7 +235,7 @@ Planner sessions are stored under `~/.pi/agent/plan-mode/planners/`; runs are sa
 
 ## Optional integrations
 
-- **pi-tool-gate**: owns the permission mode. Plan mode joins its Shift+Tab cycle, the gate judges commands while planning, and approving a plan picks the gate's next mode. They talk over Pi's event bus (`permission-mode:changed`, `permission-mode:set`, `permission-mode:cycle`, `permission-mode:plan-provider`; see pi-tool-gate's `src/modes.ts`). Without the gate, plan mode enforces a read-only shell itself and shows `⏸ plan mode on` in the footer.
+- **pi-tool-gate**: owns the permission mode. Plan mode joins its configured permission-mode cycle (Shift+Tab needs an explicit stock `app.thinking.cycle` remap), the gate judges commands while planning, and approving a plan picks the gate's next mode. They talk over Pi's event bus (`permission-mode:changed`, `permission-mode:set`, `permission-mode:cycle`, `permission-mode:plan-provider`; see pi-tool-gate's `src/modes.ts`). Without the gate, plan mode enforces a read-only shell itself and shows `⏸ plan mode on` in the footer.
 - **Herdr**: while any planner is working, the extension holds `herdr:working` on Pi's event bus (`{ active: true, label: "Planning" }`, then `{ active: false }`), so pi-herdr shows the pending run in Herdr's sidebar; while a planner waits for your answers it also holds `herdr:blocked` (`label: "Planner question"`). Outside Herdr, or without pi-herdr, nothing listens.
 - **pi-anthropic-auth** (or any extension named in `providerExtensions`): forwarded to planners and subagents on that provider.
 - **Custom editors** such as pi-vim's: the Task box uses the editor component your main editor uses, so its modes work there (pi-vim's `:q` leaves the box instead of quitting Pi).

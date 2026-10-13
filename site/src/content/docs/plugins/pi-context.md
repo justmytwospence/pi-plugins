@@ -4,6 +4,15 @@ description: Open /context to see where the context window goes, with a usage ba
 plugin: pi-context
 ---
 
+## Quick reference
+
+- **Use it for:** Find what fills the current context window, with per-part estimates and previews.
+- **Enable:** Select `packages/pi-context/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
+- **Controls:** `/context`; no global shortcut. Arrows/Enter open previews; Esc returns or closes.
+- **Settings:** No plugin settings; token breakdown and previews are read-only.
+- **Requirements, cost & privacy:** No external dependency or inference calls. Reads the prompt/session locally; opening adds nothing to model context. Previews can expose private prompt content on screen.
+- **Integrations & limits:** Optional footer/cache guard complement it. Does not trim anything; estimates are not provider-tokenizer measurements. Non-TUI uses a text report.
+
 ## Purpose
 
 `pi-context` adds one command, `/context`. It opens a dialog with a usage bar and one row per part of the request: system prompt, memory files, skills, tool definitions, tool results, conversation, other, and free space. From any row you can open a scrollable preview of that part as the model receives it. The dialog answers a practical question: what is filling the window right now, and is it something you control, such as a large memory file, many tool declarations, or long tool output?

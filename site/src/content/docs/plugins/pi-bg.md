@@ -4,6 +4,15 @@ description: Run shell jobs and services with lifecycle management, searchable l
 plugin: pi-bg
 ---
 
+## Quick reference
+
+- **Use it for:** Run a long command while the agent continues other work; distinguish finite jobs from ready services.
+- **Enable:** Select `packages/pi-bg/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
+- **Controls:** `bg_run`, `bg_wait`, `bg_logs`, `bg_kill`; `/tasks` (aliases `/bg`, `/bashes`, `/ps`), `/stop`. No global shortcut; dialog keys below.
+- **Settings:** No JSON settings. Wait: 1800 s (max 3600); logs: 60 lines (max 400). `PI_BG_DIR` relocates logs.
+- **Requirements, cost & privacy:** Bash and your command's own dependencies. No inference calls itself; commands and wake-up turns can cost money. Logs remain on disk.
+- **Integrations & limits:** Optional shared activities, notebook waits, Herdr log splits and footer wait priority. `/stop` is shell-only; Esc ends a wait, not a process.
+
 Use pi-bg when a command needs to continue while the agent does something else. It distinguishes finite **jobs**, whose outcomes matter, from persistent **services**, whose readiness matters. Waiting is an explicit tool call, not repeated log polling.
 
 ## Enable and requirements
@@ -61,6 +70,8 @@ Plain readiness patterns are case-insensitive; `/pattern/flags` supplies explici
 
 Jobs wake the agent on exit; services can wake it when ready and again when they exit. Notifications wait until the agent is idle, and accumulated outcomes are combined. Results already consumed through waiting, log inspection, or stopping are not owed again. A command failing within 1.5 seconds is reported directly in `bg_run`'s result.
 
+During `bg_wait`, its `Waiting on…` message (example) takes priority over pi-status-footer's token/time decoration through an optional event-bus claim. The latest active wait wins; updating its text preserves priority, and releasing an older wait cannot clear a newer one. Completion, timeout, interruption, user input, errors and teardown release ownership. pi-bg still paints the native message without the footer; neither requires the other.
+
 Typing a message, pressing Esc, or reaching the wait timeout stops **waiting**, not the task. Call `bg_kill` to stop the process. Service lifetime is not bounded by the job-only `timeout` argument.
 
 Tasks survive `/reload`. Quitting or changing sessions through `/new`, `/resume`, or `/fork` stops ordinary tasks, including descendants in their process group. Use `keep: true` only for services you intend to keep using outside this session. A later Pi started in or above the service directory can adopt them.
@@ -84,7 +95,9 @@ There is no JSON settings file. Logs normally live at `~/.pi/agent/bg/<session>/
 
 ## Optional integrations and limitations
 
-With pi-subagents, `/tasks` also lists agent runs and the prompt UI is shared. `bg_wait` can await `subagent:<id>` and returns its bounded result directly, suppressing a duplicate completion message. With pi-marimo, notebook runs become waitable as `marimo:<path>`, and an already-ready server can wait for its active cells rather than immediately returning.
+`/tasks` combines every offered activity source: shell tasks, subagent runs, followed notebooks, planners/scouts and Herdr children, according to enabled plugins. FleetView can host their pills, or pi-bg can aggregate them without FleetView. Double-`x` delegates to the owner only when the entry can be stopped; a Herdr-child stop interrupts an awaited turn and **never closes the pane**.
+
+With pi-subagents, the prompt UI is shared. `bg_wait` can await `subagent:<id>` and returns its bounded result directly, suppressing a duplicate completion message. With pi-marimo, notebook runs become waitable as `marimo:<path>`, and an already-ready server can wait for its active cells rather than immediately returning.
 
 Stopping a marimo-pair client job does **not** stop the notebook's cells. Interrupt the kernel through the notebook controls instead. With pi-herdr active, `f` follows a log in a split and pending work can appear in the `$bg` token; this does not replace Herdr's own pane-state reporting.
 

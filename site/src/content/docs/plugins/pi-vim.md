@@ -4,6 +4,15 @@ description: Vim modal editing for Pi's prompt, plus the embedded modal editor t
 plugin: pi-vim
 ---
 
+## Quick reference
+
+- **Use it for:** Edit the main prompt modally and provide optional modal text fields in suite dialogs.
+- **Enable:** Select `packages/pi-vim/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
+- **Controls:** Vim modes/motions; Ctrl+X Ctrl+E for external editor (main Insert/idle Normal); Ctrl+X Ctrl+F for files (main Insert). No slash command/global shortcut.
+- **Settings:** Pi's `piVim` settings; clipboard mirror all by default. Settings load at session start; shell `modeChange` is global-only.
+- **Requirements, cost & privacy:** TUI; `fd` for recursive file search, one-level fallback without it. No inference calls. Clipboard mirroring exports register text; external editor/hooks run locally.
+- **Integrations & limits:** Optional embedded consumers, stash, navigation and footer. Explicit Downloads browsing is newest-modified-first; project/home ranking is unchanged. Only one Vim editor.
+
 `pi-vim` replaces Pi's prompt editor with a Vim-style modal editor: Insert, Normal, Visual and Visual-line modes, motions, operators with counts, text objects, undo/redo, `.` repeat, and an EX line. It also answers a suite event-bus request for an **embedded** editor, so text fields in other suite dialogs can be modal too. The editing engine is [pi-vim](https://github.com/lajarre/pi-vim) 0.14.2 (MIT, lajarre); the suite adds the embedded-editor provider, the integration protocol and transcript scrolling.
 
 ## Enable and requirements
@@ -36,9 +45,26 @@ The EX line on the main prompt is a bridge to Pi, not Vim's ex language. `:name 
 
 **Ctrl+U and Ctrl+D** scroll Pi's fullscreen transcript half a page, but only in idle Normal mode. In Insert mode they keep Pi's editing meanings (delete to line start; delete forward, or exit on an empty editor). In Visual mode and pending states they keep the engine's behavior. In regular, non-fullscreen mode there is no transcript viewport, so in idle Normal mode they are consumed and do nothing rather than deleting text or exiting.
 
+## Motion cheatsheet
+
+These are **draft motions**, not transcript navigation. Escape (or Ctrl+[) enters Normal; `i` resumes Insert. The [supported-motion reference at the imported upstream revision](https://github.com/lajarre/pi-vim/blob/e55b07c05b648f3bbccf656c2b0c6ec63f1a91d1/README.md) covers the full engine and its Vim differences.
+
+| Task | Keys / examples |
+| --- | --- |
+| Move by character, line or word | `h j k l`, `w b e`; `3w` moves three words. |
+| Move within the draft | `0` line start, `^` first nonblank, `$` line end, `gg` / `G` draft start/end. |
+| Insert or open a line | `i a I A`, `o O`. |
+| Operate on a motion / line | `dw`, `cw`, `yw`; `dd`, `cc`, `yy`; counts such as `2dd`. |
+| Select / paste | `v` character Visual, `V` line Visual; `p` / `P`. |
+| Undo / redo / repeat | `u`, Ctrl+R, `.`. |
+
+Operators, counts, registers and text objects are supported; macros, block Visual, Vim search and general Vim EX semantics are not. In idle Normal, Ctrl+U/D scroll the host viewport instead of moving through the draft. [Keymap & focus](/guides/keyboard/#use-vim-on-the-main-prompt-or-in-a-dialog) compares main and embedded behavior.
+
 ## Finding files
 
 In Insert mode on the main prompt, **Ctrl+X Ctrl+F** (Vim's file-name completion) opens a fuzzy file finder and inserts the chosen path as an `@` mention, the way Pi's `@` autocomplete does. A plain query searches the project with `fd`, respecting `.gitignore`, and, once you type something, your home directory too (four levels deep, skipping hidden entries), so `download` finds `~/Downloads` from any project; matches from both are ranked together, project first on ties. Start the query with `~/`, `/`, `./` or `../` to search only below that directory (four levels deep; hidden entries are skipped for `~/` and `/` themselves), for example `~/Downloads/inv`. Directory segments match fuzzily too: an exact name wins, then the shortest name starting with the segment, then the best fuzzy match, so `~/dl/inv` searches `~/Downloads` and `~/pr/pi-pl/READ` finds `~/Projects/pi-plugins/README.md`. Hidden directories match only when the segment starts with `.`. Up/Down (or Ctrl+P/N, Ctrl+K/J) move, Tab descends into a directory, Enter inserts and Escape cancels. Project paths are inserted relative to the project, others with `~/` or as absolute paths. Without `fd`, only one directory level is listed.
+
+When explicitly browsing **`~/Downloads/` or a descendant**, entries are sorted by newest **modification** time first; fuzzy filtering keeps that order rather than ranking by match score. The rule applies after fuzzy directory resolution, so `~/dl/` gets the same order. Ordinary project/home searches keep their existing fuzzy ranking. The picker reads timestamps asynchronously, at most 16 at a time, and caches the listing and recency for its lifetime. Unreadable/missing times sort last, with alphabetical ties. A `newest modified first` hint identifies this mode; close and reopen to refresh cached timestamps.
 
 On the main prompt, **Ctrl+X Ctrl+E** opens Pi's external editor in Insert or idle Normal mode, matching the shell convention. It invokes `app.editor.external` even if that action's direct keybinding is disabled. Embedded dialogs, pending Vim commands, and EX input keep their own keys.
 
@@ -74,6 +100,6 @@ Settings live under a `piVim` key in Pi's own settings files, `~/.pi/agent/setti
 - `modeColors`, `borderSync` and `labelSync` choose per-mode colors for the input border and the footer label.
 - `modeChange` runs a shell command when the main or embedded editor changes mode. Because it executes commands, it is read **only from the global settings file**; a project file cannot set it.
 
-The engine's full key reference, Vim differences and limits are documented in the package; block Visual mode, macros, search and Vim ex semantics are out of scope.
+See the [local motion cheatsheet](#motion-cheatsheet) and [full key reference at the imported upstream revision](https://github.com/lajarre/pi-vim/blob/e55b07c05b648f3bbccf656c2b0c6ec63f1a91d1/README.md) for Vim differences and limits; block Visual mode, macros, search and Vim ex semantics are out of scope.
 
 [GitHub source](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-vim), including the [entry point](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-vim/src/index.ts) and the [integration contract](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-vim/src/contract.ts).

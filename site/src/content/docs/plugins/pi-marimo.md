@@ -4,6 +4,15 @@ description: Follow open marimo notebooks with live kernel status, turn-scoped c
 plugin: pi-marimo
 ---
 
+## Quick reference
+
+- **Use it for:** Keep followed notebook state visible and provide a fixed notebook-context snapshot for each turn.
+- **Enable:** Select `packages/pi-marimo/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
+- **Controls:** `/marimo` auto/off/show/view and notebook pinning. No global shortcut; viewer keys and explicit kernel interrupt below.
+- **Settings:** Session state, no JSON settings; auto follows up to 8 notebooks under cwd, excluding hidden directories.
+- **Requirements, cost & privacy:** Running compatible marimo server; `MARIMO_TOKEN` for protected connections. No inference or execution for observation; summaries enter model input. Notebook execution has its own costs.
+- **Integrations & limits:** Optional background waits, FleetView, footer and Herdr. Observation does not edit notebooks; marimo-pair is separate. Stopping a client job does not interrupt cells.
+
 pi-marimo makes notebook state visible to Pi without asking the model to inspect it repeatedly. It follows open notebooks, adds an outline and attention summary to each turn, and exposes a live notebook view. It does not provide notebook editing tools; marimo-pair remains the separate workflow for inspecting and changing notebook content.
 
 ## Enable, requirements, and costs

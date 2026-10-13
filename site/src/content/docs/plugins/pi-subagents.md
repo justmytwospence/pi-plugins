@@ -4,13 +4,22 @@ description: Delegate bounded tasks to separate Pi processes, inspect their conv
 plugin: pi-subagents
 ---
 
+## Quick reference
+
+- **Use it for:** Delegate independent report-back work to headless Pi processes, with fresh or forked context.
+- **Enable:** Select `packages/pi-subagents/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
+- **Controls:** `subagent` run/status/result/steer/stop; `/subagents`. No global shortcut; fleet and conversation controls below.
+- **Settings:** `pi-subagents.json`: 8 tasks, concurrency 4, depth 2; async off, fresh context, short child cache retention; FleetView on.
+- **Requirements, cost & privacy:** Runnable Pi and provider access; Git only for worktrees, created directly without a helper CLI. Each child uses model tokens; optional paid Jev sees task text. Transcripts/results are stored locally.
+- **Integrations & limits:** Optional `/tasks`, consumed result waits, notebooks, planners and Herdr-child pills. Shared cwd is not isolation; headless workers cannot approve dialogs.
+
 pi-subagents gives the agent a `subagent` tool for work that should return a result to the main conversation. Each child is a separate `pi --mode rpc` process with its own context window. Parallel execution does not imply separate files: children share the selected working directory unless you explicitly request checkout isolation.
 
 ## Enable, requirements, and costs
 
 Select `packages/pi-subagents/src/index.ts` using the [suite installation guide](/guides/install/). The suite enables every entry by default and uses one Git pin for every selected component.
 
-Children need a working Pi runtime and access to their selected model providers. The component documents Pi 0.99 or newer for classifier support; consult the installation guide for the suite's tested host version. Optional `worktree: true` additionally requires the `worktree` command and a suitable Git repository.
+Children need a working Pi runtime and access to their selected model providers. The component documents Pi 0.99 or newer for classifier support; consult the installation guide for the suite's tested host version. Optional `worktree: true` requires Git and a suitable repository; it calls Git directly, not an external worktree helper.
 
 **Costs:** each child consumes model tokens independently. Usage and model cost are included in tool results and session totals. When agent, model, or effort choices remain open, optional Jev selection can make a paid classifier request per task through Pi's model registry. Missing classifier access falls back to defaults; it does not make child model execution free. Disable selection with `jev.enabled: false` if you do not want those classifier calls.
 
@@ -100,7 +109,7 @@ Returned replies are capped at 2000 lines or 50 KB. Full output is saved under `
 
 ## Optional integrations and boundaries
 
-With pi-bg, `/tasks` includes children and `bg_wait` accepts `subagent:<id>` for async work. Waiting returns the bounded worker output and consumes it, suppressing a duplicate completion message. Reading a completed run with `subagent result` also consumes it; running snapshots do not. pi-marimo can contribute notebook pills to the fleet view. pi-herdr can display pending async work through `$bg`; no Herdr pane is needed for ordinary subagents.
+With pi-bg, `/tasks` includes children and `bg_wait` accepts `subagent:<id>` for async work. Waiting returns the bounded worker output and consumes it, suppressing a duplicate completion message. Reading a completed run with `subagent result` also consumes it; running snapshots do not. pi-marimo, pi-plan-mode and pi-herdr can contribute notebook, planner/scout and interactive-child activities. `/tasks` lists all enabled sources; FleetView hosts their pills. Stop is owner-specific: a Herdr-child stop interrupts an awaited turn, never closes its pane; `/stop` remains shell-only. pi-herdr can display pending async work through `$bg`; no Herdr pane is needed for ordinary subagents.
 
 Prefer direct work for routine investigation, diagnosis, and verification. Delegate only genuinely independent tasks with a clear payoff or when requested; avoid redundant audits and delegation merely because work is long or multistep. When delegating report-back tasks, prefer these headless children. Choose pi-herdr's interactive children when a person needs an ongoing session to take over. See [background work](/recipes/background-work/), [activity integration](/architecture/activity/), and [troubleshooting](/guides/troubleshooting/).
 

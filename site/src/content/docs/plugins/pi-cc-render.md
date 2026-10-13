@@ -4,6 +4,15 @@ description: Claude Code-style transcript rendering for Pi, with tool cards, gro
 plugin: pi-cc-render
 ---
 
+## Quick reference
+
+- **Use it for:** Read compact tool cards, grouped calls, rich diffs and thinking summaries.
+- **Enable:** Select `packages/pi-cc-render/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
+- **Controls:** `/ccstyle` panel/on/compact/off/status. No added global shortcut; stock Ctrl+O expands tool detail.
+- **Settings:** `pi-cc-render.json`; CC mode and rich diffs by default. Panel changes save; feature toggles need `/reload`.
+- **Requirements, cost & privacy:** TUI private hooks; fullscreen/SGR mouse for pointer features. No inference calls. Shiki is an optional component dependency but a regular root-suite dependency.
+- **Integrations & limits:** Optional prose/Markdown/footer/context. Exclude self-rendered tools as needed; write wrapper yields to another owner. Do not load pi-cc-extensions too.
+
 ## Purpose and scope
 
 `pi-cc-render` restyles Pi's transcript in the manner of Claude Code. Each tool call collapses to a one-line summary that expands on click or Ctrl+O. Consecutive tool calls are grouped into one card. `edit` and `write` results render as rich side-by-side or unified diffs. A `codemode` call shows its nested tool calls as a tree, including progress while the script is still running. Thinking is compacted, and the provider's latest reasoning summary becomes its title. After a run with two or more tool calls, a per-turn tool summary appears. New sessions open with a startup header. In fullscreen mode, cards react to hover, a click expands them, the mouse wheel scrolls, and a back-to-bottom button appears when you scroll up.
@@ -47,9 +56,9 @@ The file name differs from pi-cc-extensions' `pi-cc-extensions.json`, which this
 
 ## Requirements and costs
 
-The component makes no model or classifier calls and uses no network service, credentials or external executable. It reads its configuration at load time and writes it when the panel changes a value. Diff syntax highlighting loads `@shikijs/cli` lazily, and only when it can be resolved. That package is an optional dependency of the suite. Without it, diffs keep the theme colors but lose syntax highlighting. Hover, click and wheel support need fullscreen mode and a terminal that reports SGR mouse events. In regular mode, Ctrl+O and the keyboard remain available.
+The component makes no model or classifier calls and uses no network service, credentials or external executable. It reads its configuration at load time and writes it when the panel changes a value. Diff syntax highlighting loads `@shikijs/cli` lazily, and only when it can be resolved. It is an optional dependency of this component, but the root suite lists it as a regular dependency. Without it, diffs keep the theme colors but lose syntax highlighting. Hover, click and wheel support need fullscreen mode and a terminal that reports SGR mouse events. In regular mode, Ctrl+O and the keyboard remain available.
 
-The renderer patches private members of Pi's coding-agent and TUI packages: `ToolExecutionComponent`, `AssistantMessageComponent`, and the interactive mode's render path. In the TUI, it also wraps terminal input to see mouse packets. The patches go into a process-wide registry, so `/reload` replaces them instead of stacking them. If a Pi release renames one of these members, the affected feature stops working, but the rest of the extension keeps running. The package tests load the component through Pi 1.1.0's resource loader. They cover configuration, diff and summary rendering, renderer gates and the startup header. These tests do not drive a live terminal.
+The renderer patches private members of Pi's coding-agent and TUI packages: `ToolExecutionComponent`, `AssistantMessageComponent`, and the interactive mode's render path. In the TUI, it also wraps terminal input to see mouse packets. The patches go into a process-wide registry, so `/reload` replaces them instead of stacking them. If a Pi release renames one of these members, the affected feature stops working, but the rest of the extension keeps running. The package tests load the component through Pi 1.2.0's resource loader. They cover configuration, diff and summary rendering, renderer gates and the startup header. These tests do not drive a live terminal.
 
 ## Interactions and coexistence
 

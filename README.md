@@ -2,18 +2,59 @@
 
 A modular suite of 26 extensions for [Pi](https://pi.dev): background work, subagents, planning, review, context awareness and terminal ergonomics. Every component can be enabled on its own; one Git ref versions the whole suite. It is not a fork of Pi.
 
-**[Documentation](https://pi-plugins.vercel.app)** · [Personal project overview](https://www.spencerboucher.com/projects/pi-plugins)
+**[Documentation](https://pi-plugins.vercel.app)** · **[Keymap & focus](https://pi-plugins.vercel.app/guides/keyboard/)** · **[Requirements, cost & privacy](https://pi-plugins.vercel.app/guides/requirements/)** · **[Development & testing](https://pi-plugins.vercel.app/development/)**
 
-## Components
+## Choose your plugins
 
-| Area | Components |
+All 26 references include activation, controls, defaults, requirements, costs and limitations. Start with the workflow you need; companions are optional.
+
+### Run & coordinate
+
+| Plugin | Use it to… |
 | --- | --- |
-| Run and coordinate | pi-bg, pi-subagents, pi-herdr, pi-marimo, pi-btw |
-| Think and review | pi-plan-mode, pi-ask-user-question, pi-diff-review, pi-rewind, pi-tool-gate |
-| Context and cost | pi-cache-guard, pi-auto-effort, pi-status-footer, pi-context |
-| Terminal and editing | pi-vim, pi-stash, pi-copy, pi-next-prompt, pi-select-nav, pi-cc-render, pi-markdown-extras, pi-prose-width, pi-sticky-last-prompt, pi-clear-screen, pi-appearance-resync, pi-herdr-scrollbar-width |
+| [pi-bg](https://pi-plugins.vercel.app/plugins/pi-bg/) | Run jobs and services; wait for results without polling. |
+| [pi-subagents](https://pi-plugins.vercel.app/plugins/pi-subagents/) | Delegate bounded tasks to headless Pi workers. |
+| [pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/) | Coordinate interactive handoffs and Herdr pane metadata. |
+| [pi-marimo](https://pi-plugins.vercel.app/plugins/pi-marimo/) | Follow notebook state and running cells alongside the chat. |
+| [pi-btw](https://pi-plugins.vercel.app/plugins/pi-btw/) | Ask a side question without interrupting the main run. |
 
-Each component has a [reference page](https://pi-plugins.vercel.app/guides/overview/) with its commands, keys, settings, requirements and costs. Some features make paid classifier requests, need Git, Herdr or marimo, or patch non-public TUI internals. Read [requirements and costs](https://pi-plugins.vercel.app/guides/requirements/) before enabling everything.
+### Think & review
+
+| Plugin | Use it to… |
+| --- | --- |
+| [pi-plan-mode](https://pi-plugins.vercel.app/plugins/pi-plan-mode/) | Plan before editing, or compare two constrained planners. |
+| [pi-ask-user-question](https://pi-plugins.vercel.app/plugins/pi-ask-user-question/) | Make choices with previews, notes and free-text answers. |
+| [pi-diff-review](https://pi-plugins.vercel.app/plugins/pi-diff-review/) | Review actual changes and send line comments together. |
+| [pi-rewind](https://pi-plugins.vercel.app/plugins/pi-rewind/) | Restore checkpointed files when rewinding the conversation. |
+| [pi-tool-gate](https://pi-plugins.vercel.app/plugins/pi-tool-gate/) | Choose permission modes; optionally classify risky calls. Not a sandbox. |
+
+### Context & cost
+
+| Plugin | Use it to… |
+| --- | --- |
+| [pi-cache-guard](https://pi-plugins.vercel.app/plugins/pi-cache-guard/) | Review cold-cache sends and optionally trim context. |
+| [pi-auto-effort](https://pi-plugins.vercel.app/plugins/pi-auto-effort/) | Adjust reasoning effort within your manual ceiling. |
+| [pi-status-footer](https://pi-plugins.vercel.app/plugins/pi-status-footer/) | Read Git, context and provider usage at a glance. |
+| [pi-context](https://pi-plugins.vercel.app/plugins/pi-context/) | Inspect what fills the context window, with previews. |
+
+### Terminal & editing
+
+| Plugin | Use it to… |
+| --- | --- |
+| [pi-vim](https://pi-plugins.vercel.app/plugins/pi-vim/) | Edit modally; open files or an external editor from the prompt. |
+| [pi-stash](https://pi-plugins.vercel.app/plugins/pi-stash/) | Set a draft aside and restore it after a command. |
+| [pi-copy](https://pi-plugins.vercel.app/plugins/pi-copy/) | Copy a useful fragment instead of an entire reply. |
+| [pi-next-prompt](https://pi-plugins.vercel.app/plugins/pi-next-prompt/) | Accept an editable next step, never auto-send it. |
+| [pi-select-nav](https://pi-plugins.vercel.app/plugins/pi-select-nav/) | Navigate pickers and task panels without hijacking text fields. |
+| [pi-cc-render](https://pi-plugins.vercel.app/plugins/pi-cc-render/) | Use compact tool cards, rich diffs and thinking summaries. |
+| [pi-markdown-extras](https://pi-plugins.vercel.app/plugins/pi-markdown-extras/) | Render diagrams, admonitions and tidier links. |
+| [pi-prose-width](https://pi-plugins.vercel.app/plugins/pi-prose-width/) | Narrow paragraphs while keeping code and tables wide. |
+| [pi-sticky-last-prompt](https://pi-plugins.vercel.app/plugins/pi-sticky-last-prompt/) | Keep the scrolled-past prompt visible and jump back on click. |
+| [pi-clear-screen](https://pi-plugins.vercel.app/plugins/pi-clear-screen/) | Clear the fullscreen view without deleting context. |
+| [pi-appearance-resync](https://pi-plugins.vercel.app/plugins/pi-appearance-resync/) | Retry delayed terminal light/dark reports. |
+| [pi-herdr-scrollbar-width](https://pi-plugins.vercel.app/plugins/pi-herdr-scrollbar-width/) | Fix one-column wrapping at fullscreen exit inside Herdr. |
+
+Some features make paid classifier requests or patch private TUI hooks. **Ctrl+L and Shift+Tab need explicit stock-key remaps** before the suite shortcuts work; see the [keymap](https://pi-plugins.vercel.app/guides/keyboard/#resolve-the-two-stock-conflicts). Read [requirements](https://pi-plugins.vercel.app/guides/requirements/) before enabling everything.
 
 ## Install
 
@@ -64,7 +105,7 @@ for dir in packages/*/; do (cd "$dir" && npm ci); done
 npm run check
 ```
 
-`npm test` exercises Pi's real resource loader over the full suite, each individually selected entry, standalone component directories, and an empty selection, comparing registrations. It does not start sessions, make model calls or drive the interactive TUI, so focus, rendering, reload and integration behavior still need manual checks. `npm run check` runs the loader test and then every component's own `check`.
+The configured SDK test target is **Pi 1.2.0**. `npm test` checks real loader selection/registration, shortcut conflicts, shared contracts, question routing, local `AgentSession` lifecycle and in-memory TUI input. It makes no live model calls and is not live PTY proof; terminal rendering, focus and reload still need interactive checks. `npm run check` runs these root tests and every component's own `check`, using the root manifest as the inventory.
 
 Never run `npm run eval` without explicit authorization: evaluations make live, paid classifier calls.
 

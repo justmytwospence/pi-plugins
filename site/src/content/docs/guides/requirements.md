@@ -8,7 +8,7 @@ This is a static Astro/Starlight site. Reading it, searching it and building it 
 
 Installing a Pi extension is different: it runs code inside your agent process. A shell task can run whatever command you give it, and a planner or subagent can consume your configured model access.
 
-The suite is tested against Pi 1.1.0. Classifier-dependent components generally require Pi 0.99 or later; next-prompt requires Pi 1.0 or later. Private terminal hooks can change independently of those minimums.
+The configured SDK test target is **Pi 1.2.0**, covering loader selection, local session lifecycle and memory TUI input—not a live PTY compatibility matrix. Classifier-dependent components generally require Pi 0.99 or later; next-prompt requires Pi 1.0 or later. Private terminal hooks can change independently of those minimums.
 
 ## What needs something else?
 
@@ -16,15 +16,15 @@ The suite is tested against Pi 1.1.0. Classifier-dependent components generally 
 | --- | --- |
 | Background jobs | A shell environment with `bash`; commands may need their own tools or credentials. Process groups are used for stopping work. |
 | Subagents | A runnable `pi` command and usable model/provider configuration. Child sessions make model calls. |
-| Subagent worktrees | The external `worktree` CLI, only when `worktree: true` is requested. Not needed for ordinary delegation. |
-| Plan mode | Credentials or subscription access for the selected planner and helper models. One or two planner sessions cost separately. Optional tools bring their own requirements. |
+| Subagent worktrees | Git and a suitable repository, only when `worktree: true` is requested. Subagents use `git worktree add` directly; no external worktree helper is required. |
+| Plan mode | Credentials or subscription access for the selected planner and helper models. The `/planners` workflow runs two planner sessions, each with separate usage; main-session plan mode does not start them. Optional tools bring their own requirements. |
 | Diff review and rewind | A Git repository. Snapshots include non-ignored untracked files and are not a backup service. |
 | Herdr integration | An interactive Pi in Herdr. Herdr’s own Pi integration owns working/blocked/idle state. PR metadata also needs an authenticated `gh` command. |
-| Herdr worktree children | The external `worktree` CLI. Normal child tabs do not require a new checkout. |
+| Herdr worktree children | Git plus the active Herdr socket's worktree create/open operations. No external worktree CLI; normal child tabs share the existing checkout. |
 | Notebook observation | A running marimo server with the registry/session/SSE interfaces the extension uses. Token-protected servers need `MARIMO_TOKEN`. Editing is a separate marimo-pair workflow. |
 | Status footer | Optional provider quota sources; its row icons are Nerd Font glyphs that need terminal font support. Basic session rows do not require a Claude Code account. |
 | Clipboard picker | Pi’s clipboard support in your terminal environment. Optional Jev ranking. |
-| CC render | Optional `@shikijs/cli` for diff syntax highlighting; hover, click and wheel need fullscreen mode and SGR mouse reporting. Patches private Pi rendering members. |
+| CC render | `@shikijs/cli` is an optional dependency of the component but a regular dependency of the root suite; it supplies diff syntax highlighting; hover, click and wheel need fullscreen mode and SGR mouse reporting. Patches private Pi rendering members. |
 | Markdown extras | `grok-mermaid` (a suite dependency) for diagrams; without it diagram fences pass through unchanged. |
 | Terminal refinements | Relevant TUI hooks and terminal behavior; clear-screen needs fullscreen mode, scrollbar-width only acts inside Herdr. |
 
