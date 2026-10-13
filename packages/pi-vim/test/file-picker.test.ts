@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { displayPath, FilePicker, matchSegment, mention, parseQuery } from "../src/file-picker.js";
+import { mkdtemp, mkdir, rm, writeFile, utimes } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { displayPath, FilePicker, matchSegment, mention, newestModified, parseQuery } from "../src/file-picker.js";
 
 const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
 const tick = () => new Promise((r) => setTimeout(r, 5));
@@ -108,6 +111,58 @@ describe("file picker", () => {
     const picker = new FilePicker("/p", theme, () => {}, (t) => { result = t; }, async () => []);
     picker.handleInput("\x1b");
     assert.equal(result, undefined);
+  });
+});
+
+describe("Downloads recency", () => {
+  it("sorts newest first with deterministic ties and unreadable entries last", async () => {
+    const entries = ["missing-z", "old", "new-b", "new-a", "missing-a"];
+    const result = await newestModified("/fixture", entries, async (path) => {
+      if (path.includes("missing")) throw new Error("gone");
+      return path.endsWith("old") ? 10 : 20;
+    });
+    assert.deepEqual(result, ["new-a", "new-b", "old", "missing-a", "missing-z"]);
+    assert.deepEqual(entries, ["missing-z", "old", "new-b", "new-a", "missing-a"]);
+  });
+
+  it("bounds concurrent metadata reads", async () => {
+    let active = 0, peak = 0;
+    await newestModified("/fixture", Array.from({ length: 100 }, (_, i) => String(i)), async () => {
+      peak = Math.max(peak, ++active);
+      await tick();
+      active--;
+      return 1;
+    });
+    assert.ok(peak <= 16);
+    assert.equal(active, 0);
+  });
+
+  it("resolves fuzzy Downloads aliases, retains recency while filtering, and inserts the newest match", async (t) => {
+    const home = await mkdtemp(join(tmpdir(), "picker-recency-"));
+    t.after(() => rm(home, { recursive: true, force: true }));
+    const downloads = join(home, "Downloads");
+    await mkdir(downloads);
+    for (const [name, time] of [["invoice.pdf", 10], ["zinvoice.pdf", 20]] as const) {
+      const path = join(downloads, name);
+      await writeFile(path, "fixture");
+      await utimes(path, time, time);
+    }
+    let chosen: string | undefined;
+    let reads = 0;
+    const picker = new FilePicker("/fixture", theme, () => {}, (text) => { chosen = text; }, async (root) => {
+      if (root !== downloads) return [];
+      reads++;
+      return ["invoice.pdf", "zinvoice.pdf"];
+    }, (dir) => dir === home ? ["Downloads"] : [], home);
+    for (const ch of "~/dl/") picker.handleInput(ch);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.match(picker.render(120).join("\n"), /> ~\/Downloads\/zinvoice.pdf/);
+    for (const ch of "invoice") picker.handleInput(ch);
+    assert.match(picker.render(120).join("\n"), /> ~\/Downloads\/zinvoice.pdf/);
+    assert.match(picker.render(120).join("\n"), /newest modified first/);
+    assert.equal(reads, 1);
+    picker.handleInput("\r");
+    assert.equal(chosen, "@~/Downloads/zinvoice.pdf ");
   });
 });
 

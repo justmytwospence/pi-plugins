@@ -13,6 +13,7 @@
  */
 import { spawn } from "node:child_process";
 import { readdirSync, statSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
@@ -161,6 +162,28 @@ function listOneLevel(root: string): string[] {
   }
 }
 
+/** Metadata is read once per picker source, asynchronously and with bounded fan-out. */
+export async function newestModified(
+  root: string,
+  entries: string[],
+  modified: (path: string) => Promise<number> = async (path) => (await stat(path)).mtimeMs,
+): Promise<string[]> {
+  const times = new Map<string, number>();
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(16, entries.length) }, async () => {
+    for (let i = next++; i < entries.length; i = next++) {
+      const entry = entries[i];
+      try {
+        const time = await modified(join(root, entry));
+        times.set(entry, Number.isFinite(time) ? time : -Infinity);
+      } catch {
+        times.set(entry, -Infinity);
+      }
+    }
+  }));
+  return [...entries].sort((a, b) => (times.get(b)! - times.get(a)!) || a.localeCompare(b));
+}
+
 type Source = { root: string; prefix: string; project: boolean };
 type Match = { label: string; abs: string };
 
@@ -187,6 +210,7 @@ export class FilePicker implements Component, Focusable {
   private selected = 0;
   private loading = false;
   private noDirectory = false;
+  private recentFirst = false;
 
   constructor(
     private readonly cwd: string,
@@ -215,10 +239,17 @@ export class FilePicker implements Component, Focusable {
     return { sources, term };
   }
 
+  private inDownloads(root: string): boolean {
+    const downloads = join(this.home, "Downloads");
+    return root === downloads || root.startsWith(downloads + sep);
+  }
+
   private list(source: Source): Promise<string[]> | string[] {
     const cached = this.cache.get(source.root);
     if (cached) return cached;
-    const pending = this.lister(source.root, source.project);
+    const pending = this.lister(source.root, source.project).then((entries) =>
+      this.inDownloads(source.root) ? newestModified(source.root, entries) : entries,
+    );
     this.cache.set(source.root, pending);
     void pending.then((entries) => this.cache.set(source.root, entries));
     return pending;
@@ -228,6 +259,7 @@ export class FilePicker implements Component, Focusable {
     const query = this.input.getValue();
     const parsed = this.sources(query);
     this.noDirectory = parsed === undefined;
+    this.recentFirst = parsed?.sources.length === 1 && this.inDownloads(parsed.sources[0].root);
     if (parsed === undefined) {
       this.loading = false;
       this.matches = [];
@@ -261,7 +293,7 @@ export class FilePicker implements Component, Focusable {
       }
     });
     // Best score first; ties go to the project, then to shorter paths.
-    if (term) ranked.sort((a, b) => a.score - b.score || a.order - b.order || a.match.label.length - b.match.label.length);
+    if (term && !this.recentFirst) ranked.sort((a, b) => a.score - b.score || a.order - b.order || a.match.label.length - b.match.label.length);
     this.matches = ranked.slice(0, 500).map((r) => r.match);
     this.selected = 0;
   }
@@ -308,7 +340,7 @@ export class FilePicker implements Component, Focusable {
     const status = this.loading
       ? "searching..."
       : this.matches.length ? `${this.selected + 1}/${this.matches.length}` : this.noDirectory ? "no matching directory" : "no matches";
-    lines.push(t.fg("dim", truncateToWidth(`${status}  enter insert  tab descend  ~/ / ../ search elsewhere  esc cancel`, width)));
+    lines.push(t.fg("dim", truncateToWidth(`${status}${this.recentFirst ? " · newest modified first" : ""}  enter insert  tab descend  ~/ / ../ search elsewhere  esc cancel`, width)));
     return lines;
   }
 }
