@@ -145,8 +145,36 @@ function requestAnimationRender(patch: Patch): void {
 	getToolMouseTui()?.requestRender?.();
 }
 
+/** Kitty (APC `G`) or iTerm2 (OSC 1337 File) image sequence: pi-tui's Image puts one on a single row. */
+const IMAGE_SEQUENCE_RE = /\x1b_G|\x1b\]1337;File=/;
+
+/** Text rows of a child paint. Image rows are dropped: they are drawn once, below the group, by toolImageLines. */
 function visibleLines(lines: string[]): string[] {
-	return lines.filter((line) => stripAnsi(line).trim());
+	return lines.filter((line) => !IMAGE_SEQUENCE_RE.test(line) && stripAnsi(line).trim());
+}
+
+/** Indent of image rows under a group, lining them up with the child rows' content. */
+const IMAGE_INDENT = "   ";
+
+/**
+ * Images in a tool's result (pi's ToolExecutionComponent keeps them in imageComponents, already
+ * filtered by the showImages setting and the terminal's capabilities), each after a blank row.
+ * Group rows summarise their children, so without this an image read inside a group never draws.
+ */
+function toolImageLines(tool: any, width: number): string[] {
+	const images: unknown[] = Array.isArray(tool?.imageComponents) ? tool.imageComponents : [];
+	const lines: string[] = [];
+	for (const image of images) {
+		let rendered: unknown;
+		try {
+			rendered = (image as Component | undefined)?.render?.(Math.max(1, width - IMAGE_INDENT.length));
+		} catch {
+			continue;
+		}
+		if (!Array.isArray(rendered) || rendered.length === 0) continue;
+		lines.push("", ...rendered.map((line) => IMAGE_INDENT + String(line)));
+	}
+	return lines;
 }
 
 function stripLeadingSpaces(line: string, count: number): string {
@@ -334,6 +362,9 @@ export class ToolGroupComponent extends Container {
 	private settledCacheHit(width: number): string[] | undefined {
 		const cache = this.settledCache;
 		if (!cache || this._expanded) return;
+		// An image can change without a new result (a JPEG draws once pi's PNG transcoder has loaded), and
+		// Image caches its own rows, so groups holding one always repaint.
+		if ((this.children as any[]).some((tool) => tool?.imageComponents?.length)) return;
 		if (
 			cache.width !== width ||
 			cache.hover !== this.hintHovered ||
@@ -473,6 +504,7 @@ export class ToolGroupComponent extends Container {
 				lines.push(paddedBackgroundRow(theme, backgroundSlot, line, width));
 			}
 			lines.push(paddedBackgroundRow(theme, backgroundSlot, "", width));
+			for (const tool of this.children) lines.push(...toolImageLines(tool, width));
 			this.expandedPaintCache = {
 				width,
 				hover: this.hintHovered,
@@ -482,7 +514,10 @@ export class ToolGroupComponent extends Container {
 				paints: childPaints ?? [],
 				lines,
 			};
-		} else if (counts.pending === 0) {
+		} else {
+			for (const tool of this.children) lines.push(...toolImageLines(tool, width));
+		}
+		if (!this._expanded && counts.pending === 0) {
 			this.storeSettledCache(width, lines);
 		}
 		return lines;

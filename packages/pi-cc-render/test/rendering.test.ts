@@ -164,3 +164,57 @@ describe("startup header", () => {
     expect(plain(narrow).every((line) => line.length <= 30)).toBe(true);
   });
 });
+
+describe("tool groups", () => {
+  const IMAGE_ROW = "\x1b_Ga=T,f=100,q=2,C=1;AAAA\x1b\\";
+
+  async function groupedTools() {
+    const { ToolExecutionComponent } = await import("@earendil-works/pi-coding-agent");
+    const { Container } = await import("@earendil-works/pi-tui");
+    const { installToolGrouping } = await import("../src/renderer/tool/grouping.ts");
+    const hooks = installToolGrouping(() => true);
+    hooks.setTheme(theme);
+    const tool = (toolName: string, body: string[], images: string[][] = []) => {
+      const value = Object.create(ToolExecutionComponent.prototype);
+      Object.assign(value, {
+        toolName,
+        toolCallId: `${toolName}-1`,
+        args: { path: "a.png", command: "echo" },
+        result: { content: [{ type: "text", text: "ok" }], isError: false },
+        isPartial: false,
+        executionStarted: true,
+        expanded: false,
+        imageComponents: images.map((rows) => ({ render: () => rows })),
+        // A native paint: the card, then each image after a blank row.
+        render: () => [...body, ...images.flatMap((rows) => ["", ...rows])],
+        invalidate: () => {},
+        setExpanded: () => {},
+      });
+      return value;
+    };
+    const root = new Container();
+    root.addChild(tool("bash", ["✓ Bash echo"]));
+    root.addChild(tool("read", ["✓ Read a.png", "Read image file [image/png]"], [[IMAGE_ROW, "", ""]]));
+    const group = root.children[0] as any;
+    return { hooks, group };
+  }
+
+  test("a group draws its children's images, collapsed and expanded, once each", async () => {
+    const { hooks, group } = await groupedTools();
+    try {
+      expect(group.constructor.name).toBe("ToolGroupComponent");
+      for (const expanded of [false, true, false]) {
+        group.setExpanded(expanded);
+        const lines: string[] = group.render(80);
+        const imageRows = lines.filter((line) => line.includes("\x1b_G"));
+        expect(imageRows).toEqual([`   ${IMAGE_ROW}`]);
+        const at = lines.indexOf(imageRows[0]);
+        // A blank row before the image and its reserved rows after it, all at the end of the card.
+        expect(lines[at - 1]).toBe("");
+        expect(lines.slice(at + 1)).toEqual(["   ", "   "]);
+      }
+    } finally {
+      hooks.shutdown();
+    }
+  });
+});
