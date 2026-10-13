@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { displayPath, FilePicker, matchSegment, mention, parseQuery } from "../src/file-picker.js";
 
 const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
-const tick = () => new Promise((r) => setImmediate(r));
+const tick = () => new Promise((r) => setTimeout(r, 5));
 
 describe("file picker", () => {
   const tree: Record<string, string[]> = {
@@ -52,6 +52,7 @@ describe("file picker", () => {
     const picker = new FilePicker(process.cwd(), theme, () => {}, (t) => { result = t; }, lister);
     await tick();
     for (const ch of "srcidx") picker.handleInput(ch);
+    await tick();
     assert.match(picker.render(80).join("\n"), /> src\/index\.ts/);
     picker.handleInput("\r");
     assert.equal(result, "@src/index.ts ");
@@ -59,6 +60,7 @@ describe("file picker", () => {
     const again = new FilePicker(process.cwd(), theme, () => {}, (t) => { result = t; }, lister);
     await tick();
     again.handleInput("s");
+    await tick();
     again.handleInput("\t");
     await tick();
     assert.match(again.render(80).join("\n"), /\.\/src\/index\.ts/);
@@ -78,6 +80,27 @@ describe("file picker", () => {
     assert.match(picker.render(80).join("\n"), /> \/Users\/invoice\.pdf/);
     picker.handleInput("\r");
     assert.equal(result, "@/Users/invoice.pdf ");
+  });
+
+  it("searches home as well for a plain query, ranked together", async () => {
+    let result: string | undefined;
+    const lister = async (root: string) =>
+      root === "/h/proj" ? ["src/dl-worker.ts", "docs/"] : root === "/h" ? ["Downloads/", "Downloads/a.pdf", "proj/docs/"] : [];
+    const picker = new FilePicker("/h/proj", theme, () => {}, (t) => { result = t; }, lister, subdirs, "/h");
+    for (const ch of "download") picker.handleInput(ch);
+    await tick();
+    const shown = picker.render(80).join("\n");
+    assert.match(shown, /> ~\/Downloads\//);
+    picker.handleInput("\r");
+    assert.equal(result, "@~/Downloads/ ");
+
+    // Entries inside the project appear once, with project-relative labels.
+    const docs = new FilePicker("/h/proj", theme, () => {}, () => {}, lister, subdirs, "/h");
+    for (const ch of "docs") docs.handleInput(ch);
+    await tick();
+    const lines = docs.render(80).join("\n");
+    assert.match(lines, /> docs\//);
+    assert.doesNotMatch(lines, /~\/proj\/docs/);
   });
 
   it("cancels on escape", async () => {

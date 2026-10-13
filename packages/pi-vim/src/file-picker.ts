@@ -7,6 +7,8 @@
  * directory up to its last slash, so `~/Downloads/inv` finds invoices there.
  * Each directory segment is itself matched fuzzily when no directory has that
  * exact name, so `~/dl/inv` also works (dl -> Downloads).
+ * Once something is typed, a plain query also searches home (four levels,
+ * no hidden entries), so `download` finds `~/Downloads` from any project.
  * Tab on a directory descends into it.
  */
 import { spawn } from "node:child_process";
@@ -17,6 +19,7 @@ import {
   type Component,
   type Focusable,
   fuzzyFilter,
+  fuzzyMatch,
   Input,
   matchesKey,
   truncateToWidth,
@@ -27,8 +30,8 @@ export type PickerTheme = { fg(color: string, text: string): string; bold(text: 
 /** Entries below `root`, relative, directories ending in `/`. */
 export type Lister = (root: string, project: boolean) => Promise<string[]>;
 
-const MAX_RESULTS = 20000;
-const OUTSIDE_DEPTH = 5;
+const MAX_RESULTS = 50000;
+const OUTSIDE_DEPTH = 4;
 const VISIBLE = 12;
 
 /** Subdirectory names of `dir` (empty when unreadable). */
@@ -116,10 +119,17 @@ export function mention(path: string): string {
   return /\s/.test(path) ? `@"${path}" ` : `@${path} `;
 }
 
-/** List with `fd` (respects .gitignore); fall back to one directory level. */
+/**
+ * List with `fd` (respects .gitignore); fall back to one directory level.
+ * The project is listed in full, hidden files included. Anything else stops
+ * at OUTSIDE_DEPTH, and home and `/` skip hidden entries (their dot
+ * directories hold caches large enough to crowd out everything else; type
+ * `~/.config/` to search one).
+ */
 export const defaultLister: Lister = (root, project) =>
   new Promise((done) => {
-    const args = ["--hidden", "--exclude", ".git", "--max-results", String(MAX_RESULTS), "--strip-cwd-prefix", "--type", "f", "--type", "d"];
+    const args = ["--exclude", ".git", "--max-results", String(MAX_RESULTS), "--strip-cwd-prefix", "--type", "f", "--type", "d"];
+    if (project || (root !== homedir() && root !== "/")) args.push("--hidden");
     if (!project) args.push("--max-depth", String(OUTSIDE_DEPTH));
     const out: string[] = [];
     let buffer = "";
@@ -151,11 +161,29 @@ function listOneLevel(root: string): string[] {
   }
 }
 
+type Source = { root: string; prefix: string; project: boolean };
+type Match = { label: string; abs: string };
+
+/**
+ * Fuzzy score of `label` for a whitespace/slash-separated term, lower is
+ * better; undefined when a token does not match. Same rules as Pi's
+ * `fuzzyFilter`, but the score is kept so several sources can be merged.
+ */
+export function score(label: string, term: string): number | undefined {
+  let total = 0;
+  for (const token of term.split(/[\s/]+/).filter(Boolean)) {
+    const match = fuzzyMatch(token, label);
+    if (!match.matches) return undefined;
+    total += match.score;
+  }
+  return total;
+}
+
 export class FilePicker implements Component, Focusable {
   focused = true;
   private input = new Input({ prompt: "file: " });
   private cache = new Map<string, Promise<string[]> | string[]>();
-  private matches: { label: string; abs: string }[] = [];
+  private matches: Match[] = [];
   private selected = 0;
   private loading = false;
   private noDirectory = false;
@@ -167,43 +195,74 @@ export class FilePicker implements Component, Focusable {
     private readonly done: (text: string | undefined) => void,
     private readonly lister: Lister = defaultLister,
     private readonly subdirs: SubdirReader = readSubdirs,
+    private readonly home: string = homedir(),
   ) {
     this.refresh();
   }
 
+  /**
+   * Where a query looks. An explicit directory is searched alone; a plain
+   * query searches the project and, once something is typed, home as well,
+   * so `download` finds `~/Downloads` from any project.
+   */
+  private sources(query: string): { sources: Source[]; term: string } | undefined {
+    const { root, prefix, term } = parseQuery(query, this.cwd, this.home, this.subdirs);
+    if (root === undefined) return undefined;
+    const sources: Source[] = [{ root, prefix, project: root === this.cwd }];
+    if (prefix === "" && term !== "" && this.cwd !== this.home) {
+      sources.push({ root: this.home, prefix: "~/", project: false });
+    }
+    return { sources, term };
+  }
+
+  private list(source: Source): Promise<string[]> | string[] {
+    const cached = this.cache.get(source.root);
+    if (cached) return cached;
+    const pending = this.lister(source.root, source.project);
+    this.cache.set(source.root, pending);
+    void pending.then((entries) => this.cache.set(source.root, entries));
+    return pending;
+  }
+
   private refresh(): void {
     const query = this.input.getValue();
-    const { root, prefix, term } = parseQuery(query, this.cwd, homedir(), this.subdirs);
-    this.noDirectory = root === undefined;
-    if (root === undefined) {
+    const parsed = this.sources(query);
+    this.noDirectory = parsed === undefined;
+    if (parsed === undefined) {
       this.loading = false;
       this.matches = [];
       return;
     }
-    const cached = this.cache.get(root);
-    if (Array.isArray(cached)) {
-      this.apply(cached, root, prefix, term);
+    const lists = parsed.sources.map((source) => this.list(source));
+    if (lists.every(Array.isArray)) {
+      this.apply(parsed.sources, lists as string[][], parsed.term);
       return;
     }
     this.loading = true;
-    const pending = cached ?? this.lister(root, root === this.cwd);
-    this.cache.set(root, pending);
-    void pending.then((entries) => {
-      this.cache.set(root, entries);
+    void Promise.all(lists).then((entries) => {
       if (this.input.getValue() !== query) return;
-      this.loading = false;
-      this.apply(entries, root, prefix, term);
+      this.apply(parsed.sources, entries, parsed.term);
       this.requestRender();
     });
   }
 
-  private apply(entries: string[], root: string, prefix: string, term: string): void {
+  private apply(sources: Source[], lists: string[][], term: string): void {
     this.loading = false;
-    const filtered = term ? fuzzyFilter(entries, term, (e) => e) : entries;
-    this.matches = filtered.slice(0, 500).map((e) => ({
-      label: prefix + e,
-      abs: join(root, e) + (e.endsWith("/") ? sep : ""),
-    }));
+    const ranked: { match: Match; score: number; order: number }[] = [];
+    const seen = new Set<string>();
+    sources.forEach((source, order) => {
+      for (const entry of lists[order] ?? []) {
+        const abs = join(source.root, entry); // keeps a directory's trailing slash
+        if (seen.has(abs)) continue;
+        seen.add(abs);
+        const label = source.prefix + entry;
+        const value = term ? score(label, term) : 0;
+        if (value !== undefined) ranked.push({ match: { label, abs }, score: value, order });
+      }
+    });
+    // Best score first; ties go to the project, then to shorter paths.
+    if (term) ranked.sort((a, b) => a.score - b.score || a.order - b.order || a.match.label.length - b.match.label.length);
+    this.matches = ranked.slice(0, 500).map((r) => r.match);
     this.selected = 0;
   }
 
@@ -215,13 +274,13 @@ export class FilePicker implements Component, Focusable {
       this.selected = Math.min(this.matches.length - 1, this.selected + 1);
     } else if (matchesKey(data, "enter")) {
       const entry = this.matches[this.selected];
-      if (entry) this.done(mention(displayPath(entry.abs, this.cwd)));
+      if (entry) this.done(mention(displayPath(entry.abs, this.cwd, this.home)));
       return;
     } else if (matchesKey(data, "tab")) {
       const entry = this.matches[this.selected];
       if (!entry) return;
       // Descend into a directory (or complete a file), keeping the query explicit.
-      const shown = displayPath(entry.abs, this.cwd);
+      const shown = displayPath(entry.abs, this.cwd, this.home);
       this.input.setValue(/^(\/|~|\.\.?\/)/.test(shown) ? shown : `./${shown}`);
       this.refresh();
     } else {
