@@ -32,25 +32,25 @@ No `npm install` is needed to run it: the package.json has no `dependencies`; Pi
 
 ## Cold-cache warning
 
-A provider keeps a cached prompt prefix for its TTL from the start of the last request that used it. The TTL comes from the model's `promptCache` lifetime in Pi's model metadata (`short`, or `long` with `PI_CACHE_RETENTION=long`; for Anthropic, 5 minutes or 1 hour). The first prompt after that writes the whole conversation to the cache again, at the model's cache-write price from Pi's catalog (always 2x input for the 1-hour tier) instead of the much cheaper cache-read price. When that rewrite would cost at least `warn.minCost` (default $0.50 at API prices; `warn.minTokens` tokens when Pi has no prices for the model), the prompt waits for a choice.
+A provider keeps a cached prompt prefix for its TTL from the start of the last request that used it. The TTL comes from the model's `promptCache` lifetime in Pi's model metadata (`short`, or `long` with `PI_CACHE_RETENTION=long`; for Anthropic, 5 minutes or 1 hour). The first prompt after that writes the whole conversation to the cache again, at the model's cache-write price from Pi's catalog (always 2x input for the 1-hour tier) instead of the much cheaper cache-read price. When that rewrite is at least `warn.minTokens` tokens (default 100,000; `0` asks on every cold cache), the prompt waits for a choice. The question counts tokens, not dollars, so it reads the same on a subscription as on API billing.
 
 Example of the question:
 
 ```
-Prompt cache miss. The prompt cache expired 10m ago: this prompt re-caches 601k tokens (~$2.88 at API prices).
--> Send anyway (~$3.00)
+Prompt cache miss. The prompt cache expired 10m ago: this prompt re-caches 601k tokens.
+-> Send anyway (re-caches 601k tokens)
    Send, and stop asking in this session
-   Compact with Jev, then send it (~1s, ~$0)
-   Compact with a summary, then send it (up to ~$2.40)
-   Start a new session with this prompt (no history, ~$0)
+   Compact with Jev, then send it (~1s, no summary model)
+   Compact with a summary, then send it (summary reads up to 601k tokens)
+   Start a new session with this prompt (no history to re-cache)
    Keep the prompt in the editor
 ```
 
-The headline cost is what the miss adds over a cache hit. The costs in the options are each path's total.
+The token counts are the conversation the miss re-sends uncached: sending writes it to the cache again, a summary reads it once and continues on a small context, Jev's compaction needs no summary model, and a new session starts empty.
 
 - **Send anyway**, or **Send, and stop asking in this session.** Sending is first, so Enter sends as if nothing had asked. The second turns the question off for this session; the clock and the Herdr token keep running.
 - **Compact with Jev** (when Jev is ready). Jev judges every message and tool call against the held prompt, and the summary is written in code from its choices: no LLM reads the history. If Jev fails, nothing is compacted and the prompt goes back in the editor with the reason.
-- **Compact with a summary** (labeled **Compact first** without Jev). Asks what the summary should keep: Pi's default summary, a summary focused on the held prompt (keep what it needs, drop the rest), or your own guidance. It then runs Pi's compaction and sends the prompt onto the small context. Compacting reads the history once at input price instead of a cache write; with Jev filtering on (`compact.filter`), Pi's summarizer reads only what Jev did not drop, so the price shown is an upper bound. If compaction fails (for example the session is too small), the prompt goes back in the editor.
+- **Compact with a summary** (labeled **Compact first** without Jev). Asks what the summary should keep: Pi's default summary, a summary focused on the held prompt (keep what it needs, drop the rest), or your own guidance. It then runs Pi's compaction and sends the prompt onto the small context. Compacting reads the history once, uncached, then continues on a small context; with Jev filtering on (`compact.filter`), Pi's summarizer reads only what Jev did not drop, so the token count shown is an upper bound. If compaction fails (for example the session is too small), the prompt goes back in the editor.
 - **Start a new session.** Opens a new session linked to this one (as its parent), on the same model and thinking level, and sends the prompt there, images included. Also available as `/cache-guard fresh`, which takes the editor's text.
 - **Keep the prompt in the editor.** Esc does the same, and spends nothing. Images attached to the held prompt are not put back.
 
@@ -133,7 +133,7 @@ Pi reads every setting except `warm` and `warn.confirmSeconds`, which are for po
 ```json
 {
   "enabled": true,
-  "warn": { "enabled": true, "minCost": 0.5, "minTokens": 100000, "idleMinutes": 180 },
+  "warn": { "enabled": true, "minTokens": 100000, "idleMinutes": 180 },
   "herdr": { "enabled": true },
   "jev": { "enabled": true, "provider": "", "model": "", "timeoutMs": 2500 },
   "trim": { "enabled": true, "minChars": 12000, "readMinChars": 50000, "maxBlocks": 150, "stateBudgetChars": 60000,
@@ -142,14 +142,14 @@ Pi reads every setting except `warm` and `warn.confirmSeconds`, which are for po
 }
 ```
 
-- `minTokens` applies only to models Pi has no prices for.
+- `warn.minTokens` is the cold-cache question's threshold for every model; `0` asks on every cold cache. Pi ignores `warn.minCost` (the other ports still use it when they know prices). The Herdr `cache` token uses the same threshold.
 - An empty `jev.provider` picks the first provider that works; an empty `jev.model` uses that provider's default from the table.
 - `trim.keepThreshold` is the probability at which a block is kept. `compact.timeoutMs` is per Jev request.
 - `"enabled": false` turns everything off, Jev included; `"jev": { "enabled": false }` turns off only the Jev parts (and the tips).
 
 ## Requirements and costs
 
-- The warning, clock and notices need nothing external. They use Pi's model metadata for TTLs and prices; costs are estimates at API list prices.
+- The warning, clock and notices need nothing external. They use Pi's model metadata for TTLs; the transcript notices' costs are estimates at API list prices.
 - Jev is optional. It needs a Pi with classifier models (Pi 0.99 or newer) and credentials for one of the providers above. Each trim makes one classifier request, each Jev compaction one request per batch, and `/cache-guard jev` sends a one-question probe. These requests can be billed.
 - Filtered `/compact` and automatic compaction still call your current model through Pi's summarizer, as Pi's compaction does.
 - On disk: it reads the settings files above; writes full tool output under `~/.pi/agent/cache-guard/tool-output/` when it trims; and writes `~/.pi/agent/cache-guard.json` only from `/cache-guard jev`. In the session it appends `cache-guard:jev` decision entries and `cache-guard-notice` entries (never sent to the model).

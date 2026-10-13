@@ -10,13 +10,13 @@ Cache guard gives you a choice before sending a prompt that is likely to re-cach
 
 Use [Install & select](/guides/install/) with `packages/pi-cache-guard/src/index.ts`. The suite enables every entry by default; selected components share one Git pin. Interactive dialogs need a UI. Jev features require Pi 0.99 or newer, classifier credentials and permission to send conversation excerpts to that provider.
 
-**Jev is paid**, including the connectivity check performed by `/cache-guard jev`. A summary produced by Pi also uses the configured summarization model. Menu estimates are not invoices or subscription charges, and an approximately zero dollar label does not mean the classifier is free. See [Cache and cost](/recipes/cache-cost/) before enabling automated context reduction.
+**Jev is paid**, including the connectivity check performed by `/cache-guard jev`. A summary produced by Pi also uses the configured summarization model. The menu counts conversation tokens, not classifier requests: "no summary model" does not mean the classifier is free. See [Cache and cost](/recipes/cache-cost/) before enabling automated context reduction.
 
 ## Decide what to send
 
-The default warning threshold is an estimated $0.50 additional cache-miss cost. For models without prices, the fallback threshold is 100,000 tokens. Anthropic's clock uses five minutes, or one hour with `PI_CACHE_RETENTION=long`. For providers without a known TTL, the default three-hour idle threshold describes a possible miss rather than a certain expiry. A model switch can also trigger a warning.
+The warning threshold is `warn.minTokens`: the dialog appears when a cold cache would re-send at least that many tokens (default 100,000; `0` asks on every cold cache). It counts tokens rather than dollars for every model, and `warn.minCost` is ignored in Pi. Anthropic's clock uses five minutes, or one hour with `PI_CACHE_RETENTION=long`. For providers without a known TTL, the default three-hour idle threshold describes a possible miss rather than a certain expiry. A model switch can also trigger a warning.
 
-The dialog lets you send, send and stop asking for the session, compact first, open a linked fresh session, or keep the prompt in the editor. With Jev available, classifier-only compaction and a conventional summary are separate choices. Enter defaults to sending; Esc keeps the prompt. The headline estimates the extra cost over a cache hit, while option labels estimate each path's total.
+The dialog lets you send, send and stop asking for the session, compact first, open a linked fresh session, or keep the prompt in the editor. With Jev available, classifier-only compaction and a conventional summary are separate choices. Enter defaults to sending; Esc keeps the prompt. The headline and option labels give the tokens each path re-sends uncached.
 
 Commands, shell input, steering, running-agent follow-ups and extension-generated input are not held. Images attached to a held prompt are not restored to the editor: check attachments before resending.
 
@@ -39,7 +39,6 @@ For warning-only operation, place this in `.pi/cache-guard.json`:
   "enabled": true,
   "warn": {
     "enabled": true,
-    "minCost": 0.5,
     "minTokens": 100000,
     "idleMinutes": 180
   },

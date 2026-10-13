@@ -24,7 +24,7 @@ Keep the distinctions clear:
 
 ## Decide when the cache is cold
 
-After enough idle time, a large conversation can be expensive to write into the cache again. Cache guard holds a user prompt when its estimated extra cost meets `warn.minCost` (default $0.50). For unpriced models, it uses `warn.minTokens` (default 100,000). Unknown TTLs use an idle-time warning instead of a guaranteed expiry claim.
+After enough idle time, a large conversation can be expensive to write into the cache again. Cache guard holds a user prompt when the conversation it would re-cache reaches `warn.minTokens` (default 100,000; `0` always asks). The question counts tokens, not dollars. Unknown TTLs use an idle-time warning instead of a guaranteed expiry claim.
 
 The menu lets you send, stop asking for the session, compact, start fresh or keep the prompt in the editor. Esc keeps the text without sending. Images attached to a held prompt are not restored to the editor.
 

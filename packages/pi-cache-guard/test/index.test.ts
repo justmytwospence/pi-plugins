@@ -155,7 +155,7 @@ describe("extension", () => {
     await h.emit("session_start", {});
     h.ui.answer = undefined; // escape
     expect(await h.emit("input", input("next step please"))).toEqual({ action: "handled" });
-    expect(h.ui.confirms[0]).toContain("expired 10m ago: this prompt re-caches 601k tokens (~$2.88 at API prices)");
+    expect(h.ui.confirms[0]).toContain("expired 10m ago: this prompt re-caches 601k tokens");
     expect(h.ui.editor).toBe("next step please");
     h.ui.answer = "Send anyway";
     expect(await h.emit("input", input("next step please"))).toEqual({ action: "continue" });
@@ -247,10 +247,10 @@ describe("choices", () => {
     h.ui.answer = undefined;
     await h.emit("input", input("next"));
     expect(h.ui.menus[0]).toEqual([
-      "Send anyway (~$3.00)",
+      "Send anyway (re-caches 601k tokens)",
       "Send, and stop asking in this session",
-      "Compact first, then send it (~$2.40)",
-      "Start a new session with this prompt (no history, ~$0)",
+      "Compact first, then send it (summary reads 601k tokens)",
+      "Start a new session with this prompt (no history to re-cache)",
       "Keep the prompt in the editor",
     ]);
   });
@@ -320,7 +320,7 @@ describe("choices", () => {
       return h.ui.notes.at(-1) as string;
     };
     expect(await status()).toContain("The next prompt asks before sending.");
-    expect(await status()).toContain("Warning: on, from $0.50");
+    expect(await status()).toContain("Warning: on, from 100k tokens (warn.minTokens)");
 
     h.ui.answers = ["Send, and stop"];
     await h.emit("input", input("a"));
@@ -403,6 +403,22 @@ describe("warning status", () => {
     expect(h.ui.notes.at(-1)).toContain("Warning: on");
   });
 
+  test("the threshold is warn.minTokens even when prices are known, and 0 always asks", async () => {
+    writeFileSync(userFile(), JSON.stringify({ warn: { minCost: 0, minTokens: 0 } }));
+    const h = harness([assistant(NOW - 900_000, 5_000)]);
+    await h.emit("session_start", {});
+    await h.commands.get("cache-guard").handler("status", h.ctx);
+    expect(h.ui.notes.at(-1)).toContain("Warning: on, from 0 tokens (warn.minTokens)");
+    expect(h.ui.notes.at(-1)).not.toContain("$");
+    h.ui.answer = undefined;
+    await h.emit("input", input("next"));
+    expect(h.ui.confirms).toHaveLength(1);
+
+    writeFileSync(userFile(), JSON.stringify({ warn: { minCost: 0, minTokens: 10_000 } }));
+    expect(await h.emit("input", input("again"))).toEqual({ action: "continue" });
+    expect(h.ui.confirms).toHaveLength(1);
+  });
+
   test("status does not promise a dialog without UI", async () => {
     const h = harness([assistant(NOW - 900_000, 600_000)]);
     h.ctx.hasUI = false;
@@ -481,11 +497,11 @@ describe("jev", () => {
     h.ui.answer = undefined;
     await h.emit("input", input("next"));
     expect(h.ui.menus[0]).toEqual([
-      "Send anyway (~$3.00)",
+      "Send anyway (re-caches 601k tokens)",
       "Send, and stop asking in this session",
-      "Compact with Jev, then send it (~1s, ~$0)",
-      "Compact with a summary, then send it (up to ~$2.40)",
-      "Start a new session with this prompt (no history, ~$0)",
+      "Compact with Jev, then send it (~1s, no summary model)",
+      "Compact with a summary, then send it (summary reads up to 601k tokens)",
+      "Start a new session with this prompt (no history to re-cache)",
       "Keep the prompt in the editor",
     ]);
     expect(h.ui.titles[0]).not.toContain("Tip");
@@ -497,7 +513,7 @@ describe("jev", () => {
     h.ui.answer = undefined;
     await h.emit("input", input("next"));
     expect(h.ui.titles[0]).toContain(JEV_TIP);
-    expect(h.ui.menus[0]).toContain("Compact first, then send it (~$2.40)");
+    expect(h.ui.menus[0]).toContain("Compact first, then send it (summary reads 601k tokens)");
   });
 
   test("Compact with Jev judges the history against the held prompt, then sends it", async () => {
@@ -547,7 +563,7 @@ describe("jev", () => {
     h.ui.answer = undefined;
     await h.emit("input", input("next"));
     expect(h.ui.titles[1]).not.toContain("Tip");
-    expect(h.ui.menus[1]).toContain("Compact first, then send it (~$2.40)");
+    expect(h.ui.menus[1]).toContain("Compact first, then send it (summary reads 601k tokens)");
     // And back on.
     h.ui.answers = ["Turn Jev on", "Done"];
     await h.commands.get("cache-guard").handler("jev", h.ctx);

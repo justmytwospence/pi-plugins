@@ -22,13 +22,10 @@ import {
   type Settings,
   describeMiss,
   formatClock,
-  formatCost,
   formatDuration,
   formatTokens,
-  choiceCosts,
   compactionFocus,
   herdrCacheValue,
-  missCost,
   worthWarning,
 } from "./core.ts";
 
@@ -85,36 +82,29 @@ const FRESH_KEY = Symbol.for("pi-cache-guard/fresh");
 export type Choice = "keep" | "jev" | "compact" | "fresh" | "send" | "mute";
 
 /** Under the cold-cache question while Jev is not set up (and not turned off). */
-export const JEV_TIP = "Tip: /cache-guard jev sets up Jev, which compacts in about a second for ~$0 (or turns this tip off).";
+export const JEV_TIP = "Tip: /cache-guard jev sets up Jev, which compacts in about a second without a summary model reading the history (or turns this tip off).";
 
 /**
- * The ways through a cold cache, labelled with what they cost. Sending is first, so Enter sends as
- * if nothing had asked; Esc still keeps the prompt in the editor. With Jev there are two
- * compactions: Jev's, written in code, and a summary (which Jev filters first when `filtered`, so
- * its cost is an upper bound).
+ * The ways through a cold cache, labelled with the tokens each re-sends uncached. Sending is first,
+ * so Enter sends as if nothing had asked; Esc still keeps the prompt in the editor. With Jev there
+ * are two compactions: Jev's, written in code, and a summary (which Jev filters first when
+ * `filtered`, so its token count is an upper bound).
  */
 export function choiceMenu(v: CacheView, jev: { ready: boolean; filtered: boolean } = { ready: false, filtered: false }): Array<{ choice: Choice; label: string }> {
-  const costs = v.price ? choiceCosts(v.last.tokens, v.price, v.ttlMs ?? 5 * 60_000) : undefined;
-  const about = (cost: number | undefined, upTo = false) => (cost === undefined ? "" : ` (${upTo ? "up to " : ""}~${formatCost(cost)})`);
+  const tokens = formatTokens(v.last.tokens);
   const compactions: Array<{ choice: Choice; label: string }> = jev.ready
     ? [
-        { choice: "jev", label: "Compact with Jev, then send it (~1s, ~$0)" },
-        { choice: "compact", label: `Compact with a summary, then send it${about(costs?.compact, jev.filtered)}` },
+        { choice: "jev", label: "Compact with Jev, then send it (~1s, no summary model)" },
+        { choice: "compact", label: `Compact with a summary, then send it (summary reads ${jev.filtered ? "up to " : ""}${tokens} tokens)` },
       ]
-    : [{ choice: "compact", label: `Compact first, then send it${about(costs?.compact)}` }];
+    : [{ choice: "compact", label: `Compact first, then send it (summary reads ${tokens} tokens)` }];
   return [
-    { choice: "send", label: `Send anyway${about(costs?.send)}` },
+    { choice: "send", label: `Send anyway (re-caches ${tokens} tokens)` },
     { choice: "mute", label: "Send, and stop asking in this session" },
     ...compactions,
-    { choice: "fresh", label: "Start a new session with this prompt (no history, ~$0)" },
+    { choice: "fresh", label: "Start a new session with this prompt (no history to re-cache)" },
     { choice: "keep", label: "Keep the prompt in the editor" },
   ];
-}
-
-/** The cost of the miss `v` describes, in dollars at list prices, when Pi knows the model's prices. */
-export function coldCost(v: CacheView): number | undefined {
-  if (!v.cold || !v.price) return undefined;
-  return missCost(v.last.tokens, v.price, v.ttlMs ?? 5 * 60_000);
 }
 
 export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrReporter } = {}) {
@@ -163,7 +153,7 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
     if (!settings.warn.enabled) return "off (\"warn.enabled\": false in settings)";
     if (!sessionOn) return `off for this session (/${NAME} on turns it back on)`;
     if (!askOn) return `muted for this session after "Send, and stop asking" (/${NAME} on turns it back on)`;
-    return `on, from ${formatCost(settings.warn.minCost)} (or ${formatTokens(settings.warn.minTokens)} tokens without prices)`;
+    return `on, from ${formatTokens(settings.warn.minTokens)} tokens (warn.minTokens)`;
   };
   // A held prompt the `/cache-guard fresh` command carries into a new session.
   let pending: { text: string; images?: ImageContent[] } | undefined;
@@ -192,7 +182,7 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
       shown = text;
       ctx.ui.setStatus(STATUS_KEY, text);
     }
-    herdr.report(v ? herdrCacheValue(v.cold, v.last.tokens, coldCost(v), settings) : undefined);
+    herdr.report(v ? herdrCacheValue(v.cold, v.last.tokens, undefined, settings) : undefined);
   };
 
   const stop = () => {
@@ -279,11 +269,11 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
     if (!warningOn()) return { action: "continue" };
     const v = current(context);
     if (!v?.cold) return { action: "continue" };
-    const cost = coldCost(v);
-    if (!worthWarning(v.last.tokens, cost, settings)) return { action: "continue" };
+    // The warning is framed in tokens: prices (undefined here) would switch core to warn.minCost.
+    if (!worthWarning(v.last.tokens, undefined, settings)) return { action: "continue" };
     const jev = await lean.jev(context);
     const menu = choiceMenu(v, { ready: jev.kind === "ready", filtered: settings.compact.filter });
-    const title = `Prompt cache miss. ${describeMiss(v.cold, v.last.tokens, cost)}${jev.kind === "missing" ? `\n${JEV_TIP}` : ""}`;
+    const title = `Prompt cache miss. ${describeMiss(v.cold, v.last.tokens, undefined)}${jev.kind === "missing" ? `\n${JEV_TIP}` : ""}`;
     const picked = await context.ui.select(title, menu.map((item) => item.label));
     const choice = menu.find((item) => item.label === picked)?.choice ?? "keep";
     const keep = () => {
@@ -491,12 +481,11 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
           : `TTL: ${formatDuration(info.ttlMs)} (${process.env.PI_CACHE_RETENTION === "long" ? "PI_CACHE_RETENTION=long" : "short retention"}).`);
         if (v.remainingMs !== undefined) lines.push(`Warm: ${formatClock(v.remainingMs)} left.`);
         if (v.cold) {
-          const cost = coldCost(v);
-          lines.push(describeMiss(v.cold, v.last.tokens, cost));
+          lines.push(describeMiss(v.cold, v.last.tokens, undefined));
           if (!warningOn()) {
             const reason = sessionOn && settings.enabled && settings.warn.enabled ? "muted for this session" : "off";
             lines.push(`The next prompt is sent without asking: the warning is ${reason}.`);
-          } else if (!worthWarning(v.last.tokens, cost, settings)) {
+          } else if (!worthWarning(v.last.tokens, undefined, settings)) {
             lines.push("Below the warning threshold.");
           } else {
             lines.push(context.hasUI ? "The next prompt asks before sending." : "The next prompt is sent without asking: no UI is available.");
