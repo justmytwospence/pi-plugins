@@ -693,7 +693,7 @@ export const ICONS = {
   stash: "\uf187", // archive
   project: "\uf07b", // folder
   branch: "\ue725", // git branch
-  model: "\uf2db", // microchip
+  model: "\uee0d", // robot
   reasoning: "\uee9c", // brain
   gate: "\uf510", // shield with check (pi-tool-gate)
   context: "\uf0e4", // tachometer
