@@ -67,6 +67,7 @@ export interface Snapshot {
   totals: Totals; cacheHit?: number; git: GitInfo;
   quotas: Quota[]; unavailableQuota?: string; statuses: string[]; now: number;
   /** Folded in from companion extensions' statuses when they are installed. */
+  mode?: PermissionModeStatus;
   autoEffort?: boolean; autoEffortDetail?: string; lean?: string; cache?: string; extraBilled?: number;
   /** A prompt stashed by @saadjs/pi-stash; text is its content when readable. */
   stash?: { text?: string };
@@ -136,7 +137,24 @@ export function parseMarimoStatus(text: string): MarimoStatus | undefined {
   return status;
 }
 
-export interface AbsorbedStatuses { autoEffort: boolean; autoEffortDetail?: string; lean?: string; cache?: string; extraBilled?: number; stashed?: boolean; marimo?: MarimoStatus; bg?: BgItem[]; /** Another extension owns the `mcp` status. */ mcp?: boolean; rest: string[] }
+/** The permission mode (pi-tool-gate, or pi-plan-mode alone), as Claude Code labels it. */
+export interface PermissionModeStatus {
+  kind: "manual" | "acceptEdits" | "plan" | "auto" | "bypass";
+  /** `⏵⏵ auto mode on` */
+  label: string;
+  /** The key that cycles modes, e.g. `shift+tab`. */
+  key?: string;
+}
+const MODE_KINDS: Record<string, PermissionModeStatus["kind"]> = {
+  "manual mode": "manual", "accept edits": "acceptEdits", "plan mode": "plan", "auto mode": "auto", "bypass permissions": "bypass",
+};
+export function parseModeStatus(text: string): PermissionModeStatus | undefined {
+  const match = /^(⏸|⏵⏵) (manual mode|accept edits|plan mode|auto mode|bypass permissions) on(?: \((.+) to cycle\))?$/u.exec(text);
+  if (!match) return undefined;
+  return { kind: MODE_KINDS[match[2]], label: `${match[1]} ${match[2]} on`, ...(match[3] ? { key: match[3] } : {}) };
+}
+
+export interface AbsorbedStatuses { mode?: PermissionModeStatus; autoEffort: boolean; autoEffortDetail?: string; lean?: string; cache?: string; extraBilled?: number; stashed?: boolean; marimo?: MarimoStatus; bg?: BgItem[]; /** Another extension owns the `mcp` status. */ mcp?: boolean; rest: string[] }
 // Statuses from our own companion extensions that read better inside the footer
 // rows they describe. Each is optional: absent extensions publish nothing, and a
 // status whose text no longer matches the expected shape falls through to the
@@ -149,6 +167,7 @@ export interface AbsorbedStatuses { autoEffort: boolean; autoEffortDetail?: stri
 //   prompt-stash      (@saadjs/pi-stash)        "prompt stashed"       -> its own row under the editor
 //   marimo            (pi-marimo)               "marimo: nb.py · ..."  -> its own row under the context row
 //   bg                (pi-bg)                   "bg: tests 2:14 · ..." -> its own row under that
+//   permission-mode   (pi-tool-gate, pi-plan-mode) "⏵⏵ auto mode on (shift+tab to cycle)" -> the model row
 // Everything else (plan, gate, mcp, ...) stays in the status row.
 export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: { claudeRow: boolean }): AbsorbedStatuses {
   const result: AbsorbedStatuses = { autoEffort: false, rest: [] };
@@ -171,9 +190,11 @@ export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: {
     if (marimo) { result.marimo = marimo; continue; }
     const bg = key === "bg" ? parseBgStatus(plainText) : undefined;
     if (bg) { result.bg = bg; continue; }
-    const plan = key === "plan" ? /^plan: (.+) \(\/plan\)$/.exec(plainText) : null;
+    const mode = key === "permission-mode" ? parseModeStatus(plainText) : undefined;
+    if (mode) { result.mode = mode; continue; }
+    const plan = key === "plan" ? /^plan: (.+) \((\/plan(?:ners)?)\)$/.exec(plainText) : null;
     if (plan) {
-      result.rest.push(`Plan ${plan[1].replaceAll("cut off (resume in /plan)", "cut off · resume in /plan")} · /plan`);
+      result.rest.push(`Plan ${plan[1].replace(/cut off \(resume in (\/plan(?:ners)?)\)/g, "cut off · resume in $1")} · ${plan[2]}`);
       continue;
     }
     // Normalize our companion's label without rewriting arbitrary publishers.
@@ -692,6 +713,11 @@ function mcpChip(count: McpCount, theme: Paint): string {
   return `${theme.fg("muted", "MCP")} ${count.connected < count.total ? theme.fg("warning", value) : value}`;
 }
 
+/** Claude Code's mode colors, in theme roles: plan teal, accept edits purple, bypass red. */
+const MODE_COLORS: Record<PermissionModeStatus["kind"], Parameters<Paint["fg"]>[0]> = {
+  manual: "muted", acceptEdits: "customMessageLabel", plan: "mdLink", auto: "warning", bypass: "error",
+};
+
 export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): string[] {
   if (width <= 0) return [];
   const s = snapshot, g = s.git;
@@ -726,6 +752,9 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     ? `${theme.fg("muted", "reasoning")} ${theme.bold(theme.fg(thinkingColor(s.thinking), clean(s.thinking)))}${auto}`
     : "";
   const identity = `${model}${reasoning ? `${sep}${reasoning}` : ""}`;
+  const modeColor = s.mode ? MODE_COLORS[s.mode.kind] : "muted";
+  const modeText = s.mode ? theme.fg(modeColor, clean(s.mode.label)) : "";
+  const modeLong = s.mode?.key ? `${modeText}${theme.fg("dim", ` (${clean(s.mode.key)} to cycle)`)}` : modeText;
   rows.push(row(ICONS.project, (w) => fitSegments([
     { text: project, priority: 60 },
     { text: branch, short: branchShort, priority: g.conflicts ? 110 : 70 },
@@ -733,6 +762,7 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   ], w, theme)));
   rows.push(row(ICONS.model, (w) => fitSegments([
     { text: identity, short: model, priority: 100 },
+    { text: modeLong, short: modeText, priority: 105 },
     { text: phaseText, priority: 120 },
     { text: s.queued ? theme.fg("warning", "queued") : "", priority: 115 },
   ], w, theme)));
@@ -1143,7 +1173,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       context: current.getContextUsage() ?? { tokens: null, contextWindow: current.model?.contextWindow ?? 0, percent: null },
       totals, cacheHit, git: { ...git, branch: git.branch ?? branch ?? undefined },
       quotas, unavailableQuota,
-      statuses: absorbed.rest, autoEffort: absorbed.autoEffort, autoEffortDetail: absorbed.autoEffortDetail, lean: absorbed.lean, cache: absorbed.cache, extraBilled: absorbed.extraBilled,
+      statuses: absorbed.rest, mode: absorbed.mode, autoEffort: absorbed.autoEffort, autoEffortDetail: absorbed.autoEffortDetail, lean: absorbed.lean, cache: absorbed.cache, extraBilled: absorbed.extraBilled,
       stash: absorbed.stashed ? { text: stashedPrompt() } : undefined,
       marimo: absorbed.marimo, bg: absorbed.bg, borderGauge,
       // Yield to an extension that publishes its own mcp status (pi-mcp-adapter).

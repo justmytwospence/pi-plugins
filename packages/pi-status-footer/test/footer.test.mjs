@@ -1546,3 +1546,20 @@ test("the MCP chip renders with the companion label style and warns on a shortfa
     }
   }
 });
+
+test("the permission mode joins the model row in its color; plan runs point at /planners", () => {
+  const absorbed = mod.absorbStatuses(new Map([
+    ["permission-mode", "⏵⏵ accept edits on (shift+tab to cycle)"],
+    ["plan", "plan: A working · B cut off (resume in /planners) (/planners)"],
+  ]), { claudeRow: false });
+  assert.deepEqual(absorbed.mode, { kind: "acceptEdits", label: "⏵⏵ accept edits on", key: "shift+tab" });
+  assert.deepEqual(absorbed.rest, ["Plan A working · B cut off · resume in /planners · /planners"]);
+  const s = { ...fixture(), mode: absorbed.mode, statuses: absorbed.rest };
+  const rows = mod.renderFooter(s, 160, theme).map(plain);
+  assert.match(rows[1], /opus-5\.5 · reasoning xhigh · ⏵⏵ accept edits on \(shift\+tab to cycle\)$/);
+  // Narrow: the hint goes before the mode does.
+  assert.match(plain(mod.renderFooter(s, 50, theme)[1]), /⏵⏵ accept edits on$/);
+  assert.equal(mod.parseModeStatus("⏸ plan mode on").kind, "plan");
+  assert.equal(mod.parseModeStatus("plan mode please"), undefined);
+  assert.deepEqual(mod.absorbStatuses(new Map([["permission-mode", "something else"]]), { claudeRow: false }).rest, ["something else"]);
+});
