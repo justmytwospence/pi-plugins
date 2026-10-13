@@ -73,6 +73,6 @@ Warming resends a request with a very small output cap and **can cost money**. I
 
 ## Know where quota data came from
 
-The status footer can read a shared Claude Code OAuth usage cache and refresh it, or query Codex account usage using Pi’s own Codex login. The Claude Code account may be different from the account Pi bills. Unknown/stale data stays marked as such.
+The status footer can query Claude and Codex account usage using Pi’s own subscription logins. Without a Pi Claude subscription login, it reads a shared Claude Code OAuth usage cache instead, whose account may be different from the account Pi bills. Unknown/stale data stays marked as such.
 
 Use `/status native` for Pi’s own footer or `/status all` to keep the other subscription account visible. Neither a pretty gauge nor a low token-price estimate guarantees headroom in your subscription.

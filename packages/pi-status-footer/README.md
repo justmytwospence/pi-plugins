@@ -129,9 +129,15 @@ labeled.
   in `/status details`; these categories can overlap. Tracked line counts cover
   all uncommitted tracked changes against HEAD, not edits attributed to this
   agent. Untracked files affect the summary but not line counts.
-- **Claude acct:** reads the shared Claude Code OAuth usage cache at
-  `${CLAUDE_STATUSLINE_CACHE_DIR:-${XDG_CACHE_HOME:-~/.cache}/claude-statusline}/oauth-usage.json`.
-  The Claude Code account may differ from Pi's account. Model-scoped weekly limits
+- **Claude acct:** subscription limits from `GET https://api.anthropic.com/api/oauth/usage`,
+  the endpoint Claude Code's `/status` uses. Authenticated with Pi's own `anthropic`
+  subscription login (via `modelRegistry.getApiKeyForProvider`, so Pi handles refresh),
+  so it describes the account Pi bills; cached in `pi-oauth-usage.json` (below).
+  Each Anthropic response's `anthropic-ratelimit-unified-*` headers update the 5h and
+  week windows in between, as in Claude Code. When Pi has no Anthropic subscription
+  login (an API key), it falls back to the shared Claude Code OAuth usage cache at
+  `${CLAUDE_STATUSLINE_CACHE_DIR:-${XDG_CACHE_HOME:-~/.cache}/claude-statusline}/oauth-usage.json`,
+  whose Claude Code account may differ from Pi's account. Model-scoped weekly limits
   use their API labels, not a hardcoded model list. Percentages are percentage
   points; 0.5 is 0.5%, not 50%.
 - **Codex acct:** ChatGPT-plan limits from `GET https://chatgpt.com/backend-api/wham/usage`,
@@ -158,12 +164,13 @@ Rendering performs no filesystem, subprocess or network operations. Git is read
 asynchronously on startup, settlement and branch changes, with a three-second
 minimum ordinary refresh interval. A 15-second clock refreshes idle state; shared
 quota reads/refreshes run at most once per minute ordinarily. The Claude reading
-comes from the cache Claude Code's status line keeps
-(`~/.cache/claude-statusline/oauth-usage.json`): when it is more than five minutes
-old the footer refreshes it itself, reading Claude Code's OAuth token from the
-Keychain (or `~/.claude/.credentials.json`) and sending it only to Anthropic's
-OAuth usage endpoint, under the status line's `.fetch.lock` directory so only one
-process fetches. Both usage requests are in-process `fetch` calls with a
+is cached for five minutes in the status line's cache directory: with Pi's
+subscription login in `pi-oauth-usage.json` under a `.pi-fetch.lock` directory,
+so however many Pi sessions are open, one fetches. Without one, it uses the cache
+Claude Code's status line keeps (`oauth-usage.json`), refreshing it when stale
+with Claude Code's OAuth token from the Keychain (or `~/.claude/.credentials.json`)
+under the status line's own `.fetch.lock`. Either token is sent only to
+Anthropic's OAuth usage endpoint. Both usage requests are in-process `fetch` calls with a
 five-second timeout. Where there is no Claude Code login at all (a
 [herdr-machine0](https://github.com/justmytwospence/herdr-machine0) spoke, which
 only holds a long-lived setup-token), set `PI_STATUS_FOOTER_CLAUDE_USAGE_CMD` to a

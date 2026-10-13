@@ -83,6 +83,23 @@ test("Codex headers support case, windows, reset epochs and durations, and missi
   assert.equal(mod.parseCodexHeaders({ "x-codex-primary-used-percent": "NaN" }, now), undefined);
 });
 
+test("Claude limit headers are fractions with epoch-second resets, and update cached windows", () => {
+  const quota = mod.parseClaudeHeaders({
+    "Anthropic-Ratelimit-Unified-5h-Utilization": "0.125", "anthropic-ratelimit-unified-5h-reset": `${now / 1000 + 600}`,
+    "anthropic-ratelimit-unified-7d-utilization": "0.94", "anthropic-ratelimit-unified-status": "allowed",
+  }, now);
+  assert.equal(quota.source, "Claude acct");
+  assert.deepEqual(quota.windows, [{ label: "5h", used: 12.5, reset: now + 600_000 }, { label: "week", used: 94, reset: undefined }]);
+  assert.equal(mod.parseClaudeHeaders({}, now), undefined);
+  assert.equal(mod.parseClaudeHeaders({ "anthropic-ratelimit-unified-5h-utilization": "" }, now), undefined);
+  assert.equal(mod.parseClaudeHeaders({ "anthropic-ratelimit-unified-5h-utilization": "-1" }, now), undefined);
+  const cached = mod.parseClaudeQuota({ five_hour: { utilization: 80 }, limits: [
+    { kind: "weekly_scoped", percent: 74, scope: { model: { display_name: "Fable" } } }] }, now - 60_000);
+  const merged = mod.mergeQuota(cached, quota);
+  assert.deepEqual(merged.windows.map((w) => [w.label, w.used]), [["5h", 12.5], ["Fable", 74], ["week", 94]]);
+  assert.equal(merged.updated, now);
+});
+
 // Shape of ChatGPT's GET /backend-api/wham/usage (identity fields omitted).
 const codexUsage = (used = 25, at = now) => ({
   plan_type: "prolite",
@@ -1095,6 +1112,44 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
     for (const [key, value] of [["HOME", oldHome], ["TMUX", oldTmux], ["HERDR_ENV", oldHerdr]]) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
     }
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("Claude limits use Pi's own subscription login, with no Claude Code login, and response headers", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "pi-footer-claude-"));
+  const oldCache = process.env.CLAUDE_STATUSLINE_CACHE_DIR;
+  process.env.CLAUDE_STATUSLINE_CACHE_DIR = dir;
+  const realFetch = globalThis.fetch, fetches = [];
+  const reset = new Date(Date.now() + 3 * 3600_000).toISOString();
+  globalThis.fetch = async (url, init) => {
+    fetches.push({ url, headers: init.headers });
+    const body = JSON.stringify({ five_hour: { utilization: 20, resets_at: reset }, seven_day: { utilization: 40, resets_at: reset } });
+    return { ok: true, text: async () => body };
+  };
+  let h;
+  try {
+    h = host([], dir);
+    h.ctx.model = { provider: "anthropic", id: "claude-opus-5", contextWindow: 200000, reasoning: true };
+    h.ctx.modelRegistry.getApiKeyForProvider = async (p) => p === "anthropic" ? "sk-ant-oat01-pi" : undefined;
+    await h.handlers.get("session_start")({}, h.ctx);
+    await vi.waitFor(() => assert.equal(fetches.length, 1));
+    assert.equal(fetches[0].url, "https://api.anthropic.com/api/oauth/usage");
+    assert.equal(fetches[0].headers.Authorization, "Bearer sk-ant-oat01-pi");
+    await vi.waitFor(() => assert.match(plain(h.footer.render(160).join("\n")), /Claude\s+5h 20% used.*week 40% used/));
+    assert.doesNotMatch(plain(h.footer.render(160).join("\n")), /stale/);
+    await h.handlers.get("after_provider_response")({ headers: {
+      "anthropic-ratelimit-unified-7d-utilization": "0.45" } }, h.ctx);
+    assert.match(plain(h.footer.render(160).join("\n")), /5h 20% used.*week 45% used/);
+    // A later cache read must not roll back the newer header reading.
+    await h.handlers.get("model_select")({}, h.ctx);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(fetches.length, 1, "the Pi usage cache is reused within its TTL");
+    assert.match(plain(h.footer.render(160).join("\n")), /week 45% used/);
+  } finally {
+    if (h) await h.handlers.get("session_shutdown")({}, h.ctx);
+    globalThis.fetch = realFetch;
+    if (oldCache === undefined) delete process.env.CLAUDE_STATUSLINE_CACHE_DIR; else process.env.CLAUDE_STATUSLINE_CACHE_DIR = oldCache;
     await rm(dir, { recursive: true, force: true });
   }
 });

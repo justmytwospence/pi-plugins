@@ -1,12 +1,13 @@
 // A display-only footer. No model requests or prompt modifications; the editor
 // is kept (whichever one other extensions installed) and only its two border
-// lines are redrawn to carry the context gauge. It touches two credentials, each sent only to its own
+// lines are redrawn to carry the context gauge. Credentials are sent only to their own
 // provider's usage endpoint: Pi's Codex OAuth token (from Pi's model registry,
-// to ChatGPT's usage endpoint, as Codex CLI's /status) and Claude Code's OAuth
-// token (Keychain or ~/.claude/.credentials.json, to Anthropic's OAuth usage
-// endpoint, as Claude Code's /status). Without a Claude Code login, the usage
-// JSON comes from $PI_STATUS_FOOTER_CLAUDE_USAGE_CMD when set. Changes take effect
-// with /reload.
+// to ChatGPT's usage endpoint, as Codex CLI's /status) and Pi's Anthropic OAuth
+// token (from Pi's model registry, to Anthropic's OAuth usage endpoint, as Claude
+// Code's /status). When Pi has no Anthropic subscription login, Claude Code's
+// OAuth token (Keychain or ~/.claude/.credentials.json) is used instead, and
+// without that the usage JSON comes from $PI_STATUS_FOOTER_CLAUDE_USAGE_CMD when
+// set. Changes take effect with /reload.
 import { execFile, type ChildProcess } from "node:child_process";
 import { mkdir, readFile, rename, rmdir, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -25,7 +26,8 @@ const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_TTL_MS = 5 * 60_000;
 const CODEX_ACTIVE_TTL_MS = 60_000;
 const CODEX_JWT_CLAIM = "https://api.openai.com/auth";
-// Claude Code's own /status source, cached where Claude's status line keeps it.
+// Claude Code's own /status source. Readings for Claude Code's login are cached
+// where Claude's status line keeps them; readings for Pi's login get their own file.
 const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const CLAUDE_TTL_MS = 5 * 60_000;
 const CLAUDE_LOCK_STALE_MS = 2 * 60_000;
@@ -395,6 +397,24 @@ export function parseCodexHeaders(headers: Record<string, string>, now: number):
   return windows.length ? { source: "Codex acct", updated: now, windows } : undefined;
 }
 
+// Passive, tied to the actual Pi request: Anthropic sends subscription limits on
+// every response, as Claude Code itself reads them. Unlike the usage endpoint,
+// utilization here is a fraction (0.94 means 94%); resets are epoch seconds.
+export function parseClaudeHeaders(headers: Record<string, string>, now: number): Quota | undefined {
+  const values = Object.fromEntries(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]));
+  const windows: QuotaWindow[] = [];
+  for (const [key, label] of [["5h", "5h"], ["7d", "week"]]) {
+    const raw = values[`anthropic-ratelimit-unified-${key}-utilization`];
+    if (raw === undefined || raw.trim() === "") continue;
+    const fraction = number(Number(raw));
+    if (fraction === undefined) continue;
+    const resetRaw = values[`anthropic-ratelimit-unified-${key}-reset`];
+    const at = resetRaw ? number(Number(resetRaw)) : undefined;
+    windows.push({ label, used: fraction * 100, reset: at === undefined ? undefined : at * 1000 });
+  }
+  return windows.length ? { source: "Claude acct", updated: now, windows } : undefined;
+}
+
 // Operation state belongs to the actual per-worktree admin directory, not common-dir.
 export async function detectGitOperation(gitDir: string): Promise<boolean> {
   const markers = ["MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer", "BISECT_LOG"];
@@ -740,12 +760,15 @@ export default function statusFooter(pi: ExtensionAPI): void {
   let borderGauge = false;
   let codexBusy = false, codexChecked = 0, codexAbort: AbortController | undefined;
   let codexTimeout: ReturnType<typeof setTimeout> | undefined;
-  let claude: Quota | undefined, codex: Quota | undefined;
+  let claude: Quota | undefined, claudeHeaders: Quota | undefined, codex: Quota | undefined;
   let phase: string | undefined;
   let totals = collectTotals([], Date.now()), cacheHit: number | undefined;
   const children = new Set<ChildProcess>();
   const home = homedir();
-  const cacheFile = path.join(process.env.CLAUDE_STATUSLINE_CACHE_DIR ?? path.join(process.env.XDG_CACHE_HOME ?? path.join(home, ".cache"), "claude-statusline"), "oauth-usage.json");
+  const cacheDir = process.env.CLAUDE_STATUSLINE_CACHE_DIR ?? path.join(process.env.XDG_CACHE_HOME ?? path.join(home, ".cache"), "claude-statusline");
+  // Claude Code's login, shared with its status line; Pi's login (one per machine) separately.
+  const cacheFile = path.join(cacheDir, "oauth-usage.json");
+  const piCacheFile = path.join(cacheDir, "pi-oauth-usage.json");
 
   const exec = (file: string, args: string[], cwd?: string): Promise<string | undefined> => new Promise((resolve) => {
     const child = execFile(file, args, { cwd, timeout: 4_000, maxBuffer: 2 * 1024 * 1024, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } }, (error, stdout) => {
@@ -778,18 +801,27 @@ export default function statusFooter(pi: ExtensionAPI): void {
       return typeof token === "string" && token ? token : undefined;
     } catch { return undefined; }
   };
-  // Refresh the Claude usage cache when stale. Same file and lock directory as
-  // Claude Code's status line, so however many harnesses are open, one fetches.
-  const refreshClaudeCache = async () => {
-    try { if (Date.now() - (await stat(cacheFile)).mtimeMs < CLAUDE_TTL_MS) return; } catch { /* no cache yet */ }
-    const lock = path.join(path.dirname(cacheFile), ".fetch.lock");
+  // Pi's own Anthropic subscription login; Pi's registry refreshes it. API keys
+  // (no subscription) yield nothing.
+  const piClaudeToken = async (context: ExtensionContext) => {
     try {
-      await mkdir(path.dirname(cacheFile), { recursive: true });
+      const token = await context.modelRegistry.getApiKeyForProvider("anthropic");
+      return token?.startsWith("sk-ant-oat") ? token : undefined;
+    } catch { return undefined; }
+  };
+  // Refresh a Claude usage cache when stale. Claude Code's login uses the same
+  // file and lock directory as its status line, so however many harnesses are
+  // open, one fetches; Pi's login gets its own file and lock.
+  const refreshClaudeCache = async (file: string, piToken?: string) => {
+    try { if (Date.now() - (await stat(file)).mtimeMs < CLAUDE_TTL_MS) return; } catch { /* no cache yet */ }
+    const lock = path.join(path.dirname(file), piToken ? ".pi-fetch.lock" : ".fetch.lock");
+    try {
+      await mkdir(path.dirname(file), { recursive: true });
       try { if (Date.now() - (await stat(lock)).mtimeMs > CLAUDE_LOCK_STALE_MS) await rmdir(lock); } catch { /* no lock */ }
       await mkdir(lock);
     } catch { return; } // someone else is fetching
     try {
-      const token = await claudeToken();
+      const token = piToken ?? await claudeToken();
       if (!active) return;
       if (!token) {
         // No Claude Code login here (a herdr-machine0 spoke): ask a command that
@@ -799,9 +831,9 @@ export default function statusFooter(pi: ExtensionAPI): void {
         const body = await exec(command[0], command.slice(1));
         if (!body || !active) return;
         JSON.parse(body);
-        const temporary = `${cacheFile}.${process.pid}.tmp`;
+        const temporary = `${file}.${process.pid}.tmp`;
         await writeFile(temporary, body);
-        await rename(temporary, cacheFile);
+        await rename(temporary, file);
         return;
       }
       const response = await fetch(CLAUDE_USAGE_URL, {
@@ -815,9 +847,9 @@ export default function statusFooter(pi: ExtensionAPI): void {
       if (!response.ok) return;
       const body = await response.text();
       JSON.parse(body);
-      const temporary = `${cacheFile}.${process.pid}.tmp`;
+      const temporary = `${file}.${process.pid}.tmp`;
       await writeFile(temporary, body);
-      await rename(temporary, cacheFile);
+      await rename(temporary, file);
     } catch { /* keep the last good cache */ } finally { await rmdir(lock).catch(() => undefined); }
   };
   const account = () => {
@@ -864,13 +896,21 @@ export default function statusFooter(pi: ExtensionAPI): void {
   const updateQuota = async (force = false) => {
     if (!active || !ctx || quotaBusy || (!force && Date.now() - quotaChecked < 60_000)) return;
     quotaBusy = true; quotaChecked = Date.now();
-    const epoch = generation;
+    const epoch = generation, context = ctx;
     try {
-      if (ctx.model?.provider === "anthropic" || showAll) await refreshClaudeCache();
+      if (context.model?.provider !== "anthropic" && !showAll) return;
+      // Prefer Pi's own login: it is the account this session bills.
+      const piToken = await piClaudeToken(context);
+      if (!active || epoch !== generation) return;
+      const file = piToken ? piCacheFile : cacheFile;
+      await refreshClaudeCache(file, piToken);
       try {
-        const [text, meta] = await Promise.all([readFile(cacheFile, "utf8"), stat(cacheFile)]);
+        const [text, meta] = await Promise.all([readFile(file, "utf8"), stat(file)]);
         const parsed = parseClaudeQuota(JSON.parse(text), meta.mtimeMs);
-        if (active && epoch === generation) claude = parsed.windows.length ? parsed : undefined;
+        if (active && epoch === generation && parsed.windows.length) {
+          // Response headers newer than the cache update its main windows.
+          claude = piToken && claudeHeaders && claudeHeaders.updated > parsed.updated ? mergeQuota(parsed, claudeHeaders) : parsed;
+        }
       } catch { /* Keep last good snapshot; its timestamp makes staleness visible. */ }
       if (active && epoch === generation) requestRender?.();
     } finally { if (epoch === generation) quotaBusy = false; }
@@ -1024,7 +1064,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     try { stop(); } catch { /* Shutdown still reports teardown errors. */ }
     if (context.mode !== "tui") return;
     ctx = context; active = true;
-    git = { ...emptyGit(), unavailable: true }; claude = undefined; codex = undefined;
+    git = { ...emptyGit(), unavailable: true }; claude = undefined; claudeHeaders = undefined; codex = undefined;
     gitBusy = quotaBusy = codexBusy = false; gitChecked = quotaChecked = codexChecked = 0;
     phase = undefined;
     restorePreferences(context);
@@ -1069,7 +1109,14 @@ export default function statusFooter(pi: ExtensionAPI): void {
   pi.on("session_compact", () => { if (active) { phase = undefined; account(); requestRender?.(); } });
   pi.on("session_compact_failed", () => { if (active) { phase = "compact failed"; requestRender?.(); } });
   pi.on("after_provider_response", (event, context) => {
-    if (!active || context.model?.provider !== "openai-codex") return;
+    if (!active) return;
+    if (context.model?.provider === "anthropic") {
+      // Only subscription responses carry these, so they describe Pi's own login.
+      const quota = parseClaudeHeaders(event.headers, Date.now());
+      if (quota) { claudeHeaders = quota; claude = mergeQuota(claude, quota); requestRender?.(); }
+      return;
+    }
+    if (context.model?.provider !== "openai-codex") return;
     const quota = parseCodexHeaders(event.headers, Date.now());
     if (quota) { codex = mergeQuota(codex, quota); requestRender?.(); }
   });
@@ -1090,7 +1137,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
           git.unavailable ? "Git status: git unavailable." : git.notRepository ? "Git status: outside a Git repository." : !git.branch ? "Git status: git unavailable." : `Git status: ${git.changed} changed paths; ${git.staged} staged, ${git.unstaged} unstaged, ${git.untracked} untracked, ${git.conflicts} conflicts (counts can overlap). ${git.branch.startsWith("detached:") ? "" : git.upstreamMissing ? "Upstream: upstream missing (" + git.upstream + "; cached ref unavailable, no fetch)." : `Upstream: ${git.upstream ?? "no upstream"}; ${git.ahead} ahead, ${git.behind} behind (cached, no fetch).`}`,
           `Tracked Git changes: ${git.added} lines added, ${git.removed} removed. Session age: ${duration(Date.now() - totals.started)}; compactions: ${totals.compactions}.`,
           "OAuth identifies the authentication method, not guaranteed subscription billing. Git diff covers all uncommitted tracked changes, not just this agent.",
-          "Claude acct comes from the shared Claude Code account cache (which can differ from Pi's account). Values are percent used; stale means >10m old or reset due.",
+          "Claude acct comes from Anthropic's usage endpoint (as Claude Code /status) using Pi's own Claude login, refreshed every 5m and by each response's limit headers; without a Pi subscription login, from Claude Code's account (which can differ). Values are percent used; stale means >10m old or reset due.",
           "Codex acct comes from ChatGPT's usage endpoint (as Codex CLI /status), using Pi's own Codex login; polled every 5m, or 1m around turns. SSE response headers refresh it in between.",
           "/status on: active provider only; /status all: also show the other subscription account; /status native: restore Pi footer. Choice survives reload/resume in this session.",
         ].join("\n"), "info");
