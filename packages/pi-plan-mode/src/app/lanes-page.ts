@@ -1,4 +1,4 @@
-// Planning and Review: one lane per planner (one or two), side by side. Each lane shows its
+// Planning and Review: one lane per planner, side by side. Each lane shows its
 // planner's chat, drawn by Pi's own components (or its plan, once it has one), the questions it is asking you, and a line to
 // talk to it; you can talk to both at once. With two planners, a full-width pane below the lanes
 // talks to M, the merger: a third model that sees both plans and helps you merge them. The focused

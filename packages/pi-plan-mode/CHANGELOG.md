@@ -1,5 +1,20 @@
 # pi-plan-mode
 
+## Unreleased
+
+### Major Changes
+
+- `/plan` is plan mode in your own conversation, as in Claude Code: your agent researches read-only,
+  writes its plan to a plan file (`~/.pi/agent/plans/<two-words>.md`, the only file it may write),
+  and calls `exit_plan_mode`, which shows the plan and asks you to implement it here (in the
+  permission mode you pick), in a fresh session, after editing it, or to keep planning. Your agent
+  can enter plan mode itself with `enter_plan_mode`. With pi-tool-gate, plan mode is a step of its
+  Shift+Tab permission-mode cycle; alone, `toggleShortcut` toggles it.
+- The full-screen planner moved to `/planners` and always runs two planners: Planner B can no
+  longer be `none`, and **Add a planner** is gone. Restored one-planner runs still open.
+- `toggleShortcut` toggles plan mode instead of opening the planner; the Settings step no longer
+  edits it. New `plansDirectory` setting.
+
 ## 1.0.0
 
 ### Major Changes

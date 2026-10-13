@@ -56,8 +56,8 @@ export function registerMainChat(pi: ExtensionAPI, bridge: MainChatBridge) {
     name: ASK_PLANNER_TOOL,
     label: "Ask planner",
     description:
-      "Ask one of the planners working on the current /plan run a question about its plan or what it found, and wait for its answer. The planner keeps its full research context. If the answer changes its plan, it resubmits it and the new version arrives in this conversation.",
-    promptSnippet: "Ask a /plan planner (A or B) about its plan or research",
+      "Ask one of the planners working on the current /planners run a question about its plan or what it found, and wait for its answer. The planner keeps its full research context. If the answer changes its plan, it resubmits it and the new version arrives in this conversation.",
+    promptSnippet: "Ask a /planners planner (A or B) about its plan or research",
     promptGuidelines: MAIN_AGENT_GUIDELINES,
     defaultActive: false,
     parameters: {
@@ -76,12 +76,14 @@ export function registerMainChat(pi: ExtensionAPI, bridge: MainChatBridge) {
         .toUpperCase();
       const message = typeof input.message === "string" ? input.message.trim() : "";
       const planners = bridge.planners();
-      if (!planners) return text("No /plan run is active.");
+      if (!planners) return text("No /planners run is active.");
       const planner = planners.find((candidate) => candidate.id === id);
       if (!planner) return text(`There is no planner ${id || "(none)"}; this run has ${ids(planners)}.`);
       if (!message) return text("Say what to ask the planner.");
       if (planner.status === "asking") {
-        return text(`Planner ${id} is waiting for the user to answer its questions in /plan; ask again after that.`);
+        return text(
+          `Planner ${id} is waiting for the user to answer its questions in /planners; ask again after that.`,
+        );
       }
       if (planner.working) {
         return text(
@@ -102,8 +104,8 @@ export function registerMainChat(pi: ExtensionAPI, bridge: MainChatBridge) {
     name: SUBMIT_MERGED_TOOL,
     label: "Submit merged plan",
     description:
-      "Record the merged (or adjusted) plan for the current /plan run as plan M, which the user can implement or export from /plan. Call it only when the user asks for it, with the complete plan as Markdown; calling it again replaces the plan with a new version.",
-    promptSnippet: "Record the merged plan for the current /plan run (only when the user asks)",
+      "Record the merged (or adjusted) plan for the current /planners run as plan M, which the user can implement or export from /planners. Call it only when the user asks for it, with the complete plan as Markdown; calling it again replaces the plan with a new version.",
+    promptSnippet: "Record the merged plan for the current /planners run (only when the user asks)",
     promptGuidelines: MAIN_AGENT_GUIDELINES,
     defaultActive: false,
     parameters: {
@@ -124,9 +126,9 @@ export function registerMainChat(pi: ExtensionAPI, bridge: MainChatBridge) {
         typeof (params as { plan?: unknown }).plan === "string" ? (params as { plan: string }).plan.trim() : "";
       if (!plan) return text("The plan is empty.");
       const merged = bridge.submitMerged(plan, ctx);
-      if (!merged) return text("No /plan run is active, so there is nothing to record the plan in.");
+      if (!merged) return text("No /planners run is active, so there is nothing to record the plan in.");
       return text(
-        `Recorded as plan M${merged.revision > 1 ? ` v${merged.revision}` : ""}. The user can implement or export it from /plan, or ask you to implement it here.`,
+        `Recorded as plan M${merged.revision > 1 ? ` v${merged.revision}` : ""}. The user can implement or export it from /planners, or ask you to implement it here.`,
       );
     },
   });

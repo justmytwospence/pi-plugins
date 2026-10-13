@@ -103,12 +103,15 @@ export interface PlanModeSettings {
   defaultImplementationThinkingLevel?: PlanModeFixedThinkingLevel;
   defaultPlanExportPath?: string;
   safeSubcommands?: SafeSubcommands;
+  /** Toggles inline plan mode (with pi-tool-gate, cycles its permission modes). */
   toggleShortcut?: KeyId;
+  /** Where inline plan mode writes plan files (default `~/.pi/agent/plans`). */
+  plansDirectory?: string;
   /** Planning model (`provider/modelId`) to the default implementation model for its plans. */
   implementationModelMap?: Record<string, ModelSpec>;
   /** Whether implementation keeps the planning conversation or starts a fresh session. */
   defaultImplementationContext?: ImplementationContextChoice;
-  /** Models preselected for `/plan multi`. */
+  /** Planners A and B, preselected in /planners. */
   planners?: ModelSpec[];
   /** Planner model (`provider/modelId`) to the model its read-only subagents (plan_subagents) run on. */
   scoutModelMap?: Record<string, ModelSpec>;
@@ -226,6 +229,11 @@ export function normalizePlanModeSettings(value: unknown): PlanModeSettings | un
     const toggleShortcut = normalizeKeyId(Reflect.get(value, "toggleShortcut"));
     if (!toggleShortcut) return undefined;
     settings.toggleShortcut = toggleShortcut;
+  }
+  if (Object.hasOwn(value, "plansDirectory")) {
+    const plansDirectory = Reflect.get(value, "plansDirectory");
+    if (typeof plansDirectory !== "string" || !plansDirectory.trim()) return undefined;
+    settings.plansDirectory = plansDirectory.trim();
   }
   if (Object.hasOwn(value, "safeSubcommands")) {
     const safeSubcommands = normalizeSafeSubcommands(Reflect.get(value, "safeSubcommands"));

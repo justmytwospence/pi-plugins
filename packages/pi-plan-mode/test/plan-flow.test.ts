@@ -133,9 +133,9 @@ function setup(
   return { mock, context, sessions, sent, ready, harness: () => harness };
 }
 
-test("/plan opens on the settings, goes through tools, plans with one planner, adds a second, and implements", async () => {
+test("/planners opens on the settings, goes through tools, plans with two planners, and implements", async () => {
   const { mock, context, sessions, harness } = setup();
-  const command = mock.commands.get("plan");
+  const command = mock.commands.get("planners");
   assert.ok(command);
   const opened = command.handler("add a cache", context.ctx);
   await flush();
@@ -184,28 +184,17 @@ test("/plan opens on the settings, goes through tools, plans with one planner, a
   assert.match(screen, /● Tools/u);
   assert.doesNotMatch(screen, /▶ Start/u, "no start row in the tools");
   app.handleInput("\r");
-  assert.match(app.render().join("\n"), /Start planning with 1 planner\?/u);
+  assert.match(app.render().join("\n"), /Start planning with 2 planners\?/u);
   app.handleInput("\r");
   await flush();
   screen = app.render().join("\n");
   assert.match(screen, /● Review/u);
   assert.match(screen, /A · Claude Sonnet 5\.5 low/u);
-  assert.match(screen, /# Plan from claude-sonnet-5-5|Plan from claude-sonnet-5-5/u);
-  assert.equal(sessions.prompts.length, 1);
-  assert.match(sessions.prompts[0]?.text ?? "", /add a cache/u);
-
-  // Add a second planner from the actions.
-  app.handleInput("\t");
-  app.handleInput("\u001b[C");
-  app.handleInput("\r");
-  screen = app.render().join("\n");
-  assert.match(screen, /Add a planner/u);
-  assert.doesNotMatch(screen, /Merger/u, "no merger model: your main agent merges");
-  app.handleInput("\r");
-  await flush();
-  screen = app.render().join("\n");
   assert.match(screen, /B · Claude Opus 5\.5/u);
+  assert.doesNotMatch(screen, /Add a planner/u, "the planner screen always runs two");
+  assert.doesNotMatch(screen, /Merger/u, "no merger model: your main agent merges");
   assert.equal(sessions.prompts.length, 2);
+  assert.match(sessions.prompts[0]?.text ?? "", /add a cache/u);
   assert.match(sessions.prompts[1]?.text ?? "", /Another model is planning the same task/u);
 
   // Each plan landed in your main conversation, in full, without starting a turn.
@@ -389,7 +378,7 @@ test("a restored run keeps its deliveries and plan M, turns the tools back on, a
   );
   assert.ok(mock.rawPi.getActiveTools().includes("plan_submit_merged"));
 
-  const opened = mock.commands.get("plan")?.handler("", context.ctx);
+  const opened = mock.commands.get("planners")?.handler("", context.ctx);
   await flush();
   const app = harness();
   assert.ok(app);
@@ -433,7 +422,10 @@ test("restoring a run marks the turns a reload cut off or that had failed, and r
   await flush();
   // Nothing starts a model call on its own: the planners are marked, and the status line says so.
   assert.equal(sessions.prompts.length, 0);
-  assert.match(context.statuses.get("plan") ?? "", /A cut off \(resume in \/plan\) · B cut off \(resume in \/plan\)/u);
+  assert.match(
+    context.statuses.get("plan") ?? "",
+    /A cut off \(resume in \/planners\) · B cut off \(resume in \/planners\)/u,
+  );
   // The cut-off markers survive a save, so a later restore still offers to resume.
   const stored = () => {
     const entry = mock.entries.filter((entry) => entry.customType === "plan-run").at(-1);
@@ -448,7 +440,7 @@ test("restoring a run marks the turns a reload cut off or that had failed, and r
     ["B", "failed"],
   ]);
   // /plan offers to resume each; Resume A sends the resume message to A only.
-  const opened = mock.commands.get("plan")?.handler("", context.ctx);
+  const opened = mock.commands.get("planners")?.handler("", context.ctx);
   await flush();
   const app = harness();
   assert.ok(app);
@@ -528,7 +520,7 @@ test("a planner asking you something shows in herdr as blocked until it stops as
   await flush();
   // Restored, nothing runs, so nothing blocks; resuming A from /plan starts its turn, which asks.
   assert.deepEqual(blocked, []);
-  const opened = mock.commands.get("plan")?.handler("", context.ctx);
+  const opened = mock.commands.get("planners")?.handler("", context.ctx);
   await flush();
   const app = harness();
   assert.ok(app);
@@ -544,7 +536,7 @@ test("a planner asking you something shows in herdr as blocked until it stops as
   assert.deepEqual(blocked, [{ active: true, label: "Planner question" }, { active: false }]);
 });
 
-test("a planner refused for its login offers to log in again from /plan, then tries again", async () => {
+test("a planner refused for its login offers to log in again from /planners, then tries again", async () => {
   const logins: string[] = [];
   const { mock, context, sessions, harness } = setup({
     failFirst: { model: "claude-sonnet-5-5", error: "Encountered invalidated oauth token for user, failing request" },
@@ -552,7 +544,7 @@ test("a planner refused for its login offers to log in again from /plan, then tr
       logins.push(providerId);
     },
   });
-  const opened = mock.commands.get("plan")?.handler("add a cache", context.ctx);
+  const opened = mock.commands.get("planners")?.handler("add a cache", context.ctx);
   await flush();
   const app = harness();
   assert.ok(app);
@@ -563,13 +555,13 @@ test("a planner refused for its login offers to log in again from /plan, then tr
   let screen = app.render().join("\n");
   assert.match(screen, /failed: Encountered invalidated oauth token/u);
   assert.match(screen, /Log in to anthropic…/u, "a login action for the planner's provider");
-  // Tab to the actions; the login comes first.
-  app.handleInput("\t");
+  // Tab past lane B and M to the actions; the login comes first.
+  for (let i = 0; i < 3; i++) app.handleInput("\t");
   app.handleInput("\r");
   await flush();
   assert.deepEqual(logins, ["anthropic"]);
-  assert.equal(sessions.prompts.length, 2, "the planner tried again");
-  assert.match(sessions.prompts[1]?.text ?? "", /previous turn failed with an error/u);
+  assert.equal(sessions.prompts.length, 3, "the planner tried again");
+  assert.match(sessions.prompts[2]?.text ?? "", /previous turn failed with an error/u);
   screen = app.render().join("\n");
   assert.doesNotMatch(screen, /Log in to anthropic/u, "gone once the planner recovered");
   assert.match(screen, /plan ready/u);
@@ -583,7 +575,7 @@ test("a planner refused for its login offers to log in again from /plan, then tr
 
 test("slash commands in a lane act on that planner; in M they go to your own editor", async () => {
   const { mock, context, sessions, harness } = setup();
-  const opened = mock.commands.get("plan")?.handler("add a cache", context.ctx);
+  const opened = mock.commands.get("planners")?.handler("add a cache", context.ctx);
   await flush();
   const app = harness();
   assert.ok(app);
@@ -625,12 +617,7 @@ test("slash commands in a lane act on that planner; in M they go to your own edi
   assert.equal(sessions.prompts.length, before + 1);
   screen = app.render().join("\n");
 
-  // With a second planner, M's pane sends a command to your own editor and leaves /plan.
-  app.handleInput("\t");
-  app.handleInput("\u001b[C");
-  app.handleInput("\r");
-  app.handleInput("\r");
-  await flush();
+  // M's pane sends a command to your own editor and leaves /planners.
   app.handleInput("\t");
   app.handleInput("\t");
   type("/model");

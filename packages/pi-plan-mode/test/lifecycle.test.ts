@@ -117,7 +117,7 @@ async function fixture() {
   };
 }
 
-test("factory awaits shortcut settings, and the plain-prompt shortcut awaits session initialization", async () => {
+test("factory awaits shortcut settings, and the plan-mode shortcut awaits session initialization", async () => {
   const mock = createMockPi();
   let resolve!: (value: typeof settings) => void;
   let next: Promise<typeof settings> = new Promise((done) => {
@@ -132,28 +132,32 @@ test("factory awaits shortcut settings, and the plain-prompt shortcut awaits ses
   next = new Promise((done) => {
     resolve = done;
   });
-  const ctx = createMockContext({ mode: "tui", hasUI: true }).ctx;
+  const context = createMockContext({ mode: "tui", hasUI: true });
+  const ctx = context.ctx;
   let offers = 0;
   mock.eventBus.on(ACTIVITY_SECTION, () => {
     offers++;
   });
   const start = mock.events.get("session_start")?.[0]?.({ reason: "startup" }, ctx);
-  const pressed = shortcut.handler();
+  const pressed = shortcut.handler(ctx);
   await tick();
   mock.eventBus.emit(ACTIVITY_HOST, {});
   assert.equal(offers, 0, "an initializing branch cannot offer its disposed source");
-  assert.equal(mock.sentUserMessages.length, 0);
+  assert.equal(context.statuses.get("permission-mode"), undefined);
   resolve(settings);
   await start;
   assert.equal(offers, 1);
   await pressed;
-  assert.deepEqual(
-    mock.sentUserMessages.map((message) => message.text),
-    ["/plan"],
-  );
+  // Without pi-tool-gate, the shortcut toggles plan mode in this conversation.
+  assert.equal(context.statuses.get("permission-mode"), "⏸ plan mode on (ctrl+alt+p to cycle)");
+  assert.equal(mock.sentUserMessages.length, 0);
   for (const handler of mock.events.get("session_shutdown") ?? []) await handler({}, ctx);
-  await shortcut.handler();
-  assert.equal(mock.sentUserMessages.length, 1, "a stale runtime cannot send a command");
+  await shortcut.handler(ctx);
+  assert.equal(
+    context.statuses.get("permission-mode"),
+    "⏸ plan mode on (ctrl+alt+p to cycle)",
+    "a stale runtime does nothing",
+  );
 });
 
 for (const transition of ["tree", "resume", "fork", "startup"] as const) {
@@ -164,7 +168,7 @@ for (const transition of ["tree", "resume", "fork", "startup"] as const) {
     assert.ok(old);
     const oldKey = old.entries(10)[0]?.key;
     assert.ok(oldKey);
-    const opened = f.mock.commands.get("plan")?.handler("", f.ctx);
+    const opened = f.mock.commands.get("planners")?.handler("", f.ctx);
     await tick();
     f.app().handleInput("\t");
     f.app().handleInput("\r"); // Explicit Resume A.
@@ -248,7 +252,7 @@ test("shutdown during planner creation disposes the late handle without promptin
   });
   await planMode(mock.pi, { readSettings: async () => settings, createSession: () => pending });
   for (const handler of mock.events.get("session_start") ?? []) await handler({}, f.ctx);
-  const opened = mock.commands.get("plan")?.handler("", f.ctx);
+  const opened = mock.commands.get("planners")?.handler("", f.ctx);
   await tick();
   f.app().handleInput("\t");
   f.app().handleInput("\r");

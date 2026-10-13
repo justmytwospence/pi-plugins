@@ -1,4 +1,4 @@
-// Logging in again from /plan: a planner whose provider rejected its credentials (an expired,
+// Logging in again from /planners: a planner whose provider rejected its credentials (an expired,
 // revoked or missing login) gets a "Log in to <provider>" action. It runs Pi's own login flow, in
 // Pi's login dialog, without leaving the planning screen; the planner then tries again with the
 // new credentials (planner sessions re-read auth.json when it changes).

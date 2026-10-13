@@ -1,7 +1,7 @@
 {
   "name": "@justmytwospence/pi-plan-mode",
   "version": "0.1.2",
-  "description": "Full-screen /plan for Pi: one or two in-process planners you watch, answer and talk to, then implement with a chosen model, effort, and context.",
+  "description": "Claude Code-style plan mode for Pi (/plan, Shift+Tab with pi-tool-gate), plus /planners: two in-process planners side by side you watch, answer and talk to, merge, then implement.",
   "type": "module",
   "license": "MIT",
   "private": true,

@@ -1,8 +1,11 @@
 # pi-plan-mode
 
-A Pi extension: `/plan` opens a full-screen planner. One or two models plan your task read-only while you watch, answer their questions, and talk to them. With two, the pane below them is your own main agent, which gets every plan, talks them over with you, questions the planners, and writes the merged plan when you ask. Then you implement the plan you like, with the model, effort, and context you choose.
+A Pi extension with two ways to plan before anything changes:
 
-It acts only when you run `/plan` (or press the shortcut you configured), and while a planning run you started is alive.
+- **Plan mode**, as in Claude Code, in your own conversation: `/plan` (or Shift+Tab with [pi-tool-gate](../pi-tool-gate/)) turns it on, your agent researches read-only and writes its plan to a plan file, then shows you the plan and asks how to proceed.
+- **`/planners`**, a full-screen planner for two models at once: both plan the same task read-only while you watch, answer their questions, and talk to them. The pane below them is your own main agent, which gets every plan, talks them over with you, questions the planners, and writes the merged plan when you ask. Then you implement the plan you like, with the model, effort, and context you choose.
+
+It acts only while plan mode is on, when you run `/plan` or `/planners` (or press the shortcut you configured), while a planning run you started is alive, and when your agent calls `enter_plan_mode` or `exit_plan_mode`.
 
 Part of [Pi Plugins](https://github.com/justmytwospence/pi-plugins). Reference: <https://pi-plugins.vercel.app/plugins/pi-plan-mode/>. Started as a fork of [`@narumitw/pi-plan-mode`](https://github.com/narumiruna/pi-extensions/tree/main/packages/pi-plan-mode); see [License](#license).
 
@@ -30,13 +33,34 @@ pi -e ./packages/pi-plan-mode
 
 No `npm install` is needed to run it: the package.json has no `dependencies`; Pi supplies its peer dependencies. Pi loads `src/index.ts` directly; there is no build step. Requires Pi 0.99 or newer. Install only from sources you trust: Pi extensions run with Pi's permissions.
 
-## Usage
+## Plan mode
 
 ```text
 /plan Add rate limiting to the public API
 ```
 
-`/plan` (with or without a task) is the only command, and needs Pi's interactive terminal UI; everything else happens on the screen, which covers the whole terminal. A step bar at the top right shows where you are:
+`/plan` turns plan mode on and, with a task, sends it as your next message. With [pi-tool-gate](../pi-tool-gate/), plan mode is one of its permission modes: Shift+Tab steps through manual, accept edits, plan and auto, and the footer shows the mode (`⏸ plan mode on`). Without it, set `toggleShortcut` to toggle plan mode with a key. Your agent can also turn plan mode on itself with `enter_plan_mode` when a task deserves a plan first.
+
+While plan mode is on:
+
+- Your agent is told (once, with your next message, or right away mid-turn) to research, ask you what it cannot find out, and write its plan to a **plan file**, `~/.pi/agent/plans/<two-words>.md` (`plansDirectory` moves it). One file per session: entering plan mode again continues it.
+- `edit` and `write` are blocked except for the plan file. Commands: with pi-tool-gate, the gate judges them as in auto mode (as Claude Code's classifier does while planning); without it, only read-only commands run (the [shell policy](./docs/settings.md)).
+- When the plan is ready, your agent calls `exit_plan_mode`. The plan shows in the chat and you choose:
+  - **Yes, and use auto mode** / **Yes, auto-accept edits** / **Yes, manually approve edits** (with pi-tool-gate; without it, **Yes, implement it**): plan mode ends and your agent starts implementing in this conversation, in that permission mode.
+  - **Yes, in a fresh session with only the plan**: once this turn ends, a new session (a child of this one) starts with the plan as its first message.
+  - **Edit the plan first**: edit it in Pi's editor; the file is updated and you choose again. The approval tells your agent the plan was edited.
+  - **No, keep planning**: say what should change (or leave it empty, or press Esc, and say it in the chat). Plan mode stays on.
+- Leaving plan mode another way (Shift+Tab, or the shortcut) tells your agent it may now make changes.
+
+`planCompleteCommand` runs for an approved plan, as it does for `/planners`.
+
+## The planners screen
+
+```text
+/planners Add rate limiting to the public API
+```
+
+`/planners` (with or without a task) needs Pi's interactive terminal UI; everything else happens on the screen, which covers the whole terminal. It always runs two planners; for one plan, use plan mode. A step bar at the top right shows where you are:
 
 **Settings → Tools → Planning → Review → Implement**
 
@@ -45,10 +69,9 @@ No `npm install` is needed to run it: the package.json has no `dependencies`; Pi
 One page with the task, the planners, and your preferences. Up/Down (or Ctrl+K/Ctrl+J, Ctrl+P/Ctrl+N, `k`/`j`) pick a row, Left/Right (or Ctrl+H/Ctrl+L, `h`/`l`; Space also steps forward) change its value, Enter edits a text row or goes on, Esc closes.
 
 - **Task**: a box above the rows, shown in full and wrapped. Tab moves into it and out of it; while it has focus every key goes to its editor (Shift+Enter for a new line, Enter to save and go on). Empty plans what the conversation so far is about.
-- **Planner A** and its **effort** and **subagents** (the model its read-only helpers run on, with their own **effort**; `none` turns them off).
-- **Planner B**: `none` plans with one model; pick a model to plan the same task with two in parallel. Two is the maximum.
+- **Planner A** and **Planner B**, each with its **effort** and **subagents** (the model its read-only helpers run on, with their own **effort**; `none` turns them off). B defaults to a different model than A.
 - **Time limit** per planner turn (15 to 180 minutes; default 45). At 80% the planner is asked to wrap up; at the limit it is stopped.
-- Preferences: whether Jev picks tools, where implementation starts by default, the export path, and the shortcut that opens the planner (takes effect after `/reload`).
+- Preferences: whether Jev picks tools, where implementation starts by default, and the export path.
 
 Changes are saved as your defaults in `~/.pi/agent/pi-plan-mode.json`.
 
@@ -68,23 +91,23 @@ Lane keys, as the planner screen implements them:
 
 | Keys | |
 |---|---|
-| Tab, Shift+Tab | move between the lanes, the M pane (with two planners) and the actions |
+| Tab, Shift+Tab | move between the lanes, the M pane and the actions |
 | Up/Down | scroll the focused lane a line (when no question is waiting) |
 | Ctrl+U/Ctrl+D | scroll the focused lane half its height (these keys are taken by the lane, not its message line) |
 | Mouse wheel | scroll the lane under the pointer |
 | Ctrl+O | switch a lane between its plan and its chat |
 | Ctrl+E | expand or collapse tool output in a chat (as Ctrl+O does in Pi) |
 | Ctrl+N/Ctrl+P | step through a planner's running subagents; Esc goes back to the planner |
-| Shift+Up/Shift+Down | move the divider above M by a row (with two planners) |
+| Shift+Up/Shift+Down | move the divider above M by a row |
 | Esc | leave (below) |
 
 A lane's chat (and M's) is drawn by Pi's own components: Markdown, thinking, and every tool call with its own renderer (extension tools included). A restored planner's chat shows its history.
 
-Pi's built-in commands that matter for a planner work in its lane and act on its own session: `/login [provider]` (a failed planner then retries), `/model [query]`, `/thinking [level]` (or `/effort`), `/compact [instructions]`, `/context` (or `/usage`), `/copy` and `/help`. The hint line lists the matching ones as you type. Start a message with `//` to send one that begins with a slash. In M's pane, which is your main session, a `/command` leaves `/plan` with the command in your editor, so every Pi command is there.
+Pi's built-in commands that matter for a planner work in its lane and act on its own session: `/login [provider]` (a failed planner then retries), `/model [query]`, `/thinking [level]` (or `/effort`), `/compact [instructions]`, `/context` (or `/usage`), `/copy` and `/help`. The hint line lists the matching ones as you type. Start a message with `//` to send one that begins with a slash. In M's pane, which is your main session, a `/command` leaves `/planners` with the command in your editor, so every Pi command is there.
 
 ### 4. Review
 
-With two planners, the full-width pane below the lanes is **M, your main agent**: the agent of the session you started `/plan` from, so it has all your context. What you type there goes to it (a new turn, or a steer while it works), and the pane shows its replies as they stream; you can talk to it while A and B are still working. Each plan, and each revision, lands in your main conversation in full as it arrives, with what you and that planner said since its previous version. While a run is active your agent has two tools:
+The full-width pane below the lanes is **M, your main agent**: the agent of the session you started `/planners` from, so it has all your context. What you type there goes to it (a new turn, or a steer while it works), and the pane shows its replies as they stream; you can talk to it while A and B are still working. Each plan, and each revision, lands in your main conversation in full as it arrives, with what you and that planner said since its previous version. While a run is active your agent has two tools:
 
 - `plan_ask_planner`: ask planner A or B about its plan or what it found; the planner answers from its own research (the question shows in its lane as `main agent › …`). It refuses while that planner is working or waiting for your answers.
 - `plan_submit_merged`: when you ask for it, record the merged (or adjusted) plan as **plan M**; the M pane shows it (Ctrl+O switches between the plan and the chat).
@@ -99,7 +122,6 @@ The actions (Left/Right or `h`/`l` choose, Enter runs) are, as they apply:
 - **Write plan M** (with two plans in, until M has one; not while M is working).
 - **Implement M… / Implement A… / Implement B…** (the merged plan first, once there is one).
 - **Revise plan M** (right after Implement M, once M has a plan).
-- **Add a planner…** (with one): plan the same task with a second model; the first keeps its plan and everything it read.
 - **Export M… / Export A… / Export B…**: write that plan to a Markdown file (path prefilled from settings).
 - **Save & close**: close the screen; the plans are kept and the planners keep working.
 - **Discard**: stop the planners and throw these plans away.
@@ -114,17 +136,17 @@ The same row page: which plan, the **model**, its **effort**, and the **context*
 
 **Esc** on the planning screen (after leaving a focused subagent) asks before leaving:
 
-- **Hide (keep planning)**, or **Hide (keep the plans)** when nothing is working: close the screen. Planners keep working in the background; the footer shows their state (for example `plan: A working · B ready (/plan)`), and you are notified once when one asks something or a new plan version is ready.
+- **Hide (keep planning)**, or **Hide (keep the plans)** when nothing is working: close the screen. Planners keep working in the background; the footer shows their state (for example `plan: A working · B ready (/planners)`), and you are notified once when one asks something or a new plan version is ready.
 - **Stop planning** (only while something is working): stop every working planner, and abort your main agent's turn if it is running. The plans so far are kept.
 - **Back**: return to the screen.
 
 Planners are stopped from this screen (Stop planning, Discard, or implementing a plan, which ends the run) or by their time limit; they are also shut down when the Pi session ends or switches (a turn cut off that way resumes when the run is restored). They are not entries in the `/tasks` activity list, and `/stop` does not reach them.
 
-`/plan` reopens the screen where you left it, also after `/reload` or resuming the session: planners keep their sessions on disk, so you can keep talking to them. A planner whose turn the reload or restart cut off, or whose last turn failed, resumes by itself; its lane shows `continue (resumed …)` or `try again (resumed after an error)`.
+`/planners` reopens the screen where you left it, also after `/reload` or resuming the session: planners keep their sessions on disk, so you can keep talking to them. A planner whose turn the reload or restart cut off, or whose last turn failed, resumes by itself; its lane shows `continue (resumed …)` or `try again (resumed after an error)`.
 
 ## How it works
 
-Each planner is its own in-process Pi session (created with Pi's SDK), so one planner and two planners are the same thing:
+Each planner is its own in-process Pi session (created with Pi's SDK):
 
 - It starts with your main conversation's messages, so it has your context.
 - It runs on its own model and effort, with only the tools you chose, under a read-only policy (this package's planner extension): `edit` and `write` are blocked, `bash` is limited to reviewed read-only commands plus your command grants and `safeSubcommands`, MCP calls are limited to the servers and tools you selected, and tools you did not select are refused.
@@ -134,7 +156,7 @@ Each planner is its own in-process Pi session (created with Pi's SDK), so one pl
 
 M is not another session: the M pane shows your main session's own events and sends what you type to it. Each plan is added to that session as a message without starting a turn (your agent reads it on its next turn; in your main chat it shows collapsed, and Pi's expand key expands it). The run's two tools are active only while a run is, and their guidelines tell your agent how to use them and to change nothing while planning is underway. Implementing "in this conversation" then builds the plan in the session that discussed it.
 
-Planner sessions are stored under `~/.pi/agent/plan-mode/planners/`; runs are saved as custom entries in your session so `/plan` can restore them.
+Planner sessions are stored under `~/.pi/agent/plan-mode/planners/`; runs are saved as custom entries in your session so `/planners` can restore them.
 
 ## Configuration
 
@@ -153,7 +175,7 @@ Planner sessions are stored under `~/.pi/agent/plan-mode/planners/`; runs are sa
   },
   "defaultImplementationContext": "keep",
   "defaultPlanExportPath": "PLAN.md",
-  "toggleShortcut": "shift+tab",
+  "plansDirectory": "~/notes/plans",
   "plannerToolsets": {
     "web": {
       "label": "Web research",
@@ -192,7 +214,8 @@ Planner sessions are stored under `~/.pi/agent/plan-mode/planners/`; runs are sa
 - `plannerTimeoutSeconds`: the per-turn time limit (default 2700, 45 minutes).
 - `implementationModelMap`, `defaultImplementationContext` (`keep` or `clear`): Implement step defaults.
 - `defaultPlanExportPath`: the export path (default `PLAN.md`, relative to the project).
-- `toggleShortcut`: a key that opens `/plan`; none by default. It changes after `/reload`.
+- `toggleShortcut`: a key that toggles plan mode (with pi-tool-gate, it cycles the gate's modes instead, like the gate's own Shift+Tab); none by default. Do not set it to the gate's key. It changes after `/reload`.
+- `plansDirectory`: where plan mode writes plan files (default `~/.pi/agent/plans`; `~` is expanded).
 - `alwaysOffer`: tools planners always get, whatever Jev scores: a toolset, command grant, MCP server, or Other tool by id or name (`web`, `jev`, `context7`), or one tool of a group (`web/web_search`, `context7/query-docs`). Unset, it is `["web", "web_search", "fetch_content", "context7", "jev"]` (names your setup lacks are ignored); set it to replace that, or to `[]` to leave every tool to Jev.
 - `plannerToolsets`: named bundles of extensions and tools; `mcp: true` expands into your MCP servers. `commandGrants`: extra commands bash may run (one per call), with skills that explain them.
 - `jevToolSelection` (default `true`), `jevThreshold` (default 0.5, the probability at which a tool is preselected), `jevProvider` (default `typesafe`), `jevModel` (default `jev-latest`).
@@ -205,10 +228,12 @@ Planner sessions are stored under `~/.pi/agent/plan-mode/planners/`; runs are sa
 - Pi 0.99 or newer and its interactive terminal UI.
 - Planners, their subagents and M make ordinary model requests on the models you pick, through your session's providers, billed as those providers bill them. Each planner and each subagent is a separate session, so two planners with subagents can use several times the tokens of one agent. The planning screen shows tokens and cost per planner.
 - Jev tool selection makes an optional classifier request through Pi's classifier models (default `typesafe/jev-latest`, which needs Pi's credentials for it, such as `TYPESAFE_API_KEY`); it can be billed. Without a classifier the Tools step uses its fallback preselection.
-- On disk: it reads and writes `~/.pi/agent/pi-plan-mode.json`, stores planner sessions under `~/.pi/agent/plan-mode/planners/`, appends run entries and plan messages to your session, writes exported plans where you choose, and writes a temporary plan file for `planCompleteCommand`.
+- Plan mode makes no requests of its own: your agent plans on your session's model.
+- On disk: it reads and writes `~/.pi/agent/pi-plan-mode.json`, writes plan mode's plan files under `~/.pi/agent/plans/` (or `plansDirectory`), appends plan-mode state entries and hidden notices to your session, stores planner sessions under `~/.pi/agent/plan-mode/planners/`, appends run entries and plan messages to your session, writes exported plans where you choose, and writes a temporary plan file for `planCompleteCommand`.
 
 ## Optional integrations
 
+- **pi-tool-gate**: owns the permission mode. Plan mode joins its Shift+Tab cycle, the gate judges commands while planning, and approving a plan picks the gate's next mode. They talk over Pi's event bus (`permission-mode:changed`, `permission-mode:set`, `permission-mode:cycle`, `permission-mode:plan-provider`; see pi-tool-gate's `src/modes.ts`). Without the gate, plan mode enforces a read-only shell itself and shows `⏸ plan mode on` in the footer.
 - **Herdr**: while any planner is working, the extension holds `herdr:working` on Pi's event bus (`{ active: true, label: "Planning" }`, then `{ active: false }`), so pi-herdr shows the pending run in Herdr's sidebar; while a planner waits for your answers it also holds `herdr:blocked` (`label: "Planner question"`). Outside Herdr, or without pi-herdr, nothing listens.
 - **pi-anthropic-auth** (or any extension named in `providerExtensions`): forwarded to planners and subagents on that provider.
 - **Custom editors** such as pi-vim's: the Task box uses the editor component your main editor uses, so its modes work there (pi-vim's `:q` leaves the box instead of quitting Pi).
@@ -218,7 +243,8 @@ Planner sessions are stored under `~/.pi/agent/plan-mode/planners/`; runs are sa
 - The read-only policy covers Pi's `edit`/`write` (blocked), shell commands and MCP calls. Toolset and Other tools you select run as their own extensions implement them, and command grants and `safeSubcommands` bypass the shell review (see the [settings reference](./docs/settings.md)). It is not a sandbox.
 - M (your main agent) is only asked to leave files alone while planning.
 - At most two planners per run.
-- `/plan` does nothing outside the interactive terminal UI.
+- `/planners` does nothing outside the interactive terminal UI. Plan mode works without a UI, but nobody can approve a plan there.
+- Plan mode blocks `edit` and `write` outside the plan file and (without pi-tool-gate) non-read-only shell commands. Other extension and MCP tools your agent has keep working; it is told not to change anything with them.
 
 ## Development
 
@@ -235,7 +261,8 @@ Source layout:
 ```text
 src/
 ├── index.ts            # entry: the planner app, or the MCP guard inside a subagent
-├── plan.ts             # /plan: settings, tools, runs, implement, export, restore
+├── plan.ts             # /plan and /planners: settings, tools, runs, implement, export, restore
+├── inline-plan.ts      # plan mode in your conversation: plan file, enter/exit tools, approval
 ├── main-chat.ts        # your main agent as M: delivered plans, the run tools, the M pane's view
 ├── app/                # the full-screen pages: options rows, lanes, frame
 ├── planner/            # in-process planner sessions: agent, session, policy extension, access, prompts

@@ -113,7 +113,7 @@ export function planDeliveryText(delivery: PlanDelivery) {
 
 /** A planner failed: your main agent hears it too, so it does not wait for that plan. */
 export function planFailureText(id: string, model: string, error: string) {
-  return `Planner ${id} (${model}) failed: ${error}. The user can retry it from /plan (talk to it, or reload once the cause is fixed).`;
+  return `Planner ${id} (${model}) failed: ${error}. The user can retry it from /planners (talk to it, or reload once the cause is fixed).`;
 }
 
 /** How a question from your main agent reaches a planner. */
@@ -130,8 +130,8 @@ export function writeMergedRequest(revise: boolean) {
 
 /** Guidance for your main agent while a planning run is active (its tools' guidelines). */
 export const MAIN_AGENT_GUIDELINES = [
-  "Planners (A, and B when two are planning) are writing implementation plans in the background, read-only. Each plan and each revision arrives in this conversation as a message with the plan in full; the user may also talk to the planners directly in /plan.",
+  "Planners (A and B) are writing implementation plans in the background, read-only. Each plan and each revision arrives in this conversation as a message with the plan in full; the user may also talk to the planners directly in /planners.",
   "While planning is underway, do not edit files or run anything that changes state unless the user explicitly asks; talk the plans over with the user instead.",
   "To find out more about a plan or what a planner learned, ask it with plan_ask_planner rather than re-investigating from scratch.",
-  "Call plan_submit_merged only when the user asks for the merged (or adjusted) plan, with the complete plan as Markdown, not a diff. It becomes plan M, which the user implements or exports from /plan, or asks you to implement here.",
+  "Call plan_submit_merged only when the user asks for the merged (or adjusted) plan, with the complete plan as Markdown, not a diff. It becomes plan M, which the user implements or exports from /planners, or asks you to implement here.",
 ];

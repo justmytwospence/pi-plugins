@@ -233,7 +233,7 @@ test("/plan discovers the actual embedded factory for task and lane editors and 
     },
   }).ctx as ExtensionCommandContext;
   await planMode(mock.pi, { readSettings: async () => ({ thinkingLevel: "inherit", jevToolSelection: false }) });
-  const first = mock.commands.get("plan")?.handler("task", ctx);
+  const first = mock.commands.get("planners")?.handler("task", ctx);
   await tick();
   app.handleInput("\t");
   assert.equal(editors.length, 1);
@@ -262,7 +262,7 @@ test("/plan discovers the actual embedded factory for task and lane editors and 
     },
   });
   for (const handler of mock.events.get("session_start") ?? []) await handler({}, ctx);
-  const second = mock.commands.get("plan")?.handler("", ctx);
+  const second = mock.commands.get("planners")?.handler("", ctx);
   await tick();
   app.render();
   assert.equal(editors.length, 2);

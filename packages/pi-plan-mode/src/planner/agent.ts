@@ -1,5 +1,5 @@
 // One planner: an in-process Pi session you can watch, talk to, and answer, from the planning
-// screen. The same class serves `/plan` with one planner and with two; nothing about it depends on
+// screen. The same class serves `/planners` with one planner and with two; nothing about it depends on
 // how many there are.
 import { randomUUID } from "node:crypto";
 import type { AgentSessionEvent, ExtensionContext } from "@earendil-works/pi-coding-agent";

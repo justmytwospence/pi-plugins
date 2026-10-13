@@ -1,5 +1,5 @@
-// /plan: a full-screen planning app. Settings → Tools → Planning → Review → Implement, with one or
-// two planners. Each planner is an in-process Pi session (planner/agent.ts) seeded with your
+// /plan turns on plan mode in your conversation (inline-plan.ts). /planners is a full-screen
+// planning app: Settings → Tools → Planning → Review → Implement, with two planners. Each planner is an in-process Pi session (planner/agent.ts) seeded with your
 // conversation. M, the pane below the lanes, is your main agent: each plan lands in your main
 // conversation in full, and there your agent can question a planner or record the merged plan
 // (main-chat.ts).
@@ -41,6 +41,7 @@ import {
   parseModelSpec,
   sameModel,
 } from "./implementation-models.js";
+import { registerInlinePlanMode } from "./inline-plan.js";
 import { type JevToolPick, pickToolsWithJev } from "./jev-tool-picker.js";
 import { runLaneCommand } from "./lane-commands.js";
 import { isAuthError, loginInDialog, providerName } from "./login.js";
@@ -86,6 +87,8 @@ import { type ToolPreselection, ToolTreeView } from "./tool-tree-view.js";
 import { effortText } from "./ui-kit.js";
 
 const EXTENSION_ENTRY_PATH = fileURLToPath(new URL("./index.ts", import.meta.url));
+/** /plan's argument that starts the fresh session an approved plan asked for. */
+const FRESH_ARG = "--implement-fresh";
 const RUN_ENTRY = "plan-run";
 const RUNTIME_ENTRY = "plan-implementation-runtime";
 const RUNTIME_CONSUMED_ENTRY = "plan-implementation-runtime-consumed";
@@ -168,7 +171,7 @@ interface PlanRun {
 
 interface Draft {
   task: string;
-  planners: [ModelSpec, ModelSpec | undefined];
+  planners: [ModelSpec, ModelSpec];
   scouts: Record<string, ModelSpec | undefined>;
   timeLimit: number;
 }
@@ -324,7 +327,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
         },
       );
     } catch {
-      // A session that cannot take messages just misses the delivery; /plan still has the plan.
+      // A session that cannot take messages just misses the delivery; /planners still has the plan.
     }
   };
 
@@ -341,7 +344,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
               : agent.working
                 ? "working"
                 : pendingResume.has(agent.id)
-                  ? "cut off (resume in /plan)"
+                  ? "cut off (resume in /planners)"
                   : agent.plan
                     ? "ready"
                     : agent.status === "failed"
@@ -349,7 +352,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
                       : "waiting"
           }`,
       );
-      ctx.ui.setStatus(STATUS_KEY, `plan: ${parts.join(" · ")} (/plan)`);
+      ctx.ui.setStatus(STATUS_KEY, `plan: ${parts.join(" · ")} (/planners)`);
     }
     if (!run) return;
     // Tell you once per new question and once per new plan version; what you already see on the
@@ -357,12 +360,15 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     for (const agent of run.agents) {
       if (agent.status === "asking" && agent.pending && !notifiedQuestions.has(agent.pending)) {
         notifiedQuestions.add(agent.pending);
-        if (!app) ctx.ui.notify(`Planner ${agent.id} is asking you something. /plan to answer.`, "info");
+        if (!app) ctx.ui.notify(`Planner ${agent.id} is asking you something. /planners to answer.`, "info");
       } else if (agent.plan && !agent.working && notifiedPlans.get(agent.id) !== agent.revision) {
         notifiedPlans.set(agent.id, agent.revision);
         if (!app) {
           const version = agent.revision > 1 ? ` v${agent.revision}` : "";
-          ctx.ui.notify(`Plan ${agent.id}${version} is ready, and in this conversation. /plan to review it.`, "info");
+          ctx.ui.notify(
+            `Plan ${agent.id}${version} is ready, and in this conversation. /planners to review it.`,
+            "info",
+          );
         }
       }
     }
@@ -448,7 +454,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     }
     setMainToolsActive(pi, true);
     // Turns a reload or restart cut off (or that had failed) do not carry on by themselves: a
-    // restored session must not start model calls on its own. They are marked, and /plan offers to
+    // restored session must not start model calls on its own. They are marked, and /planners offers to
     // resume each (the status line says which).
     for (const agent of run.agents) {
       const turn = latest.planners.find((candidate) => candidate.id === agent.id)?.turn;
@@ -599,15 +605,63 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     clearBranch();
   });
 
+  // Inline plan mode in your own conversation (Claude Code's): /plan, Shift+Tab, enter_plan_mode.
+  let freshPlan: string | undefined;
+  const inline = registerInlinePlanMode(pi, {
+    safeSubcommands: () => settings.safeSubcommands,
+    plansDirectory: () => settings.plansDirectory,
+    approved: (plan, ctx) => hook(ctx, { id: "plan", name: "plan", revision: 1, plan, spec: undefined }),
+    implementFresh: (plan) => {
+      freshPlan = plan;
+    },
+    toggleKey: () => configuredPlanModeToggleShortcut(settings),
+  });
+  // An approved plan to build in a fresh session: once your agent's turn is over, /plan starts it
+  // (a session switch needs a command's context).
+  pi.on("agent_settled", () => {
+    if (freshPlan === undefined) return;
+    safely(() => pi.sendUserMessage(`/plan ${FRESH_ARG}`, { expandPromptTemplates: true }));
+  });
+
   pi.registerCommand("plan", {
-    description: "Plan with one or two models in a full-screen planner, then implement",
+    description: "Plan mode: research read-only and write a plan to approve before anything changes",
+    handler: async (args, ctx) => {
+      const epoch = branchEpoch;
+      await sessionReady;
+      if (!runtimeActive || epoch !== branchEpoch) return;
+      hostCtx = ctx;
+      const task = args.trim();
+      if (task === FRESH_ARG) {
+        const plan = freshPlan;
+        freshPlan = undefined;
+        if (plan === undefined) return;
+        const target = ctx.model ? { provider: ctx.model.provider, modelId: ctx.model.id } : undefined;
+        const level = pi.getThinkingLevel();
+        const source: PlanSource = { id: "plan", name: "plan", revision: 1, plan, spec: undefined };
+        await implementFresh(
+          ctx,
+          source,
+          target && level && level !== "off" ? { ...target, thinkingLevel: level as ThinkingLevel } : target,
+        );
+        return;
+      }
+      if (!inline.active) inline.enter(ctx);
+      else if (!task && ctx.hasUI) {
+        ctx.ui.notify(`Plan mode is on. The plan file is ${inline.planFile ?? "not chosen yet"}.`, "info");
+      }
+      if (task) pi.sendUserMessage(task, ctx.isIdle() ? undefined : { deliverAs: "followUp" });
+    },
+  });
+
+  pi.registerCommand("planners", {
+    description: "Plan with two models in parallel in a full-screen planner, merge, then implement",
     handler: async (args, ctx) => {
       const epoch = branchEpoch;
       await sessionReady;
       if (!runtimeActive || epoch !== branchEpoch) return;
       hostCtx = ctx;
       if (ctx.mode !== "tui") {
-        ctx.ui.notify("/plan needs the interactive terminal UI.", "warning");
+        ctx.ui.notify("/planners needs the interactive terminal UI.", "warning");
         return;
       }
       await loadSettings();
@@ -616,9 +670,9 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     },
   });
 
-  // The shortcut opens /plan (a command, so the screen can start a fresh session later). Its key
-  // is in the settings, so the factory waits for them: Pi binds extension shortcuts once, after
-  // every factory has returned, and a shortcut registered later would never fire.
+  // The shortcut toggles plan mode (with pi-tool-gate: cycles its modes, as its own key does). Its
+  // key is in the settings, so the factory waits for them: Pi binds extension shortcuts once,
+  // after every factory has returned, and a shortcut registered later would never fire.
   const initialized = (async () => {
     try {
       await loadSettings();
@@ -630,13 +684,13 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
   const shortcut = configuredPlanModeToggleShortcut(settings);
   if (shortcut) {
     pi.registerShortcut(shortcut, {
-      description: "Open the planner (/plan)",
-      handler: async () => {
+      description: "Toggle plan mode",
+      handler: async (ctx) => {
         const epoch = branchEpoch;
         await initialized;
         await sessionReady;
         if (!runtimeActive || epoch !== branchEpoch) return;
-        pi.sendUserMessage("/plan", { expandPromptTemplates: true });
+        inline.toggle(ctx);
       },
     });
   }
@@ -759,7 +813,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
 
       const lanes = (): LanesPage => {
         const lanesPage: LanesPage = new LanesPage(theme, {
-          title: "Plan",
+          title: "Planners",
           task: () => run?.task ?? "",
           createInput: createLaneInput,
           agents: () => run?.agents ?? [],
@@ -792,7 +846,10 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
             if (text.startsWith("/") && !text.startsWith("//")) {
               close();
               ctx.ui.setEditorText(text);
-              ctx.ui.notify("Press Enter to run it in your session; /plan brings the planning screen back.", "info");
+              ctx.ui.notify(
+                "Press Enter to run it in your session; /planners brings the planning screen back.",
+                "info",
+              );
               return;
             }
             // Like typing in your main editor: a new turn, or a steer while your agent is working.
@@ -882,13 +939,6 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
         }
         // Implement M is first once M has a plan; Revise plan M goes right after it.
         if (mergeable && merged) actions.splice(1, 0, merge);
-        if (agents.length === 1) {
-          actions.push({
-            id: "add",
-            label: "Add a planner…",
-            description: "Plan the same task with a second model in parallel; the first keeps its plan and context.",
-          });
-        }
         for (const source of ready) {
           actions.push({
             id: `export:${source.id}`,
@@ -902,7 +952,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
             {
               id: "close",
               label: "Save & close",
-              description: "Close the planner; the plans are kept (planners keep working). /plan reopens it.",
+              description: "Close the planner; the plans are kept (planners keep working). /planners reopens it.",
             },
             {
               id: "discard",
@@ -989,7 +1039,6 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           if (agent) resumePlanner(agent, ctx);
           return;
         }
-        if (kind === "add") return show(settingsPage("add"));
         if (kind === "close") return close();
         if (kind === "discard") {
           disposeRun("discarded");
@@ -1027,7 +1076,10 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       }
       const draft: Draft = {
         task,
-        planners: [withEffort(firstPlanner), configured[1] ? withEffort(configured[1]) : undefined],
+        planners: [
+          withEffort(firstPlanner),
+          withEffort(configured[1] ?? models.find((model) => !sameModel(model, firstPlanner)) ?? firstPlanner),
+        ],
         scouts: Object.fromEntries(
           Object.entries(settings.scoutModelMap ?? {}).map(([key, spec]) => [
             key,
@@ -1068,25 +1120,22 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
         const scout = scoutFor(spec);
         if (spec && scout) draft.scouts[formatModelKey(spec)] = cycleEffort(scout, direction);
       };
-      const plannerRows = (index: 0 | 1, adding: boolean): OptionRow[] => {
+      const plannerRows = (index: 0 | 1): OptionRow[] => {
         const id = IDS[index];
         const get = () => draft.planners[index];
         return [
           {
             id: `planner-${id}`,
             label: `Planner ${id}`,
-            ...(index === 0 && !adding ? { section: "Planners" } : {}),
+            ...(index === 0 ? { section: "Planners" } : {}),
             value: () => describe(get()),
             cycle: (direction) => {
-              const next = cycleModel(get(), direction, index === 1);
-              if (index === 0) draft.planners[0] = next ?? draft.planners[0];
-              else draft.planners[1] = next;
+              draft.planners[index] = cycleModel(get(), direction, false) ?? draft.planners[index];
             },
             description:
               index === 0
-                ? `The model that plans. ${get() ? catalog.details(get() as ModelSpec) : ""}`
-                : `A second model planning the same task in parallel, to compare or merge. "none" plans with one. ${get() ? catalog.details(get() as ModelSpec) : ""}`,
-            ...(adding && index === 0 ? { hidden: () => true } : {}),
+                ? `One of the two models that plan the same task in parallel. ${get() ? catalog.details(get() as ModelSpec) : ""}`
+                : `The other model, planning the same task in parallel, to compare or merge. For one plan, use /plan in your conversation instead. ${get() ? catalog.details(get() as ModelSpec) : ""}`,
           },
           {
             id: `effort-${id}`,
@@ -1104,7 +1153,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
               if (spec) draft.planners[index] = cycleEffort(spec, direction);
             },
             description: `How hard planner ${id} thinks (its thinking level).`,
-            hidden: () => !get() || (adding && index === 0),
+            hidden: () => !get(),
           },
           {
             id: `scouts-${id}`,
@@ -1112,7 +1161,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
             value: () => describe(scoutFor(get())),
             cycle: (direction) => setScout(get(), direction),
             description: `Read-only helpers planner ${id} can fan out for broad investigations (plan_subagents), on this model. "none" turns them off.`,
-            hidden: () => !get() || (adding && index === 0),
+            hidden: () => !get(),
           },
           {
             id: `scouts-effort-${id}`,
@@ -1124,19 +1173,12 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
             },
             cycle: (direction) => setScoutEffort(get(), direction),
             description: `How hard planner ${id}'s subagents think (their thinking level).`,
-            hidden: () => !scoutFor(get()) || (adding && index === 0),
+            hidden: () => !scoutFor(get()),
           },
         ];
       };
 
-      const settingsPage = (mode: "new" | "add") => {
-        const adding = mode === "add";
-        if (adding && !draft.planners[1]) {
-          const first = run?.agents[0]?.spec;
-          draft.planners[1] = withEffort(
-            models.find((model) => !first || !sameModel(model, first)) ?? (models[0] as ModelSpec),
-          );
-        }
+      const settingsPage = () => {
         const optionRows: OptionRow[] = [
           {
             id: "task",
@@ -1150,10 +1192,9 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
             },
             description:
               "What to plan. Tab moves in and out of it; shift+⏎ starts a new line. Leave it empty to plan what the conversation so far is about.",
-            hidden: () => adding,
           },
-          ...plannerRows(0, adding),
-          ...plannerRows(1, adding),
+          ...plannerRows(0),
+          ...plannerRows(1),
           {
             id: "time",
             label: "Time limit",
@@ -1165,7 +1206,6 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
             },
             description:
               "How long a planner may work on one turn. At 80% it is asked to wrap up; at the limit it is stopped.",
-            hidden: () => adding,
           },
           {
             id: "jev",
@@ -1178,7 +1218,6 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
               saveSettings({ jevToolSelection: next });
             },
             description: "Let Jev (TypeSafe) preselect the planners' tools from the task on the next step.",
-            hidden: () => adding,
           },
           {
             id: "context",
@@ -1193,7 +1232,6 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
             },
             description:
               "Where implementation starts by default: this conversation with the plan, or a fresh session with only the plan.",
-            hidden: () => adding,
           },
           {
             id: "export",
@@ -1208,41 +1246,22 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
               placeholder: "PLAN.md",
             },
             description: "Default file for Export (relative to the project).",
-            hidden: () => adding,
-          },
-          {
-            id: "shortcut",
-            label: "Shortcut",
-            value: () => configuredPlanModeToggleShortcut(settings) ?? theme.fg("dim", "none"),
-            text: {
-              get: () => configuredPlanModeToggleShortcut(settings) ?? "",
-              set: (value) => {
-                saveSettings({ toggleShortcut: (value || null) as never });
-                ctx.ui.notify("The shortcut changes after /reload.", "info");
-              },
-              placeholder: "e.g. shift+tab",
-            },
-            description: "Key that opens the planner. Takes effect after /reload.",
-            hidden: () => adding,
           },
         ];
         const optionsPage = new OptionsPage(theme, {
-          title: adding ? "Add a planner" : "Plan",
-          context: () =>
-            adding ? `plans ${run?.task ? `"${run.task.split("\n")[0]}"` : "the same task"} in parallel` : "settings",
+          title: "Planners",
+          context: () => "settings",
           step: "Settings",
           rows: optionRows,
-          next: adding
-            ? { label: "start planner B", run: () => void addPlanner(ctx) }
-            : { label: "next: tools", run: () => show(toolsPage()) },
-          back: adding ? { label: "back", run: () => show(lanes()) } : { label: "close", run: close },
+          next: { label: "next: tools", run: () => show(toolsPage()) },
+          back: { label: "close", run: close },
           rowsAvailable: rows,
           requestRender: render,
           createTextArea,
           onChange: (row) => {
             if (row.id.startsWith("planner") || row.id.startsWith("effort")) {
               const planners = draft.planners.filter((spec): spec is ModelSpec => spec !== undefined);
-              if (!adding) saveSettings({ planners });
+              saveSettings({ planners });
             }
             if (row.id.startsWith("scouts")) {
               const map = Object.fromEntries(
@@ -1254,7 +1273,6 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
             if (row.id === "time") saveSettings({ plannerTimeoutSeconds: draft.timeLimit * 60 });
           },
         });
-        if (adding) optionsPage.focus("planner-B");
         return optionsPage;
       };
 
@@ -1310,7 +1328,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
         current.pick = undefined;
         const count = draft.planners.filter(Boolean).length;
         return new ToolTreeView(theme, {
-          title: "Plan",
+          title: "Planners",
           ...(draft.task ? { task: draft.task.split("\n")[0] } : {}),
           notes: [],
           roots: current.roots,
@@ -1319,7 +1337,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           rows,
           requestRender: render,
           onDone: (result) => {
-            if (result.kind === "back" || result.kind === "cancel") return show(settingsPage("new"));
+            if (result.kind === "back" || result.kind === "cancel") return show(settingsPage());
             void startRun(ctx);
           },
         });
@@ -1400,7 +1418,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
         });
       };
 
-      // --- Starting and adding planners --------------------------------------------------------
+      // --- Starting planners --------------------------------------------------------
 
       const startRun = async (context: ExtensionCommandContext) => {
         const current = tree;
@@ -1470,28 +1488,8 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
         void agent.start(prompt, context);
       };
 
-      const addPlanner = async (context: ExtensionCommandContext) => {
-        const spec = draft.planners[1];
-        if (!run || !spec) return show(lanes());
-        if (!run.launch) {
-          // A restored run: give the new planner the default tools.
-          const toolsets = settings.plannerToolsets ?? {};
-          const roots = buildToolTree({
-            toolsets,
-            mcpCatalog: [],
-            scoutTargets: [],
-            grants: settings.commandGrants ?? {},
-          });
-          applyAlwaysOffer(roots, configuredAlwaysOffer(settings));
-          run.launch = { roots, others: [], seed: context.sessionManager.buildSessionProjection().messages };
-        }
-        launchPlanner(context, IDS[run.agents.length] ?? "B", spec, 2);
-        persistRun();
-        show(lanes());
-      };
-
       // Open where you left off: the plans, or a new plan's settings.
-      page = run ? lanes() : settingsPage("new");
+      page = run ? lanes() : settingsPage();
       const component: Component & {
         dispose(): void;
         [EDITOR_SURFACE]: string;
@@ -1540,26 +1538,28 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     const plan = source.plan;
     hook(ctx, source);
     disposeRun("implemented");
-    if (context === "clear") {
-      const parentSession = ctx.sessionManager.getSessionFile();
-      try {
-        await ctx.waitForIdle();
-        await ctx.newSession({
-          ...(parentSession ? { parentSession } : {}),
-          setup: async (sessionManager) => {
-            sessionManager.appendCustomEntry(RUNTIME_ENTRY, { model: formatModelSpec(target) });
-          },
-          withSession: async (fresh) => {
-            await fresh.sendUserMessage(formatImplementationPrompt(plan, true));
-          },
-        });
-      } catch (error: unknown) {
-        ctx.ui.notify(`Could not start a fresh session: ${errorText(error)}`, "error");
-      }
-      return;
-    }
+    if (context === "clear") return implementFresh(ctx, source, target);
     await applyRuntime(ctx, target);
     pi.sendUserMessage(formatImplementationPrompt(plan, false));
+  }
+
+  /** A fresh session (a child of this one) that gets only the plan, on `target` if given. */
+  async function implementFresh(ctx: ExtensionCommandContext, source: PlanSource, target: ModelSpec | undefined) {
+    const parentSession = ctx.sessionManager.getSessionFile();
+    try {
+      await ctx.waitForIdle();
+      await ctx.newSession({
+        ...(parentSession ? { parentSession } : {}),
+        setup: async (sessionManager) => {
+          if (target) sessionManager.appendCustomEntry(RUNTIME_ENTRY, { model: formatModelSpec(target) });
+        },
+        withSession: async (fresh) => {
+          await fresh.sendUserMessage(formatImplementationPrompt(source.plan, true));
+        },
+      });
+    } catch (error: unknown) {
+      ctx.ui.notify(`Could not start a fresh session: ${errorText(error)}`, "error");
+    }
   }
 
   async function applyRuntime(ctx: ExtensionContext, target: ModelSpec) {
