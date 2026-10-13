@@ -1,5 +1,4 @@
-import { stripVTControlCharacters } from "node:util";
-import { CURSOR_MARKER, visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, stripTerminalSequences, visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { expect, test, vi } from "vitest";
 import { EDITOR_MODE, EDITOR_SURFACE, INPUT_CONTEXT, requestEditorFactory, type EditorFactoryOptions, type EditorModeContext, type SuiteEditor } from "../src/contract.ts";
 import { BtwOverlayComponent, type BtwOverlayOptions } from "../src/overlay.ts";
@@ -123,7 +122,7 @@ test("short-terminal Pi height clipping never hides native or suite composer cur
         const visible = lines.slice(0, piHeight).join("\n");
         expect(visible).toContain(CURSOR_MARKER);
         if (suite) expect(visible).toContain("editor 40");
-        else expect(stripVTControlCharacters(visible)).toContain("native draft");
+        else expect(stripTerminalSequences(visible)).toContain("native draft");
         view.dispose();
       }
     }

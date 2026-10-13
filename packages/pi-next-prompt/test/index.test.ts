@@ -51,6 +51,19 @@ test("the instruction is added as one prompt section", async () => {
   expect(options.sections).toEqual({ [SECTION]: INSTRUCTION });
 });
 
+test("custom starts retain guidance and the last user prompt", async () => {
+  const { h, ctx, run, jev } = await setup();
+  await run("fix the tests", ["Working."]);
+  const options = { sections: {} };
+  await h.emit("before_agent_start", { messageType: "custom", message: { content: "Job finished" }, systemPromptOptions: options }, ctx);
+  expect(options.sections).toEqual({ [SECTION]: INSTRUCTION });
+  await h.emit("agent_start", {}, ctx);
+  await h.emit("message_end", { message: assistant("Done.\n<next>Review the diff</next>") }, ctx);
+  await h.emit("agent_before_settle", { outcome: "completed", entries: [], continue: false }, ctx);
+  await h.emit("agent_settled", {}, ctx);
+  expect(jev.calls.at(-1)?.state.last_user_prompt).toBe("fix the tests");
+});
+
 test("no UI, no instruction", async () => {
   const h = harness();
   nextPrompt(h.pi);

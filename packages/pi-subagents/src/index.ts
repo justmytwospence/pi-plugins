@@ -624,6 +624,7 @@ export default function subagents(pi: ExtensionAPI) {
   // A prompt mentioning `@subagent:<name>`: tell the model which discovered agent that is and how to
   // delegate to it (an unknown name is named as such, with the agents that exist).
   pi.on("before_agent_start", (event, ctx) => {
+    if (!("prompt" in event)) return undefined;
     const guidance = mentionGuidance(event.prompt, discoverAgents(ctx.cwd));
     if (!guidance) return undefined;
     return { message: { customType: MENTION_TYPE, content: guidance, display: false } };
@@ -632,6 +633,7 @@ export default function subagents(pi: ExtensionAPI) {
   // A prompt referencing `@run:<label-or-id>`: give the model that run's task, result and a compact
   // transcript (an unknown token is named as such, with the runs that exist).
   pi.on("before_agent_start", (event, ctx) => {
+    if (!("prompt" in event)) return undefined;
     const context = referenceContext(event.prompt, runRefs(ctx));
     if (!context) return undefined;
     return { message: { customType: REFERENCE_TYPE, content: context, display: false } };

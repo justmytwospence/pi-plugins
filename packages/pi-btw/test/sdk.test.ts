@@ -19,8 +19,8 @@ test("package metadata is independent, SDK dev versions are exact, and local att
   expect(pkg.pi).toEqual({ extensions: ["./src/index.ts"], skills: ["./skills"] });
   expect(pkg.dependencies).toBeUndefined();
   for (const name of ["@earendil-works/pi-ai", "@earendil-works/pi-coding-agent", "@earendil-works/pi-tui"]) {
-    expect(pkg.peerDependencies[name]).toBe("*"); expect(pkg.devDependencies[name]).toBe("1.1.0");
-    expect(lock.packages[""].devDependencies[name]).toBe("1.1.0");
+    expect(pkg.peerDependencies[name]).toBe("*"); expect(pkg.devDependencies[name]).toBe("1.2.0");
+    expect(lock.packages[""].devDependencies[name]).toBe("1.2.0");
   }
   const hostPeers = new Set(["@earendil-works/pi-ai", "@earendil-works/pi-agent-core", "@earendil-works/pi-coding-agent", "@earendil-works/pi-tui", "typebox"]);
   for (const [name, range] of Object.entries(pkg.peerDependencies)) {

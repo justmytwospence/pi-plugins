@@ -95,7 +95,7 @@ describe("extension factory", () => {
   });
 });
 
-describe("Pi 1.1.0 resource loader", () => {
+describe("Pi 1.2.0 resource loader", () => {
   test("loads the standalone package from an isolated copy", async () => {
     const isolated = resolve(temp, "isolated", "pi-cc-render");
     cpSync(root, isolated, {
@@ -134,7 +134,7 @@ describe("Pi 1.1.0 resource loader", () => {
     expect(manifest.pi.themes).toEqual(["./themes/cc-dark.json", "./themes/cc-light.json"]);
     for (const host of ["@earendil-works/pi-coding-agent", "@earendil-works/pi-tui", "@earendil-works/pi-ai"]) {
       expect(manifest.peerDependencies[host]).toBe("*");
-      expect(manifest.devDependencies[host]).toBe("1.1.0");
+      expect(manifest.devDependencies[host]).toBe("1.2.0");
       expect(manifest.dependencies?.[host]).toBeUndefined();
     }
     expect(manifest.dependencies).toBeUndefined();

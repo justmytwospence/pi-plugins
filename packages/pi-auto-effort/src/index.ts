@@ -378,7 +378,7 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     // ctx.signal can be a getter for the runtime's current operation. Keep this operation's
     // signal across the await rather than checking a later run's signal when the answer arrives.
     const signal = ctx.signal;
-    if (!active() || !event.prompt.trim() || signal?.aborted) return;
+    if (!("prompt" in event) || !active() || !event.prompt.trim() || signal?.aborted) return;
     // Codex usage refreshes alongside the Jev call; the prompt never waits for it.
     pollCodex(ctx);
     const outcome = await askJev(ctx.modelRegistry, config.jev, effortState(event.prompt, ctx.sessionManager.getBranch()), QUESTIONS, signal);

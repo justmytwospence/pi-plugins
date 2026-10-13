@@ -25,8 +25,8 @@ test("the independent manifest exposes the scoped entry point and only host-supp
     expect(hostPeers.has(name)).toBe(true);
     expect(range).toBe("*");
   }
-  expect(manifest.devDependencies["@earendil-works/pi-coding-agent"]).toBe("1.1.0");
-  expect(manifest.devDependencies["@earendil-works/pi-tui"]).toBe("1.1.0");
+  expect(manifest.devDependencies["@earendil-works/pi-coding-agent"]).toBe("1.2.0");
+  expect(manifest.devDependencies["@earendil-works/pi-tui"]).toBe("1.2.0");
   expect(manifest.repository.directory).toBe("packages/pi-sticky-last-prompt");
   expect(typeof stickyLastPrompt).toBe("function");
   for (const file of manifest.files) expect(existsSync(new URL(`../${file}`, import.meta.url))).toBe(true);
@@ -41,7 +41,7 @@ test("the component lockfile agrees with its manifest without a root install", (
   expect(lock.packages[""].devDependencies).toEqual(manifest.devDependencies);
   expect(lock.packages[""].peerDependencies).toEqual(manifest.peerDependencies);
   for (const name of ["@earendil-works/pi-coding-agent", "@earendil-works/pi-tui"]) {
-    expect(lock.packages[`node_modules/${name}`].version).toBe("1.1.0");
+    expect(lock.packages[`node_modules/${name}`].version).toBe("1.2.0");
   }
 });
 

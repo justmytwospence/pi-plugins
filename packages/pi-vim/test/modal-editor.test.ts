@@ -12,7 +12,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { CURSOR_MARKER, visibleWidth } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, TuiMainScreen, visibleWidth } from "@earendil-works/pi-tui";
 import {
   buildClipboardReadHelperSource,
   buildClipboardWriteHelperSource,
@@ -103,7 +103,7 @@ const INSERT_CURSOR_SHAPE = "\x1b[5 q";
 const BLOCK_CURSOR_SHAPE = "\x1b[1 q";
 const RESET_CURSOR_SHAPE = "\x1b[0 q";
 const SHOW_HARDWARE_CURSOR = "\x1b[?25h";
-const SOFTWARE_CURSOR_SPACE = "\x1b[7m \x1b[0m";
+const SOFTWARE_CURSOR_SPACE = "\x1b[7m \x1b[27m";
 /* eslint-disable no-control-regex -- DECSCUSR uses ESC. */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: DECSCUSR uses ESC.
 const DECSCUSR_PATTERN = /\x1b\[[015] q/;
@@ -223,8 +223,22 @@ function decorateLikeImageAttachments(editor: ModalEditor): DecoratedCall[] {
   return calls;
 }
 
-function findCursorMarkerLine(lines: string[]): string {
-  const line = lines.find((line) => line.includes(CURSOR_MARKER));
+// Pi 1.2 components emit fake-cursor APC markers; the renderer resolves them
+// to reverse video (or removes them when the hardware cursor is shown).
+class CursorRenderingTui extends TuiMainScreen {
+  resolveCursorRendering(lines: string[]): string[] {
+    return this.resolveFakeCursors(lines);
+  }
+}
+
+function findCursorMarkerLine(
+  lines: string[],
+  showHardwareCursor = true,
+): string {
+  const renderer = new CursorRenderingTui(stubTui.terminal, showHardwareCursor);
+  const line = renderer
+    .resolveCursorRendering(lines)
+    .find((line) => line.includes(CURSOR_MARKER));
   assert.ok(line, "expected rendered lines to include CURSOR_MARKER");
   return line;
 }
@@ -3368,7 +3382,7 @@ describe("cursor shape rendering", () => {
     const plainLine = removeCursorMarker(markerLine);
 
     assert.deepEqual(tui.terminalWrites, [INSERT_CURSOR_SHAPE]);
-    assert.equal(markerLine.includes("\x1b[7mb\x1b[0m"), false);
+    assert.equal(markerLine.includes("\x1b[7mb\x1b[27m"), false);
     assert.equal(plainLine.startsWith("abc"), true);
     assert.equal(visibleWidth(plainLine), 20);
     assertNoCursorShapeSequences(lines);
@@ -3430,7 +3444,7 @@ describe("cursor shape rendering", () => {
     focusEditor(editor);
 
     const lines = editor.render(20);
-    const markerLine = findCursorMarkerLine(lines);
+    const markerLine = findCursorMarkerLine(lines, false);
 
     assert.deepEqual(tui.terminalWrites, []);
     assert.equal(markerLine.includes(SOFTWARE_CURSOR_SPACE), true);
@@ -3478,7 +3492,7 @@ describe("cursor shape rendering", () => {
   // marker while the autocomplete list is open, so the hardware cursor is
   // used there too. Upstream 0.14.2 asserted the opposite against an older
   // pi-tui; the engine code is unchanged.
-  it("uses the hardware cursor while autocomplete is open (pi-tui 1.1.0)", () => {
+  it("uses the hardware cursor while autocomplete is open (pi-tui 1.2.0)", () => {
     const tui = createCursorShapeTui({ initialShowHardwareCursor: true });
     const editor = new ModalEditor(tui, stubTheme, stubKeybindings);
     const internal = editor as unknown as { autocompleteState?: string | null };
@@ -3492,7 +3506,7 @@ describe("cursor shape rendering", () => {
       true,
     );
     assert.equal(
-      lines.some((line) => line.includes(SOFTWARE_CURSOR_SPACE)),
+      findCursorMarkerLine(lines).includes(SOFTWARE_CURSOR_SPACE),
       false,
     );
     assert.deepEqual(tui.terminalWrites, [INSERT_CURSOR_SHAPE]);

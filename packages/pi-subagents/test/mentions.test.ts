@@ -13,6 +13,14 @@ test("config is byte-identical to the actual pi-copy sibling", () => {
   expect(readFileSync(new URL("../src/config.ts", import.meta.url), "utf8")).toBe(readFileSync(new URL("../../pi-copy/src/config.ts", import.meta.url), "utf8"));
 });
 
+test("custom starts do not expand user mentions or run references", async () => {
+  const h = harness();
+  await subagents(h.pi);
+  const ctx = h.ctx();
+  expect(await h.emit("before_agent_start", { messageType: "custom", message: { content: "@subagent:audit @run:previous" } }, ctx)).toBeUndefined();
+  await h.emit("session_shutdown", {}, ctx);
+});
+
 test("native mentions complete actual discovery, project overrides, delegate to subagent and retain file completion", async () => {
   const user = mkdtempSync(path.join(tmpdir(), "subagent-mentions-user-"));
   const cwd = mkdtempSync(path.join(tmpdir(), "subagent-mentions-project-"));

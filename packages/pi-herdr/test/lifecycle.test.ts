@@ -103,6 +103,15 @@ function inHerdr() {
   vi.stubEnv("PI_HERDR_PR", "0");
 }
 
+test("custom starts update identity without requiring a user prompt", async () => {
+  const p = fakePi();
+  piHerdr(p.pi);
+  const ctx = ctxOf([]);
+  await p.emit("before_agent_start", { messageType: "custom", message: { content: "Child finished" } }, ctx);
+  await p.emit("before_agent_start", { messageType: "user", prompt: "Review auth" }, ctx);
+  await p.emit("session_shutdown", {}, ctx);
+});
+
 test("children are a read-only activity source: entries, details without touching the pane, interrupt only while awaited, never close", async () => {
   const { f, state } = herdr();
   const changes: string[] = [];

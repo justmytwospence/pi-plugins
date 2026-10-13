@@ -334,7 +334,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
 
   pi.on("before_agent_start", (event, ctx) => {
     config = loadConfig("next-prompt", DEFAULT_CONFIG, ctx.cwd);
-    userPrompt = event.prompt;
+    if ("prompt" in event) userPrompt = event.prompt;
     // Only interactive sessions get the instruction: print mode and subagents have nowhere to show it.
     instruction = !active() ? "not injected (disabled)" : ctx.mode !== "tui" || !ctx.hasUI || !ui ? `not injected (${uiState})` : "injected";
     if (instruction !== "injected") return undefined;

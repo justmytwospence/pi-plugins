@@ -1,5 +1,5 @@
 /**
- * SDK 1.1.0 integration tests, not a replacement for the engine/oracle tests.
+ * SDK 1.2.0 integration tests, not a replacement for the engine/oracle tests.
  *
  * The extension is loaded from its .ts entry point by Pi's actual jiti loader.
  * AgentSession.bindExtensions, InteractiveMode's editor/UI wiring, CustomEditor,
@@ -329,11 +329,11 @@ async function openEmbedded(
   return { panel, editor: panel.editor, result, close };
 }
 
-describe("Pi SDK 1.1.0 loader and terminal input lifecycle", { concurrency: false }, () => {
-  it("uses the package-local 1.1.0 SDKs, not a test reimplementation", () => {
+describe("Pi SDK 1.2.0 loader and terminal input lifecycle", { concurrency: false }, () => {
+  it("uses the package-local 1.2.0 SDKs, not a test reimplementation", () => {
     for (const name of ["pi-coding-agent", "pi-tui"]) {
       const path = new URL(`../node_modules/@earendil-works/${name}/package.json`, import.meta.url);
-      assert.equal(JSON.parse(readFileSync(path, "utf8")).version, "1.1.0");
+      assert.equal(JSON.parse(readFileSync(path, "utf8")).version, "1.2.0");
     }
   });
 

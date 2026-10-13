@@ -35,8 +35,8 @@
     "directory": "packages/pi-context"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "1.1.0",
-    "@earendil-works/pi-tui": "1.1.0",
+    "@earendil-works/pi-coding-agent": "1.2.0",
+    "@earendil-works/pi-tui": "1.2.0",
     "@types/node": "^22.20.4",
     "typescript": "^7.0.2",
     "vitest": "^5.0.2"

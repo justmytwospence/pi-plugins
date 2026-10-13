@@ -385,7 +385,7 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
   pi.on("session_info_changed", () => updateIdentity());
   pi.on("before_agent_start", (event, ctx) => {
     lastCtx = ctx;
-    if (!promptTitle) promptTitle = titleFromPrompt(event.prompt);
+    if (!promptTitle && "prompt" in event) promptTitle = titleFromPrompt(event.prompt);
     updateIdentity(ctx);
   });
   pi.on("agent_settled", () => {

@@ -7,7 +7,7 @@ import { expect, test } from "vitest";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-test("SDK 1.1.0 loads the standalone manifest with no sibling packages", async () => {
+test("SDK 1.2.0 loads the standalone manifest with no sibling packages", async () => {
   const temp = mkdtempSync(resolve(tmpdir(), "pi-stash-loader-"));
   try {
     const isolated = resolve(temp, "isolated-stash");
@@ -44,7 +44,7 @@ test("manifest keeps host runtime dependencies unbundled and records exact upstr
   expect(manifest.pi.extensions).toEqual(["./src/index.ts"]);
   for (const host of ["@earendil-works/pi-coding-agent", "@earendil-works/pi-tui"]) {
     expect(manifest.peerDependencies[host]).toBe("*");
-    expect(manifest.devDependencies[host]).toBe("1.1.0");
+    expect(manifest.devDependencies[host]).toBe("1.2.0");
     expect(manifest.dependencies?.[host]).toBeUndefined();
   }
   const upstream = JSON.parse(readFileSync(resolve(root, "UPSTREAM.json"), "utf8"));

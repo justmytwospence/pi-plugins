@@ -62,10 +62,10 @@
     "grok-mermaid": "^0.2.2"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "1.1.0"
+    "@earendil-works/pi-coding-agent": "1.2.0"
   },
   "scripts": {
-    "test": "node scripts/test-loader.mjs && node scripts/test-shortcuts.mjs && node scripts/test-contracts.mjs && node scripts/test-question-flow.mjs",
+    "test": "node scripts/test-loader.mjs && node scripts/test-shortcuts.mjs && node scripts/test-contracts.mjs && node scripts/test-question-flow.mjs && node scripts/test-lifecycle.mjs",
     "check": "npm test && node scripts/check-components.mjs"
   }
 }

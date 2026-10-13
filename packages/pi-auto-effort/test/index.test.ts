@@ -13,6 +13,16 @@ function setup(script: number[]) {
   return { h, jev, ctx };
 }
 
+test("custom starts preserve effort without a prompt assessment", async () => {
+  const { h, ctx, jev } = setup([0]);
+  await h.emit("session_start", {}, ctx);
+  await h.emit("before_agent_start", { messageType: "custom", message: { content: "Background job finished" } }, ctx);
+  expect(jev.calls).toHaveLength(0);
+  await h.emit("before_agent_start", { messageType: "user", prompt: "routine" }, ctx);
+  expect(jev.calls).toHaveLength(1);
+  expect(h.thinking).toBe("low");
+});
+
 test("effort follows the requests, capped at the manual level", async () => {
   const { h, ctx } = setup([0, 3, 3]);
   await h.emit("session_start", { type: "session_start" }, ctx);
