@@ -360,6 +360,45 @@ describe("Pi SDK 1.2.0 loader and terminal input lifecycle", { concurrency: fals
     assert.equal(exits, 1);
   });
 
+  it("Ctrl+X Ctrl+E opens the editor while Ctrl+G jumps to chat end with the direct editor binding disabled", async (t) => {
+    const { MainEditor } = await import("../src/main-editor.js");
+    initTheme("dark", false);
+    const previous = getKeybindings();
+    const keybindings = new KeybindingsManager({
+      "app.editor.external": [],
+      "tui.altScreen.bottom": ["ctrl+g", "ctrl+end"],
+    });
+    setKeybindings(keybindings);
+    t.after(() => setKeybindings(previous));
+    const terminal = new MemoryTerminal();
+    const tui = new TuiAltScreen(terminal, false, undefined, { mouse: false });
+    t.after(() => tui.stop());
+    const editor = new MainEditor(tui, getEditorTheme(), keybindings);
+    t.after(() => editor.dispose());
+    let opened = 0;
+    editor.onAction("app.editor.external", () => { opened++; });
+    const dock = new Container();
+    dock.addChild(editor);
+    const document = new Container();
+    document.addChild({ render: () => Array.from({ length: 100 }, (_, i) => `line ${i}`), invalidate() {} });
+    const { root, transcript } = createChatViewport({
+      document, editor: dock, pendingMessages: new Container(), status: new Container(), footer: new Container(),
+    });
+    tui.setLayoutRoot(root);
+    tui.setFocus(editor);
+    tui.start();
+    tui.renderNow();
+    const bottom = tui.viewportTop;
+    transcript.scrollTo(10, { disableFollow: true });
+    terminal.send("\x18", "\x05");
+    assert.equal(opened, 1);
+    assert.equal(tui.viewportTop, 10);
+    terminal.send("\x07");
+    assert.equal(tui.viewportTop, bottom);
+    assert.equal(transcript.isFollowingEnd, true);
+    assert.equal(opened, 1);
+  });
+
   it("SDK fullscreen bindings run before later listeners and before the focused editor", (t) => {
     initTheme("dark", false);
     const previous = getKeybindings();

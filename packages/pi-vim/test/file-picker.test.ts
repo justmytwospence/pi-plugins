@@ -111,6 +111,54 @@ describe("file picker", () => {
   });
 });
 
+describe("Ctrl-X Ctrl-E chord", () => {
+  for (const mode of ["insert", "normal", "pending", "ex"]) {
+    it(`external editor chord respects ${mode} input ownership`, async () => {
+      const { MainEditor } = await import("../src/main-editor.js");
+      const { stubKeybindings, stubTheme, stubTui } = await import("./harness.js");
+      const editor = new MainEditor(stubTui, stubTheme, stubKeybindings);
+      editor.setText("draft");
+      let opened = 0;
+      editor.onAction("app.editor.external", () => { opened++; });
+      if (mode !== "insert") editor.handleInput("\x1b");
+      if (mode === "pending") editor.handleInput("d");
+      if (mode === "ex") editor.handleInput(":");
+      editor.handleInput("\x18");
+      editor.handleInput("\x05");
+      assert.equal(opened, mode === "insert" || mode === "normal" ? 1 : 0);
+      assert.equal(editor.getText(), "draft");
+      editor.dispose();
+    });
+  }
+
+  it("replays unmatched Ctrl-X, times out, and clears its timer on disposal", async () => {
+    const { MainEditor, CTRL_X_TIMEOUT_MS } = await import("../src/main-editor.js");
+    const { stubKeybindings, stubTheme, stubTui } = await import("./harness.js");
+    const editor = new MainEditor(stubTui, stubTheme, stubKeybindings);
+    let copied = 0;
+    let opened = 0;
+    editor.onAction("app.editor.external", () => { opened++; });
+    // Copy's fallback is observable even with the harness's simplified keybindings.
+    editor.onExtensionShortcut = (data) => {
+      if (data !== "\x18") return false;
+      copied++;
+      return true;
+    };
+    editor.handleInput("\x18");
+    editor.handleInput("a");
+    assert.equal(copied, 1);
+    assert.equal(editor.getText(), "a");
+    editor.handleInput("\x18");
+    await new Promise((resolve) => setTimeout(resolve, CTRL_X_TIMEOUT_MS + 30));
+    assert.equal(copied, 2);
+    editor.handleInput("\x18");
+    editor.dispose();
+    await new Promise((resolve) => setTimeout(resolve, CTRL_X_TIMEOUT_MS + 30));
+    assert.equal(copied, 2);
+    assert.equal(opened, 0);
+  });
+});
+
 describe("Ctrl-X Ctrl-F chord", () => {
   it("opens the picker in Insert mode and inserts its result", async () => {
     const { MainEditor } = await import("../src/main-editor.js");

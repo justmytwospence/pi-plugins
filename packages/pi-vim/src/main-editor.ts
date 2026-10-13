@@ -31,6 +31,7 @@ export class MainEditor extends SuiteModalEditor {
 
   private filePickerFn: (() => Promise<string | undefined>) | undefined;
   private ctrlXTimer: ReturnType<typeof setTimeout> | undefined;
+  private replayingCtrlX = false;
 
   /** Enables Insert-mode `Ctrl-X Ctrl-F`; resolves to the text to insert. */
   setFilePickerFn(fn: (() => Promise<string | undefined>) | undefined): void {
@@ -38,32 +39,57 @@ export class MainEditor extends SuiteModalEditor {
   }
 
   /**
-   * Insert mode: `Ctrl-X` waits up to CTRL_X_TIMEOUT_MS for `Ctrl-F`, which
-   * opens the file picker. Any other key, or the timeout, replays `Ctrl-X`
-   * so Pi's own binding for it (copy) still works.
+   * Insert/idle Normal: Ctrl-X Ctrl-E invokes Pi's external editor action.
+   * Insert also supports Ctrl-X Ctrl-F for the file picker. Unmatched keys
+   * and timeout replay Ctrl-X so Pi's own binding (copy) still works.
    */
   override handleInput(data: string): void {
+    if (this.replayingCtrlX) {
+      super.handleInput(data);
+      return;
+    }
+    if (matchesKey(data, "ctrl+x") && !["insert", "normal"].includes(this.getModeContext().state)) {
+      this.replayCtrlX();
+      return;
+    }
     if (this.ctrlXTimer !== undefined) {
       clearTimeout(this.ctrlXTimer);
       this.ctrlXTimer = undefined;
-      if (matchesKey(data, "ctrl+f")) {
+      const externalEditor = this.actionHandlers.get("app.editor.external");
+      if (matchesKey(data, "ctrl+e") && externalEditor) {
+        externalEditor();
+        return;
+      }
+      if (matchesKey(data, "ctrl+f") && this.filePickerFn && this.getModeContext().state === "insert") {
         void this.openFilePicker();
         return;
       }
-      super.handleInput("\x18");
+      this.replayCtrlX();
     } else if (
-      this.filePickerFn &&
+      (this.actionHandlers.has("app.editor.external") ||
+        (this.filePickerFn && this.getModeContext().state === "insert")) &&
       matchesKey(data, "ctrl+x") &&
-      this.getModeContext().state === "insert" &&
+      ["insert", "normal"].includes(this.getModeContext().state) &&
       !this.isShowingAutocomplete()
     ) {
       this.ctrlXTimer = setTimeout(() => {
         this.ctrlXTimer = undefined;
-        if (!this.isDisposed()) super.handleInput("\x18");
+        if (!this.isDisposed()) this.replayCtrlX();
       }, CTRL_X_TIMEOUT_MS);
       return;
     }
     super.handleInput(data);
+  }
+
+  private replayCtrlX(): void {
+    // EX can cancel and redispatch a control key through this.handleInput.
+    // Never reinterpret that replay as the start of a new chord.
+    this.replayingCtrlX = true;
+    try {
+      super.handleInput("\x18");
+    } finally {
+      this.replayingCtrlX = false;
+    }
   }
 
   private async openFilePicker(): Promise<void> {
