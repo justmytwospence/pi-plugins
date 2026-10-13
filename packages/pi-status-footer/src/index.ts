@@ -353,6 +353,30 @@ export function parseCodexUsage(raw: unknown, now: number): Quota {
   return { source: "Codex acct", updated: now, windows };
 }
 
+// Passive, tied to the actual Pi request: on Pi's default WebSocket transport the
+// Codex backend streams a `codex.rate_limits` event before each response. Its
+// windows are `primary`/`secondary` with `window_minutes`; this rewrites it in the
+// usage endpoint's shape, which is also what the shared cache stores.
+export function codexRateLimitsEvent(data: unknown): RecordValue | undefined {
+  const event = record(data);
+  if (event.type !== "codex.rate_limits") return undefined;
+  const limit = (raw: unknown) => {
+    const rl = record(raw), out: RecordValue = {};
+    for (const key of ["primary", "secondary"]) {
+      const w = record(rl[`${key}_window`] ?? rl[key]);
+      if (number(w.used_percent) === undefined) continue;
+      const minutes = number(w.window_minutes);
+      out[`${key}_window`] = { ...w, limit_window_seconds: w.limit_window_seconds ?? (minutes === undefined ? undefined : minutes * 60) };
+    }
+    return out;
+  };
+  const extras = Array.isArray(event.additional_rate_limits) ? event.additional_rate_limits.map(record) : [];
+  return {
+    rate_limit: limit(event.rate_limits ?? event.rate_limit),
+    additional_rate_limits: extras.map((item) => ({ ...item, rate_limit: limit(item.rate_limit ?? item.rate_limits) })),
+  };
+}
+
 // The ChatGPT account id Pi itself sends with Codex requests lives in the token.
 export function codexAccountId(token: string): string | undefined {
   try {
@@ -759,7 +783,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
   let quotaBusy = false, quotaChecked = 0;
   let borderGauge = false;
   let codexBusy = false, codexChecked = 0, codexAbort: AbortController | undefined;
-  let codexTimeout: ReturnType<typeof setTimeout> | undefined;
+  let codexTimeout: ReturnType<typeof setTimeout> | undefined, codexAccount: string | undefined;
   let claude: Quota | undefined, claudeHeaders: Quota | undefined, codex: Quota | undefined;
   let phase: string | undefined;
   let totals = collectTotals([], Date.now()), cacheHit: number | undefined;
@@ -769,6 +793,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
   // Claude Code's login, shared with its status line; Pi's login (one per machine) separately.
   const cacheFile = path.join(cacheDir, "oauth-usage.json");
   const piCacheFile = path.join(cacheDir, "pi-oauth-usage.json");
+  const footerCacheDir = path.join(process.env.XDG_CACHE_HOME ?? path.join(home, ".cache"), "pi-status-footer");
 
   const exec = (file: string, args: string[], cwd?: string): Promise<string | undefined> => new Promise((resolve) => {
     const child = execFile(file, args, { cwd, timeout: 4_000, maxBuffer: 2 * 1024 * 1024, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } }, (error, stdout) => {
@@ -915,6 +940,31 @@ export default function statusFooter(pi: ExtensionAPI): void {
       if (active && epoch === generation) requestRender?.();
     } finally { if (epoch === generation) quotaBusy = false; }
   };
+  // One reading per ChatGPT account, shared by every Pi session: whoever has the
+  // freshest (a usage fetch or a streamed event) writes it, the rest read it.
+  const codexFile = (account: string) => path.join(footerCacheDir, `codex-usage-${account.replace(/[^\w.-]/g, "_")}.json`);
+  const readCodexCache = async (account: string): Promise<{ updated: number; usage: RecordValue } | undefined> => {
+    try {
+      const data = record(JSON.parse(await readFile(codexFile(account), "utf8")));
+      const updated = number(data.updated);
+      return updated === undefined ? undefined : { updated, usage: record(data.usage) };
+    } catch { return undefined; }
+  };
+  const writeCodexCache = async (account: string, updated: number, usage: RecordValue) => {
+    try {
+      // A streamed event carries no named pools; keep those from the last fetch.
+      const pools = Array.isArray(usage.additional_rate_limits) && usage.additional_rate_limits.length ? undefined
+        : (await readCodexCache(account))?.usage.additional_rate_limits;
+      const file = codexFile(account), temporary = `${file}.${process.pid}.tmp`;
+      await mkdir(footerCacheDir, { recursive: true });
+      await writeFile(temporary, JSON.stringify({ updated, usage: pools ? { ...usage, additional_rate_limits: pools } : usage }));
+      await rename(temporary, file);
+    } catch { /* Sharing is best-effort; this session keeps its reading. */ }
+  };
+  const applyCodex = (parsed: Quota) => {
+    if (!parsed.windows.length || (codex && codex.updated >= parsed.updated)) return;
+    codex = mergeQuota(codex, parsed); requestRender?.();
+  };
   // Same OAuth token and account Pi sends with each Codex request; Pi's registry
   // refreshes it. A non-JWT key (no ChatGPT account) simply yields no reading.
   const updateCodex = async (maxAge = CODEX_TTL_MS) => {
@@ -931,13 +981,30 @@ export default function statusFooter(pi: ExtensionAPI): void {
       const token = await ctx.modelRegistry.getApiKeyForProvider("openai-codex");
       const account = token ? codexAccountId(token) : undefined;
       if (!token || !account || !active || epoch !== generation) return;
-      const response = await fetch(CODEX_USAGE_URL, {
-        headers: { Authorization: `Bearer ${token}`, "chatgpt-account-id": account, originator: "pi", accept: "application/json" },
-        signal: controller.signal,
-      });
-      if (!response.ok) return;
-      const parsed = parseCodexUsage(await response.json(), Date.now());
-      if (active && epoch === generation && parsed.windows.length) { codex = parsed; requestRender?.(); }
+      codexAccount = account;
+      const cached = await readCodexCache(account);
+      if (!active || epoch !== generation) return;
+      if (cached) applyCodex(parseCodexUsage(cached.usage, cached.updated));
+      // Even a forced refresh (startup, /status) trusts a reading under a minute old.
+      if (cached && Date.now() - cached.updated < Math.max(maxAge, CODEX_ACTIVE_TTL_MS)) return;
+      const lock = path.join(footerCacheDir, `.codex-fetch-${account.replace(/[^\w.-]/g, "_")}.lock`);
+      try {
+        await mkdir(footerCacheDir, { recursive: true });
+        try { if (Date.now() - (await stat(lock)).mtimeMs > CLAUDE_LOCK_STALE_MS) await rmdir(lock); } catch { /* no lock */ }
+        await mkdir(lock);
+      } catch { return; } // another session is fetching; its result lands in the cache
+      try {
+        const response = await fetch(CODEX_USAGE_URL, {
+          headers: { Authorization: `Bearer ${token}`, "chatgpt-account-id": account, originator: "pi", accept: "application/json" },
+          signal: controller.signal,
+        });
+        if (!response.ok) return;
+        const usage = record(await response.json()), updated = Date.now();
+        const parsed = parseCodexUsage(usage, updated);
+        if (!parsed.windows.length) return;
+        await writeCodexCache(account, updated, usage);
+        if (active && epoch === generation) { codex = parsed; requestRender?.(); }
+      } finally { await rmdir(lock).catch(() => undefined); }
     } catch { /* Keep last good snapshot; its timestamp makes staleness visible. */ } finally {
       clearTimeout(timeout);
       if (codexTimeout === timeout) codexTimeout = undefined;
@@ -1064,7 +1131,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     try { stop(); } catch { /* Shutdown still reports teardown errors. */ }
     if (context.mode !== "tui") return;
     ctx = context; active = true;
-    git = { ...emptyGit(), unavailable: true }; claude = undefined; claudeHeaders = undefined; codex = undefined;
+    git = { ...emptyGit(), unavailable: true }; claude = undefined; claudeHeaders = undefined; codex = undefined; codexAccount = undefined;
     gitBusy = quotaBusy = codexBusy = false; gitChecked = quotaChecked = codexChecked = 0;
     phase = undefined;
     restorePreferences(context);
@@ -1120,6 +1187,16 @@ export default function statusFooter(pi: ExtensionAPI): void {
     const quota = parseCodexHeaders(event.headers, Date.now());
     if (quota) { codex = mergeQuota(codex, quota); requestRender?.(); }
   });
+  // Runs for every streamed event, so it must stay cheap until the type matches.
+  pi.on("provider_stream_event", (event) => {
+    if (!active || event.provider !== "openai-codex") return;
+    const usage = codexRateLimitsEvent(event.data);
+    if (!usage) return;
+    const updated = Date.now(), parsed = parseCodexUsage(usage, updated);
+    if (!parsed.windows.length) return;
+    codex = mergeQuota(codex, parsed); requestRender?.();
+    if (codexAccount) void writeCodexCache(codexAccount, updated, usage);
+  });
   pi.registerCommand("status", {
     description: "Personal footer: on, native, all (also show the other subscription account), details",
     getArgumentCompletions: (prefix) => ["on", "native", "all", "details"].filter((value) => value.startsWith(prefix)).map((value) => ({ value, label: value })),
@@ -1138,7 +1215,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
           `Tracked Git changes: ${git.added} lines added, ${git.removed} removed. Session age: ${duration(Date.now() - totals.started)}; compactions: ${totals.compactions}.`,
           "OAuth identifies the authentication method, not guaranteed subscription billing. Git diff covers all uncommitted tracked changes, not just this agent.",
           "Claude acct comes from Anthropic's usage endpoint (as Claude Code /status) using Pi's own Claude login, refreshed every 5m and by each response's limit headers; without a Pi subscription login, from Claude Code's account (which can differ). Values are percent used; stale means >10m old or reset due.",
-          "Codex acct comes from ChatGPT's usage endpoint (as Codex CLI /status), using Pi's own Codex login; polled every 5m, or 1m around turns. SSE response headers refresh it in between.",
+          "Codex acct comes from ChatGPT's usage endpoint (as Codex CLI /status) using Pi's own Codex login, shared by all Pi sessions on the account; refreshed every 5m, or 1m around turns. Each request's streamed rate-limit event (or SSE headers) updates it in between.",
           "/status on: active provider only; /status all: also show the other subscription account; /status native: restore Pi footer. Choice survives reload/resume in this session.",
         ].join("\n"), "info");
         return;

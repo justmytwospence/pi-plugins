@@ -139,6 +139,20 @@ test("Codex account id comes from Pi's token claim; header snapshots keep named 
   assert.equal(merged.updated, now);
 });
 
+test("Codex's streamed rate-limit event reads like the usage endpoint", () => {
+  // Shape observed on Pi's WebSocket transport (credits/promo trimmed).
+  const event = { type: "codex.rate_limits", plan_type: "prolite", rate_limits: { allowed: true, limit_reached: false,
+    primary: { used_percent: 46, window_minutes: 10080, reset_after_seconds: 476905, reset_at: now / 1000 + 86400 }, secondary: null },
+    additional_rate_limits: null };
+  const quota = mod.parseCodexUsage(mod.codexRateLimitsEvent(event), now);
+  assert.deepEqual(quota.windows, [{ label: "week", used: 46, reset: now + 86400_000 }]);
+  const pools = mod.parseCodexUsage(mod.codexRateLimitsEvent({ ...event, additional_rate_limits: [{ limit_name: "gpt-reserve",
+    rate_limit: { primary_window: { used_percent: 3, limit_window_seconds: 604800 } } }] }), now);
+  assert.deepEqual(pools.windows.map((w) => [w.label, w.used]), [["week", 46], ["gpt-reserve", 3]]);
+  assert.equal(mod.codexRateLimitsEvent({ type: "response.created" }), undefined);
+  assert.deepEqual(mod.parseCodexUsage(mod.codexRateLimitsEvent({ type: "codex.rate_limits" }), now).windows, []);
+});
+
 test("Git parser distinguishes staged, unstaged, untracked, conflicts and rename paths", () => {
   const result = mod.parseGitStatus([
     "# branch.oid aabbccddeeff", "# branch.head feat/test", "# branch.upstream origin/feat/test", "# branch.ab +2 -3",
@@ -1056,8 +1070,7 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
     assert.doesNotMatch(h.footer.render(120).join("\n"), /effort:/);
     h.statuses.delete("auto-effort");
     assert.doesNotMatch(plain(h.footer.render(120)[1]), /\(auto\)/);
-    await settle();
-    assert.equal(fetches.length, 1);
+    await vi.waitFor(() => assert.equal(fetches.length, 1));
     assert.equal(fetches[0].url, "https://chatgpt.com/backend-api/wham/usage");
     assert.equal(fetches[0].headers["chatgpt-account-id"], "acct-1");
     assert.match(h.footer.render(120).join("\n"), /Codex\s+week 25% used · resets in 1d0h · gpt-reserve 0% used/);
@@ -1086,7 +1099,7 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
     await h.handlers.get("model_select")({}, h.ctx);
     assert.doesNotMatch(h.footer.render(120).join("\n"), /Claude|Codex|45%/);
     await h.commands.get("status").handler("all", h.ctx);
-    assert.match(h.footer.render(120).join("\n"), /Codex\s+week/, "/status all shows Codex on other providers");
+    await vi.waitFor(() => assert.match(h.footer.render(120).join("\n"), /Codex\s+week/, "/status all shows Codex on other providers"));
     await h.commands.get("status").handler("on", h.ctx);
     h.entries.push({ type: "usage", usage: usage(4) });
     for (const timer of timers) timer.callback();
@@ -1150,6 +1163,39 @@ test("Claude limits use Pi's own subscription login, with no Claude Code login, 
     if (h) await h.handlers.get("session_shutdown")({}, h.ctx);
     globalThis.fetch = realFetch;
     if (oldCache === undefined) delete process.env.CLAUDE_STATUSLINE_CACHE_DIR; else process.env.CLAUDE_STATUSLINE_CACHE_DIR = oldCache;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("Codex limits are shared across sessions and follow the streamed rate-limit event", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "pi-footer-codex-"));
+  const oldXdg = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = dir;
+  const realFetch = globalThis.fetch, fetches = [];
+  globalThis.fetch = async (url, init) => {
+    fetches.push({ url, headers: init.headers });
+    return { ok: true, json: async () => codexUsage(25, Date.now() + 30_000) };
+  };
+  const hosts = [];
+  try {
+    const first = host([], dir); hosts.push(first);
+    await first.handlers.get("session_start")({}, first.ctx);
+    await vi.waitFor(() => assert.match(first.footer.render(160).join("\n"), /Codex\s+week 25% used.*gpt-reserve 0%/));
+    assert.equal(fetches.length, 1);
+    await first.handlers.get("provider_stream_event")({ provider: "openai-codex", data: { type: "response.created" } }, first.ctx);
+    await first.handlers.get("provider_stream_event")({ provider: "openai-codex", data: { type: "codex.rate_limits",
+      rate_limits: { primary: { used_percent: 46, window_minutes: 10080, reset_at: Date.now() / 1000 + 86400 } }, additional_rate_limits: null } }, first.ctx);
+    assert.match(first.footer.render(160).join("\n"), /Codex\s+week 46% used.*gpt-reserve 0%/, "named pools survive the event");
+    // A second session on the same account reads the shared reading instead of fetching.
+    await vi.waitFor(async () => assert.match(await (await import("node:fs/promises")).readFile(path.join(dir, "pi-status-footer", "codex-usage-acct-1.json"), "utf8"), /"used_percent":46/));
+    const second = host([], dir); hosts.push(second);
+    await second.handlers.get("session_start")({}, second.ctx);
+    await vi.waitFor(() => assert.match(second.footer.render(160).join("\n"), /Codex\s+week 46% used.*gpt-reserve 0%/));
+    assert.equal(fetches.length, 1, "the shared reading is fresh, so no second fetch");
+  } finally {
+    for (const h of hosts) await h.handlers.get("session_shutdown")({}, h.ctx);
+    globalThis.fetch = realFetch;
+    if (oldXdg === undefined) delete process.env.XDG_CACHE_HOME; else process.env.XDG_CACHE_HOME = oldXdg;
     await rm(dir, { recursive: true, force: true });
   }
 });

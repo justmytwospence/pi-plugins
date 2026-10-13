@@ -147,9 +147,13 @@ labeled.
   The URL is fixed; the token is never sent anywhere else. Named pools in
   `additional_rate_limits` (for example a reserve model) keep their API names.
   Polled at most every 5 minutes, and at most every minute after a turn or model
-  switch; only while a Codex model is active (or `/status all`). `x-codex-*`
-  response headers, exposed only on the SSE transport (Pi defaults to WebSocket),
-  update the main windows in between. No model call is made. Failures keep the
+  switch; only while a Codex model is active (or `/status all`). The reading is
+  shared by every Pi session on the account through
+  `${XDG_CACHE_HOME:-~/.cache}/pi-status-footer/codex-usage-<account>.json` (one
+  fetches under a lock; a reading under a minute old is never refetched). Between
+  polls, the `codex.rate_limits` event Codex streams before each response on Pi's
+  default WebSocket transport (seen through `provider_stream_event`), or the
+  `x-codex-*` headers on the SSE transport, update the main windows. No model call is made. Failures keep the
   last reading, which then shows as stale.
 - **stale:** cache/header snapshot is at least ten minutes old or its reset time
   has passed. Never assume the provider reset a quota to zero without fresh data.
