@@ -390,23 +390,36 @@ export default function subagents(pi: ExtensionAPI) {
    * Results owed to the agent. Sent only while pi is idle: a follow-up queued during a turn is
    * dropped when the user presses Esc. Several that pile up go out as one message.
    */
-  const owedResults: { content: string; details: unknown }[] = [];
-  const deliverResult = (content: string, details?: unknown) => {
+  const consumedResults = new Set<string>();
+  const owedResults: { content: string; details: unknown; runs?: Run[]; mode?: Details["mode"] }[] = [];
+  const deliverResult = (content: string, details?: unknown, runs?: Run[], mode?: Details["mode"]) => {
     if (!live) return;
-    owedResults.push({ content, details });
+    owedResults.push({ content, details, runs, mode });
     flushResults(sessionCtx);
   };
   const flushResults = (c: Pick<ExtensionContext, "isIdle"> | undefined) => {
     if (!live || !owedResults.length || c?.isIdle?.() === false) return;
-    const items = owedResults.splice(0);
-    safely(() =>
+    const items = owedResults.splice(0).flatMap((item) => {
+      if (!item.runs) return [item];
+      const unread = item.runs.filter((run) => !consumedResults.has(run.id));
+      return unread.length ? [{ ...item, runs: unread, content: `Subagent ${item.mode} finished:\n\n${unread.map(resultText).join("\n\n---\n\n")}`, details: { mode: item.mode, runs: unread.map((run) => view(run, true)) } }] : [];
+    });
+    if (!items.length) return;
+    safely(() => {
       pi.sendMessage(
         { customType: "subagent-result", content: items.map((i) => i.content).join("\n\n---\n\n"), display: true, details: items.length === 1 ? items[0]?.details : { batches: items.map((i) => i.details) } },
         { triggerTurn: true, deliverAs: "followUp" },
-      ),
-    );
+      );
+      for (const item of items) for (const run of item.runs ?? []) consumedResults.add(run.id);
+    });
   };
   pi.on("agent_settled", (_event, c) => flushResults(c));
+  pi.events.on("bg:external-consumed", (data) => {
+    const id = (data as { id?: unknown } | undefined)?.id;
+    if (typeof id !== "string" || !id.startsWith("subagent:")) return;
+    const run = runs.get(id.slice("subagent:".length));
+    if (run && run.state.status !== "running") consumedResults.add(run.id);
+  });
 
   /** Async runs as outside work pi-bg's bg_wait can wait on; nothing listens without pi-bg. */
   const external = (run: Run, chain?: { step: number; of: number }) => {
@@ -420,7 +433,7 @@ export default function subagents(pi: ExtensionAPI) {
         id: `subagent:${run.id}`,
         label: `${runLabel(run)} · ${run.agent}`,
         state: !done ? "running" : run.state.status === "done" ? "done" : "failed",
-        ...(done ? { summary: `${run.state.status} after ${elapsed}s${after}` } : {}),
+        ...(done ? { summary: `${run.state.status} after ${elapsed}s${chain && chain.step < chain.of ? after : ""}`, result: resultText(run) } : {}),
       }),
     );
   };
@@ -628,6 +641,7 @@ export default function subagents(pi: ExtensionAPI) {
     safely(() => pi.events.emit(ACTIVITY_GONE, { id: ownSource.id }));
     live = false;
     owedResults.length = 0;
+    consumedResults.clear();
     sessionCtx = undefined;
     boundUI = undefined;
     // The UI may already be gone; each part still lets go of its timers and listeners.
@@ -677,6 +691,7 @@ export default function subagents(pi: ExtensionAPI) {
           return { content: [{ type: "text", text: `Stopping ${run.id}.` }], details: { mode: "single", runs: [view(run)] } as Details };
         }
         if (action === "result") {
+          if (run.state.status !== "running") consumedResults.add(run.id);
           let output = run.state.output;
           try {
             output = readFileSync(run.outputPath, "utf8");
@@ -838,7 +853,7 @@ export default function subagents(pi: ExtensionAPI) {
             safely(() => pi.events.emit("herdr:background", { active: false, id: hold }));
             const text = list.filter(Boolean).map(resultText).join("\n\n---\n\n");
             if (owner.signal.aborted) return;
-            deliverResult(`Subagent ${mode} finished:\n\n${text}`, { mode, runs: list.filter(Boolean).map((r) => view(r, true)) });
+            deliverResult(`Subagent ${mode} finished:\n\n${text}`, { mode, runs: list.filter(Boolean).map((r) => view(r, true)) }, list.filter(Boolean), mode);
           })
           .catch((error: unknown) => {
             backgroundCount--;

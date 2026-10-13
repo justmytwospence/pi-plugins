@@ -76,6 +76,8 @@ export interface External {
   label: string;
   state: "running" | "done" | "failed";
   summary?: string;
+  /** Optional completed output; acknowledging its return suppresses a duplicate wake-up. */
+  result?: string;
   updatedAt: number;
 }
 
@@ -536,6 +538,11 @@ export default function piBg(pi: ExtensionAPI) {
   };
 
   const externalLine = (x: External) => `${x.label} (${x.id}): ${x.state}${x.summary ? ` · ${x.summary}` : ""}`;
+  const consumeExternal = (x: External) => {
+    if (x.state === "running" || typeof x.result !== "string") return externalLine(x);
+    pi.events.emit("bg:external-consumed", { id: x.id });
+    return `${externalLine(x)}\n\n${x.result}`;
+  };
 
   pi.events.on("bg:annotate", (data) => {
     const d = data as { task?: unknown; by?: unknown; detail?: unknown; wait?: unknown } | undefined;
@@ -553,7 +560,7 @@ export default function piBg(pi: ExtensionAPI) {
     const d = data as Partial<External> | undefined;
     if (!d?.id || typeof d.id !== "string") return;
     const state = d.state === "done" || d.state === "failed" ? d.state : "running";
-    const x: External = { id: d.id, label: d.label || d.id, state, summary: d.summary, updatedAt: Date.now() };
+    const x: External = { id: d.id, label: d.label || d.id, state, summary: d.summary, ...(typeof d.result === "string" ? { result: d.result } : {}), updatedAt: Date.now() };
     // Ended outside work is kept a while for a late bg_wait, then forgotten.
     for (const [id, old] of externals) if (old.state !== "running" && x.updatedAt - old.updatedAt > EXTERNAL_KEEP_MS) externals.delete(id);
     externals.set(x.id, x);
@@ -753,7 +760,7 @@ export default function piBg(pi: ExtensionAPI) {
         const tied = t && t.status === "running" && t.kind === "service" && (t.ready || !t.readyPattern) ? (noteOf(t)?.wait ?? []) : [];
         const tiedRunning = tied.map(findExternal).filter((e): e is External => e?.state === "running");
         if (x) {
-          if (x.state !== "running") return text(externalLine(x));
+          if (x.state !== "running") return text(consumeExternal(x));
           targets.add(x.id);
         } else if (!t) {
           const known = [...reg.list().map((k) => `${k.id} ${k.name}`), ...[...externals.values()].filter((e) => e.state === "running").map((e) => e.id)];
@@ -810,7 +817,7 @@ export default function piBg(pi: ExtensionAPI) {
       const out: string[] = [];
       for (const t of waiter.finished) out.push(report(t));
       for (const t of waiter.readied) out.push(report(t));
-      for (const x of waiter.externals) out.push(externalLine(x));
+      for (const x of waiter.externals) out.push(consumeExternal(x));
       if (reason !== "done") {
         const still = names().filter((t) => t.status === "running");
         const what = still.length ? still.map((t) => `${t.name} (${t.id}, ${runtime(t)})`).join(", ") : label();

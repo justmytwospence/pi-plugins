@@ -100,7 +100,7 @@ Returned replies are capped at 2000 lines or 50 KB. Full output is saved under `
 
 ## Optional integrations and boundaries
 
-With pi-bg, `/tasks` includes children and `bg_wait` accepts `subagent:<id>` for async work. Waiting keeps the main turn active but does not replace the child's separate result message. pi-marimo can contribute notebook pills to the fleet view. pi-herdr can display pending async work through `$bg`; no Herdr pane is needed for ordinary subagents.
+With pi-bg, `/tasks` includes children and `bg_wait` accepts `subagent:<id>` for async work. Waiting returns the bounded worker output and consumes it, suppressing a duplicate completion message. Reading a completed run with `subagent result` also consumes it; running snapshots do not. pi-marimo can contribute notebook pills to the fleet view. pi-herdr can display pending async work through `$bg`; no Herdr pane is needed for ordinary subagents.
 
 Prefer direct work for routine investigation, diagnosis, and verification. Delegate only genuinely independent tasks with a clear payoff or when requested; avoid redundant audits and delegation merely because work is long or multistep. When delegating report-back tasks, prefer these headless children. Choose pi-herdr's interactive children when a person needs an ongoing session to take over. See [background work](/recipes/background-work/), [activity integration](/architecture/activity/), and [troubleshooting](/guides/troubleshooting/).
 

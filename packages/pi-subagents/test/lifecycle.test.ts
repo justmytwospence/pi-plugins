@@ -15,7 +15,7 @@ function deferred<T>() {
 const explicit = { agent: "general", model: "p/m", thinking: "low" };
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
-async function setup(concurrency = 1, exec?: (cmd: string, args: string[]) => any) {
+async function setup(concurrency = 1, exec?: (cmd: string, args: string[]) => any, withBg = false) {
   vi.stubEnv("PI_CODING_AGENT_DIR", mkdtempSync(path.join(tmpdir(), "subagents-owner-")));
   const cwd = mkdtempSync(path.join(tmpdir(), "subagents-queue-"));
   mkdirSync(path.join(cwd, ".pi"));
@@ -29,15 +29,23 @@ async function setup(concurrency = 1, exec?: (cmd: string, args: string[]) => an
   });
   const h = harness({ exec });
   let tool: any;
-  h.pi.registerTool = (t: any) => { tool = t; };
+  const tools = new Map<string, any>();
+  const events = new Map<string, Array<(data: any) => void>>();
+  h.pi.events = { emit: (name: string, data: any) => { for (const handler of events.get(name) ?? []) handler(data); }, on: (name: string, handler: (data: any) => void) => { events.set(name, [...(events.get(name) ?? []), handler]); return () => undefined; } };
+  h.pi.registerTool = (t: any) => { tools.set(t.name, t); if (t.name === "subagent") tool = t; };
   await subagents(h.pi);
+  if (withBg) {
+    vi.stubEnv("PI_BG_DIR", cwd);
+    const { default: bg } = await import(path.resolve(import.meta.dirname, "../../pi-bg/src/index.ts"));
+    await bg(h.pi);
+  }
   const ui = fakeUI();
-  const ctx = h.ctx({ cwd, ui, model: { provider: "p", id: "m" } });
+  const ctx = h.ctx({ cwd, ui, model: { provider: "p", id: "m" }, hasPendingMessages: () => false });
   await h.emit("session_start", {}, ctx);
   const run = (params: any, signal?: AbortSignal) => tool.execute("run", params, signal, undefined, ctx);
   const shutdown = () => h.emit("session_shutdown", {}, ctx);
   const finish = (index = 0) => (children[index] as any).finish("done");
-  return { h, ctx, ui, children, spawned, run, shutdown, finish };
+  return { h, ctx, ui, children, spawned, run, shutdown, finish, tools };
 }
 
 test("already-aborted foreground calls do not even plan", async () => {
@@ -195,4 +203,114 @@ test("Child stop-before-start settles without spawning, and a second start is ig
   child.stop();
   child.start().start();
   expect((await child.done).status).toBe("stopped");
+});
+
+const tick = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
+
+test.each(["before queue", "after queue"])("reading a completed result %s suppresses its wake-up", async (when) => {
+  const x = await setup();
+  x.ctx.isIdle = () => false;
+  const started = await x.run({ ...explicit, task: "already handled", async: true });
+  const id = started.details.runs[0].id;
+  x.finish();
+  if (when === "after queue") await tick();
+  await x.run({ action: "result", id });
+  await x.run({ action: "result", id });
+  await tick();
+  x.ctx.isIdle = () => true;
+  await x.h.emit("agent_settled", {}, x.ctx);
+  expect(x.h.messages).toHaveLength(0);
+  await x.shutdown();
+});
+
+test.each(["failed", "stopped"])("consuming a %s result suppresses its completion", async (status) => {
+  const x = await setup();
+  x.ctx.isIdle = () => false;
+  const started = await x.run({ ...explicit, task: "finished failure", async: true });
+  (x.children[0] as any).finish(status, "permission blocker");
+  await tick();
+  const result = await x.run({ action: "result", id: started.details.runs[0].id });
+  expect(result.content[0].text).toContain(status);
+  x.ctx.isIdle = () => true;
+  await x.h.emit("agent_settled", {}, x.ctx);
+  expect(x.h.messages).toHaveLength(0);
+  await x.shutdown();
+});
+
+test("status inspection does not consume an unread completion", async () => {
+  const x = await setup();
+  x.ctx.isIdle = () => false;
+  const started = await x.run({ ...explicit, task: "status only", async: true });
+  x.finish(); await tick();
+  await x.run({ action: "status", id: started.details.runs[0].id });
+  x.ctx.isIdle = () => true;
+  await x.h.emit("agent_settled", {}, x.ctx);
+  expect(x.h.messages).toHaveLength(1);
+  await x.shutdown();
+});
+
+test("a running snapshot does not consume the later completion", async () => {
+  const x = await setup();
+  x.ctx.isIdle = () => false;
+  const started = await x.run({ ...explicit, task: "unread", async: true });
+  await x.run({ action: "result", id: started.details.runs[0].id });
+  x.finish(); await tick();
+  x.ctx.isIdle = () => true;
+  await x.h.emit("agent_settled", {}, x.ctx);
+  await x.h.emit("agent_settled", {}, x.ctx);
+  expect(x.h.messages).toHaveLength(1);
+  expect(x.h.messages[0].message.content).toContain("unread");
+  await x.shutdown();
+});
+
+test.each(["tasks", "chain"])("partial %s consumption preserves only unread members", async (mode) => {
+  const x = await setup();
+  x.ctx.isIdle = () => false;
+  const started = await x.run({ [mode]: ["handled member", "unread member"].map(task => ({ ...explicit, task })), async: true });
+  x.finish();
+  await vi.waitFor(() => expect(x.children).toHaveLength(2));
+  await x.run({ action: "result", id: started.details.runs[0].id });
+  x.finish(1); await tick();
+  x.ctx.isIdle = () => true;
+  await x.h.emit("agent_settled", {}, x.ctx);
+  expect(x.h.messages).toHaveLength(1);
+  expect(x.h.messages[0].message.content).toContain("unread member");
+  expect(x.h.messages[0].message.content).not.toContain("handled member");
+  expect(x.h.messages[0].message.details.runs).toHaveLength(1);
+  await x.shutdown();
+});
+
+test.each(["finished", "running"])("actual bg_wait consumes %s subagent output", async (when) => {
+  const x = await setup(1, undefined, true);
+  x.ctx.hasUI = false;
+  x.ctx.isIdle = () => false;
+  const started = await x.run({ ...explicit, task: "waited result", async: true });
+  const id = started.details.runs[0].id;
+  x.children[0]!.state.output = "Full worker findings";
+  if (when === "finished") { x.finish(); await tick(); }
+  const waiting = x.tools.get("bg_wait").execute("wait", { id: `subagent:${id}`, timeout: 2 }, undefined, undefined, x.ctx);
+  if (when === "running") { x.finish(); await tick(); }
+  const result = await waiting;
+  expect(result.content[0].text).toContain("Full worker findings");
+  await tick();
+  x.ctx.isIdle = () => true;
+  await x.h.emit("agent_settled", {}, x.ctx);
+  expect(x.h.messages).toHaveLength(0);
+  await x.shutdown();
+});
+
+test.each(["aborted", "timeout"])("a %s bg_wait does not consume a later result", async (reason) => {
+  const x = await setup(1, undefined, true);
+  x.ctx.hasUI = false;
+  x.ctx.isIdle = () => false;
+  const started = await x.run({ ...explicit, task: "still unread", async: true });
+  const abort = new AbortController();
+  const waiting = x.tools.get("bg_wait").execute("wait", { id: `subagent:${started.details.runs[0].id}`, timeout: 1 }, abort.signal, undefined, x.ctx);
+  if (reason === "aborted") abort.abort();
+  await waiting;
+  x.finish(); await tick();
+  x.ctx.isIdle = () => true;
+  await x.h.emit("agent_settled", {}, x.ctx);
+  expect(x.h.messages).toHaveLength(1);
+  await x.shutdown();
 });

@@ -84,7 +84,7 @@ There is no JSON settings file. Logs normally live at `~/.pi/agent/bg/<session>/
 
 ## Optional integrations and limitations
 
-With pi-subagents, `/tasks` also lists agent runs and the prompt UI is shared. `bg_wait` can await `subagent:<id>`, but the subagent's result still arrives separately. With pi-marimo, notebook runs become waitable as `marimo:<path>`, and an already-ready server can wait for its active cells rather than immediately returning.
+With pi-subagents, `/tasks` also lists agent runs and the prompt UI is shared. `bg_wait` can await `subagent:<id>` and returns its bounded result directly, suppressing a duplicate completion message. With pi-marimo, notebook runs become waitable as `marimo:<path>`, and an already-ready server can wait for its active cells rather than immediately returning.
 
 Stopping a marimo-pair client job does **not** stop the notebook's cells. Interrupt the kernel through the notebook controls instead. With pi-herdr active, `f` follows a log in a split and pending work can appear in the `$bg` token; this does not replace Herdr's own pane-state reporting.
 
