@@ -4,9 +4,23 @@
 // agent works around it or makes its case and retries, and only that retry is put to you, with the
 // case. Project rules in `.agents/tool-gate-rules.md` (or `.pi/`) are checked on every judged
 // call. Without Jev the gate falls back to Pi's tool hints.
+//
+// That is auto mode, one of Claude Code's permission modes the gate owns (see modes.ts): manual
+// asks about everything that does more than read, accept edits also runs edits and filesystem
+// commands inside the project, bypass runs everything but critical removals, and plan mode
+// (pi-plan-mode's) blocks edits until a plan is approved. Shift+Tab cycles them.
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { alwaysAskBash, alwaysAskPath, bashKeys, expandHome, isCredentialPath, isReadOnlyBash, secretGitAdds } from "./bash.ts";
+import {
+  alwaysAskBash,
+  alwaysAskPath,
+  bashKeys,
+  expandHome,
+  isAcceptEditsBash,
+  isCredentialPath,
+  isReadOnlyBash,
+  secretGitAdds,
+} from "./bash.ts";
 import { loadConfig } from "./config.ts";
 import { whileBlocked } from "./herdr.ts";
 import { type ClassifierUsage, type JevConfig, askJev } from "./jev.ts";
@@ -22,6 +36,22 @@ import {
   workaroundQuestion,
 } from "./judge.ts";
 import { askApproval } from "./prompt.ts";
+import {
+  cycleOf,
+  MODE_CHANGED,
+  MODE_CYCLE,
+  MODE_DESCRIPTIONS,
+  MODE_ENTRY,
+  MODE_NAMES,
+  MODE_SET,
+  MODE_STATUS_KEY,
+  MODES,
+  modeStatus,
+  nextMode,
+  parseMode,
+  type PermissionMode,
+  PLAN_PROVIDER,
+} from "./modes.ts";
 import { loadRules } from "./rules.ts";
 import { agentBeforeLatestUser, callerText, clip, clipTail, recentTexts, recentUserMessages } from "./transcript.ts";
 import { callView } from "./view.ts";
@@ -36,6 +66,12 @@ export interface GateConfig extends Record<string, unknown> {
   readOnlyCommands: string[];
   /** Block a held call once with a reason for the agent before asking you; a retry asks you. */
   pushBack: boolean;
+  /** The mode a new session starts in: manual, accept-edits, plan, auto or bypass. */
+  defaultMode: string;
+  /** The modes the cycle key steps through (plan only with pi-plan-mode). */
+  modes: string[];
+  /** The key that cycles the modes; "" for none. */
+  cycleShortcut: string;
 }
 
 export const DEFAULT_CONFIG: GateConfig = {
@@ -44,11 +80,15 @@ export const DEFAULT_CONFIG: GateConfig = {
   thresholds: DEFAULT_THRESHOLDS,
   allowTools: [
     "codemode", "tool_search", "todo", "ask_user_question", "plan_mode_question", "plan_mode_complete",
+    "enter_plan_mode", "exit_plan_mode",
     "web_search", "fetch_content", "get_search_content", "code_search", "radius_web_search", "web_enable",
     "bg_status", "bg_logs", "bg_result", "bg_wait", "bg_kill", "subagents_enable",
   ],
   readOnlyCommands: [],
   pushBack: true,
+  defaultMode: "auto",
+  modes: ["default", "acceptEdits", "plan", "auto"],
+  cycleShortcut: "shift+tab",
 };
 
 const STATUS_KEY = "tool-gate";
@@ -75,7 +115,13 @@ interface Annotations {
 
 export default function toolGate(pi: ExtensionAPI) {
   let config: GateConfig = DEFAULT_CONFIG;
-  let sessionOn = true;
+  let mode: PermissionMode = "auto";
+  /** The mode plan mode was entered from. */
+  let prePlanMode: PermissionMode | undefined;
+  /** pi-plan-mode is installed and offers plan mode; the plan file it may write. */
+  let planProvider = false;
+  let planFile: string | undefined;
+  let hostCtx: ExtensionContext | undefined;
   let auto = 0;
   let held = 0;
   let pushedBack = 0;
@@ -92,13 +138,81 @@ export default function toolGate(pi: ExtensionAPI) {
     return info?.annotations;
   };
 
-  const status = (ctx: ExtensionContext) => {
-    if (!ctx.hasUI) return;
-    ctx.ui.setStatus(
-      STATUS_KEY,
-      sessionOn && config.enabled ? `gate: ${auto} auto · ${pushedBack} pushed back · ${held} asked` : "gate: off",
-    );
+  const shortcut = loadConfig("tool-gate", DEFAULT_CONFIG, process.cwd()).cycleShortcut.trim();
+
+  const status = (ctx: ExtensionContext | undefined) => {
+    if (!ctx?.hasUI) return;
+    try {
+      ctx.ui.setStatus(MODE_STATUS_KEY, modeStatus(mode, shortcut || undefined));
+      // Jev's counts matter where Jev judges: auto mode, and commands while planning.
+      ctx.ui.setStatus(
+        STATUS_KEY,
+        mode === "auto" || mode === "plan" ? `gate: ${auto} auto · ${pushedBack} pushed back · ${held} asked` : undefined,
+      );
+    } catch {
+      // A stale context after a session switch.
+    }
   };
+
+  const configuredModes = () => config.modes.map(parseMode).filter((m): m is PermissionMode => m !== undefined);
+  const cycle = () => cycleOf(configuredModes(), { plan: planProvider });
+  const startMode = (): PermissionMode => {
+    if (!config.enabled) return "bypassPermissions";
+    const configured = parseMode(config.defaultMode) ?? "auto";
+    return configured === "plan" && !planProvider ? "auto" : configured;
+  };
+
+  const broadcast = (previous?: PermissionMode) => {
+    try {
+      pi.events.emit(MODE_CHANGED, { mode, ...(previous ? { previous } : {}), cycle: cycle(), ...(prePlanMode ? { prePlanMode } : {}) });
+    } catch {
+      // A listener's failure is its own.
+    }
+  };
+
+  /** Switch modes; plan mode needs pi-plan-mode. Returns whether the mode is now `next`. */
+  const setMode = (next: PermissionMode, ctx: ExtensionContext | undefined = hostCtx): boolean => {
+    if (next === "plan" && !planProvider) return false;
+    const previous = mode;
+    if (next === previous) return true;
+    if (next === "plan") prePlanMode = previous;
+    else prePlanMode = undefined;
+    mode = next;
+    try {
+      pi.appendEntry(MODE_ENTRY, { mode });
+    } catch {
+      // No session to record it in.
+    }
+    status(ctx);
+    broadcast(previous);
+    return true;
+  };
+
+  const cycleMode = (ctx: ExtensionContext | undefined = hostCtx) => setMode(nextMode(mode, cycle()), ctx);
+
+  pi.events.on(MODE_SET, (data) => {
+    const next = parseMode((data as { mode?: unknown } | undefined)?.mode);
+    if (next) setMode(next);
+  });
+  pi.events.on(MODE_CYCLE, () => {
+    cycleMode();
+  });
+  pi.events.on(PLAN_PROVIDER, (data) => {
+    const file = (data as { planFile?: unknown } | undefined)?.planFile;
+    planFile = typeof file === "string" && file ? path.resolve(file) : planFile;
+    if (planProvider) return;
+    planProvider = true;
+    broadcast();
+  });
+
+  if (shortcut) {
+    pi.registerShortcut(shortcut as never, {
+      description: "Cycle permission modes (manual, accept edits, plan, auto)",
+      handler: async (ctx) => {
+        cycleMode(ctx);
+      },
+    });
+  }
 
   const git = (cwd: string) => {
     gitInfo ??= (async () => {
@@ -280,26 +394,93 @@ export default function toolGate(pi: ExtensionAPI) {
   };
 
   pi.on("session_start", (_event, ctx) => {
+    hostCtx = ctx;
     config = loadConfig("tool-gate", DEFAULT_CONFIG, ctx.cwd);
+    // A resumed session comes back in its mode; a new one starts in the configured mode.
+    const entries = ctx.sessionManager.getBranch() as Array<{ type?: string; customType?: string; data?: unknown }>;
+    const recorded = [...entries].reverse().find((entry) => entry.type === "custom" && entry.customType === MODE_ENTRY);
+    mode = parseMode((recorded?.data as { mode?: unknown } | undefined)?.mode) ?? startMode();
+    prePlanMode = undefined;
     status(ctx);
+    broadcast();
+  });
+
+  pi.on("session_shutdown", () => {
+    hostCtx = undefined;
+    planProvider = false;
+    planFile = undefined;
   });
 
   pi.on("before_agent_start", (_event, ctx) => {
     config = loadConfig("tool-gate", DEFAULT_CONFIG, ctx.cwd);
     pushedBackThisTurn.clear();
     gitInfo = undefined;
+    // Plan mode restored without pi-plan-mode (uninstalled since): nothing could leave it.
+    if (mode === "plan" && !planProvider) {
+      mode = startMode() === "plan" ? "auto" : startMode();
+      status(ctx);
+      broadcast("plan");
+    }
   });
 
+  const allow = (ctx: ExtensionContext) => {
+    auto++;
+    status(ctx);
+    return undefined;
+  };
+
+  /** Manual and accept-edits modes: you decide, with "allow similar" for the session. */
+  const askUser = (
+    ctx: ExtensionContext,
+    tool: string,
+    input: Record<string, unknown>,
+    p: Exclude<Plan, { kind: "allow" }>,
+  ) => {
+    if (p.kind === "judge" && p.similar.keys.every((key) => allowSimilar.has(key))) return allow(ctx);
+    held++;
+    status(ctx);
+    if (!ctx.hasUI) {
+      return { block: true, reason: `${MODE_NAMES[mode]} mode needs the user's approval for this ${tool} call, and there is no user to ask.` };
+    }
+    return ask(
+      ctx,
+      { tool, input, ...(p.kind === "ask" ? { held: p.reasons.join("; ") } : {}) },
+      p.kind === "judge" ? p.similar : undefined,
+    );
+  };
+
   pi.on("tool_call", async (event, ctx) => {
-    if (!sessionOn || !config.enabled) return undefined;
     const tool = event.toolName;
     const input = event.input as Record<string, unknown>;
+
+    if (mode === "bypassPermissions") {
+      // Everything runs, except removing /, home, the project or a parent of them (as Claude Code).
+      if (!SHELL_TOOLS.has(tool)) return undefined;
+      const command = String(input.command ?? "");
+      const critical = alwaysAskBash(command, ctx.cwd).filter((reason) => reason.startsWith("deletes "));
+      if (!critical.length) return undefined;
+      held++;
+      if (!ctx.hasUI) return { block: true, reason: `tool-gate held this call: it ${critical.join("; ")}. There is no user to approve it.` };
+      return ask(ctx, { tool, input, held: critical.join("; ") }, undefined);
+    }
+
+    if (mode === "plan" && (tool === "edit" || tool === "write")) {
+      const file = path.resolve(ctx.cwd, expandHome(String(input.path ?? "")));
+      if (planFile && file === planFile) return allow(ctx);
+      return {
+        block: true,
+        reason: `Plan mode is on: nothing may be edited until the user approves a plan.${planFile ? ` The only file you may write is the plan file, ${planFile}.` : ""}`,
+      };
+    }
+
     const p = await plan(tool, input, ctx.cwd);
 
-    if (p.kind === "allow") {
-      auto++;
-      status(ctx);
-      return undefined;
+    if (p.kind === "allow") return allow(ctx);
+
+    if (mode === "default") return askUser(ctx, tool, input, p);
+    if (mode === "acceptEdits") {
+      if (p.kind === "judge" && acceptsEdit(tool, input, ctx.cwd)) return allow(ctx);
+      return askUser(ctx, tool, input, p);
     }
 
     if (p.kind === "ask") {
@@ -383,22 +564,63 @@ export default function toolGate(pi: ExtensionAPI) {
     return { usage: addUsage(event.usage as ClassifierUsage | undefined, usage) as never };
   });
 
+  /** Accept-edits mode: edits and filesystem commands inside the project. */
+  const acceptsEdit = (tool: string, input: Record<string, unknown>, cwd: string) => {
+    const root = path.resolve(cwd);
+    if (tool === "edit" || tool === "write") {
+      const file = path.resolve(cwd, expandHome(String(input.path ?? "")));
+      return file.startsWith(`${root}${path.sep}`);
+    }
+    if (!SHELL_TOOLS.has(tool)) return false;
+    const dir = tool !== "bash" && typeof input.cwd === "string" && input.cwd ? path.resolve(cwd, expandHome(input.cwd)) : cwd;
+    // bg_run in another directory still counts only for files inside the project.
+    return isAcceptEditsBash(String(input.command ?? ""), dir, config.readOnlyCommands) &&
+      (dir === root || dir.startsWith(`${root}${path.sep}`));
+  };
+
+  pi.registerCommand("mode", {
+    description: "Permission mode: manual, accept-edits, plan, auto or bypass (no argument: pick one)",
+    getArgumentCompletions: (prefix: string) =>
+      MODES.filter((m) => m !== "plan" || planProvider)
+        .map((m) => MODE_NAMES[m])
+        .filter((name) => name.startsWith(prefix))
+        .map((name) => ({ value: name, label: name })),
+    handler: async (args, ctx) => {
+      hostCtx = ctx;
+      const arg = args.trim();
+      let next = arg ? parseMode(arg) : undefined;
+      if (arg && !next) {
+        ctx.ui.notify(`Unknown mode "${arg}". Modes: ${MODES.map((m) => MODE_NAMES[m]).join(", ")}.`, "warning");
+        return;
+      }
+      if (!next) {
+        const choices = MODES.filter((m) => m !== "plan" || planProvider);
+        const labels = choices.map((m) => `${m === mode ? "● " : "  "}${MODE_NAMES[m]} — ${MODE_DESCRIPTIONS[m]}`);
+        const picked = await ctx.ui.select("Permission mode", labels);
+        if (picked === undefined) return;
+        next = choices[labels.indexOf(picked)];
+        if (!next) return;
+      }
+      if (!setMode(next, ctx)) ctx.ui.notify("Plan mode needs pi-plan-mode.", "warning");
+    },
+  });
+
   pi.registerCommand("gate", {
-    description: "tool-gate: status, on, or off (this session)",
+    description: "tool-gate: status; on (auto mode) or off (bypass mode)",
     getArgumentCompletions: (prefix: string) =>
       ["status", "on", "off"].filter((o) => o.startsWith(prefix)).map((o) => ({ value: o, label: o })),
     handler: async (args, ctx) => {
       const arg = args.trim();
       if (arg === "on" || arg === "off") {
-        sessionOn = arg === "on";
-        status(ctx);
-        ctx.ui.notify(`tool-gate ${arg} for this session`, "info");
+        setMode(arg === "on" ? "auto" : "bypassPermissions", ctx);
+        ctx.ui.notify(arg === "on" ? "Auto mode on" : "Bypass mode on: every call runs", "info");
         return;
       }
       const rules = loadRules(ctx.cwd);
       ctx.ui.notify(
         [
-          `tool-gate ${sessionOn && config.enabled ? "on" : "off"}: ${auto} auto-approved, ${pushedBack} pushed back, ${held} asked this session.`,
+          `Mode: ${MODE_NAMES[mode]} (${MODE_DESCRIPTIONS[mode]}) Cycle: ${cycle().map((m) => MODE_NAMES[m]).join(" → ")}.`,
+          `${auto} auto-approved, ${pushedBack} pushed back, ${held} asked this session.`,
           `Jev: ${config.jev.enabled ? `${config.jev.provider}/${config.jev.model}` : "off"}; push-back ${config.pushBack ? "on" : "off"}.`,
           `${rules.length} project rule${rules.length === 1 ? "" : "s"}; ${allowSimilar.size} "allow similar" grant${allowSimilar.size === 1 ? "" : "s"}.`,
         ].join("\n"),

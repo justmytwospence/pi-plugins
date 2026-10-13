@@ -1,7 +1,7 @@
 {
   "name": "@justmytwospence/pi-tool-gate",
   "version": "0.1.2",
-  "description": "Auto-approves Pi tool calls: fixed rules for the clear cases, Jev for the gray zone, one push-back to the agent, then asks you. Checks project rules.",
+  "description": "Claude Code permission modes for Pi (manual, accept edits, plan, auto, bypass) on Shift+Tab. Auto mode: fixed rules for the clear cases, Jev for the gray zone, one push-back to the agent, then asks you.",
   "type": "module",
   "license": "MIT",
   "private": true,

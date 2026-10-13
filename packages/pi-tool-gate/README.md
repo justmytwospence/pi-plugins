@@ -2,7 +2,7 @@
 
 A Pi extension that auto-approves tool calls, so you are only pulled in when a call is risky and the agent could not find a way around it. Fixed rules settle the clear cases without a model call (read-only calls run, a short list of dangerous calls is always held); [Jev](https://docs.typesafe.ai), through Pi's own classifier models, judges the gray zone. A held call is first blocked with an explanation and a suggested workaround for the agent; only if the agent retries it, or another held call of the same family, are you asked.
 
-It acts on every tool call while it is on (the `tool_call` event) and is not a sandbox: see [Limitations](#limitations).
+That is **auto mode**, one of the Claude Code permission modes the gate provides; Shift+Tab cycles them (see [Permission modes](#permission-modes)). It acts on every tool call (the `tool_call` event) and is not a sandbox: see [Limitations](#limitations).
 
 Part of [Pi Plugins](https://github.com/justmytwospence/pi-plugins). Reference: <https://pi-plugins.vercel.app/plugins/pi-tool-gate/>.
 
@@ -30,7 +30,23 @@ pi -e ./packages/pi-tool-gate
 
 No `npm install` is needed to run it: the package.json has no `dependencies`; Pi supplies its peer dependencies.
 
-## How it works
+## Permission modes
+
+As in Claude Code, the mode decides what runs without asking you. Shift+Tab (`cycleShortcut`) steps through them, from auto to manual, then accept edits, plan, and back to auto; `/mode` picks one (`/mode` alone lists them). The footer shows the active one with Claude Code's labels.
+
+| Mode | Status | Runs without asking |
+| --- | --- | --- |
+| manual (`default`) | `⏸ manual mode on` | Reads only ([clear cases](#1-clear-cases-no-model-call)); everything else asks you, with "allow similar" for the session. |
+| accept edits (`acceptEdits`) | `⏵⏵ accept edits on` | Reads, `edit`/`write` inside the project, and `mkdir`, `touch`, `rm`, `rmdir`, `mv`, `cp` and `sed` when every file they name is inside the project (after any `cd`; no redirects or expansions; `sed` without `w`/`e`). Credential files and the [always-held calls](#1-clear-cases-no-model-call) still ask. |
+| plan | `⏸ plan mode on` | Needs [pi-plan-mode](../pi-plan-mode/): edits are blocked except to its plan file; commands are judged as in auto mode. Approving the plan picks the next mode. |
+| auto | `⏵⏵ auto mode on` | Everything Jev and the fixed rules allow, below. The default. |
+| bypass (`bypassPermissions`) | `⏵⏵ bypass permissions on` | Everything, except removing `/`, a top-level directory, home, the project or a parent of them. Not in the cycle unless you add it to `modes`. |
+
+Without a UI, a call that would ask you is blocked. The mode is saved in the session, so a resumed session comes back in it; a new session starts in `defaultMode`. Plan mode joins the cycle only when pi-plan-mode announces itself on Pi's event bus (contract in [`src/modes.ts`](./src/modes.ts)); other extensions can request a mode (`permission-mode:set`) or a cycle step (`permission-mode:cycle`) and follow changes (`permission-mode:changed`).
+
+Pi binds Shift+Tab to its thinking-level cycle by default; the gate takes it over (Pi warns about the conflict at startup). Rebind `app.thinking.cycle` in `~/.pi/agent/keybindings.json` (for example to `alt+t`), or set `cycleShortcut` to another key.
+
+## How auto mode works
 
 ### 1. Clear cases, no model call
 
@@ -82,10 +98,11 @@ When Jev cannot answer (Jev off in settings, no classifier model, no credentials
 
 ## Commands
 
-- `/gate` or `/gate status`: counts, Jev model, push-back setting, number of rules and session grants.
-- `/gate on`, `/gate off`: turn the gate on or off for this session.
+- `/mode [manual|accept-edits|plan|auto|bypass]`: switch modes; with no argument, pick one from a list.
+- `/gate` or `/gate status`: the mode and cycle, counts, Jev model, push-back setting, number of rules and session grants.
+- `/gate on`, `/gate off`: auto mode, or bypass mode.
 
-The footer status shows `gate: N auto · P pushed back · M asked` (or `gate: off`). Every call Jev judges is recorded in the session as a `tool-gate:decision` custom entry (tool, clipped arguments, scores, failures, action, latency, input tokens), for tuning thresholds. Jev's token usage is added to the gated tool's result.
+The status line shows the mode (`permission-mode` key, `⏵⏵ auto mode on (shift+tab to cycle)`) and, in auto and plan mode, `gate: N auto · P pushed back · M asked`. Every call Jev judges is recorded in the session as a `tool-gate:decision` custom entry (tool, clipped arguments, scores, failures, action, latency, input tokens), for tuning thresholds. Jev's token usage is added to the gated tool's result.
 
 ## Project rules
 
@@ -124,15 +141,21 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
   },
   "allowTools": [
     "codemode", "tool_search", "todo", "ask_user_question", "plan_mode_question", "plan_mode_complete",
-    "web_search", "fetch_content", "get_search_content", "code_search", "radius_web_search", "web_enable",
+    "enter_plan_mode", "exit_plan_mode", "web_search", "fetch_content", "get_search_content", "code_search", "radius_web_search", "web_enable",
     "bg_status", "bg_logs", "bg_result", "bg_wait", "bg_kill", "subagents_enable"
   ],
   "readOnlyCommands": [],
-  "pushBack": true
+  "pushBack": true,
+  "defaultMode": "auto",
+  "modes": ["default", "acceptEdits", "plan", "auto"],
+  "cycleShortcut": "shift+tab"
 }
 ```
 
-- `enabled`: `false` turns the gate off.
+- `enabled`: `false` starts sessions in bypass mode.
+- `defaultMode`: the mode a new session starts in (`manual`, `accept-edits`, `plan`, `auto`, `bypass`, or Claude Code's names).
+- `modes`: the modes the cycle key steps through, always in Claude Code's order; add `"bypassPermissions"` to include bypass.
+- `cycleShortcut`: the key that cycles modes, read at startup (changes after `/reload`); `""` for none.
 - `jev`: the classifier model (`provider`/`model`, looked up among Pi's classifier models) and its timeout; `enabled: false` uses the hint fallback.
 - `thresholds`: the bars described above.
 - `allowTools`: tools that never need a decision. Setting it replaces the whole default list.
@@ -150,13 +173,15 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
 - **Herdr**: while an approval dialog is open, the gate emits `herdr:blocked` on Pi's event bus (`{ active: true, label: "Allow? bash: ..." }`, then `{ active: false }` when it closes), so Herdr's Pi integration shows the pane as blocked. Outside Herdr nothing listens.
 - **pi-bg**: `bg_run` is judged like `bash`, in its own `cwd`; the read-only `bg_*` tools are on the default allow list.
 - **pi-subagents**: a subagent's approval dialogs reach you through pi-subagents' dialog forwarding.
+- **pi-plan-mode**: provides plan mode in the cycle (above).
+- **pi-status-footer**: shows the mode on its model row, in Claude Code's colors.
 
 ## Limitations
 
 - It is not a sandbox. It inspects tool names and arguments before a call; it does not confine what a command does once it runs. The read-only command rules are a parser's best effort over shell syntax, and Jev's judgment is probabilistic.
 - Tools in `allowTools` are never inspected. `codemode` is on the default list because the tools its scripts call are expected to be gated on their own; if they are not in your setup, remove it.
 - When Jev is unavailable and there is no UI, every call except the always-held ones is allowed.
-- `/gate off` and "allow similar" grants are held in memory; they are not saved.
+- "Allow similar" grants are held in memory; they are not saved. The mode is saved in the session.
 
 ## Development
 

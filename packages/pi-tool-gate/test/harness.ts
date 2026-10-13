@@ -32,6 +32,7 @@ export function harness(options: { tools?: any[]; exec?: (cmd: string, args: str
   const messages: any[] = [];
   /** Everything emitted on pi's event bus, in order. */
   const events: Array<{ channel: string; data: any }> = [];
+  const listeners = new Map<string, Array<(data: unknown) => void>>();
   let thinking = "high";
   const thinkingChanges: string[] = [];
   const pi = {
@@ -59,8 +60,12 @@ export function harness(options: { tools?: any[]; exec?: (cmd: string, args: str
     events: {
       emit: (channel: string, data: unknown) => {
         events.push({ channel, data });
+        for (const listener of listeners.get(channel) ?? []) listener(data);
       },
-      on: () => () => undefined,
+      on: (channel: string, listener: (data: unknown) => void) => {
+        listeners.set(channel, [...(listeners.get(channel) ?? []), listener]);
+        return () => undefined;
+      },
     },
   };
   async function emit(event: string, payload: any, ctx?: any) {

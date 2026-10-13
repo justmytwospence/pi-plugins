@@ -909,3 +909,80 @@ function withoutSubstitutions(command: string): string {
   }
   return out;
 }
+
+/** The filesystem commands accept-edits mode runs unasked, as Claude Code's does. */
+const ACCEPT_EDITS_COMMANDS = new Set(["mkdir", "touch", "rm", "rmdir", "mv", "cp", "sed"]);
+/** Options of these commands that take the next token as their value. */
+const FS_OPTION_WITH_VALUE: Record<string, Set<string>> = {
+  mkdir: new Set(["-m", "--mode"]),
+  touch: new Set(["-d", "-r", "-t", "--date", "--reference"]),
+  cp: new Set(["-t", "--target-directory", "-S", "--suffix"]),
+  mv: new Set(["-t", "--target-directory", "-S", "--suffix"]),
+  sed: new Set(["-e", "--expression", "-f", "--file", "-l", "--line-length"]),
+};
+
+/** The files a filesystem command names (for sed, the files after its script). */
+function fsOperands(name: string, args: readonly string[]): string[] {
+  const withValue = FS_OPTION_WITH_VALUE[name] ?? new Set<string>();
+  const operands: string[] = [];
+  let scriptGiven = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] as string;
+    if (a === "--") {
+      operands.push(...args.slice(i + 1));
+      break;
+    }
+    if (a.startsWith("-")) {
+      if (name === "sed" && (a === "-e" || a === "--expression" || /^-[a-zA-Z]*e./u.test(a) || a.startsWith("--expression="))) scriptGiven = true;
+      // `-t DIR` and `--target-directory DIR` name a destination: it is an operand too.
+      if ((name === "cp" || name === "mv") && (a === "-t" || a === "--target-directory")) operands.push(args[i + 1] ?? "");
+      if (withValue.has(a)) i++;
+      continue;
+    }
+    operands.push(a);
+  }
+  // Without -e, sed's first operand is its script.
+  return name === "sed" && !scriptGiven ? operands.slice(1) : operands;
+}
+
+/**
+ * Whether accept-edits mode runs this command unasked: every simple command in it only reads or
+ * is a filesystem command (`mkdir`, `touch`, `rm`, `rmdir`, `mv`, `cp`, `sed`) whose files all lie
+ * inside the project (after any `cd`), with no write redirect, expansion or substitution. `sed`
+ * may edit in place but not run a `w`/`e` command or read a script file. Removals of a protected
+ * directory and credential files are never covered.
+ */
+export function isAcceptEditsBash(command: string, cwd: string, extra: readonly string[] = []): boolean {
+  if (!plainShell(command)) return false;
+  if (writeRedirects(command).length) return false;
+  const root = path.resolve(cwd);
+  const inside = (file: string) => file === root || file.startsWith(`${root}${path.sep}`);
+  let parts = 0;
+  let ok = true;
+  forEachPart(command, cwd, (tokens, dir) => {
+    parts++;
+    if (!ok || isReadOnlyPart(tokens, extra)) return;
+    const p = program(tokens);
+    if (!p || p.unsafe || !ACCEPT_EDITS_COMMANDS.has(p.name)) {
+      ok = false;
+      return;
+    }
+    if (p.name === "sed") {
+      const { scripts, scriptFile } = sedScripts(p.args);
+      if (scriptFile || scripts.some(sedWrites)) {
+        ok = false;
+        return;
+      }
+    }
+    const operands = fsOperands(p.name, p.args);
+    if (!operands.length) {
+      ok = false;
+      return;
+    }
+    for (const operand of operands) {
+      const file = path.resolve(dir, expandHome(operand));
+      if (!operand || !inside(file) || isProtectedDir(file, cwd) || isCredentialPath(file)) ok = false;
+    }
+  });
+  return ok && parts > 0;
+}
