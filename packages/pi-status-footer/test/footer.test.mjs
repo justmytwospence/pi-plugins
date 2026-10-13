@@ -253,7 +253,7 @@ test("minimal Git suffix covers each dirty dimension, quiet tracking and unreada
 test("wide layout uses explicit labels without reintroducing secondary metrics", () => {
   const rows = mod.renderFooter(fixture(), 160, theme);
   assert.match(rows[0], /^ \uf07b dotfiles · \ue725 main \* ↑2$/);
-  assert.match(rows[1], /^ \uee0d opus-5\.5 · \uee9c reasoning xhigh$/);
+  assert.match(rows[1], /^ \u{f06a9} opus-5\.5 · \uee9c reasoning xhigh$/u);
   assert.match(rows[2], /Context\s+28% used [━─]{8}/);
   assert.doesNotMatch(rows[2], /cost/);
   assert.doesNotMatch(rows.slice(0, 3).join("\n"), /cache|OAuth|diff|compact|56k\/200k/);
@@ -271,7 +271,7 @@ test("footer uses natural spacing and a consistent inset without label columns",
   s.statuses = ["PLAN mode"];
   const rows = mod.renderFooter(s, 160, theme);
   assert.equal(rows[0], " \uf07b dotfiles · \ue725 main * ↑2");
-  assert.equal(rows[1], " \uee0d opus-5.5 · \uee9c reasoning xhigh");
+  assert.equal(rows[1], " \u{f06a9} opus-5.5 · \uee9c reasoning xhigh");
   assert.equal(rows[2], " \uf0e4 Context 28% used");
   assert.equal(rows[3], " \uf0f3 PLAN mode");
   assert.equal(rows[4], " \uf252 Claude 5h 32% used");
@@ -290,7 +290,7 @@ test("footer lines share separators, concise labels and unparenthesized qualifie
   s.statuses = mod.absorbStatuses(new Map([["tool-gate", "gate: 0 auto · 0 pushed back · 0 asked"]]), { claudeRow: false }).rest;
   s.quotas = [{ source: "Codex acct", updated: now, windows: [{ label: "week", used: 39, reset: now + 86400_000 }] }];
   const rows = mod.renderFooter(s, 160, theme);
-  assert.equal(rows[1], " \uee0d opus-5.5 · \uee9c reasoning xhigh · auto →");
+  assert.equal(rows[1], " \u{f06a9} opus-5.5 · \uee9c reasoning xhigh · auto →");
   assert.equal(rows[2], " \uf0e4 Context 28% used");
   assert.equal(rows[3], " \uf510 Gate 0 auto · 0 pushed back · 0 asked");
   assert.equal(rows[4], " \uf252 Codex week 39% used · resets in 1d0h");

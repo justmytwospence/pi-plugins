@@ -686,14 +686,14 @@ function bgRow(items: BgItem[], width: number, theme: Paint): string {
   return fitSegments(segments, width, theme);
 }
 
-// Nerd Font (Font Awesome / Devicons, all in the BMP private-use area, one
-// cell wide) icons that lead each footer row. Without a Nerd Font they draw as
+// Nerd Font (Font Awesome / Devicons / Material Design, all private-use,
+// one cell wide) icons that lead each footer row. Without a Nerd Font they draw as
 // placeholders; the row text stays readable.
 export const ICONS = {
   stash: "\uf187", // archive
   project: "\uf07b", // folder
   branch: "\ue725", // git branch
-  model: "\uee0d", // robot
+  model: "\u{f06a9}", // robot (Material Design; the Font Awesome robot draws wider than its neighbors)
   reasoning: "\uee9c", // brain
   gate: "\uf510", // shield with check (pi-tool-gate)
   context: "\uf0e4", // tachometer
