@@ -52,6 +52,8 @@ While plan mode is on:
   - **No, keep planning**: say what should change (or leave it empty, or press Esc, and say it in the chat). Plan mode stays on.
 - Leaving plan mode another way (Shift+Tab, or the shortcut) tells your agent it may now make changes.
 
+In Pi's fullscreen terminal mode, **Plan review** scrolls the chat to the beginning of the plan when the approval picker opens. Short plans get temporary trailing space so their beginning is at the top too. Scroll the chat to read; redraws leave your position alone. After editing, review starts at the revised plan's beginning. Closing review removes the space and follows the latest message again. Regular terminal mode and RPC keep their usual presentation; their scrollback is not controlled by this extension.
+
 `planCompleteCommand` runs for an approved plan, as it does for `/planners`.
 
 ## The planners screen

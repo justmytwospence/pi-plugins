@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Minor Changes
+
+- Fullscreen plan approval starts at the beginning of the plan in the main chat, with a
+  **Plan review** heading and scrolling reminder. Short plans get temporary trailing space;
+  manual scrolling stays under your control, editing returns to the beginning, and closing
+  review restores following the latest message. Regular terminal mode and RPC are unchanged.
+
 ### Major Changes
 
 - `/plan` is plan mode in your own conversation, as in Claude Code: your agent researches read-only,

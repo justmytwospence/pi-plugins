@@ -23,6 +23,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { expandHome } from "./plan-hook.js";
+import { PlanReviewViewport } from "./plan-review-viewport.js";
 import { findBlockedCommandSegment, readCommand, type SafeSubcommands } from "./tool-policy.js";
 
 export const MODE_CHANGED = "permission-mode:changed";
@@ -194,6 +195,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   /** Restored this session's state (so the gate's early broadcast does not clobber it). */
   let restored = false;
   let hostCtx: ExtensionContext | undefined;
+  const reviewViewport = new PlanReviewViewport();
 
   const safely = (fn: () => void) => {
     try {
@@ -307,6 +309,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   });
 
   pi.on("session_shutdown", () => {
+    reviewViewport.end();
     hostCtx = undefined;
     restored = false;
     gate = undefined;
@@ -371,9 +374,13 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       "In plan mode, once your plan is written to the plan file and complete: show it to the user and ask for approval to start implementing. It takes no arguments; it reads the plan file. Do not use it for research questions, and do not ask for approval any other way.",
     promptSnippet: "Ask the user to approve the plan in the plan file (plan mode only)",
     parameters: { type: "object", additionalProperties: false, properties: {} } as never,
-    renderCall: (_args, theme) => new Text(theme.fg("toolTitle", theme.bold("Plan")), 0, 0),
-    renderResult: (result, options, theme) => renderExit(result.details as ExitDetails | undefined, options, theme),
-    async execute(_id, _params, _signal, onUpdate, ctx) {
+    renderCall: (_args, theme, context) =>
+      new Text(theme.fg("toolTitle", theme.bold(context.isPartial ? "Plan review" : "Plan")), 0, 0),
+    renderResult: (result, options, theme, context) => {
+      const component = renderExit(result.details as ExitDetails | undefined, options, theme);
+      return options.isPartial ? reviewViewport.wrap(context.toolCallId, component) : component;
+    },
+    async execute(id, _params, signal, onUpdate, ctx) {
       hostCtx = ctx;
       if (!state.active || !state.planFile) {
         return text("You are not in plan mode. This tool only asks the user to approve a plan in plan mode.");
@@ -398,83 +405,93 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
           : [APPROVE_HERE];
         return [...here, APPROVE_FRESH, EDIT, KEEP];
       };
-      for (;;) {
-        onUpdate?.({
-          content: [{ type: "text", text: plan }],
-          details: { plan, planFile, outcome: "pending" } satisfies ExitDetails,
-        } as never);
-        const choice = await ctx.ui.select(`Ready to code? The plan is in ${tildify(planFile)}.`, choices());
-        if (choice === EDIT) {
-          const revised = await ctx.ui.editor("Edit the plan", plan);
-          if (revised?.trim() && revised.trim() !== plan) {
-            plan = revised.trim();
-            edited = true;
-            try {
-              writeFileSync(planFile, `${plan}\n`);
-            } catch (error: unknown) {
-              ctx.ui.notify(`Could not save the plan file: ${String(error)}`, "error");
+      reviewViewport.begin(ctx, id);
+      try {
+        for (;;) {
+          reviewViewport.restart();
+          onUpdate?.({
+            content: [{ type: "text", text: plan }],
+            details: { plan, planFile, outcome: "pending" } satisfies ExitDetails,
+          } as never);
+          const choice = await ctx.ui.select(
+            `Plan review · Scroll the chat to read the plan.\nReady to code? ${tildify(planFile)}`,
+            choices(),
+            { signal },
+          );
+          if (choice === EDIT) {
+            const revised = await ctx.ui.editor("Edit the plan", plan);
+            if (revised?.trim() && revised.trim() !== plan) {
+              plan = revised.trim();
+              edited = true;
+              try {
+                writeFileSync(planFile, `${plan}\n`);
+              } catch (error: unknown) {
+                ctx.ui.notify(`Could not save the plan file: ${String(error)}`, "error");
+              }
             }
+            continue;
           }
-          continue;
-        }
-        if (choice === undefined || choice === KEEP) {
-          const feedback =
-            choice === KEEP ? (await ctx.ui.input("What should change? (Enter to say it in the chat)"))?.trim() : "";
-          const details: ExitDetails = { plan, planFile, outcome: "kept" };
-          if (feedback) {
+          if (choice === undefined || choice === KEEP) {
+            const feedback =
+              choice === KEEP ? (await ctx.ui.input("What should change? (Enter to say it in the chat)"))?.trim() : "";
+            const details: ExitDetails = { plan, planFile, outcome: "kept" };
+            if (feedback) {
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: `The user wants to keep planning and did not approve the plan. Their feedback:\n\n${feedback}\n\nRevise the plan file, then call ${EXIT_TOOL} again.`,
+                  },
+                ],
+                details,
+              } as never;
+            }
             return {
               content: [
                 {
                   type: "text",
-                  text: `The user wants to keep planning and did not approve the plan. Their feedback:\n\n${feedback}\n\nRevise the plan file, then call ${EXIT_TOOL} again.`,
+                  text: "The user wants to keep planning and did not approve the plan. Stop here and wait for them to say what to change.",
                 },
               ],
               details,
+              terminate: true,
             } as never;
           }
-          return {
-            content: [
-              {
-                type: "text",
-                text: "The user wants to keep planning and did not approve the plan. Stop here and wait for them to say what to change.",
-              },
-            ],
-            details,
-            terminate: true,
-          } as never;
-        }
-        host.approved(plan, ctx);
-        if (choice === APPROVE_FRESH) {
-          // The fresh session gets the plan; this one is done.
+          host.approved(plan, ctx);
+          if (choice === APPROVE_FRESH) {
+            // The fresh session gets the plan; this one is done.
+            exitLocal(ctx, false);
+            if (gate) requestMode(gate.cycle.includes("auto") ? "auto" : "default");
+            host.implementFresh(plan);
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: "The user approved the plan; it will be implemented in a fresh session. Stop here and do nothing else.",
+                },
+              ],
+              details: { plan, planFile, outcome: "fresh", edited } satisfies ExitDetails,
+              terminate: true,
+            } as never;
+          }
+          const mode =
+            choice === APPROVE_AUTO
+              ? "auto"
+              : choice === APPROVE_EDITS
+                ? "acceptEdits"
+                : choice === APPROVE_MANUAL
+                  ? "default"
+                  : undefined;
+          // This result tells your agent it left plan mode.
           exitLocal(ctx, false);
-          if (gate) requestMode(gate.cycle.includes("auto") ? "auto" : "default");
-          host.implementFresh(plan);
+          if (mode) requestMode(mode);
           return {
-            content: [
-              {
-                type: "text",
-                text: "The user approved the plan; it will be implemented in a fresh session. Stop here and do nothing else.",
-              },
-            ],
-            details: { plan, planFile, outcome: "fresh", edited } satisfies ExitDetails,
-            terminate: true,
+            content: [{ type: "text", text: approvedText(plan, planFile, edited) }],
+            details: { plan, planFile, outcome: "approved", edited, ...(mode ? { mode } : {}) } satisfies ExitDetails,
           } as never;
         }
-        const mode =
-          choice === APPROVE_AUTO
-            ? "auto"
-            : choice === APPROVE_EDITS
-              ? "acceptEdits"
-              : choice === APPROVE_MANUAL
-                ? "default"
-                : undefined;
-        // This result tells your agent it left plan mode.
-        exitLocal(ctx, false);
-        if (mode) requestMode(mode);
-        return {
-          content: [{ type: "text", text: approvedText(plan, planFile, edited) }],
-          details: { plan, planFile, outcome: "approved", edited, ...(mode ? { mode } : {}) } satisfies ExitDetails,
-        } as never;
+      } finally {
+        reviewViewport.end();
       }
     },
   });
