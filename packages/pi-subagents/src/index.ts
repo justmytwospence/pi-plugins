@@ -16,7 +16,7 @@ import { Type } from "typebox";
 import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION, type ActivityEntry, type ActivitySection, FLEET_HOST_PRIORITY, hostOutranks, readHost } from "./activity.ts";
 import { type AgentDef, discoverAgents } from "./agents.ts";
 import { MENTION_TYPE, mentionGuidance, subagentAutocomplete } from "./mentions.ts";
-import { Child, type ChildState, subagentDepth, type DialogAnswer, type DialogRequest, type Usage, addUsage, emptyUsage } from "./child.ts";
+import { CACHE_RETENTIONS, type CacheRetention, Child, type ChildState, subagentDepth, type DialogAnswer, type DialogRequest, type Usage, addUsage, emptyUsage } from "./child.ts";
 import { agentDir, loadConfig } from "./config.ts";
 import { Conversation, type Message, readTranscript, transcriptWriter } from "./conversation.ts";
 import { type JevConfig, askJev } from "./jev.ts";
@@ -44,6 +44,8 @@ export interface SubagentsConfig extends Record<string, unknown> {
   fleetView: boolean;
   /** Levels of subagents below the main session: 2 lets a child start children of its own, 1 does not. */
   maxDepth: number;
+  /** Prompt-cache TTL for children: `short` (5 minutes on Anthropic; default), `long` (1 hour) or `inherit` the parent's `PI_CACHE_RETENTION`. */
+  childCacheRetention: CacheRetention;
 }
 
 export const DEFAULT_CONFIG: SubagentsConfig = {
@@ -56,6 +58,7 @@ export const DEFAULT_CONFIG: SubagentsConfig = {
   widget: "off",
   fleetView: true,
   maxDepth: 2,
+  childCacheRetention: "short",
 };
 
 const MAX_LINES = 2_000;
@@ -517,6 +520,7 @@ export default function subagents(pi: ExtensionAPI) {
       ...(resolved.agent.prompt ? { systemPrompt: resolved.agent.prompt } : {}),
       ...(resolved.agent.maxTurns ? { maxTurns: resolved.agent.maxTurns } : {}),
       ...(options.fork ? { forkSession: options.fork } : {}),
+      cacheRetention: CACHE_RETENTIONS.includes(config.childCacheRetention) ? config.childCacheRetention : "short",
       sessionDir: path.join(agentDir(), "subagents", "sessions"),
       onUpdate: (state) => {
         run.state = state;

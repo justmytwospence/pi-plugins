@@ -85,8 +85,23 @@ export interface ChildOptions {
   onDialog?: (request: DialogRequest) => Promise<DialogAnswer>;
   /** Each finished message, for example to save it. */
   onMessage?: (message: Message) => void;
+  /** Prompt-cache TTL for the child (`PI_CACHE_RETENTION`); `inherit` (the default) keeps the parent's. */
+  cacheRetention?: CacheRetention;
   /** Command and leading args to run Pi; defaults to the running Pi. */
   invocation?: { command: string; args: string[] };
+}
+
+export const CACHE_RETENTIONS = ["short", "long", "inherit"] as const;
+export type CacheRetention = (typeof CACHE_RETENTIONS)[number];
+
+/**
+ * The child's environment: the parent's, marked as a subagent one level deeper, with
+ * `PI_CACHE_RETENTION` set unless `retention` is `inherit` (or not a known value).
+ */
+export function childEnv(retention: CacheRetention = "inherit", env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = { ...env, PI_SUBAGENT: "1", PI_SUBAGENT_DEPTH: String(subagentDepth(env) + 1) };
+  if (retention === "short" || retention === "long") out.PI_CACHE_RETENTION = retention;
+  return out;
 }
 
 /** How deep this Pi is in a tree of subagents: 0 for a top-level session, 1 for its children. */
@@ -155,7 +170,7 @@ export class Child {
     const proc = spawn(invocation.command, [...invocation.args, ...childArgs(this.options, promptFile)], {
       cwd: this.options.cwd,
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, PI_SUBAGENT: "1", PI_SUBAGENT_DEPTH: String(subagentDepth() + 1) },
+      env: childEnv(this.options.cacheRetention),
     });
     this.proc = proc;
     let buffer = "";

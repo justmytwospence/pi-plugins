@@ -2,7 +2,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, test } from "vitest";
-import { Child, childArgs, subagentDepth } from "../src/child.ts";
+import { Child, childArgs, childEnv, subagentDepth } from "../src/child.ts";
 import { messageText, readTranscript, transcriptWriter } from "../src/conversation.ts";
 
 const fake = { command: process.execPath, args: [path.join(import.meta.dirname, "fixtures", "fake-pi.mjs")] };
@@ -70,6 +70,16 @@ test("subagentDepth: the explicit depth, else 1 inside a subagent, else 0", () =
   expect(subagentDepth({ PI_SUBAGENT: "1" })).toBe(1);
   expect(subagentDepth({ PI_SUBAGENT: "1", PI_SUBAGENT_DEPTH: "2" })).toBe(2);
   expect(subagentDepth({ PI_SUBAGENT_DEPTH: "nope" })).toBe(0);
+});
+
+test("childEnv: marks the subagent depth and sets the cache TTL unless inherited", () => {
+  const parent = { PI_CACHE_RETENTION: "long", PATH: "/bin" };
+  expect(childEnv("short", parent)).toEqual({ PI_CACHE_RETENTION: "short", PATH: "/bin", PI_SUBAGENT: "1", PI_SUBAGENT_DEPTH: "1" });
+  expect(childEnv("long", {}).PI_CACHE_RETENTION).toBe("long");
+  expect(childEnv("inherit", parent).PI_CACHE_RETENTION).toBe("long");
+  expect(childEnv(undefined, {}).PI_CACHE_RETENTION).toBeUndefined();
+  expect(childEnv("bogus" as never, parent).PI_CACHE_RETENTION).toBe("long");
+  expect(childEnv("short", { PI_SUBAGENT: "1", PI_SUBAGENT_DEPTH: "1" }).PI_SUBAGENT_DEPTH).toBe("2");
 });
 
 test("a stopped child reports stopped, even when Pi settles the aborted run first", async () => {

@@ -71,13 +71,14 @@ Global settings are `~/.pi/agent/pi-subagents.json`, overlaid by `.pi/pi-subagen
   "concurrency": 2,
   "widget": "off",
   "fleetView": true,
-  "maxDepth": 2
+  "maxDepth": 2,
+  "childCacheRetention": "short"
 }
 ```
 
 Optional `providerTiers` maps provider names to `fast`, `balanced`, and `strong` tier maps of `provider/model` identifiers. The legacy `tiers` map is still supported. Provider-specific entries win, and only models matching the parent's provider apply to implicit choices (including agent-file models). Explicit `model` call arguments may cross providers. For `openai-codex`, missing tiers use registered Luna models for fast tasks and Sol models for balanced/strong tasks, preferring the parent's matching generation; if unavailable, they inherit the parent's model. Other providers inherit the parent unless configured. Explicit call arguments take priority over agent-file choices, then classifier choices, then defaults. `tierDescriptions` changes the descriptions used for classification. Jev defaults are provider `typesafe`, model `jev-latest`, and a 3000 ms timeout.
 
-`widget` accepts `off`, `background`, or `all`; `fleetView: false` disables the list below the prompt. `maxDepth: 2` allows children to delegate once more, but removes the tool from grandchildren.
+`widget` accepts `off`, `background`, or `all`; `fleetView: false` disables the list below the prompt. `maxDepth: 2` allows children to delegate once more, but removes the tool from grandchildren. `childCacheRetention` sets each child's `PI_CACHE_RETENTION`: `short` (the default; 5 minutes on Anthropic), `long` (1 hour), or `inherit` to keep the parent's. Children run quick turns and are discarded when done, so the 1-hour tier's higher cache-write price rarely pays off for them even when the main session uses it.
 
 ## Inspect results and conversations
 

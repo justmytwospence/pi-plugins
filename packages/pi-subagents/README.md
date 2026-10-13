@@ -165,7 +165,8 @@ For the agent, the model and the thinking level separately: explicit arguments, 
   "concurrency": 4,
   "widget": "off",
   "fleetView": true,
-  "maxDepth": 2
+  "maxDepth": 2,
+  "childCacheRetention": "short"
 }
 ```
 
@@ -180,6 +181,7 @@ For the agent, the model and the thinking level separately: explicit arguments, 
 | `widget` | `"off"` | `"off"`, `"background"` (async runs only) or `"all"` |
 | `fleetView` | true | `false` turns the list below the editor off |
 | `maxDepth` | 2 | levels of subagents below the main session: with 2, a subagent can start subagents of its own, but theirs get no `subagent` tool |
+| `childCacheRetention` | `"short"` | prompt-cache TTL for children: `"short"` (5 minutes on Anthropic), `"long"` (1 hour) or `"inherit"` the parent's `PI_CACHE_RETENTION` |
 
 `providerTiers` configures several subscriptions without editing settings when you switch the parent's provider:
 
@@ -202,7 +204,7 @@ For the agent, the model and the thinking level separately: explicit arguments, 
 
 For `openai-codex`, missing tiers use registered models whose ids end in `-luna` (fast) or `-sol` (balanced and strong), preferring the parent's matching generation, otherwise the newest registered one. These defaults use only models present in Pi's registry. Other providers use the parent's model for any tier not configured.
 
-Children run with `PI_SUBAGENT=1` and `PI_SUBAGENT_DEPTH` set, which is how `maxDepth` is enforced.
+Children run with `PI_SUBAGENT=1` and `PI_SUBAGENT_DEPTH` set, which is how `maxDepth` is enforced, and with `PI_CACHE_RETENTION` set from `childCacheRetention`. Children work in quick turns and are discarded when done, so the 1-hour tier's higher cache-write price (2x input instead of 1.25x on Anthropic) rarely pays off for them even when the main session uses it.
 
 ## Requirements and costs
 
