@@ -172,8 +172,8 @@ export const ENTER_GUIDELINES = [
   `Call ${ENTER_TOOL} before starting a non-trivial implementation where planning first pays off: new features, changes across several files, architectural choices, several valid approaches, or unclear requirements. Do not use it for small fixes, single obvious changes, or pure research.`,
 ];
 
-const APPROVE_AUTO = "Yes, and use auto mode";
-const APPROVE_EDITS = "Yes, auto-accept edits";
+const APPROVE_AUTO = "Yes, auto mode (Jev judges calls)";
+const APPROVE_EDITS = "Yes, auto-accept project edits";
 const APPROVE_MANUAL = "Yes, manually approve edits";
 const APPROVE_HERE = "Yes, implement it";
 const APPROVE_FRESH = "Yes, in a fresh session with only the plan";
@@ -349,6 +349,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
 
   pi.registerTool({
     name: ENTER_TOOL,
+    exposure: "model-only",
     label: "Enter plan mode",
     description:
       "Switch to plan mode to research and design an approach, with the user's approval, before writing code. In plan mode you can only read and write a plan file; exit_plan_mode then asks the user to approve the plan.",
@@ -369,6 +370,8 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
 
   pi.registerTool({
     name: EXIT_TOOL,
+    // Nested codemode calls have no transcript row to render the plan being approved.
+    exposure: "model-only",
     label: "Exit plan mode",
     description:
       "In plan mode, once your plan is written to the plan file and complete: show it to the user and ask for approval to start implementing. It takes no arguments; it reads the plan file. Do not use it for research questions, and do not ask for approval any other way.",

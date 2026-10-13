@@ -28,9 +28,9 @@ pi-plan-mode separates researching a change from implementing it, in two ways:
 
 While it is on, your agent writes its plan to a plan file, by default `~/.pi/agent/plans/<two-words>.md` (`plansDirectory`), one per session. `edit` and `write` are blocked except for that file. With pi-tool-gate, shell commands are judged as in auto mode; without it, only the read-only shell policy runs. Other extension and MCP tools are not blocked; your agent is only instructed not to change anything with them.
 
-When the plan is complete, your agent calls `exit_plan_mode`. The plan appears in the conversation and you choose:
+When the plan is complete, your agent calls `exit_plan_mode` directly. Plan tools are model-only: calling them inside `codemode` is prohibited because nested calls have no inline plan renderer. The plan appears in the conversation and you choose:
 
-- **Yes, and use auto mode**, **Yes, auto-accept edits** or **Yes, manually approve edits** (with the gate; otherwise **Yes, implement it**): implement here, in that permission mode.
+- **Yes, auto mode (Jev judges calls)**, **Yes, auto-accept project edits** or **Yes, manually approve edits** (with the gate; otherwise **Yes, implement it**): implement here, in that permission mode. Auto mode asks Jev to judge each call; auto-accept project edits permits project edits and filesystem commands without approval, while other commands follow the gate's normal approval policy.
 - **Yes, in a fresh session with only the plan**: a child session starts with the plan once the current turn ends.
 - **Edit the plan first**: revise it in Pi's editor, then choose again.
 - **No, keep planning**: give feedback, or leave it empty and say it in the chat.

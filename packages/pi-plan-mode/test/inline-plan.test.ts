@@ -16,6 +16,7 @@ import {
 import { createMockContext, createMockPi } from "./shared/support.js";
 
 type Tool = {
+  exposure?: string;
   name: string;
   execute(...args: unknown[]): Promise<{ content: Array<{ text: string }>; details?: any; terminate?: boolean }>;
 };
@@ -178,7 +179,7 @@ test("a fresh-session approval starts /plan's fresh session once the turn is ove
 test("with pi-tool-gate, plan mode is the gate's mode: /plan asks it, approval picks the next mode", async () => {
   const { mock, context, tool, inline, gateEvents, selects } = await setup({
     gate: true,
-    select: ["Yes, auto-accept edits"],
+    select: ["Yes, auto-accept project edits"],
   });
   assert.ok(
     gateEvents.some((event) => event.channel === PLAN_PROVIDER),
@@ -196,8 +197,8 @@ test("with pi-tool-gate, plan mode is the gate's mode: /plan asks it, approval p
   writeFileSync(planFile, "# Plan\n");
   await tool(EXIT_TOOL).execute("t1", {}, undefined, undefined, context.ctx);
   assert.deepEqual(selects[0]?.options.slice(0, 3), [
-    "Yes, and use auto mode",
-    "Yes, auto-accept edits",
+    "Yes, auto mode (Jev judges calls)",
+    "Yes, auto-accept project edits",
     "Yes, manually approve edits",
   ]);
   assert.deepEqual(
@@ -210,6 +211,12 @@ test("with pi-tool-gate, plan mode is the gate's mode: /plan asks it, approval p
   assert.equal(inline().active, true);
   mock.eventBus.emit(MODE_CHANGED, { mode: "auto", cycle: [] });
   assert.equal(inline().active, false);
+});
+
+test("plan tools stay top-level so codemode cannot hide the inline plan review", async () => {
+  const { tool } = await setup();
+  assert.equal(tool(ENTER_TOOL).exposure, "model-only");
+  assert.equal(tool(EXIT_TOOL).exposure, "model-only");
 });
 
 test("enter_plan_mode lets your agent switch into plan mode itself", async () => {
