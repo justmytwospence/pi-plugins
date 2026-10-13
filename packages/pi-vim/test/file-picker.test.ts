@@ -1,17 +1,38 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { displayPath, FilePicker, mention, parseQuery } from "../src/file-picker.js";
+import { displayPath, FilePicker, matchSegment, mention, parseQuery } from "../src/file-picker.js";
 
 const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
 const tick = () => new Promise((r) => setImmediate(r));
 
 describe("file picker", () => {
+  const tree: Record<string, string[]> = {
+    "/": ["etc", "Users"],
+    "/h": ["Downloads", "Documents", "Projects", "prefs", ".config"],
+    "/h/Projects": ["pi-plugins", "pi-vim-old", "dotfiles"],
+    "/p": ["src"],
+  };
+  const subdirs = (dir: string) => tree[dir] ?? [];
+  const parse = (q: string, cwd = "/p") => parseQuery(q, cwd, "/h", subdirs);
+
   it("parses project and explicit-directory queries", () => {
-    assert.deepEqual(parseQuery("foo", "/p", "/h"), { root: "/p", prefix: "", term: "foo" });
-    assert.deepEqual(parseQuery("~/Down/inv", "/p", "/h"), { root: "/h/Down", prefix: "~/Down/", term: "inv" });
-    assert.deepEqual(parseQuery("/etc/ho", "/p", "/h"), { root: "/etc", prefix: "/etc/", term: "ho" });
-    assert.deepEqual(parseQuery("../x", "/p/q", "/h"), { root: "/p", prefix: "../", term: "x" });
-    assert.deepEqual(parseQuery("~", "/p", "/h"), { root: "/h", prefix: "~", term: "" });
+    assert.deepEqual(parse("foo"), { root: "/p", prefix: "", term: "foo" });
+    assert.deepEqual(parse("~/Downloads/inv"), { root: "/h/Downloads", prefix: "~/Downloads/", term: "inv" });
+    assert.deepEqual(parse("/etc/ho"), { root: "/etc", prefix: "/etc/", term: "ho" });
+    assert.deepEqual(parse("../x", "/p/q"), { root: "/p", prefix: "../", term: "x" });
+    assert.deepEqual(parse("./src/i"), { root: "/p/src", prefix: "./src/", term: "i" });
+    assert.deepEqual(parse("~"), { root: "/h", prefix: "~", term: "" });
+  });
+
+  it("matches directory segments by prefix, then fuzzily", () => {
+    assert.equal(matchSegment("dow", ["Documents", "Downloads"]), "Downloads");
+    assert.equal(matchSegment("pr", ["Projects", "prefs"]), "prefs");
+    assert.equal(matchSegment("dl", ["Documents", "Downloads"]), "Downloads");
+    assert.equal(matchSegment("cfg", [".config"]), undefined);
+    assert.equal(matchSegment(".cfg", [".config"]), ".config");
+    assert.deepEqual(parse("~/dl/inv"), { root: "/h/Downloads", prefix: "~/Downloads/", term: "inv" });
+    assert.deepEqual(parse("~/Proj/pipl/READ"), { root: "/h/Projects/pi-plugins", prefix: "~/Projects/pi-plugins/", term: "READ" });
+    assert.deepEqual(parse("~/zzz/x"), { root: undefined, prefix: "~/zzz/", term: "x" });
   });
 
   it("displays paths relative to the project, home or root", () => {
@@ -44,6 +65,19 @@ describe("file picker", () => {
     again.handleInput("\r");
     assert.equal(result, "@src/index.ts ");
     assert.ok(roots.some((r) => r.endsWith("/src")));
+  });
+
+  it("lists the fuzzily resolved directory and inserts its real path", async () => {
+    let result: string | undefined;
+    const roots: string[] = [];
+    const lister = async (root: string) => { roots.push(root); return ["invoice.pdf"]; };
+    const picker = new FilePicker("/p", theme, () => {}, (t) => { result = t; }, lister, subdirs);
+    for (const ch of "/Us/") picker.handleInput(ch);
+    await tick();
+    assert.ok(roots.includes("/Users"));
+    assert.match(picker.render(80).join("\n"), /> \/Users\/invoice\.pdf/);
+    picker.handleInput("\r");
+    assert.equal(result, "@/Users/invoice.pdf ");
   });
 
   it("cancels on escape", async () => {

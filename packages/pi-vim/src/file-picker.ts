@@ -5,10 +5,12 @@
  * The query is `[dir/]term`. Without a directory part the project (cwd) is
  * searched; a query starting with `/`, `~/`, `./` or `../` searches below the
  * directory up to its last slash, so `~/Downloads/inv` finds invoices there.
+ * Each directory segment is itself matched fuzzily when no directory has that
+ * exact name, so `~/dl/inv` also works (dl -> Downloads).
  * Tab on a directory descends into it.
  */
 import { spawn } from "node:child_process";
-import { readdirSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
@@ -29,14 +31,75 @@ const MAX_RESULTS = 20000;
 const OUTSIDE_DEPTH = 5;
 const VISIBLE = 12;
 
-/** Split a query into the directory to search and the fuzzy term. */
-export function parseQuery(query: string, cwd: string, home = homedir()): { root: string; prefix: string; term: string } {
+/** Subdirectory names of `dir` (empty when unreadable). */
+export type SubdirReader = (dir: string) => string[];
+
+export const readSubdirs: SubdirReader = (dir) => {
+  try {
+    return readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() || (e.isSymbolicLink() && isDir(join(dir, e.name))))
+      .map((e) => e.name);
+  } catch {
+    return [];
+  }
+};
+
+function isDir(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The directory a typed segment means: the exact name if it exists, else the
+ * shortest case-insensitive prefix match, else the best fuzzy match.
+ */
+export function matchSegment(segment: string, names: string[]): string | undefined {
+  if (names.includes(segment)) return segment;
+  const lower = segment.toLowerCase();
+  const prefixed = names.filter((n) => n.toLowerCase().startsWith(lower));
+  if (prefixed.length) return prefixed.sort((a, b) => a.length - b.length || a.localeCompare(b))[0];
+  // Hidden directories only when the segment asks for them.
+  const visible = segment.startsWith(".") ? names : names.filter((n) => !n.startsWith("."));
+  return fuzzyFilter(visible, segment, (n) => n)[0];
+}
+
+/**
+ * Split a query into the directory to search and the fuzzy term. `prefix` is
+ * the resolved directory as the user would write it (`~/dl/` -> `~/Downloads/`);
+ * `root` is undefined when a segment matches nothing.
+ */
+export function parseQuery(
+  query: string,
+  cwd: string,
+  home = homedir(),
+  subdirs: SubdirReader = readSubdirs,
+): { root: string | undefined; prefix: string; term: string } {
   const explicit = query.startsWith("/") || query === "~" || query.startsWith("~/") || query.startsWith("./") || query.startsWith("../");
   if (!explicit) return { root: cwd, prefix: "", term: query };
-  const cut = query === "~" ? query.length : query.lastIndexOf("/") + 1;
-  const prefix = query.slice(0, cut);
-  const expanded = prefix.startsWith("~") ? home + prefix.slice(1) : prefix;
-  return { root: resolve(cwd, expanded || "/"), prefix, term: query.slice(cut) };
+  if (query === "~") return { root: home, prefix: "~", term: "" };
+  const cut = query.lastIndexOf("/") + 1;
+  const term = query.slice(cut);
+  const segments = query.slice(0, cut - 1).split("/");
+  // The first segment anchors the walk: "" is the filesystem root.
+  const first = segments.shift() ?? "";
+  let root = first === "" ? "/" : first === "~" ? home : resolve(cwd, first);
+  let prefix = first + "/";
+  for (const segment of segments) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") {
+      root = resolve(root, "..");
+      prefix += "../";
+      continue;
+    }
+    const name = matchSegment(segment, subdirs(root));
+    if (name === undefined) return { root: undefined, prefix: query.slice(0, cut), term };
+    root = join(root, name);
+    prefix += name + "/";
+  }
+  return { root, prefix, term };
 }
 
 /** How a chosen absolute path is written: cwd-relative inside the project, `~/` under home, else absolute. */
@@ -92,9 +155,10 @@ export class FilePicker implements Component, Focusable {
   focused = true;
   private input = new Input({ prompt: "file: " });
   private cache = new Map<string, Promise<string[]> | string[]>();
-  private matches: string[] = [];
+  private matches: { label: string; abs: string }[] = [];
   private selected = 0;
   private loading = false;
+  private noDirectory = false;
 
   constructor(
     private readonly cwd: string,
@@ -102,16 +166,23 @@ export class FilePicker implements Component, Focusable {
     private readonly requestRender: () => void,
     private readonly done: (text: string | undefined) => void,
     private readonly lister: Lister = defaultLister,
+    private readonly subdirs: SubdirReader = readSubdirs,
   ) {
     this.refresh();
   }
 
   private refresh(): void {
     const query = this.input.getValue();
-    const { root, prefix, term } = parseQuery(query, this.cwd);
+    const { root, prefix, term } = parseQuery(query, this.cwd, homedir(), this.subdirs);
+    this.noDirectory = root === undefined;
+    if (root === undefined) {
+      this.loading = false;
+      this.matches = [];
+      return;
+    }
     const cached = this.cache.get(root);
     if (Array.isArray(cached)) {
-      this.apply(cached, prefix, term);
+      this.apply(cached, root, prefix, term);
       return;
     }
     this.loading = true;
@@ -121,22 +192,19 @@ export class FilePicker implements Component, Focusable {
       this.cache.set(root, entries);
       if (this.input.getValue() !== query) return;
       this.loading = false;
-      this.apply(entries, prefix, term);
+      this.apply(entries, root, prefix, term);
       this.requestRender();
     });
   }
 
-  private apply(entries: string[], prefix: string, term: string): void {
+  private apply(entries: string[], root: string, prefix: string, term: string): void {
     this.loading = false;
     const filtered = term ? fuzzyFilter(entries, term, (e) => e) : entries;
-    this.matches = filtered.slice(0, 500).map((e) => prefix + e);
+    this.matches = filtered.slice(0, 500).map((e) => ({
+      label: prefix + e,
+      abs: join(root, e) + (e.endsWith("/") ? sep : ""),
+    }));
     this.selected = 0;
-  }
-
-  private absolute(entry: string): string {
-    const { root, prefix } = parseQuery(entry, this.cwd);
-    const abs = join(root, entry.slice(prefix.length));
-    return entry.endsWith("/") ? abs + sep : abs;
   }
 
   handleInput(data: string): void {
@@ -147,13 +215,13 @@ export class FilePicker implements Component, Focusable {
       this.selected = Math.min(this.matches.length - 1, this.selected + 1);
     } else if (matchesKey(data, "enter")) {
       const entry = this.matches[this.selected];
-      if (entry) this.done(mention(displayPath(this.absolute(entry), this.cwd)));
+      if (entry) this.done(mention(displayPath(entry.abs, this.cwd)));
       return;
     } else if (matchesKey(data, "tab")) {
       const entry = this.matches[this.selected];
       if (!entry) return;
       // Descend into a directory (or complete a file), keeping the query explicit.
-      const shown = displayPath(this.absolute(entry), this.cwd);
+      const shown = displayPath(entry.abs, this.cwd);
       this.input.setValue(/^(\/|~|\.\.?\/)/.test(shown) ? shown : `./${shown}`);
       this.refresh();
     } else {
@@ -175,12 +243,12 @@ export class FilePicker implements Component, Focusable {
     const start = Math.max(0, Math.min(this.selected - Math.floor(VISIBLE / 2), this.matches.length - VISIBLE));
     for (const [i, entry] of this.matches.slice(start, start + VISIBLE).entries()) {
       const chosen = start + i === this.selected;
-      const text = truncateToWidth(`${chosen ? "> " : "  "}${entry}`, width);
-      lines.push(chosen ? t.fg("accent", text) : entry.endsWith("/") ? t.fg("muted", text) : text);
+      const text = truncateToWidth(`${chosen ? "> " : "  "}${entry.label}`, width);
+      lines.push(chosen ? t.fg("accent", text) : entry.label.endsWith("/") ? t.fg("muted", text) : text);
     }
     const status = this.loading
       ? "searching..."
-      : this.matches.length ? `${this.selected + 1}/${this.matches.length}` : "no matches";
+      : this.matches.length ? `${this.selected + 1}/${this.matches.length}` : this.noDirectory ? "no matching directory" : "no matches";
     lines.push(t.fg("dim", truncateToWidth(`${status}  enter insert  tab descend  ~/ / ../ search elsewhere  esc cancel`, width)));
     return lines;
   }
