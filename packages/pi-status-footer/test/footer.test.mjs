@@ -253,7 +253,7 @@ test("minimal Git suffix covers each dirty dimension, quiet tracking and unreada
 test("wide layout uses explicit labels without reintroducing secondary metrics", () => {
   const rows = mod.renderFooter(fixture(), 160, theme);
   assert.match(rows[0], /^ \uf07b dotfiles · \ue725 main \* ↑2$/);
-  assert.match(rows[1], /^ \uf2db opus-5\.5 · reasoning xhigh$/);
+  assert.match(rows[1], /^ \uee9c opus-5\.5 · reasoning xhigh$/);
   assert.match(rows[2], /Context\s+28% used [━─]{8}/);
   assert.doesNotMatch(rows[2], /cost/);
   assert.doesNotMatch(rows.slice(0, 3).join("\n"), /cache|OAuth|diff|compact|56k\/200k/);
@@ -271,7 +271,7 @@ test("footer uses natural spacing and a consistent inset without label columns",
   s.statuses = ["PLAN mode"];
   const rows = mod.renderFooter(s, 160, theme);
   assert.equal(rows[0], " \uf07b dotfiles · \ue725 main * ↑2");
-  assert.equal(rows[1], " \uf2db opus-5.5 · reasoning xhigh");
+  assert.equal(rows[1], " \uee9c opus-5.5 · reasoning xhigh");
   assert.equal(rows[2], " \uf0e4 Context 28% used");
   assert.equal(rows[3], " \uf0f3 PLAN mode");
   assert.equal(rows[4], " \uf252 Claude 5h 32% used");
@@ -290,9 +290,9 @@ test("footer lines share separators, concise labels and unparenthesized qualifie
   s.statuses = mod.absorbStatuses(new Map([["tool-gate", "gate: 0 auto · 0 pushed back · 0 asked"]]), { claudeRow: false }).rest;
   s.quotas = [{ source: "Codex acct", updated: now, windows: [{ label: "week", used: 39, reset: now + 86400_000 }] }];
   const rows = mod.renderFooter(s, 160, theme);
-  assert.equal(rows[1], " \uf2db opus-5.5 · reasoning xhigh · auto →");
+  assert.equal(rows[1], " \uee9c opus-5.5 · reasoning xhigh · auto →");
   assert.equal(rows[2], " \uf0e4 Context 28% used");
-  assert.equal(rows[3], " \uf0f3 Gate 0 auto · 0 pushed back · 0 asked");
+  assert.equal(rows[3], " \uf510 Gate 0 auto · 0 pushed back · 0 asked");
   assert.equal(rows[4], " \uf252 Codex week 39% used · resets in 1d0h");
   assert.deepEqual(mod.absorbStatuses(new Map([["tool-gate", "gate: off"]]), { claudeRow: false }).rest, ["Gate off"]);
   assert.deepEqual(mod.absorbStatuses(new Map([["tool-gate", "gate: new format"]]), { claudeRow: false }).rest, ["gate: new format"]);
@@ -413,7 +413,7 @@ test("companion extension statuses fold into their rows, and degrade when absent
   assert.deepEqual(mod.absorbStatuses(new Map([["cache-guard", "cache is weird"]]), { claudeRow: false }).rest, ["cache is weird"]);
   assert.match(rows.at(-1), /3 requests billed to extra usage/);
   assert.doesNotMatch(rows.join("\n"), /effort:|lean:|extra usage x3|cache-guard/);
-  assert.match(rows[3], /Plan A working.* Gate /);
+  assert.match(rows[3], /^ \uf0f3 Plan A working.* \uf510 Gate /);
   // The model never drops for a companion's segment, and every row fits.
   for (let width = 1; width <= 160; width++) assert.ok(mod.renderFooter(s, width, theme).every((row) => visibleWidth(row) <= width));
   assert.match(plain(mod.renderFooter(s, 50, theme).at(-1)), /extra x3/);
@@ -1538,7 +1538,7 @@ test("the MCP chip renders with the companion label style and warns on a shortfa
   const rows = (mcp, statuses = []) => mod.renderFooter({ ...fixture(), mcp, statuses }, 120, paint).map((row) => row.trim());
   assert.ok(rows({ connected: 2, total: 2 }).includes("<dim>\uf1e6</dim> <muted>MCP</muted> 2/2"));
   assert.ok(rows({ connected: 1, total: 3 }).includes("<dim>\uf1e6</dim> <muted>MCP</muted> <warning>1/3</warning>"));
-  assert.ok(rows({ connected: 1, total: 3 }, ["Gate off"]).includes("<dim>\uf1e6</dim> <muted>MCP</muted> <warning>1/3</warning><dim> \u00b7 </dim>Gate off"));
+  assert.ok(rows({ connected: 1, total: 3 }, ["Gate off"]).includes("<dim>\uf1e6</dim> <muted>MCP</muted> <warning>1/3</warning><dim> \u00b7 </dim><dim>\uf510</dim> Gate off"));
   assert.ok(!rows(undefined).some((row) => /MCP/.test(row)));
   for (const name of ["light", "dark"]) {
     for (let width = 1; width <= 240; width++) {

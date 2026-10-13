@@ -672,7 +672,8 @@ export const ICONS = {
   stash: "\uf187", // archive
   project: "\uf07b", // folder
   branch: "\ue725", // git branch
-  model: "\uf2db", // microchip
+  model: "\uee9c", // brain
+  gate: "\uf510", // shield with check (pi-tool-gate)
   context: "\uf0e4", // tachometer
   marimo: "\uf02d", // book
   bg: "\uf085", // cogs
@@ -755,16 +756,21 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   // plan mode, background failures, or other extension notices at the right edge.
   // Our own MCP chip sits first among them, in the same muted-label style as the
   // companion notices; a shortfall of connected servers takes the warning color.
-  // The row's icon is the MCP plug when the chip leads it, a bell otherwise;
-  // wrapped lines are indented under the first.
-  let statuses = s.mcp ? [mcpChip(s.mcp, theme), ...s.statuses] : s.statuses;
-  // Pi's own MCP status already carries the plug (see above): lift it to the icon.
-  const plugFirst = Boolean(s.mcp) || stripVTControlCharacters(statuses[0] ?? "").startsWith(ICONS.mcp);
-  if (!s.mcp && plugFirst) statuses = [statuses[0].replace(`${ICONS.mcp} `, ""), ...statuses.slice(1)];
-  if (statuses.length) {
-    const text = statuses.map((status) => status.replace(/[\r\n\t]/g, " ")).join(sep);
+  // Notices with an icon of their own (the MCP plug, the tool gate's shield)
+  // keep it inline; the first notice's icon becomes the row's, a bell otherwise.
+  // Wrapped lines are indented under the first.
+  const notices: { icon?: string; text: string }[] = s.mcp ? [{ icon: ICONS.mcp, text: mcpChip(s.mcp, theme) }] : [];
+  for (const status of s.statuses) {
+    const plainStatus = stripVTControlCharacters(status);
+    // Pi's own MCP status already carries the plug (see above).
+    if (plainStatus.startsWith(`${ICONS.mcp} `)) notices.push({ icon: ICONS.mcp, text: status.replace(`${ICONS.mcp} `, "") });
+    else if (/^Gate /.test(plainStatus)) notices.push({ icon: ICONS.gate, text: status });
+    else notices.push({ text: status });
+  }
+  if (notices.length) {
+    const text = notices.map((n, i) => `${i && n.icon ? `${theme.fg("dim", n.icon)} ` : ""}${n.text.replace(/[\r\n\t]/g, " ")}`).join(sep);
     const lines = wrapTextWithAnsi(text, Math.max(1, width - 2));
-    rows.push(...lines.map((line, i) => i ? `  ${line}` : `${theme.fg("dim", plugFirst ? ICONS.mcp : ICONS.notices)} ${line}`));
+    rows.push(...lines.map((line, i) => i ? `  ${line}` : `${theme.fg("dim", notices[0].icon ?? ICONS.notices)} ${line}`));
   }
 
   // Subscription limits go last: they are usually the longest rows.
