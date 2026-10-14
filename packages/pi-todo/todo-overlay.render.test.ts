@@ -1,12 +1,19 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import { createMockCtx, createMockPi, createMockUI } from "@juicesharp/rpiv-test-utils";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import { createMockCtx, createMockPi, createMockUI } from "./test/fixtures.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { __resetState, registerTodoTool, setActiveRenderSession, type TaskAction } from "./todo.js";
 import { TodoOverlay } from "./todo-overlay.js";
+import { t } from "./state/i18n-bridge.js";
 
-const CONFIG_PATH = join(process.env.HOME!, ".config", "rpiv-todo", "config.json");
+vi.mock("./state/i18n-bridge.js", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("./state/i18n-bridge.js")>();
+	return { ...actual, t: vi.fn((_key: string, fallback: string) => fallback) };
+});
+
+const CONFIG_PATH = join(process.env.HOME!, ".pi", "agent", "pi-todo.json");
 
 function writeConfigFile(contents: string): void {
 	mkdirSync(dirname(CONFIG_PATH), { recursive: true });
@@ -25,7 +32,7 @@ const identityTheme = {
 
 async function setup(
 	actions: Array<{ action: TaskAction; [k: string]: unknown }>,
-	uiOverrides: Partial<Omit<ExtensionUIContext, "theme">> = {},
+	uiOverrides: Partial<Omit<ExtensionUIContext, "theme">> & { theme?: typeof identityTheme } = {},
 ) {
 	__resetState();
 	setActiveRenderSession("test-session");
@@ -52,6 +59,7 @@ async function setup(
 beforeEach(() => {
 	__resetState();
 	removeConfigFile();
+	vi.mocked(t).mockImplementation((_key, fallback) => fallback);
 });
 afterEach(() => {
 	__resetState();
@@ -282,19 +290,14 @@ describe("TodoOverlay — overflow collapse", () => {
 });
 
 describe("TodoOverlay — collapse/expand render", () => {
-	it("collapsed view returns exactly three lines: heading with (completed/total), expand hint, trailing spacer", async () => {
+	it("collapsed view is one heading with counts and inline hint, plus trailing spacer", async () => {
 		const { widget, overlay } = await setup([
 			{ action: "create", subject: "a" },
 			{ action: "create", subject: "b" },
 			{ action: "update", id: 1, status: "completed" },
 		]);
-		overlay.toggleCollapse(); // collapse
-		const lines = widget.render(200);
-		expect(lines).toHaveLength(3); // heading + hint + trailing spacer
-		expect(lines[0]).toContain("Todos (1/2)");
-		expect(lines[1]).toContain("└─");
-		expect(lines[1]).toContain("ctrl+shift+t to expand");
-		expect(lines[2]).toBe(""); // trailing spacer
+		overlay.toggleCollapse();
+		expect(widget.render(200)).toEqual(["● Todos (1/2)  ctrl+shift+t to expand", ""]);
 	});
 
 	it("uncollapsed (default) yields the unchanged full render (regression-safe)", async () => {
@@ -328,52 +331,110 @@ describe("TodoOverlay — collapse/expand render", () => {
 });
 
 describe("TodoOverlay — collapse hint resolves the key from config", () => {
-	// resolveCollapseKey() runs at render time (per-render, like the row budget), so
-	// the config MUST be written before widget.render(). setup() itself doesn't read
-	// the collapse key — it constructs the overlay directly.
-
-	it("renders the configured key in the collapsed hint (alt+o)", async () => {
+	it("renders the configured key in the same heading (alt+o)", async () => {
 		writeConfigFile(JSON.stringify({ collapseKey: "alt+o" }));
 		const { widget, overlay } = await setup([{ action: "create", subject: "a" }]);
-		overlay.toggleCollapse(); // collapse
-		const lines = widget.render(200);
-		expect(lines[1]).toContain("alt+o to expand");
-		// The placeholder is always spliced — never leaks the raw {key} token.
-		expect(lines[1]).not.toContain("{key}");
-		expect(lines[1]).not.toContain("ctrl+shift+t");
+		overlay.toggleCollapse();
+		expect(widget.render(200)).toEqual(["● Todos (0/1)  alt+o to expand", ""]);
 	});
 
-	it("renders the default key in the collapsed hint when config is missing", async () => {
+	it("renders the default key when config is missing", async () => {
 		const { widget, overlay } = await setup([{ action: "create", subject: "a" }]);
-		overlay.toggleCollapse(); // collapse
-		const lines = widget.render(200);
-		expect(lines[1]).toContain("ctrl+shift+t to expand");
-		expect(lines[1]).not.toContain("{key}");
+		overlay.toggleCollapse();
+		expect(widget.render(200)).toEqual(["● Todos (0/1)  ctrl+shift+t to expand", ""]);
 	});
 
 	it("renders the default key when the configured spec is invalid", async () => {
 		writeConfigFile(JSON.stringify({ collapseKey: "ctr+t" }));
 		const { widget, overlay } = await setup([{ action: "create", subject: "a" }]);
-		overlay.toggleCollapse(); // collapse
-		const lines = widget.render(200);
-		expect(lines[1]).toContain("ctrl+shift+t to expand");
+		overlay.toggleCollapse();
+		expect(widget.render(200)[0]).toBe("● Todos (0/1)  ctrl+shift+t to expand");
 	});
 
-	it("renders a static collapsed label — not the sentinel — when the key resolves to off", async () => {
-		// Reachable mid-session: collapse with a bound key, then edit the config to
-		// "off" without /reload. The per-render resolver returns the sentinel; the
-		// hint must not splice it into the {key} placeholder ("off to expand").
+	it("renders a static inline label, not a fake off shortcut, after a live edit", async () => {
 		const { widget, overlay } = await setup([{ action: "create", subject: "a" }]);
-		overlay.toggleCollapse(); // collapse
+		overlay.toggleCollapse();
 		writeConfigFile(JSON.stringify({ collapseKey: "off" }));
-		const lines = widget.render(200);
-		expect(lines[1]).toContain("collapsed");
-		expect(lines[1]).not.toContain("off to expand");
-		expect(lines[1]).not.toContain("{key}");
+		expect(widget.render(200)).toEqual(["● Todos (0/1)  collapsed", ""]);
+	});
+
+	it("retains personal Ctrl+T from legacy config in the compact heading", async () => {
+		const legacyPath = join(process.env.HOME!, ".config", "rpiv-todo", "config.json");
+		mkdirSync(dirname(legacyPath), { recursive: true });
+		writeFileSync(legacyPath, JSON.stringify({ collapseKey: "ctrl+t" }));
+		const { widget, overlay } = await setup([{ action: "create", subject: "a" }]);
+		overlay.toggleCollapse();
+		expect(widget.render(200)).toEqual(["● Todos (0/1)  ctrl+t to expand", ""]);
+	});
+
+	it("localizes the heading and inline hint with the resolved key", async () => {
+		writeConfigFile(JSON.stringify({ collapseKey: "alt+o" }));
+		vi.mocked(t).mockImplementation((key, fallback) => ({ "overlay.heading": "任务", "overlay.expandHint": "按 {key} 展开" }[key] ?? fallback));
+		const { widget, overlay } = await setup([{ action: "create", subject: "a" }]);
+		overlay.toggleCollapse();
+		expect(widget.render(200)).toEqual(["● 任务 (0/1)  按 alt+o 展开", ""]);
+	});
+
+	it("localizes the off-key label without a hint row", async () => {
+		writeConfigFile(JSON.stringify({ collapseKey: "off" }));
+		vi.mocked(t).mockImplementation((key, fallback) => key === "overlay.collapsed" ? "replié" : fallback);
+		const { widget, overlay } = await setup([{ action: "create", subject: "a" }]);
+		overlay.toggleCollapse();
+		expect(widget.render(200)).toEqual(["● Todos (0/1)  replié", ""]);
 	});
 });
 
 describe("TodoOverlay — width truncation", () => {
+	it("preserves counts before the hint, including the one-column boundary after a full heading", async () => {
+		const { widget, overlay } = await setup([
+			{ action: "create", subject: "a" },
+			{ action: "create", subject: "b" },
+			{ action: "update", id: 1, status: "completed" },
+		]);
+		overlay.toggleCollapse();
+		for (const width of [5, 6, 7, 8, 10, 12, 13, 14, 15, 16, 20, 30]) {
+			const lines = widget.render(width);
+			expect(lines).toHaveLength(2);
+			expect(lines[1]).toBe("");
+			expect(lines[0]).toContain("(1/2)");
+			expect(visibleWidth(lines[0])).toBeLessThanOrEqual(width);
+		}
+		expect(widget.render(5)[0]).toBe("(1/2)");
+		expect(widget.render(14)[0]).toBe("● Todos (1/2)");
+	});
+
+	it("fits every narrow width with ANSI styling and a wide translated label", async () => {
+		vi.mocked(t).mockImplementation((key, fallback) => key === "overlay.heading" ? "待处理任务清单" : fallback);
+		const ansiTheme = { ...identityTheme, fg: (_color: string, text: string) => `\u001b[36m${text}\u001b[39m` };
+		writeConfigFile(JSON.stringify({ collapseKey: "ctrl+shift+alt+super+f12" }));
+		const { widget, overlay } = await setup([
+			{ action: "create", subject: "a" },
+			{ action: "create", subject: "b" },
+			{ action: "update", id: 1, status: "completed" },
+		], { theme: ansiTheme });
+		overlay.toggleCollapse();
+		for (let width = 0; width <= 60; width++) {
+			const lines = widget.render(width);
+			expect(lines).toHaveLength(2);
+			expect(lines[1]).toBe("");
+			expect(visibleWidth(lines[0])).toBeLessThanOrEqual(width);
+			if (width >= 5) expect(lines[0]).toContain("(1/2)");
+		}
+		expect(widget.render(60)[0]).toContain("\u001b[36m");
+		expect(widget.render(60)[0]).toContain("ctrl+shift+alt+super+f12 to expand");
+	});
+
+	it("preserves multi-digit counts at their exact minimum width", async () => {
+		const actions: Array<{ action: TaskAction; [k: string]: unknown }> = [];
+		for (let id = 1; id <= 12; id++) {
+			actions.push({ action: "create", subject: `task ${id}` });
+			if (id <= 10) actions.push({ action: "update", id, status: "completed" });
+		}
+		const { widget, overlay } = await setup(actions);
+		overlay.toggleCollapse();
+		expect(widget.render(7)).toEqual(["(10/12)", ""]);
+	});
+
 	it("renders without throwing at small widths", async () => {
 		const { widget } = await setup([
 			{ action: "create", subject: "a very long subject that would overflow a narrow column" },

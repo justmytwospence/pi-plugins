@@ -13,7 +13,7 @@
  */
 
 import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
-import { type TUI, truncateToWidth } from "@earendil-works/pi-tui";
+import { type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { COLLAPSE_KEY_OFF, getMaxWidgetLines, resolveCollapseKey } from "./config.js";
 import { formatStatusLabel, t } from "./state/i18n-bridge.js";
 import { selectHasActive, selectOverlayLayout, selectShowTaskIds, selectTodoCounts } from "./state/selectors.js";
@@ -148,25 +148,25 @@ export class TodoOverlay {
 
 		const headingColor = hasActive ? "accent" : "dim";
 		const headingIcon = hasActive ? "●" : "○";
-		const headingText = `${t("overlay.heading", OVERLAY_HEADING)} (${counts.completed}/${counts.total})`;
+		const label = t("overlay.heading", OVERLAY_HEADING);
+		const countText = `(${counts.completed}/${counts.total})`;
+		const headingText = `${label} ${countText}`;
 		const heading = truncate(`${theme.fg(headingColor, headingIcon)} ${theme.fg(headingColor, headingText)}`);
 
-		// Collapsed view: just the heading + a dim "└─" expand hint, then the
-		// trailing spacer. Short-circuit before the budget math and the completed-
-		// display tracking — nothing is shown to track, and skipping the tracking
-		// when nothing is rendered is correctness, not optimization. The hint splices
-		// the resolved key into the {key} placeholder (per-render, like the row
-		// budget); a config edit needs /reload to re-bind the actual shortcut. The
-		// "off" sentinel is reachable here mid-session (config edited after the
-		// shortcut was bound and the overlay collapsed) — render a static collapsed
-		// label instead of splicing the sentinel into the placeholder.
+		// One compact heading plus the trailing spacer; no separate hint row.
+		// Short-circuit before budget math and completed-display tracking so tasks
+		// not displayed while collapsed aren't queued to hide. Resolve the key live
+		// (rebinding still needs /reload). "off" can occur after collapsing and
+		// editing config, so show a static localized label rather than a fake key.
 		if (this.collapsed) {
 			const key = resolveCollapseKey();
 			const hint =
 				key === COLLAPSE_KEY_OFF
 					? t("overlay.collapsed", OVERLAY_COLLAPSED)
 					: t("overlay.expandHint", OVERLAY_EXPAND_HINT).replace("{key}", key);
-			return this.withTrailingSpacer([heading, truncate(`${theme.fg("dim", "└─")} ${theme.fg("dim", hint)}`)]);
+			return this.withTrailingSpacer([
+				this.renderCollapsedHeading(theme, width, headingColor, headingIcon, label, countText, hint),
+			]);
 		}
 
 		const lines: string[] = [heading];
@@ -208,6 +208,32 @@ export class TodoOverlay {
 			overflowParts.length > 0 ? `+${totalHidden} ${more} (${overflowParts.join(", ")})` : `+${totalHidden} ${more}`;
 		lines.push(truncate(`${theme.fg("dim", "└─")} ${theme.fg("dim", summary)}`));
 		return this.withTrailingSpacer(lines);
+	}
+
+	/** Reserve counts before spending columns on the translated label or hint.
+	 * ANSI-aware width/truncation matters for themes and wide-character locales.
+	 * At extremely narrow widths drop label/icon before truncating the counts. */
+	private renderCollapsedHeading(
+		theme: Theme,
+		width: number,
+		color: "accent" | "dim",
+		icon: string,
+		label: string,
+		counts: string,
+		hint: string,
+	): string {
+		const countWidth = visibleWidth(counts);
+		const prefix = `${theme.fg(color, icon)} `;
+		const prefixWidth = visibleWidth(prefix);
+		if (width < prefixWidth + countWidth) {
+			return truncateToWidth(theme.fg(color, counts), Math.max(0, width), "…");
+		}
+		const labelBudget = width - prefixWidth - countWidth - 1;
+		if (labelBudget < 1) return `${prefix}${theme.fg(color, counts)}`;
+		const heading = `${prefix}${theme.fg(color, truncateToWidth(label, labelBudget, "…"))} ${theme.fg(color, counts)}`;
+		const hintBudget = width - visibleWidth(heading) - 2;
+		if (hintBudget < 1) return heading;
+		return `${heading}  ${truncateToWidth(theme.fg("dim", hint), hintBudget, "…")}`;
 	}
 
 	/**

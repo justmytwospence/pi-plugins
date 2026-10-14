@@ -1,122 +1,57 @@
-# @juicesharp/rpiv-todo
+# pi-todo
 
-[![npm version](https://img.shields.io/npm/v/@juicesharp/rpiv-todo.svg)](https://www.npmjs.com/package/@juicesharp/rpiv-todo)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
-<div align="center">
-  <a href="https://github.com/juicesharp/rpiv-mono/tree/main/packages/rpiv-todo">
-    <img src="https://raw.githubusercontent.com/juicesharp/rpiv-mono/main/packages/rpiv-todo/docs/cover.png" alt="rpiv-todo — a persistent todo overlay for Pi Agent, showing a task panel with completed, in-progress, and pending rows" width="50%">
-  </a>
-</div>
-
-Give the model a task list you can see. `rpiv-todo` adds a `todo` tool, a
-`/todos` command, and a live panel above the editor to
-[Pi Agent](https://github.com/badlogic/pi-mono), so you always know what the
-agent is doing now, what it finished, and what is queued. The list is rebuilt
-from the conversation itself, so it survives `/reload` and compaction — useful
-on long research → design → implement sessions.
+`@justmytwospence/pi-todo` adds the `todo` tool, `/todos`, and a live task widget above Pi's editor. Tasks replay from session history across `/reload` and compaction; each session keeps its own state. No task-state files are written.
 
 ## Install
 
+Enable **pi-todo** from the [Pi Plugins suite](https://github.com/justmytwospence/pi-plugins) with `pi config`, or load this component independently:
+
 ```sh
-pi install npm:@juicesharp/rpiv-todo
+pi -e ./packages/pi-todo/index.ts
 ```
 
-Restart your Pi session.
+For a persistent local install, use `pi install /absolute/path/to/packages/pi-todo`. Do not enable the upstream and suite copies together.
 
-## Quick start
+## Widget
 
-Run `/todos` after the restart to confirm the extension is loaded. On a fresh
-session it prints:
+`ctrl+shift+t` collapses or expands the widget. The collapsed view is one heading plus a blank spacer, for example:
 
+```text
+● Todos (1/3)  ctrl+shift+t to expand
 ```
-No todos yet. Ask the agent to add some!
-```
 
-Then ask for something with several steps — "add a repository layer with tests,
-and track it as todos". The model calls `todo` and the panel appears above your
-input box, updating as work moves:
+Expanded tasks retain the configurable row budget, status glyphs, dependencies, and overflow summary. Completed tasks hide on the next agent turn. `/todos` prints the full list grouped by status. The tool also works without an interactive UI.
 
-![Todo overlay panel: a Todos (2/7) heading above two struck-through completed rows, one in-progress row with its activity label, and four pending rows](https://raw.githubusercontent.com/juicesharp/rpiv-mono/main/packages/rpiv-todo/docs/overlay.jpg)
+## Config
 
-Press `ctrl+shift+t` to collapse the panel to its heading plus a one-line hint,
-and again to expand it. Run `/todos` at any time to print the full list grouped
-by status.
-
-## What you get
-
-- **The plan stays on screen.** A panel above the editor shows every task with a
-  status glyph, the label of whatever is in progress, and a `Todos (done/total)`
-  heading — you never have to ask the agent where it is.
-- **Tasks survive `/reload` and compaction.** Each tool call carries the full
-  post-mutation snapshot, and the list is replayed from the session branch. No
-  disk writes, nothing to lose.
-- **Finished work gets out of the way.** Completed rows stay visible for the rest
-  of the turn, then drop at the start of the next one; the panel disappears
-  entirely when the list empties.
-- **The overlay never eats your terminal.** Past the row budget it drops
-  completed tasks first, truncates unfinished ones last, and tells you what it
-  hid with `+3 more (2 completed, 1 pending)`.
-- **The agent can sequence work, not just list it.** `blockedBy` dependencies are
-  validated before anything is written — dangling ids, deleted dependencies,
-  self-blocks, and cycles are all rejected.
-- **Parallel sessions stay separate.** Task state is keyed by session, so a
-  detached or child session can neither read nor overwrite the foreground list.
-- **Localized UI, no setup required.** Nine locales ship with the package and
-  activate when [`@juicesharp/rpiv-i18n`](https://www.npmjs.com/package/@juicesharp/rpiv-i18n)
-  is installed; without it, everything falls back to English.
-
-## Configuration
-
-Optional. Create `~/.config/rpiv-todo/config.json` (or
-`$XDG_CONFIG_HOME/rpiv-todo/config.json` if you set that variable):
+User settings: `~/.pi/agent/pi-todo.json` (or `$PI_CODING_AGENT_DIR/pi-todo.json`). Project overrides: `.pi/pi-todo.json` under the working directory.
 
 ```json
 {
   "maxWidgetLines": 8,
-  "collapseKey": "alt+t"
+  "collapseKey": "alt+o",
+  "guidance": {
+    "promptSnippet": "Track multi-step work",
+    "promptGuidelines": ["Update tasks as work progresses."]
+  }
 }
 ```
 
-| Setting | What it does | Default |
-| --- | --- | --- |
-| `maxWidgetLines` | Content rows the overlay may use, heading included. Minimum `3`. Applies on the next repaint. Pi's tool-output expansion mode shows all tasks. | `12` |
-| `collapseKey` | Key that collapses and expands the panel, in Pi keybinding form (`alt+o`, `ctrl+shift+t`). Set `"off"` to register no shortcut. Needs `/reload` to rebind. | `"ctrl+shift+t"` |
-| `guidance` | Replaces the built-in instructions the extension gives the model about when and how to use the todo list. Needs `/reload`. | _(built-ins)_ |
+- `maxWidgetLines`: content rows including the heading; default `12`, minimum `3`. Updates on repaint. Pi's expanded-tool mode shows all tasks.
+- `collapseKey`: Pi key spec; default `"ctrl+shift+t"`. `"off"` disables the shortcut. Reload to rebind. The hint reads the resolved key on repaint.
+- `guidance`: valid nonempty `promptSnippet` and nonempty arrays of nonempty `promptGuidelines` replace the built-ins individually. Reload to apply. Project guidance merges by field; arrays replace rather than append.
 
-A missing or malformed file falls back to these defaults. `rpiv-todo` only reads
-this file — it never writes one. Full semantics:
-[Configuration](https://github.com/juicesharp/rpiv-mono/blob/main/packages/rpiv-todo/docs/configuration.md).
+When native user config is absent, the old `$XDG_CONFIG_HOME/rpiv-todo/config.json` or `~/.config/rpiv-todo/config.json` is still read. A present XDG file wins over the old home path; a present native file wins over both, even if invalid. Existing `"collapseKey": "ctrl+t"` remains honored. No config files are rewritten. Missing, malformed, and non-object JSON fail soft; project values overlay user values.
 
-## Reference
+Localization is optional: `@juicesharp/rpiv-i18n` activates the bundled locales; without it the UI uses English. No sibling extension is required.
 
-- [`todo` tool reference](https://github.com/juicesharp/rpiv-mono/blob/main/packages/rpiv-todo/docs/tool-schema.md)
-  — every `todo` parameter, the status machine, the response envelope, and the
-  exact error strings.
-- [Configuration](https://github.com/juicesharp/rpiv-mono/blob/main/packages/rpiv-todo/docs/configuration.md)
-  — config file resolution, option validation rules, and the accepted keybinding
-  grammar.
-- [Overlay and `/todos`](https://github.com/juicesharp/rpiv-mono/blob/main/packages/rpiv-todo/docs/overlay.md)
-  — overlay lifecycle, glyphs, overflow behavior, `/todos` output, and
-  localization.
+## Development and attribution
 
-## Requirements
+```sh
+npm ci
+npm run check
+```
 
-- A Pi Agent host. No API key, no model selection, no native dependencies.
-- An interactive session for the panel and `/todos`. Headless runs still get the
-  `todo` tool; nothing is rendered.
-- [`@juicesharp/rpiv-i18n`](https://www.npmjs.com/package/@juicesharp/rpiv-i18n)
-  is an optional peer — install it for a localized UI, skip it for English.
+Checks include typechecking and all component tests, with isolated temporary home/project directories.
 
-## Related
-
-- [`@juicesharp/rpiv-i18n`](https://www.npmjs.com/package/@juicesharp/rpiv-i18n)
-  ([source](https://github.com/juicesharp/rpiv-mono/tree/main/packages/rpiv-i18n))
-  — localizes this extension's UI chrome and adds a `/languages` picker.
-- [`@juicesharp/rpiv-pi`](https://www.npmjs.com/package/@juicesharp/rpiv-pi)
-  ([source](https://github.com/juicesharp/rpiv-mono/tree/main/packages/rpiv-pi))
-  — the umbrella package that installs this extension alongside its siblings.
-
-## License
-
-MIT — see [LICENSE](https://github.com/juicesharp/rpiv-mono/blob/main/packages/rpiv-todo/LICENSE).
+Adapted from [juicesharp/rpiv-mono](https://github.com/juicesharp/rpiv-mono/tree/7c9bc924c5bfd148f36d7ebc9f7bd0a9469d633f/packages/rpiv-todo), `@juicesharp/rpiv-todo` 2.12.0, imported with package history preserved by git subtree split. The upstream tool, widget, replay, and localization identities remain compatible. Config helpers and test fixtures are adapted from the same repository. See [UPSTREAM.json](UPSTREAM.json) and the unchanged upstream [MIT license](LICENSE).

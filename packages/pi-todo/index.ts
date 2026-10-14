@@ -1,5 +1,5 @@
 /**
- * rpiv-todo — Pi extension. Registers the `todo` tool, `/todos` slash
+ * pi-todo — Pi extension. Registers the `todo` tool, `/todos` slash
  * command, and the persistent TodoOverlay widget.
  *
  * TUI chrome strings localize at render time via the i18n bridge. Strings are
@@ -102,7 +102,7 @@ export function makeTodoOverlayLoader(
 // pi-tui modules are not pulled into our load graph just to register strings.
 try {
 	const sdk = (await import("@juicesharp/rpiv-i18n/loader")) as I18nLoader;
-	sdk.registerLocalesFromDir(I18N_NAMESPACE, import.meta.url, { label: "rpiv-todo" });
+	sdk.registerLocalesFromDir(I18N_NAMESPACE, import.meta.url, { label: "pi-todo" });
 } catch {
 	// SDK absent — extension still loads with English-only UI.
 }
@@ -272,7 +272,7 @@ export default function (pi: ExtensionAPI, importOverlay: TodoOverlayImporter = 
 			// stale-namespace error still propagates: it never self-heals, and the
 			// user needs its restart guidance.
 			if (isStaleOverlayModuleError(e)) throw e;
-			console.warn(`[rpiv-todo] overlay refresh failed (will retry on next update): ${formatError(e)}`);
+			console.warn(`[pi-todo] overlay refresh failed (will retry on next update): ${formatError(e)}`);
 		}
 	});
 

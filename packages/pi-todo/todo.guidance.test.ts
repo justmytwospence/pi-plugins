@@ -1,20 +1,16 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { createMockPi } from "@juicesharp/rpiv-test-utils";
-import { beforeEach, describe, expect, it } from "vitest";
+import { createMockPi } from "./test/fixtures.js";
+import { describe, expect, it } from "vitest";
 import { DEFAULT_PROMPT_GUIDELINES, DEFAULT_PROMPT_SNIPPET, registerTodoTool, TOOL_NAME } from "./todo.js";
 
-const CONFIG_PATH = join(process.env.HOME!, ".config", "rpiv-todo", "config.json");
+const CONFIG_PATH = join(process.env.HOME!, ".pi", "agent", "pi-todo.json");
 const DEFAULT_GUIDELINES_LENGTH = DEFAULT_PROMPT_GUIDELINES.length;
 
 function writeConfig(data: Record<string, unknown>): void {
 	mkdirSync(dirname(CONFIG_PATH), { recursive: true });
 	writeFileSync(CONFIG_PATH, JSON.stringify(data, null, 2), "utf-8");
 }
-
-beforeEach(() => {
-	// test/setup.ts rmSyncs CONFIG_PATH in shared beforeEach
-});
 
 describe("registerTodoTool — guidance overrides", () => {
 	it("uses built-in defaults when no config file exists", () => {
@@ -31,6 +27,27 @@ describe("registerTodoTool — guidance overrides", () => {
 		registerTodoTool(pi);
 		const tool = captured.tools.get(TOOL_NAME)!;
 		expect(tool.promptSnippet).toBe(DEFAULT_PROMPT_SNIPPET);
+	});
+
+	it("preserves legacy guidance when native config is absent", () => {
+		const legacyPath = join(process.env.HOME!, ".config", "rpiv-todo", "config.json");
+		mkdirSync(dirname(legacyPath), { recursive: true });
+		writeFileSync(legacyPath, JSON.stringify({ guidance: { promptSnippet: "Legacy", promptGuidelines: ["Legacy rule"] } }));
+		const { pi, captured } = createMockPi();
+		registerTodoTool(pi);
+		expect(captured.tools.get(TOOL_NAME)!.promptSnippet).toBe("Legacy");
+		expect(captured.tools.get(TOOL_NAME)!.promptGuidelines).toEqual(["Legacy rule"]);
+	});
+
+	it("merges project guidance by field while replacing guideline arrays", () => {
+		writeConfig({ guidance: { promptSnippet: "User", promptGuidelines: ["Old"] } });
+		const projectPath = join(process.cwd(), ".pi", "pi-todo.json");
+		mkdirSync(dirname(projectPath), { recursive: true });
+		writeFileSync(projectPath, JSON.stringify({ guidance: { promptGuidelines: ["Project"] } }));
+		const { pi, captured } = createMockPi();
+		registerTodoTool(pi);
+		expect(captured.tools.get(TOOL_NAME)!.promptSnippet).toBe("User");
+		expect(captured.tools.get(TOOL_NAME)!.promptGuidelines).toEqual(["Project"]);
 	});
 
 	it("overrides promptSnippet with valid value", () => {

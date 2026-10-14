@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/juicesharp/rpiv-mono",
+  "originalDirectory": "packages/rpiv-todo",
+  "commit": "7c9bc924c5bfd148f36d7ebc9f7bd0a9469d633f",
+  "version": "2.12.0",
+  "originalPackage": "@juicesharp/rpiv-todo",
+  "license": "MIT",
+  "note": "Imported via git subtree split preserving package history. Config-reading and guidance-validation helpers are adapted from packages/rpiv-config at the same commit; test fixtures are adapted from packages/test-utils. The upstream MIT license and copyright are preserved."
+}

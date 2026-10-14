@@ -1,5 +1,5 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { makeTheme } from "@juicesharp/rpiv-test-utils";
+import { makeTheme } from "../test/fixtures.js";
 import { describe, expect, it } from "vitest";
 import type { Task } from "../tool/types.js";
 import { formatOverlayTaskLine } from "./format.js";

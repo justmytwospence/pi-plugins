@@ -1,11 +1,11 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { createMockCtx, createMockPi } from "@juicesharp/rpiv-test-utils";
+import { createMockCtx, createMockPi } from "./test/fixtures.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import registerTodo from "./index.js";
 import { __resetState } from "./todo.js";
 
-const CONFIG_PATH = join(process.env.HOME!, ".config", "rpiv-todo", "config.json");
+const CONFIG_PATH = join(process.env.HOME!, ".pi", "agent", "pi-todo.json");
 
 function writeConfigFile(contents: string): void {
 	mkdirSync(dirname(CONFIG_PATH), { recursive: true });
@@ -127,7 +127,7 @@ describe("rpiv-todo — collapse/expand shortcut registration", () => {
 		// Toggle → collapses; forced redraw on the height step.
 		await captured.shortcuts.get("ctrl+shift+t")?.handler?.(ctx as never);
 		expect(requestRender).toHaveBeenCalledWith(true);
-		expect(widget.render(200).some((l) => l.includes("ctrl+shift+t to expand"))).toBe(true);
+		expect(widget.render(200)).toEqual(["● Todos (0/1)  ctrl+shift+t to expand", ""]);
 
 		// Toggle again → re-expands; hint gone.
 		await captured.shortcuts.get("ctrl+shift+t")?.handler?.(ctx as never);
@@ -143,6 +143,15 @@ describe("rpiv-todo — collapse/expand shortcut config resolution", () => {
 		writeConfigFile(JSON.stringify({ collapseKey: "alt+o" }));
 		const { captured } = setup();
 		expect(captured.shortcuts.has("alt+o")).toBe(true);
+		expect(captured.shortcuts.has("ctrl+shift+t")).toBe(false);
+	});
+
+	it("preserves Ctrl+T shortcut registration from the old rpiv-todo config", () => {
+		const legacyPath = join(process.env.HOME!, ".config", "rpiv-todo", "config.json");
+		mkdirSync(dirname(legacyPath), { recursive: true });
+		writeFileSync(legacyPath, JSON.stringify({ collapseKey: "ctrl+t" }));
+		const { captured } = setup();
+		expect(captured.shortcuts.has("ctrl+t")).toBe(true);
 		expect(captured.shortcuts.has("ctrl+shift+t")).toBe(false);
 	});
 

@@ -1,5 +1,7 @@
-import type { GuidanceFields } from "@juicesharp/rpiv-config";
-import { loadJsonConfigWithLegacyFallback, validateGuidanceFields } from "@juicesharp/rpiv-config";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { expandTilde, type GuidanceFields, loadJsonConfig, loadLegacyConfig, validateGuidanceFields } from "./config-helpers.js";
 
 interface TodoConfig {
 	guidance?: GuidanceFields;
@@ -26,8 +28,25 @@ export const DEFAULT_COLLAPSE_KEY: CollapseKeySpec = "ctrl+shift+t";
 /** Sentinel value for `collapseKey` that disables the collapse shortcut entirely. */
 export const COLLAPSE_KEY_OFF: CollapseKeySpec = "off";
 
-export function loadConfig(): TodoConfig {
-	return loadJsonConfigWithLegacyFallback<TodoConfig>("rpiv-todo");
+/** Native user config replaces legacy config when present, even if invalid.
+ * Project config overlays the user config; guidance fields merge individually,
+ * while arrays and other values replace. No files are written or migrated. */
+export function loadConfig(cwd = process.cwd()): TodoConfig {
+	const agentDir = process.env.PI_CODING_AGENT_DIR
+		? expandTilde(process.env.PI_CODING_AGENT_DIR)
+		: join(homedir(), ".pi", "agent");
+	const userPath = join(agentDir, "pi-todo.json");
+	const user = existsSync(userPath) ? loadJsonConfig<TodoConfig>(userPath) : loadLegacyConfig<TodoConfig>();
+	const project = loadJsonConfig<TodoConfig>(join(cwd, ".pi", "pi-todo.json"));
+	const merged = { ...user, ...project };
+	if (isObject(user.guidance) && isObject(project.guidance)) {
+		merged.guidance = { ...user.guidance, ...project.guidance };
+	}
+	return merged;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 /** Content-row budget for the overlay, read fresh on every call (per-render —

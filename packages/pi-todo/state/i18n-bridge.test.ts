@@ -1,23 +1,23 @@
-import { applyLocale, registerStrings } from "@juicesharp/rpiv-i18n";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { formatStatusLabel, I18N_NAMESPACE, t } from "./i18n-bridge.js";
 
-describe("i18n-bridge", () => {
+// Model the optional SDK's scope contract without installing any sibling.
+const sdk = vi.hoisted(() => ({
+	locale: "en",
+	strings: {} as Record<string, Record<string, string>>,
+	scope: vi.fn(),
+}));
+vi.mock("@juicesharp/rpiv-i18n", () => ({
+	scope: sdk.scope.mockImplementation((_namespace: string) => (key: string, fallback: string) => sdk.strings[sdk.locale]?.[key] ?? fallback),
+}));
+
+describe("i18n-bridge — optional SDK contract", () => {
 	beforeEach(() => {
-		// `i18n.__resetState()` is invoked by the global test/setup.ts hook;
-		// re-register the namespace fresh per test to exercise registration.
-		registerStrings(I18N_NAMESPACE, {
-			en: {
-				"status.pending": "pending",
-				"status.in_progress": "in progress",
-				"status.completed": "completed",
-				"status.deleted": "deleted",
-			},
-			de: {
-				"status.in_progress": "in Bearbeitung",
-				"status.completed": "erledigt",
-			},
-		});
+		sdk.locale = "en";
+		sdk.strings = {
+			en: { "status.pending": "pending", "status.in_progress": "in progress", "status.completed": "completed", "status.deleted": "deleted" },
+			de: { "status.in_progress": "in Bearbeitung", "status.completed": "erledigt" },
+		};
 	});
 
 	it("returns English when no locale is active", () => {
@@ -25,22 +25,22 @@ describe("i18n-bridge", () => {
 		expect(formatStatusLabel("completed")).toBe("completed");
 	});
 
-	it("returns localized value when locale is set", () => {
-		applyLocale("de");
+	it("uses live localized values without reimporting", () => {
+		sdk.locale = "de";
 		expect(formatStatusLabel("in_progress")).toBe("in Bearbeitung");
 		expect(formatStatusLabel("completed")).toBe("erledigt");
 	});
 
-	it("falls back to English literal when key missing in active locale", () => {
-		applyLocale("de"); // de doesn't define status.pending in this test
+	it("falls back to English when the active locale omits a key", () => {
+		sdk.locale = "de";
 		expect(formatStatusLabel("pending")).toBe("pending");
 	});
 
-	it("`t` falls back to the inline English literal for unknown keys", () => {
+	it("falls back to the inline literal for unknown keys", () => {
 		expect(t("nonexistent.key", "fallback literal")).toBe("fallback literal");
 	});
 
-	it("namespace constant is the canonical package name", () => {
+	it("preserves the upstream localization namespace", () => {
 		expect(I18N_NAMESPACE).toBe("@juicesharp/rpiv-todo");
 	});
 });
