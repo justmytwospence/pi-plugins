@@ -773,13 +773,13 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   const ctxValue = context === null ? theme.fg("muted", "unknown") : theme.bold(theme.fg(context < 70 ? "muted" : heat(context), percent(context)));
   const cache = s.cache ? clean(s.cache) : "";
   const cacheNote = cache === "cold (model)" ? "model changed" : cache === "cold?" ? "unconfirmed" : "";
-  const cacheValue = cacheNote ? "cold" : cache;
+  const cacheValue = cache.startsWith("cold") ? "❄" : cache;
   const ctxShort = `${theme.fg("muted", "Context")} ${ctxValue}`;
   const ctxLong = `${label("Context")}${ctxValue}${context === null ? "" : theme.fg("dim", " used")}${context === null || s.borderGauge ? "" : ` ${gauge(theme, context)}`}`;
   rows.push(row(ICONS.context, (w) => fitSegments([
     { text: ctxLong, short: ctxShort, priority: 100 },
     { text: s.lean ? theme.fg("muted", `Lean ${clean(s.lean)}`) : "", priority: 20 },
-    // Green denotes a warm cache; cold means the next prompt re-caches the whole history.
+    // Green denotes a warm cache; ❄ (cold) means the next prompt re-caches the whole history.
     { text: cache ? `${theme.fg("muted", "Cache")} ${theme.fg(cache.startsWith("cold") ? "warning" : "success", cacheValue)}${cacheNote ? `${sep}${theme.fg("dim", cacheNote)}` : ""}` : "", priority: 30 },
   ], w, theme)));
   if (s.marimo) { const m = s.marimo; rows.push(row(ICONS.marimo, (w) => marimoRow(m, w, theme))); }

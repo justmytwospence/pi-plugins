@@ -306,7 +306,7 @@ test("dashboard hierarchy accents sections and quiets countdowns, not alerts", (
   s.cache = "cold";
   mod.renderFooter(s, 160, paint);
   for (const pair of [["muted", "Context"], ["muted", "Claude"], ["muted", "main"], ["muted", "5h"],
-    ["dim", " used"], ["dim", "resets in 2h14m"], ["error", "95%"], ["warning", "cold"]]) {
+    ["dim", " used"], ["dim", "resets in 2h14m"], ["error", "95%"], ["warning", "❄"]]) {
     assert.ok(calls.some(([color, value]) => color === pair[0] && value === pair[1]), pair.join(": "));
   }
 });
@@ -468,11 +468,11 @@ test("optional companions share label style and preserve meaningful qualifiers",
   assert.deepEqual(absorbed.rest, ["Plan A working · B cut off · resume in /plan · /plan", "Gate off"]);
   const s = { ...fixture(), borderGauge: true, ...absorbed, statuses: absorbed.rest, cache: "cold (model)" };
   const rows = mod.renderFooter(s, 200, theme);
-  assert.equal(rows[2], " \uf0e4 Context 28% used · Cache cold · model changed");
+  assert.equal(rows[2], " \uf0e4 Context 28% used · Cache ❄ · model changed");
   assert.equal(rows[3], " \uf02d Marimo fit.py · disconnected");
   assert.equal(rows[4], " \uf085 Background vite starting kept · lint ✗ · fmt ■");
   assert.match(rows[5], /^ \uf0f3 Plan /);
-  assert.match(mod.renderFooter({ ...s, cache: "cold?" }, 200, theme)[2], /Cache cold · unconfirmed/);
+  assert.match(mod.renderFooter({ ...s, cache: "cold?" }, 200, theme)[2], /Cache ❄ · unconfirmed/);
   assert.deepEqual(mod.absorbStatuses(new Map([["plan", "plan: new format"]]), { claudeRow: false }).rest, ["plan: new format"]);
   assert.deepEqual(mod.absorbStatuses(new Map([["third-party", "widget: Mixed CASE (keep me)"]]), { claudeRow: false }).rest, ["widget: Mixed CASE (keep me)"]);
 });

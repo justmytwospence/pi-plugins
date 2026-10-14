@@ -208,14 +208,14 @@ describe("herdr", () => {
     vi.advanceTimersByTime(60_000);
     expect(sent.length).toBe(1); // still warm: nothing new
     vi.advanceTimersByTime(200_000);
-    expect(sent.at(-1)).toEqual({ key: "cache", value: "cold 601k" });
+    expect(sent.at(-1)).toEqual({ key: "cache", value: "❄ 601k" });
     entries.push(assistant(Date.now(), 610_000));
     vi.advanceTimersByTime(1_000);
     expect(sent.at(-1).value).toBeUndefined();
     vi.advanceTimersByTime(400_000);
-    expect(sent.at(-1).value).toBe("cold 611k");
+    expect(sent.at(-1).value).toBe("❄ 611k");
     r.resend();
-    expect(sent.at(-1).value).toBe("cold 611k");
+    expect(sent.at(-1).value).toBe("❄ 611k");
     await h.emit("session_shutdown", {});
     expect(sent.at(-1).value).toBeUndefined();
   });
@@ -230,7 +230,7 @@ describe("herdr", () => {
 
   test("without an event bus nothing is sent", () => {
     const r = new HerdrReporter(undefined);
-    r.report("cold 1M");
+    r.report("❄ 1M");
     r.resend();
     return expect(r.clear()).resolves.toBe(true);
   });
