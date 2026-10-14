@@ -43,14 +43,16 @@ function job(): Task {
   };
 }
 
-function session() {
+const STALE = "This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession().";
+
+function session(staleMessage = "Extension context has been invalidated") {
   const c = fakeCtx("/tmp");
   let invalid = false;
   const reads = vi.fn();
   const ctx = new Proxy(c.ctx, {
     get(target, key, receiver) {
       reads(key);
-      if (invalid) throw new Error("Extension context has been invalidated");
+      if (invalid) throw new Error(staleMessage);
       return Reflect.get(target, key, receiver);
     },
   });
@@ -84,6 +86,29 @@ afterEach(async () => {
 });
 
 describe("session cleanup", () => {
+  it("a ctx pi invalidated without a session_shutdown detaches on the next tick instead of crashing", async () => {
+    reg.tasks.set("job", job());
+    const s = session(STALE);
+    await event("session_start", "startup", s.ctx);
+    expect(vi.getTimerCount()).toBe(2);
+    s.invalidate();
+    expect(() => vi.advanceTimersByTime(1_000)).not.toThrow();
+    // Detached: the timer and the registry subscription are gone, and holds were released.
+    expect(vi.getTimerCount()).toBe(0);
+    expect(reg.off).toHaveBeenCalledOnce();
+    expect(f.emitted.some((e) => e.channel === "herdr:background" && e.data.active === false)).toBe(true);
+    // A later task event is inert too.
+    for (const fn of reg.listeners) fn({ type: "end", task: reg.tasks.get("job")! });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("an unexpected error from a deferred callback still surfaces", async () => {
+    const s = session("boom");
+    await event("session_start", "startup", s.ctx);
+    s.invalidate();
+    expect(() => vi.advanceTimersByTime(1_000)).toThrow(/boom/u);
+  });
+
   it("retires repeated starts before disposing an invalidated UI; saved callbacks stay inert", async () => {
     reg.tasks.set("job", job());
     const intervals = vi.spyOn(globalThis, "setInterval");

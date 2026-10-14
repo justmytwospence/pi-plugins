@@ -61,6 +61,9 @@ import { LogViewer } from "./viewer.ts";
 import { MARIMO_READY, marimoName, marimoServer } from "./marimo.ts";
 
 const STARTUP_WAIT_MS = 1_500;
+
+/** Pi's error for a ctx used after the session it belonged to was replaced or reloaded. */
+const isStaleCtx = (error: unknown) => error instanceof Error && /\bstale\b/iu.test(error.message);
 const WAIT_DEFAULT_S = 1_800;
 const WAIT_MAX_S = 3_600;
 const LOGS_DEFAULT = 60;
@@ -365,6 +368,20 @@ export default function piBg(pi: ExtensionAPI) {
       willWake: t.origin === "agent" && t.status === "running" && !t.delivered,
       logPath: t.logPath,
     }));
+
+  /**
+   * Runs a callback that fires outside a pi handler (a timer, a registry event). Pi invalidates a
+   * session's ctx on replacement; if one got past us without a session_shutdown, every ctx call
+   * throws, and an uncaught throw from a timer takes pi down. Treat it as the shutdown we missed.
+   */
+  const guarded = (fn: () => void) => {
+    try {
+      fn();
+    } catch (error) {
+      if (attached && isStaleCtx(error)) detachSession();
+      else throw error;
+    }
+  };
 
   const updateStatus = () => {
     if (!attached || !ctx?.hasUI) return;
@@ -730,14 +747,14 @@ export default function piBg(pi: ExtensionAPI) {
     offerSection();
     startHosting();
     unsubscribe = reg.subscribe((e) => {
-      if (attached && generation === sessionGeneration) onTask(e);
+      if (attached && generation === sessionGeneration) guarded(() => onTask(e));
     });
     oweFromState();
     // Once the session is set up; a queued callback from an earlier session is inert.
     startupWake = setImmediate(() => {
       if (!attached || generation !== sessionGeneration) return;
       startupWake = undefined;
-      flushOwed();
+      guarded(flushOwed);
     });
     herdrActive = false;
     emit("herdr:probe", {
@@ -746,7 +763,7 @@ export default function piBg(pi: ExtensionAPI) {
       },
     });
     statusTimer = setInterval(() => {
-      if (generation === sessionGeneration) updateStatus();
+      if (generation === sessionGeneration) guarded(updateStatus);
     }, 1_000);
     statusTimer.unref?.();
     refresh();
