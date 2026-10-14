@@ -106,8 +106,8 @@ describe("formatting", () => {
 describe("herdr token", () => {
   test("only big cold caches, marked uncertain for idle guesses", async () => {
     const { herdrCacheValue } = await import("../src/core.ts");
-    expect(herdrCacheValue({ kind: "expired", idleMs: 1 }, 664_000, 3.19, DEFAULT_SETTINGS)).toBe("cold 664k");
-    expect(herdrCacheValue({ kind: "idle", idleMs: 1 }, 180_000, undefined, DEFAULT_SETTINGS)).toBe("cold? 180k");
+    expect(herdrCacheValue({ kind: "expired", idleMs: 1 }, 664_000, 3.19, DEFAULT_SETTINGS)).toBe("❄ 664k");
+    expect(herdrCacheValue({ kind: "idle", idleMs: 1 }, 180_000, undefined, DEFAULT_SETTINGS)).toBe("❄? 180k");
     expect(herdrCacheValue({ kind: "expired", idleMs: 1 }, 40_000, 0.19, DEFAULT_SETTINGS)).toBeUndefined();
     expect(herdrCacheValue(undefined, 664_000, 3.19, DEFAULT_SETTINGS)).toBeUndefined();
     expect(herdrCacheValue({ kind: "expired", idleMs: 1 }, 664_000, 3.19, mergeSettings(DEFAULT_SETTINGS, ['{"herdr":{"enabled":false}}']))).toBeUndefined();

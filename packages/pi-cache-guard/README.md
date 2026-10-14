@@ -157,11 +157,11 @@ Pi reads every setting except `warm` and `warn.confirmSeconds`, which are for po
 ## Optional integrations
 
 - pi-status-footer: folds the `cache-guard` and `lean-context` statuses into its context row. Optional; without it Pi shows the statuses as usual.
-- [Herdr](https://herdr.dev), through the suite's pi-herdr: the extension emits `herdr:token` on Pi's event bus with the pane token `cache`: `cold 601k` (or `cold? 180k` for a guess from idle time) while the next prompt would re-cache at least the warning threshold, cleared while the cache is warm or small and when the session ends. It resends the token on `herdr:ready`. Without pi-herdr nothing listens. `"herdr": { "enabled": false }` turns it off. Example Herdr sidebar row in `~/.config/herdr/config.toml`:
+- [Herdr](https://herdr.dev), through the suite's pi-herdr: the extension emits `herdr:token` on Pi's event bus with the pane token `cache`: `❄ 601k` (or `❄? 180k` for a guess from idle time) while the next prompt would re-cache at least the warning threshold, cleared while the cache is warm or small and when the session ends. It resends the token on `herdr:ready`. Without pi-herdr nothing listens. `"herdr": { "enabled": false }` turns it off. Example Herdr sidebar row in `~/.config/herdr/config.toml`:
 
 ```toml
 [ui.sidebar.agents]
-rows = [["state_icon", "workspace", { token = "$cache", fg = "#5f87d7", rules = [{ starts_with = "cold?", dim = true }] }]]
+rows = [["state_icon", "workspace", { token = "$cache", fg = "#5f87d7", rules = [{ starts_with = "❄?", dim = true }] }]]
 ```
 
 ## Limitations
