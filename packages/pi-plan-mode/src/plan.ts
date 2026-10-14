@@ -165,6 +165,11 @@ interface PlanRun {
   delivered: Map<string, Delivered>;
   /** Failures already reported to your main conversation. */
   failuresReported: Set<string>;
+  /**
+   * M's pane is on the screen: both plans are in (or one is, and the other planner failed), or M
+   * has a plan. Once shown it stays, even if a planner is retried after a failure.
+   */
+  mergerShown: boolean;
   /** How to start another planner with the same tools. */
   launch?: { roots: ToolNode[]; others: OtherTool[]; seed: readonly unknown[] };
 }
@@ -242,11 +247,23 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
 
   /** What each planner last saved: its plan version, session file, and whether a turn was underway. */
   const saved = new Map<string, string>();
+  /** Whether M has something to do: every planner has had its say and at least one plan is in. */
+  const mergerDue = (current: PlanRun) =>
+    current.merged !== undefined ||
+    (current.agents.length > 1 &&
+      current.agents.every((agent) => agent.plan !== undefined || agent.status === "failed") &&
+      current.agents.some((agent) => agent.plan !== undefined));
+
   const onAgentChange = () => {
     if (!run) return;
     // Save a run whenever a session file, a plan, or a turn starts or ends, so a reload can restore
     // it and resume the turns it cut off.
     let changed = deliver();
+    if (!run.mergerShown && mergerDue(run)) {
+      run.mergerShown = true;
+      mainAgent.note("Both plans are in. Talk them over with M here, or choose Write plan M in the actions.");
+      if (!app) hostCtx?.ui.notify("Both plans are in. /planners to review them with M.", "info");
+    }
     for (const agent of run.agents) {
       // Once a cut-off planner works again (you resumed it, or said something), it is no longer cut off.
       if (agent.working && pendingResume.delete(agent.id)) changed = true;
@@ -447,7 +464,9 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
         latest.planners.flatMap((stored) => (stored.delivered ? [[stored.id, stored.delivered] as const] : [])),
       ),
       failuresReported: new Set(),
+      mergerShown: false,
     };
+    run.mergerShown = mergerDue(run);
     for (const agent of run.agents) {
       saved.set(agent.id, savedSignature(agent));
       if (agent.plan) notifiedPlans.set(agent.id, agent.revision);
@@ -811,17 +830,17 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
         render();
       };
 
-      const lanes = (): LanesPage => {
+      /** The planning screen; `onActions` opens it on the actions bar (back from a page it led to). */
+      const lanes = (onActions = false): LanesPage => {
         const lanesPage: LanesPage = new LanesPage(theme, {
           title: "Planners",
           task: () => run?.task ?? "",
           createInput: createLaneInput,
           agents: () => run?.agents ?? [],
-          // With two planners, M is your main agent: you can talk to it while they work.
-          merger: () =>
-            run && run.agents.length > 1 ? { agent: mainAgent, name: mainAgent.name, ready: true } : undefined,
+          // M is your main agent; its pane joins the screen once both plans are in.
+          merger: () => (run?.mergerShown ? mainAgent : undefined),
           actions: () => laneActions(),
-          onAction: (id, text) => onLaneAction(id, text),
+          onAction: (id) => onLaneAction(id),
           say: (agent, text) => {
             const planner = run?.agents.find((candidate) => candidate.id === agent.id);
             if (!planner) return;
@@ -864,6 +883,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           rowsAvailable: rows,
           requestRender: render,
         });
+        if (onActions) lanesPage.focusActions();
         return lanesPage;
       };
 
@@ -930,36 +950,31 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           });
         }
         if (mergeable && !merged) actions.push(merge);
-        for (const source of ready) {
+        const first = ready[0];
+        const plans =
+          ready.length > 1 ? `a plan (${ready.map((source) => source.id).join(", ")})` : `plan ${first?.id}`;
+        if (first) {
           actions.push({
-            id: `implement:${source.id}`,
-            label: `Implement ${source.id}…`,
-            description: `Implement ${source.id === MERGED_ID ? "the merged plan M" : `plan ${source.id}`}${source.revision > 1 ? ` v${source.revision}` : ""}: choose the model, effort, and context next.`,
+            id: "implement",
+            label: "Implement…",
+            description: `Implement ${plans}: choose the plan, the model, effort, and context next.`,
           });
         }
-        // Implement M is first once M has a plan; Revise plan M goes right after it.
-        if (mergeable && merged) actions.splice(1, 0, merge);
-        for (const source of ready) {
+        // Once M has a plan, Implement comes first and Revise plan M right after it.
+        if (mergeable && merged) actions.push(merge);
+        if (first) {
           actions.push({
-            id: `export:${source.id}`,
-            label: `Export ${source.id}…`,
-            description: `Write plan ${source.id} to a Markdown file.`,
-            input: { placeholder: "path", initial: configuredPlanExportPath(settings) },
+            id: "export",
+            label: "Export…",
+            description: `Write ${plans} to a Markdown file: choose the plan and the path next.`,
           });
         }
         if (agents.length > 0) {
-          actions.push(
-            {
-              id: "close",
-              label: "Save & close",
-              description: "Close the planner; the plans are kept (planners keep working). /planners reopens it.",
-            },
-            {
-              id: "discard",
-              label: "Discard",
-              description: "Stop the planners and throw these plans away.",
-            },
-          );
+          actions.push({
+            id: "discard",
+            label: "Discard",
+            description: "Stop the planners and throw these plans away. (Esc hides the screen and keeps them.)",
+          });
         }
         return actions;
       };
@@ -1008,27 +1023,12 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
         );
       };
 
-      const onLaneAction = (id: string, text?: string) => {
+      const onLaneAction = (id: string) => {
         const [kind, sourceId] = id.split(":");
-        const source = sources().find((candidate) => candidate.id === sourceId);
-        if (kind === "implement" && source) return show(implementPage(source));
-        if (kind === "export" && source) {
-          const plan = source.plan;
-          void exportPlanToFile(
-            plan,
-            text || undefined,
-            ctx.cwd,
-            undefined,
-            () => true,
-            configuredPlanExportPath(settings),
-          )
-            .then((result) => {
-              ctx.ui.notify(`Plan ${source.id} exported to ${result.path}.`, "info");
-              hook(ctx, source);
-            })
-            .catch((error: unknown) => ctx.ui.notify(`Export failed: ${errorText(error)}`, "error"));
-          return;
-        }
+        // The merged plan comes first: once there is one, it is usually the one to build.
+        const first = sources()[0];
+        if (kind === "implement" && first) return show(implementPage(first));
+        if (kind === "export" && first) return show(exportPage(first));
         if (kind === "login") {
           const agent = run?.agents.find((candidate) => candidate.id === sourceId);
           if (agent) void loginAndRetry(agent);
@@ -1039,7 +1039,6 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           if (agent) resumePlanner(agent, ctx);
           return;
         }
-        if (kind === "close") return close();
         if (kind === "discard") {
           disposeRun("discarded");
           return close();
@@ -1412,7 +1411,67 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
               void implement(ctx, author, target, context);
             },
           },
-          back: { label: "back to the plans", run: () => show(lanes()) },
+          back: { label: "back to the plans", run: () => show(lanes(true)) },
+          rowsAvailable: rows,
+          requestRender: render,
+        });
+      };
+
+      // --- Export ------------------------------------------------------------------------------
+
+      /** Write a plan to a Markdown file: which plan, and where (the path from the settings). */
+      const exportPage = (first: PlanSource) => {
+        let source = first;
+        let path = configuredPlanExportPath(settings);
+        const optionRows: OptionRow[] = [
+          {
+            id: "plan",
+            label: "Plan",
+            value: () =>
+              `${source.id}${source.id === MERGED_ID ? " (merged)" : ""} · ${source.name}${source.revision > 1 ? ` v${source.revision}` : ""}`,
+            cycle: (direction) => {
+              const list = sources();
+              const index = list.findIndex((candidate) => candidate.id === source.id);
+              source = list[(index + direction + list.length) % list.length] ?? source;
+            },
+            description: "Which plan to export.",
+            hidden: () => sources().length < 2,
+          },
+          {
+            id: "path",
+            label: "Path",
+            value: () => path,
+            text: { get: () => path, set: (value) => (path = value), placeholder: "PLAN.md" },
+            description: "The file to write, relative to the project (⏎ edits it).",
+          },
+        ];
+        return new OptionsPage(theme, {
+          title: "Export",
+          context: () => `plan ${source.id}`,
+          step: "Review",
+          rows: optionRows,
+          intro: () => [],
+          next: {
+            label: "export",
+            run: () => {
+              const chosen = source;
+              show(lanes(true));
+              void exportPlanToFile(
+                chosen.plan,
+                path.trim() || undefined,
+                ctx.cwd,
+                undefined,
+                () => true,
+                configuredPlanExportPath(settings),
+              )
+                .then((result) => {
+                  ctx.ui.notify(`Plan ${chosen.id} exported to ${result.path}.`, "info");
+                  hook(ctx, chosen);
+                })
+                .catch((error: unknown) => ctx.ui.notify(`Export failed: ${errorText(error)}`, "error"));
+            },
+          },
+          back: { label: "back to the plans", run: () => show(lanes(true)) },
           rowsAvailable: rows,
           requestRender: render,
         });
@@ -1432,6 +1491,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           agents: [],
           delivered: new Map(),
           failuresReported: new Set(),
+          mergerShown: false,
           launch: { roots: current.roots, others: current.others, seed },
         };
         activity.reset();

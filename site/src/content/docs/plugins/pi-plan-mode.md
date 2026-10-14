@@ -59,13 +59,13 @@ With no task text, planning uses the conversation so far. The Settings step sele
 
 The Tools step exposes Shell, Subagents, configured toolsets, MCP servers, and other extension tools. Select only what the investigation needs. Jev can preselect tools, but your manual choices take precedence. `alwaysOffer` keeps specified tools preselected regardless of their scores; unavailable names are ignored.
 
-During planning, type into a planner's lane to steer its active turn or start a follow-up turn when idle. Its questions appear in that lane, including free-text answers. Tab moves between panes and actions, Ctrl+U/Ctrl+D scroll, Ctrl+O switches plan/chat, and Ctrl+E expands tool output.
+During planning, type into a planner's lane to steer its active turn or start a follow-up turn when idle. Its questions appear in that lane, including free-text answers. Tab moves between panes and actions, Ctrl+U/Ctrl+D scroll, Left/Right on an empty line switch a lane between its plan and its chat (shown as tabs under the lane), Ctrl+O expands tool output and Ctrl+T hides thinking, as in Pi.
 
 Lane commands act on that planner's session: `/login`, `/model`, `/thinking` (or `/effort`), `/compact`, `/context` (or `/usage`), `/copy`, and `/help`. Model and effort changes wait until it is idle. Start a message with `//` when you want literal leading-slash text instead of a lane command.
 
 ## Review and implement
 
-**M is your existing main agent**, not a third isolated planner. Every submitted plan and revision is delivered to the main conversation. That delivery does not itself start a main-agent turn. You can discuss the plans with M while the planners are still researching.
+**M is your existing main agent**, not a third isolated planner. Every submitted plan and revision is delivered to the main conversation. That delivery does not itself start a main-agent turn. M's pane joins the screen once both plans are in (or one is in and the other planner failed); until then the lanes have the whole screen, and M's chat and a notification say when it is there.
 
 While the run is active, M has two tools:
 
@@ -74,9 +74,9 @@ While the run is active, M has two tools:
 
 The **Write plan M** and **Revise plan M** actions request that synthesis for you. Planner-internal tools are separate: `plan_mode_question` asks in-lane questions, `plan_mode_complete` submits plan versions, and `plan_subagents` starts research helpers.
 
-Choose **Implement A**, **Implement B**, or **Implement M** to review the implementation model, effort, and context before starting. Context can keep this conversation plus the plan, or start a fresh session with only the plan. `implementationModelMap` supplies defaults based on the model that authored the plan; otherwise the main session's model is used.
+Choose **Implement…** to pick the plan (M first, once there is one) and review the implementation model, effort, and context before starting. Context can keep this conversation plus the plan, or start a fresh session with only the plan. `implementationModelMap` supplies defaults based on the model that authored the plan; otherwise the main session's model is used.
 
-Export actions write the selected plan to Markdown without initiating implementation.
+**Export…** picks a plan and a path and writes it to Markdown without initiating implementation. **Discard** stops the planners and drops the plans; Esc hides the screen and keeps them.
 
 ## Settings and trusted capabilities
 

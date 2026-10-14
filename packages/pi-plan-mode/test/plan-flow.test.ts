@@ -224,9 +224,9 @@ test("/planners opens on the settings, goes through tools, plans with two planne
     for (const handler of mock.events.get(type) ?? []) await handler({ type, ...payload }, context.ctx);
   };
   screen = app.render().join("\n");
-  assert.match(screen, /M · main agent · Claude Sonnet 5\.5/u);
+  assert.match(screen, /M · main agent · Claude Sonnet 5\.5/u, "M is there once both plans are in");
   assert.match(screen, /Plan B delivered to your agent\./u, "M's pane notes each delivery");
-  assert.match(screen, /2 planners · main agent/u);
+  assert.match(screen, /Both plans are in\. Talk them over with M here/u);
   app.handleInput("\t");
   app.handleInput("\t");
   for (const char of "which is safer?") app.handleInput(char);
@@ -252,7 +252,7 @@ test("/planners opens on the settings, goes through tools, plans with two planne
 
   // With both plans in, Write plan M comes first; it asks M for the merged plan and moves to M.
   screen = app.render().join("\n");
-  assert.match(screen, /Write plan M · Implement A… · Implement B…/u);
+  assert.match(screen, /Write plan M · Implement… · Export… · Discard/u);
   app.handleInput("\t");
   app.handleInput("\r");
   assert.match(mock.sentUserMessages.at(-1)?.text ?? "", /^Write plan M: merge the planners' plans/u);
@@ -272,7 +272,7 @@ test("/planners opens on the settings, goes through tools, plans with two planne
   );
   assert.match(asked.content[0]?.text ?? "", /Planner A answered:[\s\S]*resubmitted its plan as v2/u);
   assert.match(sessions.prompts.at(-1)?.text ?? "", /^\[From the user's main agent[\s\S]*why this cache\?$/u);
-  assert.match(app.render().join("\n"), /main agent › why this cache\?|A · Claude Sonnet 5\.5 low · v2/u);
+  assert.match(app.render().join("\n"), /main agent › why this cache\?|A · Claude Sonnet 5\.5 low ─+ v2 ──/u);
   assert.deepEqual(deliveries().at(-1)?.details, {
     kind: "plan",
     id: "A",
@@ -301,15 +301,24 @@ test("/planners opens on the settings, goes through tools, plans with two planne
   screen = app.render().join("\n");
   assert.match(screen, /✓ M main agent · Claude Sonnet 5\.5.*plan ready/u, "M's row shows its merged plan");
   assert.match(screen, /# Merged plan|Merged plan/u, "and its pane shows it");
-  assert.match(
-    screen,
-    /Implement M… · Revise plan M · Implement A… · Implement B…/u,
-    "the merged plan comes first, and M can revise it",
-  );
-  assert.match(screen, /Save & close/u);
+  assert.match(screen, /Implement… · Revise plan M · Export… · Discard/u, "M can revise its plan");
+  assert.doesNotMatch(screen, /Save & close/u, "Esc hides the screen");
 
-  // Implement the merged plan (focus is on M: one Tab to the actions).
+  // Export opens a page of its own: which plan (M first), and the path from the settings.
   app.handleInput("\t");
+  app.handleInput("\u001b[C");
+  app.handleInput("\u001b[C");
+  app.handleInput("\r");
+  screen = app.render().join("\n");
+  assert.match(screen, /Export\s+plan M/u);
+  assert.match(screen, /Plan\s+‹ M \(merged\) · Claude Sonnet 5\.5 ›/u);
+  assert.match(screen, /Path\s+PLAN\.md/u);
+  app.handleInput("\u001b");
+  screen = app.render().join("\n");
+  assert.match(screen, /Implement… · Revise plan M/u, "Esc goes back to the plans");
+  assert.match(screen, /⏎ do it/u, "on the actions bar, where you came from");
+
+  // Implement the merged plan: Implement… is first, with plan M first on its page.
   app.handleInput("\r");
   screen = app.render().join("\n");
   assert.match(screen, /● Implement/u);
@@ -385,7 +394,7 @@ test("a restored run keeps its deliveries and plan M, turns the tools back on, a
   const screen = app.render().join("\n");
   assert.match(screen, /M · main agent · Claude Sonnet 5\.5/u, "M is your main agent, on its model");
   assert.match(screen, /✓ M main agent · Claude Sonnet 5\.5.*plan ready/u, "with plan M restored");
-  assert.match(screen, /Implement M…/u);
+  assert.match(screen, /Implement…/u);
   app.handleInput("\u001b");
   app.handleInput("\r");
   await opened;
@@ -448,7 +457,7 @@ test("restoring a run marks the turns a reload cut off or that had failed, and r
   assert.match(screen, /Cut off: the session restarted mid-turn/u);
   assert.match(screen, /Resume A/u);
   assert.match(screen, /Resume B/u);
-  app.handleInput("\t");
+  assert.doesNotMatch(screen, /M · main agent/u, "no plan yet, so no M");
   app.handleInput("\t");
   app.handleInput("\t");
   app.handleInput("\r");

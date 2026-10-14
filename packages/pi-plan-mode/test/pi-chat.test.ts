@@ -49,6 +49,22 @@ test("a chat draws a session's events with Pi's own components", () => {
   assert.match(shown, /• Plan A submitted\./u);
 });
 
+test("thinking shows until it is hidden, for earlier and later messages alike", () => {
+  const chat = new PiChat(piChatTheme, { cwd: "/repo" });
+  const thought = (text: string) => ({ role: "assistant", content: [{ type: "thinking", thinking: text }] });
+  chat.apply({ type: "message_start", message: thought("first the cache") });
+  chat.apply({ type: "message_end", message: thought("first the cache") });
+  assert.match(text(chat), /first the cache/u);
+  assert.equal(chat.thinkingHidden, false);
+  chat.setThinkingHidden(true);
+  assert.doesNotMatch(text(chat), /first the cache/u);
+  chat.apply({ type: "message_start", message: thought("then the tests") });
+  chat.apply({ type: "message_end", message: thought("then the tests") });
+  assert.doesNotMatch(text(chat), /then the tests/u, "new messages follow the setting");
+  chat.setThinkingHidden(false);
+  assert.match(text(chat), /first the cache[\s\S]*then the tests/u);
+});
+
 test("a restored planner's chat shows what was said since its task", () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-chat-"));
   const manager = SessionManager.create("/repo", dir);

@@ -3,7 +3,7 @@
 A Pi extension with two ways to plan before anything changes:
 
 - **Plan mode**, as in Claude Code, in your own conversation: `/plan` (or Shift+Tab with [pi-tool-gate](../pi-tool-gate/) after an explicit stock thinking-key remap) turns it on, your agent researches read-only and writes its plan to a plan file, then shows you the plan and asks how to proceed.
-- **`/planners`**, a full-screen planner for two models at once: both plan the same task read-only while you watch, answer their questions, and talk to them. The pane below them is your own main agent, which gets every plan, talks them over with you, questions the planners, and writes the merged plan when you ask. Then you implement the plan you like, with the model, effort, and context you choose.
+- **`/planners`**, a full-screen planner for two models at once: both plan the same task read-only while you watch, answer their questions, and talk to them. Once both plans are in, a pane below them is your own main agent, which got every plan, talks them over with you, questions the planners, and writes the merged plan when you ask. Then you implement the plan you like, with the model, effort, and context you choose.
 
 It acts only while plan mode is on, when you run `/plan` or `/planners` (or press the shortcut you configured), while a planning run you started is alive, and when your agent calls `enter_plan_mode` or `exit_plan_mode`.
 
@@ -87,7 +87,7 @@ Keys: Up/Down (`k`/`j`, Ctrl+P/Ctrl+N, Ctrl+K/Ctrl+J) move, Ctrl+U/Ctrl+D move t
 
 ### 3. Planning
 
-Above the lanes, one live row per planner (and M, your main agent) shows its state, how long its turn has run, its tool calls, subagent tasks, tokens, cost, and what it is doing now. One lane per planner, side by side. Each shows what its planner is doing (or its plan, once it has one), the subagents it has running, and a line to talk to it. Type and press Enter to steer a working planner or to start a new turn with an idle one; both planners can be working on your messages at once.
+Above the lanes, one live row per planner (and M, your main agent, once it is there) shows its state, how long its turn has run, its tool calls, subagent tasks, tokens, cost, and what it is doing now. One lane per planner, side by side. Each shows its planner's chat (or its plan, once it has one; the rule under the lane shows the two as tabs, `plan  chat`, and Left/Right on an empty line switch), the subagents it has running, and a line to talk to it. Type and press Enter to steer a working planner or to start a new turn with an idle one; both planners can be working on your messages at once. Sending a message shows the chat; a new plan version shows the plan from its top.
 
 When a planner asks a question, the lane shows it with its options: Up/Down and Enter pick one, or type your own answer. With several questions, Left/Backspace (back) and Right (forward, up to the first unanswered one) on an empty answer line move between them to change an earlier answer; nothing is sent until all are answered.
 
@@ -95,12 +95,13 @@ Lane keys, as the planner screen implements them:
 
 | Keys | |
 |---|---|
-| Tab, Shift+Tab | move between the lanes, the M pane and the actions |
+| Tab, Shift+Tab | move between the lanes, the M pane (once it is there) and the actions |
 | Up/Down | scroll the focused lane a line (when no question is waiting) |
-| Ctrl+U/Ctrl+D | scroll the focused lane half its height (these keys are taken by the lane, not its message line) |
+| Left/Right | on an empty line, switch the lane between its plan and its chat (while a question is waiting, move between its questions) |
+| Ctrl+U/Ctrl+D, PageUp/PageDown | scroll the focused lane half a page or a page (these keys are taken by the lane, not its message line) |
 | Mouse wheel | scroll the lane under the pointer |
-| Ctrl+O | switch a lane between its plan and its chat |
-| Ctrl+E | expand or collapse tool output in a chat (as Ctrl+O does in Pi) |
+| Ctrl+O | expand or collapse tool output in a chat, as in Pi |
+| Ctrl+T | hide or show thinking in a chat, as in Pi |
 | Ctrl+N/Ctrl+P | step through a planner's running subagents; Esc goes back to the planner |
 | Shift+Up/Shift+Down | move the divider above M by a row |
 | Esc | leave (below) |
@@ -111,10 +112,10 @@ Pi's built-in commands that matter for a planner work in its lane and act on its
 
 ### 4. Review
 
-The full-width pane below the lanes is **M, your main agent**: the agent of the session you started `/planners` from, so it has all your context. What you type there goes to it (a new turn, or a steer while it works), and the pane shows its replies as they stream; you can talk to it while A and B are still working. Each plan, and each revision, lands in your main conversation in full as it arrives, with what you and that planner said since its previous version. While a run is active your agent has two tools:
+Once both plans are in (or one is, and the other planner failed), a full-width pane appears below the lanes: **M, your main agent**, the agent of the session you started `/planners` from, so it has all your context. Until then it has nothing to do, so the lanes get the whole screen; when it appears, its chat says so, and so does a notification if the screen is hidden. What you type there goes to it (a new turn, or a steer while it works), and the pane shows its replies as they stream. Each plan, and each revision, lands in your main conversation in full as it arrives, with what you and that planner said since its previous version. While a run is active your agent has two tools:
 
 - `plan_ask_planner`: ask planner A or B about its plan or what it found; the planner answers from its own research (the question shows in its lane as `main agent › …`). It refuses while that planner is working or waiting for your answers.
-- `plan_submit_merged`: when you ask for it, record the merged (or adjusted) plan as **plan M**; the M pane shows it (Ctrl+O switches between the plan and the chat).
+- `plan_submit_merged`: when you ask for it, record the merged (or adjusted) plan as **plan M**; the M pane shows it (Left/Right switch between the plan and the chat).
 
 You do not have to word that request yourself: **Write plan M** in the actions asks M to merge both plans and what you decided into plan M, and once there is one, **Revise plan M** asks it to fold in what you discussed since. Either moves you to M's pane to watch it write.
 
@@ -124,11 +125,12 @@ The actions (Left/Right or `h`/`l` choose, Enter runs) are, as they apply:
 
 - **Log in to <provider>…**, first, when a planner failed because its provider refused its credentials (an expired or revoked login): it opens Pi's login dialog in place, as `/login` does, and the planner tries again once you are logged in.
 - **Write plan M** (with two plans in, until M has one; not while M is working).
-- **Implement M… / Implement A… / Implement B…** (the merged plan first, once there is one).
-- **Revise plan M** (right after Implement M, once M has a plan).
-- **Export M… / Export A… / Export B…**: write that plan to a Markdown file (path prefilled from settings).
-- **Save & close**: close the screen; the plans are kept and the planners keep working.
-- **Discard**: stop the planners and throw these plans away.
+- **Implement…**: the Implement step; its Plan row picks M (first, once there is one), A or B.
+- **Revise plan M** (right after Implement, once M has a plan).
+- **Export…**: a page with the plan (M first) and the path (prefilled from settings); Enter writes that plan to a Markdown file.
+- **Discard**: stop the planners and throw these plans away. (Esc hides the screen and keeps them.)
+
+Leaving Implement or Export with **back to the plans** returns to the actions bar.
 
 You can keep talking to either planner in Review, too.
 

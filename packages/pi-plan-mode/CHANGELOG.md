@@ -4,6 +4,16 @@
 
 ### Minor Changes
 
+- The `/planners` screen: M's pane joins the screen only once both plans are in (or one is, and
+  the other planner failed); until then the lanes get the whole screen, and M's chat and a
+  notification say when it is there. The actions bar is **Write plan M · Implement… · Export… ·
+  Discard** (then **Implement… · Revise plan M · Export… · Discard**): Implement and Export
+  pick the plan on their own page, and coming back lands on the actions bar; **Save & close** is
+  gone (Esc hides the screen). Lane keys follow Pi: Ctrl+O expands tool output and Ctrl+T hides
+  thinking; Left/Right on an empty line switch a lane between its plan and its chat, shown as tabs
+  under the lane. Lane titles carry the state icon, model and version only; the stats table has
+  the rest (and the titles take over when it does not fit).
+
 - Fullscreen plan approval starts at the beginning of the plan in the main chat, with a
   **Plan review** heading and scrolling reminder. Short plans get temporary trailing space;
   manual scrolling stays under your control, editing returns to the beginning, and closing

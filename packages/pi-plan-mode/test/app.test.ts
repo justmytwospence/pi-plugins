@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { stripVTControlCharacters } from "node:util";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
-import { type LaneAction, LanesPage, type MergerPane } from "../src/app/lanes-page.js";
+import { type LaneAction, LanesPage } from "../src/app/lanes-page.js";
 import { OptionsPage, type TextArea } from "../src/app/options-page.js";
 import { PiChat, piChatTheme } from "../src/app/pi-chat.js";
 import type { PlannerAgent } from "../src/planner/agent.js";
@@ -102,7 +102,7 @@ function fakeAgent(id: string, extra: Partial<PlannerAgent> = {}): PlannerAgent 
 
 function lanesPage(
   agents: PlannerAgent[],
-  merger?: () => MergerPane | undefined,
+  merger?: () => PlannerAgent | undefined,
   rows = 30,
   task = "add a cache",
   before: LaneAction[] = [],
@@ -119,10 +119,12 @@ function lanesPage(
     sayToMerger: (text) => said.push(["M", text]),
     actions: () => [
       ...before,
-      { id: "implement:A", label: "Implement A…", description: "implement" },
-      { id: "export:A", label: "Export A…", description: "export", input: { placeholder: "path", initial: "PLAN.md" } },
+      { id: "implement", label: "Implement…", description: "implement" },
+      { id: "export", label: "Export…", description: "export" },
     ],
-    onAction: (id, text) => actions.push(text === undefined ? id : `${id}=${text}`),
+    onAction: (id) => {
+      actions.push(id);
+    },
     say: (agent, text) => said.push([agent.id, text]),
     hide: () => hidden++,
     stopAll: () => undefined,
@@ -190,7 +192,7 @@ test("ctrl+n/ctrl+p walk a lane through its subagents, and Esc goes back to the 
   page.handleInput(ctrl("n"));
   assert.match(screen(), /› ✓ A1 auth · haiku · done/u);
   assert.match(screen(), /auth: look into auth/u, "the subagent's task heads its trace");
-  assert.match(screen(), /A1 trace/u);
+  assert.match(screen(), /A1 chat/u);
   page.handleInput(ctrl("n"));
   assert.match(screen(), /› .* A2 cache/u);
   page.handleInput(ctrl("n"));
@@ -198,7 +200,7 @@ test("ctrl+n/ctrl+p walk a lane through its subagents, and Esc goes back to the 
   page.handleInput(ctrl("p"));
   assert.match(screen(), /› .* A2 cache/u);
   page.handleInput(KEY.escape);
-  assert.doesNotMatch(screen(), /A2 trace/u, "Esc leaves the subagent");
+  assert.doesNotMatch(screen(), /A2 chat/u, "Esc leaves the subagent");
   assert.doesNotMatch(screen(), /Leave planning\?/u, "and does not offer to leave yet");
   page.handleInput(KEY.escape);
   assert.match(screen(), /Leave planning\?/u);
@@ -269,72 +271,25 @@ test("a pending question is answered in its lane, by picking or typing", () => {
   ]);
 });
 
-test("Tab reaches the actions; an action with input asks for it; Esc offers Hide", () => {
+test("Tab reaches the actions, where Enter runs one; Esc offers Hide", () => {
   const a = fakeAgent("A", { plan: "# Plan", revision: 1 } as never);
   const { page, actions, hidden } = lanesPage([a]);
   page.handleInput(KEY.tab);
   page.handleInput(KEY.enter);
   page.handleInput(KEY.right);
   page.handleInput(KEY.enter);
-  page.handleInput(KEY.enter);
-  assert.deepEqual(actions, ["implement:A", "export:A=PLAN.md"]);
+  assert.deepEqual(actions, ["implement", "export"]);
   page.handleInput(KEY.escape);
   assert.ok(page.render(100).some((line) => line.includes("Hide (keep the plans)")));
   page.handleInput(KEY.enter);
   assert.equal(hidden(), 1);
 });
 
-test("with two planners, M's pane sits below the lanes: Tab reaches it, and it grows while focused", () => {
+test("M's pane joins the screen below the lanes once the caller offers it: Tab reaches it, and it grows while focused", () => {
   const a = fakeAgent("A", { plan: "# Plan A", revision: 1 } as never);
   const b = fakeAgent("B", { status: "working", working: true } as never);
-  const pane: MergerPane = { agent: undefined, name: "Model M high", ready: false, waiting: "B still planning" };
-  const { page, said, actions } = lanesPage([a, b], () => pane, 45);
-  const mergerHeight = (lines: string[], last: string) => {
-    const top = lines.findIndex((line) => line.includes("M · merger · Model M high"));
-    const bottom = lines.findIndex((line, index) => index > top && line.startsWith(last));
-    return bottom - top + 1;
-  };
-  let lines = page.render(120);
-  assert.equal(lines.length, 45);
-  assert.ok(
-    lines.some((line) => line.includes("B still planning")),
-    "the pane says why M cannot start",
-  );
-  assert.equal(mergerHeight(lines, "  M starts once both plans are in"), 6, "collapsed");
-
-  // Until M can start, Tab skips it: from B straight to the actions, where Enter acts.
-  page.handleInput(KEY.tab);
-  page.handleInput(KEY.tab);
-  assert.ok(
-    page.render(120).some((line) => line.includes("⏎ do it")),
-    "Tab went from B to the actions",
-  );
-  page.handleInput(KEY.enter);
-  assert.deepEqual(actions, ["implement:A"]);
-  assert.deepEqual(said, []);
-  page.handleInput(KEY.tab);
-
-  // Once both plans are in, Tab reaches M, which grows to the bottom third.
-  pane.ready = true;
-  delete pane.waiting;
-  page.handleInput(KEY.tab);
-  page.handleInput(KEY.tab);
-  lines = page.render(120);
-  assert.equal(lines.length, 45);
-  // 45 rows: header 3, task 1, stats 2, footer 4 leave 35; M takes a third of them.
-  assert.equal(mergerHeight(lines, "› "), 11, "grows to the bottom third while focused");
-  assert.ok(lines.some((line) => line.includes("⏎ compare")));
-  page.handleInput(KEY.enter);
-  for (const char of "which is safer?") page.handleInput(char);
-  page.handleInput(KEY.enter);
-  assert.deepEqual(said, [
-    ["M", ""],
-    ["M", "which is safer?"],
-  ]);
-
-  // Once M has started it is a lane of its own: its questions, its plan, ctrl+o for its chat.
   const answers: unknown[] = [];
-  pane.agent = fakeAgent("M", {
+  const m = fakeAgent("M", {
     status: "asking",
     working: true,
     pending: {
@@ -343,16 +298,59 @@ test("with two planners, M's pane sits below the lanes: Tab reaches it, and it g
     },
     answer: (value: unknown) => answers.push(value),
   } as never);
-  assert.ok(page.render(120).some((line) => line.includes("? Store")));
-  page.handleInput(KEY.enter);
-  assert.equal(answers.length, 1);
-  Object.assign(pane.agent, { status: "idle", working: false, pending: undefined, plan: "# Merged", revision: 1 });
-  lines = page.render(120);
-  assert.ok(lines.some((line) => line.includes("# Merged") || line.includes("Merged")));
-  assert.ok(lines.some((line) => line.includes("^o chat")));
+  let shown = false;
+  const { page, said, actions } = lanesPage([a, b], () => (shown ? m : undefined), 45);
+  const mergerHeight = (lines: string[]) => {
+    const top = lines.findIndex((line) => line.includes("M · main agent · Model M high"));
+    const bottom = lines.findIndex((line, index) => index > top && line.startsWith("› "));
+    return top === -1 ? 0 : bottom - top + 1;
+  };
+  let lines = page.render(120);
+  assert.equal(lines.length, 45);
+  assert.equal(mergerHeight(lines), 0, "no M pane while a plan is still to come");
+  assert.ok(!lines.some((line) => line.includes(" M ")), "and no stats row for it");
+
+  // Without M, Tab goes from B straight to the actions, where Enter acts.
+  page.handleInput(KEY.tab);
   page.handleInput(KEY.tab);
   assert.ok(
-    page.render(120).some((line) => line.includes("Implement A…")),
+    page.render(120).some((line) => line.includes("⏎ do it")),
+    "Tab went from B to the actions",
+  );
+  page.handleInput(KEY.enter);
+  assert.deepEqual(actions, ["implement"]);
+  assert.deepEqual(said, []);
+  page.handleInput(KEY.tab);
+
+  // Once both plans are in, M is there: Tab reaches it, and it grows to the bottom third.
+  Object.assign(b, { status: "idle", working: false, plan: "# Plan B", revision: 1 });
+  shown = true;
+  lines = page.render(120);
+  assert.ok(
+    lines.some((line) => line.includes("? M main agent · Model M high")),
+    "M has a stats row",
+  );
+  page.handleInput(KEY.tab);
+  page.handleInput(KEY.tab);
+  lines = page.render(120);
+  assert.equal(lines.length, 45);
+  // 45 rows: header 3, task 1, stats 3, footer 4 leave 34; M takes a third of them.
+  assert.equal(mergerHeight(lines), 11, "grows to the bottom third while focused");
+  // M is a lane of its own: its questions, its plan, and the chat behind it.
+  assert.ok(lines.some((line) => line.includes("? Store")));
+  page.handleInput(KEY.enter);
+  assert.equal(answers.length, 1);
+  Object.assign(m, { status: "idle", working: false, pending: undefined });
+  for (const char of "which is safer?") page.handleInput(char);
+  page.handleInput(KEY.enter);
+  assert.deepEqual(said, [["M", "which is safer?"]]);
+  Object.assign(m, { plan: "# Merged", revision: 1 });
+  lines = page.render(120);
+  assert.ok(lines.some((line) => line.includes("# Merged") || line.includes("Merged")));
+  assert.ok(lines.some((line) => line.includes("←→ chat")));
+  page.handleInput(KEY.tab);
+  assert.ok(
+    page.render(120).some((line) => line.includes("Implement…")),
     "Tab goes on to the actions",
   );
 });
@@ -367,7 +365,7 @@ test("with one planner there is no merger pane", () => {
   );
 });
 
-test("the top of the planning screen shows each planner's live stats, and M's once it has started", () => {
+test("the top of the planning screen shows each planner's live stats, and M's once it is there", () => {
   const a = fakeAgent("A", {
     status: "working",
     working: true,
@@ -381,16 +379,22 @@ test("the top of the planning screen shows each planner's live stats, and M's on
     },
   } as never);
   const b = fakeAgent("B", { plan: "# Plan B", revision: 2 } as never);
-  const pane: MergerPane = { agent: undefined, name: "Model M high", ready: true };
-  const { page } = lanesPage([a, b], () => pane);
+  let m: PlannerAgent | undefined;
+  const { page } = lanesPage([a, b], () => m);
   let lines = page.render(140);
   const row = (id: string) => lines.find((line) => line.includes(` ${id} Model ${id} high`)) ?? "";
   assert.match(row("A"), /2m 14s\s+38 tools\s+4 subagents\s+182k tok\s+\$1\.24\s+read src\/plan\.ts/u);
   assert.match(row("B"), /✓ B Model B high\s+1s.*plan ready \(v2\)/u);
-  assert.equal(row("M"), "", "no row for M before it starts");
+  assert.equal(row("M"), "", "no row for M before it is there");
+  // The lane titles carry the icon, id, model and version; the table has the rest.
+  assert.ok(
+    lines.some((line) => /\u2713 B \u00b7 Model B high \u2500+ v2 \u2500\u2500/u.test(line)),
+    "B's title",
+  );
+  assert.ok(!lines.some((line) => line.includes("read src/plan.ts \u00b7")), "no activity in A's title");
   assert.equal(lines.length, 30);
 
-  pane.agent = fakeAgent("M", { status: "asking", working: true } as never);
+  m = fakeAgent("M", { status: "asking", working: true } as never);
   lines = page.render(140);
   assert.match(
     lines.find((line) => line.includes("? M main agent")) ?? "",
@@ -494,14 +498,15 @@ test("a multiline text row is a box above the rows that Tab moves in and out of"
 test("the planning screen fits short terminals and always shows the actions bar", () => {
   const a = fakeAgent("A", { plan: "# Plan A", revision: 1 } as never);
   const b = fakeAgent("B", { status: "failed" } as never);
+  const m = fakeAgent("M");
   for (const rows of [12, 14, 16, 18, 20, 22, 26, 40]) {
     for (const focusMerger of [false, true]) {
       const page = new LanesPage(theme, {
         title: "Plan",
         task: () => "add a cache",
         agents: () => [a, b],
-        merger: () => ({ agent: undefined, name: "Model M high", ready: focusMerger }),
-        actions: () => [{ id: "implement:A", label: "Implement A…", description: "implement" }],
+        merger: () => (focusMerger ? m : undefined),
+        actions: () => [{ id: "implement", label: "Implement…", description: "implement" }],
         onAction: () => undefined,
         say: () => undefined,
         hide: () => undefined,
@@ -516,20 +521,25 @@ test("the planning screen fits short terminals and always shows the actions bar"
       const lines = page.render(100);
       assert.equal(lines.length, rows, `rows=${rows}`);
       assert.ok(
-        lines.some((line) => line.includes("Implement A…")),
+        lines.some((line) => line.includes("Implement…")),
         `actions bar visible at rows=${rows}`,
       );
       if (focusMerger)
         assert.ok(
-          lines.some((line) => line.includes("M · merger")),
+          lines.some((line) => line.includes("M · main agent")),
           `M stays while you are in it (${rows})`,
         );
+      // Without the stats table, the lane titles say how each planner stands.
+      const table = lines.some((line) => line.includes("✓ A Model A high"));
+      const titled = lines.some((line) => line.includes("✓ plan ready") && line.includes("A · Model A high"));
+      assert.ok(table || titled, `status somewhere at rows=${rows}`);
+      assert.ok(!(table && titled), `status once at rows=${rows}`);
     }
   }
   // With room, the stats rows and the merger pane are there.
-  const roomy = lanesPage([a, b], () => ({ agent: undefined, name: "Model M high", ready: false })).page.render(120);
+  const roomy = lanesPage([a, b], () => m).page.render(120);
   assert.ok(roomy.some((line) => line.includes("✓ A Model A high")));
-  assert.ok(roomy.some((line) => line.includes("M · merger")));
+  assert.ok(roomy.some((line) => line.includes("M · main agent")));
 });
 
 test("a planner's question and its options wrap instead of being cut", () => {
@@ -669,8 +679,8 @@ test("with text typed, ←/→ edit the answer instead of moving between questio
 test("the divider above M drags to resize it, shift+↑↓ moves it a row, and a double-click resets it", () => {
   const a = fakeAgent("A", { plan: "# Plan A", revision: 1 } as never);
   const b = fakeAgent("B", { plan: "# Plan B", revision: 1 } as never);
-  const pane: MergerPane = { agent: fakeAgent("M"), name: "Model M high", ready: true };
-  const { page, share } = lanesPage([a, b], () => pane, 45);
+  const m = fakeAgent("M");
+  const { page, share } = lanesPage([a, b], () => m, 45);
   const layout = () => {
     const lines = page.render(120);
     const divider = lines.findIndex((line) => line.includes("M · main agent · Model M high"));
@@ -736,12 +746,11 @@ test("an action for M sends its message to M and moves to M's chat", () => {
   const a = fakeAgent("A", { plan: "# Plan A", revision: 1 } as never);
   const b = fakeAgent("B", { plan: "# Plan B", revision: 1 } as never);
   const m = fakeAgent("M", { plan: "# Plan M", revision: 1 } as never);
-  const pane: MergerPane = { agent: m, name: "Model M high", ready: true };
   const write = { id: "merge", label: "Write plan M", description: "merge", toMerger: "Write plan M now." };
-  const { page, said, actions } = lanesPage([a, b], () => pane, 40, "add a cache", [write]);
+  const { page, said, actions } = lanesPage([a, b], () => m, 40, "add a cache", [write]);
   page.focusActions();
   let lines = page.render(120);
-  assert.match(lines.join("\n"), /Write plan M\s+·\s+Implement A…/u);
+  assert.match(lines.join("\n"), /Write plan M\s+·\s+Implement…/u);
   assert.ok(
     lines.some((line) => stripVTControlCharacters(line).startsWith("Plan M")),
     "M shows its plan",
@@ -751,10 +760,10 @@ test("an action for M sends its message to M and moves to M's chat", () => {
   assert.deepEqual(actions, [], "not handed to onAction");
   lines = page.render(120);
   const footer = lines.slice(-2).join("\n");
-  assert.match(footer, /\^o plan/u, "M's pane is focused, on its chat");
+  assert.match(footer, /←→ plan/u, "M's pane is focused, on its chat");
 });
 
-test("a lane draws its chat with Pi's components, and ctrl+e expands tool output", () => {
+test("a lane draws its chat with Pi's components; ctrl+o expands tool output and ctrl+t hides thinking", () => {
   const a = fakeAgent("A");
   const output = Array.from({ length: 40 }, (_unused, index) => `line ${index + 1}`).join("\n");
   a.chat.apply({ type: "tool_execution_start", toolCallId: "1", toolName: "bash", args: { command: "seq 40" } });
@@ -772,8 +781,44 @@ test("a lane draws its chat with Pi's components, and ctrl+e expands tool output
       .join("\n");
   assert.match(shown(), /\$ seq 40/u, "the call as Pi draws it");
   assert.doesNotMatch(shown(), /line 1\b/u, "long output starts collapsed");
-  assert.match(shown(), /\^e expand tools/u);
-  page.handleInput("\x05");
+  assert.match(shown(), /\^o tools/u);
+  page.handleInput(ctrl("o"));
   assert.match(shown(), /line 1\b/u, "expanded");
-  assert.match(shown(), /\^e collapse tools/u);
+  assert.match(shown(), /\^o tools/u);
+
+  // Thinking shows, as in pi, until ctrl+t hides it.
+  const thinking = { role: "assistant", content: [{ type: "thinking", thinking: "let me look at the cache first" }] };
+  a.chat.apply({ type: "message_start", message: thinking });
+  a.chat.apply({ type: "message_end", message: thinking });
+  assert.match(shown(), /let me look at the cache first/u);
+  assert.match(shown(), /\^t thinking/u);
+  page.handleInput(ctrl("t"));
+  assert.doesNotMatch(shown(), /let me look at the cache first/u, "hidden");
+  assert.match(shown(), /\^t thinking/u);
+});
+
+test("←/→ on an empty line switch a lane between its plan and its chat, shown as tabs", () => {
+  const a = fakeAgent("A", { plan: "# Plan A\n\nUse Redis.", revision: 1 } as never);
+  const { page, said } = lanesPage([a]);
+  const shown = () =>
+    page
+      .render(100)
+      .map((line) => stripVTControlCharacters(line))
+      .join("\n");
+  assert.match(shown(), /Use Redis\./u, "a lane with a plan shows it");
+  assert.match(shown(), /── plan {2}chat ─/u, "the plan tab is current");
+  assert.match(shown(), /←→ chat/u);
+  page.handleInput(KEY.right);
+  assert.doesNotMatch(shown(), /Use Redis\./u);
+  assert.match(shown(), /• started/u, "the chat");
+  assert.match(shown(), /←→ plan/u);
+  page.handleInput(KEY.left);
+  assert.match(shown(), /Use Redis\./u, "and back");
+  // With text typed, ←/→ belong to the editor.
+  for (const char of "hi") page.handleInput(char);
+  page.handleInput(KEY.left);
+  assert.match(shown(), /Use Redis\./u);
+  page.handleInput(KEY.enter);
+  assert.deepEqual(said, [["A", "hi"]]);
+  assert.match(shown(), /• started/u, "sending a message shows the chat");
 });

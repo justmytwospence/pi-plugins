@@ -26,7 +26,7 @@ Planners have a read-only policy: ordinary file edits and writes are blocked, sh
 
 ## Compare before implementing
 
-On the planners screen, **M is your existing main agent**, not a third independent planner. Each plan arrives in the main conversation. You can ask M to compare trade-offs or question a planner using the active run’s tools.
+On the planners screen, **M is your existing main agent**, not a third independent planner. Each plan arrives in the main conversation, and M's pane joins the screen once both plans are in. You can ask M to compare trade-offs or question a planner using the active run’s tools.
 
 Choose **Write plan M** to request a merged plan, then discuss and revise it. The main agent is instructed not to edit during planning, but is not forced into the planners’ read-only policy. If you need hard isolation, do not treat that instruction as an enforcement boundary.
 
@@ -34,8 +34,9 @@ Esc offers Hide, Stop planning or Back. Hiding keeps planners running. Reopen wi
 
 ## Choose the implementation context
 
-When selecting Implement A, B or M, choose:
+**Implement…** opens a page where you choose:
 
+- The plan: M (first, once there is one), A or B.
 - The model and effort for implementation.
 - **Keep:** the current conversation plus the chosen plan.
 - **Fresh:** a new session with the plan as its starting context.

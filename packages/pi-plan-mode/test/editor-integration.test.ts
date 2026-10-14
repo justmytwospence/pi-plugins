@@ -180,9 +180,9 @@ test("native lane drafts keep native Ctrl+U instead of scrolling, empty read-onl
     page.handleInput("n");
     page.handleInput("\r");
     assert.deepEqual(submitted, ["n"], "Ctrl+U edited the draft");
-    page.handleInput("\x0f"); // Return from chat to the plan.
+    page.handleInput("\x1b[D"); // Left on the empty line: from the chat back to the plan.
     const position = () => {
-      const match = /plan (\d+)–(\d+)\/\d+/u.exec(page.render(100).join("\n"));
+      const match = /plan {2}chat ─+ (\d+)–(\d+)\/\d+/u.exec(page.render(100).join("\n"));
       assert.ok(match);
       return { start: Number(match[1]), size: Number(match[2]) - Number(match[1]) + 1 };
     };

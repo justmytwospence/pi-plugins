@@ -134,7 +134,7 @@ These keys are **local to the named focused surface**, not global shortcuts. No 
 | Enter plan mode in the main chat | `/plan [task]`; optionally a configured `toggleShortcut` | [pi-plan-mode](/plugins/pi-plan-mode/); no shortcut by default. With gate, the configured key cycles gate modes instead. |
 | Choose permission mode at the main prompt | `/mode [mode]`; Shift+Tab **after remapping the stock conflict** | [pi-tool-gate](/plugins/pi-tool-gate/), `cycleShortcut` (default `shift+tab`, empty string disables). |
 | Move between planner lanes/actions | Tab / Shift+Tab | `/planners`; not effort/permission cycling inside that screen. |
-| Read a planner lane | Ctrl+U/D; Ctrl+O plan/chat; Ctrl+E tool expansion | Planner screen owns these. Typed input steers that lane. |
+| Read a planner lane | Ctrl+U/D; Left/Right plan/chat on an empty line; Ctrl+O tool output; Ctrl+T thinking | Planner screen owns these; Ctrl+O and Ctrl+T match stock Pi. Typed input steers that lane. |
 | Hide or stop planning | Escape opens Hide / Stop planning / Back | Hiding keeps the run alive; `/planners` reopens it. |
 | Select activity panels from the prompt | Tab after explicit completion/suggestion routing | [pi-select-nav](/plugins/pi-select-nav/) plus an activity host; drafts preserved. Repeated Tab cycles, Enter opens, Escape returns. |
 | Inspect a task | `/tasks`, then Enter on a row | [pi-bg](/plugins/pi-bg/) combines shell, subagent, notebook, planner/scout and Herdr-child sources as enabled. |

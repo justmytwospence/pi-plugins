@@ -53,6 +53,7 @@ export class PiChat {
   private streaming: AssistantMessageComponent | undefined;
   private builtIns: Record<string, ToolRenderers> | undefined;
   private expanded = false;
+  private hideThinking = false;
   /** Bumped on every change, so a renderer can tell when to re-render. */
   version = 0;
 
@@ -76,6 +77,19 @@ export class PiChat {
 
   get isExpanded() {
     return this.expanded;
+  }
+
+  /** Hide thinking blocks (like ctrl+t in pi), or show them again. */
+  setThinkingHidden(hidden: boolean) {
+    this.hideThinking = hidden;
+    for (const child of this.container.children) {
+      (child as { setHideThinkingBlock?(value: boolean): void }).setHideThinkingBlock?.(hidden);
+    }
+    this.changed();
+  }
+
+  get thinkingHidden() {
+    return this.hideThinking;
   }
 
   render(width: number): string[] {
@@ -224,7 +238,7 @@ export class PiChat {
   }
 
   private assistant(message: Message | undefined) {
-    return new AssistantMessageComponent(message as never, false, getMarkdownTheme());
+    return new AssistantMessageComponent(message as never, this.hideThinking, getMarkdownTheme());
   }
 
   private tool(call: ToolCall) {
