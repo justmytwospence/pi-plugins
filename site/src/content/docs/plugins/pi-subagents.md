@@ -10,7 +10,7 @@ plugin: pi-subagents
 - **Enable:** Select `packages/pi-subagents/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
 - **Controls:** `subagent` run/status/result/steer/stop; `/subagents`. No global shortcut; fleet and conversation controls below.
 - **Settings:** `pi-subagents.json`: 8 tasks, concurrency 4, depth 2; async off, fresh context, short child cache retention; FleetView on.
-- **Requirements, cost & privacy:** Runnable Pi and provider access; Git only for worktrees, created directly without a helper CLI. Each child uses model tokens; optional paid Jev sees task text. Transcripts/results are stored locally.
+- **Requirements, cost & privacy:** Runnable Pi and provider access; Git only for worktrees, created directly without a helper CLI. Each child uses model tokens; optional paid Jev sees task text. Transcripts/results and native Pi child sessions are stored locally. Optional `sessionFile` in run details names the actual native session, separate from the compact viewer transcript; it does not imply full tracking by external clients. See [remote client compatibility](/guides/clients/).
 - **Integrations & limits:** Optional `/tasks`, consumed result waits, notebooks, planners and Herdr-child pills. Shared cwd is not isolation; headless workers cannot approve dialogs.
 
 pi-subagents gives the agent a `subagent` tool for work that should return a result to the main conversation. Each child is a separate `pi --mode rpc` process with its own context window. Parallel execution does not imply separate files: children share the selected working directory unless you explicitly request checkout isolation.

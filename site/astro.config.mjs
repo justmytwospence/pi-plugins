@@ -24,6 +24,7 @@ export default defineConfig({
           { label: "Keymap & focus", slug: "guides/keyboard" },
           { label: "Standalone & compatibility", slug: "guides/standalone" },
           { label: "External packages", slug: "guides/external" },
+          { label: "Remote clients", slug: "guides/clients" },
           { label: "Troubleshooting & conflicts", slug: "guides/troubleshooting" },
         ] },
         { label: "Workflow recipes", items: [
