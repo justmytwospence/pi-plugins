@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
 import planMode from "../src/index.js";
 import {
@@ -227,3 +228,41 @@ test("enter_plan_mode lets your agent switch into plan mode itself", async () =>
   assert.equal(await emit("before_agent_start", { prompt: "x" }), undefined, "the tool result was the notice");
   assert.ok(existsSync(inline().planFile.replace(/\/[^/]+$/u, "")), "the plans directory exists");
 });
+
+for (const outcome of ["approve", "cancel", "feedback", "edit", "throw", "abort"] as const) {
+  test(`plan review releases its blocked hold after ${outcome}`, async () => {
+    const { mock, context, tool, inline } = await setup();
+    await mock.commands.get("plan")?.handler("", context.ctx);
+    writeFileSync(inline().planFile, "# Plan\n\nDo it.");
+    const holds: unknown[] = [];
+    mock.eventBus.on("herdr:blocked", (data) => holds.push(data));
+    const controller = new AbortController();
+    let calls = 0;
+    const ui = (context.ctx as ExtensionContext).ui;
+    ui.select = async (_title, options) => {
+      assert.deepEqual(holds, [{ active: true, label: "Review the plan" }]);
+      if (outcome === "throw") throw new Error("dialog failed");
+      if (outcome === "abort") {
+        controller.abort();
+        return undefined;
+      }
+      if (outcome === "cancel") return undefined;
+      if (outcome === "feedback") return options.find((s) => s === "No, keep planning");
+      if (outcome === "edit" && calls++ === 0) return options.find((s) => s === "Edit the plan first");
+      return options[0];
+    };
+    ui.input = async () => {
+      assert.equal(holds.length, 1);
+      return "Revise it";
+    };
+    ui.editor = async () => {
+      assert.equal(holds.length, 1);
+      return "# Edited plan";
+    };
+    const result = tool(EXIT_TOOL).execute("review", {}, controller.signal, undefined, context.ctx);
+    if (outcome === "throw") await assert.rejects(result, /dialog failed/);
+    else await result;
+    assert.deepEqual(holds, [{ active: true, label: "Review the plan" }, { active: false }]);
+    if (["cancel", "feedback", "throw", "abort"].includes(outcome)) assert.equal(inline().active, true);
+  });
+}

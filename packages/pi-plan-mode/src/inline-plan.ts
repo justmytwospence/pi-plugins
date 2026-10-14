@@ -22,6 +22,7 @@ import {
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
+import { holdBlocked } from "./herdr-blocked.js";
 import { expandHome } from "./plan-hook.js";
 import { PlanReviewViewport } from "./plan-review-viewport.js";
 import { findBlockedCommandSegment, readCommand, type SafeSubcommands } from "./tool-policy.js";
@@ -409,6 +410,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
         return [...here, APPROVE_FRESH, EDIT, KEEP];
       };
       reviewViewport.begin(ctx, id);
+      const releaseBlocked = holdBlocked(pi.events, "Review the plan");
       try {
         for (;;) {
           reviewViewport.restart();
@@ -494,6 +496,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
           } as never;
         }
       } finally {
+        releaseBlocked();
         reviewViewport.end();
       }
     },
