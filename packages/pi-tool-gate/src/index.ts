@@ -322,7 +322,7 @@ export default function toolGate(pi: ExtensionAPI) {
   const judgeStateFor = async (ctx: ExtensionContext, tool: string, args: string, rules: readonly string[]) => {
     const branch = ctx.sessionManager.getBranch();
     return judgeState({
-      userRequest: recentUserMessages(branch, 3).map((text, i, all) => clip(text, i === all.length - 1 ? 3_000 : 1_000)),
+      userRequest: recentUserMessages(branch, 5).map((text, i, all) => clip(text, i === all.length - 1 ? 3_000 : 1_000)),
       agentBefore: clipTail(agentBeforeLatestUser(branch), 1_500),
       recentIntent: clipTail(recentTexts(branch).assistant, 2_000),
       cwd: ctx.cwd,

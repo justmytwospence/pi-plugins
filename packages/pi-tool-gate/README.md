@@ -71,14 +71,14 @@ Commands nested in `sh -c '...'` (and other shells) and `eval` are checked again
 
 ### 2. Jev for the gray zone
 
-Edits, writes, other shell commands, and MCP or extension tools without a read-only hint go to Jev in one request. Calls are allowed by default. Unless you asked for the action, or said yes when the agent offered it (`requested` >= 0.8), a call is held when Jev judges that:
+Edits, writes, other shell commands, and MCP or extension tools without a read-only hint go to Jev in one request. Calls are allowed by default. Unless you asked for the action, or said yes when the agent offered it (`requested` >= 0.7; "open a PR" asks for the push and `gh pr create`, "request Sam as reviewer" for the `gh pr edit`, and an instruction from an earlier message still counts), a call is held when Jev judges that:
 
 - it cannot be undone (>= 0.9);
 - it does something other people see or depend on (>= 0.85: deploy, publish, send a message, open or merge a PR, change a shared or cloud resource). Pushing commits to a git branch and maintaining your own machines over ssh do not count;
 - its impact if unwanted is 2.5 or more of 3 (lost data, leaked secrets, broken production);
 - or it is clearly unrelated to your request (in scope < 0.1) and its impact is 2 or more.
 
-Whatever you said, a call is held when it would send secrets or private data off the machine (>= 0.8) or break a project rule (>= 0.7). Doubt about scope alone never holds a call. Jev sees your last three messages, the agent message your newest one replies to (so "yes" to "Want me to push?" counts as asking for the push), the agent's recent text, the working directory, the git branch and whether it is dirty, the call, and the project rules. If Jev's answer is incomplete the call is allowed. The design follows Claude Code's auto mode (allow by default; your request clears most holds).
+Whatever you said, a call is held when it would send secrets or private data somewhere they are not for (>= 0.8; using an API key with its own API is normal use) or break a project rule (>= 0.7). Doubt about scope alone never holds a call. Jev sees your last five messages, the agent message your newest one replies to (so "yes" to "Want me to push?" counts as asking for the push), the agent's recent text, the working directory, the git branch and whether it is dirty, the call, and the project rules. If Jev's answer is incomplete the call is allowed. The design follows Claude Code's auto mode (allow by default; your request clears most holds).
 
 ### 3. Push-back, then you
 
@@ -136,7 +136,7 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
   "enabled": true,
   "jev": { "enabled": true, "provider": "typesafe", "model": "jev-latest", "timeoutMs": 3000 },
   "thresholds": {
-    "irreversible": 0.9, "remoteChange": 0.85, "requested": 0.8, "exfiltration": 0.8,
+    "irreversible": 0.9, "remoteChange": 0.85, "requested": 0.7, "exfiltration": 0.8,
     "impact": 2.5, "offTask": 0.1, "offTaskImpact": 2, "rule": 0.7
   },
   "allowTools": [
