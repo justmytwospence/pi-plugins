@@ -92,6 +92,64 @@ describe("pi-bg", () => {
     await x.shutdown();
   });
 
+  describe("ending the turn with a job running", () => {
+    const settle = (x: Awaited<ReturnType<typeof load>>) => {
+      const h = x.handlers.get("agent_before_settle")?.[0];
+      if (!h) throw new Error("no agent_before_settle handler");
+      return h({ type: "agent_before_settle", outcome: "completed", entries: [], continue: false, context: { canContinue: true } }, x.ctx) as Promise<any>;
+    };
+
+    it("keeps the turn open until the job ends, then continues the run with its outcome", async () => {
+      const x = await load();
+      await x.call("bg_run", { command: "sleep 2.5; echo settled", kind: "job", name: "tests" });
+      const started = Date.now();
+      const r = await settle(x);
+      expect(Date.now() - started).toBeGreaterThan(500);
+      expect(r.continue).toBe(true);
+      expect(r.entries).toHaveLength(1);
+      expect(r.entries[0].type).toBe("custom_message");
+      expect(r.entries[0].content).toMatch(/Background job tests .* ended: exit 0/);
+      expect(r.entries[0].content).toMatch(/settled/);
+      expect(x.working.some((m) => m?.startsWith("Waiting on tests"))).toBe(true);
+      expect(x.working.at(-1)).toBeUndefined();
+      // Delivered in the turn: no wake-up follows.
+      await new Promise((res) => setTimeout(res, 300));
+      expect(x.sent).toEqual([]);
+      await x.shutdown();
+    });
+
+    it("does not wait when a message is queued, when nothing is running, or after an abort", async () => {
+      const x = await load();
+      expect(await settle(x)).toEqual({});
+      await x.call("bg_run", { command: "sleep 30", kind: "service", name: "srv" });
+      expect(await settle(x)).toEqual({});
+      await x.call("bg_run", { command: "sleep 2", kind: "job", name: "job" });
+      x.state.pending = true;
+      expect(await settle(x)).toEqual({});
+      x.state.pending = false;
+      const h = x.handlers.get("agent_before_settle")![0];
+      expect(await h({ type: "agent_before_settle", outcome: "aborted", entries: [], continue: false, context: { canContinue: true } }, x.ctx)).toEqual({});
+      expect(x.working).toEqual([]);
+      await x.shutdown();
+    });
+
+    it("stops on Esc or a typed message; the job still wakes the agent later", async () => {
+      const x = await load();
+      await x.call("bg_run", { command: "sleep 4", kind: "job", name: "long" });
+      setTimeout(() => x.press("\x1b"), 300);
+      expect(await settle(x)).toEqual({});
+      expect(x.working.at(-1)).toBeUndefined();
+      setTimeout(() => {
+        x.state.pending = true;
+      }, 300);
+      expect(await settle(x)).toEqual({});
+      x.state.pending = false;
+      await until(() => x.sent.length > 0, 8_000);
+      expect(x.sent[0]?.message.content).toMatch(/Background job long .* ended/);
+      await x.shutdown();
+    });
+  });
+
   it("wakes the agent once when a service is ready, and bg_kill stops it without a wake-up", async () => {
     const x = await load();
     const r = x.textOf(await x.call("bg_run", { command: "sleep 2; echo 'ready on :8000'; sleep 30", kind: "service", name: "srv", ready: "ready on" }));

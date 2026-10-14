@@ -1,6 +1,6 @@
 # pi-bg
 
-Background jobs and services for Pi. The agent starts a long command with `bg_run` and keeps working; a **job** (tests, builds, model fits, exports) wakes the agent with its outcome when it exits, and a **service** (a dev or notebook server, a tunnel, a watcher) wakes it once when a `ready` pattern matches a log line, or if it exits. When nothing is left but a job's result, the agent calls `bg_wait` instead of ending its turn, so the session stays "working" until the job ends; typing a message, Esc or the wait's timeout ends the wait, while the job keeps running and still wakes the agent.
+Background jobs and services for Pi. The agent starts a long command with `bg_run` and keeps working; a **job** (tests, builds, model fits, exports) wakes the agent with its outcome when it exits, and a **service** (a dev or notebook server, a tunnel, a watcher) wakes it once when a `ready` pattern matches a log line, or if it exits. When nothing is left but a job's result, the agent calls `bg_wait`, or simply ends its turn: a running job keeps the turn open until it ends, so the session stays "working" and the outcome continues the same turn; typing a message, Esc or the wait's timeout ends the wait, while the job keeps running and still wakes the agent.
 
 In the TUI, a pill under the prompt counts running shells and a full-screen `/tasks` view lists every task, laid out after Claude Code's background-tasks panel. It works alone, and integrates with pi-subagents, pi-marimo, pi-plan-mode, pi-herdr and pi-status-footer when they are loaded.
 
@@ -40,6 +40,8 @@ Add `-ne` to disable your other discovered and configured extensions for that ru
 | `bg_kill` | `id`: SIGTERM to the task's process group, SIGKILL after 3 seconds |
 
 Ids also accept a task's name (the most recent task with it) or a unique id prefix. `bg_run` waits 1.5 seconds before returning, so a command that fails at once (a typo, a missing file) is reported in its own result instead of as a wake-up. `bg_wait` returns at once, without waiting, when messages are already queued for the agent. `bg_wait` on a service without a `ready` pattern is an error: there is nothing to wait for until it exits.
+
+**Ending the turn with a job running.** When the agent ends its turn while a job it started is still running, pi-bg waits for it at Pi's `agent_before_settle` boundary, with the same `Waiting on…` message, timeout, and interruptions as `bg_wait` (type a message or press Esc). The session never goes idle meanwhile, so Pi, Herdr and tmux keep showing it working, and the job's outcome continues the run instead of waking an idle agent. Interrupted, the turn settles and the job wakes the agent later as below. Only jobs the agent started are waited for; services and outside work are not.
 
 **Wake-ups.** A wake-up is sent only while Pi is idle: one that comes due during a turn waits for the turn to settle (a follow-up queued mid-turn would be dropped by Esc), and several that pile up go out as one message. Whatever `bg_wait`, `bg_logs` or `bg_kill` has already shown the agent is no longer owed. A task that ends during `/reload` wakes the agent once the new session is up. A task you stop yourself does not wake the agent; it is told on its next turn instead.
 
@@ -140,7 +142,7 @@ Everything below goes through `pi.events`; each sibling is optional, and with no
 
 ### pi-herdr
 
-Inside Herdr with [pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/), pi-bg holds `herdr:background` while an agent job that will wake the agent runs, which pi-herdr shows as the pane token `$bg` after the agent ends its turn instead of waiting. A task you started with `/tasks run`, or a kept service, sends a Herdr notification when it ends (skipped while the pane is focused), and `f` in `/tasks` follows a log in a split. Herdr's own Pi integration still owns the pane's working/idle state.
+Inside Herdr with [pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/), pi-bg holds `herdr:background` while an agent job that will wake the agent runs, which pi-herdr shows as the pane token `$bg` once the agent is idle with the job still running (after an interrupted wait). A task you started with `/tasks run`, or a kept service, sends a Herdr notification when it ends (skipped while the pane is focused), and `f` in `/tasks` follows a log in a split. Herdr's own Pi integration still owns the pane's working/idle state.
 
 ### Event-bus channels
 
@@ -169,7 +171,7 @@ During `bg_wait`, the optional event `pi-plugins.working-message.v1` publishes `
 ## Limitations
 
 - The pill, `/tasks` view and log viewer exist only in the TUI.
-- Herdr's pane state stays Herdr's own: `bg_wait` keeps a turn "working", but once the agent ends its turn with a job running, the pane shows idle or done, and only the `$bg` token says a job will wake it.
+- Herdr's pane state stays Herdr's own: a turn kept open by `bg_wait` or by a running job shows "working"; once the user interrupts that wait, the pane shows idle or done, and only the `$bg` token says a job will wake it.
 - Kept services are adopted only by a Pi started in, above or below their directory, and only at startup.
 
 ## Development

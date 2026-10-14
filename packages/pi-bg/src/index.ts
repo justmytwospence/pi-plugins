@@ -5,6 +5,8 @@
 //   `ready` pattern matches, or if it exits.
 // - bg_wait keeps the turn going until a job ends, so the agent is visibly working (in pi, herdr,
 //   tmux) while it waits. It returns early when the user types, on Esc, or after its timeout.
+//   Ending the turn with an agent job running waits the same way (agent_before_settle), and the
+//   outcome continues the run.
 // - bg_logs reads a log (or lists the tasks); bg_kill stops one.
 // - Claude Code's layout: a pill under the prompt (`2 shells`, `1 failed` while a failure is
 //   unseen); ↓ then Enter, or a click, opens the background-tasks dialog, as does `/tasks` (aliases
@@ -32,7 +34,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { AgentBeforeSettleEvent, BoundaryResult, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { WORKING_MESSAGE_EVENT } from "./working-message.ts";
 import { Type } from "typebox";
@@ -509,6 +511,96 @@ export default function piBg(pi: ExtensionAPI) {
 
   // ---- waiting ----
 
+  /**
+   * The `Waiting on …` working message for one wait: pi's native message, and the same claim on
+   * the optional footer's channel (working-message.ts). `set()` paints or refreshes it; `release()`
+   * clears it and paints whatever other wait remains.
+   */
+  const holdWorking = (c: ExtensionContext, generation: number, label: () => string) => {
+    const owner = `bg-wait/${randomUUID()}`;
+    const live = () => attached && generation === sessionGeneration && c.hasUI;
+    const paint = () => c.ui.setWorkingMessage([...waitingMessages.values()].at(-1));
+    return {
+      set: () => {
+        if (!live()) return;
+        const message = `Waiting on ${label()}… (type to interrupt)`;
+        waitingMessages.set(owner, message);
+        paint();
+        emit(WORKING_MESSAGE_EVENT, { owner, message });
+      },
+      release: () => {
+        const owned = waitingMessages.delete(owner);
+        if (!owned || !live()) return;
+        try {
+          paint();
+        } finally {
+          emit(WORKING_MESSAGE_EVENT, { owner });
+        }
+      },
+    };
+  };
+
+  /**
+   * The agent ends its turn with a job running that would wake it: wait for the job here, so the
+   * run does not settle (pi, herdr and tmux keep showing it working) and the outcome continues the
+   * run instead of waking an idle agent. Typing or Esc ends the wait; the job then wakes the agent
+   * as usual. Pi exposes no abort signal at this boundary, so Esc is read from the terminal.
+   */
+  let settleWaiting = false;
+  const waitAtSettle = async (event: AgentBeforeSettleEvent, c: ExtensionContext): Promise<BoundaryResult> => {
+    if (settleWaiting || !attached || !tui() || event.outcome !== "completed" || !event.context.canContinue) return {};
+    if (c.hasPendingMessages() || !agentJobs().length || [...waiters].some((w) => !w.silent)) return {};
+    const generation = sessionGeneration;
+    const label = () => agentJobs().map((t) => `${t.name} ${runtime(t)}`).join(" · ");
+    const working = holdWorking(c, generation, label);
+    let ticks = 0;
+    let waiter: Waiter | undefined;
+    let reason: Reason;
+    let offKeys: (() => void) | undefined;
+    settleWaiting = true;
+    try {
+      working.set();
+      const waiting = waitFor({ targets: new Set(), any: true, silent: false }, WAIT_DEFAULT_S * 1000, () => {
+        if (!attached || generation !== sessionGeneration) return "aborted";
+        if (c.hasPendingMessages()) return "message";
+        if (!agentJobs().length) return "done";
+        if (++ticks % 4 === 0) working.set();
+        return undefined;
+      });
+      waiter = waiting.waiter;
+      try {
+        offKeys = c.ui.onTerminalInput((data) => {
+          if (data === "\x1b") waiting.waiter.resolve("aborted");
+          return undefined;
+        });
+      } catch {
+        // No terminal input hook: typing still interrupts.
+      }
+      refresh();
+      reason = await waiting.done;
+    } finally {
+      settleWaiting = false;
+      offKeys?.();
+      waiter?.resolve("aborted");
+      working.release();
+    }
+    refresh();
+    if (reason !== "done" || !waiter?.finished.length) return {};
+    const parts: string[] = [];
+    const tasks: { id: string; kind: "end"; status: string }[] = [];
+    for (const t of waiter.finished) {
+      owed.delete(t.id);
+      parts.push(wakeText(t, "end"));
+      tasks.push({ id: t.id, kind: "end", status: t.status });
+    }
+    if (waiter.extras.length) parts.push(`Also meanwhile:\n${waiter.extras.map((e) => `- ${e}`).join("\n")}`);
+    return {
+      entries: [{ type: "custom_message", customType: "pi-bg", content: parts.join("\n\n---\n\n"), display: true, details: { tasks } }],
+      continue: true,
+    };
+  };
+  pi.on("agent_before_settle", waitAtSettle);
+
   const waitFor = (
     w: Omit<Waiter, "resolve" | "finished" | "readied" | "externals" | "extras">,
     timeoutMs: number,
@@ -695,7 +787,7 @@ export default function piBg(pi: ExtensionAPI) {
     promptSnippet: "Run long commands (jobs) or servers (services) in the background; wait on them with bg_wait",
     promptGuidelines: [
       "Use bg_run for commands that may take more than a minute (kind=job) and for anything that must keep running (kind=service); plain bash for the rest.",
-      "After starting a job, keep doing other useful work. When nothing is left but the job's result, call bg_wait instead of ending your turn; the user can still interrupt it by typing.",
+      "After starting a job, keep doing other useful work. When nothing is left but the job's result, call bg_wait, or end your turn: a running job keeps the turn open until it ends and its outcome continues the turn; the user can still interrupt by typing.",
       "Never poll a background task with sleep loops or repeated bg_logs calls: bg_wait or the wake-up message tells you when it ends.",
       "Use keep=true only for a service the user works in themselves (a notebook or dev server they have open) that should outlive this pi session.",
     ],
@@ -734,7 +826,7 @@ export default function piBg(pi: ExtensionAPI) {
       if (waiter.finished.length) return text(`${task.name} (${task.kind} ${task.id}) ended at once.\n\n${report(task)}`);
       const lines = [`Started ${task.name} (${task.kind} ${task.id}, pid ${task.pid}). Log: ${task.logPath}`];
       if (task.kind === "job") {
-        lines.push(`You will be woken when it exits${task.timeoutSec ? ` (killed after ${task.timeoutSec}s)` : ""}. If nothing else is left to do, call bg_wait instead of ending your turn.`);
+        lines.push(`You will be woken when it exits${task.timeoutSec ? ` (killed after ${task.timeoutSec}s)` : ""}. If nothing else is left to do, call bg_wait or end your turn: the turn stays open until the job ends.`);
       } else if (waiter.readied.length) {
         lines.push(`It is ready: ${task.readyLine}`);
       } else if (task.readyPattern) {
@@ -808,26 +900,17 @@ export default function piBg(pi: ExtensionAPI) {
         return ts.map((t) => `${t.name} ${runtime(t)}`).join(" · ");
       };
       const started = Date.now();
-      const owner = `bg-wait/${randomUUID()}`;
-      const paintWaiting = () => c.ui.setWorkingMessage([...waitingMessages.values()].at(-1));
-      const setWorking = () => {
-        if (!attached || generation !== sessionGeneration || !c.hasUI) return;
-        const message = `Waiting on ${label()}… (type to interrupt)`;
-        waitingMessages.set(owner, message);
-        // Standalone behavior remains native; an optional footer observes the same claim.
-        paintWaiting();
-        emit(WORKING_MESSAGE_EVENT, { owner, message });
-      };
+      const working = holdWorking(c, generation, label);
       let ticks = 0;
       let reason: Reason;
       let waiter: Waiter;
       let cancelWait: (() => void) | undefined;
       try {
-        setWorking();
+        working.set();
         const waiting = waitFor({ targets, any, silent: false }, timeoutS * 1000, () => {
           if (!attached || generation !== sessionGeneration || signal?.aborted) return "aborted";
           if (c.hasPendingMessages()) return "message";
-          if (++ticks % 4 === 0) setWorking();
+          if (++ticks % 4 === 0) working.set();
           return undefined;
         });
         waiter = waiting.waiter;
@@ -836,10 +919,7 @@ export default function piBg(pi: ExtensionAPI) {
         reason = await waiting.done;
       } finally {
         cancelWait?.();
-        const owned = waitingMessages.delete(owner);
-        if (owned && attached && generation === sessionGeneration && c.hasUI) {
-          try { paintWaiting(); } finally { emit(WORKING_MESSAGE_EVENT, { owner }); }
-        }
+        working.release();
       }
       refresh();
       const out: string[] = [];

@@ -68,7 +68,7 @@ Plain readiness patterns are case-insensitive; `/pattern/flags` supplies explici
 
 ## Completion and cancellation
 
-Jobs wake the agent on exit; services can wake it when ready and again when they exit. Notifications wait until the agent is idle, and accumulated outcomes are combined. Results already consumed through waiting, log inspection, or stopping are not owed again. A command failing within 1.5 seconds is reported directly in `bg_run`'s result.
+When the agent ends its turn with a job it started still running, pi-bg waits for it at Pi's `agent_before_settle` boundary (same message, timeout and interruptions as `bg_wait`), so the session stays working in Pi, Herdr and tmux and the outcome continues the run. Typing or Esc ends the wait; the job then wakes the agent later. Jobs wake the agent on exit; services can wake it when ready and again when they exit. Notifications wait until the agent is idle, and accumulated outcomes are combined. Results already consumed through waiting, log inspection, or stopping are not owed again. A command failing within 1.5 seconds is reported directly in `bg_run`'s result.
 
 During `bg_wait`, its `Waiting on…` message (example) takes priority over pi-status-footer's token/time decoration through an optional event-bus claim. The latest active wait wins; updating its text preserves priority, and releasing an older wait cannot clear a newer one. Completion, timeout, interruption, user input, errors and teardown release ownership. pi-bg still paints the native message without the footer; neither requires the other.
 
