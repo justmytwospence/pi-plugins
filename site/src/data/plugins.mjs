@@ -2,6 +2,7 @@
 export const groups = [
   { title: "Run & coordinate", eyebrow: "01 / Execution", description: "Keep long-running work visible. Delegate bounded tasks without losing the thread.", plugins: [
     { name: "pi-bg", label: "Background work", description: "Jobs, services, logs and waiting that stays inside the turn." },
+    { name: "pi-todo", label: "Logical tasks", description: "A persistent checklist with status, dependencies and a compact live widget." },
     { name: "pi-subagents", label: "Subagents", description: "Separate Pi processes, parallel tasks and conversations you can inspect." },
     { name: "pi-herdr", label: "Herdr", description: "Pane metadata, interactive children and a shared event-bus bridge." },
     { name: "pi-marimo", label: "Notebooks", description: "Live notebook state alongside your conversation, without taking over the kernel." },

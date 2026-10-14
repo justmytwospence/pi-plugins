@@ -17,7 +17,7 @@ pi install git:github.com/justmytwospence/pi-plugins
 pi config
 ```
 
-The first command adds the suite to personal Pi settings. **It loads all 26 extensions by default.** The second opens Pi’s resource selector: keep only the entries you want. It configures packages; it is not a command inside the chat.
+The first command adds the suite to personal Pi settings. **It loads all 27 extensions by default.** The second opens Pi’s resource selector: keep only the entries you want. It configures packages; it is not a command inside the chat.
 
 For project-local selection:
 
@@ -89,11 +89,12 @@ Pi reads that directory's own `package.json` manifest. [Standalone & compatibili
 
 Never enable both a suite entry and another copy of that component. Pi can recognize the same package source, but the suite, a retired standalone repository and an upstream npm package are different packages. They can register the same tools, commands, shortcuts or UI hooks twice.
 
-This includes the upstream packages that four components were absorbed from: remove `npm:pi-vim`, `npm:@saadjs/pi-stash`, `npm:pi-sticky-last-prompt` and `npm:pi-btw` from your settings before selecting the suite's pi-vim, pi-stash, pi-sticky-last-prompt or pi-btw entries.
+This includes absorbed upstream packages: remove `npm:pi-vim`, `npm:@saadjs/pi-stash`, `npm:pi-sticky-last-prompt`, `npm:pi-btw` and `npm:@juicesharp/rpiv-todo` from your settings before selecting their suite replacements. [pi-todo](/plugins/pi-todo/) preserves upstream session replay and legacy config fallbacks; do not delete those files to resolve a registration collision.
 
 In `pi config`, disable the old entry before enabling the suite copy. Review `pi list` and both personal and project settings if duplicates remain. In particular:
 
 - Keep only one `ask_user_question` provider.
+- Keep only one `todo` tool and `/todos` command provider: select `packages/pi-todo/index.ts`, not a second upstream copy.
 - Keep only one owner of the custom footer.
 - Keep only one prompt editor replacement: the suite's pi-vim, not a second vim package. An editor replacement must load **before** the status footer; selection filters do not reorder suite entries.
 

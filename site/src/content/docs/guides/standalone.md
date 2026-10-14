@@ -5,7 +5,7 @@ description: Select one component, understand its native fallbacks, and test it 
 
 ## One feature, one entry
 
-The suite contains 26 independently selectable extensions. They share a Git revision, not runtime dependencies. Install the suite and choose entries with `pi config`, or use an [explicit resource selection](/guides/install/#enable-an-explicit-subset).
+The suite contains 27 independently selectable extensions. They share a Git revision, not runtime dependencies. Install the suite and choose entries with `pi config`, or use an [explicit resource selection](/guides/install/#enable-an-explicit-subset).
 
 From a local checkout, Pi can load a component's own package manifest:
 
@@ -31,11 +31,12 @@ This example is for input and startup checks without credentials. A model-driven
 | Prompt stash | An editor snapshot preserves cursor, mode and in-process history where supported | Text-only snapshots; no promised attachment support |
 | Planner, Herdr and notebook activity | Existing FleetView or background activity hosts aggregate their entries | Each producer keeps its own UI/status and commands |
 | `/tasks` | pi-bg aggregates registered activity sections | Only pi-bg provides the command; producers never require it |
+| Logical todos | pi-select-nav forwards eligible collapse keys in dialogs; optional rpiv-i18n localizes UI | pi-todo retains its tool, `/todos`, English widget and session replay; no rpiv-config dependency |
 | `/stop` | Stops eligible shell work owned by pi-bg | Still shell-only; it is not an all-activity kill command |
 | Rewind and diff review | The diff viewer can display checkpoint comparisons | Rewind recovery works independently |
 | Next-prompt | Owned Vim acceptance enters Insert mode at the end | Native text insertion; never submission |
 
-Logical todos are separate from process activity. Retained external packages are described in [External integrations](/guides/external/).
+[pi-todo](/plugins/pi-todo/) owns logical todos in the suite; `/todos` is separate from process activity in pi-bg's `/tasks`. It does not require an external rpiv-todo installation. Retained external packages are described in [External integrations](/guides/external/).
 
 ## Input and mode ownership
 

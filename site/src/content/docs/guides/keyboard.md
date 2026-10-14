@@ -72,7 +72,7 @@ Suite additions:
 | `app.model.cycleForward` | Ctrl+P | Cycle models; dedicated history actions can take precedence. |
 | `app.model.cycleBackward` | Ctrl+Shift+P | Cycle models backward (Windows/WSL: Alt+P). |
 | `app.thinking.cycle` | Shift+Tab | Cycle effort; conflicts with tool-gate's requested key. |
-| `app.thinking.toggle` | Ctrl+T | Expand/collapse thinking blocks. |
+| `app.thinking.toggle` | Ctrl+T | Expand/collapse thinking blocks; conflicts if todo's `collapseKey` is customized to Ctrl+T. |
 
 Dedicated history actions are unbound in stock Pi. Binding them to Ctrl+P/N is a preference, not a suite default; stock Ctrl+P cycles models. Pi gives configured history actions precedence over application actions on those keys in its main editor. Disable model cycling too if you want an unambiguous setup.
 
@@ -112,6 +112,18 @@ Current embedded consumers include question answers/notes, diff comments, subage
 Pi chooses its external editor from `externalEditor`, then `$VISUAL`, `$EDITOR`, and a platform fallback (Notepad on Windows, otherwise nano). That is a **Pi setting**, not `piVim`. Embedded dialogs, EX input and pending modal commands never trigger these main-editor chords.
 
 Plain file queries rank fuzzy project and home matches normally. `~/`, `/`, `./` and `../` constrain the search root; directory segments resolve fuzzily, so `~/dl/inv` can browse `~/Downloads`. **Explicit `~/Downloads/` browsing and its descendants list newest MODIFIED first**, not newest-created or best fuzzy score first. Filtering keeps that recency order; general project/home ranking is unchanged. Metadata uses bounded async reads (16 at a time), cached for this picker lifetime; missing/unreadable times sort last and ties sort alphabetically. Close and reopen to refresh cached recency. See [finding files](/plugins/pi-vim/#finding-files) for depth, hidden-file and `fd` fallback behavior.
+
+## Track logical tasks
+
+**Owner: [pi-todo](/plugins/pi-todo/), a suite component, not an external requirement.** Its `todo` tool tracks status and dependencies; `/todos` shows the full non-deleted checklist grouped by status. These are logical tasks, separate from pi-bg's process/session activity in `/tasks`.
+
+| Owner | Suite default | Task / setting |
+| --- | --- | --- |
+| `pi-todo` | Ctrl+Shift+T | Collapse/expand the live todo widget; `collapseKey` in `pi-todo.json`. |
+
+Stock Pi keeps Ctrl+T for thinking blocks. pi-todo defaults to Ctrl+Shift+T without requiring a personal profile or native remap. Its collapsed widget puts `Todos (done/total)` and the configured expand hint on one content row, followed by a blank spacer. `collapseKey: "off"` disables the shortcut; other valid keys are configurable. If you choose Ctrl+T—or your own native binding occupies Ctrl+Shift+T—move or disable the native action explicitly; **the suite does not override it automatically**. `/reload` rebinds the shortcut.
+
+Global settings live in `~/.pi/agent/pi-todo.json` (`PI_CODING_AGENT_DIR` honored); project `.pi/pi-todo.json` overrides them, with legacy rpiv-todo fallback. `maxWidgetLines` defaults to `12` with a floor of `3`; optional guidance settings remain available. See the [plugin reference](/plugins/pi-todo/#configuration).
 
 ## Plan, inspect tasks and review changes
 
@@ -162,7 +174,7 @@ Stock selection action IDs, configurable in `keybindings.json`:
 | `tui.select.confirm` | Enter | Confirm the item. |
 | `tui.select.cancel` | Escape / Ctrl+C | Cancel the list. |
 
-The suite does **not** include a todo plugin. If you separately enable rpiv-todo, select-nav can forward its Ctrl+T/Ctrl+Shift+T toggle inside dialogs. That optional compatibility path neither creates task entries nor changes stock thinking bindings for you.
+With [pi-todo](/plugins/pi-todo/) selected, pi-select-nav can forward **Ctrl+Shift+T** (suite default) and **Ctrl+T** (a common configured rebind) from eligible dialogs to registered extension shortcut handlers, consuming the key only when one runs. It does not forward arbitrary custom todo keys, create tasks or remap stock thinking. Text editors keep their editing keys and list-navigation safeguards; forwarding a panel toggle is not permission to rewrite text input.
 
 ## Resolve the two stock conflicts
 
@@ -171,6 +183,7 @@ The suite does **not** include a todo plugin. If you separately enable rpiv-todo
 - **Ctrl+L:** move or disable `app.model.select` before clear-screen can register a working shortcut.
 - **Shift+Tab:** move or disable `app.thinking.cycle` before tool-gate's default `cycleShortcut` can work. Alternatively change `cycleShortcut` itself. `/mode` works without the key.
 - Plan mode alone registers no shortcut. If you set `toggleShortcut` to Shift+Tab, resolve the same thinking conflict. With tool-gate, never also register plan mode on the gate's key.
+- **Customized todo key:** pi-todo's Ctrl+Shift+T default has no stock Ctrl+T conflict. If you change `collapseKey` to Ctrl+T, move or disable `app.thinking.toggle` first. A personal native Ctrl+Shift+T binding also requires moving that action or choosing another todo key.
 
 A minimal stock-action remap in `~/.pi/agent/keybindings.json` is:
 
@@ -185,7 +198,7 @@ Merge, `/reload`, then inspect `/hotkeys` and startup diagnostics. An array repl
 
 ## Optional personal profile
 
-**This is a labeled personal configuration, not stock Pi or automatic suite behavior.** It moves model/effort controls, binds dedicated history and reserves Ctrl+G for returning to the transcript tail. The external editor remains available through the suite's Ctrl+X Ctrl+E chord.
+**This is a labeled personal configuration, not stock Pi or automatic suite behavior.** It moves model/effort controls, binds dedicated history and reserves Ctrl+G for returning to the transcript tail. The external editor remains available through pi-vim's Ctrl+X Ctrl+E chord when that component is selected. This profile also relocates native thinking and tree no-tools filtering to Ctrl+Shift+T so that a separately configured todo toggle can use Ctrl+T.
 
 ```json
 {
@@ -205,6 +218,18 @@ Merge, `/reload`, then inspect `/hotkeys` and startup diagnostics. An array repl
 }
 ```
 
+### Optional todo rebind
+
+To pair the profile above with pi-todo, merge this into `~/.pi/agent/pi-todo.json` (or project `.pi/pi-todo.json`), preserving `maxWidgetLines`, `guidance` and any unrelated settings:
+
+```json
+{
+  "collapseKey": "ctrl+t"
+}
+```
+
+Use both changes together, then `/reload`: **Ctrl+T becomes the personal todo key; Ctrl+Shift+T becomes native thinking, not the todo default.** Applying only the keybindings profile would conflict with pi-todo's default Ctrl+Shift+T. Neither file is installed by the suite, and neither is necessary when you keep stock Pi plus suite defaults.
+
 During transcript search, Ctrl+G still advances matches rather than jumping to the tail; close search first. The profile disables both model-cycle actions, including Windows/WSL's Alt+P conflict. Ctrl+O remains native tool expansion. Ctrl+U/D remain **unbound** as native fullscreen half-page actions; Vim supplies the mode-sensitive route. Alt+T cycles Pi effort, not a guarantee of identical Claude thinking semantics.
 
 Herdr/tmux prefixes are separate and can intercept keys before Pi. A multiplexer shortcut is not an application action ID, and no complete cross-tool keymap mirroring is implied.
@@ -222,7 +247,7 @@ When a key does the wrong thing:
 
 - Check **where focus is** and whether Vim is Insert, idle Normal, Visual, pending or EX. Try arrows and a plain Escape before assuming a global binding failed.
 - Run **`/hotkeys`** for effective main-editor/application keys; read startup “Skipping” diagnostics. Local dialog keys need their own help/reference, not `/hotkeys` alone.
-- Check the exact **action ID** in `keybindings.json`, or the correct plugin setting (`cycleShortcut`, `toggleShortcut`, `shortcut`, `acceptKeys`). Chords have no separate action ID.
+- Check the exact **action ID** in `keybindings.json`, or the correct plugin setting (`cycleShortcut`, `toggleShortcut`, `collapseKey`, `shortcut`, `acceptKeys`). Chords have no separate action ID.
 - After editing bindings, plugin settings or selection, use **`/reload`**. A private renderer/stdout patch or retained upstream stash may need a full restart for a clean baseline.
 - Remove duplicate standalone/upstream copies. For a minimal reproduction, load one component and then add companions back; see [troubleshooting](/guides/troubleshooting/#isolate-a-conflict).
 

@@ -15,6 +15,7 @@ After changing extension selection, restart Pi or use `/reload`. If an extension
 | Two copies of a tool or registration warnings | Keep either the suite entry or the standalone component, never both. This includes `npm:pi-vim`, `npm:@saadjs/pi-stash`, `npm:pi-sticky-last-prompt` and `npm:pi-btw`, which the suite now contains |
 | Duplicate `/ccstyle`, `/context`, `/clear` or doubled diagram rendering | Remove `npm:pi-cc-extensions`. Its parts now live in pi-cc-render, pi-markdown-extras, pi-context, pi-status-footer and pi-subagents, and it patches the same renderer |
 | `ask_user_question` collision | Disable any other extension registering the same tool, such as `@juicesharp/rpiv-ask-user-question` |
+| Duplicate `todo` tool or `/todos` | Disable `npm:@juicesharp/rpiv-todo` before enabling the suite's pi-todo; retain old config/session data for replay and rollback |
 | Unexpected background UI | Check whether another background-task extension is enabled alongside pi-bg |
 | `/copy` behaves differently than expected | It is Pi’s built-in last-reply command. Pi Plugins’ picker is `/yank` |
 | Nothing to ask in print mode | Ask-user-question removes its tool without UI; a surviving call returns an error |
@@ -76,6 +77,12 @@ Next-prompt takes Tab/Right only while a suggestion is shown in the empty, focus
 ### Shift+Tab still cycles effort
 
 Current Pi skips tool-gate's conflicting shortcut while stock `app.thinking.cycle` uses Shift+Tab; selecting the gate does **not** override it automatically. Move that stock action (for example to `alt+t` in `keybindings.json`), or change the gate's `cycleShortcut`, then `/reload` and inspect `/hotkeys` plus startup diagnostics. `/mode` can switch modes without the shortcut. Plan mode registers no shortcut of its own unless you set `toggleShortcut`, which toggles plan mode (or, with the gate, cycles its modes), takes effect after `/reload`, and must not reuse the gate's key.
+
+### Todo collapse key toggles thinking or does nothing
+
+[pi-todo](/plugins/pi-todo/) defaults to Ctrl+Shift+T; stock Ctrl+T still toggles thinking blocks. If you configure `collapseKey` to `ctrl+t`, first move or disable `app.thinking.toggle` in `keybindings.json`. Native bindings are not overridden automatically: Pi skips a conflicting extension shortcut. A personal native Ctrl+Shift+T binding can also conflict with the suite default. `/reload` after rebinding, then inspect `/hotkeys` and startup diagnostics. `collapseKey: "off"` deliberately registers no collapse shortcut.
+
+The widget exists only with overlay-visible tasks; `/todos` shows the full non-deleted checklist even when rows have faded out or the widget is collapsed. Select-nav forwards the eligible Ctrl+T/Ctrl+Shift+T toggle keys in dialogs only when a registered handler runs; it does not forward arbitrary custom collapse keys or turn text fields into navigation lists. See the [keymap](/guides/keyboard/#track-logical-tasks).
 
 ## Background and notebook work
 

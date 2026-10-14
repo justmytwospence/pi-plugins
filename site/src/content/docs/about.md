@@ -8,12 +8,13 @@ Pi Plugins is maintained by [Spencer Boucher](https://github.com/justmytwospence
 
 This documentation covers the Pi suite at [justmytwospence/pi-plugins](https://github.com/justmytwospence/pi-plugins). It is an independent personal project, not the official Pi documentation. For Pi itself, start at [pi.dev](https://pi.dev).
 
-All 26 components are exposed as selectable entries from one Git package. They can be independently enabled, not independently version-pinned within the suite.
+All 27 components are exposed as selectable entries from one Git package. They can be independently enabled, not independently version-pinned within the suite.
 
 ## Source and attribution
 
 The suite preserves original repository history and MIT attribution. Component licenses remain with their source.
 
+- **Logical tasks** import [juicesharp/rpiv-mono’s rpiv-todo](https://github.com/juicesharp/rpiv-mono/tree/7c9bc924c5bfd148f36d7ebc9f7bd0a9469d633f/packages/rpiv-todo) 2.12.0 at original commit `7c9bc924c5bfd148f36d7ebc9f7bd0a9469d633f`, with upstream history and MIT attribution preserved. [pi-todo](/plugins/pi-todo/) keeps the `todo` tool, `/todos` command and upstream replay/localization identities while adopting suite configuration and a one-row collapsed widget.
 - **Plan mode** began as a fork of [narumiruna/pi-extensions’ plan-mode package](https://github.com/narumiruna/pi-extensions/tree/main/packages/pi-plan-mode), originally published as `@narumitw/pi-plan-mode`. Its planner was subsequently rebuilt around in-process Pi sessions.
 - **Subagent UI** adapts the widget, FleetView and conversation viewer from [tintinweb/pi-subagents](https://github.com/tintinweb/pi-subagents), ported to this component’s RPC children and run records.
 - **CC render, Markdown extras and context** are ports of [pi-cc-extensions](https://github.com/minuque/pi-cc-extensions) by minuque (MIT), as are status footer's working row and MCP chip. CC render's compact thinking forks pi-compact-thinking by tifandotme, and its rich diffs adapt [pi-tool-display](https://github.com/MasuRii/pi-tool-display) by MasuRii.

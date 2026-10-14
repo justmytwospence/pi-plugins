@@ -3,17 +3,20 @@ title: External integrations
 description: Which capabilities the suite owns, which specialist packages remain separate, and their permission boundaries.
 ---
 
-The suite owns its core editor interactions: **Vim editing, prompt stash, sticky last prompt and side conversations**. It also owns Claude Code-style transcript rendering, Markdown extras and `/context`. Their upstream MIT attribution and import provenance remain with each component. Owning the integration does not mean replacing the mature Vim motion engine with a handful of mappings.
+The suite owns its core editor interactions: **Vim editing, prompt stash, sticky last prompt and side conversations**. It also owns Claude Code-style transcript rendering, Markdown extras, `/context` and [logical task tracking](/plugins/pi-todo/) through `todo` and `/todos`. Their upstream MIT attribution and import provenance remain with each component. Owning the integration does not mean replacing the mature Vim motion engine with a handful of mappings.
 
-Five previously used third-party packages remain external. They are optional, not bundled suite requirements. The versions below are the audit baseline, not upgrade instructions.
+Four previously used third-party packages remain external. They are optional, not bundled suite requirements. The versions below are the audit baseline, not upgrade instructions.
 
 | Package | Baseline | Why it stays separate |
 | --- | --- | --- |
-| `@juicesharp/rpiv-todo` | 2.12.0 | A persistent logical task state machine with dependencies, checklist UI and `todo` tool |
 | `pi-web-access` | 0.33.0 | Search providers, extraction, browser credentials, media, SSRF protection and stored results |
 | `@gotgenes/pi-anthropic-auth` | 3.3.2 | Billing-sensitive authentication and request compatibility |
 | `pi-autoresearch` | 1.8.1 | Specialized experiments, benchmarks, checks, rollback and dashboards |
 | `@earendil-works/pi-radius` | 0.1.19 | A deprecated connector; migration to native/MCP routing is a separate task |
+
+## Absorbed: rpiv-todo
+
+`@juicesharp/rpiv-todo` 2.12.0 is now [pi-todo](/plugins/pi-todo/), imported with upstream history and MIT attribution at original commit `7c9bc924c5bfd148f36d7ebc9f7bd0a9469d633f`. Disable the upstream npm entry before selecting `packages/pi-todo/index.ts`. The `todo` tool, `/todos` command and upstream session identities stay compatible; global/project `pi-todo.json` settings take over with legacy rpiv-todo config fallbacks. The hard rpiv-config dependency is removed; rpiv-i18n is still optional, with English fallback. No private keyboard profile is required.
 
 ## Superseded: pi-cc-extensions
 
@@ -30,7 +33,7 @@ Five previously used third-party packages remain external. They are optional, no
 
 **Do not enable pi-cc-extensions alongside pi-cc-render.** Both patch the same Pi components and register `/ccstyle`, and Pi does not deduplicate different packages. Remove it rather than disabling its features one by one. Its custom footer, bare-URL linkifier and references to other Pi sessions are deliberately not carried over; pi-subagents' mentions target its `subagent` tool rather than an `Agent` tool. pi-cc-render reads its own `~/.pi/agent/pi-cc-render.json`, not the old `pi-cc-extensions.json`.
 
-To keep suite-owned interactive tool renderers and the external `todo` tool out of the Claude Code-style restyling, list them in `excludeRenderers` in `pi-cc-render.json`:
+To keep suite-owned interactive tool renderers, including pi-todo's `todo`, out of the Claude Code-style restyling, list them in `excludeRenderers` in `pi-cc-render.json`:
 
 ```json
 {
@@ -43,7 +46,7 @@ To keep suite-owned interactive tool renderers and the external `todo` tool out 
 }
 ```
 
-Use the actual registered tool names for your selected revision; do not interpret a renderer exclusion as disabling a tool. Logical `/todos` remain distinct from the process activity inventory in `/tasks`.
+Use the actual registered tool names for your selected revision; do not interpret a renderer exclusion as disabling a tool. [Logical `/todos`](/plugins/pi-todo/) remain distinct from the process activity inventory in `/tasks`.
 
 ## Credentials and permission boundaries
 

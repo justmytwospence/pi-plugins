@@ -3,6 +3,14 @@
 // When the configured test target changes, re-audit against its keybinding reference
 // and actual SDK, update this baseline, then review guide/platform prose together.
 export const keymapSdkVersion = "1.2.0";
+
+// Suite-owned configurable shortcuts, separate from stock action IDs and personal profiles.
+// pi-select-nav optionally forwards the todo default/common rebind in dialogs;
+// it does not register the tool or remap reserved native bindings.
+export const suiteShortcuts = {
+  "pi-todo": { setting: "collapseKey", defaultKey: "ctrl+shift+t" },
+};
+
 export const stockBindings = {
   "tui.editor.cursorUp": "up",
   "tui.editor.cursorDown": "down",

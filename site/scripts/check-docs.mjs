@@ -3,7 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { plugins } from "../src/data/plugins.mjs";
-import { keymapSdkVersion, stockBindings } from "../src/data/keymap.mjs";
+import { keymapSdkVersion, stockBindings, suiteShortcuts } from "../src/data/keymap.mjs";
 
 const site = fileURLToPath(new URL("../", import.meta.url));
 const root = path.resolve(site, "..");
@@ -18,7 +18,7 @@ const manifest = JSON.parse(await readFile(path.join(root, "package.json"), "utf
 const entries = manifest.pi.extensions.map((entry) => entry.replace(/^\.\//, ""));
 const names = entries.map((entry) => entry.split("/")[1]).sort();
 const catalog = plugins.map((plugin) => plugin.name).sort();
-if (names.length !== 26) fail("Expected 26 suite entries; update the public count deliberately when the manifest changes.");
+if (names.length !== 27) fail("Expected 27 suite entries; update the public count deliberately when the manifest changes.");
 if (new Set(catalog).size !== catalog.length) fail("Duplicate plugin in catalog.");
 if (JSON.stringify(names) !== JSON.stringify(catalog)) fail("Catalog does not match the root suite manifest.");
 if (manifest.devDependencies?.["@earendil-works/pi-coding-agent"] !== keymapSdkVersion) fail("Re-audit the keymap baseline when the configured Pi SDK test target changes.");
@@ -42,7 +42,7 @@ const requiredKeymapActions = [
   ...Object.keys(stockBindings).filter((action) => action.startsWith("tui.altScreen.")),
   "tui.editor.historyPrevious", "tui.editor.historyNext", "tui.editor.deleteToLineStart",
   "tui.editor.deleteToLineEnd", "tui.editor.deleteCharForward", "tui.input.newLine",
-  "tui.input.submit", "app.editor.external", "app.model.select", "app.thinking.cycle",
+  "tui.input.submit", "app.editor.external", "app.model.select", "app.thinking.cycle", "app.thinking.toggle",
   ...Object.keys(stockBindings).filter((action) => action.startsWith("tui.select.")),
 ];
 for (const action of requiredKeymapActions) {
@@ -58,14 +58,29 @@ for (const [, action, displayed] of stockRows) {
     fail("Wrong stock default for " + action + ": " + displayed.trim());
   }
 }
-const profileBlock = keyboard.split("## Optional personal profile")[1]?.match(/^```json\n([\s\S]*?)^```/m);
+// Plugin settings are not invented app/tui action IDs. Keep their suite defaults explicit.
+const suiteRows = [...keyboard.matchAll(/^\| `(pi-[\w-]+)` \| ([^|]+) \|/gm)];
+for (const [name, shortcut] of Object.entries(suiteShortcuts)) {
+  const row = suiteRows.find((row) => row[1] === name);
+  if (!names.includes(name)) fail("Unknown suite shortcut owner: " + name);
+  if (!row || normalizeKey(row[2].trim()) !== normalizeKey(shortcut.defaultKey)) {
+    fail("Missing or wrong suite shortcut default for " + name + "." + shortcut.setting);
+  }
+}
+const profileSection = keyboard.split("## Optional personal profile")[1] ?? "";
+const profileBlock = profileSection.match(/^```json\n([\s\S]*?)^```/m);
+const todoProfileBlock = profileSection.split("### Optional todo rebind")[1]?.match(/^```json\n([\s\S]*?)^```/m);
 try {
   const profile = JSON.parse(profileBlock?.[1] ?? "null");
   if (!profile || JSON.stringify(profile["app.editor.external"]) !== "[]" ||
       JSON.stringify(profile["tui.altScreen.bottom"]) !== '["ctrl+g","ctrl+end"]') {
     fail("Labeled personal profile must separate external-editor chord from Ctrl+G transcript tail.");
   }
-} catch { fail("Invalid optional personal keymap profile."); }
+  const todoProfile = JSON.parse(todoProfileBlock?.[1] ?? "null");
+  if (todoProfile?.collapseKey !== "ctrl+t" || profile?.["app.thinking.toggle"] !== "ctrl+shift+t") {
+    fail("Optional personal todo rebind must pair Ctrl+T with explicitly relocated native thinking.");
+  }
+} catch { fail("Invalid optional personal keymap or todo profile."); }
 
 const paths = (await filesIn(docs)).filter((file) => /\.mdx?$/.test(file));
 const routeFor = (file) => "/" + path.relative(docs, file).replaceAll(path.sep, "/").replace(/\.mdx?$/, "").replace(/(^|\/)index$/, "") .replace(/\/$/, "") + "/";
@@ -147,4 +162,4 @@ for (const required of ["/", "/guides/overview/", "/guides/install/", "/guides/r
   if (!routes.has(required)) fail("Missing required page: " + required);
 }
 if (errors.length) { console.error(errors.join("\n")); process.exitCode = 1; }
-else console.log("PASS: " + paths.length + " authored pages; all " + covered.size + " suite references covered; uniform quick references, README catalog, audited keymap action IDs/defaults, frontmatter, JSON examples, selected entries and source links checked. Rendered fragments are checked by npm run build.");
+else console.log("PASS: " + paths.length + " authored pages; all " + covered.size + " suite references covered; uniform quick references, README catalog, audited stock/suite keymap defaults and optional profile separation, frontmatter, JSON examples, selected entries and source links checked. Rendered fragments are checked by npm run build.");

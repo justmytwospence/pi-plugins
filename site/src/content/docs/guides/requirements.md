@@ -14,6 +14,7 @@ The configured SDK test target is **Pi 1.2.0**, covering loader selection, local
 
 | Component or feature | Requirement and boundary |
 | --- | --- |
+| Logical todos | No external executable, classifier, credentials or required sibling. pi-todo stores snapshots in session tool results; task text reaches the model and session history. UI needs an interactive session; rpiv-i18n is optional and rpiv-config is not required. |
 | Background jobs | A shell environment with `bash`; commands may need their own tools or credentials. Process groups are used for stopping work. |
 | Subagents | A runnable `pi` command and usable model/provider configuration. Child sessions make model calls. |
 | Subagent worktrees | Git and a suitable repository, only when `worktree: true` is requested. Subagents use `git worktree add` directly; no external worktree helper is required. |

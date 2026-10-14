@@ -11,7 +11,7 @@ plugin: pi-select-nav
 - **Controls:** Ctrl+J/K and sometimes j/k in lists; contextual Tab in the main prompt. No command or tool; no registered global shortcut.
 - **Settings:** No plugin settings. Add Ctrl+K/J to Pi's `tui.select.up/down` for keybinding-aware lists/autocomplete.
 - **Requirements, cost & privacy:** TUI/focus hooks only; no inference, network or external program. Focus heuristics inspect local component structure.
-- **Integrations & limits:** Optional next-prompt and activities; explicit input contexts keep their own keys. Optional todo dialog forwarding is not a bundled todo plugin. Shift+Tab remains stock unless explicitly remapped.
+- **Integrations & limits:** Optional next-prompt and activities; explicit input contexts keep their own keys. Optional dialog forwarding supports the suite's pi-todo default/common rebind without requiring it. Shift+Tab remains stock unless explicitly remapped.
 
 ## Purpose and input behavior
 
@@ -35,7 +35,9 @@ These companions remain optional and load order does not choose the priority. Th
 
 ## Todo toggle in dialogs
 
-Pi runs extension shortcuts only from the prompt editor, so a question, plan approval or other dialog would otherwise swallow them. While such a dialog has focus, select-nav passes **Ctrl+T** and **Ctrl+Shift+T** (rpiv-todo's collapse key, as commonly rebound and by default) to the extension shortcut handlers and consumes the key only when one runs. Other keys stay with the dialog. The list is the `DIALOG_SHORTCUTS` constant in the source.
+Pi runs extension shortcuts only from the prompt editor, so a question, plan approval or other dialog would otherwise swallow them. While such a dialog has focus, select-nav passes **Ctrl+Shift+T** ([pi-todo](/plugins/pi-todo/)'s suite default) and **Ctrl+T** (a common configured `collapseKey` rebind) to registered extension shortcut handlers and consumes the key only when one runs. Other keys stay with the dialog. The list is the `DIALOG_SHORTCUTS` constant in the source; arbitrary custom collapse keys are not forwarded.
+
+This companion behavior is optional: select-nav does not register `todo`, create tasks, require pi-todo or remap native keys. Stock Ctrl+T remains `app.thinking.toggle` unless you explicitly move or disable it before assigning todo that key. Pi skips conflicting extension shortcuts rather than overriding native bindings automatically. Text-entry and list-navigation protections still apply as described below; panel-toggle forwarding does not turn editor keys into list movement. See [stock, suite and optional personal bindings](/guides/keyboard/#track-logical-tasks).
 
 ## Requirements, configuration, and costs
 
