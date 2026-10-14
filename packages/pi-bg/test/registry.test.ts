@@ -104,6 +104,37 @@ describe("registry", () => {
     await until(() => a.tasks.get(kept.id)?.status !== "running");
   });
 
+  it("two sessions in one process see, kill and release only their own tasks; a gone session's kept services pass to the next", async () => {
+    const reg = new Registry();
+    reg.attach("main");
+    reg.attach("planner");
+    const mine = reg.start({ ...base, sessionId: "main", command: "sleep 30", name: "mine", kind: "job", cwd: dir });
+    const theirs = reg.start({ ...base, sessionId: "planner", command: "sleep 30", name: "theirs", kind: "job", cwd: dir });
+    const kept = reg.start({ ...base, sessionId: "planner", command: "sleep 30", name: "kept3", kind: "service", cwd: dir, keep: true });
+    expect(reg.list("main").map((t) => t.name)).toEqual(["mine"]);
+    expect(reg.running("planner").map((t) => t.name)).toEqual(["theirs", "kept3"]);
+    expect(reg.find(theirs.id, "main")).toBeUndefined();
+    expect(reg.find("theirs", "planner")?.id).toBe(theirs.id);
+    expect(reg.list().length).toBe(3);
+    // The planner quits: its job dies, the main session's job does not, and only its kept service is released.
+    await reg.killAll("session", 1_000, "planner");
+    await until(() => theirs.status !== "running");
+    expect(mine.status).toBe("running");
+    reg.release("planner");
+    const own = path.join(dir, "state", `${process.pid}.json`);
+    expect(JSON.parse(fs.readFileSync(own, "utf8")).map((e: { name: string; released?: boolean }) => [e.name, e.released ?? false])).toEqual([["mine", false], ["kept3", true]]);
+    reg.detach("planner");
+    // A /new in this process: the planner's ended job is forgotten and its kept service is the new session's, the user's, owing nothing.
+    reg.attach("next");
+    expect(reg.tasks.has(theirs.id)).toBe(false);
+    expect(kept.sessionId).toBe("next");
+    expect(kept.origin).toBe("user");
+    expect(kept.delivered).toBe(true);
+    expect(mine.sessionId).toBe("main");
+    await reg.killAll("session");
+    await reg.kill(kept.id, "user");
+  });
+
   it("an exit 0 that races a stop still reads as done; processes the shell left behind die at session end", async () => {
     const reg = new Registry();
     const t = reg.start({ ...base, command: "sleep 30 & exit 0", name: "leaves", kind: "job", cwd: dir });

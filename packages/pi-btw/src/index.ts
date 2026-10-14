@@ -150,6 +150,9 @@ export default function (pi: ExtensionAPI) {
       clearBtwSessionSubscriptions(runtime);
       try { await requestBtwSessionAbort(runtime); }
       finally {
+        // Pi's own runtime emits session_shutdown before disposing; so does a host of an in-process
+        // session, or an extension it loaded keeps timers running against a stale ctx.
+        try { await runtime.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); } catch { /* No extension may keep the session alive. */ }
         try { runtime.session.dispose(); } catch { /* Cleanup is idempotent even if a host hook failed. */ }
       }
     })();

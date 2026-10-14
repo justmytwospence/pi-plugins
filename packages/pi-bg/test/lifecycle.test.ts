@@ -19,9 +19,11 @@ function fakeRegistry() {
     listeners,
     off,
     cleared: new Set<string>(),
-    list: () => [...tasks.values()],
-    running: () => [...tasks.values()].filter((t) => t.status === "running"),
+    list: (sid?: string) => [...tasks.values()].filter((t) => !sid || t.sessionId === sid),
+    running: (sid?: string) => [...tasks.values()].filter((t) => t.status === "running" && (!sid || t.sessionId === sid)),
     forgetEnded: vi.fn(),
+    attach: vi.fn(),
+    detach: vi.fn(),
     sweep: vi.fn(() => []),
     subscribe: vi.fn((fn: (e: TaskEvent) => void) => {
       listeners.add(fn);
@@ -37,7 +39,7 @@ function fakeRegistry() {
 
 function job(): Task {
   return {
-    id: "job", name: "build", kind: "job", command: "make", cwd: "/tmp", logPath: "/tmp/build.log",
+    id: "job", name: "build", kind: "job", command: "make", cwd: "/tmp", logPath: "/tmp/build.log", sessionId: "test-session",
     startedAt: Date.now(), status: "running", ready: false, keep: false, origin: "agent",
     delivered: false, readyDelivered: false,
   };
@@ -173,7 +175,7 @@ describe("session cleanup", () => {
     expect(guest.setHosted).toHaveBeenLastCalledWith(false, "bg");
     expect(f.emitted).toContainEqual({ channel: "activity:gone", data: { id: "bg" } });
     expect(f.emitted).toContainEqual({ channel: "herdr:background", data: { active: false, id: "bg:job" } });
-    expect(reg.killAll).toHaveBeenCalledWith("session");
+    expect(reg.killAll).toHaveBeenCalledWith("session", undefined, "test-session");
     expect(reg.release).toHaveBeenCalledOnce();
     expect(vi.getTimerCount()).toBe(0);
     expect(() => saved({ type: "start", task: reg.tasks.get("job")! })).not.toThrow();

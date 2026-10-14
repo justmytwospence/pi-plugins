@@ -159,10 +159,12 @@ export default function piBg(pi: ExtensionAPI) {
   let statusTimer: ReturnType<typeof setInterval> | undefined;
   let startupWake: ReturnType<typeof setImmediate> | undefined;
   let sessionGeneration = 0;
+  /** The session this instance serves: the only one whose tasks it lists, waits on, wakes and kills. */
+  let sessionId = "";
   let lastStatus: string | undefined;
   let herdrActive = false;
   /** The running jobs the agent started: what bg_wait without an id waits for. */
-  const agentJobs = () => reg.running().filter((t) => t.kind === "job" && t.origin === "agent");
+  const agentJobs = () => reg.running(sessionId).filter((t) => t.kind === "job" && t.origin === "agent");
   /** The tasks a bg_wait is waiting on. */
   const waitingIds = (): Set<string> => {
     const ids = new Set<string>();
@@ -244,8 +246,8 @@ export default function piBg(pi: ExtensionAPI) {
   const alerting = (t: Task) => (t.status === "failed" || t.status === "timeout") && (t.endedAt ?? 0) > dismissedAt && !reg.cleared.has(t.id);
   const pillOf = (now: number): ActivityPill | undefined => {
     void now;
-    const running = reg.running().length;
-    const failed = reg.list().filter(alerting).length;
+    const running = reg.running(sessionId).length;
+    const failed = reg.list(sessionId).filter(alerting).length;
     if (!running && !failed) return undefined;
     return { label: running ? `${running} shell${running === 1 ? "" : "s"}` : "shells", ...(failed ? { alert: `${failed} failed` } : {}) };
   };
@@ -255,7 +257,7 @@ export default function piBg(pi: ExtensionAPI) {
     noun: "shell",
     // Running first (oldest first), then what ended (newest first).
     entries: (now) =>
-      [...reg.running(), ...reg.list().filter((t) => t.status !== "running").sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))].map((t) => ({
+      [...reg.running(sessionId), ...reg.list(sessionId).filter((t) => t.status !== "running").sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))].map((t) => ({
         key: t.id,
         label: t.name,
         detail: [noteOf(t)?.detail, t.command.replace(/\s+/gu, " ").trim()].filter(Boolean).join(" · "),
@@ -268,15 +270,15 @@ export default function piBg(pi: ExtensionAPI) {
         ...(t.endedAt ? { endedAt: t.endedAt } : {}),
       })),
     open: (key, ui) => {
-      const t = reg.find(key);
+      const t = reg.find(key, sessionId);
       return t ? openLog(ui as ExtensionContext["ui"], t) : Promise.resolve();
     },
     stop: (key) => {
-      const t = reg.find(key);
+      const t = reg.find(key, sessionId);
       if (t?.status === "running") return stopTask(t, "user");
     },
     dismiss: (key) => {
-      const t = reg.find(key);
+      const t = reg.find(key, sessionId);
       if (!t || t.status === "running") return;
       reg.cleared.add(t.id);
       refresh();
@@ -355,7 +357,7 @@ export default function piBg(pi: ExtensionAPI) {
   };
 
   const snapshot = () =>
-    reg.list().map((t) => ({
+    reg.list(sessionId).map((t) => ({
       id: t.id,
       name: t.name,
       kind: t.kind,
@@ -385,7 +387,7 @@ export default function piBg(pi: ExtensionAPI) {
 
   const updateStatus = () => {
     if (!attached || !ctx?.hasUI) return;
-    const s = tui() ? undefined : footerStatus(reg.list());
+    const s = tui() ? undefined : footerStatus(reg.list(sessionId));
     if (s === lastStatus) return;
     lastStatus = s;
     ctx.ui.setStatus("bg", s);
@@ -395,7 +397,7 @@ export default function piBg(pi: ExtensionAPI) {
   const syncHolds = () => {
     if (!attached) return;
     const want = new Set([
-      ...reg.running().filter((t) => t.origin === "agent" && t.kind === "job" && !t.delivered).map((t) => t.id),
+      ...reg.running(sessionId).filter((t) => t.origin === "agent" && t.kind === "job" && !t.delivered).map((t) => t.id),
       ...[...owed.keys()].filter((id) => reg.tasks.has(id)),
     ]);
     for (const id of want) {
@@ -465,7 +467,7 @@ export default function piBg(pi: ExtensionAPI) {
   /** After a reload: outcomes that arrived while no session was attached are owed now. */
   const oweFromState = () => {
     for (const t of reg.tasks.values()) {
-      if (t.origin !== "agent") continue;
+      if (t.origin !== "agent" || t.sessionId !== sessionId) continue;
       if (t.status !== "running" && !t.delivered) owed.set(t.id, "end");
       else if (t.status === "running" && t.ready && t.readyPattern && !t.readyDelivered) owed.set(t.id, "ready");
     }
@@ -694,12 +696,23 @@ export default function piBg(pi: ExtensionAPI) {
 
   // ---- lifecycle ----
 
+  /** The session's id; a session without one (in memory, before it is persisted) gets a per-instance id. */
+  const instanceId = `instance-${randomUUID()}`;
+  const sessionIdOf = (c: ExtensionContext): string => {
+    try {
+      return c.sessionManager.getSessionId() || instanceId;
+    } catch {
+      return instanceId;
+    }
+  };
+
   const detachSession = () => {
     const wasAttached = attached;
     // Invalidate saved/queued callbacks and drop the context before calling any session UI.
     attached = false;
     ctx = undefined;
     sessionGeneration++;
+    if (wasAttached) reg.detach(sessionId);
     if (statusTimer) clearInterval(statusTimer);
     statusTimer = undefined;
     if (startupWake) clearImmediate(startupWake);
@@ -736,9 +749,12 @@ export default function piBg(pi: ExtensionAPI) {
     attached = true;
     lastStatus = undefined;
     holds.clear();
-    if (event.reason !== "reload") reg.forgetEnded();
+    sessionId = sessionIdOf(c);
+    reg.attach(sessionId);
+    if (event.reason !== "reload") reg.forgetEnded(sessionId);
     if (event.reason === "startup") {
-      const adopted = reg.sweep(c.cwd);
+      // Only a session with a UI adopts kept services; a headless one (an in-process planner) just cleans up.
+      const adopted = reg.sweep(c.cwd, sessionId, c.hasUI);
       if (adopted.length && c.hasUI) c.ui.notify(`bg: adopted kept service${adopted.length > 1 ? "s" : ""} ${adopted.map((t) => t.name).join(", ")}`, "info");
     }
     hosts.clear();
@@ -747,7 +763,7 @@ export default function piBg(pi: ExtensionAPI) {
     offerSection();
     startHosting();
     unsubscribe = reg.subscribe((e) => {
-      if (attached && generation === sessionGeneration) guarded(() => onTask(e));
+      if (attached && generation === sessionGeneration && e.task.sessionId === sessionId) guarded(() => onTask(e));
     });
     oweFromState();
     // Once the session is set up; a queued callback from an earlier session is inert.
@@ -762,10 +778,13 @@ export default function piBg(pi: ExtensionAPI) {
         herdrActive = true;
       },
     });
-    statusTimer = setInterval(() => {
-      if (generation === sessionGeneration) guarded(updateStatus);
-    }, 1_000);
-    statusTimer.unref?.();
+    // The footer status only exists with a UI: a headless session has nothing to tick.
+    if (c.hasUI) {
+      statusTimer = setInterval(() => {
+        if (generation === sessionGeneration) guarded(updateStatus);
+      }, 1_000);
+      statusTimer.unref?.();
+    }
     refresh();
   });
 
@@ -785,12 +804,13 @@ export default function piBg(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (event) => {
+    const ending = sessionId;
     detachSession();
     try {
-      if (event.reason !== "reload") await reg.killAll("session");
+      if (event.reason !== "reload") await reg.killAll("session", undefined, ending);
     } finally {
       // Quitting: kept services stay listed for a later pi to adopt, even if killing failed.
-      if (event.reason === "quit") reg.release();
+      if (event.reason === "quit") reg.release(ending);
     }
   });
 
@@ -830,7 +850,7 @@ export default function piBg(pi: ExtensionAPI) {
         name: params.name?.trim() || (server ? marimoName(server) : nameFromCommand(params.command)),
         kind,
         cwd,
-        sessionId: c.sessionManager.getSessionId(),
+        sessionId,
         origin: "agent",
         ready: params.ready ?? (server ? MARIMO_READY : undefined),
         timeoutSec: params.timeout,
@@ -864,7 +884,7 @@ export default function piBg(pi: ExtensionAPI) {
     parameters: WaitParams,
     renderCall(args, theme) {
       const a = args as { id?: string };
-      return new Text(`${theme.fg("toolTitle", theme.bold("bg_wait"))} ${theme.fg("accent", a.id ? (reg.find(a.id)?.name ?? a.id) : "next job")}`, 0, 0);
+      return new Text(`${theme.fg("toolTitle", theme.bold("bg_wait"))} ${theme.fg("accent", a.id ? (reg.find(a.id, sessionId)?.name ?? a.id) : "next job")}`, 0, 0);
     },
     async execute(_id, params, signal, _onUpdate, c) {
       const generation = sessionGeneration;
@@ -873,7 +893,7 @@ export default function piBg(pi: ExtensionAPI) {
       let any = false;
       if (params.id) {
         const x = findExternal(params.id);
-        const t = x ? undefined : reg.find(params.id);
+        const t = x ? undefined : reg.find(params.id, sessionId);
         // A server that is up, with outside work an extension tied to it (a marimo kernel): wait for that.
         const tied = t && t.status === "running" && t.kind === "service" && (t.ready || !t.readyPattern) ? (noteOf(t)?.wait ?? []) : [];
         const tiedRunning = tied.map(findExternal).filter((e): e is External => e?.state === "running");
@@ -881,7 +901,7 @@ export default function piBg(pi: ExtensionAPI) {
           if (x.state !== "running") return text(consumeExternal(x));
           targets.add(x.id);
         } else if (!t) {
-          const known = [...reg.list().map((k) => `${k.id} ${k.name}`), ...[...externals.values()].filter((e) => e.state === "running").map((e) => e.id)];
+          const known = [...reg.list(sessionId).map((k) => `${k.id} ${k.name}`), ...[...externals.values()].filter((e) => e.state === "running").map((e) => e.id)];
           throw new Error(`No task or outside work matches "${params.id}". ${known.length ? `Known: ${known.join(", ")}.` : "Nothing is running."}`);
         } else if (t.status !== "running") {
           t.delivered = true;
@@ -902,7 +922,7 @@ export default function piBg(pi: ExtensionAPI) {
       } else {
         const jobs = agentJobs();
         if (!jobs.length) {
-          const services = reg.running().filter((t) => t.kind === "service");
+          const services = reg.running(sessionId).filter((t) => t.kind === "service");
           return text(`Nothing to wait for: no job is running.${services.length ? ` Services: ${services.map((t) => `${t.name} (${outcome(t)})`).join(", ")}.` : ""}`);
         }
         any = true;
@@ -967,7 +987,7 @@ export default function piBg(pi: ExtensionAPI) {
     parameters: LogsParams,
     async execute(_id, params) {
       if (!params.id) {
-        const tasks = reg.list();
+        const tasks = reg.list(sessionId);
         const tied = new Set<string>();
         const lines = tasks.map((t) => {
           const note = noteOf(t);
@@ -978,7 +998,7 @@ export default function piBg(pi: ExtensionAPI) {
         for (const x of externals.values()) if (x.state === "running" && !tied.has(x.id)) lines.push(`${x.id}  ${x.label}  outside work  running`);
         return text(lines.length ? lines.join("\n") : "No background tasks.");
       }
-      const t = reg.find(params.id);
+      const t = reg.find(params.id, sessionId);
       if (!t) throw new Error(`No task matches "${params.id}".`);
       const n = Math.min(Math.max(1, Math.round(params.lines ?? LOGS_DEFAULT)), LOGS_MAX);
       const lines = params.grep ? grep(t.logPath, parsePattern(params.grep), n) : params.head ? head(t.logPath, n) : tail(t.logPath, n);
@@ -1003,7 +1023,7 @@ export default function piBg(pi: ExtensionAPI) {
     promptSnippet: "Stop a background task",
     parameters: KillParams,
     async execute(_id, params) {
-      const t = reg.find(params.id);
+      const t = reg.find(params.id, sessionId);
       if (!t) throw new Error(`No task matches "${params.id}".`);
       if (t.status !== "running") {
         t.delivered = true;
@@ -1026,7 +1046,7 @@ export default function piBg(pi: ExtensionAPI) {
   };
 
   const startUserTask = (c: ExtensionContext, command: string) => {
-    const t = reg.start({ command, name: nameFromCommand(command), kind: "job", cwd: c.cwd, sessionId: c.sessionManager.getSessionId(), origin: "user" });
+    const t = reg.start({ command, name: nameFromCommand(command), kind: "job", cwd: c.cwd, sessionId, origin: "user" });
     t.delivered = true;
     refresh();
     c.ui.notify(`bg: started ${t.name} (${t.id})`, "info");
@@ -1062,10 +1082,10 @@ export default function piBg(pi: ExtensionAPI) {
         }
       }
       else if (picked.kind === "rerun") {
-        const t = reg.find(picked.key);
+        const t = reg.find(picked.key, sessionId);
         if (t && ctx) initialKey = stableKey(section.id, startUserTask(ctx, t.command).id);
       } else if (picked.kind === "follow") {
-        const t = reg.find(picked.key);
+        const t = reg.find(picked.key, sessionId);
         if (t) follow({ ui }, t);
         return;
       }
@@ -1087,14 +1107,14 @@ export default function piBg(pi: ExtensionAPI) {
         return;
       }
       if (sub === "kill") {
-        const t = reg.find(rest.join(" "));
+        const t = reg.find(rest.join(" "), sessionId);
         if (!t || t.status !== "running") return c.ui.notify(`No running task matches "${arg}".`, "warning");
         await stopTask(t, "user");
         return c.ui.notify(`bg: stopped ${t.name}`, "info");
       }
       if (sub === "clear") {
         let n = 0;
-        for (const t of reg.list()) {
+        for (const t of reg.list(sessionId)) {
           if (t.status === "running") continue;
           reg.cleared.add(t.id);
           n++;
@@ -1104,7 +1124,7 @@ export default function piBg(pi: ExtensionAPI) {
       }
       if (c.mode === "tui") return openDialog(c.ui);
       // Without the TUI: a plain list.
-      const lines = reg.list().map((t) => taskLine(t));
+      const lines = reg.list(sessionId).map((t) => taskLine(t));
       c.ui.notify(lines.length ? lines.join("\n") : "No background tasks.", "info");
     },
   };
@@ -1117,7 +1137,7 @@ export default function piBg(pi: ExtensionAPI) {
   pi.registerCommand("stop", {
     description: "Stop every background shell this session started (not kept services from earlier sessions; subagents, notebooks and herdr children are stopped from /tasks or their own commands)",
     handler: async (_args, c) => {
-      const running = reg.running().filter((t) => !t.adopted);
+      const running = reg.running(sessionId).filter((t) => !t.adopted);
       if (!running.length) return c.ui.notify("No background shells running.", "info");
       await Promise.all(running.map((t) => stopTask(t, "user")));
       c.ui.notify(`bg: stopped ${running.length} shell${running.length === 1 ? "" : "s"}`, "info");

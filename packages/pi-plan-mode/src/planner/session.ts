@@ -126,8 +126,29 @@ async function openSession(host: ExtensionContext, options: PlannerSessionOption
     file: sessionManager.getSessionFile(),
     entries: () => sessionManager.getBranch(),
     subscribe: (listener) => session.subscribe(listener),
-    dispose: () => session.dispose(),
+    dispose: () => void shutdownSession(session),
   };
+}
+
+/**
+ * Ends an in-process session the way Pi's own runtime does: `session_shutdown` to the extensions
+ * it loaded (a toolset extension such as pi-bg stops its timers and kills the planner's jobs),
+ * then dispose, which invalidates their ctx. Disposing without the event leaves their timers
+ * running against a stale ctx, and a throw from a timer takes the whole Pi process down.
+ */
+export async function shutdownSession(session: AgentSession): Promise<void> {
+  try {
+    await session.abort();
+  } catch {
+    // Already idle.
+  }
+  try {
+    await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+  } catch {
+    // A failing extension must not keep the session alive.
+  } finally {
+    session.dispose();
+  }
 }
 
 /** A stored planner session's entries, read without opening it as an agent session. */

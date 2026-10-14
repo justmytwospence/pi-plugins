@@ -1,5 +1,8 @@
 // The tasks and their processes. One registry per pi process, kept on globalThis so that tasks
-// outlive `/reload`. A reload loads this module again, so the new code builds a new Registry that
+// outlive `/reload`. Several sessions can live in one process (the main one, pi-plan-mode's
+// in-process planners, which load pi-bg when given its tools), so every task carries its session
+// and the session-scoped queries take a `sessionId`; `attach`/`detach` track the live sessions,
+// and tasks of a session that is gone pass to the next session that attaches. A reload loads this module again, so the new code builds a new Registry that
 // shares the old one's maps (tasks, processes, listeners...) and becomes its successor: process-exit
 // handlers and timers started by the old instance hand over to the newest one.
 //
@@ -27,6 +30,11 @@ export interface Task {
   command: string;
   cwd: string;
   logPath: string;
+  /**
+   * The session that owns it: the one that started it, or adopted it. Several sessions can share
+   * one registry (an in-process planner session loads pi-bg too), each seeing only its own tasks.
+   */
+  sessionId: string;
   pid?: number;
   startedAt: number;
   endedAt?: number;
@@ -172,6 +180,10 @@ export class Registry {
   private successor: Registry | undefined;
   /** Ended tasks hidden from lists (`/tasks clear`, `x` in the dialog). */
   readonly cleared = new Set<string>();
+  /** Sessions of this process with a pi-bg instance attached. */
+  private readonly live = new Set<string>();
+  /** Sessions that quit: their kept services are released in the state file for a later pi. */
+  private readonly released = new Set<string>();
 
   /** The newest registry (this one, or the one that took over after a reload). */
   private latest(): Registry {
@@ -188,7 +200,7 @@ export class Registry {
     const o = old as Record<string, unknown>;
     const self = this as unknown as Record<string, unknown>;
     for (const key of ["tasks", "procs", "followers", "timeouts"]) if (o[key] instanceof Map) self[key] = o[key];
-    for (const key of ["listeners", "cleared", "strays"]) if (o[key] instanceof Set) self[key] = o[key];
+    for (const key of ["listeners", "cleared", "strays", "live", "released"]) if (o[key] instanceof Set) self[key] = o[key];
     // One poller: the new code's.
     if (o.poller) clearInterval(o.poller as ReturnType<typeof setInterval>);
     o.poller = undefined;
@@ -211,21 +223,50 @@ export class Registry {
     }
   }
 
-  list(): Task[] {
-    return [...this.tasks.values()].filter((t) => !this.cleared.has(t.id)).sort((a, b) => a.startedAt - b.startedAt);
+  /**
+   * A session's pi-bg instance is up. Tasks of sessions that are gone (a /new in this process, a
+   * planner disposed without a shutdown) pass to it: kept services, now the user's and owing no
+   * wake-up; ended tasks are forgotten; anything else still running is left to end on its own.
+   */
+  attach(sessionId: string): void {
+    this.live.add(sessionId);
+    for (const [id, t] of this.tasks) {
+      if (t.sessionId === sessionId || this.live.has(t.sessionId)) continue;
+      if (t.status !== "running") this.tasks.delete(id);
+      else if (t.keep) {
+        t.sessionId = sessionId;
+        t.delivered = true;
+        t.readyDelivered = true;
+        t.origin = "user";
+      }
+    }
   }
 
-  running(): Task[] {
-    return [...this.tasks.values()].filter((t) => t.status === "running").sort((a, b) => a.startedAt - b.startedAt);
+  detach(sessionId: string): void {
+    this.live.delete(sessionId);
+  }
+
+  /** All tasks, or one session's, when `sessionId` is given. */
+  private of(sessionId?: string): Task[] {
+    const all = [...this.tasks.values()];
+    return sessionId === undefined ? all : all.filter((t) => t.sessionId === sessionId);
+  }
+
+  list(sessionId?: string): Task[] {
+    return this.of(sessionId).filter((t) => !this.cleared.has(t.id)).sort((a, b) => a.startedAt - b.startedAt);
+  }
+
+  running(sessionId?: string): Task[] {
+    return this.of(sessionId).filter((t) => t.status === "running").sort((a, b) => a.startedAt - b.startedAt);
   }
 
   /** By id, by id prefix, or by name (the most recent task with it). */
-  find(ref: string): Task | undefined {
+  find(ref: string, sessionId?: string): Task | undefined {
     const r = ref.trim();
     if (!r) return undefined;
     const exact = this.tasks.get(r);
-    if (exact) return exact;
-    const all = [...this.tasks.values()].sort((a, b) => b.startedAt - a.startedAt);
+    if (exact) return sessionId === undefined || exact.sessionId === sessionId ? exact : undefined;
+    const all = this.of(sessionId).sort((a, b) => b.startedAt - a.startedAt);
     const byName = all.find((t) => t.name === r);
     if (byName) return byName;
     const byPrefix = all.filter((t) => t.id.startsWith(r));
@@ -252,6 +293,7 @@ export class Registry {
       command: o.command,
       cwd: o.cwd,
       logPath,
+      sessionId: o.sessionId,
       startedAt: Date.now(),
       status: "running",
       ready: false,
@@ -419,18 +461,23 @@ export class Registry {
     this.strays.delete(pid);
   }
 
-  /** Kill every running task except kept services, and what ended tasks left behind; used when the session ends. */
-  async killAll(by: NonNullable<Task["killedBy"]>, graceMs = 1_000): Promise<void> {
-    const strays = [...this.strays];
-    this.strays.clear();
+  /**
+   * Kill every running task except kept services (one session's, or all), and what ended tasks
+   * left behind; used when a session ends. Strays go with the last session: they are not tied to one.
+   */
+  async killAll(by: NonNullable<Task["killedBy"]>, graceMs = 1_000, sessionId?: string): Promise<void> {
+    const last = sessionId === undefined || this.live.size <= (this.live.has(sessionId) ? 1 : 0);
+    const strays = last ? [...this.strays] : [];
+    if (last) this.strays.clear();
     for (const pgid of strays) signalGroup(pgid, "SIGTERM");
-    await Promise.all(this.running().filter((t) => !t.keep).map((t) => this.kill(t.id, by, graceMs)));
+    await Promise.all(this.running(sessionId).filter((t) => !t.keep).map((t) => this.kill(t.id, by, graceMs)));
     for (const pgid of strays) if (groupAlive(pgid)) signalGroup(pgid, "SIGKILL");
   }
 
   /** Forget ended tasks: used when the session changes. Kept services stay, owing the new session nothing. */
-  forgetEnded(): void {
+  forgetEnded(sessionId?: string): void {
     for (const [id, t] of this.tasks) {
+      if (sessionId !== undefined && t.sessionId !== sessionId) continue;
       if (t.status !== "running") this.tasks.delete(id);
       else if (t.keep) {
         t.delivered = true;
@@ -487,24 +534,24 @@ export class Registry {
     };
   }
 
-  /** Rewrites this process's state file: its running tasks. */
+  /**
+   * Rewrites this process's state file: its running tasks. A session that quit leaves only its
+   * kept services, released for a later pi; the rest of its tasks are being killed.
+   */
   persist(): void {
     Registry.writeEntries(
       this.ownStatePath(),
       this.running()
-        .filter((t) => t.pid)
-        .map((t) => this.entryOf(t)),
+        .filter((t) => t.pid && (!this.released.has(t.sessionId) || t.keep))
+        .map((t) => this.entryOf(t, this.released.has(t.sessionId))),
     );
   }
 
-  /** The session ends for good (quit): leave kept services in the state file, released for a later pi. */
-  release(): void {
-    Registry.writeEntries(
-      this.ownStatePath(),
-      this.running()
-        .filter((t) => t.pid && t.keep)
-        .map((t) => this.entryOf(t, true)),
-    );
+  /** A session (or every one) ends for good (quit): leave its kept services in the state file, released for a later pi. */
+  release(sessionId?: string): void {
+    if (sessionId === undefined) for (const t of this.tasks.values()) this.released.add(t.sessionId);
+    else this.released.add(sessionId);
+    this.persist();
   }
 
   /**
@@ -512,7 +559,7 @@ export class Registry {
    * delete logs older than a week that nothing references. A pid is only signalled or adopted while
    * it still runs the task's command.
    */
-  sweep(cwd: string): Task[] {
+  sweep(cwd: string, sessionId = "", adopt = true): Task[] {
     const adopted: Task[] = [];
     const referenced: StateEntry[] = [];
     const inside = (a: string, b: string) => a === b || a.startsWith(`${b}${path.sep}`);
@@ -553,7 +600,7 @@ export class Registry {
           }, KILL_GRACE_MS).unref?.();
           continue;
         }
-        if (!inside(e.cwd, cwd) && !inside(cwd, e.cwd)) {
+        if (!adopt || (!inside(e.cwd, cwd) && !inside(cwd, e.cwd))) {
           left.push({ ...e, released: true });
           continue;
         }
@@ -564,6 +611,7 @@ export class Registry {
           command: e.command,
           cwd: e.cwd,
           logPath: e.logPath,
+          sessionId,
           pid: e.pid,
           startedAt: e.startedAt,
           status: "running",

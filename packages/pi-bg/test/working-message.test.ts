@@ -14,7 +14,7 @@ beforeEach(() => {
   vi.setSystemTime(100_000);
   registryMock.mockReturnValue({
     tasks: new Map(), list: () => [], running: () => [], sweep: () => [],
-    subscribe: () => () => {}, forgetEnded() {}, release() {}, killAll: async () => {},
+    subscribe: () => () => {}, forgetEnded() {}, attach() {}, detach() {}, release() {}, killAll: async () => {},
   });
 });
 afterEach(async () => {

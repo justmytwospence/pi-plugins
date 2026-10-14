@@ -18,11 +18,15 @@ afterAll(() => {
   delete process.env.PI_BG_DIR;
 });
 
-async function load() {
+async function load(session?: { id: string; hasUI?: boolean }) {
   const { default: piBg } = await import("../src/index.ts");
   const f = fakePi();
   piBg(f.pi as any);
   const c = fakeCtx(dir);
+  if (session) {
+    c.ctx.sessionManager.getSessionId = () => session.id;
+    if (session.hasUI === false) Object.assign(c.ctx, { hasUI: false, mode: "print" });
+  }
   for (const h of f.handlers.get("session_start") ?? []) await h({ reason: "startup" }, c.ctx);
   const call = (tool: string, params: any, signal?: AbortSignal) => f.tools.get(tool).execute("call", params, signal, undefined, c.ctx);
   const cleanup = () => shutdown();
@@ -79,7 +83,7 @@ describe("pi-bg", () => {
 
   it("bg_wait stops when the user sends a message; the job still wakes the agent later", async () => {
     const x = await load();
-    await x.call("bg_run", { command: "sleep 2", kind: "job", name: "long" });
+    await x.call("bg_run", { command: "sleep 4", kind: "job", name: "long" });
     setTimeout(() => {
       x.state.pending = true;
     }, 300);
@@ -87,7 +91,7 @@ describe("pi-bg", () => {
     expect(r).toMatch(/user sent a message/);
     expect(r).toMatch(/Still running: long/);
     x.state.pending = false;
-    await until(() => x.sent.length > 0, 5_000);
+    await until(() => x.sent.length > 0, 8_000);
     expect(x.sent[0]?.message.content).toMatch(/long/);
     await x.shutdown();
   });
@@ -101,7 +105,7 @@ describe("pi-bg", () => {
 
     it("keeps the turn open until the job ends, then continues the run with its outcome", async () => {
       const x = await load();
-      await x.call("bg_run", { command: "sleep 2.5; echo settled", kind: "job", name: "tests" });
+      await x.call("bg_run", { command: "sleep 3.5; echo settled", kind: "job", name: "tests" });
       const started = Date.now();
       const r = await settle(x);
       expect(Date.now() - started).toBeGreaterThan(500);
@@ -149,6 +153,26 @@ describe("pi-bg", () => {
       await x.shutdown();
     });
   });
+
+  it("a headless session in the same process (an in-process planner) neither sees nor disturbs the main session's tasks", async () => {
+    const main = await load({ id: "main" });
+    await main.call("bg_run", { command: "sleep 5; echo main-done", kind: "job", name: "mainjob" });
+    const planner = await load({ id: "planner", hasUI: false });
+    // The planner's start did not forget or claim the main session's work, and lists nothing of it.
+    expect(planner.textOf(await planner.call("bg_logs", {}))).toBe("No background tasks.");
+    expect(planner.textOf(await planner.call("bg_wait", {}))).toMatch(/^Nothing to wait for/u);
+    await planner.call("bg_run", { command: "sleep 30", kind: "job", name: "plannerjob" });
+    expect(main.textOf(await main.call("bg_logs", {}))).not.toMatch(/plannerjob/u);
+    expect(main.widgetLines()).toEqual([" 1 shell "]);
+    // The planner is shut down (quit): its job dies, the main session's job keeps running and wakes only the main agent.
+    await planner.shutdown("quit");
+    await new Promise((res) => setTimeout(res, 300));
+    expect(main.textOf(await main.call("bg_logs", {}))).toMatch(/mainjob.*running/u);
+    await until(() => main.sent.length > 0, 8_000);
+    expect(main.sent[0]?.message.content).toMatch(/mainjob .* ended: exit 0/u);
+    expect(planner.sent).toEqual([]);
+    await main.shutdown();
+  }, 15_000);
 
   it("wakes the agent once when a service is ready, and bg_kill stops it without a wake-up", async () => {
     const x = await load();

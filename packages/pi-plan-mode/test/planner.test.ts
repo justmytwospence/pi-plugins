@@ -345,3 +345,24 @@ test("scouts get the extension that keeps a Claude subscription paying, found fr
   });
   assert.deepEqual(resolved.config.policy.scouts?.extensions, [auth]);
 });
+
+test("an in-process planner session is shut down like Pi's own runtime does: abort, session_shutdown to its extensions, then dispose", async () => {
+  const { shutdownSession } = await import("../src/planner/session.js");
+  const order: string[] = [];
+  const session = {
+    abort: async () => void order.push("abort"),
+    extensionRunner: { emit: async (event: { type: string; reason?: string }) => void order.push(`${event.type}:${event.reason}`) },
+    dispose: () => void order.push("dispose"),
+  };
+  await shutdownSession(session as never);
+  assert.deepEqual(order, ["abort", "session_shutdown:quit", "dispose"]);
+
+  // An extension that throws on shutdown, or a session that cannot abort, must not keep the session alive.
+  const failing: string[] = [];
+  await shutdownSession({
+    abort: async () => { throw new Error("busy"); },
+    extensionRunner: { emit: async () => { throw new Error("extension failed"); } },
+    dispose: () => void failing.push("dispose"),
+  } as never);
+  assert.deepEqual(failing, ["dispose"]);
+});

@@ -14,6 +14,7 @@ const task = (over: Partial<Task>): Task => ({
   command: "npm test",
   cwd: "/tmp",
   logPath: "/tmp/x.log",
+  sessionId: "test-session",
   startedAt: 0,
   status: "running",
   ready: false,
