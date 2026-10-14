@@ -3,6 +3,7 @@
 // the child steerable, and its extension dialogs (for example a tool gate asking for approval) are
 // cancelled and reported as blockers instead of interrupting the user. Every event feeds the viewer.
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -44,6 +45,8 @@ export type ChildStatus = "running" | "done" | "failed" | "stopped";
 
 export interface ChildState {
   status: ChildStatus;
+  /** Native session path reported by Pi's get_state (never inferred). */
+  sessionFile?: string;
   /** The child's last assistant text. */
   output: string;
   usage: Usage;
@@ -134,14 +137,17 @@ export const HEADLESS_PROMPT = "You are a headless report-back worker, not a hum
 
 export function childArgs(options: ChildOptions, promptFile?: string): string[] {
   const args = ["--mode", "rpc"];
-  if (options.forkSession) args.push("--fork", options.forkSession, "--session-dir", options.sessionDir);
-  else args.push("--no-session");
+  if (options.forkSession) args.push("--fork", options.forkSession);
+  args.push("--session-dir", options.sessionDir);
   args.push("--model", options.model, "--thinking", options.thinking);
   if (options.tools?.length) args.push("--tools", options.tools.join(","));
   args.push("--exclude-tools", HEADLESS_EXCLUDED_TOOLS.join(","));
   if (promptFile) args.push("--append-system-prompt", promptFile);
   return args;
 }
+
+/** Session discovery is best-effort: an older/unresponsive RPC child must still receive its task. */
+export const STARTUP_STATE_TIMEOUT_MS = 10_000;
 
 export class Child {
   readonly state: ChildState;
@@ -152,6 +158,7 @@ export class Child {
   private stderr = "";
   private stopping = false;
   private started = false;
+  private startupState?: { id: string; timer: ReturnType<typeof setTimeout> };
 
   constructor(private readonly options: ChildOptions) {
     this.state = { status: "running", output: "", usage: emptyUsage(), turns: 0, startedAt: Date.now() };
@@ -186,19 +193,38 @@ export class Child {
     proc.stderr?.on("data", (data: Buffer) => {
       this.stderr = (this.stderr + data.toString()).slice(-4_000);
     });
-    proc.on("error", (error) => this.finish("failed", error.message));
+    const failed = (error: Error) => this.finishAndClose(this.stopping ? "stopped" : "failed", this.stopping ? undefined : error.message);
+    proc.on("error", failed);
+    // In particular, an exit while the startup command is being written can cause EPIPE.
+    proc.stdin?.on("error", failed);
     proc.on("close", (code) => {
       if (buffer.trim()) this.onLine(buffer);
       if (this.state.status === "running") {
         this.finish(this.stopping ? "stopped" : "failed", this.stopping ? undefined : `pi exited (${code ?? "signal"})${this.stderr.trim() ? `: ${this.stderr.trim().split("\n").slice(-3).join(" ")}` : ""}`);
       }
     });
-    this.send({ type: "prompt", message: this.options.task });
+    // Fresh and CLI-forked sessions already have a path when RPC starts, before the first prompt.
+    // Wait for this specific response, not an unrelated response or a guessed filename.
+    const id = randomUUID();
+    const timer = setTimeout(() => this.promptAfterStartup(), STARTUP_STATE_TIMEOUT_MS);
+    timer.unref?.();
+    this.startupState = { id, timer };
+    this.send({ type: "get_state", id });
     return this;
   }
 
+  private clearStartup() {
+    if (this.startupState) clearTimeout(this.startupState.timer);
+    this.startupState = undefined;
+  }
+
+  private promptAfterStartup() {
+    this.clearStartup();
+    if (!this.stopping && this.state.status === "running") this.send({ type: "prompt", message: this.options.task });
+  }
+
   steer(message: string): boolean {
-    if (this.state.status !== "running") return false;
+    if (this.stopping || this.state.status !== "running") return false;
     this.send({ type: "steer", message });
     return true;
   }
@@ -206,6 +232,7 @@ export class Child {
   stop() {
     if (this.state.status !== "running") return;
     this.stopping = true;
+    this.clearStartup();
     if (!this.started) {
       this.finish("stopped");
       return;
@@ -220,7 +247,7 @@ export class Child {
 
   private send(command: Record<string, unknown>) {
     const stdin = this.proc?.stdin;
-    if (stdin && !stdin.destroyed && stdin.writable) stdin.write(`${JSON.stringify(command)}\n`);
+    if (stdin && !stdin.destroyed && !stdin.writableEnded && stdin.writable) stdin.write(`${JSON.stringify(command)}\n`);
   }
 
   private update() {
@@ -229,6 +256,7 @@ export class Child {
 
   private finish(status: ChildStatus, error?: string) {
     if (this.state.status !== "running") return;
+    this.clearStartup();
     this.state.status = status;
     this.state.endedAt = Date.now();
     this.state.activity = undefined;
@@ -275,8 +303,19 @@ export class Child {
         break;
       }
       case "response":
-        if (event.command === "prompt" && event.success === false) this.finishAndClose("failed", String(event.error ?? "the prompt was rejected"));
-        else if (event.command === "prompt" && event.data?.disposition === "handled") this.finishAndClose("done");
+        if (event.command === "get_state" && this.startupState && event.id === this.startupState.id) {
+          this.clearStartup();
+          if (event.success === true && typeof event.data?.sessionFile === "string" && event.data.sessionFile.trim()) {
+            this.state.sessionFile = event.data.sessionFile;
+            this.update();
+          }
+          // A rejected state query is only missing metadata, not a failed task.
+          this.promptAfterStartup();
+        } else if (event.command === "prompt" && event.success === false) {
+          this.finishAndClose(this.stopping ? "stopped" : "failed", this.stopping ? undefined : String(event.error ?? "the prompt was rejected"));
+        } else if (event.command === "prompt" && event.data?.disposition === "handled") {
+          this.finishAndClose(this.stopping ? "stopped" : "done");
+        }
         break;
       case "agent_settled":
         // After stop(), Pi settles the aborted run before it exits.

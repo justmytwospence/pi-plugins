@@ -1,5 +1,6 @@
 // A stand-in for `pi --mode rpc`: answers one prompt with one tool call, asking one dialog first.
 import { createInterface } from "node:readline";
+import { stateResponse } from "./fake-state.mjs";
 const out = (e) => process.stdout.write(`${JSON.stringify(e)}\n`);
 const args = process.argv.slice(2);
 const rl = createInterface({ input: process.stdin });
@@ -8,7 +9,9 @@ const call = { type: "toolCall", id: "c1", name: "bash", arguments: { command: "
 let steered = "";
 rl.on("line", (line) => {
   const cmd = JSON.parse(line);
-  if (cmd.type === "prompt") {
+  if (cmd.type === "get_state") {
+    out(stateResponse(cmd, args));
+  } else if (cmd.type === "prompt") {
     out({ type: "response", command: "prompt", success: true, data: { disposition: "started" } });
     const user = { role: "user", content: cmd.message, timestamp: 1 };
     out({ type: "message_start", message: user });

@@ -107,6 +107,8 @@ export interface RunView {
   thinking: string;
   byJev: Resolved["byJev"];
   status: ChildState["status"];
+  /** Native child history, when Pi reported its session path. */
+  sessionFile?: string;
   activity?: string;
   turns: number;
   tokens: number;
@@ -132,6 +134,7 @@ function view(run: Run, withOutput = false): RunView {
     thinking: run.thinking,
     byJev: run.byJev,
     status: s.status,
+    ...(s.sessionFile ? { sessionFile: s.sessionFile } : {}),
     ...(s.activity ? { activity: s.activity } : {}),
     turns: s.turns,
     tokens: displayTokens(s.usage),
@@ -171,7 +174,7 @@ export function recordedRun(v: RecordedRun): Run {
     cwd: "",
     async: Boolean(v.async),
     // A record still "running" belongs to a process that is gone.
-    state: { status: v.status === "running" ? "stopped" : v.status, output: "", usage, turns: v.turns ?? 0, startedAt: 0, endedAt: (v.seconds ?? 0) * 1000, ...(v.error ? { error: v.error } : {}) },
+    state: { status: v.status === "running" ? "stopped" : v.status, output: "", usage, turns: v.turns ?? 0, startedAt: 0, endedAt: (v.seconds ?? 0) * 1000, ...(v.sessionFile ? { sessionFile: v.sessionFile } : {}), ...(v.error ? { error: v.error } : {}) },
     conversation: Conversation.from(messages),
     outputPath: v.outputPath,
   };
@@ -527,6 +530,7 @@ export default function subagents(pi: ExtensionAPI) {
   ): Run => {
     const id = shortId();
     const outputPath = path.join(agentDir(), "subagents", id, "output.md");
+    let sessionRecorded = false;
     const child = new Child({
       task: item.task,
       cwd: options.cwd,
@@ -540,6 +544,11 @@ export default function subagents(pi: ExtensionAPI) {
       sessionDir: path.join(agentDir(), "subagents", "sessions"),
       onUpdate: (state) => {
         run.state = state;
+        // Preserve the discovered path even if this runtime shuts down before the child finishes.
+        if (!sessionRecorded && state.sessionFile && state.status === "running" && !options.owner.aborted) {
+          sessionRecorded = true;
+          record(run);
+        }
         options.onUpdate();
       },
       onMessage: transcriptWriter(transcriptPath(outputPath)),

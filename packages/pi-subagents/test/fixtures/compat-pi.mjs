@@ -3,6 +3,7 @@
 import readline from "node:readline";
 import path from "node:path";
 import { createJiti } from "jiti";
+import { stateResponse } from "./fake-state.mjs";
 const [webStorage, effortPath, harnessPath] = process.argv.slice(2, 5);
 const jiti = createJiti(import.meta.url);
 const storage = await jiti.import(webStorage);
@@ -22,6 +23,10 @@ const input = readline.createInterface({ input: process.stdin });
 const send = (event) => process.stdout.write(JSON.stringify(event) + "\n");
 input.on("line", async (line) => {
   const command = JSON.parse(line);
+  if (command.type === "get_state") {
+    send(stateResponse(command));
+    return;
+  }
   if (command.type !== "prompt") return;
   await h.emit("before_agent_start", { prompt: command.message }, ctx);
   const parentVisible = storage.getResult("parent-only") !== null;

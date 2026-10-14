@@ -26,12 +26,22 @@ test("a child runs the task over RPC, forwards its dialog, and reports usage", a
   }).start();
   const state = await child.done;
   expect(state.status).toBe("done");
-  expect(state.output).toContain("task=count lines answer=Allow once args=--mode rpc --no-session --model anthropic/claude-sonnet-5-5 --thinking low --tools read,bash --exclude-tools " + HEADLESS_EXCLUDED_TOOLS.join(","));
+  expect(state.output).toContain("task=count lines answer=Allow once args=--mode rpc --session-dir /tmp --model anthropic/claude-sonnet-5-5 --thinking low --tools read,bash --exclude-tools " + HEADLESS_EXCLUDED_TOOLS.join(","));
   expect(state.output).toContain("--append-system-prompt");
   expect(dialogs).toEqual(["Allow?: Allow once/Block"]);
   expect(updates).toContain("bash: npm test");
   expect(state.usage.cost.total).toBeCloseTo(0.03);
   expect(state.model).toBe("anthropic/fake");
+  expect(state.sessionFile).toMatch(/^\/tmp\/pi-chose-fresh-\d+\.jsonl$/u);
+});
+
+test("a fork reports the new child session, not its source session", async () => {
+  const child = new Child({ task: "fork task", cwd: process.cwd(), model: "m", thinking: "low", sessionDir: "/tmp", forkSession: "/source/parent.jsonl", invocation: fake, onDialog: async () => ({ value: "Allow once" }) }).start();
+  const state = await child.done;
+  expect(state.status).toBe("done");
+  expect(state.sessionFile).toMatch(/^\/tmp\/pi-chose-forked-\d+\.jsonl$/u);
+  expect(state.sessionFile).not.toBe("/source/parent.jsonl");
+  expect(state.output).toContain("--fork /source/parent.jsonl --session-dir /tmp");
 });
 
 test("a child keeps its conversation and saves each finished message", async () => {
@@ -60,6 +70,13 @@ test("headless dialogs fail closed as blockers; steering reaches the child", asy
   expect(state.error).toContain("Headless worker requires user interaction");
   expect(state.output).toMatch(/answer=cancelled/u);
   expect(state.output).toMatch(/steered=focus on tests/u);
+});
+
+test("childArgs: fresh children use native session storage", () => {
+  const args = childArgs({ task: "t", cwd: "/", model: "m", thinking: "low", sessionDir: "/native sessions" });
+  expect(args.slice(0, 4)).toEqual(["--mode", "rpc", "--session-dir", "/native sessions"]);
+  expect(args).not.toContain("--no-session");
+  expect(args).not.toContain("--fork");
 });
 
 test("childArgs: fork and system prompt", () => {

@@ -1,6 +1,7 @@
 // A stand-in for `pi --mode rpc` that keeps calling tools, turn after turn, until it is steered
 // (then it answers), unless FAKE_IGNORE_STEER is set; abort settles the run.
 import { createInterface } from "node:readline";
+import { stateResponse } from "./fake-state.mjs";
 const out = (e) => process.stdout.write(`${JSON.stringify(e)}\n`);
 const rl = createInterface({ input: process.stdin });
 let steered = false;
@@ -18,7 +19,9 @@ const next = () => {
 };
 rl.on("line", (line) => {
   const cmd = JSON.parse(line);
-  if (cmd.type === "prompt") {
+  if (cmd.type === "get_state") {
+    out(stateResponse(cmd));
+  } else if (cmd.type === "prompt") {
     out({ type: "response", command: "prompt", success: true, data: { disposition: "started" } });
     timer = setTimeout(next, 5);
   } else if (cmd.type === "steer") {
