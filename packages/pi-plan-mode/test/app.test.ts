@@ -5,6 +5,7 @@ import { test } from "vitest";
 import { type LaneAction, LanesPage } from "../src/app/lanes-page.js";
 import { OptionsPage, type TextArea } from "../src/app/options-page.js";
 import { PiChat, piChatTheme } from "../src/app/pi-chat.js";
+import { readInputContext } from "../src/editor-contract.js";
 import type { PlannerAgent } from "../src/planner/agent.js";
 import { PlannerTrace } from "../src/planner-trace.js";
 import { SubagentTracker } from "../src/subagent-progress.js";
@@ -227,7 +228,7 @@ test("lanes sit side by side, and what you type goes to the focused planner", ()
   ]);
 });
 
-test("a pending question is answered in its lane, by picking or typing", () => {
+test("a pending question is a picker in its lane: digits and j/k move, ⏎ picks, Type something. takes typed words", () => {
   const answers: unknown[] = [];
   const a = fakeAgent("A", {
     status: "asking",
@@ -257,11 +258,34 @@ test("a pending question is answered in its lane, by picking or typing", () => {
     },
     answer: (value: unknown) => answers.push(value),
   } as never);
-  const { page } = lanesPage([a]);
-  assert.ok(page.render(100).some((line) => line.includes("? Language (1/2)")));
-  page.handleInput(KEY.down);
+  const { page, said } = lanesPage([a]);
+  const shown = () => page.render(100).join("\n");
+  assert.match(shown(), /\? Language \(1\/2\)/u);
+  assert.match(shown(), /3\. Type something\.[^\n]*\n[^\n]*4\. Skip \(let the planner decide\)/u);
+  assert.match(shown(), /── answer ─/u, "the lane's line is the answer line, not the chat");
+  assert.equal(readInputContext(page), "list", "the list owns the keys");
+  // j moves, a digit jumps, Enter picks.
+  page.handleInput("j");
+  assert.match(shown(), /❯ 2\. Node/u);
+  page.handleInput("1");
+  assert.match(shown(), /❯ 1\. Python/u);
+  page.handleInput("2");
   page.handleInput(KEY.enter);
-  for (const char of "only unit tests") page.handleInput(char);
+  assert.match(shown(), /\? Tests \(2\/2\)/u);
+  // Typing on Type something. opens the answer line with that character; Esc goes back to the
+  // options and keeps the draft; Enter saves it.
+  page.handleInput("3");
+  assert.match(shown(), /❯ 3\. Type something\./u);
+  for (const char of "only u") page.handleInput(char);
+  assert.equal(readInputContext(page), "editor");
+  assert.match(shown(), /› only u/u);
+  assert.match(shown(), /⏎ save answer/u);
+  page.handleInput(KEY.escape);
+  assert.equal(readInputContext(page), "list");
+  assert.doesNotMatch(shown(), /Leave planning\?/u);
+  page.handleInput(KEY.enter);
+  assert.match(shown(), /› only u/u, "the draft is back");
+  for (const char of "nit tests") page.handleInput(char);
   page.handleInput(KEY.enter);
   assert.deepEqual(answers, [
     [
@@ -269,6 +293,7 @@ test("a pending question is answered in its lane, by picking or typing", () => {
       { id: "tests", header: "Tests", question: "Tests?", answer: "only unit tests", wasCustom: true },
     ],
   ]);
+  assert.deepEqual(said, [], "an answer is not a chat message");
 });
 
 test("Tab reaches the actions, where Enter runs one; Esc offers Hide", () => {
@@ -576,7 +601,7 @@ test("a planner's question and its options wrap instead of being cut", () => {
   assert.match(text, /on the read replicas\./u, "descriptions wrap under their option");
   assert.match(text, /needs its own wiring and invalidation\./u);
   const question = lines.slice(lines.findIndex((line) => line.includes("? Cache")));
-  const cut = question.filter((line) => /\w…/u.test(line) && !line.includes("talk to") && !line.includes("Implement"));
+  const cut = question.filter((line) => /\w…/u.test(line) && !line.includes("Implement"));
   assert.deepEqual(cut, [], "nothing is cut");
 
   // A short lane keeps only the highlighted option's description, and still its input line.
@@ -586,7 +611,7 @@ test("a planner's question and its options wrap instead of being cut", () => {
   assert.match(short, /❯ 1\. Every read/u);
   assert.match(short, /Simplest to reason about/u);
   assert.doesNotMatch(short, /Less memory/u);
-  assert.match(short, /alk to A…/u, "the input line stays");
+  assert.match(short, /── answer ─/u, "the answer line stays");
 });
 
 test("in a planner's questions, ←/→ (and backspace) move between them to change an earlier answer", () => {
@@ -617,19 +642,20 @@ test("in a planner's questions, ←/→ (and backspace) move between them to cha
 
   page.handleInput(KEY.down); // Node
   page.handleInput(KEY.enter);
-  for (const char of "DuckDB") page.handleInput(char); // own words
+  page.handleInput("3"); // Type something.
+  for (const char of "DuckDB") page.handleInput(char);
   page.handleInput(KEY.enter);
   assert.match(shown(), /\? Tests \(3\/3\).*●●◉/u);
 
-  // Back to the database: the typed answer is a row of its own, selected, and the line is empty.
+  // Back to the database: the typed answer is a row of its own, selected.
   page.handleInput(KEY.left);
   assert.match(shown(), /\? Database \(2\/3\)/u);
-  assert.match(shown(), /❯ 4\. ✎ your answer: DuckDB/u);
-  // Backspace on the empty line goes back again; Node is still selected there.
+  assert.match(shown(), /❯ 5\. ✎ your answer: DuckDB/u);
+  // Backspace goes back again; Node is still selected there.
   page.handleInput("\x7f");
   assert.match(shown(), /\? Language \(1\/3\)/u);
   assert.match(shown(), /❯ 2\. Node ✓/u);
-  page.handleInput(KEY.up); // change it to Python
+  page.handleInput("k"); // change it to Python
   page.handleInput(KEY.enter);
   // Enter moves on; keep DuckDB as it was, then answer the last one.
   assert.match(shown(), /\? Database \(2\/3\)/u);
@@ -649,7 +675,7 @@ test("in a planner's questions, ←/→ (and backspace) move between them to cha
   ]);
 });
 
-test("with text typed, ←/→ edit the answer instead of moving between questions", () => {
+test("while typing an answer, ←/→ edit it; a suite editor in Insert mode gets no keys until then", () => {
   const answers: unknown[] = [];
   const a = fakeAgent("A", {
     status: "asking",
@@ -665,6 +691,7 @@ test("with text typed, ←/→ edit the answer instead of moving between questio
   } as never);
   const { page } = lanesPage([a]);
   page.handleInput(KEY.enter);
+  page.handleInput("2");
   for (const char of "ac") page.handleInput(char);
   page.handleInput(KEY.left);
   page.handleInput("b");
@@ -674,6 +701,69 @@ test("with text typed, ←/→ edit the answer instead of moving between questio
   );
   page.handleInput(KEY.enter);
   assert.equal((answers[0] as Array<{ answer: string }>)[1]?.answer, "abc");
+
+  // A pi-vim-style input (Insert mode, owns Enter): the list still gets ↑/↓/Enter/digits, and the
+  // editor only once Type something. opens it, in Insert mode.
+  const b = fakeAgent("B", {
+    status: "asking",
+    working: true,
+    pending: {
+      questions: [{ id: "q", header: "Store", question: "Which?", options: [{ label: "Redis", description: "r" }] }],
+      resolve: () => undefined,
+    },
+    answer: (value: unknown) => answers.push(value),
+  } as never);
+  const log: string[] = [];
+  let text = "";
+  let inserts = 0;
+  const fake = {
+    focused: false,
+    getValue: () => text,
+    setValue: (value: string) => {
+      text = value;
+    },
+    handleInput: (data: string) => {
+      log.push(data);
+      if (data === "\r") hooks?.submit(text);
+      else text += data;
+    },
+    render: () => [text],
+    ownsEnter: true,
+    [Symbol.for("pi-plugins.editor-mode.v1")]: () => ({ state: "insert", autocomplete: false }),
+    [Symbol.for("pi-plugins.editor-insert.v1")]: () => {
+      inserts += 1;
+    },
+  };
+  let hooks: { submit(text?: string): void } | undefined;
+  const vim = new LanesPage(theme, {
+    title: "Plan",
+    task: () => "t",
+    agents: () => [b],
+    actions: () => [],
+    onAction: () => undefined,
+    say: () => undefined,
+    hide: () => undefined,
+    stopAll: () => undefined,
+    rowsAvailable: () => 30,
+    requestRender: () => undefined,
+    createInput: (_id, given) => {
+      hooks = given;
+      return fake as never;
+    },
+  });
+  vim.render(100);
+  vim.handleInput("j");
+  vim.handleInput(KEY.down);
+  assert.deepEqual(log, [], "the list, not the editor, took the keys");
+  assert.ok(vim.render(100).some((line) => line.includes("❯ 3. Skip")));
+  vim.handleInput("2");
+  for (const char of "memcached") vim.handleInput(char);
+  assert.equal(inserts, 1, "Type something. put the editor in Insert mode");
+  assert.equal(text, "memcached");
+  vim.handleInput(KEY.enter);
+  assert.deepEqual(answers.at(-1), [
+    { id: "q", header: "Store", question: "Which?", answer: "memcached", wasCustom: true },
+  ]);
 });
 
 test("the divider above M drags to resize it, shift+↑↓ moves it a row, and a double-click resets it", () => {

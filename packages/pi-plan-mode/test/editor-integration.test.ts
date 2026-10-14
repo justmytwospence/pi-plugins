@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { stripVTControlCharacters } from "node:util";
 import { type ExtensionCommandContext, initTheme } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
 import { type LaneInput, LanesPage } from "../src/app/lanes-page.js";
@@ -264,9 +265,14 @@ test("/plan discovers the actual embedded factory for task and lane editors and 
   for (const handler of mock.events.get("session_start") ?? []) await handler({}, ctx);
   const second = mock.commands.get("planners")?.handler("", ctx);
   await tick();
-  app.render();
+  const screen = app.render().map((line) => stripVTControlCharacters(line));
   assert.equal(editors.length, 2);
   assert.equal(readEditorSurface(editors[1]), "embedded");
+  // The lane draws one rule above its input; the editor's own border lines are left out.
+  const rule = screen.findIndex((line) => /^── plan {2}chat ─+$/u.test(line));
+  assert.ok(rule >= 0, "the lane's rule");
+  assert.match(screen[rule + 1] ?? "", /^› /u, "the input text comes right under the rule, with no editor border");
+  assert.match(screen[rule + 3] ?? "", /Implement…|Actions appear/u, "then the footer: its rule and the actions");
   app.dispose();
   await second;
   assert.equal(disposals, 2);

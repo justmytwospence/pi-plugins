@@ -4,6 +4,12 @@
 
 ### Minor Changes
 
+- A planner's question is a picker at the bottom of its lane, as in pi-ask-user-question: options,
+  `Type something.` and `Skip`; arrows or `j`/`k` move, digits jump, Enter picks, typing on
+  `Type something.` opens the answer line (pi-vim in Insert mode), Esc returns to the options with
+  the draft kept. The question owns the lane's keys until it is answered, so it also works with
+  pi-vim lanes, which previously swallowed the arrows. Lane inputs no longer show the suite
+  editor's own border lines above and below the text.
 - The `/planners` screen: M's pane joins the screen only once both plans are in (or one is, and
   the other planner failed); until then the lanes get the whole screen, and M's chat and a
   notification say when it is there. The actions bar is **Write plan M · Implement… · Export… ·

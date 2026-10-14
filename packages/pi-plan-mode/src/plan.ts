@@ -814,7 +814,12 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           getValue: () => editor.getText(),
           setValue: (text) => editor.setText(text),
           handleInput: (data) => editor.handleInput(data),
-          render: (width) => editor.render(width),
+          // Pi's editor frames its text with a border line above and below; the lane draws its
+          // own rule, so only the text lines are shown.
+          render: (width) => {
+            const lines = editor.render(width);
+            return lines.length > 2 ? lines.slice(1, -1) : lines;
+          },
           ownsEnter: true,
           [EDITOR_MODE]: () => readEditorMode(editor),
           dispose: () => editor.dispose(),

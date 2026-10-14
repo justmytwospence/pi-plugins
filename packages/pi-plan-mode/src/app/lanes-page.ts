@@ -7,6 +7,7 @@
 // planner's subagents, showing each one's task and chat in place of the planner's.
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
+  decodeKittyPrintable,
   Input,
   type KeyId,
   matchesKey,
@@ -38,6 +39,7 @@ export type LaneAgent = Pick<
 >;
 
 import {
+  EDITOR_INSERT,
   EDITOR_MODE,
   EDITOR_SURFACE,
   type EditorModeContext,
@@ -90,6 +92,8 @@ export interface LaneInput {
   render(width: number): string[];
   ownsEnter: boolean;
   [EDITOR_MODE]?(): EditorModeContext | undefined;
+  /** A suite editor: go to Insert mode (an answer is being typed). */
+  [EDITOR_INSERT]?(): void;
   dispose?(): void;
 }
 
@@ -154,7 +158,18 @@ interface QuestionCursor {
   option: number;
   /** Answers by question index; going back and answering again replaces one. */
   answers: Array<PlanModeQuestionAnswer | undefined>;
+  /** An answer in your own words is being typed on the lane's input. */
+  composing: boolean;
 }
+
+/** A row of a question: one of its options, Type something., Skip, or your earlier own answer. */
+type QuestionRow =
+  | { kind: "option"; index: number; label: string; description: string | undefined }
+  | { kind: "type"; label: string; description: undefined }
+  | { kind: "skip"; label: string; description: undefined }
+  | { kind: "earlier"; label: string; description: undefined };
+
+const TYPE_SOMETHING = "Type something.";
 
 type Modal = { kind: "escape"; choice: number };
 
@@ -238,17 +253,30 @@ export class LanesPage {
   readonly [EDITOR_SURFACE] = "embedded";
 
   [INPUT_CONTEXT]() {
-    return this.modal || this.focusedTarget().kind === "actions" ? "list" : "editor";
+    const target = this.focusedTarget();
+    if (this.modal || target.kind === "actions" || this.picking(target.agent)) return "list";
+    return "editor";
   }
 
   [EDITOR_MODE]() {
     const target = this.focusedTarget();
-    if (this.modal || target.kind === "actions") return undefined;
-    return readEditorMode(this.inputFor(target.kind === "lane" ? target.agent.id : MERGER_ID));
+    if (this.modal || target.kind === "actions" || this.picking(target.agent)) return undefined;
+    return readEditorMode(this.inputFor(target.agent.id));
   }
 
   get typing() {
-    return !this.modal && this.focusedTarget().kind !== "actions";
+    const target = this.focusedTarget();
+    return !this.modal && target.kind !== "actions" && !this.picking(target.agent);
+  }
+
+  /** A question of this agent is on screen (not a subagent), as a list of answers to pick from. */
+  private asking(agent: LaneAgent) {
+    return agent.pending !== undefined && !this.selectedSub(agent);
+  }
+
+  /** Asking, and not typing an answer: the keys are the list's, not the input's. */
+  private picking(agent: LaneAgent) {
+    return this.asking(agent) && !this.questionCursor(agent).composing;
   }
 
   /** M, once both plans are in. */
@@ -293,7 +321,10 @@ export class LanesPage {
         },
         cancel: () => {
           const agent = this.agentFor(id);
-          if (agent && this.selectedSub(agent)) this.subFocus.delete(agent.id);
+          if (agent && this.asking(agent) && this.questionCursor(agent).composing) {
+            // Back to the options; the draft stays on the line for next time.
+            this.questionCursor(agent).composing = false;
+          } else if (agent && this.selectedSub(agent)) this.subFocus.delete(agent.id);
           else this.modal = { kind: "escape", choice: 0 };
           this.options.requestRender();
         },
@@ -413,6 +444,11 @@ export class LanesPage {
     const focused = targets[this.focus];
     const laneAgent = focused?.kind === "lane" || focused?.kind === "merger" ? focused.agent : undefined;
     const input = laneAgent ? this.inputFor(laneAgent.id) : undefined;
+    // A question's list owns the keys (nothing reaches the input) until you type an answer.
+    if (laneAgent && this.picking(laneAgent) && !is("tab", "shift+tab")) {
+      this.handleQuestion(laneAgent, data, is);
+      return this.options.requestRender();
+    }
     const mode = readEditorMode(input);
     const modalEdit = mode && !idleNormal(input);
     // Tab is an explicit pane switch, unless a popup or unfinished modal command owns it.
@@ -429,6 +465,11 @@ export class LanesPage {
     }
     if (input?.ownsEnter && is("escape", "ctrl+u", "ctrl+d", "enter")) {
       this.edit(input, data);
+      return this.options.requestRender();
+    }
+    if (laneAgent && this.asking(laneAgent) && is("escape")) {
+      // Typing an answer on pi's input: Esc goes back to the options, keeping the draft.
+      this.questionCursor(laneAgent).composing = false;
       return this.options.requestRender();
     }
     if (laneAgent && is("ctrl+n", "ctrl+p")) {
@@ -466,19 +507,6 @@ export class LanesPage {
     } else if (is("ctrl+t")) {
       // Show or hide thinking, as in pi.
       agent.chat.setThinkingHidden(!agent.chat.thinkingHidden);
-    } else if (agent.pending && this.input(agent).getValue() === "" && is("left", "backspace", "right")) {
-      // With nothing typed, ←/backspace go back a question and → forward (as far as you have answered).
-      const cursor = this.questionCursor(agent);
-      if (is("right")) {
-        const reachable = cursor.answers.indexOf(undefined);
-        const last = reachable === -1 ? agent.pending.questions.length - 1 : reachable;
-        if (cursor.question < last) this.moveToQuestion(agent, cursor, cursor.question + 1);
-      } else if (cursor.question > 0) this.moveToQuestion(agent, cursor, cursor.question - 1);
-    } else if (agent.pending && (is("up") || is("down"))) {
-      const cursor = this.questionCursor(agent);
-      const question = agent.pending.questions[cursor.question];
-      const count = this.optionCount(cursor, cursor.question, question?.options.length ?? 0);
-      cursor.option = (cursor.option + (is("up") ? -1 : 1) + count) % count;
     } else if (is("up")) this.scrollLane(agent, -1);
     else if (is("down")) this.scrollLane(agent, 1);
     else if (is("left", "right") && this.input(agent).getValue() === "") this.toggleView(agent);
@@ -539,7 +567,7 @@ export class LanesPage {
   private questionCursor(agent: LaneAgent): QuestionCursor {
     let cursor = this.questions.get(agent.id);
     if (!cursor || !agent.pending || cursor.of !== agent.pending) {
-      cursor = { of: agent.pending, question: 0, option: 0, answers: [] };
+      cursor = { of: agent.pending, question: 0, option: 0, answers: [], composing: false };
       this.questions.set(agent.id, cursor);
     }
     return cursor;
@@ -551,60 +579,142 @@ export class LanesPage {
    */
   private moveToQuestion(agent: LaneAgent, cursor: QuestionCursor, index: number) {
     cursor.question = index;
+    cursor.composing = false;
     const previous = cursor.answers[index];
     const question = agent.pending?.questions[index];
+    const rows = question ? this.questionRows(question, cursor, index) : [];
     cursor.option = !previous
       ? 0
       : previous.wasCustom
-        ? (question?.options.length ?? 0) + 1
+        ? Math.max(
+            0,
+            rows.findIndex((row) => row.kind === "earlier"),
+          )
         : Math.max(0, (previous.optionIndex ?? 1) - 1);
   }
 
-  /** Rows a question offers: its options, Skip, and your own earlier answer if you typed one. */
-  private optionCount(cursor: QuestionCursor, questionIndex: number, optionsLength: number) {
-    return optionsLength + 1 + (cursor.answers[questionIndex]?.wasCustom ? 1 : 0);
+  /** The rows a question offers: its options, Type something., Skip, and your earlier own answer. */
+  private questionRows(
+    question: { options: ReadonlyArray<{ label: string; description?: string }> },
+    cursor: QuestionCursor,
+    index = cursor.question,
+  ): QuestionRow[] {
+    const earlier = cursor.answers[index];
+    return [
+      ...question.options.map(
+        (option, position): QuestionRow => ({
+          kind: "option",
+          index: position,
+          label: option.label,
+          description: option.description,
+        }),
+      ),
+      { kind: "type", label: TYPE_SOMETHING, description: undefined },
+      { kind: "skip", label: "Skip (let the planner decide)", description: undefined },
+      ...(earlier?.wasCustom
+        ? [{ kind: "earlier", label: `✎ your answer: ${earlier.answer}`, description: undefined } as QuestionRow]
+        : []),
+    ];
+  }
+
+  /** The keys of a question's list: move, jump, confirm, or start typing on Type something. */
+  private handleQuestion(agent: LaneAgent, data: string, is: (...keys: KeyId[]) => boolean) {
+    const pending = agent.pending;
+    const cursor = this.questionCursor(agent);
+    const question = pending?.questions[cursor.question];
+    if (!pending || !question) return;
+    const rows = this.questionRows(question, cursor);
+    const half = Math.max(1, Math.floor((this.laneHeights.get(agent.id) ?? 10) / 2));
+    const key = printable(data);
+    if (is("escape")) this.modal = { kind: "escape", choice: 0 };
+    else if (is("enter")) this.confirmQuestion(agent);
+    else if (rows[cursor.option]?.kind === "type" && (key === " " || isTextInput(data))) {
+      // Typing on Type something. starts the answer with what you typed (j, k and digits included).
+      this.startComposing(agent);
+      if (key !== " ") this.edit(this.input(agent), data);
+    } else if (is("up", "ctrl+k") || key === "k") cursor.option = (cursor.option - 1 + rows.length) % rows.length;
+    else if (is("down", "ctrl+j") || key === "j") cursor.option = (cursor.option + 1) % rows.length;
+    else if (key && /^[1-9]$/u.test(key)) {
+      if (Number(key) <= rows.length) cursor.option = Number(key) - 1;
+    } else if (is("left", "backspace", "right")) {
+      // ←/backspace go back a question and → forward (as far as you have answered).
+      if (is("right")) {
+        const reachable = cursor.answers.indexOf(undefined);
+        const last = reachable === -1 ? pending.questions.length - 1 : reachable;
+        if (cursor.question < last) this.moveToQuestion(agent, cursor, cursor.question + 1);
+      } else if (cursor.question > 0) this.moveToQuestion(agent, cursor, cursor.question - 1);
+    } else if (is("ctrl+u")) this.scrollLane(agent, -half);
+    else if (is("ctrl+d")) this.scrollLane(agent, half);
+    else if (is("pageUp")) this.scrollLane(agent, -(this.laneHeights.get(agent.id) ?? 10));
+    else if (is("pageDown")) this.scrollLane(agent, this.laneHeights.get(agent.id) ?? 10);
+    else if (is("ctrl+n", "ctrl+p")) this.stepSub(agent, is("ctrl+n") ? 1 : -1);
+    else if (is("ctrl+o")) agent.chat.setExpanded(!agent.chat.isExpanded);
+    else if (is("ctrl+t")) agent.chat.setThinkingHidden(!agent.chat.thinkingHidden);
+  }
+
+  /** Type something.: the lane's input becomes the answer line (a suite editor in Insert mode). */
+  private startComposing(agent: LaneAgent) {
+    const cursor = this.questionCursor(agent);
+    cursor.composing = true;
+    const input = this.input(agent);
+    input.focused = true;
+    try {
+      input[EDITOR_INSERT]?.();
+    } catch {
+      // A provider without Insert on demand keeps its mode.
+    }
+  }
+
+  /** Enter on a question: the highlighted row, or the answer you typed. */
+  private confirmQuestion(agent: LaneAgent) {
+    const pending = agent.pending;
+    const cursor = this.questionCursor(agent);
+    const question = pending?.questions[cursor.question];
+    if (!pending || !question) return;
+    const input = this.input(agent);
+    const rows = this.questionRows(question, cursor);
+    const row = rows[cursor.option];
+    const earlier = cursor.answers[cursor.question];
+    let answer: PlanModeQuestionAnswer | undefined;
+    if (cursor.composing) {
+      const text = input.getValue().trim();
+      if (!text) return;
+      answer = { id: question.id, header: question.header, question: question.question, answer: text, wasCustom: true };
+      input.setValue("");
+      cursor.composing = false;
+    } else if (!row || row.kind === "type") return this.startComposing(agent);
+    else if (row.kind === "skip") {
+      this.questions.delete(agent.id);
+      agent.answer(undefined);
+      return;
+    } else if (row.kind === "earlier") answer = earlier;
+    else {
+      answer = {
+        id: question.id,
+        header: question.header,
+        question: question.question,
+        answer: row.label,
+        wasCustom: false,
+        optionIndex: row.index + 1,
+      };
+    }
+    cursor.answers[cursor.question] = answer;
+    const unanswered = pending.questions.findIndex((_question, index) => cursor.answers[index] === undefined);
+    if (unanswered === -1 && cursor.question === pending.questions.length - 1) {
+      this.questions.delete(agent.id);
+      agent.answer(cursor.answers.filter((value): value is PlanModeQuestionAnswer => value !== undefined));
+      return;
+    }
+    // On to the next question (or, after the last, the first one still unanswered).
+    const next = cursor.question + 1 < pending.questions.length ? cursor.question + 1 : unanswered;
+    this.moveToQuestion(agent, cursor, next);
   }
 
   /** Enter in a lane or the merger pane: answer its question, or send what you typed. */
   private submit(agent: LaneAgent, merger = false) {
+    if (this.asking(agent)) return this.confirmQuestion(agent);
     const input = this.input(agent);
     const text = input.getValue().trim();
-    const pending = agent.pending;
-    if (pending) {
-      const cursor = this.questionCursor(agent);
-      const question = pending.questions[cursor.question];
-      if (!question) return;
-      if (!text && cursor.option === question.options.length) {
-        this.questions.delete(agent.id);
-        agent.answer(undefined);
-        return;
-      }
-      const option = question.options[cursor.option];
-      const earlier = cursor.answers[cursor.question];
-      // Your own earlier words, kept when you leave them selected and type nothing new.
-      const keepsEarlier = !text && cursor.option === question.options.length + 1 && earlier?.wasCustom;
-      cursor.answers[cursor.question] = keepsEarlier
-        ? earlier
-        : {
-            id: question.id,
-            header: question.header,
-            question: question.question,
-            answer: text || option?.label || "",
-            wasCustom: text.length > 0,
-            ...(text ? {} : { optionIndex: cursor.option + 1 }),
-          };
-      input.setValue("");
-      const unanswered = pending.questions.findIndex((_question, index) => cursor.answers[index] === undefined);
-      if (unanswered === -1 && cursor.question === pending.questions.length - 1) {
-        this.questions.delete(agent.id);
-        agent.answer(cursor.answers.filter((answer): answer is PlanModeQuestionAnswer => answer !== undefined));
-        return;
-      }
-      // On to the next question (or, after the last, the first one still unanswered).
-      const next = cursor.question + 1 < pending.questions.length ? cursor.question + 1 : unanswered;
-      this.moveToQuestion(agent, cursor, next);
-      return;
-    }
     if (!text) return;
     input.setValue("");
     this.scroll.follow(`${agent.id}:chat`);
@@ -798,11 +908,24 @@ export class LanesPage {
     );
     const selected = this.selectedSub(agent);
     const subagents = this.subagentLines(agent, selected, width, rows);
-    // The question gets the room it needs, short of the title, two lines of chat, and the input.
-    const question = this.questionLines(agent, width, Math.max(1, rows - 1 - subagents.length - 2 - 2));
+    // A question gets the room it needs, short of the title, two lines of chat, and the answer line.
+    const asking = this.asking(agent);
+    const question = asking ? this.questionLines(agent, width, Math.max(1, rows - 1 - subagents.length - 2 - 2)) : [];
+    const composing = asking && this.questionCursor(agent).composing;
     const input = this.input(agent);
-    input.focused = focused && this.modal === undefined;
-    const inputLines = this.inputLines(input, focused, width, `tab to talk to ${agent.id}`);
+    input.focused = focused && this.modal === undefined && (!asking || composing);
+    const inputLines = asking
+      ? composing
+        ? this.inputLines(input, focused, width, "")
+        : [
+            theme.fg(
+              "dim",
+              focused
+                ? `› ⏎ picks the highlighted answer; type one on ${TYPE_SOMETHING}`
+                : `› tab to answer ${agent.id}`,
+            ),
+          ]
+      : this.inputLines(input, focused, width, `tab to talk to ${agent.id}`);
     const bodyHeight = Math.max(2, rows - 1 - subagents.length - question.length - 1 - inputLines.length);
     this.laneHeights.set(agent.id, bodyHeight);
     const key = this.viewKey(agent);
@@ -822,11 +945,13 @@ export class LanesPage {
     // The views as tabs: the one shown bright, the other dim (←/→ switch); then where you are in it.
     const tab = (label: string, current: boolean) =>
       current ? theme.fg(focused ? "accent" : "text", theme.bold(label)) : theme.fg("dim", label);
-    const tabs = selected
-      ? tab(`${selected.id} chat`, true)
-      : agent.plan !== undefined
-        ? `${tab("plan", this.showsPlan(agent))}  ${tab("chat", !this.showsPlan(agent))}`
-        : tab("chat", true);
+    const tabs = asking
+      ? tab("answer", true)
+      : selected
+        ? tab(`${selected.id} chat`, true)
+        : agent.plan !== undefined
+          ? `${tab("plan", this.showsPlan(agent))}  ${tab("chat", !this.showsPlan(agent))}`
+          : tab("chat", true);
     const position =
       view.below > 0 || view.start > 0
         ? theme.fg("dim", `${view.start + 1}–${view.start + view.lines.length}/${all.length}`)
@@ -1018,11 +1143,7 @@ export class LanesPage {
             .join("")
         : "";
     const earlier = cursor.answers[cursor.question];
-    const rows = [
-      ...question.options.map((option) => ({ label: option.label, description: option.description })),
-      { label: "Skip (let the planner decide)", description: undefined },
-      ...(earlier?.wasCustom ? [{ label: `✎ your answer: ${earlier.answer}`, description: undefined }] : []),
-    ];
+    const rows = this.questionRows(question, cursor);
     const build = (descriptions: "all" | "focused") => {
       const lines = [
         labeledRule(theme, width, theme.fg("warning", theme.bold(`? ${question.header}${count}`)), progress, "warning"),
@@ -1030,9 +1151,10 @@ export class LanesPage {
       ];
       rows.forEach((row, index) => {
         const focused = index === cursor.option;
-        const chosen = !earlier?.wasCustom && earlier?.optionIndex === index + 1;
+        const chosen = row.kind === "option" && !earlier?.wasCustom && earlier?.optionIndex === row.index + 1;
         const prefix = ` ${focused ? theme.fg("accent", "❯") : " "} ${theme.fg(focused ? "accent" : "muted", `${index + 1}.`)} `;
-        const label = theme.fg(focused ? "accent" : "text", focused ? theme.bold(row.label) : row.label);
+        const tone = focused ? "accent" : row.kind === "option" || row.kind === "earlier" ? "text" : "muted";
+        const label = theme.fg(tone, focused ? theme.bold(row.label) : row.label);
         lines.push(...hang(prefix, `${label}${chosen ? theme.fg("success", " ✓") : ""}`, width));
         if (row.description && (descriptions === "all" || focused)) {
           lines.push(...hang(" ".repeat(visibleWidth(prefix)), theme.fg("muted", row.description), width));
@@ -1105,9 +1227,11 @@ export class LanesPage {
     if (sub) {
       return `Subagent ${sub.id} of ${agent.id}, on ${sub.model}. ^n/^p other subagents · esc back to ${agent.id} · typing talks to ${agent.id}.`;
     }
-    if (agent.pending) {
+    if (this.asking(agent) && agent.pending) {
+      if (this.questionCursor(agent).composing)
+        return `Your answer to ${agent.id}: ⏎ saves it, esc goes back to the options.`;
       const several = agent.pending.questions.length > 1;
-      return `${agent.id} is asking you: ↑↓ pick an answer and ⏎, or type your own answer.${several ? " ←→ (with nothing typed) move between its questions to change an answer." : ""}`;
+      return `${agent.id} is asking you: pick an answer and press ⏎, or type one on ${TYPE_SOMETHING}${several ? " ←→ move between its questions." : ""}`;
     }
     if (agent.working) return `${agent.id} is working. Type to steer it; it reads your message after its current step.`;
     if (agent.status === "failed") {
@@ -1139,17 +1263,28 @@ export class LanesPage {
     const merger = target.kind === "merger";
     const sub = this.selectedSub(agent);
     const onChat = !this.showsPlan(agent) && !sub;
+    if (this.asking(agent) && agent.pending) {
+      if (this.questionCursor(agent).composing) {
+        return [
+          { key: "⏎", label: "save answer", primary: true },
+          { key: "esc", label: "options" },
+          { key: "tab", label: panes > 1 ? "next pane" : "actions" },
+        ];
+      }
+      return [
+        { key: "⏎", label: "answer", primary: true },
+        { key: "↑↓ j/k", label: "pick" },
+        { key: "1-9", label: "jump" },
+        ...(agent.pending.questions.length > 1 ? [{ key: "←→", label: "question" }] : []),
+        { key: "^u/^d", label: "chat" },
+        { key: "tab", label: panes > 1 ? "next pane" : "actions" },
+        { key: "esc", label: "leave" },
+      ];
+    }
     return [
-      { key: "⏎", label: agent.pending ? "answer" : "send", primary: true },
-      ...(agent.pending
-        ? [
-            { key: "↑↓", label: "pick" },
-            ...(agent.pending.questions.length > 1 ? [{ key: "←→", label: "question" }] : []),
-          ]
-        : [
-            { key: "↑↓", label: "scroll" },
-            ...(agent.plan !== undefined ? [{ key: "←→", label: this.showsPlan(agent) ? "chat" : "plan" }] : []),
-          ]),
+      { key: "⏎", label: "send", primary: true },
+      { key: "↑↓", label: "scroll" },
+      ...(agent.plan !== undefined ? [{ key: "←→", label: this.showsPlan(agent) ? "chat" : "plan" }] : []),
       { key: "^u/^d", label: "page" },
       ...(agent.subagents.agents.length > 0 ? [{ key: "^n/^p", label: sub ? "subagent" : "subagents" }] : []),
       ...(onChat
@@ -1163,6 +1298,23 @@ export class LanesPage {
       { key: "esc", label: sub ? `back to ${agent.id}` : "leave" },
     ];
   }
+}
+
+/** A plain character typed, from a legacy or a kitty-protocol terminal. */
+function printable(data: string): string | undefined {
+  if (data.length === 1) return data;
+  return decodeKittyPrintable(data);
+}
+
+/** Typed text or a paste: what starts an answer of your own on Type something. */
+function isTextInput(data: string): boolean {
+  if (data.startsWith("\x1b[200~")) return true;
+  const text = printable(data) ?? data;
+  const control = [...text].some((char) => {
+    const code = char.codePointAt(0) ?? 0;
+    return code < 0x20 || code === 0x7f;
+  });
+  return text.length > 0 && !control && text !== " ";
 }
 
 /** `text` wrapped after `prefix`, continuation lines indented to line up under it. */

@@ -89,7 +89,7 @@ Keys: Up/Down (`k`/`j`, Ctrl+P/Ctrl+N, Ctrl+K/Ctrl+J) move, Ctrl+U/Ctrl+D move t
 
 Above the lanes, one live row per planner (and M, your main agent, once it is there) shows its state, how long its turn has run, its tool calls, subagent tasks, tokens, cost, and what it is doing now. One lane per planner, side by side. Each shows its planner's chat (or its plan, once it has one; the rule under the lane shows the two as tabs, `plan  chat`, and Left/Right on an empty line switch), the subagents it has running, and a line to talk to it. Type and press Enter to steer a working planner or to start a new turn with an idle one; both planners can be working on your messages at once. Sending a message shows the chat; a new plan version shows the plan from its top.
 
-When a planner asks a question, the lane shows it with its options: Up/Down and Enter pick one, or type your own answer. With several questions, Left/Backspace (back) and Right (forward, up to the first unanswered one) on an empty answer line move between them to change an earlier answer; nothing is sent until all are answered.
+When a planner asks a question, the bottom of its lane becomes the question, as in pi-ask-user-question: its options, then `Type something.` and `Skip (let the planner decide)`. Up/Down, `j`/`k` or Ctrl+J/Ctrl+K move, a digit jumps to that row, Enter picks. On `Type something.`, Enter or just typing opens the answer line (a pi-vim editor goes to Insert mode); Enter saves the answer, Esc goes back to the options and keeps the draft. While a question is up, keys go to it, not to the chat line; Ctrl+U/Ctrl+D still scroll the chat above. With several questions, Left/Backspace (back) and Right (forward, up to the first unanswered one) move between them to change an earlier answer; nothing is sent until all are answered.
 
 Lane keys, as the planner screen implements them:
 
@@ -97,7 +97,8 @@ Lane keys, as the planner screen implements them:
 |---|---|
 | Tab, Shift+Tab | move between the lanes, the M pane (once it is there) and the actions |
 | Up/Down | scroll the focused lane a line (when no question is waiting) |
-| Left/Right | on an empty line, switch the lane between its plan and its chat (while a question is waiting, move between its questions) |
+| Left/Right | on an empty line, switch the lane between its plan and its chat (while a question is up, move between its questions) |
+| j/k, 1-9, Space | while a question is up: move, jump to a row, open `Type something.` |
 | Ctrl+U/Ctrl+D, PageUp/PageDown | scroll the focused lane half a page or a page (these keys are taken by the lane, not its message line) |
 | Mouse wheel | scroll the lane under the pointer |
 | Ctrl+O | expand or collapse tool output in a chat, as in Pi |
