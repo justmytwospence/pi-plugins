@@ -1,7 +1,8 @@
 // The approval dialog. In Pi's terminal UI a held call is shown laid out and highlighted (bash one
 // step per line, edits as diffs), with why it was held and the agent's case rendered as Markdown;
-// long parts are clamped and ctrl+o expands them. Elsewhere (RPC clients, forwarded subagent
-// dialogs) it falls back to a plain select with a one-line summary.
+// long parts are clamped and ctrl+o expands them. `n` (or the "Block with a message" row) opens a
+// field whose text goes to the agent with the refusal. Elsewhere (RPC clients, forwarded subagent
+// dialogs) it falls back to a plain select with a one-line summary, then a text input for a message.
 import {
   DynamicBorder,
   type ExtensionContext,
@@ -14,8 +15,26 @@ import {
   renderDiff,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
-import { Box, type Component, Container, Markdown, SelectList, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
+import {
+  Box,
+  type Component,
+  Container,
+  decodeKittyPrintable,
+  Editor,
+  type EditorTheme,
+  isKeyRelease,
+  Markdown,
+  matchesKey,
+  SelectList,
+  Spacer,
+  Text,
+  type TUI,
+} from "@earendil-works/pi-tui";
+import { beginComposition, type EditorCreator, editorOwnsCancel, type ProseEditor } from "./editor.ts";
 import type { CallView } from "./view.ts";
+
+/** The extra row that refuses with a message; also `n` in the terminal dialog. */
+export const BLOCK_WITH_MESSAGE = "Block with a message";
 
 export interface Approval {
   view: CallView;
@@ -25,23 +44,39 @@ export interface Approval {
   agentCase?: string;
   /** Anything else the user should know, e.g. that Jev was unavailable. */
   note?: string;
-  /** Choices, the last of which is the refusal Esc picks. */
+  /** Choices, the last of which is the refusal Esc picks; "Block with a message" is added after them. */
   options: string[];
 }
 
-/** Ask the user to approve a call; resolves to the chosen option, or undefined if dismissed. */
-export async function askApproval(ctx: ExtensionContext, approval: Approval, fallbackTitle: string): Promise<string | undefined> {
+/** The user's answer: a choice from the options, and for a refusal with a message, the message. */
+export interface ApprovalAnswer {
+  choice: string;
+  message?: string;
+}
+
+/** Ask the user to approve a call; resolves to the answer, or undefined if dismissed. */
+export async function askApproval(
+  ctx: ExtensionContext,
+  approval: Approval,
+  fallbackTitle: string,
+  createEditor?: EditorCreator,
+): Promise<ApprovalAnswer | undefined> {
+  const refuse = approval.options[approval.options.length - 1] ?? "Block";
   if (ctx.mode === "tui") {
     try {
-      const choice = await ctx.ui.custom<string | undefined>(
-        (tui, theme, keybindings, done) => new ApprovalDialog(tui, theme, keybindings, approval, done),
+      const answer = await ctx.ui.custom<ApprovalAnswer | undefined>(
+        (tui, theme, keybindings, done) => new ApprovalDialog(tui, theme, keybindings, approval, done, createEditor),
       );
-      if (choice !== undefined) return choice;
+      if (answer !== undefined) return answer;
     } catch {
       // Fall through to the plain dialog rather than lose the question.
     }
   }
-  return ctx.ui.select(fallbackTitle, approval.options);
+  const choice = await ctx.ui.select(fallbackTitle, [...approval.options, BLOCK_WITH_MESSAGE]);
+  if (choice === undefined) return undefined;
+  if (choice !== BLOCK_WITH_MESSAGE) return { choice };
+  const message = (await ctx.ui.input("Message for the agent", "why, or what to do instead"))?.trim();
+  return message ? { choice: refuse, message } : { choice: refuse };
 }
 
 /** Shows the first `limit()` lines of a child, then a hint to expand. */
@@ -82,27 +117,51 @@ class ApprovalDialog implements Component {
   private readonly note = new Text("", 1, 0);
   private readonly hints = new Text("", 1, 0);
   private readonly clamps: Clamp[] = [];
+  /** The message field, shown below the options while open. */
+  private readonly messageLabel = new Text("", 1, 0);
+  private readonly message: ProseEditor;
+  private readonly messageBox = new Box(1, 0);
+  private editing = false;
+  private emptyMessage = false;
+  private hasFocus = false;
+  private finished = false;
 
   private readonly tui: TUI;
   private readonly theme: Theme;
   private readonly keybindings: KeybindingsManager;
   private readonly a: Approval;
+  private readonly refuse: string;
+  private readonly done: (answer: ApprovalAnswer | undefined) => void;
 
-  constructor(tui: TUI, theme: Theme, keybindings: KeybindingsManager, a: Approval, done: (choice: string | undefined) => void) {
+  constructor(
+    tui: TUI,
+    theme: Theme,
+    keybindings: KeybindingsManager,
+    a: Approval,
+    done: (answer: ApprovalAnswer | undefined) => void,
+    createEditor?: EditorCreator,
+  ) {
     this.tui = tui;
     this.theme = theme;
     this.keybindings = keybindings;
     this.a = a;
-    const refuse = a.options[a.options.length - 1];
+    this.done = done;
+    this.refuse = a.options[a.options.length - 1] ?? "Block";
+    const rows = [...a.options, BLOCK_WITH_MESSAGE];
     this.list = new SelectList(
-      a.options.map((o) => ({ value: o, label: o })),
-      a.options.length,
+      rows.map((o) => ({ value: o, label: o })),
+      rows.length,
       getSelectListTheme(),
     );
-    this.list.onSelect = (item) => done(item.value);
-    this.list.onCancel = () => done(refuse);
+    this.list.onSelect = (item) => (item.value === BLOCK_WITH_MESSAGE ? this.openMessage() : this.finish({ choice: item.value }));
+    this.list.onCancel = () => this.finish({ choice: this.refuse });
+    const editorTheme: EditorTheme = { borderColor: (s) => theme.fg("warning", s), selectList: getSelectListTheme() };
+    const submit = (text: string) => this.submitMessage(text);
+    this.message = createEditor?.(tui, editorTheme, keybindings, submit, () => this.closeMessage()) ?? (new Editor(tui, editorTheme) as ProseEditor);
+    this.message.onSubmit = submit;
+    this.messageBox.addChild(this.message);
 
-    const rows = () => (this.expanded ? undefined : Math.max(8, Math.floor(tui.terminal.rows * 0.4)));
+    const bodyRows = () => (this.expanded ? undefined : Math.max(8, Math.floor(tui.terminal.rows * 0.4)));
     const more = (hidden: number) =>
       `${theme.fg("muted", `... ${hidden} more line${hidden === 1 ? "" : "s"}, `)}${keyHint("app.tools.expand", "to expand")}`;
     this.caseText = a.agentCase ? new Markdown(a.agentCase, 1, 0, getMarkdownTheme()) : new Text("", 1, 0);
@@ -114,7 +173,7 @@ class ApprovalDialog implements Component {
       return c;
     };
     const box = new Box(1, 1, (s) => theme.bg("toolPendingBg", s));
-    box.addChild(clamp(this.body, rows));
+    box.addChild(clamp(this.body, bodyRows));
     this.root.addChild(border());
     this.root.addChild(new Spacer(1));
     this.root.addChild(this.title);
@@ -173,38 +232,111 @@ class ApprovalDialog implements Component {
   }
 
   private paintHints(): void {
+    const { theme } = this;
+    this.messageLabel.setText(
+      this.editing
+        ? `${theme.fg("warning", theme.bold("Message for the agent:"))}${this.emptyMessage ? ` ${theme.fg("muted", "(type a message, or Esc to go back)")}` : ""}`
+        : "",
+    );
+    if (this.editing) {
+      this.hints.setText([keyHint("tui.select.confirm", "block with this message"), keyHint("tui.select.cancel", "back")].join("  "));
+      return;
+    }
     const expandable = this.clamps.some((c) => c.clamped);
     this.hints.setText(
       [
         rawKeyHint("↑↓", "navigate"),
         keyHint("tui.select.confirm", "select"),
         keyHint("tui.select.cancel", "block"),
+        rawKeyHint("n", "block with a message"),
         ...(expandable ? [keyHint("app.tools.expand", this.expanded ? "collapse" : "expand")] : []),
       ].join("  "),
     );
   }
 
+  get focused(): boolean {
+    return this.hasFocus;
+  }
+
+  set focused(value: boolean) {
+    this.hasFocus = value;
+    this.message.focused = value && this.editing;
+  }
+
+  /** Tells key-remapping extensions (pi-select-nav) that this dialog handles its own keys. */
+  [Symbol.for("pi-plugins.input-context.v1")]() {
+    return this.editing ? "editor" : "list";
+  }
+
   handleInput(data: string): void {
-    if (this.keybindings.matches(data, "app.tools.expand")) {
+    if (this.finished || isKeyRelease(data)) return;
+    const kb = this.keybindings;
+    if (this.editing) {
+      this.emptyMessage = false;
+      if (kb.matches(data, "tui.select.cancel") && !editorOwnsCancel(this.message)) this.closeMessage();
+      else this.message.handleInput(data);
+    } else if (kb.matches(data, "app.tools.expand")) {
       this.expanded = !this.expanded;
       this.invalidate();
-    } else if (data === "j" || data === "k") {
-      this.list.handleInput(data === "j" ? "\x1b[B" : "\x1b[A");
     } else {
-      this.list.handleInput(data);
+      const key = data.length === 1 ? data : decodeKittyPrintable(data);
+      if (key === "n") this.openMessage();
+      else if (key === "j" || matchesKey(data, "ctrl+j")) this.list.handleInput("\x1b[B");
+      else if (key === "k" || matchesKey(data, "ctrl+k")) this.list.handleInput("\x1b[A");
+      else this.list.handleInput(data);
     }
     this.tui.requestRender();
+  }
+
+  private openMessage(): void {
+    // Leave the highlight on the message row so the list shows what Enter will do.
+    this.list.setSelectedIndex(this.a.options.length);
+    this.editing = true;
+    this.emptyMessage = false;
+    beginComposition(this.message);
+    this.message.focused = this.hasFocus;
+    this.tui.requestRender();
+  }
+
+  private closeMessage(): void {
+    this.editing = false;
+    this.emptyMessage = false;
+    this.message.focused = false;
+    this.tui.requestRender();
+  }
+
+  private submitMessage(raw: string): void {
+    const message = raw.trim();
+    if (!message) {
+      // An empty message keeps the field open; plain Block is one Esc away.
+      this.message.setText(raw);
+      this.emptyMessage = true;
+      beginComposition(this.message);
+      this.tui.requestRender();
+      return;
+    }
+    this.finish({ choice: this.refuse, message });
+  }
+
+  private finish(answer: ApprovalAnswer): void {
+    if (this.finished) return;
+    this.finished = true;
+    this.message.dispose?.();
+    this.done(answer);
   }
 
   render(width: number): string[] {
     const body = this.root.render(width);
     this.paintHints();
-    return [...body, ...this.footer.render(width)];
+    const message = this.editing ? [...this.messageLabel.render(width), ...this.messageBox.render(width), ""] : [];
+    return [...body, ...message, ...this.footer.render(width)];
   }
 
   invalidate(): void {
     this.paint();
     this.root.invalidate();
+    this.messageLabel.invalidate();
+    this.messageBox.invalidate();
     this.footer.invalidate();
   }
 }

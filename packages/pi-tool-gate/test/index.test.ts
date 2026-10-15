@@ -86,7 +86,7 @@ test("a held call is pushed back with Jev's reasons and suggestion; the agent's 
   expect(await h.emit("tool_call", call("bash", { command: "npm publish" }, "t2"), ctx)).toBeUndefined();
   expect(ctx.ui.selects[0]?.title).toMatch(/Held: it changes something other people see/u);
   expect(ctx.ui.selects[0]?.title).toMatch(/Agent: Publishing is the whole point/u);
-  expect(ctx.ui.selects[0]?.options).toEqual(["Allow once", "Allow similar for this session (`npm publish`)", "Block"]);
+  expect(ctx.ui.selects[0]?.options).toEqual(["Allow once", "Allow similar for this session (`npm publish`)", "Block", "Block with a message"]);
   // The grant covers the same program and subcommand without asking again, wherever it starts.
   expect(await h.emit("tool_call", call("bash", { command: "npm publish --dry-run" }, "t3"), ctx)).toBeUndefined();
   expect(await h.emit("tool_call", call("bash", { command: "cd pkg && echo go; npm publish" }, "t4"), ctx)).toBeUndefined();
@@ -146,9 +146,21 @@ test("always-ask calls skip the judgment, are pushed back first, then go to the 
   expect(ctx.ui.selects).toHaveLength(0);
   ctx.ui.selectAnswers.push("Allow once");
   expect(await h.emit("tool_call", call("bash", { command: "git push --force origin main" }, "t2"), ctx)).toBeUndefined();
-  expect(ctx.ui.selects[0]?.options).toEqual(["Allow once", "Block"]);
+  expect(ctx.ui.selects[0]?.options).toEqual(["Allow once", "Block", "Block with a message"]);
   // Jev was only asked for a workaround, never to judge the call.
   expect(jev.calls.map((c) => Object.keys(c.questions))).toEqual([["workaround"]]);
+});
+
+test("a block with a message passes the user's message to the agent", async () => {
+  const { h, ctx } = setup(safe);
+  await h.emit("before_agent_start", { prompt: "x" }, ctx);
+  await h.emit("tool_call", call("bash", { command: "git push --force origin main" }), ctx);
+  ctx.ui.selectAnswers.push("Block with a message");
+  ctx.ui.inputAnswers.push("Push to a feature branch instead.");
+  const blocked: any = await h.emit("tool_call", call("bash", { command: "git push --force origin main" }, "t2"), ctx);
+  expect(blocked.block).toBe(true);
+  expect(blocked.reason).toMatch(/declined this call, with this message:\n\nPush to a feature branch instead\./u);
+  expect(blocked.reason).not.toMatch(/ask the user how to proceed/u);
 });
 
 test("bg_run's command gets the bash rules", async () => {

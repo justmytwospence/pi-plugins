@@ -50,7 +50,7 @@ By default, a held call first returns an explanation to the agent rather than as
 
 ## Approvals and commands
 
-The interactive dialog offers **Allow once**, **Allow similar for this session** when applicable, and **Block**. Fixed-rule holds do not offer a similar-call grant. Esc blocks; Ctrl+O expands long content. Bash is displayed as a command, file edits as a diff, and other tool arguments as JSON. RPC and forwarded subagent questions use a simpler presentation.
+The interactive dialog offers **Allow once**, **Allow similar for this session** when applicable, **Block**, and **Block with a message**, whose text goes to the agent with the refusal. Fixed-rule holds do not offer a similar-call grant. Esc blocks; `n` opens the message field; Ctrl+O expands long content. Bash is displayed as a command, file edits as a diff, and other tool arguments as JSON. RPC and forwarded subagent questions use a simpler presentation.
 
 Similar-call grants are broader than exact argument matches. Shell grants use program/subcommand keys and can apply across working directories. Edit/write grants are directory-scoped; other tools are keyed by name. Read the scope shown in the approval option before granting it.
 

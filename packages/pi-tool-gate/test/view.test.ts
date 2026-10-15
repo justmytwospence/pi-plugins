@@ -4,7 +4,7 @@ import path from "node:path";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import { describe, expect, test } from "vitest";
-import { askApproval } from "../src/prompt.ts";
+import { askApproval, BLOCK_WITH_MESSAGE } from "../src/prompt.ts";
 import { callView, formatBash } from "../src/view.ts";
 
 describe("formatBash", () => {
@@ -79,7 +79,8 @@ describe("askApproval in the terminal UI", () => {
         custom: (factory: any) =>
           new Promise((resolve) => {
             const tui = { terminal: { rows, columns: 100 }, requestRender: () => undefined };
-            const kb = { matches: (data: string, id: string) => id === "app.tools.expand" && data === "\x0f" };
+            const keys_: Record<string, string> = { "app.tools.expand": "\x0f", "tui.select.cancel": "\x1b", "tui.select.confirm": "\r" };
+            const kb = { matches: (data: string, id: string) => keys_[id] === data };
             const theme = { fg: (_: string, t: string) => t, bg: (_: string, t: string) => t, bold: (t: string) => t, italic: (t: string) => t };
             const c = factory(tui, theme, kb, resolve);
             frames.push(c.render(100).map(stripTerminalSequences));
@@ -91,8 +92,8 @@ describe("askApproval in the terminal UI", () => {
         select: async () => "select fallback",
       },
     };
-    const choice = await askApproval(ctx, approval, "title");
-    return { choice, frames };
+    const answer = await askApproval(ctx, approval, "title");
+    return { choice: answer?.choice, message: answer?.message, frames };
   }
 
   const view = { tool: "bash", subject: "", body: { kind: "code" as const, lang: "bash", text: "git push --force origin main" } };
@@ -129,8 +130,41 @@ describe("askApproval in the terminal UI", () => {
     expect(frames[1]!.join("\n")).toMatch(/echo 49/u);
   });
 
+  test("n opens a message field; Enter blocks with the message", async () => {
+    const { choice, message, frames } = await show({ view, options: ["Allow once", "Block"] }, ["n", ..."use a branch", "\r"]);
+    expect(frames[0]!.join("\n")).toMatch(/n block with a message/u);
+    expect(frames[1]!.join("\n")).toMatch(/Message for the agent:/u);
+    expect(choice).toBe("Block");
+    expect(message).toBe("use a branch");
+  });
+
+  test("the message row opens the field too; an empty message keeps it open and Esc goes back", async () => {
+    const { choice, message, frames } = await show(
+      { view, options: ["Allow once", "Block"] },
+      ["\x1b[B", "\x1b[B", "\r", "\r", "\x1b", "k", "\r"],
+    );
+    expect(frames[0]!.join("\n")).toMatch(new RegExp(BLOCK_WITH_MESSAGE, "u"));
+    expect(frames[3]!.join("\n")).toMatch(/Message for the agent:/u);
+    expect(frames[4]!.join("\n")).toMatch(/type a message, or Esc to go back/u);
+    expect(frames[5]!.join("\n")).not.toMatch(/Message for the agent:/u);
+    expect(choice).toBe("Block");
+    expect(message).toBeUndefined();
+  });
+
   test("outside the terminal UI it falls back to a plain select", async () => {
-    const ctx: any = { mode: "rpc", ui: { custom: async () => undefined, select: async (title: string) => `asked: ${title}` } };
-    expect(await askApproval(ctx, { view, options: ["Allow once", "Block"] }, "Allow? bash: x")).toBe("asked: Allow? bash: x");
+    const asked: string[][] = [];
+    const ctx: any = {
+      mode: "rpc",
+      ui: { custom: async () => undefined, select: async (title: string, options: string[]) => (asked.push(options), `asked: ${title}`) },
+    };
+    expect(await askApproval(ctx, { view, options: ["Allow once", "Block"] }, "Allow? bash: x")).toEqual({ choice: "asked: Allow? bash: x" });
+    expect(asked[0]).toEqual(["Allow once", "Block", BLOCK_WITH_MESSAGE]);
+  });
+
+  test("the fallback asks for the message after the select", async () => {
+    const ctx: any = { mode: "rpc", ui: { select: async () => BLOCK_WITH_MESSAGE, input: async () => "  try a dry run  " } };
+    expect(await askApproval(ctx, { view, options: ["Allow once", "Block"] }, "t")).toEqual({ choice: "Block", message: "try a dry run" });
+    ctx.ui.input = async () => undefined;
+    expect(await askApproval(ctx, { view, options: ["Allow once", "Block"] }, "t")).toEqual({ choice: "Block" });
   });
 });

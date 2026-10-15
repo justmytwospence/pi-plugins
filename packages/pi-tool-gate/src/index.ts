@@ -36,6 +36,7 @@ import {
   verdict,
   workaroundQuestion,
 } from "./judge.ts";
+import { embeddedEditorFactory } from "./editor.ts";
 import { askApproval } from "./prompt.ts";
 import {
   cycleOf,
@@ -313,6 +314,8 @@ export default function toolGate(pi: ExtensionAPI) {
     return { kind: "judge", args: clip(JSON.stringify(input), 6_000), key: `tool:${tool}`, similar: { keys: [`tool:${tool}`], label: `${tool} calls` } };
   };
 
+  const editorFactory = embeddedEditorFactory(pi);
+
   /** Ask the user, one dialog at a time. */
   const ask = (
     ctx: ExtensionContext,
@@ -334,12 +337,18 @@ export default function toolGate(pi: ExtensionAPI) {
       // Held only while the dialog is open, so queued approvals do not report blocked early.
       const label = clip(`Allow? ${describeCall(q.tool, q.input)}`.replace(/\s+/gu, " "), 60);
       const answer = await whileBlocked(pi.events, label, () =>
-        askApproval(ctx, { view, held: q.held, agentCase: q.agentCase, note: q.note, options }, title),
+        askApproval(ctx, { view, held: q.held, agentCase: q.agentCase, note: q.note, options }, title, editorFactory),
       );
-      if (answer === "Allow once") return undefined;
-      if (answer !== undefined && answer === similarOption && similar) {
+      if (answer?.choice === "Allow once") return undefined;
+      if (answer !== undefined && answer.choice === similarOption && similar) {
         for (const key of similar.keys) allowSimilar.add(key);
         return undefined;
+      }
+      if (answer?.message) {
+        return {
+          block: true,
+          reason: `The user declined this call, with this message:\n\n${answer.message}\n\nDo not retry the call as it was; follow the user's message.`,
+        };
       }
       return { block: true, reason: "The user declined this call. Do not retry it; continue without it, or ask the user how to proceed." };
     };
