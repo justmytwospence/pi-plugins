@@ -30,7 +30,7 @@ import {
   Text,
   type TUI,
 } from "@earendil-works/pi-tui";
-import { beginComposition, type EditorCreator, editorOwnsCancel, type ProseEditor } from "./editor.ts";
+import { beginComposition, type EditorCreator, editorOwnsCancel, inline, type ProseEditor } from "./editor.ts";
 import type { CallView } from "./view.ts";
 
 /** The extra row that refuses with a message; also `n` in the terminal dialog. */
@@ -117,10 +117,9 @@ class ApprovalDialog implements Component {
   private readonly note = new Text("", 1, 0);
   private readonly hints = new Text("", 1, 0);
   private readonly clamps: Clamp[] = [];
-  /** The message field, shown below the options while open. */
-  private readonly messageLabel = new Text("", 1, 0);
+  /** The message field, shown in place of the "Block with a message" row while open. */
   private readonly message: ProseEditor;
-  private readonly messageBox = new Box(1, 0);
+  private readonly emptyHint = new Text("", 3, 0);
   private editing = false;
   private emptyMessage = false;
   private hasFocus = false;
@@ -159,7 +158,6 @@ class ApprovalDialog implements Component {
     const submit = (text: string) => this.submitMessage(text);
     this.message = createEditor?.(tui, editorTheme, keybindings, submit, () => this.closeMessage()) ?? (new Editor(tui, editorTheme) as ProseEditor);
     this.message.onSubmit = submit;
-    this.messageBox.addChild(this.message);
 
     const bodyRows = () => (this.expanded ? undefined : Math.max(8, Math.floor(tui.terminal.rows * 0.4)));
     const more = (hidden: number) =>
@@ -194,7 +192,18 @@ class ApprovalDialog implements Component {
     }
     this.root.addChild(new Spacer(1));
     const options = new Box(1, 0);
-    options.addChild(this.list);
+    const selectTheme = getSelectListTheme();
+    options.addChild({
+      render: (width: number) => {
+        const lines = this.list.render(width);
+        if (!this.editing) return lines;
+        // The message row becomes the field: no label line, no editor rules.
+        const label = selectTheme.selectedText("Block: ");
+        const field = inline(selectTheme.selectedPrefix("→ "), label, this.message, width, theme);
+        return [...lines.slice(0, -1), ...field, ...(this.emptyMessage ? this.emptyHint.render(width) : [])];
+      },
+      invalidate: () => this.list.invalidate(),
+    });
     this.root.addChild(options);
     this.root.addChild(new Spacer(1));
     this.footer.addChild(this.hints);
@@ -233,11 +242,7 @@ class ApprovalDialog implements Component {
 
   private paintHints(): void {
     const { theme } = this;
-    this.messageLabel.setText(
-      this.editing
-        ? `${theme.fg("warning", theme.bold("Message for the agent:"))}${this.emptyMessage ? ` ${theme.fg("muted", "(type a message, or Esc to go back)")}` : ""}`
-        : "",
-    );
+    this.emptyHint.setText(theme.fg("warning", "Type a message for the agent, or Esc to go back."));
     if (this.editing) {
       this.hints.setText([keyHint("tui.select.confirm", "block with this message"), keyHint("tui.select.cancel", "back")].join("  "));
       return;
@@ -328,15 +333,12 @@ class ApprovalDialog implements Component {
   render(width: number): string[] {
     const body = this.root.render(width);
     this.paintHints();
-    const message = this.editing ? [...this.messageLabel.render(width), ...this.messageBox.render(width), ""] : [];
-    return [...body, ...message, ...this.footer.render(width)];
+    return [...body, ...this.footer.render(width)];
   }
 
   invalidate(): void {
     this.paint();
     this.root.invalidate();
-    this.messageLabel.invalidate();
-    this.messageBox.invalidate();
     this.footer.invalidate();
   }
 }

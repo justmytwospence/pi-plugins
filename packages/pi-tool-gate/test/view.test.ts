@@ -133,7 +133,9 @@ describe("askApproval in the terminal UI", () => {
   test("n opens a message field; Enter blocks with the message", async () => {
     const { choice, message, frames } = await show({ view, options: ["Allow once", "Block"] }, ["n", ..."use a branch", "\r"]);
     expect(frames[0]!.join("\n")).toMatch(/n block with a message/u);
-    expect(frames[1]!.join("\n")).toMatch(/Message for the agent:/u);
+    expect(frames[1]!.join("\n")).toMatch(/→ Block: /u);
+    expect(frames.at(-2)!.join("\n")).toMatch(/→ Block: use a branch/u);
+    expect(frames.at(-2)!.join("\n")).not.toMatch(/Block with a message/u);
     expect(choice).toBe("Block");
     expect(message).toBe("use a branch");
   });
@@ -144,9 +146,9 @@ describe("askApproval in the terminal UI", () => {
       ["\x1b[B", "\x1b[B", "\r", "\r", "\x1b", "k", "\r"],
     );
     expect(frames[0]!.join("\n")).toMatch(new RegExp(BLOCK_WITH_MESSAGE, "u"));
-    expect(frames[3]!.join("\n")).toMatch(/Message for the agent:/u);
-    expect(frames[4]!.join("\n")).toMatch(/type a message, or Esc to go back/u);
-    expect(frames[5]!.join("\n")).not.toMatch(/Message for the agent:/u);
+    expect(frames[3]!.join("\n")).toMatch(/→ Block: /u);
+    expect(frames[4]!.join("\n")).toMatch(/Type a message for the agent, or Esc to go back/u);
+    expect(frames[5]!.join("\n")).not.toMatch(/→ Block: /u);
     expect(choice).toBe("Block");
     expect(message).toBeUndefined();
   });
