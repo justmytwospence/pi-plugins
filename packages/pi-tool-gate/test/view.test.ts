@@ -132,7 +132,7 @@ describe("askApproval in the terminal UI", () => {
 
   test("n opens a message field; Enter blocks with the message", async () => {
     const { choice, message, frames } = await show({ view, options: ["Allow once", "Block"] }, ["n", ..."use a branch", "\r"]);
-    expect(frames[0]!.join("\n")).toMatch(/n block with a message/u);
+    expect(frames[0]!.join("\n")).not.toMatch(/navigate|enter select/u);
     expect(frames[1]!.join("\n")).toMatch(/→ Block: /u);
     expect(frames.at(-2)!.join("\n")).toMatch(/→ Block: use a branch/u);
     expect(frames.at(-2)!.join("\n")).not.toMatch(/Block with a message/u);

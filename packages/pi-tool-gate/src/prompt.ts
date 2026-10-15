@@ -11,7 +11,6 @@ import {
   highlightCode,
   type KeybindingsManager,
   keyHint,
-  rawKeyHint,
   renderDiff,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
@@ -106,7 +105,7 @@ class Clamp implements Component {
 class ApprovalDialog implements Component {
   private expanded = false;
   private readonly root = new Container();
-  /** Key hints and the closing border; painted after the body so they know whether it was clamped. */
+  /** The closing border. */
   private readonly footer = new Container();
   private readonly list: SelectList;
   private readonly title = new Text("", 1, 0);
@@ -115,7 +114,6 @@ class ApprovalDialog implements Component {
   private readonly caseLabel = new Text("", 1, 0);
   private readonly caseText: Component;
   private readonly note = new Text("", 1, 0);
-  private readonly hints = new Text("", 1, 0);
   private readonly clamps: Clamp[] = [];
   /** The message field, shown in place of the "Block with a message" row while open. */
   private readonly message: ProseEditor;
@@ -206,7 +204,6 @@ class ApprovalDialog implements Component {
     });
     this.root.addChild(options);
     this.root.addChild(new Spacer(1));
-    this.footer.addChild(this.hints);
     this.footer.addChild(border());
     this.paint();
   }
@@ -237,26 +234,7 @@ class ApprovalDialog implements Component {
       theme.fg("accent", theme.bold("Agent:")) + (a.agentCase ? "" : ` ${theme.fg("muted", theme.italic("(gave no reason)"))}`),
     );
     this.note.setText(theme.fg("muted", a.note ?? ""));
-    this.paintHints();
-  }
-
-  private paintHints(): void {
-    const { theme } = this;
     this.emptyHint.setText(theme.fg("warning", "Type a message for the agent, or Esc to go back."));
-    if (this.editing) {
-      this.hints.setText([keyHint("tui.select.confirm", "block with this message"), keyHint("tui.select.cancel", "back")].join("  "));
-      return;
-    }
-    const expandable = this.clamps.some((c) => c.clamped);
-    this.hints.setText(
-      [
-        rawKeyHint("↑↓", "navigate"),
-        keyHint("tui.select.confirm", "select"),
-        keyHint("tui.select.cancel", "block"),
-        rawKeyHint("n", "block with a message"),
-        ...(expandable ? [keyHint("app.tools.expand", this.expanded ? "collapse" : "expand")] : []),
-      ].join("  "),
-    );
   }
 
   get focused(): boolean {
@@ -332,7 +310,6 @@ class ApprovalDialog implements Component {
 
   render(width: number): string[] {
     const body = this.root.render(width);
-    this.paintHints();
     return [...body, ...this.footer.render(width)];
   }
 
