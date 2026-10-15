@@ -214,7 +214,7 @@ describe("modes", () => {
     expect(await h.emit("before_agent_start", { prompt: "x" }, ctx)).toBeUndefined();
   });
 
-  test("/mode lists only the enabled modes", async () => {
+  test("modes limits the cycle; /mode still lists every mode", async () => {
     const { mkdirSync, writeFileSync } = await import("node:fs");
     mkdirSync(path.join(configDir, "xdg", "agents"), { recursive: true });
     writeFileSync(path.join(configDir, "xdg", "agents", "tool-gate.json"), JSON.stringify({ modes: ["chat", "plan", "auto"] }));
@@ -223,7 +223,7 @@ describe("modes", () => {
     h.pi.events.emit(PLAN_PROVIDER, { planFile: "/tmp/plan.md" });
     ctx.ui.selectAnswers.push(undefined);
     await h.commands.get("mode").handler("", ctx);
-    expect(ctx.ui.selects[0].options.map((o: string) => o.slice(2).split(" ")[0])).toEqual(["chat", "plan", "auto"]);
+    expect(ctx.ui.selects[0].options.map((o: string) => o.slice(2).split(" ")[0])).toEqual(["chat", "manual", "accept-edits", "plan", "auto", "bypass"]);
     const seen: string[] = [];
     for (let i = 0; i < 3; i++) {
       await h.shortcuts.get("shift+tab").handler(ctx);

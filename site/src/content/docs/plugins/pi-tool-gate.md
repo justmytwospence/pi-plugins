@@ -54,7 +54,7 @@ The interactive dialog offers **Allow once**, **Allow similar for this session**
 
 Similar-call grants are broader than exact argument matches. Shell grants use program/subcommand keys and can apply across working directories. Edit/write grants are directory-scoped; other tools are keyed by name. Read the scope shown in the approval option before granting it.
 
-- `/mode [chat|manual|accept-edits|plan|auto|bypass]` switches the permission mode; with no argument it lists the enabled ones.
+- `/mode [chat|manual|accept-edits|plan|auto|bypass]` switches the permission mode; with no argument it lists every mode.
 - `/gate` or `/gate status` shows the mode, counts, classifier settings, rules and grant counts.
 - `/gate on` switches to auto mode; `/gate off` to bypass mode.
 
@@ -79,7 +79,7 @@ This `.pi/tool-gate.json` keeps the standard checks but asks immediately instead
 }
 ```
 
-`defaultMode` (default `auto`) chooses the starting mode, `modes` the enabled modes that the cycle and `/mode` list offer (`["default", "acceptEdits", "plan", "auto"]`; for example `["chat", "plan", "auto"]`), and `cycleShortcut` its key (`shift+tab`; `""` for none, read after `/reload`). `enabled: false` starts sessions in bypass mode.
+`defaultMode` (default `auto`) chooses the starting mode, `modes` the modes the cycle key steps through, while `/mode` still offers every mode (`["default", "acceptEdits", "plan", "auto"]`; for example `["chat", "plan", "auto"]`), and `cycleShortcut` its key (`shift+tab`; `""` for none, read after `/reload`). `enabled: false` starts sessions in bypass mode.
 
 Overriding `allowTools` replaces the entire default list. Adding a tool there bypasses its ordinary checks, so do not treat it as a cosmetic preference. `readOnlyCommands` similarly extends trusted shell programs. The default allowance for `codemode` relies on Pi gating its nested tool calls separately.
 

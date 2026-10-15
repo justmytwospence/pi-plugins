@@ -99,7 +99,7 @@ When Jev cannot answer (Jev off in settings, no classifier model, no credentials
 
 ## Commands
 
-- `/mode [chat|manual|accept-edits|plan|auto|bypass]`: switch modes; with no argument, pick one of the enabled modes (`modes`) from a list.
+- `/mode [chat|manual|accept-edits|plan|auto|bypass]`: switch modes; with no argument, pick one from a list of every mode.
 - `/gate` or `/gate status`: the mode and cycle, counts, Jev model, push-back setting, number of rules and session grants.
 - `/gate on`, `/gate off`: auto mode, or bypass mode.
 
@@ -155,7 +155,7 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
 
 - `enabled`: `false` starts sessions in bypass mode.
 - `defaultMode`: the mode a new session starts in (`chat`, `manual`, `accept-edits`, `plan`, `auto`, `bypass`, or Claude Code's names).
-- `modes`: the enabled modes: those the cycle key steps through and `/mode` lists, always in Claude Code's order with chat first; add `"bypassPermissions"` or `"chat"` to include them. For example `["chat", "plan", "auto"]` cycles chat, plan, auto.
+- `modes`: the modes the cycle key steps through (`/mode` still offers every mode), always in Claude Code's order with chat first; add `"bypassPermissions"` or `"chat"` to include them. For example `["chat", "plan", "auto"]` cycles chat, plan, auto.
 - `cycleShortcut`: the key that cycles modes, read at startup (changes after `/reload`); `""` for none.
 - `jev`: the classifier model (`provider`/`model`, looked up among Pi's classifier models) and its timeout; `enabled: false` uses the hint fallback.
 - `thresholds`: the bars described above.

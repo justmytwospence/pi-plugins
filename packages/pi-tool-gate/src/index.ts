@@ -69,7 +69,7 @@ export interface GateConfig extends Record<string, unknown> {
   pushBack: boolean;
   /** The mode a new session starts in: chat, manual, accept-edits, plan, auto or bypass. */
   defaultMode: string;
-  /** The modes the cycle key steps through, and `/mode` offers (plan only with pi-plan-mode). */
+  /** The modes the cycle key steps through (plan only with pi-plan-mode); `/mode` offers them all. */
   modes: string[];
   /** The key that cycles the modes; "" for none. */
   cycleShortcut: string;
@@ -642,9 +642,7 @@ export default function toolGate(pi: ExtensionAPI) {
         return;
       }
       if (!next) {
-        // The enabled modes (the cycle), and the current one if it is not among them.
-        const enabled = cycle();
-        const choices = MODES.filter((m) => (m !== "plan" || planProvider) && (!enabled.length || enabled.includes(m) || m === mode));
+        const choices = MODES.filter((m) => m !== "plan" || planProvider);
         const labels = choices.map((m) => `${m === mode ? "● " : "  "}${MODE_NAMES[m]} — ${MODE_DESCRIPTIONS[m]}`);
         const picked = await ctx.ui.select("Permission mode", labels);
         if (picked === undefined) return;
