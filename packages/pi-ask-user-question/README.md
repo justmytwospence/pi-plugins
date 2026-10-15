@@ -68,7 +68,7 @@ It takes the place of the editor, like Claude Code's: the transcript stays visib
 
 | Key | Does |
 |---|---|
-| Your `tui.select.up`/`tui.select.down` keys, Ctrl+K/Ctrl+J | move, wrapping |
+| Your `tui.select.up`/`tui.select.down` keys, Ctrl+K/Ctrl+J | move, wrapping; Ctrl+K/Ctrl+J also work from an open answer or note field, in any editor mode (a note is saved, an answer draft stays on its row) |
 | `k`/`j`, 1-9 | navigate or highlight without choosing; on the free-text row, start typing an answer instead |
 | Enter (`tui.select.confirm`) | choose the highlighted option; on `Type something.` open the editor; in multi-select, finish the question (with nothing checked, the highlighted option alone) |
 | Space | check or uncheck an option (multi-select); on `Type something.` open the editor if nothing is typed yet |
@@ -77,7 +77,7 @@ It takes the place of the editor, like Claude Code's: the transcript stays visib
 | Tab, Shift+Tab, Right, Left | next or previous question or Review (several questions only) |
 | Esc (`tui.select.cancel`) | in an editor, leave it keeping the draft; otherwise decline the questionnaire |
 
-In the `Type something.` and notes editors, Enter saves and Shift+Enter starts a new line. A free-text answer needs no offered option, including in multi-select. Empty answer submission keeps the editor open with guidance. Saving typed text answers a single-select question, or checks the text and finishes a multi-select one. Free-text composition uses the full width, without an irrelevant preview box. If the editor is showing autocomplete, or is a modal editor (from an editor provider, below) that is not in its normal mode, Esc goes to the editor first. On the Review tab, Enter submits and Esc declines; questions left blank are reported as unanswered. Unsaved answer/note drafts are shown on Review; Enter returns to the first unfinished field instead of silently dropping it. If the tool call is aborted, the dialog closes as declined.
+Typing on `Type something.` puts the text on that row, and a note goes on a `note:` line, with no box around either. The dialog shows no key-hint line. In the `Type something.` and notes editors, Enter saves and Shift+Enter starts a new line (Ctrl+J moves to the next row instead). A free-text answer needs no offered option, including in multi-select. Empty answer submission keeps the editor open with guidance. Saving typed text answers a single-select question, or checks the text and finishes a multi-select one. Free-text composition uses the full width, without an irrelevant preview box. If the editor is showing autocomplete, or is a modal editor (from an editor provider, below) that is not in its normal mode, Esc goes to the editor first. On the Review tab, Enter submits and Esc declines; questions left blank are reported as unanswered. Unsaved answer/note drafts are shown on Review; Enter returns to the first unfinished field instead of silently dropping it. If the tool call is aborted, the dialog closes as declined.
 
 ## Hosts
 

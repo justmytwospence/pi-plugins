@@ -123,6 +123,10 @@ export class QuestionDialog implements Component, Focusable {
     if (this.editing) {
       this.emptyAnswer = false;
       const editor = this.editor();
+      // Ctrl+J/Ctrl+K move between rows from an open field too, in any editor mode: a note is
+      // saved, an answer draft is kept on its row. Shift+Enter is the newline key.
+      const step = matchesKey(data, "ctrl+j") ? 1 : matchesKey(data, "ctrl+k") ? -1 : 0;
+      if (step && !this.onReview()) return this.leaveEditor(step);
       if (editor && kb.matches(data, "tui.select.cancel") && !editorOwnsCancel(editor)) this.closeEditor();
       else editor?.handleInput(data);
       return;
@@ -140,6 +144,11 @@ export class QuestionDialog implements Component, Focusable {
     const slot = this.slots[this.tab]!;
     const rows = q.options.length + 1;
     const key = printable(data);
+    // A bare LF is Ctrl+J in a legacy terminal (Enter sends CR), though it also matches "enter".
+    if (data === "\n") {
+      slot.cursor = (slot.cursor + 1) % rows;
+      return;
+    }
     if (kb.matches(data, "tui.select.confirm")) return this.confirm(q, slot);
     if (kb.matches(data, "tui.select.cancel")) return this.finish(true);
     // A highlighted text row is a composition target: printable input and paste
@@ -217,6 +226,14 @@ export class QuestionDialog implements Component, Focusable {
     slot.note = raw.trim();
     slot.notes.setText(slot.note);
     this.closeEditor();
+  }
+
+  private leaveEditor(step: 1 | -1): void {
+    const slot = this.slots[this.tab]!;
+    if (this.editing === "notes") this.saveNote(this.tab, slot.notes.getText());
+    else this.closeEditor();
+    const rows = this.questions[this.tab]!.options.length + 1;
+    slot.cursor = (slot.cursor + step + rows) % rows;
   }
 
   private openEditor(kind: Editing): void {
@@ -333,7 +350,9 @@ export class QuestionDialog implements Component, Focusable {
     const out = [...this.border.render(width)];
     if (this.questions.length > 1) out.push(...wrap(` ${this.tabBar()}`, width), "");
     out.push(...(this.onReview() ? this.review(width) : this.question(width)));
-    out.push("", ...wrap(` ${this.hints()}`, width), ...this.border.render(width));
+    const state = this.modeState();
+    if (state) out.push("", ` ${this.theme.fg("muted", state)}`);
+    out.push("", ...this.border.render(width));
     return out;
   }
 
@@ -448,36 +467,11 @@ export class QuestionDialog implements Component, Focusable {
     return out;
   }
 
-  private hints(): string {
-    const hint = (action: "tui.select.confirm" | "tui.select.cancel" | "tui.input.submit" | "tui.input.newLine", label: string) => rawKeyHint(this.keybindings.getKeys(action).join("/") || "unbound", label);
-    const many = this.questions.length > 1;
-    if (this.editing) {
-      const state = compositionState(this.editor()!);
-      const action = this.editing === "custom" ? "use answer" : "save note";
-      return [
-        ...(state ? [state.toUpperCase()] : []),
-        ...(state === "normal" ? [rawKeyHint("i", "insert")] : []),
-        hint("tui.input.submit", action),
-        hint("tui.input.newLine", "newline"),
-        hint("tui.select.cancel", state && state !== "normal" ? "normal mode" : "back (keep draft)"),
-      ].join("  ");
-    }
-    if (this.onReview()) {
-      const drafts = this.slots.some((s) => s.custom.getText().trim() !== s.typed || s.notes.getText().trim() !== s.note);
-      return [hint("tui.select.confirm", drafts ? "finish unsaved draft" : "submit"), rawKeyHint("tab", "questions"), hint("tui.select.cancel", "cancel")].join("  ");
-    }
-    const q = this.questions[this.tab]!;
-    const multi = q.multiSelect;
-    const custom = this.slots[this.tab]!.cursor === q.options.length;
-    return [
-      `${this.keybindings.getKeys("tui.select.up").join("/")}/${this.keybindings.getKeys("tui.select.down").join("/")} navigate`,
-      ...(custom
-        ? ["type or paste your answer", hint("tui.select.confirm", "edit answer"), ...(multi ? [rawKeyHint("space", "toggle/edit answer")] : [])]
-        : multi ? [rawKeyHint("space", "toggle"), hint("tui.select.confirm", "done")] : [hint("tui.select.confirm", "select")]),
-      rawKeyHint(custom ? "ctrl+g" : "n/ctrl+g", "notes"),
-      ...(many ? [rawKeyHint("tab", "next question")] : []),
-      hint("tui.select.cancel", "cancel"),
-    ].join("  ");
+  /** A modal editor's state when it is not ready for typing (e.g. NORMAL); no key hints otherwise. */
+  private modeState(): string | undefined {
+    const editor = this.editing ? this.editor() : undefined;
+    const state = editor ? compositionState(editor) : undefined;
+    return state && state !== "insert" ? state.toUpperCase() : undefined;
   }
 }
 

@@ -37,6 +37,9 @@ class MemoryTerminal {
   send(...keys) { assert.ok(this.input); for (const key of keys) this.input(key); }
 }
 
+// Kitty-protocol Ctrl+J/Ctrl+K: unambiguous, unlike legacy LF, which some keybindings read as Enter.
+const CTRL_J = '\x1b[106;5u';
+const CTRL_K = '\x1b[107;5u';
 const question = (multiSelect = false) => ({ question: 'Which approach?', header: 'Approach', multiSelect,
   options: [{ label: 'A', description: 'First' }, { label: 'B', description: 'Second', preview: '**Second approach**' }] });
 const previous = getKeybindings();
@@ -84,10 +87,28 @@ try {
             assert.equal(editors[0][MODE]().state, 'insert');
             terminal.send(ESC);
             assert.equal(dialog[CONTEXT](), 'editor');
-            assert.match(screen(), /NORMAL.*i insert/);
+            assert.match(screen(), /^ NORMAL$/m);
+            assert.doesNotMatch(screen(), /i insert/);
             terminal.send(ESC);
           } else terminal.send(ESC);
           assert.equal(dialog[CONTEXT](), 'list');
+          assert.equal(result, undefined);
+          // Ctrl+J/Ctrl+K leave an open field for the rows, in Insert and Normal mode alike.
+          terminal.send('\r');
+          assert.equal(dialog[CONTEXT](), 'editor');
+          terminal.send(CTRL_J);
+          assert.equal(dialog[CONTEXT](), 'list');
+          assert.match(screen(), /❯ 1\./);
+          terminal.send(CTRL_K);
+          assert.match(screen(), /❯ 3\./);
+          if (modal) {
+            terminal.send('\r', ESC);
+            assert.equal(editors[0][MODE]().state, 'normal');
+            terminal.send(CTRL_K);
+            assert.equal(dialog[CONTEXT](), 'list');
+            assert.match(screen(), /❯ 2\./);
+            terminal.send(CTRL_J);
+          }
           assert.equal(result, undefined);
           // Reopen without asking the user to discover i; the first letter is retained.
           terminal.send('t', '\x1b[200~ these\x1b[201~', '\r');

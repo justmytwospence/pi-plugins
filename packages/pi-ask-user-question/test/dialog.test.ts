@@ -45,7 +45,7 @@ describe("single question", () => {
   });
 
   test("Type something opens a multiline editor; Enter saves the answer", () => {
-    const d = dialog([library], ["3", enter, ...type("Use"), "\n", ...type("Temporal"), enter]);
+    const d = dialog([library], ["3", enter, ...type("Use"), "\x1b[13;2u", ...type("Temporal"), enter]);
     expect(d.result?.answers[0]).toMatchObject({ kind: "custom", answer: "Use\nTemporal" });
   });
 
@@ -80,6 +80,29 @@ describe("single question", () => {
     expect(lines.some((l) => /^ ❯ 3\. i thought we wanted to/u.test(l))).toBe(true);
     expect(lines.join("\n")).not.toMatch(/Your answer|Type something\./u);
     expect(lines.filter((l) => /^\s*─+\s*$/u.test(l))).toHaveLength(2); // only the dialog's own borders
+  });
+
+  test("Ctrl+J/Ctrl+K move rows from an open field: the answer draft stays, a note is saved", () => {
+    const d = dialog([library], ["3", ...type("draft"), "\n"]);
+    expect(screen(d.frames.at(-1))).toMatch(/❯ 1\. date-fns/u);
+    expect(screen(d.frames.at(-1))).toMatch(/3\. Type something\.\n\s+draft/u);
+    d.dialog.handleInput("n");
+    for (const c of "small") d.dialog.handleInput(c);
+    d.dialog.handleInput("\x0b");
+    const text = screen(d.dialog.render(100));
+    expect(text).toMatch(/❯ 3\. Type something\./u);
+    expect(text).toMatch(/note: small/u);
+  });
+
+  test("a legacy Ctrl+J (LF) in the list moves down instead of choosing", () => {
+    const d = dialog([library], ["\n"]);
+    expect(d.result).toBeUndefined();
+    expect(screen(d.frames.at(-1))).toMatch(/❯ 2\. dayjs/u);
+  });
+
+  test("no key-hint line", () => {
+    const d = dialog([library], ["3", "x"]);
+    for (const frame of d.frames) expect(screen(frame)).not.toMatch(/navigate|use answer|cancel|newline/u);
   });
 
   test("an empty typed answer is no answer", () => {

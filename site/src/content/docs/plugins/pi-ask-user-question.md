@@ -74,9 +74,9 @@ The questionnaire replaces the editor while leaving the transcript above it. Mul
 | Tab / Shift+Tab or Left/Right | Move between question tabs. |
 | Esc | Leave an editor while retaining its draft; otherwise decline the questionnaire. |
 
-In text and note editors, Enter saves and Shift+Enter inserts a newline. An empty answer keeps the editor open with guidance. Multi-select accepts checked choices plus a typed answer; a typed answer alone is also valid. The answer field uses the full width without a preview box. If nothing is checked when Enter finishes a multi-select question, the highlighted option is used alone. On Review, Enter submits; unanswered questions remain explicitly unanswered. Unsaved answer and note drafts are visible, and Enter returns to the first unfinished field before submitting.
+Typed answers and notes are edited inline, on their own row, without a box; the dialog has no key-hint line. In text and note editors, Enter saves, Shift+Enter inserts a newline, and Ctrl+J/Ctrl+K move to another row in any editor mode (a note is saved, an answer draft is kept). An empty answer keeps the editor open with guidance. Multi-select accepts checked choices plus a typed answer; a typed answer alone is also valid. The answer field uses the full width without a preview box. If nothing is checked when Enter finishes a multi-select question, the highlighted option is used alone. On Review, Enter submits; unanswered questions remain explicitly unanswered. Unsaved answer and note drafts are visible, and Enter returns to the first unfinished field before submitting.
 
-With pi-vim enabled, opening or reopening a field starts in Insert mode. The footer shows the editor state; in Normal mode it also shows `i` to resume typing. Escape first leaves Insert/Visual mode, then returns to the list while retaining the draft. Autocomplete likewise gets Escape before the questionnaire does.
+With pi-vim enabled, opening or reopening a field starts in Insert mode. The dialog shows the editor state when it is not Insert (for example `NORMAL`). Escape first leaves Insert/Visual mode, then returns to the list while retaining the draft. Autocomplete likewise gets Escape before the questionnaire does.
 
 ### Interaction design
 
