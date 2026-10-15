@@ -350,7 +350,7 @@ export class QuestionDialog implements Component, Focusable {
     const out = [...this.border.render(width)];
     if (this.questions.length > 1) out.push(...wrap(` ${this.tabBar()}`, width), "");
     out.push(...(this.onReview() ? this.review(width) : this.question(width)));
-    out.push("", ...this.border.render(width));
+    out.push(...this.border.render(width));
     return out;
   }
 

@@ -203,7 +203,6 @@ class ApprovalDialog implements Component {
       invalidate: () => this.list.invalidate(),
     });
     this.root.addChild(options);
-    this.root.addChild(new Spacer(1));
     this.footer.addChild(border());
     this.paint();
   }
