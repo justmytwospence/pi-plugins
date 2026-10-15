@@ -87,8 +87,9 @@ try {
             assert.equal(editors[0][MODE]().state, 'insert');
             terminal.send(ESC);
             assert.equal(dialog[CONTEXT](), 'editor');
-            assert.match(screen(), /^ NORMAL$/m);
-            assert.doesNotMatch(screen(), /i insert/);
+            // The mode badge sits at the end of the answer row, not on a line of its own.
+            assert.match(screen().replace(/\x1b_[^\x07]*\x07/g, ""), /❯ 3\. (\[ \] )?no +NORMAL/);
+            assert.doesNotMatch(screen(), /^\s*NORMAL\s*$/m);
             terminal.send(ESC);
           } else terminal.send(ESC);
           assert.equal(dialog[CONTEXT](), 'list');

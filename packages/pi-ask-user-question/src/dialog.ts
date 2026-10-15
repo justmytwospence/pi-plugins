@@ -2,7 +2,7 @@
 // transcript stays visible above it. Several questions get a tab each plus a Review tab; every
 // question ends with a "Type something." row that becomes a multiline editor in place, `n` adds a note, and
 // options with a Markdown preview show it beside the list (below it in narrow terminals).
-import { DynamicBorder, getMarkdownTheme, getSelectListTheme, type KeybindingsManager, rawKeyHint, type Theme } from "@earendil-works/pi-coding-agent";
+import { DynamicBorder, getMarkdownTheme, getSelectListTheme, type KeybindingsManager, type Theme } from "@earendil-works/pi-coding-agent";
 import {
   type Component,
   decodeKittyPrintable,
@@ -18,7 +18,7 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { type EditorCreator, type ProseEditor, beginComposition, compositionState, editorOwnsCancel, inline } from "./editor.ts";
+import { type EditorCreator, type ProseEditor, beginComposition, editorOwnsCancel, inline } from "./editor.ts";
 import { BOX_CHROME, box, columns, contentWidth, type Natural, SIDE_ROWS, sideBySide, split, STACKED_ROWS } from "./preview.ts";
 import { type Answer, type Choice, type DialogResult, makeAnswer } from "./result.ts";
 import { type Question, TYPE_SOMETHING } from "./schema.ts";
@@ -350,8 +350,6 @@ export class QuestionDialog implements Component, Focusable {
     const out = [...this.border.render(width)];
     if (this.questions.length > 1) out.push(...wrap(` ${this.tabBar()}`, width), "");
     out.push(...(this.onReview() ? this.review(width) : this.question(width)));
-    const state = this.modeState();
-    if (state) out.push("", ` ${this.theme.fg("muted", state)}`);
     out.push("", ...this.border.render(width));
     return out;
   }
@@ -413,9 +411,9 @@ export class QuestionDialog implements Component, Focusable {
       const pad = row(i, o.label, slot.checked.has(i), chosen);
       if (o.description) out.push(...hang(pad, t.fg("muted", o.description), width));
     });
-    const pad = row(q.options.length, TYPE_SOMETHING, slot.typedChecked && !!slot.typed, slot.choice?.kind === "custom");
-    const draft = slot.custom.getText().trim();
-    if (draft && this.editing !== "custom") out.push(...hang(pad, t.fg("dim", oneLine(draft)), width).slice(0, 3));
+    // A draft stays on its row after the field closes, in place of the "Type something." label.
+    const draft = oneLine(slot.custom.getText().trim());
+    row(q.options.length, draft || TYPE_SOMETHING, slot.typedChecked && !!slot.typed, slot.choice?.kind === "custom");
     return out;
   }
 
@@ -467,12 +465,6 @@ export class QuestionDialog implements Component, Focusable {
     return out;
   }
 
-  /** A modal editor's state when it is not ready for typing (e.g. NORMAL); no key hints otherwise. */
-  private modeState(): string | undefined {
-    const editor = this.editing ? this.editor() : undefined;
-    const state = editor ? compositionState(editor) : undefined;
-    return state && state !== "insert" ? state.toUpperCase() : undefined;
-  }
 }
 
 /** Text input, not control keys: preserve the original bytes for the editor. */

@@ -52,7 +52,7 @@ describe("single question", () => {
   test("Esc leaves the editor and keeps the draft; Enter reopens it", () => {
     const d = dialog([library], ["3", enter, ...type("draft"), esc]);
     expect(d.result).toBeUndefined();
-    expect(screen(d.frames.at(-1))).toMatch(/3\. Type something\.\n\s+draft/u);
+    expect(screen(d.frames.at(-1))).toMatch(/❯ 3\. draft\s*$/mu);
     d.dialog.handleInput(enter);
     d.dialog.handleInput(enter);
     expect(d.result?.answers[0]).toMatchObject({ kind: "custom", answer: "draft" });
@@ -85,12 +85,12 @@ describe("single question", () => {
   test("Ctrl+J/Ctrl+K move rows from an open field: the answer draft stays, a note is saved", () => {
     const d = dialog([library], ["3", ...type("draft"), "\n"]);
     expect(screen(d.frames.at(-1))).toMatch(/❯ 1\. date-fns/u);
-    expect(screen(d.frames.at(-1))).toMatch(/3\. Type something\.\n\s+draft/u);
+    expect(screen(d.frames.at(-1))).toMatch(/^ {3}3\. draft\s*$/mu);
     d.dialog.handleInput("n");
     for (const c of "small") d.dialog.handleInput(c);
     d.dialog.handleInput("\x0b");
     const text = screen(d.dialog.render(100));
-    expect(text).toMatch(/❯ 3\. Type something\./u);
+    expect(text).toMatch(/❯ 3\. draft/u);
     expect(text).toMatch(/note: small/u);
   });
 

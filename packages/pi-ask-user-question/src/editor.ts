@@ -1,5 +1,5 @@
 import type { ExtensionAPI, KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
-import { Editor, type EditorTheme, type TUI, visibleWidth } from "@earendil-works/pi-tui";
+import { Editor, type EditorTheme, truncateToWidth, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 
 const EDITOR_MODE = Symbol.for("pi-plugins.editor-mode.v1");
 const EDITOR_INSERT = Symbol.for("pi-plugins.editor-insert.v1");
@@ -44,6 +44,8 @@ export function editorOwnsCancel(editor: ProseEditor): boolean {
 const NO_BORDER = "\u0000";
 const MARKER = "\u0001";
 const BARE = Symbol("bare-editor");
+/** Columns kept at the right of a modal editor's first line for its mode badge. */
+const BADGE = 12;
 
 /**
  * An editor without its top and bottom rules, after `prefix` (continuation lines hang under it),
@@ -67,12 +69,19 @@ export function inline(prefix: string, label: string, editor: ProseEditor, width
     label = "";
   }
   const pad = " ".repeat(lead);
+  // A modal editor writes its mode badge (" NORMAL ") over its bottom rule. Keep it, at the right
+  // end of the first line, by leaving it room there.
+  const modal = typeof editor[EDITOR_MODE] === "function" && width - lead > BADGE + 8;
+  const lines = editor.render(Math.max(1, width - lead - (modal ? BADGE : 0)));
+  const last = lines[lines.length - 1];
+  const badge = modal && last !== undefined && last !== NO_BORDER && !last.startsWith(MARKER) ? lines.pop() : undefined;
   let first = out.length === 0;
-  for (const line of editor.render(Math.max(1, width - lead))) {
+  for (const line of lines) {
     if (line === NO_BORDER) continue;
     if (line.startsWith(MARKER)) out.push(pad + line.slice(1));
     else if (first) {
-      out.push(prefix + label + line);
+      const tail = badge === undefined ? "" : ` ${truncateToWidth(badge, BADGE - 1, "")}`;
+      out.push(prefix + label + line + tail);
       first = false;
     } else out.push(pad + line);
   }
