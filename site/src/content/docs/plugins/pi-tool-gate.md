@@ -29,6 +29,7 @@ After an [explicit stock-key remap](/guides/keyboard/#resolve-the-two-stock-conf
 
 | Mode | Runs without asking |
 | --- | --- |
+| Chat (`chat mode on`) | Recognized reads only; every other call is blocked without asking, and the agent is told to talk and answer questions. No classifier requests. Opt in by adding `chat` to `modes`. |
 | Manual (`manual mode on`) | Recognized reads only; every other call asks, with an "allow similar" option. No classifier requests. |
 | Accept edits (`accept edits on`) | Reads, edits and writes inside the project, and `mkdir`, `touch`, `rm`, `rmdir`, `mv`, `cp` and `sed` on files inside the project. Other commands ask. |
 | Plan (`plan mode on`) | With [pi-plan-mode](/plugins/pi-plan-mode/) only. Edits are blocked except to its plan file; commands are judged as in auto mode. Approving the plan picks the next mode. |
@@ -53,7 +54,7 @@ The interactive dialog offers **Allow once**, **Allow similar for this session**
 
 Similar-call grants are broader than exact argument matches. Shell grants use program/subcommand keys and can apply across working directories. Edit/write grants are directory-scoped; other tools are keyed by name. Read the scope shown in the approval option before granting it.
 
-- `/mode [manual|accept-edits|plan|auto|bypass]` switches the permission mode; with no argument it lists them.
+- `/mode [chat|manual|accept-edits|plan|auto|bypass]` switches the permission mode; with no argument it lists the enabled ones.
 - `/gate` or `/gate status` shows the mode, counts, classifier settings, rules and grant counts.
 - `/gate on` switches to auto mode; `/gate off` to bypass mode.
 
@@ -78,7 +79,7 @@ This `.pi/tool-gate.json` keeps the standard checks but asks immediately instead
 }
 ```
 
-`defaultMode` (default `auto`) chooses the starting mode, `modes` the cycle (`["default", "acceptEdits", "plan", "auto"]`), and `cycleShortcut` its key (`shift+tab`; `""` for none, read after `/reload`). `enabled: false` starts sessions in bypass mode.
+`defaultMode` (default `auto`) chooses the starting mode, `modes` the enabled modes that the cycle and `/mode` list offer (`["default", "acceptEdits", "plan", "auto"]`; for example `["chat", "plan", "auto"]`), and `cycleShortcut` its key (`shift+tab`; `""` for none, read after `/reload`). `enabled: false` starts sessions in bypass mode.
 
 Overriding `allowTools` replaces the entire default list. Adding a tool there bypasses its ordinary checks, so do not treat it as a cosmetic preference. `readOnlyCommands` similarly extends trusted shell programs. The default allowance for `codemode` relies on Pi gating its nested tool calls separately.
 
