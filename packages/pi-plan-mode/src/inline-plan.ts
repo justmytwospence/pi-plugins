@@ -152,10 +152,12 @@ End each turn by asking the user a question or by calling ${EXIT_TOOL}. If the u
 </system-reminder>`;
 }
 
-export function exitPlanText(planFile: string | undefined) {
+export function exitPlanText(planFile: string | undefined, nextMode?: string) {
+  // Chat mode (pi-tool-gate's) is read-only too; its own notice says what is allowed.
+  const may = nextMode === "chat" ? "" : " You may now make edits, run tools, and take actions.";
   return `<system-reminder>
 ## Exited plan mode
-You have left plan mode. You may now make edits, run tools, and take actions.${planFile && existsSync(planFile) ? ` The plan file is at ${planFile} if you need it.` : ""}
+You have left plan mode.${may}${planFile && existsSync(planFile) ? ` The plan file is at ${planFile} if you need it.` : ""}
 </system-reminder>`;
 }
 
@@ -244,7 +246,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   const noticeText = () =>
     state.active
       ? enterPlanText(state.planFile as string, hasPlan(state.planFile), gate !== undefined)
-      : exitPlanText(state.planFile);
+      : exitPlanText(state.planFile, gate?.mode);
 
   const enterLocal = (ctx: ExtensionContext | undefined) => {
     if (state.active) return;
@@ -404,7 +406,10 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
           ? [
               ...(cycle.includes("auto") ? [APPROVE_AUTO] : []),
               ...(cycle.includes("acceptEdits") ? [APPROVE_EDITS] : []),
-              APPROVE_MANUAL,
+              // Manual approval when it is in the cycle, or when nothing else is.
+              ...(cycle.includes("default") || !(cycle.includes("auto") || cycle.includes("acceptEdits"))
+                ? [APPROVE_MANUAL]
+                : []),
             ]
           : [APPROVE_HERE];
         return [...here, APPROVE_FRESH, EDIT, KEEP];

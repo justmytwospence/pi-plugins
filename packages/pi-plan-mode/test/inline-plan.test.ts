@@ -23,7 +23,14 @@ type Tool = {
 };
 
 async function setup(
-  options: { select?: string[]; input?: string; gate?: boolean; plansDirectory?: string; cwd?: string } = {},
+  options: {
+    select?: string[];
+    input?: string;
+    gate?: boolean;
+    cycle?: string[];
+    plansDirectory?: string;
+    cwd?: string;
+  } = {},
 ) {
   const mock = createMockPi();
   const plansDirectory = options.plansDirectory ?? mkdtempSync(join(tmpdir(), "plans-"));
@@ -53,7 +60,7 @@ async function setup(
     // A stand-in for pi-tool-gate: it takes mode requests and announces every change.
     let mode = "auto";
     const announce = () =>
-      mock.eventBus.emit(MODE_CHANGED, { mode, cycle: ["default", "acceptEdits", "plan", "auto"] });
+      mock.eventBus.emit(MODE_CHANGED, { mode, cycle: options.cycle ?? ["default", "acceptEdits", "plan", "auto"] });
     mock.eventBus.on(MODE_SET, (data) => {
       gateEvents.push({ channel: MODE_SET, data });
       mode = (data as { mode: string }).mode;
@@ -212,6 +219,28 @@ test("with pi-tool-gate, plan mode is the gate's mode: /plan asks it, approval p
   assert.equal(inline().active, true);
   mock.eventBus.emit(MODE_CHANGED, { mode: "auto", cycle: [] });
   assert.equal(inline().active, false);
+});
+
+test("with the gate's chat mode enabled: approval offers only enabled modes; leaving into chat grants nothing", async () => {
+  const { mock, context, tool, emit, inline, selects } = await setup({
+    gate: true,
+    cycle: ["chat", "plan", "auto"],
+    select: [undefined as never],
+  });
+  await mock.commands.get("plan")?.handler("", context.ctx);
+  writeFileSync(inline().planFile, "# Plan\n");
+  await emit("before_agent_start", { prompt: "x" });
+  await tool(EXIT_TOOL).execute("t1", {}, undefined, undefined, context.ctx);
+  assert.deepEqual(selects[0]?.options, [
+    "Yes, auto mode (Jev judges calls)",
+    "Yes, in a fresh session with only the plan",
+    "Edit the plan first",
+    "No, keep planning",
+  ]);
+  mock.eventBus.emit(MODE_CHANGED, { mode: "chat", cycle: ["chat", "plan", "auto"] });
+  const notice = await emit("before_agent_start", { prompt: "y" });
+  assert.match(notice.message.content, /left plan mode/u);
+  assert.doesNotMatch(notice.message.content, /may now make edits/u);
 });
 
 test("plan tools stay top-level so codemode cannot hide the inline plan review", async () => {

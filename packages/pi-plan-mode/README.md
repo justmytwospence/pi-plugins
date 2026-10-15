@@ -46,7 +46,7 @@ While plan mode is on:
 - Your agent is told (once, with your next message, or right away mid-turn) to research, ask you what it cannot find out, and write its plan to a **plan file**, `~/.pi/agent/plans/<two-words>.md` (`plansDirectory` moves it). One file per session: entering plan mode again continues it.
 - `edit` and `write` are blocked except for the plan file. Commands: with pi-tool-gate, the gate judges them as in auto mode (as Claude Code's classifier does while planning); without it, only read-only commands run (the [shell policy](./docs/settings.md)).
 - When the plan is ready, your agent calls `exit_plan_mode`. The plan shows in the chat and you choose:
-  - **Yes, auto mode (Jev judges calls)** / **Yes, auto-accept project edits** / **Yes, manually approve edits** (with pi-tool-gate; without it, **Yes, implement it**): plan mode ends and your agent starts implementing in this conversation, in that permission mode.
+  - **Yes, auto mode (Jev judges calls)** / **Yes, auto-accept project edits** / **Yes, manually approve edits** (with pi-tool-gate, those of its enabled modes, with manual approval when neither auto nor accept edits is enabled; without it, **Yes, implement it**): plan mode ends and your agent starts implementing in this conversation, in that permission mode.
   - **Yes, in a fresh session with only the plan**: once this turn ends, a new session (a child of this one) starts with the plan as its first message.
   - **Edit the plan first**: edit it in Pi's editor; the file is updated and you choose again. The approval tells your agent the plan was edited.
   - **No, keep planning**: say what should change (or leave it empty, or press Esc, and say it in the chat). Plan mode stays on.
