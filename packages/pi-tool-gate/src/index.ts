@@ -7,8 +7,9 @@
 //
 // That is auto mode, one of Claude Code's permission modes the gate owns (see modes.ts): manual
 // asks about everything that does more than read, accept edits also runs edits and filesystem
-// commands inside the project, bypass runs everything but critical removals, and plan mode
-// (pi-plan-mode's) blocks edits until a plan is approved. Shift+Tab cycles them.
+// commands inside the project, bypass runs everything but critical removals, plan mode
+// (pi-plan-mode's) blocks edits until a plan is approved, and chat mode (the gate's own) runs
+// only read-only calls while you talk. Shift+Tab cycles them.
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -66,9 +67,9 @@ export interface GateConfig extends Record<string, unknown> {
   readOnlyCommands: string[];
   /** Block a held call once with a reason for the agent before asking you; a retry asks you. */
   pushBack: boolean;
-  /** The mode a new session starts in: manual, accept-edits, plan, auto or bypass. */
+  /** The mode a new session starts in: chat, manual, accept-edits, plan, auto or bypass. */
   defaultMode: string;
-  /** The modes the cycle key steps through (plan only with pi-plan-mode). */
+  /** The modes the cycle key steps through, and `/mode` offers (plan only with pi-plan-mode). */
   modes: string[];
   /** The key that cycles the modes; "" for none. */
   cycleShortcut: string;
@@ -92,6 +93,8 @@ export const DEFAULT_CONFIG: GateConfig = {
 };
 
 const STATUS_KEY = "tool-gate";
+/** Records whether the agent was last told chat mode is on, so it hears each change once. */
+const CHAT_ENTRY = "tool-gate:chat-notice";
 const BUILTIN_READ = new Set(["read", "grep", "find", "ls"]);
 /** Tools whose `command` is a shell command, judged by the same rules: bash, and pi-bg's bg_run. */
 const SHELL_TOOLS = new Set(["bash", "bg_run"]);
@@ -122,6 +125,8 @@ export default function toolGate(pi: ExtensionAPI) {
   let planProvider = false;
   let planFile: string | undefined;
   let hostCtx: ExtensionContext | undefined;
+  /** The agent was last told that chat mode is on. */
+  let chatTold = false;
   let auto = 0;
   let held = 0;
   let pushedBack = 0;
@@ -185,7 +190,32 @@ export default function toolGate(pi: ExtensionAPI) {
     }
     status(ctx);
     broadcast(previous);
+    tellChatNow(ctx);
     return true;
+  };
+
+  const chatNotice = () => (mode === "chat" ? chatEnterText(shortcut) : chatExitText(mode));
+  const markChatTold = () => {
+    chatTold = mode === "chat";
+    try {
+      pi.appendEntry(CHAT_ENTRY, { told: chatTold });
+    } catch {
+      // No session to record it in.
+    }
+  };
+  /** Mid-turn, tell the agent about a chat mode change now; otherwise with your next message. */
+  const tellChatNow = (ctx: ExtensionContext | undefined) => {
+    if (!ctx || (mode === "chat") === chatTold) return;
+    try {
+      if (ctx.isIdle()) return;
+      pi.sendMessage(
+        { customType: CHAT_ENTRY, content: chatNotice(), display: false, details: { active: mode === "chat" } },
+        { deliverAs: "steer" },
+      );
+    } catch {
+      return;
+    }
+    markChatTold();
   };
 
   const cycleMode = (ctx: ExtensionContext | undefined = hostCtx) => setMode(nextMode(mode, cycle()), ctx);
@@ -400,6 +430,8 @@ export default function toolGate(pi: ExtensionAPI) {
     const entries = ctx.sessionManager.getBranch() as Array<{ type?: string; customType?: string; data?: unknown }>;
     const recorded = [...entries].reverse().find((entry) => entry.type === "custom" && entry.customType === MODE_ENTRY);
     mode = parseMode((recorded?.data as { mode?: unknown } | undefined)?.mode) ?? startMode();
+    const told = [...entries].reverse().find((entry) => entry.type === "custom" && entry.customType === CHAT_ENTRY);
+    chatTold = (told?.data as { told?: unknown } | undefined)?.told === true;
     prePlanMode = undefined;
     status(ctx);
     broadcast();
@@ -421,6 +453,10 @@ export default function toolGate(pi: ExtensionAPI) {
       status(ctx);
       broadcast("plan");
     }
+    if ((mode === "chat") === chatTold) return undefined;
+    const content = chatNotice();
+    markChatTold();
+    return { message: { customType: CHAT_ENTRY, content, display: false, details: { active: mode === "chat" } } };
   });
 
   const allow = (ctx: ExtensionContext) => {
@@ -462,6 +498,18 @@ export default function toolGate(pi: ExtensionAPI) {
       held++;
       if (!ctx.hasUI) return { block: true, reason: `tool-gate held this call: it ${critical.join("; ")}. There is no user to approve it.` };
       return ask(ctx, { tool, input, held: critical.join("; ") }, undefined);
+    }
+
+    if (mode === "chat") {
+      // Talking, not acting: what the gate counts as read-only runs, nothing else does.
+      const p = await plan(tool, input, ctx.cwd);
+      if (p.kind === "allow") return allow(ctx);
+      return {
+        block: true,
+        reason:
+          `Chat mode is on: only read-only tools run, and this ${tool} call is not one. Do not retry it or work around it. ` +
+          `Answer from what you can read, or tell the user what you would do; they can switch modes (${shortcut || "/mode"}) to let you act.`,
+      };
     }
 
     if (mode === "plan" && (tool === "edit" || tool === "write")) {
@@ -579,7 +627,7 @@ export default function toolGate(pi: ExtensionAPI) {
   };
 
   pi.registerCommand("mode", {
-    description: "Permission mode: manual, accept-edits, plan, auto or bypass (no argument: pick one)",
+    description: "Permission mode: chat, manual, accept-edits, plan, auto or bypass (no argument: pick one)",
     getArgumentCompletions: (prefix: string) =>
       MODES.filter((m) => m !== "plan" || planProvider)
         .map((m) => MODE_NAMES[m])
@@ -594,7 +642,9 @@ export default function toolGate(pi: ExtensionAPI) {
         return;
       }
       if (!next) {
-        const choices = MODES.filter((m) => m !== "plan" || planProvider);
+        // The enabled modes (the cycle), and the current one if it is not among them.
+        const enabled = cycle();
+        const choices = MODES.filter((m) => (m !== "plan" || planProvider) && (!enabled.length || enabled.includes(m) || m === mode));
         const labels = choices.map((m) => `${m === mode ? "● " : "  "}${MODE_NAMES[m]} — ${MODE_DESCRIPTIONS[m]}`);
         const picked = await ctx.ui.select("Permission mode", labels);
         if (picked === undefined) return;
@@ -628,6 +678,19 @@ export default function toolGate(pi: ExtensionAPI) {
       );
     },
   });
+}
+
+export function chatEnterText(shortcut: string) {
+  return `<system-reminder>
+Chat mode is active. The user wants to talk: answer questions, explain, discuss and recommend. You MUST NOT make edits, run commands that change files or the system, commit, or otherwise make changes, even if asked to; this supersedes any other instructions. Read-only tools (reading and searching files, read-only commands, web lookups) run; anything else is blocked. If the user asks for a change, say what you would do; they can switch modes (${shortcut || "/mode"}) to let you act.
+</system-reminder>`;
+}
+
+export function chatExitText(mode: PermissionMode) {
+  return `<system-reminder>
+## Exited chat mode
+You have left chat mode; the user switched to ${MODE_NAMES[mode]} mode.${mode === "plan" ? "" : " You may now make edits, run tools, and take actions the user asks for."}
+</system-reminder>`;
 }
 
 export function addUsage(a: ClassifierUsage | undefined, b: ClassifierUsage): ClassifierUsage {

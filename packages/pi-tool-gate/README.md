@@ -36,6 +36,7 @@ As in Claude Code, the mode decides what runs without asking you. Shift+Tab (`cy
 
 | Mode | Status | Runs without asking |
 | --- | --- | --- |
+| chat | `⏸ chat mode on` | Read-only calls only ([clear cases](#1-clear-cases-no-model-call)); everything else is blocked without asking you, and the agent is told it is there to talk and answer questions. No Jev calls. Not in the cycle unless you add it to `modes`. |
 | manual (`default`) | `⏸ manual mode on` | Reads only ([clear cases](#1-clear-cases-no-model-call)); everything else asks you, with "allow similar" for the session. |
 | accept edits (`acceptEdits`) | `⏵⏵ accept edits on` | Reads, `edit`/`write` inside the project, and `mkdir`, `touch`, `rm`, `rmdir`, `mv`, `cp` and `sed` when every file they name is inside the project (after any `cd`; no redirects or expansions; `sed` without `w`/`e`). Credential files and the [always-held calls](#1-clear-cases-no-model-call) still ask. |
 | plan | `⏸ plan mode on` | Needs [pi-plan-mode](../pi-plan-mode/): edits are blocked except to its plan file; commands are judged as in auto mode. Approving the plan picks the next mode. |
@@ -98,7 +99,7 @@ When Jev cannot answer (Jev off in settings, no classifier model, no credentials
 
 ## Commands
 
-- `/mode [manual|accept-edits|plan|auto|bypass]`: switch modes; with no argument, pick one from a list.
+- `/mode [chat|manual|accept-edits|plan|auto|bypass]`: switch modes; with no argument, pick one of the enabled modes (`modes`) from a list.
 - `/gate` or `/gate status`: the mode and cycle, counts, Jev model, push-back setting, number of rules and session grants.
 - `/gate on`, `/gate off`: auto mode, or bypass mode.
 
@@ -153,8 +154,8 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
 ```
 
 - `enabled`: `false` starts sessions in bypass mode.
-- `defaultMode`: the mode a new session starts in (`manual`, `accept-edits`, `plan`, `auto`, `bypass`, or Claude Code's names).
-- `modes`: the modes the cycle key steps through, always in Claude Code's order; add `"bypassPermissions"` to include bypass.
+- `defaultMode`: the mode a new session starts in (`chat`, `manual`, `accept-edits`, `plan`, `auto`, `bypass`, or Claude Code's names).
+- `modes`: the enabled modes: those the cycle key steps through and `/mode` lists, always in Claude Code's order with chat first; add `"bypassPermissions"` or `"chat"` to include them. For example `["chat", "plan", "auto"]` cycles chat, plan, auto.
 - `cycleShortcut`: the key that cycles modes, read at startup (changes after `/reload`); `""` for none.
 - `jev`: the classifier model (`provider`/`model`, looked up among Pi's classifier models) and its timeout; `enabled: false` uses the hint fallback.
 - `thresholds`: the bars described above.

@@ -42,6 +42,7 @@ describe("mode helpers", () => {
     expect(parseMode("acceptEdits")).toBe("acceptEdits");
     expect(parseMode("accept-edits")).toBe("acceptEdits");
     expect(parseMode("bypass")).toBe("bypassPermissions");
+    expect(parseMode("chat")).toBe("chat");
     expect(parseMode("nope")).toBeUndefined();
   });
 
@@ -51,6 +52,7 @@ describe("mode helpers", () => {
     expect(cycleOf(all, { plan: false })).toEqual(["default", "acceptEdits", "bypassPermissions", "auto"]);
     expect(nextMode("auto", ["default", "acceptEdits", "plan", "auto"])).toBe("default");
     expect(nextMode("bypassPermissions", ["default", "auto"])).toBe("default");
+    expect(cycleOf(["auto", "chat", "plan"], { plan: true })).toEqual(["chat", "plan", "auto"]);
   });
 });
 
@@ -168,5 +170,65 @@ describe("modes", () => {
     await h.commands.get("mode").handler("plan", ctx);
     expect(ctx.ui.notes.at(-1)?.message).toMatch(/needs pi-plan-mode/u);
     expect(ctx.ui.status.get("permission-mode")).toMatch(/^⏵⏵ auto mode on/u);
+  });
+
+  test("chat mode runs only read-only calls and blocks the rest without asking", async () => {
+    const { h, jev, ctx } = setup();
+    await h.emit("session_start", { type: "session_start" }, ctx);
+    await h.commands.get("mode").handler("chat", ctx);
+    expect(ctx.ui.status.get("permission-mode")).toBe("⏸ chat mode on (shift+tab to cycle)");
+    expect(await h.emit("tool_call", call("read", { path: "a.ts" }), ctx)).toBeUndefined();
+    expect(await h.emit("tool_call", call("bash", { command: "git log --oneline" }), ctx)).toBeUndefined();
+    expect(await h.emit("tool_call", call("web_search", { query: "x" }), ctx)).toBeUndefined();
+    for (const [tool, input] of [
+      ["edit", { path: "src/a.ts", edits: [] }],
+      ["write", { path: "src/a.ts", content: "x" }],
+      ["bash", { command: "npm test" }],
+      ["subagent", { task: "x" }],
+    ] as const) {
+      expect(await h.emit("tool_call", call(tool, input), ctx)).toMatchObject({ block: true, reason: expect.stringMatching(/Chat mode is on/u) });
+    }
+    expect(ctx.ui.selects).toHaveLength(0);
+    expect(jev.calls).toHaveLength(0);
+  });
+
+  test("chat mode tells the agent with the next message, once, and again on leaving", async () => {
+    const { h, ctx } = setup();
+    await h.emit("session_start", { type: "session_start" }, ctx);
+    expect(await h.emit("before_agent_start", { prompt: "x" }, ctx)).toBeUndefined();
+    await h.commands.get("mode").handler("chat", ctx);
+    const enter: any = await h.emit("before_agent_start", { prompt: "x" }, ctx);
+    expect(enter.message.content).toMatch(/Chat mode is active/u);
+    expect(await h.emit("before_agent_start", { prompt: "x" }, ctx)).toBeUndefined();
+    await h.commands.get("mode").handler("auto", ctx);
+    const exit: any = await h.emit("before_agent_start", { prompt: "x" }, ctx);
+    expect(exit.message.content).toMatch(/left chat mode.*auto mode.*may now make edits/su);
+  });
+
+  test("a chat mode change mid-turn steers the agent right away", async () => {
+    const { h, ctx } = setup();
+    ctx.isIdle = () => false;
+    await h.emit("session_start", { type: "session_start" }, ctx);
+    await h.commands.get("mode").handler("chat", ctx);
+    expect(h.messages.at(-1)).toMatchObject({ opts: { deliverAs: "steer" }, message: { content: expect.stringMatching(/Chat mode is active/u) } });
+    expect(await h.emit("before_agent_start", { prompt: "x" }, ctx)).toBeUndefined();
+  });
+
+  test("/mode lists only the enabled modes", async () => {
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    mkdirSync(path.join(configDir, "xdg", "agents"), { recursive: true });
+    writeFileSync(path.join(configDir, "xdg", "agents", "tool-gate.json"), JSON.stringify({ modes: ["chat", "plan", "auto"] }));
+    const { h, ctx } = setup();
+    await h.emit("session_start", { type: "session_start" }, ctx);
+    h.pi.events.emit(PLAN_PROVIDER, { planFile: "/tmp/plan.md" });
+    ctx.ui.selectAnswers.push(undefined);
+    await h.commands.get("mode").handler("", ctx);
+    expect(ctx.ui.selects[0].options.map((o: string) => o.slice(2).split(" ")[0])).toEqual(["chat", "plan", "auto"]);
+    const seen: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      await h.shortcuts.get("shift+tab").handler(ctx);
+      seen.push(ctx.ui.status.get("permission-mode")!.replace(/ \(.*\)$/u, ""));
+    }
+    expect(seen).toEqual(["⏸ chat mode on", "⏸ plan mode on", "⏵⏵ auto mode on"]);
   });
 });
