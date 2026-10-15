@@ -1560,6 +1560,7 @@ test("the permission mode joins the model row in its color; plan runs point at /
   // Narrow: the hint goes before the mode does.
   assert.match(plain(mod.renderFooter(s, 50, theme)[1]), /⏵⏵ accept edits on$/);
   assert.equal(mod.parseModeStatus("⏸ plan mode on").kind, "plan");
+  assert.equal(mod.parseModeStatus("⏸ chat mode on (shift+tab to cycle)").kind, "chat");
   assert.equal(mod.parseModeStatus("plan mode please"), undefined);
   assert.deepEqual(mod.absorbStatuses(new Map([["permission-mode", "something else"]]), { claudeRow: false }).rest, ["something else"]);
 });

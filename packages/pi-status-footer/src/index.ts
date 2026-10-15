@@ -140,17 +140,17 @@ export function parseMarimoStatus(text: string): MarimoStatus | undefined {
 
 /** The permission mode (pi-tool-gate, or pi-plan-mode alone), as Claude Code labels it. */
 export interface PermissionModeStatus {
-  kind: "manual" | "acceptEdits" | "plan" | "auto" | "bypass";
+  kind: "chat" | "manual" | "acceptEdits" | "plan" | "auto" | "bypass";
   /** `⏵⏵ auto mode on` */
   label: string;
   /** The key that cycles modes, e.g. `shift+tab`. */
   key?: string;
 }
 const MODE_KINDS: Record<string, PermissionModeStatus["kind"]> = {
-  "manual mode": "manual", "accept edits": "acceptEdits", "plan mode": "plan", "auto mode": "auto", "bypass permissions": "bypass",
+  "chat mode": "chat", "manual mode": "manual", "accept edits": "acceptEdits", "plan mode": "plan", "auto mode": "auto", "bypass permissions": "bypass",
 };
 export function parseModeStatus(text: string): PermissionModeStatus | undefined {
-  const match = /^(⏸|⏵⏵) (manual mode|accept edits|plan mode|auto mode|bypass permissions) on(?: \((.+) to cycle\))?$/u.exec(text);
+  const match = /^(⏸|⏵⏵) (chat mode|manual mode|accept edits|plan mode|auto mode|bypass permissions) on(?: \((.+) to cycle\))?$/u.exec(text);
   if (!match) return undefined;
   return { kind: MODE_KINDS[match[2]], label: `${match[1]} ${match[2]} on`, ...(match[3] ? { key: match[3] } : {}) };
 }
@@ -715,9 +715,9 @@ function mcpChip(count: McpCount, theme: Paint): string {
   return `${theme.fg("muted", "MCP")} ${count.connected < count.total ? theme.fg("warning", value) : value}`;
 }
 
-/** Claude Code's mode colors, in theme roles: plan teal, accept edits purple, bypass red. */
+/** Claude Code's mode colors, in theme roles: plan teal, accept edits purple, bypass red (chat, the gate's own, green). */
 const MODE_COLORS: Record<PermissionModeStatus["kind"], Parameters<Paint["fg"]>[0]> = {
-  manual: "muted", acceptEdits: "customMessageLabel", plan: "mdLink", auto: "warning", bypass: "error",
+  chat: "success", manual: "muted", acceptEdits: "customMessageLabel", plan: "mdLink", auto: "warning", bypass: "error",
 };
 
 export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): string[] {
