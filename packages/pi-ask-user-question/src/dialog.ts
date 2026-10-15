@@ -1,6 +1,6 @@
 // The question dialog, in the editor area at the bottom of pi's terminal UI like Claude Code's: the
 // transcript stays visible above it. Several questions get a tab each plus a Review tab; every
-// question ends with a "Type something." row that opens a multiline editor, `n` adds a note, and
+// question ends with a "Type something." row that becomes a multiline editor in place, `n` adds a note, and
 // options with a Markdown preview show it beside the list (below it in narrow terminals).
 import { DynamicBorder, getMarkdownTheme, getSelectListTheme, type KeybindingsManager, rawKeyHint, type Theme } from "@earendil-works/pi-coding-agent";
 import {
@@ -18,7 +18,7 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { type EditorCreator, type ProseEditor, beginComposition, compositionState, editorOwnsCancel } from "./editor.ts";
+import { type EditorCreator, type ProseEditor, beginComposition, compositionState, editorOwnsCancel, inline } from "./editor.ts";
 import { BOX_CHROME, box, columns, contentWidth, type Natural, SIDE_ROWS, sideBySide, split, STACKED_ROWS } from "./preview.ts";
 import { type Answer, type Choice, type DialogResult, makeAnswer } from "./result.ts";
 import { type Question, TYPE_SOMETHING } from "./schema.ts";
@@ -364,13 +364,10 @@ export class QuestionDialog implements Component, Focusable {
       const { left, right } = split(width, this.natural(q, slot, width));
       out.push(...columns(this.options(q, slot, left), this.preview(slot, right, SIDE_ROWS), left));
     } else out.push(...this.options(q, slot, width));
-    if (this.editing === "custom") {
-      out.push(` ${t.fg("accent", "Your answer:")}`, ...indent(slot.custom.render(Math.max(1, width - 4)), 4));
-      if (this.emptyAnswer) out.push(...hang("   ", t.fg("warning", "Write an answer before continuing."), width));
-    }
+    if (this.editing === "custom" && this.emptyAnswer) out.push(...hang("   ", t.fg("warning", "Write an answer before continuing."), width));
     if (hasPreview && !sideBySide(width) && width >= 8) out.push("", ...indent(this.preview(slot, width - 2, STACKED_ROWS), 1));
 
-    if (this.editing === "notes") out.push("", ` ${t.fg("accent", "Notes:")}`, ...indent(slot.notes.render(Math.max(1, width - 2)), 1));
+    if (this.editing === "notes") out.push("", ...inline("   ", t.fg("accent", "note: "), slot.notes, width, t));
     else if (slot.note) out.push("", ...hang("   ", t.fg("dim", `note: ${oneLine(slot.note)}`), width));
     return out;
   }
@@ -383,6 +380,11 @@ export class QuestionDialog implements Component, Focusable {
       const focused = slot.cursor === i || (i === q.options.length && this.editing === "custom");
       const box = q.multiSelect ? (checked ? "[x] " : "[ ] ") : "";
       const prefix = ` ${focused ? t.fg("accent", "❯") : " "} ${t.fg(focused ? "accent" : "muted", `${i + 1}.`)} ${box ? t.fg(checked ? "success" : "muted", box) : ""}`;
+      if (i === q.options.length && this.editing === "custom") {
+        // The row itself is the answer field: the text replaces the label as it is typed.
+        out.push(...inline(prefix, "", slot.custom, width, t));
+        return " ".repeat(visibleWidth(prefix));
+      }
       const text = t.fg(focused ? "accent" : "text", focused ? t.bold(label) : label) + (chosen ? t.fg("success", " ✓") : "");
       out.push(...hang(prefix, text, width));
       return " ".repeat(visibleWidth(prefix));

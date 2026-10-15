@@ -74,6 +74,14 @@ describe("single question", () => {
     expect(d.result?.answers[0]).toMatchObject({ kind: "custom", answer: "n" });
   });
 
+  test("the Type something row becomes the answer field, without the editor's rules", () => {
+    const d = dialog([library], ["3", ...type("i thought we wanted to")]);
+    const lines = d.frames.at(-1)!;
+    expect(lines.some((l) => /^ ❯ 3\. i thought we wanted to/u.test(l))).toBe(true);
+    expect(lines.join("\n")).not.toMatch(/Your answer|Type something\./u);
+    expect(lines.filter((l) => /^\s*─+\s*$/u.test(l))).toHaveLength(2); // only the dialog's own borders
+  });
+
   test("an empty typed answer is no answer", () => {
     const d = dialog([library], ["3", enter, enter]);
     expect(d.result).toBeUndefined();
@@ -81,7 +89,7 @@ describe("single question", () => {
 
   test("n adds a note that reaches the result", () => {
     const d = dialog([library], ["n", ...type("only if small"), enter, enter]);
-    expect(screen(d.frames[2])).toMatch(/Notes:/u);
+    expect(screen(d.frames[2])).toMatch(/^ +note: o/mu);
     expect(screen(d.frames.at(-2))).toMatch(/note: only if small/u);
     expect(d.result?.answers[0]).toMatchObject({ answer: "date-fns", notes: "only if small" });
   });
@@ -165,7 +173,7 @@ describe("several questions", () => {
     const d = dialog(both, [...keys, ...type("draft"), esc, shiftTab]);
     expect(screen(d.frames.at(-1))).toContain(`unsaved ${kind === "custom" ? "answer" : "note"}: ndraft`);
     d.dialog.handleInput(enter);
-    expect(screen(d.dialog.render(100))).toContain(kind === "custom" ? "Your answer:" : "Notes:");
+    expect(screen(d.dialog.render(100))).toMatch(kind === "custom" ? /❯ 3\. ndraft/u : /note: ndraft/u);
     expect(d.result).toBeUndefined();
     d.dialog.handleInput(enter);
     if (kind === "notes") d.dialog.handleInput(enter);
@@ -210,7 +218,8 @@ describe("previews", () => {
   test("a custom answer gets the full width instead of an irrelevant preview", () => {
     const d = dialog([layouts], ["3", "n"], { columns: 120 });
     const text = screen(d.frames.at(-1));
-    expect(text).toContain("Your answer:");
+    expect(text).toMatch(/❯ 3\. n/u);
+    expect(text).not.toContain("Type something.");
     expect(text).not.toContain("No preview for this option");
     expect(text).not.toContain("┌");
   });

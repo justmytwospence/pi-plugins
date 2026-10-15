@@ -76,9 +76,10 @@ try {
           // Highlighting the custom row, then n, must compose an answer, never notes.
           terminal.send('\x1b[B', '\x1b[B', 'n', 'o');
           assert.equal(dialog[CONTEXT](), 'editor');
-          assert.match(screen(), /Your answer:/);
-          assert.match(screen(), /no/);
-          assert.doesNotMatch(screen(), /Notes:/);
+          // The Type something row is the field itself, with no editor rules around it.
+          assert.match(screen(), /❯ 3\. (\[ \] )?no/);
+          assert.doesNotMatch(screen(), /Type something\./);
+          assert.equal(screen().split('\n').filter((line) => /^\s*─+\s*$/.test(line)).length, 2);
           if (modal) {
             assert.equal(editors[0][MODE]().state, 'insert');
             terminal.send(ESC);
