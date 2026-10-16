@@ -12,8 +12,9 @@ leads with a dim Nerd Font icon: folder (project), git branch, robot
 gate's shield mark their own notices; the first notice's icon leads the row, a
 bell otherwise. Without a Nerd Font they draw as placeholders;
 all labels and readings remain readable. Other status text is preserved.
-While a dialog holds `herdr:blocked`, the footer shrinks to two rows (project and
-branch; model, reasoning and context) so herdr-web-ui can read the dialog.
+While a dialog holds `herdr:blocked`, the footer shrinks to one row (project, branch,
+model, reasoning and context) so herdr-web-ui can read the dialog, with room
+for an activity row such as pi-bg's shells.
 
 ## Install
 

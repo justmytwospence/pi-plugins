@@ -79,8 +79,7 @@ export interface Snapshot {
   /** The editor's border lines draw the context gauge, so the context row leaves it out. */
   borderGauge?: boolean;
   /**
-   * A dialog is waiting on the user (some extension holds `herdr:blocked`): draw at most two rows,
-   * as pi's own footer does. herdr-web-ui reads a pi dialog off the screen only when its key hint
+   * A dialog is waiting on the user (some extension holds `herdr:blocked`): draw one row. herdr-web-ui reads a pi dialog off the screen only when its key hint
    * is followed by no more than two footer lines.
    */
   compact?: boolean;
@@ -772,15 +771,18 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     { text: s.sessionName ? theme.fg("dim", clean(s.sessionName)) : "", priority: 10 },
   ], w, theme)));
   if (s.compact) {
+    // One row: room is left for an activity row (pi-bg's shells, subagents) under the dialog,
+    // within the two lines herdr-web-ui allows after a dialog's key hint.
     const used = s.context.percent;
     const ctx = used === null ? "" : `${theme.fg("muted", "Context")} ${theme.bold(theme.fg(used < 70 ? "muted" : heat(used), percent(used)))}${theme.fg("dim", " used")}`;
-    rows.splice(0, rows.length - 1); // the stash row waits for the dialog to close
-    rows.push(row(ICONS.model, (w) => fitSegments([
+    const compact = row(ICONS.project, (w) => fitSegments([
+      { text: project, priority: 60 },
+      { text: branch, short: branchShort, priority: 40 },
       { text: identity, short: model, priority: 100 },
       { text: ctx, priority: 90 },
       { text: phaseText, priority: 120 },
-    ], w, theme)));
-    return rows.map((r) => " ".repeat(inset) + truncateToWidth(r, width));
+    ], w, theme));
+    return [" ".repeat(inset) + truncateToWidth(compact, width)];
   }
   rows.push(row(ICONS.model, (w) => fitSegments([
     { text: identity, short: model, priority: 100 },
