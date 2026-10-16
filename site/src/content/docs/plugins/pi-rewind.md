@@ -33,7 +33,7 @@ Checkpoint metadata is stored as `rewind-checkpoint` custom session entries, ass
 
 ## Restore through conversation navigation
 
-Use Pi's existing `/tree` or `/fork` navigation. This extension does not register a separate `/rewind` command. When the selected point has a matching checkpoint and its files differ from the present state, the dialog offers **Restore files** or **Keep current files**, with a differing-file count.
+Use Pi's existing `/tree` or `/fork` navigation. This extension does not register a separate `/rewind` command. When the selected point has a matching checkpoint and its files differ from the present state, the dialog offers **Keep current files** (the default) or **Restore files**, with a differing-file count.
 
 A typical workflow is to navigate back to the user request before an unwanted edit, inspect the restoration offer, and choose whether the conversation alone or both conversation and files should move back. Keeping current files is a valid choice when you want to reuse completed work in a different conversational branch.
 

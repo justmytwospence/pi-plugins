@@ -293,8 +293,8 @@ export default function (pi: ExtensionAPI) {
 		const n = diff.remove.length + diff.write.length;
 		if (n === 0) return;
 		const choice = await ctx.ui.select(`Restore files to this point? (${n} file${n === 1 ? "" : "s"} differ)`, [
-			"Restore files",
 			"Keep current files",
+			"Restore files",
 		]);
 		if (choice !== "Restore files") return;
 		// Save recovery before attempting any mutations, including a partial restore.
