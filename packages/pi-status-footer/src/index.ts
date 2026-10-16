@@ -118,6 +118,8 @@ export interface MarimoStatus {
   queued?: number; errors?: number;
   /** The other notebooks pi-marimo follows, most recently used first (older versions sent only a count). */
   others?: string[] | number;
+  /** The server: `:2718` when local, else `host[:port][/path]`. */
+  where?: string;
   /** Anything else ("disconnected", "not open", "/marimo to pick one"). */
   notes: string[];
 }
@@ -133,7 +135,8 @@ export function parseMarimoStatus(text: string): MarimoStatus | undefined {
     const errors = /^(\d+) errors?$/.exec(part);
     const others = /^\+(\d+) open$/.exec(part);
     const also = /^also (.+)$/.exec(part);
-    if (running) status.running = { section: running[1], elapsed: running[2] };
+    if (/^:\d+(\/\S*)?$/.test(part) || /^[\w-]+(\.[\w-]+)+(:\d+)?(\/\S*)?$/.test(part)) status.where = part;
+    else if (running) status.running = { section: running[1], elapsed: running[2] };
     else if (queued) status.queued = +queued[1];
     else if (errors) status.errors = +errors[1];
     else if (others) status.others = +others[1];
@@ -662,7 +665,8 @@ function marimoRow(m: MarimoStatus, width: number, theme: Paint): string {
   const time = run?.elapsed ? theme.fg("dim", ` ${run.elapsed}`) : "";
   const deepest = run?.section.split(" › ").pop() ?? "";
   return fitSegments([
-    { text: `${theme.fg("muted", "Marimo")} ${theme.bold(theme.fg("accent", m.notebook))}`, short: theme.bold(theme.fg("accent", m.notebook)), priority: 90 },
+    { text: `${theme.fg("muted", "Marimo")} ${theme.bold(theme.fg("accent", m.notebook))}`, short: theme.bold(theme.fg("accent", m.notebook)), separatorAfter: m.where ? " " : undefined, priority: 90 },
+    { text: m.where ? theme.fg("dim", m.where) : "", priority: 75 },
     { text: run ? `${theme.fg("warning", "running")} ${run.section}${time}` : "",
       short: run ? `${theme.fg("warning", "running")} ${truncateToWidth(deepest, 30)}${time}` : "", priority: 100 },
     { text: m.queued ? theme.fg("muted", `${m.queued} queued`) : "", priority: 30 },

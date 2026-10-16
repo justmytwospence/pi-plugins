@@ -29,6 +29,20 @@ export interface StatusParts {
   errors: number;
   /** File names of the other notebooks followed, most recently used first. */
   others?: string[];
+  /** Where the server is: `:2718` when local, else `host[:port][/path]` (no scheme). */
+  where?: string;
+}
+
+const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "[::1]", "[::]"]);
+
+/** The shortest useful address for a server URL: just the port when local, else the URL without its scheme. */
+export function shortWhere(url: string): string | undefined {
+  let u: URL;
+  try { u = new URL(url); } catch { return undefined; }
+  const port = u.port || (u.protocol === "https:" ? "443" : "80");
+  const path = u.pathname.replace(/\/$/, "");
+  if (LOCAL_HOSTS.has(u.hostname)) return `:${port}${path}`;
+  return `${u.host}${path}`;
 }
 
 export function statusParts(nb: NotebookState, attachment: Attachment, connection: string, now = Date.now(), others: Attachment[] = []): StatusParts {
@@ -46,16 +60,19 @@ export function statusParts(nb: NotebookState, attachment: Attachment, connectio
     queued: connection === "connected" ? nb.queued() : 0,
     errors: connection === "connected" ? nb.errors().length : 0,
     others: others.map((o) => basename(o.path)),
+    where: shortWhere(attachment.url),
   };
 }
 
 /**
  * One line, e.g. `marimo: fit.py · running Data loading › Model fit (12s) · 2 queued · 1 error · also prep.py, plots.py`.
- * The shape is stable so footers can parse it: `marimo: <current file>`, then ` · ` separated parts
+ * The shape is stable so footers can parse it: `marimo: <current file>`, then its server (`:port` when local,
+ * else `host[/path]`), then ` · ` separated parts
  * about it, then `also <file>, <file>` naming the other notebooks followed.
  */
 export function statusText(parts: StatusParts): string {
   const out = [`marimo: ${parts.notebook}`];
+  if (parts.where) out.push(parts.where);
   if (parts.connection !== "connected") out.push(parts.connection);
   if (parts.running) {
     const where = parts.running.section || `cell ${parts.running.cell}`;

@@ -3,7 +3,7 @@ import { describe, expect, test } from "vitest";
 import { insertState } from "../src/index.js";
 import { headingsFromCode, isMarkdownCell, mdLiterals } from "../src/core/markdown.js";
 import { NotebookState } from "../src/core/notebook.js";
-import { snapshot, statusParts, statusText } from "../src/core/render.js";
+import { snapshot, statusParts, shortWhere, statusText } from "../src/core/render.js";
 import { SseParser } from "../src/core/sse.js";
 import { normalize, within } from "../src/core/io.js";
 import { parseMode } from "../src/core/watcher.js";
@@ -141,11 +141,13 @@ describe("render", () => {
     const nb = replay("kiosk-run.sse", (op, data) => op === "cell-op" && data.cell_id === "lEQa" && data.status === "running");
     const since = nb.running()!.since!;
     expect(statusText(statusParts(nb, attachment, "connected", since + 12_400))).toBe(
-      "marimo: nb.py · running Data loading › Slow model fit (12s) · 1 queued",
+      "marimo: nb.py · :2799 · running Data loading › Slow model fit (12s) · 1 queued",
     );
-    expect(statusText(statusParts(nb, attachment, "disconnected"))).toBe("marimo: nb.py · disconnected");
+    expect(statusText(statusParts(nb, attachment, "disconnected"))).toBe("marimo: nb.py · :2799 · disconnected");
+    expect(shortWhere("http://localhost:2718")).toBe(":2718");
+    expect(shortWhere("https://nb.example.com/lab/")).toBe("nb.example.com/lab");
     expect(statusText(statusParts(nb, attachment, "connected", since + 1000, [{ ...attachment, path: "/w/prep.py" }, { ...attachment, path: "/w/plots.py" }]))).toBe(
-      "marimo: nb.py · running Data loading › Slow model fit (1s) · 1 queued · also prep.py, plots.py",
+      "marimo: nb.py · :2799 · running Data loading › Slow model fit (1s) · 1 queued · also prep.py, plots.py",
     );
   });
 

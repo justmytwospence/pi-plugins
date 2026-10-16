@@ -498,7 +498,7 @@ test("all optional footer rows fit both themes at every width, alone and combine
   const variants = [combined, ...["stash", "marimo", "bg", "cache", "lean", "autoEffort", "extraBilled"].map((key) => ({ ...fixture(), [key]: combined[key] })),
     { ...fixture(), stash: {} },
     ...["4:12", "1h05m", "cold", "cold?"].map((cache) => ({ ...fixture(), cache })),
-    ...["marimo: idle.py", "marimo: queued.py · 2 queued", "marimo: broken.py · 2 errors · not open", "marimo: older.py · +3 open", "marimo: /marimo to pick one"].map((text) => ({ ...fixture(), marimo: mod.parseMarimoStatus(text) })),
+    ...["marimo: idle.py", "marimo: local.py · :2718", "marimo: remote.py · nb.example.com/lab · disconnected", "marimo: queued.py · 2 queued", "marimo: broken.py · 2 errors · not open", "marimo: older.py · +3 open", "marimo: /marimo to pick one"].map((text) => ({ ...fixture(), marimo: mod.parseMarimoStatus(text) })),
     { ...fixture(), bg: mod.parseBgStatus("bg: api up · vite ready · lint ✗") },
     { ...fixture(), context: { percent: null, tokens: null, contextWindow: 200_000 }, quotas: [], unavailableQuota: "Claude acct" },
     { ...fixture(), quotas: [{ source: "Claude acct", updated: now, windows: [{ label: "named model pool", used: 99 }], extra: { enabled: true, used: 12.5, currency: "EUR" } }] },
@@ -1579,4 +1579,12 @@ test("a waiting dialog compacts the footer to one row for herdr-web-ui", () => {
   assert.match(rows[0], /opus-5\.5/);
   assert.match(rows[0], /Context 28%/);
   assert.match(rows[0], /dotfiles|pi-plugins|project/);
+});
+
+test("parseMarimoStatus reads the server address", async () => {
+  const mod = await import("../src/index.ts");
+  assert.equal(mod.parseMarimoStatus("marimo: a.py · :2718 · 1 queued").where, ":2718");
+  const remote = mod.parseMarimoStatus("marimo: a.py · nb.example.com/lab · disconnected");
+  assert.equal(remote.where, "nb.example.com/lab");
+  assert.deepEqual(remote.notes, ["disconnected"]);
 });
