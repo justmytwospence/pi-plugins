@@ -378,7 +378,11 @@ export class QuestionDialog implements Component, Focusable {
     const t = this.theme;
     const lone = this.questions.length === 1 ? this.questions[0]! : undefined;
     const chip = lone?.header ? ` ${t.fg("dim", "·")} ${t.bg("selectedBg", t.fg("accent", t.bold(` ${clipHeader(lone.header)} `)))}` : "";
-    out.push(` ${t.fg("muted", "Ask user")}${chip}`);
+    // A multiple choice says so up top: its rows leave unchecked boxes blank (anything drawn there
+    // would show in the phone card's option text), so this and the ✓ column are the cue.
+    const current = this.onReview() ? undefined : this.questions[this.tab];
+    const cue = current?.multiSelect ? ` ${t.fg("dim", "·")} ${t.fg("accent", "choose any")}` : "";
+    out.push(` ${t.fg("muted", "Ask user")}${chip}${cue}`);
     if (!lone) out.push(...wrap(` ${this.tabBar()}`, width));
     else if (lone.multiSelect) out.push(` ${t.fg("dim", `→ ${clipHeader(lone.header || "Q1")}   Submit`)}`);
     out.push("");
@@ -405,7 +409,6 @@ export class QuestionDialog implements Component, Focusable {
     const q = this.questions[this.tab]!;
     const slot = this.slots[this.tab]!;
     const out: string[] = [];
-    const hint = q.multiSelect ? t.fg("muted", " (select all that apply)") : "";
     // Laid out as Pi's own select and input dialogs are, top to bottom: the question, a blank,
     // one row per option (anything under a row is a `│` continuation of it), a blank, then Pi's
     // key hint. herdr-web-ui reads a pi dialog off the screen by exactly that, and a phone then
@@ -413,7 +416,7 @@ export class QuestionDialog implements Component, Focusable {
     const hasPreview = !q.multiSelect && slot.cursor < q.options.length && q.options.some((o) => o.preview);
     // A stacked preview goes over the question, so nothing comes between the rows and the hint.
     if (hasPreview && !sideBySide(width) && width >= 8) out.push(...indent(this.preview(slot, width - 2, STACKED_ROWS), 1), "");
-    out.push(...hang(" ", `${t.bold(t.fg("text", q.question))}${hint}`, width));
+    out.push(...hang(" ", t.bold(t.fg("text", q.question)), width));
     if (slot.note && this.editing !== "notes") out.push(...hang(" ", t.fg("dim", `note: ${oneLine(slot.note)}`), width));
     out.push("");
 
@@ -456,12 +459,15 @@ export class QuestionDialog implements Component, Focusable {
     // indented five or more, which it reads as the row's description).
     const row = (i: number, label: string, description: string | undefined, mark: boolean) => {
       const focused = slot.cursor === i || (i === own && this.editing === "custom");
-      const number = i === own && q.multiSelect ? "" : `${t.fg(focused ? "accent" : "muted", `${i + 1}.`)} `;
-      const prefix = ` ${focused ? t.fg("accent", "→") : " "} ${number}`;
-      // The tick sits right after the label, where a wrapped description cannot push it away.
+      const ownRow = i === own && q.multiSelect;
+      const number = ownRow ? "" : `${t.fg(focused ? "accent" : "muted", `${i + 1}.`)} `;
+      // A multiple choice keeps its ticks in one column after the numbers; a single choice (and
+      // the typed-answer row, which OmO's form names by its first words) ticks after the label.
+      const column = q.multiSelect && !ownRow ? (mark ? `${t.fg("success", "✓")} ` : "  ") : "";
+      const prefix = ` ${focused ? t.fg("accent", "→") : " "} ${number}${column}`;
       const text =
         t.fg(focused ? "accent" : "text", focused ? t.bold(label) : label) +
-        (mark ? t.fg("success", " ✓") : "") +
+        (mark && !column ? t.fg("success", " ✓") : "") +
         (description ? t.fg("muted", ` · ${description}`) : "");
       const [first = "", ...rest] = hang(prefix, text, width);
       out.push(first, ...(q.multiSelect ? rest.map((line) => ` ${line}`) : gutter(rest, t)));
