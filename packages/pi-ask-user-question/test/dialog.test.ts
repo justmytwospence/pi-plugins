@@ -150,7 +150,7 @@ describe("single question", () => {
 describe("multi-select", () => {
   test("space toggles, Enter commits the checked options", () => {
     const d = dialog([features], [space, down, down, space]);
-    expect(screen(d.frames.at(-1))).toMatch(/ {3}1\. ✓ Auth · Auth description\n {3}2\. {3}Billing · Billing description\n → 3\. ✓ Search · Search description\n {3}Type your own answer\.\.\./u);
+    expect(screen(d.frames.at(-1))).toMatch(/ {3}1\. ✓ Auth · Auth description\n {3}2\. {3}Billing · Billing description\n → 3\. ✓ Search · Search description\n {3}4\. {3}Other · type your own answer\n {3}Type your own answer: check 4, then enter\./u);
     expect(screen(d.frames[0])).toMatch(/^ Ask user · {2}Features {2}· choose any$/mu);
     d.dialog.handleInput(enter);
     expect(d.result?.answers[0]).toMatchObject({ kind: "multi", answer: "Auth, Search", selected: ["Auth", "Search"] });
@@ -164,6 +164,14 @@ describe("multi-select", () => {
     expect(d.result).toBeUndefined();
     d.dialog.handleInput(tab);
     expect(d.result?.answers[0]).toMatchObject({ kind: "multi", selected: ["Auth", "Billing"] });
+  });
+
+  test("a ticked Other asks for its text when committed, as a phone's checkbox card does it", () => {
+    const d = dialog([features], ["\x7f", "1", "4", tab]);
+    expect(d.result).toBeUndefined();
+    expect(screen(d.frames.at(-1))).toMatch(/Your answer · Which features do you want\?\s*\n\s*\n › \s*\n\s*\n enter submit/u);
+    for (const k of ["\x0b", "\x15", ...type("Payments"), enter]) d.dialog.handleInput(k);
+    expect(d.result?.answers[0]).toMatchObject({ kind: "multi", selected: ["Auth", "Payments"] });
   });
 
   test("Enter with nothing checked picks the highlighted option", () => {

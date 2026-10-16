@@ -28,7 +28,9 @@ import { type Question, TYPE_SOMETHING } from "./schema.ts";
 export const HEADER_WIDTH = 16;
 const NO_PREVIEW = "No preview for this option";
 /** The typed-answer row of a multiple choice, named as OmO's form names it (herdr-web-ui reads it). */
-const OWN_ANSWER = "Type your own answer...";
+const OWN_ANSWER = "Type your own answer";
+/** A multiple choice's typed-answer option. */
+const OTHER = "Other";
 
 interface Slot {
   /** The highlighted row: an option, or the "Type something." row after them. */
@@ -141,7 +143,11 @@ export class QuestionDialog implements Component, Focusable {
     }
     const many = this.questions.length > 1;
     const reserved = kb.matches(data, "tui.select.confirm") || kb.matches(data, "tui.select.cancel") || kb.matches(data, "tui.select.up") || kb.matches(data, "tui.select.down");
-    if (!reserved && many && (matchesKey(data, Key.tab) || matchesKey(data, Key.right))) return this.go(1);
+    if (!reserved && many && (matchesKey(data, Key.tab) || matchesKey(data, Key.right))) {
+      // A ticked "Other" with nothing typed yet asks for its text before moving on.
+      if (!this.onReview() && this.wantsText(this.tab)) return this.openEditor("custom");
+      return this.go(1);
+    }
     if (!reserved && many && (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left))) return this.go(-1);
     if (this.onReview()) {
       const key = printable(data);
@@ -178,8 +184,13 @@ export class QuestionDialog implements Component, Focusable {
     else if (key && /^[1-9]$/u.test(key)) {
       if (Number(key) > rows) return;
       slot.cursor = Number(key) - 1;
-      // A multiple choice's number toggles its option, as OmO's form does.
+      // A multiple choice's number toggles its option, as OmO's form does; on "Other" it only
+      // ticks it, and the text is asked for when the answer is committed.
       if (q.multiSelect && slot.cursor < q.options.length) this.toggle(q, slot);
+      else if (q.multiSelect) {
+        slot.typedChecked = !slot.typedChecked;
+        this.updateMulti(q, slot);
+      }
     } else if (key === " " && q.multiSelect) this.toggle(q, slot);
     else if (q.multiSelect && matchesKey(data, Key.backspace)) {
       // Clears the checks (herdr-web-ui starts a multiple-choice answer with it).
@@ -187,7 +198,8 @@ export class QuestionDialog implements Component, Focusable {
       slot.typedChecked = false;
       this.updateMulti(q, slot);
     } else if (q.multiSelect && !many && matchesKey(data, Key.tab)) {
-      if (slot.choice) this.advance();
+      if (this.wantsText(this.tab)) this.openEditor("custom");
+      else if (slot.choice) this.advance();
     }
     else if (key === "n") this.openEditor("notes");
   }
@@ -199,10 +211,17 @@ export class QuestionDialog implements Component, Focusable {
       slot.choice = { kind: "option", label: option.label, ...(option.preview ? { preview: option.preview } : {}) };
       return this.advance();
     }
+    if (this.wantsText(this.tab)) return this.openEditor("custom");
     // Enter with nothing checked picks the highlighted option alone.
     if (slot.checked.size === 0 && !slot.typedChecked) slot.checked.add(slot.cursor);
     this.updateMulti(q, slot);
     this.advance();
+  }
+
+  /** A multiple choice's "Other" is ticked but has no text yet. */
+  private wantsText(index: number): boolean {
+    const slot = this.slots[index];
+    return !!this.questions[index]?.multiSelect && !!slot?.typedChecked && !slot.typed;
   }
 
   private toggle(q: Question, slot: Slot): void {
@@ -459,11 +478,9 @@ export class QuestionDialog implements Component, Focusable {
     // indented five or more, which it reads as the row's description).
     const row = (i: number, label: string, description: string | undefined, mark: boolean) => {
       const focused = slot.cursor === i || (i === own && this.editing === "custom");
-      const ownRow = i === own && q.multiSelect;
-      const number = ownRow ? "" : `${t.fg(focused ? "accent" : "muted", `${i + 1}.`)} `;
-      // A multiple choice keeps its ticks in one column after the numbers; a single choice (and
-      // the typed-answer row, which OmO's form names by its first words) ticks after the label.
-      const column = q.multiSelect && !ownRow ? (mark ? `${t.fg("success", "✓")} ` : "  ") : "";
+      const number = `${t.fg(focused ? "accent" : "muted", `${i + 1}.`)} `;
+      // A multiple choice keeps its ticks in one column after the numbers; a single choice ticks after the label.
+      const column = q.multiSelect ? (mark ? `${t.fg("success", "✓")} ` : "  ") : "";
       const prefix = ` ${focused ? t.fg("accent", "→") : " "} ${number}${column}`;
       const text =
         t.fg(focused ? "accent" : "text", focused ? t.bold(label) : label) +
@@ -478,8 +495,15 @@ export class QuestionDialog implements Component, Focusable {
     });
     // A draft stays on its row, after (or in place of) the typed-answer label; the field opens below.
     const draft = oneLine(slot.custom.getText().trim());
-    const ownLabel = q.multiSelect ? (draft ? `${OWN_ANSWER}: ${draft}` : OWN_ANSWER) : draft || TYPE_SOMETHING;
-    row(own, ownLabel, undefined, q.multiSelect ? slot.typedChecked && !!slot.typed : slot.choice?.kind === "custom");
+    if (!q.multiSelect) {
+      row(own, draft || TYPE_SOMETHING, undefined, slot.choice?.kind === "custom");
+      return out;
+    }
+    // A multiple choice's typed answer is an option of its own, "Other", so a phone's checkbox card
+    // can tick it (the text is asked for next). OmO's form also has an unnumbered typed-answer row,
+    // which herdr-web-ui requires; here it is a faint line of help.
+    row(own, draft ? `${OTHER}: ${draft}` : OTHER, draft ? undefined : "type your own answer", slot.typedChecked);
+    out.push(...hang("   ", t.fg("dim", `${OWN_ANSWER}: check ${own + 1}, then enter.`), width));
     return out;
   }
 
