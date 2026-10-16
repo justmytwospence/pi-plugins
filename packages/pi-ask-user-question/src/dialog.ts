@@ -384,7 +384,9 @@ export class QuestionDialog implements Component, Focusable {
     const q = this.questions[this.tab]!;
     const slot = this.slots[this.tab]!;
     const out: string[] = [];
-    const chip = this.questions.length === 1 && q.header ? `${t.bg("selectedBg", t.fg("accent", t.bold(` ${clipHeader(q.header)} `)))} ` : "";
+    // The header chip stands on its own line, as the tab bar does for several questions, so a
+    // phone's card (which takes the lines over the options as its question) shows the question alone.
+    if (this.questions.length === 1 && q.header) out.push(` ${t.bg("selectedBg", t.fg("accent", t.bold(` ${clipHeader(q.header)} `)))}`, "");
     const hint = q.multiSelect ? t.fg("muted", " (select all that apply)") : "";
     // Laid out as Pi's own select and input dialogs are, top to bottom: the question, a blank,
     // one row per option (anything under a row is a `│` continuation of it), a blank, then Pi's
@@ -393,7 +395,7 @@ export class QuestionDialog implements Component, Focusable {
     const hasPreview = !q.multiSelect && slot.cursor < q.options.length && q.options.some((o) => o.preview);
     // A stacked preview goes over the question, so nothing comes between the rows and the hint.
     if (hasPreview && !sideBySide(width) && width >= 8) out.push(...indent(this.preview(slot, width - 2, STACKED_ROWS), 1), "");
-    out.push(...hang(" ", `${chip}${t.bold(t.fg("text", q.question))}${hint}`, width));
+    out.push(...hang(" ", `${t.bold(t.fg("text", q.question))}${hint}`, width));
     if (slot.note && this.editing !== "notes") out.push(...hang(" ", t.fg("dim", `note: ${oneLine(slot.note)}`), width));
     out.push("");
 
@@ -426,8 +428,10 @@ export class QuestionDialog implements Component, Focusable {
     const out: string[] = [];
     const row = (i: number, label: string, checked: boolean, chosen: boolean) => {
       const focused = slot.cursor === i || (i === q.options.length && this.editing === "custom");
-      const box = q.multiSelect ? (checked ? "[x] " : "[ ] ") : "";
-      const prefix = ` ${focused ? t.fg("accent", "❯") : " "} ${t.fg(focused ? "accent" : "muted", `${i + 1}.`)} ${box ? t.fg(checked ? "success" : "muted", box) : ""}`;
+      // A checked row's tick goes before its number, where Pi puts the tick on its own menus:
+      // herdr-web-ui drops it there, so a phone's card shows the label without a box.
+      const box = q.multiSelect ? (checked ? t.fg("success", "✔ ") : "  ") : "";
+      const prefix = ` ${focused ? t.fg("accent", "❯") : " "} ${box}${t.fg(focused ? "accent" : "muted", `${i + 1}.`)} `;
       const text = t.fg(focused ? "accent" : "text", focused ? t.bold(label) : label) + (chosen ? t.fg("success", " ✓") : "");
       const [first = "", ...rest] = hang(prefix, text, width);
       out.push(first, ...gutter(rest, t));
@@ -449,7 +453,7 @@ export class QuestionDialog implements Component, Focusable {
    * columns do not shift as the highlight moves).
    */
   private natural(q: Question, slot: Slot, width: number): Natural {
-    const boxW = q.multiSelect ? 4 : 0;
+    const boxW = q.multiSelect ? 2 : 0;
     const rows = [...q.options, { label: TYPE_SOMETHING, description: "" }].map((o, i) => {
       const prefix = 5 + `${i + 1}.`.length + boxW;
       return { label: prefix + visibleWidth(o.label) + 4, description: prefix + visibleWidth(o.description ?? "") + 2 };

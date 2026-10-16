@@ -14,7 +14,7 @@ describe("single question", () => {
   test("shows the header chip, numbered options, descriptions and the Type something row", () => {
     const { frames } = dialog([library], []);
     const text = screen(frames[0]);
-    expect(text).toMatch(/ Library {2}Which date library should we use\?/u);
+    expect(text).toMatch(/ Library \n\n Which date library should we use\?/u);
     expect(text).toMatch(/❯ 1\. date-fns\n │ +date-fns description/u);
     expect(text).toMatch(/ {3}2\. dayjs/u);
     expect(text).toMatch(/ {3}3\. Type something\./u);
@@ -150,7 +150,7 @@ describe("single question", () => {
 describe("multi-select", () => {
   test("space toggles, Enter commits the checked options", () => {
     const d = dialog([features], [space, down, down, space]);
-    expect(screen(d.frames.at(-1))).toMatch(/1\. \[x\] Auth[\s\S]*2\. \[ \] Billing[\s\S]*3\. \[x\] Search/u);
+    expect(screen(d.frames.at(-1))).toMatch(/ {3}✔ 1\. Auth\n.*\n {5}2\. Billing[\s\S]*❯ ✔ 3\. Search/u);
     expect(screen(d.frames[0])).toMatch(/\(select all that apply\)/u);
     d.dialog.handleInput(enter);
     expect(d.result?.answers[0]).toMatchObject({ kind: "multi", answer: "Auth, Search", selected: ["Auth", "Search"] });
