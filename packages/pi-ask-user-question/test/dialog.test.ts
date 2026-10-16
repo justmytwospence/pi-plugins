@@ -14,8 +14,8 @@ describe("single question", () => {
   test("shows the header chip, numbered options, descriptions and the Type something row", () => {
     const { frames } = dialog([library], []);
     const text = screen(frames[0]);
-    expect(text).toMatch(/ Library \n\n Which date library should we use\?/u);
-    expect(text).toMatch(/❯ 1\. date-fns\n │ +date-fns description/u);
+    expect(text).toMatch(/ Ask user · {2}Library \n\n Which date library should we use\?/u);
+    expect(text).toMatch(/→ 1\. date-fns · date-fns description\n/u);
     expect(text).toMatch(/ {3}2\. dayjs/u);
     expect(text).toMatch(/ {3}3\. Type something\./u);
     expect(text).not.toMatch(/Review/u);
@@ -32,14 +32,14 @@ describe("single question", () => {
   test("digits move the highlight without submitting; up and down wrap", () => {
     const d = dialog([library], ["2"]);
     expect(d.result).toBeUndefined();
-    expect(screen(d.frames[1])).toMatch(/❯ 2\. dayjs/u);
+    expect(screen(d.frames[1])).toMatch(/→ 2\. dayjs/u);
     const wrapped = dialog([library], [up]);
-    expect(screen(wrapped.frames[1])).toMatch(/❯ 3\. Type something\./u);
-    expect(screen(dialog([library], ["9"]).frames[1])).toMatch(/❯ 1\. date-fns/u);
+    expect(screen(wrapped.frames[1])).toMatch(/→ 3\. Type something\./u);
+    expect(screen(dialog([library], ["9"]).frames[1])).toMatch(/→ 1\. date-fns/u);
   });
 
   test("j and k move outside editors and type inside them", () => {
-    expect(screen(dialog([library], ["j"]).frames[1])).toMatch(/❯ 2\. dayjs/u);
+    expect(screen(dialog([library], ["j"]).frames[1])).toMatch(/→ 2\. dayjs/u);
     const d = dialog([library], ["3", enter, "j", "k", enter]);
     expect(d.result?.answers[0]).toMatchObject({ kind: "custom", answer: "jk" });
   });
@@ -52,7 +52,7 @@ describe("single question", () => {
   test("Esc leaves the editor and keeps the draft; Enter reopens it", () => {
     const d = dialog([library], ["3", enter, ...type("draft"), esc]);
     expect(d.result).toBeUndefined();
-    expect(screen(d.frames.at(-1))).toMatch(/❯ 3\. draft\s*$/mu);
+    expect(screen(d.frames.at(-1))).toMatch(/→ 3\. draft\s*$/mu);
     d.dialog.handleInput(enter);
     d.dialog.handleInput(enter);
     expect(d.result?.answers[0]).toMatchObject({ kind: "custom", answer: "draft" });
@@ -77,7 +77,7 @@ describe("single question", () => {
   test("the Type something row opens an answer field under the rows, without the editor's rules", () => {
     const d = dialog([library], ["3", ...type("i thought we wanted to")]);
     const lines = d.frames.at(-1)!;
-    expect(lines.some((l) => /^ ❯ 3\. i thought we wanted to/u.test(l))).toBe(true);
+    expect(lines.some((l) => /^ → 3\. i thought we wanted to/u.test(l))).toBe(true);
     // Pi's own input dialog layout: a title, a blank, the `›` line, a blank, the input hint.
     expect(lines.join("\n")).toMatch(/Your answer · Which date library should we use\?\s*\n\s*\n › i thought we wanted to\s*\n\s*\n enter submit {2}escape\/ctrl\+c cancel/u);
     expect(lines.join("\n")).not.toMatch(/Type something\./u);
@@ -91,20 +91,20 @@ describe("single question", () => {
 
   test("Ctrl+J/Ctrl+K move rows from an open field: the answer draft stays, a note is saved", () => {
     const d = dialog([library], ["3", ...type("draft"), "\n"]);
-    expect(screen(d.frames.at(-1))).toMatch(/❯ 1\. date-fns/u);
+    expect(screen(d.frames.at(-1))).toMatch(/→ 1\. date-fns/u);
     expect(screen(d.frames.at(-1))).toMatch(/^ {3}3\. draft\s*$/mu);
     d.dialog.handleInput("n");
     for (const c of "small") d.dialog.handleInput(c);
     d.dialog.handleInput("\x0b");
     const text = screen(d.dialog.render(100));
-    expect(text).toMatch(/❯ 3\. draft/u);
+    expect(text).toMatch(/→ 3\. draft/u);
     expect(text).toMatch(/note: small/u);
   });
 
   test("a legacy Ctrl+J (LF) in the list moves down instead of choosing", () => {
     const d = dialog([library], ["\n"]);
     expect(d.result).toBeUndefined();
-    expect(screen(d.frames.at(-1))).toMatch(/❯ 2\. dayjs/u);
+    expect(screen(d.frames.at(-1))).toMatch(/→ 2\. dayjs/u);
   });
 
   test("ends in Pi's own key hint, as herdr-web-ui expects: rows, a blank, the hint", () => {
@@ -150,10 +150,20 @@ describe("single question", () => {
 describe("multi-select", () => {
   test("space toggles, Enter commits the checked options", () => {
     const d = dialog([features], [space, down, down, space]);
-    expect(screen(d.frames.at(-1))).toMatch(/ {3}✔ 1\. Auth\n.*\n {5}2\. Billing[\s\S]*❯ ✔ 3\. Search/u);
+    expect(screen(d.frames.at(-1))).toMatch(/ {3}1\. Auth ✓ · Auth description\n {3}2\. Billing · Billing description\n → 3\. Search ✓ · Search description\n {3}Type your own answer\.\.\./u);
     expect(screen(d.frames[0])).toMatch(/\(select all that apply\)/u);
     d.dialog.handleInput(enter);
     expect(d.result?.answers[0]).toMatchObject({ kind: "multi", answer: "Auth, Search", selected: ["Auth", "Search"] });
+  });
+
+  test("OmO's keys, which herdr-web-ui sends: Backspace clears, numbers toggle, Tab finishes", () => {
+    const d = dialog([features], [space, "\x7f", "2", "3", "3", "1"]);
+    expect(screen(d.frames[0])).toMatch(/^ Ask user · {2}Features \n → Features {3}Submit\n/mu);
+    expect(screen(d.frames[0])).toMatch(/\n\n ↑↓ move {2}1-9 select {2}space toggle {2}enter next {2}tab done {2}n note {2}esc cancel\n─+$/u);
+    expect(screen(d.frames[2])).not.toMatch(/✓/u);
+    expect(d.result).toBeUndefined();
+    d.dialog.handleInput(tab);
+    expect(d.result?.answers[0]).toMatchObject({ kind: "multi", selected: ["Auth", "Billing"] });
   });
 
   test("Enter with nothing checked picks the highlighted option", () => {
@@ -176,8 +186,8 @@ describe("several questions", () => {
 
   test("tabs, answered marks, and Review after the last answer", () => {
     const d = dialog(both, [enter]);
-    expect(screen(d.frames[0])).toMatch(/□ Library {3}□ Features {3}Review/u);
-    expect(screen(d.frames[1])).toMatch(/■ Library {3}□ Features/u);
+    expect(screen(d.frames[0])).toMatch(/→ Library {3}Features {3}Submit/u);
+    expect(screen(d.frames[1])).toMatch(/Library ✓ {3}→ Features {3}Submit/u);
     expect(screen(d.frames[1])).toMatch(/Which features do you want\?/u);
     d.dialog.handleInput(down);
     d.dialog.handleInput(enter);
@@ -204,7 +214,7 @@ describe("several questions", () => {
     const d = dialog(both, [...keys, ...type("draft"), esc, shiftTab]);
     expect(screen(d.frames.at(-1))).toContain(`unsaved ${kind === "custom" ? "answer" : "note"}: ndraft`);
     d.dialog.handleInput(enter);
-    expect(screen(d.dialog.render(100))).toMatch(kind === "custom" ? /❯ 3\. ndraft/u : / › ndraft/u);
+    expect(screen(d.dialog.render(100))).toMatch(kind === "custom" ? /→ 3\. ndraft/u : / › ndraft/u);
     expect(d.result).toBeUndefined();
     d.dialog.handleInput(enter);
     if (kind === "notes") d.dialog.handleInput(enter);
@@ -232,7 +242,7 @@ describe("previews", () => {
   test("beside the options at 120 columns, following the highlight", () => {
     const d = dialog([layouts], [down], { columns: 120 });
     const first = d.frames[0]!;
-    expect(first.some((line) => /❯ 1\. Sidebar.*┌─+┐/u.test(line))).toBe(true);
+    expect(first.some((line) => /→ 1\. Sidebar.*┌─+┐/u.test(line))).toBe(true);
     expect(first.some((line) => /│ +\| side \| doc \|/u.test(line))).toBe(true);
     expect(screen(d.frames[1])).toMatch(/│ Tabs across the top/u);
   });
@@ -250,7 +260,7 @@ describe("previews", () => {
   test("a custom answer gets the full width instead of an irrelevant preview", () => {
     const d = dialog([layouts], ["3", "n"], { columns: 120 });
     const text = screen(d.frames.at(-1));
-    expect(text).toMatch(/❯ 3\. n/u);
+    expect(text).toMatch(/→ 3\. n/u);
     expect(text).not.toContain("Type something.");
     expect(text).not.toContain("No preview for this option");
     expect(text).not.toContain("┌");

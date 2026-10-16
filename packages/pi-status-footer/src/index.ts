@@ -773,7 +773,7 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   ], w, theme)));
   if (s.compact) {
     const used = s.context.percent;
-    const ctx = used === null ? "" : `${theme.fg("muted", "Context")} ${theme.bold(theme.fg(used < 70 ? "muted" : heat(used), percent(used)))}`;
+    const ctx = used === null ? "" : `${theme.fg("muted", "Context")} ${theme.bold(theme.fg(used < 70 ? "muted" : heat(used), percent(used)))}${theme.fg("dim", " used")}`;
     rows.splice(0, rows.length - 1); // the stash row waits for the dialog to close
     rows.push(row(ICONS.model, (w) => fitSegments([
       { text: identity, short: model, priority: 100 },

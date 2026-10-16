@@ -55,6 +55,6 @@ test("a long header is accepted and cut in the tab bar", () => {
   expect(validate(questions)).toBeUndefined();
   const { frames } = dialog(questions, []);
   const bar = frames[0]!.find((line) => line.includes("Short"))!;
-  expect(bar).toContain("□ A very long hea…");
+  expect(bar).toContain("→ A very long hea…");
   expect(bar).not.toContain("indeed");
 });

@@ -27,6 +27,8 @@ import { type Question, TYPE_SOMETHING } from "./schema.ts";
 /** Longest header shown in a tab or chip before it is cut with "…". */
 export const HEADER_WIDTH = 16;
 const NO_PREVIEW = "No preview for this option";
+/** The typed-answer row of a multiple choice, named as OmO's form names it (herdr-web-ui reads it). */
+const OWN_ANSWER = "Type your own answer...";
 
 interface Slot {
   /** The highlighted row: an option, or the "Type something." row after them. */
@@ -174,8 +176,19 @@ export class QuestionDialog implements Component, Focusable {
     if (kb.matches(data, "tui.select.up") || matchesKey(data, "ctrl+k") || key === "k") slot.cursor = (slot.cursor - 1 + rows) % rows;
     else if (kb.matches(data, "tui.select.down") || matchesKey(data, "ctrl+j") || key === "j") slot.cursor = (slot.cursor + 1) % rows;
     else if (key && /^[1-9]$/u.test(key)) {
-      if (Number(key) <= rows) slot.cursor = Number(key) - 1;
+      if (Number(key) > rows) return;
+      slot.cursor = Number(key) - 1;
+      // A multiple choice's number toggles its option, as OmO's form does.
+      if (q.multiSelect && slot.cursor < q.options.length) this.toggle(q, slot);
     } else if (key === " " && q.multiSelect) this.toggle(q, slot);
+    else if (q.multiSelect && matchesKey(data, Key.backspace)) {
+      // Clears the checks (herdr-web-ui starts a multiple-choice answer with it).
+      slot.checked.clear();
+      slot.typedChecked = false;
+      this.updateMulti(q, slot);
+    } else if (q.multiSelect && !many && matchesKey(data, Key.tab)) {
+      if (slot.choice) this.advance();
+    }
     else if (key === "n") this.openEditor("notes");
   }
 
@@ -360,7 +373,15 @@ export class QuestionDialog implements Component, Focusable {
 
   private build(width: number): string[] {
     const out = [...this.border.render(width)];
-    if (this.questions.length > 1) out.push(...wrap(` ${this.tabBar()}`, width), "");
+    // The top lines follow OmO's ask_user_question form (`Ask user`, then a tab bar ending in
+    // Submit), which herdr-web-ui reads for its multiple-choice cards; Pi's own dialogs have none.
+    const t = this.theme;
+    const lone = this.questions.length === 1 ? this.questions[0]! : undefined;
+    const chip = lone?.header ? ` ${t.fg("dim", "·")} ${t.bg("selectedBg", t.fg("accent", t.bold(` ${clipHeader(lone.header)} `)))}` : "";
+    out.push(` ${t.fg("muted", "Ask user")}${chip}`);
+    if (!lone) out.push(...wrap(` ${this.tabBar()}`, width));
+    else if (lone.multiSelect) out.push(` ${t.fg("dim", `→ ${clipHeader(lone.header || "Q1")}   Submit`)}`);
+    out.push("");
     out.push(...(this.onReview() ? this.review(width) : this.question(width)));
     out.push(...this.border.render(width));
     return out;
@@ -368,15 +389,15 @@ export class QuestionDialog implements Component, Focusable {
 
   private tabBar(): string {
     const t = this.theme;
+    // OmO's shape: `→` on the open tab, `✓` after an answered one, Submit last, two spaces or more apart.
+    const tab = (text: string, open: boolean, color: "success" | "muted" | "dim") =>
+      open ? t.bg("selectedBg", t.fg("text", `→ ${text}`)) : t.fg(color, text);
     const tabs = this.questions.map((q, i) => {
       const answered = !!this.slots[i]!.choice;
-      const text = ` ${answered ? "■" : "□"} ${clipHeader(q.header || `Q${i + 1}`)} `;
-      return i === this.tab ? t.bg("selectedBg", t.fg("text", text)) : t.fg(answered ? "success" : "muted", text);
+      return tab(`${clipHeader(q.header || `Q${i + 1}`)}${answered ? " ✓" : ""}`, i === this.tab, answered ? "success" : "muted");
     });
-    const ready = this.slots.every((s) => s.choice);
-    const review = " Review ";
-    tabs.push(this.onReview() ? t.bg("selectedBg", t.fg("text", review)) : t.fg(ready ? "success" : "dim", review));
-    return tabs.join(" ");
+    tabs.push(tab("Submit", this.onReview(), this.slots.every((s) => s.choice) ? "success" : "dim"));
+    return tabs.join("   ");
   }
 
   private question(width: number): string[] {
@@ -384,9 +405,6 @@ export class QuestionDialog implements Component, Focusable {
     const q = this.questions[this.tab]!;
     const slot = this.slots[this.tab]!;
     const out: string[] = [];
-    // The header chip stands on its own line, as the tab bar does for several questions, so a
-    // phone's card (which takes the lines over the options as its question) shows the question alone.
-    if (this.questions.length === 1 && q.header) out.push(` ${t.bg("selectedBg", t.fg("accent", t.bold(` ${clipHeader(q.header)} `)))}`, "");
     const hint = q.multiSelect ? t.fg("muted", " (select all that apply)") : "";
     // Laid out as Pi's own select and input dialogs are, top to bottom: the question, a blank,
     // one row per option (anything under a row is a `│` continuation of it), a blank, then Pi's
@@ -415,6 +433,11 @@ export class QuestionDialog implements Component, Focusable {
       const editor = this.editing === "custom" ? slot.custom : slot.notes;
       out.push(...hang(" ", title, width), "", ...inline(` ${t.fg("accent", "›")} `, "", editor, width, t), "");
       out.push(...hintLines(`${keyHint("tui.select.confirm", "submit")}  ${keyHint("tui.select.cancel", "cancel")}`, width));
+    } else if (q.multiSelect) {
+      // OmO's multiple-choice hint, so herdr-web-ui offers checkboxes for this question.
+      const many = this.questions.length > 1;
+      const keys = [["↑↓", "move"], ["1-9", "select"], ["space", "toggle"], ["enter", "next"], ["tab", many ? "next question" : "done"], ["n", "note"], ["esc", "cancel"]];
+      out.push(...hintLines(keys.map(([k, d]) => rawKeyHint(k!, d!)).join("  "), width));
     } else {
       const extra = `${this.questions.length > 1 ? `${rawKeyHint("tab", "next")}  ` : ""}${rawKeyHint("n", "note")}  `;
       out.push(...hintLines(`${extra}${menuHint()}`, width));
@@ -426,25 +449,31 @@ export class QuestionDialog implements Component, Focusable {
   private options(q: Question, slot: Slot, width: number): string[] {
     const t = this.theme;
     const out: string[] = [];
-    const row = (i: number, label: string, checked: boolean, chosen: boolean) => {
-      const focused = slot.cursor === i || (i === q.options.length && this.editing === "custom");
-      // A checked row's tick goes before its number, where Pi puts the tick on its own menus:
-      // herdr-web-ui drops it there, so a phone's card shows the label without a box.
-      const box = q.multiSelect ? (checked ? t.fg("success", "✔ ") : "  ") : "";
-      const prefix = ` ${focused ? t.fg("accent", "❯") : " "} ${box}${t.fg(focused ? "accent" : "muted", `${i + 1}.`)} `;
-      const text = t.fg(focused ? "accent" : "text", focused ? t.bold(label) : label) + (chosen ? t.fg("success", " ✓") : "");
+    const own = q.options.length;
+    // `description` follows the label on its line. A single choice is laid out as Pi's select (a
+    // wrapped rest goes behind a `│`, which herdr-web-ui joins to the row); a multiple choice as
+    // OmO's form (a ✓ after each checked row, an unnumbered typed-answer row, and wrapped lines
+    // indented five or more, which it reads as the row's description).
+    const row = (i: number, label: string, description: string | undefined, mark: boolean) => {
+      const focused = slot.cursor === i || (i === own && this.editing === "custom");
+      const number = i === own && q.multiSelect ? "" : `${t.fg(focused ? "accent" : "muted", `${i + 1}.`)} `;
+      const prefix = ` ${focused ? t.fg("accent", "→") : " "} ${number}`;
+      // The tick sits right after the label, where a wrapped description cannot push it away.
+      const text =
+        t.fg(focused ? "accent" : "text", focused ? t.bold(label) : label) +
+        (mark ? t.fg("success", " ✓") : "") +
+        (description ? t.fg("muted", ` · ${description}`) : "");
       const [first = "", ...rest] = hang(prefix, text, width);
-      out.push(first, ...gutter(rest, t));
-      return " ".repeat(visibleWidth(prefix));
+      out.push(first, ...(q.multiSelect ? rest.map((line) => ` ${line}`) : gutter(rest, t)));
     };
     q.options.forEach((o, i) => {
-      const chosen = slot.choice?.kind === "option" && slot.choice.label === o.label;
-      const pad = row(i, o.label, slot.checked.has(i), chosen);
-      if (o.description) out.push(...gutter(hang(pad, t.fg("muted", o.description), width), t));
+      const mark = q.multiSelect ? slot.checked.has(i) : slot.choice?.kind === "option" && slot.choice.label === o.label;
+      row(i, o.label, o.description || undefined, mark);
     });
-    // A draft stays on its row, in place of the "Type something." label; the field opens below.
+    // A draft stays on its row, after (or in place of) the typed-answer label; the field opens below.
     const draft = oneLine(slot.custom.getText().trim());
-    row(q.options.length, draft || TYPE_SOMETHING, slot.typedChecked && !!slot.typed, slot.choice?.kind === "custom");
+    const ownLabel = q.multiSelect ? (draft ? `${OWN_ANSWER}: ${draft}` : OWN_ANSWER) : draft || TYPE_SOMETHING;
+    row(own, ownLabel, undefined, q.multiSelect ? slot.typedChecked && !!slot.typed : slot.choice?.kind === "custom");
     return out;
   }
 
@@ -453,10 +482,10 @@ export class QuestionDialog implements Component, Focusable {
    * columns do not shift as the highlight moves).
    */
   private natural(q: Question, slot: Slot, width: number): Natural {
-    const boxW = q.multiSelect ? 2 : 0;
     const rows = [...q.options, { label: TYPE_SOMETHING, description: "" }].map((o, i) => {
-      const prefix = 5 + `${i + 1}.`.length + boxW;
-      return { label: prefix + visibleWidth(o.label) + 4, description: prefix + visibleWidth(o.description ?? "") + 2 };
+      const prefix = 4 + `${i + 1}.`.length;
+      const label = prefix + visibleWidth(o.label) + 4;
+      return { label, description: o.description ? label + 3 + visibleWidth(o.description) : 0 };
     });
     const labels = Math.max(...rows.map((r) => r.label));
     const inner = Math.max(1, width - 2 - BOX_CHROME);
@@ -496,7 +525,7 @@ export class QuestionDialog implements Component, Focusable {
     out.push("", ` ${t.fg("text", "Submit these answers?")}`, "");
     ["Submit answers", "Cancel"].forEach((label, i) => {
       const focused = this.reviewCursor === i;
-      out.push(` ${focused ? t.fg("accent", "❯") : " "} ${focused ? t.fg("accent", t.bold(label)) : t.fg("text", label)}`);
+      out.push(` ${focused ? t.fg("accent", "→") : " "} ${focused ? t.fg("accent", t.bold(label)) : t.fg("text", label)}`);
     });
     out.push("", ...hintLines(`${rawKeyHint("tab", "back")}  ${menuHint()}`, width));
     return out;
