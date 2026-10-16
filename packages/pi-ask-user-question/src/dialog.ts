@@ -393,9 +393,9 @@ export class QuestionDialog implements Component, Focusable {
   }
 
   private build(width: number): string[] {
-    const out = [...this.border.render(width)];
-    // The top lines follow OmO's ask_user_question form (`Ask user`, then a tab bar ending in
-    // Submit), which herdr-web-ui reads for its multiple-choice cards; Pi's own dialogs have none.
+    // The top border carries the title `Ask user`, the first line of OmO's ask_user_question form
+    // (then a tab bar ending in Submit), which herdr-web-ui reads for its multiple-choice cards;
+    // it reads any line that starts with those words, so a titled border costs no line of its own.
     const t = this.theme;
     const lone = this.questions.length === 1 ? this.questions[0]! : undefined;
     // A lone multiple choice names its header in the tab bar it needs anyway, not twice.
@@ -403,11 +403,10 @@ export class QuestionDialog implements Component, Focusable {
     // A multiple choice says so up top: its rows leave unchecked boxes blank (anything drawn there
     // would show in the phone card's option text), so this and the ✓ column are the cue.
     const current = this.onReview() ? undefined : this.questions[this.tab];
-    const cue = current?.multiSelect ? ` ${t.fg("dim", "·")} ${t.fg("accent", "choose any")}` : "";
-    // A lone multiple choice's `Ask user` is there only for herdr-web-ui: faint, with the header,
-    // the cue and Submit on the tab bar below it.
-    if (lone?.multiSelect) out.push(` ${t.fg("dim", "Ask user")}`);
-    else out.push(` ${t.fg("muted", "Ask user")}${chip}${cue}`);
+    const cue = current?.multiSelect && !lone ? ` ${t.fg("dim", "·")} ${t.fg("accent", "choose any")}` : "";
+    // herdr-web-ui wants a `·` after `Ask user` whenever anything follows it on the line.
+    const title = ` ${t.fg("muted", "Ask user")}${chip || cue ? `${chip}${cue}` : ` ${t.fg("dim", "·")}`} `;
+    const out = [title + t.fg("accent", "─".repeat(Math.max(0, width - visibleWidth(title))))];
     if (!lone) out.push(...wrap(` ${this.tabBar()}`, width));
     // One tab label (single spaces inside it), then Submit: OmO's tab bar, which herdr-web-ui needs.
     else if (lone.multiSelect) out.push(` ${t.bg("selectedBg", t.fg("accent", t.bold(` → ${clipHeader(lone.header || "Q1")} `)))}${t.fg("dim", "·")} ${t.fg("accent", "choose any")}   ${t.fg("dim", "Submit")}`);

@@ -14,7 +14,7 @@ describe("single question", () => {
   test("shows the header chip, numbered options, descriptions and the Type something row", () => {
     const { frames } = dialog([library], []);
     const text = screen(frames[0]);
-    expect(text).toMatch(/ Ask user · {2}Library \n\n Which date library should we use\?/u);
+    expect(text).toMatch(/^ Ask user · {2}Library  ─+\n\n Which date library should we use\?/mu);
     expect(text).toMatch(/→ 1\. date-fns · date-fns description\n/u);
     expect(text).toMatch(/ {3}2\. dayjs/u);
     expect(text).toMatch(/ {3}3\. Type something\./u);
@@ -81,7 +81,7 @@ describe("single question", () => {
     // Pi's own input dialog layout: a title, a blank, the `›` line, a blank, the input hint.
     expect(lines.join("\n")).toMatch(/Your answer · Which date library should we use\?\s*\n\s*\n › i thought we wanted to\s*\n\s*\n enter submit {2}escape\/ctrl\+c cancel/u);
     expect(lines.join("\n")).not.toMatch(/Type something\./u);
-    expect(lines.filter((l) => /^\s*─+\s*$/u.test(l))).toHaveLength(2); // only the dialog's own borders
+    expect(lines.filter((l) => /^\s*─+\s*$/u.test(l))).toHaveLength(1); // only the dialog's bottom border (the top one is titled)
   });
 
   test("Ctrl+K on an empty field stays in it (herdr-web-ui clears a field with ctrl+k ctrl+u)", () => {
@@ -158,7 +158,7 @@ describe("multi-select", () => {
 
   test("OmO's keys, which herdr-web-ui sends: Backspace clears, numbers toggle, Tab finishes", () => {
     const d = dialog([features], [space, "\x7f", "2", "3", "3", "1"]);
-    expect(screen(d.frames[0])).toMatch(/^ Ask user\n {2}→ Features · choose any   Submit\n/mu);
+    expect(screen(d.frames[0])).toMatch(/^ Ask user · ─+\n {2}→ Features · choose any {3}Submit\n/mu);
     expect(screen(d.frames[0])).toMatch(/\n\n ↑↓ move {2}1-9 select {2}space toggle {2}enter next {2}tab done {2}n note {2}esc cancel\n─+$/u);
     expect(screen(d.frames[2])).not.toMatch(/✓/u);
     expect(d.result).toBeUndefined();
