@@ -151,14 +151,14 @@ describe("multi-select", () => {
   test("space toggles, Enter commits the checked options", () => {
     const d = dialog([features], [space, down, down, space]);
     expect(screen(d.frames.at(-1))).toMatch(/ {3}1\. ✓ Auth · Auth description\n {3}2\. {3}Billing · Billing description\n → 3\. ✓ Search · Search description\n {3}4\. {3}Other · type your own answer\n {3}Type your own answer: check 4, then enter\./u);
-    expect(screen(d.frames[0])).toMatch(/^ Ask user · {2}Features {2}· choose any$/mu);
+    expect(screen(d.frames[0])).toMatch(/· choose any   Submit$/mu);
     d.dialog.handleInput(enter);
     expect(d.result?.answers[0]).toMatchObject({ kind: "multi", answer: "Auth, Search", selected: ["Auth", "Search"] });
   });
 
   test("OmO's keys, which herdr-web-ui sends: Backspace clears, numbers toggle, Tab finishes", () => {
     const d = dialog([features], [space, "\x7f", "2", "3", "3", "1"]);
-    expect(screen(d.frames[0])).toMatch(/^ Ask user · {2}Features {2}· choose any\n → Features {3}Submit\n/mu);
+    expect(screen(d.frames[0])).toMatch(/^ Ask user\n {2}→ Features · choose any   Submit\n/mu);
     expect(screen(d.frames[0])).toMatch(/\n\n ↑↓ move {2}1-9 select {2}space toggle {2}enter next {2}tab done {2}n note {2}esc cancel\n─+$/u);
     expect(screen(d.frames[2])).not.toMatch(/✓/u);
     expect(d.result).toBeUndefined();

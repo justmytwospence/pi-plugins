@@ -398,14 +398,19 @@ export class QuestionDialog implements Component, Focusable {
     // Submit), which herdr-web-ui reads for its multiple-choice cards; Pi's own dialogs have none.
     const t = this.theme;
     const lone = this.questions.length === 1 ? this.questions[0]! : undefined;
-    const chip = lone?.header ? ` ${t.fg("dim", "·")} ${t.bg("selectedBg", t.fg("accent", t.bold(` ${clipHeader(lone.header)} `)))}` : "";
+    // A lone multiple choice names its header in the tab bar it needs anyway, not twice.
+    const chip = lone?.header && !lone.multiSelect ? ` ${t.fg("dim", "·")} ${t.bg("selectedBg", t.fg("accent", t.bold(` ${clipHeader(lone.header)} `)))}` : "";
     // A multiple choice says so up top: its rows leave unchecked boxes blank (anything drawn there
     // would show in the phone card's option text), so this and the ✓ column are the cue.
     const current = this.onReview() ? undefined : this.questions[this.tab];
     const cue = current?.multiSelect ? ` ${t.fg("dim", "·")} ${t.fg("accent", "choose any")}` : "";
-    out.push(` ${t.fg("muted", "Ask user")}${chip}${cue}`);
+    // A lone multiple choice's `Ask user` is there only for herdr-web-ui: faint, with the header,
+    // the cue and Submit on the tab bar below it.
+    if (lone?.multiSelect) out.push(` ${t.fg("dim", "Ask user")}`);
+    else out.push(` ${t.fg("muted", "Ask user")}${chip}${cue}`);
     if (!lone) out.push(...wrap(` ${this.tabBar()}`, width));
-    else if (lone.multiSelect) out.push(` ${t.fg("dim", `→ ${clipHeader(lone.header || "Q1")}   Submit`)}`);
+    // One tab label (single spaces inside it), then Submit: OmO's tab bar, which herdr-web-ui needs.
+    else if (lone.multiSelect) out.push(` ${t.bg("selectedBg", t.fg("accent", t.bold(` → ${clipHeader(lone.header || "Q1")} `)))}${t.fg("dim", "·")} ${t.fg("accent", "choose any")}   ${t.fg("dim", "Submit")}`);
     out.push("");
     out.push(...(this.onReview() ? this.review(width) : this.question(width)));
     out.push(...this.border.render(width));
