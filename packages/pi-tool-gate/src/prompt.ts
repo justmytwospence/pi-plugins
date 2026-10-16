@@ -1,7 +1,8 @@
 // The approval dialog. In Pi's terminal UI a held call is shown laid out and highlighted (bash one
 // step per line, edits as diffs), with why it was held and the agent's case rendered as Markdown;
 // long parts are clamped and ctrl+o expands them. `n` (or the "Block with a message" row) opens a
-// field whose text goes to the agent with the refusal. Elsewhere (RPC clients, forwarded subagent
+// field under the choices whose text goes to the agent with the refusal. The choices and the field
+// end as Pi's own select and input dialogs do, which herdr-web-ui reads as a chat card. Elsewhere (RPC clients, forwarded subagent
 // dialogs) it falls back to a plain select with a one-line summary, then a text input for a message.
 import {
   DynamicBorder,
@@ -11,6 +12,7 @@ import {
   highlightCode,
   type KeybindingsManager,
   keyHint,
+  rawKeyHint,
   renderDiff,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
@@ -28,6 +30,7 @@ import {
   Spacer,
   Text,
   type TUI,
+  truncateToWidth,
 } from "@earendil-works/pi-tui";
 import { beginComposition, type EditorCreator, editorOwnsCancel, inline, type ProseEditor } from "./editor.ts";
 import type { CallView } from "./view.ts";
@@ -117,7 +120,6 @@ class ApprovalDialog implements Component {
   private readonly clamps: Clamp[] = [];
   /** The message field, shown in place of the "Block with a message" row while open. */
   private readonly message: ProseEditor;
-  private readonly emptyHint = new Text("", 3, 0);
   private editing = false;
   private emptyMessage = false;
   private hasFocus = false;
@@ -191,14 +193,23 @@ class ApprovalDialog implements Component {
     this.root.addChild(new Spacer(1));
     const options = new Box(1, 0);
     const selectTheme = getSelectListTheme();
+    // Laid out as Pi's own select and input dialogs are (question, blank, rows, blank, key hint),
+    // which is what herdr-web-ui reads a pi dialog off the screen by: a phone then gets the
+    // options, or a text box for the message, instead of a bare Enter/Esc card.
     options.addChild({
       render: (width: number) => {
-        const lines = this.list.render(width);
-        if (!this.editing) return lines;
-        // The message row becomes the field: no label line, no editor rules.
-        const label = selectTheme.selectedText("Block: ");
-        const field = inline(selectTheme.selectedPrefix("→ "), label, this.message, width, theme);
-        return [...lines.slice(0, -1), ...field, ...(this.emptyMessage ? this.emptyHint.render(width) : [])];
+        const question = truncateToWidth(theme.fg("text", this.question()), Math.max(1, width));
+        const out = [question, "", ...this.list.render(width), ""];
+        const wrapHint = (text: string) => new Text(text, 0, 0).render(Math.max(1, width));
+        if (!this.editing) {
+          return [...out, ...wrapHint(`${rawKeyHint("n", "message")}  ${rawKeyHint("↑↓", "navigate")}  ${keyHint("tui.select.confirm", "select")}  ${keyHint("tui.select.cancel", "cancel")}`)];
+        }
+        // The message field opens under the rows, as Pi's own text input: a title, then `›`.
+        const title = this.emptyMessage
+          ? wrapHint(theme.fg("warning", "Type a message for the agent, or Esc to go back."))
+          : [theme.fg("accent", theme.bold("Message for the agent"))];
+        const field = inline(selectTheme.selectedPrefix("› "), "", this.message, width, theme);
+        return [...out, ...title, "", ...field, "", ...wrapHint(`${keyHint("tui.select.confirm", "submit")}  ${keyHint("tui.select.cancel", "cancel")}`)];
       },
       invalidate: () => this.list.invalidate(),
     });
@@ -233,7 +244,14 @@ class ApprovalDialog implements Component {
       theme.fg("accent", theme.bold("Agent:")) + (a.agentCase ? "" : ` ${theme.fg("muted", theme.italic("(gave no reason)"))}`),
     );
     this.note.setText(theme.fg("muted", a.note ?? ""));
-    this.emptyHint.setText(theme.fg("warning", "Type a message for the agent, or Esc to go back."));
+  }
+
+  /** One line naming the call: the question a phone's card shows over the options. */
+  private question(): string {
+    const v = this.a.view;
+    const command = v.tool === "bash" && v.body.kind === "code" ? v.body.text.split("\n")[0]?.trim() : "";
+    const what = v.subject || command;
+    return `Allow ${v.tool}${what ? ` ${what}` : ""}?`.replace(/\s+/g, " ");
   }
 
   get focused(): boolean {
