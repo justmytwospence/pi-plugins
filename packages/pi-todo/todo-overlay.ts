@@ -36,6 +36,14 @@ export class TodoOverlay {
 	private hiddenCompletedTaskIds = new Set<number>();
 	private lastNextId: number | undefined;
 	private collapsed = false;
+	private suppressed = false;
+
+	/** Hide the widget while a dialog waits on the user (it needs the rows), keeping its state. */
+	setSuppressed(suppressed: boolean): void {
+		if (suppressed === this.suppressed) return;
+		this.suppressed = suppressed;
+		this.tui?.requestRender(true);
+	}
 
 	setUICtx(ctx: ExtensionUIContext): void {
 		// Identity-compare so repeat session_start handlers are idempotent;
@@ -136,6 +144,7 @@ export class TodoOverlay {
 	}
 
 	private renderWidget(theme: Theme, width: number): string[] {
+		if (this.suppressed) return [];
 		const snapshot = this.getSnapshot();
 		const overlayTasks = this.selectOverlayTasks(snapshot);
 		if (overlayTasks.length === 0) return [];

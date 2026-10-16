@@ -142,10 +142,20 @@ export default function (pi: ExtensionAPI, importOverlay: TodoOverlayImporter = 
 		if (generation !== lifecycleGeneration || !uiCtx) return;
 
 		todoOverlay ??= new TodoOverlay();
+		todoOverlay.setSuppressed?.(blocked > 0);
 		todoOverlay.setUICtx(uiCtx);
 		if (resetCompletedDisplayState) todoOverlay.resetCompletedDisplayState();
 		todoOverlay.update();
 	}
+
+	// Another extension holds `herdr:blocked` while its dialog waits on the user
+	// (plan review, questions). Give the dialog the rows the list would take.
+	let blocked = 0;
+	pi.events?.on?.("herdr:blocked", (data: unknown) => {
+		const active = (data as { active?: boolean } | undefined)?.active === true;
+		blocked = Math.max(0, blocked + (active ? 1 : -1));
+		todoOverlay?.setSuppressed?.(blocked > 0);
+	});
 
 	registerTodoTool(pi);
 	registerTodosCommand(pi);
