@@ -73,6 +73,8 @@ export interface Snapshot {
   /** A prompt stashed by @saadjs/pi-stash; text is its content when readable. */
   stash?: { text?: string };
   marimo?: MarimoStatus;
+  /** pi-marimo's open marimo-lens selections, shown on their own row under the marimo row. */
+  lens?: LensStatus;
   bg?: BgItem[];
   /** Built-in MCP servers, connected/configured, unless another extension publishes an `mcp` status. */
   mcp?: McpCount;
@@ -109,6 +111,31 @@ export function parseBgStatus(text: string): BgItem[] | undefined {
     else return undefined;
   }
   return items;
+}
+
+/** pi-marimo's `marimo-lens` status, parsed: `lens: fit.py · S1 "note" · S2 · +3 · also prep.py 2`. */
+export interface LensStatus {
+  notebook: string;
+  selections: Array<{ label: string; note?: string }>;
+  more?: number;
+  others?: string[];
+}
+
+export function parseLensStatus(text: string): LensStatus | undefined {
+  const match = /^lens: (.+)$/.exec(text);
+  if (!match) return undefined;
+  const [notebook, ...parts] = match[1].split(" · ");
+  const status: LensStatus = { notebook, selections: [] };
+  for (const part of parts) {
+    const selection = /^(S\d+)(?: "(.*)")?$/.exec(part);
+    const more = /^\+(\d+)$/.exec(part);
+    const also = /^also (.+)$/.exec(part);
+    if (selection) status.selections.push({ label: selection[1], note: selection[2] });
+    else if (more) status.more = +more[1];
+    else if (also) status.others = also[1].split(", ");
+    else return undefined;
+  }
+  return status.selections.length ? status : undefined;
 }
 
 /** pi-marimo's status, parsed: the notebook and the ` · ` separated parts after it. */
@@ -163,7 +190,7 @@ export function parseModeStatus(text: string): PermissionModeStatus | undefined 
   return { kind: MODE_KINDS[match[2]], label: `${match[1]} ${match[2]} on`, ...(match[3] ? { key: match[3] } : {}) };
 }
 
-export interface AbsorbedStatuses { mode?: PermissionModeStatus; autoEffort: boolean; autoEffortDetail?: string; lean?: string; cache?: string; extraBilled?: number; stashed?: boolean; marimo?: MarimoStatus; bg?: BgItem[]; /** Another extension owns the `mcp` status. */ mcp?: boolean; rest: string[] }
+export interface AbsorbedStatuses { mode?: PermissionModeStatus; autoEffort: boolean; autoEffortDetail?: string; lean?: string; cache?: string; extraBilled?: number; stashed?: boolean; marimo?: MarimoStatus; lens?: LensStatus; bg?: BgItem[]; /** Another extension owns the `mcp` status. */ mcp?: boolean; rest: string[] }
 // Statuses from our own companion extensions that read better inside the footer
 // rows they describe. Each is optional: absent extensions publish nothing, and a
 // status whose text no longer matches the expected shape falls through to the
@@ -175,6 +202,7 @@ export interface AbsorbedStatuses { mode?: PermissionModeStatus; autoEffort: boo
 //   anthropic-billing (anthropic-billing-guard) "extra usage x3"       -> Claude limits row
 //   prompt-stash      (@saadjs/pi-stash)        "prompt stashed"       -> its own row under the editor
 //   marimo            (pi-marimo)               "marimo: nb.py · ..."  -> its own row under the context row
+//   marimo-lens       (pi-marimo)               "lens: nb.py · S1 ..." -> its own row under the marimo row
 //   bg                (pi-bg)                   "bg: tests 2:14 · ..." -> its own row under that
 //   permission-mode   (pi-tool-gate, pi-plan-mode) "⏵⏵ auto mode on (shift+tab to cycle)" -> the model row
 // Everything else (plan, gate, mcp, ...) stays in the status row.
@@ -197,6 +225,8 @@ export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: {
     if (key === "prompt-stash" && plainText === "prompt stashed") { result.stashed = true; continue; }
     const marimo = key === "marimo" ? parseMarimoStatus(plainText) : undefined;
     if (marimo) { result.marimo = marimo; continue; }
+    const lens = key === "marimo-lens" ? parseLensStatus(plainText) : undefined;
+    if (lens) { result.lens = lens; continue; }
     const bg = key === "bg" ? parseBgStatus(plainText) : undefined;
     if (bg) { result.bg = bg; continue; }
     const mode = key === "permission-mode" ? parseModeStatus(plainText) : undefined;
@@ -660,6 +690,21 @@ function stashRow(text: string | undefined, width: number, theme: Paint): string
 // The notebooks pi-marimo follows: the current one (used most recently) first,
 // with what its kernel is doing (the markdown section the running cell sits
 // under, its deepest heading when narrow), then the others by name.
+// Open marimo-lens selections: what the user marked in the browser and has not had addressed.
+function lensRow(l: LensStatus, width: number, theme: Paint): string {
+  const count = l.selections.length + (l.more ?? 0);
+  return fitSegments([
+    { text: `${theme.fg("muted", "Lens")} ${theme.bold(theme.fg("accent", l.notebook))}`, short: theme.bold(theme.fg("accent", l.notebook)), priority: 90 },
+    ...l.selections.map((s, i): Segment => ({
+      text: `${theme.fg("warning", s.label)}${s.note ? ` ${theme.fg("muted", clean(s.note))}` : ""}`,
+      short: theme.fg("warning", s.label),
+      priority: 70 - i,
+    })),
+    { text: l.more ? theme.fg("dim", `+${l.more}`) : "", short: theme.fg("dim", `${count} open`), priority: 80 },
+    { text: l.others?.length ? `${theme.fg("dim", "also")} ${theme.fg("muted", l.others.join(", "))}` : "", priority: 40 },
+  ], width, theme);
+}
+
 function marimoRow(m: MarimoStatus, width: number, theme: Paint): string {
   const run = m.running;
   const time = run?.elapsed ? theme.fg("dim", ` ${run.elapsed}`) : "";
@@ -708,6 +753,7 @@ export const ICONS = {
   gate: "\uf510", // shield with check (pi-tool-gate)
   context: "\uf0e4", // tachometer
   marimo: "\uf02d", // book
+  lens: "\uf06e", // eye (marimo-lens selections)
   bg: "\uf085", // cogs
   mcp: "\uf1e6", // plug
   notices: "\uf0f3", // bell
@@ -810,6 +856,7 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     { text: cache ? `${theme.fg("muted", "Cache")} ${theme.fg(cache.startsWith("cold") ? "warning" : "success", cacheValue)}${cacheNote ? `${sep}${theme.fg("dim", cacheNote)}` : ""}` : "", priority: 30 },
   ], w, theme)));
   if (s.marimo) { const m = s.marimo; rows.push(row(ICONS.marimo, (w) => marimoRow(m, w, theme))); }
+  if (s.lens) { const l = s.lens; rows.push(row(ICONS.lens, (w) => lensRow(l, w, theme))); }
   if (s.bg?.length) { const bg = s.bg; rows.push(row(ICONS.bg, (w) => bgRow(bg, w, theme))); }
   // Statuses remain owned by their publishers. Wrap instead of silently dropping
   // plan mode, background failures, or other extension notices at the right edge.
@@ -1222,7 +1269,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       quotas, unavailableQuota,
       statuses: absorbed.rest, mode: absorbed.mode, autoEffort: absorbed.autoEffort, autoEffortDetail: absorbed.autoEffortDetail, lean: absorbed.lean, cache: absorbed.cache, extraBilled: absorbed.extraBilled,
       stash: absorbed.stashed ? { text: stashedPrompt() } : undefined,
-      marimo: absorbed.marimo, bg: absorbed.bg, borderGauge, compact: blockedHolds > 0,
+      marimo: absorbed.marimo, lens: absorbed.lens, bg: absorbed.bg, borderGauge, compact: blockedHolds > 0,
       // Yield to an extension that publishes its own mcp status (pi-mcp-adapter).
       mcp: showMcp && !absorbed.mcp ? mcp : undefined,
       now: Date.now(),

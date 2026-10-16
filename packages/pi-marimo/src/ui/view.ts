@@ -8,7 +8,7 @@ import type { Cell, NotebookState } from "../core/notebook.js";
 import { elapsed } from "../core/render.js";
 import { truncate } from "../core/notebook.js";
 import type { Followed } from "../core/watcher.js";
-import { kernelStateParts } from "../bg.js";
+import { kernelStateParts, lensParts } from "../bg.js";
 import { INPUT_CONTEXT } from "../activity.js";
 import { interruptKey, notebookKey, notebookPath } from "./identity.js";
 import { banner, bottom, row as frameRow, rule as frameRule, type FrameTheme } from "./frame.js";
@@ -28,8 +28,11 @@ const firstLine = (code: string) => code.split("\n").find((l) => l.trim())?.trim
 
 /** The notebook as display lines: headings, then a line per code cell (and its error under it). */
 export function notebookLines(nb: NotebookState, theme: FrameTheme, now: number): { lines: string[]; running?: number } {
-  const lines: string[] = [];
+  const lines = lensSection(nb, theme);
   let running: number | undefined;
+  // Each cell's open Lens selections, tagged on its row.
+  const marks = new Map<string, string[]>();
+  for (const s of nb.lens.selections()) for (const id of s.cells) marks.set(id, [...marks.get(id) ?? [], s.label]);
   const icon = (c: Cell) =>
     c.status === "running"
       ? theme.fg("accent", "●")
@@ -55,10 +58,33 @@ export function notebookLines(nb: NotebookState, theme: FrameTheme, now: number)
     const label = cell.name !== "_" ? cell.name : cell.id;
     const what = defs.length ? `→ ${truncate(defs.join(", "), 80)}` : theme.fg("dim", truncate(firstLine(cell.code) || "(empty)", 80));
     if (cell.status === "running") running = lines.length;
-    lines.push(`  ${icon(cell)} ${theme.fg("muted", label)}  ${what}${notes.length ? `  ${notes.join(theme.fg("dim", " · "))}` : ""}`);
+    const marked = marks.get(cell.id);
+    lines.push(`  ${icon(cell)} ${theme.fg("muted", label)}${marked ? ` ${theme.fg("warning", marked.join(" "))}` : ""}  ${what}${notes.length ? `  ${notes.join(theme.fg("dim", " · "))}` : ""}`);
     if (cell.error) lines.push(`      ${theme.fg("error", truncate(cell.error, 200))}`);
   }
   return { lines, ...(running !== undefined ? { running } : {}) };
+}
+
+/** Open marimo-lens selections (label, note, where, image) and the latest addressed ones, above the outline. */
+export function lensSection(nb: NotebookState, theme: FrameTheme): string[] {
+  const open = nb.lens.selections();
+  const history = nb.lens.history().slice(-3);
+  if (!open.length && !history.length) return [];
+  const current = nb.lens.current()?.id;
+  const where = (cells: string[]) => cells.map((id) => {
+    const c = nb.cells.get(id);
+    return c && c.name !== "_" ? c.name : id;
+  }).join(", ");
+  const lines = [theme.bold(theme.fg("accent", "Lens"))];
+  for (const s of open) {
+    const meta = [where(s.cells), s.image && s.image !== "available" ? `image ${s.image}` : "", s.previous !== undefined ? "reopened" : ""].filter(Boolean).join(" \u00b7 ");
+    lines.push(`  ${theme.fg("warning", s.label)}${s.id === current ? theme.fg("dim", "*") : " "} ${s.note ? truncate(s.note.replace(/\s+/g, " "), 120) : theme.fg("dim", s.what ?? "(no note)")}${meta ? `  ${theme.fg("dim", meta)}` : ""}`);
+  }
+  for (const h of history) {
+    lines.push(`  ${theme.fg("success", "\u2713")} ${theme.fg("dim", h.label)} ${theme.fg("dim", truncate(h.summary ?? h.note ?? "", 120))}`);
+  }
+  lines.push("");
+  return lines;
 }
 
 export class NotebookView implements Component {
@@ -178,7 +204,7 @@ export class NotebookView implements Component {
       for (let i = 0; i < page; i++) out.push(row(""));
     } else {
       const busy = f.notebook.running() || f.notebook.queued() > 0;
-      const state = kernelStateParts(f).join(" · ");
+      const state = [...kernelStateParts(f), ...lensParts(f)].join(" · ");
       out.push(row(`${busy ? th.fg("accent", "●") : f.notebook.errors().length ? th.fg("error", "✗") : th.fg("dim", "○")} ${th.bold(file)}  ${state}`));
       out.push(row(th.fg("dim", `${f.attachment.path} · ${f.attachment.url} · session ${f.attachment.sessionId}`)));
       out.push(rule);

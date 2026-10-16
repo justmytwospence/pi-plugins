@@ -134,6 +134,10 @@ export default function nextPrompt(pi: ExtensionAPI) {
   /** The suggestion on offer until the next prompt is sent; `shown` is set while it is on screen. */
   let offered: string | undefined;
   let shown: string | undefined;
+  // Which extension offered the current suggestion through `prompt:offer` (undefined: the model's own).
+  let offerSource: string | undefined;
+  // A turn is running: offers from other extensions wait for the user's next idle moment.
+  let busy = false;
   let generation = 0;
   let lastVerdict = "";
   let lastTag = "none yet";
@@ -183,6 +187,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
 
   const hide = () => {
     offered = undefined;
+    offerSource = undefined;
     conceal();
   };
 
@@ -310,6 +315,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
 
   pi.on("session_start", (_event, ctx) => {
     config = loadConfig("next-prompt", DEFAULT_CONFIG, ctx.cwd);
+    busy = false;
     reset();
     attach(ctx);
   });
@@ -342,7 +348,30 @@ export default function nextPrompt(pi: ExtensionAPI) {
     return undefined;
   });
 
-  pi.on("agent_start", () => reset());
+  pi.on("agent_start", () => {
+    busy = true;
+    reset();
+  });
+
+  // Optional bus integration: another extension offers a next prompt while Pi is idle
+  // (pi-marimo when a Lens selection appears), or withdraws its own offer (text undefined).
+  // The model's own suggestion is never replaced, and nothing is ever sent.
+  pi.events.on("prompt:offer", (data) => {
+    const request = data as { source?: unknown; text?: unknown } | undefined;
+    const source = typeof request?.source === "string" ? request.source : undefined;
+    if (!source) return;
+    const text = typeof request?.text === "string" ? request.text.replace(/\s+/g, " ").trim().slice(0, config.maxChars) : "";
+    if (!text) {
+      if (offerSource === source) hide();
+      return;
+    }
+    if (!active() || !ui || busy) return;
+    if (offered !== undefined && offerSource === undefined) return;
+    generation++;
+    if (ui.getEditorText() === "") show(text);
+    else { conceal(); offered = text; }
+    offerSource = source;
+  });
 
   pi.on("message_end", (event) => {
     const message = event.message as { role?: string; content?: unknown };
@@ -363,6 +392,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
 
   pi.on("agent_settled", async (_event, ctx) => {
     settled = true;
+    busy = false;
     const candidate = pending;
     pending = undefined;
     if (!candidate || outcome !== "completed" || !active() || !ui) return;

@@ -562,6 +562,22 @@ test("pi-marimo's notebook gets its own row under the context row", () => {
   assert.deepEqual(mod.absorbStatuses(new Map([["marimo", "notebook ready"]]), { claudeRow: true }).rest, ["notebook ready"]);
 });
 
+test("pi-marimo's Lens selections get their own row under the marimo row", () => {
+  const absorbed = mod.absorbStatuses(new Map([
+    ["marimo", "marimo: fit.py"],
+    ["marimo-lens", "lens: fit.py \u00b7 S1 \"make this blue\" \u00b7 S2 \u00b7 also prep.py 1"],
+  ]), { claudeRow: true });
+  assert.deepEqual(absorbed.lens, { notebook: "fit.py", selections: [{ label: "S1", note: "make this blue" }, { label: "S2", note: undefined }], others: ["prep.py 1"] });
+  assert.deepEqual(absorbed.rest, []);
+  const s = { ...fixture(), statuses: absorbed.rest, marimo: absorbed.marimo, lens: absorbed.lens };
+  const rows = mod.renderFooter(s, 160, theme).map(plain);
+  assert.match(rows[3], /Marimo fit\.py/);
+  assert.equal(rows[4], " \uf06e Lens fit.py \u00b7 S1 make this blue \u00b7 S2 \u00b7 also prep.py 1");
+  for (const width of [46, 120]) for (const row of mod.renderFooter(s, width, theme)) assert.ok(visibleWidth(row) <= width);
+  // Another shape stays in the status row.
+  assert.deepEqual(mod.absorbStatuses(new Map([["marimo-lens", "lens ready"]]), { claudeRow: true }).rest, ["lens ready"]);
+});
+
 test("external text is sanitized and over-100 gauges are bounded", () => {
   const s = fixture();
   s.git.project = "project\x1b[2J\nattack";

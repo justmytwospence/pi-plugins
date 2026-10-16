@@ -63,6 +63,10 @@ For a candidate suggestion, Jev receives the suggestion itself, up to 1,500 char
 
 A probability below 0.6 hides the proposal by default. Disabled Jev, missing credentials, timeouts or missing answers **show the proposal anyway**. There is no classifier request when the main model supplies no candidate. `/next-prompt status` helps distinguish a rejected candidate from one shown without validation.
 
+## Offers from other extensions
+
+An extension can offer a next prompt over Pi's event bus with `prompt:offer { source, text }`, and withdraw it with `{ source }` and no text. An offer appears only while Pi is idle and never replaces the model's own suggestion. It goes through no Jev check and is cleared by your next prompt, and nothing is sent. pi-marimo uses it when you make a new marimo-lens selection.
+
 ## Limitations and related documentation
 
 A suggestion is model-authored and can still be wrong or redundant, even after validation. It cannot know which of several unstated priorities you prefer. Do not expect a suggestion after every turn, and review accepted commands or requests before sending them.

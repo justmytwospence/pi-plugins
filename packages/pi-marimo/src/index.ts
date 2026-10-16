@@ -7,6 +7,9 @@
 //   after that prompt for the whole turn. It is never stored in the session, so
 //   the model sees only the current turn's copy and old copies never pile up.
 // - /marimo: pin notebooks, follow every notebook under the cwd, or turn it off.
+// - marimo-lens (core/lens.ts): open selections enter the context and get their own status
+//   (`marimo-lens`); a new one made while Pi is idle is offered as the next prompt through
+//   pi-next-prompt (`prompt:offer`).
 // - herdr (through pi-herdr): when a turn ends with a cell the agent started still running, the pane
 //   token `marimo` says what runs until the kernel goes quiet, then a notification says it finished
 //   (herdr.ts).
@@ -17,7 +20,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { BgBridge } from "./bg.js";
 import { KernelHold } from "./core/hold.js";
-import { snapshot, STATE_TAG, statusParts, statusText } from "./core/render.js";
+import { lensLines, lensStatusText, snapshot, STATE_TAG, statusParts, statusText } from "./core/render.js";
+import { basename } from "./core/io.js";
 import { nodeIo } from "./core/node-io.js";
 import { pairTargets } from "./core/touch.js";
 import { MarimoWatcher, type Mode, parseMode } from "./core/watcher.js";
@@ -32,6 +36,9 @@ import { NotebookView, type ViewActions } from "./ui/view.js";
 
 const ENTRY = "pi-marimo";
 const STATUS_KEY = "marimo";
+// Open Lens selections get a status (and so a footer line) of their own.
+const LENS_STATUS_KEY = "marimo-lens";
+const OFFER_SOURCE = "pi-marimo";
 const MESSAGE_TYPE = "pi-marimo-state";
 
 type Entry = { type?: string; customType?: string; data?: unknown };
@@ -84,6 +91,11 @@ export default function piMarimo(pi: ExtensionAPI): void {
   let pending: ReturnType<typeof setTimeout> | undefined;
   let ticker: ReturnType<typeof setInterval> | undefined;
   let lastStatus: string | undefined;
+  let lastLensStatus: string | undefined;
+  // Lens selections (path + selection id) already seen, so only new ones are offered as a next prompt.
+  const lensSeen = new Set<string>();
+  let offering = false;
+  let busy = false;
   // The state taken when the current turn's prompt was sent, and that prompt's timestamp.
   let turn: { text: string; anchor?: number } | undefined;
   // A cell the agent started that outlives its turn, shown in herdr (interactive sessions only).
@@ -172,10 +184,44 @@ export default function piMarimo(pi: ExtensionAPI): void {
       lastStatus = text;
       ctxRef?.ui.setStatus(STATUS_KEY, text);
     }
+    lensUpdate();
     // Tick the elapsed time while a cell runs, and while a run waits out a disconnect.
     const running = (watcher?.connection === "connected" && watcher.notebook.running()) || bg.needsTick();
     if (running && !ticker) ticker = setInterval(render, 1000);
     if (!running && ticker) { clearInterval(ticker); ticker = undefined; }
+  };
+
+  /** The Lens footer line, and a next-prompt offer when the user marks something new while Pi is idle. */
+  const lensUpdate = (): void => {
+    const connected = (watcher?.followed() ?? []).filter((f) => f.connection === "connected");
+    const lens = lensStatusText(connected);
+    if (lens !== lastLensStatus) {
+      lastLensStatus = lens;
+      ctxRef?.ui.setStatus(LENS_STATUS_KEY, lens);
+    }
+    // Selections made during a turn wait for it to end; the turn may have addressed them.
+    const fresh: Array<{ path: string; label: string; key: string }> = [];
+    let open = 0;
+    for (const f of connected) {
+      for (const s of f.notebook.lens.selections()) {
+        open++;
+        const key = `${f.attachment.path}\0${s.id}`;
+        if (!lensSeen.has(key)) fresh.push({ path: f.attachment.path, label: s.label, key });
+      }
+    }
+    if (!open && offering) {
+      offering = false;
+      pi.events?.emit("prompt:offer", { source: OFFER_SOURCE });
+    }
+    if (!fresh.length || busy || ctxRef?.mode !== "tui") return;
+    for (const f of fresh) lensSeen.add(f.key);
+    const files = [...new Set(fresh.map((f) => basename(f.path)))];
+    const first = fresh[0]!;
+    const text = fresh.length === 1
+      ? `Use Lens to address ${first.label} in ${basename(first.path)}`
+      : `Use Lens to address my open selections in ${files.join(" and ")}`;
+    offering = true;
+    pi.events?.emit("prompt:offer", { source: OFFER_SOURCE, text });
   };
 
   const schedule = (): void => {
@@ -227,7 +273,10 @@ export default function piMarimo(pi: ExtensionAPI): void {
     source.resetHosts();
     await previousWatcher?.stop();
     previousContext?.ui.setStatus(STATUS_KEY, undefined);
-    lastStatus = undefined;
+    previousContext?.ui.setStatus(LENS_STATUS_KEY, undefined);
+    lastStatus = lastLensStatus = undefined;
+    lensSeen.clear();
+    offering = busy = false;
   });
 
   pi.on("before_agent_start", async () => {
@@ -250,6 +299,8 @@ export default function piMarimo(pi: ExtensionAPI): void {
   });
 
   pi.on("agent_start", () => {
+    busy = true;
+    offering = false;
     void herdr?.apply(hold.begin(Date.now()));
     bg.resetHold();
   });
@@ -257,6 +308,8 @@ export default function piMarimo(pi: ExtensionAPI): void {
   // The agent is done for now: a cell it started that still runs holds the pane's attention.
   pi.on("agent_settled", (_event, ctx) => {
     if (!watcher || ctx.isIdle() !== true) return;
+    busy = false;
+    schedule();
     void herdr?.apply(hold.end(watcher.followed(), Date.now()));
     bg.noteCovered(hold.paths);
   });
@@ -275,9 +328,9 @@ export default function piMarimo(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("marimo", {
-    description: "Choose the marimo notebooks Pi follows (view, auto, off, show)",
+    description: "Choose the marimo notebooks Pi follows (view, auto, off, show, lens)",
     getArgumentCompletions: (prefix) =>
-      ["view", "auto", "off", "show"].filter((a) => a.startsWith(prefix.trim())).map((value) => ({ value, label: value })),
+      ["view", "auto", "off", "show", "lens"].filter((a) => a.startsWith(prefix.trim())).map((value) => ({ value, label: value })),
     handler: async (args, ctx) => {
       if (!watcher) return;
       const arg = args.trim();
@@ -287,6 +340,11 @@ export default function piMarimo(pi: ExtensionAPI): void {
         const path = source.busiest();
         if (!path) ctx.ui.notify("marimo: no notebook followed", "info");
         else await openView(path, ctx.ui);
+        return;
+      }
+      if (arg === "lens") {
+        const parts = stateEntries().map((e) => ({ path: e.attachment.path, lines: lensLines(e.notebook) })).filter((p) => p.lines.length);
+        ctx.ui.notify(parts.length ? parts.map((p) => [p.path, ...p.lines].join("\n")).join("\n\n") : "marimo: no Lens selections in the followed notebooks", "info");
         return;
       }
       if (arg === "show") {

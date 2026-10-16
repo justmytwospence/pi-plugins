@@ -2,7 +2,7 @@
 
 Pi follows the [marimo](https://marimo.io) notebooks you are working in, so it knows what they look like and what they are doing without being asked. It shows what each notebook's kernel is running in the footer, places the notebooks' current state in the model's context when you send a prompt, and, in the TUI, offers a pill and a full-screen notebook view while a notebook is busy.
 
-It only reads. It pairs with the [marimo-pair](https://github.com/marimo-team/marimo-pair) skill, which is how the agent inspects and changes a notebook.
+It only reads. It pairs with the [marimo-pair](https://github.com/marimo-team/marimo-pair) skill, which is how the agent inspects and changes a notebook. It also follows [marimo-lens](https://marimo-team.github.io/marimo-lens/) selections, the results you point at in the browser, and offers to address them.
 
 Part of [Pi Plugins](https://github.com/justmytwospence/pi-plugins). Reference: <https://pi-plugins.vercel.app/plugins/pi-marimo/>.
 
@@ -79,8 +79,20 @@ Interrupting stops the running cell; marimo drops the queue behind it.
 | `/marimo off` | follow nothing |
 | `/marimo view` | open the busiest notebook in the notebook view |
 | `/marimo show` | print the state block the model sees |
+| `/marimo lens` | print the open Lens selections and the recently addressed ones |
 
 The chosen mode is saved as a `pi-marimo` session entry and restored with the session.
+
+### marimo-lens
+
+[marimo-lens](https://marimo-team.github.io/marimo-lens/) is a widget that lets you mark part of a rendered result (a bar, a row, a region) and attach a note, as selection `S1`, `S2`, ... When a notebook has a Lens mounted, pi-marimo follows its selections from the same stream. It runs nothing in the kernel.
+
+- **Context:** the state block lists each notebook's open selections: label, note, the producing cell and the heading it sits under, what was marked, and the image status. The latest addressed selections follow with their summaries. The block tells the agent to work through the marimo-lens skill that ships with the notebook's package (`import marimo_lens; help(marimo_lens.agent)` through marimo-pair), which reads the images and resolves the selections.
+- **Footer:** open selections get a status of their own, key `marimo-lens`, so the `marimo` line does not grow: `lens: fit.py · S1 "make this blue" · S2 · also prep.py 1`. pi-status-footer draws it as a separate row. It is cleared when nothing is open.
+- **Next prompt:** with [pi-next-prompt](https://pi-plugins.vercel.app/plugins/pi-next-prompt/), a selection you make while Pi is idle offers `Use Lens to address S1 in fit.py` (or `... my open selections in fit.py`) as ghost text. Tab fills it in; it is not sent. A selection made during a turn is offered when the turn ends, unless the turn addressed it. The offer goes out over Pi's event bus (`prompt:offer`); without pi-next-prompt nothing happens.
+- **Pill and view:** selections made since your last message add `2 selections` to the pill. Enter opens that notebook. The notebook view lists open selections (`*` marks the current one) and the latest addressed ones above the outline, and tags each selected cell's row with its labels. pi-bg's `/tasks` row counts open selections.
+
+Lens keeps its selections in a synced widget trait, which marimo sends to every frontend (`model-lifecycle` messages) and replays to late joiners. Selection images, agent activity and reveals do not travel there and are not read.
 
 ## How it works
 
@@ -130,7 +142,7 @@ Inside a [Herdr](https://herdr.dev) pane with [pi-herdr](https://pi-plugins.verc
 
 ## Limitations
 
-- Read-only: it never runs or edits cells (the notebook view's interrupt is the one exception, on your keypress).
+- Read-only: it never runs or edits cells or resolves Lens selections (the notebook view's interrupt is the one exception, on your keypress).
 - In `auto` mode, at most eight notebooks are followed, only those under Pi's working directory and outside hidden directories.
 - Only servers listed in marimo's server registry are followed.
 - The context block can be a turn old while the agent runs cells.

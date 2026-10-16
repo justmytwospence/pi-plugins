@@ -84,6 +84,69 @@ export function statusText(parts: StatusParts): string {
   return out.join(" · ");
 }
 
+/** A short label for a cell: `id "name"` and the heading path it sits under. */
+function cellLabel(nb: NotebookState, id: string): string {
+  const cell = nb.cells.get(id);
+  if (!cell) return `${id} (not in the notebook)`;
+  const section = nb.sectionPath(id);
+  return `${cell.name !== "_" ? `${id} "${cell.name}"` : id}${section.length ? ` under "${section.join(" › ")}"` : ""}`;
+}
+
+const MAX_SELECTIONS = 12;
+const MAX_HISTORY = 3;
+
+/** The notebook's open Lens selections and its latest addressed ones, for the context block. */
+export function lensLines(nb: NotebookState): string[] {
+  const open = nb.lens.selections();
+  const history = nb.lens.history().slice(-MAX_HISTORY);
+  if (!open.length && !history.length) return [];
+  const current = nb.lens.current()?.id;
+  const lines: string[] = [];
+  if (open.length) {
+    lines.push(`Lens: ${open.length} open selection${open.length === 1 ? "" : "s"} the user marked on rendered results (newest current):`);
+    for (const s of open.slice(-MAX_SELECTIONS)) {
+      const parts = [
+        `${s.label}${s.id === current ? " (current)" : ""}`,
+        s.note ? `"${truncate(s.note.replace(/\s+/g, " "), 200)}"` : "(no note)",
+        s.cells.length ? `on ${s.cells.map((id) => cellLabel(nb, id)).join(", ")}` : `on a ${s.targetKind} target`,
+      ];
+      const extra = [s.what ? `marked: ${s.what}` : "", s.image ? `image ${s.image}` : "", s.previous !== undefined ? `reopened${s.previous ? ` (was: ${truncate(s.previous, 100)})` : ""}` : ""].filter(Boolean);
+      lines.push(`  ${parts.join(" ")}${extra.length ? ` -- ${extra.join("; ")}` : ""}`);
+    }
+    if (open.length > MAX_SELECTIONS) lines.push(`  … ${open.length - MAX_SELECTIONS} older`);
+    lines.push("  To act on them, follow the marimo-lens skill shipped with the notebook's marimo-lens package",
+      "  (run `import marimo_lens; help(marimo_lens.agent)` through marimo-pair): it reads the selection images",
+      "  and graph context, and resolves the selections with a summary. Do not resolve unless asked to address them.");
+  }
+  if (history.length) {
+    lines.push(`Lens: recently addressed: ${history.map((h) => `${h.label}${h.summary ? ` (${truncate(h.summary, 80)})` : ""}`).join("; ")}`);
+  }
+  return lines;
+}
+
+export interface LensStatusEntry {
+  notebook: NotebookState;
+  attachment: Attachment;
+}
+
+/**
+ * pi-marimo's second status line, published only while selections are open, e.g.
+ * `lens: fit.py · S1 "make blue" · S2 · also prep.py 1`. The first notebook with
+ * open selections is named in full; the others by count.
+ */
+export function lensStatusText(entries: LensStatusEntry[]): string | undefined {
+  const open = entries.filter((e) => e.notebook.lens.selections().length);
+  const first = open[0];
+  if (!first) return undefined;
+  const out = [`lens: ${basename(first.attachment.path)}`];
+  for (const s of first.notebook.lens.selections().slice(-4)) out.push(s.note ? `${s.label} "${truncate(s.note.replace(/\s+/g, " "), 40)}"` : s.label);
+  const more = first.notebook.lens.selections().length - 4;
+  if (more > 0) out.push(`+${more}`);
+  const others = open.slice(1).map((e) => `${basename(e.attachment.path)} ${e.notebook.lens.selections().length}`);
+  if (others.length) out.push(`also ${others.join(", ")}`);
+  return out.join(" · ");
+}
+
 function firstLine(code: string): string {
   const line = code.split("\n").map((l) => l.trim()).find((l) => l && !l.startsWith("#")) ?? "";
   return truncate(line, 60);
@@ -188,6 +251,7 @@ function section(nb: NotebookState, attachment: Attachment, current: boolean, o:
   return [
     `=== ${attachment.path} (${current ? "current" : "also followed"}; ${attachment.url}, session ${attachment.sessionId}) ===`,
     `Kernel: ${summary.length ? summary.join(", ") : "idle"}.`,
+    ...lensLines(nb),
     ...lines,
   ];
 }

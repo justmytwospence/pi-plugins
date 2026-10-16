@@ -3,6 +3,7 @@
 // each cell's run state and errors (cell-op), and the dataflow graph
 // (variables). Only what an agent needs is kept; outputs are dropped.
 
+import { LensTracker } from "./lens.js";
 import { type Heading, headingsFromCode, isMarkdownCell, sameCode } from "./markdown.js";
 
 export type EditSource = "frontend" | "code-mode" | "kernel" | string;
@@ -84,6 +85,8 @@ export class NotebookState {
    * edit seen live.
    */
   lastActivity = 0;
+  /** marimo-lens selections (lens.ts), from widget model messages. */
+  lens = new LensTracker();
   private readyAt = 0;
   private headingCache = new Map<string, Heading[]>();
 
@@ -95,6 +98,7 @@ export class NotebookState {
     this.lastActivity = 0;
     this.readyAt = 0;
     this.headingCache.clear();
+    this.lens.reset();
   }
 
   private ensure(id: string): Cell {
@@ -132,6 +136,8 @@ export class NotebookState {
         return this.cellOp(data);
       case "variables":
         return this.variables(data);
+      case "model-lifecycle":
+        return this.lens.apply(data);
       default:
         return false;
     }

@@ -80,3 +80,47 @@ for (const nextFirst of [true, false]) test(`Tab accepts next before tasks regar
     expect(request.handled).toBe(false);
   } finally { pill.dispose(); rmSync(cwd, { recursive: true, force: true }); }
 });
+
+test("another extension's prompt:offer shows only while idle and never replaces the model's suggestion", async () => {
+  const h = harness(); h.pi.events = createEventBus(); nextPrompt(h.pi);
+  const cwd = mkdtempSync("/tmp/pi-offer-");
+  const ctx = h.ctx({ cwd });
+  const editor = {
+    getText: () => ctx.ui.editorText, setText: (text: string) => ctx.ui.setEditorText(text),
+    getCursor: () => ({ line: 0, col: ctx.ui.editorText.length }), render: () => [],
+    [Symbol.for("pi-plugins.editor-surface.v1")]: "main",
+  };
+  const tui = { getFocusedComponent: () => editor, requestRender() {}, terminal: { columns: 80 } };
+  ctx.ui.setWidget = (key: string, content: any, opts: any) => {
+    if (typeof content === "function") content(tui, { fg: (_: string, s: string) => s });
+    if (content === undefined) ctx.ui.widgets.delete(key);
+    else ctx.ui.widgets.set(key, { content, opts });
+  };
+  await h.emit("session_start", {}, ctx);
+  try {
+    const offer = (text?: string) => h.pi.events.emit("prompt:offer", { source: "pi-marimo", text });
+    offer("Use Lens to address S1 in fit.py");
+    expect(ctx.ui.press("\t")).toBe(true);
+    expect(ctx.ui.editorText).toBe("Use Lens to address S1 in fit.py");
+    // Withdrawn by its source.
+    ctx.ui.editorText = "";
+    offer("Use Lens to address S2 in fit.py");
+    offer(undefined);
+    ctx.ui.press("\t");
+    expect(ctx.ui.editorText).toBe("");
+    // Not during a turn.
+    await h.emit("agent_start", {}, ctx);
+    offer("Use Lens to address S3 in fit.py");
+    await h.emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "Done.\n<next>Run tests</next>" }] } }, ctx);
+    await h.emit("agent_before_settle", { outcome: "completed" }, ctx);
+    await h.emit("agent_settled", {}, ctx);
+    // The model's suggestion stays.
+    offer("Use Lens to address S4 in fit.py");
+    offer(undefined);
+    expect(ctx.ui.press("\t")).toBe(true);
+    expect(ctx.ui.editorText).toBe("Run tests");
+  } finally {
+    await h.emit("session_shutdown", {}, ctx);
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});

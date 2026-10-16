@@ -34,6 +34,7 @@ No sibling extension is required. A custom footer, background manager, and Herdr
 | `/marimo off` | Stop following notebooks for this session. |
 | `/marimo show` | Print the current notebook-state snapshot for inspection. |
 | `/marimo view` | Open the live full-screen notebook view. |
+| `/marimo lens` | Print the open marimo-lens selections and recently addressed ones. |
 
 Auto mode follows up to eight notebooks and excludes hidden directories, including nested worktree directories. Pinned paths are remembered in the Pi session across reloads and server restarts; pinning a closed notebook does not start its server. These modes are session state, not a separate JSON settings file.
 
@@ -56,6 +57,17 @@ At each prompt, pi-marimo captures followed notebooks once. The current notebook
 That block stays immediately after the prompt for every model request in the turn. It is not saved as permanent session history. Keeping it fixed avoids changing the prefix before newly generated thinking blocks during the same turn.
 
 The trade-off is deliberate: the footer and view update live, but the model's injected snapshot can become stale during a long turn. Use marimo-pair's execution results or fresh inspection for decisions that require the latest values. This extension does not replace those results with continuous model messages.
+
+## marimo-lens selections
+
+[marimo-lens](https://marimo-team.github.io/marimo-lens/) lets you point at part of a rendered result (a bar, a row, a region) and attach a note. pi-marimo reads Lens's selection state from the same read-only stream. Lens publishes that state as a synced widget trait, so pi-marimo needs no kernel call and no extra setup beyond a mounted Lens.
+
+- **Context:** each followed notebook's open selections (`S<n>`, the note, the producing cell and its heading path, and the image status) plus the latest addressed summaries. The block also tells the agent to follow the marimo-lens skill shipped with the notebook's package (`help(marimo_lens.agent)` through marimo-pair) to read images and resolve.
+- **Footer:** a separate `marimo-lens` status, `lens: fit.py · S1 "make this blue" · S2`, published only while selections are open. pi-status-footer gives it a row of its own.
+- **Next prompt:** with pi-next-prompt, a selection you make while Pi is idle offers `Use Lens to address S1 in fit.py` as ghost text. Tab fills it in; nothing is sent. A selection made during a turn waits until the turn ends.
+- **Pill and view:** new selections add `2 selections` to the pill until your next message. The notebook view lists open and addressed selections at the top and tags each selected cell's row with its labels.
+
+Selection images, agent activity and reveals are not read. pi-marimo never resolves a selection; the agent does that through marimo-pair.
 
 ## Live view and kernel control
 

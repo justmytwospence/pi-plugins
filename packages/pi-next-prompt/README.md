@@ -98,6 +98,7 @@ The `agents` locations are meant to be shared with the opencode and Claude Code 
 
 ## Optional integrations
 
+- Other extensions can offer a next prompt over Pi's event bus: `pi.events.emit("prompt:offer", { source, text })`, and withdraw it with `{ source }` and no text. An offer is shown only while Pi is idle, never replaces the model's own suggestion, and is cleared by the next prompt. Nothing is ever sent. pi-marimo uses it for new marimo-lens selections (`Use Lens to address S1 in fit.py`).
 - pi-vim, or any editor that reports the suite's editor surface and mode markers: the suggestion is offered only in its main editor in Normal or Insert state, and accepting calls its insert hook. Not required.
 
 ## Limitations

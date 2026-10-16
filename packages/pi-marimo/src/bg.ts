@@ -67,6 +67,12 @@ export function kernelStateParts(f: Followed): string[] {
   return parts;
 }
 
+/** Open marimo-lens selections, as a part for a notebook's row: `2 selections`. */
+export function lensParts(f: Followed): string[] {
+  const n = f.connection === "connected" ? f.notebook.lens.selections().length : 0;
+  return n ? [`${n} selection${n === 1 ? "" : "s"}`] : [];
+}
+
 /** A notebook's kernel in a few words: `fit.py: running Model fit · 2 queued`, `fit.py: idle · 1 error`. */
 export function kernelState(f: Followed): string {
   return `${basename(f.attachment.path)}: ${kernelStateParts(f).join(" · ")}`;

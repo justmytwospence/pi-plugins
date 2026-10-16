@@ -6,12 +6,14 @@
 // - A pill under the prompt, `1 notebook` while one is busy and `1 failed` while a failure is
 //   unseen; nothing for idle notebooks. A host draws it (pi-subagents' list, or pi-bg's pill);
 //   alone, pi-marimo draws its own, and Enter on it opens the busiest notebook.
+// - marimo-lens selections the user made since their last message add `2 selections` to the pill,
+//   and every open selection is counted in the notebook's row.
 import { basename } from "../core/io.js";
 import { interruptKey, notebookKey } from "./identity.js";
 import { elapsed } from "../core/render.js";
 import type { Followed } from "../core/watcher.js";
 import { busy } from "../core/hold.js";
-import { kernelStateParts } from "../bg.js";
+import { kernelStateParts, lensParts } from "../bg.js";
 import type { ActivityEntry, ActivityPill, ActivitySection } from "../activity.js";
 
 interface Run {
@@ -43,6 +45,8 @@ export class NotebookSource {
   private dismissedAt = 0;
   private hosts = new Set<string>();
   private lastKey = "";
+  /** When each open Lens selection (path + id) was first seen. */
+  private lensSince = new Map<string, number>();
   readonly section: ActivitySection;
 
   constructor(private readonly actions: SourceActions) {
@@ -111,7 +115,22 @@ export class NotebookSource {
       this.ended.set(path, { at: now, ms: now - run.since, failed: broke > 0, summary: `ran ${elapsed(now - run.since)}${broke ? ` · ${broke} error${broke === 1 ? "" : "s"}` : ""}` });
     }
     for (const p of [...this.runs.keys(), ...this.ended.keys()]) if (!paths.has(p)) { this.runs.delete(p); this.ended.delete(p); }
-    const key = JSON.stringify([followed.map((f) => [notebookKey(f), f.connection, busy(f), kernelStateParts(f)]), this.pill(now)]);
+    const open = new Set<string>();
+    for (const f of followed) {
+      if (f.connection !== "connected") continue;
+      for (const s of f.notebook.lens.selections()) {
+        const key = `${notebookKey(f)}\0${s.id}`;
+        open.add(key);
+        if (!this.lensSince.has(key)) this.lensSince.set(key, now);
+      }
+    }
+    // A disconnected notebook keeps its selections until it reconnects and says otherwise.
+    for (const key of this.lensSince.keys()) {
+      const path = key.slice(0, key.indexOf("\0"));
+      const f = followed.find((o) => notebookKey(o) === path);
+      if (!open.has(key) && (!f || f.connection === "connected")) this.lensSince.delete(key);
+    }
+    const key = JSON.stringify([followed.map((f) => [notebookKey(f), f.connection, busy(f), kernelStateParts(f), lensParts(f)]), this.pill(now)]);
     if (key !== this.lastKey) {
       this.lastKey = key;
       this.actions.changed();
@@ -121,6 +140,13 @@ export class NotebookSource {
   private alerting(path: string): boolean {
     const e = this.ended.get(path);
     return !!e && e.failed && e.at > this.dismissedAt && !this.dismissed.has(path) && !this.runs.has(path);
+  }
+
+  /** Open Lens selections of a notebook made after the user's last message. */
+  private lensNew(f: Followed): number {
+    if (f.connection !== "connected") return 0;
+    const path = notebookKey(f);
+    return f.notebook.lens.selections().filter((s) => (this.lensSince.get(`${path}\0${s.id}`) ?? 0) > this.dismissedAt).length;
   }
 
   entries(now: number): ActivityEntry[] {
@@ -134,7 +160,7 @@ export class NotebookSource {
         key: path,
         stopToken: interruptKey(f),
         label: basename(f.attachment.path),
-        detail: kernelStateParts(f).join(" · "),
+        detail: [...kernelStateParts(f), ...lensParts(f)].join(" · "),
         status,
         stats,
         startedAt: run?.since ?? (ended ? ended.at - ended.ms : f.notebook.lastActivity),
@@ -148,14 +174,20 @@ export class NotebookSource {
     const followed = this.actions.followed();
     const running = followed.filter((f) => this.runs.has(notebookKey(f))).length;
     const failed = followed.filter((f) => this.alerting(notebookKey(f))).length;
-    if (!running && !failed) return undefined;
-    return { label: running ? `${running} notebook${running === 1 ? "" : "s"}` : "notebooks", ...(failed ? { alert: `${failed} failed` } : {}) };
+    const selections = followed.reduce((n, f) => n + this.lensNew(f), 0);
+    if (!running && !failed && !selections) return undefined;
+    const label = [
+      running ? `${running} notebook${running === 1 ? "" : "s"}` : failed ? "notebooks" : "",
+      selections ? `${selections} selection${selections === 1 ? "" : "s"}` : "",
+    ].filter(Boolean).join(" · ");
+    return { label, ...(failed ? { alert: `${failed} failed` } : {}) };
   }
 
   /** The notebook to open from the pill: a running one, then a failed one, then the current one. */
   busiest(): string | undefined {
     const followed = this.actions.followed();
-    const selected = followed.find((f) => this.runs.has(notebookKey(f))) ?? followed.find((f) => this.alerting(notebookKey(f))) ?? followed[0];
+    const selected = followed.find((f) => this.runs.has(notebookKey(f))) ?? followed.find((f) => this.alerting(notebookKey(f)))
+      ?? followed.find((f) => this.lensNew(f) > 0) ?? followed[0];
     return selected ? notebookKey(selected) : undefined;
   }
 }
