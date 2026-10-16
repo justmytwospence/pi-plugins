@@ -1564,3 +1564,18 @@ test("the permission mode joins the model row in its color; plan runs point at /
   assert.equal(mod.parseModeStatus("plan mode please"), undefined);
   assert.deepEqual(mod.absorbStatuses(new Map([["permission-mode", "something else"]]), { claudeRow: false }).rest, ["something else"]);
 });
+
+test("a waiting dialog compacts the footer to two rows for herdr-web-ui", () => {
+  const s = fixture();
+  s.stash = { text: "draft" };
+  s.statuses = ["Gate auto", "PLAN mode"];
+  assert.ok(mod.renderFooter(s, 120, theme).length > 2);
+  s.compact = true;
+  for (const width of [30, 46, 120, 200]) {
+    const rows = mod.renderFooter(s, width, theme);
+    assert.equal(rows.length, 2, `width ${width}`);
+  }
+  const rows = mod.renderFooter(s, 120, theme).map(plain);
+  assert.match(rows[1], /opus-5\.5/);
+  assert.match(rows[1], /Context 28%/);
+});

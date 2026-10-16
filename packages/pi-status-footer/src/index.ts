@@ -78,6 +78,12 @@ export interface Snapshot {
   mcp?: McpCount;
   /** The editor's border lines draw the context gauge, so the context row leaves it out. */
   borderGauge?: boolean;
+  /**
+   * A dialog is waiting on the user (some extension holds `herdr:blocked`): draw at most two rows,
+   * as pi's own footer does. herdr-web-ui reads a pi dialog off the screen only when its key hint
+   * is followed by no more than two footer lines.
+   */
+  compact?: boolean;
 }
 
 /** One item of pi-bg's status: a running job, a service, a task that just ended, or a count of more. */
@@ -720,6 +726,9 @@ const MODE_COLORS: Record<PermissionModeStatus["kind"], Parameters<Paint["fg"]>[
   chat: "success", manual: "muted", acceptEdits: "customMessageLabel", plan: "mdLink", auto: "warning", bypass: "error",
 };
 
+/** Extensions hold this on pi's event bus while a dialog waits on the user (herdr counts the pairs). */
+const HERDR_BLOCKED_EVENT = "herdr:blocked";
+
 export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): string[] {
   if (width <= 0) return [];
   const s = snapshot, g = s.git;
@@ -762,6 +771,17 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     { text: branch, short: branchShort, priority: g.conflicts ? 110 : 70 },
     { text: s.sessionName ? theme.fg("dim", clean(s.sessionName)) : "", priority: 10 },
   ], w, theme)));
+  if (s.compact) {
+    const used = s.context.percent;
+    const ctx = used === null ? "" : `${theme.fg("muted", "Context")} ${theme.bold(theme.fg(used < 70 ? "muted" : heat(used), percent(used)))}`;
+    rows.splice(0, rows.length - 1); // the stash row waits for the dialog to close
+    rows.push(row(ICONS.model, (w) => fitSegments([
+      { text: identity, short: model, priority: 100 },
+      { text: ctx, priority: 90 },
+      { text: phaseText, priority: 120 },
+    ], w, theme)));
+    return rows.map((r) => " ".repeat(inset) + truncateToWidth(r, width));
+  }
   rows.push(row(ICONS.model, (w) => fitSegments([
     { text: identity, short: model, priority: 100 },
     { text: modeLong, short: modeText, priority: 105 },
@@ -882,6 +902,8 @@ export default function statusFooter(pi: ExtensionAPI): void {
   let codexTimeout: ReturnType<typeof setTimeout> | undefined, codexAccount: string | undefined;
   let claude: Quota | undefined, claudeHeaders: Quota | undefined, codex: Quota | undefined;
   let phase: string | undefined;
+  /** Open `herdr:blocked` holds: dialogs waiting on the user. */
+  let blockedHolds = 0;
   let totals = collectTotals([], Date.now()), cacheHit: number | undefined;
   const children = new Set<ChildProcess>();
   const home = homedir();
@@ -1120,6 +1142,12 @@ export default function statusFooter(pi: ExtensionAPI): void {
     if (!active || !runStarted || !showWorking) return;
     setWorking(workingMessage(working.tokens(), Date.now() - runStarted));
   };
+  // herdr's pi integration counts these pairs; so do we, to shrink the footer while a dialog waits.
+  pi.events?.on(HERDR_BLOCKED_EVENT, (data) => {
+    const hold = data as { active?: unknown } | undefined;
+    blockedHolds = hold?.active === true ? blockedHolds + 1 : Math.max(0, blockedHolds - 1);
+    requestRender?.();
+  });
   pi.events?.on(WORKING_MESSAGE_EVENT, (data) => {
     const claim = data as Partial<WorkingMessageClaim> | undefined;
     if (!active || typeof claim?.owner !== "string") return;
@@ -1187,7 +1215,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       quotas, unavailableQuota,
       statuses: absorbed.rest, mode: absorbed.mode, autoEffort: absorbed.autoEffort, autoEffortDetail: absorbed.autoEffortDetail, lean: absorbed.lean, cache: absorbed.cache, extraBilled: absorbed.extraBilled,
       stash: absorbed.stashed ? { text: stashedPrompt() } : undefined,
-      marimo: absorbed.marimo, bg: absorbed.bg, borderGauge,
+      marimo: absorbed.marimo, bg: absorbed.bg, borderGauge, compact: blockedHolds > 0,
       // Yield to an extension that publishes its own mcp status (pi-mcp-adapter).
       mcp: showMcp && !absorbed.mcp ? mcp : undefined,
       now: Date.now(),
