@@ -9,7 +9,9 @@ The suite preserves rich desktop dialogs. There is no remote-client UI setting t
 
 Install Herdr's official Pi integration for lifecycle state and session identity. [pi-herdr](/plugins/pi-herdr/) adds metadata and orchestration; it does not replace that integration.
 
-herdr-web-ui reads the running TUI and session store, rather than launching Pi in RPC mode. Its standard Pi prompt cards recognize the inline plan approval selector. The rich questionnaire and permission dialogs require its **terminal fallback**; previews, notes, review and multi-select are not native chat-card controls. `/planners` is a terminal interface too.
+herdr-web-ui reads the running TUI and session store, rather than launching Pi in RPC mode. It builds a chat card for a Pi dialog when the screen ends the way Pi's own select and input dialogs do: a question, a blank line, one row per option, a blank line, then Pi's key hint (`↑↓ navigate  enter select  escape/ctrl+c cancel`, or `enter submit  escape/ctrl+c cancel` over a `›` field), followed by at most two footer lines. The questionnaire, permission prompts and plan approval all end that way, so a phone gets their options as buttons and their free-text fields (Type something., notes, Block with a message) as a text box. Option descriptions sit behind a `│` gutter, which the card joins onto the option. While any dialog holds `herdr:blocked`, [pi-status-footer](/plugins/pi-status-footer/) shrinks to two rows for the same reason.
+
+Limits: a card appears only with the cursor on the first row (as for Pi's own dialogs); a question showing a side-by-side preview, picking several options of a multi-select question, and `/planners` still need the terminal.
 
 Attaching to a live terminal can resize the shared terminal seen on your desktop. Removing a particular phone client does not change this property of terminal attachment.
 
@@ -42,4 +44,4 @@ The audited native bridge publishes idle at `agent_end`, which can precede Pi's 
 
 ## Audit baseline
 
-These limits were checked against herdr-web-ui `dc2f11de`, Paseo `4a3ff87e` and Omnigent `f8f69988`. Custom question/gate frames were tested against the web prompt parser; the standard plan selector was recognized. This is not a live iPhone or end-to-end model test. Newer client revisions may behave differently.
+The herdr-web-ui layout was checked against its v17 prompt parser (`parseInteractivePrompt`) at 46 and 120 columns; other limits against herdr-web-ui `dc2f11de`, Paseo `4a3ff87e` and Omnigent `f8f69988`. Custom question/gate frames were tested against the web prompt parser; the standard plan selector was recognized. This is not a live iPhone or end-to-end model test. Newer client revisions may behave differently.

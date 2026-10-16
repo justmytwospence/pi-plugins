@@ -15,7 +15,7 @@ describe("single question", () => {
     const { frames } = dialog([library], []);
     const text = screen(frames[0]);
     expect(text).toMatch(/ Library {2}Which date library should we use\?/u);
-    expect(text).toMatch(/❯ 1\. date-fns\n\s+date-fns description/u);
+    expect(text).toMatch(/❯ 1\. date-fns\n │ +date-fns description/u);
     expect(text).toMatch(/ {3}2\. dayjs/u);
     expect(text).toMatch(/ {3}3\. Type something\./u);
     expect(text).not.toMatch(/Review/u);
@@ -74,12 +74,19 @@ describe("single question", () => {
     expect(d.result?.answers[0]).toMatchObject({ kind: "custom", answer: "n" });
   });
 
-  test("the Type something row becomes the answer field, without the editor's rules", () => {
+  test("the Type something row opens an answer field under the rows, without the editor's rules", () => {
     const d = dialog([library], ["3", ...type("i thought we wanted to")]);
     const lines = d.frames.at(-1)!;
     expect(lines.some((l) => /^ ❯ 3\. i thought we wanted to/u.test(l))).toBe(true);
-    expect(lines.join("\n")).not.toMatch(/Your answer|Type something\./u);
+    // Pi's own input dialog layout: a title, a blank, the `›` line, a blank, the input hint.
+    expect(lines.join("\n")).toMatch(/Your answer · Which date library should we use\?\s*\n\s*\n › i thought we wanted to\s*\n\s*\n enter submit {2}escape\/ctrl\+c cancel/u);
+    expect(lines.join("\n")).not.toMatch(/Type something\./u);
     expect(lines.filter((l) => /^\s*─+\s*$/u.test(l))).toHaveLength(2); // only the dialog's own borders
+  });
+
+  test("Ctrl+K on an empty field stays in it (herdr-web-ui clears a field with ctrl+k ctrl+u)", () => {
+    const d = dialog([library], ["3", enter, "\x0b", "\x15", ...type("typed"), enter]);
+    expect(d.result?.answers[0]).toMatchObject({ kind: "custom", answer: "typed" });
   });
 
   test("Ctrl+J/Ctrl+K move rows from an open field: the answer draft stays, a note is saved", () => {
@@ -100,9 +107,10 @@ describe("single question", () => {
     expect(screen(d.frames.at(-1))).toMatch(/❯ 2\. dayjs/u);
   });
 
-  test("no key-hint line", () => {
+  test("ends in Pi's own key hint, as herdr-web-ui expects: rows, a blank, the hint", () => {
     const d = dialog([library], ["3", "x"]);
-    for (const frame of d.frames) expect(screen(frame)).not.toMatch(/navigate|use answer|cancel|newline/u);
+    expect(screen(d.frames[0])).toMatch(/ {3}3\. Type something\.\s*\n\s*\n n note {2}↑↓ navigate {2}enter select {2}escape\/ctrl\+c cancel\s*\n─+\s*$/u);
+    expect(screen(d.frames.at(-1))).toMatch(/enter submit {2}escape\/ctrl\+c cancel\s*\n─+\s*$/u);
   });
 
   test("an empty typed answer is no answer", () => {
@@ -112,7 +120,7 @@ describe("single question", () => {
 
   test("n adds a note that reaches the result", () => {
     const d = dialog([library], ["n", ...type("only if small"), enter, enter]);
-    expect(screen(d.frames[2])).toMatch(/^ +note: o/mu);
+    expect(screen(d.frames[2])).toMatch(/Note\s*\n\s*\n › o/u);
     expect(screen(d.frames.at(-2))).toMatch(/note: only if small/u);
     expect(d.result?.answers[0]).toMatchObject({ answer: "date-fns", notes: "only if small" });
   });
@@ -196,7 +204,7 @@ describe("several questions", () => {
     const d = dialog(both, [...keys, ...type("draft"), esc, shiftTab]);
     expect(screen(d.frames.at(-1))).toContain(`unsaved ${kind === "custom" ? "answer" : "note"}: ndraft`);
     d.dialog.handleInput(enter);
-    expect(screen(d.dialog.render(100))).toMatch(kind === "custom" ? /❯ 3\. ndraft/u : /note: ndraft/u);
+    expect(screen(d.dialog.render(100))).toMatch(kind === "custom" ? /❯ 3\. ndraft/u : / › ndraft/u);
     expect(d.result).toBeUndefined();
     d.dialog.handleInput(enter);
     if (kind === "notes") d.dialog.handleInput(enter);
@@ -232,9 +240,10 @@ describe("previews", () => {
   test("below the options at 80 columns", () => {
     const { frames } = dialog([layouts], [], { columns: 80 });
     const lines = frames[0]!;
+    // Over the question, so the rows run straight into the key hint (herdr-web-ui reads them so).
     const top = lines.findIndex((line) => line.includes("┌"));
-    const typeRow = lines.findIndex((line) => line.includes("Type something."));
-    expect(top).toBeGreaterThan(typeRow);
+    const question = lines.findIndex((line) => line.includes("Which layout?"));
+    expect(top).toBeLessThan(question);
     expect(lines[top]).not.toMatch(/Sidebar/u);
   });
 

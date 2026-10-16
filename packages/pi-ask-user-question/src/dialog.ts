@@ -1,8 +1,9 @@
 // The question dialog, in the editor area at the bottom of pi's terminal UI like Claude Code's: the
 // transcript stays visible above it. Several questions get a tab each plus a Review tab; every
-// question ends with a "Type something." row that becomes a multiline editor in place, `n` adds a note, and
-// options with a Markdown preview show it beside the list (below it in narrow terminals).
-import { DynamicBorder, getMarkdownTheme, getSelectListTheme, type KeybindingsManager, type Theme } from "@earendil-works/pi-coding-agent";
+// question ends with a "Type something." row that opens a multiline field under the options, `n` adds a note,
+// and options with a Markdown preview show it beside the list (above the question in narrow terminals).
+// The layout follows Pi's own select/input dialogs so herdr-web-ui can read it as a chat card.
+import { DynamicBorder, getMarkdownTheme, getSelectListTheme, type KeybindingsManager, keyHint, rawKeyHint, type Theme } from "@earendil-works/pi-coding-agent";
 import {
   type Component,
   decodeKittyPrintable,
@@ -60,6 +61,8 @@ export class QuestionDialog implements Component, Focusable {
   private readonly border: DynamicBorder;
   /** The open tab: a question, or `questions.length` for Review. */
   private tab = 0;
+  /** Review's highlighted row: 0 submits, 1 cancels. */
+  private reviewCursor = 0;
   private editing: Editing | undefined;
   private emptyAnswer = false;
   private finished = false;
@@ -126,6 +129,9 @@ export class QuestionDialog implements Component, Focusable {
       // Ctrl+J/Ctrl+K move between rows from an open field too, in any editor mode: a note is
       // saved, an answer draft is kept on its row. Shift+Enter is the newline key.
       const step = matchesKey(data, "ctrl+j") ? 1 : matchesKey(data, "ctrl+k") ? -1 : 0;
+      // Up from an empty field does nothing, as Pi's kill-to-end would: herdr-web-ui clears a text
+      // field with ctrl+k ctrl+u before typing an answer into it.
+      if (step === -1 && !editor?.getText()) return;
       if (step && !this.onReview()) return this.leaveEditor(step);
       if (editor && kb.matches(data, "tui.select.cancel") && !editorOwnsCancel(editor)) this.closeEditor();
       else editor?.handleInput(data);
@@ -136,8 +142,14 @@ export class QuestionDialog implements Component, Focusable {
     if (!reserved && many && (matchesKey(data, Key.tab) || matchesKey(data, Key.right))) return this.go(1);
     if (!reserved && many && (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left))) return this.go(-1);
     if (this.onReview()) {
-      if (kb.matches(data, "tui.select.confirm")) this.submitReview();
-      else if (kb.matches(data, "tui.select.cancel")) this.finish(true);
+      const key = printable(data);
+      if (kb.matches(data, "tui.select.confirm")) {
+        if (this.reviewCursor === 0) this.submitReview();
+        else this.finish(true);
+      } else if (kb.matches(data, "tui.select.cancel")) this.finish(true);
+      else if (kb.matches(data, "tui.select.up") || kb.matches(data, "tui.select.down") || matchesKey(data, "ctrl+j") || matchesKey(data, "ctrl+k") || key === "j" || key === "k") {
+        this.reviewCursor = 1 - this.reviewCursor;
+      }
       return;
     }
     const q = this.questions[this.tab]!;
@@ -374,18 +386,37 @@ export class QuestionDialog implements Component, Focusable {
     const out: string[] = [];
     const chip = this.questions.length === 1 && q.header ? `${t.bg("selectedBg", t.fg("accent", t.bold(` ${clipHeader(q.header)} `)))} ` : "";
     const hint = q.multiSelect ? t.fg("muted", " (select all that apply)") : "";
-    out.push(...hang(" ", `${chip}${t.bold(t.fg("text", q.question))}${hint}`, width), "");
-
+    // Laid out as Pi's own select and input dialogs are, top to bottom: the question, a blank,
+    // one row per option (anything under a row is a `│` continuation of it), a blank, then Pi's
+    // key hint. herdr-web-ui reads a pi dialog off the screen by exactly that, and a phone then
+    // gets the options (or a text box) instead of a bare Enter/Esc card.
     const hasPreview = !q.multiSelect && slot.cursor < q.options.length && q.options.some((o) => o.preview);
+    // A stacked preview goes over the question, so nothing comes between the rows and the hint.
+    if (hasPreview && !sideBySide(width) && width >= 8) out.push(...indent(this.preview(slot, width - 2, STACKED_ROWS), 1), "");
+    out.push(...hang(" ", `${chip}${t.bold(t.fg("text", q.question))}${hint}`, width));
+    if (slot.note && this.editing !== "notes") out.push(...hang(" ", t.fg("dim", `note: ${oneLine(slot.note)}`), width));
+    out.push("");
+
     if (hasPreview && sideBySide(width)) {
       const { left, right } = split(width, this.natural(q, slot, width));
       out.push(...columns(this.options(q, slot, left), this.preview(slot, right, SIDE_ROWS), left));
     } else out.push(...this.options(q, slot, width));
-    if (this.editing === "custom" && this.emptyAnswer) out.push(...hang("   ", t.fg("warning", "Write an answer before continuing."), width));
-    if (hasPreview && !sideBySide(width) && width >= 8) out.push("", ...indent(this.preview(slot, width - 2, STACKED_ROWS), 1));
+    out.push("");
 
-    if (this.editing === "notes") out.push("", ...inline("   ", t.fg("accent", "note: "), slot.notes, width, t));
-    else if (slot.note) out.push("", ...hang("   ", t.fg("dim", `note: ${oneLine(slot.note)}`), width));
+    if (this.editing) {
+      const title =
+        this.editing === "notes"
+          ? t.fg("accent", t.bold("Note"))
+          : this.emptyAnswer
+            ? t.fg("warning", "Write an answer before continuing.")
+            : `${t.fg("accent", t.bold("Your answer"))}${t.fg("dim", ` · ${q.question}`)}`;
+      const editor = this.editing === "custom" ? slot.custom : slot.notes;
+      out.push(...hang(" ", title, width), "", ...inline(` ${t.fg("accent", "›")} `, "", editor, width, t), "");
+      out.push(...hintLines(`${keyHint("tui.select.confirm", "submit")}  ${keyHint("tui.select.cancel", "cancel")}`, width));
+    } else {
+      const extra = `${this.questions.length > 1 ? `${rawKeyHint("tab", "next")}  ` : ""}${rawKeyHint("n", "note")}  `;
+      out.push(...hintLines(`${extra}${menuHint()}`, width));
+    }
     return out;
   }
 
@@ -397,21 +428,17 @@ export class QuestionDialog implements Component, Focusable {
       const focused = slot.cursor === i || (i === q.options.length && this.editing === "custom");
       const box = q.multiSelect ? (checked ? "[x] " : "[ ] ") : "";
       const prefix = ` ${focused ? t.fg("accent", "❯") : " "} ${t.fg(focused ? "accent" : "muted", `${i + 1}.`)} ${box ? t.fg(checked ? "success" : "muted", box) : ""}`;
-      if (i === q.options.length && this.editing === "custom") {
-        // The row itself is the answer field: the text replaces the label as it is typed.
-        out.push(...inline(prefix, "", slot.custom, width, t));
-        return " ".repeat(visibleWidth(prefix));
-      }
       const text = t.fg(focused ? "accent" : "text", focused ? t.bold(label) : label) + (chosen ? t.fg("success", " ✓") : "");
-      out.push(...hang(prefix, text, width));
+      const [first = "", ...rest] = hang(prefix, text, width);
+      out.push(first, ...gutter(rest, t));
       return " ".repeat(visibleWidth(prefix));
     };
     q.options.forEach((o, i) => {
       const chosen = slot.choice?.kind === "option" && slot.choice.label === o.label;
       const pad = row(i, o.label, slot.checked.has(i), chosen);
-      if (o.description) out.push(...hang(pad, t.fg("muted", o.description), width));
+      if (o.description) out.push(...gutter(hang(pad, t.fg("muted", o.description), width), t));
     });
-    // A draft stays on its row after the field closes, in place of the "Type something." label.
+    // A draft stays on its row, in place of the "Type something." label; the field opens below.
     const draft = oneLine(slot.custom.getText().trim());
     row(q.options.length, draft || TYPE_SOMETHING, slot.typedChecked && !!slot.typed, slot.choice?.kind === "custom");
     return out;
@@ -462,6 +489,12 @@ export class QuestionDialog implements Component, Focusable {
         if (draft !== saved) out.push(...hang("   ", t.fg("warning", `unsaved ${label}: ${oneLine(draft) || "(cleared)"}`), width));
       }
     });
+    out.push("", ` ${t.fg("text", "Submit these answers?")}`, "");
+    ["Submit answers", "Cancel"].forEach((label, i) => {
+      const focused = this.reviewCursor === i;
+      out.push(` ${focused ? t.fg("accent", "❯") : " "} ${focused ? t.fg("accent", t.bold(label)) : t.fg("text", label)}`);
+    });
+    out.push("", ...hintLines(`${rawKeyHint("tab", "back")}  ${menuHint()}`, width));
     return out;
   }
 
@@ -478,6 +511,24 @@ function isTextInput(data: string): boolean {
 function printable(data: string): string | undefined {
   if (data.length === 1) return data;
   return decodeKittyPrintable(data);
+}
+
+/** Pi's own select hint, which herdr-web-ui looks for at the end of a dialog's last line. */
+function menuHint(): string {
+  return `${rawKeyHint("↑↓", "navigate")}  ${keyHint("tui.select.confirm", "select")}  ${keyHint("tui.select.cancel", "cancel")}`;
+}
+
+function hintLines(text: string, width: number): string[] {
+  return hang(" ", text, width);
+}
+
+/**
+ * Lines under an option row (its wrapped label, its description) behind a dim `│` in column two.
+ * Besides lining them up, the bar marks them as the row's own: herdr-web-ui joins a line that
+ * starts with exactly one space and no cursor to the row above it, and drops a leading `│`.
+ */
+function gutter(lines: string[], t: Theme): string[] {
+  return lines.map((line) => (line.startsWith("  ") ? ` ${t.fg("dim", "│")}${line.slice(2)}` : line));
 }
 
 function oneLine(text: string): string {
