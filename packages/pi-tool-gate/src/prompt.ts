@@ -1,3 +1,5 @@
+// herdr-web-ui reads this dialog off the screen for phone cards; keep its layout compatible.
+// See "herdr-web-ui compatibility" in the repository's AGENTS.md before changing rendering.
 // The approval dialog. In Pi's terminal UI a held call is shown laid out and highlighted (bash one
 // step per line, edits as diffs), with why it was held and the agent's case rendered as Markdown;
 // long parts are clamped and ctrl+o expands them. `n` (or the "Block with a message" row) opens a

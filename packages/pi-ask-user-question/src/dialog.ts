@@ -1,3 +1,5 @@
+// herdr-web-ui reads this dialog off the screen for phone cards; keep its layout compatible.
+// See "herdr-web-ui compatibility" in the repository's AGENTS.md before changing rendering.
 // The question dialog, in the editor area at the bottom of pi's terminal UI like Claude Code's: the
 // transcript stays visible above it. Several questions get a tab each plus a Review tab; every
 // question ends with a "Type something." row that opens a multiline field under the options, `n` adds a note,
