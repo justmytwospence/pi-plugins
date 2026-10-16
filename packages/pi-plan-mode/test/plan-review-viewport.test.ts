@@ -179,7 +179,7 @@ test.each(["long", "short"])(
     expect(h.scroll.isFollowingEnd).toBe(false);
     expect(layout.lines[1]).toContain("Plan review");
     expect(layout.lines[2]).toContain("Beginning of plan");
-    expect(layout.lines.join("\n")).toContain("Scroll the chat to read the plan");
+    expect(layout.lines.join("\n")).toContain("Implement this plan?");
     expect(h.widgets().size).toBe(1);
     h.choose();
     const approved = await result;

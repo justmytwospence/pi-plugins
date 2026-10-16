@@ -175,12 +175,12 @@ export const ENTER_GUIDELINES = [
   `Call ${ENTER_TOOL} before starting a non-trivial implementation where planning first pays off: new features, changes across several files, architectural choices, several valid approaches, or unclear requirements. Do not use it for small fixes, single obvious changes, or pure research.`,
 ];
 
-const APPROVE_AUTO = "Yes, auto mode (Jev judges calls)";
-const APPROVE_EDITS = "Yes, auto-accept project edits";
-const APPROVE_MANUAL = "Yes, manually approve edits";
+const APPROVE_AUTO = "Yes, auto mode";
+const APPROVE_EDITS = "Yes, accept edits";
+const APPROVE_MANUAL = "Yes, approve each edit";
 const APPROVE_HERE = "Yes, implement it";
-const APPROVE_FRESH = "Yes, in a fresh session with only the plan";
-const EDIT = "Edit the plan first";
+const APPROVE_FRESH = "Yes, in a fresh session";
+const EDIT = "Edit the plan";
 const KEEP = "No, keep planning";
 
 interface ExitDetails {
@@ -416,6 +416,8 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       };
       reviewViewport.begin(ctx, id);
       const releaseBlocked = holdBlocked(pi.events, "Review the plan");
+      // The agent is waiting on the user: the Working row only takes a plan line.
+      ctx.ui.setWorkingVisible?.(false);
       try {
         for (;;) {
           reviewViewport.restart();
@@ -423,11 +425,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             content: [{ type: "text", text: plan }],
             details: { plan, planFile, outcome: "pending" } satisfies ExitDetails,
           } as never);
-          const choice = await ctx.ui.select(
-            `Plan review · Scroll the chat to read the plan.\nReady to code? ${tildify(planFile)}`,
-            choices(),
-            { signal },
-          );
+          const choice = await ctx.ui.select(`Implement this plan? ${tildify(planFile)}`, choices(), { signal });
           if (choice === EDIT) {
             const revised = await ctx.ui.editor("Edit the plan", plan);
             if (revised?.trim() && revised.trim() !== plan) {
@@ -502,6 +500,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
         }
       } finally {
         releaseBlocked();
+        ctx.ui.setWorkingVisible?.(true);
         reviewViewport.end();
       }
     },
