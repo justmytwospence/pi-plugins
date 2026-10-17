@@ -62,6 +62,23 @@ It also asks when the selected model differs from the one the conversation was c
 
 Never held: commands (`/...`), shell input (`!...`), steering and follow-ups while the agent runs, input from other extensions (anything not typed interactively), and sessions without a UI.
 
+### Asking before you type
+
+When the cache is certainly cold (the TTL ran out, or you switched models) and above `warn.minTokens`, the question opens on its own, so it is waiting when you come back instead of catching the prompt you just typed. It waits until the agent is idle, no other dialog holds `herdr:blocked`, and no key has reached the terminal for 3 seconds, so it never takes keys meant for the editor. It opens once per cold cache, silently: no bell, no `herdr:blocked`.
+
+Example:
+
+```
+Prompt cache miss ahead. The prompt cache expired 0s ago: your next prompt re-caches 601k tokens.
+-> Keep the context (your next prompt re-caches 601k tokens)
+   Compact with Jev now (~1s, no summary model)
+   Compact with a summary now (summary reads up to 601k tokens)
+   Start a new session (no history to re-cache)
+   Keep the context, and stop asking in this session
+```
+
+Keeping the context (or Esc) answers for that cold cache: the next prompt sends without asking. The compactions are judged against your recent requests, as there is no prompt yet; if one fails, the next prompt asks as usual. A new session takes any text in the editor along as a draft, unsent. If the moment passes before you answer (the agent starts, the cache changes, the session ends), the question closes and the next prompt asks as usual. Guesses from idle time (models without a published TTL) still ask only when you send. `"warn": { "early": false }` turns this off.
+
 ## Status clock
 
 The `cache-guard` status reads `cache 4:12` (time left), `cache cold`, `cache cold (model)` or `cache cold?` (no TTL known, long idle). It updates every second. pi-status-footer folds it into its context row.
@@ -135,7 +152,7 @@ Pi reads every setting except `warm` and `warn.confirmSeconds`, which are for po
 ```json
 {
   "enabled": true,
-  "warn": { "enabled": true, "minTokens": 100000, "idleMinutes": 180 },
+  "warn": { "enabled": true, "minTokens": 100000, "idleMinutes": 180, "early": true },
   "herdr": { "enabled": true },
   "jev": { "enabled": true, "provider": "", "model": "", "timeoutMs": 2500 },
   "trim": { "enabled": true, "minChars": 12000, "readMinChars": 50000, "maxBlocks": 150, "stateBudgetChars": 60000,

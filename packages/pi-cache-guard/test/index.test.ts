@@ -93,10 +93,16 @@ function harnessWith(entries: unknown[], herdr: HerdrReporter, model: any = opus
     editor: "",
     notes: [] as string[],
     setStatus: (key: string, text: string | undefined) => ui.status.set(key, text),
-    select: async (title: string, options: string[]) => {
+    keys: [] as Array<(data: string) => unknown>,
+    onTerminalInput: (handler: (data: string) => unknown) => { ui.keys.push(handler); return () => { ui.keys = ui.keys.filter((h) => h !== handler); }; },
+    select: async (title: string, options: string[], opts?: { signal?: AbortSignal }) => {
       ui.menus.push(options);
       ui.titles.push(title);
-      if (title.startsWith("Prompt cache miss")) { ui.confirms.push(title); expect(options[0]).toMatch(/^Send anyway/); }
+      if (ui.answers[0] === "(wait)") {
+        ui.answers.shift();
+        return new Promise<undefined>((resolve) => opts?.signal?.addEventListener("abort", () => resolve(undefined)));
+      }
+      if (title.startsWith("Prompt cache miss.")) { ui.confirms.push(title); expect(options[0]).toMatch(/^Send anyway/); }
       const answer = ui.answers.length ? ui.answers.shift() : ui.answer;
       return answer === undefined ? undefined : options.find((option) => option.startsWith(answer));
     },
@@ -193,6 +199,134 @@ describe("extension", () => {
     await h.emit("session_start", {});
     await h.emit("message_start", { message: { role: "assistant", timestamp: NOW, provider: "anthropic", model: "claude-opus-5-5" } });
     expect(h.ui.status.get("cache-guard")).toBe("cache 5:00");
+  });
+});
+
+describe("early question", () => {
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(NOW); });
+  afterEach(() => vi.useRealTimers());
+  const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+  const idle = (h: ReturnType<typeof harness>, value = true) => { h.ctx.isIdle = () => value; h.ctx.hasPendingMessages = () => false; return h; };
+  const early = (h: ReturnType<typeof harness>) => h.ui.titles.filter((t) => t.startsWith("Prompt cache miss ahead"));
+
+  test("opens when the TTL runs out, silently, and the next prompt then sends without asking", async () => {
+    const h = idle(harness([assistant(NOW - 290_000, 600_000)]));
+    await h.emit("session_start", {});
+    h.ui.answer = undefined; // escape: keep the context
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(early(h)).toEqual([]);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await flush();
+    expect(early(h)[0]).toContain("expired 0s ago: your next prompt re-caches 601k tokens");
+    expect(h.ui.menus[0]).toEqual([
+      "Keep the context (your next prompt re-caches 601k tokens)",
+      "Compact now (summary reads 601k tokens)",
+      "Start a new session (no history to re-cache)",
+      "Keep the context, and stop asking in this session",
+    ]);
+    expect(h.bells()).toBe(0);
+    expect(h.blocked).toEqual([]);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(early(h)).toHaveLength(1);
+    expect(await h.emit("input", input("next"))).toEqual({ action: "continue" });
+    expect(h.ui.confirms).toEqual([]);
+  });
+
+  test("waits for the keyboard to go quiet, and never asks while busy, small or guessing", async () => {
+    const h = idle(harness([assistant(NOW - 900_000, 600_000)]));
+    await h.emit("session_start", {});
+    h.ui.answer = undefined;
+    for (let i = 0; i < 5; i++) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      h.ui.keys.forEach((key) => key("x"));
+    }
+    expect(early(h)).toEqual([]);
+    await vi.advanceTimersByTimeAsync(4_000);
+    await flush();
+    expect(early(h)).toHaveLength(1);
+
+    const busy = idle(harness([assistant(NOW - 900_000, 600_000)]), false);
+    await busy.emit("session_start", {});
+    const small = idle(harness([assistant(NOW - 900_000, 50_000)]));
+    await small.emit("session_start", {});
+    const guess = idle(harness([assistant(NOW - 4 * 3_600_000, 600_000, codex as any)], codex));
+    await guess.emit("session_start", {});
+    const off = idle(harness([assistant(NOW - 900_000, 600_000)]));
+    writeFileSync(path.join(process.env.PI_CODING_AGENT_DIR!, "cache-guard.json"), JSON.stringify({ warn: { early: false } }));
+    await off.emit("session_start", {});
+    rmSync(path.join(process.env.PI_CODING_AGENT_DIR!, "cache-guard.json"));
+    await vi.advanceTimersByTimeAsync(10_000);
+    await flush();
+    expect([busy, small, guess, off].map((x) => early(x).length)).toEqual([0, 0, 0, 0]);
+    guess.ui.answer = undefined;
+    expect(await guess.emit("input", input("next"))).toEqual({ action: "handled" });
+    expect(guess.ui.confirms).toHaveLength(1);
+  });
+
+  test("opens after a model switch drops the cache", async () => {
+    const h = idle(harness([assistant(NOW - 10_000, 600_000)]));
+    await h.emit("session_start", {});
+    h.ui.answer = undefined;
+    h.ctx.model = sonnet;
+    await h.emit("model_select", {});
+    await vi.advanceTimersByTimeAsync(4_000);
+    await flush();
+    expect(early(h)[0]).toContain("claude-sonnet-5-5 has no cache of this conversation");
+  });
+
+  test("closes when its moment passes, and the send-time question still asks", async () => {
+    const h = idle(harness([assistant(NOW - 900_000, 600_000)]));
+    await h.emit("session_start", {});
+    h.ui.answers = ["(wait)"];
+    await vi.advanceTimersByTimeAsync(4_000);
+    await flush();
+    expect(early(h)).toHaveLength(1);
+    h.ctx.isIdle = () => false;
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flush();
+    h.ui.answer = undefined;
+    expect(await h.emit("input", input("next"))).toEqual({ action: "handled" });
+    expect(h.ui.confirms).toHaveLength(1);
+  });
+
+  test("compacts now, and a failed compaction lets the next prompt ask", async () => {
+    const h = idle(harness([assistant(NOW - 900_000, 600_000)]));
+    await h.emit("session_start", {});
+    h.ui.answers = ["Compact now", "Default summary"];
+    await vi.advanceTimersByTimeAsync(4_000);
+    await flush();
+    expect(h.ui.compactions).toHaveLength(1);
+    expect(h.ui.compactions[0].customInstructions).toBeUndefined();
+    h.ui.compactions[0].onError(new Error("too small"));
+    h.ui.answer = undefined;
+    expect(await h.emit("input", input("next"))).toEqual({ action: "handled" });
+    expect(h.ui.confirms).toHaveLength(1);
+  });
+
+  test("a new session takes the editor's draft as a draft", async () => {
+    const h = idle(harness([assistant(NOW - 900_000, 600_000)]));
+    await h.emit("session_start", {});
+    h.ui.editor = "half a thought";
+    h.ui.answers = ["Start a new session"];
+    await vi.advanceTimersByTimeAsync(4_000);
+    await flush();
+    expect(h.ui.menus[0]).toContain("Start a new session, taking the editor's text (no history to re-cache)");
+    await vi.advanceTimersByTimeAsync(10);
+    await flush();
+    expect(h.sessions).toEqual(["/sessions/old.jsonl"]);
+    expect(h.ui.editor).toBe("half a thought");
+    await vi.advanceTimersByTimeAsync(10);
+    expect(h.sent.filter((x) => "content" in x)).toEqual([]);
+  });
+
+  test("mute stops both questions for the session", async () => {
+    const h = idle(harness([assistant(NOW - 900_000, 600_000)]));
+    await h.emit("session_start", {});
+    h.ui.answers = ["Keep the context, and stop"];
+    await vi.advanceTimersByTimeAsync(4_000);
+    await flush();
+    expect(await h.emit("input", input("next"))).toEqual({ action: "continue" });
+    expect(h.ui.confirms).toEqual([]);
   });
 });
 

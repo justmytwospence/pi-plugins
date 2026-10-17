@@ -31,6 +31,8 @@ export interface Settings {
     confirmSeconds: number;
     /** Providers that publish no TTL (OpenAI, Codex): warn after this long idle. */
     idleMinutes: number;
+    /** Pi: ask as soon as the cache is known to be cold (TTL expired or model switched), before you type. */
+    early: boolean;
   };
   warm: {
     enabled: boolean;
@@ -89,7 +91,7 @@ export interface Settings {
 
 export const DEFAULT_SETTINGS: Settings = {
   enabled: true,
-  warn: { enabled: true, minCost: 0.5, minTokens: 100_000, confirmSeconds: 120, idleMinutes: 180 },
+  warn: { enabled: true, minCost: 0.5, minTokens: 100_000, confirmSeconds: 120, idleMinutes: 180, early: true },
   warm: {
     enabled: true,
     continuationProbability: 0.15,
@@ -214,15 +216,15 @@ export function compactionFocus(prompt: string): string {
 }
 
 /** One line saying why the next request misses and what that costs. */
-export function describeMiss(reason: ColdReason, tokens: number, cost: number | undefined): string {
+export function describeMiss(reason: ColdReason, tokens: number, cost: number | undefined, subject = "this prompt"): string {
   const amount = `${formatTokens(tokens)} tokens${cost === undefined ? "" : ` (~${formatCost(cost)} at API prices)`}`;
   switch (reason.kind) {
     case "expired":
-      return `The prompt cache expired ${formatDuration(reason.idleMs)} ago: this prompt re-caches ${amount}.`;
+      return `The prompt cache expired ${formatDuration(reason.idleMs)} ago: ${subject} re-caches ${amount}.`;
     case "idle":
-      return `Idle ${formatDuration(reason.idleMs)}: the prompt cache has probably expired, so this prompt may re-cache ${amount}.`;
+      return `Idle ${formatDuration(reason.idleMs)}: the prompt cache has probably expired, so ${subject} may re-cache ${amount}.`;
     case "model":
-      return `${reason.to} has no cache of this conversation (it was cached for ${reason.from}): this prompt re-caches ${amount}.`;
+      return `${reason.to} has no cache of this conversation (it was cached for ${reason.from}): ${subject} re-caches ${amount}.`;
   }
 }
 

@@ -27,6 +27,8 @@ The warning threshold is `warn.minTokens`: the dialog appears when a cold cache 
 
 The dialog lets you send, send and stop asking for the session, compact first, open a linked fresh session, or keep the prompt in the editor. With Jev available, classifier-only compaction and a conventional summary are separate choices. Enter defaults to sending; Esc keeps the prompt. The headline and option labels give the tokens each path re-sends uncached.
 
+When the cache is certainly cold (the TTL expired or the model changed) and above the threshold, a version of the question opens by itself once the agent is idle, no other dialog is waiting, and no key has been pressed for 3 seconds. It is silent (no bell, no Herdr blocked state). It offers to keep the context (first, so Enter is harmless), compact now, open a fresh session that takes the editor's draft, or stop asking. Keeping the context answers for that cold cache, so the next prompt sends without a second question. Idle-time guesses for providers without a known TTL still ask only at send time. Set `warn.early` to `false` to turn it off.
+
 Commands, shell input, steering, running-agent follow-ups and extension-generated input are not held. Images attached to a held prompt are not restored to the editor: check attachments before resending.
 
 ## Commands and configuration

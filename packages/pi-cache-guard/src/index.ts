@@ -45,6 +45,8 @@ const COMPACT_PI = "Compact with Pi's summary";
 const SUMMARY_DEFAULT = "Default summary";
 const SUMMARY_FOCUS = "Focus the summary on this prompt";
 const SUMMARY_WRITE = "Write guidance for the summary...";
+/** The early question waits for this long without a keystroke, so it never takes keys meant for the editor. */
+export const EARLY_QUIET_MS = 3_000;
 
 type ModelLike = NonNullable<ExtensionContext["model"]>;
 
@@ -73,6 +75,8 @@ export function statusText(v: CacheView | undefined): string | undefined {
 interface FreshStart {
   text: string;
   images?: ImageContent[];
+  /** Put `text` in the new session's editor instead of sending it (a draft, not a submitted prompt). */
+  draft?: boolean;
   provider?: string;
   modelId?: string;
   thinking?: string;
@@ -104,6 +108,28 @@ export function choiceMenu(v: CacheView, jev: { ready: boolean; filtered: boolea
     ...compactions,
     { choice: "fresh", label: "Start a new session with this prompt (no history to re-cache)" },
     { choice: "keep", label: "Keep the prompt in the editor" },
+  ];
+}
+
+export type EarlyChoice = "keep" | "jev" | "compact" | "fresh" | "mute";
+
+/**
+ * The early question's ways through a cold cache, before any prompt is typed. Keeping the context
+ * is first, so a stray Enter costs nothing; the next prompt then sends without asking again.
+ */
+export function earlyMenu(v: CacheView, jev: { ready: boolean; filtered: boolean }, draft: boolean): Array<{ choice: EarlyChoice; label: string }> {
+  const tokens = formatTokens(v.last.tokens);
+  const compactions: Array<{ choice: EarlyChoice; label: string }> = jev.ready
+    ? [
+        { choice: "jev", label: "Compact with Jev now (~1s, no summary model)" },
+        { choice: "compact", label: `Compact with a summary now (summary reads ${jev.filtered ? "up to " : ""}${tokens} tokens)` },
+      ]
+    : [{ choice: "compact", label: `Compact now (summary reads ${tokens} tokens)` }];
+  return [
+    { choice: "keep", label: `Keep the context (your next prompt re-caches ${tokens} tokens)` },
+    ...compactions,
+    { choice: "fresh", label: `Start a new session${draft ? ", taking the editor's text" : ""} (no history to re-cache)` },
+    { choice: "mute", label: "Keep the context, and stop asking in this session" },
   ];
 }
 
@@ -156,7 +182,19 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
     return `on, from ${formatTokens(settings.warn.minTokens)} tokens (warn.minTokens)`;
   };
   // A held prompt the `/cache-guard fresh` command carries into a new session.
-  let pending: { text: string; images?: ImageContent[] } | undefined;
+  let pending: { text: string; images?: ImageContent[]; draft?: boolean } | undefined;
+  // The early question: open now (dismissed in code when its moment passes), and the cold episode it
+  // was shown for, so neither it nor the send-time question asks about that episode again.
+  let early: { key: string; abort: AbortController } | undefined;
+  let answeredEarly: string | undefined;
+  // When a key last reached the terminal, so the early question never opens mid-typing.
+  let lastKeyAt = 0;
+  let stopKeys: (() => void) | undefined;
+  // `herdr:blocked` holds: some dialog (ours at send time, or another extension's) is open.
+  let holds = 0;
+  pi.events?.on?.("herdr:blocked", (data: unknown) => {
+    holds = Math.max(0, holds + ((data as { active?: boolean } | undefined)?.active === true ? 1 : -1));
+  });
   let timer: ReturnType<typeof setInterval> | undefined;
   let shown: string | undefined;
   // Request start of the assistant message streaming now; the branch only has it at message_end.
@@ -183,6 +221,79 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
       ctx.ui.setStatus(STATUS_KEY, text);
     }
     herdr.report(v ? herdrCacheValue(v.cold, v.last.tokens, undefined, settings) : undefined);
+    if (early && (!v || episode(v, ctx) !== early.key || !(ctx.isIdle?.() ?? false))) early.abort.abort();
+    else if (v) maybeAskEarly(ctx, v);
+  };
+
+  /** One cold episode: the cached request it would lose, and the model the next prompt goes to. */
+  const episode = (v: CacheView, context: ExtensionContext) =>
+    `${v.last.provider}/${v.last.model}@${v.last.at}>${context.model?.provider}/${context.model?.id}`;
+
+  /** Open the early question once the cache is certainly cold, large, idle and untouched for a moment. */
+  const maybeAskEarly = (context: ExtensionContext, v: CacheView) => {
+    if (early || holds > 0 || !v.cold || v.cold.kind === "idle") return;
+    if (!context.hasUI || !settings.warn.early || !warningOn()) return;
+    if (!(context.isIdle?.() ?? false) || context.hasPendingMessages?.()) return;
+    if (Date.now() - lastKeyAt < EARLY_QUIET_MS) return;
+    if (!worthWarning(v.last.tokens, undefined, settings)) return;
+    const key = episode(v, context);
+    if (key === answeredEarly) return;
+    void askEarly(context, v, key);
+  };
+
+  const askEarly = async (context: ExtensionContext, v: CacheView, key: string) => {
+    const abort = new AbortController();
+    early = { key, abort };
+    answeredEarly = key;
+    try {
+      const jev = await lean.jev(context);
+      const draft = context.ui.getEditorText();
+      const menu = earlyMenu(v, { ready: jev.kind === "ready", filtered: settings.compact.filter }, draft.trim().length > 0);
+      const title = `Prompt cache miss ahead. ${describeMiss(v.cold!, v.last.tokens, undefined, "your next prompt")}${jev.kind === "missing" ? `\n${JEV_TIP}` : ""}`;
+      const picked = abort.signal.aborted ? undefined : await context.ui.select(title, menu.map((item) => item.label), { signal: abort.signal });
+      // Dismissed in code (the agent started, the cache changed, the session ended): not an answer.
+      if (abort.signal.aborted) {
+        if (answeredEarly === key) answeredEarly = undefined;
+        return;
+      }
+      // A failed compaction leaves the cache as it was: let the next prompt ask.
+      const failed = () => { if (answeredEarly === key) answeredEarly = undefined; };
+      switch (menu.find((item) => item.label === picked)?.choice ?? "keep") {
+        case "mute":
+          askOn = false;
+          return;
+        case "jev":
+          runJevCompaction("", context, failed);
+          return;
+        case "compact": {
+          lean.disarm();
+          const how = await context.ui.select("Compact now: what should the summary keep?", [SUMMARY_DEFAULT, SUMMARY_WRITE]);
+          let guidance: string | undefined;
+          if (how === SUMMARY_WRITE) {
+            guidance = await context.ui.input("Guidance for the summary", "what to keep or stress");
+            if (guidance === undefined) return;
+          } else if (how !== SUMMARY_DEFAULT) return;
+          context.ui.notify("Compacting.", "info");
+          context.compact({
+            customInstructions: guidance?.trim() || undefined,
+            onError: (error) => {
+              failed();
+              context.ui.notify(`Compaction failed: ${error.message}`, "warning");
+            },
+          });
+          return;
+        }
+        case "fresh":
+          // Replacing the session is a command's job. A draft in the editor goes along as a draft.
+          pending = { text: draft, draft: true };
+          setTimeout(() => void pi.sendUserMessage(`/${NAME} fresh`, { expandPromptTemplates: true }), 0);
+          return;
+        default:
+          return;
+      }
+    } finally {
+      if (early?.abort === abort) early = undefined;
+    }
   };
 
   const stop = () => {
@@ -190,6 +301,11 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
     timer = undefined;
     if (ctx && shown !== undefined) ctx.ui.setStatus(STATUS_KEY, undefined);
     shown = undefined;
+    early?.abort.abort();
+    early = undefined;
+    answeredEarly = undefined;
+    stopKeys?.();
+    stopKeys = undefined;
     void herdr.clear();
     ctx = undefined;
     live = undefined;
@@ -209,6 +325,12 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
     pendingMiss = undefined;
     seenWarm = new Set(recentWarms(context).map((entry) => entry.id!));
     if (!context.hasUI) return;
+    // Counted from now: a key that switched to this session may still be in flight.
+    lastKeyAt = Date.now();
+    stopKeys = context.ui.onTerminalInput?.(() => {
+      lastKeyAt = Date.now();
+      return undefined;
+    });
     publish();
     timer = setInterval(publish, TICK_MS);
     timer.unref?.();
@@ -277,6 +399,8 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
     if (!warningOn()) return { action: "continue" };
     const v = current(context);
     if (!v?.cold) return { action: "continue" };
+    // The early question already asked about this cold cache.
+    if (answeredEarly === episode(v, context)) return { action: "continue" };
     // The warning is framed in tokens: prices (undefined here) would switch core to warn.minCost.
     if (!worthWarning(v.last.tokens, undefined, settings)) return { action: "continue" };
     const jev = await lean.jev(context);
@@ -401,6 +525,21 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
     }
   };
 
+  /** Jev's compaction, judged against `focus` (or the recent requests). Strict: nothing is spent if Jev fails. */
+  const runJevCompaction = (focus: string, context: ExtensionContext, onFailed?: () => void) => {
+    lean.armJevCompaction({ strict: true, goal: focus || undefined });
+    const started = Date.now();
+    context.compact({
+      customInstructions: focus || undefined,
+      onComplete: () => context.ui.notify(`Compacted with Jev in ${((Date.now() - started) / 1000).toFixed(1)} s.`, "info"),
+      onError: (error) => {
+        lean.disarm();
+        onFailed?.();
+        context.ui.notify(`Compaction with Jev did not run: ${lean.lastFailure() ?? error.message}.`, "warning");
+      },
+    });
+  };
+
   /** `/cache-guard compact [focus]`: Jev's compaction, written in code; nothing is spent if Jev fails. */
   const compactCommand = async (focus: string, context: ExtensionContext) => {
     const jev = await lean.jev(context);
@@ -416,16 +555,7 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
       }
       return;
     }
-    lean.armJevCompaction({ strict: true, goal: focus || undefined });
-    const started = Date.now();
-    context.compact({
-      customInstructions: focus || undefined,
-      onComplete: () => context.ui.notify(`Compacted with Jev in ${((Date.now() - started) / 1000).toFixed(1)} s.`, "info"),
-      onError: (error) => {
-        lean.disarm();
-        context.ui.notify(`Compaction with Jev did not run: ${lean.lastFailure() ?? error.message}.`, "warning");
-      },
-    });
+    runJevCompaction(focus, context);
   };
 
   pi.registerCommand(NAME, {
@@ -446,6 +576,7 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
       if (command === "compact") return compactCommand(rest, context);
       if (command === "fresh") {
         // A new session (linked to this one) that starts with the held prompt, or the editor's text.
+        // The early question's new session carries the editor's draft, which may be empty.
         const carry = pending ?? (context.ui.getEditorText().trim() ? { text: context.ui.getEditorText() } : undefined);
         pending = undefined;
         if (!carry) {
@@ -521,5 +652,9 @@ async function startFresh(pi: ExtensionAPI, context: ExtensionContext, fresh: Fr
   const model = fresh.provider && fresh.modelId ? context.modelRegistry.find(fresh.provider, fresh.modelId) : undefined;
   if (model && (context.model?.provider !== model.provider || context.model?.id !== model.id)) await pi.setModel(model);
   if (fresh.thinking) pi.setThinkingLevel(fresh.thinking as Parameters<ExtensionAPI["setThinkingLevel"]>[0]);
+  if (fresh.draft) {
+    if (fresh.text.trim()) context.ui.setEditorText(fresh.text);
+    return;
+  }
   setTimeout(() => void pi.sendUserMessage(fresh.images?.length ? [{ type: "text", text: fresh.text }, ...fresh.images] : fresh.text), 0);
 }
