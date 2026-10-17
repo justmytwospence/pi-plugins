@@ -182,10 +182,10 @@ export interface PermissionModeStatus {
   key?: string;
 }
 const MODE_KINDS: Record<string, PermissionModeStatus["kind"]> = {
-  "chat mode": "chat", "manual mode": "manual", "accept edits": "acceptEdits", "plan mode": "plan", "auto mode": "auto", "bypass permissions": "bypass",
+  "chat mode": "chat", "manual mode": "manual", "accept edits": "acceptEdits", "plan mode": "plan", "auto mode": "auto", "yolo mode": "bypass", "bypass permissions": "bypass",
 };
 export function parseModeStatus(text: string): PermissionModeStatus | undefined {
-  const match = /^(⏸|⏵⏵) (chat mode|manual mode|accept edits|plan mode|auto mode|bypass permissions) on(?: \((.+) to cycle\))?$/u.exec(text);
+  const match = /^(⏸|⏵⏵) (chat mode|manual mode|accept edits|plan mode|auto mode|yolo mode|bypass permissions) on(?: \((.+) to cycle\))?$/u.exec(text);
   if (!match) return undefined;
   return { kind: MODE_KINDS[match[2]], label: `${match[1]} ${match[2]} on`, ...(match[3] ? { key: match[3] } : {}) };
 }

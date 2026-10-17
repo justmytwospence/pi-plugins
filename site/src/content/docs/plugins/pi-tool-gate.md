@@ -34,7 +34,7 @@ After an [explicit stock-key remap](/guides/keyboard/#resolve-the-two-stock-conf
 | Accept edits (`accept edits on`) | Reads, edits and writes inside the project, and `mkdir`, `touch`, `rm`, `rmdir`, `mv`, `cp` and `sed` on files inside the project. Other commands ask. |
 | Plan (`plan mode on`) | With [pi-plan-mode](/plugins/pi-plan-mode/) only. Edits are blocked except to its plan file; commands are judged as in auto mode. Approving the plan picks the next mode. |
 | Auto (`auto mode on`) | The default: the checks and judgments below. |
-| Bypass (`bypass permissions on`) | Everything except removing `/`, top-level directories, home, the project or their parents. Opt in by adding `bypassPermissions` to `modes`, or use `/mode bypass`. |
+| Yolo (`yolo mode on`) | Claude Code's bypass permissions mode: everything except removing `/`, top-level directories, home, the project or their parents. Opt in by adding `yolo` (or `bypassPermissions`) to `modes`, or use `/mode yolo`. |
 
 Without a UI, calls that would ask are blocked. Sessions remember their mode across resume; new sessions start in `defaultMode`. Pi's stock Shift+Tab is reserved for `app.thinking.cycle`; current Pi **skips** the conflicting extension shortcut. It does not override that action automatically. Move the stock action, for example to `alt+t` in `~/.pi/agent/keybindings.json`, or choose a different `cycleShortcut`, then `/reload`. `/mode` remains available without a shortcut.
 
@@ -54,9 +54,9 @@ The interactive dialog offers **Allow once**, **Allow similar for this session**
 
 Similar-call grants are broader than exact argument matches. Shell grants use program/subcommand keys and can apply across working directories. Edit/write grants are directory-scoped; other tools are keyed by name. Read the scope shown in the approval option before granting it.
 
-- `/mode [chat|manual|accept-edits|plan|auto|bypass]` switches the permission mode; with no argument it lists every mode.
+- `/mode [chat|manual|accept-edits|plan|auto|yolo]` switches the permission mode; with no argument it lists every mode.
 - `/gate` or `/gate status` shows the mode, counts, classifier settings, rules and grant counts.
-- `/gate on` switches to auto mode; `/gate off` to bypass mode.
+- `/gate on` switches to auto mode; `/gate off` to yolo mode.
 
 For example, after a held publish attempt, inspect the agent's explanation and proposed call before choosing Allow once. Do not interpret a retry as proof that the action is necessary.
 
@@ -79,7 +79,7 @@ This `.pi/tool-gate.json` keeps the standard checks but asks immediately instead
 }
 ```
 
-`defaultMode` (default `auto`) chooses the starting mode, `modes` the modes the cycle key steps through, while `/mode` still offers every mode (`["default", "acceptEdits", "plan", "auto"]`; for example `["chat", "plan", "auto"]`), and `cycleShortcut` its key (`shift+tab`; `""` for none, read after `/reload`). `enabled: false` starts sessions in bypass mode.
+`defaultMode` (default `auto`) chooses the starting mode, `modes` the modes the cycle key steps through, while `/mode` still offers every mode (`["default", "acceptEdits", "plan", "auto"]`; for example `["chat", "plan", "auto"]`), and `cycleShortcut` its key (`shift+tab`; `""` for none, read after `/reload`). `enabled: false` starts sessions in yolo mode.
 
 Overriding `allowTools` replaces the entire default list. Adding a tool there bypasses its ordinary checks, so do not treat it as a cosmetic preference. `readOnlyCommands` similarly extends trusted shell programs. The default allowance for `codemode` relies on Pi gating its nested tool calls separately.
 

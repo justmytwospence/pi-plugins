@@ -7,7 +7,7 @@
 //
 // That is auto mode, one of Claude Code's permission modes the gate owns (see modes.ts): manual
 // asks about everything that does more than read, accept edits also runs edits and filesystem
-// commands inside the project, bypass runs everything but critical removals, plan mode
+// commands inside the project, yolo runs everything but critical removals, plan mode
 // (pi-plan-mode's) blocks edits until a plan is approved, and chat mode (the gate's own) runs
 // only read-only calls while you talk. Shift+Tab cycles them.
 import path from "node:path";
@@ -68,7 +68,7 @@ export interface GateConfig extends Record<string, unknown> {
   readOnlyCommands: string[];
   /** Block a held call once with a reason for the agent before asking you; a retry asks you. */
   pushBack: boolean;
-  /** The mode a new session starts in: chat, manual, accept-edits, plan, auto or bypass. */
+  /** The mode a new session starts in: chat, manual, accept-edits, plan, auto or yolo. */
   defaultMode: string;
   /** The modes the cycle key steps through (plan only with pi-plan-mode); `/mode` offers them all. */
   modes: string[];
@@ -636,7 +636,7 @@ export default function toolGate(pi: ExtensionAPI) {
   };
 
   pi.registerCommand("mode", {
-    description: "Permission mode: chat, manual, accept-edits, plan, auto or bypass (no argument: pick one)",
+    description: "Permission mode: chat, manual, accept-edits, plan, auto or yolo (no argument: pick one)",
     getArgumentCompletions: (prefix: string) =>
       MODES.filter((m) => m !== "plan" || planProvider)
         .map((m) => MODE_NAMES[m])
@@ -663,14 +663,14 @@ export default function toolGate(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("gate", {
-    description: "tool-gate: status; on (auto mode) or off (bypass mode)",
+    description: "tool-gate: status; on (auto mode) or off (yolo mode)",
     getArgumentCompletions: (prefix: string) =>
       ["status", "on", "off"].filter((o) => o.startsWith(prefix)).map((o) => ({ value: o, label: o })),
     handler: async (args, ctx) => {
       const arg = args.trim();
       if (arg === "on" || arg === "off") {
         setMode(arg === "on" ? "auto" : "bypassPermissions", ctx);
-        ctx.ui.notify(arg === "on" ? "Auto mode on" : "Bypass mode on: every call runs", "info");
+        ctx.ui.notify(arg === "on" ? "Auto mode on" : "Yolo mode on: every call runs", "info");
         return;
       }
       const rules = loadRules(ctx.cwd);

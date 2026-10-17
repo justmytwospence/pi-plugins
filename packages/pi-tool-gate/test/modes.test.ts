@@ -42,6 +42,7 @@ describe("mode helpers", () => {
     expect(parseMode("acceptEdits")).toBe("acceptEdits");
     expect(parseMode("accept-edits")).toBe("acceptEdits");
     expect(parseMode("bypass")).toBe("bypassPermissions");
+    expect(parseMode("yolo")).toBe("bypassPermissions");
     expect(parseMode("chat")).toBe("chat");
     expect(parseMode("nope")).toBeUndefined();
   });
@@ -140,9 +141,10 @@ describe("modes", () => {
     expect(ctx.ui.selects).toHaveLength(2);
   });
 
-  test("bypass mode runs everything but critical removals", async () => {
+  test("yolo mode runs everything but critical removals", async () => {
     const { h, jev, ctx } = setup();
-    await h.commands.get("mode").handler("bypass", ctx);
+    await h.commands.get("mode").handler("yolo", ctx);
+    expect(ctx.ui.status.get("permission-mode")).toMatch(/^⏵⏵ yolo mode on/u);
     expect(await h.emit("tool_call", call("bash", { command: "npm publish" }), ctx)).toBeUndefined();
     expect(await h.emit("tool_call", call("write", { path: "/etc/hosts", content: "x" }), ctx)).toBeUndefined();
     ctx.ui.selectAnswers.push("Block");
@@ -223,7 +225,7 @@ describe("modes", () => {
     h.pi.events.emit(PLAN_PROVIDER, { planFile: "/tmp/plan.md" });
     ctx.ui.selectAnswers.push(undefined);
     await h.commands.get("mode").handler("", ctx);
-    expect(ctx.ui.selects[0].options.map((o: string) => o.slice(2).split(" ")[0])).toEqual(["chat", "manual", "accept-edits", "plan", "auto", "bypass"]);
+    expect(ctx.ui.selects[0].options.map((o: string) => o.slice(2).split(" ")[0])).toEqual(["chat", "manual", "accept-edits", "plan", "auto", "yolo"]);
     const seen: string[] = [];
     for (let i = 0; i < 3; i++) {
       await h.shortcuts.get("shift+tab").handler(ctx);

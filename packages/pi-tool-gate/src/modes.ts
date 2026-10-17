@@ -1,4 +1,4 @@
-// Permission modes, after Claude Code's: what runs without asking you. The gate owns the mode,
+// Permission modes, after Claude Code's (its bypassPermissions is called yolo here): what runs without asking you. The gate owns the mode,
 // the cycle key (Shift+Tab by default) and the status line; plan mode itself is pi-plan-mode's,
 // which joins the cycle over Pi's event bus when it is installed.
 //
@@ -28,7 +28,7 @@ export const MODE_LABELS: Record<PermissionMode, string> = {
   acceptEdits: "⏵⏵ accept edits on",
   plan: "⏸ plan mode on",
   auto: "⏵⏵ auto mode on",
-  bypassPermissions: "⏵⏵ bypass permissions on",
+  bypassPermissions: "⏵⏵ yolo mode on",
 };
 
 /** Short names for `/mode` and descriptions. */
@@ -38,7 +38,7 @@ export const MODE_NAMES: Record<PermissionMode, string> = {
   acceptEdits: "accept-edits",
   plan: "plan",
   auto: "auto",
-  bypassPermissions: "bypass",
+  bypassPermissions: "yolo",
 };
 
 export const MODE_DESCRIPTIONS: Record<PermissionMode, string> = {
@@ -72,7 +72,7 @@ export function parseMode(value: unknown): PermissionMode | undefined {
 
 /**
  * The modes Shift+Tab steps through, in Claude Code's order (manual, accept edits, plan, then
- * bypass and auto) after chat, the most restrictive, keeping only those configured and available.
+ * yolo and auto) after chat, the most restrictive, keeping only those configured and available.
  */
 export function cycleOf(configured: readonly PermissionMode[], available: { plan: boolean }): PermissionMode[] {
   return MODES.filter((mode) => configured.includes(mode) && (mode !== "plan" || available.plan)).sort(
