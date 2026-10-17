@@ -21,16 +21,19 @@ const entries = [
 ];
 
 describe("collectTurns", () => {
-  const turns = collectTurns(entries, { contextWindow: () => 10_000 });
-  it("splits at user messages and sums usage", () => {
-    expect(turns).toHaveLength(2);
-    expect(turns[0]).toMatchObject({ index: 1, input: 1200, output: 400, cacheRead: 1000, toolCalls: 2, effort: "medium", durationMs: 8000 });
-    expect(turns[0].cost).toBeCloseTo(0.02);
+  const calls = collectTurns(entries, { contextWindow: () => 10_000 });
+  it("makes one point per model call, grouped by prompt", () => {
+    expect(calls).toHaveLength(3);
+    expect(calls.map((c) => [c.prompt, c.promptStart])).toEqual([[1, true], [1, false], [2, true]]);
   });
-  it("uses the last response for context and tracks effort and compaction", () => {
-    expect(turns[0].contextTokens).toBe(1500);
-    expect(turns[0].contextPercent).toBeCloseTo(15);
-    expect(turns[1]).toMatchObject({ effort: "high", compacted: true, contextTokens: 5000, durationMs: 30000 });
+  it("keeps per-call usage, tools and duration including tool results", () => {
+    expect(calls[0]).toMatchObject({ input: 1000, output: 100, toolCalls: 1, durationMs: 5000, effort: "medium" });
+    expect(calls[0].contextPercent).toBeCloseTo(11);
+    expect(calls[1]).toMatchObject({ cacheRead: 1000, toolCalls: 1, durationMs: 3000 });
+    expect(calls[1].contextTokens).toBe(1500);
+  });
+  it("tracks effort changes and compaction", () => {
+    expect(calls[2]).toMatchObject({ effort: "high", compacted: true, contextTokens: 5000, durationMs: 30000 });
   });
   it("falls back to the current effort without change entries", () => {
     expect(collectTurns(entries.slice(1, 3), { initialEffort: "low" })[0].effort).toBe("low");
@@ -55,17 +58,18 @@ describe("rendering", () => {
       expect(visibleWidth(line)).toBeLessThanOrEqual(width);
     }
     expect(renderWidgetLine(turns, 120, theme)).toContain("ctx");
-    expect(renderWidgetLine([], 40, theme)).toContain("no turns");
+    expect(renderWidgetLine([], 40, theme)).toContain("no model calls");
   });
   it("overlay shows every metric and the cursor turn", () => {
     const { lines } = renderOverlay(turns, 0, 80, 2, theme);
     const text = lines.join("\n");
     for (const label of ["Context", "Effort", "Tokens", "Cost", "Tool calls", "Duration"]) expect(text).toContain(label);
-    expect(text).toContain("Turn 1");
+    expect(text).toContain("Call 1 (prompt 1)");
+    expect(text).toContain("prompts");
     expect(lines.every((l) => visibleWidth(l) <= 80)).toBe(true);
   });
   it("text report summarizes", () => {
-    expect(formatReport(turns)).toMatch(/2 turns/);
+    expect(formatReport(turns)).toMatch(/3 model calls over 2 prompts/);
   });
 });
 

@@ -1,19 +1,24 @@
-// Reconstructs per-turn statistics from session entries. A turn starts at a user message and
-// runs until the next one; it covers every assistant message and tool result in between.
+// Reconstructs per-call statistics from session entries: one point per assistant response (one
+// model request), grouped into prompts by the user messages between them.
 
 export const EFFORT_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 export interface TurnStat {
-  /** 1-based turn number along the current branch. */
+  /** 1-based model-call number along the current branch. */
   index: number;
+  /** 1-based user prompt this call answers. */
+  prompt: number;
+  /** First call after its user prompt. */
+  promptStart: boolean;
   startedAt: number;
+  /** Request duration plus the tool calls it made, until their last result. */
   durationMs: number;
-  /** Tokens in context after the turn's last assistant response (input + cache + output). */
+  /** Tokens in context after this response (input + cache + output). */
   contextTokens: number;
   contextWindow: number;
   /** 0-100, or undefined when the context window is unknown. */
   contextPercent: number | undefined;
-  /** Thinking level in effect for the turn's last response. */
+  /** Thinking level in effect for this call. */
   effort: string;
   model: string | undefined;
   input: number;
@@ -22,7 +27,7 @@ export interface TurnStat {
   cacheWrite: number;
   cost: number;
   toolCalls: number;
-  /** A compaction happened since the previous turn. */
+  /** A compaction happened since the previous call. */
   compacted: boolean;
 }
 
@@ -61,16 +66,14 @@ const time = (entry: LooseEntry): number => {
 };
 
 export function collectTurns(entries: readonly unknown[], options: CollectOptions = {}): TurnStat[] {
-  const turns: TurnStat[] = [];
+  const calls: TurnStat[] = [];
   const firstChange = (entries as LooseEntry[]).find((entry) => entry?.type === "thinking_level_change");
   let effort = firstChange?.thinkingLevel ?? options.initialEffort ?? "off";
   let pendingCompaction = false;
+  let prompt = 0;
+  let promptStart = false;
+  let lastMessageAt = 0;
   let current: TurnStat | undefined;
-  let lastTime = 0;
-
-  const close = () => {
-    if (current) current.durationMs = Math.max(0, lastTime - current.startedAt);
-  };
 
   for (const raw of entries) {
     const entry = raw as LooseEntry;
@@ -88,60 +91,57 @@ export function collectTurns(entries: readonly unknown[], options: CollectOption
     const at = time(entry);
 
     if (message.role === "user") {
-      close();
-      current = {
-        index: turns.length + 1,
-        startedAt: at,
-        durationMs: 0,
-        contextTokens: 0,
-        contextWindow: 0,
-        contextPercent: undefined,
-        effort,
-        model: undefined,
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        cost: 0,
-        toolCalls: 0,
-        compacted: pendingCompaction,
-      };
-      pendingCompaction = false;
-      turns.push(current);
-      lastTime = at;
+      prompt++;
+      promptStart = true;
+      current = undefined;
+      lastMessageAt = at;
       continue;
     }
-    if (!current) continue;
-    lastTime = Math.max(lastTime, at);
-    if (message.role !== "assistant") continue;
+    if (message.role !== "assistant") {
+      // Tool results extend the call that requested them.
+      if (current) current.durationMs = Math.max(current.durationMs, at - current.startedAt);
+      lastMessageAt = at;
+      continue;
+    }
+    if (prompt === 0) continue;
 
     const usage = message.usage ?? {};
     const input = usage.input ?? 0;
     const output = usage.output ?? 0;
     const cacheRead = usage.cacheRead ?? 0;
     const cacheWrite = usage.cacheWrite ?? 0;
-    current.input += input;
-    current.output += output;
-    current.cacheRead += cacheRead;
-    current.cacheWrite += cacheWrite;
-    current.cost += usage.cost?.total ?? 0;
-    current.effort = effort;
-    if (Array.isArray(message.content)) {
-      current.toolCalls += message.content.filter((part) => (part as { type?: string })?.type === "toolCall").length;
-    }
-    const tokens = input + cacheRead + cacheWrite + output;
-    if (tokens > 0) {
-      current.contextTokens = tokens;
-      if (message.provider && message.model) {
-        current.model = `${message.provider}/${message.model}`;
-        const window = options.contextWindow?.(message.provider, message.model);
-        if (window && window > 0) current.contextWindow = window;
-      }
-      current.contextPercent = current.contextWindow > 0 ? (tokens / current.contextWindow) * 100 : undefined;
-    }
+    const startedAt = lastMessageAt || at;
+    const toolCalls = Array.isArray(message.content)
+      ? message.content.filter((part) => (part as { type?: string })?.type === "toolCall").length
+      : 0;
+    const model = message.provider && message.model ? `${message.provider}/${message.model}` : undefined;
+    const contextWindow = (message.provider && message.model && options.contextWindow?.(message.provider, message.model)) || 0;
+    const contextTokens = input + cacheRead + cacheWrite + output;
+    current = {
+      index: calls.length + 1,
+      prompt,
+      promptStart,
+      startedAt,
+      durationMs: Math.max(0, at - startedAt),
+      contextTokens,
+      contextWindow,
+      contextPercent: contextWindow > 0 && contextTokens > 0 ? (contextTokens / contextWindow) * 100 : undefined,
+      effort,
+      model,
+      input,
+      output,
+      cacheRead,
+      cacheWrite,
+      cost: usage.cost?.total ?? 0,
+      toolCalls,
+      compacted: pendingCompaction,
+    };
+    calls.push(current);
+    pendingCompaction = false;
+    promptStart = false;
+    lastMessageAt = at;
   }
-  close();
-  return turns;
+  return calls;
 }
 
 export function effortRank(level: string): number {

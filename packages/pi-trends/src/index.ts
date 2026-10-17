@@ -1,6 +1,6 @@
-// pi-trends: per-turn trends of context %, effort, tokens, cost, tool calls and duration.
+// pi-trends: per-model-call trends of context %, effort, tokens, cost, tool calls and duration.
 // A one-line sparkline widget (toggled with a shortcut or `/trends widget`) and a `/trends`
-// overlay with a braille line chart per metric and a movable turn cursor. History is rebuilt from the
+// overlay with a braille line chart per metric and a movable call cursor. History is rebuilt from the
 // current branch's session entries, so it survives resume, reload, /tree and compaction.
 
 import { existsSync, readFileSync } from "node:fs";
@@ -66,9 +66,9 @@ function latestValue(m: Metric, turns: TurnStat[]): string {
   return "-";
 }
 
-/** One line: label, sparkline over recent turns, latest value per metric. */
+/** One line: label, sparkline over recent model calls, latest value per metric. */
 export function renderWidgetLine(turns: TurnStat[], width: number, theme: Pick<Theme, "fg">): string {
-  if (turns.length === 0) return truncateToWidth(theme.fg("dim", "trends: no turns yet"), width);
+  if (turns.length === 0) return truncateToWidth(theme.fg("dim", "trends: no model calls yet"), width);
   const segment = (key: string, short: string, n: number, color: boolean) => {
     const m = metric(key);
     const recent = window(turns, n);
@@ -81,7 +81,8 @@ export function renderWidgetLine(turns: TurnStat[], width: number, theme: Pick<T
   };
   const sep = "  ";
   // Ends with a word so the line never ends in %, $, # or > (herdr-web-ui reads those as a shell prompt).
-  const tail = ` \u00b7 ${turns.length} turn${turns.length === 1 ? "" : "s"}`;
+  const prompts = turns.at(-1)?.prompt ?? 0;
+  const tail = ` \u00b7 ${turns.length} call${turns.length === 1 ? "" : "s"}/${prompts} prompt${prompts === 1 ? "" : "s"}`;
   for (let count = WIDGET_METRICS.length; count >= 1; count--) {
     const shown = WIDGET_METRICS.slice(0, count);
     for (let n = Math.min(turns.length, 24); n >= Math.min(turns.length, 4); n--) {
@@ -99,7 +100,7 @@ function scaleLabel(metric: Metric, ceiling: number, turn: TurnStat): string {
 
 export function turnDetail(turn: TurnStat): string {
   const parts = [
-    `Turn ${turn.index}`,
+    `Call ${turn.index} (prompt ${turn.prompt})`,
     turn.startedAt ? new Date(turn.startedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : undefined,
     turn.model,
     turn.contextPercent !== undefined
@@ -116,15 +117,15 @@ export function turnDetail(turn: TurnStat): string {
 }
 
 export function formatReport(turns: TurnStat[]): string {
-  if (turns.length === 0) return "No turns in this session yet.";
+  if (turns.length === 0) return "No model calls in this session yet.";
   const lines = METRICS.map((m) => `${m.label.padEnd(10)} ${sparkline(window(turns, 40).map(m.value), m.max)} ${latestValue(m, turns)}`);
   const total = turns.reduce((sum, t) => sum + t.cost, 0);
-  return [`Session trends: ${turns.length} turns, ${formatCost(total)} total`, ...lines, turnDetail(turns.at(-1)!)].join("\n");
+  return [`Session trends: ${turns.length} model calls over ${turns.at(-1)!.prompt} prompts, ${formatCost(total)} total`, ...lines, turnDetail(turns.at(-1)!)].join("\n");
 }
 
 const GUTTER = 12;
 
-/** Overlay body lines (without border), for a given cursor turn and width. */
+/** Overlay body lines (without border), for a given cursor call and width. */
 export function renderOverlay(
   turns: TurnStat[],
   cursor: number,
@@ -134,9 +135,9 @@ export function renderOverlay(
 ): { lines: string[]; columns: number } {
   const inner = Math.max(10, width);
   const plotWidth = Math.max(4, inner - GUTTER);
-  // Two dots per cell: up to 2*plotWidth turns fit before the view scrolls.
+  // Two dots per cell: up to 2*plotWidth calls fit before the view scrolls.
   const columns = Math.max(2, plotWidth * 2);
-  // Keep the cursor visible: show the window of `columns` turns that ends at or after it.
+  // Keep the cursor visible: show the window of `columns` calls that ends at or after it.
   const offset = Math.max(0, Math.min(turns.length - columns, turns.length - 1 - cursor - Math.floor(columns / 4)));
   const visible = window(turns, columns, offset);
   const first = turns.length - offset - visible.length;
@@ -144,7 +145,7 @@ export function renderOverlay(
   const lines: string[] = [];
   lines.push(
     truncateToWidth(
-      `${theme.bold(theme.fg("accent", "Session Trends"))}  ${theme.fg("muted", `${turns.length} turn${turns.length === 1 ? "" : "s"} · ${formatCost(total)} · showing ${first + 1}-${first + visible.length}`)}`,
+      `${theme.bold(theme.fg("accent", "Session Trends"))}  ${theme.fg("muted", `${turns.length} calls · ${turns.at(-1)?.prompt ?? 0} prompts · ${formatCost(total)} · showing ${first + 1}-${first + visible.length}`)}`,
       inner,
     ),
   );
@@ -174,6 +175,18 @@ export function renderOverlay(
       lines.push(truncateToWidth(`${gutterFor(r)} ${plot}`, inner));
     });
   }
+  {
+    const axisChart = lineChart(visible.map(() => 0), plotWidth, 1, 1);
+    const cells = new Array<string>(plotWidth).fill(" ");
+    const cursorPrompt = turns[cursor]?.prompt;
+    visible.forEach((call, i) => {
+      if (!call.promptStart) return;
+      const cell = axisChart.cellOf(i);
+      cells[cell] = call.prompt === cursorPrompt ? theme.fg("warning", "▲") : theme.fg("dim", "╵");
+    });
+    lines.push("");
+    lines.push(truncateToWidth(`${theme.fg("dim", "prompts".padEnd(GUTTER - 1))} ${cells.join("")}`, inner));
+  }
   lines.push("");
   const current = turns[cursor];
   if (current) {
@@ -188,7 +201,7 @@ export function renderOverlay(
     }
     if (line) lines.push(truncateToWidth(line, inner));
   }
-  lines.push(theme.fg("dim", truncateToWidth("←/→ turn  shift+←/→ jump 10  home/end  esc close", inner)));
+  lines.push(theme.fg("dim", truncateToWidth("←/→ call  [/] prompt  shift+←/→ 10  home/end  esc", inner)));
   return { lines, columns };
 }
 
@@ -206,6 +219,13 @@ async function showOverlay(ctx: ExtensionCommandContext, turns: TurnStat[]): Pro
           if (matchesKey(data, Key.escape) || data === "q") return done();
           if (matchesKey(data, Key.left) || data === "h") return move(-1);
           if (matchesKey(data, Key.right) || data === "l") return move(1);
+          if (data === "[" || data === "]") {
+            // Jump to the first call of the previous/next prompt.
+            const prompt = turns[cursor].prompt + (data === "]" ? 1 : turns[cursor].promptStart ? -1 : 0);
+            const target = turns.findIndex((call) => call.prompt === prompt);
+            if (target >= 0) move(target - cursor);
+            return;
+          }
           if (matchesKey(data, Key.shift("left")) || data === "H") return move(-10);
           if (matchesKey(data, Key.shift("right")) || data === "L") return move(10);
           if (matchesKey(data, Key.home) || data === "g") return move(-turns.length);
@@ -289,7 +309,7 @@ export default function trendsExtension(pi: ExtensionAPI): void {
   }
 
   pi.registerCommand("trends", {
-    description: "Chart context %, effort, tokens, cost, tool calls and duration per turn (`/trends widget` toggles the sparkline)",
+    description: "Chart context %, effort, tokens, cost, tool calls and duration per model call (`/trends widget` toggles the sparkline)",
     getArgumentCompletions: (prefix: string) =>
       ["widget", "widget on", "widget off"].filter((v) => v.startsWith(prefix)).map((value) => ({ value, label: value })),
     handler: async (args, ctx) => {
