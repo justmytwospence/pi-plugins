@@ -1563,7 +1563,7 @@ test("the MCP chip renders with the companion label style and warns on a shortfa
   }
 });
 
-test("the permission mode joins the model row in its color; plan runs point at /planners", () => {
+test("the permission mode gets its own row in its color; plan runs point at /planners", () => {
   const absorbed = mod.absorbStatuses(new Map([
     ["permission-mode", "⏵⏵ accept edits on (shift+tab to cycle)"],
     ["plan", "plan: A working · B cut off (resume in /planners) (/planners)"],
@@ -1572,9 +1572,17 @@ test("the permission mode joins the model row in its color; plan runs point at /
   assert.deepEqual(absorbed.rest, ["Plan A working · B cut off · resume in /planners · /planners"]);
   const s = { ...fixture(), mode: absorbed.mode, statuses: absorbed.rest };
   const rows = mod.renderFooter(s, 160, theme).map(plain);
-  assert.match(rows[1], /opus-5\.5 · \uee9c reasoning xhigh · ⏵⏵ accept edits on \(shift\+tab to cycle\)$/);
+  assert.match(rows[1], /opus-5\.5 · \uee9c reasoning xhigh$/);
+  assert.equal(rows[2], " \uf510 ⏵⏵ accept edits on (shift+tab to cycle)");
   // Narrow: the hint goes before the mode does.
-  assert.match(plain(mod.renderFooter(s, 50, theme)[1]), /⏵⏵ accept edits on$/);
+  assert.match(plain(mod.renderFooter(s, 30, theme)[2]), /⏵⏵ accept edits on$/);
+  // Outside auto mode the gate stays with the notices; in auto mode it follows the mode.
+  const gated = { ...s, statuses: ["Gate 2 auto · 0 pushed back · 1 asked"] };
+  assert.ok(!plain(mod.renderFooter(gated, 160, theme)[2]).includes("Gate"));
+  const auto = { ...gated, mode: mod.parseModeStatus("⏵⏵ auto mode on (shift+tab to cycle)") };
+  const autoRows = mod.renderFooter(auto, 160, theme).map(plain);
+  assert.equal(autoRows[2], " \uf510 ⏵⏵ auto mode on (shift+tab to cycle) · Gate 2 auto · 0 pushed back · 1 asked");
+  assert.equal(autoRows.filter((r) => r.includes("Gate")).length, 1);
   assert.equal(mod.parseModeStatus("⏸ plan mode on").kind, "plan");
   assert.equal(mod.parseModeStatus("⏸ chat mode on (shift+tab to cycle)").kind, "chat");
   assert.equal(mod.parseModeStatus("⏵⏵ yolo mode on (shift+tab to cycle)").kind, "bypass");

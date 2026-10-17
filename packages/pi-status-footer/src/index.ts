@@ -837,9 +837,15 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   }
   rows.push(row(ICONS.model, (w) => fitSegments([
     { text: identity, short: model, priority: 100 },
-    { text: modeLong, short: modeText, priority: 105 },
     { text: phaseText, priority: 120 },
     { text: s.queued ? theme.fg("warning", "queued") : "", priority: 115 },
+  ], w, theme)));
+  // The permission mode gets its own row; in auto mode the gate's tally follows it.
+  const gateStatus = s.mode?.kind === "auto" ? s.statuses.find((status) => /^Gate /.test(stripVTControlCharacters(status))) : undefined;
+  const statuses = gateStatus ? s.statuses.filter((status) => status !== gateStatus) : s.statuses;
+  if (s.mode) rows.push(row(ICONS.gate, (w) => fitSegments([
+    { text: modeLong, short: modeText, priority: 100 },
+    { text: gateStatus ? gateStatus.replace(/[\r\n\t]/g, " ") : "", priority: 50 },
   ], w, theme)));
 
   const context = s.context.percent;
@@ -866,7 +872,7 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   // keep it inline; the first notice's icon becomes the row's, a bell otherwise.
   // Wrapped lines are indented under the first.
   const notices: { icon?: string; text: string }[] = s.mcp ? [{ icon: ICONS.mcp, text: mcpChip(s.mcp, theme) }] : [];
-  for (const status of s.statuses) {
+  for (const status of statuses) {
     const plainStatus = stripVTControlCharacters(status);
     // Pi's own MCP status already carries the plug (see above).
     if (plainStatus.startsWith(`${ICONS.mcp} `)) notices.push({ icon: ICONS.mcp, text: status.replace(`${ICONS.mcp} `, "") });
