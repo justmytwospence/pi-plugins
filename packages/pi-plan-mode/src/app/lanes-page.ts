@@ -7,6 +7,7 @@
 // planner's subagents, showing each one's task and chat in place of the planner's.
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
+  CURSOR_MARKER,
   decodeKittyPrintable,
   Input,
   type KeyId,
@@ -381,11 +382,19 @@ export class LanesPage {
   }
 
   /** A lane's input as lines: focused, the editor itself (several lines for a suite editor); else its first line, dim. */
-  private inputLines(input: LaneInput, focused: boolean, width: number, idle: string): string[] {
+  private inputLines(input: LaneInput, focused: boolean, width: number, idle: string, max = MAX_INPUT_LINES): string[] {
     const theme = this.theme;
     if (!focused) return [theme.fg("dim", `› ${input.getValue().split("\n")[0] || idle}`)];
     const lines = input.render(Math.max(4, width - 2));
-    const shown = lines.length ? lines.slice(0, MAX_INPUT_LINES) : [""];
+    const limit = Math.max(1, max);
+    // Past the limit, keep the cursor's line in view rather than cutting the end off.
+    let start = 0;
+    if (lines.length > limit) {
+      const cursor = lines.findIndex((line) => line.includes(CURSOR_MARKER));
+      const anchor = cursor >= 0 ? cursor : lines.length - 1;
+      start = Math.min(lines.length - limit, Math.max(0, anchor - limit + 2));
+    }
+    const shown = lines.length ? lines.slice(start, start + limit) : [""];
     return shown.map((line, index) => `${index === 0 ? theme.fg("accent", "›") : " "} ${line}`);
   }
 
@@ -927,9 +936,14 @@ export class LanesPage {
     const composing = asking && this.questionCursor(agent).composing;
     const input = this.input(agent);
     input.focused = focused && this.modal === undefined && (!asking || composing);
+    // The input grows to half the lane, leaving the title and at least two lines of chat.
+    const inputRoom = Math.max(
+      MAX_INPUT_LINES,
+      Math.min(Math.floor(rows / 2), rows - 1 - subagents.length - question.length - 1 - 2),
+    );
     const inputLines = asking
       ? composing
-        ? this.inputLines(input, focused, width, "")
+        ? this.inputLines(input, focused, width, "", inputRoom)
         : [
             theme.fg(
               "dim",
@@ -938,7 +952,7 @@ export class LanesPage {
                 : `› tab to answer ${agent.id}`,
             ),
           ]
-      : this.inputLines(input, focused, width, `tab to talk to ${agent.id}`);
+      : this.inputLines(input, focused, width, `tab to talk to ${agent.id}`, inputRoom);
     const bodyHeight = Math.max(2, rows - 1 - subagents.length - question.length - 1 - inputLines.length);
     this.laneHeights.set(agent.id, bodyHeight);
     const key = this.viewKey(agent);
