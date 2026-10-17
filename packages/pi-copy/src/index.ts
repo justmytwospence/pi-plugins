@@ -12,6 +12,13 @@ import { Picker, type PickerModel } from "./picker.ts";
 import { DEFAULT_RANK, type Judged, type RankSettings, chronological, piecesToJudge, rankQuestions, rankState, readJudgments, suggested } from "./rank.ts";
 import { type Segment, extractSegments, segmentKey } from "./segments.ts";
 import { clip, messageText } from "./transcript.ts";
+import { type Snapshot, snapshotSession, snapshotTranscript } from "./copy-mode/snapshot.ts";
+import { CopyModeView } from "./copy-mode/view.ts";
+
+/** Event other extensions (pi-vim's `/` and `?`) emit to open copy mode; `handled` is set when it opens. */
+export const COPY_MODE_OPEN = "copy-mode:open";
+/** ui.custom options for a view that covers the screen. */
+const FULL_SCREEN = { overlay: true, overlayOptions: { anchor: "top-left" as const, width: "100%" as const, maxHeight: "100%" as const } };
 
 export interface CopyConfig extends Record<string, unknown> {
   jev: JevConfig;
@@ -19,6 +26,8 @@ export interface CopyConfig extends Record<string, unknown> {
   /** User turns the picker covers. */
   maxTurns: number;
   shortcut: string;
+  /** Opens copy mode (vim-style search and yank over the whole transcript). */
+  copyModeShortcut: string;
 }
 
 export const DEFAULT_CONFIG: CopyConfig = {
@@ -26,6 +35,7 @@ export const DEFAULT_CONFIG: CopyConfig = {
   rank: DEFAULT_RANK,
   maxTurns: 30,
   shortcut: "ctrl+shift+x",
+  copyModeShortcut: "alt+s",
 };
 
 export default function piCopy(pi: ExtensionAPI) {
@@ -83,7 +93,60 @@ export default function piCopy(pi: ExtensionAPI) {
     }
   };
 
+  let current: ExtensionContext | undefined;
+  let copyModeOpen = false;
+
+  /** Copy mode over the whole transcript; `search` opens it with the search line active. */
+  const openCopyMode = async (ctx: ExtensionContext, search?: "forward" | "backward") => {
+    if (ctx.mode !== "tui") {
+      ctx.ui.notify("Copy mode needs the interactive terminal UI.", "warning");
+      return;
+    }
+    if (copyModeOpen) return;
+    copyModeOpen = true;
+    let snap: Snapshot | undefined;
+    try {
+      const result = await ctx.ui.custom<{ row: number } | undefined>((tui, theme, _keys, done) => {
+        const width = (tui as { terminal?: { columns?: number } }).terminal?.columns ?? 80;
+        snap = snapshotTranscript(tui, width) ?? snapshotSession(ctx.sessionManager.getBranch(), width);
+        return new CopyModeView(snap, theme as never, () => (tui as { terminal?: { rows?: number } }).terminal?.rows ?? 24, {
+          copy: (text) => copyToClipboard(text),
+          insert: (text) => {
+            const draft = ctx.ui.getEditorText();
+            ctx.ui.setEditorText(draft ? `${draft}${/\s$/.test(draft) ? "" : " "}${text}` : text);
+          },
+          done: (r) => done(r),
+          requestRender: () => tui.requestRender(),
+        }, { search });
+      }, FULL_SCREEN as never);
+      if (result && snap?.scrollTo) snap.scrollTo(result.row);
+    } finally {
+      copyModeOpen = false;
+    }
+  };
+
+  // pi-vim's idle Normal-mode `/` and `?` (or any extension) can open copy mode through the bus.
+  pi.events?.on(COPY_MODE_OPEN, (data) => {
+    const request = data as { direction?: "forward" | "backward"; handled?: boolean } | undefined;
+    if (!current || current.mode !== "tui" || copyModeOpen) return;
+    if (request) request.handled = true;
+    void openCopyMode(current, request?.direction);
+  });
+
+  pi.registerCommand("copy-mode", {
+    description: "Vim-style copy mode over the whole transcript: / search, n/N, v/y yank, f hints, [[ ]] jumps",
+    handler: async (args, ctx) => {
+      const arg = args.trim();
+      await openCopyMode(ctx, arg === "/" ? "forward" : arg === "?" ? "backward" : undefined);
+    },
+  });
+
+  pi.on("session_shutdown", () => {
+    current = undefined;
+  });
+
   pi.on("session_start", (_event, ctx) => {
+    current = ctx;
     config = loadConfig("copy", DEFAULT_CONFIG, ctx.cwd);
     cache.clear();
   });
@@ -102,6 +165,13 @@ export default function piCopy(pi: ExtensionAPI) {
     description: "Pick something from this session to copy (/yank)",
     handler: (ctx) => open(ctx),
   });
+  const copyModeShortcut = loadConfig("copy", DEFAULT_CONFIG, process.cwd()).copyModeShortcut;
+  if (copyModeShortcut) {
+    pi.registerShortcut(copyModeShortcut as never, {
+      description: "Copy mode: vim-style search and yank over the whole transcript (/copy-mode)",
+      handler: (ctx) => openCopyMode(ctx),
+    });
+  }
 }
 
 function recentUserMessages(entries: readonly unknown[]): string[] {

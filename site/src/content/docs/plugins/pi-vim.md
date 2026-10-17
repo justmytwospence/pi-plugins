@@ -58,7 +58,7 @@ These are **draft motions**, not transcript navigation. Escape (or Ctrl+[) enter
 | Select / paste | `v` character Visual, `V` line Visual; `p` / `P`. |
 | Undo / redo / repeat | `u`, Ctrl+R, `.`. |
 
-Operators, counts, registers and text objects are supported; macros, block Visual, Vim search and general Vim EX semantics are not. In idle Normal, Ctrl+U/D scroll the host viewport instead of moving through the draft. [Keymap & focus](/guides/keyboard/#use-vim-on-the-main-prompt-or-in-a-dialog) compares main and embedded behavior.
+Operators, counts, registers and text objects are supported; macros, block Visual, Vim search and general Vim EX semantics are not. In idle Normal, Ctrl+U/D scroll the host viewport instead of moving through the draft, and with [pi-copy](/plugins/pi-copy/#copy-mode) loaded `/` and `?` open its copy mode over the whole transcript. [Keymap & focus](/guides/keyboard/#use-vim-on-the-main-prompt-or-in-a-dialog) compares main and embedded behavior.
 
 ## Finding files
 

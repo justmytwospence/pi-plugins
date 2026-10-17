@@ -1,6 +1,6 @@
 # pi-copy
 
-A Pi extension: `/yank` (or `ctrl+shift+x`) opens a scrollable picker of things you might want to copy from the session, and copies the one you pick to the clipboard.
+A Pi extension: `/yank` (or `ctrl+shift+x`) opens a scrollable picker of things you might want to copy from the session, and copies the one you pick to the clipboard. `/copy-mode` (or `alt+s`) is a vim-style copy mode over the whole transcript: search, hints, jumps and yank.
 
 The picker opens at once in recency order. If a classifier model is available, Jev then ranks the newest pieces by how likely you are to want to copy each one now, and the list reorders in place. Pi's built-in `/copy` (the last reply) and `ctrl+x` are left as they are.
 
@@ -73,6 +73,25 @@ The picker is always a search field: typing filters the current tab (fuzzy). It 
 
 The footer hint shows the keys currently bound to the `tui.select.*` actions. After copying, a notification reports the kind, line count and character count.
 
+## Copy mode
+
+`/copy-mode` (or `alt+s`, or `/` and `?` in pi-vim's idle Normal mode) opens a vim-style copy mode over the whole fullscreen transcript, like herdr's or tmux's copy mode. Those only see the screen, while this one covers the history above it. It takes a snapshot of every rendered transcript line, folded tool output as folded, and opens where you were looking. Esc clears the search highlights, then closes; `q` closes.
+
+| keys | action |
+|---|---|
+| `h j k l`, `w b e W B E`, `0 ^ $`, `{ }` | move; counts work (`5j`, `3w`) |
+| `gg G` (`12G`), `H M L`, Ctrl+U/D/F/B/E/Y, Space | jump or scroll |
+| `/` `?` then Enter, `n N` | search forward or back with every match highlighted as you type. Smartcase (`\c`, `\C` force it); JavaScript regular expressions, literal if invalid; wraps with a notice; `[3/17]` counter; Up and Down recall earlier searches; an empty search repeats the last |
+| `*` `#` | search the word under the cursor |
+| `gu` `gf` `gh` `ge` | preset searches: URLs, file paths (with `:line`), git hashes, error lines; then `n N` |
+| `f` | label every URL, path, hash and quoted string on screen: the label copies it, Shift+label inserts it into the prompt |
+| `v` `V`, `o`, then `y` | select and copy; `yy`/`Y` copy lines |
+| `I`, `>` | insert the selection (or line) into the prompt, or insert it as a `>` quote, and close |
+| `[[ ]]`, `[t ]t`, `[e ]e`, `[m ]m` | previous or next prompt you sent, tool call or shell command, error, reply |
+| Enter | close and scroll Pi's transcript to the cursor's line |
+
+Outside fullscreen mode (`tuiMode: "regular"`, where the terminal's own scrollback and copy mode work), it falls back to the session's text, marked `(session text)`. The snapshot does not follow output that arrives while it is open.
+
 ## Configuration
 
 `~/.pi/agent/copy.json` (or `$PI_CODING_AGENT_DIR/copy.json`), with `<project>/.pi/copy.json` merged on top. Objects merge key by key; other values replace only when the type matches. Unreadable or invalid files are ignored. Defaults:
@@ -82,11 +101,12 @@ The footer hint shows the keys currently bound to the `tui.select.*` actions. Af
   "jev": { "enabled": true, "provider": "typesafe", "model": "jev-latest", "timeoutMs": 3000 },
   "rank": { "maxPieces": 120, "pieceChars": 600, "stateBudgetChars": 60000, "copyableThreshold": 0.3, "wantWeight": 0.6 },
   "maxTurns": 30,
-  "shortcut": "ctrl+shift+x"
+  "shortcut": "ctrl+shift+x",
+  "copyModeShortcut": "alt+s"
 }
 ```
 
-Settings are reread each time the picker opens. `shortcut` is read once when the extension loads (the global file, plus `.pi/copy.json` in the directory Pi was started from); a change takes effect after `/reload` or a restart.
+Settings are reread each time the picker opens. `shortcut` and `copyModeShortcut` (empty to register none) are read once when the extension loads (the global file, plus `.pi/copy.json` in the directory Pi was started from); a change takes effect after `/reload` or a restart.
 
 ## Requirements and costs
 
@@ -98,6 +118,7 @@ Settings are reread each time the picker opens. `shortcut` is read once when the
 ## Optional integrations
 
 - [Herdr](https://herdr.dev): while the picker is open it emits `herdr:blocked` on Pi's event bus (`{ active: true, label: "Yank picker" }`, then `{ active: false }` when it closes), so Herdr shows the pane as blocked. Outside Herdr nothing listens and the events do nothing.
+- [pi-vim](https://pi-plugins.vercel.app/plugins/pi-vim/): `/` and `?` in idle Normal mode open copy mode with the search line active. They emit `copy-mode:open { direction, handled }` on Pi's event bus; any extension can do the same.
 - Suite key handlers such as pi-vim and pi-select-nav read the picker's `filter` input context and leave its text input alone. Neither is required.
 
 ## Limitations

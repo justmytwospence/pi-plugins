@@ -171,6 +171,12 @@ export default function piVim(pi: ExtensionAPI) {
       if (options.initialText !== undefined) editor.setText(options.initialText);
       if (options.initialMode === "normal") editor.handleInput("\x1b");
       editor.setModeChangeFn(config.modeChangeFor("main"));
+      // Optional: pi-copy's copy mode answers `copy-mode:open` and searches the whole transcript.
+      editor.setTranscriptSearchFn((direction) => {
+        const request = { direction, handled: false };
+        pi.events.emit("copy-mode:open", request);
+        return request.handled;
+      });
       editor.setFilePickerFn(() =>
         ctx.ui.custom<string | undefined>((tui, theme, _keybindings, done) =>
           new FilePicker(ctx.cwd, theme as never, () => tui.requestRender(), done),

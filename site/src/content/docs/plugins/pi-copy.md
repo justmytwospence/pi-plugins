@@ -8,7 +8,7 @@ plugin: pi-copy
 
 - **Use it for:** Copy a message fragment, code block, command, path or URL instead of a whole response.
 - **Enable:** Select `packages/pi-copy/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
-- **Controls:** `/yank`, Ctrl+Shift+X; filter-local navigation and preview keys below. Pi `/copy` remains separate.
+- **Controls:** `/yank`, Ctrl+Shift+X; `/copy-mode`, Alt+S (or `/` `?` in pi-vim Normal mode) for vim-style copy mode over the whole transcript. Pi `/copy` remains separate.
 - **Settings:** `copy.json` user/project layers; last 30 turns, 120-piece ceiling, paid Jev ranking on when available; `shortcut` registers at load.
 - **Requirements, cost & privacy:** TUI and Pi clipboard support. Local recency/filtering is free; optional ranking sends candidate excerpts and recent requests externally.
 - **Integrations & limits:** Optional Herdr blocked state; handles Ctrl+J/K itself. No judgments means recency; clipboard success cannot prove OSC 52 delivery.
@@ -24,6 +24,25 @@ The default window covers the last 30 user turns. Whole user messages and assist
 The picker is always a search field: printable keys, including `j` and `k`, go into a fuzzy filter. Move with Pi's configured `tui.select.up`/`tui.select.down` bindings (arrows by default) or Ctrl+K/Ctrl+J; PageUp/PageDown move by a page of rows. Tab switches **Suggested** and **All**. Right arrow, or Space with an empty filter, toggles a preview; left arrow collapses it. `tui.select.confirm` (Enter) copies and closes. `tui.select.cancel` (Escape) first clears a nonempty filter, then closes on another press.
 
 Because the filter is a text field, Ctrl+U and Ctrl+D keep text meanings: Ctrl+U clears the query, and Ctrl+D is delete-forward at the end of the query, which has nothing to delete. Neither scrolls the list. Backspace removes the last character; a bracketed paste goes into the filter with control characters replaced by spaces. Preview length is limited, but copying uses the selected piece's text, not the truncated preview. Extracted commands can omit shell prompts, and code pieces omit their enclosing fences: inspect the selected kind rather than assuming every piece is a byte-for-byte message copy.
+
+## Copy mode
+
+`/copy-mode` (or `alt+s`, or `/` and `?` in pi-vim's idle Normal mode) opens a vim-style copy mode over the whole fullscreen transcript, like herdr's or tmux's copy mode. Those only see the screen, while this one covers the history above it. It takes a snapshot of every rendered transcript line, folded tool output as folded, and opens where you were looking. Esc clears the search highlights, then closes; `q` closes.
+
+| keys | action |
+|---|---|
+| `h j k l`, `w b e W B E`, `0 ^ $`, `{ }` | move; counts work (`5j`, `3w`) |
+| `gg G` (`12G`), `H M L`, Ctrl+U/D/F/B/E/Y, Space | jump or scroll |
+| `/` `?` then Enter, `n N` | search forward or back with every match highlighted as you type. Smartcase (`\c`, `\C` force it); JavaScript regular expressions, literal if invalid; wraps with a notice; `[3/17]` counter; Up and Down recall earlier searches; an empty search repeats the last |
+| `*` `#` | search the word under the cursor |
+| `gu` `gf` `gh` `ge` | preset searches: URLs, file paths (with `:line`), git hashes, error lines; then `n N` |
+| `f` | label every URL, path, hash and quoted string on screen: the label copies it, Shift+label inserts it into the prompt |
+| `v` `V`, `o`, then `y` | select and copy; `yy`/`Y` copy lines |
+| `I`, `>` | insert the selection (or line) into the prompt, or insert it as a `>` quote, and close |
+| `[[ ]]`, `[t ]t`, `[e ]e`, `[m ]m` | previous or next prompt you sent, tool call or shell command, error, reply |
+| Enter | close and scroll Pi's transcript to the cursor's line |
+
+Outside fullscreen mode (`tuiMode: "regular"`, where the terminal's own scrollback and copy mode work), it falls back to the session's text, marked `(session text)`. The snapshot does not follow output that arrives while it is open.
 
 ## Requirements, privacy, and costs
 

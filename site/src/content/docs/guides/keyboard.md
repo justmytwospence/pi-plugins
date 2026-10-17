@@ -76,7 +76,7 @@ Suite additions:
 
 Dedicated history actions are unbound in stock Pi. Binding them to Ctrl+P/N is a preference, not a suite default; stock Ctrl+P cycles models. Pi gives configured history actions precedence over application actions on those keys in its main editor. Disable model cycling too if you want an unambiguous setup.
 
-[pi-stash](/plugins/pi-stash/) adds **Ctrl+S** in the focused main editor: stash, restore or swap one draft. This is a raw editor wrapper, not a configurable stock action. A dialog's Ctrl+S remains local—for example, saving a model selection. [pi-copy](/plugins/pi-copy/) adds **Ctrl+Shift+X** (configurable `shortcut`) for `/yank`; Pi's `/copy` stays separate.
+[pi-stash](/plugins/pi-stash/) adds **Ctrl+S** in the focused main editor: stash, restore or swap one draft. This is a raw editor wrapper, not a configurable stock action. A dialog's Ctrl+S remains local—for example, saving a model selection. [pi-copy](/plugins/pi-copy/) adds **Ctrl+Shift+X** (configurable `shortcut`) for `/yank` and **Alt+S** (`copyModeShortcut`) for [copy mode](/plugins/pi-copy/#copy-mode), a vim-style search and yank over the whole transcript; with pi-vim, `/` and `?` in idle Normal mode open it too. Pi's `/copy` stays separate.
 
 ## Use Vim on the main prompt or in a dialog
 

@@ -30,6 +30,16 @@ export class MainEditor extends SuiteModalEditor {
   }
 
   private filePickerFn: (() => Promise<string | undefined>) | undefined;
+  private transcriptSearchFn: ((direction: "forward" | "backward") => boolean) | undefined;
+
+  /** Idle Normal `/` and `?`: returns true when something (pi-copy's copy mode) opened. */
+  setTranscriptSearchFn(fn: ((direction: "forward" | "backward") => boolean) | undefined): void {
+    this.transcriptSearchFn = fn;
+  }
+
+  protected override openTranscriptSearch(direction: "forward" | "backward"): boolean {
+    return this.transcriptSearchFn?.(direction) === true;
+  }
   private ctrlXTimer: ReturnType<typeof setTimeout> | undefined;
   private replayingCtrlX = false;
 

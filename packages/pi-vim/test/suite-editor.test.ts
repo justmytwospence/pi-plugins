@@ -476,6 +476,23 @@ describe("main editor Ctrl+U / Ctrl+D", () => {
     assert.equal(mode(editor).state, "normal");
   });
 
+  it("hands idle Normal / and ? to copy mode only when it answers", async () => {
+    const installed = await started();
+    const editor = installed.editorFactory()(stubTui, stubTheme, stubKeybindings);
+    seed(editor, "hello world");
+    const requests: Array<{ direction: string; handled: boolean }> = [];
+    installed.pi.events.on("copy-mode:open", (data: unknown) => {
+      const request = data as { direction: string; handled: boolean };
+      requests.push({ ...request });
+      request.handled = true;
+    });
+    editor.handleInput("/");
+    editor.handleInput("?");
+    assert.deepEqual(requests, [{ direction: "forward", handled: false }, { direction: "backward", handled: false }]);
+    assert.equal(editor.getText(), "hello world");
+    assert.equal(mode(editor).state, "normal");
+  });
+
   it("keeps Visual mode on the engine (no transcript scroll)", async () => {
     const installed = await started();
     const { tui, scrolls } = scrollableTui();

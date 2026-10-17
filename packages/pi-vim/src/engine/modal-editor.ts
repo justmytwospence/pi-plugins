@@ -1716,6 +1716,7 @@ export class ModalEditor extends CustomEditor {
             ? 1
             : 0;
         if (direction !== 0 && this.scrollHalfPage(direction)) return;
+        if ((data === "/" || data === "?") && this.openTranscriptSearch(data === "/" ? "forward" : "backward")) return;
       }
 
       if (isVisualMode(this.mode) && this.handleVisualMode(data)) return;
@@ -1753,6 +1754,15 @@ export class ModalEditor extends CustomEditor {
    * and every pending state keep the engine behavior.
    */
   protected scrollHalfPage(_direction: -1 | 1): boolean {
+    return false;
+  }
+
+  /**
+   * `/` and `?` in idle Normal mode. Return true to consume the key: the main
+   * surface hands them to a transcript copy mode (pi-copy) when one is loaded.
+   * Otherwise they keep the engine behavior.
+   */
+  protected openTranscriptSearch(_direction: "forward" | "backward"): boolean {
     return false;
   }
 
