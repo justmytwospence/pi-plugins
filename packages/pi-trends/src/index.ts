@@ -8,8 +8,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { formatCost, formatDuration, formatTokens, lineChart, METRICS, type Metric, sparkline, window } from "./chart.ts";
-import { collectTurns, EFFORT_LEVELS, type TurnStat } from "./turns.ts";
+import { formatCost, formatDuration, formatTokens, METRICS, type Metric, normalize, plot, slots, sparkline, window } from "./chart.ts";
+import { collectTurns, type TurnStat } from "./turns.ts";
 
 export const DEFAULT_SHORTCUT = "ctrl+shift+g";
 const WIDGET_KEY = "pi-trends";
@@ -50,34 +50,52 @@ const contextColor = (percent: number | undefined): "success" | "warning" | "err
 const WIDGET_METRICS: { key: string; short: string }[] = [
   { key: "context", short: "ctx" },
   { key: "effort", short: "effort" },
-  { key: "tokens", short: "tok" },
   { key: "cost", short: "cost" },
+  { key: "tokens", short: "new" },
   { key: "tools", short: "tools" },
   { key: "duration", short: "time" },
 ];
 
-const metric = (key: string): Metric => METRICS.find((m) => m.key === key)!;
+const metricFor = (key: string): Metric => METRICS.find((m) => m.key === key)!;
 
-function latestValue(m: Metric, turns: TurnStat[]): string {
-  for (let i = turns.length - 1; i >= 0; i--) {
-    const value = m.value(turns[i]);
-    if (value !== undefined) return m.format(value, turns[i]);
+const defined = (values: (number | undefined)[]): number[] => values.filter((v): v is number => v !== undefined && Number.isFinite(v));
+
+/** Normalized 0-1 levels for a run of calls, on the metric's own axis. */
+function levels(m: Metric, calls: TurnStat[]): { values: (number | undefined)[]; domain: [number, number]; norm: (number | undefined)[] } {
+  const values = calls.map(m.value);
+  const domain = m.domain(defined(values));
+  return { values, domain, norm: values.map((v) => (v === undefined ? undefined : normalize(m, v, domain))) };
+}
+
+function latestValue(m: Metric, calls: TurnStat[]): string {
+  for (let i = calls.length - 1; i >= 0; i--) {
+    const value = m.value(calls[i]);
+    if (value !== undefined) return m.format(value, calls[i]);
   }
   return "-";
 }
 
-/** One line: label, sparkline over recent model calls, latest value per metric. */
+/** Widget value: the current level for levels, the session total for per-call events. */
+function widgetValue(m: Metric, calls: TurnStat[]): string {
+  if (m.kind !== "bars") return latestValue(m, calls);
+  if (m.key === "cost") return formatCost(calls.reduce((t, c) => t + c.cost, 0));
+  if (m.key === "duration") return formatDuration(calls.reduce((t, c) => t + c.durationMs, 0));
+  if (m.key === "tokens") return formatTokens(calls.reduce((t, c) => t + c.input + c.cacheWrite + c.output, 0));
+  return `${calls.reduce((t, c) => t + (m.value(c) ?? 0), 0)}`;
+}
+
+/** One line: label, sparkline over recent model calls, current level or session total. */
 export function renderWidgetLine(turns: TurnStat[], width: number, theme: Pick<Theme, "fg">): string {
   if (turns.length === 0) return truncateToWidth(theme.fg("dim", "trends: no model calls yet"), width);
   const segment = (key: string, short: string, n: number, color: boolean) => {
-    const m = metric(key);
+    const m = metricFor(key);
     const recent = window(turns, n);
-    const spark = sparkline(recent.map(m.value), m.max);
-    const last = latestValue(m, turns);
+    const spark = sparkline(levels(m, recent).norm);
+    const value = widgetValue(m, turns);
     const sparkColor = key === "context" ? contextColor(recent.at(-1)?.contextPercent) : "accent";
     return color
-      ? `${theme.fg("dim", short)} ${theme.fg(sparkColor, spark)} ${theme.fg("muted", last)}`
-      : `${short} ${spark} ${last}`;
+      ? `${theme.fg("dim", short)} ${theme.fg(sparkColor, spark)} ${theme.fg("muted", value)}`
+      : `${short} ${spark} ${value}`;
   };
   const sep = "  ";
   // Ends with a word so the line never ends in %, $, # or > (herdr-web-ui reads those as a shell prompt).
@@ -91,11 +109,6 @@ export function renderWidgetLine(turns: TurnStat[], width: number, theme: Pick<T
     }
   }
   return truncateToWidth(segment("context", "ctx", Math.min(turns.length, 4), true), width);
-}
-
-function scaleLabel(metric: Metric, ceiling: number, turn: TurnStat): string {
-  if (metric.key === "effort") return EFFORT_LEVELS[EFFORT_LEVELS.length - 1];
-  return metric.format(ceiling, turn);
 }
 
 export function turnDetail(turn: TurnStat): string {
@@ -118,77 +131,110 @@ export function turnDetail(turn: TurnStat): string {
 
 export function formatReport(turns: TurnStat[]): string {
   if (turns.length === 0) return "No model calls in this session yet.";
-  const lines = METRICS.map((m) => `${m.label.padEnd(10)} ${sparkline(window(turns, 40).map(m.value), m.max)} ${latestValue(m, turns)}`);
+  const recent = window(turns, 40);
+  const lines = METRICS.map((m) => `${m.label.padEnd(11)} ${sparkline(levels(m, recent).norm)} ${widgetValue(m, turns)}`);
   const total = turns.reduce((sum, t) => sum + t.cost, 0);
   return [`Session trends: ${turns.length} model calls over ${turns.at(-1)!.prompt} prompts, ${formatCost(total)} total`, ...lines, turnDetail(turns.at(-1)!)].join("\n");
 }
 
-const GUTTER = 12;
+/** Width of the y-axis tick column, plus one space and the axis rule. */
+const GUTTER = 7;
+const TOTAL_WEIGHT = METRICS.reduce((t, m) => t + m.weight, 0);
 
-/** Overlay body lines (without border), for a given cursor call and width. */
+/** Chart heights for a budget of chart rows, by weight; every chart keeps at least one row. Step
+ *  charts get one row per level in view instead. */
+export function chartHeights(budget: number, stepRows = 1): number[] {
+  const stepMetrics = METRICS.filter((m) => m.kind === "step");
+  const rest = Math.max(0, budget - stepRows * stepMetrics.length);
+  const weight = TOTAL_WEIGHT - stepMetrics.reduce((t, m) => t + m.weight, 0);
+  const factor = Math.max(0.25, Math.min(1.5, rest / weight));
+  return METRICS.map((m) => (m.kind === "step" ? stepRows : Math.max(1, Math.round(m.weight * factor))));
+}
+
+/** Rows the overlay needs besides the charts: title, one header per metric, axes, detail, help. */
+export const OVERLAY_CHROME = 1 + METRICS.length + 3 + 3 + 1;
+
+/** Overlay body lines (without border), for a given cursor call, width and chart-row budget. */
 export function renderOverlay(
   turns: TurnStat[],
   cursor: number,
   width: number,
-  chartHeight: number,
+  rowBudget: number,
   theme: Pick<Theme, "fg" | "bold">,
 ): { lines: string[]; columns: number } {
-  const inner = Math.max(10, width);
-  const plotWidth = Math.max(4, inner - GUTTER);
-  // Two dots per cell: up to 2*plotWidth calls fit before the view scrolls.
+  const inner = Math.max(20, width);
+  const plotWidth = Math.max(4, inner - GUTTER - 2);
+  // At one dot column per call, 2*plotWidth calls fit before the view scrolls.
   const columns = Math.max(2, plotWidth * 2);
-  // Keep the cursor visible: show the window of `columns` calls that ends at or after it.
   const offset = Math.max(0, Math.min(turns.length - columns, turns.length - 1 - cursor - Math.floor(columns / 4)));
   const visible = window(turns, columns, offset);
   const first = turns.length - offset - visible.length;
+  const x = slots(visible.length, plotWidth);
+  const cursorIndex = cursor - first;
+  const cursorCell = x.cellOf(cursorIndex);
+  const current = turns[cursor];
   const total = turns.reduce((sum, t) => sum + t.cost, 0);
+  const effortDomain = metricFor("effort").domain(defined(visible.map(metricFor("effort").value)));
+  const heights = chartHeights(rowBudget, Math.min(7, effortDomain[1] - effortDomain[0] + 1));
+  const valueWidth = inner >= 80 ? 16 : 0;
+  const axis = (text: string) => theme.fg("dim", text);
   const lines: string[] = [];
   lines.push(
     truncateToWidth(
-      `${theme.bold(theme.fg("accent", "Session Trends"))}  ${theme.fg("muted", `${turns.length} calls · ${turns.at(-1)?.prompt ?? 0} prompts · ${formatCost(total)} · showing ${first + 1}-${first + visible.length}`)}`,
+      `${theme.bold(theme.fg("accent", "Session Trends"))}  ${theme.fg("muted", `calls ${first + 1}-${first + visible.length} of ${turns.length} · ${turns.at(-1)?.prompt ?? 0} prompts · ${formatCost(total)}`)}`,
       inner,
     ),
   );
-  for (const metric of METRICS) {
-    lines.push("");
-    const values = visible.map(metric.value);
-    const chart = lineChart(values, plotWidth, chartHeight, metric.max);
-    const cursorCell = chart.cellOf(cursor - first);
-    const current = turns[cursor];
-    const value = current ? metric.value(current) : undefined;
-    const ceiling = metric.max ?? Math.max(0, ...values.filter((v): v is number => v !== undefined));
-    const color = metric.key === "context" ? contextColor(current?.contextPercent) : "accent";
-    const fit = (text: string) => text.padEnd(GUTTER - 1).slice(0, GUTTER - 1);
-    const gutterFor = (r: number): string => {
-      if (r === 0) return theme.bold(fit(metric.label));
-      if (r === 1 && chartHeight > 2 && current) return theme.fg("dim", fit(`max ${scaleLabel(metric, ceiling, current)}`));
-      if (r === chartHeight - 1) return theme.fg(color, fit(value === undefined ? "-" : metric.format(value, current!)));
-      return " ".repeat(GUTTER - 1);
-    };
-    chart.rows.forEach((row, r) => {
-      const plot = [...row]
-        .map((ch, i) => {
-          if (i === cursorCell) return ch === " " ? theme.fg("dim", "│") : theme.bold(theme.fg("warning", ch));
-          return theme.fg(color, ch);
+
+  METRICS.forEach((m, mi) => {
+    const height = heights[mi];
+    const { domain, norm } = levels(m, visible);
+    const value = current ? m.value(current) : undefined;
+    const valueColor = m.key === "context" ? contextColor(current?.contextPercent) : "accent";
+    // Header: label, the cursor call's value, then a session aggregate.
+    const header = `${theme.bold(m.label.padEnd(11))} ${theme.bold(theme.fg(valueColor, (value === undefined ? "-" : m.format(value, current!)).padEnd(valueWidth)))} ${theme.fg("muted", m.summary(turns))}`;
+    lines.push(truncateToWidth(header, inner));
+
+    const rows = plot(norm, m.kind, x, plotWidth, height);
+    // Ticks: top and bottom of the domain; the midpoint too on tall linear charts.
+    const ticks = new Map<number, string>([[0, m.tick(domain[1])]]);
+    if (height > 1) ticks.set(height - 1, m.tick(domain[0]));
+    if (height >= 4 && !m.log && m.kind !== "step") ticks.set(Math.floor((height - 1) / 2), m.tick((domain[0] + domain[1]) / 2));
+    if (m.kind === "step") {
+      // One row per level, each named.
+      for (let r = 0; r < height; r++) ticks.set(r, m.tick(domain[1] - r));
+    }
+    rows.forEach((row, r) => {
+      const plotted = [...row]
+        .map((ch, cell) => {
+          if (cell === cursorCell) return ch === " " ? axis("│") : theme.bold(theme.fg("warning", ch));
+          if (m.key === "context") return theme.fg(contextColor(visible[x.callAt(cell)]?.contextPercent), ch);
+          return theme.fg(m.kind === "step" ? "muted" : "accent", ch);
         })
         .join("");
-      lines.push(truncateToWidth(`${gutterFor(r)} ${plot}`, inner));
+      lines.push(truncateToWidth(`${axis((ticks.get(r) ?? "").slice(0, GUTTER).padStart(GUTTER))} ${axis("┤")}${plotted}`, inner));
     });
-  }
-  {
-    const axisChart = lineChart(visible.map(() => 0), plotWidth, 1, 1);
-    const cells = new Array<string>(plotWidth).fill(" ");
-    const cursorPrompt = turns[cursor]?.prompt;
-    visible.forEach((call, i) => {
-      if (!call.promptStart) return;
-      const cell = axisChart.cellOf(i);
-      cells[cell] = call.prompt === cursorPrompt ? theme.fg("warning", "▲") : theme.fg("dim", "╵");
-    });
-    lines.push("");
-    lines.push(truncateToWidth(`${theme.fg("dim", "prompts".padEnd(GUTTER - 1))} ${cells.join("")}`, inner));
-  }
+  });
+
+  // X axis: a tick where each prompt starts (the cursor's prompt highlighted), its number below.
+  const ticks = new Array<string>(plotWidth).fill(axis("─"));
+  const labels = new Array<string>(plotWidth).fill(" ");
+  let free = 0;
+  visible.forEach((call, i) => {
+    if (!call.promptStart) return;
+    const cell = x.cellOf(i);
+    const mine = call.prompt === current?.prompt;
+    ticks[cell] = mine ? theme.fg("warning", "┴") : axis("┴");
+    const label = `${call.prompt}`;
+    if (cell >= free && cell + label.length <= plotWidth) {
+      [...label].forEach((ch, k) => (labels[cell + k] = mine ? theme.fg("warning", ch) : axis(ch)));
+      free = cell + label.length + 1;
+    }
+  });
+  lines.push(truncateToWidth(`${" ".repeat(GUTTER)} ${axis("└")}${ticks.join("")}`, inner));
+  lines.push(truncateToWidth(`${axis("prompt".padStart(GUTTER))}  ${labels.join("")}`, inner));
+
   lines.push("");
-  const current = turns[cursor];
   if (current) {
     // Wrap the detail at its " · " separators instead of cutting it off.
     let line = "";
@@ -201,7 +247,7 @@ export function renderOverlay(
     }
     if (line) lines.push(truncateToWidth(line, inner));
   }
-  lines.push(theme.fg("dim", truncateToWidth("←/→ call  [/] prompt  shift+←/→ 10  home/end  esc", inner)));
+  lines.push(axis(truncateToWidth("←/→ call  [/] prompt  shift+←/→ 10  home/end  esc", inner)));
   return { lines, columns };
 }
 
@@ -235,8 +281,7 @@ async function showOverlay(ctx: ExtensionCommandContext, turns: TurnStat[]): Pro
         render(width: number) {
           const inner = Math.max(10, width - 4);
           const rows = process.stdout.rows || 40;
-          const chartHeight = Math.max(1, Math.min(6, Math.floor((rows * 0.9 - 10) / METRICS.length) - 1));
-          const { lines } = renderOverlay(turns, cursor, inner, chartHeight, theme);
+          const { lines } = renderOverlay(turns, cursor, inner, Math.floor(rows * 0.95) - 2 - OVERLAY_CHROME, theme);
           const pad = (line: string) => line + " ".repeat(Math.max(0, inner - visibleWidth(line)));
           return [
             border(`╭${"─".repeat(width - 2)}╮`),

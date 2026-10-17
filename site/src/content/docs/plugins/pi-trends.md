@@ -20,7 +20,7 @@ Each point is one model call (one assistant response). A prompt (your message) u
 Example widget (illustration, not a screenshot):
 
 ```
-ctx ▁▂▃▄▆▂▃ 31%  effort ▄▄▆▆▄▂▂ medium  tok ▂▃█▄▂▁▂ 48k  cost ▂▃█▄▂▁▂ $0.041 · 71 calls/3 prompts
+ctx ▁▂▃▄▆▂▃ 31%  effort ▄▄▆▆▄▂▂ medium  cost ▂▃█▄▂▁▂ $2.64  new ▂▃█▄▂▁▂ 323k · 71 calls/3 prompts
 ```
 
 ## Keys and modes
@@ -30,13 +30,28 @@ ctx ▁▂▃▄▆▂▃ 31%  effort ▄▄▆▆▄▂▂ medium  tok ▂▃�
 | Overlay | `←`/`→` (or `h`/`l`) move the call cursor; `[`/`]` jump to the previous/next prompt; `shift+←/→` (`H`/`L`) jump 10; `Home`/`End` (`g`/`G`); `esc` or `q` closes. |
 | Anywhere | `ctrl+shift+g` toggles the widget. |
 
-The overlay draws one braille line chart per metric (2x4 dots per cell, so twice as many calls as columns fit before it scrolls), with a vertical cursor on the selected call and its full details on the bottom line. Context bars are coloured by fill (under 50%, under 80%, above).
+## Reading the charts
+
+All charts share one x-axis: each call gets the same horizontal slot in every chart, so a call lines up vertically. Under the charts, `┴` ticks and numbers mark where each prompt starts; the cursor's prompt is highlighted. Each chart's header shows the cursor call's value, then a session aggregate.
+
+| Chart | Shape | Y-axis | Header |
+| --- | --- | --- | --- |
+| Context | Filled area (a level that persists between calls), coloured by fill: under 50%, under 80%, above | 0 to a round value just above the peak, so growth stays visible on 1M windows | Cursor %, peak, window size |
+| Effort | Step line: levels change, they do not slide between values | One named row per level used | Cursor level, number of changes |
+| New tokens | Bars (per-call events) | 0 to a round maximum | Uncached input + cache writes, output; session total. Cache reads are excluded because Context already shows them |
+| Cost | Bars | 0 to a round maximum | Cursor cost, session total |
+| Tool calls | Bars | 0 to the maximum | Cursor count, session total |
+| Duration | Bars | Logarithmic, so one long `bg_wait` does not flatten the rest | Cursor duration, session total |
+
+A cache miss shows up as a single spike in both New tokens and Cost.
+
+The widget shows the current level for Context and Effort, and session totals for the rest.
 
 ## How it counts
 
 - **Context %** is the response's input + cache read + cache write + output, divided by that model's context window from the model registry.
 - **Effort** is the latest `thinking_level_change` before the call; before any such entry, the current level.
-- **Tokens and cost** are the call's provider-reported usage.
+- **New tokens and cost** are the call's provider-reported usage.
 - **Duration** runs from the previous message (your prompt or the last tool result) to the response, extended to the last result of the tools it called.
 
 [GitHub source](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-trends)

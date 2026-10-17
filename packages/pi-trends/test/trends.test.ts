@@ -1,6 +1,6 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
-import { columnChart, lineChart, sparkline } from "../src/chart.ts";
+import { niceMax, normalize, plot, slots, sparkline } from "../src/chart.ts";
 import { formatReport, renderOverlay, renderWidgetLine } from "../src/index.ts";
 import { collectTurns } from "../src/turns.ts";
 
@@ -42,11 +42,27 @@ describe("collectTurns", () => {
 });
 
 describe("charts", () => {
-  it("sparkline scales to max and leaves gaps", () => {
-    expect(sparkline([0, 50, 100, undefined], 100)).toBe("▁▄█ ");
+  it("sparkline maps 0-1 levels and leaves gaps", () => {
+    expect(sparkline([0, 0.5, 1, undefined])).toBe("▁▄█ ");
   });
-  it("columnChart stacks blocks top-down", () => {
-    expect(columnChart([2, 1], 2, 2)).toEqual(["█ ", "██"]);
+  it("niceMax rounds up to 1/2/2.5/5", () => {
+    expect([0.7, 1, 1.2, 2.2, 3, 7, 120].map(niceMax)).toEqual([1, 1, 2, 2.5, 5, 10, 200]);
+  });
+  it("slots align calls across charts", () => {
+    const x = slots(4, 10);
+    expect(x.dotsPerSlot).toBe(5);
+    expect([0, 1, 2, 3].map(x.cellOf)).toEqual([0, 2, 5, 7]);
+    expect(x.callAt(5)).toBe(2);
+  });
+  it("bars fill from the bottom with gaps; steps hold levels", () => {
+    const x = slots(2, 2);
+    expect(plot([1, 0.5], "bars", x, 2, 1)).toEqual(["⡇⡄"]);
+    expect(plot([0, 0], "bars", x, 2, 1)).toEqual(["  "]);
+    const step = plot([0, 1], "step", x, 2, 1)[0];
+    expect(step).toHaveLength(2);
+  });
+  it("log scale keeps small values visible", () => {
+    expect(normalize({ log: true }, 5000, [0, 420_000])).toBeGreaterThan(0.25);
   });
 });
 
@@ -61,11 +77,12 @@ describe("rendering", () => {
     expect(renderWidgetLine([], 40, theme)).toContain("no model calls");
   });
   it("overlay shows every metric and the cursor turn", () => {
-    const { lines } = renderOverlay(turns, 0, 80, 2, theme);
+    const { lines } = renderOverlay(turns, 0, 80, 12, theme);
     const text = lines.join("\n");
-    for (const label of ["Context", "Effort", "Tokens", "Cost", "Tool calls", "Duration"]) expect(text).toContain(label);
+    for (const label of ["Context", "Effort", "New tokens", "Cost", "Tool calls", "Duration"]) expect(text).toContain(label);
     expect(text).toContain("Call 1 (prompt 1)");
-    expect(text).toContain("prompts");
+    expect(text).toContain("prompt");
+    expect(text).toContain("calls 1-3 of 3");
     expect(lines.every((l) => visibleWidth(l) <= 80)).toBe(true);
   });
   it("text report summarizes", () => {
@@ -73,16 +90,3 @@ describe("rendering", () => {
   });
 });
 
-describe("lineChart", () => {
-  it("joins points across the full width", () => {
-    const { rows, cellOf } = lineChart([0, 10], 2, 1, 10);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toHaveLength(2);
-    expect(rows[0].trim()).not.toBe("");
-    expect(cellOf(0)).toBe(0);
-    expect(cellOf(1)).toBe(1);
-  });
-  it("breaks at gaps", () => {
-    expect(lineChart([undefined, undefined], 2, 1).rows[0]).toBe("  ");
-  });
-});

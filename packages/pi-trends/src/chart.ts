@@ -1,18 +1,32 @@
-// Text charts for per-turn metrics: one-row sparklines for the widget and multi-row column charts
-// for the overlay. Pure string output; callers add colour.
+// Text charts for per-call metrics. Every overlay chart shares one slot-based x-axis (a fixed
+// number of braille dot columns per call), so a call lines up vertically across all charts.
+// Levels use areas or step lines; per-call events use bars.
 
 import { EFFORT_LEVELS, effortRank, type TurnStat } from "./turns.ts";
 
 const BLOCKS = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
 
+export type ChartKind = "area" | "step" | "bars";
+
 export interface Metric {
   key: string;
   label: string;
-  /** Numeric value plotted for a turn; undefined leaves a gap. */
-  value: (turn: TurnStat) => number | undefined;
-  /** Fixed chart ceiling; otherwise the visible maximum. */
-  max?: number;
-  format: (value: number, turn: TurnStat) => string;
+  /** How the series reads: a level that persists (area, step) or a per-call event (bars). */
+  kind: ChartKind;
+  /** Relative chart height. */
+  weight: number;
+  /** Logarithmic y-axis, for heavy-tailed values. */
+  log?: boolean;
+  /** Numeric value plotted for a call; undefined leaves a gap. */
+  value: (call: TurnStat) => number | undefined;
+  /** [min, max] of the y-axis for the values in view. */
+  domain: (values: number[]) => [number, number];
+  /** Header value for one call. */
+  format: (value: number, call: TurnStat) => string;
+  /** Y-axis tick label. */
+  tick: (value: number) => string;
+  /** Session aggregate shown after the header value. */
+  summary: (calls: TurnStat[]) => string;
 }
 
 export function formatTokens(value: number): string {
@@ -31,46 +45,115 @@ export function formatDuration(ms: number): string {
 
 export const formatCost = (value: number): string => `$${value < 1 ? value.toFixed(3) : value.toFixed(2)}`;
 
+/** Smallest 1, 2, 2.5 or 5 x 10^k at or above `value`. */
+export function niceMax(value: number): number {
+  if (!(value > 0)) return 1;
+  const power = 10 ** Math.floor(Math.log10(value));
+  for (const step of [1, 2, 2.5, 5, 10]) if (step * power >= value * (1 - 1e-9)) return step * power;
+  return 10 * power;
+}
+
+const sum = (calls: TurnStat[], f: (c: TurnStat) => number) => calls.reduce((total, c) => total + f(c), 0);
+const freshTokens = (c: TurnStat) => c.input + c.cacheWrite + c.output;
+const shortCost = (v: number) => (v === 0 ? "$0" : v < 0.01 ? `$${v.toFixed(3)}` : v < 1 ? `$${v.toFixed(2)}` : `$${v.toFixed(1)}`);
+
 export const METRICS: Metric[] = [
-  { key: "context", label: "Context", value: (t) => t.contextPercent, max: 100, format: (v) => `${v.toFixed(0)}%` },
-  { key: "effort", label: "Effort", value: (t) => effortRank(t.effort), max: EFFORT_LEVELS.length - 1, format: (_v, t) => t.effort },
-  { key: "tokens", label: "Tokens", value: (t) => t.input + t.output + t.cacheRead + t.cacheWrite, format: (v) => formatTokens(v) },
-  { key: "cost", label: "Cost", value: (t) => t.cost, format: (v) => formatCost(v) },
-  { key: "tools", label: "Tool calls", value: (t) => t.toolCalls, format: (v) => `${v}` },
-  { key: "duration", label: "Duration", value: (t) => t.durationMs, format: (v) => formatDuration(v) },
+  {
+    key: "context",
+    label: "Context",
+    kind: "area",
+    weight: 4,
+    value: (c) => c.contextPercent,
+    // Zoomed to just above the peak: a 1M window would otherwise leave the area flat on the floor.
+    domain: (values) => [0, Math.min(100, niceMax(Math.max(10, ...values) * 1.05))],
+    format: (v) => `${v.toFixed(0)}%`,
+    tick: (v) => `${v.toFixed(0)}%`,
+    summary: (calls) => {
+      const peak = Math.max(0, ...calls.map((c) => c.contextPercent ?? 0));
+      const window = calls.at(-1)?.contextWindow;
+      return [`peak ${peak.toFixed(0)}%`, window ? `${formatTokens(window)} window` : undefined].filter(Boolean).join(" · ");
+    },
+  },
+  {
+    key: "effort",
+    label: "Effort",
+    kind: "step",
+    weight: 2,
+    value: (c) => effortRank(c.effort),
+    // Only the levels actually used; the chart gets one row per level.
+    domain: (values) => {
+      const lo = Math.min(...values);
+      const hi = Math.max(...values);
+      return Number.isFinite(lo) ? [lo, hi] : [0, 0];
+    },
+    format: (_v, c) => c.effort,
+    tick: (v) => EFFORT_LEVELS[Math.round(v)] ?? "",
+    summary: (calls) => {
+      const changes = calls.filter((c, i) => i > 0 && c.effort !== calls[i - 1].effort).length;
+      return `${changes} change${changes === 1 ? "" : "s"}`;
+    },
+  },
+  {
+    key: "tokens",
+    label: "New tokens",
+    kind: "bars",
+    weight: 3,
+    value: freshTokens,
+    domain: (values) => [0, niceMax(Math.max(0, ...values))],
+    format: (_v, c) => `${formatTokens(c.input + c.cacheWrite)} in, ${formatTokens(c.output)} out`,
+    tick: formatTokens,
+    summary: (calls) => `Σ ${formatTokens(sum(calls, freshTokens))} · cache reads excluded`,
+  },
+  {
+    key: "cost",
+    label: "Cost",
+    kind: "bars",
+    weight: 3,
+    value: (c) => c.cost,
+    domain: (values) => [0, niceMax(Math.max(0, ...values))],
+    format: (v) => formatCost(v),
+    tick: shortCost,
+    summary: (calls) => `Σ ${formatCost(sum(calls, (c) => c.cost))}`,
+  },
+  {
+    key: "tools",
+    label: "Tool calls",
+    kind: "bars",
+    weight: 2,
+    value: (c) => c.toolCalls,
+    domain: (values) => [0, Math.max(1, ...values)],
+    format: (v) => `${v}`,
+    tick: (v) => `${Math.round(v)}`,
+    summary: (calls) => `Σ ${sum(calls, (c) => c.toolCalls)}`,
+  },
+  {
+    key: "duration",
+    label: "Duration",
+    kind: "bars",
+    weight: 3,
+    log: true,
+    value: (c) => c.durationMs,
+    domain: (values) => [0, Math.max(1000, ...values)],
+    format: (v) => formatDuration(v),
+    tick: (v) => (v === 0 ? "0" : formatDuration(v)),
+    summary: (calls) => `Σ ${formatDuration(sum(calls, (c) => c.durationMs))} · log scale`,
+  },
 ];
 
-function scale(values: (number | undefined)[], max?: number): number {
-  const visible = values.filter((v): v is number => v !== undefined && Number.isFinite(v));
-  return max ?? Math.max(0, ...visible);
-}
-
-/** One block character per value, scaled to `max` (or the largest value). */
-export function sparkline(values: (number | undefined)[], max?: number): string {
-  const ceiling = scale(values, max);
-  return values
-    .map((v) => {
-      if (v === undefined || !Number.isFinite(v)) return " ";
-      if (ceiling <= 0) return BLOCKS[1];
-      const eighths = Math.round((Math.min(v, ceiling) / ceiling) * 8);
-      return BLOCKS[Math.max(1, eighths)];
-    })
-    .join("");
-}
-
-/** Column chart `height` rows tall, top row first; each value is one column. */
-export function columnChart(values: (number | undefined)[], height: number, max?: number): string[] {
-  const ceiling = scale(values, max);
-  const fills = values.map((v) => {
-    if (v === undefined || !Number.isFinite(v)) return 0;
-    if (ceiling <= 0) return 1;
-    return Math.max(1, Math.round((Math.min(v, ceiling) / ceiling) * height * 8));
-  });
-  const rows: string[] = [];
-  for (let row = height - 1; row >= 0; row--) {
-    rows.push(fills.map((fill) => BLOCKS[Math.max(0, Math.min(8, fill - row * 8))]).join(""));
+/** Position of `value` within the metric's domain, 0 to 1. */
+export function normalize(metric: Pick<Metric, "log">, value: number, [lo, hi]: [number, number]): number {
+  if (metric.log) {
+    const f = (v: number) => Math.log10(1 + Math.max(0, v) / 1000);
+    return hi > lo ? Math.max(0, Math.min(1, (f(value) - f(lo)) / (f(hi) - f(lo)))) : 0;
   }
-  return rows;
+  return hi > lo ? Math.max(0, Math.min(1, (value - lo) / (hi - lo))) : 0;
+}
+
+/** One block character per value already normalized to 0-1. */
+export function sparkline(values: (number | undefined)[]): string {
+  return values
+    .map((v) => (v === undefined || !Number.isFinite(v) ? " " : BLOCKS[Math.max(1, Math.round(Math.min(1, Math.max(0, v)) * 8))]))
+    .join("");
 }
 
 const DOT = [
@@ -78,70 +161,65 @@ const DOT = [
   [0x08, 0x10, 0x20, 0x80],
 ];
 
-export interface LineChart {
-  /** Braille rows, top first; one string of `width` cells per row. */
-  rows: string[];
-  /** Cell column holding each value's point. */
+/** Shared x-axis: each call gets `dotsPerSlot` braille dot columns, left to right. */
+export interface Slots {
+  count: number;
+  dotsPerSlot: number;
+  start: (index: number) => number;
+  /** Cell holding the call's first dot column. */
   cellOf: (index: number) => number;
+  /** Call drawn in a cell (the last slot that starts in or before it). */
+  callAt: (cell: number) => number;
+}
+
+export function slots(count: number, width: number): Slots {
+  const dotsPerSlot = Math.max(1, Math.min(6, Math.floor((width * 2) / Math.max(1, count))));
+  return {
+    count,
+    dotsPerSlot,
+    start: (i) => i * dotsPerSlot,
+    cellOf: (i) => Math.floor((i * dotsPerSlot) / 2),
+    callAt: (cell) => Math.min(count - 1, Math.floor((cell * 2 + 1) / dotsPerSlot)),
+  };
 }
 
 /**
- * Braille line chart `width` cells by `height` rows (2x4 dots per cell). Points are spread evenly
- * across the width and joined by straight segments; undefined values break the line.
+ * Braille chart `width` cells by `height` rows. `levels` are values normalized to 0-1 (undefined
+ * leaves a gap). Areas and bars fill from the bottom; step lines hold each level across its slot and
+ * join levels with vertical risers.
  */
-export function lineChart(values: (number | undefined)[], width: number, height: number, max?: number): LineChart {
-  const ceiling = scale(values, max);
+export function plot(levels: (number | undefined)[], kind: ChartKind, x: Slots, width: number, height: number): string[] {
   const dotsX = width * 2;
   const dotsY = height * 4;
   const grid = Array.from({ length: height }, () => new Array<number>(width).fill(0));
-  const xOf = (i: number) => (values.length <= 1 ? 0 : Math.round((i * (dotsX - 1)) / (values.length - 1)));
-  const yOf = (v: number) => {
-    const ratio = ceiling > 0 ? Math.min(v, ceiling) / ceiling : 0;
-    return Math.round((1 - ratio) * (dotsY - 1));
+  const set = (dx: number, dy: number) => {
+    if (dx < 0 || dy < 0 || dx >= dotsX || dy >= dotsY) return;
+    grid[Math.floor(dy / 4)][Math.floor(dx / 2)] |= DOT[dx % 2][dy % 4];
   };
-  const plot = (x: number, y: number) => {
-    if (x < 0 || y < 0 || x >= dotsX || y >= dotsY) return;
-    grid[Math.floor(y / 4)][Math.floor(x / 2)] |= DOT[x % 2][y % 4];
-  };
-  let prev: [number, number] | undefined;
-  values.forEach((v, i) => {
-    if (v === undefined || !Number.isFinite(v)) {
-      prev = undefined;
+  let previousY: number | undefined;
+  levels.forEach((level, i) => {
+    if (level === undefined || !Number.isFinite(level)) {
+      previousY = undefined;
       return;
     }
-    const point: [number, number] = [xOf(i), yOf(v)];
-    if (prev) {
-      // Bresenham between consecutive points.
-      let [x0, y0] = prev;
-      const [x1, y1] = point;
-      const dx = Math.abs(x1 - x0);
-      const dy = -Math.abs(y1 - y0);
-      const sx = x0 < x1 ? 1 : -1;
-      const sy = y0 < y1 ? 1 : -1;
-      let err = dx + dy;
-      for (;;) {
-        plot(x0, y0);
-        if (x0 === x1 && y0 === y1) break;
-        const e2 = 2 * err;
-        if (e2 >= dy) {
-          err += dy;
-          x0 += sx;
-        }
-        if (e2 <= dx) {
-          err += dx;
-          y0 += sy;
-        }
-      }
-    } else plot(point[0], point[1]);
-    prev = point;
+    const start = x.start(i);
+    if (kind === "step") {
+      // One row per level: the line runs through the middle of its row.
+      const y = (height - 1 - Math.round(level * (height - 1))) * 4 + 1;
+      if (previousY !== undefined) for (let dy = Math.min(y, previousY); dy <= Math.max(y, previousY); dy++) set(start, dy);
+      for (let dx = start; dx < start + x.dotsPerSlot; dx++) set(dx, y);
+      previousY = y;
+      return;
+    }
+    // Areas are continuous; bars leave a one-dot gap when slots are wide enough.
+    const barWidth = kind === "bars" && x.dotsPerSlot >= 2 ? x.dotsPerSlot - 1 : x.dotsPerSlot;
+    const filled = level > 0 ? Math.max(1, Math.round(level * dotsY)) : 0;
+    for (let dx = start; dx < start + barWidth; dx++) for (let k = 0; k < filled; k++) set(dx, dotsY - 1 - k);
   });
-  return {
-    rows: grid.map((row) => row.map((bits) => (bits ? String.fromCharCode(0x2800 + bits) : " ")).join("")),
-    cellOf: (i) => Math.floor(xOf(i) / 2),
-  };
+  return grid.map((row) => row.map((bits) => (bits ? String.fromCharCode(0x2800 + bits) : " ")).join(""));
 }
 
-/** The last `count` turns, ending `offset` turns before the newest. */
+/** The last `count` items, ending `offset` items before the newest. */
 export function window<T>(items: readonly T[], count: number, offset = 0): T[] {
   const end = Math.max(0, items.length - offset);
   return items.slice(Math.max(0, end - count), end);
