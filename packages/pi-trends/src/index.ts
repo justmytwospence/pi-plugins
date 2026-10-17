@@ -1,6 +1,6 @@
 // pi-trends: per-turn trends of context %, effort, tokens, cost, tool calls and duration.
 // A one-line sparkline widget (toggled with a shortcut or `/trends widget`) and a `/trends`
-// overlay with a column chart per metric and a movable turn cursor. History is rebuilt from the
+// overlay with a braille line chart per metric and a movable turn cursor. History is rebuilt from the
 // current branch's session entries, so it survives resume, reload, /tree and compaction.
 
 import { existsSync, readFileSync } from "node:fs";
@@ -8,8 +8,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { columnChart, formatCost, formatDuration, formatTokens, METRICS, type Metric, sparkline, window } from "./chart.ts";
-import { collectTurns, type TurnStat } from "./turns.ts";
+import { formatCost, formatDuration, formatTokens, lineChart, METRICS, type Metric, sparkline, window } from "./chart.ts";
+import { collectTurns, EFFORT_LEVELS, type TurnStat } from "./turns.ts";
 
 export const DEFAULT_SHORTCUT = "ctrl+shift+g";
 const WIDGET_KEY = "pi-trends";
@@ -92,6 +92,11 @@ export function renderWidgetLine(turns: TurnStat[], width: number, theme: Pick<T
   return truncateToWidth(segment("context", "ctx", Math.min(turns.length, 4), true), width);
 }
 
+function scaleLabel(metric: Metric, ceiling: number, turn: TurnStat): string {
+  if (metric.key === "effort") return EFFORT_LEVELS[EFFORT_LEVELS.length - 1];
+  return metric.format(ceiling, turn);
+}
+
 export function turnDetail(turn: TurnStat): string {
   const parts = [
     `Turn ${turn.index}`,
@@ -129,13 +134,12 @@ export function renderOverlay(
 ): { lines: string[]; columns: number } {
   const inner = Math.max(10, width);
   const plotWidth = Math.max(4, inner - GUTTER);
-  const barWidth = Math.max(1, Math.min(3, Math.floor(plotWidth / Math.max(1, turns.length))));
-  const columns = Math.max(1, Math.floor(plotWidth / barWidth));
+  // Two dots per cell: up to 2*plotWidth turns fit before the view scrolls.
+  const columns = Math.max(2, plotWidth * 2);
   // Keep the cursor visible: show the window of `columns` turns that ends at or after it.
   const offset = Math.max(0, Math.min(turns.length - columns, turns.length - 1 - cursor - Math.floor(columns / 4)));
   const visible = window(turns, columns, offset);
   const first = turns.length - offset - visible.length;
-  const cursorCol = cursor - first;
   const total = turns.reduce((sum, t) => sum + t.cost, 0);
   const lines: string[] = [];
   lines.push(
@@ -144,25 +148,30 @@ export function renderOverlay(
       inner,
     ),
   );
-  lines.push("");
-  for (const m of METRICS) {
-    const values = visible.map(m.value);
-    const rows = columnChart(values, chartHeight, m.max);
+  for (const metric of METRICS) {
+    lines.push("");
+    const values = visible.map(metric.value);
+    const chart = lineChart(values, plotWidth, chartHeight, metric.max);
+    const cursorCell = chart.cellOf(cursor - first);
     const current = turns[cursor];
-    const value = current ? m.value(current) : undefined;
-    const label = theme.bold(m.label.padEnd(GUTTER - 1).slice(0, GUTTER - 1));
-    rows.forEach((row, r) => {
-      const chars = [...row];
-      const plot = chars
+    const value = current ? metric.value(current) : undefined;
+    const ceiling = metric.max ?? Math.max(0, ...values.filter((v): v is number => v !== undefined));
+    const color = metric.key === "context" ? contextColor(current?.contextPercent) : "accent";
+    const fit = (text: string) => text.padEnd(GUTTER - 1).slice(0, GUTTER - 1);
+    const gutterFor = (r: number): string => {
+      if (r === 0) return theme.bold(fit(metric.label));
+      if (r === 1 && chartHeight > 2 && current) return theme.fg("dim", fit(`max ${scaleLabel(metric, ceiling, current)}`));
+      if (r === chartHeight - 1) return theme.fg(color, fit(value === undefined ? "-" : metric.format(value, current!)));
+      return " ".repeat(GUTTER - 1);
+    };
+    chart.rows.forEach((row, r) => {
+      const plot = [...row]
         .map((ch, i) => {
-          const cell = ch.repeat(barWidth);
-          if (i === cursorCol) return theme.fg("accent", ch === " " ? "·".repeat(barWidth) : cell);
-          const color = m.key === "context" ? contextColor(visible[i]?.contextPercent) : "muted";
-          return theme.fg(color, cell);
+          if (i === cursorCell) return ch === " " ? theme.fg("dim", "│") : theme.bold(theme.fg("warning", ch));
+          return theme.fg(color, ch);
         })
         .join("");
-      const gutter = r === 0 ? label : r === rows.length - 1 ? theme.fg("dim", (value === undefined ? "-" : m.format(value, current!)).padEnd(GUTTER - 1)) : " ".repeat(GUTTER - 1);
-      lines.push(truncateToWidth(`${gutter} ${plot}`, inner));
+      lines.push(truncateToWidth(`${gutterFor(r)} ${plot}`, inner));
     });
   }
   lines.push("");
@@ -206,7 +215,7 @@ async function showOverlay(ctx: ExtensionCommandContext, turns: TurnStat[]): Pro
         render(width: number) {
           const inner = Math.max(10, width - 4);
           const rows = process.stdout.rows || 40;
-          const chartHeight = Math.max(1, Math.min(4, Math.floor((rows * 0.9 - 9) / METRICS.length)));
+          const chartHeight = Math.max(1, Math.min(6, Math.floor((rows * 0.9 - 10) / METRICS.length) - 1));
           const { lines } = renderOverlay(turns, cursor, inner, chartHeight, theme);
           const pad = (line: string) => line + " ".repeat(Math.max(0, inner - visibleWidth(line)));
           return [

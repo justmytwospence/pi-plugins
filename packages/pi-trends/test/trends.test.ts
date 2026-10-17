@@ -1,6 +1,6 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
-import { columnChart, sparkline } from "../src/chart.ts";
+import { columnChart, lineChart, sparkline } from "../src/chart.ts";
 import { formatReport, renderOverlay, renderWidgetLine } from "../src/index.ts";
 import { collectTurns } from "../src/turns.ts";
 
@@ -66,5 +66,19 @@ describe("rendering", () => {
   });
   it("text report summarizes", () => {
     expect(formatReport(turns)).toMatch(/2 turns/);
+  });
+});
+
+describe("lineChart", () => {
+  it("joins points across the full width", () => {
+    const { rows, cellOf } = lineChart([0, 10], 2, 1, 10);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveLength(2);
+    expect(rows[0].trim()).not.toBe("");
+    expect(cellOf(0)).toBe(0);
+    expect(cellOf(1)).toBe(1);
+  });
+  it("breaks at gaps", () => {
+    expect(lineChart([undefined, undefined], 2, 1).rows[0]).toBe("  ");
   });
 });

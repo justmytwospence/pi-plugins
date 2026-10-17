@@ -73,6 +73,74 @@ export function columnChart(values: (number | undefined)[], height: number, max?
   return rows;
 }
 
+const DOT = [
+  [0x01, 0x02, 0x04, 0x40],
+  [0x08, 0x10, 0x20, 0x80],
+];
+
+export interface LineChart {
+  /** Braille rows, top first; one string of `width` cells per row. */
+  rows: string[];
+  /** Cell column holding each value's point. */
+  cellOf: (index: number) => number;
+}
+
+/**
+ * Braille line chart `width` cells by `height` rows (2x4 dots per cell). Points are spread evenly
+ * across the width and joined by straight segments; undefined values break the line.
+ */
+export function lineChart(values: (number | undefined)[], width: number, height: number, max?: number): LineChart {
+  const ceiling = scale(values, max);
+  const dotsX = width * 2;
+  const dotsY = height * 4;
+  const grid = Array.from({ length: height }, () => new Array<number>(width).fill(0));
+  const xOf = (i: number) => (values.length <= 1 ? 0 : Math.round((i * (dotsX - 1)) / (values.length - 1)));
+  const yOf = (v: number) => {
+    const ratio = ceiling > 0 ? Math.min(v, ceiling) / ceiling : 0;
+    return Math.round((1 - ratio) * (dotsY - 1));
+  };
+  const plot = (x: number, y: number) => {
+    if (x < 0 || y < 0 || x >= dotsX || y >= dotsY) return;
+    grid[Math.floor(y / 4)][Math.floor(x / 2)] |= DOT[x % 2][y % 4];
+  };
+  let prev: [number, number] | undefined;
+  values.forEach((v, i) => {
+    if (v === undefined || !Number.isFinite(v)) {
+      prev = undefined;
+      return;
+    }
+    const point: [number, number] = [xOf(i), yOf(v)];
+    if (prev) {
+      // Bresenham between consecutive points.
+      let [x0, y0] = prev;
+      const [x1, y1] = point;
+      const dx = Math.abs(x1 - x0);
+      const dy = -Math.abs(y1 - y0);
+      const sx = x0 < x1 ? 1 : -1;
+      const sy = y0 < y1 ? 1 : -1;
+      let err = dx + dy;
+      for (;;) {
+        plot(x0, y0);
+        if (x0 === x1 && y0 === y1) break;
+        const e2 = 2 * err;
+        if (e2 >= dy) {
+          err += dy;
+          x0 += sx;
+        }
+        if (e2 <= dx) {
+          err += dx;
+          y0 += sy;
+        }
+      }
+    } else plot(point[0], point[1]);
+    prev = point;
+  });
+  return {
+    rows: grid.map((row) => row.map((bits) => (bits ? String.fromCharCode(0x2800 + bits) : " ")).join("")),
+    cellOf: (i) => Math.floor(xOf(i) / 2),
+  };
+}
+
 /** The last `count` turns, ending `offset` turns before the newest. */
 export function window<T>(items: readonly T[], count: number, offset = 0): T[] {
   const end = Math.max(0, items.length - offset);

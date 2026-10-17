@@ -30,7 +30,7 @@ ctx ▁▂▃▄▆▂▃ 31%  effort ▄▄▆▆▄▂▂ medium  tok ▂▃�
 | Overlay | `←`/`→` (or `h`/`l`) move the turn cursor; `shift+←/→` (`H`/`L`) jump 10; `Home`/`End` (`g`/`G`); `esc` or `q` closes. |
 | Anywhere | `ctrl+shift+g` toggles the widget. |
 
-The overlay draws one column chart per metric, with the cursor turn highlighted and its full details on the bottom line. Context bars are coloured by fill (under 50%, under 80%, above).
+The overlay draws one braille line chart per metric (2x4 dots per cell, so twice as many turns as columns fit before it scrolls), with a vertical cursor on the selected turn and its full details on the bottom line. Context bars are coloured by fill (under 50%, under 80%, above).
 
 ## How it counts
 
