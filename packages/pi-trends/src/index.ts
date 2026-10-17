@@ -1,6 +1,6 @@
 // pi-trends: per-model-call trends of context %, effort, tokens, cost, tool calls and duration.
 // A one-line sparkline widget (toggled with a shortcut or `/trends widget`) and a `/trends`
-// overlay with a braille line chart per metric and a movable call cursor. History is rebuilt from the
+// overlay with a braille chart per metric (areas/steps for levels, bars for events) and a movable call cursor. History is rebuilt from the
 // current branch's session entries, so it survives resume, reload, /tree and compaction.
 
 import { existsSync, readFileSync } from "node:fs";
