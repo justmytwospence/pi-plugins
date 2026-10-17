@@ -15,7 +15,7 @@ plugin: pi-todo
 
 ## Enable and provenance
 
-Select `packages/pi-todo/index.ts` from the suite using [Install & select](/guides/install/). The suite loads all 27 entries by default; every selected component shares one Git pin.
+Select `packages/pi-todo/index.ts` from the suite using [Install & select](/guides/install/). The suite loads all 28 entries by default; every selected component shares one Git pin.
 
 This component imports [`@juicesharp/rpiv-todo`](https://github.com/juicesharp/rpiv-mono/tree/7c9bc924c5bfd148f36d7ebc9f7bd0a9469d633f/packages/rpiv-todo) **2.12.0**, at original commit `7c9bc924c5bfd148f36d7ebc9f7bd0a9469d633f`, with upstream history and MIT attribution preserved. The `todo` tool, `/todos` command, `rpiv-todos` widget key and upstream replay/localization identities stay intact. Do not enable the upstream npm package alongside the suite entry: Pi does not deduplicate different packages with the same registrations.
 

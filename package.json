@@ -41,7 +41,8 @@
       "./packages/pi-btw/src/index.ts",
       "./packages/pi-cc-render/src/index.ts",
       "./packages/pi-markdown-extras/src/index.ts",
-      "./packages/pi-context/src/index.ts"
+      "./packages/pi-context/src/index.ts",
+      "./packages/pi-trends/src/index.ts"
     ],
     "skills": [
       "./packages/pi-btw/skills"
