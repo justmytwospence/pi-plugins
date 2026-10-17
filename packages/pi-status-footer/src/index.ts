@@ -78,6 +78,8 @@ export interface Snapshot {
   bg?: BgItem[];
   /** Built-in MCP servers, connected/configured, unless another extension publishes an `mcp` status. */
   mcp?: McpCount;
+  /** Skills loaded in this session. */
+  skills?: number;
   /** The editor's border lines draw the context gauge, so the context row leaves it out. */
   borderGauge?: boolean;
   /**
@@ -756,6 +758,7 @@ export const ICONS = {
   lens: "\uf06e", // eye (marimo-lens selections)
   bg: "\uf085", // cogs
   mcp: "\uf1e6", // plug
+  skills: "\uf0d0", // magic wand
   notices: "\uf0f3", // bell
   limits: "\uf252", // hourglass half
 } as const;
@@ -872,6 +875,7 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   // keep it inline; the first notice's icon becomes the row's, a bell otherwise.
   // Wrapped lines are indented under the first.
   const notices: { icon?: string; text: string }[] = s.mcp ? [{ icon: ICONS.mcp, text: mcpChip(s.mcp, theme) }] : [];
+  if (s.skills) notices.push({ icon: ICONS.skills, text: `${theme.fg("muted", "Skills")} ${s.skills}` });
   for (const status of statuses) {
     const plainStatus = stripVTControlCharacters(status);
     // Pi's own MCP status already carries the plug (see above).
@@ -1278,6 +1282,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       marimo: absorbed.marimo, lens: absorbed.lens, bg: absorbed.bg, borderGauge, compact: blockedHolds > 0,
       // Yield to an extension that publishes its own mcp status (pi-mcp-adapter).
       mcp: showMcp && !absorbed.mcp ? mcp : undefined,
+      skills: pi.getCommands().filter((command) => command.source === "skill").length,
       now: Date.now(),
     };
   };

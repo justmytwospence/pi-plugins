@@ -1556,6 +1556,10 @@ test("the MCP chip renders with the companion label style and warns on a shortfa
   assert.ok(rows({ connected: 1, total: 3 }).includes("<dim>\uf1e6</dim> <muted>MCP</muted> <warning>1/3</warning>"));
   assert.ok(rows({ connected: 1, total: 3 }, ["Gate off"]).includes("<dim>\uf1e6</dim> <muted>MCP</muted> <warning>1/3</warning><dim> \u00b7 </dim><dim>\uf510</dim> Gate off"));
   assert.ok(!rows(undefined).some((row) => /MCP/.test(row)));
+  const withSkills = mod.renderFooter({ ...fixture(), mcp: { connected: 2, total: 2 }, skills: 7, statuses: ["Gate off"] }, 240, paint).map((row) => row.trim());
+  assert.ok(withSkills.includes("<dim>\uf1e6</dim> <muted>MCP</muted> 2/2<dim> \u00b7 </dim><dim>\uf0d0</dim> <muted>Skills</muted> 7<dim> \u00b7 </dim><dim>\uf510</dim> Gate off"));
+  assert.ok(mod.renderFooter({ ...fixture(), skills: 3 }, 120, paint).some((row) => row.trim() === "<dim>\uf0d0</dim> <muted>Skills</muted> 3"), "skills show without MCP");
+  assert.ok(!mod.renderFooter({ ...fixture(), skills: 0 }, 120, paint).some((row) => /Skills/.test(row)));
   for (const name of ["light", "dark"]) {
     for (let width = 1; width <= 240; width++) {
       assert.ok(mod.renderFooter({ ...fixture(), mcp: { connected: 1, total: 3 }, statuses: ["Gate off"] }, width, getThemeByName(name)).every((row) => visibleWidth(row) <= width));
