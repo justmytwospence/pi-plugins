@@ -54,6 +54,8 @@ The token counts are the conversation the miss re-sends uncached: sending writes
 - **Start a new session.** Opens a new session linked to this one (as its parent), on the same model and thinking level, and sends the prompt there, images included. Also available as `/cache-guard fresh`, which takes the editor's text.
 - **Keep the prompt in the editor.** Esc does the same, and spends nothing. Images attached to the held prompt are not put back.
 
+When the question opens it rings the terminal bell, so a prompt you sent just before switching away does not sit there unnoticed. Inside Herdr it also holds `herdr:blocked` while open, so the pane shows as needing input (sidebar, sound, phone card) instead of idle.
+
 When Jev is not set up (and not turned off), the question ends with a tip: `/cache-guard jev` sets it up, or turns it (and the tip) off.
 
 It also asks when the selected model differs from the one the conversation was cached for (each model has its own cache). For models without a published TTL (for example OpenAI and Codex models) it asks after `warn.idleMinutes` (default 180) idle, worded as a likelihood.

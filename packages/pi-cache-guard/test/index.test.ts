@@ -63,7 +63,10 @@ function harnessWith(entries: unknown[], herdr: HerdrReporter, model: any = opus
   const commands = new Map<string, any>();
   const renderers = new Map<string, any>();
   const appended: Array<{ customType: string; data: any }> = [];
+  const blocked: unknown[] = [];
+  let bells = 0;
   const pi = {
+    events: { emit: (channel: string, data: unknown) => { if (channel === "herdr:blocked") blocked.push(data); }, on: () => () => undefined },
     on: (name: string, handler: any) => { handlers.set(name, [...(handlers.get(name) ?? []), handler]); return () => undefined; },
     registerCommand: (name: string, options: any) => commands.set(name, options),
     registerEntryRenderer: (type: string, renderer: any) => renderers.set(type, renderer),
@@ -116,13 +119,13 @@ function harnessWith(entries: unknown[], herdr: HerdrReporter, model: any = opus
       return { cancelled: false };
     },
   };
-  cacheGuard(pi as any, { herdr });
+  cacheGuard(pi as any, { herdr, bell: () => { bells++; } });
   const emit = async (name: string, event: any) => {
     let result: unknown;
     for (const handler of handlers.get(name) ?? []) result = (await handler(event, ctx)) ?? result;
     return result;
   };
-  return { emit, ui, ctx, commands, sent, sessions, appended, renderers };
+  return { emit, ui, ctx, commands, sent, sessions, appended, renderers, blocked, bells: () => bells };
 }
 
 const input = (text: string, extra: Record<string, unknown> = {}) => ({ type: "input", text, source: "interactive", ...extra });
@@ -157,6 +160,8 @@ describe("extension", () => {
     expect(await h.emit("input", input("next step please"))).toEqual({ action: "handled" });
     expect(h.ui.confirms[0]).toContain("expired 10m ago: this prompt re-caches 601k tokens");
     expect(h.ui.editor).toBe("next step please");
+    expect(h.bells()).toBe(1);
+    expect(h.blocked).toEqual([{ active: true, label: "Prompt cache miss" }, { active: false }]);
     h.ui.answer = "Send anyway";
     expect(await h.emit("input", input("next step please"))).toEqual({ action: "continue" });
   });
@@ -165,6 +170,8 @@ describe("extension", () => {
     const small = harness([assistant(NOW - 900_000, 50_000)]);
     await small.emit("session_start", {});
     expect(await small.emit("input", input("hi"))).toEqual({ action: "continue" });
+    expect(small.bells()).toBe(0);
+    expect(small.blocked).toEqual([]);
     const h = harness([assistant(NOW - 900_000, 600_000)]);
     await h.emit("session_start", {});
     expect(await h.emit("input", input("/compact"))).toEqual({ action: "continue" });

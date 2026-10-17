@@ -37,3 +37,34 @@ export class HerdrReporter {
     return Promise.resolve(true);
   }
 }
+
+// herdr shows a pi agent as blocked (needs input) while any extension holds `herdr:blocked` on pi's
+// event bus, counting `{ active: true, label }` / `{ active: false }` pairs. The cold-cache question
+// holds it while open, so the pane reads as waiting (sidebar, sound, phone card) instead of idle.
+export const HERDR_BLOCKED = "herdr:blocked";
+
+/** Run `run` (a dialog) while holding `herdr:blocked`, released however it ends. */
+export async function whileBlocked<T>(events: EventBus | undefined, label: string, run: () => Promise<T>): Promise<T> {
+  const emit = (data: unknown) => {
+    try {
+      events?.emit(HERDR_BLOCKED, data);
+    } catch {
+      // A failing listener must not break the dialog.
+    }
+  };
+  emit({ active: true, label });
+  try {
+    return await run();
+  } finally {
+    emit({ active: false });
+  }
+}
+
+/** The terminal bell (BEL), so a prompt held by the question is noticed after switching away. */
+export function ringBell(): void {
+  try {
+    if (process.stdout.isTTY) process.stdout.write("\x07");
+  } catch {
+    // No terminal to ring.
+  }
+}

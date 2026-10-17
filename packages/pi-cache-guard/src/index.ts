@@ -11,7 +11,7 @@ import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { type CacheView, type LastRequest, type ModelInfo, lastRequest, view } from "./clock.ts";
 import { loadSettings, saveUserSettings } from "./config.ts";
 import { type Lean, leanContext, trimStatus } from "./context.ts";
-import { HerdrReporter } from "./herdr.ts";
+import { HerdrReporter, ringBell, whileBlocked } from "./herdr.ts";
 import { JEV_LOGINS, type JevState, label, probe } from "./jev.ts";
 import { JEV_KEY_URL, JEV_PITCH } from "./lean.ts";
 import { type AssistantLike, NOTICE_TYPE, type Notice, detectMiss, noticeLine } from "./notices.ts";
@@ -107,7 +107,7 @@ export function choiceMenu(v: CacheView, jev: { ready: boolean; filtered: boolea
   ];
 }
 
-export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrReporter } = {}) {
+export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrReporter; bell?: () => void } = {}) {
   // Inside a herdr pane (through pi-herdr): the `cache` token, so herdr's agents sidebar shows this
   // session when doomed.
   const herdr = options.herdr ?? new HerdrReporter(pi.events);
@@ -260,6 +260,14 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
   });
 
   pi.on("input", async (event, context) => {
+    let rang = false;
+    // Every dialog of the cold-cache flow holds `herdr:blocked`; the first also rings the bell, so a
+    // prompt sent just before switching away is not left waiting unnoticed.
+    const ask = <T>(run: () => Promise<T>) => whileBlocked(pi.events, "Prompt cache miss", () => {
+      if (!rang) (options.bell ?? ringBell)();
+      rang = true;
+      return run();
+    });
     if (!sessionOn || !askOn || event.source !== "interactive" || event.streamingBehavior !== undefined || !context.hasUI) {
       return { action: "continue" };
     }
@@ -274,7 +282,7 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
     const jev = await lean.jev(context);
     const menu = choiceMenu(v, { ready: jev.kind === "ready", filtered: settings.compact.filter });
     const title = `Prompt cache miss. ${describeMiss(v.cold, v.last.tokens, undefined)}${jev.kind === "missing" ? `\n${JEV_TIP}` : ""}`;
-    const picked = await context.ui.select(title, menu.map((item) => item.label));
+    const picked = await ask(() => context.ui.select(title, menu.map((item) => item.label)));
     const choice = menu.find((item) => item.label === picked)?.choice ?? "keep";
     const keep = () => {
       context.ui.setEditorText(event.text);
@@ -310,11 +318,11 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
         return { action: "handled" };
       case "compact": {
         lean.disarm();
-        const how = await context.ui.select("Compact first: what should the summary keep?", [SUMMARY_DEFAULT, SUMMARY_FOCUS, SUMMARY_WRITE]);
+        const how = await ask(() => context.ui.select("Compact first: what should the summary keep?", [SUMMARY_DEFAULT, SUMMARY_FOCUS, SUMMARY_WRITE]));
         let guidance: string | undefined;
         if (how === SUMMARY_FOCUS) guidance = compactionFocus(event.text);
         else if (how === SUMMARY_WRITE) {
-          guidance = await context.ui.input("Guidance for the summary", "what to keep or stress");
+          guidance = await ask(() => context.ui.input("Guidance for the summary", "what to keep or stress"));
           if (guidance === undefined) return keep();
         } else if (how !== SUMMARY_DEFAULT) return keep();
         context.ui.notify("Compacting, then sending your prompt.", "info");
