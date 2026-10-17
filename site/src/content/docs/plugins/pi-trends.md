@@ -37,7 +37,7 @@ All charts share one x-axis: each call gets the same horizontal slot in every ch
 | Chart | Shape | Y-axis | Header |
 | --- | --- | --- | --- |
 | Context | Filled area (a level that persists between calls), coloured by fill: under 50%, under 80%, above | 0 to a round value just above the peak, so growth stays visible on 1M windows | Cursor %, peak, window size |
-| Effort | Step line: levels change, they do not slide between values | One named row per level used | Cursor level, number of changes |
+| Effort | Step line: levels change, they do not slide between values | One named row per level, all seven (off to max) | Cursor level, number of changes |
 | New tokens | Bars (per-call events) | 0 to a round maximum | Uncached input + cache writes, output; session total. Cache reads are excluded because Context already shows them |
 | Cost | Bars | 0 to a round maximum | Cursor cost, session total |
 | Tool calls | Bars | 0 to the maximum | Cursor count, session total |

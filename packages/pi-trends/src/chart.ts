@@ -80,12 +80,8 @@ export const METRICS: Metric[] = [
     kind: "step",
     weight: 2,
     value: (c) => effortRank(c.effort),
-    // Only the levels actually used; the chart gets one row per level.
-    domain: (values) => {
-      const lo = Math.min(...values);
-      const hi = Math.max(...values);
-      return Number.isFinite(lo) ? [lo, hi] : [0, 0];
-    },
+    // Every level, one row each: few enough to show them all, and the scale never shifts.
+    domain: () => [0, EFFORT_LEVELS.length - 1],
     format: (_v, c) => c.effort,
     tick: (v) => EFFORT_LEVELS[Math.round(v)] ?? "",
     summary: (calls) => {

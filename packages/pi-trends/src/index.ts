@@ -174,8 +174,8 @@ export function renderOverlay(
   const cursorCell = x.cellOf(cursorIndex);
   const current = turns[cursor];
   const total = turns.reduce((sum, t) => sum + t.cost, 0);
-  const effortDomain = metricFor("effort").domain(defined(visible.map(metricFor("effort").value)));
-  const heights = chartHeights(rowBudget, Math.min(7, effortDomain[1] - effortDomain[0] + 1));
+  const effortDomain = metricFor("effort").domain([]);
+  const heights = chartHeights(rowBudget, effortDomain[1] - effortDomain[0] + 1);
   const valueWidth = inner >= 80 ? 16 : 0;
   const axis = (text: string) => theme.fg("dim", text);
   const lines: string[] = [];
