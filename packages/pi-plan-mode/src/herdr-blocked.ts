@@ -14,12 +14,22 @@ interface EventBus {
   emit(channel: string, data: unknown): void;
 }
 
+let emittingOwn = false;
+
+/** True while plan mode itself is emitting: pi's event bus runs listeners synchronously. */
+export function isOwnEmit(): boolean {
+  return emittingOwn;
+}
+
 function emitter(events: EventBus | undefined, channel: string) {
   return (data: unknown) => {
+    emittingOwn = true;
     try {
       events?.emit(channel, data);
     } catch {
       // A listener failing must not break the dialog or the work.
+    } finally {
+      emittingOwn = false;
     }
   };
 }

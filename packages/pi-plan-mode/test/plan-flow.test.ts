@@ -635,3 +635,22 @@ test("slash commands in a lane act on that planner; in M they go to your own edi
   await opened;
   assert.equal(context.editorText, "/model");
 });
+
+test("another dialog waiting on you closes the planning screen, and /planners waits until it is answered", async () => {
+  const { mock, context, harness } = setup();
+  const opened = mock.commands.get("planners")?.handler("add a cache", context.ctx);
+  await flush();
+  assert.ok(harness(), "the planning screen is open");
+  // Your main agent's ask_user_question (another extension) holds herdr:blocked.
+  mock.pi.events.emit("herdr:blocked", { active: true, label: "Question" });
+  await opened;
+  assert.ok(context.notifications.some((note) => /asking you something/u.test(note.message)));
+  await mock.commands.get("planners")?.handler("", context.ctx);
+  assert.ok(context.notifications.some((note) => /Answer the open question first/u.test(note.message)));
+  mock.pi.events.emit("herdr:blocked", { active: false });
+  const reopened = mock.commands.get("planners")?.handler("", context.ctx);
+  await flush();
+  harness()?.handleInput("\u001b");
+  harness()?.handleInput("\r");
+  await reopened;
+});

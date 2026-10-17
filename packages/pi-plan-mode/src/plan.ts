@@ -34,7 +34,7 @@ import {
 } from "./editor-contract.js";
 import { editExternally, externalEditorCommand } from "./external-editor.js";
 import { formatImplementationPrompt } from "./handoff.js";
-import { holdBlocked, holdWorking } from "./herdr-blocked.js";
+import { HERDR_BLOCKED_CHANNEL, holdBlocked, holdWorking, isOwnEmit } from "./herdr-blocked.js";
 import {
   formatModelKey,
   formatModelSpec,
@@ -575,6 +575,19 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       safely(() => pi.events.emit(ACTIVITY_SECTION, { section: activity.section }));
   };
   pi.events.on(ACTIVITY_HOST, () => offerActivity());
+
+  // Another extension's dialog that waits on you (your main agent's ask_user_question, a tool-gate
+  // approval, a cache-guard prompt) holds herdr:blocked. Pi draws it under the planning screen,
+  // which is a full-screen overlay, so it would wait unseen: step aside for it.
+  let foreignBlocked = 0;
+  pi.events.on(HERDR_BLOCKED_CHANNEL, (data) => {
+    if (isOwnEmit()) return;
+    const active = (data as { active?: unknown } | undefined)?.active === true;
+    foreignBlocked = Math.max(0, foreignBlocked + (active ? 1 : -1));
+    if (!active || !app) return;
+    app.close();
+    hostCtx?.ui.notify("Your session is asking you something. /planners brings the planning screen back.", "info");
+  });
   pi.on("input", (event) => {
     if ((event as { source?: string }).source === "interactive") activity.seen();
   });
@@ -720,6 +733,10 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
 
   async function openApp(ctx: ExtensionCommandContext, task: string) {
     if (app) return;
+    if (foreignBlocked > 0) {
+      ctx.ui.notify("Answer the open question first; then /planners.", "warning");
+      return;
+    }
     const epoch = branchEpoch;
     await ctx.ui.custom<void>((tui, theme, keybindings, done) => {
       const rows = () => Math.max(12, (tui as unknown as { terminal?: { rows?: number } }).terminal?.rows ?? 40);
