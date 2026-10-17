@@ -3,6 +3,7 @@
 // conversation. M, the pane below the lanes, is your main agent: each plan lands in your main
 // conversation in full, and there your agent can question a planner or record the merged plan
 // (main-chat.ts).
+
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,6 +32,7 @@ import {
   readInputContext,
   requestEditorFactory,
 } from "./editor-contract.js";
+import { editExternally, externalEditorCommand } from "./external-editor.js";
 import { formatImplementationPrompt } from "./handoff.js";
 import { holdBlocked, holdWorking } from "./herdr-blocked.js";
 import {
@@ -887,6 +889,23 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           },
           rowsAvailable: rows,
           requestRender: render,
+          externalEditor: {
+            matches: (data) => keybindings.matches(data, "app.editor.external"),
+            edit: async (text) => {
+              const command = externalEditorCommand(ctx.cwd);
+              if (!command) {
+                ctx.ui.notify("No external editor: set externalEditor in settings, or $VISUAL / $EDITOR.", "warning");
+                return undefined;
+              }
+              tui.stop();
+              try {
+                return await editExternally(command, text);
+              } finally {
+                tui.start();
+                tui.requestRender(true);
+              }
+            },
+          },
         });
         if (onActions) lanesPage.focusActions();
         return lanesPage;

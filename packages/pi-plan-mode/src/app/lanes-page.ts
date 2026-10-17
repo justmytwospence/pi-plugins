@@ -149,6 +149,8 @@ export interface LanesPageOptions {
    */
   mergerShare?: { get(): number | undefined; set(share: number | undefined): void };
   requestRender(): void;
+  /** Ctrl+G (pi's app.editor.external): edit the focused input's text in an external editor. */
+  externalEditor?: { matches(data: string): boolean; edit(text: string): Promise<string | undefined> };
 }
 
 interface QuestionCursor {
@@ -448,6 +450,17 @@ export class LanesPage {
     if (laneAgent && this.picking(laneAgent) && !is("tab", "shift+tab")) {
       this.handleQuestion(laneAgent, data, is);
       return this.options.requestRender();
+    }
+    if (input && this.options.externalEditor?.matches(data)) {
+      const target = input;
+      void this.options.externalEditor
+        .edit(target.getValue())
+        .then((text) => {
+          if (text !== undefined) target.setValue(text);
+        })
+        .catch(() => undefined)
+        .finally(() => this.options.requestRender());
+      return;
     }
     const mode = readEditorMode(input);
     const modalEdit = mode && !idleNormal(input);

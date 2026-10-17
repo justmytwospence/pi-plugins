@@ -912,3 +912,33 @@ test("←/→ on an empty line switch a lane between its plan and its chat, show
   assert.deepEqual(said, [["A", "hi"]]);
   assert.match(shown(), /• started/u, "sending a message shows the chat");
 });
+
+test("ctrl+g edits the focused lane's input in the external editor", async () => {
+  const a = fakeAgent("A");
+  const edited: string[] = [];
+  const page = new LanesPage(theme, {
+    title: "Plan",
+    task: () => "add a cache",
+    agents: () => [a],
+    actions: () => [],
+    onAction: () => undefined,
+    say: () => undefined,
+    hide: () => undefined,
+    stopAll: () => undefined,
+    rowsAvailable: () => 30,
+    requestRender: () => undefined,
+    externalEditor: {
+      matches: (data) => data === ctrl("g"),
+      edit: async (text) => {
+        edited.push(text);
+        return `${text} and more`;
+      },
+    },
+  });
+  for (const ch of "draft") page.handleInput(ch);
+  page.handleInput(ctrl("g"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(edited, ["draft"]);
+  const line = page.render(100).find((row) => row.startsWith("›")) ?? "";
+  assert.ok(line.includes("draft") && line.includes("and more"), line);
+});
