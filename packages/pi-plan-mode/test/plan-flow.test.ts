@@ -642,12 +642,12 @@ test("another dialog waiting on you closes the planning screen, and /planners wa
   await flush();
   assert.ok(harness(), "the planning screen is open");
   // Your main agent's ask_user_question (another extension) holds herdr:blocked.
-  mock.pi.events.emit("herdr:blocked", { active: true, label: "Question" });
+  mock.rawPi.events.emit("herdr:blocked", { active: true, label: "Question" });
   await opened;
   assert.ok(context.notifications.some((note) => /asking you something/u.test(note.message)));
   await mock.commands.get("planners")?.handler("", context.ctx);
   assert.ok(context.notifications.some((note) => /Answer the open question first/u.test(note.message)));
-  mock.pi.events.emit("herdr:blocked", { active: false });
+  mock.rawPi.events.emit("herdr:blocked", { active: false });
   const reopened = mock.commands.get("planners")?.handler("", context.ctx);
   await flush();
   harness()?.handleInput("\u001b");
