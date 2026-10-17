@@ -1,0 +1,185 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { bashPathAccess } from "../src/bash.ts";
+import { DEFAULT_DIRECTORIES, canRead, canWrite, describePolicy, resolvePolicy, scopeOf, under, violations } from "../src/dirs.ts";
+import toolGate from "../src/index.ts";
+import { assistantEntry, fakeJev, harness, userEntry } from "./harness.ts";
+
+const H = homedir();
+const P = path.join(H, "Projects");
+const app = path.join(P, "app");
+
+describe("bashPathAccess", () => {
+  const access = (command: string, cwd = app) => bashPathAccess(command, cwd);
+
+  test("read-only commands read what they name, relative to the directory they run in", () => {
+    expect(access("cat ~/Projects/other/README.md")).toEqual({ reads: [`${P}/other/README.md`], writes: [] });
+    expect(access("rg foo ../other src")).toEqual({ reads: [`${P}/other`], writes: [] });
+    expect(access("git -C ~/dotfiles log").reads).toContain(`${H}/dotfiles`);
+  });
+
+  test("words without a slash are not paths, and URLs are not files", () => {
+    expect(access("git status && npm test")).toEqual({ reads: [], writes: [] });
+    expect(access("curl -s https://example.com/a/b")).toEqual({ reads: [], writes: [] });
+  });
+
+  test("writes: redirects, filesystem commands, cp's destination, sed -i", () => {
+    expect(access("echo hi > ~/Projects/other/x").writes).toEqual([`${P}/other/x`]);
+    expect(access("rm -rf ../other/build").writes).toEqual([`${P}/other/build`]);
+    expect(access("cp src/a.ts ~/Projects/other/a.ts")).toEqual({ reads: [`${app}/src/a.ts`], writes: [`${P}/other/a.ts`] });
+    expect(access("sed -i s/a/b/ ~/Projects/other/f")).toMatchObject({ writes: [`${P}/other/f`] });
+    expect(access("sed s/a/b/ ~/Projects/other/f")).toMatchObject({ writes: [], reads: expect.arrayContaining([`${P}/other/f`]) });
+    expect(access("2>/dev/null ls ~/x").writes).toEqual([]);
+    expect(access("wc -l < ~/Projects/other/f 2>/dev/null")).toEqual({ reads: [`${P}/other/f`], writes: [] });
+  });
+
+  test("other programs are assumed to write what they name", () => {
+    expect(access("python3 ~/Projects/other/tool.py").writes).toEqual([`${P}/other/tool.py`]);
+  });
+
+  test("a part run elsewhere reads that directory, or writes it when it does more than read", () => {
+    expect(access("cd ~/Projects/other && git status")).toEqual({ reads: [`${P}/other`], writes: [] });
+    expect(access("cd ~/Projects/other && make")).toEqual({ reads: [], writes: [`${P}/other`] });
+  });
+
+  test("sh -c and here-documents", () => {
+    expect(access("sh -c 'cat ~/Projects/other/a'").reads).toEqual([`${P}/other/a`]);
+    expect(access("cat > notes.md <<'EOF'\nsee ~/Projects/other/x\nEOF")).toEqual({ reads: [], writes: [`${app}/notes.md`] });
+  });
+});
+
+describe("policy", () => {
+  const policy = (over: Partial<typeof DEFAULT_DIRECTORIES> = {}, project = [app]) => resolvePolicy({ ...DEFAULT_DIRECTORIES, ...over }, project);
+
+  test("globs and plain paths", () => {
+    expect(under(`${P}/herdr-undo/x`, `${P}/herdr-*`)).toBe(true);
+    expect(under(`${P}/herdr`, `${P}/herdr-*`)).toBe(false);
+    expect(under(`${P}/appx`, `${P}/app`)).toBe(false);
+  });
+
+  test("default: the project, and anything outside the private roots, is readable; writes stay in the project and temp", () => {
+    const p = policy();
+    expect(canRead(p, `${app}/src/a.ts`)).toBe(true);
+    expect(canRead(p, "/usr/include/stdio.h")).toBe(true);
+    expect(canRead(p, `${H}/.config/git/config`)).toBe(true);
+    expect(canRead(p, `${P}/other/a`)).toBe(false);
+    expect(canRead(p, `${H}/Documents/tax.pdf`)).toBe(false);
+    expect(canWrite(p, `${app}/a`)).toBe(true);
+    expect(canWrite(p, "/tmp/x")).toBe(true);
+    expect(canWrite(p, `${H}/.cache/x`)).toBe(true);
+    expect(canWrite(p, `${H}/.zshrc`)).toBe(false);
+  });
+
+  test("grants: read anywhere, read lists, write lists with globs; a worktree's main checkout belongs to the project", () => {
+    expect(canRead(policy({ read: ["*"] }), `${P}/other/a`)).toBe(true);
+    expect(canWrite(policy({ read: ["*"] }), `${P}/other/a`)).toBe(false);
+    expect(canRead(policy({ read: ["~/Projects/other"] }), `${P}/other/a`)).toBe(true);
+    const w = policy({ write: ["~/dotfiles", "~/Projects/herdr-*"] });
+    expect(canWrite(w, `${H}/dotfiles/x`)).toBe(true);
+    expect(canWrite(w, `${P}/herdr-undo/x`)).toBe(true);
+    expect(canRead(w, `${P}/herdr-undo/x`)).toBe(true);
+    expect(canWrite(policy({}, [`${app}/.worktrees/b`, app]), `${app}/x`)).toBe(true);
+  });
+
+  test("a grant covers the folder under a private root", () => {
+    const p = policy();
+    expect(scopeOf(p, `${P}/other/src/a.ts`, "read")).toBe(`${P}/other`);
+    expect(scopeOf(p, `${H}/.zshrc`, "write")).toBe(H);
+    expect(violations(p, { reads: [`${P}/other/a`], writes: [`${H}/.zshrc`] })).toEqual([
+      { access: "write", file: `${H}/.zshrc`, scope: H },
+      { access: "read", file: `${P}/other/a`, scope: `${P}/other` },
+    ]);
+    expect(describePolicy(p)).toMatch(/^Project: ~\/Projects\/app\./u);
+  });
+});
+
+describe("the gate", () => {
+  let configDir: string;
+  beforeEach(() => {
+    configDir = mkdtempSync(path.join(tmpdir(), "pi-tool-gate-dirs-"));
+    vi.stubEnv("XDG_CONFIG_HOME", path.join(configDir, "xdg"));
+    vi.stubEnv("PI_CODING_AGENT_DIR", path.join(configDir, "pi"));
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(configDir, { recursive: true, force: true });
+  });
+
+  const safe = {
+    in_scope: { type: "bool", probability: 0.95 },
+    irreversible: { type: "bool", probability: 0.05 },
+    remote_change: { type: "bool", probability: 0.02 },
+    exfiltration: { type: "bool", probability: 0.01 },
+    impact: { type: "score", score: 1, confidence: 0.9 },
+  };
+  const call = (toolName: string, input: Record<string, unknown>, id = "t1") => ({ type: "tool_call", toolCallId: id, toolName, input });
+
+  function setup(directories?: Record<string, unknown>) {
+    if (directories) {
+      mkdirSync(path.join(configDir, "xdg", "agents"), { recursive: true });
+      writeFileSync(path.join(configDir, "xdg", "agents", "tool-gate.json"), JSON.stringify({ directories }));
+    }
+    const h = harness();
+    toolGate(h.pi);
+    const branch: any[] = [userEntry("Fix it"), assistantEntry("On it.")];
+    const jev = fakeJev((q) => (q.workaround ? { workaround: { type: "choice", choice: "skip", probabilities: { skip: 1 }, confidence: 1 } } : safe));
+    const ctx = h.ctx({ cwd: app, modelRegistry: jev.registry, sessionManager: { getBranch: () => branch } });
+    return { h, ctx, jev };
+  }
+
+  test("reads inside the project and outside private roots run; a read of another project is pushed back, then asked", async () => {
+    const { h, ctx, jev } = setup();
+    await h.emit("session_start", {}, ctx);
+    await h.emit("before_agent_start", { prompt: "x" }, ctx);
+    expect(await h.emit("tool_call", call("read", { path: "src/a.ts" }), ctx)).toBeUndefined();
+    expect(await h.emit("tool_call", call("read", { path: "/etc/hosts" }), ctx)).toBeUndefined();
+    const first: any = await h.emit("tool_call", call("read", { path: "~/Projects/other/a.ts" }), ctx);
+    expect(first.block).toBe(true);
+    expect(first.reason).toMatch(/reads ~\/Projects\/other\/a\.ts, outside this project's directories/u);
+    ctx.ui.selectAnswers.push("Allow similar for this session (reads in ~/Projects/other)");
+    expect(await h.emit("tool_call", call("read", { path: "~/Projects/other/a.ts" }, "t2"), ctx)).toBeUndefined();
+    expect(ctx.ui.selects[0]?.options[1]).toBe("Allow similar for this session (reads in ~/Projects/other)");
+    // The folder is granted for the session: no more asking, no Jev.
+    expect(await h.emit("tool_call", call("bash", { command: "rg foo ~/Projects/other" }, "t3"), ctx)).toBeUndefined();
+    expect(ctx.ui.selects).toHaveLength(1);
+    expect(jev.calls.filter((c) => !c.questions.workaround)).toHaveLength(0);
+  });
+
+  test("write grants and read-anywhere come from tool-gate.json", async () => {
+    const { h, ctx, jev } = setup({ read: ["*"], write: ["~/dotfiles"] });
+    await h.emit("session_start", {}, ctx);
+    await h.emit("before_agent_start", { prompt: "x" }, ctx);
+    expect(await h.emit("tool_call", call("read", { path: "~/Projects/other/a.ts" }), ctx)).toBeUndefined();
+    expect(await h.emit("tool_call", call("edit", { path: "~/dotfiles/x", edits: [] }, "t2"), ctx)).toBeUndefined();
+    expect(jev.calls).toHaveLength(1);
+    const held: any = await h.emit("tool_call", call("write", { path: "~/Projects/other/a.ts", content: "" }, "t3"), ctx);
+    expect(held.reason).toMatch(/writes ~\/Projects\/other\/a\.ts/u);
+  });
+
+  test("off: no directory holds", async () => {
+    const { h, ctx } = setup({ enabled: false });
+    await h.emit("session_start", {}, ctx);
+    await h.emit("before_agent_start", { prompt: "x" }, ctx);
+    expect(await h.emit("tool_call", call("read", { path: "~/Projects/other/a.ts" }), ctx)).toBeUndefined();
+  });
+
+  test("chat mode asks about reads outside instead of refusing them; yolo ignores the policy", async () => {
+    const { h, ctx } = setup();
+    await h.emit("session_start", {}, ctx);
+    await h.commands.get("mode").handler("chat", ctx);
+    ctx.ui.selectAnswers.push("Allow once");
+    expect(await h.emit("tool_call", call("read", { path: "~/Projects/other/a.ts" }), ctx)).toBeUndefined();
+    expect(ctx.ui.selects).toHaveLength(1);
+    await h.commands.get("mode").handler("yolo", ctx);
+    expect(await h.emit("tool_call", call("write", { path: "~/Projects/other/a.ts", content: "" }, "t2"), ctx)).toBeUndefined();
+  });
+
+  test("/gate shows the policy", async () => {
+    const { h, ctx } = setup({ write: ["~/dotfiles"] });
+    await h.emit("session_start", {}, ctx);
+    await h.commands.get("gate").handler("", ctx);
+    expect(ctx.ui.notes.at(-1)?.message).toMatch(/Writes: the project, ~\/dotfiles, and/u);
+  });
+});

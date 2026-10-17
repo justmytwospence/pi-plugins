@@ -16,6 +16,7 @@ import {
   alwaysAskBash,
   alwaysAskPath,
   bashKeys,
+  bashPathAccess,
   expandHome,
   isAcceptEditsBash,
   isCredentialPath,
@@ -23,6 +24,17 @@ import {
   secretGitAdds,
 } from "./bash.ts";
 import { loadConfig } from "./config.ts";
+import {
+  DEFAULT_DIRECTORIES,
+  type DirectoriesConfig,
+  type Policy,
+  canWrite,
+  describePolicy,
+  grantKey,
+  resolvePolicy,
+  shown,
+  violations,
+} from "./dirs.ts";
 import { whileBlocked } from "./herdr.ts";
 import { type ClassifierUsage, type JevConfig, askJev } from "./jev.ts";
 import {
@@ -74,6 +86,8 @@ export interface GateConfig extends Record<string, unknown> {
   modes: string[];
   /** The key that cycles the modes; "" for none. */
   cycleShortcut: string;
+  /** Which directories this project reads and writes without asking (dirs.ts). */
+  directories: DirectoriesConfig;
 }
 
 export const DEFAULT_CONFIG: GateConfig = {
@@ -91,6 +105,7 @@ export const DEFAULT_CONFIG: GateConfig = {
   defaultMode: "auto",
   modes: ["default", "acceptEdits", "plan", "auto"],
   cycleShortcut: "shift+tab",
+  directories: DEFAULT_DIRECTORIES,
 };
 
 const STATUS_KEY = "tool-gate";
@@ -102,7 +117,16 @@ const SHELL_TOOLS = new Set(["bash", "bg_run"]);
 
 type Plan =
   | { kind: "allow"; why: string }
-  | { kind: "ask"; reasons: string[]; key: string; args: string }
+  | {
+      kind: "ask";
+      reasons: string[];
+      key: string;
+      args: string;
+      /** "Allow similar" for directory-policy holds: the folders it grants. */
+      similar?: Similar;
+      /** Held only by the directory policy; otherwise the call only reads. */
+      readOnly?: boolean;
+    }
   | { kind: "judge"; args: string; key: string; similar: Similar };
 
 /** What "allow similar for this session" grants: every key, described for the user. */
@@ -273,7 +297,65 @@ export default function toolGate(pi: ExtensionAPI) {
     return ignored;
   };
 
+  /** The project's checkouts: the git checkout `cwd` is in and, for a worktree, its main checkout. */
+  const projects = new Map<string, Promise<string[]>>();
+  const projectOf = (cwd: string) => {
+    let found = projects.get(cwd);
+    if (!found) {
+      found = (async () => {
+        try {
+          const out = await pi.exec("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"], { timeout: 2_000 });
+          const [top, common] = out.stdout.split("\n").map((l) => l.trim());
+          if (out.code !== 0 || !top) return [path.resolve(cwd)];
+          const main = common && path.basename(common) === ".git" ? path.dirname(common) : undefined;
+          return main && main !== top ? [top, main] : [top];
+        } catch {
+          return [path.resolve(cwd)];
+        }
+      })();
+      projects.set(cwd, found);
+    }
+    return found;
+  };
+  const policyFor = async (cwd: string): Promise<Policy> => resolvePolicy(config.directories, await projectOf(cwd));
+
+  /** Paths this call touches that the directory policy does not cover, minus folders granted this session. */
+  const directoryHolds = async (tool: string, input: Record<string, unknown>, cwd: string) => {
+    if (config.directories.enabled === false) return [];
+    let access: { reads: string[]; writes: string[] };
+    if (SHELL_TOOLS.has(tool)) {
+      const dir = tool !== "bash" && typeof input.cwd === "string" && input.cwd ? path.resolve(cwd, expandHome(input.cwd)) : cwd;
+      access = bashPathAccess(String(input.command ?? ""), dir, config.readOnlyCommands);
+      if (dir !== path.resolve(cwd)) (isReadOnlyBash(String(input.command ?? ""), config.readOnlyCommands) ? access.reads : access.writes).push(dir);
+    } else if (tool === "edit" || tool === "write") {
+      access = { reads: [], writes: [path.resolve(cwd, expandHome(String(input.path ?? "")))] };
+    } else if (BUILTIN_READ.has(tool)) {
+      access = { reads: [path.resolve(cwd, expandHome(String(input.path ?? ".") || "."))], writes: [] };
+    } else return [];
+    const policy = await policyFor(cwd);
+    if (tool === "edit" || tool === "write") {
+      // The plan file pi-plan-mode hands out is always writable.
+      if (planFile && access.writes[0] === planFile) return [];
+    }
+    return violations(policy, access).filter((v) => !allowSimilar.has(grantKey(v)));
+  };
+
   const plan = async (tool: string, input: Record<string, unknown>, cwd: string): Promise<Plan> => {
+    const base = await basePlan(tool, input, cwd);
+    const holds = base.kind === "allow" && base.why === "allow list" ? [] : await directoryHolds(tool, input, cwd);
+    if (!holds.length) return base;
+    const reasons = [...new Set(holds.map((v) => `${v.access === "write" ? "writes" : "reads"} ${shown(v.file)}, outside this project's directories`))];
+    const scopes = [...new Map(holds.map((v) => [grantKey(v), v])).values()];
+    const similar: Similar = {
+      keys: scopes.map(grantKey),
+      label: scopes.map((v) => `${v.access}s in ${shown(v.scope)}`).join(", "),
+    };
+    const args = base.kind === "allow" ? clip(SHELL_TOOLS.has(tool) ? String(input.command ?? "") : JSON.stringify(input), 6_000) : base.args;
+    if (base.kind === "ask") return { ...base, reasons: [...base.reasons, ...reasons], key: `${base.key}; dirs` };
+    return { kind: "ask", reasons, key: `dirs:${similar.keys.join("|")}`, args, similar, readOnly: base.kind === "allow" };
+  };
+
+  const basePlan = async (tool: string, input: Record<string, unknown>, cwd: string): Promise<Plan> => {
     if (config.allowTools.includes(tool)) return { kind: "allow", why: "allow list" };
     if (SHELL_TOOLS.has(tool)) {
       const command = String(input.command ?? "");
@@ -487,11 +569,7 @@ export default function toolGate(pi: ExtensionAPI) {
     if (!ctx.hasUI) {
       return { block: true, reason: `${MODE_NAMES[mode]} mode needs the user's approval for this ${tool} call, and there is no user to ask.` };
     }
-    return ask(
-      ctx,
-      { tool, input, ...(p.kind === "ask" ? { held: p.reasons.join("; ") } : {}) },
-      p.kind === "judge" ? p.similar : undefined,
-    );
+    return ask(ctx, { tool, input, ...(p.kind === "ask" ? { held: p.reasons.join("; ") } : {}) }, p.similar);
   };
 
   pi.on("tool_call", async (event, ctx) => {
@@ -513,6 +591,8 @@ export default function toolGate(pi: ExtensionAPI) {
       // Talking, not acting: what the gate counts as read-only runs, nothing else does.
       const p = await plan(tool, input, ctx.cwd);
       if (p.kind === "allow") return allow(ctx);
+      // A read outside the project's directories: yours to allow, as in manual mode.
+      if (p.kind === "ask" && p.readOnly) return askUser(ctx, tool, input, p);
       return {
         block: true,
         reason:
@@ -536,7 +616,7 @@ export default function toolGate(pi: ExtensionAPI) {
 
     if (mode === "default") return askUser(ctx, tool, input, p);
     if (mode === "acceptEdits") {
-      if (p.kind === "judge" && acceptsEdit(tool, input, ctx.cwd)) return allow(ctx);
+      if (p.kind === "judge" && (await acceptsEdit(tool, input, ctx.cwd))) return allow(ctx);
       return askUser(ctx, tool, input, p);
     }
 
@@ -549,7 +629,7 @@ export default function toolGate(pi: ExtensionAPI) {
         family: p.key,
         reason: `tool-gate held this ${tool} call: it ${why}. Calls like this are always held, whatever Jev says.`,
         summary: why,
-        similar: undefined,
+        similar: p.similar,
         state: await judgeStateFor(ctx, tool, p.args, []),
       });
     }
@@ -622,11 +702,12 @@ export default function toolGate(pi: ExtensionAPI) {
   });
 
   /** Accept-edits mode: edits and filesystem commands inside the project. */
-  const acceptsEdit = (tool: string, input: Record<string, unknown>, cwd: string) => {
+  const acceptsEdit = async (tool: string, input: Record<string, unknown>, cwd: string) => {
     const root = path.resolve(cwd);
     if (tool === "edit" || tool === "write") {
+      // Inside the project, or a directory it may write (the plan has already held any other).
       const file = path.resolve(cwd, expandHome(String(input.path ?? "")));
-      return file.startsWith(`${root}${path.sep}`);
+      return file.startsWith(`${root}${path.sep}`) || (config.directories.enabled !== false && canWrite(await policyFor(cwd), file));
     }
     if (!SHELL_TOOLS.has(tool)) return false;
     const dir = tool !== "bash" && typeof input.cwd === "string" && input.cwd ? path.resolve(cwd, expandHome(input.cwd)) : cwd;
@@ -680,6 +761,7 @@ export default function toolGate(pi: ExtensionAPI) {
           `${auto} auto-approved, ${pushedBack} pushed back, ${held} asked this session.`,
           `Jev: ${config.jev.enabled ? `${config.jev.provider}/${config.jev.model}` : "off"}; push-back ${config.pushBack ? "on" : "off"}.`,
           `${rules.length} project rule${rules.length === 1 ? "" : "s"}; ${allowSimilar.size} "allow similar" grant${allowSimilar.size === 1 ? "" : "s"}.`,
+          config.directories.enabled === false ? "Directory policy: off." : describePolicy(await policyFor(ctx.cwd)),
         ].join("\n"),
         "info",
       );

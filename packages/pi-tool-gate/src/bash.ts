@@ -986,3 +986,88 @@ export function isAcceptEditsBash(command: string, cwd: string, extra: readonly 
   });
   return ok && parts > 0;
 }
+
+/** Programs that write every path they name. */
+const WRITES_ALL = new Set([
+  "rm", "rmdir", "trash", "unlink", "shred", "mkdir", "touch", "tee", "ln", "chmod", "chown", "chgrp", "truncate", "mv",
+]);
+/** Programs that read their sources and write their last operand. */
+const WRITES_LAST = new Set(["cp", "rsync", "install", "scp"]);
+
+const REDIRECT = /^[0-9&]*(>>?|<>?|<)/u;
+
+/** Whether a token names a file: it has a slash or starts with `~`, `.` or `$HOME`, and is not a URL. */
+function pathLike(token: string): boolean {
+  if (!token || token.includes("://") || token.startsWith("-")) return false;
+  return token.includes("/") || token === "." || token === ".." || token === "~" || token.startsWith("~") || token.startsWith("$HOME");
+}
+
+/** The file-like words of a simple command's arguments, including `--opt=/path` values. */
+function pathArgs(args: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const a of args) {
+    if (a.startsWith("-")) {
+      const eq = a.indexOf("=");
+      if (eq > 0 && pathLike(a.slice(eq + 1))) out.push(a.slice(eq + 1));
+      continue;
+    }
+    const eq = a.indexOf("=");
+    // dd's `of=/x`, `if=/x`.
+    if (eq > 0 && /^[a-z]+$/u.test(a.slice(0, eq)) && pathLike(a.slice(eq + 1))) out.push(a.slice(eq + 1));
+    else if (pathLike(a)) out.push(a);
+  }
+  return out;
+}
+
+/**
+ * The files and directories a shell command reads and writes, as absolute paths, for the
+ * directory policy. A heuristic: words that look like paths (a slash, `~`, `.`), resolved against
+ * the directory each part runs in (after `cd`), plus write redirects. A read-only part reads what
+ * it names; `rm`, `mv`, `mkdir`, `touch`, `tee`, `ln`, `chmod`... write it; `cp`, `rsync` and
+ * `install` write their last operand; `sed -i` writes its files; any other program is assumed to
+ * write what it names. A part run in another directory (`cd ../x && make`) reads that directory,
+ * or writes it when the part does more than read. Commands in `sh -c` and `eval` are followed.
+ */
+export function bashPathAccess(command: string, cwd: string, extra: readonly string[] = []): { reads: string[]; writes: string[] } {
+  const reads = new Set<string>();
+  const writes = new Set<string>();
+  const resolve = (dir: string, file: string) => path.resolve(dir, expandHome(file));
+  const text = withoutHeredocBodies(command);
+  for (const target of writeRedirects(text)) if (target !== ">") writes.add(resolve(cwd, target));
+  forEachPart(text, cwd, (raw, dir) => {
+    // Redirects (collected above) are not arguments: `2>/dev/null`, `> out`.
+    const tokens = raw.filter((t, i) => !REDIRECT.test(t) && !/^[0-9&]*(>>?|<>?|<)\|?&?$/u.test(raw[i - 1] ?? ""));
+    raw.forEach((t, i) => {
+      const input = /^[0-9]*<([^<>]*)$/u.exec(t);
+      const target = input ? input[1] || raw[i + 1] : undefined;
+      if (target && pathLike(target)) reads.add(resolve(dir, target));
+    });
+    const p = program(tokens);
+    if (!p) return;
+    const readOnly = isReadOnlyPart(tokens, extra);
+    if (dir !== path.resolve(cwd)) (readOnly ? reads : writes).add(dir);
+    const nested = nestedCommands(p);
+    const args = p.args.filter((a) => !nested.includes(a));
+    const files = pathArgs(p.name === "eval" ? [] : args).map((f) => resolve(dir, f));
+    if (readOnly) {
+      for (const f of files) reads.add(f);
+    } else if (WRITES_ALL.has(p.name)) {
+      for (const f of files) writes.add(f);
+    } else if (WRITES_LAST.has(p.name)) {
+      files.forEach((f, i) => (i === files.length - 1 ? writes : reads).add(f));
+    } else if (p.name === "sed") {
+      // Past its script: `s/a/b/` is not a file.
+      const inPlace = p.args.some((a) => /^-[a-zA-Z]*i/u.test(a) || a.startsWith("--in-place"));
+      for (const f of fsOperands("sed", p.args).filter(pathLike)) (inPlace ? writes : reads).add(resolve(dir, f));
+    } else {
+      for (const f of files) writes.add(f);
+    }
+    for (const script of nested) {
+      const inner = bashPathAccess(script, dir, extra);
+      for (const f of inner.reads) reads.add(f);
+      for (const f of inner.writes) writes.add(f);
+    }
+  });
+  for (const f of writes) reads.delete(f);
+  return { reads: [...reads], writes: [...writes] };
+}

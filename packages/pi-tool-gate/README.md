@@ -97,6 +97,31 @@ Dialogs are shown one at a time. In Pi's terminal UI the dialog shows the call i
 
 When Jev cannot answer (Jev off in settings, no classifier model, no credentials, an invalid key, a timeout or another error), the gate warns once and falls back to Pi's tool hints: with a UI it asks you about calls whose tool declares `destructiveHint: true`, or that lack `readOnlyHint` and do not declare both `destructiveHint: false` and `openWorldHint: false` (so tools with no hints are asked about); everything else is allowed. Without a UI every such call is allowed. The always-held rules still apply.
 
+## Directories
+
+Pi has no directory boundary of its own, so the gate keeps one. In auto, manual and accept-edits modes (and for reads in chat and plan mode), a call is held when it touches a path outside its project's directories, before any Jev call. Auto mode pushes it back once, as with any held call, and then asks you. "Allow similar" grants that folder for the session.
+
+- The project (the git checkout of the working directory, and the main checkout of a worktree) is always readable and writable.
+- Private roots (`directories.private`: `~/Projects`, `~/Documents`, `~/Desktop`, `~/Downloads`, iCloud Drive) are neither read nor written outside the project and its grants.
+- Other paths (system and toolchain directories, `~/.config`) can be read. They can be written only under `alwaysWrite` (temp and cache directories) or a `write` grant.
+- `directories.read` grants extra readable directories (`["*"]` reads anywhere). `directories.write` grants extra directories to read and write. Paths take `~` and globs (`~/Projects/herdr-*`). Relative paths are relative to the project.
+
+Put a project's grants in its `.agents/tool-gate.json`, which the opencode and Claude Code ports read too:
+
+```json
+{ "directories": { "read": ["*"], "write": ["~/dotfiles"] } }
+```
+
+The gate finds paths in `read`, `grep`, `find` and `ls` arguments (reads) and `edit` and `write` paths (writes). In shell commands it finds words that look like paths (a slash, `~`, `.`), resolved after any `cd`:
+
+- Read-only commands read them.
+- `rm`, `mv`, `mkdir`, `touch`, `tee`, `ln`, `chmod` and the like write them, `cp`, `rsync` and `install` write their last operand, and `sed -i` writes its files.
+- Any other program is assumed to write what it names.
+- Output redirects write their target, and input redirects read theirs.
+- A command run in another directory reads that directory, or writes it when the command does more than read.
+
+This is a heuristic over arguments. Paths a program builds at runtime are not seen. Yolo mode ignores the policy, as Claude Code's bypass mode ignores its directories. `/gate` shows the resolved policy, and `"directories": { "enabled": false }` turns it off.
+
 ## Commands
 
 - `/mode [chat|manual|accept-edits|plan|auto|yolo]`: switch modes; with no argument, pick one from a list of every mode.
@@ -149,7 +174,14 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
   "pushBack": true,
   "defaultMode": "auto",
   "modes": ["default", "acceptEdits", "plan", "auto"],
-  "cycleShortcut": "shift+tab"
+  "cycleShortcut": "shift+tab",
+  "directories": {
+    "enabled": true,
+    "private": ["~/Projects", "~/Documents", "~/Desktop", "~/Downloads", "~/Library/Mobile Documents"],
+    "read": [],
+    "write": [],
+    "alwaysWrite": ["/tmp", "/private/tmp", "/dev", "$TMPDIR", "~/.cache", "~/Library/Caches", "~/.npm", "~/.bun", "~/.cargo", "~/.rustup", "~/.pyenv", "~/.local/share", "~/.local/state"]
+  }
 }
 ```
 
@@ -162,12 +194,13 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
 - `allowTools`: tools that never need a decision. Setting it replaces the whole default list.
 - `readOnlyCommands`: extra programs treated as read-only in shell commands.
 - `pushBack`: `false` asks you on the first hold instead of blocking it once.
+- `directories`: the [directory policy](#directories). Its lists replace the defaults, so to add a private root, repeat the default ones.
 
 ## Requirements and costs
 
 - Jev runs through Pi's classifier models (`ctx.modelRegistry.classify`), which needs Pi 0.99 or newer, and Pi's credentials for the provider (`TYPESAFE_API_KEY` for the default `typesafe` provider). Without them the hint fallback applies.
 - Each gray-zone call makes one Jev request; each held call makes one more for the workaround (also for always-held calls). These requests can be billed by the provider.
-- It runs `git branch --show-current`, `git status --porcelain` and `git check-ignore` in the working directory, and reads the target file of an edit or write to show a diff. It writes nothing to disk except `tool-gate:decision` entries in the Pi session.
+- It runs `git branch --show-current`, `git status --porcelain`, `git check-ignore` and `git rev-parse --show-toplevel --git-common-dir` in the working directory, and reads the target file of an edit or write to show a diff. It writes nothing to disk except `tool-gate:decision` entries in the Pi session.
 
 ## Optional integrations
 
