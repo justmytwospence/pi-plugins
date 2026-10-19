@@ -19,6 +19,7 @@ import { Text } from "@earendil-works/pi-tui";
 import {
   DEFAULT_SETTINGS,
   NAME,
+  type ColdReason,
   type Settings,
   describeMiss,
   formatClock,
@@ -126,11 +127,19 @@ export function earlyMenu(v: CacheView, jev: { ready: boolean; filtered: boolean
       ]
     : [{ choice: "compact", label: `Compact now (summary reads ${tokens} tokens)` }];
   return [
-    { choice: "keep", label: `Keep the context (your next prompt re-caches ${tokens} tokens)` },
+    { choice: "keep", label: "Keep the context" },
     ...compactions,
     { choice: "fresh", label: `Start a new session${draft ? ", taking the editor's text" : ""} (no history to re-cache)` },
     { choice: "mute", label: "Keep the context, and stop asking in this session" },
   ];
+}
+
+/** The early question's headline: no elapsed time, since it opens the moment the cache goes cold. */
+export function earlyTitle(cold: ColdReason, tokens: number): string {
+  const head = cold.kind === "model"
+    ? `No prompt cache for ${cold.to} (this conversation is cached for ${cold.from}).`
+    : "Prompt cache expired.";
+  return `${head} Your next prompt will re-cache ${formatTokens(tokens)} tokens.`;
 }
 
 export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrReporter; bell?: () => void } = {}) {
@@ -249,7 +258,7 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
       const jev = await lean.jev(context);
       const draft = context.ui.getEditorText();
       const menu = earlyMenu(v, { ready: jev.kind === "ready", filtered: settings.compact.filter }, draft.trim().length > 0);
-      const title = `Prompt cache miss ahead. ${describeMiss(v.cold!, v.last.tokens, undefined, "your next prompt")}${jev.kind === "missing" ? `\n${JEV_TIP}` : ""}`;
+      const title = `${earlyTitle(v.cold!, v.last.tokens)}${jev.kind === "missing" ? `\n${JEV_TIP}` : ""}`;
       const picked = abort.signal.aborted ? undefined : await context.ui.select(title, menu.map((item) => item.label), { signal: abort.signal });
       // Dismissed in code (the agent started, the cache changed, the session ended): not an answer.
       if (abort.signal.aborted) {

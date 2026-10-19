@@ -207,7 +207,7 @@ describe("early question", () => {
   afterEach(() => vi.useRealTimers());
   const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
   const idle = (h: ReturnType<typeof harness>, value = true) => { h.ctx.isIdle = () => value; h.ctx.hasPendingMessages = () => false; return h; };
-  const early = (h: ReturnType<typeof harness>) => h.ui.titles.filter((t) => t.startsWith("Prompt cache miss ahead"));
+  const early = (h: ReturnType<typeof harness>) => h.ui.titles.filter((t) => t.includes("Your next prompt will re-cache"));
 
   test("opens when the TTL runs out, silently, and the next prompt then sends without asking", async () => {
     const h = idle(harness([assistant(NOW - 290_000, 600_000)]));
@@ -217,9 +217,9 @@ describe("early question", () => {
     expect(early(h)).toEqual([]);
     await vi.advanceTimersByTimeAsync(2_000);
     await flush();
-    expect(early(h)[0]).toContain("expired 0s ago: your next prompt re-caches 601k tokens");
+    expect(early(h)[0]).toMatch(/^Prompt cache expired\. Your next prompt will re-cache 601k tokens\./);
     expect(h.ui.menus[0]).toEqual([
-      "Keep the context (your next prompt re-caches 601k tokens)",
+      "Keep the context",
       "Compact now (summary reads 601k tokens)",
       "Start a new session (no history to re-cache)",
       "Keep the context, and stop asking in this session",
@@ -271,7 +271,7 @@ describe("early question", () => {
     await h.emit("model_select", {});
     await vi.advanceTimersByTimeAsync(4_000);
     await flush();
-    expect(early(h)[0]).toContain("claude-sonnet-5-5 has no cache of this conversation");
+    expect(early(h)[0]).toMatch(/^No prompt cache for claude-sonnet-5-5 \(this conversation is cached for claude-opus-5-5\)\. Your next prompt will re-cache 601k tokens\./);
   });
 
   test("closes when its moment passes, and the send-time question still asks", async () => {

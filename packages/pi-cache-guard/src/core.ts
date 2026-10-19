@@ -216,15 +216,15 @@ export function compactionFocus(prompt: string): string {
 }
 
 /** One line saying why the next request misses and what that costs. */
-export function describeMiss(reason: ColdReason, tokens: number, cost: number | undefined, subject = "this prompt"): string {
+export function describeMiss(reason: ColdReason, tokens: number, cost: number | undefined): string {
   const amount = `${formatTokens(tokens)} tokens${cost === undefined ? "" : ` (~${formatCost(cost)} at API prices)`}`;
   switch (reason.kind) {
     case "expired":
-      return `The prompt cache expired ${formatDuration(reason.idleMs)} ago: ${subject} re-caches ${amount}.`;
+      return `The prompt cache expired ${formatDuration(reason.idleMs)} ago: this prompt re-caches ${amount}.`;
     case "idle":
-      return `Idle ${formatDuration(reason.idleMs)}: the prompt cache has probably expired, so ${subject} may re-cache ${amount}.`;
+      return `Idle ${formatDuration(reason.idleMs)}: the prompt cache has probably expired, so this prompt may re-cache ${amount}.`;
     case "model":
-      return `${reason.to} has no cache of this conversation (it was cached for ${reason.from}): ${subject} re-caches ${amount}.`;
+      return `${reason.to} has no cache of this conversation (it was cached for ${reason.from}): this prompt re-caches ${amount}.`;
   }
 }
 

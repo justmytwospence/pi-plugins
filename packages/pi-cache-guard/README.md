@@ -69,8 +69,8 @@ When the cache is certainly cold (the TTL ran out, or you switched models) and a
 Example:
 
 ```
-Prompt cache miss ahead. The prompt cache expired 0s ago: your next prompt re-caches 601k tokens.
--> Keep the context (your next prompt re-caches 601k tokens)
+Prompt cache expired. Your next prompt will re-cache 601k tokens.
+-> Keep the context
    Compact with Jev now (~1s, no summary model)
    Compact with a summary now (summary reads up to 601k tokens)
    Start a new session (no history to re-cache)
