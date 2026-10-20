@@ -177,7 +177,7 @@ describe("formatChecklist", () => {
 			t({ id: 2, subject: "scaffold", status: "in_progress", activeForm: "scaffolding" }),
 			t({ id: 3, subject: "test", blockedBy: [1, 2] }),
 			t({ id: 4, subject: "gone", status: "deleted" }),
-			t({ id: 5, subject: "ship", blockedBy: [1] }),
+			t({ id: 5, subject: "ship", blockedBy: [1, 4] }),
 		);
 		const text = formatChecklist(state)!;
 		expect(text).toBe(

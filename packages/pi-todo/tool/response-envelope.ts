@@ -84,6 +84,8 @@ export function formatChecklist(state: TaskState): string | null {
 	const visible = state.tasks.filter((t) => t.status !== "deleted");
 	if (visible.length === 0) return null;
 	const done = new Set(state.tasks.filter((t) => t.status === "completed").map((t) => t.id));
+	// Only unfinished tasks block: deleting a task leaves it in others' blockedBy, but it is dropped work.
+	const open = new Set(visible.filter((t) => t.status !== "completed").map((t) => t.id));
 	const lines = visible.map((t) => {
 		const label = `#${t.id} ${sanitizeTerminalText(t.subject)}`;
 		if (t.status === "completed") return `    - [X] ${label}`;
@@ -91,7 +93,7 @@ export function formatChecklist(state: TaskState): string | null {
 			const form = t.activeForm ? sanitizeTerminalText(t.activeForm) : "";
 			return `    - [ ] ${label} (in progress${form ? `: ${form}` : ""})`;
 		}
-		const waiting = (t.blockedBy ?? []).filter((id) => !done.has(id));
+		const waiting = (t.blockedBy ?? []).filter((id) => open.has(id));
 		if (waiting.length) return `    - [ ] ${label} (blocked: waiting on ${waiting.map((id) => `#${id}`).join(", ")})`;
 		return `    - [ ] ${label}`;
 	});
