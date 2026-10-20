@@ -92,6 +92,44 @@ export interface ChildOptions {
   cacheRetention?: CacheRetention;
   /** Command and leading args to run Pi; defaults to the running Pi. */
   invocation?: { command: string; args: string[] };
+  /** Extra environment for the child (from the subagent-env contract). */
+  env?: Record<string, string>;
+}
+
+/**
+ * Optional contract: before a child starts, this package asks this `pi.events` channel for extra
+ * environment (`{ version: 1, env }`; listeners add entries to `env`). pi-sidebar uses it to run
+ * its read-only guard inside the subagents Sidebar starts. A probe (`{ version: 1, env, probe: true }`)
+ * gets `supported: true`, so a listener can tell the contract is honored.
+ */
+export const SUBAGENT_ENV_CHANNEL = "pi-plugins.subagent-env.v1";
+
+export interface SubagentEnvRequest {
+  version: 1;
+  env: Record<string, string>;
+  probe?: boolean;
+  supported?: boolean;
+}
+
+const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
+
+/** Extra environment listeners add for a child about to start; never throws. */
+export function requestSubagentEnv(events: { emit(channel: string, data: unknown): void } | undefined): Record<string, string> {
+  const request: SubagentEnvRequest = { version: 1, env: {} };
+  try {
+    events?.emit(SUBAGENT_ENV_CHANNEL, request);
+  } catch {
+    return {};
+  }
+  return Object.fromEntries(Object.entries(request.env).filter(([key, value]) => ENV_NAME.test(key) && typeof value === "string"));
+}
+
+/** Answer probes on the contract channel, so listeners know subagents will get their env. */
+export function answerSubagentEnvProbes(events: { on(channel: string, handler: (data: unknown) => void): unknown }): void {
+  events.on(SUBAGENT_ENV_CHANNEL, (data) => {
+    const request = data as Partial<SubagentEnvRequest> | undefined;
+    if (request?.version === 1 && request.probe) request.supported = true;
+  });
 }
 
 export const CACHE_RETENTIONS = ["short", "long", "inherit"] as const;
@@ -180,7 +218,7 @@ export class Child {
     const proc = spawn(invocation.command, [...invocation.args, ...childArgs(this.options, promptFile)], {
       cwd: this.options.cwd,
       stdio: ["pipe", "pipe", "pipe"],
-      env: childEnv(this.options.cacheRetention),
+      env: { ...childEnv(this.options.cacheRetention), ...(this.options.env ?? {}) },
     });
     this.proc = proc;
     let buffer = "";

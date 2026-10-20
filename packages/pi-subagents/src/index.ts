@@ -16,7 +16,7 @@ import { Type } from "typebox";
 import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION, type ActivityEntry, type ActivitySection, FLEET_HOST_PRIORITY, hostOutranks, readHost } from "./activity.ts";
 import { type AgentDef, discoverAgents } from "./agents.ts";
 import { MENTION_TYPE, mentionGuidance, subagentAutocomplete } from "./mentions.ts";
-import { CACHE_RETENTIONS, type CacheRetention, Child, type ChildState, subagentDepth, type Usage, addUsage, emptyUsage } from "./child.ts";
+import { CACHE_RETENTIONS, type CacheRetention, Child, type ChildState, answerSubagentEnvProbes, requestSubagentEnv, subagentDepth, type Usage, addUsage, emptyUsage } from "./child.ts";
 import { agentDir, loadConfig } from "./config.ts";
 import { Conversation, type Message, readTranscript, transcriptWriter } from "./conversation.ts";
 import { type JevConfig, askJev } from "./jev.ts";
@@ -343,6 +343,7 @@ export default function subagents(pi: ExtensionAPI) {
   const announce = () => {
     if (hosting && yieldedTo.size === 0) safely(() => pi.events.emit(ACTIVITY_HOST, { ...me }));
   };
+  answerSubagentEnvProbes(pi.events);
   pi.events.on(ACTIVITY_SECTION, (data) => {
     const section = (data as { section?: ActivitySection } | undefined)?.section;
     if (section && typeof section.pill === "function" && typeof section.setHosted === "function") accept(section);
@@ -542,6 +543,7 @@ export default function subagents(pi: ExtensionAPI) {
       ...(options.fork ? { forkSession: options.fork } : {}),
       cacheRetention: CACHE_RETENTIONS.includes(config.childCacheRetention) ? config.childCacheRetention : "short",
       sessionDir: path.join(agentDir(), "subagents", "sessions"),
+      env: requestSubagentEnv(pi.events),
       onUpdate: (state) => {
         run.state = state;
         // Preserve the discovered path even if this runtime shuts down before the child finishes.
