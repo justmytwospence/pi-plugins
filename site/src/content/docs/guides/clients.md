@@ -44,4 +44,4 @@ The audited native bridge publishes idle at `agent_end`, which can precede Pi's 
 
 ## Audit baseline
 
-The herdr-web-ui layout was checked against its v17 prompt parser (`parseInteractivePrompt`) at 46 and 120 columns; other limits against herdr-web-ui `dc2f11de`, Paseo `4a3ff87e` and Omnigent `f8f69988`. Custom question/gate frames were tested against the web prompt parser; the standard plan selector was recognized. This is not a live iPhone or end-to-end model test. Newer client revisions may behave differently.
+The herdr-web-ui layout was checked against its v17 and v27 (0.4.8) prompt parsers (`parseInteractivePrompt`) at 46 and 120 columns; other limits against herdr-web-ui `dc2f11de`, Paseo `4a3ff87e` and Omnigent `f8f69988`. Custom question/gate frames were tested against the web prompt parser; the standard plan selector was recognized. This is not a live iPhone or end-to-end model test. Newer client revisions may behave differently.
