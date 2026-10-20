@@ -62,7 +62,9 @@ function fakePi() {
     getSessionName: () => undefined,
   };
   const emit = async (event: string, payload: any, ctx: any) => {
-    for (const h of handlers.get(event) ?? []) await h(payload, ctx);
+    const results: unknown[] = [];
+    for (const h of handlers.get(event) ?? []) results.push(await h(payload, ctx));
+    return results;
   };
   return { pi: pi as unknown as ExtensionAPI, emit, emitted, entries, messages, tool: () => tool };
 }
@@ -110,6 +112,20 @@ test("custom starts update identity without requiring a user prompt", async () =
   await p.emit("before_agent_start", { messageType: "custom", message: { content: "Child finished" } }, ctx);
   await p.emit("before_agent_start", { messageType: "user", prompt: "Review auth" }, ctx);
   await p.emit("session_shutdown", {}, ctx);
+});
+
+test("message_end gives tool calls without a summary an intent, only in a live TUI session", async () => {
+  inHerdr();
+  const { f } = herdr();
+  const p = fakePi();
+  piHerdr(p.pi, { call: f.call, exec: async () => ({ code: 0, stdout: "", stderr: "" }), pollMs: 60_000 });
+  const message = { role: "assistant", content: [{ type: "toolCall", id: "1", name: "subagent", arguments: { task: "Audit it", label: "Audit" } }] };
+  const ctx = ctxOf([]);
+  expect(await p.emit("message_end", { type: "message_end", message }, ctx)).toEqual([undefined]);
+  await p.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  const [result] = (await p.emit("message_end", { type: "message_end", message }, ctx)) as Array<{ message: any } | undefined>;
+  expect(result?.message.content[0]).toMatchObject({ name: "subagent", intent: "Audit" });
+  await p.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx);
 });
 
 test("children are a read-only activity source: entries, details without touching the pane, interrupt only while awaited, never close", async () => {

@@ -11,6 +11,7 @@
 //   They are also a source for the suite's activity views (children-activity.ts): rows in pi-bg's
 //   /tasks, a pill in pi-subagents' list, read-only.
 // - `pr` space token: the branch's pull request (pr.ts).
+// - Tool calls get a one-line `intent` that herdr-web-ui's chat shows on their row (intent.ts).
 //
 // Lifecycle: children are restored from the session's current branch (an abandoned branch's
 // children are not this conversation's), their replies are delivered only while pi is idle (a
@@ -29,6 +30,7 @@ import { type Call, herdrTarget, socketCall } from "./core/herdr.ts";
 import { displayAgent, firstUserText, titleFromPrompt } from "./identity.ts";
 import { PR_FIELDS, parsePrView, prToken } from "./core/pr.ts";
 import { PaneReporter, WorkspaceReporter } from "./core/report.ts";
+import { withIntents } from "./intent.ts";
 import { PI_CHILD } from "./session.ts";
 
 const TOOL = "herdr_child";
@@ -391,6 +393,12 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
   pi.on("agent_settled", () => {
     schedulePr(5_000);
     flushOwed();
+  });
+  // herdr-web-ui labels a tool row with the call's `intent`: give calls without a summary one.
+  pi.on("message_end", (event) => {
+    if (!active) return undefined;
+    const message = withIntents(event.message);
+    return message ? { message } : undefined;
   });
 
   pi.registerTool({
