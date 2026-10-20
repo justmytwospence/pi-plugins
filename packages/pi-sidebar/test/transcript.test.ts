@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { assembleContext, describeLive, mainDelta, roleMessage, statusMessage, summarizeArgs } from "../src/transcript.ts";
-import type { LiveState } from "../src/protocol.ts";
+import type { LiveState } from "../src/main-state.ts";
 
 let n = 0;
 function chain(messages: any[]): SessionEntry[] {
@@ -77,7 +77,7 @@ describe("mainDelta", () => {
 
 describe("live note", () => {
   const live: LiveState = {
-    version: 1, state: "working", since: 0, leafId: null, updatedAt: 0,
+    state: "working", since: 0, finished: [],
     tools: [{ id: "t", name: "bash", summary: "npm test", startedAt: 1000 }],
     streaming: "half a sentence",
   };

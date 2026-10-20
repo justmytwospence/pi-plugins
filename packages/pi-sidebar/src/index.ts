@@ -1,45 +1,31 @@
-// Sidebar: a live, read-only side chat in a Herdr pane beside a working Pi session.
+// Sidebar: a live, read-only side chat beside a working Pi session, in the same Pi process.
 //
-// The same extension runs in both panes. In the main session (the host) it publishes main's last
-// provider request and live status, and opens, parks or closes the Sidebar pane. In the Sidebar pane
-// (started with PI_SIDEBAR_HOST pointing at the host's runtime directory) it builds every request
-// from main's last one so main's prompt cache serves it, keeps the conversation read-only, and
-// refuses to send when that would re-read main's context uncached without asking.
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { registerHost } from "./host.ts";
-import { HOST_ENV, KEYS_ENV, parseKeys } from "./protocol.ts";
-import { registerSide } from "./side.ts";
+// Ctrl+' opens Sidebar in half of Pi's fullscreen layout (main reflows into the other half) or moves
+// focus between the two. Every Sidebar request is main's last provider request plus Sidebar's part,
+// so main's prompt cache serves it; it never changes anything, and it asks before a request would
+// re-read main's context uncached.
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { KEYS_ENV, parseKeys } from "./config.ts";
+import { SidebarController } from "./controller.ts";
 
 const COMMAND_HELP = [
-  "/sidebar        open or hide Sidebar (in Sidebar: hide it)",
-  "/sidebar new    start a fresh Sidebar thread for this session",
+  "/sidebar        open Sidebar, or hide it (its thread is kept)",
+  "/sidebar new    start a fresh Sidebar thread",
   "/sidebar model  why Sidebar always uses main's model",
+  "Ctrl+'          open Sidebar, or switch focus between main and Sidebar",
 ].join("\n");
 
 const MODEL_NOTE =
   "Sidebar always uses main's model and thinking settings: a provider's prompt cache belongs to one model and one set of settings, so anything else would re-read main's whole context uncached on every question.";
 
 export default function piSidebar(pi: ExtensionAPI) {
-  const hostDir = process.env[HOST_ENV];
-  const side = hostDir ? registerSide(pi, hostDir) : undefined;
-  const host = hostDir ? undefined : registerHost(pi);
+  const keys = parseKeys(process.env[KEYS_ENV]);
+  const sidebar = new SidebarController(pi, keys);
 
-  const run = async (ctx: ExtensionContext, mode: "toggle" | "new") => {
-    if (side) {
-      if (mode === "new") {
-        ctx.ui.notify("Use /new here to start a fresh Sidebar thread.", "info");
-        return;
-      }
-      await side.hide(ctx);
-      return;
-    }
-    await host!.toggle(ctx, mode);
-  };
-
-  for (const key of parseKeys(process.env[KEYS_ENV])) {
+  for (const key of keys) {
     pi.registerShortcut(key as never, {
-      description: "Open or hide Sidebar, a read-only side chat beside this session",
-      handler: (ctx) => run(ctx, "toggle"),
+      description: "Open Sidebar, or move focus to it (a read-only side chat beside this session)",
+      handler: (ctx) => sidebar.openOrFocus(ctx),
     });
   }
 
@@ -51,8 +37,10 @@ export default function piSidebar(pi: ExtensionAPI) {
       const sub = args.trim().toLowerCase();
       if (sub === "help") ctx.ui.notify(COMMAND_HELP, "info");
       else if (sub === "model" || sub.startsWith("model ") || sub.startsWith("thinking")) ctx.ui.notify(MODEL_NOTE, "info");
-      else if (sub === "new") await run(ctx, "new");
-      else if (!sub) await run(ctx, "toggle");
+      else if (sub === "new") {
+        await sidebar.reset();
+        sidebar.openOrFocus(ctx);
+      } else if (!sub) sidebar.toggle(ctx);
       else ctx.ui.notify(`Unknown /sidebar argument "${sub}".\n${COMMAND_HELP}`, "warning");
     },
   });

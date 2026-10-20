@@ -4,14 +4,15 @@ import clearScreen from '../src/index.ts';
 import { getKeybindings, setKeybindings } from '@earendil-works/pi-tui';
 import { KeybindingsManager } from '../node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js';
 setKeybindings(new KeybindingsManager());
-function setup() {
+function setup(nested = false) {
   const handlers = new Map(); let shortcut;
   clearScreen({ on: (name, fn) => handlers.set(name, fn), registerCommand() {}, registerShortcut: (key, def) => { assert.equal(key, 'ctrl+l'); shortcut = def; } });
   const chat = { children: [], render: () => chat.children.flatMap(c => c.render()), addChild: c => chat.children.push(c), removeChild: c => { chat.children = chat.children.filter(v => v !== c); } };
   const doc = { children: [chat], render: () => ['history', ...chat.render()] };
   const original = doc.render;
   const scroll = { child: doc, viewportHeight: 10, scrollToEnd() {} };
-  const tui = { children: [doc], layoutRoot: { entries: [{ component: scroll }] }, requestRender() {} };
+  const main = { entries: [{ component: scroll }] };
+  const tui = { children: [doc], layoutRoot: nested ? { entries: [{ component: main }, { component: { render: () => [] } }] } : main, requestRender() {} };
   const notices = [];
   const ctx = { sessionManager: {}, mode: 'tui', ui: { notify: text => notices.push(text), setWidget: (key, factory) => factory?.(tui) } };
   handlers.get('session_start')({}, ctx);
@@ -25,6 +26,11 @@ test('clear keeps original transcript and releases its own renderer', () => {
   h.handlers.get('session_shutdown')({}, h.ctx);
   assert.equal(h.doc.render, h.original);
   assert.deepEqual(h.doc.render(80), ['history']);
+});
+test('clear finds the transcript when another extension nests the layout root', () => {
+  const h = setup(true);
+  h.shortcut.handler(h.ctx);
+  assert.equal(h.doc.render(80).length, 11);
 });
 test('teardown does not overwrite a newer renderer wrapper', () => {
   const h = setup(); h.shortcut.handler(h.ctx);

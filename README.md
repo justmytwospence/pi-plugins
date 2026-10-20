@@ -18,7 +18,7 @@ All 29 references include activation, controls, defaults, requirements, costs an
 | [pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/) | Coordinate interactive handoffs and Herdr pane metadata. |
 | [pi-marimo](https://pi-plugins.vercel.app/plugins/pi-marimo/) | Follow notebook state and running cells alongside the chat. |
 | [pi-btw](https://pi-plugins.vercel.app/plugins/pi-btw/) | Ask a side question without interrupting the main run. |
-| [pi-sidebar](https://pi-plugins.vercel.app/plugins/pi-sidebar/) | Chat read-only beside a working session in a Herdr pane, on its prompt cache. |
+| [pi-sidebar](https://pi-plugins.vercel.app/plugins/pi-sidebar/) | Chat read-only beside a working session, on its prompt cache. |
 
 ### Think & review
 

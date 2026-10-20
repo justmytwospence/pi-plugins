@@ -6,7 +6,7 @@ import {
   type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { LiveState } from "./protocol.ts";
+import type { LiveState } from "./main-state.ts";
 
 export interface PendingCall {
   name: string;

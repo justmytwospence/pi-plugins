@@ -1,19 +1,25 @@
 ---
 title: pi-sidebar
-description: A live, read-only side chat in a Herdr pane beside a working Pi session, built on the main session's prompt cache so a question costs little.
+description: A live, read-only side chat beside a working Pi session, in the same Pi process, built on the main session's prompt cache so a question costs little.
 plugin: pi-sidebar
 ---
 
 ## Quick reference
 
-- **Use it for:** Ask what the main agent is doing, why, or how the code works while it keeps working, without interrupting it.
+- **Use it for:** Ask what the main agent is doing, why, or how the code works, without interrupting it.
 - **Enable:** Select `packages/pi-sidebar/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
-- **Controls:** Ctrl+' opens Sidebar beside main, and hides or shows it from either pane. `/sidebar` does the same; `/sidebar new` starts a fresh thread.
-- **Settings:** `PI_SIDEBAR_KEYS` replaces the key; `PI_SIDEBAR_RATIO` sets Sidebar's share of main's pane (default 0.5); `PI_SIDEBAR_MIN_COLUMNS` (default 80) is the narrowest half for a side-by-side split. The model and thinking always match main.
-- **Requirements, cost & privacy:** Pi inside [Herdr](https://herdr.dev). Each question reads main's context from the cache, plus a small new part. Sidebar asks before sending when main's cache has probably expired. Main's last request (the whole conversation) is shared through owner-only files in the temp directory and removed when the session ends.
-- **Integrations & limits:** Anthropic Messages, OpenAI Responses (including Codex) and Chat Completions. Read-only blocks tool calls; it is not a sandbox. A hidden Sidebar waits in a `sidebar-parked` tab.
+- **Controls:** Ctrl+' opens Sidebar, or switches focus between main and Sidebar. `/sidebar` opens or hides it, and `/sidebar new` starts a fresh thread. In Sidebar, Enter asks, Esc stops an answer, and Shift+↑/↓ scrolls.
+- **Settings:** `PI_SIDEBAR_KEYS` replaces the key. `PI_SIDEBAR_RATIO` sets Sidebar's share (default 0.5). `PI_SIDEBAR_MIN_COLUMNS` is the narrowest half for a side-by-side split (default 80). The model and thinking always match main.
+- **Requirements, cost & privacy:** Requires Pi's fullscreen mode. Each question reads main's context from the cache, plus a small new part, and Sidebar asks first when that cache has probably expired. The thread is stored as hidden entries in main's session.
+- **Integrations & limits:** Works with Anthropic Messages, OpenAI Responses (including Codex) and Chat Completions. Read-only blocks tool calls; it is not a sandbox. An optional pi-vim composer is supported. Sidebar steps aside while a dialog holds `herdr:blocked`.
 
-`pi-sidebar` opens a second Pi session in a Herdr pane beside the main one (or below it, when main's pane is narrow), for talking about the work while it runs. Sidebar sees main's latest state: everything main has committed, plus what it is doing this second (the running tool and how long it has run, results of parallel calls that have finished, and the reply it is writing). It cannot change anything.
+`pi-sidebar` splits Pi's fullscreen layout in two. Main's transcript, editor and footer reflow into one half, and Sidebar fills the other: side by side when each half keeps 80 columns, otherwise below main.
+
+Sidebar is a second agent inside main's Pi process. It sees main's latest state:
+- everything main has committed;
+- what main is doing this second: the running tool and how long it has run, results of parallel calls that have finished, and the reply it is writing.
+
+It cannot change anything.
 
 ## Enable and requirements
 
@@ -33,55 +39,57 @@ Entry: `packages/pi-sidebar/src/index.ts`. To load it alone, merge this object i
 }
 ```
 
-Run Pi inside a Herdr pane. Outside Herdr, the key and command explain that Herdr is required. The Sidebar pane runs Pi with the same model, thinking level and extension flags as main, so the component needs no separate setup there.
+Use Pi's fullscreen mode (`"tuiMode": "fullscreen"`). In regular mode, the key and the command explain that Sidebar needs it.
 
 ## Controls
 
 | Control | What it does |
 | --- | --- |
-| Ctrl+' in main | The first press splits main's pane into equal halves and opens Sidebar in the new one, focused: side by side when both halves keep 80 columns, otherwise one above the other. After that, it hides Sidebar when it is showing and brings it back when it is hidden. |
-| Ctrl+' in Sidebar | Hides Sidebar and returns to main. The process keeps running in a `sidebar-parked` tab, so the thread is kept. |
-| `/sidebar` | Same as the key. |
-| `/sidebar new` | Opens Sidebar on a fresh thread. Inside Sidebar, `/new` does the same. |
-| `/sidebar model` | Explains why there is no model override. |
+| Ctrl+' in main | Opens Sidebar if it is closed, otherwise moves focus to it. |
+| Ctrl+' in Sidebar | Moves focus back to main. Clicking Sidebar focuses it too. |
+| `/sidebar` | Opens Sidebar, or hides it (the thread is kept). `/close` in Sidebar also hides it. |
+| `/sidebar new`, `/new` in Sidebar | Starts a fresh thread. |
+| Enter, Esc | Ask; stop an answer while it streams (when idle, Esc returns to main). |
+| Shift+↑/↓, Shift+PgUp/PgDn, wheel | Scroll Sidebar. Plain PgUp/PgDn keep scrolling main's transcript. |
+| Ctrl+O | Expand or collapse tool output in Sidebar. |
 
-Ctrl+' needs a terminal that reports it (the kitty keyboard protocol, passed through by Herdr). Set `PI_SIDEBAR_KEYS=ctrl+.` (or a comma-separated list) where main starts to use other keys.
+Ctrl+' needs a terminal that reports it (the kitty keyboard protocol). Set `PI_SIDEBAR_KEYS=ctrl+.` (or a comma-separated list) to use other keys.
 
-Sidebar is a normal Pi session saved under `~/.pi/agent/sidebar-sessions/<main session id>/`, so `/tree`, branching and `/resume` work there. Opening Sidebar again for the same main session continues the latest thread.
+While Sidebar has focus, typing goes only to Sidebar. Main's own keys work again after Ctrl+'.
+
+The focused half has an accent divider and header, and an answer that finishes while you are in main shows `● new answer`.
+
+Sidebar's thread is stored as hidden entries in main's session. It follows `/tree` and comes back after resume and `/reload`.
 
 ## Why it costs little
 
-Before each request, main keeps a copy of the request it is sending. Each Sidebar request is built in four layers:
+Main keeps its last provider request in memory. Each Sidebar request is built from four parts:
 
 1. **Main's last request, unchanged.** The model, system prompt, tool declarations, thinking and effort settings, cache keys, every message and every cache breakpoint all come from it.
-2. **What main committed since.** Sidebar reads these entries from main's session file.
-3. **Sidebar's instructions and the live status.**
-4. **Sidebar's conversation.**
+2. **What main committed since.**
+3. **Sidebar's instructions and earlier exchanges.**
+4. **The live status, then your question.**
 
-The provider serves the first layer from the cache main already wrote. Example from a live run against a ~22k-token context: Sidebar read 95% to 97% from the cache, with under 1k new input tokens and no cache writes.
+The provider serves the first part from the cache main already wrote. In live runs against a ~20k-token context, answers read 88–96% from the cache, with 1–2k new input tokens and no cache writes.
 
-To keep that prefix identical, Sidebar declares the same tools as main and blocks calls instead of removing tools. Reading tools, the web search and fetch tools, and shell commands that only read (plan mode's policy) run. Everything else gets a reason the model relays.
+To keep that prefix identical, Sidebar keeps main's tool declarations and blocks calls instead of removing tools.
+- **Allowed:** reading tools, main's web search and fetch tools, and shell commands that only read (plan mode's policy).
+- **Blocked:** everything else, with a reason the model relays.
 
-Sidebar never quietly re-reads main's context uncached:
+Sidebar never quietly re-reads main's context uncached. It asks inline (Enter sends, Esc keeps the question) when:
+- main has not sent a request since Pi started;
+- main's cache has probably expired;
+- the last answer missed the cache.
 
-- **Expired cache.** It asks before sending when main's last request is older than the cache TTL main asked for (5 minutes, or 1 hour with `PI_CACHE_RETENTION=long`). Declining puts the prompt back in the editor.
-- **Unexpected request.** It aborts without sending when main's request is missing, the API or model differs, or the request would exceed Anthropic's four cache breakpoints.
-- **Missed cache.** It warns after an answer that read less than half of main's context from the cache, and asks before the next one.
-- **No model override.** A cache belongs to one model and one set of thinking settings.
-- **No warming.** It never keeps its own cache warm.
-
-Its questions hold `herdr:blocked`, so Herdr and phone cards show Sidebar as waiting.
+It aborts, sending nothing, on a missing request, an API or model mismatch, or too many cache breakpoints. There is no model override, and it never keeps its own cache warm.
 
 ## Limits
 
-- Models that drop earlier thinking when a new user message arrives (Claude models before Opus 4.5 and Sonnet 4.6) can miss the cache when asked during main's tool calls; the miss warning catches it.
-- When main quits or switches sessions, Sidebar's pane closes and the shared files are removed. A `/reload` keeps both.
-- Other suite components also run in Sidebar's Pi. [pi-tool-gate](/plugins/pi-tool-gate/) may still ask before reads outside the project.
-- [pi-btw](/plugins/pi-btw/) is the in-process overlay alternative: it works outside Herdr, but its threads do not follow main and do not share main's cache.
+- Sidebar uses Pi's fullscreen layout, which Pi does not publish as an API. [pi-clear-screen](/plugins/pi-clear-screen/), [pi-copy](/plugins/pi-copy/) and [pi-sticky-last-prompt](/plugins/pi-sticky-last-prompt/) read it the same way and work with Sidebar open.
+- While a dialog holds `herdr:blocked` (for example a question from main), Sidebar steps aside so the dialog renders full width for Herdr and its phone cards.
+- Models that drop earlier thinking when a new user message arrives (Claude models before Opus 4.5 and Sonnet 4.6) can miss the cache when asked during main's tool calls. The miss check catches it.
+- [pi-btw](/plugins/pi-btw/) is the overlay alternative. It works in regular mode, but its threads do not follow main and do not share main's cache.
 
-Claude Code's `/btw` and Codex's `/side` showed that a side question should reuse the main conversation's cache. Two Herdr projects inspired the rest, with no code copied:
-
-- [pi-herdr-btw](https://github.com/oscabriel/pi-herdr-btw), for exact prompt replay in a pane.
-- [herdr-sidekick](https://github.com/qapquiz/herdr-sidekick), for parking a pane in a tab.
+Claude Code's `/btw` and Codex's `/side` showed that a side question should reuse the main conversation's cache. [pi-herdr-btw](https://github.com/oscabriel/pi-herdr-btw) showed exact prompt replay; no code was copied from it.
 
 [GitHub source](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-sidebar)

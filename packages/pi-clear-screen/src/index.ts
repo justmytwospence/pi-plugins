@@ -49,12 +49,24 @@ function grabTui(ctx: ExtensionContext): Tui | undefined {
   return tui;
 }
 
+/**
+ * The scroll view showing `doc`. Pi's layout root is a stack of the transcript and the editor dock,
+ * but another extension may nest it (pi-sidebar puts it beside a panel), so stacks are walked.
+ */
 function transcriptOf(tui: Tui, doc: Comp): ScrollLike | undefined {
-  for (const entry of tui.layoutRoot?.entries ?? []) {
-    const c = entry.component as Partial<ScrollLike>;
-    if (c && c.child === doc && typeof c.scrollToEnd === "function") return c as ScrollLike;
-  }
-  return undefined;
+  const seen = new Set<unknown>();
+  const walk = (node: unknown, depth: number): ScrollLike | undefined => {
+    if (!node || typeof node !== "object" || seen.has(node) || depth > 6) return undefined;
+    seen.add(node);
+    const c = node as Partial<ScrollLike> & { entries?: { component?: unknown }[] };
+    if (c.child === doc && typeof c.scrollToEnd === "function") return c as ScrollLike;
+    for (const entry of Array.isArray(c.entries) ? c.entries : []) {
+      const found = walk(entry?.component, depth + 1);
+      if (found) return found;
+    }
+    return undefined;
+  };
+  return walk(tui.layoutRoot, 0);
 }
 
 export default function (pi: ExtensionAPI) {

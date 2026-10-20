@@ -10,6 +10,7 @@ import stickyLastPrompt, {
   collectAnchors,
   extractUserText,
   isClearSentinel,
+  layoutRectOf,
   selectAnchor,
   type AnchorIndex,
 } from "../src/index.ts";
@@ -641,4 +642,19 @@ test("a non-extensible renderer stays inactive without leaving a probe", async (
   expect(Object.getOwnPropertySymbols(h.screen)).toEqual(symbols);
   expect(Object.hasOwn(h.screen, "hasOverlay")).toBe(false);
   await h.emit("session_shutdown", h.ctx);
+});
+
+test("layoutRectOf finds a nested component's rectangle in the last frame", () => {
+  const transcript = {};
+  const root = {
+    component: {},
+    rect: { x: 0, y: 0, width: 165, height: 50 },
+    children: [
+      { component: {}, rect: { x: 0, y: 0, width: 82, height: 50 }, children: [{ component: transcript, rect: { x: 0, y: 0, width: 82, height: 40 } }] },
+      { component: {}, rect: { x: 83, y: 0, width: 82, height: 50 } },
+    ],
+  };
+  expect(layoutRectOf(root, transcript)).toEqual({ x: 0, y: 0, width: 82, height: 40 });
+  expect(layoutRectOf(root, {})).toBeUndefined();
+  expect(layoutRectOf(undefined, transcript)).toBeUndefined();
 });

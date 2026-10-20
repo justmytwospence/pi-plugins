@@ -25,6 +25,23 @@ interface ScrollViewLike {
   scrollTo(scrollTop: number, options?: { disableFollow?: boolean }): void;
 }
 
+interface LayoutBoxLike {
+  component?: unknown;
+  rect?: { x: number; y: number; width: number; height: number };
+  children?: readonly LayoutBoxLike[];
+}
+
+/** The screen rectangle of `component` in the last layout frame, if it was laid out. */
+export function layoutRectOf(root: LayoutBoxLike | undefined | null, component: unknown): LayoutBoxLike["rect"] {
+  const stack: LayoutBoxLike[] = root ? [root] : [];
+  for (let guard = 0; stack.length > 0 && guard < 10_000; guard++) {
+    const box = stack.pop()!;
+    if (box.component === component) return box.rect;
+    if (Array.isArray(box.children)) stack.push(...box.children);
+  }
+  return undefined;
+}
+
 interface OverlayEntryLike {
   component?: unknown;
   hidden?: boolean;
@@ -34,6 +51,8 @@ interface OverlayEntryLike {
 /** These renderer internals are optional; missing members leave the bar blank. */
 type AltScreen = TUI & {
   layoutRoot?: { entries?: readonly { component?: unknown }[] | null } | null;
+  /** The last layout frame: boxes with each component's screen rectangle. */
+  currentLayout?: { root?: LayoutBoxLike } | null;
   getPrimaryScrollView?: () => ScrollViewLike | undefined;
   overlayStack?: readonly unknown[];
   isOverlayVisible?: (entry: unknown) => boolean;
@@ -237,6 +256,8 @@ export default function stickyLastPrompt(pi: ExtensionAPI): void {
   let warnedDuplicate = false;
   let releasePatch: (() => void) | undefined;
   let paintedAnchor: UserAnchor | undefined;
+  // Pi keeps this object and reads it on every render, so a narrower transcript moves the bar.
+  const barOptions: OverlayOptions = { anchor: "top-left", row: 0, col: 0, width: "100%", nonCapturing: true };
 
   const bar = new PinBar(
     () => {
@@ -305,7 +326,13 @@ export default function stickyLastPrompt(pi: ExtensionAPI): void {
     if (!sv || !Array.isArray(children)) return undefined;
     try {
       const termWidth = screen.terminal.columns;
-      const width = sv.getContentWidth?.(termWidth) ?? termWidth;
+      // The transcript may not span the screen (pi-sidebar puts a panel beside it): the bar covers
+      // only the transcript, and anchors are measured at its width.
+      const rect = layoutRectOf(screen.currentLayout?.root, sv);
+      const boxWidth = rect && rect.width > 0 ? rect.width : termWidth;
+      if (rect && rect.width > 0 && rect.width < termWidth) Object.assign(barOptions, { row: rect.y, col: rect.x, width: rect.width });
+      else Object.assign(barOptions, { row: 0, col: 0, width: "100%" });
+      const width = sv.getContentWidth?.(boxWidth) ?? boxWidth;
       if (!Number.isFinite(width) || width < 1) return undefined;
       // Outer children identity + total height cannot detect nested, in-place, same-height
       // edits or skill expansion. Rewalk on each paint; component render caches still apply.
@@ -394,7 +421,7 @@ export default function stickyLastPrompt(pi: ExtensionAPI): void {
         screen = rendererOf(tui);
         if (!screen || !installPatch(screen)) return EMPTY_COMPONENT;
         bar.setTheme(() => ctx.ui.theme);
-        overlay = screen.showOverlay(bar, { anchor: "top-left", row: 0, col: 0, width: "100%", nonCapturing: true });
+        overlay = screen.showOverlay(bar, barOptions);
         return { ...EMPTY_COMPONENT, dispose: () => { if (mine === generation) teardown(); } };
       });
     } catch (error) {
