@@ -189,8 +189,8 @@ const MODE_KINDS: Record<string, PermissionModeStatus["kind"]> = {
 export function parseModeStatus(text: string): PermissionModeStatus | undefined {
   const match = /^(⏸|⏵⏵) (chat mode|manual mode|accept edits|plan mode|auto mode|yolo mode|bypass permissions) on(?: \((.+) to cycle\))?$/u.exec(text);
   if (!match) return undefined;
-  // Pad the one-cell ⏸ to the two cells of ⏵⏵, so the mode name starts in the same column in every mode.
-  const glyph = match[1] === "⏸" ? "⏸ " : match[1];
+  // ⏸ is one cell and ⏵⏵ two; the footer draws one same-width icon for either.
+  const glyph = match[1] === "⏸" ? ICONS.paused : ICONS.running;
   return { kind: MODE_KINDS[match[2]], label: `${glyph} ${match[2]} on`, ...(match[3] ? { key: match[3] } : {}) };
 }
 
@@ -755,6 +755,8 @@ export const ICONS = {
   model: "\u{f06a9}", // robot (Material Design; the Font Awesome robot draws wider than its neighbors)
   reasoning: "\uee9c", // brain
   gate: "\uf510", // shield with check (pi-tool-gate)
+  paused: "\u{f03e4}", // pause (Material Design): chat and plan mode, sent as ⏸
+  running: "\u{f0211}", // fast forward (Material Design): the other modes, sent as ⏵⏵
   context: "\uf0e4", // tachometer
   marimo: "\uf02d", // book
   lens: "\uf06e", // eye (marimo-lens selections)

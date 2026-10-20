@@ -81,7 +81,7 @@ instead of the status row:
 | --- | --- | --- |
 | pi-auto-effort | `effort: high (auto ↑)` | `reasoning high · auto ↑` on the model row (arrow and any `limited:` note kept) |
 | pi-cache-guard | `cache 4:12`, `cache cold` | `Cache 4:12` or `Cache ❄` on the context row (warm in green, cold in the warning color) |
-| pi-tool-gate (or pi-plan-mode alone) | `⏵⏵ auto mode on (shift+tab to cycle)` | the permission mode on the model row, in Claude Code's color for it (the key hint is dropped first when narrow) |
+| pi-tool-gate (or pi-plan-mode alone) | `⏵⏵ auto mode on (shift+tab to cycle)` | the permission mode on the model row, in Claude Code's color for it, with one same-width pause or fast-forward Nerd Font icon in place of `⏸` / `⏵⏵` (the key hint is dropped first when narrow) |
 | pi-cache-guard (Jev trimming, key `lean-context`) | `lean: −12k tok` | `Lean −12k tok` on the context row |
 | anthropic-billing-guard | `extra usage x3` | `3 requests billed to extra usage` on the Claude limits row |
 | @saadjs/pi-stash | `prompt stashed` | `Stashed · "first line…" +2 lines · ctrl+s to restore` as the top row, just under the editor |

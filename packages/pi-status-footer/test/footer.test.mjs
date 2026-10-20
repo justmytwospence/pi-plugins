@@ -1572,23 +1572,24 @@ test("the permission mode gets its own row in its color; plan runs point at /pla
     ["permission-mode", "⏵⏵ accept edits on (shift+tab to cycle)"],
     ["plan", "plan: A working · B cut off (resume in /planners) (/planners)"],
   ]), { claudeRow: false });
-  assert.deepEqual(absorbed.mode, { kind: "acceptEdits", label: "⏵⏵ accept edits on", key: "shift+tab" });
+  assert.deepEqual(absorbed.mode, { kind: "acceptEdits", label: "\u{f0211} accept edits on", key: "shift+tab" });
   assert.deepEqual(absorbed.rest, ["Plan A working · B cut off · resume in /planners · /planners"]);
   const s = { ...fixture(), mode: absorbed.mode, statuses: absorbed.rest };
   const rows = mod.renderFooter(s, 160, theme).map(plain);
   assert.match(rows[1], /opus-5\.5 · \uee9c reasoning xhigh$/);
-  assert.equal(rows[2], " \uf510 ⏵⏵ accept edits on (shift+tab to cycle)");
+  assert.equal(rows[2], " \uf510 \u{f0211} accept edits on (shift+tab to cycle)");
   // Narrow: the hint goes before the mode does.
-  assert.match(plain(mod.renderFooter(s, 30, theme)[2]), /⏵⏵ accept edits on$/);
+  assert.match(plain(mod.renderFooter(s, 30, theme)[2]), /\u{f0211} accept edits on$/u);
   // Outside auto mode the gate stays with the notices; in auto mode it follows the mode.
   const gated = { ...s, statuses: ["Gate 2 auto · 0 pushed back · 1 asked"] };
   assert.ok(!plain(mod.renderFooter(gated, 160, theme)[2]).includes("Gate"));
   const auto = { ...gated, mode: mod.parseModeStatus("⏵⏵ auto mode on (shift+tab to cycle)") };
   const autoRows = mod.renderFooter(auto, 160, theme).map(plain);
-  assert.equal(autoRows[2], " \uf510 ⏵⏵ auto mode on (shift+tab to cycle) · Gate 2 auto · 0 pushed back · 1 asked");
+  assert.equal(autoRows[2], " \uf510 \u{f0211} auto mode on (shift+tab to cycle) · Gate 2 auto · 0 pushed back · 1 asked");
   assert.equal(autoRows.filter((r) => r.includes("Gate")).length, 1);
   assert.equal(mod.parseModeStatus("⏸ plan mode on").kind, "plan");
-  assert.equal(mod.parseModeStatus("⏸ plan mode on").label, "⏸  plan mode on");
+  assert.equal(mod.parseModeStatus("⏸ plan mode on").label, "\u{f03e4} plan mode on");
+  assert.equal(visibleWidth(mod.ICONS.paused), visibleWidth(mod.ICONS.running));
   assert.equal(mod.parseModeStatus("⏸ chat mode on (shift+tab to cycle)").kind, "chat");
   assert.equal(mod.parseModeStatus("⏵⏵ yolo mode on (shift+tab to cycle)").kind, "bypass");
   assert.equal(mod.parseModeStatus("⏵⏵ bypass permissions on").kind, "bypass");
