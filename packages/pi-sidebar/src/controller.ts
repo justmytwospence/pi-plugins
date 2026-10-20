@@ -1,15 +1,16 @@
 // Ties Sidebar together in main's process: opening, focus, the layout, the panel, the agent and the
 // thread stored in main's session.
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import path from "node:path";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, type Component, type TUI } from "@earendil-works/pi-tui";
 import { ago, SidebarAgent, type SidebarEvent } from "./child.ts";
-import { MIN_COLUMNS_ENV, parseMinColumns, parseRatio, RATIO_ENV } from "./config.ts";
+import { MIN_COLUMNS_ENV, parseMinColumns, parseRatio, PREFS_ENV, RATIO_ENV } from "./config.ts";
 import { canSplit, dividerLines, SplitLayout } from "./layout.ts";
 import { MainState } from "./main-state.ts";
+import { RatioStore } from "./preferences.ts";
 import { herdrFocus, navDirection, navTarget } from "./nav.ts";
 import { SidebarPanel, type StatusPart } from "./panel.ts";
 import { RESET_ENTRY, threadFromBranch } from "./thread.ts";
-import { routeViewportScroll, type ScrollAction } from "./viewport.ts";
 
 const PROBE = "pi-sidebar-probe";
 const HERDR_BLOCKED = "herdr:blocked";
@@ -26,8 +27,9 @@ export class SidebarController {
   private mainFocus: Component | null = null;
   private blocked = 0;
   private ticker: ReturnType<typeof setInterval> | undefined;
-  private releaseViewport: (() => void) | undefined;
   private releaseInput: (() => void) | undefined;
+  /** Sidebar's share per orientation: what you dragged the divider to, else PI_SIDEBAR_RATIO. */
+  readonly ratios = new RatioStore(process.env[PREFS_ENV] ?? path.join(getAgentDir(), "pi-sidebar.json"), parseRatio(process.env[RATIO_ENV]));
 
   constructor(private readonly pi: ExtensionAPI, private readonly keys: string[], private readonly focusKeys: string[] = []) {
     this.main = new MainState(pi);
@@ -44,8 +46,6 @@ export class SidebarController {
       this.releaseInput?.();
       this.releaseInput = undefined;
       this.close();
-      this.releaseViewport?.();
-      this.releaseViewport = undefined;
       this.panel?.dispose();
       this.panel = undefined;
       this.tui = undefined;
@@ -95,8 +95,6 @@ export class SidebarController {
     }
     if (tui !== this.tui || !this.panel) {
       if (tui !== this.tui) {
-        this.releaseViewport?.();
-        this.releaseViewport = undefined;
       }
       this.panel?.dispose();
       this.layout?.unmount();
@@ -120,9 +118,21 @@ export class SidebarController {
         },
       });
       this.panel.chat.seed(this.agent.messages, (text) => ({ text }));
+      // Pi sends keyboard scrolling, `tui.scrollBy` (pi-vim's Ctrl+U/D), its transcript search, the
+      // end indicator and leftover wheel scrolling to the primary scroll view; the last primary view in
+      // the layout wins, and Sidebar comes after main. So the focused half gets them (pi-stereo-view's
+      // approach).
+      const panel = this.panel;
+      Object.defineProperty(panel.view, "primary", {
+        get: () => this.panel === panel && this.isOpen && panel.focused && this.blocked === 0,
+        configurable: true,
+      });
       const theme = () => this.theme ?? ctx.ui.theme;
       this.layout = new SplitLayout(tui, this.panel.root, {
-        ratio: parseRatio(process.env[RATIO_ENV]),
+        ratio: (orientation) => this.ratios.get(orientation),
+        setRatio: (orientation, ratio, final) => this.ratios.set(orientation, ratio, final),
+        scrollSidebar: (lines) => panel.view.scrollBy(lines),
+        sidebarPrimary: () => panel.view.primary,
         minColumns: parseMinColumns(process.env[MIN_COLUMNS_ENV]),
         collapsed: () => this.blocked > 0,
         focused: () => !!this.panel?.focused,
@@ -130,29 +140,8 @@ export class SidebarController {
       });
     }
     if (!this.layout!.mount()) return false;
-    if (!this.releaseViewport) {
-      const panel = () => this.panel;
-      this.releaseViewport = routeViewportScroll(
-        tui,
-        () => this.isOpen && !!panel()?.focused && this.blocked === 0,
-        (action) => this.scroll(action),
-      );
-    }
     this.startTicker();
     return true;
-  }
-
-  private scroll(action: ScrollAction): void {
-    const panel = this.panel;
-    if (!panel) return;
-    if (action === "top") panel.scrollToStart();
-    else if (action === "bottom") panel.scrollToEnd();
-    else if (action === "pageUp") panel.scroll(-1);
-    else if (action === "pageDown") panel.scroll(1);
-    else if (action === "halfPageUp") panel.scroll(-0.5);
-    else if (action === "halfPageDown") panel.scroll(0.5);
-    else if (action === "lineUp") panel.scrollLines(-1);
-    else panel.scrollLines(1);
   }
 
   /**
@@ -194,7 +183,8 @@ export class SidebarController {
     const panel = this.panel;
     if (!tui || !panel || !this.isOpen) return;
     const current = tui.getFocusedComponent?.() ?? null;
-    if (current && current !== panel.input) this.mainFocus = current;
+    // While Sidebar is the active half, the focused component is Sidebar's own overlay (Pi's search), not main's.
+    if (current && current !== panel.input && !panel.focused) this.mainFocus = current;
     panel.unread = false;
     tui.setFocus(panel.input);
     tui.requestRender();
@@ -203,6 +193,7 @@ export class SidebarController {
   focusMain(): void {
     const tui = this.tui;
     if (!tui) return;
+    if (this.panel) this.panel.focused = false;
     tui.setFocus(this.mainFocus);
     tui.requestRender();
   }

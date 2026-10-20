@@ -7,8 +7,10 @@
 //
 // Pi does not publish its layout root; the suite reads it the same way in pi-clear-screen, pi-copy,
 // pi-sticky-last-prompt and plan mode. Anything unexpected leaves Pi's layout untouched.
-import { HStack, type Component } from "@earendil-works/pi-tui";
-import { orientationFor, splitSizes, type Orientation } from "./config.ts";
+import { HStack, type Component, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
+
+type TuiMouseDispatchResult = NonNullable<ReturnType<HStack["handleMouse"]>> & { target: unknown };
+import { orientationFor, ratioAt, splitSizes, type Orientation } from "./config.ts";
 
 /** What Sidebar needs from Pi's fullscreen renderer. */
 export interface LayoutTui {
@@ -24,8 +26,15 @@ export function canSplit(tui: unknown): tui is LayoutTui & Required<Pick<LayoutT
 }
 
 export interface SplitSettings {
-  ratio: number;
+  /** Sidebar's share for an orientation. */
+  ratio(orientation: Orientation): number;
+  /** Divider drags: a new share while dragging (`final` on release), undefined to reset it. */
+  setRatio?(orientation: Orientation, ratio: number | undefined, final: boolean): void;
   minColumns: number;
+  /** Scroll Sidebar's transcript by lines (the mouse wheel over Sidebar). */
+  scrollSidebar?(lines: number): void;
+  /** Whether Sidebar's view is Pi's primary scroll view now (it has focus). */
+  sidebarPrimary?(): boolean;
   /** Sidebar hidden but the split kept (a dialog holds `herdr:blocked`). */
   collapsed(): boolean;
   /** Whether Sidebar has focus, for the divider's color. */
@@ -35,14 +44,67 @@ export interface SplitSettings {
 
 type MutableEntry = { component: Component; basis?: number | "auto"; grow?: number; shrink?: number; minSize?: number; visible?: (v: { width: number; height: number }) => boolean };
 
-/** The divider: a full-height rule beside main, or a full-width rule below it. */
+/**
+ * The divider: a full-height rule beside main, or a full-width rule below it. Drag it to resize
+ * (it captures the mouse from press to release); double-click it to go back to the default share.
+ */
 class Divider implements Component {
   orientation: Orientation = "right";
-  constructor(private readonly settings: SplitSettings) {}
+  dragging = false;
+  constructor(private readonly settings: SplitSettings, private readonly drag: (event: TuiMouseEvent, phase: "move" | "end" | "reset") => void) {}
   render(width: number): string[] {
-    return this.settings.divider(this.orientation, this.settings.focused(), width);
+    return this.settings.divider(this.orientation, this.dragging || this.settings.focused(), width);
+  }
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (event.type === "click" && (event.clickCount ?? 1) >= 2) {
+      this.drag(event, "reset");
+      return { handled: true };
+    }
+    if (event.type === "press" && event.button === "left") {
+      this.dragging = true;
+      return { capture: true, render: true };
+    }
+    if (!this.dragging) return undefined;
+    if (event.type === "drag") {
+      this.drag(event, "move");
+      return { handled: true };
+    }
+    if (event.type === "release") {
+      this.dragging = false;
+      this.drag(event, "end");
+      return { handled: true, render: true };
+    }
+    return undefined;
   }
   invalidate(): void {}
+}
+
+type WheelView = { scrollBy(lines: number): unknown; child?: { children?: unknown } };
+
+/** Main's transcript scroll view: the scroll view over a document with children, primary first. */
+export function findTranscriptView(root: unknown): WheelView | undefined {
+  const seen = new Set<unknown>();
+  let fallback: WheelView | undefined;
+  const walk = (node: unknown, depth: number): WheelView | undefined => {
+    if (!node || typeof node !== "object" || seen.has(node) || depth > 8) return undefined;
+    seen.add(node);
+    const view = node as Partial<WheelView> & { primary?: unknown };
+    if (typeof view.scrollBy === "function" && Array.isArray(view.child?.children)) {
+      if (view.primary === true) return view as WheelView;
+      fallback ??= view as WheelView;
+    }
+    const parent = node as { children?: unknown; entries?: unknown };
+    const kids = [
+      ...(Array.isArray(parent.entries) ? parent.entries.map((entry) => (entry as { component?: unknown } | undefined)?.component) : []),
+      ...(Array.isArray(parent.children) ? parent.children : []),
+    ];
+    for (const kid of kids) {
+      const found = walk(kid, depth + 1);
+      if (found) return found;
+    }
+    return undefined;
+  };
+  return walk(root, 0) ?? fallback;
 }
 
 /**
@@ -52,9 +114,12 @@ class Divider implements Component {
 export class SplitRoot extends HStack {
   orientation: Orientation = "right";
   private readonly divider: Divider;
+  /** Main's size along the split axis and the axis's total, from the last frame. */
+  private split = { main: 0, total: 0 };
+  private mainView: WheelView | undefined;
 
   constructor(readonly main: Component, readonly panel: Component, private readonly settings: SplitSettings, private readonly requestRender: () => void) {
-    const divider = new Divider(settings);
+    const divider = new Divider(settings, (event, phase) => this.dragDivider(event, phase));
     super([
       { component: main, basis: 0 },
       { component: divider, basis: 0 },
@@ -87,12 +152,51 @@ export class SplitRoot extends HStack {
     const total = this.orientation === "right" ? viewport.width : viewport.height;
     if (this.settings.collapsed()) {
       Object.assign(entries[0]!, { basis: total, grow: 1, shrink: 1, minSize: 1 });
+      this.split = { main: total, total };
       return;
     }
-    const sizes = splitSizes(total, this.settings.ratio);
+    const sizes = splitSizes(total, this.settings.ratio(this.orientation));
+    this.split = { main: sizes.main, total };
     Object.assign(entries[0]!, { basis: sizes.main, grow: 0, shrink: 0, minSize: 1 });
     Object.assign(entries[1]!, { basis: sizes.divider, grow: 0, shrink: 0, minSize: 1 });
     Object.assign(entries[2]!, { basis: sizes.side, grow: 0, shrink: 0, minSize: 1 });
+  }
+
+  private dragDivider(event: TuiMouseEvent, phase: "move" | "end" | "reset"): void {
+    if (!this.settings.setRatio || this.split.total < 3) return;
+    if (phase === "reset") this.settings.setRatio(this.orientation, undefined, true);
+    else {
+      // The split fills the screen from its top-left corner, so screen coordinates are its own.
+      const position = this.orientation === "right" ? event.screenX : event.screenY;
+      this.settings.setRatio(this.orientation, ratioAt(position, this.split.total), phase === "end");
+    }
+    this.requestRender();
+  }
+
+  /**
+   * The wheel scrolls only the half under the pointer. Pi gives a scroll view's leftover wheel
+   * lines to the primary view, which would move the other half at a transcript's top or end
+   * (pi-stereo-view consumes the wheel per panel the same way).
+   */
+  override handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | undefined {
+    if (event.type !== "wheel" || this.settings.collapsed()) return undefined;
+    const handled: TuiMouseDispatchResult = {
+      handled: true,
+      target: { component: this, originX: event.screenX - event.x, originY: event.screenY - event.y, width: event.width, height: event.height },
+    };
+    const lines = event.wheelDelta ?? 0;
+    const position = this.orientation === "right" ? event.x : event.y;
+    if (position > this.split.main) {
+      if (!this.settings.scrollSidebar) return undefined;
+      this.settings.scrollSidebar(lines);
+      return handled;
+    }
+    if (position === this.split.main || !this.settings.sidebarPrimary?.()) return undefined;
+    // Sidebar is primary, so main's leftover lines would scroll it: scroll main's transcript here.
+    this.mainView ??= findTranscriptView(this.main);
+    if (!this.mainView) return undefined;
+    this.mainView.scrollBy(lines);
+    return handled;
   }
 }
 

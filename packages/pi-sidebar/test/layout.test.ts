@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { Component } from "@earendil-works/pi-tui";
+import type { Component, TuiMouseEvent } from "@earendil-works/pi-tui";
 import { orientationFor, splitSizes } from "../src/config.ts";
-import { canSplit, dividerLines, SplitLayout, SplitRoot } from "../src/layout.ts";
+import { canSplit, dividerLines, findTranscriptView, SplitLayout, SplitRoot } from "../src/layout.ts";
 
 const leaf = (): Component => ({ render: () => [], invalidate() {} });
 
@@ -17,7 +17,7 @@ function fakeTui(root: Component | undefined = leaf()) {
 
 function settings(overrides: Partial<{ collapsed: boolean; minColumns: number; ratio: number }> = {}) {
   return {
-    ratio: overrides.ratio ?? 0.5,
+    ratio: () => overrides.ratio ?? 0.5,
     minColumns: overrides.minColumns ?? 80,
     collapsed: () => overrides.collapsed ?? false,
     focused: () => false,
@@ -101,5 +101,61 @@ describe("SplitLayout", () => {
     expect(canSplit({ requestRender() {} })).toBe(false);
     const tui = { layoutRoot: undefined, requestRender() {} };
     expect(new SplitLayout(tui, leaf(), settings()).mount()).toBe(false);
+  });
+});
+
+describe("mouse", () => {
+  const event = (over: Partial<TuiMouseEvent>): TuiMouseEvent => ({
+    type: "wheel", button: "none" as never, x: 0, y: 0, screenX: 0, screenY: 0, width: 165, height: 50, shift: false, alt: false, ctrl: false, ...over,
+  });
+
+  function mouseRoot(options: { primary?: boolean } = {}) {
+    const scrolled: string[] = [];
+    const ratios: Array<[string, number | undefined, boolean]> = [];
+    const transcript = { primary: true, child: { children: [] }, scrollBy: (n: number) => { scrolled.push(`main:${n}`); return 0; }, render: () => [], invalidate() {} };
+    const main = { children: [transcript], render: () => [], invalidate() {} } as unknown as Component;
+    const root = new SplitRoot(main, leaf(), {
+      ...settings(),
+      setRatio: (orientation, ratio, final) => ratios.push([orientation, ratio, final]),
+      scrollSidebar: (n) => scrolled.push(`side:${n}`),
+      sidebarPrimary: () => options.primary ?? false,
+    }, () => {});
+    entries(root)[0]!.visible!({ width: 165, height: 50 }); // main 82, divider at 82, Sidebar from 83
+    return { root, scrolled, ratios, divider: (root as unknown as { entries: Array<{ component: Component }> }).entries[1]!.component };
+  }
+
+  it("keeps the wheel in Sidebar when it is under the pointer", () => {
+    const { root, scrolled } = mouseRoot();
+    expect(root.handleMouse(event({ x: 100, screenX: 100, wheelDelta: -3 }))).toMatchObject({ handled: true });
+    expect(scrolled).toEqual(["side:-3"]);
+  });
+
+  it("leaves main's wheel to Pi unless Sidebar is primary, then scrolls main's transcript itself", () => {
+    expect(mouseRoot().root.handleMouse(event({ x: 10, wheelDelta: -3 }))).toBeUndefined();
+    const { root, scrolled } = mouseRoot({ primary: true });
+    expect(root.handleMouse(event({ x: 10, wheelDelta: -3 }))).toMatchObject({ handled: true });
+    expect(scrolled).toEqual(["main:-3"]);
+    expect(root.handleMouse(event({ type: "click", x: 10 }))).toBeUndefined();
+  });
+
+  it("drags the divider to a new share, saves it on release, and resets on double-click", () => {
+    const { divider, ratios } = mouseRoot();
+    expect(divider.handleMouse!(event({ type: "drag", screenX: 60 }))).toBeUndefined(); // not pressed
+    expect(divider.handleMouse!(event({ type: "press", button: "left" }))).toMatchObject({ capture: true });
+    expect(divider.render(1)[0]).toBe("|");
+    divider.handleMouse!(event({ type: "drag", screenX: 60 }));
+    divider.handleMouse!(event({ type: "release", screenX: 50 }));
+    divider.handleMouse!(event({ type: "click", clickCount: 2 }));
+    expect(ratios).toEqual([
+      ["right", (164 - 60) / 164, false],
+      ["right", (164 - 50) / 164, true],
+      ["right", undefined, true],
+    ]);
+  });
+
+  it("finds a transcript view nested in main", () => {
+    const view = { primary: true, child: { children: [] }, scrollBy() {} };
+    expect(findTranscriptView({ entries: [{ component: { children: [view] } }] })).toBe(view);
+    expect(findTranscriptView({ children: [{ scrollBy() {}, child: {} }] })).toBeUndefined();
   });
 });

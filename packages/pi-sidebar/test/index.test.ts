@@ -128,6 +128,28 @@ describe("opening and focus", () => {
     expect(input!("x")).toBeUndefined();
   });
 
+  it("makes Sidebar's view Pi's primary scroll view only while it has focus and shows", async () => {
+    const { pi, controller, tui, ctx } = setup();
+    controller.toggle(ctx as never);
+    const panel = panelOf(controller);
+    expect(panel.view.primary).toBe(true);
+    controller.focusMain();
+    expect(panel.view.primary).toBe(false);
+    controller.focusSidebar();
+    pi.events.emit("herdr:blocked", { active: true, label: "question" });
+    expect(panel.view.primary).toBe(false);
+    pi.events.emit("herdr:blocked", { active: false });
+    expect(panel.view.primary).toBe(true);
+    // Pi's search opens as an overlay and takes focus: Sidebar stays the half it searches.
+    (tui as unknown as { hasOverlay(): boolean }).hasOverlay = () => true;
+    panel.input.focused = false;
+    expect(panel.view.primary).toBe(true);
+    controller.focusMain();
+    expect(panel.view.primary).toBe(false);
+    controller.toggle(ctx as never);
+    expect(panel.view.primary).toBe(false);
+  });
+
   it("draws a filled title bar while focused, and a faint panel otherwise", () => {
     const { controller, ctx } = setup();
     controller.toggle(ctx as never);

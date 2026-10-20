@@ -45,13 +45,20 @@ pi -e ./packages/pi-sidebar
 | `Ctrl+'` | Opens Sidebar, focused, or closes it from either half. The thread is kept. |
 | Herdr `prefix+h/l` (or `j/k` when Sidebar is below main) | Move between main and Sidebar as if Sidebar were a Herdr pane. Any other move is Herdr's normal pane move. Needs the bundled Herdr plugin (below). |
 | Click | Clicking Sidebar's title, notice or composer focuses it, and clicking main's editor focuses main. |
+| Drag the divider | Resizes the halves. The size is remembered per orientation (beside or below) in `~/.pi/agent/pi-sidebar.json`; double-click the divider to go back to the default. |
 | `/sidebar`, `/close` in Sidebar | Open or close Sidebar. |
 | `/sidebar new` (or `/new` in Sidebar) | Starts a fresh thread. |
 | Enter | Asks. |
 | `/sidebar model` | Explains why Sidebar always uses main's model. |
 
 While Sidebar has focus, your keys do what they do in main. They are resolved through Pi's keybindings, so changes in `~/.pi/agent/keybindings.json` apply in both halves:
-- **Scrolling.** With pi-vim, Ctrl+U/D in idle Normal mode half-page scroll Sidebar, as they do in main (in Insert mode they edit). Pi's transcript scroll actions (`tui.altScreen.*`, for example `tui.altScreen.bottom` on Ctrl+G or Ctrl+End) scroll Sidebar instead of main. The mouse wheel scrolls whichever half it is over. The hint row shows your keys.
+- **Scrolling and search.** While Sidebar has focus, its transcript is Pi's primary scroll view, so everything Pi aims at the transcript acts on Sidebar:
+  - Pi's scroll actions (`tui.altScreen.*`, for example `tui.altScreen.bottom` on Ctrl+G or Ctrl+End);
+  - pi-vim's Ctrl+U/D in idle Normal mode (in Insert mode they edit);
+  - transcript search (`tui.altScreen.search`, Ctrl+Shift+F);
+  - the scroll-to-end indicator and pi-copy's copy mode.
+
+  With main focused, they act on main again. The mouse wheel scrolls only the half under the pointer, and never spills into the other half at a transcript's top or end. The hint row shows your keys.
 - **Editing.** The composer is Pi's editor, or pi-vim's embedded editor when pi-vim is installed, so editor keys, history and autocomplete follow your bindings. Your `tui.select.*` keys (such as Ctrl+J/K) move through autocomplete lists.
 - **Skills and prompt templates.** `/skill:name` and your prompt templates run in Sidebar as in main. Other slash commands are main's.
 - **App actions.**
@@ -105,7 +112,8 @@ Settings, read from the environment Pi starts with:
 
 - `PI_SIDEBAR_KEYS`: a comma-separated list of keys that replaces `ctrl+'`, for example `ctrl+.`. `Ctrl+'` reaches Pi only through terminals that report it (kitty keyboard protocol).
 - `PI_SIDEBAR_FOCUS_KEYS`: optional keys that switch focus between main and Sidebar directly, for use outside Herdr.
-- `PI_SIDEBAR_RATIO`: Sidebar's share, from 0.15 to 0.85 (default 0.5).
+- `PI_SIDEBAR_RATIO`: Sidebar's share, from 0.15 to 0.85 (default 0.5), until you drag the divider.
+- `PI_SIDEBAR_PREFS`: where the dragged size is kept (default `~/.pi/agent/pi-sidebar.json`).
 - `PI_SIDEBAR_MIN_COLUMNS`: the narrowest half for a side-by-side split (default 80).
 
 ## How it stays current and cheap
@@ -160,13 +168,17 @@ Supported APIs: Anthropic Messages, OpenAI Responses (including Codex and Azure)
 
 **Model behavior.** On models that drop earlier thinking when a new user message arrives (Claude models before Opus 4.5 and Sonnet 4.6), a question asked during main's tool calls can miss the cache. The miss check catches this.
 
-**Keys while Sidebar has focus:** typing goes only to Sidebar. Main-only actions (stopping main, model shortcuts) work again once main has focus. Transcript search and previous/next prompt jumps still act on main.
+**Keys while Sidebar has focus:** typing goes only to Sidebar. Main-only actions (stopping main, model shortcuts) work again once main has focus. Transcript search and previous/next prompt jumps act on the focused half.
 
 ## Prior art
 
 - Claude Code's `/btw` and Codex's `/side` showed that a side question should share the main conversation's cache.
 - [pi-herdr-btw](https://github.com/oscabriel/pi-herdr-btw) (MIT, Oscar Gabriel) replays a parent's exact prompt and messages.
 - Plan mode's planner sessions and chat rendering in this suite are the model for the in-process agent and its transcript. `src/pi-chat.ts` is copied from plan mode.
+- [pi-stereo-view](https://github.com/alexshpunt/pi-stereo-view) (MIT, Alex Shpunt) splits Pi's fullscreen history into two panels. Sidebar takes three of its techniques:
+  - the focused panel's scroll view acts as Pi's primary;
+  - the wheel is consumed per half;
+  - the divider can be dragged and its size is remembered.
 
 ## Development
 

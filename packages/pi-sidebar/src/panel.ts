@@ -169,6 +169,14 @@ class WorkingRow implements Component {
 }
 
 /** Pi's editor, or pi-vim's embedded editor when it answers the suite contract. */
+function overlayShown(tui: TUI): boolean {
+  try {
+    return (tui as { hasOverlay?(): boolean }).hasOverlay?.() === true;
+  } catch {
+    return false;
+  }
+}
+
 class Composer implements Component, Focusable {
   private readonly editor: (Component & Focusable & { getText(): string; setText(text: string): void; handleInput(data: string): void }) | SuiteEditor;
   private readonly suite: boolean;
@@ -179,7 +187,7 @@ class Composer implements Component, Focusable {
     return this.suite;
   }
 
-  constructor(tui: TUI, theme: () => Theme, private readonly panel: SidebarPanel, private readonly host: PanelHost) {
+  constructor(private readonly tui: TUI, theme: () => Theme, private readonly panel: SidebarPanel, private readonly host: PanelHost) {
     const editorTheme: EditorTheme = {
       borderColor: (text) => (panel.focused ? theme().fg("borderAccent", text) : dimLine(theme().fg("borderMuted", text))),
       selectList: getSelectListTheme(),
@@ -223,7 +231,9 @@ class Composer implements Component, Focusable {
   set focused(value: boolean) {
     this._focused = value;
     this.editor.focused = value;
-    this.panel.focused = value;
+    // An overlay that takes focus from Sidebar (Pi's transcript search, a selector) acts for Sidebar,
+    // so Sidebar stays the active half (and Pi's primary scroll view) until focus moves elsewhere.
+    if (value || !overlayShown(this.tui)) this.panel.focused = value;
   }
 
   [INPUT_CONTEXT](): "editor" {

@@ -9,7 +9,7 @@ plugin: pi-sidebar
 - **Use it for:** Ask what the main agent is doing, why, or how the code works, without interrupting it.
 - **Enable:** Select `packages/pi-sidebar/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
 - **Controls:** Ctrl+' opens or closes Sidebar. In Herdr, `prefix+h/l` moves between main and Sidebar as if Sidebar were a pane (with the bundled Herdr plugin). In Sidebar, your own keybindings apply: pi-vim's Ctrl+U/D and your transcript scroll keys (such as Ctrl+G) scroll it, Esc stops an answer, Ctrl+O expands tools, and your thinking toggle shows or hides reasoning.
-- **Settings:** `PI_SIDEBAR_KEYS` replaces the key. `PI_SIDEBAR_RATIO` sets Sidebar's share (default 0.5). `PI_SIDEBAR_MIN_COLUMNS` is the narrowest half for a side-by-side split (default 80). The model and thinking always match main.
+- **Settings:** `PI_SIDEBAR_KEYS` replaces the key. `PI_SIDEBAR_RATIO` sets Sidebar's share (default 0.5) until you drag the divider, which is remembered. `PI_SIDEBAR_MIN_COLUMNS` is the narrowest half for a side-by-side split (default 80). The model and thinking always match main.
 - **Requirements, cost & privacy:** Requires Pi's fullscreen mode. Each question reads main's context from the cache, plus a small new part, and Sidebar asks first when that cache has probably expired. The thread is stored as hidden entries in main's session.
 - **Integrations & limits:** Works with Anthropic Messages, OpenAI Responses (including Codex) and Chat Completions. Sidebar uses main's tools, skills and templates; a guard refuses calls that would change anything, but it is not a sandbox. An optional pi-vim composer is supported. Sidebar steps aside while a dialog holds `herdr:blocked`.
 
@@ -48,11 +48,12 @@ Use Pi's fullscreen mode (`"tuiMode": "fullscreen"`). In regular mode, the key a
 | Ctrl+' | Opens Sidebar, focused, or closes it from either half. The thread is kept. |
 | Herdr `prefix+h/l` (`j/k` when Sidebar is below) | Moves between main and Sidebar as if Sidebar were a Herdr pane. Other moves are Herdr's normal pane moves. |
 | Click | Clicking Sidebar focuses it; clicking main's editor focuses main. |
+| Drag the divider | Resizes the halves, remembered per orientation. A double-click goes back to the default. |
 | `/sidebar`, `/close` in Sidebar | Open or close Sidebar. |
 | `/sidebar new`, `/new` in Sidebar | Starts a fresh thread. |
 
 While Sidebar has focus, your keys do what they do in main, through Pi's keybindings:
-- **Scrolling.** pi-vim's Ctrl+U/D (idle Normal mode) and your transcript scroll actions (such as Ctrl+G to the end) scroll Sidebar.
+- **Scrolling and search.** The focused half is Pi's primary scroll view, so these act on Sidebar while it has focus: your transcript scroll actions (such as Ctrl+G to the end), pi-vim's Ctrl+U/D in idle Normal mode, transcript search (Ctrl+Shift+F) and pi-copy's copy mode. The mouse wheel scrolls only the half under the pointer.
 - **Editing.** Editor keys, history and autocomplete work as in main, including your list keys such as Ctrl+J/K.
 - **Skills and prompt templates.** `/skill:name` and your templates run in Sidebar.
 - **App actions.** Esc stops an answer, Ctrl+O expands tools, your thinking toggle shows or hides reasoning, Ctrl+C clears the composer, and Ctrl+D never quits Pi.
