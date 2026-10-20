@@ -74,6 +74,31 @@ export function formatContent(op: Op, state: TaskState): string {
 }
 
 /**
+ * The whole visible list after a change, appended to create/update/delete results. The model
+ * sees where the list stands without a `list` call, and herdr-web-ui (the phone client) draws
+ * these lines as its todo checklist instead of the raw output: it reads `    - [X] label` /
+ * `    - [ ] label`, with a trailing `(in progress: note)` or `(blocked: note)`, from the output
+ * of a tool named `todo`. Keep that shape; the heading at column 0 is not a phase to it.
+ */
+export function formatChecklist(state: TaskState): string | null {
+	const visible = state.tasks.filter((t) => t.status !== "deleted");
+	if (visible.length === 0) return null;
+	const done = new Set(state.tasks.filter((t) => t.status === "completed").map((t) => t.id));
+	const lines = visible.map((t) => {
+		const label = `#${t.id} ${sanitizeTerminalText(t.subject)}`;
+		if (t.status === "completed") return `    - [X] ${label}`;
+		if (t.status === "in_progress") {
+			const form = t.activeForm ? sanitizeTerminalText(t.activeForm) : "";
+			return `    - [ ] ${label} (in progress${form ? `: ${form}` : ""})`;
+		}
+		const waiting = (t.blockedBy ?? []).filter((id) => !done.has(id));
+		if (waiting.length) return `    - [ ] ${label} (blocked: waiting on ${waiting.map((id) => `#${id}`).join(", ")})`;
+		return `    - [ ] ${label}`;
+	});
+	return `Todo list (${done.size}/${visible.length} done):\n${lines.join("\n")}`;
+}
+
+/**
  * Build the LLM-facing tool envelope after the store has committed the
  * reducer's new state. `details` is the persistence + replay snapshot —
  * `state/replay.ts` consumes this exact shape on session lifecycle events.
@@ -86,7 +111,9 @@ export function buildToolResult(
 	state: TaskState,
 	op: Op,
 ): { content: Array<{ type: "text"; text: string }>; details: TaskDetails } {
-	const text = formatContent(op, state);
+	const summary = formatContent(op, state);
+	const checklist = op.kind === "create" || op.kind === "update" || op.kind === "delete" ? formatChecklist(state) : null;
+	const text = checklist ? `${summary}\n\n${checklist}` : summary;
 	const details: TaskDetails = {
 		action,
 		params: params as Record<string, unknown>,

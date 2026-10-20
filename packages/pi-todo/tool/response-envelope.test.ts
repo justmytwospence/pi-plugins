@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { TaskState } from "../state/state.js";
 import type { Op } from "../state/state-reducer.js";
-import { buildToolResult, formatContent } from "./response-envelope.js";
+import { buildToolResult, formatChecklist, formatContent } from "./response-envelope.js";
 import type { Task } from "./types.js";
 
 const stateWith = (...tasks: Task[]): TaskState => ({
@@ -128,7 +128,7 @@ describe("buildToolResult", () => {
 		const state = stateWith(t({ id: 1, subject: "alpha" }));
 		const env = buildToolResult("create", { subject: "alpha" }, state, { kind: "create", taskId: 1 });
 		expect(env).toEqual({
-			content: [{ type: "text", text: "Created #1: alpha (pending)" }],
+			content: [{ type: "text", text: "Created #1: alpha (pending)\n\nTodo list (0/1 done):\n    - [ ] #1 alpha" }],
 			details: { action: "create", params: { subject: "alpha" }, tasks: state.tasks, nextId: state.nextId },
 		});
 	});
@@ -140,6 +140,78 @@ describe("buildToolResult", () => {
 		});
 		expect(env.details.error).toBe("subject required for create");
 		expect(env.content[0].text).toBe("Error: subject required for create");
+	});
+});
+
+/**
+ * herdr-web-ui's reader of a `todo` call's output (`parseTodoAnswer`, src/lib/todos.ts then shared/todos.ts,
+ * v0.3.50 through v0.4.12), ported verbatim in behaviour: its phone client shows these rows as
+ * the call's checklist and hides the raw output. If this stops parsing, the phone falls back
+ * to plain text, so keep the format and this port in step.
+ */
+function herdrWebTodoRows(text: string): { label: string; status: string; note?: string }[] | null {
+	if (text.endsWith("… trimmed")) return null;
+	const rows: { label: string; status: string; note?: string }[] = [];
+	for (const line of text.split("\n")) {
+		if (/^ {2}(\S.*):$/.test(line)) continue;
+		const box = /^ {4}- \[(X| )\] (.+)$/.exec(line);
+		if (!box) continue;
+		let label = box[2]!;
+		let status = box[1] === "X" ? "completed" : "pending";
+		let note: string | undefined;
+		const tail = / \((in progress|dropped|blocked)(?:: (.*))?\)$/.exec(label);
+		if (tail) {
+			label = label.slice(0, tail.index);
+			status = tail[1] === "in progress" ? "in_progress" : tail[1]!;
+			note = tail[2];
+		}
+		rows.push(note === undefined ? { label, status } : { label, status, note });
+	}
+	return rows.length ? rows : null;
+}
+
+describe("formatChecklist", () => {
+	it("lists visible tasks with status marks herdr-web-ui reads as a checklist", () => {
+		const state = stateWith(
+			t({ id: 1, subject: "study", status: "completed" }),
+			t({ id: 2, subject: "scaffold", status: "in_progress", activeForm: "scaffolding" }),
+			t({ id: 3, subject: "test", blockedBy: [1, 2] }),
+			t({ id: 4, subject: "gone", status: "deleted" }),
+			t({ id: 5, subject: "ship", blockedBy: [1] }),
+		);
+		const text = formatChecklist(state)!;
+		expect(text).toBe(
+			"Todo list (1/4 done):\n" +
+				"    - [X] #1 study\n" +
+				"    - [ ] #2 scaffold (in progress: scaffolding)\n" +
+				"    - [ ] #3 test (blocked: waiting on #2)\n" +
+				"    - [ ] #5 ship",
+		);
+		expect(herdrWebTodoRows(`Updated #2\n\n${text}`)).toEqual([
+			{ label: "#1 study", status: "completed" },
+			{ label: "#2 scaffold", status: "in_progress", note: "scaffolding" },
+			{ label: "#3 test", status: "blocked", note: "waiting on #2" },
+			{ label: "#5 ship", status: "pending" },
+		]);
+	});
+
+	it("in progress without an activeForm carries no note", () => {
+		const state = stateWith(t({ id: 1, subject: "x", status: "in_progress" }));
+		expect(herdrWebTodoRows(formatChecklist(state)!)).toEqual([{ label: "#1 x", status: "in_progress" }]);
+	});
+
+	it("null when nothing is left to show", () => {
+		expect(formatChecklist(stateWith(t({ id: 1, subject: "x", status: "deleted" })))).toBeNull();
+	});
+
+	it("is appended to create/update/delete results only", () => {
+		const state = stateWith(t({ id: 1, subject: "a" }));
+		const update = buildToolResult("update", { id: 1 }, state, { kind: "update", id: 1, fromStatus: "pending", toStatus: "pending", changed: true });
+		expect(update.content[0].text).toBe("Updated #1\n\nTodo list (0/1 done):\n    - [ ] #1 a");
+		const list = buildToolResult("list", {}, state, { kind: "list", includeDeleted: false });
+		expect(list.content[0].text).toBe("[pending] #1 a");
+		const cleared = buildToolResult("clear", {}, stateWith(), { kind: "clear", count: 1 });
+		expect(cleared.content[0].text).toBe("Cleared 1 tasks");
 	});
 });
 
