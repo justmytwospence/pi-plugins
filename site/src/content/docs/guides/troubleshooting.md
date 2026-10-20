@@ -12,7 +12,7 @@ After changing extension selection, restart Pi or use `/reload`. If an extension
 
 | Symptom | Check |
 | --- | --- |
-| Two copies of a tool or registration warnings | Keep either the suite entry or the standalone component, never both. This includes `npm:pi-vim`, `npm:@saadjs/pi-stash`, `npm:pi-sticky-last-prompt` and `npm:pi-btw`, which the suite now contains |
+| Two copies of a tool or registration warnings | Keep either the suite entry or the standalone component, never both. This includes `npm:pi-vim`, `npm:@saadjs/pi-stash` and `npm:pi-sticky-last-prompt`, which the suite now contains |
 | Duplicate `/ccstyle`, `/context`, `/clear` or doubled diagram rendering | Remove `npm:pi-cc-extensions`. Its parts now live in pi-cc-render, pi-markdown-extras, pi-context, pi-status-footer and pi-subagents, and it patches the same renderer |
 | `ask_user_question` collision | Disable any other extension registering the same tool, such as `@juicesharp/rpiv-ask-user-question` |
 | Duplicate `todo` tool or `/todos` | Disable `npm:@juicesharp/rpiv-todo` before enabling the suite's pi-todo; retain old config/session data for replay and rollback |

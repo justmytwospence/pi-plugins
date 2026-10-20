@@ -1,12 +1,12 @@
 # Pi Plugins
 
-A modular suite of 29 extensions for [Pi](https://pi.dev): background work, subagents, planning, review, context awareness and terminal ergonomics. Every component can be enabled on its own; one Git ref versions the whole suite. It is not a fork of Pi.
+A modular suite of 28 extensions for [Pi](https://pi.dev): background work, subagents, planning, review, context awareness and terminal ergonomics. Every component can be enabled on its own; one Git ref versions the whole suite. It is not a fork of Pi.
 
 **[Documentation](https://pi-plugins.vercel.app)** · **[Keymap & focus](https://pi-plugins.vercel.app/guides/keyboard/)** · **[Requirements, cost & privacy](https://pi-plugins.vercel.app/guides/requirements/)** · **[Development & testing](https://pi-plugins.vercel.app/development/)**
 
 ## Choose your plugins
 
-All 29 references include activation, controls, defaults, requirements, costs and limitations. Start with the workflow you need; companions are optional.
+All 28 references include activation, controls, defaults, requirements, costs and limitations. Start with the workflow you need; companions are optional.
 
 ### Run & coordinate
 
@@ -17,7 +17,6 @@ All 29 references include activation, controls, defaults, requirements, costs an
 | [pi-subagents](https://pi-plugins.vercel.app/plugins/pi-subagents/) | Delegate bounded tasks to headless Pi workers. |
 | [pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/) | Coordinate interactive handoffs and Herdr pane metadata. |
 | [pi-marimo](https://pi-plugins.vercel.app/plugins/pi-marimo/) | Follow notebook state and running cells alongside the chat. |
-| [pi-btw](https://pi-plugins.vercel.app/plugins/pi-btw/) | Ask a side question without interrupting the main run. |
 | [pi-sidebar](https://pi-plugins.vercel.app/plugins/pi-sidebar/) | Chat read-only beside a working session, on its prompt cache. |
 
 ### Think & review
@@ -129,4 +128,4 @@ Develop components under `packages/<name>/`. Keep each one independently usable 
 
 ## License
 
-MIT. Each component keeps its own `LICENSE`. Upstream attribution is retained where components began elsewhere: pi-todo (`@juicesharp/rpiv-todo` 2.12.0 by juicesharp, original commit `7c9bc924c5bfd148f36d7ebc9f7bd0a9469d633f`), pi-plan-mode (narumiruna/pi-extensions), the pi-subagents UI (tintinweb/pi-subagents), pi-vim (lajarre/pi-vim), pi-stash (`@saadjs/pi-stash` by Saad Bash), pi-sticky-last-prompt (tangentyh/pi-collections), pi-btw (dbachelder/pi-btw), and pi-cc-render, pi-markdown-extras, pi-context and parts of pi-status-footer (pi-cc-extensions by minuque; pi-cc-render also credits tifandotme/pi-extensions and MasuRii/pi-tool-display). See [about and credits](https://pi-plugins.vercel.app/about/).
+MIT. Each component keeps its own `LICENSE`. Upstream attribution is retained where components began elsewhere: pi-todo (`@juicesharp/rpiv-todo` 2.12.0 by juicesharp, original commit `7c9bc924c5bfd148f36d7ebc9f7bd0a9469d633f`), pi-plan-mode (narumiruna/pi-extensions), the pi-subagents UI (tintinweb/pi-subagents), pi-vim (lajarre/pi-vim), pi-stash (`@saadjs/pi-stash` by Saad Bash), pi-sticky-last-prompt (tangentyh/pi-collections), and pi-cc-render, pi-markdown-extras, pi-context and parts of pi-status-footer (pi-cc-extensions by minuque; pi-cc-render also credits tifandotme/pi-extensions and MasuRii/pi-tool-display). See [about and credits](https://pi-plugins.vercel.app/about/).

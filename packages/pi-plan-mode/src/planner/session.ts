@@ -1,5 +1,5 @@
 // A planner is an in-process Pi agent session: its own model, effort, tools and read-only policy,
-// running next to your main session in the same Pi process (as pi-btw and pi-subagents run theirs).
+// running next to your main session in the same Pi process (as pi-subagents runs its own).
 // The policy is this package's planner extension, passed as an inline factory; provider auth comes
 // from the providers your session registered, so subscriptions and custom providers work unchanged.
 

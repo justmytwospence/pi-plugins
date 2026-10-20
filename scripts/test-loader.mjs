@@ -64,9 +64,6 @@ try {
     assert.deepEqual(signature(isolatedExtensions[0]), signature(all[i]));
     console.log(`PASS ${plugin.name}: isolated, standalone, filtered, suite registrations match`);
   }
-  const btwResources = await load([{ source: root, extensions: [], skills: ['+packages/pi-btw/skills/btw/SKILL.md'], prompts: [], themes: [] }], false);
-  assert.equal(btwResources.extensions.length, 0);
-  assert.deepEqual(btwResources.skills.skills.map(s => s.name), ['btw'], 'optional BTW skill can be selected without its extension');
   const none = await load([{ source: root, extensions: [], skills: [], prompts: [], themes: [] }], false);
   assert.equal(none.extensions.length, 0);
   assert.equal(none.skills.skills.length, 0);

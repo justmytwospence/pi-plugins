@@ -2,7 +2,7 @@
 
 Local verification completed for the 23-component suite against Pi 1.1.0.
 
-- Root `npm run check`: passed. Includes actual SDK loader tests for isolated, standalone, individually selected and combined components; empty resource selection; optional BTW skill; actual shortcut resolution; metadata, host peers, helper parity and runtime independence; all component checks.
+- Root `npm run check`: passed. Includes actual SDK loader tests for isolated, standalone, individually selected and combined components; empty resource selection; actual shortcut resolution; metadata, host peers, helper parity and runtime independence; all component checks.
 - `python3 scripts/pty-smoke.py`: passed in fullscreen and regular mode, with owned Vim and native fallback editors. Exercises editing, mode-sensitive scrolling, stash/restore, clearing, model picker, embedded question focus/Escape, draft preservation and resize. Uses isolated configuration and offline dummy credentials; never submits a model prompt.
 - Owned Vim: 995 unit/integration tests passed; Neovim parity 321 passed with 23 retained upstream skips.
 - Site: check/build passed, including 40 HTML pages and 2818 local link/asset checks.

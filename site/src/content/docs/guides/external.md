@@ -3,7 +3,7 @@ title: External integrations
 description: Which capabilities the suite owns, which specialist packages remain separate, and their permission boundaries.
 ---
 
-The suite owns its core editor interactions: **Vim editing, prompt stash, sticky last prompt and side conversations**. It also owns Claude Code-style transcript rendering, Markdown extras, `/context` and [logical task tracking](/plugins/pi-todo/) through `todo` and `/todos`. Their upstream MIT attribution and import provenance remain with each component. Owning the integration does not mean replacing the mature Vim motion engine with a handful of mappings.
+The suite owns its core editor interactions: **Vim editing, prompt stash and sticky last prompt**. It also owns Claude Code-style transcript rendering, Markdown extras, `/context` and [logical task tracking](/plugins/pi-todo/) through `todo` and `/todos`. Their upstream MIT attribution and import provenance remain with each component. Owning the integration does not mean replacing the mature Vim motion engine with a handful of mappings.
 
 Four previously used third-party packages remain external. They are optional, not bundled suite requirements. The versions below are the audit baseline, not upgrade instructions.
 
@@ -52,7 +52,7 @@ Use the actual registered tool names for your selected revision; do not interpre
 
 Provider authentication is not a quota service. Footer quota readings can use different accounts or credentials from effort control; do not combine them or imply they identify the same account.
 
-Planner extension selections are explicit capability grants, not a guarantee that every granted tool is read-only. Parent/planner extension isolation must be tested with fixtures, especially packages with module-level state. A side conversation does not silently inherit every parent extension or its tool-gate protection. BTW ask mode has a structurally restricted toolset; normal side sessions have their own permission boundary.
+Planner extension selections are explicit capability grants, not a guarantee that every granted tool is read-only. Parent/planner extension isolation must be tested with fixtures, especially packages with module-level state. A side conversation does not silently inherit every parent extension or its tool-gate protection.
 
 Tool-gate is approval assistance, **not a sandbox**. Ambiguous shell commands leave the read-only fast path for its normal judgment/approval policy. The existing classifier-unavailable headless behavior fails open; do not rely on it to enforce a security boundary.
 

@@ -95,7 +95,7 @@ Dedicated history actions are unbound in stock Pi. Binding them to Ctrl+P/N is a
 
 A practical motion starter: `i`/`a` to type; `h j k l`, `w b e`, `0 ^ $` and `gg G` to move; `d`/`c`/`y` plus a motion, `dd`/`cc`/`yy`, `v`/`V`, `p`/`P`, `u`, Ctrl+R and `.` for editing. Counts compose, for example `3w` or `2dd`. See the [local cheatsheet](/plugins/pi-vim/#motion-cheatsheet) and [upstream supported commands at the imported revision](https://github.com/lajarre/pi-vim/blob/e55b07c05b648f3bbccf656c2b0c6ec63f1a91d1/README.md). This is not full Vim: macros, block Visual, Vim search and general Vim EX semantics are not supported.
 
-Current embedded consumers include question answers/notes, diff comments, subagent steering and BTW composition. Without pi-vim, each falls back to its native editor; no consumer requires the provider.
+Current embedded consumers include question answers/notes, diff comments and subagent steering. Without pi-vim, each falls back to its native editor; no consumer requires the provider.
 
 ## Open an external editor or find a file
 
@@ -159,9 +159,7 @@ These keys are **local to the named focused surface**, not global shortcuts. No 
 | `/yank` filter | Ctrl+J/K moves; Tab Suggested/All; Right previews; Enter copies | pi-copy; letters including j/k filter. Escape clears the query first, then closes. Ctrl+U clears query; Ctrl+D deletes forward, not scrolls. |
 | Question choices | Arrows or j/k; Enter selects; Space toggles multi-select; Ctrl+G adds a note | [pi-ask-user-question](/plugins/pi-ask-user-question/). On `Type something.`, letters/digits are text. |
 | Question tabs / Review | Tab/Shift+Tab or Left/Right; Review Enter submits | Local to the questionnaire. Escape from a text field retains the draft; otherwise declines. |
-| BTW focus / width | Alt+/, Super+/ or Ctrl+Alt+W; Alt+W width | [pi-btw](/plugins/pi-btw/); `PI_BTW_FOCUS_KEYS` replaces focus keys. The overlay can stay open with focus back in the main editor. |
 | Sidebar open / close / move | Ctrl+' opens or closes Sidebar. In Herdr, prefix+h/l moves between main and Sidebar (with its Herdr plugin). In Sidebar, your own scroll, search, editor and app keys apply (pi-vim's Ctrl+U/D in Normal mode, Ctrl+G to the end, Ctrl+Shift+F search, Ctrl+J/K in lists); drag the divider to resize | [pi-sidebar](/plugins/pi-sidebar/); `PI_SIDEBAR_KEYS` replaces Ctrl+' (comma-separated). Needs a terminal that reports Ctrl+' (kitty keyboard protocol). `/sidebar` opens or closes it. |
-| BTW submit / cancel | Enter; Escape aborts streaming, or dismisses when idle | Native empty composer scrolls with Ctrl+U/D; with Vim, only idle Normal does. |
 | Read-only log / child viewer | Ctrl+U/D scrolls where supported; Escape returns | Focused viewer, not global. A steering composer instead owns editing keys. |
 | Notebook view | j/k scroll, Tab notebook, `o` browser, double-`x` interrupt, Escape/`h` return | [pi-marimo](/plugins/pi-marimo/); interrupt targets the kernel, not its server process. |
 

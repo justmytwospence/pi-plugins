@@ -39,14 +39,10 @@
       "./packages/pi-diff-review/src/index.ts",
       "./packages/pi-prose-width/src/index.ts",
       "./packages/pi-sticky-last-prompt/src/index.ts",
-      "./packages/pi-btw/src/index.ts",
       "./packages/pi-cc-render/src/index.ts",
       "./packages/pi-markdown-extras/src/index.ts",
       "./packages/pi-context/src/index.ts",
       "./packages/pi-trends/src/index.ts"
-    ],
-    "skills": [
-      "./packages/pi-btw/skills"
     ],
     "themes": [
       "./packages/pi-cc-render/themes/cc-dark.json",

@@ -1,5 +1,5 @@
-// Sidebar's agent: an in-process Pi session inside main's process (as plan mode's planners and
-// pi-btw run theirs), with no extensions of its own except Sidebar's policy, passed inline. Every
+// Sidebar's agent: an in-process Pi session inside main's process (as plan mode's planners
+// run theirs), with no extensions of its own except Sidebar's policy, passed inline. Every
 // request it sends is main's last request plus Sidebar's part, so main's prompt cache serves it.
 import {
   buildSessionContext,

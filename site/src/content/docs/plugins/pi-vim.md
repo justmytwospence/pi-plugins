@@ -72,7 +72,7 @@ Ctrl+X waits one second for the second key. Any other key, or the timeout, passe
 
 ## Embedded editors in suite dialogs
 
-pi-vim answers the `pi-plugins.editor-factory.v1` request on Pi's event bus while a session is active. A dialog that asks gets a multi-line modal editor; a dialog that gets no answer uses Pi's native editor. Current consumers include [pi-ask-user-question](/plugins/pi-ask-user-question/)'s free-text answer, [pi-diff-review](/plugins/pi-diff-review/)'s comment editor, the [pi-subagents](/plugins/pi-subagents/) conversation viewer's composer and [pi-btw](/plugins/pi-btw/)'s overlay.
+pi-vim answers the `pi-plugins.editor-factory.v1` request on Pi's event bus while a session is active. A dialog that asks gets a multi-line modal editor; a dialog that gets no answer uses Pi's native editor. Current consumers include [pi-ask-user-question](/plugins/pi-ask-user-question/)'s free-text answer, [pi-diff-review](/plugins/pi-diff-review/)'s comment editor and the [pi-subagents](/plugins/pi-subagents/) conversation viewer's composer.
 
 An embedded editor never reaches Pi's agent, command registry, shell or process:
 

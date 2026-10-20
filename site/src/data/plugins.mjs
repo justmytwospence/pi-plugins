@@ -6,7 +6,6 @@ export const groups = [
     { name: "pi-subagents", label: "Subagents", description: "Separate Pi processes, parallel tasks and conversations you can inspect." },
     { name: "pi-herdr", label: "Herdr", description: "Pane metadata, interactive children and a shared event-bus bridge." },
     { name: "pi-marimo", label: "Notebooks", description: "Live notebook state alongside your conversation, without taking over the kernel." },
-    { name: "pi-btw", label: "Side conversation", description: "Ask a side question in its own thread while the main run keeps going." },
     { name: "pi-sidebar", label: "Sidebar", description: "A live, read-only side chat beside the main session, served from its prompt cache." },
   ] },
   { title: "Think & review", eyebrow: "02 / Decisions", description: "Make the decision explicit, compare plans, and review the actual changes.", plugins: [
