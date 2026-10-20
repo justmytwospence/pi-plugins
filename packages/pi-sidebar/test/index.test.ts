@@ -44,6 +44,9 @@ function setup(entries: unknown[] = []) {
   return { pi, controller, tui, mainEditor, ctx, notes };
 }
 
+// Main answered long ago: its cache has expired, so a send asks first.
+const OLD_ANSWER = [{ type: "message", timestamp: "1970-01-01T00:00:00.000Z", message: { role: "assistant", timestamp: 0, usage: { input: 10, cacheRead: 20000, cacheWrite: 0 } } }];
+
 const panelOf = (controller: SidebarController) => (controller as unknown as { panel: any }).panel;
 
 describe("registration", () => {
@@ -123,7 +126,7 @@ describe("opening and focus", () => {
 
 describe("asking", () => {
   it("asks inline before a send that cannot use main's cache, and sends on Enter", () => {
-    const { controller, ctx } = setup();
+    const { controller, ctx } = setup(OLD_ANSWER);
     controller.openOrFocus(ctx as never);
     const ask = vi.spyOn(controller.agent, "ask").mockResolvedValue();
     const panel = panelOf(controller);
@@ -136,7 +139,7 @@ describe("asking", () => {
   });
 
   it("keeps the question in the composer when the confirmation is declined", () => {
-    const { controller, ctx } = setup();
+    const { controller, ctx } = setup(OLD_ANSWER);
     controller.openOrFocus(ctx as never);
     const ask = vi.spyOn(controller.agent, "ask").mockResolvedValue();
     const panel = panelOf(controller);

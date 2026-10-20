@@ -102,6 +102,10 @@ export class MainState {
 
   constructor(pi: ExtensionAPI, private readonly now = () => Date.now()) {
     pi.on("session_start", (_event, ctx) => this.bind(ctx));
+    // After /tree or a compaction main's next request starts from a different history: the one in
+    // memory no longer describes it, so Sidebar rebuilds from the session until main sends again.
+    pi.on("session_tree", (_event, ctx) => { this.ctx = ctx; this.request = undefined; this.changed(); });
+    pi.on("session_compact", (_event, ctx) => { this.ctx = ctx; this.request = undefined; this.changed(); });
     pi.on("model_select", (_event, ctx) => { this.ctx = ctx; this.changed(); });
 
     pi.on("before_provider_request", (event, ctx) => {
@@ -188,10 +192,31 @@ export class MainState {
     this.changed();
   }
 
-  /** Prompt tokens main's last request covered (from its usage), or a rough estimate from its size. */
+  /**
+   * Main's last answer on the current branch, from its session: when it was written and the prompt
+   * tokens its request carried. Available after a restart or `/reload`, when nothing is in memory.
+   */
+  lastAnswer(): { at: number; promptTokens: number } | undefined {
+    const branch = this.ctx?.sessionManager.getBranch() ?? [];
+    for (let i = branch.length - 1; i >= 0; i--) {
+      const entry = branch[i] as { type?: string; timestamp?: string; message?: { role?: string; timestamp?: number; usage?: Partial<Usage> } };
+      if (entry.type !== "message" || entry.message?.role !== "assistant") continue;
+      const u = entry.message.usage;
+      const at = typeof entry.message.timestamp === "number" ? entry.message.timestamp : Date.parse(entry.timestamp ?? "");
+      return {
+        at: Number.isFinite(at) ? at : 0,
+        promptTokens: (u?.input ?? 0) + (u?.cacheRead ?? 0) + (u?.cacheWrite ?? 0),
+      };
+    }
+    return undefined;
+  }
+
+  /** Prompt tokens of main's last request: from its usage, else its session, else its size. */
   promptTokens(): number {
     const u = this.live.lastUsage;
     if (u && u.input + u.cacheRead + u.cacheWrite > 0) return u.input + u.cacheRead + u.cacheWrite;
+    const last = this.lastAnswer();
+    if (last && last.promptTokens > 0) return last.promptTokens;
     return this.request ? Math.round(JSON.stringify(this.request.payload).length / 4) : 0;
   }
 

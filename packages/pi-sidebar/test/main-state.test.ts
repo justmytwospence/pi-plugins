@@ -37,6 +37,22 @@ describe("MainState", () => {
     expect(state.request!.payload).toBe(sent);
   });
 
+  it("forgets the request after /tree or a compaction, and reads main's last answer from its session", async () => {
+    const pi = new FakePi();
+    const state = new MainState(pi as never);
+    const branch = [{ type: "message", timestamp: "1970-01-01T00:00:05.000Z", message: { role: "assistant", usage: { input: 10, cacheRead: 990, cacheWrite: 0 } } }];
+    const { ctx } = fakeCtx({ systemPrompt: PROMPT, entries: branch });
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    await pi.emit("before_provider_request", { payload: payload() }, ctx);
+    await pi.emit("session_tree", {}, ctx);
+    expect(state.request).toBeUndefined();
+    await pi.emit("before_provider_request", { payload: payload() }, ctx);
+    await pi.emit("session_compact", {}, ctx);
+    expect(state.request).toBeUndefined();
+    expect(state.lastAnswer()).toEqual({ at: 5000, promptTokens: 1000 });
+    expect(state.promptTokens()).toBe(1000);
+  });
+
   it("forgets the request when main switches session", async () => {
     const pi = new FakePi();
     const state = new MainState(pi as never);

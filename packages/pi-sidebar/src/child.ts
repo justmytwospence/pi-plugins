@@ -89,7 +89,6 @@ export class SidebarAgent {
   private creating: Promise<AgentSession> | undefined;
   private thread: AgentMessage[] = [];
   private turnStart = 0;
-  private allowReplay = false;
   private mode: "splice" | "replay" | undefined;
   private readonly listeners = new Set<(event: SidebarEvent) => void>();
   private generation = 0;
@@ -134,20 +133,15 @@ export class SidebarAgent {
     const ctx = this.main.ctx;
     if (!ctx) return { kind: "refuse", reason: "main's session is not ready yet." };
     const request = this.main.request;
-    if (!request) {
-      const tokens = ctx.getContextUsage()?.tokens ?? 0;
-      return {
-        kind: "confirm",
-        title: "Main has not sent a request since Pi started",
-        message: tokens > 0
-          ? `So its cache cannot be shared for sure. Sending reads about ${formatTokens(tokens)} tokens of main's conversation, probably uncached.`
-          : "Main has no conversation yet, so Sidebar's request carries only the prompt and tools, uncached.",
-      };
-    }
-    if (!SUPPORTED_APIS.has(request.api)) return { kind: "refuse", reason: `main uses the ${request.api} API, which Sidebar cannot share a cache with.` };
-    if (!ctx.modelRegistry.find(request.provider, request.model)) return { kind: "refuse", reason: `main's model ${request.provider}/${request.model} is not available.` };
-    const age = this.now() - request.sentAt;
-    const ttl = requestedCacheTtlMs(request.api, request.payload);
+    // Without a request in memory (after a restart, /reload, /tree or a compaction), Sidebar rebuilds
+    // main's request from its session; main's last answer says how warm its cache still is.
+    const last = request ? undefined : this.main.lastAnswer();
+    if (!request && !last) return { kind: "send" }; // no conversation yet: only the prompt and tools
+    const api = request?.api ?? ctx.model?.api ?? "";
+    if (!SUPPORTED_APIS.has(api)) return { kind: "refuse", reason: `main uses the ${api} API, which Sidebar cannot share a cache with.` };
+    if (request && !ctx.modelRegistry.find(request.provider, request.model)) return { kind: "refuse", reason: `main's model ${request.provider}/${request.model} is not available.` };
+    const age = this.now() - (request?.sentAt ?? last!.at);
+    const ttl = request ? requestedCacheTtlMs(request.api, request.payload) : configuredCacheTtlMs();
     if (age > ttl - COLD_MARGIN_MS) {
       return {
         kind: "confirm",
@@ -170,18 +164,13 @@ export class SidebarAgent {
     const ctx = this.main.ctx;
     if (!ctx) throw new Error("main's session is not ready yet");
     if (confirmed) this.missed = undefined;
-    this.allowReplay = confirmed && !this.main.request;
     const session = await this.ensureSession(ctx);
     if (session.isStreaming) {
       await session.followUp(text);
       return;
     }
     this.turnStart = session.messages.length;
-    try {
-      await session.prompt(text);
-    } finally {
-      this.allowReplay = false;
-    }
+    await session.prompt(text);
   }
 
   async abort(): Promise<void> {
@@ -284,7 +273,7 @@ export class SidebarAgent {
     const total = read + (message.usage.input ?? 0) + (message.usage.cacheWrite ?? 0);
     if (total === 0) return;
     const expected = this.main.promptTokens();
-    this.missed = this.mode === "splice" && expected >= MISS_MIN_TOKENS && read < expected * MISS_RATIO ? { read, expected } : undefined;
+    this.missed = this.mode !== undefined && expected >= MISS_MIN_TOKENS && read < expected * MISS_RATIO ? { read, expected } : undefined;
     this.lastAnswer = `${Math.round((read / total) * 100)}% cached · ${formatTokens(total - read)} new`;
   }
 
@@ -311,10 +300,6 @@ export class SidebarAgent {
           const status = statusMessage(describeLive(this.main.live, delta, now), now);
           return { messages: assembleContext(event.messages, delta.messages, roleMessage(now), status) };
         }
-        if (!this.allowReplay) {
-          this.mode = undefined;
-          return undefined;
-        }
         this.mode = "replay";
         const status = statusMessage(describeLive(this.main.live, { messages: [], pending: [] }, now), now);
         const replay = replayMessages(ctx);
@@ -334,7 +319,7 @@ export class SidebarAgent {
           cctx.abort();
           return inertPayload(api, event.payload);
         };
-        if (this.mode === "replay") return undefined;
+        if (this.mode === "replay") return replayPayload(api, event.payload, cctx.sessionManager.getSessionId(), this.main.sessionId);
         const request = this.main.request;
         if (this.mode !== "splice" || !request) return fail("there is no copy of main's last request");
         if (request.api !== api) return fail(`main is on the ${request.api} API and Sidebar on ${api}`);
@@ -372,4 +357,60 @@ export function webToolSources(pi: Pick<ExtensionAPI, "getAllTools">): { names: 
     // No tool information: Sidebar keeps the built-in reading tools.
   }
   return { names, paths: [...paths] };
+}
+
+/** The cache TTL main's requests ask for when none is in memory: Pi's retention setting. */
+export function configuredCacheTtlMs(env: NodeJS.ProcessEnv = process.env): number {
+  return env.PI_CACHE_RETENTION === "long" ? 60 * 60_000 : 5 * 60_000;
+}
+
+type Block = Record<string, unknown> & { type?: string; text?: string; cache_control?: unknown };
+type Msg = { role?: string; content?: unknown };
+
+const ANTHROPIC_MAX_BREAKPOINTS = 4;
+
+/**
+ * A request Sidebar rebuilt from main's session. Its prefix is main's conversation; on Anthropic the
+ * cache breakpoint goes where main's own last request ended (the last user-role block before
+ * Sidebar's part), so the lookup lands on the entry main wrote. Fields carrying Sidebar's session
+ * id (OpenAI's prompt_cache_key) get main's, which routes to main's cache.
+ */
+export function replayPayload(api: string, payload: unknown, ownSessionId: string | undefined, mainSessionId: string | undefined): unknown {
+  if (!payload || typeof payload !== "object") return payload;
+  const out = structuredClone(payload) as Record<string, unknown>;
+  if (ownSessionId && mainSessionId && ownSessionId !== mainSessionId) {
+    for (const [key, value] of Object.entries(out)) {
+      if (value === ownSessionId) out[key] = mainSessionId;
+    }
+  }
+  if (api !== "anthropic-messages" || !Array.isArray(out.messages)) return out;
+  const messages = out.messages as Msg[];
+  const flat: Array<{ role: string; block: Block }> = [];
+  for (const message of messages) {
+    if (!Array.isArray(message.content)) continue;
+    for (const block of message.content as Block[]) if (block && typeof block === "object") flat.push({ role: message.role ?? "", block });
+  }
+  const roleAt = flat.findIndex(({ block }) => block.type === "text" && typeof block.text === "string" && block.text.startsWith("<sidebar>\n"));
+  if (roleAt <= 0) return out;
+  let boundary = -1;
+  for (let i = roleAt - 1; i >= 0; i--) {
+    const { role, block } = flat[i]!;
+    if (role === "user" && block.type !== "thinking" && block.type !== "redacted_thinking") {
+      boundary = i;
+      break;
+    }
+  }
+  if (boundary === -1) return out;
+  const count = (value: unknown): number =>
+    Array.isArray(value) ? value.reduce<number>((n, item) => n + (item && typeof item === "object" && (item as Block).cache_control !== undefined ? 1 : 0), 0) : 0;
+  const fixed = count(out.system) + count(out.tools);
+  if (fixed >= ANTHROPIC_MAX_BREAKPOINTS) return out;
+  const marker = [...((Array.isArray(out.system) ? out.system : []) as Block[]), ...((Array.isArray(out.tools) ? out.tools : []) as Block[])]
+    .map((b) => b?.cache_control)
+    .find((c) => c && typeof c === "object") ?? { type: "ephemeral" };
+  const last = flat[flat.length - 1]!.block;
+  for (const { block } of flat) delete block.cache_control;
+  flat[boundary]!.block.cache_control = structuredClone(marker);
+  if (fixed + 1 < ANTHROPIC_MAX_BREAKPOINTS && last !== flat[boundary]!.block) last.cache_control = structuredClone(marker);
+  return out;
 }

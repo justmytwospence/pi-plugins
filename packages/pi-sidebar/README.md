@@ -94,13 +94,14 @@ Read-only does not change the tool list: removing tools would change the request
 
 ## When it asks first
 
+Sidebar works from any point in the conversation. When main has no request in memory, Sidebar rebuilds main's request from its session and puts the cache breakpoint where main's last request ended, so a warm cache is still hit. This happens after a restart, resume, `/reload`, `/tree` or a compaction. In a live test after a restart it answered 97% from the cache.
+
 Sidebar never quietly re-reads main's context uncached. It asks inline (Enter sends, Esc keeps the question) when:
 
-- main has not sent a request since Pi started (Sidebar would build one from main's transcript);
-- main's cache has probably expired: main's last request is older than the TTL it asked for, which is 5 minutes, or 1 hour with `PI_CACHE_RETENTION=long`;
+- main's cache has probably expired: main's last request (or, without one in memory, its last answer) is older than the cache TTL, which is 5 minutes, or 1 hour with `PI_CACHE_RETENTION=long`;
 - the last answer read less than half of main's context from the cache.
 
-Sidebar refuses outright on an API it cannot share a cache with. It aborts a request without sending it when main's request is missing, the API or model differs, or Anthropic's limit of four cache breakpoints would be exceeded.
+Sidebar refuses outright on an API it cannot share a cache with. It aborts a request without sending it when main's request vanishes while one is being built, the API or model differs, or Anthropic's limit of four cache breakpoints would be exceeded.
 
 It always uses main's model and thinking settings: a cache belongs to one model and one set of settings. It never keeps its own cache warm.
 

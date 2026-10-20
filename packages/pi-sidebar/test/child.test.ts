@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SidebarAgent, replayMessages, webToolSources } from "../src/child.ts";
+import { replayMessages, replayPayload, SidebarAgent, webToolSources } from "../src/child.ts";
 import { MainState } from "../src/main-state.ts";
 import { FakePi, fakeCtx } from "./fake.ts";
 
@@ -21,7 +21,7 @@ const sidePayload = () => ({
 
 const entries = [
   { type: "message", id: "u1", parentId: null, timestamp: "", message: { role: "user", content: [{ type: "text", text: "fix it" }], timestamp: 0 } },
-  { type: "message", id: "a1", parentId: "u1", timestamp: "", message: { role: "assistant", content: [{ type: "text", text: "Fixed a.ts." }], provider: "anthropic", model: "claude-x", api: "anthropic-messages", usage: {}, stopReason: "stop", timestamp: 0 } },
+  { type: "message", id: "a1", parentId: "u1", timestamp: "", message: { role: "assistant", content: [{ type: "text", text: "Fixed a.ts." }], provider: "anthropic", model: "claude-x", api: "anthropic-messages", usage: { input: 100, cacheRead: 21_900, cacheWrite: 0 }, stopReason: "stop", timestamp: 0 } },
 ];
 
 function setup(opts: { request?: boolean; sentAt?: number; now?: number; api?: string } = {}) {
@@ -68,25 +68,27 @@ describe("Sidebar's requests", () => {
     expect(aborted()).toBe(0);
   });
 
-  it("aborts without sending when there is no request to build on", async () => {
-    const { cpi, cctx, events, aborted } = setup({ request: false });
-    expect(await cpi.emit("context_with_system", { messages: [] }, cctx)).toBeUndefined();
+  it("rebuilds main's request from its session when none is in memory", async () => {
+    const { cpi, cctx, aborted } = setup({ request: false });
+    const system = { role: "system", content: "", timestamp: 0 };
+    const question = { role: "user", content: [{ type: "text", text: "q" }], timestamp: 0 };
+    const out = await cpi.emit("context_with_system", { messages: [system, question] }, cctx);
+    // Main's transcript has no system message here, so Sidebar's own stands in.
+    expect(out.messages.map((m: any) => m.role)).toEqual(["system", "user", "assistant", "user", "user", "user"]);
+    expect(out.messages[0]).toBe(system);
+    const sent = await cpi.emit("before_provider_request", { payload: sidePayload() }, cctx);
+    expect(sent).toEqual(sidePayload());
+    expect(aborted()).toBe(0);
+  });
+
+  it("aborts without sending when main's request disappears mid-request", async () => {
+    const { cpi, cctx, events, aborted, state } = setup();
+    await cpi.emit("context_with_system", { messages: [] }, cctx);
+    state.request = undefined;
     const sent = await cpi.emit("before_provider_request", { payload: sidePayload() }, cctx);
     expect(aborted()).toBe(1);
     expect(sent.messages).toEqual([]);
     expect(events[0]).toMatchObject({ type: "sidebar_error", message: expect.stringMatching(/Nothing was spent/) });
-  });
-
-  it("replays main's conversation only when a send without a request was confirmed", async () => {
-    const { agent, cpi, cctx } = setup({ request: false });
-    (agent as unknown as { allowReplay: boolean }).allowReplay = true;
-    const system = { role: "system", content: "", timestamp: 0 };
-    const question = { role: "user", content: [{ type: "text", text: "q" }], timestamp: 0 };
-    const out = await cpi.emit("context_with_system", { messages: [system, question] }, cctx);
-    // Main's transcript has no system message yet, so Sidebar's own stands in.
-    expect(out.messages.map((m: any) => m.role)).toEqual(["system", "user", "assistant", "user", "user", "user"]);
-    expect(out.messages[0]).toBe(system);
-    expect(await cpi.emit("before_provider_request", { payload: sidePayload() }, cctx)).toBeUndefined();
   });
 
   it("aborts when main and Sidebar are on different APIs", async () => {
@@ -112,9 +114,19 @@ describe("preflight", () => {
     expect(setup().agent.preflight()).toEqual({ kind: "send" });
   });
 
-  it("asks when main has not sent a request since Pi started", () => {
-    const check = setup({ request: false }).agent.preflight();
-    expect(check).toMatchObject({ kind: "confirm", title: expect.stringMatching(/not sent a request/), message: expect.stringMatching(/22k tokens/) });
+  it("sends without a request in memory while main's last answer is recent", () => {
+    expect(setup({ request: false }).agent.preflight()).toEqual({ kind: "send" });
+  });
+
+  it("asks without a request in memory when main's last answer is older than its cache", () => {
+    const check = setup({ request: false, now: 2 * 60 * 60_000 }).agent.preflight();
+    expect(check).toMatchObject({ kind: "confirm", title: expect.stringMatching(/expired/), message: expect.stringMatching(/22k tokens/) });
+  });
+
+  it("sends right away when main has no conversation yet", () => {
+    const { agent, state } = setup({ request: false });
+    state.bind(fakeCtx({ entries: [] }).ctx as never);
+    expect(agent.preflight()).toEqual({ kind: "send" });
   });
 
   it("asks when main's cache has probably expired", () => {
@@ -137,6 +149,44 @@ describe("preflight", () => {
     (agent as unknown as { recordUsage(m: unknown): void }).recordUsage({ role: "assistant", usage: { input: 500, cacheRead: 29_500, cacheWrite: 0 } });
     expect(agent.missed).toBeUndefined();
     expect(agent.lastAnswer).toBe("98% cached · 500 new");
+  });
+});
+
+describe("replayPayload", () => {
+  const H = { type: "ephemeral", ttl: "1h" };
+  const rebuilt = () => ({
+    model: "claude-x",
+    prompt_cache_key: "side-session",
+    system: [{ type: "text", text: "identity", cache_control: H }, { type: "text", text: "MAIN", cache_control: H }],
+    tools: [{ name: "read", cache_control: H }],
+    messages: [
+      { role: "user", content: [{ type: "text", text: "fix it" }] },
+      { role: "assistant", content: [{ type: "thinking", thinking: "t" }, { type: "tool_use", id: "1" }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "1", content: "ok" }] },
+      { role: "assistant", content: [{ type: "text", text: "Fixed." }] },
+      { role: "user", content: [{ type: "text", text: "<sidebar>\nYou are Sidebar" }, { type: "text", text: "<sidebar-status>" }, { type: "text", text: "q", cache_control: { type: "ephemeral" } }] },
+    ],
+  });
+
+  it("puts the breakpoint where main's last request ended and keeps four at most", () => {
+    const out = replayPayload("anthropic-messages", rebuilt(), "side-session", "main-session") as any;
+    expect(out.messages[2].content[0].cache_control).toEqual(H);
+    expect(out.messages[4].content[2].cache_control).toBeUndefined();
+    expect(JSON.stringify(out).match(/cache_control/g)).toHaveLength(4);
+    expect(out.prompt_cache_key).toBe("main-session");
+  });
+
+  it("adds a trailing breakpoint when there is room", () => {
+    const input = rebuilt();
+    input.system = [input.system[1]!];
+    const out = replayPayload("anthropic-messages", input, "side-session", "main-session") as any;
+    expect(out.messages[2].content[0].cache_control).toEqual(H);
+    expect(out.messages[4].content[2].cache_control).toEqual(H);
+  });
+
+  it("leaves a request without Sidebar's part alone", () => {
+    const input = { model: "m", messages: [{ role: "user", content: [{ type: "text", text: "q", cache_control: { type: "ephemeral" } }] }] };
+    expect(replayPayload("anthropic-messages", input, "a", "b")).toEqual(input);
   });
 });
 

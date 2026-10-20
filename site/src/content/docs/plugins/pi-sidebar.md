@@ -76,12 +76,13 @@ To keep that prefix identical, Sidebar keeps main's tool declarations and blocks
 - **Allowed:** reading tools, main's web search and fetch tools, and shell commands that only read (plan mode's policy).
 - **Blocked:** everything else, with a reason the model relays.
 
+It works from any point in the conversation. With no request of main's in memory, Sidebar rebuilds it from main's session and still lands on main's warm cache. This happens after a restart, resume, `/reload`, `/tree` or a compaction.
+
 Sidebar never quietly re-reads main's context uncached. It asks inline (Enter sends, Esc keeps the question) when:
-- main has not sent a request since Pi started;
 - main's cache has probably expired;
 - the last answer missed the cache.
 
-It aborts, sending nothing, on a missing request, an API or model mismatch, or too many cache breakpoints. There is no model override, and it never keeps its own cache warm.
+It aborts, sending nothing, if main's request vanishes mid-build, on an API or model mismatch, or too many cache breakpoints. There is no model override, and it never keeps its own cache warm.
 
 ## Limits
 
