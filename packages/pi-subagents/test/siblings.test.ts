@@ -146,10 +146,11 @@ test.each([true, false])("actual pi-bg and subagents negotiate hosts in both sta
   expect(yes).toBe(true);
   expect(hosts).toContainEqual({ host: "subagents", priority: 20 });
   expect(offered.some((section) => section.id === "bg")).toBe(true);
-  // Seed the actual registry with a completed fixture: no subprocess or socket is opened.
+  // Seed the actual registry with a completed fixture: no subprocess or socket is opened. pi-bg
+  // lists only its own session's tasks, so the fixture belongs to the harness session.
   const { registry } = await import(sibling("pi-bg", "registry.ts"));
   const reg = registry();
-  const task = { id: "fixture", name: "Fixture", command: "fixture only", cwd, logPath: path.join(cwd, "fixture.log"), kind: "job", origin: "agent", status: "failed", startedAt: Date.now(), endedAt: Date.now(), exitCode: 1, ready: false, keep: false, delivered: true, readyDelivered: true };
+  const task = { id: "fixture", sessionId: ctx.sessionManager.getSessionId(), name: "Fixture", command: "fixture only", cwd, logPath: path.join(cwd, "fixture.log"), kind: "job", origin: "agent", status: "failed", startedAt: Date.now(), endedAt: Date.now(), exitCode: 1, ready: false, keep: false, delivered: true, readyDelivered: true };
   reg.tasks.set(task.id, task);
   reg.emit("change", task);
   expect(ui.render("subagents-fleet").join("\n")).toContain("shells");
