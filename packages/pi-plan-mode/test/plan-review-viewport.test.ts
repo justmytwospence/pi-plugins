@@ -90,6 +90,13 @@ function setup(plan: string, scrollbar: "always" | "hidden" = "always") {
   const ctx = createMockContext({ mode: "tui", hasUI: true }).ctx as ExtensionToolContext;
   ctx.ui.setWidget = mode.setExtensionWidget.bind(mode);
   ctx.ui.select = mode.showExtensionSelector.bind(mode);
+  // Raw terminal input, as Pi hands it to extensions before the focused component.
+  const keyHandlers = new Set<(data: string) => { consume?: boolean } | undefined>();
+  ctx.ui.onTerminalInput = (handler) => {
+    keyHandlers.add(handler);
+    return () => keyHandlers.delete(handler);
+  };
+  const press = (data: string) => [...keyHandlers].some((handler) => handler(data)?.consume === true);
   const mock = createMockPi();
   const directory = mkdtempSync(join(tmpdir(), "plan-review-"));
   directories.push(directory);
@@ -153,6 +160,8 @@ function setup(plan: string, scrollbar: "always" | "hidden" = "always") {
     mock,
     run,
     choose,
+    press,
+    keyHandlers,
     settle,
     frame,
     top,
@@ -190,6 +199,24 @@ test.each(["long", "short"])(
     expect(h.card.render(64).length).toBeLessThan(size === "long" ? 40 : 12);
   },
 );
+
+test("ctrl+d and ctrl+u scroll the plan half a page while you decide, and only then", async () => {
+  const h = setup(longPlan);
+  const result = h.run();
+  await h.settle();
+  const start = h.scroll.scrollTop;
+  const half = Math.floor(h.scroll.viewportHeight / 2);
+  expect(h.press("\x04")).toBe(true); // ctrl+d
+  expect(h.scroll.scrollTop).toBe(start + half);
+  await h.settle();
+  expect(h.scroll.scrollTop).toBe(start + half); // rerenders keep the reader's place
+  expect(h.press("\x15")).toBe(true); // ctrl+u
+  expect(h.scroll.scrollTop).toBe(start);
+  expect(h.press("x")).toBe(false); // other keys go to the picker
+  h.choose();
+  await result;
+  expect(h.keyHandlers.size).toBe(0); // after the review, ctrl+u/ctrl+d are the editor's again
+});
 
 test("manual scrolling is not overwritten by rerenders or resizing away from the start", async () => {
   const h = setup(longPlan);

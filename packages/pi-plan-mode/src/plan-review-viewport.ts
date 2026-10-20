@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { Component, TUI } from "@earendil-works/pi-tui";
+import { type Component, getKeybindings, matchesKey, type TUI } from "@earendil-works/pi-tui";
 
 interface ReviewScrollView {
   child: Component;
@@ -22,6 +22,7 @@ interface Review {
   tui?: ReviewTui;
   view?: ReviewScrollView;
   removeWidget(): void;
+  removeKeys?(): void;
   jump: boolean;
   queued: boolean;
   wasAtStart?: boolean;
@@ -86,6 +87,18 @@ export class PlanReviewViewport {
       removeWidget: () => ctx.ui.setWidget(widget, undefined),
     };
     this.review = review;
+    // Ctrl+U / Ctrl+D scroll the plan half a page while you decide, as in /planners. Only for the
+    // review: elsewhere they stay the editor's. Pi's own half-page bindings count too.
+    try {
+      review.removeKeys = ctx.ui.onTerminalInput((data) => {
+        const up = matchesKey(data, "ctrl+u") || getKeybindings().matches(data, "tui.altScreen.halfPageUp");
+        const down = matchesKey(data, "ctrl+d") || getKeybindings().matches(data, "tui.altScreen.halfPageDown");
+        if ((!up && !down) || this.review !== review) return undefined;
+        return this.scrollHalf(review, up ? -1 : 1) ? { consume: true } : undefined;
+      });
+    } catch {
+      // No raw input (not the interactive TUI): the keys keep their usual meaning.
+    }
     // A zero-row widget gives us Pi's stable renderer proxy without replacing any UI.
     try {
       ctx.ui.setWidget(widget, (tui) => {
@@ -159,10 +172,31 @@ export class PlanReviewViewport {
     }
   }
 
+  /** Scroll the transcript half its height up (-1) or down (1); false without a full-screen view. */
+  private scrollHalf(review: Review, direction: -1 | 1): boolean {
+    try {
+      const view = scrollView(review.tui);
+      if (!review.tui || !view || view.viewportHeight <= 0) return false;
+      const step = Math.max(1, Math.floor(view.viewportHeight / 2));
+      view.scrollTo(Math.max(0, view.scrollTop + direction * step), { disableFollow: true });
+      // The reader moved: resizes no longer snap back to the plan's top.
+      review.jump = false;
+      review.tui.requestRender();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   end(): void {
     const review = this.review;
     this.review = undefined; // Invalidates queued jumps and removes padding from old components.
     if (!review) return;
+    try {
+      review.removeKeys?.();
+    } catch {
+      // Already gone with the UI.
+    }
     try {
       review.removeWidget();
     } catch {
