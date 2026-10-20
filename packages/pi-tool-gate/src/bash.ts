@@ -1001,9 +1001,15 @@ const WRITES_LAST = new Set(["cp", "rsync", "install", "scp"]);
 
 const REDIRECT = /^[0-9&]*(>>?|<>?|<)/u;
 
-/** Whether a token names a file: it has a slash or starts with `~`, `.` or `$HOME`, and is not a URL. */
+/**
+ * Whether a token names a local file: it has a slash or starts with `~`, `.` or `$HOME`, and is
+ * not a URL, a package spec (`git:github.com/o/r`, `github:o/r`) or a remote (`nuc:/x`,
+ * `user@nuc:~/x`): a `:` before the first slash, unless the token starts like a local path.
+ */
 function pathLike(token: string): boolean {
   if (!token || token.includes("://") || token.startsWith("-")) return false;
+  const local = /^(\/|~|\.|\$HOME)/u.test(token);
+  if (!local && token.split("/")[0].includes(":")) return false;
   return token.includes("/") || token === "." || token === ".." || token === "~" || token.startsWith("~") || token.startsWith("$HOME");
 }
 
@@ -1127,7 +1133,10 @@ export function bashPathAccess(
     } else if (WRITES_ALL.has(p.name)) {
       for (const f of files) writes.add(f);
     } else if (WRITES_LAST.has(p.name)) {
-      files.forEach((f, i) => (i === files.length - 1 ? writes : reads).add(f));
+      // A remote destination (`scp f nuc:/x`) is not a local file: every local operand is read.
+      const dest = args.filter((a) => !a.startsWith("-")).at(-1);
+      if (dest !== undefined && !pathLike(dest)) for (const f of files) reads.add(f);
+      else files.forEach((f, i) => (i === files.length - 1 ? writes : reads).add(f));
     } else if (p.name === "sed") {
       // Past its script: `s/a/b/` is not a file.
       const inPlace = p.args.some((a) => /^-[a-zA-Z]*i/u.test(a) || a.startsWith("--in-place"));

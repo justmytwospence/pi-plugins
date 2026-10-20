@@ -29,6 +29,16 @@ describe("bashPathAccess", () => {
     expect(access("curl -s https://example.com/a/b")).toEqual({ reads: [], writes: [] });
   });
 
+  test("package specs and host:path remotes are not local files; local paths with a colon are", () => {
+    expect(access("pi update git:github.com/o/r")).toEqual({ reads: [], writes: [] });
+    expect(access("npm i github:o/r")).toEqual({ reads: [], writes: [] });
+    expect(access("scp ./f nuc:/tmp/f")).toEqual({ reads: [`${app}/f`], writes: [] });
+    expect(access("scp nuc:/x ./y")).toEqual({ reads: [], writes: [`${app}/y`] });
+    expect(access("rsync -a src/ user@nuc:~/dst/")).toEqual({ reads: [`${app}/src`], writes: [] });
+    expect(access("cat ./a:b")).toEqual({ reads: [`${app}/a:b`], writes: [] });
+    expect(access("rm /tmp/a:b").writes).toEqual(["/tmp/a:b"]);
+  });
+
   test("writes: redirects, filesystem commands, cp's destination, sed -i", () => {
     expect(access("echo hi > ~/Projects/other/x").writes).toEqual([`${P}/other/x`]);
     expect(access("rm -rf ../other/build").writes).toEqual([`${P}/other/build`]);
