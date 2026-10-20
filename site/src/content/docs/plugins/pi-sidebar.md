@@ -73,12 +73,14 @@ Sidebar's thread is stored as hidden entries in main's session. It follows `/tre
 
 Main keeps its last provider request in memory. Each Sidebar request is built from four parts:
 
-1. **Main's last request, unchanged.** The model, system prompt, tool declarations, thinking and effort settings, cache keys, every message and every cache breakpoint all come from it.
+1. **Main's last request, unchanged.** The model, system prompt, tool declarations, thinking and effort settings, cache keys and every message all come from it.
 2. **What main committed since.**
-3. **Sidebar's instructions and earlier exchanges.**
-4. **The live status, then your question.**
+3. **Sidebar's instructions and conversation**, including this answer's tool calls.
+4. **The live status**, last.
 
-The provider serves the first part from the cache main already wrote. In live runs against a ~20k-token context, answers read 88–96% from the cache, with 1–2k new input tokens and no cache writes.
+The provider serves the first part from the cache main already wrote. In real sessions of 17k to 845k tokens, Sidebar read main's whole prefix from the cache every time, with 500–2,000 uncached tokens per question.
+
+Sidebar also caches its own part. It puts a 5-minute breakpoint on its last block before the status note. With a Claude subscription login, whose request already uses all four breakpoints, it takes the slot of the redundant first system one; main's prefix still reads fully from the cache. Later steps of an answer and follow-ups while main is idle then read Sidebar's earlier turns from the cache too. Its new tokens are written at 1.25× instead of sent at 1×.
 
 To keep that prefix identical, Sidebar keeps main's tool declarations and blocks calls instead of removing tools.
 - **Allowed:** reading tools, main's web search and fetch tools, and shell commands that only read (plan mode's policy).

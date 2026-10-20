@@ -52,8 +52,8 @@ describe("Sidebar's requests", () => {
     expect(out.messages.map((m: any) => m.role)).toEqual(["system", "assistant", "user", "user", "user"]);
     expect(out.messages[1].content[0].text).toBe("Fixed a.ts.");
     expect(out.messages[2].content[0].text).toContain("You are Sidebar");
-    expect(out.messages[3].content[0].text).toContain("Main is idle");
-    expect(out.messages[4]).toBe(question);
+    expect(out.messages[3]).toBe(question);
+    expect(out.messages[4].content[0].text).toContain("Main is idle");
   });
 
   it("sends main's request unchanged with Sidebar's messages after it", async () => {
@@ -164,24 +164,28 @@ describe("replayPayload", () => {
       { role: "assistant", content: [{ type: "thinking", thinking: "t" }, { type: "tool_use", id: "1" }] },
       { role: "user", content: [{ type: "tool_result", tool_use_id: "1", content: "ok" }] },
       { role: "assistant", content: [{ type: "text", text: "Fixed." }] },
-      { role: "user", content: [{ type: "text", text: "<sidebar>\nYou are Sidebar" }, { type: "text", text: "<sidebar-status>" }, { type: "text", text: "q", cache_control: { type: "ephemeral" } }] },
+      { role: "user", content: [{ type: "text", text: "<sidebar>\nYou are Sidebar" }, { type: "text", text: "q1" }, { type: "text", text: "q", cache_control: { type: "ephemeral" } }, { type: "text", text: "<sidebar-status>" }] },
     ],
   });
 
-  it("puts the breakpoint where main's last request ended and keeps four at most", () => {
+  it("puts the breakpoint where main's last request ended, and Sidebar's own on its last block", () => {
     const out = replayPayload("anthropic-messages", rebuilt(), "side-session", "main-session") as any;
     expect(out.messages[2].content[0].cache_control).toEqual(H);
-    expect(out.messages[4].content[2].cache_control).toBeUndefined();
+    // The redundant first system breakpoint goes to Sidebar's last block (not the status note).
+    expect(out.system[0].cache_control).toBeUndefined();
+    expect(out.messages[4].content[2].cache_control).toEqual({ type: "ephemeral" });
+    expect(out.messages[4].content[1].cache_control).toBeUndefined();
     expect(JSON.stringify(out).match(/cache_control/g)).toHaveLength(4);
     expect(out.prompt_cache_key).toBe("main-session");
   });
 
-  it("adds a trailing breakpoint when there is room", () => {
+  it("keeps both system breakpoints when there is a spare slot", () => {
     const input = rebuilt();
     input.system = [input.system[1]!];
     const out = replayPayload("anthropic-messages", input, "side-session", "main-session") as any;
+    expect(out.system[0].cache_control).toEqual(H);
     expect(out.messages[2].content[0].cache_control).toEqual(H);
-    expect(out.messages[4].content[2].cache_control).toEqual(H);
+    expect(out.messages[4].content[2].cache_control).toEqual({ type: "ephemeral" });
   });
 
   it("leaves a request without Sidebar's part alone", () => {

@@ -17,7 +17,7 @@ import {
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { MainState } from "./main-state.ts";
 import { judgeToolCall, READ_ONLY_TOOLS } from "./read-only.ts";
-import { inertPayload, requestedCacheTtlMs, splicePayload, SUPPORTED_APIS } from "./splice.ts";
+import { inertPayload, placeSideBreakpoint, requestedCacheTtlMs, splicePayload, SUPPORTED_APIS } from "./splice.ts";
 import { compactExchange, EXCHANGE_ENTRY } from "./thread.ts";
 import { assembleContext, describeLive, mainDelta, roleMessage, statusMessage, trimOpenTurn, type MainDelta } from "./transcript.ts";
 
@@ -400,9 +400,8 @@ export function replayPayload(api: string, payload: unknown, ownSessionId: strin
   const marker = [...((Array.isArray(out.system) ? out.system : []) as Block[]), ...((Array.isArray(out.tools) ? out.tools : []) as Block[])]
     .map((b) => b?.cache_control)
     .find((c) => c && typeof c === "object") ?? { type: "ephemeral" };
-  const last = flat[flat.length - 1]!.block;
   for (const { block } of flat) delete block.cache_control;
   flat[boundary]!.block.cache_control = structuredClone(marker);
-  if (fixed + 1 < ANTHROPIC_MAX_BREAKPOINTS && last !== flat[boundary]!.block) last.cache_control = structuredClone(marker);
+  placeSideBreakpoint(out, flat.slice(roleAt).map(({ block }) => block), fixed + 1);
   return out;
 }

@@ -135,13 +135,13 @@ export const SIDEBAR_ROLE = [
   "You are Sidebar: the user's read-only side chat, running beside the main session whose conversation is above.",
   "That conversation belongs to the main agent, which carries on with its task in parallel. Do not continue or redo its work, and do not answer its open questions on its behalf.",
   "The user talks to you about what the main agent is doing, why, how the code works, and what its changes mean. Answer from the conversation above first; read files or run read-only commands when that is not enough.",
-  "Main's conversation above and the live status before the user's newest message are current, so do not dig through session files, runtime files or environment variables to find out what main is doing.",
+  "Main's conversation above and the live status at the end are current, so do not dig through session files, runtime files or environment variables to find out what main is doing.",
   "You cannot change anything: edits, writes and commands that modify state are blocked. When the user wants a change, say what to ask the main session.",
   "Keep answers short unless the user asks for depth.",
 ].join(" ");
 
 const TIMELINE =
-  "Main's conversation above is its latest state. The Sidebar conversation that follows spans time: earlier Sidebar answers were accurate for main as it was when they were given, so when main has moved on since, describe what changed rather than calling them mistakes. The live status just before the user's newest message is the current one.";
+  "Main's conversation above is its latest state. The Sidebar conversation that follows spans time: earlier Sidebar answers were accurate for main as it was when they were given, so when main has moved on since, describe what changed rather than calling them mistakes. The live status at the very end is the current one.";
 
 function userText(text: string, now: number): AgentMessage {
   return { role: "user", content: [{ type: "text", text }], timestamp: now } as AgentMessage;
@@ -160,16 +160,11 @@ export function statusMessage(liveText: string, now = Date.now()): AgentMessage 
 /**
  * Sidebar's request transcript: its own leading system message (the provider needs one; its
  * prompt and tools are replaced by main's when the request is spliced), main's delta, the role
- * note, Sidebar's earlier conversation, the live status, then the user's newest message and
- * whatever Sidebar has done for it so far (tool calls within this turn).
+ * note, Sidebar's conversation (including this turn's tool calls so far), then the live status.
+ * The status changes on every request, so it goes last: everything before it stays a stable
+ * prefix that Sidebar's own cache breakpoint can reuse on the next step or question.
  */
 export function assembleContext(sideMessages: AgentMessage[], delta: AgentMessage[], role: AgentMessage, status: AgentMessage): AgentMessage[] {
   const leading = sideMessages[0]?.role === "system" ? [sideMessages[0]] : [];
-  const rest = sideMessages.slice(leading.length);
-  let newest = -1;
-  for (let i = rest.length - 1; i >= 0; i--) {
-    if (rest[i]!.role === "user") { newest = i; break; }
-  }
-  if (newest === -1) return [...leading, ...delta, role, ...rest, status];
-  return [...leading, ...delta, role, ...rest.slice(0, newest), status, ...rest.slice(newest)];
+  return [...leading, ...delta, role, ...sideMessages.slice(leading.length), status];
 }

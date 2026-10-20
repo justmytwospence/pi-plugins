@@ -47,38 +47,58 @@ function spliceAnthropic(main: Json, side: Json): SpliceResult {
   if (!Array.isArray(side.messages)) return { ok: false, reason: "Sidebar's request has no messages" };
   const mainMessages = clone(main.messages as Json[]);
   const sideMessages = clone(side.messages as Json[]);
-  const marker = lastBreakpoint(mainMessages);
   const payload: Json = {
     ...clone(main),
     messages: [...mainMessages, ...sideMessages],
     max_tokens: side.max_tokens ?? main.max_tokens,
     stream: true,
   };
-  // Sidebar's own breakpoints may only follow main's, with main's TTL (a longer TTL after a shorter
-  // one is rejected), and the whole request may carry at most four.
   const fixed = countBreakpoints(payload.system) + countBreakpoints(payload.tools) + countBreakpoints(mainMessages);
-  let room = ANTHROPIC_MAX_BREAKPOINTS - fixed;
-  if (room < 0) return { ok: false, reason: `main's request already carries ${fixed} cache breakpoints` };
-  const sideBlocks = blocksWithBreakpoints(sideMessages);
-  // Keep the latest ones: the trailing breakpoint lets a follow-up reuse Sidebar's own turn.
+  if (fixed > ANTHROPIC_MAX_BREAKPOINTS) return { ok: false, reason: `main's request already carries ${fixed} cache breakpoints` };
+  placeSideBreakpoint(payload, sideMessages.flatMap(messageBlocks), fixed);
+  return { ok: true, payload, mainItems: mainMessages.length, sideItems: sideMessages.length };
+}
+
+/** Sidebar's own breakpoint: 5 minutes, after every 1-hour one (Anthropic rejects the reverse). */
+export const SIDE_BREAKPOINT = { type: "ephemeral" } as const;
+
+const STATUS_PREFIX = "<sidebar-status";
+
+function isStatusBlock(block: Json): boolean {
+  return block.type === "text" && typeof block.text === "string" && block.text.startsWith(STATUS_PREFIX);
+}
+
+/**
+ * One breakpoint on Sidebar's own part, on its last block before the live status note (which comes
+ * last and changes on every request). The next step of an answer, or the next question while main
+ * is idle, then reads Sidebar's thread from the cache instead of sending it again.
+ *
+ * A request may carry four breakpoints. With a Claude subscription login main's already does: two
+ * on the system prompt (Claude Code's identity line, then Pi's prompt), one on the tools, one at
+ * the end of its conversation. The first is redundant, since the second covers more of the same
+ * prefix, and a breakpoint only marks where an entry is written: removing it does not change what
+ * main's prefix reads from the cache. Its slot goes to Sidebar.
+ */
+export function placeSideBreakpoint(payload: Json, sideBlocks: Json[], fixed: number): void {
+  for (const block of sideBlocks) delete block.cache_control;
+  let used = fixed;
+  if (used >= ANTHROPIC_MAX_BREAKPOINTS) {
+    const system = Array.isArray(payload.system) ? (payload.system as unknown[]).filter(isObject) : [];
+    const marked = system.filter((block) => block.cache_control !== undefined);
+    if (marked.length < 2) return;
+    delete marked[0]!.cache_control;
+    used--;
+  }
   for (let i = sideBlocks.length - 1; i >= 0; i--) {
     const block = sideBlocks[i]!;
-    if (room > 0 && marker) {
-      block.cache_control = clone(marker);
-      room--;
-    } else {
-      delete block.cache_control;
-    }
+    if (isStatusBlock(block) || block.type === "thinking" || block.type === "redacted_thinking") continue;
+    block.cache_control = { ...SIDE_BREAKPOINT };
+    return;
   }
-  return { ok: true, payload, mainItems: mainMessages.length, sideItems: sideMessages.length };
 }
 
 function messageBlocks(message: Json): Json[] {
   return Array.isArray(message.content) ? (message.content as unknown[]).filter(isObject) : [];
-}
-
-function blocksWithBreakpoints(messages: Json[]): Json[] {
-  return messages.flatMap(messageBlocks).filter((block) => block.cache_control !== undefined);
 }
 
 function countBreakpoints(value: unknown): number {
@@ -91,16 +111,6 @@ function countBreakpoints(value: unknown): number {
   return n;
 }
 
-function lastBreakpoint(messages: Json[]): Json | undefined {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const blocks = messageBlocks(messages[i]!);
-    for (let j = blocks.length - 1; j >= 0; j--) {
-      const marker = blocks[j]!.cache_control;
-      if (isObject(marker)) return marker;
-    }
-  }
-  return undefined;
-}
 
 // ---------------------------------------------------------------- OpenAI Responses (and Codex)
 

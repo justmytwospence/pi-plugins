@@ -124,19 +124,19 @@ describe("assembleContext", () => {
   const role = user("role") as any;
   const status = user("status") as any;
 
-  it("puts main's delta and the role first and the live status just before the newest question", () => {
+  it("puts main's delta and the role first, Sidebar's thread next, and the live status last", () => {
     const q1 = user("q1") as any;
     const a1 = assistant([{ type: "text", text: "a1" }]) as any;
     const q2 = user("q2") as any;
-    expect(assembleContext([system, q1, a1, q2], [d], role, status)).toEqual([system, d, role, q1, a1, status, q2]);
-    expect(assembleContext([q1], [], role, status)).toEqual([role, status, q1]);
+    expect(assembleContext([system, q1, a1, q2], [d], role, status)).toEqual([system, d, role, q1, a1, q2, status]);
+    expect(assembleContext([q1], [], role, status)).toEqual([role, q1, status]);
   });
 
-  it("keeps the status before the question during Sidebar's own tool calls", () => {
+  it("keeps the status last during Sidebar's own tool calls, so the steps before it stay a stable prefix", () => {
     const q = user("q") as any;
     const callTurn = assistant([call("s1", "ls")]) as any;
     const res = result("s1") as any;
-    expect(assembleContext([system, q, callTurn, res], [], role, status)).toEqual([system, role, status, q, callTurn, res]);
+    expect(assembleContext([system, q, callTurn, res], [], role, status)).toEqual([system, role, q, callTurn, res, status]);
   });
 });
 

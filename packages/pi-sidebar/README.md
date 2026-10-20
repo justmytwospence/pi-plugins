@@ -113,12 +113,19 @@ Main keeps its last provider request in memory, together with the session entry 
 
 Sidebar's agent is an in-process Pi session with none of main's extensions, only Sidebar's own policy. Each of its requests is built from four parts:
 
-1. **Main's last request, unchanged.** The model, system prompt, tool declarations, thinking and effort settings, cache keys, every message and every cache breakpoint all come from main's request.
+1. **Main's last request, unchanged.** The model, system prompt, tool declarations, thinking and effort settings, cache keys and every message all come from main's request.
 2. **What main committed since.** A tool call that is still running is described rather than replayed.
-3. **Sidebar's instructions**, then Sidebar's earlier exchanges.
-4. **The live status**, just before your newest question.
+3. **Sidebar's instructions and its conversation**, including this answer's tool calls so far.
+4. **The live status**, last, because it changes on every request.
 
-Only parts 2 to 4 are new to the provider. In live runs against a ~20k-token main context, answers read 88–96% from the cache, with 1–2k new tokens and no cache writes.
+The provider serves part 1 from the cache main already wrote. In your own sessions (contexts of 17k to 845k tokens), Sidebar read main's whole prefix from the cache every time, with 500–2,000 uncached tokens per question and no cache writes for main's part.
+
+**Cache breakpoints.** Anthropic allows four per request.
+- **Main's:** Sidebar keeps the one at the end of main's conversation, where main's cache entry is.
+- **Sidebar's own (5-minute):** sits on Sidebar's last block before the status note, so the next step of an answer, or the next question while main is idle, reads Sidebar's own thread from the cache too.
+- **When main's request already uses all four** (a Claude subscription login marks both system blocks), Sidebar takes the slot of the first one. The second covers more of the same prefix, and moving a breakpoint does not change what reads from the cache. In a live test, main's prefix still read 27,606 of 27,608 tokens. Later steps and follow-ups read Sidebar's earlier turns, and only about 60 tokens per request went uncached.
+- **The trade-off:** Sidebar's new tokens are written at 1.25× instead of sent at 1×. That costs a few hundred tokens' worth on a one-off question and pays off as soon as an answer takes a tool step or you ask a follow-up.
+- **Caveat:** like main, a follow-up re-reads an earlier answer's reasoning uncached, as finished turns' thinking does not stay in the same form.
 
 Read-only does not change the tool list: removing tools would change the request and lose the cache. Calls are blocked instead.
 - **Allowed:** Sidebar's agent has `read`, `grep`, `find`, `ls` and `bash`. Shell commands are allowed only when they just read (plan mode's policy).

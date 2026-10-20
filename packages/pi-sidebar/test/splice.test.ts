@@ -36,6 +36,7 @@ function anthropicSide() {
     messages: [
       { role: "assistant", content: [{ type: "text", text: "main's final answer" }] },
       { role: "user", content: [{ type: "text", text: "<sidebar>…</sidebar>" }, { type: "text", text: "what now?", cache_control: M5 }] },
+      { role: "user", content: [{ type: "text", text: "<sidebar-status at=\"x\">\nMain is idle.\n</sidebar-status>" }] },
     ],
   };
 }
@@ -47,33 +48,50 @@ describe("splicePayload: Anthropic", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const p = result.payload as any;
-    expect(p.system).toEqual(main.system);
+    // Main's system text and tools are unchanged; only the redundant first breakpoint moved to Sidebar.
+    expect(p.system.map((b: any) => b.text)).toEqual(main.system.map((b) => b.text));
+    expect(p.system[1]).toEqual(main.system[1]);
     expect(p.tools).toEqual(main.tools);
     expect(p.thinking).toEqual(main.thinking);
     expect(p.output_config).toEqual({ effort: "high" });
     expect(p.betas).toEqual(["b1"]);
     expect(p.messages.slice(0, 3)).toEqual(main.messages);
-    expect(p.messages).toHaveLength(5);
+    expect(p.messages).toHaveLength(6);
     expect(p.max_tokens).toBe(32000);
     expect(result.mainItems).toBe(3);
-    expect(result.sideItems).toBe(2);
+    expect(result.sideItems).toBe(3);
   });
 
-  it("never exceeds four breakpoints: with OAuth's two system markers Sidebar adds none", () => {
+  it("with OAuth's four breakpoints, moves the redundant first system one to Sidebar's last block", () => {
     const result = splicePayload("anthropic-messages", anthropicMain(true), anthropicSide());
     if (!result.ok) throw new Error(result.reason);
-    const text = JSON.stringify(result.payload);
-    expect(text.match(/cache_control/g)).toHaveLength(4);
-    const last = (result.payload as any).messages.at(-1).content.at(-1);
-    expect(last.cache_control).toBeUndefined();
+    const p = result.payload as any;
+    expect(JSON.stringify(p).match(/cache_control/g)).toHaveLength(4);
+    expect(p.system[0].cache_control).toBeUndefined();
+    expect(p.system[1].cache_control).toEqual(H1);
+    expect(p.messages[2].content[0].cache_control).toEqual(H1);
+    // Sidebar's breakpoint: its last block before the live status, 5 minutes (after the 1-hour ones).
+    expect(p.messages[4].content[1].cache_control).toEqual({ type: "ephemeral" });
+    expect(p.messages[5].content[0].cache_control).toBeUndefined();
   });
 
-  it("uses a spare breakpoint on Sidebar's last block, with main's TTL", () => {
-    const result = splicePayload("anthropic-messages", anthropicMain(false), anthropicSide());
+  it("uses a spare breakpoint on Sidebar's last block without touching main's", () => {
+    const main = anthropicMain(false);
+    const result = splicePayload("anthropic-messages", main, anthropicSide());
+    if (!result.ok) throw new Error(result.reason);
+    const p = result.payload as any;
+    expect(JSON.stringify(p).match(/cache_control/g)).toHaveLength(4);
+    expect(p.system).toEqual(main.system);
+    expect(p.messages[4].content[1].cache_control).toEqual({ type: "ephemeral" });
+  });
+
+  it("adds no breakpoint when main's request leaves no slot it can free", () => {
+    const main = anthropicMain(false);
+    (main.messages[0]!.content[0] as any).cache_control = H1;
+    const result = splicePayload("anthropic-messages", main, anthropicSide());
     if (!result.ok) throw new Error(result.reason);
     expect(JSON.stringify(result.payload).match(/cache_control/g)).toHaveLength(4);
-    const last = (result.payload as any).messages.at(-1).content.at(-1);
-    expect(last.cache_control).toEqual(H1);
+    expect((result.payload as any).messages[4].content[1].cache_control).toBeUndefined();
   });
 
   it("does not mutate its inputs", () => {
