@@ -1,5 +1,6 @@
 import { getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import { Markdown, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { mermaidArt } from "../mermaid-art.js";
 import type { PlannerTrace, TraceEntry } from "../planner-trace.js";
 
 /** Wrapped lines of a planner's trace, cached per entry and width. */
@@ -46,7 +47,8 @@ export class TraceRenderer {
   planLines(id: string, plan: string, width: number): string[] {
     const cached = this.plans.get(id);
     if (cached && cached.plan === plan && cached.width === width) return cached.lines;
-    const lines = markdown(plan, width);
+    // Mermaid blocks as terminal diagrams, as in /plan's review (mermaid-art.ts).
+    const lines = markdown(mermaidArt(plan, width), width);
     this.plans.set(id, { plan, width, lines });
     return lines;
   }
