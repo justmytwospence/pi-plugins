@@ -48,11 +48,12 @@ function subagent(args: Args): string | undefined {
   return line(args.label) ?? line(args.task);
 }
 
-/** A script's own description: its first comment, else its first statement. */
+/** A script's own description: a comment it opens with, else its first statement. */
 function script(code: unknown): string | undefined {
-  const lines = (str(code) ?? "").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("// @options"));
-  const comment = lines.find((l) => l.startsWith("//"));
-  return comment ? comment.replace(/^\/\/+\s*/, "") || undefined : lines[0];
+  const first = (str(code) ?? "").split("\n").map((l) => l.trim()).find((l) => l && !l.startsWith("// @options"));
+  if (!first) return undefined;
+  if (!first.startsWith("//") && !first.startsWith("/*")) return first;
+  return first.replace(/^(\/\/+|\/\*+)\s*/, "").replace(/\s*\*+\/\s*$/, "") || undefined;
 }
 
 function questions(args: Args): string | undefined {
@@ -66,8 +67,16 @@ function strings(value: unknown): string | undefined {
   return list.length ? list.join(" · ") : undefined;
 }
 
+/** A stored result by its id and the page asked for (web tools' `get_search_content`). */
+function stored(args: Args): string | undefined {
+  const id = str(args.responseId);
+  if (!id) return undefined;
+  const at = typeof args.urlIndex === "number" ? ` url ${args.urlIndex}` : typeof args.queryIndex === "number" ? ` query ${args.queryIndex}` : "";
+  return `${id}${at}`;
+}
+
 /** Generic arguments that say what a call is about, in order of preference. */
-const GENERIC_KEYS = ["query", "claim", "task", "prompt", "message", "subject", "title", "name", "id", "action"];
+const GENERIC_KEYS = ["query", "claim", "task", "prompt", "message", "subject", "title", "name", "id", "taskId", "action"];
 
 /** The summary for one call, or undefined when herdr-web-ui already has one or there is none. */
 export function toolIntent(name: string, args: unknown): string | undefined {
@@ -92,10 +101,10 @@ export function toolIntent(name: string, args: unknown): string | undefined {
     case "bg_logs":
     case "bg_kill":
     case "bg_status":
-      text = [str(a.id), str(a.grep) ? `/${str(a.grep)}/` : undefined].filter(Boolean).join(" ") || (name === "bg_wait" ? "next to finish" : undefined);
+      text = [str(a.id), str(a.grep) ? `/${str(a.grep)}/` : undefined].filter(Boolean).join(" ") || (name === "bg_wait" ? "next to finish" : name === "bg_logs" ? "all tasks" : undefined);
       break;
   }
-  text ??= strings(a.queries) ?? strings(a.urls) ?? strings(a.findText);
+  text ??= strings(a.queries) ?? strings(a.urls) ?? strings(a.findText) ?? stored(a);
   for (const key of GENERIC_KEYS) {
     if (text) break;
     text = line(a[key]);

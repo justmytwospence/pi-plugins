@@ -19,7 +19,9 @@ describe("toolIntent", () => {
     expect(toolIntent("subagent", { action: "status", id: "ab12" })).toBe("status ab12");
   });
 
-  test("codemode: the script's first comment, else its first statement", () => {
+  test("codemode: a comment the script opens with, else its first statement", () => {
+    expect(toolIntent("codemode", { code: "/* Count lines */\nreturn 1" })).toBe("Count lines");
+    expect(toolIntent("codemode", { code: "const a = 1;\n// later note\nreturn a" })).toBe("const a = 1;");
     expect(toolIntent("codemode", { code: '// @options: {"timeout_ms": 1}\n// Batch the reads\nawait tools.read({})' })).toBe("Batch the reads");
     expect(toolIntent("codemode", { code: "\nconst r = await tools.bash({ command: 'ls' });\nreturn r" })).toBe("const r = await tools.bash({ command: 'ls' });");
   });
@@ -29,11 +31,14 @@ describe("toolIntent", () => {
     expect(toolIntent("herdr_child", { action: "spawn", task: "Fix the build\nnow" })).toBe("spawn Fix the build");
     expect(toolIntent("herdr_child", { action: "send", name: "fixer", message: "hi" })).toBe("send fixer");
     expect(toolIntent("bg_wait", {})).toBe("next to finish");
+    expect(toolIntent("bg_logs", {})).toBe("all tasks");
     expect(toolIntent("bg_logs", { id: "c4a2b", grep: "error" })).toBe("c4a2b /error/");
     expect(toolIntent("web_search", { queries: ["a b", "c"] })).toBe("a b · c");
     expect(toolIntent("web_search", { query: "pi extensions" })).toBe("pi extensions");
     expect(toolIntent("get_search_content", { responseId: "r1", findText: ["x"] })).toBe("x");
     expect(toolIntent("source_check", { claim: "The sky is blue" })).toBe("The sky is blue");
+    expect(toolIntent("get_search_content", { responseId: "r1", urlIndex: 2 })).toBe("r1 url 2");
+    expect(toolIntent("bg_kill", { taskId: "b16" })).toBe("b16");
   });
 
   test("nothing to say: no intent; long text is cut to 120 characters", () => {

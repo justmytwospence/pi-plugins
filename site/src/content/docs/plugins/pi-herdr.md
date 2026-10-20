@@ -35,7 +35,7 @@ The `$bg` pane token uses compact icon/count badges: `⑂ 2` for pending subagen
 
 The session name, or the first prompt's first line, becomes the pane title and `$task`. The displayed agent name includes model and effort. `$pr` is a space token describing the checkout branch's PR, refreshed at session start, after turns, and every three minutes. Set `PI_HERDR_PR=0` to disable PR reporting.
 
-For herdr-web-ui's chat, each tool call without an argument it can summarize by (`command`, `path`, `pattern`, `url`) gets a one-line `intent` before Pi saves the message, such as the subagent labels, a script's first comment, the question headers, a job id or the search query; its row shows that instead of the bare tool name. Providers never send the field to the model.
+For herdr-web-ui's chat, each tool call without an argument it can summarize by (`command`, `path`, `pattern`, `url`) gets a one-line `intent` before Pi saves the message, such as the subagent labels, the comment a script opens with, the question headers, a job id or the search query; its row shows that instead of the bare tool name. Providers never send the field to the model.
 
 Herdr must render these tokens in its sidebar configuration. For example, in `~/.config/herdr/config.toml`:
 
