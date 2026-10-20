@@ -42,6 +42,32 @@ export function layoutRectOf(root: LayoutBoxLike | undefined | null, component: 
   return undefined;
 }
 
+/** The transcript scroll view under `root`: a valid scroll view whose child has children, primary first. */
+export function findTranscriptView<T>(root: unknown, valid: (value: unknown) => value is T): T | undefined {
+  const seen = new Set<unknown>();
+  let fallback: T | undefined;
+  const walk = (node: unknown, depth: number): T | undefined => {
+    if (!node || typeof node !== "object" || seen.has(node) || depth > 8) return undefined;
+    seen.add(node);
+    const view = node as { primary?: unknown; child?: { children?: unknown } };
+    if (valid(node) && Array.isArray(view.child?.children)) {
+      if (view.primary === true) return node;
+      fallback ??= node;
+    }
+    const parent = node as { children?: unknown; entries?: unknown };
+    const kids = [
+      ...(Array.isArray(parent.entries) ? parent.entries.map((entry) => (entry as { component?: unknown } | undefined)?.component) : []),
+      ...(Array.isArray(parent.children) ? parent.children : []),
+    ];
+    for (const kid of kids) {
+      const found = walk(kid, depth + 1);
+      if (found) return found;
+    }
+    return undefined;
+  };
+  return walk(root, 0) ?? fallback;
+}
+
 interface OverlayEntryLike {
   component?: unknown;
   hidden?: boolean;
@@ -286,10 +312,9 @@ export default function stickyLastPrompt(pi: ExtensionAPI): void {
     } catch {
       // Fall back to the mounted primary scroll view.
     }
-    const entries = screen.layoutRoot?.entries;
-    if (!Array.isArray(entries)) return undefined;
-    const found = entries.find((entry) => (entry?.component as { primary?: unknown } | undefined)?.primary === true)?.component;
-    return valid(found) ? found : undefined;
+    // Another scroll view can be primary (pi-sidebar's panel while it has focus): find main's
+    // transcript, the scroll view over a document with children, anywhere in the layout tree.
+    return findTranscriptView(screen.layoutRoot, valid);
   }
 
   function isVisible(entry: OverlayEntryLike): boolean {

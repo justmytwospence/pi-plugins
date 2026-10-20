@@ -2,6 +2,7 @@ import { SkillInvocationMessageComponent, UserMessageComponent, type ExtensionAP
 import { expect, test } from "vitest";
 import { visibleWidth, type Component, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import stickyLastPrompt, {
+  findTranscriptView,
   CLEAR_SENTINEL,
   OWNER,
   PinBar,
@@ -657,4 +658,14 @@ test("layoutRectOf finds a nested component's rectangle in the last frame", () =
   expect(layoutRectOf(root, transcript)).toEqual({ x: 0, y: 0, width: 82, height: 40 });
   expect(layoutRectOf(root, {})).toBeUndefined();
   expect(layoutRectOf(undefined, transcript)).toBeUndefined();
+});
+
+test("findTranscriptView finds main's transcript under a split root while another view is primary", () => {
+  const valid = (value: unknown): value is { scrollTop: number } => typeof (value as { scrollTop?: unknown })?.scrollTop === "number";
+  const transcript = { scrollTop: 3, primary: true, child: { children: [] } };
+  const side = { scrollTop: 0, primary: true, child: { render: () => [] } };
+  const main = { children: [transcript, { children: [] }] };
+  const split = { entries: [{ component: main }, { component: {} }, { component: { entries: [{ component: side }] } }] };
+  expect(findTranscriptView(split, valid)).toBe(transcript);
+  expect(findTranscriptView({ entries: [{ component: side }] }, valid)).toBeUndefined();
 });
