@@ -43,6 +43,17 @@ describe("bashPathAccess", () => {
     expect(access("python3 ~/Projects/other/tool.py").writes).toEqual([`${P}/other/tool.py`]);
   });
 
+  test("ssh: the remote command names remote paths; local key, config, log and socket options count", () => {
+    expect(access("ssh -o BatchMode=yes -o ConnectTimeout=10 spencer@nuc '~/.local/bin/chezmoi update --no-tty' 2>&1 | tail -15")).toEqual({ reads: [], writes: [] });
+    expect(access("ssh nuc rm -rf ~/Projects/other")).toEqual({ reads: [], writes: [] });
+    expect(access("ssh -i ~/.ssh/k -F ./cfg -o IdentityFile=~/.ssh/j -E /tmp/ssh.log nuc ls /x")).toEqual({
+      reads: [`${H}/.ssh/k`, `${app}/cfg`, `${H}/.ssh/j`],
+      writes: ["/tmp/ssh.log"],
+    });
+    expect(access("ssh -vSctl nuc true")).toEqual({ reads: [], writes: [] });
+    expect(access("ssh nuc true > ~/Projects/other/out").writes).toEqual([`${P}/other/out`]);
+  });
+
   test("absolute words whose top-level directory does not exist are arguments, not files", () => {
     expect(access('pi --no-extensions -e /tmp/s/smoke.ts -p "/smoke"').writes).toEqual(["/tmp/s/smoke.ts"]);
     expect(access('C=smoke; cd /tmp/s && pi -p "/$C"').writes).toEqual(["/tmp/s"]);

@@ -1050,6 +1050,35 @@ function isExemptPart(p: { name: string; args: string[] }, exempt: readonly stri
   });
 }
 
+/** ssh options that take a separate value (OpenSSH `ssh(1)` synopsis). */
+const SSH_VALUE_OPTIONS = "BbcDEeFIiJLlmOoPpQRSWw";
+
+/**
+ * The local files an `ssh` invocation names. Its host and remote command name paths on the
+ * remote machine, so they are not local reads or writes. Local option values are: `-i`, `-F` and
+ * `-o Key=/path` are read, `-E` (log file) and `-S` (control socket) are written.
+ */
+function sshLocalFiles(args: readonly string[]): { reads: string[]; writes: string[] } {
+  const reads: string[] = [];
+  const writes: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--" || !a.startsWith("-") || a === "-") break;
+    // Bundled flags: `-vT`, or `-i~/.ssh/key` / `-p22` with an attached value.
+    for (let j = 1; j < a.length; j++) {
+      const flag = a[j];
+      if (!SSH_VALUE_OPTIONS.includes(flag)) continue;
+      const value = j + 1 < a.length ? a.slice(j + 1) : args[++i];
+      if (value !== undefined) {
+        const v = flag === "o" ? value.slice(value.indexOf("=") + 1).trim() : value;
+        if (pathLike(v)) (flag === "E" || flag === "S" ? writes : reads).push(v);
+      }
+      break;
+    }
+  }
+  return { reads, writes };
+}
+
 /**
  * The files and directories a shell command reads and writes, as absolute paths, for the
  * directory policy. A heuristic: words that look like paths (a slash, `~`, `.`), resolved against
@@ -1084,6 +1113,12 @@ export function bashPathAccess(
     const readOnly = isReadOnlyPart(tokens, extra);
     if (dir !== path.resolve(cwd)) (readOnly ? reads : writes).add(dir);
     if (isExemptPart(p, exempt)) return;
+    if (path.basename(p.name) === "ssh") {
+      const own = sshLocalFiles(p.args);
+      for (const f of own.reads) reads.add(resolve(dir, f));
+      for (const f of own.writes) writes.add(resolve(dir, f));
+      return;
+    }
     const nested = nestedCommands(p);
     const args = p.args.filter((a) => !nested.includes(a));
     const files = pathArgs(p.name === "eval" ? [] : args).map((f) => resolve(dir, f));
