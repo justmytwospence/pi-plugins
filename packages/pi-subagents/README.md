@@ -42,7 +42,7 @@ Options:
 
 | option | |
 |---|---|
-| `async` | default false. Return the run ids at once and deliver the results later as one `subagent-result` message that starts a turn |
+| `async` | default false. Return the run ids at once and deliver the results later as one `subagent-result` message that starts a turn; its first line names the runs and how they ended (herdr-web-ui labels the message's card with it) |
 | `context` | `fresh` (default) or `fork`: start each child from this conversation (`--fork` of the session file; needs a saved session) |
 | `worktree` | run each task in a new checkout, `git worktree add <repo>/.worktrees/subagent-<slug>-<id>` on branch `subagent/<slug>-<id>` from the current HEAD. Set it only when the user requests a worktree or branch isolation; otherwise ask first. The child stays headless |
 | `cwd` | working directory (default: the session's); each task item may set its own |

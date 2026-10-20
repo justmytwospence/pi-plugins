@@ -51,7 +51,7 @@ Example arguments for independent read-only reconnaissance:
 }
 ```
 
-`async` defaults to false. When true, the call returns IDs immediately and later delivers `subagent-result` messages that start a turn. Results due during a main-agent turn wait until it settles. Use `context: "fork"` to seed children from the current conversation rather than fresh context.
+`async` defaults to false. When true, the call returns IDs immediately and later delivers `subagent-result` messages that start a turn; the first line names the runs and how they ended, which is what herdr-web-ui's chat shows on the collapsed message. Results due during a main-agent turn wait until it settles. Use `context: "fork"` to seed children from the current conversation rather than fresh context.
 
 Control an existing run with `action: "status"`, `"result"`, `"stop"`, or `"steer"`. These take an `id` or unique prefix; status without an ID lists runs. Steering additionally requires `message`:
 

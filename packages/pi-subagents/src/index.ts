@@ -405,7 +405,7 @@ export default function subagents(pi: ExtensionAPI) {
     const items = owedResults.splice(0).flatMap((item) => {
       if (!item.runs) return [item];
       const unread = item.runs.filter((run) => !consumedResults.has(run.id));
-      return unread.length ? [{ ...item, runs: unread, content: `Subagent ${item.mode} finished:\n\n${unread.map(resultText).join("\n\n---\n\n")}`, details: { mode: item.mode, runs: unread.map((run) => view(run, true)) } }] : [];
+      return unread.length ? [{ ...item, runs: unread, content: `${finishedHeadline(item.mode, unread)}\n\n${unread.map(resultText).join("\n\n---\n\n")}`, details: { mode: item.mode, runs: unread.map((run) => view(run, true)) } }] : [];
     });
     if (!items.length) return;
     safely(() => {
@@ -589,6 +589,21 @@ export default function subagents(pi: ExtensionAPI) {
       }
     });
     return run;
+  };
+
+  /**
+   * The result message's first line: which runs ended and how. herdr-web-ui's phone chat shows a
+   * custom message as a collapsed card labelled with its first line (cut at 96 characters), so this
+   * line is all a phone shows of the result until it is opened.
+   */
+  const finishedHeadline = (mode: Details["mode"] | undefined, list: Run[]) => {
+    if (list.length === 1) {
+      const run = list[0]!;
+      return `Subagent "${clip(runLabel(run), 60)}" ${run.state.status === "done" ? "finished" : run.state.status} after ${formatElapsed(elapsedMs(run))}:`;
+    }
+    const bad = list.filter((run) => run.state.status !== "done").length;
+    const labels = clip(list.map((run) => runLabel(run)).join(", "), 60);
+    return `${list.length} subagents (${mode ?? "runs"}) finished${bad ? `, ${bad} not done` : ""}: ${labels}:`;
   };
 
   const resultText = (run: Run) => {
@@ -862,7 +877,7 @@ export default function subagents(pi: ExtensionAPI) {
             safely(() => pi.events.emit("herdr:background", { active: false, id: hold }));
             const text = list.filter(Boolean).map(resultText).join("\n\n---\n\n");
             if (owner.signal.aborted) return;
-            deliverResult(`Subagent ${mode} finished:\n\n${text}`, { mode, runs: list.filter(Boolean).map((r) => view(r, true)) }, list.filter(Boolean), mode);
+            deliverResult(`${finishedHeadline(mode, list.filter(Boolean))}\n\n${text}`, { mode, runs: list.filter(Boolean).map((r) => view(r, true)) }, list.filter(Boolean), mode);
           })
           .catch((error: unknown) => {
             backgroundCount--;

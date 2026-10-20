@@ -103,7 +103,7 @@ test("b in FleetView moves a foreground call to the background; its result arriv
     expect(h.messages).toHaveLength(0);
     await h.commands.get("subagents").handler("stop all", ctx);
     await new Promise((r) => setTimeout(r, 200));
-    expect(h.messages[0]?.message.content).toMatch(/^Subagent single finished:\n\n\[loop forever · general · p\/m · high · stopped\]/u);
+    expect(h.messages[0]?.message.content).toMatch(/^Subagent "loop forever" stopped after \d+s:\n\n\[loop forever · general · p\/m · high · stopped\]/u);
     await h.emit("session_shutdown", { type: "session_shutdown" }, ctx);
   } finally {
     setPiInvocation(undefined);
