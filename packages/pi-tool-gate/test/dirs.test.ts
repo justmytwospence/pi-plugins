@@ -18,6 +18,10 @@ describe("bashPathAccess", () => {
     expect(access("cat ~/Projects/other/README.md")).toEqual({ reads: [`${P}/other/README.md`], writes: [] });
     expect(access("rg foo ../other src")).toEqual({ reads: [`${P}/other`], writes: [] });
     expect(access("git -C ~/dotfiles log").reads).toContain(`${H}/dotfiles`);
+    expect(access("chezmoi cat ~/.config/git/ignore > /tmp/g && diff /tmp/g ~/.config/git/ignore")).toEqual({
+      reads: [`${H}/.config/git/ignore`],
+      writes: ["/tmp/g"],
+    });
   });
 
   test("words without a slash are not paths, and URLs are not files", () => {

@@ -408,6 +408,10 @@ describe("read-only CLIs and fetches", () => {
     "journalctl -u nginx --since today",
     "sqlite3 -readonly did_cache.sqlite 'select 1'",
     "dig +short example.com",
+    "chezmoi cat ~/.config/git/ignore",
+    "chezmoi diff ~/.zshrc",
+    "chezmoi managed --include=files",
+    "chezmoi source-path ~/.config/git/ignore",
   ])("%s is read-only", (command) => expect(isReadOnlyBash(command)).toBe(true));
 
   test.each([
@@ -423,5 +427,11 @@ describe("read-only CLIs and fetches", () => {
     "gh repo create x",
     "systemctl restart nginx",
     "sqlite3 db.sqlite 'delete from t'",
+    "chezmoi apply",
+    "chezmoi add ~/.zshrc",
+    "chezmoi cat -o out ~/.zshrc",
+    "chezmoi diff --output=out",
+    "chezmoi status --init",
+    "chezmoi execute-template '{{ output \"sh\" }}'",
   ])("%s is not read-only", (command) => expect(isReadOnlyBash(command)).toBe(false));
 });

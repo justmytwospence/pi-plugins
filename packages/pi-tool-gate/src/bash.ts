@@ -28,6 +28,8 @@ const READ_ONLY_SUBCOMMANDS: Record<string, Set<string>> = {
   journalctl: new Set(["*"]),
   launchctl: new Set(["list", "print"]),
   sqlite3: new Set(["-readonly"]),
+  // Not `execute-template` (its template can run commands) or `apply`/`add`/`edit`/`init`/`update`/...
+  chezmoi: new Set(["cat", "cat-config", "diff", "status", "managed", "unmanaged", "ignored", "source-path", "target-path", "data", "dump", "dump-config", "verify", "doctor", "help"]),
 };
 
 /** Words that make a CLI subcommand change something, e.g. `gh pr merge`, `docker network rm`. */
@@ -631,6 +633,8 @@ function isReadOnlyPart(tokens: string[], extra: readonly string[]): boolean {
       };
       if (sub !== "status" && !verbs[sub]?.includes(words[1] ?? "")) return false;
     }
+    // `chezmoi cat -o file` writes the file; `--init` runs the config template.
+    if (name === "chezmoi" && (shortOption(args, "o") || args.some((a) => /^--(?:output|init)(=|$)/u.test(a)))) return false;
     if (name === "podman" && args.some((a) => /^--(?:logfile|log-file)(=|$)/u.test(a))) return false;
     if (name === "docker" && ["network", "volume", "context", "image"].includes(sub) && !["ls", "inspect", "list"].includes(words[1] ?? "")) return false;
     if (name === "kubectl" && sub === "config") return KUBECTL_CONFIG_READS.has(words[1] ?? "");
