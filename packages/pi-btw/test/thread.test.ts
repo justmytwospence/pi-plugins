@@ -10,6 +10,7 @@ import {
   BTW_THINKING_OVERRIDE_TYPE,
   BTW_TOOLS_BY_MODE,
   buildBtwMessageContent,
+  buildBtwNoteContent,
   buildBtwSeedState,
   extractBtwHandoffThread,
   formatThread,
@@ -87,6 +88,7 @@ test("handoff extraction skips the continuation marker, merges assistant parts, 
   ]);
   expect(formatThread([{ user: " q ", assistant: " a " }, { user: "x", assistant: "y" }])).toBe("User: q\nAssistant: a\n\n---\n\nUser: x\nAssistant: y");
   expect(buildBtwMessageContent("q", "a")).toBe("**Question**\n\nq\n\n**Answer**\n\na");
+  expect(buildBtwNoteContent("\nwhy is it slow?\nmore", "a")).toBe("Side question (/btw): why is it slow?\n\n**Question**\n\n\nwhy is it slow?\nmore\n\n**Answer**\n\na");
 });
 
 test("seed state: tangent threads inherit nothing, contextual threads inherit the branch minus BTW notes", () => {

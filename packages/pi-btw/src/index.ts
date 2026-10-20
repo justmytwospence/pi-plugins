@@ -18,7 +18,7 @@ import { createBtwModelRuntimeOptions, createBtwResourceLoader, hasUsableModelAu
 import {
   BTW_ENTRY_TYPE, BTW_MESSAGE_TYPE, BTW_MODEL_OVERRIDE_TYPE, BTW_RESET_TYPE,
   BTW_SUMMARIZE_SYSTEM_PROMPT, BTW_THINKING_OVERRIDE_TYPE, BTW_TOOLS_BY_MODE,
-  buildBtwMessageContent, buildBtwSeedState, extractAnswer, extractBtwHandoffThread,
+  buildBtwMessageContent, buildBtwNoteContent, buildBtwSeedState, extractAnswer, extractBtwHandoffThread,
   extractThinking, formatModelRef, formatThread, getLastAssistantMessage,
   isCustomEntry, isVisibleBtwMessage, parseBtwArgs, parseBtwModelArgs, parseBtwThinkingArgs,
   type BtwDetails, type BtwHandoffExchange, type BtwModelOverrideDetails, type BtwResetDetails,
@@ -469,7 +469,7 @@ export default function (pi: ExtensionAPI) {
 
   function saveVisibleBtwNote(ctx: ExtensionCommandContext, details: BtwDetails, requested: boolean): SaveState {
     if (!requested) return "not-saved";
-    const message = { customType: BTW_MESSAGE_TYPE, content: buildBtwMessageContent(details.question, details.answer), display: true, details };
+    const message = { customType: BTW_MESSAGE_TYPE, content: buildBtwNoteContent(details.question, details.answer), display: true, details };
     // Check at delivery, not before the side call: main may have started or settled meanwhile.
     if (!ctx.isIdle()) { pi.sendMessage(message, { deliverAs: "followUp" }); return "queued"; }
     pi.sendMessage(message);

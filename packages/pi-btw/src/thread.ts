@@ -308,6 +308,17 @@ export function buildBtwMessageContent(question: string, answer: string): string
   return `**Question**\n\n${question}\n\n**Answer**\n\n${answer}`;
 }
 
+/**
+ * The saved note's message content: a plain headline, then the question and answer. Only
+ * herdr-web-ui reads this text (the model never sees btw notes, and the TUI draws them from
+ * details); its phone chat labels the collapsed card with the first line.
+ */
+export function buildBtwNoteContent(question: string, answer: string): string {
+  const first = question.split("\n").find((line) => line.trim())?.trim() ?? "";
+  const headline = first.length > 80 ? `${first.slice(0, 79)}…` : first;
+  return `Side question (/btw): ${headline}\n\n${buildBtwMessageContent(question, answer)}`;
+}
+
 export function formatThread(thread: BtwHandoffExchange[]): string {
   return thread.map((entry) => `User: ${entry.user.trim()}\nAssistant: ${entry.assistant.trim()}`).join("\n\n---\n\n");
 }

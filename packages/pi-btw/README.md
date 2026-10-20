@@ -56,7 +56,7 @@ Upstream entry names and payload formats are preserved:
 - `btw-thread-reset`: timestamp and optional mode (`contextual`, `tangent`, `readonly`).
 - `btw-model-override`: set/clear action, timestamp, and model reference for set.
 - `btw-thinking-override`: set/clear action, timestamp, and thinkingLevel for set.
-- `btw-note`: visible custom message using the upstream Question/Answer Markdown and exchange details.
+- `btw-note`: visible custom message: a `Side question (/btw): …` headline (the label herdr-web-ui shows), then the upstream Question/Answer Markdown, with exchange details.
 
 State rehydrates from the active branch, not abandoned history. Hidden entries never enter main model context; visible BTW notes are filtered from future main context too. Live tool activity is kept in the overlay; completed persisted exchanges rehydrate as question/thinking/answer. The `skills/btw/SKILL.md` workflow and full command family are retained, with wording narrowed to tool selection rather than a safety claim.
 
