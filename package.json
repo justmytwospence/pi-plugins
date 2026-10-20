@@ -26,6 +26,7 @@
       "./packages/pi-select-nav/src/index.ts",
       "./packages/pi-herdr-scrollbar-width/src/index.ts",
       "./packages/pi-herdr/src/index.ts",
+      "./packages/pi-sidebar/src/index.ts",
       "./packages/pi-subagents/src/index.ts",
       "./packages/pi-tool-gate/src/index.ts",
       "./packages/pi-bg/src/index.ts",

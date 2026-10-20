@@ -17,7 +17,7 @@ pi install git:github.com/justmytwospence/pi-plugins
 pi config
 ```
 
-The first command adds the suite to personal Pi settings. **It loads all 28 extensions by default.** The second opens Pi’s resource selector: keep only the entries you want. It configures packages; it is not a command inside the chat.
+The first command adds the suite to personal Pi settings. **It loads all 29 extensions by default.** The second opens Pi’s resource selector: keep only the entries you want. It configures packages; it is not a command inside the chat.
 
 For project-local selection:
 

@@ -160,6 +160,7 @@ These keys are **local to the named focused surface**, not global shortcuts. No 
 | Question choices | Arrows or j/k; Enter selects; Space toggles multi-select; Ctrl+G adds a note | [pi-ask-user-question](/plugins/pi-ask-user-question/). On `Type something.`, letters/digits are text. |
 | Question tabs / Review | Tab/Shift+Tab or Left/Right; Review Enter submits | Local to the questionnaire. Escape from a text field retains the draft; otherwise declines. |
 | BTW focus / width | Alt+/, Super+/ or Ctrl+Alt+W; Alt+W width | [pi-btw](/plugins/pi-btw/); `PI_BTW_FOCUS_KEYS` replaces focus keys. The overlay can stay open with focus back in the main editor. |
+| Sidebar open / hide | Ctrl+' in the main session or in Sidebar | [pi-sidebar](/plugins/pi-sidebar/); `PI_SIDEBAR_KEYS` replaces it (comma-separated). Needs a terminal that reports Ctrl+' (kitty keyboard protocol); `/sidebar` does the same. |
 | BTW submit / cancel | Enter; Escape aborts streaming, or dismisses when idle | Native empty composer scrolls with Ctrl+U/D; with Vim, only idle Normal does. |
 | Read-only log / child viewer | Ctrl+U/D scrolls where supported; Escape returns | Focused viewer, not global. A steering composer instead owns editing keys. |
 | Notebook view | j/k scroll, Tab notebook, `o` browser, double-`x` interrupt, Escape/`h` return | [pi-marimo](/plugins/pi-marimo/); interrupt targets the kernel, not its server process. |
