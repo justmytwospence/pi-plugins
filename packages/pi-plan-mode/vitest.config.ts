@@ -9,6 +9,11 @@ export default defineConfig({
       GIT_CONFIG_VALUE_0: "false",
       // Tests must never reach TypeSafe; Jev tool selection falls back without a key.
       TYPESAFE_API_KEY: "",
+      // Nor spawn terminal-browser: rendered plans are off unless a test brings its own.
+      PI_PLAN_MODE_TERMINAL_BROWSER: "",
+      // Nor open the developer's editor: "Edit the plan" uses pi's editor unless a test sets one.
+      EDITOR: "",
+      VISUAL: "",
     },
     hookTimeout: 30_000,
     include: ["test/**/*.test.ts"],

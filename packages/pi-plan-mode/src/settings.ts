@@ -129,6 +129,8 @@ export interface PlanModeSettings {
   commandGrants?: Record<string, CommandGrant>;
   /** Let Jev pick tools from the task, for planners and for Plan mode itself (default true; needs a Jev classifier in Pi, e.g. TYPESAFE_API_KEY). */
   jevToolSelection?: boolean;
+  /** /planners: a finished plan's lane shows it as a rendered page (terminal-browser embed); default true. */
+  renderedPlans?: boolean;
   /**
    * Tools planners are always offered: preselected, and Jev scores them but never deselects them.
    * Each entry names a toolset, command grant, MCP server, or Other tool by id or name (`web`,
@@ -159,6 +161,7 @@ export interface PlanModeSettingsPatch {
   scoutModelMap?: Readonly<Record<string, ModelSpec>> | null;
   plannerTimeoutSeconds?: number | null;
   jevToolSelection?: boolean | null;
+  renderedPlans?: boolean | null;
 }
 export interface UpdatePlanModeSettingsOptions {
   settingsPath?: string;
@@ -298,6 +301,11 @@ export function normalizePlanModeSettings(value: unknown): PlanModeSettings | un
     const enabled = Reflect.get(value, "jevToolSelection");
     if (typeof enabled !== "boolean") return undefined;
     settings.jevToolSelection = enabled;
+  }
+  if (Object.hasOwn(value, "renderedPlans")) {
+    const enabled = Reflect.get(value, "renderedPlans");
+    if (typeof enabled !== "boolean") return undefined;
+    settings.renderedPlans = enabled;
   }
   if (Object.hasOwn(value, "jevThreshold")) {
     const threshold = Reflect.get(value, "jevThreshold");
@@ -612,6 +620,8 @@ export function updatePlanModeSettings(
     else if (patch.plannerTimeoutSeconds !== undefined) updated.plannerTimeoutSeconds = patch.plannerTimeoutSeconds;
     if (patch.jevToolSelection === null) delete updated.jevToolSelection;
     else if (patch.jevToolSelection !== undefined) updated.jevToolSelection = patch.jevToolSelection;
+    if (patch.renderedPlans === null) delete updated.renderedPlans;
+    else if (patch.renderedPlans !== undefined) updated.renderedPlans = patch.renderedPlans;
     const settings = normalizePlanModeSettings(updated);
     if (!settings) throw invalidSettingsError(settingsPath, "invalid settings shape");
     await publishSettings(settingsPath, updated, options.signal, options.beforeRename);

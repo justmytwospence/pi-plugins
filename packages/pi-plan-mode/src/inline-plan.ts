@@ -21,8 +21,10 @@ import {
   getMarkdownTheme,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
+import { Container, Spacer, Text } from "@earendil-works/pi-tui";
+import { editInTerminal, externalEditorCommand } from "./external-editor.js";
 import { holdBlocked } from "./herdr-blocked.js";
+import { PlanMarkdown } from "./mermaid-art.js";
 import { expandHome } from "./plan-hook.js";
 import { PlanReviewViewport } from "./plan-review-viewport.js";
 import { findBlockedCommandSegment, readCommand, type SafeSubcommands } from "./tool-policy.js";
@@ -427,7 +429,14 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
           } as never);
           const choice = await ctx.ui.select(`Implement this plan? ${tildify(planFile)}`, choices(), { signal });
           if (choice === EDIT) {
-            const revised = await ctx.ui.editor("Edit the plan", plan);
+            // In your external editor when one is set (pi's externalEditor, or $VISUAL / $EDITOR),
+            // else in pi's own.
+            const command = externalEditorCommand(ctx.cwd);
+            const revised = command
+              ? await editInTerminal(ctx.ui as never, command, plan, "plan.md")
+              : await ctx.ui.editor("Edit the plan", plan);
+            if (command && revised === undefined)
+              ctx.ui.notify(`${command.split(" ")[0]} did not save the plan.`, "warning");
             if (revised?.trim() && revised.trim() !== plan) {
               plan = revised.trim();
               edited = true;
@@ -561,7 +570,7 @@ function renderExit(
   // The plan in full while you decide; folded after, until expanded.
   const folded = outcome !== "pending" && !options.expanded && lines.length > COLLAPSED_LINES;
   container.addChild(
-    new Markdown(folded ? lines.slice(0, COLLAPSED_LINES).join("\n") : plan, 0, 0, getMarkdownTheme()),
+    new PlanMarkdown(folded ? lines.slice(0, COLLAPSED_LINES).join("\n") : plan, getMarkdownTheme(), theme),
   );
   if (folded) container.addChild(new Text(theme.fg("dim", `… ${lines.length - COLLAPSED_LINES} more lines`), 0, 0));
   container.addChild(new Spacer(1));

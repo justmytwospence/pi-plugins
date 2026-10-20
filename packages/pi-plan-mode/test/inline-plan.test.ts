@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -252,6 +252,49 @@ test("enter_plan_mode lets your agent switch into plan mode itself", async () =>
   assert.equal(inline().active, true);
   assert.equal(await emit("before_agent_start", { prompt: "x" }), undefined, "the tool result was the notice");
   assert.ok(existsSync(inline().planFile.replace(/\/[^/]+$/u, "")), "the plans directory exists");
+});
+
+test("Edit the plan opens your external editor in pi's terminal, and saves what you wrote", async () => {
+  const { mock, context, tool, inline } = await setup();
+  await mock.commands.get("plan")?.handler("", context.ctx);
+  writeFileSync(inline().planFile, "# Plan\n\nDo it.");
+  const dir = mkdtempSync(join(tmpdir(), "plan-editor-"));
+  const editor = join(dir, "fake-editor");
+  // Records the file it was given, then writes the revised plan into it.
+  writeFileSync(editor, `#!/bin/sh\necho "$1" > "${dir}/opened"\nprintf '# Better plan\\n\\nDo it well.\\n' > "$1"\n`, {
+    mode: 0o755,
+  });
+  const previous = process.env.EDITOR;
+  process.env.EDITOR = editor;
+  const terminal: string[] = [];
+  let calls = 0;
+  const ui = (context.ctx as ExtensionContext).ui;
+  ui.select = async (_title, options) => (calls++ === 0 ? options.find((s) => s === "Edit the plan") : options[0]);
+  ui.editor = async () => assert.fail("pi's editor is not used when an external one is set");
+  (ui as unknown as { custom: unknown }).custom = (
+    factory: (tui: unknown, theme: unknown, keys: unknown, done: (value: unknown) => void) => unknown,
+  ) =>
+    new Promise((resolve) => {
+      factory(
+        {
+          stop: () => terminal.push("stop"),
+          start: () => terminal.push("start"),
+          requestRender: () => terminal.push("render"),
+        },
+        undefined,
+        undefined,
+        resolve,
+      );
+    });
+  try {
+    await tool(EXIT_TOOL).execute("edit", {}, undefined, undefined, context.ctx);
+  } finally {
+    if (previous === undefined) delete process.env.EDITOR;
+    else process.env.EDITOR = previous;
+  }
+  assert.deepEqual(terminal, ["stop", "start", "render"], "pi hands its terminal to the editor and takes it back");
+  assert.match(readFileSync(join(dir, "opened"), "utf8"), /plan\.md\n$/u, "a Markdown file");
+  assert.equal(readFileSync(inline().planFile, "utf8"), "# Better plan\n\nDo it well.\n", "the plan file is updated");
 });
 
 for (const outcome of ["approve", "cancel", "feedback", "edit", "throw", "abort"] as const) {

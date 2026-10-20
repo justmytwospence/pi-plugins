@@ -5,8 +5,21 @@
 Settings live in `<getAgentDir()>/pi-plan-mode.json` (normally `~/.pi/agent/pi-plan-mode.json`).
 The file may be a symlink; saves write through it, preserve unknown fields, and publish atomically.
 The Settings step of `/plan` edits planners, efforts, subagent models, the time limit, Jev tool
-selection, the default implementation context, the export path, and the shortcut; everything else
-is edited in the file. An invalid file is ignored (defaults apply) and never overwritten.
+selection, rendered plans, the default implementation context, the export path, and the shortcut;
+everything else is edited in the file. An invalid file is ignored (defaults apply) and never overwritten.
+
+### Rendered plans
+
+`renderedPlans` (boolean, default `true`) shows each finished plan in its `/planners` lane as a page
+rendered by terminal-browser; `false` keeps terminal text. It needs `terminal-browser` on `PATH` and
+a terminal with Kitty graphics. Environment variables for unusual setups:
+
+- `PI_PLAN_MODE_TERMINAL_BROWSER`: the terminal-browser executable to use; empty turns rendering off.
+- `PI_PLAN_MODE_FRAMES`: `shared` (the terminal reads the picture from shared memory on this machine,
+  the default locally and in herdr) or `inline` (the pixels travel through the terminal, the default
+  over SSH without herdr; Linux only).
+- `PI_PLAN_MODE_SCALE`: the page's pixel ratio; by default it follows the terminal's cell height
+  (2 for Retina-sized cells).
 
 ### Safe shell subcommands
 

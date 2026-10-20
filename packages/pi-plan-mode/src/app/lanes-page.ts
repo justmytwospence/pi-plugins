@@ -9,6 +9,7 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
   CURSOR_MARKER,
   decodeKittyPrintable,
+  getKeybindings,
   Input,
   type KeyId,
   matchesKey,
@@ -19,6 +20,7 @@ import {
 } from "@earendil-works/pi-tui";
 import type { PlannerAgent } from "../planner/agent.js";
 import type { SubagentView } from "../subagent-progress.js";
+import type { PlanRenders } from "./plan-embed.js";
 
 /** What a lane shows of an agent: a planner, or M, your main agent seen through the same lens. */
 export type LaneAgent = Pick<
@@ -126,6 +128,8 @@ export function nativeLaneInput(input: Input): LaneInput {
 
 /** The most lines a lane's input takes (a suite editor's draft scrolls inside them). */
 const MAX_INPUT_LINES = 4;
+/** Home and End: further than any lane or page is long. */
+const LANE_END = 1_000_000;
 
 export interface LanesPageOptions {
   title: string;
@@ -152,6 +156,8 @@ export interface LanesPageOptions {
   requestRender(): void;
   /** Ctrl+G (pi's app.editor.external): edit the focused input's text in an external editor. */
   externalEditor?: { matches(data: string): boolean; edit(text: string): Promise<string | undefined> };
+  /** Finished plans as rendered pages in their lanes (the Rendered plans setting); kept by the caller. */
+  renders?: PlanRenders;
 }
 
 interface QuestionCursor {
@@ -400,6 +406,7 @@ export class LanesPage {
 
   /** Let the inputs go (a suite editor must be disposed when its screen closes). */
   dispose() {
+    this.options.renders?.hideAll();
     for (const input of this.inputs.values()) {
       try {
         input.dispose?.();
@@ -519,10 +526,21 @@ export class LanesPage {
     if (!target || target.kind === "actions") return this.handleActions(is);
     const agent = target.agent;
     const half = Math.max(1, Math.floor((this.laneHeights.get(agent.id) ?? 10) / 2));
+    // Pi's own bindings too (keybindings.json): a list's up/down (ctrl+k/ctrl+j for some), and the
+    // transcript's top, bottom and page keys (ctrl+g, say).
+    const bound = (...ids: Parameters<ReturnType<typeof getKeybindings>["matches"]>[1][]) =>
+      ids.some((id) => getKeybindings().matches(data, id));
+    const editing = this.input(agent).getValue() !== "";
     if (is("ctrl+u")) this.scrollLane(agent, -half);
     else if (is("ctrl+d")) this.scrollLane(agent, half);
-    else if (is("pageUp")) this.scrollLane(agent, -(this.laneHeights.get(agent.id) ?? 10));
-    else if (is("pageDown")) this.scrollLane(agent, this.laneHeights.get(agent.id) ?? 10);
+    else if (is("pageUp") || bound("tui.altScreen.pageUp"))
+      this.scrollLane(agent, -(this.laneHeights.get(agent.id) ?? 10));
+    else if (is("pageDown") || bound("tui.altScreen.pageDown"))
+      this.scrollLane(agent, this.laneHeights.get(agent.id) ?? 10);
+    else if (!editing && bound("tui.select.up")) this.scrollLane(agent, -1);
+    else if (!editing && bound("tui.select.down")) this.scrollLane(agent, 1);
+    else if (!editing && bound("tui.altScreen.top")) this.scrollLane(agent, -LANE_END);
+    else if (!editing && bound("tui.altScreen.bottom")) this.scrollLane(agent, LANE_END);
     else if (is("ctrl+o")) {
       // Expand or collapse tool output, as in pi.
       agent.chat.setExpanded(!agent.chat.isExpanded);
@@ -531,6 +549,8 @@ export class LanesPage {
       agent.chat.setThinkingHidden(!agent.chat.thinkingHidden);
     } else if (is("up")) this.scrollLane(agent, -1);
     else if (is("down")) this.scrollLane(agent, 1);
+    else if (is("home") && this.input(agent).getValue() === "") this.scrollLane(agent, -LANE_END);
+    else if (is("end") && this.input(agent).getValue() === "") this.scrollLane(agent, LANE_END);
     else if (is("left", "right") && this.input(agent).getValue() === "") this.toggleView(agent);
     else if (is("enter") && !this.input(agent).ownsEnter) this.submit(agent, target.kind === "merger");
     else this.edit(this.input(agent), data);
@@ -746,6 +766,8 @@ export class LanesPage {
   }
 
   private scrollLane(agent: LaneAgent, delta: number) {
+    // A rendered plan keeps its own place in the page's picture, not in lines this page keeps.
+    if (this.showsPlan(agent) && !this.selectedSub(agent) && this.options.renders?.scroll(agent.id, delta)) return;
     const key = this.viewKey(agent);
     this.scroll.scrollBy(key, delta, this.lineCounts.get(key) ?? 0, this.laneHeights.get(agent.id) ?? 10);
   }
@@ -806,25 +828,44 @@ export class LanesPage {
   }
 
   render(width: number): string[] {
-    const theme = this.theme;
     const height = this.options.rowsAvailable();
     const agents = this.options.agents();
     const target = this.focusedTarget();
     const merger = this.merger();
     for (const agent of this.everyone()) this.syncRevision(agent);
+    const renders = this.options.renders;
+    renders?.beginFrame();
+    try {
+      return this.renderPage(width, height, agents, target, merger);
+    } finally {
+      renders?.endFrame();
+    }
+  }
+
+  private renderPage(
+    width: number,
+    height: number,
+    agents: readonly LaneAgent[],
+    target: Target,
+    merger: LaneAgent | undefined,
+  ): string[] {
+    const theme = this.theme;
     const header = pageHeader(theme, width, this.options.title, this.context(), this.step());
     const footer = this.footer(width, target);
     // Everything fits the screen and the actions bar always shows: when room runs short, the task
     // shrinks to one line, then the stats rows go, then the merger pane (unless you are in it), and
     // the lanes are cut last.
     const mergerFocused = target.kind === "merger";
-    const stats = this.statsLines(width);
+    // Once the plans are in and drawn as pages, the stats table only repeats the lane titles (and the
+    // header has the totals): the pages get its rows.
+    const reviewing = this.options.renders?.enabled() === true && this.step() === "Review";
+    const stats = reviewing ? [] : this.statsLines(width);
     const mergerMin = merger ? MERGER_MIN_ROWS : 0;
     const fixed = header.length + footer.length + stats.length + MIN_LANE_ROWS + mergerMin;
     const taskMax = Math.max(1, Math.min(MAX_TASK_LINES, Math.floor(height / 6), height - fixed));
     const base = [...header, ...this.taskLines(width, taskMax)];
     const room = height - base.length - footer.length;
-    this.statsShown = room - stats.length >= MIN_LANE_ROWS + mergerMin;
+    this.statsShown = stats.length > 0 && room - stats.length >= MIN_LANE_ROWS + mergerMin;
     const top = this.statsShown ? [...base, ...stats] : base;
     const available = Math.max(1, height - top.length - footer.length);
     const showMerger = merger !== undefined && (mergerFocused || available >= MIN_LANE_ROWS + MERGER_MIN_ROWS);
@@ -956,6 +997,13 @@ export class LanesPage {
     const bodyHeight = Math.max(2, rows - 1 - subagents.length - question.length - 1 - inputLines.length);
     this.laneHeights.set(agent.id, bodyHeight);
     const key = this.viewKey(agent);
+    const renders = this.options.renders;
+    const rendered =
+      !selected && !asking && this.showsPlan(agent) && renders?.enabled()
+        ? renders.body(agent.id, agent.revision, agent.plan ?? "", { cols: width, rows: bodyHeight })
+        : undefined;
+    const renderFailure =
+      !selected && !asking && this.showsPlan(agent) && renders?.enabled() ? renders.failure(agent.id) : undefined;
     const all = selected
       ? [
           ...wrap(`${selected.label}: ${selected.task}`, width).map((line) => theme.fg("muted", line)),
@@ -968,7 +1016,7 @@ export class LanesPage {
     this.lineCounts.set(key, all.length);
     const view = this.scroll.window(key, all, bodyHeight);
     const empty = agent.status === "starting" ? `${spinner()} starting…` : "(nothing yet)";
-    const body = all.length === 0 ? [theme.fg("dim", empty)] : view.lines;
+    const body = rendered ?? (all.length === 0 ? [theme.fg("dim", empty)] : view.lines);
     // The views as tabs: the one shown bright, the other dim (←/→ switch); then where you are in it.
     const tab = (label: string, current: boolean) =>
       current ? theme.fg(focused ? "accent" : "text", theme.bold(label)) : theme.fg("dim", label);
@@ -979,10 +1027,16 @@ export class LanesPage {
         : agent.plan !== undefined
           ? `${tab("plan", this.showsPlan(agent))}  ${tab("chat", !this.showsPlan(agent))}`
           : tab("chat", true);
-    const position =
-      view.below > 0 || view.start > 0
-        ? theme.fg("dim", `${view.start + 1}–${view.start + view.lines.length}/${all.length}`)
-        : "";
+    const page = rendered ? renders?.position?.(agent.id) : undefined;
+    const position = rendered
+      ? page && page.total > page.last - page.first + 1
+        ? theme.fg("dim", `${page.first}–${page.last}/${page.total}`)
+        : ""
+      : renderFailure
+        ? theme.fg("dim", truncateToWidth(`not rendered: ${renderFailure}`, Math.max(10, width - 24)))
+        : view.below > 0 || view.start > 0
+          ? theme.fg("dim", `${view.start + 1}–${view.start + view.lines.length}/${all.length}`)
+          : "";
     return [
       head,
       ...subagents,

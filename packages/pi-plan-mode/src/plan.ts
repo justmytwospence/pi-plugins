@@ -23,6 +23,8 @@ import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION } from
 import { FULL_SCREEN } from "./app/frame.js";
 import { type LaneAction, type LaneInput, type LaneInputHooks, LanesPage } from "./app/lanes-page.js";
 import { type OptionRow, OptionsPage, type TextArea } from "./app/options-page.js";
+import { RenderedPlans, renderedPlansUnavailable } from "./app/plan-embed.js";
+import { embedColors, planHtml, styleKey } from "./app/plan-html.js";
 import {
   EDITOR_MODE,
   EDITOR_SURFACE,
@@ -32,7 +34,7 @@ import {
   readInputContext,
   requestEditorFactory,
 } from "./editor-contract.js";
-import { editExternally, externalEditorCommand } from "./external-editor.js";
+import { editExternally, externalEditorCommand, prepareEditor } from "./external-editor.js";
 import { formatImplementationPrompt } from "./handoff.js";
 import { HERDR_BLOCKED_CHANNEL, holdBlocked, holdWorking, isOwnEmit } from "./herdr-blocked.js";
 import {
@@ -747,11 +749,44 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       }, 250);
       ticker.unref?.();
       let closed = false;
+      // Rendered plans (the Settings row): why they cannot work here, checked once per screen.
+      const renderBlock = renderedPlansUnavailable();
+      const renders = new RenderedPlans({
+        enabled: () => renderBlock === undefined && settings.renderedPlans !== false,
+        html: (plan, id) => planHtml(plan, theme, `Plan ${id}`),
+        colors: () => embedColors(theme),
+        // The theme's resolved colours are a new object whenever the theme or the terminal's colours
+        // change, so the key is worked out once per change.
+        styleKey: () => {
+          const colors = theme.colors;
+          if (styleCache?.colors !== colors) styleCache = { colors, key: styleKey(theme) };
+          return styleCache.key;
+        },
+        onChange: render,
+        // The pages' pictures go out through Pi's terminal, in order with its own output.
+        write: (data) => tui.terminal.write(data),
+      });
+      let styleCache: { colors: object; key: string } | undefined;
+      // A light/dark switch (macOS appearance): Pi re-queries the terminal's colours and re-themes a
+      // moment later. Redraw then, so the pages are rebuilt in the new colours even while idle.
+      const schemeTimers: NodeJS.Timeout[] = [];
+      const unsubscribeScheme = (
+        tui as unknown as { onTerminalColorSchemeChange?(listener: () => void): () => void }
+      ).onTerminalColorSchemeChange?.(() => {
+        for (const ms of [300, 1000, 2500]) {
+          const timer = setTimeout(render, ms);
+          timer.unref?.();
+          schemeTimers.push(timer);
+        }
+      });
       const close = () => {
         if (closed) return;
         closed = true;
+        unsubscribeScheme?.();
+        for (const timer of schemeTimers) clearTimeout(timer);
         clearInterval(ticker);
         (page as { dispose?(): void } | undefined)?.dispose?.();
+        renders.dispose();
         app = undefined;
         updateStatus();
         done();
@@ -906,6 +941,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           },
           rowsAvailable: rows,
           requestRender: render,
+          renders,
           externalEditor: {
             matches: (data) => keybindings.matches(data, "app.editor.external"),
             edit: async (text) => {
@@ -914,6 +950,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
                 ctx.ui.notify("No external editor: set externalEditor in settings, or $VISUAL / $EDITOR.", "warning");
                 return undefined;
               }
+              prepareEditor(command, theme);
               tui.stop();
               try {
                 return await editExternally(command, text);
@@ -1258,6 +1295,24 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
               saveSettings({ jevToolSelection: next });
             },
             description: "Let Jev (TypeSafe) preselect the planners' tools from the task on the next step.",
+          },
+          {
+            id: "rendered",
+            label: "Rendered plans",
+            value: () =>
+              renderBlock ? theme.fg("dim", "unavailable") : settings.renderedPlans === false ? "off" : "on",
+            ...(renderBlock
+              ? {}
+              : {
+                  cycle: () => {
+                    const next = settings.renderedPlans === false;
+                    settings = { ...settings, renderedPlans: next };
+                    saveSettings({ renderedPlans: next });
+                  },
+                }),
+            description: renderBlock
+              ? `Show each finished plan as a styled page in its lane (drawn by terminal-browser). Unavailable here: ${renderBlock}.`
+              : "Once a plan is in, its lane shows it as a styled page rendered by terminal-browser (diagrams included) instead of terminal text. \u2191/\u2193, PgUp/PgDn, Home/End and the wheel scroll it; \u2190/\u2192 still switch to the chat.",
           },
           {
             id: "context",

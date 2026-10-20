@@ -45,10 +45,10 @@ While plan mode is on:
 
 - Your agent is told (once, with your next message, or right away mid-turn) to research, ask you what it cannot find out, and write its plan to a **plan file**, `~/.pi/agent/plans/<two-words>.md` (`plansDirectory` moves it). One file per session: entering plan mode again continues it.
 - `edit` and `write` are blocked except for the plan file. Commands: with pi-tool-gate, the gate judges them as in auto mode (as Claude Code's classifier does while planning); without it, only read-only commands run (the [shell policy](./docs/settings.md)).
-- When the plan is ready, your agent calls `exit_plan_mode`. The plan shows in the chat and you choose:
+- When the plan is ready, your agent calls `exit_plan_mode`. The plan shows in the chat (Mermaid diagrams drawn as terminal diagrams, top-down when a left-to-right chart is too wide) and you choose:
   - **Yes, auto mode (Jev judges calls)** / **Yes, auto-accept project edits** / **Yes, manually approve edits** (with pi-tool-gate, those of its enabled modes, with manual approval when neither auto nor accept edits is enabled; without it, **Yes, implement it**): plan mode ends and your agent starts implementing in this conversation, in that permission mode.
   - **Yes, in a fresh session with only the plan**: once this turn ends, a new session (a child of this one) starts with the plan as its first message.
-  - **Edit the plan first**: edit it in Pi's editor; the file is updated and you choose again. The approval tells your agent the plan was edited.
+  - **Edit the plan first**: edit it in your external editor (Pi's `externalEditor` setting, else `$VISUAL` / `$EDITOR`; a Markdown editor such as [edamame](https://github.com/mijowi/edamame) keeps it rendered while you edit), or in Pi's editor when none is set; the file is updated and you choose again. The approval tells your agent the plan was edited.
   - **No, keep planning**: say what should change (or leave it empty, or press Esc, and say it in the chat). Plan mode stays on.
 - Leaving plan mode another way (Shift+Tab, or the shortcut) tells your agent it may now make changes.
 
@@ -75,7 +75,7 @@ One page with the task, the planners, and your preferences. Up/Down (or Ctrl+K/C
 - **Task**: a box above the rows, shown in full and wrapped. Tab moves into it and out of it; while it has focus every key goes to its editor (Shift+Enter for a new line, Enter to save and go on). Empty plans what the conversation so far is about.
 - **Planner A** and **Planner B**, each with its **effort** and **subagents** (the model its read-only helpers run on, with their own **effort**; `none` turns them off). B defaults to a different model than A.
 - **Time limit** per planner turn (15 to 180 minutes; default 45). At 80% the planner is asked to wrap up; at the limit it is stopped.
-- Preferences: whether Jev picks tools, where implementation starts by default, and the export path.
+- Preferences: whether Jev picks tools, whether finished plans are rendered (below), where implementation starts by default, and the export path.
 
 Changes are saved as your defaults in `~/.pi/agent/pi-plan-mode.json`.
 
@@ -88,6 +88,8 @@ Keys: Up/Down (`k`/`j`, Ctrl+P/Ctrl+N, Ctrl+K/Ctrl+J) move, Ctrl+U/Ctrl+D move t
 ### 3. Planning
 
 Above the lanes, one live row per planner (and M, your main agent, once it is there) shows its state, how long its turn has run, its tool calls, subagent tasks, tokens, cost, and what it is doing now. One lane per planner, side by side. Each shows its planner's chat (or its plan, once it has one; the rule under the lane shows the two as tabs, `plan  chat`, and Left/Right on an empty line switch), the subagents it has running, and a line to talk to it. Type and press Enter to steer a working planner or to start a new turn with an idle one; both planners can be working on your messages at once. Sending a message shows the chat; a new plan version shows the plan from its top.
+
+With **Rendered plans** on (the Settings step; default on), a plan view is a styled page instead of terminal text: headings, tables, highlighted code, task lists, GitHub callouts (`> [!NOTE]` and the rest), and Mermaid diagrams, in the Pi theme's colors with code in your terminal's font (read from Ghostty's config when Pi runs in Ghostty). [terminal-browser](https://github.com/zenbu-labs/terminal-browser) renders the page through its embedded mode; Pi keeps a picture of it and shows that in the lane with Kitty graphics placeholders, so it needs terminal-browser on `PATH` and a terminal Pi shows Kitty images in (Ghostty, Kitty, or herdr inside one). Scrolling moves through the picture like text, with no redrawing: Up/Down, PgUp/PgDn, Ctrl+U/D, Home/End and the wheel; Left/Right still switch to the chat; M's pane renders plan M the same way. The page is captured again when the plan, the colors or the lane's width change, taking about half a second. Mermaid comes bundled (`vendor/mermaid`); a diagram it cannot draw shows as text art. Without terminal-browser or Kitty graphics the row says `unavailable`; when a page cannot be shown, that lane keeps the terminal text and its rule says why. The pages are temporary files, deleted when the screen closes.
 
 When a planner asks a question, the bottom of its lane becomes the question, as in pi-ask-user-question: its options, then `Type something.` and `Skip (let the planner decide)`. Up/Down, `j`/`k` or Ctrl+J/Ctrl+K move, a digit jumps to that row, Enter picks. On `Type something.`, Enter or just typing opens the answer line (a pi-vim editor goes to Insert mode); Enter saves the answer, Esc goes back to the options and keeps the draft. While a question is up, keys go to it, not to the chat line; Ctrl+U/Ctrl+D still scroll the chat above. With several questions, Left/Backspace (back) and Right (forward, up to the first unanswered one) move between them to change an earlier answer; nothing is sent until all are answered.
 
@@ -225,6 +227,7 @@ Planner sessions are stored under `~/.pi/agent/plan-mode/planners/`; runs are sa
 - `plansDirectory`: where plan mode writes plan files (default `~/.pi/agent/plans`; `~` is expanded).
 - `alwaysOffer`: tools planners always get, whatever Jev scores: a toolset, command grant, MCP server, or Other tool by id or name (`web`, `jev`, `context7`), or one tool of a group (`web/web_search`, `context7/query-docs`). Unset, it is `["web", "web_search", "fetch_content", "context7", "jev"]` (names your setup lacks are ignored); set it to replace that, or to `[]` to leave every tool to Jev.
 - `plannerToolsets`: named bundles of extensions and tools; `mcp: true` expands into your MCP servers. `commandGrants`: extra commands bash may run (one per call), with skills that explain them.
+- `renderedPlans` (default `true`): finished plans as rendered pages in their lanes (see Planning and Review).
 - `jevToolSelection` (default `true`), `jevThreshold` (default 0.5, the probability at which a tool is preselected), `jevProvider` (default `typesafe`), `jevModel` (default `jev-latest`).
 - `providerExtensions`: provider id to the extensions planners and subagents load when their model is on that provider; an entry replaces detection for that provider.
 - `planCompleteCommand` runs when you implement or export a plan, with Claude Code `PostToolUse`-shaped JSON on stdin (`tool_input.plan`, `tool_response.filePath`, `model`), so a hook written for Claude's `ExitPlanMode` works unchanged. Its output is ignored, it is killed after 30 seconds, and failures never break planning.
