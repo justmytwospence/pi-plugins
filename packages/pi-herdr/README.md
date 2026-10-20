@@ -34,6 +34,7 @@ Add `-ne` to disable your other discovered and configured extensions for that ru
 
 - **`$bg` pane token**: background work that will wake the agent or runs outside its turn, from `herdr:background` and `herdr:working` holds on Pi's event bus (for example async subagents, pi-bg jobs, plan-mode planner runs, awaited Herdr children): compact icon/count badges such as `⑂ 2 · ↳ 1`. `⑂` counts pending subagents, `≡` planner holds, `↳` awaited child replies, and `⌘` background jobs/other holds. Counts of the same kind are combined; names and parentheses stay out of the sidebar. Herdr shows the pane idle or done meanwhile (pi-bg keeps a turn open for its own jobs, but after an interrupted wait, and for the other sources, the agent is idle), since only Herdr's Pi integration reports state; the token is what says the agent is not finished. It has a 90-second TTL, refreshed while held.
 - **Pane title and agent name**: the session name, else the first prompt's first line (also published as the pane token `$task`), and a displayed agent name such as `pi opus-5-5:xhigh` (model plus thinking level), which Herdr's `agent` row token shows. Both apply only while Herdr's Pi integration holds the pane.
+- **`$summary` pane token**: one line (at most 80 characters) on what the last turn did, or what the agent waits on, for notification tools (herdr-native-notify shows it as an alert's body instead of the session title). As a turn settles, a small model (Haiku by default, thinking off) summarizes it from the prompt, the tool calls and the final reply; this runs before Pi reports the turn finished, so the token is set when the done alert fires (about 1-2 seconds; a 4-second cap). A reply that is already one short line is used as is, with no model call; without a model, on an error, a timeout or an interrupted turn, the reply's first sentence stands in. While a dialog holds `herdr:blocked`, the token is its question at once (a pending `ask_user_question`'s first question, else the dialog's label, such as tool-gate's `Allow? …`). It is cleared as each run starts.
 - **Tool-row summaries for herdr-web-ui**: each tool call whose arguments herdr-web-ui cannot summarize (no `command`, `path`, `pattern` or `url`, as with `subagent`, `codemode`, `ask_user_question`, `bg_wait`, `web_search`) gets a one-line `intent` field before Pi saves the message: the subagent labels, the comment a script opens with, the question headers, the job id or the query. herdr-web-ui's chat shows it on the call's row instead of the bare tool name. No provider sends the field to the model; `bash`, `read`, `edit`, `write` and `todo` keep herdr-web-ui's own labels.
 - **`$pr` space token**: the pull request for the checkout's branch, from `gh pr view`: for example `#123 ✓ approved`, `#123 draft …`, `#123 ✗ changes`, `#123 review`, `#123 merged`, `#123 closed` (`✓` all checks passed, `✗` one failed, `…` some still running). Checked shortly after the session starts, a few seconds after each turn, and every 3 minutes; cleared when the branch has no PR or the session ends. Network failures keep the last value. `PI_HERDR_PR=0` turns it off; it also turns itself off for the session when `gh` is not installed.
 
@@ -110,6 +111,8 @@ Holds pair `{ active: true }` with `{ active: false }`; a release without `id` e
 | variable | |
 |---|---|
 | `PI_HERDR_PR` | `0` turns the `$pr` token off |
+| `PI_HERDR_SUMMARY` | `0` keeps `$summary` but makes no model call (first sentence of the reply only) |
+| `PI_HERDR_SUMMARY_MODEL` | `provider/id` for the turn summary; default the first of `anthropic/claude-haiku-5-5`, `anthropic/claude-haiku-4-5` with credentials |
 | `HERDR_ENV`, `HERDR_SOCKET_PATH`, `HERDR_PANE_ID` | set by Herdr; pi-herdr is active only when `HERDR_ENV=1` and both others are set |
 
 There is no settings file.
@@ -120,7 +123,7 @@ There is no settings file.
 - Herdr's own Pi integration (`herdr integration install pi`) for reading children's replies (it reports their session files) and for the pane title and agent name to apply.
 - `gh`, authenticated for the repository, for the `$pr` token (optional).
 - `git` for `where: "worktree"`.
-- Each Herdr child is a full interactive Pi session using your configured model and credentials, billed like any session. pi-herdr itself makes no model or classifier calls.
+- Each Herdr child is a full interactive Pi session using your configured model and credentials, billed like any session. pi-herdr's own model call is the `$summary` line: one small request per settled turn whose reply is longer than a line (Haiku, roughly 300 input and 20 output tokens, a few thousandths of a cent), through your configured credentials. `PI_HERDR_SUMMARY=0` turns it off.
 - It writes nothing to disk except session entries (`pi-herdr:child`) in the current session.
 
 ## Optional integrations

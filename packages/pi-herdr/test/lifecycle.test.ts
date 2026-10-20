@@ -128,6 +128,30 @@ test("message_end gives tool calls without a summary an intent, only in a live T
   await p.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx);
 });
 
+test("the summary token: cleared as a run starts, set before settling, and a blocked dialog's question", async () => {
+  inHerdr();
+  const { f } = herdr();
+  const p = fakePi();
+  piHerdr(p.pi, { call: f.call, exec: async () => ({ code: 0, stdout: "", stderr: "" }), pollMs: 60_000 });
+  const branch: any[] = [];
+  const ctx = { ...ctxOf(branch), modelRegistry: { find: () => ({ id: "haiku" }), hasConfiguredAuth: () => true, complete: async () => ({ stopReason: "stop", content: [{ type: "text", text: "Fixed the parser" }] }) } };
+  await p.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  const summaries = () => f.of("pane.report_metadata").map((l) => l.params.tokens).filter((t) => t && "summary" in t).map((t) => t.summary?.value ?? t.summary);
+
+  branch.push({ type: "message", message: { role: "user", content: "Fix it" } });
+  branch.push({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", name: "ask_user_question", arguments: { questions: [{ header: "Fix", question: "Which fix?" }] } }] } });
+  await p.emit("agent_start", {}, ctx);
+  p.pi.events.emit("herdr:blocked", { active: true, label: "Fix" });
+  p.pi.events.emit("herdr:blocked", { active: false });
+  branch.push({ type: "message", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Fixed it.\n\nDetails follow at length." }] } });
+  await p.emit("agent_before_settle", { type: "agent_before_settle" }, ctx);
+  expect(summaries()).toEqual(["Which fix?", "Fixed the parser"]);
+
+  await p.emit("agent_start", {}, ctx);
+  expect(summaries()).toEqual(["Which fix?", "Fixed the parser", null]);
+  await p.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx);
+});
+
 test("children are a read-only activity source: entries, details without touching the pane, interrupt only while awaited, never close", async () => {
   const { f, state } = herdr();
   const changes: string[] = [];

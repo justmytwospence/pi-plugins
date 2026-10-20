@@ -12,6 +12,7 @@
 //   /tasks, a pill in pi-subagents' list, read-only.
 // - `pr` space token: the branch's pull request (pr.ts).
 // - Tool calls get a one-line `intent` that herdr-web-ui's chat shows on their row (intent.ts).
+// - `summary` pane token: what the last turn did or what a dialog waits on, for alerts (summary.ts).
 //
 // Lifecycle: children are restored from the session's current branch (an abandoned branch's
 // children are not this conversation's), their replies are delivered only while pi is idle (a
@@ -32,6 +33,7 @@ import { PR_FIELDS, parsePrView, prToken } from "./core/pr.ts";
 import { PaneReporter, WorkspaceReporter } from "./core/report.ts";
 import { withIntents } from "./intent.ts";
 import { PI_CHILD } from "./session.ts";
+import { blockedSummary, type SummaryRegistry, turnSummary } from "./summary.ts";
 
 const TOOL = "herdr_child";
 const CHILD_ENTRY = "pi-herdr:child";
@@ -276,6 +278,16 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     if (active) return bridge.split(s);
     s?.done?.(false, "pi-herdr is not active in this session");
   });
+  // The `summary` token (summary.ts): what a blocked dialog waits on, set as it opens.
+  pi.events.on("herdr:blocked", (e) => {
+    const hold = e as HoldEvent | undefined;
+    if (!active || !hold?.active) return;
+    try {
+      void pane.setToken("summary", blockedSummary(hold.label, (lastCtx?.sessionManager.getBranch() ?? []) as any));
+    } catch {
+      // The runtime went stale.
+    }
+  });
   pi.events.on("herdr:probe", (e) => {
     if (active) (e as { reply?: () => void })?.reply?.();
   });
@@ -389,6 +401,23 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     lastCtx = ctx;
     if (!promptTitle && "prompt" in event) promptTitle = titleFromPrompt(event.prompt);
     updateIdentity(ctx);
+  });
+  // A turn's summary replaces the last one; it is cleared as a run starts so an alert never shows
+  // a stale one, and set before settling, so it is there when herdr's integration reports done.
+  pi.on("agent_start", () => {
+    if (active) void pane.setToken("summary", undefined);
+  });
+  pi.on("agent_before_settle", async (_event, ctx) => {
+    if (!active || ctx.mode !== "tui") return undefined;
+    const epoch = generation;
+    let summary: string | undefined;
+    try {
+      summary = await turnSummary(ctx.modelRegistry as unknown as SummaryRegistry, ctx.sessionManager.getBranch() as any);
+    } catch {
+      return undefined;
+    }
+    if (epoch === generation && active) await pane.setToken("summary", summary);
+    return undefined;
   });
   pi.on("agent_settled", () => {
     schedulePr(5_000);

@@ -9,8 +9,8 @@ plugin: pi-herdr
 - **Use it for:** Add pane metadata and deliberate human-accessible child sessions inside Herdr.
 - **Enable:** Select `packages/pi-herdr/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
 - **Controls:** `herdr_child` spawn/send/read/list/interrupt/close. No global shortcut; child activities offer read-only inspection.
-- **Settings:** No plugin JSON settings. Child location: tab; focus: false; model/effort inherit the parent. `PI_HERDR_PR=0` disables PR polling.
-- **Requirements, cost & privacy:** Interactive Herdr socket/pane, Pi/provider access for children; Git for worktrees, `gh` for PRs. Herdr socket operations create/open checkouts; no external worktree CLI. Metadata is not inference; children are paid sessions.
+- **Settings:** No plugin JSON settings. Child location: tab; focus: false; model/effort inherit the parent. `PI_HERDR_PR=0` disables PR polling; `PI_HERDR_SUMMARY=0` disables the summary model call, `PI_HERDR_SUMMARY_MODEL` picks its model.
+- **Requirements, cost & privacy:** Interactive Herdr socket/pane, Pi/provider access for children; Git for worktrees, `gh` for PRs. Herdr socket operations create/open checkouts; no external worktree CLI. The `$summary` line is one small Haiku request per settled turn; children are paid sessions.
 - **Integrations & limits:** Optional event-bus bridge and `/tasks`/FleetView child entries. An activity stop interrupts an awaited turn, never closes the pane. Herdr itself owns pane state.
 
 pi-herdr adds Pi-specific metadata and an event-bus bridge inside Herdr. It complements Herdr's own Pi integration rather than replacing it: Herdr's integration owns working, blocked, and idle state, while this plugin adds background labels, presentation, pull-request status, and interactive children.
@@ -27,13 +27,15 @@ Additional requirements depend on the feature:
 - Interactive children need a runnable Pi and credentials for their chosen provider.
 - Worktree children need Git and a checkout. The plugin calls Herdr's socket `worktree.create`/`worktree.open` operations; no external worktree helper or CLI is required.
 
-**Costs:** metadata and event bridging do not call a model. Children are normal Pi sessions with their own model usage, and delivered replies can start parent turns. PR refreshes also make GitHub API requests.
+**Costs:** the `$summary` token makes one small model request per settled turn whose reply is longer than a line (Haiku by default, a few thousandths of a cent); other metadata and event bridging do not call a model. Children are normal Pi sessions with their own model usage, and delivered replies can start parent turns. PR refreshes also make GitHub API requests.
 
 ## Pane and space metadata
 
 The `$bg` pane token uses compact icon/count badges: `⑂ 2` for pending subagents, `≡ 1` for planner holds, `↳ 1` for awaited child replies, and `⌘ 1` for jobs/other background holds (examples). Counts of the same kind are combined, without task names or parentheses. Its 90-second TTL is refreshed while held. A pane may correctly show idle while `$bg` counts unfinished work; the token is not a replacement working-state flag.
 
 The session name, or the first prompt's first line, becomes the pane title and `$task`. The displayed agent name includes model and effort. `$pr` is a space token describing the checkout branch's PR, refreshed at session start, after turns, and every three minutes. Set `PI_HERDR_PR=0` to disable PR reporting.
+
+`$summary` is one line (at most 80 characters) on what the last turn did or what the agent waits on, for notification tools such as herdr-native-notify. As a turn settles, a small model summarizes the prompt, tool calls, and final reply, before Pi reports the turn finished (about 1-2 seconds, capped at 4). A one-line reply is used as is; without a model, or on an error, timeout, or interrupted turn, the reply's first sentence stands in. While a dialog holds `herdr:blocked`, the token is its question (a pending `ask_user_question`'s first question, else the dialog's label). It is cleared as each run starts.
 
 For herdr-web-ui's chat, each tool call without an argument it can summarize by (`command`, `path`, `pattern`, `url`) gets a one-line `intent` before Pi saves the message, such as the subagent labels, the comment a script opens with, the question headers, a job id or the search query; its row shows that instead of the bare tool name. Providers never send the field to the model.
 
