@@ -8,8 +8,8 @@ plugin: pi-trends
 
 - **Use it for:** See how the session evolved, model call by model call: context growth, effort changes (including pi-auto-effort's), token and cost spikes, tool-heavy or slow calls.
 - **Enable:** Select `packages/pi-trends/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
-- **Controls:** `/trends` opens the chart overlay; `ctrl+shift+g` or `/trends widget [on|off]` toggles the one-line sparkline widget.
-- **Settings:** Optional `~/.pi/agent/pi-trends.json` (project `.pi/pi-trends.json` overrides): `widget` (show at startup, default `false`), `shortcut` (default `ctrl+shift+g`, or `"off"`), `placement` (`belowEditor` default, or `aboveEditor`).
+- **Controls:** `/trends` opens the chart overlay; `alt+g` or `/trends widget [on|off]` toggles the one-line sparkline widget.
+- **Settings:** Optional `~/.pi/agent/pi-trends.json` (project `.pi/pi-trends.json` overrides): `widget` (show at startup, default `false`), `shortcut` (default `alt+g`, or `"off"`), `placement` (`belowEditor` default, or `aboveEditor`).
 - **Requirements, cost & privacy:** No external dependency or inference calls. Reads the session locally and adds nothing to model context.
 - **Integrations & limits:** Complements [pi-status-footer](/plugins/pi-status-footer/) and [pi-context](/plugins/pi-context/). Non-TUI modes get a plain-text report.
 
@@ -28,7 +28,7 @@ ctx ▁▂▃▄▆▂▃ 31%  effort ▄▄▆▆▄▂▂ medium  cost ▂▃�
 | Where | Keys |
 | --- | --- |
 | Overlay | `←`/`→` (or `h`/`l`) move the call cursor; `[`/`]` jump to the previous/next prompt; `shift+←/→` (`H`/`L`) jump 10; `Home`/`End` (`g`/`G`); `esc` or `q` closes. |
-| Anywhere | `ctrl+shift+g` toggles the widget. |
+| Anywhere | `alt+g` toggles the widget. |
 
 ## Reading the charts
 

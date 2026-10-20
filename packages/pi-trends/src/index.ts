@@ -11,13 +11,13 @@ import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/
 import { formatCost, formatDuration, formatTokens, METRICS, type Metric, normalize, plot, slots, sparkline, window } from "./chart.ts";
 import { collectTurns, type TurnStat } from "./turns.ts";
 
-export const DEFAULT_SHORTCUT = "ctrl+shift+g";
+export const DEFAULT_SHORTCUT = "alt+g";
 const WIDGET_KEY = "pi-trends";
 
 export interface TrendsConfig {
   /** Show the widget at startup. Default false. */
   widget?: boolean;
-  /** Toggle shortcut, or "off". Default ctrl+shift+g. */
+  /** Toggle shortcut, or "off". Default alt+g. */
   shortcut?: string;
   /** Widget placement. Default belowEditor. */
   placement?: "aboveEditor" | "belowEditor";
