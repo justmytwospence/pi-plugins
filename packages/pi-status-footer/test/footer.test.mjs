@@ -1588,6 +1588,7 @@ test("the permission mode gets its own row in its color; plan runs point at /pla
   assert.equal(autoRows[2], " \uf510 ⏵⏵ auto mode on (shift+tab to cycle) · Gate 2 auto · 0 pushed back · 1 asked");
   assert.equal(autoRows.filter((r) => r.includes("Gate")).length, 1);
   assert.equal(mod.parseModeStatus("⏸ plan mode on").kind, "plan");
+  assert.equal(mod.parseModeStatus("⏸ plan mode on").label, "⏸  plan mode on");
   assert.equal(mod.parseModeStatus("⏸ chat mode on (shift+tab to cycle)").kind, "chat");
   assert.equal(mod.parseModeStatus("⏵⏵ yolo mode on (shift+tab to cycle)").kind, "bypass");
   assert.equal(mod.parseModeStatus("⏵⏵ bypass permissions on").kind, "bypass");

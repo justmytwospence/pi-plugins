@@ -189,7 +189,9 @@ const MODE_KINDS: Record<string, PermissionModeStatus["kind"]> = {
 export function parseModeStatus(text: string): PermissionModeStatus | undefined {
   const match = /^(⏸|⏵⏵) (chat mode|manual mode|accept edits|plan mode|auto mode|yolo mode|bypass permissions) on(?: \((.+) to cycle\))?$/u.exec(text);
   if (!match) return undefined;
-  return { kind: MODE_KINDS[match[2]], label: `${match[1]} ${match[2]} on`, ...(match[3] ? { key: match[3] } : {}) };
+  // Pad the one-cell ⏸ to the two cells of ⏵⏵, so the mode name starts in the same column in every mode.
+  const glyph = match[1] === "⏸" ? "⏸ " : match[1];
+  return { kind: MODE_KINDS[match[2]], label: `${glyph} ${match[2]} on`, ...(match[3] ? { key: match[3] } : {}) };
 }
 
 export interface AbsorbedStatuses { mode?: PermissionModeStatus; autoEffort: boolean; autoEffortDetail?: string; lean?: string; cache?: string; extraBilled?: number; stashed?: boolean; marimo?: MarimoStatus; lens?: LensStatus; bg?: BgItem[]; /** Another extension owns the `mcp` status. */ mcp?: boolean; rest: string[] }
