@@ -105,6 +105,17 @@ Pi has no directory boundary of its own, so the gate keeps one. In auto, manual 
 - Private roots (`directories.private`: `~/Projects`, `~/Documents`, `~/Desktop`, `~/Downloads`, iCloud Drive) are neither read nor written outside the project and its grants.
 - Other paths (system and toolchain directories, `~/.config`) can be read. They can be written only under `alwaysWrite` (temp and cache directories) or a `write` grant.
 - `directories.read` grants extra readable directories (`["*"]` reads anywhere). `directories.write` grants extra directories to read and write. Paths take `~` and globs (`~/Projects/herdr-*`). Relative paths are relative to the project.
+- `directories.derived` lists paths generated from a source elsewhere: a deployed config file, a build output or a generated client. A write to one outside the project is held even when a grant covers it, and the agent is told the entry's `hint` (word for word) instead of a Jev workaround, so it edits the source instead. Entries are `{ "path": "...", "hint": "..." }` or a bare path.
+- `directories.exemptCommands` lists commands whose paths the policy does not check, typically the one that regenerates the derived paths from their source. An entry is a program and its leading words (`make install`, `stow`), matched by the program's base name and its first non-option arguments. Jev and the always-held rules still judge the command; redirects and other commands in the same line are still checked.
+
+```json
+{
+  "directories": {
+    "derived": [{ "path": "~/.config", "hint": "Edit the source in ~/dotfiles, then deploy it." }],
+    "exemptCommands": ["stow"]
+  }
+}
+```
 
 Put a project's grants in its `.agents/tool-gate.json`, which the opencode and Claude Code ports read too:
 
@@ -180,7 +191,9 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
     "private": ["~/Projects", "~/Documents", "~/Desktop", "~/Downloads", "~/Library/Mobile Documents"],
     "read": [],
     "write": [],
-    "alwaysWrite": ["/tmp", "/private/tmp", "/dev", "$TMPDIR", "~/.cache", "~/Library/Caches", "~/.npm", "~/.bun", "~/.cargo", "~/.rustup", "~/.pyenv", "~/.local/share", "~/.local/state"]
+    "alwaysWrite": ["/tmp", "/private/tmp", "/dev", "$TMPDIR", "~/.cache", "~/Library/Caches", "~/.npm", "~/.bun", "~/.cargo", "~/.rustup", "~/.pyenv", "~/.local/share", "~/.local/state"],
+    "derived": [],
+    "exemptCommands": []
   }
 }
 ```

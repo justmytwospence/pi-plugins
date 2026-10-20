@@ -126,6 +126,8 @@ type Plan =
       similar?: Similar;
       /** Held only by the directory policy; otherwise the call only reads. */
       readOnly?: boolean;
+      /** Configured advice for the agent (a derived path's hint), used instead of asking Jev for a workaround. */
+      advice?: string;
     }
   | { kind: "judge"; args: string; key: string; similar: Similar };
 
@@ -325,7 +327,7 @@ export default function toolGate(pi: ExtensionAPI) {
     let access: { reads: string[]; writes: string[] };
     if (SHELL_TOOLS.has(tool)) {
       const dir = tool !== "bash" && typeof input.cwd === "string" && input.cwd ? path.resolve(cwd, expandHome(input.cwd)) : cwd;
-      access = bashPathAccess(String(input.command ?? ""), dir, config.readOnlyCommands);
+      access = bashPathAccess(String(input.command ?? ""), dir, config.readOnlyCommands, config.directories.exemptCommands);
       if (dir !== path.resolve(cwd)) (isReadOnlyBash(String(input.command ?? ""), config.readOnlyCommands) ? access.reads : access.writes).push(dir);
     } else if (tool === "edit" || tool === "write") {
       access = { reads: [], writes: [path.resolve(cwd, expandHome(String(input.path ?? "")))] };
@@ -344,15 +346,20 @@ export default function toolGate(pi: ExtensionAPI) {
     const base = await basePlan(tool, input, cwd);
     const holds = base.kind === "allow" && base.why === "allow list" ? [] : await directoryHolds(tool, input, cwd);
     if (!holds.length) return base;
-    const reasons = [...new Set(holds.map((v) => `${v.access === "write" ? "writes" : "reads"} ${shown(v.file)}, outside this project's directories`))];
+    const reasons = [...new Set(holds.map((v) =>
+      v.hint !== undefined
+        ? `writes ${shown(v.file)}, a derived path (generated from a source elsewhere)`
+        : `${v.access === "write" ? "writes" : "reads"} ${shown(v.file)}, outside this project's directories`))];
+    const hints = [...new Set(holds.flatMap((v) => (v.hint !== undefined ? [v.hint || "Edit its source instead."] : [])))];
+    const advice = hints.length ? hints.join(" ") : undefined;
     const scopes = [...new Map(holds.map((v) => [grantKey(v), v])).values()];
     const similar: Similar = {
       keys: scopes.map(grantKey),
       label: scopes.map((v) => `${v.access}s in ${shown(v.scope)}`).join(", "),
     };
     const args = base.kind === "allow" ? clip(SHELL_TOOLS.has(tool) ? String(input.command ?? "") : JSON.stringify(input), 6_000) : base.args;
-    if (base.kind === "ask") return { ...base, reasons: [...base.reasons, ...reasons], key: `${base.key}; dirs` };
-    return { kind: "ask", reasons, key: `dirs:${similar.keys.join("|")}`, args, similar, readOnly: base.kind === "allow" };
+    if (base.kind === "ask") return { ...base, reasons: [...base.reasons, ...reasons], key: `${base.key}; dirs`, advice };
+    return { kind: "ask", reasons, key: `dirs:${similar.keys.join("|")}`, args, similar, readOnly: base.kind === "allow", advice };
   };
 
   const basePlan = async (tool: string, input: Record<string, unknown>, cwd: string): Promise<Plan> => {
@@ -473,6 +480,8 @@ export default function toolGate(pi: ExtensionAPI) {
       summary: string;
       similar: Similar | undefined;
       state: Record<string, unknown>;
+      /** Configured advice, used instead of asking Jev for a workaround. */
+      advice?: string;
     },
   ) => {
     const exact = `${h.tool}\0${JSON.stringify(h.input)}`;
@@ -481,11 +490,14 @@ export default function toolGate(pi: ExtensionAPI) {
       pushedBackThisTurn.add(h.family);
       pushedBack++;
       status(ctx);
-      const suggestion = await askJev(ctx.modelRegistry, config.jev, { ...h.state, held_because: h.reason }, workaroundQuestion(), ctx.signal);
-      const ideas = suggestion.ok ? suggestions(suggestion.answers) : [];
-      if (suggestion.ok && suggestion.usage) pendingUsage.set(h.toolCallId, addUsage(pendingUsage.get(h.toolCallId), suggestion.usage));
+      let ideas: string[] = [];
+      if (h.advice === undefined) {
+        const suggestion = await askJev(ctx.modelRegistry, config.jev, { ...h.state, held_because: h.reason }, workaroundQuestion(), ctx.signal);
+        ideas = suggestion.ok ? suggestions(suggestion.answers) : [];
+        if (suggestion.ok && suggestion.usage) pendingUsage.set(h.toolCallId, addUsage(pendingUsage.get(h.toolCallId), suggestion.usage));
+      }
       const noWorkaround = ideas[0] === WORKAROUNDS.user_only;
-      const advice = noWorkaround
+      const advice = h.advice !== undefined ? h.advice : noWorkaround
         ? "Jev sees no workaround: whether to do this is the user's decision."
         : ideas.length
           ? `Jev suggests: ${ideas.join("; or ")}.`
@@ -631,6 +643,7 @@ export default function toolGate(pi: ExtensionAPI) {
         summary: why,
         similar: p.similar,
         state: await judgeStateFor(ctx, tool, p.args, []),
+        advice: p.advice,
       });
     }
 

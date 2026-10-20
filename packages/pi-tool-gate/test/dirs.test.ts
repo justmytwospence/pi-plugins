@@ -48,6 +48,18 @@ describe("bashPathAccess", () => {
     expect(access("cd ~/Projects/other && make")).toEqual({ reads: [], writes: [`${P}/other`] });
   });
 
+  test("exempt commands name no paths; other parts, redirects and the directory still count", () => {
+    const ex = (command: string, cwd = app) => bashPathAccess(command, cwd, [], ["chezmoi apply", "make install"]);
+    expect(ex("chezmoi apply ~/.config/x")).toEqual({ reads: [], writes: [] });
+    expect(ex("chezmoi -v apply ~/.config/x")).toEqual({ reads: [], writes: [] });
+    expect(ex("/opt/homebrew/bin/chezmoi apply ~/.config/x")).toEqual({ reads: [], writes: [] });
+    expect(ex("sh -c 'chezmoi apply ~/.config/x'")).toEqual({ reads: [], writes: [] });
+    expect(ex("chezmoi apply ~/.config/x && cp a ~/.config/y").writes).toEqual([`${H}/.config/y`]);
+    expect(ex("chezmoi apply ~/.config/x > ~/.config/log").writes).toEqual([`${H}/.config/log`]);
+    expect(ex("chezmoi add ~/.config/x").writes).toEqual([`${H}/.config/x`]);
+    expect(ex("cd ~/Projects/other && make install").writes).toEqual([`${P}/other`]);
+  });
+
   test("sh -c and here-documents", () => {
     expect(access("sh -c 'cat ~/Projects/other/a'").reads).toEqual([`${P}/other/a`]);
     expect(access("cat > notes.md <<'EOF'\nsee ~/Projects/other/x\nEOF")).toEqual({ reads: [], writes: [`${app}/notes.md`] });
@@ -85,6 +97,19 @@ describe("policy", () => {
     expect(canWrite(w, `${P}/herdr-undo/x`)).toBe(true);
     expect(canRead(w, `${P}/herdr-undo/x`)).toBe(true);
     expect(canWrite(policy({}, [`${app}/.worktrees/b`, app]), `${app}/x`)).toBe(true);
+  });
+
+  test("derived paths: writes are held even under a grant, with the hint; the project and reads are unaffected", () => {
+    const p = policy({ write: ["~/.config"], derived: [{ path: "~/.config/app", hint: "Edit ~/src/app.toml." }, { path: "~/.local/bin" } as any] }, [app, `${H}/.config/app/repo`]);
+    expect(canWrite(p, `${H}/.config/other`)).toBe(true);
+    expect(canWrite(p, `${H}/.config/app/x`)).toBe(false);
+    expect(canRead(p, `${H}/.config/app/x`)).toBe(true);
+    expect(canWrite(p, `${H}/.config/app/repo/x`)).toBe(true);
+    expect(violations(p, { reads: [`${H}/.config/app/y`], writes: [`${H}/.config/app/x`, `${H}/.local/bin/t`] })).toEqual([
+      { access: "write", file: `${H}/.config/app/x`, scope: `${H}/.config/app`, hint: "Edit ~/src/app.toml." },
+      { access: "write", file: `${H}/.local/bin/t`, scope: `${H}/.local/bin`, hint: "" },
+    ]);
+    expect(describePolicy(p)).toMatch(/Derived \(writes held\): ~\/\.config\/app, ~\/\.local\/bin\./u);
   });
 
   test("a grant covers the folder under a private root", () => {
@@ -160,6 +185,22 @@ describe("the gate", () => {
     expect(jev.calls).toHaveLength(1);
     const held: any = await h.emit("tool_call", call("write", { path: "~/Projects/other/a.ts", content: "" }, "t3"), ctx);
     expect(held.reason).toMatch(/writes ~\/Projects\/other\/a\.ts/u);
+  });
+
+  test("a derived write is pushed back with its hint and no Jev workaround; exempt commands run", async () => {
+    const { h, ctx, jev } = setup({
+      derived: [{ path: "~/.config/app", hint: "Edit ~/src/app.toml, then run the generator." }],
+      exemptCommands: ["gen apply"],
+    });
+    await h.emit("session_start", {}, ctx);
+    await h.emit("before_agent_start", { prompt: "x" }, ctx);
+    const held: any = await h.emit("tool_call", call("write", { path: "~/.config/app/a.toml", content: "" }), ctx);
+    expect(held.block).toBe(true);
+    expect(held.reason).toMatch(/writes ~\/\.config\/app\/a\.toml, a derived path/u);
+    expect(held.reason).toMatch(/\nEdit ~\/src\/app\.toml, then run the generator\.\n/u);
+    expect(jev.calls).toHaveLength(0);
+    expect(await h.emit("tool_call", call("bash", { command: "gen apply ~/.config/app/a.toml" }, "t2"), ctx)).toBeUndefined();
+    expect(jev.calls.filter((c) => c.questions.workaround)).toHaveLength(0);
   });
 
   test("off: no directory holds", async () => {

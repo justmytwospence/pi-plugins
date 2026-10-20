@@ -1024,15 +1024,35 @@ function pathArgs(args: readonly string[]): string[] {
 }
 
 /**
+ * Whether a command matches an exempt entry: its program (by base name) followed by the entry's
+ * other words as its first arguments, skipping options (`chezmoi -v apply` matches
+ * `chezmoi apply`; an option that takes a separate value before them defeats the match).
+ */
+function isExemptPart(p: { name: string; args: string[] }, exempt: readonly string[]): boolean {
+  if (!exempt.length) return false;
+  const words = [path.basename(p.name), ...p.args.filter((a) => !a.startsWith("-"))];
+  return exempt.some((entry) => {
+    const want = entry.trim().split(/\s+/u);
+    return want.length > 0 && want.every((w, i) => words[i] === w);
+  });
+}
+
+/**
  * The files and directories a shell command reads and writes, as absolute paths, for the
  * directory policy. A heuristic: words that look like paths (a slash, `~`, `.`), resolved against
  * the directory each part runs in (after `cd`), plus write redirects. A read-only part reads what
  * it names; `rm`, `mv`, `mkdir`, `touch`, `tee`, `ln`, `chmod`... write it; `cp`, `rsync` and
  * `install` write their last operand; `sed -i` writes its files; any other program is assumed to
  * write what it names. A part run in another directory (`cd ../x && make`) reads that directory,
- * or writes it when the part does more than read. Commands in `sh -c` and `eval` are followed.
+ * or writes it when the part does more than read. Commands in `sh -c` and `eval` are followed. A
+ * part matching one of `exempt` (see `isExemptPart`) names no paths; its directory still counts.
  */
-export function bashPathAccess(command: string, cwd: string, extra: readonly string[] = []): { reads: string[]; writes: string[] } {
+export function bashPathAccess(
+  command: string,
+  cwd: string,
+  extra: readonly string[] = [],
+  exempt: readonly string[] = [],
+): { reads: string[]; writes: string[] } {
   const reads = new Set<string>();
   const writes = new Set<string>();
   const resolve = (dir: string, file: string) => path.resolve(dir, expandHome(file));
@@ -1050,6 +1070,7 @@ export function bashPathAccess(command: string, cwd: string, extra: readonly str
     if (!p) return;
     const readOnly = isReadOnlyPart(tokens, extra);
     if (dir !== path.resolve(cwd)) (readOnly ? reads : writes).add(dir);
+    if (isExemptPart(p, exempt)) return;
     const nested = nestedCommands(p);
     const args = p.args.filter((a) => !nested.includes(a));
     const files = pathArgs(p.name === "eval" ? [] : args).map((f) => resolve(dir, f));
@@ -1067,7 +1088,7 @@ export function bashPathAccess(command: string, cwd: string, extra: readonly str
       for (const f of files) writes.add(f);
     }
     for (const script of nested) {
-      const inner = bashPathAccess(script, dir, extra);
+      const inner = bashPathAccess(script, dir, extra, exempt);
       for (const f of inner.reads) reads.add(f);
       for (const f of inner.writes) writes.add(f);
     }
