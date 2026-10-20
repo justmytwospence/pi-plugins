@@ -4,6 +4,9 @@
 import {
   buildSessionContext,
   createAgentSession,
+  createCodemodeExtension,
+  createMcpExtension,
+  createToolSearchExtension,
   DefaultResourceLoader,
   getAgentDir,
   ModelRuntime,
@@ -16,7 +19,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { MainState } from "./main-state.ts";
-import { judgeToolCall, READ_ONLY_TOOLS } from "./read-only.ts";
+import { GUARD_ENV, judgeCall, REFUSED_TOOLS, SUBAGENT_ENV_CHANNEL, type SubagentEnvRequest } from "./guard.ts";
 import { inertPayload, placeSideBreakpoint, requestedCacheTtlMs, splicePayload, SUPPORTED_APIS } from "./splice.ts";
 import { compactExchange, EXCHANGE_ENTRY } from "./thread.ts";
 import { assembleContext, describeLive, mainDelta, roleMessage, statusMessage, trimOpenTurn, type MainDelta } from "./transcript.ts";
@@ -204,18 +207,18 @@ export class SidebarAgent {
   private async create(ctx: ExtensionContext, model: NonNullable<ExtensionContext["model"]>): Promise<AgentSession> {
     const agentDir = getAgentDir();
     const settingsManager = SettingsManager.create(ctx.cwd, agentDir);
-    const web = webToolSources(this.pi);
+    const sources = toolSources(this.pi);
     const loader = new DefaultResourceLoader({
       cwd: ctx.cwd,
       agentDir,
       settingsManager,
+      // Main's tool-providing extensions only, so their other hooks (footers, cache questions,
+      // effort judgments) do not run twice. Skills and prompt templates load as in main.
       noExtensions: true,
-      noPromptTemplates: true,
       noThemes: true,
-      noSkills: true,
       noContextFiles: true,
-      additionalExtensionPaths: web.paths,
-      extensionFactories: [this.policy()] as never,
+      additionalExtensionPaths: sources.paths,
+      extensionFactories: [this.policy(), ...sources.builtins] as never,
     });
     await loader.reload();
     const modelRuntime = await ModelRuntime.create();
@@ -231,7 +234,7 @@ export class SidebarAgent {
       modelRuntime,
       model,
       thinkingLevel: this.pi.getThinkingLevel(),
-      tools: [...BUILTIN_TOOLS, ...web.names],
+      tools: sources.names,
       resourceLoader: loader,
       sessionManager,
       settingsManager,
@@ -273,8 +276,20 @@ export class SidebarAgent {
     return (cpi: ExtensionAPI) => {
       cpi.on("cache_warming_decision", () => ({ action: "stop" as const }));
 
-      cpi.on("tool_call", (event, cctx) => {
-        const verdict = judgeToolCall(event.toolName, event.input, cctx.cwd);
+      // Sidebar's subagents run under the same guard (pi-subagents asks this channel for their env).
+      cpi.events.on(SUBAGENT_ENV_CHANNEL, (data: unknown) => {
+        const request = data as Partial<SubagentEnvRequest> | undefined;
+        if (request?.version === 1 && !request.probe && request.env) request.env[GUARD_ENV] = "1";
+      });
+
+      cpi.on("tool_call", async (event, cctx) => {
+        const verdict = await judgeCall(event.toolName, event.input, {
+          cwd: cctx.cwd,
+          registry: this.main.ctx?.modelRegistry ?? cctx.modelRegistry,
+          tool: (name) => cpi.getAllTools().find((tool) => tool.name === name),
+          subagentsGuarded: () => subagentsGuarded(cpi.events),
+          ...(cctx.signal ? { signal: cctx.signal } : {}),
+        });
         return verdict.allowed ? undefined : { block: true, reason: verdict.reason };
       });
 
@@ -333,22 +348,42 @@ export class SidebarAgent {
   }
 }
 
-/** Main's read-only web tools and the extensions that provide them, to load into Sidebar too. */
-export function webToolSources(pi: Pick<ExtensionAPI, "getAllTools">): { names: string[]; paths: string[] } {
-  const names: string[] = [];
+/** Whether pi-subagents in this session asks for subagent environment (so subagents get the guard). */
+export function subagentsGuarded(events: { emit(channel: string, data: unknown): void }): boolean {
+  const probe: SubagentEnvRequest = { version: 1, env: {}, probe: true };
+  try { events.emit(SUBAGENT_ENV_CHANNEL, probe); } catch { return false; }
+  return probe.supported === true;
+}
+
+type ToolSourceApi = Pick<ExtensionAPI, "getAllTools">;
+
+/**
+ * Main's tools, for Sidebar's session: the extensions that provide them (by source path; Pi's
+ * built-in codemode, tool search and MCP by their factories) and the names to allow. Every tool
+ * main has is allowed, switched on or not (a session's tool list is its allowlist, so a tool main
+ * switches on later, such as web_enable's, must be on it). What the model sees still comes from
+ * main's request. Tools the guard always refuses, and pi-sidebar itself, are left out.
+ */
+export function toolSources(pi: ToolSourceApi): { names: string[]; paths: string[]; builtins: ExtensionFactory[] } {
+  const names = new Set<string>(BUILTIN_TOOLS);
   const paths = new Set<string>();
-  try {
-    for (const tool of pi.getAllTools()) {
-      if (!READ_ONLY_TOOLS.has(tool.name) || BUILTIN_TOOLS.includes(tool.name)) continue;
-      const path = (tool.sourceInfo as { path?: unknown } | undefined)?.path;
-      if (typeof path !== "string" || path.startsWith("builtin:")) continue;
-      names.push(tool.name);
-      paths.add(path);
-    }
-  } catch {
-    // No tool information: Sidebar keeps the built-in reading tools.
+  const builtins = new Map<string, ExtensionFactory>();
+  let tools: ReturnType<ExtensionAPI["getAllTools"]> = [];
+  try { tools = pi.getAllTools(); } catch { /* no tool information: built-ins only */ }
+  for (const tool of tools) {
+    if (REFUSED_TOOLS.has(tool.name)) continue;
+    const path = (tool.sourceInfo as { path?: unknown } | undefined)?.path;
+    if (typeof path !== "string") continue;
+    if (path === "builtin:codemode") builtins.set(path, createCodemodeExtension() as ExtensionFactory);
+    else if (path === "builtin:tool_search") builtins.set(path, createToolSearchExtension() as ExtensionFactory);
+    else if (path === "builtin:mcp") builtins.set(path, createMcpExtension() as ExtensionFactory);
+    else if (path.startsWith("builtin:")) {
+      // Pi's core tools are built into every session.
+    } else if (/[\\/]pi-sidebar[\\/]/.test(path)) continue;
+    else paths.add(path);
+    names.add(tool.name);
   }
-  return { names, paths: [...paths] };
+  return { names: [...names], paths: [...paths], builtins: [...builtins.values()] };
 }
 
 /** The cache TTL main's requests ask for when none is in memory: Pi's retention setting. */

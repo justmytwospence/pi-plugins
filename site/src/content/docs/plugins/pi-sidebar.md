@@ -8,10 +8,10 @@ plugin: pi-sidebar
 
 - **Use it for:** Ask what the main agent is doing, why, or how the code works, without interrupting it.
 - **Enable:** Select `packages/pi-sidebar/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
-- **Controls:** Ctrl+' opens or closes Sidebar. In Herdr, `prefix+h/l` moves between main and Sidebar as if Sidebar were a pane (with the bundled Herdr plugin). In Sidebar, your own keybindings apply: PgUp/PgDn and your other transcript scroll keys scroll it, Esc stops an answer, Ctrl+O expands tools, and your thinking toggle shows or hides reasoning.
+- **Controls:** Ctrl+' opens or closes Sidebar. In Herdr, `prefix+h/l` moves between main and Sidebar as if Sidebar were a pane (with the bundled Herdr plugin). In Sidebar, your own keybindings apply: pi-vim's Ctrl+U/D and your transcript scroll keys (such as Ctrl+G) scroll it, Esc stops an answer, Ctrl+O expands tools, and your thinking toggle shows or hides reasoning.
 - **Settings:** `PI_SIDEBAR_KEYS` replaces the key. `PI_SIDEBAR_RATIO` sets Sidebar's share (default 0.5). `PI_SIDEBAR_MIN_COLUMNS` is the narrowest half for a side-by-side split (default 80). The model and thinking always match main.
 - **Requirements, cost & privacy:** Requires Pi's fullscreen mode. Each question reads main's context from the cache, plus a small new part, and Sidebar asks first when that cache has probably expired. The thread is stored as hidden entries in main's session.
-- **Integrations & limits:** Works with Anthropic Messages, OpenAI Responses (including Codex) and Chat Completions. Read-only blocks tool calls; it is not a sandbox. An optional pi-vim composer is supported. Sidebar steps aside while a dialog holds `herdr:blocked`.
+- **Integrations & limits:** Works with Anthropic Messages, OpenAI Responses (including Codex) and Chat Completions. Sidebar uses main's tools, skills and templates; a guard refuses calls that would change anything, but it is not a sandbox. An optional pi-vim composer is supported. Sidebar steps aside while a dialog holds `herdr:blocked`.
 
 `pi-sidebar` splits Pi's fullscreen layout in two. Main's transcript, editor and footer reflow into one half, and Sidebar fills the other: side by side when each half keeps 80 columns, otherwise below main.
 
@@ -52,8 +52,9 @@ Use Pi's fullscreen mode (`"tuiMode": "fullscreen"`). In regular mode, the key a
 | `/sidebar new`, `/new` in Sidebar | Starts a fresh thread. |
 
 While Sidebar has focus, your keys do what they do in main, through Pi's keybindings:
-- **Scrolling.** The transcript scroll actions (PgUp/PgDn, Ctrl+Home/End, and anything you bound, such as Ctrl+G) scroll Sidebar.
-- **Editing.** Editor keys, history and autocomplete work as in main, and so do pi-vim's Ctrl+U/D.
+- **Scrolling.** pi-vim's Ctrl+U/D (idle Normal mode) and your transcript scroll actions (such as Ctrl+G to the end) scroll Sidebar.
+- **Editing.** Editor keys, history and autocomplete work as in main, including your list keys such as Ctrl+J/K.
+- **Skills and prompt templates.** `/skill:name` and your templates run in Sidebar.
 - **App actions.** Esc stops an answer, Ctrl+O expands tools, your thinking toggle shows or hides reasoning, Ctrl+C clears the composer, and Ctrl+D never quits Pi.
 
 Ctrl+' needs a terminal that reports it (the kitty keyboard protocol). Set `PI_SIDEBAR_KEYS=ctrl+.` (or a comma-separated list) to use other keys.
@@ -82,9 +83,16 @@ The provider serves the first part from the cache main already wrote. In real se
 
 Sidebar also caches its own part. It puts a 5-minute breakpoint on its last block before the status note. With a Claude subscription login, whose request already uses all four breakpoints, it takes the slot of the redundant first system one; main's prefix still reads fully from the cache. Later steps of an answer and follow-ups while main is idle then read Sidebar's earlier turns from the cache too. Its new tokens are written at 1.25× instead of sent at 1×.
 
-To keep that prefix identical, Sidebar keeps main's tool declarations and blocks calls instead of removing tools.
-- **Allowed:** reading tools, main's web search and fetch tools, and shell commands that only read (plan mode's policy).
-- **Blocked:** everything else, with a reason the model relays.
+To keep that prefix identical, Sidebar keeps main's tool declarations and refuses calls instead of removing tools.
+
+## What it can use
+
+Everything main can, except changing anything. Sidebar loads the extensions behind main's tools, Pi's codemode, tool search and MCP, and main's skills and templates. One guard judges every call:
+- **Refused:** `edit`, `write`, `todo`, `ask_user_question`, plan mode's tools, `herdr_child`, and tools marked destructive.
+- **Allowed:** reading, search and web tools, codemode (its nested calls are judged one by one), tool search, pi-bg's job readers, and tools marked read-only.
+- **Shell commands** (including pi-bg's `bg_run`): run when they only read. Plan mode's policy, loosened for flags like `rg -i`, globs, `2>/dev/null`, `cd` and variables set in the same command.
+- **Anything else:** a Jev judgment of whether the call would change anything, refused at 50% or more, or when Jev is unavailable.
+- **Subagents:** allowed, and they run under the same guard. [pi-subagents](/plugins/pi-subagents/) passes `PI_SIDEBAR_GUARD=1` to them through its subagent-environment channel.
 
 It works from any point in the conversation. With no request of main's in memory, Sidebar rebuilds it from main's session and still lands on main's warm cache. This happens after a restart, resume, `/reload`, `/tree` or a compaction.
 

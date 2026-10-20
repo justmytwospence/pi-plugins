@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { replayMessages, replayPayload, SidebarAgent, webToolSources } from "../src/child.ts";
+import { replayMessages, replayPayload, SidebarAgent, subagentsGuarded, toolSources } from "../src/child.ts";
 import { MainState } from "../src/main-state.ts";
 import { FakePi, fakeCtx } from "./fake.ts";
 
@@ -223,15 +223,29 @@ describe("helpers", () => {
     expect(replay.pending).toEqual([{ name: "bash", summary: "sleep 9" }]);
   });
 
-  it("loads main's web tools from the extensions that provide them", () => {
+  it("loads every tool main has, switched on or not, except refused ones and pi-sidebar", () => {
     const pi = new FakePi();
     pi.tools = [
       { name: "web_search", sourceInfo: { path: "/ext/web/index.ts" } },
       { name: "fetch_content", sourceInfo: { path: "/ext/web/index.ts" } },
+      { name: "subagent", sourceInfo: { path: "/suite/packages/pi-subagents/src/index.ts" } },
+      { name: "todo", sourceInfo: { path: "/suite/packages/pi-todo/index.ts" } },
       { name: "read", sourceInfo: { path: "builtin:read" } },
       { name: "codemode", sourceInfo: { path: "builtin:codemode" } },
-      { name: "subagent", sourceInfo: { path: "/ext/sub.ts" } },
+      { name: "mcp__docs__search", sourceInfo: { path: "builtin:mcp" } },
+      { name: "peek", sourceInfo: { path: "/suite/packages/pi-sidebar/src/index.ts" } },
     ];
-    expect(webToolSources(pi as never)).toEqual({ names: ["web_search", "fetch_content"], paths: ["/ext/web/index.ts"] });
+    const sources = toolSources(pi as never);
+    expect(sources.paths).toEqual(["/ext/web/index.ts", "/suite/packages/pi-subagents/src/index.ts"]);
+    expect(sources.builtins).toHaveLength(2);
+    expect(sources.names).toEqual(["read", "grep", "find", "ls", "bash", "web_search", "fetch_content", "subagent", "codemode", "mcp__docs__search"]);
   });
+
+  it("knows whether pi-subagents will give its subagents the guard", () => {
+    const pi = new FakePi();
+    expect(subagentsGuarded(pi.events)).toBe(false);
+    pi.events.on("pi-plugins.subagent-env.v1", (data) => { if ((data as { probe?: boolean }).probe) (data as { supported?: boolean }).supported = true; });
+    expect(subagentsGuarded(pi.events)).toBe(true);
+  });
+
 });

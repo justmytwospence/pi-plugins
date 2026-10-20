@@ -241,8 +241,8 @@ export class SidebarController {
       void this.reset();
       return;
     }
-    if (text.startsWith("/")) {
-      this.panel?.notice({ kind: "warning", text: `Sidebar knows /new and /close; ${text.split(/\s/)[0]} is a main-session command.` });
+    if (text.startsWith("/") && !this.isSidebarCommand(text)) {
+      this.panel?.notice({ kind: "warning", text: `Sidebar knows /new, /close, skills and prompt templates; ${text.split(/\s/)[0]} is a main-session command.` });
       return;
     }
     const check = this.agent.preflight();
@@ -256,6 +256,16 @@ export class SidebarController {
       return;
     }
     this.send(text, false);
+  }
+
+  /** Skills (`/skill:name`) and prompt templates run in Sidebar as they do in main. */
+  private isSidebarCommand(text: string): boolean {
+    const name = text.slice(1).split(/\s/)[0] ?? "";
+    try {
+      return this.pi.getCommands().some((command) => command.name === name && (command.source === "skill" || command.source === "prompt"));
+    } catch {
+      return false;
+    }
   }
 
   private send(text: string, confirmed: boolean): void {

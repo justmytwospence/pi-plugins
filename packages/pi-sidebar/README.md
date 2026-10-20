@@ -51,8 +51,9 @@ pi -e ./packages/pi-sidebar
 | `/sidebar model` | Explains why Sidebar always uses main's model. |
 
 While Sidebar has focus, your keys do what they do in main. They are resolved through Pi's keybindings, so changes in `~/.pi/agent/keybindings.json` apply in both halves:
-- **Scrolling.** Pi's transcript scroll actions (`tui.altScreen.pageUp/pageDown/halfPageUp/halfPageDown/lineUp/lineDown/top/bottom`: PgUp/PgDn, Ctrl+Home and Ctrl+End by default, plus anything you added, such as Ctrl+G) scroll Sidebar instead of main. The mouse wheel scrolls whichever half it is over.
-- **Editing.** The composer is Pi's editor, or pi-vim's embedded editor when pi-vim is installed, so editor keys, history and autocomplete follow your bindings. With pi-vim, Ctrl+U/D in idle Normal mode half-page scroll Sidebar, as they do in main.
+- **Scrolling.** With pi-vim, Ctrl+U/D in idle Normal mode half-page scroll Sidebar, as they do in main (in Insert mode they edit). Pi's transcript scroll actions (`tui.altScreen.*`, for example `tui.altScreen.bottom` on Ctrl+G or Ctrl+End) scroll Sidebar instead of main. The mouse wheel scrolls whichever half it is over. The hint row shows your keys.
+- **Editing.** The composer is Pi's editor, or pi-vim's embedded editor when pi-vim is installed, so editor keys, history and autocomplete follow your bindings. Your `tui.select.*` keys (such as Ctrl+J/K) move through autocomplete lists.
+- **Skills and prompt templates.** `/skill:name` and your prompt templates run in Sidebar as in main. Other slash commands are main's.
 - **App actions.**
   - `app.interrupt` (Esc) stops Sidebar's answer.
   - `app.tools.expand` (Ctrl+O) expands tool output.
@@ -111,7 +112,7 @@ Settings, read from the environment Pi starts with:
 
 Main keeps its last provider request in memory, together with the session entry it was built from. It also tracks a live status: running tools and how long they have run, results of parallel calls that have finished but are not yet committed, and the tail of the reply it is streaming.
 
-Sidebar's agent is an in-process Pi session with none of main's extensions, only Sidebar's own policy. Each of its requests is built from four parts:
+Sidebar's agent is an in-process Pi session. It loads the extensions behind main's tools (and Pi's built-in codemode, tool search and MCP), main's skills and prompt templates, and Sidebar's guard. Main's other extension hooks (footers, cache prompts and so on) do not run twice. Each of its requests is built from four parts:
 
 1. **Main's last request, unchanged.** The model, system prompt, tool declarations, thinking and effort settings, cache keys and every message all come from main's request.
 2. **What main committed since.** A tool call that is still running is described rather than replayed.
@@ -127,10 +128,16 @@ The provider serves part 1 from the cache main already wrote. In your own sessio
 - **The trade-off:** Sidebar's new tokens are written at 1.25× instead of sent at 1×. That costs a few hundred tokens' worth on a one-off question and pays off as soon as an answer takes a tool step or you ask a follow-up.
 - **Caveat:** like main, a follow-up re-reads an earlier answer's reasoning uncached, as finished turns' thinking does not stay in the same form.
 
-Read-only does not change the tool list: removing tools would change the request and lose the cache. Calls are blocked instead.
-- **Allowed:** Sidebar's agent has `read`, `grep`, `find`, `ls` and `bash`. Shell commands are allowed only when they just read (plan mode's policy).
-- **Web tools:** main's web search and fetch tools run too, loaded from the extension that provides them in main.
-- **Blocked:** everything else, with a reason the model can relay.
+## What Sidebar can use
+
+Everything main can, except changing anything. Read-only does not change the tool list: removing tools would change the request and lose the cache. Instead, every call passes one guard (`src/guard.ts`):
+- **Refused:** `edit`, `write`, `todo`, `ask_user_question`, plan mode's tools, `herdr_child`, and any tool marked destructive.
+- **Allowed:** reading and search tools, web search and fetch (including `web_enable`), `codemode` (each nested call passes the guard too), `tool_search`, pi-bg's `bg_wait`/`bg_logs`/`bg_kill`, and any tool marked read-only (MCP's `readOnlyHint`).
+- **Shell commands** (`bash`, `powershell`, pi-bg's `bg_run`): run when they only read. The policy is plan mode's, loosened for reading: flags such as `rg -i`, globs, `2>/dev/null` and `2>&1`, input redirection, `cd`, and `$VAR` set earlier in the same command or from `HOME`, `PWD`, `USER` and `TMPDIR`. Writes, `sed -i`, command substitution and unknown variables are never cleared by the policy.
+- **Anything else** (an unfamiliar command, a tool without hints): one Jev judgment (`typesafe/jev-latest` through Pi's classifier models, 3 s timeout) of whether the call would change anything. It is refused at 50% or more, or when Jev is unavailable.
+- **Subagents:** Sidebar may start them with pi-subagents, and they run under the same guard. pi-subagents asks the `pi-plugins.subagent-env.v1` event channel for extra environment, and Sidebar adds `PI_SIDEBAR_GUARD=1`. With that set, pi-sidebar in the subagent installs only the guard. An older pi-subagents that does not answer the channel's probe gets no subagents from Sidebar.
+
+A refusal comes back to the model with its reason, and Sidebar tells you what to ask main instead. The guard judges calls; it is not a sandbox.
 
 ## When it asks first
 

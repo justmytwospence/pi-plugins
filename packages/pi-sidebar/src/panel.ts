@@ -174,6 +174,11 @@ class Composer implements Component, Focusable {
   private readonly suite: boolean;
   private _focused = false;
 
+  /** Whether the composer is pi-vim's editor (its Normal mode scrolls with Ctrl+U/D). */
+  get vim(): boolean {
+    return this.suite;
+  }
+
   constructor(tui: TUI, theme: () => Theme, private readonly panel: SidebarPanel, private readonly host: PanelHost) {
     const editorTheme: EditorTheme = {
       borderColor: (text) => (panel.focused ? theme().fg("borderAccent", text) : dimLine(theme().fg("borderMuted", text))),
@@ -457,8 +462,13 @@ export class SidebarPanel {
     let text: string;
     if (this.note?.kind === "confirm") text = [rawKeyHint("enter", "send anyway"), keyHint("app.interrupt", "keep the question")].join(sep);
     else if (!this.focused) return dimLine(truncateToWidth(` ${rawKeyHint(this.host.toggleLabel, "close")}`, width));
-    else if (this.host.isBusy()) text = [keyHint("app.interrupt", "stop"), keyHint("tui.altScreen.pageUp", "scroll"), rawKeyHint(this.host.toggleLabel, "close")].join(sep);
-    else text = [rawKeyHint("enter", "ask"), keyHint("app.tools.expand", "tools"), keyHint("app.thinking.toggle", "thinking"), rawKeyHint("/new", "fresh thread"), rawKeyHint(this.host.toggleLabel, "close")].join(sep);
+    else {
+      // Your own scroll keys, as in main: pi-vim's Ctrl+U/D in Normal mode, and the transcript's end key.
+      const scroll = [...(this.input.vim ? [rawKeyHint("ctrl+u/d", "scroll")] : []), keyHint("tui.altScreen.bottom", "end")];
+      text = this.host.isBusy()
+        ? [keyHint("app.interrupt", "stop"), ...scroll, rawKeyHint(this.host.toggleLabel, "close")].join(sep)
+        : [rawKeyHint("enter", "ask"), ...scroll, keyHint("app.tools.expand", "tools"), keyHint("app.thinking.toggle", "thinking"), rawKeyHint("/new", "fresh thread"), rawKeyHint(this.host.toggleLabel, "close")].join(sep);
+    }
     return truncateToWidth(` ${text}`, width);
   }
 }

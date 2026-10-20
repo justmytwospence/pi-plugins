@@ -1,5 +1,12 @@
-// Read-only shell policy, copied verbatim from packages/pi-plan-mode/src/tool-policy.ts (same suite)
-// so pi-sidebar has no sibling imports. Keep the two copies in step when the policy changes.
+// Read-only shell policy, copied from packages/pi-plan-mode/src/tool-policy.ts (same suite) so
+// pi-sidebar has no sibling imports. Sidebar's copy is deliberately looser than plan mode's, because
+// Sidebar should read as freely as main (anything this policy cannot clear goes to Jev instead):
+//   - `-i` is refused only where it edits in place (sed), so `rg -i` and `grep -i` run;
+//   - `2>/dev/null`, `>/dev/null`, `&>/dev/null`, `2>&1` and `< file` are allowed;
+//   - globs are allowed, and `$NAME` is replaced by a value assigned earlier in the same command
+//     or by a few environment variables (HOME, PWD, USER, TMPDIR) before the command is checked;
+//   - `cd` and plain `NAME=value` assignments are allowed.
+// Command substitution (`$(`, backticks), writing redirections and unknown variables still block.
 import { isAbsolute, normalize } from "node:path";
 import type { ToolInfo } from "@earendil-works/pi-coding-agent";
 
@@ -80,6 +87,7 @@ const READ_ONLY_POWERSHELL_COMMANDS = new Set([
   "write-output",
 ]);
 const READ_ONLY_COMMANDS = new Set([
+  "cd",
   "cat",
   "head",
   "tail",
@@ -152,9 +160,61 @@ export function findBlockedCommandSegment(
   platform: NodeJS.Platform = process.platform,
 ): string | undefined {
   if (matchesConfiguredSafeSubcommand(command, safeSubcommands)) return undefined;
-  const segments = splitShellSegments(command);
+  const segments = splitShellSegments(withoutHarmlessRedirections(command));
   if (!segments || segments.length === 0) return command.trim() || "(empty command)";
-  return segments.find((segment) => !isSafeSegment(segment, safeSubcommands, workingDirectory, platform));
+  const variables = new Map<string, string>();
+  for (const segment of segments) {
+    const resolved = resolveVariables(segment, variables);
+    if (resolved === undefined) return segment;
+    if (resolved === "") continue; // only assignments
+    if (!isSafeSegment(resolved, safeSubcommands, workingDirectory, platform)) return segment;
+  }
+  return undefined;
+}
+
+/** Environment variables a command may read: their values never hold a command. */
+const SAFE_ENV = ["HOME", "PWD", "USER", "TMPDIR"];
+const NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** Discarding output (`2>/dev/null`, `>/dev/null`, `&>/dev/null`), joining streams, reading a file. */
+export function withoutHarmlessRedirections(command: string): string {
+  return command
+    .replace(/(^|\s)(?:\d?>|&>|\d?>>)\s*\/dev\/null(?=$|[\s;|&])/g, "$1")
+    .replace(/(^|\s)\d?>&\d(?=$|[\s;|&])/g, "$1")
+    .replace(/(^|\s)<(?![<(])\s*([^\s<>|;&()`$]+)/g, "$1$2");
+}
+
+/**
+ * A segment with its leading `NAME=value` assignments recorded (and removed) and every `$NAME` or
+ * `${NAME}` replaced by its value. "" when the segment only assigns; undefined when it reads a
+ * variable that is neither assigned here nor a known-safe environment variable.
+ */
+function resolveVariables(segment: string, variables: Map<string, string>): string | undefined {
+  const substitute = (text: string): string | undefined => {
+    let unknown = false;
+    const out = text.replace(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g, (_match, braced: string, bare: string) => {
+      const name = braced ?? bare;
+      const value = variables.get(name) ?? (SAFE_ENV.includes(name) ? process.env[name] : undefined);
+      if (value === undefined) {
+        unknown = true;
+        return "";
+      }
+      return value;
+    });
+    return unknown ? undefined : out;
+  };
+  let rest = segment.trim();
+  for (;;) {
+    const match = /^([A-Za-z_][A-Za-z0-9_]*)=("[^"`$]*"|'[^']*'|[^\s"'`;|&]*)(?:\s+|$)/.exec(rest);
+    if (!match || !NAME.test(match[1]!)) break;
+    const raw = match[2]!;
+    const value = raw.startsWith('"') || raw.startsWith("'") ? raw.slice(1, -1) : substitute(raw);
+    if (value === undefined) return undefined;
+    variables.set(match[1]!, value);
+    rest = rest.slice(match[0].length).trim();
+  }
+  if (!rest) return "";
+  return substitute(rest);
 }
 
 export function isSafeCommand(
@@ -390,7 +450,7 @@ function hasShellExpansion(segment: string) {
       quote = character;
       continue;
     }
-    if (["$", "*", "?", "[", "{"].includes(character)) return true;
+    if (character === "$") return true;
   }
   return false;
 }
@@ -427,7 +487,7 @@ function shellWords(segment: string): string[] | undefined {
 }
 
 function hasSafeArguments(command: string, args: string[]) {
-  const forbidden = new Set(["-i", "--in-place", "--fix", "--write", "-delete", "--delete"]);
+  const forbidden = new Set(["--in-place", "--fix", "--write", "-delete", "--delete"]);
   if (args.some((argument) => forbidden.has(argument))) return false;
   if (
     command === "sed" &&

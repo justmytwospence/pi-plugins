@@ -6,7 +6,30 @@
 // re-read main's context uncached.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { FOCUS_KEYS_ENV, KEYS_ENV, parseFocusKeys, parseKeys } from "./config.ts";
+import { subagentsGuarded } from "./child.ts";
 import { SidebarController } from "./controller.ts";
+import { GUARD_ENV, judgeCall, SUBAGENT_ENV_CHANNEL, type SubagentEnvRequest } from "./guard.ts";
+
+/**
+ * Inside a subagent Sidebar started (GUARD_ENV set by the pi-subagents contract), pi-sidebar only
+ * guards: every tool call goes through the same read-only judgment as in Sidebar.
+ */
+export function installGuardOnly(pi: ExtensionAPI): void {
+  pi.events.on(SUBAGENT_ENV_CHANNEL, (data: unknown) => {
+    const request = data as Partial<SubagentEnvRequest> | undefined;
+    if (request?.version === 1 && !request.probe && request.env) request.env[GUARD_ENV] = "1";
+  });
+  pi.on("tool_call", async (event, ctx) => {
+    const verdict = await judgeCall(event.toolName, event.input, {
+      cwd: ctx.cwd,
+      registry: ctx.modelRegistry,
+      tool: (name) => pi.getAllTools().find((tool) => tool.name === name),
+      subagentsGuarded: () => subagentsGuarded(pi.events),
+      ...(ctx.signal ? { signal: ctx.signal } : {}),
+    });
+    return verdict.allowed ? undefined : { block: true, reason: verdict.reason };
+  });
+}
 
 const COMMAND_HELP = [
   "/sidebar        open Sidebar, or hide it (its thread is kept)",
@@ -19,6 +42,7 @@ const MODEL_NOTE =
   "Sidebar always uses main's model and thinking settings: a provider's prompt cache belongs to one model and one set of settings, so anything else would re-read main's whole context uncached on every question.";
 
 export default function piSidebar(pi: ExtensionAPI) {
+  if (process.env[GUARD_ENV] === "1") return installGuardOnly(pi);
   const keys = parseKeys(process.env[KEYS_ENV]);
   const sidebar = new SidebarController(pi, keys, parseFocusKeys(process.env[FOCUS_KEYS_ENV]));
 

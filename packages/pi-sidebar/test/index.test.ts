@@ -66,6 +66,24 @@ describe("registration", () => {
     expect([...pi.shortcuts.keys()]).toEqual(["ctrl+.", "alt+s"]);
   });
 
+  it("only guards inside a subagent Sidebar started", async () => {
+    process.env.PI_SIDEBAR_GUARD = "1";
+    try {
+      const pi = new FakePi();
+      piSidebar(pi as never);
+      expect([...pi.commands.keys()]).toEqual([]);
+      expect([...pi.shortcuts.keys()]).toEqual([]);
+      const { ctx } = fakeCtx();
+      expect(await pi.emit("tool_call", { toolName: "edit", input: {} }, ctx)).toEqual({ block: true, reason: expect.stringMatching(/read-only/) });
+      expect(await pi.emit("tool_call", { toolName: "read", input: { path: "a" } }, ctx)).toBeUndefined();
+      const request = { version: 1, env: {} as Record<string, string> };
+      pi.events.emit("pi-plugins.subagent-env.v1", request);
+      expect(request.env).toEqual({ PI_SIDEBAR_GUARD: "1" });
+    } finally {
+      delete process.env.PI_SIDEBAR_GUARD;
+    }
+  });
+
   it("explains why the model cannot be overridden", async () => {
     const pi = new FakePi();
     piSidebar(pi as never);
@@ -227,6 +245,25 @@ describe("asking", () => {
     vi.spyOn(controller.agent, "busy", "get").mockReturnValue(true);
     panel.input.handleInput("\x1b");
     expect(abort).toHaveBeenCalled();
+  });
+
+  it("runs skills and prompt templates in Sidebar, and refuses other commands", () => {
+    const { pi, controller, ctx } = setup();
+    (pi as unknown as { getCommands(): unknown[] }).getCommands = () => [
+      { name: "skill:herdr", source: "skill" },
+      { name: "review", source: "prompt" },
+      { name: "tasks", source: "extension" },
+    ];
+    controller.main.bind(ctx as never);
+    controller.main.request = { api: "anthropic-messages", provider: "anthropic", model: "claude-x", leafId: null, sentAt: Date.now(), payload: {} };
+    controller.toggle(ctx as never);
+    const ask = vi.spyOn(controller.agent, "ask").mockResolvedValue();
+    const panel = panelOf(controller);
+    panel.submit("/skill:herdr list panes");
+    panel.submit("/review src");
+    panel.submit("/tasks");
+    expect(ask.mock.calls.map((call) => call[0])).toEqual(["/skill:herdr list panes", "/review src"]);
+    expect(panel.hasNotice()).toBe(true);
   });
 
   it("/new marks a fresh thread in main's session", async () => {
