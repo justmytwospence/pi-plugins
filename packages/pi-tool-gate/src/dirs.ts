@@ -156,14 +156,17 @@ export function canRead(policy: Policy, file: string): boolean {
   return !policy.private.some((root) => under(file, root));
 }
 
-/** The folder a "allow similar" grant covers: the first folder under a private root, else the file's own directory. */
+/**
+ * The folder a "allow similar" grant covers: the first folder under a private root, else the file's
+ * own directory, except that the filesystem root is never a scope: a write to `/x` covers only `/x`.
+ */
 export function scopeOf(policy: Policy, file: string, access: Access): string {
   for (const root of policy.private) {
     if (/[*?]/u.test(root) || !under(file, root) || file === root) continue;
     const rest = file.slice(root.length + 1).split("/")[0];
     return rest ? path.join(root, rest) : root;
   }
-  return access === "write" ? path.dirname(file) : file;
+  return access === "write" && path.dirname(file) !== file && path.dirname(file) !== "/" ? path.dirname(file) : file;
 }
 
 export function violations(policy: Policy, access: { reads: readonly string[]; writes: readonly string[] }): Violation[] {

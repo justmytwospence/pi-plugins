@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 
@@ -1024,6 +1025,18 @@ function pathArgs(args: readonly string[]): string[] {
 }
 
 /**
+ * Whether a word an arbitrary program takes is plausibly a file there: an absolute path counts only
+ * when its top-level directory exists, so `pi -p "/smoke"`, `/$CMD` and `/api/v1` routes are
+ * arguments, not writes to the filesystem root. Commands known to write (`mkdir /x`) are not
+ * filtered: their intent is clear.
+ */
+function plausibleFile(word: string, resolved: string): boolean {
+  if (!word.startsWith("/")) return true;
+  const top = resolved.split("/")[1];
+  return !top || existsSync(`/${top}`);
+}
+
+/**
  * Whether a command matches an exempt entry: its program (by base name) followed by the entry's
  * other words as its first arguments, skipping options (`chezmoi -v apply` matches
  * `chezmoi apply`; an option that takes a separate value before them defeats the match).
@@ -1085,7 +1098,8 @@ export function bashPathAccess(
       const inPlace = p.args.some((a) => /^-[a-zA-Z]*i/u.test(a) || a.startsWith("--in-place"));
       for (const f of fsOperands("sed", p.args).filter(pathLike)) (inPlace ? writes : reads).add(resolve(dir, f));
     } else {
-      for (const f of files) writes.add(f);
+      const guessed = pathArgs(p.name === "eval" ? [] : args).filter((a) => plausibleFile(a, resolve(dir, a)));
+      for (const f of guessed) writes.add(resolve(dir, f));
     }
     for (const script of nested) {
       const inner = bashPathAccess(script, dir, extra, exempt);

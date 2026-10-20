@@ -43,6 +43,13 @@ describe("bashPathAccess", () => {
     expect(access("python3 ~/Projects/other/tool.py").writes).toEqual([`${P}/other/tool.py`]);
   });
 
+  test("absolute words whose top-level directory does not exist are arguments, not files", () => {
+    expect(access('pi --no-extensions -e /tmp/s/smoke.ts -p "/smoke"').writes).toEqual(["/tmp/s/smoke.ts"]);
+    expect(access('C=smoke; cd /tmp/s && pi -p "/$C"').writes).toEqual(["/tmp/s"]);
+    expect(access("node server.js --route /api/v1").writes).toEqual([]);
+    expect(access("mkdir /smoke").writes).toEqual(["/smoke"]);
+  });
+
   test("a part run elsewhere reads that directory, or writes it when it does more than read", () => {
     expect(access("cd ~/Projects/other && git status")).toEqual({ reads: [`${P}/other`], writes: [] });
     expect(access("cd ~/Projects/other && make")).toEqual({ reads: [], writes: [`${P}/other`] });
@@ -116,6 +123,8 @@ describe("policy", () => {
     const p = policy();
     expect(scopeOf(p, `${P}/other/src/a.ts`, "read")).toBe(`${P}/other`);
     expect(scopeOf(p, `${H}/.zshrc`, "write")).toBe(H);
+    expect(scopeOf(p, "/smoke", "write")).toBe("/smoke");
+    expect(scopeOf(p, "/", "write")).toBe("/");
     expect(violations(p, { reads: [`${P}/other/a`], writes: [`${H}/.zshrc`] })).toEqual([
       { access: "write", file: `${H}/.zshrc`, scope: H },
       { access: "read", file: `${P}/other/a`, scope: `${P}/other` },
