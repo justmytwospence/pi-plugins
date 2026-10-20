@@ -162,7 +162,7 @@ describe("cleanup", () => {
 });
 
 describe("pane control", () => {
-  function fakeHerdr(state: { sidebar?: { pane_id: string; tab_id: string } }) {
+  function fakeHerdr(state: { sidebar?: { pane_id: string; tab_id: string }; width?: number }) {
     const calls: string[][] = [];
     const run: Runner = async (args) => {
       calls.push(args);
@@ -171,6 +171,7 @@ describe("pane control", () => {
       if (key === "pane get") return ok({ pane: { pane_id: "w:p1", tab_id: "w:t1", workspace_id: "w" } });
       if (key === "pane list") return ok({ panes: [{ pane_id: "w:p1", tab_id: "w:t1" }, ...(state.sidebar ? [{ ...state.sidebar, label: "sidebar w:p1" }] : [])] });
       if (key === "tab list") return ok({ tabs: [{ tab_id: "w:t1", label: "1" }] });
+      if (key === "pane layout") return ok({ layout: { panes: [{ pane_id: "w:p1", rect: { x: 0, y: 0, width: state.width ?? 200, height: 50 } }] } });
       if (key === "pane split") return ok({ pane: { pane_id: "w:p2" } });
       if (key === "pane move") return ok({ move_result: { pane: { pane_id: state.sidebar?.pane_id } } });
       return ok({});
@@ -200,8 +201,8 @@ describe("pane control", () => {
     await host.toggle(c.ctx as any);
     expect(c.notes).toEqual([]);
     const split = calls.find((a) => a[0] === "pane" && a[1] === "split")!;
-    // Herdr's ratio is main's share: Sidebar gets the default 40%.
-    expect(split[split.indexOf("--ratio") + 1]).toBe("0.6");
+    // Equal halves by default (Herdr's ratio is main's share).
+    expect(split[split.indexOf("--ratio") + 1]).toBe("0.5");
     expect(split).toEqual(expect.arrayContaining(["w:p1", "--direction", "right", "--focus", `PI_SIDEBAR_HOST=${runtimeDir("s5")}`, "PI_SIDEBAR_MAIN_PANE=w:p1", "PI_CACHE_RETENTION=long"]));
     expect(calls).toContainEqual(["pane", "rename", "w:p2", "sidebar w:p1"]);
     const start = calls.find((a) => a[0] === "agent")!;
@@ -210,10 +211,22 @@ describe("pane control", () => {
     expect(existsSync(join(runtimeDir("s5"), FILES.host))).toBe(true);
   });
 
+  it("splits below when side-by-side halves would be narrower than 80 columns", async () => {
+    process.env.HERDR_ENV = "1";
+    process.env.HERDR_PANE_ID = "w:p1";
+    const { herdr, calls } = fakeHerdr({ width: 150 });
+    const pi = new FakePi();
+    const host = registerHost(pi as any, herdr);
+    const c = mainCtx();
+    await host.toggle(c.ctx as any);
+    const split = calls.find((a) => a[0] === "pane" && a[1] === "split")!;
+    expect(split[split.indexOf("--direction") + 1]).toBe("down");
+  });
+
   it("parks a visible Sidebar and brings a parked one back", async () => {
     process.env.HERDR_ENV = "1";
     process.env.HERDR_PANE_ID = "w:p1";
-    const state: { sidebar?: { pane_id: string; tab_id: string } } = { sidebar: { pane_id: "w:p2", tab_id: "w:t1" } };
+    const state: { sidebar?: { pane_id: string; tab_id: string }; width?: number } = { sidebar: { pane_id: "w:p2", tab_id: "w:t1" } };
     const { herdr, calls } = fakeHerdr(state);
     const pi = new FakePi();
     const host = registerHost(pi as any, herdr);
@@ -222,9 +235,10 @@ describe("pane control", () => {
     expect(calls.find((a) => a[1] === "move")).toEqual(["pane", "move", "w:p2", "--new-tab", "--workspace", "w", "--label", "sidebar-parked", "--no-focus"]);
     calls.length = 0;
     state.sidebar = { pane_id: "w:p2", tab_id: "w:t9" };
+    state.width = 120;
     await new Promise((r) => setTimeout(r, 750));
     await host.toggle(c.ctx as any);
-    expect(calls.find((a) => a[1] === "move")).toEqual(expect.arrayContaining(["pane", "move", "w:p2", "--tab", "w:t1", "--target-pane", "w:p1", "--focus"]));
+    expect(calls.find((a) => a[1] === "move")).toEqual(["pane", "move", "w:p2", "--tab", "w:t1", "--split", "down", "--target-pane", "w:p1", "--ratio", "0.5", "--focus"]);
   });
 
   it("ignores a second press while the first is still in flight", async () => {
@@ -236,5 +250,15 @@ describe("pane control", () => {
     const c = mainCtx();
     await Promise.all([host.toggle(c.ctx as any), host.toggle(c.ctx as any)]);
     expect(calls.filter((a) => a[1] === "move")).toHaveLength(1);
+  });
+});
+
+describe("splitDirection", () => {
+  it("halves side by side only when both halves keep the minimum width", async () => {
+    const { splitDirection } = await import("../src/herdr.ts");
+    expect(splitDirection({ width: 161 }, 80)).toBe("right");
+    expect(splitDirection({ width: 160 }, 80)).toBe("down");
+    expect(splitDirection({ width: 121 }, 60)).toBe("right");
+    expect(splitDirection(undefined, 80)).toBe("right");
   });
 });

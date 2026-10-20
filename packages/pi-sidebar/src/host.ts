@@ -5,7 +5,7 @@
 import { existsSync, rmSync, watch, type FSWatcher } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Herdr, inHerdr, sidebarLabel, type PaneInfo } from "./herdr.ts";
+import { Herdr, inHerdr, sidebarLabel, splitDirection, type Direction, type PaneInfo } from "./herdr.ts";
 import {
   FILES,
   HOST_ENV,
@@ -13,9 +13,11 @@ import {
   LABEL_ENV,
   MAIN_PANE_ENV,
   PROTOCOL_VERSION,
+  MIN_COLUMNS_ENV,
   RATIO_ENV,
   LatestWriter,
   ensureDir,
+  parseMinColumns,
   parseRatio,
   runtimeDir,
   sanitizeId,
@@ -337,6 +339,11 @@ export function registerHost(pi: ExtensionAPI, herdr = new Herdr()) {
     return pane;
   }
 
+  /** Halves main's pane: side by side when both halves stay wide enough, otherwise one above the other. */
+  async function placement(me: PaneInfo): Promise<Direction> {
+    return splitDirection(await herdr.rect(me.pane_id), parseMinColumns(process.env[MIN_COLUMNS_ENV]));
+  }
+
   async function closeSidebar(mainPaneId: string): Promise<void> {
     const pane = await herdr.findByLabel(sidebarLabel(mainPaneId));
     if (pane) await herdr.close(pane.pane_id);
@@ -357,8 +364,9 @@ export function registerHost(pi: ExtensionAPI, herdr = new Herdr()) {
       "--model", `${ctx.model.provider}/${ctx.model.id}`, "--thinking", pi.getThinkingLevel(),
     ];
     const env: Record<string, string> = { [HOST_ENV]: dir!, [MAIN_PANE_ENV]: me.pane_id, [LABEL_ENV]: label };
-    for (const key of ["PI_CACHE_RETENTION", KEYS_ENV, RATIO_ENV]) if (process.env[key]) env[key] = process.env[key]!;
-    const pane = await herdr.split(me.pane_id, { ratio: parseRatio(process.env[RATIO_ENV]), cwd: ctx.cwd, env, focus: true });
+    for (const key of ["PI_CACHE_RETENTION", KEYS_ENV, RATIO_ENV, MIN_COLUMNS_ENV]) if (process.env[key]) env[key] = process.env[key]!;
+    const direction = await placement(me);
+    const pane = await herdr.split(me.pane_id, { direction, ratio: parseRatio(process.env[RATIO_ENV]), cwd: ctx.cwd, env, focus: true });
     try {
       await herdr.rename(pane, label);
       await herdr.startPi(`sidebar-${sanitizeId(sessionId!).slice(-8)}`, pane, args);
@@ -395,7 +403,7 @@ export function registerHost(pi: ExtensionAPI, herdr = new Herdr()) {
       } else {
         bind(ctx);
         flushPayload(true);
-        const id = await herdr.show(existing.pane_id, me, parseRatio(process.env[RATIO_ENV]), true);
+        const id = await herdr.show(existing.pane_id, me, await placement(me), parseRatio(process.env[RATIO_ENV]), true);
         if (id !== existing.pane_id) await herdr.rename(id, label).catch(() => {});
       }
     } catch (error) {

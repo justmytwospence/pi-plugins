@@ -30,7 +30,7 @@ The Sidebar pane starts with main's extension flags (`-e`, `-ne`, `--no-mcp`, `-
 
 | Control | What it does |
 | --- | --- |
-| `Ctrl+'` in main | Opens Sidebar to the right of main (40% of the width) and focuses it. If Sidebar is hidden, it comes back; if it is showing, it is hidden. |
+| `Ctrl+'` in main | Splits main's pane into equal halves and opens Sidebar in the new half, focused. The split is side by side when both halves keep at least 80 columns, and one above the other when main is narrower. If Sidebar is hidden, it comes back the same way, sized to main's pane at that moment; if it is showing, it is hidden. |
 | `Ctrl+'` in Sidebar | Hides Sidebar in a `sidebar-parked` tab. Its process keeps running, so the thread is still there next time. |
 | `/sidebar` | Same as the key, in either pane. |
 | `/sidebar new` | Closes Sidebar and opens it again on a fresh thread. Inside Sidebar, `/new` does the same. |
@@ -43,7 +43,8 @@ A status line above Sidebar's editor shows what main is doing and how much of th
 Settings, set in the environment main starts with:
 
 - `PI_SIDEBAR_KEYS`: a comma-separated list of keys that replaces `ctrl+'`, for example `ctrl+.`. `Ctrl+'` only reaches Pi through terminals that report it (kitty keyboard protocol).
-- `PI_SIDEBAR_RATIO`: Sidebar's share of the width, from 0.15 to 0.85 (default 0.4).
+- `PI_SIDEBAR_RATIO`: Sidebar's share of main's pane, from 0.15 to 0.85 (default 0.5, equal halves).
+- `PI_SIDEBAR_MIN_COLUMNS`: the narrowest a half may be for a side-by-side split (default 80). Narrower panes split one above the other.
 
 ## How it stays current and cheap
 

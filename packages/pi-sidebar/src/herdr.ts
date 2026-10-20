@@ -32,7 +32,18 @@ export function sidebarLabel(mainPaneId: string): string {
   return `sidebar ${mainPaneId}`;
 }
 
-/** Herdr's --ratio is the share the existing (left) pane keeps; ours is Sidebar's share. */
+export type Direction = "right" | "down";
+
+/**
+ * Beside main when both halves keep `minColumns` columns, otherwise below it. Without a known size,
+ * beside.
+ */
+export function splitDirection(rect: { width: number } | undefined, minColumns: number): Direction {
+  if (!rect) return "right";
+  return rect.width >= 2 * minColumns + 1 ? "right" : "down";
+}
+
+/** Herdr's --ratio is the share the existing (left or top) pane keeps; ours is Sidebar's share. */
 export function targetShare(sidebarShare: number): string {
   return String(Math.round((1 - sidebarShare) * 100) / 100);
 }
@@ -81,8 +92,18 @@ export class Herdr {
     return (await this.panes()).find((pane) => pane.label === label);
   }
 
-  async split(target: string, opts: { ratio: number; cwd: string; env: Record<string, string>; focus: boolean }): Promise<string> {
-    const args = ["pane", "split", target, "--direction", "right", "--ratio", targetShare(opts.ratio), "--cwd", opts.cwd, opts.focus ? "--focus" : "--no-focus"];
+  /** A pane's size in cells, from its tab's layout. */
+  async rect(paneId: string): Promise<{ width: number; height: number } | undefined> {
+    try {
+      const layout = (await this.json(["pane", "layout", "--pane", paneId]))?.result?.layout;
+      return layout?.panes?.find((p: { pane_id: string }) => p.pane_id === paneId)?.rect;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async split(target: string, opts: { direction: Direction; ratio: number; cwd: string; env: Record<string, string>; focus: boolean }): Promise<string> {
+    const args = ["pane", "split", target, "--direction", opts.direction, "--ratio", targetShare(opts.ratio), "--cwd", opts.cwd, opts.focus ? "--focus" : "--no-focus"];
     for (const [key, value] of Object.entries(opts.env)) args.push("--env", `${key}=${value}`);
     const id = (await this.json(args))?.result?.pane?.pane_id;
     if (!id) throw new Error("herdr could not split the pane");
@@ -109,10 +130,10 @@ export class Herdr {
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 
-  /** Moves a pane beside `target`, in target's tab. Returns its (possibly new) id. */
-  async show(paneId: string, target: PaneInfo, ratio: number, focus: boolean): Promise<string> {
+  /** Moves a pane beside or below `target`, in target's tab. Returns its (possibly new) id. */
+  async show(paneId: string, target: PaneInfo, direction: Direction, ratio: number, focus: boolean): Promise<string> {
     const result = await this.json([
-      "pane", "move", paneId, "--tab", target.tab_id, "--split", "right", "--target-pane", target.pane_id,
+      "pane", "move", paneId, "--tab", target.tab_id, "--split", direction, "--target-pane", target.pane_id,
       "--ratio", targetShare(ratio), focus ? "--focus" : "--no-focus",
     ]);
     return result?.result?.move_result?.pane?.pane_id ?? paneId;

@@ -9,11 +9,11 @@ plugin: pi-sidebar
 - **Use it for:** Ask what the main agent is doing, why, or how the code works while it keeps working, without interrupting it.
 - **Enable:** Select `packages/pi-sidebar/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
 - **Controls:** Ctrl+' opens Sidebar beside main, and hides or shows it from either pane. `/sidebar` does the same; `/sidebar new` starts a fresh thread.
-- **Settings:** `PI_SIDEBAR_KEYS` replaces the key; `PI_SIDEBAR_RATIO` sets Sidebar's width (default 0.4). The model and thinking always match main.
+- **Settings:** `PI_SIDEBAR_KEYS` replaces the key; `PI_SIDEBAR_RATIO` sets Sidebar's share of main's pane (default 0.5); `PI_SIDEBAR_MIN_COLUMNS` (default 80) is the narrowest half for a side-by-side split. The model and thinking always match main.
 - **Requirements, cost & privacy:** Pi inside [Herdr](https://herdr.dev). Each question reads main's context from the cache, plus a small new part. Sidebar asks before sending when main's cache has probably expired. Main's last request (the whole conversation) is shared through owner-only files in the temp directory and removed when the session ends.
 - **Integrations & limits:** Anthropic Messages, OpenAI Responses (including Codex) and Chat Completions. Read-only blocks tool calls; it is not a sandbox. A hidden Sidebar waits in a `sidebar-parked` tab.
 
-`pi-sidebar` opens a second Pi session in a Herdr pane to the right of the main one, for talking about the work while it runs. Sidebar sees main's latest state: everything main has committed, plus what it is doing this second (the running tool and how long it has run, results of parallel calls that have finished, and the reply it is writing). It cannot change anything.
+`pi-sidebar` opens a second Pi session in a Herdr pane beside the main one (or below it, when main's pane is narrow), for talking about the work while it runs. Sidebar sees main's latest state: everything main has committed, plus what it is doing this second (the running tool and how long it has run, results of parallel calls that have finished, and the reply it is writing). It cannot change anything.
 
 ## Enable and requirements
 
@@ -39,7 +39,7 @@ Run Pi inside a Herdr pane. Outside Herdr, the key and command explain that Herd
 
 | Control | What it does |
 | --- | --- |
-| Ctrl+' in main | The first press creates Sidebar to the right and focuses it. After that, it hides Sidebar when it is showing and brings it back when it is hidden. |
+| Ctrl+' in main | The first press splits main's pane into equal halves and opens Sidebar in the new one, focused: side by side when both halves keep 80 columns, otherwise one above the other. After that, it hides Sidebar when it is showing and brings it back when it is hidden. |
 | Ctrl+' in Sidebar | Hides Sidebar and returns to main. The process keeps running in a `sidebar-parked` tab, so the thread is kept. |
 | `/sidebar` | Same as the key. |
 | `/sidebar new` | Opens Sidebar on a fresh thread. Inside Sidebar, `/new` does the same. |

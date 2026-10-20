@@ -11,8 +11,10 @@ export const MAIN_PANE_ENV = "PI_SIDEBAR_MAIN_PANE";
 export const LABEL_ENV = "PI_SIDEBAR_LABEL";
 export const KEYS_ENV = "PI_SIDEBAR_KEYS";
 export const RATIO_ENV = "PI_SIDEBAR_RATIO";
+export const MIN_COLUMNS_ENV = "PI_SIDEBAR_MIN_COLUMNS";
 export const DEFAULT_KEYS = ["ctrl+'"];
-export const DEFAULT_RATIO = 0.4;
+export const DEFAULT_RATIO = 0.5;
+export const DEFAULT_MIN_COLUMNS = 80;
 
 export const FILES = {
   host: "host.json",
@@ -199,6 +201,11 @@ export function sideAlive(dir: string): boolean {
 export function parseKeys(raw: string | undefined): string[] {
   const keys = (raw ?? "").split(",").map((k) => k.trim().toLowerCase()).filter(Boolean);
   return keys.length ? keys : [...DEFAULT_KEYS];
+}
+
+export function parseMinColumns(raw: string | undefined): number {
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 20 && n <= 400 ? n : DEFAULT_MIN_COLUMNS;
 }
 
 export function parseRatio(raw: string | undefined): number {
