@@ -67,7 +67,7 @@ export function fakeCtx(opts: FakeCtxOptions = {}) {
     getSystemPrompt: () => opts.systemPrompt ?? "",
     getContextUsage: () => ({ tokens: opts.contextTokens ?? 0 }),
     ui: {
-      theme: { fg: (_c: string, t: string) => t, bold: (t: string) => t },
+      theme: { fg: (_c: string, t: string) => t, bg: (_c: string, t: string) => `[bg]${t}`, bold: (t: string) => t },
       notify: (message: string, level?: string) => notes.push({ message, level }),
       setWidget: () => {},
     },

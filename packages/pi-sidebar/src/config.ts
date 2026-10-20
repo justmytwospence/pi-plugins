@@ -3,6 +3,7 @@
 export const KEYS_ENV = "PI_SIDEBAR_KEYS";
 export const RATIO_ENV = "PI_SIDEBAR_RATIO";
 export const MIN_COLUMNS_ENV = "PI_SIDEBAR_MIN_COLUMNS";
+export const FOCUS_KEYS_ENV = "PI_SIDEBAR_FOCUS_KEYS";
 export const DEFAULT_KEYS = ["ctrl+'"];
 export const DEFAULT_RATIO = 0.5;
 export const DEFAULT_MIN_COLUMNS = 80;
@@ -10,6 +11,11 @@ export const DEFAULT_MIN_COLUMNS = 80;
 export function parseKeys(raw: string | undefined): string[] {
   const keys = (raw ?? "").split(",").map((k) => k.trim().toLowerCase()).filter(Boolean);
   return keys.length ? keys : [...DEFAULT_KEYS];
+}
+
+/** Optional keys that switch focus between main and Sidebar (none by default). */
+export function parseFocusKeys(raw: string | undefined): string[] {
+  return (raw ?? "").split(",").map((k) => k.trim().toLowerCase()).filter(Boolean);
 }
 
 export function parseRatio(raw: string | undefined): number {

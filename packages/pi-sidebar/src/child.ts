@@ -19,7 +19,7 @@ import type { MainState } from "./main-state.ts";
 import { judgeToolCall, READ_ONLY_TOOLS } from "./read-only.ts";
 import { inertPayload, requestedCacheTtlMs, splicePayload, SUPPORTED_APIS } from "./splice.ts";
 import { compactExchange, EXCHANGE_ENTRY } from "./thread.ts";
-import { assembleContext, describeLive, mainDelta, roleMessage, statusMessage } from "./transcript.ts";
+import { assembleContext, describeLive, mainDelta, roleMessage, statusMessage, trimOpenTurn, type MainDelta } from "./transcript.ts";
 
 const BUILTIN_TOOLS = ["read", "grep", "find", "ls", "bash"];
 const COLD_MARGIN_MS = 20_000;
@@ -69,18 +69,9 @@ export function inheritProviders(host: ExtensionContext, runtime: ModelRuntime):
 }
 
 /** Main's whole conversation as its model sees it, for a request when main has none in memory. */
-export function replayMessages(ctx: ExtensionContext): AgentMessage[] {
+export function replayMessages(ctx: ExtensionContext): MainDelta {
   const entries = ctx.sessionManager.getEntries();
-  const messages = buildSessionContext(entries as never, ctx.sessionManager.getLeafId()).messages as AgentMessage[];
-  // Cut a trailing turn whose tool calls are still running (a provider rejects a call without a result).
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i] as { role: string; content?: Array<{ type: string; id?: string }> };
-    if (message.role !== "assistant") continue;
-    const calls = (message.content ?? []).filter((b) => b.type === "toolCall").map((b) => b.id ?? "");
-    const answered = new Set<string>(messages.slice(i + 1).flatMap((m) => (m.role === "toolResult" ? [(m as { toolCallId: string }).toolCallId] : [])));
-    return calls.some((id) => !answered.has(id)) ? messages.slice(0, i) : messages;
-  }
-  return messages;
+  return trimOpenTurn(buildSessionContext(entries as never, ctx.sessionManager.getLeafId()).messages as AgentMessage[]);
 }
 
 export class SidebarAgent {
@@ -301,8 +292,9 @@ export class SidebarAgent {
           return { messages: assembleContext(event.messages, delta.messages, roleMessage(now), status) };
         }
         this.mode = "replay";
-        const status = statusMessage(describeLive(this.main.live, { messages: [], pending: [] }, now), now);
-        const replay = replayMessages(ctx);
+        const rebuilt = replayMessages(ctx);
+        const replay = rebuilt.messages;
+        const status = statusMessage(describeLive(this.main.live, { messages: [], pending: rebuilt.pending }, now), now);
         // Main's transcript starts with its prompt and tools once it has sent anything; before that,
         // Sidebar's own leading system message stands in.
         if (replay[0]?.role === "system") {

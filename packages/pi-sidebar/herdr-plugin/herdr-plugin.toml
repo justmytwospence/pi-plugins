@@ -1,0 +1,26 @@
+id = "pi-sidebar-nav"
+name = "Pi Sidebar navigation"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Pane focus that also moves between a Pi session and its pi-sidebar, as if Sidebar were a pane"
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "focus-left"
+title = "Focus left (into or out of Pi Sidebar)"
+command = ["sh", "nav.sh", "left"]
+
+[[actions]]
+id = "focus-down"
+title = "Focus down (into or out of Pi Sidebar)"
+command = ["sh", "nav.sh", "down"]
+
+[[actions]]
+id = "focus-up"
+title = "Focus up (into or out of Pi Sidebar)"
+command = ["sh", "nav.sh", "up"]
+
+[[actions]]
+id = "focus-right"
+title = "Focus right (into or out of Pi Sidebar)"
+command = ["sh", "nav.sh", "right"]

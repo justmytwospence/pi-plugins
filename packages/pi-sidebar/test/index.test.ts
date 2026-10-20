@@ -3,7 +3,7 @@ import type { Component } from "@earendil-works/pi-tui";
 import piSidebar from "../src/index.ts";
 import { SidebarController } from "../src/controller.ts";
 import { SplitRoot } from "../src/layout.ts";
-import { fitStatus } from "../src/panel.ts";
+import { dimLine, fitStatus } from "../src/panel.ts";
 import { EXCHANGE_ENTRY, RESET_ENTRY } from "../src/thread.ts";
 import { FakePi, fakeCtx } from "./fake.ts";
 
@@ -85,16 +85,81 @@ describe("opening and focus", () => {
     expect(notes.pop()!.message).toMatch(/fullscreen/);
   });
 
-  it("opens beside main, moves focus there, and back with the key", () => {
+  it("opens focused with the key, and the same key in Sidebar closes it", () => {
     const { controller, tui, mainEditor, ctx } = setup();
-    controller.openOrFocus(ctx as never);
+    controller.toggle(ctx as never);
     expect(tui.layoutRoot).toBeInstanceOf(SplitRoot);
     const panel = panelOf(controller);
     expect(tui.focused).toBe(panel.input);
     panel.input.handleInput("\x14"); // ctrl+t, the test's toggle key
+    expect(controller.isOpen).toBe(false);
     expect(tui.focused).toBe(mainEditor);
-    controller.openOrFocus(ctx as never);
+  });
+
+  it("moves between main and Sidebar with Herdr's prefix+h/l, and hands other moves to Herdr", async () => {
+    const { pi, controller, tui, mainEditor, ctx } = setup();
+    let input: ((data: string) => unknown) | undefined;
+    (ctx.ui as { onTerminalInput?: unknown }).onTerminalInput = (handler: (data: string) => unknown) => { input = handler; return () => {}; };
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    controller.toggle(ctx as never);
+    const panel = panelOf(controller);
+    expect(input!("\x1b[104;8u")).toEqual({ consume: true }); // left, from Sidebar: main
+    expect(tui.focused).toBe(mainEditor);
+    expect(input!("\x1b[108;8u")).toEqual({ consume: true }); // right, from main: Sidebar
     expect(tui.focused).toBe(panel.input);
+    expect(input!("x")).toBeUndefined();
+  });
+
+  it("draws a filled title bar while focused, and a faint panel otherwise", () => {
+    const { controller, ctx } = setup();
+    controller.toggle(ctx as never);
+    const panel = panelOf(controller);
+    const title = () => (panel as any).titleLine(80) as string;
+    expect(title()).toMatch(/^\[bg\] ◧ Sidebar/);
+    controller.focusMain();
+    expect(title()).toMatch(/^\x1b\[2m ◧ Sidebar/);
+    expect(title()).toContain("ctrl+t to close");
+    panel.unread = true;
+    expect(title()).not.toMatch(/^\x1b\[2m/);
+    expect(title()).toContain("● new answer");
+  });
+
+  it("shows Pi's working row while Sidebar answers", () => {
+    const { controller, ctx } = setup();
+    controller.toggle(ctx as never);
+    const panel = panelOf(controller);
+    expect(panel.working.render(60)).toEqual([]);
+    panel.apply({ type: "agent_start" });
+    expect(panel.working.render(60).join("")).toContain("Working");
+    panel.apply({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x".repeat(400), partial: { content: [] } } });
+    expect(panel.working.render(60).join("")).toContain("↓ 100 tokens");
+    panel.apply({ type: "auto_retry_start" });
+    expect(panel.working.render(60).join("")).toContain("Retrying");
+    panel.apply({ type: "agent_end" });
+    expect(panel.working.render(60)).toEqual([]);
+  });
+
+  it("follows main's thinking setting, and Pi's own keys act on Sidebar", () => {
+    const { pi, controller, ctx } = setup();
+    let hidden = true;
+    (pi as unknown as { getSettings(): unknown }).getSettings = () => ({ hideThinkingBlock: hidden });
+    controller.toggle(ctx as never);
+    const panel = panelOf(controller);
+    panel.view.render(80);
+    expect(panel.chat.thinkingHidden).toBe(true);
+    panel.input.handleInput("\x0f"); // ctrl+o: app.tools.expand
+    expect(panel.chat.isExpanded).toBe(true);
+    panel.toggleThinking();
+    expect(panel.chat.thinkingHidden).toBe(false);
+    panel.view.render(80);
+    expect(panel.chat.thinkingHidden).toBe(false); // Sidebar's own toggle lasts...
+    hidden = false;
+    panel.view.render(80);
+    hidden = true;
+    panel.view.render(80);
+    expect(panel.chat.thinkingHidden).toBe(true); // ...until main's setting changes
+    panel.input.handleInput("\x04"); // ctrl+d on an empty composer: never quits Pi
+    expect(controller.isOpen).toBe(true);
   });
 
   it("hides with /sidebar (or /close) and keeps the thread", () => {
@@ -178,6 +243,13 @@ describe("asking", () => {
     const { pi, controller, ctx } = setup([exchange]);
     await pi.emit("session_start", { reason: "resume" }, ctx);
     expect(controller.agent.messages.map((m: any) => m.content[0].text)).toEqual(["earlier"]);
+  });
+});
+
+describe("dimLine", () => {
+  it("keeps faint on after resets inside the line", () => {
+    expect(dimLine("a\x1b[0mb\x1b[22mc\x1b[31md")).toBe("\x1b[2ma\x1b[0m\x1b[2mb\x1b[22m\x1b[2mc\x1b[31md\x1b[22m");
+    expect(dimLine("")).toBe("");
   });
 });
 

@@ -6,8 +6,10 @@ import { ago, SidebarAgent, type SidebarEvent } from "./child.ts";
 import { MIN_COLUMNS_ENV, parseMinColumns, parseRatio, RATIO_ENV } from "./config.ts";
 import { canSplit, dividerLines, SplitLayout } from "./layout.ts";
 import { MainState } from "./main-state.ts";
+import { herdrFocus, navDirection, navTarget } from "./nav.ts";
 import { SidebarPanel, type StatusPart } from "./panel.ts";
 import { RESET_ENTRY, threadFromBranch } from "./thread.ts";
+import { routeViewportScroll, type ScrollAction } from "./viewport.ts";
 
 const PROBE = "pi-sidebar-probe";
 const HERDR_BLOCKED = "herdr:blocked";
@@ -24,17 +26,26 @@ export class SidebarController {
   private mainFocus: Component | null = null;
   private blocked = 0;
   private ticker: ReturnType<typeof setInterval> | undefined;
+  private releaseViewport: (() => void) | undefined;
+  private releaseInput: (() => void) | undefined;
 
-  constructor(private readonly pi: ExtensionAPI, private readonly keys: string[]) {
+  constructor(private readonly pi: ExtensionAPI, private readonly keys: string[], private readonly focusKeys: string[] = []) {
     this.main = new MainState(pi);
     this.agent = new SidebarAgent(pi, this.main);
     this.agent.onEvent((event) => this.onAgentEvent(event));
     this.main.onChange(() => this.render());
 
-    pi.on("session_start", async (_event, ctx) => this.restore(ctx));
+    pi.on("session_start", async (_event, ctx) => {
+      this.listen(ctx);
+      await this.restore(ctx);
+    });
     pi.on("session_tree", async (_event, ctx) => this.restore(ctx));
     pi.on("session_shutdown", async () => {
+      this.releaseInput?.();
+      this.releaseInput = undefined;
       this.close();
+      this.releaseViewport?.();
+      this.releaseViewport = undefined;
       this.panel?.dispose();
       this.panel = undefined;
       this.tui = undefined;
@@ -55,13 +66,17 @@ export class SidebarController {
     return this.keys.some((key) => matchesKey(data, key as never));
   }
 
-  /** Ctrl+' from main: open Sidebar if it is closed, otherwise move focus to it. */
+  matchesFocusSwitch(data: string): boolean {
+    return this.focusKeys.some((key) => matchesKey(data, key as never));
+  }
+
+  /** Open Sidebar (focused) if it is closed. */
   openOrFocus(ctx: ExtensionContext): void {
     if (!this.isOpen && !this.open(ctx)) return;
     this.focusSidebar();
   }
 
-  /** `/sidebar`: open it, or hide it when it is open (the thread is kept). */
+  /** Ctrl+' and `/sidebar`: open it (focused), or close it when it is open (the thread is kept). */
   toggle(ctx: ExtensionContext): void {
     if (this.isOpen) this.close();
     else if (this.open(ctx)) this.focusSidebar();
@@ -79,6 +94,10 @@ export class SidebarController {
       return false;
     }
     if (tui !== this.tui || !this.panel) {
+      if (tui !== this.tui) {
+        this.releaseViewport?.();
+        this.releaseViewport = undefined;
+      }
       this.panel?.dispose();
       this.layout?.unmount();
       this.tui = tui;
@@ -91,8 +110,14 @@ export class SidebarController {
         abort: () => void this.agent.abort(),
         focusMain: () => this.focusMain(),
         focusSidebar: () => this.focusSidebar(),
+        close: () => this.close(),
         isBusy: () => this.agent.busy,
         matchesToggle: (data) => this.matchesToggle(data),
+        matchesFocusSwitch: (data) => this.matchesFocusSwitch(data),
+        toggleLabel: this.keys[0] ?? "ctrl+'",
+        mainHidesThinking: () => {
+          try { return (this.pi.getSettings() as { hideThinkingBlock?: boolean }).hideThinkingBlock === true; } catch { return false; }
+        },
       });
       this.panel.chat.seed(this.agent.messages, (text) => ({ text }));
       const theme = () => this.theme ?? ctx.ui.theme;
@@ -105,8 +130,55 @@ export class SidebarController {
       });
     }
     if (!this.layout!.mount()) return false;
+    if (!this.releaseViewport) {
+      const panel = () => this.panel;
+      this.releaseViewport = routeViewportScroll(
+        tui,
+        () => this.isOpen && !!panel()?.focused && this.blocked === 0,
+        (action) => this.scroll(action),
+      );
+    }
     this.startTicker();
     return true;
+  }
+
+  private scroll(action: ScrollAction): void {
+    const panel = this.panel;
+    if (!panel) return;
+    if (action === "top") panel.scrollToStart();
+    else if (action === "bottom") panel.scrollToEnd();
+    else if (action === "pageUp") panel.scroll(-1);
+    else if (action === "pageDown") panel.scroll(1);
+    else if (action === "halfPageUp") panel.scroll(-0.5);
+    else if (action === "halfPageDown") panel.scroll(0.5);
+    else if (action === "lineUp") panel.scrollLines(-1);
+    else panel.scrollLines(1);
+  }
+
+  /**
+   * Keys that reach Pi whichever half has focus: Herdr's prefix+h/j/k/l (sent by the pi-sidebar-nav
+   * Herdr plugin as reserved keys) and the optional direct focus-switch keys.
+   */
+  private listen(ctx: ExtensionContext): void {
+    this.releaseInput?.();
+    this.releaseInput = undefined;
+    if (ctx.mode !== "tui" || typeof ctx.ui.onTerminalInput !== "function") return;
+    this.releaseInput = ctx.ui.onTerminalInput((data) => {
+      const direction = navDirection(data);
+      if (direction) {
+        const target = navTarget(direction, this.isOpen && this.blocked === 0, this.layout?.orientation ?? "right", !!this.panel?.focused);
+        if (target === "sidebar") this.focusSidebar();
+        else if (target === "main") this.focusMain();
+        else herdrFocus(direction);
+        return { consume: true };
+      }
+      if (this.isOpen && this.matchesFocusSwitch(data)) {
+        if (this.panel?.focused) this.focusMain();
+        else this.focusSidebar();
+        return { consume: true };
+      }
+      return undefined;
+    });
   }
 
   close(): void {
@@ -188,7 +260,7 @@ export class SidebarController {
 
   private send(text: string, confirmed: boolean): void {
     this.panel?.clearNotice();
-    this.panel?.followEnd();
+    this.panel?.scrollToEnd();
     this.agent.ask(text, confirmed).catch((error) => {
       this.panel?.notice({ kind: "error", text: error instanceof Error ? error.message : String(error) });
     });
@@ -201,7 +273,7 @@ export class SidebarController {
       panel.notice({ kind: "error", text: String(event.message) });
       return;
     }
-    panel.chat.apply(event);
+    panel.apply(event);
     if (event.type === "agent_end" && !panel.focused) panel.unread = true;
     if (event.type === "agent_end" && this.agent.missed) {
       panel.notice({ kind: "warning", text: "That answer missed main's cache; the next question asks first." });

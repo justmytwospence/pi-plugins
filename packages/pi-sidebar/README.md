@@ -42,24 +42,56 @@ pi -e ./packages/pi-sidebar
 
 | Control | What it does |
 | --- | --- |
-| `Ctrl+'` in main | Opens Sidebar if it is closed, otherwise moves focus to it. |
-| `Ctrl+'` in Sidebar | Moves focus back to main. Clicking Sidebar's header, notice or composer also focuses it. |
-| `/sidebar` | Opens Sidebar, or hides it when it is open. |
-| `/close` in Sidebar | Hides Sidebar. |
+| `Ctrl+'` | Opens Sidebar, focused, or closes it from either half. The thread is kept. |
+| Herdr `prefix+h/l` (or `j/k` when Sidebar is below main) | Move between main and Sidebar as if Sidebar were a Herdr pane. Any other move is Herdr's normal pane move. Needs the bundled Herdr plugin (below). |
+| Click | Clicking Sidebar's title, notice or composer focuses it, and clicking main's editor focuses main. |
+| `/sidebar`, `/close` in Sidebar | Open or close Sidebar. |
 | `/sidebar new` (or `/new` in Sidebar) | Starts a fresh thread. |
 | Enter | Asks. |
-| Esc | Stops an answer while it streams. When idle, Esc returns to main; with pi-vim, that takes Esc in Normal mode. |
-| Shift+↑/↓, Shift+PgUp/PgDn, mouse wheel | Scroll Sidebar's conversation. Plain PgUp/PgDn keep scrolling main's transcript. |
-| `Ctrl+O` | Expands or collapses tool output in Sidebar. |
 | `/sidebar model` | Explains why Sidebar always uses main's model. |
 
-When Sidebar opens:
-- **Layout:** main's pane splits into equal halves. They sit side by side when each half keeps at least 80 columns, and Sidebar goes below main otherwise. This is decided again on every resize.
-- **Main:** main's transcript, editor and footer reflow into their half. Nothing is drawn over them.
-- **Focus marker:** the divider and Sidebar's header turn to the accent color while Sidebar has focus.
-- **Unread marker:** an answer that finishes while you are in main shows `● new answer`.
+While Sidebar has focus, your keys do what they do in main. They are resolved through Pi's keybindings, so changes in `~/.pi/agent/keybindings.json` apply in both halves:
+- **Scrolling.** Pi's transcript scroll actions (`tui.altScreen.pageUp/pageDown/halfPageUp/halfPageDown/lineUp/lineDown/top/bottom`: PgUp/PgDn, Ctrl+Home and Ctrl+End by default, plus anything you added, such as Ctrl+G) scroll Sidebar instead of main. The mouse wheel scrolls whichever half it is over.
+- **Editing.** The composer is Pi's editor, or pi-vim's embedded editor when pi-vim is installed, so editor keys, history and autocomplete follow your bindings. With pi-vim, Ctrl+U/D in idle Normal mode half-page scroll Sidebar, as they do in main.
+- **App actions.**
+  - `app.interrupt` (Esc) stops Sidebar's answer.
+  - `app.tools.expand` (Ctrl+O) expands tool output.
+  - `app.thinking.toggle` shows or hides reasoning.
+  - `app.clear` (Ctrl+C) clears the composer.
+  - `app.exit` (Ctrl+D) never quits Pi from Sidebar.
 
-The composer is Pi's editor, or pi-vim's embedded editor when pi-vim is installed.
+How it looks:
+- **Layout:** main's pane splits into equal halves. They sit side by side when each half keeps at least 80 columns, and Sidebar goes below main otherwise. This is decided again on every resize. Main's transcript, editor and footer reflow into their half; nothing is drawn over them.
+- **Focus:** the focused Sidebar has a filled title bar and an accent divider and composer border. When main has focus, Sidebar is drawn faint, except for `● new answer` when an answer finished meanwhile.
+- **Working row:** while Sidebar answers, Pi's own spinner row reads `Working (↓ 120 tokens · 4s)`, the same message pi-status-footer gives main, or `Retrying…`.
+- **Rendering:** messages, tool cards and reasoning use Pi's components, so pi-cc-render's styling applies too. Reasoning follows main's `hideThinkingBlock` setting (pi-cc-render's compact "Thought for…" title when hidden). Sidebar's own thinking toggle lasts until main's setting changes.
+
+### Herdr navigation
+
+Herdr reads its prefix keys before Pi sees them, so moving into Sidebar with `prefix+h/l` needs the small Herdr plugin in `herdr-plugin/`. Its `focus-left/down/up/right` actions work like this:
+- **Pi panes:** the plugin sends the pane a reserved key, Ctrl+Alt+Shift+H/J/K/L. Pi moves between main and Sidebar when it can, and otherwise asks Herdr for the normal pane move.
+- **Other panes:** they get the normal pane move right away.
+
+```sh
+herdr plugin install justmytwospence/pi-plugins/packages/pi-sidebar/herdr-plugin --ref <commit> --yes
+```
+
+```toml
+# ~/.config/herdr/config.toml: replace Herdr's own pane focus keys
+[keys]
+focus_pane_left = ""
+focus_pane_down = ""
+focus_pane_up = ""
+focus_pane_right = ""
+
+[[keys.command]]
+key = "prefix+h"
+type = "plugin_action"
+command = "pi-sidebar-nav.focus-left"
+# ...and prefix+j/k/l -> focus-down/focus-up/focus-right
+```
+
+Bind these only where your Pi sessions load pi-sidebar. A Pi without it ignores the reserved keys, so `prefix+h/l` would do nothing from that pane.
 
 The header shows, live, what main is doing and how much of Sidebar's last answer came from the cache. While another dialog holds `herdr:blocked` (for example a question from main), Sidebar steps aside so the dialog renders full width. That is what herdr-web-ui's phone parser reads. Sidebar comes back once the dialog is answered.
 
@@ -71,6 +103,7 @@ The header shows, live, what main is doing and how much of Sidebar's last answer
 Settings, read from the environment Pi starts with:
 
 - `PI_SIDEBAR_KEYS`: a comma-separated list of keys that replaces `ctrl+'`, for example `ctrl+.`. `Ctrl+'` reaches Pi only through terminals that report it (kitty keyboard protocol).
+- `PI_SIDEBAR_FOCUS_KEYS`: optional keys that switch focus between main and Sidebar directly, for use outside Herdr.
 - `PI_SIDEBAR_RATIO`: Sidebar's share, from 0.15 to 0.85 (default 0.5).
 - `PI_SIDEBAR_MIN_COLUMNS`: the narrowest half for a side-by-side split (default 80).
 
@@ -113,10 +146,7 @@ Supported APIs: Anthropic Messages, OpenAI Responses (including Codex and Azure)
 
 **Model behavior.** On models that drop earlier thinking when a new user message arrives (Claude models before Opus 4.5 and Sonnet 4.6), a question asked during main's tool calls can miss the cache. The miss check catches this.
 
-**Keys while Sidebar has focus**
-- Typing goes only to Sidebar.
-- Main's own keys (Esc to stop main, model and thinking shortcuts) work again after `Ctrl+'`.
-- Plain PgUp/PgDn always scroll main.
+**Keys while Sidebar has focus:** typing goes only to Sidebar. Main-only actions (stopping main, model shortcuts) work again once main has focus. Transcript search and previous/next prompt jumps still act on main.
 
 ## Prior art
 

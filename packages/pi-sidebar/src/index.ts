@@ -5,14 +5,14 @@
 // so main's prompt cache serves it; it never changes anything, and it asks before a request would
 // re-read main's context uncached.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { KEYS_ENV, parseKeys } from "./config.ts";
+import { FOCUS_KEYS_ENV, KEYS_ENV, parseFocusKeys, parseKeys } from "./config.ts";
 import { SidebarController } from "./controller.ts";
 
 const COMMAND_HELP = [
   "/sidebar        open Sidebar, or hide it (its thread is kept)",
   "/sidebar new    start a fresh Sidebar thread",
   "/sidebar model  why Sidebar always uses main's model",
-  "Ctrl+'          open Sidebar, or switch focus between main and Sidebar",
+  "Ctrl+'          open or close Sidebar (in Herdr, prefix+h/l moves between main and Sidebar)",
 ].join("\n");
 
 const MODEL_NOTE =
@@ -20,12 +20,12 @@ const MODEL_NOTE =
 
 export default function piSidebar(pi: ExtensionAPI) {
   const keys = parseKeys(process.env[KEYS_ENV]);
-  const sidebar = new SidebarController(pi, keys);
+  const sidebar = new SidebarController(pi, keys, parseFocusKeys(process.env[FOCUS_KEYS_ENV]));
 
   for (const key of keys) {
     pi.registerShortcut(key as never, {
-      description: "Open Sidebar, or move focus to it (a read-only side chat beside this session)",
-      handler: (ctx) => sidebar.openOrFocus(ctx),
+      description: "Open or close Sidebar, a read-only side chat beside this session",
+      handler: (ctx) => sidebar.toggle(ctx),
     });
   }
 

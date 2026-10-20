@@ -8,7 +8,7 @@ plugin: pi-sidebar
 
 - **Use it for:** Ask what the main agent is doing, why, or how the code works, without interrupting it.
 - **Enable:** Select `packages/pi-sidebar/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
-- **Controls:** Ctrl+' opens Sidebar, or switches focus between main and Sidebar. `/sidebar` opens or hides it, and `/sidebar new` starts a fresh thread. In Sidebar, Enter asks, Esc stops an answer, and Shift+↑/↓ scrolls.
+- **Controls:** Ctrl+' opens or closes Sidebar. In Herdr, `prefix+h/l` moves between main and Sidebar as if Sidebar were a pane (with the bundled Herdr plugin). In Sidebar, your own keybindings apply: PgUp/PgDn and your other transcript scroll keys scroll it, Esc stops an answer, Ctrl+O expands tools, and your thinking toggle shows or hides reasoning.
 - **Settings:** `PI_SIDEBAR_KEYS` replaces the key. `PI_SIDEBAR_RATIO` sets Sidebar's share (default 0.5). `PI_SIDEBAR_MIN_COLUMNS` is the narrowest half for a side-by-side split (default 80). The model and thinking always match main.
 - **Requirements, cost & privacy:** Requires Pi's fullscreen mode. Each question reads main's context from the cache, plus a small new part, and Sidebar asks first when that cache has probably expired. The thread is stored as hidden entries in main's session.
 - **Integrations & limits:** Works with Anthropic Messages, OpenAI Responses (including Codex) and Chat Completions. Read-only blocks tool calls; it is not a sandbox. An optional pi-vim composer is supported. Sidebar steps aside while a dialog holds `herdr:blocked`.
@@ -45,19 +45,27 @@ Use Pi's fullscreen mode (`"tuiMode": "fullscreen"`). In regular mode, the key a
 
 | Control | What it does |
 | --- | --- |
-| Ctrl+' in main | Opens Sidebar if it is closed, otherwise moves focus to it. |
-| Ctrl+' in Sidebar | Moves focus back to main. Clicking Sidebar focuses it too. |
-| `/sidebar` | Opens Sidebar, or hides it (the thread is kept). `/close` in Sidebar also hides it. |
+| Ctrl+' | Opens Sidebar, focused, or closes it from either half. The thread is kept. |
+| Herdr `prefix+h/l` (`j/k` when Sidebar is below) | Moves between main and Sidebar as if Sidebar were a Herdr pane. Other moves are Herdr's normal pane moves. |
+| Click | Clicking Sidebar focuses it; clicking main's editor focuses main. |
+| `/sidebar`, `/close` in Sidebar | Open or close Sidebar. |
 | `/sidebar new`, `/new` in Sidebar | Starts a fresh thread. |
-| Enter, Esc | Ask; stop an answer while it streams (when idle, Esc returns to main). |
-| Shift+↑/↓, Shift+PgUp/PgDn, wheel | Scroll Sidebar. Plain PgUp/PgDn keep scrolling main's transcript. |
-| Ctrl+O | Expand or collapse tool output in Sidebar. |
+
+While Sidebar has focus, your keys do what they do in main, through Pi's keybindings:
+- **Scrolling.** The transcript scroll actions (PgUp/PgDn, Ctrl+Home/End, and anything you bound, such as Ctrl+G) scroll Sidebar.
+- **Editing.** Editor keys, history and autocomplete work as in main, and so do pi-vim's Ctrl+U/D.
+- **App actions.** Esc stops an answer, Ctrl+O expands tools, your thinking toggle shows or hides reasoning, Ctrl+C clears the composer, and Ctrl+D never quits Pi.
 
 Ctrl+' needs a terminal that reports it (the kitty keyboard protocol). Set `PI_SIDEBAR_KEYS=ctrl+.` (or a comma-separated list) to use other keys.
 
-While Sidebar has focus, typing goes only to Sidebar. Main's own keys work again after Ctrl+'.
+Herdr reads its prefix keys first, so `prefix+h/l` into Sidebar needs the Herdr plugin in `packages/pi-sidebar/herdr-plugin`.
+- **The plugin:** bind its `pi-sidebar-nav.focus-left/down/up/right` actions in place of Herdr's `focus_pane_*` keys (the package README has the config).
+- **In a Pi pane:** it hands the move to Pi as a reserved key (Ctrl+Alt+Shift+H/J/K/L). Pi moves between main and Sidebar when it can, and otherwise asks Herdr for the normal pane move.
 
-The focused half has an accent divider and header, and an answer that finishes while you are in main shows `● new answer`.
+How it looks:
+- **Focus:** the focused Sidebar has a filled title bar and an accent divider and composer border. When main has focus, Sidebar is faint, except for `● new answer`.
+- **Working row:** while Sidebar answers, Pi's own spinner row reads `Working (↓ 120 tokens · 4s)`.
+- **Rendering:** messages, tool cards and reasoning use Pi's components, so pi-cc-render's styling applies. Reasoning follows main's `hideThinkingBlock` setting.
 
 Sidebar's thread is stored as hidden entries in main's session. It follows `/tree` and comes back after resume and `/reload`.
 

@@ -62,6 +62,17 @@ export function mainDelta(entries: SessionEntry[], recordedLeaf: string | null, 
   let messages = after.flatMap((entry) => sessionEntryToContextMessages(entry));
   // A request always ends on main's side of the turn, so a leading tool result has lost its call.
   while (messages[0]?.role === "toolResult") messages = messages.slice(1);
+  return trimOpenTurn(messages);
+}
+
+/**
+ * Main's messages without the open calls of a trailing turn whose tool calls have not all returned
+ * (a provider rejects a call without its result). Calls that did return stay, with their results;
+ * the open ones are listed for the live note; that turn's thinking goes, as thinking may only be
+ * replayed with its turn unchanged.
+ */
+export function trimOpenTurn(input: AgentMessage[]): MainDelta {
+  let messages = input;
   const pending: PendingCall[] = [];
   for (let i = messages.length - 1; i >= 0; i--) {
     const calls = toolCalls(messages[i]!);

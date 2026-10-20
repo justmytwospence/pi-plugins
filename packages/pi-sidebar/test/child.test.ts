@@ -196,10 +196,27 @@ describe("helpers", () => {
       leafId: "a2",
       entries: [
         ...entries,
-        { type: "message", id: "a2", parentId: "a1", timestamp: "", message: { role: "assistant", content: [{ type: "toolCall", id: "t", name: "bash", arguments: {} }], provider: "anthropic", model: "claude-x", api: "anthropic-messages", usage: {}, stopReason: "toolUse", timestamp: 0 } },
+        { type: "message", id: "a2", parentId: "a1", timestamp: "", message: { role: "assistant", content: [{ type: "toolCall", id: "t", name: "bash", arguments: { command: "npm test" } }], provider: "anthropic", model: "claude-x", api: "anthropic-messages", usage: {}, stopReason: "toolUse", timestamp: 0 } },
       ],
     });
-    expect(replayMessages(ctx as never).map((m) => m.role)).toEqual(["user", "assistant"]);
+    const replay = replayMessages(ctx as never);
+    expect(replay.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(replay.pending).toEqual([{ name: "bash", summary: "npm test" }]);
+  });
+
+  it("keeps the finished calls of a parallel turn when it replays", () => {
+    const { ctx } = fakeCtx({
+      leafId: "r1",
+      entries: [
+        ...entries,
+        { type: "message", id: "a2", parentId: "a1", timestamp: "", message: { role: "assistant", content: [{ type: "toolCall", id: "r", name: "read", arguments: { path: "a.ts" } }, { type: "toolCall", id: "b", name: "bash", arguments: { command: "sleep 9" } }], provider: "anthropic", model: "claude-x", api: "anthropic-messages", usage: {}, stopReason: "toolUse", timestamp: 0 } },
+        { type: "message", id: "r1", parentId: "a2", timestamp: "", message: { role: "toolResult", toolCallId: "r", toolName: "read", content: [{ type: "text", text: "export const a = 1;" }], isError: false, timestamp: 0 } },
+      ],
+    });
+    const replay = replayMessages(ctx as never);
+    expect(replay.messages.map((m) => m.role)).toEqual(["user", "assistant", "assistant", "toolResult"]);
+    expect((replay.messages[2] as any).content).toEqual([{ type: "toolCall", id: "r", name: "read", arguments: { path: "a.ts" } }]);
+    expect(replay.pending).toEqual([{ name: "bash", summary: "sleep 9" }]);
   });
 
   it("loads main's web tools from the extensions that provide them", () => {
