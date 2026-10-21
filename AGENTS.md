@@ -14,7 +14,7 @@ All npm installations follow the machine's release-age policy. Never bypass it.
 
 One Git commit/tag versions the whole suite. Components can be independently enabled, not independently Git-version-pinned from this package. Never enable both the suite copy and original standalone copy of a component. Test manifest selection, registration parity, and interactions after integration changes. A factory-loader test is not a full TUI/lifecycle test.
 
-Publish source changes before bumping the suite pin in `~/dotfiles/private_dot_pi/private_agent/settings.managed.json`. Read the dotfiles chezmoi skill and `~/dotfiles/docs/plugins.md`; use `plugins try pi-plugins` for local iteration and `plugins pin pi-plugins` for published pins. Never edit an installed copy. Preserve original repo history and upstream MIT attribution. `source-pins.json` records initial import provenance, not the current release versions of components.
+Publish source changes before bumping the suite pin in `~/dotfiles/home/private_dot_pi/private_agent/settings.managed.json`. Read the dotfiles chezmoi skill and `~/dotfiles/docs/plugins.md`; iterate locally with `pi --no-extensions -e ~/Projects/pi-plugins`, and after a pin bump let dotfiles' converge script install it (`chezmoi apply`). Never edit an installed copy. Preserve original repo history and upstream MIT attribution. `source-pins.json` records initial import provenance, not the current release versions of components.
 
 ### Completion and rollout
 
