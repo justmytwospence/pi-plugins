@@ -124,7 +124,7 @@ Develop components under `packages/<name>/`. Keep each one independently usable 
 
 ## Provenance
 
-[docs/trial.md](docs/trial.md) is the historical record of the original reversible consolidation of 19 standalone repositories; it is not current installation guidance. `source-pins.json` records the revisions first imported, not current component versions. Original repository history is preserved.
+`source-pins.json` records the revisions first imported from the original repositories (CI also reads its component list), not current component versions. Each original repository keeps its history.
 
 ## License
 
