@@ -11,6 +11,8 @@ import { RatioStore } from "./preferences.ts";
 import { herdrFocus, navDirection, navTarget } from "./nav.ts";
 import { SidebarPanel, type StatusPart } from "./panel.ts";
 import { HeadsUp } from "./headsup/headsup.ts";
+import type { HeadsUpNote } from "./headsup/protocol.ts";
+import { isNoteMarker, noteMessages } from "./headsup/thread.ts";
 import { QUIZ_ENTRY, QuizMode, quizFromBranch } from "./quiz/mode.ts";
 import { QUIZ_NEXT, QUIZ_ROLE, QUIZ_START } from "./quiz/prompt.ts";
 import { RESET_ENTRY, threadFromBranch } from "./thread.ts";
@@ -21,6 +23,11 @@ export const QUIZ_HELP = [
   "/quiz           quiz mode on (asks the first question) or off",
   "/quiz next      the next question, on what main changed most recently",
   "/quiz progress  what you have shown you know in this repository",
+].join("\n");
+
+export const SIDEBAR_HEADSUP_HELP = [
+  "/known          the last heads-up note was something you knew: it is not raised again",
+  "/headsup        heads-up mode's state and cost (on | off)",
 ].join("\n");
 
 const PROBE = "pi-sidebar-probe";
@@ -41,6 +48,9 @@ export class SidebarController {
   private mainEditor: Component | null = null;
   /** Blocking extension dialogs open in main (a digit then belongs to them). */
   private prompts = 0;
+  /** Heads-up notes waiting for Sidebar to finish its answer. */
+  private pendingNotes: HeadsUpNote[] = [];
+  private flushTimer: ReturnType<typeof setTimeout> | undefined;
   private tui: FocusTui | undefined;
   private theme: Theme | undefined;
   private panel: SidebarPanel | undefined;
@@ -63,6 +73,7 @@ export class SidebarController {
     });
     this.main.onChange(() => this.render());
     this.headsUp = new HeadsUp(pi, this.main, {
+      deliver: (note) => this.deliverNote(note),
       askSidebar: (text, ctx) => {
         this.openOrFocus(ctx);
         if (!this.isOpen) return false;
@@ -98,6 +109,9 @@ export class SidebarController {
       this.releaseInput?.();
       this.releaseInput = undefined;
       this.headsUp.dispose();
+      if (this.flushTimer) clearTimeout(this.flushTimer);
+      this.flushTimer = undefined;
+      this.pendingNotes = [];
       this.close();
       this.panel?.dispose();
       this.panel = undefined;
@@ -170,7 +184,7 @@ export class SidebarController {
           try { return (this.pi.getSettings() as { hideThinkingBlock?: boolean }).hideThinkingBlock === true; } catch { return false; }
         },
       });
-      this.panel.chat.seed(this.agent.messages, (text) => ({ text }));
+      this.panel.chat.seed(this.agent.messages, (text) => (isNoteMarker(text) ? undefined : { text }));
       // Pi sends keyboard scrolling, `tui.scrollBy` (pi-vim's Ctrl+U/D), its transcript search, the
       // end indicator and leftover wheel scrolling to the primary scroll view; the last primary view in
       // the layout wins, and Sidebar comes after main. So the focused half gets them (pi-stereo-view's
@@ -276,6 +290,7 @@ export class SidebarController {
     this.main.bind(ctx);
     const branch = ctx.sessionManager.getBranch();
     this.headsUp.restore(branch, newSession);
+    this.pendingNotes = [];
     await this.agent.setThread(threadFromBranch(branch));
     await this.quiz.restore(quizFromBranch(branch), ctx.cwd).catch(() => {});
     this.rebuild();
@@ -325,8 +340,68 @@ export class SidebarController {
     if (wasOpen && ctx && this.open(ctx) && hadFocus) this.focusSidebar();
   }
 
+  /**
+   * A heads-up note into Sidebar's thread, while Sidebar is open. While it answers, the note waits
+   * for the answer to end. False when Sidebar is closed (the note goes above main's editor).
+   */
+  private deliverNote(note: HeadsUpNote): boolean {
+    if (!this.isOpen || !this.panel) return false;
+    this.pendingNotes.push(note);
+    this.flushNotes();
+    return true;
+  }
+
+  private flushNotes(): void {
+    const panel = this.panel;
+    if (!panel || this.pendingNotes.length === 0) return;
+    if (!this.agent.idle) {
+      // Sidebar is answering (or just finishing): try again shortly; its agent_end also flushes.
+      if (!this.flushTimer) {
+        this.flushTimer = setTimeout(() => { this.flushTimer = undefined; this.flushNotes(); }, 500);
+        this.flushTimer.unref?.();
+      }
+      return;
+    }
+    const request = this.main.request;
+    const model = this.main.ctx?.model;
+    const id = { api: request?.api ?? model?.api ?? "", provider: request?.provider ?? model?.provider ?? "", model: request?.model ?? model?.id ?? "" };
+    const notes = this.pendingNotes;
+    this.pendingNotes = [];
+    for (const note of notes) {
+      const messages = noteMessages(note, id, Date.now());
+      this.agent.appendMessages(messages).catch(() => {});
+      panel.chat.seed(messages, (text) => (isNoteMarker(text) ? undefined : { text }));
+      panel.chat.note("/known if you knew this · ask about it below");
+    }
+    panel.scrollToEnd();
+    if (!panel.focused) panel.unread = true;
+    this.render();
+  }
+
+  private async sidebarHeadsUp(arg: string): Promise<void> {
+    const sub = arg.trim().toLowerCase();
+    if (sub === "on" || sub === "off") {
+      this.headsUp.setOn(sub === "on");
+      this.panel?.notice({ kind: "info", text: `Heads-up mode is ${sub} for this session.` });
+    } else if (sub === "") this.noteLines(this.headsUp.summary().split("\n"));
+    else this.panel?.notice({ kind: "warning", text: `Unknown /headsup argument "${sub}": /headsup, /headsup on, /headsup off.` });
+  }
+
+  private async known(): Promise<void> {
+    const note = await this.headsUp.markLastKnown().catch(() => undefined);
+    this.panel?.notice(note ? { kind: "info", text: `Marked as known: ${note.text}` } : { kind: "info", text: "No heads-up note to mark yet." });
+  }
+
   private submit(text: string): void {
     if (text === "/close") return this.close();
+    if (text === "/known") {
+      void this.known();
+      return;
+    }
+    if (text === "/headsup" || text.startsWith("/headsup ")) {
+      void this.sidebarHeadsUp(text.slice("/headsup".length));
+      return;
+    }
     if (text === "/new") {
       void this.reset();
       return;
@@ -336,7 +411,7 @@ export class SidebarController {
       return;
     }
     if (text.startsWith("/") && !this.isSidebarCommand(text)) {
-      this.panel?.notice({ kind: "warning", text: `Sidebar knows /new, /close, /quiz, skills and prompt templates; ${text.split(/\s/)[0]} is a main-session command.` });
+      this.panel?.notice({ kind: "warning", text: `Sidebar knows /new, /close, /quiz, /known, /headsup, skills and prompt templates; ${text.split(/\s/)[0]} is a main-session command.` });
       return;
     }
     this.question(text);
@@ -396,6 +471,7 @@ export class SidebarController {
     }
     panel.apply(event);
     if (event.type === "agent_end" && !panel.focused) panel.unread = true;
+    if (event.type === "agent_end") setTimeout(() => this.flushNotes(), 0);
     if (event.type === "agent_end" && this.agent.missed) {
       panel.notice({ kind: "warning", text: "That answer missed main's cache; the next question asks first." });
     }

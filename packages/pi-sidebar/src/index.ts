@@ -7,7 +7,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { FOCUS_KEYS_ENV, KEYS_ENV, parseFocusKeys, parseKeys } from "./config.ts";
 import { subagentsGuarded } from "./child.ts";
-import { QUIZ_HELP, SidebarController } from "./controller.ts";
+import { QUIZ_HELP, SIDEBAR_HEADSUP_HELP, SidebarController } from "./controller.ts";
 import { HEADSUP_HELP } from "./headsup/headsup.ts";
 import { GUARD_ENV, judgeCall, SUBAGENT_ENV_CHANNEL, type SubagentEnvRequest } from "./guard.ts";
 
@@ -62,7 +62,7 @@ export default function piSidebar(pi: ExtensionAPI) {
       ["new", "quiz", "quiz next", "quiz progress", "quiz off", "headsup", "headsup on", "headsup off", "model", "help"].filter((a) => a.startsWith(prefix.trim())).map((value) => ({ value, label: value })),
     handler: async (args, ctx) => {
       const sub = args.trim().toLowerCase();
-      if (sub === "help") ctx.ui.notify(`${COMMAND_HELP}\n\nIn Sidebar:\n${QUIZ_HELP}\n\n${HEADSUP_HELP}`, "info");
+      if (sub === "help") ctx.ui.notify(`${COMMAND_HELP}\n\nIn Sidebar:\n${QUIZ_HELP}\n${SIDEBAR_HEADSUP_HELP}\n\n${HEADSUP_HELP}`, "info");
       else if (sub === "headsup" || sub.startsWith("headsup ")) {
         const arg = sub.slice("headsup".length).trim();
         if (arg === "on" || arg === "off") {

@@ -142,7 +142,7 @@ Quiz mode turns Sidebar into a tutor for main's work. You switch it on when you 
 
 ## Heads-up mode
 
-Heads-up mode watches main's longer runs for one thing you should know but might have missed. Examples are a tradeoff main chose without saying so, a result that looks off, or a risk in what it did. When a check finds one, a short note appears above main's editor, whether Sidebar is open or not:
+Heads-up mode watches main's longer runs for one thing you should know but might have missed. Examples are a tradeoff main chose without saying so, a result that looks off, or a risk in what it did. When a check finds one and Sidebar is open, the note arrives in Sidebar's thread. If Sidebar is answering at that moment, the note waits until the answer ends. Ask about it by typing in Sidebar, which knows what it raised, or type `/known` if you already knew it. With Sidebar closed, a short note appears above main's editor instead:
 
 ```
 ✦ Heads up · check this result · sum.py's "total" covers only north; it excludes every south row.
@@ -154,7 +154,9 @@ It is on by default. `/sidebar headsup off` switches it off for the session, and
 
 **When it checks.** Checks happen at main's turn boundaries, once a run is long (5 replies or 2 minutes). They are at most 3 minutes apart, and a long run gets one more check when it ends. There is never a check while one is running or while a note is showing. A check is skipped, with nothing sent, when main's prompt cache has probably expired, when Sidebar cannot share main's API, or when no copy of main's last request is in memory (after `/reload`, until main sends again).
 
-**Answering a note.** Type a digit on its own into main's empty editor. Digits typed anywhere else, or while a dialog is open, go where they always go.
+**In Sidebar.** The note is part of Sidebar's conversation: an answer that carries the note and its explanation, preceded by a hidden marker that tells the model it raised the note unasked. `/known` marks the last note as known. `/headsup` in Sidebar works like `/sidebar headsup`.
+
+**Answering a note above the editor.** Type a digit on its own into main's empty editor. Digits typed anywhere else, or while a dialog is open, go where they always go.
 - **Learn more** shows the short explanation the same check wrote, with no further request. It then offers:
   - **Understood**: closes the note and marks the topic as known.
   - **Ask main**: puts the note, quoted, in main's editor, so you can add a question and send it.

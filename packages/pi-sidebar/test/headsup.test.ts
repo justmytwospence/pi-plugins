@@ -9,6 +9,7 @@ import { HeadsUp } from "../src/headsup/headsup.ts";
 import { HEADSUP_ENTRY, headsUpDefault, headsUpFromBranch, HeadsUpStats } from "../src/headsup/mode.ts";
 import { NoteState, quoteForMain } from "../src/headsup/note.ts";
 import { parseHeadsUp } from "../src/headsup/protocol.ts";
+import { isNoteMarker, noteMessages } from "../src/headsup/thread.ts";
 import { HeadsUpScheduler } from "../src/headsup/scheduler.ts";
 import { addRecent, knownTopics, markKnown, ProfileStore, emptyProfile } from "../src/quiz/profile.ts";
 import { splicePayload } from "../src/splice.ts";
@@ -220,7 +221,7 @@ describe("a heads-up check", () => {
 });
 
 describe("HeadsUp in main", () => {
-  async function setup(reply = NOTE) {
+  async function setup(reply = NOTE, deliver = false) {
     const now = 1000;
     const { pi, main, ctx } = await primedMain(now);
     const widgets: unknown[] = [];
@@ -229,9 +230,10 @@ describe("HeadsUp in main", () => {
     (ctx.ui as any).setEditorText = (text: string) => { editor = text; };
     (ctx as any).ui.getEditorText = () => editor;
     const asked: string[] = [];
+    const delivered: unknown[] = [];
     const dir = mkdtempSync(path.join(tmpdir(), "headsup-"));
     const { stream } = stubStream(reply);
-    const headsUp = new HeadsUp(pi as never, main, { askSidebar: (text) => { asked.push(text); return true; } }, {
+    const headsUp = new HeadsUp(pi as never, main, { deliver: (note) => { if (deliver) delivered.push(note); return deliver; }, askSidebar: (text) => { asked.push(text); return true; } }, {
       knowledgeDir: dir,
       logFile: path.join(dir, "log"),
       run: async () => undefined,
@@ -239,7 +241,7 @@ describe("HeadsUp in main", () => {
       now: () => now,
       env: {},
     });
-    return { pi, ctx, headsUp, widgets, asked, dir, editor: () => editor };
+    return { pi, ctx, headsUp, widgets, asked, delivered, dir, editor: () => editor };
   }
 
   it("shows a note above the editor and takes its digits only when the editor is idle", async () => {
@@ -255,6 +257,16 @@ describe("HeadsUp in main", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(editor()).toContain("> Main skipped the failing integration tests.");
     expect(headsUp.note.showing).toBe(false);
+  });
+
+  it("hands the note to Sidebar when it is open, and /known marks it", async () => {
+    const { headsUp, widgets, delivered, dir } = await setup(NOTE, true);
+    await headsUp.check("turn");
+    expect(delivered).toHaveLength(1);
+    expect(widgets).toHaveLength(0);
+    expect(headsUp.note.showing).toBe(false);
+    expect(await headsUp.markLastKnown()).toMatchObject({ topic: "skipped-tests" });
+    expect(knownTopics(new ProfileStore(dir, "/repo").load(), 0).known[0]).toMatch(/^skipped-tests:/);
   });
 
   it("remembers a topic marked as known and lists it in the next check", async () => {
@@ -294,5 +306,16 @@ describe("splice without Sidebar's breakpoint", () => {
     const messages = (result as any).payload.messages;
     expect(messages[0]).toEqual(mainPayload().messages[0]);
     expect(messages[1].content[0].cache_control).toBeUndefined();
+  });
+});
+
+describe("a note in Sidebar's thread", () => {
+  it("is a hidden marker and an answer carrying the note", () => {
+    const messages = noteMessages({ topic: "t", kind: "risk", text: "Careful.", detail: "Because." }, { api: "anthropic-messages", provider: "anthropic", model: "m" }, 5) as any[];
+    expect(messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(isNoteMarker(messages[0].content[0].text)).toBe(true);
+    expect(isNoteMarker("a question")).toBe(false);
+    expect(messages[1].content[0].text).toBe("**Heads up: a risk.** Careful.\n\nBecause.");
+    expect(messages[1]).toMatchObject({ provider: "anthropic", model: "m", stopReason: "stop" });
   });
 });

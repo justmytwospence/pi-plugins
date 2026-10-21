@@ -110,6 +110,11 @@ export class SidebarAgent {
     return !!this.session?.isStreaming;
   }
 
+  /** Not answering and not starting a session for a question. */
+  get idle(): boolean {
+    return !this.busy && !(this.creating && !this.session);
+  }
+
   get messages(): readonly AgentMessage[] {
     return this.thread;
   }
@@ -136,6 +141,19 @@ export class SidebarAgent {
     this.thread = messages;
     this.missed = undefined;
     this.lastAnswer = undefined;
+    await this.dispose();
+  }
+
+  /**
+   * Messages added to the thread from outside a turn (a heads-up note), stored like an exchange.
+   * Only while idle; the session is rebuilt from the thread on the next question.
+   */
+  async appendMessages(messages: AgentMessage[]): Promise<void> {
+    if (!this.idle) throw new Error("Sidebar is answering");
+    this.thread = [...this.thread, ...messages];
+    try {
+      this.pi.appendEntry(EXCHANGE_ENTRY, { version: 1, messages, timestamp: this.now() });
+    } catch { /* main's session went away */ }
     await this.dispose();
   }
 

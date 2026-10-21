@@ -83,7 +83,7 @@ Quiz mode is a voluntary tutor for main's work. It never blocks main or git.
 
 ## Heads-up mode
 
-During main's longer runs, heads-up mode occasionally checks for one thing you should know but might have missed: an unstated tradeoff, a result that looks off, or a risk. A note then appears above main's editor, whether Sidebar is open or not. The example below is an illustration:
+During main's longer runs, heads-up mode occasionally checks for one thing you should know but might have missed: an unstated tradeoff, a result that looks off, or a risk. When Sidebar is open, the note becomes part of its thread, after any answer in progress. Ask about it there, or type `/known` if you knew it. When Sidebar is closed, the note appears above main's editor. The example below is an illustration:
 
 ```
 ✦ Heads up · risk · Main skipped the failing integration tests.
@@ -92,7 +92,7 @@ During main's longer runs, heads-up mode occasionally checks for one thing you s
 
 - **Switch:** on by default. `/sidebar headsup off` or `on` sets it per session (stored in main's session), `/sidebar headsup` shows its cost so far, and `PI_SIDEBAR_HEADSUP=0` starts sessions with it off.
 - **When:** at main's turn boundaries, once a run has 5 replies or has gone on for 2 minutes. Checks are at most 3 minutes apart, with one more at the end of a long run. A check is skipped when main's cache has probably expired.
-- **Answering:** type the digit on its own into main's empty editor.
+- **Answering above the editor:** type the digit on its own into main's empty editor.
   - **Learn more** shows an explanation the check already wrote. From there you can mark it understood, quote it into main's editor (**Ask main**), or ask Sidebar about it.
   - **Knew this already** marks the topic as known.
   - **Dismiss** closes it, and for 20 seconds `9` turns the mode off.

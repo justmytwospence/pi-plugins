@@ -24,6 +24,8 @@ export const HEADSUP_HELP = [
 ].join("\n");
 
 export interface HeadsUpHost {
+  /** Put a note in Sidebar's thread when Sidebar is open; false shows it above main's editor. */
+  deliver(note: HeadsUpNote): boolean;
   /** Open Sidebar and ask it this; false when Sidebar cannot open. */
   askSidebar(text: string, ctx: ExtensionContext): boolean;
 }
@@ -45,6 +47,8 @@ export class HeadsUp {
   readonly scheduler = new HeadsUpScheduler();
   readonly note = new NoteState();
   private misses = 0;
+  /** The last note shown, wherever it went (for /known in Sidebar). */
+  lastNote: HeadsUpNote | undefined;
   private abort: AbortController | undefined;
   private tui: TUI | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
@@ -82,6 +86,7 @@ export class HeadsUp {
     this.on = entry ? entry.on : headsUpDefault(this.env);
     this.paused = undefined;
     this.misses = 0;
+    this.lastNote = undefined;
     if (newSession) this.stats.reset();
     this.abort?.abort();
     this.hide();
@@ -172,10 +177,22 @@ export class HeadsUp {
       }
     }
     if (result.outcome === "note" && result.note && this.on && this.note.free) {
-      try { (await this.profile(ctx.cwd)).update((p) => addRecent(p, { id: result.note!.topic, text: result.note!.text, at: now })); } catch { /* not remembered */ }
-      this.show(result.note, ctx);
+      const note = result.note;
+      try { (await this.profile(ctx.cwd)).update((p) => addRecent(p, { id: note.topic, text: note.text, at: now })); } catch { /* not remembered */ }
+      this.lastNote = note;
+      if (!this.host.deliver(note)) this.show(note, ctx);
     }
     return result;
+  }
+
+  /** `/known` in Sidebar: the last note's topic is one the user knows. */
+  async markLastKnown(): Promise<HeadsUpNote | undefined> {
+    const ctx = this.main.ctx;
+    const note = this.lastNote;
+    if (!ctx || !note) return undefined;
+    (await this.profile(ctx.cwd)).update((p) => markKnown(p, { id: note.topic, text: note.text, at: this.now() }));
+    if (this.note.note === note) this.hide();
+    return note;
   }
 
   private log(trigger: Trigger, result: CheckResult): void {

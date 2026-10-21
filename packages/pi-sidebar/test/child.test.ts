@@ -277,3 +277,14 @@ describe("helpers", () => {
   });
 
 });
+
+describe("messages added outside a turn", () => {
+  it("join the thread and are stored like an exchange", async () => {
+    const { pi, agent } = setup();
+    const note = [{ role: "user", content: [{ type: "text", text: "<sidebar-headsup-note>x" }], timestamp: 1 }] as never[];
+    await agent.appendMessages(note);
+    expect(agent.messages).toEqual(note);
+    expect(pi.entries.at(-1)).toMatchObject({ customType: "sidebar:exchange", data: { version: 1, messages: note } });
+    expect(agent.idle).toBe(true);
+  });
+});
