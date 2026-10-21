@@ -5,6 +5,8 @@ import { SidebarController } from "../src/controller.ts";
 import { SplitRoot } from "../src/layout.ts";
 import { dimLine, fitStatus } from "../src/panel.ts";
 import { EXCHANGE_ENTRY, RESET_ENTRY } from "../src/thread.ts";
+import { QUIZ_ENTRY } from "../src/quiz/mode.ts";
+import { QUIZ_NEXT, QUIZ_ROLE, QUIZ_START } from "../src/quiz/prompt.ts";
 import { FakePi, fakeCtx } from "./fake.ts";
 
 const saved = process.env.PI_SIDEBAR_KEYS;
@@ -302,6 +304,82 @@ describe("asking", () => {
     const { pi, controller, ctx } = setup([exchange]);
     await pi.emit("session_start", { reason: "resume" }, ctx);
     expect(controller.agent.messages.map((m: any) => m.content[0].text)).toEqual(["earlier"]);
+  });
+});
+
+describe("quiz mode", () => {
+  const warm = (controller: SidebarController, ctx: unknown) => {
+    controller.main.bind(ctx as never);
+    controller.main.request = { api: "anthropic-messages", provider: "anthropic", model: "claude-x", leafId: null, sentAt: Date.now(), payload: {} };
+  };
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 50));
+
+  it("/quiz turns it on, stores that in main's session and asks the first question; /quiz again turns it off", async () => {
+    const { pi, controller, ctx } = setup();
+    warm(controller, ctx);
+    controller.openOrFocus(ctx as never);
+    const ask = vi.spyOn(controller.agent, "ask").mockResolvedValue();
+    const panel = panelOf(controller);
+    panel.submit("/quiz");
+    await flush();
+    expect(controller.quiz.on).toBe(true);
+    expect(pi.entries.at(-1)).toMatchObject({ customType: QUIZ_ENTRY, data: { version: 1, on: true } });
+    expect(ask).toHaveBeenCalledWith(QUIZ_START, false);
+    expect(controller.agent.quiz?.role()).toBe(QUIZ_ROLE);
+    panel.submit("/quiz next");
+    await flush();
+    expect(ask).toHaveBeenLastCalledWith(QUIZ_NEXT, false);
+    panel.submit("/quiz");
+    await flush();
+    expect(controller.quiz.on).toBe(false);
+    expect(pi.entries.at(-1)).toMatchObject({ customType: QUIZ_ENTRY, data: { on: false } });
+    expect(controller.agent.quiz?.role()).toBeUndefined();
+    expect(ask).toHaveBeenCalledTimes(2);
+  });
+
+  it("/quiz progress shows the profile without asking the model", async () => {
+    const { controller, ctx } = setup();
+    warm(controller, ctx);
+    controller.openOrFocus(ctx as never);
+    const ask = vi.spyOn(controller.agent, "ask").mockResolvedValue();
+    const note = vi.spyOn(panelOf(controller).chat, "note");
+    panelOf(controller).submit("/quiz progress");
+    await flush();
+    expect(ask).not.toHaveBeenCalled();
+    expect(note).toHaveBeenCalledWith(expect.stringMatching(/No quiz answers|concepts:/));
+  });
+
+  it("never shows a rubric or a grade, seeded or streamed", () => {
+    const { controller, ctx } = setup();
+    controller.openOrFocus(ctx as never);
+    const panel = panelOf(controller);
+    const reply = (text: string) => ({ role: "assistant", content: [{ type: "text", text }], stopReason: "stop", timestamp: 0 });
+    panel.chat.seed([reply("What happens on retry?\n<quiz-key>SECRET-KEY</quiz-key>")], (text: string) => ({ text }));
+    panel.apply({ type: "message_start", message: reply("Right.") });
+    panel.apply({ type: "message_update", message: reply('Right.\n<quiz-update>{"concept":"x","result":"correct"}</quiz-update>\nNext?\n<quiz-key>OTHER-SE') });
+    const shown = panel.chat.render(100).join("\n");
+    expect(shown).toContain("What happens on retry?");
+    expect(shown).toContain("Next?");
+    expect(shown).not.toMatch(/SECRET|OTHER-SE|quiz-/);
+  });
+
+  it("comes back on with main's branch after a restart", async () => {
+    const entry = { type: "custom", customType: QUIZ_ENTRY, data: { version: 1, on: true, base: "abc", at: 1 } };
+    const { pi, controller, ctx } = setup([entry]);
+    await pi.emit("session_start", { reason: "resume" }, ctx);
+    expect(controller.quiz.on).toBe(true);
+    expect(controller.quiz.base).toBe("abc");
+  });
+
+  it("/sidebar quiz opens Sidebar in quiz mode", async () => {
+    delete process.env.PI_SIDEBAR_KEYS;
+    const pi = new FakePi();
+    piSidebar(pi as never);
+    const { tui } = fakeTui();
+    const { ctx } = fakeCtx();
+    (ctx.ui as { setWidget: unknown }).setWidget = (_key: string, factory?: (t: unknown, theme: unknown) => unknown) => factory?.(tui, ctx.ui.theme);
+    await pi.commands.get("sidebar")!.handler("quiz progress", ctx);
+    expect(tui.layoutRoot).toBeInstanceOf(SplitRoot);
   });
 });
 

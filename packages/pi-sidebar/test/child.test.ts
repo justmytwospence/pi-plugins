@@ -109,6 +109,34 @@ describe("Sidebar's requests", () => {
   });
 });
 
+describe("quiz mode in requests", () => {
+  it("adds its rules to the role note and its status last, and sends main's request unchanged", async () => {
+    const { agent, cpi, cctx, aborted } = setup();
+    agent.quiz = { role: () => "QUIZ MODE IS ON.", status: () => "<quiz-status>\nprofile\n</quiz-status>" };
+    const system = { role: "system", content: "", timestamp: 0 };
+    const question = { role: "user", content: [{ type: "text", text: "Quiz me." }], timestamp: 0 };
+    const out = await cpi.emit("context_with_system", { messages: [system, question] }, cctx);
+    const texts = out.messages.map((m: any) => (Array.isArray(m.content) ? m.content[0]?.text : m.content));
+    expect(texts[2]).toMatch(/^<sidebar>\nYou are Sidebar[\s\S]*QUIZ MODE IS ON\.\n<\/sidebar>$/);
+    expect(out.messages[3]).toBe(question);
+    expect(texts[4]).toMatch(/Main is idle[\s\S]*<quiz-status>\nprofile\n<\/quiz-status>\n<\/sidebar-status>$/);
+    const sent = await cpi.emit("before_provider_request", { payload: sidePayload() }, cctx);
+    expect(aborted()).toBe(0);
+    expect(sent.system).toEqual(mainPayload().system);
+    expect(sent.tools).toEqual(mainPayload().tools);
+    expect(sent.messages[0]).toEqual(mainPayload().messages[0]);
+  });
+
+  it("adds nothing while quiz mode is off", async () => {
+    const { agent, cpi, cctx } = setup();
+    agent.quiz = { role: () => undefined, status: () => "" };
+    const out = await cpi.emit("context_with_system", { messages: [] }, cctx);
+    const role = out.messages.find((m: any) => m.content?.[0]?.text?.startsWith("<sidebar>"));
+    expect(role.content[0].text).not.toContain("QUIZ");
+    expect(out.messages.at(-1).content[0].text).not.toContain("quiz-status");
+  });
+});
+
 describe("preflight", () => {
   it("sends while main's cache is warm", () => {
     expect(setup().agent.preflight()).toEqual({ kind: "send" });

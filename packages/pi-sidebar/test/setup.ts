@@ -8,3 +8,5 @@ setKeybindings(new KeybindingsManager());
 
 // Never read or write the user's remembered divider position.
 process.env.PI_SIDEBAR_PREFS = `${process.env.TMPDIR ?? "/tmp"}/pi-sidebar-test-${process.pid}.json`;
+// Nor the user's quiz knowledge profiles.
+process.env.PI_SIDEBAR_KNOWLEDGE = `${process.env.TMPDIR ?? "/tmp"}/pi-sidebar-test-knowledge-${process.pid}`;

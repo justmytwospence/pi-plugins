@@ -6,7 +6,7 @@ plugin: pi-sidebar
 
 ## Quick reference
 
-- **Use it for:** Ask what the main agent is doing, why, or how the code works, without interrupting it.
+- **Use it for:** Ask what the main agent is doing, why, or how the code works, without interrupting it. Quiz mode (`/quiz`) also quizzes you on main's changes and tracks what you know.
 - **Enable:** Select `packages/pi-sidebar/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
 - **Controls:** Ctrl+' opens or closes Sidebar. In Herdr, `prefix+h/l` moves between main and Sidebar as if Sidebar were a pane (with the bundled Herdr plugin). In Sidebar, your own keybindings apply: pi-vim's Ctrl+U/D and your transcript scroll keys (such as Ctrl+G) scroll it, Esc stops an answer, Ctrl+O expands tools, and your thinking toggle shows or hides reasoning.
 - **Settings:** `PI_SIDEBAR_KEYS` replaces the key. `PI_SIDEBAR_RATIO` sets Sidebar's share (default 0.5) until you drag the divider, which is remembered. `PI_SIDEBAR_MIN_COLUMNS` is the narrowest half for a side-by-side split (default 80). The model and thinking always match main.
@@ -70,6 +70,16 @@ How it looks:
 - **Rendering:** messages, tool cards and reasoning use Pi's components, so pi-cc-render's styling applies. Reasoning follows main's `hideThinkingBlock` setting.
 
 Sidebar's thread is stored as hidden entries in main's session. It follows `/tree` and comes back after resume and `/reload`.
+
+## Quiz mode
+
+Quiz mode is a voluntary tutor for main's work. It never blocks main or git.
+- **Commands:** `/quiz` in Sidebar (or `/sidebar quiz` in main) switches it on and asks a question, or switches it off. `/quiz next` asks about main's latest changes. `/quiz progress` lists what you have shown you know in this repository, without a model call.
+- **Questions:** each is about behaviour, failures or design reasons in the changed code, and asks for a prediction with a reason. Sidebar reads the diff before asking.
+- **Adapting:** a correct answer gets a harder scenario. A wrong one gets a short explanation and a fresh scenario on the same concept. You can ask it to explain, or dispute a question.
+- **Knowledge profile:** grades build a per-repository profile in `~/.pi/agent/pi-sidebar/knowledge/` (or `PI_SIDEBAR_KNOWLEDGE`). Harder questions count more and old evidence fades, so a concept is *proven*, *shaky* or *due* for review. Questions aim at your gaps.
+- **Nudges:** when main finishes a run that changed files, Sidebar's notice says so. Nothing is sent until you ask.
+- **Cost and privacy:** questions keep main's cache sharing intact. Rubrics and grades are hidden blocks in Sidebar's replies, never displayed. Answers stay in Sidebar's hidden thread and never reach main's model.
 
 ## Why it costs little
 

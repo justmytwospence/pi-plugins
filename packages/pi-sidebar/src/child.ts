@@ -36,6 +36,14 @@ export type Preflight =
 
 export type SidebarEvent = Record<string, unknown> & { type: string };
 
+/** What quiz mode adds to each request while it is on. */
+export interface QuizContext {
+  /** Extra standing instructions for the role note, or undefined when quiz mode is off. */
+  role(): string | undefined;
+  /** The quiz part of the live status ("" when off). */
+  status(): string;
+}
+
 export function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
@@ -85,7 +93,10 @@ export class SidebarAgent {
   private turnStart = 0;
   private mode: "splice" | "replay" | undefined;
   private readonly listeners = new Set<(event: SidebarEvent) => void>();
+  private readonly turnListeners = new Set<(added: readonly AgentMessage[]) => void>();
   private generation = 0;
+  /** Quiz mode's part of each request, when the controller has one. */
+  quiz: QuizContext | undefined;
   missed: { read: number; expected: number } | undefined;
   lastAnswer: string | undefined;
 
@@ -106,6 +117,12 @@ export class SidebarAgent {
   onEvent(listener: (event: SidebarEvent) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /** Every finished turn's new messages, in full (quiz mode reads its grades from them). */
+  onTurn(listener: (added: readonly AgentMessage[]) => void): () => void {
+    this.turnListeners.add(listener);
+    return () => this.turnListeners.delete(listener);
   }
 
   private emit(event: SidebarEvent): void {
@@ -251,6 +268,9 @@ export class SidebarAgent {
       const added = session.messages.slice(this.turnStart) as AgentMessage[];
       this.turnStart = session.messages.length;
       if (added.length > 0) {
+        for (const listener of this.turnListeners) {
+          try { listener(added); } catch { /* a listener must not break the agent */ }
+        }
         const compact = compactExchange(added);
         this.thread = [...this.thread, ...compact];
         try {
@@ -303,20 +323,21 @@ export class SidebarAgent {
         if (request) {
           this.mode = "splice";
           const delta = mainDelta(entries, request.leafId, leaf);
-          const status = statusMessage(describeLive(this.main.live, delta, now), now);
-          return { messages: assembleContext(event.messages, delta.messages, roleMessage(now), status) };
+          const status = statusMessage(describeLive(this.main.live, delta, now), now, this.quiz?.status());
+          return { messages: assembleContext(event.messages, delta.messages, roleMessage(now, this.quiz?.role()), status) };
         }
         this.mode = "replay";
         const rebuilt = replayMessages(ctx);
         const replay = rebuilt.messages;
-        const status = statusMessage(describeLive(this.main.live, { messages: [], pending: rebuilt.pending }, now), now);
+        const status = statusMessage(describeLive(this.main.live, { messages: [], pending: rebuilt.pending }, now), now, this.quiz?.status());
+        const role = roleMessage(now, this.quiz?.role());
         // Main's transcript starts with its prompt and tools once it has sent anything; before that,
         // Sidebar's own leading system message stands in.
         if (replay[0]?.role === "system") {
           const own = event.messages[0]?.role === "system" ? event.messages.slice(1) : event.messages;
-          return { messages: [...replay, ...assembleContext(own, [], roleMessage(now), status)] };
+          return { messages: [...replay, ...assembleContext(own, [], role, status)] };
         }
-        return { messages: assembleContext(event.messages, replay, roleMessage(now), status) };
+        return { messages: assembleContext(event.messages, replay, role, status) };
       });
 
       cpi.on("before_provider_request", (event, cctx) => {

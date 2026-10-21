@@ -148,13 +148,13 @@ function userText(text: string, now: number): AgentMessage {
 }
 
 /** Sidebar's standing instructions, placed between main's conversation and Sidebar's own. */
-export function roleMessage(now = Date.now()): AgentMessage {
-  return userText(`<sidebar>\n${SIDEBAR_ROLE}\n\n${TIMELINE}\n</sidebar>`, now);
+export function roleMessage(now = Date.now(), quizRole?: string): AgentMessage {
+  return userText(`<sidebar>\n${SIDEBAR_ROLE}\n\n${TIMELINE}${quizRole ? `\n\n${quizRole}` : ""}\n</sidebar>`, now);
 }
 
 /** Main's live status, placed just before the user's newest message. */
-export function statusMessage(liveText: string, now = Date.now()): AgentMessage {
-  return userText(`<sidebar-status at="${new Date(now).toISOString()}">\n${liveText}\n</sidebar-status>`, now);
+export function statusMessage(liveText: string, now = Date.now(), quizText?: string): AgentMessage {
+  return userText(`<sidebar-status at="${new Date(now).toISOString()}">\n${liveText}${quizText ? `\n\n${quizText}` : ""}\n</sidebar-status>`, now);
 }
 
 /**

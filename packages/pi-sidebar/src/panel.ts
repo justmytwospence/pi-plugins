@@ -22,6 +22,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { EDITOR_MODE, EDITOR_SURFACE, INPUT_CONTEXT, requestEditorFactory, type EditorModeContext, type SuiteEditor } from "./contract.ts";
 import { PiChat } from "./pi-chat.ts";
+import { displayMessage } from "./quiz/protocol.ts";
 import { WorkingStats, workingMessage } from "./working.ts";
 
 export interface StatusPart {
@@ -328,7 +329,7 @@ export class SidebarPanel {
   unread = false;
 
   constructor(private readonly tui: TUI, private readonly theme: () => Theme, private readonly host: PanelHost) {
-    this.chat = new PiChat(() => theme(), { cwd: host.cwd, userMessagesFromEvents: true, requestRender: () => tui.requestRender() });
+    this.chat = new PiChat(() => theme(), { cwd: host.cwd, userMessagesFromEvents: true, requestRender: () => tui.requestRender(), displayAssistant: displayMessage });
     this.syncThinking();
     const body: Component = {
       render: (width) => {
@@ -433,6 +434,7 @@ export class SidebarPanel {
       "",
       t.fg("muted", "Ask about what main is doing, why, or how the code works."),
       t.fg("dim", "Sidebar reads main's live conversation, never changes anything, and answers from main's prompt cache."),
+      t.fg("dim", "/quiz quizzes you on main's changes and keeps track of what you know."),
     ];
     return lines.flatMap((line) => (line ? wrapTextWithAnsi(line, Math.max(1, width - 1)).map((row) => ` ${row}`) : [""]));
   }

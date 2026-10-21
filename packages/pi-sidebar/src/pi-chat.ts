@@ -29,6 +29,8 @@ export interface PiChatOptions {
   /** Show user messages as their events arrive (your main session); planners label theirs instead. */
   userMessagesFromEvents?: boolean;
   requestRender?(): void;
+  /** The assistant message as shown (Sidebar hides quiz mode's rubric and grade blocks). */
+  displayAssistant?<T extends { role?: string; content?: unknown }>(message: T): T;
 }
 
 type Tone = "info" | "warning" | "error";
@@ -158,12 +160,12 @@ export class PiChat {
         } else if (message?.role === "assistant") {
           this.streaming = this.assistant(undefined);
           this.add(this.streaming);
-          this.streaming.updateContent(message as never, true);
+          this.streaming.updateContent(this.shown(message) as never, true);
         }
         break;
       case "message_update":
         if (this.streaming && message?.role === "assistant") {
-          this.streaming.updateContent(message as never, true);
+          this.streaming.updateContent(this.shown(message) as never, true);
           for (const call of toolCalls(message)) {
             const existing = this.pendingTools.get(call.id);
             if (existing) existing.updateArgs(call.arguments);
@@ -173,7 +175,7 @@ export class PiChat {
         break;
       case "message_end":
         if (this.streaming && message?.role === "assistant") {
-          this.streaming.updateContent(message as never, false);
+          this.streaming.updateContent(this.shown(message) as never, false);
           if (message.stopReason === "aborted" || message.stopReason === "error") {
             const text = message.errorMessage || (message.stopReason === "aborted" ? "Operation aborted" : "Error");
             for (const component of this.pendingTools.values()) {
@@ -238,7 +240,11 @@ export class PiChat {
   }
 
   private assistant(message: Message | undefined) {
-    return new AssistantMessageComponent(message as never, this.hideThinking, getMarkdownTheme());
+    return new AssistantMessageComponent((message ? this.shown(message) : message) as never, this.hideThinking, getMarkdownTheme());
+  }
+
+  private shown(message: Message): Message {
+    return this.options.displayAssistant ? this.options.displayAssistant(message) : message;
   }
 
   private tool(call: ToolCall) {

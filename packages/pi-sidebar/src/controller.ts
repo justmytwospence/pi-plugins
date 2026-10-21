@@ -10,7 +10,17 @@ import { MainState } from "./main-state.ts";
 import { RatioStore } from "./preferences.ts";
 import { herdrFocus, navDirection, navTarget } from "./nav.ts";
 import { SidebarPanel, type StatusPart } from "./panel.ts";
+import { QUIZ_ENTRY, QuizMode, quizFromBranch } from "./quiz/mode.ts";
+import { QUIZ_NEXT, QUIZ_ROLE, QUIZ_START } from "./quiz/prompt.ts";
 import { RESET_ENTRY, threadFromBranch } from "./thread.ts";
+
+export const KNOWLEDGE_ENV = "PI_SIDEBAR_KNOWLEDGE";
+
+export const QUIZ_HELP = [
+  "/quiz           quiz mode on (asks the first question) or off",
+  "/quiz next      the next question, on what main changed most recently",
+  "/quiz progress  what you have shown you know in this repository",
+].join("\n");
 
 const PROBE = "pi-sidebar-probe";
 const HERDR_BLOCKED = "herdr:blocked";
@@ -20,6 +30,8 @@ type FocusTui = TUI & { getFocusedComponent?(): Component | null };
 export class SidebarController {
   readonly main: MainState;
   readonly agent: SidebarAgent;
+  /** Quiz mode: questions on main's changes, graded into a per-repository knowledge profile. */
+  readonly quiz = new QuizMode(process.env[KNOWLEDGE_ENV] ?? path.join(getAgentDir(), "pi-sidebar", "knowledge"));
   private tui: FocusTui | undefined;
   private theme: Theme | undefined;
   private panel: SidebarPanel | undefined;
@@ -35,7 +47,21 @@ export class SidebarController {
     this.main = new MainState(pi);
     this.agent = new SidebarAgent(pi, this.main);
     this.agent.onEvent((event) => this.onAgentEvent(event));
+    this.agent.quiz = { role: () => (this.quiz.on ? QUIZ_ROLE : undefined), status: () => this.quiz.status() };
+    this.agent.onTurn((added) => {
+      const recorded = this.quiz.record(added);
+      if (recorded.invalid > 0) this.panel?.notice({ kind: "warning", text: `Quiz mode could not read ${recorded.invalid} grade${recorded.invalid === 1 ? "" : "s"} from that answer; it was not counted.` });
+    });
     this.main.onChange(() => this.render());
+    // While quiz mode is on, say when main's run changed files (a nudge; nothing is sent).
+    pi.on("agent_end", async (_event, ctx) => {
+      if (!this.quiz.on) return;
+      const fresh = await this.quiz.freshChanges(ctx.cwd).catch(() => []);
+      if (fresh.length === 0 || !this.panel) return;
+      this.panel.notice({ kind: "info", text: `Main changed ${fresh.length} file${fresh.length === 1 ? "" : "s"}: /quiz next asks about ${fresh.length === 1 ? "it" : "them"}.` });
+      if (!this.panel.focused) this.panel.unread = true;
+      this.render();
+    });
 
     pi.on("session_start", async (_event, ctx) => {
       this.listen(ctx);
@@ -208,8 +234,40 @@ export class SidebarController {
 
   private async restore(ctx: ExtensionContext): Promise<void> {
     this.main.bind(ctx);
-    await this.agent.setThread(threadFromBranch(ctx.sessionManager.getBranch()));
+    const branch = ctx.sessionManager.getBranch();
+    await this.agent.setThread(threadFromBranch(branch));
+    await this.quiz.restore(quizFromBranch(branch), ctx.cwd).catch(() => {});
     this.rebuild();
+  }
+
+  /** `/quiz …` in Sidebar, or `/sidebar quiz …` in main. */
+  async quizCommand(args: string): Promise<void> {
+    const ctx = this.main.ctx;
+    const sub = args.trim().toLowerCase();
+    if (!ctx) return;
+    if (sub === "help") return this.noteLines(QUIZ_HELP.split("\n"));
+    if (sub === "progress") return this.noteLines(await this.quiz.progress(ctx.cwd).catch(() => ["Could not read the knowledge profile."]));
+    if (sub === "off" || (sub === "" && this.quiz.on)) {
+      if (!this.quiz.on) return this.panel?.notice({ kind: "info", text: "Quiz mode is already off." });
+      this.pi.appendEntry(QUIZ_ENTRY, this.quiz.stop());
+      this.panel?.notice({ kind: "info", text: "Quiz mode off. What you showed is kept; /quiz progress lists it." });
+      this.render();
+      return;
+    }
+    if (sub !== "" && sub !== "on" && sub !== "next") {
+      this.panel?.notice({ kind: "warning", text: `Unknown /quiz argument "${sub}": /quiz, /quiz next, /quiz progress, /quiz off.` });
+      return;
+    }
+    const starting = !this.quiz.on;
+    if (starting) this.pi.appendEntry(QUIZ_ENTRY, await this.quiz.start(ctx.cwd));
+    this.render();
+    this.question(sub === "next" && !starting ? QUIZ_NEXT : QUIZ_START);
+  }
+
+  private noteLines(lines: string[]): void {
+    if (!this.panel) return;
+    for (const line of lines) this.panel.chat.note(line);
+    this.panel.scrollToEnd();
   }
 
   /** A new panel for the current thread, reopened (and refocused) if it was showing. */
@@ -232,10 +290,19 @@ export class SidebarController {
       void this.reset();
       return;
     }
-    if (text.startsWith("/") && !this.isSidebarCommand(text)) {
-      this.panel?.notice({ kind: "warning", text: `Sidebar knows /new, /close, skills and prompt templates; ${text.split(/\s/)[0]} is a main-session command.` });
+    if (text === "/quiz" || text.startsWith("/quiz ")) {
+      void this.quizCommand(text.slice("/quiz".length));
       return;
     }
+    if (text.startsWith("/") && !this.isSidebarCommand(text)) {
+      this.panel?.notice({ kind: "warning", text: `Sidebar knows /new, /close, /quiz, skills and prompt templates; ${text.split(/\s/)[0]} is a main-session command.` });
+      return;
+    }
+    this.question(text);
+  }
+
+  /** A question for Sidebar's agent, after its cache preflight. */
+  private question(text: string): void {
     const check = this.agent.preflight();
     if (check.kind === "refuse") {
       this.panel?.notice({ kind: "warning", text: `Not sent: ${check.reason}` });
@@ -262,9 +329,21 @@ export class SidebarController {
   private send(text: string, confirmed: boolean): void {
     this.panel?.clearNotice();
     this.panel?.scrollToEnd();
-    this.agent.ask(text, confirmed).catch((error) => {
-      this.panel?.notice({ kind: "error", text: error instanceof Error ? error.message : String(error) });
-    });
+    const failed = (error: unknown) => this.panel?.notice({ kind: "error", text: error instanceof Error ? error.message : String(error) });
+    const cwd = this.main.ctx?.cwd;
+    if (!this.quiz.on || !cwd) {
+      this.agent.ask(text, confirmed).catch(failed);
+      return;
+    }
+    // Quiz mode measures main's changes before each question; the status carries them.
+    this.quiz
+      .prepare(cwd)
+      .catch(() => {})
+      .then(() => {
+        this.quiz.sent();
+        return this.agent.ask(text, confirmed);
+      })
+      .catch(failed);
   }
 
   private onAgentEvent(event: SidebarEvent): void {
@@ -286,6 +365,11 @@ export class SidebarController {
     const live = this.main.live;
     const now = Date.now();
     const parts: StatusPart[] = [{ text: theme.fg("dim", "read-only"), optional: 1 }];
+    if (this.quiz.on) {
+      const c = this.quiz.counts();
+      const figures = c ? [c.proven ? `${c.proven} proven` : "", c.shaky ? `${c.shaky} shaky` : "", c.due ? `${c.due} due` : ""].filter(Boolean) : [];
+      parts.unshift({ text: theme.fg("accent", ["quiz", ...figures].join(" · ")) });
+    }
     if (live.state === "working") {
       const tool = live.tools[live.tools.length - 1];
       parts.push({ text: tool ? `main: ${tool.name} ${ago(now - tool.startedAt)}` : `main working ${ago(now - live.since)}` });

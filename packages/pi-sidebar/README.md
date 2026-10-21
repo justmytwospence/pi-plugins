@@ -115,6 +115,28 @@ Settings, read from the environment Pi starts with:
 - `PI_SIDEBAR_RATIO`: Sidebar's share, from 0.15 to 0.85 (default 0.5), until you drag the divider.
 - `PI_SIDEBAR_PREFS`: where the dragged size is kept (default `~/.pi/agent/pi-sidebar.json`).
 - `PI_SIDEBAR_MIN_COLUMNS`: the narrowest half for a side-by-side split (default 80).
+- `PI_SIDEBAR_KNOWLEDGE`: where quiz mode keeps its knowledge profiles (default `~/.pi/agent/pi-sidebar/knowledge`).
+
+## Quiz mode
+
+Quiz mode turns Sidebar into a tutor for main's work. You switch it on when you want to learn what main changed and show that you understand it. It never blocks main, git or anything else.
+
+- **`/quiz`** (in Sidebar's composer, or `/sidebar quiz` in main) switches it on and asks the first question, or switches it off. The setting is stored in main's session, so it follows `/tree` and comes back after resume and `/reload`.
+- **`/quiz next`** asks about what main changed most recently. **`/quiz progress`** lists what you have shown you know in this repository, without a model call.
+- **Questions** are about what the code does: a concrete scenario, a failure, why main chose a design, what an invariant protects. Each asks for a prediction and a short reason, never for a file or function name. Sidebar reads the change (`git diff`, the code) before it asks, rather than trusting main's description.
+- **Answering** is ordinary chat. After a correct answer comes a harder question, often a new scenario. After a partial or wrong one, Sidebar explains the gap briefly and asks a fresh scenario on the same concept. Ask it to explain, say you don't know, or dispute a question (it checks the code and corrects itself). Side questions get normal answers.
+- **Nudges:** while quiz mode is on and main finishes a run that changed files, Sidebar's notice says so (`Main changed 3 files: /quiz next asks about them`). Nothing is sent until you ask.
+- **Header:** `quiz · 3 proven · 1 shaky` while it is on.
+
+**What it learns about you.** Each graded answer updates a knowledge profile kept per repository (by git root) in `~/.pi/agent/pi-sidebar/knowledge/`, so it carries across sessions.
+- **Evidence:** each concept keeps weighted evidence for and against. Harder questions count more, and old evidence fades with a 14-day half-life.
+- **Standing:** a concept is *proven* at 80% mastery with at least two correct answers, which takes harder than recall-level questions. It is *shaky* below 50%, and *due* when it has gone unpractised for longer than the half-life.
+- **Steering:** every question carries the concepts that matter now (on the changed files, then the weakest), so Sidebar aims at your gaps and does not re-ask what you have proven.
+
+**How it works.**
+- **Cache:** quiz mode keeps Sidebar's cache sharing intact. Its fixed rules join Sidebar's role note and change only when you toggle the mode. What changes per question (the changed files, your profile) rides in the live status at the end.
+- **Hidden blocks:** the model has no tool of its own, so it ends each question with a hidden rubric (`<quiz-key>`) and each graded answer with a hidden grade (`<quiz-update>`, JSON). Sidebar never displays them, even while they stream. The model reads its own rubric when it grades, so grading stays consistent. A grade that cannot be read is not counted, and Sidebar says so.
+- **Privacy:** your answers stay in Sidebar's hidden thread and never reach main's model.
 
 ## How it stays current and cheap
 
