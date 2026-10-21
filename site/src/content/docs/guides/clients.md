@@ -23,9 +23,9 @@ See the [herdr-web-ui guide](https://github.com/devswha/herdr-web-ui/blob/main/d
 
 ## Collie
 
-[Collie](https://github.com/AltanS/collie) also mirrors Herdr panes to a phone and reads a waiting Pi dialog off the screen. Single-choice questions, permission prompts and Pi's own selects (plan approval, cache-guard) show as buttons; a multiple-choice question shows Collie's Escape card, with the terminal for the answer.
+[Collie](https://github.com/AltanS/collie) also mirrors Herdr panes to a phone and reads a waiting Pi dialog off the screen. Single-choice questions, permission prompts and Pi's own selects (plan approval, cache-guard) show as buttons, and a lone multiple-choice question as checkboxes (its Other answer is typed in the terminal). A set of several questions shows Collie's Escape card, with the terminal for the answer.
 
-To send a message in one tap and lift those cards, Collie has to find Pi's editor. pi-status-footer paints a context gauge into the editor's rules and draws a taller, indented footer, and pi-vim puts its mode label at the bottom rule's end, so declare that frame to Collie in `~/.config/collie/frames.toml` (a Collie build with `frames.toml` support; see Collie's "Your own editor frame"):
+To send a message in one tap and lift those cards, Collie has to find Pi's editor. pi-status-footer paints a context gauge into the editor's rules and draws a taller, indented footer, and pi-vim puts its mode label at the bottom rule's end, so declare that frame to Collie in `~/.config/collie/frames.toml` (a Collie build with `frames.toml` support, and checkbox cards for the multiple choice; see Collie's "Your own editor frame"):
 
 ```toml
 [pi]

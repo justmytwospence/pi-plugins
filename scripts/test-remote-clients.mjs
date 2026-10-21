@@ -90,15 +90,14 @@ function selectorLines(width) {
   return selector.render(width);
 }
 
-// Each dialog, and what each client must make of it. `collie: "unread-dialog"` is the Escape card:
-// Collie does not lift a pick-many question yet. `narrow` is what Collie makes of the dialog in a
+// Each dialog, and what each client must make of it. `narrow` is what Collie makes of the dialog in a
 // pane too narrow for its hint or an option row, a known gap with its reason: Collie joins a key hint
 // wrapped onto two rows with one space, which runs `enter select` into `escape/ctrl+c cancel`, and it
 // takes an option's wrapped rest only at the label's column, not behind the one-column `│` gutter
 // herdr-web-ui needs. Both are pi-reader fixes for Collie upstream.
 const DIALOGS = [
   { name: 'ask single', lines: (w) => questionLines([question(false)], w), herdr: { options: 4, multi: false }, collie: { kind: 'prompt-select', options: 4 }, narrow: 'unread-dialog' },
-  { name: 'ask multi', lines: (w) => questionLines([question(true)], w), herdr: { multi: true }, collie: { kind: 'unread-dialog' } },
+  { name: 'ask multi', lines: (w) => questionLines([question(true)], w), herdr: { multi: true }, collie: { kind: 'multi-select' }, narrow: 'unread-dialog' },
   { name: 'tool-gate approval', lines: approvalLines, herdr: { options: 3, multi: false }, collie: { kind: 'prompt-select' }, narrow: 'unread-dialog' },
   { name: 'pi select (plan approval, cache-guard)', lines: selectorLines, herdr: { options: 3, multi: false }, collie: { kind: 'prompt-select', options: 4 } },
 ];

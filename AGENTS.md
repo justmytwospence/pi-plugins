@@ -35,9 +35,9 @@ Before changing a dialog's rendering, the footer, or below-editor widgets, rende
 
 ## Collie compatibility
 
-Collie (AltanS/collie) also reads a waiting Pi dialog off the screen, and finds the editor by its frame to decide whether a phone send may type. Its pi reader knows Pi's own frame, so the suite's frame (pi-status-footer's `━` gauge in the editor rules and its indented footer, pi-vim's mode label at the bottom rule's end, pi-bg's activity row and the blank row under it) is declared to it in `~/.config/collie/frames.toml`, managed in dotfiles (`home/dot_config/collie/frames.toml`). That file needs a Collie build with `frames.toml` support: until upstream ships it, the fork branch `justmytwospence/collie` `feat/pi-frames`.
+Collie (AltanS/collie) also reads a waiting Pi dialog off the screen, and finds the editor by its frame to decide whether a phone send may type. Its pi reader knows Pi's own frame, so the suite's frame (pi-status-footer's `━` gauge in the editor rules and its indented footer, pi-vim's mode label at the bottom rule's end, pi-bg's activity row and the blank row under it) is declared to it in `~/.config/collie/frames.toml`, managed in dotfiles (`home/dot_config/collie/frames.toml`). That file needs a Collie build with `frames.toml` support: until upstream ships it, the fork branch `justmytwospence/collie` `feat/pi-multi-select` (frames, plus checkbox cards; `feat/pi-frames` alone has no checkbox cards).
 
-- The dialog layouts above serve Collie too: single-choice questions, tool-gate approvals and Pi's own selects lift as walked buttons; a multiple choice shows Collie's Escape card.
+- The dialog layouts above serve Collie too: single-choice questions, tool-gate approvals and Pi's own selects lift as walked buttons; a lone multiple choice lifts as checkboxes (its digits toggle, `tab done` submits, `Other` stays in the terminal), and several questions at once show Collie's Escape card.
 - A change to the editor's rules, the footer's height or indent, or a below-editor widget must stay inside `frames.toml`'s limits, or change that file with it (and restart Collie).
 - In a pane narrower than a dialog's key hint or an option row, Collie shows the Escape card instead of buttons: it joins a wrapped hint with one space and does not read the `│` gutter herdr-web-ui needs. Fix that in Collie, not by dropping the gutter.
 
