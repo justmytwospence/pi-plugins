@@ -85,13 +85,15 @@ Whatever you said, a call is held when it would send secrets or private data som
 
 A held call is blocked automatically the first time. The agent sees why (which checks failed and how sure Jev is, plus any quoted rules) and a suggested workaround, which Jev picks in a second request made only for held calls: preview it with a dry run, narrow it, make it reversible, keep it local, follow the project rule, skip it, or "no workaround, this is the user's call". The agent then does the job another way, drops the call, or makes its case in a short visible message and repeats the identical call.
 
-That retry, or another held call of the same family (same key, below) in the same user turn, is put to you with the hold reasons and the agent's case: Allow once, Allow similar for this session, Block, or Block with a message (always-held calls offer no "allow similar"). A message goes to the agent with the refusal, for example what to do instead, and the agent is told to follow it rather than to stop and ask you. Without a UI (print and JSON modes) the retry is blocked. Set `"pushBack": false` to be asked on the first hold.
+That retry, or another held call of the same family (same key, below) in the same user turn, is put to you with the hold reasons and the agent's case: Allow once, Allow similar for this session, Always allow similar in this project, Block, or Block with a message (always-held calls offer no "allow similar"). A message goes to the agent with the refusal, for example what to do instead, and the agent is told to follow it rather than to stop and ask you. Without a UI (print and JSON modes) the retry is blocked. Set `"pushBack": false` to be asked on the first hold.
 
 Dialogs are shown one at a time. In Pi's terminal UI the dialog shows the call itself, highlighted: a long one-line shell command laid out one step per line (only whitespace changes), an edit or overwrite as a diff against the file, a new file in its language, any other tool's input as JSON. Below it are why it was held and the agent's case, rendered as Markdown. Long parts are clamped; Pi's `app.tools.expand` key (Ctrl+O by default) expands them. The choices end as Pi's own select does (a one-line question, the rows, Pi's key hint), so herdr-web-ui shows them as a chat card. `j`/`k`, Ctrl+J/Ctrl+K and the arrow keys move, Enter selects, Esc blocks, and `n` (or the Block with a message row) opens a `›` message field under the choices, laid out as Pi's text input: Enter blocks with it, Esc goes back to the choices. The field uses an editor provider such as pi-vim when one answers on the suite's editor-factory channel, as pi-ask-user-question's fields do. In other UI modes (RPC clients, and subagent dialogs forwarded by pi-subagents) the question is a plain select with a one-line summary, followed by a text input when you pick Block with a message.
 
 ### Allow similar
 
-"Allow similar" names what it grants, for example ``Allow similar for this session (`docker restart`, `python3`)``. A shell call is keyed by each command in it that does more than read, as program plus subcommand when it takes one (`git push`, `docker compose up`, `gh repo create`, `bin/homelab status`); `cd`, `echo`, loop headers, assignments, `$(...)` substitutions and here-document bodies are skipped. A later call runs unasked when every one of its keys was granted, whatever directory it starts in. Calls whose commands all only read (held back only by a substitution or redirect) share one key. Edits and writes are keyed by tool and directory, other tools by name. Grants are held in memory and never saved.
+"Allow similar" names what it grants, for example ``Allow similar for this session (`docker restart`, `python3`)``. A shell call is keyed by each command in it that does more than read, as program plus subcommand when it takes one (`git push`, `docker compose up`, `gh repo create`, `bin/homelab status`); `cd`, `echo`, loop headers, assignments, `$(...)` substitutions and here-document bodies are skipped. A later call runs unasked when every one of its keys was granted, whatever directory it starts in. Calls whose commands all only read (held back only by a substitution or redirect) share one key. Edits and writes are keyed by tool and directory, other tools by name. Session grants are held in memory and never saved.
+
+"Always allow similar in this project" grants the same keys and saves them in `~/.pi/agent/tool-gate/project-grants.json` (under `PI_CODING_AGENT_DIR`), keyed by the project's main checkout so its worktrees share them. They stay outside the repository because they hold this machine's absolute paths. `/gate grants` lists them; picking one revokes it.
 
 ### Jev unavailable
 
@@ -99,7 +101,7 @@ When Jev cannot answer (Jev off in settings, no classifier model, no credentials
 
 ## Directories
 
-Pi has no directory boundary of its own, so the gate keeps one. In auto, manual and accept-edits modes (and for reads in chat and plan mode), a call is held when it touches a path outside its project's directories, before any Jev call. Auto mode pushes it back once, as with any held call, and then asks you. "Allow similar" grants that folder for the session.
+Pi has no directory boundary of its own, so the gate keeps one. In auto, manual and accept-edits modes (and for reads in chat and plan mode), a call is held when it touches a path outside its project's directories, before any Jev call. Auto mode pushes it back once, as with any held call, and then asks you. "Allow similar" grants that folder for the session, or always for the project: a folder under a private root (`~/Projects/other`), the private root itself for a file directly in it (`~/Downloads/shot.png` grants `~/Downloads`), else the file's directory.
 
 - The project (the git checkout of the working directory, and the main checkout of a worktree) is always readable and writable.
 - Private roots (`directories.private`: `~/Projects`, `~/Documents`, `~/Desktop`, `~/Downloads`, iCloud Drive) are neither read nor written outside the project and its grants.
@@ -136,7 +138,8 @@ This is a heuristic over arguments. Paths a program builds at runtime are not se
 ## Commands
 
 - `/mode [chat|manual|accept-edits|plan|auto|yolo]`: switch modes; with no argument, pick one from a list of every mode.
-- `/gate` or `/gate status`: the mode and cycle, counts, Jev model, push-back setting, number of rules and session grants.
+- `/gate` or `/gate status`: the mode and cycle, counts, Jev model, push-back setting, number of rules, session grants and project grants.
+- `/gate grants`: this project's saved grants; pick one to revoke it.
 - `/gate on`, `/gate off`: auto mode, or yolo mode.
 
 The status line shows the mode (`permission-mode` key, `⏵⏵ auto mode on (shift+tab to cycle)`) and, in auto and plan mode, `gate: N auto · P pushed back · M asked`. Every call Jev judges is recorded in the session as a `tool-gate:decision` custom entry (tool, clipped arguments, scores, failures, action, latency, input tokens), for tuning thresholds. Jev's token usage is added to the gated tool's result.
@@ -228,7 +231,7 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
 - It is not a sandbox. It inspects tool names and arguments before a call; it does not confine what a command does once it runs. The read-only command rules are a parser's best effort over shell syntax, and Jev's judgment is probabilistic.
 - Tools in `allowTools` are never inspected. `codemode` is on the default list because the tools its scripts call are expected to be gated on their own; if they are not in your setup, remove it.
 - When Jev is unavailable and there is no UI, every call except the always-held ones is allowed.
-- "Allow similar" grants are held in memory; they are not saved. The mode is saved in the session.
+- "Allow similar for this session" grants are held in memory; project grants are saved outside the repository. The mode is saved in the session.
 
 ## Development
 

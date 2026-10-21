@@ -220,6 +220,35 @@ describe("the gate", () => {
     expect(jev.calls.filter((c) => !c.questions.workaround)).toHaveLength(0);
   });
 
+  test("a project grant outlives the session and can be revoked with /gate grants", async () => {
+    const first = setup();
+    await first.h.emit("session_start", {}, first.ctx);
+    await first.h.emit("before_agent_start", { prompt: "x" }, first.ctx);
+    const pushed: any = await first.h.emit("tool_call", call("read", { path: "~/Downloads/shot.png" }), first.ctx);
+    expect(pushed.block).toBe(true);
+    first.ctx.ui.selectAnswers.push("Always allow similar in this project (reads in ~/Downloads)");
+    expect(await first.h.emit("tool_call", call("read", { path: "~/Downloads/shot.png" }, "t2"), first.ctx)).toBeUndefined();
+    expect(first.ctx.ui.selects[0]?.options.slice(1, 3)).toEqual([
+      "Allow similar for this session (reads in ~/Downloads)",
+      "Always allow similar in this project (reads in ~/Downloads)",
+    ]);
+    const stored = JSON.parse(readFileSync(path.join(configDir, "pi", "tool-gate", "project-grants.json"), "utf8"));
+    expect(stored[app]).toEqual([expect.objectContaining({ key: `dir:read:${H}/Downloads`, label: "reads in ~/Downloads" })]);
+
+    // A new session in the same project: no asking.
+    const second = setup();
+    await second.h.emit("session_start", {}, second.ctx);
+    await second.h.emit("before_agent_start", { prompt: "x" }, second.ctx);
+    expect(await second.h.emit("tool_call", call("read", { path: "~/Downloads/other.pdf" }), second.ctx)).toBeUndefined();
+    expect(second.ctx.ui.selects).toHaveLength(0);
+
+    second.ctx.ui.selectAnswers.push(`reads in ~/Downloads (since ${new Date().toISOString().slice(0, 10)})`);
+    await second.h.commands.get("gate").handler("grants", second.ctx);
+    expect(JSON.parse(readFileSync(path.join(configDir, "pi", "tool-gate", "project-grants.json"), "utf8"))).toEqual({});
+    const again: any = await second.h.emit("tool_call", call("read", { path: "~/Downloads/other.pdf" }, "t3"), second.ctx);
+    expect(again.block).toBe(true);
+  });
+
   test("write grants and read-anywhere come from tool-gate.json", async () => {
     const { h, ctx, jev } = setup({ read: ["*"], write: ["~/dotfiles"] });
     await h.emit("session_start", {}, ctx);

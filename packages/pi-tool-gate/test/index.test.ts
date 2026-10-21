@@ -86,7 +86,13 @@ test("a held call is pushed back with Jev's reasons and suggestion; the agent's 
   expect(await h.emit("tool_call", call("bash", { command: "npm publish" }, "t2"), ctx)).toBeUndefined();
   expect(ctx.ui.selects[0]?.title).toMatch(/Held: it changes something other people see/u);
   expect(ctx.ui.selects[0]?.title).toMatch(/Agent: Publishing is the whole point/u);
-  expect(ctx.ui.selects[0]?.options).toEqual(["Allow once", "Allow similar for this session (`npm publish`)", "Block", "Block with a message"]);
+  expect(ctx.ui.selects[0]?.options).toEqual([
+    "Allow once",
+    "Allow similar for this session (`npm publish`)",
+    "Always allow similar in this project (`npm publish`)",
+    "Block",
+    "Block with a message",
+  ]);
   // The grant covers the same program and subcommand without asking again, wherever it starts.
   expect(await h.emit("tool_call", call("bash", { command: "npm publish --dry-run" }, "t3"), ctx)).toBeUndefined();
   expect(await h.emit("tool_call", call("bash", { command: "cd pkg && echo go; npm publish" }, "t4"), ctx)).toBeUndefined();

@@ -35,6 +35,7 @@ import {
   shown,
   violations,
 } from "./dirs.ts";
+import { addGrants, grantsFile, loadGrants, removeGrant } from "./grants.ts";
 import { whileBlocked } from "./herdr.ts";
 import { type ClassifierUsage, type JevConfig, askJev } from "./jev.ts";
 import {
@@ -131,10 +132,17 @@ type Plan =
     }
   | { kind: "judge"; args: string; key: string; similar: Similar };
 
-/** What "allow similar for this session" grants: every key, described for the user. */
+/** What "allow similar" grants (for the session or the project): every key, described for the user. */
 interface Similar {
   keys: string[];
+  /** One description per key. */
+  labels: string[];
   label: string;
+}
+
+function similarOf(items: ReadonlyArray<readonly [key: string, label: string]>): Similar {
+  const labels = items.map(([, label]) => label);
+  return { keys: items.map(([key]) => key), labels, label: labels.join(", ") };
 }
 
 interface Annotations {
@@ -160,6 +168,9 @@ export default function toolGate(pi: ExtensionAPI) {
   /** Calls (and families of calls) pushed back this user turn; a retry goes to the user. */
   const pushedBackThisTurn = new Set<string>();
   const allowSimilar = new Set<string>();
+  /** "Always allow similar in this project" grants for the current project, from grants.ts. */
+  let projectGrants = new Set<string>();
+  const granted = (key: string) => allowSimilar.has(key) || projectGrants.has(key);
   const pendingUsage = new Map<string, ClassifierUsage>();
   let gitInfo: Promise<{ branch: string; dirty: boolean } | undefined> | undefined;
   let dialogs: Promise<unknown> = Promise.resolve();
@@ -320,6 +331,14 @@ export default function toolGate(pi: ExtensionAPI) {
     return found;
   };
   const policyFor = async (cwd: string): Promise<Policy> => resolvePolicy(config.directories, await projectOf(cwd));
+  /** Where project grants are kept: the main checkout, so a project's worktrees share them. */
+  const projectKey = async (cwd: string) => {
+    const checkouts = await projectOf(cwd);
+    return checkouts[checkouts.length - 1] ?? path.resolve(cwd);
+  };
+  const refreshProjectGrants = async (cwd: string) => {
+    projectGrants = new Set(loadGrants(await projectKey(cwd)).map((g) => g.key));
+  };
 
   /** Paths this call touches that the directory policy does not cover, minus folders granted this session. */
   const directoryHolds = async (tool: string, input: Record<string, unknown>, cwd: string) => {
@@ -339,7 +358,7 @@ export default function toolGate(pi: ExtensionAPI) {
       // The plan file pi-plan-mode hands out is always writable.
       if (planFile && access.writes[0] === planFile) return [];
     }
-    return violations(policy, access).filter((v) => !allowSimilar.has(grantKey(v)));
+    return violations(policy, access).filter((v) => !granted(grantKey(v)));
   };
 
   const plan = async (tool: string, input: Record<string, unknown>, cwd: string): Promise<Plan> => {
@@ -353,10 +372,7 @@ export default function toolGate(pi: ExtensionAPI) {
     const hints = [...new Set(holds.flatMap((v) => (v.hint !== undefined ? [v.hint || "Edit its source instead."] : [])))];
     const advice = hints.length ? hints.join(" ") : undefined;
     const scopes = [...new Map(holds.map((v) => [grantKey(v), v])).values()];
-    const similar: Similar = {
-      keys: scopes.map(grantKey),
-      label: scopes.map((v) => `${v.access}s in ${shown(v.scope)}`).join(", "),
-    };
+    const similar = similarOf(scopes.map((v) => [grantKey(v), `${v.access}s in ${shown(v.scope)}`] as const));
     const args = base.kind === "allow" ? clip(SHELL_TOOLS.has(tool) ? String(input.command ?? "") : JSON.stringify(input), 6_000) : base.args;
     if (base.kind === "ask") return { ...base, reasons: [...base.reasons, ...reasons], key: `${base.key}; dirs`, advice };
     return { kind: "ask", reasons, key: `dirs:${similar.keys.join("|")}`, args, similar, readOnly: base.kind === "allow", advice };
@@ -376,7 +392,7 @@ export default function toolGate(pi: ExtensionAPI) {
         kind: "judge",
         args: clip(command, 6_000),
         key: `bash:${keys.join("|")}`,
-        similar: { keys: keys.map((k) => `bash:${k}`), label: keys.map((k) => `\`${k}\``).join(", ") },
+        similar: similarOf(keys.map((k) => [`bash:${k}`, `\`${k}\``] as const)),
       };
     }
     if (tool === "edit" || tool === "write") {
@@ -389,7 +405,7 @@ export default function toolGate(pi: ExtensionAPI) {
         kind: "judge",
         args: clip(JSON.stringify(input), 6_000),
         key: `${tool}:${dir}`,
-        similar: { keys: [`${tool}:${dir}`], label: `${tool}s in ${shown.startsWith("..") ? dir : shown}` },
+        similar: similarOf([[`${tool}:${dir}`, `${tool}s in ${shown.startsWith("..") ? dir : shown}`]]),
       };
     }
     if (BUILTIN_READ.has(tool)) {
@@ -400,7 +416,7 @@ export default function toolGate(pi: ExtensionAPI) {
       return { kind: "allow", why: "read-only tool" };
     }
     if (annotations(tool)?.readOnlyHint === true) return { kind: "allow", why: "read-only hint" };
-    return { kind: "judge", args: clip(JSON.stringify(input), 6_000), key: `tool:${tool}`, similar: { keys: [`tool:${tool}`], label: `${tool} calls` } };
+    return { kind: "judge", args: clip(JSON.stringify(input), 6_000), key: `tool:${tool}`, similar: similarOf([[`tool:${tool}`, `${tool} calls`]]) };
   };
 
   const editorFactory = embeddedEditorFactory(pi);
@@ -413,7 +429,8 @@ export default function toolGate(pi: ExtensionAPI) {
   ): Promise<{ block?: boolean; reason?: string } | undefined> => {
     const run = async () => {
       const similarOption = similar ? `Allow similar for this session (${clip(similar.label, 80)})` : undefined;
-      const options = ["Allow once", ...(similarOption ? [similarOption] : []), "Block"];
+      const projectOption = similar ? `Always allow similar in this project (${clip(similar.label, 80)})` : undefined;
+      const options = ["Allow once", ...(similarOption && projectOption ? [similarOption, projectOption] : []), "Block"];
       const title = [
         `Allow? ${describeCall(q.tool, q.input)}`,
         ...(q.held !== undefined ? [`Held: ${q.held}`] : []),
@@ -431,6 +448,17 @@ export default function toolGate(pi: ExtensionAPI) {
       if (answer?.choice === "Allow once") return undefined;
       if (answer !== undefined && answer.choice === similarOption && similar) {
         for (const key of similar.keys) allowSimilar.add(key);
+        return undefined;
+      }
+      if (answer !== undefined && answer.choice === projectOption && similar) {
+        for (const key of similar.keys) allowSimilar.add(key);
+        const project = await projectKey(ctx.cwd);
+        try {
+          addGrants(project, similar.keys.map((key, i) => ({ key, label: similar.labels[i] ?? key })));
+          for (const key of similar.keys) projectGrants.add(key);
+        } catch (error) {
+          ctx.ui.notify(`tool-gate: could not save the project grant (${(error as Error).message}); allowed for this session only.`, "warning");
+        }
         return undefined;
       }
       if (answer?.message) {
@@ -575,7 +603,7 @@ export default function toolGate(pi: ExtensionAPI) {
     input: Record<string, unknown>,
     p: Exclude<Plan, { kind: "allow" }>,
   ) => {
-    if (p.kind === "judge" && p.similar.keys.every((key) => allowSimilar.has(key))) return allow(ctx);
+    if (p.kind === "judge" && p.similar.keys.every(granted)) return allow(ctx);
     held++;
     status(ctx);
     if (!ctx.hasUI) {
@@ -598,6 +626,8 @@ export default function toolGate(pi: ExtensionAPI) {
       if (!ctx.hasUI) return { block: true, reason: `tool-gate held this call: it ${critical.join("; ")}. There is no user to approve it.` };
       return ask(ctx, { tool, input, held: critical.join("; ") }, undefined);
     }
+
+    await refreshProjectGrants(ctx.cwd);
 
     if (mode === "chat") {
       // Talking, not acting: what the gate counts as read-only runs, nothing else does.
@@ -647,7 +677,7 @@ export default function toolGate(pi: ExtensionAPI) {
       });
     }
 
-    if (p.similar.keys.every((key) => allowSimilar.has(key))) {
+    if (p.similar.keys.every(granted)) {
       auto++;
       status(ctx);
       return undefined;
@@ -757,9 +787,9 @@ export default function toolGate(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("gate", {
-    description: "tool-gate: status; on (auto mode) or off (yolo mode)",
+    description: "tool-gate: status; on (auto mode) or off (yolo mode); grants (review or revoke this project's grants)",
     getArgumentCompletions: (prefix: string) =>
-      ["status", "on", "off"].filter((o) => o.startsWith(prefix)).map((o) => ({ value: o, label: o })),
+      ["status", "on", "off", "grants"].filter((o) => o.startsWith(prefix)).map((o) => ({ value: o, label: o })),
     handler: async (args, ctx) => {
       const arg = args.trim();
       if (arg === "on" || arg === "off") {
@@ -767,13 +797,32 @@ export default function toolGate(pi: ExtensionAPI) {
         ctx.ui.notify(arg === "on" ? "Auto mode on" : "Yolo mode on: every call runs", "info");
         return;
       }
+      const project = await projectKey(ctx.cwd);
+      if (arg === "grants") {
+        const grants = loadGrants(project);
+        if (!grants.length) {
+          ctx.ui.notify(`No project grants for ${shown(project)}.`, "info");
+          return;
+        }
+        const labels = grants.map((g) => `${g.label}${g.added ? ` (since ${g.added.slice(0, 10)})` : ""}`);
+        const picked = await ctx.ui.select(`Project grants for ${shown(project)} (enter revokes)`, labels);
+        const grant = picked === undefined ? undefined : grants[labels.indexOf(picked)];
+        if (!grant) return;
+        removeGrant(project, grant.key);
+        projectGrants.delete(grant.key);
+        allowSimilar.delete(grant.key);
+        ctx.ui.notify(`Revoked: ${grant.label}.`, "info");
+        return;
+      }
       const rules = loadRules(ctx.cwd);
+      const projectCount = loadGrants(project).length;
       ctx.ui.notify(
         [
           `Mode: ${MODE_NAMES[mode]} (${MODE_DESCRIPTIONS[mode]}) Cycle: ${cycle().map((m) => MODE_NAMES[m]).join(" → ")}.`,
           `${auto} auto-approved, ${pushedBack} pushed back, ${held} asked this session.`,
           `Jev: ${config.jev.enabled ? `${config.jev.provider}/${config.jev.model}` : "off"}; push-back ${config.pushBack ? "on" : "off"}.`,
-          `${rules.length} project rule${rules.length === 1 ? "" : "s"}; ${allowSimilar.size} "allow similar" grant${allowSimilar.size === 1 ? "" : "s"}.`,
+          `${rules.length} project rule${rules.length === 1 ? "" : "s"}; ${allowSimilar.size} "allow similar" grant${allowSimilar.size === 1 ? "" : "s"} this session; ` +
+            `${projectCount} for this project (/gate grants; ${shown(grantsFile())}).`,
           config.directories.enabled === false ? "Directory policy: off." : describePolicy(await policyFor(ctx.cwd)),
         ].join("\n"),
         "info",
