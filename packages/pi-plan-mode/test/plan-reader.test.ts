@@ -1,5 +1,5 @@
 import { type ExtensionContext, initTheme } from "@earendil-works/pi-coding-agent";
-import { setKeybindings } from "@earendil-works/pi-tui";
+import { setKeybindings, TUI_KEYBINDINGS, KeybindingsManager as TuiKeybindingsManager } from "@earendil-works/pi-tui";
 import { beforeAll, expect, test } from "vitest";
 import { KeybindingsManager } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js";
 import { theme } from "../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js";
@@ -12,8 +12,9 @@ const strip = (line: string) => line.replace(new RegExp(`${ESC}\\[[0-9;]*m`, "g"
 
 beforeAll(() => {
   initTheme("dark", false);
-  // Pi's app bindings, as the interactive mode installs them (Ctrl+G edits the plan).
-  setKeybindings(new KeybindingsManager());
+  // As in a bundled Pi: the pi-tui extensions import never gets the app's bindings, so the
+  // reader must use the manager ui.custom hands it.
+  setKeybindings(new TuiKeybindingsManager(TUI_KEYBINDINGS));
 });
 
 function reader(rows = 30) {
@@ -23,6 +24,7 @@ function reader(rows = 30) {
     OPTIONS,
     "Keep planning",
     theme,
+    new KeybindingsManager(),
     () => rows,
     (choice) => results.push(choice),
     () => {},
@@ -128,7 +130,7 @@ test("the TUI opens the reader full screen; abort closes it", async () => {
         const component = (factory as (...args: unknown[]) => PlanReader)(
           { terminal: { rows: 24 }, requestRender() {} },
           theme,
-          undefined,
+          new KeybindingsManager(),
           resolve,
         );
         opened = { options, component };

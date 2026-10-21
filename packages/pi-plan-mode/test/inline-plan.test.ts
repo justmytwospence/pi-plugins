@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
+import { KeybindingsManager } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js";
+import { theme } from "../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js";
 import planMode from "../src/index.js";
 import {
   ENTER_TOOL,
@@ -39,8 +41,9 @@ async function setup(
   });
   const answers = [...(options.select ?? [])];
   const selects: Array<{ title: string; options: string[] }> = [];
+  // RPC: Pi's select asks (test/plan-reader.test.ts covers the TUI reader).
   const context = createMockContext({
-    mode: "tui",
+    mode: "rpc",
     hasUI: true,
     cwd: options.cwd ?? "/work/app",
     select: async (title: string, choices: string[]) => {
@@ -265,6 +268,28 @@ test("with the gate's yolo mode enabled, approval offers it and switches the gat
     ["plan", "bypassPermissions"],
   );
   assert.equal(inline().active, false);
+});
+
+test("in the TUI, review opens the full-screen reader with Pi's keybindings, and Enter twice approves", async () => {
+  const { mock, context, tool, inline } = await setup({ gate: true });
+  await mock.commands.get("plan")?.handler("", context.ctx);
+  writeFileSync(inline().planFile, "# Plan\n\nDo it.");
+  const ctx = context.ctx as ExtensionContext & { mode: string };
+  ctx.mode = "tui";
+  let overlay: unknown;
+  (ctx.ui as unknown as { custom: unknown }).custom = (
+    factory: (...args: unknown[]) => { handleInput(data: string): void },
+    options: unknown,
+  ) =>
+    new Promise((resolve) => {
+      overlay = options;
+      const reader = factory({ terminal: { rows: 20 }, requestRender() {} }, theme, new KeybindingsManager(), resolve);
+      reader.handleInput("\r");
+      reader.handleInput("\r");
+    });
+  const result = await tool(EXIT_TOOL).execute("t1", {}, undefined, undefined, ctx);
+  assert.deepEqual((overlay as { overlay?: boolean }).overlay, true);
+  assert.equal(result.details.mode, "auto");
 });
 
 test("plan tools stay top-level so codemode cannot hide the inline plan review", async () => {

@@ -10,10 +10,14 @@
 // herdr-web-ui reads the choices as a phone card: their panel's padding rows hold, concealed,
 // the rule and Pi's hint line its parser needs. While reading, phones get its bare Enter/Esc card;
 // Enter there opens the choices, which then read as the full card.
-import { type ExtensionContext, getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
+import {
+  type ExtensionContext,
+  getMarkdownTheme,
+  type KeybindingsManager,
+  type Theme,
+} from "@earendil-works/pi-coding-agent";
 import {
   type Component,
-  getKeybindings,
   matchesKey,
   type TuiMouseEvent,
   type TuiMouseEventResult,
@@ -43,14 +47,14 @@ export async function choosePlanApproval(
   keep: string,
   signal?: AbortSignal,
 ): Promise<string | undefined> {
-  if (ctx.mode !== "tui" || typeof ctx.ui.custom !== "function" || !editKeyBound()) {
+  if (ctx.mode !== "tui" || typeof ctx.ui.custom !== "function") {
     const withEdit = [...options.slice(0, -1), EDIT_CHOICE, ...options.slice(-1)];
     return ctx.ui.select(title, withEdit, { signal });
   }
   if (signal?.aborted) return undefined;
   let abort: (() => void) | undefined;
   try {
-    return await ctx.ui.custom<string | undefined>((tui, theme, _keybindings, done) => {
+    return await ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) => {
       abort = () => done(undefined);
       signal?.addEventListener("abort", abort, { once: true });
       return new PlanReader(
@@ -58,6 +62,7 @@ export async function choosePlanApproval(
         options,
         keep,
         theme,
+        keybindings,
         () => tui.terminal.rows,
         done,
         () => tui.requestRender(),
@@ -65,14 +70,6 @@ export async function choosePlanApproval(
     }, FULL_SCREEN as never);
   } finally {
     if (abort) signal?.removeEventListener("abort", abort);
-  }
-}
-
-function editKeyBound() {
-  try {
-    return getKeybindings().getKeys(EDIT_KEY).length > 0;
-  } catch {
-    return false;
   }
 }
 
@@ -90,6 +87,11 @@ export class PlanReader implements Component {
     readonly options: string[],
     private readonly keep: string,
     private readonly theme: Theme,
+    /**
+     * Pi's own keybindings, from ui.custom. Not pi-tui's global getKeybindings(): a bundled Pi
+     * keeps its own copy of pi-tui, so the copy extensions import never gets the app's bindings.
+     */
+    private readonly kb: KeybindingsManager,
     private readonly rows: () => number,
     private readonly done: (choice: string | undefined) => void,
     private readonly requestRender: () => void,
@@ -135,7 +137,7 @@ export class PlanReader implements Component {
   }
 
   handleInput(data: string): void {
-    const kb = getKeybindings();
+    const kb = this.kb;
     if (kb.matches(data, EDIT_KEY)) {
       this.done(EDIT_CHOICE);
       return;
@@ -154,10 +156,13 @@ export class PlanReader implements Component {
     else if (kb.matches(data, "tui.select.down") || data === "j") this.scroll(1);
     else if (matchesKey(data, "ctrl+u")) this.scroll(-half);
     else if (matchesKey(data, "ctrl+d")) this.scroll(half);
-    else if (matchesKey(data, "pageUp")) this.scroll(-this.page);
-    else if (matchesKey(data, "pageDown") || data === " ") this.scroll(this.page);
-    else if (matchesKey(data, "home") || data === "g") this.scroll(-this.total);
-    else if (matchesKey(data, "end") || data === "G") this.scroll(this.total);
+    else if (kb.matches(data, "tui.select.pageUp") || matchesKey(data, "pageUp")) this.scroll(-this.page);
+    else if (kb.matches(data, "tui.select.pageDown") || matchesKey(data, "pageDown") || data === " ")
+      this.scroll(this.page);
+    else if (kb.matches(data, "tui.altScreen.top") || matchesKey(data, "home") || data === "g")
+      this.scroll(-this.total);
+    else if (kb.matches(data, "tui.altScreen.bottom") || matchesKey(data, "end") || data === "G")
+      this.scroll(this.total);
   }
 
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
