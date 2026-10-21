@@ -51,7 +51,7 @@ While plan mode is on:
   - **Keep planning** (or Esc while reading): say what should change (or leave it empty and say it in the chat). Plan mode stays on.
   - Ctrl+G (Pi's `app.editor.external`) at any point edits the plan in your external editor (Pi's `externalEditor` setting, else `$VISUAL` / `$EDITOR`; a Markdown editor such as [edamame](https://github.com/mijowi/edamame) keeps it rendered while you edit), or in Pi's editor when none is set; the file is updated and the reader reopens at its top. The approval tells your agent the plan was edited.
 
-  In RPC the plan shows in the chat and Pi's select asks, with **Edit the plan** as a row. On a phone, herdr-web-ui cannot read the reader as a dialog and shows its plain Enter/Esc card.
+  In RPC the plan shows in the chat and Pi's select asks, with **Edit the plan** as a row. On a phone, herdr-web-ui shows its plain Enter/Esc card while you read; Enter opens the choices, which it shows as a full card (their panel carries the hint it needs, concealed).
 - Leaving plan mode another way (Shift+Tab, or the shortcut) tells your agent it may now make changes.
 
 The plan tools are model-only: your agent calls them directly, never inside `codemode`. This keeps the plan's renderer in the chat for the record. Auto mode uses Jev to judge each call; auto-accept project edits allows project edits and filesystem commands without approval, while other commands follow the gate's normal approval policy.

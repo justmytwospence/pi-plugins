@@ -67,19 +67,29 @@ test("keys and the wheel scroll, clamped to the plan", () => {
   expect(view.render(80).map(strip).at(-1)).toContain("Step 80");
 });
 
+/** What the terminal shows: concealed (SGR 8) text drawn as blanks. */
+const visible = (line: string) =>
+  strip(line.replace(new RegExp(`${ESC}\\[8m(.*?)${ESC}\\[28m`, "g"), (_, text: string) => " ".repeat(text.length)));
+
 test("Enter shows only the choices over the plan's end; Esc goes back to reading", () => {
   const { view, results } = reader(20);
   view.handleInput("\r");
-  const lines = view.render(60).map(strip);
-  expect(lines).toHaveLength(20);
-  expect(lines.slice(-4)).toEqual([
+  const frame = view.render(60);
+  expect(frame).toHaveLength(20);
+  // On screen: the plan, then a tinted block of the options between two empty-looking rows.
+  expect(frame.map(visible).slice(-6)).toEqual([
+    "",
     " → Implement in auto mode",
     "   Implement in yolo mode",
     "   Implement in a fresh session",
     "   Keep planning",
+    "",
   ]);
-  expect(lines[0]).toContain("Beginning of plan");
-  expect(lines.join("\n")).not.toMatch(/─|navigate|Implement this plan/u);
+  expect(frame.map(visible)[0]).toContain("Beginning of plan");
+  // In the pane's text, as herdr-web-ui reads it: a rule ending the rows, then Pi's hint last.
+  const text = frame.map(strip);
+  expect(text.at(-6)).toMatch(/^─{8,}$/u);
+  expect(text.at(-1)).toBe(" ↑↓ navigate  enter select  escape/ctrl+c cancel");
   view.handleInput(ESC);
   expect(view.isChoosing).toBe(false);
   expect(results).toEqual([]);

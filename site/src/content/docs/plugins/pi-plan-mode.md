@@ -34,7 +34,7 @@ When the plan is complete, your agent calls `exit_plan_mode` directly. Plan tool
 - **Implement in a fresh session**: a child session starts with the plan once the current turn ends.
 - **Keep planning** (or Esc while reading): give feedback, or leave it empty and say it in the chat.
 
-Ctrl+G edits the plan in your external editor, or Pi's editor when none is set, and reopens the reader. In RPC, Pi's select asks, with **Edit the plan** as a row. herdr-web-ui cannot read the full-screen reader, so phones get its plain Enter/Esc card for plan review.
+Ctrl+G edits the plan in your external editor, or Pi's editor when none is set, and reopens the reader. In RPC, Pi's select asks, with **Edit the plan** as a row. On a phone, herdr-web-ui shows its plain Enter/Esc card while you read; Enter opens the choices, which it shows as a full card.
 
 Plan mode itself makes no extra model requests; your agent plans on the session's model.
 

@@ -7,8 +7,9 @@
 // g/G and Home/End the ends, and the wheel scrolls. Enter: the choices. Ctrl+G (Pi's
 // app.editor.external): edit the plan. Esc: keep planning.
 //
-// herdr-web-ui cannot read this as a dialog (it needs Pi's hint line), so phones get its bare
-// Enter/Esc card for plan review.
+// herdr-web-ui reads the choices as a phone card: their panel's padding rows hold, concealed,
+// the rule and Pi's hint line its parser needs. While reading, phones get its bare Enter/Esc card;
+// Enter there opens the choices, which then read as the full card.
 import { type ExtensionContext, getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import {
   type Component,
@@ -18,6 +19,7 @@ import {
   type TuiMouseEventResult,
   truncateToWidth,
   visibleWidth,
+  wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { FULL_SCREEN } from "./app/frame.js";
 import { PlanMarkdown } from "./mermaid-art.js";
@@ -26,6 +28,8 @@ export const EDIT_CHOICE = "Edit the plan";
 const EDIT_KEY = "app.editor.external";
 /** The plan's column: wider prose is hard to read. */
 const MAX_WIDTH = 100;
+/** Pi's selector hint, which herdr-web-ui looks for at the end of the screen. */
+const HINT = "↑↓ navigate  enter select  escape/ctrl+c cancel";
 
 /**
  * Ask which of `options` to take after reading `plan`. Returns EDIT_CHOICE to edit, `keep` when
@@ -108,13 +112,26 @@ export class PlanReader implements Component {
     const lines = plan.slice(this.top, this.top + height);
     while (lines.length < height) lines.push("");
     if (!this.choosing) return lines.map((line) => truncateToWidth(line, width));
-    const choices = this.options.map((option, index) => {
+    const panel = (text: string) =>
+      this.theme.bg("selectedBg", text + " ".repeat(Math.max(0, width - visibleWidth(text))));
+    const options = this.options.map((option, index) => {
       const row = index === this.selected ? this.theme.fg("accent", `→ ${option}`) : `  ${option}`;
-      const text = truncateToWidth(`${margin}${row}`, width);
-      return this.theme.bg("selectedBg", text + " ".repeat(Math.max(0, width - visibleWidth(text))));
+      return panel(truncateToWidth(`${margin}${row}`, width));
     });
+    // The panel's padding rows look empty but carry, concealed, what herdr-web-ui's Pi parser
+    // needs for a phone card: a rule ending the option rows above (an empty question), and Pi's
+    // key hint as the screen's last line (wrapped when the pane is too narrow for it).
+    const hidden = (text: string) => panel(this.conceal(text));
+    const hint = wrapTextWithAnsi(HINT, Math.max(1, width - 1)).map((line) => hidden(` ${line}`));
+    const choices = [hidden("─".repeat(Math.min(width, 16))), ...options, ...hint];
     const kept = lines.slice(0, Math.max(0, height - choices.length)).map((line) => truncateToWidth(line, width));
     return [...kept, ...choices.slice(-height)];
+  }
+
+  /** Text the terminal does not show (SGR 8, and the panel's colour as a fallback) but screen readers of the pane do. */
+  private conceal(text: string) {
+    const fg = this.theme.getBgAnsi("selectedBg").replace("[48;", "[38;");
+    return `${fg}\x1b[8m${text}\x1b[28m\x1b[39m`;
   }
 
   handleInput(data: string): void {
