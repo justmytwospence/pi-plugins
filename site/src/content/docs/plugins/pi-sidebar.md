@@ -6,7 +6,7 @@ plugin: pi-sidebar
 
 ## Quick reference
 
-- **Use it for:** Ask what the main agent is doing, why, or how the code works, without interrupting it. Quiz mode (`/quiz`) also quizzes you on main's changes and tracks what you know.
+- **Use it for:** Ask what the main agent is doing, why, or how the code works, without interrupting it. Quiz mode (`/quiz`) also quizzes you on main's changes and tracks what you know. Heads-up mode, on by default, notes one thing worth knowing above main's editor during longer runs.
 - **Enable:** Select `packages/pi-sidebar/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
 - **Controls:** Ctrl+' opens or closes Sidebar. In Herdr, `prefix+h/l` moves between main and Sidebar as if Sidebar were a pane (with the bundled Herdr plugin). In Sidebar, your own keybindings apply: pi-vim's Ctrl+U/D and your transcript scroll keys (such as Ctrl+G) scroll it, Esc stops an answer, Ctrl+O expands tools, and your thinking toggle shows or hides reasoning.
 - **Settings:** `PI_SIDEBAR_KEYS` replaces the key. `PI_SIDEBAR_RATIO` sets Sidebar's share (default 0.5) until you drag the divider, which is remembered. `PI_SIDEBAR_MIN_COLUMNS` is the narrowest half for a side-by-side split (default 80). The model and thinking always match main.
@@ -80,6 +80,26 @@ Quiz mode is a voluntary tutor for main's work. It never blocks main or git.
 - **Knowledge profile:** grades build a per-repository profile in `~/.pi/agent/pi-sidebar/knowledge/` (or `PI_SIDEBAR_KNOWLEDGE`). Harder questions count more and old evidence fades, so a concept is *proven*, *shaky* or *due* for review. Questions aim at your gaps.
 - **Nudges:** when main finishes a run that changed files, Sidebar's notice says so. Nothing is sent until you ask.
 - **Cost and privacy:** questions keep main's cache sharing intact. Rubrics and grades are hidden blocks in Sidebar's replies, never displayed. Answers stay in Sidebar's hidden thread and never reach main's model.
+
+## Heads-up mode
+
+During main's longer runs, heads-up mode occasionally checks for one thing you should know but might have missed: an unstated tradeoff, a result that looks off, or a risk. A note then appears above main's editor, whether Sidebar is open or not. The example below is an illustration:
+
+```
+✦ Heads up · risk · Main skipped the failing integration tests.
+  1: Learn more   2: Knew this already   0: Dismiss
+```
+
+- **Switch:** on by default. `/sidebar headsup off` or `on` sets it per session (stored in main's session), `/sidebar headsup` shows its cost so far, and `PI_SIDEBAR_HEADSUP=0` starts sessions with it off.
+- **When:** at main's turn boundaries, once a run has 5 replies or has gone on for 2 minutes. Checks are at most 3 minutes apart, with one more at the end of a long run. A check is skipped when main's cache has probably expired.
+- **Answering:** type the digit on its own into main's empty editor.
+  - **Learn more** shows an explanation the check already wrote. From there you can mark it understood, quote it into main's editor (**Ask main**), or ask Sidebar about it.
+  - **Knew this already** marks the topic as known.
+  - **Dismiss** closes it, and for 20 seconds `9` turns the mode off.
+  
+  Main never sees a note unless you send it there.
+- **Memory:** known topics and recent notes go into quiz mode's per-repository knowledge profile. Each check lists them, along with the concepts proven in quiz mode, so it does not repeat itself across sessions.
+- **Cost:** a check is one request built from main's last request, so main's prompt cache serves almost all of it. You pay for main's activity since, about 600 tokens of instructions, the reply, and main's thinking setting. Checks pause after two in a row miss the cache. `PI_SIDEBAR_HEADSUP_DEBUG=1` logs each check to `~/.pi/agent/pi-sidebar/headsup.log`.
 
 ## Why it costs little
 

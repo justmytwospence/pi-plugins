@@ -31,11 +31,29 @@ export interface Concept {
   lastNote?: string;
 }
 
+/** A heads-up topic the user marked as known, or a note heads-up mode showed recently. */
+export interface HeadsUpTopic {
+  id: string;
+  text: string;
+  at: number;
+}
+
+/** What heads-up mode remembers in this repository, so it does not repeat itself. */
+export interface HeadsUpMemory {
+  known: HeadsUpTopic[];
+  recent: HeadsUpTopic[];
+}
+
 export interface Profile {
   version: 1;
   root: string;
   concepts: Record<string, Concept>;
+  /** Optional, so profiles written before heads-up mode still load. */
+  headsUp?: HeadsUpMemory;
 }
+
+export const MAX_KNOWN_TOPICS = 200;
+export const MAX_RECENT_NOTES = 20;
 
 export type Standing = "proven" | "learning" | "shaky" | "due" | "new";
 
@@ -183,7 +201,49 @@ function valid(raw: unknown, root: string): Profile | undefined {
       ...(typeof c.lastNote === "string" ? { lastNote: c.lastNote } : {}),
     };
   }
-  return { version: 1, root, concepts };
+  const headsUp = validHeadsUp((p as { headsUp?: unknown }).headsUp);
+  return { version: 1, root, concepts, ...(headsUp ? { headsUp } : {}) };
+}
+
+function validHeadsUp(raw: unknown): HeadsUpMemory | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const list = (value: unknown): HeadsUpTopic[] =>
+    Array.isArray(value)
+      ? value.flatMap((t) => {
+          const topic = t as Partial<HeadsUpTopic> | undefined;
+          if (!topic || typeof topic.id !== "string" || !topic.id) return [];
+          return [{ id: topic.id, text: typeof topic.text === "string" ? topic.text : topic.id, at: typeof topic.at === "number" && Number.isFinite(topic.at) ? topic.at : 0 }];
+        })
+      : [];
+  const memory = raw as { known?: unknown; recent?: unknown };
+  return { known: list(memory.known), recent: list(memory.recent) };
+}
+
+/** The profile with a heads-up topic marked as known (replacing an older mark of the same id). */
+export function markKnown(profile: Profile, topic: HeadsUpTopic): Profile {
+  const memory = profile.headsUp ?? { known: [], recent: [] };
+  const known = [...memory.known.filter((t) => t.id !== topic.id), topic].slice(-MAX_KNOWN_TOPICS);
+  return { ...profile, headsUp: { ...memory, known } };
+}
+
+/** The profile with a note heads-up mode just showed. */
+export function addRecent(profile: Profile, topic: HeadsUpTopic): Profile {
+  const memory = profile.headsUp ?? { known: [], recent: [] };
+  const recent = [...memory.recent.filter((t) => t.id !== topic.id), topic].slice(-MAX_RECENT_NOTES);
+  return { ...profile, headsUp: { ...memory, recent } };
+}
+
+/**
+ * What heads-up mode must not raise again: topics marked as known, quiz concepts the user has
+ * proven, and recent notes.
+ */
+export function knownTopics(profile: Profile, now: number): { known: string[]; recent: string[] } {
+  const known = (profile.headsUp?.known ?? []).map((t) => `${t.id}: ${t.text}`);
+  for (const concept of Object.values(profile.concepts)) {
+    if (standing(concept, now) === "proven") known.push(`${concept.id}: ${concept.title} (proven in quiz mode)`);
+  }
+  const recent = (profile.headsUp?.recent ?? []).map((t) => `${t.id}: ${t.text}`);
+  return { known, recent };
 }
 
 /** Loads and saves one repository's profile. An unreadable file is set aside, not overwritten. */
@@ -216,10 +276,20 @@ export class ProfileStore {
     renameSync(tmp, this.file);
   }
 
-  apply(updates: readonly QuizUpdate[], now: number): Profile {
-    let profile = this.load();
-    for (const update of updates) profile = applyUpdate(profile, update, now);
-    if (updates.length > 0) this.save(profile);
+  /**
+   * A change made from the file's current content (another Pi session may have written it since),
+   * then saved.
+   */
+  update(change: (profile: Profile) => Profile): Profile {
+    this.cached = undefined;
+    const profile = change(this.load());
+    this.save(profile);
     return profile;
+  }
+
+  apply(updates: readonly QuizUpdate[], now: number): Profile {
+    if (updates.length === 0) return this.load();
+    // From the file, not the cache: heads-up mode (or another session) may have written it since.
+    return this.update((profile) => updates.reduce((p, update) => applyUpdate(p, update, now), profile));
   }
 }

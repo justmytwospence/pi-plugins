@@ -49,6 +49,7 @@ pi -e ./packages/pi-sidebar
 | `/sidebar`, `/close` in Sidebar | Open or close Sidebar. |
 | `/sidebar new` (or `/new` in Sidebar) | Starts a fresh thread. |
 | Enter | Asks. |
+| `/sidebar headsup [on\|off]` | Heads-up mode's state and cost, or switches it on or off for the session. |
 | `/sidebar model` | Explains why Sidebar always uses main's model. |
 
 While Sidebar has focus, your keys do what they do in main. They are resolved through Pi's keybindings, so changes in `~/.pi/agent/keybindings.json` apply in both halves:
@@ -115,7 +116,8 @@ Settings, read from the environment Pi starts with:
 - `PI_SIDEBAR_RATIO`: Sidebar's share, from 0.15 to 0.85 (default 0.5), until you drag the divider.
 - `PI_SIDEBAR_PREFS`: where the dragged size is kept (default `~/.pi/agent/pi-sidebar.json`).
 - `PI_SIDEBAR_MIN_COLUMNS`: the narrowest half for a side-by-side split (default 80).
-- `PI_SIDEBAR_KNOWLEDGE`: where quiz mode keeps its knowledge profiles (default `~/.pi/agent/pi-sidebar/knowledge`).
+- `PI_SIDEBAR_KNOWLEDGE`: where quiz mode and heads-up mode keep their knowledge profiles (default `~/.pi/agent/pi-sidebar/knowledge`).
+- `PI_SIDEBAR_HEADSUP`: `0` starts sessions with heads-up mode off. `PI_SIDEBAR_HEADSUP_DEBUG=1` logs its checks.
 
 ## Quiz mode
 
@@ -137,6 +139,43 @@ Quiz mode turns Sidebar into a tutor for main's work. You switch it on when you 
 - **Cache:** quiz mode keeps Sidebar's cache sharing intact. Its fixed rules join Sidebar's role note and change only when you toggle the mode. What changes per question (the changed files, your profile) rides in the live status at the end.
 - **Hidden blocks:** the model has no tool of its own, so it ends each question with a hidden rubric (`<quiz-key>`) and each graded answer with a hidden grade (`<quiz-update>`, JSON). Sidebar never displays them, even while they stream. The model reads its own rubric when it grades, so grading stays consistent. A grade that cannot be read is not counted, and Sidebar says so.
 - **Privacy:** your answers stay in Sidebar's hidden thread and never reach main's model.
+
+## Heads-up mode
+
+Heads-up mode watches main's longer runs for one thing you should know but might have missed. Examples are a tradeoff main chose without saying so, a result that looks off, or a risk in what it did. When a check finds one, a short note appears above main's editor, whether Sidebar is open or not:
+
+```
+✦ Heads up · check this result · sum.py's "total" covers only north; it excludes every south row.
+  1: Learn more   2: Knew this already   0: Dismiss
+```
+*Illustration, not a screenshot.*
+
+It is on by default. `/sidebar headsup off` switches it off for the session, and `/sidebar headsup on` switches it back on. The setting is stored in main's session, so it follows `/tree` and comes back after resume and `/reload`. Set `PI_SIDEBAR_HEADSUP=0` to start every session with it off.
+
+**When it checks.** Checks happen at main's turn boundaries, once a run is long (5 replies or 2 minutes). They are at most 3 minutes apart, and a long run gets one more check when it ends. There is never a check while one is running or while a note is showing. A check is skipped, with nothing sent, when main's prompt cache has probably expired, when Sidebar cannot share main's API, or when no copy of main's last request is in memory (after `/reload`, until main sends again).
+
+**Answering a note.** Type a digit on its own into main's empty editor. Digits typed anywhere else, or while a dialog is open, go where they always go.
+- **Learn more** shows the short explanation the same check wrote, with no further request. It then offers:
+  - **Understood**: closes the note and marks the topic as known.
+  - **Ask main**: puts the note, quoted, in main's editor, so you can add a question and send it.
+  - **Ask Sidebar**: opens Sidebar and asks it about the note. Outside fullscreen mode it falls back to Ask main.
+  - **Dismiss**
+- **Knew this already** closes the note and marks the topic as known.
+- **Dismiss** closes it. For 20 seconds afterwards, `9` turns heads-up mode off for the session.
+
+Main never sees a note unless you send it to main.
+
+**Memory.** Topics you mark as known, and the last 20 notes, go into the repository's knowledge profile that quiz mode uses (`~/.pi/agent/pi-sidebar/knowledge/`). Every check lists them, together with the concepts you have proven in quiz mode, as things not to raise again, in this session and later ones.
+
+**Cost.** A check is one request on main's model, outside any Pi session, so no extension in main sees it.
+- **Cache sharing:** it starts with main's last request byte for byte, the way Sidebar's requests do, so main's prompt cache serves almost all of it.
+- **Newly paid:** what main committed since, a fixed instruction block of about 600 tokens, the reply, and main's thinking setting.
+- **No breakpoint:** it adds no cache breakpoint of its own, since nothing reuses it.
+- **Misses:** after two checks in a row that miss main's cache, checks pause until you run `/sidebar headsup on`.
+- **Totals:** `/sidebar headsup` shows the checks, notes and tokens for this session.
+- **Debug log:** `PI_SIDEBAR_HEADSUP_DEBUG=1` logs every check (trigger, usage and raw reply) to `~/.pi/agent/pi-sidebar/headsup.log`.
+
+**No tools.** The check keeps main's tool declarations, because removing them would break the cache. A reply that calls a tool counts as having no note.
 
 ## How it stays current and cheap
 

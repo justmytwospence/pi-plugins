@@ -26,8 +26,8 @@ import { assembleContext, describeLive, mainDelta, roleMessage, statusMessage, t
 
 const BUILTIN_TOOLS = ["read", "grep", "find", "ls", "bash"];
 const COLD_MARGIN_MS = 20_000;
-const MISS_RATIO = 0.5;
-const MISS_MIN_TOKENS = 8_000;
+export const MISS_RATIO = 0.5;
+export const MISS_MIN_TOKENS = 8_000;
 
 export type Preflight =
   | { kind: "send" }
@@ -141,25 +141,8 @@ export class SidebarAgent {
 
   /** Whether a question may go now, needs a confirmation first, or cannot go at all. */
   preflight(): Preflight {
-    const ctx = this.main.ctx;
-    if (!ctx) return { kind: "refuse", reason: "main's session is not ready yet." };
-    const request = this.main.request;
-    // Without a request in memory (after a restart, /reload, /tree or a compaction), Sidebar rebuilds
-    // main's request from its session; main's last answer says how warm its cache still is.
-    const last = request ? undefined : this.main.lastAnswer();
-    if (!request && !last) return { kind: "send" }; // no conversation yet: only the prompt and tools
-    const api = request?.api ?? ctx.model?.api ?? "";
-    if (!SUPPORTED_APIS.has(api)) return { kind: "refuse", reason: `main uses the ${api} API, which Sidebar cannot share a cache with.` };
-    if (request && !ctx.modelRegistry.find(request.provider, request.model)) return { kind: "refuse", reason: `main's model ${request.provider}/${request.model} is not available.` };
-    const age = this.now() - (request?.sentAt ?? last!.at);
-    const ttl = request ? requestedCacheTtlMs(request.api, request.payload) : configuredCacheTtlMs();
-    if (age > ttl - COLD_MARGIN_MS) {
-      return {
-        kind: "confirm",
-        title: "Main's prompt cache has probably expired",
-        message: `Main's last request was ${ago(age)} ago and its cache lasts ${ago(ttl)}. Sending re-reads about ${formatTokens(this.main.promptTokens())} tokens uncached.`,
-      };
-    }
+    const cache = cachePreflight(this.main, this.now());
+    if (cache.kind !== "send") return cache;
     if (this.missed) {
       return {
         kind: "confirm",
@@ -367,6 +350,33 @@ export class SidebarAgent {
       });
     };
   }
+}
+
+/**
+ * Whether main's prompt cache can serve a request built on main's last one now: refused when the
+ * API or model cannot share it, a confirmation when it has probably expired.
+ */
+export function cachePreflight(main: MainState, now: number): Preflight {
+  const ctx = main.ctx;
+  if (!ctx) return { kind: "refuse", reason: "main's session is not ready yet." };
+  const request = main.request;
+  // Without a request in memory (after a restart, /reload, /tree or a compaction), Sidebar rebuilds
+  // main's request from its session; main's last answer says how warm its cache still is.
+  const last = request ? undefined : main.lastAnswer();
+  if (!request && !last) return { kind: "send" }; // no conversation yet: only the prompt and tools
+  const api = request?.api ?? ctx.model?.api ?? "";
+  if (!SUPPORTED_APIS.has(api)) return { kind: "refuse", reason: `main uses the ${api} API, which Sidebar cannot share a cache with.` };
+  if (request && !ctx.modelRegistry.find(request.provider, request.model)) return { kind: "refuse", reason: `main's model ${request.provider}/${request.model} is not available.` };
+  const age = now - (request?.sentAt ?? last!.at);
+  const ttl = request ? requestedCacheTtlMs(request.api, request.payload) : configuredCacheTtlMs();
+  if (age > ttl - COLD_MARGIN_MS) {
+    return {
+      kind: "confirm",
+      title: "Main's prompt cache has probably expired",
+      message: `Main's last request was ${ago(age)} ago and its cache lasts ${ago(ttl)}. Sending re-reads about ${formatTokens(main.promptTokens())} tokens uncached.`,
+    };
+  }
+  return { kind: "send" };
 }
 
 /** Whether pi-subagents in this session asks for subagent environment (so subagents get the guard). */

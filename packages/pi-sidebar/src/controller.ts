@@ -10,6 +10,7 @@ import { MainState } from "./main-state.ts";
 import { RatioStore } from "./preferences.ts";
 import { herdrFocus, navDirection, navTarget } from "./nav.ts";
 import { SidebarPanel, type StatusPart } from "./panel.ts";
+import { HeadsUp } from "./headsup/headsup.ts";
 import { QUIZ_ENTRY, QuizMode, quizFromBranch } from "./quiz/mode.ts";
 import { QUIZ_NEXT, QUIZ_ROLE, QUIZ_START } from "./quiz/prompt.ts";
 import { RESET_ENTRY, threadFromBranch } from "./thread.ts";
@@ -32,6 +33,14 @@ export class SidebarController {
   readonly agent: SidebarAgent;
   /** Quiz mode: questions on main's changes, graded into a per-repository knowledge profile. */
   readonly quiz = new QuizMode(process.env[KNOWLEDGE_ENV] ?? path.join(getAgentDir(), "pi-sidebar", "knowledge"));
+  /** Heads-up mode: occasional checks for one thing worth knowing, shown above main's editor. */
+  readonly headsUp: HeadsUp;
+  /** Main's TUI, found when the session starts (Sidebar's own may not exist yet). */
+  private hostTui: FocusTui | undefined;
+  /** Main's editor: the component focused when the user last submitted a prompt. */
+  private mainEditor: Component | null = null;
+  /** Blocking extension dialogs open in main (a digit then belongs to them). */
+  private prompts = 0;
   private tui: FocusTui | undefined;
   private theme: Theme | undefined;
   private panel: SidebarPanel | undefined;
@@ -53,6 +62,23 @@ export class SidebarController {
       if (recorded.invalid > 0) this.panel?.notice({ kind: "warning", text: `Quiz mode could not read ${recorded.invalid} grade${recorded.invalid === 1 ? "" : "s"} from that answer; it was not counted.` });
     });
     this.main.onChange(() => this.render());
+    this.headsUp = new HeadsUp(pi, this.main, {
+      askSidebar: (text, ctx) => {
+        this.openOrFocus(ctx);
+        if (!this.isOpen) return false;
+        this.question(text);
+        return true;
+      },
+    }, {
+      knowledgeDir: process.env[KNOWLEDGE_ENV] ?? path.join(getAgentDir(), "pi-sidebar", "knowledge"),
+      logFile: path.join(getAgentDir(), "pi-sidebar", "headsup.log"),
+    });
+    pi.on("ui_prompt_start", () => { this.prompts++; });
+    pi.on("ui_prompt_end", () => { this.prompts = Math.max(0, this.prompts - 1); });
+    pi.on("input", (event) => {
+      if (event.source === "interactive") this.mainEditor = this.hostTui?.getFocusedComponent?.() ?? this.mainEditor;
+      return undefined;
+    });
     // While quiz mode is on, say when main's run changed files (a nudge; nothing is sent).
     pi.on("agent_end", async (_event, ctx) => {
       if (!this.quiz.on) return;
@@ -65,12 +91,13 @@ export class SidebarController {
 
     pi.on("session_start", async (_event, ctx) => {
       this.listen(ctx);
-      await this.restore(ctx);
+      await this.restore(ctx, true);
     });
-    pi.on("session_tree", async (_event, ctx) => this.restore(ctx));
+    pi.on("session_tree", async (_event, ctx) => this.restore(ctx, false));
     pi.on("session_shutdown", async () => {
       this.releaseInput?.();
       this.releaseInput = undefined;
+      this.headsUp.dispose();
       this.close();
       this.panel?.dispose();
       this.panel = undefined;
@@ -178,7 +205,9 @@ export class SidebarController {
     this.releaseInput?.();
     this.releaseInput = undefined;
     if (ctx.mode !== "tui" || typeof ctx.ui.onTerminalInput !== "function") return;
+    this.hostTui = this.probe(ctx) ?? this.hostTui;
     this.releaseInput = ctx.ui.onTerminalInput((data) => {
+      if (this.headsUp.note.showing && this.headsUp.handleKey(data, this.editorIdle(ctx))) return { consume: true };
       const direction = navDirection(data);
       if (direction) {
         const target = navTarget(direction, this.isOpen && this.blocked === 0, this.layout?.orientation ?? "right", !!this.panel?.focused);
@@ -194,6 +223,17 @@ export class SidebarController {
       }
       return undefined;
     });
+  }
+
+  /** Main's own editor has focus and is empty: no dialog, no Sidebar focus, nothing typed. */
+  private editorIdle(ctx: ExtensionContext): boolean {
+    if (this.blocked > 0 || this.prompts > 0 || this.panel?.focused) return false;
+    try { if (ctx.ui.getEditorText() !== "") return false; } catch { return false; }
+    const focused = this.hostTui?.getFocusedComponent?.() ?? null;
+    if (this.mainEditor) return focused === this.mainEditor;
+    // Before the first prompt: an editor-like component (not a list dialog) that is empty.
+    const text = (focused as { getText?: () => unknown } | null)?.getText;
+    return typeof text === "function" && text.call(focused) === "";
   }
 
   close(): void {
@@ -232,9 +272,10 @@ export class SidebarController {
     this.rebuild();
   }
 
-  private async restore(ctx: ExtensionContext): Promise<void> {
+  private async restore(ctx: ExtensionContext, newSession = false): Promise<void> {
     this.main.bind(ctx);
     const branch = ctx.sessionManager.getBranch();
+    this.headsUp.restore(branch, newSession);
     await this.agent.setThread(threadFromBranch(branch));
     await this.quiz.restore(quizFromBranch(branch), ctx.cwd).catch(() => {});
     this.rebuild();
@@ -302,7 +343,7 @@ export class SidebarController {
   }
 
   /** A question for Sidebar's agent, after its cache preflight. */
-  private question(text: string): void {
+  question(text: string): void {
     const check = this.agent.preflight();
     if (check.kind === "refuse") {
       this.panel?.notice({ kind: "warning", text: `Not sent: ${check.reason}` });

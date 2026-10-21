@@ -28,21 +28,29 @@ function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
-export function splicePayload(api: string, main: unknown, side: unknown): SpliceResult {
+export interface SpliceOptions {
+  /**
+   * Put Sidebar's own cache breakpoint on its part (Anthropic). Off for a one-shot request that
+   * nothing reuses, which would only pay to write it.
+   */
+  sideBreakpoint?: boolean;
+}
+
+export function splicePayload(api: string, main: unknown, side: unknown, options: SpliceOptions = {}): SpliceResult {
   if (!isObject(main)) return { ok: false, reason: "main's last request is missing" };
   if (!isObject(side)) return { ok: false, reason: "Sidebar's request is not an object" };
   if (!SUPPORTED_APIS.has(api)) return { ok: false, reason: `the ${api} API is not supported, so the cache cannot be shared` };
   if (typeof main.model === "string" && typeof side.model === "string" && main.model !== side.model) {
     return { ok: false, reason: `Sidebar is on ${side.model} but main is on ${main.model}` };
   }
-  if (api === "anthropic-messages") return spliceAnthropic(main, side);
+  if (api === "anthropic-messages") return spliceAnthropic(main, side, options.sideBreakpoint !== false);
   if (api === "openai-completions") return spliceChat(main, side);
   return spliceResponses(main, side);
 }
 
 // ---------------------------------------------------------------- Anthropic Messages
 
-function spliceAnthropic(main: Json, side: Json): SpliceResult {
+function spliceAnthropic(main: Json, side: Json, sideBreakpoint: boolean): SpliceResult {
   if (!Array.isArray(main.messages) || main.messages.length === 0) return { ok: false, reason: "main's last request has no messages" };
   if (!Array.isArray(side.messages)) return { ok: false, reason: "Sidebar's request has no messages" };
   const mainMessages = clone(main.messages as Json[]);
@@ -55,7 +63,8 @@ function spliceAnthropic(main: Json, side: Json): SpliceResult {
   };
   const fixed = countBreakpoints(payload.system) + countBreakpoints(payload.tools) + countBreakpoints(mainMessages);
   if (fixed > ANTHROPIC_MAX_BREAKPOINTS) return { ok: false, reason: `main's request already carries ${fixed} cache breakpoints` };
-  placeSideBreakpoint(payload, sideMessages.flatMap(messageBlocks), fixed);
+  if (sideBreakpoint) placeSideBreakpoint(payload, sideMessages.flatMap(messageBlocks), fixed);
+  else for (const block of sideMessages.flatMap(messageBlocks)) delete block.cache_control;
   return { ok: true, payload, mainItems: mainMessages.length, sideItems: sideMessages.length };
 }
 
