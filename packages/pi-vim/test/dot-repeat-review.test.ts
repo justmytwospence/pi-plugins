@@ -208,7 +208,7 @@ describe("dot repeat review regressions", () => {
       editor.handleInput(BRACKETED_PASTE);
       sendKeys(editor, ["x", "."]);
 
-      assert.equal(editor.getText(), "cdef", pending);
+      assert.equal(editor.getText(), "apastecdef", pending);
     }
   });
 

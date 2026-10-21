@@ -922,11 +922,47 @@ describe("mode transitions", () => {
     assert.equal(editor.getMode(), "normal");
   });
 
-  it("normal mode ignores bracketed paste payload", () => {
+  it("normal mode inserts bracketed paste after the cursor", () => {
     const { editor } = createEditorWithSpy("abc");
     sendKeys(editor, ["\x1b[200~PASTE\x1b[201~"]);
-    assert.equal(editor.getText(), "abc");
+    assert.equal(editor.getText(), "aPASTEbc");
+    assert.deepEqual(editor.getCursor(), { line: 0, col: 5 });
     assert.equal(editor.getMode(), "normal");
+  });
+
+  it("normal mode paste is one undo step back to the original cursor", () => {
+    const { editor } = createEditorWithSpy("abc");
+    sendKeys(editor, ["\x1b[200~PASTE\x1b[201~", "u"]);
+    assert.equal(editor.getText(), "abc");
+    assert.deepEqual(editor.getCursor(), { line: 0, col: 0 });
+  });
+
+  it("normal mode paste of a dragged file path keeps host path spacing", () => {
+    const { editor } = createEditorWithSpy("see");
+    sendKeys(editor, ["$", "\x1b[200~/tmp/a b.png\x1b[201~"]);
+    assert.equal(editor.getText(), "see /tmp/a b.png");
+    assert.equal(editor.getMode(), "normal");
+  });
+
+  it("normal mode paste into an empty buffer", () => {
+    const { editor } = createEditorWithSpy("");
+    sendKeys(editor, ["\x1b[200~/tmp/x\x1b[201~"]);
+    assert.equal(editor.getText(), "/tmp/x");
+    assert.equal(editor.getMode(), "normal");
+  });
+
+  it("visual mode paste drops the selection and inserts after the cursor", () => {
+    const { editor } = createEditorWithSpy("foo bar");
+    sendKeys(editor, ["v", "l", "\x1b[200~X\x1b[201~"]);
+    assert.equal(editor.getText(), "foXo bar");
+    assert.equal(editor.getMode(), "normal");
+  });
+
+  it("keys before a paste in the same chunk run first", () => {
+    const { editor } = createEditorWithSpy("abc");
+    sendKeys(editor, ["i\x1b[200~X\x1b[201~"]);
+    assert.equal(editor.getText(), "Xabc");
+    assert.equal(editor.getMode(), "insert");
   });
 
   it("insert mode keeps bracketed paste payload text", () => {
@@ -4249,7 +4285,7 @@ describe("Universal Counts State & Bounds", () => {
 
     sendKeys(editor, ["2", "d", "\x1b[200~paste\x1b[201~", "x"]);
 
-    assert.equal(editor.getText(), "bc");
+    assert.equal(editor.getText(), "apastbc");
   });
 });
 
@@ -6242,7 +6278,7 @@ describe("dot repeat — .", () => {
 
     sendKeys(editor, ["c", "\x1b[200~paste\x1b[201~", "x", "."]);
 
-    assert.equal(editor.getText(), "c");
+    assert.equal(editor.getText(), "apastc");
     assert.equal(editor.getMode(), "normal");
     assert.equal(editor.getRegister(), "b");
   });
@@ -8233,7 +8269,7 @@ describe("undo / redo — u / ctrl+r", () => {
     });
   });
 
-  it("bracketed paste in normal mode still clears pending state before redo", () => {
+  it("bracketed paste in normal mode clears pending state and redo history", () => {
     const { editor } = createEditorWithSpy("abcd");
 
     sendKeys(editor, ["x", "u"]);
@@ -8242,8 +8278,8 @@ describe("undo / redo — u / ctrl+r", () => {
     editor.setRegister("keep");
     sendKeys(editor, ["d", "\x1b[200~paste\x1b[201~", "\x12"]);
 
-    assert.equal(editor.getText(), "bcd");
-    assert.deepEqual(editor.getCursor(), { line: 0, col: 0 });
+    assert.equal(editor.getText(), "apastebcd");
+    assert.deepEqual(editor.getCursor(), { line: 0, col: 5 });
     assert.equal(editor.getRegister(), "keep");
   });
 
@@ -9142,7 +9178,7 @@ describe("operator cancellation", () => {
 
     sendKeys(editor, ["d", "f", "\x1b[200~PASTE\x1b[201~", "w", "x"]);
 
-    assert.equal(editor.getText(), "foo ar");
+    assert.equal(editor.getText(), "fPASTEoo ar");
     assert.equal(editor.getRegister(), "b");
   });
 
@@ -9151,7 +9187,7 @@ describe("operator cancellation", () => {
 
     sendKeys(editor, ["d", "f", "\x1b[200~", "PASTE", "\x1b[201~", "w", "x"]);
 
-    assert.equal(editor.getText(), "foo ar");
+    assert.equal(editor.getText(), "fPASTEoo ar");
     assert.equal(editor.getRegister(), "b");
   });
 
@@ -9189,12 +9225,12 @@ describe("operator cancellation", () => {
     }
   });
 
-  it("split bracketed paste end marker closes discard state", () => {
+  it("split bracketed paste end marker completes the paste", () => {
     const { editor } = createEditorWithSpy("foo bar");
 
     sendKeys(editor, ["\x1b[200~", "PASTE", "\x1b", "[201~", "w", "x"]);
 
-    assert.equal(editor.getText(), "foo ar");
+    assert.equal(editor.getText(), "fPASTEoo ar");
     assert.equal(editor.getRegister(), "b");
   });
 

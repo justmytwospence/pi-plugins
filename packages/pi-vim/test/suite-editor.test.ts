@@ -401,14 +401,14 @@ describe("mode context substates", () => {
     assert.equal(mode(editor).ex, null);
   });
 
-  it("reports a discarded Normal-mode paste as pending until it ends", async () => {
+  it("reports a Normal-mode paste as pending until it ends", async () => {
     const { editor } = (await started()).embedded();
     seed(editor, "text");
     editor.handleInput("\x1b[200~partial");
     assert.equal(mode(editor).state, "pending");
     editor.handleInput(" rest\x1b[201~");
     assert.equal(mode(editor).state, "normal");
-    assert.equal(editor.getText(), "text");
+    assert.equal(editor.getText(), "tpartial restext");
   });
 
   it("reports an open autocomplete popup", async () => {

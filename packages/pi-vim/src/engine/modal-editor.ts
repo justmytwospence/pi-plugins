@@ -309,6 +309,9 @@ export class ModalEditor extends CustomEditor {
   private lastCharMotion: LastCharMotion | null = null;
   private discardingBracketedPasteInNormalMode: boolean = false;
   private pendingEscWhileDiscardingBracketedPasteInNormalMode: boolean = false;
+  /** Payload of a Normal/Visual-mode bracketed paste still arriving, else null. */
+  private normalModePasteBuffer: string | null = null;
+  private pendingEscInNormalModePaste: boolean = false;
   private wordBoundaryCache = new WordBoundaryCache();
   private readonly redoStack: EditorSnapshot[] = [];
   private lastRepeatableCommand: RepeatableCommand | null = null;
@@ -464,6 +467,7 @@ export class ModalEditor extends CustomEditor {
       this.mode === "normal" &&
       this.pendingExCommand === null &&
       !this.discardingBracketedPasteInNormalMode &&
+      this.normalModePasteBuffer === null &&
       this.getPendingKeys() === ""
     );
   }
@@ -484,7 +488,9 @@ export class ModalEditor extends CustomEditor {
         ? "insert"
         : ex !== null
           ? "ex"
-          : pending !== "" || this.discardingBracketedPasteInNormalMode
+          : pending !== "" ||
+              this.discardingBracketedPasteInNormalMode ||
+              this.normalModePasteBuffer !== null
             ? "pending"
             : isVisualMode(mode)
               ? "visual"
@@ -669,6 +675,8 @@ export class ModalEditor extends CustomEditor {
   private resetDiscardedNormalPaste(): void {
     this.discardingBracketedPasteInNormalMode = false;
     this.pendingEscWhileDiscardingBracketedPasteInNormalMode = false;
+    this.normalModePasteBuffer = null;
+    this.pendingEscInNormalModePaste = false;
   }
 
   /**
@@ -1517,46 +1525,85 @@ export class ModalEditor extends CustomEditor {
     }
   }
 
+  /**
+   * Drop the rest of a paste whose start fed a cancelled EX line. A fresh
+   * paste in Normal mode is not stripped here: `beginNormalModePaste` inserts it.
+   */
   private stripBracketedPasteInNormalMode(data: string): {
     filtered: string | null;
     stripped: boolean;
   } {
-    let chunk = data;
-    let stripped = false;
-
-    while (true) {
-      if (this.discardingBracketedPasteInNormalMode) {
-        stripped = true;
-        const end = chunk.indexOf(BRACKETED_PASTE_END);
-        if (end === -1) {
-          return { filtered: null, stripped };
-        }
-        this.discardingBracketedPasteInNormalMode = false;
-        this.pendingEscWhileDiscardingBracketedPasteInNormalMode = false;
-        chunk = chunk.slice(end + BRACKETED_PASTE_END.length);
-        if (!chunk) return { filtered: null, stripped };
-      }
-
-      const start = chunk.indexOf(BRACKETED_PASTE_START);
-      if (start === -1) {
-        return { filtered: chunk, stripped };
-      }
-
-      stripped = true;
-      const end = chunk.indexOf(
-        BRACKETED_PASTE_END,
-        start + BRACKETED_PASTE_START.length,
-      );
-      if (end === -1) {
-        this.discardingBracketedPasteInNormalMode = true;
-        const leading = chunk.slice(0, start);
-        return { filtered: leading.length > 0 ? leading : null, stripped };
-      }
-
-      chunk =
-        chunk.slice(0, start) + chunk.slice(end + BRACKETED_PASTE_END.length);
-      if (!chunk) return { filtered: null, stripped };
+    if (!this.discardingBracketedPasteInNormalMode) {
+      return { filtered: data, stripped: false };
     }
+    const end = data.indexOf(BRACKETED_PASTE_END);
+    if (end === -1) return { filtered: null, stripped: true };
+    this.discardingBracketedPasteInNormalMode = false;
+    this.pendingEscWhileDiscardingBracketedPasteInNormalMode = false;
+    const rest = data.slice(end + BRACKETED_PASTE_END.length);
+    return { filtered: rest.length > 0 ? rest : null, stripped: true };
+  }
+
+  /**
+   * A bracketed paste in Normal or Visual mode (a dragged-in file path, a
+   * terminal paste) inserts its text after the cursor like a charwise `p`
+   * and stays in Normal mode, as Neovim does. It never runs as commands.
+   * Visual mode drops the selection first. A pending count or operator is
+   * cancelled.
+   */
+  private beginNormalModePaste(data: string): void {
+    this.clearPendingState();
+    this.cancelRepeatableCommand();
+    if (isVisualMode(this.mode)) this.exitVisualMode();
+    this.normalModePasteBuffer = "";
+    this.pendingEscInNormalModePaste = false;
+    this.continueNormalModePaste(data.slice(BRACKETED_PASTE_START.length));
+  }
+
+  private continueNormalModePaste(chunk: string): void {
+    if (this.normalModePasteBuffer === null) return;
+    const escape = isEscapeLikeInput(chunk);
+    // Two lone Escapes abandon a paste whose end marker never arrives.
+    if (escape && this.pendingEscInNormalModePaste) {
+      this.normalModePasteBuffer = null;
+      this.pendingEscInNormalModePaste = false;
+      return;
+    }
+    this.pendingEscInNormalModePaste = escape;
+    const buffer = this.normalModePasteBuffer + chunk;
+    const end = buffer.indexOf(BRACKETED_PASTE_END);
+    if (end === -1) {
+      this.normalModePasteBuffer = buffer;
+      return;
+    }
+    this.normalModePasteBuffer = null;
+    this.pendingEscInNormalModePaste = false;
+    this.insertPasteAfterCursor(buffer.slice(0, end));
+    const rest = buffer.slice(end + BRACKETED_PASTE_END.length);
+    if (rest.length > 0) this.handleInputCore(rest);
+  }
+
+  private insertPasteAfterCursor(payload: string): void {
+    if (payload.length === 0) return;
+    const handlePaste = (
+      this as unknown as { handlePaste?: (text: string) => void }
+    ).handlePaste;
+    if (typeof handlePaste !== "function") return;
+    const origin = this.getCursor();
+    const stack = (this as unknown as ModalEditorInternals).undoStack?.stack;
+    const depth = stack?.length ?? 0;
+    if (!this.isCursorAtOrPastEol()) super.handleInput(ESC_RIGHT);
+    // The host paste path keeps its file-path spacing, large-paste markers and
+    // single undo snapshot.
+    handlePaste.call(this, payload);
+    // `u` returns the cursor to where it was before the paste, not one right.
+    const snapshot = stack && stack.length > depth ? stack[depth] : undefined;
+    const state = (snapshot as { state?: { cursorLine?: number; cursorCol?: number } } | undefined)?.state;
+    if (state) {
+      state.cursorLine = origin.line;
+      state.cursorCol = origin.col;
+    }
+    this.moveCursorToPreviousGraphemeStart();
   }
 
   handleInput(data: string): void {
@@ -1576,6 +1623,10 @@ export class ModalEditor extends CustomEditor {
       if (normalized === null) return;
       data = normalized;
     } else if (this.mode !== "insert") {
+      if (this.normalModePasteBuffer !== null) {
+        this.continueNormalModePaste(data);
+        return;
+      }
       if (this.discardingBracketedPasteInNormalMode) {
         if (isEscapeLikeInput(data)) {
           if (this.pendingEscWhileDiscardingBracketedPasteInNormalMode) {
@@ -1613,6 +1664,19 @@ export class ModalEditor extends CustomEditor {
       }
       if (filtered === null) return;
       data = filtered;
+
+      const start = data.indexOf(BRACKETED_PASTE_START);
+      if (start !== -1) {
+        // Keys typed ahead of the paste in the same chunk run first; they may
+        // switch to Insert, where the paste goes to the host editor as usual.
+        if (start > 0) {
+          this.handleInputCore(data.slice(0, start));
+          this.handleInputCore(data.slice(start));
+          return;
+        }
+        this.beginNormalModePaste(data);
+        return;
+      }
     }
 
     this.prepareRepeatRecordingForInput(data);

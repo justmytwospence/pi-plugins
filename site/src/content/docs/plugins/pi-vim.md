@@ -55,7 +55,7 @@ These are **draft motions**, not transcript navigation. Escape (or Ctrl+[) enter
 | Move within the draft | `0` line start, `^` first nonblank, `$` line end, `gg` / `G` draft start/end. |
 | Insert or open a line | `i a I A`, `o O`. |
 | Operate on a motion / line | `dw`, `cw`, `yw`; `dd`, `cc`, `yy`; counts such as `2dd`. |
-| Select / paste | `v` character Visual, `V` line Visual; `p` / `P`. |
+| Select / paste | `v` character Visual, `V` line Visual; `p` / `P`. A terminal paste or a file dragged in while in Normal or Visual inserts its text after the cursor, like `p`, and stays in Normal. |
 | Undo / redo / repeat | `u`, Ctrl+R, `.`. |
 
 Operators, counts, registers and text objects are supported; macros, block Visual, Vim search and general Vim EX semantics are not. In idle Normal, Ctrl+U/D scroll the host viewport instead of moving through the draft, and with [pi-copy](/plugins/pi-copy/#copy-mode) loaded `/` and `?` open its copy mode over the whole transcript. [Keymap & focus](/guides/keyboard/#use-vim-on-the-main-prompt-or-in-a-dialog) compares main and embedded behavior.
