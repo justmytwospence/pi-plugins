@@ -601,7 +601,11 @@ function menuHint(): string {
 }
 
 function hintLines(text: string, width: number): string[] {
-  return hang(" ", text, width);
+  // A row wraps at a hint boundary, so the separator's spaces would open the next row: every row of a
+  // hint stays one column in, as Pi's own (and as Collie reads a wrapped footer).
+  const p = 1;
+  if (p >= width - 4) return hang(" ", text, width);
+  return wrap(text, width - p).map((line) => ` ${line.replace(/^((?:\x1b\[[0-9;:]*m)*) +/u, "$1")}`);
 }
 
 /**

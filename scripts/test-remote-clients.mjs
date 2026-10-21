@@ -90,15 +90,11 @@ function selectorLines(width) {
   return selector.render(width);
 }
 
-// Each dialog, and what each client must make of it. `narrow` is what Collie makes of the dialog in a
-// pane too narrow for its hint or an option row, a known gap with its reason: Collie joins a key hint
-// wrapped onto two rows with one space, which runs `enter select` into `escape/ctrl+c cancel`, and it
-// takes an option's wrapped rest only at the label's column, not behind the one-column `│` gutter
-// herdr-web-ui needs. Both are pi-reader fixes for Collie upstream.
+// Each dialog, and what each client must make of it.
 const DIALOGS = [
-  { name: 'ask single', lines: (w) => questionLines([question(false)], w), herdr: { options: 4, multi: false }, collie: { kind: 'prompt-select', options: 4 }, narrow: 'unread-dialog' },
-  { name: 'ask multi', lines: (w) => questionLines([question(true)], w), herdr: { multi: true }, collie: { kind: 'multi-select' }, narrow: 'unread-dialog' },
-  { name: 'tool-gate approval', lines: approvalLines, herdr: { options: 3, multi: false }, collie: { kind: 'prompt-select' }, narrow: 'unread-dialog' },
+  { name: 'ask single', lines: (w) => questionLines([question(false)], w), herdr: { options: 4, multi: false }, collie: { kind: 'prompt-select', options: 4 }, },
+  { name: 'ask multi', lines: (w) => questionLines([question(true)], w), herdr: { multi: true }, collie: { kind: 'multi-select' }, },
+  { name: 'tool-gate approval', lines: approvalLines, herdr: { options: 3, multi: false }, collie: { kind: 'prompt-select' }, },
   { name: 'pi select (plan approval, cache-guard)', lines: selectorLines, herdr: { options: 3, multi: false }, collie: { kind: 'prompt-select', options: 4 } },
 ];
 
@@ -145,7 +141,7 @@ screens.forEach((screen, i) => {
   const c = results.collie?.[i];
   if (c !== undefined) {
     const card = c.blocks.find((b) => b.kind !== 'raw');
-    const wanted = screen.width < 60 && dialog.narrow !== undefined ? dialog.narrow : dialog.collie.kind;
+    const wanted = dialog.collie.kind;
     if (card?.kind !== wanted) problems.push(`Collie: ${card?.kind ?? 'no card'}, wanted ${wanted}`);
     else if (wanted === dialog.collie.kind && dialog.collie.options !== undefined && card.options.length !== dialog.collie.options) problems.push(`Collie: options ${JSON.stringify(card.options)}`);
   }
