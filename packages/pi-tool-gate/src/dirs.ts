@@ -9,7 +9,7 @@
 // held even when a grant covers it, with its `hint` (where to edit instead) passed on verbatim.
 // `exemptCommands` (bash.ts) are commands whose paths are not checked at all, such as the one
 // that regenerates the derived paths from their source.
-import { realpathSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 
@@ -157,16 +157,28 @@ export function canRead(policy: Policy, file: string): boolean {
 }
 
 /**
- * The folder a "allow similar" grant covers: the first folder under a private root, else the file's
- * own directory, except that the filesystem root is never a scope: a write to `/x` covers only `/x`.
+ * The folder a "allow similar" grant covers: the first folder under a private root (the root
+ * itself for a file directly in it, as `~/Downloads/shot.png`), else the file's own directory,
+ * except that the filesystem root is never a scope: a write to `/x` covers only `/x`.
  */
 export function scopeOf(policy: Policy, file: string, access: Access): string {
   for (const root of policy.private) {
     if (/[*?]/u.test(root) || !under(file, root) || file === root) continue;
     const rest = file.slice(root.length + 1).split("/")[0];
-    return rest ? path.join(root, rest) : root;
+    if (!rest) return root;
+    const child = path.join(root, rest);
+    return child === file && !looksLikeFolder(file) ? root : child;
   }
   return access === "write" && path.dirname(file) !== file && path.dirname(file) !== "/" ? path.dirname(file) : file;
+}
+
+/** An existing directory, or a missing path without an extension (a folder about to be made). */
+function looksLikeFolder(file: string): boolean {
+  try {
+    return statSync(file).isDirectory();
+  } catch {
+    return !path.extname(file);
+  }
 }
 
 export function violations(policy: Policy, access: { reads: readonly string[]; writes: readonly string[] }): Violation[] {

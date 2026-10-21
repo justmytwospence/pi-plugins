@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -146,6 +146,20 @@ describe("policy", () => {
     expect(scopeOf(p, `${H}/.zshrc`, "write")).toBe(H);
     expect(scopeOf(p, "/smoke", "write")).toBe("/smoke");
     expect(scopeOf(p, "/", "write")).toBe("/");
+    // A file directly in a private root grants the root, not the file.
+    expect(scopeOf(p, `${H}/Downloads/Screenshot at 1.01.45 PM.png`, "read")).toBe(`${H}/Downloads`);
+    const root = mkdtempSync(path.join(tmpdir(), "pi-tool-gate-scope-"));
+    try {
+      mkdirSync(path.join(root, "repo"));
+      writeFileSync(path.join(root, "notes"), "");
+      const q = policy({ private: [root] });
+      expect(scopeOf(q, path.join(root, "repo"), "read")).toBe(path.join(root, "repo"));
+      expect(scopeOf(q, path.join(root, "notes"), "read")).toBe(root);
+      expect(scopeOf(q, path.join(root, "new-folder"), "write")).toBe(path.join(root, "new-folder"));
+      expect(scopeOf(q, path.join(root, "new.txt"), "write")).toBe(root);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
     expect(violations(p, { reads: [`${P}/other/a`], writes: [`${H}/.zshrc`] })).toEqual([
       { access: "write", file: `${H}/.zshrc`, scope: H },
       { access: "read", file: `${P}/other/a`, scope: `${P}/other` },
