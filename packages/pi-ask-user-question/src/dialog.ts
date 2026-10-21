@@ -482,14 +482,14 @@ export class QuestionDialog implements Component, Focusable {
     // wrapped rest goes behind a `│`, which herdr-web-ui joins to the row); a multiple choice as
     // OmO's form (a ✓ after each checked row, an unnumbered typed-answer row, and wrapped lines
     // indented five or more, which it reads as the row's description).
-    const row = (i: number, label: string, description: string | undefined, mark: boolean) => {
+    const row = (i: number, label: string, description: string | undefined, mark: boolean, blank = false) => {
       const focused = slot.cursor === i || (i === own && this.editing === "custom");
       const number = `${t.fg(focused ? "accent" : "muted", `${i + 1}.`)} `;
       // A multiple choice keeps its ticks in one column after the numbers; a single choice ticks after the label.
       const column = q.multiSelect ? (mark ? `${t.fg("success", "✓")} ` : "  ") : "";
       const prefix = ` ${focused ? t.fg("accent", "→") : " "} ${number}${column}`;
       const text =
-        t.fg(focused ? "accent" : "text", focused ? t.bold(label) : label) +
+        (blank ? concealed(label) : t.fg(focused ? "accent" : "text", focused ? t.bold(label) : label)) +
         (mark && !column ? t.fg("success", " ✓") : "") +
         (description ? t.fg("muted", ` · ${description}`) : "");
       const [first = "", ...rest] = hang(prefix, text, width);
@@ -502,7 +502,10 @@ export class QuestionDialog implements Component, Focusable {
     // A draft stays on its row, after (or in place of) the typed-answer label; the field opens below.
     const draft = oneLine(slot.custom.getText().trim());
     if (!q.multiSelect) {
-      row(own, draft || TYPE_SOMETHING, undefined, slot.choice?.kind === "custom");
+      // Highlighted and still empty, the row looks like an empty field with a cursor, ready for
+      // typing. The label is only concealed, so herdr-web-ui still reads "Type something." there.
+      const blank = !draft && slot.cursor === own && !this.editing;
+      row(own, draft || TYPE_SOMETHING, undefined, slot.choice?.kind === "custom", blank);
       return out;
     }
     // A multiple choice's typed answer is an option of its own, "Other", so a phone's checkbox card
@@ -567,6 +570,15 @@ export class QuestionDialog implements Component, Focusable {
     return out;
   }
 
+}
+
+/**
+ * `label` hidden (SGR 8), its first cell drawn as a block cursor. The characters stay in the
+ * terminal's cells, so a screen read (herdr's) still has the label; only the display is blank.
+ */
+function concealed(label: string): string {
+  const [first = " ", ...rest] = [...label];
+  return `\x1b[7;8m${first}\x1b[27m${rest.join("")}\x1b[28m`;
 }
 
 /** Text input, not control keys: preserve the original bytes for the editor. */

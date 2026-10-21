@@ -38,6 +38,16 @@ describe("single question", () => {
     expect(screen(dialog([library], ["9"]).frames[1])).toMatch(/→ 1\. date-fns/u);
   });
 
+  test("the highlighted empty Type something row hides its label behind a cursor, still readable on screen", () => {
+    const d = dialog([library], []);
+    const row = (lines: string[]) => lines.find((line) => line.includes("3."))!;
+    expect(row(d.dialog.render(100))).not.toContain("\x1b[8m");
+    d.dialog.handleInput("3");
+    const shown = row(d.dialog.render(100));
+    expect(shown).toContain("\x1b[7;8mT\x1b[27mype something.\x1b[28m");
+    expect(visibleWidth(shown)).toBe(visibleWidth(" → 3. Type something."));
+  });
+
   test("j and k move outside editors and type inside them", () => {
     expect(screen(dialog([library], ["j"]).frames[1])).toMatch(/→ 2\. dayjs/u);
     const d = dialog([library], ["3", enter, "j", "k", enter]);
