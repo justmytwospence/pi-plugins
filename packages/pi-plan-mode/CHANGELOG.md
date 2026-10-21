@@ -4,13 +4,7 @@
 
 ### Minor Changes
 
-- Plan review is a full-screen reader in the terminal: the plan alone fills the screen (no
-  header, hints or rules) and scrolls with the usual keys and the wheel; Enter shows the choices
-  over its end, Esc keeps planning, Ctrl+G edits. The choices say what they do (**Implement in
-  auto mode**, **Implement in yolo mode** when pi-tool-gate's cycle includes yolo, **Implement in
-  a fresh session**, **Keep planning**). The chat no longer scrolls or pads itself for review.
-  RPC keeps Pi's select with an Edit row. On herdr-web-ui phones, Enter on the plain card opens
-  the choices, which read as a full card (their tinted panel carries Pi's hint, concealed).
+- Plan approval offers **Yes, yolo mode** when pi-tool-gate's cycle includes yolo.
 - A planner's question is a picker at the bottom of its lane, as in pi-ask-user-question: options,
   `Type something.` and `Skip`; arrows or `j`/`k` move, digits jump, Enter picks, typing on
   `Type something.` opens the answer line (pi-vim in Insert mode), Esc returns to the options with
