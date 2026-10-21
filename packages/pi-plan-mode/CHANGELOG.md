@@ -4,6 +4,11 @@
 
 ### Minor Changes
 
+- Plan approval offers **Yes, yolo mode** when pi-tool-gate's cycle includes yolo. In the
+  terminal the approval picker is compact so more of the plan shows: no blank rows around it,
+  **Edit the plan** is Ctrl+G (Pi's `app.editor.external`, shown in its hint) instead of a row,
+  and the plan drops its "Waiting for approval" line while you decide. RPC keeps Pi's select with
+  the Edit row.
 - A planner's question is a picker at the bottom of its lane, as in pi-ask-user-question: options,
   `Type something.` and `Skip`; arrows or `j`/`k` move, digits jump, Enter picks, typing on
   `Type something.` opens the answer line (pi-vim in Insert mode), Esc returns to the options with

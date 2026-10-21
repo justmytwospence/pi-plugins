@@ -11,17 +11,20 @@ import {
   type Component,
   Container,
   ScrollView,
+  setKeybindings,
   type Terminal,
   Text,
   TuiAltScreen,
   VStack,
 } from "@earendil-works/pi-tui";
 import { afterEach, expect, test, vi } from "vitest";
+import { KeybindingsManager } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js";
 import { ToolExecutionComponent } from "../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/tool-execution.js";
 import { InteractiveMode } from "../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js";
 import { createInteractiveTuiReference } from "../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/tui-renderer.js";
 import { renderLayoutFrame } from "../node_modules/@earendil-works/pi-tui/dist/layout.js";
 import { EXIT_TOOL, registerInlinePlanMode } from "../src/inline-plan.js";
+import { ApprovalPicker } from "../src/plan-approval.js";
 import { PlanReviewViewport } from "../src/plan-review-viewport.js";
 import { createMockContext, createMockPi } from "./shared/support.js";
 
@@ -54,6 +57,8 @@ afterEach(() => {
 
 function setup(plan: string, scrollbar: "always" | "hidden" = "always") {
   initTheme("dark", false);
+  // Pi's app bindings, as the interactive mode installs them (Ctrl+G edits the plan).
+  setKeybindings(new KeybindingsManager());
   const terminal = new MemoryTerminal();
   const renderer = new TuiAltScreen(terminal);
   vi.spyOn(renderer, "requestRender").mockImplementation(() => {});
@@ -64,7 +69,7 @@ function setup(plan: string, scrollbar: "always" | "hidden" = "always") {
   const document = new Container();
   document.addChild(chat);
   const scroll = new ScrollView(document, { primary: true, follow: "end", scrollbar });
-  const editor = new Text("Your prompt", 0, 0);
+  const editor = Object.assign(new Text("Your prompt", 0, 0), { getText: () => "", setText() {} });
   const editorContainer = new Container();
   editorContainer.addChild(editor);
   const above = new Container();
@@ -74,6 +79,7 @@ function setup(plan: string, scrollbar: "always" | "hidden" = "always") {
   // Use the SDK's real widget and selector lifecycles, without starting a terminal/session.
   const mode = Object.assign(Object.create(InteractiveMode.prototype), {
     ui: reference,
+    keybindings: new KeybindingsManager(),
     editor,
     editorContainer,
     widgetContainerAbove: above,
@@ -85,11 +91,12 @@ function setup(plan: string, scrollbar: "always" | "hidden" = "always") {
   }) as {
     setExtensionWidget: ExtensionContext["ui"]["setWidget"];
     showExtensionSelector: ExtensionContext["ui"]["select"];
-    extensionSelector?: Component;
+    showExtensionCustom: ExtensionContext["ui"]["custom"];
   };
   const ctx = createMockContext({ mode: "tui", hasUI: true }).ctx as ExtensionToolContext;
   ctx.ui.setWidget = mode.setExtensionWidget.bind(mode);
   ctx.ui.select = mode.showExtensionSelector.bind(mode);
+  ctx.ui.custom = mode.showExtensionCustom.bind(mode);
   // Raw terminal input, as Pi hands it to extensions before the focused component.
   const keyHandlers = new Set<(data: string) => { consume?: boolean } | undefined>();
   ctx.ui.onTerminalInput = (handler) => {
@@ -139,10 +146,16 @@ function setup(plan: string, scrollbar: "always" | "hidden" = "always") {
       },
       ctx,
     );
+  // The approval picker sits in the editor's slot, as Pi's own selector does.
+  const picker = () => editorContainer.children[0] as Component;
+  // Pi mounts a custom component a microtask after asking for it.
+  const mounted = async () => {
+    for (let i = 0; i < 10 && !(picker() instanceof ApprovalPicker); i++) await Promise.resolve();
+    expect(picker()).toBeInstanceOf(ApprovalPicker);
+  };
   const choose = (index = 0) => {
-    const selector = mode.extensionSelector as Component;
-    for (let i = 0; i < index; i++) selector.handleInput?.("\x1b[B");
-    selector.handleInput?.("\r");
+    for (let i = 0; i < index; i++) picker().handleInput?.("\x1b[B");
+    picker().handleInput?.("\r");
   };
   const top = () =>
     chat.children
@@ -160,6 +173,8 @@ function setup(plan: string, scrollbar: "always" | "hidden" = "always") {
     mock,
     run,
     choose,
+    picker,
+    mounted,
     press,
     keyHandlers,
     settle,
@@ -259,7 +274,7 @@ test("editing returns to the start of the revised plan", async () => {
   const result = h.run();
   await h.settle();
   h.scroll.scrollBy(12);
-  h.choose(2); // Edit the plan first, without a gate installed.
+  h.picker().handleInput?.("\x07"); // Ctrl+G edits the plan first.
   await Promise.resolve();
   const layout = await h.settle();
   expect(h.scroll.scrollTop).toBe(h.top());
@@ -283,10 +298,11 @@ test.each(["escape", "keep", "fresh", "abort"])(
       },
       h.ctx,
     );
+    await h.mounted();
     h.frame(); // Leave an anchor microtask queued while the user dismisses review.
-    if (ending === "escape") h.mode.extensionSelector?.handleInput?.("\x1b");
+    if (ending === "escape") h.picker().handleInput?.("\x1b");
     else if (ending === "abort") abort.abort();
-    else h.choose(ending === "keep" ? 3 : 1);
+    else h.choose(ending === "keep" ? 2 : 1);
     const final = await result;
     h.card.updateResult({ ...final, isError: false }, false);
     await h.settle();
@@ -297,7 +313,7 @@ test.each(["escape", "keep", "fresh", "abort"])(
 
 test("a thrown dialog error releases review resources", async () => {
   const h = setup(longPlan);
-  h.ctx.ui.select = async () => {
+  h.ctx.ui.custom = async () => {
     throw new Error("dialog failed");
   };
   await expect(h.run()).rejects.toThrow("dialog failed");
@@ -400,3 +416,30 @@ test.each(["rpc", "regular", "unsupported"])(
     if (mode === "rpc") expect(setWidget).not.toHaveBeenCalled();
   },
 );
+
+test.each([46, 120])("the approval picker keeps Pi's dialog layout in few rows at %i columns", async (columns) => {
+  const h = setup(longPlan);
+  h.terminal.columns = columns;
+  const result = h.run();
+  const layout = await h.settle();
+  const strip = (line: string) => line.replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g"), "");
+  const rows = h
+    .picker()
+    .render(columns)
+    .map((line) => strip(line).trimEnd());
+  expect(rows[0]).toMatch(/^─+$/);
+  const blank = rows.indexOf("");
+  expect(rows.slice(1, blank).join(" ")).toMatch(/^ Implement this plan\? /);
+  expect(rows.slice(blank + 1, blank + 4)).toEqual([
+    " → Yes, implement it",
+    "   Yes, in a fresh session",
+    "   No, keep planning",
+  ]);
+  expect(rows.slice(blank + 4).join(" ")).toMatch(
+    /ctrl\+g edit\s+↑↓ navigate\s+enter select\s+escape\/ctrl\+c cancel$/,
+  );
+  // Everything else on screen is the plan.
+  expect(layout.lines.join("\n")).not.toContain("Waiting for approval");
+  h.choose();
+  await result;
+});

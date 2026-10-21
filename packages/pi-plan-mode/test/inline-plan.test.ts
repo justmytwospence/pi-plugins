@@ -239,6 +239,30 @@ test("with the gate's chat mode enabled: approval offers only enabled modes; lea
   assert.doesNotMatch(notice.message.content, /may now make edits/u);
 });
 
+test("with the gate's yolo mode enabled, approval offers it and switches the gate to it", async () => {
+  const { mock, context, tool, inline, gateEvents, selects } = await setup({
+    gate: true,
+    cycle: ["chat", "plan", "bypassPermissions", "auto"],
+    select: ["Yes, yolo mode"],
+  });
+  await mock.commands.get("plan")?.handler("", context.ctx);
+  writeFileSync(inline().planFile, "# Plan\n");
+  const result = await tool(EXIT_TOOL).execute("t1", {}, undefined, undefined, context.ctx);
+  assert.deepEqual(selects[0]?.options, [
+    "Yes, auto mode",
+    "Yes, yolo mode",
+    "Yes, in a fresh session",
+    "Edit the plan",
+    "No, keep planning",
+  ]);
+  assert.equal(result.details.mode, "bypassPermissions");
+  assert.deepEqual(
+    gateEvents.filter((event) => event.channel === MODE_SET).map((event) => event.data.mode),
+    ["plan", "bypassPermissions"],
+  );
+  assert.equal(inline().active, false);
+});
+
 test("plan tools stay top-level so codemode cannot hide the inline plan review", async () => {
   const { tool } = await setup();
   assert.equal(tool(ENTER_TOOL).exposure, "model-only");

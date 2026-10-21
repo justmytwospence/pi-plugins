@@ -25,6 +25,7 @@ import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { editInTerminal, externalEditorCommand } from "./external-editor.js";
 import { holdBlocked } from "./herdr-blocked.js";
 import { PlanMarkdown } from "./mermaid-art.js";
+import { choosePlanApproval, EDIT_CHOICE } from "./plan-approval.js";
 import { expandHome } from "./plan-hook.js";
 import { PlanReviewViewport } from "./plan-review-viewport.js";
 import { findBlockedCommandSegment, readCommand, type SafeSubcommands } from "./tool-policy.js";
@@ -178,11 +179,12 @@ export const ENTER_GUIDELINES = [
 ];
 
 const APPROVE_AUTO = "Yes, auto mode";
+const APPROVE_YOLO = "Yes, yolo mode";
 const APPROVE_EDITS = "Yes, accept edits";
 const APPROVE_MANUAL = "Yes, approve each edit";
 const APPROVE_HERE = "Yes, implement it";
 const APPROVE_FRESH = "Yes, in a fresh session";
-const EDIT = "Edit the plan";
+const EDIT = EDIT_CHOICE;
 const KEEP = "No, keep planning";
 
 interface ExitDetails {
@@ -407,14 +409,17 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
         const here = gate
           ? [
               ...(cycle.includes("auto") ? [APPROVE_AUTO] : []),
+              ...(cycle.includes("bypassPermissions") ? [APPROVE_YOLO] : []),
               ...(cycle.includes("acceptEdits") ? [APPROVE_EDITS] : []),
               // Manual approval when it is in the cycle, or when nothing else is.
-              ...(cycle.includes("default") || !(cycle.includes("auto") || cycle.includes("acceptEdits"))
+              ...(cycle.includes("default") ||
+              !(cycle.includes("auto") || cycle.includes("bypassPermissions") || cycle.includes("acceptEdits"))
                 ? [APPROVE_MANUAL]
                 : []),
             ]
           : [APPROVE_HERE];
-        return [...here, APPROVE_FRESH, EDIT, KEEP];
+        // The picker adds EDIT (a row, or a key in the TUI) before KEEP.
+        return [...here, APPROVE_FRESH, KEEP];
       };
       reviewViewport.begin(ctx, id);
       const releaseBlocked = holdBlocked(pi.events, "Review the plan");
@@ -427,7 +432,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             content: [{ type: "text", text: plan }],
             details: { plan, planFile, outcome: "pending" } satisfies ExitDetails,
           } as never);
-          const choice = await ctx.ui.select(`Implement this plan? ${tildify(planFile)}`, choices(), { signal });
+          const choice = await choosePlanApproval(ctx, `Implement this plan? ${tildify(planFile)}`, choices(), signal);
           if (choice === EDIT) {
             // In your external editor when one is set (pi's externalEditor, or $VISUAL / $EDITOR),
             // else in pi's own.
@@ -494,11 +499,13 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
           const mode =
             choice === APPROVE_AUTO
               ? "auto"
-              : choice === APPROVE_EDITS
-                ? "acceptEdits"
-                : choice === APPROVE_MANUAL
-                  ? "default"
-                  : undefined;
+              : choice === APPROVE_YOLO
+                ? "bypassPermissions"
+                : choice === APPROVE_EDITS
+                  ? "acceptEdits"
+                  : choice === APPROVE_MANUAL
+                    ? "default"
+                    : undefined;
           // This result tells your agent it left plan mode.
           exitLocal(ctx, false);
           if (mode) requestMode(mode);
@@ -551,6 +558,7 @@ function tildify(file: string) {
 
 const MODE_WORDS: Record<string, string> = {
   auto: "auto mode",
+  bypassPermissions: "yolo mode",
   acceptEdits: "accepting edits",
   default: "approving edits manually",
 };
@@ -573,6 +581,8 @@ function renderExit(
     new PlanMarkdown(folded ? lines.slice(0, COLLAPSED_LINES).join("\n") : plan, getMarkdownTheme(), theme),
   );
   if (folded) container.addChild(new Text(theme.fg("dim", `… ${lines.length - COLLAPSED_LINES} more lines`), 0, 0));
+  // While you decide, the picker under the plan names the file: every row goes to the plan.
+  if (outcome === "pending") return container;
   container.addChild(new Spacer(1));
   const where = details?.planFile ? theme.fg("dim", ` · ${tildify(details.planFile)}`) : "";
   const status =
@@ -583,9 +593,7 @@ function renderExit(
         )
       : outcome === "fresh"
         ? theme.fg("success", "✓ Approved, implementing in a fresh session")
-        : outcome === "kept"
-          ? theme.fg("warning", "Kept planning")
-          : theme.fg("muted", "Waiting for approval");
+        : theme.fg("warning", "Kept planning");
   container.addChild(new Text(`${status}${where}`, 0, 0));
   return container;
 }
