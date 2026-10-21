@@ -116,7 +116,7 @@ test("/plan with a task enters plan mode and sends the task", async () => {
 });
 
 test("exit_plan_mode needs a written plan, shows it, and implements it here once approved", async () => {
-  const { mock, context, tool, emit, inline, selects } = await setup({ select: ["Yes, implement it"] });
+  const { mock, context, tool, emit, inline, selects } = await setup({ select: ["Implement it"] });
   const outside = await tool(EXIT_TOOL).execute("t0", {}, undefined, undefined, context.ctx);
   assert.match(outside.content[0]?.text ?? "", /not in plan mode/u);
   await mock.commands.get("plan")?.handler("", context.ctx);
@@ -134,10 +134,10 @@ test("exit_plan_mode needs a written plan, shows it, and implements it here once
   );
   assert.equal(updates[0]?.details.outcome, "pending", "the plan shows while you decide");
   assert.deepEqual(selects[0]?.options, [
-    "Yes, implement it",
-    "Yes, in a fresh session",
+    "Implement it",
+    "Implement in a fresh session",
     "Edit the plan",
-    "No, keep planning",
+    "Keep planning",
   ]);
   assert.match(
     result.content[0]?.text ?? "",
@@ -152,7 +152,7 @@ test("exit_plan_mode needs a written plan, shows it, and implements it here once
 
 test("keep planning sends your feedback back; Esc stops the turn", async () => {
   const { mock, context, tool, inline } = await setup({
-    select: ["No, keep planning", undefined as never],
+    select: ["Keep planning", undefined as never],
     input: "use redis",
   });
   await mock.commands.get("plan")?.handler("", context.ctx);
@@ -167,7 +167,7 @@ test("keep planning sends your feedback back; Esc stops the turn", async () => {
 });
 
 test("a fresh-session approval starts /plan's fresh session once the turn is over", async () => {
-  const { mock, context, tool, emit, inline } = await setup({ select: ["Yes, in a fresh session"] });
+  const { mock, context, tool, emit, inline } = await setup({ select: ["Implement in a fresh session"] });
   await mock.commands.get("plan")?.handler("", context.ctx);
   writeFileSync(inline().planFile, "# Plan\n");
   const result = await tool(EXIT_TOOL).execute("t1", {}, undefined, undefined, context.ctx);
@@ -187,7 +187,7 @@ test("a fresh-session approval starts /plan's fresh session once the turn is ove
 test("with pi-tool-gate, plan mode is the gate's mode: /plan asks it, approval picks the next mode", async () => {
   const { mock, context, tool, inline, gateEvents, selects } = await setup({
     gate: true,
-    select: ["Yes, accept edits"],
+    select: ["Implement accepting edits"],
   });
   assert.ok(
     gateEvents.some((event) => event.channel === PLAN_PROVIDER),
@@ -204,7 +204,11 @@ test("with pi-tool-gate, plan mode is the gate's mode: /plan asks it, approval p
   assert.ok(gateEvents.some((event) => event.channel === PLAN_PROVIDER && event.data.planFile === planFile));
   writeFileSync(planFile, "# Plan\n");
   await tool(EXIT_TOOL).execute("t1", {}, undefined, undefined, context.ctx);
-  assert.deepEqual(selects[0]?.options.slice(0, 3), ["Yes, auto mode", "Yes, accept edits", "Yes, approve each edit"]);
+  assert.deepEqual(selects[0]?.options.slice(0, 3), [
+    "Implement in auto mode",
+    "Implement accepting edits",
+    "Implement approving each edit",
+  ]);
   assert.deepEqual(
     gateEvents.filter((event) => event.channel === MODE_SET).map((event) => event.data.mode),
     ["plan", "acceptEdits"],
@@ -228,10 +232,10 @@ test("with the gate's chat mode enabled: approval offers only enabled modes; lea
   await emit("before_agent_start", { prompt: "x" });
   await tool(EXIT_TOOL).execute("t1", {}, undefined, undefined, context.ctx);
   assert.deepEqual(selects[0]?.options, [
-    "Yes, auto mode",
-    "Yes, in a fresh session",
+    "Implement in auto mode",
+    "Implement in a fresh session",
     "Edit the plan",
-    "No, keep planning",
+    "Keep planning",
   ]);
   mock.eventBus.emit(MODE_CHANGED, { mode: "chat", cycle: ["chat", "plan", "auto"] });
   const notice = await emit("before_agent_start", { prompt: "y" });
@@ -243,17 +247,17 @@ test("with the gate's yolo mode enabled, approval offers it and switches the gat
   const { mock, context, tool, inline, gateEvents, selects } = await setup({
     gate: true,
     cycle: ["chat", "plan", "bypassPermissions", "auto"],
-    select: ["Yes, yolo mode"],
+    select: ["Implement in yolo mode"],
   });
   await mock.commands.get("plan")?.handler("", context.ctx);
   writeFileSync(inline().planFile, "# Plan\n");
   const result = await tool(EXIT_TOOL).execute("t1", {}, undefined, undefined, context.ctx);
   assert.deepEqual(selects[0]?.options, [
-    "Yes, auto mode",
-    "Yes, yolo mode",
-    "Yes, in a fresh session",
+    "Implement in auto mode",
+    "Implement in yolo mode",
+    "Implement in a fresh session",
     "Edit the plan",
-    "No, keep planning",
+    "Keep planning",
   ]);
   assert.equal(result.details.mode, "bypassPermissions");
   assert.deepEqual(
@@ -339,7 +343,7 @@ for (const outcome of ["approve", "cancel", "feedback", "edit", "throw", "abort"
         return undefined;
       }
       if (outcome === "cancel") return undefined;
-      if (outcome === "feedback") return options.find((s) => s === "No, keep planning");
+      if (outcome === "feedback") return options.find((s) => s === "Keep planning");
       if (outcome === "edit" && calls++ === 0) return options.find((s) => s === "Edit the plan");
       return options[0];
     };

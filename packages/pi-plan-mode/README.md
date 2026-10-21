@@ -45,18 +45,17 @@ While plan mode is on:
 
 - Your agent is told (once, with your next message, or right away mid-turn) to research, ask you what it cannot find out, and write its plan to a **plan file**, `~/.pi/agent/plans/<two-words>.md` (`plansDirectory` moves it). One file per session: entering plan mode again continues it.
 - `edit` and `write` are blocked except for the plan file. Commands: with pi-tool-gate, the gate judges them as in auto mode (as Claude Code's classifier does while planning); without it, only read-only commands run (the [shell policy](./docs/settings.md)).
-- When the plan is ready, your agent calls `exit_plan_mode`. The plan shows in the chat (Mermaid diagrams drawn as terminal diagrams, top-down when a left-to-right chart is too wide) and you choose:
-  - **Yes, auto mode** / **Yes, yolo mode** / **Yes, accept edits** / **Yes, approve each edit** (with pi-tool-gate, those of its enabled modes, with manual approval when none of the others is enabled; without it, **Yes, implement it**): plan mode ends and your agent starts implementing in this conversation, in that permission mode.
-  - **Yes, in a fresh session**: once this turn ends, a new session (a child of this one) starts with the plan as its first message.
-  - **Edit the plan** (Ctrl+G, Pi's `app.editor.external`, in the terminal; a row in RPC): edit it in your external editor (Pi's `externalEditor` setting, else `$VISUAL` / `$EDITOR`; a Markdown editor such as [edamame](https://github.com/mijowi/edamame) keeps it rendered while you edit), or in Pi's editor when none is set; the file is updated and you choose again. The approval tells your agent the plan was edited.
-  - **No, keep planning**: say what should change (or leave it empty, or press Esc, and say it in the chat). Plan mode stays on.
+- When the plan is ready, your agent calls `exit_plan_mode`. In the terminal the plan opens full screen, with nothing else on it (no header, hints or rules; Mermaid diagrams drawn as terminal diagrams, top-down when a left-to-right chart is too wide; at most 100 columns wide, centred). Up/Down or `j`/`k`, Ctrl+D/Ctrl+U, PgDn/PgUp (or Space), `g`/`G` (or Home/End) and the wheel scroll it. Enter shows the choices over the end of the plan (Up/Down and Enter pick one; Esc goes back to reading):
+  - **Implement in auto mode** / **Implement in yolo mode** / **Implement accepting edits** / **Implement approving each edit** (with pi-tool-gate, those of its enabled modes, with manual approval when none of the others is enabled; without it, **Implement it**): plan mode ends and your agent starts implementing in this conversation, in that permission mode.
+  - **Implement in a fresh session**: once this turn ends, a new session (a child of this one) starts with the plan as its first message.
+  - **Keep planning** (or Esc while reading): say what should change (or leave it empty and say it in the chat). Plan mode stays on.
+  - Ctrl+G (Pi's `app.editor.external`) at any point edits the plan in your external editor (Pi's `externalEditor` setting, else `$VISUAL` / `$EDITOR`; a Markdown editor such as [edamame](https://github.com/mijowi/edamame) keeps it rendered while you edit), or in Pi's editor when none is set; the file is updated and the reader reopens at its top. The approval tells your agent the plan was edited.
 
-  In the terminal the picker is compact (no blank rows around it, the plan file's path in its question, editing a key in its hint) so the plan keeps most of the screen.
+  In RPC the plan shows in the chat and Pi's select asks, with **Edit the plan** as a row. On a phone, herdr-web-ui cannot read the reader as a dialog and shows its plain Enter/Esc card.
 - Leaving plan mode another way (Shift+Tab, or the shortcut) tells your agent it may now make changes.
 
-The plan tools are model-only: your agent calls them directly, never inside `codemode`. This keeps the plan's inline renderer visible while you approve it. Auto mode uses Jev to judge each call; auto-accept project edits allows project edits and filesystem commands without approval, while other commands follow the gate's normal approval policy.
+The plan tools are model-only: your agent calls them directly, never inside `codemode`. This keeps the plan's renderer in the chat for the record. Auto mode uses Jev to judge each call; auto-accept project edits allows project edits and filesystem commands without approval, while other commands follow the gate's normal approval policy.
 
-In Pi's fullscreen terminal mode, **Plan review** scrolls the chat to the beginning of the plan when the approval picker opens. Short plans get temporary trailing space so their beginning is at the top too. Scroll the chat to read; redraws leave your position alone. After editing, review starts at the revised plan's beginning. Closing review removes the space and follows the latest message again. Regular terminal mode and RPC keep their usual presentation; their scrollback is not controlled by this extension.
 
 `planCompleteCommand` runs for an approved plan, as it does for `/planners`.
 

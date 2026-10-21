@@ -27,7 +27,6 @@ import { holdBlocked } from "./herdr-blocked.js";
 import { PlanMarkdown } from "./mermaid-art.js";
 import { choosePlanApproval, EDIT_CHOICE } from "./plan-approval.js";
 import { expandHome } from "./plan-hook.js";
-import { PlanReviewViewport } from "./plan-review-viewport.js";
 import { findBlockedCommandSegment, readCommand, type SafeSubcommands } from "./tool-policy.js";
 
 export const MODE_CHANGED = "permission-mode:changed";
@@ -178,14 +177,14 @@ export const ENTER_GUIDELINES = [
   `Call ${ENTER_TOOL} before starting a non-trivial implementation where planning first pays off: new features, changes across several files, architectural choices, several valid approaches, or unclear requirements. Do not use it for small fixes, single obvious changes, or pure research.`,
 ];
 
-const APPROVE_AUTO = "Yes, auto mode";
-const APPROVE_YOLO = "Yes, yolo mode";
-const APPROVE_EDITS = "Yes, accept edits";
-const APPROVE_MANUAL = "Yes, approve each edit";
-const APPROVE_HERE = "Yes, implement it";
-const APPROVE_FRESH = "Yes, in a fresh session";
+const APPROVE_AUTO = "Implement in auto mode";
+const APPROVE_YOLO = "Implement in yolo mode";
+const APPROVE_EDITS = "Implement accepting edits";
+const APPROVE_MANUAL = "Implement approving each edit";
+const APPROVE_HERE = "Implement it";
+const APPROVE_FRESH = "Implement in a fresh session";
 const EDIT = EDIT_CHOICE;
-const KEEP = "No, keep planning";
+const KEEP = "Keep planning";
 
 interface ExitDetails {
   plan?: string;
@@ -202,7 +201,6 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   /** Restored this session's state (so the gate's early broadcast does not clobber it). */
   let restored = false;
   let hostCtx: ExtensionContext | undefined;
-  const reviewViewport = new PlanReviewViewport();
 
   const safely = (fn: () => void) => {
     try {
@@ -316,7 +314,6 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   });
 
   pi.on("session_shutdown", () => {
-    reviewViewport.end();
     hostCtx = undefined;
     restored = false;
     gate = undefined;
@@ -386,11 +383,8 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     parameters: { type: "object", additionalProperties: false, properties: {} } as never,
     renderCall: (_args, theme, context) =>
       new Text(theme.fg("toolTitle", theme.bold(context.isPartial ? "Plan review" : "Plan")), 0, 0),
-    renderResult: (result, options, theme, context) => {
-      const component = renderExit(result.details as ExitDetails | undefined, options, theme);
-      return options.isPartial ? reviewViewport.wrap(context.toolCallId, component) : component;
-    },
-    async execute(id, _params, signal, onUpdate, ctx) {
+    renderResult: (result, options, theme) => renderExit(result.details as ExitDetails | undefined, options, theme),
+    async execute(_id, _params, signal, onUpdate, ctx) {
       hostCtx = ctx;
       if (!state.active || !state.planFile) {
         return text("You are not in plan mode. This tool only asks the user to approve a plan in plan mode.");
@@ -418,21 +412,24 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
                 : []),
             ]
           : [APPROVE_HERE];
-        // The picker adds EDIT (a row, or a key in the TUI) before KEEP.
+        // RPC's select adds EDIT as a row before KEEP; the TUI reader has a key for it.
         return [...here, APPROVE_FRESH, KEEP];
       };
-      reviewViewport.begin(ctx, id);
       const releaseBlocked = holdBlocked(pi.events, "Review the plan");
-      // The agent is waiting on the user: the Working row only takes a plan line.
-      ctx.ui.setWorkingVisible?.(false);
       try {
         for (;;) {
-          reviewViewport.restart();
           onUpdate?.({
             content: [{ type: "text", text: plan }],
             details: { plan, planFile, outcome: "pending" } satisfies ExitDetails,
           } as never);
-          const choice = await choosePlanApproval(ctx, `Implement this plan? ${tildify(planFile)}`, choices(), signal);
+          const choice = await choosePlanApproval(
+            ctx,
+            plan,
+            `Implement this plan? ${tildify(planFile)}`,
+            choices(),
+            KEEP,
+            signal,
+          );
           if (choice === EDIT) {
             // In your external editor when one is set (pi's externalEditor, or $VISUAL / $EDITOR),
             // else in pi's own.
@@ -516,8 +513,6 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
         }
       } finally {
         releaseBlocked();
-        ctx.ui.setWorkingVisible?.(true);
-        reviewViewport.end();
       }
     },
   });
