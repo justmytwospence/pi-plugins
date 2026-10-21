@@ -9,7 +9,7 @@ plugin: pi-cache-guard
 - **Use it for:** Review expensive cold-cache sends; optionally trim large tool output or compact history.
 - **Enable:** Select `packages/pi-cache-guard/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
 - **Controls:** `/cache-guard` status/compact/jev/fresh/on/off. No global shortcut; warning dialog keys below.
-- **Settings:** `cache-guard.json` shared/user/project layers; warning threshold 100,000 tokens, unknown-provider idle heuristic 180 min.
+- **Settings:** `cache-guard.json` shared/user/project layers; warning threshold 100,000 tokens, idle heuristic 180 min for providers with no documented cache lifetime.
 - **Requirements, cost & privacy:** Optional paid Jev sends output/history excerpts; summaries use model tokens. Full trimmed output is saved locally. Warnings and clock work without Jev.
 - **Integrations & limits:** Optional footer/Herdr. `/cache-guard off` disables warnings, not classifier trimming. No cache warming; Pi owns warming and its costs.
 
@@ -23,7 +23,7 @@ Use [Install & select](/guides/install/) with `packages/pi-cache-guard/src/index
 
 ## Decide what to send
 
-The warning threshold is `warn.minTokens`: the dialog appears when a cold cache would re-send at least that many tokens (default 100,000; `0` asks on every cold cache). It counts tokens rather than dollars for every model, and `warn.minCost` is ignored in Pi. Anthropic's clock uses five minutes, or one hour with `PI_CACHE_RETENTION=long`. For providers without a known TTL, the default three-hour idle threshold describes a possible miss rather than a certain expiry. A model switch can also trigger a warning.
+The warning threshold is `warn.minTokens`: the dialog appears when a cold cache would re-send at least that many tokens (default 100,000; `0` asks on every cold cache). It counts tokens rather than dollars for every model, and `warn.minCost` is ignored in Pi. Anthropic's clock uses five minutes, or one hour with `PI_CACHE_RETENTION=long`. OpenAI's API on GPT-5.6 and later uses the `prompt_cache_options.ttl` each request sends (30 minutes by default, 12 hours for `"12h"`), also a guaranteed minimum. The rest of OpenAI (the Codex backend, ChatGPT sign-ins, older models) uses `prompt_cache_retention`, which guarantees nothing: the clock shows an estimate (`cache ~12:00`) of the documented typical lifetime (about 30 minutes for `24h`, 10 for `in_memory`) and then calls the cache probably cold. For providers with no documented lifetime, the default three-hour idle threshold describes a possible miss rather than a certain expiry. A model switch can also trigger a warning.
 
 The dialog lets you send, send and stop asking for the session, compact first, open a linked fresh session, or keep the prompt in the editor. With Jev available, classifier-only compaction and a conventional summary are separate choices. Enter defaults to sending; Esc keeps the prompt. The headline and option labels give the tokens each path re-sends uncached.
 

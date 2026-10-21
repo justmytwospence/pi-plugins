@@ -32,7 +32,14 @@ No `npm install` is needed to run it: the package.json has no `dependencies`; Pi
 
 ## Cold-cache warning
 
-A provider keeps a cached prompt prefix for its TTL from the start of the last request that used it. The TTL comes from the model's `promptCache` lifetime in Pi's model metadata (`short`, or `long` with `PI_CACHE_RETENTION=long`; for Anthropic, 5 minutes or 1 hour). The first prompt after that writes the whole conversation to the cache again, at the model's cache-write price from Pi's catalog (always 2x input for the 1-hour tier) instead of the much cheaper cache-read price. When that rewrite is at least `warn.minTokens` tokens (default 100,000; `0` asks on every cold cache), the prompt waits for a choice. The question counts tokens, not dollars, so it reads the same on a subscription as on API billing.
+A provider keeps a cached prompt prefix for its TTL from the start of the last request that used it. The TTL is the most precise one the provider documents:
+
+- **Pi's model metadata** (`promptCache`, `short`, or `long` with `PI_CACHE_RETENTION=long`): for Anthropic, 5 minutes or 1 hour, a guaranteed minimum.
+- **OpenAI API, GPT-5.6 and later** (an API key): the `prompt_cache_options.ttl` Pi sends, read from each request: 30 minutes by default, 12 hours for `"12h"`. A guaranteed minimum, refreshed by every read.
+- **The rest of OpenAI** (`prompt_cache_retention`: the Codex backend, `openai` with a ChatGPT sign-in, models before GPT-5.6): no minimum exists. The clock uses the documented typical lifetime of the retention each response reports: about 30 minutes for `24h` (the default, and what the ChatGPT backends use), about 10 for `in_memory`. Past it the cache is probably, not certainly, cold.
+- **Anything else** (for example OpenRouter or Azure): no lifetime is known, so it asks after `warn.idleMinutes` (default 180) idle.
+
+`PI_CACHE_RETENTION=none` caches nothing, so there is nothing to guard. The first prompt after the TTL writes the whole conversation to the cache again, at the model's cache-write price from Pi's catalog (always 2x input for the 1-hour tier) instead of the much cheaper cache-read price. When that rewrite is at least `warn.minTokens` tokens (default 100,000; `0` asks on every cold cache), the prompt waits for a choice. The question counts tokens, not dollars, so it reads the same on a subscription as on API billing.
 
 Example of the question:
 
@@ -58,7 +65,7 @@ When the question opens it rings the terminal bell, so a prompt you sent just be
 
 When Jev is not set up (and not turned off), the question ends with a tip: `/cache-guard jev` sets it up, or turns it (and the tip) off.
 
-It also asks when the selected model differs from the one the conversation was cached for (each model has its own cache). For models without a published TTL (for example OpenAI and Codex models) it asks after `warn.idleMinutes` (default 180) idle, worded as a likelihood.
+It also asks when the selected model differs from the one the conversation was cached for (each model has its own cache). Past a typical lifetime, or `warn.idleMinutes` without one, the question is worded as a likelihood.
 
 Never held: commands (`/...`), shell input (`!...`), steering and follow-ups while the agent runs, input from other extensions (anything not typed interactively), and sessions without a UI.
 
@@ -77,11 +84,11 @@ Prompt cache expired. Your next prompt will re-cache 601k tokens.
    Keep the context, and stop asking in this session
 ```
 
-Keeping the context (or Esc) answers for that cold cache: the next prompt sends without asking. The compactions are judged against your recent requests, as there is no prompt yet; if one fails, the next prompt asks as usual. A new session takes any text in the editor along as a draft, unsent. If the moment passes before you answer (the agent starts, the cache changes, the session ends), the question closes and the next prompt asks as usual. Guesses from idle time (models without a published TTL) still ask only when you send. `"warn": { "early": false }` turns this off.
+Keeping the context (or Esc) answers for that cold cache: the next prompt sends without asking. The compactions are judged against your recent requests, as there is no prompt yet; if one fails, the next prompt asks as usual. A new session takes any text in the editor along as a draft, unsent. If the moment passes before you answer (the agent starts, the cache changes, the session ends), the question closes and the next prompt asks as usual. Likely-cold caches (a typical lifetime passed, or a long idle) still ask only when you send. `"warn": { "early": false }` turns this off.
 
 ## Status clock
 
-The `cache-guard` status reads `cache 4:12` (time left), `cache cold`, `cache cold (model)` or `cache cold?` (no TTL known, long idle). It updates every second. pi-status-footer folds it into its context row.
+The `cache-guard` status reads `cache 4:12` (time left), `cache ~4:12` (estimated time left, without a guaranteed minimum), `cache cold`, `cache cold (model)` or `cache cold?` (probably cold: a typical lifetime passed, or a long idle without one). It updates every second. pi-status-footer folds it into its context row.
 
 ## Trimming tool output (Jev)
 
@@ -168,7 +175,7 @@ Pi reads every setting except `warm` and `warn.confirmSeconds`, which are for po
 
 ## Requirements and costs
 
-- The warning, clock and notices need nothing external. They use Pi's model metadata for TTLs; the transcript notices' costs are estimates at API list prices.
+- The warning, clock and notices need nothing external. They use Pi's model metadata and OpenAI's documented cache lifetimes for TTLs; the transcript notices' costs are estimates at API list prices.
 - Jev is optional. It needs a Pi with classifier models (Pi 0.99 or newer) and credentials for one of the providers above. Each trim makes one classifier request, each Jev compaction one request per batch, and `/cache-guard jev` sends a one-question probe. These requests can be billed.
 - Filtered `/compact` and automatic compaction still call your current model through Pi's summarizer, as Pi's compaction does.
 - On disk: it reads the settings files above; writes full tool output under `~/.pi/agent/cache-guard/tool-output/` when it trims; and writes `~/.pi/agent/cache-guard.json` only from `/cache-guard jev`. In the session it appends `cache-guard:jev` decision entries and `cache-guard-notice` entries (never sent to the model).
@@ -185,7 +192,7 @@ rows = [["state_icon", "workspace", { token = "$cache", fg = "#5f87d7", rules = 
 
 ## Limitations
 
-- The clock is the API's guaranteed minimum, measured from each request's start; entries are deleted soon after it, not exactly at it. Other invalidations (tool or system prompt changes, an MCP server reconnecting) are not visible to it.
+- The clock is the API's guaranteed minimum, measured from each request's start; entries are deleted soon after it, not exactly at it. OpenAI keeps entries at least that long but may keep them longer. Where OpenAI guarantees nothing (`prompt_cache_retention`), entries can also go early, for example when a request lands on another machine. Other invalidations (tool or system prompt changes, an MCP server reconnecting) are not visible to it.
 - After a compaction or branch summary there is no cached request to track until the next response.
 - The warning needs an interactive UI; prompts sent without one are never held.
 

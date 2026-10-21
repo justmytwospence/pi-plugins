@@ -15,6 +15,7 @@ import { HerdrReporter, ringBell, whileBlocked } from "./herdr.ts";
 import { JEV_LOGINS, type JevState, label, probe } from "./jev.ts";
 import { JEV_KEY_URL, JEV_PITCH } from "./lean.ts";
 import { type AssistantLike, NOTICE_TYPE, type Notice, detectMiss, noticeLine } from "./notices.ts";
+import { type Wire, cachePolicy, echoedRetention, requestedTtl } from "./policy.ts";
 import { Text } from "@earendil-works/pi-tui";
 import {
   DEFAULT_SETTINGS,
@@ -51,22 +52,35 @@ export const EARLY_QUIET_MS = 3_000;
 
 type ModelLike = NonNullable<ExtensionContext["model"]>;
 
-/** The TTL Pi requests for this model: its `promptCache` lifetime for the active retention tier. */
-export function modelInfo(model: ModelLike | undefined, env: NodeJS.ProcessEnv = process.env): ModelInfo | undefined {
+/**
+ * This model's cache lifetime (`policy.ts`): a guaranteed TTL, a typical one (`likely`), or none
+ * known. Undefined when there is no model, or nothing is cached (PI_CACHE_RETENTION=none).
+ */
+export function modelInfo(
+  model: ModelLike | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+  options: { oauth?: boolean; wire?: Wire } = {},
+): ModelInfo | undefined {
   if (!model) return undefined;
-  const retention = env.PI_CACHE_RETENTION === "long" ? "long" : "short";
-  const seconds = (model as { promptCache?: { short?: number; long?: number } }).promptCache?.[retention];
+  const policy = cachePolicy(model as Parameters<typeof cachePolicy>[0], env, options.oauth ?? false, options.wire);
+  if (policy === null) return undefined;
   const cost = model.cost;
   const price = cost && cost.input > 0
     ? { input: cost.input, cacheRead: cost.cacheRead, cacheWrite: cost.cacheWrite > 0 ? cost.cacheWrite : cost.input }
     : undefined;
-  return { provider: model.provider, id: model.id, ttlMs: seconds === undefined ? undefined : seconds * 1000, price };
+  const info: ModelInfo = { provider: model.provider, id: model.id, price };
+  if (policy) {
+    info.ttlMs = policy.ttlMs;
+    info.source = policy.source;
+    if (!policy.guaranteed) info.likely = true;
+  }
+  return info;
 }
 
-/** The status text: time left while warm, "cold" once the next request misses. */
+/** The status text: time left while warm (`~` when estimated), "cold" once the next request misses. */
 export function statusText(v: CacheView | undefined): string | undefined {
   if (!v) return undefined;
-  if (v.remainingMs !== undefined) return `cache ${formatClock(v.remainingMs)}`;
+  if (v.remainingMs !== undefined) return `cache ${v.likely ? "~" : ""}${formatClock(v.remainingMs)}`;
   if (v.cold?.kind === "model") return "cache cold (model)";
   if (v.cold) return v.cold.kind === "idle" ? "cache cold?" : "cache cold";
   return undefined;
@@ -209,8 +223,39 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
   // Request start of the assistant message streaming now; the branch only has it at message_end.
   let live: { at: number; provider: string; model: string } | undefined;
 
+  // What the wire said per `provider/model`: the `ttl` Pi requested, the retention OpenAI applied.
+  const wires = new Map<string, Wire>();
+  const wireFor = (provider: string, id: string) => {
+    const key = `${provider}/${id}`;
+    let wire = wires.get(key);
+    if (!wire) wires.set(key, (wire = {}));
+    return wire;
+  };
+  pi.on("before_provider_request", (event, context) => {
+    const request = requestedTtl(event.payload);
+    const model = context.model;
+    // Only this session's model: other requests (Jev, for one) go to other models.
+    if (request && model && request.model === model.id) wireFor(model.provider, model.id).ttl = request.ttl;
+    return undefined;
+  });
+  pi.on("provider_stream_event", (event) => {
+    const retention = echoedRetention(event.data);
+    if (retention !== undefined) wireFor(event.provider, event.model).retention = retention;
+  });
+  const infoFor = (context: ExtensionContext) => {
+    const model = context.model;
+    if (!model) return undefined;
+    let oauth = false;
+    try {
+      oauth = context.modelRegistry.isUsingOAuth(model);
+    } catch {
+      // An older Pi or a stub registry: treat it as an API key.
+    }
+    return modelInfo(model, process.env, { oauth, wire: wires.get(`${model.provider}/${model.id}`) });
+  };
+
   const current = (context: ExtensionContext): CacheView | undefined => {
-    const info = modelInfo(context.model);
+    const info = infoFor(context);
     if (!info) return undefined;
     let last: LastRequest | undefined = lastRequest(context.sessionManager.getBranch());
     if (live && last && live.provider === last.provider && live.model === last.model && live.at > last.at) {
@@ -621,13 +666,15 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
       if (!v) {
         lines.push("No cached request on this branch yet (or the context was just compacted).");
       } else {
-        const info = modelInfo(context.model);
+        const info = infoFor(context);
         lines.push(`Last request: ${v.last.provider}/${v.last.model}, ${formatTokens(v.last.tokens)} tokens, ${formatDuration(Date.now() - v.last.realAt)} ago` +
           (v.last.at > v.last.realAt ? `; refreshed by cache warming ${formatDuration(Date.now() - v.last.at)} ago.` : "."));
         lines.push(info?.ttlMs === undefined
           ? `TTL: not published for ${info?.provider}/${info?.id}; warning after ${settings.warn.idleMinutes}m idle.`
-          : `TTL: ${formatDuration(info.ttlMs)} (${process.env.PI_CACHE_RETENTION === "long" ? "PI_CACHE_RETENTION=long" : "short retention"}).`);
-        if (v.remainingMs !== undefined) lines.push(`Warm: ${formatClock(v.remainingMs)} left.`);
+          : info.likely
+            ? `TTL: about ${formatDuration(info.ttlMs)} (${info.source}); warning after that, as a likelihood.`
+            : `TTL: ${formatDuration(info.ttlMs)} minimum (${info.source}).`);
+        if (v.remainingMs !== undefined) lines.push(`Warm: ${v.likely ? "about " : ""}${formatClock(v.remainingMs)} left.`);
         if (v.cold) {
           lines.push(describeMiss(v.cold, v.last.tokens, undefined));
           if (!warningOn()) {

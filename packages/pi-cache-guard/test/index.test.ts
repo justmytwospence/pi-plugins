@@ -52,6 +52,16 @@ describe("clock", () => {
     expect(statusText(view(c, modelInfo(codex as any, {})!, NOW, 3 * 3_600_000))).toBe("cache cold?");
     expect(modelInfo(codex as any, {})!.price).toEqual({ input: 10, cacheRead: 1, cacheWrite: 10 });
   });
+
+  test("views: an estimated lifetime goes probably cold, not expired", () => {
+    const info = modelInfo(codex as any, {})!;
+    expect(info).toMatchObject({ ttlMs: 1_800_000, likely: true });
+    const recent = lastRequest([assistant(NOW - 600_000, 200_000, codex as any)])!;
+    expect(statusText(view(recent, info, NOW, 3 * 3_600_000))).toBe("cache ~20:00");
+    const old = lastRequest([assistant(NOW - 2_400_000, 200_000, codex as any)])!;
+    expect(view(old, info, NOW, 3 * 3_600_000).cold).toEqual({ kind: "idle", idleMs: 2_400_000 });
+    expect(modelInfo(codex as any, { PI_CACHE_RETENTION: "none" })).toBeUndefined();
+  });
 });
 
 function harness(entries: unknown[], model: any = opus, registry: Record<string, unknown> = {}) {
@@ -150,6 +160,28 @@ describe("extension", () => {
     expect(h.ui.status.get("cache-guard")).toBe("cache cold");
     await h.emit("session_shutdown", {});
     expect(h.ui.status.get("cache-guard")).toBeUndefined();
+  });
+
+  test("the clock follows the cache lifetime the wire reports", async () => {
+    const sol = { provider: "openai", id: "gpt-5.6-sol", api: "openai-responses", compat: { supportsExplicitPromptCacheMode: true },
+      cost: { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5 } };
+    const h = harness([assistant(NOW - 60_000, 600_000, sol as any)], sol, { isUsingOAuth: () => false });
+    await h.emit("session_start", {});
+    expect(h.ui.status.get("cache-guard")).toBe("cache 29:00");
+    // Another model's request (Jev, say) does not count.
+    await h.emit("before_provider_request", { payload: { model: "jev-latest", prompt_cache_options: { ttl: "12h" } } });
+    vi.advanceTimersByTime(1_000);
+    expect(h.ui.status.get("cache-guard")).toBe("cache 28:59");
+    await h.emit("before_provider_request", { payload: { model: "gpt-5.6-sol", prompt_cache_options: { ttl: "12h" } } });
+    vi.advanceTimersByTime(1_000);
+    expect(h.ui.status.get("cache-guard")).toBe("cache 11h58m");
+
+    const c = harness([assistant(NOW - 600_000, 600_000, codex as any)], codex);
+    await c.emit("session_start", {});
+    expect(c.ui.status.get("cache-guard")).toBe("cache ~19:58");
+    await c.emit("provider_stream_event", { provider: "openai-codex", model: "gpt-6-astra", data: { type: "response.completed", response: { prompt_cache_retention: "in_memory" } } });
+    vi.advanceTimersByTime(1_000);
+    expect(c.ui.status.get("cache-guard")).toBe("cache cold?");
   });
 
   test("lets a warm prompt through without asking", async () => {

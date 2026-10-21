@@ -61,6 +61,8 @@ export interface CacheView {
   cold?: ColdReason;
   last: LastRequest;
   ttlMs?: number;
+  /** The TTL is a typical lifetime, not a guaranteed minimum: time left is an estimate. */
+  likely?: boolean;
   price?: Price;
 }
 
@@ -68,12 +70,17 @@ export interface ModelInfo {
   provider: string;
   id: string;
   ttlMs?: number;
+  /** `ttlMs` is how long entries typically last, not a guaranteed minimum (OpenAI's `prompt_cache_retention`). */
+  likely?: boolean;
+  /** Where `ttlMs` comes from, for the status command. */
+  source?: string;
   price?: Price;
 }
 
 /**
  * Where the cache stands for a request on `current`: warm with time left, expired, gone with a
- * model switch, or (for a provider without a published TTL) probably gone after a long idle.
+ * model switch, or probably gone: past a typical lifetime (`likely`), or after a long idle for a
+ * provider that documents none.
  */
 export function view(last: LastRequest, current: ModelInfo, now: number, idleWarnMs: number): CacheView {
   if (current.provider !== last.provider || current.id !== last.model) {
@@ -83,7 +90,9 @@ export function view(last: LastRequest, current: ModelInfo, now: number, idleWar
   if (current.ttlMs === undefined) {
     return { last, price: current.price, cold: idleMs >= idleWarnMs ? { kind: "idle", idleMs } : undefined };
   }
+  const likely = current.likely === true;
+  const base = { last, ttlMs: current.ttlMs, price: current.price, ...(likely ? { likely } : {}) };
   const left = last.at + current.ttlMs - now;
-  if (left > 0) return { last, remainingMs: left, ttlMs: current.ttlMs, price: current.price };
-  return { last, ttlMs: current.ttlMs, price: current.price, cold: { kind: "expired", idleMs: -left } };
+  if (left > 0) return { ...base, remainingMs: left };
+  return { ...base, cold: likely ? { kind: "idle", idleMs } : { kind: "expired", idleMs: -left } };
 }
