@@ -31,7 +31,17 @@ herdr-web-ui (devswha/herdr-web-ui, `server/prompt.ts`) turns a waiting Pi dialo
 - pi-status-footer shrinks to one row while `herdr:blocked` is held, so a pi-bg or subagent activity row still fits in the 2 lines after the hint.
 - Anything drawn on an option row shows up in the phone card's option text, so keep box glyphs and decorations off unchecked rows.
 
-Before changing a dialog's rendering, the footer, or below-editor widgets, render the screen at 46 and 120 columns. Feed it, plus the footer and any activity row, to the installed parser: `parseInteractivePrompt("pi", screen)` from `~/.local/share/herdr-web-ui/remote-v*/server/prompt.ts`, run with that bundle's `bin/bun`. Check the card's question, options and `multi_select`, and the text-box card after "Type something." or "Other". Re-check after herdr-web-ui updates.
+Before changing a dialog's rendering, the footer, or below-editor widgets, render the screen at 46 and 120 columns. Feed it, plus the footer and any activity row, to the installed parser: `parseInteractivePrompt("pi", screen)` from `~/.local/share/herdr-web-ui/remote-v*/server/prompt.ts`, run with that bundle's `bin/bun`. Check the card's question, options and `multi_select`, and the text-box card after "Type something." or "Other". Re-check after herdr-web-ui updates. `npm run check:clients` does this for every dialog.
+
+## Collie compatibility
+
+Collie (AltanS/collie) also reads a waiting Pi dialog off the screen, and finds the editor by its frame to decide whether a phone send may type. Its pi reader knows Pi's own frame, so the suite's frame (pi-status-footer's `━` gauge in the editor rules and its indented footer, pi-vim's mode label at the bottom rule's end, pi-bg's activity row and the blank row under it) is declared to it in `~/.config/collie/frames.toml`, managed in dotfiles (`home/dot_config/collie/frames.toml`). That file needs a Collie build with `frames.toml` support: until upstream ships it, the fork branch `justmytwospence/collie` `feat/pi-frames`.
+
+- The dialog layouts above serve Collie too: single-choice questions, tool-gate approvals and Pi's own selects lift as walked buttons; a multiple choice shows Collie's Escape card.
+- A change to the editor's rules, the footer's height or indent, or a below-editor widget must stay inside `frames.toml`'s limits, or change that file with it (and restart Collie).
+- In a pane narrower than a dialog's key hint or an option row, Collie shows the Escape card instead of buttons: it joins a wrapped hint with one space and does not read the `│` gutter herdr-web-ui needs. Fix that in Collie, not by dropping the gutter.
+
+`npm run check:clients` renders every dialog at 46 and 120 columns over the blocked footer and runs both clients' readers on it (herdr-web-ui's installed bundle, and a Collie checkout at `~/Projects/collie` with this machine's `frames.toml`); a client that is not installed is skipped. Run it after changing a dialog, the footer or a below-editor widget.
 
 ## Documentation ownership
 

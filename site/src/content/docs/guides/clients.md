@@ -21,6 +21,25 @@ On iPhone, web push requires iOS 16.4+, HTTPS, and installing the site through S
 
 See the [herdr-web-ui guide](https://github.com/devswha/herdr-web-ui/blob/main/docs/guide.md) for current setup and behavior.
 
+## Collie
+
+[Collie](https://github.com/AltanS/collie) also mirrors Herdr panes to a phone and reads a waiting Pi dialog off the screen. Single-choice questions, permission prompts and Pi's own selects (plan approval, cache-guard) show as buttons; a multiple-choice question shows Collie's Escape card, with the terminal for the answer.
+
+To send a message in one tap and lift those cards, Collie has to find Pi's editor. pi-status-footer paints a context gauge into the editor's rules and draws a taller, indented footer, and pi-vim puts its mode label at the bottom rule's end, so declare that frame to Collie in `~/.config/collie/frames.toml` (a Collie build with `frames.toml` support; see Collie's "Your own editor frame"):
+
+```toml
+[pi]
+rule_glyphs = "━"
+rule_labels = "ends"
+status_rows = 12
+status_indent = 1
+status_blank_rows = 1
+```
+
+Collie reads it at startup: run `collie restart` after an edit. Collie's phone app also shows the footer's rows under Chat; Settings → pi → Show the status line turns that off per device.
+
+Limits: in a pane narrower than a dialog's key hint or an option row, Collie shows the Escape card instead of buttons.
+
 ## Paseo
 
 Paseo starts Pi in RPC mode. The questionnaire's select/input fallback supports ordinary selections, custom answers and numbered multi-select. Permission prompts use standard selects. Inline plan approval uses standard selects and editing uses the RPC editor.
@@ -44,4 +63,4 @@ The audited native bridge publishes idle at `agent_end`, which can precede Pi's 
 
 ## Audit baseline
 
-The herdr-web-ui layout was checked against its v17, v27 (0.4.8) and v31 (0.4.12) prompt parsers (`parseInteractivePrompt`) at 46 and 120 columns; other limits against herdr-web-ui `dc2f11de`, Paseo `4a3ff87e` and Omnigent `f8f69988`. Custom question/gate frames were tested against the web prompt parser; the standard plan selector was recognized. This is not a live iPhone or end-to-end model test. Newer client revisions may behave differently.
+Collie was checked against its pi reader on the `frames.toml` branch (`npm run check:clients`, 46 and 120 columns) and live from a phone on a two-machine crew. The herdr-web-ui layout was checked against its v17, v27 (0.4.8) and v31 (0.4.12) prompt parsers (`parseInteractivePrompt`) at 46 and 120 columns; other limits against herdr-web-ui `dc2f11de`, Paseo `4a3ff87e` and Omnigent `f8f69988`. Custom question/gate frames were tested against the web prompt parser; the standard plan selector was recognized. This is not a live iPhone or end-to-end model test. Newer client revisions may behave differently.
