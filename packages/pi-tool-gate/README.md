@@ -113,7 +113,7 @@ Pi has no directory boundary of its own, so the gate keeps one. In auto, manual 
 ```json
 {
   "directories": {
-    "derived": [{ "path": "~/.config", "hint": "Edit the source in ~/dotfiles, then deploy it." }],
+    "derived": [{ "path": "~/.config", "hint": "Edit the source in ~/Projects/dotfiles, then deploy it." }],
     "exemptCommands": ["stow"]
   }
 }
@@ -122,7 +122,7 @@ Pi has no directory boundary of its own, so the gate keeps one. In auto, manual 
 Put a project's grants in its `.agents/tool-gate.json`, which the opencode and Claude Code ports read too:
 
 ```json
-{ "directories": { "read": ["*"], "write": ["~/dotfiles"] } }
+{ "directories": { "read": ["*"], "write": ["~/Projects/dotfiles"] } }
 ```
 
 The gate finds paths in `read`, `grep`, `find` and `ls` arguments (reads) and `edit` and `write` paths (writes). In shell commands it finds words that look like paths (a slash, `~`, `.`), resolved after any `cd`:
