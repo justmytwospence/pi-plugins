@@ -5,8 +5,8 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import { MainState } from "../src/main-state.ts";
 import { runCheck } from "../src/headsup/check.ts";
-import { HeadsUp } from "../src/headsup/headsup.ts";
-import { HEADSUP_ENTRY, headsUpDefault, headsUpFromBranch, HeadsUpStats } from "../src/headsup/mode.ts";
+import { HeadsUp, headsUpChange } from "../src/headsup/headsup.ts";
+import { HEADSUP_ENTRY, headsUpDefault, headsUpFromBranch, HeadsUpStats, headsUpWhereDefault } from "../src/headsup/mode.ts";
 import { NoteState, quoteForMain } from "../src/headsup/note.ts";
 import { parseHeadsUp } from "../src/headsup/protocol.ts";
 import { isNoteMarker, noteMessages } from "../src/headsup/thread.ts";
@@ -287,6 +287,40 @@ describe("HeadsUp in main", () => {
     expect(headsUp.on).toBe(false);
     headsUp.restore([], true);
     expect(headsUp.on).toBe(true);
+  });
+
+  it("asks Sidebar to keep the note when it shows only in Sidebar", async () => {
+    const { headsUp, widgets } = await setup();
+    const onlySidebar: boolean[] = [];
+    (headsUp as any).host.deliver = (_note: unknown, only: boolean) => { onlySidebar.push(only); return only; };
+    headsUp.setOn(true, "sidebar");
+    await headsUp.check("turn");
+    expect(onlySidebar).toEqual([true]);
+    expect(widgets).toHaveLength(0);
+  });
+
+  it("stores where notes go, defaulting from the env", async () => {
+    const { pi, headsUp } = await setup();
+    expect(headsUp.where).toBe("any");
+    headsUp.setOn(true, "sidebar");
+    expect(pi.entries.at(-1)).toMatchObject({ customType: HEADSUP_ENTRY, data: { on: true, where: "sidebar" } });
+    headsUp.restore([{ type: "custom", customType: HEADSUP_ENTRY, data: { version: 1, on: true, at: 1 } }], false);
+    expect(headsUp.where).toBe("any");
+    expect(headsUpWhereDefault({ PI_SIDEBAR_HEADSUP: "sidebar" })).toBe("sidebar");
+    expect(headsUpDefault({ PI_SIDEBAR_HEADSUP: "sidebar" })).toBe(true);
+    expect(headsUpChange("sidebar")).toEqual({ on: true, where: "sidebar" });
+    expect(headsUpChange("off")).toEqual({ on: false });
+  });
+
+  it("gives up a showing note to Sidebar, but not a dismissed one", async () => {
+    const { headsUp } = await setup();
+    await headsUp.check("turn");
+    expect(headsUp.take()).toMatchObject({ topic: "skipped-tests" });
+    expect(headsUp.note.showing).toBe(false);
+    await headsUp.check("turn");
+    headsUp.handleKey("0", true);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(headsUp.take()).toBeUndefined();
   });
 
   it("checks at main's turn boundaries once a run is long", async () => {

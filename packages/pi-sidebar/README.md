@@ -117,7 +117,7 @@ Settings, read from the environment Pi starts with:
 - `PI_SIDEBAR_PREFS`: where the dragged size is kept (default `~/.pi/agent/pi-sidebar.json`).
 - `PI_SIDEBAR_MIN_COLUMNS`: the narrowest half for a side-by-side split (default 80).
 - `PI_SIDEBAR_KNOWLEDGE`: where quiz mode and heads-up mode keep their knowledge profiles (default `~/.pi/agent/pi-sidebar/knowledge`).
-- `PI_SIDEBAR_HEADSUP`: `0` starts sessions with heads-up mode off. `PI_SIDEBAR_HEADSUP_DEBUG=1` logs its checks.
+- `PI_SIDEBAR_HEADSUP`: `0` starts sessions with heads-up mode off; `sidebar` keeps it on but shows notes only in Sidebar. `PI_SIDEBAR_HEADSUP_DEBUG=1` logs its checks.
 
 ## Quiz mode
 
@@ -142,7 +142,7 @@ Quiz mode turns Sidebar into a tutor for main's work. You switch it on when you 
 
 ## Heads-up mode
 
-Heads-up mode watches main's longer runs for one thing you should know but might have missed. Examples are a tradeoff main chose without saying so, a result that looks off, or a risk in what it did. When a check finds one and Sidebar is open, the note arrives in Sidebar's thread. If Sidebar is answering at that moment, the note waits until the answer ends. Ask about it by typing in Sidebar, which knows what it raised, or type `/known` if you already knew it. With Sidebar closed, a short note appears above main's editor instead:
+Heads-up mode watches main's longer runs for one thing you should know but might have missed. Examples are a tradeoff main chose without saying so, a result that looks off, or a risk in what it did. When a check finds one and Sidebar is open, the note arrives in Sidebar's thread. If Sidebar is answering at that moment, the note waits until the answer ends. Ask about it by typing in Sidebar, which knows what it raised, or type `/known` if you already knew it. With Sidebar closed, a short note appears above main's editor instead, and opening Sidebar moves it into Sidebar's thread. With notes set to show only in Sidebar (below), nothing appears above main's editor: a note found while Sidebar is closed goes into its thread and waits there.
 
 ```
 ✦ Heads up · check this result · sum.py's "total" covers only north; it excludes every south row.
@@ -150,7 +150,7 @@ Heads-up mode watches main's longer runs for one thing you should know but might
 ```
 *Illustration, not a screenshot.*
 
-It is on by default. `/sidebar headsup off` switches it off for the session, and `/sidebar headsup on` switches it back on. The setting is stored in main's session, so it follows `/tree` and comes back after resume and `/reload`. Set `PI_SIDEBAR_HEADSUP=0` to start every session with it off.
+It is on by default. `/sidebar headsup off` switches it off for the session, `/sidebar headsup on` switches it back on, and `/sidebar headsup sidebar` keeps it on with notes only in Sidebar. The setting is stored in main's session, so it follows `/tree` and comes back after resume and `/reload`. Set `PI_SIDEBAR_HEADSUP=0` to start every session with it off, or `PI_SIDEBAR_HEADSUP=sidebar` to start them with notes only in Sidebar.
 
 **When it checks.** Checks happen at main's turn boundaries, once a run is long (5 replies or 2 minutes). They are at most 3 minutes apart, and a long run gets one more check when it ends. There is never a check while one is running or while a note is showing. A check is skipped, with nothing sent, when main's prompt cache has probably expired, when Sidebar cannot share main's API, or when no copy of main's last request is in memory (after `/reload`, until main sends again).
 

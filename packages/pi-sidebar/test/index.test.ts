@@ -385,6 +385,34 @@ describe("quiz mode", () => {
   });
 });
 
+describe("heads-up notes and Sidebar", () => {
+  const NOTE = { topic: "t", kind: "risk" as const, text: "Careful.", detail: "Because." };
+  const deliver = (controller: SidebarController, onlySidebar: boolean) =>
+    (controller as unknown as { deliverNote(note: unknown, only: boolean): boolean }).deliverNote(NOTE, onlySidebar);
+
+  it("move a note showing above main's editor into Sidebar when it opens", () => {
+    const { controller, ctx } = setup();
+    controller.main.bind(ctx as never);
+    (controller.headsUp as any).show(NOTE, ctx);
+    expect(controller.headsUp.note.showing).toBe(true);
+    controller.toggle(ctx as never);
+    expect(controller.headsUp.note.showing).toBe(false);
+    expect(controller.agent.messages.at(-1)).toMatchObject({ role: "assistant" });
+    expect(JSON.stringify(controller.agent.messages.at(-1))).toContain("Careful.");
+  });
+
+  it("go above main's editor while Sidebar is closed, unless notes show only in Sidebar", () => {
+    const { controller, ctx } = setup();
+    controller.main.bind(ctx as never);
+    expect(deliver(controller, false)).toBe(false);
+    expect(controller.agent.messages).toHaveLength(0);
+    expect(deliver(controller, true)).toBe(true);
+    expect(JSON.stringify(controller.agent.messages)).toContain("Careful.");
+    controller.toggle(ctx as never);
+    expect(panelOf(controller).chat.empty).toBe(false); // the panel built on open shows the thread, note included
+  });
+});
+
 describe("dimLine", () => {
   it("keeps faint on after resets inside the line", () => {
     expect(dimLine("a\x1b[0mb\x1b[22mc\x1b[31md")).toBe("\x1b[2ma\x1b[0m\x1b[2mb\x1b[22m\x1b[2mc\x1b[31md\x1b[22m");

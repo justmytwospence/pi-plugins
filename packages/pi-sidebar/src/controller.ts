@@ -10,7 +10,7 @@ import { MainState } from "./main-state.ts";
 import { RatioStore } from "./preferences.ts";
 import { herdrFocus, navDirection, navTarget } from "./nav.ts";
 import { SidebarPanel, type StatusPart } from "./panel.ts";
-import { HeadsUp } from "./headsup/headsup.ts";
+import { HeadsUp, headsUpChange, headsUpChanged } from "./headsup/headsup.ts";
 import type { HeadsUpNote } from "./headsup/protocol.ts";
 import { isNoteMarker, noteMessages } from "./headsup/thread.ts";
 import { QUIZ_ENTRY, QuizMode, quizFromBranch } from "./quiz/mode.ts";
@@ -27,7 +27,7 @@ export const QUIZ_HELP = [
 
 export const SIDEBAR_HEADSUP_HELP = [
   "/known          the last heads-up note was something you knew: it is not raised again",
-  "/headsup        heads-up mode's state and cost (on | off)",
+  "/headsup        heads-up mode's state and cost (on | sidebar | off)",
 ].join("\n");
 
 const PROBE = "pi-sidebar-probe";
@@ -73,7 +73,7 @@ export class SidebarController {
     });
     this.main.onChange(() => this.render());
     this.headsUp = new HeadsUp(pi, this.main, {
-      deliver: (note) => this.deliverNote(note),
+      deliver: (note, onlySidebar) => this.deliverNote(note, onlySidebar),
       askSidebar: (text, ctx) => {
         this.openOrFocus(ctx);
         if (!this.isOpen) return false;
@@ -208,6 +208,10 @@ export class SidebarController {
     }
     if (!this.layout!.mount()) return false;
     this.startTicker();
+    // A note showing above main's editor moves into Sidebar's thread.
+    const shown = this.headsUp.take();
+    if (shown) this.pendingNotes.push(shown);
+    this.flushNotes();
     return true;
   }
 
@@ -341,11 +345,12 @@ export class SidebarController {
   }
 
   /**
-   * A heads-up note into Sidebar's thread, while Sidebar is open. While it answers, the note waits
-   * for the answer to end. False when Sidebar is closed (the note goes above main's editor).
+   * A heads-up note into Sidebar's thread, while Sidebar is open (or always, with `onlySidebar`). While
+   * it answers, the note waits for the answer to end. False when Sidebar is closed and the note may go
+   * above main's editor instead.
    */
-  private deliverNote(note: HeadsUpNote): boolean {
-    if (!this.isOpen || !this.panel) return false;
+  private deliverNote(note: HeadsUpNote, onlySidebar = false): boolean {
+    if (!this.isOpen && !onlySidebar) return false;
     this.pendingNotes.push(note);
     this.flushNotes();
     return true;
@@ -353,7 +358,7 @@ export class SidebarController {
 
   private flushNotes(): void {
     const panel = this.panel;
-    if (!panel || this.pendingNotes.length === 0) return;
+    if (this.pendingNotes.length === 0) return;
     if (!this.agent.idle) {
       // Sidebar is answering (or just finishing): try again shortly; its agent_end also flushes.
       if (!this.flushTimer) {
@@ -370,9 +375,11 @@ export class SidebarController {
     for (const note of notes) {
       const messages = noteMessages(note, id, Date.now());
       this.agent.appendMessages(messages).catch(() => {});
-      panel.chat.seed(messages, (text) => (isNoteMarker(text) ? undefined : { text }));
-      panel.chat.note("/known if you knew this · ask about it below");
+      // Without a panel yet, the one Sidebar builds when it opens shows the thread, note included.
+      panel?.chat.seed(messages, (text) => (isNoteMarker(text) ? undefined : { text }));
+      panel?.chat.note("/known if you knew this · ask about it below");
     }
+    if (!panel) return;
     panel.scrollToEnd();
     if (!panel.focused) panel.unread = true;
     this.render();
@@ -380,11 +387,12 @@ export class SidebarController {
 
   private async sidebarHeadsUp(arg: string): Promise<void> {
     const sub = arg.trim().toLowerCase();
-    if (sub === "on" || sub === "off") {
-      this.headsUp.setOn(sub === "on");
-      this.panel?.notice({ kind: "info", text: `Heads-up mode is ${sub} for this session.` });
+    const change = headsUpChange(sub);
+    if (change) {
+      this.headsUp.setOn(change.on, change.where);
+      this.panel?.notice({ kind: "info", text: headsUpChanged(change) });
     } else if (sub === "") this.noteLines(this.headsUp.summary().split("\n"));
-    else this.panel?.notice({ kind: "warning", text: `Unknown /headsup argument "${sub}": /headsup, /headsup on, /headsup off.` });
+    else this.panel?.notice({ kind: "warning", text: `Unknown /headsup argument "${sub}": /headsup, /headsup on, /headsup sidebar, /headsup off.` });
   }
 
   private async known(): Promise<void> {

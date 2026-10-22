@@ -6,7 +6,7 @@ plugin: pi-sidebar
 
 ## Quick reference
 
-- **Use it for:** Ask what the main agent is doing, why, or how the code works, without interrupting it. Quiz mode (`/quiz`) also quizzes you on main's changes and tracks what you know. Heads-up mode, on by default, notes one thing worth knowing above main's editor during longer runs.
+- **Use it for:** Ask what the main agent is doing, why, or how the code works, without interrupting it. Quiz mode (`/quiz`) also quizzes you on main's changes and tracks what you know. Heads-up mode, on by default, notes one thing worth knowing in Sidebar or above main's editor during longer runs (or only in Sidebar).
 - **Enable:** Select `packages/pi-sidebar/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
 - **Controls:** Ctrl+' opens or closes Sidebar. In Herdr, `prefix+h/l` moves between main and Sidebar as if Sidebar were a pane (with the bundled Herdr plugin). In Sidebar, your own keybindings apply: pi-vim's Ctrl+U/D and your transcript scroll keys (such as Ctrl+G) scroll it, Esc or Ctrl+C stops an answer, Ctrl+O expands tools and collapsed reasoning, and your thinking toggle shows or hides reasoning.
 - **Settings:** `PI_SIDEBAR_KEYS` replaces the key. `PI_SIDEBAR_RATIO` sets Sidebar's share (default 0.5) until you drag the divider, which is remembered. `PI_SIDEBAR_MIN_COLUMNS` is the narrowest half for a side-by-side split (default 80). The model and thinking always match main.
@@ -83,14 +83,14 @@ Quiz mode is a voluntary tutor for main's work. It never blocks main or git.
 
 ## Heads-up mode
 
-During main's longer runs, heads-up mode occasionally checks for one thing you should know but might have missed: an unstated tradeoff, a result that looks off, or a risk. When Sidebar is open, the note becomes part of its thread, after any answer in progress. Ask about it there, or type `/known` if you knew it. When Sidebar is closed, the note appears above main's editor. The example below is an illustration:
+During main's longer runs, heads-up mode occasionally checks for one thing you should know but might have missed: an unstated tradeoff, a result that looks off, or a risk. When Sidebar is open, the note becomes part of its thread, after any answer in progress. Ask about it there, or type `/known` if you knew it. When Sidebar is closed, the note appears above main's editor, and opening Sidebar moves it into Sidebar's thread. With notes set to show only in Sidebar, a note found while Sidebar is closed goes straight into its thread and waits there. The example below is an illustration:
 
 ```
 ✦ Heads up · risk · Main skipped the failing integration tests.
   1: Learn more   2: Knew this already   0: Dismiss
 ```
 
-- **Switch:** on by default. `/sidebar headsup off` or `on` sets it per session (stored in main's session), `/sidebar headsup` shows its cost so far, and `PI_SIDEBAR_HEADSUP=0` starts sessions with it off.
+- **Switch:** on by default. `/sidebar headsup off`, `on` or `sidebar` (notes only in Sidebar) sets it per session (stored in main's session), `/sidebar headsup` shows its cost so far, and `PI_SIDEBAR_HEADSUP` sets the default: `0` off, `sidebar` notes only in Sidebar.
 - **When:** at main's turn boundaries, once a run has 5 replies or has gone on for 2 minutes. Checks are at most 3 minutes apart, with one more at the end of a long run. A check is skipped when main's cache has probably expired.
 - **Answering above the editor:** type the digit on its own into main's empty editor.
   - **Learn more** shows an explanation the check already wrote. From there you can mark it understood, quote it into main's editor (**Ask main**), or ask Sidebar about it.

@@ -8,7 +8,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { FOCUS_KEYS_ENV, KEYS_ENV, parseFocusKeys, parseKeys } from "./config.ts";
 import { subagentsGuarded } from "./child.ts";
 import { QUIZ_HELP, SIDEBAR_HEADSUP_HELP, SidebarController } from "./controller.ts";
-import { HEADSUP_HELP } from "./headsup/headsup.ts";
+import { HEADSUP_HELP, headsUpChange, headsUpChanged } from "./headsup/headsup.ts";
 import { GUARD_ENV, judgeCall, SUBAGENT_ENV_CHANNEL, type SubagentEnvRequest } from "./guard.ts";
 
 /**
@@ -36,7 +36,7 @@ const COMMAND_HELP = [
   "/sidebar        open Sidebar, or hide it (its thread is kept)",
   "/sidebar new    start a fresh Sidebar thread",
   "/sidebar quiz   quiz mode: Sidebar quizzes you on main's changes (next | progress | off)",
-  "/sidebar headsup  heads-up checks: one thing worth knowing, above main's editor (on | off)",
+  "/sidebar headsup  heads-up checks: one thing worth knowing, in Sidebar or above main's editor (on | sidebar | off)",
   "/sidebar model  why Sidebar always uses main's model",
   "Ctrl+'          open or close Sidebar (in Herdr, prefix+h/l moves between main and Sidebar)",
 ].join("\n");
@@ -59,15 +59,16 @@ export default function piSidebar(pi: ExtensionAPI) {
   pi.registerCommand("sidebar", {
     description: "Open or hide Sidebar, a live read-only side chat beside this session (new | quiz | headsup | model | help)",
     getArgumentCompletions: (prefix: string) =>
-      ["new", "quiz", "quiz next", "quiz progress", "quiz off", "headsup", "headsup on", "headsup off", "model", "help"].filter((a) => a.startsWith(prefix.trim())).map((value) => ({ value, label: value })),
+      ["new", "quiz", "quiz next", "quiz progress", "quiz off", "headsup", "headsup on", "headsup sidebar", "headsup off", "model", "help"].filter((a) => a.startsWith(prefix.trim())).map((value) => ({ value, label: value })),
     handler: async (args, ctx) => {
       const sub = args.trim().toLowerCase();
       if (sub === "help") ctx.ui.notify(`${COMMAND_HELP}\n\nIn Sidebar:\n${QUIZ_HELP}\n${SIDEBAR_HEADSUP_HELP}\n\n${HEADSUP_HELP}`, "info");
       else if (sub === "headsup" || sub.startsWith("headsup ")) {
         const arg = sub.slice("headsup".length).trim();
-        if (arg === "on" || arg === "off") {
-          sidebar.headsUp.setOn(arg === "on");
-          ctx.ui.notify(arg === "on" ? "Heads-up mode is on for this session." : "Heads-up mode is off for this session.", "info");
+        const change = headsUpChange(arg);
+        if (change) {
+          sidebar.headsUp.setOn(change.on, change.where);
+          ctx.ui.notify(headsUpChanged(change), "info");
         } else if (arg === "") ctx.ui.notify(sidebar.headsUp.summary(), "info");
         else ctx.ui.notify(`Unknown /sidebar headsup argument "${arg}".\n${HEADSUP_HELP}`, "warning");
       }
