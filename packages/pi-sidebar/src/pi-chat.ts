@@ -17,7 +17,7 @@ import {
   ToolExecutionComponent,
   UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
-import { type Component, Container, Spacer, Text } from "@earendil-works/pi-tui";
+import { type Component, Container, Spacer, Text, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
 
 /** What a tool call needs to render: its definition's renderCall/renderResult, if it has them. */
 export type ToolRenderers = ConstructorParameters<typeof ToolExecutionComponent>[4];
@@ -64,6 +64,11 @@ export class PiChat {
     private readonly options: PiChatOptions,
   ) {}
 
+  /** The transcript's components, top to bottom. */
+  get children(): readonly Component[] {
+    return this.container.children;
+  }
+
   get empty() {
     return this.container.children.length === 0;
   }
@@ -92,6 +97,15 @@ export class PiChat {
 
   get thinkingHidden() {
     return this.hideThinking;
+  }
+
+  /** Clicks on the transcript, such as a tool card's "click to show more", in document rows. */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    try {
+      return this.container.handleMouse(event);
+    } catch {
+      return undefined;
+    }
   }
 
   render(width: number): string[] {

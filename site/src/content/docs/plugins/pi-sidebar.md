@@ -65,7 +65,8 @@ Herdr reads its prefix keys first, so `prefix+h/l` into Sidebar needs the Herdr 
 - **In a Pi pane:** it hands the move to Pi as a reserved key (Ctrl+Alt+Shift+H/J/K/L). Pi moves between main and Sidebar when it can, and otherwise asks Herdr for the normal pane move.
 
 How it looks:
-- **Focus:** the focused Sidebar has a filled title bar and an accent divider and composer border. When main has focus, Sidebar is faint, except for `● new answer`.
+- **Focus:** the focused Sidebar has a filled title bar and an accent divider and composer border. When main has focus, the title bar shows `● new answer` when an answer finished meanwhile; nothing is dimmed.
+- **Pinned prompt:** once your latest question scrolls above the top, it is pinned on Sidebar's top row as main's pi-sticky-last-prompt bar is; click it to jump back. Clicks in the transcript (a tool card's "click to show more") work as in main.
 - **Working row:** while Sidebar answers, Pi's own spinner row reads `Working (↓ 120 tokens · 4s)`.
 - **Rendering:** messages, tool cards and reasoning use Pi's components, so pi-cc-render's styling applies. Reasoning follows main's `hideThinkingBlock` setting.
 

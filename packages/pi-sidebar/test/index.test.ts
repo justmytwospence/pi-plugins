@@ -3,7 +3,8 @@ import type { Component } from "@earendil-works/pi-tui";
 import piSidebar from "../src/index.ts";
 import { SidebarController } from "../src/controller.ts";
 import { SplitRoot } from "../src/layout.ts";
-import { dimLine, fitStatus } from "../src/panel.ts";
+import { fitStatus } from "../src/panel.ts";
+import { pinnedAnchor, promptAnchors } from "../src/pin.ts";
 import { EXCHANGE_ENTRY, RESET_ENTRY } from "../src/thread.ts";
 import { QUIZ_ENTRY } from "../src/quiz/mode.ts";
 import { QUIZ_NEXT, QUIZ_ROLE, QUIZ_START } from "../src/quiz/prompt.ts";
@@ -185,17 +186,16 @@ describe("opening and focus", () => {
     expect(panel.view.primary).toBe(false);
   });
 
-  it("draws a filled title bar while focused, and a faint panel otherwise", () => {
+  it("draws a filled title bar while focused, and never dims the panel", () => {
     const { controller, ctx } = setup();
     controller.toggle(ctx as never);
     const panel = panelOf(controller);
     const title = () => (panel as any).titleLine(80) as string;
     expect(title()).toMatch(/^\[bg\] ◧ Sidebar/);
     controller.focusMain();
-    expect(title()).toMatch(/^\x1b\[2m ◧ Sidebar/);
+    expect(title()).toMatch(/^ ◧ Sidebar/);
     expect(title()).toContain("ctrl+t to close");
     panel.unread = true;
-    expect(title()).not.toMatch(/^\x1b\[2m/);
     expect(title()).toContain("● new answer");
   });
 
@@ -461,10 +461,37 @@ describe("heads-up notes and Sidebar", () => {
   });
 });
 
-describe("dimLine", () => {
-  it("keeps faint on after resets inside the line", () => {
-    expect(dimLine("a\x1b[0mb\x1b[22mc\x1b[31md")).toBe("\x1b[2ma\x1b[0m\x1b[2mb\x1b[22m\x1b[2mc\x1b[31md\x1b[22m");
-    expect(dimLine("")).toBe("");
+describe("pinned prompt", () => {
+  const rows = (n: number) => Array.from({ length: n }, () => ({ render: () => ["x"] }));
+
+  it("pins the newest prompt wholly above the top, and nothing for one on the boundary", () => {
+    const anchors = [{ start: 2, end: 4, text: "first" }, { start: 10, end: 11, text: "second" }];
+    expect(pinnedAnchor(anchors, 1)).toBeUndefined();
+    expect(pinnedAnchor(anchors, 3)).toBeUndefined();
+    expect(pinnedAnchor(anchors, 4)?.text).toBe("first");
+    expect(pinnedAnchor(anchors, 10)).toBeUndefined();
+    expect(pinnedAnchor(anchors, 12)?.text).toBe("second");
+    expect(promptAnchors(rows(3), 40)).toEqual([]);
+  });
+
+  it("draws main's bar on Sidebar's top row once the prompt scrolls away, and clicking it jumps back", async () => {
+    (await import("@earendil-works/pi-coding-agent")).initTheme();
+    const { controller, ctx } = setup();
+    controller.toggle(ctx as never);
+    const panel = panelOf(controller);
+    panel.chat.user("what is it doing");
+    panel.chat.note(Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n"));
+    const lines = panel.chat.render(60);
+    panel.view.updateLayout(lines.length, 10, () => {});
+    const start = lines.findIndex((line: string) => line.includes("what is it doing"));
+    panel.view.scrollTo(start, { disableFollow: true });
+    expect((panel as any).pin(lines, 60)).toEqual(lines);
+    panel.view.scrollTo(start + 5, { disableFollow: true });
+    const pinned = (panel as any).pin(lines, 60) as string[];
+    expect(pinned[start + 5]).toContain("what is it doing");
+    expect(pinned.filter((line, i) => line !== lines[i])).toHaveLength(1);
+    (panel as any).view.child.handleMouse({ type: "click", button: "left", x: 3, y: start + 5, width: 60, height: lines.length, screenX: 3, screenY: 0 });
+    expect(panel.view.scrollTop).toBe(Math.max(0, start - 1));
   });
 });
 

@@ -22,6 +22,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { EDITOR_MODE, EDITOR_SURFACE, INPUT_CONTEXT, requestEditorFactory, type EditorModeContext, type SuiteEditor } from "./contract.ts";
 import { PiChat } from "./pi-chat.ts";
+import { pinBar, pinnedAnchor, promptAnchors, type PromptAnchor } from "./pin.ts";
 import { displayMessage } from "./quiz/protocol.ts";
 import { WorkingStats, workingMessage } from "./working.ts";
 
@@ -41,22 +42,6 @@ export function fitStatus(parts: StatusPart[], width: number, separator: string)
     kept = kept.filter((p) => p !== part);
   }
   return truncateToWidth(line(), Math.max(1, width));
-}
-
-const FAINT = "\x1b[2m";
-const SGR = /\x1b\[([0-9;]*)m/g;
-
-/**
- * A line drawn faint, colors kept. A reset (0, or 22 which ends bold and faint together) turns faint
- * off again, so faint is re-applied after each one.
- */
-export function dimLine(line: string): string {
-  if (!line) return line;
-  const body = line.replace(SGR, (sequence, params: string) => {
-    const codes = params === "" ? ["0"] : params.split(";");
-    return codes.includes("0") || codes.includes("22") ? `${sequence}${FAINT}` : sequence;
-  });
-  return `${FAINT}${body}\x1b[22m`;
 }
 
 export interface PanelHost {
@@ -190,7 +175,7 @@ class Composer implements Component, Focusable {
 
   constructor(private readonly tui: TUI, theme: () => Theme, private readonly panel: SidebarPanel, private readonly host: PanelHost) {
     const editorTheme: EditorTheme = {
-      borderColor: (text) => (panel.focused ? theme().fg("borderAccent", text) : dimLine(theme().fg("borderMuted", text))),
+      borderColor: (text) => theme().fg(panel.focused ? "borderAccent" : "borderMuted", text),
       selectList: getSelectListTheme(),
     };
     const provided = requestEditorFactory(host.events);
@@ -328,6 +313,9 @@ export class SidebarPanel {
   private mainThinking: boolean | undefined;
   focused = false;
   unread = false;
+  /** The prompt pinned on the top row in the last frame, and that row in document lines. */
+  private pinned: { anchor: PromptAnchor; row: number } | undefined;
+  private recheck = false;
 
   constructor(private readonly tui: TUI, private readonly theme: () => Theme, private readonly host: PanelHost) {
     this.chat = new PiChat(() => theme(), { cwd: host.cwd, userMessagesFromEvents: true, requestRender: () => tui.requestRender(), displayAssistant: displayMessage });
@@ -335,8 +323,23 @@ export class SidebarPanel {
     const body: Component = {
       render: (width) => {
         this.syncThinking();
-        const lines = this.chat.empty ? this.emptyState(width) : this.chat.render(width);
-        return this.focused ? lines : lines.map(dimLine);
+        if (this.chat.empty) {
+          this.pinned = undefined;
+          return this.emptyState(width);
+        }
+        return this.pin(this.chat.render(width), width);
+      },
+      handleMouse: (event) => {
+        const pinned = this.pinned;
+        if (pinned && event.y === pinned.row && event.button === "left") {
+          if (event.type === "press") return { handled: true, render: false };
+          if (event.type === "click") {
+            this.view.scrollTo(Math.max(0, pinned.anchor.start - 1), { disableFollow: true });
+            this.tui.requestRender();
+            return { handled: true };
+          }
+        }
+        return this.chat.handleMouse(event);
       },
       invalidate: () => {},
     };
@@ -363,6 +366,31 @@ export class SidebarPanel {
 
   submit(text: string): void {
     this.host.submit(text);
+  }
+
+  /**
+   * Main's pinned prompt bar, on Sidebar's transcript. Pi lays the transcript out before it scrolls
+   * it, so the top row is predicted from the scroll view's state as it will be after this frame; a
+   * wrong guess (the viewport just changed height) is redrawn on the next frame.
+   */
+  private pin(lines: string[], width: number): string[] {
+    const view = this.view;
+    const height = view.viewportHeight;
+    const end = Math.max(0, lines.length - height);
+    const top = view.isFollowingEnd ? end : Math.min(view.scrollTop, end);
+    const anchor = height > 1 ? pinnedAnchor(promptAnchors(this.chat.children, width), top) : undefined;
+    this.pinned = anchor ? { anchor, row: top } : undefined;
+    if (!this.recheck) {
+      this.recheck = true;
+      queueMicrotask(() => {
+        this.recheck = false;
+        if (view.scrollTop !== top || view.viewportHeight !== height) this.tui.requestRender();
+      });
+    }
+    if (!anchor) return lines;
+    const pinned = lines.slice();
+    pinned[top] = pinBar(this.theme(), anchor.text, width);
+    return pinned;
   }
 
   /** A Sidebar session event: the chat and the working row follow it. */
@@ -455,9 +483,7 @@ export class SidebarPanel {
     const parts: StatusPart[] = [{ text: "◧ Sidebar" }];
     if (this.unread) parts.push({ text: t.fg("accent", "● new answer") });
     parts.push({ text: `${this.host.toggleLabel} to close` }, ...this.host.status(t).map((p) => ({ ...p, optional: (p.optional ?? 0) + 1 })));
-    const line = ` ${fitStatus(parts, Math.max(1, width - 1), separator)}`;
-    // An unread answer stays bright; everything else on an unfocused Sidebar is faint.
-    return this.unread ? line : dimLine(line);
+    return ` ${fitStatus(parts, Math.max(1, width - 1), separator)}`;
   }
 
   private noticeLines(width: number): string[] {
@@ -478,7 +504,7 @@ export class SidebarPanel {
     const sep = "  ";
     let text: string;
     if (this.note?.kind === "confirm") text = [rawKeyHint("enter", "send anyway"), keyHint("app.interrupt", "keep the question")].join(sep);
-    else if (!this.focused) return dimLine(truncateToWidth(` ${rawKeyHint(this.host.toggleLabel, "close")}`, width));
+    else if (!this.focused) return truncateToWidth(` ${rawKeyHint(this.host.toggleLabel, "close")}`, width);
     else {
       // Your own scroll keys, as in main: pi-vim's Ctrl+U/D in Normal mode, and the transcript's end key.
       const scroll = [...(this.input.vim ? [rawKeyHint("ctrl+u/d", "scroll")] : []), keyHint("tui.altScreen.bottom", "end")];

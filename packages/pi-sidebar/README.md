@@ -71,7 +71,8 @@ While Sidebar has focus, your keys do what they do in main. They are resolved th
 
 How it looks:
 - **Layout:** main's pane splits into equal halves. They sit side by side when each half keeps at least 80 columns, and Sidebar goes below main otherwise. This is decided again on every resize. Main's transcript, editor and footer reflow into their half; nothing is drawn over them.
-- **Focus:** the focused Sidebar has a filled title bar and an accent divider and composer border. When main has focus, Sidebar is drawn faint, except for `● new answer` when an answer finished meanwhile.
+- **Focus:** the focused Sidebar has a filled title bar and an accent divider and composer border. When main has focus, the title bar shows `● new answer` when an answer finished meanwhile; nothing is dimmed, as in main.
+- **Pinned prompt:** once your latest question scrolls above the top, it is pinned on Sidebar's top row as main's pi-sticky-last-prompt bar is; click it to jump back. Clicks in the transcript (a tool card's "click to show more") work as in main.
 - **Working row:** while Sidebar answers, Pi's own spinner row reads `Working (↓ 120 tokens · 4s)`, the same message pi-status-footer gives main, or `Retrying…`.
 - **Rendering:** messages, tool cards and reasoning use Pi's components, so pi-cc-render's styling applies too. Reasoning follows main's `hideThinkingBlock` setting (pi-cc-render's compact "Thought for…" title when hidden). Sidebar's own thinking toggle lasts until main's setting changes.
 
