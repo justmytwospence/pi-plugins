@@ -347,10 +347,14 @@ export class SidebarPanel {
     const title = new Row((width) => [this.titleLine(width)], focus);
     const notice = new Row((width) => this.noticeLines(width), focus);
     const hint = new Row((width) => [this.hintLine(width)], focus);
+    // Main's editor dock always has one blank row above the editor (Pi's empty widgets-above
+    // container is a Spacer(1)), below the working row; notices sit after it, as widgets do.
+    const spacer = new Row(() => [""], focus);
     this.root = new VStack([
       { component: title, basis: "auto" },
       { component: this.view, basis: 0, grow: 1, minSize: 1 },
       { component: this.working, basis: "auto" },
+      { component: spacer, basis: "auto" },
       { component: notice, basis: "auto" },
       { component: this.input, basis: "auto" },
       { component: hint, basis: "auto" },

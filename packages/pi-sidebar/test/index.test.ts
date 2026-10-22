@@ -214,6 +214,21 @@ describe("opening and focus", () => {
     expect(panel.working.render(60)).toEqual([]);
   });
 
+  it("keeps a blank row between the working row and the composer, as main does", async () => {
+    (await import("@earendil-works/pi-coding-agent")).initTheme();
+    const { controller, ctx } = setup();
+    controller.toggle(ctx as never);
+    const panel = panelOf(controller);
+    panel.apply({ type: "agent_start" });
+    const lines = panel.root.render(60, 20);
+    const working = lines.findIndex((line: string) => line.includes("Working"));
+    expect(working).toBeGreaterThan(0);
+    expect(lines[working - 1]!.trim()).toBe("");
+    expect(lines[working + 1]!.trim()).toBe("");
+    expect(lines[working + 2]).toMatch(/─/);
+    panel.apply({ type: "agent_end" });
+  });
+
   it("follows main's thinking setting, and Pi's own keys act on Sidebar", () => {
     const { pi, controller, ctx } = setup();
     let hidden = true;
