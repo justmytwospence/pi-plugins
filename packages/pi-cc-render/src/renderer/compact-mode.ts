@@ -1044,13 +1044,17 @@ function ensureAssistantSetExpanded(component: any): void {
 	) {
 		return;
 	}
-	if (typeof component.setExpanded === "function") {
+	// Only an instance's own setExpanded is someone else's; the prototype's is compact-thinking's
+	// Ctrl+O hook, which this per-instance one overrides.
+	if (Object.hasOwn(component, "setExpanded")) {
 		detachAssistantExpansion(component);
-		if (typeof component.setExpanded === "function") return;
+		if (Object.hasOwn(component, "setExpanded")) return;
 	}
 	const installed = function (this: any, expanded: boolean) {
 		if (config.mode !== "compact") {
 			detachAssistantExpansion(this);
+			// Fall through to the prototype's (compact-thinking's Ctrl+O hook), if any.
+			if (!Object.hasOwn(this, "setExpanded")) this.setExpanded?.(expanded);
 			return;
 		}
 		const toggleRound = this[ASSISTANT_TOGGLE_ROUND_KEY];

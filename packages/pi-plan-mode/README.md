@@ -103,7 +103,7 @@ Lane keys, as the planner screen implements them:
 | j/k, 1-9, Space | while a question is up: move, jump to a row, open `Type something.` |
 | Ctrl+U/Ctrl+D, PageUp/PageDown | scroll the focused lane half a page or a page (these keys are taken by the lane, not its message line) |
 | Mouse wheel | scroll the lane under the pointer |
-| Ctrl+O | expand or collapse tool output in a chat, as in Pi |
+| Ctrl+O | expand or collapse tool output (and, with pi-cc-render, collapsed thinking) in a chat, as in Pi |
 | Ctrl+T | hide or show thinking in a chat, as in Pi |
 | Ctrl+N/Ctrl+P | step through a planner's running subagents; Esc goes back to the planner |
 | Shift+Up/Shift+Down | move the divider above M by a row |

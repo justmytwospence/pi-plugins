@@ -22,6 +22,8 @@ export const COMPACT_THINKING_OWNER = Symbol.for("pi.ccstyle.compact-thinking-ow
 export const ASSISTANT_SET_EXPANDED_KEY = Symbol.for("pi.ccstyle.compact-assistant-set-expanded");
 export const ASSISTANT_TOGGLE_ROUND_KEY = Symbol.for("pi.ccstyle.compact-assistant-toggle-round");
 export const ASSISTANT_REENTRY_KEY = Symbol.for("pi.ccstyle.compact-assistant-reentry");
+/** An assistant component's `app.tools.expand` state (Ctrl+O), set through its prototype `setExpanded`. */
+export const ASSISTANT_TOOLS_EXPANDED_KEY = Symbol.for("pi.ccstyle.assistant-tools-expanded");
 
 // ── tool rendering patch ──
 export const GLOBAL_TOOL_RENDER_PATCH = Symbol.for("pi.ccstyle.global-tool-render-patch");

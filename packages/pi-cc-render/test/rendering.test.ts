@@ -218,3 +218,54 @@ describe("tool groups", () => {
     }
   });
 });
+
+describe("compact thinking and Ctrl+O", () => {
+  test("app.tools.expand opens collapsed thinking, per component or from main's state", async () => {
+    const { AssistantMessageComponent } = await import("@earendil-works/pi-coding-agent");
+    const { installCompactThinking } = await import("../src/feature/compact-thinking.ts");
+    const handlers = new Map<string, Array<(event: any, ctx: any) => unknown>>();
+    const pi = {
+      on: (name: string, handler: (event: any, ctx: any) => unknown) => handlers.set(name, [...(handlers.get(name) ?? []), handler]),
+      appendEntry: () => {},
+    };
+    installCompactThinking(pi as any, { useSummaryTitlesAsThinkingTitle: true, previewLines: 2, animationIntervalMs: 90 });
+    let mainExpanded = false;
+    const ctx = {
+      mode: "tui",
+      sessionManager: { getBranch: () => [], getEntries: () => [] },
+      ui: { theme, setWidget: () => {}, getToolsExpanded: () => mainExpanded },
+    };
+    for (const handler of handlers.get("session_start") ?? []) await handler({}, ctx);
+    try {
+      const thinking = Array.from({ length: 8 }, (_, i) => `step ${i + 1}`).join("\n");
+      const message = {
+        role: "assistant",
+        timestamp: 1234,
+        api: "anthropic-messages",
+        content: [{ type: "thinking", thinking }, { type: "text", text: "done" }],
+      };
+      const text = (component: any) => plain(component.render(60)).join("\n");
+
+      const own = new AssistantMessageComponent(message as never, true) as any;
+      expect(typeof own.setExpanded).toBe("function");
+      expect(text(own)).toContain("more lines");
+      expect(text(own)).not.toContain("step 1\n");
+      own.setExpanded(true);
+      expect(text(own)).toContain("step 1");
+      expect(text(own)).not.toContain("more lines");
+      own.setExpanded(false);
+      expect(text(own)).toContain("more lines");
+
+      // A component Pi has not called setExpanded on follows main's Ctrl+O state.
+      mainExpanded = true;
+      const fresh = new AssistantMessageComponent(message as never, true) as any;
+      expect(text(fresh)).toContain("step 1");
+      // Its own state wins once set (a Sidebar keeps its own toggle).
+      fresh.setExpanded(false);
+      expect(text(fresh)).toContain("more lines");
+    } finally {
+      for (const handler of handlers.get("session_shutdown") ?? []) await handler({}, ctx);
+    }
+    expect(Object.hasOwn(AssistantMessageComponent.prototype, "setExpanded")).toBe(false);
+  });
+});

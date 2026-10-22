@@ -1,6 +1,6 @@
 # pi-cc-render
 
-Claude Code-style transcript rendering for Pi: one-line tool summaries that expand on click or Ctrl+O, consecutive tool calls grouped into a card, rich side-by-side or unified diffs for `edit` and `write`, a codemode call tree, compact thinking with the provider's summary as its title, a per-turn tool summary, and a startup header. In fullscreen mode cards react to hover, click to expand, and a back-to-bottom button appears when you scroll up.
+Claude Code-style transcript rendering for Pi: one-line tool summaries that expand on click or Ctrl+O, consecutive tool calls grouped into a card, rich side-by-side or unified diffs for `edit` and `write`, a codemode call tree, compact thinking with the provider's summary as its title (when Pi hides thinking blocks; Ctrl+O opens it with the tool output, as in Claude Code), a per-turn tool summary, and a startup header. In fullscreen mode cards react to hover, click to expand, and a back-to-bottom button appears when you scroll up.
 
 Example of a tool card and a grouped card (illustration, not a screenshot):
 

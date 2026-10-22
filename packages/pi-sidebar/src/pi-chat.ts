@@ -240,7 +240,11 @@ export class PiChat {
   }
 
   private assistant(message: Message | undefined) {
-    return new AssistantMessageComponent((message ? this.shown(message) : message) as never, this.hideThinking, getMarkdownTheme());
+    const component = new AssistantMessageComponent((message ? this.shown(message) : message) as never, this.hideThinking, getMarkdownTheme());
+    // pi-cc-render makes assistant messages expandable (Ctrl+O opens collapsed thinking): keep them
+    // in step with this chat's own toggle instead of main's.
+    (component as { setExpanded?(value: boolean): void }).setExpanded?.(this.expanded);
+    return component;
   }
 
   private shown(message: Message): Message {

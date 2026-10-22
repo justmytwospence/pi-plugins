@@ -8,14 +8,14 @@ plugin: pi-cc-render
 
 - **Use it for:** Read compact tool cards, grouped calls, rich diffs and thinking summaries.
 - **Enable:** Select `packages/pi-cc-render/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
-- **Controls:** `/ccstyle` panel/on/compact/off/status. No added global shortcut; stock Ctrl+O expands tool detail.
+- **Controls:** `/ccstyle` panel/on/compact/off/status. No added global shortcut; stock Ctrl+O expands tool detail and collapsed thinking.
 - **Settings:** `pi-cc-render.json`; CC mode and rich diffs by default. Panel changes save; feature toggles need `/reload`.
 - **Requirements, cost & privacy:** TUI private hooks; fullscreen/SGR mouse for pointer features. No inference calls. Shiki is an optional component dependency but a regular root-suite dependency.
 - **Integrations & limits:** Optional prose/Markdown/footer/context. Exclude self-rendered tools as needed; write wrapper yields to another owner. Do not load pi-cc-extensions too.
 
 ## Purpose and scope
 
-`pi-cc-render` restyles Pi's transcript in the manner of Claude Code. Each tool call collapses to a one-line summary that expands on click or Ctrl+O. Consecutive tool calls are grouped into one card. `edit` and `write` results render as rich side-by-side or unified diffs. A `codemode` call shows its nested tool calls as a tree, including progress while the script is still running. Thinking is compacted, and the provider's latest reasoning summary becomes its title. After a run with two or more tool calls, a per-turn tool summary appears. New sessions open with a startup header. In fullscreen mode, cards react to hover, a click expands them, the mouse wheel scrolls, and a back-to-bottom button appears when you scroll up.
+`pi-cc-render` restyles Pi's transcript in the manner of Claude Code. Each tool call collapses to a one-line summary that expands on click or Ctrl+O. Consecutive tool calls are grouped into one card. `edit` and `write` results render as rich side-by-side or unified diffs. A `codemode` call shows its nested tool calls as a tree, including progress while the script is still running. When Pi hides thinking blocks (`hideThinkingBlock`), thinking is compacted to a short preview, the provider's latest reasoning summary becomes its title, and Ctrl+O (`app.tools.expand`) opens it in full along with the tool output, as Claude Code's Ctrl+O does. Hosts that draw their own chat with Pi's components, such as pi-sidebar, get the same through `setExpanded`. After a run with two or more tool calls, a per-turn tool summary appears. New sessions open with a startup header. In fullscreen mode, cards react to hover, a click expands them, the mouse wheel scrolls, and a back-to-bottom button appears when you scroll up.
 
 Example of a single card and a grouped card (illustration, not a screenshot):
 

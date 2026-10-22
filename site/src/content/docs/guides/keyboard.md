@@ -67,7 +67,7 @@ Suite additions:
 | `app.interrupt` | Escape | Interrupt/cancel when no local editor action consumes it. |
 | `app.editor.external` | Ctrl+G | Edit the prompt externally; search owns Ctrl+G while searching. |
 | `app.message.copy` | Ctrl+X | Copy a message/selection in the applicable Pi context. |
-| `app.tools.expand` | Ctrl+O | Expand/collapse tool output. |
+| `app.tools.expand` | Ctrl+O | Expand/collapse tool output; with pi-cc-render, collapsed thinking too. |
 | `app.model.select` | Ctrl+L | Open the model picker; conflicts with suite view clearing. |
 | `app.model.cycleForward` | Ctrl+P | Cycle models; dedicated history actions can take precedence. |
 | `app.model.cycleBackward` | Ctrl+Shift+P | Cycle models backward (Windows/WSL: Alt+P). |

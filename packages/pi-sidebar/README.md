@@ -64,7 +64,7 @@ While Sidebar has focus, your keys do what they do in main. They are resolved th
 - **Skills and prompt templates.** `/skill:name` and your prompt templates run in Sidebar as in main. Other slash commands are main's.
 - **App actions.**
   - `app.interrupt` (Esc) stops Sidebar's answer.
-  - `app.tools.expand` (Ctrl+O) expands tool output.
+  - `app.tools.expand` (Ctrl+O) expands tool output, and with pi-cc-render collapsed reasoning too, as in main.
   - `app.thinking.toggle` shows or hides reasoning.
   - `app.clear` (Ctrl+C) clears the composer.
   - `app.exit` (Ctrl+D) never quits Pi from Sidebar.

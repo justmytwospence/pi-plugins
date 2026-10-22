@@ -479,7 +479,7 @@ export class SidebarPanel {
       const scroll = [...(this.input.vim ? [rawKeyHint("ctrl+u/d", "scroll")] : []), keyHint("tui.altScreen.bottom", "end")];
       text = this.host.isBusy()
         ? [keyHint("app.interrupt", "stop"), ...scroll, rawKeyHint(this.host.toggleLabel, "close")].join(sep)
-        : [rawKeyHint("enter", "ask"), ...scroll, keyHint("app.tools.expand", "tools"), keyHint("app.thinking.toggle", "thinking"), rawKeyHint("/new", "fresh thread"), rawKeyHint(this.host.toggleLabel, "close")].join(sep);
+        : [rawKeyHint("enter", "ask"), ...scroll, keyHint("app.tools.expand", "expand"), keyHint("app.thinking.toggle", "thinking"), rawKeyHint("/new", "fresh thread"), rawKeyHint(this.host.toggleLabel, "close")].join(sep);
     }
     return truncateToWidth(` ${text}`, width);
   }

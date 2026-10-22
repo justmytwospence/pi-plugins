@@ -28,6 +28,7 @@ import {
 } from "../renderer/compact-mode.ts";
 import { refreshMountedTranscript } from "../renderer/transcript-refresh.ts";
 import {
+	ASSISTANT_TOOLS_EXPANDED_KEY,
 	COMPACT_THINKING_OWNER,
 	COMPACT_THINKING_PATCH_KEY,
 	patchRegistry,
@@ -106,6 +107,7 @@ type AssistantInternals = {
 
 type PatchedPrototype = typeof AssistantMessageComponent.prototype & {
 	updateContent: (message: AssistantMessage, isStreaming?: boolean) => void;
+	setExpanded?: (expanded: boolean) => void;
 };
 
 // Config is controlled by claude-code-style (installCompactThinking injects initial values,
@@ -163,8 +165,9 @@ function restoreDurationEntries(
 	}
 }
 
+// Collapsed thinking expands with the transcript's expand key (app.tools.expand, Ctrl+O), as in Claude Code.
 function getThinkingToggleHint() {
-	const keys = getKeybindings().getKeys("app.thinking.toggle");
+	const keys = getKeybindings().getKeys("app.tools.expand");
 	return keys.length > 0 ? `${keys.join("/")} to expand` : undefined;
 }
 
@@ -336,6 +339,8 @@ export class ThinkingPreviewBlock implements Component {
 	private style: (text: string) => string;
 	private theme: Theme | undefined;
 	private _expanded: boolean;
+	/** Expanded by the host's Ctrl+O (app.tools.expand) state rather than a click on this block. */
+	private forced = false;
 	private hintHovered = false;
 	private collapsedMemo:
 		| {
@@ -373,11 +378,18 @@ export class ThinkingPreviewBlock implements Component {
 	}
 
 	get expanded(): boolean {
-		return this._expanded;
+		return this._expanded || this.forced;
+	}
+
+	/** Follow the host's Ctrl+O state; a click (setExpanded) still collapses this block on its own. */
+	setForcedExpanded(forced: boolean): void {
+		if (this.forced !== forced) this.collapsedMemo = undefined;
+		this.forced = forced;
 	}
 
 	setExpanded(expanded: boolean): void {
-		if (this._expanded !== expanded) this.collapsedMemo = undefined;
+		if (this.expanded !== expanded) this.collapsedMemo = undefined;
+		this.forced = false;
 		this._expanded = expanded;
 		if (expanded) expandedThinking.add(this.messageTimestamp);
 		else {
@@ -392,7 +404,7 @@ export class ThinkingPreviewBlock implements Component {
 	}
 
 	private headingLines(width: number, hiddenLines: number, padding: number): string[] {
-		const hint = this._expanded
+		const hint = this.expanded
 			? undefined
 			: hiddenPreviewHint(hiddenLines, Boolean(this.text) && config.previewLines <= 0);
 		if (!hint) return new Text(this.heading, padding, 0).render(width);
@@ -412,10 +424,10 @@ export class ThinkingPreviewBlock implements Component {
 	}
 
 	private bodyLines(width: number, padding: number): { lines: string[]; hiddenLines: number } {
-		if (!this.text || (config.previewLines <= 0 && !this._expanded)) {
+		if (!this.text || (config.previewLines <= 0 && !this.expanded)) {
 			return { lines: [], hiddenLines: 0 };
 		}
-		if (this._expanded) {
+		if (this.expanded) {
 			return {
 				lines: wrapExpandedThinking(this.messageTimestamp, this.runStartIndex, this.text, width),
 				hiddenLines: 0,
@@ -426,7 +438,7 @@ export class ThinkingPreviewBlock implements Component {
 	}
 
 	render(width: number) {
-		if (this._expanded) {
+		if (this.expanded) {
 			const innerWidth = Math.max(1, width - 2);
 			const body = this.bodyLines(innerWidth, 0);
 			const heading = this.headingLines(innerWidth, 0, 0);
@@ -590,6 +602,26 @@ function compactThinking(pi: ExtensionAPI) {
 	let animationFrame = 0;
 	let compactSummaryActive = false;
 	let patchInstalled = true;
+	// Main's Ctrl+O state, for components Pi has not called setExpanded on yet (new messages, rebuilds).
+	let mainToolsExpanded: () => boolean = () => false;
+
+	function toolsExpanded(self: AssistantInternals): boolean {
+		const own = (self as unknown as Record<symbol, unknown>)[ASSISTANT_TOOLS_EXPANDED_KEY];
+		return typeof own === "boolean" ? own : mainToolsExpanded();
+	}
+
+	// Ctrl+O (app.tools.expand) expands collapsed thinking too, as Claude Code's transcript toggle does.
+	// Pi calls setExpanded on every expandable chat child, and hosts such as pi-sidebar call it on
+	// their own chat's children, so assistant messages become expandable here. Compact mode installs
+	// its own per-instance setExpanded over this one.
+	const ownedSetExpanded = !Object.hasOwn(prototype, "setExpanded");
+	const installedSetExpanded = function (this: AssistantInternals, expanded: boolean) {
+		const self = this as unknown as Record<symbol, unknown>;
+		if (self[ASSISTANT_TOOLS_EXPANDED_KEY] === expanded) return;
+		self[ASSISTANT_TOOLS_EXPANDED_KEY] = expanded;
+		if (this.hideThinkingBlock && this.lastMessage) this.updateContent(this.lastMessage);
+	};
+	if (ownedSetExpanded) prototype.setExpanded = installedSetExpanded;
 
 	function thinkingStyle(text: string) {
 		return styleCompactThinkingText(text, activeTheme);
@@ -751,17 +783,17 @@ function compactThinking(pi: ExtensionAPI) {
 				);
 			}
 			const previewSource = (latestSummary?.body ?? thinkingBlocks.join("\n\n")).trim();
-			self.contentContainer.addChild(
-				new ThinkingPreviewBlock(
-					heading,
-					previewSource,
-					self.outputPad,
-					message.timestamp,
-					thinkingStyle,
-					activeTheme,
-					runStartIndex,
-				),
+			const block = new ThinkingPreviewBlock(
+				heading,
+				previewSource,
+				self.outputPad,
+				message.timestamp,
+				thinkingStyle,
+				activeTheme,
+				runStartIndex,
 			);
+			if (toolsExpanded(self)) block.setForcedExpanded(true);
+			self.contentContainer.addChild(block);
 
 			const hasVisibleContentAfter = message.content
 				.slice(i + 1)
@@ -988,6 +1020,14 @@ function compactThinking(pi: ExtensionAPI) {
 		restoreDurationEntries(ctx.sessionManager.getBranch(), completedDurations);
 		activeTheme = ctx.ui.theme;
 		if (ctx.mode !== "tui") return;
+		const ui = ctx.ui as { getToolsExpanded?: () => boolean };
+		mainToolsExpanded = () => {
+			try {
+				return ui.getToolsExpanded?.() === true;
+			} catch {
+				return false;
+			}
+		};
 
 		// An empty widget gives the animation loop access to requestRender without
 		// enabling terminal mouse reporting or intercepting native scrollback input.
@@ -1030,7 +1070,11 @@ function compactThinking(pi: ExtensionAPI) {
 		clearThinkingPreviewCache();
 		if (ctx.mode === "tui") ctx.ui.setWidget(WIDGET_ID, undefined);
 
+		mainToolsExpanded = () => false;
 		if (patchInstalled) {
+			if (ownedSetExpanded && prototype.setExpanded === installedSetExpanded) {
+				delete prototype.setExpanded;
+			}
 			if (prototype.updateContent === installedUpdateContent) {
 				const wrappedOriginal = (originalUpdateContent as any)[PROTOTYPE_ORIGINAL_KEY];
 				prototype.updateContent =
