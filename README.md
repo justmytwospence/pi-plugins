@@ -1,12 +1,12 @@
 # Pi Plugins
 
-A modular suite of 28 extensions for [Pi](https://pi.dev): background work, subagents, planning, review, context awareness and terminal ergonomics. Every component can be enabled on its own; one Git ref versions the whole suite. It is not a fork of Pi.
+A modular suite of 29 extensions for [Pi](https://pi.dev): background work, subagents, planning, review, context awareness and terminal ergonomics. Every component can be enabled on its own; one Git ref versions the whole suite. It is not a fork of Pi.
 
 **[Documentation](https://pi-plugins.vercel.app)** · **[Keymap & focus](https://pi-plugins.vercel.app/guides/keyboard/)** · **[Requirements, cost & privacy](https://pi-plugins.vercel.app/guides/requirements/)** · **[Development & testing](https://pi-plugins.vercel.app/development/)**
 
 ## Choose your plugins
 
-All 28 references include activation, controls, defaults, requirements, costs and limitations. Start with the workflow you need; companions are optional.
+All 29 references include activation, controls, defaults, requirements, costs and limitations. Start with the workflow you need; companions are optional.
 
 ### Run & coordinate
 
@@ -18,6 +18,7 @@ All 28 references include activation, controls, defaults, requirements, costs an
 | [pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/) | Coordinate interactive handoffs and Herdr pane metadata. |
 | [pi-marimo](https://pi-plugins.vercel.app/plugins/pi-marimo/) | Follow notebook state and running cells alongside the chat. |
 | [pi-sidebar](https://pi-plugins.vercel.app/plugins/pi-sidebar/) | Chat read-only beside a working session, on its prompt cache. |
+| [pi-mcp-device-login](https://pi-plugins.vercel.app/plugins/pi-mcp-device-login/) | Sign in to OAuth MCP servers with a code, no localhost redirect. |
 
 ### Think & review
 

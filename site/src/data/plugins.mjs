@@ -7,6 +7,7 @@ export const groups = [
     { name: "pi-herdr", label: "Herdr", description: "Pane metadata, interactive children and a shared event-bus bridge." },
     { name: "pi-marimo", label: "Notebooks", description: "Live notebook state alongside your conversation, without taking over the kernel." },
     { name: "pi-sidebar", label: "Sidebar", description: "A live, read-only side chat beside the main session, served from its prompt cache." },
+    { name: "pi-mcp-device-login", label: "MCP device sign-in", description: "Sign in to OAuth MCP servers with a code when the browser is on another machine." },
   ] },
   { title: "Think & review", eyebrow: "02 / Decisions", description: "Make the decision explicit, compare plans, and review the actual changes.", plugins: [
     { name: "pi-plan-mode", label: "Plan mode", description: "Claude Code-style plan mode in your chat, or two read-only planners side by side." },

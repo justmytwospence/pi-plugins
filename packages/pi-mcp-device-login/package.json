@@ -1,0 +1,46 @@
+{
+  "name": "@justmytwospence/pi-mcp-device-login",
+  "version": "0.1.2",
+  "description": "Sign in to OAuth MCP servers with a device code (RFC 8628) when the browser is on another machine; pi keeps and refreshes the tokens.",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "mcp",
+    "oauth",
+    "device-code"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "check": "tsc --noEmit && npm test",
+    "test": "node --test test/*.test.mjs"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.2.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^7.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/justmytwospence/pi-plugins",
+    "directory": "packages/pi-mcp-device-login"
+  },
+  "homepage": "https://pi-plugins.vercel.app/plugins/pi-mcp-device-login/",
+  "bugs": {
+    "url": "https://github.com/justmytwospence/pi-plugins/issues"
+  }
+}

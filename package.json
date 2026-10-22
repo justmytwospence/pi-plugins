@@ -42,7 +42,8 @@
       "./packages/pi-cc-render/src/index.ts",
       "./packages/pi-markdown-extras/src/index.ts",
       "./packages/pi-context/src/index.ts",
-      "./packages/pi-trends/src/index.ts"
+      "./packages/pi-trends/src/index.ts",
+      "./packages/pi-mcp-device-login/src/index.ts"
     ],
     "themes": [
       "./packages/pi-cc-render/themes/cc-dark.json",
