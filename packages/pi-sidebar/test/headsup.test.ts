@@ -7,7 +7,7 @@ import { MainState } from "../src/main-state.ts";
 import { runCheck } from "../src/headsup/check.ts";
 import { HeadsUp, headsUpChange } from "../src/headsup/headsup.ts";
 import { HEADSUP_ENTRY, headsUpDefault, headsUpFromBranch, HeadsUpStats, headsUpWhereDefault } from "../src/headsup/mode.ts";
-import { NoteState, quoteForMain } from "../src/headsup/note.ts";
+import { chatWidth, NoteState, quoteForMain } from "../src/headsup/note.ts";
 import { parseHeadsUp } from "../src/headsup/protocol.ts";
 import { isNoteMarker, noteMessages } from "../src/headsup/thread.ts";
 import { HeadsUpScheduler } from "../src/headsup/scheduler.ts";
@@ -244,6 +244,19 @@ describe("HeadsUp in main", () => {
     return { pi, ctx, headsUp, widgets, asked, delivered, dir, editor: () => editor };
   }
 
+  it("mounts the note again after a tool runs, so a widget the tool added sits above it", async () => {
+    const { pi, ctx, headsUp, widgets } = await setup();
+    await (pi as any).emit("tool_execution_end", { toolName: "todo" }, ctx);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(widgets).toHaveLength(0);
+    await headsUp.check("turn");
+    const shown = widgets.length;
+    await (pi as any).emit("tool_execution_end", { toolName: "todo" }, ctx);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(widgets).toHaveLength(shown + 1);
+    expect(widgets.at(-1)).toBeTypeOf("function");
+  });
+
   it("shows a note above the editor and takes its digits only when the editor is idle", async () => {
     const { headsUp, widgets, editor } = await setup();
     await headsUp.check("turn");
@@ -351,5 +364,16 @@ describe("a note in Sidebar's thread", () => {
     expect(isNoteMarker("a question")).toBe(false);
     expect(messages[1].content[0].text).toBe("**Heads up: a risk.** Careful.\n\nBecause.");
     expect(messages[1]).toMatchObject({ provider: "anthropic", model: "m", stopReason: "stop" });
+  });
+});
+
+describe("chatWidth", () => {
+  const KEY = Symbol.for("pi-prose-width");
+  it("wraps at pi-prose-width's measure when it is on, else the full width", () => {
+    expect(chatWidth(120, {})).toBe(120);
+    expect(chatWidth(120, { [KEY]: { active: true, measure: 80 } })).toBe(80);
+    expect(chatWidth(60, { [KEY]: { active: true, measure: 80 } })).toBe(60);
+    expect(chatWidth(120, { [KEY]: { active: true, measure: 0 } })).toBe(120);
+    expect(chatWidth(120, { [KEY]: { active: false, measure: 80 } })).toBe(120);
   });
 });

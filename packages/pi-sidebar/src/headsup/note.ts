@@ -1,7 +1,7 @@
 // The heads-up note above main's editor, and its choices. A digit typed on its own into main's empty
 // editor answers it; nothing else is taken from the editor.
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Markdown, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { HeadsUpNote } from "./protocol.ts";
 
 export const DISMISSED_MS = 20_000;
@@ -99,6 +99,16 @@ export class NoteState {
     out.push(truncateToWidth(`${indent}${theme.fg("dim", CHOICES[this.phase])}`, width));
     return out.map((line) => truncateToWidth(line, width));
   }
+}
+
+/**
+ * The width the chat's prose wraps at: pi-prose-width's measure when it is loaded and on (shared
+ * on Markdown's prototype), else the full width.
+ */
+export function chatWidth(width: number, proto: object = Markdown.prototype): number {
+  const state = (proto as Record<symbol, { active?: boolean; measure?: number } | undefined>)[Symbol.for("pi-prose-width")];
+  const measure = state?.active ? state.measure : undefined;
+  return typeof measure === "number" && measure > 0 && measure < width ? measure : width;
 }
 
 /** Main's editor text that quotes a note, for the user to add a question and send to main. */

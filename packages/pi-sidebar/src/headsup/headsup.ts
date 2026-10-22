@@ -10,7 +10,7 @@ import { git, repoRoot, type Git } from "../quiz/changes.ts";
 import { addRecent, knownTopics, markKnown, ProfileStore } from "../quiz/profile.ts";
 import { runCheck, type CheckResult, type StreamFn } from "./check.ts";
 import { HEADSUP_DEBUG_ENV, HEADSUP_ENTRY, HEADSUP_ENV, headsUpDefault, headsUpFromBranch, HeadsUpStats, headsUpWhereDefault, type HeadsUpEntry, type HeadsUpWhere } from "./mode.ts";
-import { NoteState, quoteForMain, askSidebar, DISMISSED_MS, type NoteAction } from "./note.ts";
+import { chatWidth, NoteState, quoteForMain, askSidebar, DISMISSED_MS, type NoteAction } from "./note.ts";
 import type { HeadsUpNote } from "./protocol.ts";
 import { HeadsUpScheduler, type Trigger } from "./scheduler.ts";
 
@@ -95,6 +95,13 @@ export class HeadsUp {
     });
     pi.on("agent_end", () => {
       if (this.scheduler.ended(this.now(), !this.note.free) && this.active) void this.check("end");
+    });
+    // Pi stacks widgets above the editor in the order they were set, so one a tool adds while the
+    // note shows (pi-todo's task list) lands below it. Mount the note again afterwards to stay last.
+    pi.on("tool_execution_end", (_event, ctx) => {
+      if (!this.note.showing) return;
+      const timer = setTimeout(() => { if (this.note.showing) this.mount(this.main.ctx ?? ctx); }, 0);
+      timer.unref?.();
     });
   }
 
@@ -239,7 +246,7 @@ export class HeadsUp {
         HEADSUP_WIDGET,
         (tui, theme) => {
           this.tui = tui;
-          return { render: (width: number) => this.note.lines(width, theme), invalidate() {} };
+          return { render: (width: number) => this.note.lines(chatWidth(width), theme), invalidate() {} };
         },
         { placement: "aboveEditor" },
       );
