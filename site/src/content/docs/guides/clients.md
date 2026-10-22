@@ -34,11 +34,12 @@ rule_labels = "ends"
 status_rows = 12
 status_indent = 1
 status_blank_rows = 1
+option_gutter = "│"
+checkbox_ticks = "✓"
+typed_answer = "Other"
 ```
 
 Collie reads it at startup: run `collie restart` after an edit. Collie's phone app also shows the footer's rows under Chat; Settings → pi → Show the status line turns that off per device.
-
-Limits: in a pane narrower than a dialog's key hint or an option row, Collie shows the Escape card instead of buttons.
 
 ## Paseo
 
