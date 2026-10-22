@@ -8,6 +8,7 @@ import { MIN_COLUMNS_ENV, parseMinColumns, parseRatio, PREFS_ENV, RATIO_ENV } fr
 import { canSplit, dividerLines, SplitLayout } from "./layout.ts";
 import { MainState } from "./main-state.ts";
 import { RatioStore } from "./preferences.ts";
+import { InjectedPrompt } from "./injected.ts";
 import { herdrFocus, navDirection, navTarget } from "./nav.ts";
 import { SidebarPanel, type StatusPart } from "./panel.ts";
 import { HeadsUp, headsUpChange, headsUpChanged } from "./headsup/headsup.ts";
@@ -59,6 +60,8 @@ export class SidebarController {
   private blocked = 0;
   private ticker: ReturnType<typeof setInterval> | undefined;
   private releaseInput: (() => void) | undefined;
+  /** Prompts another program types into this pane, which go to main even while Sidebar has focus. */
+  private readonly injected = new InjectedPrompt();
   /** Sidebar's share per orientation: what you dragged the divider to, else PI_SIDEBAR_RATIO. */
   readonly ratios = new RatioStore(process.env[PREFS_ENV] ?? path.join(getAgentDir(), "pi-sidebar.json"), parseRatio(process.env[RATIO_ENV]));
 
@@ -226,6 +229,14 @@ export class SidebarController {
     this.hostTui = this.probe(ctx) ?? this.hostTui;
     this.releaseInput = ctx.ui.onTerminalInput((data) => {
       if (this.headsUp.note.showing && this.headsUp.handleKey(data, this.editorIdle(ctx))) return { consume: true };
+      if (this.sidebarTyping()) {
+        const prompt = this.injected.observe(data, this.panel!.input.getText() === "", (d) => matchesKey(d, "enter"));
+        if (prompt !== undefined) {
+          this.panel!.input.setText("");
+          this.toMain(prompt, ctx);
+          return { consume: true };
+        }
+      } else this.injected.reset();
       const direction = navDirection(data);
       if (direction) {
         const target = navTarget(direction, this.isOpen && this.blocked === 0, this.layout?.orientation ?? "right", !!this.panel?.focused);
@@ -241,6 +252,30 @@ export class SidebarController {
       }
       return undefined;
     });
+  }
+
+  /** Sidebar's composer has the keyboard: open, focused, and no dialog in main. */
+  private sidebarTyping(): boolean {
+    return this.isOpen && !!this.panel?.focused && this.blocked === 0 && this.prompts === 0;
+  }
+
+  /**
+   * A prompt typed into this pane by another program, sent to main as its editor would: a new turn
+   * when main is idle, else a steer into its current one (the sender chose steer by sending now).
+   */
+  private toMain(text: string, fallback: ExtensionContext): void {
+    const ctx = this.main.ctx ?? fallback;
+    let idle = true;
+    try { idle = ctx.isIdle(); } catch { /* treat as idle */ }
+    try {
+      this.pi.sendUserMessage(text, idle ? undefined : { deliverAs: "steer" });
+    } catch (error) {
+      this.panel?.input.setText(text);
+      this.panel?.notice({ kind: "error", text: `Could not pass that message to main: ${error instanceof Error ? error.message : String(error)}` });
+      return;
+    }
+    this.panel?.notice({ kind: "info", text: `A message sent to this pane went to main${idle ? "" : " (steering its current turn)"}, not Sidebar.` });
+    this.render();
   }
 
   /** Main's own editor has focus and is empty: no dialog, no Sidebar focus, nothing typed. */

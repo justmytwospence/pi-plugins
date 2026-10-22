@@ -130,6 +130,39 @@ describe("opening and focus", () => {
     expect(input!("x")).toBeUndefined();
   });
 
+  it("sends a prompt another program types into the pane to main, even while Sidebar has focus", async () => {
+    const { pi, controller, ctx } = setup();
+    let input: ((data: string) => unknown) | undefined;
+    (ctx.ui as { onTerminalInput?: unknown }).onTerminalInput = (handler: (data: string) => unknown) => { input = handler; return () => {}; };
+    const sent: Array<{ text: unknown; options: unknown }> = [];
+    (pi as any).sendUserMessage = (text: unknown, options?: unknown) => sent.push({ text, options });
+    let idle = false;
+    (ctx as any).isIdle = () => idle;
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    controller.toggle(ctx as never);
+    const panel = panelOf(controller);
+    // Herdr's agent prompt: a bracketed paste, then Enter. Main is working, so it steers.
+    const paste = "\x1b[200~fold in #1371\nthen rebase\x1b[201~";
+    expect(input!(paste)).toBeUndefined();
+    panel.input.handleInput(paste);
+    expect(input!("\r")).toEqual({ consume: true });
+    expect(sent).toEqual([{ text: "fold in #1371\nthen rebase", options: { deliverAs: "steer" } }]);
+    expect(panel.input.getText()).toBe("");
+    // A paste you then edit, or one into a draft, stays Sidebar's.
+    input!("\x1b[200~mine\x1b[201~");
+    expect(input!("x")).toBeUndefined();
+    expect(input!("\r")).toBeUndefined();
+    panel.input.setText("draft ");
+    input!("\x1b[200~more\x1b[201~");
+    expect(input!("\r")).toBeUndefined();
+    // Idle main: a new turn.
+    panel.input.setText("");
+    idle = true;
+    input!("\x1b[200~next\x1b[201~");
+    expect(input!("\r")).toEqual({ consume: true });
+    expect(sent.at(-1)).toEqual({ text: "next", options: undefined });
+  });
+
   it("makes Sidebar's view Pi's primary scroll view only while it has focus and shows", async () => {
     const { pi, controller, tui, ctx } = setup();
     controller.toggle(ctx as never);

@@ -231,7 +231,7 @@ Supported APIs: Anthropic Messages, OpenAI Responses (including Codex and Azure)
 
 **Model behavior.** On models that drop earlier thinking when a new user message arrives (Claude models before Opus 4.5 and Sonnet 4.6), a question asked during main's tool calls can miss the cache. The miss check catches this.
 
-**Keys while Sidebar has focus:** typing goes only to Sidebar. Main-only actions (stopping main, model shortcuts) work again once main has focus. Transcript search and previous/next prompt jumps act on the focused half.
+**Keys while Sidebar has focus:** typing goes only to Sidebar, except a prompt another program types into the pane (`herdr agent prompt`, pi-herdr's `send`, a phone client): a paste into Sidebar's empty composer followed by Enter within 0.7 s is sent to main instead (steering main's turn if it is working), with a notice in Sidebar. Main-only actions (stopping main, model shortcuts) work again once main has focus. Transcript search and previous/next prompt jumps act on the focused half.
 
 ## Prior art
 
