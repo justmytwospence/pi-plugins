@@ -39,6 +39,19 @@ export interface ChildRecord {
   /** The child's session as herdr reports it: a pi session path, an opencode session id. */
   session?: string;
   closed?: boolean;
+  /** Messages queued while the child worked, sent together once its turn ends. */
+  queued?: string[];
+}
+
+/** How a message reaches a child that is working: into its current turn, or after it. */
+export type Delivery = "steer" | "queue";
+
+export interface SendResult {
+  rec: ChildRecord;
+  /** sent: it was idle; steered: it was working and got it mid-turn; queued: it gets it when the turn ends. */
+  outcome: "sent" | "steered" | "queued";
+  /** The child's state when the message arrived. */
+  status: string;
 }
 
 /** What differs between hosts: which agent herdr starts, how, and how its reply is read. */
@@ -336,10 +349,46 @@ export class Children {
     this.ensureLoop();
   }
 
-  async send(name: string, message: string): Promise<ChildRecord> {
+  /** The child's herdr state now ("gone" when herdr does not know it). */
+  async status(name: string): Promise<string> {
     const rec = this.get(name);
+    if (rec.closed) return "closed";
+    const { call } = this.scope(rec);
+    const a = await call<{ agent?: AgentInfo }>("agent.get", { target: rec.paneId });
+    return a.result?.agent?.agent_status ?? "gone";
+  }
+
+  /**
+   * Send a message. An idle child gets it at once. A working one gets it mid-turn (steer: pi
+   * delivers it after the current tool call) or once the turn ends (queue: held here, then sent).
+   */
+  async send(name: string, message: string, delivery: Delivery = "steer"): Promise<SendResult> {
+    const rec = this.get(name);
+    const status = await this.status(name);
+    const busy = status === "working" || status === "blocked";
+    if (busy && delivery === "queue") {
+      rec.queued = [...(rec.queued ?? []), message];
+      this.save(rec);
+      this.ensureLoop();
+      return { rec, outcome: "queued", status };
+    }
     await this.prompt(rec, message);
-    return rec;
+    return { rec, outcome: busy ? "steered" : "sent", status };
+  }
+
+  /** Send the queued messages, as one, to a child whose turn has ended. */
+  private async flushQueue(rec: ChildRecord): Promise<void> {
+    const queued = rec.queued ?? [];
+    if (!queued.length || rec.closed) return;
+    delete rec.queued;
+    this.save(rec);
+    try {
+      await this.prompt(rec, queued.join("\n\n"));
+    } catch (error) {
+      if (error instanceof StaleChildOperation) throw error;
+      rec.queued = [...queued, ...(rec.queued ?? [])];
+      this.save(rec);
+    }
   }
 
   private finish(rec: ChildRecord, text: string, reply: string | undefined, closed = false): void {
@@ -360,7 +409,7 @@ export class Children {
     this.ticking = true;
     try {
       for (const rec of [...this.records.values()]) {
-        if (!rec.awaiting || rec.closed) continue;
+        if ((!rec.awaiting && !rec.queued?.length) || rec.closed) continue;
         try {
           await this.check(rec);
         } catch (error) {
@@ -370,7 +419,7 @@ export class Children {
       }
     } finally {
       this.ticking = false;
-      if (![...this.records.values()].some((r) => r.awaiting && !r.closed)) this.stopLoop();
+      if (![...this.records.values()].some((r) => (r.awaiting || r.queued?.length) && !r.closed)) this.stopLoop();
     }
   }
 
@@ -393,6 +442,10 @@ export class Children {
       return;
     }
     if (status !== "idle" && status !== "done") return;
+    if (!rec.awaiting) {
+      await this.flushQueue(rec);
+      return;
+    }
     const seq = info.completion_seq;
     const completed = (seq !== undefined && seq !== rec.baseline?.completionSeq) || rec.sawWorking;
     if (!completed) return;
@@ -404,6 +457,7 @@ export class Children {
       ? `Herdr child "${rec.name}" (${where}, pane ${rec.paneId}) replied:\n\n${reply}`
       : `Herdr child "${rec.name}" (${where}, pane ${rec.paneId}) finished its turn, but its reply could not be read${rec.session ? ` from ${rec.session}` : ""}. Use action=read.`;
     this.finish(rec, text, reply);
+    await this.flushQueue(rec);
   }
 
   async read(name: string, lines = 80): Promise<string> {
@@ -474,7 +528,7 @@ export class Children {
   }
 
   private ensureLoop(): void {
-    if (this.timer || ![...this.records.values()].some((r) => r.awaiting && !r.closed)) return;
+    if (this.timer || ![...this.records.values()].some((r) => (r.awaiting || r.queued?.length) && !r.closed)) return;
     this.timer = setInterval(() => void this.tick(), this.deps.pollMs ?? 2_000);
     this.timer.unref?.();
   }

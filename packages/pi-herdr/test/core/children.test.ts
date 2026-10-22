@@ -110,6 +110,49 @@ describe("children", () => {
     expect(w.delivered).toHaveLength(1);
   });
 
+  it("steers a working child, or queues the message until its turn ends", async () => {
+    const w = world();
+    await w.children.spawn({ task: "build it", name: "builder", cwd: "/repo" });
+    w.state.agent.agent_status = "working";
+    await w.children.tick();
+
+    expect(await w.children.send("builder", "use the other API", "steer")).toMatchObject({ outcome: "steered", status: "working" });
+    expect(w.f.of("agent.prompt")).toHaveLength(2);
+
+    expect(await w.children.send("builder", "then do issue 1371", "queue")).toMatchObject({ outcome: "queued" });
+    expect(await w.children.send("builder", "and rebase", "queue")).toMatchObject({ outcome: "queued" });
+    expect(w.f.of("agent.prompt")).toHaveLength(2);
+    expect(w.children.get("builder").queued).toEqual(["then do issue 1371", "and rebase"]);
+
+    // The turn ends: its reply is delivered, then the queue goes out as one message.
+    w.state.agent.agent_status = "idle";
+    w.state.agent.completion_seq = 5;
+    await w.children.tick();
+    expect(w.delivered).toHaveLength(1);
+    expect(w.f.of("agent.prompt").at(-1)!.params.text).toBe("then do issue 1371\n\nand rebase");
+    expect(w.children.get("builder").queued).toBeUndefined();
+    expect(w.children.get("builder").awaiting).toBe(true);
+
+    // An idle child gets it at once, whatever the delivery.
+    expect(await w.children.send("builder", "one more", "queue")).toMatchObject({ outcome: "sent", status: "idle" });
+  });
+
+  it("sends a queued message to a child working on a turn the user started", async () => {
+    const w = world();
+    await w.children.spawn({ task: "t", name: "solo", cwd: "/repo" });
+    w.state.agent.completion_seq = 2;
+    await w.children.tick();
+    expect(w.children.get("solo").awaiting).toBe(false);
+    w.state.agent.agent_status = "working";
+    await w.children.send("solo", "later", "queue");
+    await w.children.tick();
+    expect(w.f.of("agent.prompt")).toHaveLength(1);
+    w.state.agent.agent_status = "idle";
+    await w.children.tick();
+    expect(w.f.of("agent.prompt").at(-1)!.params.text).toBe("later");
+    expect(w.children.get("solo").awaiting).toBe(true);
+  });
+
   it("detects a fast turn by its completion_seq alone", async () => {
     const w = world();
     await w.children.spawn({ task: "quick", name: "quick", cwd: "/repo" });

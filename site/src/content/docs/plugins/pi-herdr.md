@@ -61,7 +61,7 @@ These are Herdr settings, not a pi-herdr JSON settings file. Token visibility de
 | Action | Arguments |
 | --- | --- |
 | `spawn` | Required `task`; optional `name`, `where`, `branch`, `model`, `thinking`, `focus`. |
-| `send` | `name` and `message`; the reply is delivered automatically. |
+| `send` | `name` and `message`; the reply is delivered automatically. While the child is working, `delivery` is required: `steer` (into its current turn) or `queue` (sent when that turn ends). |
 | `read` | `name`; optional `lines` controls screen capture while working, default 80. |
 | `list` | Lists this session's children and their state. |
 | `interrupt` | `name`; sends Escape to end the child's current turn. |

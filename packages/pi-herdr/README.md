@@ -60,7 +60,7 @@ The `herdr_child` tool starts an interactive Pi in its own Herdr pane and gives 
 | action | parameters |
 |---|---|
 | `spawn` | `task`; optional `name` (lowercase, dashes; otherwise derived from the task and made unique), `where` (`tab` default, `split` beside this pane, or `worktree` with `branch`), `model` and `thinking` (default: this session's), `focus` (default false) |
-| `send` | `name`, `message`: ask it something more |
+| `send` | `name`, `message`: ask it something more. While the child is working, `delivery` is required: `steer` puts the message into its current turn (Pi delivers it after the current tool call), `queue` holds it and sends it once that turn ends (several queued messages go as one, after the turn's reply). An idle child gets it at once. |
 | `read` | `name`, optional `lines` (default 80, 10-400): its last reply when idle, or its screen while it works |
 | `list` | this session's children: state, pending reply, layout, pane, task |
 | `interrupt` | `name`: sends Escape, ending its current turn; that turn still reports back when it settles |

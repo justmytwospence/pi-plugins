@@ -68,6 +68,11 @@ const Params = Type.Object({
   thinking: Type.Optional(Type.String({ description: "spawn: off|minimal|low|medium|high|xhigh|max; default this session's" })),
   focus: Type.Optional(Type.Boolean({ description: "spawn: switch to the child's pane (default false)" })),
   message: Type.Optional(Type.String({ description: "send: the message" })),
+  delivery: Type.Optional(
+    Type.Union([Type.Literal("steer"), Type.Literal("queue")], {
+      description: "send, when the child is working: steer delivers it into the current turn (after its current tool call; for corrections to what it is doing now); queue holds it and sends it once that turn ends (for new or separate work). Required when the child is working; ignored when it is idle",
+    }),
+  ),
   lines: Type.Optional(Type.Number({ description: "read: screen lines while it works (default 80)" })),
 });
 
@@ -434,7 +439,7 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     name: TOOL,
     label: "Herdr child",
     description:
-      "Start and talk to persistent, human-led pi sessions in herdr, for an explicit interactive-session request or a clear handoff to the user. Not for delegated work whose purpose is to report back to this session: use a headless subagent instead, even for long or multi-step tasks. A tab shares this checkout in the existing space; a split is for side-by-side interaction; a worktree gets its own space and requires a user-requested independent branch/checkout. action=spawn takes `task` (plus optional name, where, branch, model, thinking, focus); replies arrive as messages, so do not poll. action=send (name, message), read (name), list, interrupt (name), close (name).",
+      "Start and talk to persistent, human-led pi sessions in herdr, for an explicit interactive-session request or a clear handoff to the user. Not for delegated work whose purpose is to report back to this session: use a headless subagent instead, even for long or multi-step tasks. A tab shares this checkout in the existing space; a split is for side-by-side interaction; a worktree gets its own space and requires a user-requested independent branch/checkout. action=spawn takes `task` (plus optional name, where, branch, model, thinking, focus); replies arrive as messages, so do not poll. action=send (name, message, delivery when the child is working), read (name), list, interrupt (name), close (name).",
     promptSnippet: "Start persistent human-led pi sessions in herdr for interactive requests or user handoffs, not report-back subagents",
     promptGuidelines: [
       "Prefer doing work directly; delegate only genuinely independent tasks with a clear payoff or when requested. If delegating report-back work, use a headless subagent, not a Herdr pane. Duration, complexity, and the possibility the user might want to watch are not reasons to create a Herdr pane.",
@@ -443,6 +448,7 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
       "Use where=worktree for an independent branch/checkout only when the user requests a worktree or branch isolation; otherwise ask before creating one. It opens the checkout in its own Herdr space (or adds a tab there if already open). Do not create a new space or worktree merely because work is delegated, long, or parallel.",
       "Give a herdr child a complete, self-contained task: it cannot see this conversation.",
       "A herdr child's reply arrives as a message when its turn ends; end your turn instead of polling, and use action=send for follow-ups.",
+      "Before sending to a herdr child or any other agent pane, consider whether it is still working. If it is, choose: steer (herdr_child delivery=steer) for a correction to the work it is doing now; queue (delivery=queue) for new or separate work that should not derail its current turn. For an agent you did not start, plain `herdr agent prompt` steers; to queue, run `herdr agent wait <name>` and then the prompt in a background job.",
     ],
     parameters: Params,
     async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -470,8 +476,21 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
           return text(`Started herdr child "${rec.name}" in ${place}, pane ${rec.paneId}, and sent it the task. Its reply arrives as a message when its turn ends; do not poll.`);
         }
         case "send": {
-          const rec = await children.send(need(params.name, "name"), need(params.message, "message"));
-          return text(`Sent to ${rec.name}. Its reply arrives as a message.`);
+          const name = need(params.name, "name");
+          const message = need(params.message, "message");
+          if (!params.delivery) {
+            const status = await children.status(name);
+            if (status === "working" || status === "blocked") {
+              throw new Error(`${name} is ${status} on a turn now, so nothing was sent. Read it (action=read) if you need to know what it is doing, then send again with delivery=steer to put the message into its current turn (a correction to that work), or delivery=queue to send it when the turn ends (new or separate work).`);
+            }
+          }
+          const { rec, outcome } = await children.send(name, message, params.delivery);
+          const how = outcome === "queued"
+            ? `Queued for ${rec.name}: it is still working and gets the message when its current turn ends.`
+            : outcome === "steered"
+              ? `Sent to ${rec.name} mid-turn: it steers the turn it is working on.`
+              : `Sent to ${rec.name}.`;
+          return text(`${how} Its reply arrives as a message.`);
         }
         case "read":
           return text(await children.read(need(params.name, "name"), params.lines));
