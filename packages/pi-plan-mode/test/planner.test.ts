@@ -351,7 +351,9 @@ test("an in-process planner session is shut down like Pi's own runtime does: abo
   const order: string[] = [];
   const session = {
     abort: async () => void order.push("abort"),
-    extensionRunner: { emit: async (event: { type: string; reason?: string }) => void order.push(`${event.type}:${event.reason}`) },
+    extensionRunner: {
+      emit: async (event: { type: string; reason?: string }) => void order.push(`${event.type}:${event.reason}`),
+    },
     dispose: () => void order.push("dispose"),
   };
   await shutdownSession(session as never);
@@ -360,8 +362,14 @@ test("an in-process planner session is shut down like Pi's own runtime does: abo
   // An extension that throws on shutdown, or a session that cannot abort, must not keep the session alive.
   const failing: string[] = [];
   await shutdownSession({
-    abort: async () => { throw new Error("busy"); },
-    extensionRunner: { emit: async () => { throw new Error("extension failed"); } },
+    abort: async () => {
+      throw new Error("busy");
+    },
+    extensionRunner: {
+      emit: async () => {
+        throw new Error("extension failed");
+      },
+    },
     dispose: () => void failing.push("dispose"),
   } as never);
   assert.deepEqual(failing, ["dispose"]);
