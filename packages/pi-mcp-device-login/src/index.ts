@@ -61,10 +61,8 @@ export default function mcpDeviceLogin(pi: ExtensionAPI) {
       ctx.ui.notify(`${server.name}: approve code ${code.userCode} at ${link}`, "info");
       const tokens = await pollForTokens(discovery, code, { clientId: server.clientId }, { signal });
       await saveTokens(join(getAgentDir(), "mcp-auth.json"), server.name, server.url, tokens);
-      ctx.ui.notify(
-        `${server.name}: signed in${tokens.refresh_token ? "" : " (no refresh token: sign in again when it expires)"}. Takes effect on the next turn; /mcp reconnects now.`,
-        "info",
-      );
+      ctx.ui.notify(`${server.name}: signed in${tokens.refresh_token ? "" : " (no refresh token: sign in again when it expires)"}`, "info");
+      signedIn.add(server.name);
     } catch (error) {
       if (error instanceof DeviceFlowError && error.code === "cancelled") {
         ctx.ui.notify(`${server.name}: device sign-in cancelled`, "info");
@@ -73,6 +71,22 @@ export default function mcpDeviceLogin(pi: ExtensionAPI) {
       }
     } finally {
       clear();
+      await reconnectWhenDone(ctx);
+    }
+  }
+
+  // Pi reconnects a server waiting for sign-in when its tokens change, but not one that failed (for
+  // example on a refused refresh), and an extension cannot reconnect a server. Reloading does, so
+  // once the last running sign-in ends, reload if any succeeded and the agent is idle.
+  const signedIn = new Set<string>();
+  async function reconnectWhenDone(ctx: ExtensionCommandContext) {
+    if (running.size > 0 || signedIn.size === 0) return;
+    const names = [...signedIn].join(", ");
+    signedIn.clear();
+    if (ctx.isIdle()) {
+      await ctx.reload();
+    } else {
+      ctx.ui.notify(`${names}: run /reload after this turn to reconnect`, "info");
     }
   }
 
@@ -85,10 +99,11 @@ export default function mcpDeviceLogin(pi: ExtensionAPI) {
       }
       if (words.length > 1) return null;
       const names = [...loadServers({ agentDir: getAgentDir(), cwd: process.cwd(), projectTrusted: false }).keys()];
-      return [...names, "cancel"].filter((n) => n.startsWith(words[0] ?? "")).map((n) => ({ value: n, label: n }));
+      return [...names, "all", "cancel"].filter((n) => n.startsWith(words[0] ?? "")).map((n) => ({ value: n, label: n }));
     },
     handler: async (args, ctx) => {
-      const [first, second] = args.trim().split(/\s+/).filter(Boolean);
+      const words = args.trim().split(/\s+/).filter(Boolean);
+      const [first, second] = words;
       if (first === "cancel") {
         const targets = second ? [second] : [...running.keys()];
         if (!targets.length) ctx.ui.notify(`${COMMAND}: no sign-in is running`, "info");
@@ -96,23 +111,29 @@ export default function mcpDeviceLogin(pi: ExtensionAPI) {
         return;
       }
       const available = servers(ctx);
-      let name: string | undefined = first;
-      if (!name) {
-        const names = [...available.keys()];
-        if (!names.length) {
+      let names = words;
+      if (first === "all") {
+        // Every server with a pre-registered public client; the others cannot use the device grant.
+        names = [...available.values()].filter((s) => s.clientId && !s.clientSecret).map((s) => s.name);
+      } else if (!names.length) {
+        const choices = [...available.keys()];
+        if (!choices.length) {
           ctx.ui.notify(`${COMMAND}: no HTTP MCP servers configured`, "error");
           return;
         }
-        name = await ctx.ui.select("Sign in to which MCP server with a device code?", names);
+        const name = await ctx.ui.select("Sign in to which MCP server with a device code?", choices);
         if (!name) return;
+        names = [name];
       }
-      const server = available.get(name);
-      if (!server) {
-        ctx.ui.notify(`${COMMAND}: no HTTP MCP server named ${name}`, "error");
-        return;
+      for (const name of names) {
+        const server = available.get(name);
+        if (!server) {
+          ctx.ui.notify(`${COMMAND}: no HTTP MCP server named ${name}`, "error");
+          continue;
+        }
+        // Poll in the background so the session stays usable while the code waits for approval.
+        void signIn(server, ctx);
       }
-      // Poll in the background so the session stays usable while the code waits for approval.
-      void signIn(server, ctx);
     },
   });
 

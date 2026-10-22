@@ -8,7 +8,7 @@ plugin: pi-mcp-device-login
 
 - **Use it for:** Signing in to an OAuth MCP server from a Pi session whose browser is elsewhere (SSH, a phone, a web terminal), without pasting a dead `127.0.0.1` redirect URL.
 - **Enable:** Select `packages/pi-mcp-device-login/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
-- **Controls:** `/mcp-code <server>` starts a sign-in; with no argument it asks which server. `/mcp-code cancel [server]` stops one or all.
+- **Controls:** `/mcp-code <server...>` starts a sign-in for each named server; `/mcp-code all` for every server with a configured public client; with no argument it asks which server. `/mcp-code cancel [server]` stops one or all.
 - **Settings:** None of its own. Reads the server's `url` and `oauth` (`clientId`, `scope`, `authServerMetadataUrl`) from Pi's `mcp.json` files.
 - **Requirements, cost & privacy:** An authorization server that supports the device authorization grant (RFC 8628) for a pre-registered public client. Talks only to the server's own OAuth endpoints. No inference.
 - **Integrations & limits:** Writes tokens into Pi's private `mcp-auth.json` format, so a Pi update that changes it needs this entry updated. Public clients only: a server whose `oauth` sets `clientSecret` is refused.
@@ -25,7 +25,7 @@ Entry: `packages/pi-mcp-device-login/src/index.ts`.
 2. It reads the server's protected resource metadata (RFC 9728) for the authorization server, its scopes and resource, then the authorization server metadata (RFC 8414 or OpenID discovery) for the device and token endpoints. The issuer must match, and endpoints must use HTTPS. `oauth.authServerMetadataUrl` overrides this discovery as it does for Pi.
 3. It requests a device code for `oauth.clientId` with the configured `oauth.scope`, or else the advertised scopes, and the server as `resource` (RFC 8707). A widget above the editor shows the approval link and the code.
 4. It polls the token endpoint in the background at the server's interval, slowing down when asked, until you approve, deny, cancel, or the code expires. The session stays usable meanwhile.
-5. It stores the tokens in `~/.pi/agent/mcp-auth.json` under the same key Pi uses, removing any half-finished browser sign-in and cached discovery for that server. Pi picks them up on its next turn (or reconnect it from `/mcp`) and refreshes them itself.
+5. It stores the tokens in `~/.pi/agent/mcp-auth.json` under the same key Pi uses, removing any half-finished browser sign-in and cached discovery for that server. Pi refreshes them itself from then on. When the last running sign-in ends, the entry reloads the session if the agent is idle (Pi does not reconnect a server that failed, and extensions cannot reconnect one directly); during a turn it asks you to `/reload` afterwards.
 
 Request `offline_access` (through `oauth.scope` or the server's advertised scopes) to get a refresh token; without one the session ends when the access token expires.
 
