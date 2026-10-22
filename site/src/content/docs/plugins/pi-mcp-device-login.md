@@ -8,7 +8,7 @@ plugin: pi-mcp-device-login
 
 - **Use it for:** Signing in to an OAuth MCP server from a Pi session whose browser is elsewhere (SSH, a phone, a web terminal), without pasting a dead `127.0.0.1` redirect URL.
 - **Enable:** Select `packages/pi-mcp-device-login/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
-- **Controls:** `/mcp-code` opens a menu like `/mcp`'s: pick a server or All servers. `/mcp-code <server...>` or `/mcp-code all` skips the menu. Escape cancels a sign-in.
+- **Controls:** `/mcp-code` opens a menu like `/mcp`'s listing servers that have `oauth.clientId`: pick one or All servers. `/mcp-code <server...>` or `/mcp-code all` skips the menu. Escape cancels a sign-in.
 - **Settings:** None of its own. Reads the server's `url` and `oauth` (`clientId`, `scope`, `authServerMetadataUrl`) from Pi's `mcp.json` files.
 - **Requirements, cost & privacy:** An authorization server that supports the device authorization grant (RFC 8628) for a pre-registered public client. Talks only to the server's own OAuth endpoints. No inference.
 - **Integrations & limits:** Writes tokens into Pi's private `mcp-auth.json` format, so a Pi update that changes it needs this entry updated. Public clients only: a server whose `oauth` sets `clientSecret` is refused.

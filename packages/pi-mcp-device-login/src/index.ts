@@ -160,18 +160,21 @@ export default function mcpDeviceLogin(pi: ExtensionAPI) {
           if (words.includes("all")) chosen = eligible;
           else if (words.length) chosen = words.map((n) => available.get(n)!);
           else {
+            // Servers without a pre-registered public client cannot use the device grant (Pi signs in
+            // to those with dynamic client registration), so they are left out rather than offered.
             const items: SelectItem[] = [];
-            if (eligible.length > 1) items.push({ value: ALL, label: "All servers", description: `${eligible.length} with a client ID` });
-            for (const server of available.values()) {
-              const problem = usable(server);
-              const status = problem ?? (hasTokens(authFile(), server.name, server.url) ? "signed in" : "not signed in");
+            if (eligible.length > 1) items.push({ value: ALL, label: "All servers", description: `${eligible.length} servers` });
+            for (const server of eligible) {
+              const status = hasTokens(authFile(), server.name, server.url) ? "signed in" : "not signed in";
               items.push({ value: server.name, label: server.name, description: status });
             }
             if (!items.length) {
-              ctx.ui.notify("No HTTP MCP servers are configured", "warning");
+              ctx.ui.notify("No MCP server has an oauth.clientId, which device sign-in needs", "warning");
               return done([]);
             }
-            const picked = await view.menu("MCP device sign-in", items, "Sign in with a code you approve on any device.");
+            const hidden = available.size - eligible.length;
+            const details = `Sign in with a code you approve on any device.${hidden ? ` ${hidden} server${hidden === 1 ? "" : "s"} without oauth.clientId not shown.` : ""}`;
+            const picked = await view.menu("MCP device sign-in", items, details);
             if (!picked) return done([]);
             chosen = picked === ALL ? eligible : [available.get(picked)!];
           }
