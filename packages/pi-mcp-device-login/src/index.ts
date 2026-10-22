@@ -1,21 +1,128 @@
-// /mcp-code <server>: sign in to an OAuth MCP server with the device authorization grant
+// /mcp-code [server...|all]: sign in to OAuth MCP servers with the device authorization grant
 // (RFC 8628) instead of a browser redirect to localhost, for pi sessions whose browser is on another
-// machine (SSH, a phone). The tokens go into pi's own MCP credential store, so the built-in MCP
-// client sends and refreshes them as if it had signed in itself.
+// machine (SSH, a phone). Looks and behaves like Pi's own `/mcp` sign-in screen. The tokens go into
+// pi's MCP credential store, so the built-in client sends and refreshes them as if it had signed in.
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, keyHint } from "@earendil-works/pi-coding-agent";
+import { Spacer, Text, type Component, type SelectItem } from "@earendil-works/pi-tui";
 import { join } from "node:path";
 import { loadServers, type HttpServer } from "./config.ts";
-import { DeviceFlowError, discover, pollForTokens, requestDeviceCode } from "./device.ts";
-import { saveTokens } from "./store.ts";
+import { DeviceFlowError, discover, pollForTokens, requestDeviceCode, type DeviceCode } from "./device.ts";
+import { hasTokens, saveTokens } from "./store.ts";
+import { DeviceLoginView } from "./ui.ts";
 
 const COMMAND = "mcp-code";
-const WIDGET = "mcp-device-login";
+const ALL = "\u0000all";
+
+type Sign =
+  | { state: "starting" }
+  | { state: "waiting"; code: DeviceCode; expiresAt: number }
+  | { state: "done"; refresh: boolean }
+  | { state: "failed"; error: string }
+  | { state: "cancelled" };
+
+const authFile = () => join(getAgentDir(), "mcp-auth.json");
+
+function usable(server: HttpServer): string | undefined {
+  if (!server.clientId) return "no oauth.clientId";
+  if (server.clientSecret) return "uses a client secret";
+  return undefined;
+}
+
+function remaining(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+async function signIn(server: HttpServer, signal: AbortSignal, update: (sign: Sign) => void): Promise<void> {
+  try {
+    const discovery = await discover(server.url, { authServerMetadataUrl: server.authServerMetadataUrl, signal });
+    const scope = server.scope ?? discovery.scopes?.join(" ");
+    const code = await requestDeviceCode(discovery, { clientId: server.clientId!, scope }, { signal });
+    update({ state: "waiting", code, expiresAt: Date.now() + code.expiresIn * 1000 });
+    const tokens = await pollForTokens(discovery, code, { clientId: server.clientId! }, { signal });
+    await saveTokens(authFile(), server.name, server.url, tokens);
+    update({ state: "done", refresh: Boolean(tokens.refresh_token) });
+  } catch (error) {
+    if (error instanceof DeviceFlowError && error.code === "cancelled") update({ state: "cancelled" });
+    else update({ state: "failed", error: (error as Error).message });
+  }
+}
+
+/** Runs the sign-ins in the view; resolves to the names that signed in. */
+async function runSignIns(view: DeviceLoginView, servers: HttpServer[]): Promise<string[]> {
+  const { theme } = view;
+  const signs = new Map<string, Sign>(servers.map((s) => [s.name, { state: "starting" }]));
+  const controller = new AbortController();
+  const single = servers.length === 1;
+  const title = single ? `Sign in to ${servers[0]!.name}` : `Sign in to ${servers.length} servers`;
+  const cancelHint = keyHint("tui.select.cancel", "cancel");
+
+  const describe = (name: string, sign: Sign): Component[] => {
+    const muted = (text: string) => new Text(theme.fg("muted", text), 1, 0);
+    const heading = single ? [] : [new Text(theme.bold(name), 1, 0)];
+    switch (sign.state) {
+      case "starting":
+        return [...heading, muted("Requesting a code…")];
+      case "waiting": {
+        const link = sign.code.verificationUriComplete ?? sign.code.verificationUri;
+        return [
+          ...heading,
+          muted("Approve access on any device. Visit:"),
+          new Text(theme.fg("accent", link), 1, 0),
+          new Spacer(1),
+          new Text(`${theme.fg("muted", "Code:")} ${theme.fg("accent", theme.bold(sign.code.userCode))}`, 1, 0),
+          muted(`Waiting for approval… expires in ${remaining(sign.expiresAt - Date.now())}`),
+        ];
+      }
+      case "done":
+        return [...heading, new Text(theme.fg("success", `Signed in${sign.refresh ? "" : " (no refresh token)"}`), 1, 0)];
+      case "failed":
+        return [...heading, new Text(theme.fg("error", sign.error), 1, 0)];
+      case "cancelled":
+        return [...heading, muted("Cancelled")];
+    }
+  };
+
+  return new Promise((resolve) => {
+    let finished = false;
+    const succeeded = () => [...signs].filter(([, s]) => s.state === "done").map(([n]) => n);
+    const close = () => {
+      if (finished) return;
+      finished = true;
+      clearInterval(timer);
+      controller.abort();
+      resolve(succeeded());
+    };
+    const render = () => {
+      if (finished) return;
+      const body: Component[] = [];
+      for (const [name, sign] of signs) body.push(new Spacer(1), ...describe(name, sign));
+      const settled = [...signs.values()].every((s) => s.state !== "starting" && s.state !== "waiting");
+      if (settled && [...signs.values()].every((s) => s.state === "done")) {
+        close();
+        return;
+      }
+      view.screen(
+        title,
+        body,
+        settled ? keyHint("tui.select.cancel", "close") : cancelHint,
+        settled ? { "tui.select.cancel": close, "tui.select.confirm": close } : { "tui.select.cancel": close },
+      );
+    };
+    const timer = setInterval(render, 1000);
+    render();
+    for (const server of servers) {
+      void signIn(server, controller.signal, (sign) => {
+        signs.set(server.name, sign);
+        render();
+      });
+    }
+  });
+}
 
 export default function mcpDeviceLogin(pi: ExtensionAPI) {
-  const running = new Map<string, AbortController>();
-
   const servers = (ctx: ExtensionCommandContext) =>
     loadServers({
       agentDir: getAgentDir(),
@@ -24,120 +131,75 @@ export default function mcpDeviceLogin(pi: ExtensionAPI) {
       registered: pi.getMcpServers().map((s) => ({ name: s.name, config: s.config as never })),
     });
 
-  const render = (ctx: ExtensionCommandContext, lines: Map<string, string[]>) => {
-    const all = [...lines.values()].flat();
-    ctx.ui.setWidget(WIDGET, all.length ? all : undefined);
-  };
-  const widgetLines = new Map<string, string[]>();
-
-  async function signIn(server: HttpServer, ctx: ExtensionCommandContext) {
-    if (!server.clientId) {
-      ctx.ui.notify(`${COMMAND}: ${server.name} has no oauth.clientId in mcp.json; the device grant needs a pre-registered client`, "error");
-      return;
-    }
-    if (server.clientSecret) {
-      ctx.ui.notify(`${COMMAND}: ${server.name} uses a client secret; only public clients are supported`, "error");
-      return;
-    }
-    running.get(server.name)?.abort();
-    const controller = new AbortController();
-    running.set(server.name, controller);
-    const { signal } = controller;
-    const clear = () => {
-      if (running.get(server.name) === controller) running.delete(server.name);
-      widgetLines.delete(server.name);
-      render(ctx, widgetLines);
-    };
-    try {
-      const discovery = await discover(server.url, { authServerMetadataUrl: server.authServerMetadataUrl, signal });
-      const scope = server.scope ?? discovery.scopes?.join(" ");
-      const code = await requestDeviceCode(discovery, { clientId: server.clientId, scope }, { signal });
-      const link = code.verificationUriComplete ?? code.verificationUri;
-      widgetLines.set(server.name, [
-        `MCP sign-in ${server.name}: open ${link}`,
-        `  code ${code.userCode}  (expires in ${Math.round(code.expiresIn / 60)} min; /${COMMAND} cancel ${server.name})`,
-      ]);
-      render(ctx, widgetLines);
-      ctx.ui.notify(`${server.name}: approve code ${code.userCode} at ${link}`, "info");
-      const tokens = await pollForTokens(discovery, code, { clientId: server.clientId }, { signal });
-      await saveTokens(join(getAgentDir(), "mcp-auth.json"), server.name, server.url, tokens);
-      ctx.ui.notify(`${server.name}: signed in${tokens.refresh_token ? "" : " (no refresh token: sign in again when it expires)"}`, "info");
-      signedIn.add(server.name);
-    } catch (error) {
-      if (error instanceof DeviceFlowError && error.code === "cancelled") {
-        ctx.ui.notify(`${server.name}: device sign-in cancelled`, "info");
-      } else {
-        ctx.ui.notify(`${COMMAND} ${server.name}: ${(error as Error).message}`, "error");
-      }
-    } finally {
-      clear();
-      await reconnectWhenDone(ctx);
-    }
-  }
-
-  // Pi reconnects a server waiting for sign-in when its tokens change, but not one that failed (for
-  // example on a refused refresh), and an extension cannot reconnect a server. Reloading does, so
-  // once the last running sign-in ends, reload if any succeeded and the agent is idle.
-  const signedIn = new Set<string>();
-  async function reconnectWhenDone(ctx: ExtensionCommandContext) {
-    if (running.size > 0 || signedIn.size === 0) return;
-    const names = [...signedIn].join(", ");
-    signedIn.clear();
-    if (ctx.isIdle()) {
-      await ctx.reload();
-    } else {
-      ctx.ui.notify(`${names}: run /reload after this turn to reconnect`, "info");
-    }
-  }
-
   pi.registerCommand(COMMAND, {
-    description: "Sign in to an OAuth MCP server with a device code (no localhost redirect)",
+    description: "Sign in to OAuth MCP servers with a device code (no localhost redirect)",
     getArgumentCompletions: (prefix) => {
       const words = prefix.trimStart().split(/\s+/);
-      if (words[0] === "cancel" && words.length === 2) {
-        return [...running.keys()].filter((n) => n.startsWith(words[1]!)).map((n) => ({ value: `cancel ${n}`, label: n }));
-      }
-      if (words.length > 1) return null;
+      const last = words[words.length - 1] ?? "";
+      const before = words.slice(0, -1).join(" ");
       const names = [...loadServers({ agentDir: getAgentDir(), cwd: process.cwd(), projectTrusted: false }).keys()];
-      return [...names, "all", "cancel"].filter((n) => n.startsWith(words[0] ?? "")).map((n) => ({ value: n, label: n }));
+      return [...names, ...(words.length === 1 ? ["all"] : [])]
+        .filter((n) => n.startsWith(last) && !words.slice(0, -1).includes(n))
+        .map((n) => ({ value: before ? `${before} ${n}` : n, label: n }));
     },
     handler: async (args, ctx) => {
-      const words = args.trim().split(/\s+/).filter(Boolean);
-      const [first, second] = words;
-      if (first === "cancel") {
-        const targets = second ? [second] : [...running.keys()];
-        if (!targets.length) ctx.ui.notify(`${COMMAND}: no sign-in is running`, "info");
-        for (const name of targets) running.get(name)?.abort();
-        return;
-      }
       const available = servers(ctx);
-      let names = words;
-      if (first === "all") {
-        // Every server with a pre-registered public client; the others cannot use the device grant.
-        names = [...available.values()].filter((s) => s.clientId && !s.clientSecret).map((s) => s.name);
-      } else if (!names.length) {
-        const choices = [...available.keys()];
-        if (!choices.length) {
-          ctx.ui.notify(`${COMMAND}: no HTTP MCP servers configured`, "error");
+      const words = args.trim().split(/\s+/).filter(Boolean);
+      for (const name of words) {
+        if (name !== "all" && !available.has(name)) {
+          ctx.ui.notify(`No HTTP MCP server named "${name}"`, "error");
           return;
         }
-        const name = await ctx.ui.select("Sign in to which MCP server with a device code?", choices);
-        if (!name) return;
-        names = [name];
       }
-      for (const name of names) {
-        const server = available.get(name);
-        if (!server) {
-          ctx.ui.notify(`${COMMAND}: no HTTP MCP server named ${name}`, "error");
-          continue;
-        }
-        // Poll in the background so the session stays usable while the code waits for approval.
-        void signIn(server, ctx);
+      const eligible = [...available.values()].filter((s) => !usable(s));
+
+      const signedIn = await ctx.ui.custom<string[]>((tui, theme, keybindings, done) => {
+        const view = new DeviceLoginView(tui, theme, keybindings);
+        void (async () => {
+          let chosen: HttpServer[];
+          if (words.includes("all")) chosen = eligible;
+          else if (words.length) chosen = words.map((n) => available.get(n)!);
+          else {
+            const items: SelectItem[] = [];
+            if (eligible.length > 1) items.push({ value: ALL, label: "All servers", description: `${eligible.length} with a client ID` });
+            for (const server of available.values()) {
+              const problem = usable(server);
+              const status = problem ?? (hasTokens(authFile(), server.name, server.url) ? "signed in" : "not signed in");
+              items.push({ value: server.name, label: server.name, description: status });
+            }
+            if (!items.length) {
+              ctx.ui.notify("No HTTP MCP servers are configured", "warning");
+              return done([]);
+            }
+            const picked = await view.menu("MCP device sign-in", items, "Sign in with a code you approve on any device.");
+            if (!picked) return done([]);
+            chosen = picked === ALL ? eligible : [available.get(picked)!];
+          }
+          for (const server of chosen) {
+            const problem = usable(server);
+            if (problem) {
+              ctx.ui.notify(`${server.name}: ${problem}; device sign-in needs a pre-registered public client`, "error");
+              return done([]);
+            }
+          }
+          if (!chosen.length) return done([]);
+          done(await runSignIns(view, chosen));
+        })().catch((error) => {
+          ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+          done([]);
+        });
+        return view;
+      });
+
+      if (!signedIn?.length) return;
+      // Pi reconnects a server waiting for sign-in when its tokens change, but not one that failed (on
+      // a refused refresh, say), and extensions cannot reconnect a server. Reloading reconnects all.
+      if (ctx.isIdle()) {
+        ctx.ui.notify(`Signed in to ${signedIn.join(", ")}; reconnecting`, "info");
+        await ctx.reload();
+      } else {
+        ctx.ui.notify(`Signed in to ${signedIn.join(", ")}; run /reload after this turn to reconnect`, "info");
       }
     },
-  });
-
-  pi.on("session_shutdown", () => {
-    for (const controller of running.values()) controller.abort();
   });
 }

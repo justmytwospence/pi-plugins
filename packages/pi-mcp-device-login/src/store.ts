@@ -51,6 +51,16 @@ async function withFileLock<T>(file: string, fn: () => T): Promise<T> {
   }
 }
 
+/** Whether pi holds tokens for the server (they may still be expired or refused). */
+export function hasTokens(file: string, name: string, serverUrl: string): boolean {
+  try {
+    const states = JSON.parse(readFileSync(file, "utf-8"));
+    return Boolean(states?.[storeKey(name, serverUrl)]?.tokens?.access_token);
+  } catch {
+    return false;
+  }
+}
+
 export async function saveTokens(file: string, name: string, serverUrl: string, tokens: Tokens, now = Date.now()): Promise<void> {
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   if (!existsSync(file)) writeFileSync(file, "{}", { encoding: "utf-8", mode: 0o600 });
