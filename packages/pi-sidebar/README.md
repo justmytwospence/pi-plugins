@@ -66,7 +66,7 @@ While Sidebar has focus, your keys do what they do in main. They are resolved th
   - `app.interrupt` (Esc) stops Sidebar's answer.
   - `app.tools.expand` (Ctrl+O) expands tool output, and with pi-cc-render collapsed reasoning too, as in main.
   - `app.thinking.toggle` shows or hides reasoning.
-  - `app.clear` (Ctrl+C) clears the composer.
+  - `app.clear` (Ctrl+C) stops Sidebar's answer while it runs, as in Claude Code, and otherwise clears the composer.
   - `app.exit` (Ctrl+D) never quits Pi from Sidebar.
 
 How it looks:

@@ -256,7 +256,7 @@ describe("asking", () => {
     expect(panel.input.getText()).toBe("what now?");
   });
 
-  it("sends right away while main's cache is warm, and Esc stops a running answer", () => {
+  it("sends right away while main's cache is warm, and Esc or Ctrl+C stops a running answer", () => {
     const { controller, ctx } = setup();
     controller.main.bind(ctx as never);
     controller.main.request = { api: "anthropic-messages", provider: "anthropic", model: "claude-x", leafId: null, sentAt: Date.now(), payload: {} };
@@ -268,7 +268,9 @@ describe("asking", () => {
     expect(ask).toHaveBeenCalledWith("what now?", false);
     vi.spyOn(controller.agent, "busy", "get").mockReturnValue(true);
     panel.input.handleInput("\x1b");
-    expect(abort).toHaveBeenCalled();
+    expect(abort).toHaveBeenCalledTimes(1);
+    panel.input.handleInput("\x03"); // Ctrl+C stops it too, as in Claude Code
+    expect(abort).toHaveBeenCalledTimes(2);
   });
 
   it("runs skills and prompt templates in Sidebar, and refuses other commands", () => {

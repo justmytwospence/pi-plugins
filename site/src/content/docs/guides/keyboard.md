@@ -62,7 +62,7 @@ Suite additions:
 | `tui.input.tab` | Tab | Native completion; select-nav changes main-prompt routing below. |
 | `app.message.followUp` | Alt+Enter | Queue a follow-up instead of steering (Windows/WSL: Ctrl+Q). |
 | `app.message.dequeue` | Alt+Up | Restore queued messages to the editor (Windows/WSL: Alt+Q). |
-| `app.clear` | Ctrl+C | Clear the draft; a second press can exit. |
+| `app.clear` | Ctrl+C | Clear the draft; a second press can exit. With pi-clear-screen, stops a running turn instead, as in Claude Code. |
 | `app.exit` | Ctrl+D | Exit **when the main editor is empty**. |
 | `app.interrupt` | Escape | Interrupt/cancel when no local editor action consumes it. |
 | `app.editor.external` | Ctrl+G | Edit the prompt externally; search owns Ctrl+G while searching. |

@@ -1,7 +1,7 @@
 {
   "name": "@justmytwospence/pi-clear-screen",
   "version": "0.1.2",
-  "description": "ctrl+l clears pi's fullscreen transcript like a shell clears the screen, keeping history.",
+  "description": "ctrl+l clears pi's fullscreen transcript like a shell clears the screen, keeping history; ctrl+c stops a running turn.",
   "type": "module",
   "license": "MIT",
   "private": true,

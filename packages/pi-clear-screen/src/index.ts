@@ -14,6 +14,7 @@
 // mode the terminal owns scrollback, so ctrl+l just says so.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getKeybindings } from "@earendil-works/pi-tui";
+import { clearHandlerOf, routeCtrlC } from "./interrupt.ts";
 
 // setup runs before the replacement's session_start. Carry plain data, never stale APIs.
 type Selection = { provider: string; modelId: string; thinkingLevel: ExtensionContext["thinkingLevel"] };
@@ -25,6 +26,7 @@ const SENTINEL = "\u0000pi-clear-screen\u0000";
 type Comp = { render(width: number): string[]; invalidate?(): void; children?: Comp[] };
 type Tui = Comp & {
   children: Comp[];
+  getFocusedComponent?(): unknown;
   layoutRoot?: { entries?: { component: unknown }[] };
   scrollToBottom?(): void;
   requestRender(force?: boolean): void;
@@ -73,7 +75,11 @@ export default function (pi: ExtensionAPI) {
   let tui: Tui | undefined;
   let marker: ClearMarker | undefined;
   let release: (() => void) | undefined;
-  const cleanup = () => { release?.(); release = undefined; marker = undefined; tui = undefined; };
+  let stopKeys: (() => void) | undefined;
+  const cleanup = () => {
+    release?.(); release = undefined; marker = undefined; tui = undefined;
+    stopKeys?.(); stopKeys = undefined;
+  };
 
   pi.on("session_start", async (event, ctx) => {
     cleanup();
@@ -91,6 +97,13 @@ export default function (pi: ExtensionAPI) {
     }
     if (ctx.mode !== "tui") return;
     tui = grabTui(ctx);
+    // Ctrl+C interrupts a running turn (see interrupt.ts). The prompt editor has focus now.
+    let mainClear = clearHandlerOf(tui?.getFocusedComponent?.());
+    stopKeys = ctx.ui.onTerminalInput?.((data) => {
+      const focused = tui?.getFocusedComponent?.();
+      mainClear ??= clearHandlerOf(focused);
+      return routeCtrlC(data, focused, mainClear, !ctx.isIdle());
+    });
     if (getKeybindings().getKeys("app.model.select").includes(KEY)) {
       ctx.ui.notify('clear-screen: Ctrl+L conflicts with Pi model selection. Set "app.model.select": ["alt+p", "alt+m"] in keybindings.json, then reload.', "warning");
     }

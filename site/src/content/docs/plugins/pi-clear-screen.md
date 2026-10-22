@@ -8,7 +8,7 @@ plugin: pi-clear-screen
 
 - **Use it for:** Get a fresh fullscreen viewing area without discarding conversation history.
 - **Enable:** Select `packages/pi-clear-screen/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
-- **Controls:** Ctrl+L after remapping stock `app.model.select`; `/clear` starts a fresh session, `/exit` quits. No model tool.
+- **Controls:** Ctrl+L after remapping stock `app.model.select`; Ctrl+C stops a running turn; `/clear` starts a fresh session, `/exit` quits. No model tool.
 - **Settings:** No plugin settings; Ctrl+L fixed in source. Pi `tuiMode` must be fullscreen for view clearing.
 - **Requirements, cost & privacy:** Fullscreen/private layout hooks; no network, inference or external program. Clearing is not redaction or compaction.
 - **Integrations & limits:** Optional sticky-prompt horizon. Stock conflict skips the shortcut, not an automatic override. `/clear` changes context; Ctrl+L does not.
@@ -24,6 +24,10 @@ Entry: `packages/pi-clear-screen/src/index.ts`.
 Use [Install & select](/guides/install/) to enable the entry from the suite. Every suite entry loads by default, and all selected components use one Git pin. You do not need a separate package source for this feature.
 
 The extension provides Ctrl+L and the `/clear` and `/exit` commands, but no model-callable tool. Because nothing is submitted, clearing adds no entry to the prompt history, and the handler does not touch the editor: a half-written draft stays exactly as it was. Its behavior is intentionally close to clearing a shell's visible screen while retaining scrollback, but it operates on Pi's application-owned fullscreen transcript rather than issuing a general terminal scrollback-erasure command.
+
+## Ctrl+C stops a running turn
+
+As in Claude Code, Ctrl+C (your `app.clear` key) stops the agent while it works, exactly as Esc does, and leaves the draft alone. Stock Pi clears the draft instead, and a second press within half a second exits Pi, so a habitual Ctrl+C Ctrl+C would quit rather than stop. Idle, Ctrl+C keeps Pi's behavior. Pi reserves `app.clear`'s key from extension shortcuts, so this watches raw terminal input and acts only while main's prompt editor (Pi's own or a custom one such as pi-vim's) has focus; dialogs, pickers and [pi-sidebar](/plugins/pi-sidebar/) keep their own Ctrl+C.
 
 ## Session commands
 

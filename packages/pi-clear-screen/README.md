@@ -35,6 +35,9 @@ No `npm install` is needed to run it: the package.json has no `dependencies`; Pi
 | Key | Effect |
 |---|---|
 | `ctrl+l` | Clear the screen (keeps history; scroll up to see it) |
+| `ctrl+c` while the agent works | Stop the turn, as Esc does (Claude Code's Ctrl+C). Idle, Pi's own Ctrl+C is unchanged: clear the draft, a second press exits. |
+
+Ctrl+C is Pi's `app.clear` key, which extensions cannot bind, so the extension watches raw terminal input instead. It acts only while main's prompt editor has focus and the agent is busy; dialogs, pickers and pi-sidebar keep their own Ctrl+C. It follows your `app.clear` binding.
 
 ## Commands
 

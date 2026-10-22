@@ -283,7 +283,8 @@ class Composer implements Component, Focusable {
       }
     }
     // Main's own action keys, as you bound them, act on Sidebar.
-    if (keys.matches(data, "app.interrupt") && this.host.isBusy()) return this.host.abort();
+    // Ctrl+C (app.clear) stops a running answer too, as in Claude Code; idle, it clears the composer.
+    if ((keys.matches(data, "app.interrupt") || keys.matches(data, "app.clear")) && this.host.isBusy()) return this.host.abort();
     if (keys.matches(data, "app.tools.expand")) return this.panel.toggleExpanded();
     if (keys.matches(data, "app.thinking.toggle")) return this.panel.toggleThinking();
     if (!this.suite) {
