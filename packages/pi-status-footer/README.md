@@ -8,8 +8,8 @@ While the agent runs, it adds streamed-output and elapsed-time statistics to
 pi's own working indicator message, keeping pi's spinner. Every footer row
 leads with a dim Nerd Font icon: folder (project), git branch, robot
 (model) with a brain before the reasoning level, tachometer (context), book (marimo), cogs (background), archive
-(stash), and hourglass (limits). In the notices row, the MCP plug and the tool
-gate's shield mark their own notices; the first notice's icon leads the row, a
+(stash), and hourglass (limits). On the context row a plug marks MCP and a magic
+wand skills. In the notices row, the tool gate's shield marks its own notices; the first notice's icon leads the row, a
 bell otherwise. Without a Nerd Font they draw as placeholders;
 all labels and readings remain readable. Other status text is preserved.
 While a dialog holds `herdr:blocked`, the footer shrinks to one row (project, branch,
@@ -66,8 +66,10 @@ readings fresh; the working row is independent of the footer mode.
    editor without pi's border hooks keeps its borders, and the gauge stays in the
    footer. An extension that installs an editor without wrapping the previous one
    (pi-vim) must load before this one; pi-stash wraps, so its order is free.
-3. Other extensions' status notices, only when present, led by the MCP chip
-   (below) when pi's built-in MCP is in use. Notices wrap rather than
+   The rest of what fills the context follows on the same row: the MCP chip
+   (below) and the number of loaded skills. Being lowest priority, they are the
+   first to go when the row is narrow.
+3. Other extensions' status notices, only when present. Notices wrap rather than
    disappearing at the right edge. Existing task widgets are not duplicated.
 4. Provider/account limits explicitly labeled as percent **used**, with reset
    countdowns when supported. Last, since they are usually the longest rows.
@@ -121,7 +123,7 @@ With pi-bg enabled, a `bg_wait` message takes priority over these statistics thr
 ### MCP chip
 
 Pi's built-in MCP extension publishes no status: its connections are only
-visible in `/mcp`. The footer approximates them as `MCP 2/3` in the status
+visible in `/mcp`. The footer approximates them as `MCP 2/3` on the context
 row: servers whose tools (from `builtin:mcp`, exposure not `hidden`) are
 registered, over those plus the servers enabled in `mcp.json` (the user file,
 and the project's `.pi/mcp.json` when the project is trusted). A shortfall
@@ -130,7 +132,7 @@ its tools, a server with no tools is invisible, and needs-auth, failed and
 connecting are not told apart; `/mcp` remains the source of truth. The chip
 is absent when no built-in `/mcp` command exists, when another extension
 registers `/mcp`, and whenever any extension publishes an `mcp` status
-(pi-mcp-adapter), whose text is shown unchanged instead. Tools are reread
+(pi-mcp-adapter), whose text is shown unchanged in its place. Tools are reread
 from memory and `mcp.json` by modification time every five seconds, on
 `mcp_servers_change` and after each turn; rendering still reads nothing.
 `/status mcp off` disables it.

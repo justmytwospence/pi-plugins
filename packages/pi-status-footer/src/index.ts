@@ -862,29 +862,33 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   const cacheValue = cache.startsWith("cold") ? "❄" : cache;
   const ctxShort = `${theme.fg("muted", "Context")} ${ctxValue}`;
   const ctxLong = `${label("Context")}${ctxValue}${context === null ? "" : theme.fg("dim", " used")}${context === null || s.borderGauge ? "" : ` ${gauge(theme, context)}`}`;
+  // What fills the context besides the conversation: MCP servers (our chip, or the
+  // status of an extension that publishes its own, which already carries the plug)
+  // and loaded skills. Each keeps its icon inline.
+  const inline = (icon: string, text: string) => `${theme.fg("dim", icon)} ${text.replace(/[\r\n\t]/g, " ")}`;
+  const mcpStatus = statuses.find((status) => stripVTControlCharacters(status).startsWith(`${ICONS.mcp} `));
+  const mcpText = mcpStatus ? inline(ICONS.mcp, mcpStatus.replace(`${ICONS.mcp} `, "")) : s.mcp ? inline(ICONS.mcp, mcpChip(s.mcp, theme)) : "";
+  const skillsText = s.skills ? inline(ICONS.skills, `${theme.fg("muted", "Skills")} ${s.skills}`) : "";
   rows.push(row(ICONS.context, (w) => fitSegments([
     { text: ctxLong, short: ctxShort, priority: 100 },
     { text: s.lean ? theme.fg("muted", `Lean ${clean(s.lean)}`) : "", priority: 20 },
     // Green denotes a warm cache; ❄ (cold) means the next prompt re-caches the whole history.
     { text: cache ? `${theme.fg("muted", "Cache")} ${theme.fg(cache.startsWith("cold") ? "warning" : "success", cacheValue)}${cacheNote ? `${sep}${theme.fg("dim", cacheNote)}` : ""}` : "", priority: 30 },
+    { text: mcpText, priority: 25 },
+    { text: skillsText, priority: 15 },
   ], w, theme)));
   if (s.marimo) { const m = s.marimo; rows.push(row(ICONS.marimo, (w) => marimoRow(m, w, theme))); }
   if (s.lens) { const l = s.lens; rows.push(row(ICONS.lens, (w) => lensRow(l, w, theme))); }
   if (s.bg?.length) { const bg = s.bg; rows.push(row(ICONS.bg, (w) => bgRow(bg, w, theme))); }
   // Statuses remain owned by their publishers. Wrap instead of silently dropping
   // plan mode, background failures, or other extension notices at the right edge.
-  // Our own MCP chip sits first among them, in the same muted-label style as the
-  // companion notices; a shortfall of connected servers takes the warning color.
-  // Notices with an icon of their own (the MCP plug, the tool gate's shield)
-  // keep it inline; the first notice's icon becomes the row's, a bell otherwise.
-  // Wrapped lines are indented under the first.
-  const notices: { icon?: string; text: string }[] = s.mcp ? [{ icon: ICONS.mcp, text: mcpChip(s.mcp, theme) }] : [];
-  if (s.skills) notices.push({ icon: ICONS.skills, text: `${theme.fg("muted", "Skills")} ${s.skills}` });
+  // MCP sits on the context row (above). Notices with an icon of their own (the
+  // tool gate's shield) keep it inline; the first notice's icon becomes the row's,
+  // a bell otherwise. Wrapped lines are indented under the first.
+  const notices: { icon?: string; text: string }[] = [];
   for (const status of statuses) {
-    const plainStatus = stripVTControlCharacters(status);
-    // Pi's own MCP status already carries the plug (see above).
-    if (plainStatus.startsWith(`${ICONS.mcp} `)) notices.push({ icon: ICONS.mcp, text: status.replace(`${ICONS.mcp} `, "") });
-    else if (/^Gate /.test(plainStatus)) notices.push({ icon: ICONS.gate, text: status });
+    if (status === mcpStatus) continue;
+    if (/^Gate /.test(stripVTControlCharacters(status))) notices.push({ icon: ICONS.gate, text: status });
     else notices.push({ text: status });
   }
   if (notices.length) {

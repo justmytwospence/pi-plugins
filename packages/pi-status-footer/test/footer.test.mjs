@@ -1524,7 +1524,7 @@ test("MCP configuration: enabled entries from the user file and the trusted proj
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test("MCP chip: built-in servers in the status row, yielding to a published mcp status, project trust and /status mcp", async () => {
+test("MCP chip: built-in servers on the context row, yielding to a published mcp status, project trust and /status mcp", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "pi-footer-mcp-chip-"));
   const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = dir;
@@ -1534,42 +1534,44 @@ test("MCP chip: built-in servers in the status row, yielding to a published mcp 
   await writeFile(path.join(project, ".pi", "mcp.json"), JSON.stringify({ mcpServers: { local: {} } }));
   const h = host([], project);
   const tool = (namespace, exposure = "codemode") => ({ namespace: { name: namespace }, sourceInfo: { path: "builtin:mcp" }, exposure });
-  const statusRow = (width = 120) => h.footer.render(width).map(plain).find((row) => /MCP/.test(row)) ?? "";
+  const statusRow = (width = 120) => h.footer.render(width).map(plain).find((row) => /Context/.test(row)) ?? "";
   try {
     await h.handlers.get("session_start")({}, h.ctx);
     await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.equal(statusRow(), "", "no /mcp command: pi's built-in MCP is not loaded");
+    assert.doesNotMatch(statusRow(), /MCP/, "no /mcp command: pi's built-in MCP is not loaded");
     h.commandInfos.push({ name: "mcp", sourceInfo: { path: "builtin:mcp" } });
     await h.handlers.get("agent_settled")({}, h.ctx);
-    await vi.waitFor(() => assert.match(statusRow(), /^ \uf1e6 MCP 0\/2$/), "configured but nothing connected yet");
+    await vi.waitFor(() => assert.match(statusRow(), /Context .* \u00b7 \uf1e6 MCP 0\/2$/), "configured but nothing connected yet");
     h.tools.push(tool("mcp__docs"), tool("mcp__docs", "direct"), tool("mcp__my_db"), tool("mcp__hidden", "hidden"));
     await h.handlers.get("mcp_servers_change")({}, h.ctx);
-    await vi.waitFor(() => assert.match(statusRow(), /^ \uf1e6 MCP 2\/2$/));
+    await vi.waitFor(() => assert.match(statusRow(), /Context .* \u00b7 \uf1e6 MCP 2\/2$/));
     assert.equal(h.footer.render(120).filter((row) => /MCP/.test(row)).length, 1);
     for (let width = 1; width <= 240; width++) assert.ok(h.footer.render(width).every((row) => visibleWidth(row) <= width));
     h.trusted = true;
     await h.handlers.get("agent_settled")({}, h.ctx);
     await vi.waitFor(() => assert.match(statusRow(), /MCP 2\/3$/), "the trusted project's file adds its servers");
     h.statuses.set("plan", "PLAN mode");
-    assert.match(statusRow(), /^ \uf1e6 MCP 2\/3 \u00b7 PLAN mode$/, "the chip leads the status row and shares its separator");
+    assert.match(statusRow(), /Context .* \u00b7 \uf1e6 MCP 2\/3$/, "the chip stays on the context row");
+    assert.ok(h.footer.render(120).map(plain).some((row) => /^ \S+ PLAN mode$/.test(row)), "other statuses keep their own row");
     h.statuses.set("mcp", "\u{1f50c} MCP: 5 connected");
-    assert.equal(statusRow(), " \uf1e6 MCP: 5 connected \u00b7 PLAN mode", "another extension's mcp status replaces the chip");
+    assert.match(statusRow(), /Context .* \u00b7 \uf1e6 MCP: 5 connected$/, "another extension's mcp status replaces the chip");
+    assert.equal(h.footer.render(120).filter((row) => /MCP/.test(row)).length, 1);
     h.statuses.delete("mcp"); h.statuses.delete("plan");
     await h.commands.get("status").handler("mcp off", h.ctx);
-    assert.equal(statusRow(), "");
+    assert.doesNotMatch(statusRow(), /MCP/);
     assert.match(h.notices.at(-1), /MCP chip disabled/);
     assert.deepEqual(h.entries.at(-1).data, { enabled: true, showAll: false, working: true, mcp: false });
     await h.handlers.get("session_shutdown")({}, h.ctx);
     await h.handlers.get("session_start")({}, h.ctx);
     await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.equal(statusRow(), "", "the preference survives reload");
+    assert.doesNotMatch(statusRow(), /MCP/, "the preference survives reload");
     await h.commands.get("status").handler("details", h.ctx);
     assert.match(h.notices.at(-1), /MCP chip: off/);
     await h.commands.get("status").handler("mcp on", h.ctx);
     await vi.waitFor(() => assert.match(statusRow(), /MCP 2\/3$/));
     h.commandInfos.push({ name: "mcp", sourceInfo: { path: "/elsewhere/pi-mcp-adapter.ts" } });
     await h.handlers.get("agent_settled")({}, h.ctx);
-    await vi.waitFor(() => assert.equal(statusRow(), ""), "an extension that took over /mcp owns the chip");
+    await vi.waitFor(() => assert.doesNotMatch(statusRow(), /MCP/), "an extension that took over /mcp owns the chip");
   } finally {
     await h.handlers.get("session_shutdown")?.({}, h.ctx);
     if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
@@ -1579,15 +1581,17 @@ test("MCP chip: built-in servers in the status row, yielding to a published mcp 
 
 test("the MCP chip renders with the companion label style and warns on a shortfall", () => {
   const paint = { fg: (color, text) => `<${color}>${text}</${color}>`, bold: (text) => text };
-  const rows = (mcp, statuses = []) => mod.renderFooter({ ...fixture(), mcp, statuses }, 120, paint).map((row) => row.trim());
-  assert.ok(rows({ connected: 2, total: 2 }).includes("<dim>\uf1e6</dim> <muted>MCP</muted> 2/2"));
-  assert.ok(rows({ connected: 1, total: 3 }).includes("<dim>\uf1e6</dim> <muted>MCP</muted> <warning>1/3</warning>"));
-  assert.ok(rows({ connected: 1, total: 3 }, ["Gate off"]).includes("<dim>\uf1e6</dim> <muted>MCP</muted> <warning>1/3</warning><dim> \u00b7 </dim><dim>\uf510</dim> Gate off"));
-  assert.ok(!rows(undefined).some((row) => /MCP/.test(row)));
-  const withSkills = mod.renderFooter({ ...fixture(), mcp: { connected: 2, total: 2 }, skills: 7, statuses: ["Gate off"] }, 240, paint).map((row) => row.trim());
-  assert.ok(withSkills.includes("<dim>\uf1e6</dim> <muted>MCP</muted> 2/2<dim> \u00b7 </dim><dim>\uf0d0</dim> <muted>Skills</muted> 7<dim> \u00b7 </dim><dim>\uf510</dim> Gate off"));
-  assert.ok(mod.renderFooter({ ...fixture(), skills: 3 }, 120, paint).some((row) => row.trim() === "<dim>\uf0d0</dim> <muted>Skills</muted> 3"), "skills show without MCP");
-  assert.ok(!mod.renderFooter({ ...fixture(), skills: 0 }, 120, paint).some((row) => /Skills/.test(row)));
+  // Painted markup counts toward the width, hence the wide terminal.
+  const render = (extra) => mod.renderFooter({ ...fixture(), ...extra }, 300, paint).map((row) => row.trim());
+  const contextRow = (extra) => render(extra).find((row) => row.includes("<muted>Context</muted>")) ?? "";
+  assert.ok(contextRow({ mcp: { connected: 2, total: 2 } }).endsWith("<dim> \u00b7 </dim><dim>\uf1e6</dim> <muted>MCP</muted> 2/2"));
+  assert.ok(contextRow({ mcp: { connected: 1, total: 3 } }).endsWith("<dim> \u00b7 </dim><dim>\uf1e6</dim> <muted>MCP</muted> <warning>1/3</warning>"));
+  assert.ok(!render({}).some((row) => /MCP/.test(row)));
+  const withSkills = render({ mcp: { connected: 2, total: 2 }, skills: 7, statuses: ["Gate off"] });
+  assert.ok(withSkills.find((row) => row.includes("Context")).endsWith("<dim>\uf1e6</dim> <muted>MCP</muted> 2/2<dim> \u00b7 </dim><dim>\uf0d0</dim> <muted>Skills</muted> 7"));
+  assert.ok(withSkills.includes("<dim>\uf510</dim> Gate off"), "other notices keep their own row");
+  assert.ok(contextRow({ skills: 3 }).endsWith("<dim> \u00b7 </dim><dim>\uf0d0</dim> <muted>Skills</muted> 3"), "skills show without MCP");
+  assert.ok(!render({ skills: 0 }).some((row) => /Skills/.test(row)));
   for (const name of ["light", "dark"]) {
     for (let width = 1; width <= 240; width++) {
       assert.ok(mod.renderFooter({ ...fixture(), mcp: { connected: 1, total: 3 }, statuses: ["Gate off"] }, width, getThemeByName(name)).every((row) => visibleWidth(row) <= width));
