@@ -1,7 +1,7 @@
 // The heads-up note above main's editor, and its choices. A digit typed on its own into main's empty
 // editor answers it; nothing else is taken from the editor.
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { Markdown, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Markdown, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { HeadsUpNote } from "./protocol.ts";
 
 export const DISMISSED_MS = 20_000;
@@ -27,6 +27,9 @@ const CHOICES: Record<NotePhase, string> = {
   detail: "1: Understood   2: Ask main   3: Ask Sidebar   0: Dismiss",
   dismissed: "9: Turn off heads-up for this session",
 };
+
+/** The note's mark; pi-recap's line has `※ ` in the same place. */
+export const MARK = "✦ ";
 
 const KIND_LABEL: Record<HeadsUpNote["kind"], string> = {
   tradeoff: "tradeoff",
@@ -83,33 +86,41 @@ export class NoteState {
     return this.phase === "dismissed" && now >= this.until;
   }
 
-  lines(width: number, theme: Theme): string[] {
+  /**
+   * The note's lines, laid out like pi-recap's ` ※ recap: text` line so the two read as one family
+   * when both show: one column in, a mark, a lowercase label ending in a colon, the text hanging under
+   * the label, and the same wrap (the prose measure, or the width less the indent and one column).
+   * The note keeps the accent: it asks for an answer, the recap does not.
+   */
+  lines(width: number, theme: Theme, measure = 0): string[] {
     const note = this.note;
     if (!note || width < 4) return [];
-    // One column in, level with the transcript's text and the editor's (editorPaddingX: 1).
-    const indent = " ";
-    const inner = Math.max(1, width - indent.length);
+    const hang = " ".repeat(1 + visibleWidth(MARK));
+    let room = Math.max(1, width - hang.length - 1);
+    if (measure > 0 && room > measure) room = measure;
+    const fit = (line: string) => truncateToWidth(line, width);
+    const mark = theme.fg("accent", theme.bold(MARK));
     if (this.phase === "dismissed") {
-      return [truncateToWidth(theme.fg("dim", `${indent}Heads-up dismissed. ${CHOICES.dismissed}`), width)];
+      return [fit(` ${theme.fg("dim", `${theme.bold(MARK)}${theme.bold(`heads up dismissed: `)}${CHOICES.dismissed}`)}`)];
     }
-    const head = `${theme.fg("accent", "✦ Heads up")}${theme.fg("dim", ` · ${KIND_LABEL[note.kind]} · `)}`;
-    const out = wrapTextWithAnsi(`${head}${note.text}`, inner).map((line) => `${indent}${line}`);
+    const label = `${theme.fg("accent", theme.bold("heads up"))}${theme.fg("dim", ` · ${KIND_LABEL[note.kind]}: `)}`;
+    const out = wrapTextWithAnsi(`${label}${note.text}`, room).map((line, i) => `${i === 0 ? ` ${mark}` : hang}${line}`);
     if (this.phase === "detail" && note.detail) {
-      for (const line of wrapTextWithAnsi(note.detail, inner)) out.push(`${indent}${theme.fg("muted", line)}`);
+      for (const line of wrapTextWithAnsi(note.detail, room)) out.push(`${hang}${theme.fg("muted", line)}`);
     }
-    out.push(truncateToWidth(`${indent}${theme.fg("dim", CHOICES[this.phase])}`, width));
-    return out.map((line) => truncateToWidth(line, width));
+    out.push(`${hang}${theme.fg("dim", CHOICES[this.phase])}`);
+    return out.map(fit);
   }
 }
 
 /**
- * The width the chat's prose wraps at: pi-prose-width's measure when it is loaded and on (shared
- * on Markdown's prototype), else the full width.
+ * pi-prose-width's measure when it is loaded and on (shared on Markdown's prototype), else 0. Notes
+ * wrap their text at it, as pi-recap's line does.
  */
-export function chatWidth(width: number, proto: object = Markdown.prototype): number {
+export function proseMeasure(proto: object = Markdown.prototype): number {
   const state = (proto as Record<symbol, { active?: boolean; measure?: number } | undefined>)[Symbol.for("pi-prose-width")];
   const measure = state?.active ? state.measure : undefined;
-  return typeof measure === "number" && measure > 0 && measure < width ? measure : width;
+  return typeof measure === "number" && measure > 0 ? measure : 0;
 }
 
 /** Main's editor text that quotes a note, for the user to add a question and send to main. */

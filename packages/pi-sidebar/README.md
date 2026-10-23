@@ -146,10 +146,13 @@ Quiz mode turns Sidebar into a tutor for main's work. You switch it on when you 
 Heads-up mode watches main's longer runs for one thing you should know but might have missed. Examples are a tradeoff main chose without saying so, a result that looks off, or a risk in what it did. When a check finds one and Sidebar is open, the note arrives in Sidebar's thread. If Sidebar is answering at that moment, the note waits until the answer ends. Ask about it by typing in Sidebar, which knows what it raised, or type `/known` if you already knew it. With Sidebar closed, a short note appears above main's editor instead, and opening Sidebar moves it into Sidebar's thread. With notes set to show only in Sidebar (below), nothing appears above main's editor: a note found while Sidebar is closed goes into its thread and waits there.
 
 ```
-✦ Heads up · check this result · sum.py's "total" covers only north; it excludes every south row.
+✦ heads up · check this result: sum.py's "total" covers only north; it excludes every
+  south row.
   1: Learn more   2: Knew this already   0: Dismiss
 ```
 *Illustration, not a screenshot.*
+
+The note is laid out like pi-recap's `※ recap:` line (mark, lowercase label, text hanging under it, same wrap), so the two read as a pair when both show; the note keeps the accent color because it asks for an answer.
 
 It is on by default. `/sidebar headsup off` switches it off for the session, `/sidebar headsup on` switches it back on, and `/sidebar headsup sidebar` keeps it on with notes only in Sidebar. The setting is stored in main's session, so it follows `/tree` and comes back after resume and `/reload`. Set `PI_SIDEBAR_HEADSUP=0` to start every session with it off, or `PI_SIDEBAR_HEADSUP=sidebar` to start them with notes only in Sidebar.
 

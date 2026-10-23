@@ -10,7 +10,7 @@ import { git, repoRoot, type Git } from "../quiz/changes.ts";
 import { addRecent, knownTopics, markKnown, ProfileStore } from "../quiz/profile.ts";
 import { runCheck, type CheckResult, type StreamFn } from "./check.ts";
 import { HEADSUP_DEBUG_ENV, HEADSUP_ENTRY, HEADSUP_ENV, headsUpDefault, headsUpFromBranch, HeadsUpStats, headsUpWhereDefault, type HeadsUpEntry, type HeadsUpWhere } from "./mode.ts";
-import { chatWidth, NoteState, quoteForMain, askSidebar, DISMISSED_MS, type NoteAction } from "./note.ts";
+import { proseMeasure, NoteState, quoteForMain, askSidebar, DISMISSED_MS, type NoteAction } from "./note.ts";
 import type { HeadsUpNote } from "./protocol.ts";
 import { HeadsUpScheduler, type Trigger } from "./scheduler.ts";
 
@@ -246,7 +246,7 @@ export class HeadsUp {
         HEADSUP_WIDGET,
         (tui, theme) => {
           this.tui = tui;
-          return { render: (width: number) => this.note.lines(chatWidth(width), theme), invalidate() {} };
+          return { render: (width: number) => this.note.lines(width, theme, proseMeasure()), invalidate() {} };
         },
         { placement: "aboveEditor" },
       );

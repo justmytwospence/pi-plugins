@@ -7,7 +7,7 @@ import { MainState } from "../src/main-state.ts";
 import { runCheck } from "../src/headsup/check.ts";
 import { HeadsUp, headsUpChange } from "../src/headsup/headsup.ts";
 import { HEADSUP_ENTRY, headsUpDefault, headsUpFromBranch, HeadsUpStats, headsUpWhereDefault } from "../src/headsup/mode.ts";
-import { chatWidth, NoteState, quoteForMain } from "../src/headsup/note.ts";
+import { proseMeasure, NoteState, quoteForMain } from "../src/headsup/note.ts";
 import { parseHeadsUp } from "../src/headsup/protocol.ts";
 import { isNoteMarker, noteMessages } from "../src/headsup/thread.ts";
 import { HeadsUpScheduler } from "../src/headsup/scheduler.ts";
@@ -140,13 +140,28 @@ describe("heads-up note", () => {
   it("renders within the width", () => {
     const state = new NoteState();
     state.show({ ...note, text: "word ".repeat(40).trim() });
-    const theme = { fg: (_c: string, t: string) => t } as never;
+    const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t } as never;
     for (const width of [30, 46, 120]) {
       const lines = state.lines(width, theme);
-      expect(lines[0]).toContain("✦ Heads up");
-      expect(lines[lines.length - 1]).toContain("1: Learn more");
+      expect(lines[0]).toMatch(/^ ✦ heads up · risk: word/);
+      expect(lines[lines.length - 1]).toMatch(/^ {3}1: Learn more/);
       for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
     }
+  });
+
+  it("lays out like pi-recap's line: hanging indent and the same wrap", () => {
+    const state = new NoteState();
+    state.show({ ...note, text: "word ".repeat(40).trim() });
+    const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t } as never;
+    const lines = state.lines(70, theme, 40);
+    expect(lines.slice(1, -1).every((line) => line.startsWith("   word"))).toBe(true);
+    expect(Math.max(...lines.slice(0, -1).map(visibleWidth))).toBeLessThanOrEqual(3 + 40);
+    state.apply({ type: "expand" }, 0);
+    expect(state.lines(70, theme).at(-2)).toBe("   Why it matters.");
+    state.apply({ type: "dismiss" }, 0);
+    state.show(note);
+    state.apply({ type: "dismiss" }, 0);
+    expect(state.lines(120, theme)).toEqual([" ✦ heads up dismissed: 9: Turn off heads-up for this session"]);
   });
 
   it("quotes the note for main", () => {
@@ -367,13 +382,12 @@ describe("a note in Sidebar's thread", () => {
   });
 });
 
-describe("chatWidth", () => {
+describe("proseMeasure", () => {
   const KEY = Symbol.for("pi-prose-width");
-  it("wraps at pi-prose-width's measure when it is on, else the full width", () => {
-    expect(chatWidth(120, {})).toBe(120);
-    expect(chatWidth(120, { [KEY]: { active: true, measure: 80 } })).toBe(80);
-    expect(chatWidth(60, { [KEY]: { active: true, measure: 80 } })).toBe(60);
-    expect(chatWidth(120, { [KEY]: { active: true, measure: 0 } })).toBe(120);
-    expect(chatWidth(120, { [KEY]: { active: false, measure: 80 } })).toBe(120);
+  it("is pi-prose-width's measure when it is on, else 0", () => {
+    expect(proseMeasure({})).toBe(0);
+    expect(proseMeasure({ [KEY]: { active: true, measure: 80 } })).toBe(80);
+    expect(proseMeasure({ [KEY]: { active: true, measure: 0 } })).toBe(0);
+    expect(proseMeasure({ [KEY]: { active: false, measure: 80 } })).toBe(0);
   });
 });
