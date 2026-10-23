@@ -5,6 +5,7 @@ export const groups = [
     { name: "pi-todo", label: "Logical tasks", description: "A persistent checklist with status, dependencies and a compact live widget." },
     { name: "pi-subagents", label: "Subagents", description: "Separate Pi processes, parallel tasks and conversations you can inspect." },
     { name: "pi-herdr", label: "Herdr", description: "Pane metadata, interactive children and a shared event-bus bridge." },
+    { name: "pi-recap", label: "Recap", description: "One line on where the session stands when you come back, matching the notification." },
     { name: "pi-marimo", label: "Notebooks", description: "Live notebook state alongside your conversation, without taking over the kernel." },
     { name: "pi-sidebar", label: "Sidebar", description: "A live, read-only side chat beside the main session, served from its prompt cache." },
     { name: "pi-mcp-device-login", label: "MCP device sign-in", description: "Sign in to OAuth MCP servers with a code when the browser is on another machine." },

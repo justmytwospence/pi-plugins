@@ -1,0 +1,47 @@
+{
+  "name": "@justmytwospence/pi-recap",
+  "version": "0.1.2",
+  "description": "A one-line recap of where the session stands, above the editor after you have been away, and the same line as the turn notification (pi-herdr).",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "recap"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "check": "npm run typecheck && npm test",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "typebox": "*"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/justmytwospence/pi-plugins",
+    "directory": "packages/pi-recap"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.2.0",
+    "@earendil-works/pi-tui": "1.2.0",
+    "@types/node": "^22.20.4",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.2"
+  },
+  "homepage": "https://pi-plugins.vercel.app/plugins/pi-recap/",
+  "bugs": {
+    "url": "https://github.com/justmytwospence/pi-plugins/issues"
+  }
+}

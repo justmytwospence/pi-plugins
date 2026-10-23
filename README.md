@@ -16,6 +16,7 @@ All 29 references include activation, controls, defaults, requirements, costs an
 | [pi-todo](https://pi-plugins.vercel.app/plugins/pi-todo/) | Track logical tasks and dependencies in a persistent checklist. |
 | [pi-subagents](https://pi-plugins.vercel.app/plugins/pi-subagents/) | Delegate bounded tasks to headless Pi workers. |
 | [pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/) | Coordinate interactive handoffs and Herdr pane metadata. |
+| [pi-recap](https://pi-plugins.vercel.app/plugins/pi-recap/) | See where a session stands when you come back to it. |
 | [pi-marimo](https://pi-plugins.vercel.app/plugins/pi-marimo/) | Follow notebook state and running cells alongside the chat. |
 | [pi-sidebar](https://pi-plugins.vercel.app/plugins/pi-sidebar/) | Chat read-only beside a working session, on its prompt cache. |
 | [pi-mcp-device-login](https://pi-plugins.vercel.app/plugins/pi-mcp-device-login/) | Sign in to OAuth MCP servers with a code, no localhost redirect. |
