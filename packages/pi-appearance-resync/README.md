@@ -32,7 +32,7 @@ No `npm install` is needed to run it: the package.json has no `dependencies`; Pi
 
 With `"theme": "light/dark"`, Pi follows the terminal through mode 2031: when the terminal sends a light/dark report (`CSI ? 997 ; 1 n` for dark or `CSI ? 997 ; 2 n` for light), Pi queries the terminal's colors at once, and the reported background decides which theme it uses.
 
-Herdr 0.9.3 forwards that report to its panes before it has fetched the new colors from the host terminal ([herdrdev/herdr#4183](https://github.com/herdrdev/herdr/issues/4183)). Pi's query gets the old background, so Pi stays one switch behind: light while the system is dark, and the reverse.
+Herdr 0.9.3 forwards that report to its panes before it has fetched the new colors from the host terminal ([herdrdev/herdr#4183](https://github.com/herdrdev/herdr/issues/4183)). Pi's query gets the old background, so Pi stays one switch behind: light while the system is dark, and the reverse. Herdr fixed this after 0.9.5 ([herdrdev/herdr#5517](https://github.com/herdrdev/herdr/pull/5517)).
 
 ## How it works
 
@@ -42,18 +42,22 @@ When the terminal reports an appearance change, the extension replays the same r
 
 It uses only the escape sequences the terminal already speaks. Where the first answer was already right, the replays find the same colors and Pi changes nothing. It has no effect when the multiplexer forwards no reports at all.
 
+## Standing down on a fixed Herdr
+
+Inside Herdr (`HERDR_ENV=1` or `TERM_PROGRAM=herdr`) the extension asks the running server for its version with `herdr status server` (through `HERDR_BIN_PATH` when set): once at start, then again after each appearance report, so an update handed off to a live session counts from the next switch. Until the first answer it goes by the version Herdr gave the pane (`TERM_PROGRAM_VERSION`). On a server newer than 0.9.5 it lets reports through without replaying them. Up to 0.9.5, including preview builds (which report 0.9.5 whether or not they carry the fix), when the version cannot be read, and outside Herdr, it keeps replaying. A failed read keeps the previous verdict.
+
 ## Configuration
 
 No settings. Set `PI_APPEARANCE_RESYNC_LOG=/path/to/file` to append a log of reports and replays (timestamp, process ID, message) to that file. Logging is best effort.
 
 ## Requirements and costs
 
-Nothing external. It writes only the optional log file named by `PI_APPEARANCE_RESYNC_LOG`.
+Nothing external. Inside Herdr it runs `herdr status server` at start and after each appearance report. It writes only the optional log file named by `PI_APPEARANCE_RESYNC_LOG`.
 
 ## Limitations
 
 - Pi's extension API has no appearance hooks. The extension uses two pi-tui TUI methods outside that API, `onTerminalColorSchemeChange` and `consumeTerminalColorSchemeReport`. If a Pi release removes either, the extension does nothing rather than fail (and logs "pi-tui lacks the color scheme hooks; doing nothing" when logging is on).
-- It is a workaround: remove it once Herdr sends the report after the new colors.
+- It is a workaround. On Herdr newer than 0.9.5 it already does nothing; remove it once no machine runs an older Herdr.
 
 ## Development
 

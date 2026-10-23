@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { type Scheme, type SchemeSource, type Timers, isSchemeSource, resync, schemeReport } from "../src/index.ts";
+import { type Scheme, type SchemeSource, type Timers, herdrNeedsResync, isSchemeSource, parseServerVersion, resync, ResyncNeed, schemeReport } from "../src/index.ts";
 
 /** A TUI stand-in that, like pi-tui, hands consumed reports to every listener. */
 function fakeTui() {
@@ -107,4 +107,50 @@ test("isSchemeSource requires both hooks", () => {
   expect(isSchemeSource(fakeTui().source)).toBe(true);
   expect(isSchemeSource({ onTerminalColorSchemeChange: () => () => {} })).toBe(false);
   expect(isSchemeSource(undefined)).toBe(false);
+});
+
+describe("standing down once Herdr is fixed", () => {
+  test("Herdr versions up to 0.9.5 need the replays, later ones do not", () => {
+    for (const v of ["0.9.3", "0.9.5", "v0.9.5", "0.8.12", "0.9.5-preview.1", undefined, "", "garbage"]) expect(herdrNeedsResync(v)).toBe(true);
+    for (const v of ["0.9.6", "0.10.0", "1.0.0", "0.9.6-preview.2"]) expect(herdrNeedsResync(v)).toBe(false);
+  });
+
+  test("reads the running server's version from herdr status", () => {
+    expect(parseServerVersion("status: running\nversion: 0.9.3\nendpoint_compatible: yes\n")).toBe("0.9.3");
+    expect(parseServerVersion("status: stopped\n")).toBeUndefined();
+  });
+
+  test("follows the running server, keeps the last verdict on a failed read, and ignores non-Herdr terminals", async () => {
+    let version: string | undefined = "0.9.5";
+    const need = new ResyncNeed({ HERDR_ENV: "1", TERM_PROGRAM: "herdr", TERM_PROGRAM_VERSION: "0.9.6" }, async () => version);
+    expect(need.get()).toBe(false); // the pane's version, until the server answers
+    await need.refresh();
+    expect(need.get()).toBe(true); // an older server than the pane claims
+    version = "0.9.6";
+    await need.refresh();
+    expect(need.get()).toBe(false);
+    version = undefined;
+    await need.refresh();
+    expect(need.get()).toBe(false);
+    const outside = new ResyncNeed({ TERM_PROGRAM: "ghostty" }, async () => "0.9.6");
+    await outside.refresh();
+    expect(outside.get()).toBe(true);
+  });
+
+  test("skips the replays while not needed, and asks for a refresh on every report", () => {
+    const tui = fakeTui();
+    const clock = fakeTimers();
+    let needed = false;
+    let refreshes = 0;
+    resync(tui.source, { delays: [250], timers: clock.timers, needed: () => needed, reported: () => refreshes++ });
+    tui.report("dark");
+    clock.advance(1000);
+    expect(tui.consumed).toEqual([]);
+    expect(refreshes).toBe(1);
+    needed = true;
+    tui.report("light");
+    clock.advance(1000);
+    expect(tui.consumed).toEqual(["\x1b[?997;2n"]);
+    expect(refreshes).toBe(2);
+  });
 });

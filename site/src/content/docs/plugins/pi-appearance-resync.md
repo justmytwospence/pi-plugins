@@ -23,11 +23,11 @@ Entry: `packages/pi-appearance-resync/src/index.ts`.
 
 Follow [Install & select](/guides/install/) to select this entry from the suite. The suite loads every entry by default; selected entries share one Git pin, rather than separate component versions.
 
-The package README identifies the notification-ordering problem in Herdr 0.9.3. That is the documented motivating case, not a claim that every later Herdr version needs this workaround or that every other multiplexer has been tested. The extension itself does not require a Herdr environment flag.
+The package README identifies the notification-ordering problem in Herdr up to 0.9.5, fixed after it ([herdrdev/herdr#5517](https://github.com/herdrdev/herdr/pull/5517)). Inside Herdr the extension reads the running server's version (`herdr status server`, at start and after each appearance report) and stops replaying on anything newer than 0.9.5, so it cuts over by itself when Herdr updates. Outside Herdr, or when the version cannot be read, it keeps replaying; other multiplexers have not been tested.
 
 ## Requirements and costs
 
-This is a local terminal-UI adjustment. It makes no model or classifier requests, needs no API credentials, and has no paid service requirement. There is no external executable to install for the extension itself. Its work consists of listening for appearance reports and scheduling delayed replays inside the running Pi process.
+This is a local terminal-UI adjustment. It makes no model or classifier requests, needs no API credentials, and has no paid service requirement. There is no external executable to install for the extension itself; inside Herdr it runs the `herdr` CLI it finds there to read the server's version. Its work consists of listening for appearance reports and scheduling delayed replays inside the running Pi process.
 
 For the intended automatic switching behavior, configure Pi to use its `light/dark` theme setting. Merge this field into your Pi settings rather than replacing unrelated configuration:
 
