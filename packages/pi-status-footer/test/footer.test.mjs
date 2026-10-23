@@ -902,7 +902,7 @@ function savedLifecycleCallbacks(f) {
   };
 }
 
-for (const fault of ["dispose", "footer", "getEditor", "setEditor", "all"]) {
+for (const fault of ["dispose", "footer", "all"]) {
   test(`shutdown completes remaining cleanup after ${fault} errors and leaves saved callbacks inert`, async () => {
     await withLifecycleHost(async (f) => {
       const { h, intervals, timeouts, steps, failures, aborted, killed } = f;
@@ -910,11 +910,10 @@ for (const fault of ["dispose", "footer", "getEditor", "setEditor", "all"]) {
       h.handlers.get("session_start")({}, old.ctx);
       const invokeSaved = savedLifecycleCallbacks(f);
       assert.equal(intervals.size, 2); assert.equal(timeouts.size, 1);
-      const failing = fault === "all" ? ["abort", "child", "dispose", "footer", "setEditor"] : [fault];
+      const failing = fault === "all" ? ["abort", "child", "dispose", "footer"] : [fault];
       for (const step of failing) failures.set(step, new Error(`${step} failed`));
       steps.length = 0;
-      const expectedSteps = ["interval", "interval", "timeout", "abort", "child", "child", "child", "dispose", "footer", "getEditor"];
-      if (fault !== "getEditor") expectedSteps.push("setEditor");
+      const expectedSteps = ["interval", "interval", "timeout", "abort", "child", "child", "child", "dispose", "footer"];
       const expectedErrors = expectedSteps.filter((step) => failures.has(step)).map((step) => failures.get(step));
       assert.throws(() => h.handlers.get("session_shutdown")({}, old.ctx), (error) => {
         if (expectedErrors.length === 1) assert.equal(error, expectedErrors[0]);
@@ -924,7 +923,7 @@ for (const fault of ["dispose", "footer", "getEditor", "setEditor", "all"]) {
       assert.deepEqual(steps, expectedSteps, "timers cancel before every fallible cleanup attempt");
       assert.equal(intervals.size, 0); assert.equal(timeouts.size, 0);
       assert.equal(aborted.size, 1); assert.equal(killed.size, 3);
-      if (!["getEditor", "setEditor", "all"].includes(fault)) assert.equal(h.editorFactory, f.originalEditor);
+
       old.state.valid = false;
       steps.length = 0;
       const reads = old.state.reads, paints = h.paints;
@@ -972,10 +971,36 @@ for (const invalidated of [false, true]) {
       f.failures.clear();
       f.h.handlers.get("session_shutdown")({}, fresh.ctx);
       assert.equal(f.intervals.size, 0); assert.equal(f.timeouts.size, 0);
-      assert.equal(f.h.footer, undefined); assert.equal(f.h.editorFactory, f.originalEditor);
+      assert.equal(f.h.footer, undefined);
     });
   });
 }
+
+// Pi resets the editor after session_shutdown. Restoring the wrapped factory
+// there made Pi build an editor from it at once, after its owners had shut down
+// (pi-vim threw "session is no longer active" on every /clear).
+test("shutdown leaves the editor component alone and the next start does not stack wrappers", async () => {
+  await withLifecycleHost(async (f) => {
+    let built = 0;
+    f.h.editorFactory = () => { built++; return f.originalEditor(); };
+    const inner = f.h.editorFactory;
+    const old = f.newContext();
+    f.h.handlers.get("session_start")({}, old.ctx);
+    const wrapper = f.h.editorFactory;
+    assert.notEqual(wrapper, inner);
+    f.steps.length = 0;
+    f.h.handlers.get("session_shutdown")({}, old.ctx);
+    assert.ok(!f.steps.includes("getEditor") && !f.steps.includes("setEditor"), "shutdown does not touch the editor");
+    assert.equal(f.h.editorFactory, wrapper);
+    assert.equal(built, 0, "no editor is built from the outgoing factories");
+    old.state.valid = false;
+    const fresh = f.newContext();
+    f.h.handlers.get("session_start")({}, fresh.ctx);
+    const editor = f.h.editorFactory({ requestRender() {} }, { borderColor: (text) => text }, { matches: () => false });
+    assert.equal(built, 1, "the fresh wrapper calls the original factory once, not a stale wrapper");
+    assert.ok(editor);
+  });
+});
 
 test("a saved editor wrapper never invokes a foreign factory bound to an invalidated context", async () => {
   await withLifecycleHost(async (f) => {
@@ -1036,7 +1061,7 @@ test("normal repeated shutdown and reload leave fresh timers and no stale callba
       saved.push(savedLifecycleCallbacks(f));
       f.h.handlers.get("session_shutdown")({}, current.ctx);
       assert.equal(f.intervals.size, 0); assert.equal(f.timeouts.size, 0);
-      assert.equal(f.h.footer, undefined); assert.equal(f.h.editorFactory, f.originalEditor);
+      assert.equal(f.h.footer, undefined);
       current.state.valid = false;
       const stoppedReads = current.state.reads, stoppedPaints = f.h.paints;
       assert.doesNotThrow(() => f.h.handlers.get("session_shutdown")({}, current.ctx));

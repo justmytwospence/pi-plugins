@@ -1352,7 +1352,11 @@ export default function statusFooter(pi: ExtensionAPI): void {
     };
     context.ui.setEditorComponent(factory);
   };
-  const stop = () => {
+  // `restoreEditor` is false on session_shutdown: Pi resets the editor itself
+  // once the session ends, and putting back the previous factory would make Pi
+  // build an editor from it at once, after its owners (pi-vim, pi-stash) have
+  // already shut down. The next start unwraps our stale wrapper anyway.
+  const stop = (restoreEditor = true) => {
     // Invalidate and detach everything locally before any cleanup can throw or
     // re-enter us. Saved callbacks must stay inert even after another start.
     const context = ctx, interval = timer, timeout = codexTimeout, controller = codexAbort;
@@ -1379,7 +1383,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     // Own disposal too: setFooter may throw before Pi calls dispose().
     if (footer) cleanup(footer);
     if (context) cleanup(() => context.ui.setFooter(undefined));
-    if (editor) cleanup(editor);
+    if (editor && restoreEditor) cleanup(editor);
     if (errors.length === 1) throw errors[0];
     if (errors.length > 1) throw new AggregateError(errors, "Status footer cleanup failed");
   };
@@ -1420,7 +1424,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
   // Back to pi's idle text at once: no completion message lingers between turns.
   pi.on("turn_end", () => { if (active) endTurn(); });
   pi.on("agent_end", () => { if (active) endRun(); });
-  pi.on("session_shutdown", stop);
+  pi.on("session_shutdown", () => stop(false));
   pi.on("model_select", (_event, context) => {
     if (!active) return;
     // Codex limits are per account, not per model; keep them across switches.
