@@ -6,6 +6,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { CURSOR_MARKER } from "@earendil-works/pi-tui";
 import installPiVim, {
   DUPLICATE_WARNING,
@@ -218,6 +219,18 @@ describe("editor factory protocol", () => {
     const live = installed.request().factory!;
     await installed.shutdown();
     assert.throws(() => live({ surface: "embedded", tui: stubTui, theme: stubTheme, keybindings: stubKeybindings }), /no longer active/);
+  });
+
+  // Another extension restoring the main factory after shutdown makes Pi build
+  // an editor from it at once; that must not throw.
+  it("falls back to Pi's plain editor from a stale main factory", async () => {
+    const installed = await started();
+    const main = installed.editorFactory();
+    assert.ok(EDITOR_SURFACE in main(stubTui, stubTheme, stubKeybindings));
+    await installed.shutdown();
+    const stale = main(stubTui, stubTheme, stubKeybindings);
+    assert.ok(stale instanceof CustomEditor);
+    assert.ok(!(EDITOR_SURFACE in stale));
   });
 
   it("does not install or answer in non-TUI modes", async () => {

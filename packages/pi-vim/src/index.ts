@@ -8,9 +8,10 @@
  * `pi-plugins.editor-factory.v1` provider and a once-per-process diagnostic
  * when the standalone pi-vim package is loaded next to this one.
  */
-import type {
-  ExtensionAPI,
-  ExtensionContext,
+import {
+  CustomEditor,
+  type ExtensionAPI,
+  type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import {
   EDITOR_FACTORY_CHANNEL,
@@ -234,8 +235,13 @@ export default function piVim(pi: ExtensionAPI) {
       warnDuplicate(ctx);
     }
     const current = session;
+    // Pi builds an editor whenever a factory is (re)installed, including when
+    // another extension restores this one after shutdown. A stale main factory
+    // falls back to Pi's plain editor instead of throwing.
     ctx.ui.setEditorComponent((tui, theme, keybindings) =>
-      createEditor(current, { surface: "main", tui, theme, keybindings }),
+      session === current
+        ? createEditor(current, { surface: "main", tui, theme, keybindings })
+        : new CustomEditor(tui, theme, keybindings),
     );
   });
 
