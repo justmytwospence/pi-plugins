@@ -451,6 +451,9 @@ test("a stashed prompt gets its own row under the editor, with a preview when re
   // Narrow: the preview shrinks, then goes, then the hint shortens; the label stays.
   assert.match(plain(mod.renderFooter(s, 60, theme)[0]), /^ \uf187 Stashed \u00b7 "refactor the [^"]*\u2026" \+2 lines \u00b7 ctrl\+s to restore$/);
   assert.equal(plain(mod.renderFooter(s, 20, theme)[0]), "\uf187 Stashed \u00b7 ctrl+s");
+  // A long first line is only cut where the terminal runs out, not at a fixed cap.
+  const long = "x".repeat(100);
+  assert.equal(plain(mod.renderFooter({ ...s, stash: { text: long } }, 160, theme)[0]), ` \uf187 Stashed \u00b7 "${long}" \u00b7 ctrl+s to restore`);
   for (let width = 1; width <= 160; width++) assert.ok(mod.renderFooter(s, width, theme).every((row) => visibleWidth(row) <= width));
   // pi-stash's internals unreadable: still a row, just without the preview.
   assert.equal(plain(mod.renderFooter({ ...s, stash: {} }, 120, theme)[0]), " \uf187 Stashed \u00b7 ctrl+s to restore");

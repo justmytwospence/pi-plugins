@@ -677,8 +677,8 @@ function stashRow(text: string | undefined, width: number, theme: Paint): string
   const more = lines.length > 1 ? ` +${lines.length - 1} line${lines.length === 2 ? "" : "s"}` : "";
   const label = theme.fg("muted", "Stashed");
   const hint = "ctrl+s to restore";
-  // The preview gets what the label, line count and hint leave, up to 60 cells.
-  const room = Math.min(60, width - visibleWidth(`${label} · ""${more} · ${hint}`));
+  // The preview gets whatever the label, line count and hint leave.
+  const room = width - visibleWidth(`${label} · ""${more} · ${hint}`);
   // Truncate the already-plain line ourselves: truncateToWidth's reset before
   // the ellipsis would end the dim color early.
   const first = lines[0] ?? "";
