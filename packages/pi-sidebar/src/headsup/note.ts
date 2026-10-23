@@ -86,13 +86,14 @@ export class NoteState {
   lines(width: number, theme: Theme): string[] {
     const note = this.note;
     if (!note || width < 4) return [];
-    const indent = "  ";
+    // One column in, level with the transcript's text and the editor's (editorPaddingX: 1).
+    const indent = " ";
     const inner = Math.max(1, width - indent.length);
     if (this.phase === "dismissed") {
       return [truncateToWidth(theme.fg("dim", `${indent}Heads-up dismissed. ${CHOICES.dismissed}`), width)];
     }
     const head = `${theme.fg("accent", "✦ Heads up")}${theme.fg("dim", ` · ${KIND_LABEL[note.kind]} · `)}`;
-    const out = wrapTextWithAnsi(`${head}${note.text}`, inner).map((line, i) => (i === 0 ? line : `${indent}${line}`));
+    const out = wrapTextWithAnsi(`${head}${note.text}`, inner).map((line) => `${indent}${line}`);
     if (this.phase === "detail" && note.detail) {
       for (const line of wrapTextWithAnsi(note.detail, inner)) out.push(`${indent}${theme.fg("muted", line)}`);
     }
