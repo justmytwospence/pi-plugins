@@ -11,7 +11,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { type Component, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION, type ActivityEntry, type ActivitySection, FLEET_HOST_PRIORITY, hostOutranks, readHost } from "./activity.ts";
 import { type AgentDef, discoverAgents } from "./agents.ts";
@@ -27,7 +27,7 @@ import { type Run, displayTokens, transcriptPath } from "./run.ts";
 import { clip, recentTexts } from "./transcript.ts";
 import { FleetView, SUCCESS_HINT_MS } from "./ui/fleet.ts";
 import { type ViewerActions, openViewer } from "./ui/viewer.ts";
-import { elapsedMs, formatCount, formatElapsed } from "./ui/format.ts";
+import { elapsedMs, formatCount, formatElapsed, shortModel } from "./ui/format.ts";
 import { RunsWidget, WIDGET_MODES, type WidgetMode } from "./ui/widget.ts";
 
 export interface SubagentsConfig extends Record<string, unknown> {
@@ -962,16 +962,26 @@ export default function subagents(pi: ExtensionAPI) {
       const icon = (s: RunView["status"]) =>
         s === "running" ? theme.fg("warning", "●") : s === "done" ? theme.fg("success", "✓") : s === "stopped" ? theme.fg("muted", "■") : theme.fg("error", "✗");
       const jev = (on: boolean) => (on ? theme.fg("dim", " (Jev)") : "");
-      const lines: string[] = [];
+      const sep = theme.fg("muted", " · ");
+      const flat = (text: string) => text.replace(/\s+/gu, " ").trim();
+      // Every run is exactly two clipped rows, so the block never changes height or reflows
+      // while runs progress: identity left and stats flush right, then what the run is doing
+      // (or ended with) below. Only expanded output wraps.
+      const rows: Row[] = [];
       for (const r of d.runs) {
-        lines.push(
-          `${icon(r.status)} ${theme.fg("accent", runLabel(r))} ${theme.fg("muted", `· ${r.agent}`)}${jev(r.byJev.agent)} ${theme.fg("muted", "·")} ${r.model}${jev(r.byJev.model)} ${theme.fg("muted", "·")} ${r.thinking}${jev(r.byJev.thinking)} ${theme.fg("dim", `· ${r.seconds}s · ${r.turns} turns${r.cost ? ` · $${r.cost.toFixed(3)}` : ""} · ${r.id}`)}`,
-        );
-        if (r.status === "running" && r.activity) lines.push(`  ${theme.fg("dim", r.activity)}`);
-        if (r.error) lines.push(`  ${theme.fg("error", clip(r.error, 200))}`);
-        if (expanded && r.output) for (const line of r.output.split("\n").slice(0, 40)) lines.push(`  ${line}`);
+        rows.push({
+          left: `${icon(r.status)} ${theme.fg("accent", runLabel(r))}${sep}${r.agent}${jev(r.byJev.agent)}${sep}${shortModel(r.model)}${jev(r.byJev.model)}${sep}${r.thinking}${jev(r.byJev.thinking)}`,
+          right: [formatElapsed(r.seconds * 1000), `${r.turns} turns`, ...(r.cost ? [`$${r.cost.toFixed(3)}`] : []), r.id],
+        });
+        const detail = r.error
+          ? theme.fg("error", flat(r.error))
+          : r.status === "running"
+            ? theme.fg("dim", flat(r.activity ?? "starting…"))
+            : theme.fg("dim", flat(r.output?.split("\n").find((l) => l.trim()) ?? r.task));
+        rows.push({ left: `  ${theme.fg("muted", "└")} ${detail}` });
+        if (expanded && r.output) for (const line of r.output.split("\n").slice(0, 40)) rows.push({ left: `    ${line}`, wrap: true });
       }
-      return new Text(lines.join("\n"), 0, 0);
+      return new RowsText(rows, (text) => theme.fg("dim", text));
     },
   });
 
@@ -1025,4 +1035,33 @@ export default function subagents(pi: ExtensionAPI) {
       }
     },
   });
+}
+
+type Row = { left: string; right?: string[]; wrap?: boolean };
+
+/** Tool-result rows, clipped to the width (stats kept flush right) unless marked to wrap. */
+class RowsText implements Component {
+  constructor(
+    private readonly rows: Row[],
+    private readonly dim: (text: string) => string = (text) => text,
+  ) {}
+  invalidate(): void {}
+  render(width: number): string[] {
+    const w = Math.max(1, width);
+    return this.rows.flatMap((r) => (r.wrap ? wrapTextWithAnsi(r.left, w) : [this.line(r.left, r.right, w)]));
+  }
+
+  /** Stats flush right; on a narrow row they drop whole trailing parts (id, cost, ...) so the identity keeps most of it. */
+  private line(left: string, right: string[] | undefined, w: number): string {
+    if (!right?.length) return truncateToWidth(left, w, "…");
+    const lw = visibleWidth(left);
+    const want = Math.min(lw, Math.ceil(w * 0.6));
+    let parts = right;
+    while (parts.length && visibleWidth(parts.join(" · ")) + 2 + want > w) parts = parts.slice(0, -1);
+    if (!parts.length) return truncateToWidth(left, w, "…");
+    const stats = this.dim(parts.join(" · "));
+    const sw = visibleWidth(stats);
+    const kept = truncateToWidth(left, w - sw - 2, "…");
+    return kept + " ".repeat(Math.max(2, w - visibleWidth(kept) - sw)) + stats;
+  }
 }
