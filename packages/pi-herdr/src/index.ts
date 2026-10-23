@@ -13,6 +13,8 @@
 // - `pr` space token: the branch's pull request (pr.ts).
 // - Tool calls get a one-line `intent` that herdr-web-ui's chat shows on their row (intent.ts).
 // - `summary` pane token: what the last turn did or what a dialog waits on, for alerts (summary.ts).
+//   With pi-recap loaded, a settled turn's line is pi-recap's recap (asked for over
+//   `recap:summary { reply(promise) }`), so the alert and the recap line are the same text.
 //
 // Lifecycle: children are restored from the session's current branch (an abandoned branch's
 // children are not this conversation's), their replies are delivered only while pi is idle (a
@@ -417,7 +419,11 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     const epoch = generation;
     let summary: string | undefined;
     try {
-      summary = await turnSummary(ctx.modelRegistry as unknown as SummaryRegistry, ctx.sessionManager.getBranch() as any);
+      let recap: Promise<string | undefined> | undefined;
+      pi.events.emit("recap:summary", { reply: (p: Promise<string | undefined>) => void (recap = p) });
+      summary = recap
+        ? await recap
+        : await turnSummary(ctx.modelRegistry as unknown as SummaryRegistry, ctx.sessionManager.getBranch() as any);
     } catch {
       return undefined;
     }

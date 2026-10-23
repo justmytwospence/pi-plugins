@@ -123,7 +123,7 @@ There is no settings file.
 - Herdr's own Pi integration (`herdr integration install pi`) for reading children's replies (it reports their session files) and for the pane title and agent name to apply.
 - `gh`, authenticated for the repository, for the `$pr` token (optional).
 - `git` for `where: "worktree"`.
-- Each Herdr child is a full interactive Pi session using your configured model and credentials, billed like any session. pi-herdr's own model call is the `$summary` line: one small request per settled turn whose reply is longer than a line (Haiku, roughly 300 input and 20 output tokens, a few thousandths of a cent), through your configured credentials. `PI_HERDR_SUMMARY=0` turns it off.
+- Each Herdr child is a full interactive Pi session using your configured model and credentials, billed like any session. pi-herdr's own model call is the `$summary` line: one small request per settled turn whose reply is longer than a line (Haiku, roughly 300 input and 20 output tokens, a few thousandths of a cent), through your configured credentials. `PI_HERDR_SUMMARY=0` turns it off. With pi-recap loaded, pi-recap makes that one request instead.
 - It writes nothing to disk except session entries (`pi-herdr:child`) in the current session.
 
 ## Optional integrations
@@ -133,6 +133,7 @@ All optional; each sibling works without pi-herdr, and pi-herdr works without th
 - **[pi-bg](https://pi-plugins.vercel.app/plugins/pi-bg/)** holds `herdr:background` for agent jobs, sends notifications, and uses `herdr:split` to follow a task's log.
 - **[pi-subagents](https://pi-plugins.vercel.app/plugins/pi-subagents/)** holds `herdr:background` while async runs work.
 - **[pi-plan-mode](https://pi-plugins.vercel.app/plugins/pi-plan-mode/)** holds `herdr:working` for its planner runs.
+- **[pi-recap](https://pi-plugins.vercel.app/plugins/pi-recap/)** supplies a settled turn's `$summary` line: pi-herdr asks it over `recap:summary { reply(promise) }` and uses its recap (which also lists the session's earlier prompts to the model) instead of making its own call, so the notification and pi-recap's idle recap line are the same text. Blocked dialogs still get their question from pi-herdr.
 - **[pi-marimo](https://pi-plugins.vercel.app/plugins/pi-marimo/)** sets the `$marimo` token and a notification while a notebook the agent started keeps running after its turn.
 
 Plan-mode planners and Herdr children are not entries in pi-bg's `/tasks` list; they only send holds, and are stopped from their own interfaces (children with `interrupt` or `close`).

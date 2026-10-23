@@ -152,6 +152,26 @@ test("the summary token: cleared as a run starts, set before settling, and a blo
   await p.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx);
 });
 
+test("with pi-recap answering recap:summary, a settled turn's summary token is its recap, with no model call of its own", async () => {
+  inHerdr();
+  const { f } = herdr();
+  const p = fakePi();
+  piHerdr(p.pi, { call: f.call, exec: async () => ({ code: 0, stdout: "", stderr: "" }), pollMs: 60_000 });
+  p.pi.events.on("recap:summary", (e: any) => e.reply(Promise.resolve("Recap from pi-recap")));
+  const complete = vi.fn(async () => ({ stopReason: "stop", content: [{ type: "text", text: "own summary" }] }));
+  const branch: any[] = [
+    { type: "message", message: { role: "user", content: "Fix it" } },
+    { type: "message", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Fixed it.\n\nDetails follow at length." }] } },
+  ];
+  const ctx = { ...ctxOf(branch), modelRegistry: { find: () => ({ id: "haiku" }), hasConfiguredAuth: () => true, complete } };
+  await p.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await p.emit("agent_before_settle", { type: "agent_before_settle" }, ctx);
+  const summaries = f.of("pane.report_metadata").map((l) => l.params.tokens).filter((t) => t && "summary" in t).map((t) => t.summary?.value ?? t.summary);
+  expect(summaries).toEqual(["Recap from pi-recap"]);
+  expect(complete).not.toHaveBeenCalled();
+  await p.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx);
+});
+
 test("children are a read-only activity source: entries, details without touching the pane, interrupt only while awaited, never close", async () => {
   const { f, state } = herdr();
   const changes: string[] = [];
