@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Component, TuiMouseEvent } from "@earendil-works/pi-tui";
 import { orientationFor, splitSizes } from "../src/config.ts";
-import { canSplit, dividerLines, findTranscriptView, SplitLayout, SplitRoot } from "../src/layout.ts";
+import { canSplit, dividerLines, faintColumns, findTranscriptView, muteEditorBorders, SplitLayout, SplitRoot } from "../src/layout.ts";
 
 const leaf = (): Component => ({ render: () => [], invalidate() {} });
 
@@ -15,12 +15,12 @@ function fakeTui(root: Component | undefined = leaf()) {
   };
 }
 
-function settings(overrides: Partial<{ collapsed: boolean; minColumns: number; ratio: number }> = {}) {
+function settings(overrides: Partial<{ collapsed: boolean; minColumns: number; ratio: number; focused: () => boolean }> = {}) {
   return {
     ratio: () => overrides.ratio ?? 0.5,
     minColumns: overrides.minColumns ?? 80,
     collapsed: () => overrides.collapsed ?? false,
-    focused: () => false,
+    focused: overrides.focused ?? (() => false),
     divider: () => ["|"],
   };
 }
@@ -41,6 +41,28 @@ describe("sizes", () => {
   it("draws a full-height rule beside main and a full-width rule below it", () => {
     expect(dividerLines("right", 1, (t) => t).length).toBeGreaterThan(100);
     expect(dividerLines("down", 5, (t) => t)).toEqual(["─────"]);
+  });
+
+  it("points the divider at the focused half from its middle", () => {
+    const pointer = (t: string) => `[${t}]`;
+    const beside = dividerLines("right", 1, (t) => t, { sidebar: true, length: 9, pointer });
+    expect(beside[4]).toBe("[▸]");
+    expect(beside.filter((line) => line !== "│")).toEqual(["[▸]"]);
+    expect(dividerLines("right", 1, (t) => t, { sidebar: false, length: 9, pointer })[4]).toBe("[◂]");
+    expect(dividerLines("down", 7, (t) => t, { sidebar: true, length: 7, pointer })).toEqual(["───[▾]───"]);
+    expect(dividerLines("down", 7, (t) => t, { sidebar: false, length: 7, pointer })).toEqual(["───[▴]───"]);
+    expect(dividerLines("right", 1, (t) => t, { sidebar: true, length: 0, pointer }).every((line) => line === "│")).toBe(true);
+  });
+
+  it("draws a column range faint without dropping anything", () => {
+    expect(faintColumns("abcdef", 2, 4)).toBe("ab\x1b[2mcd\x1b[22mef");
+    expect(faintColumns("abc", 0, 3)).toBe("\x1b[2mabc\x1b[22m");
+    // Resets inside the range keep it faint; cursor markers and links pass through.
+    const cursor = "\x1b_pi:c\x07";
+    expect(faintColumns(`a\x1b[0mb${cursor}c`, 0, 9)).toBe(`\x1b[2ma\x1b[0m\x1b[2mb${cursor}c\x1b[22m`);
+    expect(faintColumns(`ab${cursor}`, 0, 1)).toBe(`\x1b[2ma\x1b[22mb${cursor}`);
+    expect(faintColumns("中文x", 2, 4)).toBe("中\x1b[2m文\x1b[22mx");
+    expect(faintColumns("\x1b_Gf=100;AAAA\x1b\\", 0, 5)).toBe("\x1b_Gf=100;AAAA\x1b\\");
   });
 });
 
@@ -69,6 +91,68 @@ describe("SplitRoot", () => {
     expect(entries(root)[1]!.visible!({ width: 165, height: 50 })).toBe(false);
     expect(entries(root)[2]!.visible!({ width: 165, height: 50 })).toBe(false);
     expect(entries(root)[0]!.basis).toBe(165);
+  });
+});
+
+describe("focus cues", () => {
+  const frameFor = (root: SplitRoot, mainWidth: number) => ({
+    root: { component: root, rect: { x: 0, y: 0, width: 9, height: 2 }, children: [
+      { component: root.main, rect: { x: 0, y: 0, width: mainWidth, height: 2 }, children: [] },
+      { component: {}, rect: { x: mainWidth, y: 0, width: 1, height: 2 }, children: [] },
+      { component: root.panel, rect: { x: mainWidth + 1, y: 0, width: 9 - mainWidth - 1, height: 2 }, children: [] },
+    ] },
+  });
+
+  it("dims the half without focus", () => {
+    let sidebar = false;
+    const root = new SplitRoot(leaf(), leaf(), settings({ focused: () => sidebar }), () => {});
+    const frame = frameFor(root, 4);
+    expect(root.dimUnfocused(["mmmm|sss", "mm"], frame)).toEqual(["mmmm|\x1b[2msss\x1b[22m", "mm"]);
+    sidebar = true;
+    expect(root.dimUnfocused(["mmmm|sss", "mm"], frame)).toEqual(["\x1b[2mmmmm\x1b[22m|sss", "\x1b[2mmm\x1b[22m"]);
+    expect(root.dimUnfocused(["x"], { root: { component: {}, rect: frame.root.rect, children: [] } })).toEqual(["x"]);
+    const collapsed = new SplitRoot(leaf(), leaf(), settings({ collapsed: true }), () => {});
+    expect(collapsed.dimUnfocused(["mmmm|sss"], frameFor(collapsed, 4))).toEqual(["mmmm|sss"]);
+  });
+
+  it("wraps the renderer's highlight stage while mounted and restores it", () => {
+    const calls: string[][] = [];
+    const tui = Object.assign(fakeTui(), { applySearchHighlights(screen: string[], _frame?: unknown) { calls.push(screen); return screen; } });
+    const stage = tui.applySearchHighlights;
+    const layout = new SplitLayout(tui, leaf(), settings());
+    layout.mount();
+    expect(tui.applySearchHighlights).not.toBe(stage);
+    const root = tui.layoutRoot as SplitRoot;
+    tui.applySearchHighlights(["mmmm|sss"], frameFor(root, 4));
+    expect(calls.at(-1)).toEqual(["mmmm|\x1b[2msss\x1b[22m"]);
+    layout.unmount();
+    expect(tui.applySearchHighlights).toBe(stage);
+    expect(Object.prototype.hasOwnProperty.call(tui, "applySearchHighlights")).toBe(true);
+    // A renderer whose stage lives on its prototype gets it back there.
+    class Renderer { mode = "fullscreen"; layoutRoot: Component | undefined = leaf(); setLayoutRoot(c: Component | undefined) { this.layoutRoot = c; } requestRender() {} applySearchHighlights(screen: string[]) { return screen; } }
+    const proto = new Renderer();
+    const other = new SplitLayout(proto, leaf(), settings());
+    other.mount();
+    expect(Object.prototype.hasOwnProperty.call(proto, "applySearchHighlights")).toBe(true);
+    other.unmount();
+    expect(Object.prototype.hasOwnProperty.call(proto, "applySearchHighlights")).toBe(false);
+  });
+
+  it("mutes an editor's borders while asked, once per editor", () => {
+    const editor = { renderTopBorder: (w: number) => `\x1b[36m${"─".repeat(w)}\x1b[39m`, renderBottomBorder: () => "\x1b[31m━\x1b[36m─\x1b[39m" };
+    let mute = true;
+    const muted = (t: string) => `<muted>${t}</muted>`;
+    expect(muteEditorBorders(editor, () => (mute ? muted : undefined))).toBe(true);
+    expect(editor.renderTopBorder(3)).toBe("<muted>───</muted>");
+    expect(editor.renderBottomBorder()).toBe("<muted>━─</muted>");
+    mute = false;
+    expect(editor.renderTopBorder(2)).toBe("\x1b[36m──\x1b[39m");
+    const top = editor.renderTopBorder;
+    expect(muteEditorBorders(editor, () => muted)).toBe(true);
+    expect(editor.renderTopBorder).toBe(top);
+    expect(editor.renderTopBorder(1)).toBe("<muted>─</muted>");
+    expect(muteEditorBorders({ render: () => [] }, () => muted)).toBe(false);
+    expect(muteEditorBorders(null, () => muted)).toBe(false);
   });
 });
 

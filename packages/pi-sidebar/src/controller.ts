@@ -5,7 +5,7 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext, type Theme } fro
 import { matchesKey, type Component, type TUI } from "@earendil-works/pi-tui";
 import { ago, SidebarAgent, type SidebarEvent } from "./child.ts";
 import { MIN_COLUMNS_ENV, parseMinColumns, parseRatio, PREFS_ENV, RATIO_ENV } from "./config.ts";
-import { canSplit, dividerLines, SplitLayout } from "./layout.ts";
+import { canSplit, dividerLines, muteEditorBorders, SplitLayout } from "./layout.ts";
 import { MainState } from "./main-state.ts";
 import { RatioStore } from "./preferences.ts";
 import { InjectedPrompt } from "./injected.ts";
@@ -206,7 +206,10 @@ export class SidebarController {
         minColumns: parseMinColumns(process.env[MIN_COLUMNS_ENV]),
         collapsed: () => this.blocked > 0,
         focused: () => !!this.panel?.focused,
-        divider: (orientation, focused, width) => dividerLines(orientation, width, (text) => theme().fg(focused ? "borderAccent" : "borderMuted", text)),
+        // Accent in both states; the arrow in its middle points at the focused half.
+        divider: (orientation, sidebarFocused, width, length) => dividerLines(orientation, width, (text) => theme().fg("borderAccent", text), {
+          sidebar: sidebarFocused, length, pointer: (text) => theme().bold(theme().fg("accent", text)),
+        }),
       });
     }
     if (!this.layout!.mount()) return false;
@@ -304,6 +307,13 @@ export class SidebarController {
     const current = tui.getFocusedComponent?.() ?? null;
     // While Sidebar is the active half, the focused component is Sidebar's own overlay (Pi's search), not main's.
     if (current && current !== panel.input && !panel.focused) this.mainFocus = current;
+    // Main's editor keeps drawing its (accent) borders in its half; mute them while Sidebar has focus.
+    for (const editor of new Set([this.mainFocus, this.mainEditor])) {
+      muteEditorBorders(editor, () => {
+        const theme = this.theme;
+        return theme && this.panel === panel && this.isOpen && panel.focused && this.blocked === 0 ? (text) => theme.fg("borderMuted", text) : undefined;
+      });
+    }
     panel.unread = false;
     tui.setFocus(panel.input);
     tui.requestRender();

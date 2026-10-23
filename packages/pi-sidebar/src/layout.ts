@@ -7,7 +7,7 @@
 //
 // Pi does not publish its layout root; the suite reads it the same way in pi-clear-screen, pi-copy,
 // pi-sticky-last-prompt and plan mode. Anything unexpected leaves Pi's layout untouched.
-import { HStack, type Component, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
+import { HStack, visibleWidth, type Component, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
 
 type TuiMouseDispatchResult = NonNullable<ReturnType<HStack["handleMouse"]>> & { target: unknown };
 import { orientationFor, ratioAt, splitSizes, type Orientation } from "./config.ts";
@@ -37,9 +37,10 @@ export interface SplitSettings {
   sidebarPrimary?(): boolean;
   /** Sidebar hidden but the split kept (a dialog holds `herdr:blocked`). */
   collapsed(): boolean;
-  /** Whether Sidebar has focus, for the divider's color. */
+  /** Whether Sidebar has focus: the divider points at the focused half, and the other one is dimmed. */
   focused(): boolean;
-  divider(orientation: Orientation, focused: boolean, width: number): string[];
+  /** The divider's lines; `length` is its run along the split (rows beside main, columns below it). */
+  divider(orientation: Orientation, sidebarFocused: boolean, width: number, length: number): string[];
 }
 
 type MutableEntry = { component: Component; basis?: number | "auto"; grow?: number; shrink?: number; minSize?: number; visible?: (v: { width: number; height: number }) => boolean };
@@ -51,9 +52,11 @@ type MutableEntry = { component: Component; basis?: number | "auto"; grow?: numb
 class Divider implements Component {
   orientation: Orientation = "right";
   dragging = false;
+  /** Rows beside main, from the last frame's viewport. */
+  length = 0;
   constructor(private readonly settings: SplitSettings, private readonly drag: (event: TuiMouseEvent, phase: "move" | "end" | "reset") => void) {}
   render(width: number): string[] {
-    return this.settings.divider(this.orientation, this.dragging || this.settings.focused(), width);
+    return this.settings.divider(this.orientation, this.settings.focused(), width, this.orientation === "right" ? this.length : width);
   }
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (event.type === "click" && (event.clickCount ?? 1) >= 2) {
@@ -149,6 +152,7 @@ export class SplitRoot extends HStack {
       queueMicrotask(() => this.requestRender());
     }
     const entries = this.stackEntries();
+    this.divider.length = viewport.height;
     const total = this.orientation === "right" ? viewport.width : viewport.height;
     if (this.settings.collapsed()) {
       Object.assign(entries[0]!, { basis: total, grow: 1, shrink: 1, minSize: 1 });
@@ -171,6 +175,25 @@ export class SplitRoot extends HStack {
       this.settings.setRatio(this.orientation, ratioAt(position, this.split.total), phase === "end");
     }
     this.requestRender();
+  }
+
+  /**
+   * Dim the half without focus on a composited frame, so the focused half stands out (as tmux dims
+   * an inactive pane). The halves' boxes come from Pi's layout frame; nothing else is touched.
+   */
+  dimUnfocused(screen: string[], frame: unknown): string[] {
+    if (this.settings.collapsed()) return screen;
+    const box = findBox((frame as { root?: FrameBox } | undefined)?.root, this);
+    const target = this.settings.focused() ? this.main : this.panel;
+    const half = box?.children.find((child) => child.component === target);
+    if (!half) return screen;
+    const area = half.clip ?? half.rect;
+    if (area.width <= 0 || area.height <= 0) return screen;
+    const result = screen.slice();
+    for (let row = Math.max(0, area.y); row < Math.min(result.length, area.y + area.height); row++) {
+      result[row] = faintColumns(result[row] ?? "", area.x, area.x + area.width);
+    }
+    return result;
   }
 
   /**
@@ -204,6 +227,7 @@ export class SplitRoot extends HStack {
 export class SplitLayout {
   private original: Component | undefined;
   private root: SplitRoot | undefined;
+  private restoreDim: (() => void) | undefined;
 
   constructor(readonly tui: LayoutTui, private readonly panel: Component, private readonly settings: SplitSettings) {}
 
@@ -220,11 +244,40 @@ export class SplitLayout {
     this.original = current instanceof SplitRoot ? current.main : current;
     this.root = new SplitRoot(this.original, this.panel, this.settings, () => this.tui.requestRender());
     this.tui.setLayoutRoot!(this.root);
+    this.installDim();
     this.tui.requestRender(true);
     return true;
   }
 
+  /**
+   * Dim the unfocused half on every frame. Pi has no hook for a whole-frame pass, so this wraps the
+   * renderer's search-highlight stage, the first one that gets both the composited frame and its layout
+   * boxes (after fake cursors, before overlays, so dialogs and search stay undimmed). pi-cc-render
+   * wraps a later stage the same way. A Pi without that stage just shows no dimming.
+   */
+  private installDim(): void {
+    if (this.restoreDim) return;
+    const tui = this.tui as LayoutTui & { applySearchHighlights?: HighlightStage };
+    const stage = tui.applySearchHighlights;
+    if (typeof stage !== "function") return;
+    const own = Object.prototype.hasOwnProperty.call(tui, "applySearchHighlights");
+    const layout = this;
+    const wrapped: HighlightStage = function (this: unknown, screen, frame) {
+      const root = layout.mounted ? layout.root : undefined;
+      return stage.call(this, root ? root.dimUnfocused(screen, frame) : screen, frame);
+    };
+    tui.applySearchHighlights = wrapped;
+    this.restoreDim = () => {
+      // Someone wrapped it after us: leave theirs; ours is inert once unmounted.
+      if (tui.applySearchHighlights !== wrapped) return;
+      if (own) tui.applySearchHighlights = stage;
+      else delete tui.applySearchHighlights;
+    };
+  }
+
   unmount(): void {
+    this.restoreDim?.();
+    this.restoreDim = undefined;
     if (this.root && this.tui.layoutRoot === this.root && this.original) {
       this.tui.setLayoutRoot?.(this.original);
       this.tui.requestRender(true);
@@ -240,9 +293,110 @@ export class SplitLayout {
 
 const DIVIDER_ROWS = 400;
 
-/** The divider's lines: Pi clips a leaf's lines to its box, so a tall column covers any height. */
-export function dividerLines(orientation: Orientation, width: number, style: (text: string) => string): string[] {
-  if (orientation === "down") return [style("─".repeat(Math.max(1, width)))];
+/**
+ * The divider's lines: Pi clips a leaf's lines to its box, so a tall column covers any height. A
+ * small arrow in its middle points at the focused half (`pointer` styles it); `length` is the run
+ * along the split, 0 when unknown.
+ */
+export function dividerLines(orientation: Orientation, width: number, style: (text: string) => string, focus?: { sidebar: boolean; length: number; pointer: (text: string) => string }): string[] {
+  if (orientation === "down") {
+    const columns = Math.max(1, width);
+    if (!focus || columns < 3) return [style("─".repeat(columns))];
+    const middle = Math.floor((columns - 1) / 2);
+    return [style("─".repeat(middle)) + focus.pointer(focus.sidebar ? "▾" : "▴") + style("─".repeat(columns - middle - 1))];
+  }
   const cell = style("│");
-  return Array.from({ length: DIVIDER_ROWS }, () => cell);
+  const lines = Array.from({ length: DIVIDER_ROWS }, () => cell);
+  if (focus && focus.length >= 3) lines[Math.min(DIVIDER_ROWS - 1, Math.floor((focus.length - 1) / 2))] = focus.pointer(focus.sidebar ? "▸" : "◂");
+  return lines;
+}
+
+type HighlightStage = (screen: string[], frame: unknown) => string[];
+type FrameRect = { x: number; y: number; width: number; height: number };
+type FrameBox = { component: unknown; rect: FrameRect; clip?: FrameRect; children: FrameBox[] };
+
+function findBox(box: FrameBox | undefined, component: unknown, depth = 0): FrameBox | undefined {
+  if (!box || depth > 6) return undefined;
+  if (box.component === component) return box;
+  for (const child of box.children ?? []) {
+    const found = findBox(child, component, depth + 1);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+const FAINT = "\x1b[2m";
+const NORMAL_INTENSITY = "\x1b[22m";
+// CSI, OSC and APC (Pi's cursor marker) sequences, and two-byte escapes: kept as they are.
+const ESCAPE = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|_[^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/y;
+const segmenter = new Intl.Segmenter();
+
+/**
+ * Draw columns [from, to) of a terminal line faint, inserting codes only: nothing in the line is
+ * dropped, so cursor markers and links survive. Faint is re-applied after every SGR code in the range
+ * (a reset would end it), and ended at the range's end. Image lines are left alone.
+ */
+export function faintColumns(line: string, from: number, to: number): string {
+  if (to <= from || line.includes("\x1b_G") || line.includes("\x1b]1337;File=")) return line;
+  let out = "", column = 0, index = 0, faint = false;
+  const at = (col: number) => {
+    const inside = col >= from && col < to;
+    if (inside && !faint) out += FAINT;
+    else if (!inside && faint) out += NORMAL_INTENSITY;
+    faint = inside;
+  };
+  while (index < line.length) {
+    ESCAPE.lastIndex = index;
+    const escape = ESCAPE.exec(line);
+    if (escape) {
+      out += escape[0];
+      if (faint && escape[0].startsWith("\x1b[") && escape[0].endsWith("m")) out += FAINT;
+      index += escape[0].length;
+      continue;
+    }
+    let end = line.indexOf("\x1b", index + 1);
+    if (end < 0) end = line.length;
+    for (const { segment } of segmenter.segment(line.slice(index, end))) {
+      at(column);
+      out += segment;
+      column += visibleWidth(segment);
+    }
+    index = end;
+  }
+  if (faint) out += NORMAL_INTENSITY;
+  return out;
+}
+
+type BorderRenderer = (this: unknown, width: number, hidden: number) => string;
+interface BorderedEditor {
+  renderTopBorder?: BorderRenderer;
+  renderBottomBorder?: BorderRenderer;
+  [MUTED_BORDERS]?: { muted: () => ((text: string) => string) | undefined };
+}
+const MUTED_BORDERS = Symbol.for("pi-sidebar/muted-borders");
+const SGR = /\x1b\[[0-9;:]*m/g;
+
+/**
+ * Redraw a Pi editor's border lines (pi-status-footer's gauge included) in `muted()`'s color while it
+ * returns one, so main's editor stops looking active while Sidebar has focus. Wraps the instance's
+ * border hooks once; a later call only swaps the predicate. Editors without those hooks are left alone.
+ */
+export function muteEditorBorders(editor: unknown, muted: () => ((text: string) => string) | undefined): boolean {
+  const e = editor as BorderedEditor | null;
+  if (!e || typeof e.renderTopBorder !== "function" || typeof e.renderBottomBorder !== "function") return false;
+  const installed = e[MUTED_BORDERS];
+  if (installed) {
+    installed.muted = muted;
+    return true;
+  }
+  const state = { muted };
+  const wrap = (render: BorderRenderer): BorderRenderer => function (this: unknown, width, hidden) {
+    const line = render.call(this, width, hidden);
+    const color = state.muted();
+    return color ? color(line.replace(SGR, "")) : line;
+  };
+  e[MUTED_BORDERS] = state;
+  e.renderTopBorder = wrap(e.renderTopBorder);
+  e.renderBottomBorder = wrap(e.renderBottomBorder);
+  return true;
 }
