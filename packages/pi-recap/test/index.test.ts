@@ -1,16 +1,26 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import piRecap, { LABEL, WIDGET, recapLines } from "../src/index.ts";
+import piRecap, { ENTRY, LABEL, MARK, WIDGET, recapDue, recapLines } from "../src/index.ts";
 import { harness } from "./harness.ts";
 
 const LONG = "I changed the parser so empty lines are skipped.\n\nMore detail on a second line.";
 let n = 0;
 const user = (text: string) => ({ type: "message", id: `e${n++}`, message: { role: "user", content: text } });
 const assistant = (text: string) => ({ type: "message", id: `e${n++}`, message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text }] } });
+const turns = (count: number) => Array.from({ length: count }, (_, i) => [user(`prompt ${i}`), assistant(LONG)]).flat();
+const LINE = (text: string) => ` ${MARK}${LABEL}${text}`;
 
-function setup(answer = "Fixed the parser; tests pass") {
+function setup(answer = "Fixed the parser; tests pass", prompts = 3) {
   const h = harness();
+  const branch: any[] = turns(prompts);
+  // Like Pi, an appended entry becomes the branch's leaf.
+  const appendEntry = h.pi.appendEntry;
+  h.pi.appendEntry = (customType: string, data: unknown) => {
+    appendEntry(customType, data);
+    branch.push({ type: "custom", id: `e${n++}`, customType, data });
+  };
+  let renderer: any;
+  h.pi.registerEntryRenderer = (type: string, r: any) => { if (type === ENTRY) renderer = r; };
   piRecap(h.pi);
-  const branch: any[] = [user("Fix the parser"), assistant(LONG)];
   const complete = vi.fn(async () => ({ stopReason: "stop", content: [{ type: "text", text: answer }] }));
   const modelRegistry = { find: (provider: string, id: string) => ({ provider, id }), hasConfiguredAuth: () => true, complete };
   const ctx = h.ctx({ sessionManager: { getBranch: () => branch, getSessionId: () => "s" }, modelRegistry, waitForIdle: async () => undefined });
@@ -23,7 +33,10 @@ function setup(answer = "Fixed the parser; tests pass") {
     h.pi.events.emit("recap:summary", { reply: (p: Promise<string | undefined>) => { got = p; } });
     return got;
   };
-  return { h, ctx, ui: ctx.ui, branch, complete, settle, ask };
+  const recaps = () => h.entries.filter((e) => e.customType === ENTRY).map((e: any) => e.data.text);
+  const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s, italic: (s: string) => s };
+  const render = (text: string, width = 200) => renderer({ customType: ENTRY, data: { text } }, { expanded: false }, theme).render(width);
+  return { h, ctx, ui: ctx.ui, branch, complete, settle, ask, recaps, render };
 }
 
 beforeEach(() => {
@@ -33,30 +46,40 @@ beforeEach(() => {
 });
 afterEach(() => vi.useRealTimers());
 
-test("the recap appears after the idle delay, and a new run clears it", async () => {
-  const { h, ctx, ui, settle, complete } = setup();
+test("the recap is written into the transcript after the idle delay, and drawn like Claude Code's", async () => {
+  const { h, ctx, ui, settle, complete, recaps, render } = setup();
   await h.emit("session_start", {}, ctx);
   await h.emit("agent_start", {}, ctx);
   await settle();
-  expect(ui.widgets.has(WIDGET)).toBe(false);
   await vi.advanceTimersByTimeAsync(179_000);
-  expect(ui.widgets.has(WIDGET)).toBe(false);
+  expect(recaps()).toEqual([]);
   await vi.advanceTimersByTimeAsync(1_000);
-  expect(ui.widgetLines(WIDGET)).toEqual([` ${LABEL}Fixed the parser; tests pass`]);
+  expect(recaps()).toEqual(["Fixed the parser; tests pass"]);
   expect(complete).toHaveBeenCalledOnce();
-  await h.emit("agent_start", {}, ctx);
   expect(ui.widgets.has(WIDGET)).toBe(false);
+  expect(render("Fixed the parser; tests pass")).toEqual([LINE("Fixed the parser; tests pass")]);
+  // It stays in the transcript when the next run starts.
+  await h.emit("agent_start", {}, ctx);
+  expect(recaps()).toHaveLength(1);
+});
+
+test("the label is dim bold and the text dim italic", () => {
+  const theme = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bold: (s: string) => `<b>${s}</b>`, italic: (s: string) => `<i>${s}</i>` };
+  const style = { mark: (s: string) => theme.fg("dim", s), label: (s: string) => theme.fg("dim", theme.bold(s)), text: (s: string) => theme.fg("dim", theme.italic(s)) };
+  expect(recapLines("done", 200, style, 0)).toEqual([" <dim>※ </dim><dim><b>recap: </b></dim><dim><i>done</i></dim>"]);
 });
 
 test("pi-herdr's request gets the same memoized text, with one model call", async () => {
-  const { h, ctx, settle, complete, ask } = setup();
+  const { h, ctx, settle, complete, ask, recaps } = setup();
   await h.emit("session_start", {}, ctx);
   const herdr = ask();
   await settle();
   expect(await herdr).toBe("Fixed the parser; tests pass");
   expect(await ask()).toBe("Fixed the parser; tests pass");
   await vi.advanceTimersByTimeAsync(180_000);
-  expect(ctx.ui.widgetLines(WIDGET)?.[0]).toContain("Fixed the parser; tests pass");
+  expect(recaps()).toEqual(["Fixed the parser; tests pass"]);
+  // The recap entry itself does not start a new turn's recap.
+  expect(await ask()).toBe("Fixed the parser; tests pass");
   expect(complete).toHaveBeenCalledOnce();
 });
 
@@ -72,19 +95,43 @@ test("a new turn gets a new recap", async () => {
   expect(complete).toHaveBeenCalledTimes(2);
 });
 
-test("no recap line after an interrupted run, a short reply already on screen, a new run or PI_RECAP=0", async () => {
+test("as in Claude Code, no automatic recap before 3 prompts, nor before 2 more since the last", async () => {
+  const early = setup(undefined, 2);
+  await early.h.emit("session_start", {}, early.ctx);
+  await early.settle();
+  await vi.advanceTimersByTimeAsync(200_000);
+  expect(early.recaps()).toEqual([]);
+
+  const { h, ctx, branch, settle, recaps } = setup("first");
+  await h.emit("session_start", {}, ctx);
+  await settle();
+  await vi.advanceTimersByTimeAsync(200_000);
+  expect(recaps()).toEqual(["first"]);
+  branch.push(user("one more"), assistant(LONG));
+  await settle();
+  await vi.advanceTimersByTimeAsync(200_000);
+  expect(recaps()).toHaveLength(1);
+  branch.push(user("and another"), assistant(LONG));
+  await settle();
+  await vi.advanceTimersByTimeAsync(200_000);
+  expect(recaps()).toHaveLength(2);
+
+  expect(recapDue([...turns(3), { type: "custom", customType: ENTRY }])).toBe(false);
+});
+
+test("no automatic recap after an interrupted run, a short reply already on screen, a new run or PI_RECAP=0", async () => {
   const a = setup();
   await a.h.emit("session_start", {}, a.ctx);
   await a.settle(true);
   await vi.advanceTimersByTimeAsync(200_000);
-  expect(a.ui.widgets.has(WIDGET)).toBe(false);
+  expect(a.recaps()).toEqual([]);
 
   const b = setup();
   b.branch.push(user("push it"), assistant("Pushed."));
   await b.h.emit("session_start", {}, b.ctx);
   await b.settle();
   await vi.advanceTimersByTimeAsync(200_000);
-  expect(b.ui.widgets.has(WIDGET)).toBe(false);
+  expect(b.recaps()).toEqual([]);
   expect(await b.ask()).toBe("Pushed.");
 
   const c = setup();
@@ -93,24 +140,24 @@ test("no recap line after an interrupted run, a short reply already on screen, a
   await vi.advanceTimersByTimeAsync(60_000);
   await c.h.emit("agent_start", {}, c.ctx);
   await vi.advanceTimersByTimeAsync(200_000);
-  expect(c.ui.widgets.has(WIDGET)).toBe(false);
+  expect(c.recaps()).toEqual([]);
 
   process.env.PI_RECAP = "0";
   const d = setup();
   await d.h.emit("session_start", {}, d.ctx);
   await d.settle();
   await vi.advanceTimersByTimeAsync(200_000);
-  expect(d.ui.widgets.has(WIDGET)).toBe(false);
+  expect(d.recaps()).toEqual([]);
   expect(await d.ask()).toBe("Fixed the parser; tests pass");
 });
 
 test("PI_RECAP_DELAY_MS sets the delay", async () => {
   process.env.PI_RECAP_DELAY_MS = "10000";
-  const { h, ctx, ui, settle } = setup();
+  const { h, ctx, settle, recaps } = setup();
   await h.emit("session_start", {}, ctx);
   await settle();
   await vi.advanceTimersByTimeAsync(10_000);
-  expect(ui.widgets.has(WIDGET)).toBe(true);
+  expect(recaps()).toHaveLength(1);
 });
 
 test("non-interactive sessions stay dormant and answer no requests", async () => {
@@ -123,23 +170,30 @@ test("non-interactive sessions stay dormant and answer no requests", async () =>
   expect(complete).not.toHaveBeenCalled();
 });
 
-test("/recap shows the recap at once, even a short reply, and warns when there is nothing", async () => {
-  const { h, ctx, ui, branch } = setup();
+test("/recap writes the recap at once, even early or for a short reply, and warns when there is nothing", async () => {
+  const { h, ctx, ui, branch, recaps } = setup(undefined, 1);
   await h.emit("session_start", {}, ctx);
   await h.commands.get("recap").handler("", ctx);
-  expect(ui.widgetLines(WIDGET)).toEqual([` ${LABEL}Fixed the parser; tests pass`]);
+  expect(recaps()).toEqual(["Fixed the parser; tests pass"]);
+  expect(ui.widgets.has(WIDGET)).toBe(false);
   branch.push(user("push it"), assistant("Pushed."));
   await h.commands.get("recap").handler("", ctx);
-  expect(ui.widgetLines(WIDGET)).toEqual([` ${LABEL}Pushed.`]);
+  expect(recaps().at(-1)).toBe("Pushed.");
   branch.length = 0;
   await h.commands.get("recap").handler("", ctx);
+  expect(recaps()).toHaveLength(2);
   expect(ui.widgets.has(WIDGET)).toBe(false);
   expect(ui.notes.at(-1)).toEqual({ message: "Nothing to recap yet", type: "warning" });
 });
 
-test("long recaps wrap and line up after the label", () => {
-  const lines = recapLines("one two three four five six seven eight nine ten", 30);
-  expect(lines[0].startsWith(` ${LABEL}`)).toBe(true);
+test("long recaps wrap under the label, at the prose measure when one is set", () => {
+  const text = "one two three four five six seven eight nine ten";
+  const lines = recapLines(text, 30, undefined, 0);
+  expect(lines[0].startsWith(` ${MARK}${LABEL}`)).toBe(true);
   expect(lines.length).toBeGreaterThan(1);
-  for (const l of lines.slice(1)) expect(l.startsWith(" ".repeat(1 + LABEL.length))).toBe(true);
+  for (const l of lines.slice(1)) expect(l.startsWith(" ".repeat(1 + MARK.length)) && l[1 + MARK.length] !== " ").toBe(true);
+  expect(recapLines(text, 200, undefined, 0)).toHaveLength(1);
+  const measured = recapLines(text, 200, undefined, 20);
+  expect(measured.length).toBeGreaterThan(1);
+  for (const l of measured) expect(l.trimEnd().length).toBeLessThanOrEqual(3 + 20);
 });
