@@ -2,9 +2,9 @@
 // has sat idle for a while (3 minutes by default) after a turn, and on demand with /recap.
 //
 // It follows Claude Code's session recap: the line is a transcript entry (a custom session entry,
-// never sent to the model) drawn as ` ※ recap: <text>`, with the label in dim bold and the text in
-// dim italic, wrapped at pi-prose-width's measure. An automatic recap needs 3 prompts in the session
-// and 2 more since the previous recap.
+// never sent to the model) drawn as ` ※ recap: <text>`, all in dim bold with the text also italic,
+// wrapped at pi-prose-width's measure. An automatic recap needs 3 prompts in the session and 2 more
+// since the previous recap.
 //
 // The recap is computed once per settled turn (summary.ts, one small-model call) and shared: pi-herdr
 // asks for it over the event bus and writes it to its `$summary` pane token, so the turn's
@@ -63,9 +63,9 @@ export function recapLines(text: string, width: number, style: RecapStyle = PLAI
 
 function themeStyle(theme: { fg(color: any, s: string): string; bold(s: string): string; italic(s: string): string }): RecapStyle {
   return {
-    mark: (s) => theme.fg("dim", s),
+    mark: (s) => theme.fg("dim", theme.bold(s)),
     label: (s) => theme.fg("dim", theme.bold(s)),
-    text: (s) => theme.fg("dim", theme.italic(s)),
+    text: (s) => theme.fg("dim", theme.bold(theme.italic(s))),
   };
 }
 

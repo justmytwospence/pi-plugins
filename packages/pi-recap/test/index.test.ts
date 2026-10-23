@@ -34,8 +34,9 @@ function setup(answer = "Fixed the parser; tests pass", prompts = 3) {
     return got;
   };
   const recaps = () => h.entries.filter((e) => e.customType === ENTRY).map((e: any) => e.data.text);
-  const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s, italic: (s: string) => s };
-  const render = (text: string, width = 200) => renderer({ customType: ENTRY, data: { text } }, { expanded: false }, theme).render(width);
+  const plainTheme = { fg: (_c: string, s: string) => s, bold: (s: string) => s, italic: (s: string) => s };
+  const render = (text: string, width = 200, theme: any = plainTheme) =>
+    renderer({ customType: ENTRY, data: { text } }, { expanded: false }, theme).render(width);
   return { h, ctx, ui: ctx.ui, branch, complete, settle, ask, recaps, render };
 }
 
@@ -63,10 +64,10 @@ test("the recap is written into the transcript after the idle delay, and drawn l
   expect(recaps()).toHaveLength(1);
 });
 
-test("the label is dim bold and the text dim italic", () => {
+test("the whole line is dim bold, the text also italic", () => {
   const theme = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bold: (s: string) => `<b>${s}</b>`, italic: (s: string) => `<i>${s}</i>` };
-  const style = { mark: (s: string) => theme.fg("dim", s), label: (s: string) => theme.fg("dim", theme.bold(s)), text: (s: string) => theme.fg("dim", theme.italic(s)) };
-  expect(recapLines("done", 200, style, 0)).toEqual([" <dim>※ </dim><dim><b>recap: </b></dim><dim><i>done</i></dim>"]);
+  const lines = setup().render("done", 200, theme);
+  expect(lines).toEqual([" <dim><b>※ </b></dim><dim><b>recap: </b></dim><dim><b><i>done</i></b></dim>"]);
 });
 
 test("pi-herdr's request gets the same memoized text, with one model call", async () => {

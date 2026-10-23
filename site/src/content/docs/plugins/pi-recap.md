@@ -13,7 +13,7 @@ plugin: pi-recap
 - **Requirements, cost & privacy:** Pi 1.0+ TUI; recaps are saved in the session file; one small Haiku request per settled turn with a multi-line reply, sending earlier prompts, the turn's prompt, tool calls and reply.
 - **Integrations & limits:** With pi-herdr, the same line is its `$summary` notification text, from one shared request. At most 80 characters.
 
-Recap writes one line on where the session stands: what the last turn got done and, if it ended needing you, what you must decide or do. After a turn settles and the session sits idle for 3 minutes, the line is added to the transcript, drawn like Claude Code's session recap (a dim `※`, `recap:` in dim bold, the text in dim italic, wrapped at pi-prose-width's measure when that is loaded):
+Recap writes one line on where the session stands: what the last turn got done and, if it ended needing you, what you must decide or do. After a turn settles and the session sits idle for 3 minutes, the line is added to the transcript, drawn like Claude Code's session recap but bold throughout (a dim bold `※` and `recap:`, then the text in dim bold italic, wrapped at pi-prose-width's measure when that is loaded):
 
 ```
  ※ recap: Fixed the parser to skip empty lines; tests pass, waiting on your OK to push
