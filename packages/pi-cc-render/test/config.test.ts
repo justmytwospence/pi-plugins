@@ -85,6 +85,7 @@ describe("normalizeConfig", () => {
       showStartupHeader: true,
       scrollStepLines: 3,
       enableAgentSummary: true,
+      restoreInterruptedPrompt: true,
     });
   });
 
@@ -139,6 +140,7 @@ describe("normalizeConfig", () => {
     const status = formatConfigStatus(DEFAULT_CONFIG);
     expect(status).toContain("mode=on");
     expect(status).toContain("agentSummary=on");
+    expect(status).toContain("restorePrompt=on");
     expect(status).not.toMatch(/footer|sessionRef|context=|aliases|workingMsg/);
   });
 });

@@ -8,6 +8,7 @@ import piStartupHeader, { installEarlyStartupHeader } from "./feature/shell/star
 // features
 import agentSummary from "./feature/agent-summary/index.ts";
 import { installCompactThinking } from "./feature/compact-thinking.ts";
+import restoreInterruptedPrompt from "./feature/restore-interrupted-prompt.ts";
 
 // renderer
 import claudeCodeStyle, { getCompactThinkingConfig } from "./renderer/index.ts";
@@ -31,6 +32,7 @@ export default function (pi: ExtensionAPI): void {
 
 	// features
 	if (config.enableAgentSummary) agentSummary(pi);
+	if (config.restoreInterruptedPrompt) restoreInterruptedPrompt(pi);
 }
 
 export { CONFIG_PATH, config, DEFAULT_CONFIG, normalizeConfig } from "./config/config.ts";

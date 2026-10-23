@@ -54,7 +54,7 @@ describe("extension factory", () => {
     extension(pi as any);
     expect([...commands.keys()]).toEqual(["ccstyle"]);
     expect(tools).toEqual([]);
-    for (const event of ["session_start", "session_shutdown", "session_compact", "session_tree", "message_start", "message_update", "tool_execution_start", "tool_execution_end", "agent_start", "agent_end"]) {
+    for (const event of ["session_start", "session_shutdown", "session_compact", "session_tree", "message_start", "message_update", "tool_execution_start", "tool_execution_end", "agent_start", "agent_end", "input", "before_agent_start", "agent_settled"]) {
       expect(handlers.get(event), event).toBeGreaterThan(0);
     }
     // The write override is deferred to session_start so sibling extensions can claim write first.
@@ -120,7 +120,7 @@ describe("Pi 1.2.0 resource loader", () => {
     expect(extension.tools.size).toBe(0);
     expect(extension.shortcuts.size).toBe(0);
     expect([...extension.handlers.keys()].sort()).toEqual([
-      "agent_end", "agent_start", "message_start", "message_update", "session_compact", "session_shutdown",
+      "agent_end", "agent_settled", "agent_start", "before_agent_start", "input", "message_start", "message_update", "session_compact", "session_shutdown",
       "session_start", "session_tree", "tool_execution_end", "tool_execution_start",
     ]);
     const themes = loader.getThemes().themes.map((theme) => theme.name).sort();

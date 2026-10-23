@@ -439,8 +439,16 @@ export async function showCcstylePanel(
 			"Agent summary disabled.",
 			config.enableAgentSummary,
 		);
+		const restorePromptToggle = featureToggleSetting(
+			"restoreInterruptedPrompt",
+			"Restore interrupted prompt",
+			"Escape before the model responds puts the prompt back in the editor. Next restart applies.",
+			"Interrupted prompts stay in the transcript only.",
+			config.restoreInterruptedPrompt,
+		);
 		const featureToggles: Record<string, { apply: (on: boolean) => void }> = {
 			enableAgentSummary: agentSummaryToggle,
+			restoreInterruptedPrompt: restorePromptToggle,
 		};
 
 		const onSettingChange = (id: string, value: string) => {
@@ -604,7 +612,7 @@ export async function showCcstylePanel(
 			{
 				id: "feature",
 				label: "Features",
-				items: [agentSummaryToggle.setting],
+				items: [agentSummaryToggle.setting, restorePromptToggle.setting],
 			},
 			{
 				id: "ui",

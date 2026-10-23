@@ -68,6 +68,7 @@ Panel changes apply to the current transcript immediately and are saved. Feature
 
   // features
   "enableAgentSummary": true, // per-turn tool summary after agent_end (2+ tools)
+  "restoreInterruptedPrompt": true, // Escape before the model responds puts the prompt back in the editor
 
   // ui
   "expandedInputMaxLines": 5, // expanded tool Input lines; overflow shows a hint
@@ -94,7 +95,13 @@ Panel changes apply to the current transcript immediately and are saved. Feature
 }
 ```
 
-### Coexisting with other tool renderers
+### Interrupted prompts
+
+As in Claude Code, pressing Escape before the model has streamed anything (text, thinking or a tool call) puts the prompt that started the run back into the editor, so you can edit and resend it. Once output has started, Escape only interrupts. Only prompts typed in the interactive editor are restored, as text (attached images are not); steering and follow-up messages are already returned to the editor by Pi. If the editor then holds text (a restored queue or a draft typed during the run), the prompt goes before it, separated by a blank line.
+
+The interrupted prompt stays in the transcript and the session, so resending it adds a second copy to the context.
+
+## Coexisting with other tool renderers
 
 A tool whose extension provides `renderCall`, `renderResult` or `renderShell: "self"` is still restyled unless its name is listed in `excludeRenderers`. Suite components such as pi-bg and pi-subagents that draw their own tool output should be listed there (the panel's Exclude tools entry toggles common names; any name can be added to the file). The `Agent` tool always keeps its dedicated renderer.
 

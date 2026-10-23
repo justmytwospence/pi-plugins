@@ -60,6 +60,7 @@ export type Config = {
 	showStartupHeader: boolean;
 	scrollStepLines: number;
 	enableAgentSummary: boolean;
+	restoreInterruptedPrompt: boolean;
 };
 
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
@@ -134,6 +135,7 @@ export const DEFAULT_CONFIG: Config = {
 	showStartupHeader: true,
 	scrollStepLines: 3,
 	enableAgentSummary: true,
+	restoreInterruptedPrompt: true,
 };
 
 function pickEnum<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
@@ -238,6 +240,7 @@ export function normalizeConfig(input: unknown): Config {
 		showStartupHeader: source.showStartupHeader !== false,
 		scrollStepLines: pickPositiveInt(source.scrollStepLines, DEFAULT_CONFIG.scrollStepLines, 1, 50),
 		enableAgentSummary: source.enableAgentSummary !== false,
+		restoreInterruptedPrompt: source.restoreInterruptedPrompt !== false,
 	};
 }
 
@@ -286,6 +289,7 @@ export function formatConfigStatus(source: Config = config): string {
 		`startupHeader=${source.showStartupHeader ? "on" : "off"}`,
 		`scrollStep=${source.scrollStepLines}`,
 		`agentSummary=${source.enableAgentSummary ? "on" : "off"}`,
+		`restorePrompt=${source.restoreInterruptedPrompt ? "on" : "off"}`,
 	].join(" · ");
 }
 
