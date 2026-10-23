@@ -209,6 +209,22 @@ type ExpandedWrapEntry = { text: string; lines: string[] };
 const expandedWrapCache = new Map<string, ExpandedWrapEntry>();
 export const THINKING_EXPANDED_WRAP_CACHE_MAX = 64;
 
+// pi-prose-width keeps its state on the shared Markdown prototype; read it so thinking wraps at the same measure as other prose.
+const PROSE_WIDTH_STATE = Symbol.for("pi-prose-width");
+
+function proseMeasure(): number {
+	const state = (Markdown.prototype as unknown as Record<symbol, { active?: boolean; measure?: number } | undefined>)[
+		PROSE_WIDTH_STATE
+	];
+	return state?.active && typeof state.measure === "number" && state.measure > 0 ? state.measure : 0;
+}
+
+/** The width thinking text wraps at: the content width, capped at pi-prose-width's measure when it is loaded. */
+export function thinkingWrapWidth(contentWidth: number): number {
+	const measure = proseMeasure();
+	return Math.max(1, measure && contentWidth > measure ? measure : contentWidth);
+}
+
 function expandedWrapKey(messageTimestamp: number, runStartIndex: number, width: number): string {
 	return `${messageTimestamp}:${runStartIndex}:${width}`;
 }
@@ -279,7 +295,7 @@ function layoutThinkingPreview(
 	padding: number,
 ): { visible: string[]; hiddenLines: number } {
 	if (!text || config.previewLines <= 0) return { visible: [], hiddenLines: 0 };
-	const contentWidth = Math.max(1, width - padding * 2);
+	const contentWidth = thinkingWrapWidth(width - padding * 2);
 	const budget = Math.max(
 		width * (config.previewLines + PREVIEW_BUDGET_SLACK_LINES),
 		PREVIEW_BUDGET_MIN_CHARS,
@@ -293,7 +309,7 @@ function layoutThinkingPreview(
 		if (cut < source.length) source = source.slice(cut);
 		else cut = 0;
 	}
-	const cacheKey = `${width}:${padding}:${cut}:${source}`;
+	const cacheKey = `${contentWidth}:${cut}:${source}`;
 	let entry = getCachedPreview(cacheKey);
 	if (!entry) {
 		entry = {
@@ -345,6 +361,7 @@ export class ThinkingPreviewBlock implements Component {
 	private collapsedMemo:
 		| {
 				width: number;
+				measure: number;
 				previewLines: number;
 				hintHovered: boolean;
 				expandAction: string | undefined;
@@ -429,7 +446,12 @@ export class ThinkingPreviewBlock implements Component {
 		}
 		if (this.expanded) {
 			return {
-				lines: wrapExpandedThinking(this.messageTimestamp, this.runStartIndex, this.text, width),
+				lines: wrapExpandedThinking(
+					this.messageTimestamp,
+					this.runStartIndex,
+					this.text,
+					thinkingWrapWidth(width - padding * 2),
+				),
 				hiddenLines: 0,
 			};
 		}
@@ -460,6 +482,7 @@ export class ThinkingPreviewBlock implements Component {
 		const expandAction = thinkingExpandAction();
 		if (
 			this.collapsedMemo?.width === width &&
+			this.collapsedMemo.measure === proseMeasure() &&
 			this.collapsedMemo.previewLines === config.previewLines &&
 			this.collapsedMemo.hintHovered === this.hintHovered &&
 			this.collapsedMemo.expandAction === expandAction
@@ -477,6 +500,7 @@ export class ThinkingPreviewBlock implements Component {
 			: heading;
 		this.collapsedMemo = {
 			width,
+			measure: proseMeasure(),
 			previewLines: config.previewLines,
 			hintHovered: this.hintHovered,
 			expandAction,

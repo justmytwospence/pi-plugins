@@ -111,7 +111,7 @@ The renderer patches Pi's `ToolExecutionComponent`, `AssistantMessageComponent` 
 
 `write` is re-registered on `session_start` with a wrapper that records the previous file content so the result can be rendered as a diff. If another extension already owns `write`, this component yields and shows a notice instead of a diff.
 
-pi-tui's `Markdown` is not touched, so pi-prose-width's measure applies inside thinking, assistant messages and the agent summary. The footer is left to Pi or pi-status-footer.
+pi-tui's `Markdown` is not touched, so pi-prose-width's measure applies inside thinking, assistant messages and the agent summary. Compact thinking wraps its plain text itself, at the same measure: it reads pi-prose-width's state from the shared `Markdown` prototype, so `/prose-width` changes it too. The footer is left to Pi or pi-status-footer.
 
 ## What is not included
 

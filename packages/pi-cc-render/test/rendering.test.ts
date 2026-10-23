@@ -268,4 +268,30 @@ describe("compact thinking and Ctrl+O", () => {
     }
     expect(Object.hasOwn(AssistantMessageComponent.prototype, "setExpanded")).toBe(false);
   });
+
+  test("thinking wraps at pi-prose-width's measure when it is loaded", async () => {
+    const { ThinkingPreviewBlock } = await import("../src/feature/compact-thinking.ts");
+    const { Markdown } = await import("@earendil-works/pi-tui");
+    // pi-prose-width's shared state on the host's Markdown prototype (a separate pi-tui copy here).
+    const key = Symbol.for("pi-prose-width");
+    const proto = Markdown.prototype as any;
+    const words = Array.from({ length: 60 }, (_, i) => `word${i}`).join(" ");
+    // Body lines only: the heading carries the expand hint.
+    const longest = (lines: string[]) =>
+      Math.max(...plain(lines).filter((line) => line.includes("word")).map((line) => line.trimEnd().length));
+    const collapsed = new ThinkingPreviewBlock("Thinking", words, 1, 9001, (s) => s, undefined);
+    const expanded = new ThinkingPreviewBlock("Thinking", words, 1, 9002, (s) => s, undefined);
+    expanded.setExpanded(true);
+    expect(longest(collapsed.render(120))).toBeGreaterThan(60);
+    proto[key] = { active: true, measure: 40 };
+    try {
+      expect(longest(collapsed.render(120))).toBeLessThanOrEqual(41);
+      expect(longest(expanded.render(120))).toBeLessThanOrEqual(42);
+      proto[key].measure = 0;
+      expect(longest(collapsed.render(120))).toBeGreaterThan(60);
+    } finally {
+      delete proto[key];
+      expanded.setExpanded(false);
+    }
+  });
 });
