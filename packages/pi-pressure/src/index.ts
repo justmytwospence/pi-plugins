@@ -1,8 +1,9 @@
 // pi-pressure: a status that appears only while the machine is under CPU,
 // memory or thermal pressure, and disappears once it eases. pi-status-footer
 // folds it into its own footer row; without it, it shows in Pi's status row.
-// `/pressure` prints the readings, thresholds and top processes; `/pressure
-// on|off` toggles it.
+// It shows on its own when thresholds are hit; `/pressure` toggles it by hand
+// (`show` pins it, `hide` dismisses it until the episode ends, `auto` hands it
+// back), and `/pressure details` prints readings, thresholds and top processes.
 //
 // No polling: readings are taken when Pi does something (input, turns, tool
 // calls, streamed output) and when the macOS helper reports a state change.
@@ -14,7 +15,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createMonitor, DEFAULTS, formatRate, formatStatus, type Level, type Paint, type PressureConfig, SIGNALS, spark, topBy, type View } from "./pressure.ts";
+import { createMonitor, DEFAULTS, formatRate, formatStatus, type Level, type Mode, type Paint, type PressureConfig, SIGNALS, spark, topBy, type View } from "./pressure.ts";
 import { ensureHelper, startHelper } from "./darwin.ts";
 import { createSampler, type Sampler } from "./sample.ts";
 
@@ -63,10 +64,17 @@ const DARWIN_LEVELS: Record<number, string> = { 1: "normal", 2: "warn", 4: "crit
 const THERMAL_STATES = ["nominal", "fair", "serious (throttling)", "critical"];
 
 /** `/pressure`'s plain-text report. */
-export async function report(view: View | undefined, config: PressureConfig, sampler: Sampler, watching: boolean, source: string): Promise<string> {
+const MODE_TEXT: Record<Mode, string> = {
+  auto: "automatic",
+  shown: "shown by hand (/pressure auto hands it back)",
+  hidden: "hidden by hand until this episode ends",
+};
+
+export async function report(view: View | undefined, config: PressureConfig, sampler: Sampler, source: string): Promise<string> {
   const lines: string[] = [];
-  const state = !watching ? "off (/pressure on)" : view?.visible ? "showing" : "hidden";
-  lines.push(`Pressure: ${state}. Shows after ${config.showAfterMs / 1000}s at warn or above, hides ${config.hideAfterMs / 1000}s after it eases. Read on Pi activity; ${source}.`);
+  const state = view?.visible ? "showing" : "hidden";
+  const auto = config.enabled ? "" : " Automatic showing is off (enabled: false).";
+  lines.push(`Pressure: ${state}, ${MODE_TEXT[view?.mode ?? "auto"]}.${auto} Shows after ${config.showAfterMs / 1000}s at warn or above, hides ${config.hideAfterMs / 1000}s after it eases. Read on Pi activity; ${source}.`);
   const r = view?.reading;
   const lv = (signal: (typeof SIGNALS)[number]) => view?.levels[signal] ?? "ok";
   if (!r) lines.push("No reading yet.");
@@ -92,13 +100,17 @@ const isStaleCtx = (error: unknown) => error instanceof Error && /\bstale\b/iu.t
 
 const ACTIVITY = ["input", "agent_start", "agent_end", "turn_start", "turn_end", "tool_execution_start", "tool_execution_end", "message_update"] as const;
 
+export const SUBCOMMANDS = ["show", "hide", "auto", "details"] as const;
+
 export default function pressureExtension(pi: ExtensionAPI): void {
   const config = loadConfig();
   const sampler = createSampler();
-  let watching = config.enabled;
+  // Pinned by hand: survives session switches in this Pi process. A dismissal does not need to.
+  let pinned = false;
   let ctx: ExtensionContext | undefined;
   let generation = 0;
   let busy = false;
+  let again = false;
   let lastRead = 0;
   let wake: ReturnType<typeof setTimeout> | undefined;
   let helper: { stop(): void } | undefined;
@@ -144,8 +156,10 @@ export default function pressureExtension(pi: ExtensionAPI): void {
     wake.unref?.();
   };
 
-  const read = async (epoch: number, force = false) => {
-    if (busy || epoch !== generation || !ctx) return;
+  const read = async (epoch: number, force = false): Promise<void> => {
+    if (epoch !== generation || !ctx) return;
+    // A forced read (a kernel push, a timer, a command) during another runs right after it.
+    if (busy) { if (force) again = true; return; }
     if (!force && Date.now() - lastRead < config.minGapMs) return;
     busy = true;
     try {
@@ -171,6 +185,7 @@ export default function pressureExtension(pi: ExtensionAPI): void {
       if (isStaleCtx(error)) { stop(); ctx = undefined; }
     } finally {
       busy = false;
+      if (again && epoch === generation) { again = false; void read(epoch, true); }
     }
   };
 
@@ -195,12 +210,20 @@ export default function pressureExtension(pi: ExtensionAPI): void {
   const start = (context: ExtensionContext) => {
     stop();
     ctx = context;
-    if (!context.hasUI || !watching) return;
+    if (!context.hasUI) return;
     monitor = createMonitor(config);
+    if (pinned) monitor.setMode("shown");
     last = undefined;
     const epoch = generation;
     startHelperFor(epoch);
     void read(epoch, true);
+  };
+
+  /** Change the mode and redraw from a fresh reading. */
+  const setMode = async (mode: Mode) => {
+    pinned = mode === "shown";
+    last = monitor.setMode(mode);
+    await read(generation, true);
   };
 
   pi.on("session_start", (_event, context) => start(context));
@@ -208,34 +231,46 @@ export default function pressureExtension(pi: ExtensionAPI): void {
     stop();
     ctx = undefined;
   });
-  for (const event of ACTIVITY) pi.on(event as "turn_end", () => { if (watching) void read(generation); });
+  for (const event of ACTIVITY) pi.on(event as "turn_end", () => { void read(generation); });
 
   const source = () => process.platform === "darwin"
     ? helperState === "live" ? "macOS memory and thermal pushed by the kernel" : helperState === "starting" ? "macOS helper starting" : "macOS memory from sysctl (no Swift compiler for the helper)"
     : process.platform === "linux" ? "Linux memory from PSI totals" : "CPU only on this platform";
 
   pi.registerCommand("pressure", {
-    description: "CPU, memory and thermal pressure: readings, thresholds and top processes (`/pressure on|off` toggles the footer row)",
-    getArgumentCompletions: (prefix: string) => ["on", "off"].filter((v) => v.startsWith(prefix)).map((value) => ({ value, label: value })),
+    description: "Toggle the pressure row by hand; `show` pins it, `hide` dismisses it until the episode ends, `auto` hands it back, `details` reports readings",
+    getArgumentCompletions: (prefix: string) => SUBCOMMANDS.filter((v) => v.startsWith(prefix)).map((value) => ({ value, label: value })),
     handler: async (args, context) => {
       const arg = args.trim();
-      if (arg === "on" || arg === "off") {
-        watching = arg === "on";
-        if (watching) start(context);
-        else { stop(); ctx = context; }
-        context.ui.notify(`pressure: ${watching ? "watching" : "off"}`, "info");
+      if (arg === "details") {
+        if (ctx) await read(generation, true);
+        let view = ctx ? last : undefined;
+        if (!view) {
+          // No UI session: two quick reads of our own for a CPU delta.
+          const once = createSampler();
+          await once.sample();
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          view = createMonitor(config).step(await once.sample());
+        }
+        context.ui.notify(await report(view, config, sampler, source()), "info");
         return;
       }
-      if (watching) await read(generation, true);
-      let view = watching ? last : undefined;
-      if (!view) {
-        // Not watching: two quick reads of our own for a CPU delta.
-        const once = createSampler();
-        await once.sample();
-        await new Promise((resolve) => setTimeout(resolve, 300));
-        view = createMonitor(config).step(await once.sample());
+      if (arg && !(SUBCOMMANDS as readonly string[]).includes(arg)) {
+        context.ui.notify(`pressure: unknown "${arg}"; use ${SUBCOMMANDS.join(", ")}, or nothing to toggle`, "warning");
+        return;
       }
-      context.ui.notify(await report(view, config, sampler, watching, source()), "info");
+      if (!ctx) {
+        context.ui.notify("pressure: the row needs Pi's terminal UI", "warning");
+        return;
+      }
+      const visible = monitor.view().visible;
+      const mode: Mode = arg === "show" ? "shown" : arg === "hide" ? "hidden" : arg === "auto" ? "auto" : visible ? "hidden" : "shown";
+      await setMode(mode);
+      const view = monitor.view();
+      const note = view.mode === "shown" ? "shown until you hide it"
+        : view.mode === "hidden" ? "hidden until this episode ends"
+        : view.visible ? "automatic (showing: thresholds are hit)" : "automatic: shows when thresholds are hit";
+      context.ui.notify(`pressure: ${note}`, "info");
     },
   });
 }

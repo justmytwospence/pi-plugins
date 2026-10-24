@@ -29,7 +29,15 @@ A signal must stay at warn or above for 10 s before the row shows; an interval t
 
 The signals that rose during the episode, the busiest process (by memory when only memory is under pressure; `ps` runs only while the row shows, at most every 10 s), then a braille trace of CPU over the last hour: one dot column per minute (the minute's time-weighted mean), two minutes per character, current minute last. It comes last on the row and takes whatever width is left, keeping the newest minutes, so it starts at one character and grows.
 
-`/pressure` reports the current readings, levels, thresholds, where memory comes from, and the top five processes by CPU and by memory. `/pressure on|off` toggles watching for this Pi process.
+## Controls
+
+It shows on its own when thresholds are hit, and you can override it either way:
+
+- `/pressure` toggles the row: hides it if it is showing, shows it if not.
+- `/pressure show` pins it, with every signal's current reading even when nothing is under pressure, until you hide it. A pin lasts across sessions in this Pi process.
+- `/pressure hide` dismisses it for the rest of the current episode; once pressure has eased (the moment the row would have gone by itself), the next episode shows it again.
+- `/pressure auto` hands it back to the thresholds.
+- `/pressure details` reports the current readings, levels, thresholds, where memory comes from, and the top five processes by CPU and by memory.
 
 Settings (optional) in `~/.pi/agent/pi-pressure.json`, overridden by `.pi/pi-pressure.json`. Defaults:
 
@@ -42,6 +50,6 @@ Settings (optional) in `~/.pi/agent/pi-pressure.json`, overridden by `.pi/pi-pre
 }
 ```
 
-No dependencies or inference calls; sessions with a UI only.
+`enabled: false` stops it showing on its own; `/pressure show` still works. No dependencies or inference calls; sessions with a UI only.
 
 Docs: https://pi-plugins.vercel.app/plugins/pi-pressure/

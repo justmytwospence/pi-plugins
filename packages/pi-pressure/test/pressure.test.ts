@@ -178,6 +178,38 @@ describe("monitor", () => {
     // The current minute (3) has no time in it yet.
     expect(m.view().history).toEqual([40, 40, 70, undefined]);
   });
+  test("shown by hand: visible without pressure, every signal with a reading, kept current", () => {
+    const m = createMonitor(DEFAULTS);
+    m.step(reading(0, { memory: { source: "darwin", level: 1, since: 0 } }));
+    expect(m.nextCheck()).toBeUndefined();
+    const view = m.setMode("shown");
+    expect(view.visible).toBe(true);
+    expect(view.episode).toEqual(["cpu", "load", "mem"]);
+    expect(m.nextCheck()).toBe(DEFAULTS.refreshMs);
+    expect(formatStatus(view, undefined)).toMatch(/^pressure: cpu 20 ok \u00b7 load 0.5 ok \u00b7 mem ok \u00b7 [\u2800-\u28ff]+$/);
+    // It stays until hidden; hiding with no episode running hands it back to auto.
+    expect(m.step(reading(100_000)).visible).toBe(true);
+    m.setMode("hidden");
+    expect(m.step(reading(102_000)).mode).toBe("auto");
+    expect(m.nextCheck()).toBeUndefined();
+  });
+  test("hidden by hand: stays hidden for the rest of the episode, and the next one shows again", () => {
+    const m = createMonitor({ ...DEFAULTS, showAfterMs: 0 });
+    expect(m.step(reading(0, { cpu: 97 })).visible).toBe(true);
+    expect(m.setMode("hidden").visible).toBe(false);
+    expect(m.step(reading(20_000, { cpu: 97 })).visible).toBe(false);
+    // Still checking while idle, so it notices the episode end.
+    expect(m.nextCheck()).toBe(20_000 + DEFAULTS.refreshMs);
+    const eased = m.step(reading(25_000));
+    expect(eased.mode).toBe("hidden");
+    expect(m.step(reading(55_000)).mode).toBe("auto");
+    expect(m.step(reading(60_000, { cpu: 97 })).visible).toBe(true);
+  });
+  test("enabled: false never shows on its own, but shows by hand", () => {
+    const m = createMonitor({ ...DEFAULTS, enabled: false, showAfterMs: 0 });
+    expect(m.step(reading(0, { cpu: 97 })).visible).toBe(false);
+    expect(m.setMode("shown").visible).toBe(true);
+  });
   test("memory-only pressure names the biggest process", () => {
     const m = createMonitor({ ...DEFAULTS, showAfterMs: 0 });
     expect(topBy(m.step({ at: 0, cpu: 10, loadPerCore: 0.2, memory: { source: "psi", some: 50, full: 0 } }))).toBe("memory");
