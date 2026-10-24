@@ -277,6 +277,24 @@ describe("opening and focus", () => {
     pi.events.emit("herdr:blocked", { active: false });
     expect(sidebarEntry.visible({ width: 165, height: 50 })).toBe(true);
   });
+
+  it("collapses while main shows a UI prompt, held or not", async () => {
+    const { pi, controller, tui, ctx } = setup();
+    controller.openOrFocus(ctx as never);
+    const panel = panelOf(controller);
+    const root = tui.layoutRoot as SplitRoot;
+    const sidebarEntry = (root as unknown as { entries: Array<{ visible(v: unknown): boolean }> }).entries[2]!;
+    await pi.emit("ui_prompt_start", { type: "ui_prompt_start", reason: "ui_prompt", kind: "select", title: "Pick" }, ctx);
+    expect(sidebarEntry.visible({ width: 165, height: 50 })).toBe(false);
+    expect(panel.view.primary).toBe(false);
+    // A held dialog inside the prompt: Sidebar stays collapsed until both end.
+    pi.events.emit("herdr:blocked", { active: true, label: "question" });
+    await pi.emit("ui_prompt_end", { type: "ui_prompt_end", reason: "ui_prompt", kind: "select" }, ctx);
+    expect(sidebarEntry.visible({ width: 165, height: 50 })).toBe(false);
+    pi.events.emit("herdr:blocked", { active: false });
+    expect(sidebarEntry.visible({ width: 165, height: 50 })).toBe(true);
+    expect(panel.view.primary).toBe(true);
+  });
 });
 
 describe("asking", () => {

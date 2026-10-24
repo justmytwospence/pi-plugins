@@ -103,7 +103,7 @@ command = "pi-sidebar-nav.focus-left"
 
 Bind these only where your Pi sessions load pi-sidebar. A Pi without it ignores the reserved keys, so `prefix+h/l` would do nothing from that pane.
 
-The header shows, live, what main is doing and how much of Sidebar's last answer came from the cache. While another dialog holds `herdr:blocked` (for example a question from main), Sidebar steps aside so the dialog renders full width. That is what herdr-web-ui's phone parser reads. Sidebar comes back once the dialog is answered.
+The header shows, live, what main is doing and how much of Sidebar's last answer came from the cache. While a dialog waits in main (one that holds `herdr:blocked`, such as a question from main, or any Pi select, confirm, input or extension dialog), Sidebar steps aside so the dialog renders full width. That is what herdr-web-ui's and Collie's phone readers read. Sidebar comes back once the dialog is answered. Collie does not yet find main's editor while Sidebar is open (it takes Sidebar's composer for it, or finds none when Sidebar is beside main), so a phone send through Collie may be refused or misread until Sidebar is closed; `npm run check:clients` tracks this.
 
 **Thread storage**
 - Sidebar's thread lives in main's session as hidden entries (never sent to main's model).

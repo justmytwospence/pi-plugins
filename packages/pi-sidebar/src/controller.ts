@@ -58,6 +58,10 @@ export class SidebarController {
   private layout: SplitLayout | undefined;
   private mainFocus: Component | null = null;
   private blocked = 0;
+  /** Sidebar steps aside: a dialog holds `herdr:blocked` or a UI prompt is open in main. */
+  private get collapsed(): boolean {
+    return this.blocked > 0 || this.prompts > 0;
+  }
   private ticker: ReturnType<typeof setInterval> | undefined;
   private releaseInput: (() => void) | undefined;
   /** Prompts another program types into this pane, which go to main even while Sidebar has focus. */
@@ -87,8 +91,17 @@ export class SidebarController {
       knowledgeDir: process.env[KNOWLEDGE_ENV] ?? path.join(getAgentDir(), "pi-sidebar", "knowledge"),
       logFile: path.join(getAgentDir(), "pi-sidebar", "headsup.log"),
     });
-    pi.on("ui_prompt_start", () => { this.prompts++; });
-    pi.on("ui_prompt_end", () => { this.prompts = Math.max(0, this.prompts - 1); });
+    // A dialog in main (Pi's select/confirm/input/editor or an extension's custom UI) collapses
+    // Sidebar like a `herdr:blocked` hold, also for dialogs that hold none: remote clients
+    // (herdr-web-ui, Collie) read the dialog off a full-width screen.
+    pi.on("ui_prompt_start", () => {
+      this.prompts++;
+      this.render();
+    });
+    pi.on("ui_prompt_end", () => {
+      this.prompts = Math.max(0, this.prompts - 1);
+      this.render();
+    });
     pi.on("input", (event) => {
       if (event.source === "interactive") this.mainEditor = this.hostTui?.getFocusedComponent?.() ?? this.mainEditor;
       return undefined;
@@ -194,7 +207,7 @@ export class SidebarController {
       // approach).
       const panel = this.panel;
       Object.defineProperty(panel.view, "primary", {
-        get: () => this.panel === panel && this.isOpen && panel.focused && this.blocked === 0,
+        get: () => this.panel === panel && this.isOpen && panel.focused && !this.collapsed,
         configurable: true,
       });
       const theme = () => this.theme ?? ctx.ui.theme;
@@ -204,7 +217,7 @@ export class SidebarController {
         scrollSidebar: (lines) => panel.view.scrollBy(lines),
         sidebarPrimary: () => panel.view.primary,
         minColumns: parseMinColumns(process.env[MIN_COLUMNS_ENV]),
-        collapsed: () => this.blocked > 0,
+        collapsed: () => this.collapsed,
         focused: () => !!this.panel?.focused,
         // Accent in both states; the arrow in its middle points at the focused half.
         divider: (orientation, sidebarFocused, width, length) => dividerLines(orientation, width, (text) => theme().fg("borderAccent", text), {
@@ -242,7 +255,7 @@ export class SidebarController {
       } else this.injected.reset();
       const direction = navDirection(data);
       if (direction) {
-        const target = navTarget(direction, this.isOpen && this.blocked === 0, this.layout?.orientation ?? "right", !!this.panel?.focused);
+        const target = navTarget(direction, this.isOpen && !this.collapsed, this.layout?.orientation ?? "right", !!this.panel?.focused);
         if (target === "sidebar") this.focusSidebar();
         else if (target === "main") this.focusMain();
         else herdrFocus(direction);
@@ -259,7 +272,7 @@ export class SidebarController {
 
   /** Sidebar's composer has the keyboard: open, focused, and no dialog in main. */
   private sidebarTyping(): boolean {
-    return this.isOpen && !!this.panel?.focused && this.blocked === 0 && this.prompts === 0;
+    return this.isOpen && !!this.panel?.focused && !this.collapsed;
   }
 
   /**
@@ -283,7 +296,7 @@ export class SidebarController {
 
   /** Main's own editor has focus and is empty: no dialog, no Sidebar focus, nothing typed. */
   private editorIdle(ctx: ExtensionContext): boolean {
-    if (this.blocked > 0 || this.prompts > 0 || this.panel?.focused) return false;
+    if (this.collapsed || this.panel?.focused) return false;
     try { if (ctx.ui.getEditorText() !== "") return false; } catch { return false; }
     const focused = this.hostTui?.getFocusedComponent?.() ?? null;
     if (this.mainEditor) return focused === this.mainEditor;
@@ -311,7 +324,7 @@ export class SidebarController {
     for (const editor of new Set([this.mainFocus, this.mainEditor])) {
       muteEditorBorders(editor, () => {
         const theme = this.theme;
-        return theme && this.panel === panel && this.isOpen && panel.focused && this.blocked === 0 ? (text) => theme.fg("borderMuted", text) : undefined;
+        return theme && this.panel === panel && this.isOpen && panel.focused && !this.collapsed ? (text) => theme.fg("borderMuted", text) : undefined;
       });
     }
     panel.unread = false;
