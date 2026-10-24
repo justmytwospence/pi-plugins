@@ -96,3 +96,44 @@ export class WorkingStats {
     }
   }
 }
+
+/**
+ * Working-stats service (version 1) for other plugins' working rows, such as pi-sidebar's, so they
+ * read like main's. Discovery is a synchronous request over `pi.events`: the consumer emits
+ * `{ version: 1 }` on `WORKING_STATS_CHANNEL`; pi-status-footer sets `service` before `emit`
+ * returns while it shows main's working stats. Consumers copy these declarations structurally.
+ */
+export const WORKING_STATS_CHANNEL = "pi-plugins.working-stats.v1";
+
+export interface WorkingCounter {
+  /** Start a new run. */
+  reset(): void;
+  /** A streamed `assistantMessageEvent`. */
+  apply(event: AssistantMessageEvent): void;
+  /** The working message after `elapsedMs`, or undefined for the plain default. */
+  message(elapsedMs: number, base?: string): string | undefined;
+}
+
+export interface WorkingStatsService {
+  create(): WorkingCounter;
+  /** How often to refresh the message while a run lasts. */
+  refreshMs: number;
+}
+
+export interface WorkingStatsRequest {
+  version: 1;
+  service?: WorkingStatsService;
+  provider?: string;
+}
+
+export const workingStatsService: WorkingStatsService = {
+  refreshMs: WORKING_REFRESH_MS,
+  create() {
+    const stats = new WorkingStats();
+    return {
+      reset: () => stats.reset(),
+      apply: (event) => stats.apply(event),
+      message: (elapsedMs, base) => workingMessage(stats.tokens(), elapsedMs, base),
+    };
+  },
+};

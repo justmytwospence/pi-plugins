@@ -631,7 +631,12 @@ function host(entries = [], cwd = os.tmpdir(), mode = "tui", nativeBranch = null
   const handlers = new Map(), commands = new Map(), statuses = new Map(), notices = [], workingMessages = [];
   const commandInfos = [], tools = [];
   let footer, editorFactory, disposed = 0, paints = 0, name = "", trusted = false;
+  const listeners = new Map();
   const pi = {
+    events: {
+      on(channel, listener) { listeners.set(channel, [...(listeners.get(channel) ?? []), listener]); return () => {}; },
+      emit(channel, data) { for (const listener of listeners.get(channel) ?? []) listener(data); },
+    },
     on(event, handler) { handlers.set(event, handler); },
     registerCommand(key, command) { commands.set(key, command); },
     getThinkingLevel: () => "xhigh", getSessionName: () => name,
@@ -1688,4 +1693,21 @@ test("parseMarimoStatus reads the server address", async () => {
   const remote = mod.parseMarimoStatus("marimo: a.py · nb.example.com/lab · disconnected");
   assert.equal(remote.where, "nb.example.com/lab");
   assert.deepEqual(remote.notes, ["disconnected"]);
+});
+
+test("working-stats service: offered while main shows working stats, counting like main", async () => {
+  const h = host();
+  const ask = () => { const request = { version: 1 }; h.pi.events.emit("pi-plugins.working-stats.v1", request); return request; };
+  assert.equal(ask().service, undefined);
+  await h.handlers.get("session_start")({}, h.ctx);
+  const request = ask();
+  assert.equal(request.provider, "pi-status-footer");
+  const counter = request.service.create();
+  assert.equal(counter.message(1000), undefined);
+  counter.apply({ type: "text_delta", contentIndex: 0, delta: "x".repeat(40), partial: { content: [], usage: {} } });
+  assert.equal(counter.message(4000), "Working (\u2193 10 tokens \u00b7 4s)");
+  counter.reset();
+  assert.equal(counter.message(500), undefined);
+  await h.handlers.get("session_shutdown")({}, h.ctx);
+  assert.equal(ask().service, undefined);
 });

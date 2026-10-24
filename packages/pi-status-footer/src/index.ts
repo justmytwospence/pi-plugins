@@ -16,7 +16,7 @@ import { stripVTControlCharacters } from "node:util";
 import { CustomEditor, getAgentDir, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { builtinMcpOwnsCommand, connectedMcpServers, countMcp, McpConfigReader, MCP_STATUS_KEY, type McpCount } from "./mcp.ts";
-import { SHOW_TIMER_AFTER_MS, WORKING_REFRESH_MS, workingMessage, WorkingStats } from "./working.ts";
+import { SHOW_TIMER_AFTER_MS, WORKING_REFRESH_MS, WORKING_STATS_CHANNEL, workingMessage, WorkingStats, workingStatsService, type WorkingStatsRequest } from "./working.ts";
 import { WORKING_MESSAGE_EVENT, type WorkingMessageClaim } from "./working-message.ts";
 
 export * from "./mcp.ts";
@@ -1262,6 +1262,13 @@ export default function statusFooter(pi: ExtensionAPI): void {
     if (!active || !runStarted || !showWorking) return;
     setWorking(workingMessage(working.tokens(), Date.now() - runStarted));
   };
+  // Other plugins' working rows (pi-sidebar's) read like main's while main shows working stats.
+  pi.events?.on(WORKING_STATS_CHANNEL, (data) => {
+    const request = data as WorkingStatsRequest | undefined;
+    if (!active || !showWorking || !request || request.version !== 1 || request.service) return;
+    request.service = workingStatsService;
+    request.provider = "pi-status-footer";
+  });
   // herdr's pi integration counts these pairs; so do we, to shrink the footer while a dialog waits.
   pi.events?.on(HERDR_BLOCKED_EVENT, (data) => {
     const hold = data as { active?: unknown } | undefined;

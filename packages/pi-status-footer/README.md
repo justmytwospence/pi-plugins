@@ -5,7 +5,9 @@ It leaves task widgets and tool rendering alone, and keeps whichever editor is
 installed (pi's, pi-vim's), redrawing only its two border lines as the context
 gauge. It uses pi's current theme, without background color blocks or animation.
 While the agent runs, it adds streamed-output and elapsed-time statistics to
-pi's own working indicator message, keeping pi's spinner. Every footer row
+pi's own working indicator message, keeping pi's spinner. Other plugins' working
+rows (pi-sidebar's) get the same statistics over `pi.events` (channel
+`pi-plugins.working-stats.v1`, `src/working.ts`) while they are on. Every footer row
 leads with a dim Nerd Font icon: folder (project), git branch, robot
 (model) with a brain before the reasoning level, tachometer (context), book (marimo), cogs (background), microchip (pressure), archive
 (stash), and hourglass (limits). On the context row a plug marks MCP and a magic
