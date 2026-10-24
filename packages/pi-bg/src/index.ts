@@ -237,7 +237,7 @@ export default function piBg(pi: ExtensionAPI) {
     open: () => {
       if (ctx) openDialog(ctx.ui).catch(() => undefined);
     },
-  });
+  }, "pi-bg-pill");
   const bindPill = () => pill.setUI(attached && tui() && !hosted() ? (ctx?.ui as any) : undefined);
 
   const entryStatus = (t: Task): ActivityEntry["status"] =>

@@ -1,13 +1,13 @@
-// The pill under the prompt, Claude Code's background-tasks indicator: `2 shells`, plus
-// `1 failed` in the error color while a failure is unseen. `↓` at the bottom of the prompt (or `j`
-// in pi-vim's normal mode) selects it, even with a draft in the prompt; Enter, `l` or a click opens
-// the background-tasks view; Esc, `↑`, `k` or `h` goes back to the prompt.
-// With pi-subagents installed it draws nothing: pi-subagents' list under the prompt ends with the
-// same pill (activity.ts).
+// The pill under the prompt, Claude Code's background-tasks indicator: `2 shells` (pi-bg) or
+// `1 notebook` (pi-marimo), plus `1 failed` in the error color while a failure is unseen. `↓` at the
+// bottom of the prompt (or `j` in pi-vim's normal mode) selects it, even with a draft in the prompt;
+// Enter, `l` or a click opens the source's view; Esc, `↑`, `k` or `h` goes back to the prompt.
+// It is drawn only while no host shows the source's pill (activity.ts): pi-subagents' list under the
+// prompt, or pi-bg's pill for pi-marimo.
+// This file is copied verbatim into pi-bg and pi-marimo (src/pill.ts); change it in both
+// (scripts/test-contracts.mjs checks they stay identical).
 import { type TUI, type TuiMouseEvent, type TuiMouseEventResult, isKeyRelease, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { type ActivityPill, focusedComponent, leavesPromptDown, mainEditorFocused, readEditorMode } from "./activity.ts";
-
-const KEY = "pi-bg-pill";
 
 export interface Theme {
   fg(color: string, text: string): string;
@@ -52,7 +52,14 @@ export class PillView {
   private unsubscribe: (() => void) | undefined;
   private generation = 0;
 
-  constructor(private readonly source: PillSource) {}
+  private readonly source: PillSource;
+  /** Widget key, e.g. `pi-bg-pill`. */
+  private readonly key: string;
+
+  constructor(source: PillSource, key: string) {
+    this.source = source;
+    this.key = key;
+  }
 
   /** Bind to a session's UI, or to none (outside the TUI, or while another extension hosts the pill). */
   setUI(ui: PillUI | undefined): void {
@@ -76,7 +83,7 @@ export class PillView {
       return;
     }
     ui.setWidget(
-      KEY,
+      this.key,
       (tui, factoryTheme: Theme) => {
         if (generation === this.generation) this.tui = tui;
         return {
@@ -171,7 +178,7 @@ export class PillView {
     this.selected = false;
     this.registered = false;
     this.tui = undefined;
-    if (registered) this.ui?.setWidget(KEY, undefined);
+    if (registered) this.ui?.setWidget(this.key, undefined);
   }
 
   dispose(): void {
@@ -186,7 +193,7 @@ export class PillView {
     this.registered = false;
     this.tui = undefined;
     try {
-      if (registered) ui?.setWidget(KEY, undefined);
+      if (registered) ui?.setWidget(this.key, undefined);
     } finally {
       unsubscribe?.();
     }

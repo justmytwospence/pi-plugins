@@ -8,6 +8,8 @@ const components = manifest.pi.extensions.map(p => p.split('/')[2]);
 const identical = [
   ['pi-bg','pi-subagents','pi-marimo','pi-plan-mode','pi-herdr'].map(p => `packages/${p}/src/activity.ts`),
   ['pi-bg','pi-status-footer'].map(p => `packages/${p}/src/working-message.ts`),
+  ['pi-bg','pi-marimo'].map(p => `packages/${p}/src/pill.ts`),
+  ['pi-bg','pi-marimo'].map(p => `packages/${p}/src/frame.ts`),
   ['pi-auto-effort','pi-copy','pi-next-prompt','pi-subagents','pi-tool-gate'].map(p => `packages/${p}/src/jev.ts`),
   ['pi-auto-effort','pi-copy','pi-next-prompt','pi-subagents'].map(p => `packages/${p}/src/transcript.ts`),
   ['pi-auto-effort','pi-next-prompt','pi-tool-gate'].map(p => `packages/${p}/src/config.ts`),

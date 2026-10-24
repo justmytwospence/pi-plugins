@@ -10,7 +10,8 @@
       "node"
     ],
     "rootDir": ".",
-    "noUncheckedIndexedAccess": true
+    "noUncheckedIndexedAccess": true,
+    "allowImportingTsExtensions": true
   },
   "include": [
     "src/**/*.ts"

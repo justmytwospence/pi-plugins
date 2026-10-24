@@ -247,7 +247,7 @@ describe("pill cleanup", () => {
         return removed;
       };
     });
-    const pill = new PillView({ pill: () => ({ label: "work" }), open: vi.fn() });
+    const pill = new PillView({ pill: () => ({ label: "work" }), open: vi.fn() }, "pi-bg-pill");
     pill.setUI(c.ctx.ui as any);
     pill.update();
     const savedWidget = c.widgetComponent();

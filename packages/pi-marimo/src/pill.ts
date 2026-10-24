@@ -1,12 +1,13 @@
-// The pill under the prompt, copied from pi-bg's src/pill.ts (only the import path and widget key differ):
-// `1 notebook`, plus `1 failed` in the error color while a failure is unseen. pi-marimo draws it
-// only while no host shows its pill (pi-subagents' list, pi-bg's pill). `↓` at the bottom of the
-// prompt (or `j` in pi-vim's normal mode) selects it; Enter, `l` or a click opens the busiest
-// notebook; Esc, `↑`, `k` or `h` goes back to the prompt.
+// The pill under the prompt, Claude Code's background-tasks indicator: `2 shells` (pi-bg) or
+// `1 notebook` (pi-marimo), plus `1 failed` in the error color while a failure is unseen. `↓` at the
+// bottom of the prompt (or `j` in pi-vim's normal mode) selects it, even with a draft in the prompt;
+// Enter, `l` or a click opens the source's view; Esc, `↑`, `k` or `h` goes back to the prompt.
+// It is drawn only while no host shows the source's pill (activity.ts): pi-subagents' list under the
+// prompt, or pi-bg's pill for pi-marimo.
+// This file is copied verbatim into pi-bg and pi-marimo (src/pill.ts); change it in both
+// (scripts/test-contracts.mjs checks they stay identical).
 import { type TUI, type TuiMouseEvent, type TuiMouseEventResult, isKeyRelease, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import { type ActivityPill, focusedComponent, leavesPromptDown, mainEditorFocused, readEditorMode } from "../activity.js";
-
-const KEY = "pi-marimo-pill";
+import { type ActivityPill, focusedComponent, leavesPromptDown, mainEditorFocused, readEditorMode } from "./activity.ts";
 
 export interface Theme {
   fg(color: string, text: string): string;
@@ -49,22 +50,30 @@ export class PillView {
   private registered = false;
   private selected = false;
   private unsubscribe: (() => void) | undefined;
+  private generation = 0;
 
-  constructor(private readonly source: PillSource) {}
+  private readonly source: PillSource;
+  /** Widget key, e.g. `pi-bg-pill`. */
+  private readonly key: string;
+
+  constructor(source: PillSource, key: string) {
+    this.source = source;
+    this.key = key;
+  }
 
   /** Bind to a session's UI, or to none (outside the TUI, or while another extension hosts the pill). */
   setUI(ui: PillUI | undefined): void {
     if (ui === this.ui) return;
-    this.hide();
-    this.unsubscribe?.();
-    this.unsubscribe = undefined;
+    this.dispose();
+    const generation = this.generation;
     this.ui = ui;
-    if (ui) this.unsubscribe = ui.onTerminalInput((data) => this.handleKey(data));
+    if (ui) this.unsubscribe = ui.onTerminalInput((data) => generation === this.generation ? this.handleKey(data) : undefined);
   }
 
   update(): void {
     const ui = this.ui;
     if (!ui) return;
+    const generation = this.generation;
     if (!this.source.pill(Date.now())) {
       this.hide();
       return;
@@ -74,13 +83,13 @@ export class PillView {
       return;
     }
     ui.setWidget(
-      KEY,
+      this.key,
       (tui, factoryTheme: Theme) => {
-        this.tui = tui;
+        if (generation === this.generation) this.tui = tui;
         return {
-          render: (width: number) => renderPill(this.source.pill(Date.now()), this.selected, width, ui.theme ?? factoryTheme),
+          render: (width: number) => generation === this.generation ? renderPill(this.source.pill(Date.now()), this.selected, width, ui.theme ?? factoryTheme) : [],
           handleMouse: (e: TuiMouseEvent): TuiMouseEventResult | undefined => {
-            if (e.button !== "left") return undefined;
+            if (generation !== this.generation || e.button !== "left") return undefined;
             // pi turns a press and release into a click only for the component that took the press.
             if (e.type === "press") return { handled: true, render: false };
             if (e.type !== "click") return undefined;
@@ -96,8 +105,14 @@ export class PillView {
     this.registered = true;
   }
 
+  /** Optional select-nav routing; a selected single pill stays selected on Tab. */
+  tab(activeOnly = false): boolean {
+    if (activeOnly && !this.selected) return false;
+    return this.handleKey("\t", true)?.consume === true;
+  }
+
   /** `{ consume: true }` for the keys the pill takes; undefined lets a key through. */
-  handleKey(data: string): KeyResult {
+  handleKey(data: string, enterWithTab = false): KeyResult {
     if (!this.ui || !this.registered || isKeyRelease(data)) return undefined;
     if (!this.editorFocused()) {
       this.deselect();
@@ -107,7 +122,11 @@ export class PillView {
       const focused = this.focused();
       // Without a view of the editor, only an empty prompt is safe to leave.
       const down = focused ? leavesPromptDown(focused, data, matchesKey(data, "down"), data === "j") : matchesKey(data, "down") && this.ui.getEditorText() === "";
-      if (down) {
+      const mode = readEditorMode(focused);
+      const tab = enterWithTab && matchesKey(data, "tab") && !mode?.autocomplete
+        && !(focused as { isShowingAutocomplete?: () => boolean } | undefined)?.isShowingAutocomplete?.()
+        && (!mode || mode.state === "normal" || mode.state === "insert");
+      if (down || tab) {
         this.selected = true;
         this.tui?.requestRender();
         return { consume: true };
@@ -115,7 +134,7 @@ export class PillView {
       return undefined;
     }
     const modal = readEditorMode(this.focused());
-    const navigation = ["enter", "escape", "up", "down", "left", "right"].some((key) => matchesKey(data, key as never));
+    const navigation = ["enter", "escape", "up", "down", "left", "right", "tab"].some((key) => matchesKey(data, key as never));
     if ((modal && (modal.autocomplete || (modal.state !== "normal" && modal.state !== "insert"))) || (modal?.state !== "normal" && !navigation)) {
       this.deselect();
       return undefined;
@@ -129,7 +148,7 @@ export class PillView {
       this.deselect();
       return { consume: true };
     }
-    if (matchesKey(data, "down") || matchesKey(data, "j")) return { consume: true };
+    if (matchesKey(data, "down") || matchesKey(data, "j") || matchesKey(data, "tab")) return { consume: true };
     // Anything else goes back to the editor.
     this.deselect();
     return undefined;
@@ -155,16 +174,28 @@ export class PillView {
   }
 
   private hide(): void {
+    const registered = this.registered;
     this.selected = false;
-    if (this.registered) this.ui?.setWidget(KEY, undefined);
     this.registered = false;
     this.tui = undefined;
+    if (registered) this.ui?.setWidget(this.key, undefined);
   }
 
   dispose(): void {
-    this.hide();
-    this.unsubscribe?.();
-    this.unsubscribe = undefined;
+    const ui = this.ui;
+    const registered = this.registered;
+    const unsubscribe = this.unsubscribe;
+    // Forget all session-bound state before touching a possibly invalidated UI.
+    this.generation++;
     this.ui = undefined;
+    this.unsubscribe = undefined;
+    this.selected = false;
+    this.registered = false;
+    this.tui = undefined;
+    try {
+      if (registered) ui?.setWidget(this.key, undefined);
+    } finally {
+      unsubscribe?.();
+    }
   }
 }

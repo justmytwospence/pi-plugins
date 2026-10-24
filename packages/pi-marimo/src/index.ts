@@ -28,9 +28,9 @@ import { MarimoWatcher, type Mode, parseMode } from "./core/watcher.js";
 import { HerdrHold } from "./herdr.js";
 import { spawn } from "node:child_process";
 import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION } from "./activity.js";
-import { FULL_SCREEN } from "./ui/frame.js";
+import { FULL_SCREEN } from "./frame.ts";
 import { interruptKernel } from "./ui/interrupt.js";
-import { PillView } from "./ui/pill.js";
+import { PillView } from "./pill.ts";
 import { NotebookSource } from "./ui/source.js";
 import { NotebookView, type ViewActions } from "./ui/view.js";
 
@@ -140,7 +140,7 @@ export default function piMarimo(pi: ExtensionAPI): void {
     open: () => {
       if (ctxRef) void source.section.openDialog?.(ctxRef.ui).catch(() => undefined);
     },
-  });
+  }, "pi-marimo-pill");
   /** pi-marimo draws its own pill only in the TUI, and only while no host (pi-subagents, pi-bg) shows it. */
   const bindPill = () => {
     ownPill.setUI(ctxRef?.mode === "tui" && !source.hosted ? (ctxRef.ui as never) : undefined);

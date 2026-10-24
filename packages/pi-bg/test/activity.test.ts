@@ -163,7 +163,7 @@ it("Tab can select a background pill with a draft, cycle safely and return with 
   const editor = new Editor(tui as any, { borderColor: (s: string) => s } as any);
   editor.setText("keep this draft");
   const c = fakeCtx("/w"); const open = vi.fn();
-  const pill = new PillView({ pill: () => ({ label: "1 shell" }), open });
+  const pill = new PillView({ pill: () => ({ label: "1 shell" }), open }, "pi-bg-pill");
   pill.setUI(c.ctx.ui as any); pill.update();
   c.widgets.get("pi-bg-pill")({ ...tui, getFocusedComponent: () => editor }, theme).render(100);
   try {
@@ -182,12 +182,12 @@ it("Tab can select a background pill with a draft, cycle safely and return with 
 });
 
 it("both pills leave typed navigation letters to the native editor", async () => {
-  const { PillView: NotebookPill } = await import(new URL("../../pi-marimo/src/ui/pill.ts", import.meta.url).href);
+  const { PillView: NotebookPill } = await import(new URL("../../pi-marimo/src/pill.ts", import.meta.url).href);
   for (const [View, widgetKey] of [[PillView, "pi-bg-pill"], [NotebookPill, "pi-marimo-pill"]] as const) {
     const editor = new Editor(tui as any, { borderColor: (s: string) => s } as any);
     const c = fakeCtx("/w");
     const open = vi.fn();
-    const pill = new View({ pill: () => ({ label: "work" }), open });
+    const pill = new View({ pill: () => ({ label: "work" }), open }, widgetKey);
     pill.setUI(c.ctx.ui as any);
     pill.update();
     c.widgets.get(widgetKey)({ ...tui, getFocusedComponent: () => editor }, theme).render(100);
@@ -210,7 +210,7 @@ it("a real pi-vim main editor yields only idle navigation; pending/visual/EX/emb
   const editor = new MainEditor(tui, { ...theme, borderColor: (s: string) => s }, { matches: () => false });
   const c = fakeCtx("/w");
   const liveTui = { ...tui, getFocusedComponent: () => editor };
-  const pill = new PillView({ pill: () => ({ label: "one shell" }), open: () => {} });
+  const pill = new PillView({ pill: () => ({ label: "one shell" }), open: () => {} }, "pi-bg-pill");
   pill.setUI(c.ctx.ui as any);
   pill.update();
   try {

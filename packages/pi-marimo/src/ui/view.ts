@@ -11,7 +11,7 @@ import type { Followed } from "../core/watcher.js";
 import { kernelStateParts, lensParts } from "../bg.js";
 import { INPUT_CONTEXT } from "../activity.js";
 import { interruptKey, notebookKey, notebookPath } from "./identity.js";
-import { banner, bottom, row as frameRow, rule as frameRule, type FrameTheme } from "./frame.js";
+import { banner, bottom, row as frameRow, rule as frameRule, type FrameTheme } from "../frame.ts";
 
 /** Banner, two header lines, two rules, hints, bottom border. */
 const CHROME = 7;

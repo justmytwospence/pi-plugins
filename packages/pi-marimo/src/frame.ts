@@ -1,6 +1,7 @@
-// The full-screen frame of pi-marimo's notebook view, copied from pi-bg's src/frame.ts so both look the
-// same: it takes over the whole screen, with a banner in the accent color that says this is not the
-// main session and how to get back.
+// The full-screen frame of pi-bg's views (the background-tasks dialog, a task's log) and pi-marimo's
+// notebook view: they take over the whole screen, the way Claude Code and Codex switch the main view
+// to a subagent's transcript, with a banner in the accent color that says this is not the main
+// session and how to get back. Copied verbatim into pi-bg and pi-marimo (src/frame.ts); change both.
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 export interface FrameTheme {
