@@ -68,6 +68,7 @@ test("a subagent's session draws as Pi draws main: transcript, working row, edit
   expect(out).toContain("Working");
   // The editor's rules, then the list (this session marked), then the footer.
   expect(out).toMatch(/─{20}\n.*\n─{20}[^]*○ main\n ◉ Find where the config is loaded  scout/u);
+  expect(out).toContain("esc back to main · tab/shift+tab switch · ↓ list");
   expect(out).toContain("claude-haiku-5 • low");
   expect(out).toContain(`/tmp • ${"Find where the config is loaded"}`);
   // The transcript sits at the top; the editor and footer at the bottom.

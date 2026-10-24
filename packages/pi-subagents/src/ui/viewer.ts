@@ -495,7 +495,8 @@ export class SessionView implements Component, Focusable {
       return;
     }
     this.stopArmed = false;
-    if (!this.suite && matchesKey(data, "escape") && !autocomplete) return this.close();
+    // Esc goes back to main. With pi-vim it first leaves Insert mode, unless there is nothing to edit.
+    if (matchesKey(data, "escape") && !autocomplete && (!this.suite || (mode?.state === "insert" && !text))) return this.close();
     const down = matchesKey(data, "down");
     if (this.listShown() && !autocomplete && leavesPromptDown(composer, data, down, data === "j" && mode?.state === "normal")) return this.enterList();
     composer.handleInput(data);
@@ -624,6 +625,8 @@ export class SessionView implements Component, Focusable {
       const selected = this.listActive ? this.listSelected : current;
       const entry = roster[selected];
       const canBackground = entry?.kind === "run" && Boolean(safe(() => this.actions(entry.run).canBackground?.()));
+      // How to get back, since nothing else on this screen says it is not main.
+      if (!this.listActive) dock.push(truncateToWidth(` ${th.fg("dim", `esc back to main · tab/shift+tab switch · ↓ list`)}`, width));
       dock.push(...renderFleet({ roster, selected, current, active: this.listActive, stopArmed: this.listStopArmed, canBackground, normalKeys: true, now: Date.now(), width, theme: th }));
     } else dock.push("");
     dock.push(...this.footerLines(width));

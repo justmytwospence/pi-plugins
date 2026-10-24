@@ -122,7 +122,15 @@ test("the session view's editor is actual pi-vim's embedded editor; modes, focus
   // Esc in idle Normal mode goes back to main.
   viewer.handleInput(KEY.escape); viewer.handleInput(KEY.escape);
   expect(closed).toBe(1);
-  viewer.dispose(); await h.emit("session_shutdown", { reason: "quit" }, ctx);
+  viewer.dispose();
+  // With nothing typed, one Esc in Insert mode goes straight back.
+  let left = 0;
+  const fresh = new SessionView(ui.tui as never, run, plain, () => left++, { events: h.pi.events, steer: () => true }, keys);
+  fresh.focused = true; fresh.render(120);
+  expect(fresh[EDITOR_MODE]()?.state).toBe("insert");
+  fresh.handleInput(KEY.escape);
+  expect(left).toBe(1);
+  fresh.dispose(); await h.emit("session_shutdown", { reason: "quit" }, ctx);
 });
 
 test("actual pi-status-footer draws the child's footer and context gauge in the session view", async () => {
