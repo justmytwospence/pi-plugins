@@ -1,8 +1,10 @@
-// A planner's (or your main agent's) conversation as Pi itself shows it: Pi's own message and tool
-// components, fed by the session's events the way Pi's interactive mode feeds its chat, so
-// Markdown, thinking, tool calls and results, and every extension tool's renderer look as they do
-// in pi. Plan mode adds only notes (plan submitted, delivered, stopped) and labels for messages
-// someone else sent (your main agent).
+// A conversation as Pi itself shows it (a planner's or your main agent's in plan mode, Sidebar's):
+// Pi's own message and tool components, fed by the session's events the way Pi's interactive mode
+// feeds its chat, so Markdown, thinking, tool calls and results, and every extension tool's renderer
+// look as they do in Pi. Plan mode adds only notes (plan submitted, delivered, stopped) and labels
+// for messages someone else sent (your main agent); Sidebar hides quiz blocks (`displayAssistant`).
+// Copied verbatim into pi-plan-mode (src/app/pi-chat.ts) and pi-sidebar (src/pi-chat.ts); change
+// both (scripts/test-contracts.mjs checks they stay identical).
 import {
   AssistantMessageComponent,
   createBashToolDefinition,
@@ -17,7 +19,14 @@ import {
   ToolExecutionComponent,
   UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
-import { type Component, Container, Spacer, Text } from "@earendil-works/pi-tui";
+import {
+  type Component,
+  Container,
+  Spacer,
+  Text,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
+} from "@earendil-works/pi-tui";
 
 /** What a tool call needs to render: its definition's renderCall/renderResult, if it has them. */
 export type ToolRenderers = ConstructorParameters<typeof ToolExecutionComponent>[4];
@@ -29,6 +38,8 @@ export interface PiChatOptions {
   /** Show user messages as their events arrive (your main session); planners label theirs instead. */
   userMessagesFromEvents?: boolean;
   requestRender?(): void;
+  /** The assistant message as shown (Sidebar hides quiz mode's rubric and grade blocks). */
+  displayAssistant?<T extends { role?: string; content?: unknown }>(message: T): T;
 }
 
 type Tone = "info" | "warning" | "error";
@@ -62,6 +73,11 @@ export class PiChat {
     private readonly options: PiChatOptions,
   ) {}
 
+  /** The transcript's components, top to bottom. */
+  get children(): readonly Component[] {
+    return this.container.children;
+  }
+
   get empty() {
     return this.container.children.length === 0;
   }
@@ -90,6 +106,15 @@ export class PiChat {
 
   get thinkingHidden() {
     return this.hideThinking;
+  }
+
+  /** Clicks on the transcript, such as a tool card's "click to show more", in document rows. */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    try {
+      return this.container.handleMouse(event);
+    } catch {
+      return undefined;
+    }
   }
 
   render(width: number): string[] {
@@ -158,12 +183,12 @@ export class PiChat {
         } else if (message?.role === "assistant") {
           this.streaming = this.assistant(undefined);
           this.add(this.streaming);
-          this.streaming.updateContent(message as never, true);
+          this.streaming.updateContent(this.shown(message) as never, true);
         }
         break;
       case "message_update":
         if (this.streaming && message?.role === "assistant") {
-          this.streaming.updateContent(message as never, true);
+          this.streaming.updateContent(this.shown(message) as never, true);
           for (const call of toolCalls(message)) {
             const existing = this.pendingTools.get(call.id);
             if (existing) existing.updateArgs(call.arguments);
@@ -173,7 +198,7 @@ export class PiChat {
         break;
       case "message_end":
         if (this.streaming && message?.role === "assistant") {
-          this.streaming.updateContent(message as never, false);
+          this.streaming.updateContent(this.shown(message) as never, false);
           if (message.stopReason === "aborted" || message.stopReason === "error") {
             const text = message.errorMessage || (message.stopReason === "aborted" ? "Operation aborted" : "Error");
             for (const component of this.pendingTools.values()) {
@@ -238,11 +263,19 @@ export class PiChat {
   }
 
   private assistant(message: Message | undefined) {
-    const component = new AssistantMessageComponent(message as never, this.hideThinking, getMarkdownTheme());
+    const component = new AssistantMessageComponent(
+      (message ? this.shown(message) : message) as never,
+      this.hideThinking,
+      getMarkdownTheme(),
+    );
     // pi-cc-render makes assistant messages expandable (Ctrl+O opens collapsed thinking): keep them
     // in step with this chat's own toggle instead of main's.
     (component as { setExpanded?(value: boolean): void }).setExpanded?.(this.expanded);
     return component;
+  }
+
+  private shown(message: Message): Message {
+    return this.options.displayAssistant ? this.options.displayAssistant(message) : message;
   }
 
   private tool(call: ToolCall) {

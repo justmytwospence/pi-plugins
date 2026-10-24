@@ -1,8 +1,10 @@
-// Sidebar's conversation as Pi itself shows it: Pi's own message and tool components, fed by the
-// session's events the way Pi's interactive mode feeds its chat, so Markdown, thinking, tool calls
-// and results look as they do in Pi.
-// Copied from packages/pi-plan-mode/src/app/pi-chat.ts (same suite) so pi-sidebar has no sibling
-// imports; keep the two in step.
+// A conversation as Pi itself shows it (a planner's or your main agent's in plan mode, Sidebar's):
+// Pi's own message and tool components, fed by the session's events the way Pi's interactive mode
+// feeds its chat, so Markdown, thinking, tool calls and results, and every extension tool's renderer
+// look as they do in Pi. Plan mode adds only notes (plan submitted, delivered, stopped) and labels
+// for messages someone else sent (your main agent); Sidebar hides quiz blocks (`displayAssistant`).
+// Copied verbatim into pi-plan-mode (src/app/pi-chat.ts) and pi-sidebar (src/pi-chat.ts); change
+// both (scripts/test-contracts.mjs checks they stay identical).
 import {
   AssistantMessageComponent,
   createBashToolDefinition,
@@ -17,7 +19,14 @@ import {
   ToolExecutionComponent,
   UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
-import { type Component, Container, Spacer, Text, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
+import {
+  type Component,
+  Container,
+  Spacer,
+  Text,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
+} from "@earendil-works/pi-tui";
 
 /** What a tool call needs to render: its definition's renderCall/renderResult, if it has them. */
 export type ToolRenderers = ConstructorParameters<typeof ToolExecutionComponent>[4];
@@ -254,7 +263,11 @@ export class PiChat {
   }
 
   private assistant(message: Message | undefined) {
-    const component = new AssistantMessageComponent((message ? this.shown(message) : message) as never, this.hideThinking, getMarkdownTheme());
+    const component = new AssistantMessageComponent(
+      (message ? this.shown(message) : message) as never,
+      this.hideThinking,
+      getMarkdownTheme(),
+    );
     // pi-cc-render makes assistant messages expandable (Ctrl+O opens collapsed thinking): keep them
     // in step with this chat's own toggle instead of main's.
     (component as { setExpanded?(value: boolean): void }).setExpanded?.(this.expanded);
