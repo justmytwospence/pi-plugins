@@ -684,7 +684,7 @@ export default function subagents(pi: ExtensionAPI) {
     name: "subagent",
     label: "Subagent",
     description:
-      "Prefer doing work directly. Delegate only genuinely independent tasks with a clear payoff, or when the user requests it; each subagent adds its own context and token usage. action=run (default): a single `task`, parallel `tasks`, or a `chain` whose steps can use {previous}. Omit agent, model, or thinking to let Jev choose them; implicit models stay on the parent session's provider. `async: true` returns run ids at once and delivers each result as a message. action=status|steer|stop|result take `id` (steer also `message`).",
+      "Each subagent adds its own context and token usage. action=run (default): a single `task`, parallel `tasks`, or a `chain` whose steps can use {previous}. Omit agent, model, or thinking to let Jev choose them; implicit models stay on the parent session's provider. `async: true` returns run ids at once and delivers each result as a message. action=status|steer|stop|result take `id` (steer also `message`).",
     promptSnippet: "Delegate self-contained tasks to subagents with their own context windows",
     promptGuidelines: [
       "Prefer direct work for routine investigation, diagnosis, and verification. Do not delegate merely because work is long or multistep, or commission a redundant audit of work you are already doing. Delegate only genuinely independent tasks with a clear payoff or when requested; when delegating report-back work, use headless subagents rather than interactive Herdr sessions.",
