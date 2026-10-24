@@ -241,6 +241,10 @@ describe("status", () => {
     // One read a minute: too sparse for a trend.
     expect(formatStatus(view, "vitest")).toBe("pressure: cpu 97 hot · load 1.6 warn · mem warn · thermal warn · top vitest");
     expect(formatStatus(view, undefined)).not.toMatch(/[%$#>]$/);
+    // The label takes the level's color as well as the value.
+    const tagged = formatStatus(view, undefined, { level: (level, text) => `<${level}>${text}</>`, dim: (text) => text })!;
+    expect(tagged).toContain("<hot>cpu</> <hot>97 hot</>");
+    expect(tagged).toContain("<warn>mem</> <warn>warn</>");
     expect(topBy(view)).toBe("cpu");
     expect(formatStatus({ ...view, visible: false }, "x")).toBeUndefined();
   });

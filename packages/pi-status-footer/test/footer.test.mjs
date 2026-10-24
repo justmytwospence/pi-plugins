@@ -559,6 +559,15 @@ test("pi-pressure's signals get their own row, with arrows while they move", () 
   assert.equal(plain(mod.renderFooter(s, 160, theme)[3]), " \uf2db Pressure cpu 97 \u2191 \u00b7 load 1.6 \u00b7 mem warn \u2193 \u00b7 thermal hot \u00b7 swap-in 40MB/s \u00b7 top vitest");
   // Narrow: the culprit and eased signals go; hot and warn signals stay.
   assert.equal(plain(mod.renderFooter(s, 46, theme)[3]), "\uf2db Pressure cpu 97 \u2191 \u00b7 mem warn \u2193 \u00b7 thermal hot");
+  // Label, value and arrow all take the level's color.
+  // Zero-width SGR codes stand in for the theme's colors.
+  const sgr = { error: 31, warning: 33, muted: 37 };
+  const tags = { fg: (color, text) => `\x1b[${sgr[color] ?? 39}m${text}\x1b[0m`, bold: (text) => text };
+  const tagged = mod.renderFooter(s, 160, tags)[3];
+  const tint = (color, text) => `\x1b[${sgr[color]}m${text}\x1b[0m`;
+  for (const [color, label, value] of [["error", "cpu", "97"], ["warning", "load", "1.6"], ["warning", "mem", "warn"], ["error", "thermal", "hot"], ["muted", "swap-in", "40MB/s"]]) {
+    assert.ok(tagged.includes(`${tint(color, label)} ${tint(color, value)}`), label);
+  }
   for (const width of [46, 120]) {
     for (const row of mod.renderFooter(s, width, theme).map(plain)) assert.doesNotMatch(row, /[%$#>]\s*$/);
   }

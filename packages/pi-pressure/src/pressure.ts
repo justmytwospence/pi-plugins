@@ -241,11 +241,11 @@ export function formatStatus(view: View, top: string | undefined, paint: Paint =
     const value = (text: string) => paint.level(level, [text, arrow, level].filter(Boolean).join(" "));
     if (signal === "cpu") {
       const busy = r?.cpu;
-      items.push(`${paint.dim("cpu")} ${value(busy === undefined ? "" : `${Math.round(busy)}`)}`);
-    } else if (signal === "load") items.push(`${paint.dim("load")} ${value(r ? r.loadPerCore.toFixed(1) : "")}`);
-    else if (signal === "mem") items.push(`${paint.dim("mem")} ${value("")}`);
-    else if (signal === "heat") items.push(`${paint.dim("thermal")} ${value("")}`);
-    else items.push(`${paint.dim("swap-in")} ${value(r?.swapInBps === undefined ? "" : formatRate(r.swapInBps))}`);
+      items.push(`${paint.level(level, "cpu")} ${value(busy === undefined ? "" : `${Math.round(busy)}`)}`);
+    } else if (signal === "load") items.push(`${paint.level(level, "load")} ${value(r ? r.loadPerCore.toFixed(1) : "")}`);
+    else if (signal === "mem") items.push(`${paint.level(level, "mem")} ${value("")}`);
+    else if (signal === "heat") items.push(`${paint.level(level, "thermal")} ${value("")}`);
+    else items.push(`${paint.level(level, "swap-in")} ${value(r?.swapInBps === undefined ? "" : formatRate(r.swapInBps))}`);
   }
   if (top) items.push(`${paint.dim("top")} ${top}`);
   return `${paint.dim("pressure:")} ${items.join(paint.dim(" \u00b7 "))}`;

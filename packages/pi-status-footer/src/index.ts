@@ -774,8 +774,8 @@ function bgRow(items: BgItem[], width: number, theme: Paint): string {
   return fitSegments(segments, width, theme);
 }
 
-// pi-pressure's signals: the value (or the level, for memory and thermal) in the
-// level's color, with an arrow while it is moving significantly; hot signals
+// pi-pressure's signals: label and value (or the level, for memory and thermal)
+// in the level's color, with an arrow while it is moving significantly; hot signals
 // stay longest when narrow, then warn, then eased ones, and the busiest
 // process goes first.
 function pressureRow(items: PressureItem[], width: number, theme: Paint): string {
@@ -785,7 +785,8 @@ function pressureRow(items: PressureItem[], width: number, theme: Paint): string
     if (item.kind === "top") { segments.push({ text: `${theme.fg("dim", "top")} ${theme.fg("muted", item.name)}`, priority: 20 }); continue; }
     const value = theme.bold(theme.fg(color[item.level], item.value ?? item.level));
     const arrow = item.trend ? ` ${theme.fg(color[item.level], item.trend === "up" ? "\u2191" : "\u2193")}` : "";
-    segments.push({ text: `${theme.fg("muted", item.name)} ${value}${arrow}`, priority: item.level === "hot" ? 100 : item.level === "warn" ? 90 : 55 });
+    // The label takes the level's color too, so the row reads at a glance.
+    segments.push({ text: `${theme.fg(color[item.level], item.name)} ${value}${arrow}`, priority: item.level === "hot" ? 100 : item.level === "warn" ? 90 : 55 });
   }
   return fitSegments(segments, width, theme);
 }
