@@ -820,7 +820,7 @@ export default function piBg(pi: ExtensionAPI) {
     name: "bg_run",
     label: "Background",
     description:
-      "Run a shell command in the background, in its own process group, with its output in a log file. kind=job for a finite command whose result you need: you are woken with its outcome when it exits. kind=service for something that keeps running (dev or notebook server, tunnel, watcher): set `ready` to a regex for the line that means it is up; you are woken once when it matches, or if it exits. Jobs and services stop when this pi session ends, except services with keep=true.",
+      "Run a shell command in the background, in its own process group, with its output in a log file. kind=job for a finite command whose result you need: you are woken with its outcome when it exits. kind=service for something that keeps running (dev or notebook server, tunnel, watcher): set `ready` to a regex for the line that means it is up; you are woken once when it matches, or if it exits. Jobs and services stop when this pi session ends, except services with keep=true. Don't pipe through `tail`, `head` or similar; the log keeps the full output, `bg_wait` returns its end, and `bg_logs` with `grep` finds the rest.",
     promptSnippet: "Run long commands (jobs) or servers (services) in the background; wait on them with bg_wait",
     promptGuidelines: [
       "Use bg_run for commands that may take more than a minute (kind=job) and for anything that must keep running (kind=service); plain bash for the rest.",
