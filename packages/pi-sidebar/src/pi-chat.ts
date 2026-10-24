@@ -1,10 +1,11 @@
-// A conversation as Pi itself shows it (a planner's or your main agent's in plan mode, Sidebar's):
+// A conversation as Pi itself shows it (a planner's or your main agent's in plan mode, Sidebar's, a subagent's):
 // Pi's own message and tool components, fed by the session's events the way Pi's interactive mode
 // feeds its chat, so Markdown, thinking, tool calls and results, and every extension tool's renderer
 // look as they do in Pi. Plan mode adds only notes (plan submitted, delivered, stopped) and labels
 // for messages someone else sent (your main agent); Sidebar hides quiz blocks (`displayAssistant`).
-// Copied verbatim into pi-plan-mode (src/app/pi-chat.ts) and pi-sidebar (src/pi-chat.ts); change
-// both (scripts/test-contracts.mjs checks they stay identical).
+// Copied verbatim into pi-plan-mode (src/app/pi-chat.ts), pi-sidebar (src/pi-chat.ts) and
+// pi-subagents (src/ui/pi-chat.ts); change all three (scripts/test-contracts.mjs checks they stay
+// identical).
 import {
   AssistantMessageComponent,
   createBashToolDefinition,
@@ -169,6 +170,8 @@ export class PiChat {
         pending.delete(message.toolCallId);
       }
     }
+    // Calls still waiting for a result (a session seeded mid-tool) get it from later events.
+    for (const [id, component] of pending) this.pendingTools.set(id, component);
     this.changed();
   }
 
