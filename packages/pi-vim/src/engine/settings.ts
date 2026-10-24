@@ -35,6 +35,9 @@ export type SurfaceSyncMap = {
 export type PiVimSettings = {
   clipboardMirror?: unknown;
   displayLineMotion?: unknown;
+  wordMotion?: unknown;
+  targets?: unknown;
+  surround?: unknown;
   exCommand?: unknown;
   globalExCommand?: unknown;
   modeColors?: ModeColorSettings;
@@ -132,6 +135,20 @@ export function readPiVimClipboardMirrorSetting(g: unknown, p: unknown) {
 export function readPiVimDisplayLineMotion(g: unknown, p: unknown) {
   let v = get(p, "displayLineMotion");
   if (v === M) v = get(g, "displayLineMotion");
+  return v === M ? undefined : v;
+}
+
+/**
+ * A boolean feature toggle (wordMotion, targets, surround): the project value
+ * wins when present, else the global one.
+ */
+export function readPiVimToggle(
+  g: unknown,
+  p: unknown,
+  key: "wordMotion" | "targets" | "surround",
+) {
+  let v = get(p, key);
+  if (v === M) v = get(g, key);
   return v === M ? undefined : v;
 }
 
@@ -275,6 +292,9 @@ function disk(cwd: string): PiVimSettings {
   return {
     clipboardMirror: readPiVimClipboardMirrorSetting(g, p),
     displayLineMotion: readPiVimDisplayLineMotion(g, p),
+    wordMotion: readPiVimToggle(g, p, "wordMotion"),
+    targets: readPiVimToggle(g, p, "targets"),
+    surround: readPiVimToggle(g, p, "surround"),
     exCommand: readPiVimExCommandSetting(g, p),
     globalExCommand: readPiVimGlobalExCommandSetting(g, p),
     modeColors: readPiVimModeColors(g, p),

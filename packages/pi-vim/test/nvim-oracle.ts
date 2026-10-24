@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { ModalEditor } from "../src/index.js";
+import type { ModalEditorOptions } from "../src/engine/modal-editor.js";
 import { stubKeybindings, stubTheme, stubTui } from "./harness.js";
 
 export type NvimParityMode = "normal" | "insert" | "visual" | "visual-line";
@@ -20,11 +24,44 @@ export type NvimParityInitialState = {
   register?: string;
 };
 
+/** Vim plugins a case runs with: loaded in Neovim, enabled in pi-vim. */
+export type NvimParityPlugin = "targets" | "surround" | "wordmotion";
+
 export type NvimParityCase = {
   name: string;
   initial: NvimParityInitialState;
   keys: string[];
+  plugins?: NvimParityPlugin[];
+  /** Ex commands Neovim runs before the keys (e.g. `set sw=2 et`). */
+  setup?: string[];
 };
+
+const PLUGIN_DIRS: Record<NvimParityPlugin, string[]> = {
+  targets: ["targets.vim"],
+  surround: ["vim-repeat", "vim-surround"],
+  wordmotion: ["vim-wordmotion"],
+};
+
+/** Where the Vim plugins are checked out (`PI_VIM_PLUGIN_DIR`, else ~/.vim/plugins). */
+export const VIM_PLUGIN_DIR = process.env.PI_VIM_PLUGIN_DIR ?? join(homedir(), ".vim", "plugins");
+
+function pluginPaths(plugins: NvimParityPlugin[] = []): string[] {
+  return plugins.flatMap((plugin) => PLUGIN_DIRS[plugin].map((dir) => join(VIM_PLUGIN_DIR, dir)));
+}
+
+/** True when every plugin a case needs is installed, so the oracle can load it. */
+export function pluginsAvailable(plugins: NvimParityPlugin[] = []): boolean {
+  return pluginPaths(plugins).every((path) => existsSync(path));
+}
+
+function piOptionsFor(plugins: NvimParityPlugin[] = []): ModalEditorOptions {
+  return {
+    targets: plugins.includes("targets"),
+    surround: plugins.includes("surround"),
+    wordMotion: plugins.includes("wordmotion"),
+    shiftWidth: 2,
+  };
+}
 
 export type NvimParitySnapshot = {
   text: string;
@@ -73,6 +110,11 @@ const NVIM_MODE_MAP: Record<string, NvimParityMode> = {
 
 const NVIM_DRIVER_LUA = [
   "local input = vim.json.decode(vim.env.PI_VIM_NVIM_SCENARIO)",
+  "for _, p in ipairs(input.plugins) do vim.opt.rtp:prepend(p) end",
+  "for _, p in ipairs(input.plugins) do for _, f in ipairs(vim.fn.globpath(p, 'plugin/*.vim', 0, 1)) do vim.cmd('source ' .. vim.fn.fnameescape(f)) end end",
+  // Neovim 0.12's default `in`/`an` selection maps would shadow targets.vim's `n`.
+  "if #input.plugins > 0 then for _, m in ipairs({'in', 'an'}) do pcall(vim.keymap.del, {'o', 'x'}, m) end end",
+  "for _, c in ipairs(input.setup) do vim.cmd(c) end",
   "local lines = vim.split(input.text, '\\n', { plain = true })",
   "if #lines == 0 then lines = { '' } end",
   "vim.api.nvim_buf_set_lines(0, 0, -1, true, lines)",
@@ -158,7 +200,7 @@ function takePiSnapshot(editor: ModalEditor): NvimParitySnapshot {
 }
 
 export function runPiParityCase(testCase: NvimParityCase): NvimParitySnapshot {
-  const editor = new ModalEditor(stubTui, stubTheme, stubKeybindings);
+  const editor = new ModalEditor(stubTui, stubTheme, stubKeybindings, piOptionsFor(testCase.plugins));
   editor.setClipboardFn(() => undefined);
   editor.setClipboardReadFn(() => null);
   editor.setText(testCase.initial.text);
@@ -186,6 +228,8 @@ export async function runNvimParityCase(
     mode: testCase.initial.mode ?? "normal",
     register: testCase.initial.register ?? "",
     keys: testCase.keys.map(toNvimKey),
+    plugins: pluginPaths(testCase.plugins),
+    setup: testCase.setup ?? [],
   };
 
   const child = spawn(
@@ -236,8 +280,10 @@ export async function runNvimParityCase(
   }
 
   const combinedOutput = `${stdout}\n${stderr}`;
+  // Messages such as a search pattern echo can precede the result on its line.
   const resultLine = combinedOutput
     .split(/\r?\n/)
+    .map((line) => line.slice(Math.max(0, line.indexOf(NVIM_RESULT_PREFIX))))
     .find((line) => line.startsWith(NVIM_RESULT_PREFIX));
 
   if (!resultLine) {

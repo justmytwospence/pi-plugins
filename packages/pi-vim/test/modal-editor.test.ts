@@ -4122,10 +4122,11 @@ describe("linewise operators and counts", () => {
   it("invalid continuation after counted delete cancels cleanly", () => {
     const { editor } = createMultiLineEditor("foo bar\nbaz");
 
+    // `z` takes an argument, so `w` is swallowed with the cancelled `d2z`.
     sendKeys(editor, ["d", "2", "z", "w", "x"]);
 
-    assert.equal(editor.getText(), "foo ar\nbaz");
-    assert.equal(editor.getRegister(), "b");
+    assert.equal(editor.getText(), "oo bar\nbaz");
+    assert.equal(editor.getRegister(), "f");
   });
 
   it("counted delete motion d2w deletes two words", () => {
@@ -9770,11 +9771,11 @@ describe("visual mode — entering and leaving", () => {
   });
 
   it("a count before a swallowed visual key does not leak into the next motion", () => {
-    // `p` is inert in visual mode (pi swallows it), so the pending count must
-    // be dropped: `v2pld` must behave exactly like `vld` — extend by one and
+    // `.` is inert in visual mode (pi swallows it), so the pending count must
+    // be dropped: `v2.ld` must behave exactly like `vld` — extend by one and
     // delete two chars — not carry the 2 into `l` and over-delete.
     const leaked = createEditorWithSpy("hello");
-    sendKeys(leaked.editor, ["v", "2", "p", "l", "d"]);
+    sendKeys(leaked.editor, ["v", "2", ".", "l", "d"]);
 
     const baseline = createEditorWithSpy("hello");
     sendKeys(baseline.editor, ["v", "l", "d"]);
@@ -9861,12 +9862,12 @@ describe("visual mode — inert normal-mode commands", () => {
     return editor;
   };
 
-  it("u does not undo and does not leave visual mode", () => {
-    const { editor } = createEditorWithSpy("hello");
-    sendKeys(editor, ["x"]); // "ello"
-    sendKeys(editor, ["v", "u"]);
-    assert.equal(editor.getText(), "ello");
-    assert.equal(editor.getMode(), "visual");
+  it("u lowercases the selection instead of undoing", () => {
+    const { editor } = createEditorWithSpy("HELLO");
+    sendKeys(editor, ["x"]); // "ELLO"
+    sendKeys(editor, ["v", "l", "u"]);
+    assert.equal(editor.getText(), "elLO");
+    assert.equal(editor.getMode(), "normal");
   });
 
   it("ctrl+r does not redo while a selection is live", () => {
@@ -9877,12 +9878,16 @@ describe("visual mode — inert normal-mode commands", () => {
     assert.equal(editor.getMode(), "visual");
   });
 
-  it("p and P do not put the register", () => {
+  it("p and P replace the selection and keep the register", () => {
     const { editor } = createEditorWithSpy("hello");
     editor.setRegister("XY");
-    sendKeys(editor, ["v", "p", "P"]);
-    assert.equal(editor.getText(), "hello");
-    assert.equal(editor.getMode(), "visual");
+    sendKeys(editor, ["v", "l", "p"]);
+    assert.equal(editor.getText(), "XYllo");
+    assert.equal(editor.getRegister(), "XY");
+    assert.equal(editor.getMode(), "normal");
+    sendKeys(editor, ["v", "P"]);
+    assert.equal(editor.getText(), "XXYllo");
+    assert.equal(editor.getRegister(), "XY");
   });
 
   it("i, a, A and I do not open insert mode", () => {
@@ -9893,19 +9898,21 @@ describe("visual mode — inert normal-mode commands", () => {
     }
   });
 
-  it("r does not start a pending replace", () => {
-    const editor = stays(["r", "Z"]);
-    assert.equal(editor.getText(), "hello");
-    assert.equal(editor.getMode(), "visual");
+  it("r replaces every selected character", () => {
+    const { editor } = createEditorWithSpy("hello");
+    sendKeys(editor, ["v", "l", "l", "r", "Z"]);
+    assert.equal(editor.getText(), "ZZZlo");
+    assert.equal(editor.getMode(), "normal");
   });
 
-  it("J does not join lines, with or without a g prefix", () => {
-    const { editor } = createMultiLineEditor("abc\ndef");
-    sendKeys(editor, ["v", "J"]);
-    assert.equal(editor.getText(), "abc\ndef");
-    sendKeys(editor, ["g", "J"]);
-    assert.equal(editor.getText(), "abc\ndef");
-    assert.equal(editor.getMode(), "visual");
+  it("J and gJ join the selected lines", () => {
+    const joined = createMultiLineEditor("abc\ndef");
+    sendKeys(joined.editor, ["v", "j", "J"]);
+    assert.equal(joined.editor.getText(), "abc def");
+    const raw = createMultiLineEditor("abc\ndef");
+    sendKeys(raw.editor, ["v", "j", "g", "J"]);
+    assert.equal(raw.editor.getText(), "abcdef");
+    assert.equal(raw.editor.getMode(), "normal");
   });
 
   it(": does not open the EX mini-mode", () => {

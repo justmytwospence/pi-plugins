@@ -59,6 +59,16 @@ export function resolveSessionConfig(
     warnings.push("Invalid piVim.displayLineMotion; expected a boolean.");
   }
 
+  // Plugin behaviour pi-vim reproduces (vim-wordmotion, targets.vim,
+  // surround.vim): on unless a setting turns it off.
+  const toggles = { wordMotion: true, targets: true, surround: true };
+  for (const key of ["wordMotion", "targets", "surround"] as const) {
+    const value = settings[key];
+    if (value === undefined) continue;
+    if (typeof value === "boolean") toggles[key] = value;
+    else warnings.push(`Invalid piVim.${key}; expected a boolean.`);
+  }
+
   const modeColors = resolveModeColors(settings.modeColors);
   const { borderSync, labelSync } = resolveSurfaceSyncMaps(settings);
   // Both surfaces get their colorizers unconditionally; the editor installs
@@ -74,6 +84,7 @@ export function resolveSessionConfig(
     offBorderColor: theme ? buildOffBorderColor(theme) : null,
     labelTransform: reverseVideo,
     displayLineMotion,
+    ...toggles,
   };
 
   const handlers = new Map<EditorSurface, ModeChangeFn>();

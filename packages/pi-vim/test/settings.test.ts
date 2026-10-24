@@ -11,10 +11,13 @@ import {
   readPiVimLabelSync,
   readPiVimModeChange,
   readPiVimModeColors,
+  readPiVimToggle,
   resolveExCommandSettings,
+  setPiVimSettingsReaderForTests,
   resolveSurfaceSyncMaps,
   type SurfaceSyncMap,
 } from "../src/engine/settings.js";
+import { resolveSessionConfig } from "../src/session.js";
 
 describe("piVim mode color settings reader", () => {
   it("returns undefined when mode colors are missing", () => {
@@ -677,5 +680,28 @@ describe("piVim exCommand settings resolver", () => {
       resolved.warning,
       "Invalid piVim.exCommand copyInputToClipboard; expected a boolean.",
     );
+  });
+});
+
+describe("piVim plugin toggles (wordMotion, targets, surround)", () => {
+  it("reads project before global", () => {
+    const g = { piVim: { wordMotion: false, targets: false } };
+    const p = { piVim: { targets: true } };
+    assert.equal(readPiVimToggle(g, p, "wordMotion"), false);
+    assert.equal(readPiVimToggle(g, p, "targets"), true);
+    assert.equal(readPiVimToggle(g, p, "surround"), undefined);
+  });
+
+  it("defaults every toggle on and warns about non-booleans", () => {
+    const restore = setPiVimSettingsReaderForTests(() => ({ surround: false, targets: "yes" }));
+    try {
+      const config = resolveSessionConfig("/tmp", undefined, () => {});
+      assert.equal(config.editorOptions.wordMotion, true);
+      assert.equal(config.editorOptions.targets, true);
+      assert.equal(config.editorOptions.surround, false);
+      assert.deepEqual(config.warnings, ["Invalid piVim.targets; expected a boolean."]);
+    } finally {
+      restore();
+    }
   });
 });

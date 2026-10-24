@@ -5,7 +5,27 @@
 export type Mode = "normal" | "insert" | "visual" | "visual-line";
 export type CharMotion = "f" | "F" | "t" | "T";
 export type PendingMotion = CharMotion | null;
-export type PendingOperator = "d" | "c" | "y" | null;
+/**
+ * Operators beyond d/c/y, named by the keys that start them: case changes,
+ * shifts, surround.vim's `ys`/`yS`, and operators pi-vim accepts but leaves
+ * the text alone for (formatting, filters, folds) so their motion is consumed.
+ */
+export type GenericOperator =
+  | "gu"
+  | "gU"
+  | "g~"
+  | "g?"
+  | ">"
+  | "<"
+  | "ys"
+  | "yS"
+  | "gq"
+  | "gw"
+  | "g@"
+  | "="
+  | "!"
+  | "zf";
+export type PendingOperator = "d" | "c" | "y" | GenericOperator | null;
 
 export interface LastCharMotion {
   motion: CharMotion;

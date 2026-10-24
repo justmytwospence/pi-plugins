@@ -68,6 +68,7 @@ import {
   type SurfaceSyncMap,
 } from "./settings.js";
 import {
+  normalizeDelimiterKey,
   resolveDelimitedTextObjectRange,
   resolveMatchingPairMotionTarget,
   resolveWordTextObjectRange,
@@ -77,6 +78,7 @@ import {
 } from "./text-objects.js";
 import type {
   CharMotion,
+  GenericOperator,
   LastCharMotion,
   Mode,
   PendingMotion,
@@ -105,6 +107,40 @@ import {
   type VisualMode,
   type VisualPosition,
 } from "./visual.js";
+import { incrementNumber } from "./increment.js";
+import {
+  surroundAdd,
+  surroundChange,
+  surroundLineSpan,
+  surroundNeedsInput,
+  type SurroundReplacement,
+} from "./surround.js";
+import {
+  isTargetsTrigger,
+  resolveTargetsObject,
+  type TargetsModifier,
+} from "./targets.js";
+import {
+  bckendWord,
+  bckWord,
+  BACKWARD,
+  currentBlock,
+  currentLine,
+  currentParagraph,
+  currentQuote,
+  currentSentence,
+  currentTagBlock,
+  deleteBecomesLinewise,
+  endWord,
+  findSentence,
+  FORWARD,
+  fwdWord,
+  type OpSpan,
+  resolveOpSpan,
+} from "./vim-objects.js";
+import { comparePos, type Pos, samePos, VimBuffer } from "./vim-pos.js";
+import { startPS as startsParagraph } from "./vim-objects.js";
+import { wordmotionMotion, wordmotionObject } from "./wordmotion.js";
 import {
   WordBoundaryCache,
   type WordMotionDirection,
@@ -142,7 +178,135 @@ const REPEATABLE_COMMAND_START_KEYS = new Set([
   "s",
   "x",
   "X",
+  // Changes added on top of the upstream engine: case and shift operators,
+  // surround.vim's `ys` (a yank that changes nothing is never committed),
+  // Replace mode and number increments.
+  "y",
+  "~",
+  ">",
+  "<",
+  "R",
+  "\x01",
+  "\x18",
 ]);
+
+const GENERIC_OPERATORS = new Set<string>([
+  "gu",
+  "gU",
+  "g~",
+  "g?",
+  ">",
+  "<",
+  "ys",
+  "yS",
+  "gq",
+  "gw",
+  "g@",
+  "=",
+  "!",
+  "zf",
+]);
+/** The key that repeats an operator for whole lines (`guu`, `>>`, `yss`). */
+const OPERATOR_LINE_KEY: Record<GenericOperator, string> = {
+  gu: "u",
+  gU: "U",
+  "g~": "~",
+  "g?": "?",
+  ">": ">",
+  "<": "<",
+  ys: "s",
+  yS: "S",
+  gq: "q",
+  gw: "w",
+  "g@": "@",
+  "=": "=",
+  "!": "!",
+  zf: "f",
+};
+/**
+ * Commands pi-vim does not support that take one more key (a register, mark
+ * or macro name, a `z`/`Z`/`[`/`]` command). The next key is swallowed so it
+ * never runs as a command of its own (`"ayw`, `qa`, `ma`).
+ */
+const ARGUMENT_PREFIX_KEYS = new Set(["q", "@", "m", "`", "'", "Z", "z", "[", "]"]);
+/** The same inside an operator (`d'a`, `y]]`). */
+const OPERATOR_ARGUMENT_PREFIX_KEYS = new Set(["`", "'", "[", "]", "z", '"']);
+
+type ObjectKind = TextObjectKind | "I" | "A";
+
+const BRACKET_OBJECT_PAIRS: Record<string, [string, string]> = {
+  "(": ["(", ")"],
+  ")": ["(", ")"],
+  b: ["(", ")"],
+  "{": ["{", "}"],
+  "}": ["{", "}"],
+  B: ["{", "}"],
+  "[": ["[", "]"],
+  "]": ["[", "]"],
+  "<": ["<", ">"],
+  ">": ["<", ">"],
+};
+
+function rot13(ch: string): string {
+  const code = ch.charCodeAt(0);
+  if (code >= 65 && code <= 90) return String.fromCharCode(((code - 65 + 13) % 26) + 65);
+  if (code >= 97 && code <= 122) return String.fromCharCode(((code - 97 + 13) % 26) + 97);
+  return ch;
+}
+
+/** Text for gu, gU, g~ (swap case) and g? (rot13). */
+function transformCase(op: string, text: string): string {
+  switch (op) {
+    case "gu":
+      return text.toLowerCase();
+    case "gU":
+      return text.toUpperCase();
+    case "g?":
+      return text.replace(/[A-Za-z]/g, rot13);
+    default:
+      return Array.from(text, (ch) => {
+        const lower = ch.toLowerCase();
+        return ch === lower ? ch.toUpperCase() : lower;
+      }).join("");
+  }
+}
+
+const normalizeDelimiterKeyForLegacy = (key: string): boolean => normalizeDelimiterKey(key) !== null;
+
+type SurroundSpan = {
+  startAbs: number;
+  endAbs: number;
+  linewise: boolean;
+  startLine: number;
+  endLine: number;
+};
+
+type PendingSurround = {
+  kind: "add" | "delete" | "change";
+  stage: "target" | "replacement" | "input";
+  count: number;
+  /** Keys typed so far, for the mode label. */
+  keys: string;
+  span?: SurroundSpan;
+  fromVisual?: boolean;
+  special?: boolean;
+  target?: string;
+  targetDigits?: string;
+  targetSpace?: boolean;
+  char?: string;
+  extraSpace?: boolean;
+  input: string;
+};
+
+type ObjectSpan = OpSpan & {
+  /**
+   * The span came from a Visual selection (a plugin object): an inclusive end
+   * on an empty line or past the end of a line takes the line break too.
+   */
+  visualEnd?: boolean;
+  /** targets.vim found an empty object: `c` inserts there, `d` leaves it. */
+  empty?: boolean;
+};
 // Normal-mode commands that must never run while a visual selection is live.
 // They are swallowed instead of falling through to the normal-mode dispatch.
 const VISUAL_IGNORED_KEYS = new Set([
@@ -306,18 +470,51 @@ export type ModalEditorOptions = {
   // Reverse-video transform applied to the label. When the label defers to the
   // host color it is wrapped with this so it keeps its block styling.
   labelTransform?: ((s: string) => string) | null;
+  // vim-wordmotion: lowercase w/b/e/ge/iw/aw split CamelCase, snake_case and
+  // kebab-case words. Off by default in the engine (stock Vim words).
+  wordMotion?: boolean;
+  // targets.vim text objects (seeking pairs and quotes, I/A, n, separators,
+  // arguments). Off by default in the engine (stock Vim objects).
+  targets?: boolean;
+  // surround.vim (ys, yss, yS, ds, cs, Visual S). Off by default in the
+  // engine (Visual S stays Vim's linewise change).
+  surround?: boolean;
+  // Columns per shift for >, < and surround indentation. Default 2.
+  shiftWidth?: number;
 };
 
 export class ModalEditor extends CustomEditor {
   private mode: Mode = "insert";
   private pendingMotion: PendingMotion = null;
-  private pendingTextObject: TextObjectKind | null = null;
+  private pendingTextObject: ObjectKind | null = null;
   private pendingOperator: PendingOperator = null;
   private prefixCount: string = "";
   private operatorCount: string = "";
   private pendingG: boolean = false;
   private pendingGCount: string = "";
   private pendingReplace: boolean = false;
+  /** `g` typed while an operator waits for its motion (`dgg`, `gUge`). */
+  private pendingOpG: boolean = false;
+  /** targets.vim `n` (next) between `i`/`a`/`I`/`A` and the trigger. */
+  private pendingTextObjectWhich: "n" | null = null;
+  /** An unsupported command's prefix whose argument key is swallowed. */
+  private pendingSwallow: string | null = null;
+  /** `"` typed: the next key names a register. */
+  private pendingRegister: boolean = false;
+  /** `"_`: the next command's register write is dropped. */
+  private blackHoleRegister: boolean = false;
+  private blackHoleArmedThisKey: boolean = false;
+  private pendingSurround: PendingSurround | null = null;
+  /** Replace mode (`R`): the characters each typed key overwrote. */
+  private replaceSession: { originals: (string | null)[] } | null = null;
+  private lastVisual: { mode: VisualMode; anchor: VisualPosition; cursor: VisualPosition } | null = null;
+  /** Where Insert mode was last left (Vim's `'^`), for `gi`. */
+  private lastInsertPos: VisualPosition | null = null;
+  private lastStarSearch: { pattern: string; forward: boolean } | null = null;
+  private readonly wordMotion: boolean;
+  private readonly targets: boolean;
+  private readonly surround: boolean;
+  private readonly shiftWidth: number;
   private visualAnchor: VisualPosition | null = null;
   private pendingExCommand: string | null = null;
   private acceptingBracketedPasteInExCommand: boolean = false;
@@ -417,6 +614,10 @@ export class ModalEditor extends CustomEditor {
     this.labelSync = opts?.labelSync ?? null;
     this.labelTransform = opts?.labelTransform ?? null;
     this.displayLineMotion = opts?.displayLineMotion === true;
+    this.wordMotion = opts?.wordMotion === true;
+    this.targets = opts?.targets === true;
+    this.surround = opts?.surround === true;
+    this.shiftWidth = Math.max(1, Math.floor(opts?.shiftWidth ?? 2));
     this.installModeBorderColorizer();
   }
 
@@ -473,12 +674,17 @@ export class ModalEditor extends CustomEditor {
 
   /** Pending normal-mode keys as typed (`"2d"`, `"f"`, `"g"`); `""` when idle. */
   private getPendingKeys(): string {
-    let keys = this.prefixCount;
+    let keys = this.pendingRegister ? '"' : "";
+    keys += this.prefixCount;
     if (this.pendingOperator) keys += this.pendingOperator + this.operatorCount;
+    if (this.pendingOpG) keys += "g";
     if (this.pendingG) keys += `g${this.pendingGCount}`;
     if (this.pendingMotion) keys += this.pendingMotion;
     if (this.pendingTextObject) keys += this.pendingTextObject;
+    if (this.pendingTextObjectWhich) keys += this.pendingTextObjectWhich;
     if (this.pendingReplace) keys += "r";
+    if (this.pendingSwallow) keys += this.pendingSwallow;
+    if (this.pendingSurround) keys += this.pendingSurround.keys;
     return keys;
   }
 
@@ -1022,7 +1228,9 @@ export class ModalEditor extends CustomEditor {
       this.pendingTextObject !== null ||
       this.pendingOperator !== null ||
       this.pendingG ||
-      this.pendingReplace
+      this.pendingReplace ||
+      this.pendingOpG ||
+      this.pendingSurround !== null
     );
   }
 
@@ -1458,6 +1666,12 @@ export class ModalEditor extends CustomEditor {
     this.pendingG = false;
     this.pendingGCount = "";
     this.pendingReplace = false;
+    this.pendingOpG = false;
+    this.pendingTextObjectWhich = null;
+    this.pendingSwallow = null;
+    this.pendingRegister = false;
+    this.blackHoleRegister = false;
+    this.pendingSurround = null;
     this.clearPendingExCommand();
   }
 
@@ -1721,6 +1935,14 @@ export class ModalEditor extends CustomEditor {
     };
     const cursor = toRow(realCursor);
     if (this.visualAnchor) this.visualAnchor = toRow(this.visualAnchor);
+    if (this.lastVisual) {
+      this.lastVisual = {
+        ...this.lastVisual,
+        anchor: toRow(this.lastVisual.anchor),
+        cursor: toRow(this.lastVisual.cursor),
+      };
+    }
+    if (this.lastInsertPos) this.lastInsertPos = toRow(this.lastInsertPos);
     state.lines = rowLines;
     state.cursorLine = cursor.line;
     state.cursorCol = cursor.col;
@@ -1757,6 +1979,21 @@ export class ModalEditor extends CustomEditor {
     }
     const insertedLine = text.slice(a, text.length - b).includes("\n");
     const removed: number[] = [];
+    // Inside the changed span a soft wrap survives when the edit kept the
+    // span's shape (a case change) or only added text around it (a surround).
+    const midBefore = before.slice(a, before.length - b);
+    const midAfter = text.slice(a, text.length - b);
+    let midShift: number | null = null;
+    if (midBefore.length > 0) {
+      const sameShape =
+        midBefore.length === midAfter.length &&
+        [...midBefore].every((ch, i) => (ch === "\n") === (midAfter[i] === "\n"));
+      if (sameShape) midShift = 0;
+      else {
+        const at = midAfter.indexOf(midBefore);
+        if (at !== -1) midShift = at;
+      }
+    }
     for (const s of ctx.synthetic) {
       if (s < a) {
         if (!(insertedLine && s === a - 1)) removed.push(s);
@@ -1764,8 +2001,11 @@ export class ModalEditor extends CustomEditor {
         if (!(insertedLine && s === before.length - b)) {
           removed.push(s - before.length + text.length);
         }
+      } else if (midShift !== null) {
+        removed.push(s + midShift);
       }
     }
+    removed.sort((x, y) => x - y);
     if (removed.length === 0) return { text, removed };
     let out = "";
     let from = 0;
@@ -1809,6 +2049,16 @@ export class ModalEditor extends CustomEditor {
     });
     if (this.visualAnchor) {
       this.visualAnchor = this.unwrapRowPosition(rowText, removed, text, this.visualAnchor);
+    }
+    if (this.lastVisual) {
+      this.lastVisual = {
+        ...this.lastVisual,
+        anchor: this.unwrapRowPosition(rowText, removed, text, this.lastVisual.anchor),
+        cursor: this.unwrapRowPosition(rowText, removed, text, this.lastVisual.cursor),
+      };
+    }
+    if (this.lastInsertPos) {
+      this.lastInsertPos = this.unwrapRowPosition(rowText, removed, text, this.lastInsertPos);
     }
     state.lines = text.split("\n");
     state.cursorLine = cursor.line;
@@ -1936,6 +2186,14 @@ export class ModalEditor extends CustomEditor {
 
     this.prepareRepeatRecordingForInput(data);
     try {
+      if (isVisualMode(this.mode)) {
+        this.lastVisual = {
+          mode: this.mode,
+          anchor: this.getVisualAnchor(),
+          cursor: { ...this.getCursor() },
+        };
+      }
+
       if (isEscapeLikeInput(data)) {
         this.handleEscape();
         return;
@@ -1958,7 +2216,34 @@ export class ModalEditor extends CustomEditor {
           this.openLineAbove();
           return;
         }
+        if (this.replaceSession && this.handleReplaceModeInput(data)) return;
         super.handleInput(data);
+        return;
+      }
+
+      if (this.pendingSwallow !== null) {
+        // The argument of an unsupported command: drop it with the command.
+        this.clearPendingState();
+        this.cancelRepeatableCommand();
+        return;
+      }
+
+      if (this.pendingRegister) {
+        this.pendingRegister = false;
+        if (!isPrintableInput(data)) {
+          this.clearPendingState();
+          this.cancelRepeatableCommand();
+          return;
+        }
+        // Only the black hole register is distinct; every other name is the
+        // unnamed register (which mirrors to the clipboard by policy).
+        this.blackHoleRegister = data === "_";
+        this.blackHoleArmedThisKey = this.blackHoleRegister;
+        return;
+      }
+
+      if (this.pendingSurround) {
+        this.handlePendingSurround(data);
         return;
       }
 
@@ -1968,6 +2253,11 @@ export class ModalEditor extends CustomEditor {
           this.prefixCount = "";
           this.operatorCount = "";
           this.cancelRepeatableCommand();
+          return;
+        }
+        if (isVisualMode(this.mode)) {
+          this.takeTotalCount(1);
+          this.visualReplaceChars(data);
           return;
         }
 
@@ -2013,6 +2303,11 @@ export class ModalEditor extends CustomEditor {
         return;
       }
 
+      if (this.pendingOpG) {
+        this.handlePendingOpG(data);
+        return;
+      }
+
       if (this.pendingOperator === "d") {
         this.handlePendingDelete(data);
         return;
@@ -2025,6 +2320,11 @@ export class ModalEditor extends CustomEditor {
 
       if (this.pendingOperator === "y") {
         this.handlePendingYank(data);
+        return;
+      }
+
+      if (this.pendingOperator !== null && GENERIC_OPERATORS.has(this.pendingOperator)) {
+        this.handlePendingGenericOperator(data);
         return;
       }
 
@@ -2044,6 +2344,9 @@ export class ModalEditor extends CustomEditor {
     } finally {
       this.finishRepeatRecordingAfterInput();
       this.settleUndoWindowAfterInput();
+      // `"_` lasts for exactly one command: drop it once nothing is pending.
+      if (this.blackHoleArmedThisKey) this.blackHoleArmedThisKey = false;
+      else if (this.blackHoleRegister && this.getPendingKeys() === "") this.blackHoleRegister = false;
     }
   }
 
@@ -2113,7 +2416,12 @@ export class ModalEditor extends CustomEditor {
       this.operatorCount ||
       this.pendingG ||
       this.pendingGCount ||
-      this.pendingReplace
+      this.pendingReplace ||
+      this.pendingOpG ||
+      this.pendingSwallow ||
+      this.pendingRegister ||
+      this.blackHoleRegister ||
+      this.pendingSurround
     ) {
       this.clearPendingState();
       this.cancelRepeatableCommand();
@@ -2125,6 +2433,9 @@ export class ModalEditor extends CustomEditor {
     }
     if ("insert" === this.mode) {
       this.clearUnderlyingPasteStateIfActive();
+      this.replaceSession = null;
+      const stopped = this.getCursor();
+      this.lastInsertPos = { line: stopped.line, col: stopped.col };
       this.setMode("normal");
       if (this.getCursor().col > 0) this.moveCursorBy(-1);
     } else {
@@ -2494,6 +2805,17 @@ export class ModalEditor extends CustomEditor {
     } else if (this.pendingOperator === "y") {
       this.yankWithCharMotion(pendingMotion, data);
       this.pendingOperator = null;
+    } else if (this.pendingOperator !== null) {
+      const op = this.pendingOperator;
+      const span = this.charMotionSpan(pendingMotion, data);
+      this.pendingMotion = null;
+      if (span) {
+        this.lastCharMotion = { motion: pendingMotion, char: data };
+        this.applyOperatorSpan(op, span);
+      } else {
+        this.pendingOperator = null;
+        this.cancelRepeatableCommand();
+      }
     } else {
       this.executeCharMotion(pendingMotion, data);
     }
@@ -2501,8 +2823,59 @@ export class ModalEditor extends CustomEditor {
     this.pendingMotion = null;
   }
 
+  /**
+   * Text objects: targets.vim's `n` modifier, then the upstream fast path for
+   * d/c/y on stock words and brackets, then every other object (paragraphs,
+   * sentences, lines, tags, targets.vim objects, wordmotion words) for any
+   * operator or Visual mode.
+   */
   private handlePendingTextObject(data: string): void {
-    const pendingTextObject = this.pendingTextObject;
+    const kind = this.pendingTextObject;
+    if (!kind) return;
+    if (this.targets && data === "n" && this.pendingTextObjectWhich === null) {
+      this.pendingTextObjectWhich = "n";
+      return;
+    }
+    const which = this.pendingTextObjectWhich;
+    this.pendingTextObjectWhich = null;
+    const op = this.pendingOperator;
+    const legacyOp = op === "d" || op === "c" || op === "y";
+    const legacyKind = kind === "i" || kind === "a";
+    if (
+      legacyOp &&
+      legacyKind &&
+      which === null &&
+      (data === "W" ||
+        (data === "w" && !this.wordMotion) ||
+        (!this.targets && normalizeDelimiterKeyForLegacy(data)))
+    ) {
+      this.handleLegacyTextObject(data);
+      return;
+    }
+    this.pendingTextObject = null;
+    if (!isPrintableInput(data)) {
+      this.pendingOperator = null;
+      this.clearPendingState();
+      this.cancelRepeatableCommand();
+      if (!isPrintableChunk(data)) super.handleInput(data);
+      return;
+    }
+    const count = this.takeTotalCount(1);
+    const span = this.resolveTextObjectSpan(kind, which, data, count);
+    if (!op) {
+      if (span && isVisualMode(this.mode)) this.selectObjectInVisual(span);
+      return;
+    }
+    if (!span) {
+      this.pendingOperator = null;
+      this.cancelRepeatableCommand();
+      return;
+    }
+    this.applyOperatorSpan(op, span);
+  }
+
+  private handleLegacyTextObject(data: string): void {
+    const pendingTextObject = this.pendingTextObject as TextObjectKind | null;
     this.pendingTextObject = null;
     if (!pendingTextObject) {
       this.pendingOperator = null;
@@ -2555,7 +2928,14 @@ export class ModalEditor extends CustomEditor {
       data,
     );
     if (!range) {
-      this.cancelPendingOperator(data);
+      // Not inside one: Neovim seeks the next block or quote on the line.
+      const op = this.pendingOperator;
+      const span = this.resolveTextObjectSpan(pendingTextObject, null, data, 1);
+      if (!op || !span) {
+        this.cancelPendingOperator(data);
+        return;
+      }
+      this.applyOperatorSpan(op, span);
       return;
     }
 
@@ -2657,6 +3037,8 @@ export class ModalEditor extends CustomEditor {
       this.pendingMotion = data as PendingMotion;
       return;
     }
+
+    if (this.handleExtendedOperatorKey(data)) return;
 
     if (data === "l" || data === "h") {
       if (this.applyCharwiseHorizontalOperator(data, "d")) {
@@ -2760,6 +3142,8 @@ export class ModalEditor extends CustomEditor {
       this.pendingMotion = data as PendingMotion;
       return;
     }
+
+    if (this.handleExtendedOperatorKey(data)) return;
 
     if (data === "l" || data === "h") {
       if (this.applyCharwiseHorizontalOperator(data, "c")) {
@@ -2987,8 +3371,50 @@ export class ModalEditor extends CustomEditor {
         this.applyVisualOperator("y", true);
         return true;
       case "C":
-      case "S":
         this.applyVisualOperator("c", true);
+        return true;
+      case "S":
+        if (this.surround) this.startVisualSurround();
+        else this.applyVisualOperator("c", true);
+        return true;
+      case "p":
+      case "P":
+        this.visualPut();
+        return true;
+      case "~":
+        this.visualCaseOperator("g~");
+        return true;
+      case "u":
+        this.visualCaseOperator("gu");
+        return true;
+      case "U":
+        this.visualCaseOperator("gU");
+        return true;
+      case ">":
+      case "<":
+        this.visualShift(data);
+        return true;
+      case "J":
+        this.visualJoin(true);
+        return true;
+      case "r":
+        this.pendingReplace = true;
+        return true;
+      case "i":
+      case "a":
+        this.pendingTextObject = data;
+        return true;
+      case "I":
+      case "A":
+        if (this.targets) {
+          this.pendingTextObject = data;
+          return true;
+        }
+        this.takeTotalCount(1);
+        return true;
+      case "\x01":
+      case "\x18":
+        this.takeTotalCount(1);
         return true;
       default:
         if (
@@ -3036,6 +3462,8 @@ export class ModalEditor extends CustomEditor {
           return;
         }
 
+        if (this.handleExtendedGCommand(data)) return;
+
         if (data === "M") {
           // :h gM — halfway the text of the line; with a count of 1..100,
           // to that percentage of the line's text. nvim ignores counts
@@ -3057,8 +3485,11 @@ export class ModalEditor extends CustomEditor {
       }
 
       this.clearPendingState();
+      if (data === "'" || data === "`") this.pendingSwallow = `g${data}`;
       return;
     }
+
+    if (this.handleExtendedNormalKey(data)) return;
 
     if (this.prefixCount.length > 0) {
       if (isDigit(data)) {
@@ -4000,6 +4431,7 @@ export class ModalEditor extends CustomEditor {
     text: string,
     source: RegisterWriteSource = "mutation",
   ): void {
+    if (this.blackHoleRegister) return;
     if (this.rowCtx) text = this.unwrapRegisterText(text);
     this.unnamedRegister = text;
     const shouldMirror = text !== "" && this.shouldMirrorRegisterWrite(source);
@@ -4443,6 +4875,8 @@ export class ModalEditor extends CustomEditor {
       this.pendingTextObject = data;
       return;
     }
+
+    if (this.handleExtendedOperatorKey(data)) return;
 
     if (data === "l" || data === "h") {
       if (this.applyCharwiseHorizontalOperator(data, "y")) {
@@ -4924,6 +5358,1128 @@ export class ModalEditor extends CustomEditor {
     return lines;
   }
 
+  // ---------------------------------------------------------------------------
+  // Commands beyond the upstream engine: Vim motions and operators it lacked,
+  // vim-surround, targets.vim and vim-wordmotion. Positions here come from
+  // `VimBuffer`, a snapshot of the buffer as the key started.
+  // ---------------------------------------------------------------------------
+
+  private vimBuffer(): VimBuffer {
+    return new VimBuffer(this.getText());
+  }
+
+  private cursorPos(): Pos {
+    const cursor = this.getCursor();
+    return { line: cursor.line, col: cursor.col };
+  }
+
+  /** Put the cursor on `pos`, never past the last character in Normal mode. */
+  private moveCursorToPos(pos: Pos, allowEol = false): void {
+    const lines = this.getLines();
+    const line = Math.max(0, Math.min(pos.line, lines.length - 1));
+    const len = (lines[line] ?? "").length;
+    let col = Math.max(0, Math.min(pos.col, len));
+    if (!allowEol && len > 0 && col >= len) col = len - 1;
+    this.moveCursorToAbsoluteIndex(this.getAbsoluteIndex(line, col));
+  }
+
+  /** Normal and Visual keys added on top of upstream. True when consumed. */
+  private handleExtendedNormalKey(data: string): boolean {
+    const visual = isVisualMode(this.mode);
+    if (data === '"') {
+      this.pendingRegister = true;
+      return true;
+    }
+    if (ARGUMENT_PREFIX_KEYS.has(data)) {
+      this.prefixCount = "";
+      this.operatorCount = "";
+      this.pendingSwallow = data;
+      return true;
+    }
+    switch (data) {
+      case "~":
+        if (visual) return false;
+        this.swapCaseUnderCursor();
+        return true;
+      case ">":
+      case "<":
+      case "=":
+      case "!":
+        if (visual) return false;
+        this.pendingOperator = data;
+        return true;
+      case "(":
+      case ")": {
+        const count = this.takeTotalCount(1);
+        const target = findSentence(this.vimBuffer(), this.cursorPos(), data === ")" ? FORWARD : BACKWARD, count);
+        if (target) this.moveCursorToPos(target, visual);
+        return true;
+      }
+      case "+":
+      case "-": {
+        const count = this.takeTotalCount(1);
+        const line = this.getCursor().line + (data === "+" ? count : -count);
+        if (line < 0 || line > this.getLines().length - 1) return true;
+        this.moveCursorToLineStart(line);
+        this.moveCursorToFirstNonWhitespace();
+        return true;
+      }
+      case "|": {
+        const count = this.takeTotalCount(1);
+        this.moveCursorToPos({ line: this.getCursor().line, col: count - 1 });
+        return true;
+      }
+      case "*":
+      case "#":
+        this.starSearch(data === "*", true);
+        return true;
+      case "n":
+      case "N":
+        this.repeatStarSearch(data === "n");
+        return true;
+      case "R":
+        if (visual) return false;
+        this.takeTotalCount(1);
+        this.replaceSession = { originals: [] };
+        this.setMode("insert");
+        return true;
+      case "\x01":
+      case "\x18":
+        if (visual) return true;
+        // With no number on the line the key keeps its host binding (Pi's
+        // Ctrl+X copies the last message).
+        if (!this.incrementUnderCursor(data === "\x01" ? 1n : -1n)) {
+          this.cancelRepeatableCommand();
+          super.handleInput(data);
+        }
+        return true;
+      case "w":
+      case "b":
+      case "e": {
+        if (!this.wordMotion) return false;
+        const count = this.takeTotalCount(1);
+        const result = wordmotionMotion(this.getText(), this.cursorPos(), count, data, null);
+        this.moveCursorToPos(result.pos, visual);
+        return true;
+      }
+      default:
+        return false;
+    }
+  }
+
+  /** `g` commands added on top of upstream. True when consumed. */
+  private handleExtendedGCommand(data: string): boolean {
+    const visual = isVisualMode(this.mode);
+    switch (data) {
+      case "e":
+      case "E": {
+        const count = this.takeTotalCount(1);
+        this.moveCursorToPos(this.backEndWordTarget(count, data === "E"), visual);
+        return true;
+      }
+      case "_": {
+        const count = this.takeTotalCount(1);
+        const lineIndex = Math.min(this.getLines().length - 1, this.getCursor().line + count - 1);
+        const line = this.getLines()[lineIndex] ?? "";
+        const last = line.search(/\s*$/);
+        this.moveCursorToPos({ line: lineIndex, col: Math.max(0, last - 1) }, visual);
+        return true;
+      }
+      case "v":
+        this.reselectLastVisual();
+        return true;
+      case "i":
+        if (visual) return false;
+        this.takeTotalCount(1);
+        if (this.lastInsertPos) this.moveCursorToPos(this.lastInsertPos, true);
+        this.setMode("insert");
+        return true;
+      case "u":
+      case "U":
+      case "~":
+      case "?":
+        if (visual) {
+          this.visualCaseOperator(`g${data}` as GenericOperator);
+          return true;
+        }
+        this.pendingOperator = `g${data}` as GenericOperator;
+        return true;
+      case "q":
+      case "w":
+      case "@":
+        if (visual) {
+          this.takeTotalCount(1);
+          this.exitVisualMode();
+          return true;
+        }
+        this.pendingOperator = `g${data}` as GenericOperator;
+        return true;
+      case "*":
+      case "#":
+        this.starSearch(data === "*", false);
+        return true;
+      case "J":
+        if (!visual) return false;
+        this.visualJoin(false);
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  private backEndWordTarget(count: number, bigword: boolean): Pos {
+    if (!bigword && this.wordMotion) {
+      return wordmotionMotion(this.getText(), this.cursorPos(), count, "ge", null).pos;
+    }
+    return bckendWord(this.vimBuffer(), this.cursorPos(), count, bigword, false).pos;
+  }
+
+  // --- operator-pending keys --------------------------------------------------
+
+  /**
+   * Keys d/c/y gained: `g` motions, sentence/paragraph/line motions, targets
+   * `I`/`A`, wordmotion words, surround's `ds`/`cs`/`ys`, and swallowing the
+   * argument of unsupported motions. True when consumed.
+   */
+  private handleExtendedOperatorKey(data: string): boolean {
+    const op = this.pendingOperator;
+    if (!op) return false;
+    if (data === "g") {
+      this.pendingOpG = true;
+      return true;
+    }
+    if (OPERATOR_ARGUMENT_PREFIX_KEYS.has(data)) {
+      this.pendingOperator = null;
+      this.prefixCount = "";
+      this.operatorCount = "";
+      this.cancelRepeatableCommand();
+      this.pendingSwallow = data;
+      return true;
+    }
+    if ((data === "I" || data === "A") && this.targets) {
+      this.pendingTextObject = data;
+      return true;
+    }
+    if (this.surround && this.operatorCount === "") {
+      if ((op === "d" || op === "c") && data === "s") {
+        const count = this.takeTotalCount(1);
+        this.pendingOperator = null;
+        this.pendingSurround = {
+          kind: op === "d" ? "delete" : "change",
+          stage: "target",
+          count,
+          keys: `${op}s`,
+          input: "",
+        };
+        return true;
+      }
+      if (op === "y" && (data === "s" || data === "S")) {
+        this.pendingOperator = data === "s" ? "ys" : "yS";
+        return true;
+      }
+    }
+    const extraMotion =
+      data === "(" ||
+      data === ")" ||
+      data === "{" ||
+      data === "}" ||
+      data === "+" ||
+      data === "-" ||
+      data === "|" ||
+      (this.wordMotion && (data === "w" || data === "b" || data === "e"));
+    if (!extraMotion) return false;
+    const span = this.resolveMotionSpan(data, op);
+    if (!span) {
+      this.cancelPendingOperator(data);
+      return true;
+    }
+    this.applyOperatorSpan(op, span);
+    return true;
+  }
+
+  private handlePendingGenericOperator(data: string): void {
+    const op = this.pendingOperator as GenericOperator;
+    if (this.opDigit(data)) return;
+    if (!isPrintableInput(data)) {
+      this.cancelPendingOperator(data);
+      return;
+    }
+    if (data === "g") {
+      this.pendingOpG = true;
+      return;
+    }
+    if (data === OPERATOR_LINE_KEY[op] || (op === "yS" && data === "s")) {
+      this.applyOperatorToLines(op);
+      return;
+    }
+    if (CHAR_MOTION_KEYS.has(data)) {
+      this.pendingMotion = data as PendingMotion;
+      return;
+    }
+    if (data === "i" || data === "a" || (this.targets && (data === "I" || data === "A"))) {
+      this.pendingTextObject = data;
+      return;
+    }
+    if (OPERATOR_ARGUMENT_PREFIX_KEYS.has(data)) {
+      this.pendingOperator = null;
+      this.prefixCount = "";
+      this.operatorCount = "";
+      this.cancelRepeatableCommand();
+      this.pendingSwallow = data;
+      return;
+    }
+    const span = this.resolveMotionSpan(data, op);
+    if (!span) {
+      this.cancelPendingOperator(data);
+      return;
+    }
+    this.applyOperatorSpan(op, span);
+  }
+
+  private handlePendingOpG(data: string): void {
+    this.pendingOpG = false;
+    const op = this.pendingOperator;
+    if (!op) return;
+    if (!isPrintableInput(data)) {
+      this.cancelPendingOperator(data);
+      return;
+    }
+    // gugu, gUgU, g~g~, g?g?, gqgq, gwgw
+    if (op.length === 2 && op[0] === "g" && op[1] === data) {
+      this.applyOperatorToLines(op as GenericOperator);
+      return;
+    }
+    const count = this.takeTotalCount(1);
+    const buf = this.vimBuffer();
+    const cursor = this.cursorPos();
+    let span: ObjectSpan | null = null;
+    if (data === "g") {
+      const target = Math.min(count, buf.lineCount) - 1;
+      span = {
+        start: { line: target, col: 0 },
+        end: cursor,
+        inclusive: false,
+        linewise: true,
+      };
+    } else if (data === "e" || data === "E") {
+      const bigword = data === "E";
+      if (!bigword && this.wordMotion) {
+        const result = wordmotionMotion(buf.text, cursor, count, "ge", op);
+        span = { start: cursor, end: result.pos, inclusive: true, linewise: false, visualEnd: true };
+      } else {
+        const result = bckendWord(buf, cursor, count, bigword, false);
+        if (!result.ok) span = null;
+        else span = { start: cursor, end: result.pos, inclusive: true, linewise: false };
+      }
+    } else if (data === "j" || data === "k") {
+      const target = cursor.line + (data === "j" ? count : -count);
+      if (target >= 0 && target < buf.lineCount) {
+        span = { start: cursor, end: { line: target, col: 0 }, inclusive: false, linewise: true };
+      }
+    } else if (data === "_") {
+      const lineIndex = Math.min(buf.lineCount - 1, cursor.line + count - 1);
+      const line = buf.lines[lineIndex] ?? "";
+      const last = Math.max(0, line.search(/\s*$/) - 1);
+      span = { start: cursor, end: { line: lineIndex, col: last }, inclusive: true, linewise: false };
+    }
+    if (!span) {
+      this.pendingOperator = null;
+      this.cancelRepeatableCommand();
+      return;
+    }
+    this.applyOperatorSpan(op, span);
+  }
+
+  /** The operator applied to `count` whole lines from the cursor (`>>`, `guu`, `yss`). */
+  private applyOperatorToLines(op: GenericOperator): void {
+    const count = this.takeTotalCount(1);
+    const cursor = this.cursorPos();
+    const lastLine = this.getLines().length - 1;
+    if (op === "ys") {
+      // `yss`: from the first non-blank through the last non-blank character.
+      const span = surroundLineSpan(this.getText(), cursor.line, count);
+      this.pendingOperator = null;
+      if (!span) {
+        this.cancelRepeatableCommand();
+        return;
+      }
+      this.startSurroundAdd(span, false, false, "yss");
+      return;
+    }
+    const endLine = Math.min(lastLine, cursor.line + count - 1);
+    // Like Vim's `_`: shifts keep the column, other operators land on the
+    // first non-blank of the last line.
+    const shift = op === ">" || op === "<";
+    const endCol = shift ? cursor.col : findFirstNonWhitespaceColumn(this.getLines()[endLine] ?? "");
+    this.applyOperatorSpan(op, {
+      start: cursor,
+      end: { line: endLine, col: endCol },
+      inclusive: false,
+      linewise: true,
+    });
+  }
+
+  private charMotionSpan(motion: CharMotion, targetChar: string): ObjectSpan | null {
+    const cursor = this.cursorPos();
+    const line = this.getLines()[cursor.line] ?? "";
+    const count = this.takeTotalCount(1);
+    const targetCol = findCharMotionTarget(line, cursor.col, motion, targetChar, false, count);
+    if (targetCol === null) return null;
+    const forward = motion === "f" || motion === "t";
+    return {
+      start: cursor,
+      end: { line: cursor.line, col: targetCol },
+      inclusive: forward,
+      linewise: false,
+    };
+  }
+
+  /** The span a motion key covers for an operator, or null when it fails. */
+  private resolveMotionSpan(data: string, op: string): ObjectSpan | null {
+    const count = this.takeTotalCount(1);
+    const buf = this.vimBuffer();
+    const cursor = this.cursorPos();
+    const lastLine = buf.lineCount - 1;
+    const line = buf.lines[cursor.line] ?? "";
+    const charwise = (end: Pos, inclusive: boolean): ObjectSpan => ({
+      start: cursor,
+      end,
+      inclusive,
+      linewise: false,
+    });
+    const linewise = (endLine: number): ObjectSpan => ({
+      start: cursor,
+      end: { line: endLine, col: cursor.col },
+      inclusive: false,
+      linewise: true,
+    });
+    switch (data) {
+      case "j":
+        return cursor.line >= lastLine ? null : linewise(Math.min(lastLine, cursor.line + count));
+      case "k":
+        return cursor.line <= 0 ? null : linewise(Math.max(0, cursor.line - count));
+      case "+":
+        return cursor.line >= lastLine ? null : linewise(Math.min(lastLine, cursor.line + count));
+      case "-":
+        return cursor.line <= 0 ? null : linewise(Math.max(0, cursor.line - count));
+      case "_":
+        return linewise(Math.min(lastLine, cursor.line + count - 1));
+      case "G":
+        return linewise(this.hasPendingCount() ? Math.min(lastLine, count - 1) : lastLine);
+      case "h": {
+        if (cursor.col === 0) return null;
+        return charwise({ line: cursor.line, col: Math.max(0, cursor.col - count) }, false);
+      }
+      case "l": {
+        if (line.length === 0) return null;
+        return charwise({ line: cursor.line, col: Math.min(line.length, cursor.col + count) }, false);
+      }
+      case "0":
+        return charwise({ line: cursor.line, col: 0 }, false);
+      case "^":
+        return charwise({ line: cursor.line, col: findFirstNonWhitespaceColumn(line) }, false);
+      case "$": {
+        const endLine = Math.min(lastLine, cursor.line + count - 1);
+        return charwise({ line: endLine, col: Math.max(0, buf.lineLength(endLine) - 1) }, true);
+      }
+      case "|":
+        return charwise({ line: cursor.line, col: Math.min(Math.max(0, line.length - 1), count - 1) }, false);
+      case "(":
+      case ")": {
+        const target = findSentence(buf, cursor, data === ")" ? FORWARD : BACKWARD, count);
+        return target ? charwise(target, false) : null;
+      }
+      case "{":
+      case "}": {
+        // Neovim findpar(): the next empty line after some text.
+        const dir = data === "}" ? 1 : -1;
+        let curr = cursor.line;
+        for (let n = count; n > 0; n--) {
+          let didSkip = false;
+          for (let first = true; ; first = false) {
+            if (!buf.isLineEmpty(curr)) didSkip = true;
+            if (!first && didSkip && startsParagraph(buf, curr)) break;
+            curr += dir;
+            if (curr < 0 || curr > lastLine) {
+              if (n > 1) return null;
+              curr -= dir;
+              break;
+            }
+          }
+        }
+        if (dir > 0 && curr === lastLine && buf.lineLength(lastLine) > 0) {
+          return charwise({ line: curr, col: buf.lineLength(curr) - 1 }, true);
+        }
+        return charwise({ line: curr, col: 0 }, false);
+      }
+      case "%": {
+        const target = this.getMatchingPairMotionTarget();
+        if (!target) return null;
+        return {
+          start: buf.fromAbs(target.rangeAnchorAbs),
+          end: buf.fromAbs(target.targetAbs),
+          inclusive: true,
+          linewise: false,
+        };
+      }
+      case ";":
+      case ",": {
+        if (!this.lastCharMotion) return null;
+        const motion =
+          data === ";" ? this.lastCharMotion.motion : reverseCharMotion(this.lastCharMotion.motion);
+        const targetCol = findCharMotionTarget(line, cursor.col, motion, this.lastCharMotion.char, true, count);
+        if (targetCol === null) return null;
+        return charwise({ line: cursor.line, col: targetCol }, motion === "f" || motion === "t");
+      }
+      case "w":
+      case "W":
+      case "b":
+      case "B":
+      case "e":
+      case "E":
+        return this.wordMotionSpan(data, count, op);
+      default:
+        return null;
+    }
+  }
+
+  private wordMotionSpan(data: string, count: number, op: string): ObjectSpan | null {
+    const buf = this.vimBuffer();
+    const cursor = this.cursorPos();
+    const bigword = data === "W" || data === "B" || data === "E";
+    const kind = data.toLowerCase() as "w" | "b" | "e";
+    if (!bigword && this.wordMotion) {
+      const result = wordmotionMotion(buf.text, cursor, count, kind, op === "c" || op === "d" ? op : "y");
+      if (result.endBeforeLineBreak) {
+        const prev = result.endBeforeLineBreak.line;
+        const empty = buf.isLineEmpty(prev);
+        return {
+          start: cursor,
+          end: empty ? { line: prev, col: 0 } : { line: prev, col: Math.max(0, buf.lineLength(prev) - 1) },
+          inclusive: true,
+          linewise: false,
+          visualEnd: true,
+        };
+      }
+      return {
+        start: cursor,
+        end: result.pos,
+        inclusive: result.inclusive,
+        linewise: false,
+        visualEnd: result.inclusive,
+      };
+    }
+    if (kind === "b") {
+      const result = bckWord(buf, cursor, count, bigword, false);
+      if (!result.ok && samePos(result.pos, cursor)) return null;
+      return { start: cursor, end: result.pos, inclusive: false, linewise: false };
+    }
+    if (kind === "e") {
+      const result = endWord(buf, cursor, count, bigword, false, false);
+      if (!result.ok && samePos(result.pos, cursor)) return null;
+      return { start: cursor, end: result.pos, inclusive: true, linewise: false };
+    }
+    // `w` with an operator: the last word stops at the end of its line; a
+    // cursor left on the end-of-line position backs onto the last character
+    // and makes the motion inclusive (Neovim nv_wordcmd/adjust_cursor).
+    const result = fwdWord(buf, cursor, count, bigword, true);
+    if (!result.ok && samePos(result.pos, cursor)) return null;
+    const end = { ...result.pos };
+    let inclusive = false;
+    if (end.col > 0 && end.col >= buf.lineLength(end.line) && comparePos(cursor, end) < 0) {
+      end.col--;
+      inclusive = true;
+    }
+    return { start: cursor, end, inclusive, linewise: false };
+  }
+
+  // --- text objects -------------------------------------------------------------
+
+  private resolveTextObjectSpan(
+    kind: ObjectKind,
+    which: "n" | null,
+    key: string,
+    count: number,
+  ): ObjectSpan | null {
+    const buf = this.vimBuffer();
+    const cursor = this.cursorPos();
+    const include = kind === "a" || kind === "A";
+    const plain = kind === "i" || kind === "a";
+    if (plain && which === null) {
+      switch (key) {
+        case "w":
+        case "W": {
+          if (key === "w" && this.wordMotion) {
+            const range = wordmotionObject(buf.text, cursor, count, !include);
+            return range
+              ? { start: range.start, end: range.end, inclusive: true, linewise: false, visualEnd: true }
+              : null;
+          }
+          const range = this.getWordObjectRange(kind as TextObjectKind, count, key === "W" ? "WORD" : "word");
+          if (!range) return null;
+          return {
+            start: buf.fromAbs(range.startAbs),
+            end: buf.fromAbs(range.endAbs),
+            inclusive: false,
+            linewise: false,
+            noAdjust: true,
+          };
+        }
+        case "s":
+          return currentSentence(buf, cursor, count, include);
+        case "p": {
+          const range = currentParagraph(buf, cursor.line, count, include);
+          return range
+            ? {
+                start: { line: range.startLine, col: 0 },
+                end: { line: range.endLine, col: 0 },
+                inclusive: false,
+                linewise: true,
+              }
+            : null;
+        }
+        case "l":
+          return currentLine(buf, cursor, include);
+      }
+    }
+    if (this.targets && isTargetsTrigger(key)) {
+      const result = resolveTargetsObject(buf.text, cursor, kind as TargetsModifier, which ?? "c", key, count);
+      if (!result) return null;
+      return {
+        start: result.start,
+        end: result.end,
+        inclusive: true,
+        linewise: result.linewise,
+        visualEnd: true,
+        empty: result.empty,
+      };
+    }
+    if (!plain || which !== null) return null;
+    const pair = BRACKET_OBJECT_PAIRS[key];
+    if (pair) return currentBlock(buf, cursor, count, include, pair[0], pair[1]);
+    if (key === '"' || key === "'" || key === "`") return currentQuote(buf, cursor, count, include, key);
+    if (key === "t") return currentTagBlock(buf, cursor, count, include);
+    return null;
+  }
+
+  private selectObjectInVisual(span: ObjectSpan): void {
+    if (span.empty) return;
+    if (span.linewise) {
+      this.visualAnchor = { line: Math.min(span.start.line, span.end.line), col: 0 };
+      this.setMode("visual-line");
+      this.moveCursorToPos({ line: Math.max(span.start.line, span.end.line), col: 0 });
+      return;
+    }
+    const buf = this.vimBuffer();
+    const end = { ...span.end };
+    if (!span.inclusive) {
+      if (comparePos(end, span.start) <= 0) return;
+      buf.decl(end);
+    }
+    this.visualAnchor = { ...span.start };
+    if (this.mode !== "visual") this.setMode("visual");
+    this.moveCursorToPos(end, true);
+  }
+
+  // --- applying operators ---------------------------------------------------------
+
+  private applyOperatorSpan(op: string, span: ObjectSpan): void {
+    this.pendingOperator = null;
+    const buf = this.vimBuffer();
+    // Vim's oap->start (where case operators leave the cursor) and the column
+    // linewise deletes and shifts return to ('nostartofline').
+    const opStart = comparePos(span.start, span.end) <= 0 ? span.start : span.end;
+    const oldCol = this.getCursor().col;
+    if (span.empty) {
+      // targets.vim inserts a blank and lets `c`/`d` take it.
+      if (op === "c" || op === "d") {
+        this.writeToRegister(" ");
+        this.moveCursorToPos(span.start, true);
+        if (op === "c") this.setMode("insert");
+        else this.forceCommitRepeatRecording();
+      } else {
+        this.cancelRepeatableCommand();
+      }
+      return;
+    }
+    const range = resolveOpSpan(buf, span, { visualEnd: span.visualEnd });
+    let { startAbs, endAbs, linewise, startLine, endLine } = range;
+    if (!linewise && op === "d" && deleteBecomesLinewise(buf, startAbs, endAbs)) {
+      linewise = true;
+      startLine = buf.fromAbs(startAbs).line;
+      endLine = buf.fromAbs(endAbs).line;
+    }
+    if (!linewise && endAbs <= startAbs) {
+      if (op === "c") {
+        this.moveCursorToAbsoluteIndex(startAbs);
+        this.setMode("insert");
+        this.forceCommitRepeatRecording();
+        return;
+      }
+      this.cancelRepeatableCommand();
+      return;
+    }
+    switch (op) {
+      case "d":
+        if (linewise) {
+          this.deleteLineRange(startLine, endLine);
+          if (range.linewise && !span.linewise) this.moveCursorToFirstNonWhitespace();
+          else this.moveCursorToPos({ line: this.getCursor().line, col: oldCol });
+        } else {
+          this.deleteRangeByAbsolute(startAbs, endAbs);
+          this.clampCursorToLastGrapheme();
+        }
+        return;
+      case "c":
+        if (linewise) {
+          this.setMode("insert");
+          this.changeVisualLines(startLine, endLine);
+        } else {
+          this.deleteRangeByAbsolute(startAbs, endAbs);
+          this.setMode("insert");
+        }
+        return;
+      case "y":
+        if (linewise) {
+          this.yankLineRange(startLine, endLine);
+          if (startLine !== this.getCursor().line) this.moveCursorToLineStart(startLine);
+        } else {
+          this.yankRangeByAbsolute(startAbs, endAbs);
+          this.moveCursorToAbsoluteIndex(startAbs);
+        }
+        return;
+      case "gu":
+      case "gU":
+      case "g~":
+      case "g?": {
+        const from = linewise ? buf.abs({ line: startLine, col: 0 }) : startAbs;
+        const to = linewise ? buf.abs({ line: endLine, col: buf.lineLength(endLine) }) : endAbs;
+        const text = this.getText();
+        const changed = text.slice(0, from) + transformCase(op, text.slice(from, to)) + text.slice(to);
+        this.forceCommitRepeatRecording();
+        if (changed !== text) this.replaceTextInBuffer(changed, from);
+        this.moveCursorToPos(opStart);
+        return;
+      }
+      case ">":
+      case "<":
+        this.shiftLines(startLine, endLine, op === ">" ? 1 : -1, 1, oldCol);
+        return;
+      case "ys":
+      case "yS":
+        this.startSurroundAdd({ startAbs, endAbs, linewise, startLine, endLine }, false, op === "yS", op);
+        return;
+      default:
+        // Operators pi-vim accepts without changing text (gq, gw, =, !, ...).
+        return;
+    }
+  }
+
+  private shiftLines(startLine: number, endLine: number, dir: 1 | -1, amount: number, col: number): void {
+    const lines = this.getLines().slice();
+    const sw = this.shiftWidth;
+    // On screen rows (displayLineMotion), only rows that begin a real line
+    // have an indent; a wrapped row continues the line above it.
+    const softStarts = new Set<number>();
+    if (this.rowCtx) {
+      let abs = 0;
+      for (let i = 0; i < lines.length; i++) {
+        if (i > 0 && this.rowCtx.synthetic.includes(abs - 1)) softStarts.add(i);
+        abs += (lines[i] ?? "").length + 1;
+      }
+    }
+    for (let i = startLine; i <= endLine && i < lines.length; i++) {
+      if (softStarts.has(i)) continue;
+      const line = lines[i] ?? "";
+      if (line.length === 0) continue;
+      const lead = /^[ \t]*/.exec(line)![0];
+      let width = 0;
+      for (const ch of lead) width = ch === "\t" ? width + 8 - (width % 8) : width + 1;
+      const next = dir > 0 ? width + sw * amount : Math.max(0, width - sw * amount);
+      lines[i] = " ".repeat(next) + line.slice(lead.length);
+    }
+    const text = lines.join("\n");
+    this.forceCommitRepeatRecording();
+    if (text !== this.getText()) this.replaceTextInBuffer(text, 0);
+    this.moveCursorToPos({ line: startLine, col });
+  }
+
+  private swapCaseUnderCursor(): void {
+    const count = Math.max(1, Math.min(MAX_COUNT, this.takeTotalCount(1)));
+    const { line, col } = this.getCurrentLineAndCol();
+    if (line.length === 0) {
+      this.cancelRepeatableCommand();
+      return;
+    }
+    const range = this.getGraphemeRangeAtCol(line, col, count, true);
+    if (!range) return;
+    const lineStart = this.getAbsoluteIndex(this.getCursor().line, 0);
+    const text = this.getText();
+    const swapped = transformCase("g~", line.slice(range.start, range.end));
+    const next = text.slice(0, lineStart + range.start) + swapped + text.slice(lineStart + range.end);
+    this.forceCommitRepeatRecording();
+    if (next !== text) this.replaceTextInBuffer(next, lineStart + range.start);
+    const target = range.end >= line.length ? Math.max(0, line.length - 1) : range.end;
+    this.moveCursorToAbsoluteIndex(lineStart + target);
+    if (range.end >= line.length) this.clampCursorToLastGrapheme();
+  }
+
+  private incrementUnderCursor(sign: bigint): boolean {
+    const count = BigInt(Math.max(1, this.takeTotalCount(1)));
+    const cursor = this.getCursor();
+    const line = this.getLines()[cursor.line] ?? "";
+    const result = incrementNumber(line, cursor.col, sign * count);
+    if (!result) return false;
+    const lineStart = this.getAbsoluteIndex(cursor.line, 0);
+    const text = this.getText();
+    const next = text.slice(0, lineStart) + result.line + text.slice(lineStart + line.length);
+    this.forceCommitRepeatRecording();
+    this.replaceTextInBuffer(next, lineStart + result.cursorCol);
+    return true;
+  }
+
+  /** Replace mode: printable keys overwrite, Backspace restores. True when handled. */
+  private handleReplaceModeInput(data: string): boolean {
+    const session = this.replaceSession;
+    if (!session) return false;
+    if (isBackspaceLikeInput(data)) {
+      const cursor = this.getCursor();
+      if (session.originals.length === 0) {
+        if (cursor.col > 0) this.moveCursorToPreviousGraphemeStart();
+        return true;
+      }
+      const original = session.originals.pop() ?? null;
+      const line = this.getLines()[cursor.line] ?? "";
+      const prev = this.getGraphemeRangeAtCol(line, Math.max(0, cursor.col - 1), 1);
+      if (!prev || cursor.col === 0) return true;
+      const lineStart = this.getAbsoluteIndex(cursor.line, 0);
+      const text = this.getText();
+      const restored = original ?? "";
+      const next =
+        text.slice(0, lineStart + prev.start) + restored + text.slice(lineStart + prev.end);
+      this.replaceTextInBuffer(next, lineStart + prev.start);
+      return true;
+    }
+    if (!isPrintableChunk(data) || data.includes("\n") || data.includes("\r")) return false;
+    for (const { segment } of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(data)) {
+      const cursor = this.getCursor();
+      const line = this.getLines()[cursor.line] ?? "";
+      const lineStart = this.getAbsoluteIndex(cursor.line, 0);
+      const under = cursor.col < line.length ? this.getGraphemeRangeAtCol(line, cursor.col, 1) : null;
+      const text = this.getText();
+      const from = lineStart + cursor.col;
+      const to = under ? lineStart + under.end : from;
+      session.originals.push(under ? line.slice(under.start, under.end) : null);
+      this.replaceTextInBuffer(text.slice(0, from) + segment + text.slice(to), from + segment.length);
+    }
+    return true;
+  }
+
+  // --- Visual-mode commands -------------------------------------------------------
+
+  private beginVisualChange(): { anchor: VisualPosition; cursor: VisualPosition; linewise: boolean } {
+    this.clearRepeatState();
+    this.openUndoWindow();
+    return {
+      anchor: this.getVisualAnchor(),
+      cursor: this.cursorPos(),
+      linewise: this.mode === "visual-line",
+    };
+  }
+
+  private visualRange(): { startAbs: number; endAbs: number; startLine: number; endLine: number; linewise: boolean } {
+    const linewise = this.mode === "visual-line";
+    const { startLine, endLine } = getVisualLineRange(this.getVisualAnchor(), this.getCursor());
+    if (linewise) {
+      const lines = this.getLines();
+      return {
+        startAbs: this.getAbsoluteIndex(startLine, 0),
+        endAbs: this.getAbsoluteIndex(endLine, (lines[endLine] ?? "").length),
+        startLine,
+        endLine,
+        linewise,
+      };
+    }
+    const { startAbs, endAbs } = this.getVisualCharwiseRange();
+    return { startAbs, endAbs, startLine, endLine, linewise };
+  }
+
+  private visualCaseOperator(op: GenericOperator): void {
+    this.takeTotalCount(1);
+    this.beginVisualChange();
+    const range = this.visualRange();
+    this.visualAnchor = null;
+    this.setMode("normal");
+    const text = this.getText();
+    const changed = text.slice(0, range.startAbs) + transformCase(op, text.slice(range.startAbs, range.endAbs)) + text.slice(range.endAbs);
+    if (changed !== text) this.replaceTextInBuffer(changed, range.startAbs);
+    this.moveCursorToAbsoluteIndex(range.startAbs);
+    this.clampCursorToLastGrapheme();
+  }
+
+  private visualShift(key: string): void {
+    const amount = Math.max(1, this.takeTotalCount(1));
+    this.beginVisualChange();
+    const range = this.visualRange();
+    this.visualAnchor = null;
+    this.setMode("normal");
+    this.shiftLines(range.startLine, range.endLine, key === ">" ? 1 : -1, amount, this.getCursor().col);
+  }
+
+  private visualJoin(normalize: boolean): void {
+    this.takeTotalCount(1);
+    this.beginVisualChange();
+    const range = this.visualRange();
+    this.visualAnchor = null;
+    this.setMode("normal");
+    this.moveCursorToLineStart(range.startLine);
+    this.prefixCount = String(Math.max(2, range.endLine - range.startLine + 1));
+    this.joinLines(normalize);
+  }
+
+  private visualReplaceChars(char: string): void {
+    this.beginVisualChange();
+    const range = this.visualRange();
+    this.visualAnchor = null;
+    this.setMode("normal");
+    const text = this.getText();
+    const replaced = text
+      .slice(range.startAbs, range.endAbs)
+      .replace(/[^\n]/gu, char);
+    const next = text.slice(0, range.startAbs) + replaced + text.slice(range.endAbs);
+    if (next !== text) this.replaceTextInBuffer(next, range.startAbs);
+    this.moveCursorToAbsoluteIndex(range.startAbs);
+  }
+
+  /**
+   * Visual `p`/`P`: replace the selection with the register and keep the
+   * register (Neovim's `P`, and the common `p` remap that re-yanks).
+   */
+  private visualPut(): void {
+    const count = Math.max(1, Math.min(MAX_COUNT, this.takeTotalCount(1)));
+    const reg = this.getPasteRegisterText();
+    if (!reg) {
+      this.exitVisualMode();
+      return;
+    }
+    this.beginVisualChange();
+    const range = this.visualRange();
+    this.visualAnchor = null;
+    this.setMode("normal");
+    const text = this.getText();
+    const regLinewise = reg.endsWith("\n");
+    const body = regLinewise ? reg.slice(0, -1) : reg;
+    if (range.linewise) {
+      const content = Array.from({ length: count }, () => body).join("\n");
+      const lines = this.getLines().slice();
+      lines.splice(range.startLine, range.endLine - range.startLine + 1, ...content.split("\n"));
+      const next = lines.join("\n");
+      this.replaceTextInBuffer(next, this.getAbsoluteIndexIn(next, { line: range.startLine, col: 0 }));
+      this.moveCursorToLineStart(range.startLine);
+      if (regLinewise) this.moveCursorToFirstNonWhitespace();
+      else this.moveCursorToPos({ line: range.startLine + content.split("\n").length - 1, col: Number.MAX_SAFE_INTEGER });
+      return;
+    }
+    if (regLinewise) {
+      const content = Array.from({ length: count }, () => body).join("\n");
+      const next = `${text.slice(0, range.startAbs)}\n${content}\n${text.slice(range.endAbs)}`;
+      const startLine = this.getCursorFromAbsoluteIndex(text, range.startAbs).line + 1;
+      this.replaceTextInBuffer(next, this.getAbsoluteIndexIn(next, { line: startLine, col: 0 }));
+      this.moveCursorToLineStart(startLine);
+      this.moveCursorToFirstNonWhitespace();
+      return;
+    }
+    const content = reg.repeat(count);
+    const next = text.slice(0, range.startAbs) + content + text.slice(range.endAbs);
+    this.replaceTextInBuffer(next, range.startAbs + content.length);
+    this.moveCursorToPreviousGraphemeStart();
+  }
+
+  private reselectLastVisual(): void {
+    this.takeTotalCount(1);
+    const last = this.lastVisual;
+    if (!last) return;
+    const lines = this.getLines();
+    this.visualAnchor = clampVisualPosition(last.anchor, lines);
+    this.setMode(last.mode);
+    this.moveCursorToPos(clampVisualPosition(last.cursor, lines), true);
+  }
+
+  // --- * # n N --------------------------------------------------------------------
+
+  private starSearch(forward: boolean, whole: boolean): void {
+    this.takeTotalCount(1);
+    const { line, col } = this.getCurrentLineAndCol();
+    const keyword = /[\p{L}\p{N}\p{M}_]/u;
+    let start = col;
+    while (start < line.length && !keyword.test(line[start] ?? "")) start++;
+    const isKeyword = start < line.length;
+    if (!isKeyword) {
+      start = col;
+      while (start < line.length && /\s/.test(line[start] ?? "")) start++;
+      if (start >= line.length) return;
+    }
+    while (start > 0 && (isKeyword ? keyword.test(line[start - 1] ?? "") : !/\s/.test(line[start - 1] ?? ""))) start--;
+    let end = start;
+    while (end < line.length && (isKeyword ? keyword.test(line[end] ?? "") : !/\s/.test(line[end] ?? ""))) end++;
+    const word = line.slice(start, end).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const boundary = "[\\p{L}\\p{N}\\p{M}_]";
+    const pattern = whole && isKeyword ? `(?<!${boundary})${word}(?!${boundary})` : word;
+    this.lastStarSearch = { pattern, forward };
+    const wordStartAbs = this.getAbsoluteIndex(this.getCursor().line, start);
+    this.jumpToMatch(pattern, forward, wordStartAbs);
+  }
+
+  private repeatStarSearch(sameDirection: boolean): void {
+    const count = Math.max(1, Math.min(MAX_COUNT, this.takeTotalCount(1)));
+    const last = this.lastStarSearch;
+    if (!last) return;
+    const forward = sameDirection ? last.forward : !last.forward;
+    for (let i = 0; i < count; i++) {
+      this.jumpToMatch(last.pattern, forward, this.getAbsoluteIndexFromCursor());
+    }
+  }
+
+  private jumpToMatch(pattern: string, forward: boolean, fromAbs: number): void {
+    const text = this.getText();
+    const re = new RegExp(pattern, "gu");
+    const starts: number[] = [];
+    for (let m = re.exec(text); m; m = re.exec(text)) {
+      starts.push(m.index);
+      if (m[0].length === 0) re.lastIndex++;
+    }
+    if (starts.length === 0) return;
+    let target: number | undefined;
+    if (forward) target = starts.find((s) => s > fromAbs) ?? starts[0];
+    else target = [...starts].reverse().find((s) => s < fromAbs) ?? starts[starts.length - 1];
+    if (target !== undefined) this.moveCursorToAbsoluteIndex(target);
+  }
+
+  // --- surround -------------------------------------------------------------------
+
+  private startSurroundAdd(span: SurroundSpan, fromVisual: boolean, special: boolean, keys: string): void {
+    this.pendingOperator = null;
+    this.pendingSurround = {
+      kind: "add",
+      stage: "replacement",
+      count: 1,
+      keys,
+      span,
+      fromVisual,
+      special,
+      input: "",
+    };
+  }
+
+  private startVisualSurround(): void {
+    this.takeTotalCount(1);
+    this.beginVisualChange();
+    const range = this.visualRange();
+    this.visualAnchor = null;
+    this.setMode("normal");
+    this.moveCursorToAbsoluteIndex(range.startAbs);
+    this.startSurroundAdd(range, true, range.linewise, "S");
+  }
+
+  private handlePendingSurround(data: string): void {
+    const pending = this.pendingSurround!;
+    const cancel = () => {
+      this.pendingSurround = null;
+      this.cancelRepeatableCommand();
+    };
+    if (pending.stage === "input") {
+      if (isEnterLikeInput(data) || data === "\r" || data === "\n") {
+        this.finishSurround(pending);
+        return;
+      }
+      if (isBackspaceLikeInput(data)) {
+        if (pending.input === "") {
+          cancel();
+          return;
+        }
+        pending.input = pending.input.slice(0, -1);
+        return;
+      }
+      if (!isPrintableChunk(data)) {
+        cancel();
+        return;
+      }
+      pending.input += data;
+      pending.keys += data;
+      // `>` ends a tag (surround maps it to `><CR>` at the tag prompt).
+      if (data.endsWith(">") && surroundNeedsInput(pending.char ?? "") === "tag") {
+        this.finishSurround(pending);
+      }
+      return;
+    }
+    if (!isPrintableInput(data)) {
+      cancel();
+      return;
+    }
+    pending.keys += data;
+    if (pending.stage === "target") {
+      if (isDigit(data)) {
+        pending.targetDigits = (pending.targetDigits ?? "") + data;
+        return;
+      }
+      if (data === " " && !pending.targetSpace) {
+        pending.targetSpace = true;
+        return;
+      }
+      pending.target = data;
+      if (pending.kind === "delete") {
+        this.finishSurround(pending);
+        return;
+      }
+      pending.stage = "replacement";
+      return;
+    }
+    // replacement
+    if (data === " " && !pending.extraSpace) {
+      pending.extraSpace = true;
+      return;
+    }
+    pending.char = data;
+    if (surroundNeedsInput(data)) {
+      pending.stage = "input";
+      return;
+    }
+    this.finishSurround(pending);
+  }
+
+  private finishSurround(pending: PendingSurround): void {
+    this.pendingSurround = null;
+    const options = { shiftWidth: this.shiftWidth };
+    const repl: SurroundReplacement | null = pending.char
+      ? { char: pending.char, input: pending.input, extraSpace: pending.extraSpace }
+      : null;
+    let edit: { text: string; cursorAbs: number } | null = null;
+    if (pending.kind === "add" && pending.span && repl) {
+      edit = surroundAdd(this.getText(), pending.span, repl, {
+        ...options,
+        fromVisual: pending.fromVisual,
+        special: pending.special,
+      });
+    } else if (pending.kind !== "add" && pending.target) {
+      const count = pending.count * (pending.targetDigits ? Number(pending.targetDigits) : 1);
+      edit = surroundChange(
+        this.getText(),
+        this.cursorPos(),
+        Math.max(1, count),
+        (pending.targetSpace ? " " : "") + pending.target,
+        pending.kind === "change" ? repl : null,
+        options,
+      );
+    }
+    if (!edit) {
+      this.cancelRepeatableCommand();
+      return;
+    }
+    this.forceCommitRepeatRecording();
+    if (edit.text !== this.getText()) this.replaceTextInBuffer(edit.text, edit.cursorAbs);
+    this.moveCursorToPos(this.getCursorFromAbsoluteIndex(edit.text, edit.cursorAbs));
+  }
+
   private getModeLabelColorizer(): ((s: string) => string) | null {
     if (!this.labelColorizers) return null;
     const labelColorizers = this.labelColorizers;
@@ -4933,8 +6489,19 @@ export class ModalEditor extends CustomEditor {
   }
 
   private getModeLabel(): string {
-    if ("insert" === this.mode) return " INSERT ";
+    if ("insert" === this.mode) return this.replaceSession ? " REPLACE " : " INSERT ";
     if (this.pendingExCommand !== null) return ` EX ${this.pendingExCommand}_ `;
+    if (
+      this.pendingOpG ||
+      this.pendingSurround ||
+      this.pendingSwallow ||
+      this.pendingRegister ||
+      this.pendingTextObjectWhich ||
+      (this.pendingTextObject && !this.pendingOperator)
+    ) {
+      const name = this.mode === "visual" ? "VISUAL" : this.mode === "visual-line" ? "V-LINE" : "NORMAL";
+      return ` ${name} ${this.getPendingKeys()}_ `;
+    }
 
     const prefixCount = this.prefixCount;
     const operatorCount = this.operatorCount;

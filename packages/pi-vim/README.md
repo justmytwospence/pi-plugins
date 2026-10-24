@@ -19,6 +19,10 @@ Ctrl+X Ctrl+F is main-prompt Insert-only; Ctrl+X Ctrl+E also works in idle Norma
 
 For a practical [local motion cheatsheet](https://pi-plugins.vercel.app/plugins/pi-vim/#motion-cheatsheet) and main/embedded ownership comparisons, see the [keymap](https://pi-plugins.vercel.app/guides/keyboard/). The optional personal profile disables direct `app.editor.external` keys and uses Ctrl+G for the transcript tail; Ctrl+X Ctrl+E still invokes the external-editor action.
 
+## Additions beyond upstream
+
+The engine adds Vim commands upstream lacks (`ge`, sentences, `+`/`-`/`|`, `*`/`#`/`n`, case operators, shifts, Ctrl+A/X, Replace mode, `gv`/`gi`, paragraph, sentence, tag and line objects, Visual `p`/`P`/`~`/`u`/`U`/`>`/`<`/`J`/`r`, the `"_` register) and drops the argument of unsupported commands such as `qa` or `ma` instead of running it. It also reproduces three Vim plugins, each behind a `piVim` setting that defaults to on in sessions and off in the bare engine: `surround` ([surround.vim](https://github.com/tpope/vim-surround), Vim license), `targets` ([targets.vim](https://github.com/wellle/targets.vim), MIT) and `wordMotion` ([vim-wordmotion](https://github.com/chaoren/vim-wordmotion), MIT). They are TypeScript ports in `src/engine/surround.ts`, `targets.ts` and `wordmotion.ts`; Neovim's own word, sentence, paragraph and object code is ported in `vim-objects.ts`. `test/nvim-parity-extensions.ts` checks them against Neovim with the plugins loaded from `~/.vim/plugins` (or `PI_VIM_PLUGIN_DIR`), skipping plugins that are not installed.
+
 ## Optional editor factory
 
 Consumers remain independently usable and do not import sibling packages. Copy the structural contract from [`src/contract.ts`](src/contract.ts), request a factory when opening the dialog, and fall back to Pi's native `Editor` when discovery is unanswered:
