@@ -114,9 +114,15 @@ export const defaultDeps: SamplerDeps = {
 
 const LINUX_PAGE = 4096;
 
-/** Samples on demand, keeping the previous counters to turn them into rates. */
-export function createSampler(deps: SamplerDeps = defaultDeps) {
+/**
+ * Samples on demand, keeping the previous counters to turn them into rates.
+ * CPU and load are in-process reads, every sample. macOS memory needs two
+ * subprocesses (`sysctl`, `vm_stat`), so it is read at most every
+ * `darwinMemoryEveryMs` and the last reading is reused in between.
+ */
+export function createSampler(deps: SamplerDeps = defaultDeps, { darwinMemoryEveryMs = 10_000 } = {}) {
   let prevCpu: CpuTimes | undefined;
+  let darwinMemory: { at: number; memory?: MemoryReading; swapInBps?: number } | undefined;
   let prevSwap: { at: number; bytes: number } | undefined;
   const swapRate = (at: number, bytes: number | undefined): number | undefined => {
     if (bytes === undefined) return undefined;
@@ -139,12 +145,18 @@ export function createSampler(deps: SamplerDeps = defaultDeps) {
       const loadPerCore = (deps.loadavg()[0] ?? 0) / Math.max(1, cpus.length);
       const reading: Reading = { at, cpu, loadPerCore };
       if (deps.platform === "darwin") {
+        if (darwinMemory && at - darwinMemory.at < darwinMemoryEveryMs) {
+          if (darwinMemory.memory) reading.memory = darwinMemory.memory;
+          if (darwinMemory.swapInBps !== undefined) reading.swapInBps = darwinMemory.swapInBps;
+          return reading;
+        }
         const [level, vm] = await Promise.all([
           quiet(async () => Number.parseInt((await deps.run("sysctl", ["-n", "kern.memorystatus_vm_pressure_level"])).trim(), 10)),
           quiet(async () => parseVmStat(await deps.run("vm_stat", []))),
         ]);
         if (level !== undefined && Number.isFinite(level)) reading.memory = { source: "darwin", level };
         reading.swapInBps = swapRate(at, vm ? vm.swapins * vm.pageSize : undefined);
+        darwinMemory = { at, memory: reading.memory, swapInBps: reading.swapInBps };
       } else if (deps.platform === "linux") {
         const [psi, vmstat] = await Promise.all([
           quiet(async () => parsePsi(await deps.read("/proc/pressure/memory"))),

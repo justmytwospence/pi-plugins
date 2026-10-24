@@ -117,25 +117,26 @@ export function parseBgStatus(text: string): BgItem[] | undefined {
   return items;
 }
 
-/** One item of pi-pressure's status: a signal with its level, or the busiest process. */
+/** One item of pi-pressure's status: a signal with its level, the busiest process, or the CPU trace (last). */
 export type PressureItem =
-  | { kind: "signal"; name: "cpu" | "load" | "mem" | "swap-in"; trace?: string; value?: string; level: "ok" | "warn" | "hot" }
-  | { kind: "top"; name: string };
+  | { kind: "signal"; name: "cpu" | "load" | "mem" | "swap-in"; value?: string; level: "ok" | "warn" | "hot" }
+  | { kind: "top"; name: string }
+  | { kind: "trace"; trace: string };
 
-/** pi-pressure's status, `pressure: cpu ⣴⣿ 97 hot · mem warn · swap-in 40MB/s warn · top vitest`, or undefined when any item is unfamiliar. */
+/** pi-pressure's status, `pressure: cpu 97 hot · mem warn · swap-in 40MB/s warn · top vitest · ⣀⣤⣿`, or undefined when any item is unfamiliar. */
 export function parsePressureStatus(text: string): PressureItem[] | undefined {
   const match = /^pressure: (.+)$/.exec(text);
   if (!match) return undefined;
   const items: PressureItem[] = [];
-  for (const part of match[1].split(" · ")) {
-    const signal = /^(cpu|load|mem|swap-in)(?: ([\u2800-\u28ff]+))?(?: (\S+))? (ok|warn|hot)$/u.exec(part);
+  for (const part of match[1].split(" \u00b7 ")) {
+    const signal = /^(cpu|load|mem|swap-in)(?: (\S+))? (ok|warn|hot)$/.exec(part);
     const top = /^top (.+)$/.exec(part);
     if (signal) {
-      const item: PressureItem = { kind: "signal", name: signal[1] as "cpu", level: signal[4] as "ok" };
-      if (signal[2]) item.trace = signal[2];
-      if (signal[3]) item.value = signal[3];
+      const item: PressureItem = { kind: "signal", name: signal[1] as "cpu", level: signal[3] as "ok" };
+      if (signal[2]) item.value = signal[2];
       items.push(item);
     } else if (top) items.push({ kind: "top", name: top[1] });
+    else if (/^[\u2800-\u28ff]+$/u.test(part)) items.push({ kind: "trace", trace: part });
     else return undefined;
   }
   return items;
@@ -775,23 +776,26 @@ function bgRow(items: BgItem[], width: number, theme: Paint): string {
 }
 
 // pi-pressure's signals: the value (or the level, for memory) in the level's
-// color; hot signals stay longest when narrow, then warn, then eased ones; the
-// CPU trace goes before its number, and the busiest process goes first.
+// color; hot signals stay longest when narrow, then warn, then eased ones, and
+// the busiest process goes first. The CPU trace comes last and gets whatever
+// width is left, keeping its newest minutes: it starts at one cell and grows.
 function pressureRow(items: PressureItem[], width: number, theme: Paint): string {
   const color = { ok: "muted", warn: "warning", hot: "error" } as const;
   const segments: Segment[] = [{ text: theme.fg("muted", "Pressure"), separatorAfter: " ", priority: 110 }];
+  let trace = "";
+  let cpu: keyof typeof color = "ok";
   for (const item of items) {
+    if (item.kind === "trace") { trace = item.trace; continue; }
     if (item.kind === "top") { segments.push({ text: `${theme.fg("dim", "top")} ${theme.fg("muted", item.name)}`, priority: 20 }); continue; }
-    const paint = (text: string) => theme.fg(color[item.level], text);
-    const value = theme.bold(paint(item.value ?? item.level));
-    const name = theme.fg("muted", item.name);
-    segments.push({
-      text: `${name} ${item.trace ? `${paint(item.trace)} ` : ""}${value}`,
-      short: `${name} ${value}`,
-      priority: item.level === "hot" ? 100 : item.level === "warn" ? 90 : 55,
-    });
+    if (item.name === "cpu") cpu = item.level;
+    const value = theme.bold(theme.fg(color[item.level], item.value ?? item.level));
+    segments.push({ text: `${theme.fg("muted", item.name)} ${value}`, priority: item.level === "hot" ? 100 : item.level === "warn" ? 90 : 55 });
   }
-  return fitSegments(segments, width, theme);
+  const text = fitSegments(segments, width, theme);
+  const separator = theme.fg("dim", " \u00b7 ");
+  // Braille cells are one code unit and one cell wide.
+  const room = width - visibleWidth(text) - visibleWidth(separator);
+  return trace && room > 0 ? `${text}${separator}${theme.fg(color[cpu], trace.slice(-room))}` : text;
 }
 
 // Nerd Font (Font Awesome / Devicons / Material Design, all private-use,

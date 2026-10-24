@@ -58,7 +58,7 @@ describe("sampler", () => {
   };
   test("macOS: pressure level and swap-in rate", async () => {
     let swapins = 1000;
-    const sampler = createSampler(deps({ run: async (command) => (command === "sysctl" ? "2\n" : `page size of 1024 bytes\nSwapins: ${(swapins += 2048)}.\n`) }));
+    const sampler = createSampler(deps({ run: async (command) => (command === "sysctl" ? "2\n" : `page size of 1024 bytes\nSwapins: ${(swapins += 2048)}.\n`) }), { darwinMemoryEveryMs: 0 });
     const first = await sampler.sample();
     expect(first.cpu).toBeUndefined();
     expect(first.memory).toEqual({ source: "darwin", level: 2 });
@@ -66,6 +66,15 @@ describe("sampler", () => {
     const second = await sampler.sample();
     expect(second.cpu).toBeCloseTo(95);
     expect(second.swapInBps).toBe(2048 * 1024 / 2);
+  });
+  test("macOS: memory subprocesses run at most every darwinMemoryEveryMs; CPU every sample", async () => {
+    const calls: string[] = [];
+    const sampler = createSampler(deps({ run: async (command) => { calls.push(command); return command === "sysctl" ? "4\n" : VM_STAT; } }));
+    const readings = [];
+    for (let i = 0; i < 6; i++) readings.push(await sampler.sample()); // 2 s apart
+    expect(calls).toEqual(["sysctl", "vm_stat", "sysctl", "vm_stat"]);
+    expect(readings.every((r) => r.memory?.source === "darwin" && r.memory.level === 4)).toBe(true);
+    expect(readings.slice(1).every((r) => r.cpu !== undefined)).toBe(true);
   });
   test("Linux: PSI and pswpin; failures leave fields out", async () => {
     let pswpin = 0;
@@ -151,7 +160,7 @@ describe("status", () => {
     for (const [i, cpu] of [60, 80, 90, 97].entries()) m.step({ at: i * 60_000, cpu, loadPerCore: 1.6, memory: { source: "darwin", level: 2 }, swapInBps: 40 * 1024 * 1024 });
     const view = m.view();
     const text = formatStatus(view, "vitest")!;
-    expect(text).toBe("pressure: cpu ⣴⣿ 97 hot · load 1.6 warn · mem warn · swap-in 40MB/s warn · top vitest");
+    expect(text).toBe("pressure: cpu 97 hot · load 1.6 warn · mem warn · swap-in 40MB/s warn · top vitest · ⣴⣿");
     expect(formatStatus(view, undefined)).not.toMatch(/[%$#>]$/);
     expect(topBy(view)).toBe("cpu");
     expect(formatStatus({ ...view, visible: false }, "x")).toBeUndefined();
@@ -180,7 +189,7 @@ describe("config", () => {
   test("merges valid values over defaults, ignores the rest", () => {
     const config = mergeConfig({ cpu: { warn: 70 }, showAfterMs: 0, historyMinutes: 999 }, { cpu: { hot: -1 } as never, intervalMs: 10, enabled: false });
     expect(config.historyMinutes).toBe(120);
-    expect(DEFAULTS.historyMinutes).toBe(20);
+    expect(DEFAULTS.historyMinutes).toBe(60);
     expect(config.cpu).toEqual({ warn: 70, hot: 95 });
     expect(config.showAfterMs).toBe(0);
     expect(config.intervalMs).toBe(500);

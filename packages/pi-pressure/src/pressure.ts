@@ -1,8 +1,9 @@
 // Turns readings into levels with hysteresis, decides when the row shows, and
 // formats the status pi-status-footer folds into its own row:
-//   pressure: cpu ⣀⣤⣶⣿ 97 hot · load 1.6 warn · mem warn · swap-in 40MB/s warn · top vitest
-// Items are ` · `-separated; each signal ends in its level word, so no item ends
-// in `%` (herdr-web-ui reads a footer line ending in % $ # > as a shell prompt).
+//   pressure: cpu 97 hot · load 1.6 warn · mem warn · swap-in 40MB/s warn · top vitest · ⣀⣤⣶⣿
+// Items are ` · `-separated; each signal ends in its level word and the CPU trace
+// (braille only) comes last, so nothing ends in `%` (herdr-web-ui reads a footer
+// line ending in % $ # > as a shell prompt).
 
 import type { Reading } from "./sample.ts";
 
@@ -38,7 +39,7 @@ export const DEFAULTS: PressureConfig = {
   intervalMs: 2_000,
   showAfterMs: 10_000,
   hideAfterMs: 30_000,
-  historyMinutes: 20,
+  historyMinutes: 60,
   cpu: { warn: 85, hot: 95 },
   loadPerCore: { warn: 1.5, hot: 2.5 },
   memorySome: { warn: 10, hot: 40 },
@@ -178,13 +179,14 @@ export function formatStatus(view: View, top: string | undefined, paint: Paint =
     const value = (text: string) => paint.level(level, `${text}${text ? " " : ""}${level}`);
     if (signal === "cpu") {
       const busy = r?.cpu ?? view.history.at(-1);
-      const trace = view.history.some((v) => v !== undefined) ? `${paint.level(level, spark(view.history))} ` : "";
-      items.push(`${paint.dim("cpu")} ${trace}${value(busy === undefined ? "" : `${Math.round(busy)}`)}`);
+      items.push(`${paint.dim("cpu")} ${value(busy === undefined ? "" : `${Math.round(busy)}`)}`);
     } else if (signal === "load") items.push(`${paint.dim("load")} ${value(r ? r.loadPerCore.toFixed(1) : "")}`);
     else if (signal === "mem") items.push(`${paint.dim("mem")} ${value("")}`);
     else items.push(`${paint.dim("swap-in")} ${value(r?.swapInBps === undefined ? "" : formatRate(r.swapInBps))}`);
   }
   if (top) items.push(`${paint.dim("top")} ${top}`);
+  // The CPU trace goes last, so a reader can give it whatever width is left.
+  if (view.episode.includes("cpu") && view.history.some((v) => v !== undefined)) items.push(paint.level(view.levels.cpu, spark(view.history)));
   return `${paint.dim("pressure:")} ${items.join(paint.dim(" \u00b7 "))}`;
 }
 

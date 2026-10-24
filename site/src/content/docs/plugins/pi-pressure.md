@@ -9,7 +9,7 @@ plugin: pi-pressure
 - **Use it for:** Notice when the machine, not the model, is the bottleneck: a build pinning every core, memory pressure, swapping. Nothing is shown otherwise.
 - **Enable:** Select `packages/pi-pressure/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
 - **Controls:** `/pressure` reports readings, thresholds and top processes; `/pressure on|off` toggles watching.
-- **Settings:** Optional `~/.pi/agent/pi-pressure.json` (project `.pi/pi-pressure.json` overrides): `enabled`, `intervalMs` (2000), `showAfterMs` (10000), `hideAfterMs` (30000), `historyMinutes` (20, up to 120), and `warn`/`hot` bands for `cpu`, `loadPerCore`, `memorySome`, `memoryFull` and `swapInMBps`.
+- **Settings:** Optional `~/.pi/agent/pi-pressure.json` (project `.pi/pi-pressure.json` overrides): `enabled`, `intervalMs` (2000), `showAfterMs` (10000), `hideAfterMs` (30000), `historyMinutes` (60, up to 120), and `warn`/`hot` bands for `cpu`, `loadPerCore`, `memorySome`, `memoryFull` and `swapInMBps`.
 - **Requirements, cost & privacy:** No dependencies or inference calls. macOS and Linux get memory signals; other platforms get CPU only. Nothing leaves the machine or enters model context.
 - **Integrations & limits:** With [pi-status-footer](/plugins/pi-status-footer/) it gets its own footer row; otherwise it shows in Pi's status row. Hidden while a dialog shrinks the footer to one row.
 
@@ -20,10 +20,10 @@ An always-on resource meter is noise most of the time. pi-pressure stays out of 
 Example row with pi-status-footer (illustration, not a screenshot):
 
 ```
- Pressure cpu ⣀⣀⣀⣠⣤⣴⣶⣾⣿⣿ 97 · load 1.6 · mem warn · swap-in 40MB/s · top vitest
+ Pressure cpu 97 · load 1.6 · mem warn · swap-in 40MB/s · top vitest · ⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣠⣤⣤⣤⣴⣶⣾⣾⣿⣿⣿
 ```
 
-Values take the level's color: muted once eased, warning, then error. The braille trace covers the last 20 minutes of CPU: each dot column is one minute's mean, two minutes per character, with the current minute last. Sampling runs from Pi's start, not just while the row shows, so the trace shows how the load built up. When the terminal is narrow, the busiest process, then eased signals and the trace go first; hot and warn signals stay. Without the footer, the same text appears in Pi's status row with level words: `pressure: cpu ⣀⣀⣀⣠⣤⣴⣶⣾⣿⣿ 97 hot · mem warn · top vitest`.
+Values take the level's color: muted once eased, warning, then error. The braille trace covers the last hour of CPU: each dot column is one minute's mean, two minutes per character (30 characters for the hour), with the current minute last. It sits at the end of the row and takes whatever width is left, keeping the newest minutes, so it starts at one character and grows. Sampling runs from Pi's start, not just while the row shows, so the trace shows how the load built up. When the terminal is narrow, the trace shrinks first (oldest minutes go), then the busiest process and eased signals; hot and warn signals stay. Without the footer, the same text appears in Pi's status row with level words: `pressure: cpu 97 hot · mem warn · top vitest · ⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣠⣤⣤⣤⣴⣶⣾⣾⣿⣿⣿`.
 
 ## Signals
 
@@ -41,6 +41,6 @@ The busiest process comes from `ps`, which runs only while the row shows (at mos
 
 ## Cost
 
-Sampling runs every 2 seconds, only in sessions with a UI. On macOS each sample runs `sysctl` and `vm_stat`; on Linux it reads two `/proc` files.
+Sampling runs every 2 seconds from session start, only in sessions with a UI: no OS offers Node a CPU-pressure notification, and the trace needs the minutes before the row shows. CPU and load are in-process reads. Memory on macOS needs `sysctl` and `vm_stat`, run at most every 10 seconds; on Linux it reads two `/proc` files.
 
 [GitHub source](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-pressure)
