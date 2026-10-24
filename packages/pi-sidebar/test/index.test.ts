@@ -194,6 +194,21 @@ describe("Sidebar's model", () => {
   });
 });
 
+describe("the composer", () => {
+  it("starts the prompt where main's does (main's editorPaddingX)", () => {
+    const column = (padding?: number) => {
+      const { pi, controller, ctx } = setup();
+      if (padding !== undefined) pi.settings = { editorPaddingX: padding };
+      controller.open(ctx as never);
+      const panel = panelOf(controller);
+      panel.input.setText("hello");
+      const line = (panel.input.render(40) as string[]).find((l) => l.includes("hello"))!;
+      return line.indexOf("hello");
+    };
+    expect(column(1)).toBe(column() + 1);
+  });
+});
+
 describe("opening and focus", () => {
   it("needs the interactive UI and fullscreen mode", () => {
     const { controller, ctx, notes } = setup();

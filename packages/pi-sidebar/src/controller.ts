@@ -242,6 +242,9 @@ export class SidebarController {
         toggleLabel: this.keys[0] ?? "ctrl+'",
         cycleModel: (direction) => this.cycleModel(direction),
         pickModel: () => void this.pickModel(),
+        editorPaddingX: () => {
+          try { return Number((this.pi.getSettings() as { editorPaddingX?: unknown }).editorPaddingX) || 0; } catch { return 0; }
+        },
         mainHidesThinking: () => {
           try { return (this.pi.getSettings() as { hideThinkingBlock?: boolean }).hideThinkingBlock === true; } catch { return false; }
         },

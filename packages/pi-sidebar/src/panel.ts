@@ -64,6 +64,8 @@ export interface PanelHost {
   matchesFocusSwitch(data: string): boolean;
   /** Whether main hides thinking blocks (its `hideThinkingBlock` setting). */
   mainHidesThinking(): boolean;
+  /** Main's editor padding (its `editorPaddingX` setting), so the prompt starts where main's does. */
+  editorPaddingX?(): number;
   cwd: string;
   events?: { emit(channel: string, data: unknown): void };
   /** pi-sticky-last-prompt's pinned prompt bar, when it is active. */
@@ -198,6 +200,7 @@ class Composer implements Component, Focusable {
       borderColor: (text) => theme().fg(panel.focused ? "borderAccent" : "borderMuted", text),
       selectList: getSelectListTheme(),
     };
+    const paddingX = Math.max(0, Math.min(3, Math.floor(host.editorPaddingX?.() ?? 0)));
     const provided = requestEditorFactory(host.events);
     let suiteEditor: SuiteEditor | undefined;
     if (provided?.factory) {
@@ -211,7 +214,7 @@ class Composer implements Component, Focusable {
           onCancel: () => {},
           scrollViewport: (direction) => panel.scroll(direction * 0.5),
           notify: (message, type) => panel.notice({ kind: type, text: message }),
-          paddingX: 0,
+          paddingX,
           initialText: "",
           initialMode: "insert",
         });
@@ -223,7 +226,7 @@ class Composer implements Component, Focusable {
       this.editor = suiteEditor;
       this.suite = true;
     } else {
-      const editor = new Editor(tui, editorTheme, { paddingX: 0 });
+      const editor = new Editor(tui, editorTheme, { paddingX });
       editor.onSubmit = (text) => this.submit(text);
       this.editor = editor;
       this.suite = false;
