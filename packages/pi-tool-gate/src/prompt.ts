@@ -1,5 +1,5 @@
 // herdr-web-ui and Collie read this dialog off the screen for phone cards; keep its layout compatible.
-// See "herdr-web-ui compatibility" and "Collie compatibility" in the repository's AGENTS.md, and run
+// See "herdr-web-ui compatibility" and "Collie compatibility" in the repository's docs/clients.md, and run
 // `npm run check:clients`, before changing rendering.
 // The approval dialog. In Pi's terminal UI a held call is shown laid out and highlighted (bash one
 // step per line, edits as diffs), with why it was held and the agent's case rendered as Markdown;

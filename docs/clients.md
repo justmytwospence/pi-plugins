@@ -1,0 +1,23 @@
+# Remote client compatibility
+
+Maintainer rules for keeping the suite's dialogs, footer and below-editor widgets readable by the phone clients that parse Pi's screen. The public overview is `site/src/content/docs/guides/clients.md`.
+
+## herdr-web-ui compatibility
+
+herdr-web-ui (devswha/herdr-web-ui, `server/prompt.ts`) turns a waiting Pi dialog into a phone card by reading the screen text. It has no configuration hook. Every dialog that holds `herdr:blocked` must keep a layout it can read, or phones fall back to a bare Enter/Esc card:
+
+- **Pi layout** (single-choice questions, tool-gate approvals, plan approval, Review): from the bottom, at most 2 footer lines, a rule, then Pi's key hint ending in `↑↓ navigate  enter select  escape/ctrl+c cancel` (or `enter submit  escape/ctrl+c cancel` under a single `›` input line). Above that a blank line, then one row per option (cursor `→`, single-space labels, cursor on the first row). A wrapped rest of a row goes behind a 1-column `│`. Above that a blank line, then the question.
+- **OmO form** (multi-select questions): an `Ask user` line (here the dialog's titled top border; anything after `Ask user` must follow a ` · `), a tab bar ending in `Submit`, numbered rows indented 2-4, an unnumbered `Type your own answer` line, and a hint starting `↑↓ move  1-9 select  space toggle  enter next` and ending `esc cancel`. No footer line may end in `%`, `$`, `#` or `>`. Number keys toggle, Backspace clears, Tab commits.
+- pi-status-footer shrinks to one row while `herdr:blocked` is held, so a pi-bg or subagent activity row still fits in the 2 lines after the hint.
+- Anything drawn on an option row shows up in the phone card's option text, so keep box glyphs and decorations off unchecked rows.
+
+Before changing a dialog's rendering, the footer, or below-editor widgets, render the screen at 46 and 120 columns. Feed it, plus the footer and any activity row, to the installed parser: `parseInteractivePrompt("pi", screen)` from `~/.local/share/herdr-web-ui/remote-v*/server/prompt.ts`, run with that bundle's `bin/bun`. Check the card's question, options and `multi_select`, and the text-box card after "Type something." or "Other". Re-check after herdr-web-ui updates. `npm run check:clients` does this for every dialog.
+
+## Collie compatibility
+
+Collie (AltanS/collie) also reads a waiting Pi dialog off the screen, and finds the editor by its frame to decide whether a phone send may type. Out of the box it reads vanilla Pi only, so everything the suite draws differently is declared to it in `~/.config/collie/frames.toml`, managed in dotfiles (`home/dot_config/collie/frames.toml`): pi-status-footer's `━` gauge in the editor rules and its indented footer, pi-vim's mode label at the bottom rule's end, pi-bg's activity row and the blank row under it, the `│` gutter of a wrapped option, and the multiple choice's `✓` tick column and `Other` row. That file needs a Collie build with `frames.toml` support: until upstream ships it, the fork branch `justmytwospence/collie` `feat/pi-frames`.
+
+- The dialog layouts above serve Collie too: single-choice questions, tool-gate approvals and Pi's own selects lift as walked buttons; a lone multiple choice lifts as checkboxes (its digits toggle, `tab done` submits, `Other` stays in the terminal), and several questions at once show Collie's Escape card. Keep those shapes inside `frames.toml`'s declarations, or change the file with them.
+- A change to the editor's rules, the footer's height or indent, or a below-editor widget must stay inside `frames.toml`'s limits, or change that file with it (and restart Collie).
+
+`npm run check:clients` renders every dialog at 46 and 120 columns over the blocked footer and runs both clients' readers on it (herdr-web-ui's installed bundle, and a Collie checkout at `~/Projects/collie` with this machine's `frames.toml`); a client that is not installed is skipped. It also draws every dialog with pi-sidebar open (collapsed, as it is while a dialog waits) and main's idle editor with Sidebar open, which must read as it does without Sidebar; Collie's known misreading of the latter is printed as `KNOWN`. Run it after changing a dialog, the footer, a below-editor widget or Sidebar's layout.

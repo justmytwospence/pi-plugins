@@ -2,7 +2,7 @@
 // the suite's dialogs through Pi's real theme and components, as they sit over the one-row footer
 // pi-status-footer draws while `herdr:blocked` is held, and runs every screen through each installed
 // client's own reader:
-//   - herdr-web-ui: `parseInteractivePrompt` from its installed bundle (AGENTS.md, "herdr-web-ui
+//   - herdr-web-ui: `parseInteractivePrompt` from its installed bundle (docs/clients.md, "herdr-web-ui
 //     compatibility");
 //   - Collie: the pi adapter of a Collie checkout, given this machine's `frames.toml`.
 // A client that is not installed is skipped, so this is not part of `npm test`: run it with

@@ -1,5 +1,5 @@
 // herdr-web-ui and Collie read this dialog off the screen for phone cards; keep its layout compatible.
-// See "herdr-web-ui compatibility" and "Collie compatibility" in the repository's AGENTS.md, and run
+// See "herdr-web-ui compatibility" and "Collie compatibility" in the repository's docs/clients.md, and run
 // `npm run check:clients`, before changing rendering.
 // The question dialog, in the editor area at the bottom of pi's terminal UI like Claude Code's: the
 // transcript stays visible above it. Several questions get a tab each plus a Review tab; every

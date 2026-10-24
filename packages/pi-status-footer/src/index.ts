@@ -830,7 +830,7 @@ const MODE_COLORS: Record<PermissionModeStatus["kind"], Parameters<Paint["fg"]>[
 };
 
 /** Extensions hold this on pi's event bus while a dialog waits on the user (herdr counts the pairs).
- * While one is held the footer is one row, for herdr-web-ui (see AGENTS.md, "herdr-web-ui compatibility"). */
+ * While one is held the footer is one row, for herdr-web-ui (see docs/clients.md, "herdr-web-ui compatibility"). */
 const HERDR_BLOCKED_EVENT = "herdr:blocked";
 
 export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): string[] {
