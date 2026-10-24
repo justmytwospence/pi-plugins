@@ -48,6 +48,66 @@ const OPERATOR_MOTION_FINAL_STATE_CASES: NvimParityCase[] = [
     keys: ["d", "B"],
   },
   {
+    name: "dl - deletes the char under the cursor",
+    initial: { text: "foo bar", cursor: { line: 0, col: 1 } },
+    keys: ["d", "l"],
+  },
+  {
+    name: "3dl - deletes three chars",
+    initial: { text: "foo bar", cursor: { line: 0, col: 1 } },
+    keys: ["3", "d", "l"],
+  },
+  {
+    name: "d5l - clamps to line end",
+    initial: { text: "foo bar", cursor: { line: 0, col: 5 } },
+    keys: ["d", "5", "l"],
+  },
+  {
+    name: "dh - deletes the char before the cursor",
+    initial: { text: "foo bar", cursor: { line: 0, col: 4 } },
+    keys: ["d", "h"],
+  },
+  {
+    name: "dh at col 0 - no-op",
+    initial: { text: "foo bar", cursor: { line: 0, col: 0 } },
+    keys: ["d", "h"],
+  },
+  {
+    name: "cl - changes the char under the cursor",
+    initial: { text: "foo bar", cursor: { line: 0, col: 1 } },
+    keys: ["c", "l", "Z", "\x1b"],
+  },
+  {
+    name: "2cl - changes two chars",
+    initial: { text: "foo bar", cursor: { line: 0, col: 1 } },
+    keys: ["2", "c", "l", "Z", "\x1b"],
+  },
+  {
+    name: "cl at last char - changes it",
+    initial: { text: "foo bar", cursor: { line: 0, col: 6 } },
+    keys: ["c", "l", "Z", "\x1b"],
+  },
+  {
+    name: "cl on empty line - enters insert",
+    initial: { text: "", cursor: { line: 0, col: 0 } },
+    keys: ["c", "l", "Z", "\x1b"],
+  },
+  {
+    name: "ch - changes the char before the cursor",
+    initial: { text: "foo bar", cursor: { line: 0, col: 4 } },
+    keys: ["c", "h", "Z", "\x1b"],
+  },
+  {
+    name: "yl then P - yanks the char under the cursor",
+    initial: { text: "foo bar", cursor: { line: 0, col: 4 } },
+    keys: ["y", "l", "P"],
+  },
+  {
+    name: "y2h then p - yanks two chars back and moves the cursor",
+    initial: { text: "foo bar", cursor: { line: 0, col: 4 } },
+    keys: ["y", "2", "h", "p"],
+  },
+  {
     name: "cw - changes whitespace to the next word start",
     initial: { text: "foo bar baz", cursor: { line: 0, col: 3 } },
     keys: ["c", "w", "Z", "\x1b"],

@@ -5,6 +5,16 @@ const ESC = "\x1b";
 
 const DOT_REPEAT_FINAL_STATE_CASES: NvimParityCase[] = [
   {
+    name: ". repeats cl with its inserted text",
+    initial: { text: "abcdef", cursor: { line: 0, col: 0 } },
+    keys: ["c", "l", "Z", ESC, "l", "."],
+  },
+  {
+    name: ". repeats 2dl",
+    initial: { text: "abcdef", cursor: { line: 0, col: 0 } },
+    keys: ["2", "d", "l", "."],
+  },
+  {
     name: ". repeats a single-key edit",
     initial: { text: "abcdef", cursor: { line: 0, col: 0 } },
     keys: ["x", "."],

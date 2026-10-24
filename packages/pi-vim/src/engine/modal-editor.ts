@@ -2658,6 +2658,15 @@ export class ModalEditor extends CustomEditor {
       return;
     }
 
+    if (data === "l" || data === "h") {
+      if (this.applyCharwiseHorizontalOperator(data, "d")) {
+        this.pendingOperator = null;
+        return;
+      }
+      this.cancelPendingOperator(data);
+      return;
+    }
+
     const hasCount = this.hasPendingCount();
     const supportsCountedWordMotion =
       data === "w" ||
@@ -2749,6 +2758,16 @@ export class ModalEditor extends CustomEditor {
 
     if (CHAR_MOTION_KEYS.has(data)) {
       this.pendingMotion = data as PendingMotion;
+      return;
+    }
+
+    if (data === "l" || data === "h") {
+      if (this.applyCharwiseHorizontalOperator(data, "c")) {
+        this.pendingOperator = null;
+        this.setMode();
+        return;
+      }
+      this.cancelPendingOperator(data);
       return;
     }
 
@@ -4425,6 +4444,15 @@ export class ModalEditor extends CustomEditor {
       return;
     }
 
+    if (data === "l" || data === "h") {
+      if (this.applyCharwiseHorizontalOperator(data, "y")) {
+        this.pendingOperator = null;
+        return;
+      }
+      this.cancelPendingOperator(data);
+      return;
+    }
+
     if (this.hasPendingCount()) {
       this.cancelPendingOperator(data);
       return;
@@ -4435,6 +4463,56 @@ export class ModalEditor extends CustomEditor {
     } else {
       this.cancelPendingOperator(data); // cancel on unrecognised motion
     }
+  }
+
+  // `{op}l` / `{op}h`: an exclusive charwise motion of {count} graphemes,
+  // clamped to the current line. `l` past the line end is clamped (so `cl` on
+  // an empty line still opens insert, like `s`); `h` at column 0 fails.
+  private applyCharwiseHorizontalOperator(
+    motion: "l" | "h",
+    operator: "d" | "c" | "y",
+  ): boolean {
+    const count = Math.max(1, Math.min(MAX_COUNT, this.takeTotalCount(1)));
+    const cursor = this.getCursor();
+    const line = this.getLines()[cursor.line] ?? "";
+    const segments = getLineGraphemes(line);
+
+    let start: number;
+    let end: number;
+    if (motion === "l") {
+      const after = segments.filter((segment) => segment.start >= cursor.col);
+      if (after.length === 0) return operator === "c";
+      const take = Math.min(count, after.length);
+      start = after[0].start;
+      end = after[take - 1].end;
+    } else {
+      const before = segments.filter((segment) => segment.end <= cursor.col);
+      if (before.length === 0) return false;
+      const take = Math.min(count, before.length);
+      start = before[before.length - take].start;
+      end = before[before.length - 1].end;
+    }
+
+    if (operator === "y") {
+      this.writeToRegister(line.slice(start, end), "yank");
+      if (motion === "h") this.moveCursorToCol(start);
+      return true;
+    }
+
+    const lineStartAbs = this.getAbsoluteIndex(cursor.line, 0);
+    const text = this.getText();
+    this.writeToRegister(line.slice(start, end));
+    this.replaceTextInBuffer(
+      text.slice(0, lineStartAbs + start) + text.slice(lineStartAbs + end),
+      lineStartAbs + start,
+    );
+    if (operator === "d") {
+      const current = this.getCurrentLineAndCol();
+      if (current.line && current.col >= current.line.length) {
+        this.moveCursorBy(-1);
+      }
+    }
+    return true;
   }
 
   private yankWithMotion(motion: string): boolean {
