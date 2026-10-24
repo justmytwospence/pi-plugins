@@ -159,7 +159,8 @@ export function canRead(policy: Policy, file: string): boolean {
 /**
  * The folder a "allow similar" grant covers: the first folder under a private root (the root
  * itself for a file directly in it, as `~/Downloads/shot.png`), else the file's own directory,
- * except that the filesystem root is never a scope: a write to `/x` covers only `/x`.
+ * except that the filesystem root is never a scope: a write to `/x` covers only `/x`. A write to an
+ * existing directory (the working directory of `cd ~ && make`, say) covers that directory, not its parent.
  */
 export function scopeOf(policy: Policy, file: string, access: Access): string {
   for (const root of policy.private) {
@@ -169,7 +170,16 @@ export function scopeOf(policy: Policy, file: string, access: Access): string {
     const child = path.join(root, rest);
     return child === file && !looksLikeFolder(file) ? root : child;
   }
-  return access === "write" && path.dirname(file) !== file && path.dirname(file) !== "/" ? path.dirname(file) : file;
+  if (access !== "write" || path.dirname(file) === file || path.dirname(file) === "/" || isDirectory(file)) return file;
+  return path.dirname(file);
+}
+
+function isDirectory(file: string): boolean {
+  try {
+    return statSync(file).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 /** An existing directory, or a missing path without an extension (a folder about to be made). */

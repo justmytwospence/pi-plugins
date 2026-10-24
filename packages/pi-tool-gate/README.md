@@ -101,7 +101,7 @@ When Jev cannot answer (Jev off in settings, no classifier model, no credentials
 
 ## Directories
 
-Pi has no directory boundary of its own, so the gate keeps one. In auto, manual and accept-edits modes (and for reads in chat and plan mode), a call is held when it touches a path outside its project's directories, before any Jev call. Auto mode pushes it back once, as with any held call, and then asks you. "Allow similar" grants that folder for the session, or always for the project: a folder under a private root (`~/Projects/other`), the private root itself for a file directly in it (`~/Downloads/shot.png` grants `~/Downloads`), else the file's directory.
+Pi has no directory boundary of its own, so the gate keeps one. In auto, manual and accept-edits modes (and for reads in chat and plan mode), a call is held when it touches a path outside its project's directories, before any Jev call. Auto mode pushes it back once, as with any held call, and then asks you. "Allow similar" grants that folder for the session, or always for the project: a folder under a private root (`~/Projects/other`), the private root itself for a file directly in it (`~/Downloads/shot.png` grants `~/Downloads`), else the file's directory, or the directory itself when the write is to an existing one (a writing command's working directory: `cd ~ && chezmoi apply` grants `~`, not `/Users`).
 
 - The project (the git checkout of the working directory, and the main checkout of a worktree) is always readable and writable.
 - Private roots (`directories.private`: `~/Projects`, `~/Documents`, `~/Desktop`, `~/Downloads`, iCloud Drive) are neither read nor written outside the project and its grants.

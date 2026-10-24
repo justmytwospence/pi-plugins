@@ -157,6 +157,12 @@ describe("policy", () => {
       expect(scopeOf(q, path.join(root, "notes"), "read")).toBe(root);
       expect(scopeOf(q, path.join(root, "new-folder"), "write")).toBe(path.join(root, "new-folder"));
       expect(scopeOf(q, path.join(root, "new.txt"), "write")).toBe(root);
+      // Outside private roots, a write to an existing directory (a command's working directory) covers
+      // that directory, not its parent: `cd ~ && chezmoi apply` grants writes in ~, not in /Users.
+      const plain = policy();
+      expect(scopeOf(plain, path.join(root, "repo"), "write")).toBe(path.join(root, "repo"));
+      expect(scopeOf(plain, path.join(root, "repo", "new.txt"), "write")).toBe(path.join(root, "repo"));
+      expect(violations(plain, bashPathAccess("cd ~ && chezmoi apply", app))).toEqual([{ access: "write", file: H, scope: H }]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
