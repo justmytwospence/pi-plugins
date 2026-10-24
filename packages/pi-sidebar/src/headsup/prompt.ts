@@ -32,3 +32,11 @@ export function headsUpStatus({ liveText, known, recent, now }: HeadsUpStatusInp
     "</sidebar-status>",
   ].join("\n");
 }
+
+/** The system prompt of a check on another model than main's (main's own prompt is not reused there). */
+export const HEADSUP_SYSTEM = "You read another AI agent's coding session on the user's behalf and, rarely, point out one thing worth knowing.";
+
+/** What a check on another model is told about the transcript it reads. */
+export function foreignHeadsUpIntro({ sidebar, main }: { sidebar: string; main: string }): string {
+  return `The <main-transcript> parts above record a session in which another agent (on ${main}) works with the user; its tool results are clipped. You run on ${sidebar}, a different model: weigh the main agent's claims and choices on your own, not as it framed them.`;
+}

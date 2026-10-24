@@ -1,16 +1,16 @@
 ---
 title: pi-sidebar
-description: A live, read-only side chat beside a working Pi session, in the same Pi process, built on the main session's prompt cache so a question costs little.
+description: A live, read-only side chat beside a working Pi session, in the same Pi process, built on the main session's prompt cache so a question costs little, or on another model for a second opinion.
 plugin: pi-sidebar
 ---
 
 ## Quick reference
 
-- **Use it for:** Ask what the main agent is doing, why, or how the code works, without interrupting it. Quiz mode (`/quiz`) also quizzes you on main's changes and tracks what you know. Heads-up mode, on by default, notes one thing worth knowing in Sidebar or above main's editor during longer runs (or only in Sidebar).
+- **Use it for:** Ask what the main agent is doing, why, or how the code works, without interrupting it. Switch it to another model (`/model`) for a second opinion. Quiz mode (`/quiz`) also quizzes you on main's changes and tracks what you know. Heads-up mode, on by default, notes one thing worth knowing in Sidebar or above main's editor during longer runs (or only in Sidebar).
 - **Enable:** Select `packages/pi-sidebar/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
 - **Controls:** Ctrl+' opens or closes Sidebar. In Herdr, `prefix+h/l` moves between main and Sidebar as if Sidebar were a pane (with the bundled Herdr plugin). In Sidebar, your own keybindings apply: pi-vim's Ctrl+U/D and your transcript scroll keys (such as Ctrl+G) scroll it, Esc or Ctrl+C stops an answer, Ctrl+O expands tools and collapsed reasoning, and your thinking toggle shows or hides reasoning.
-- **Settings:** `PI_SIDEBAR_KEYS` replaces the key. `PI_SIDEBAR_RATIO` sets Sidebar's share (default 0.5) until you drag the divider, which is remembered. `PI_SIDEBAR_MIN_COLUMNS` is the narrowest half for a side-by-side split (default 80). The model and thinking always match main.
-- **Requirements, cost & privacy:** Requires Pi's fullscreen mode. Each question reads main's context from the cache, plus a small new part, and Sidebar asks first when that cache has probably expired. The thread is stored as hidden entries in main's session.
+- **Settings:** `PI_SIDEBAR_KEYS` replaces the key. `PI_SIDEBAR_RATIO` sets Sidebar's share (default 0.5) until you drag the divider, which is remembered. `PI_SIDEBAR_MIN_COLUMNS` is the narrowest half for a side-by-side split (default 80). `PI_SIDEBAR_MODELS` lists favorite models for Sidebar (default: Pi's `enabledModels`), and `PI_SIDEBAR_MODEL` sets the one new sessions start with (default `same`, main's).
+- **Requirements, cost & privacy:** Requires Pi's fullscreen mode. On main's model, each question reads main's context from main's cache, plus a small new part, and Sidebar asks first when that cache has probably expired. On another model, the first question reads main's transcript uncached once, and later ones read it from that model's own cache. The thread is stored as hidden entries in main's session.
 - **Integrations & limits:** Works with Anthropic Messages, OpenAI Responses (including Codex) and Chat Completions. Sidebar uses main's tools, skills and templates; a guard refuses calls that would change anything, but it is not a sandbox. An optional pi-vim composer is supported. Sidebar steps aside while a dialog waits in main.
 
 `pi-sidebar` splits Pi's fullscreen layout in two. Main's transcript, editor and footer reflow into one half, and Sidebar fills the other: side by side when each half keeps 80 columns, otherwise below main.
@@ -52,12 +52,14 @@ Use Pi's fullscreen mode (`"tuiMode": "fullscreen"`). In regular mode, the key a
 | `/sidebar`, `/close` in Sidebar | Open or close Sidebar. |
 | Ctrl+S | With pi-stash enabled, stashes Sidebar's draft in a stash of its own, apart from main's: the hint row shows `stashed`. Ctrl+S in an empty composer restores it, with text in both it swaps them, and it comes back on its own after a `/` command such as `/new`. It is kept while Sidebar is closed. |
 | `/sidebar new`, `/new` in Sidebar | Starts a fresh thread. |
+| `/sidebar model`, `/model` in Sidebar | Picks Sidebar's model: `Same as main` (the default) or a favorite. `/model sol` or `/model provider/id` switches directly, `/model same` goes back. |
 
 While Sidebar has focus, your keys do what they do in main, through Pi's keybindings:
 - **Scrolling and search.** The focused half is Pi's primary scroll view, so these act on Sidebar while it has focus: your transcript scroll actions (such as Ctrl+G to the end), pi-vim's Ctrl+U/D in idle Normal mode, transcript search (Ctrl+Shift+F) and pi-copy's copy mode. The mouse wheel scrolls only the half under the pointer.
 - **Editing.** Editor keys, history and autocomplete work as in main, including your list keys such as Ctrl+J/K.
 - **Skills and prompt templates.** `/skill:name` and your templates run in Sidebar.
 - **App actions.** Esc or Ctrl+C stops an answer, Ctrl+O expands tools and collapsed reasoning, your thinking toggle shows or hides reasoning, Ctrl+C clears an idle composer, and Ctrl+D never quits Pi.
+- **Model keys.** Your model picker key (Ctrl+L by default) picks Sidebar's model, and your model cycling keys (Ctrl+P, Shift+Ctrl+P) step through `same` and your favorites.
 
 Ctrl+' needs a terminal that reports it (the kitty keyboard protocol). Set `PI_SIDEBAR_KEYS=ctrl+.` (or a comma-separated list) to use other keys.
 
@@ -101,7 +103,8 @@ During main's longer runs, heads-up mode occasionally checks for one thing you s
   
   Main never sees a note unless you send it there.
 - **Memory:** known topics and recent notes go into quiz mode's per-repository knowledge profile. Each check lists them, along with the concepts proven in quiz mode, so it does not repeat itself across sessions.
-- **Cost:** a check is one request built from main's last request, so main's prompt cache serves almost all of it. You pay for main's activity since, about 600 tokens of instructions, the reply, and main's thinking setting. Checks pause after two in a row miss the cache. `PI_SIDEBAR_HEADSUP_DEBUG=1` logs each check to `~/.pi/agent/pi-sidebar/headsup.log`.
+- **Model:** checks run on Sidebar's model. On another model, a check reads main's session as a transcript with a cache of its own, so it pays for what main did since the last check; the first check after a pause longer than the cache's lifetime reads the whole transcript uncached.
+- **Cost:** on main's model, a check is one request built from main's last request, so main's prompt cache serves almost all of it. You pay for main's activity since, about 600 tokens of instructions, the reply, and main's thinking setting. Checks pause after two in a row miss the cache. `PI_SIDEBAR_HEADSUP_DEBUG=1` logs each check to `~/.pi/agent/pi-sidebar/headsup.log`.
 
 ## Why it costs little
 
@@ -118,6 +121,15 @@ Sidebar also caches its own part. It puts a 5-minute breakpoint on its last bloc
 
 To keep that prefix identical, Sidebar keeps main's tool declarations and refuses calls instead of removing tools.
 
+## Another model
+
+A second opinion is worth more from a model that did not write the work. `/model` in Sidebar (or `/sidebar model`) offers `Same as main` and your favorites that you are logged in to; the header names the model while it is not main's, and heads-up checks follow it. The choice is stored in main's session.
+- **Favorites:** `PI_SIDEBAR_MODELS`, comma-separated, else Pi's `enabledModels`. Each is `provider/id`, a bare id, or a glob whose newest match counts (`anthropic/claude-opus-*` is always the latest Opus); `:level` sets the thinking level. A favorite that is main's own model counts as `same`.
+- **What it reads:** its own system prompt (with the project's context files) and tools, its role note, then main's session as user-side `<main-transcript>` parts: the user's messages, main's replies, reasoning and tool calls, and tool results clipped to their first 1,200 and last 600 characters. It is told the work is another agent's, to read it critically and check claims against the code.
+- **Its own cache:** each request adds main's activity since the last as a new part, placed among Sidebar's exchanges in the order things happened, so every request extends the previous one and the model's cache serves everything but the end. On Anthropic, the breakpoint takes the system prompt's style, so `PI_CACHE_RETENTION=long` keeps it for an hour; on OpenAI, a session id derived from main's routes it. In a live test on Anthropic, a second question after main had moved on read 96% from the cache.
+- **When it asks first:** before reading 8k tokens or more into a cold cache, and after an answer that missed its own cache.
+- **Size:** past 60% of the model's context window, the oldest messages are left out, with a note saying how many.
+
 ## What it can use
 
 Everything main can, except changing anything. Sidebar loads the extensions behind main's tools, Pi's codemode, tool search and MCP, and main's skills and templates. One guard judges every call:
@@ -133,7 +145,7 @@ Sidebar never quietly re-reads main's context uncached. It asks inline (Enter se
 - main's cache has probably expired;
 - the last answer missed the cache.
 
-It aborts, sending nothing, if main's request vanishes mid-build, on an API or model mismatch, or too many cache breakpoints. There is no model override, and it never keeps its own cache warm.
+It aborts, sending nothing, if main's request vanishes mid-build, on an API or model mismatch, or too many cache breakpoints. It never keeps a cache warm with requests of its own. On [another model](#another-model), the questions it asks first are about that model's own cache.
 
 ## Limits
 

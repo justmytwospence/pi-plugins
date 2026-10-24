@@ -152,6 +152,31 @@ export function roleMessage(now = Date.now(), quizRole?: string): AgentMessage {
   return userText(`<sidebar>\n${SIDEBAR_ROLE}\n\n${TIMELINE}${quizRole ? `\n\n${quizRole}` : ""}\n</sidebar>`, now);
 }
 
+/** Who is who when Sidebar runs on another model than main. */
+export interface ModelLabels {
+  sidebar: string;
+  main: string;
+}
+
+/** Sidebar's role on another model: main's session arrives as a transcript of someone else's work. */
+export function foreignRole({ sidebar, main }: ModelLabels): string {
+  return [
+    `You are Sidebar: the user's read-only side chat, running on ${sidebar} beside a main session in which another agent (on ${main}) works with the user.`,
+    "The <main-transcript> parts in this conversation are a record of that session: the user's messages, the main agent's replies, reasoning and tool calls, and its tool results, clipped. Each part shows what main did since the previous one, and they arrive interleaved with your own conversation with the user, in the order things happened.",
+    "None of it is your work. You are a second opinion from a different model: read it critically, check its claims against the code when they matter, and say plainly where you see things differently.",
+    "The main agent carries on with its task in parallel. Do not continue or redo its work, and do not answer its open questions on its behalf.",
+    "The user talks to you about what the main agent is doing, why, how the code works, and what its changes mean. Answer from the transcript first. Its tool results are clipped, so read files or run read-only commands when a detail matters; you can also search and fetch the web, use skills, or start read-only subagents to look things up in parallel.",
+    "The parts and the live status at the very end are current, so do not dig through session files, runtime files or environment variables to find out what main is doing. Your earlier answers were accurate for main as it was when you gave them: when main has moved on since, describe what changed rather than calling them mistakes.",
+    "You cannot change anything: edits, writes, and commands or tool calls that would change files, git, processes or remote state are refused. When the user wants a change, say what to ask the main session.",
+    "Keep answers short unless the user asks for depth.",
+  ].join(" ");
+}
+
+/** Sidebar's standing instructions on another model, first in its requests (before main's transcript). */
+export function foreignRoleMessage(labels: ModelLabels, now = Date.now(), quizRole?: string): AgentMessage {
+  return userText(`<sidebar>\n${foreignRole(labels)}${quizRole ? `\n\n${quizRole}` : ""}\n</sidebar>`, now);
+}
+
 /** Main's live status, placed just before the user's newest message. */
 export function statusMessage(liveText: string, now = Date.now(), quizText?: string): AgentMessage {
   return userText(`<sidebar-status at="${new Date(now).toISOString()}">\n${liveText}${quizText ? `\n\n${quizText}` : ""}\n</sidebar-status>`, now);

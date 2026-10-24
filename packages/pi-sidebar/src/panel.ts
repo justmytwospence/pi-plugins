@@ -68,6 +68,10 @@ export interface PanelHost {
   pinService?(): PromptPinService | undefined;
   /** Sidebar's own prompt stash from pi-stash, when it is active; kept by the host across panel rebuilds. */
   stash?(): StashController | undefined;
+  /** Main's model-cycling keys (Ctrl+P, Shift+Ctrl+P): Sidebar's next or previous model. */
+  cycleModel?(direction: 1 | -1): void;
+  /** Main's model-picker key (Ctrl+L): pick Sidebar's model. */
+  pickModel?(): void;
 }
 
 type Notice = { kind: "info" | "warning" | "error"; text: string } | { kind: "confirm"; title: string; message: string; text: string };
@@ -283,6 +287,9 @@ class Composer implements Component, Focusable {
     if (this.host.stash?.()?.handleKey(data)) return;
     if (keys.matches(data, "app.tools.expand")) return this.panel.toggleExpanded();
     if (keys.matches(data, "app.thinking.toggle")) return this.panel.toggleThinking();
+    if (this.host.cycleModel && keys.matches(data, "app.model.cycleForward")) return this.host.cycleModel(1);
+    if (this.host.cycleModel && keys.matches(data, "app.model.cycleBackward")) return this.host.cycleModel(-1);
+    if (this.host.pickModel && keys.matches(data, "app.model.select")) return this.host.pickModel();
     if (!this.suite) {
       if (keys.matches(data, "app.interrupt") && this.panel.hasNotice()) return this.panel.clearNotice();
       if (keys.matches(data, "app.clear")) return this.editor.setText("");
@@ -480,6 +487,7 @@ export class SidebarPanel {
       t.fg("muted", "Ask about what main is doing, why, or how the code works."),
       t.fg("dim", "Sidebar reads main's live conversation, never changes anything, and answers from main's prompt cache."),
       t.fg("dim", "/quiz quizzes you on main's changes and keeps track of what you know."),
+      t.fg("dim", "/model (or ctrl+p) runs Sidebar on another model for a second opinion; same is main's own."),
     ];
     return lines.flatMap((line) => (line ? wrapTextWithAnsi(line, Math.max(1, width - 1)).map((row) => ` ${row}`) : [""]));
   }

@@ -18,6 +18,25 @@ import { isNoteMarker, noteMessages } from "./headsup/thread.ts";
 import { QUIZ_ENTRY, QuizMode, quizFromBranch } from "./quiz/mode.ts";
 import { QUIZ_NEXT, QUIZ_ROLE, QUIZ_START } from "./quiz/prompt.ts";
 import { RESET_ENTRY, threadFromBranch } from "./thread.ts";
+import {
+  cycleChoice,
+  favoritePatterns,
+  findModel,
+  isMainModel,
+  MODEL_ENTRY,
+  modelDefault,
+  modelFromBranch,
+  modelKey,
+  modelLabel,
+  MODELS_ENV,
+  resolveChoice,
+  resolvePattern,
+  SAME,
+  type Favorite,
+  type ModelChoice,
+  type ModelEntry,
+  type ModelLike,
+} from "./models.ts";
 
 export const KNOWLEDGE_ENV = "PI_SIDEBAR_KNOWLEDGE";
 
@@ -26,6 +45,15 @@ export const QUIZ_HELP = [
   "/quiz next      the next question, on what main changed most recently",
   "/quiz progress  what you have shown you know in this repository",
 ].join("\n");
+
+export const MODEL_HELP = [
+  "/model          pick Sidebar's model: main's own (same, sharing its prompt cache) or a favorite",
+  "/model <name>   switch to a favorite by name (opus, sol, ...) or provider/id; /model same goes back",
+  "ctrl+p          the next model (shift+ctrl+p the previous; your own model keys apply)",
+].join("\n");
+
+/** How long a resolved model choice is reused (the header asks every second). */
+const CHOICE_MS = 2_000;
 
 export const SIDEBAR_HEADSUP_HELP = [
   "/known          the last heads-up note was something you knew: it is not raised again",
@@ -54,6 +82,9 @@ export class SidebarController {
   private pinService: PromptPinService | undefined;
   /** Blocking extension dialogs open in main (a digit then belongs to them). */
   private prompts = 0;
+  /** Sidebar's model: `same` (main's) or a favorite's pattern, stored in main's session. */
+  private modelSetting = modelDefault();
+  private resolvedChoice: { id: string; at: number; choice: ModelChoice } | undefined;
   /** Heads-up notes waiting for Sidebar to finish its answer. */
   private pendingNotes: HeadsUpNote[] = [];
   private flushTimer: ReturnType<typeof setTimeout> | undefined;
@@ -78,6 +109,7 @@ export class SidebarController {
     this.main = new MainState(pi);
     this.agent = new SidebarAgent(pi, this.main);
     this.agent.onEvent((event) => this.onAgentEvent(event));
+    this.agent.modelChoice = () => this.sidebarModel();
     this.agent.quiz = { role: () => (this.quiz.on ? QUIZ_ROLE : undefined), status: () => this.quiz.status() };
     this.agent.onTurn((added) => {
       const recorded = this.quiz.record(added);
@@ -92,6 +124,7 @@ export class SidebarController {
         this.question(text);
         return true;
       },
+      model: () => this.sidebarModel(),
     }, {
       knowledgeDir: process.env[KNOWLEDGE_ENV] ?? path.join(getAgentDir(), "pi-sidebar", "knowledge"),
       logFile: path.join(getAgentDir(), "pi-sidebar", "headsup.log"),
@@ -207,6 +240,8 @@ export class SidebarController {
         matchesToggle: (data) => this.matchesToggle(data),
         matchesFocusSwitch: (data) => this.matchesFocusSwitch(data),
         toggleLabel: this.keys[0] ?? "ctrl+'",
+        cycleModel: (direction) => this.cycleModel(direction),
+        pickModel: () => void this.pickModel(),
         mainHidesThinking: () => {
           try { return (this.pi.getSettings() as { hideThinkingBlock?: boolean }).hideThinkingBlock === true; } catch { return false; }
         },
@@ -363,10 +398,135 @@ export class SidebarController {
     this.main.bind(ctx);
     const branch = ctx.sessionManager.getBranch();
     this.headsUp.restore(branch, newSession);
+    this.modelSetting = modelFromBranch(branch)?.model ?? modelDefault();
+    this.resolvedChoice = undefined;
     this.pendingNotes = [];
     await this.agent.setThread(threadFromBranch(branch));
     await this.quiz.restore(quizFromBranch(branch), ctx.cwd).catch(() => {});
     this.rebuild();
+  }
+
+  private availableModels(): ModelLike[] {
+    try {
+      return (this.main.ctx?.modelRegistry.getAvailable() ?? []) as ModelLike[];
+    } catch {
+      return [];
+    }
+  }
+
+  /** Your favorites (PI_SIDEBAR_MODELS, else Pi's enabledModels), resolved against the models you are logged in to. */
+  favorites(): Favorite[] {
+    let enabled: string[] | undefined;
+    try { enabled = (this.pi.getSettings() as { enabledModels?: string[] }).enabledModels; } catch { /* none */ }
+    const available = this.availableModels();
+    return favoritePatterns(process.env, enabled).map((pattern) => resolvePattern(pattern, available));
+  }
+
+  /** Main's model as Sidebar shares it: the one of its last request, else the selected one. */
+  private mainModel(): { provider: string; id: string } | undefined {
+    const request = this.main.request;
+    if (request) return { provider: request.provider, id: request.model };
+    const model = this.main.ctx?.model;
+    return model ? { provider: model.provider, id: model.id } : undefined;
+  }
+
+  /** The model Sidebar answers (and checks) on now. A favorite that is main's own model means `same`. */
+  sidebarModel(): ModelChoice {
+    const main = this.mainModel();
+    const id = `${this.modelSetting}\u0000${main ? modelKey(main) : ""}`;
+    const now = Date.now();
+    const memo = this.resolvedChoice;
+    if (memo && memo.id === id && now - memo.at < CHOICE_MS) return memo.choice;
+    let choice = resolveChoice(this.modelSetting, this.availableModels());
+    if (choice.kind === "other" && isMainModel(choice.model, main)) choice = { kind: "same" };
+    this.resolvedChoice = { id, at: now, choice };
+    return choice;
+  }
+
+  /** Switch Sidebar's model for this session (stored in main's session). */
+  setModel(setting: string): string {
+    this.modelSetting = setting;
+    this.resolvedChoice = undefined;
+    const entry: ModelEntry = { version: 1, model: setting, at: Date.now() };
+    try { this.pi.appendEntry(MODEL_ENTRY, entry); } catch { /* main's session went away */ }
+    this.agent.missed = undefined;
+    this.render();
+    return this.describeModel();
+  }
+
+  /** What Sidebar runs on now, in a sentence. */
+  describeModel(): string {
+    const choice = this.sidebarModel();
+    if (choice.kind === "unavailable") return `Sidebar's model ${choice.pattern} matches no model you are logged in to. /model picks another.`;
+    if (choice.kind === "other") {
+      return `Sidebar runs on ${choice.label} (${modelKey(choice.model)}${choice.thinking ? `, thinking ${choice.thinking}` : ""}).\nIt reads main's session as a transcript and keeps its own prompt cache, so its first question pays for that transcript once.`;
+    }
+    if (this.modelSetting !== SAME) return "Sidebar's favorite is main's own model, so it uses main's model and shares main's prompt cache.";
+    return "Sidebar uses main's model and shares main's prompt cache.";
+  }
+
+  /** `/sidebar model …` in main, or `/model …` in Sidebar: a picker without an argument. */
+  async modelCommand(args: string, ctx: ExtensionContext | undefined = this.main.ctx): Promise<void> {
+    const arg = args.trim();
+    if (!arg) return this.pickModel(ctx);
+    if (arg === "help") return this.say(MODEL_HELP, "info", ctx);
+    if (["same", "main", "off", "default"].includes(arg.toLowerCase())) return this.say(this.setModel(SAME), "info", ctx);
+    const found = findModel(arg, this.favorites(), this.availableModels());
+    if (!found?.model) return this.say(`No favorite or model you are logged in to matches "${arg}". /model lists your favorites (set ${MODELS_ENV}).`, "warning", ctx);
+    this.say(this.setModel(found.pattern), "info", ctx);
+  }
+
+  /** Ctrl+P in Sidebar: the next of `same` and the favorites you are logged in to. */
+  cycleModel(direction: 1 | -1): void {
+    const favorites = this.favorites();
+    if (!favorites.some((f) => f.model)) {
+      this.say(`No favorite models to switch to: set ${MODELS_ENV} (or Pi's enabled models).`, "warning");
+      return;
+    }
+    this.say(this.setModel(cycleChoice(this.modelSetting, favorites, direction)), "info");
+  }
+
+  /** Pick Sidebar's model from `same` and your favorites. */
+  async pickModel(ctx: ExtensionContext | undefined = this.main.ctx): Promise<void> {
+    if (!ctx) return;
+    const favorites = this.favorites();
+    const current = (setting: string) => (setting === this.modelSetting ? " (current)" : "");
+    const options = [`Same as main · shares main's prompt cache${current(SAME)}`];
+    const settings = [SAME];
+    for (const fav of favorites) {
+      if (!fav.model) continue;
+      options.push(`${modelLabel(fav.model)} · ${modelKey(fav.model)}${fav.thinking ? ` · ${fav.thinking}` : ""}${current(fav.pattern)}`);
+      settings.push(fav.pattern);
+    }
+    if (settings.length === 1) {
+      this.say(`No favorite models to pick from: set ${MODELS_ENV} (or Pi's enabled models).`, "warning", ctx);
+      return;
+    }
+    // Pi gives focus back to main's editor when a dialog closes; one opened from Sidebar returns it there.
+    const fromSidebar = this.isOpen && !!this.panel?.focused;
+    let picked: string | undefined;
+    try {
+      picked = await ctx.ui.select("Sidebar's model", options);
+    } catch {
+      return;
+    } finally {
+      if (fromSidebar && this.isOpen) this.focusSidebar();
+    }
+    const at = picked === undefined ? -1 : options.indexOf(picked);
+    if (at === -1) return;
+    this.say(this.setModel(settings[at]!), "info", ctx);
+  }
+
+  /** A message in Sidebar while it is open, else a notification in main. */
+  private say(text: string, kind: "info" | "warning", ctx: ExtensionContext | undefined = this.main.ctx): void {
+    if (this.isOpen && this.panel) {
+      const [first, ...rest] = text.split("\n");
+      this.panel.notice({ kind, text: first ?? "" });
+      for (const line of rest) this.panel.chat.note(line);
+      this.render();
+      return;
+    }
+    ctx?.ui.notify(text, kind);
   }
 
   /** `/quiz …` in Sidebar, or `/sidebar quiz …` in main. */
@@ -438,7 +598,10 @@ export class SidebarController {
     }
     const request = this.main.request;
     const model = this.main.ctx?.model;
-    const id = { api: request?.api ?? model?.api ?? "", provider: request?.provider ?? model?.provider ?? "", model: request?.model ?? model?.id ?? "" };
+    const choice = this.sidebarModel();
+    const id = choice.kind === "other"
+      ? { api: choice.model.api, provider: choice.model.provider, model: choice.model.id }
+      : { api: request?.api ?? model?.api ?? "", provider: request?.provider ?? model?.provider ?? "", model: request?.model ?? model?.id ?? "" };
     const notes = this.pendingNotes;
     this.pendingNotes = [];
     for (const note of notes) {
@@ -483,12 +646,16 @@ export class SidebarController {
       void this.reset();
       return;
     }
+    if (text === "/model" || text.startsWith("/model ")) {
+      void this.modelCommand(text.slice("/model".length));
+      return;
+    }
     if (text === "/quiz" || text.startsWith("/quiz ")) {
       void this.quizCommand(text.slice("/quiz".length));
       return;
     }
     if (text.startsWith("/") && !this.isSidebarCommand(text)) {
-      this.panel?.notice({ kind: "warning", text: `Sidebar knows /new, /close, /quiz, /known, /headsup, skills and prompt templates; ${text.split(/\s/)[0]} is a main-session command.` });
+      this.panel?.notice({ kind: "warning", text: `Sidebar knows /new, /close, /model, /quiz, /known, /headsup, skills and prompt templates; ${text.split(/\s/)[0]} is a main-session command.` });
       return;
     }
     this.question(text);
@@ -550,7 +717,9 @@ export class SidebarController {
     if (event.type === "agent_end" && !panel.focused) panel.unread = true;
     if (event.type === "agent_end") setTimeout(() => this.flushNotes(), 0);
     if (event.type === "agent_end" && this.agent.missed) {
-      panel.notice({ kind: "warning", text: "That answer missed main's cache; the next question asks first." });
+      const choice = this.sidebarModel();
+      const which = this.agent.missed.own && choice.kind === "other" ? `${choice.label}'s own cache` : "main's cache";
+      panel.notice({ kind: "warning", text: `That answer missed ${which}; the next question asks first.` });
     }
     this.render();
   }
@@ -559,6 +728,9 @@ export class SidebarController {
     const live = this.main.live;
     const now = Date.now();
     const parts: StatusPart[] = [{ text: theme.fg("dim", "read-only"), optional: 1 }];
+    const choice = this.sidebarModel();
+    if (choice.kind === "other") parts.unshift({ text: theme.fg("accent", choice.label) });
+    else if (choice.kind === "unavailable") parts.unshift({ text: theme.fg("warning", `${choice.pattern} unavailable`) });
     if (this.quiz.on) {
       const c = this.quiz.counts();
       const figures = c ? [c.proven ? `${c.proven} proven` : "", c.shaky ? `${c.shaky} shaky` : "", c.due ? `${c.due} due` : ""].filter(Boolean) : [];
@@ -570,7 +742,7 @@ export class SidebarController {
     } else {
       parts.push({ text: theme.fg("dim", `main idle ${ago(now - live.since)}`) });
     }
-    if (this.agent.missed) parts.push({ text: theme.fg("warning", "missed main's cache") });
+    if (this.agent.missed) parts.push({ text: theme.fg("warning", this.agent.missed.own ? "missed its cache" : "missed main's cache") });
     else if (this.agent.lastAnswer) parts.push({ text: theme.fg("dim", this.agent.lastAnswer), optional: 2 });
     return parts;
   }

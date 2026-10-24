@@ -86,12 +86,83 @@ describe("registration", () => {
     }
   });
 
-  it("explains why the model cannot be overridden", async () => {
+});
+
+describe("Sidebar's model", () => {
+  const MODELS = [
+    { provider: "anthropic", id: "claude-x", api: "anthropic-messages", name: "Claude X" },
+    { provider: "anthropic", id: "claude-opus-5-5", api: "anthropic-messages", name: "Claude Opus 5.5" },
+    { provider: "openai-codex", id: "gpt-6-sol", api: "openai-codex-responses", name: "GPT-6 Sol" },
+    { provider: "openai-codex", id: "gpt-6.1-sol", api: "openai-codex-responses", name: "GPT-6.1 Sol" },
+  ];
+  const savedModels = process.env.PI_SIDEBAR_MODELS;
+  afterEach(() => {
+    if (savedModels === undefined) delete process.env.PI_SIDEBAR_MODELS;
+    else process.env.PI_SIDEBAR_MODELS = savedModels;
+  });
+
+  function modelSetup() {
+    process.env.PI_SIDEBAR_MODELS = "anthropic/claude-opus-*,openai-codex/gpt-*-sol,anthropic/claude-x,nope/x";
     const pi = new FakePi();
     piSidebar(pi as never);
-    const { ctx, notes } = fakeCtx();
-    await pi.commands.get("sidebar")!.handler("model anthropic/claude-haiku", ctx);
-    expect(notes[0]!.message).toMatch(/always uses main's model/);
+    const { ctx, notes } = fakeCtx({ models: MODELS });
+    return { pi, ctx, notes };
+  }
+
+  it("switches to a favorite by name, stores it in main's session, and back to same", async () => {
+    const { pi, ctx, notes } = modelSetup();
+    await pi.commands.get("sidebar")!.handler("model sol", ctx);
+    expect(notes.at(-1)!.message).toMatch(/^Sidebar runs on GPT-6\.1 Sol \(openai-codex\/gpt-6\.1-sol\)/);
+    expect(pi.entries.at(-1)).toMatchObject({ customType: "sidebar:model", data: { version: 1, model: "openai-codex/gpt-*-sol" } });
+    await pi.commands.get("sidebar")!.handler("model same", ctx);
+    expect(notes.at(-1)!.message).toBe("Sidebar uses main's model and shares main's prompt cache.");
+    await pi.commands.get("sidebar")!.handler("model nothing-like-it", ctx);
+    expect(notes.at(-1)).toMatchObject({ level: "warning" });
+  });
+
+  it("treats main's own model as same", async () => {
+    const { pi, ctx, notes } = modelSetup();
+    await pi.commands.get("sidebar")!.handler("model claude-x", ctx);
+    expect(notes.at(-1)!.message).toMatch(/main's own model/);
+  });
+
+  it("picks from same and the favorites with a login", async () => {
+    const { pi, ctx, notes } = modelSetup();
+    let offered: string[] = [];
+    (ctx.ui as any).select = async (_title: string, options: string[]) => { offered = options; return options[2]; };
+    await pi.commands.get("sidebar")!.handler("model", ctx);
+    expect(offered).toEqual([
+      "Same as main · shares main's prompt cache (current)",
+      "Claude Opus 5.5 · anthropic/claude-opus-5-5",
+      "GPT-6.1 Sol · openai-codex/gpt-6.1-sol",
+      "Claude X · anthropic/claude-x",
+    ]);
+    expect(notes.at(-1)!.message).toMatch(/runs on GPT-6\.1 Sol/);
+  });
+
+  it("cycles with main's model keys in Sidebar and shows the model in its header", () => {
+    process.env.PI_SIDEBAR_MODELS = "anthropic/claude-opus-*,openai-codex/gpt-*-sol";
+    const { controller, ctx } = setup();
+    (ctx.modelRegistry as any).getAvailable = () => MODELS;
+    expect(controller.open(ctx as never)).toBe(true);
+    controller.focusSidebar();
+    const panel = panelOf(controller);
+    panel.input.handleInput("\x10"); // Ctrl+P
+    expect(controller.sidebarModel()).toMatchObject({ kind: "other", label: "Claude Opus 5.5" });
+    expect(panel.titleLine(120)).toContain("Claude Opus 5.5");
+    panel.input.handleInput("\x10");
+    expect(controller.sidebarModel()).toMatchObject({ kind: "other", label: "GPT-6.1 Sol" });
+    panel.input.handleInput("\x10");
+    expect(controller.sidebarModel()).toEqual({ kind: "same" });
+  });
+
+  it("restores the choice from main's branch", async () => {
+    process.env.PI_SIDEBAR_MODELS = "openai-codex/gpt-*-sol";
+    const branch = [{ type: "custom", customType: "sidebar:model", data: { version: 1, model: "openai-codex/gpt-*-sol", at: 1 } }];
+    const { pi, controller, ctx } = setup(branch);
+    (ctx.modelRegistry as any).getAvailable = () => MODELS;
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    expect(controller.sidebarModel()).toMatchObject({ kind: "other", label: "GPT-6.1 Sol" });
   });
 });
 

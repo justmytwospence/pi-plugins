@@ -8,6 +8,7 @@ export class FakePi {
   entries: Array<{ customType: string; data: unknown }> = [];
   busListeners = new Map<string, Array<(data: unknown) => void>>();
   thinking = "high";
+  settings: Record<string, unknown> = {};
   tools: Array<{ name: string; sourceInfo: { path: string } }> = [];
   events = {
     emit: (channel: string, data: unknown) => {
@@ -29,6 +30,7 @@ export class FakePi {
   registerShortcut(key: string, options: { handler: (ctx: any) => any }) { this.shortcuts.set(key, options); }
   registerCommand(name: string, options: { handler: (args: string, ctx: any) => any }) { this.commands.set(name, options); }
   getThinkingLevel() { return this.thinking; }
+  getSettings() { return this.settings; }
   getAllTools() { return this.tools; }
   appendEntry(customType: string, data: unknown) { this.entries.push({ customType, data }); }
   async emit(event: string, payload: any, ctx: any) {
@@ -48,6 +50,8 @@ export interface FakeCtxOptions {
   model?: { provider: string; id: string; api: string };
   systemPrompt?: string;
   contextTokens?: number;
+  /** Models with a login, for Sidebar's model choice (main's own model is always among them). */
+  models?: Array<{ provider: string; id: string; api: string; name?: string; contextWindow?: number }>;
 }
 
 export function fakeCtx(opts: FakeCtxOptions = {}) {
@@ -57,7 +61,10 @@ export function fakeCtx(opts: FakeCtxOptions = {}) {
     mode: "tui",
     hasUI: true,
     model: opts.model ?? { provider: "anthropic", id: "claude-x", api: "anthropic-messages" },
-    modelRegistry: { find: (provider: string, id: string) => ({ provider, id, api: "anthropic-messages" }) },
+    modelRegistry: {
+      find: (provider: string, id: string) => ({ provider, id, api: "anthropic-messages" }),
+      getAvailable: () => opts.models ?? [opts.model ?? { provider: "anthropic", id: "claude-x", api: "anthropic-messages" }],
+    },
     sessionManager: {
       getSessionId: () => opts.sessionId ?? "main-session",
       getLeafId: () => opts.leafId ?? null,

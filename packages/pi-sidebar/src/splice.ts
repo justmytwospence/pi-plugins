@@ -73,7 +73,7 @@ export const SIDE_BREAKPOINT = { type: "ephemeral" } as const;
 
 const STATUS_PREFIX = "<sidebar-status";
 
-function isStatusBlock(block: Json): boolean {
+export function isStatusBlock(block: Json): boolean {
   return block.type === "text" && typeof block.text === "string" && block.text.startsWith(STATUS_PREFIX);
 }
 

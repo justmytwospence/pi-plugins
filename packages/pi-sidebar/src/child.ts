@@ -1,6 +1,7 @@
 // Sidebar's agent: an in-process Pi session inside main's process (as plan mode's planners
-// run theirs), with no extensions of its own except Sidebar's policy, passed inline. Every
-// request it sends is main's last request plus Sidebar's part, so main's prompt cache serves it.
+// run theirs), with no extensions of its own except Sidebar's policy, passed inline. On main's
+// model every request it sends is main's last request plus Sidebar's part, so main's prompt cache
+// serves it; on another model it reads main's session as a transcript, with a cache of its own.
 import {
   buildSessionContext,
   createAgentSession,
@@ -20,9 +21,11 @@ import {
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { MainState } from "./main-state.ts";
 import { GUARD_ENV, judgeCall, REFUSED_TOOLS, SUBAGENT_ENV_CHANNEL, type SubagentEnvRequest } from "./guard.ts";
-import { inertPayload, placeSideBreakpoint, requestedCacheTtlMs, splicePayload, SUPPORTED_APIS } from "./splice.ts";
+import { inertPayload, isStatusBlock, placeSideBreakpoint, requestedCacheTtlMs, splicePayload, SUPPORTED_APIS } from "./splice.ts";
 import { compactExchange, EXCHANGE_ENTRY } from "./thread.ts";
-import { assembleContext, describeLive, mainDelta, roleMessage, statusMessage, trimOpenTurn, type MainDelta } from "./transcript.ts";
+import { assembleContext, describeLive, foreignRoleMessage, mainDelta, roleMessage, statusMessage, trimOpenTurn, type MainDelta } from "./transcript.ts";
+import { derivedSessionId, interleave, newPartAt, TRANSCRIPT_TAG, TranscriptParts } from "./foreign.ts";
+import { modelKey, type ModelChoice, type ModelLike } from "./models.ts";
 
 const BUILTIN_TOOLS = ["read", "grep", "find", "ls", "bash"];
 const COLD_MARGIN_MS = 20_000;
@@ -35,6 +38,20 @@ export type Preflight =
   | { kind: "refuse"; reason: string };
 
 export type SidebarEvent = Record<string, unknown> & { type: string };
+
+/** Sidebar on another model than main's: what its requests are built with. */
+interface Foreign {
+  model: ModelLike;
+  label: string;
+  thinking?: string;
+}
+
+/** A missed cache: main's (shared), or Sidebar's own on another model. */
+export interface Missed {
+  read: number;
+  expected: number;
+  own?: boolean;
+}
 
 /** What quiz mode adds to each request while it is on. */
 export interface QuizContext {
@@ -80,9 +97,16 @@ export function inheritProviders(host: ExtensionContext, runtime: ModelRuntime):
 }
 
 /** Main's whole conversation as its model sees it, for a request when main has none in memory. */
-export function replayMessages(ctx: ExtensionContext): MainDelta {
+export function replayMessages(ctx: Pick<ExtensionContext, "sessionManager">, trim = true): MainDelta {
   const entries = ctx.sessionManager.getEntries();
-  return trimOpenTurn(buildSessionContext(entries as never, ctx.sessionManager.getLeafId()).messages as AgentMessage[]);
+  const messages = buildSessionContext(entries as never, ctx.sessionManager.getLeafId()).messages as AgentMessage[];
+  return trim ? trimOpenTurn(messages) : { messages, pending: [] };
+}
+
+/** Main's model, as Sidebar names it. */
+export function mainLabel(ctx: Pick<ExtensionContext, "model">): string {
+  const model = ctx.model as ModelLike | undefined;
+  return model ? model.name?.trim() || model.id : "another model";
 }
 
 export class SidebarAgent {
@@ -91,13 +115,21 @@ export class SidebarAgent {
   private creating: Promise<AgentSession> | undefined;
   private thread: AgentMessage[] = [];
   private turnStart = 0;
-  private mode: "splice" | "replay" | undefined;
+  private mode: "splice" | "replay" | "foreign" | undefined;
+  /** Main's transcript as Sidebar reads it on another model, in parts that keep its own cache. */
+  private readonly parts = new TranscriptParts();
+  /** Sidebar's last request on another model: when, on which model, and the cache TTL it asked for. */
+  private foreignSent: { at: number; model: string; ttl: number } | undefined;
+  /** Whether that model's own cache should have served the request in flight. */
+  private foreignWarm = false;
+  /** The model Sidebar answers on: main's (`same`), or another, chosen by the controller. */
+  modelChoice: () => ModelChoice = () => ({ kind: "same" });
   private readonly listeners = new Set<(event: SidebarEvent) => void>();
   private readonly turnListeners = new Set<(added: readonly AgentMessage[]) => void>();
   private generation = 0;
   /** Quiz mode's part of each request, when the controller has one. */
   quiz: QuizContext | undefined;
-  missed: { read: number; expected: number } | undefined;
+  missed: Missed | undefined;
   lastAnswer: string | undefined;
 
   constructor(
@@ -141,6 +173,7 @@ export class SidebarAgent {
     this.thread = messages;
     this.missed = undefined;
     this.lastAnswer = undefined;
+    this.parts.rebase();
     await this.dispose();
   }
 
@@ -159,6 +192,9 @@ export class SidebarAgent {
 
   /** Whether a question may go now, needs a confirmation first, or cannot go at all. */
   preflight(): Preflight {
+    const choice = this.modelChoice();
+    if (choice.kind === "unavailable") return { kind: "refuse", reason: `Sidebar's model ${choice.pattern} matches no model you are logged in to. /model picks another.` };
+    if (choice.kind === "other") return this.foreignPreflight({ model: choice.model, label: choice.label });
     const cache = cachePreflight(this.main, this.now());
     if (cache.kind !== "send") return cache;
     if (this.missed) {
@@ -166,6 +202,36 @@ export class SidebarAgent {
         kind: "confirm",
         title: "The last answer missed main's cache",
         message: `Only ${formatTokens(this.missed.read)} of about ${formatTokens(this.missed.expected)} tokens came from the cache. Another question may re-read main's context uncached.`,
+      };
+    }
+    return { kind: "send" };
+  }
+
+  /** Whether the chosen model's own cache is probably warm for main's transcript. */
+  private foreignCacheWarm(model: ModelLike, now: number): boolean {
+    const sent = this.foreignSent;
+    return !!sent && sent.model === modelKey(model) && now - sent.at < sent.ttl - COLD_MARGIN_MS;
+  }
+
+  private foreignPreflight(foreign: Foreign): Preflight {
+    const ctx = this.main.ctx;
+    if (!ctx) return { kind: "refuse", reason: "main's session is not ready yet." };
+    const now = this.now();
+    if (!this.foreignCacheWarm(foreign.model, now)) {
+      const view = this.parts.peek(replayMessages(ctx, false).messages, foreign.model.contextWindow, now);
+      if (view.tokens >= MISS_MIN_TOKENS) {
+        return {
+          kind: "confirm",
+          title: `${foreign.label} has no warm cache of main's session`,
+          message: `Sending reads main's transcript, about ${formatTokens(view.tokens)} tokens, uncached on ${foreign.label}. Later questions read it from ${foreign.label}'s own cache.`,
+        };
+      }
+    }
+    if (this.missed) {
+      return {
+        kind: "confirm",
+        title: `The last answer missed ${foreign.label}'s cache`,
+        message: `Only ${formatTokens(this.missed.read)} of about ${formatTokens(this.missed.expected)} tokens came from the cache. Another question may re-read main's transcript uncached.`,
       };
     }
     return { kind: "send" };
@@ -202,16 +268,19 @@ export class SidebarAgent {
   }
 
   private async ensureSession(ctx: ExtensionContext): Promise<AgentSession> {
+    const choice = this.modelChoice();
+    if (choice.kind === "unavailable") throw new Error(`Sidebar's model ${choice.pattern} matches no model you are logged in to.`);
+    const foreign: Foreign | undefined = choice.kind === "other" ? { model: choice.model, label: choice.label, ...(choice.thinking ? { thinking: choice.thinking } : {}) } : undefined;
     const request = this.main.request;
-    const model = request ? ctx.modelRegistry.find(request.provider, request.model) : ctx.model;
+    const model = foreign ? (foreign.model as NonNullable<ExtensionContext["model"]>) : request ? ctx.modelRegistry.find(request.provider, request.model) : ctx.model;
     if (!model) throw new Error("no model");
-    const key = `${model.provider}/${model.id}`;
+    const key = `${foreign ? `other:${foreign.thinking ?? ""}:` : ""}${model.provider}/${model.id}`;
     if (this.session && this.sessionModel === key) return this.session;
     if (this.creating && this.sessionModel === key) return this.creating;
     await this.dispose();
     const generation = this.generation;
     this.sessionModel = key;
-    this.creating = this.create(ctx, model).then((session) => {
+    this.creating = this.create(ctx, model, foreign).then((session) => {
       if (generation !== this.generation) {
         session.dispose();
         throw new Error("Sidebar was reset while starting");
@@ -222,7 +291,7 @@ export class SidebarAgent {
     return this.creating;
   }
 
-  private async create(ctx: ExtensionContext, model: NonNullable<ExtensionContext["model"]>): Promise<AgentSession> {
+  private async create(ctx: ExtensionContext, model: NonNullable<ExtensionContext["model"]>, foreign?: Foreign): Promise<AgentSession> {
     const agentDir = getAgentDir();
     const settingsManager = SettingsManager.create(ctx.cwd, agentDir);
     const sources = toolSources(this.pi);
@@ -234,15 +303,20 @@ export class SidebarAgent {
       // effort judgments) do not run twice. Skills and prompt templates load as in main.
       noExtensions: true,
       noThemes: true,
-      noContextFiles: true,
+      // On main's model the request carries main's system prompt (with its context files); on
+      // another model Sidebar's own prompt stands, so it loads the project's context files itself.
+      noContextFiles: !foreign,
       additionalExtensionPaths: sources.paths,
-      extensionFactories: [this.policy(), ...sources.builtins] as never,
+      extensionFactories: [this.policy(foreign), ...sources.builtins] as never,
     });
     await loader.reload();
     const modelRuntime = await ModelRuntime.create();
     inheritProviders(ctx, modelRuntime);
     await modelRuntime.refresh({ allowNetwork: false });
-    const sessionManager = SessionManager.inMemory(ctx.cwd);
+    // On another model, a session id derived from main's keeps OpenAI's cache routing
+    // (prompt_cache_key, Codex's session) the same when Sidebar's session is rebuilt.
+    const mainId = this.main.sessionId ?? ctx.sessionManager.getSessionId();
+    const sessionManager = SessionManager.inMemory(ctx.cwd, foreign && mainId ? { id: derivedSessionId(mainId, "sidebar") } : undefined);
     for (const message of this.thread) {
       try { sessionManager.appendMessage(message as never); } catch { /* a message Pi will not store is left out */ }
     }
@@ -251,7 +325,7 @@ export class SidebarAgent {
       agentDir,
       modelRuntime,
       model,
-      thinkingLevel: this.pi.getThinkingLevel(),
+      thinkingLevel: (foreign?.thinking ?? this.pi.getThinkingLevel()) as never,
       tools: sources.names,
       resourceLoader: loader,
       sessionManager,
@@ -287,13 +361,18 @@ export class SidebarAgent {
     const read = message.usage.cacheRead ?? 0;
     const total = read + (message.usage.input ?? 0) + (message.usage.cacheWrite ?? 0);
     if (total === 0) return;
-    const expected = this.main.promptTokens();
-    this.missed = this.mode !== undefined && expected >= MISS_MIN_TOKENS && read < expected * MISS_RATIO ? { read, expected } : undefined;
+    if (this.mode === "foreign") {
+      // Only a request the model's own cache should have served can miss it.
+      this.missed = this.foreignWarm && total >= MISS_MIN_TOKENS && read < total * MISS_RATIO ? { read, expected: total, own: true } : undefined;
+    } else {
+      const expected = this.main.promptTokens();
+      this.missed = this.mode !== undefined && expected >= MISS_MIN_TOKENS && read < expected * MISS_RATIO ? { read, expected } : undefined;
+    }
     this.lastAnswer = `${Math.round((read / total) * 100)}% cached · ${formatTokens(total - read)} new`;
   }
 
   /** Sidebar's policy, loaded into its session as an inline extension. */
-  private policy(): ExtensionFactory {
+  private policy(foreign?: Foreign): ExtensionFactory {
     return (cpi: ExtensionAPI) => {
       cpi.on("cache_warming_decision", () => ({ action: "stop" as const }));
 
@@ -321,6 +400,19 @@ export class SidebarAgent {
         const request = this.main.request;
         const entries = ctx.sessionManager.getEntries() as never;
         const leaf = ctx.sessionManager.getLeafId();
+        if (foreign) {
+          // Another model: its role, then main's session as a transcript of someone else's work in
+          // parts, interleaved with Sidebar's own exchanges as they happened, then the live status.
+          // Each request extends the previous one, so the model's own cache serves all but the end.
+          this.mode = "foreign";
+          const leading = event.messages[0]?.role === "system" ? [event.messages[0]] : [];
+          const thread = event.messages.slice(leading.length);
+          const view = this.parts.build(replayMessages(ctx, false).messages, foreign.model.contextWindow, now, newPartAt(thread));
+          this.foreignWarm = view.continued && this.foreignCacheWarm(foreign.model, now);
+          const status = statusMessage(describeLive(this.main.live, { messages: [], pending: view.pending }, now), now, this.quiz?.status());
+          const role = foreignRoleMessage({ sidebar: foreign.label, main: mainLabel(ctx) }, now, this.quiz?.role());
+          return { messages: [...leading, role, ...interleave(view.messages, view.threadAt, thread), status] };
+        }
         if (request) {
           this.mode = "splice";
           const delta = mainDelta(entries, request.leafId, leaf);
@@ -348,6 +440,12 @@ export class SidebarAgent {
           cctx.abort();
           return inertPayload(api, event.payload);
         };
+        if (foreign) {
+          // Its own cache: a breakpoint at the end of everything before the live status.
+          const payload = anchorForeign(api, event.payload);
+          this.foreignSent = { at: this.now(), model: modelKey(foreign.model), ttl: requestedCacheTtlMs(api, payload) };
+          return payload;
+        }
         if (this.mode === "replay") return replayPayload(api, event.payload, cctx.sessionManager.getSessionId(), this.main.sessionId);
         const request = this.main.request;
         if (this.mode !== "splice" || !request) return fail("there is no copy of main's last request");
@@ -359,6 +457,8 @@ export class SidebarAgent {
       // Routing headers carry the session id (OpenRouter affinity, Codex): main's id keeps Sidebar's
       // requests on the machine that holds main's cache.
       cpi.on("before_provider_headers", (event, cctx) => {
+        // On another model Sidebar has its own cache, routed by its own (derived) session id.
+        if (foreign) return;
         const main = this.main.sessionId;
         const own = cctx.sessionManager.getSessionId();
         if (!main || !own || main === own) return;
@@ -446,6 +546,48 @@ type Msg = { role?: string; content?: unknown };
 const ANTHROPIC_MAX_BREAKPOINTS = 4;
 
 /**
+ * On Anthropic, the cache breakpoints of a request on another model, which only ever grows at the
+ * end: one on its last block before the live status (the next request extends everything up to
+ * there), and one on the newest transcript part when a slot is free. Each takes the style of the
+ * system prompt's (so a 1-hour retention keeps the model's cache between questions). Other APIs
+ * cache prefixes on their own.
+ */
+export function anchorForeign(api: string, payload: unknown): unknown {
+  if (!payload || typeof payload !== "object") return payload;
+  const out = structuredClone(payload) as Record<string, unknown>;
+  if (api !== "anthropic-messages" || !Array.isArray(out.messages)) return out;
+  const blocks: Block[] = [];
+  for (const message of out.messages as Msg[]) {
+    if (!Array.isArray(message.content)) continue;
+    for (const block of message.content as Block[]) if (block && typeof block === "object") blocks.push(block);
+  }
+  for (const block of blocks) delete block.cache_control;
+  const fixedBlocks = [...((Array.isArray(out.system) ? out.system : []) as Block[]), ...((Array.isArray(out.tools) ? out.tools : []) as Block[])];
+  const marked = fixedBlocks.filter((b) => b && typeof b === "object" && b.cache_control !== undefined);
+  const marker = marked.map((b) => b.cache_control).find((c) => c && typeof c === "object") ?? { type: "ephemeral" };
+  let free = ANTHROPIC_MAX_BREAKPOINTS - marked.length;
+  const system = (Array.isArray(out.system) ? (out.system as Block[]) : []).filter((b) => b && b.cache_control !== undefined);
+  if (free < 2 && system.length >= 2) {
+    // Two marks on the system prompt (a Claude subscription login): the first is redundant, since
+    // the second covers more of the same prefix.
+    delete system[0]!.cache_control;
+    free++;
+  }
+  if (free < 1) return out;
+  const end = blocks.findLastIndex((b, i) => i < blocks.length && !isStatusBlock(b) && b.type !== "thinking" && b.type !== "redacted_thinking");
+  if (end === -1) return out;
+  blocks[end]!.cache_control = structuredClone(marker);
+  if (free >= 2) {
+    const part = blocks.findLastIndex((b, i) => i < end && b.type === "text" && typeof b.text === "string" && b.text.startsWith(`<${TRANSCRIPT_TAG} `));
+    if (part !== -1) blocks[part]!.cache_control = structuredClone(marker);
+  }
+  return out;
+}
+
+/** Where Sidebar's part starts in a request: its role note. */
+export const ROLE_SEAM = (text: string): boolean => text.startsWith("<sidebar>\n");
+
+/**
  * A request Sidebar rebuilt from main's session. Its prefix is main's conversation; on Anthropic the
  * cache breakpoint goes where main's own last request ended (the last user-role block before
  * Sidebar's part), so the lookup lands on the entry main wrote. Fields carrying Sidebar's session
@@ -459,6 +601,18 @@ export function replayPayload(api: string, payload: unknown, ownSessionId: strin
       if (value === ownSessionId) out[key] = mainSessionId;
     }
   }
+  return anchorPayload(api, out, ROLE_SEAM);
+}
+
+/**
+ * On Anthropic, the request's cache breakpoints for a prefix Sidebar built itself: one on the last
+ * user-role block before the seam (the first block `seam` matches), so the next request finds this
+ * one's entry, and (with `sideBreakpoint`) one on Sidebar's part after the seam. Other APIs cache
+ * prefixes on their own, so their requests pass unchanged (as a copy).
+ */
+export function anchorPayload(api: string, payload: unknown, seam: (text: string) => boolean, sideBreakpoint = true): unknown {
+  if (!payload || typeof payload !== "object") return payload;
+  const out = structuredClone(payload) as Record<string, unknown>;
   if (api !== "anthropic-messages" || !Array.isArray(out.messages)) return out;
   const messages = out.messages as Msg[];
   const flat: Array<{ role: string; block: Block }> = [];
@@ -466,7 +620,7 @@ export function replayPayload(api: string, payload: unknown, ownSessionId: strin
     if (!Array.isArray(message.content)) continue;
     for (const block of message.content as Block[]) if (block && typeof block === "object") flat.push({ role: message.role ?? "", block });
   }
-  const roleAt = flat.findIndex(({ block }) => block.type === "text" && typeof block.text === "string" && block.text.startsWith("<sidebar>\n"));
+  const roleAt = flat.findIndex(({ block }) => block.type === "text" && typeof block.text === "string" && seam(block.text));
   if (roleAt <= 0) return out;
   let boundary = -1;
   for (let i = roleAt - 1; i >= 0; i--) {
@@ -486,6 +640,6 @@ export function replayPayload(api: string, payload: unknown, ownSessionId: strin
     .find((c) => c && typeof c === "object") ?? { type: "ephemeral" };
   for (const { block } of flat) delete block.cache_control;
   flat[boundary]!.block.cache_control = structuredClone(marker);
-  placeSideBreakpoint(out, flat.slice(roleAt).map(({ block }) => block), fixed + 1);
+  if (sideBreakpoint) placeSideBreakpoint(out, flat.slice(roleAt).map(({ block }) => block), fixed + 1);
   return out;
 }

@@ -8,7 +8,9 @@ import type { MainState } from "../main-state.ts";
 import { formatTokens } from "../child.ts";
 import { git, repoRoot, type Git } from "../quiz/changes.ts";
 import { addRecent, knownTopics, markKnown, ProfileStore } from "../quiz/profile.ts";
-import { runCheck, type CheckResult, type StreamFn } from "./check.ts";
+import { runCheck, type CheckResult, type ForeignCheck, type StreamFn } from "./check.ts";
+import { TranscriptParts } from "../foreign.ts";
+import { modelKey, type ModelChoice, type ModelLike } from "../models.ts";
 import { HEADSUP_DEBUG_ENV, HEADSUP_ENTRY, HEADSUP_ENV, headsUpDefault, headsUpFromBranch, HeadsUpStats, headsUpWhereDefault, type HeadsUpEntry, type HeadsUpWhere } from "./mode.ts";
 import { proseMeasure, NoteState, quoteForMain, askSidebar, DISMISSED_MS, type NoteAction } from "./note.ts";
 import type { HeadsUpNote } from "./protocol.ts";
@@ -47,7 +49,14 @@ export interface HeadsUpHost {
   deliver(note: HeadsUpNote, onlySidebar: boolean): boolean;
   /** Open Sidebar and ask it this; false when Sidebar cannot open. */
   askSidebar(text: string, ctx: ExtensionContext): boolean;
+  /** Sidebar's model: checks run on it too (main's, sharing main's cache, unless another is chosen). */
+  model?(): ModelChoice;
 }
+
+/** A check's cache lifetime when the request did not say (Anthropic's and OpenAI's default). */
+const DEFAULT_TTL_MS = 5 * 60_000;
+/** Checks within this margin of the TTL count as cold. */
+const COLD_MARGIN_MS = 20_000;
 
 export interface HeadsUpOptions {
   knowledgeDir: string;
@@ -68,6 +77,9 @@ export class HeadsUp {
   readonly scheduler = new HeadsUpScheduler();
   readonly note = new NoteState();
   private misses = 0;
+  /** Checks on another model read main's session as a transcript with a cache of their own. */
+  private readonly parts = new TranscriptParts();
+  private lastForeign: { at: number; model: string; ttl: number } | undefined;
   /** The last note shown, wherever it went (for /known in Sidebar). */
   lastNote: HeadsUpNote | undefined;
   private abort: AbortController | undefined;
@@ -148,11 +160,14 @@ export class HeadsUp {
     const s = this.stats;
     const state = this.paused ? `paused (${this.paused})` : this.on ? (this.where === "sidebar" ? "on, notes only in Sidebar," : "on") : "off";
     const lines = [`Heads-up mode is ${state} in this session.`];
+    const choice = this.host.model?.();
+    if (choice?.kind === "other") lines.push(`Checks run on ${choice.label}, which reads main's session as a transcript and keeps its own cache.`);
+    else if (choice?.kind === "unavailable") lines.push(`Sidebar's model ${choice.pattern} matches no model you are logged in to, so checks are skipped.`);
     if (s.checks + s.failed + s.skipped === 0) lines.push("No checks yet: they run during main's longer runs, at most every 3 minutes.");
     else {
       const fresh = s.usage.input + s.usage.cacheWrite;
       lines.push(`${s.checks} check${s.checks === 1 ? "" : "s"}, ${s.notes} note${s.notes === 1 ? "" : "s"}${s.failed ? `, ${s.failed} failed` : ""}${s.skipped ? `, ${s.skipped} skipped` : ""}.`);
-      lines.push(`Tokens: ${formatTokens(s.usage.cacheRead)} read from main's cache, ${formatTokens(fresh)} new input, ${formatTokens(s.usage.output)} output.`);
+      lines.push(`Tokens: ${formatTokens(s.usage.cacheRead)} read from the cache, ${formatTokens(fresh)} new input, ${formatTokens(s.usage.output)} output.`);
       if (s.lastSkip) lines.push(`Last skip: ${s.lastSkip}.`);
     }
     lines.push(`Turn off for this session with /sidebar headsup off; set ${HEADSUP_ENV}=0 to start sessions with it off.`);
@@ -182,15 +197,26 @@ export class HeadsUp {
         known = topics.known;
         recent = topics.recent;
       } catch { /* no memory: the check still runs */ }
-      result = await runCheck({
-        main: this.main,
-        known,
-        recent,
-        thinking: this.pi.getThinkingLevel(),
-        now,
-        signal: abort.signal,
-        ...(this.options.stream ? { stream: this.options.stream } : {}),
-      });
+      const choice = this.host.model?.() ?? { kind: "same" as const };
+      if (choice.kind === "unavailable") {
+        result = { outcome: "skipped", reason: `Sidebar's model ${choice.pattern} matches no model you are logged in to` };
+      } else {
+        const foreign = choice.kind === "other" ? this.foreign(choice.model, choice.label, choice.thinking, now) : undefined;
+        result = await runCheck({
+          main: this.main,
+          known,
+          recent,
+          thinking: this.pi.getThinkingLevel(),
+          now,
+          signal: abort.signal,
+          ...(this.options.stream ? { stream: this.options.stream } : {}),
+          ...(foreign ? { foreign } : {}),
+        });
+        if (!foreign) this.lastForeign = undefined;
+        else if (result.outcome === "note" || result.outcome === "none") {
+          this.lastForeign = { at: now, model: modelKey(foreign.model), ttl: result.cacheTtlMs ?? DEFAULT_TTL_MS };
+        }
+      }
     } catch (error) {
       result = { outcome: "failed", reason: error instanceof Error ? error.message : String(error) };
     } finally {
@@ -203,8 +229,9 @@ export class HeadsUp {
     if (result.outcome === "note" || result.outcome === "none") {
       this.misses = result.missed ? this.misses + 1 : 0;
       if (this.misses >= MAX_MISSES) {
-        this.paused = "its checks missed main's prompt cache";
-        ctx.ui.notify("Heads-up checks paused: the last ones missed main's prompt cache. /sidebar headsup on resumes them.", "warning");
+        const which = this.lastForeign ? "their model's own prompt cache" : "main's prompt cache";
+        this.paused = `its checks missed ${which}`;
+        ctx.ui.notify(`Heads-up checks paused: the last ones missed ${which}. /sidebar headsup on resumes them.`, "warning");
       }
     }
     if (result.outcome === "note" && result.note && this.on && this.note.free) {
@@ -214,6 +241,12 @@ export class HeadsUp {
       if (!this.host.deliver(note, this.where === "sidebar")) this.show(note, ctx);
     }
     return result;
+  }
+
+  private foreign(model: ModelLike, label: string, thinking: string | undefined, now: number): ForeignCheck {
+    const last = this.lastForeign;
+    const warm = !!last && last.model === modelKey(model) && now - last.at < last.ttl - COLD_MARGIN_MS;
+    return { model, label, ...(thinking ? { thinking } : {}), parts: this.parts, warm };
   }
 
   /** `/known` in Sidebar: the last note's topic is one the user knows. */

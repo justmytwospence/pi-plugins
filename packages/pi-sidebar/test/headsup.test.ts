@@ -13,6 +13,8 @@ import { isNoteMarker, noteMessages } from "../src/headsup/thread.ts";
 import { HeadsUpScheduler } from "../src/headsup/scheduler.ts";
 import { addRecent, knownTopics, markKnown, ProfileStore, emptyProfile } from "../src/quiz/profile.ts";
 import { splicePayload } from "../src/splice.ts";
+import { derivedSessionId, TranscriptParts } from "../src/foreign.ts";
+import { HEADSUP_SYSTEM } from "../src/headsup/prompt.ts";
 import { FakePi, fakeCtx } from "./fake.ts";
 
 const NOTE = '<headsup topic="Skipped Tests" kind="risk">Main skipped the failing integration tests.</headsup><headsup-detail>It ran with --skip. The suite never ran.</headsup-detail>';
@@ -232,6 +234,81 @@ describe("a heads-up check", () => {
     const { main } = await primedMain(1000);
     const { stream } = stubStream("<headsup-none/>", { input: 20_000, output: 5, cacheRead: 0, cacheWrite: 0 });
     expect(await runCheck({ main, known: [], recent: [], now: 1000, stream })).toMatchObject({ outcome: "none", missed: true });
+  });
+});
+
+describe("a heads-up check on another model", () => {
+  const FABLE = { provider: "anthropic", id: "claude-fable-5-1", api: "anthropic-messages", name: "Claude Fable 5.1", contextWindow: 1_000_000 };
+  const conversation = [
+    { type: "message", id: "u1", parentId: null, timestamp: "", message: { role: "user", content: [{ type: "text", text: "migrate the db" }], timestamp: 0 } },
+    { type: "message", id: "a1", parentId: "u1", timestamp: "", message: { role: "assistant", content: [{ type: "text", text: "Dropped the old table." }], provider: "anthropic", model: "claude-x", api: "anthropic-messages", usage: {}, stopReason: "stop", timestamp: 0 } },
+  ];
+
+  function foreignStream(usage = { input: 300, output: 40, cacheRead: 0, cacheWrite: 2_000 }) {
+    const calls: Array<{ model: any; context: any; options: any; payload: any }> = [];
+    const H = { type: "ephemeral", ttl: "1h" };
+    const stream = (model: unknown, context: any, options: any) => ({
+      result: async () => {
+        const side = { model: "claude-fable-5-1", system: [{ type: "text", text: context.systemPrompt, cache_control: H }], messages: context.messages.map((m: any) => ({ role: m.role, content: m.content.map((b: any) => ({ ...b })) })) };
+        side.messages.at(-1).content.at(-1).cache_control = H;
+        calls.push({ model, context, options, payload: await options.onPayload(side) });
+        return { role: "assistant", content: [{ type: "text", text: "<headsup-none/>" }], usage, stopReason: "stop" };
+      },
+    });
+    return { stream, calls };
+  }
+
+  async function foreignMain() {
+    const pi = new FakePi();
+    const main = new MainState(pi as never, () => 1000);
+    const { ctx } = fakeCtx({ leafId: "a1", entries: conversation });
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    return main;
+  }
+
+  it("reads main's transcript without main's request, and anchors its own cache where the transcript ends", async () => {
+    const main = await foreignMain();
+    expect(main.request).toBeUndefined();
+    const { stream, calls } = foreignStream();
+    const parts = new TranscriptParts();
+    const result = await runCheck({ main, known: [], recent: [], now: 1000, stream, thinking: "high", foreign: { model: FABLE, label: "Claude Fable 5.1", parts, warm: false } });
+    expect(result).toMatchObject({ outcome: "none", missed: false, cacheTtlMs: 60 * 60_000 });
+    const { model, context, options, payload } = calls[0]!;
+    expect(model).toBe(FABLE);
+    expect(context.systemPrompt).toBe(HEADSUP_SYSTEM);
+    expect(context.tools).toEqual([]);
+    expect(options).toMatchObject({ sessionId: derivedSessionId("main-session", "headsup"), reasoning: "high" });
+    const blocks = payload.messages.flatMap((m: any) => m.content);
+    expect(blocks[0].text).toContain("Dropped the old table.");
+    expect(blocks[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+    expect(blocks[1].text).toMatch(/^<sidebar-headsup>\nThe <main-transcript> parts above/);
+    expect(blocks.slice(1).some((b: any) => b.cache_control)).toBe(false);
+  });
+
+  it("counts a miss only when the last check left the cache warm", async () => {
+    const main = await foreignMain();
+    const parts = new TranscriptParts();
+    const cold = foreignStream({ input: 20_000, output: 5, cacheRead: 0, cacheWrite: 0 });
+    const foreign = (warm: boolean) => ({ model: FABLE, label: "Claude Fable 5.1", parts, warm });
+    expect(await runCheck({ main, known: [], recent: [], now: 1000, stream: cold.stream, foreign: foreign(false) })).toMatchObject({ missed: false });
+    expect(await runCheck({ main, known: [], recent: [], now: 2000, stream: cold.stream, foreign: foreign(true) })).toMatchObject({ missed: true });
+  });
+
+  it("runs on Sidebar's model in HeadsUp, and is skipped when that model is unavailable", async () => {
+    const main = await foreignMain();
+    const pi = new FakePi();
+    const dir = mkdtempSync(path.join(tmpdir(), "headsup-"));
+    const { stream, calls } = foreignStream();
+    let choice: any = { kind: "other", pattern: "anthropic/claude-fable-*", model: FABLE, label: "Claude Fable 5.1" };
+    const headsUp = new HeadsUp(pi as never, main, { deliver: () => true, askSidebar: () => true, model: () => choice }, {
+      knowledgeDir: dir, logFile: path.join(dir, "log"), run: async () => undefined, stream, now: () => 1000, env: {},
+    });
+    expect(await headsUp.check("turn")).toMatchObject({ outcome: "none" });
+    expect(calls).toHaveLength(1);
+    expect(headsUp.summary()).toContain("Checks run on Claude Fable 5.1");
+    choice = { kind: "unavailable", pattern: "nope/x" };
+    expect(await headsUp.check("turn")).toMatchObject({ outcome: "skipped", reason: expect.stringMatching(/nope\/x/) });
+    expect(calls).toHaveLength(1);
   });
 });
 

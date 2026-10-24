@@ -2,7 +2,7 @@
 
 Sidebar is a read-only side chat that runs beside a working Pi session, inside the same Pi process. Ask it what the main agent is doing, why, or how the code works, while the main run keeps going.
 
-Sidebar always sees main's latest state. Every request it sends starts with main's last request, byte for byte, so the provider serves almost all of it from the prompt cache main already wrote.
+Sidebar always sees main's latest state. Every request it sends starts with main's last request, byte for byte, so the provider serves almost all of it from the prompt cache main already wrote. Or switch it to another model for a second opinion (`/model`): it then reads main's session as a transcript of someone else's work and keeps a prompt cache of its own.
 
 Part of [Pi Plugins](https://github.com/justmytwospence/pi-plugins). Reference: <https://pi-plugins.vercel.app/plugins/pi-sidebar/>.
 
@@ -51,7 +51,8 @@ pi -e ./packages/pi-sidebar
 | Enter | Asks. |
 | Ctrl+S | With pi-stash enabled, stashes Sidebar's draft in a stash of its own, apart from main's: the hint row shows `stashed`. Ctrl+S in an empty composer restores it, with text in both it swaps them, and it comes back on its own after a `/` command such as `/new`. It is kept while Sidebar is closed. |
 | `/sidebar headsup [on\|off]` | Heads-up mode's state and cost, or switches it on or off for the session. |
-| `/sidebar model` | Explains why Sidebar always uses main's model. |
+| `/sidebar model` (or `/model` in Sidebar) | Picks Sidebar's model: `Same as main` (the default, sharing main's cache) or one of your favorites. `/model sol`, `/model opus` or `/model provider/id` switch directly, `/model same` goes back. See [Another model](#another-model). |
+| Main's model keys in Sidebar | The model picker key (`app.model.select`, Ctrl+L by default) picks Sidebar's model; the cycling keys (`app.model.cycleForward`/`cycleBackward`, Ctrl+P and Shift+Ctrl+P by default) step through `same` and your favorites. |
 
 While Sidebar has focus, your keys do what they do in main. They are resolved through Pi's keybindings, so changes in `~/.pi/agent/keybindings.json` apply in both halves:
 - **Scrolling and search.** While Sidebar has focus, its transcript is Pi's primary scroll view, so everything Pi aims at the transcript acts on Sidebar:
@@ -120,6 +121,8 @@ Settings, read from the environment Pi starts with:
 - `PI_SIDEBAR_MIN_COLUMNS`: the narrowest half for a side-by-side split (default 80).
 - `PI_SIDEBAR_KNOWLEDGE`: where quiz mode and heads-up mode keep their knowledge profiles (default `~/.pi/agent/pi-sidebar/knowledge`).
 - `PI_SIDEBAR_HEADSUP`: `0` starts sessions with heads-up mode off; `sidebar` keeps it on but shows notes only in Sidebar. `PI_SIDEBAR_HEADSUP_DEBUG=1` logs its checks.
+- `PI_SIDEBAR_MODELS`: your favorite models for Sidebar, comma-separated (default: Pi's own favorites, `enabledModels`). Each is `provider/id`, a bare id, or a glob whose newest match counts, so `anthropic/claude-opus-*` is always the latest Opus; `:level` sets the thinking level, as in `openai-codex/gpt-*-sol:high`.
+- `PI_SIDEBAR_MODEL`: the model new sessions start with: `same` (default) or a favorite.
 
 ## Quiz mode
 
@@ -157,7 +160,9 @@ The note is laid out like pi-recap's `※ recap:` line (mark, lowercase label, t
 
 It is on by default. `/sidebar headsup off` switches it off for the session, `/sidebar headsup on` switches it back on, and `/sidebar headsup sidebar` keeps it on with notes only in Sidebar. The setting is stored in main's session, so it follows `/tree` and comes back after resume and `/reload`. Set `PI_SIDEBAR_HEADSUP=0` to start every session with it off, or `PI_SIDEBAR_HEADSUP=sidebar` to start them with notes only in Sidebar.
 
-**When it checks.** Checks happen at main's turn boundaries, once a run is long (5 replies or 2 minutes). They are at most 3 minutes apart, and a long run gets one more check when it ends. There is never a check while one is running or while a note is showing. A check is skipped, with nothing sent, when main's prompt cache has probably expired, when Sidebar cannot share main's API, or when no copy of main's last request is in memory (after `/reload`, until main sends again).
+**When it checks.** Checks happen at main's turn boundaries, once a run is long (5 replies or 2 minutes). They are at most 3 minutes apart, and a long run gets one more check when it ends. There is never a check while one is running or while a note is showing. On main's model, a check is skipped, with nothing sent, when main's prompt cache has probably expired, when Sidebar cannot share main's API, or when no copy of main's last request is in memory (after `/reload`, until main sends again).
+
+**On another model.** Checks run on Sidebar's model. With [another model](#another-model) chosen, a check reads main's session as a transcript, with a cache of its own apart from Sidebar's questions': one breakpoint where the transcript ends, so the next check reads it back and pays only for what main did since. Checks within a run are at most 3 minutes apart, so that cache stays warm through a run. The first check of a run after a longer pause reads the whole transcript uncached. It needs no copy of main's request, so it also runs after `/reload`.
 
 **In Sidebar.** The note is part of Sidebar's conversation: an answer that carries the note and its explanation, preceded by a hidden marker that tells the model it raised the note unasked. `/known` marks the last note as known. `/headsup` in Sidebar works like `/sidebar headsup`.
 
@@ -174,15 +179,15 @@ Main never sees a note unless you send it to main.
 
 **Memory.** Topics you mark as known, and the last 20 notes, go into the repository's knowledge profile that quiz mode uses (`~/.pi/agent/pi-sidebar/knowledge/`). Every check lists them, together with the concepts you have proven in quiz mode, as things not to raise again, in this session and later ones.
 
-**Cost.** A check is one request on main's model, outside any Pi session, so no extension in main sees it.
+**Cost.** A check is one request outside any Pi session, so no extension in main sees it. On main's model:
 - **Cache sharing:** it starts with main's last request byte for byte, the way Sidebar's requests do, so main's prompt cache serves almost all of it.
 - **Newly paid:** what main committed since, a fixed instruction block of about 600 tokens, the reply, and main's thinking setting.
 - **No breakpoint:** it adds no cache breakpoint of its own, since nothing reuses it.
-- **Misses:** after two checks in a row that miss main's cache, checks pause until you run `/sidebar headsup on`.
+- **Misses:** after two checks in a row that miss the cache they should have read (main's, or on another model its own), checks pause until you run `/sidebar headsup on`.
 - **Totals:** `/sidebar headsup` shows the checks, notes and tokens for this session.
 - **Debug log:** `PI_SIDEBAR_HEADSUP_DEBUG=1` logs every check (trigger, usage and raw reply) to `~/.pi/agent/pi-sidebar/headsup.log`.
 
-**No tools.** The check keeps main's tool declarations, because removing them would break the cache. A reply that calls a tool counts as having no note.
+**No tools.** On main's model the check keeps main's tool declarations, because removing them would break the cache; on another model it declares none. A reply that calls a tool counts as having no note.
 
 ## How it stays current and cheap
 
@@ -203,6 +208,26 @@ The provider serves part 1 from the cache main already wrote. In your own sessio
 - **When main's request already uses all four** (a Claude subscription login marks both system blocks), Sidebar takes the slot of the first one. The second covers more of the same prefix, and moving a breakpoint does not change what reads from the cache. In a live test, main's prefix still read 27,606 of 27,608 tokens. Later steps and follow-ups read Sidebar's earlier turns, and only about 60 tokens per request went uncached.
 - **The trade-off:** Sidebar's new tokens are written at 1.25× instead of sent at 1×. That costs a few hundred tokens' worth on a one-off question and pays off as soon as an answer takes a tool step or you ask a follow-up.
 - **Caveat:** like main, a follow-up re-reads an earlier answer's reasoning uncached, as finished turns' thinking does not stay in the same form.
+
+## Another model
+
+A model reads its own conclusions back as settled, so a second opinion is worth more from a different model. Pick one with `/model` in Sidebar (or `/sidebar model`, or main's model picker key while Sidebar has focus):
+
+```
+Sidebar's model
+→ Same as main · shares main's prompt cache (current)
+  Claude Opus 5.5 · anthropic/claude-opus-5-5
+  Claude Fable 5.1 · anthropic/claude-fable-5-1
+  GPT-6.1 Sol · openai-codex/gpt-6.1-sol
+```
+*Illustration, not a screenshot.*
+
+- **Favorites** come from `PI_SIDEBAR_MODELS`, else Pi's `enabledModels`; only models you are logged in to are offered. A glob (`anthropic/claude-opus-*`) means its newest match. A favorite that is main's own model counts as `same`.
+- **The choice** is stored in main's session, so it follows `/tree` and comes back after resume and `/reload`; `PI_SIDEBAR_MODEL` sets it for new sessions. The header names the model while it is not main's. Heads-up checks run on it too.
+- **What it sees.** Its own system prompt (Pi's, with the project's context files) and tools, then its role note, then main's session as a transcript: the user's messages, main's replies, reasoning and tool calls, and tool results clipped to their first 1,200 and last 600 characters. The transcript arrives as user-side text in `<main-transcript>` parts, not as the model's own turns, so it reads it as someone else's work. It is told to read critically and to check claims against the code, which it can read itself. A turn whose tool calls are still running stays out of the transcript (the live status lists them).
+- **Its own cache.** Main's cache belongs to main's model, so the other model keeps one of its own. Its requests only ever grow at the end: each request adds main's activity since the last as a new part, placed where Sidebar's conversation stood at the time, so parts and Sidebar's exchanges interleave in the order they happened. On Anthropic, a breakpoint sits on the last block before the live status (and one on the newest part when a slot is free), in the style of the system prompt's, so with `PI_CACHE_RETENTION=long` the cache lasts an hour between questions. OpenAI caches prefixes by itself, routed by a session id derived from main's (`prompt_cache_key`), which stays the same when Sidebar's session is rebuilt.
+- **Cost.** The first question on a model reads main's transcript uncached, once; Sidebar asks first when that is 8k tokens or more. After that, each question reads everything before it from the cache: in a live test on Anthropic, a second question after main had moved on read 96% from the cache, with 764 tokens new. A compaction or `/tree` in main, a fresh Sidebar thread or a switch of model starts the layout over, which reads the transcript uncached once more.
+- **Size.** When the transcript outgrows 60% of the model's context window, its oldest messages are left out (from a user message, with a note saying how many), with room to grow before that happens again.
 
 ## What Sidebar can use
 
@@ -226,9 +251,11 @@ Sidebar never quietly re-reads main's context uncached. It asks inline (Enter se
 
 Sidebar refuses outright on an API it cannot share a cache with. It aborts a request without sending it when main's request vanishes while one is being built, the API or model differs, or Anthropic's limit of four cache breakpoints would be exceeded.
 
-It always uses main's model and thinking settings: a cache belongs to one model and one set of settings. It never keeps its own cache warm.
+On main's model it uses main's thinking settings too: a cache belongs to one model and one set of settings. It never keeps its own cache warm.
 
 Supported APIs: Anthropic Messages, OpenAI Responses (including Codex and Azure) and OpenAI Chat Completions. It has been tested live on Anthropic.
+
+On [another model](#another-model) it asks instead when that model's own cache is probably cold (its last request is older than the cache TTL, or it has none) and main's transcript is 8k tokens or more, and after an answer that missed its own cache. It refuses when your chosen favorite matches no model you are logged in to.
 
 ## Requirements and limits
 
@@ -236,7 +263,7 @@ Supported APIs: Anthropic Messages, OpenAI Responses (including Codex and Azure)
 
 **Model behavior.** On models that drop earlier thinking when a new user message arrives (Claude models before Opus 4.5 and Sonnet 4.6), a question asked during main's tool calls can miss the cache. The miss check catches this.
 
-**Keys while Sidebar has focus:** typing goes only to Sidebar, except a prompt another program types into the pane (`herdr agent prompt`, pi-herdr's `send`, a phone client): a paste into Sidebar's empty composer followed by Enter within 0.7 s is sent to main instead (steering main's turn if it is working), with a notice in Sidebar. Main-only actions (stopping main, model shortcuts) work again once main has focus. Transcript search and previous/next prompt jumps act on the focused half.
+**Keys while Sidebar has focus:** typing goes only to Sidebar, except a prompt another program types into the pane (`herdr agent prompt`, pi-herdr's `send`, a phone client): a paste into Sidebar's empty composer followed by Enter within 0.7 s is sent to main instead (steering main's turn if it is working), with a notice in Sidebar. Main-only actions (stopping main, its thinking level) work again once main has focus; main's model keys pick Sidebar's model while Sidebar has focus. Transcript search and previous/next prompt jumps act on the focused half.
 
 ## Prior art
 
