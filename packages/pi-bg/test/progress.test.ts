@@ -202,10 +202,10 @@ describe("ProgressTracker", () => {
 
 describe("drawing", () => {
   it("draws eighths", () => {
-    expect(bar(0)).toBe(`▕${" ".repeat(10)}▏`);
-    expect(bar(1)).toBe(`▕${"█".repeat(10)}▏`);
-    expect(bar(0.45)).toBe("▕████▌     ▏");
-    expect(bar(0.45)).toHaveLength(12);
+    expect(bar(0)).toBe("░".repeat(10));
+    expect(bar(1)).toBe("█".repeat(10));
+    expect(bar(0.45)).toBe("████▌░░░░░");
+    expect(bar(0.45)).toHaveLength(10);
   });
 
   it("formats percent and ETA", () => {

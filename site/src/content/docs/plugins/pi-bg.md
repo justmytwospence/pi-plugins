@@ -84,7 +84,7 @@ Many tools draw bars only on a terminal; in a log file, tqdm, pytest, wget and r
 }
 ```
 
-Progress appears as a bar, percent and ETA in the `/tasks` row (`▕████▌     ▏ 45% · ~3m · 2:14`, example), in the pill when exactly one task has progress (`2 shells · fit 45%`), in the `Waiting on fit 45% · 2:14…` message, and in the agent's text (`45% (450/1000, ~3m left, detected: tqdm)`). A task that ends short of done reports `last progress 87%`.
+Progress appears as a bar, percent and ETA in the `/tasks` row (`45% · ~3m · 2:14 ████▌░░░░░`, bar flush right, example), in the pill when exactly one task has progress (`2 shells · fit 45%`), in the `Waiting on fit ███▋░░░░ 45% · 2:14…` message, and in the agent's text (`45% (450/1000, ~3m left, detected: tqdm)`). A task that ends short of done reports `last progress 87%`.
 
 ## Completion and cancellation
 

@@ -265,15 +265,18 @@ export default function piBg(pi: ExtensionAPI) {
     const label = one ? `${count} · ${running.length === 1 ? "" : `${one.name} `}${shortProgress(one)}` : count;
     return { label, ...(failed ? { alert: `${failed} failed` } : {}) };
   };
-  /** A row's stats while it runs with progress: `▕████▌     ▏ 45% · ~3m`. */
+  /** A row's progress, before its runtime: `45% · ~3m`; the bar goes last, flush right, so bars line up. */
   const progressStats = (t: Task, now: number): string | undefined => {
     const p = t.status === "running" ? t.progress : undefined;
     if (!p) return undefined;
     const left = eta(p, now);
-    return `${bar(p.fraction)} ${percent(p)}${left === undefined ? "" : ` · ${etaText(left)}`}`;
+    return `${percent(p)}${left === undefined ? "" : ` · ${etaText(left)}`}`;
   };
-  /** `fit 45% · 2:14` for the waiting message. */
-  const waitLabel = (t: Task) => [t.name, [shortProgress(t), runtime(t)].filter(Boolean).join(" · ")].join(" ");
+  /** `fit ███▌░░░░ 45% · 2:14` for the waiting message. */
+  const waitLabel = (t: Task) => {
+    const p = t.status === "running" ? t.progress : undefined;
+    return p ? `${t.name} ${bar(p.fraction, 8)} ${percent(p)} · ${runtime(t)}` : `${t.name} ${runtime(t)}`;
+  };
   const section: ActivitySection = {
     id: "bg",
     title: "shells",
@@ -294,7 +297,7 @@ export default function piBg(pi: ExtensionAPI) {
                 runtime(t, now),
               ]
                 .filter(Boolean)
-                .join(" · ")
+                .join(" · ") + (t.progress ? ` ${bar(t.progress.fraction)}` : "")
             : `${outcome(t)} · ${runtime(t, now)}`,
         startedAt: t.startedAt,
         ...(t.endedAt ? { endedAt: t.endedAt } : {}),

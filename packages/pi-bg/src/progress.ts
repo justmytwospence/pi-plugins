@@ -339,12 +339,12 @@ export function percent(p: Reading): string {
 
 const EIGHTHS = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
 
-/** `▕█████▌    ▏`: `cells` wide inside its edges, in eighths of a cell. */
+/** `████▌░░░░░`: `cells` wide, in eighths of a cell, the rest a light track. */
 export function bar(fraction: number, cells = 10): string {
   const eighths = Math.round(Math.max(0, Math.min(1, fraction)) * cells * 8);
   const full = Math.floor(eighths / 8);
   const part = EIGHTHS[eighths % 8] ?? "";
-  return `▕${"█".repeat(full)}${part}${" ".repeat(cells - full - (part ? 1 : 0))}▏`;
+  return `${"█".repeat(full)}${part}${"░".repeat(cells - full - (part ? 1 : 0))}`;
 }
 
 /** Milliseconds left at the rate seen since the baseline, once there is enough of it to go on. */

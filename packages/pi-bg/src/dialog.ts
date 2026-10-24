@@ -197,7 +197,7 @@ export class TasksDialog implements Component {
         const left = `${on ? th.fg("accent", "❯") : " "} ${icon(e.status, th)} ${tag}${name}  ${th.fg("dim", e.detail)}`;
         const right = th.fg(on ? "text" : "dim", e.stats);
         const gap = inner - visibleWidth(right) - 1;
-        lines.push(visibleWidth(left) < gap ? `${left}${" ".repeat(gap - visibleWidth(left))} ${right}` : `${truncateToWidth(left, Math.max(8, gap - 1), "…")} ${right}`);
+        lines.push(visibleWidth(left) < gap ? `${left}${" ".repeat(gap - visibleWidth(left))} ${right}` : `${truncateToWidth(left, Math.max(8, gap), "…")} ${right}`);
         n++;
       }
     }
