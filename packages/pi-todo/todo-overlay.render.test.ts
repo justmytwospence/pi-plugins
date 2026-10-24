@@ -297,7 +297,7 @@ describe("TodoOverlay — collapse/expand render", () => {
 			{ action: "update", id: 1, status: "completed" },
 		]);
 		overlay.toggleCollapse();
-		expect(widget.render(200)).toEqual(["● Todos (1/2)  ctrl+shift+t to expand", ""]);
+		expect(widget.render(200)).toEqual([" ● Todos (1/2)  ctrl+shift+t to expand", ""]);
 	});
 
 	it("uncollapsed (default) yields the unchanged full render (regression-safe)", async () => {
@@ -335,27 +335,27 @@ describe("TodoOverlay — collapse hint resolves the key from config", () => {
 		writeConfigFile(JSON.stringify({ collapseKey: "alt+o" }));
 		const { widget, overlay } = await setup([{ action: "create", subject: "a" }]);
 		overlay.toggleCollapse();
-		expect(widget.render(200)).toEqual(["● Todos (0/1)  alt+o to expand", ""]);
+		expect(widget.render(200)).toEqual([" ● Todos (0/1)  alt+o to expand", ""]);
 	});
 
 	it("renders the default key when config is missing", async () => {
 		const { widget, overlay } = await setup([{ action: "create", subject: "a" }]);
 		overlay.toggleCollapse();
-		expect(widget.render(200)).toEqual(["● Todos (0/1)  ctrl+shift+t to expand", ""]);
+		expect(widget.render(200)).toEqual([" ● Todos (0/1)  ctrl+shift+t to expand", ""]);
 	});
 
 	it("renders the default key when the configured spec is invalid", async () => {
 		writeConfigFile(JSON.stringify({ collapseKey: "ctr+t" }));
 		const { widget, overlay } = await setup([{ action: "create", subject: "a" }]);
 		overlay.toggleCollapse();
-		expect(widget.render(200)[0]).toBe("● Todos (0/1)  ctrl+shift+t to expand");
+		expect(widget.render(200)[0]).toBe(" ● Todos (0/1)  ctrl+shift+t to expand");
 	});
 
 	it("renders a static inline label, not a fake off shortcut, after a live edit", async () => {
 		const { widget, overlay } = await setup([{ action: "create", subject: "a" }]);
 		overlay.toggleCollapse();
 		writeConfigFile(JSON.stringify({ collapseKey: "off" }));
-		expect(widget.render(200)).toEqual(["● Todos (0/1)  collapsed", ""]);
+		expect(widget.render(200)).toEqual([" ● Todos (0/1)  collapsed", ""]);
 	});
 
 	it("retains personal Ctrl+T from legacy config in the compact heading", async () => {
@@ -364,7 +364,7 @@ describe("TodoOverlay — collapse hint resolves the key from config", () => {
 		writeFileSync(legacyPath, JSON.stringify({ collapseKey: "ctrl+t" }));
 		const { widget, overlay } = await setup([{ action: "create", subject: "a" }]);
 		overlay.toggleCollapse();
-		expect(widget.render(200)).toEqual(["● Todos (0/1)  ctrl+t to expand", ""]);
+		expect(widget.render(200)).toEqual([" ● Todos (0/1)  ctrl+t to expand", ""]);
 	});
 
 	it("localizes the heading and inline hint with the resolved key", async () => {
@@ -372,7 +372,7 @@ describe("TodoOverlay — collapse hint resolves the key from config", () => {
 		vi.mocked(t).mockImplementation((key, fallback) => ({ "overlay.heading": "任务", "overlay.expandHint": "按 {key} 展开" }[key] ?? fallback));
 		const { widget, overlay } = await setup([{ action: "create", subject: "a" }]);
 		overlay.toggleCollapse();
-		expect(widget.render(200)).toEqual(["● 任务 (0/1)  按 alt+o 展开", ""]);
+		expect(widget.render(200)).toEqual([" ● 任务 (0/1)  按 alt+o 展开", ""]);
 	});
 
 	it("localizes the off-key label without a hint row", async () => {
@@ -380,7 +380,7 @@ describe("TodoOverlay — collapse hint resolves the key from config", () => {
 		vi.mocked(t).mockImplementation((key, fallback) => key === "overlay.collapsed" ? "replié" : fallback);
 		const { widget, overlay } = await setup([{ action: "create", subject: "a" }]);
 		overlay.toggleCollapse();
-		expect(widget.render(200)).toEqual(["● Todos (0/1)  replié", ""]);
+		expect(widget.render(200)).toEqual([" ● Todos (0/1)  replié", ""]);
 	});
 });
 
@@ -392,15 +392,15 @@ describe("TodoOverlay — width truncation", () => {
 			{ action: "update", id: 1, status: "completed" },
 		]);
 		overlay.toggleCollapse();
-		for (const width of [5, 6, 7, 8, 10, 12, 13, 14, 15, 16, 20, 30]) {
+		for (const width of [6, 7, 8, 10, 12, 13, 14, 15, 16, 20, 30]) {
 			const lines = widget.render(width);
 			expect(lines).toHaveLength(2);
 			expect(lines[1]).toBe("");
 			expect(lines[0]).toContain("(1/2)");
 			expect(visibleWidth(lines[0])).toBeLessThanOrEqual(width);
 		}
-		expect(widget.render(5)[0]).toBe("(1/2)");
-		expect(widget.render(14)[0]).toBe("● Todos (1/2)");
+		expect(widget.render(6)[0]).toBe(" (1/2)");
+		expect(widget.render(15)[0]).toBe(" ● Todos (1/2)");
 	});
 
 	it("fits every narrow width with ANSI styling and a wide translated label", async () => {
@@ -418,7 +418,7 @@ describe("TodoOverlay — width truncation", () => {
 			expect(lines).toHaveLength(2);
 			expect(lines[1]).toBe("");
 			expect(visibleWidth(lines[0])).toBeLessThanOrEqual(width);
-			if (width >= 5) expect(lines[0]).toContain("(1/2)");
+			if (width >= 6) expect(lines[0]).toContain("(1/2)");
 		}
 		expect(widget.render(60)[0]).toContain("\u001b[36m");
 		expect(widget.render(60)[0]).toContain("ctrl+shift+alt+super+f12 to expand");
@@ -432,7 +432,7 @@ describe("TodoOverlay — width truncation", () => {
 		}
 		const { widget, overlay } = await setup(actions);
 		overlay.toggleCollapse();
-		expect(widget.render(7)).toEqual(["(10/12)", ""]);
+		expect(widget.render(8)).toEqual([" (10/12)", ""]);
 	});
 
 	it("renders without throwing at small widths", async () => {

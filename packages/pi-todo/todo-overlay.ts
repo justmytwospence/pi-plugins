@@ -143,7 +143,12 @@ export class TodoOverlay {
 		return task.status === "completed" && this.hiddenCompletedTaskIds.has(task.id);
 	}
 
+	/** The panel, indented one column so it lines up with the transcript and other widgets. */
 	private renderWidget(theme: Theme, width: number): string[] {
+		return this.renderPanel(theme, Math.max(0, width - 1)).map((line) => (line ? ` ${line}` : line));
+	}
+
+	private renderPanel(theme: Theme, width: number): string[] {
 		if (this.suppressed) return [];
 		const snapshot = this.getSnapshot();
 		const overlayTasks = this.selectOverlayTasks(snapshot);

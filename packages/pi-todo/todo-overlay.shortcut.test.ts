@@ -127,7 +127,7 @@ describe("rpiv-todo — collapse/expand shortcut registration", () => {
 		// Toggle → collapses; forced redraw on the height step.
 		await captured.shortcuts.get("ctrl+shift+t")?.handler?.(ctx as never);
 		expect(requestRender).toHaveBeenCalledWith(true);
-		expect(widget.render(200)).toEqual(["● Todos (0/1)  ctrl+shift+t to expand", ""]);
+		expect(widget.render(200)).toEqual([" ● Todos (0/1)  ctrl+shift+t to expand", ""]);
 
 		// Toggle again → re-expands; hint gone.
 		await captured.shortcuts.get("ctrl+shift+t")?.handler?.(ctx as never);
