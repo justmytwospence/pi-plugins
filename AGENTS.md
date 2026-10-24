@@ -40,7 +40,7 @@ Collie (AltanS/collie) also reads a waiting Pi dialog off the screen, and finds 
 - The dialog layouts above serve Collie too: single-choice questions, tool-gate approvals and Pi's own selects lift as walked buttons; a lone multiple choice lifts as checkboxes (its digits toggle, `tab done` submits, `Other` stays in the terminal), and several questions at once show Collie's Escape card. Keep those shapes inside `frames.toml`'s declarations, or change the file with them.
 - A change to the editor's rules, the footer's height or indent, or a below-editor widget must stay inside `frames.toml`'s limits, or change that file with it (and restart Collie).
 
-`npm run check:clients` renders every dialog at 46 and 120 columns over the blocked footer and runs both clients' readers on it (herdr-web-ui's installed bundle, and a Collie checkout at `~/Projects/collie` with this machine's `frames.toml`); a client that is not installed is skipped. Run it after changing a dialog, the footer or a below-editor widget.
+`npm run check:clients` renders every dialog at 46 and 120 columns over the blocked footer and runs both clients' readers on it (herdr-web-ui's installed bundle, and a Collie checkout at `~/Projects/collie` with this machine's `frames.toml`); a client that is not installed is skipped. It also draws every dialog with pi-sidebar open (collapsed, as it is while a dialog waits) and main's idle editor with Sidebar open, which must read as it does without Sidebar; Collie's known misreading of the latter is printed as `KNOWN`. Run it after changing a dialog, the footer, a below-editor widget or Sidebar's layout.
 
 ## Documentation ownership
 

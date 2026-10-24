@@ -7,6 +7,9 @@
 //   - Collie: the pi adapter of a Collie checkout, given this machine's `frames.toml`.
 // A client that is not installed is skipped, so this is not part of `npm test`: run it with
 // `npm run check:clients` after changing a dialog, the footer or a below-editor widget.
+// With Sidebar (pi-sidebar) open, every dialog is drawn again in Sidebar's real split, collapsed as
+// the controller collapses it while a dialog waits, and main's idle editor must read as it does
+// without Sidebar.
 // Overrides: HERDR_WEB_UI_DIR, COLLIE_DIR (a checkout with frames.toml support), COLLIE_FRAMES.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -25,6 +28,8 @@ const themeModule = await import(new URL('./modes/interactive/theme/theme.js', s
 const jiti = createJiti(import.meta.url);
 const { QuestionDialog } = await jiti.import('../packages/pi-ask-user-question/src/dialog.ts');
 const { askApproval } = await jiti.import('../packages/pi-tool-gate/src/prompt.ts');
+const { CustomEditor } = await import(new URL('./modes/interactive/components/custom-editor.js', sdkUrl));
+const { sidebarScreen } = await import('./remote-clients/sidebar.mjs');
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const herdrDir = process.env.HERDR_WEB_UI_DIR ?? latest(path.join(homedir(), '.local/share/herdr-web-ui'), /^remote-v\d+$/);
@@ -109,6 +114,37 @@ for (const width of [46, 120]) {
   }
 }
 
+// Sidebar open: below main under 161 columns, beside it from there (its default share and minimum).
+const HEIGHT = 40;
+for (const width of [46, 120, 180]) {
+  tui.terminal.columns = width;
+  for (const dialog of DIALOGS) {
+    const lines = await dialog.lines(width);
+    for (const [under, rows] of Object.entries(UNDERS)) {
+      const { lines: screen } = sidebarScreen({ width, height: HEIGHT, dock: () => lines, footer: rows, collapsed: true });
+      screens.push({ name: dialog.name, width, under: `${under}, Sidebar open`, ansi: screen.join('\n') });
+    }
+  }
+}
+
+// Main's idle editor under pi-status-footer's indented footer, without Sidebar and with it (either
+// half focused): each client must read the last two as it reads the first.
+const editor = new CustomEditor({ ...tui, terminal: { rows: HEIGHT, columns: 180 } }, themeModule.getEditorTheme(), kb, { paddingX: 0 });
+editor.setText('next step');
+const idleFooter = (width) => [theme.fg('dim', ' pi-plugins · main · opus'.slice(0, width)), theme.fg('dim', ' Context 12% used · idle'.slice(0, width))];
+const IDLE = [['without Sidebar', { open: false }], ['Sidebar open, main focused', { focused: false }], ['Sidebar open, Sidebar focused', { focused: true }]];
+// Known gap: Collie finds the editor by its frame and knows nothing of Sidebar's split. Below main
+// it takes Sidebar's empty composer for the editor; beside main, no rule is a whole row, so it finds
+// none. A known screen that starts reading right fails, so this list cannot go stale.
+const KNOWN = { collie: (screen) => screen.name === 'idle editor' && screen.under.startsWith('Sidebar open') };
+for (const width of [46, 120, 180]) {
+  const baseline = screens.length;
+  for (const [under, options] of IDLE) {
+    const { lines: screen } = sidebarScreen({ width, height: HEIGHT, dock: (w) => editor.render(w), footer: idleFooter, ...options });
+    screens.push({ name: 'idle editor', width, under, idle: baseline, ansi: screen.join('\n') });
+  }
+}
+
 const dir = mkdtempSync(path.join(tmpdir(), 'pi-remote-clients-'));
 const screensFile = path.join(dir, 'screens.json');
 writeFileSync(screensFile, JSON.stringify(screens.map((s) => ({ ...s, text: stripVTControlCharacters(s.ansi) }))));
@@ -126,10 +162,26 @@ if (existsSync(path.join(collieDir, 'web/src/lib/frame-declarations.ts'))) resul
 else console.log('SKIP Collie: no checkout with frames.toml support (COLLIE_DIR)');
 
 let failures = 0;
+const known = [];
 screens.forEach((screen, i) => {
-  const dialog = DIALOGS.find((d) => d.name === screen.name);
   const label = `${screen.name} @${screen.width} over ${screen.under}`;
   const problems = [];
+  if (screen.idle !== undefined) {
+    // An idle screen reads as the same screen without Sidebar does.
+    const h = results.herdr, c = results.collie;
+    if (h && JSON.stringify(h[i]) !== JSON.stringify(h[screen.idle])) problems.push(`herdr-web-ui: ${JSON.stringify(h[i])}, without Sidebar ${JSON.stringify(h[screen.idle])}`);
+    const kinds = (r) => JSON.stringify({ blocks: r.blocks.filter((b) => b.kind !== 'raw'), composer: r.composer, draft: r.draft });
+    if (c) {
+      const same = kinds(c[i]) === kinds(c[screen.idle]);
+      if (KNOWN.collie(screen)) {
+        if (same) problems.push('Collie: reads as without Sidebar now; drop it from KNOWN');
+        else known.push(`${label}\n  Collie: ${kinds(c[i])}, without Sidebar ${kinds(c[screen.idle])}`);
+      } else if (!same) problems.push(`Collie: ${kinds(c[i])}, without Sidebar ${kinds(c[screen.idle])}`);
+    }
+    report(label, problems);
+    return;
+  }
+  const dialog = DIALOGS.find((d) => d.name === screen.name);
   const h = results.herdr?.[i];
   if (h !== undefined) {
     if (h === null) problems.push('herdr-web-ui: no card');
@@ -145,10 +197,15 @@ screens.forEach((screen, i) => {
     if (card?.kind !== wanted) problems.push(`Collie: ${card?.kind ?? 'no card'}, wanted ${wanted}`);
     else if (wanted === dialog.collie.kind && dialog.collie.options !== undefined && card.options.length !== dialog.collie.options) problems.push(`Collie: options ${JSON.stringify(card.options)}`);
   }
+  report(label, problems);
+});
+
+function report(label, problems) {
   if (problems.length) {
     failures++;
     console.log(`FAIL ${label}\n  ${problems.join('\n  ')}`);
   } else console.log(`ok   ${label}`);
-});
+}
+for (const line of known) console.log(`KNOWN ${line}`);
 assert.equal(failures, 0, `${failures} screen(s) not read as their client should read them`);
 console.log('PASS remote clients read every dialog');
