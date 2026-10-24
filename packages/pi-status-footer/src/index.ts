@@ -18,9 +18,11 @@ import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works
 import { builtinMcpOwnsCommand, connectedMcpServers, countMcp, McpConfigReader, MCP_STATUS_KEY, type McpCount } from "./mcp.ts";
 import { SHOW_TIMER_AFTER_MS, WORKING_REFRESH_MS, WORKING_STATS_CHANNEL, workingMessage, WorkingStats, workingStatsService, type WorkingStatsRequest } from "./working.ts";
 import { WORKING_MESSAGE_EVENT, type WorkingMessageClaim } from "./working-message.ts";
+import { SESSION_CHROME_CHANNEL, type SessionChromeOverrides, type SessionChromeRequest } from "./session-chrome.ts";
 
 export * from "./mcp.ts";
 export * from "./working.ts";
+export * from "./session-chrome.ts";
 
 const STATE_KEY = "personal-status-footer";
 const QUOTA_STALE_MS = 10 * 60_000;
@@ -1022,6 +1024,8 @@ export default function statusFooter(pi: ExtensionAPI): void {
   let mcpTimer: ReturnType<typeof setInterval> | undefined, mcp: McpCount | undefined, mcpBusy = false;
   let requestRender: (() => void) | undefined;
   let releaseFooter: (() => void) | undefined;
+  /** The footer's data from pi (branch, extension statuses), for the session-chrome service. */
+  let footerSource: { getGitBranch(): string | null; getExtensionStatuses(): ReadonlyMap<string, string> } | undefined;
   let git: GitInfo = { ...emptyGit(), unavailable: true }, gitBusy = false, gitChecked = 0;
   let quotaBusy = false, quotaChecked = 0;
   let borderGauge = false;
@@ -1276,6 +1280,30 @@ export default function statusFooter(pi: ExtensionAPI): void {
     request.service = workingStatsService;
     request.provider = "pi-status-footer";
   });
+  // Other plugins' views of another session (pi-subagents') draw this footer and gauge for it.
+  pi.events?.on(SESSION_CHROME_CHANNEL, (data) => {
+    const request = data as SessionChromeRequest | undefined;
+    if (!active || !enabled || !ctx || !request || request.version !== 1 || request.service) return;
+    const epoch = generation;
+    const current = () => active && enabled && epoch === generation && ctx !== undefined;
+    request.service = {
+      footer(session, width, theme) {
+        if (!current()) return [];
+        try {
+          return renderFooter(snapshot(footerSource?.getGitBranch() ?? null, footerSource?.getExtensionStatuses() ?? new Map(), session), width, liftAccent(theme));
+        } catch {
+          return [];
+        }
+      },
+      gauge(editor, used, theme) {
+        return drawGaugeOnBorders(editor, () => (current() ? used() : null), () => {
+          const paint = current() ? theme() : undefined;
+          return paint ? liftAccent(paint) : undefined;
+        });
+      },
+    };
+    request.provider = "pi-status-footer";
+  });
   // herdr's pi integration counts these pairs; so do we, to shrink the footer while a dialog waits.
   pi.events?.on(HERDR_BLOCKED_EVENT, (data) => {
     const hold = data as { active?: unknown } | undefined;
@@ -1325,10 +1353,11 @@ export default function statusFooter(pi: ExtensionAPI): void {
       if (next?.connected !== mcp?.connected || next?.total !== mcp?.total) { mcp = next; requestRender?.(); }
     } catch { /* The footer must not fail over a tool list or config read. */ } finally { if (epoch === generation) mcpBusy = false; }
   };
-  const snapshot = (branch: string | null, statuses: ReadonlyMap<string, string>): Snapshot => {
+  /** Main's snapshot, or (with `session`) another session's in main's surroundings (session-chrome.ts). */
+  const snapshot = (branch: string | null, statuses: ReadonlyMap<string, string>, session?: SessionChromeOverrides): Snapshot => {
     if (!ctx) throw new Error("Footer rendered outside its session lifecycle");
     const current = ctx;
-    const provider = current.model?.provider ?? "no provider";
+    const provider = session ? session.provider : current.model?.provider ?? "no provider";
     const quotas: Quota[] = [];
     let unavailableQuota: string | undefined;
     if (provider === "anthropic" || showAll) {
@@ -1339,7 +1368,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       else unavailableQuota = unavailableQuota ? `${unavailableQuota} / Codex acct` : "Codex acct";
     } else if (showAll && codex) quotas.push(codex);
     const absorbed = absorbStatuses(statuses, { claudeRow: quotas.some((q) => q.source === "Claude acct") });
-    return {
+    const main: Snapshot = {
       cwd: current.cwd, provider, model: current.model?.id ?? "no model",
       thinking: current.model?.reasoning ? pi.getThinkingLevel() : undefined,
       oauth: current.model ? current.modelRegistry.isUsingOAuth(current.model) : false,
@@ -1354,6 +1383,18 @@ export default function statusFooter(pi: ExtensionAPI): void {
       mcp: showMcp && !absorbed.mcp ? mcp : undefined,
       skills: pi.getCommands().filter((command) => command.source === "skill").length,
       now: Date.now(),
+    };
+    if (!session) return main;
+    const model = current.modelRegistry.find?.(session.provider, session.model);
+    return {
+      ...main,
+      cwd: session.cwd, provider: session.provider, model: session.model, thinking: session.thinking,
+      oauth: model ? current.modelRegistry.isUsingOAuth(model) : false,
+      sessionName: session.sessionName, phase: session.phase, queued: session.queued === true,
+      context: session.context, totals: session.totals, cacheHit: undefined,
+      // Main's git status describes main's directory only.
+      git: path.resolve(session.cwd) === path.resolve(current.cwd) ? main.git : { ...emptyGit(), unavailable: true },
+      borderGauge: session.borderGauge === true,
     };
   };
   const attach = () => {
@@ -1371,10 +1412,12 @@ export default function statusFooter(pi: ExtensionAPI): void {
         disposed = true;
         if (requestRender === render) requestRender = undefined;
         if (releaseFooter === dispose) releaseFooter = undefined;
+        if (footerSource === footerData) footerSource = undefined;
         unsubscribe();
       };
       requestRender = render;
       releaseFooter = dispose;
+      footerSource = footerData;
       return {
         render(width: number) { return current() ? renderFooter(snapshot(footerData.getGitBranch(), footerData.getExtensionStatuses()), width, liftAccent(theme)) : []; },
         invalidate() {}, // Colors are evaluated on every render, never cached.

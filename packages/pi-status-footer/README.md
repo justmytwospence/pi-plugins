@@ -7,7 +7,11 @@ gauge. It uses pi's current theme, without background color blocks or animation.
 While the agent runs, it adds streamed-output and elapsed-time statistics to
 pi's own working indicator message, keeping pi's spinner. Other plugins' working
 rows (pi-sidebar's) get the same statistics over `pi.events` (channel
-`pi-plugins.working-stats.v1`, `src/working.ts`) while they are on. Every footer row
+`pi-plugins.working-stats.v1`, `src/working.ts`) while they are on. Views of another
+session (pi-subagents' subagent sessions) get this footer and the editor gauge filled
+with that session's directory, model, thinking level, context and cost, keeping main's
+accounts and statuses (channel `pi-plugins.session-chrome.v1`, `src/session-chrome.ts`).
+Every footer row
 leads with a dim Nerd Font icon: folder (project), git branch, robot
 (model) with a brain before the reasoning level, tachometer (context), book (marimo), cogs (background), microchip (pressure), archive
 (stash), and hourglass (limits). On the context row a plug marks MCP and a magic

@@ -1715,3 +1715,31 @@ test("working-stats service: offered while main shows working stats, counting li
   await h.handlers.get("session_shutdown")({}, h.ctx);
   assert.equal(ask().service, undefined);
 });
+
+test("session-chrome service: another session's footer and gauge in main's surroundings", async () => {
+  const h = host();
+  const ask = () => { const request = { version: 1 }; h.pi.events.emit("pi-plugins.session-chrome.v1", request); return request; };
+  assert.equal(ask().service, undefined);
+  await h.handlers.get("session_start")({}, h.ctx);
+  const request = ask();
+  assert.equal(request.provider, "pi-status-footer");
+  h.ctx.modelRegistry.find = (provider, id) => ({ provider, id });
+  const session = {
+    cwd: h.ctx.cwd, provider: "anthropic", model: "claude-haiku-5", thinking: "low",
+    context: { tokens: 50_000, contextWindow: 200_000, percent: 25 },
+    totals: { input: 1000, output: 200, cacheRead: 0, cacheWrite: 0, cost: 0.12, compactions: 0, started: Date.now() - 60_000 },
+  };
+  const footer = request.service.footer(session, 160, theme).map(plain).join("\n");
+  assert.match(footer, /haiku-5/);
+  assert.doesNotMatch(footer, /gpt-6-astra/);
+  assert.match(footer, /25%/);
+  for (const width of [46, 120]) for (const row of request.service.footer(session, width, theme)) assert.ok(visibleWidth(row) <= width);
+  // The gauge goes on an editor's borders, and only while the footer is on.
+  const editor = { borderColor: (t) => t, renderTopBorder: (w) => "-".repeat(w), renderBottomBorder: (w) => "-".repeat(w) };
+  assert.equal(request.service.gauge(editor, () => 50, () => theme), true);
+  assert.equal(editor.renderTopBorder(10, 0), "\u2501".repeat(5) + "\u2500".repeat(5));
+  await h.handlers.get("session_shutdown")({}, h.ctx);
+  assert.equal(ask().service, undefined);
+  assert.deepEqual(request.service.footer(session, 160, theme), []);
+  assert.equal(editor.renderTopBorder(10, 0), "-".repeat(10));
+});
