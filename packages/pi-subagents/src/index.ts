@@ -26,7 +26,7 @@ import { REFERENCE_TYPE, type RunRef, referenceContext, runAutocomplete } from "
 import { type Run, displayTokens, transcriptPath } from "./run.ts";
 import { clip, recentTexts } from "./transcript.ts";
 import { FleetView, SUCCESS_HINT_MS } from "./ui/fleet.ts";
-import { type ViewerActions, openViewer } from "./ui/viewer.ts";
+import type { ViewerActions } from "./ui/viewer.ts";
 import { elapsedMs, formatCount, formatElapsed, shortModel } from "./ui/format.ts";
 import { RunsWidget, WIDGET_MODES, type WidgetMode } from "./ui/widget.ts";
 
@@ -238,7 +238,7 @@ export default function subagents(pi: ExtensionAPI) {
     open: (runId) => {
       const ui = boundUI;
       const run = runs.get(runId);
-      if (ui && run) void openViewer(ui, run, viewerActions(run, ui)).catch(() => undefined);
+      if (ui && run) void fleet.show(ui, run).catch(() => undefined);
     },
   });
   /** Steer and stop for the viewer; only a live child takes either. */
@@ -264,6 +264,24 @@ export default function subagents(pi: ExtensionAPI) {
     dismiss: (runId) => {
       dismissed.add(runId);
       refreshUI();
+    },
+    // A subagent's session view draws main's footer and editor for the child.
+    contextWindow: (model) => {
+      const slash = model.indexOf("/");
+      if (slash <= 0 || !sessionCtx) return undefined;
+      try {
+        return sessionCtx.modelRegistry.find(model.slice(0, slash), model.slice(slash + 1))?.contextWindow;
+      } catch {
+        return undefined;
+      }
+    },
+    settings: () => {
+      try {
+        const s = pi.getSettings() as { hideThinkingBlock?: unknown; editorPaddingX?: unknown };
+        return { hideThinkingBlock: s.hideThinkingBlock === true, editorPaddingX: Math.max(0, Math.min(3, Math.floor(Number(s.editorPaddingX) || 0))) };
+      } catch {
+        return {};
+      }
     },
     // Claude Code: a background subagent that succeeds leaves the panel at once, with this for 30 s.
     note: (now) => {
@@ -303,7 +321,7 @@ export default function subagents(pi: ExtensionAPI) {
     open: (key, ui) => {
       const run = runs.get(key);
       const u = ui as ExtensionContext["ui"];
-      return run ? openViewer(u, run, viewerActions(run, u)) : Promise.resolve();
+      return run ? fleet.show(u, run) : Promise.resolve();
     },
     stop: (key) => runs.get(key)?.child?.stop(),
     dismiss: (key) => {
@@ -1020,7 +1038,7 @@ export default function subagents(pi: ExtensionAPI) {
           return;
         }
         const run = only.run();
-        await openViewer(ctx.ui, run, viewerActions(run, ctx.ui));
+        await fleet.show(ctx.ui, run);
         return;
       }
       for (;;) {
@@ -1030,7 +1048,7 @@ export default function subagents(pi: ExtensionAPI) {
         const entry = choice === undefined ? undefined : list[labels.indexOf(choice)];
         if (!entry) return;
         const run = entry.run();
-        await openViewer(ctx.ui, run, viewerActions(run, ctx.ui));
+        await fleet.show(ctx.ui, run);
         list = allRuns(ctx);
       }
     },

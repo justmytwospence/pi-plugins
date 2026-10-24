@@ -10,7 +10,7 @@ const identical = [
   ['pi-bg','pi-status-footer'].map(p => `packages/${p}/src/working-message.ts`),
   ['pi-bg','pi-marimo'].map(p => `packages/${p}/src/pill.ts`),
   ['pi-bg','pi-marimo'].map(p => `packages/${p}/src/frame.ts`),
-  ['packages/pi-plan-mode/src/app/pi-chat.ts','packages/pi-sidebar/src/pi-chat.ts'],
+  ['packages/pi-plan-mode/src/app/pi-chat.ts','packages/pi-sidebar/src/pi-chat.ts','packages/pi-subagents/src/ui/pi-chat.ts'],
   ['pi-auto-effort','pi-copy','pi-next-prompt','pi-subagents','pi-tool-gate'].map(p => `packages/${p}/src/jev.ts`),
   ['pi-auto-effort','pi-copy','pi-next-prompt','pi-subagents'].map(p => `packages/${p}/src/transcript.ts`),
   ['pi-auto-effort','pi-next-prompt','pi-tool-gate'].map(p => `packages/${p}/src/config.ts`),

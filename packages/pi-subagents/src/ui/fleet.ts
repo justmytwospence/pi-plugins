@@ -17,7 +17,7 @@ import type { Run } from "../run.ts";
 import { runLabel } from "../label.ts";
 import { displayTokens } from "../run.ts";
 import { type Theme, elapsedMs, formatCost, formatCount, formatElapsed, rightAlign, statusIcon, taskRows } from "./format.ts";
-import { type ViewerActions, type ViewerUI, openViewer } from "./viewer.ts";
+import { type SessionSource, type ViewerActions, type ViewerUI, openViewer } from "./viewer.ts";
 
 const FLEET_KEY = "subagents-fleet";
 /** Subagent rows shown at once; the rest scroll. */
@@ -67,6 +67,8 @@ export interface FleetFrame {
   roster: readonly FleetEntry[];
   /** Index into the roster. */
   selected: number;
+  /** The session shown now (in a subagent's session view), marked even while the list is inactive. */
+  current?: number;
   active: boolean;
   /** The selected run is one `x` away from being stopped. */
   stopArmed?: boolean;
@@ -81,14 +83,14 @@ export interface FleetFrame {
   theme: Theme & { inverse?(text: string): string };
 }
 
-export function renderFleet({ roster, selected, active, stopArmed, canBackground, normalKeys = true, note, now, width, theme }: FleetFrame): string[] {
+export function renderFleet({ roster, selected, current, active, stopArmed, canBackground, normalKeys = true, note, now, width, theme }: FleetFrame): string[] {
   if (!roster.length && !note) return [];
   const lines: string[] = [];
   const runs = roster.flatMap((e) => (e.kind === "run" ? [e.run] : []));
   const pills = roster.flatMap((e, i) => (e.kind === "pill" ? [{ e, i }] : []));
   const sel = Math.min(selected, Math.max(0, roster.length - 1));
   const chosen = active ? roster[sel] : undefined;
-  const bullet = (i: number) => (active && i === sel ? theme.fg("accent", "●") : theme.fg("dim", "○"));
+  const bullet = (i: number) => (active && i === sel ? theme.fg("accent", "●") : i === current ? theme.fg("text", "◉") : theme.fg("dim", "○"));
   if (runs.length) {
     const stoppable = normalKeys && chosen?.kind === "run" && chosen.run.state.status === "running";
     const dismissable = normalKeys && chosen?.kind === "run" && chosen.run.state.status !== "running";
@@ -106,13 +108,13 @@ export function renderFleet({ roster, selected, active, stopArmed, canBackground
     lines.push(truncateToWidth(` ${bullet(0)} ${active && sel === 0 ? theme.fg("text", "main") : "main"}`, width));
     // Runs are roster rows 1..runs.length; scroll so the selected one shows.
     const visible = Math.min(MAX_ROWS, runs.length);
-    const selRun = chosen?.kind === "run" ? sel - 1 : 0;
+    const selRun = chosen?.kind === "run" ? sel - 1 : current !== undefined && roster[current]?.kind === "run" ? current - 1 : 0;
     const start = selRun < visible ? 0 : selRun - visible + 1;
     if (start > 0) lines.push(rightAlign("", theme.fg("dim", `↑ ${start} more`), width));
     for (let i = start; i < start + visible; i++) {
       const run = runs[i];
       if (!run) continue;
-      const on = active && i + 1 === sel;
+      const on = (active && i + 1 === sel) || (!active && i + 1 === current);
       const prefix = ` ${bullet(i + 1)} `;
       const identity = `${on ? theme.bold(theme.fg("text", runLabel(run))) : theme.fg("muted", runLabel(run))}  ${theme.fg("dim", run.agent)}`;
       const cost = formatCost(run.state.usage.cost.total);
@@ -147,7 +149,7 @@ export interface FleetUI extends ViewerUI {
   readonly theme?: Theme;
 }
 
-export interface FleetSource {
+export interface FleetSource extends Omit<SessionSource, "onSwitch"> {
   runs(): readonly Run[];
   enabled(): boolean;
   actions(run: Run): ViewerActions;
@@ -408,10 +410,34 @@ export class FleetView {
         .then(cleared, cleared);
       return;
     }
-    const run = entry.run;
-    openViewer(this.ui, run, this.source.actions(run), (close) => {
+    void this.show(this.ui, entry.run);
+  }
+
+  /**
+   * Show `run`'s session; Tab and the list there switch between main and the runs listed here.
+   * Resolves when you are back in main.
+   */
+  show(ui: ViewerUI, run: Run): Promise<void> {
+    this.viewing = `run:${run.id}`;
+    const src = this.source;
+    const source: SessionSource = {
+      runs: () => src.runs(),
+      actions: (r) => src.actions(r),
+      enabled: () => src.enabled(),
+      sections: () => src.sections?.() ?? [],
+      dismissedAt: () => src.dismissedAt?.() ?? Number.POSITIVE_INFINITY,
+      dismissed: () => src.dismissed?.() ?? new Set(),
+      dismiss: (id) => src.dismiss?.(id),
+      contextWindow: (model) => src.contextWindow?.(model),
+      settings: () => src.settings?.() ?? {},
+      onSwitch: (r) => {
+        this.viewing = `run:${r.id}`;
+      },
+    };
+    const cleared = () => this.viewerClosed(this.viewing ?? `run:${run.id}`);
+    return openViewer(ui, run, src.actions(run), (close) => {
       this.closeViewer = close;
-    }).then(cleared, cleared);
+    }, source).then(cleared, cleared);
   }
 
   private viewerClosed(key: string) {

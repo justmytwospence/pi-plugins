@@ -1,29 +1,25 @@
-// A live, auto-scrolling view of one subagent's conversation, full screen under a banner. Enter opens a composer
-// that steers the child; `x` twice stops it; `b` moves a foreground run to the background; `m` cycles what renders as Markdown; Esc (or q)
-// closes. It stays open when the run ends. ↑/↓ (j/k), PgUp/PgDn, Ctrl+U/Ctrl+D (half a page) and
-// Home/End scroll. The composer is the suite's editor (pi-vim's, when loaded: Enter or :w steers,
-// :q or Escape in Normal mode cancels, Ctrl+U/D scroll the conversation) or pi's one-line input.
+// A subagent's session, shown the way Pi shows main's: Pi's own message and tool components
+// (PiChat), Pi's working row, queued steers as Pi shows queued messages, your editor (pi-vim's
+// when loaded) with pi-status-footer's context gauge, the subagent list main shows under its prompt,
+// and your footer, all for the child. Pi hosts one live session, and subagents are separate
+// processes, so this is what Claude Code and Codex do too: main's chrome redrawn for another
+// thread. Tab and Shift+Tab switch to the next or previous session (main closes the view), Esc
+// returns to main, and ↓ at the editor's bottom enters the list. Typing steers a running child;
+// Ctrl+C twice on an empty editor stops it.
 // Adapted from tintinweb/pi-subagents (MIT): https://github.com/tintinweb/pi-subagents
-import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
+import { keyText } from "@earendil-works/pi-coding-agent";
+import { compositeTuiLine, getKeybindings, Editor, Loader, type Component, type EditorTheme, type Focusable, type TUI, type TuiMouseEvent, type TuiMouseEventResult, isKeyRelease, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { leavesPromptDown, type ActivitySection } from "../activity.ts";
+import { contextTokens, type Conversation } from "../conversation.ts";
+import { type EditorModeContext, type EmbeddedEditor, type EditorFactoryOptions, type SuiteEditor, EDITOR_MODE, EDITOR_SURFACE, INPUT_CONTEXT, readEditorMode, requestEditorFactory } from "../editor-contract.ts";
 import { runLabel } from "../label.ts";
-import { type Component, Input, Markdown, type MarkdownTheme, type TUI, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { type Message, describeActivity, describeTool, messageText } from "../conversation.ts";
-import { type EmbeddedEditor, type EditorFactoryOptions, EDITOR_MODE, EDITOR_SURFACE, INPUT_CONTEXT, readEditorMode, requestEditorFactory } from "../editor-contract.ts";
 import type { Run } from "../run.ts";
-import { type Theme, dimAll, jev, modelAndEffort, runStats, statusIcon } from "./format.ts";
+import { type FleetEntry, fleetRoster, renderFleet } from "./fleet.ts";
+import { type Theme, formatCost, formatCount, statusIcon } from "./format.ts";
+import { PiChat } from "./pi-chat.ts";
 
-/** Share of the terminal height the view takes: all of it, like Claude Code's and Codex's subagent views. */
+/** Share of the terminal height the view takes: all of it, as main's screen does. */
 export const VIEWER_HEIGHT_PCT = 100;
-/** Border, header, invocation line, two separators, footer, border. */
-const CHROME_LINES = 7;
-const MIN_VIEWPORT = 3;
-/** Lines of a running tool's partial output shown live. */
-const PARTIAL_LINES = 6;
-
-/** How much renders as Markdown: assistant text (default), tool results too, or nothing. */
-export type MarkdownMode = "assistant" | "all" | "off";
-const MARKDOWN_MODES: readonly MarkdownMode[] = ["assistant", "all", "off"];
-const MARKDOWN_LABELS: Record<MarkdownMode, string> = { assistant: "md", all: "md+", off: "raw" };
 
 export interface ViewerActions {
   /** Send a steering message; false when the run can no longer be steered. */
@@ -32,8 +28,26 @@ export interface ViewerActions {
   /** Move a foreground run's tool call to the background, so the main agent can go on. */
   background?: () => void;
   canBackground?: () => boolean;
-  /** pi's event bus, to ask for the suite's editor factory for the composer (editor-contract.ts). */
+  /** pi's event bus: the suite's editor, working stats and footer are requested over it. */
   events?: { emit(channel: string, data: unknown): void };
+}
+
+/** What the view switches between and draws around a session: FleetView's source, plus Pi's settings. */
+export interface SessionSource {
+  runs(): readonly Run[];
+  actions(run: Run): ViewerActions;
+  /** Whether the list under the editor shows (FleetView's setting). */
+  enabled?(): boolean;
+  sections?(): readonly ActivitySection[];
+  dismissedAt?(): number;
+  dismissed?(): ReadonlySet<string>;
+  dismiss?(runId: string): void | Promise<void>;
+  /** The context window of `provider/model`, for the footer's context share. */
+  contextWindow?(model: string): number | undefined;
+  /** Main's `hideThinkingBlock` and `editorPaddingX`. */
+  settings?(): { hideThinkingBlock?: boolean; editorPaddingX?: number };
+  /** The view moved to another run. */
+  onSwitch?(run: Run): void;
 }
 
 /** Pi's KeybindingsManager, structurally. */
@@ -41,175 +55,296 @@ export interface Keybindings {
   matches(data: string, id: string): boolean;
 }
 
-type TuiLike = Pick<TUI, "requestRender"> & { terminal: { rows: number } };
+type TuiLike = Pick<TUI, "requestRender"> & { terminal: { rows: number; columns?: number } };
 
-function markdownTheme(theme: Theme): MarkdownTheme {
-  // Pi's theme highlights code; it throws only when no theme was initialized (tests, embedding).
-  try {
-    const pi = getMarkdownTheme();
-    pi.heading("probe");
-    return pi;
-  } catch {
-    const sgr = (on: number, off: number) => (text: string) => `\x1b[${on}m${text}\x1b[${off}m`;
-    return {
-      heading: (t) => theme.bold(theme.fg("accent", t)),
-      link: (t) => theme.fg("accent", t),
-      linkUrl: (t) => theme.fg("muted", t),
-      code: (t) => theme.fg("muted", t),
-      codeBlock: (t) => theme.fg("muted", t),
-      codeBlockBorder: (t) => theme.fg("dim", t),
-      quote: (t) => theme.fg("muted", t),
-      quoteBorder: (t) => theme.fg("dim", t),
-      hr: (t) => theme.fg("dim", t),
-      listBullet: (t) => theme.fg("accent", t),
-      bold: (t) => theme.bold(t),
-      italic: sgr(3, 23),
-      underline: sgr(4, 24),
-      strikethrough: sgr(9, 29),
-    };
-  }
+const WORKING_STATS_CHANNEL = "pi-plugins.working-stats.v1";
+const SESSION_CHROME_CHANNEL = "pi-plugins.session-chrome.v1";
+
+interface WorkingCounter {
+  reset(): void;
+  apply(event: unknown): void;
+  message(elapsedMs: number, base?: string): string | undefined;
+}
+interface WorkingStatsService {
+  create(): WorkingCounter;
+  refreshMs: number;
+}
+/** pi-status-footer's session-chrome service (its src/session-chrome.ts, copied structurally). */
+interface SessionChromeOverrides {
+  cwd: string;
+  provider: string;
+  model: string;
+  thinking?: string;
+  context: { tokens: number | null; contextWindow: number; percent: number | null };
+  totals: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; compactions: number; started: number };
+  phase?: string;
+  queued?: boolean;
+  sessionName?: string;
+  borderGauge?: boolean;
+}
+interface SessionChromeService {
+  footer(session: SessionChromeOverrides, width: number, theme: Theme): string[];
+  gauge(editor: unknown, used: () => number | null, theme: () => Theme | undefined): boolean;
 }
 
-export class ConversationViewer implements Component {
-  /** Shared by every viewer in this Pi, so `m` sticks for the session. */
-  static markdownMode: MarkdownMode = "assistant";
-  private scroll = 0;
-  private follow = true;
-  private stopArmed = false;
-  private composer: EmbeddedEditor | undefined;
-  private hasFocus = false;
-
-  get focused(): boolean { return this.hasFocus; }
-  set focused(value: boolean) {
-    this.hasFocus = value;
-    if (this.composer) this.composer.focused = value;
+function requestService<T>(events: ViewerActions["events"], channel: string, valid: (service: T) => boolean): T | undefined {
+  if (!events) return undefined;
+  const request: { version: 1; service?: T } = { version: 1 };
+  try {
+    events.emit(channel, request);
+  } catch {
+    return undefined;
   }
+  return request.service && valid(request.service) ? request.service : undefined;
+}
 
-  readonly [EDITOR_SURFACE] = "embedded";
-  [EDITOR_MODE]() { return readEditorMode(this.composer); }
-  /** Lines the composer takes under the conversation (one for pi's input; a suite editor wraps). */
-  private composerLines: string[] = [];
-  private width = 80;
+/** Drafts per run, so switching away and back keeps what you were typing. */
+const drafts = new Map<string, string>();
+
+type Composer = (EmbeddedEditor & { getText?(): string; setText?(text: string): void; isShowingAutocomplete?(): boolean }) | SuiteEditor;
+
+export class SessionView implements Component, Focusable {
+  private run: Run;
+  private chat!: PiChat;
+  private unsubscribe: (() => void) | undefined;
+  private composer: Composer | undefined;
+  private suite = false;
+  private gauge = false;
+  private chrome: SessionChromeService | undefined;
+  private stats: WorkingStatsService | undefined;
+  private counter: WorkingCounter | undefined;
+  private readonly loader: Loader;
+  private hasFocus = false;
   private closed = false;
-  private readonly unsubscribe: () => void;
+  private stopArmed = false;
+  /** The list under the editor has the keyboard. */
+  private listActive = false;
+  private listSelected = 0;
+  private listStopArmed = false;
+  /** Transcript scrolling: the first shown line, and whether it follows new output. */
+  private scrollTop = 0;
+  private follow = true;
+  private lastViewport = 1;
+  private lastContent = 0;
   private readonly timer: ReturnType<typeof setInterval>;
-  private readonly md: MarkdownTheme;
-  private readonly markdown = new WeakMap<Message, { component: Markdown; text: string; failed?: boolean }>();
-  private readonly lineCache = new WeakMap<Message, { width: number; mode: MarkdownMode; lines: string[] }>();
 
   constructor(
     private readonly tui: TuiLike,
-    private readonly run: Run,
+    run: Run,
     private readonly theme: Theme,
     private readonly done: () => void,
-    private readonly actions: ViewerActions = {},
+    private readonly initialActions: ViewerActions = {},
     private readonly keybindings?: Keybindings,
+    private readonly source?: SessionSource,
+    private readonly openSection?: (section: ActivitySection) => void,
   ) {
-    this.md = markdownTheme(theme);
-    this.unsubscribe = run.conversation.subscribe(() => {
-      if (!this.closed) this.tui.requestRender();
-    });
-    // Elapsed time ticks even when the child is quiet.
+    this.run = run;
+    this.loader = new Loader(tui as TUI, (text) => theme.fg("accent", text), (text) => theme.fg("muted", text), "Working");
+    this.loader.stop();
+    this.attach(run);
+    // Elapsed time and the list's clocks tick even when the child is quiet.
     this.timer = setInterval(() => {
-      if (!this.closed && this.running()) this.tui.requestRender();
+      if (!this.closed) {
+        this.refreshWorking();
+        this.tui.requestRender();
+      }
     }, 1_000);
     this.timer.unref?.();
   }
 
-  private running() {
-    return this.run.state.status === "running";
+  /** The run shown now. */
+  get current(): Run {
+    return this.run;
   }
 
-  private canSteer() {
-    return Boolean(this.actions.steer) && this.running() && Boolean(this.run.child);
+  get focused(): boolean {
+    return this.hasFocus;
   }
 
-  private canBackground() {
-    return this.running() && Boolean(this.actions.canBackground?.());
+  set focused(value: boolean) {
+    this.hasFocus = value;
+    if (this.composer) this.composer.focused = value && !this.listActive;
   }
 
-  private canStop() {
-    return Boolean(this.actions.stop) && this.running() && Boolean(this.run.child);
+  readonly [EDITOR_SURFACE] = "embedded";
+
+  [EDITOR_MODE](): EditorModeContext | undefined {
+    return this.composer && !this.listActive ? readEditorMode(this.composer) : undefined;
   }
 
-  private key(data: string, id: string, fallback: string) {
-    return this.keybindings ? this.keybindings.matches(data, id) : matchesKey(data, fallback as never);
-  }
-
-  /** Read-only scrolling content (its composer is an editor of its own): global listeners leave its keys alone. */
-  [INPUT_CONTEXT](): "viewer" | "editor" {
+  [INPUT_CONTEXT](): "editor" | "list" | "viewer" {
+    if (this.listActive) return "list";
     return this.composer ? "editor" : "viewer";
   }
 
-  /** Scroll by `lines` (negative up), as Ctrl+U/Ctrl+D do by half a page; follows again at the end. */
-  scrollBy(lines: number): void {
-    const total = this.contentLines(this.width).length;
-    const max = Math.max(0, total - this.viewport());
-    this.scroll = Math.max(0, Math.min(max, Math.min(this.scroll, max) + lines));
-    this.follow = this.scroll >= max;
-    this.tui.requestRender();
+  private actions(run = this.run): ViewerActions {
+    if (this.source) {
+      try {
+        return this.source.actions(run);
+      } catch {
+        return {};
+      }
+    }
+    return run === this.run ? this.initialActions : {};
   }
 
-  handleInput(data: string): void {
-    if (this.composer) {
-      // The composer owns every key while open (the suite's editor hands Ctrl+U/D back through scrollViewport).
-      this.composer.handleInput(data);
+  private get events() {
+    return this.actions().events ?? this.initialActions.events;
+  }
+
+  private running(run = this.run) {
+    return run.state.status === "running";
+  }
+
+  private canSteer() {
+    return Boolean(this.actions().steer) && this.running() && Boolean(this.run.child);
+  }
+
+  private canStop() {
+    return Boolean(this.actions().stop) && this.running() && Boolean(this.run.child);
+  }
+
+  private key(data: string, id: string, ...fallback: string[]) {
+    const keys = this.keybindings ?? safeKeybindings();
+    if (keys) {
+      try {
+        if (keys.matches(data, id)) return true;
+      } catch {
+        // An unknown id in an older Pi.
+      }
+    }
+    return fallback.some((k) => matchesKey(data, k as never));
+  }
+
+  /** Show `run`: its conversation, working row, editor and footer. */
+  private attach(run: Run) {
+    this.run = run;
+    this.follow = true;
+    this.scrollTop = 0;
+    this.stopArmed = false;
+    const settings = safe(() => this.source?.settings?.()) ?? {};
+    this.chat = new PiChat(() => this.theme as never, { cwd: run.cwd || process.cwd(), userMessagesFromEvents: true, requestRender: () => this.tui.requestRender() });
+    if (settings.hideThinkingBlock) this.chat.setThinkingHidden(true);
+    // A message Pi's components cannot draw must not keep the session from opening.
+    safe(() => seedChat(this.chat, run.conversation));
+    this.stats = requestService<WorkingStatsService>(this.events, WORKING_STATS_CHANNEL, (s) => typeof s.create === "function");
+    this.counter = this.stats?.create();
+    this.chrome = requestService<SessionChromeService>(this.events, SESSION_CHROME_CHANNEL, (s) => typeof s.footer === "function");
+    this.unsubscribe = run.conversation.subscribeEvents((event) => {
+      if (this.closed) return;
+      this.chat.apply(event);
+      if (event.type === "message_update" && event.assistantMessageEvent) this.counter?.apply(event.assistantMessageEvent);
       this.tui.requestRender();
+    });
+    if (this.running(run)) {
+      this.loader.start();
+      this.refreshWorking();
+    }
+    this.openComposer(settings.editorPaddingX ?? 0);
+  }
+
+  private detach() {
+    this.unsubscribe?.();
+    this.unsubscribe = undefined;
+    this.loader.stop();
+    this.closeComposer();
+  }
+
+  private refreshWorking() {
+    if (!this.running()) {
+      this.loader.stop();
       return;
     }
-    if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || matchesKey(data, "q") || matchesKey(data, "h")) {
+    const elapsed = Date.now() - (this.run.state.startedAt || Date.now());
+    this.loader.setMessage(this.counter?.message(elapsed) ?? "Working");
+  }
+
+  /** Switch to `run`, or back to main (`undefined`). */
+  switchTo(run: Run | undefined) {
+    if (run === this.run) return;
+    if (!run) {
       this.close();
       return;
     }
-    if (matchesKey(data, "enter") && this.canSteer()) {
-      this.stopArmed = false;
-      this.openComposer();
-      return;
-    }
-    if (matchesKey(data, "b") && this.canBackground()) {
-      this.stopArmed = false;
-      this.actions.background?.();
-      this.tui.requestRender();
-      return;
-    }
-    if (matchesKey(data, "m")) {
-      // The escape hatch for output that Markdown would reshape (diffs, logs, # comments).
-      const mode = ConversationViewer.markdownMode;
-      ConversationViewer.markdownMode = MARKDOWN_MODES[(MARKDOWN_MODES.indexOf(mode) + 1) % MARKDOWN_MODES.length] ?? "assistant";
-      this.stopArmed = false;
-      this.tui.requestRender();
-      return;
-    }
-    if (matchesKey(data, "x")) {
-      if (this.canStop()) {
-        if (this.stopArmed) {
-          this.stopArmed = false;
-          try {
-            void Promise.resolve(this.actions.stop?.()).catch(() => undefined);
-          } catch {
-            // An input callback cannot let a failed stop escape.
-          }
-        } else this.stopArmed = true;
-        this.tui.requestRender();
-      }
-      return;
-    }
-    this.stopArmed = false;
-    const total = this.contentLines(this.width).length;
-    const page = this.viewport();
-    const max = Math.max(0, total - page);
-    const half = Math.max(1, Math.floor(page / 2));
-    if (this.key(data, "tui.select.up", "up") || matchesKey(data, "k")) this.scroll = Math.max(0, Math.min(this.scroll, max) - 1);
-    else if (this.key(data, "tui.select.down", "down") || matchesKey(data, "j")) this.scroll = Math.min(max, this.scroll + 1);
-    else if (matchesKey(data, "ctrl+u") || this.key(data, "tui.altScreen.halfPageUp", "ctrl+u")) this.scroll = Math.max(0, Math.min(this.scroll, max) - half);
-    else if (matchesKey(data, "ctrl+d") || this.key(data, "tui.altScreen.halfPageDown", "ctrl+d")) this.scroll = Math.min(max, this.scroll + half);
-    else if (this.key(data, "tui.select.pageUp", "pageUp") || matchesKey(data, "pageUp") || matchesKey(data, "shift+up")) this.scroll = Math.max(0, Math.min(this.scroll, max) - page);
-    else if (this.key(data, "tui.select.pageDown", "pageDown") || matchesKey(data, "pageDown") || matchesKey(data, "shift+down")) this.scroll = Math.min(max, this.scroll + page);
-    else if (matchesKey(data, "home")) this.scroll = 0;
-    else if (matchesKey(data, "end")) this.scroll = max;
-    else return;
-    this.follow = this.scroll >= max;
+    this.detach();
+    this.listActive = false;
+    this.attach(run);
+    this.focused = this.hasFocus;
+    safe(() => this.source?.onSwitch?.(run));
     this.tui.requestRender();
+  }
+
+  private openComposer(paddingX: number) {
+    if (!this.canSteer()) return;
+    const th = this.theme;
+    const editorTheme: EditorTheme = {
+      borderColor: (text) => th.fg("borderAccent", text),
+      selectList: {
+        selectedPrefix: (text) => th.fg("accent", text),
+        selectedText: (text) => th.fg("accent", text),
+        description: (text) => th.fg("muted", text),
+        scrollInfo: (text) => th.fg("dim", text),
+        noMatch: (text) => th.fg("dim", text),
+      },
+    };
+    const submit = (value: string) => {
+      const message = value.trim();
+      if (!message) return;
+      (this.composer as { addToHistory?(text: string): void } | undefined)?.addToHistory?.(message);
+      (this.composer as { setText?(text: string): void } | undefined)?.setText?.("");
+      drafts.delete(this.run.id);
+      this.actions().steer?.(message);
+      this.follow = true;
+      this.tui.requestRender();
+    };
+    const draft = drafts.get(this.run.id) ?? "";
+    const suite = requestEditorFactory(this.events);
+    let composer: Composer | undefined;
+    if (suite) {
+      try {
+        composer = suite.factory!({
+          surface: "embedded",
+          tui: this.tui as EditorFactoryOptions["tui"],
+          theme: editorTheme,
+          keybindings: (this.keybindings ?? safeKeybindings()) as EditorFactoryOptions["keybindings"],
+          onSubmit: submit,
+          // Esc in idle Normal mode: back to main.
+          onCancel: () => this.close(),
+          scrollViewport: (direction) => this.scrollBy(direction * Math.max(1, Math.floor(this.lastViewport / 2))),
+          notify: () => undefined,
+          paddingX,
+          initialText: draft,
+          initialMode: "insert",
+        });
+        this.suite = true;
+      } catch {
+        composer = undefined;
+      }
+    }
+    if (!composer) {
+      const editor = new Editor(this.tui as TUI, editorTheme, { paddingX });
+      editor.onSubmit = submit;
+      if (draft) editor.setText(draft);
+      composer = editor as unknown as Composer;
+      this.suite = false;
+    }
+    composer.focused = this.hasFocus && !this.listActive;
+    this.composer = composer;
+    this.gauge = this.chrome ? safe(() => this.chrome!.gauge(composer, () => this.contextShare().percent, () => this.theme)) === true : false;
+  }
+
+  private closeComposer() {
+    const composer = this.composer;
+    this.composer = undefined;
+    if (!composer) return;
+    const text = safe(() => (composer as { getText?(): string }).getText?.()) ?? "";
+    if (text.trim()) drafts.set(this.run.id, text);
+    else drafts.delete(this.run.id);
+    try {
+      composer.dispose?.();
+    } catch {
+      // Already gone.
+    }
   }
 
   private close() {
@@ -218,248 +353,360 @@ export class ConversationViewer implements Component {
     this.done();
   }
 
-  private openComposer() {
-    const submit = (value: string) => {
-      this.closeComposer();
-      const message = value.trim();
-      if (message) this.actions.steer?.(message);
-      this.follow = true;
-      this.tui.requestRender();
-    };
-    const cancel = () => {
-      this.closeComposer();
-      this.tui.requestRender();
-    };
-    // The suite's editor (pi-vim's) when a provider is loaded: modal editing, :w steers, :q cancels.
-    const suite = requestEditorFactory(this.actions.events);
-    if (suite) {
-      try {
-        const editor = suite.factory!({
-          surface: "embedded",
-          tui: this.tui as EditorFactoryOptions["tui"],
-          theme: this.editorTheme(),
-          keybindings: this.keybindings as EditorFactoryOptions["keybindings"],
-          onSubmit: submit,
-          onCancel: cancel,
-          scrollViewport: (direction) => this.scrollBy(direction * Math.max(1, Math.floor(this.viewport() / 2))),
-          notify: () => undefined,
-          initialMode: "insert",
-        });
-        editor.focused = this.focused;
-        this.composer = editor;
-        this.tui.requestRender();
-        return;
-      } catch {
-        // A provider's bug must not take steering away: pi's input follows.
-      }
-    }
-    const input = new Input();
-    input.focused = this.focused;
-    input.onSubmit = submit;
-    input.onEscape = cancel;
-    this.composer = input;
+  /** Scroll the transcript by `lines` (negative up); follows again at the end. */
+  scrollBy(lines: number): void {
+    const max = Math.max(0, this.lastContent - this.lastViewport);
+    this.scrollTop = Math.max(0, Math.min(max, Math.min(this.follow ? max : this.scrollTop, max) + lines));
+    this.follow = this.scrollTop >= max;
     this.tui.requestRender();
   }
 
-  private closeComposer() {
-    const composer = this.composer;
-    this.composer = undefined;
-    this.composerLines = [];
-    try {
-      composer?.dispose?.();
-    } catch {
-      // Already gone.
+  private scrollTo(where: "top" | "bottom") {
+    if (where === "bottom") this.follow = true;
+    else {
+      this.follow = false;
+      this.scrollTop = 0;
     }
+    this.tui.requestRender();
   }
 
-  /** Pi's editor theme shape, from the viewer's theme. */
-  private editorTheme() {
-    const th = this.theme;
+  // ---- the sessions you can switch to: main, the listed runs, then pills -------------------------
+
+  private roster(): FleetEntry[] {
+    const runs = safe(() => this.source?.runs()) ?? [];
+    const roster = fleetRoster(runs, Date.now(), `run:${this.run.id}`, safe(() => this.source?.sections?.()) ?? [], safe(() => this.source?.dismissedAt?.()), safe(() => this.source?.dismissed?.()));
+    // A recorded run (from /subagents) is not one of this session's live runs.
+    if (!roster.some((e) => e.kind === "run" && e.run === this.run)) {
+      const at = roster.findIndex((e) => e.kind === "pill");
+      const entry: FleetEntry = { kind: "run", run: this.run };
+      if (at < 0) roster.push(entry);
+      else roster.splice(at, 0, entry);
+    }
+    if (roster[0]?.kind !== "main") roster.unshift({ kind: "main" });
+    return roster;
+  }
+
+  private sessions(): (Run | undefined)[] {
+    return this.roster().flatMap((e) => (e.kind === "main" ? [undefined] : e.kind === "run" ? [e.run] : []));
+  }
+
+  private cycle(direction: 1 | -1) {
+    const sessions = this.sessions();
+    const at = sessions.indexOf(this.run);
+    const next = sessions[(at + direction + sessions.length) % sessions.length];
+    this.switchTo(next);
+  }
+
+  private listShown() {
+    return this.source ? safe(() => this.source!.enabled?.()) !== false : false;
+  }
+
+  private enterList() {
+    const roster = this.roster();
+    this.listActive = true;
+    this.listStopArmed = false;
+    this.listSelected = Math.max(0, roster.findIndex((e) => e.kind === "run" && e.run === this.run));
+    if (this.composer) this.composer.focused = false;
+    this.tui.requestRender();
+  }
+
+  private leaveList() {
+    this.listActive = false;
+    this.listStopArmed = false;
+    if (this.composer) this.composer.focused = this.hasFocus;
+    this.tui.requestRender();
+  }
+
+  private listKey(data: string) {
+    const roster = this.roster();
+    this.listSelected = Math.min(this.listSelected, Math.max(0, roster.length - 1));
+    const entry = roster[this.listSelected];
+    const armed = this.listStopArmed;
+    this.listStopArmed = false;
+    if (matchesKey(data, "escape") || matchesKey(data, "h")) return this.leaveList();
+    if (matchesKey(data, "up") || matchesKey(data, "k")) {
+      if (this.listSelected === 0) return this.leaveList();
+      this.listSelected--;
+    } else if (matchesKey(data, "down") || matchesKey(data, "j")) {
+      this.listSelected = Math.min(roster.length - 1, this.listSelected + 1);
+    } else if (matchesKey(data, "enter") || matchesKey(data, "l")) {
+      if (!entry) return;
+      if (entry.kind === "pill") {
+        safe(() => this.openSection?.(entry.section));
+        return;
+      }
+      this.listActive = false;
+      this.switchTo(entry.kind === "run" ? entry.run : undefined);
+      return;
+    } else if (matchesKey(data, "x") && entry?.kind === "run") {
+      if (this.running(entry.run)) {
+        if (armed) invoke(() => this.actions(entry.run).stop?.());
+        else this.listStopArmed = true;
+      } else if (entry.run !== this.run) invoke(() => this.source?.dismiss?.(entry.run.id));
+    } else if (matchesKey(data, "b") && entry?.kind === "run" && this.actions(entry.run).canBackground?.()) {
+      this.actions(entry.run).background?.();
+    } else return;
+    this.tui.requestRender();
+  }
+
+  // ---- keys ----------------------------------------------------------------------------------------
+
+  handleInput(data: string): void {
+    if (isKeyRelease(data)) return;
+    const autocomplete = Boolean(this.composer && (readEditorMode(this.composer)?.autocomplete || this.composer.isShowingAutocomplete?.()));
+    if (!autocomplete && matchesKey(data, "tab")) return this.cycle(1);
+    if (!autocomplete && matchesKey(data, "shift+tab")) return this.cycle(-1);
+    if (this.listActive) return this.listKey(data);
+    if (this.key(data, "app.tools.expand", "ctrl+o")) {
+      this.chat.setExpanded(!this.chat.isExpanded);
+      return;
+    }
+    if (this.key(data, "app.thinking.toggle")) {
+      this.chat.setThinkingHidden(!this.chat.thinkingHidden);
+      return;
+    }
+    if (this.key(data, "tui.altScreen.halfPageUp", "pageUp")) return this.scrollBy(-Math.max(1, Math.floor(this.lastViewport / 2)));
+    if (this.key(data, "tui.altScreen.halfPageDown", "pageDown")) return this.scrollBy(Math.max(1, Math.floor(this.lastViewport / 2)));
+    if (this.key(data, "tui.altScreen.pageUp")) return this.scrollBy(-Math.max(1, this.lastViewport - 1));
+    if (this.key(data, "tui.altScreen.pageDown")) return this.scrollBy(Math.max(1, this.lastViewport - 1));
+    if (this.key(data, "tui.altScreen.lineUp")) return this.scrollBy(-1);
+    if (this.key(data, "tui.altScreen.lineDown")) return this.scrollBy(1);
+    if (this.key(data, "tui.altScreen.bottom", "ctrl+end")) return this.scrollTo("bottom");
+    if (this.key(data, "tui.altScreen.top", "ctrl+home")) return this.scrollTo("top");
+    const composer = this.composer;
+    if (!composer) return this.viewerKey(data);
+    const mode = readEditorMode(composer);
+    const text = safe(() => (composer as { getText?(): string }).getText?.()) ?? "";
+    // Ctrl+C clears the editor; on an empty one, twice stops the child (main's Esc, which here goes back).
+    if (this.key(data, "app.clear", "ctrl+c") && (!mode || mode.state === "normal" || mode.state === "insert")) {
+      if (text) {
+        (composer as { setText?(text: string): void }).setText?.("");
+        this.stopArmed = false;
+      } else if (this.canStop()) {
+        if (this.stopArmed) {
+          this.stopArmed = false;
+          invoke(() => this.actions().stop?.());
+        } else this.stopArmed = true;
+      }
+      this.tui.requestRender();
+      return;
+    }
+    this.stopArmed = false;
+    if (!this.suite && matchesKey(data, "escape") && !autocomplete) return this.close();
+    const down = matchesKey(data, "down");
+    if (this.listShown() && !autocomplete && leavesPromptDown(composer, data, down, data === "j" && mode?.state === "normal")) return this.enterList();
+    composer.handleInput(data);
+    this.tui.requestRender();
+  }
+
+  /** An ended run has no editor: the keys scroll, and ↓ at the end enters the list. */
+  private viewerKey(data: string) {
+    if (matchesKey(data, "escape") || matchesKey(data, "q")) return this.close();
+    const atEnd = this.follow || this.scrollTop >= this.lastContent - this.lastViewport;
+    if ((matchesKey(data, "down") || matchesKey(data, "j")) && atEnd && this.listShown()) return this.enterList();
+    if (matchesKey(data, "up") || matchesKey(data, "k")) return this.scrollBy(-1);
+    if (matchesKey(data, "down") || matchesKey(data, "j")) return this.scrollBy(1);
+    if (matchesKey(data, "ctrl+u")) return this.scrollBy(-Math.max(1, Math.floor(this.lastViewport / 2)));
+    if (matchesKey(data, "ctrl+d")) return this.scrollBy(Math.max(1, Math.floor(this.lastViewport / 2)));
+    if (matchesKey(data, "home") || data === "g") return this.scrollTo("top");
+    if (matchesKey(data, "end") || data === "G") return this.scrollTo("bottom");
+  }
+
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (event.type === "wheel") {
+      this.scrollBy(event.wheelDelta ?? 0);
+      return { handled: true };
+    }
+    // Pi's "Jump to latest message" pill.
+    if (event.y === this.lastViewport - 1 && !this.follow && event.type === "click") {
+      this.scrollTo("bottom");
+      return { handled: true };
+    }
+    if (event.y < this.lastViewport) {
+      const top = this.follow ? Math.max(0, this.lastContent - this.lastViewport) : this.scrollTop;
+      return this.chat.handleMouse({ ...event, y: event.y + top }) ?? undefined;
+    }
+    return undefined;
+  }
+
+  // ---- drawing -------------------------------------------------------------------------------------
+
+  /** The child's context in use, as a share of its model's window. */
+  private contextShare(): SessionChromeOverrides["context"] {
+    const tokens = contextTokens(this.run.conversation.messages) ?? null;
+    const window = safe(() => this.source?.contextWindow?.(this.run.state.model ?? this.run.model)) ?? 0;
+    return { tokens, contextWindow: window, percent: tokens !== null && window > 0 ? (tokens / window) * 100 : null };
+  }
+
+  private overrides(): SessionChromeOverrides {
+    const model = this.run.state.model ?? this.run.model;
+    const slash = model.indexOf("/");
+    const u = this.run.state.usage;
+    const s = this.run.state.status;
     return {
-      borderColor: (text: string) => th.fg("accent", text),
-      selectList: {
-        selectedPrefix: (text: string) => th.fg("accent", text),
-        selectedText: (text: string) => th.fg("accent", text),
-        description: (text: string) => th.fg("muted", text),
-        scrollInfo: (text: string) => th.fg("dim", text),
-        noMatch: (text: string) => th.fg("dim", text),
-      },
+      cwd: this.run.cwd || process.cwd(),
+      provider: slash > 0 ? model.slice(0, slash) : "",
+      model: slash > 0 ? model.slice(slash + 1) : model,
+      thinking: this.run.thinking,
+      context: this.contextShare(),
+      totals: { input: u.input, output: u.output, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, cost: u.cost.total, compactions: 0, started: this.run.state.startedAt || Date.now() },
+      phase: s === "running" || s === "done" ? undefined : s === "failed" ? "error" : s,
+      queued: this.run.conversation.queued.length > 0,
+      sessionName: runLabel(this.run),
+      borderGauge: this.gauge,
     };
   }
 
-  private viewport() {
-    const rows = Math.floor((this.tui.terminal.rows * VIEWER_HEIGHT_PCT) / 100);
-    return Math.max(MIN_VIEWPORT, rows - CHROME_LINES - (this.composer ? Math.max(1, this.composerLines.length) : 0));
+  private footerLines(width: number): string[] {
+    if (this.chrome) {
+      const lines = safe(() => this.chrome!.footer(this.overrides(), width, this.theme));
+      if (lines?.length) return lines;
+    }
+    // Pi's own footer, in its layout: the directory, then usage on the left and the model on the right.
+    const th = this.theme;
+    const o = this.overrides();
+    const home = process.env.HOME;
+    const cwd = home && o.cwd.startsWith(home) ? `~${o.cwd.slice(home.length)}` : o.cwd;
+    const parts = [`↑${formatCount(o.totals.input)}`, `↓${formatCount(o.totals.output)}`];
+    if (o.totals.cacheRead) parts.push(`R${formatCount(o.totals.cacheRead)}`);
+    if (o.totals.cacheWrite) parts.push(`W${formatCount(o.totals.cacheWrite)}`);
+    const cost = formatCost(o.totals.cost);
+    if (cost) parts.push(cost);
+    if (o.context.percent !== null) parts.push(`${o.context.percent.toFixed(1)}%/${formatCount(o.context.contextWindow)}`);
+    const right = `${o.model}${o.thinking ? ` • ${o.thinking}` : ""}`;
+    const left = parts.join(" ");
+    const gap = width - visibleWidth(left) - visibleWidth(right);
+    return [
+      truncateToWidth(th.fg("dim", `${cwd} • ${o.sessionName}`), width, th.fg("dim", "…")),
+      truncateToWidth(th.fg("dim", gap >= 2 ? `${left}${" ".repeat(gap)}${right}` : left), width),
+    ];
+  }
+
+  private statusLines(width: number): string[] {
+    const th = this.theme;
+    const s = this.run.state;
+    if (this.running()) {
+      if (this.composer) return [];
+      return [truncateToWidth(th.fg("dim", " Waiting for the subagent to start…"), width)];
+    }
+    const label = s.error ? `${s.status}: ${s.error.replace(/\s+/gu, " ")}` : s.status;
+    return [truncateToWidth(` ${statusIcon(s.status, th)} ${th.fg(s.status === "done" ? "dim" : "error", label)}`, width)];
   }
 
   render(width: number): string[] {
     if (width < 8) return [];
     const th = this.theme;
-    const inner = width - 4;
-    this.width = inner;
-    const row = (content: string) => `${th.fg("accent", "│")} ${truncateToWidth(content, inner, "…", true)} ${th.fg("accent", "│")}`;
-    const rule = row(th.fg("dim", "─".repeat(inner)));
-    const run = this.run;
-    const s = run.state;
-
-    // A banner in the accent color says this is not the main session, and how to get back.
-    const prefix = " ◀ esc · ";
-    const suffix = ` · ${truncateToWidth(run.agent, 20, "…")} · not your main session `;
-    const title = truncateToWidth(runLabel(run), Math.max(1, width - 3 - visibleWidth(prefix + suffix)), "…");
-    const label = `${prefix}${title}${suffix}`;
-    const lines = [th.fg("accent", `╭─${th.bold(truncateToWidth(label, Math.max(4, width - 3)))}${"─".repeat(Math.max(0, width - 3 - visibleWidth(label)))}╮`)];
-    lines.push(row(`${statusIcon(s.status, th)} ${th.bold(runLabel(run))}  ${th.fg("muted", run.agent)}${jev(run.byJev.agent, th)} ${th.fg("dim", "·")} ${th.fg("dim", runStats(run))}`));
-    const status = s.status === "running" ? "" : ` · ${s.status}`;
-    lines.push(row(dimAll(`  ↳ ${modelAndEffort(run, th, true)} · ${run.async ? "async" : "sync"} · ${run.id}${status}`, th)));
-    lines.push(rule);
-
-    // The composer's lines come first: a suite editor may wrap, and the viewport makes room.
+    const rows = Math.max(4, Math.floor((this.tui.terminal.rows * VIEWER_HEIGHT_PCT) / 100));
+    if (!this.running()) this.loader.stop();
+    // The run ended while shown: no more steering (an unsent draft is kept).
+    if (this.composer && !this.canSteer()) this.closeComposer();
+    const dock: string[] = [];
+    // Pi's working row, then queued messages, then the blank row over the editor.
+    if (this.running()) dock.push(...safeRender(this.loader, width));
+    const queued = this.run.conversation.queued;
+    if (queued.length) {
+      dock.push("");
+      for (const q of queued) dock.push(truncateToWidth(` ${th.fg("dim", `Steering: ${q.replace(/\s+/gu, " ")}`)}`, width));
+    }
+    dock.push("");
     if (this.composer) {
-      let rendered: string[];
-      try {
-        rendered = this.composer.render(inner);
-      } catch {
-        rendered = [];
-      }
-      this.composerLines = rendered.length ? rendered.slice(0, Math.max(1, Math.floor(this.tui.terminal.rows / 3))) : [""];
-    }
-    const content = this.contentLines(inner);
-    const page = this.viewport();
-    const max = Math.max(0, content.length - page);
-    if (this.follow) this.scroll = max;
-    const start = Math.min(this.scroll, max);
-    for (let i = 0; i < page; i++) lines.push(row(content[start + i] ?? ""));
+      let lines = safeRender(this.composer, width);
+      if (!lines.length) lines = [""];
+      dock.push(...lines.slice(0, Math.max(1, Math.floor(rows / 2))));
+    } else dock.push(...this.statusLines(width));
+    if (this.stopArmed && this.canStop()) dock.push(truncateToWidth(` ${th.fg("error", `${keyLabel("app.clear", "ctrl+c")} again to stop ${runLabel(this.run)}`)}`, width));
+    if (this.listShown()) {
+      const roster = this.roster();
+      const current = roster.findIndex((e) => e.kind === "run" && e.run === this.run);
+      const selected = this.listActive ? this.listSelected : current;
+      const entry = roster[selected];
+      const canBackground = entry?.kind === "run" && Boolean(safe(() => this.actions(entry.run).canBackground?.()));
+      dock.push(...renderFleet({ roster, selected, current, active: this.listActive, stopArmed: this.listStopArmed, canBackground, normalKeys: true, now: Date.now(), width, theme: th }));
+    } else dock.push("");
+    dock.push(...this.footerLines(width));
 
-    lines.push(rule);
-    if (this.composer) {
-      for (const l of this.composerLines) lines.push(row(l));
-      lines.push(row(spread(th.fg("accent", "✎ steer"), th.fg("dim", "Enter send · Esc cancel"), inner)));
-    } else {
-      const actions: string[] = [];
-      if (this.canSteer()) actions.push(th.fg("dim", "Enter steer"));
-      if (this.canStop()) actions.push(this.stopArmed ? th.fg("error", "x again to stop") : th.fg("dim", "x stop"));
-      if (this.canBackground()) actions.push(th.fg("dim", "b background"));
-      const position = content.length <= page ? "all" : `${Math.round(((start + page) / content.length) * 100)}%`;
-      actions.push(th.fg("dim", `m ${MARKDOWN_LABELS[ConversationViewer.markdownMode]}`));
-      const sep = th.fg("dim", " · ");
-      const nav = th.fg("dim", "^U/^D half · j/k · PgUp/Dn · h/esc back");
-      // The line count goes first when the footer is short of room.
-      const withCount = [...actions, th.fg("dim", `${content.length} lines · ${position}`)].join(sep);
-      const left = visibleWidth(withCount) + visibleWidth(nav) + 1 <= inner ? withCount : actions.join(sep);
-      lines.push(row(spread(left, nav, inner)));
+    const viewport = Math.max(1, rows - dock.length);
+    const content = this.chat.empty ? [th.fg("dim", " (waiting for the first message…)")] : safe(() => this.chat.render(width)) ?? [];
+    this.lastViewport = viewport;
+    this.lastContent = content.length;
+    const max = Math.max(0, content.length - viewport);
+    if (this.follow) this.scrollTop = max;
+    const start = Math.min(this.scrollTop, max);
+    const lines = content.slice(start, start + viewport).map((l) => truncateToWidth(l, width));
+    while (lines.length < viewport) lines.push("");
+    // Pi's own pill when you are scrolled up, centered on the last transcript row.
+    if (!this.follow && start < max) {
+      const key = keyLabel("tui.altScreen.bottom", "ctrl+end");
+      const raw = ` ↓ Jump to latest message${key ? ` · ${key}` : ""} `;
+      const styled = th as Theme & { bg?(color: string, text: string): string };
+      const label = truncateToWidth(styled.bg ? styled.bg("selectedBg", th.fg("text", raw)) : `\x1b[7m${raw}\x1b[27m`, width, "");
+      const labelWidth = visibleWidth(label);
+      const column = Math.max(0, Math.floor((width - labelWidth) / 2));
+      lines[viewport - 1] = safe(() => compositeTuiLine(lines[viewport - 1] ?? "", label, column, labelWidth, width)) ?? label;
     }
-    lines.push(th.fg("accent", `╰${"─".repeat(width - 2)}╯`));
-    return lines;
-  }
-
-  /** The conversation as display lines at `width`; finished messages are cached. */
-  contentLines(width: number): string[] {
-    const th = this.theme;
-    const c = this.run.conversation;
-    const out: string[] = [];
-    for (const message of c.messages) {
-      const streaming = message === c.streaming;
-      const mode = ConversationViewer.markdownMode;
-      const cached = streaming ? undefined : this.lineCache.get(message);
-      let lines = cached?.width === width && cached.mode === mode ? cached.lines : undefined;
-      if (!lines) {
-        lines = this.messageLines(message, width).map((l) => truncateToWidth(l, width));
-        if (!streaming) this.lineCache.set(message, { width, mode, lines });
-      }
-      if (!lines.length) continue;
-      if (out.length) out.push("");
-      out.push(...lines);
-    }
-    if (!out.length) out.push(th.fg("dim", "(waiting for the first message…)"));
-    const s = this.run.state;
-    if (s.status !== "running" && s.error) out.push("", ...wrapTextWithAnsi(th.fg("error", `✗ ${s.status}: ${s.error}`), width));
-    if (this.running()) {
-      for (const tool of c.activeTools.values()) {
-        const partial = tool.partial?.trimEnd();
-        if (!partial) continue;
-        out.push("");
-        out.push(th.fg("muted", `  ${describeTool(tool.name, tool.args)}`));
-        for (const l of partial.split("\n").slice(-PARTIAL_LINES)) out.push(truncateToWidth(th.fg("dim", `    ${l}`), width));
-      }
-      for (const q of c.queued) out.push(truncateToWidth(th.fg("dim", `  ⏳ queued steer: ${q.replace(/\s+/gu, " ")}`), width));
-      out.push("");
-      out.push(truncateToWidth(`${th.fg("accent", "▍ ")}${th.fg("dim", describeActivity(c))}`, width));
-    }
-    return out;
-  }
-
-  private messageLines(message: Message, width: number): string[] {
-    const th = this.theme;
-    const text = messageText(message).trim();
-    switch (message.role) {
-      case "user":
-        return text ? [th.fg("accent", "[User]"), ...wrapTextWithAnsi(text, width)] : [];
-      case "assistant": {
-        const lines = [th.bold("[Assistant]")];
-        if (text) lines.push(...(ConversationViewer.markdownMode === "off" ? wrapTextWithAnsi(text, width) : this.markdownLines(message, text, width)));
-        for (const block of message.content) {
-          if (block.type === "toolCall") lines.push(th.fg("muted", `  ▸ ${describeTool(block.name, block.arguments, Math.max(20, width - 20))}`));
-        }
-        if (message.stopReason === "error" && message.errorMessage) lines.push(...wrapTextWithAnsi(th.fg("error", message.errorMessage), width));
-        if (message.stopReason === "aborted") lines.push(th.fg("muted", "(aborted)"));
-        return lines.length > 1 ? lines : [];
-      }
-      case "toolResult": {
-        if (!text && !message.isError) return [];
-        const label = `[${message.isError ? "Error" : "Result"}${message.toolName ? `: ${message.toolName}` : ""}]`;
-        const body = ConversationViewer.markdownMode === "all" ? this.markdownLines(message, text, width, true) : wrapTextWithAnsi(text, width).map((l) => th.fg("dim", l));
-        const lines = [th.fg(message.isError ? "error" : "dim", label), ...body];
-        if (message.elided) lines.push(th.fg("dim", `… (${message.elided} more characters)`));
-        return lines;
-      }
-      case "bashExecution":
-        return [th.fg("muted", `$ ${message.command ?? ""}`), ...wrapTextWithAnsi(text, width).map((l) => th.fg("dim", l))];
-      default:
-        return text ? [th.fg("dim", `[${message.customType ?? message.role}]`), ...wrapTextWithAnsi(text, width).map((l) => th.fg("dim", l))] : [];
-    }
-  }
-
-  private markdownLines(message: Message, text: string, width: number, dim = false): string[] {
-    let entry = this.markdown.get(message);
-    if (!entry) {
-      const style = dim ? { color: (t: string) => this.theme.fg("dim", t) } : undefined;
-      entry = { component: new Markdown(text, 0, 0, this.md, style, { preserveOrderedListMarkers: true, preserveBackslashEscapes: true }), text };
-      this.markdown.set(message, entry);
-    } else if (entry.text !== text) {
-      entry.component.setText(text);
-      if (!text.startsWith(entry.text)) entry.failed = false;
-      entry.text = text;
-    }
-    if (!entry.failed) {
-      try {
-        return entry.component.render(width);
-      } catch {
-        // Deeply nested input can overflow the parser; show it raw instead.
-        entry.failed = true;
-      }
-    }
-    const raw = wrapTextWithAnsi(text, width);
-    return dim ? raw.map((l) => this.theme.fg("dim", l)) : raw;
+    return [...lines, ...dock.slice(0, rows - lines.length)];
   }
 
   invalidate(): void {
-    // Lines are cached per width only; a theme change re-creates the overlay.
+    this.composer?.invalidate?.();
   }
 
   dispose(): void {
     this.closed = true;
-    this.unsubscribe();
     clearInterval(this.timer);
-    this.closeComposer();
+    this.detach();
   }
 }
 
-function spread(left: string, right: string, width: number): string {
-  const gap = width - visibleWidth(left) - visibleWidth(right);
-  return gap >= 1 ? `${left}${" ".repeat(gap)}${right}` : left;
+/** Fill a fresh chat from a conversation already under way: finished messages, the one streaming, the tools running. */
+export function seedChat(chat: PiChat, conversation: Conversation) {
+  const streaming = conversation.streaming;
+  chat.seed(conversation.messages.filter((m) => m !== streaming), (text) => ({ text }));
+  if (streaming?.role === "assistant") {
+    chat.apply({ type: "message_start", message: streaming });
+    chat.apply({ type: "message_update", message: streaming });
+  }
+  for (const tool of conversation.activeTools.values()) {
+    chat.apply({ type: "tool_execution_start", toolCallId: tool.id, toolName: tool.name, args: tool.args });
+    if (tool.partial) chat.apply({ type: "tool_execution_update", toolCallId: tool.id, partialResult: { content: [{ type: "text", text: tool.partial }] } });
+  }
 }
 
-/** The part of `ctx.ui` the viewer uses. */
+function safe<T>(fn: () => T): T | undefined {
+  try {
+    return fn();
+  } catch {
+    return undefined;
+  }
+}
+
+function safeRender(component: Component, width: number): string[] {
+  try {
+    return component.render(width);
+  } catch {
+    return [];
+  }
+}
+
+function safeKeybindings(): Keybindings | undefined {
+  return safe(() => getKeybindings() as unknown as Keybindings);
+}
+
+/** How you bound `id` (Pi's key hints), or `fallback`. */
+function keyLabel(id: string, fallback: string): string {
+  return safe(() => keyText(id as never)) || fallback;
+}
+
+/** Input callbacks cannot await; contain synchronous and asynchronous failures. */
+function invoke(action: () => void | Promise<void>) {
+  try {
+    void Promise.resolve(action()).catch(() => undefined);
+  } catch {
+    // A failed stop must not take the keyboard.
+  }
+}
+
+/** The part of `ctx.ui` the view uses. */
 export interface ViewerUI {
   custom<T>(
     factory: (tui: TUI, theme: any, keybindings: any, done: (result: T) => void) => Component & { dispose?(): void },
@@ -467,12 +714,20 @@ export interface ViewerUI {
   ): Promise<T>;
 }
 
-/** Show `run`'s conversation full screen until the user goes back; `onOpen` gets a way to close it. */
-export function openViewer(ui: ViewerUI, run: Run, actions: ViewerActions = {}, onOpen?: (close: () => void) => void): Promise<void> {
+/**
+ * Show `run`'s session full screen until you go back to main; `onOpen` gets a way to close it.
+ * With a `source`, Tab and the list switch between main and its runs.
+ */
+export function openViewer(ui: ViewerUI, run: Run, actions: ViewerActions = {}, onOpen?: (close: () => void) => void, source?: SessionSource): Promise<void> {
   return ui.custom<void>(
     (tui, theme, keybindings, done) => {
       onOpen?.(() => done(undefined));
-      return new ConversationViewer(tui, run, theme, () => done(undefined), actions, keybindings);
+      const openSection = (section: ActivitySection) => {
+        void Promise.resolve()
+          .then(() => section.openDialog?.(ui as never))
+          .catch(() => undefined);
+      };
+      return new SessionView(tui, run, theme, () => done(undefined), actions, keybindings, source, openSection);
     },
     { overlay: true, overlayOptions: { anchor: "top-left", width: "100%", maxHeight: `${VIEWER_HEIGHT_PCT}%` } },
   );

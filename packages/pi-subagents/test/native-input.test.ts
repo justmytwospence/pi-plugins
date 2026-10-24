@@ -1,7 +1,7 @@
 import { Editor } from "@earendil-works/pi-tui";
 import { expect, test } from "vitest";
 import { FleetView } from "../src/ui/fleet.ts";
-import { ConversationViewer } from "../src/ui/viewer.ts";
+import { SessionView } from "../src/ui/viewer.ts";
 import { INPUT_CONTEXT } from "../src/editor-contract.ts";
 import { fakeRun, fakeUI, fakeTui, KEY, plain } from "./ui-helpers.ts";
 const theme = { borderColor: (s: string) => s, selectList: { selectedPrefix: (s: string) => s, selectedText: (s: string) => s, description: (s: string) => s, scrollInfo: (s: string) => s, noMatch: (s: string) => s } };
@@ -33,21 +33,21 @@ test("actual native Editor retains h/j/k/l and Ctrl-U/D while Fleet is virtually
   } finally { fleet.dispose(); }
 });
 
-test("native steering input retains edit keys while read-only Ctrl-U/D scroll exactly half pages", () => {
+test("native steering editor keeps its edit keys; PageUp/PageDown scroll half a page", () => {
   const tui = fakeTui(27);
   const run = fakeRun({ child: {} as never });
-  run.conversation.apply({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: Array.from({ length: 100 }, (_, i) => `line ${i}`).join("\n") }] } });
+  const message = { role: "assistant", content: [{ type: "text", text: Array.from({ length: 100 }, (_, i) => `line ${i}`).join("\n\n") }] };
+  run.conversation.apply({ type: "message_start", message });
+  run.conversation.apply({ type: "message_end", message });
   let steered = "";
-  // Deliberately conflicting full-page bindings: literal Ctrl-U/D remain the half-page primary.
-  const viewer = new ConversationViewer(tui, run, plain, () => undefined, { steer: (message) => { steered = message; return true; } }, { matches: (data, id) => id === "tui.select.pageUp" && data === "\x15" });
+  const viewer = new SessionView(tui as never, run, plain, () => undefined, { steer: (message) => { steered = message; return true; } }, { matches: () => false });
   viewer.focused = true;
   try {
     viewer.render(100);
-    const bottom = (viewer as any).scroll;
-    viewer.handleInput("\x15"); expect((viewer as any).scroll).toBe(bottom - 10);
-    viewer.handleInput("\x04"); expect((viewer as any).scroll).toBe(bottom);
-    viewer.handleInput("\x1b[5~"); expect((viewer as any).scroll).toBe(bottom - 20);
-    viewer.handleInput(KEY.enter);
+    const bottom = (viewer as any).scrollTop;
+    const half = Math.floor((viewer as any).lastViewport / 2);
+    viewer.handleInput("\x1b[5~"); expect((viewer as any).scrollTop).toBe(bottom - half);
+    viewer.handleInput("\x1b[6~"); expect((viewer as any).scrollTop).toBe(bottom);
     expect(viewer[INPUT_CONTEXT]()).toBe("editor");
     for (const key of "draft") viewer.handleInput(key);
     viewer.handleInput("\x15");
@@ -55,7 +55,7 @@ test("native steering input retains edit keys while read-only Ctrl-U/D scroll ex
     viewer.handleInput("\x01"); viewer.handleInput("\x04");
     viewer.handleInput(KEY.enter);
     expect(steered).toBe("bc");
-    expect(viewer[INPUT_CONTEXT]()).toBe("viewer");
+    expect(viewer[INPUT_CONTEXT]()).toBe("editor");
   } finally { viewer.dispose(); }
 });
 
@@ -68,8 +68,8 @@ test("input callbacks contain asynchronous and synchronous stop/dismiss failures
   ui.press(KEY.down); expect(ui.press("x")).toBe(true); expect(ui.press("x")).toBe(true);
   run.state.status = "failed"; run.state.endedAt = Date.now();
   expect(ui.press("x")).toBe(true);
-  const viewer = new ConversationViewer(fakeTui(), fakeRun({ child: {} as never }), plain, () => undefined, { stop: async () => { throw new Error("failed viewer stop"); } });
-  expect(() => { viewer.handleInput("x"); viewer.handleInput("x"); }).not.toThrow();
+  const viewer = new SessionView(fakeTui() as never, fakeRun({ child: {} as never }), plain, () => undefined, { steer: () => true, stop: async () => { throw new Error("failed viewer stop"); } });
+  expect(() => { viewer.handleInput("\x03"); viewer.handleInput("\x03"); }).not.toThrow();
   await Promise.resolve(); await Promise.resolve();
   fleet.dispose(); viewer.dispose();
 });

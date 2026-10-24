@@ -2,7 +2,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, test } from "vitest";
-import { Conversation, RESULT_MAX_CHARS, describeActivity, messageText, readTranscript, transcriptWriter } from "../src/conversation.ts";
+import { Conversation, DETAILS_MAX_CHARS, RESULT_MAX_CHARS, contextTokens, describeActivity, messageText, readTranscript, transcriptWriter } from "../src/conversation.ts";
 
 const update = (assistantMessageEvent: Record<string, unknown>) => ({ type: "message_update", usage: {}, assistantMessageEvent });
 
@@ -64,7 +64,10 @@ test("tools: active set, partial output, use count; long results are cut", () =>
   expect(messageText(result)).toHaveLength(RESULT_MAX_CHARS);
   expect(result.elided).toBe(50);
   expect(result.content[1]).toEqual({ type: "image" });
-  expect(result).not.toHaveProperty("details");
+  // Small details stay for Pi's renderers (edit diffs); large ones go.
+  expect(result.details).toEqual({ diff: "big" });
+  c.apply({ type: "message_end", message: { role: "toolResult", toolCallId: "c", toolName: "edit", content: [], details: { diff: "x".repeat(DETAILS_MAX_CHARS) } } });
+  expect(c.messages.at(-1)).not.toHaveProperty("details");
   c.apply({ type: "queue_update", steering: ["focus"], followUp: [] });
   expect(c.queued).toEqual(["focus"]);
   c.close();
@@ -81,4 +84,21 @@ test("the transcript file round-trips finished messages", () => {
   expect(back).toEqual(c.messages);
   expect(back?.[1]?.elided).toBe(5);
   expect(readTranscript(path.join(file, "missing"))).toBeUndefined();
+});
+
+test("event listeners get each event, a message_update with the whole streaming message", () => {
+  const c = new Conversation();
+  const seen: Record<string, any>[] = [];
+  const off = c.subscribeEvents((event) => seen.push(event));
+  c.apply({ type: "message_start", message: { role: "assistant", content: [] } });
+  c.apply({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Hi" } });
+  expect(seen[1]?.message?.content).toEqual([{ type: "text", text: "Hi" }]);
+  expect(seen[1]?.assistantMessageEvent?.delta).toBe("Hi");
+  c.apply({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Hi" }], usage: { input: 10, output: 5, cacheRead: 100, cacheWrite: 0, totalTokens: 0 } } });
+  c.apply({ type: "agent_end" });
+  expect(seen.map((e) => e.type)).toEqual(["message_start", "message_update", "message_end", "agent_end"]);
+  expect(contextTokens(c.messages)).toBe(115);
+  off();
+  c.apply({ type: "agent_start" });
+  expect(seen).toHaveLength(4);
 });

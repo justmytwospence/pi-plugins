@@ -1,142 +1,197 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { stripVTControlCharacters } from "node:util";
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { expect, test } from "vitest";
+import { beforeAll, expect, test } from "vitest";
 import { transcriptWriter } from "../src/conversation.ts";
 import { recordedRun } from "../src/index.ts";
-import { ConversationViewer, openViewer } from "../src/ui/viewer.ts";
+import type { Run } from "../src/run.ts";
+import { type SessionSource, SessionView, openViewer } from "../src/ui/viewer.ts";
 import { KEY, fakeRun, fakeTui, fakeUI, plain } from "./ui-helpers.ts";
 
-function liveRun() {
-  const run = fakeRun({ child: {} as never, byJev: { agent: false, model: true, thinking: false }, state: { turns: 1, startedAt: Date.now() } });
+// Pi's message and tool components draw with Pi's theme.
+beforeAll(() => initTheme("dark"));
+
+const CTRL_C = "\x03";
+const SHIFT_TAB = "\x1b[Z";
+
+function liveRun(over: Parameters<typeof fakeRun>[0] = {}) {
+  const run = fakeRun({ child: {} as never, state: { turns: 1, startedAt: Date.now() }, ...over });
   const c = run.conversation;
   c.apply({ type: "message_end", message: { role: "user", content: "Find where the config is loaded" } });
   c.apply({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Looking with **rg**." }, { type: "toolCall", id: "t", name: "bash", arguments: { command: "rg loadConfig" } }] } });
-  c.apply({ type: "message_end", message: { role: "toolResult", toolName: "bash", content: [{ type: "text", text: "src/config.ts:8" }] } });
+  c.apply({ type: "tool_execution_start", toolCallId: "t", toolName: "bash", args: { command: "rg loadConfig" } });
+  c.apply({ type: "tool_execution_end", toolCallId: "t", result: { content: [{ type: "text", text: "src/config.ts:8" }] }, isError: false });
+  c.apply({ type: "message_end", message: { role: "toolResult", toolCallId: "t", toolName: "bash", content: [{ type: "text", text: "src/config.ts:8" }] } });
   return run;
 }
 
-function viewer(run = liveRun(), rows = 40) {
+function setup(runs: Run[] = [liveRun()], rows = 40) {
   const tui = fakeTui(rows);
-  const calls = { done: 0, steer: [] as string[], stop: 0 };
-  const v = new ConversationViewer(tui, run, plain, () => void calls.done++, {
-    steer: (m) => {
-      calls.steer.push(m);
-      return true;
-    },
-    stop: () => void calls.stop++,
-  });
-  return { v, tui, calls, run };
+  const calls = { done: 0, steer: [] as Array<[string, string]>, stop: [] as string[], background: [] as string[], switched: [] as string[] };
+  const source: SessionSource = {
+    runs: () => runs,
+    enabled: () => true,
+    actions: (run) => ({
+      steer: (m) => calls.steer.push([run.id, m]) > 0,
+      stop: () => void calls.stop.push(run.id),
+      background: () => void calls.background.push(run.id),
+      canBackground: () => true,
+    }),
+    contextWindow: () => 200_000,
+    onSwitch: (run) => void calls.switched.push(run.id),
+  };
+  const v = new SessionView(tui as never, runs[0]!, plain, () => void calls.done++, source.actions(runs[0]!), undefined, source);
+  v.focused = true;
+  return { v, tui, calls, runs };
 }
 
-const text = (lines: string[]) => lines.map((l) => l.trimEnd()).join("\n");
+const text = (lines: string[]) => lines.map((l) => stripVTControlCharacters(l).trimEnd()).join("\n");
+const type = (v: SessionView, s: string) => {
+  for (const ch of s) v.handleInput(ch);
+};
 
-test("the viewer frames the header, the conversation and the live activity", () => {
-  const { v, run } = viewer();
-  run.conversation.apply({ type: "tool_execution_start", toolCallId: "u", toolName: "read", args: { path: "src/config.ts" } });
-  const lines = v.render(80);
-  // The whole screen (40 rows), under a banner that says it is not the main session.
+test("a subagent's session draws as Pi draws main: transcript, working row, editor, list, footer", () => {
+  const { v, runs } = setup();
+  const lines = v.render(100);
+  // The whole screen, no box and no banner.
   expect(lines).toHaveLength(40);
-  expect(lines[0]).toContain("◀ esc · Find where");
-  expect(lines.every((l) => visibleWidth(l) === 80)).toBe(true);
-  expect(lines[0]).toContain("scout · not your main session");
+  expect(lines.every((l) => visibleWidth(l) <= 100)).toBe(true);
   const out = text(lines);
-  expect(out).toContain("│ ● Find where the config is loaded  scout · ↻1 · 0s");
-  expect(out).toContain("↳ anthropic/claude-haiku-5 (Jev) · low · async · r");
-  expect(out).toMatch(/\[User\][^]*Find where the config is loaded[^]*\[Assistant\][^]*Looking with rg\.[^]*▸ bash: rg loadConfig[^]*\[Result: bash\][^]*src\/config\.ts:8/u);
-  expect(out).toContain("▍ read: src/config.ts");
-  expect(out).toContain("Enter steer · x stop");
-  expect(out).toContain("esc back");
+  expect(out).not.toContain("not your main session");
+  expect(out).not.toContain("╭");
+  expect(out).not.toContain("[User]");
+  // Pi's components: the user message, Markdown, and the bash card with its output.
+  expect(out).toMatch(/Find where the config is loaded[^]*Looking with rg\.[^]*\$ rg loadConfig[^]*src\/config\.ts:8/u);
+  expect(out).toContain("Working");
+  // The editor's rules, then the list (this session marked), then the footer.
+  expect(out).toMatch(/─{20}\n.*\n─{20}[^]*○ main\n ◉ Find where the config is loaded  scout/u);
+  expect(out).toContain("claude-haiku-5 • low");
+  expect(out).toContain(`/tmp • ${"Find where the config is loaded"}`);
+  // The transcript sits at the top; the editor and footer at the bottom.
+  expect(text([lines[1]!])).toContain("Find where the config is loaded");
+  expect(text(lines.slice(-2))).toContain("claude-haiku-5");
+  void runs;
   v.dispose();
 });
 
 test("it follows new output until scrolled up, and again from the end", () => {
-  const { v, run } = viewer(liveRun(), 20);
-  for (let i = 0; i < 40; i++) run.conversation.apply({ type: "message_end", message: { role: "toolResult", toolName: "bash", content: [{ type: "text", text: `line ${i}` }] } });
+  const { v, runs } = setup([liveRun()], 20);
+  const c = runs[0]!.conversation;
+  const say = (text: string) => {
+    const message = { role: "assistant", content: [{ type: "text", text }] };
+    c.apply({ type: "message_start", message });
+    c.apply({ type: "message_end", message });
+  };
+  say(Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n\n"));
   expect(text(v.render(60))).toContain("line 39");
-  v.handleInput(KEY.up);
-  v.handleInput(KEY.up);
-  run.conversation.apply({ type: "message_end", message: { role: "toolResult", toolName: "bash", content: [{ type: "text", text: "line 40" }] } });
-  expect(text(v.render(60))).not.toContain("line 40");
-  v.handleInput("\x1b[F"); // End
-  expect(text(v.render(60))).toContain("line 40");
+  v.handleInput("\x1b[5~"); // PageUp
+  say("line 40");
+  let out = text(v.render(60));
+  expect(out).not.toContain("line 40");
+  expect(out).toContain("↓ Jump to latest message · ctrl+end");
+  v.handleInput("\x1b[1;5F"); // Ctrl+End
+  out = text(v.render(60));
+  expect(out).toContain("line 40");
   v.dispose();
 });
 
-test("Enter steers through a composer; x twice stops; esc backs", () => {
-  const { v, calls, tui } = viewer();
-  v.render(80);
+test("typing steers; Ctrl+C clears, then twice on an empty editor stops; Esc goes back to main", () => {
+  const { v, calls, runs } = setup();
+  type(v, "focus on tests");
   v.handleInput(KEY.enter);
-  expect(text(v.render(80))).toContain("✎ steer");
-  for (const ch of "focus on tests") v.handleInput(ch);
-  v.handleInput(KEY.enter);
-  expect(calls.steer).toEqual(["focus on tests"]);
-  v.handleInput(KEY.enter);
-  v.handleInput(KEY.escape);
-  expect(calls.steer).toHaveLength(1);
+  expect(calls.steer).toEqual([[runs[0]!.id, "focus on tests"]]);
+  type(v, "draft");
+  v.handleInput(CTRL_C);
+  expect(text(v.render(100))).not.toContain("draft");
+  expect(calls.stop).toEqual([]);
+  v.handleInput(CTRL_C);
+  expect(text(v.render(100))).toContain("ctrl+c again to stop Find where the config is loaded");
+  v.handleInput(CTRL_C);
+  expect(calls.stop).toEqual([runs[0]!.id]);
   expect(calls.done).toBe(0);
-  v.handleInput("x");
-  expect(text(v.render(80))).toContain("x again to stop");
-  v.handleInput(KEY.down);
-  expect(text(v.render(80))).toContain("x stop");
-  v.handleInput("x");
-  v.handleInput("x");
-  expect(calls.stop).toBe(1);
-  expect(tui.renders).toBeGreaterThan(0);
   v.handleInput(KEY.escape);
   expect(calls.done).toBe(1);
   v.dispose();
 });
 
-test("b moves a foreground run to the background, when offered", () => {
-  let moved = 0;
-  let offered = true;
-  const v = new ConversationViewer(fakeTui(), liveRun(), plain, () => undefined, { background: () => void moved++, canBackground: () => offered });
-  expect(text(v.render(120))).toContain("b background");
-  v.handleInput("b");
-  expect(moved).toBe(1);
-  offered = false;
-  expect(text(v.render(120))).not.toContain("b background");
-  v.handleInput("b");
-  expect(moved).toBe(1);
+test("Tab and Shift+Tab switch sessions through main; drafts stay with their run", () => {
+  const second = liveRun({ label: "Second task", state: { startedAt: Date.now() + 1 } });
+  const { v, calls, runs } = setup([liveRun(), second]);
+  type(v, "half a thought");
+  v.handleInput("\t");
+  expect(v.current).toBe(second);
+  expect(calls.switched).toEqual([second.id]);
+  let out = text(v.render(100));
+  expect(out).toContain("◉ Second task");
+  expect(out).not.toContain("half a thought");
+  v.handleInput(SHIFT_TAB);
+  expect(v.current).toBe(runs[0]);
+  expect(text(v.render(100))).toContain("half a thought");
+  // Past the last run is main: the view closes.
+  v.handleInput("\t");
+  v.handleInput("\t");
+  expect(calls.done).toBe(1);
+  void out;
   v.dispose();
 });
 
-test("m cycles Markdown: assistant text, then tool results too, then nothing", () => {
-  const { v, run } = viewer();
-  run.conversation.apply({ type: "message_end", message: { role: "toolResult", toolName: "read", content: [{ type: "text", text: "# Heading" }] } });
-  const out = () => text(v.render(100));
-  expect(out()).toContain("m md ·");
-  expect(out()).toContain("Looking with rg.");
-  expect(out()).toContain("# Heading");
-  v.handleInput("m");
-  expect(out()).toContain("m md+ ·");
-  expect(out()).not.toContain("# Heading");
-  v.handleInput("m");
-  expect(out()).toContain("m raw ·");
-  expect(out()).toContain("Looking with **rg**.");
-  expect(out()).toContain("# Heading");
-  v.handleInput("m");
-  expect(out()).toContain("m md ·");
-  v.dispose();
-});
-
-test("a finished run offers no steer or stop and shows how it ended", () => {
-  const run = liveRun();
-  run.state = { ...run.state, status: "failed", error: "pi exited (1)", endedAt: run.state.startedAt + 3_000 };
-  run.child = undefined;
-  run.conversation.close();
-  const { v, calls } = viewer(run);
-  const out = text(v.render(80));
-  expect(out).toContain("✗ Find where the config is loaded  scout");
-  expect(out).toContain("failed: pi exited (1)");
-  expect(out).not.toContain("Enter steer");
-  expect(out).not.toContain("▍");
+test("↓ from the editor enters the list: select, switch, background, back", () => {
+  const second = liveRun({ label: "Second task", state: { startedAt: Date.now() + 1 } });
+  const { v, calls } = setup([liveRun(), second]);
+  v.handleInput(KEY.down);
+  expect((v as any)[Symbol.for("pi-plugins.input-context.v1")]()).toBe("list");
+  expect(text(v.render(100))).toContain("j/k select");
+  v.handleInput("j");
+  v.handleInput("b");
+  expect(calls.background).toEqual([second.id]);
   v.handleInput(KEY.enter);
-  v.handleInput("x");
-  v.handleInput("x");
-  expect(calls).toMatchObject({ steer: [], stop: 0 });
+  expect(v.current).toBe(second);
+  // Back in the editor after switching; ↓ and Esc in the list return to it.
+  v.handleInput(KEY.down);
+  v.handleInput(KEY.escape);
+  expect(calls.done).toBe(0);
+  type(v, "x");
+  v.handleInput(KEY.enter);
+  expect(calls.steer).toEqual([[second.id, "x"]]);
+  // main in the list goes back.
+  v.handleInput(KEY.down);
+  v.handleInput("k");
+  v.handleInput("k");
+  expect(calls.done).toBe(0);
+  v.handleInput(KEY.enter);
+  expect(calls.done).toBe(1);
+  v.dispose();
+});
+
+test("a finished run has no editor: it shows how it ended; Esc or q goes back", () => {
+  const run = liveRun({ child: undefined, state: { status: "failed", error: "boom", endedAt: Date.now() } });
+  const { v, calls } = setup([run]);
+  const out = text(v.render(100));
+  expect(out).toContain("✗ failed: boom");
+  expect(out).not.toContain("Working");
+  type(v, "hello");
+  v.handleInput(CTRL_C);
+  v.handleInput(CTRL_C);
+  expect(calls.steer).toEqual([]);
+  expect(calls.stop).toEqual([]);
+  v.handleInput("q");
+  expect(calls.done).toBe(1);
+  v.dispose();
+});
+
+test("opened mid-tool, the running tool's card gets its result later", () => {
+  const run = liveRun();
+  const c = run.conversation;
+  c.apply({ type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", id: "u", name: "bash", arguments: { command: "npm test" } }] } });
+  c.apply({ type: "tool_execution_start", toolCallId: "u", toolName: "bash", args: { command: "npm test" } });
+  c.apply({ type: "tool_execution_update", toolCallId: "u", partialResult: { content: [{ type: "text", text: "running 3 tests" }] } });
+  const { v } = setup([run]);
+  expect(text(v.render(100))).toContain("running 3 tests");
+  c.apply({ type: "tool_execution_end", toolCallId: "u", result: { content: [{ type: "text", text: "3 passed" }] }, isError: false });
+  expect(text(v.render(100))).toContain("3 passed");
   v.dispose();
 });
 
@@ -147,11 +202,12 @@ test("openViewer shows an overlay that re-renders on new messages and resolves o
   expect(ui.customs[0]?.options).toMatchObject({ overlay: true, overlayOptions: { anchor: "top-left", width: "100%", maxHeight: "100%" } });
   const before = ui.tui.renders;
   run.conversation.apply({ type: "message_start", message: { role: "assistant", content: [] } });
-  expect(ui.tui.renders).toBe(before + 1);
-  ui.customs[0]?.component.handleInput("q");
+  expect(ui.tui.renders).toBeGreaterThan(before);
+  ui.customs[0]?.component.handleInput(KEY.escape);
   await closed;
+  const after = ui.tui.renders;
   run.conversation.apply({ type: "message_end", message: { role: "assistant", content: [] } });
-  expect(ui.tui.renders).toBe(before + 1);
+  expect(ui.tui.renders).toBe(after);
 });
 
 test("a recorded run opens from its saved conversation, or else its task and output", () => {
@@ -174,7 +230,10 @@ test("a recorded run opens from its saved conversation, or else its task and out
   const restored = recordedRun({ ...record, sessionFile: "/native/child.jsonl" });
   expect(restored.state.sessionFile).toBe("/native/child.jsonl");
   expect(restored.conversation.messages).toHaveLength(3);
-  const { v } = viewer(restored);
-  expect(v.render(80).join("\n")).toContain("scout · not your main session");
+  // Not one of this session's live runs, it is still listed while shown.
+  const v = new SessionView(fakeTui() as never, restored, plain, () => undefined, {}, undefined, { runs: () => [], actions: () => ({}), enabled: () => true });
+  const out = text(v.render(80));
+  expect(out).toContain("◉ t");
+  expect(out).toContain("■ stopped");
   v.dispose();
 });

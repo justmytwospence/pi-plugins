@@ -2,7 +2,7 @@
 
 Delegates tasks to Pi subagents. Each subagent is a separate headless `pi --mode rpc` process with its own context window, started by the `subagent` tool: a single task, up to eight parallel tasks, or a chain whose steps receive the previous step's output, in the foreground or async, with fresh or forked context, optionally each in a new worktree. When a call leaves the agent role, model or thinking level open, Jev (through Pi's classifier models) picks them, one request per task.
 
-In the TUI, FleetView under the prompt lists the running subagents, and a full-screen viewer streams any run's conversation, laid out after Claude Code's subagent panel.
+In the TUI, FleetView under the prompt lists the running subagents, and any run opens as its own session, drawn the way Pi draws main's, with Tab switching between main and the subagents as in Claude Code.
 
 Part of [Pi Plugins](https://github.com/justmytwospence/pi-plugins). Reference: <https://pi-plugins.vercel.app/plugins/pi-subagents/>.
 
@@ -77,13 +77,13 @@ Sizes are capped: 4,000 characters of task, 12,000 of output and 8,000 of transc
 
 ### FleetView
 
-Claude Code's subagent panel, below the prompt: `main` and every running subagent with elapsed time, tokens and cost, then the pills of other sources it hosts (see below). A run that succeeds leaves the list at once, and a dim `/subagents to see subagents` (`/tasks to see subagents` when it hosts pi-bg) shows for 30 seconds after an async run succeeds. A failed or stopped run stays until your next typed message (a message another extension sends does not count), or until `x` dismisses it. A run whose conversation is open stays until you close it. Selection and stop arming follow the row, not its position.
+Claude Code's subagent panel, below the prompt: `main` and every running subagent with elapsed time, tokens and cost, then the pills of other sources it hosts (see below). A run that succeeds leaves the list at once, and a dim `/subagents to see subagents` (`/tasks to see subagents` when it hosts pi-bg) shows for 30 seconds after an async run succeeds. A failed or stopped run stays until your next typed message (a message another extension sends does not count), or until `x` dismisses it. A run whose session is open stays until you leave it. Selection and stop arming follow the row, not its position.
 
 | key | action |
 |---|---|
 | `↓` (prompt empty, or cursor at the end of its last line), or `←` at an empty prompt | move into the list; `j` in pi-vim's idle Normal mode also works |
 | `↑`/`↓`, `k`/`j` | select |
-| Enter, `l` | open the selected run's conversation, or a pill's own view |
+| Enter, `l` | open the selected run's session, or a pill's own view |
 | `x` twice | stop the selected running run |
 | `x` | dismiss the selected ended run |
 | `b` | move a foreground run to the background: the tool call returns and the result arrives later as a message, as with `async` |
@@ -91,33 +91,33 @@ Claude Code's subagent panel, below the prompt: `main` and every running subagen
 
 `↓` does not leave the prompt while autocomplete is showing or a history entry is being browsed. With pi-select-nav, Tab selects this panel when no next-prompt is accepted, preserving any draft. Repeated Tab cycles runs and hosted pills, skipping the main row and wrapping at the end. Enter opens the selection and Esc returns to the editor. Other editing keys return to the editor.
 
-### Conversation viewer
+### Subagent sessions
 
-Full screen under an accent-colored banner (for example `◀ esc · Find config · scout · not your main session`): the child's conversation as it streams, with tool calls, results (each kept up to 16,000 characters), the last lines of a running tool's output, queued steering messages and current activity. It follows new output until you scroll up, and stays open when the run ends.
+A run opens full screen as a session of its own, drawn as Pi draws main: its conversation in Pi's own message and tool components (Markdown, thinking as your `hideThinkingBlock` setting says, tool cards with Pi's renderers, including edit diffs), Pi's working row while it works, steering messages it has not read yet as `Steering: …`, your editor (pi-vim's when loaded, with your `editorPaddingX`), the subagent list main shows under its prompt with this session marked `◉`, and your footer. With pi-status-footer, the footer and the context gauge on the editor's borders describe the child (its model, thinking level, context share and cost); otherwise a footer in Pi's own layout does. Tool results keep up to 16,000 characters, and their details up to 16,000 characters of JSON.
+
+Pi runs one live session per process and every subagent is a separate process, so this is the same thing Claude Code's and Codex's subagent views are: main's screen drawn for another thread, which you switch to and from.
 
 | key | action |
 |---|---|
-| `↑`/`↓`, `k`/`j` | scroll one line |
-| PgUp/PgDn, Shift+↑/Shift+↓ | scroll one page |
-| Ctrl+U/Ctrl+D | scroll half a page (this read-only viewer only) |
-| Home, End | top, end |
-| Enter | open a composer that steers the running child |
-| `x` twice | stop the run |
-| `b` | move a foreground run to the background |
-| `m` | cycle Markdown rendering: assistant text (default), tool results too, or none; the choice holds for every viewer in this Pi process |
-| Esc, `q`, `h`, Ctrl+C | close |
+| typing, Enter | steer the running child (pi-vim: Enter, `:w`, `:wq` or `:x`) |
+| Tab, Shift+Tab | next or previous session in the list's order (main, then the runs); past the ends is main. Tab completes instead while autocomplete is open |
+| Esc | back to main (with pi-vim, Esc in idle Normal mode) |
+| `↓` at the editor's end | into the list: `↑`/`↓` or `k`/`j` select, Enter or `l` switches (main goes back), `x` twice stops, `x` dismisses an ended run, `b` moves a foreground run to the background, Esc, `h` or `↑` past the top return to the editor |
+| Ctrl+C | clear the editor; on an empty editor, twice stops the child |
+| your `tui.altScreen.*` scroll keys (half page, page, top, bottom), PageUp/PageDown, mouse wheel | scroll the conversation; pi-vim's Ctrl+U/Ctrl+D in idle Normal mode scroll half a page |
+| your `app.tools.expand` (Ctrl+O) and `app.thinking.toggle` | expand tool output, show or hide thinking |
 
-The steering composer is the suite's editor when a provider such as pi-vim is loaded: it opens in Insert mode; Enter, `:w`, `:wq` or `:x` sends; `:q` or Esc in idle Normal mode cancels; and Ctrl+U/Ctrl+D in idle Normal mode scroll the conversation by half a page. Otherwise it is Pi's one-line input (Enter sends, Esc cancels). While the composer is open it owns every key.
+A run that has ended has no editor: a line says how it ended (`✗ failed: …`), `↑`/`↓`, `j`/`k`, Ctrl+U/Ctrl+D, Home/End scroll, `↓` at the end enters the list, and Esc or `q` goes back. A draft you leave in one session is still there when you come back to it. The view follows new output until you scroll up.
 
 ### Widget
 
-An optional widget above the editor, off by default (`"widget": "background"` for async runs, or `"all"`): one row per running subagent with a spinner, task label and role, model and thinking level (Jev's picks marked `(Jev)`), turns, tokens, cost and elapsed time, with its current tool or text beneath; queued tasks; a successful run for 8 seconds, and the latest failed or stopped run until your next message (several share one row). Double-clicking a row opens that run's conversation when Pi passes mouse events to widgets.
+An optional widget above the editor, off by default (`"widget": "background"` for async runs, or `"all"`): one row per running subagent with a spinner, task label and role, model and thinking level (Jev's picks marked `(Jev)`), turns, tokens, cost and elapsed time, with its current tool or text beneath; queued tasks; a successful run for 8 seconds, and the latest failed or stopped run until your next message (several share one row). Double-clicking a row opens that run's session when Pi passes mouse events to widgets.
 
 ### `/subagents`
 
 | command | |
 |---|---|
-| `/subagents` | pick one of this session's runs, live or recorded, and open it in the viewer; outside the TUI, a plain list |
+| `/subagents` | pick one of this session's runs, live or recorded, and open its session; outside the TUI, a plain list |
 | `/subagents <id>` | open one run directly (id or unique prefix) |
 | `/subagents stop <id>` | stop a running run (with no id, the only running one) |
 | `/subagents stop all` | stop every running run |
@@ -232,7 +232,7 @@ Each works alone; with a sibling loaded they work together through Pi's event bu
 
 ## Limitations
 
-- FleetView, the viewer and the widget exist only in the TUI; other modes get the tool and `/subagents` lists.
+- FleetView, subagent sessions and the widget exist only in the TUI; other modes get the tool and `/subagents` lists.
 - The tool row updates only while its call is open; async runs are followed through FleetView, the widget or `/subagents`.
 - Children are RPC processes; the views are rebuilt from their RPC event streams.
 - Agent roles' no-change instructions are instructions, not a filesystem sandbox.
@@ -251,4 +251,4 @@ npm run check
 
 MIT. See [LICENSE](./LICENSE).
 
-The widget, FleetView and conversation viewer are adapted from [@tintinweb/pi-subagents](https://github.com/tintinweb/pi-subagents) by tintinweb (MIT), ported to this extension's RPC children, run records and Jev picks.
+The widget, FleetView and the session view are adapted from [@tintinweb/pi-subagents](https://github.com/tintinweb/pi-subagents) by tintinweb (MIT), ported to this extension's RPC children, run records and Jev picks.

@@ -1,12 +1,15 @@
 import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { SessionManager, initTheme } from "@earendil-works/pi-coding-agent";
 import { afterEach, expect, test, vi } from "vitest";
 import { emptyUsage, setPiInvocation } from "../src/child.ts";
 import subagents, { recordedRun } from "../src/index.ts";
 import { harness } from "./harness.ts";
 import { fakeUI } from "./ui-helpers.ts";
+
+// The session view draws with Pi's own components.
+initTheme("dark");
 
 afterEach(() => { setPiInvocation(undefined); vi.unstubAllEnvs(); });
 
@@ -70,7 +73,7 @@ test.each(["fresh", "fork"] as const)("%s child history propagates through detai
     const opened = reloaded.commands.get("subagents").handler(run.id, reloadedCtx);
     expect(ui.customs).toHaveLength(1);
     expect(ui.customs[0]!.component.render(80).join("\n")).toContain("task=native history");
-    ui.customs[0]!.component.handleInput("q");
+    ui.customs[0]!.component.handleInput("\x1b");
     await opened;
     await reloaded.emit("session_shutdown", {}, reloadedCtx);
   } finally {

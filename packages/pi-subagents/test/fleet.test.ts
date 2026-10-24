@@ -308,3 +308,24 @@ test("↓ leaves a draft for the list once the cursor is at its end; vim's j doe
   expect(ui.customs).toHaveLength(1);
   fleet.dispose();
 });
+
+test("Tab in a subagent's session switches to the next one; back in main, the list is on the last one shown", async () => {
+  const { ui, fleet, runs, steered } = setup();
+  ui.press(KEY.down);
+  ui.press(KEY.enter);
+  const view = ui.customs[0]!.component;
+  expect(view.current).toBe(runs[0]);
+  view.handleInput("\t");
+  expect(view.current).toBe(runs[1]);
+  // One overlay, not one per session.
+  expect(ui.customs).toHaveLength(1);
+  for (const ch of "go") view.handleInput(ch);
+  view.handleInput(KEY.enter);
+  expect(steered).toEqual(["go"]);
+  view.handleInput(KEY.escape);
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(ui.customs).toHaveLength(0);
+  expect(ui.render("subagents-fleet").join("\n")).toMatch(/● Fix config/u);
+  fleet.dispose();
+});

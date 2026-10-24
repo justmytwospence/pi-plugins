@@ -141,7 +141,7 @@ These keys are **local to the named focused surface**, not global shortcuts. No 
 | Inspect a task | `/tasks`, then Enter on a row | [pi-bg](/plugins/pi-bg/) combines shell, subagent, notebook, planner/scout and Herdr-child sources as enabled. |
 | Stop a listed running task | `x` twice, only if the owner supports stopping | Owner-specific: process stop, kernel interrupt, planner stop or awaited Herdr-child interrupt. **Never closes a Herdr pane.** |
 | Stop all own shell tasks | `/stop` | pi-bg only; not subagents, notebooks, planners or Herdr children. |
-| Inspect a subagent | `/subagents [id]`; Enter opens; `b` backgrounds a foreground run | [pi-subagents](/plugins/pi-subagents/); conversation Enter opens steering, `m` cycles Markdown. |
+| Inspect a subagent | `/subagents [id]`; Enter opens; `b` backgrounds a foreground run | [pi-subagents](/plugins/pi-subagents/); in its session, type to steer, Tab/Shift+Tab switch sessions, Esc returns to main. |
 | Review changes | `/diff`; `j/k`, Ctrl+D/U, `gg/G`; `]c/[c` hunks, `]f/[f` files | [pi-diff-review](/plugins/pi-diff-review/); `/` and `n/N` search this diff, not Pi's transcript. |
 | Leave feedback / send it | `c` comment, `s` suggestion; `:w` send, `:wq` send/close | An open comment editor owns text keys. |
 | Record review progress | `r` checks/folds a file; `:mark` advances the live review mark | `:mark` confirms and stays open. Closing never marks reviewed. `?` shows the full viewer keymap. |
@@ -160,7 +160,7 @@ These keys are **local to the named focused surface**, not global shortcuts. No 
 | Question choices | Arrows or j/k; Enter selects; Space toggles multi-select; Ctrl+G adds a note | [pi-ask-user-question](/plugins/pi-ask-user-question/). On `Type something.`, letters/digits are text. |
 | Question tabs / Review | Tab/Shift+Tab or Left/Right; Review Enter submits | Local to the questionnaire. Escape from a text field retains the draft; otherwise declines. |
 | Sidebar open / close / move | Ctrl+' opens or closes Sidebar. In Herdr, prefix+h/l moves between main and Sidebar (with its Herdr plugin). In Sidebar, your own scroll, search, editor and app keys apply (pi-vim's Ctrl+U/D in Normal mode, Ctrl+G to the end, Ctrl+Shift+F search, Ctrl+J/K in lists); drag the divider to resize | [pi-sidebar](/plugins/pi-sidebar/); `PI_SIDEBAR_KEYS` replaces Ctrl+' (comma-separated). Needs a terminal that reports Ctrl+' (kitty keyboard protocol). `/sidebar` opens or closes it. |
-| Read-only log / child viewer | Ctrl+U/D scrolls where supported; Escape returns | Focused viewer, not global. A steering composer instead owns editing keys. |
+| Read-only log viewer | Ctrl+U/D scrolls where supported; Escape returns | Focused viewer, not global. A subagent's session has an editor, which owns editing keys. |
 | Notebook view | j/k scroll, Tab notebook, `o` browser, double-`x` interrupt, Escape/`h` return | [pi-marimo](/plugins/pi-marimo/); interrupt targets the kernel, not its server process. |
 
 Stock selection action IDs, configurable in `keybindings.json`:

@@ -8,7 +8,7 @@ import { setPiInvocation } from "../src/child.ts";
 import subagents, { recordedRun } from "../src/index.ts";
 import { runLabel, taskLabel } from "../src/label.ts";
 import { fleetRoster, renderFleet } from "../src/ui/fleet.ts";
-import { ConversationViewer } from "../src/ui/viewer.ts";
+import { SessionView } from "../src/ui/viewer.ts";
 import { renderSection, renderWidget } from "../src/ui/widget.ts";
 import { harness } from "./harness.ts";
 import { fakeRun, fakeTui, fakeUI, plain } from "./ui-helpers.ts";
@@ -42,14 +42,17 @@ test("same-role runs show distinct primary labels, with width-safe FleetView, wi
     expect(widget.join("\n")).toContain("Audit cache");
     expect(widget.join("\n")).toContain("Audit auth");
     expect(widget.every((line) => visibleWidth(line) <= width)).toBe(true);
-    const viewer = new ConversationViewer(fakeTui(), runs[0]!, plain, () => undefined);
+    const viewer = new SessionView(fakeTui() as never, runs[0]!, plain, () => undefined, {}, undefined, { runs: () => runs, actions: () => ({}), enabled: () => true });
     const lines = viewer.render(width);
-    expect(lines.every((line) => visibleWidth(line) === width)).toBe(true);
+    expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
     if (width >= 80) {
       expect(fleet[2]).toContain("Audit cache  reviewer");
       expect(widget[1]).toContain("Audit cache  reviewer");
-      expect(lines[0]).toContain("Audit cache · reviewer · not your main session");
-      expect(lines[1]).toContain("Audit cache  reviewer");
+      // The list under the editor names the session shown; the footer too.
+      const text = lines.join("\n");
+      expect(text).toContain("◉ Audit cache  reviewer");
+      expect(text).toContain("○ Audit auth  reviewer");
+      expect(text).toContain("• Audit cache");
     }
     viewer.dispose();
   }

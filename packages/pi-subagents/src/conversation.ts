@@ -26,6 +26,10 @@ export interface Message {
   customType?: string;
   command?: string;
   timestamp?: number;
+  /** A tool result's details (Pi's renderers draw diffs and the like from them), when small. */
+  details?: unknown;
+  /** An assistant message's token usage: the latest one gives the context in use. */
+  usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number };
 }
 
 export interface ActiveTool {
@@ -39,6 +43,8 @@ export interface ActiveTool {
 
 /** Longest tool result kept; the rest is counted in `elided`. */
 export const RESULT_MAX_CHARS = 16_000;
+/** Largest tool-result `details` kept, as JSON. */
+export const DETAILS_MAX_CHARS = 16_000;
 const PARTIAL_MAX_CHARS = 2_000;
 
 type RawEvent = Record<string, any>;
@@ -67,7 +73,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Keep what the viewer shows; drop signatures, details, image data, and the tail of long results. */
+/** Keep what the viewer shows; drop signatures, image data, large details, and the tail of long results. */
 export function normalizeMessage(raw: unknown): Message {
   const m = (isObject(raw) ? raw : {}) as Record<string, any>;
   const role = typeof m.role === "string" ? m.role : "unknown";
@@ -91,7 +97,33 @@ export function normalizeMessage(raw: unknown): Message {
   }
   if (typeof m.isError === "boolean") out.isError = m.isError;
   if (typeof m.timestamp === "number") out.timestamp = m.timestamp;
+  if (role === "toolResult" && m.details !== undefined && smallJson(m.details)) out.details = m.details;
+  if (role === "assistant" && isObject(m.usage)) {
+    const u = m.usage as Record<string, unknown>;
+    const n = (key: string) => (typeof u[key] === "number" && Number.isFinite(u[key]) ? (u[key] as number) : 0);
+    out.usage = { input: n("input"), output: n("output"), cacheRead: n("cacheRead"), cacheWrite: n("cacheWrite"), totalTokens: n("totalTokens") };
+  }
   return out;
+}
+
+function smallJson(value: unknown): boolean {
+  try {
+    const json = JSON.stringify(value);
+    return typeof json === "string" && json.length <= DETAILS_MAX_CHARS;
+  } catch {
+    return false;
+  }
+}
+
+/** Tokens of context the latest assistant turn used, as Pi counts them; undefined before the first. */
+export function contextTokens(messages: readonly Message[]): number | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m?.role !== "assistant" || !m.usage || m.stopReason === "aborted" || m.stopReason === "error") continue;
+    const u = m.usage;
+    return u.totalTokens || u.input + u.output + u.cacheRead + u.cacheWrite;
+  }
+  return undefined;
 }
 
 export function messageText(message: Message): string {
@@ -108,6 +140,7 @@ export class Conversation {
   version = 0;
   private open: Message | undefined;
   private readonly listeners = new Set<() => void>();
+  private readonly eventListeners = new Set<(event: RawEvent) => void>();
 
   constructor(private readonly onMessage?: (message: Message) => void) {}
 
@@ -127,8 +160,30 @@ export class Conversation {
     return () => this.listeners.delete(listener);
   }
 
+  /**
+   * Every RPC event, after it is applied. A `message_update` carries the whole streaming message
+   * (`message`), as Pi's own session events do; RPC sends only the delta.
+   */
+  subscribeEvents(listener: (event: RawEvent) => void): () => void {
+    this.eventListeners.add(listener);
+    return () => this.eventListeners.delete(listener);
+  }
+
   /** Apply one RPC event; events that are not about the conversation are ignored. */
   apply(event: RawEvent): void {
+    this.applyEvent(event);
+    if (!this.eventListeners.size) return;
+    const shown = event.type === "message_update" && this.open ? { ...event, message: this.open } : event;
+    for (const listener of this.eventListeners) {
+      try {
+        listener(shown);
+      } catch {
+        // A broken view must not break the child's event loop.
+      }
+    }
+  }
+
+  private applyEvent(event: RawEvent): void {
     switch (event.type) {
       case "message_start": {
         const message = normalizeMessage(event.message);
