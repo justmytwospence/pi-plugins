@@ -39,6 +39,8 @@ export interface SplitSettings {
   collapsed(): boolean;
   /** Whether Sidebar has focus: the divider points at the focused half, and the other one is dimmed. */
   focused(): boolean;
+  /** A left press in a half without focus: give that half focus (before Pi handles the press). */
+  focusHalf?(half: "main" | "sidebar"): void;
   /** The divider's lines; `length` is its run along the split (rows beside main, columns below it). */
   divider(orientation: Orientation, sidebarFocused: boolean, width: number, length: number): string[];
 }
@@ -177,6 +179,15 @@ export class SplitRoot extends HStack {
     this.requestRender();
   }
 
+  /** The half at a screen position (the split fills the screen from its top-left), none on the divider. */
+  halfAt(x: number, y: number): "main" | "sidebar" | undefined {
+    if (this.settings.collapsed() || this.split.total < 3) return undefined;
+    const position = this.orientation === "right" ? x : y;
+    if (position < this.split.main) return "main";
+    if (position > this.split.main) return "sidebar";
+    return undefined;
+  }
+
   /**
    * Dim the half without focus on a composited frame, so the focused half stands out (as tmux dims
    * an inactive pane). The halves' boxes come from Pi's layout frame; nothing else is touched.
@@ -228,6 +239,7 @@ export class SplitLayout {
   private original: Component | undefined;
   private root: SplitRoot | undefined;
   private restoreDim: (() => void) | undefined;
+  private restoreClick: (() => void) | undefined;
 
   constructor(readonly tui: LayoutTui, private readonly panel: Component, private readonly settings: SplitSettings) {}
 
@@ -245,6 +257,7 @@ export class SplitLayout {
     this.root = new SplitRoot(this.original, this.panel, this.settings, () => this.tui.requestRender());
     this.tui.setLayoutRoot!(this.root);
     this.installDim();
+    this.installClickFocus();
     this.tui.requestRender(true);
     return true;
   }
@@ -275,9 +288,59 @@ export class SplitLayout {
     };
   }
 
+  /**
+   * A left press anywhere in a half focuses it, as clicking a Herdr pane does. Pi dispatches a press
+   * to the deepest component first and falls back to text selection, so the root never sees most
+   * presses: this wraps the renderer's raw mouse handler instead. Presses on overlays (dialogs), the
+   * divider, a gesture in progress or while Pi's search is open are left alone; the press itself
+   * still reaches Pi (selection, "click to show more").
+   */
+  private installClickFocus(): void {
+    if (this.restoreClick || !this.settings.focusHalf) return;
+    type Raw = { x: number; y: number; button: number; release?: boolean };
+    type Renderer = LayoutTui & {
+      handleMouseEvent?: (raw: Raw) => unknown;
+      mouseCapture?: unknown;
+      mousePressTarget?: unknown;
+      activeSearch?: unknown;
+      renderedOverlayLayouts?: { row: number; col: number; width: number; height: number }[];
+    };
+    const tui = this.tui as Renderer;
+    const handler = tui.handleMouseEvent;
+    if (typeof handler !== "function") return;
+    const own = Object.prototype.hasOwnProperty.call(tui, "handleMouseEvent");
+    const layout = this;
+    const wrapped = function (this: Renderer, raw: Raw) {
+      try { layout.pressFocus(this ?? tui, raw); } catch { /* never block the press */ }
+      return handler.call(this, raw);
+    };
+    tui.handleMouseEvent = wrapped;
+    this.restoreClick = () => {
+      if (tui.handleMouseEvent !== wrapped) return;
+      if (own) tui.handleMouseEvent = handler;
+      else delete tui.handleMouseEvent;
+    };
+  }
+
+  private pressFocus(
+    tui: { mouseCapture?: unknown; mousePressTarget?: unknown; activeSearch?: unknown; renderedOverlayLayouts?: { row: number; col: number; width: number; height: number }[] },
+    raw: { x: number; y: number; button: number; release?: boolean },
+  ): void {
+    const root = this.mounted ? this.root : undefined;
+    if (!root || raw.release || (raw.button & (32 | 64)) !== 0 || (raw.button & 3) !== 0) return;
+    if (tui.mouseCapture || tui.mousePressTarget || tui.activeSearch) return;
+    const overlays = tui.renderedOverlayLayouts ?? [];
+    if (overlays.some((o) => raw.x >= o.col && raw.x < o.col + o.width && raw.y >= o.row && raw.y < o.row + o.height)) return;
+    const half = root.halfAt(raw.x, raw.y);
+    if (!half || (half === "sidebar") === this.settings.focused()) return;
+    this.settings.focusHalf?.(half);
+  }
+
   unmount(): void {
     this.restoreDim?.();
     this.restoreDim = undefined;
+    this.restoreClick?.();
+    this.restoreClick = undefined;
     if (this.root && this.tui.layoutRoot === this.root && this.original) {
       this.tui.setLayoutRoot?.(this.original);
       this.tui.requestRender(true);

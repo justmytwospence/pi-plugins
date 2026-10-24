@@ -268,6 +268,7 @@ export class SidebarController {
         minColumns: parseMinColumns(process.env[MIN_COLUMNS_ENV]),
         collapsed: () => this.collapsed,
         focused: () => !!this.panel?.focused,
+        focusHalf: (half) => (half === "sidebar" ? this.focusSidebar() : this.focusMain()),
         // Accent in both states; the arrow in its middle points at the focused half.
         divider: (orientation, sidebarFocused, width, length) => dividerLines(orientation, width, (text) => theme().fg("borderAccent", text), {
           sidebar: sidebarFocused, length, pointer: (text) => theme().bold(theme().fg("accent", text)),

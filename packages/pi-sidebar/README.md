@@ -44,7 +44,7 @@ pi -e ./packages/pi-sidebar
 | --- | --- |
 | `Ctrl+'` | Opens Sidebar, focused, or closes it from either half. The thread is kept. |
 | Herdr `prefix+h/l` (or `j/k` when Sidebar is below main) | Move between main and Sidebar as if Sidebar were a Herdr pane. Any other move is Herdr's normal pane move. Needs the bundled Herdr plugin (below). |
-| Click | Clicking Sidebar's title, notice or composer focuses it, and clicking main's editor focuses main. |
+| Click | Clicking anywhere in a half (its transcript, title, notice or editor) focuses that half. Clicks on dialogs and the divider do not. |
 | Drag the divider | Resizes the halves. The size is remembered per orientation (beside or below) in `~/.pi/agent/pi-sidebar.json`; double-click the divider to go back to the default. |
 | `/sidebar`, `/close` in Sidebar | Open or close Sidebar. |
 | `/sidebar new` (or `/new` in Sidebar) | Starts a fresh thread. |

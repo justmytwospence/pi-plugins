@@ -138,6 +138,42 @@ describe("focus cues", () => {
     expect(Object.prototype.hasOwnProperty.call(proto, "applySearchHighlights")).toBe(false);
   });
 
+  it("focuses the half a left press lands in, then lets Pi handle the press", () => {
+    let sidebar = false;
+    const asked: string[] = [];
+    const seen: unknown[] = [];
+    const tui = Object.assign(fakeTui(), {
+      mouseCapture: undefined as unknown,
+      activeSearch: undefined as unknown,
+      renderedOverlayLayouts: [] as { row: number; col: number; width: number; height: number }[],
+      handleMouseEvent(raw: unknown) { seen.push(raw); },
+    });
+    const handler = tui.handleMouseEvent;
+    const layout = new SplitLayout(tui, leaf(), { ...settings({ focused: () => sidebar }), focusHalf: (half: "main" | "sidebar") => { asked.push(half); sidebar = half === "sidebar"; } });
+    layout.mount();
+    entries(tui.layoutRoot as SplitRoot)[0]!.visible!({ width: 165, height: 50 });
+    tui.handleMouseEvent({ x: 120, y: 3, button: 0 });
+    expect(asked).toEqual(["sidebar"]);
+    expect(seen).toHaveLength(1);
+    tui.handleMouseEvent({ x: 120, y: 3, button: 0 }); // already focused
+    tui.handleMouseEvent({ x: 10, y: 3, button: 0, release: true }); // release
+    tui.handleMouseEvent({ x: 10, y: 3, button: 2 }); // right button
+    tui.handleMouseEvent({ x: 10, y: 3, button: 64 }); // wheel
+    tui.handleMouseEvent({ x: 82, y: 3, button: 0 }); // divider
+    tui.renderedOverlayLayouts = [{ row: 0, col: 0, width: 20, height: 10 }];
+    tui.handleMouseEvent({ x: 10, y: 3, button: 0 }); // dialog
+    tui.renderedOverlayLayouts = [];
+    tui.activeSearch = {};
+    tui.handleMouseEvent({ x: 10, y: 3, button: 0 }); // search open
+    tui.activeSearch = undefined;
+    expect(asked).toEqual(["sidebar"]);
+    tui.handleMouseEvent({ x: 10, y: 3, button: 0 });
+    expect(asked).toEqual(["sidebar", "main"]);
+    expect(seen).toHaveLength(9);
+    layout.unmount();
+    expect(tui.handleMouseEvent).toBe(handler);
+  });
+
   it("mutes an editor's borders while asked, once per editor", () => {
     const editor = { renderTopBorder: (w: number) => `\x1b[36m${"─".repeat(w)}\x1b[39m`, renderBottomBorder: () => "\x1b[31m━\x1b[36m─\x1b[39m" };
     let mute = true;
