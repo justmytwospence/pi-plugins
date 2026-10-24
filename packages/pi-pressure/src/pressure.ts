@@ -1,9 +1,9 @@
 // Turns readings into levels with hysteresis, decides when the row shows, and
 // formats the status pi-status-footer folds into its own row:
-//   pressure: cpu 97 hot · load 1.6 warn · mem warn · thermal warn · swap-in 40MB/s warn · top vitest · ⣀⣤⣶⣿
-// Items are ` · `-separated; each signal ends in its level word and the CPU trace
-// (braille only) comes last, so nothing ends in `%` (herdr-web-ui reads a footer
-// line ending in % $ # > as a shell prompt).
+//   pressure: cpu 97 ↑ hot · load 1.6 warn · mem warn · thermal warn · swap-in 40MB/s ↓ warn · top vitest
+// Items are ` · `-separated; each signal is `name [value] [↑|↓] level`, the
+// arrow only while it is moving significantly. Nothing ends in `%`
+// (herdr-web-ui reads a footer line ending in % $ # > as a shell prompt).
 
 import type { Reading } from "./sample.ts";
 
@@ -23,8 +23,6 @@ export interface PressureConfig {
   hideAfterMs: number;
   /** While the row shows and Pi is idle, re-read this often so it stays current and can hide. */
   refreshMs: number;
-  /** Minutes of CPU history in the trace, one braille dot column per minute (two per character). */
-  historyMinutes: number;
   /** Busy share of all cores, percent. */
   cpu: Band;
   /** One-minute load average per core. */
@@ -43,7 +41,6 @@ export const DEFAULTS: PressureConfig = {
   showAfterMs: 10_000,
   hideAfterMs: 30_000,
   refreshMs: 10_000,
-  historyMinutes: 60,
   cpu: { warn: 85, hot: 95 },
   loadPerCore: { warn: 1.5, hot: 2.5 },
   memorySome: { warn: 10, hot: 40 },
@@ -102,11 +99,57 @@ export interface View {
   /** Signals to list, in display order: those that rose during the current episode (they stay until the row hides), and when shown by hand every signal with a reading. */
   episode: Signal[];
   reading?: Reading;
-  /** Mean CPU busy percentage per minute, oldest first, ending with the current (partial) minute; undefined where nothing was read. */
-  history: (number | undefined)[];
+  /** Signals moving significantly, and which way. */
+  trends: Partial<Record<Signal, Trend>>;
 }
 
-const MINUTE = 60_000;
+export type Trend = "up" | "down";
+
+/** A trend compares the last RECENT_MS with the TREND_MS before it, time-weighted. */
+const RECENT_MS = 15_000;
+const TREND_MS = 60_000;
+/** How far the recent mean must move to count. Memory and thermal on macOS are levels (1, 2, 4 and 0-3). */
+const TREND_STEP: Record<Signal, number> = { cpu: 15, load: 0.3, mem: 0.5, swap: 5, heat: 0.5 };
+
+/** The number a signal's trend follows, from one reading. */
+function trendValue(signal: Signal, r: Reading): number | undefined {
+  if (signal === "cpu") return r.cpu;
+  if (signal === "load") return r.loadPerCore;
+  if (signal === "mem") return r.memory?.source === "darwin" ? r.memory.level : r.memory?.some;
+  if (signal === "heat") return r.thermal?.state;
+  return r.swapInBps === undefined ? undefined : r.swapInBps / (1024 * 1024);
+}
+
+/** Up or down when the last 15 s moved a signal by its step against the minute before; nothing otherwise. */
+export function trends(samples: readonly Reading[], now: number): Partial<Record<Signal, Trend>> {
+  const out: Partial<Record<Signal, Trend>> = {};
+  const mean = (signal: Signal, from: number, to: number): number | undefined => {
+    let sum = 0, weight = 0;
+    for (const r of samples) {
+      const value = trendValue(signal, r);
+      if (value === undefined) continue;
+      // Averages (CPU, Linux memory stall, swap-ins) stand for the interval they cover; macOS
+      // levels hold from when they were entered; load is the kernel's own moving average, an instant.
+      const start = signal === "load" ? r.at - 1
+        : signal === "mem" && r.memory?.source === "darwin" ? Math.max(r.memory.since, r.since ?? r.at - 1)
+        : signal === "heat" && r.thermal ? Math.max(r.thermal.since, r.since ?? r.at - 1)
+        : r.since ?? r.at - 1;
+      const overlap = Math.min(r.at, to) - Math.max(start, from);
+      if (overlap <= 0) continue;
+      sum += value * overlap;
+      weight += overlap;
+    }
+    return weight > 0 ? sum / weight : undefined;
+  };
+  for (const signal of SIGNALS) {
+    const recent = mean(signal, now - RECENT_MS, now);
+    const before = mean(signal, now - TREND_MS, now - RECENT_MS);
+    if (recent === undefined || before === undefined) continue;
+    if (recent - before >= TREND_STEP[signal]) out[signal] = "up";
+    else if (before - recent >= TREND_STEP[signal]) out[signal] = "down";
+  }
+  return out;
+}
 
 /**
  * Steps through readings, which arrive whenever Pi does something rather than
@@ -118,31 +161,8 @@ const MINUTE = 60_000;
  */
 export function createMonitor(config: PressureConfig) {
   let levels: Record<Signal, Level> = { cpu: "ok", load: "ok", mem: "ok", swap: "ok", heat: "ok" };
-  // Time-weighted CPU per minute (percent x ms, ms), keyed by minute since the epoch.
-  const minutes = new Map<number, { sum: number; weight: number }>();
-  let latest: number | undefined;
-  const history = (): (number | undefined)[] => {
-    if (latest === undefined || minutes.size === 0) return [];
-    const first = Math.max(Math.min(...minutes.keys()), latest - config.historyMinutes + 1);
-    const out: (number | undefined)[] = [];
-    for (let m = first; m <= latest; m++) {
-      const bucket = minutes.get(m);
-      out.push(bucket && bucket.weight > 0 ? bucket.sum / bucket.weight : undefined);
-    }
-    return out;
-  };
-  /** Spread an interval's mean over the minutes it covers, weighted by overlap. */
-  const record = (since: number, at: number, cpu: number) => {
-    const from = Math.max(Math.floor(since / MINUTE), Math.floor(at / MINUTE) - config.historyMinutes + 1);
-    for (let m = from; m <= Math.floor(at / MINUTE); m++) {
-      const overlap = Math.min(at, (m + 1) * MINUTE) - Math.max(since, m * MINUTE);
-      if (overlap <= 0) continue;
-      const bucket = minutes.get(m) ?? { sum: 0, weight: 0 };
-      bucket.sum += cpu * overlap;
-      bucket.weight += overlap;
-      minutes.set(m, bucket);
-    }
-  };
+  // Readings covering the last minute, for trends.
+  let samples: Reading[] = [];
   const episode = new Set<Signal>();
   // Automatic visibility, tracked even while the mode overrides it.
   let automatic = false;
@@ -158,16 +178,13 @@ export function createMonitor(config: PressureConfig) {
     levels: { ...levels },
     episode: SIGNALS.filter((s) => episode.has(s) || (mode === "shown" && available(s))),
     reading,
-    history: history(),
+    trends: reading ? trends(samples, reading.at) : {},
   });
   return {
     step(next: Reading): View {
       reading = next;
       levels = classify(next, config, levels);
-      const minute = Math.floor(next.at / MINUTE);
-      latest = Math.max(latest ?? minute, minute);
-      if (next.cpu !== undefined && next.since !== undefined) record(next.since, next.at, next.cpu);
-      for (const m of minutes.keys()) if (m <= latest - config.historyMinutes) minutes.delete(m);
+      samples = [...samples.filter((r) => r.at > next.at - TREND_MS), next];
       const now = next.at;
       if (pressed()) {
         const raised = SIGNALS.filter((s) => levels[s] !== "ok");
@@ -203,22 +220,6 @@ export function createMonitor(config: PressureConfig) {
   };
 }
 
-const BRAILLE_LEFT = [0x40, 0x04, 0x02, 0x01]; // bottom to top
-const BRAILLE_RIGHT = [0x80, 0x20, 0x10, 0x08];
-
-/** Percentages as braille bars, two values per cell, filled from the bottom (4 dots per column); undefined is blank. */
-export function spark(values: readonly (number | undefined)[]): string {
-  const padded = values.length % 2 ? [undefined, ...values] : [...values];
-  const dots = (value: number | undefined, column: number[]) => {
-    if (value === undefined) return 0;
-    const height = value <= 0 ? 0 : Math.max(1, Math.min(4, Math.round(value / 25)));
-    return column.slice(0, height).reduce((bits, bit) => bits | bit, 0);
-  };
-  let out = "";
-  for (let i = 0; i < padded.length; i += 2) out += String.fromCodePoint(0x2800 | dots(padded[i], BRAILLE_LEFT) | dots(padded[i + 1], BRAILLE_RIGHT));
-  return out;
-}
-
 export function formatRate(bytesPerSecond: number): string {
   const units = ["B", "KB", "MB", "GB"];
   let value = Math.max(0, bytesPerSecond), unit = 0;
@@ -236,9 +237,10 @@ export function formatStatus(view: View, top: string | undefined, paint: Paint =
   const items: string[] = [];
   for (const signal of view.episode) {
     const level = view.levels[signal];
-    const value = (text: string) => paint.level(level, `${text}${text ? " " : ""}${level}`);
+    const arrow = view.trends[signal] === "up" ? "\u2191" : view.trends[signal] === "down" ? "\u2193" : "";
+    const value = (text: string) => paint.level(level, [text, arrow, level].filter(Boolean).join(" "));
     if (signal === "cpu") {
-      const busy = r?.cpu ?? view.history.at(-1);
+      const busy = r?.cpu;
       items.push(`${paint.dim("cpu")} ${value(busy === undefined ? "" : `${Math.round(busy)}`)}`);
     } else if (signal === "load") items.push(`${paint.dim("load")} ${value(r ? r.loadPerCore.toFixed(1) : "")}`);
     else if (signal === "mem") items.push(`${paint.dim("mem")} ${value("")}`);
@@ -246,8 +248,6 @@ export function formatStatus(view: View, top: string | undefined, paint: Paint =
     else items.push(`${paint.dim("swap-in")} ${value(r?.swapInBps === undefined ? "" : formatRate(r.swapInBps))}`);
   }
   if (top) items.push(`${paint.dim("top")} ${top}`);
-  // The CPU trace goes last, so a reader can give it whatever width is left.
-  if (view.history.some((v) => v !== undefined)) items.push(paint.level(view.levels.cpu, spark(view.history)));
   return `${paint.dim("pressure:")} ${items.join(paint.dim(" \u00b7 "))}`;
 }
 

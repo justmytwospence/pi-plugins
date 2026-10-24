@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { ensureHelper, parseHelperLine, startHelper, type HelperLine } from "../src/darwin.ts";
 import { mergeConfig } from "../src/index.ts";
-import { bandLevel, createMonitor, DEFAULTS, formatRate, formatStatus, spark, topBy } from "../src/pressure.ts";
+import { bandLevel, createMonitor, DEFAULTS, formatRate, formatStatus, topBy, trends } from "../src/pressure.ts";
 import { busyPercent, cpuTimes, createSampler, parseProcVmstat, parsePs, parsePsi, processName, psiShare, type Reading, type SamplerDeps } from "../src/sample.ts";
 
 const PSI = "some avg10=12.50 avg60=2.48 avg300=2.55 total=1000000\nfull avg10=3.10 avg60=0.00 avg300=0.00 total=200000\n";
@@ -167,16 +167,27 @@ describe("monitor", () => {
     expect(view.episode).toEqual(["heat"]);
     expect(createMonitor(DEFAULTS).step(reading(0, { thermal: { state: 1, since: 0 } })).levels.heat).toBe("ok");
   });
-  test("history: an interval's mean spreads over the minutes it covers, time-weighted", () => {
-    const m = createMonitor({ ...DEFAULTS, historyMinutes: 4 });
-    const min = 60_000;
-    m.step({ at: 0, loadPerCore: 0 });
-    // One read after 2.5 idle-ish minutes at 40%, then 30 s at 100%.
-    m.step({ at: 2.5 * min, since: 0, cpu: 40, loadPerCore: 0 });
-    expect(m.view().history).toEqual([40, 40, 40]);
-    m.step({ at: 3 * min, since: 2.5 * min, cpu: 100, loadPerCore: 0 });
-    // The current minute (3) has no time in it yet.
-    expect(m.view().history).toEqual([40, 40, 70, undefined]);
+  test("trends: an arrow only while the last 15 s moved a signal by its step against the minute before", () => {
+    const steady = Array.from({ length: 30 }, (_, i) => reading((i + 1) * 2_000, { cpu: 50 }));
+    expect(trends(steady, 60_000)).toEqual({});
+    const rising = [...steady.slice(0, 22), ...Array.from({ length: 8 }, (_, i) => reading(46_000 + (i + 1) * 2_000, { cpu: 80 }))];
+    expect(trends(rising, 62_000)).toEqual({ cpu: "up" });
+    // Small moves (under 15 points) do not count.
+    const drifting = [...steady.slice(0, 22), ...Array.from({ length: 8 }, (_, i) => reading(46_000 + (i + 1) * 2_000, { cpu: 60 }))];
+    expect(trends(drifting, 62_000)).toEqual({});
+    // macOS memory level 1 -> 2 is a step; load falling by 0.3 per core is too.
+    const memory = [reading(10_000, { loadPerCore: 1.2, memory: { source: "darwin", level: 1, since: 0 } }), reading(55_000, { since: 10_000, loadPerCore: 0.8, memory: { source: "darwin", level: 2, since: 50_000 } })];
+    expect(trends(memory, 55_000)).toMatchObject({ mem: "up", load: "down" });
+    // One read covering a long idle stretch has nothing to compare against.
+    expect(trends([reading(600_000, { since: 0, cpu: 90 })], 600_000)).toEqual({});
+  });
+  test("the monitor's view carries trends from the last minute of readings", () => {
+    const m = createMonitor({ ...DEFAULTS, showAfterMs: 0 });
+    for (let i = 1; i <= 22; i++) m.step(reading(i * 2_000, { cpu: 30 }));
+    let view = m.view();
+    for (let i = 23; i <= 30; i++) view = m.step(reading(i * 2_000, { cpu: 97 }));
+    expect(view.trends.cpu).toBe("up");
+    expect(formatStatus(view, undefined)).toBe("pressure: cpu 97 \u2191 hot");
   });
   test("shown by hand: visible without pressure, every signal with a reading, kept current", () => {
     const m = createMonitor(DEFAULTS);
@@ -186,7 +197,7 @@ describe("monitor", () => {
     expect(view.visible).toBe(true);
     expect(view.episode).toEqual(["cpu", "load", "mem"]);
     expect(m.nextCheck()).toBe(DEFAULTS.refreshMs);
-    expect(formatStatus(view, undefined)).toMatch(/^pressure: cpu 20 ok \u00b7 load 0.5 ok \u00b7 mem ok \u00b7 [\u2800-\u28ff]+$/);
+    expect(formatStatus(view, undefined)).toBe("pressure: cpu 20 ok \u00b7 load 0.5 ok \u00b7 mem ok");
     // It stays until hidden; hiding with no episode running hands it back to auto.
     expect(m.step(reading(100_000)).visible).toBe(true);
     m.setMode("hidden");
@@ -217,23 +228,18 @@ describe("monitor", () => {
 });
 
 describe("status", () => {
-  test("spark: two values per braille cell, filled from the bottom", () => {
-    expect(spark([25, 25, 50, 50, 75, 75, 100, 100])).toBe("⣀⣤⣶⣿");
-    expect(spark([0, 100, 100])).toBe("⠀⣿");
-    expect(spark([10, 100])).toBe("⣸");
-    expect(spark([])).toBe("");
-  });
   test("rates", () => {
     expect(formatRate(40 * 1024 * 1024)).toBe("40MB/s");
     expect(formatRate(1.5 * 1024)).toBe("1.5KB/s");
     expect(formatRate(12)).toBe("12B/s");
   });
-  test("format: episode signals, level words, culprit, then the trace; never ends in a prompt character", () => {
+  test("format: episode signals, level words, then the culprit; never ends in a prompt character", () => {
     const m = createMonitor({ ...DEFAULTS, showAfterMs: 0 });
     // One read per minute: each minute is a braille dot column.
     for (const [i, cpu] of [60, 80, 90, 97].entries()) m.step({ at: (i + 1) * 60_000, since: i * 60_000, cpu, loadPerCore: 1.6, memory: { source: "darwin", level: 2, since: 0 }, thermal: { state: 2, since: 0 } });
     const view = m.view();
-    expect(formatStatus(view, "vitest")).toBe("pressure: cpu 97 hot · load 1.6 warn · mem warn · thermal warn · top vitest · ⢠⣾⡇");
+    // One read a minute: too sparse for a trend.
+    expect(formatStatus(view, "vitest")).toBe("pressure: cpu 97 hot · load 1.6 warn · mem warn · thermal warn · top vitest");
     expect(formatStatus(view, undefined)).not.toMatch(/[%$#>]$/);
     expect(topBy(view)).toBe("cpu");
     expect(formatStatus({ ...view, visible: false }, "x")).toBeUndefined();
@@ -242,9 +248,7 @@ describe("status", () => {
 
 describe("config", () => {
   test("merges valid values over defaults, ignores the rest", () => {
-    const config = mergeConfig({ cpu: { warn: 70 }, showAfterMs: 0, historyMinutes: 999 }, { cpu: { hot: -1 } as never, minGapMs: 10, enabled: false });
-    expect(config.historyMinutes).toBe(120);
-    expect(DEFAULTS.historyMinutes).toBe(60);
+    const config = mergeConfig({ cpu: { warn: 70 }, showAfterMs: 0 }, { cpu: { hot: -1 } as never, minGapMs: 10, enabled: false });
     expect(config.cpu).toEqual({ warn: 70, hot: 95 });
     expect(config.showAfterMs).toBe(0);
     expect(config.minGapMs).toBe(250);

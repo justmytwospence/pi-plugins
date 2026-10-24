@@ -3,10 +3,10 @@
 A footer row that appears only while the machine is under CPU, memory or thermal pressure, and goes away once it eases. It does not poll.
 
 ```
- Pressure cpu 97 · load 1.6 · mem warn · thermal warn · top vitest · ⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣠⣤⣤⣤⣴⣶⣾⣾⣿⣿⣿
+ Pressure cpu 97 ↑ · load 1.6 · mem warn · thermal warn ↑ · top vitest
 ```
 
-(Example, not a screenshot.) With [pi-status-footer](../pi-status-footer) the row sits under the context and background rows, led by a microchip icon. Values are colored by level (muted ok, warning, error). Without it, the same text shows in Pi's status row as `pressure: cpu 97 hot · … · ⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣠⣤⣤⣤⣴⣶⣾⣾⣿⣿⣿`.
+(Example, not a screenshot.) With [pi-status-footer](../pi-status-footer) the row sits under the context and background rows, led by a microchip icon. Values are colored by level (muted ok, warning, error). Without it, the same text shows in Pi's status row as `pressure: cpu 97 ↑ hot · …`.
 
 ## How it reads without polling
 
@@ -27,7 +27,7 @@ A signal must stay at warn or above for 10 s before the row shows; an interval t
 
 ## The row
 
-The signals that rose during the episode, the busiest process (by memory when only memory is under pressure; `ps` runs only while the row shows, at most every 10 s), then a braille trace of CPU over the last hour: one dot column per minute (the minute's time-weighted mean), two minutes per character, current minute last. It comes last on the row and takes whatever width is left, keeping the newest minutes, so it starts at one character and grows.
+The signals that rose during the episode, then the busiest process (by memory when only memory is under pressure; `ps` runs only while the row shows, at most every 10 s). A signal gets an arrow, `↑` or `↓`, only while it is moving significantly: its time-weighted mean over the last 15 s differs from the minute before by at least a step (15 points of CPU, 0.3 load per core, one macOS memory or thermal level, 5 points of Linux memory stall, 5 MB/s of swap-ins). Reads that are too sparse to compare (Pi idle) give no arrow.
 
 ## Controls
 
@@ -43,7 +43,7 @@ Settings (optional) in `~/.pi/agent/pi-pressure.json`, overridden by `.pi/pi-pre
 
 ```json
 {
-  "enabled": true, "minGapMs": 2000, "showAfterMs": 10000, "hideAfterMs": 30000, "refreshMs": 10000, "historyMinutes": 60,
+  "enabled": true, "minGapMs": 2000, "showAfterMs": 10000, "hideAfterMs": 30000, "refreshMs": 10000,
   "cpu": { "warn": 85, "hot": 95 }, "loadPerCore": { "warn": 1.5, "hot": 2.5 },
   "memorySome": { "warn": 10, "hot": 40 }, "memoryFull": { "warn": 2, "hot": 5 },
   "swapInMBps": { "warn": 10, "hot": 50 }

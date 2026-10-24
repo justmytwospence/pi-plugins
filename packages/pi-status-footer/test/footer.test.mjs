@@ -503,7 +503,7 @@ test("all optional footer rows fit both themes at every width, alone and combine
     ...["4:12", "1h05m", "cold", "cold?"].map((cache) => ({ ...fixture(), cache })),
     ...["marimo: idle.py", "marimo: local.py · :2718", "marimo: remote.py · nb.example.com/lab · disconnected", "marimo: queued.py · 2 queued", "marimo: broken.py · 2 errors · not open", "marimo: older.py · +3 open", "marimo: /marimo to pick one"].map((text) => ({ ...fixture(), marimo: mod.parseMarimoStatus(text) })),
     { ...fixture(), bg: mod.parseBgStatus("bg: api up · vite ready · lint ✗") },
-    { ...fixture(), pressure: mod.parsePressureStatus("pressure: cpu 97 hot · load 1.6 warn · mem warn · swap-in 40MB/s ok · top Google Chrome Helper (R… · ⣴⣿") },
+    { ...fixture(), pressure: mod.parsePressureStatus("pressure: cpu 97 ↑ hot · load 1.6 warn · mem warn · swap-in 40MB/s ok · top Google Chrome Helper (R…") },
     { ...fixture(), context: { percent: null, tokens: null, contextWindow: 200_000 }, quotas: [], unavailableQuota: "Claude acct" },
     { ...fixture(), quotas: [{ source: "Claude acct", updated: now, windows: [{ label: "named model pool", used: 99 }], extra: { enabled: true, used: 12.5, currency: "EUR" } }] },
   ];
@@ -543,37 +543,31 @@ test("pi-bg's tasks get their own row under the context row", () => {
   assert.deepEqual(mod.absorbStatuses(new Map([["bg", "bg: something new happened"]]), { claudeRow: true }).rest, ["bg: something new happened"]);
 });
 
-test("pi-pressure's signals get their own row, the CPU trace last in the width left", () => {
-  const text = "pressure: cpu 97 hot \u00b7 load 1.6 warn \u00b7 mem warn \u00b7 thermal hot \u00b7 swap-in 40MB/s ok \u00b7 top vitest \u00b7 \u28f4\u28ff";
+test("pi-pressure's signals get their own row, with arrows while they move", () => {
+  const text = "pressure: cpu 97 \u2191 hot \u00b7 load 1.6 warn \u00b7 mem \u2193 warn \u00b7 thermal hot \u00b7 swap-in 40MB/s ok \u00b7 top vitest";
   const absorbed = mod.absorbStatuses(new Map([["pressure", `\x1b[2m${text}\x1b[0m`]]), { claudeRow: true });
   assert.deepEqual(absorbed.pressure, [
-    { kind: "signal", name: "cpu", value: "97", level: "hot" },
+    { kind: "signal", name: "cpu", value: "97", trend: "up", level: "hot" },
     { kind: "signal", name: "load", value: "1.6", level: "warn" },
-    { kind: "signal", name: "mem", level: "warn" },
+    { kind: "signal", name: "mem", trend: "down", level: "warn" },
     { kind: "signal", name: "thermal", level: "hot" },
     { kind: "signal", name: "swap-in", value: "40MB/s", level: "ok" },
     { kind: "top", name: "vitest" },
-    { kind: "trace", trace: "\u28f4\u28ff" },
   ]);
   assert.deepEqual(absorbed.rest, []);
   const s = { ...fixture(), statuses: absorbed.rest, pressure: absorbed.pressure };
-  assert.equal(plain(mod.renderFooter(s, 160, theme)[3]), " \uf2db Pressure cpu 97 \u00b7 load 1.6 \u00b7 mem warn \u00b7 thermal hot \u00b7 swap-in 40MB/s \u00b7 top vitest \u00b7 \u28f4\u28ff");
-  // Narrow: the culprit and eased signals go; hot and warn signals stay, the trace takes what is left.
-  assert.equal(plain(mod.renderFooter(s, 46, theme)[3]), "\uf2db Pressure cpu 97 \u00b7 mem warn \u00b7 thermal hot \u00b7 \u28ff");
+  assert.equal(plain(mod.renderFooter(s, 160, theme)[3]), " \uf2db Pressure cpu 97 \u2191 \u00b7 load 1.6 \u00b7 mem warn \u2193 \u00b7 thermal hot \u00b7 swap-in 40MB/s \u00b7 top vitest");
+  // Narrow: the culprit and eased signals go; hot and warn signals stay.
+  assert.equal(plain(mod.renderFooter(s, 46, theme)[3]), "\uf2db Pressure cpu 97 \u2191 \u00b7 mem warn \u2193 \u00b7 thermal hot");
   for (const width of [46, 120]) {
     for (const row of mod.renderFooter(s, width, theme).map(plain)) assert.doesNotMatch(row, /[%$#>]\s*$/);
   }
+  for (let width = 1; width <= 160; width++) assert.ok(mod.renderFooter(s, width, theme).every((row) => visibleWidth(row) <= width), `width ${width}`);
   // While a dialog waits the footer is one row, without it.
   assert.equal(mod.renderFooter({ ...s, compact: true }, 120, theme).length, 1);
-  // An hour-long trace (30 cells, unsampled minutes blank) keeps its newest minutes in the width left, down to one cell.
-  const hour = "\u2800".repeat(10) + "\u28c0".repeat(10) + "\u28e4\u28e4\u28f6\u28f6\u28ff\u28ff\u28ff\u28ff\u28ff\u28fe";
-  const long = { ...fixture(), pressure: mod.parsePressureStatus(`pressure: cpu 97 hot \u00b7 mem warn \u00b7 top vitest \u00b7 ${hour}`) };
-  assert.equal(plain(mod.renderFooter(long, 120, theme)[3]), ` \uf2db Pressure cpu 97 \u00b7 mem warn \u00b7 top vitest \u00b7 ${hour}`);
-  assert.equal(plain(mod.renderFooter(long, 60, theme)[3]), ` \uf2db Pressure cpu 97 \u00b7 mem warn \u00b7 top vitest \u00b7 ${hour.slice(-14)}`);
-  assert.equal(plain(mod.renderFooter(long, 32, theme)[3]), `\uf2db Pressure cpu 97 \u00b7 mem warn \u00b7 ${hour.slice(-1)}`);
-  for (let width = 1; width <= 160; width++) assert.ok(mod.renderFooter(long, width, theme).every((row) => visibleWidth(row) <= width), `width ${width}`);
   // Another shape stays in the status row.
   assert.deepEqual(mod.absorbStatuses(new Map([["pressure", "pressure: gpu 99 hot"]]), { claudeRow: true }).rest, ["pressure: gpu 99 hot"]);
+  assert.deepEqual(mod.absorbStatuses(new Map([["pressure", "pressure: cpu 97 hot \u00b7 \u28f4\u28ff"]]), { claudeRow: true }).rest, ["pressure: cpu 97 hot \u00b7 \u28f4\u28ff"]);
 });
 
 test("pi-marimo's notebook gets its own row under the context row", () => {

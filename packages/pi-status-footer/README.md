@@ -90,7 +90,7 @@ instead of the status row:
 | pi-marimo | `marimo: fit.py · running Data loading › Model fit (12s) · 1 error · also prep.py, plots.py` | `Marimo fit.py · …` on its own row under the context row: the current notebook (bold) and its kernel, then the other notebooks it follows; when narrow, the others become a count and the section its deepest heading |
 | pi-marimo (key `marimo-lens`) | `lens: fit.py · S1 "make this blue" · S2` | `Lens fit.py · S1 make this blue · S2` on its own row under the marimo row (eye icon), only while marimo-lens selections are open; when narrow, notes go first |
 | pi-bg | `bg: tests 2:14 · vite ready · lint ✗` | `Background tests 2:14 · vite ready · lint ✗` on its own row under that: running jobs with their time, services with their state, then what ended in the last minute; when narrow, what ended fine goes first |
-| pi-pressure | `pressure: cpu 97 hot · mem warn · top vitest · ⣀⣤⣴⣿` | `Pressure cpu 97 · mem warn · top vitest · ⣀⣤⣴⣿` on its own row under that, values in the level's color; the CPU trace comes last in whatever width is left (newest minutes kept); when narrow, the process and eased signals go first |
+| pi-pressure | `pressure: cpu 97 ↑ hot · mem warn · top vitest` | `Pressure cpu 97 ↑ · mem warn · top vitest` on its own row under that, values in the level's color, `↑`/`↓` while a signal is moving; when narrow, the process and eased signals go first |
 
 Without them nothing changes. A status whose text no longer has the expected shape,
 or a billing notice with no Claude limits row to attach to, stays in the status row

@@ -117,26 +117,25 @@ export function parseBgStatus(text: string): BgItem[] | undefined {
   return items;
 }
 
-/** One item of pi-pressure's status: a signal with its level, the busiest process, or the CPU trace (last). */
+/** One item of pi-pressure's status: a signal with its level (and an arrow while it moves significantly), or the busiest process. */
 export type PressureItem =
-  | { kind: "signal"; name: "cpu" | "load" | "mem" | "thermal" | "swap-in"; value?: string; level: "ok" | "warn" | "hot" }
-  | { kind: "top"; name: string }
-  | { kind: "trace"; trace: string };
+  | { kind: "signal"; name: "cpu" | "load" | "mem" | "thermal" | "swap-in"; value?: string; trend?: "up" | "down"; level: "ok" | "warn" | "hot" }
+  | { kind: "top"; name: string };
 
-/** pi-pressure's status, `pressure: cpu 97 hot · mem warn · thermal warn · swap-in 40MB/s warn · top vitest · ⣀⣤⣿`, or undefined when any item is unfamiliar. */
+/** pi-pressure's status, `pressure: cpu 97 \u2191 hot \u00b7 mem warn \u00b7 swap-in 40MB/s \u2193 warn \u00b7 top vitest`, or undefined when any item is unfamiliar. */
 export function parsePressureStatus(text: string): PressureItem[] | undefined {
   const match = /^pressure: (.+)$/.exec(text);
   if (!match) return undefined;
   const items: PressureItem[] = [];
   for (const part of match[1].split(" \u00b7 ")) {
-    const signal = /^(cpu|load|mem|thermal|swap-in)(?: (\S+))? (ok|warn|hot)$/.exec(part);
+    const signal = /^(cpu|load|mem|thermal|swap-in)(?: ([^\s\u2191\u2193]+))?(?: ([\u2191\u2193]))? (ok|warn|hot)$/.exec(part);
     const top = /^top (.+)$/.exec(part);
     if (signal) {
-      const item: PressureItem = { kind: "signal", name: signal[1] as "cpu", level: signal[3] as "ok" };
+      const item: PressureItem = { kind: "signal", name: signal[1] as "cpu", level: signal[4] as "ok" };
       if (signal[2]) item.value = signal[2];
+      if (signal[3]) item.trend = signal[3] === "\u2191" ? "up" : "down";
       items.push(item);
     } else if (top) items.push({ kind: "top", name: top[1] });
-    else if (/^[\u2800-\u28ff]+$/u.test(part)) items.push({ kind: "trace", trace: part });
     else return undefined;
   }
   return items;
@@ -235,7 +234,7 @@ export interface AbsorbedStatuses { mode?: PermissionModeStatus; autoEffort: boo
 //   marimo            (pi-marimo)               "marimo: nb.py · ..."  -> its own row under the context row
 //   marimo-lens       (pi-marimo)               "lens: nb.py · S1 ..." -> its own row under the marimo row
 //   bg                (pi-bg)                   "bg: tests 2:14 · ..." -> its own row under that
-//   pressure          (pi-pressure)             "pressure: cpu ⣴⣿ 97 hot · ..." -> its own row under that
+//   pressure          (pi-pressure)             "pressure: cpu 97 ↑ hot · ..." -> its own row under that
 //   permission-mode   (pi-tool-gate, pi-plan-mode) "⏵⏵ auto mode on (shift+tab to cycle)" -> the model row
 // Everything else (plan, gate, mcp, ...) stays in the status row.
 export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: { claudeRow: boolean }): AbsorbedStatuses {
@@ -775,27 +774,20 @@ function bgRow(items: BgItem[], width: number, theme: Paint): string {
   return fitSegments(segments, width, theme);
 }
 
-// pi-pressure's signals: the value (or the level, for memory) in the level's
-// color; hot signals stay longest when narrow, then warn, then eased ones, and
-// the busiest process goes first. The CPU trace comes last and gets whatever
-// width is left, keeping its newest minutes: it starts at one cell and grows.
+// pi-pressure's signals: the value (or the level, for memory and thermal) in the
+// level's color, with an arrow while it is moving significantly; hot signals
+// stay longest when narrow, then warn, then eased ones, and the busiest
+// process goes first.
 function pressureRow(items: PressureItem[], width: number, theme: Paint): string {
   const color = { ok: "muted", warn: "warning", hot: "error" } as const;
   const segments: Segment[] = [{ text: theme.fg("muted", "Pressure"), separatorAfter: " ", priority: 110 }];
-  let trace = "";
-  let cpu: keyof typeof color = "ok";
   for (const item of items) {
-    if (item.kind === "trace") { trace = item.trace; continue; }
     if (item.kind === "top") { segments.push({ text: `${theme.fg("dim", "top")} ${theme.fg("muted", item.name)}`, priority: 20 }); continue; }
-    if (item.name === "cpu") cpu = item.level;
     const value = theme.bold(theme.fg(color[item.level], item.value ?? item.level));
-    segments.push({ text: `${theme.fg("muted", item.name)} ${value}`, priority: item.level === "hot" ? 100 : item.level === "warn" ? 90 : 55 });
+    const arrow = item.trend ? ` ${theme.fg(color[item.level], item.trend === "up" ? "\u2191" : "\u2193")}` : "";
+    segments.push({ text: `${theme.fg("muted", item.name)} ${value}${arrow}`, priority: item.level === "hot" ? 100 : item.level === "warn" ? 90 : 55 });
   }
-  const text = fitSegments(segments, width, theme);
-  const separator = theme.fg("dim", " \u00b7 ");
-  // Braille cells are one code unit and one cell wide.
-  const room = width - visibleWidth(text) - visibleWidth(separator);
-  return trace && room > 0 ? `${text}${separator}${theme.fg(color[cpu], trace.slice(-room))}` : text;
+  return fitSegments(segments, width, theme);
 }
 
 // Nerd Font (Font Awesome / Devicons / Material Design, all private-use,

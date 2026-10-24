@@ -15,7 +15,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createMonitor, DEFAULTS, formatRate, formatStatus, type Level, type Mode, type Paint, type PressureConfig, SIGNALS, spark, topBy, type View } from "./pressure.ts";
+import { createMonitor, DEFAULTS, formatRate, formatStatus, type Level, type Mode, type Paint, type PressureConfig, SIGNALS, topBy, type View } from "./pressure.ts";
 import { ensureHelper, startHelper } from "./darwin.ts";
 import { createSampler, type Sampler } from "./sample.ts";
 
@@ -31,7 +31,7 @@ export function mergeConfig(...layers: Partial2<PressureConfig>[]): PressureConf
   const config: PressureConfig = structuredClone(DEFAULTS);
   for (const layer of layers) {
     if (typeof layer.enabled === "boolean") config.enabled = layer.enabled;
-    for (const key of ["minGapMs", "showAfterMs", "hideAfterMs", "refreshMs", "historyMinutes"] as const) if (finite(layer[key])) config[key] = layer[key];
+    for (const key of ["minGapMs", "showAfterMs", "hideAfterMs", "refreshMs"] as const) if (finite(layer[key])) config[key] = layer[key];
     for (const key of ["cpu", "loadPerCore", "memorySome", "memoryFull", "swapInMBps"] as const) {
       const band = layer[key];
       if (!band || typeof band !== "object") continue;
@@ -41,7 +41,6 @@ export function mergeConfig(...layers: Partial2<PressureConfig>[]): PressureConf
   }
   config.minGapMs = Math.max(250, config.minGapMs);
   config.refreshMs = Math.max(1_000, config.refreshMs);
-  config.historyMinutes = Math.max(1, Math.min(120, Math.round(config.historyMinutes)));
   return config;
 }
 
@@ -79,16 +78,16 @@ export async function report(view: View | undefined, config: PressureConfig, sam
   const lv = (signal: (typeof SIGNALS)[number]) => view?.levels[signal] ?? "ok";
   if (!r) lines.push("No reading yet.");
   else {
-    const trace = view.history.some((v) => v !== undefined) ? ` (last ${view.history.length} min, a minute per dot column: ${spark(view.history)})` : "";
+    const arrow = (signal: (typeof SIGNALS)[number]) => view.trends[signal] === "up" ? " \u2191 rising" : view.trends[signal] === "down" ? " \u2193 falling" : "";
     const span = r.since === undefined ? "" : ` over the last ${Math.max(1, Math.round((r.at - r.since) / 1000))}s`;
-    lines.push(`cpu ${r.cpu === undefined ? "?" : Math.round(r.cpu)} busy${span}${trace} · ${lv("cpu")} (warn ${config.cpu.warn}, hot ${config.cpu.hot})`);
-    lines.push(`load ${r.loadPerCore.toFixed(2)} per core · ${lv("load")} (warn ${config.loadPerCore.warn}, hot ${config.loadPerCore.hot})`);
+    lines.push(`cpu ${r.cpu === undefined ? "?" : Math.round(r.cpu)} busy${span}${arrow("cpu")} · ${lv("cpu")} (warn ${config.cpu.warn}, hot ${config.cpu.hot})`);
+    lines.push(`load ${r.loadPerCore.toFixed(2)} per core${arrow("load")} · ${lv("load")} (warn ${config.loadPerCore.warn}, hot ${config.loadPerCore.hot})`);
     const m = r.memory;
-    if (m?.source === "darwin") lines.push(`memory pressure level ${m.level} (${DARWIN_LEVELS[m.level] ?? "unknown"}) · ${lv("mem")}`);
-    else if (m?.source === "psi") lines.push(`memory stall some ${m.some.toFixed(1)} full ${m.full.toFixed(1)}${span} · ${lv("mem")} (some warn ${config.memorySome.warn}, hot ${config.memorySome.hot}; full warn ${config.memoryFull.warn}, hot ${config.memoryFull.hot})`);
+    if (m?.source === "darwin") lines.push(`memory pressure level ${m.level} (${DARWIN_LEVELS[m.level] ?? "unknown"})${arrow("mem")} · ${lv("mem")}`);
+    else if (m?.source === "psi") lines.push(`memory stall some ${m.some.toFixed(1)} full ${m.full.toFixed(1)}${span}${arrow("mem")} · ${lv("mem")} (some warn ${config.memorySome.warn}, hot ${config.memorySome.hot}; full warn ${config.memoryFull.warn}, hot ${config.memoryFull.hot})`);
     else lines.push("memory pressure unavailable on this platform");
-    if (r.thermal) lines.push(`thermal ${THERMAL_STATES[r.thermal.state] ?? r.thermal.state} · ${lv("heat")}`);
-    if (r.swapInBps !== undefined) lines.push(`swap-in ${formatRate(r.swapInBps)} · ${lv("swap")} (warn ${config.swapInMBps.warn}MB/s, hot ${config.swapInMBps.hot}MB/s)`);
+    if (r.thermal) lines.push(`thermal ${THERMAL_STATES[r.thermal.state] ?? r.thermal.state}${arrow("heat")} · ${lv("heat")}`);
+    if (r.swapInBps !== undefined) lines.push(`swap-in ${formatRate(r.swapInBps)}${arrow("swap")} · ${lv("swap")} (warn ${config.swapInMBps.warn}MB/s, hot ${config.swapInMBps.hot}MB/s)`);
   }
   const [cpu, memory] = await Promise.all([sampler.top("cpu", 5), sampler.top("memory", 5)]);
   if (cpu.length) lines.push(`top cpu: ${cpu.map((p) => `${p.name} ${Math.round(p.cpu)}`).join(", ")}`);
