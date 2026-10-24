@@ -76,6 +76,8 @@ export interface Snapshot {
   /** pi-marimo's open marimo-lens selections, shown on their own row under the marimo row. */
   lens?: LensStatus;
   bg?: BgItem[];
+  /** pi-pressure's signals while the machine is constrained, on their own row under the bg row. */
+  pressure?: PressureItem[];
   /** Built-in MCP servers, connected/configured, unless another extension publishes an `mcp` status. */
   mcp?: McpCount;
   /** Skills loaded in this session. */
@@ -110,6 +112,30 @@ export function parseBgStatus(text: string): BgItem[] | undefined {
     else if (service) items.push({ kind: "service", name: service[1], state: service[2] as "ready" | "starting" | "up", kept: Boolean(service[3]) });
     else if (ended) items.push({ kind: "ended", name: ended[1], mark: ended[2] as "✓" | "✗" | "■" });
     else if (more) items.push({ kind: "more", count: +more[1] });
+    else return undefined;
+  }
+  return items;
+}
+
+/** One item of pi-pressure's status: a signal with its level, or the busiest process. */
+export type PressureItem =
+  | { kind: "signal"; name: "cpu" | "load" | "mem" | "swap-in"; trace?: string; value?: string; level: "ok" | "warn" | "hot" }
+  | { kind: "top"; name: string };
+
+/** pi-pressure's status, `pressure: cpu ⣴⣿ 97 hot · mem warn · swap-in 40MB/s warn · top vitest`, or undefined when any item is unfamiliar. */
+export function parsePressureStatus(text: string): PressureItem[] | undefined {
+  const match = /^pressure: (.+)$/.exec(text);
+  if (!match) return undefined;
+  const items: PressureItem[] = [];
+  for (const part of match[1].split(" · ")) {
+    const signal = /^(cpu|load|mem|swap-in)(?: ([\u2800-\u28ff]+))?(?: (\S+))? (ok|warn|hot)$/u.exec(part);
+    const top = /^top (.+)$/.exec(part);
+    if (signal) {
+      const item: PressureItem = { kind: "signal", name: signal[1] as "cpu", level: signal[4] as "ok" };
+      if (signal[2]) item.trace = signal[2];
+      if (signal[3]) item.value = signal[3];
+      items.push(item);
+    } else if (top) items.push({ kind: "top", name: top[1] });
     else return undefined;
   }
   return items;
@@ -194,7 +220,7 @@ export function parseModeStatus(text: string): PermissionModeStatus | undefined 
   return { kind: MODE_KINDS[match[2]], label: `${glyph} ${match[2]} on`, ...(match[3] ? { key: match[3] } : {}) };
 }
 
-export interface AbsorbedStatuses { mode?: PermissionModeStatus; autoEffort: boolean; autoEffortDetail?: string; lean?: string; cache?: string; extraBilled?: number; stashed?: boolean; marimo?: MarimoStatus; lens?: LensStatus; bg?: BgItem[]; /** Another extension owns the `mcp` status. */ mcp?: boolean; rest: string[] }
+export interface AbsorbedStatuses { mode?: PermissionModeStatus; autoEffort: boolean; autoEffortDetail?: string; lean?: string; cache?: string; extraBilled?: number; stashed?: boolean; marimo?: MarimoStatus; lens?: LensStatus; bg?: BgItem[]; pressure?: PressureItem[]; /** Another extension owns the `mcp` status. */ mcp?: boolean; rest: string[] }
 // Statuses from our own companion extensions that read better inside the footer
 // rows they describe. Each is optional: absent extensions publish nothing, and a
 // status whose text no longer matches the expected shape falls through to the
@@ -208,6 +234,7 @@ export interface AbsorbedStatuses { mode?: PermissionModeStatus; autoEffort: boo
 //   marimo            (pi-marimo)               "marimo: nb.py · ..."  -> its own row under the context row
 //   marimo-lens       (pi-marimo)               "lens: nb.py · S1 ..." -> its own row under the marimo row
 //   bg                (pi-bg)                   "bg: tests 2:14 · ..." -> its own row under that
+//   pressure          (pi-pressure)             "pressure: cpu ⣴⣿ 97 hot · ..." -> its own row under that
 //   permission-mode   (pi-tool-gate, pi-plan-mode) "⏵⏵ auto mode on (shift+tab to cycle)" -> the model row
 // Everything else (plan, gate, mcp, ...) stays in the status row.
 export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: { claudeRow: boolean }): AbsorbedStatuses {
@@ -233,6 +260,8 @@ export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: {
     if (lens) { result.lens = lens; continue; }
     const bg = key === "bg" ? parseBgStatus(plainText) : undefined;
     if (bg) { result.bg = bg; continue; }
+    const pressure = key === "pressure" ? parsePressureStatus(plainText) : undefined;
+    if (pressure) { result.pressure = pressure; continue; }
     const mode = key === "permission-mode" ? parseModeStatus(plainText) : undefined;
     if (mode) { result.mode = mode; continue; }
     const plan = key === "plan" ? /^plan: (.+) \((\/plan(?:ners)?)\)$/.exec(plainText) : null;
@@ -745,6 +774,26 @@ function bgRow(items: BgItem[], width: number, theme: Paint): string {
   return fitSegments(segments, width, theme);
 }
 
+// pi-pressure's signals: the value (or the level, for memory) in the level's
+// color; hot signals stay longest when narrow, then warn, then eased ones; the
+// CPU trace goes before its number, and the busiest process goes first.
+function pressureRow(items: PressureItem[], width: number, theme: Paint): string {
+  const color = { ok: "muted", warn: "warning", hot: "error" } as const;
+  const segments: Segment[] = [{ text: theme.fg("muted", "Pressure"), separatorAfter: " ", priority: 110 }];
+  for (const item of items) {
+    if (item.kind === "top") { segments.push({ text: `${theme.fg("dim", "top")} ${theme.fg("muted", item.name)}`, priority: 20 }); continue; }
+    const paint = (text: string) => theme.fg(color[item.level], text);
+    const value = theme.bold(paint(item.value ?? item.level));
+    const name = theme.fg("muted", item.name);
+    segments.push({
+      text: `${name} ${item.trace ? `${paint(item.trace)} ` : ""}${value}`,
+      short: `${name} ${value}`,
+      priority: item.level === "hot" ? 100 : item.level === "warn" ? 90 : 55,
+    });
+  }
+  return fitSegments(segments, width, theme);
+}
+
 // Nerd Font (Font Awesome / Devicons / Material Design, all private-use,
 // one cell wide) icons that lead each footer row. Without a Nerd Font they draw as
 // placeholders; the row text stays readable.
@@ -761,6 +810,7 @@ export const ICONS = {
   marimo: "\uf02d", // book
   lens: "\uf06e", // eye (marimo-lens selections)
   bg: "\uf085", // cogs
+  pressure: "\uf2db", // microchip
   mcp: "\uf1e6", // plug
   skills: "\uf0d0", // magic wand
   notices: "\uf0f3", // bell
@@ -880,6 +930,7 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   if (s.marimo) { const m = s.marimo; rows.push(row(ICONS.marimo, (w) => marimoRow(m, w, theme))); }
   if (s.lens) { const l = s.lens; rows.push(row(ICONS.lens, (w) => lensRow(l, w, theme))); }
   if (s.bg?.length) { const bg = s.bg; rows.push(row(ICONS.bg, (w) => bgRow(bg, w, theme))); }
+  if (s.pressure?.length) { const p = s.pressure; rows.push(row(ICONS.pressure, (w) => pressureRow(p, w, theme))); }
   // Statuses remain owned by their publishers. Wrap instead of silently dropping
   // plan mode, background failures, or other extension notices at the right edge.
   // MCP sits on the context row (above). Notices with an icon of their own (the
@@ -1287,7 +1338,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       quotas, unavailableQuota,
       statuses: absorbed.rest, mode: absorbed.mode, autoEffort: absorbed.autoEffort, autoEffortDetail: absorbed.autoEffortDetail, lean: absorbed.lean, cache: absorbed.cache, extraBilled: absorbed.extraBilled,
       stash: absorbed.stashed ? { text: stashedPrompt() } : undefined,
-      marimo: absorbed.marimo, lens: absorbed.lens, bg: absorbed.bg, borderGauge, compact: blockedHolds > 0,
+      marimo: absorbed.marimo, lens: absorbed.lens, bg: absorbed.bg, pressure: absorbed.pressure, borderGauge, compact: blockedHolds > 0,
       // Yield to an extension that publishes its own mcp status (pi-mcp-adapter).
       mcp: showMcp && !absorbed.mcp ? mcp : undefined,
       skills: pi.getCommands().filter((command) => command.source === "skill").length,
