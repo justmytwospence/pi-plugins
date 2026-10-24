@@ -9,6 +9,7 @@ import {
   Loader,
   matchesKey,
   ScrollView,
+  SelectList,
   truncateToWidth,
   visibleWidth,
   VStack,
@@ -16,6 +17,7 @@ import {
   type Component,
   type EditorTheme,
   type Focusable,
+  type SelectItem,
   type TUI,
   type TuiMouseEvent,
   type TuiMouseEventResult,
@@ -72,6 +74,16 @@ export interface PanelHost {
   cycleModel?(direction: 1 | -1): void;
   /** Main's model-picker key (Ctrl+L): pick Sidebar's model. */
   pickModel?(): void;
+}
+
+/** A choice shown in Sidebar itself, in the composer's place (Sidebar's model picker). */
+export interface PickerOptions {
+  title: string;
+  items: SelectItem[];
+  /** The item the cursor starts on. */
+  selected?: number;
+  onSelect(value: string): void;
+  onCancel?(): void;
 }
 
 type Notice = { kind: "info" | "warning" | "error"; text: string } | { kind: "confirm"; title: string; message: string; text: string };
@@ -268,6 +280,11 @@ class Composer implements Component, Focusable {
     const keys = getKeybindings();
     if (this.host.matchesToggle(data)) return this.host.close();
     if (this.host.matchesFocusSwitch(data)) return this.host.focusMain();
+    if (this.panel.picker) {
+      this.panel.picker.list.handleInput(data);
+      this.tui.requestRender();
+      return;
+    }
     const pending = this.panel.pendingConfirm();
     if (pending) {
       if (matchesKey(data, "enter")) {
@@ -300,7 +317,7 @@ class Composer implements Component, Focusable {
   }
 
   render(width: number): string[] {
-    return this.editor.render(width);
+    return this.panel.picker ? this.panel.pickerLines(width) : this.editor.render(width);
   }
 
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
@@ -331,6 +348,8 @@ export class SidebarPanel {
   private mainThinking: boolean | undefined;
   focused = false;
   unread = false;
+  /** A choice showing in the composer's place, while one is open. */
+  picker: { title: string; list: SelectList } | undefined;
   /** The prompt pinned on the top row in the last frame, and that row in document lines. */
   private pinned: { anchor: PinnedPrompt; row: number } | undefined;
   private recheck = false;
@@ -384,6 +403,43 @@ export class SidebarPanel {
 
   submit(text: string): void {
     this.host.submit(text);
+  }
+
+  /** Show a choice in the composer's place; Enter picks, Esc cancels, and the composer comes back. */
+  openPicker(options: PickerOptions): void {
+    // Pi's select-list colors, from the theme Sidebar draws with.
+    const t = () => this.theme();
+    const list = new SelectList(options.items, Math.min(10, Math.max(1, options.items.length)), {
+      selectedPrefix: (text) => t().fg("accent", text),
+      selectedText: (text) => t().fg("accent", text),
+      description: (text) => t().fg("muted", text),
+      scrollInfo: (text) => t().fg("muted", text),
+      noMatch: (text) => t().fg("muted", text),
+    });
+    if (options.selected !== undefined) list.setSelectedIndex(options.selected);
+    const close = () => {
+      if (this.picker?.list !== list) return false;
+      this.picker = undefined;
+      this.tui.requestRender();
+      return true;
+    };
+    list.onSelect = (item) => { if (close()) options.onSelect(item.value); };
+    list.onCancel = () => { if (close()) options.onCancel?.(); };
+    this.picker = { title: options.title, list };
+    this.tui.requestRender();
+  }
+
+  closePicker(): void {
+    this.picker = undefined;
+    this.tui.requestRender();
+  }
+
+  pickerLines(width: number): string[] {
+    const picker = this.picker;
+    if (!picker) return [];
+    const t = this.theme();
+    const rule = t.fg("borderAccent", "─".repeat(Math.max(1, width)));
+    return [rule, truncateToWidth(` ${t.fg("accent", t.bold(picker.title))}`, width), ...picker.list.render(width), rule];
   }
 
   /**
@@ -487,7 +543,7 @@ export class SidebarPanel {
       t.fg("muted", "Ask about what main is doing, why, or how the code works."),
       t.fg("dim", "Sidebar reads main's live conversation, never changes anything, and answers from main's prompt cache."),
       t.fg("dim", "/quiz quizzes you on main's changes and keeps track of what you know."),
-      t.fg("dim", "/model (or ctrl+p) runs Sidebar on another model for a second opinion; same is main's own."),
+      t.fg("dim", "/model (or your model picker key) runs Sidebar on another model for a second opinion."),
     ];
     return lines.flatMap((line) => (line ? wrapTextWithAnsi(line, Math.max(1, width - 1)).map((row) => ` ${row}`) : [""]));
   }
@@ -524,7 +580,8 @@ export class SidebarPanel {
     const sep = "  ";
     let text: string;
     const stashed = this.host.stash?.()?.stashed ? `${this.theme().fg("accent", "stashed")}${sep}` : "";
-    if (this.note?.kind === "confirm") text = [rawKeyHint("enter", "send anyway"), keyHint("app.interrupt", "keep the question")].join(sep);
+    if (this.picker && this.focused) text = [rawKeyHint("↑↓", "navigate"), keyHint("tui.select.confirm", "select"), keyHint("tui.select.cancel", "cancel")].join(sep);
+    else if (this.note?.kind === "confirm") text = [rawKeyHint("enter", "send anyway"), keyHint("app.interrupt", "keep the question")].join(sep);
     else if (!this.focused) return truncateToWidth(` ${stashed}${rawKeyHint(this.host.toggleLabel, "close")}`, width);
     else {
       // Your own scroll keys, as in main: pi-vim's Ctrl+U/D in Normal mode, and the transcript's end key.

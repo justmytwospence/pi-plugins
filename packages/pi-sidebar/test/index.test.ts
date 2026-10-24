@@ -132,12 +132,40 @@ describe("Sidebar's model", () => {
     (ctx.ui as any).select = async (_title: string, options: string[]) => { offered = options; return options[2]; };
     await pi.commands.get("sidebar")!.handler("model", ctx);
     expect(offered).toEqual([
-      "Same as main · shares main's prompt cache (current)",
+      "Same as main (current) · shares main's prompt cache",
       "Claude Opus 5.5 · anthropic/claude-opus-5-5",
       "GPT-6.1 Sol · openai-codex/gpt-6.1-sol",
       "Claude X · anthropic/claude-x",
     ]);
     expect(notes.at(-1)!.message).toMatch(/runs on GPT-6\.1 Sol/);
+  });
+
+  it("shows the picker in Sidebar itself while Sidebar is open, and focuses it", async () => {
+    process.env.PI_SIDEBAR_MODELS = "anthropic/claude-opus-*,openai-codex/gpt-*-sol";
+    const { controller, ctx, tui, mainEditor } = setup();
+    (ctx.modelRegistry as any).getAvailable = () => MODELS;
+    let mainDialog = false;
+    (ctx.ui as any).select = async () => { mainDialog = true; return undefined; };
+    expect(controller.open(ctx as never)).toBe(true);
+    controller.focusMain();
+    tui.setFocus(mainEditor);
+    await controller.modelCommand("", ctx as never);
+    const panel = panelOf(controller);
+    expect(mainDialog).toBe(false);
+    expect(panel.picker).toBeDefined();
+    expect(tui.focused).toBe(panel.input);
+    const lines = panel.input.render(80).join("\n");
+    expect(lines).toContain("Sidebar's model");
+    expect(lines).toContain("GPT-6.1 Sol");
+    panel.input.handleInput("\x1b[B");
+    panel.input.handleInput("\x1b[B");
+    panel.input.handleInput("\r");
+    expect(panel.picker).toBeUndefined();
+    expect(controller.sidebarModel()).toMatchObject({ kind: "other", label: "GPT-6.1 Sol" });
+    await controller.modelCommand("", ctx as never);
+    panel.input.handleInput("\x1b");
+    expect(panel.picker).toBeUndefined();
+    expect(controller.sidebarModel()).toMatchObject({ label: "GPT-6.1 Sol" });
   });
 
   it("cycles with main's model keys in Sidebar and shows the model in its header", () => {

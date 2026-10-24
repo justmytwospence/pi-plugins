@@ -486,35 +486,44 @@ export class SidebarController {
     this.say(this.setModel(cycleChoice(this.modelSetting, favorites, direction)), "info");
   }
 
-  /** Pick Sidebar's model from `same` and your favorites. */
+  /**
+   * Pick Sidebar's model from `same` and your favorites: in Sidebar while it is open (focusing it),
+   * else as a dialog in main.
+   */
   async pickModel(ctx: ExtensionContext | undefined = this.main.ctx): Promise<void> {
     if (!ctx) return;
     const favorites = this.favorites();
     const current = (setting: string) => (setting === this.modelSetting ? " (current)" : "");
-    const options = [`Same as main · shares main's prompt cache${current(SAME)}`];
-    const settings = [SAME];
+    const items = [{ value: SAME, label: `Same as main${current(SAME)}`, description: "shares main's prompt cache" }];
     for (const fav of favorites) {
       if (!fav.model) continue;
-      options.push(`${modelLabel(fav.model)} · ${modelKey(fav.model)}${fav.thinking ? ` · ${fav.thinking}` : ""}${current(fav.pattern)}`);
-      settings.push(fav.pattern);
+      items.push({ value: fav.pattern, label: `${modelLabel(fav.model)}${current(fav.pattern)}`, description: `${modelKey(fav.model)}${fav.thinking ? ` · ${fav.thinking}` : ""}` });
     }
-    if (settings.length === 1) {
+    if (items.length === 1) {
       this.say(`No favorite models to pick from: set ${MODELS_ENV} (or Pi's enabled models).`, "warning", ctx);
       return;
     }
-    // Pi gives focus back to main's editor when a dialog closes; one opened from Sidebar returns it there.
-    const fromSidebar = this.isOpen && !!this.panel?.focused;
+    if (this.isOpen && this.panel) {
+      const at = items.findIndex((item) => item.value === this.modelSetting);
+      this.panel.clearNotice();
+      this.panel.openPicker({
+        title: "Sidebar's model",
+        items,
+        selected: Math.max(0, at),
+        onSelect: (value) => this.say(this.setModel(value), "info", ctx),
+      });
+      this.focusSidebar();
+      return;
+    }
+    const options = items.map((item) => `${item.label} · ${item.description}`);
     let picked: string | undefined;
     try {
       picked = await ctx.ui.select("Sidebar's model", options);
     } catch {
       return;
-    } finally {
-      if (fromSidebar && this.isOpen) this.focusSidebar();
     }
-    const at = picked === undefined ? -1 : options.indexOf(picked);
-    if (at === -1) return;
-    this.say(this.setModel(settings[at]!), "info", ctx);
+    const index = picked === undefined ? -1 : options.indexOf(picked);
+    if (index !== -1) this.say(this.setModel(items[index]!.value), "info", ctx);
   }
 
   /** A message in Sidebar while it is open, else a notification in main. */

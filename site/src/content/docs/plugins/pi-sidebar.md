@@ -52,7 +52,7 @@ Use Pi's fullscreen mode (`"tuiMode": "fullscreen"`). In regular mode, the key a
 | `/sidebar`, `/close` in Sidebar | Open or close Sidebar. |
 | Ctrl+S | With pi-stash enabled, stashes Sidebar's draft in a stash of its own, apart from main's: the hint row shows `stashed`. Ctrl+S in an empty composer restores it, with text in both it swaps them, and it comes back on its own after a `/` command such as `/new`. It is kept while Sidebar is closed. |
 | `/sidebar new`, `/new` in Sidebar | Starts a fresh thread. |
-| `/sidebar model`, `/model` in Sidebar | Picks Sidebar's model: `Same as main` (the default) or a favorite. `/model sol` or `/model provider/id` switches directly, `/model same` goes back. |
+| `/sidebar model`, `/model` in Sidebar | Picks Sidebar's model: `Same as main` (the default) or a favorite, in Sidebar while it is open. `/model sol` or `/model provider/id` switches directly, `/model same` goes back. |
 
 While Sidebar has focus, your keys do what they do in main, through Pi's keybindings:
 - **Scrolling and search.** The focused half is Pi's primary scroll view, so these act on Sidebar while it has focus: your transcript scroll actions (such as Ctrl+G to the end), pi-vim's Ctrl+U/D in idle Normal mode, transcript search (Ctrl+Shift+F) and pi-copy's copy mode. The mouse wheel scrolls only the half under the pointer.

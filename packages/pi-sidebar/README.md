@@ -51,7 +51,7 @@ pi -e ./packages/pi-sidebar
 | Enter | Asks. |
 | Ctrl+S | With pi-stash enabled, stashes Sidebar's draft in a stash of its own, apart from main's: the hint row shows `stashed`. Ctrl+S in an empty composer restores it, with text in both it swaps them, and it comes back on its own after a `/` command such as `/new`. It is kept while Sidebar is closed. |
 | `/sidebar headsup [on\|off]` | Heads-up mode's state and cost, or switches it on or off for the session. |
-| `/sidebar model` (or `/model` in Sidebar) | Picks Sidebar's model: `Same as main` (the default, sharing main's cache) or one of your favorites. `/model sol`, `/model opus` or `/model provider/id` switch directly, `/model same` goes back. See [Another model](#another-model). |
+| `/sidebar model` (or `/model` in Sidebar) | Picks Sidebar's model: `Same as main` (the default, sharing main's cache) or one of your favorites. While Sidebar is open the picker shows in Sidebar, in the composer's place (Enter picks, Esc cancels); with Sidebar closed it is a dialog in main. `/model sol`, `/model opus` or `/model provider/id` switch directly, `/model same` goes back. See [Another model](#another-model). |
 | Main's model keys in Sidebar | The model picker key (`app.model.select`, Ctrl+L by default) picks Sidebar's model; the cycling keys (`app.model.cycleForward`/`cycleBackward`, Ctrl+P and Shift+Ctrl+P by default) step through `same` and your favorites. |
 
 While Sidebar has focus, your keys do what they do in main. They are resolved through Pi's keybindings, so changes in `~/.pi/agent/keybindings.json` apply in both halves:
@@ -214,11 +214,12 @@ The provider serves part 1 from the cache main already wrote. In your own sessio
 A model reads its own conclusions back as settled, so a second opinion is worth more from a different model. Pick one with `/model` in Sidebar (or `/sidebar model`, or main's model picker key while Sidebar has focus):
 
 ```
-Sidebar's model
-→ Same as main · shares main's prompt cache (current)
-  Claude Opus 5.5 · anthropic/claude-opus-5-5
-  Claude Fable 5.1 · anthropic/claude-fable-5-1
-  GPT-6.1 Sol · openai-codex/gpt-6.1-sol
+ Sidebar's model
+→ Same as main (current)          shares main's prompt cache
+  Claude Opus 5.5                 anthropic/claude-opus-5-5
+  Claude Fable 5.1                anthropic/claude-fable-5-1
+  GPT-6.1 Sol                     openai-codex/gpt-6.1-sol
+ ↑↓ navigate  enter select  escape/ctrl+c cancel
 ```
 *Illustration, not a screenshot.*
 
