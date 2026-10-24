@@ -17,7 +17,10 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { LogFollower, logSize } from "./log.ts";
+import { LogFollower, logSize, parsePattern } from "./log.ts";
+import { type Progress, ProgressTracker, percent, progressSpec } from "./progress.ts";
+
+export { parsePattern };
 
 export type Kind = "job" | "service";
 export type Status = "running" | "done" | "failed" | "killed" | "timeout";
@@ -60,6 +63,10 @@ export interface Task {
   readyLine?: string;
   /** The shell exited but processes it started are still running in its group. */
   strays?: boolean;
+  /** bg_run's `progress`: `none`, a catalogue or preset name, or a regex (progress.ts). */
+  progressSpec?: string;
+  /** What is known of its progress (progress.ts); kept after it ends as its last value. */
+  progress?: Progress;
 }
 
 export type TaskEvent = { type: "start" | "ready" | "end" | "change"; task: Task };
@@ -74,7 +81,30 @@ export interface StartOptions {
   ready?: string;
   timeoutSec?: number;
   keep?: boolean;
+  progress?: string;
 }
+
+/** The file a task may write its progress to (`PI_BG_PROGRESS`), beside its log. */
+export function progressPath(t: Pick<Task, "logPath">): string {
+  return t.logPath.replace(/\.log$/u, "") + ".progress";
+}
+
+/** Log lines a poll feeds the progress tracker at most: only the latest matter. */
+const PROGRESS_LINES = 500;
+/** Where a progress follower built for a running task (after a reload, an adoption) starts. */
+const PROGRESS_REWIND = 64 * 1024;
+/** The end of a progress file that is read. */
+const PROGRESS_FILE_BYTES = 4096;
+
+interface ProgressWatch {
+  tracker: ProgressTracker;
+  follower: LogFollower;
+  /** The progress file's size and mtime when last read; empty when it did not exist. */
+  stamp: string;
+}
+
+/** What the display of progress depends on: a change to it is announced (a `change` event). */
+const shownKey = (p: Progress | undefined) => (p ? `${p.source}|${percent(p)}|${p.note ?? ""}` : "");
 
 interface StateEntry {
   id: string;
@@ -88,6 +118,7 @@ interface StateEntry {
   keep: boolean;
   ready: boolean;
   readyPattern?: string;
+  progressSpec?: string;
   /** The owning pi quit and left this kept service for a later one. */
   released?: boolean;
   /** Only in the legacy single state.json. */
@@ -160,12 +191,6 @@ export function stillOurs(pid: number, command: string): boolean {
   return want.length > 0 && squash(line).includes(want);
 }
 
-/** A pattern from the model: `/src/flags`, or a plain regex matched case-insensitively. */
-export function parsePattern(pattern: string): RegExp {
-  const m = /^\/(.+)\/([a-z]*)$/su.exec(pattern);
-  return m ? new RegExp(m[1] as string, (m[2] ?? "").replace(/[gy]/gu, "")) : new RegExp(pattern, "i");
-}
-
 /**
  * The Git checkout `dir` belongs to: the nearest folder at or above it holding `.git` (a folder in
  * a main checkout, a file in a linked worktree or submodule); undefined outside Git.
@@ -185,6 +210,11 @@ export class Registry {
   private readonly procs = new Map<string, ChildProcess>();
   private readonly followers = new Map<string, { follower: LogFollower; re: RegExp }>();
   private readonly timeouts = new Map<string, ReturnType<typeof setTimeout>>();
+  /**
+   * Progress watchers of running tasks. Not taken over on a reload: the new code builds its own,
+   * starting near the log's end.
+   */
+  private readonly progress = new Map<string, ProgressWatch>();
   private readonly listeners = new Set<(e: TaskEvent) => void>();
   /** Process groups of ended tasks that still have members, killed when the session ends. */
   private readonly strays = new Set<number>();
@@ -300,6 +330,8 @@ export class Registry {
     fs.mkdirSync(dir, { recursive: true });
     const logPath = path.join(dir, `${id}.log`);
     const re = o.ready ? parsePattern(o.ready) : undefined;
+    // Throws on an unusable regex, before anything starts.
+    const spec = progressSpec(o.progress);
     const task: Task = {
       id,
       name: o.name,
@@ -317,6 +349,7 @@ export class Registry {
       origin: o.origin,
       delivered: false,
       readyDelivered: false,
+      ...(o.progress?.trim() ? { progressSpec: o.progress.trim() } : {}),
     };
     const fd = fs.openSync(logPath, "a");
     let child: ChildProcess;
@@ -325,7 +358,7 @@ export class Registry {
         cwd: o.cwd,
         detached: true,
         stdio: ["ignore", fd, fd],
-        env: { ...process.env, PI_BG_TASK_ID: id },
+        env: { ...process.env, PI_BG_TASK_ID: id, PI_BG_PROGRESS: progressPath(task) },
       });
     } finally {
       fs.closeSync(fd);
@@ -340,6 +373,7 @@ export class Registry {
     });
     child.on("exit", (code, signal) => this.latest().finish(id, code, signal));
     if (re) this.followers.set(id, { follower: new LogFollower(logPath), re });
+    this.progress.set(id, { tracker: new ProgressTracker(spec), follower: new LogFollower(logPath), stamp: "" });
     if (task.timeoutSec && task.timeoutSec > 0) {
       const t = setTimeout(() => void this.latest().kill(id, "timeout"), task.timeoutSec * 1000);
       t.unref?.();
@@ -357,9 +391,10 @@ export class Registry {
     this.poller.unref?.();
   }
 
-  /** Ready patterns, the liveness of adopted services, and the log size cap. */
+  /** Ready patterns, progress, the liveness of adopted services, and the log size cap. */
   poll(): void {
     if (++this.polls % SIZE_CHECK_POLLS === 0) this.capLogs();
+    this.pollProgress();
     for (const [id, w] of this.followers) {
       const task = this.tasks.get(id);
       if (!task || task.status !== "running" || task.ready) {
@@ -412,6 +447,68 @@ export class Registry {
     }
   }
 
+  /** Feeds every running task's progress tracker what is new, and announces a visible change. */
+  pollProgress(now = Date.now()): void {
+    for (const id of [...this.progress.keys()]) {
+      if (this.tasks.get(id)?.status !== "running") this.progress.delete(id);
+    }
+    for (const t of this.tasks.values()) {
+      if (t.status !== "running") continue;
+      const w = this.watch(t);
+      if (!w) continue;
+      const before = shownKey(t.progress);
+      try {
+        this.feedProgress(t, w, now, false);
+      } catch {
+        // A log or progress file that cannot be read now: next poll.
+      }
+      if (shownKey(t.progress) !== before) this.emit("change", t);
+    }
+  }
+
+  /** A running task's progress watcher, built when missing (after a reload or an adoption). */
+  private watch(t: Task): ProgressWatch | undefined {
+    const have = this.progress.get(t.id);
+    if (have) return have;
+    let spec: ReturnType<typeof progressSpec>;
+    try {
+      spec = progressSpec(t.progressSpec);
+    } catch {
+      spec = "none";
+    }
+    const w = { tracker: new ProgressTracker(spec), follower: new LogFollower(t.logPath, logSize(t.logPath) - PROGRESS_REWIND), stamp: "" };
+    this.progress.set(t.id, w);
+    return w;
+  }
+
+  private feedProgress(t: Task, w: ProgressWatch, now: number, final: boolean): void {
+    const lines = w.follower.readRaw();
+    for (const line of lines.slice(-PROGRESS_LINES)) w.tracker.line(line, now);
+    if (final) {
+      const rest = w.follower.pending();
+      if (rest) w.tracker.line(rest, now);
+    } else w.tracker.pending(w.follower.pending(), now);
+    const file = progressPath(t);
+    const st = fs.statSync(file, { throwIfNoEntry: false });
+    const stamp = st ? `${st.size}:${st.mtimeMs}` : "";
+    if (stamp !== w.stamp) {
+      w.stamp = stamp;
+      if (!st) w.tracker.file(undefined, now);
+      else {
+        const fd = fs.openSync(file, "r");
+        try {
+          const len = Math.min(st.size, PROGRESS_FILE_BYTES);
+          const buf = Buffer.alloc(len);
+          const n = fs.readSync(fd, buf, 0, len, st.size - len);
+          w.tracker.file(buf.subarray(0, n).toString("utf8"), now);
+        } finally {
+          fs.closeSync(fd);
+        }
+      }
+    }
+    t.progress = w.tracker.current(now);
+  }
+
   private markReady(task: Task, line: string): void {
     if (task.ready) return;
     task.ready = true;
@@ -437,6 +534,16 @@ export class Registry {
       }
     }
     this.followers.delete(id);
+    // The last of its progress, kept as the value it ended at.
+    const pw = this.progress.get(id);
+    if (pw) {
+      try {
+        this.feedProgress(task, pw, Date.now(), true);
+      } catch {
+        // Keep what was known.
+      }
+    }
+    this.progress.delete(id);
     const t = this.timeouts.get(id);
     if (t) clearTimeout(t);
     this.timeouts.delete(id);
@@ -544,6 +651,7 @@ export class Registry {
       keep: t.keep,
       ready: t.ready,
       readyPattern: t.readyPattern,
+      ...(t.progressSpec ? { progressSpec: t.progressSpec } : {}),
       ...(released ? { released: true } : {}),
     };
   }
@@ -637,6 +745,7 @@ export class Registry {
           status: "running",
           ready: e.ready,
           readyPattern: e.readyPattern,
+          ...(e.progressSpec ? { progressSpec: e.progressSpec } : {}),
           keep: true,
           origin: "user",
           delivered: true,

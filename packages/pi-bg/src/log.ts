@@ -16,8 +16,18 @@ const ANSI = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()*
 /** The longest partial line a follower keeps (a progress bar redrawn with \r and no \n). */
 const MAX_PARTIAL = 64 * 1024;
 
+export function stripAnsi(text: string): string {
+  return text.replace(ANSI, "");
+}
+
+/** A pattern from the model: `/src/flags`, or a plain regex matched case-insensitively. */
+export function parsePattern(pattern: string): RegExp {
+  const m = /^\/(.+)\/([a-z]*)$/su.exec(pattern);
+  return m ? new RegExp(m[1] as string, (m[2] ?? "").replace(/[gy]/gu, "")) : new RegExp(pattern, "i");
+}
+
 export function cleanLine(line: string): string {
-  let l = line.replace(ANSI, "");
+  let l = stripAnsi(line);
   // A progress bar rewrites its line with \r: keep what was drawn last.
   const cr = l.lastIndexOf("\r", l.length - 2);
   if (cr >= 0) l = l.slice(cr + 1);
@@ -84,9 +94,28 @@ export class LogFollower {
   private offset = 0;
   private partial = "";
 
-  constructor(private readonly path: string) {}
+  /** `from`: where to start reading (a byte offset); a line cut there is dropped. */
+  constructor(
+    private readonly path: string,
+    from = 0,
+  ) {
+    this.offset = Math.max(0, Math.min(from, logSize(path)));
+    this.skipCut = this.offset > 0;
+  }
+
+  private skipCut: boolean;
 
   read(): string[] {
+    return this.readRaw().map(cleanLine);
+  }
+
+  /** The incomplete last line as written so far (a \r progress bar's drawings), uncleaned. */
+  pending(): string {
+    return this.partial;
+  }
+
+  /** Like `read`, without cleaning: \r redraws and ANSI escapes kept. */
+  readRaw(): string[] {
     const size = logSize(this.path);
     if (size < this.offset) {
       this.offset = 0;
@@ -99,7 +128,11 @@ export class LogFollower {
     const lines = text.split("\n");
     // A line that never ends (a \r progress bar) is kept short: only its latest drawing matters.
     this.partial = (lines.pop() ?? "").slice(-MAX_PARTIAL);
-    return lines.map(cleanLine);
+    if (this.skipCut && lines.length) {
+      lines.shift();
+      this.skipCut = false;
+    }
+    return lines;
   }
 
   /** Whatever is left, including a last line with no newline (after the process ended). */

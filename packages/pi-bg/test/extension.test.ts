@@ -461,4 +461,34 @@ describe("pi-bg", () => {
     expect(calls.at(-1)).toEqual([false, "bg"]);
     await x.shutdown();
   });
+
+  it("shows progress a task reports: the row, the pill, the waiting message, the agent's text and the snapshot", async () => {
+    const { ACTIVITY_SECTION } = await import("../src/activity.ts");
+    const x = await load();
+    const section = x.emitted.find((e) => e.channel === ACTIVITY_SECTION)?.data.section;
+    await expect(x.call("bg_run", { command: "true", kind: "job", progress: String.raw`\d+%` })).rejects.toThrow(/capture group/);
+    const r = x.textOf(await x.call("bg_run", { command: `echo "450/1000 fold 3" > "$PI_BG_PROGRESS"; sleep 3`, kind: "job", name: "fit" }));
+    expect(r).toMatch(/Started fit/);
+    await until(() => section.entries(Date.now())[0]?.stats.includes("45%"), 4_000);
+    const row = section.entries(Date.now())[0];
+    expect(row.stats).toMatch(/^▕████▌ {5}▏ 45% · 0:0\d$/u);
+    expect(row.detail).toMatch(/^fold 3 · echo/);
+    expect(x.widgetLines()).toEqual([" 1 shell · 45% "]);
+    expect(x.textOf(await x.call("bg_logs", {}))).toMatch(/fit {2}job {2}running 0:0\d {2}45% \(450\/1000, fold 3\)/);
+    const snap = x.emitted.filter((e) => e.channel === "bg:tasks").at(-1)?.data.tasks[0];
+    expect(snap.progress).toEqual({ fraction: 0.45, source: "file", count: "450/1000", note: "fold 3" });
+    await x.call("bg_wait", {});
+    expect(x.working.some((m) => /^Waiting on fit 45% · 0:0\d/u.test(m ?? ""))).toBe(true);
+    await x.shutdown();
+  });
+
+  it("says where a declared progress comes from", async () => {
+    const x = await load();
+    const r = x.textOf(await x.call("bg_run", { command: "sleep 3", kind: "job", name: "t", progress: "pytest" }));
+    expect(r).toMatch(/Progress: read as pytest output/);
+    const s = x.textOf(await x.call("bg_run", { command: "sleep 3", kind: "job", name: "u", progress: String.raw`row (\d+) of (\d+)` }));
+    expect(s).toMatch(/Progress: from log lines matching row/);
+    await x.shutdown();
+  });
 });
+

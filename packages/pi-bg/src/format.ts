@@ -1,6 +1,25 @@
 // Text for the footer, lists, tool results and wake-up messages.
 import { bounded, tail } from "./log.ts";
+import { eta, etaText, percent } from "./progress.ts";
 import type { Task } from "./registry.ts";
+
+/**
+ * For the agent: `45% (450/1000, ~3m left)`, `87% (fold 3, detected: tqdm)`; `last progress 87%`
+ * for a task that ended short of done. Undefined when nothing is known.
+ */
+export function progressText(t: Task, now = Date.now()): string | undefined {
+  const p = t.progress;
+  if (!p) return undefined;
+  if (t.status !== "running") return p.fraction < 1 ? `last progress ${percent(p)}` : undefined;
+  const left = eta(p, now);
+  const bits = [p.count, p.note, left === undefined ? undefined : `${etaText(left)} left`, p.source.startsWith("detected") ? p.source : undefined].filter(Boolean);
+  return `${percent(p)}${bits.length ? ` (${bits.join(", ")})` : ""}`;
+}
+
+/** A running task's percent, for short labels: `45%`. */
+export function shortProgress(t: Task): string | undefined {
+  return t.status === "running" && t.progress ? percent(t.progress) : undefined;
+}
 
 /** `0:45`, `12:03`, `1h05m`. */
 export function elapsed(ms: number): string {
@@ -50,7 +69,7 @@ const FOOTER_ITEMS = 4;
  */
 export function footerStatus(tasks: Task[], now = Date.now()): string | undefined {
   const items: string[] = [];
-  for (const t of tasks) if (t.status === "running" && t.kind === "job") items.push(`${t.name} ${runtime(t, now)}`);
+  for (const t of tasks) if (t.status === "running" && t.kind === "job") items.push([t.name, shortProgress(t), runtime(t, now)].filter(Boolean).join(" "));
   for (const t of tasks) {
     if (t.status !== "running" || t.kind !== "service") continue;
     items.push(`${t.name} ${t.ready ? "ready" : t.readyPattern ? "starting" : "up"}${t.keep ? " (kept)" : ""}`);
@@ -69,6 +88,8 @@ export function footerStatus(tasks: Task[], now = Date.now()): string | undefine
 /** One line per task for `bg_logs` without an id and for `/bg`. */
 export function taskLine(t: Task, now = Date.now()): string {
   const bits = [t.id, t.name, t.kind, `${outcome(t)} ${runtime(t, now)}`];
+  const progress = progressText(t, now);
+  if (progress) bits.push(progress);
   if (t.keep) bits.push("kept");
   if (t.origin === "user") bits.push("started by the user");
   return bits.join("  ");
@@ -77,6 +98,8 @@ export function taskLine(t: Task, now = Date.now()): string {
 export function header(t: Task, now = Date.now()): string {
   const bits = [`${t.name} (${t.kind} ${t.id})`, `${outcome(t)} after ${runtime(t, now)}`];
   if (t.status === "running") bits[1] = `${outcome(t)} for ${runtime(t, now)}`;
+  const progress = progressText(t, now);
+  if (progress) bits.splice(2, 0, progress);
   if (t.pid) bits.push(`pid ${t.pid}`);
   bits.push(`cwd ${t.cwd}`);
   return bits.join(" · ");

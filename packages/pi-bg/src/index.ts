@@ -8,6 +8,9 @@
 //   Ending the turn with an agent job running waits the same way (agent_before_settle), and the
 //   outcome continues the run.
 // - bg_logs reads a log (or lists the tasks); bg_kill stops one.
+// - Progress (progress.ts): standard bars (tqdm, pytest, ...) are detected, the agent may declare a
+//   format or regex (bg_run's `progress`), and a task may write `done/total` to $PI_BG_PROGRESS. It
+//   shows in /tasks rows, the pill, the waiting message and the agent's text; nothing otherwise.
 // - Claude Code's layout: a pill under the prompt (`2 shells`, `1 failed` while a failure is
 //   unseen); ↓ then Enter, or a click, opens the background-tasks dialog, as does `/tasks` (aliases
 //   `/bashes`, `/ps`, `/bg`). `/stop` stops every task. Outside the TUI, a footer status `bg`.
@@ -19,7 +22,7 @@
 //                                              (pi-herdr shows it as the pane token $bg)
 //          herdr:notify {title,body,sound,unlessFocused}  when a task the user started ends
 //          herdr:split {command,cwd}           /bg's "follow in a herdr split" (when pi-herdr answers herdr:probe)
-//          bg:tasks {tasks}                    a snapshot after every change
+//          bg:tasks {tasks}                    a snapshot after every change (with `progress` when known)
 //          bg:killed {id,command,cwd}          after bg_kill or /bg stops a task
 //   reads  bg:external {id,label,state,summary?}  outside work bg_wait can wait on (state running|done|failed)
 //          bg:annotate {task,by,detail?,wait?}  what another extension knows about a task (pi-marimo: the
@@ -38,7 +41,8 @@ import type { AgentBeforeSettleEvent, BoundaryResult, ExtensionAPI, ExtensionCon
 import { Text } from "@earendil-works/pi-tui";
 import { WORKING_MESSAGE_EVENT } from "./working-message.ts";
 import { Type } from "typebox";
-import { elapsed, footerStatus, header, marimoNote, nameFromCommand, outcome, report, runtime, taskLine } from "./format.ts";
+import { elapsed, footerStatus, header, marimoNote, nameFromCommand, outcome, progressText, report, runtime, shortProgress, taskLine } from "./format.ts";
+import { CATALOGUE, FORMAT_NAMES, bar, eta, etaText, percent } from "./progress.ts";
 import { bounded, grep, head, tail } from "./log.ts";
 import { type Kind, type Task, type TaskEvent, parsePattern, registry } from "./registry.ts";
 import {
@@ -113,6 +117,11 @@ const RunParams = Type.Object({
   ready: Type.Optional(Type.String({ description: "service: regex (case-insensitive, or /src/flags) for the log line that means it is up; you are woken once when it matches" })),
   timeout: Type.Optional(Type.Number({ description: "job: kill it after this many seconds" })),
   keep: Type.Optional(Type.Boolean({ description: "service: leave it running when this pi session ends (a server the user works in)" })),
+  progress: Type.Optional(
+    Type.String({
+      description: `Where its progress shows up in the log, when the command prints countable progress that is not detected on its own: a format (${CATALOGUE.map((f) => f.name).join(", ")}, percent, fraction) or a regex with one group (a percent) or two (done, total), or named groups pct / done and total. "none" turns detection off. Omit it otherwise; never declare progress the command does not print.`,
+    }),
+  ),
   cwd: Type.Optional(Type.String({ description: "Working directory (default: the session's)" })),
 });
 
@@ -246,11 +255,25 @@ export default function piBg(pi: ExtensionAPI) {
   const alerting = (t: Task) => (t.status === "failed" || t.status === "timeout") && (t.endedAt ?? 0) > dismissedAt && !reg.cleared.has(t.id);
   const pillOf = (now: number): ActivityPill | undefined => {
     void now;
-    const running = reg.running(sessionId).length;
+    const running = reg.running(sessionId);
     const failed = reg.list(sessionId).filter(alerting).length;
-    if (!running && !failed) return undefined;
-    return { label: running ? `${running} shell${running === 1 ? "" : "s"}` : "shells", ...(failed ? { alert: `${failed} failed` } : {}) };
+    if (!running.length && !failed) return undefined;
+    // One task's progress, when exactly one running task has any: `2 shells · fit 45%`.
+    const measured = running.filter((t) => t.progress);
+    const one = measured.length === 1 ? measured[0] : undefined;
+    const count = running.length ? `${running.length} shell${running.length === 1 ? "" : "s"}` : "shells";
+    const label = one ? `${count} · ${running.length === 1 ? "" : `${one.name} `}${shortProgress(one)}` : count;
+    return { label, ...(failed ? { alert: `${failed} failed` } : {}) };
   };
+  /** A row's stats while it runs with progress: `▕████▌     ▏ 45% · ~3m`. */
+  const progressStats = (t: Task, now: number): string | undefined => {
+    const p = t.status === "running" ? t.progress : undefined;
+    if (!p) return undefined;
+    const left = eta(p, now);
+    return `${bar(p.fraction)} ${percent(p)}${left === undefined ? "" : ` · ${etaText(left)}`}`;
+  };
+  /** `fit 45% · 2:14` for the waiting message. */
+  const waitLabel = (t: Task) => [t.name, [shortProgress(t), runtime(t)].filter(Boolean).join(" · ")].join(" ");
   const section: ActivitySection = {
     id: "bg",
     title: "shells",
@@ -260,11 +283,18 @@ export default function piBg(pi: ExtensionAPI) {
       [...reg.running(sessionId), ...reg.list(sessionId).filter((t) => t.status !== "running").sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))].map((t) => ({
         key: t.id,
         label: t.name,
-        detail: [noteOf(t)?.detail, t.command.replace(/\s+/gu, " ").trim()].filter(Boolean).join(" · "),
+        detail: [noteOf(t)?.detail, t.status === "running" ? t.progress?.note : undefined, t.command.replace(/\s+/gu, " ").trim()].filter(Boolean).join(" · "),
         status: entryStatus(t),
         stats:
           t.status === "running"
-            ? `${waitingIds().has(t.id) ? "waiting · " : ""}${t.kind === "service" ? (t.ready ? "ready · " : t.readyPattern ? "starting · " : "service · ") : ""}${runtime(t, now)}`
+            ? [
+                waitingIds().has(t.id) ? "waiting" : undefined,
+                t.kind === "service" ? (t.ready ? "ready" : t.readyPattern ? "starting" : "service") : undefined,
+                progressStats(t, now),
+                runtime(t, now),
+              ]
+                .filter(Boolean)
+                .join(" · ")
             : `${outcome(t)} · ${runtime(t, now)}`,
         startedAt: t.startedAt,
         ...(t.endedAt ? { endedAt: t.endedAt } : {}),
@@ -369,6 +399,9 @@ export default function piBg(pi: ExtensionAPI) {
       keep: t.keep,
       willWake: t.origin === "agent" && t.status === "running" && !t.delivered,
       logPath: t.logPath,
+      ...(t.progress
+        ? { progress: { fraction: t.progress.fraction, source: t.progress.source, ...(t.progress.count ? { count: t.progress.count } : {}), ...(t.progress.note ? { note: t.progress.note } : {}) } }
+        : {}),
     }));
 
   /**
@@ -570,7 +603,7 @@ export default function piBg(pi: ExtensionAPI) {
     if (settleWaiting || !attached || !tui() || event.outcome !== "completed" || !event.context.canContinue) return {};
     if (c.hasPendingMessages() || !agentJobs().length || [...waiters].some((w) => !w.silent)) return {};
     const generation = sessionGeneration;
-    const label = () => agentJobs().map((t) => `${t.name} ${runtime(t)}`).join(" · ");
+    const label = () => agentJobs().map(waitLabel).join(" · ");
     const working = holdWorking(c, generation, label);
     let ticks = 0;
     let waiter: Waiter | undefined;
@@ -827,6 +860,7 @@ export default function piBg(pi: ExtensionAPI) {
       "After starting a job, keep doing other useful work. When nothing is left but the job's result, call bg_wait, or end your turn: a running job keeps the turn open until it ends and its outcome continues the turn; the user can still interrupt by typing.",
       "Never poll a background task with sleep loops or repeated bg_logs calls: bg_wait or the wake-up message tells you when it ends.",
       "Use keep=true only for a service the user works in themselves (a notebook or dev server they have open) that should outlive this pi session.",
+      `Progress shows on its own for standard bars (${CATALOGUE.map((f) => f.name).join(", ")}). When another command prints countable progress, set bg_run's progress to a preset or regex; in a script you write for bg_run, report it with \`echo "$done/$total [note]" > "$PI_BG_PROGRESS"\`.`,
     ],
     parameters: RunParams,
     renderCall(args, theme) {
@@ -855,6 +889,7 @@ export default function piBg(pi: ExtensionAPI) {
         ready: params.ready ?? (server ? MARIMO_READY : undefined),
         timeoutSec: params.timeout,
         keep: params.keep,
+        progress: params.progress,
       });
       // A command that fails at once (a typo, a missing file) is reported here rather than as a wake-up.
       const { waiter, done } = waitFor({ targets: new Set([task.id]), any: false, silent: true }, STARTUP_WAIT_MS, undefined);
@@ -872,6 +907,7 @@ export default function piBg(pi: ExtensionAPI) {
         lines.push("You will be woken if it exits. Set `ready` next time to be told when it is up.");
       }
       if (task.keep) lines.push("It keeps running after this pi session ends.");
+      if (task.progressSpec && task.progressSpec.toLowerCase() !== "none") lines.push(`Progress: ${FORMAT_NAMES.includes(task.progressSpec.toLowerCase()) ? `read as ${task.progressSpec.toLowerCase()} output` : `from log lines matching ${task.progressSpec}`}${task.progress ? `, now ${progressText(task)}` : ""}.`);
       return text(lines.join("\n"));
     },
   });
@@ -934,7 +970,7 @@ export default function piBg(pi: ExtensionAPI) {
       const label = () => {
         const ts = names();
         if (!ts.length) return [...targets].map((id) => externals.get(id)?.label ?? id).join(" · ") || "outside work";
-        return ts.map((t) => `${t.name} ${runtime(t)}`).join(" · ");
+        return ts.map(waitLabel).join(" · ");
       };
       const started = Date.now();
       const working = holdWorking(c, generation, label);
@@ -965,7 +1001,7 @@ export default function piBg(pi: ExtensionAPI) {
       for (const x of waiter.externals) out.push(consumeExternal(x));
       if (reason !== "done") {
         const still = names().filter((t) => t.status === "running");
-        const what = still.length ? still.map((t) => `${t.name} (${t.id}, ${runtime(t)})`).join(", ") : label();
+        const what = still.length ? still.map((t) => `${t.name} (${[t.id, runtime(t), progressText(t)].filter(Boolean).join(", ")})`).join(", ") : label();
         const why =
           reason === "message"
             ? "Stopped waiting: the user sent a message."

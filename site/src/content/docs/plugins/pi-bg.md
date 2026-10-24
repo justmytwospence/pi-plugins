@@ -27,7 +27,7 @@ Commands run through `bash -c` in separate process groups. Bash and the programs
 
 | Tool | Arguments and behavior |
 | --- | --- |
-| `bg_run` | Required `command` and `kind` (`job` or `service`); optional `name`, `cwd`, service `ready` and `keep`, job `timeout` in seconds. |
+| `bg_run` | Required `command` and `kind` (`job` or `service`); optional `name`, `cwd`, service `ready` and `keep`, job `timeout` in seconds, and `progress` (see [Progress](#progress)). |
 | `bg_wait` | Optional `id` and `timeout`; waits inside the turn, default 1800 seconds, maximum 3600. Without an ID, waits for the next running agent-started job to finish. |
 | `bg_logs` | Optional `id`, `lines`, `grep`, `head`. Omit the ID to list tasks; log reads default to 60 lines, maximum 400. |
 | `bg_kill` | Required `id`; sends SIGTERM to the process group, then SIGKILL after three seconds if necessary. |
@@ -65,6 +65,26 @@ For a development server, use a pattern matching its actual readiness output:
 ```
 
 Plain readiness patterns are case-insensitive; `/pattern/flags` supplies explicit regex flags. A service without a readiness pattern has no readiness event to wait for. Recognized marimo server commands receive an automatic name and readiness pattern unless overridden.
+
+## Progress
+
+A task shows a progress bar only when pi-bg knows its progress from one of three sources, highest priority first:
+
+1. **The progress file.** Every task gets `PI_BG_PROGRESS`, a file path. A command or script writes `450/1000`, `45%`, or either followed by a note (`3/5 fitting fold 3`); the last line counts.
+2. **A declared format.** `bg_run`'s `progress` names a format below, a generic `percent` or `fraction`, or a regex: one capture group is a percent, two are done and total, or use named groups `pct`, or `done` and `total`. A regex without a group is rejected. `"none"` turns detection off.
+3. **Detection.** Standard output pi-bg recognizes without being asked: `tqdm`, `pytest`, `cargo`, `keras`, `rich` (pip), `wget` (dot progress) and `rsync`. A detected bar shows only once it looks live: a line redrawn in place with `\r`, or three matches whose value never went down. A drop hides it until it qualifies again, interleaved bars hide it, and a finished bar that goes quiet for 30 seconds is hidden.
+
+Many tools draw bars only on a terminal; in a log file, tqdm, pytest, wget and rsync still report. For example, a job driven by a script the agent wrote:
+
+```json
+{
+  "command": "python fit.py  # writes \"$i/$n fold $k\" to $PI_BG_PROGRESS",
+  "kind": "job",
+  "name": "fit"
+}
+```
+
+Progress appears as a bar, percent and ETA in the `/tasks` row (`▕████▌     ▏ 45% · ~3m · 2:14`, example), in the pill when exactly one task has progress (`2 shells · fit 45%`), in the `Waiting on fit 45% · 2:14…` message, and in the agent's text (`45% (450/1000, ~3m left, detected: tqdm)`). A task that ends short of done reports `last progress 87%`.
 
 ## Completion and cancellation
 

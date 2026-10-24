@@ -34,7 +34,7 @@ Add `-ne` to disable your other discovered and configured extensions for that ru
 
 | tool | parameters |
 |---|---|
-| `bg_run` | `command`, `kind` (`job` or `service`, required), `name`, `ready` (service only: a regex matched case-insensitively, or `/src/flags`), `timeout` (job only: seconds before it is killed), `keep` (service only: outlive this Pi session), `cwd` |
+| `bg_run` | `command`, `kind` (`job` or `service`, required), `name`, `ready` (service only: a regex matched case-insensitively, or `/src/flags`), `timeout` (job only: seconds before it is killed), `keep` (service only: outlive this Pi session), `progress` (a format name, `none`, or a regex; see Progress below), `cwd` |
 | `bg_wait` | `id` (a task, or outside work another extension reports; default: whichever running agent job ends first), `timeout` (seconds, default 1800, max 3600) |
 | `bg_logs` | `id` (omit to list every task), `lines` (default 60, max 400), `grep`, `head` |
 | `bg_kill` | `id`: SIGTERM to the task's process group, SIGKILL after 3 seconds |
@@ -45,9 +45,31 @@ Ids also accept a task's name (the most recent task with it) or a unique id pref
 
 **Wake-ups.** A wake-up is sent only while Pi is idle: one that comes due during a turn waits for the turn to settle (a follow-up queued mid-turn would be dropped by Esc), and several that pile up go out as one message. Whatever `bg_wait`, `bg_logs` or `bg_kill` has already shown the agent is no longer owed. A task that ends during `/reload` wakes the agent once the new session is up. A task you stop yourself does not wake the agent; it is told on its next turn instead.
 
+## Progress
+
+A task shows a progress bar only when pi-bg knows its progress, from one of three sources (highest priority first). Nothing is guessed from arbitrary numbers in the output.
+
+1. **Progress file.** Each task's environment has `PI_BG_PROGRESS`, a file beside its log. A command writes `450/1000`, `45%`, or either followed by a note (`3/5 fitting fold 3`) to it; its last line counts. This is the way for scripts the agent writes itself.
+2. **Declared format.** `bg_run`'s `progress` is a catalogue name (below), a generic `percent` or `fraction`, or a regex (`/src/flags`, or plain and case-insensitive): one capture group is a percent, two are done and total, or named groups `pct`, or `done` and `total`. A regex without a group is rejected before the command starts. The agent vouched for it, so it shows at once. `none` turns detection off.
+3. **Detection.** A catalogue of standard progress output, recognized without being asked:
+
+| name | example line |
+|---|---|
+| `tqdm` | ` 45%\|████▌     \| 450/1000 [00:12<00:15, 36it/s]` (also `1.2k/10.0k`) |
+| `pytest` | `tests/test_x.py ....  [ 45%]`, `[gw0] [ 45%] PASSED tests/a.py::t` |
+| `cargo` | `    Building [=====>      ] 45/120: serde` |
+| `keras` | `120/500 [=====>.......] - ETA: 3s`, `120/500 ━━━━━━━━ 3s 6ms/step` |
+| `rich` (pip) | `━━━━━━━━╸━━━━━━━ 1.2/3.4 MB 5.0 MB/s` |
+| `wget` | `  4500K .......... .......... 45% 1.23M 3s` (dot progress) |
+| `rsync` | `  1,234,567  45%  1.23MB/s    0:00:12` |
+
+A detected bar shows only once it looks live: a line redrawn in place with `\r` (read from the unfinished last line too), or three matches whose value never went down. A drop hides it until it qualifies again, three drops within 10 seconds (interleaved or nested bars) hide it, and a bar that reached 100% and stays quiet for 30 seconds is hidden. Many tools draw bars only on a terminal; in a log file tqdm, pytest, wget and rsync still report.
+
+Where it shows: the `/tasks` row (`▕████▌     ▏ 45% · ~3m · 2:14`, the ETA once 10 seconds and 5 points of movement give a rate; a file note leads the row's detail), the pill when exactly one running task has progress (`1 shell · 45%`, `2 shells · fit 45%`), the waiting message (`Waiting on fit 45% · 2:14…`), the RPC footer status (`fit 45% 2:14`), and the agent's text: `bg_logs`, reports, wake-ups and `bg_wait` say `45% (450/1000, ~3m left, detected: tqdm)`, and a task that ended short of done `last progress 87%`. Adopted kept services keep their declared format. After a `/reload`, detection starts again near the log's end.
+
 ## Processes and files
 
-Each task runs `bash -c <command>` (`/bin/sh` when `/bin/bash` is missing) in its own process group, with `PI_BG_TASK_ID` set to its id and stdout and stderr appended to `~/.pi/agent/bg/<session-id>/<id>.log`. Nothing is written into the project. `PI_BG_DIR` moves the whole directory. A running task's log is cut back to its last megabyte once it passes 64 MB.
+Each task runs `bash -c <command>` (`/bin/sh` when `/bin/bash` is missing) in its own process group, with `PI_BG_TASK_ID` set to its id, `PI_BG_PROGRESS` to its progress file, and stdout and stderr appended to `~/.pi/agent/bg/<session-id>/<id>.log`. Nothing is written into the project. `PI_BG_DIR` moves the whole directory. A running task's log is cut back to its last megabyte once it passes 64 MB.
 
 - **Reload.** Tasks survive `/reload`: the reloaded code takes the running tasks over.
 - **Several sessions in one process.** An in-process session that loads pi-bg too (a pi-plan-mode planner given its tools) gets its own view: it lists, waits on, wakes and, when it ends, kills only the tasks it started. Only a session with a UI adopts kept services. Kept services of a session that is gone pass to the next session that starts in the process, as the user's.
@@ -60,7 +82,7 @@ Each task runs `bash -c <command>` (`/bin/sh` when `/bin/bash` is missing) in it
 
 ### Pill under the prompt
 
-In the TUI the pill reads `1 shell`, `2 shells`, plus `· 1 failed` in the error color while a failure you have not seen is there (until your next typed message, or until you dismiss it with `x` in `/tasks`). Nothing is drawn above the prompt.
+In the TUI the pill reads `1 shell`, `2 shells` (with one task's progress when exactly one running task has any: `2 shells · fit 45%`), plus `· 1 failed` in the error color while a failure you have not seen is there (until your next typed message, or until you dismiss it with `x` in `/tasks`). Nothing is drawn above the prompt.
 
 | key | action |
 |---|---|
@@ -119,6 +141,7 @@ There is no settings file. Environment:
 |---|---|
 | `PI_BG_DIR` | base directory for logs and state files (default `~/.pi/agent/bg`) |
 | `PI_BG_TASK_ID` | set by pi-bg in each task's environment to its id |
+| `PI_BG_PROGRESS` | set by pi-bg in each task's environment: the file the task may write its progress to |
 
 ## Requirements and costs
 
@@ -153,7 +176,7 @@ Inside Herdr with [pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/), p
 | `herdr:notify` | emits | `{ title, body, sound, unlessFocused }` | a `/tasks run` task or a kept service ended |
 | `herdr:split` | emits | `{ command, cwd, done }` | `f` in `/tasks`: `tail -n 200 -F` on the log |
 | `herdr:probe`, `herdr:ready` | emits / reads | `{ reply }`, `{}` | whether pi-herdr is active (enables `f`) |
-| `bg:tasks` | emits | `{ tasks }` | a snapshot after every change: `id`, `name`, `kind`, `command`, `cwd`, `status`, `ready`, `origin`, `keep`, `willWake`, `logPath` |
+| `bg:tasks` | emits | `{ tasks }` | a snapshot after every change: `id`, `name`, `kind`, `command`, `cwd`, `status`, `ready`, `origin`, `keep`, `willWake`, `logPath`, and `progress` (`fraction`, `source`, `count?`, `note?`) when known |
 | `bg:killed` | emits | `{ id, command, cwd }` | after a task is stopped |
 | `bg:external` | reads | `{ id, label, state, summary?, result? }` | outside work `bg_wait <id>` can wait on (`state`: `running`, `done`, `failed`); ended entries are kept 10 minutes for a late `bg_wait` |
 | `bg:external-consumed` | emits | `{ id }` | a completed external's optional `result` was returned by `bg_wait`; its owner can suppress a duplicate announcement. Summary-only waits do not emit this acknowledgment |

@@ -199,4 +199,46 @@ describe("registry across a reload and over time", () => {
     expect(fs.statSync(t.logPath).size).toBeLessThan(300);
     await reg.kill(t.id, "agent");
   });
+
+  describe("progress", () => {
+    it("detects a \\r-redrawn tqdm bar while it runs and keeps its last value", async () => {
+      const reg = new Registry();
+      const changes: number[] = [];
+      reg.subscribe((e) => e.type === "change" && changes.push(e.task.progress?.fraction ?? -1));
+      const bar = (n: number) => `${String(n / 10).padStart(3)}%|          | ${n}/1000 [00:00<?, ?it/s]`;
+      const t = reg.start({ ...base, command: `printf '\\r%s\\r%s' '${bar(0)}' '${bar(450)}' >&2; sleep 1.5; printf '\\r%s\\n' '${bar(1000)}' >&2`, name: "fit", kind: "job", cwd: dir });
+      await until(() => t.progress?.fraction === 0.45, 4_000);
+      expect(t.progress).toMatchObject({ count: "450/1000", source: "detected: tqdm" });
+      await until(() => t.status !== "running", 5_000);
+      expect(t.progress?.fraction).toBe(1);
+      expect(changes).toContain(0.45);
+    });
+
+    it("reads what the command writes to $PI_BG_PROGRESS", async () => {
+      const reg = new Registry();
+      const t = reg.start({ ...base, command: `echo "3/4 fold 3" > "$PI_BG_PROGRESS"; sleep 1.5`, name: "cv", kind: "job", cwd: dir });
+      await until(() => t.progress !== undefined, 4_000);
+      expect(t.progress).toMatchObject({ fraction: 0.75, count: "3/4", note: "fold 3", source: "file" });
+      await reg.kill(t.id, "agent");
+    });
+
+    it("uses a declared regex, and shows nothing without a source", async () => {
+      const reg = new Registry();
+      const t = reg.start({ ...base, command: "echo 'row 5 of 20'; echo 'step 3/10 at 40%'; sleep 1.5", name: "rows", kind: "job", cwd: dir, progress: String.raw`row (\d+) of (\d+)` });
+      const plain = reg.start({ ...base, command: "echo 'step 3/10 at 40%'; sleep 1.5", name: "plain", kind: "job", cwd: dir });
+      await until(() => t.progress !== undefined, 4_000);
+      expect(t.progress).toMatchObject({ fraction: 0.25, source: "declared" });
+      await until(() => plain.status !== "running", 5_000);
+      expect(plain.progress).toBeUndefined();
+      expect(t.progressSpec).toBe(String.raw`row (\d+) of (\d+)`);
+      await reg.kill(t.id, "agent");
+    });
+
+    it("refuses a regex without a capture group before starting anything", () => {
+      const reg = new Registry();
+      expect(() => reg.start({ ...base, command: "true", name: "x", kind: "job", cwd: dir, progress: String.raw`\d+%` })).toThrow(/capture group/);
+      expect(reg.list()).toEqual([]);
+    });
+  });
 });
+
