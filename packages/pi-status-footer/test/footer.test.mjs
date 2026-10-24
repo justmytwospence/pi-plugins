@@ -564,6 +564,8 @@ test("pi-pressure's signals get their own row, never ending in a prompt characte
   }
   // While a dialog waits the footer is one row, without it.
   assert.equal(mod.renderFooter({ ...s, compact: true }, 120, theme).length, 1);
+  // A 20-minute trace with blank (unsampled) minutes parses whole.
+  assert.equal(mod.parsePressureStatus("pressure: cpu \u2800\u2800\u28c0\u28e0\u28e4\u28f4\u28f6\u28fe\u28ff\u28ff 97 hot")[0].trace, "\u2800\u2800\u28c0\u28e0\u28e4\u28f4\u28f6\u28fe\u28ff\u28ff");
   // Another shape stays in the status row.
   assert.deepEqual(mod.absorbStatuses(new Map([["pressure", "pressure: gpu 99 hot"]]), { claudeRow: true }).rest, ["pressure: gpu 99 hot"]);
 });

@@ -147,13 +147,28 @@ describe("status", () => {
   });
   test("format: episode signals, level words, culprit; never ends in a prompt character", () => {
     const m = createMonitor({ ...DEFAULTS, showAfterMs: 0 });
-    for (const [i, cpu] of [60, 80, 90, 97].entries()) m.step({ at: i * 2000, cpu, loadPerCore: 1.6, memory: { source: "darwin", level: 2 }, swapInBps: 40 * 1024 * 1024 });
+    // One sample per minute: each minute is a braille dot column.
+    for (const [i, cpu] of [60, 80, 90, 97].entries()) m.step({ at: i * 60_000, cpu, loadPerCore: 1.6, memory: { source: "darwin", level: 2 }, swapInBps: 40 * 1024 * 1024 });
     const view = m.view();
     const text = formatStatus(view, "vitest")!;
     expect(text).toBe("pressure: cpu ⣴⣿ 97 hot · load 1.6 warn · mem warn · swap-in 40MB/s warn · top vitest");
     expect(formatStatus(view, undefined)).not.toMatch(/[%$#>]$/);
     expect(topBy(view)).toBe("cpu");
     expect(formatStatus({ ...view, visible: false }, "x")).toBeUndefined();
+  });
+  test("history: a mean per minute over the window, gaps blank, current minute last", () => {
+    const m = createMonitor({ ...DEFAULTS, historyMinutes: 4 });
+    const at = (minute: number, second: number) => minute * 60_000 + second * 1000;
+    m.step({ at: at(0, 0), cpu: 100, loadPerCore: 0 });
+    m.step({ at: at(1, 0), cpu: 20, loadPerCore: 0 });
+    m.step({ at: at(1, 30), cpu: 40, loadPerCore: 0 });
+    expect(m.view().history).toEqual([100, 30]);
+    m.step({ at: at(3, 0), cpu: 50, loadPerCore: 0 });
+    expect(m.view().history).toEqual([100, 30, undefined, 50]);
+    // Minute 0 falls out of a four-minute window; a sample without CPU still advances it.
+    m.step({ at: at(4, 0), loadPerCore: 0 });
+    expect(m.view().history).toEqual([30, undefined, 50, undefined]);
+    expect(spark(m.view().history)).toBe("⡀⡄");
   });
   test("memory-only pressure names the biggest process", () => {
     const m = createMonitor({ ...DEFAULTS, showAfterMs: 0 });
@@ -163,7 +178,9 @@ describe("status", () => {
 
 describe("config", () => {
   test("merges valid values over defaults, ignores the rest", () => {
-    const config = mergeConfig({ cpu: { warn: 70 }, showAfterMs: 0 }, { cpu: { hot: -1 } as never, intervalMs: 10, enabled: false });
+    const config = mergeConfig({ cpu: { warn: 70 }, showAfterMs: 0, historyMinutes: 999 }, { cpu: { hot: -1 } as never, intervalMs: 10, enabled: false });
+    expect(config.historyMinutes).toBe(120);
+    expect(DEFAULTS.historyMinutes).toBe(20);
     expect(config.cpu).toEqual({ warn: 70, hot: 95 });
     expect(config.showAfterMs).toBe(0);
     expect(config.intervalMs).toBe(500);

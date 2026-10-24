@@ -22,7 +22,7 @@ export function mergeConfig(...layers: Partial2<PressureConfig>[]): PressureConf
   const config: PressureConfig = structuredClone(DEFAULTS);
   for (const layer of layers) {
     if (typeof layer.enabled === "boolean") config.enabled = layer.enabled;
-    for (const key of ["intervalMs", "showAfterMs", "hideAfterMs"] as const) if (finite(layer[key])) config[key] = layer[key];
+    for (const key of ["intervalMs", "showAfterMs", "hideAfterMs", "historyMinutes"] as const) if (finite(layer[key])) config[key] = layer[key];
     for (const key of ["cpu", "loadPerCore", "memorySome", "memoryFull", "swapInMBps"] as const) {
       const band = layer[key];
       if (!band || typeof band !== "object") continue;
@@ -31,6 +31,7 @@ export function mergeConfig(...layers: Partial2<PressureConfig>[]): PressureConf
     }
   }
   config.intervalMs = Math.max(500, config.intervalMs);
+  config.historyMinutes = Math.max(1, Math.min(120, Math.round(config.historyMinutes)));
   return config;
 }
 
@@ -60,7 +61,7 @@ export async function report(view: View | undefined, config: PressureConfig, sam
   const lv = (signal: (typeof SIGNALS)[number]) => view?.levels[signal] ?? "ok";
   if (!r) lines.push("No reading yet.");
   else {
-    const trace = view.history.length ? ` ${spark(view.history)}` : "";
+    const trace = view.history.some((v) => v !== undefined) ? ` (last ${view.history.length} min, a minute per dot column: ${spark(view.history)})` : "";
     lines.push(`cpu ${r.cpu === undefined ? "?" : Math.round(r.cpu)} busy${trace} · ${lv("cpu")} (warn ${config.cpu.warn}, hot ${config.cpu.hot})`);
     lines.push(`load ${r.loadPerCore.toFixed(2)} per core · ${lv("load")} (warn ${config.loadPerCore.warn}, hot ${config.loadPerCore.hot})`);
     const m = r.memory;

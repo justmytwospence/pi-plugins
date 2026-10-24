@@ -19,6 +19,8 @@ export interface PressureConfig {
   showAfterMs: number;
   /** How long every signal stays back at ok before the row hides. */
   hideAfterMs: number;
+  /** Minutes of CPU history in the trace, one braille dot column per minute (two per character). */
+  historyMinutes: number;
   /** Busy share of all cores, percent. */
   cpu: Band;
   /** One-minute load average per core. */
@@ -36,6 +38,7 @@ export const DEFAULTS: PressureConfig = {
   intervalMs: 2_000,
   showAfterMs: 10_000,
   hideAfterMs: 30_000,
+  historyMinutes: 20,
   cpu: { warn: 85, hot: 95 },
   loadPerCore: { warn: 1.5, hot: 2.5 },
   memorySome: { warn: 10, hot: 40 },
@@ -79,30 +82,47 @@ export interface View {
   /** Signals that rose during the current episode, in display order; they stay listed until the row hides. */
   episode: Signal[];
   reading?: Reading;
-  /** Recent CPU busy percentages, oldest first. */
-  history: number[];
+  /** Mean CPU busy percentage per minute, oldest first, ending with the current (partial) minute; undefined where nothing was sampled. */
+  history: (number | undefined)[];
 }
 
-export const HISTORY = 8;
+const MINUTE = 60_000;
 
 /** Steps through readings: shows after sustained pressure, lingers once it eases. */
 export function createMonitor(config: PressureConfig) {
   let levels: Record<Signal, Level> = { cpu: "ok", load: "ok", mem: "ok", swap: "ok" };
-  const history: number[] = [];
+  // Per-minute sums, keyed by minute since the epoch, trimmed to the window.
+  const minutes = new Map<number, { sum: number; count: number }>();
+  let latest: number | undefined;
+  const history = (): (number | undefined)[] => {
+    if (latest === undefined || minutes.size === 0) return [];
+    const first = Math.max(Math.min(...minutes.keys()), latest - config.historyMinutes + 1);
+    const out: (number | undefined)[] = [];
+    for (let m = first; m <= latest; m++) {
+      const bucket = minutes.get(m);
+      out.push(bucket ? bucket.sum / bucket.count : undefined);
+    }
+    return out;
+  };
   const episode = new Set<Signal>();
   let visible = false;
   let pressedSince: number | undefined;
   let calmSince: number | undefined;
   let reading: Reading | undefined;
-  const view = (): View => ({ visible, levels: { ...levels }, episode: SIGNALS.filter((s) => episode.has(s)), reading, history: [...history] });
+  const view = (): View => ({ visible, levels: { ...levels }, episode: SIGNALS.filter((s) => episode.has(s)), reading, history: history() });
   return {
     step(next: Reading): View {
       reading = next;
       levels = classify(next, config, levels);
+      const minute = Math.floor(next.at / MINUTE);
+      latest = Math.max(latest ?? minute, minute);
       if (next.cpu !== undefined) {
-        history.push(next.cpu);
-        if (history.length > HISTORY) history.shift();
+        const bucket = minutes.get(minute) ?? { sum: 0, count: 0 };
+        bucket.sum += next.cpu;
+        bucket.count++;
+        minutes.set(minute, bucket);
       }
+      for (const m of minutes.keys()) if (m <= latest - config.historyMinutes) minutes.delete(m);
       const now = next.at;
       const pressed = SIGNALS.some((s) => levels[s] !== "ok");
       if (pressed) {
@@ -125,8 +145,8 @@ export function createMonitor(config: PressureConfig) {
 const BRAILLE_LEFT = [0x40, 0x04, 0x02, 0x01]; // bottom to top
 const BRAILLE_RIGHT = [0x80, 0x20, 0x10, 0x08];
 
-/** Percentages as braille bars, two samples per cell, filled from the bottom (4 dots per column). */
-export function spark(values: readonly number[]): string {
+/** Percentages as braille bars, two values per cell, filled from the bottom (4 dots per column); undefined is blank. */
+export function spark(values: readonly (number | undefined)[]): string {
   const padded = values.length % 2 ? [undefined, ...values] : [...values];
   const dots = (value: number | undefined, column: number[]) => {
     if (value === undefined) return 0;
@@ -158,7 +178,7 @@ export function formatStatus(view: View, top: string | undefined, paint: Paint =
     const value = (text: string) => paint.level(level, `${text}${text ? " " : ""}${level}`);
     if (signal === "cpu") {
       const busy = r?.cpu ?? view.history.at(-1);
-      const trace = view.history.length ? `${paint.level(level, spark(view.history))} ` : "";
+      const trace = view.history.some((v) => v !== undefined) ? `${paint.level(level, spark(view.history))} ` : "";
       items.push(`${paint.dim("cpu")} ${trace}${value(busy === undefined ? "" : `${Math.round(busy)}`)}`);
     } else if (signal === "load") items.push(`${paint.dim("load")} ${value(r ? r.loadPerCore.toFixed(1) : "")}`);
     else if (signal === "mem") items.push(`${paint.dim("mem")} ${value("")}`);
