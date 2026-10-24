@@ -10,7 +10,8 @@ import { MainState } from "./main-state.ts";
 import { RatioStore } from "./preferences.ts";
 import { InjectedPrompt } from "./injected.ts";
 import { herdrFocus, navDirection, navTarget } from "./nav.ts";
-import { ComposerStash, SidebarPanel, type StatusPart } from "./panel.ts";
+import { SidebarPanel, type StatusPart } from "./panel.ts";
+import { requestStash, type StashController } from "./contract.ts";
 import { HeadsUp, headsUpChange, headsUpChanged } from "./headsup/headsup.ts";
 import type { HeadsUpNote } from "./headsup/protocol.ts";
 import { isNoteMarker, noteMessages } from "./headsup/thread.ts";
@@ -47,8 +48,8 @@ export class SidebarController {
   private hostTui: FocusTui | undefined;
   /** Main's editor: the component focused when the user last submitted a prompt. */
   private mainEditor: Component | null = null;
-  /** Sidebar's own prompt stash (Ctrl+S in its composer); it outlives panel rebuilds. */
-  private readonly stash = new ComposerStash();
+  /** Sidebar's own prompt stash from pi-stash (Ctrl+S in its composer); it outlives panel rebuilds. */
+  private stashController: StashController | undefined;
   /** Blocking extension dialogs open in main (a digit then belongs to them). */
   private prompts = 0;
   /** Heads-up notes waiting for Sidebar to finish its answer. */
@@ -187,7 +188,11 @@ export class SidebarController {
       this.panel = new SidebarPanel(tui, () => this.theme ?? ctx.ui.theme, {
         cwd: ctx.cwd,
         events: this.pi.events,
-        stash: this.stash,
+        stash: () => (this.stashController ??= requestStash(this.pi.events, {
+          editor: () => this.panel?.input.editorComponent,
+          notify: (message, type) => this.panel?.notice({ kind: type, text: message }),
+          changed: () => this.render(),
+        })),
         status: (theme) => this.status(theme),
         submit: (text) => this.submit(text),
         confirm: (text) => this.send(text, true),

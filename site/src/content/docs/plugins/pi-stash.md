@@ -8,7 +8,7 @@ plugin: pi-stash
 
 - **Use it for:** Set a half-written main prompt aside, run a command and restore it without overwriting new text.
 - **Enable:** Select `packages/pi-stash/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
-- **Controls:** Ctrl+S stashes/restores/swaps only in the main editor. No slash command or model tool.
+- **Controls:** Ctrl+S stashes/restores/swaps in the main editor, and in [pi-sidebar](/plugins/pi-sidebar/)'s composer with a stash of its own. No slash command or model tool.
 - **Settings:** No settings; one in-memory slot. Text/cursor/modal snapshots when supported; no persistence across process restart.
 - **Requirements, cost & privacy:** TUI only; no network, inference or external program. Draft stays in memory; image attachments are not stashed.
 - **Integrations & limits:** Optional Vim snapshots/footer hint. Embedded fields are untouched. Migrating from the upstream stash requires a full restart after saving the draft.
@@ -52,7 +52,7 @@ Automatic restoration happens after a submitted slash command starts, after a `!
 
 ## Editors and focus
 
-Only Pi's main prompt editor is stashed. Ctrl+S passes through unchanged when another component has focus or when the editor is an embedded one inside a dialog, as marked by the suite editor contract. The stash wraps whatever editor factory was installed before it, so it composes with an editor replacement such as [pi-vim](/plugins/pi-vim/) loaded earlier.
+Only Pi's main prompt editor is stashed. Ctrl+S passes through unchanged when another component has focus or when the editor is an embedded one inside a dialog, as marked by the suite editor contract. Other plugins can ask pi-stash for a stash of their own over the `pi-plugins.prompt-stash.v1` event channel; pi-sidebar's composer does, so its drafts never mix with main's. The stash wraps whatever editor factory was installed before it, so it composes with an editor replacement such as [pi-vim](/plugins/pi-vim/) loaded earlier.
 
 With an editor that implements the suite snapshot protocol (pi-vim), the stash keeps the cursor position and modal state along with the text and restores them when the text still matches. Any other editor falls back to plain text. Prompt attachments such as pasted images are not part of the editor text and are not stashed.
 

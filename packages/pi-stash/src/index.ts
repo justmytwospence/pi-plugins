@@ -12,8 +12,25 @@
 //   - A second prompt-stash owner in the process is reported instead of stacked.
 import { CustomEditor, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey, type EditorComponent, type TUI } from "@earendil-works/pi-tui";
-import { isEditorSnapshot, readEditorSnapshotApi, readEditorSurface } from "./contract.ts";
-import { isShellAction, isTemporaryAction, PromptStash, type StashedPrompt } from "./core.ts";
+import {
+  isEditorSnapshot,
+  readEditorSnapshotApi,
+  readEditorSurface,
+  STASH_CHANNEL,
+  type StashController,
+  type StashControllerOptions,
+  type StashEditor,
+  type StashRequest,
+} from "./contract.ts";
+import {
+  isShellAction,
+  isTemporaryAction,
+  PromptStash,
+  restoreDraft,
+  toggleDraft,
+  type DraftTarget,
+  type StashedPrompt,
+} from "./core.ts";
 
 /** Footer status key and text; pi-status-footer absorbs exactly this pair into its stash row. */
 export const STATUS_ID = "prompt-stash";
@@ -86,6 +103,52 @@ export function capture(editor: EditorComponent | undefined, text: string): Stas
   }
 }
 
+/** Put a stashed draft into another plugin's editor: snapshot restore when possible, text otherwise. */
+function applyToEditor(editor: StashEditor, entry: StashedPrompt): void {
+  const api = entry.snapshot ? readEditorSnapshotApi(editor) : undefined;
+  if (api && entry.snapshot) {
+    try {
+      if (api.restore(entry.snapshot) && editor.getText() === entry.text) return;
+    } catch {
+      // Fall back to text.
+    }
+  }
+  editor.setText(entry.text);
+}
+
+/** A stash of its own for another plugin's editor (the `STASH_CHANNEL` service). */
+export function createStashController(options: StashControllerOptions): StashController {
+  const store = new PromptStash();
+  const target = (editor: StashEditor): DraftTarget => ({
+    getText: () => editor.getText(),
+    capture: (text) => capture(editor as unknown as EditorComponent, text),
+    apply: (entry) => applyToEditor(editor, entry),
+    clear: () => editor.setText(""),
+    notify: (message, type) => options.notify(message, type),
+    changed: () => options.changed?.(),
+  });
+  return {
+    get stashed() {
+      return store.hasPrompt;
+    },
+    handleKey(data) {
+      if (!matchesKey(data, STASH_KEY_ID)) return false;
+      const editor = options.editor();
+      if (!editor) return false;
+      toggleDraft(store, target(editor));
+      return true;
+    },
+    submitted(text) {
+      const editor = options.editor();
+      if (editor && isTemporaryAction(text)) restoreDraft(store, target(editor), true);
+    },
+  };
+}
+
+function isStashRequest(data: unknown): data is StashRequest {
+  return typeof data === "object" && data !== null && (data as StashRequest).version === 1;
+}
+
 export default function promptStash(pi: ExtensionAPI): void {
   let stash: PromptStash | undefined;
   let session: Session | undefined;
@@ -116,41 +179,21 @@ export default function promptStash(pi: ExtensionAPI): void {
     state.ctx.ui.setEditorText(entry.text);
   };
 
-  /** Automatic restoration only fills an empty editor; it never overwrites a newer draft. */
-  const restore = (state: Session, automatic: boolean): boolean => {
-    const entry = stash?.entry;
-    if (!entry || !stash) return false;
-    if (automatic && state.ctx.ui.getEditorText().length > 0) return false;
-    stash.take();
-    apply(state, entry);
-    updateStatus(state);
-    state.ctx.ui.notify("Restored stashed prompt", "info");
-    return true;
-  };
+  /** Pi's main editor as a stash target. */
+  const mainTarget = (state: Session, editor?: EditorComponent): DraftTarget => ({
+    getText: () => state.ctx.ui.getEditorText(),
+    capture: (text) => capture(editor, text),
+    apply: (entry) => apply(state, entry),
+    clear: () => state.ctx.ui.setEditorText(""),
+    notify: (message, type) => state.ctx.ui.notify(message, type),
+    changed: () => updateStatus(state),
+  });
+
+  const restore = (state: Session, automatic: boolean): boolean =>
+    !!stash && restoreDraft(stash, mainTarget(state), automatic);
 
   const toggle = (state: Session, editor: EditorComponent) => {
-    if (!stash) return;
-    const current = state.ctx.ui.getEditorText();
-    if (!stash.hasPrompt) {
-      if (current.length === 0) {
-        state.ctx.ui.notify("Nothing to stash", "warning");
-        return;
-      }
-      stash.stash(capture(editor, current));
-      state.ctx.ui.setEditorText("");
-      updateStatus(state);
-      state.ctx.ui.notify("Prompt stashed", "info");
-      return;
-    }
-    if (current.length === 0) {
-      restore(state, false);
-      return;
-    }
-    const previous = stash.take()!;
-    stash.stash(capture(editor, current));
-    apply(state, previous);
-    updateStatus(state);
-    state.ctx.ui.notify("Swapped current and stashed prompts", "info");
+    if (stash) toggleDraft(stash, mainTarget(state, editor));
   };
 
   /** Restore once the just-submitted slash command has started (Pi clears the editor synchronously). */
@@ -297,6 +340,13 @@ export default function promptStash(pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", () => stop());
+
+  // Other plugins' editors (Sidebar's composer) get a stash of their own while this copy is active.
+  pi.events?.on?.(STASH_CHANNEL, (data: unknown) => {
+    if (!session || !isStashRequest(data) || data.create) return;
+    data.create = createStashController;
+    data.provider = "pi-stash";
+  });
 
   pi.on("model_select", () => {
     if (session) restore(session, true);

@@ -50,7 +50,7 @@ Use Pi's fullscreen mode (`"tuiMode": "fullscreen"`). In regular mode, the key a
 | Click | Clicking Sidebar focuses it; clicking main's editor focuses main. |
 | Drag the divider | Resizes the halves, remembered per orientation. A double-click goes back to the default. |
 | `/sidebar`, `/close` in Sidebar | Open or close Sidebar. |
-| Ctrl+S | Stashes Sidebar's draft, separately from main's pi-stash draft: the hint row shows `stashed`. Ctrl+S in an empty composer restores it, with text in both it swaps them, and it comes back on its own after a `/` command such as `/new`. It is kept while Sidebar is closed. |
+| Ctrl+S | With pi-stash enabled, stashes Sidebar's draft in a stash of its own, apart from main's: the hint row shows `stashed`. Ctrl+S in an empty composer restores it, with text in both it swaps them, and it comes back on its own after a `/` command such as `/new`. It is kept while Sidebar is closed. |
 | `/sidebar new`, `/new` in Sidebar | Starts a fresh thread. |
 
 While Sidebar has focus, your keys do what they do in main, through Pi's keybindings:

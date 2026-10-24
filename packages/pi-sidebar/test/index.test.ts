@@ -252,25 +252,42 @@ describe("opening and focus", () => {
     expect(controller.isOpen).toBe(true);
   });
 
-  it("stashes its own draft with Ctrl+S, apart from main's, and restores it after a / command", () => {
+  it("hands Ctrl+S and submits to pi-stash's stash service, and keeps one stash across rebuilds", () => {
+    const { pi, controller, ctx } = setup();
+    const calls: string[] = [];
+    let created = 0;
+    let editor: { getText(): string; setText(text: string): void } | undefined;
+    pi.events.on("pi-plugins.prompt-stash.v1", (data: any) => {
+      data.provider = "pi-stash";
+      data.create = (options: any) => {
+        created++;
+        editor = options.editor();
+        return {
+          stashed: false,
+          handleKey: (key: string) => key === "\x13" && (calls.push("key"), true),
+          submitted: (text: string) => calls.push(`submitted ${text}`),
+        };
+      };
+    });
+    controller.toggle(ctx as never);
+    const panel = panelOf(controller);
+    panel.input.setText("draft");
+    panel.input.handleInput("\x13");
+    expect(panel.input.getText()).toBe("draft"); // the service owns what Ctrl+S does
+    expect(editor?.getText()).toBe("draft");
+    panel.input.setText("/headsup");
+    panel.input.handleInput("\r");
+    expect(calls).toEqual(["key", "submitted /headsup"]);
+    expect(created).toBe(1);
+  });
+
+  it("leaves Ctrl+S to the editor without pi-stash", () => {
     const { controller, ctx } = setup();
     controller.toggle(ctx as never);
     const panel = panelOf(controller);
+    panel.input.setText("draft");
     panel.input.handleInput("\x13");
-    expect(panel.input.getText()).toBe("");
-    panel.input.setText("long question");
-    panel.input.handleInput("\x13");
-    expect(panel.input.getText()).toBe("");
-    panel.input.setText("other");
-    panel.input.handleInput("\x13"); // swap
-    expect(panel.input.getText()).toBe("long question");
-    panel.input.setText("");
-    panel.input.handleInput("\x13"); // restore into the empty composer
-    expect(panel.input.getText()).toBe("other");
-    panel.input.handleInput("\x13");
-    panel.input.setText("/headsup");
-    panel.input.handleInput("\r");
-    expect(panel.input.getText()).toBe("other");
+    expect(panel.input.getText()).toBe("draft");
   });
 
   it("hides with /sidebar (or /close) and keeps the thread", () => {

@@ -60,7 +60,18 @@ export function markEmbedded<T extends object>(editor: T): T {
 
 export function harness() {
   const handlers = new Map<string, Handler[]>();
+  const listeners = new Map<string, Array<(data: unknown) => void>>();
+  const events = {
+    on: (channel: string, listener: (data: unknown) => void) => {
+      listeners.set(channel, [...(listeners.get(channel) ?? []), listener]);
+      return () => undefined;
+    },
+    emit: (channel: string, data: unknown) => {
+      for (const listener of listeners.get(channel) ?? []) listener(data);
+    },
+  };
   const pi = {
+    events,
     on: (event: string, handler: Handler) => {
       handlers.set(event, [...(handlers.get(event) ?? []), handler]);
       return () => undefined;
@@ -130,7 +141,7 @@ export function harness() {
     return { ctx, ui, notes, status, submitted, state, tui, keybindings, shell, embed, baseFactory, factory: () => factory };
   }
 
-  return { pi: pi as never, emit, session };
+  return { pi: pi as never, events, emit, session };
 }
 
 export const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 5));

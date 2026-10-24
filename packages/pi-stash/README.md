@@ -16,6 +16,10 @@ The optional version-1 editor snapshot protocol restores text, cursor, modal mod
 
 A process-global draft survives session replacement. Session-local callbacks and timers are invalidated on shutdown; editor factory teardown leaves newer owners alone. Duplicate suite instances are diagnosed rather than stacked. Do not enable the upstream package alongside this package. Editor-replacing extensions should load first.
 
+## Stash service for other editors
+
+Other plugins' editors can get a stash of their own over `pi.events` (channel `pi-plugins.prompt-stash.v1`, declared in `src/contract.ts`): emit `{ version: 1 }`, and an active pi-stash sets `create`. A controller from `create({ editor, notify, changed })` handles Ctrl+S (`handleKey`) with the same stash, restore and swap rules as main, and `submitted(text)` brings the draft back after a `/` command. Each controller keeps its own draft, apart from main's. pi-sidebar's composer uses it.
+
 ## Migrating from @saadjs/pi-stash
 
 Disable the upstream copy and **fully quit and restart Pi** before using this copy; do not hot-switch between these implementations in either direction. `/reload` and session replacement do not clear process-global state: `@saadjs/pi-stash@0.0.3` creates an untagged stash in its factory, even if no draft was ever stashed, and does not delete it on shutdown.

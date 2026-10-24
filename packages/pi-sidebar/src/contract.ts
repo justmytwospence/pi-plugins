@@ -22,29 +22,6 @@ export const EDITOR_SURFACE = Symbol.for("pi-plugins.editor-surface.v1");
 export const INPUT_CONTEXT = Symbol.for("pi-plugins.input-context.v1");
 /** Method on a modal editor: the current modal input state. */
 export const EDITOR_MODE = Symbol.for("pi-plugins.editor-mode.v1");
-/** Property on an editor: capture/restore plain draft snapshots (cursor, mode). */
-export const EDITOR_SNAPSHOT = Symbol.for("pi-plugins.editor-snapshot.v1");
-
-/** Plain draft snapshot, opaque to Sidebar apart from its text. */
-export interface EditorSnapshot {
-  version: 1;
-  text: string;
-}
-
-export interface EditorSnapshotApi {
-  capture(): EditorSnapshot;
-  /** Returns false and changes nothing when the snapshot is unsupported. */
-  restore(snapshot: EditorSnapshot): boolean;
-}
-
-/** An editor's snapshot API; undefined for editors without one (text-only fallback). */
-export function readEditorSnapshotApi(component: unknown): EditorSnapshotApi | undefined {
-  if (typeof component !== "object" || component === null) return undefined;
-  const value = (component as Record<symbol, unknown>)[EDITOR_SNAPSHOT] as Partial<EditorSnapshotApi> | undefined;
-  if (!value || typeof value.capture !== "function" || typeof value.restore !== "function") return undefined;
-  return value as EditorSnapshotApi;
-}
-
 export interface EditorModeContext {
   state: "insert" | "normal" | "visual" | "ex" | "pending";
   mode: "insert" | "normal" | "visual" | "visual-line";
@@ -107,4 +84,42 @@ export function requestEditorFactory(events: { emit(channel: string, data: unkno
     return undefined;
   }
   return typeof request.factory === "function" ? request : undefined;
+}
+
+/**
+ * Prompt-stash service (version 1), provided by pi-stash; copied structurally from
+ * packages/pi-stash/src/contract.ts. Each controller keeps its own stash, apart from main's.
+ */
+export const STASH_CHANNEL = "pi-plugins.prompt-stash.v1";
+
+export interface StashControllerOptions {
+  editor(): { getText(): string; setText(text: string): void } | undefined;
+  notify(message: string, type: "info" | "warning"): void;
+  changed?(): void;
+}
+
+export interface StashController {
+  readonly stashed: boolean;
+  /** Handle the stash key (Ctrl+S); true when consumed. */
+  handleKey(data: string): boolean;
+  /** After a submit: a `/` command brings the stash back into an empty editor. */
+  submitted(text: string): void;
+}
+
+export interface StashRequest {
+  version: 1;
+  create?: (options: StashControllerOptions) => StashController;
+  provider?: string;
+}
+
+/** A stash controller from an active pi-stash; undefined when none answers. */
+export function requestStash(events: { emit(channel: string, data: unknown): void } | undefined, options: StashControllerOptions): StashController | undefined {
+  if (!events) return undefined;
+  const request: StashRequest = { version: 1 };
+  try {
+    events.emit(STASH_CHANNEL, request);
+    return typeof request.create === "function" ? request.create(options) : undefined;
+  } catch {
+    return undefined;
+  }
 }

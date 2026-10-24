@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
-import { EDITOR_SNAPSHOT } from "../src/contract.ts";
+import { EDITOR_SNAPSHOT, STASH_CHANNEL, type StashRequest } from "../src/contract.ts";
 import { isShellAction, isTemporaryAction, PromptStash } from "../src/core.ts";
 import promptStash, { LEASE, OWNER, STASH_KEY, STASH_OWNER, STATUS_ID, STATUS_TEXT, WRAPPER, adoptStash, capture } from "../src/index.ts";
 import { CTRL_S, ENTER, FakeEditor, SnapshotEditor, flush, harness, markEmbedded } from "./harness.ts";
@@ -463,4 +463,50 @@ test("non-TUI sessions install nothing", async () => {
   await h.emit("session_start", {}, s.ctx);
   expect(s.factory()).toBe(s.baseFactory);
   expect(globals[STASH_KEY]).toBeUndefined();
+});
+
+// ─── stash service for other plugins' editors ───
+
+test("service: answers only while active, and each controller keeps its own stash", async () => {
+  const h = harness();
+  promptStash(h.pi);
+  const before: StashRequest = { version: 1 };
+  h.events.emit(STASH_CHANNEL, before);
+  expect(before.create).toBeUndefined();
+
+  const s = h.session();
+  await h.emit("session_start", {}, s.ctx);
+  const request: StashRequest = { version: 1 };
+  h.events.emit(STASH_CHANNEL, request);
+  expect(request.provider).toBe("pi-stash");
+
+  const editor = new SnapshotEditor();
+  const notes: string[] = [];
+  let changes = 0;
+  const ctl = request.create!({ editor: () => editor, notify: (m) => notes.push(m), changed: () => changes++ });
+  expect(ctl.handleKey("x")).toBe(false);
+  expect(ctl.handleKey(CTRL_S)).toBe(true);
+  expect(notes.at(-1)).toBe("Nothing to stash");
+
+  editor.text = "side draft";
+  editor.mode = "normal";
+  ctl.handleKey(CTRL_S);
+  expect(editor.text).toBe("");
+  expect(ctl.stashed).toBe(true);
+  expect(changes).toBe(1);
+  expect(globals[STASH_KEY] && (globals[STASH_KEY] as PromptStash).hasPrompt).toBe(false); // main's stash untouched
+
+  editor.text = "other";
+  ctl.handleKey(CTRL_S);
+  expect(editor.text).toBe("side draft");
+  expect(editor.mode).toBe("normal");
+  expect(notes.at(-1)).toBe("Swapped current and stashed prompts");
+
+  ctl.submitted("a question"); // not a / command: nothing comes back
+  editor.text = "";
+  ctl.submitted("a question");
+  expect(editor.text).toBe("");
+  ctl.submitted("/new");
+  expect(editor.text).toBe("other");
+  expect(ctl.stashed).toBe(false);
 });

@@ -64,3 +64,42 @@ export function isEditorSnapshot(value: unknown): value is EditorSnapshot {
     && ["insert", "normal", "visual", "visual-line"].includes(snapshot.mode ?? "")
     && (snapshot.anchor === undefined || cursor(snapshot.anchor));
 }
+
+/**
+ * Prompt-stash service for other plugins' editors (version 1), provided by pi-stash.
+ * Discovery is a synchronous request over `pi.events`, like the editor factory: the
+ * consumer emits `{ version: 1 }` on `STASH_CHANNEL`; an active pi-stash sets `create`
+ * and `provider` before `emit` returns. Each controller keeps its own stash, separate
+ * from main's. Consumers copy these declarations structurally.
+ */
+export const STASH_CHANNEL = "pi-plugins.prompt-stash.v1";
+
+/** The editor a controller stashes from; an editor with the snapshot protocol keeps cursor and mode. */
+export interface StashEditor {
+  getText(): string;
+  setText(text: string): void;
+}
+
+export interface StashControllerOptions {
+  /** The consumer's current editor; undefined while it has none. */
+  editor(): StashEditor | undefined;
+  notify(message: string, type: "info" | "warning"): void;
+  /** The stash changed, e.g. to redraw an indicator. */
+  changed?(): void;
+}
+
+export interface StashController {
+  /** Whether a draft is stashed. */
+  readonly stashed: boolean;
+  /** Handle the stash key (Ctrl+S); true when consumed. */
+  handleKey(data: string): boolean;
+  /** Call after the editor submitted `text`: a `/` command brings the stash back into an empty editor. */
+  submitted(text: string): void;
+}
+
+export interface StashRequest {
+  version: 1;
+  create?: (options: StashControllerOptions) => StashController;
+  /** Name of the answering provider, e.g. `"pi-stash"`. */
+  provider?: string;
+}
