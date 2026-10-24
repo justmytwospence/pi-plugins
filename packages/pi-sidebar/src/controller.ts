@@ -10,7 +10,7 @@ import { MainState } from "./main-state.ts";
 import { RatioStore } from "./preferences.ts";
 import { InjectedPrompt } from "./injected.ts";
 import { herdrFocus, navDirection, navTarget } from "./nav.ts";
-import { SidebarPanel, type StatusPart } from "./panel.ts";
+import { ComposerStash, SidebarPanel, type StatusPart } from "./panel.ts";
 import { HeadsUp, headsUpChange, headsUpChanged } from "./headsup/headsup.ts";
 import type { HeadsUpNote } from "./headsup/protocol.ts";
 import { isNoteMarker, noteMessages } from "./headsup/thread.ts";
@@ -47,6 +47,8 @@ export class SidebarController {
   private hostTui: FocusTui | undefined;
   /** Main's editor: the component focused when the user last submitted a prompt. */
   private mainEditor: Component | null = null;
+  /** Sidebar's own prompt stash (Ctrl+S in its composer); it outlives panel rebuilds. */
+  private readonly stash = new ComposerStash();
   /** Blocking extension dialogs open in main (a digit then belongs to them). */
   private prompts = 0;
   /** Heads-up notes waiting for Sidebar to finish its answer. */
@@ -185,6 +187,7 @@ export class SidebarController {
       this.panel = new SidebarPanel(tui, () => this.theme ?? ctx.ui.theme, {
         cwd: ctx.cwd,
         events: this.pi.events,
+        stash: this.stash,
         status: (theme) => this.status(theme),
         submit: (text) => this.submit(text),
         confirm: (text) => this.send(text, true),

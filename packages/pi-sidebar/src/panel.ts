@@ -20,7 +20,7 @@ import {
   type TuiMouseEvent,
   type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
-import { EDITOR_MODE, EDITOR_SURFACE, INPUT_CONTEXT, requestEditorFactory, type EditorModeContext, type SuiteEditor } from "./contract.ts";
+import { EDITOR_MODE, EDITOR_SURFACE, INPUT_CONTEXT, readEditorSnapshotApi, requestEditorFactory, type EditorModeContext, type EditorSnapshot, type SuiteEditor } from "./contract.ts";
 import { PiChat } from "./pi-chat.ts";
 import { pinBar, pinnedAnchor, promptAnchors, type PromptAnchor } from "./pin.ts";
 import { displayMessage } from "./quiz/protocol.ts";
@@ -66,6 +66,28 @@ export interface PanelHost {
   mainHidesThinking(): boolean;
   cwd: string;
   events?: { emit(channel: string, data: unknown): void };
+  /** Sidebar's own prompt stash, kept by the host so it outlives a rebuilt panel. */
+  stash?: ComposerStash;
+}
+
+/** The key that stashes a draft, as pi-stash uses in main. */
+export const STASH_KEY = "ctrl+s";
+
+/** A stashed Sidebar draft: its text, plus the editor's cursor/mode snapshot when it has one. */
+export interface StashedDraft {
+  text: string;
+  snapshot?: EditorSnapshot;
+}
+
+/** Sidebar's prompt stash, separate from main's (pi-stash). */
+export class ComposerStash {
+  entry: StashedDraft | undefined;
+
+  take(): StashedDraft | undefined {
+    const entry = this.entry;
+    this.entry = undefined;
+    return entry;
+  }
 }
 
 type Notice = { kind: "info" | "warning" | "error"; text: string } | { kind: "confirm"; title: string; message: string; text: string };
@@ -247,7 +269,58 @@ class Composer implements Component, Focusable {
     if (!value) return;
     (this.editor as { addToHistory?(text: string): void }).addToHistory?.(value);
     this.editor.setText("");
+    const entry = this.host.stash!.entry;
     this.panel.submit(value);
+    // As in main: a `/` command is over at once, so a stashed draft comes back into an empty composer.
+    if (value.startsWith("/") && entry && this.host.stash!.entry === entry && !this.getText()) this.restoreStash();
+  }
+
+  /** What to stash: the text, with the editor's snapshot when it agrees on the text. */
+  private captureDraft(text: string): StashedDraft {
+    const api = this.suite ? readEditorSnapshotApi(this.editor) : undefined;
+    if (!api) return { text };
+    try {
+      const snapshot = api.capture();
+      return snapshot?.version === 1 && snapshot.text === text ? { text, snapshot } : { text };
+    } catch {
+      return { text };
+    }
+  }
+
+  private applyDraft(entry: StashedDraft): void {
+    const api = this.suite && entry.snapshot ? readEditorSnapshotApi(this.editor) : undefined;
+    if (api && entry.snapshot) {
+      try {
+        if (api.restore(entry.snapshot) && this.getText() === entry.text) return;
+      } catch {
+        // Fall back to text.
+      }
+    }
+    this.editor.setText(entry.text);
+  }
+
+  private restoreStash(): void {
+    const entry = this.host.stash!.take();
+    if (!entry) return;
+    this.applyDraft(entry);
+    this.panel.notice({ kind: "info", text: "Restored stashed prompt" });
+  }
+
+  /** Ctrl+S: stash the draft, restore into an empty composer, or swap the two. */
+  private toggleStash(): void {
+    const stash = this.host.stash!;
+    const current = this.getText();
+    if (!stash.entry) {
+      if (!current) return this.panel.notice({ kind: "warning", text: "Nothing to stash" });
+      stash.entry = this.captureDraft(current);
+      this.editor.setText("");
+      return this.panel.notice({ kind: "info", text: "Prompt stashed" });
+    }
+    if (!current) return this.restoreStash();
+    const previous = stash.take()!;
+    stash.entry = this.captureDraft(current);
+    this.applyDraft(previous);
+    this.panel.notice({ kind: "info", text: "Swapped current and stashed prompts" });
   }
 
   handleInput(data: string): void {
@@ -270,6 +343,7 @@ class Composer implements Component, Focusable {
     // Main's own action keys, as you bound them, act on Sidebar.
     // Ctrl+C (app.clear) stops a running answer too, as in Claude Code; idle, it clears the composer.
     if ((keys.matches(data, "app.interrupt") || keys.matches(data, "app.clear")) && this.host.isBusy()) return this.host.abort();
+    if (matchesKey(data, STASH_KEY)) return this.toggleStash();
     if (keys.matches(data, "app.tools.expand")) return this.panel.toggleExpanded();
     if (keys.matches(data, "app.thinking.toggle")) return this.panel.toggleThinking();
     if (!this.suite) {
@@ -318,6 +392,7 @@ export class SidebarPanel {
   private recheck = false;
 
   constructor(private readonly tui: TUI, private readonly theme: () => Theme, private readonly host: PanelHost) {
+    host.stash ??= new ComposerStash();
     this.chat = new PiChat(() => theme(), { cwd: host.cwd, userMessagesFromEvents: true, requestRender: () => tui.requestRender(), displayAssistant: displayMessage });
     this.syncThinking();
     const body: Component = {
@@ -503,8 +578,9 @@ export class SidebarPanel {
   private hintLine(width: number): string {
     const sep = "  ";
     let text: string;
+    const stashed = this.host.stash!.entry ? `${this.theme().fg("accent", "stashed")}${sep}` : "";
     if (this.note?.kind === "confirm") text = [rawKeyHint("enter", "send anyway"), keyHint("app.interrupt", "keep the question")].join(sep);
-    else if (!this.focused) return truncateToWidth(` ${rawKeyHint(this.host.toggleLabel, "close")}`, width);
+    else if (!this.focused) return truncateToWidth(` ${stashed}${rawKeyHint(this.host.toggleLabel, "close")}`, width);
     else {
       // Your own scroll keys, as in main: pi-vim's Ctrl+U/D in Normal mode, and the transcript's end key.
       const scroll = [...(this.input.vim ? [rawKeyHint("ctrl+u/d", "scroll")] : []), keyHint("tui.altScreen.bottom", "end")];
@@ -512,6 +588,6 @@ export class SidebarPanel {
         ? [keyHint("app.interrupt", "stop"), ...scroll, rawKeyHint(this.host.toggleLabel, "close")].join(sep)
         : [rawKeyHint("enter", "ask"), ...scroll, keyHint("app.tools.expand", "expand"), keyHint("app.thinking.toggle", "thinking"), rawKeyHint("/new", "fresh thread"), rawKeyHint(this.host.toggleLabel, "close")].join(sep);
     }
-    return truncateToWidth(` ${text}`, width);
+    return truncateToWidth(` ${stashed}${text}`, width);
   }
 }

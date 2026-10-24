@@ -252,6 +252,27 @@ describe("opening and focus", () => {
     expect(controller.isOpen).toBe(true);
   });
 
+  it("stashes its own draft with Ctrl+S, apart from main's, and restores it after a / command", () => {
+    const { controller, ctx } = setup();
+    controller.toggle(ctx as never);
+    const panel = panelOf(controller);
+    panel.input.handleInput("\x13");
+    expect(panel.input.getText()).toBe("");
+    panel.input.setText("long question");
+    panel.input.handleInput("\x13");
+    expect(panel.input.getText()).toBe("");
+    panel.input.setText("other");
+    panel.input.handleInput("\x13"); // swap
+    expect(panel.input.getText()).toBe("long question");
+    panel.input.setText("");
+    panel.input.handleInput("\x13"); // restore into the empty composer
+    expect(panel.input.getText()).toBe("other");
+    panel.input.handleInput("\x13");
+    panel.input.setText("/headsup");
+    panel.input.handleInput("\r");
+    expect(panel.input.getText()).toBe("other");
+  });
+
   it("hides with /sidebar (or /close) and keeps the thread", () => {
     const { controller, tui, mainEditor, ctx } = setup();
     controller.toggle(ctx as never);

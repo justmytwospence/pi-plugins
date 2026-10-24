@@ -49,6 +49,7 @@ pi -e ./packages/pi-sidebar
 | `/sidebar`, `/close` in Sidebar | Open or close Sidebar. |
 | `/sidebar new` (or `/new` in Sidebar) | Starts a fresh thread. |
 | Enter | Asks. |
+| Ctrl+S | Stashes Sidebar's draft, separately from main's pi-stash draft: the hint row shows `stashed`. Ctrl+S in an empty composer restores it, with text in both it swaps them, and it comes back on its own after a `/` command such as `/new`. It is kept while Sidebar is closed. |
 | `/sidebar headsup [on\|off]` | Heads-up mode's state and cost, or switches it on or off for the session. |
 | `/sidebar model` | Explains why Sidebar always uses main's model. |
 

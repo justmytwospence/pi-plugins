@@ -22,6 +22,28 @@ export const EDITOR_SURFACE = Symbol.for("pi-plugins.editor-surface.v1");
 export const INPUT_CONTEXT = Symbol.for("pi-plugins.input-context.v1");
 /** Method on a modal editor: the current modal input state. */
 export const EDITOR_MODE = Symbol.for("pi-plugins.editor-mode.v1");
+/** Property on an editor: capture/restore plain draft snapshots (cursor, mode). */
+export const EDITOR_SNAPSHOT = Symbol.for("pi-plugins.editor-snapshot.v1");
+
+/** Plain draft snapshot, opaque to Sidebar apart from its text. */
+export interface EditorSnapshot {
+  version: 1;
+  text: string;
+}
+
+export interface EditorSnapshotApi {
+  capture(): EditorSnapshot;
+  /** Returns false and changes nothing when the snapshot is unsupported. */
+  restore(snapshot: EditorSnapshot): boolean;
+}
+
+/** An editor's snapshot API; undefined for editors without one (text-only fallback). */
+export function readEditorSnapshotApi(component: unknown): EditorSnapshotApi | undefined {
+  if (typeof component !== "object" || component === null) return undefined;
+  const value = (component as Record<symbol, unknown>)[EDITOR_SNAPSHOT] as Partial<EditorSnapshotApi> | undefined;
+  if (!value || typeof value.capture !== "function" || typeof value.restore !== "function") return undefined;
+  return value as EditorSnapshotApi;
+}
 
 export interface EditorModeContext {
   state: "insert" | "normal" | "visual" | "ex" | "pending";
