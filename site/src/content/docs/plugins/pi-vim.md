@@ -57,8 +57,24 @@ These are **draft motions**, not transcript navigation. Escape (or Ctrl+[) enter
 | Operate on a motion / line | `dw`, `cw`, `yw`; `dd`, `cc`, `yy`; counts such as `2dd`. |
 | Select / paste | `v` character Visual, `V` line Visual; `p` / `P`. A terminal paste or a file dragged in while in Normal or Visual inserts its text after the cursor, like `p`, and stays in Normal. |
 | Undo / redo / repeat | `u`, Ctrl+R, `.`. |
+| Sentences, lines and columns | `(` `)` sentences, `+` `-` next/previous line, `\|` column, `g_` last nonblank, `ge` / `gE` back to a word end. |
+| Case, shift and numbers | `~`, `g~` / `gu` / `gU` / `g?` with a motion (`gUiw`, `guu`), `>>` / `<<` / `>ip`, Ctrl+A / Ctrl+X on a number. |
+| Text objects | Words, `ip` / `ap`, `is` / `as`, `it` / `at`, `il` / `al`, brackets and quotes (outside one, the next one on the line). |
+| Word search | `*` / `#` (and `g*` / `g#`) jump to the word under the cursor, `n` / `N` repeat. |
+| Replace and reselect | `R` Replace mode (Backspace restores), `gv` last selection, `gi` Insert where you left it. |
+| Visual | `p` / `P` replace the selection and keep the register; `~` `u` `U` case, `>` `<` shift, `J` / `gJ` join, `r` replace, text objects (`vi(`, `vip`). |
 
-Operators, counts, registers and text objects are supported; macros, block Visual, Vim search and general Vim EX semantics are not. In idle Normal, Ctrl+U/D scroll the host viewport instead of moving through the draft, and with [pi-copy](/plugins/pi-copy/#copy-mode) loaded `/` and `?` open its copy mode over the whole transcript. [Keymap & focus](/guides/keyboard/#use-vim-on-the-main-prompt-or-in-a-dialog) compares main and embedded behavior.
+Operators, counts and text objects are supported. Every register name is the unnamed register except `"_`, the black hole. Macros, marks, block Visual, `/` search and general Vim EX semantics are not: an unsupported command that takes a key (`qa`, `@a`, `ma`, `'a`, `zz`, `]x`) drops that key rather than running it as a command.
+
+### Plugin behavior
+
+pi-vim reproduces three popular Vim plugins; each has a [setting](#settings) to turn it off.
+
+- **[surround.vim](https://github.com/tpope/vim-surround):** `ys{motion}{char}` (`ysiw)`, `ysiw(` with inner spaces, `ysiwt` then a tag ending in `>` or Enter, `ysiwf` then a function name), `yss` for the line, `ySS` on its own lines; `ds{char}`; `cs{old}{new}` (`cs"'`, `cs)]`, `cst<p>`); Visual `S{char}`. `.` repeats them and the unnamed register is left alone.
+- **[targets.vim](https://github.com/wellle/targets.vim):** pair, quote, separator (`, . ; : + - = ~ _ * # / | \ & $`), argument (`a`) and tag text objects that seek the next or previous one on the line, with `I` / `A` (inside without blanks, around with one side's blank), `n` for the next object (`cin(`), `b` for any bracket and `q` for any quote. The targets.vim `l` (last) modifier is not available: `il` / `al` are Neovim's line objects.
+- **[vim-wordmotion](https://github.com/chaoren/vim-wordmotion):** lowercase `w`, `b`, `e`, `ge`, `iw` and `aw` stop inside `CamelCase`, `ACRONYMWords`, `snake_case` and `kebab-case`; `W`, `B`, `E` and `iW` still use whole WORDs.
+
+Neovim (with these plugins loaded for their cases) is the reference: the package's parity tests run every case in both editors. In idle Normal, Ctrl+U/D scroll the host viewport instead of moving through the draft, and with [pi-copy](/plugins/pi-copy/#copy-mode) loaded `/` and `?` open its copy mode over the whole transcript. [Keymap & focus](/guides/keyboard/#use-vim-on-the-main-prompt-or-in-a-dialog) compares main and embedded behavior.
 
 ## Finding files
 
@@ -68,7 +84,7 @@ When explicitly browsing **`~/Downloads/` or a descendant**, entries are sorted 
 
 On the main prompt, **Ctrl+X Ctrl+E** opens Pi's external editor in Insert or idle Normal mode, matching the shell convention. It invokes `app.editor.external` even if that action's direct keybinding is disabled. Embedded dialogs, pending Vim commands, and EX input keep their own keys.
 
-Ctrl+X waits one second for the second key. Any other key, or the timeout, passes Ctrl+X on to Pi, so its default binding (`app.message.copy`) still works, after the delay.
+Ctrl+X waits one second for the second key. Any other key, or the timeout, passes Ctrl+X on. In Normal mode it then decrements the number at or after the cursor, like Vim; on a line without a number, and in Insert mode, it reaches Pi's default binding (`app.message.copy`), after the delay.
 
 ## Embedded editors in suite dialogs
 
@@ -97,10 +113,11 @@ Settings live under a `piVim` key in Pi's own settings files, `~/.pi/agent/setti
 
 - `clipboardMirror`: `all` (default), `yank` or `never`; which register writes are mirrored to the OS clipboard.
 - `displayLineMotion`: `true` makes Normal and Visual mode treat each wrapped screen row as its own line: `j`/`k`, `0`/`^`/`$`, `gg`/`G`, `dd`/`yy`/`cc`/`S`/`D`/`C`/`Y`, `dj`/`yk`, `V`, `o`/`O` and linewise `p` all work on rows. Yanked rows keep no soft-wrap breaks; opening or pasting a line between two rows splits the underlying line there. Insert mode is unaffected. Default `false`.
+- `wordMotion`, `targets` and `surround`: `false` turns off the vim-wordmotion, targets.vim or surround.vim behavior described [above](#plugin-behavior). Default `true` each.
 - `exCommand.piDispatch` turns the EX bridge to Pi commands off when `false`; `copyInputToClipboard` copies the prompt before each dispatch.
 - `modeColors`, `borderSync` and `labelSync` choose per-mode colors for the input border and the footer label.
 - `modeChange` runs a shell command when the main or embedded editor changes mode. Because it executes commands, it is read **only from the global settings file**; a project file cannot set it.
 
-See the [local motion cheatsheet](#motion-cheatsheet) and [full key reference at the imported upstream revision](https://github.com/lajarre/pi-vim/blob/e55b07c05b648f3bbccf656c2b0c6ec63f1a91d1/README.md) for Vim differences and limits; block Visual mode, macros, search and Vim ex semantics are out of scope.
+See the [local motion cheatsheet](#motion-cheatsheet) and [full key reference at the imported upstream revision](https://github.com/lajarre/pi-vim/blob/e55b07c05b648f3bbccf656c2b0c6ec63f1a91d1/README.md) for Vim differences and limits; block Visual mode, macros, marks, `/` search and Vim ex semantics are out of scope.
 
 [GitHub source](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-vim), including the [entry point](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-vim/src/index.ts) and the [integration contract](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-vim/src/contract.ts).
