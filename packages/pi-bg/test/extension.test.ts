@@ -471,14 +471,14 @@ describe("pi-bg", () => {
     expect(r).toMatch(/Started fit/);
     await until(() => section.entries(Date.now())[0]?.stats.includes("45%"), 4_000);
     const row = section.entries(Date.now())[0];
-    expect(row.stats).toMatch(/^45% · 0:0\d ████▌░░░░░$/u);
+    expect(row.stats).toMatch(/^45% · 0:0\d ████░░░░░░$/u);
     expect(row.detail).toMatch(/^fold 3 · echo/);
     expect(x.widgetLines()).toEqual([" 1 shell · 45% "]);
     expect(x.textOf(await x.call("bg_logs", {}))).toMatch(/fit {2}job {2}running 0:0\d {2}45% \(450\/1000, fold 3\)/);
     const snap = x.emitted.filter((e) => e.channel === "bg:tasks").at(-1)?.data.tasks[0];
     expect(snap.progress).toEqual({ fraction: 0.45, source: "file", count: "450/1000", note: "fold 3" });
     await x.call("bg_wait", {});
-    expect(x.working.some((m) => /^Waiting on fit ███▋░░░░ 45% · 0:0\d/u.test(m ?? ""))).toBe(true);
+    expect(x.working.some((m) => /^Waiting on fit ███░░░░░ 45% · 0:0\d/u.test(m ?? ""))).toBe(true);
     await x.shutdown();
   });
 

@@ -337,14 +337,10 @@ export function percent(p: Reading): string {
   return `${Math.floor(p.fraction * 100 + 1e-9)}%`;
 }
 
-const EIGHTHS = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
-
-/** `████▌░░░░░`: `cells` wide, in eighths of a cell, the rest a light track. */
+/** `████░░░░░░`: `cells` wide, whole cells only (a partial cell leaves a gap before the track). */
 export function bar(fraction: number, cells = 10): string {
-  const eighths = Math.round(Math.max(0, Math.min(1, fraction)) * cells * 8);
-  const full = Math.floor(eighths / 8);
-  const part = EIGHTHS[eighths % 8] ?? "";
-  return `${"█".repeat(full)}${part}${"░".repeat(cells - full - (part ? 1 : 0))}`;
+  const full = Math.floor(Math.max(0, Math.min(1, fraction)) * cells + 1e-9);
+  return `${"█".repeat(full)}${"░".repeat(cells - full)}`;
 }
 
 /** Milliseconds left at the rate seen since the baseline, once there is enough of it to go on. */
