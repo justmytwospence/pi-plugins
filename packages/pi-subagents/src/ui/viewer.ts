@@ -3,7 +3,7 @@
 // when loaded) with pi-status-footer's context gauge, the subagent list main shows under its prompt,
 // and your footer, all for the child. Pi hosts one live session, and subagents are separate
 // processes, so this is what Claude Code and Codex do too: main's chrome redrawn for another
-// thread. Tab and Shift+Tab switch to the next or previous session (main closes the view), Esc
+// thread. Tab and Shift+Tab (or Ctrl+J and Ctrl+K) switch to the next or previous session (main closes the view), Esc
 // returns to main, and ↓ at the editor's bottom enters the list. Typing steers a running child;
 // Ctrl+C twice on an empty editor stops it.
 // Adapted from tintinweb/pi-subagents (MIT): https://github.com/tintinweb/pi-subagents
@@ -456,6 +456,9 @@ export class SessionView implements Component, Focusable {
     const autocomplete = Boolean(this.composer && (readEditorMode(this.composer)?.autocomplete || this.composer.isShowingAutocomplete?.()));
     if (!autocomplete && matchesKey(data, "tab")) return this.cycle(1);
     if (!autocomplete && matchesKey(data, "shift+tab")) return this.cycle(-1);
+    // Ctrl+J/Ctrl+K too (over the editor's newline and kill-line, which have other keys).
+    if (!autocomplete && matchesKey(data, "ctrl+j")) return this.cycle(1);
+    if (!autocomplete && matchesKey(data, "ctrl+k")) return this.cycle(-1);
     if (this.listActive) return this.listKey(data);
     if (this.key(data, "app.tools.expand", "ctrl+o")) {
       this.chat.setExpanded(!this.chat.isExpanded);

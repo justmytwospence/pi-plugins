@@ -141,7 +141,7 @@ These keys are **local to the named focused surface**, not global shortcuts. No 
 | Inspect a task | `/tasks`, then Enter on a row | [pi-bg](/plugins/pi-bg/) combines shell, subagent, notebook, planner/scout and Herdr-child sources as enabled. |
 | Stop a listed running task | `x` twice, only if the owner supports stopping | Owner-specific: process stop, kernel interrupt, planner stop or awaited Herdr-child interrupt. **Never closes a Herdr pane.** |
 | Stop all own shell tasks | `/stop` | pi-bg only; not subagents, notebooks, planners or Herdr children. |
-| Inspect a subagent | `/subagents [id]`; Enter opens; `b` backgrounds a foreground run | [pi-subagents](/plugins/pi-subagents/); in its session, type to steer, Tab/Shift+Tab switch sessions, Esc returns to main. |
+| Inspect a subagent | `/subagents [id]`; Enter opens; `b` backgrounds a foreground run | [pi-subagents](/plugins/pi-subagents/); in its session, type to steer, Tab/Shift+Tab or Ctrl+J/Ctrl+K switch sessions, Esc returns to main. |
 | Review changes | `/diff`; `j/k`, Ctrl+D/U, `gg/G`; `]c/[c` hunks, `]f/[f` files | [pi-diff-review](/plugins/pi-diff-review/); `/` and `n/N` search this diff, not Pi's transcript. |
 | Leave feedback / send it | `c` comment, `s` suggestion; `:w` send, `:wq` send/close | An open comment editor owns text keys. |
 | Record review progress | `r` checks/folds a file; `:mark` advances the live review mark | `:mark` confirms and stays open. Closing never marks reviewed. `?` shows the full viewer keymap. |

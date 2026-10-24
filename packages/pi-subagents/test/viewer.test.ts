@@ -117,7 +117,7 @@ test("typing steers; Ctrl+C clears, then twice on an empty editor stops; Esc goe
   v.dispose();
 });
 
-test("Tab and Shift+Tab switch sessions through main; drafts stay with their run", () => {
+test("Tab/Shift+Tab and Ctrl+J/Ctrl+K switch sessions through main; drafts stay with their run", () => {
   const second = liveRun({ label: "Second task", state: { startedAt: Date.now() + 1 } });
   const { v, calls, runs } = setup([liveRun(), second]);
   type(v, "half a thought");
@@ -130,6 +130,11 @@ test("Tab and Shift+Tab switch sessions through main; drafts stay with their run
   v.handleInput(SHIFT_TAB);
   expect(v.current).toBe(runs[0]);
   expect(text(v.render(100))).toContain("half a thought");
+  // Ctrl+J and Ctrl+K cycle the same way.
+  v.handleInput("\n");
+  expect(v.current).toBe(second);
+  v.handleInput("\x0b");
+  expect(v.current).toBe(runs[0]);
   // Past the last run is main: the view closes.
   v.handleInput("\t");
   v.handleInput("\t");

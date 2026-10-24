@@ -100,7 +100,7 @@ Pi runs one live session per process and every subagent is a separate process, s
 | key | action |
 |---|---|
 | typing, Enter | steer the running child (pi-vim: Enter, `:w`, `:wq` or `:x`) |
-| Tab, Shift+Tab | next or previous session in the list's order (main, then the runs); past the ends is main. Tab completes instead while autocomplete is open |
+| Tab, Shift+Tab; Ctrl+J, Ctrl+K | next or previous session in the list's order (main, then the runs); past the ends is main. While autocomplete is open these keys go to it. Ctrl+J and Ctrl+K replace the editor's newline and kill-line here (Shift+Enter still adds a line) |
 | Esc | back to main (with pi-vim, Esc in idle Normal mode) |
 | `↓` at the editor's end | into the list: `↑`/`↓` or `k`/`j` select, Enter or `l` switches (main goes back), `x` twice stops, `x` dismisses an ended run, `b` moves a foreground run to the background, Esc, `h` or `↑` past the top return to the editor |
 | Ctrl+C | clear the editor; on an empty editor, twice stops the child |
