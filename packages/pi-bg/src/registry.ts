@@ -166,6 +166,20 @@ export function parsePattern(pattern: string): RegExp {
   return m ? new RegExp(m[1] as string, (m[2] ?? "").replace(/[gy]/gu, "")) : new RegExp(pattern, "i");
 }
 
+/**
+ * The Git checkout `dir` belongs to: the nearest folder at or above it holding `.git` (a folder in
+ * a main checkout, a file in a linked worktree or submodule); undefined outside Git.
+ */
+export function checkoutRoot(dir: string): string | undefined {
+  let current = path.resolve(dir);
+  for (;;) {
+    if (fs.existsSync(path.join(current, ".git"))) return current;
+    const parent = path.dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+}
+
 export class Registry {
   readonly tasks = new Map<string, Task>();
   private readonly procs = new Map<string, ChildProcess>();
@@ -563,6 +577,12 @@ export class Registry {
     const adopted: Task[] = [];
     const referenced: StateEntry[] = [];
     const inside = (a: string, b: string) => a === b || a.startsWith(`${b}${path.sep}`);
+    // A Git worktree sits inside its main checkout (`<project>/.worktrees/<branch>`), so folder
+    // containment alone would hand one checkout's services to another's sessions. Adopt only within
+    // the same checkout (or, outside Git, by containment alone), and nothing whose folder is gone.
+    const home = checkoutRoot(cwd);
+    const adoptable = (dir: string) =>
+      (inside(dir, cwd) || inside(cwd, dir)) && fs.existsSync(dir) && checkoutRoot(dir) === home;
     const files: { file: string; owner: number; entries: StateEntry[] }[] = [];
     try {
       for (const name of fs.readdirSync(stateDir())) {
@@ -600,7 +620,7 @@ export class Registry {
           }, KILL_GRACE_MS).unref?.();
           continue;
         }
-        if (!adopt || (!inside(e.cwd, cwd) && !inside(cwd, e.cwd))) {
+        if (!adopt || !adoptable(e.cwd)) {
           left.push({ ...e, released: true });
           continue;
         }

@@ -74,7 +74,7 @@ During `bg_wait`, its `Waiting on…` message (example) takes priority over pi-s
 
 Typing a message, pressing Esc, or reaching the wait timeout stops **waiting**, not the task. Call `bg_kill` to stop the process. Service lifetime is not bounded by the job-only `timeout` argument.
 
-Tasks survive `/reload`. Quitting or changing sessions through `/new`, `/resume`, or `/fork` stops ordinary tasks, including descendants in their process group. Use `keep: true` only for services you intend to keep using outside this session. A later Pi started in or above the service directory can adopt them.
+Tasks survive `/reload`. Quitting or changing sessions through `/new`, `/resume`, or `/fork` stops ordinary tasks, including descendants in their process group. Use `keep: true` only for services you intend to keep using outside this session. A later Pi started in, above or below the service directory, in the same Git checkout, can adopt them; a worktree counts as its own checkout, so its services and the main checkout's never cross.
 
 ## Commands, views, and storage
 

@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { tail } from "../src/log.ts";
-import { Registry, type TaskEvent, groupAlive } from "../src/registry.ts";
+import { Registry, type TaskEvent, checkoutRoot, groupAlive } from "../src/registry.ts";
 import { until } from "./fake.ts";
 
 let dir: string;
@@ -102,6 +102,33 @@ describe("registry", () => {
     expect(b.sweep(dir).map((t) => t.name)).toEqual(["kept2"]);
     await b.kill(kept.id, "user");
     await until(() => a.tasks.get(kept.id)?.status !== "running");
+  });
+
+  it("adopts kept services only within the same Git checkout, never across worktrees", async () => {
+    const project = path.join(dir, "project");
+    const worktree = path.join(project, ".worktrees", "branch");
+    const notebooks = path.join(project, "notebooks");
+    fs.mkdirSync(path.join(project, ".git"), { recursive: true });
+    fs.mkdirSync(worktree, { recursive: true });
+    fs.writeFileSync(path.join(worktree, ".git"), "gitdir: ../../.git/worktrees/branch\n");
+    fs.mkdirSync(notebooks);
+    expect(checkoutRoot(notebooks)).toBe(project);
+    expect(checkoutRoot(worktree)).toBe(worktree);
+    const a = new Registry();
+    const main = a.start({ ...base, command: "sleep 35", name: "main-server", kind: "service", cwd: project, keep: true });
+    const branch = a.start({ ...base, command: "sleep 36", name: "branch-server", kind: "service", cwd: worktree, keep: true });
+    a.release();
+    const own = path.join(dir, "state", `${process.pid}.json`);
+    fs.renameSync(own, path.join(dir, "state", `${process.ppid}.json`));
+    // A worktree session takes only the worktree's service; the main checkout's stays released.
+    const b = new Registry();
+    expect(b.sweep(worktree).map((t) => t.name)).toEqual(["branch-server"]);
+    // A session lower in the main checkout takes the main checkout's, not the worktree's.
+    const c = new Registry();
+    expect(c.sweep(notebooks).map((t) => t.name)).toEqual(["main-server"]);
+    await b.kill(branch.id, "user");
+    await c.kill(main.id, "user");
+    await until(() => a.tasks.get(main.id)?.status !== "running" && a.tasks.get(branch.id)?.status !== "running");
   });
 
   it("two sessions in one process see, kill and release only their own tasks; a gone session's kept services pass to the next", async () => {

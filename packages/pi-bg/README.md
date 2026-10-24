@@ -52,7 +52,7 @@ Each task runs `bash -c <command>` (`/bin/sh` when `/bin/bash` is missing) in it
 - **Reload.** Tasks survive `/reload`: the reloaded code takes the running tasks over.
 - **Several sessions in one process.** An in-process session that loads pi-bg too (a pi-plan-mode planner given its tools) gets its own view: it lists, waits on, wakes and, when it ends, kills only the tasks it started. Only a session with a UI adopts kept services. Kept services of a session that is gone pass to the next session that starts in the process, as the user's.
 - **Session end.** Quitting, `/new`, `/resume` and `/fork` stop every task, along with anything a task left running in its process group (`npm run dev &`), except services started with `keep: true`.
-- **Kept services.** When Pi quits, kept services keep running and are recorded for later. The next Pi started in, above or below their directory adopts them at startup: it lists them and can stop them, and it notifies you when one ends.
+- **Kept services.** When Pi quits, kept services keep running and are recorded for later. The next Pi started in, above or below their directory, in the same Git checkout, adopts them at startup: it lists them and can stop them, and it notifies you when one ends. A worktree is its own checkout, so a Pi in `<project>/.worktrees/<branch>` never adopts the main checkout's services, nor the other way round.
 - **Crash cleanup.** Each Pi process records its running tasks in `~/.pi/agent/bg/state/<pid>.json`. At startup, a Pi kills the leftovers of a Pi process that is no longer running. A pid is signalled or adopted only while `ps` shows it still running the task's command, never after it has been reused.
 - **Old logs.** Session log directories older than seven days that no live task references are deleted at startup.
 
@@ -173,7 +173,7 @@ During `bg_wait`, the optional event `pi-plugins.working-message.v1` publishes `
 
 - The pill, `/tasks` view and log viewer exist only in the TUI.
 - Herdr's pane state stays Herdr's own: a turn kept open by `bg_wait` or by a running job shows "working"; once the user interrupts that wait, the pane shows idle or done, and only the `$bg` token says a job will wake it.
-- Kept services are adopted only by a Pi started in, above or below their directory, and only at startup.
+- Kept services are adopted only by a Pi started in, above or below their directory in the same Git checkout (outside Git, by directory alone), and only at startup.
 
 ## Development
 
