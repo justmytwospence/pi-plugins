@@ -4,7 +4,7 @@ description: Treat Pi Plugins as one Git-versioned suite while retaining indepen
 ---
 ## One release, independent selection
 
-The root package exposes 30 extension entries. A Git commit or tag selects the version of **the whole suite**. Your `extensions` filter selects which entries load.
+The root package exposes 31 extension entries. A Git commit or tag selects the version of **the whole suite**. Your `extensions` filter selects which entries load.
 
 There are no independent per-component Git pins within this package. Do not combine multiple copies of the suite at different refs to simulate them. `source-pins.json` records initial import provenance, not current component release versions.
 

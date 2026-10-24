@@ -1,12 +1,12 @@
 # Pi Plugins
 
-A modular suite of 29 extensions for [Pi](https://pi.dev): background work, subagents, planning, review, context awareness and terminal ergonomics. Every component can be enabled on its own; one Git ref versions the whole suite. It is not a fork of Pi.
+A modular suite of 31 extensions for [Pi](https://pi.dev): background work, subagents, planning, review, context awareness and terminal ergonomics. Every component can be enabled on its own; one Git ref versions the whole suite. It is not a fork of Pi.
 
 **[Documentation](https://pi-plugins.vercel.app)** · **[Keymap & focus](https://pi-plugins.vercel.app/guides/keyboard/)** · **[Requirements, cost & privacy](https://pi-plugins.vercel.app/guides/requirements/)** · **[Development & testing](https://pi-plugins.vercel.app/development/)**
 
 ## Choose your plugins
 
-All 29 references include activation, controls, defaults, requirements, costs and limitations. Start with the workflow you need; companions are optional.
+All 31 references include activation, controls, defaults, requirements, costs and limitations. Start with the workflow you need; companions are optional.
 
 ### Run & coordinate
 
@@ -40,6 +40,7 @@ All 29 references include activation, controls, defaults, requirements, costs an
 | [pi-status-footer](https://pi-plugins.vercel.app/plugins/pi-status-footer/) | Read Git, context and provider usage at a glance. |
 | [pi-context](https://pi-plugins.vercel.app/plugins/pi-context/) | Inspect what fills the context window, with previews. |
 | [pi-trends](https://pi-plugins.vercel.app/plugins/pi-trends/) | Chart context %, effort, tokens and cost per model call. |
+| [pi-pressure](https://pi-plugins.vercel.app/plugins/pi-pressure/) | See CPU and memory pressure, only while the machine is constrained. |
 
 ### Terminal & editing
 
