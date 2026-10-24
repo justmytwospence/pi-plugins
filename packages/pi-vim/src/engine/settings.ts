@@ -34,6 +34,7 @@ export type SurfaceSyncMap = {
 
 export type PiVimSettings = {
   clipboardMirror?: unknown;
+  displayLineMotion?: unknown;
   exCommand?: unknown;
   globalExCommand?: unknown;
   modeColors?: ModeColorSettings;
@@ -125,6 +126,12 @@ export function readPiVimClipboardMirrorSetting(g: unknown, p: unknown) {
   let v = get(p, "clipboardMirror");
   if (v !== M) return v;
   v = get(g, "clipboardMirror");
+  return v === M ? undefined : v;
+}
+
+export function readPiVimDisplayLineMotion(g: unknown, p: unknown) {
+  let v = get(p, "displayLineMotion");
+  if (v === M) v = get(g, "displayLineMotion");
   return v === M ? undefined : v;
 }
 
@@ -267,6 +274,7 @@ function disk(cwd: string): PiVimSettings {
     p = s.getProjectSettings();
   return {
     clipboardMirror: readPiVimClipboardMirrorSetting(g, p),
+    displayLineMotion: readPiVimDisplayLineMotion(g, p),
     exCommand: readPiVimExCommandSetting(g, p),
     globalExCommand: readPiVimGlobalExCommandSetting(g, p),
     modeColors: readPiVimModeColors(g, p),

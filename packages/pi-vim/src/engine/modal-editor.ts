@@ -273,6 +273,9 @@ type ModalEditorInternals = {
 type CustomEditorConstructorArgs = ConstructorParameters<typeof CustomEditor>;
 
 export type ModalEditorOptions = {
+  // Make j/k move by screen (wrapped) rows like gj/gk, the common
+  // `noremap j gj` / `noremap k gk` vim setup. Operators (dj, yk) stay linewise.
+  displayLineMotion?: boolean;
   labelColorizers?: ModeColorizers | null;
   borderColorizers?: ModeColorizers | null;
   // Per-mode paint policy for each surface. "mode" paints the mode color;
@@ -351,6 +354,7 @@ export class ModalEditor extends CustomEditor {
 
   private unnamedRegister: string = "";
   private preferRegisterForPut = false;
+  private displayLineMotion = false;
   private clipboardMirrorPolicy: ClipboardMirrorPolicy =
     DEFAULT_CLIPBOARD_MIRROR_POLICY;
   private readonly clipboardMirror = new ClipboardMirror(
@@ -396,6 +400,7 @@ export class ModalEditor extends CustomEditor {
     this.borderSync = opts?.borderSync ?? null;
     this.labelSync = opts?.labelSync ?? null;
     this.labelTransform = opts?.labelTransform ?? null;
+    this.displayLineMotion = opts?.displayLineMotion === true;
     this.installModeBorderColorizer();
   }
 
@@ -2751,6 +2756,12 @@ export class ModalEditor extends CustomEditor {
           return;
         }
 
+        if (data === "j" || data === "k") {
+          const count = Math.min(this.takeTotalCount(1), MAX_COUNT);
+          this.moveCursorVertically(data === "j" ? count : -count, true);
+          return;
+        }
+
         if (data === "J" && !isVisualMode(this.mode)) {
           this.joinLines(false);
           return;
@@ -2865,7 +2876,7 @@ export class ModalEditor extends CustomEditor {
           this.moveCursorBy(clamped);
         } else {
           const delta = data === "j" ? clamped : -clamped;
-          this.moveCursorVertically(delta);
+          this.moveCursorVertically(delta, this.displayLineMotion);
         }
         return;
       }
@@ -3125,10 +3136,10 @@ export class ModalEditor extends CustomEditor {
         this.cutCharsBeforeCursor();
         break;
       case "j":
-        this.moveCursorVertically(1);
+        this.moveCursorVertically(1, this.displayLineMotion);
         break;
       case "k":
-        this.moveCursorVertically(-1);
+        this.moveCursorVertically(-1, this.displayLineMotion);
         break;
       default:
         if (seq) super.handleInput(seq);
@@ -3217,8 +3228,19 @@ export class ModalEditor extends CustomEditor {
     }
   }
 
-  private moveCursorVertically(delta: number): void {
+  private moveCursorVertically(delta: number, display = false): void {
     if (delta === 0) return;
+
+    if (display) {
+      // The base editor's moveCursor walks wrapped screen rows (gj/gk).
+      const base = this as unknown as { moveCursor?: (dl: number, dc: number) => void };
+      if (typeof base.moveCursor === "function") {
+        base.moveCursor(delta, 0);
+        if (this.mode === "normal") this.clampCursorToLastGrapheme();
+        (this as unknown as { tui?: { requestRender?: () => void } }).tui?.requestRender?.();
+        return;
+      }
+    }
 
     const editor = this as unknown as {
       state?: { lines?: string[]; cursorLine?: number; cursorCol?: number };

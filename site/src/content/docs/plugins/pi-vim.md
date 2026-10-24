@@ -52,7 +52,7 @@ These are **draft motions**, not transcript navigation. Escape (or Ctrl+[) enter
 | Task | Keys / examples |
 | --- | --- |
 | Move by character, line or word | `h j k l`, `w b e`; `3w` moves three words. |
-| Move within the draft | `0` line start, `^` first nonblank, `$` line end, `gg` / `G` draft start/end. |
+| Move within the draft | `0` line start, `^` first nonblank, `$` line end, `gg` / `G` draft start/end; `gj` / `gk` move by wrapped screen row. |
 | Insert or open a line | `i a I A`, `o O`. |
 | Operate on a motion / line | `dw`, `cw`, `yw`; `dd`, `cc`, `yy`; counts such as `2dd`. |
 | Select / paste | `v` character Visual, `V` line Visual; `p` / `P`. A terminal paste or a file dragged in while in Normal or Visual inserts its text after the cursor, like `p`, and stays in Normal. |
@@ -96,6 +96,7 @@ Settings live under a `piVim` key in Pi's own settings files, `~/.pi/agent/setti
 ```
 
 - `clipboardMirror`: `all` (default), `yank` or `never`; which register writes are mirrored to the OS clipboard.
+- `displayLineMotion`: `true` makes `j` / `k` move by wrapped screen row like `gj` / `gk` (the Vim `noremap j gj` idiom); operators such as `dj` stay linewise. Default `false`.
 - `exCommand.piDispatch` turns the EX bridge to Pi commands off when `false`; `copyInputToClipboard` copies the prompt before each dispatch.
 - `modeColors`, `borderSync` and `labelSync` choose per-mode colors for the input border and the footer label.
 - `modeChange` runs a shell command when the main or embedded editor changes mode. Because it executes commands, it is read **only from the global settings file**; a project file cannot set it.

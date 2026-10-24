@@ -6601,6 +6601,32 @@ describe("Universal Counts: Change and Nav", () => {
 
     assert.deepEqual(editor.getCursor(), { line: 2, col: 0 });
   });
+
+  it("gj/gk move by wrapped screen rows", () => {
+    const wrappedLine = "x".repeat(200);
+    const { editor } = createMultiLineEditor(`top\n${wrappedLine}\nbottom`);
+    sendKeys(editor, ["j", "g", "j"]);
+    const after = editor.getCursor();
+    assert.equal(after.line, 1);
+    assert.ok(after.col > 0);
+    sendKeys(editor, ["g", "k"]);
+    assert.deepEqual(editor.getCursor(), { line: 1, col: 0 });
+  });
+
+  it("displayLineMotion makes j/k move by screen rows; dj stays linewise", () => {
+    const wrappedLine = "x".repeat(200);
+    const editor = new ModalEditor(stubTui, stubTheme, stubKeybindings, {
+      displayLineMotion: true,
+    });
+    editor.setText(`top\n${wrappedLine}\nbottom`);
+    sendKeys(editor, ["\x1b", "g", "g", "j", "j"]);
+    assert.equal(editor.getCursor().line, 1);
+    assert.ok(editor.getCursor().col > 0);
+    sendKeys(editor, ["k"]);
+    assert.deepEqual(editor.getCursor(), { line: 1, col: 0 });
+    sendKeys(editor, ["d", "j"]);
+    assert.equal(editor.getText(), "top");
+  });
 });
 
 // ---------------------------------------------------------------------------

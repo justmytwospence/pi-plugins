@@ -54,6 +54,11 @@ export function resolveSessionConfig(
   );
   if (exCommand.warning) warnings.push(exCommand.warning);
 
+  const displayLineMotion = settings.displayLineMotion === true;
+  if (settings.displayLineMotion !== undefined && typeof settings.displayLineMotion !== "boolean") {
+    warnings.push("Invalid piVim.displayLineMotion; expected a boolean.");
+  }
+
   const modeColors = resolveModeColors(settings.modeColors);
   const { borderSync, labelSync } = resolveSurfaceSyncMaps(settings);
   // Both surfaces get their colorizers unconditionally; the editor installs
@@ -68,6 +73,7 @@ export function resolveSessionConfig(
     labelSync,
     offBorderColor: theme ? buildOffBorderColor(theme) : null,
     labelTransform: reverseVideo,
+    displayLineMotion,
   };
 
   const handlers = new Map<EditorSurface, ModeChangeFn>();
