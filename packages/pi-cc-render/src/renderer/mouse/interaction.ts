@@ -55,6 +55,7 @@ import {
 	renderScrollButton,
 	resetScrollButtonState,
 	scheduleScrollButtonSync,
+	scrollTranscriptToBottom,
 	setScrollButtonHovered,
 	setScrollButtonVisible,
 	setScrollButtonWidget,
@@ -404,7 +405,7 @@ function handleFullscreenToolClick(tui: any, packet: SgrMousePacket): boolean {
 	const pressComponent = target.owner ?? component;
 	// Back-to-bottom button: hit by component reference, independent of the rendered-line cache.
 	if (getScrollButtonVisible() && component === getScrollButtonWidget()) {
-		tui.scrollToBottom?.();
+		scrollTranscriptToBottom(tui);
 		hideScrollButton(tui);
 		return true;
 	}

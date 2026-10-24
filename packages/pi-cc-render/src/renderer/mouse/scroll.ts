@@ -138,10 +138,55 @@ export function syncOfficialScrollToEnd(tui: any): void {
 	else restoreOfficialScrollToEnd(tui);
 }
 
-/** Host fullscreen: whether the view follows the transcript bottom (button hidden condition). */
+/** A scroll view over a document (main's transcript is a container of message components). */
+function isDocumentView(view: any): boolean {
+	return !!view && typeof view.scrollToEnd === "function" && Array.isArray(view.child?.children);
+}
+
+/**
+ * Main's transcript scroll view, which the dock button sits under. Usually Pi's primary scroll view,
+ * but another one can be primary (pi-sidebar's panel while it has focus); then the scroll view over
+ * a document anywhere in the layout tree. Falls back to the primary view.
+ */
+export function transcriptScrollView(tui: any): any {
+	const primary = tui?.getPrimaryScrollView?.();
+	if (isDocumentView(primary)) return primary;
+	const seen = new Set<unknown>();
+	const walk = (node: any, depth: number): any => {
+		if (!node || typeof node !== "object" || seen.has(node) || depth > 8) return undefined;
+		seen.add(node);
+		if (isDocumentView(node)) return node;
+		const kids = [
+			...(Array.isArray(node.entries) ? node.entries.map((entry: any) => entry?.component) : []),
+			...(Array.isArray(node.children) ? node.children : []),
+		];
+		for (const kid of kids) {
+			const found = walk(kid, depth + 1);
+			if (found) return found;
+		}
+		return undefined;
+	};
+	try {
+		return walk(tui?.layoutRoot, 0) ?? primary;
+	} catch {
+		return primary;
+	}
+}
+
+/** Host fullscreen: whether main's transcript follows its bottom (button hidden condition). */
 export function isFullscreenAtBottom(tui: any): boolean {
-	const following = tui.isFollowingOutput ?? tui.getPrimaryScrollView?.()?.isFollowingEnd ?? true;
-	return Boolean(following);
+	const view = transcriptScrollView(tui);
+	const following = view ? view.isFollowingEnd : tui.isFollowingOutput;
+	return Boolean(following ?? true);
+}
+
+/** The dock button's action: scroll main's transcript to its end. */
+export function scrollTranscriptToBottom(tui: any): void {
+	const view = transcriptScrollView(tui);
+	if (view && view !== tui.getPrimaryScrollView?.()) {
+		view.scrollToEnd();
+		tui.requestRender?.();
+	} else tui.scrollToBottom?.();
 }
 
 function formatShortcut(shortcut: string): string {
