@@ -556,9 +556,13 @@ test("pi-pressure's signals get their own row, with arrows while they move", () 
   ]);
   assert.deepEqual(absorbed.rest, []);
   const s = { ...fixture(), statuses: absorbed.rest, pressure: absorbed.pressure };
-  assert.equal(plain(mod.renderFooter(s, 160, theme)[3]), " \uf2db Pressure cpu 97 \u2191 \u00b7 load 1.6 \u00b7 mem warn \u2193 \u00b7 thermal hot \u00b7 swap-in 40MB/s \u00b7 top vitest");
+  assert.equal(plain(mod.renderFooter(s, 160, theme)[3]), " \uf2db Pressure cpu  97 \u2191 \u00b7 load 1.6   \u00b7 mem warn \u2193 \u00b7 thermal hot    \u00b7 swap-in  40MB/s   \u00b7 top vitest");
+  // Each signal keeps its width as its value, level and arrow change, so nothing after it moves.
+  const moved = mod.parsePressureStatus("pressure: cpu 5 ok \u00b7 load 0.4 \u2193 hot \u00b7 mem ok \u00b7 thermal \u2191 warn \u00b7 swap-in 1.5MB/s \u2191 hot \u00b7 top vitest");
+  const starts = (row) => [...row.matchAll(/(cpu|load|mem|thermal|swap-in|top) /g)].map((m) => m.index);
+  assert.deepEqual(starts(plain(mod.renderFooter({ ...s, pressure: moved }, 160, theme)[3])), starts(plain(mod.renderFooter(s, 160, theme)[3])));
   // Narrow: the culprit and eased signals go; hot and warn signals stay.
-  assert.equal(plain(mod.renderFooter(s, 46, theme)[3]), "\uf2db Pressure cpu 97 \u2191 \u00b7 mem warn \u2193 \u00b7 thermal hot");
+  assert.equal(plain(mod.renderFooter(s, 50, theme)[3]), "\uf2db Pressure cpu  97 \u2191 \u00b7 mem warn \u2193 \u00b7 thermal hot");
   // Label, value and arrow all take the level's color.
   // Zero-width SGR codes stand in for the theme's colors.
   const sgr = { error: 31, warning: 33, muted: 37 };
@@ -566,7 +570,7 @@ test("pi-pressure's signals get their own row, with arrows while they move", () 
   const tagged = mod.renderFooter(s, 160, tags)[3];
   const tint = (color, text) => `\x1b[${sgr[color]}m${text}\x1b[0m`;
   for (const [color, label, value] of [["error", "cpu", "97"], ["warning", "load", "1.6"], ["warning", "mem", "warn"], ["error", "thermal", "hot"], ["muted", "swap-in", "40MB/s"]]) {
-    assert.ok(tagged.includes(`${tint(color, label)} ${tint(color, value)}`), label);
+    assert.match(tagged, new RegExp(`${tint(color, label)} +${tint(color, value)}`.replace(/[[\]/]/g, "\\$&")), label);
   }
   for (const width of [46, 120]) {
     for (const row of mod.renderFooter(s, width, theme).map(plain)) assert.doesNotMatch(row, /[%$#>]\s*$/);

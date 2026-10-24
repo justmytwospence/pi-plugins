@@ -777,18 +777,25 @@ function bgRow(items: BgItem[], width: number, theme: Paint): string {
 // pi-pressure's signals: label and value (or the level, for memory and thermal)
 // in the level's color, with an arrow while it is moving significantly; hot signals
 // stay longest when narrow, then warn, then eased ones, and the busiest
-// process goes first.
+// process goes first. Each signal's value and arrow take a fixed width, so the
+// items hold still as the numbers change and arrows come and go.
+const PRESSURE_WIDTH: Record<Extract<PressureItem, { kind: "signal" }>["name"], number> = { cpu: 3, load: 3, mem: 4, thermal: 4, "swap-in": 7 };
 function pressureRow(items: PressureItem[], width: number, theme: Paint): string {
   const color = { ok: "muted", warn: "warning", hot: "error" } as const;
   const segments: Segment[] = [{ text: theme.fg("muted", "Pressure"), separatorAfter: " ", priority: 110 }];
   for (const item of items) {
     if (item.kind === "top") { segments.push({ text: `${theme.fg("dim", "top")} ${theme.fg("muted", item.name)}`, priority: 20 }); continue; }
-    const value = theme.bold(theme.fg(color[item.level], item.value ?? item.level));
-    const arrow = item.trend ? ` ${theme.fg(color[item.level], item.trend === "up" ? "\u2191" : "\u2193")}` : "";
+    // Numbers align right, the level words of mem and thermal left.
+    const text = item.value ?? item.level;
+    const gap = " ".repeat(Math.max(0, PRESSURE_WIDTH[item.name] - visibleWidth(text)));
+    const painted = theme.bold(theme.fg(color[item.level], text));
+    const value = item.value === undefined ? `${painted}${gap}` : `${gap}${painted}`;
+    const arrow = item.trend ? ` ${theme.fg(color[item.level], item.trend === "up" ? "\u2191" : "\u2193")}` : "  ";
     // The label takes the level's color too, so the row reads at a glance.
     segments.push({ text: `${theme.fg(color[item.level], item.name)} ${value}${arrow}`, priority: item.level === "hot" ? 100 : item.level === "warn" ? 90 : 55 });
   }
-  return fitSegments(segments, width, theme);
+  // The last item's padding holds nothing in place.
+  return fitSegments(segments, width, theme).replace(/ +((?:\x1b\[[0-9;]*m)*)$/, "$1");
 }
 
 // Nerd Font (Font Awesome / Devicons / Material Design, all private-use,
