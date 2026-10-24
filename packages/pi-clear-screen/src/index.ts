@@ -14,7 +14,7 @@
 // mode the terminal owns scrollback, so ctrl+l just says so.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getKeybindings } from "@earendil-works/pi-tui";
-import { clearHandlerOf, routeCtrlC } from "./interrupt.ts";
+import { clearHandlerOf, routeCtrlC, routeEscape } from "./interrupt.ts";
 
 // setup runs before the replacement's session_start. Carry plain data, never stale APIs.
 type Selection = { provider: string; modelId: string; thinkingLevel: ExtensionContext["thinkingLevel"] };
@@ -97,12 +97,15 @@ export default function (pi: ExtensionAPI) {
     }
     if (ctx.mode !== "tui") return;
     tui = grabTui(ctx);
-    // Ctrl+C interrupts a running turn (see interrupt.ts). The prompt editor has focus now.
+    // Ctrl+C interrupts a running turn, and Esc/Ctrl+C take queued prompts back before they stop
+    // it (see interrupt.ts). The prompt editor has focus now.
     let mainClear = clearHandlerOf(tui?.getFocusedComponent?.());
     stopKeys = ctx.ui.onTerminalInput?.((data) => {
       const focused = tui?.getFocusedComponent?.();
       mainClear ??= clearHandlerOf(focused);
-      return routeCtrlC(data, focused, mainClear, !ctx.isIdle());
+      const busy = !ctx.isIdle();
+      const state = { focused, mainClear, busy, queued: busy && ctx.hasPendingMessages() };
+      return routeEscape(data, state) ?? routeCtrlC(data, state);
     });
     if (getKeybindings().getKeys("app.model.select").includes(KEY)) {
       ctx.ui.notify('clear-screen: Ctrl+L conflicts with Pi model selection. Set "app.model.select": ["alt+p", "alt+m"] in keybindings.json, then reload.', "warning");

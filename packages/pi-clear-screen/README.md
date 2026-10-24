@@ -36,8 +36,11 @@ No `npm install` is needed to run it: the package.json has no `dependencies`; Pi
 |---|---|
 | `ctrl+l` | Clear the screen (keeps history; scroll up to see it) |
 | `ctrl+c` while the agent works | Stop the turn, as Esc does (Claude Code's Ctrl+C). Idle, Pi's own Ctrl+C is unchanged: clear the draft, a second press exits. |
+| `esc` (or `ctrl+c`) with prompts queued | Take the queued prompts back into the editor and keep the turn running. The next press, with nothing queued, stops the turn. Stock Pi does both at once. |
 
 Ctrl+C is Pi's `app.clear` key, which extensions cannot bind, so the extension watches raw terminal input instead. It acts only while main's prompt editor has focus and the agent is busy; dialogs, pickers and pi-sidebar keep their own Ctrl+C. It follows your `app.clear` binding.
+
+Esc with prompts queued runs Pi's `app.message.dequeue` (Alt+Up) instead of stopping the turn. It too acts only in main's prompt editor while the agent works; an open autocomplete popup keeps its Esc, and so do pi-vim's Visual mode, pending commands and EX line (Insert and Normal mode restore the queue).
 
 ## Commands
 

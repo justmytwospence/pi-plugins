@@ -8,7 +8,7 @@ plugin: pi-clear-screen
 
 - **Use it for:** Get a fresh fullscreen viewing area without discarding conversation history.
 - **Enable:** Select `packages/pi-clear-screen/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
-- **Controls:** Ctrl+L after remapping stock `app.model.select`; Ctrl+C stops a running turn; `/clear` starts a fresh session, `/exit` quits. No model tool.
+- **Controls:** Ctrl+L after remapping stock `app.model.select`; Ctrl+C stops a running turn; Esc or Ctrl+C first takes queued prompts back; `/clear` starts a fresh session, `/exit` quits. No model tool.
 - **Settings:** No plugin settings; Ctrl+L fixed in source. Pi `tuiMode` must be fullscreen for view clearing.
 - **Requirements, cost & privacy:** Fullscreen/private layout hooks; no network, inference or external program. Clearing is not redaction or compaction.
 - **Integrations & limits:** Optional sticky-prompt horizon. Stock conflict skips the shortcut, not an automatic override. `/clear` changes context; Ctrl+L does not.
@@ -28,6 +28,10 @@ The extension provides Ctrl+L and the `/clear` and `/exit` commands, but no mode
 ## Ctrl+C stops a running turn
 
 As in Claude Code, Ctrl+C (your `app.clear` key) stops the agent while it works, exactly as Esc does, and leaves the draft alone. Stock Pi clears the draft instead, and a second press within half a second exits Pi, so a habitual Ctrl+C Ctrl+C would quit rather than stop. Idle, Ctrl+C keeps Pi's behavior. Pi reserves `app.clear`'s key from extension shortcuts, so this watches raw terminal input and acts only while main's prompt editor (Pi's own or a custom one such as pi-vim's) has focus; dialogs, pickers and [pi-sidebar](/plugins/pi-sidebar/) keep their own Ctrl+C.
+
+## Esc takes queued prompts back first
+
+Stock Pi's Esc during a run restores every queued prompt to the editor and stops the turn in one press. With prompts queued, Esc (and Ctrl+C) here only restores them, as `app.message.dequeue` (Alt+Up) does, and the turn keeps running; the next press, with nothing queued, stops it. This also acts only in main's prompt editor while the agent works. An open autocomplete popup keeps its Esc, as do pi-vim's Visual mode, pending commands and EX line; in its Insert and Normal modes Esc restores the queue.
 
 ## Session commands
 
