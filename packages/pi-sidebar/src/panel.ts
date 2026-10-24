@@ -20,11 +20,9 @@ import {
   type TuiMouseEvent,
   type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
-import { EDITOR_MODE, EDITOR_SURFACE, INPUT_CONTEXT, requestEditorFactory, type EditorModeContext, type StashController, type SuiteEditor } from "./contract.ts";
+import { EDITOR_MODE, EDITOR_SURFACE, INPUT_CONTEXT, requestEditorFactory, requestWorkingStats, type EditorModeContext, type PinnedPrompt, type PromptPinService, type StashController, type SuiteEditor, type WorkingCounter } from "./contract.ts";
 import { PiChat } from "./pi-chat.ts";
-import { pinBar, pinnedAnchor, promptAnchors, type PromptAnchor } from "./pin.ts";
 import { displayMessage } from "./quiz/protocol.ts";
-import { WorkingStats, workingMessage } from "./working.ts";
 
 export interface StatusPart {
   text: string;
@@ -66,6 +64,8 @@ export interface PanelHost {
   mainHidesThinking(): boolean;
   cwd: string;
   events?: { emit(channel: string, data: unknown): void };
+  /** pi-sticky-last-prompt's pinned prompt bar, when it is active. */
+  pinService?(): PromptPinService | undefined;
   /** Sidebar's own prompt stash from pi-stash, when it is active; kept by the host across panel rebuilds. */
   stash?(): StashController | undefined;
 }
@@ -86,16 +86,17 @@ class Row implements Component {
   invalidate(): void {}
 }
 
-/** Pi's working row (its spinner, colors and pi-status-footer's message) while Sidebar answers. */
+/** Pi's working row (its spinner, colors and pi-status-footer's message, as main has) while Sidebar answers. */
 class WorkingRow implements Component {
   private readonly loader: Loader;
-  private readonly stats = new WorkingStats();
+  /** This run's counter from pi-status-footer, when it shows main's working stats. */
+  private stats: WorkingCounter | undefined;
   private startedAt = 0;
   private running = false;
   private ticker: ReturnType<typeof setInterval> | undefined;
   private retry: string | undefined;
 
-  constructor(private readonly tui: TUI, theme: () => Theme) {
+  constructor(private readonly tui: TUI, theme: () => Theme, private readonly events: PanelHost["events"]) {
     this.loader = new Loader(tui, (text) => theme().fg("accent", text), (text) => theme().fg("muted", text), "Working");
     this.loader.stop();
   }
@@ -109,10 +110,11 @@ class WorkingRow implements Component {
     this.running = true;
     this.retry = undefined;
     this.startedAt = Date.now();
-    this.stats.reset();
+    const service = requestWorkingStats(this.events);
+    this.stats = service?.create();
     this.refresh();
     this.loader.start();
-    this.ticker = setInterval(() => this.refresh(), 1000);
+    this.ticker = setInterval(() => this.refresh(), service?.refreshMs ?? 1000);
     this.ticker.unref?.();
   }
 
@@ -129,7 +131,7 @@ class WorkingRow implements Component {
     if (event.type === "agent_start") this.start();
     else if (event.type === "agent_end") this.stop();
     else if (event.type === "message_update" && event.assistantMessageEvent) {
-      this.stats.apply(event.assistantMessageEvent as never);
+      this.stats?.apply(event.assistantMessageEvent);
       this.retry = undefined;
       this.refresh();
     } else if (event.type === "auto_retry_start") {
@@ -140,7 +142,7 @@ class WorkingRow implements Component {
 
   private refresh(): void {
     if (!this.running) return;
-    this.loader.setMessage(this.retry ?? workingMessage(this.stats.tokens(), Date.now() - this.startedAt) ?? "Working");
+    this.loader.setMessage(this.retry ?? this.stats?.message(Date.now() - this.startedAt) ?? "Working");
   }
 
   render(width: number): string[] {
@@ -323,7 +325,7 @@ export class SidebarPanel {
   focused = false;
   unread = false;
   /** The prompt pinned on the top row in the last frame, and that row in document lines. */
-  private pinned: { anchor: PromptAnchor; row: number } | undefined;
+  private pinned: { anchor: PinnedPrompt; row: number } | undefined;
   private recheck = false;
 
   constructor(private readonly tui: TUI, private readonly theme: () => Theme, private readonly host: PanelHost) {
@@ -353,7 +355,7 @@ export class SidebarPanel {
       invalidate: () => {},
     };
     this.view = new ScrollView(body, { follow: "end", primary: false, overscroll: "contain", scrollbar: "auto" });
-    this.working = new WorkingRow(tui, theme);
+    this.working = new WorkingRow(tui, theme, host.events);
     this.input = new Composer(tui, theme, this, host);
     const focus = () => host.focusSidebar();
     const title = new Row((width) => [this.titleLine(width)], focus);
@@ -378,7 +380,7 @@ export class SidebarPanel {
   }
 
   /**
-   * Main's pinned prompt bar, on Sidebar's transcript. Pi lays the transcript out before it scrolls
+   * Main's pinned prompt bar (pi-sticky-last-prompt's), on Sidebar's transcript. Pi lays the transcript out before it scrolls
    * it, so the top row is predicted from the scroll view's state as it will be after this frame; a
    * wrong guess (the viewport just changed height) is redrawn on the next frame.
    */
@@ -387,7 +389,8 @@ export class SidebarPanel {
     const height = view.viewportHeight;
     const end = Math.max(0, lines.length - height);
     const top = view.isFollowingEnd ? end : Math.min(view.scrollTop, end);
-    const anchor = height > 1 ? pinnedAnchor(promptAnchors(this.chat.children, width), top) : undefined;
+    const service = this.host.pinService?.();
+    const anchor = service && height > 1 ? service.anchor(this.chat.children, width, top) : undefined;
     this.pinned = anchor ? { anchor, row: top } : undefined;
     if (!this.recheck) {
       this.recheck = true;
@@ -398,7 +401,7 @@ export class SidebarPanel {
     }
     if (!anchor) return lines;
     const pinned = lines.slice();
-    pinned[top] = pinBar(this.theme(), anchor.text, width);
+    pinned[top] = service!.bar(this.theme(), anchor.text, width);
     return pinned;
   }
 

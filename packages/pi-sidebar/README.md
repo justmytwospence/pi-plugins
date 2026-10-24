@@ -73,8 +73,8 @@ While Sidebar has focus, your keys do what they do in main. They are resolved th
 How it looks:
 - **Layout:** main's pane splits into equal halves. They sit side by side when each half keeps at least 80 columns, and Sidebar goes below main otherwise. This is decided again on every resize. Main's transcript, editor and footer reflow into their half; nothing is drawn over them.
 - **Focus:** the half without focus is drawn faint, and an arrow in the middle of the divider (`◂`/`▸` beside main, `▴`/`▾` below it) points at the focused half. The focused Sidebar has a filled title bar and an accent composer border; while it has focus, main's editor borders (and pi-status-footer's gauge on them) turn muted. When main has focus, the title bar shows `● new answer` when an answer finished meanwhile. Dialogs, overlays and search highlights are never dimmed.
-- **Pinned prompt:** once your latest question scrolls above the top, it is pinned on Sidebar's top row as main's pi-sticky-last-prompt bar is; click it to jump back. Clicks in the transcript (a tool card's "click to show more") work as in main.
-- **Working row:** while Sidebar answers, Pi's own spinner row reads `Working (↓ 120 tokens · 4s)`, the same message pi-status-footer gives main, or `Retrying…`.
+- **Pinned prompt:** once your latest question scrolls above the top, with pi-sticky-last-prompt enabled it is pinned on Sidebar's top row by the same bar main shows; click it to jump back. Clicks in the transcript (a tool card's "click to show more") work as in main.
+- **Working row:** while Sidebar answers, Pi's own spinner row reads `Working`, or `Retrying…`. With pi-status-footer showing main's working stats, it reads like main's: `Working (↓ 120 tokens · 4s)`.
 - **Rendering:** messages, tool cards and reasoning use Pi's components, so pi-cc-render's styling applies too. Reasoning follows main's `hideThinkingBlock` setting (pi-cc-render's compact "Thought for…" title when hidden). Sidebar's own thinking toggle lasts until main's setting changes.
 
 ### Herdr navigation

@@ -4,7 +4,6 @@ import piSidebar from "../src/index.ts";
 import { SidebarController } from "../src/controller.ts";
 import { SplitRoot } from "../src/layout.ts";
 import { fitStatus } from "../src/panel.ts";
-import { pinnedAnchor, promptAnchors } from "../src/pin.ts";
 import { EXCHANGE_ENTRY, RESET_ENTRY } from "../src/thread.ts";
 import { QUIZ_ENTRY } from "../src/quiz/mode.ts";
 import { QUIZ_NEXT, QUIZ_ROLE, QUIZ_START } from "../src/quiz/prompt.ts";
@@ -199,8 +198,19 @@ describe("opening and focus", () => {
     expect(title()).toContain("● new answer");
   });
 
-  it("shows Pi's working row while Sidebar answers", () => {
-    const { controller, ctx } = setup();
+  it("shows Pi's working row while Sidebar answers, with pi-status-footer's stats", () => {
+    const { pi, controller, ctx } = setup();
+    let chars = 0;
+    pi.events.on("pi-plugins.working-stats.v1", (data: any) => {
+      data.service = {
+        refreshMs: 1000,
+        create: () => ({
+          reset: () => { chars = 0; },
+          apply: (event: any) => { chars += event.delta?.length ?? 0; },
+          message: () => (chars ? `Working (↓ ${chars / 4} tokens)` : undefined),
+        }),
+      };
+    });
     controller.toggle(ctx as never);
     const panel = panelOf(controller);
     expect(panel.working.render(60)).toEqual([]);
@@ -212,6 +222,16 @@ describe("opening and focus", () => {
     expect(panel.working.render(60).join("")).toContain("Retrying");
     panel.apply({ type: "agent_end" });
     expect(panel.working.render(60)).toEqual([]);
+  });
+
+  it("says plain Working without pi-status-footer", () => {
+    const { controller, ctx } = setup();
+    controller.toggle(ctx as never);
+    const panel = panelOf(controller);
+    panel.apply({ type: "agent_start" });
+    panel.apply({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x".repeat(400), partial: { content: [] } } });
+    expect(panel.working.render(60).join("")).not.toContain("tokens");
+    panel.apply({ type: "agent_end" });
   });
 
   it("keeps a blank row between the working row and the composer, as main does", async () => {
@@ -518,19 +538,7 @@ describe("heads-up notes and Sidebar", () => {
 });
 
 describe("pinned prompt", () => {
-  const rows = (n: number) => Array.from({ length: n }, () => ({ render: () => ["x"] }));
-
-  it("pins the newest prompt wholly above the top, and nothing for one on the boundary", () => {
-    const anchors = [{ start: 2, end: 4, text: "first" }, { start: 10, end: 11, text: "second" }];
-    expect(pinnedAnchor(anchors, 1)).toBeUndefined();
-    expect(pinnedAnchor(anchors, 3)).toBeUndefined();
-    expect(pinnedAnchor(anchors, 4)?.text).toBe("first");
-    expect(pinnedAnchor(anchors, 10)).toBeUndefined();
-    expect(pinnedAnchor(anchors, 12)?.text).toBe("second");
-    expect(promptAnchors(rows(3), 40)).toEqual([]);
-  });
-
-  it("draws main's bar on Sidebar's top row once the prompt scrolls away, and clicking it jumps back", async () => {
+  it("pins nothing without pi-sticky-last-prompt", async () => {
     (await import("@earendil-works/pi-coding-agent")).initTheme();
     const { controller, ctx } = setup();
     controller.toggle(ctx as never);
@@ -539,12 +547,33 @@ describe("pinned prompt", () => {
     panel.chat.note(Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n"));
     const lines = panel.chat.render(60);
     panel.view.updateLayout(lines.length, 10, () => {});
+    panel.view.scrollTo(10, { disableFollow: true });
+    expect((panel as any).pin(lines, 60)).toEqual(lines);
+  });
+
+  it("draws pi-sticky-last-prompt's bar on Sidebar's top row once the prompt scrolls away, and clicking it jumps back", async () => {
+    (await import("@earendil-works/pi-coding-agent")).initTheme();
+    const { pi, controller, ctx } = setup();
+    let promptRow = 0;
+    pi.events.on("pi-plugins.prompt-pin.v1", (data: any) => {
+      data.service = {
+        anchor: (_children: unknown[], _width: number, top: number) => (top > promptRow ? { start: promptRow, end: promptRow + 1, text: "what is it doing" } : undefined),
+        bar: (_theme: unknown, text: string) => `PIN ${text}`,
+      };
+    });
+    controller.toggle(ctx as never);
+    const panel = panelOf(controller);
+    panel.chat.user("what is it doing");
+    panel.chat.note(Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n"));
+    const lines = panel.chat.render(60);
+    panel.view.updateLayout(lines.length, 10, () => {});
     const start = lines.findIndex((line: string) => line.includes("what is it doing"));
+    promptRow = start;
     panel.view.scrollTo(start, { disableFollow: true });
     expect((panel as any).pin(lines, 60)).toEqual(lines);
     panel.view.scrollTo(start + 5, { disableFollow: true });
     const pinned = (panel as any).pin(lines, 60) as string[];
-    expect(pinned[start + 5]).toContain("what is it doing");
+    expect(pinned[start + 5]).toBe("PIN what is it doing");
     expect(pinned.filter((line, i) => line !== lines[i])).toHaveLength(1);
     (panel as any).view.child.handleMouse({ type: "click", button: "left", x: 3, y: start + 5, width: 60, height: lines.length, screenX: 3, screenY: 0 });
     expect(panel.view.scrollTop).toBe(Math.max(0, start - 1));

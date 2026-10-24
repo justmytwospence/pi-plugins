@@ -67,8 +67,8 @@ Herdr reads its prefix keys first, so `prefix+h/l` into Sidebar needs the Herdr 
 
 How it looks:
 - **Focus:** the half without focus is drawn faint, and an arrow in the middle of the divider (`◂`/`▸` beside main, `▴`/`▾` below it) points at the focused half. The focused Sidebar has a filled title bar and an accent composer border; while it has focus, main's editor borders (and pi-status-footer's gauge on them) turn muted. When main has focus, the title bar shows `● new answer` when an answer finished meanwhile. Dialogs, overlays and search highlights are never dimmed.
-- **Pinned prompt:** once your latest question scrolls above the top, it is pinned on Sidebar's top row as main's pi-sticky-last-prompt bar is; click it to jump back. Clicks in the transcript (a tool card's "click to show more") work as in main.
-- **Working row:** while Sidebar answers, Pi's own spinner row reads `Working (↓ 120 tokens · 4s)`.
+- **Pinned prompt:** once your latest question scrolls above the top, with pi-sticky-last-prompt enabled it is pinned on Sidebar's top row by the same bar main shows; click it to jump back. Clicks in the transcript (a tool card's "click to show more") work as in main.
+- **Working row:** while Sidebar answers, Pi's own spinner row reads `Working`; with pi-status-footer showing main's working stats, it reads like main's: `Working (↓ 120 tokens · 4s)`.
 - **Rendering:** messages, tool cards and reasoning use Pi's components, so pi-cc-render's styling applies. Reasoning follows main's `hideThinkingBlock` setting.
 
 Sidebar's thread is stored as hidden entries in main's session. It follows `/tree` and comes back after resume and `/reload`.

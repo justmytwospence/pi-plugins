@@ -123,3 +123,62 @@ export function requestStash(events: { emit(channel: string, data: unknown): voi
     return undefined;
   }
 }
+
+/**
+ * Prompt-pin service (version 1), provided by pi-sticky-last-prompt; copied structurally from
+ * packages/pi-sticky-last-prompt/src/index.ts. Without it Sidebar's transcript pins nothing, as main.
+ */
+export const PIN_CHANNEL = "pi-plugins.prompt-pin.v1";
+
+export interface PinnedPrompt {
+  start: number;
+  end: number;
+  text: string;
+}
+
+export interface PromptPinService {
+  anchor(children: readonly unknown[], width: number, top: number): PinnedPrompt | undefined;
+  bar(theme: unknown, text: string, width: number): string;
+}
+
+/** The prompt-pin service of an active pi-sticky-last-prompt; undefined when none answers. */
+export function requestPinService(events: { emit(channel: string, data: unknown): void } | undefined): PromptPinService | undefined {
+  if (!events) return undefined;
+  const request: { version: 1; service?: PromptPinService } = { version: 1 };
+  try {
+    events.emit(PIN_CHANNEL, request);
+  } catch {
+    return undefined;
+  }
+  return request.service && typeof request.service.anchor === "function" ? request.service : undefined;
+}
+
+/**
+ * Working-stats service (version 1), provided by pi-status-footer while it shows main's working
+ * stats; copied structurally from packages/pi-status-footer/src/working.ts. Without it Sidebar's
+ * working row says plain "Working", as main's does.
+ */
+export const WORKING_STATS_CHANNEL = "pi-plugins.working-stats.v1";
+
+export interface WorkingCounter {
+  reset(): void;
+  apply(event: unknown): void;
+  message(elapsedMs: number, base?: string): string | undefined;
+}
+
+export interface WorkingStatsService {
+  create(): WorkingCounter;
+  refreshMs: number;
+}
+
+/** pi-status-footer's working-stats service; undefined when none answers. */
+export function requestWorkingStats(events: { emit(channel: string, data: unknown): void } | undefined): WorkingStatsService | undefined {
+  if (!events) return undefined;
+  const request: { version: 1; service?: WorkingStatsService } = { version: 1 };
+  try {
+    events.emit(WORKING_STATS_CHANNEL, request);
+  } catch {
+    return undefined;
+  }
+  return request.service && typeof request.service.create === "function" ? request.service : undefined;
+}

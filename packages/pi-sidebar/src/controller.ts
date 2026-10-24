@@ -11,7 +11,7 @@ import { RatioStore } from "./preferences.ts";
 import { InjectedPrompt } from "./injected.ts";
 import { herdrFocus, navDirection, navTarget } from "./nav.ts";
 import { SidebarPanel, type StatusPart } from "./panel.ts";
-import { requestStash, type StashController } from "./contract.ts";
+import { requestPinService, requestStash, type PromptPinService, type StashController } from "./contract.ts";
 import { HeadsUp, headsUpChange, headsUpChanged } from "./headsup/headsup.ts";
 import type { HeadsUpNote } from "./headsup/protocol.ts";
 import { isNoteMarker, noteMessages } from "./headsup/thread.ts";
@@ -50,6 +50,8 @@ export class SidebarController {
   private mainEditor: Component | null = null;
   /** Sidebar's own prompt stash from pi-stash (Ctrl+S in its composer); it outlives panel rebuilds. */
   private stashController: StashController | undefined;
+  /** pi-sticky-last-prompt's prompt-pin service, once found. */
+  private pinService: PromptPinService | undefined;
   /** Blocking extension dialogs open in main (a digit then belongs to them). */
   private prompts = 0;
   /** Heads-up notes waiting for Sidebar to finish its answer. */
@@ -188,6 +190,7 @@ export class SidebarController {
       this.panel = new SidebarPanel(tui, () => this.theme ?? ctx.ui.theme, {
         cwd: ctx.cwd,
         events: this.pi.events,
+        pinService: () => (this.pinService ??= requestPinService(this.pi.events)),
         stash: () => (this.stashController ??= requestStash(this.pi.events, {
           editor: () => this.panel?.input.editorComponent,
           notify: (message, type) => this.panel?.notice({ kind: type, text: message }),
