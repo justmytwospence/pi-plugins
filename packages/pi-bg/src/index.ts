@@ -578,7 +578,7 @@ export default function piBg(pi: ExtensionAPI) {
     return {
       set: () => {
         if (!live()) return;
-        const message = `Waiting on ${label()}… (type to interrupt)`;
+        const message = `Waiting on ${label()}…`;
         waitingMessages.set(owner, message);
         paint();
         emit(WORKING_MESSAGE_EVENT, { owner, message });
