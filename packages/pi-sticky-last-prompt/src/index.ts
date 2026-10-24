@@ -203,6 +203,52 @@ export function selectAnchor(index: AnchorIndex, scrollTop: number): UserAnchor 
   return selected && selected.end <= scrollTop ? selected : undefined;
 }
 
+/** The bar's one line: the pin glyph and the prompt on the selection background, `width` columns. */
+export function renderPinBar(theme: Theme, text: string, width: number): string {
+  const label = truncateToWidth(text, Math.max(0, width - 4), "…");
+  const line = truncateToWidth(` ${theme.fg("accent", PIN_ICON)} ${theme.fg("text", label)}`, width, "");
+  return theme.bg("selectedBg", padToWidth(line, width));
+}
+
+/**
+ * Prompt-pin service (version 1) for other plugins' transcripts, such as pi-sidebar's. Discovery is
+ * a synchronous request over `pi.events`: the consumer emits `{ version: 1 }` on `PIN_CHANNEL`; an
+ * active copy sets `service` and `provider` before `emit` returns. Consumers copy these
+ * declarations structurally; without this extension their transcripts pin nothing, as main does.
+ */
+export const PIN_CHANNEL = "pi-plugins.prompt-pin.v1";
+
+export interface PinnedPrompt {
+  /** First document row of the prompt. */
+  start: number;
+  /** Exclusive end row. */
+  end: number;
+  text: string;
+}
+
+export interface PromptPinService {
+  /** The prompt to pin over a transcript of `children` rendered at `width` and scrolled to `top`. */
+  anchor(children: readonly unknown[], width: number, top: number): PinnedPrompt | undefined;
+  /** The bar for `text`, as main draws it. */
+  bar(theme: Theme, text: string, width: number): string;
+}
+
+export interface PromptPinRequest {
+  version: 1;
+  service?: PromptPinService;
+  provider?: string;
+}
+
+export const promptPinService: PromptPinService = {
+  anchor(children, width, top) {
+    const index: AnchorIndex = { anchors: [], horizons: [] };
+    collectAnchors(children, Math.max(1, Math.floor(width)), 0, index);
+    const selected = selectAnchor(index, top);
+    return selected ? { start: selected.start, end: selected.end, text: selected.text } : undefined;
+  },
+  bar: renderPinBar,
+};
+
 const EMPTY_COMPONENT: Component = { render: () => [], invalidate: () => {} };
 
 export class PinBar implements Component {
@@ -231,10 +277,8 @@ export class PinBar implements Component {
       this.renderedRows = 0;
       return [];
     }
-    const label = truncateToWidth(text, Math.max(0, width - 4), "…");
-    const line = truncateToWidth(` ${theme.fg("accent", PIN_ICON)} ${theme.fg("text", label)}`, width, "");
     this.renderedRows = 1;
-    return [theme.bg("selectedBg", padToWidth(line, width))];
+    return [renderPinBar(theme, text, width)];
   }
 
   invalidate(): void {}
@@ -282,6 +326,7 @@ export default function stickyLastPrompt(pi: ExtensionAPI): void {
   let warnedDuplicate = false;
   let releasePatch: (() => void) | undefined;
   let paintedAnchor: UserAnchor | undefined;
+  let serving = false;
   // Pi keeps this object and reads it on every render, so a narrower transcript moves the bar.
   const barOptions: OverlayOptions = { anchor: "top-left", row: 0, col: 0, width: "100%", nonCapturing: true };
 
@@ -425,6 +470,7 @@ export default function stickyLastPrompt(pi: ExtensionAPI): void {
     bar.reset();
     paintedAnchor = undefined;
     warnedDuplicate = false;
+    serving = false;
     for (const release of cleanup) {
       try {
         release?.();
@@ -438,6 +484,7 @@ export default function stickyLastPrompt(pi: ExtensionAPI): void {
     teardown();
     if (ctx.mode !== "tui" || !ctx.hasUI) return;
     const mine = generation;
+    serving = true;
     notify = (message) => ctx.ui.notify(message, "warning");
     removeWidget = () => ctx.ui.setWidget(widgetId, undefined);
     try {
@@ -456,4 +503,11 @@ export default function stickyLastPrompt(pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", () => teardown());
+
+  pi.events?.on?.(PIN_CHANNEL, (data: unknown) => {
+    const request = data as PromptPinRequest | undefined;
+    if (!serving || !request || request.version !== 1 || request.service) return;
+    request.service = promptPinService;
+    request.provider = "pi-sticky-last-prompt";
+  });
 }

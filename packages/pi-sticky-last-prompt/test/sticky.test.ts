@@ -2,6 +2,8 @@ import { SkillInvocationMessageComponent, UserMessageComponent, type ExtensionAP
 import { expect, test } from "vitest";
 import { visibleWidth, type Component, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import stickyLastPrompt, {
+  PIN_CHANNEL,
+  type PromptPinRequest,
   findTranscriptView,
   CLEAR_SENTINEL,
   OWNER,
@@ -106,7 +108,18 @@ class FakeScreen {
 
 function harness() {
   const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
+  const listeners = new Map<string, Array<(data: unknown) => void>>();
+  const events = {
+    on: (channel: string, listener: (data: unknown) => void) => {
+      listeners.set(channel, [...(listeners.get(channel) ?? []), listener]);
+      return () => undefined;
+    },
+    emit: (channel: string, data: unknown) => {
+      for (const listener of listeners.get(channel) ?? []) listener(data);
+    },
+  };
   const pi = {
+    events,
     on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => {
       handlers.set(event, [...(handlers.get(event) ?? []), handler]);
       return () => undefined;
@@ -134,7 +147,7 @@ function harness() {
     },
   };
   const ctx = { mode: "tui", hasUI: true, ui };
-  return { pi: pi as unknown as ExtensionAPI, emit, screen, notes, widgets, components, ctx };
+  return { pi: pi as unknown as ExtensionAPI, events, emit, screen, notes, widgets, components, ctx };
 }
 
 function bar(screen: FakeScreen) {
@@ -668,4 +681,25 @@ test("findTranscriptView finds main's transcript under a split root while anothe
   const split = { entries: [{ component: main }, { component: {} }, { component: { entries: [{ component: side }] } }] };
   expect(findTranscriptView(split, valid)).toBe(transcript);
   expect(findTranscriptView({ entries: [{ component: side }] }, valid)).toBeUndefined();
+});
+
+test("prompt-pin service: offered while a TUI session runs, with main's anchor rules and bar", async () => {
+  const h = harness();
+  stickyLastPrompt(h.pi);
+  const before: PromptPinRequest = { version: 1 };
+  h.events.emit(PIN_CHANNEL, before);
+  expect(before.service).toBeUndefined();
+  await h.emit("session_start", h.ctx);
+  const request: PromptPinRequest = { version: 1 };
+  h.events.emit(PIN_CHANNEL, request);
+  expect(request.provider).toBe("pi-sticky-last-prompt");
+  const service = request.service!;
+  const children = [userMessage("first  prompt", ["a", "b"]), { render: () => ["x", "y", "z"] }, userMessage("second", ["c"])];
+  expect(service.anchor(children, 40, 1)).toBeUndefined(); // straddling the top
+  expect(service.anchor(children, 40, 3)).toEqual({ start: 0, end: 2, text: "first prompt" });
+  expect(visibleWidth(service.bar(theme, "first prompt", 30))).toBe(30);
+  await h.emit("session_shutdown", h.ctx);
+  const after: PromptPinRequest = { version: 1 };
+  h.events.emit(PIN_CHANNEL, after);
+  expect(after.service).toBeUndefined();
 });
