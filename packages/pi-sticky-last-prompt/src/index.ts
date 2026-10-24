@@ -205,9 +205,14 @@ export function selectAnchor(index: AnchorIndex, scrollTop: number): UserAnchor 
 
 /** The bar's one line: the pin glyph and the prompt on the selection background, `width` columns. */
 export function renderPinBar(theme: Theme, text: string, width: number): string {
-  const label = truncateToWidth(text, Math.max(0, width - 4), "…");
+  // truncateToWidth ends a cut with a full reset (`ESC[0m`), which would also end the background:
+  // cut the plain text ourselves, so the ellipsis keeps the text color, and reopen the background
+  // after any reset that remains.
+  const room = Math.max(0, width - 4);
+  const label = visibleWidth(text) <= room ? text : `${truncateToWidth(text, Math.max(0, room - 1), "").replace(/\x1b\[0m$/, "")}…`;
   const line = truncateToWidth(` ${theme.fg("accent", PIN_ICON)} ${theme.fg("text", label)}`, width, "");
-  return theme.bg("selectedBg", padToWidth(line, width));
+  const open = theme.bg("selectedBg", "\u0000").split("\u0000")[0] ?? "";
+  return theme.bg("selectedBg", padToWidth(line, width).replaceAll("\x1b[0m", `\x1b[0m${open}`));
 }
 
 /**

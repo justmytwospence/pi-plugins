@@ -2,6 +2,7 @@ import { SkillInvocationMessageComponent, UserMessageComponent, type ExtensionAP
 import { expect, test } from "vitest";
 import { visibleWidth, type Component, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import stickyLastPrompt, {
+  renderPinBar,
   PIN_CHANNEL,
   type PromptPinRequest,
   findTranscriptView,
@@ -702,4 +703,21 @@ test("prompt-pin service: offered while a TUI session runs, with main's anchor r
   const after: PromptPinRequest = { version: 1 };
   h.events.emit(PIN_CHANNEL, after);
   expect(after.service).toBeUndefined();
+});
+
+test("a cut prompt keeps the bar's background through the ellipsis to the edge", () => {
+  const styled = {
+    fg: (_color: string, text: string) => `\x1b[34m${text}\x1b[39m`,
+    bg: (_color: string, text: string) => `\x1b[48;5;24m${text}\x1b[49m`,
+  } as unknown as Theme;
+  const line = renderPinBar(styled, "a long prompt that will not fit in the bar", 20);
+  expect(visibleWidth(line)).toBe(20);
+  expect(line).toContain("…");
+  // Every full reset is followed by the background again, so nothing after it loses the color.
+  for (const at of [...line.matchAll(/\x1b\[0m/g)].map((m) => m.index!)) {
+    expect(line.slice(at + 4).startsWith("\x1b[48;5;24m")).toBe(true);
+  }
+  const ellipsis = line.indexOf("…");
+  expect(line.lastIndexOf("\x1b[0m", ellipsis)).toBeLessThan(line.lastIndexOf("\x1b[48;5;24m", ellipsis));
+  expect(renderPinBar(styled, "short", 20)).not.toContain("…");
 });
