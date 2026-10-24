@@ -6613,7 +6613,7 @@ describe("Universal Counts: Change and Nav", () => {
     assert.deepEqual(editor.getCursor(), { line: 1, col: 0 });
   });
 
-  it("displayLineMotion makes j/k move by screen rows; dj stays linewise", () => {
+  it("displayLineMotion makes j/k and dj work on screen rows", () => {
     const wrappedLine = "x".repeat(200);
     const editor = new ModalEditor(stubTui, stubTheme, stubKeybindings, {
       displayLineMotion: true,
@@ -6625,7 +6625,87 @@ describe("Universal Counts: Change and Nav", () => {
     sendKeys(editor, ["k"]);
     assert.deepEqual(editor.getCursor(), { line: 1, col: 0 });
     sendKeys(editor, ["d", "j"]);
-    assert.equal(editor.getText(), "top");
+    assert.equal(editor.getText(), `top\n${"x".repeat(40)}\nbottom`);
+  });
+});
+
+describe("displayLineMotion row space", () => {
+  const TEXT = "alpha beta gamma delta epsilon";
+  // At width 12 the line wraps into "alpha beta ", "gamma delta ", "epsilon".
+  function rows(text = TEXT) {
+    const editor = new ModalEditor(stubTui, stubTheme, stubKeybindings, {
+      displayLineMotion: true,
+    });
+    (editor as unknown as { lastWidth: number }).lastWidth = 12;
+    const changes: string[] = [];
+    editor.onChange = (t: string) => changes.push(t);
+    editor.setText(text);
+    sendKeys(editor, ["\x1b", "g", "g"]);
+    return { editor, changes };
+  }
+
+  it("0, $ and G work on screen rows", () => {
+    const { editor } = rows();
+    sendKeys(editor, ["j", "$"]);
+    assert.deepEqual(editor.getCursor(), { line: 0, col: 22 });
+    sendKeys(editor, ["0"]);
+    assert.deepEqual(editor.getCursor(), { line: 0, col: 11 });
+    sendKeys(editor, ["G"]);
+    assert.deepEqual(editor.getCursor(), { line: 0, col: 23 });
+  });
+
+  it("dd deletes one row, yanks it linewise, and u restores", () => {
+    const { editor, changes } = rows();
+    sendKeys(editor, ["j", "d", "d"]);
+    assert.equal(editor.getText(), "alpha beta epsilon");
+    assert.equal(editor.getRegister(), "gamma delta \n");
+    assert.ok(changes.every((t) => !t.includes("\n")));
+    sendKeys(editor, ["u"]);
+    assert.equal(editor.getText(), TEXT);
+  });
+
+  it("2yy joins the yanked rows without the soft wraps", () => {
+    const { editor } = rows();
+    sendKeys(editor, ["2", "y", "y"]);
+    assert.equal(editor.getRegister(), "alpha beta gamma delta \n");
+    assert.equal(editor.getText(), TEXT);
+  });
+
+  it("D stops at the end of the row", () => {
+    const { editor } = rows();
+    sendKeys(editor, ["w", "D"]);
+    assert.equal(editor.getText(), "alpha gamma delta epsilon");
+    assert.equal(editor.getRegister(), "beta ");
+  });
+
+  it("cc replaces only the row", () => {
+    const { editor } = rows();
+    sendKeys(editor, ["j", "c", "c", "X", "\x1b"]);
+    assert.equal(editor.getText(), "alpha beta Xepsilon");
+  });
+
+  it("o opens a line after the row", () => {
+    const { editor } = rows();
+    sendKeys(editor, ["o"]);
+    assert.equal(editor.getMode(), "insert");
+    assert.equal(editor.getText(), "alpha beta \n\ngamma delta epsilon");
+    assert.equal(editor.getCursor().line, 1);
+  });
+
+  it("V selects rows and . repeats a row delete", () => {
+    const { editor } = rows();
+    sendKeys(editor, ["V", "j", "d"]);
+    assert.equal(editor.getText(), "epsilon");
+    sendKeys(editor, ["u", "g", "g", "d", "d", "."]);
+    assert.equal(editor.getText(), "epsilon");
+    sendKeys(editor, ["u", "u"]);
+    assert.equal(editor.getText(), TEXT);
+  });
+
+  it("leaves unwrapped text alone", () => {
+    const { editor } = rows("one\ntwo\nthree");
+    sendKeys(editor, ["j", "d", "d"]);
+    assert.equal(editor.getText(), "one\nthree");
   });
 });
 

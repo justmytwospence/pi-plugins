@@ -252,6 +252,20 @@ type RepeatRecording = {
 
 type RepeatableCommand = Pick<RepeatRecording, "keys" | "countOverrideKeys">;
 
+/**
+ * A Normal/Visual key run with wrapped screen rows as real lines
+ * (`displayLineMotion`). `text` is the row-space text before the key and
+ * `synthetic` the indices of its newlines that stand for soft wraps.
+ */
+type RowSpace = {
+  text: string;
+  synthetic: number[];
+  realLines: string[];
+  realCursor: { line: number; col: number };
+  undoFloor: number;
+  changed: boolean;
+};
+
 type TransitionState = "none" | "undo" | "redo" | "restore";
 
 type ModalEditorInternals = {
@@ -355,6 +369,8 @@ export class ModalEditor extends CustomEditor {
   private unnamedRegister: string = "";
   private preferRegisterForPut = false;
   private displayLineMotion = false;
+  private hostOnChange: ((text: string) => void) | undefined;
+  private rowCtx: RowSpace | null = null;
   private clipboardMirrorPolicy: ClipboardMirrorPolicy =
     DEFAULT_CLIPBOARD_MIRROR_POLICY;
   private readonly clipboardMirror = new ClipboardMirror(
@@ -981,8 +997,12 @@ export class ModalEditor extends CustomEditor {
     const editor = this as unknown as ModalEditorInternals;
     const originalOnChange = editor.onChange;
 
+    this.hostOnChange = originalOnChange;
     editor.onChange = (text: string) => {
-      originalOnChange?.(text);
+      // Inside row space the text carries synthetic row breaks; listeners get
+      // the real text once the key finishes (see exitRowSpace).
+      if (this.rowCtx) this.rowCtx.changed = true;
+      else originalOnChange?.(text);
       this.bufferChangeVersion++;
       this.centralInvalidationCheck();
     };
@@ -1613,11 +1633,241 @@ export class ModalEditor extends CustomEditor {
 
   handleInput(data: string): void {
     if (this.disposed) return;
+    const ctx = this.shouldUseRowSpace(data) ? this.enterRowSpace() : null;
     try {
       this.handleInputCore(data);
     } finally {
+      if (ctx) this.exitRowSpace(ctx);
       this.refreshPendingDispatchRestore();
     }
+  }
+
+  private shouldUseRowSpace(data: string): boolean {
+    if (!this.displayLineMotion || this.rowCtx) return false;
+    if (this.mode === "insert" || this.pendingExCommand !== null) return false;
+    if (this.normalModePasteBuffer !== null) return false;
+    if (this.discardingBracketedPasteInNormalMode) return false;
+    if (data.includes(BRACKETED_PASTE_START)) return false;
+    const undoKey =
+      data === "u" ||
+      data === CTRL_UNDERSCORE ||
+      data === CTRL_R ||
+      matchesKey(data, "ctrl+_") ||
+      matchesKey(data, "ctrl+r");
+    if (
+      undoKey &&
+      !this.pendingOperator &&
+      !this.pendingMotion &&
+      !this.pendingTextObject &&
+      !this.pendingReplace &&
+      !this.pendingG
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  private getRowMap(): { logicalLine: number; startCol: number; length: number }[] | null {
+    const editor = this as unknown as {
+      buildVisualLineMap?: (w: number) => { logicalLine: number; startCol: number; length: number }[];
+      lastWidth?: number;
+    };
+    if (typeof editor.buildVisualLineMap !== "function") return null;
+    return editor.buildVisualLineMap(editor.lastWidth ?? 80);
+  }
+
+  /** Re-lay the buffer so every wrapped screen row is its own line. */
+  private enterRowSpace(): RowSpace | null {
+    const editor = this as unknown as ModalEditorInternals;
+    const state = editor.state;
+    if (!state || !Array.isArray(state.lines)) return null;
+    const rows = this.getRowMap();
+    if (!rows || rows.length === state.lines.length) return null;
+
+    const realLines = state.lines.slice();
+    const rowLines: string[] = [];
+    const synthetic: number[] = [];
+    let abs = 0;
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i]!;
+      const text = (realLines[row.logicalLine] ?? "").slice(
+        row.startCol,
+        row.startCol + row.length,
+      );
+      rowLines.push(text);
+      abs += text.length;
+      if (i < rows.length - 1 && rows[i + 1]!.logicalLine === row.logicalLine) {
+        synthetic.push(abs);
+      }
+      abs += 1;
+    }
+
+    const toRow = (pos: VisualPosition): VisualPosition => {
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i]!;
+        if (row.logicalLine !== pos.line) continue;
+        const offset = pos.col - row.startCol;
+        const last = rows[i + 1]?.logicalLine !== row.logicalLine;
+        if (offset >= 0 && (offset < row.length || (last && offset >= row.length))) {
+          return { line: i, col: Math.min(offset, row.length) };
+        }
+      }
+      return { line: 0, col: 0 };
+    };
+
+    const realCursor = {
+      line: state.cursorLine ?? 0,
+      col: state.cursorCol ?? 0,
+    };
+    const cursor = toRow(realCursor);
+    if (this.visualAnchor) this.visualAnchor = toRow(this.visualAnchor);
+    state.lines = rowLines;
+    state.cursorLine = cursor.line;
+    state.cursorCol = cursor.col;
+    this.invalidateWordBoundaryCache();
+
+    const ctx: RowSpace = {
+      text: rowLines.join("\n"),
+      synthetic,
+      realLines,
+      realCursor,
+      undoFloor: editor.undoStack?.stack?.length ?? 0,
+      changed: false,
+    };
+    this.rowCtx = ctx;
+    return ctx;
+  }
+
+  /**
+   * Map row-space text back to real text: drop the synthetic breaks that
+   * survived the edit. A break right next to inserted lines (o, O, linewise
+   * p) becomes a real line break, since the row it ended is now a line.
+   */
+  private unwrapRowText(ctx: RowSpace, text: string): { text: string; removed: number[] } {
+    const before = ctx.text;
+    const max = Math.min(before.length, text.length);
+    let a = 0;
+    while (a < max && before[a] === text[a]) a++;
+    let b = 0;
+    while (
+      b < max - a &&
+      before[before.length - 1 - b] === text[text.length - 1 - b]
+    ) {
+      b++;
+    }
+    const insertedLine = text.slice(a, text.length - b).includes("\n");
+    const removed: number[] = [];
+    for (const s of ctx.synthetic) {
+      if (s < a) {
+        if (!(insertedLine && s === a - 1)) removed.push(s);
+      } else if (s >= before.length - b) {
+        if (!(insertedLine && s === before.length - b)) {
+          removed.push(s - before.length + text.length);
+        }
+      }
+    }
+    if (removed.length === 0) return { text, removed };
+    let out = "";
+    let from = 0;
+    for (const r of removed) {
+      out += text.slice(from, r);
+      from = r + 1;
+    }
+    out += text.slice(from);
+    return { text: out, removed };
+  }
+
+  private unwrapRowPosition(
+    text: string,
+    removed: number[],
+    real: string,
+    pos: VisualPosition,
+  ): VisualPosition {
+    const abs = this.getAbsoluteIndexIn(text, pos);
+    const shift = removed.filter((r) => r < abs).length;
+    return this.getCursorFromAbsoluteIndex(real, abs - shift);
+  }
+
+  private getAbsoluteIndexIn(text: string, pos: VisualPosition): number {
+    const lines = text.split("\n");
+    let abs = 0;
+    for (let i = 0; i < pos.line && i < lines.length; i++) abs += lines[i]!.length + 1;
+    return abs + pos.col;
+  }
+
+  private exitRowSpace(ctx: RowSpace): void {
+    this.rowCtx = null;
+    const editor = this as unknown as ModalEditorInternals;
+    const state = editor.state;
+    if (!state || !Array.isArray(state.lines)) return;
+
+    const rowText = state.lines.join("\n");
+    const { text, removed } = this.unwrapRowText(ctx, rowText);
+    const cursor = this.unwrapRowPosition(rowText, removed, text, {
+      line: state.cursorLine ?? 0,
+      col: state.cursorCol ?? 0,
+    });
+    if (this.visualAnchor) {
+      this.visualAnchor = this.unwrapRowPosition(rowText, removed, text, this.visualAnchor);
+    }
+    state.lines = text.split("\n");
+    state.cursorLine = cursor.line;
+    state.cursorCol = cursor.col;
+
+    // Undo snapshots taken during the key hold row-space text.
+    const stack = editor.undoStack?.stack as
+      | { state?: { lines?: string[]; cursorLine?: number; cursorCol?: number } }[]
+      | undefined;
+    if (stack) {
+      for (let i = ctx.undoFloor; i < stack.length; i++) {
+        const snap = stack[i]?.state;
+        if (!snap || !Array.isArray(snap.lines)) continue;
+        const snapText = snap.lines.join("\n");
+        if (snapText === ctx.text) {
+          snap.lines = ctx.realLines.slice();
+          snap.cursorLine = ctx.realCursor.line;
+          snap.cursorCol = ctx.realCursor.col;
+          continue;
+        }
+        const un = this.unwrapRowText(ctx, snapText);
+        const pos = this.unwrapRowPosition(snapText, un.removed, un.text, {
+          line: snap.cursorLine ?? 0,
+          col: snap.cursorCol ?? 0,
+        });
+        snap.lines = un.text.split("\n");
+        snap.cursorLine = pos.line;
+        snap.cursorCol = pos.col;
+      }
+    }
+
+    this.invalidateWordBoundaryCache();
+    if (ctx.changed) this.hostOnChange?.(text);
+    editor.tui?.requestRender?.();
+  }
+
+  /** Strip soft-wrap breaks from text a row-space key puts in the register. */
+  private unwrapRegisterText(text: string): string {
+    const ctx = this.rowCtx;
+    if (!ctx || ctx.synthetic.length === 0 || !text.includes("\n")) return text;
+    const trailing = text.endsWith("\n");
+    const candidates = trailing ? [text, text.slice(0, -1)] : [text];
+    for (const body of candidates) {
+      if (body.length === 0) continue;
+      let best = -1;
+      for (let at = ctx.text.indexOf(body); at !== -1; at = ctx.text.indexOf(body, at + 1)) {
+        best = at;
+        if (ctx.synthetic.some((s) => s >= at && s < at + body.length)) break;
+      }
+      if (best === -1) continue;
+      const keepLast = trailing ? text.length - 1 : -1;
+      let out = "";
+      for (let i = 0; i < text.length; i++) {
+        const synthetic = i < body.length && i !== keepLast && ctx.synthetic.includes(best + i);
+        if (!synthetic) out += text[i];
+      }
+      return out;
+    }
+    return text;
   }
 
   private handleInputCore(data: string): void {
@@ -3731,6 +3981,7 @@ export class ModalEditor extends CustomEditor {
     text: string,
     source: RegisterWriteSource = "mutation",
   ): void {
+    if (this.rowCtx) text = this.unwrapRegisterText(text);
     this.unnamedRegister = text;
     const shouldMirror = text !== "" && this.shouldMirrorRegisterWrite(source);
     this.preferRegisterForPut = text !== "" && !shouldMirror;

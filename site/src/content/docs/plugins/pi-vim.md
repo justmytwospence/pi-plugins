@@ -96,7 +96,7 @@ Settings live under a `piVim` key in Pi's own settings files, `~/.pi/agent/setti
 ```
 
 - `clipboardMirror`: `all` (default), `yank` or `never`; which register writes are mirrored to the OS clipboard.
-- `displayLineMotion`: `true` makes `j` / `k` move by wrapped screen row like `gj` / `gk` (the Vim `noremap j gj` idiom); operators such as `dj` stay linewise. Default `false`.
+- `displayLineMotion`: `true` makes Normal and Visual mode treat each wrapped screen row as its own line: `j`/`k`, `0`/`^`/`$`, `gg`/`G`, `dd`/`yy`/`cc`/`S`/`D`/`C`/`Y`, `dj`/`yk`, `V`, `o`/`O` and linewise `p` all work on rows. Yanked rows keep no soft-wrap breaks; opening or pasting a line between two rows splits the underlying line there. Insert mode is unaffected. Default `false`.
 - `exCommand.piDispatch` turns the EX bridge to Pi commands off when `false`; `copyInputToClipboard` copies the prompt before each dispatch.
 - `modeColors`, `borderSync` and `labelSync` choose per-mode colors for the input border and the footer label.
 - `modeChange` runs a shell command when the main or embedded editor changes mode. Because it executes commands, it is read **only from the global settings file**; a project file cannot set it.
