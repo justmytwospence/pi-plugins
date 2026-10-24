@@ -23,7 +23,7 @@ export const groups = [
     { name: "pi-status-footer", label: "Status footer", description: "Context, Git and provider-aware usage in one responsive footer." },
     { name: "pi-context", label: "Context breakdown", description: "See what fills the context window, part by part, with previews." },
     { name: "pi-trends", label: "Session trends", description: "Context %, effort, tokens, cost and tool calls charted per model call." },
-    { name: "pi-pressure", label: "Machine pressure", description: "A footer row that appears only while CPU or memory is constrained." },
+    { name: "pi-pressure", label: "Machine pressure", description: "A footer row that appears only while CPU, memory or heat constrain the machine." },
   ] },
   { title: "Make it yours", eyebrow: "04 / Terminal craft", description: "Small, focused improvements to the place you spend your working day.", plugins: [
     { name: "pi-vim", label: "Vim editing", description: "Modal editing for the prompt and for text fields inside suite dialogs." },

@@ -1,25 +1,26 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "vitest";
+import { ensureHelper, parseHelperLine, startHelper, type HelperLine } from "../src/darwin.ts";
 import { mergeConfig } from "../src/index.ts";
 import { bandLevel, createMonitor, DEFAULTS, formatRate, formatStatus, spark, topBy } from "../src/pressure.ts";
-import { busyPercent, cpuTimes, createSampler, parseProcVmstat, parsePs, parsePsi, parseVmStat, processName, type Reading, type SamplerDeps } from "../src/sample.ts";
+import { busyPercent, cpuTimes, createSampler, parseProcVmstat, parsePs, parsePsi, processName, psiShare, type Reading, type SamplerDeps } from "../src/sample.ts";
 
-const VM_STAT = `Mach Virtual Memory Statistics: (page size of 16384 bytes)
-Pages free:                                   493698.
-Pageins:                                   482396237.
-Pageouts:                                    2081330.
-Swapins:                                     7202751.
-Swapouts:                                   18609735.
-`;
-const PSI = "some avg10=12.50 avg60=2.48 avg300=2.55 total=74826079805\nfull avg10=3.10 avg60=0.00 avg300=0.00 total=1184582163\n";
+const PSI = "some avg10=12.50 avg60=2.48 avg300=2.55 total=1000000\nfull avg10=3.10 avg60=0.00 avg300=0.00 total=200000\n";
 
 describe("parsers", () => {
-  test("vm_stat", () => {
-    expect(parseVmStat(VM_STAT)).toEqual({ pageSize: 16384, swapins: 7202751 });
-    expect(parseVmStat("nothing")).toBeUndefined();
+  test("PSI: avg10 and cumulative stall totals", () => {
+    expect(parsePsi(PSI)).toEqual({ someAvg10: 12.5, fullAvg10: 3.1, someTotal: 1_000_000, fullTotal: 200_000 });
+    expect(parsePsi("some avg10=0.00 avg60=0.00 avg300=0.00 total=1\n")).toEqual({ someAvg10: 0, fullAvg10: 0, someTotal: 1, fullTotal: 0 });
   });
-  test("PSI", () => {
-    expect(parsePsi(PSI)).toEqual({ some: 12.5, full: 3.1 });
-    expect(parsePsi("some avg10=0.00 avg60=0.00 avg300=0.00 total=1\n")).toEqual({ some: 0, full: 0 });
+  test("PSI share between two reads is exact; the first read uses the kernel's avg10", () => {
+    const first = parsePsi(PSI)!;
+    expect(psiShare(undefined, 0, first)).toEqual({ some: 12.5, full: 3.1 });
+    // 10 s later, 2 s more of some-stall and 0.5 s of full-stall.
+    const later = { ...first, someTotal: first.someTotal + 2_000_000, fullTotal: first.fullTotal + 500_000 };
+    expect(psiShare({ at: 0, psi: first }, 10_000, later)).toEqual({ some: 20, full: 5 });
   });
   test("/proc/vmstat", () => {
     expect(parseProcVmstat("pgpgin 5\npswpin 42\npswpout 7\n")).toBe(42);
@@ -41,47 +42,63 @@ describe("parsers", () => {
     expect(busyPercent(a, b)).toBe(90);
     expect(busyPercent(a, a)).toBeUndefined();
   });
+  test("helper lines", () => {
+    expect(parseHelperLine("memory 4")).toEqual({ memoryLevel: 4 });
+    expect(parseHelperLine("thermal 2\n")).toEqual({ thermalState: 2 });
+    expect(parseHelperLine("hello")).toBeUndefined();
+  });
 });
 
 describe("sampler", () => {
-  const deps = (over: Partial<SamplerDeps>): SamplerDeps => {
+  const deps = (over: Partial<SamplerDeps>, step = 2_000): SamplerDeps => {
     let t = 0, user = 0;
     return {
       platform: "darwin",
       cpus: () => { user += 95; return [{ times: { user, nice: 0, sys: 0, idle: 5 * (user / 95), irq: 0 } }]; },
       loadavg: () => [3, 0, 0],
-      now: () => (t += 2_000),
-      run: async (command) => (command === "sysctl" ? "2\n" : VM_STAT),
+      now: () => (t += step),
+      run: async () => "2\n",
       read: async () => "",
       ...over,
     };
   };
-  test("macOS: pressure level and swap-in rate", async () => {
-    let swapins = 1000;
-    const sampler = createSampler(deps({ run: async (command) => (command === "sysctl" ? "2\n" : `page size of 1024 bytes\nSwapins: ${(swapins += 2048)}.\n`) }), { darwinMemoryEveryMs: 0 });
+  test("each read covers the interval since the previous one, however long", async () => {
+    const sampler = createSampler(deps({}, 20 * 60_000));
     const first = await sampler.sample();
     expect(first.cpu).toBeUndefined();
-    expect(first.memory).toEqual({ source: "darwin", level: 2 });
+    expect(first.since).toBeUndefined();
     expect(first.loadPerCore).toBe(3);
     const second = await sampler.sample();
+    expect(second.since).toBe(first.at);
+    expect(second.at - second.since!).toBe(20 * 60_000);
     expect(second.cpu).toBeCloseTo(95);
-    expect(second.swapInBps).toBe(2048 * 1024 / 2);
   });
-  test("macOS: memory subprocesses run at most every darwinMemoryEveryMs; CPU every sample", async () => {
+  test("macOS: the helper's states replace sysctl; without it, one sysctl at most every 10 s", async () => {
     const calls: string[] = [];
-    const sampler = createSampler(deps({ run: async (command) => { calls.push(command); return command === "sysctl" ? "4\n" : VM_STAT; } }));
-    const readings = [];
-    for (let i = 0; i < 6; i++) readings.push(await sampler.sample()); // 2 s apart
-    expect(calls).toEqual(["sysctl", "vm_stat", "sysctl", "vm_stat"]);
-    expect(readings.every((r) => r.memory?.source === "darwin" && r.memory.level === 4)).toBe(true);
-    expect(readings.slice(1).every((r) => r.cpu !== undefined)).toBe(true);
+    const sampler = createSampler(deps({ run: async (command) => { calls.push(command); return "2\n"; } }));
+    for (let i = 0; i < 6; i++) await sampler.sample(); // 2 s apart
+    expect(calls).toEqual(["sysctl", "sysctl"]);
+    sampler.setDarwin({ memoryLevel: 4, thermalState: 2, at: 50_000 });
+    const pushed = await sampler.sample();
+    expect(pushed.memory).toEqual({ source: "darwin", level: 4, since: 50_000 });
+    expect(pushed.thermal).toEqual({ state: 2, since: 50_000 });
+    // The same level again keeps its start time.
+    sampler.setDarwin({ memoryLevel: 4, at: 60_000 });
+    expect((await sampler.sample()).memory).toMatchObject({ since: 50_000 });
+    expect(calls).toHaveLength(2);
+    sampler.helperGone();
+    for (let i = 0; i < 6; i++) await sampler.sample();
+    expect(calls.length).toBeGreaterThan(2);
   });
-  test("Linux: PSI and pswpin; failures leave fields out", async () => {
-    let pswpin = 0;
-    const sampler = createSampler(deps({ platform: "linux", read: async (file) => (file.endsWith("memory") ? PSI : `pswpin ${(pswpin += 500)}\n`) }));
-    await sampler.sample();
+  test("Linux: PSI share and swap-in rate over the interval; failures leave fields out", async () => {
+    let some = 0, pswpin = 0;
+    const sampler = createSampler(deps({
+      platform: "linux",
+      read: async (file) => (file.endsWith("memory") ? `some avg10=1.00 avg60=0 avg300=0 total=${(some += 400_000)}\nfull avg10=0.00 avg60=0 avg300=0 total=0\n` : `pswpin ${(pswpin += 500)}\n`),
+    }));
+    expect((await sampler.sample()).memory).toEqual({ source: "psi", some: 1, full: 0 });
     const reading = await sampler.sample();
-    expect(reading.memory).toEqual({ source: "psi", some: 12.5, full: 3.1 });
+    expect(reading.memory).toEqual({ source: "psi", some: 20, full: 0 });
     expect(reading.swapInBps).toBe(500 * 4096 / 2);
     const broken = createSampler(deps({ platform: "linux", read: async () => { throw new Error("ENOENT"); } }));
     expect((await broken.sample()).memory).toBeUndefined();
@@ -108,42 +125,67 @@ describe("levels", () => {
 });
 
 describe("monitor", () => {
-  const reading = (at: number, over: Partial<Reading> = {}): Reading => ({ at, cpu: 20, loadPerCore: 0.5, memory: { source: "darwin", level: 1 }, ...over });
-  test("shows after sustained pressure, lingers, then hides", () => {
+  const reading = (at: number, over: Partial<Reading> = {}): Reading => ({ at, since: at - 2_000, cpu: 20, loadPerCore: 0.5, ...over });
+  test("a busy interval at least showAfterMs long shows at once; a short one waits for a check", () => {
     const m = createMonitor(DEFAULTS);
-    expect(m.step(reading(0, { cpu: 97 })).visible).toBe(false);
-    expect(m.step(reading(8_000, { cpu: 97 })).visible).toBe(false);
-    const shown = m.step(reading(10_000, { cpu: 97 }));
+    expect(m.step(reading(100_000, { since: 80_000, cpu: 97 })).visible).toBe(true);
+    const n = createMonitor(DEFAULTS);
+    n.step(reading(0, { since: undefined, cpu: undefined }));
+    expect(n.nextCheck()).toBeUndefined(); // steady state: nothing armed
+    expect(n.step(reading(4_000, { cpu: 97 })).visible).toBe(false);
+    expect(n.nextCheck()).toBe(2_000 + DEFAULTS.showAfterMs);
+    const shown = n.step(reading(12_000, { since: 4_000, cpu: 97 }));
     expect(shown.visible).toBe(true);
     expect(shown.levels.cpu).toBe("hot");
     expect(shown.episode).toEqual(["cpu"]);
-    // Memory joins the episode; easing keeps the row up for hideAfterMs.
-    m.step(reading(12_000, { cpu: 90, memory: { source: "darwin", level: 2 } }));
-    expect(m.step(reading(14_000)).visible).toBe(true);
-    const lingering = m.step(reading(40_000));
-    expect(lingering.visible).toBe(true);
-    expect(lingering.episode).toEqual(["cpu", "mem"]);
-    const hidden = m.step(reading(44_000));
+  });
+  test("lingers once it eases, re-checking while idle, then hides", () => {
+    const m = createMonitor({ ...DEFAULTS, showAfterMs: 0 });
+    m.step(reading(0, { cpu: 97 }));
+    expect(m.nextCheck()).toBe(DEFAULTS.refreshMs);
+    m.step(reading(5_000, { memory: { source: "darwin", level: 2, since: 4_000 } }));
+    const eased = m.step(reading(10_000));
+    expect(eased.visible).toBe(true);
+    expect(m.nextCheck()).toBe(10_000 + DEFAULTS.refreshMs);
+    expect(m.step(reading(39_000)).visible).toBe(true);
+    expect(m.nextCheck()).toBe(40_000);
+    const hidden = m.step(reading(40_000));
     expect(hidden.visible).toBe(false);
     expect(hidden.episode).toEqual([]);
+    expect(m.nextCheck()).toBeUndefined();
   });
-  test("a brief spike never shows", () => {
+  test("a state that just changed is not backdated over a long interval", () => {
     const m = createMonitor(DEFAULTS);
-    m.step(reading(0, { cpu: 99 }));
-    m.step(reading(2_000));
-    expect(m.step(reading(20_000, { cpu: 99 })).visible).toBe(false);
+    expect(m.step(reading(600_000, { since: 0, memory: { source: "darwin", level: 4, since: 599_000 } })).visible).toBe(false);
+    expect(m.nextCheck()).toBe(599_000 + DEFAULTS.showAfterMs);
+    expect(m.step(reading(609_500, { memory: { source: "darwin", level: 4, since: 599_000 } })).visible).toBe(true);
   });
-  test("pressure returning while lingering keeps it up", () => {
+  test("thermal throttling is a signal", () => {
     const m = createMonitor({ ...DEFAULTS, showAfterMs: 0 });
-    expect(m.step(reading(0, { cpu: 99 })).visible).toBe(true);
-    m.step(reading(20_000));
-    m.step(reading(25_000, { cpu: 99 }));
-    expect(m.step(reading(50_000)).visible).toBe(true);
+    const view = m.step(reading(0, { thermal: { state: 2, since: -1 } }));
+    expect(view.levels.heat).toBe("warn");
+    expect(view.episode).toEqual(["heat"]);
+    expect(createMonitor(DEFAULTS).step(reading(0, { thermal: { state: 1, since: 0 } })).levels.heat).toBe("ok");
+  });
+  test("history: an interval's mean spreads over the minutes it covers, time-weighted", () => {
+    const m = createMonitor({ ...DEFAULTS, historyMinutes: 4 });
+    const min = 60_000;
+    m.step({ at: 0, loadPerCore: 0 });
+    // One read after 2.5 idle-ish minutes at 40%, then 30 s at 100%.
+    m.step({ at: 2.5 * min, since: 0, cpu: 40, loadPerCore: 0 });
+    expect(m.view().history).toEqual([40, 40, 40]);
+    m.step({ at: 3 * min, since: 2.5 * min, cpu: 100, loadPerCore: 0 });
+    // The current minute (3) has no time in it yet.
+    expect(m.view().history).toEqual([40, 40, 70, undefined]);
+  });
+  test("memory-only pressure names the biggest process", () => {
+    const m = createMonitor({ ...DEFAULTS, showAfterMs: 0 });
+    expect(topBy(m.step({ at: 0, cpu: 10, loadPerCore: 0.2, memory: { source: "psi", some: 50, full: 0 } }))).toBe("memory");
   });
 });
 
 describe("status", () => {
-  test("spark: two samples per braille cell, filled from the bottom", () => {
+  test("spark: two values per braille cell, filled from the bottom", () => {
     expect(spark([25, 25, 50, 50, 75, 75, 100, 100])).toBe("⣀⣤⣶⣿");
     expect(spark([0, 100, 100])).toBe("⠀⣿");
     expect(spark([10, 100])).toBe("⣸");
@@ -154,46 +196,53 @@ describe("status", () => {
     expect(formatRate(1.5 * 1024)).toBe("1.5KB/s");
     expect(formatRate(12)).toBe("12B/s");
   });
-  test("format: episode signals, level words, culprit; never ends in a prompt character", () => {
+  test("format: episode signals, level words, culprit, then the trace; never ends in a prompt character", () => {
     const m = createMonitor({ ...DEFAULTS, showAfterMs: 0 });
-    // One sample per minute: each minute is a braille dot column.
-    for (const [i, cpu] of [60, 80, 90, 97].entries()) m.step({ at: i * 60_000, cpu, loadPerCore: 1.6, memory: { source: "darwin", level: 2 }, swapInBps: 40 * 1024 * 1024 });
+    // One read per minute: each minute is a braille dot column.
+    for (const [i, cpu] of [60, 80, 90, 97].entries()) m.step({ at: (i + 1) * 60_000, since: i * 60_000, cpu, loadPerCore: 1.6, memory: { source: "darwin", level: 2, since: 0 }, thermal: { state: 2, since: 0 } });
     const view = m.view();
-    const text = formatStatus(view, "vitest")!;
-    expect(text).toBe("pressure: cpu 97 hot · load 1.6 warn · mem warn · swap-in 40MB/s warn · top vitest · ⣴⣿");
+    expect(formatStatus(view, "vitest")).toBe("pressure: cpu 97 hot · load 1.6 warn · mem warn · thermal warn · top vitest · ⢠⣾⡇");
     expect(formatStatus(view, undefined)).not.toMatch(/[%$#>]$/);
     expect(topBy(view)).toBe("cpu");
     expect(formatStatus({ ...view, visible: false }, "x")).toBeUndefined();
-  });
-  test("history: a mean per minute over the window, gaps blank, current minute last", () => {
-    const m = createMonitor({ ...DEFAULTS, historyMinutes: 4 });
-    const at = (minute: number, second: number) => minute * 60_000 + second * 1000;
-    m.step({ at: at(0, 0), cpu: 100, loadPerCore: 0 });
-    m.step({ at: at(1, 0), cpu: 20, loadPerCore: 0 });
-    m.step({ at: at(1, 30), cpu: 40, loadPerCore: 0 });
-    expect(m.view().history).toEqual([100, 30]);
-    m.step({ at: at(3, 0), cpu: 50, loadPerCore: 0 });
-    expect(m.view().history).toEqual([100, 30, undefined, 50]);
-    // Minute 0 falls out of a four-minute window; a sample without CPU still advances it.
-    m.step({ at: at(4, 0), loadPerCore: 0 });
-    expect(m.view().history).toEqual([30, undefined, 50, undefined]);
-    expect(spark(m.view().history)).toBe("⡀⡄");
-  });
-  test("memory-only pressure names the biggest process", () => {
-    const m = createMonitor({ ...DEFAULTS, showAfterMs: 0 });
-    expect(topBy(m.step({ at: 0, cpu: 10, loadPerCore: 0.2, memory: { source: "psi", some: 50, full: 0 } }))).toBe("memory");
   });
 });
 
 describe("config", () => {
   test("merges valid values over defaults, ignores the rest", () => {
-    const config = mergeConfig({ cpu: { warn: 70 }, showAfterMs: 0, historyMinutes: 999 }, { cpu: { hot: -1 } as never, intervalMs: 10, enabled: false });
+    const config = mergeConfig({ cpu: { warn: 70 }, showAfterMs: 0, historyMinutes: 999 }, { cpu: { hot: -1 } as never, minGapMs: 10, enabled: false });
     expect(config.historyMinutes).toBe(120);
     expect(DEFAULTS.historyMinutes).toBe(60);
     expect(config.cpu).toEqual({ warn: 70, hot: 95 });
     expect(config.showAfterMs).toBe(0);
-    expect(config.intervalMs).toBe(500);
+    expect(config.minGapMs).toBe(250);
     expect(config.enabled).toBe(false);
     expect(DEFAULTS.cpu.warn).toBe(85);
   });
+});
+
+const hasSwift = (() => {
+  if (process.platform !== "darwin") return false;
+  try { execFileSync("xcrun", ["--find", "swiftc"], { stdio: "ignore" }); return true; } catch { return false; }
+})();
+
+describe.skipIf(!hasSwift)("macOS helper", () => {
+  test("compiles, reports both states at start, and exits when its stdin closes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-pressure-test-"));
+    try {
+      const binary = await ensureHelper(dir);
+      expect(binary).toBeDefined();
+      expect(await ensureHelper(dir)).toBe(binary); // cached
+      const lines: HelperLine[] = [];
+      let exited = false;
+      const helper = startHelper(binary!, (line) => lines.push(line), () => { exited = true; });
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      expect(lines.some((l) => "memoryLevel" in l && [1, 2, 4].includes(l.memoryLevel))).toBe(true);
+      expect(lines.some((l) => "thermalState" in l && l.thermalState >= 0 && l.thermalState <= 3)).toBe(true);
+      expect(exited).toBe(false);
+      helper.stop();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
 });

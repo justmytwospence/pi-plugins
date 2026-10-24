@@ -544,21 +544,22 @@ test("pi-bg's tasks get their own row under the context row", () => {
 });
 
 test("pi-pressure's signals get their own row, the CPU trace last in the width left", () => {
-  const text = "pressure: cpu 97 hot \u00b7 load 1.6 warn \u00b7 mem warn \u00b7 swap-in 40MB/s ok \u00b7 top vitest \u00b7 \u28f4\u28ff";
+  const text = "pressure: cpu 97 hot \u00b7 load 1.6 warn \u00b7 mem warn \u00b7 thermal hot \u00b7 swap-in 40MB/s ok \u00b7 top vitest \u00b7 \u28f4\u28ff";
   const absorbed = mod.absorbStatuses(new Map([["pressure", `\x1b[2m${text}\x1b[0m`]]), { claudeRow: true });
   assert.deepEqual(absorbed.pressure, [
     { kind: "signal", name: "cpu", value: "97", level: "hot" },
     { kind: "signal", name: "load", value: "1.6", level: "warn" },
     { kind: "signal", name: "mem", level: "warn" },
+    { kind: "signal", name: "thermal", level: "hot" },
     { kind: "signal", name: "swap-in", value: "40MB/s", level: "ok" },
     { kind: "top", name: "vitest" },
     { kind: "trace", trace: "\u28f4\u28ff" },
   ]);
   assert.deepEqual(absorbed.rest, []);
   const s = { ...fixture(), statuses: absorbed.rest, pressure: absorbed.pressure };
-  assert.equal(plain(mod.renderFooter(s, 160, theme)[3]), " \uf2db Pressure cpu 97 \u00b7 load 1.6 \u00b7 mem warn \u00b7 swap-in 40MB/s \u00b7 top vitest \u00b7 \u28f4\u28ff");
+  assert.equal(plain(mod.renderFooter(s, 160, theme)[3]), " \uf2db Pressure cpu 97 \u00b7 load 1.6 \u00b7 mem warn \u00b7 thermal hot \u00b7 swap-in 40MB/s \u00b7 top vitest \u00b7 \u28f4\u28ff");
   // Narrow: the culprit and eased signals go; hot and warn signals stay, the trace takes what is left.
-  assert.equal(plain(mod.renderFooter(s, 46, theme)[3]), "\uf2db Pressure cpu 97 \u00b7 load 1.6 \u00b7 mem warn \u00b7 \u28f4\u28ff");
+  assert.equal(plain(mod.renderFooter(s, 46, theme)[3]), "\uf2db Pressure cpu 97 \u00b7 mem warn \u00b7 thermal hot \u00b7 \u28ff");
   for (const width of [46, 120]) {
     for (const row of mod.renderFooter(s, width, theme).map(plain)) assert.doesNotMatch(row, /[%$#>]\s*$/);
   }

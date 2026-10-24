@@ -1,17 +1,17 @@
 ---
 title: pi-pressure
-description: A footer row that appears only while the machine is under CPU or memory pressure, with a braille CPU trace and the busiest process.
+description: A footer row that appears only while the machine is under CPU, memory or thermal pressure, with an hour-long braille CPU trace. No polling.
 plugin: pi-pressure
 ---
 
 ## Quick reference
 
-- **Use it for:** Notice when the machine, not the model, is the bottleneck: a build pinning every core, memory pressure, swapping. Nothing is shown otherwise.
+- **Use it for:** Notice when the machine, not the model, is the bottleneck: a build pinning every core, memory pressure, swapping, thermal throttling. Nothing is shown otherwise.
 - **Enable:** Select `packages/pi-pressure/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
 - **Controls:** `/pressure` reports readings, thresholds and top processes; `/pressure on|off` toggles watching.
-- **Settings:** Optional `~/.pi/agent/pi-pressure.json` (project `.pi/pi-pressure.json` overrides): `enabled`, `intervalMs` (2000), `showAfterMs` (10000), `hideAfterMs` (30000), `historyMinutes` (60, up to 120), and `warn`/`hot` bands for `cpu`, `loadPerCore`, `memorySome`, `memoryFull` and `swapInMBps`.
-- **Requirements, cost & privacy:** No dependencies or inference calls. macOS and Linux get memory signals; other platforms get CPU only. Nothing leaves the machine or enters model context.
-- **Integrations & limits:** With [pi-status-footer](/plugins/pi-status-footer/) it gets its own footer row; otherwise it shows in Pi's status row. Hidden while a dialog shrinks the footer to one row.
+- **Settings:** Optional `~/.pi/agent/pi-pressure.json` (project `.pi/pi-pressure.json` overrides): `enabled`, `minGapMs` (2000), `showAfterMs` (10000), `hideAfterMs` (30000), `refreshMs` (10000), `historyMinutes` (60, up to 120), and `warn`/`hot` bands for `cpu`, `loadPerCore`, `memorySome`, `memoryFull` and `swapInMBps`.
+- **Requirements, cost & privacy:** No dependencies or inference calls, and no polling. On macOS, memory and thermal signals use a small Swift helper compiled once with the Xcode command line tools (sysctl fallback without them). Nothing leaves the machine or enters model context.
+- **Integrations & limits:** With [pi-status-footer](/plugins/pi-status-footer/) it gets its own footer row; otherwise it shows in Pi's status row. Hidden while a dialog shrinks the footer to one row. A CPU hog that starts while Pi is idle shows at your next interaction.
 
 ## Purpose
 
@@ -20,27 +20,32 @@ An always-on resource meter is noise most of the time. pi-pressure stays out of 
 Example row with pi-status-footer (illustration, not a screenshot):
 
 ```
- Pressure cpu 97 · load 1.6 · mem warn · swap-in 40MB/s · top vitest · ⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣠⣤⣤⣤⣴⣶⣾⣾⣿⣿⣿
+ Pressure cpu 97 · load 1.6 · mem warn · thermal warn · top vitest · ⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣠⣤⣤⣤⣴⣶⣾⣾⣿⣿⣿
 ```
 
-Values take the level's color: muted once eased, warning, then error. The braille trace covers the last hour of CPU: each dot column is one minute's mean, two minutes per character (30 characters for the hour), with the current minute last. It sits at the end of the row and takes whatever width is left, keeping the newest minutes, so it starts at one character and grows. Sampling runs from Pi's start, not just while the row shows, so the trace shows how the load built up. When the terminal is narrow, the trace shrinks first (oldest minutes go), then the busiest process and eased signals; hot and warn signals stay. Without the footer, the same text appears in Pi's status row with level words: `pressure: cpu 97 hot · mem warn · top vitest · ⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣠⣤⣤⣤⣴⣶⣾⣾⣿⣿⣿`.
+Values take the level's color: muted once eased, warning, then error. The braille trace covers the last hour of CPU: each dot column is one minute's time-weighted mean, two minutes per character, with the current minute last. It sits at the end of the row and takes whatever width is left, keeping the newest minutes, so it starts at one character and grows. When the terminal is narrow, the trace shrinks first, then the busiest process and eased signals go; hot and warn signals stay. Without the footer, the same text appears in Pi's status row with level words: `pressure: cpu 97 hot · mem warn · top vitest · ⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣠⣤⣤⣤⣴⣶⣾⣾⣿⣿⣿`.
+
+## Without polling
+
+- **Counters, read on Pi activity.** CPU time per core, Linux PSI stall time and swap-ins are cumulative kernel counters, so two reads any distance apart give the exact average between them. pi-pressure reads them when Pi does something (input, turns, tool calls, streamed output; activity within 2 seconds shares one read) and spreads each interval over the minutes it covers. An interval that was busy for at least 10 seconds shows the row at once.
+- **States, pushed by the kernel (macOS).** Memory pressure and thermal state are not counters. A Swift helper of a few dozen lines blocks until the kernel wakes it (a memory-pressure dispatch source and ProcessInfo's thermal-state notification) and prints one line per change. It is compiled once per version into `~/.cache/pi-pressure/`, uses no CPU while nothing changes, and exits when Pi closes its stdin.
+- **One-shot timers, only during an episode:** to confirm pressure has lasted 10 seconds, to keep the row current every 10 seconds while it shows and Pi is idle, and to hide it 30 seconds after it eases. In the steady state nothing runs.
+
+No OS sends an event for CPU load, and Linux pressure triggers need root on older kernels (5.10 here), so a CPU hog that starts while Pi sits idle shows at your next interaction. macOS memory and thermal changes show at once.
 
 ## Signals
 
 | Signal | Source | Warn | Hot |
 | --- | --- | --- | --- |
-| CPU | Busy share of all cores, from `os.cpus()` deltas | 85 | 95 |
-| Load | One-minute load average per core | 1.5 | 2.5 |
-| Memory (macOS) | `kern.memorystatus_vm_pressure_level` | 2 (warn) | 4 (critical) |
-| Memory (Linux) | `/proc/pressure/memory` avg10, `some` / `full` | 10 / 2 | 40 / 5 |
-| Swap-in | `vm_stat` swap-ins or `/proc/vmstat` `pswpin`, MB/s | 10 | 50 |
+| CPU | Busy share of all cores over the interval, from `os.cpus()` counters | 85 | 95 |
+| Load | The kernel's one-minute load average per core | 1.5 | 2.5 |
+| Memory (macOS) | Memory pressure level, pushed by the helper | 2 (warn) | 4 (critical) |
+| Memory (Linux) | `/proc/pressure/memory` stall share over the interval, `some` / `full` | 10 / 2 | 40 / 5 |
+| Swap-in (Linux) | `/proc/vmstat` `pswpin`, MB/s | 10 | 50 |
+| Thermal (macOS) | Thermal state, pushed by the helper | serious (throttling) | critical |
 
 A level rises at its threshold and falls only once the value is a margin below it (5 points for CPU), so a value hovering on a threshold does not toggle the row. Free memory is deliberately not a signal: both kernels use spare memory as cache, so pressure and swap-ins are the honest measures.
 
 The busiest process comes from `ps`, which runs only while the row shows (at most every 10 seconds). It is ranked by CPU, or by resident memory when only memory is under pressure. Pi's own process is labeled `pi`.
-
-## Cost
-
-Sampling runs every 2 seconds from session start, only in sessions with a UI: no OS offers Node a CPU-pressure notification, and the trace needs the minutes before the row shows. CPU and load are in-process reads. Memory on macOS needs `sysctl` and `vm_stat`, run at most every 10 seconds; on Linux it reads two `/proc` files.
 
 [GitHub source](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-pressure)

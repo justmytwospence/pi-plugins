@@ -119,17 +119,17 @@ export function parseBgStatus(text: string): BgItem[] | undefined {
 
 /** One item of pi-pressure's status: a signal with its level, the busiest process, or the CPU trace (last). */
 export type PressureItem =
-  | { kind: "signal"; name: "cpu" | "load" | "mem" | "swap-in"; value?: string; level: "ok" | "warn" | "hot" }
+  | { kind: "signal"; name: "cpu" | "load" | "mem" | "thermal" | "swap-in"; value?: string; level: "ok" | "warn" | "hot" }
   | { kind: "top"; name: string }
   | { kind: "trace"; trace: string };
 
-/** pi-pressure's status, `pressure: cpu 97 hot · mem warn · swap-in 40MB/s warn · top vitest · ⣀⣤⣿`, or undefined when any item is unfamiliar. */
+/** pi-pressure's status, `pressure: cpu 97 hot · mem warn · thermal warn · swap-in 40MB/s warn · top vitest · ⣀⣤⣿`, or undefined when any item is unfamiliar. */
 export function parsePressureStatus(text: string): PressureItem[] | undefined {
   const match = /^pressure: (.+)$/.exec(text);
   if (!match) return undefined;
   const items: PressureItem[] = [];
   for (const part of match[1].split(" \u00b7 ")) {
-    const signal = /^(cpu|load|mem|swap-in)(?: (\S+))? (ok|warn|hot)$/.exec(part);
+    const signal = /^(cpu|load|mem|thermal|swap-in)(?: (\S+))? (ok|warn|hot)$/.exec(part);
     const top = /^top (.+)$/.exec(part);
     if (signal) {
       const item: PressureItem = { kind: "signal", name: signal[1] as "cpu", level: signal[3] as "ok" };

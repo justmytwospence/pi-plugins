@@ -1,7 +1,10 @@
-// Reads the machine's CPU and memory pressure without dependencies: os.cpus()
-// deltas and load for CPU; on macOS the kernel's memory pressure level and the
-// swap-in count from vm_stat; on Linux pressure stall information (PSI) and
-// /proc/vmstat. Parsers are pure so tests can feed them captured output.
+// Reads the machine's CPU and memory pressure on demand, without a timer.
+// Every rate comes from a cumulative kernel counter (CPU time from os.cpus(),
+// Linux PSI stall totals, swap-ins), so two reads any distance apart give the
+// exact average between them: reading only when Pi does something loses
+// nothing but resolution. macOS memory pressure and thermal state are states,
+// not counters; the kernel-woken helper (darwin.ts) pushes them in. Parsers are
+// pure so tests can feed them captured output.
 
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
@@ -12,19 +15,25 @@ export interface CpuTimes { idle: number; total: number }
 
 /** Memory pressure as the platform reports it. */
 export type MemoryReading =
-  /** macOS kern.memorystatus_vm_pressure_level: 1 normal, 2 warn, 4 critical. */
-  | { source: "darwin"; level: number }
-  /** Linux PSI avg10, percent of time some/all tasks stalled on memory. */
+  /** macOS kern.memorystatus_vm_pressure_level: 1 normal, 2 warn, 4 critical; `since` is when it took this level. */
+  | { source: "darwin"; level: number; since: number }
+  /** Linux PSI, percent of time some/all tasks stalled on memory over the reading's interval. */
   | { source: "psi"; some: number; full: number };
+
+/** macOS ProcessInfo.thermalState: 0 nominal, 1 fair, 2 serious (throttling), 3 critical; `since` is when it took this state. */
+export interface ThermalReading { state: number; since: number }
 
 export interface Reading {
   at: number;
-  /** Busy share of all cores since the previous sample, 0-100; absent on the first sample. */
+  /** Start of the interval the averages cover: the previous read. Absent on the first read. */
+  since?: number;
+  /** Busy share of all cores over the interval, 0-100. */
   cpu?: number;
-  /** One-minute load average per core. */
+  /** One-minute load average per core (the kernel's own moving average). */
   loadPerCore: number;
   memory?: MemoryReading;
-  /** Bytes swapped in per second since the previous sample. */
+  thermal?: ThermalReading;
+  /** Bytes swapped in per second over the interval (Linux). */
   swapInBps?: number;
 }
 
@@ -45,19 +54,22 @@ export function busyPercent(prev: CpuTimes, next: CpuTimes): number | undefined 
   return Math.max(0, Math.min(100, (1 - (next.idle - prev.idle) / total) * 100));
 }
 
-/** `vm_stat`'s page size and cumulative swap-ins. */
-export function parseVmStat(text: string): { pageSize: number; swapins: number } | undefined {
-  const pageSize = /page size of (\d+) bytes/.exec(text);
-  const swapins = /^Swapins:\s+(\d+)\.?$/m.exec(text);
-  return pageSize && swapins ? { pageSize: +pageSize[1], swapins: +swapins[1] } : undefined;
+export interface Psi { someAvg10: number; fullAvg10: number; someTotal: number; fullTotal: number }
+
+/** A /proc/pressure file: avg10 and the cumulative stall time (microseconds) of its `some` and `full` lines. */
+export function parsePsi(text: string): Psi | undefined {
+  const some = /^some avg10=([\d.]+) .*total=(\d+)/m.exec(text);
+  if (!some) return undefined;
+  const full = /^full avg10=([\d.]+) .*total=(\d+)/m.exec(text);
+  return { someAvg10: +some[1], fullAvg10: full ? +full[1] : 0, someTotal: +some[2], fullTotal: full ? +full[2] : 0 };
 }
 
-/** avg10 of the `some` and `full` lines of a /proc/pressure file. */
-export function parsePsi(text: string): { some: number; full: number } | undefined {
-  const some = /^some avg10=([\d.]+)/m.exec(text);
-  if (!some) return undefined;
-  const full = /^full avg10=([\d.]+)/m.exec(text);
-  return { some: +some[1], full: full ? +full[1] : 0 };
+/** Stall share between two PSI reads, percent of wall time; the kernel's avg10 on the first read. */
+export function psiShare(prev: { at: number; psi: Psi } | undefined, at: number, psi: Psi): { some: number; full: number } {
+  const elapsedUs = prev ? (at - prev.at) * 1000 : 0;
+  if (!prev || elapsedUs <= 0 || psi.someTotal < prev.psi.someTotal) return { some: psi.someAvg10, full: psi.fullAvg10 };
+  const share = (now: number, before: number) => Math.max(0, Math.min(100, ((now - before) / elapsedUs) * 100));
+  return { some: share(psi.someTotal, prev.psi.someTotal), full: share(psi.fullTotal, prev.psi.fullTotal) };
 }
 
 /** Cumulative pages swapped in, from /proc/vmstat. */
@@ -95,9 +107,9 @@ export interface SamplerDeps {
   read: (file: string) => Promise<string>;
 }
 
-const run = (command: string, args: string[]): Promise<string> =>
+export const run = (command: string, args: string[], timeout = 1_500): Promise<string> =>
   new Promise((resolve, reject) => {
-    execFile(command, args, { timeout: 1_500, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } }, (error, stdout) => {
+    execFile(command, args, { timeout, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } }, (error, stdout) => {
       if (error) reject(error);
       else resolve(stdout);
     });
@@ -115,56 +127,63 @@ export const defaultDeps: SamplerDeps = {
 const LINUX_PAGE = 4096;
 
 /**
- * Samples on demand, keeping the previous counters to turn them into rates.
- * CPU and load are in-process reads, every sample. macOS memory needs two
- * subprocesses (`sysctl`, `vm_stat`), so it is read at most every
- * `darwinMemoryEveryMs` and the last reading is reused in between.
+ * Reads on demand, keeping the previous counters to turn them into averages.
+ * On macOS, memory and thermal come from the helper through `setDarwin`. Until
+ * it reports (or when it cannot run), memory falls back to one `sysctl` per
+ * read, at most every `darwinFallbackEveryMs`.
  */
-export function createSampler(deps: SamplerDeps = defaultDeps, { darwinMemoryEveryMs = 10_000 } = {}) {
-  let prevCpu: CpuTimes | undefined;
-  let darwinMemory: { at: number; memory?: MemoryReading; swapInBps?: number } | undefined;
-  let prevSwap: { at: number; bytes: number } | undefined;
-  const swapRate = (at: number, bytes: number | undefined): number | undefined => {
-    if (bytes === undefined) return undefined;
-    const prev = prevSwap;
-    prevSwap = { at, bytes };
-    if (!prev || at <= prev.at || bytes < prev.bytes) return undefined;
-    return (bytes - prev.bytes) / ((at - prev.at) / 1000);
-  };
+export function createSampler(deps: SamplerDeps = defaultDeps, { darwinFallbackEveryMs = 10_000 } = {}) {
+  let prev: { at: number; cpu: CpuTimes; psi?: Psi; pswpin?: number } | undefined;
+  let darwin: { memory?: MemoryReading; thermal?: ThermalReading; live: boolean } = { live: false };
+  let fallbackAt: number | undefined;
   const quiet = async <T>(work: () => Promise<T>): Promise<T | undefined> => {
     try { return await work(); } catch { return undefined; }
   };
+  const darwinLevel = (level: number, at: number): MemoryReading =>
+    darwin.memory?.source === "darwin" && darwin.memory.level === level ? darwin.memory : { source: "darwin", level, since: at };
 
   return {
+    /** The helper's latest states; `live` stops the sysctl fallback. */
+    setDarwin(update: { memoryLevel?: number; thermalState?: number; at: number }) {
+      darwin.live = true;
+      if (update.memoryLevel !== undefined) darwin.memory = darwinLevel(update.memoryLevel, update.at);
+      if (update.thermalState !== undefined && darwin.thermal?.state !== update.thermalState) darwin.thermal = { state: update.thermalState, since: update.at };
+    },
+    /** The helper stopped: fall back to sysctl reads. */
+    helperGone() { darwin = { ...darwin, live: false }; },
     async sample(): Promise<Reading> {
       const at = deps.now();
       const cpus = deps.cpus();
       const times = cpuTimes(cpus);
-      const cpu = prevCpu ? busyPercent(prevCpu, times) : undefined;
-      prevCpu = times;
-      const loadPerCore = (deps.loadavg()[0] ?? 0) / Math.max(1, cpus.length);
-      const reading: Reading = { at, cpu, loadPerCore };
+      const reading: Reading = { at, loadPerCore: (deps.loadavg()[0] ?? 0) / Math.max(1, cpus.length) };
+      if (prev) {
+        reading.since = prev.at;
+        reading.cpu = busyPercent(prev.cpu, times);
+      }
+      const next: NonNullable<typeof prev> = { at, cpu: times };
       if (deps.platform === "darwin") {
-        if (darwinMemory && at - darwinMemory.at < darwinMemoryEveryMs) {
-          if (darwinMemory.memory) reading.memory = darwinMemory.memory;
-          if (darwinMemory.swapInBps !== undefined) reading.swapInBps = darwinMemory.swapInBps;
-          return reading;
+        if (!darwin.live && (fallbackAt === undefined || at - fallbackAt >= darwinFallbackEveryMs)) {
+          fallbackAt = at;
+          const level = await quiet(async () => Number.parseInt((await deps.run("sysctl", ["-n", "kern.memorystatus_vm_pressure_level"])).trim(), 10));
+          if (level !== undefined && Number.isFinite(level)) darwin.memory = darwinLevel(level, at);
         }
-        const [level, vm] = await Promise.all([
-          quiet(async () => Number.parseInt((await deps.run("sysctl", ["-n", "kern.memorystatus_vm_pressure_level"])).trim(), 10)),
-          quiet(async () => parseVmStat(await deps.run("vm_stat", []))),
-        ]);
-        if (level !== undefined && Number.isFinite(level)) reading.memory = { source: "darwin", level };
-        reading.swapInBps = swapRate(at, vm ? vm.swapins * vm.pageSize : undefined);
-        darwinMemory = { at, memory: reading.memory, swapInBps: reading.swapInBps };
+        if (darwin.memory) reading.memory = darwin.memory;
+        if (darwin.thermal) reading.thermal = darwin.thermal;
       } else if (deps.platform === "linux") {
-        const [psi, vmstat] = await Promise.all([
+        const [psi, pswpin] = await Promise.all([
           quiet(async () => parsePsi(await deps.read("/proc/pressure/memory"))),
           quiet(async () => parseProcVmstat(await deps.read("/proc/vmstat"))),
         ]);
-        if (psi) reading.memory = { source: "psi", ...psi };
-        reading.swapInBps = swapRate(at, vmstat === undefined ? undefined : vmstat * LINUX_PAGE);
+        if (psi) {
+          reading.memory = { source: "psi", ...psiShare(prev?.psi ? { at: prev.at, psi: prev.psi } : undefined, at, psi) };
+          next.psi = psi;
+        }
+        if (pswpin !== undefined) {
+          next.pswpin = pswpin;
+          if (prev?.pswpin !== undefined && pswpin >= prev.pswpin && at > prev.at) reading.swapInBps = ((pswpin - prev.pswpin) * LINUX_PAGE) / ((at - prev.at) / 1000);
+        }
       }
+      prev = next;
       return reading;
     },
     /** The busiest processes, by CPU or by resident memory. */

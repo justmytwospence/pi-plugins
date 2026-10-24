@@ -40,7 +40,7 @@ All 31 references include activation, controls, defaults, requirements, costs an
 | [pi-status-footer](https://pi-plugins.vercel.app/plugins/pi-status-footer/) | Read Git, context and provider usage at a glance. |
 | [pi-context](https://pi-plugins.vercel.app/plugins/pi-context/) | Inspect what fills the context window, with previews. |
 | [pi-trends](https://pi-plugins.vercel.app/plugins/pi-trends/) | Chart context %, effort, tokens and cost per model call. |
-| [pi-pressure](https://pi-plugins.vercel.app/plugins/pi-pressure/) | See CPU and memory pressure, only while the machine is constrained. |
+| [pi-pressure](https://pi-plugins.vercel.app/plugins/pi-pressure/) | See CPU, memory and thermal pressure, only while the machine is constrained. |
 
 ### Terminal & editing
 
