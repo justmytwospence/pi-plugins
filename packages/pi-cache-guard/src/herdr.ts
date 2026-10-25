@@ -2,6 +2,9 @@
 // so herdr's agents sidebar can show which sessions are doomed to a cache miss. pi-herdr does the
 // herdr work (and only in an interactive pi inside herdr); without it nothing listens. The opencode
 // and Codex ports keep their own socket reporter (core.ts stays shared verbatim).
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+
 import { HERDR_TOKEN } from "./core.ts";
 
 export interface EventBus {
@@ -60,11 +63,43 @@ export async function whileBlocked<T>(events: EventBus | undefined, label: strin
   }
 }
 
-/** The terminal bell (BEL), so a prompt held by the question is noticed after switching away. */
-export function ringBell(): void {
-  try {
-    if (process.stdout.isTTY) process.stdout.write("\x07");
-  } catch {
-    // No terminal to ring.
+/**
+ * Say that a prompt did not go out: the question holds it. On macOS `sound` plays through `afplay`
+ * (a system sound name or a file path), whatever space or app has focus. Inside herdr (through
+ * pi-herdr) a notification names the session, with herdr's request sound where no macOS sound
+ * played. Elsewhere the terminal bell rings; herdr does not pass the bell on.
+ */
+export function alertHeld(events: EventBus | undefined, sound: string, body: string, platform: NodeJS.Platform = process.platform): void {
+  const file = platform === "darwin" ? soundFile(sound) : undefined;
+  let played = false;
+  if (file) {
+    try {
+      const child = spawn("afplay", [file], { stdio: "ignore", detached: true });
+      child.on("error", () => undefined);
+      child.unref();
+      played = true;
+    } catch {
+      // No afplay: fall through to herdr's sound.
+    }
   }
+  try {
+    events?.emit("herdr:notify", { title: "Prompt not sent: cache cold", body, sound: played || !sound ? "none" : "request" });
+  } catch {
+    // A failing listener must not break the question.
+  }
+  if (!played && sound && !process.env.HERDR_ENV) {
+    try {
+      if (process.stdout.isTTY) process.stdout.write("\x07");
+    } catch {
+      // No terminal to ring.
+    }
+  }
+}
+
+/** A macOS sound name (`Basso`) as its system file, or a path as is; undefined when it does not exist. */
+export function soundFile(sound: string): string | undefined {
+  const name = sound.trim();
+  if (!name) return undefined;
+  const file = name.includes("/") ? name : `/System/Library/Sounds/${name}.aiff`;
+  return existsSync(file) ? file : undefined;
 }

@@ -61,30 +61,15 @@ The token counts are the conversation the miss re-sends uncached: sending writes
 - **Start a new session.** Opens a new session linked to this one (as its parent), on the same model and thinking level, and sends the prompt there, images included. Also available as `/cache-guard fresh`, which takes the editor's text.
 - **Keep the prompt in the editor.** Esc does the same, and spends nothing. Images attached to the held prompt are not put back.
 
-When the question opens it rings the terminal bell, so a prompt you sent just before switching away does not sit there unnoticed. Inside Herdr it also holds `herdr:blocked` while open, so the pane shows as needing input (sidebar, sound, phone card) instead of idle.
+When the question holds a prompt it says so out loud, so a prompt you sent just before switching away does not sit there unnoticed. On macOS it plays `warn.sound` (default `Basso`, the system "thunk"; any name from `/System/Library/Sounds` or a sound file path; `""` for silence) whatever has focus. Inside Herdr it also posts a notification naming the project and the held prompt (with Herdr's request sound where no macOS sound played), and holds `herdr:blocked` while open, so the pane shows as needing input (sidebar, phone card) instead of idle. Herdr's own state sound is not enough here: it plays only for a change in a space you are not viewing, and the question opens before you have switched. Elsewhere it rings the terminal bell.
+
+The question only ever opens in answer to a prompt you sent: nothing pops up on its own while you are away, so keys and remote clients (herdr-web-ui, Collie) never type into a dialog they did not expect. The `❄` status and Herdr token show a cold cache ahead of time; `/cache-guard compact` and `/cache-guard fresh` act on it before you type.
 
 When Jev is not set up (and not turned off), the question ends with a tip: `/cache-guard jev` sets it up, or turns it (and the tip) off.
 
 It also asks when the selected model differs from the one the conversation was cached for (each model has its own cache). Past a typical lifetime, or `warn.idleMinutes` without one, the question is worded as a likelihood.
 
 Never held: commands (`/...`), shell input (`!...`), steering and follow-ups while the agent runs, input from other extensions (anything not typed interactively), and sessions without a UI.
-
-### Asking before you type
-
-When the cache is certainly cold (the TTL ran out, or you switched models) and above `warn.minTokens`, the question opens on its own, so it is waiting when you come back instead of catching the prompt you just typed. It waits until the agent is idle, no other dialog holds `herdr:blocked`, and no key has reached the terminal for 3 seconds, so it never takes keys meant for the editor. It opens once per cold cache, silently: no bell, no `herdr:blocked`.
-
-Example:
-
-```
-Prompt cache expired. Your next prompt will re-cache 601k tokens.
--> Keep the context
-   Compact with Jev now (~1s, no summary model)
-   Compact with a summary now (summary reads up to 601k tokens)
-   Start a new session (no history to re-cache)
-   Keep the context, and stop asking in this session
-```
-
-Keeping the context (or Esc) answers for that cold cache: the next prompt sends without asking. The compactions are judged against your recent requests, as there is no prompt yet; if one fails, the next prompt asks as usual. A new session takes any text in the editor along as a draft, unsent. If the moment passes before you answer (the agent starts, the cache changes, the session ends), the question closes and the next prompt asks as usual. Likely-cold caches (a typical lifetime passed, or a long idle) still ask only when you send. `"warn": { "early": false }` turns this off.
 
 ## Status clock
 
@@ -159,7 +144,7 @@ Pi reads every setting except `warm` and `warn.confirmSeconds`, which are for po
 ```json
 {
   "enabled": true,
-  "warn": { "enabled": true, "minTokens": 100000, "idleMinutes": 180, "early": true },
+  "warn": { "enabled": true, "minTokens": 100000, "idleMinutes": 180, "sound": "Basso" },
   "herdr": { "enabled": true },
   "jev": { "enabled": true, "provider": "", "model": "", "timeoutMs": 2500 },
   "trim": { "enabled": true, "minChars": 12000, "readMinChars": 50000, "maxBlocks": 150, "stateBudgetChars": 60000,

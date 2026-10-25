@@ -31,8 +31,11 @@ export interface Settings {
     confirmSeconds: number;
     /** Providers that publish no TTL (OpenAI, Codex): warn after this long idle. */
     idleMinutes: number;
-    /** Pi: ask as soon as the cache is known to be cold (TTL expired or model switched), before you type. */
-    early: boolean;
+    /**
+     * Played when the question holds a prompt, so one sent just before switching away is noticed: a
+     * macOS system sound name (`/System/Library/Sounds/<name>.aiff`) or a sound file path; "" for none.
+     */
+    sound: string;
   };
   warm: {
     enabled: boolean;
@@ -91,7 +94,7 @@ export interface Settings {
 
 export const DEFAULT_SETTINGS: Settings = {
   enabled: true,
-  warn: { enabled: true, minCost: 0.5, minTokens: 100_000, confirmSeconds: 120, idleMinutes: 180, early: true },
+  warn: { enabled: true, minCost: 0.5, minTokens: 100_000, confirmSeconds: 120, idleMinutes: 180, sound: "Basso" },
   warm: {
     enabled: true,
     continuationProbability: 0.15,

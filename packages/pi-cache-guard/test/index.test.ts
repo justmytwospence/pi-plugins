@@ -5,7 +5,7 @@ import path from "node:path";
 
 import cacheGuard, { JEV_TIP, modelInfo, statusText } from "../src/index.ts";
 import { lastRequest, view } from "../src/clock.ts";
-import { HerdrReporter } from "../src/herdr.ts";
+import { HerdrReporter, alertHeld, soundFile } from "../src/herdr.ts";
 
 const NOW = Date.parse("2026-10-07T12:00:00Z");
 const opus = {
@@ -74,7 +74,7 @@ function harnessWith(entries: unknown[], herdr: HerdrReporter, model: any = opus
   const renderers = new Map<string, any>();
   const appended: Array<{ customType: string; data: any }> = [];
   const blocked: unknown[] = [];
-  let bells = 0;
+  const alerts: string[] = [];
   const pi = {
     events: { emit: (channel: string, data: unknown) => { if (channel === "herdr:blocked") blocked.push(data); }, on: () => () => undefined },
     on: (name: string, handler: any) => { handlers.set(name, [...(handlers.get(name) ?? []), handler]); return () => undefined; },
@@ -103,8 +103,6 @@ function harnessWith(entries: unknown[], herdr: HerdrReporter, model: any = opus
     editor: "",
     notes: [] as string[],
     setStatus: (key: string, text: string | undefined) => ui.status.set(key, text),
-    keys: [] as Array<(data: string) => unknown>,
-    onTerminalInput: (handler: (data: string) => unknown) => { ui.keys.push(handler); return () => { ui.keys = ui.keys.filter((h) => h !== handler); }; },
     select: async (title: string, options: string[], opts?: { signal?: AbortSignal }) => {
       ui.menus.push(options);
       ui.titles.push(title);
@@ -135,13 +133,13 @@ function harnessWith(entries: unknown[], herdr: HerdrReporter, model: any = opus
       return { cancelled: false };
     },
   };
-  cacheGuard(pi as any, { herdr, bell: () => { bells++; } });
+  cacheGuard(pi as any, { herdr, alert: (body) => alerts.push(body) });
   const emit = async (name: string, event: any) => {
     let result: unknown;
     for (const handler of handlers.get(name) ?? []) result = (await handler(event, ctx)) ?? result;
     return result;
   };
-  return { emit, ui, ctx, commands, sent, sessions, appended, renderers, blocked, bells: () => bells };
+  return { emit, ui, ctx, commands, sent, sessions, appended, renderers, blocked, alerts };
 }
 
 const input = (text: string, extra: Record<string, unknown> = {}) => ({ type: "input", text, source: "interactive", ...extra });
@@ -198,7 +196,7 @@ describe("extension", () => {
     expect(await h.emit("input", input("next step please"))).toEqual({ action: "handled" });
     expect(h.ui.confirms[0]).toContain("expired 10m ago: this prompt re-caches 601k tokens");
     expect(h.ui.editor).toBe("next step please");
-    expect(h.bells()).toBe(1);
+    expect(h.alerts).toEqual(["nonexistent: next step please"]);
     expect(h.blocked).toEqual([{ active: true, label: "Prompt cache miss" }, { active: false }]);
     h.ui.answer = "Send anyway";
     expect(await h.emit("input", input("next step please"))).toEqual({ action: "continue" });
@@ -208,7 +206,7 @@ describe("extension", () => {
     const small = harness([assistant(NOW - 900_000, 50_000)]);
     await small.emit("session_start", {});
     expect(await small.emit("input", input("hi"))).toEqual({ action: "continue" });
-    expect(small.bells()).toBe(0);
+    expect(small.alerts).toEqual([]);
     expect(small.blocked).toEqual([]);
     const h = harness([assistant(NOW - 900_000, 600_000)]);
     await h.emit("session_start", {});
@@ -234,131 +232,26 @@ describe("extension", () => {
   });
 });
 
-describe("early question", () => {
-  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(NOW); });
-  afterEach(() => vi.useRealTimers());
-  const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
-  const idle = (h: ReturnType<typeof harness>, value = true) => { h.ctx.isIdle = () => value; h.ctx.hasPendingMessages = () => false; return h; };
-  const early = (h: ReturnType<typeof harness>) => h.ui.titles.filter((t) => t.includes("Your next prompt will re-cache"));
+describe("held-prompt alert", () => {
+  const bus = () => {
+    const sent: unknown[] = [];
+    return { sent, events: { emit: (channel: string, data: unknown) => sent.push({ channel, data }) } };
+  };
 
-  test("opens when the TTL runs out, silently, and the next prompt then sends without asking", async () => {
-    const h = idle(harness([assistant(NOW - 290_000, 600_000)]));
-    await h.emit("session_start", {});
-    h.ui.answer = undefined; // escape: keep the context
-    await vi.advanceTimersByTimeAsync(9_000);
-    expect(early(h)).toEqual([]);
-    await vi.advanceTimersByTimeAsync(2_000);
-    await flush();
-    expect(early(h)[0]).toMatch(/^Prompt cache expired\. Your next prompt will re-cache 601k tokens\./);
-    expect(h.ui.menus[0]).toEqual([
-      "Keep the context",
-      "Compact now (summary reads 601k tokens)",
-      "Start a new session (no history to re-cache)",
-      "Keep the context, and stop asking in this session",
-    ]);
-    expect(h.bells()).toBe(0);
-    expect(h.blocked).toEqual([]);
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(early(h)).toHaveLength(1);
-    expect(await h.emit("input", input("next"))).toEqual({ action: "continue" });
-    expect(h.ui.confirms).toEqual([]);
+  test("a sound name resolves to the macOS system sound; unknown names and blank do not", () => {
+    expect(soundFile("")).toBeUndefined();
+    expect(soundFile("NoSuchSound")).toBeUndefined();
+    expect(soundFile("/nonexistent/thunk.aiff")).toBeUndefined();
+    if (existsSync("/System/Library/Sounds/Basso.aiff")) expect(soundFile("Basso")).toBe("/System/Library/Sounds/Basso.aiff");
   });
 
-  test("waits for the keyboard to go quiet, and never asks while busy, small or guessing", async () => {
-    const h = idle(harness([assistant(NOW - 900_000, 600_000)]));
-    await h.emit("session_start", {});
-    h.ui.answer = undefined;
-    for (let i = 0; i < 5; i++) {
-      await vi.advanceTimersByTimeAsync(1_000);
-      h.ui.keys.forEach((key) => key("x"));
-    }
-    expect(early(h)).toEqual([]);
-    await vi.advanceTimersByTimeAsync(4_000);
-    await flush();
-    expect(early(h)).toHaveLength(1);
-
-    const busy = idle(harness([assistant(NOW - 900_000, 600_000)]), false);
-    await busy.emit("session_start", {});
-    const small = idle(harness([assistant(NOW - 900_000, 50_000)]));
-    await small.emit("session_start", {});
-    const guess = idle(harness([assistant(NOW - 4 * 3_600_000, 600_000, codex as any)], codex));
-    await guess.emit("session_start", {});
-    const off = idle(harness([assistant(NOW - 900_000, 600_000)]));
-    writeFileSync(path.join(process.env.PI_CODING_AGENT_DIR!, "cache-guard.json"), JSON.stringify({ warn: { early: false } }));
-    await off.emit("session_start", {});
-    rmSync(path.join(process.env.PI_CODING_AGENT_DIR!, "cache-guard.json"));
-    await vi.advanceTimersByTimeAsync(10_000);
-    await flush();
-    expect([busy, small, guess, off].map((x) => early(x).length)).toEqual([0, 0, 0, 0]);
-    guess.ui.answer = undefined;
-    expect(await guess.emit("input", input("next"))).toEqual({ action: "handled" });
-    expect(guess.ui.confirms).toHaveLength(1);
-  });
-
-  test("opens after a model switch drops the cache", async () => {
-    const h = idle(harness([assistant(NOW - 10_000, 600_000)]));
-    await h.emit("session_start", {});
-    h.ui.answer = undefined;
-    h.ctx.model = sonnet;
-    await h.emit("model_select", {});
-    await vi.advanceTimersByTimeAsync(4_000);
-    await flush();
-    expect(early(h)[0]).toMatch(/^No prompt cache for claude-sonnet-5-5 \(this conversation is cached for claude-opus-5-5\)\. Your next prompt will re-cache 601k tokens\./);
-  });
-
-  test("closes when its moment passes, and the send-time question still asks", async () => {
-    const h = idle(harness([assistant(NOW - 900_000, 600_000)]));
-    await h.emit("session_start", {});
-    h.ui.answers = ["(wait)"];
-    await vi.advanceTimersByTimeAsync(4_000);
-    await flush();
-    expect(early(h)).toHaveLength(1);
-    h.ctx.isIdle = () => false;
-    await vi.advanceTimersByTimeAsync(1_000);
-    await flush();
-    h.ui.answer = undefined;
-    expect(await h.emit("input", input("next"))).toEqual({ action: "handled" });
-    expect(h.ui.confirms).toHaveLength(1);
-  });
-
-  test("compacts now, and a failed compaction lets the next prompt ask", async () => {
-    const h = idle(harness([assistant(NOW - 900_000, 600_000)]));
-    await h.emit("session_start", {});
-    h.ui.answers = ["Compact now", "Default summary"];
-    await vi.advanceTimersByTimeAsync(4_000);
-    await flush();
-    expect(h.ui.compactions).toHaveLength(1);
-    expect(h.ui.compactions[0].customInstructions).toBeUndefined();
-    h.ui.compactions[0].onError(new Error("too small"));
-    h.ui.answer = undefined;
-    expect(await h.emit("input", input("next"))).toEqual({ action: "handled" });
-    expect(h.ui.confirms).toHaveLength(1);
-  });
-
-  test("a new session takes the editor's draft as a draft", async () => {
-    const h = idle(harness([assistant(NOW - 900_000, 600_000)]));
-    await h.emit("session_start", {});
-    h.ui.editor = "half a thought";
-    h.ui.answers = ["Start a new session"];
-    await vi.advanceTimersByTimeAsync(4_000);
-    await flush();
-    expect(h.ui.menus[0]).toContain("Start a new session, taking the editor's text (no history to re-cache)");
-    await vi.advanceTimersByTimeAsync(10);
-    await flush();
-    expect(h.sessions).toEqual(["/sessions/old.jsonl"]);
-    expect(h.ui.editor).toBe("half a thought");
-    await vi.advanceTimersByTimeAsync(10);
-    expect(h.sent.filter((x) => "content" in x)).toEqual([]);
-  });
-
-  test("mute stops both questions for the session", async () => {
-    const h = idle(harness([assistant(NOW - 900_000, 600_000)]));
-    await h.emit("session_start", {});
-    h.ui.answers = ["Keep the context, and stop"];
-    await vi.advanceTimersByTimeAsync(4_000);
-    await flush();
-    expect(await h.emit("input", input("next"))).toEqual({ action: "continue" });
-    expect(h.ui.confirms).toEqual([]);
+  test("herdr gets a notification, with its own sound only when no macOS sound played", () => {
+    const linux = bus();
+    alertHeld(linux.events, "Basso", "proj: next step", "linux");
+    expect(linux.sent).toEqual([{ channel: "herdr:notify", data: { title: "Prompt not sent: cache cold", body: "proj: next step", sound: "request" } }]);
+    const silent = bus();
+    alertHeld(silent.events, "", "proj: next step", "linux");
+    expect(silent.sent).toEqual([{ channel: "herdr:notify", data: { title: "Prompt not sent: cache cold", body: "proj: next step", sound: "none" } }]);
   });
 });
 
