@@ -68,8 +68,8 @@ test('signalMachines reports ssh failures and counts per machine', async () => {
   };
   const reports = await signalMachines(makeRequest(), deps);
   assert.deepEqual(reports, [
-    { machine: 'NUC', ok: true, sessions: 1 },
-    { machine: 'Down', ok: false, error: 'ssh: connect to host down: refused' },
+    { machine: 'NUC', target: 'nuc', ok: true, sessions: 1 },
+    { machine: 'Down', target: 'down', ok: false, error: 'ssh: connect to host down: refused' },
   ]);
   assert.ok(calls.some((c) => c[0] === 'ssh' && c.includes('BatchMode=yes')));
 });
@@ -121,9 +121,10 @@ test('a fresh request makes the session dispatch its own reload command once', a
     assert.ok(commands.has('reload-all') && commands.has(PENDING_COMMAND));
     const ctx = { mode: 'tui', hasUI: true, ui: { setStatus: (k, v) => statuses.push([k, v]) } };
     handlers.get('session_start')({}, ctx);
-    writeRequest(makeRequest(), dir);
+    const request = makeRequest();
+    writeRequest(request, dir);
     for (let i = 0; i < 50 && !sent.length; i++) await new Promise((r) => setTimeout(r, 20));
-    assert.deepEqual(sent, [[`/${PENDING_COMMAND}`, { expandPromptTemplates: true }]]);
+    assert.deepEqual(sent, [[`/${PENDING_COMMAND} ${request.id}`, { expandPromptTemplates: true }]]);
     assert.deepEqual(statuses, [['reload-all', 'reload pending']]);
     let reloaded = 0;
     await commands.get(PENDING_COMMAND).handler('', { ...fakeCtx([{ idle: true }]), reload: async () => { reloaded++; } });
@@ -249,4 +250,30 @@ test('a reload waits for typing, open overlays, questions and probe holds such a
   });
   assert.equal(await h.run(), 1);
   assert.deepEqual([...new Set(seen)], ['reload pending: typing', 'reload pending: a question', 'reload pending: an open dialog', 'reload pending: Sidebar is open']);
+});
+
+test('after its own reload the sender marks itself reloaded and resumes the live view', async () => {
+  const dir = tmp();
+  const prev = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  try {
+    const { writeAck, readAcks } = await import('../src/acks.ts');
+    writeAck('req', { session: 'sess', name: 'pi-plugins', state: 'reloading' }, dir);
+    const handlers = new Map();
+    const widgets = [];
+    reloadAll({ on: (n, h) => handlers.set(n, h), registerCommand() {}, registerEntryRenderer() {}, appendEntry() {}, sendUserMessage() {}, getSessionName: () => undefined },
+      { now: () => Date.now(), sleep: async () => {}, exec: async () => '' });
+    const track = { id: 'req', at: Date.now(), machines: [], expected: 2 };
+    const ctx = { mode: 'tui', hasUI: true, cwd: '/x/pi-plugins',
+      sessionManager: { getSessionId: () => 'sess', getBranch: () => [{ type: 'custom', customType: 'reload-all:report', data: { lines: [], track } }] },
+      ui: { theme: { fg: (_c, s) => s }, setStatus() {}, setWidget: (k, l) => { if (k === 'reload-all') widgets.push(l); } } };
+    handlers.get('session_start')({ reason: 'reload' }, ctx);
+    assert.equal(readAcks('req', dir)[0].state, 'reloaded');
+    for (let i = 0; i < 50 && !widgets.length; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(widgets[0][0], 'reload-all · 1/2 reloaded');
+    handlers.get('session_shutdown')({}, ctx);
+  } finally {
+    if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = prev;
+    rmSync(dir, { recursive: true });
+  }
 });

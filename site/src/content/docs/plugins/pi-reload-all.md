@@ -8,7 +8,7 @@ plugin: pi-reload-all
 
 - **Use it for:** Picking up a new suite pin, settings, skills or keybindings in every running Pi at once, instead of `/reload` pane by pane.
 - **Enable:** Select `packages/pi-reload-all/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset). Every session that should be reloaded needs it.
-- **Controls:** `/reload-all` signals this machine and every enabled `herdr machine`; `/reload-all --local` only this machine. `/reload-when-idle` is the command each session runs on itself. No model tool.
+- **Controls:** `/reload-all` signals this machine and every enabled `herdr machine` and shows live progress above the editor; `/reload-all --local` only this machine; `/reload-all stop` closes the progress view. `/reload-when-idle` is the command each session runs on itself. No model tool.
 - **Settings:** None. The signal is `reload-request` in Pi's agent directory (`~/.pi/agent`, or `PI_CODING_AGENT_DIR`).
 - **Requirements, cost & privacy:** Other machines are reached with `ssh -o BatchMode=yes <target>`, using the targets from `herdr machine list`, so key-based SSH must already work. No network otherwise, no inference.
 - **Integrations & limits:** Herdr is optional: without it only this machine is signalled. Interactive (TUI) sessions only; print and RPC sessions ignore the signal.
@@ -26,15 +26,22 @@ Nothing is typed into other panes. Typing `/reload` with `herdr agent prompt` wo
    - anything that answers the `reload-all:probe` event with a hold: [pi-sidebar](/plugins/pi-sidebar/) does while it is open or replying.
 3. It then runs Pi's own reload, the same as `/reload`.
 
-The session that ran `/reload-all` reloads too, right after the command. Its report, one line per machine with the number of Pi panes Herdr sees there, is kept in the transcript across that reload:
+The session that ran `/reload-all` reloads too, once it is safe. Its report, one line per machine with the number of Pi panes Herdr sees there, is kept in the transcript across that reload.
+
+## Live progress
+
+Each session that receives a request reports its progress in `reload-acks/<request id>/<session id>.json` in the agent directory: `pending` (with what it waits on), `reloading`, then `reloaded` (written by the reloaded runtime) or `failed`. The session that ran `/reload-all` shows them above its editor, reading this machine's folder directly and each signalled machine's over ssh every three seconds, and picks the view up again after its own reload:
 
 ```text
-/reload-all: sessions reload when their turn ends and the editor is empty
-  this machine: signalled (9 Pi sessions in Herdr)
-  NUC: signalled (3 Pi sessions in Herdr)
+reload-all · 7/12 reloaded
+  MacBook-Pro  runnable-models  pending: subagents (2)
+  NUC          homelab          pending: typing
+  MacBook-Pro  pi-plugins       reloaded
 ```
 
 (Example output.)
+
+The view closes, leaving its last summary in the transcript, when every session Herdr counted has reloaded or failed; or when everyone who answered is done and nothing changed for 30 seconds (the rest are counted as `not answering`, for example sessions without this entry or on an older version); or after ten minutes. `/reload-all stop` closes it early. Report folders older than a day are removed when the next request is written.
 
 Anything else that writes the file triggers the same reload. For example, a package-update script can write it after installing a new pin, so sessions pick the pin up without a manual step.
 

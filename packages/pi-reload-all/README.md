@@ -1,6 +1,6 @@
 # pi-reload-all
 
-`/reload-all` reloads every interactive Pi session on this machine and on Herdr's saved machines (`herdr machine list`). Each session reloads itself once its turn has ended, nothing is queued and its editor is empty, so running turns and half-written drafts are never interrupted. `/reload-all --local` signals only this machine.
+`/reload-all` reloads every interactive Pi session on this machine and on Herdr's saved machines (`herdr machine list`). Each session reloads itself once its turn has ended, nothing is queued and its editor is empty, so running turns and half-written drafts are never interrupted. `/reload-all --local` signals only this machine. The session that ran it shows each session's progress live above its editor (`/reload-all stop` closes the view).
 
 Nothing is typed into other panes. The command writes `reload-request` in Pi's agent directory (over `ssh -o BatchMode=yes` for other machines); every session running this extension watches the file. Anything else that writes it, such as a package-update script after installing a new pin, triggers the same reload.
 

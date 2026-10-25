@@ -9,9 +9,12 @@
 // pi.sendUserMessage() dispatches at once, even during a turn.
 import { execFile } from "node:child_process";
 import { type FSWatcher, watch } from "node:fs";
+import { basename } from "node:path";
 import { promisify } from "node:util";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { type AckState, markReloaded, pruneAcks, writeAck } from "./acks.ts";
+import { Progress, PROGRESS_LIMIT_MS, type Tracked } from "./progress.ts";
 import { agentDir, FILE_NAME, isFresh, makeRequest, readRequest, remoteWriteCommand, type Request, writeRequest } from "./signal.ts";
 
 const run = promisify(execFile);
@@ -55,6 +58,7 @@ interface Machine {
 
 export interface MachineReport {
   machine: string;
+  target: string;
   ok: boolean;
   /** Pi panes Herdr sees there, when it could tell. */
   sessions?: number;
@@ -77,6 +81,18 @@ export default function reloadAll(pi: ExtensionAPI, deps: Deps = defaultDeps): v
   /** Active holds by channel and id (herdr:blocked has no id: counted). */
   const holds = new Map<string, string>();
   let blocked = 0;
+  let progress: Progress | undefined;
+  /** This session, as its progress reports name it. */
+  let self: { session: string; name: string } | undefined;
+
+  const ack = (requestId: string | undefined, state: AckState, reason?: string) => {
+    if (!requestId || !self) return;
+    try {
+      writeAck(requestId, { ...self, state, ...(reason ? { reason } : {}) });
+    } catch {
+      // progress is best effort
+    }
+  };
 
   for (const channel of HOLD_CHANNELS) {
     pi.events?.on?.(channel, (data: unknown) => {
@@ -130,7 +146,8 @@ export default function reloadAll(pi: ExtensionAPI, deps: Deps = defaultDeps): v
     } catch {
       // stale runtime
     }
-    pi.sendUserMessage(`/${PENDING_COMMAND}`, { expandPromptTemplates: true });
+    ack(request.id, "pending");
+    pi.sendUserMessage(`/${PENDING_COMMAND} ${request.id}`, { expandPromptTemplates: true });
   };
 
   pi.on("session_start", (_event, ctx) => {
@@ -138,6 +155,21 @@ export default function reloadAll(pi: ExtensionAPI, deps: Deps = defaultDeps): v
     startedAt = deps.now();
     ctxRef = ctx;
     stale = false;
+    try {
+      const session = ctx.sessionManager.getSessionId();
+      let name = "";
+      try {
+        name = pi.getSessionName() ?? "";
+      } catch {
+        // none
+      }
+      self = { session, name: name.trim() || basename(ctx.cwd) || session };
+      // This runtime is what a "reloading" report was waiting for.
+      markReloaded(session);
+    } catch {
+      self = undefined;
+    }
+    resumeProgress(ctx);
     try {
       watcher = watch(agentDir(), (_type, name) => {
         if (!name || name === FILE_NAME) check();
@@ -179,10 +211,60 @@ export default function reloadAll(pi: ExtensionAPI, deps: Deps = defaultDeps): v
     stopInput?.();
     stopInput = undefined;
     tui = undefined;
+    progress?.stop();
+    progress = undefined;
   });
 
+  const startProgress = (ctx: ExtensionContext, t: Tracked) => {
+    progress?.stop();
+    const theme = ctx.ui.theme;
+    const paint = (color: string) => (s: string) => {
+      try {
+        return theme.fg(color as never, s);
+      } catch {
+        return s;
+      }
+    };
+    progress = new Progress(
+      t,
+      { setWidget: (key, lines) => ctx.ui.setWidget(key, lines), dim: paint("dim"), accent: paint("accent"), warn: paint("warning"), ok: paint("success") },
+      deps,
+      (lines) => {
+        progress = undefined;
+        if (stale) return;
+        try {
+          pi.appendEntry(ENTRY, { lines, final: t.id });
+        } catch {
+          // stale runtime
+        }
+      },
+    );
+    progress.start();
+  };
+
+  /** After the sending session's own reload, its live view picks up where it was. */
+  const resumeProgress = (ctx: ExtensionContext) => {
+    let branch: { type?: string; customType?: string; data?: unknown }[] = [];
+    try {
+      branch = ctx.sessionManager.getBranch() as typeof branch;
+    } catch {
+      return;
+    }
+    const finished = new Set<string>();
+    for (let i = branch.length - 1; i >= 0; i--) {
+      const e = branch[i]!;
+      if (e.type !== "custom" || e.customType !== ENTRY) continue;
+      const data = e.data as { track?: Tracked; final?: string } | undefined;
+      if (data?.final) finished.add(data.final);
+      const t = data?.track;
+      if (!t) continue;
+      if (!finished.has(t.id) && deps.now() - t.at < PROGRESS_LIMIT_MS) startProgress(ctx, t);
+      return;
+    }
+  };
+
   /** Reloads this session once it is safe. Nothing may touch pi or ctx after ctx.reload(). */
-  const reloadWhenSafe = async (ctx: ExtensionCommandContext) => {
+  const reloadWhenSafe = async (ctx: ExtensionCommandContext, requestId?: string) => {
     pending = true;
     let shown = "";
     const held = () => {
@@ -190,6 +272,7 @@ export default function reloadAll(pi: ExtensionAPI, deps: Deps = defaultDeps): v
       const text = reason ? `reload pending: ${reason}` : "reload pending";
       if (text !== shown) {
         shown = text;
+        ack(requestId, "pending", reason);
         try {
           ctx.ui.setStatus(STATUS, text);
         } catch {
@@ -198,8 +281,12 @@ export default function reloadAll(pi: ExtensionAPI, deps: Deps = defaultDeps): v
       }
       return !!reason;
     };
-    if (await waitUntilSafe(ctx, () => stale, deps, held)) await ctx.reload();
+    if (await waitUntilSafe(ctx, () => stale, deps, held)) {
+      ack(requestId, "reloading");
+      await ctx.reload();
+    }
     if (stale) return;
+    ack(requestId, "failed", "Pi skipped the reload (compacting?)");
     // Not reloaded (Pi skips it while compacting): accept the next request.
     pending = false;
     try {
@@ -211,41 +298,62 @@ export default function reloadAll(pi: ExtensionAPI, deps: Deps = defaultDeps): v
 
   pi.registerCommand(PENDING_COMMAND, {
     description: "Reload once the turn ends and the editor is empty (used by /reload-all)",
-    handler: async (_args, ctx) => reloadWhenSafe(ctx),
+    handler: async (args, ctx) => reloadWhenSafe(ctx, args.trim() || undefined),
   });
 
   pi.registerCommand("reload-all", {
-    description: "Reload every Pi session here and on Herdr's saved machines (--local: this machine only)",
+    description: "Reload every Pi session here and on Herdr's saved machines (--local: this machine only; stop: close the progress view)",
     handler: async (args, ctx) => {
+      if (/^\s*stop\s*$/u.test(args)) {
+        progress?.dismiss();
+        progress = undefined;
+        return;
+      }
       const request = makeRequest();
       // This session's watcher must not reload it while the command still runs.
       handled.add(request.id);
       sending = true;
-      let lines: string[];
+      let sent: { lines: string[]; track: Tracked };
       try {
-        lines = await signal(args, request);
+        sent = await signal(args, request);
       } finally {
         sending = false;
       }
-      if (ctx.mode !== "tui" || !ctx.hasUI) return ctx.ui.notify(lines.join("\n"), "info");
-      // The report is kept as an entry: the reload rebuilds the chat.
-      await reloadWhenSafe(ctx);
+      if (ctx.mode !== "tui" || !ctx.hasUI) return ctx.ui.notify(sent.lines.join("\n"), "info");
+      // The report and what to watch are kept as an entry: the reload rebuilds the chat, and the
+      // next runtime resumes the live view from it.
+      startProgress(ctx, sent.track);
+      await reloadWhenSafe(ctx, request.id);
     },
   });
 
   /** Writes the request everywhere and records the report. */
-  const signal = async (args: string, request: Request): Promise<string[]> => {
+  const signal = async (args: string, request: Request): Promise<{ lines: string[]; track: Tracked }> => {
     const local = /(^|\s)--local(\s|$)/u.test(args);
     const lines = ["/reload-all: sessions reload when their turn ends and the editor is empty"];
+    let expected: number | undefined = 0;
     try {
+      pruneAcks();
       writeRequest(request);
-      lines.push(`  this machine: signalled${countText(await countLocal(deps))}`);
+      const n = await countLocal(deps);
+      expected = n;
+      lines.push(`  this machine: signalled${countText(n)}`);
     } catch (error) {
+      expected = undefined;
       lines.push(`  this machine: failed (${message(error)})`);
     }
-    if (!local) for (const r of await signalMachines(request, deps)) lines.push(`  ${r.machine}: ${r.ok ? `signalled${countText(r.sessions)}` : `failed (${r.error})`}`);
-    pi.appendEntry(ENTRY, { lines });
-    return lines;
+    const machines: Tracked["machines"] = [];
+    if (!local) {
+      for (const r of await signalMachines(request, deps)) {
+        lines.push(`  ${r.machine}: ${r.ok ? `signalled${countText(r.sessions)}` : `failed (${r.error})`}`);
+        if (!r.ok) continue;
+        machines.push({ label: r.machine, target: r.target });
+        expected = expected === undefined || r.sessions === undefined ? undefined : expected + r.sessions;
+      }
+    }
+    const track: Tracked = { id: request.id, at: request.at, machines, ...(expected === undefined ? {} : { expected }) };
+    pi.appendEntry(ENTRY, { lines, track });
+    return { lines, track };
   };
 }
 
@@ -326,7 +434,7 @@ export async function signalMachines(request: Request, deps: Deps): Promise<Mach
       try {
         await deps.exec("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", m.target, command], 20_000);
       } catch (error) {
-        return { machine: m.label, ok: false, error: message(error) };
+        return { machine: m.label, target: m.target, ok: false, error: message(error) };
       }
       let sessions: number | undefined;
       try {
@@ -334,7 +442,7 @@ export async function signalMachines(request: Request, deps: Deps): Promise<Mach
       } catch {
         // The signal went out; only the count is missing.
       }
-      return { machine: m.label, ok: true, ...(sessions === undefined ? {} : { sessions }) };
+      return { machine: m.label, target: m.target, ok: true, ...(sessions === undefined ? {} : { sessions }) };
     }),
   );
 }
