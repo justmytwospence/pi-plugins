@@ -18,7 +18,12 @@ plugin: pi-reload-all
 Nothing is typed into other panes. Typing `/reload` with `herdr agent prompt` would append to a half-written draft, and Pi ignores `/reload` while a turn runs. Instead `/reload-all` writes a small request file, atomically, on each machine, and every session running this entry watches that file (with a 30-second poll as a fallback) and reloads itself:
 
 1. A request written after the session started shows `reload pending` in the footer.
-2. The session waits until its turn has ended, nothing is queued, and the editor is empty. A running turn, an open question or a draft only delays the reload; it rechecks every two seconds.
+2. The session waits, rechecking every two seconds, until nothing a reload would break is in progress. The footer names what it waits on (for example `reload pending: subagents (2)`):
+   - a running turn, a queued message, or a draft in the editor;
+   - a keystroke anywhere in the terminal within the last five seconds;
+   - async subagents or plan-mode planner runs (their `herdr:background` and `herdr:working` holds), which a reload would abort; pi-bg jobs and awaited Herdr children survive a reload and do not delay it;
+   - an open question or permission dialog, or any open overlay (todo list, pickers);
+   - anything that answers the `reload-all:probe` event with a hold: [pi-sidebar](/plugins/pi-sidebar/) does while it is open or replying.
 3. It then runs Pi's own reload, the same as `/reload`.
 
 The session that ran `/reload-all` reloads too, right after the command. Its report, one line per machine with the number of Pi panes Herdr sees there, is kept in the transcript across that reload:
@@ -35,7 +40,8 @@ Anything else that writes the file triggers the same reload. For example, a pack
 
 ## Limits
 
-- A session that never goes idle with an empty editor stays pending. Clear the draft, or run `/reload` yourself.
+- A session that never becomes safe stays pending; the footer says why. Clear the draft or close what is open, or run `/reload` yourself.
+- Only the work listed above is detected. An extension that keeps unsaved in-memory state while Pi is idle, and does not answer `reload-all:probe`, loses it on reload, exactly as with a manual `/reload`.
 - If Pi is compacting at that moment, Pi skips the reload and the session stays on its old code. Run `/reload` afterwards.
 - A machine that cannot be reached over SSH is reported as failed. Its sessions are not signalled.
 

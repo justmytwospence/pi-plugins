@@ -172,6 +172,13 @@ export class SidebarController {
       this.tui = undefined;
       await this.agent.dispose();
     });
+    // pi-reload-all asks before reloading: a reload would close Sidebar and drop its draft or reply.
+    pi.events?.on?.("reload-all:probe", (data: unknown) => {
+      const hold = (data as { hold?: (reason: string) => void } | undefined)?.hold;
+      if (typeof hold !== "function") return;
+      if (this.agent.busy) hold("Sidebar is replying");
+      else if (this.isOpen) hold("Sidebar is open");
+    });
     pi.events?.on?.(HERDR_BLOCKED, (data: unknown) => {
       const active = (data as { active?: unknown } | undefined)?.active === true;
       this.blocked = Math.max(0, this.blocked + (active ? 1 : -1));

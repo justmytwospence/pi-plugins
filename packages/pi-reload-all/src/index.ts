@@ -21,6 +21,20 @@ const STATUS = "reload-all";
 const ENTRY = "reload-all:report";
 const POLL_MS = 30_000;
 const RECHECK_MS = 2_000;
+/** No reload within this long of a keystroke anywhere in the terminal (main, Sidebar, a dialog). */
+export const QUIET_MS = 5_000;
+/** Asked synchronously before a reload; any extension may call `hold(reason)` to wait. */
+export const PROBE = "reload-all:probe";
+/** Holds that mean work a reload would abort. */
+const HOLD_CHANNELS = ["herdr:background", "herdr:working", "herdr:blocked"] as const;
+
+/**
+ * A hold a reload does not hurt: pi-bg keeps its jobs across a reload, and pi-herdr restores an
+ * awaited child's reply in the next runtime.
+ */
+export function survivesReload(id: string): boolean {
+  return id.startsWith("bg:") || id.startsWith("child:");
+}
 
 export interface Deps {
   exec(file: string, args: string[], timeoutMs: number): Promise<string>;
@@ -57,6 +71,47 @@ export default function reloadAll(pi: ExtensionAPI, deps: Deps = defaultDeps): v
   let sending = false;
   let stale = false;
   let ctxRef: ExtensionContext | undefined;
+  let lastInput = Number.NEGATIVE_INFINITY;
+  let stopInput: (() => void) | undefined;
+  let tui: { hasOverlay?(): boolean } | undefined;
+  /** Active holds by channel and id (herdr:blocked has no id: counted). */
+  const holds = new Map<string, string>();
+  let blocked = 0;
+
+  for (const channel of HOLD_CHANNELS) {
+    pi.events?.on?.(channel, (data: unknown) => {
+      const e = (data ?? {}) as { active?: unknown; id?: unknown; label?: unknown };
+      const active = e.active === true;
+      if (channel === "herdr:blocked" && typeof e.id !== "string") {
+        blocked = Math.max(0, blocked + (active ? 1 : -1));
+        return;
+      }
+      const id = `${channel}:${typeof e.id === "string" ? e.id : String(e.label ?? "")}`;
+      if (typeof e.id === "string" && survivesReload(e.id)) return;
+      if (active) holds.set(id, typeof e.label === "string" && e.label ? e.label : channel === "herdr:working" ? "planner" : "background work");
+      else holds.delete(id);
+    });
+  }
+
+  /** Why a reload must wait now, or undefined when nothing else is in the way. */
+  const heldBy = (): string | undefined => {
+    if (sending) return "/reload-all";
+    if (deps.now() - lastInput < QUIET_MS) return "typing";
+    if (holds.size) return [...new Set(holds.values())].join(", ");
+    if (blocked) return "a question";
+    try {
+      if (tui?.hasOverlay?.()) return "an open dialog";
+    } catch {
+      // stale TUI
+    }
+    const reasons: string[] = [];
+    try {
+      pi.events?.emit?.(PROBE, { hold: (reason: string) => reasons.push(String(reason)) });
+    } catch {
+      // a listener failed: do not let it block forever
+    }
+    return reasons[0];
+  };
 
   pi.registerEntryRenderer<{ lines?: string[] }>(ENTRY, (entry, _options, theme) => {
     const lines = entry.data?.lines;
@@ -94,6 +149,24 @@ export default function reloadAll(pi: ExtensionAPI, deps: Deps = defaultDeps): v
     }
     poll = setInterval(check, POLL_MS);
     poll.unref?.();
+    try {
+      stopInput = ctx.ui.onTerminalInput?.(() => {
+        lastInput = deps.now();
+        return undefined;
+      });
+    } catch {
+      // no input hook
+    }
+    // Borrow the TUI to see open overlays; widget factories receive it.
+    try {
+      ctx.ui.setWidget("reload-all-probe", (t) => {
+        tui = t as unknown as typeof tui;
+        return { render: () => [], invalidate() {} };
+      });
+      ctx.ui.setWidget("reload-all-probe", undefined);
+    } catch {
+      // no widgets
+    }
   });
 
   pi.on("session_shutdown", () => {
@@ -103,12 +176,29 @@ export default function reloadAll(pi: ExtensionAPI, deps: Deps = defaultDeps): v
     watcher = undefined;
     if (poll) clearInterval(poll);
     poll = undefined;
+    stopInput?.();
+    stopInput = undefined;
+    tui = undefined;
   });
 
   /** Reloads this session once it is safe. Nothing may touch pi or ctx after ctx.reload(). */
   const reloadWhenSafe = async (ctx: ExtensionCommandContext) => {
     pending = true;
-    if (await waitUntilSafe(ctx, () => stale, deps, () => sending)) await ctx.reload();
+    let shown = "";
+    const held = () => {
+      const reason = heldBy();
+      const text = reason ? `reload pending: ${reason}` : "reload pending";
+      if (text !== shown) {
+        shown = text;
+        try {
+          ctx.ui.setStatus(STATUS, text);
+        } catch {
+          // stale runtime
+        }
+      }
+      return !!reason;
+    };
+    if (await waitUntilSafe(ctx, () => stale, deps, held)) await ctx.reload();
     if (stale) return;
     // Not reloaded (Pi skips it while compacting): accept the next request.
     pending = false;

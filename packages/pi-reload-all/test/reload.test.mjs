@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import reloadAll, { countPi, parseMachines, PENDING_COMMAND, signalMachines, waitUntilSafe } from '../src/index.ts';
+import reloadAll, { countPi, parseMachines, PENDING_COMMAND, PROBE, signalMachines, waitUntilSafe } from '../src/index.ts';
 import { FILE_NAME, isFresh, makeRequest, readRequest, remoteWriteCommand, writeRequest } from '../src/signal.ts';
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'reload-all-'));
@@ -176,4 +176,77 @@ test('/reload-all reports first, then reloads its own session once, and nothing 
     if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = prev;
     rmSync(dir, { recursive: true });
   }
+});
+
+function harness({ now = () => 100_000 } = {}) {
+  const handlers = new Map();
+  const commands = new Map();
+  const listeners = new Map();
+  const statuses = [];
+  let input;
+  let overlay = false;
+  const events = {
+    on: (name, fn) => listeners.set(name, [...(listeners.get(name) ?? []), fn]),
+    emit: (name, data) => (listeners.get(name) ?? []).forEach((fn) => fn(data)),
+  };
+  let clock = now();
+  const deps = { now: () => clock, sleep: async () => { clock += 2_000; tick(); }, exec: async () => { throw new Error('no'); } };
+  let tick = () => {};
+  reloadAll({
+    events, on: (n, h) => handlers.set(n, h), registerCommand: (n, c) => commands.set(n, c),
+    registerEntryRenderer() {}, appendEntry() {}, sendUserMessage() {},
+  }, deps);
+  const ui = {
+    setStatus: (k, v) => statuses.push(v), getEditorText: () => '',
+    onTerminalInput: (fn) => { input = fn; return () => { input = undefined; }; },
+    setWidget: (_k, factory) => { if (typeof factory === 'function') factory({ hasOverlay: () => overlay }); },
+  };
+  const ctx = { mode: 'tui', hasUI: true, ui, waitForIdle: async () => {}, isIdle: () => true, hasPendingMessages: () => false };
+  handlers.get('session_start')({}, ctx);
+  return {
+    events, statuses, ctx, commands,
+    type: () => input?.('x'),
+    setOverlay: (v) => { overlay = v; },
+    onTick: (fn) => { tick = fn; },
+    run: async () => { let reloaded = 0; await commands.get(PENDING_COMMAND).handler('', { ...ctx, reload: async () => { reloaded++; } }); return reloaded; },
+  };
+}
+
+test('a reload waits for subagents and planners, not for pi-bg jobs or herdr children', async () => {
+  const h = harness();
+  h.events.emit('herdr:background', { active: true, id: 'bg:1', label: 'build' });
+  h.events.emit('herdr:background', { active: true, id: 'child:x', label: 'child x' });
+  h.events.emit('herdr:background', { active: true, id: 'subagents:1', label: 'subagents (2)' });
+  h.events.emit('herdr:working', { active: true, id: 'planner:1' });
+  let ticks = 0;
+  h.onTick(() => {
+    ticks++;
+    if (ticks === 1) h.events.emit('herdr:background', { active: false, id: 'subagents:1' });
+    if (ticks === 2) h.events.emit('herdr:working', { active: false, id: 'planner:1' });
+  });
+  assert.equal(await h.run(), 1);
+  assert.equal(ticks, 2);
+  assert.ok(h.statuses.includes('reload pending: subagents (2), planner'));
+});
+
+test('a reload waits for typing, open overlays, questions and probe holds such as Sidebar', async () => {
+  const h = harness();
+  h.type();
+  h.setOverlay(true);
+  h.events.emit('herdr:blocked', { active: true });
+  let sidebarOpen = true;
+  h.events.on(PROBE, ({ hold }) => { if (sidebarOpen) hold('Sidebar is open'); });
+  const seen = [];
+  let ticks = 0;
+  h.onTick(() => {
+    ticks++;
+    const now = h.statuses.at(-1);
+    seen.push(now);
+    // Each obstacle clears once the status names it.
+    if (now === 'reload pending: a question') h.events.emit('herdr:blocked', { active: false });
+    if (now === 'reload pending: an open dialog') h.setOverlay(false);
+    if (now === 'reload pending: Sidebar is open') sidebarOpen = false;
+  });
+  assert.equal(await h.run(), 1);
+  assert.deepEqual([...new Set(seen)], ['reload pending: typing', 'reload pending: a question', 'reload pending: an open dialog', 'reload pending: Sidebar is open']);
 });
