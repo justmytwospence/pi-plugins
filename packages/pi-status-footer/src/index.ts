@@ -824,8 +824,11 @@ export const ICONS = {
 } as const;
 
 /** Prefix a row with its icon; `render` gets the width left after it. */
+/** Space between a row's leading icon and its text: two cells, so the icon column reads apart. */
+const ICON_GAP = "  ";
+
 function iconRow(icon: string, width: number, theme: Paint, render: (width: number) => string): string {
-  return `${theme.fg("dim", icon)} ${render(Math.max(0, width - 2))}`;
+  return `${theme.fg("dim", icon)}${ICON_GAP}${render(Math.max(0, width - 1 - ICON_GAP.length))}`;
 }
 
 function mcpChip(count: McpCount, theme: Paint): string {
@@ -950,8 +953,8 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   }
   if (notices.length) {
     const text = notices.map((n, i) => `${i && n.icon ? `${theme.fg("dim", n.icon)} ` : ""}${n.text.replace(/[\r\n\t]/g, " ")}`).join(sep);
-    const lines = wrapTextWithAnsi(text, Math.max(1, width - 2));
-    rows.push(...lines.map((line, i) => i ? `  ${line}` : `${theme.fg("dim", notices[0].icon ?? ICONS.notices)} ${line}`));
+    const lines = wrapTextWithAnsi(text, Math.max(1, width - 1 - ICON_GAP.length));
+    rows.push(...lines.map((line, i) => i ? ` ${ICON_GAP}${line}` : `${theme.fg("dim", notices[0].icon ?? ICONS.notices)}${ICON_GAP}${line}`));
   }
 
   // Subscription limits go last: they are usually the longest rows.

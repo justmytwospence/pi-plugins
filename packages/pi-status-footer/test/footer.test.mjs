@@ -252,8 +252,8 @@ test("minimal Git suffix covers each dirty dimension, quiet tracking and unreada
 
 test("wide layout uses explicit labels without reintroducing secondary metrics", () => {
   const rows = mod.renderFooter(fixture(), 160, theme);
-  assert.match(rows[0], /^ \uf07b dotfiles · \ue725 main \* ↑2$/);
-  assert.match(rows[1], /^ \u{f06a9} opus-5\.5 · \uee9c reasoning xhigh$/u);
+  assert.match(rows[0], /^ \uf07b  dotfiles · \ue725 main \* ↑2$/);
+  assert.match(rows[1], /^ \u{f06a9}  opus-5\.5 · \uee9c reasoning xhigh$/u);
   assert.match(rows[2], /Context\s+28% used [━─]{8}/);
   assert.doesNotMatch(rows[2], /cost/);
   assert.doesNotMatch(rows.slice(0, 3).join("\n"), /cache|OAuth|diff|compact|56k\/200k/);
@@ -270,16 +270,17 @@ test("footer uses natural spacing and a consistent inset without label columns",
   ];
   s.statuses = ["PLAN mode"];
   const rows = mod.renderFooter(s, 160, theme);
-  assert.equal(rows[0], " \uf07b dotfiles · \ue725 main * ↑2");
-  assert.equal(rows[1], " \u{f06a9} opus-5.5 · \uee9c reasoning xhigh");
-  assert.equal(rows[2], " \uf0e4 Context 28% used");
-  assert.equal(rows[3], " \uf0f3 PLAN mode");
-  assert.equal(rows[4], " \uf252 Claude 5h 32% used");
-  assert.equal(rows[5], " \uf252 Codex week 41% used");
-  assert.ok(rows.every((row) => !/ {2}/.test(row)));
+  assert.equal(rows[0], " \uf07b  dotfiles · \ue725 main * ↑2");
+  assert.equal(rows[1], " \u{f06a9}  opus-5.5 · \uee9c reasoning xhigh");
+  assert.equal(rows[2], " \uf0e4  Context 28% used");
+  assert.equal(rows[3], " \uf0f3  PLAN mode");
+  assert.equal(rows[4], " \uf252  Claude 5h 32% used");
+  assert.equal(rows[5], " \uf252  Codex week 41% used");
+  // Two cells after the leading icon, single spaces elsewhere.
+  assert.ok(rows.every((row) => !/ {2}/.test(row.slice(4))));
   assert.ok(rows.every((row) => row.startsWith(" ") && !row.endsWith(" ")));
   // Padding is cosmetic, never a reason to lose context on small terminals.
-  assert.match(mod.renderFooter(s, 20, theme)[2], /^\uf0e4 Context 28% used$/);
+  assert.match(mod.renderFooter(s, 20, theme)[2], /^\uf0e4  Context 28% used$/);
 });
 
 test("footer lines share separators, concise labels and unparenthesized qualifiers", () => {
@@ -290,10 +291,10 @@ test("footer lines share separators, concise labels and unparenthesized qualifie
   s.statuses = mod.absorbStatuses(new Map([["tool-gate", "gate: 0 auto · 0 pushed back · 0 asked"]]), { claudeRow: false }).rest;
   s.quotas = [{ source: "Codex acct", updated: now, windows: [{ label: "week", used: 39, reset: now + 86400_000 }] }];
   const rows = mod.renderFooter(s, 160, theme);
-  assert.equal(rows[1], " \u{f06a9} opus-5.5 · \uee9c reasoning xhigh · auto →");
-  assert.equal(rows[2], " \uf0e4 Context 28% used");
-  assert.equal(rows[3], " \uf510 Gate 0 auto · 0 pushed back · 0 asked");
-  assert.equal(rows[4], " \uf252 Codex week 39% used · resets in 1d0h");
+  assert.equal(rows[1], " \u{f06a9}  opus-5.5 · \uee9c reasoning xhigh · auto →");
+  assert.equal(rows[2], " \uf0e4  Context 28% used");
+  assert.equal(rows[3], " \uf510  Gate 0 auto · 0 pushed back · 0 asked");
+  assert.equal(rows[4], " \uf252  Codex week 39% used · resets in 1d0h");
   assert.deepEqual(mod.absorbStatuses(new Map([["tool-gate", "gate: off"]]), { claudeRow: false }).rest, ["Gate off"]);
   assert.deepEqual(mod.absorbStatuses(new Map([["tool-gate", "gate: new format"]]), { claudeRow: false }).rest, ["gate: new format"]);
 });
@@ -353,7 +354,7 @@ test("natural labels preserve wide characters and fit long names", () => {
   const s = fixture();
   s.quotas[0].source = "日本語 acct";
   const rows = mod.renderFooter(s, 160, theme);
-  assert.match(rows[3], /^ \uf252 日本語 acct 5h/);
+  assert.match(rows[3], /^ \uf252  日本語 acct 5h/);
   s.quotas[0].source = "a very long account label that must shrink";
   s.statuses = ["診断: 問題なし ".repeat(20)];
   for (let width = 1; width <= 240; width++) {
@@ -413,7 +414,7 @@ test("companion extension statuses fold into their rows, and degrade when absent
   assert.deepEqual(mod.absorbStatuses(new Map([["cache-guard", "cache is weird"]]), { claudeRow: false }).rest, ["cache is weird"]);
   assert.match(rows.at(-1), /3 requests billed to extra usage/);
   assert.doesNotMatch(rows.join("\n"), /effort:|lean:|extra usage x3|cache-guard/);
-  assert.match(rows[3], /^ \uf0f3 Plan A working.* \uf510 Gate /);
+  assert.match(rows[3], /^ \uf0f3  Plan A working.* \uf510 Gate /);
   // The model never drops for a companion's segment, and every row fits.
   for (let width = 1; width <= 160; width++) assert.ok(mod.renderFooter(s, width, theme).every((row) => visibleWidth(row) <= width));
   assert.match(plain(mod.renderFooter(s, 50, theme).at(-1)), /extra x3/);
@@ -445,18 +446,18 @@ test("a stashed prompt gets its own row under the editor, with a preview when re
   assert.deepEqual(absorbed, { autoEffort: false, stashed: true, rest: [] });
   const s = { ...fixture(), statuses: absorbed.rest, stash: { text: "refactor the quota poller\n\nso that it backs off\non 429" } };
   const rows = mod.renderFooter(s, 120, theme).map(plain);
-  assert.equal(rows[0], ' \uf187 Stashed \u00b7 "refactor the quota poller" +2 lines \u00b7 ctrl+s to restore');
-  assert.match(rows[1], /^ \uf07b dotfiles/);
+  assert.equal(rows[0], ' \uf187  Stashed \u00b7 "refactor the quota poller" +2 lines \u00b7 ctrl+s to restore');
+  assert.match(rows[1], /^ \uf07b  dotfiles/);
   assert.doesNotMatch(rows.join("\n"), /prompt stashed/);
   // Narrow: the preview shrinks, then goes, then the hint shortens; the label stays.
-  assert.match(plain(mod.renderFooter(s, 60, theme)[0]), /^ \uf187 Stashed \u00b7 "refactor the [^"]*\u2026" \+2 lines \u00b7 ctrl\+s to restore$/);
-  assert.equal(plain(mod.renderFooter(s, 20, theme)[0]), "\uf187 Stashed \u00b7 ctrl+s");
+  assert.match(plain(mod.renderFooter(s, 60, theme)[0]), /^ \uf187  Stashed \u00b7 "refactor the [^"]*\u2026" \+2 lines \u00b7 ctrl\+s to restore$/);
+  assert.equal(plain(mod.renderFooter(s, 20, theme)[0]), "\uf187  Stashed \u00b7 ctrl+s");
   // A long first line is only cut where the terminal runs out, not at a fixed cap.
   const long = "x".repeat(100);
-  assert.equal(plain(mod.renderFooter({ ...s, stash: { text: long } }, 160, theme)[0]), ` \uf187 Stashed \u00b7 "${long}" \u00b7 ctrl+s to restore`);
+  assert.equal(plain(mod.renderFooter({ ...s, stash: { text: long } }, 160, theme)[0]), ` \uf187  Stashed \u00b7 "${long}" \u00b7 ctrl+s to restore`);
   for (let width = 1; width <= 160; width++) assert.ok(mod.renderFooter(s, width, theme).every((row) => visibleWidth(row) <= width));
   // pi-stash's internals unreadable: still a row, just without the preview.
-  assert.equal(plain(mod.renderFooter({ ...s, stash: {} }, 120, theme)[0]), " \uf187 Stashed \u00b7 ctrl+s to restore");
+  assert.equal(plain(mod.renderFooter({ ...s, stash: {} }, 120, theme)[0]), " \uf187  Stashed \u00b7 ctrl+s to restore");
   // Unrecognized text from the stash extension stays in the status row.
   assert.deepEqual(mod.absorbStatuses(new Map([["prompt-stash", "2 prompts stashed"]]), { claudeRow: true }).rest, ["2 prompts stashed"]);
 });
@@ -471,10 +472,10 @@ test("optional companions share label style and preserve meaningful qualifiers",
   assert.deepEqual(absorbed.rest, ["Plan A working · B cut off · resume in /plan · /plan", "Gate off"]);
   const s = { ...fixture(), borderGauge: true, ...absorbed, statuses: absorbed.rest, cache: "cold (model)" };
   const rows = mod.renderFooter(s, 200, theme);
-  assert.equal(rows[2], " \uf0e4 Context 28% used · Cache ❄ · model changed");
-  assert.equal(rows[3], " \uf02d Marimo fit.py · disconnected");
-  assert.equal(rows[4], " \uf085 Background vite starting kept · lint ✗ · fmt ■");
-  assert.match(rows[5], /^ \uf0f3 Plan /);
+  assert.equal(rows[2], " \uf0e4  Context 28% used · Cache ❄ · model changed");
+  assert.equal(rows[3], " \uf02d  Marimo fit.py · disconnected");
+  assert.equal(rows[4], " \uf085  Background vite starting kept · lint ✗ · fmt ■");
+  assert.match(rows[5], /^ \uf0f3  Plan /);
   assert.match(mod.renderFooter({ ...s, cache: "cold?" }, 200, theme)[2], /Cache ❄ · unconfirmed/);
   assert.deepEqual(mod.absorbStatuses(new Map([["plan", "plan: new format"]]), { claudeRow: false }).rest, ["plan: new format"]);
   assert.deepEqual(mod.absorbStatuses(new Map([["third-party", "widget: Mixed CASE (keep me)"]]), { claudeRow: false }).rest, ["widget: Mixed CASE (keep me)"]);
@@ -520,7 +521,7 @@ test("all optional footer rows fit both themes at every width, alone and combine
     for (const notice of ["Stashed", "Marimo", "Background", "lint ✗", "Plan", "Gate", "MCP", "reset due", "extra usage on", "3 requests billed", "limits unavailable"]) {
       assert.ok(text.includes(notice), notice);
     }
-    assert.match(plain(mod.renderFooter(combined, 22, paint).find((row) => plain(row).startsWith("\uf085 Bg "))), /lint ✗/);
+    assert.match(plain(mod.renderFooter(combined, 22, paint).find((row) => plain(row).startsWith("\uf085  Bg "))), /lint ✗/);
   }
 });
 
@@ -536,9 +537,9 @@ test("pi-bg's tasks get their own row under the context row", () => {
   assert.deepEqual(absorbed.rest, []);
   const s = { ...fixture(), statuses: absorbed.rest, bg: absorbed.bg };
   const rows = mod.renderFooter(s, 160, theme).map(plain);
-  assert.equal(rows[3], " \uf085 Background tests 2:14 \u00b7 vite ready kept \u00b7 lint \u2717 \u00b7 fmt \u2713 \u00b7 +1");
+  assert.equal(rows[3], " \uf085  Background tests 2:14 \u00b7 vite ready kept \u00b7 lint \u2717 \u00b7 fmt \u2713 \u00b7 +1");
   // Narrow: what ended fine and the count go first; running and failed work stays.
-  assert.equal(plain(mod.renderFooter(s, 34, theme)[3]), "\uf085 Bg tests · vite ready · lint ✗");
+  assert.equal(plain(mod.renderFooter(s, 34, theme)[3]), "\uf085  Bg tests · vite ready · lint ✗");
   // Another shape stays in the status row.
   assert.deepEqual(mod.absorbStatuses(new Map([["bg", "bg: something new happened"]]), { claudeRow: true }).rest, ["bg: something new happened"]);
 });
@@ -556,13 +557,13 @@ test("pi-pressure's signals get their own row, with arrows while they move", () 
   ]);
   assert.deepEqual(absorbed.rest, []);
   const s = { ...fixture(), statuses: absorbed.rest, pressure: absorbed.pressure };
-  assert.equal(plain(mod.renderFooter(s, 160, theme)[3]), " \uf2db Pressure cpu  97 \u2191 \u00b7 load 1.6   \u00b7 mem warn \u2193 \u00b7 thermal hot    \u00b7 swap-in  40MB/s   \u00b7 top vitest");
+  assert.equal(plain(mod.renderFooter(s, 160, theme)[3]), " \uf2db  Pressure cpu  97 \u2191 \u00b7 load 1.6   \u00b7 mem warn \u2193 \u00b7 thermal hot    \u00b7 swap-in  40MB/s   \u00b7 top vitest");
   // Each signal keeps its width as its value, level and arrow change, so nothing after it moves.
   const moved = mod.parsePressureStatus("pressure: cpu 5 ok \u00b7 load 0.4 \u2193 hot \u00b7 mem ok \u00b7 thermal \u2191 warn \u00b7 swap-in 1.5MB/s \u2191 hot \u00b7 top vitest");
   const starts = (row) => [...row.matchAll(/(cpu|load|mem|thermal|swap-in|top) /g)].map((m) => m.index);
   assert.deepEqual(starts(plain(mod.renderFooter({ ...s, pressure: moved }, 160, theme)[3])), starts(plain(mod.renderFooter(s, 160, theme)[3])));
   // Narrow: the culprit and eased signals go; hot and warn signals stay.
-  assert.equal(plain(mod.renderFooter(s, 50, theme)[3]), "\uf2db Pressure cpu  97 \u2191 \u00b7 mem warn \u2193 \u00b7 thermal hot");
+  assert.equal(plain(mod.renderFooter(s, 51, theme)[3]), "\uf2db  Pressure cpu  97 \u2191 \u00b7 mem warn \u2193 \u00b7 thermal hot");
   // Label, value and arrow all take the level's color.
   // Zero-width SGR codes stand in for the theme's colors.
   const sgr = { error: 31, warning: 33, muted: 37 };
@@ -591,12 +592,12 @@ test("pi-marimo's notebook gets its own row under the context row", () => {
   assert.deepEqual(absorbed.rest, []);
   const s = { ...fixture(), statuses: absorbed.rest, marimo: absorbed.marimo };
   const rows = mod.renderFooter(s, 160, theme).map(plain);
-  assert.match(rows[2], /^ \uf0e4 Context/);
-  assert.equal(rows[3], " \uf02d Marimo fit.py \u00b7 running Data loading \u203a Model fit 12s \u00b7 2 queued \u00b7 1 error \u00b7 also prep.py, plots.py");
+  assert.match(rows[2], /^ \uf0e4  Context/);
+  assert.equal(rows[3], " \uf02d  Marimo fit.py \u00b7 running Data loading \u203a Model fit 12s \u00b7 2 queued \u00b7 1 error \u00b7 also prep.py, plots.py");
   // Narrower: queued goes first, then the other notebooks become a count, then the label goes and the
   // section shortens to its deepest heading; which notebook is current and how many others never go.
-  assert.equal(plain(mod.renderFooter(s, 92, theme)[3]), " \uf02d Marimo fit.py \u00b7 running Data loading \u203a Model fit 12s \u00b7 1 error \u00b7 also prep.py, plots.py");
-  assert.equal(plain(mod.renderFooter(s, 58, theme)[3]), "\uf02d fit.py \u00b7 running Model fit 12s \u00b7 1 error \u00b7 +2 more");
+  assert.equal(plain(mod.renderFooter(s, 92, theme)[3]), " \uf02d  Marimo fit.py \u00b7 running Data loading \u203a Model fit 12s \u00b7 1 error \u00b7 also prep.py, plots.py");
+  assert.equal(plain(mod.renderFooter(s, 58, theme)[3]), "\uf02d  fit.py \u00b7 running Model fit 12s \u00b7 1 error \u00b7 +2 more");
   // An older pi-marimo sent only a count.
   assert.deepEqual(mod.absorbStatuses(new Map([["marimo", "marimo: fit.py \u00b7 +3 open"]]), { claudeRow: true }).marimo, { notebook: "fit.py", others: 3, notes: [] });
 
@@ -616,7 +617,7 @@ test("pi-marimo's Lens selections get their own row under the marimo row", () =>
   const s = { ...fixture(), statuses: absorbed.rest, marimo: absorbed.marimo, lens: absorbed.lens };
   const rows = mod.renderFooter(s, 160, theme).map(plain);
   assert.match(rows[3], /Marimo fit\.py/);
-  assert.equal(rows[4], " \uf06e Lens fit.py \u00b7 S1 make this blue \u00b7 S2 \u00b7 also prep.py 1");
+  assert.equal(rows[4], " \uf06e  Lens fit.py \u00b7 S1 make this blue \u00b7 S2 \u00b7 also prep.py 1");
   for (const width of [46, 120]) for (const row of mod.renderFooter(s, width, theme)) assert.ok(visibleWidth(row) <= width);
   // Another shape stays in the status row.
   assert.deepEqual(mod.absorbStatuses(new Map([["marimo-lens", "lens ready"]]), { claudeRow: true }).rest, ["lens ready"]);
@@ -1598,7 +1599,7 @@ test("MCP chip: built-in servers on the context row, yielding to a published mcp
     await vi.waitFor(() => assert.match(statusRow(), /MCP 2\/3$/), "the trusted project's file adds its servers");
     h.statuses.set("plan", "PLAN mode");
     assert.match(statusRow(), /Context .* \u00b7 \uf1e6 MCP 2\/3$/, "the chip stays on the context row");
-    assert.ok(h.footer.render(120).map(plain).some((row) => /^ \S+ PLAN mode$/.test(row)), "other statuses keep their own row");
+    assert.ok(h.footer.render(120).map(plain).some((row) => /^ \S+  PLAN mode$/.test(row)), "other statuses keep their own row");
     h.statuses.set("mcp", "\u{1f50c} MCP: 5 connected");
     assert.match(statusRow(), /Context .* \u00b7 \uf1e6 MCP: 5 connected$/, "another extension's mcp status replaces the chip");
     assert.equal(h.footer.render(120).filter((row) => /MCP/.test(row)).length, 1);
@@ -1635,7 +1636,7 @@ test("the MCP chip renders with the companion label style and warns on a shortfa
   assert.ok(!render({}).some((row) => /MCP/.test(row)));
   const withSkills = render({ mcp: { connected: 2, total: 2 }, skills: 7, statuses: ["Gate off"] });
   assert.ok(withSkills.find((row) => row.includes("Context")).endsWith("<dim>\uf1e6</dim> <muted>MCP</muted> 2/2<dim> \u00b7 </dim><dim>\uf0d0</dim> <muted>Skills</muted> 7"));
-  assert.ok(withSkills.includes("<dim>\uf510</dim> Gate off"), "other notices keep their own row");
+  assert.ok(withSkills.includes("<dim>\uf510</dim>  Gate off"), "other notices keep their own row");
   assert.ok(contextRow({ skills: 3 }).endsWith("<dim> \u00b7 </dim><dim>\uf0d0</dim> <muted>Skills</muted> 3"), "skills show without MCP");
   assert.ok(!render({ skills: 0 }).some((row) => /Skills/.test(row)));
   for (const name of ["light", "dark"]) {
@@ -1656,12 +1657,12 @@ test("the permission mode gets its own row in its color; plan runs point at /pla
   const rows = mod.renderFooter(s, 160, theme).map(plain);
   assert.match(rows[1], /opus-5\.5 · \uee9c reasoning xhigh$/);
   // The cycle-key hint is not shown.
-  assert.equal(rows[2], " \uf510 \u{f0211} accept edits on");
+  assert.equal(rows[2], " \uf510  \u{f0211} accept edits on");
   // The gate's tally follows the mode on its row.
   const gated = { ...s, statuses: ["Gate 2 auto · 0 pushed back · 1 asked"] };
   const auto = { ...gated, mode: mod.parseModeStatus("⏵⏵ auto mode on (shift+tab to cycle)") };
   const autoRows = mod.renderFooter(auto, 160, theme).map(plain);
-  assert.equal(autoRows[2], " \uf510 \u{f0211} auto mode on · Gate 2 auto · 0 pushed back · 1 asked");
+  assert.equal(autoRows[2], " \uf510  \u{f0211} auto mode on · Gate 2 auto · 0 pushed back · 1 asked");
   assert.equal(autoRows.filter((r) => r.includes("Gate")).length, 1);
   assert.equal(mod.parseModeStatus("⏸ plan mode on").kind, "plan");
   assert.equal(mod.parseModeStatus("⏸ plan mode on").label, "\u{f03e4} plan mode on");
