@@ -17,6 +17,12 @@ export interface StashedPrompt {
 
 export class PromptStash {
   private prompt: StashedPrompt | undefined;
+  /**
+   * Held through a navigation (/tree, /fork, /clone) that may load a message into the editor:
+   * the draft comes back when the editor is empty afterwards, else after the next submit.
+   * Lives on the process-global stash so it survives the session replacement of a fork.
+   */
+  held = false;
 
   /** The stashed text (upstream-compatible accessor; pi-status-footer reads it). */
   get value(): string | undefined {
@@ -34,11 +40,13 @@ export class PromptStash {
 
   stash(prompt: string | StashedPrompt): void {
     this.prompt = typeof prompt === "string" ? { text: prompt } : { ...prompt };
+    this.held = false;
   }
 
   take(): StashedPrompt | undefined {
     const prompt = this.prompt;
     this.prompt = undefined;
+    this.held = false;
     return prompt;
   }
 }
@@ -97,6 +105,16 @@ export function toggleDraft(stash: PromptStash, target: DraftTarget): void {
 /** A slash command: the editor is free again as soon as the command starts. */
 export function isTemporaryAction(input: string): boolean {
   return input.trimStart().startsWith("/");
+}
+
+/**
+ * Pi's built-in navigation commands. Each opens a selector and may then put the selected
+ * user message into the editor (/tree only into an empty one, /fork and /clone always), so
+ * restoring when the command starts would block or lose that message, or lose the draft.
+ */
+export function isNavigationAction(input: string): boolean {
+  const command = input.trim();
+  return command === "/tree" || command === "/fork" || command === "/clone";
 }
 
 /** A `!` or `!!` shell command: Pi awaits it inside the submit callback. */

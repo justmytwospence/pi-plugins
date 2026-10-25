@@ -23,6 +23,7 @@ import {
   type StashRequest,
 } from "./contract.ts";
 import {
+  isNavigationAction,
   isShellAction,
   isTemporaryAction,
   PromptStash,
@@ -159,6 +160,8 @@ export default function promptStash(pi: ExtensionAPI): void {
   const wrappedEditors = new WeakSet<object>();
   const globals = globalThis as Record<symbol, unknown>;
   const lease = {};
+  /** Set at a fork's session start; the next editor setText is Pi loading the forked editor. */
+  let awaitingForkText = false;
 
   const updateStatus = (state: Session) => {
     state.ctx.ui.setStatus(STATUS_ID, stash?.hasPrompt ? state.ctx.ui.theme.fg("accent", STATUS_TEXT) : undefined);
@@ -196,6 +199,39 @@ export default function promptStash(pi: ExtensionAPI): void {
     if (stash) toggleDraft(stash, mainTarget(state, editor));
   };
 
+  /** Held draft: restore into an empty editor, otherwise keep holding until the next submit. */
+  const settle = (state: Session, entry: StashedPrompt | undefined) => {
+    if (session !== state || !stash?.held || stash.entry !== entry) return;
+    restore(state, true);
+  };
+
+  /**
+   * After /tree, wait until its selector and any follow-up dialogs have closed and the
+   * navigation has finished (main editor focused, session idle; Pi has then put the selected
+   * message into the editor, if any), then settle. Cancelling ends up here too.
+   */
+  const settleWhenBack = (state: Session, editor: EditorComponent, tui: TUI, entry: StashedPrompt | undefined) => {
+    const mine = generation;
+    const check = () => {
+      timers.delete(timer);
+      if (mine !== generation || session !== state || !stash?.held || stash.entry !== entry) return;
+      let idle: boolean;
+      try {
+        idle = typeof state.ctx.isIdle === "function" ? state.ctx.isIdle() : true;
+      } catch {
+        return;
+      }
+      if (idle && (tui as FocusedTui).getFocusedComponent?.() === editor) settle(state, entry);
+      else schedule();
+    };
+    let timer: ReturnType<typeof setTimeout>;
+    const schedule = () => {
+      timer = setTimeout(check, 50);
+      timers.add(timer);
+    };
+    schedule();
+  };
+
   /** Restore once the just-submitted slash command has started (Pi clears the editor synchronously). */
   const restoreAfterAction = (state: Session, entry: StashedPrompt | undefined) => {
     const mine = generation;
@@ -209,6 +245,22 @@ export default function promptStash(pi: ExtensionAPI): void {
   const attach = (editor: EditorComponent, tui: TUI) => {
     if (wrappedEditors.has(editor)) return;
     wrappedEditors.add(editor);
+    // After a fork or clone, Pi sets the new session's editor text (the selected message, or
+    // empty) once the replacement has finished; that is when a held draft can settle.
+    const setText = editor.setText.bind(editor);
+    editor.setText = (text: string): void => {
+      setText(text);
+      const state = session;
+      if (!awaitingForkText || !state || state.editor !== editor) return;
+      awaitingForkText = false;
+      const entry = stash?.entry;
+      const mine = generation;
+      const timer = setTimeout(() => {
+        timers.delete(timer);
+        if (mine === generation) settle(state, entry);
+      }, 0);
+      timers.add(timer);
+    };
     const handleInput = editor.handleInput.bind(editor);
     editor.handleInput = (data: string): void => {
       const state = session;
@@ -239,20 +291,25 @@ export default function promptStash(pi: ExtensionAPI): void {
         const state = session;
         const entry = stash?.entry;
         const main = !!state && !!entry && isMainEditor(editor, tui, state.ctx);
+        const navigation = main && isNavigationAction(text);
+        // A held draft (left by a navigation that loaded a message) returns after any submit.
+        const held = main && !navigation && !!stash?.held && text.trim().length > 0;
+        if (navigation) stash!.held = true;
         const revision = changes;
         let failure: unknown;
         let failed = false;
         try {
           const result = submit(text);
           // Only a real submit schedules restoration; accepting autocomplete does not.
-          if (main && state && isTemporaryAction(text)) restoreAfterAction(state, entry);
+          if (state && navigation && text.trim() === "/tree") settleWhenBack(state, editor, tui, entry);
+          else if (main && state && !navigation && (held || isTemporaryAction(text))) restoreAfterAction(state, entry);
           await result;
         } catch (error) {
           failure = error;
           failed = true;
         }
-        if (main && state && session === state && stash?.entry === entry
-          && (isShellAction(text) || isTemporaryAction(text))) {
+        if (main && state && !navigation && session === state && stash?.entry === entry
+          && (held || isShellAction(text) || isTemporaryAction(text))) {
           const current = state.ctx.ui.getEditorText();
           // An unchanged command left by Pi can be removed. Newly typed text is a draft,
           // even if it happens to equal the command, so text equality alone is not enough.
@@ -310,10 +367,11 @@ export default function promptStash(pi: ExtensionAPI): void {
     }
     release = undefined;
     session = undefined;
+    awaitingForkText = false;
     if (globals[LEASE] === lease) delete globals[LEASE];
   };
 
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", (event, ctx) => {
     stop();
     if (ctx.mode !== "tui" || !ctx.hasUI) return;
     const adopted = adoptStash();
@@ -336,6 +394,13 @@ export default function promptStash(pi: ExtensionAPI): void {
       return;
     }
     globals[LEASE] = lease;
+    if ((event as { reason?: string } | undefined)?.reason === "fork" && stash.hasPrompt) {
+      // Pi overwrites the editor after a fork or clone; hold the draft until it has.
+      stash.held = true;
+      awaitingForkText = true;
+      updateStatus(state);
+      return;
+    }
     if (!restore(state, true)) updateStatus(state);
   });
 

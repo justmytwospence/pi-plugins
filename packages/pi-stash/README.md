@@ -7,6 +7,7 @@ Main-editor draft stashing for Pi SDK 1.1.0. Independently usable; pi-vim is opt
 - **Ctrl+S** stashes the main draft and clears the editor.
 - Run `/command`: the draft returns when the command starts or finishes and the editor is empty.
 - Run `!command` or `!!command`: restoration waits for shell completion.
+- Run `/tree`, `/fork` or `/clone`: the draft stays stashed while the selector and its dialogs are open, so Pi can load the message you went back to. If the editor is empty afterwards (a non-message node, a clone or a cancelled `/tree`), the draft comes back. If it holds the loaded message, the draft returns after you submit that message. A cancelled `/fork` keeps the draft until Ctrl+S or the next submit, because a cancel looks the same as a fork in progress.
 - **Ctrl+S** with an empty editor restores manually; with text in both places it swaps them.
 - Model and thinking-level selection also restore into an empty editor.
 

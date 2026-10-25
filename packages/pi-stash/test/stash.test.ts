@@ -347,6 +347,99 @@ test("shell completion cannot overwrite a newly typed identical command", async 
   expect((globals[STASH_KEY] as PromptStash).value).toBe("draft");
 });
 
+// ─── navigation: /tree, /fork, /clone ───
+
+const settled = () => new Promise<void>((resolve) => setTimeout(resolve, 120));
+
+function submit(s: Awaited<ReturnType<typeof start>>["s"], text: string) {
+  s.state.main.setText(text);
+  s.state.main.handleInput(ENTER);
+}
+
+test("/tree holds the draft while its selector is open and the session is busy, then fills an empty editor", async () => {
+  const { s } = await start();
+  let idle = true;
+  (s.ctx as { isIdle?: () => boolean }).isIdle = () => idle;
+  s.state.main.setText("draft");
+  s.state.main.handleInput(CTRL_S);
+  submit(s, "/tree");
+  const editor = s.state.main;
+  s.state.focused = {}; // the tree selector
+  await settled();
+  expect(s.state.main.getText()).toBe("");
+  expect((globals[STASH_KEY] as PromptStash).held).toBe(true);
+  s.state.focused = editor;
+  idle = false; // navigating (summary, session_before_tree handlers)
+  await settled();
+  expect(s.state.main.getText()).toBe("");
+  idle = true; // navigated to a non-message node, or cancelled
+  await settled();
+  expect(s.state.main.getText()).toBe("draft");
+  expect((globals[STASH_KEY] as PromptStash).hasPrompt).toBe(false);
+});
+
+test("/tree that loads a message keeps the draft stashed until the next submit", async () => {
+  const { s } = await start();
+  s.state.main.setText("draft");
+  s.state.main.handleInput(CTRL_S);
+  submit(s, "/tree");
+  s.state.main.setText("earlier message"); // Pi fills the empty editor with the selected message
+  await settled();
+  expect(s.state.main.getText()).toBe("earlier message");
+  expect((globals[STASH_KEY] as PromptStash).value).toBe("draft");
+  expect(s.status.get(STATUS_ID)).toBe(STATUS_TEXT);
+  s.state.main.handleInput(ENTER);
+  expect(s.submitted.at(-1)).toBe("earlier message");
+  await flush();
+  expect(s.state.main.getText()).toBe("draft");
+  expect((globals[STASH_KEY] as PromptStash).held).toBe(false);
+});
+
+test("/fork never restores under its selector; a cancelled fork holds until Ctrl+S or the next submit", async () => {
+  const { s } = await start();
+  s.state.main.setText("draft");
+  s.state.main.handleInput(CTRL_S);
+  submit(s, "/fork");
+  await settled();
+  expect(s.state.main.getText()).toBe("");
+  expect((globals[STASH_KEY] as PromptStash).held).toBe(true);
+  s.state.main.handleInput(CTRL_S);
+  expect(s.state.main.getText()).toBe("draft");
+});
+
+test("a fork's session start holds the draft until Pi sets the forked editor text", async () => {
+  const { h, s } = await start();
+  s.state.main.setText("draft");
+  s.state.main.handleInput(CTRL_S);
+  submit(s, "/fork");
+  await h.emit("session_shutdown", { reason: "fork" }, s.ctx);
+  const next = h.session();
+  await h.emit("session_start", { reason: "fork" }, next.ctx);
+  await settled();
+  expect(next.state.main.getText()).toBe("");
+  next.state.main.setText("selected message"); // Pi, after the fork
+  await flush();
+  expect(next.state.main.getText()).toBe("selected message");
+  expect((globals[STASH_KEY] as PromptStash).value).toBe("draft");
+  await flush(); // onSubmit is wrapped a microtask after creation
+  next.state.main.handleInput(ENTER);
+  await flush();
+  expect(next.state.main.getText()).toBe("draft");
+});
+
+test("a clone's session start restores once Pi has cleared the editor", async () => {
+  const { h, s } = await start();
+  s.state.main.setText("draft");
+  s.state.main.handleInput(CTRL_S);
+  submit(s, "/clone");
+  await h.emit("session_shutdown", { reason: "fork" }, s.ctx);
+  const next = h.session();
+  await h.emit("session_start", { reason: "fork" }, next.ctx);
+  next.state.main.setText(""); // Pi, after the clone
+  await flush();
+  expect(next.state.main.getText()).toBe("draft");
+});
+
 test("late shell completion cannot restore into a replacement session", async () => {
   const { h, s } = await start();
   s.state.main.setText("draft");

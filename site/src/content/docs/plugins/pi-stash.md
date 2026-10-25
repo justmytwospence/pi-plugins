@@ -50,6 +50,8 @@ While a prompt is stashed, a `prompt stashed` status is shown; [pi-status-footer
 
 Automatic restoration happens after a submitted slash command starts, after a `!` or `!!` shell command finishes, after a model or thinking-level change, and at session start when a stash is still held in the process. It **only fills an empty editor**. If you typed something new in the meantime, that text stays and the stash waits for an explicit Ctrl+S. After a shell command, Pi can leave the command itself in the editor; only that exact text is cleared before restoring.
 
+`/tree`, `/fork` and `/clone` are the exception to "after a slash command starts". They can load an earlier user message into the editor, so the draft stays stashed until the selector, its dialogs and the navigation have finished. If the editor is then empty (a non-message node, a clone, a cancelled `/tree`), the draft comes back. If it holds the loaded message, the draft returns after you submit that message. A cancelled `/fork` keeps the draft until Ctrl+S or the next submit.
+
 ## Editors and focus
 
 Only Pi's main prompt editor is stashed. Ctrl+S passes through unchanged when another component has focus or when the editor is an embedded one inside a dialog, as marked by the suite editor contract. Other plugins can ask pi-stash for a stash of their own over the `pi-plugins.prompt-stash.v1` event channel; pi-sidebar's composer does, so its drafts never mix with main's. The stash wraps whatever editor factory was installed before it, so it composes with an editor replacement such as [pi-vim](/plugins/pi-vim/) loaded earlier.
