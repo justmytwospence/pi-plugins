@@ -3,6 +3,9 @@
 // - Footer: `marimo: <current file> · running <section> (12s) · 2 queued · 1 error · also <file>, <file>`
 //   through ctx.ui.setStatus("marimo", ...), so it shows in Pi's own footer and
 //   any footer that reads extension statuses.
+// - Session scope: footer, Lens and context cover only the notebooks this session uses (pinned, or
+//   worked in by its agent through marimo-pair, saved with the session). Other notebooks open under
+//   the cwd, such as one another session in this checkout works in, get a one-line mention in context.
 // - Context: the notebooks' state, taken when you send a prompt, sits right
 //   after that prompt for the whole turn. It is never stored in the session, so
 //   the model sees only the current turn's copy and old copies never pile up.
@@ -42,6 +45,16 @@ const OFFER_SOURCE = "pi-marimo";
 const MESSAGE_TYPE = "pi-marimo-state";
 
 type Entry = { type?: string; customType?: string; data?: unknown };
+
+function savedEngaged(entries: readonly Entry[]): string[] {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry?.type !== "custom" || entry.customType !== ENTRY) continue;
+    const engaged = (entry.data as { engaged?: unknown } | undefined)?.engaged;
+    if (Array.isArray(engaged)) return engaged.filter((p): p is string => typeof p === "string");
+  }
+  return [];
+}
 
 function savedMode(entries: readonly Entry[]): Mode | undefined {
   for (let i = entries.length - 1; i >= 0; i--) {
@@ -155,14 +168,17 @@ export default function piMarimo(pi: ExtensionAPI): void {
     if (id && id !== source.section.id) source.section.setHosted?.(false, id);
   });
 
+  /** The followed notebooks this session uses, the current one first. */
+  const mine = () => (watcher?.followed() ?? []).filter((f) => f.engaged);
+
   const statusLine = (): string | undefined => {
     if (!watcher) return undefined;
-    const { connection, attachment, mode } = watcher;
-    if (!attachment) return undefined;
-    if (connection === "searching") {
+    const [first, ...rest] = mine();
+    if (!first) {
+      const { mode } = watcher;
       return mode.kind === "pinned" ? statusText({ notebook: mode.paths.map((p) => p.split("/").pop()).join(", "), connection: "not open", queued: 0, errors: 0 }) : undefined;
     }
-    return statusText(statusParts(watcher.notebook, attachment, connection, Date.now(), watcher.others()));
+    return statusText(statusParts(first.notebook, first.attachment, first.connection, Date.now(), rest.map((f) => f.attachment)));
   };
 
   const render = (): void => {
@@ -193,7 +209,7 @@ export default function piMarimo(pi: ExtensionAPI): void {
 
   /** The Lens footer line, and a next-prompt offer when the user marks something new while Pi is idle. */
   const lensUpdate = (): void => {
-    const connected = (watcher?.followed() ?? []).filter((f) => f.connection === "connected");
+    const connected = mine().filter((f) => f.connection === "connected");
     const lens = lensStatusText(connected);
     if (lens !== lastLensStatus) {
       lastLensStatus = lens;
@@ -229,10 +245,10 @@ export default function piMarimo(pi: ExtensionAPI): void {
     pending ??= setTimeout(render, 150);
   };
 
-  /** The followed notebooks that are connected, the current one first. */
-  const stateEntries = () =>
+  /** The followed notebooks that are connected (only this session's with `own`), the current one first. */
+  const stateEntries = (own = false) =>
     (watcher?.followed() ?? [])
-      .filter((f) => f.connection === "connected" && f.notebook.ready)
+      .filter((f) => f.connection === "connected" && f.notebook.ready && (!own || f.engaged))
       .map((f) => ({ notebook: f.notebook, attachment: f.attachment, current: f.current, seenSeq: seen.get(f.attachment.path) ?? 0 }));
 
   const setMode = (mode: Mode): void => {
@@ -246,7 +262,9 @@ export default function piMarimo(pi: ExtensionAPI): void {
     herdr = ctx.mode === "tui" ? new HerdrHold(pi.events) : undefined;
     await watcher?.stop();
     watcher = new MarimoWatcher({ io: nodeIo(), cwd: ctx.cwd, token: process.env.MARIMO_TOKEN, onChange: schedule });
-    watcher.mode = savedMode(ctx.sessionManager.getBranch() as Entry[]) ?? { kind: "auto" };
+    const branch = ctx.sessionManager.getBranch() as Entry[];
+    watcher.mode = savedMode(branch) ?? { kind: "auto" };
+    watcher.engage(savedEngaged(branch));
     watcher.start();
     source.resetHosts();
     bindPill();
@@ -284,17 +302,23 @@ export default function piMarimo(pi: ExtensionAPI): void {
     if (!watcher) return;
     watcher.refresh();
     await watcher.settle(2000);
-    const entries = stateEntries();
+    const entries = stateEntries(true);
+    const others = watcher.followed().filter((f) => !f.engaged && f.connection === "connected").map((f) => f.attachment.path);
     // Bring the running list up to date first: a cell may have started within the last render's debounce.
     if (ctxRef) bg.external(watcher.followed(), ctxRef.cwd);
-    turn = entries.length ? { text: withWaitHint(snapshot(entries, { refresh: "prompt" }), bg.runningIds(), pi) } : undefined;
+    const note = others.length ? `Other marimo notebooks open under this directory, not used in this session (work in one through marimo-pair to follow it): ${others.join(", ")}` : "";
+    const text = entries.length ? withWaitHint(snapshot(entries, { refresh: "prompt" }), bg.runningIds(), pi) : "";
+    turn = text || note ? { text: [text, note].filter(Boolean).join("\n") } : undefined;
   });
 
   // The notebook this session's agent works in (through marimo-pair) becomes current for this
   // session, whatever other sessions or the browser do. Nested calls (codemode) arrive here too.
   pi.on("tool_call", (event) => {
     const targets = pairTargets(JSON.stringify(event.input ?? {}));
-    if (targets.length) watcher?.touch(targets);
+    if (!targets.length || !watcher) return undefined;
+    const before = watcher.engaged().length;
+    watcher.touch(targets);
+    if (watcher.engaged().length !== before) pi.appendEntry(ENTRY, { engaged: watcher.engaged() });
     return undefined;
   });
 

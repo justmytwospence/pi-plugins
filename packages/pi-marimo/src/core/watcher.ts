@@ -46,6 +46,8 @@ export interface Followed {
   current: boolean;
   /** When this session's agent last worked in it (0: never). */
   touchedAt: number;
+  /** Whether this session uses it: pinned, or its agent has worked in it (now or earlier in the session). */
+  engaged?: boolean;
 }
 
 /** Read a saved or configured mode, accepting the single-notebook form `{ kind: "pinned", path }`. */
@@ -145,6 +147,8 @@ export class MarimoWatcher {
   private realCwd?: string;
   private readonly realPaths = new Map<string, string>();
   private readonly empty = new NotebookState();
+  // Canonical paths of the notebooks this session's agent has worked in.
+  private readonly engagedPaths = new Set<string>();
 
   constructor(private readonly options: WatcherOptions) {}
 
@@ -166,7 +170,7 @@ export class MarimoWatcher {
 
   /** Every followed notebook, the current one first, then by most recent use. */
   followed(): Followed[] {
-    return this.ranked().map((f, i) => ({ attachment: f.attachment, canonicalPath: f.target.real, notebook: f.notebook, connection: f.connection, current: i === 0, touchedAt: f.touchedAt }));
+    return this.ranked().map((f, i) => ({ attachment: f.attachment, canonicalPath: f.target.real, notebook: f.notebook, connection: f.connection, current: i === 0, touchedAt: f.touchedAt, engaged: this.mode.kind === "pinned" || this.engagedPaths.has(f.target.real) }));
   }
 
   get notebook(): NotebookState {
@@ -221,10 +225,22 @@ export class MarimoWatcher {
       if (!match) return;
       // Later calls in one tool call win.
       match.touchedAt = now + i;
+      this.engagedPaths.add(match.target.real);
       touched = true;
     });
     if (touched) this.options.onChange();
     return touched;
+  }
+
+  /** Canonical paths of the notebooks this session has worked in, to save with the session. */
+  engaged(): string[] {
+    return [...this.engagedPaths];
+  }
+
+  /** Restore notebooks this session worked in before (canonical paths, as engaged() returns them). */
+  engage(paths: readonly string[]): void {
+    for (const p of paths) this.engagedPaths.add(p);
+    this.options.onChange();
   }
 
   /** The other notebooks followed besides the current one, most recently used first. */

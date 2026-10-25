@@ -54,10 +54,12 @@ async function until(cond: () => boolean, ms = 3_000): Promise<void> {
   }
 }
 
-function setup() {
+function setup(branch: unknown[] = []) {
   const handlers = new Map<string, Array<(e: unknown, c: unknown) => unknown>>();
   const listeners = new Map<string, Array<(d: unknown) => void>>();
   const sent: Array<[string, any]> = [];
+  const entries: Array<{ type: string; customType: string; data: any }> = [];
+  const statuses = new Map<string, string | undefined>();
   const pi = {
     on: (name: string, h: (e: unknown, c: unknown) => unknown) => void handlers.set(name, [...(handlers.get(name) ?? []), h]),
     events: {
@@ -68,12 +70,12 @@ function setup() {
       },
     },
     registerCommand: () => undefined,
-    appendEntry: () => undefined,
+    appendEntry: (customType: string, data: unknown) => void entries.push({ type: "custom", customType, data }),
   };
   const widgets = new Map<string, any>();
   const customs: any[] = [];
   const ui = {
-    setStatus: () => undefined,
+    setStatus: (key: string, text: string | undefined) => void statuses.set(key, text),
     notify: () => undefined,
     setWidget: (key: string, w: unknown) => void (w ? widgets.set(key, w) : widgets.delete(key)),
     onTerminalInput: () => () => undefined,
@@ -84,7 +86,7 @@ function setup() {
       return Promise.resolve();
     },
   };
-  const ctx = { cwd: CWD, mode: "tui", isIdle: () => true, ui, sessionManager: { getBranch: () => [] } };
+  const ctx = { cwd: CWD, mode: "tui", isIdle: () => true, ui, sessionManager: { getBranch: () => branch } };
   piMarimo(pi as never);
   const fire = async (name: string, event: unknown = {}) => {
     for (const h of handlers.get(name) ?? []) await h(event, ctx);
@@ -95,7 +97,7 @@ function setup() {
     const w = widgets.get("pi-marimo-pill") ?? [...widgets.values()][0];
     return w ? w({ requestRender: () => undefined }, { fg: (_c: string, t: string) => t, bold: (t: string) => t }).render(80).join("\n") : undefined;
   };
-  return { pi, fire, sent, of, widgets, customs, pillText, ui };
+  return { pi, fire, sent, of, widgets, customs, pillText, ui, entries, statuses, handlers };
 }
 
 const pair = `bash .agents/skills/marimo-pair/scripts/execute-code.sh --url ${SERVER} --file nb.py - <<'PY'\nfit()\nPY`;
@@ -205,4 +207,32 @@ test("the notebooks as background work: a source for the hosts, its own pill alo
   x.pi.events.emit("activity:host", {});
   expect(x.of("activity:section")).toHaveLength(offered);
   vi.unstubAllGlobals();
+});
+
+test("session scope: a notebook open under the cwd gets no footer until this session works in it, and stays after resuming", async () => {
+  const x = setup();
+  await x.fire("session_start");
+  await until(() => server.feeds.length > 0);
+  server.feeds.at(-1)!(untilRunning);
+  await until(() => x.of("bg:external").some((d) => d.state === "running"));
+  // Another session's notebook: no footer, only a mention in the turn's context.
+  expect(x.statuses.get("marimo")).toBeUndefined();
+  await x.fire("before_agent_start");
+  const [context] = x.handlers.get("context")!;
+  const placed = (await context!({ messages: [{ role: "user", timestamp: 1 }] }, undefined)) as { messages: Array<{ content?: string }> };
+  expect(placed.messages[1]?.content).toMatch(/^Other marimo notebooks open under this directory, not used in this session.*\/w\/nb\.py$/u);
+
+  // The agent works in it: footer, and saved with the session.
+  await x.fire("tool_call", { input: { command: pair } });
+  await until(() => /nb\.py/u.test(x.statuses.get("marimo") ?? ""));
+  expect(x.entries).toContainEqual({ type: "custom", customType: "pi-marimo", data: { engaged: ["/w/nb.py"] } });
+  await x.fire("session_shutdown");
+
+  // Resumed: shown without another touch.
+  const y = setup(x.entries);
+  await y.fire("session_start");
+  await until(() => server.feeds.length > 1);
+  server.feeds.at(-1)!(untilRunning);
+  await until(() => /nb\.py/u.test(y.statuses.get("marimo") ?? ""));
+  await y.fire("session_shutdown");
 });
