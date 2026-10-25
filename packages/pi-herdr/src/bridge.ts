@@ -12,7 +12,7 @@
 // pi-herdr emits `herdr:ready` once it is active, so an extension that set a token before pi-herdr
 // loaded can send it again. `herdr:blocked` is not handled here: herdr's own pi integration
 // reads it.
-import { type Call, splitDirection } from "./core/herdr.ts";
+import { type Call, errorText, splitDirection } from "./core/herdr.ts";
 import type { PaneReporter } from "./core/report.ts";
 
 export interface TokenEvent {
@@ -113,7 +113,12 @@ export class Bridge {
     if (!paneId) return report(false, "herdr could not open a split");
     // The split starts a shell; exit it with the command so the pane closes when it ends.
     const run = await this.call("pane.send_input", { pane_id: paneId, text: `${e.command}; exit`, keys: ["enter"] });
-    if (run.error) return report(false, "herdr opened a split but could not run the command");
+    if (run.error) {
+      // e.g. macOS refuses input longer than the terminal's line limit (herdr 0.9.4+):
+      // do not leave a bare shell behind.
+      await this.call("pane.close", { pane_id: paneId });
+      return report(false, `herdr opened a split but could not run the command: ${errorText(run)}`);
+    }
     report(true, paneId);
   }
 

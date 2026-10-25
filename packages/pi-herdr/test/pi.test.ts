@@ -81,6 +81,19 @@ describe("bridge", () => {
     expect(got).toEqual([true, "w1:p2"]);
   });
 
+  it("closes the split when the command cannot be sent", async () => {
+    const f = fakeCall({
+      "pane.layout": () => ({ result: { layout: { zoomed: false, panes: [{ pane_id: "w1:p1", rect: { width: 120, height: 40 } }] } } }),
+      "pane.split": () => ({ result: { pane: { pane_id: "w1:p2" } } }),
+      "pane.send_input": () => ({ error: { code: "pane_send_failed", message: "too long" } }),
+    });
+    const b = new Bridge(f.call, new PaneReporter(f.call, "w1:p1"));
+    let got: [boolean, string] | undefined;
+    await b.split({ command: "x", cwd: "/r", done: (ok, m) => (got = [ok, m]) });
+    expect(f.of("pane.close")[0]!.params).toEqual({ pane_id: "w1:p2" });
+    expect(got).toEqual([false, "herdr opened a split but could not run the command: too long (pane_send_failed)"]);
+  });
+
   it("notifies unless focused", async () => {
     let focused = true;
     const f = fakeCall({ "pane.get": () => ({ result: { pane: { focused } } }) });
