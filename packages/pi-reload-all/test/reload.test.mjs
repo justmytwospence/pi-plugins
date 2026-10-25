@@ -141,3 +141,39 @@ test('print and RPC sessions do not watch', () => {
   handlers.get('session_start')({}, { mode: 'rpc', hasUI: true, ui: {} });
   handlers.get('session_shutdown')({}, {});
 });
+
+test('/reload-all reports first, then reloads its own session once, and nothing after', async () => {
+  const dir = tmp();
+  const prev = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  const handlers = new Map();
+  const commands = new Map();
+  const sent = [];
+  const order = [];
+  let stale = false;
+  const live = (name) => { assert.ok(!stale, `${name} used after reload`); };
+  try {
+    let release;
+    const slow = new Promise((r) => { release = r; });
+    reloadAll({
+      on: (n, h) => handlers.set(n, h),
+      registerCommand: (n, c) => commands.set(n, c),
+      registerEntryRenderer() {},
+      appendEntry: () => { live('pi.appendEntry'); order.push('report'); },
+      sendUserMessage: (t) => sent.push(t),
+    }, { now: () => 0, sleep: async () => {}, exec: async (file, args) => { if (args[0] === 'machine') { await slow; return '[]'; } throw new Error('no'); } });
+    const ctx = { mode: 'tui', hasUI: true, ...fakeCtx([{ idle: true }]), ui: { setStatus() {}, getEditorText: () => '', notify() { live('notify'); } },
+      reload: async () => { live('reload'); order.push('reload'); handlers.get('session_shutdown')({}, ctx); stale = true; } };
+    handlers.get('session_start')({}, ctx);
+    const running = commands.get('reload-all').handler('', ctx);
+    // The watcher sees the request while ssh/herdr calls are still out: it must not act.
+    await new Promise((r) => setTimeout(r, 150));
+    assert.deepEqual(sent, []);
+    release();
+    await running;
+    assert.deepEqual(order, ['report', 'reload']);
+  } finally {
+    if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = prev;
+    rmSync(dir, { recursive: true });
+  }
+});

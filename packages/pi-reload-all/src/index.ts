@@ -53,6 +53,8 @@ export default function reloadAll(pi: ExtensionAPI, deps: Deps = defaultDeps): v
   let watcher: FSWatcher | undefined;
   let poll: ReturnType<typeof setInterval> | undefined;
   let pending = false;
+  /** /reload-all is running here: it reloads this session itself when done. */
+  let sending = false;
   let stale = false;
   let ctxRef: ExtensionContext | undefined;
 
@@ -63,7 +65,7 @@ export default function reloadAll(pi: ExtensionAPI, deps: Deps = defaultDeps): v
   });
 
   const check = () => {
-    if (stale || pending || !ctxRef) return;
+    if (stale || pending || sending || !ctxRef) return;
     const request = readRequest();
     if (!isFresh(request, startedAt, handled)) return;
     handled.add(request.id);
@@ -103,44 +105,67 @@ export default function reloadAll(pi: ExtensionAPI, deps: Deps = defaultDeps): v
     poll = undefined;
   });
 
+  /** Reloads this session once it is safe. Nothing may touch pi or ctx after ctx.reload(). */
+  const reloadWhenSafe = async (ctx: ExtensionCommandContext) => {
+    pending = true;
+    if (await waitUntilSafe(ctx, () => stale, deps, () => sending)) await ctx.reload();
+    if (stale) return;
+    // Not reloaded (Pi skips it while compacting): accept the next request.
+    pending = false;
+    try {
+      ctx.ui.setStatus(STATUS, undefined);
+    } catch {
+      // stale runtime
+    }
+  };
+
   pi.registerCommand(PENDING_COMMAND, {
     description: "Reload once the turn ends and the editor is empty (used by /reload-all)",
-    handler: async (_args, ctx) => {
-      pending = true;
-      if (await waitUntilSafe(ctx, () => stale, deps)) await ctx.reload();
-      if (stale) return;
-      // Not reloaded (Pi skips it while compacting): accept the next request.
-      pending = false;
-      try {
-        ctx.ui.setStatus(STATUS, undefined);
-      } catch {
-        // stale runtime
-      }
-    },
+    handler: async (_args, ctx) => reloadWhenSafe(ctx),
   });
 
   pi.registerCommand("reload-all", {
     description: "Reload every Pi session here and on Herdr's saved machines (--local: this machine only)",
     handler: async (args, ctx) => {
-      const local = /(^|\s)--local(\s|$)/u.test(args);
       const request = makeRequest();
-      const lines = ["/reload-all: sessions reload when their turn ends and the editor is empty"];
+      // This session's watcher must not reload it while the command still runs.
+      handled.add(request.id);
+      sending = true;
+      let lines: string[];
       try {
-        writeRequest(request);
-        lines.push(`  this machine: signalled${countText(await countLocal(deps))}`);
-      } catch (error) {
-        lines.push(`  this machine: failed (${message(error)})`);
+        lines = await signal(args, request);
+      } finally {
+        sending = false;
       }
-      if (!local) for (const r of await signalMachines(request, deps)) lines.push(`  ${r.machine}: ${r.ok ? `signalled${countText(r.sessions)}` : `failed (${r.error})`}`);
-      // Kept as an entry: this session's own reload, a moment later, rebuilds the chat.
-      pi.appendEntry(ENTRY, { lines });
-      if (ctx.mode !== "tui") ctx.ui.notify(lines.join("\n"), "info");
+      if (ctx.mode !== "tui" || !ctx.hasUI) return ctx.ui.notify(lines.join("\n"), "info");
+      // The report is kept as an entry: the reload rebuilds the chat.
+      await reloadWhenSafe(ctx);
     },
   });
+
+  /** Writes the request everywhere and records the report. */
+  const signal = async (args: string, request: Request): Promise<string[]> => {
+    const local = /(^|\s)--local(\s|$)/u.test(args);
+    const lines = ["/reload-all: sessions reload when their turn ends and the editor is empty"];
+    try {
+      writeRequest(request);
+      lines.push(`  this machine: signalled${countText(await countLocal(deps))}`);
+    } catch (error) {
+      lines.push(`  this machine: failed (${message(error)})`);
+    }
+    if (!local) for (const r of await signalMachines(request, deps)) lines.push(`  ${r.machine}: ${r.ok ? `signalled${countText(r.sessions)}` : `failed (${r.error})`}`);
+    pi.appendEntry(ENTRY, { lines });
+    return lines;
+  };
 }
 
 /** Waits for an ended turn, an empty queue and an empty editor. False when the runtime went stale. */
-export async function waitUntilSafe(ctx: ExtensionCommandContext, isStale: () => boolean, deps: Pick<Deps, "sleep">): Promise<boolean> {
+export async function waitUntilSafe(
+  ctx: ExtensionCommandContext,
+  isStale: () => boolean,
+  deps: Pick<Deps, "sleep">,
+  isHeld: () => boolean = () => false,
+): Promise<boolean> {
   for (;;) {
     await ctx.waitForIdle();
     if (isStale()) return false;
@@ -151,7 +176,7 @@ export async function waitUntilSafe(ctx: ExtensionCommandContext, isStale: () =>
       return false;
     }
     // A queued follow-up can start another run right after idle.
-    if (ctx.isIdle() && !ctx.hasPendingMessages() && !draft.trim()) return true;
+    if (!isHeld() && ctx.isIdle() && !ctx.hasPendingMessages() && !draft.trim()) return true;
     await deps.sleep(RECHECK_MS);
     if (isStale()) return false;
   }
