@@ -89,7 +89,7 @@ instead of the status row:
 | --- | --- | --- |
 | pi-auto-effort | `effort: high (auto ↑)` | `reasoning high · auto ↑` on the model row (arrow and any `limited:` note kept) |
 | pi-cache-guard | `cache 4:12`, `cache cold` | `Cache 4:12` or `Cache ❄` on the context row (warm in green, cold in the warning color) |
-| pi-tool-gate (or pi-plan-mode alone) | `⏵⏵ auto mode on (shift+tab to cycle)` | the permission mode on the model row, in Claude Code's color for it, with one same-width pause or fast-forward Nerd Font icon in place of `⏸` / `⏵⏵` (the key hint is dropped first when narrow) |
+| pi-tool-gate (or pi-plan-mode alone) | `⏵⏵ auto mode on (shift+tab to cycle)` | the permission mode on its own row, in Claude Code's color for it, with one same-width pause or fast-forward Nerd Font icon in place of `⏸` / `⏵⏵`; the cycle-key hint is not shown, and the tool-gate tally follows the mode on that row |
 | pi-cache-guard (Jev trimming, key `lean-context`) | `lean: −12k tok` | `Lean −12k tok` on the context row |
 | anthropic-billing-guard | `extra usage x3` | `3 requests billed to extra usage` on the Claude limits row |
 | @saadjs/pi-stash | `prompt stashed` | `Stashed · "first line…" +2 lines · ctrl+s to restore` as the top row, just under the editor |
@@ -100,8 +100,8 @@ instead of the status row:
 
 Without them nothing changes. A status whose text no longer has the expected shape,
 or a billing notice with no Claude limits row to attach to, stays in the status row
-unchanged, so a notice is never lost. Planner-run, tool-gate count and MCP statuses
-always stay in the status row. The recognized tool-gate status displays as
+unchanged, so a notice is never lost. Planner-run statuses stay in the status row; the tool-gate count joins the
+permission mode's row when there is one. The recognized tool-gate status displays as
 `Gate 2 auto · 0 pushed back · 1 asked` (example). Recognized planner-run
 notices use `Plan A working · /planners` (example). Model-change and
 unconfirmed cache states display as `Cache ❄ · model changed` and

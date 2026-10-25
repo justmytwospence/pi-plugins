@@ -878,7 +878,6 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   const identity = `${model}${reasoning ? `${sep}${reasoning}` : ""}`;
   const modeColor = s.mode ? MODE_COLORS[s.mode.kind] : "muted";
   const modeText = s.mode ? theme.fg(modeColor, clean(s.mode.label)) : "";
-  const modeLong = s.mode?.key ? `${modeText}${theme.fg("dim", ` (${clean(s.mode.key)} to cycle)`)}` : modeText;
   rows.push(row(ICONS.project, (w) => fitSegments([
     { text: project, priority: 60 },
     { text: branch, short: branchShort, priority: g.conflicts ? 110 : 70 },
@@ -903,11 +902,12 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     { text: phaseText, priority: 120 },
     { text: s.queued ? theme.fg("warning", "queued") : "", priority: 115 },
   ], w, theme)));
-  // The permission mode gets its own row; in auto mode the gate's tally follows it.
-  const gateStatus = s.mode?.kind === "auto" ? s.statuses.find((status) => /^Gate /.test(stripVTControlCharacters(status))) : undefined;
+  // The permission mode gets its own row, and the gate's tally (published only in the
+  // modes where Jev judges) follows it there. The cycle-key hint is not shown.
+  const gateStatus = s.mode ? s.statuses.find((status) => /^Gate /.test(stripVTControlCharacters(status))) : undefined;
   const statuses = gateStatus ? s.statuses.filter((status) => status !== gateStatus) : s.statuses;
   if (s.mode) rows.push(row(ICONS.gate, (w) => fitSegments([
-    { text: modeLong, short: modeText, priority: 100 },
+    { text: modeText, priority: 100 },
     { text: gateStatus ? gateStatus.replace(/[\r\n\t]/g, " ") : "", priority: 50 },
   ], w, theme)));
 
