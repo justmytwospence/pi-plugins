@@ -23,6 +23,11 @@ export class PromptStash {
    * Lives on the process-global stash so it survives the session replacement of a fork.
    */
   held = false;
+  /**
+   * Set by /import, which replaces the session and then clears the editor: the next session
+   * settles the draft only after that. (Forks and clones are told apart by their start reason.)
+   */
+  awaitText = false;
 
   /** The stashed text (upstream-compatible accessor; pi-status-footer reads it). */
   get value(): string | undefined {
@@ -41,12 +46,14 @@ export class PromptStash {
   stash(prompt: string | StashedPrompt): void {
     this.prompt = typeof prompt === "string" ? { text: prompt } : { ...prompt };
     this.held = false;
+    this.awaitText = false;
   }
 
   take(): StashedPrompt | undefined {
     const prompt = this.prompt;
     this.prompt = undefined;
     this.held = false;
+    this.awaitText = false;
     return prompt;
   }
 }
@@ -115,6 +122,23 @@ export function isTemporaryAction(input: string): boolean {
 export function isNavigationAction(input: string): boolean {
   const command = input.trim();
   return command === "/tree" || command === "/fork" || command === "/clone";
+}
+
+/**
+ * Pi's built-in commands that clear the editor only after they finish (/copy, /export,
+ * /share, /import): a draft restored while they run would be wiped.
+ */
+export function isClearedAfterAction(input: string): boolean {
+  const command = input.trim();
+  return command === "/copy" || command === "/share"
+    || command === "/export" || command.startsWith("/export ")
+    || command === "/import" || command.startsWith("/import ");
+}
+
+/** /import replaces the session and then clears the editor (a fork's session start says so itself). */
+export function isImportAction(input: string): boolean {
+  const command = input.trim();
+  return command === "/import" || command.startsWith("/import ");
 }
 
 /** A `!` or `!!` shell command: Pi awaits it inside the submit callback. */

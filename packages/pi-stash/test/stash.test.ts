@@ -440,6 +440,56 @@ test("a clone's session start restores once Pi has cleared the editor", async ()
   expect(next.state.main.getText()).toBe("draft");
 });
 
+test("a slash command never restores while a dialog or extension UI covers the editor", async () => {
+  const { s } = await start();
+  s.state.main.setText("draft");
+  s.state.main.handleInput(CTRL_S);
+  submit(s, "/probe");
+  const editor = s.state.main;
+  s.state.focused = {}; // ctx.ui.custom opened, having saved the empty editor text
+  await settled();
+  expect(s.state.main.getText()).toBe("");
+  s.state.main.setText(""); // closing it writes the saved text back
+  s.state.focused = editor;
+  await settled();
+  expect(s.state.main.getText()).toBe("draft");
+});
+
+for (const command of ["/copy", "/export out.html", "/share", "/import in.jsonl"]) {
+  test(`${command} restores only after Pi clears the editor at its end`, async () => {
+    const { s } = await start({ late: [command] });
+    s.state.main.setText("draft");
+    s.state.main.handleInput(CTRL_S);
+    submit(s, command);
+    s.state.main.setText(""); // the editor is empty while the command runs
+    await settled();
+    expect(s.state.main.getText()).toBe("");
+    expect((globals[STASH_KEY] as PromptStash).value).toBe("draft");
+    s.late.resolve?.();
+    await flush();
+    expect(s.state.main.getText()).toBe("draft");
+    expect((globals[STASH_KEY] as PromptStash).awaitText).toBe(false);
+  });
+}
+
+test("an import's replacement session restores once Pi has cleared the editor", async () => {
+  const { h, s } = await start({ late: ["/import in.jsonl"] });
+  s.state.main.setText("draft");
+  s.state.main.handleInput(CTRL_S);
+  submit(s, "/import in.jsonl");
+  expect((globals[STASH_KEY] as PromptStash).awaitText).toBe(true);
+  await h.emit("session_shutdown", { reason: "resume" }, s.ctx);
+  const next = h.session();
+  await h.emit("session_start", { reason: "resume" }, next.ctx);
+  await settled();
+  expect(next.state.main.getText()).toBe("");
+  s.late.resolve?.(); // the old submit finishes after the switch; its clear is stale
+  await flush();
+  next.state.main.setText(""); // Pi, after the import
+  await flush();
+  expect(next.state.main.getText()).toBe("draft");
+});
+
 test("late shell completion cannot restore into a replacement session", async () => {
   const { h, s } = await start();
   s.state.main.setText("draft");

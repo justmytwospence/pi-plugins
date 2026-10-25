@@ -84,15 +84,24 @@ export function harness() {
   }
 
   /** One interactive session: Pi's main editor, focus, and the editor-factory slot. */
-  function session(options: { mode?: string; hasUI?: boolean; base?: () => FakeEditor } = {}) {
+  function session(options: { mode?: string; hasUI?: boolean; base?: () => FakeEditor; late?: string[] } = {}) {
     const notes: Array<{ message: string; type?: string }> = [];
     const status = new Map<string, string | undefined>();
     const submitted: string[] = [];
     let factory: ((tui: unknown, theme: unknown, keybindings: unknown) => FakeEditor) | undefined;
     const shell = { resolve: undefined as undefined | (() => void) };
+    /** A built-in like /copy: Pi clears the editor only once the command has finished. */
+    const late = { resolve: undefined as undefined | (() => void) };
     /** Pi's submit callback: slash commands clear the editor at once; shell commands await completion. */
     const mainSubmit = async (text: string) => {
       submitted.push(text);
+      if (options.late?.includes(text)) {
+        await new Promise<void>((resolve) => {
+          late.resolve = resolve;
+        });
+        state.main.setText("");
+        return;
+      }
       if (text.startsWith("/")) {
         state.main.setText("");
         return;
@@ -138,7 +147,7 @@ export function harness() {
     ui.setEditorComponent(baseFactory);
     /** Create an editor through the installed factory outside Pi's main slot (an embedder). */
     const embed = () => factory!(tui, {}, keybindings);
-    return { ctx, ui, notes, status, submitted, state, tui, keybindings, shell, embed, baseFactory, factory: () => factory };
+    return { ctx, ui, notes, status, submitted, state, tui, keybindings, shell, late, embed, baseFactory, factory: () => factory };
   }
 
   return { pi: pi as never, events, emit, session };
