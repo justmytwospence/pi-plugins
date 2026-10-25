@@ -29,12 +29,16 @@ export interface Details {
   answers: Answer[];
   cancelled: boolean;
   error?: ErrorCode;
+  /** A note on the answers as a whole, added on Review. */
+  note?: string;
 }
 
 /** What a dialog returns: one answer per question when submitted, the answered ones when cancelled. */
 export interface DialogResult {
   cancelled: boolean;
   answers: Answer[];
+  /** A note on the answers as a whole, added on Review. */
+  note?: string;
 }
 
 export const DECLINED = "User declined to answer questions";
@@ -65,7 +69,8 @@ function segment(a: Answer): string {
 
 export function envelope(details: Details): string {
   if (details.cancelled) return DECLINED;
-  return `${PREFIX} ${details.answers.map(segment).join(" ")} ${SUFFIX}`;
+  const note = details.note ? ` User notes on all answers: ${details.note}.` : "";
+  return `${PREFIX} ${details.answers.map(segment).join(" ")}${note} ${SUFFIX}`;
 }
 
 export function toolResult(details: Details) {

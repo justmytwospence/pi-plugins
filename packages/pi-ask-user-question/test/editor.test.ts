@@ -40,5 +40,5 @@ test('first Escape exits modal input, second returns to list, finish disposes ed
   expect((d as any)[context]()).toBe('list');
   expect(result).toBeUndefined();
   d.handleInput('\x1b');
-  expect(disposed).toBe(2);
+  expect(disposed).toBe(3);
 });

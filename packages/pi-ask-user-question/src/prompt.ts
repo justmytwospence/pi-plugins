@@ -12,7 +12,7 @@ Usage notes:
 - Users will always be able to pick "${TYPE_SOMETHING}" to answer in their own words; it is added to every question automatically, so do not author an "Other" or "${TYPE_SOMETHING}" option.
 - Use multiSelect: true to allow multiple answers to be selected for a question.
 - If you recommend a specific option, make that the first option in the list and add "(Recommended)" at the end of the label.
-- Users can add a note to any answer, and can press Esc to decline the whole questionnaire. If they decline, do not ask the same questions again; continue with your best judgment or ask in plain text.
+- Users can add a note to any answer or, when there are several questions, to the answers as a whole, and can press Esc to decline the whole questionnaire. If they decline, do not ask the same questions again; continue with your best judgment or ask in plain text.
 
 Preview feature:
 Use the optional \`preview\` field on options when presenting concrete artifacts that users need to visually compare:

@@ -88,7 +88,9 @@ export function resultLines(details: Details, content: readonly { type: string; 
     return [theme.fg("error", first?.type === "text" ? (first.text ?? details.error) : details.error)];
   }
   if (details.cancelled) return [theme.fg("warning", "Declined")];
-  return details.answers.map((a) => answerLine(a, theme));
+  const lines = details.answers.map((a) => answerLine(a, theme));
+  if (details.note) lines.push(theme.fg("dim", `note: ${details.note.replace(/\s+/gu, " ")}`));
+  return lines;
 }
 
 function answerLine(a: Answer, theme: Theme): string {

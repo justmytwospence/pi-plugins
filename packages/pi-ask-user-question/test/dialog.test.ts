@@ -241,6 +241,25 @@ describe("several questions", () => {
     expect(d.result?.answers[0]).toMatchObject(kind === "custom" ? { kind: "custom", answer: "ndraft" } : { answer: "date-fns", notes: "ndraft" });
   });
 
+  test("Review takes a note on all the answers with n", () => {
+    const d = dialog(both, [enter, enter, "n", ...type("overall"), enter]);
+    const review = screen(d.frames.at(-1));
+    expect(review).toMatch(/note: overall/u);
+    expect(review).toMatch(/Submit these answers\?/u);
+    d.dialog.handleInput(enter);
+    expect(d.result).toMatchObject({ cancelled: false, note: "overall" });
+  });
+
+  test("Review returns to an unsaved review note before submission", () => {
+    const d = dialog(both, [enter, enter, "n", ...type("draft"), esc]);
+    expect(screen(d.frames.at(-1))).toContain("unsaved note: draft");
+    d.dialog.handleInput(enter);
+    expect(d.result).toBeUndefined();
+    d.dialog.handleInput(enter);
+    d.dialog.handleInput(enter);
+    expect(d.result?.note).toBe("draft");
+  });
+
   test("tabs do not switch while an editor is open", () => {
     const d = dialog(both, ["n", tab]);
     expect(screen(d.frames.at(-1))).toMatch(/Which date library/u);

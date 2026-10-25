@@ -70,6 +70,9 @@ export class QuestionDialog implements Component, Focusable {
   private tab = 0;
   /** Review's highlighted row: 0 submits, 1 cancels. */
   private reviewCursor = 0;
+  /** Review's own note, about the answers as a whole. */
+  private readonly reviewNotes: ProseEditor;
+  private reviewNote = "";
   private editing: Editing | undefined;
   private emptyAnswer = false;
   private finished = false;
@@ -106,6 +109,13 @@ export class QuestionDialog implements Component, Focusable {
       notes.onSubmit = saveNotes;
       return { cursor: 0, checked: new Set(), typedChecked: false, typed: "", note: "", custom, notes, previews: this.previewsFor(q) };
     });
+    const saveReviewNote = (text: string) => {
+      this.reviewNote = text.trim();
+      this.reviewNotes.setText(this.reviewNote);
+      this.closeEditor();
+    };
+    this.reviewNotes = createEditor?.(tui, editorTheme, keybindings, saveReviewNote, () => this.closeEditor()) ?? new Editor(tui, editorTheme) as ProseEditor;
+    this.reviewNotes.onSubmit = saveReviewNote;
     signal?.addEventListener("abort", this.onAbort, { once: true });
   }
 
@@ -160,7 +170,7 @@ export class QuestionDialog implements Component, Focusable {
       } else if (kb.matches(data, "tui.select.cancel")) this.finish(true);
       else if (kb.matches(data, "tui.select.up") || kb.matches(data, "tui.select.down") || matchesKey(data, "ctrl+j") || matchesKey(data, "ctrl+k") || key === "j" || key === "k") {
         this.reviewCursor = 1 - this.reviewCursor;
-      }
+      } else if (key === "n" || matchesKey(data, "ctrl+g")) this.openEditor("notes");
       return;
     }
     const q = this.questions[this.tab]!;
@@ -284,6 +294,12 @@ export class QuestionDialog implements Component, Focusable {
   }
 
   private openEditor(kind: Editing): void {
+    if (this.onReview()) {
+      this.editing = "notes";
+      beginComposition(this.reviewNotes);
+      this.syncFocus();
+      return;
+    }
     const slot = this.slots[this.tab]!;
     if (kind === "custom") slot.cursor = this.questions[this.tab]!.options.length;
     this.editing = kind;
@@ -299,6 +315,7 @@ export class QuestionDialog implements Component, Focusable {
   }
 
   private editor(): ProseEditor | undefined {
+    if (this.onReview()) return this.editing ? this.reviewNotes : undefined;
     const slot = this.slots[this.tab];
     if (!slot || !this.editing) return undefined;
     return this.editing === "custom" ? slot.custom : slot.notes;
@@ -311,6 +328,7 @@ export class QuestionDialog implements Component, Focusable {
       slot.custom.focused = this.hasFocus && slot.custom === open;
       slot.notes.focused = this.hasFocus && slot.notes === open;
     }
+    this.reviewNotes.focused = this.hasFocus && this.reviewNotes === open;
   }
 
   /** After an answer: submit a lone question, else go to the next unanswered one, then Review. */
@@ -343,6 +361,7 @@ export class QuestionDialog implements Component, Focusable {
         return;
       }
     }
+    if (this.reviewNotes.getText().trim() !== this.reviewNote) return this.openEditor("notes");
     this.finish(false);
   }
 
@@ -355,12 +374,13 @@ export class QuestionDialog implements Component, Focusable {
     this.finished = true;
     this.signal?.removeEventListener("abort", this.onAbort);
     for (const slot of this.slots) { slot.custom.dispose?.(); slot.notes.dispose?.(); }
+    this.reviewNotes.dispose?.();
     const answers: Answer[] = [];
     this.slots.forEach((slot, i) => {
       if (cancelled && !slot.choice) return;
       answers.push(makeAnswer(this.questions, i, slot.choice, slot.note));
     });
-    this.done({ cancelled, answers });
+    this.done({ cancelled, answers, ...(!cancelled && this.reviewNote ? { note: this.reviewNote } : {}) });
   }
 
   private refresh(): void {
@@ -562,12 +582,20 @@ export class QuestionDialog implements Component, Focusable {
         if (draft !== saved) out.push(...hang("   ", t.fg("warning", `unsaved ${label}: ${oneLine(draft) || "(cleared)"}`), width));
       }
     });
+    const draft = this.reviewNotes.getText().trim();
+    if (this.reviewNote && this.editing !== "notes") out.push("", ...hang(" ", t.fg("dim", `note: ${oneLine(this.reviewNote)}`), width));
+    if (!this.editing && draft !== this.reviewNote) out.push(...hang(" ", t.fg("warning", `unsaved note: ${oneLine(draft) || "(cleared)"}`), width));
+    if (this.editing) {
+      out.push("", ...hang(" ", t.fg("accent", t.bold("Note")), width), "", ...inline(` ${t.fg("accent", "›")} `, "", this.reviewNotes, width, t), "");
+      out.push(...hintLines(`${keyHint("tui.select.confirm", "submit")}  ${keyHint("tui.select.cancel", "cancel")}`, width));
+      return out;
+    }
     out.push("", ` ${t.fg("text", "Submit these answers?")}`, "");
     ["Submit answers", "Cancel"].forEach((label, i) => {
       const focused = this.reviewCursor === i;
       out.push(` ${focused ? t.fg("accent", "→") : " "} ${focused ? t.fg("accent", t.bold(label)) : t.fg("text", label)}`);
     });
-    out.push("", ...hintLines(`${rawKeyHint("tab", "back")}  ${menuHint()}`, width));
+    out.push("", ...hintLines(`${rawKeyHint("tab", "back")}  ${rawKeyHint("n", "note")}  ${menuHint()}`, width));
     return out;
   }
 
