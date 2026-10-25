@@ -5,7 +5,7 @@ description: Select one component, understand its native fallbacks, and test it 
 
 ## One feature, one entry
 
-The suite contains 31 independently selectable extensions. They share a Git revision, not runtime dependencies. Install the suite and choose entries with `pi config`, or use an [explicit resource selection](/guides/install/#enable-an-explicit-subset).
+The suite contains 32 independently selectable extensions. They share a Git revision, not runtime dependencies. Install the suite and choose entries with `pi config`, or use an [explicit resource selection](/guides/install/#enable-an-explicit-subset).
 
 From a local checkout, Pi can load a component's own package manifest:
 
