@@ -12,10 +12,11 @@
 //
 // Event bus:
 //   recap:summary { reply(promise) }   pi-recap calls reply with a Promise<string | undefined> for
-//                                      the current turn (memoized), when it is loaded and active
+//                                      the current turn (memoized, clipped to the token's 80
+//                                      characters), when it is loaded and active
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Markdown, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { type Recap, type RecapRegistry, recap } from "./summary.ts";
+import { oneLine, type Recap, RECAP_MAX, type RecapRegistry, recap } from "./summary.ts";
 
 /** The custom entry type of a recap in the session, and the key of /recap's pending line. */
 export const ENTRY = "recap";
@@ -152,7 +153,7 @@ export default function piRecap(pi: ExtensionAPI) {
   pi.events.on("recap:summary", (data) => {
     const request = data as RecapRequest | undefined;
     if (!active || !lastCtx || typeof request?.reply !== "function") return;
-    request.reply(summarize(lastCtx).then((r) => r?.text));
+    request.reply(summarize(lastCtx).then((r) => r && oneLine(r.text, RECAP_MAX)));
   });
 
   pi.on("session_start", (_event, ctx) => {

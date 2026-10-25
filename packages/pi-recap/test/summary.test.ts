@@ -49,14 +49,13 @@ test("only the last five earlier prompts are listed, each clipped", () => {
   expect(t.split("\n").find((l) => l.startsWith("- p7"))!.length).toBeLessThanOrEqual(202);
 });
 
-test("a model's answer becomes one clipped line", async () => {
+test("a model's answer becomes one line, unclipped until the safety cap", async () => {
   const { r, complete } = registry(`"Fixed the parser to skip empty lines;\n tests pass ${"x".repeat(100)}"`);
   const s = await recap(r, branch as any, {});
   expect(complete).toHaveBeenCalledOnce();
   expect((complete.mock.calls[0] as unknown[])[0]).toEqual({ provider: "anthropic", id: "claude-haiku-5-5" });
   expect(s!.source).toBe("model");
-  expect(s!.text.length).toBeLessThanOrEqual(80);
-  expect(s!.text).toMatch(/^Fixed the parser to skip empty lines; tests pass x+…$/u);
+  expect(s!.text).toBe(`Fixed the parser to skip empty lines; tests pass ${"x".repeat(100)}`);
 });
 
 test("a short one-line reply is its own recap, with no model call", async () => {

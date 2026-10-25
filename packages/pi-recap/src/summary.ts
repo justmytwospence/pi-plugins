@@ -1,5 +1,6 @@
 // The recap line: one line on where the session stands after a turn. It is also the text of the
-// turn's notification (pi-herdr's `$summary` pane token), so it keeps that token's 80-character cap.
+// turn's notification (pi-herdr's `$summary` pane token), clipped there to that token's 80 characters;
+// the transcript line keeps the whole text and wraps it.
 //
 // Started from pi-herdr's summary.ts, which stays as pi-herdr's own fallback when this component is
 // not loaded. Differences: the transcript also lists the session's earlier prompts, so a short
@@ -10,8 +11,10 @@
 // as is, and without a model (no credentials, an error, a timeout, an interrupted turn) the reply's
 // first sentence stands in.
 
-/** Pane tokens hold at most 80 characters, and the recap is the same text. */
+/** Pane tokens hold at most 80 characters: the recap is asked to fit, and is clipped to it for the token. */
 export const RECAP_MAX = 80;
+/** A safety cap on the transcript line, which wraps; a recap that fits the prompt never reaches it. */
+export const RECAP_LINE_MAX = 300;
 const TIMEOUT_MS = 4_000;
 const MODELS = ["anthropic/claude-haiku-5-5", "anthropic/claude-haiku-4-5"];
 const EARLIER_PROMPTS = 5;
@@ -105,7 +108,7 @@ export function fallbackRecap(branch: readonly Entry[]): string | undefined {
   const line = reply.split("\n").map((l) => l.replace(/^[\s#>*\-|`]+/u, "").replace(/[*_`]/gu, "").trim()).find(Boolean);
   if (!line) return undefined;
   const sentence = /^(.+?[.!?])(\s|$)/u.exec(line)?.[1] ?? line;
-  return oneLine(sentence);
+  return oneLine(sentence, RECAP_LINE_MAX);
 }
 
 /** The parts of pi's model registry the recap uses. */
@@ -163,7 +166,7 @@ export async function recap(registry: RecapRegistry | undefined, branch: readonl
     );
     if (response.stopReason === "error" || response.stopReason === "aborted") return fallback;
     const text = textOf(response as Message).replace(/^["'`]+|["'`]+$/gu, "").trim();
-    return text ? { text: oneLine(text), source: "model" } : fallback;
+    return text ? { text: oneLine(text, RECAP_LINE_MAX), source: "model" } : fallback;
   } catch {
     return fallback;
   } finally {

@@ -84,6 +84,22 @@ test("pi-herdr's request gets the same memoized text, with one model call", asyn
   expect(complete).toHaveBeenCalledOnce();
 });
 
+test("a long recap is whole and wrapped in the transcript, clipped only for pi-herdr's token", async () => {
+  const long = `Fixed the parser to skip empty lines and reran the suite; ${"all tests pass ".repeat(4).trim()}`;
+  const { h, ctx, settle, ask, recaps, render } = setup(long);
+  await h.emit("session_start", {}, ctx);
+  await settle();
+  const token = (await ask())!;
+  expect(token.length).toBe(80);
+  expect(token.endsWith("…")).toBe(true);
+  await vi.advanceTimersByTimeAsync(180_000);
+  expect(recaps()).toEqual([long]);
+  const lines = render(long, 60);
+  expect(lines.length).toBeGreaterThan(1);
+  expect(lines.join(" ")).not.toContain("…");
+  expect(lines.map((l: string) => l.trim()).join(" ")).toBe(`${MARK}${LABEL}${long}`.trim());
+});
+
 test("a new turn gets a new recap", async () => {
   const { h, ctx, branch, complete, ask, settle } = setup();
   await h.emit("session_start", {}, ctx);
