@@ -74,7 +74,7 @@ function setup() {
   return { ui, runs, fleet, steered, stopped, disable: () => (enabled = false) };
 }
 
-test("Tab routing selects and cycles tasks without main-row stops or draft replacement", () => {
+test("Tab routing selects and cycles tasks through main without draft replacement", () => {
   const { ui, fleet, runs } = setup();
   ui.editorText = "keep this draft";
   expect(fleet.tab(true)).toBe(false);
@@ -82,6 +82,8 @@ test("Tab routing selects and cycles tasks without main-row stops or draft repla
   expect(ui.render("subagents-fleet")[2]).toMatch(/● Find config/u);
   expect(ui.press("\t")).toBe(true);
   expect(ui.render("subagents-fleet")[3]).toMatch(/● Fix config/u);
+  expect(ui.press("\t")).toBe(true);
+  expect(ui.render("subagents-fleet")[1]).toBe(" ● main");
   expect(ui.press("\t")).toBe(true);
   expect(ui.render("subagents-fleet")[2]).toMatch(/● Find config/u);
   expect(ui.editorText).toBe("keep this draft");
@@ -108,7 +110,7 @@ test("↓ at an empty prompt enters the list; arrows select; Esc or ↑ past mai
   expect(ui.press(KEY.up)).toBe(true);
   expect(ui.render("subagents-fleet")[1]).toBe(" ● main");
   expect(ui.press(KEY.up)).toBe(true);
-  expect(ui.render("subagents-fleet")[0]).toBe(" ○ main");
+  expect(ui.render("subagents-fleet")[0]).toBe(" ◉ main");
   expect(ui.press(KEY.up)).toBe(false);
   // ← also enters; Esc leaves; typing leaves and reaches the editor.
   expect(ui.press(KEY.left)).toBe(true);
@@ -116,12 +118,38 @@ test("↓ at an empty prompt enters the list; arrows select; Esc or ↑ past mai
   expect(ui.press(KEY.escape)).toBe(false);
   expect(ui.press(KEY.left)).toBe(true);
   expect(ui.press("a")).toBe(false);
-  expect(ui.render("subagents-fleet")[0]).toBe(" ○ main");
+  expect(ui.render("subagents-fleet")[0]).toBe(" ◉ main");
   // A dialog has the keyboard: hands off.
   ui.tui.focused = { handleInput: () => undefined };
   expect(ui.press(KEY.down)).toBe(false);
   ui.tui.focused = { getText: () => "", setText: () => undefined };
   expect(ui.press(KEY.down)).toBe(true);
+  fleet.dispose();
+});
+
+test("Ctrl+J/Ctrl+K cycle the list from the prompt, through main, unless a dialog has the keyboard", () => {
+  const { ui, fleet, runs } = setup();
+  ui.editorText = "draft";
+  expect(ui.press("\n")).toBe(true);
+  expect(ui.render("subagents-fleet")[2]).toMatch(/● Find config/u);
+  expect(ui.press("\n")).toBe(true);
+  expect(ui.render("subagents-fleet")[3]).toMatch(/● Fix config/u);
+  expect(ui.press("\n")).toBe(true);
+  expect(ui.render("subagents-fleet")[1]).toBe(" ● main");
+  expect(ui.press("\x0b")).toBe(true);
+  expect(ui.render("subagents-fleet")[3]).toMatch(/● Fix config/u);
+  expect(ui.editorText).toBe("draft");
+  expect(ui.press(KEY.escape)).toBe(true);
+  // Ctrl+K from the prompt starts at the last row.
+  expect(ui.press("\x0b")).toBe(true);
+  expect(ui.render("subagents-fleet")[3]).toMatch(/● Fix config/u);
+  expect(ui.press(KEY.escape)).toBe(true);
+  // A dialog has the keyboard, or there is no list: the keys stay the editor's.
+  ui.tui.focused = { handleInput: () => undefined };
+  expect(ui.press("\n")).toBe(false);
+  ui.tui.focused = { getText: () => "", setText: () => undefined };
+  runs.length = 0; fleet.update();
+  expect(ui.press("\n")).toBe(false);
   fleet.dispose();
   expect(ui.widgets.has("subagents-fleet")).toBe(false);
   expect(ui.inputHandlers.size).toBe(0);

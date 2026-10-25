@@ -3,7 +3,7 @@
 // (pi-bg's `2 shells`). A run that succeeds leaves at once, and a dim `/tasks to see subagents`
 // (or `/subagents ...` without pi-bg) shows for 30 s, as in Claude Code.
 // ↓ at the bottom of the prompt (even with a draft in it), `j` in pi-vim's normal mode there, or ←
-// at an empty prompt moves into it; ↑/↓ or k/j select; Enter or l opens the selected run's
+// at an empty prompt moves into it; ↑/↓ or k/j select; Tab and Ctrl+J/Ctrl+K cycle through main too; Enter or l opens the selected run's
 // conversation viewer (Esc there comes back here) or the pill's dialog; x twice stops the selected
 // run, x on an ended run dismisses it; b moves a foreground run to the background; Esc, h, or ↑/k
 // past the first row, returns to the prompt. A run whose viewer is open stays until it closes.
@@ -105,7 +105,9 @@ export function renderFleet({ roster, selected, current, active, stopArmed, canB
               `${normalKeys ? "j/k select · l/enter view" : "↑/↓ select · enter view"}${stoppable ? " · x stop" : ""}${dismissable ? " · x dismiss" : ""}${stoppable && canBackground ? " · b background" : ""} · ${normalKeys ? "h/esc" : "esc"} back`,
             );
     if (hint !== undefined) lines.push(truncateToWidth(` ${hint}`, width));
-    lines.push(truncateToWidth(` ${bullet(0)} ${active && sel === 0 ? theme.fg("text", "main") : "main"}`, width));
+    // Bold for the selected row and for the session shown now, as for the runs below.
+    const mainOn = (active && sel === 0) || current === 0;
+    lines.push(truncateToWidth(` ${bullet(0)} ${mainOn ? theme.bold(theme.fg("text", "main")) : theme.fg("muted", "main")}`, width));
     // Runs are roster rows 1..runs.length; scroll so the selected one shows.
     const visible = Math.min(MAX_ROWS, runs.length);
     const selRun = chosen?.kind === "run" ? sel - 1 : current !== undefined && roster[current]?.kind === "run" ? current - 1 : 0;
@@ -114,7 +116,7 @@ export function renderFleet({ roster, selected, current, active, stopArmed, canB
     for (let i = start; i < start + visible; i++) {
       const run = runs[i];
       if (!run) continue;
-      const on = (active && i + 1 === sel) || (!active && i + 1 === current);
+      const on = (active && i + 1 === sel) || i + 1 === current;
       const prefix = ` ${bullet(i + 1)} `;
       const identity = `${on ? theme.bold(theme.fg("text", runLabel(run))) : theme.fg("muted", runLabel(run))}  ${theme.fg("dim", run.agent)}`;
       const cost = formatCost(run.state.usage.cost.total);
@@ -254,7 +256,9 @@ export class FleetView {
             const canBackground = entry?.kind === "run" && Boolean(this.source.actions(entry.run).canBackground?.());
             const now = Date.now();
             const stopArmed = this.stopArmed && entry?.kind === "run" && entryKey(entry) === this.armedKey && (entry.run.child ?? entry.run) === this.armedTarget;
-            return renderFleet({ roster, selected: this.selected, active: this.active, stopArmed, canBackground, normalKeys: readEditorMode(this.focused())?.state === "normal", note: this.source.note?.(now), now, width, theme: ui.theme ?? factoryTheme });
+            // Below the main prompt, main is the session shown.
+            const current = roster[0]?.kind === "main" ? 0 : undefined;
+            return renderFleet({ roster, selected: this.selected, current, active: this.active, stopArmed, canBackground, normalKeys: readEditorMode(this.focused())?.state === "normal", note: this.source.note?.(now), now, width, theme: ui.theme ?? factoryTheme });
           },
           invalidate: () => undefined,
         };
@@ -296,19 +300,23 @@ export class FleetView {
       const down = focused ? leavesPromptDown(focused, data, matchesKey(data, "down"), data === "j" && modal?.state === "normal") : matchesKey(data, "down") && this.ui.getEditorText() === "";
       const left = matchesKey(data, "left") && this.ui.getEditorText() === "";
       const tab = enterWithTab && matchesKey(data, "tab");
-      if (!down && !left && !tab) return undefined;
+      // Ctrl+J/Ctrl+K cycle the list from the prompt, as in a subagent's session view (over the
+      // editor's newline and kill-line, which have other keys), but only while there is a list.
+      const back = matchesKey(data, "ctrl+k");
+      const cycle = matchesKey(data, "ctrl+j") || back;
+      if (!down && !left && !tab && !cycle) return undefined;
       const roster = this.roster();
       if (roster.length > 0) {
         this.active = true;
         this.selectedMode = mode;
-        this.select(roster, this.firstRow(roster));
+        this.select(roster, back ? roster.length - 1 : this.firstRow(roster));
         this.update();
         return { consume: true };
       }
       return undefined;
     }
     // Insert and plain nonmodal editors retain text/edit keys while a row is highlighted.
-    if (modal?.state !== "normal" && !["up", "down", "enter", "escape", "pageUp", "pageDown", "tab"].some((key) => matchesKey(data, key as never))) {
+    if (modal?.state !== "normal" && !["up", "down", "enter", "escape", "pageUp", "pageDown", "tab", "ctrl+j", "ctrl+k"].some((key) => matchesKey(data, key as never))) {
       this.deactivate();
       return undefined;
     }
@@ -341,9 +349,11 @@ export class FleetView {
       const page = Math.min(MAX_ROWS, roster.length);
       const step = matchesKey(data, "ctrl+u") || matchesKey(data, "ctrl+d") ? Math.max(1, Math.floor(page / 2)) : page;
       this.select(roster, Math.max(0, Math.min(roster.length - 1, this.selected + direction * step)));
-    } else if (matchesKey(data, "tab")) {
-      const first = this.firstRow(roster);
-      this.select(roster, this.selected + 1 >= roster.length ? first : this.selected + 1);
+    } else if (matchesKey(data, "tab") || matchesKey(data, "ctrl+j")) {
+      // The cycle wraps through main, too.
+      this.select(roster, (this.selected + 1) % roster.length);
+    } else if (matchesKey(data, "ctrl+k")) {
+      this.select(roster, (this.selected - 1 + roster.length) % roster.length);
     } else if (matchesKey(data, "down") || matchesKey(data, "j")) {
       this.select(roster, Math.min(roster.length - 1, this.selected + 1));
     } else if (matchesKey(data, "up") || matchesKey(data, "k")) {
