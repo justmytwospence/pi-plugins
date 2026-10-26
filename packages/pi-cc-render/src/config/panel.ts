@@ -446,9 +446,17 @@ export async function showCcstylePanel(
 			"Interrupted prompts stay in the transcript only.",
 			config.restoreInterruptedPrompt,
 		);
-		const featureToggles: Record<string, { apply: (on: boolean) => void }> = {
+		const bashHighlightToggle = featureToggleSetting(
+			"highlightBashOutput",
+			"Highlight ! output",
+			"Syntax-highlight ! command output when its language is known (a file it prints, a diff, JSON).",
+			"! command output stays one color.",
+			config.highlightBashOutput,
+		);
+		const featureToggles: Record<string, { apply: (on: boolean) => void; live?: boolean }> = {
 			enableAgentSummary: agentSummaryToggle,
 			restoreInterruptedPrompt: restorePromptToggle,
+			highlightBashOutput: { ...bashHighlightToggle, live: true },
 		};
 
 		const onSettingChange = (id: string, value: string) => {
@@ -457,7 +465,7 @@ export async function showCcstylePanel(
 			if (featureToggle) {
 				updateConfig({ [id]: value === "on" } as Partial<Config>);
 				featureToggle.apply(value === "on");
-				ctx.ui.notify(`Updated ${id}: ${value} (next restart)`, "info");
+				ctx.ui.notify(`Updated ${id}: ${value}${featureToggle.live ? "" : " (next restart)"}`, "info");
 				return;
 			}
 			switch (id) {
@@ -612,7 +620,7 @@ export async function showCcstylePanel(
 			{
 				id: "feature",
 				label: "Features",
-				items: [agentSummaryToggle.setting, restorePromptToggle.setting],
+				items: [agentSummaryToggle.setting, restorePromptToggle.setting, bashHighlightToggle.setting],
 			},
 			{
 				id: "ui",

@@ -86,6 +86,7 @@ describe("normalizeConfig", () => {
       scrollStepLines: 3,
       enableAgentSummary: true,
       restoreInterruptedPrompt: true,
+      highlightBashOutput: true,
     });
   });
 

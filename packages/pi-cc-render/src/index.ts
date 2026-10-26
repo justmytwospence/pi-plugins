@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { config } from "./config/config.ts";
 
 // shell
+import { installBashHighlight } from "./feature/shell/bash-highlight.ts";
 import { installFlushDockedBash } from "./feature/shell/flush-docked-bash.ts";
 import piStartupHeader, { installEarlyStartupHeader } from "./feature/shell/startup-header.ts";
 
@@ -24,6 +25,7 @@ import claudeCodeStyle, { getCompactThinkingConfig } from "./renderer/index.ts";
 export default function (pi: ExtensionAPI): void {
 	// shell chrome
 	installFlushDockedBash();
+	installBashHighlight();
 	installEarlyStartupHeader();
 	piStartupHeader(pi);
 
