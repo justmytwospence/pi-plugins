@@ -204,6 +204,32 @@ function arrayItemText(item: unknown): string | undefined {
 	return undefined;
 }
 
+/** pi-bg's tools read as command rows: a background Bash, then waits, logs and stops on its task. */
+const BACKGROUND_TITLES: Readonly<Record<string, string>> = {
+	bg_run: "Bash",
+	bg_wait: "Wait",
+	bg_logs: "Task log",
+	bg_kill: "Stop",
+};
+
+/** The title a pi-bg tool row uses, in single and grouped cards alike. */
+export function backgroundTaskTitle(toolName: string): string | undefined {
+	return BACKGROUND_TITLES[toolName.toLowerCase()];
+}
+
+function backgroundTaskSummary(name: string, args: any): ToolCallSummary | undefined {
+	const title = BACKGROUND_TITLES[name];
+	if (!title) return undefined;
+	const id = typeof args.id === "string" && args.id ? clip(args.id) : "";
+	if (name === "bg_run") {
+		const kind = args.kind === "service" ? "service" : "job";
+		return { main: `${title} ${clip(args.command || "...")}`, detail: ` · background ${kind}` };
+	}
+	if (name === "bg_wait") return { main: `${title} ${id || "next job"}`, detail: "" };
+	if (name === "bg_logs") return { main: id ? `${title} ${id}` : "Tasks", detail: "" };
+	return { main: `${title} ${id || "..."}`, detail: "" };
+}
+
 function summaryFieldValue(value: unknown): SummaryValue | undefined {
 	if (typeof value === "string" && value) return { text: value, more: 0 };
 	if (!Array.isArray(value)) return undefined;
@@ -286,6 +312,8 @@ export function toolCallSummary(
 	if (variant === "default" && name === "agents") {
 		return { main: value("launch agents", "description", "prompt"), detail: "" };
 	}
+	const background = backgroundTaskSummary(name, args);
+	if (background) return background;
 	if (name === "skill") return { main: value("run skill", "name"), detail: "" };
 	if (name === "enterplanmode" || name === "enter_plan_mode") {
 		return { main: `${title} enable read-only planning`, detail: "" };

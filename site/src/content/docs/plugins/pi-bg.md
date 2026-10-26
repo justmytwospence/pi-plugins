@@ -86,6 +86,18 @@ Many tools draw bars only on a terminal; in a log file, tqdm, pytest, wget and r
 
 Progress appears as a bar, percent and ETA in the `/tasks` row (`45% · ~3m · 2:14 ████░░░░░░`, bar flush right, example), in the pill when exactly one task has progress (`2 tasks · fit 45%`), in the `Waiting on fit ███░░░░░ 45% · 2:14…` message, and in the agent's text (`45% (450/1000, ~3m left, detected: tqdm)`). A task that ends short of done reports `last progress 87%`.
 
+## Transcript rows
+
+A task reads as a Bash call that runs in the background (example):
+
+```text
+✓ Bash npm run fit · background job
+   ↳ fit running · 45% ████░░░░ · 2:14
+✓ Background job fit (ab12c) ended: exit 0 after 3:02. · ctrl+o to expand
+```
+
+The result line follows the task while it runs and keeps its outcome afterwards. `bg_wait`, `bg_logs` and `bg_kill` show as `Wait`, `Task log` and `Stop` rows with their first line collapsed. With pi-cc-render, call rows take its style and the result line stays pi-bg's.
+
 ## Completion and cancellation
 
 When the agent ends its turn with a job it started still running, pi-bg waits for it at Pi's `agent_before_settle` boundary (same message, timeout and interruptions as `bg_wait`), so the session stays working in Pi, Herdr and tmux and the outcome continues the run. Typing or Esc ends the wait; the job then wakes the agent later. Jobs wake the agent on exit; services can wake it when ready and again when they exit. Notifications wait until the agent is idle, and accumulated outcomes are combined. Results already consumed through waiting, log inspection, or stopping are not owed again. A command failing within 1.5 seconds is reported directly in `bg_run`'s result.

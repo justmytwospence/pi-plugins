@@ -80,6 +80,10 @@ Each task runs `bash -c <command>` (`/bin/sh` when `/bin/bash` is missing) in it
 
 ## Usage
 
+### Rows in the transcript
+
+A task reads as a Bash call that runs in the background. `bg_run`'s row is `Bash <command> · background job` (or `service`), with one result line that follows the task while it runs and keeps its outcome afterwards, for example `↳ fit running · 45% ████░░░░ · 2:14`, then `↳ fit exit 0 after 3:02`. `bg_wait`, `bg_logs` and `bg_kill` are `Wait <task>`, `Task log <task>` and `Stop <task>` with their first line collapsed and the full report expanded (a subagent's answer as Markdown). A wake-up is one row, `✓ Background job fit (ab12c) ended: exit 0 after 3:02.` (`✗` for a failure, `■` when stopped), that expands to the report. With [pi-cc-render](https://pi-plugins.vercel.app/plugins/pi-cc-render/) the call rows take its style and the result line stays pi-bg's (`ccstyleOwnResult`).
+
 ### Pill under the prompt
 
 In the TUI the pill reads `1 task`, `2 tasks` (with one task's progress when exactly one running task has any: `2 tasks · fit 45%`), plus `· 1 failed` in the error color while a failure you have not seen is there (until your next typed message, or until you dismiss it with `x` in `/tasks`). Nothing is drawn above the prompt.

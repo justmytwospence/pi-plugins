@@ -5,6 +5,7 @@ export function fakePi() {
   const tools = new Map<string, any>();
   const commands = new Map<string, any>();
   const sent: { message: any; options: any }[] = [];
+  const renderers = new Map<string, any>();
   const emitted: { channel: string; data: any }[] = [];
   const pi = {
     on(event: string, fn: any) {
@@ -24,6 +25,9 @@ export function fakePi() {
     registerTool(def: any) {
       tools.set(def.name, def);
     },
+    registerMessageRenderer(type: string, fn: any) {
+      renderers.set(type, fn);
+    },
     registerCommand(name: string, def: any) {
       commands.set(name, def);
     },
@@ -31,7 +35,7 @@ export function fakePi() {
       sent.push({ message, options });
     },
   };
-  return { pi, handlers, tools, commands, sent, emitted, bus };
+  return { pi, handlers, tools, commands, sent, emitted, bus, renderers };
 }
 
 export function fakeCtx(cwd: string) {

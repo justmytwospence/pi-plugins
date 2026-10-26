@@ -40,6 +40,30 @@ async function load(session?: { id: string; hasUI?: boolean }) {
 }
 
 describe("pi-bg", () => {
+  it("draws bg_run as a background Bash row whose result line follows the task live, and wake-ups as one row", async () => {
+    const x = await load();
+    const run = x.tools.get("bg_run");
+    expect(run.ccstyleOwnResult).toBe(true);
+    const plain = { fg: (_c: string, t: string) => t, bold: (t: string) => t } as any;
+    expect(run.renderCall({ command: "sleep 1.6", kind: "job" }, plain).render(200)[0].trimEnd()).toBe("Bash sleep 1.6 · background job");
+    const r = await x.call("bg_run", { command: 'echo 1/4 > "$PI_BG_PROGRESS"; sleep 1.6', kind: "job", name: "fit" });
+    expect(r.details.id).toBeTruthy();
+    let redraws = 0;
+    const view = run.renderResult(r, { expanded: false, isPartial: false }, plain, { invalidate: () => redraws++ });
+    await until(() => /25%/.test(view.render(200)[0]), 4_000);
+    expect(view.render(200)[0]).toMatch(/^↳ fit running · 25% ██░░░░░░ · 0:0\d$/u);
+    await until(() => /exit 0/.test(view.render(200)[0]), 6_000);
+    expect(view.render(200)[0]).toMatch(/^↳ fit exit 0 after 0:0\d$/u);
+    expect(redraws).toBeGreaterThan(0);
+    const wake = x.renderers.get("pi-bg");
+    const msg = { content: "Background job fit (ab12c) ended: exit 0 after 0:02.\n\nLast lines", details: { tasks: [{ id: "ab12c", kind: "end", status: "done" }] } };
+    expect(wake(msg, { expanded: false }, plain).render(200)[0]).toMatch(/^✓ Background job fit \(ab12c\) ended: exit 0 after 0:02\. · /u);
+    expect(wake(msg, { expanded: true }, plain).render(200).join("\n")).toMatch(/Last lines/);
+    const failed = { ...msg, details: { tasks: [{ id: "ab12c", kind: "end", status: "failed" }] } };
+    expect(wake(failed, { expanded: false }, plain).render(200)[0].startsWith("✗ ")).toBe(true);
+    await x.shutdown();
+  });
+
   it("reports a command that fails at once in bg_run's own result", async () => {
     const x = await load();
     const r = x.textOf(await x.call("bg_run", { command: "echo nope; exit 2", kind: "job", name: "bad" }));

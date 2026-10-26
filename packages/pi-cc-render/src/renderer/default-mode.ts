@@ -44,6 +44,7 @@ import { getMessageDisplayTheme } from "./tool/message-display.ts";
 import { mcpToolTitle } from "./tool/mcp-title.ts";
 import {
 	fitToolCallSummary,
+	backgroundTaskTitle,
 	humanizeToolLabel,
 	renderToolSummary,
 	toolCallSummary,
@@ -214,13 +215,14 @@ function renderExpandedTaskResult(
 }
 
 /** Wraps any tool definition with ccstyle call/result. */
-function createCcstyleTool(
+export function createCcstyleTool(
 	originalTool: any,
 	writeExecutionMetadata: WriteExecutionMetadataStore,
 ): any {
 	const toolName = originalTool.name;
 	const label = originalTool.label || toolName;
-	const defaultTitle = label === toolName ? humanizeToolLabel(label) : label;
+	const defaultTitle =
+		backgroundTaskTitle(toolName) ?? (label === toolName ? humanizeToolLabel(label) : label);
 	// MCP tools use the real tool name exposed by the adapter, without humanizing it
 	const title = mcpToolTitle({ toolName, definition: originalTool }) ?? defaultTitle;
 
@@ -335,6 +337,12 @@ function createCcstyleTool(
 					isError,
 					isHovered: () => isToolCallHovered(toolCallId),
 				});
+			}
+			// A tool that draws its own result row (pi-bg's live task row) keeps it under our call row.
+			if (originalTool.ccstyleOwnResult === true && typeof originalTool.renderResult === "function") {
+				if (!options?.isPartial) setToolVisualState(context, isError ? "error" : "success");
+				const own = originalTool.renderResult(result, { ...options, expanded }, theme, context);
+				if (own) return expanded ? own : insetComponent(own);
 			}
 			if (options?.isPartial) {
 				// Expanded flush left (Box provides 1 cell of padding); collapsed keeps 3-cell alignment with the title

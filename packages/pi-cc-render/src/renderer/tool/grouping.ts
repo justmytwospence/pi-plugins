@@ -21,6 +21,7 @@ import { stripAnsi, stripBackgroundAnsi, stripLeadingStatusIcon } from "../../ut
 import { walkComponentTree } from "../../utils/component-tree.ts";
 import {
 	fitToolCallSummary,
+	backgroundTaskTitle,
 	humanizeToolLabel,
 	renderToolSummary,
 	toolCallSummary,
@@ -63,7 +64,9 @@ function toolTitle(tool: any): string {
 		mcpToolTitle({
 			toolName: name,
 			definition: tool?.toolDefinition ?? tool?.builtInToolDefinition,
-		}) ?? humanizeToolLabel(name)
+		}) ??
+		backgroundTaskTitle(name) ??
+		humanizeToolLabel(name)
 	);
 }
 

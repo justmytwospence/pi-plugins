@@ -106,6 +106,8 @@ The interrupted prompt stays in the transcript and the session, so resending it 
 
 A tool whose extension provides `renderCall`, `renderResult` or `renderShell: "self"` is still restyled unless its name is listed in `excludeRenderers`. Suite components such as pi-bg and pi-subagents that draw their own tool output should be listed there (the panel's Exclude tools entry toggles common names; any name can be added to the file). The `Agent` tool always keeps its dedicated renderer.
 
+A tool can instead keep only its result row: with `ccstyleOwnResult: true` on its definition, pi-cc-render draws the call row and places the tool's own `renderResult` under it (pi-bg uses this for its live task line). pi-bg's `bg_run`, `bg_wait`, `bg_logs` and `bg_kill` read as command rows: `Bash <command> · background job`, `Wait <task>`, `Task log <task>`, `Stop <task>`, in single and grouped cards alike.
+
 ## How it works
 
 The renderer patches Pi's `ToolExecutionComponent`, `AssistantMessageComponent` and the interactive mode's `doRender` on the shared class prototypes, and registers the patches in a process-wide registry so a `/reload` replaces rather than stacks them. In TUI mode it also wraps terminal input to see SGR mouse packets for hover, click and wheel.

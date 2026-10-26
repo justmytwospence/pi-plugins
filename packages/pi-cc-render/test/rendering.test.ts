@@ -86,6 +86,20 @@ describe("tool summaries", () => {
     expect(`${read.main} ${read.detail} ${read.path ?? ""}`).toContain("src/index.ts");
     expect(stripTerminalSequences(fitToolCallSummary(bash, 12)).length).toBeLessThanOrEqual(12);
   });
+
+  test("pi-bg's tools read as command rows on their task", async () => {
+    const { toolCallSummary, backgroundTaskTitle } = await import("../src/renderer/tool/names.ts");
+    const row = (name: string, args: any) => { const s = toolCallSummary(name, args); return `${s.main}${s.detail}`; };
+    expect(row("bg_run", { command: "npm test", kind: "job", name: "tests" })).toBe("Bash npm test · background job");
+    expect(row("bg_run", { command: "vite", kind: "service" })).toBe("Bash vite · background service");
+    expect(row("bg_wait", {})).toBe("Wait next job");
+    expect(row("bg_wait", { id: "tests" })).toBe("Wait tests");
+    expect(row("bg_logs", { id: "tests" })).toBe("Task log tests");
+    expect(row("bg_logs", {})).toBe("Tasks");
+    expect(row("bg_kill", { id: "tests" })).toBe("Stop tests");
+    expect(backgroundTaskTitle("bg_run")).toBe("Bash");
+    expect(toolCallSummary("bg_run", { command: "ls" }, { variant: "grouping" }).main).toBe("Bash ls");
+  });
 });
 
 describe("renderer gates", () => {
@@ -105,6 +119,20 @@ describe("renderer gates", () => {
     expect(preservesOriginalRenderer(custom, "bg_run", undefined, [])).toBe(false);
     expect(preservesOriginalRenderer({}, "bash", undefined, ["bash"])).toBe(false);
     expect(preservesOriginalRenderer({}, "bash", { renderShell: "self" }, ["bash"])).toBe(true);
+  });
+});
+
+describe("own result rows", () => {
+  test("a tool with ccstyleOwnResult keeps its result row under the styled call row", async () => {
+    const { createCcstyleTool } = await import("../src/renderer/default-mode.ts");
+    const own = { name: "bg_run", label: "Background", ccstyleOwnResult: true, renderResult: () => ({ render: () => ["↳ fit running · 45%"], invalidate() {} }) };
+    const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t, bg: (_c: string, t: string) => t };
+    const wrapped = createCcstyleTool(own, new Map() as any);
+    const lines = wrapped.renderResult({ content: [{ type: "text", text: "Started" }] }, { expanded: false, isPartial: false }, theme, { state: {} }).render(80);
+    expect(lines[0]).toBe("   ↳ fit running · 45%");
+    const plain = createCcstyleTool({ ...own, ccstyleOwnResult: undefined }, new Map() as any);
+    const generic = plain.renderResult({ content: [{ type: "text", text: "Started" }] }, { expanded: false, isPartial: false }, theme, { state: {} }).render(80);
+    expect(stripTerminalSequences(generic[0])).toMatch(/1 line returned/);
   });
 });
 

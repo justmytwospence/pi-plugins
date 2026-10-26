@@ -66,6 +66,7 @@ import { PillView } from "./pill.ts";
 import { LogViewer } from "./viewer.ts";
 import { MARIMO_READY, marimoName, marimoServer } from "./marimo.ts";
 import { type Block, blocks, blocksView } from "./result-view.ts";
+import { reportResultView, runResultView, type WakeDetails, wakeView } from "./rows.ts";
 
 const STARTUP_WAIT_MS = 1_500;
 
@@ -141,6 +142,9 @@ const LogsParams = Type.Object({
 });
 
 const KillParams = Type.Object({ id: Type.String({ description: "Task id or name" }) });
+
+/** pi-cc-render draws these tools' call rows but leaves the result row to them (the live task line). */
+const OWN_RESULT = { ccstyleOwnResult: true } as const;
 
 const text = (t: string) => ({ content: [{ type: "text" as const, text: t }], details: {} });
 
@@ -451,7 +455,23 @@ export default function piBg(pi: ExtensionAPI) {
     }
   };
 
+  /** Redraws for bg_run rows whose task is running; an ended task's rows redraw once more, then drop. */
+  const liveRows = new Map<string, Set<() => void>>();
+  const redrawRows = () => {
+    for (const [id, redraws] of liveRows) {
+      const running = reg.tasks.get(id)?.status === "running";
+      for (const redraw of redraws) {
+        try {
+          redraw();
+        } catch {
+          redraws.delete(redraw);
+        }
+      }
+      if (!running) liveRows.delete(id);
+    }
+  };
   const refresh = () => {
+    redrawRows();
     updateStatus();
     pill.update();
     emit(ACTIVITY_CHANGED, { id: section.id });
@@ -823,7 +843,10 @@ export default function piBg(pi: ExtensionAPI) {
     // The footer status only exists with a UI: a headless session has nothing to tick.
     if (c.hasUI) {
       statusTimer = setInterval(() => {
-        if (generation === sessionGeneration) guarded(updateStatus);
+        if (generation === sessionGeneration) {
+          guarded(updateStatus);
+          guarded(redrawRows);
+        }
       }, 1_000);
       statusTimer.unref?.();
     }
@@ -858,6 +881,11 @@ export default function piBg(pi: ExtensionAPI) {
 
   // ---- tools ----
 
+  pi.registerMessageRenderer<WakeDetails>("pi-bg", (message, { expanded }, theme) => {
+    const content = typeof message.content === "string" ? message.content : message.content.flatMap((c) => (c.type === "text" ? [c.text] : [])).join("\n");
+    return wakeView(content, message.details, expanded, theme);
+  });
+
   pi.registerTool({
     name: "bg_run",
     label: "Background",
@@ -872,11 +900,19 @@ export default function piBg(pi: ExtensionAPI) {
       `Progress shows on its own for standard bars (${CATALOGUE.map((f) => f.name).join(", ")}). When another command prints countable progress, set bg_run's progress to a preset or regex; in a script you write for bg_run, report it with \`echo "$done/$total [note]" > "$PI_BG_PROGRESS"\`.`,
     ],
     parameters: RunParams,
+    ...OWN_RESULT,
     renderCall(args, theme) {
-      const a = args as { command?: string; kind?: string; name?: string };
-      const server = a.kind === "service" ? marimoServer(a.command ?? "") : undefined;
-      const name = a.name || (server ? marimoName(server) : nameFromCommand(a.command ?? ""));
-      return new Text(`${theme.fg("toolTitle", theme.bold("bg_run"))} ${theme.fg("accent", name)} ${theme.fg("muted", `(${a.kind ?? "?"})`)} ${theme.fg("dim", (a.command ?? "").replace(/\s+/gu, " "))}`, 0, 0);
+      const a = args as { command?: string; kind?: string };
+      return new Text(`${theme.fg("toolTitle", theme.bold("Bash"))} ${(a.command ?? "").replace(/\s+/gu, " ")}${theme.fg("dim", ` · background ${a.kind === "service" ? "service" : "job"}`)}`, 0, 0);
+    },
+    renderResult(result, { expanded, isPartial }, theme, context) {
+      const id = (result.details as { id?: string } | undefined)?.id;
+      if (id && !isPartial && reg.tasks.get(id)?.status === "running" && context?.invalidate) {
+        const redraws = liveRows.get(id) ?? new Set();
+        redraws.add(context.invalidate);
+        liveRows.set(id, redraws);
+      }
+      return runResultView(result as never, expanded, theme, () => (id ? reg.tasks.get(id) : undefined));
     },
     async execute(_id, params, _signal, _onUpdate, c) {
       const kind = params.kind as Kind;
@@ -917,7 +953,7 @@ export default function piBg(pi: ExtensionAPI) {
       }
       if (task.keep) lines.push("It keeps running after this pi session ends.");
       if (task.progressSpec && task.progressSpec.toLowerCase() !== "none") lines.push(`Progress: ${FORMAT_NAMES.includes(task.progressSpec.toLowerCase()) ? `read as ${task.progressSpec.toLowerCase()} output` : `from log lines matching ${task.progressSpec}`}${task.progress ? `, now ${progressText(task)}` : ""}.`);
-      return text(lines.join("\n"));
+      return { ...text(lines.join("\n")), details: { id: task.id } };
     },
   });
 
@@ -927,13 +963,14 @@ export default function piBg(pi: ExtensionAPI) {
     description: `Wait inside this turn for a background job to end (or a service to become ready, when named), then get its outcome and the end of its log. Without id, waits for whichever running job ends first. \`id\` may also name outside work other extensions report, such as \`marimo:<file>\` for a running marimo notebook (pi-marimo); for a marimo server that is up, with pi-marimo installed, its id waits for the notebook's running cells. Returns early when the user sends a message, on Esc, or after \`timeout\` seconds (default ${WAIT_DEFAULT_S}); the job keeps running and still wakes you when it ends.`,
     promptSnippet: "Wait for a background job (keeps the turn working)",
     parameters: WaitParams,
+    ...OWN_RESULT,
     renderCall(args, theme) {
       const a = args as { id?: string };
-      return new Text(`${theme.fg("toolTitle", theme.bold("bg_wait"))} ${theme.fg("accent", a.id ? (reg.find(a.id, sessionId)?.name ?? a.id) : "next job")}`, 0, 0);
+      return new Text(`${theme.fg("toolTitle", theme.bold("Wait"))} ${a.id ? (reg.find(a.id, sessionId)?.name ?? a.id) : "next job"}`, 0, 0);
     },
-    renderResult(result, { expanded }, theme) {
+    renderResult(result, { expanded }, theme, context) {
       // Reports keep the look of Pi's own tool output; a subagent's answer reads as Markdown.
-      return blocksView(result, expanded, theme);
+      return reportResultView(result as never, expanded, theme, Boolean((context as { isError?: boolean } | undefined)?.isError));
     },
     async execute(_id, params, signal, _onUpdate, c) {
       const generation = sessionGeneration;
@@ -1041,6 +1078,14 @@ export default function piBg(pi: ExtensionAPI) {
     description: "Read a background task's log: its status, then the last lines (or the first, or only lines matching `grep`). Without id, lists every task.",
     promptSnippet: "Read a background task's log, or list the tasks",
     parameters: LogsParams,
+    ...OWN_RESULT,
+    renderCall(args, theme) {
+      const a = args as { id?: string };
+      return new Text(a.id ? `${theme.fg("toolTitle", theme.bold("Task log"))} ${reg.find(a.id, sessionId)?.name ?? a.id}` : theme.fg("toolTitle", theme.bold("Tasks")), 0, 0);
+    },
+    renderResult(result, { expanded }, theme, context) {
+      return reportResultView(result as never, expanded, theme, Boolean((context as { isError?: boolean } | undefined)?.isError));
+    },
     async execute(_id, params) {
       if (!params.id) {
         const tasks = reg.list(sessionId);
@@ -1078,6 +1123,14 @@ export default function piBg(pi: ExtensionAPI) {
     description: "Stop a background task: SIGTERM to its process group, then SIGKILL after 3 seconds.",
     promptSnippet: "Stop a background task",
     parameters: KillParams,
+    ...OWN_RESULT,
+    renderCall(args, theme) {
+      const a = args as { id?: string };
+      return new Text(`${theme.fg("toolTitle", theme.bold("Stop"))} ${a.id ? (reg.find(a.id, sessionId)?.name ?? a.id) : ""}`, 0, 0);
+    },
+    renderResult(result, { expanded }, theme, context) {
+      return reportResultView(result as never, expanded, theme, Boolean((context as { isError?: boolean } | undefined)?.isError));
+    },
     async execute(_id, params) {
       const t = reg.find(params.id, sessionId);
       if (!t) throw new Error(`No task matches "${params.id}".`);
