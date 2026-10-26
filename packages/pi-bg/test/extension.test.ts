@@ -203,6 +203,27 @@ describe("pi-bg", () => {
     await x.shutdown();
   });
 
+  it("bg_wait renders an outside result as Markdown and its own reports verbatim", async () => {
+    const x = await load();
+    x.pi.events.emit("bg:external", { id: "subagent:a1", label: "audit · general", state: "running" });
+    setTimeout(
+      () => x.pi.events.emit("bg:external", { id: "subagent:a1", label: "audit · general", state: "done", summary: "done after 3s", result: "## Findings\n\n- **one** thing\n- `two`" }),
+      200,
+    );
+    const r = await x.call("bg_wait", { id: "subagent:a1" });
+    expect(r.content.map((c: any) => c.text)).toEqual(["audit · general (subagent:a1): done · done after 3s", "## Findings\n\n- **one** thing\n- `two`"]);
+    expect(r.details).toEqual({ markdown: [1] });
+    const theme = { fg: (_c: string, t: string) => t, bg: (_c: string, t: string) => t, bold: (t: string) => t, italic: (t: string) => t, underline: (t: string) => t, strikethrough: (t: string) => t };
+    const { initTheme } = await import("@earendil-works/pi-coding-agent");
+    initTheme("dark");
+    const lines = x.tools.get("bg_wait").renderResult(r, { expanded: true }, theme).render(80).map((l: string) => l.replace(/\x1b\[[0-9;]*m/g, "").trimEnd());
+    expect(lines[0]).toBe("audit · general (subagent:a1): done · done after 3s");
+    expect(lines).toContain("Findings");
+    expect(lines.some((l: string) => /^\s*[-•] one thing$/u.test(l))).toBe(true);
+    expect(lines.join("\n")).not.toMatch(/\*\*|##/u);
+    await x.shutdown();
+  });
+
   it("the pill: 1 shell, then the failure in the error color until the next message; ↓ Enter opens the dialog", async () => {
     const x = await load();
     await x.call("bg_run", { command: "sleep 2; echo bad; exit 3", kind: "job", name: "flaky" });

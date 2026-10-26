@@ -24,7 +24,9 @@
 //          herdr:split {command,cwd}           /bg's "follow in a herdr split" (when pi-herdr answers herdr:probe)
 //          bg:tasks {tasks}                    a snapshot after every change (with `progress` when known)
 //          bg:killed {id,command,cwd}          after bg_kill or /bg stops a task
-//   reads  bg:external {id,label,state,summary?}  outside work bg_wait can wait on (state running|done|failed)
+//   reads  bg:external {id,label,state,summary?,result?}  outside work bg_wait can wait on (state
+//                                              running|done|failed); `result` is Markdown and bg_wait
+//                                              renders it as such
 //          bg:annotate {task,by,detail?,wait?}  what another extension knows about a task (pi-marimo: the
 //                                              kernel state of the notebook a server serves or a job drives);
 //                                              `wait` names outside work that bg_wait on the task waits for
@@ -63,6 +65,7 @@ import { FULL_SCREEN } from "./frame.ts";
 import { PillView } from "./pill.ts";
 import { LogViewer } from "./viewer.ts";
 import { MARIMO_READY, marimoName, marimoServer } from "./marimo.ts";
+import { type Block, blocks, blocksView } from "./result-view.ts";
 
 const STARTUP_WAIT_MS = 1_500;
 
@@ -87,7 +90,7 @@ export interface External {
   label: string;
   state: "running" | "done" | "failed";
   summary?: string;
-  /** Optional completed output; acknowledging its return suppresses a duplicate wake-up. */
+  /** Optional completed output, in Markdown; acknowledging its return suppresses a duplicate wake-up. */
   result?: string;
   updatedAt: number;
 }
@@ -692,10 +695,10 @@ export default function piBg(pi: ExtensionAPI) {
   };
 
   const externalLine = (x: External) => `${x.label} (${x.id}): ${x.state}${x.summary ? ` · ${x.summary}` : ""}`;
-  const consumeExternal = (x: External) => {
-    if (x.state === "running" || typeof x.result !== "string") return externalLine(x);
+  const consumeExternal = (x: External): Block[] => {
+    if (x.state === "running" || typeof x.result !== "string") return [{ text: externalLine(x) }];
     pi.events.emit("bg:external-consumed", { id: x.id });
-    return `${externalLine(x)}\n\n${x.result}`;
+    return [{ text: externalLine(x) }, { text: x.result, markdown: true }];
   };
 
   pi.events.on("bg:annotate", (data) => {
@@ -925,6 +928,10 @@ export default function piBg(pi: ExtensionAPI) {
       const a = args as { id?: string };
       return new Text(`${theme.fg("toolTitle", theme.bold("bg_wait"))} ${theme.fg("accent", a.id ? (reg.find(a.id, sessionId)?.name ?? a.id) : "next job")}`, 0, 0);
     },
+    renderResult(result, { expanded }, theme) {
+      // Reports keep the look of Pi's own tool output; a subagent's answer reads as Markdown.
+      return blocksView(result, expanded, theme);
+    },
     async execute(_id, params, signal, _onUpdate, c) {
       const generation = sessionGeneration;
       const timeoutS = Math.min(Math.max(1, Math.round(params.timeout ?? WAIT_DEFAULT_S)), WAIT_MAX_S);
@@ -937,7 +944,7 @@ export default function piBg(pi: ExtensionAPI) {
         const tied = t && t.status === "running" && t.kind === "service" && (t.ready || !t.readyPattern) ? (noteOf(t)?.wait ?? []) : [];
         const tiedRunning = tied.map(findExternal).filter((e): e is External => e?.state === "running");
         if (x) {
-          if (x.state !== "running") return text(consumeExternal(x));
+          if (x.state !== "running") return blocks(consumeExternal(x));
           targets.add(x.id);
         } else if (!t) {
           const known = [...reg.list(sessionId).map((k) => `${k.id} ${k.name}`), ...[...externals.values()].filter((e) => e.state === "running").map((e) => e.id)];
@@ -998,10 +1005,10 @@ export default function piBg(pi: ExtensionAPI) {
         working.release();
       }
       refresh();
-      const out: string[] = [];
-      for (const t of waiter.finished) out.push(report(t));
-      for (const t of waiter.readied) out.push(report(t));
-      for (const x of waiter.externals) out.push(consumeExternal(x));
+      const out: Block[] = [];
+      for (const t of waiter.finished) out.push({ text: report(t) });
+      for (const t of waiter.readied) out.push({ text: report(t) });
+      for (const x of waiter.externals) out.push(...consumeExternal(x));
       if (reason !== "done") {
         const still = names().filter((t) => t.status === "running");
         const what = still.length ? still.map((t) => `${t.name} (${[t.id, runtime(t), progressText(t)].filter(Boolean).join(", ")})`).join(", ") : label();
@@ -1011,10 +1018,17 @@ export default function piBg(pi: ExtensionAPI) {
             : reason === "aborted"
               ? "Stopped waiting: interrupted."
               : `Stopped waiting after ${elapsed(Date.now() - started)} (the timeout).`;
-        out.push(`${why} Still running: ${what}. It wakes you when it ends; call bg_wait again to keep waiting.`);
+        out.push({ text: `${why} Still running: ${what}. It wakes you when it ends; call bg_wait again to keep waiting.` });
       }
-      if (waiter.extras.length) out.push(`Also while you waited:\n${waiter.extras.map((e) => `- ${e}`).join("\n")}`);
-      return text(out.join("\n\n"));
+      if (waiter.extras.length) out.push({ text: `Also while you waited:\n${waiter.extras.map((e) => `- ${e}`).join("\n")}` });
+      // One block per item for the renderer; plain ones are merged so the model reads them as before.
+      const merged: Block[] = [];
+      for (const b of out) {
+        const last = merged.at(-1);
+        if (last && !last.markdown && !b.markdown) last.text = `${last.text}\n\n${b.text}`;
+        else merged.push({ ...b });
+      }
+      return blocks(merged);
     },
   });
 

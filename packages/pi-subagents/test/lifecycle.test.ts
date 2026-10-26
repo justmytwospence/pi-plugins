@@ -291,7 +291,7 @@ test.each(["finished", "running"])("actual bg_wait consumes %s subagent output",
   const waiting = x.tools.get("bg_wait").execute("wait", { id: `subagent:${id}`, timeout: 2 }, undefined, undefined, x.ctx);
   if (when === "running") { x.finish(); await tick(); }
   const result = await waiting;
-  expect(result.content[0].text).toContain("Full worker findings");
+  expect(result.content.map((c: { text: string }) => c.text).join("\n\n")).toContain("Full worker findings");
   await tick();
   x.ctx.isIdle = () => true;
   await x.h.emit("agent_settled", {}, x.ctx);

@@ -67,7 +67,7 @@ The fallback aggregation and return to an independent pill are covered by [pi-bg
 | Event | Direction and purpose |
 | --- | --- |
 | `bg:probe` | A consumer sends `{ reply }`; pi-bg invokes `reply()` when loaded. |
-| `bg:external` | A producer reports `{ id, label, state, summary?, result? }`, with state `running`, `done` or `failed`. pi-bg records it for `bg_wait`. |
+| `bg:external` | A producer reports `{ id, label, state, summary?, result? }`, with state `running`, `done` or `failed`. pi-bg records it for `bg_wait`, which renders a `result` as Markdown. |
 | `bg:external-consumed` | `{ id }` acknowledges a completed external result returned through `bg_wait`; the owner suppresses duplicate delivery. Summary-only waits do not acknowledge a result. |
 | `bg:tasks` | pi-bg publishes `{ tasks }` snapshots, including readiness, origin and `willWake`. |
 | `bg:annotate` | A sibling supplies `{ task, by, detail?, wait? }` for a known shell task. Missing detail clears the annotation. |

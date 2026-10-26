@@ -178,7 +178,7 @@ Inside Herdr with [pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/), p
 | `herdr:probe`, `herdr:ready` | emits / reads | `{ reply }`, `{}` | whether pi-herdr is active (enables `f`) |
 | `bg:tasks` | emits | `{ tasks }` | a snapshot after every change: `id`, `name`, `kind`, `command`, `cwd`, `status`, `ready`, `origin`, `keep`, `willWake`, `logPath`, and `progress` (`fraction`, `source`, `count?`, `note?`) when known |
 | `bg:killed` | emits | `{ id, command, cwd }` | after a task is stopped |
-| `bg:external` | reads | `{ id, label, state, summary?, result? }` | outside work `bg_wait <id>` can wait on (`state`: `running`, `done`, `failed`); ended entries are kept 10 minutes for a late `bg_wait` |
+| `bg:external` | reads | `{ id, label, state, summary?, result? }` | outside work `bg_wait <id>` can wait on (`state`: `running`, `done`, `failed`); `result` is Markdown, which `bg_wait` renders as such; ended entries are kept 10 minutes for a late `bg_wait` |
 | `bg:external-consumed` | emits | `{ id }` | a completed external's optional `result` was returned by `bg_wait`; its owner can suppress a duplicate announcement. Summary-only waits do not emit this acknowledgment |
 | `bg:annotate` | reads | `{ task, by, detail?, wait? }` | what another extension knows about a running task: `detail` shows in its row and under it in `bg_logs`; `wait` names outside work that `bg_wait <task>` waits for once the task is up. No `detail` clears it |
 | `bg:probe` | reads | `{ reply }` | `reply()` when pi-bg is loaded |

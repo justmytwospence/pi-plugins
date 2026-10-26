@@ -10,8 +10,8 @@
 // can wait on (`subagent:<id>`). Each works alone without the other.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { type Component, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
+import { type Component, Markdown, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION, type ActivityEntry, type ActivitySection, FLEET_HOST_PRIORITY, hostOutranks, readHost } from "./activity.ts";
 import { type AgentDef, discoverAgents } from "./agents.ts";
@@ -629,7 +629,8 @@ export default function subagents(pi: ExtensionAPI) {
   const resultText = (run: Run) => {
     const s = run.state;
     const head = `[${runLabel(run)} · ${run.agent} · ${s.model ?? run.model} · ${run.thinking} · ${s.status}${s.error ? `: ${clip(s.error, 300)}` : ""}]`;
-    return `${head}\n${truncateOutput(s.output || "(no output)", run.outputPath)}`;
+    // A blank line keeps the Markdown answer from running into the header when it is rendered.
+    return `${head}\n\n${truncateOutput(s.output || "(no output)", run.outputPath)}`;
   };
 
   const usageOf = (list: Run[]): Usage => list.reduce((sum, r) => addUsage(sum, r.state.usage), emptyUsage());
@@ -742,7 +743,7 @@ export default function subagents(pi: ExtensionAPI) {
           } catch {
             // still running or not written
           }
-          const text = `[${runLabel(run)} · ${run.agent} · ${run.state.status}]\n${truncateOutput(output || "(no output yet)", run.outputPath)}`;
+          const text = `[${runLabel(run)} · ${run.agent} · ${run.state.status}]\n\n${truncateOutput(output || "(no output yet)", run.outputPath)}`;
           return { content: [{ type: "text", text }], details: { mode: "single", runs: [view(run, true)] } as Details };
         }
         return { content: [{ type: "text", text: JSON.stringify(view(run, true), null, 2) }], details: { mode: "single", runs: [view(run, true)] } as Details };
@@ -997,7 +998,7 @@ export default function subagents(pi: ExtensionAPI) {
             ? theme.fg("dim", flat(r.activity ?? "starting…"))
             : theme.fg("dim", flat(r.output?.split("\n").find((l) => l.trim()) ?? r.task));
         rows.push({ left: `  ${theme.fg("muted", "└")} ${detail}` });
-        if (expanded && r.output) for (const line of r.output.split("\n").slice(0, 40)) rows.push({ left: `    ${line}`, wrap: true });
+        if (expanded && r.output) rows.push({ left: "", markdown: r.output.split("\n").slice(0, 40).join("\n"), indent: 4 });
       }
       return new RowsText(rows, (text) => theme.fg("dim", text));
     },
@@ -1055,7 +1056,8 @@ export default function subagents(pi: ExtensionAPI) {
   });
 }
 
-type Row = { left: string; right?: string[]; wrap?: boolean };
+/** A row; with `markdown`, that text rendered as Markdown and indented instead of `left`. */
+type Row = { left: string; right?: string[]; wrap?: boolean; markdown?: string; indent?: number };
 
 /** Tool-result rows, clipped to the width (stats kept flush right) unless marked to wrap. */
 class RowsText implements Component {
@@ -1066,7 +1068,15 @@ class RowsText implements Component {
   invalidate(): void {}
   render(width: number): string[] {
     const w = Math.max(1, width);
-    return this.rows.flatMap((r) => (r.wrap ? wrapTextWithAnsi(r.left, w) : [this.line(r.left, r.right, w)]));
+    return this.rows.flatMap((r) => {
+      if (r.markdown !== undefined) {
+        const pad = " ".repeat(Math.min(r.indent ?? 0, Math.max(0, w - 1)));
+        const lines = new Markdown(r.markdown.trim(), 0, 0, getMarkdownTheme()).render(Math.max(1, w - pad.length));
+        while (lines.length && !lines.at(-1)?.trim()) lines.pop();
+        return lines.map((l) => pad + l);
+      }
+      return r.wrap ? wrapTextWithAnsi(r.left, w) : [this.line(r.left, r.right, w)];
+    });
   }
 
   /** Stats flush right; on a narrow row they drop whole trailing parts (id, cost, ...) so the identity keeps most of it. */
