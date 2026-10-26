@@ -37,7 +37,7 @@ The extension wraps rendering rather than replacing the editor. Editors drawing 
 
 With [pi-interactive-shell](/plugins/pi-interactive-shell/) enabled in a real terminal TUI, next-prompt can probe its capability and suggest `!i <command>` when direct human interaction is the next step. Neither extension requires the other; next-prompt owns the suggestion UI and acceptance behavior.
 
-Press Tab to copy the ghost into the editor, review or edit it, then press Enter yourself. Acceptance never runs it. The explicit prefix hands an idle terminal to the foreground command and restores Pi on exit; it does not auto-detect commands or automatically continue the agent. Pi's event processing and background monitoring can continue, but its terminal and UI remain occupied until the command exits; no agent run starts during the handoff. See the [interactive-shell reference](/plugins/pi-interactive-shell/) for history and privacy limits.
+Press Tab to copy the ghost into the editor, review or edit it, then press Enter yourself. Acceptance never runs it. The explicit prefix opens a focused embedded terminal overlay in the lower half, keeping the conversation visible without clearing the screen or stopping Pi's TUI. It does not auto-detect commands or automatically continue the agent. Program keys, including Tab and Esc, reach the running command; Ctrl+] prefixes panel controls. Exited output remains until Enter or Esc dismisses it. Pi's event processing and background monitoring can continue, but new agent requests are gated until the panel closes. See the [interactive-shell reference](/plugins/pi-interactive-shell/) for controls, requirements and privacy limits.
 
 ## Commands and configuration
 

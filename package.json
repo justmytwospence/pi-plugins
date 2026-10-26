@@ -63,8 +63,10 @@
   },
   "dependencies": {
     "@shikijs/cli": "^4.4.3",
+    "@xterm/headless": "6.0.0",
     "grok-mermaid": "^0.2.2",
     "marked": "^18.0.11",
+    "node-pty": "1.1.0",
     "shiki": "^4.5.0"
   },
   "devDependencies": {
@@ -73,6 +75,10 @@
   "scripts": {
     "test": "node scripts/test-loader.mjs && node scripts/test-shortcuts.mjs && node scripts/test-contracts.mjs && node scripts/test-question-flow.mjs && node scripts/test-lifecycle.mjs",
     "check": "npm test && node scripts/check-components.mjs",
-    "check:clients": "node scripts/test-remote-clients.mjs"
+    "check:clients": "node scripts/test-remote-clients.mjs",
+    "postinstall": "node packages/pi-interactive-shell/scripts/prepare-pty.cjs"
+  },
+  "allowScripts": {
+    "node-pty@1.1.0": true
   }
 }

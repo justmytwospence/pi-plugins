@@ -154,6 +154,8 @@ type ShortcutEditor = Obj & { onExtensionShortcut?: (data: string) => boolean };
 /** Run a dialog-safe extension shortcut through the prompt editor when something else has focus. */
 export function routeShortcut(data: string, focused: Obj | null, main: ShortcutEditor | null): { consume: true } | undefined {
   if (isKeyRelease(data) || !focused || !main || focused === main) return undefined;
+  // A terminal owns every key, including shortcuts normally safe to reroute from dialogs.
+  if (typeof focused[INPUT_CONTEXT] === "function" && focused[INPUT_CONTEXT]() === "terminal") return undefined;
   // An editor wired to extension shortcuts (the prompt, or a swapped-in custom editor) runs them itself.
   if (isFn((focused as ShortcutEditor).onExtensionShortcut)) return undefined;
   if (!isFn(main.onExtensionShortcut) || !DIALOG_SHORTCUTS.some((key) => matchesKey(data, key))) return undefined;

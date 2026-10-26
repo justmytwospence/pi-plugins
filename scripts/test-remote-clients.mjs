@@ -30,6 +30,7 @@ const { QuestionDialog } = await jiti.import('../packages/pi-ask-user-question/s
 const { askApproval } = await jiti.import('../packages/pi-tool-gate/src/prompt.ts');
 const { CustomEditor } = await import(new URL('./modes/interactive/components/custom-editor.js', sdkUrl));
 const { sidebarScreen } = await import('./remote-clients/sidebar.mjs');
+const { TerminalPanel } = await jiti.import('../packages/pi-interactive-shell/src/panel.ts');
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const herdrDir = process.env.HERDR_WEB_UI_DIR ?? latest(path.join(homedir(), '.local/share/herdr-web-ui'), /^remote-v\d+$/);
@@ -145,6 +146,19 @@ for (const width of [46, 120, 180]) {
   }
 }
 
+// A terminal is not a question or an editable Pi composer. Its frame deliberately
+// differs from editor/dialog frames; keyboard interaction is terminal-only for now.
+for (const width of [46, 120]) {
+  tui.terminal.columns = width;
+  const panel = new TerminalPanel(tui, theme, 'interactive-example', '/tmp', () => {});
+  for (const confirm of [false, true]) {
+    if (confirm) { panel.handleInput('\x1d'); panel.handleInput('q'); }
+    const lines = panel.render(width - 2).map(line => ` ${line} `);
+    screens.push({ name: 'interactive terminal', terminal: true, width, under: confirm ? 'stop confirmation' : 'active panel', ansi: [...lines, ...footer(width)].join('\n') });
+  }
+  await panel.shutdown();
+}
+
 const dir = mkdtempSync(path.join(tmpdir(), 'pi-remote-clients-'));
 const screensFile = path.join(dir, 'screens.json');
 writeFileSync(screensFile, JSON.stringify(screens.map((s) => ({ ...s, text: stripVTControlCharacters(s.ansi) }))));
@@ -166,6 +180,14 @@ const known = [];
 screens.forEach((screen, i) => {
   const label = `${screen.name} @${screen.width} over ${screen.under}`;
   const problems = [];
+  if (screen.terminal) {
+    const h = results.herdr?.[i], c = results.collie?.[i];
+    if (h) problems.push(`herdr-web-ui: terminal misidentified as question: ${JSON.stringify(h)}`);
+    if (c?.blocks.some(block => block.kind !== 'raw')) problems.push(`Collie: terminal misidentified as card: ${JSON.stringify(c.blocks)}`);
+    if (c && ['empty', 'draft'].includes(c.composer)) problems.push(`Collie: terminal misidentified as Pi composer: ${c.composer}`);
+    report(label, problems);
+    return;
+  }
   if (screen.idle !== undefined) {
     // An idle screen reads as the same screen without Sidebar does.
     const h = results.herdr, c = results.collie;

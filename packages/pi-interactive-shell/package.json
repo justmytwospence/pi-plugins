@@ -13,7 +13,8 @@
   "scripts": {
     "check": "npm run typecheck && npm test",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "postinstall": "node scripts/prepare-pty.cjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
@@ -31,5 +32,12 @@
     "url": "https://github.com/justmytwospence/pi-plugins",
     "directory": "packages/pi-interactive-shell"
   },
-  "homepage": "https://pi-plugins.vercel.app/plugins/pi-interactive-shell/"
+  "homepage": "https://pi-plugins.vercel.app/plugins/pi-interactive-shell/",
+  "dependencies": {
+    "@xterm/headless": "6.0.0",
+    "node-pty": "1.1.0"
+  },
+  "allowScripts": {
+    "node-pty@1.1.0": true
+  }
 }

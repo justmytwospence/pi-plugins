@@ -11,7 +11,7 @@ test('inactive embedded editors do not prevent third-party list controls', () =>
   assert.deepEqual(routeInput('\n', { render: () => [], child: editor(false) }), { data: '\x1b[B' });
 });
 test('explicit contexts are never rendered or rewritten', () => {
-  for (const context of ['editor', 'filter', 'list', 'viewer']) {
+  for (const context of ['editor', 'filter', 'list', 'viewer', 'terminal']) {
     const component = { [INPUT_CONTEXT]: () => context, render() { throw Error('must not render'); } };
     for (const key of ['j', 'k', '\n', '\x0b']) assert.equal(routeInput(key, component), undefined);
   }

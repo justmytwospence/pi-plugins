@@ -18,11 +18,15 @@ A longer task does not automatically need an interactive pane. A normal subagent
 
 ## When you need the terminal yourself
 
-With optional [pi-interactive-shell](/plugins/pi-interactive-shell/), submit `!i git add -p` at an idle real TUI prompt to hand over the terminal until the command exits. There is no auto-detection or agent tool. If [pi-next-prompt](/plugins/pi-next-prompt/) offers an `!i` ghost, press Tab, review it, then press Enter yourself; next-prompt owns that optional suggestion UI.
+With optional [pi-interactive-shell](/plugins/pi-interactive-shell/), submit `!i git add -p` at an idle real terminal TUI prompt. A focused overlay occupies the lower half, keeping the conversation visible without clearing the screen or stopping Pi's TUI. There is no auto-detection or agent tool. If [pi-next-prompt](/plugins/pi-next-prompt/) offers an `!i` ghost, press Tab, review it, then press Enter yourself; next-prompt owns that optional suggestion UI.
 
-Pi's event processing and background monitoring can continue, and existing background OS processes keep running. The foreground command occupies the terminal with Pi's TUI suspended until it exits; no agent run starts during the handoff. On exit Pi restores its UI without automatically continuing the agent. Only the command and status enter history, not captured output or interactive keystrokes; terminal recording and commands echoing secrets remain possible. `!!i` applies Pi's normal context exclusion, not history deletion.
+While the command runs, program keys—including Tab, Esc, Ctrl+C and Ctrl+D—reach the program. Panel controls use Ctrl+] followed by `f` to toggle compact/expanded, `q` to confirm stop/close, `u`/`d` to scroll half a page or `g`/`G` for top/end. Ctrl+] twice sends a literal Ctrl+]. On exit, output stays visible until Enter or Esc dismisses it. Teardown stops the process group with escalation when needed and disposes terminal emulation.
 
-This does not attach to, detach from or adopt a pi-bg job. **pi-bg is unchanged**; keep using its jobs and services when the agent needs logs, progress and asynchronous results.
+Pi's event processing and background monitoring can continue, and existing background OS processes keep running. New agent requests are gated until the panel closes; there is no automatic agent continuation. Only the command and completion/error status enter session history. The terminal screen and up to 1,000 scrollback lines stay in memory only while the panel is open; the extension does not write them to tool results, session history, model context or its own debug logs. Host screen-capture diagnostics, external recording and commands echoing secrets remain possible. `!!i` applies Pi's normal context exclusion, not history deletion.
+
+This requires a real, idle terminal, not RPC or print/headless mode. Support is keyboard-first VT, not universal mouse, graphics or remote/phone-client support; no OSC 52/clipboard passthrough. The [component reference](/plugins/pi-interactive-shell/#enable-and-requirements) covers its lazily loaded native PTY dependencies and platform requirements.
+
+There is no detach, multiple-terminal management or adoption of a pi-bg job. **pi-bg is unchanged**; keep using its jobs and services when the agent needs logs, progress and asynchronous results.
 
 ## Start the shell job, then do useful work
 

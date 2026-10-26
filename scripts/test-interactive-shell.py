@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline real-Pi PTY handoff test. Uses dummy input, never sudo or model calls."""
+"""Offline full-suite Pi PTY test. Dummy input only; no sudo or model calls."""
 import fcntl
 import json
 import os
@@ -15,29 +15,66 @@ import time
 
 ROOT = Path(__file__).resolve().parent.parent
 PROBE = '''import { appendFileSync } from "node:fs";
+import { visibleWidth } from "@earendil-works/pi-tui";
 export default function(pi) {
+  let off;
+  pi.registerCommand("terminal-test-reload", {description: "Offline reload fixture", handler: async (_, ctx) => { await ctx.reload(); }});
+  pi.on("session_shutdown", () => { off?.(); off = undefined; });
   pi.on("session_start", (_, ctx) => {
-    ctx.ui.onTerminalInput(data => {
+    let tui;
+    ctx.ui.setWidget("terminal-test-probe", t => { tui = t; return {render: () => [], invalidate(){}}; });
+    ctx.ui.setWidget("terminal-test-probe", undefined);
+    off?.();
+    off = ctx.ui.onTerminalInput(data => {
+      if (data === "\\x1b[18~") { pi.sendUserMessage("/terminal-test-reload", {expandPromptTemplates: true}); return { consume: true }; }
       if (data === "\\x1b[19~") {
         pi.events.emit("prompt:offer", {source: "handoff-test", text: process.env.HANDOFF_COMMAND});
         return { consume: true };
       }
       if (data !== "\\x1b[20~") return;
-      appendFileSync(process.env.HANDOFF_PROBE, JSON.stringify({text: ctx.ui.getEditorText(), idle: ctx.isIdle()}) + "\\n");
+      const focus = tui.getFocusedComponent();
+      const terminal = focus?.[Symbol.for("pi-plugins.input-context.v1")]?.() === "terminal";
+      const lines = terminal ? focus.render(tui.terminal.columns - 2) : [];
+      const text = lines.join("\\n");
+      // Only booleans/geometry in this test probe, never terminal contents or typed keys.
+      appendFileSync(process.env.HANDOFF_PROBE, JSON.stringify({
+        text: ctx.ui.getEditorText(), terminal, height: lines.length,
+        width: tui.terminal.columns, maxWidth: Math.max(0, ...lines.map(visibleWidth)),
+        exited: text.includes("exited"), ready: text.includes("HANDOFF_INPUT:"),
+        stop: text.includes("Stop command?"), menu: text.includes("MENU_READY"),
+        scrollTop: text.includes("SCROLL_000"), scrollEnd: text.includes("SCROLL_079")
+      }) + "\\n");
       return { consume: true };
     });
   });
 }'''
+MENU = '''import os,sys,termios,tty
+fd=0
+old=termios.tcgetattr(fd)
+try:
+    tty.setraw(fd)
+    os.write(1,b"\\x1b[?1049hMENU_READY")
+    keys=b""
+    while True:
+        data=os.read(fd,1)
+        if data==b"\\x04": break
+        keys+=data
+    os.write(1,b"\\x1b[?1049lMENU_DONE:"+keys.hex().encode()+b"\\r\\n")
+finally:
+    termios.tcsetattr(fd,termios.TCSANOW,old)
+'''
 
 
 def run(mode):
-    with tempfile.TemporaryDirectory(prefix="pi-handoff-pty-") as directory:
+    with tempfile.TemporaryDirectory(prefix="pi-panel-pty-") as directory:
         temp = Path(directory)
         agent = temp / "agent"
         agent.mkdir()
         (agent / "settings.json").write_text(json.dumps({"packages": [], "quietStartup": True}))
         fixture = temp / "probe.ts"
         fixture.write_text(PROBE)
+        menu = temp / "menu.py"
+        menu.write_text(MENU)
         probe = temp / "probe.jsonl"
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 110, 0, 0))
@@ -49,9 +86,9 @@ def run(mode):
         seed = sessions_dir / "seed.jsonl"
         seed.write_text("\n".join(json.dumps(entry) for entry in [
             {"type": "session", "version": 3, "id": "00000000-0000-4000-8000-000000000001", "timestamp": "2026-10-26T00:00:00Z", "cwd": str(temp)},
-            {"type": "message", "id": "00000001", "parentId": None, "timestamp": "2026-10-26T00:00:00Z", "message": {"role": "user", "content": "Offline handoff test fixture", "timestamp": 0}},
+            {"type": "message", "id": "00000001", "parentId": None, "timestamp": "2026-10-26T00:00:00Z", "message": {"role": "user", "content": "Offline panel test fixture", "timestamp": 0}},
         ]) + "\n")
-        args = ["pi", "--session", str(seed), "--offline", "--no-extensions", "--no-mcp", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-approve", "--session-dir", str(temp / "sessions"), "--tui-mode", mode, "-e", str(ROOT), "-e", str(fixture)]
+        args = ["pi", "--session", str(seed), "--offline", "--no-extensions", "--no-mcp", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-approve", "--session-dir", str(sessions_dir), "--tui-mode", mode, "-e", str(ROOT), "-e", str(fixture)]
 
         def own_terminal():
             os.setsid()
@@ -81,61 +118,95 @@ def run(mode):
 
         def snapshot():
             count = len(probe.read_text().splitlines()) if probe.exists() else 0
-            try:
-                os.write(master, b"\x1b[20~")
-            except OSError as error:
-                child.wait(timeout=2)
-                raise AssertionError(f"Pi exited {child.returncode}: {transcript[-4000:]!r}") from error
+            os.write(master, b"\x1b[20~")
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 drain(0.1)
                 if probe.exists() and len(probe.read_text().splitlines()) > count:
-                    return json.loads(probe.read_text().splitlines()[-1])
+                    result = json.loads(probe.read_text().splitlines()[-1])
+                    assert result["maxWidth"] <= result["width"], result
+                    return result
                 assert child.poll() is None, f"Pi exited: {child.returncode}: {transcript[-3000:]!r}"
-            raise AssertionError(f"TUI did not resume: {transcript[-4000:]!r}")
+            raise AssertionError(f"No input probe: {transcript[-4000:]!r}")
+
+        def send(keys):
+            os.write(master, keys)
+            drain(0.7)
 
         def submit(command):
-            os.write(master, command.encode() + b"\r")
-            drain(0.6)
+            send(command.encode() + b"\r")
+
+        def dismiss():
+            assert snapshot()["exited"]
+            send(b"\x1b")
+            assert not snapshot()["terminal"]
 
         try:
             drain(3)
-            assert snapshot()["idle"]
-            os.write(master, b"\x1b[19~")  # Existing next-prompt offer integration.
-            drain(0.1)
-            os.write(master, b"\t")
-            drain(0.1)
-            assert snapshot() == {"text": command, "idle": True}  # Tab does not execute.
-            os.write(master, b"\r")
-            drain(0.6)
-            assert b"HANDOFF_INPUT:" in transcript[-5000:]
-            os.write(master, b"dummy-handoff-input\n")
-            drain(0.8)
-            assert snapshot() == {"text": "", "idle": True}
+            assert not snapshot()["terminal"]
+            send(b"\x1b[19~\t")
+            accepted = snapshot()
+            assert accepted["text"] == command and not accepted["terminal"], accepted
+            send(b"\r")
+            compact = snapshot()
+            assert compact["terminal"] and compact["ready"] and compact["height"] < 24, compact
+            send(b"\x1df")
+            assert snapshot()["height"] > compact["height"]
+            send(b"\x1df")
+            send(b"dummy-handoff-input\r")
+            assert snapshot()["terminal"] and snapshot()["exited"]
             assert b"TERMINAL_ONLY:dummy-handoff-input" in transcript
+            dismiss()
             submit("!i read -s -p 'INTERRUPT_ME: ' value")
-            os.write(master, b"\x03")
-            drain(0.8)
-            assert snapshot() == {"text": "", "idle": True}
+            send(b"\x03")
+            dismiss()
             submit("!i pi-handoff-nonexistent-command")
-            assert snapshot()["idle"]
+            dismiss()
+            submit(f"!i python3 {menu}")
+            assert snapshot()["menu"]
+            # Esc, arrows, Tab and Ctrl+T belong to the program, not Pi/editor navigation.
+            send(b"\x1b[B\t\x14")
+            send(b"\x1b")  # Let the host disambiguate literal Esc from an Alt chord.
+            send(b"\x1d\x1d")
+            send(b"\x04")
+            assert b"MENU_DONE:1b5b4209141b1d" in transcript, transcript[-6000:]
+            dismiss()
+            submit("!i for ((i=0;i<80;i++)); do printf 'SCROLL_%03d\\n' \"$i\"; done")
+            assert snapshot()["scrollEnd"]
+            send(b"\x1dg")
+            assert snapshot()["scrollTop"]
+            send(b"\x1dG")
+            assert snapshot()["scrollEnd"]
+            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 18, 46, 0, 0))
+            os.kill(child.pid, signal.SIGWINCH)
+            drain(0.3)
+            assert snapshot()["width"] == 46
+            dismiss()
+            submit("!i read -p STOP_READY value")
+            send(b"\x1dq")
+            assert snapshot()["stop"]
+            send(b"\x1b")
+            assert snapshot()["terminal"] and not snapshot()["stop"]
+            send(b"\x1dq\r")
+            assert not snapshot()["terminal"]
+            submit("!i read -p RELOAD_READY value")
+            assert snapshot()["terminal"]
+            send(b"\x1b[18~")
+            drain(3)
+            assert not snapshot()["terminal"]
             submit("!!i printf 'EXCLUDED_HANDOFF_OUTPUT\\n'")
-            assert snapshot()["idle"]
-            # Ensure normal user-bash status recording works after restoring the terminal.
+            dismiss()
             submit("!printf NORMAL_BASH_OK")
-            assert snapshot()["idle"]
-            sessions = "\n".join(p.read_text() for p in (temp / "sessions").rglob("*.jsonl"))
+            assert not snapshot()["terminal"]
+            sessions = "\n".join(p.read_text() for p in sessions_dir.rglob("*.jsonl"))
             assert "interactive command exited with code 0" in sessions
             assert "127" in sessions and "NORMAL_BASH_OK" in sessions
-            assert "dummy-handoff-input" not in sessions
-            assert "TERMINAL_ONLY:dummy" not in sessions
-            # Excluded bash may still be persisted, but must retain its context exclusion flag.
+            assert "dummy-handoff-input" not in sessions and "MENU_DONE:" not in sessions
             excluded = [json.loads(line) for line in sessions.splitlines() if "EXCLUDED_HANDOFF_OUTPUT" in line]
             assert excluded and all(item.get("message", {}).get("excludeFromContext") is True for item in excluded), excluded
-            print(f"PASS {mode}: full-suite real PTY handoff, non-echoing input, Ctrl+C, failed command, exclusion and UI restoration")
+            print(f"PASS {mode}: panel suggestion, private input, retained output, Ctrl+C, editor keys, expansion, scrollback, resize, stop, reload, exclusion and focus")
         finally:
             if child.poll() is None:
-                # Kill the isolated test process group, including any interrupted shell.
                 os.killpg(child.pid, signal.SIGKILL)
                 _, status = os.waitpid(child.pid, 0)
                 child.returncode = os.waitstatus_to_exitcode(status)

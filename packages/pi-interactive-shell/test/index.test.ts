@@ -21,7 +21,7 @@ function harness(overrides: any = {}) {
     on: (key: string, fn: any) => events.set(key, fn), emit: vi.fn(),
   } };
   const ctx = { mode: "tui", hasUI: true, isIdle: () => true,
-    ui: { custom: vi.fn(async (factory: any) => { let result; await factory({}, {}, {}, (r: any) => { result = r; }); return result; }) }, ...overrides };
+    ui: { custom: vi.fn((factory: any) => new Promise(resolve => { factory({}, {}, {}, resolve); })) }, ...overrides };
   interactiveShell(pi as any);
   handlers.get("session_start")({}, ctx);
   const bash = (command: string, excludeFromContext = false) => handlers.get("user_bash")({ command, cwd: "/session/cwd", excludeFromContext }, ctx);
@@ -34,12 +34,16 @@ test("ordinary bang commands pass through, including ones named id/install", asy
   expect(h.ctx.ui.custom).not.toHaveBeenCalled();
 });
 
-test.each([false, true])("explicit handoffs use the event cwd; Pi owns exclusion=%s", async (exclude) => {
-  const result = { output: "status only", exitCode: 0, cancelled: false, truncated: false };
-  const spy = vi.spyOn(handoffModule, "handoff").mockResolvedValue(result);
+test.each([false, true])("explicit handoffs use an overlay and event cwd; Pi owns exclusion=%s", async (exclude) => {
+  const result = { output: "status only", exitCode: 0, cancelled: false, truncated: false as const };
+  const spy = vi.spyOn(handoffModule, "handoff").mockImplementation((_tui, _theme, _cmd, _cwd, done) => {
+    queueMicrotask(() => done(result));
+    return {} as any;
+  });
   const h = harness();
   expect(await h.bash("i sudo true", exclude)).toEqual({ result });
-  expect(spy).toHaveBeenCalledWith({}, "sudo true", "/session/cwd");
+  expect(spy).toHaveBeenCalledWith({}, {}, "sudo true", "/session/cwd", expect.any(Function));
+  expect(h.ctx.ui.custom.mock.calls[0][1].overlay).toBe(true);
   expect(h.pi.events.emit).toHaveBeenCalledWith("prompt:clear", {});
 });
 
@@ -57,31 +61,32 @@ test("rejects empty commands and missing terminals", async () => {
   expect(h.ctx.ui.custom).not.toHaveBeenCalled();
 });
 
-test("agent starts and reload wait until the terminal is released", async () => {
-  let finish!: (result: ReturnType<typeof handoffModule.failure>) => void;
-  vi.spyOn(handoffModule, "handoff").mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+test("agent starts wait for panel dismissal; reload stops the panel", async () => {
+  const result = { output: "stopped", exitCode: 130, cancelled: true, truncated: false as const };
+  let finish!: (value: typeof result) => void;
+  const shutdown = vi.fn(async () => { finish(result); });
+  vi.spyOn(handoffModule, "handoff").mockImplementation((_tui, _theme, _cmd, _cwd, done) => {
+    finish = done; return { shutdown } as any;
+  });
   const h = harness();
   const running = h.bash("i true");
   expect((await h.bash("i another-command")).result.exitCode).toBe(1);
   let started = false;
-  let shutDown = false;
   const start = h.handlers.get("before_agent_start")().then(() => { started = true; });
-  const shutdown = h.handlers.get("session_shutdown")().then(() => { shutDown = true; });
   await Promise.resolve();
   expect(started).toBe(false);
-  expect(shutDown).toBe(false);
-  finish({ output: "status", exitCode: 0, cancelled: false, truncated: false });
-  await Promise.all([running, start, shutdown]);
+  await h.handlers.get("session_shutdown")();
+  await Promise.all([running, start]);
+  expect(shutdown).toHaveBeenCalledOnce();
   expect(started).toBe(true);
-  expect(shutDown).toBe(true);
 });
 
-test("capability is session-scoped and absent outside TUI", () => {
+test("capability is session-scoped and absent outside TUI", async () => {
   const h = harness();
   const reply = vi.fn();
   h.events.get("interactive-shell:probe")({ reply });
   expect(reply).toHaveBeenCalledOnce();
-  h.handlers.get("session_shutdown")();
+  await h.handlers.get("session_shutdown")();
   h.events.get("interactive-shell:probe")({ reply });
   expect(reply).toHaveBeenCalledOnce();
   const rpc = harness({ mode: "rpc" });
