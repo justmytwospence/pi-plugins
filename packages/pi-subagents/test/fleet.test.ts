@@ -127,10 +127,15 @@ test("↓ at an empty prompt enters the list; arrows select; Esc or ↑ past mai
   fleet.dispose();
 });
 
-test("Ctrl+J/Ctrl+K cycle the list from the prompt, through main, unless a dialog has the keyboard", () => {
+test("Ctrl+J/Ctrl+K stay the editor's until the list is selected, then cycle it through main", () => {
   const { ui, fleet, runs } = setup();
   ui.editorText = "draft";
-  expect(ui.press("\n")).toBe(true);
+  // From the prompt the keys are the editor's.
+  expect(ui.press("\n")).toBe(false);
+  expect(ui.press("\x0b")).toBe(false);
+  // Selected (here with ↓ at the prompt's end), they cycle the rows.
+  ui.editorText = "";
+  expect(ui.press(KEY.down)).toBe(true);
   expect(ui.render("subagents-fleet")[2]).toMatch(/● Find config/u);
   expect(ui.press("\n")).toBe(true);
   expect(ui.render("subagents-fleet")[3]).toMatch(/● Fix config/u);
@@ -138,12 +143,8 @@ test("Ctrl+J/Ctrl+K cycle the list from the prompt, through main, unless a dialo
   expect(ui.render("subagents-fleet")[1]).toBe(" ● main");
   expect(ui.press("\x0b")).toBe(true);
   expect(ui.render("subagents-fleet")[3]).toMatch(/● Fix config/u);
-  expect(ui.editorText).toBe("draft");
   expect(ui.press(KEY.escape)).toBe(true);
-  // Ctrl+K from the prompt starts at the last row.
-  expect(ui.press("\x0b")).toBe(true);
-  expect(ui.render("subagents-fleet")[3]).toMatch(/● Fix config/u);
-  expect(ui.press(KEY.escape)).toBe(true);
+  expect(ui.press("\n")).toBe(false);
   // A dialog has the keyboard, or there is no list: the keys stay the editor's.
   ui.tui.focused = { handleInput: () => undefined };
   expect(ui.press("\n")).toBe(false);

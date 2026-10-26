@@ -89,7 +89,7 @@ Claude Code's subagent panel, below the prompt: `main` and every running subagen
 | `b` | move a foreground run to the background: the tool call returns and the result arrives later as a message, as with `async` |
 | Esc, `h`, or `↑`/`k` past the first row | back to the prompt |
 
-`↓` does not leave the prompt while autocomplete is showing or a history entry is being browsed. With pi-select-nav, Tab selects this panel when no next-prompt is accepted, preserving any draft. Repeated Tab cycles runs and hosted pills, wrapping through the main row. Ctrl+J and Ctrl+K (without pi-select-nav too) select the next or previous row from the prompt or the panel, wrapping the same way, whenever the panel lists something and no dialog has the keyboard; they replace the editor's newline and kill-line only then. Enter opens the selection (on main, returns to the editor) and Esc returns to the editor. The session shown (main here) is marked ◉ and bold, as in a subagent's view. Other editing keys return to the editor.
+`↓` does not leave the prompt while autocomplete is showing or a history entry is being browsed. With pi-select-nav, Tab selects this panel when no next-prompt is accepted, preserving any draft. Repeated Tab cycles runs and hosted pills, wrapping through the main row. Once the panel is selected (Tab or `↓`), Ctrl+J and Ctrl+K move to the next or previous row, wrapping the same way; from the prompt they stay the editor's newline and kill-line. Enter opens the selection (on main, returns to the editor) and Esc returns to the editor. The session shown (main here) is marked ◉ and bold, as in a subagent's view. Other editing keys return to the editor.
 
 ### Subagent sessions
 

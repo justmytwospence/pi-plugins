@@ -300,16 +300,14 @@ export class FleetView {
       const down = focused ? leavesPromptDown(focused, data, matchesKey(data, "down"), data === "j" && modal?.state === "normal") : matchesKey(data, "down") && this.ui.getEditorText() === "";
       const left = matchesKey(data, "left") && this.ui.getEditorText() === "";
       const tab = enterWithTab && matchesKey(data, "tab");
-      // Ctrl+J/Ctrl+K cycle the list from the prompt, as in a subagent's session view (over the
-      // editor's newline and kill-line, which have other keys), but only while there is a list.
-      const back = matchesKey(data, "ctrl+k");
-      const cycle = matchesKey(data, "ctrl+j") || back;
-      if (!down && !left && !tab && !cycle) return undefined;
+      // Ctrl+J/Ctrl+K stay the editor's until the list is selected (Tab, or ↓ at the prompt's end);
+      // only then do they cycle it.
+      if (!down && !left && !tab) return undefined;
       const roster = this.roster();
       if (roster.length > 0) {
         this.active = true;
         this.selectedMode = mode;
-        this.select(roster, back ? roster.length - 1 : this.firstRow(roster));
+        this.select(roster, this.firstRow(roster));
         this.update();
         return { consume: true };
       }
