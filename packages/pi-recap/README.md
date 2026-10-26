@@ -36,6 +36,12 @@ To try it alone from a checkout of the suite repository, for one run:
 pi -e ./packages/pi-recap
 ```
 
+## Session name
+
+`pi --resume` and `/resume` list a session by its name, or by its first message when it has none. pi-recap keeps the name current instead: your latest prompt while a turn runs, then the turn's recap once it settles (the same one-line summary pi-herdr notifies with, so no extra model call). The list then shows what each session was doing last. Commands, `!` lines, steers and queued follow-ups do not rename it. With pi-herdr, the pane title and `task` token follow the name too.
+
+A name you set yourself (`/name`, `--name`) is never replaced; clear it (`/name` with an empty name) to hand naming back. Each automatic name is recorded as a `recap-name` session entry, which is how a resumed session tells its own names from yours.
+
 ## How it works
 
 - **One recap per turn.** As a turn settles, a small model (the first of `anthropic/claude-haiku-5-5`, `anthropic/claude-haiku-4-5` with credentials, thinking off, 4-second cap) writes a line of about 60 characters from a condensed transcript: up to 5 earlier prompts of the session as context, then the latest prompt, its tool calls and the final reply. It says what got done and, if the turn ended needing you, what you must decide or do. A reply that is already one short line is used as is, with no model call. Without a model, on an error, a timeout or an interrupted turn, the reply's first sentence stands in. The transcript line keeps the whole recap and wraps it; only pi-herdr's `$summary` token is clipped to 80 characters.
@@ -52,6 +58,7 @@ pi -e ./packages/pi-recap
 | Variable | Effect |
 | --- | --- |
 | `PI_RECAP=0` | No automatic recap line; `/recap` and pi-herdr's summary still work |
+| `PI_RECAP_NAME=0` | Leave the session name alone (see [Session name](#session-name)) |
 | `PI_RECAP_DELAY_MS` | Idle delay before the line appears (default `180000`) |
 | `PI_RECAP_MODEL` | `provider/id` for the recap; else `PI_HERDR_SUMMARY_MODEL`, else Haiku |
 | `PI_HERDR_SUMMARY=0` | No model call: the reply's first sentence only |

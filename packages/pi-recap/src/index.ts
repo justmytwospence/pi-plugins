@@ -10,6 +10,11 @@
 // asks for it over the event bus and writes it to its `$summary` pane token, so the turn's
 // notification and the recap line are the same text.
 //
+// Session name (what `pi --resume` and /resume list, and pi-herdr's pane title): your latest prompt
+// while a turn runs, then the turn's recap once it settles, so the list shows what the session was
+// doing last rather than its first message. A name you set yourself (/name, --name) is left alone
+// until you clear it. PI_RECAP_NAME=0 turns this off.
+//
 // Event bus:
 //   recap:summary { reply(promise) }   pi-recap calls reply with a Promise<string | undefined> for
 //                                      the current turn (memoized, clipped to the token's 80
@@ -20,6 +25,8 @@ import { oneLine, type Recap, RECAP_MAX, type RecapRegistry, recap } from "./sum
 
 /** The custom entry type of a recap in the session, and the key of /recap's pending line. */
 export const ENTRY = "recap";
+/** The custom entry recording each session name pi-recap set, so a name set by hand is told apart. */
+export const NAME_ENTRY = "recap-name";
 export const WIDGET = "recap";
 export const MARK = "※ ";
 export const LABEL = "recap: ";
@@ -97,6 +104,39 @@ export default function piRecap(pi: ExtensionAPI) {
   // Bumped whenever a pending recap goes stale: a new run, a tree jump, a new session.
   let generation = 0;
   let memo: { key: string; promise: Promise<Recap | undefined> } | undefined;
+  // The session name pi-recap set last; any other name was set by hand.
+  let autoName: string | undefined;
+
+  /** The latest automatic name recorded in the session, so it survives a resume. */
+  const recordedName = (ctx: ExtensionContext): string | undefined => {
+    try {
+      const entries = ctx.sessionManager.getEntries() as any[];
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const e = entries[i];
+        if (e?.type === "custom" && e.customType === NAME_ENTRY && typeof e.data?.name === "string") return e.data.name;
+      }
+    } catch {
+      // No entries to read.
+    }
+    return undefined;
+  };
+
+  /** Name the session after what it is doing now, unless you named it yourself. */
+  const nameSession = (text: string | undefined) => {
+    if (!active || process.env.PI_RECAP_NAME === "0") return;
+    const name = oneLine(text ?? "", RECAP_MAX);
+    if (!name) return;
+    try {
+      const current = pi.getSessionName();
+      if (current && current !== autoName) return;
+      if (current === name) return;
+      pi.setSessionName(name);
+      pi.appendEntry(NAME_ENTRY, { name });
+      autoName = name;
+    } catch {
+      // The runtime went stale.
+    }
+  };
 
   pi.registerEntryRenderer<{ text?: string }>(ENTRY, (entry, _options, theme) => {
     const text = entry.data?.text;
@@ -161,6 +201,15 @@ export default function piRecap(pi: ExtensionAPI) {
     memo = undefined;
     active = ctx.mode === "tui";
     lastCtx = active ? ctx : undefined;
+    autoName = active ? recordedName(ctx) : undefined;
+  });
+  pi.on("input", (event) => {
+    const text = event.text?.trim() ?? "";
+    // Commands and shell lines are not what the session is about; a steer or queued follow-up
+    // refines the running turn, whose recap names it when it settles.
+    if (!text || text.startsWith("/") || text.startsWith("!") || event.streamingBehavior) return undefined;
+    nameSession(text);
+    return undefined;
   });
   pi.on("session_tree", (_event, ctx) => {
     if (!active) return;
@@ -192,6 +241,9 @@ export default function piRecap(pi: ExtensionAPI) {
     reset();
     const epoch = generation;
     const recapping = summarize(ctx);
+    void recapping.then((r) => {
+      if (epoch === generation && r) nameSession(r.text);
+    });
     timer = setTimeout(async () => {
       const r = await recapping;
       if (epoch !== generation || !active || !r) return;
@@ -216,8 +268,10 @@ export default function piRecap(pi: ExtensionAPI) {
         const epoch = generation;
         const r = await summarize(ctx);
         if (epoch !== generation) return;
-        if (r) append(r.text);
-        else ctx.ui.notify("Nothing to recap yet", "warning");
+        if (r) {
+          append(r.text);
+          nameSession(r.text);
+        } else ctx.ui.notify("Nothing to recap yet", "warning");
       } finally {
         pending(ctx, false);
       }

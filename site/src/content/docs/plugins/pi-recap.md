@@ -9,7 +9,7 @@ plugin: pi-recap
 - **Use it for:** Seeing at a glance where a session stands after you have been away from it.
 - **Enable:** Select `packages/pi-recap/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
 - **Controls:** `/recap` adds the latest turn's recap to the transcript at once.
-- **Settings:** `PI_RECAP=0` (no automatic line), `PI_RECAP_DELAY_MS` (default 180000), `PI_RECAP_MODEL`, `PI_HERDR_SUMMARY=0` (no model call).
+- **Settings:** `PI_RECAP=0` (no automatic line), `PI_RECAP_NAME=0` (leave the session name alone), `PI_RECAP_DELAY_MS` (default 180000), `PI_RECAP_MODEL`, `PI_HERDR_SUMMARY=0` (no model call).
 - **Requirements, cost & privacy:** Pi 1.0+ TUI; recaps are saved in the session file; one small Haiku request per settled turn with a multi-line reply, sending earlier prompts, the turn's prompt, tool calls and reply.
 - **Integrations & limits:** With pi-herdr, the same line is its `$summary` notification text, from one shared request, clipped there to 80 characters; the transcript line wraps instead of truncating.
 
@@ -20,6 +20,10 @@ Recap writes one line on where the session stands: what the last turn got done a
 ```
 
 *Example, not a screenshot.*
+
+## Session name
+
+`pi --resume` and `/resume` list a session by its name, or by its first message when it has none. Recap keeps the name current: your latest prompt while a turn runs, then the turn's recap once it settles, so the list shows what each session was doing last. Commands, `!` lines, steers and queued follow-ups do not rename it. With pi-herdr the pane title and `task` token follow the name. A name you set yourself (`/name`, `--name`) is never replaced; clear it to hand naming back. Each automatic name is recorded as a `recap-name` session entry.
 
 ## Enable and requirements
 

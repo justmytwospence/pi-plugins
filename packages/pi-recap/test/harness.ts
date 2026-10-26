@@ -48,6 +48,11 @@ export function harness(options: { tools?: any[]; exec?: (cmd: string, args: str
     getAllTools: () => options.tools ?? [],
     exec: async (cmd: string, args: string[]) => options.exec?.(cmd, args) ?? { code: 1, stdout: "", stderr: "", killed: false },
     appendEntry: (customType: string, data: unknown) => entries.push({ customType, data }),
+    sessionName: undefined as string | undefined,
+    getSessionName: () => pi.sessionName,
+    setSessionName: (name: string) => {
+      pi.sessionName = name.trim() || undefined;
+    },
     sendMessage: (message: any, opts: any) => messages.push({ message, opts }),
     getThinkingLevel: () => thinking,
     setThinkingLevel: (level: string) => {
