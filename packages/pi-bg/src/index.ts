@@ -603,10 +603,13 @@ export default function piBg(pi: ExtensionAPI) {
    * run does not settle (pi, herdr and tmux keep showing it working) and the outcome continues the
    * run instead of waking an idle agent. Typing or Esc ends the wait; the job then wakes the agent
    * as usual. Pi exposes no abort signal at this boundary, so Esc is read from the terminal.
+   * `event.context.canContinue` is not consulted: after an ordinary reply it is false (the context
+   * ends with the assistant message), and the outcome entry this returns is what makes the
+   * continuation valid; Pi re-checks it after committing the entries.
    */
   let settleWaiting = false;
   const waitAtSettle = async (event: AgentBeforeSettleEvent, c: ExtensionContext): Promise<BoundaryResult> => {
-    if (settleWaiting || !attached || !tui() || event.outcome !== "completed" || !event.context.canContinue) return {};
+    if (settleWaiting || !attached || !tui() || event.outcome !== "completed") return {};
     if (c.hasPendingMessages() || !agentJobs().length || [...waiters].some((w) => !w.silent)) return {};
     const generation = sessionGeneration;
     const label = () => agentJobs().map(waitLabel).join(" · ");

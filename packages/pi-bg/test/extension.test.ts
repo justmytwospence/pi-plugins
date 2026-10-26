@@ -100,7 +100,9 @@ describe("pi-bg", () => {
     const settle = (x: Awaited<ReturnType<typeof load>>) => {
       const h = x.handlers.get("agent_before_settle")?.[0];
       if (!h) throw new Error("no agent_before_settle handler");
-      return h({ type: "agent_before_settle", outcome: "completed", entries: [], continue: false, context: { canContinue: true } }, x.ctx) as Promise<any>;
+      // As Pi sends it after an ordinary reply: the context ends with the assistant message, so it
+      // cannot continue until the outcome entry is added.
+      return h({ type: "agent_before_settle", outcome: "completed", entries: [], continue: false, context: { canContinue: false } }, x.ctx) as Promise<any>;
     };
 
     it("keeps the turn open until the job ends, then continues the run with its outcome", async () => {
@@ -132,7 +134,7 @@ describe("pi-bg", () => {
       expect(await settle(x)).toEqual({});
       x.state.pending = false;
       const h = x.handlers.get("agent_before_settle")![0];
-      expect(await h({ type: "agent_before_settle", outcome: "aborted", entries: [], continue: false, context: { canContinue: true } }, x.ctx)).toEqual({});
+      expect(await h({ type: "agent_before_settle", outcome: "aborted", entries: [], continue: false, context: { canContinue: false } }, x.ctx)).toEqual({});
       expect(x.working).toEqual([]);
       await x.shutdown();
     });
