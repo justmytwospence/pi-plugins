@@ -38,6 +38,7 @@
       "./packages/pi-marimo/src/index.ts",
       "./packages/pi-cache-guard/src/index.ts",
       "./packages/pi-next-prompt/src/index.ts",
+      "./packages/pi-interactive-shell/src/index.ts",
       "./packages/pi-diff-review/src/index.ts",
       "./packages/pi-prose-width/src/index.ts",
       "./packages/pi-sticky-last-prompt/src/index.ts",

@@ -11,7 +11,7 @@ plugin: pi-next-prompt
 - **Controls:** `/next-prompt` status/on/off; Tab/Right accept into an empty focused main editor, never submit.
 - **Settings:** `next-prompt.json` shared/user/project layers; enabled, Tab/Right, max 110 characters; Jev timeout 1500 ms, threshold 0.6.
 - **Requirements, cost & privacy:** Pi 1.0+ TUI; normal input/output tokens for suggestion instruction; optional paid Jev sees suggestion/request/answer excerpts.
-- **Integrations & limits:** Optional Vim/select-nav. Missing classifier shows unvetted text; no prompt after failed/aborted runs. Suggestions are not authorization.
+- **Integrations & limits:** Optional Vim/select-nav and interactive-shell capability probe. Missing classifier shows unvetted text; no prompt after failed/aborted runs. Suggestions are not authorization.
 
 Next prompt offers a likely follow-up after a completed run. It is deliberately selective: a finished task, an unresolved question or several equally plausible directions should produce no suggestion. Accepting text never sends it automatically.
 
@@ -32,6 +32,12 @@ Typing hides the suggestion. Deleting everything you typed brings it back until 
 The acceptance keys are intercepted only while a suggestion is offered, the editor is empty, and the focused component is the main prompt editor: not an editor embedded in a dialog, not while autocomplete is open, and, with pi-vim, only in an idle Insert or Normal state (not during a pending command, Visual mode or an EX line). Otherwise the focused component handles Right normally. With [pi-select-nav](/plugins/pi-select-nav/), Tab accepts explicit completion or selects available task panels instead of triggering implicit file completion. A selected task panel keeps Tab for navigation, even if a new suggestion arrives. With pi-vim, accepting also moves the editor to Insert mode at the end of the text; it still does not submit.
 
 The extension wraps rendering rather than replacing the editor. Editors drawing Pi's software or hardware cursor, including pi-vim, can show inline ghost text. If no compatible cursor is drawn, the fallback is a dim line below the editor with an acceptance hint naming the first configured key.
+
+## Optional interactive-shell next step
+
+With [pi-interactive-shell](/plugins/pi-interactive-shell/) enabled in a real terminal TUI, next-prompt can probe its capability and suggest `!i <command>` when direct human interaction is the next step. Neither extension requires the other; next-prompt owns the suggestion UI and acceptance behavior.
+
+Press Tab to copy the ghost into the editor, review or edit it, then press Enter yourself. Acceptance never runs it. The explicit prefix hands an idle terminal to the foreground command and restores Pi on exit; it does not auto-detect commands or automatically continue the agent. Pi's event processing and background monitoring can continue, but its terminal and UI remain occupied until the command exits; no agent run starts during the handoff. See the [interactive-shell reference](/plugins/pi-interactive-shell/) for history and privacy limits.
 
 ## Commands and configuration
 

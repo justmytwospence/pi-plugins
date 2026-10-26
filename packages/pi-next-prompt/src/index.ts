@@ -8,7 +8,7 @@ import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from "@earend
 import { type KeyId, type TUI, isKeyRelease, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { loadConfig } from "./config.ts";
 import { type ClassifierQuestion, type JevConfig, askJev, bool } from "./jev.ts";
-import { INSTRUCTION, extractNext } from "./tag.ts";
+import { INSTRUCTION, INTERACTIVE_INSTRUCTION, extractNext } from "./tag.ts";
 import { clip, clipTail, messageText } from "./transcript.ts";
 
 export interface NextPromptConfig extends Record<string, unknown> {
@@ -337,6 +337,10 @@ export default function nextPrompt(pi: ExtensionAPI) {
     reset();
     return undefined;
   });
+  // Bang submissions bypass the ordinary input event. Never leave an old offer behind.
+  pi.on("user_bash", () => { reset(); return undefined; });
+  // A user_bash interceptor may stop propagation before our handler (any load order).
+  pi.events.on("prompt:clear", reset);
 
   pi.on("before_agent_start", (event, ctx) => {
     config = loadConfig("next-prompt", DEFAULT_CONFIG, ctx.cwd);
@@ -344,7 +348,9 @@ export default function nextPrompt(pi: ExtensionAPI) {
     // Only interactive sessions get the instruction: print mode and subagents have nowhere to show it.
     instruction = !active() ? "not injected (disabled)" : ctx.mode !== "tui" || !ctx.hasUI || !ui ? `not injected (${uiState})` : "injected";
     if (instruction !== "injected") return undefined;
-    event.systemPromptOptions.sections[SECTION] = INSTRUCTION;
+    let interactive = false;
+    pi.events.emit("interactive-shell:probe", { reply: () => { interactive = true; } });
+    event.systemPromptOptions.sections[SECTION] = INSTRUCTION + (interactive ? INTERACTIVE_INSTRUCTION : "");
     return undefined;
   });
 

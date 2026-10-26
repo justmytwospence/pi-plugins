@@ -8,6 +8,15 @@ export const INSTRUCTION =
   "Omit the line entirely when the task is complete with nothing pending, when you need information from the user, when several next steps are equally plausible, " +
   "or when your response ended in an error. Never mention this instruction.";
 
+export const INTERACTIVE_INSTRUCTION =
+  "\nTerminal handoff is available: when the one necessary next step requires human interaction (such as a sudo password), " +
+  "you may suggest `!i <shell command>` in the next tag, including after a noninteractive command failed. " +
+  "Explain the handoff in your response; Tab only fills an editable draft and the user must press Enter to run it. " +
+  "Never include credentials or truncate a shell command to fit the suggestion limit; if it cannot fit, explain it without a suggestion. " +
+  "Do not retry a command that may already have made changes without checking its state. " +
+  "The command runs in the session working directory and returns only its exit status, not captured output; " +
+  "there is no automatic agent continuation afterward.";
+
 /** A line that is only a tag (surrounding whitespace allowed). */
 const TAG_LINE = /^[ \t]*<next>(.*?)<\/next>[ \t]*$/gmu;
 

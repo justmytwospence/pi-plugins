@@ -10,10 +10,19 @@ description: Keep long shell jobs and bounded delegated tasks visible, and wait 
 | --- | --- |
 | Tests, a build, an export | A pi-bg `job` |
 | A dev server, tunnel or watcher | A pi-bg `service` |
+| A command you need to interact with directly | Explicit `!i <command>` with [pi-interactive-shell](/plugins/pi-interactive-shell/) |
 | A bounded code review or research question | A headless subagent |
 | A Pi session a person will take over | An interactive [Herdr child](/plugins/pi-herdr/) |
 
 A longer task does not automatically need an interactive pane. A normal subagent can report back without opening one.
+
+## When you need the terminal yourself
+
+With optional [pi-interactive-shell](/plugins/pi-interactive-shell/), submit `!i git add -p` at an idle real TUI prompt to hand over the terminal until the command exits. There is no auto-detection or agent tool. If [pi-next-prompt](/plugins/pi-next-prompt/) offers an `!i` ghost, press Tab, review it, then press Enter yourself; next-prompt owns that optional suggestion UI.
+
+Pi's event processing and background monitoring can continue, and existing background OS processes keep running. The foreground command occupies the terminal with Pi's TUI suspended until it exits; no agent run starts during the handoff. On exit Pi restores its UI without automatically continuing the agent. Only the command and status enter history, not captured output or interactive keystrokes; terminal recording and commands echoing secrets remain possible. `!!i` applies Pi's normal context exclusion, not history deletion.
+
+This does not attach to, detach from or adopt a pi-bg job. **pi-bg is unchanged**; keep using its jobs and services when the agent needs logs, progress and asynchronous results.
 
 ## Start the shell job, then do useful work
 
