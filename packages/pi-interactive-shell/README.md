@@ -1,6 +1,6 @@
 # pi-interactive-shell
 
-Run a command you explicitly submit with `!i <command>` in a focused terminal overlay inside Pi. The compact panel occupies the lower half, keeping the conversation visible without clearing the screen or stopping Pi's TUI. No command auto-detection and no agent-callable tool.
+Run a command you explicitly submit with `!i <command>` in a focused terminal overlay inside Pi. The compact panel occupies the lower half, keeping the conversation visible without clearing the screen or stopping Pi's TUI. Both compact and expanded views leave the footer visible, adjusting to its height and terminal resizes. No command auto-detection and no agent-callable tool.
 
 Part of [Pi Plugins](https://github.com/justmytwospence/pi-plugins). Reference: <https://pi-plugins.vercel.app/plugins/pi-interactive-shell/>.
 

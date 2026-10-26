@@ -37,6 +37,27 @@ test("renders a bounded overlay and never suspends or clears Pi", async () => {
   await h.panel.shutdown();
 });
 
+for (const width of [46, 120]) test(`footer stays uncovered in both sizes at ${width} columns`, async () => {
+  const h = await setup();
+  let footerHeight = 4;
+  (h.tui as any).children = [{ render: () => Array(footerHeight).fill("footer") }];
+  h.tui.terminal.columns = width;
+  for (const expanded of [false, true]) {
+    if (expanded) { h.panel.handleInput("\x1d"); h.panel.handleInput("f"); }
+    for (const height of [4, 8]) {
+      footerHeight = height;
+      const options = h.panel.overlayOptions();
+      const lines = h.panel.render(width - (expanded ? 0 : 2));
+      expect(options.margin.bottom).toBeGreaterThanOrEqual(height);
+      expect(lines.length + options.margin.top + options.margin.bottom).toBeLessThanOrEqual(30);
+      if (expanded) expect(h.pty.resize).toHaveBeenLastCalledWith(width - 4, 30 - height - 4);
+    }
+  }
+  h.tui.terminal.rows = 6;
+  expect(h.panel.render(width).length + h.panel.overlayOptions().margin.bottom).toBeLessThanOrEqual(6);
+  await h.panel.shutdown();
+});
+
 test("a command's literal control bytes cannot escape the header", async () => {
   const h = await setup(undefined, "printf '\x1b[2J'\nnext-line");
   const header = h.panel.render(98)[1];

@@ -2,6 +2,7 @@ import { constants } from "node:os";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { type TUI, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { encodeInput } from "./input.ts";
+import { footerRows } from "./footer.ts";
 import { TerminalScreen } from "./screen.ts";
 import { type PtyFactory, type PtyProcess, spawnPty, stopPty } from "./pty.ts";
 
@@ -45,13 +46,21 @@ export class TerminalPanel {
     });
   }
 
+  private bounds() {
+    const rows = Math.max(1, this.tui.terminal?.rows ?? 24);
+    const footer = Math.min(Math.max(0, footerRows(this.tui)), Math.max(0, rows - 1));
+    const gap = !this.expanded && rows - footer >= 7 ? 1 : 0;
+    return { height: Math.max(1, rows - footer - gap * 2), margin: { top: gap, bottom: footer + gap, left: this.expanded ? 0 : 1, right: this.expanded ? 0 : 1 } };
+  }
+
   overlayOptions() {
-    return { anchor: "bottom-center" as const, width: "100%" as const, maxHeight: "100%" as const, margin: this.expanded ? 0 : 1 };
+    const { height, margin } = this.bounds();
+    return { anchor: "bottom-center" as const, width: "100%" as const, maxHeight: height, margin };
   }
 
   private dimensions(width: number) {
-    const height = Math.max(5, (this.tui.terminal?.rows ?? 24) - (this.expanded ? 0 : 2));
-    const panelHeight = this.expanded ? height : Math.max(5, Math.floor(height * 0.55));
+    const height = this.bounds().height;
+    const panelHeight = this.expanded ? height : Math.min(height, Math.max(5, Math.floor(height * 0.55)));
     return { cols: Math.max(1, width - 4), rows: Math.max(1, panelHeight - 4) };
   }
 
@@ -195,7 +204,7 @@ export class TerminalPanel {
     const command = border("│") + pad(` $ ${displayCommand}`) + border("│");
     const lines = this.screen.render(this.offset, this.focused && !this.confirming && !this.prefix && !this.ended).map(line => border("│") + " " + line + " " + border("│"));
     const hint = this.confirming ? " Stop command? Enter stop · Esc return" : this.prefix ? " f size · q stop/close · u/d scroll · g/G top/end · Ctrl+] send" : this.ended ? " Enter/Esc close · Ctrl+] panel controls" : " Keyboard → command · Ctrl+] panel controls";
-    return [top, command, ...lines, border("│") + pad(hint) + border("│"), border("└" + "─".repeat(innerWidth) + "┘")];
+    return [top, command, ...lines, border("│") + pad(hint) + border("│"), border("└" + "─".repeat(innerWidth) + "┘")].slice(0, this.bounds().height);
   }
 
   invalidate() { /* Rendering derives current theme and emulator state; no cached lines. */ }
