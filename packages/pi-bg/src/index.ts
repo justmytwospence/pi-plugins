@@ -455,16 +455,20 @@ export default function piBg(pi: ExtensionAPI) {
     }
   };
 
-  /** Redraws for bg_run rows whose task is running; an ended task's rows redraw once more, then drop. */
-  const liveRows = new Map<string, Set<() => void>>();
+  /**
+   * Redraws for bg_run rows whose task is running, one per row (keyed by tool call): an ended task's
+   * rows redraw once more, then drop. Pi hands each render a fresh invalidate that re-renders at once,
+   * so a redraw re-registers its row; keying by row and walking a snapshot keeps a tick finite.
+   */
+  const liveRows = new Map<string, Map<string, () => void>>();
   const redrawRows = () => {
-    for (const [id, redraws] of liveRows) {
+    for (const [id, redraws] of [...liveRows]) {
       const running = reg.tasks.get(id)?.status === "running";
-      for (const redraw of redraws) {
+      for (const [row, redraw] of [...redraws]) {
         try {
           redraw();
         } catch {
-          redraws.delete(redraw);
+          redraws.delete(row);
         }
       }
       if (!running) liveRows.delete(id);
@@ -908,8 +912,8 @@ export default function piBg(pi: ExtensionAPI) {
     renderResult(result, { expanded, isPartial }, theme, context) {
       const id = (result.details as { id?: string } | undefined)?.id;
       if (id && !isPartial && reg.tasks.get(id)?.status === "running" && context?.invalidate) {
-        const redraws = liveRows.get(id) ?? new Set();
-        redraws.add(context.invalidate);
+        const redraws = liveRows.get(id) ?? new Map<string, () => void>();
+        redraws.set((context as { toolCallId?: string }).toolCallId ?? id, context.invalidate);
         liveRows.set(id, redraws);
       }
       return runResultView(result as never, expanded, theme, () => (id ? reg.tasks.get(id) : undefined));

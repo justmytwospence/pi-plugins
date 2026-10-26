@@ -64,6 +64,29 @@ describe("pi-bg", () => {
     await x.shutdown();
   });
 
+  it("redraws a live row once per tick even though each redraw re-renders it with a fresh invalidate", async () => {
+    const x = await load();
+    const run = x.tools.get("bg_run");
+    const plain = { fg: (_c: string, t: string) => t, bold: (t: string) => t } as any;
+    const r = await x.call("bg_run", { command: "sleep 3", kind: "job", name: "slow" });
+    // Pi's invalidate re-renders the row at once, and every render hands over a new invalidate.
+    let redraws = 0;
+    const render = (): void => {
+      run.renderResult(r, { expanded: false, isPartial: false }, plain, {
+        toolCallId: "call-1",
+        invalidate: () => {
+          redraws++;
+          if (redraws < 1_000) render();
+        },
+      });
+    };
+    render();
+    await until(() => redraws > 0, 3_000);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(redraws).toBe(1);
+    await x.shutdown();
+  });
+
   it("reports a command that fails at once in bg_run's own result", async () => {
     const x = await load();
     const r = x.textOf(await x.call("bg_run", { command: "echo nope; exit 2", kind: "job", name: "bad" }));
