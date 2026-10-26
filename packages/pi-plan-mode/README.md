@@ -49,7 +49,7 @@ While plan mode is on:
   - **Yes, auto mode (Jev judges calls)** / **Yes, yolo mode** / **Yes, auto-accept project edits** / **Yes, manually approve edits** (with pi-tool-gate, those of its enabled modes, with manual approval when none of the others is enabled; without it, **Yes, implement it**): plan mode ends and your agent starts implementing in this conversation, in that permission mode.
   - **Yes, in a fresh session with only the plan**: once this turn ends, a new session (a child of this one) starts with the plan as its first message.
   - **Edit the plan first**: edit it in your external editor (Pi's `externalEditor` setting, else `$VISUAL` / `$EDITOR`; a Markdown editor such as [edamame](https://github.com/mijowi/edamame) keeps it rendered while you edit), or in Pi's editor when none is set; the file is updated and you choose again. The approval tells your agent the plan was edited.
-  - **No, keep planning**: say what should change (or leave it empty, or press Esc, and say it in the chat). Plan mode stays on.
+  - **No, keep planning**: say what should change (or leave it empty, or press Esc, and say it in the chat). With an editor provider such as pi-vim the field is that editor (Enter or `:w` sends, Escape in Normal mode or `:q` cancels). Plan mode stays on.
 - Leaving plan mode another way (Shift+Tab, or the shortcut) tells your agent it may now make changes.
 
 The plan tools are model-only: your agent calls them directly, never inside `codemode`. This keeps the plan's inline renderer visible while you approve it. Auto mode uses Jev to judge each call; auto-accept project edits allows project edits and filesystem commands without approval, while other commands follow the gate's normal approval policy.

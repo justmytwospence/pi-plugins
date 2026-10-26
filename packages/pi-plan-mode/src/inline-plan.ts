@@ -23,6 +23,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { editInTerminal, externalEditorCommand } from "./external-editor.js";
+import { askFeedback } from "./feedback-input.js";
 import { holdBlocked } from "./herdr-blocked.js";
 import { PlanMarkdown } from "./mermaid-art.js";
 import { expandHome } from "./plan-hook.js";
@@ -453,7 +454,9 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
           }
           if (choice === undefined || choice === KEEP) {
             const feedback =
-              choice === KEEP ? (await ctx.ui.input("What should change? (Enter to say it in the chat)"))?.trim() : "";
+              choice === KEEP
+                ? (await askFeedback(pi, ctx, "What should change? (Enter to say it in the chat)"))?.trim()
+                : "";
             const details: ExitDetails = { plan, planFile, outcome: "kept" };
             if (feedback) {
               return {
