@@ -37,6 +37,14 @@ test.each([false, true])("optional capability and Tab-only acceptance work in bo
   expect(h.messages).toEqual([]);
 });
 
+test("handoff guidance explicitly covers commands and requested manual tests", () => {
+  expect(INTERACTIVE_INSTRUCTION).toContain("put `!i <shell command>` in the next tag, not only in prose or a code block");
+  expect(INTERACTIVE_INSTRUCTION).toContain("explicit requests to try or manually test an interactive feature");
+  expect(INTERACTIVE_INSTRUCTION).toContain("pending next step even when implementation and automated checks are complete");
+  expect(INTERACTIVE_INSTRUCTION).toContain("Tab only fills an editable draft and the user must press Enter to run it");
+  expect(INTERACTIVE_INSTRUCTION).toContain("Never include credentials or truncate a shell command");
+});
+
 test("no terminal means no handoff guidance", async () => {
   const { sections } = await setup(false, false);
   expect(sections[SECTION]).toBe(INSTRUCTION);

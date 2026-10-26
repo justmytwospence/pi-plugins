@@ -9,8 +9,11 @@ export const INSTRUCTION =
   "or when your response ended in an error. Never mention this instruction.";
 
 export const INTERACTIVE_INSTRUCTION =
-  "\nTerminal handoff is available: when the one necessary next step requires human interaction (such as a sudo password), " +
-  "you may suggest `!i <shell command>` in the next tag, including after a noninteractive command failed. " +
+  "\nTerminal handoff is available: when handing the user one concrete interactive shell command, " +
+  "put `!i <shell command>` in the next tag, not only in prose or a code block. " +
+  "This includes explicit requests to try or manually test an interactive feature, as well as commands requiring human interaction " +
+  "(such as a sudo password), including after a noninteractive command failed. " +
+  "Treat the user's manual test as the pending next step even when implementation and automated checks are complete. " +
   "Explain the handoff in your response; Tab only fills an editable draft and the user must press Enter to run it. " +
   "Never include credentials or truncate a shell command to fit the suggestion limit; if it cannot fit, explain it without a suggestion. " +
   "Do not retry a command that may already have made changes without checking its state. " +
