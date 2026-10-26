@@ -6,12 +6,12 @@
 //
 // Each extension offers its background work as a *source*:
 // - pi-subagents is the host under the prompt: its list (FleetView, Claude Code's subagent panel)
-//   ends with the other sources' pills (`2 shells`, `1 notebook`), and calls `setHosted(true,
+//   ends with the other sources' pills (`2 tasks`, `1 notebook`), and calls `setHosted(true,
 //   "subagents")` on each so they draw no pill of their own. Enter on a pill opens that source's
 //   dialog.
 // - Without pi-subagents, pi-bg hosts: its pill also counts the other sources' work
-//   (`2 shells · 1 notebook`), calling `setHosted(true, "bg")` on them.
-// - pi-bg's `/tasks` dialog lists every source's entries: its shells, pi-subagents' runs,
+//   (`2 tasks · 1 notebook`), calling `setHosted(true, "bg")` on them.
+// - pi-bg's `/tasks` dialog lists every source's entries: its tasks, pi-subagents' runs,
 //   pi-marimo's notebooks, pi-herdr's children, pi-plan-mode's planners and scouts.
 // - Without any host, a source with a pill draws its own.
 //
@@ -105,7 +105,7 @@ export interface ActivityEntry {
   stopToken?: string;
 }
 
-/** The compact label a source shows under the prompt, Claude Code's footer pill: `2 shells, 1 service`. */
+/** The compact label a source shows under the prompt, Claude Code's footer pill: `2 tasks, 1 service`. */
 export interface ActivityPill {
   label: string;
   /** Something failed or was stopped and has not been seen: drawn in the error color. */
@@ -114,9 +114,9 @@ export interface ActivityPill {
 
 export interface ActivitySection {
   id: string;
-  /** What its entries are: `shells`, `subagents`. */
+  /** What its entries are: `tasks`, `subagents`. */
   title: string;
-  /** One of them, tagged on each row of a list that mixes sources: `shell`, `agent`. */
+  /** One of them, tagged on each row of a list that mixes sources: `task`, `agent`. */
   noun?: string;
   /** Running entries, then ended ones still worth showing (the source decides how long). */
   entries(now: number): ActivityEntry[];

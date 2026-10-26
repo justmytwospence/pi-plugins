@@ -11,7 +11,7 @@
 // - Progress (progress.ts): standard bars (tqdm, pytest, ...) are detected, the agent may declare a
 //   format or regex (bg_run's `progress`), and a task may write `done/total` to $PI_BG_PROGRESS. It
 //   shows in /tasks rows, the pill, the waiting message and the agent's text; nothing otherwise.
-// - Claude Code's layout: a pill under the prompt (`2 shells`, `1 failed` while a failure is
+// - Claude Code's layout: a pill under the prompt (`2 tasks`, `1 failed` while a failure is
 //   unseen); ↓ then Enter, or a click, opens the background-tasks dialog, as does `/tasks` (aliases
 //   `/bashes`, `/ps`, `/bg`). `/stop` stops every task. Outside the TUI, a footer status `bg`.
 // - With pi-subagents installed (activity.ts), its list under the prompt ends with this pill, and
@@ -229,7 +229,7 @@ export default function piBg(pi: ExtensionAPI) {
     emit(ACTIVITY_HOST, { ...me });
   };
   const tui = () => ctx?.mode === "tui";
-  /** Our pill and our guests': `2 shells · 1 notebook`. */
+  /** Our pill and our guests': `2 tasks · 1 notebook`. */
   const combinedPill = (now: number): ActivityPill | undefined => {
     const pills = [pillOf(now)];
     for (const s of guests.values()) {
@@ -261,10 +261,10 @@ export default function piBg(pi: ExtensionAPI) {
     const running = reg.running(sessionId);
     const failed = reg.list(sessionId).filter(alerting).length;
     if (!running.length && !failed) return undefined;
-    // One task's progress, when exactly one running task has any: `2 shells · fit 45%`.
+    // One task's progress, when exactly one running task has any: `2 tasks · fit 45%`.
     const measured = running.filter((t) => t.progress);
     const one = measured.length === 1 ? measured[0] : undefined;
-    const count = running.length ? `${running.length} shell${running.length === 1 ? "" : "s"}` : "shells";
+    const count = running.length ? `${running.length} task${running.length === 1 ? "" : "s"}` : "tasks";
     const label = one ? `${count} · ${running.length === 1 ? "" : `${one.name} `}${shortProgress(one)}` : count;
     return { label, ...(failed ? { alert: `${failed} failed` } : {}) };
   };
@@ -282,8 +282,8 @@ export default function piBg(pi: ExtensionAPI) {
   };
   const section: ActivitySection = {
     id: "bg",
-    title: "shells",
-    noun: "shell",
+    title: "tasks",
+    noun: "task",
     // Running first (oldest first), then what ended (newest first).
     entries: (now) =>
       [...reg.running(sessionId), ...reg.list(sessionId).filter((t) => t.status !== "running").sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))].map((t) => ({
@@ -1187,16 +1187,16 @@ export default function piBg(pi: ExtensionAPI) {
   // Claude Code's /tasks and /bashes, Codex's /ps, and our own /bg.
   for (const name of ["tasks", "bashes", "ps", "bg"]) pi.registerCommand(name, tasksCommand);
 
-  // Codex's /stop: stop every background shell this pi started (kept services from earlier sessions
+  // Codex's /stop: stop every background task this pi started (kept services from earlier sessions
   // stay). Other sources' work (subagents, notebooks, herdr children) is stopped from its own
   // commands or with x in /tasks, never from here.
   pi.registerCommand("stop", {
-    description: "Stop every background shell this session started (not kept services from earlier sessions; subagents, notebooks and herdr children are stopped from /tasks or their own commands)",
+    description: "Stop every background task this session started (not kept services from earlier sessions; subagents, notebooks and herdr children are stopped from /tasks or their own commands)",
     handler: async (_args, c) => {
       const running = reg.running(sessionId).filter((t) => !t.adopted);
-      if (!running.length) return c.ui.notify("No background shells running.", "info");
+      if (!running.length) return c.ui.notify("No background tasks running.", "info");
       await Promise.all(running.map((t) => stopTask(t, "user")));
-      c.ui.notify(`bg: stopped ${running.length} shell${running.length === 1 ? "" : "s"}`, "info");
+      c.ui.notify(`bg: stopped ${running.length} task${running.length === 1 ? "" : "s"}`, "info");
     },
   });
 }

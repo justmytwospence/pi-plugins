@@ -1,6 +1,6 @@
 // FleetView: Claude Code's panel below the prompt. `main` and the subagents (running, plus failed
 // or stopped ones until the user's next message or `x`), then the pills other extensions offer
-// (pi-bg's `2 shells`). A run that succeeds leaves at once, and a dim `/tasks to see subagents`
+// (pi-bg's `2 tasks`). A run that succeeds leaves at once, and a dim `/tasks to see subagents`
 // (or `/subagents ...` without pi-bg) shows for 30 s, as in Claude Code.
 // ↓ at the bottom of the prompt (even with a draft in it), `j` in pi-vim's normal mode there, or ←
 // at an empty prompt moves into it; ↑/↓ or k/j select; Tab and Ctrl+J/Ctrl+K cycle through main too; Enter or l opens the selected run's

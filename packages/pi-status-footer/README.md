@@ -20,7 +20,7 @@ bell otherwise. Without a Nerd Font they draw as placeholders;
 all labels and readings remain readable. Other status text is preserved.
 While a dialog holds `herdr:blocked`, the footer shrinks to one row (project, branch,
 model, reasoning and context) so herdr-web-ui can read the dialog, with room
-for an activity row such as pi-bg's shells.
+for an activity row such as pi-bg's tasks.
 
 ## Install
 

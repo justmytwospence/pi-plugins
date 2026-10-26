@@ -204,7 +204,7 @@ test.each([true, false])("actual pi-bg and subagents negotiate hosts in both sta
   const task = { id: "fixture", sessionId: ctx.sessionManager.getSessionId(), name: "Fixture", command: "fixture only", cwd, logPath: path.join(cwd, "fixture.log"), kind: "job", origin: "agent", status: "failed", startedAt: Date.now(), endedAt: Date.now(), exitCode: 1, ready: false, keep: false, delivered: true, readyDelivered: true };
   reg.tasks.set(task.id, task);
   reg.emit("change", task);
-  expect(ui.render("subagents-fleet").join("\n")).toContain("shells");
+  expect(ui.render("subagents-fleet").join("\n")).toContain("tasks");
   expect(ui.widgets.has("pi-bg-pill")).toBe(false);
   // Fleet selected pill opens pi-bg's actual dialog factory over the same bus/UI.
   expect(ui.press(KEY.down)).toBe(true);
@@ -217,7 +217,7 @@ test.each([true, false])("actual pi-bg and subagents negotiate hosts in both sta
   // Only Fleet leaves: the actual bg section gets its pill back and resumes lesser hosting.
   for (const fn of subagentShutdown) await fn({ reason: "quit" }, ctx);
   expect(ui.widgets.has("subagents-fleet")).toBe(false);
-  expect(ui.render("pi-bg-pill").join("\n")).toContain("shells");
+  expect(ui.render("pi-bg-pill").join("\n")).toContain("tasks");
   reg.tasks.delete(task.id);
   await h.emit("session_shutdown", { reason: "quit" }, ctx);
   expect(ui.inputHandlers.size).toBe(0);

@@ -14,11 +14,11 @@ process.env.PI_CODING_AGENT_DIR = mkdtempSync(path.join(tmpdir(), "subagents-age
 afterEach(() => vi.useRealTimers());
 
 /** A source like pi-bg's: a pill, a dialog. */
-function fakeShells(label = "2 shells") {
+function fakeTasks(label = "2 tasks") {
   const calls = { hosted: [] as boolean[], dialogs: 0 };
   const section: ActivitySection = {
     id: "bg",
-    title: "shells",
+    title: "tasks",
     entries: () => [],
     open: async () => undefined,
     pill: () => ({ label }),
@@ -49,28 +49,28 @@ function withBus() {
 test("hosting: a source offered before or after our session start ends FleetView with its pill; it is let go at the end", async () => {
   const { h, emitted } = withBus();
   subagents(h.pi);
-  const shells = fakeShells();
+  const tasks = fakeTasks();
   // Offered before we host: ignored, until our session start asks again.
-  h.pi.events.emit(ACTIVITY_SECTION, { section: shells.section });
-  expect(shells.calls.hosted).toEqual([]);
-  h.pi.events.on(ACTIVITY_HOST, () => h.pi.events.emit(ACTIVITY_SECTION, { section: shells.section }));
+  h.pi.events.emit(ACTIVITY_SECTION, { section: tasks.section });
+  expect(tasks.calls.hosted).toEqual([]);
+  h.pi.events.on(ACTIVITY_HOST, () => h.pi.events.emit(ACTIVITY_SECTION, { section: tasks.section }));
   const ui = fakeUI();
   const ctx = h.ctx({ ui, sessionManager: { getBranch: () => [], getSessionId: () => "s" } });
   await h.emit("session_start", { type: "session_start" }, ctx);
   expect(emitted.some(([c]) => c === ACTIVITY_HOST)).toBe(true);
-  expect(shells.calls.hosted).toEqual([true]);
+  expect(tasks.calls.hosted).toEqual([true]);
   // No runs: FleetView is just the pill.
-  expect(ui.render("subagents-fleet")).toEqual([" 2 shells ", ""]);
+  expect(ui.render("subagents-fleet")).toEqual([" 2 tasks ", ""]);
   // Offered again: still shown, not toggled.
-  h.pi.events.emit(ACTIVITY_SECTION, { section: shells.section });
-  expect(shells.calls.hosted).toEqual([true]);
+  h.pi.events.emit(ACTIVITY_SECTION, { section: tasks.section });
+  expect(tasks.calls.hosted).toEqual([true]);
   h.pi.events.emit(ACTIVITY_CHANGED, { id: "bg" });
   h.pi.events.emit(ACTIVITY_GONE, { id: "bg" });
   expect(ui.widgets.has("subagents-fleet")).toBe(false);
-  h.pi.events.emit(ACTIVITY_SECTION, { section: shells.section });
-  expect(shells.calls.hosted).toEqual([true, true]);
+  h.pi.events.emit(ACTIVITY_SECTION, { section: tasks.section });
+  expect(tasks.calls.hosted).toEqual([true, true]);
   await h.emit("session_shutdown", { type: "session_shutdown" }, ctx);
-  expect(shells.calls.hosted).toEqual([true, true, false]);
+  expect(tasks.calls.hosted).toEqual([true, true, false]);
   expect(emitted.some(([c, d]) => c === ACTIVITY_GONE && d.id === "subagents")).toBe(true);
 });
 
@@ -79,8 +79,8 @@ test("prompt Tab reaches the hosted background pill and stops at shutdown", asyn
   const ui = fakeUI(); normalFocus(ui); ui.editorText = "preserved draft";
   const ctx = h.ctx({ ui, sessionManager: { getBranch: () => [], getSessionId: () => "s" } });
   await h.emit("session_start", {}, ctx);
-  const shells = fakeShells();
-  h.pi.events.emit(ACTIVITY_SECTION, { section: shells.section });
+  const tasks = fakeTasks();
+  h.pi.events.emit(ACTIVITY_SECTION, { section: tasks.section });
   const request = { handled: false, phase: "enter" };
   h.pi.events.emit("activity:prompt-tab", request);
   expect(request.handled).toBe(true);
@@ -89,7 +89,7 @@ test("prompt Tab reaches the hosted background pill and stops at shutdown", asyn
   expect(ui.press("\t")).toBe(true);
   expect(ui.press("\r")).toBe(true);
   await Promise.resolve();
-  expect(shells.calls.dialogs).toBe(1);
+  expect(tasks.calls.dialogs).toBe(1);
   await h.emit("session_shutdown", {}, ctx);
   const stale = { handled: false, phase: "enter" };
   h.pi.events.emit("activity:prompt-tab", stale);
@@ -109,7 +109,7 @@ test("our runs are a source for pi-bg's dialog: entries, open, stop, dismiss", a
 test("no FleetView to host in (RPC mode, or fleetView off): sources are left to show their own pill", async () => {
   const { h } = withBus();
   subagents(h.pi);
-  const s = fakeShells();
+  const s = fakeTasks();
   h.pi.events.on(ACTIVITY_HOST, () => h.pi.events.emit(ACTIVITY_SECTION, { section: s.section }));
   await h.emit("session_start", { type: "session_start" }, h.ctx({ ui: fakeUI(), mode: "rpc" }));
   h.pi.events.emit(ACTIVITY_SECTION, { section: s.section });

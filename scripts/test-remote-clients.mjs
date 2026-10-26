@@ -53,7 +53,7 @@ const tui = { terminal: { rows: 40, columns: 120 }, requestRender() {} };
 const footer = (width) => [theme.fg('dim', ` pi-plugins · main · opus · Context 12% used · waiting`.slice(0, width))];
 const UNDERS = {
   footer: (width) => footer(width),
-  'pill+footer': (width) => [theme.fg('muted', ' 1 shell '), '', ...footer(width)],
+  'pill+footer': (width) => [theme.fg('muted', ' 1 task '), '', ...footer(width)],
 };
 
 const question = (multiSelect, options = 3) => ({

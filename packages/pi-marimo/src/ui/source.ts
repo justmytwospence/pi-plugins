@@ -1,4 +1,4 @@
-// The followed notebooks as a source of background work (activity.ts), like pi-bg's shells and
+// The followed notebooks as a source of background work (activity.ts), like pi-bg's tasks and
 // pi-subagents' runs:
 // - Rows in pi-bg's `/tasks` view, tagged `notebook`: running while a cell runs or is queued,
 //   failed when its last run broke cells (until the user's next message, or `x`), idle otherwise.

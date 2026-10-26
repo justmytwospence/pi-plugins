@@ -1,4 +1,4 @@
-// The pill under the prompt, Claude Code's background-tasks indicator: `2 shells` (pi-bg) or
+// The pill under the prompt, Claude Code's background-tasks indicator: `2 tasks` (pi-bg) or
 // `1 notebook` (pi-marimo), plus `1 failed` in the error color while a failure is unseen. `↓` at the
 // bottom of the prompt (or `j` in pi-vim's normal mode) selects it, even with a draft in the prompt;
 // Enter, `l` or a click opens the source's view; Esc, `↑`, `k` or `h` goes back to the prompt.

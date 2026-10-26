@@ -1,4 +1,4 @@
-// This session's herdr children as a source of background work (activity.ts), like pi-bg's shells
+// This session's herdr children as a source of background work (activity.ts), like pi-bg's tasks
 // and pi-subagents' runs: rows in pi-bg's `/tasks` view tagged `child`, a pill (`1 child`) at the
 // end of pi-subagents' list under the prompt while a child works on a turn this session asked for.
 //

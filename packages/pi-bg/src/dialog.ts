@@ -1,9 +1,9 @@
 // The background-tasks view (`/tasks`, or Enter on the pill): Claude Code's Background dialog, full
-// screen. One list mixing every source (pi-bg's shells and, with pi-subagents installed, its
+// screen. One list mixing every source (pi-bg's tasks and, with pi-subagents installed, its
 // subagent runs), each row tagged with what it is: running first (oldest first), then what ended
-// (newest first). ↑↓ or j/k select; Enter, → or l opens the entry (a shell's live log, a run's
+// (newest first). ↑↓ or j/k select; Enter, → or l opens the entry (a task's live log, a run's
 // conversation) and comes back here when it closes; `x` stops a running entry (press twice) or
-// dismisses an ended one; `r` reruns a shell; `f` follows a shell's log in a herdr split; Esc, q, ←
+// dismisses an ended one; `r` reruns a task; `f` follows a task's log in a herdr split; Esc, q, ←
 // or h goes back.
 import { type Component, type TUI, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { type ActivityEntry, type ActivitySection, INPUT_CONTEXT, dismissable, stableKey, stopKey, stoppable } from "./activity.ts";
@@ -68,7 +68,7 @@ export function dialogRows(sections: ActivitySection[], now: number): Row[] {
   return [...running, ...ended];
 }
 
-/** `shell`, `agent`: what a row is, from its source. */
+/** `task`, `agent`: what a row is, from its source. */
 const nounOf = (section: ActivitySection) => section.noun ?? section.title.replace(/s$/u, "");
 
 export class TasksDialog implements Component {

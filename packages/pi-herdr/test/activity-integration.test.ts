@@ -64,10 +64,10 @@ test("legacy host calls use subagents identity and explicit host releases do not
 test("actual pi-bg /tasks lists children, opens read-only details, awaits interrupt and only dismisses ended rows", async () => {
   const x = childrenFixture();
   const d = detailsUI();
-  const shell: ActivitySection = { id: "bg", title: "shells", noun: "shell", entries: () => [{ key: "shell", label: "shell", detail: "build", status: "running", stats: "0:01", startedAt: 2_000 }], open: async () => undefined };
+  const shell: ActivitySection = { id: "bg", title: "tasks", noun: "task", entries: () => [{ key: "shell", label: "shell", detail: "build", status: "running", stats: "0:01", startedAt: 2_000 }], open: async () => undefined };
   let selected: any;
   const dialog = new TasksDialog(d.tui, theme, { sections: () => [shell, x.section], ownId: "bg", canFollow: true }, (result: any) => { selected = result; dialog.dispose(); });
-  expect(dialogRows([shell, x.section], 1_000).map((r: any) => [r.section.noun, r.entry.key])).toEqual([["child", "child"], ["shell", "shell"]]);
+  expect(dialogRows([shell, x.section], 1_000).map((r: any) => [r.section.noun, r.entry.key])).toEqual([["child", "child"], ["task", "shell"]]);
   expect(dialog.render(100).join("\n")).toContain("child child");
   // Rerun and follow belong to the shell source only, never the child pane.
   dialog.handleInput("r"); dialog.handleInput("f");

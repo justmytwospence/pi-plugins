@@ -2,7 +2,7 @@
 
 Background jobs and services for Pi. The agent starts a long command with `bg_run` and keeps working; a **job** (tests, builds, model fits, exports) wakes the agent with its outcome when it exits, and a **service** (a dev or notebook server, a tunnel, a watcher) wakes it once when a `ready` pattern matches a log line, or if it exits. When nothing is left but a job's result, the agent calls `bg_wait`, or simply ends its turn: a running job keeps the turn open until it ends, so the session stays "working" and the outcome continues the same turn; typing a message, Esc or the wait's timeout ends the wait, while the job keeps running and still wakes the agent.
 
-In the TUI, a pill under the prompt counts running shells and a full-screen `/tasks` view lists every task, laid out after Claude Code's background-tasks panel. It works alone, and integrates with pi-subagents, pi-marimo, pi-plan-mode, pi-herdr and pi-status-footer when they are loaded.
+In the TUI, a pill under the prompt counts running tasks and a full-screen `/tasks` view lists every task, laid out after Claude Code's background-tasks panel. It works alone, and integrates with pi-subagents, pi-marimo, pi-plan-mode, pi-herdr and pi-status-footer when they are loaded.
 
 Part of [Pi Plugins](https://github.com/justmytwospence/pi-plugins). Reference: <https://pi-plugins.vercel.app/plugins/pi-bg/>.
 
@@ -65,7 +65,7 @@ A task shows a progress bar only when pi-bg knows its progress, from one of thre
 
 A detected bar shows only once it looks live: a line redrawn in place with `\r` (read from the unfinished last line too), or three matches whose value never went down. A drop hides it until it qualifies again, three drops within 10 seconds (interleaved or nested bars) hide it, and a bar that reached 100% and stays quiet for 30 seconds is hidden. Many tools draw bars only on a terminal; in a log file tqdm, pytest, wget and rsync still report.
 
-Where it shows: the `/tasks` row (`45% · ~3m · 2:14 ████░░░░░░`, bar flush right, the ETA once 10 seconds and 5 points of movement give a rate; a file note leads the row's detail), the pill when exactly one running task has progress (`1 shell · 45%`, `2 shells · fit 45%`), the waiting message (`Waiting on fit ███░░░░░ 45% · 2:14…`), the RPC footer status (`fit 45% 2:14`), and the agent's text: `bg_logs`, reports, wake-ups and `bg_wait` say `45% (450/1000, ~3m left, detected: tqdm)`, and a task that ended short of done `last progress 87%`. Adopted kept services keep their declared format. After a `/reload`, detection starts again near the log's end.
+Where it shows: the `/tasks` row (`45% · ~3m · 2:14 ████░░░░░░`, bar flush right, the ETA once 10 seconds and 5 points of movement give a rate; a file note leads the row's detail), the pill when exactly one running task has progress (`1 task · 45%`, `2 tasks · fit 45%`), the waiting message (`Waiting on fit ███░░░░░ 45% · 2:14…`), the RPC footer status (`fit 45% 2:14`), and the agent's text: `bg_logs`, reports, wake-ups and `bg_wait` say `45% (450/1000, ~3m left, detected: tqdm)`, and a task that ended short of done `last progress 87%`. Adopted kept services keep their declared format. After a `/reload`, detection starts again near the log's end.
 
 ## Processes and files
 
@@ -82,7 +82,7 @@ Each task runs `bash -c <command>` (`/bin/sh` when `/bin/bash` is missing) in it
 
 ### Pill under the prompt
 
-In the TUI the pill reads `1 shell`, `2 shells` (with one task's progress when exactly one running task has any: `2 shells · fit 45%`), plus `· 1 failed` in the error color while a failure you have not seen is there (until your next typed message, or until you dismiss it with `x` in `/tasks`). Nothing is drawn above the prompt.
+In the TUI the pill reads `1 task`, `2 tasks` (with one task's progress when exactly one running task has any: `2 tasks · fit 45%`), plus `· 1 failed` in the error color while a failure you have not seen is there (until your next typed message, or until you dismiss it with `x` in `/tasks`). Nothing is drawn above the prompt.
 
 | key | action |
 |---|---|
@@ -94,21 +94,21 @@ In the TUI the pill reads `1 shell`, `2 shells` (with one task's progress when e
 
 ### Background-tasks view
 
-`/tasks` (aliases `/bashes`, `/ps`, `/bg`), or Enter on the pill, opens a full-screen view under an accent-colored banner (`◀ esc · Background tasks · not your main session`). It lists every task in one list, running first (oldest first), then ended (newest first), each with its command, state and runtime: `waiting` while a `bg_wait` is on it, and for services `starting`, `ready` or `service`. With other activity sources loaded (pi-subagents runs, pi-marimo notebooks, pi-plan-mode planners/scouts and pi-herdr children) their entries are mixed in, and while the list mixes sources each row is tagged with its kind (`shell`, `agent`, `notebook`).
+`/tasks` (aliases `/bashes`, `/ps`, `/bg`), or Enter on the pill, opens a full-screen view under an accent-colored banner (`◀ esc · Background tasks · not your main session`). It lists every task in one list, running first (oldest first), then ended (newest first), each with its command, state and runtime: `waiting` while a `bg_wait` is on it, and for services `starting`, `ready` or `service`. With other activity sources loaded (pi-subagents runs, pi-marimo notebooks, pi-plan-mode planners/scouts and pi-herdr children) their entries are mixed in, and while the list mixes sources each row is tagged with its kind (`task`, `agent`, `notebook`).
 
 | key | action |
 |---|---|
 | `↑`/`↓`, `k`/`j` | select |
-| Enter, `→`, `l` | open the entry: a shell's live log, a run's conversation, a notebook; closing it returns here on the same entry |
+| Enter, `→`, `l` | open the entry: a task's live log, a run's conversation, a notebook; closing it returns here on the same entry |
 | `x` twice | stop a running entry whose source supports stopping (the second `x` must hit the same entry) |
 | `x` | dismiss an ended entry |
-| `r` | rerun a shell task as a new user task |
-| `f` | follow a shell task's log in a Herdr split (`tail -F`); offered only when pi-herdr is active |
+| `r` | rerun a task as a new user task |
+| `f` | follow a task's log in a Herdr split (`tail -F`); offered only when pi-herdr is active |
 | Esc, `q`, `←`, `h`, Ctrl+C | back to the session |
 
 ### Log viewer
 
-A shell task's log, full screen, refreshed every second. It follows new output until you scroll up; scrolling back to the end follows again.
+A task's log, full screen, refreshed every second. It follows new output until you scroll up; scrolling back to the end follows again.
 
 | key | action |
 |---|---|
@@ -127,7 +127,7 @@ A shell task's log, full screen, refreshed every second. It follows new output u
 | `/tasks run <command>` | start a job yourself; it notifies you when it ends and does not wake the agent |
 | `/tasks kill <id>` | stop a running task |
 | `/tasks clear` | hide ended tasks |
-| `/stop` | stop every running shell task this Pi process started. It leaves alone kept services adopted from earlier Pi processes, subagent runs, plan-mode planners, marimo notebooks and Herdr children; stop those from `/tasks` or their own commands |
+| `/stop` | stop every running task this Pi process started. It leaves alone kept services adopted from earlier Pi processes, subagent runs, plan-mode planners, marimo notebooks and Herdr children; stop those from `/tasks` or their own commands |
 
 ### Outside the TUI
 
@@ -159,7 +159,7 @@ Everything below goes through `pi.events`; each sibling is optional, and with no
 
 ### pi-marimo and marimo
 
-- **Pills.** Without pi-subagents, pi-bg's pill also counts other sources' work, such as [pi-marimo](https://pi-plugins.vercel.app/plugins/pi-marimo/)'s busy notebooks: `2 shells · 1 notebook`; those sources then draw no pill of their own.
+- **Pills.** Without pi-subagents, pi-bg's pill also counts other sources' work, such as [pi-marimo](https://pi-plugins.vercel.app/plugins/pi-marimo/)'s busy notebooks: `2 tasks · 1 notebook`; those sources then draw no pill of their own.
 - **marimo servers without pi-marimo.** A `bg_run` service whose command starts a marimo server (`marimo edit nb.py`, `uv run marimo edit --no-token nb.py`, `uvx marimo run app.py`, ...) is named `marimo nb.py` and is ready when marimo prints its URL, unless you give a `name` or a `ready` pattern.
 - **marimo-pair calls.** A marimo-pair `execute-code` call blocks until the cells it ran finish, so a long run fits a job (`bg_run` the call, then `bg_wait`). Stopping that job stops the client, not the cells; `bg_kill` says so for marimo-pair commands.
 - **With pi-marimo.** pi-marimo annotates tasks tied to a followed notebook: the server's row, and the row of a job whose marimo-pair calls target that notebook, show its kernel state (`nb.py: running Model fit · 2 queued`); `bg_logs` lists the notebook under that task; and `bg_wait` on a server that is up waits for the notebook's running cells instead of returning at once. A notebook's own `bg_wait` id is `marimo:` plus its path from the cwd; `marimo:<file>` also finds it when only one followed notebook has that name.
@@ -186,7 +186,7 @@ Inside Herdr with [pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/), p
 
 ### Activity protocol
 
-`src/activity.ts` is the activity protocol, copied verbatim into pi-bg, pi-subagents, pi-marimo, pi-herdr and pi-plan-mode; no sibling imports another's copy. Each extension offers its background work as a *source* (`activity:section { section }`) with entries keyed by a stable id, optional `stop`, `canStop` and `dismiss`, an optional pill, and `setHosted(on, host)`. A *host* draws the other sources' pills: pi-subagents' FleetView (priority 20) outranks pi-bg's pill (priority 10, host id `bg`; an `activity:host` payload of `{}` counts as the FleetView host), and a host that hears a higher-ranked `activity:host` releases its guests until `activity:gone` names that host. A source draws its own pill only while no host shows it. Hosts key selection and `x`-twice stop arming by `${section.id}\0${key}`, so rows coming and going never move either onto another entry. The `/tasks` view lists every offered source's entries; today those are pi-bg shells, pi-subagents runs, pi-marimo notebooks, pi-plan-mode planners/scouts and pi-herdr children. Per-entry stopping is owner-specific; a Herdr-child stop only interrupts an awaited turn and never closes the pane. `/stop` remains shell-only.
+`src/activity.ts` is the activity protocol, copied verbatim into pi-bg, pi-subagents, pi-marimo, pi-herdr and pi-plan-mode; no sibling imports another's copy. Each extension offers its background work as a *source* (`activity:section { section }`) with entries keyed by a stable id, optional `stop`, `canStop` and `dismiss`, an optional pill, and `setHosted(on, host)`. A *host* draws the other sources' pills: pi-subagents' FleetView (priority 20) outranks pi-bg's pill (priority 10, host id `bg`; an `activity:host` payload of `{}` counts as the FleetView host), and a host that hears a higher-ranked `activity:host` releases its guests until `activity:gone` names that host. A source draws its own pill only while no host shows it. Hosts key selection and `x`-twice stop arming by `${section.id}\0${key}`, so rows coming and going never move either onto another entry. The `/tasks` view lists every offered source's entries; today those are pi-bg tasks, pi-subagents runs, pi-marimo notebooks, pi-plan-mode planners/scouts and pi-herdr children. Per-entry stopping is owner-specific; a Herdr-child stop only interrupts an awaited turn and never closes the pane. `/stop` remains limited to pi-bg's own tasks.
 
 ### Working-message priority
 

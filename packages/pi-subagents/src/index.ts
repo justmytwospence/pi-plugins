@@ -218,7 +218,7 @@ export default function subagents(pi: ExtensionAPI) {
   const detachers = new Map<string, () => void>();
 
   const widgetMode = (): WidgetMode => (WIDGET_MODES.includes(config.widget) ? config.widget : "off");
-  /** Other extensions' sources whose pills end FleetView (pi-bg's shells), while we host them. */
+  /** Other extensions' sources whose pills end FleetView (pi-bg's tasks), while we host them. */
   const sections = new Map<string, ActivitySection>();
   let hosting = false;
   /** Our identity as a host (activity.ts): the list under the prompt, which outranks the pill host. */

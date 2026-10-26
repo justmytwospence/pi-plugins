@@ -138,7 +138,7 @@ describe("session cleanup", () => {
     expect(first.reads).not.toHaveBeenCalled();
     expect(reg.off).toHaveBeenCalledOnce();
     expect(reg.listeners.size).toBe(1);
-    expect(next.widgetLines()).toEqual([" 1 shell "]);
+    expect(next.widgetLines()).toEqual([" 1 task "]);
     expect(vi.getTimerCount()).toBe(2); // One current status interval and startup immediate.
     first.reads.mockClear();
     next.reads.mockClear();

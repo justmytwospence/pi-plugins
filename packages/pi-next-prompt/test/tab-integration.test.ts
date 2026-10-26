@@ -30,7 +30,7 @@ for (const nextFirst of [true, false]) test(`Tab accepts next before tasks regar
   if (nextFirst) ctx.ui.onTerminalInput(route);
   let available = true;
   let opened = 0;
-  const pill = new PillView({ pill: () => available ? { label: "1 shell" } : undefined, open: () => { opened++; } });
+  const pill = new PillView({ pill: () => available ? { label: "1 task" } : undefined, open: () => { opened++; } });
   pill.setUI(ctx.ui); pill.update();
   h.pi.events.on(TASK_TAB, (request: any) => { if (!request.handled) request.handled = pill.tab(request.phase === "active"); });
   try {

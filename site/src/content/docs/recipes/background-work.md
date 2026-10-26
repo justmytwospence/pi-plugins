@@ -78,13 +78,13 @@ Do not poll with `sleep` and repeated `bg_logs`. A user message, Esc or timeout 
 
 ## Inspect or intervene
 
-- `/tasks` opens a combined activity list: shells, subagents, followed notebooks, planners/scouts and Herdr children, according to the plugins enabled.
-- Enter opens a shell log or a child conversation.
+- `/tasks` opens a combined activity list: pi-bg tasks, subagents, followed notebooks, planners/scouts and Herdr children, according to the plugins enabled.
+- Enter opens a task's log or a child conversation.
 - Double-`x` stops a stoppable selected running entry through its owner. A notebook interrupts its kernel; a working planner can be stopped (scouts are observed, not independently stoppable); a Herdr-child stop interrupts an awaited turn and **never closes the pane**. A single `x` dismisses an ended one.
-- `/stop` stops only pi-bg's shell tasks from this Pi process. It does not stop subagents, notebooks, planners or Herdr children.
-- `bg_logs` reads a shell task’s log; `subagent` with `action: "status"` inspects runs.
+- `/stop` stops only pi-bg's tasks from this Pi process. It does not stop subagents, notebooks, planners or Herdr children.
+- `bg_logs` reads a task’s log; `subagent` with `action: "status"` inspects runs.
 - `subagent` with `action: "steer"`, an `id` and a `message` changes the child’s direction.
-- `bg_kill` stops a shell process group; it is not the command for stopping a subagent.
+- `bg_kill` stops a task's process group; it is not the command for stopping a subagent.
 
 The agent should report failures rather than treating “the wait returned” as “the tests passed.”
 

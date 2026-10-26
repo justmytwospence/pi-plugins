@@ -887,7 +887,7 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     { text: s.sessionName ? theme.fg("dim", clean(s.sessionName)) : "", priority: 10 },
   ], w, theme)));
   if (s.compact) {
-    // One row: room is left for an activity row (pi-bg's shells, subagents) under the dialog,
+    // One row: room is left for an activity row (pi-bg's tasks, subagents) under the dialog,
     // within the two lines herdr-web-ui allows after a dialog's key hint.
     const used = s.context.percent;
     const ctx = used === null ? "" : `${theme.fg("muted", "Context")} ${theme.bold(theme.fg(used < 70 ? "muted" : heat(used), percent(used)))}${theme.fg("dim", " used")}`;

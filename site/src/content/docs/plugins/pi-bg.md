@@ -11,7 +11,7 @@ plugin: pi-bg
 - **Controls:** `bg_run`, `bg_wait`, `bg_logs`, `bg_kill`; `/tasks` (aliases `/bg`, `/bashes`, `/ps`), `/stop`. No global shortcut; dialog keys below.
 - **Settings:** No JSON settings. Wait: 1800 s (max 3600); logs: 60 lines (max 400). `PI_BG_DIR` relocates logs.
 - **Requirements, cost & privacy:** Bash and your command's own dependencies. No inference calls itself; commands and wake-up turns can cost money. Logs remain on disk.
-- **Integrations & limits:** Optional shared activities, notebook waits, Herdr log splits and footer wait priority. `/stop` is shell-only; Esc ends a wait, not a process.
+- **Integrations & limits:** Optional shared activities, notebook waits, Herdr log splits and footer wait priority. `/stop` stops only pi-bg's tasks; Esc ends a wait, not a process.
 
 Use pi-bg when a command needs to continue while the agent does something else. It distinguishes finite **jobs**, whose outcomes matter, from persistent **services**, whose readiness matters. Waiting is an explicit tool call, not repeated log polling.
 
@@ -84,7 +84,7 @@ Many tools draw bars only on a terminal; in a log file, tqdm, pytest, wget and r
 }
 ```
 
-Progress appears as a bar, percent and ETA in the `/tasks` row (`45% · ~3m · 2:14 ████░░░░░░`, bar flush right, example), in the pill when exactly one task has progress (`2 shells · fit 45%`), in the `Waiting on fit ███░░░░░ 45% · 2:14…` message, and in the agent's text (`45% (450/1000, ~3m left, detected: tqdm)`). A task that ends short of done reports `last progress 87%`.
+Progress appears as a bar, percent and ETA in the `/tasks` row (`45% · ~3m · 2:14 ████░░░░░░`, bar flush right, example), in the pill when exactly one task has progress (`2 tasks · fit 45%`), in the `Waiting on fit ███░░░░░ 45% · 2:14…` message, and in the agent's text (`45% (450/1000, ~3m left, detected: tqdm)`). A task that ends short of done reports `last progress 87%`.
 
 ## Completion and cancellation
 
@@ -107,15 +107,15 @@ Tasks survive `/reload`. Quitting or changing sessions through `/new`, `/resume`
 /stop
 ```
 
-A manually started task notifies you on completion rather than waking the agent. `/tasks clear` hides ended tasks. `/stop` stops only pi-bg's running shell tasks that this Pi process started; it leaves kept services adopted from an earlier session alone and never stops subagents, notebooks, planners or Herdr children.
+A manually started task notifies you on completion rather than waking the agent. `/tasks clear` hides ended tasks. `/stop` stops only pi-bg's running tasks that this Pi process started; it leaves kept services adopted from an earlier session alone and never stops subagents, notebooks, planners or Herdr children.
 
-In the view, use arrows or `j`/`k`, Enter for logs, `x` twice to stop the selected running entry, `x` once to dismiss an ended one, and `r` to rerun a shell. Double-`x` works per entry for any listed source that supports stopping, such as a subagent run. The prompt pill opens the same view. With [pi-select-nav](/plugins/pi-select-nav/), Tab selects it when no next-prompt is accepted, preserving drafts. Enter opens it, Esc returns to the editor, and repeated Tab keeps the single pill selected. In a log viewer, Ctrl+U/Ctrl+D scroll half a page; PageUp/PageDown remain optional full-page aliases. The viewer has no text field. RPC hosts receive a footer status instead of the TUI controls.
+In the view, use arrows or `j`/`k`, Enter for logs, `x` twice to stop the selected running entry, `x` once to dismiss an ended one, and `r` to rerun a task. Double-`x` works per entry for any listed source that supports stopping, such as a subagent run. The prompt pill opens the same view. With [pi-select-nav](/plugins/pi-select-nav/), Tab selects it when no next-prompt is accepted, preserving drafts. Enter opens it, Esc returns to the editor, and repeated Tab keeps the single pill selected. In a log viewer, Ctrl+U/Ctrl+D scroll half a page; PageUp/PageDown remain optional full-page aliases. The viewer has no text field. RPC hosts receive a footer status instead of the TUI controls.
 
 There is no JSON settings file. Logs normally live at `~/.pi/agent/bg/<session>/<id>.log`; `PI_BG_DIR` changes the storage root. Logs exceeding 64 MB are reduced to their final megabyte, and logs older than a week are removed. Do not treat them as a durable archive or print secrets unnecessarily.
 
 ## Optional integrations and limitations
 
-`/tasks` combines every offered activity source: shell tasks, subagent runs, followed notebooks, planners/scouts and Herdr children, according to enabled plugins. FleetView can host their pills, or pi-bg can aggregate them without FleetView. Double-`x` delegates to the owner only when the entry can be stopped; a Herdr-child stop interrupts an awaited turn and **never closes the pane**.
+`/tasks` combines every offered activity source: pi-bg tasks, subagent runs, followed notebooks, planners/scouts and Herdr children, according to enabled plugins. FleetView can host their pills, or pi-bg can aggregate them without FleetView. Double-`x` delegates to the owner only when the entry can be stopped; a Herdr-child stop interrupts an awaited turn and **never closes the pane**.
 
 With pi-subagents, the prompt UI is shared. `bg_wait` can await `subagent:<id>` and returns its bounded result directly, suppressing a duplicate completion message. With pi-marimo, notebook runs become waitable as `marimo:<path>`, and an already-ready server can wait for its active cells rather than immediately returning.
 

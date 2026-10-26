@@ -58,7 +58,7 @@ describe("pi-bg", () => {
     expect(hold?.data.label).toBe("build");
     // The pill under the prompt, not a footer status, shows it in the TUI.
     expect(x.status.get("bg")).toBeUndefined();
-    expect(x.widgetLines()).toEqual([" 1 shell "]);
+    expect(x.widgetLines()).toEqual([" 1 task "]);
     await until(() => x.sent.length > 0, 5_000);
     const wake = x.sent[0];
     expect(wake?.options).toEqual({ triggerTurn: true, deliverAs: "followUp" });
@@ -165,7 +165,7 @@ describe("pi-bg", () => {
     expect(planner.textOf(await planner.call("bg_wait", {}))).toMatch(/^Nothing to wait for/u);
     await planner.call("bg_run", { command: "sleep 30", kind: "job", name: "plannerjob" });
     expect(main.textOf(await main.call("bg_logs", {}))).not.toMatch(/plannerjob/u);
-    expect(main.widgetLines()).toEqual([" 1 shell "]);
+    expect(main.widgetLines()).toEqual([" 1 task "]);
     // The planner is shut down (quit): its job dies, the main session's job keeps running and wakes only the main agent.
     await planner.shutdown("quit");
     await new Promise((res) => setTimeout(res, 300));
@@ -226,13 +226,13 @@ describe("pi-bg", () => {
     await x.shutdown();
   });
 
-  it("the pill: 1 shell, then the failure in the error color until the next message; ↓ Enter opens the dialog", async () => {
+  it("the pill: 1 task, then the failure in the error color until the next message; ↓ Enter opens the dialog", async () => {
     const x = await load();
     await x.call("bg_run", { command: "sleep 2; echo bad; exit 3", kind: "job", name: "flaky" });
-    expect(x.widgetLines()).toEqual([" 1 shell "]);
+    expect(x.widgetLines()).toEqual([" 1 task "]);
     // ↓ at an empty prompt selects it; Enter opens the dialog.
     expect(x.press("\x1b[B")).toBe(true);
-    expect(x.widgetLines()?.[0]).toBe("[ 1 shell ]  enter view · esc back");
+    expect(x.widgetLines()?.[0]).toBe("[ 1 task ]  enter view · esc back");
     expect(x.press("\r")).toBe(true);
     expect(x.opened).toHaveLength(1);
     const dialog = x.overlay(0);
@@ -246,7 +246,7 @@ describe("pi-bg", () => {
     dialog.handleInput("\x1b");
     await until(() => x.sent.length > 0, 5_000);
     // Failed: the pill keeps a red count until the user's next message.
-    expect(x.widgetLines()).toEqual([" shells  · 1 failed"]);
+    expect(x.widgetLines()).toEqual([" tasks  · 1 failed"]);
     for (const h of x.handlers.get("input") ?? []) await h({ source: "interactive", text: "ok" }, x.ctx);
     expect(x.widgets.has("pi-bg-pill")).toBe(false);
     await x.shutdown();
@@ -344,7 +344,7 @@ describe("pi-bg", () => {
     expect(x.widgets.has("pi-bg-pill")).toBe(false);
     expect(x.status.get("bg")).toBeUndefined();
     expect(x.emitted.some((e) => e.channel === "activity:changed")).toBe(true);
-    expect(section.pill(Date.now())).toEqual({ label: "1 shell" });
+    expect(section.pill(Date.now())).toEqual({ label: "1 task" });
     const entries = section.entries(Date.now());
     expect(entries).toMatchObject([{ label: "hosted", detail: "echo out; sleep 3", status: "running" }]);
     // Another source (pi-subagents' runs) shows in the dialog under its own heading.
@@ -353,7 +353,7 @@ describe("pi-bg", () => {
     void section.openDialog(x.ctx.ui);
     const text = x.overlay(0).render(100).join("\n");
     // One list: the oldest running first, each row tagged with what it is.
-    expect(text).toMatch(/● subagent scout  look around[\s\S]*● shell    hosted  echo out; sleep 3/u);
+    expect(text).toMatch(/● subagent scout  look around[\s\S]*● task\s+hosted  echo out; sleep 3/u);
     x.overlay(0).handleInput("\x1b");
     section.stop(entries[0].key);
     await until(() => section.entries(Date.now())[0]?.status === "stopped", 5_000);
@@ -457,7 +457,7 @@ describe("pi-bg", () => {
     await x.shutdown();
   }, 15_000);
 
-  it("hosts another source's pill while no one hosts it: one pill, `1 shell · 1 notebook`; hosted itself, it lets go", async () => {
+  it("hosts another source's pill while no one hosts it: one pill, `1 task · 1 notebook`; hosted itself, it lets go", async () => {
     const x = await load();
     const calls: Array<[boolean, string | undefined]> = [];
     let busy = true;
@@ -474,10 +474,10 @@ describe("pi-bg", () => {
     expect(calls).toEqual([[true, "bg"]]);
     expect(x.widgetLines()).toEqual([" 1 notebook "]);
     await x.call("bg_run", { command: "sleep 5", kind: "job", name: "s" });
-    expect(x.widgetLines()).toEqual([" 1 shell · 1 notebook "]);
+    expect(x.widgetLines()).toEqual([" 1 task · 1 notebook "]);
     busy = false;
     x.pi.events.emit("activity:changed", { id: "marimo" });
-    expect(x.widgetLines()).toEqual([" 1 shell "]);
+    expect(x.widgetLines()).toEqual([" 1 task "]);
     // pi-subagents hosts us: the guest goes back to it.
     const ours = x.emitted.filter((e) => e.channel === "activity:section").map((e) => e.data.section).find((s: any) => s.id === "bg");
     ours.setHosted(true);
@@ -496,7 +496,7 @@ describe("pi-bg", () => {
     const row = section.entries(Date.now())[0];
     expect(row.stats).toMatch(/^45% · 0:0\d ████░░░░░░$/u);
     expect(row.detail).toMatch(/^fold 3 · echo/);
-    expect(x.widgetLines()).toEqual([" 1 shell · 45% "]);
+    expect(x.widgetLines()).toEqual([" 1 task · 45% "]);
     expect(x.textOf(await x.call("bg_logs", {}))).toMatch(/fit {2}job {2}running 0:0\d {2}45% \(450\/1000, fold 3\)/);
     const snap = x.emitted.filter((e) => e.channel === "bg:tasks").at(-1)?.data.tasks[0];
     expect(snap.progress).toEqual({ fraction: 0.45, source: "file", count: "450/1000", note: "fold 3" });

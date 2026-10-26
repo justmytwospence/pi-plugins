@@ -129,8 +129,8 @@ Each is optional and goes through Pi's event bus; without the sibling nothing ha
 
 The notebooks are one more source in the activity protocol (`src/activity.ts`, copied verbatim into pi-bg, pi-subagents, pi-marimo, pi-herdr and pi-plan-mode).
 
-- **[pi-bg](https://pi-plugins.vercel.app/plugins/pi-bg/)'s `/tasks`** lists followed notebooks beside the shells and agents, tagged `notebook`: running while a cell runs or is queued, failed when its last run broke cells. Enter opens the notebook view, `x` twice interrupts the kernel, and `x` on an idle notebook clears its failure alert.
-- **Pills.** With [pi-subagents](https://pi-plugins.vercel.app/plugins/pi-subagents/), the pill ends its FleetView list (Enter opens the busiest notebook); with only pi-bg, it joins pi-bg's pill (`2 shells · 1 notebook`, Enter opens `/tasks`). pi-marimo draws its own pill only when no host shows it.
+- **[pi-bg](https://pi-plugins.vercel.app/plugins/pi-bg/)'s `/tasks`** lists followed notebooks beside the tasks and agents, tagged `notebook`: running while a cell runs or is queued, failed when its last run broke cells. Enter opens the notebook view, `x` twice interrupts the kernel, and `x` on an idle notebook clears its failure alert.
+- **Pills.** With [pi-subagents](https://pi-plugins.vercel.app/plugins/pi-subagents/), the pill ends its FleetView list (Enter opens the busiest notebook); with only pi-bg, it joins pi-bg's pill (`2 tasks · 1 notebook`, Enter opens `/tasks`). pi-marimo draws its own pill only when no host shows it.
 
 ### pi-bg's `bg_wait` and tasks
 

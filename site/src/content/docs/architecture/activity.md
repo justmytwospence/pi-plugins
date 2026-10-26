@@ -29,12 +29,12 @@ In [pi-bg's `/tasks` dialog](https://github.com/justmytwospence/pi-plugins/blob/
 
 Calling a section's `stop` delegates to its owner:
 
-- A shell stops its process group; a subagent stops its Pi child.
+- A pi-bg task stops its process group; a subagent stops its Pi child.
 - The [notebook source](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-marimo/src/ui/source.ts) interrupts a kernel, not the shell service that launched it.
 - Working planner rows stop that planner. Scout rows are observational and cannot be stopped independently from the activity list; stop their owning planner or use the planning screen. Opening either kind of row returns to `/planners`.
 - A stoppable Herdr child receives an interrupt for its awaited turn. **It never closes the pane.** Explicit `herdr_child close` remains a separate action.
 
-`/stop` is not a stop-everything command. pi-bg's [`/stop`](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-bg/src/index.ts) stops only pi-bg's own running shell tasks that this Pi process started; kept services adopted from an earlier session, subagent runs, notebooks, planners and Herdr children are untouched.
+`/stop` is not a stop-everything command. pi-bg's [`/stop`](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-bg/src/index.ts) stops only pi-bg's own running tasks that this Pi process started; kept services adopted from an earlier session, subagent runs, notebooks, planners and Herdr children are untouched.
 
 ## Request and offer handshake
 
@@ -70,7 +70,7 @@ The fallback aggregation and return to an independent pill are covered by [pi-bg
 | `bg:external` | A producer reports `{ id, label, state, summary?, result? }`, with state `running`, `done` or `failed`. pi-bg records it for `bg_wait`, which renders a `result` as Markdown. |
 | `bg:external-consumed` | `{ id }` acknowledges a completed external result returned through `bg_wait`; the owner suppresses duplicate delivery. Summary-only waits do not acknowledge a result. |
 | `bg:tasks` | pi-bg publishes `{ tasks }` snapshots, including readiness, origin and `willWake`. |
-| `bg:annotate` | A sibling supplies `{ task, by, detail?, wait? }` for a known shell task. Missing detail clears the annotation. |
+| `bg:annotate` | A sibling supplies `{ task, by, detail?, wait? }` for a known pi-bg task. Missing detail clears the annotation. |
 | `bg:killed` | pi-bg reports `{ id, command, cwd }` after explicitly stopping a task. |
 
 Async subagents publish external IDs as `subagent:<id>`. `bg_wait` returns a completed child's bounded result directly and acknowledges consumption, so pi-subagents suppresses the duplicate follow-up. Without a consuming wait or explicit completed-result read, pi-subagents delivers its normal result message. A running snapshot or a summary-only wait does not consume the child result. pi-marimo publishes `marimo:<path>` IDs while cells run or queue. Its [background bridge](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-marimo/src/bg.ts) ends them when the run completes, fails, disconnects beyond its grace period or is no longer followed.

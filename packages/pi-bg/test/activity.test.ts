@@ -163,7 +163,7 @@ it("Tab can select a background pill with a draft, cycle safely and return with 
   const editor = new Editor(tui as any, { borderColor: (s: string) => s } as any);
   editor.setText("keep this draft");
   const c = fakeCtx("/w"); const open = vi.fn();
-  const pill = new PillView({ pill: () => ({ label: "1 shell" }), open }, "pi-bg-pill");
+  const pill = new PillView({ pill: () => ({ label: "1 task" }), open }, "pi-bg-pill");
   pill.setUI(c.ctx.ui as any); pill.update();
   c.widgets.get("pi-bg-pill")({ ...tui, getFocusedComponent: () => editor }, theme).render(100);
   try {

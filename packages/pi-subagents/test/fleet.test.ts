@@ -20,9 +20,9 @@ test("the roster: main, running and viewed runs earliest first, failures until t
   expect(names(fleetRoster([late, early, done, failed], now, undefined, [], 0, new Set([failed.id])))).toEqual(["main", "early", "late"]);
   expect(names(fleetRoster([late, early, done, failed], now, `run:${done.id}`))).toEqual(["main", "early", "done", "late"]);
   // Pills end the list; with no runs there is no main row.
-  const shells = { id: "bg", title: "shells", entries: () => [], open: async () => undefined, pill: () => ({ label: "2 shells" }) };
-  expect(names(fleetRoster([early], now, undefined, [shells]))).toEqual(["main", "early", "2 shells"]);
-  expect(names(fleetRoster([done], now, undefined, [shells]))).toEqual(["2 shells"]);
+  const tasks = { id: "bg", title: "tasks", entries: () => [], open: async () => undefined, pill: () => ({ label: "2 tasks" }) };
+  expect(names(fleetRoster([early], now, undefined, [tasks]))).toEqual(["main", "early", "2 tasks"]);
+  expect(names(fleetRoster([done], now, undefined, [tasks]))).toEqual(["2 tasks"]);
   expect(fleetRoster([done], now)).toEqual([]);
 });
 
@@ -43,14 +43,14 @@ test("rows: the selection, stats flush right, a status icon once finished, and s
   expect(active[1]).toBe(" ○ main");
   expect(active[3]).toMatch(/^ ● Review the diff {2}reviewer/u);
   // A pill, and the note after a success.
-  const shells = { id: "bg", title: "shells", entries: () => [], open: async () => undefined, pill: () => ({ label: "2 shells", alert: "1 failed" }) };
-  const withPill = fleetRoster([a], 60_000, undefined, [shells]);
+  const tasks = { id: "bg", title: "tasks", entries: () => [], open: async () => undefined, pill: () => ({ label: "2 tasks", alert: "1 failed" }) };
+  const withPill = fleetRoster([a], 60_000, undefined, [tasks]);
   expect(renderFleet({ roster: withPill, selected: 1, active: true, now: 60_000, width: 80, theme: plain, note: "/tasks to see subagents" }).slice(-3)).toEqual([
-    " 2 shells  · 1 failed",
+    " 2 tasks  · 1 failed",
     " /tasks to see subagents",
     "",
   ]);
-  expect(renderFleet({ roster: fleetRoster([], 0, undefined, [shells]), selected: 0, active: false, now: 0, width: 80, theme: plain })).toEqual([" 2 shells  · 1 failed", ""]);
+  expect(renderFleet({ roster: fleetRoster([], 0, undefined, [tasks]), selected: 0, active: false, now: 0, width: 80, theme: plain })).toEqual([" 2 tasks  · 1 failed", ""]);
 
   const many = fleetRoster(Array.from({ length: 8 }, (_, i) => fakeRun({ agent: `a${i}`, label: `Task ${i}`, state: { startedAt: i } })), 0);
   const top = renderFleet({ roster: many, selected: 0, active: true, now: 0, width: 60, theme: plain });
@@ -273,12 +273,12 @@ test("a pill: ↓ selects it when there are no runs; Enter opens its dialog, whi
   const ui = fakeUI();
   let opened = 0;
   let close: () => void = () => undefined;
-  const shells = {
+  const tasks = {
     id: "bg",
-    title: "shells",
+    title: "tasks",
     entries: () => [],
     open: async () => undefined,
-    pill: () => ({ label: "2 shells" }),
+    pill: () => ({ label: "2 tasks" }),
     openDialog: () => {
       opened++;
       return new Promise<void>((resolve) => {
@@ -286,12 +286,12 @@ test("a pill: ↓ selects it when there are no runs; Enter opens its dialog, whi
       });
     },
   };
-  const fleet = new FleetView({ runs: () => [], enabled: () => true, actions: () => ({}), sections: () => [shells] });
+  const fleet = new FleetView({ runs: () => [], enabled: () => true, actions: () => ({}), sections: () => [tasks] });
   fleet.setUI(ui);
   fleet.update();
-  expect(ui.render("subagents-fleet")).toEqual([" 2 shells ", ""]);
+  expect(ui.render("subagents-fleet")).toEqual([" 2 tasks ", ""]);
   expect(ui.press(KEY.down)).toBe(true);
-  expect(ui.render("subagents-fleet")[0]).toBe("\x1b[7m 2 shells \x1b[27m  enter view · esc back");
+  expect(ui.render("subagents-fleet")[0]).toBe("\x1b[7m 2 tasks \x1b[27m  enter view · esc back");
   expect(ui.press(KEY.enter)).toBe(true);
   await Promise.resolve();
   expect(opened).toBe(1);
