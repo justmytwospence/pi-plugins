@@ -10,12 +10,15 @@
 // asks for it over the event bus and writes it to its `$summary` pane token, so the turn's
 // notification and the recap line are the same text.
 //
-// Session name (what `pi --resume` and /resume list, and pi-herdr's pane title): your latest prompt
-// while a turn runs, then the turn's recap once it settles, so the list shows what the session was
-// doing last rather than its first message. A name you set yourself (/name, --name) is left alone
-// until you clear it. PI_RECAP_NAME=0 turns this off.
+// Session name (what `pi --resume` and /resume list): the latest turn's recap once it settles, so the
+// list shows what the session was doing last rather than its first message. A name you set yourself
+// (/name, --name) is left alone until you clear it. PI_RECAP_NAME=0 turns this off. The name is
+// announced on `recap:session-name`, so the footer and pi-herdr can tell it from one you set and
+// keep it off screen.
 //
 // Event bus:
+//   recap:session-name { name }        pi-recap's own session name (undefined when it set none),
+//                                      sent when it changes and at session start
 //   recap:summary { reply(promise) }   pi-recap calls reply with a Promise<string | undefined> for
 //                                      the current turn (memoized, clipped to the token's 80
 //                                      characters), when it is loaded and active
@@ -27,6 +30,8 @@ import { oneLine, type Recap, RECAP_MAX, type RecapRegistry, recap } from "./sum
 export const ENTRY = "recap";
 /** The custom entry recording each session name pi-recap set, so a name set by hand is told apart. */
 export const NAME_ENTRY = "recap-name";
+/** Bus channel announcing the session name pi-recap set, so other plugins can leave it off screen. */
+export const NAME_EVENT = "recap:session-name";
 export const WIDGET = "recap";
 export const MARK = "※ ";
 export const LABEL = "recap: ";
@@ -133,6 +138,7 @@ export default function piRecap(pi: ExtensionAPI) {
       pi.setSessionName(name);
       pi.appendEntry(NAME_ENTRY, { name });
       autoName = name;
+      pi.events.emit(NAME_EVENT, { name });
     } catch {
       // The runtime went stale.
     }
@@ -202,14 +208,7 @@ export default function piRecap(pi: ExtensionAPI) {
     active = ctx.mode === "tui";
     lastCtx = active ? ctx : undefined;
     autoName = active ? recordedName(ctx) : undefined;
-  });
-  pi.on("input", (event) => {
-    const text = event.text?.trim() ?? "";
-    // Commands and shell lines are not what the session is about; a steer or queued follow-up
-    // refines the running turn, whose recap names it when it settles.
-    if (!text || text.startsWith("/") || text.startsWith("!") || event.streamingBehavior) return undefined;
-    nameSession(text);
-    return undefined;
+    pi.events.emit(NAME_EVENT, { name: autoName });
   });
   pi.on("session_tree", (_event, ctx) => {
     if (!active) return;

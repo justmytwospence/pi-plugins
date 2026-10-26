@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import piRecap, { ENTRY, LABEL, MARK, NAME_ENTRY, WIDGET, recapDue, recapLines } from "../src/index.ts";
+import piRecap, { ENTRY, LABEL, MARK, NAME_ENTRY, NAME_EVENT, WIDGET, recapDue, recapLines } from "../src/index.ts";
 import { harness } from "./harness.ts";
 
 const LONG = "I changed the parser so empty lines are skipped.\n\nMore detail on a second line.";
@@ -215,43 +215,48 @@ test("long recaps wrap under the label, at the prose measure when one is set", (
   for (const l of measured) expect(l.trimEnd().length).toBeLessThanOrEqual(3 + 20);
 });
 
-test("the session is named after the latest prompt, then the turn's recap; a name you set wins", async () => {
-  const { h, ctx, settle } = setup("Fixed the parser; tests pass");
+test("the session is named after the turn's recap, never the prompt; a name you set wins", async () => {
+  const { h, ctx, settle, branch } = setup("Fixed the parser; tests pass");
+  const announced: unknown[] = [];
+  h.pi.events.on(NAME_EVENT, (d: any) => announced.push(d.name));
   await h.emit("session_start", {}, ctx);
-  await h.emit("input", { type: "input", text: "/model", source: "interactive" }, ctx);
+  await h.emit("input", { type: "input", text: "make the parser skip empty lines", source: "interactive" }, ctx);
   expect(h.pi.getSessionName()).toBeUndefined();
-  await h.emit("input", { type: "input", text: "  make the parser\nskip empty lines ", source: "interactive" }, ctx);
-  expect(h.pi.getSessionName()).toBe("make the parser skip empty lines");
   await h.emit("agent_start", {}, ctx);
   await settle();
   await vi.advanceTimersByTimeAsync(0);
   expect(h.pi.getSessionName()).toBe("Fixed the parser; tests pass");
-  expect(h.entries.filter((e) => e.customType === NAME_ENTRY).map((e: any) => e.data.name)).toEqual([
-    "make the parser skip empty lines",
-    "Fixed the parser; tests pass",
-  ]);
-  // Your own name stays until you clear it.
+  expect(h.entries.filter((e) => e.customType === NAME_ENTRY).map((e: any) => e.data.name)).toEqual(["Fixed the parser; tests pass"]);
+  expect(announced).toEqual([undefined, "Fixed the parser; tests pass"]);
+  // Your own name stays.
   h.pi.setSessionName("Parser work");
-  await h.emit("input", { type: "input", text: "now the lexer", source: "interactive" }, ctx);
+  branch.push({ type: "message", id: "later", message: { role: "user", content: "more" } });
+  await h.emit("agent_start", {}, ctx);
+  await settle();
+  await vi.advanceTimersByTimeAsync(0);
   expect(h.pi.getSessionName()).toBe("Parser work");
-  h.pi.setSessionName("");
-  await h.emit("input", { type: "input", text: "now the lexer", source: "interactive" }, ctx);
-  expect(h.pi.getSessionName()).toBe("now the lexer");
 });
 
-test("a resumed session recognizes its automatic name; PI_RECAP_NAME=0 leaves names alone", async () => {
-  const { h, ctx } = setup();
+test("a resumed session recognizes and announces its automatic name; PI_RECAP_NAME=0 leaves names alone", async () => {
+  const { h, ctx, settle } = setup("new recap");
   const entries = [{ type: "custom", customType: NAME_ENTRY, data: { name: "old recap" } }];
   (ctx.sessionManager as any).getEntries = () => entries;
+  const announced: unknown[] = [];
+  h.pi.events.on(NAME_EVENT, (d: any) => announced.push(d.name));
   h.pi.setSessionName("old recap");
   await h.emit("session_start", {}, ctx);
-  await h.emit("input", { type: "input", text: "next thing", source: "interactive" }, ctx);
-  expect(h.pi.getSessionName()).toBe("next thing");
+  expect(announced).toEqual(["old recap"]);
   process.env.PI_RECAP_NAME = "0";
   try {
-    await h.emit("input", { type: "input", text: "another", source: "interactive" }, ctx);
-    expect(h.pi.getSessionName()).toBe("next thing");
+    await h.emit("agent_start", {}, ctx);
+    await settle();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.pi.getSessionName()).toBe("old recap");
   } finally {
     delete process.env.PI_RECAP_NAME;
   }
+  await h.emit("agent_start", {}, ctx);
+  await settle();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(h.pi.getSessionName()).toBe("new recap");
 });

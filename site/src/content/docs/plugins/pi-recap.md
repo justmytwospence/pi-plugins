@@ -23,7 +23,7 @@ Recap writes one line on where the session stands: what the last turn got done a
 
 ## Session name
 
-`pi --resume` and `/resume` list a session by its name, or by its first message when it has none. Recap keeps the name current: your latest prompt while a turn runs, then the turn's recap once it settles, so the list shows what each session was doing last. Commands, `!` lines, steers and queued follow-ups do not rename it. With pi-herdr the pane title and `task` token follow the name. A name you set yourself (`/name`, `--name`) is never replaced; clear it to hand naming back. Each automatic name is recorded as a `recap-name` session entry.
+`pi --resume` and `/resume` list a session by its name, or by its first message when it has none. Recap names the session after the latest turn's recap once it settles, so the list shows what each session was doing last. The name is only for that list: the status footer and pi-herdr's pane title leave it out and show only a name you set. A name you set yourself (`/name`, `--name`) is never replaced; clear it to hand naming back. Each automatic name is recorded as a `recap-name` session entry.
 
 ## Enable and requirements
 

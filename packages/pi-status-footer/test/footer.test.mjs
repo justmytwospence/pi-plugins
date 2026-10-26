@@ -1742,3 +1742,10 @@ test("session-chrome service: another session's footer and gauge in main's surro
   assert.deepEqual(request.service.footer(session, 160, theme), []);
   assert.equal(editor.renderTopBorder(10, 0), "-".repeat(10));
 });
+
+test("pi-recap's automatic session name stays off the footer; a name you set shows", () => {
+  assert.equal(mod.ownName("Fixed the parser", "Fixed the parser"), undefined);
+  assert.equal(mod.ownName("Parser work", "Fixed the parser"), "Parser work");
+  assert.equal(mod.ownName("Parser work", undefined), "Parser work");
+  assert.equal(mod.ownName(undefined, undefined), undefined);
+});

@@ -1277,6 +1277,12 @@ export default function statusFooter(pi: ExtensionAPI): void {
     setWorking(workingMessage(working.tokens(), Date.now() - runStarted));
   };
   // Other plugins' working rows (pi-sidebar's) read like main's while main shows working stats.
+  // pi-recap names the session after its recap for the /resume list; that name stays off the footer.
+  let recapName: string | undefined;
+  pi.events?.on("recap:session-name", (data) => {
+    const name = (data as { name?: unknown } | undefined)?.name;
+    recapName = typeof name === "string" ? name : undefined;
+  });
   pi.events?.on(WORKING_STATS_CHANNEL, (data) => {
     const request = data as WorkingStatsRequest | undefined;
     if (!active || !showWorking || !request || request.version !== 1 || request.service) return;
@@ -1375,7 +1381,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       cwd: current.cwd, provider, model: current.model?.id ?? "no model",
       thinking: current.model?.reasoning ? pi.getThinkingLevel() : undefined,
       oauth: current.model ? current.modelRegistry.isUsingOAuth(current.model) : false,
-      sessionName: pi.getSessionName(), phase, queued: current.hasPendingMessages(),
+      sessionName: ownName(pi.getSessionName(), recapName), phase, queued: current.hasPendingMessages(),
       context: current.getContextUsage() ?? { tokens: null, contextWindow: current.model?.contextWindow ?? 0, percent: null },
       totals, cacheHit, git: { ...git, branch: git.branch ?? branch ?? undefined },
       quotas, unavailableQuota,
@@ -1630,4 +1636,9 @@ export default function statusFooter(pi: ExtensionAPI): void {
       context.ui.notify(enabled ? "Custom footer enabled" : "Native footer restored", "info");
     },
   });
+}
+
+/** The session name to show: one you set, not pi-recap's automatic one. */
+export function ownName(name: string | undefined, recapName: string | undefined): string | undefined {
+  return name && name !== recapName ? name : undefined;
 }

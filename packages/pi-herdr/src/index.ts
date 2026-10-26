@@ -138,6 +138,8 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
   let lastCtx: ExtensionContext | undefined;
   /** The first prompt's title, until the session has a name. */
   let promptTitle: string | undefined;
+  /** pi-recap's automatic session name, which is for the /resume list, not the pane title. */
+  let recapName: string | undefined;
 
   const updateBg = () => {
     if (active) void pane.setToken("bg", activity.token(), BG_TTL_MS);
@@ -147,7 +149,8 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     if (!active) return;
     const c = ctx ?? lastCtx;
     if (!promptTitle && c) promptTitle = titleFromPrompt(firstUserText(c.sessionManager.getEntries() as any));
-    const title = pi.getSessionName() ?? promptTitle;
+    const name = pi.getSessionName();
+    const title = (name && name !== recapName ? name : undefined) ?? promptTitle;
     void pane.setPresentation(title, displayAgent(modelId, thinking));
     void pane.setToken("task", title);
   };
@@ -268,6 +271,11 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
       updateBg();
     });
   }
+  pi.events.on("recap:session-name", (e) => {
+    const name = (e as { name?: unknown } | undefined)?.name;
+    recapName = typeof name === "string" ? name : undefined;
+    updateIdentity();
+  });
   pi.events.on("herdr:token", (e) => {
     const t = e as TokenEvent;
     if (!t || typeof t.key !== "string") return;
