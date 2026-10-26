@@ -47,7 +47,7 @@ SHA-256 of the actual read-only installed files (all five shipped files):
 - Public SDK 1.1 `handleMouse` routing replaces the upstream `handleSelectionMouseEvent` patch.
 - Real renderer acquisition accounts for SDK 1.1's stable TUI proxy; wrapper cleanup uses exact instance/function identity, yields to existing owners, and leaves newer wrappers intact.
 - Instance-specific widget ownership, disposal, generation guards and idempotent shutdown protect reload/rebinding and overlapping copies.
-- Live transcript remeasurement fixes nested/in-place same-height rebuilds, resize/scrollbar width changes and expanded skills. Exact clear markers suppress pre-clear pins without adding rows.
+- Live transcript remeasurement fixes nested/in-place same-height rebuilds, resize/scrollbar width changes and expanded skills. Exact clear markers add no rows; the latest prompt stays pinned after a clear.
 - Boundary visibility, narrow/wide text rendering, fresh theme lookup and stale-click validation are covered by regression tests and in-memory SDK tests.
 
 No upstream installed file was changed. This provenance file is package-local; it does not update the suite's root import ledger.

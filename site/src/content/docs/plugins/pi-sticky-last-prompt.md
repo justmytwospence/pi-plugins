@@ -11,7 +11,7 @@ plugin: pi-sticky-last-prompt
 - **Controls:** Automatic bar; left-click jumps to the pinned prompt. No command, tool or shortcut.
 - **Settings:** No settings; derives the pin from the live transcript on paint.
 - **Requirements, cost & privacy:** Fullscreen TUI; reported mouse clicks for jumping, Nerd Font for pin icon. No network, inference or external program; shows prompt text locally.
-- **Integrations & limits:** Optional clear-screen horizon. Private renderer hooks may change; duplicate/wrapped overlay ownership makes it stay inactive.
+- **Integrations & limits:** Pin survives a clear-screen Ctrl+L. Private renderer hooks may change; duplicate/wrapped overlay ownership makes it stay inactive.
 
 `pi-sticky-last-prompt` shows a one-line bar at the very top of Pi's fullscreen TUI with the most recent prompt that has scrolled completely out of view. Left-click the bar and the transcript scrolls so that prompt sits just below it. It began as [pi-sticky-last-prompt](https://github.com/tangentyh/pi-collections/tree/main/extensions/sticky-last-prompt) 0.1.1 (MIT, pi-collections contributors) and was adapted for the suite.
 
@@ -41,7 +41,7 @@ Remove `npm:pi-sticky-last-prompt` first. A second sticky bar is detected and re
 
 The bar shows the latest prompt whose rows have all scrolled above the top of the viewport. While a prompt is still crossing the top edge, the bar is blank rather than repeating text that is directly beneath it. Text is collapsed to one line and truncated to the terminal width. Skill invocations count as prompts and are shown as `[skill] <name>`.
 
-With [pi-clear-screen](/plugins/pi-clear-screen/), a Ctrl+L clear acts as a horizon: prompts above the most recent clear are not pinned until you scroll back above that point.
+With [pi-clear-screen](/plugins/pi-clear-screen/), a Ctrl+L clear keeps the latest prompt pinned at the top of the cleared view, so you still see what the conversation is answering.
 
 The pin is recomputed on each paint from the live transcript, so scrolling, streaming output, resizing, `/tree` navigation, compaction and reloads re-derive it without polling. Prompt positions are cached per width and content height; streaming output that changes the height costs one extra measuring pass of the transcript per frame.
 

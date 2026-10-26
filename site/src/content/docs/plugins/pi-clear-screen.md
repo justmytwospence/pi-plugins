@@ -11,7 +11,7 @@ plugin: pi-clear-screen
 - **Controls:** Ctrl+L after remapping stock `app.model.select`; Ctrl+C stops a running turn; Esc or Ctrl+C first takes queued prompts back; `/clear` starts a fresh session, `/exit` quits. No model tool.
 - **Settings:** No plugin settings; Ctrl+L fixed in source. Pi `tuiMode` must be fullscreen for view clearing.
 - **Requirements, cost & privacy:** Fullscreen/private layout hooks; no network, inference or external program. Clearing is not redaction or compaction.
-- **Integrations & limits:** Optional sticky-prompt horizon. Stock conflict skips the shortcut, not an automatic override. `/clear` changes context; Ctrl+L does not.
+- **Integrations & limits:** With sticky-last-prompt, the latest prompt stays pinned after a clear. Stock conflict skips the shortcut, not an automatic override. `/clear` changes context; Ctrl+L does not.
 
 ## Purpose and selection
 

@@ -329,7 +329,7 @@ test("SDK first layout, nested clear, and resize use live ScrollView rows", asyn
   document.render = (width) => original(width).filter((line) => line !== CLEAR_SENTINEL).concat(["", "", "", "", ""]);
   renderLayoutFrame(root, 40, 5, () => {});
   scroll.scrollToEnd();
-  expect(pin.render(40)).toEqual([]);
+  expect(pin.render(40)[0]).toContain("the real SDK prompt");
   scroll.scrollTo(10);
   expect(pin.render(40)[0]).toContain("the real SDK prompt");
   h.terminal.columns = 5;

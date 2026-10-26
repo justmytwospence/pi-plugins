@@ -222,7 +222,7 @@ test("the pin is the latest prompt fully above the viewport; a straddling prompt
   expect(selectAnchor(result, 13)?.text).toBe("two");
 });
 
-test("a clear horizon hides earlier prompts until the viewport scrolls back above it", () => {
+test("a clear horizon keeps the latest prompt above it pinned", () => {
   const result: AnchorIndex = {
     anchors: [
       { start: 0, end: 1, text: "before" },
@@ -230,8 +230,8 @@ test("a clear horizon hides earlier prompts until the viewport scrolls back abov
     ],
     horizons: [{ row: 3 }],
   };
-  expect(selectAnchor(result, 3)).toBeUndefined();
-  expect(selectAnchor(result, 4)).toBeUndefined();
+  expect(selectAnchor(result, 3)?.text).toBe("before");
+  expect(selectAnchor(result, 4)?.text).toBe("before");
   expect(selectAnchor(result, 6)?.text).toBe("after");
   expect(selectAnchor(result, 2)?.text).toBe("before");
 });
@@ -324,11 +324,11 @@ test("the pin re-derives after a transcript rebuild and a resize without polling
   // Resize: the width key changes and the prompt's extent is measured again.
   h.screen.terminal.columns = 20;
   expect(pin.render(20)[0]).toContain("new");
-  // Cleared: the horizon hides the pre-clear prompt while the viewport is below it.
+  // Cleared: the pre-clear prompt stays pinned at the top of the cleared view.
   rebuilt.children.push(new Block([CLEAR_SENTINEL]));
   h.screen.doc.children = [...h.screen.doc.children];
   h.screen.sv.scrollTop = 3;
-  expect(pin.render(20)).toEqual([]);
+  expect(pin.render(20)[0]).toContain("new");
   h.screen.sv.scrollTop = 2;
   expect(pin.render(20)[0]).toContain("new");
 });
@@ -472,7 +472,7 @@ test("malformed renderers and zero-height prompts do not become jump targets", (
   expect(selectAnchor(result, -1)).toBeUndefined();
 });
 
-test("only the exact clear marker has zero height; multiple clears use the latest horizon", () => {
+test("only the exact clear marker has zero height; clears keep the latest prompt pinned", () => {
   const result = index([
     new Block(["p"], { kind: "user", text: "one" }),
     new Block([CLEAR_SENTINEL]),
@@ -483,7 +483,7 @@ test("only the exact clear marker has zero height; multiple clears use the lates
     new Block(["p"], { kind: "user", text: "three" }),
   ]);
   expect(result.horizons).toEqual([{ row: 1 }, { row: 4 }]);
-  expect(selectAnchor(result, 4)).toBeUndefined();
+  expect(selectAnchor(result, 4)?.text).toBe("two");
   expect(selectAnchor(result, 3)).toBeUndefined(); // two is at the boundary
   expect(selectAnchor(result, 6)?.text).toBe("three");
 });
@@ -555,8 +555,8 @@ test("clicks revalidate identity after same-label rebuild/clear and refresh move
   h.screen.doc.children.push(new Block([CLEAR_SENTINEL]));
   h.screen.sv.scrollTop = 8;
   pin.handleMouse(leftClick);
-  expect(h.screen.scrollTo).toEqual([]);
-  expect(pin.render(40)).toEqual([]);
+  expect(h.screen.scrollTo).toEqual([{ top: 3, options: { disableFollow: true } }]);
+  expect(pin.render(40)[0]).toContain("prompt");
 });
 
 test("restart, stale factory, widget disposal and shutdown are idempotent", async () => {

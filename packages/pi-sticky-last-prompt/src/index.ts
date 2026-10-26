@@ -193,13 +193,14 @@ export function collectAnchors(
   return offset;
 }
 
-/** A prompt on the top boundary or straddling it blanks the bar rather than pinning an older one. */
+/**
+ * A prompt on the top boundary or straddling it blanks the bar rather than pinning an older one.
+ * Clear horizons do not hide earlier prompts: after Ctrl+L the latest prompt stays pinned.
+ */
 export function selectAnchor(index: AnchorIndex, scrollTop: number): UserAnchor | undefined {
   if (!Number.isFinite(scrollTop) || scrollTop < 0) return undefined;
-  let floor = 0;
-  for (const horizon of index.horizons) if (horizon.row <= scrollTop) floor = Math.max(floor, horizon.row);
   let selected: UserAnchor | undefined;
-  for (const anchor of index.anchors) if (anchor.start <= scrollTop && anchor.start >= floor) selected = anchor;
+  for (const anchor of index.anchors) if (anchor.start <= scrollTop) selected = anchor;
   return selected && selected.end <= scrollTop ? selected : undefined;
 }
 
