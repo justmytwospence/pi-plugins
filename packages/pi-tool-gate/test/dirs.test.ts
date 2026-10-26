@@ -24,6 +24,10 @@ describe("bashPathAccess", () => {
     });
   });
 
+  test("a sed script with > is neither a redirect nor a file", () => {
+    expect(access("sed -e 's/<[^>]*>/ /g' /tmp/us_wsdl.xml | tr -s ' '")).toEqual({ reads: ["/tmp/us_wsdl.xml"], writes: [] });
+  });
+
   test("words without a slash are not paths, and URLs are not files", () => {
     expect(access("git status && npm test")).toEqual({ reads: [], writes: [] });
     expect(access("curl -s https://example.com/a/b")).toEqual({ reads: [], writes: [] });

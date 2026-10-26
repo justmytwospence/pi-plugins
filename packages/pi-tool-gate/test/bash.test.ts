@@ -371,6 +371,12 @@ test("writeRedirects ignores /dev/null and fd duplication", () => {
   expect(writeRedirects("echo a >> notes.md")).toEqual(["notes.md"]);
 });
 
+test("writeRedirects ignores > inside quotes and after a backslash, and unquotes targets", () => {
+  expect(writeRedirects("sed -e 's/<[^>]*>/ /g' /tmp/a.xml | tr -s ' '")).toEqual([]);
+  expect(writeRedirects('grep "a>/b" x \\> y')).toEqual([]);
+  expect(writeRedirects('echo a > "out file.txt"')).toEqual(["out file.txt"]);
+});
+
 test("bashKeys name what a call does, skipping shell noise and reads", () => {
   expect(bashKeys("npm run build -- --watch")).toEqual(["npm run"]);
   expect(bashKeys("FOO=1 cargo test -p x")).toEqual(["cargo test"]);

@@ -289,9 +289,13 @@ function program(tokens: string[]): { name: string; args: string[]; unsafe: bool
 export function writeRedirects(command: string): string[] {
   const targets: string[] = [];
   const re = /(?<![<>])(?:[0-9]*|&)(>>?|<>)\|?(&?)\s*([^\s;|&<>]*)/gu;
-  for (const match of command.matchAll(re)) {
+  // Match on a copy whose quoted and escaped characters are masked, so `sed 's/<[^>]*>/ /g'` has
+  // no redirect; the target is then read back from the original and unquoted.
+  const masked = maskQuoted(command);
+  for (const match of masked.matchAll(re)) {
     const dup = match[2] === "&";
-    const target = match[3] as string;
+    const start = (match.index ?? 0) + match[0].length - (match[3] as string).length;
+    const target = command.slice(start, (match.index ?? 0) + match[0].length).replace(/\\(.)|["']/gu, "$1");
     // `2>&1`, `>&-`: duplicating or closing a descriptor, not a file.
     if (dup && (/^\d+$/u.test(target) || target === "-")) continue;
     // A redirect with no target is a syntax error, or something this parser does not follow.
@@ -302,6 +306,21 @@ export function writeRedirects(command: string): string[] {
     if (target !== "/dev/null") targets.push(target);
   }
   return targets;
+}
+
+/** `command` with every character inside quotes, or after a backslash, replaced by `x` (quotes kept). */
+function maskQuoted(command: string): string {
+  let out = "";
+  let quote: "'" | '"' | undefined;
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i];
+    if (quote === "'") { out += c === "'" ? ((quote = undefined), c) : "x"; continue; }
+    if (c === "\\" && i + 1 < command.length) { out += "xx"; i++; continue; }
+    if (c === quote) { quote = undefined; out += c; continue; }
+    if (!quote && (c === "'" || c === '"')) { quote = c; out += c; continue; }
+    out += quote ? "x" : c;
+  }
+  return out;
 }
 
 /** Expansions can hide options or executable names. Only literal shell words are auto-approved. */
@@ -1129,7 +1148,9 @@ export function bashPathAccess(
     const args = p.args.filter((a) => !nested.includes(a));
     const files = pathArgs(p.name === "eval" ? [] : args).map((f) => resolve(dir, f));
     if (readOnly) {
-      for (const f of files) reads.add(f);
+      // sed's script (`s/a/b/`) is not a file.
+      const named = p.name === "sed" ? fsOperands("sed", p.args).filter(pathLike).map((f) => resolve(dir, f)) : files;
+      for (const f of named) reads.add(f);
     } else if (WRITES_ALL.has(p.name)) {
       for (const f of files) writes.add(f);
     } else if (WRITES_LAST.has(p.name)) {
