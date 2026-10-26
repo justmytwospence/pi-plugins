@@ -1,6 +1,6 @@
 # pi-ask-user-question
 
-A Pi extension that gives the model an `ask_user_question` tool: up to four multiple-choice questions, answered in a Claude Code-style dialog at the bottom of the terminal, with the answers sent back in Claude Code's words. The parameters follow Claude Code's `AskUserQuestion` schema, with Claude Code's "Other" replaced by a `Type something.` row on every question.
+A Pi extension that gives the model an `ask_user_question` tool: up to four multiple-choice questions (plus follow-ups shown only for certain answers), answered in a Claude Code-style dialog at the bottom of the terminal, with the answers sent back in Claude Code's words. The parameters follow Claude Code's `AskUserQuestion` schema, with Claude Code's "Other" replaced by a `Type something.` row on every question.
 
 The tool acts only when the model calls it. While the user is being asked, it holds `herdr:blocked` so Herdr shows the pane as blocked. Without a UI the tool is withdrawn from the model.
 
@@ -50,7 +50,7 @@ If another configured extension already provides `ask_user_question`, add `-ne` 
 }
 ```
 
-1-4 questions, 2-4 options each. Every question also gets a `Type something.` row for an answer in the user's own words, so options labelled `Other` or `Type something.` (any case, with or without the period) are rejected, as are duplicate questions and duplicate labels within a question; the model gets an error naming the problem. Headers are meant to be 12 characters or fewer; longer ones are cut with `…` on screen, never rejected. `preview` is Markdown and is shown for single-select questions only.
+1-4 questions, 2-4 options each. A question with `showIf` is a follow-up, asked only when an earlier question was answered with one of the listed options: `"showIf": { "header": "Auth", "answers": ["OAuth"] }` names that question by its header and lists its option labels (for a multi-select question, selecting any of them counts; typed answers never match). A follow-up of a hidden follow-up stays hidden. With follow-ups a call can hold up to 6 questions, still at most 4 without `showIf`. A `showIf` that does not name exactly one earlier question by header, or lists a label that question does not offer, is rejected. Every question also gets a `Type something.` row for an answer in the user's own words, so options labelled `Other` or `Type something.` (any case, with or without the period) are rejected, as are duplicate questions and duplicate labels within a question; the model gets an error naming the problem. Headers are meant to be 12 characters or fewer; longer ones are cut with `…` on screen, never rejected. `preview` is Markdown and is shown for single-select questions only.
 
 The answer comes back as Claude Code's text (example):
 
@@ -60,11 +60,11 @@ format(d, 'yyyy')
 ```. user notes: only if it stays small. You can now continue with the user's answers in mind.
 ```
 
-Multi-select answers are the selected labels joined by `, ` (typed text counts as one more item). A question left blank on the Review tab reads `"…"="Unanswered"`. Declining gives `User declined to answer questions`. The tool result's `details` carry the questions and one structured answer per question (`kind`: `option`, `custom`, `multi` or `unanswered`, plus `selected`, `notes` and `preview`). The transcript shows one line per answer, or `Declined`.
+Multi-select answers are the selected labels joined by `, ` (typed text counts as one more item). A question left blank on the Review tab reads `"…"="Unanswered"`. A follow-up that was never shown is left out of the text. Declining gives `User declined to answer questions`. The tool result's `details` carry the questions and one structured answer per question (`kind`: `option`, `custom`, `multi`, `unanswered`, or `skipped` for a follow-up that was never shown, plus `selected`, `notes` and `preview`). The transcript shows one line per answer, or `Declined`.
 
 ## The dialog
 
-It takes the place of the editor, like Claude Code's: the transcript stays visible above it. Several questions get a tab each (`■` answered, `□` not) and a Review tab; answering one moves to the next unanswered question, then to Review. A single question submits as soon as it is answered. Options with a preview show it in a box beside the list in terminals 100 columns or wider, below it otherwise, following the highlighted option.
+It takes the place of the editor, like Claude Code's: the transcript stays visible above it. Several questions get a tab each (`■` answered, `□` not) and a Review tab; answering one moves to the next unanswered question, then to Review. A follow-up gets its tab (and its Review row) only while the answer it depends on calls for it, so it appears as soon as that answer is chosen and disappears again if the answer changes (anything already entered in it is kept, but not reported while it is hidden). A single question submits as soon as it is answered. Options with a preview show it in a box beside the list in terminals 100 columns or wider, below it otherwise, following the highlighted option.
 
 | Key | Does |
 |---|---|
@@ -82,7 +82,7 @@ Typing on `Type something.` opens a `›` field under the options (titled Your a
 ## Hosts
 
 - **Terminal UI**: the dialog above.
-- **Other UI modes** (RPC clients such as Paseo, and subagent children whose dialogs pi-subagents forwards), or if the terminal dialog cannot be shown: one native dialog per question. Single-select is a select with the options numbered and `Type something.` last (then a text input); multi-select is a text input taking numbers like `1,3`, where anything that is not a list of valid option numbers is taken as a typed answer. Previews are added to the question text, cut to 600 characters each; notes are terminal-only. Dismissing any dialog declines.
+- **Other UI modes** (RPC clients such as Paseo, and subagent children whose dialogs pi-subagents forwards), or if the terminal dialog cannot be shown: one native dialog per question. Single-select is a select with the options numbered and `Type something.` last (then a text input); multi-select is a text input taking numbers like `1,3`, where anything that is not a list of valid option numbers is taken as a typed answer. Previews are added to the question text, cut to 600 characters each; notes are terminal-only. Follow-ups are asked only if the answers before them call for them. Dismissing any dialog declines.
 - **No UI** (print and JSON modes): before each agent run the tool is removed from the active tool list, and put back when a UI is present again (only if this extension removed it, so a tool list another extension narrowed is left alone). A call that still arrives gets an error telling the model there is nobody to ask and not to retry.
 
 ## Configuration

@@ -3,7 +3,7 @@
 // a select per single-select question, a text input for typed answers and for multi-select
 // (comma-separated numbers, or words for an answer of your own). Previews are folded into the
 // title; notes need the terminal dialog. Dismissing any dialog declines the questionnaire.
-import { type Answer, type DialogResult, makeAnswer } from "./result.ts";
+import { type Answer, type Choice, type DialogResult, makeAnswer, shownFor, skippedAnswer } from "./result.ts";
 import { type Question, TYPE_SOMETHING } from "./schema.ts";
 
 export interface DialogUI {
@@ -16,12 +16,25 @@ export const MULTI_INSTRUCTIONS = "Enter the numbers of all that apply, comma-se
 
 export async function askWithDialogs(ui: DialogUI, questions: Question[], signal?: AbortSignal): Promise<DialogResult> {
   const answers: Answer[] = [];
+  const choices: Array<Choice | undefined> = [];
   for (let i = 0; i < questions.length; i++) {
+    // A follow-up is asked only if the answers before it call for it.
+    if (!shownFor(questions, choices)[i]) {
+      answers.push(skippedAnswer(questions, i));
+      continue;
+    }
     const answer = questions[i]!.multiSelect ? await multi(ui, questions, i, signal) : await single(ui, questions, i, signal);
-    if (!answer) return { cancelled: true, answers: answers.filter((a) => a.kind !== "unanswered") };
+    if (!answer) return { cancelled: true, answers: answers.filter((a) => a.kind !== "unanswered" && a.kind !== "skipped") };
     answers.push(answer);
+    choices[i] = toChoice(answer);
   }
   return { cancelled: false, answers };
+}
+
+function toChoice(a: Answer): Choice | undefined {
+  if (a.kind === "option") return { kind: "option", label: a.answer ?? "" };
+  if (a.kind === "multi") return { kind: "multi", selected: a.selected ?? [] };
+  return undefined;
 }
 
 function title(q: Question): string {

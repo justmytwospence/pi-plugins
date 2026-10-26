@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { DECLINED, envelope, makeAnswer, toolResult } from "../src/result.ts";
+import { DECLINED, envelope, makeAnswer, skippedAnswer, toolResult } from "../src/result.ts";
 import { q } from "./harness.ts";
 
 const questions = [
@@ -37,4 +37,12 @@ test("declining keeps the partial answers in details", () => {
   const result = toolResult({ questions, answers: partial, cancelled: true });
   expect(result.content[0]!.text).toBe(DECLINED);
   expect(result.details.answers).toEqual([{ index: 0, header: "Library", question: "Which library?", kind: "option", answer: "dayjs" }]);
+});
+
+test("skipped follow-ups stay in details but not in the answer text", () => {
+  const answers = [makeAnswer(questions, 0, { kind: "option", label: "dayjs" }), skippedAnswer(questions, 1)];
+  expect(answers[1]).toEqual({ index: 1, header: "Features", question: "Which features?", kind: "skipped", answer: null });
+  expect(envelope({ questions: questions.slice(0, 2), answers, cancelled: false })).toBe(
+    'User has answered your questions: "Which library?"="dayjs". You can now continue with the user\'s answers in mind.',
+  );
 });

@@ -271,6 +271,58 @@ describe("several questions", () => {
   });
 });
 
+describe("follow-ups (showIf)", () => {
+  const auth = q("Which sign-in?", "Auth", ["OAuth", "API keys", "None"]);
+  const provider = q("Which OAuth provider?", "Provider", ["Google", "GitHub"], { showIf: { header: "Auth", answers: ["OAuth"] } });
+  const scopes = q("Which scopes?", "Scopes", ["Read", "Write"], { multiSelect: true, showIf: { header: "Provider", answers: ["GitHub"] } });
+  const target = q("Deploy where?", "Target", ["Fly", "Vercel"]);
+  const all = [auth, provider, scopes, target];
+
+  test("hidden until the answer they depend on calls for them, then next in line", () => {
+    const d = dialog(all, []);
+    expect(screen(d.frames[0])).toMatch(/→ Auth {3}Target {3}Submit/u);
+    d.dialog.handleInput(enter);
+    expect(screen(d.dialog.render(100))).toMatch(/Auth ✓ {3}→ Provider {3}Target {3}Submit/u);
+    d.dialog.handleInput(down);
+    d.dialog.handleInput(enter);
+    expect(screen(d.dialog.render(100))).toMatch(/Auth ✓ {3}Provider ✓ {3}→ Scopes {3}Target {3}Submit/u);
+  });
+
+  test("a branch not taken is skipped: no tab, no Review row, left out of the answers", () => {
+    const d = dialog(all, [down, enter, enter]);
+    const review = screen(d.frames.at(-1));
+    expect(review).toMatch(/Auth ✓ {3}Target ✓ {3}→ Submit/u);
+    expect(review).toMatch(/Auth → API keys\n\s*Target → Fly/u);
+    expect(review).not.toMatch(/Provider|Scopes/u);
+    d.dialog.handleInput(enter);
+    expect(d.result?.answers.map((a) => [a.header, a.kind])).toEqual([["Auth", "option"], ["Provider", "skipped"], ["Scopes", "skipped"], ["Target", "option"]]);
+  });
+
+  test("changing an earlier answer hides its follow-ups again, and tabs skip hidden ones", () => {
+    const d = dialog(all, [enter, down, enter, space, enter, enter]);
+    expect(screen(d.frames.at(-1))).toMatch(/Review your answers/u);
+    // Back to Auth, choose API keys: Provider and Scopes disappear, their answers are not reported.
+    for (const key of [left, left, left, left, down, enter]) d.dialog.handleInput(key);
+    expect(screen(d.dialog.render(100))).toMatch(/Auth ✓ {3}Target ✓ {3}→ Submit/u);
+    d.dialog.handleInput(right);
+    expect(screen(d.dialog.render(100))).toMatch(/→ Auth/u);
+    d.dialog.handleInput(shiftTab);
+    d.dialog.handleInput(enter);
+    expect(d.result?.answers.map((a) => a.kind)).toEqual(["option", "skipped", "skipped", "option"]);
+  });
+
+  test("a typed answer opens no follow-up", () => {
+    const d = dialog([auth, provider], ["4", ...type("SSO"), enter]);
+    expect(screen(d.frames.at(-1))).toMatch(/Auth ✓ {3}→ Submit/u);
+  });
+
+  test("Esc leaves hidden follow-ups out even if they hold an answer", () => {
+    const d = dialog(all, [enter, enter, left, left, down, enter, esc]);
+    expect(d.result).toMatchObject({ cancelled: true, answers: [{ header: "Auth", answer: "API keys" }] });
+    expect(d.result?.answers).toHaveLength(1);
+  });
+});
+
 describe("previews", () => {
   const layouts = q("Which layout?", "Layout", ["Sidebar", "Tabs"]);
   layouts.options[0]!.preview = "```\n+------+-----+\n| side | doc |\n+------+-----+\n```";

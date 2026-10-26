@@ -49,3 +49,14 @@ test("dismissing any dialog declines, keeping earlier answers", async () => {
   expect(result).toMatchObject({ cancelled: true, answers: [{ answer: "dayjs" }] });
   expect((await askWithDialogs(ui([undefined], []), [library])).cancelled).toBe(true);
 });
+
+test("follow-ups are asked only when an earlier answer calls for them", async () => {
+  const provider = q("Which provider?", "Provider", ["Google", "GitHub"], { showIf: { header: "Features", answers: ["Auth"] } });
+  const skipped = await askWithDialogs(ui([], ["2"]), [features, provider]);
+  expect(skipped).toMatchObject({ cancelled: false, answers: [{ kind: "multi" }, { kind: "skipped", answer: null }] });
+  const asked = await askWithDialogs(ui(["2."], ["1,2"]), [features, provider]);
+  expect(asked.answers[1]).toMatchObject({ kind: "option", answer: "GitHub" });
+  // A typed answer picks no option.
+  const typed = await askWithDialogs(ui([], ["just auth"]), [features, provider]);
+  expect(typed.answers[1]).toMatchObject({ kind: "skipped" });
+});

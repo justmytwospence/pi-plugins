@@ -27,7 +27,7 @@ test("registers ask_user_question with Claude Code's schema and pi's prompt hook
   expect(h.tool.promptSnippet).toMatch(/up to 4/u);
   expect(h.tool.promptGuidelines.join("\n")).toMatch(/\(Recommended\)/u);
   const question = h.tool.parameters.properties.questions.items.properties;
-  expect(Object.keys(question)).toEqual(["question", "header", "options", "multiSelect"]);
+  expect(Object.keys(question)).toEqual(["question", "header", "options", "multiSelect", "showIf"]);
 });
 
 describe("herdr", () => {

@@ -24,7 +24,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { type EditorCreator, type ProseEditor, beginComposition, editorOwnsCancel, inline } from "./editor.ts";
 import { BOX_CHROME, box, columns, contentWidth, type Natural, SIDE_ROWS, sideBySide, split, STACKED_ROWS } from "./preview.ts";
-import { type Answer, type Choice, type DialogResult, makeAnswer } from "./result.ts";
+import { type Answer, type Choice, type DialogResult, makeAnswer, shownFor, skippedAnswer } from "./result.ts";
 import { type Question, TYPE_SOMETHING } from "./schema.ts";
 
 /** Longest header shown in a tab or chip before it is cut with "…". */
@@ -135,6 +135,8 @@ export class QuestionDialog implements Component, Focusable {
   handleInput(data: string): void {
     if (this.finished || isKeyRelease(data)) return;
     this.input(data);
+    // A follow-up hidden by a changed answer never stays open.
+    if (!this.finished && !this.onReview() && !this.shown()[this.tab]) this.go(1);
     this.refresh();
   }
 
@@ -331,13 +333,19 @@ export class QuestionDialog implements Component, Focusable {
     this.reviewNotes.focused = this.hasFocus && this.reviewNotes === open;
   }
 
-  /** After an answer: submit a lone question, else go to the next unanswered one, then Review. */
+  /** Which questions are shown: showIf follow-ups appear once the answer they depend on calls for them. */
+  private shown(): boolean[] {
+    return shownFor(this.questions, this.slots.map((s) => s.choice));
+  }
+
+  /** After an answer: submit a lone question, else go to the next unanswered one shown, then Review. */
   private advance(): void {
     const n = this.questions.length;
     if (n === 1) return this.finish(false);
+    const shown = this.shown();
     for (let step = 1; step < n; step++) {
       const i = (this.tab + step) % n;
-      if (!this.slots[i]!.choice) {
+      if (shown[i] && !this.slots[i]!.choice) {
         this.tab = i;
         return;
       }
@@ -347,13 +355,17 @@ export class QuestionDialog implements Component, Focusable {
 
   private go(direction: 1 | -1): void {
     const tabs = this.questions.length + 1;
-    this.tab = (this.tab + direction + tabs) % tabs;
+    const shown = this.shown();
+    do this.tab = (this.tab + direction + tabs) % tabs;
+    while (this.tab < this.questions.length && !shown[this.tab]);
   }
 
   /** Review never silently drops text left behind with Escape. */
   private submitReview(): void {
+    const shown = this.shown();
     for (let i = 0; i < this.slots.length; i++) {
       const slot = this.slots[i]!;
+      if (!shown[i]) continue;
       const kind = slot.custom.getText().trim() !== slot.typed ? "custom" : slot.notes.getText().trim() !== slot.note ? "notes" : undefined;
       if (kind) {
         this.tab = i;
@@ -376,9 +388,10 @@ export class QuestionDialog implements Component, Focusable {
     for (const slot of this.slots) { slot.custom.dispose?.(); slot.notes.dispose?.(); }
     this.reviewNotes.dispose?.();
     const answers: Answer[] = [];
+    const shown = this.shown();
     this.slots.forEach((slot, i) => {
-      if (cancelled && !slot.choice) return;
-      answers.push(makeAnswer(this.questions, i, slot.choice, slot.note));
+      if (cancelled && (!slot.choice || !shown[i])) return;
+      answers.push(shown[i] ? makeAnswer(this.questions, i, slot.choice, slot.note) : skippedAnswer(this.questions, i));
     });
     this.done({ cancelled, answers, ...(!cancelled && this.reviewNote ? { note: this.reviewNote } : {}) });
   }
@@ -442,11 +455,13 @@ export class QuestionDialog implements Component, Focusable {
     // OmO's shape: `→` on the open tab, `✓` after an answered one, Submit last, two spaces or more apart.
     const tab = (text: string, open: boolean, color: "success" | "muted" | "dim") =>
       open ? t.bg("selectedBg", t.fg("text", `→ ${text}`)) : t.fg(color, text);
-    const tabs = this.questions.map((q, i) => {
+    const shown = this.shown();
+    const tabs = this.questions.flatMap((q, i) => {
+      if (!shown[i]) return [];
       const answered = !!this.slots[i]!.choice;
-      return tab(`${clipHeader(q.header || `Q${i + 1}`)}${answered ? " ✓" : ""}`, i === this.tab, answered ? "success" : "muted");
+      return [tab(`${clipHeader(q.header || `Q${i + 1}`)}${answered ? " ✓" : ""}`, i === this.tab, answered ? "success" : "muted")];
     });
-    tabs.push(tab("Submit", this.onReview(), this.slots.every((s) => s.choice) ? "success" : "dim"));
+    tabs.push(tab("Submit", this.onReview(), this.slots.every((s, i) => !shown[i] || s.choice) ? "success" : "dim"));
     return tabs.join("   ");
   }
 
@@ -569,7 +584,9 @@ export class QuestionDialog implements Component, Focusable {
   private review(width: number): string[] {
     const t = this.theme;
     const out = [` ${t.bold(t.fg("accent", "Review your answers"))}`, ""];
+    const shown = this.shown();
     this.questions.forEach((q, i) => {
+      if (!shown[i]) return;
       const slot = this.slots[i]!;
       const a = makeAnswer(this.questions, i, slot.choice, slot.note);
       const value =

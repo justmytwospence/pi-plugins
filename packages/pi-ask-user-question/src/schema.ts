@@ -3,7 +3,10 @@
 import { type Static, Type } from "typebox";
 
 export const TOOL_NAME = "ask_user_question";
+/** Questions shown no matter what is answered. */
 export const MAX_QUESTIONS = 4;
+/** Questions in all, counting follow-ups that `showIf` may keep hidden. */
+export const MAX_TOTAL_QUESTIONS = 6;
 export const MIN_OPTIONS = 2;
 export const MAX_OPTIONS = 4;
 /** The free-text row appended to every question. */
@@ -26,6 +29,23 @@ export const OptionSchema = Type.Object({
   ),
 });
 
+export const ShowIfSchema = Type.Object(
+  {
+    header: Type.String({
+      description: "The header of an earlier question in this call that decides whether this one is shown.",
+    }),
+    answers: Type.Array(Type.String(), {
+      minItems: 1,
+      description:
+        "Option labels of that earlier question. This question is shown only if the user picked one of them (for a multiSelect question: selected any of them). Answers typed in the user's own words never match.",
+    }),
+  },
+  {
+    description:
+      "Make this a follow-up: ask it only when an earlier question was answered with one of the given options. Hidden follow-ups are left out of the answers.",
+  },
+);
+
 export const QuestionSchema = Type.Object({
   question: Type.String({
     description:
@@ -45,17 +65,19 @@ export const QuestionSchema = Type.Object({
       description: "Set to true to allow the user to select multiple options instead of just one. Use when choices are not mutually exclusive.",
     }),
   ),
+  showIf: Type.Optional(ShowIfSchema),
 });
 
 export const ParamsSchema = Type.Object({
   questions: Type.Array(QuestionSchema, {
     minItems: 1,
-    maxItems: MAX_QUESTIONS,
-    description: `Questions to ask the user (1-${MAX_QUESTIONS} questions)`,
+    maxItems: MAX_TOTAL_QUESTIONS,
+    description: `Questions to ask the user (1-${MAX_QUESTIONS} questions, plus up to ${MAX_TOTAL_QUESTIONS} in all when some are showIf follow-ups)`,
   }),
 });
 
 export type Option = Static<typeof OptionSchema>;
+export type ShowIf = Static<typeof ShowIfSchema>;
 export type Question = Omit<Static<typeof QuestionSchema>, "multiSelect"> & { multiSelect: boolean };
 export type Params = Static<typeof ParamsSchema>;
 
@@ -67,6 +89,7 @@ export type ErrorCode =
   | "too_many_options"
   | "duplicate_option_label"
   | "reserved_label"
+  | "invalid_show_if"
   | "no_ui";
 
 export const NO_UI_MESSAGE =
@@ -75,15 +98,17 @@ export const NO_UI_MESSAGE =
 /** Plain line endings, a one-line header, and multiSelect filled in. */
 export function normalize(params: Params): Question[] {
   const text = (s: unknown) => String(s ?? "").replace(/\r\n?/gu, "\n");
+  const line = (s: unknown) => text(s).replace(/\s+/gu, " ").trim();
   return (params.questions ?? []).map((q) => ({
     question: text(q.question).trim(),
-    header: text(q.header).replace(/\s+/gu, " ").trim(),
+    header: line(q.header),
     options: (q.options ?? []).map((o) => ({
-      label: text(o.label).replace(/\s+/gu, " ").trim(),
+      label: line(o.label),
       description: text(o.description).trim(),
       ...(o.preview?.trim() ? { preview: text(o.preview) } : {}),
     })),
     multiSelect: q.multiSelect === true,
+    ...(q.showIf ? { showIf: { header: line(q.showIf.header), answers: (q.showIf.answers ?? []).map(line) } } : {}),
   }));
 }
 
@@ -93,7 +118,9 @@ const isReserved = (label: string) => /^(other|type something)\.?$/iu.test(label
 export function validate(questions: readonly Question[]): { error: ErrorCode; message: string } | undefined {
   const fail = (error: ErrorCode, message: string) => ({ error, message: `Error: ${message}` });
   if (questions.length === 0) return fail("no_questions", "ask at least one question.");
-  if (questions.length > MAX_QUESTIONS) return fail("too_many_questions", `ask at most ${MAX_QUESTIONS} questions per call.`);
+  if (questions.length > MAX_TOTAL_QUESTIONS || questions.filter((q) => !q.showIf).length > MAX_QUESTIONS) {
+    return fail("too_many_questions", `ask at most ${MAX_QUESTIONS} questions per call, or ${MAX_TOTAL_QUESTIONS} when some are showIf follow-ups.`);
+  }
   const seen = new Set<string>();
   for (const q of questions) {
     if (seen.has(q.question)) return fail("duplicate_question", `the question "${q.question}" appears twice; each question must be unique.`);
@@ -111,5 +138,35 @@ export function validate(questions: readonly Question[]): { error: ErrorCode; me
       labels.add(o.label);
     }
   }
+  for (const [i, q] of questions.entries()) {
+    if (!q.showIf) continue;
+    const { header, answers } = q.showIf;
+    const earlier = questions.slice(0, i).filter((p) => p.header && p.header === header);
+    if (earlier.length !== 1) {
+      const why = earlier.length ? "more than one earlier question has that header" : "no earlier question has that header";
+      return fail("invalid_show_if", `"${q.question}" has showIf.header "${header}", but ${why}; it must name exactly one question before it.`);
+    }
+    if (answers.length === 0) return fail("invalid_show_if", `"${q.question}" needs at least one label in showIf.answers.`);
+    const labels = earlier[0]!.options.map((o) => o.label);
+    const unknown = answers.find((a) => !labels.includes(a));
+    if (unknown !== undefined) {
+      return fail("invalid_show_if", `"${q.question}" has showIf answer "${unknown}", which is not an option of "${header}" (${labels.map((l) => `"${l}"`).join(", ")}).`);
+    }
+  }
   return undefined;
+}
+
+/**
+ * Which questions are shown, given each question's current answer: a follow-up is shown when the
+ * question it names is shown and was answered with one of its labels (typed answers never match).
+ */
+export function shownQuestions(questions: readonly Question[], picked: ReadonlyArray<readonly string[] | undefined>): boolean[] {
+  const shown: boolean[] = [];
+  questions.forEach((q, i) => {
+    if (!q.showIf) return void shown.push(true);
+    const { header, answers } = q.showIf;
+    const parent = questions.findIndex((p, j) => j < i && p.header === header);
+    shown.push(parent >= 0 && shown[parent]! && (picked[parent] ?? []).some((label) => answers.includes(label)));
+  });
+  return shown;
 }

@@ -1,15 +1,16 @@
 // What the model gets back: Claude Code's answer text ("question"="answer", with the selected
 // preview and the user's notes), and the structured details the transcript renders from.
-import type { ErrorCode, Question } from "./schema.ts";
+import { type ErrorCode, type Question, shownQuestions } from "./schema.ts";
 
-export type AnswerKind = "option" | "custom" | "multi" | "unanswered";
+/** `skipped`: a showIf follow-up whose condition was not met; left out of the answer text. */
+export type AnswerKind = "option" | "custom" | "multi" | "unanswered" | "skipped";
 
 export interface Answer {
   index: number;
   header: string;
   question: string;
   kind: AnswerKind;
-  /** The chosen label, the typed text, or the selected items joined by ", "; null when unanswered. */
+  /** The chosen label, the typed text, or the selected items joined by ", "; null when unanswered or skipped. */
   answer: string | null;
   /** Multi-select: the selected labels, then the typed text if any. */
   selected?: string[];
@@ -56,6 +57,20 @@ export function makeAnswer(questions: readonly Question[], index: number, choice
   return { ...base, kind: "multi", answer: choice.selected.join(", "), selected: choice.selected };
 }
 
+/** A follow-up the user never saw, because the answer it depends on did not call for it. */
+export function skippedAnswer(questions: readonly Question[], index: number): Answer {
+  const q = questions[index]!;
+  return { index, header: q.header, question: q.question, kind: "skipped", answer: null };
+}
+
+/** Which questions are shown, given the choices made so far (typed answers pick no option). */
+export function shownFor(questions: readonly Question[], choices: ReadonlyArray<Choice | undefined>): boolean[] {
+  return shownQuestions(
+    questions,
+    choices.map((c) => (c?.kind === "option" ? [c.label] : c?.kind === "multi" ? c.selected : undefined)),
+  );
+}
+
 export function answerText(a: Answer): string {
   return a.kind === "unanswered" ? "Unanswered" : (a.answer ?? "");
 }
@@ -70,7 +85,8 @@ function segment(a: Answer): string {
 export function envelope(details: Details): string {
   if (details.cancelled) return DECLINED;
   const note = details.note ? ` User notes on all answers: ${details.note}.` : "";
-  return `${PREFIX} ${details.answers.map(segment).join(" ")}${note} ${SUFFIX}`;
+  const answers = details.answers.filter((a) => a.kind !== "skipped");
+  return `${PREFIX} ${answers.map(segment).join(" ")}${note} ${SUFFIX}`;
 }
 
 export function toolResult(details: Details) {

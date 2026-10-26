@@ -9,7 +9,7 @@ plugin: pi-ask-user-question
 - **Use it for:** Ask about a preference or trade-off that cannot be established from project files.
 - **Enable:** Select `packages/pi-ask-user-question/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
 - **Controls:** `ask_user_question`; no slash command or global shortcut. Local choice, note, free-text and Review controls below.
-- **Settings:** No settings file. 1–4 questions, 2–4 options each; `multiSelect` defaults to false; a custom-answer row is automatic.
+- **Settings:** No settings file. 1–4 questions (up to 6 with `showIf` follow-ups), 2–4 options each; `multiSelect` defaults to false; a custom-answer row is automatic.
 - **Requirements, cost & privacy:** TUI or RPC select/input support. No extra inference itself; answers enter normal model context. No user UI means no available questionnaire.
 - **Integrations & limits:** Optional embedded Vim and Herdr blocked state. Headless subagents report decisions as blockers; an answer is not an enforcement policy.
 
@@ -28,6 +28,8 @@ A terminal UI supplies the full questionnaire. An RPC host must support Pi's nat
 ## Tool schema and example
 
 The top-level `questions` array accepts one to four questions. Each question supplies `question`, `header`, and two to four `options`. Each option has a `label` and `description`, with optional Markdown `preview`. `multiSelect` defaults to false.
+
+A question with `showIf` is a follow-up, asked only when an earlier question was answered with one of the listed option labels: `"showIf": { "header": "Auth", "answers": ["OAuth"] }`. It names that question by its header; for a multi-select question any listed label counts, and typed answers never match. A follow-up of a hidden follow-up stays hidden. With follow-ups a call may hold up to six questions, at most four of them without `showIf`. A `showIf` that does not name exactly one earlier question, or lists a label that question does not offer, is rejected.
 
 Example tool arguments:
 
@@ -61,7 +63,7 @@ Keep headers to 12 characters or fewer for legibility. Longer headers are shorte
 
 ## Answer in the terminal
 
-The questionnaire replaces the editor while leaving the transcript above it. Multiple questions have individual tabs and a final Review tab. Completing a question moves to the next unanswered one; a single-question questionnaire submits immediately after answering.
+The questionnaire replaces the editor while leaving the transcript above it. Multiple questions have individual tabs and a final Review tab. Completing a question moves to the next unanswered one. A follow-up's tab and Review row appear only while the answer it depends on calls for it, and disappear again if that answer changes; a single-question questionnaire submits immediately after answering.
 
 | Key | Action |
 | --- | --- |
@@ -86,11 +88,11 @@ For our terminal setup, text owns its keys, highlights do not submit, batches re
 
 ## Results and host differences
 
-The model receives readable answer text beginning `User has answered your questions`, with question-to-answer pairs, selected previews when applicable, and notes. Multi-select labels are joined by commas. Structured result `details` also contain one answer per question, with kinds `option`, `custom`, `multi`, or `unanswered`, plus selections, notes, and previews.
+The model receives readable answer text beginning `User has answered your questions`, with question-to-answer pairs, selected previews when applicable, and notes. Multi-select labels are joined by commas. Structured result `details` also contain one answer per question, with kinds `option`, `custom`, `multi`, `unanswered`, or `skipped` (a follow-up never shown, which the answer text leaves out), plus selections, notes, and previews.
 
 Declining produces `User declined to answer questions`. It is not a tool failure requiring another questionnaire. Blank questions submitted from Review produce `Unanswered`, which is distinct from declining the whole call.
 
-RPC uses one native dialog per question. Single-select offers numbered options followed by free text; multi-select uses a text input accepting option numbers such as `1,3`, or a custom answer. Previews are appended to the question text and limited to 600 characters each. Notes are terminal-only, and dismissing any RPC dialog declines the questionnaire. If the custom terminal UI cannot open, the extension attempts these native dialogs instead.
+RPC uses one native dialog per question. Single-select offers numbered options followed by free text; multi-select uses a text input accepting option numbers such as `1,3`, or a custom answer. Previews are appended to the question text and limited to 600 characters each. Follow-ups are asked only when the answers before them call for them. Notes are terminal-only, and dismissing any RPC dialog declines the questionnaire. If the custom terminal UI cannot open, the extension attempts these native dialogs instead.
 
 ## Optional integrations and limitations
 
