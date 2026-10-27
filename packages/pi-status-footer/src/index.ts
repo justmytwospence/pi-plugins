@@ -751,7 +751,7 @@ function marimoRow(m: MarimoStatus, width: number, theme: Paint): string {
   const time = run?.elapsed ? theme.fg("dim", ` ${run.elapsed}`) : "";
   const deepest = run?.section.split(" › ").pop() ?? "";
   return fitSegments([
-    { text: `${theme.fg("muted", "Marimo")} ${theme.bold(theme.fg("accent", m.notebook))}`, short: theme.bold(theme.fg("accent", m.notebook)), separatorAfter: m.where ? " " : undefined, priority: 90 },
+    { text: `${theme.fg("muted", "Marimo")} ${theme.bold(theme.fg("accent", m.notebook))}`, short: theme.bold(theme.fg("accent", m.notebook)), separatorAfter: m.where ? (m.where.startsWith(":") ? "" : " ") : undefined, priority: 90 },
     { text: m.where ? theme.fg("dim", m.where) : "", priority: 75 },
     { text: run ? `${theme.fg("warning", "running")} ${run.section}${time}` : "",
       short: run ? `${theme.fg("warning", "running")} ${truncateToWidth(deepest, 30)}${time}` : "", priority: 100 },
