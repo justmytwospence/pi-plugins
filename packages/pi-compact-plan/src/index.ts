@@ -78,11 +78,11 @@ export default function piCompactPlan(pi: ExtensionAPI) {
   /** Drafts of this process and recorded outcomes, by entry id, for the transcript renderer. */
   const states = new Map<string, DraftState>();
 
-  pi.registerEntryRenderer<DraftEntry>(ENTRY, (entry, _options, theme) => {
+  pi.registerEntryRenderer<DraftEntry>(ENTRY, (entry, options, theme) => {
     const data = entry.data;
     if (!data?.id || typeof data.draft !== "string") return undefined;
     const fallback: DraftState = { goal: data.goal ?? "", draft: data.draft, status: "cancelled" };
-    return new DraftView(() => states.get(data.id) ?? fallback, theme);
+    return new DraftView(() => states.get(data.id) ?? fallback, theme, () => options.expanded);
   });
   // The outcome is state for the draft's block, not a block of its own.
   pi.registerEntryRenderer(OUTCOME_ENTRY, () => undefined);
@@ -405,9 +405,9 @@ export default function piCompactPlan(pi: ExtensionAPI) {
           }
           continue;
         }
+        // The card's status line says so; no notification on top.
         state.status = "cancelled";
         record();
-        ctx.ui.notify("Compaction cancelled", "info");
         return;
       }
 

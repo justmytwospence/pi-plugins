@@ -1,18 +1,17 @@
 # pi-compact-plan
 
-A Pi extension that turns compaction into a small plan. Run `/compact-plan <what you will do next>`: the session asks a question or two only when an answer changes what the summary must keep, then drafts focus instructions. The draft is shown in the transcript like a plan waiting for approval, with the review under it: compact with it, edit it (in the suite's editor, so pi-vim works there), tell the session what to change, or cancel. With pi-ask-user-question loaded, the questions and the review are its dialog, with typed answers and notes; otherwise Pi's selects.
+A Pi extension that turns compaction into a small plan. Run `/compact-plan <what you will do next>`: the session asks a question or two only when an answer changes what the summary must keep, then drafts focus instructions. The draft is shown in the transcript on the same review card pi-plan-mode draws plans with, with the review under it: compact with it, edit it (in the suite's editor, so pi-vim works there), tell the session what to change, or cancel. With pi-ask-user-question loaded, the questions and the review are its dialog, with typed answers and notes; otherwise Pi's selects.
 
 Example draft (illustration, not a screenshot):
 
 ```
- Compaction focus · wire the retry into the CLI
-
+ Compaction plan review
  - Next task: wire retry() from src/net/retry.ts into the CLI's fetch command
  - Preserve verbatim: backoff is 2^n * 250ms capped at 8s; ...
  - Preserve briefly: why the old wrapper was removed
  - Drop: the caching tangent, the passing test runs
 
- Waiting for approval
+ Waiting for approval · next: wire the retry into the CLI
 ```
 
 The drafting is a side request to the session's model, outside the session. Where the API allows, it reuses the session's last provider request byte for byte, so the conversation is read from the prompt cache.

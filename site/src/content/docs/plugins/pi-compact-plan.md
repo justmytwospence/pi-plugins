@@ -19,17 +19,16 @@ plugin: pi-compact-plan
 
 1. `/compact-plan wire the retry into the CLI` (or `/compact-plan`, then type the goal).
 2. The session's model reads the conversation and your goal. If an answer would change what the summary keeps (an abandoned approach, a side issue), it asks up to 3 questions, then revises the draft with your answers. With pi-ask-user-question loaded they are its dialog: options with descriptions, `Type something.` for your own answer, `n` to add a note to an option, and a Review tab (with a note on all answers) when there are several. Without it, each is a Pi select with `Type your own answer` and `Skip this question`.
-3. The draft appears in the transcript the way plan mode shows a plan waiting for approval, with the review under it (here pi-ask-user-question's dialog):
+3. The draft appears in the transcript as the same review card plan mode draws a plan with (`Compaction plan review` on the tool background, the focus, then `Waiting for approval`), with the review under it (here pi-ask-user-question's dialog):
 
 ```
- Compaction focus · wire the retry into the CLI
-
+ Compaction plan review
  - Next task: wire retry() from src/net/retry.ts into the CLI's fetch command
  - Preserve verbatim: backoff is 2^n * 250ms capped at 8s (agreed: no jitter in tests)
  - Preserve briefly: why the old wrapper was removed
  - Drop: the caching tangent, the passing test runs
 
- Waiting for approval
+ Waiting for approval · next: wire the retry into the CLI
 
  Ask user ·  Compaction  ───────────────────────────────────────────
  Compact with this focus? Or type what should change.
@@ -42,7 +41,7 @@ plugin: pi-compact-plan
 
 *Example, not a screenshot.*
 
-4. **Yes** compacts with the draft; a note on it (`n`) is added to the focus as an `Also:` line. **Edit the focus** opens the draft in the suite's editor (Normal mode with pi-vim): Enter or `:w` saves, Escape in Normal mode or `:q` discards. **Type something.** (or, with Pi's select, **No, change it**) tells the session what to change, and it revises the draft. **Cancel** or Escape leaves the session as it was. After compacting, the status line becomes `✓ Compacted with this focus`, with how much of the drafting input came from the prompt cache, and your goal is placed in the empty prompt editor so you can send it next.
+4. **Yes** compacts with the draft; a note on it (`n`) is added to the focus as an `Also:` line. **Edit the focus** opens the draft in the suite's editor (Normal mode with pi-vim): Enter or `:w` saves, Escape in Normal mode or `:q` discards. **Type something.** (or, with Pi's select, **No, change it**) tells the session what to change, and it revises the draft. **Cancel** or Escape leaves the session as it was. After compacting, the card turns green and reads `Compaction plan` and `✓ Compacted with this focus`, with how much of the drafting input came from the prompt cache; a decided focus longer than 12 lines folds until you expand the transcript (ctrl+o). Your goal is placed in the empty prompt editor so you can send it next.
 
 The draft block is a session entry that is never sent to the model; the outcome is recorded with it, so a resumed session draws the same block.
 

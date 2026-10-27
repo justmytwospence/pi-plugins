@@ -18,6 +18,7 @@ const identical = [
   ['pi-ask-user-question','pi-copy','pi-tool-gate'].map(p => `packages/${p}/src/herdr.ts`),
   ['pi-plan-mode','pi-compact-plan'].map(p => `packages/${p}/src/editor-contract.ts`),
   ['pi-plan-mode','pi-compact-plan'].map(p => `packages/${p}/src/herdr-blocked.ts`),
+  ['pi-plan-mode','pi-compact-plan'].map(p => `packages/${p}/src/review-card.ts`),
 ];
 for (const group of identical) {
   const expected = readFileSync(resolve(root, group[0]), 'utf8');

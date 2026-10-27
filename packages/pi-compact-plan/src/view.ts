@@ -1,10 +1,12 @@
-// The draft in the transcript, drawn as plan mode draws a plan waiting for approval: the text as
-// Markdown, a blank line, then one status line ("Waiting for approval", "✓ Compacted with this
-// focus", "Cancelled"). The entry is a custom session entry (never sent to the model) appended once
-// per /compact-plan run; edits and revisions update it in memory while you review, and the outcome
-// entry records the final text and status so a reloaded session draws the same thing.
+// The draft in the transcript, drawn with the suite's review card (review-card.ts, shared with
+// pi-plan-mode), so it looks like a plan waiting for approval: "Compaction plan review" on the
+// tool background, the focus as Markdown, then the status ("Waiting for approval", "✓ Compacted
+// with this focus", "Cancelled"). The entry is a custom session entry (never sent to the model)
+// appended once per /compact-plan run; edits and revisions update it in memory while you review,
+// and the outcome entry records the final text and status so a reloaded session draws the same.
 import { getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
-import { type Component, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
+import { type Component, Markdown } from "@earendil-works/pi-tui";
+import { type ReviewStatus, reviewBody, reviewCard } from "./review-card.ts";
 
 export const ENTRY = "compact-plan";
 export const OUTCOME_ENTRY = "compact-plan-outcome";
@@ -32,50 +34,50 @@ export interface OutcomeEntry extends DraftState {
   id: string;
 }
 
-export function statusLine(state: DraftState, theme: Theme): string {
-  const stats = state.tokens ? theme.fg("dim", ` · drafting read ${state.tokens.toLocaleString("en-US")} tokens, ${state.cached ?? 0}% from cache`) : "";
+/** The card's status line: what happened, then the goal and (once compacted) the drafting cost. */
+export function reviewStatus(state: DraftState): ReviewStatus {
+  const parts = [state.goal ? `next: ${state.goal.replace(/\s+/gu, " ")}` : ""];
+  if (state.status === "compacted" && state.tokens) {
+    parts.push(`drafting read ${state.tokens.toLocaleString("en-US")} tokens, ${state.cached ?? 0}% cached`);
+  }
+  const context = parts.filter(Boolean).join(" · ") || undefined;
   switch (state.status) {
     case "drafting":
-      return theme.fg("muted", "Revising…");
+      return { tone: "pending", text: "Revising…", context };
     case "pending":
-      return theme.fg("muted", "Waiting for approval");
+      return { tone: "pending", text: "Waiting for approval", context };
     case "compacting":
-      return theme.fg("muted", "Compacting…");
+      return { tone: "pending", text: "Compacting…", context };
     case "compacted":
-      return theme.fg("success", `✓ Compacted with this focus${state.edited ? " (edited)" : ""}`) + stats;
+      return { tone: "success", text: `✓ Compacted with this focus${state.edited ? " (edited)" : ""}`, context };
     case "cancelled":
-      return theme.fg("warning", "Cancelled");
+      return { tone: "warning", text: "Cancelled", context };
     case "failed":
-      return theme.fg("error", `Compaction failed${state.error ? `: ${state.error}` : ""}`);
+      return { tone: "error", text: `Compaction failed${state.error ? `: ${state.error}` : ""}`, context };
   }
 }
 
-/** The transcript block: title, the draft as Markdown, then the status. Reads its state at render time. */
+/** The transcript card. Reads its state at render time, so edits and outcomes show as they happen. */
 export class DraftView implements Component {
-  private cache: { width: number; text: string; lines: string[] } | undefined;
+  private cache: { key: string; lines: string[] } | undefined;
 
   constructor(
     private readonly state: () => DraftState,
     private readonly theme: Theme,
+    private readonly expanded: () => boolean = () => false,
   ) {}
 
   render(width: number): string[] {
     const state = this.state();
-    const title = new Text(
-      this.theme.fg("accent", this.theme.bold("Compaction focus")) + (state.goal ? this.theme.fg("dim", ` · ${state.goal.replace(/\s+/gu, " ")}`) : ""),
-      1,
-      0,
-    );
-    if (this.cache?.width !== width || this.cache.text !== state.draft) {
-      this.cache = { width, text: state.draft, lines: new Markdown(state.draft, 1, 0, getMarkdownTheme()).render(width) };
+    const status = reviewStatus(state);
+    const expanded = this.expanded();
+    const key = JSON.stringify([width, state.draft, status, expanded]);
+    if (this.cache?.key !== key) {
+      const body = reviewBody(this.theme, state.draft, status, { expanded }, (text) => new Markdown(text, 0, 0, getMarkdownTheme()));
+      const title = status.tone === "pending" ? "Compaction plan review" : "Compaction plan";
+      this.cache = { key, lines: reviewCard(this.theme, title, body, status.tone).render(width) };
     }
-    return [
-      ...title.render(width),
-      ...new Spacer(1).render(width),
-      ...this.cache.lines,
-      ...new Spacer(1).render(width),
-      ...new Text(statusLine(state, this.theme), 1, 0).render(width),
-    ];
+    return this.cache.lines;
   }
 
   invalidate(): void {
