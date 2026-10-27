@@ -8,7 +8,7 @@ plugin: pi-compact-plan
 
 - **Use it for:** Compacting with focus instructions that keep what your next task needs, without writing them from scratch.
 - **Enable:** Select `packages/pi-compact-plan/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
-- **Controls:** `/compact-plan [what you will do next]`. Without an argument it asks; leave that empty to let the session infer the next step. Under the draft: compact with it, edit it, tell the session what to change, or cancel. Escape stops a request in flight.
+- **Controls:** `/compact-plan [what you will do next]`. Without an argument it asks; leave that empty to let the session infer the next step. Under the draft: compact with it, compact and continue, edit it, tell the session what to change, or cancel. Escape stops a request in flight.
 - **Settings:** None.
 - **Requirements, cost & privacy:** Pi 1.2+ with a UI. One request to the session's model (two if you answer its questions), sending the session's context; on supported APIs it reuses the session's last request so the context is read from the prompt cache.
 - **Integrations & limits:** Plain `/compact [instructions]` is unchanged. With [Ask a question](/plugins/pi-ask-user-question/) loaded, the questions and the review use its dialog (typed answers, notes, Review tab); otherwise Pi's selects. Text fields use the suite's editor, so [Vim editing](/plugins/pi-vim/) works in them when it is loaded. Its dialogs hold Herdr's blocked state, and its requests the working state. A request gives up after 3 minutes.
@@ -33,15 +33,16 @@ plugin: pi-compact-plan
  Ask user ·  Compaction  ───────────────────────────────────────────
  Compact with this focus? Or type what should change.
  → 1. Yes, compact with it · Compact now. A note on this option is added to the focus.
-   2. Edit the focus · Open the draft in the editor. A note on this option is added to it first.
-   3. Cancel · Leave the session as it is.
-   4. Type something.
+   2. Yes, compact and continue · Compact, then send the next step so the session keeps working. A note is added to the focus.
+   3. Edit the focus · Open the draft in the editor. A note on this option is added to it first.
+   4. Cancel · Leave the session as it is.
+   5. Type something.
  n note  ↑↓ navigate  enter select  escape/ctrl+c cancel
 ```
 
 *Example, not a screenshot.*
 
-4. **Yes** compacts with the draft; a note on it (`n`) is added to the focus as an `Also:` line. **Edit the focus** opens the draft in the suite's editor (Normal mode with pi-vim): Enter or `:w` saves, Escape in Normal mode or `:q` discards. **Type something.** (or, with Pi's select, **No, change it**) tells the session what to change, and it revises the draft. **Cancel** or Escape leaves the session as it was. After compacting, the card turns green and reads `Compaction plan` and `✓ Compacted with this focus`, with how much of the drafting input came from the prompt cache; a decided focus longer than 12 lines folds until you expand the transcript (ctrl+o). Your goal is placed in the empty prompt editor so you can send it next.
+4. **Yes** compacts with the draft; a note on it (`n`) is added to the focus as an `Also:` line. **Yes, compact and continue** does the same, then sends your goal (or `Continue with the next step.` when you gave none) as the next prompt, so the session keeps working without you. **Edit the focus** opens the draft in the suite's editor (Normal mode with pi-vim): Enter or `:w` saves, Escape in Normal mode or `:q` discards. **Type something.** (or, with Pi's select, **No, change it**) tells the session what to change, and it revises the draft. **Cancel** or Escape leaves the session as it was. After compacting, the card turns green and reads `Compaction plan` and `✓ Compacted with this focus`, with how much of the drafting input came from the prompt cache; a decided focus longer than 12 lines folds until you expand the transcript (ctrl+o). After a plain **Yes**, your goal is placed in the empty prompt editor so you can send it next.
 
 The draft block is a session entry that is never sent to the model; the outcome is recorded with it, so a resumed session draws the same block.
 

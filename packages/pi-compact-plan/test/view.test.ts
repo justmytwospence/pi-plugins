@@ -42,6 +42,7 @@ describe("DraftView", () => {
   it("names every status", () => {
     const base = { goal: "", draft: "" };
     expect(reviewStatus({ ...base, status: "drafting" })).toEqual({ tone: "pending", text: "Revising…", context: undefined });
+    expect(reviewStatus({ ...base, status: "compacted", continued: true }).text).toBe("✓ Compacted with this focus, continuing");
     expect(reviewStatus({ ...base, status: "cancelled" }).tone).toBe("warning");
     expect(reviewStatus({ ...base, status: "failed", error: "boom" })).toMatchObject({ tone: "error", text: "Compaction failed: boom" });
   });

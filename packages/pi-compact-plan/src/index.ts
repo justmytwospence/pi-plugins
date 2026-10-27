@@ -25,13 +25,16 @@ export const WIDGET = "compact-plan";
 export const WRITE_OWN = "Type your own answer";
 export const SKIP = "Skip this question";
 export const APPROVE = "Yes, compact with it";
+export const CONTINUE = "Yes, compact and continue";
+/** Sent after compacting when the user chose to continue without stating a goal. */
+export const CONTINUE_PROMPT = "Continue with the next step.";
 export const EDIT = "Edit the focus";
 export const CHANGE = "No, change it";
 export const CANCEL = "Cancel";
 export const REVIEW_QUESTION = "Compact with this focus?";
 
 type Review =
-  | { action: "approve" | "edit"; note?: string }
+  | { action: "approve" | "continue" | "edit"; note?: string }
   | { action: "change"; feedback: string }
   | { action: "cancel" | "none" };
 const TIMEOUT_MS = 180_000;
@@ -278,6 +281,7 @@ export default function piCompactPlan(pi: ExtensionAPI) {
         header: "Compaction",
         options: [
           { label: APPROVE, description: "Compact now. A note on this option is added to the focus." },
+          { label: CONTINUE, description: "Compact, then send the next step so the session keeps working. A note is added to the focus." },
           { label: EDIT, description: "Open the draft in the editor. A note on this option is added to it first." },
           { label: CANCEL, description: "Leave the session as it is." },
         ],
@@ -289,13 +293,15 @@ export default function piCompactPlan(pi: ExtensionAPI) {
         const note = a.notes?.trim() || undefined;
         if (a.kind === "custom" && a.answer) return { action: "change", feedback: note ? `${a.answer}\n${note}` : a.answer };
         if (a.answer === APPROVE) return { action: "approve", note };
+        if (a.answer === CONTINUE) return { action: "continue", note };
         if (a.answer === EDIT) return { action: "edit", note };
         if (a.kind === "unanswered" && note) return { action: "change", feedback: note };
         return { action: "cancel" };
       }
     }
-    const choice = await waiting(REVIEW_QUESTION, () => ctx.ui.select(REVIEW_QUESTION, [APPROVE, EDIT, CHANGE, CANCEL]));
+    const choice = await waiting(REVIEW_QUESTION, () => ctx.ui.select(REVIEW_QUESTION, [APPROVE, CONTINUE, EDIT, CHANGE, CANCEL]));
     if (choice === APPROVE) return { action: "approve" };
+    if (choice === CONTINUE) return { action: "continue" };
     if (choice === EDIT) return { action: "edit" };
     if (choice === CHANGE) {
       const feedback = (await waiting("What should change?", () => askText(pi, ctx, "What should change?")))?.trim();
@@ -371,11 +377,15 @@ export default function piCompactPlan(pi: ExtensionAPI) {
         state.status = "pending";
         const review = await reviewChoice(ctx);
         if (review.action === "none") continue;
-        if ((review.action === "approve" || review.action === "edit") && review.note) {
+        if ((review.action === "approve" || review.action === "continue" || review.action === "edit") && review.note) {
           state.draft = `${state.draft}\n- **Also:** ${review.note.replace(/\s*\n\s*/gu, " ")}`;
           state.edited = true;
         }
         if (review.action === "approve") break;
+        if (review.action === "continue") {
+          state.continued = true;
+          break;
+        }
         if (review.action === "edit") {
           const edited = await waiting("Edit the compaction focus", () =>
             askText(pi, ctx, "Edit the compaction focus", { initial: state.draft, hint: "enter save · esc in normal mode (or :q) discard changes" }),
@@ -420,7 +430,8 @@ export default function piCompactPlan(pi: ExtensionAPI) {
         onComplete: () => {
           state.status = "compacted";
           record();
-          if (goal && !ctx.ui.getEditorText().trim()) ctx.ui.setEditorText(goal);
+          if (state.continued) pi.sendUserMessage(goal || CONTINUE_PROMPT);
+          else if (goal && !ctx.ui.getEditorText().trim()) ctx.ui.setEditorText(goal);
         },
         onError: (error) => {
           state.status = "failed";

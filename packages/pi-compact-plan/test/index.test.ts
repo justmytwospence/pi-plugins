@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import piCompactPlan, { APPROVE, CANCEL, CHANGE, COMMAND, EDIT, messagesSince, SKIP, WRITE_OWN } from "../src/index.ts";
+import piCompactPlan, { APPROVE, CANCEL, CHANGE, COMMAND, CONTINUE, CONTINUE_PROMPT, EDIT, messagesSince, SKIP, WRITE_OWN } from "../src/index.ts";
 import { ENTRY, OUTCOME_ENTRY } from "../src/view.ts";
 
 const SYSTEM = "You are pi, a coding agent.";
@@ -29,7 +29,9 @@ function setup(options: { replies: string[]; ui?: Partial<Record<string, any>>; 
     registerEntryRenderer: () => undefined,
     appendEntry: (customType: string, data: any) => entries.push({ customType, data: structuredClone(data) }),
     events: { emit: () => undefined, on: () => () => undefined },
+    sendUserMessage: (text: string) => sent.push(text),
   };
+  const sent: string[] = [];
   const entries: Array<{ customType: string; data: any }> = [];
   piCompactPlan(pi);
 
@@ -89,7 +91,7 @@ function setup(options: { replies: string[]; ui?: Partial<Record<string, any>>; 
   const mainPayload = { model: model.id, system: [{ type: "text", text: SYSTEM }], tools: [{ name: "bash" }], messages: [{ role: "user", content: [{ type: "text", text: "fix the bug" }] }] };
   const sendMain = () => handlers.get("before_provider_request")?.forEach((h) => h({ payload: mainPayload }, ctx));
   const run = (args: string) => commands.get(COMMAND).handler(args, ctx);
-  return { run, sendMain, requests, notes, compacts, handlers, ctx, entries, pi, getEditor: () => editorText };
+  return { run, sendMain, requests, notes, compacts, handlers, ctx, entries, pi, sent, getEditor: () => editorText };
 }
 
 const json = (draft: string, questions: unknown[] = []) => JSON.stringify({ questions, draft });
@@ -187,6 +189,24 @@ describe("/compact-plan", () => {
     expect(t.compacts[0].customInstructions).toBe("D2");
   });
 
+  it("compacts and continues with the goal, or a generic prompt without one", async () => {
+    const t = setup({ replies: [json("D")], ui: { select: review(CONTINUE) } });
+    await t.run("ship it");
+    expect(t.compacts[0].customInstructions).toBe("D");
+    expect(t.sent).toEqual(["ship it"]);
+    expect(t.getEditor()).toBe("");
+    expect(t.entries.at(-1)!.data).toMatchObject({ status: "compacted", continued: true });
+    const u = setup({ replies: [json("D")], ui: { select: review(CONTINUE), input: async () => "" } });
+    await u.run("");
+    expect(u.sent).toEqual([CONTINUE_PROMPT]);
+  });
+
+  it("does not send anything after a plain approve", async () => {
+    const t = setup({ replies: [json("D")] });
+    await t.run("ship it");
+    expect(t.sent).toEqual([]);
+  });
+
   it("keeps the draft when a revision fails", async () => {
     const t = setup({ replies: [json("D1"), ""], ui: { select: review(CHANGE, APPROVE), input: async () => "x" } });
     await t.run("next");
@@ -271,7 +291,7 @@ describe("/compact-plan with pi-ask-user-question's dialog", () => {
     ]);
     await t.run("next");
     expect(calls[0].params.questions[0]).toMatchObject({ question: "Keep A?", header: "Approach A", multiSelect: false });
-    expect(calls[1].params.questions[0].options.map((o: any) => o.label)).toEqual([APPROVE, EDIT, CANCEL]);
+    expect(calls[1].params.questions[0].options.map((o: any) => o.label)).toEqual([APPROVE, CONTINUE, EDIT, CANCEL]);
     const refine = t.requests[1]!.context.messages.at(-1).content[0].text;
     expect(refine).toContain("A: Drop\nNote: but keep its test");
     expect(refine).toContain("Note: be brief");

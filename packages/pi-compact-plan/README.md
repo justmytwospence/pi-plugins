@@ -1,6 +1,6 @@
 # pi-compact-plan
 
-A Pi extension that turns compaction into a small plan. Run `/compact-plan <what you will do next>`: the session asks a question or two only when an answer changes what the summary must keep, then drafts focus instructions. The draft is shown in the transcript on the same review card pi-plan-mode draws plans with, with the review under it: compact with it, edit it (in the suite's editor, so pi-vim works there), tell the session what to change, or cancel. With pi-ask-user-question loaded, the questions and the review are its dialog, with typed answers and notes; otherwise Pi's selects.
+A Pi extension that turns compaction into a small plan. Run `/compact-plan <what you will do next>`: the session asks a question or two only when an answer changes what the summary must keep, then drafts focus instructions. The draft is shown in the transcript on the same review card pi-plan-mode draws plans with, with the review under it: compact with it, compact and keep going (it sends your goal as the next prompt), edit it (in the suite's editor, so pi-vim works there), tell the session what to change, or cancel. With pi-ask-user-question loaded, the questions and the review are its dialog, with typed answers and notes; otherwise Pi's selects.
 
 Example draft (illustration, not a screenshot):
 

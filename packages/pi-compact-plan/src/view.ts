@@ -18,6 +18,8 @@ export interface DraftState {
   draft: string;
   status: Status;
   edited?: boolean;
+  /** Approved with "compact and continue": the next step is sent once compacted. */
+  continued?: boolean;
   /** Drafting input tokens, and the share read from the prompt cache (0-100). */
   tokens?: number;
   cached?: number;
@@ -49,7 +51,7 @@ export function reviewStatus(state: DraftState): ReviewStatus {
     case "compacting":
       return { tone: "pending", text: "Compacting…", context };
     case "compacted":
-      return { tone: "success", text: `✓ Compacted with this focus${state.edited ? " (edited)" : ""}`, context };
+      return { tone: "success", text: `✓ Compacted with this focus${state.edited ? " (edited)" : ""}${state.continued ? ", continuing" : ""}`, context };
     case "cancelled":
       return { tone: "warning", text: "Cancelled", context };
     case "failed":
