@@ -4,6 +4,10 @@
 // the tool and report nothing.
 //
 // - `bg` pane token: background work that will wake the agent (activity.ts).
+// - `wait` pane token: what a turn is kept open only to wait on (pi-bg's bg_wait, or its wait for a
+//   job at the turn's end), from `herdr:waiting { active, label, id }` holds. herdr still shows the
+//   pane working; a client that reads the token (herdr-web-ui's HERDR_WEB_WAIT_TOKEN) knows that
+//   typing now ends the wait, as it does in the terminal.
 // - The pane's title (session name or first prompt; also the token `task`) and displayed agent
 //   name (`pi opus-5-5:xhigh`) (identity.ts).
 // - The event-bus bridge other extensions use instead of talking to herdr (bridge.ts).
@@ -93,6 +97,9 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
   const pane = new PaneReporter(call, target.paneId);
   const bridge = new Bridge(call, pane);
   const activity = new ActivityBadges();
+  /** Open `herdr:waiting` holds, id to label, oldest first. */
+  const waits = new Map<string, string>();
+  let anonymousWaits = 0;
   /** Tokens other extensions set before the session started. */
   const pendingTokens = new Map<string, TokenEvent>();
 
@@ -143,6 +150,10 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
 
   const updateBg = () => {
     if (active) void pane.setToken("bg", activity.token(), BG_TTL_MS);
+  };
+  /** The newest wait's label, the one the terminal shows. */
+  const updateWait = () => {
+    if (active) void pane.setToken("wait", [...waits.values()].at(-1), BG_TTL_MS);
   };
 
   const updateIdentity = (ctx?: ExtensionContext) => {
@@ -271,6 +282,19 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
       updateBg();
     });
   }
+  pi.events.on("herdr:waiting", (e) => {
+    const hold = e as HoldEvent | undefined;
+    if (hold?.active) {
+      waits.delete(hold.id ?? "");
+      waits.set(hold.id ?? `anonymous:${++anonymousWaits}`, hold.label?.trim() || "background work");
+    } else if (hold?.id !== undefined) waits.delete(hold.id);
+    else {
+      // A release without an id ends the oldest hold, as on the activity channels.
+      const oldest = waits.keys().next();
+      if (!oldest.done) waits.delete(oldest.value);
+    }
+    updateWait();
+  });
   pi.events.on("recap:session-name", (e) => {
     const name = (e as { name?: unknown } | undefined)?.name;
     recapName = typeof name === "string" ? name : undefined;
@@ -365,6 +389,7 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     for (const t of pendingTokens.values()) void bridge.token(t);
     pendingTokens.clear();
     updateBg();
+    updateWait();
     updateIdentity(ctx);
 
     restoreBranch(ctx);

@@ -170,13 +170,14 @@ Everything below goes through `pi.events`; each sibling is optional, and with no
 
 ### pi-herdr
 
-Inside Herdr with [pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/), pi-bg holds `herdr:background` while an agent job that will wake the agent runs, which pi-herdr shows as the pane token `$bg` once the agent is idle with the job still running (after an interrupted wait). A task you started with `/tasks run`, or a kept service, sends a Herdr notification when it ends (skipped while the pane is focused), and `f` in `/tasks` follows a log in a split. Herdr's own Pi integration still owns the pane's working/idle state.
+Inside Herdr with [pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/), pi-bg holds `herdr:background` while an agent job that will wake the agent runs, which pi-herdr shows as the pane token `$bg` once the agent is idle with the job still running (after an interrupted wait). A task you started with `/tasks run`, or a kept service, sends a Herdr notification when it ends (skipped while the pane is focused), and `f` in `/tasks` follows a log in a split. While a turn waits on a job (`bg_wait`, or the wait at the turn's end), pi-bg also holds `herdr:waiting`, which pi-herdr shows as the pane token `$wait`: the pane is working, but typing ends the wait, so a client such as herdr-web-ui can send a message at once instead of queueing it. Herdr's own Pi integration still owns the pane's working/idle state.
 
 ### Event-bus channels
 
 | channel | direction | payload | |
 |---|---|---|---|
 | `herdr:background` | emits | `{ active, label, id }` | held while an agent job that will wake the agent runs (and while its wake-up is owed) |
+| `herdr:waiting` | emits | `{ active, label, id }` | held while a turn waits on jobs (`bg_wait`, or the wait at the turn's end); `label` names them |
 | `herdr:notify` | emits | `{ title, body, sound, unlessFocused }` | a `/tasks run` task or a kept service ended |
 | `herdr:split` | emits | `{ command, cwd, done }` | `f` in `/tasks`: `tail -n 200 -F` on the log |
 | `herdr:probe`, `herdr:ready` | emits / reads | `{ reply }`, `{}` | whether pi-herdr is active (enables `f`) |

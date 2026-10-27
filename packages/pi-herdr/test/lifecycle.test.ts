@@ -152,6 +152,27 @@ test("the summary token: cleared as a run starts, set before settling, and a blo
   await p.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx);
 });
 
+test("the wait token: the newest herdr:waiting hold's label while any is held, cleared with the last", async () => {
+  inHerdr();
+  const { f } = herdr();
+  const p = fakePi();
+  piHerdr(p.pi, { call: f.call, exec: async () => ({ code: 0, stdout: "", stderr: "" }), pollMs: 60_000 });
+  const ctx = ctxOf([]);
+  // A hold from before the session started is published once it does.
+  p.pi.events.emit("herdr:waiting", { active: true, label: "tests", id: "a" });
+  await p.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  const waits = () => f.of("pane.report_metadata").map((l) => l.params.tokens).filter((t) => t && "wait" in t).map((t) => t.wait);
+  await until(() => waits().length === 1);
+  p.pi.events.emit("herdr:waiting", { active: true, label: "build \u00b7 lint", id: "b" });
+  // The same hold with a new label replaces its own.
+  p.pi.events.emit("herdr:waiting", { active: true, label: "tests \u00b7 e2e", id: "a" });
+  p.pi.events.emit("herdr:waiting", { active: false, id: "a" });
+  p.pi.events.emit("herdr:waiting", { active: false, id: "b" });
+  await until(() => waits().length === 5);
+  expect(waits()).toEqual(["tests", "build \u00b7 lint", "tests \u00b7 e2e", "build \u00b7 lint", null]);
+  await p.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx);
+});
+
 test("with pi-recap answering recap:summary, a settled turn's summary token is its recap, with no model call of its own", async () => {
   inHerdr();
   const { f } = herdr();

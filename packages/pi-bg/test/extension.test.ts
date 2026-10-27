@@ -167,6 +167,9 @@ describe("pi-bg", () => {
       expect(x.working.at(-1)).toBeUndefined();
       // Pi took its indicator down at agent_end: the wait puts it back, and the continued run's turn owns it.
       expect(x.visible).toEqual([true]);
+      // herdr is told the turn only waited, and that the wait is over.
+      const waits = x.emitted.filter((e) => e.channel === "herdr:waiting").map((e) => e.data);
+      expect(waits).toEqual([{ active: true, label: "tests", id: waits[0].id }, { active: false, id: waits[0].id }]);
       for (const h of x.handlers.get("turn_start") ?? []) await h({}, x.ctx);
       for (const h of x.handlers.get("agent_settled") ?? []) await h({}, x.ctx);
       expect(x.visible).toEqual([true]);

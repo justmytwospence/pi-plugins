@@ -33,6 +33,8 @@ Additional requirements depend on the feature:
 
 The `$bg` pane token uses compact icon/count badges: `⑂ 2` for pending subagents, `≡ 1` for planner holds, `↳ 1` for awaited child replies, and `⌘ 1` for jobs/other background holds (examples). Counts of the same kind are combined, without task names or parentheses. Its 90-second TTL is refreshed while held. A pane may correctly show idle while `$bg` counts unfinished work; the token is not a replacement working-state flag.
 
+`$wait` names what a turn kept open only to wait is waiting on (pi-bg's `bg_wait`, or its wait for a job at the turn's end), from `herdr:waiting` holds. The pane stays working, but typing ends the wait, so a client that reads the token can send a message at once instead of queueing it; herdr-web-ui's fork does with `HERDR_WEB_WAIT_TOKEN=wait`, and shows `Waiting on …` in its chat. Same TTL as `$bg`.
+
 The session name you set (not Recap's automatic one), or the first prompt's first line, becomes the pane title and `$task`. The displayed agent name includes model and effort. `$pr` is a space token describing the checkout branch's PR, refreshed at session start, after turns, and every three minutes. Set `PI_HERDR_PR=0` to disable PR reporting.
 
 `$summary` is one line (at most 80 characters) on what the last turn did or what the agent waits on, for notification tools such as herdr-native-notify. As a turn settles, a small model summarizes the prompt, tool calls, and final reply, before Pi reports the turn finished (about 1-2 seconds, capped at 4). A one-line reply is used as is; without a model, or on an error, timeout, or interrupted turn, the reply's first sentence stands in. While a dialog holds `herdr:blocked`, the token is its question (a pending `ask_user_question`'s first question, else the dialog's label). It is cleared as each run starts. With [Recap](/plugins/pi-recap/) loaded, a settled turn's line is Recap's recap instead (one shared request), so the notification matches Recap's idle line above the editor.
@@ -95,7 +97,7 @@ Interactive children are also an activity source for `/tasks` and FleetView (or 
 
 ## Optional bridge integrations
 
-Sibling plugins communicate through `pi.events`; they need no direct Herdr client. The bridge accepts `herdr:background` and `herdr:working` holds, `herdr:token`, `herdr:notify`, `herdr:zoom`, `herdr:split`, and `herdr:probe`. It emits `herdr:ready` so earlier token publishers can resend state.
+Sibling plugins communicate through `pi.events`; they need no direct Herdr client. The bridge accepts `herdr:background`, `herdr:working` and `herdr:waiting` holds, `herdr:token`, `herdr:notify`, `herdr:zoom`, `herdr:split`, and `herdr:probe`. It emits `herdr:ready` so earlier token publishers can resend state.
 
 pi-bg uses notifications and log-follow splits; pi-diff-review uses zoom and editor splits; pi-marimo publishes notebook tokens; pi-plan-mode publishes planner holds. These integrations are optional. Without an active bridge, those plugins retain their non-Herdr behavior. `herdr:blocked` is handled by Herdr's own Pi integration, not by this bridge.
 

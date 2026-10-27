@@ -20,6 +20,9 @@
 // Other extensions, through pi.events (all optional; without listeners nothing happens):
 //   emits  herdr:background {active,label,id}  while an agent job runs that will wake the agent
 //                                              (pi-herdr shows it as the pane token $bg)
+//          herdr:waiting {active,label,id}     while a turn is kept open only to wait (bg_wait, or a
+//                                              job at the turn's end); label names what it waits
+//                                              on (pi-herdr shows it as the pane token $wait)
 //          herdr:notify {title,body,sound,unlessFocused}  when a task the user started ends
 //          herdr:split {command,cwd}           /bg's "follow in a herdr split" (when pi-herdr answers herdr:probe)
 //          bg:tasks {tasks}                    a snapshot after every change (with `progress` when known)
@@ -167,6 +170,8 @@ export default function piBg(pi: ExtensionAPI) {
   const noteOf = (t: Task): Annotation | undefined => (t.status === "running" ? annotations.get(t.id) : undefined);
   const waiters = new Set<Waiter>();
   const waitingMessages = new Map<string, string>();
+  /** The same waits' `herdr:waiting` labels (what they wait on), by owner. */
+  const waitingNames = new Map<string, string>();
   /** Ids whose herdr:background hold is active. */
   const holds = new Set<string>();
   let ctx: ExtensionContext | undefined;
@@ -595,10 +600,11 @@ export default function piBg(pi: ExtensionAPI) {
 
   /**
    * The `Waiting on …` working message for one wait: pi's native message, and the same claim on
-   * the optional footer's channel (working-message.ts). `set()` paints or refreshes it; `release()`
-   * clears it and paints whatever other wait remains.
+   * the optional footer's channel (working-message.ts), and a `herdr:waiting` hold naming `what`
+   * it waits on. `set()` paints or refreshes it; `release()` clears it and paints whatever other
+   * wait remains.
    */
-  const holdWorking = (c: ExtensionContext, generation: number, label: () => string) => {
+  const holdWorking = (c: ExtensionContext, generation: number, label: () => string, what: () => string) => {
     const owner = `bg-wait/${randomUUID()}`;
     const live = () => attached && generation === sessionGeneration && c.hasUI;
     const paint = () => c.ui.setWorkingMessage([...waitingMessages.values()].at(-1));
@@ -609,9 +615,17 @@ export default function piBg(pi: ExtensionAPI) {
         waitingMessages.set(owner, message);
         paint();
         emit(WORKING_MESSAGE_EVENT, { owner, message });
+        // herdr shows the pane working meanwhile; this says the turn only waits, so typing ends it.
+        // The names alone, not the ticking times: the hold is sent again only when they change.
+        const names = what();
+        if (names !== waitingNames.get(owner)) {
+          waitingNames.set(owner, names);
+          emit("herdr:waiting", { active: true, label: names, id: owner });
+        }
       },
       release: () => {
         const owned = waitingMessages.delete(owner);
+        if (waitingNames.delete(owner)) emit("herdr:waiting", { active: false, id: owner });
         if (!owned || !live()) return;
         try {
           paint();
@@ -654,7 +668,7 @@ export default function piBg(pi: ExtensionAPI) {
     if (c.hasPendingMessages() || !agentJobs().length || [...waiters].some((w) => !w.silent)) return {};
     const generation = sessionGeneration;
     const label = () => agentJobs().map(waitLabel).join(" · ");
-    const working = holdWorking(c, generation, label);
+    const working = holdWorking(c, generation, label, () => agentJobs().map((t) => t.name).join(" · "));
     let ticks = 0;
     let waiter: Waiter | undefined;
     let reason: Reason;
@@ -812,7 +826,9 @@ export default function piBg(pi: ExtensionAPI) {
     yieldedTo.clear();
     for (const w of [...waiters]) w.resolve("aborted");
     for (const owner of waitingMessages.keys()) emit(WORKING_MESSAGE_EVENT, { owner });
+    for (const owner of waitingNames.keys()) emit("herdr:waiting", { active: false, id: owner });
     waitingMessages.clear();
+    waitingNames.clear();
     const activeHolds = [...holds];
     holds.clear();
     try {
@@ -1055,8 +1071,13 @@ export default function piBg(pi: ExtensionAPI) {
         if (!ts.length) return [...targets].map((id) => externals.get(id)?.label ?? id).join(" · ") || "outside work";
         return ts.map(waitLabel).join(" · ");
       };
+      const what = () => {
+        const ts = names();
+        if (!ts.length) return [...targets].map((id) => externals.get(id)?.label ?? id).join(" · ") || "outside work";
+        return ts.map((t) => t.name).join(" · ");
+      };
       const started = Date.now();
-      const working = holdWorking(c, generation, label);
+      const working = holdWorking(c, generation, label, what);
       let ticks = 0;
       let reason: Reason;
       let waiter: Waiter;

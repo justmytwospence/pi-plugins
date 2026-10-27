@@ -94,6 +94,8 @@ pi-bg still paints the native working message directly when the footer is absent
 - `herdr:background`: work expected to wake the agent, such as async subagents or awaited interactive children.
 - `herdr:working`: work outside the main turn, such as planner runs.
 
+pi-herdr also takes `herdr:waiting` holds, outside the collector: a turn kept open only to wait (pi-bg's `bg_wait`, or its wait for a job at the turn's end), published as the `wait` token (the newest hold's label). The pane is working, but input ends the wait; a client reading the token can deliver a message at once.
+
 Acquire with `{ active: true, label, id? }`; release with `{ active: false, id? }`. A release with an ID removes the matching hold on that channel. Without an ID it removes the oldest hold on that channel, so producers should use their own IDs. Repeated acquisitions count separately rather than behaving as an idempotent boolean. [Collector tests](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-herdr/test/core/core.test.ts) cover counting and both release forms.
 
 pi-bg uses `bg:<id>` holds for running agent jobs and outcomes still owed; it does not hold every long-lived service merely because it exists. pi-subagents uses `subagents:<counter>` per async call and releases on success or failure. pi-herdr's children use `child:<name>`.

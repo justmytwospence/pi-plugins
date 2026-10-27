@@ -4,10 +4,11 @@ Maintainer rules for keeping the suite's dialogs, footer and below-editor widget
 
 ## herdr-web-ui compatibility
 
-herdr-web-ui (devswha/herdr-web-ui, `server/prompt.ts`) turns a waiting Pi dialog into a phone card by reading the screen text. It has no configuration hook. Every dialog that holds `herdr:blocked` must keep a layout it can read, or phones fall back to a bare Enter/Esc card:
+herdr-web-ui (devswha/herdr-web-ui, `server/prompt.ts`) turns a waiting Pi dialog into a phone card by reading the screen text. It has no configuration hook for dialogs. Every dialog that holds `herdr:blocked` must keep a layout it can read, or phones fall back to a bare Enter/Esc card:
 
 - **Pi layout** (single-choice questions, tool-gate approvals, plan approval, Review): from the bottom, at most 2 footer lines, a rule, then Pi's key hint ending in `↑↓ navigate  enter select  escape/ctrl+c cancel` (or `enter submit  escape/ctrl+c cancel` under a single `›` input line). Above that a blank line, then one row per option (cursor `→`, single-space labels, cursor on the first row). A wrapped rest of a row goes behind a 1-column `│`. Above that a blank line, then the question.
 - **OmO form** (multi-select questions): an `Ask user` line (here the dialog's titled top border; anything after `Ask user` must follow a ` · `), a tab bar ending in `Submit`, numbered rows indented 2-4, an unnumbered `Type your own answer` line, and a hint starting `↑↓ move  1-9 select  space toggle  enter next` and ending `esc cancel`. No footer line may end in `%`, `$`, `#` or `>`. Number keys toggle, Backspace clears, Tab commits.
+- Message delivery follows herdr's pane status: herdr-web-ui queues or holds a chat message (Send now) while the pane is `working`. pi-bg keeps a turn open while it waits on a job (`bg_wait`, or the wait at the turn's end), where typing in the terminal ends the wait. It holds `herdr:waiting` meanwhile, and pi-herdr publishes the pane token `wait`. Spencer's fork reads it with `HERDR_WEB_WAIT_TOKEN=wait` (homelab `herdr-web`): it types the message at once and its chat says `Waiting on …`. Any new way of keeping a turn open only to wait should hold `herdr:waiting` too.
 - pi-status-footer shrinks to one row while `herdr:blocked` is held, so a pi-bg or subagent activity row still fits in the 2 lines after the hint.
 - Anything drawn on an option row shows up in the phone card's option text, so keep box glyphs and decorations off unchecked rows.
 
