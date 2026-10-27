@@ -97,6 +97,19 @@ export interface StashController {
   submitted(text: string): void;
 }
 
+/**
+ * Optional pi-next-prompt integration: Ctrl+S on an empty main editor with nothing
+ * stashed asks, synchronously over `pi.events`, for the next-prompt suggestion on
+ * screen. An active pi-next-prompt sets `text` and withdraws the suggestion, which
+ * pi-stash then stashes as if it were the draft.
+ */
+export const TAKE_NEXT_CHANNEL = "prompt:take-next";
+
+export interface TakeNextRequest {
+  /** The suggestion, set by the answering provider. */
+  text?: string;
+}
+
 export interface StashRequest {
   version: 1;
   create?: (options: StashControllerOptions) => StashController;

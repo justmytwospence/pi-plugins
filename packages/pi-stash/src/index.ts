@@ -17,10 +17,12 @@ import {
   readEditorSnapshotApi,
   readEditorSurface,
   STASH_CHANNEL,
+  TAKE_NEXT_CHANNEL,
   type StashController,
   type StashControllerOptions,
   type StashEditor,
   type StashRequest,
+  type TakeNextRequest,
 } from "./contract.ts";
 import {
   isClearedAfterAction,
@@ -197,8 +199,30 @@ export default function promptStash(pi: ExtensionAPI): void {
   const restore = (state: Session, automatic: boolean): boolean =>
     !!stash && restoreDraft(stash, mainTarget(state), automatic);
 
+  /** The next-prompt suggestion on screen, withdrawn from pi-next-prompt (optional sibling). */
+  const takeSuggestion = (): string | undefined => {
+    const request: TakeNextRequest = {};
+    try {
+      pi.events?.emit?.(TAKE_NEXT_CHANNEL, request);
+    } catch {
+      return undefined;
+    }
+    return typeof request.text === "string" && request.text.trim().length > 0 ? request.text : undefined;
+  };
+
   const toggle = (state: Session, editor: EditorComponent) => {
-    if (stash) toggleDraft(stash, mainTarget(state, editor));
+    if (!stash) return;
+    // Nothing to stash or restore: a suggestion shown as ghost text counts as the draft.
+    if (!stash.hasPrompt && state.ctx.ui.getEditorText().length === 0) {
+      const suggestion = takeSuggestion();
+      if (suggestion !== undefined) {
+        stash.stash({ text: suggestion });
+        updateStatus(state);
+        state.ctx.ui.notify("Suggestion stashed", "info");
+        return;
+      }
+    }
+    toggleDraft(stash, mainTarget(state, editor));
   };
 
   /** Held draft: restore into an empty editor, otherwise keep holding until the next submit. */

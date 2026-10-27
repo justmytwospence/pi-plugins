@@ -11,7 +11,7 @@ plugin: pi-stash
 - **Controls:** Ctrl+S stashes/restores/swaps in the main editor, and in [pi-sidebar](/plugins/pi-sidebar/)'s composer with a stash of its own. No slash command or model tool.
 - **Settings:** No settings; one in-memory slot. Text/cursor/modal snapshots when supported; no persistence across process restart.
 - **Requirements, cost & privacy:** TUI only; no network, inference or external program. Draft stays in memory; image attachments are not stashed.
-- **Integrations & limits:** Optional Vim snapshots/footer hint. Embedded fields are untouched. Migrating from the upstream stash requires a full restart after saving the draft.
+- **Integrations & limits:** Optional Vim snapshots/footer hint; stashes a shown next-prompt suggestion. Embedded fields are untouched. Migrating from the upstream stash requires a full restart after saving the draft.
 
 `pi-stash` gives the main prompt editor a single stash slot. Press **Ctrl+S** to set the current draft aside and clear the editor, run a slash command such as `/model` or a `!` shell command, and the draft comes back on its own. It began as [`@saadjs/pi-stash`](https://www.npmjs.com/package/@saadjs/pi-stash) 0.0.3 (MIT, Saad Bash) and was adapted for the suite.
 
@@ -44,6 +44,7 @@ Remove `npm:@saadjs/pi-stash` from your settings first. When migrating from it, 
 | Has text | Empty | Stashes the draft and clears the editor |
 | Empty | Has a prompt | Restores the stashed prompt |
 | Has text | Has a prompt | Swaps the two |
+| Empty, showing a [next-prompt](/plugins/pi-next-prompt/) suggestion | Empty | Stashes the suggestion and withdraws it |
 | Empty | Empty | Warns that there is nothing to stash |
 
 While a prompt is stashed, a `prompt stashed` status is shown; [pi-status-footer](/plugins/pi-status-footer/) turns it into a preview row under the editor.

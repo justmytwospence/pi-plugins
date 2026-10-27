@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
-import { EDITOR_SNAPSHOT, STASH_CHANNEL, type StashRequest } from "../src/contract.ts";
+import { EDITOR_SNAPSHOT, STASH_CHANNEL, TAKE_NEXT_CHANNEL, type StashRequest, type TakeNextRequest } from "../src/contract.ts";
 import { isShellAction, isTemporaryAction, PromptStash } from "../src/core.ts";
 import promptStash, { LEASE, OWNER, STASH_KEY, STASH_OWNER, STATUS_ID, STATUS_TEXT, WRAPPER, adoptStash, capture } from "../src/index.ts";
 import { CTRL_S, ENTER, FakeEditor, SnapshotEditor, flush, harness, markEmbedded } from "./harness.ts";
@@ -77,6 +77,39 @@ test("Ctrl+S on an empty editor restores; with text in both it swaps", async () 
   expect(s.state.main.getText()).toBe("one");
   expect((globals[STASH_KEY] as PromptStash).value).toBe("two");
   expect(s.notes.at(-1)?.message).toBe("Swapped current and stashed prompts");
+});
+
+test("Ctrl+S on an empty editor with nothing stashed stashes the next-prompt suggestion", async () => {
+  const { h, s } = await start();
+  let suggestion: string | undefined = "Run the tests";
+  const asked: unknown[] = [];
+  h.events.on(TAKE_NEXT_CHANNEL, (data) => {
+    asked.push(data);
+    const request = data as TakeNextRequest;
+    if (suggestion !== undefined) request.text = suggestion;
+    suggestion = undefined;
+  });
+  s.state.main.handleInput(CTRL_S);
+  expect(s.state.main.getText()).toBe("");
+  expect((globals[STASH_KEY] as PromptStash).value).toBe("Run the tests");
+  expect(s.status.get(STATUS_ID)).toBe(STATUS_TEXT);
+  expect(s.notes.at(-1)).toEqual({ message: "Suggestion stashed", type: "info" });
+  // With a stash, Ctrl+S restores as usual and does not ask for the suggestion.
+  suggestion = "Something else";
+  s.state.main.handleInput(CTRL_S);
+  expect(s.state.main.getText()).toBe("Run the tests");
+  expect(asked).toHaveLength(1);
+  // A typed draft is stashed, not the suggestion.
+  s.state.main.handleInput(CTRL_S);
+  expect((globals[STASH_KEY] as PromptStash).value).toBe("Run the tests");
+  expect(asked).toHaveLength(1);
+  // No suggestion on offer: the usual warning.
+  s.state.main.handleInput(CTRL_S);
+  s.state.main.setText("");
+  suggestion = undefined;
+  s.state.main.handleInput(CTRL_S);
+  expect(asked).toHaveLength(2);
+  expect(s.notes.at(-1)).toEqual({ message: "Nothing to stash", type: "warning" });
 });
 
 test("nothing to stash is a warning", async () => {

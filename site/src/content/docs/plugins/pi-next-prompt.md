@@ -25,7 +25,7 @@ The main model receives an additional prompt section of roughly 150 tokens and m
 
 ## Accept, edit or ignore
 
-A suggestion appears as dim text in an empty editor after a completed run. Press Tab or Right to copy it into the editor, then review, edit and send it normally. For example, a suggestion to run a specific test should remain an editable proposal, not permission to execute that test without your next message.
+A suggestion appears as dim text in an empty editor after a completed run. Press Tab or Right to copy it into the editor, then review, edit and send it normally. With [pi-stash](/plugins/pi-stash/) and nothing stashed, Ctrl+S moves the suggestion into the stash instead, so it comes back like a stashed draft. For example, a suggestion to run a specific test should remain an editable proposal, not permission to execute that test without your next message.
 
 Typing hides the suggestion. Deleting everything you typed brings it back until a prompt is sent. A new run, a submitted prompt, compaction, tree navigation, a model change or a session switch clears it. Failed and aborted runs do not show suggestions.
 

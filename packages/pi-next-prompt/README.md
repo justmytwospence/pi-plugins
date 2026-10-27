@@ -1,6 +1,6 @@
 # pi-next-prompt
 
-A Pi extension that suggests the prompt you would most likely send next, like Claude Code's prompt suggestions. After a run, the suggestion appears as dim ghost text inside the empty editor, with no hint. `Tab` (or `Right`) fills it in; it is not sent. Typing hides it, and deleting what you typed brings it back, until you send a prompt.
+A Pi extension that suggests the prompt you would most likely send next, like Claude Code's prompt suggestions. After a run, the suggestion appears as dim ghost text inside the empty editor, with no hint. `Tab` (or `Right`) fills it in; it is not sent. Typing hides it, and deleting what you typed brings it back, until you send a prompt. With pi-stash and nothing stashed, `Ctrl+S` stashes the suggestion instead (`prompt:take-next` on `pi.events`).
 
 It only appears when there is one obvious next step. Most turns show nothing.
 

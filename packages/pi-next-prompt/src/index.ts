@@ -296,6 +296,16 @@ export default function nextPrompt(pi: ExtensionAPI) {
     if (request && !request.handled) request.handled = onKey("\t")?.consume === true;
   });
 
+  // Optional pi-stash integration: Ctrl+S on an empty main editor with nothing stashed
+  // takes the suggestion on screen into the stash, as if it were the draft.
+  pi.events.on("prompt:take-next", (data) => {
+    const request = data as { text?: string } | undefined;
+    if (!request || request.text !== undefined || shown === undefined || !ui) return;
+    if (ui.getEditorText() !== "" || !mainFocused()) return;
+    request.text = shown;
+    hide();
+  });
+
   const attach = (ctx: ExtensionContext) => {
     unsubscribe?.();
     unsubscribe = undefined;

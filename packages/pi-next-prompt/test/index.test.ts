@@ -240,6 +240,29 @@ test("typing dismisses; Tab with text in the editor is not ours", async () => {
   expect(ui.widgetLines("next-prompt")).toEqual(["→ Run the tests  Tab to accept"]);
 });
 
+test("prompt:take-next hands the shown suggestion to pi-stash and withdraws it", async () => {
+  const { h, run, ui } = await setup();
+  await run("go", ["Done.\n<next>Run the tests</next>"]);
+  // A draft in the editor: the suggestion is not the draft.
+  ui.editorText = "draft";
+  const blocked: { text?: string } = {};
+  h.pi.events.emit("prompt:take-next", blocked);
+  expect(blocked.text).toBeUndefined();
+  ui.editorText = "";
+  const request: { text?: string } = {};
+  h.pi.events.emit("prompt:take-next", request);
+  expect(request.text).toBe("Run the tests");
+  expect(ui.widgets.size).toBe(0);
+  // Taken for good: neither Tab nor a later key brings it back.
+  expect(ui.press(TAB)).toBe(false);
+  ui.press("\x13");
+  await new Promise((r) => setTimeout(r, 5));
+  expect(ui.widgets.size).toBe(0);
+  const again: { text?: string } = {};
+  h.pi.events.emit("prompt:take-next", again);
+  expect(again.text).toBeUndefined();
+});
+
 test("key releases and non-typing keys keep the suggestion", async () => {
   const { run, ui } = await setup();
   await run("go", ["Done.\n<next>Run the tests</next>"]);
