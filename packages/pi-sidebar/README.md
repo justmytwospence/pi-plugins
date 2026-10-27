@@ -207,7 +207,7 @@ Heads-up checks can also suggest something worth sharing publicly: a technique, 
 
 Configure destinations with environment variables (any one turns share notes on; `PI_SIDEBAR_SHARE=0` keeps them off):
 
-- `PI_SIDEBAR_BLUESKY_HANDLE` and `PI_SIDEBAR_BLUESKY_APP_PASSWORD`: post as this account with an [app password](https://bsky.app/settings/app-passwords). `PI_SIDEBAR_BLUESKY_SERVICE` sets another PDS (default `https://bsky.social`). Links and hashtags become rich-text links.
+- `PI_SIDEBAR_BLUESKY_HANDLE` and `PI_SIDEBAR_BLUESKY_APP_PASSWORD`: post as this account (a handle or DID) with an app password (the account password also works). Sidebar signs in directly at the account's own PDS, which it resolves from the handle (its `_atproto` DNS record or `/.well-known/atproto-did`, then its DID document), so a self-hosted PDS works the same as a bsky.social account. `PI_SIDEBAR_BLUESKY_SERVICE` skips resolution and names the PDS; `PI_SIDEBAR_BLUESKY_PLC` sets the did:plc directory (default `https://plc.directory`). Post links point at `PI_SIDEBAR_BLUESKY_WEB` (default `https://bsky.app`; `none` reports the `at://` URI). Links and hashtags become rich-text links.
 - `PI_SIDEBAR_DRAFTS_DIR`: write drafts to `<dir>/<date>-<slug>.md` (never overwriting).
 - `PI_SIDEBAR_DRAFTS_COMMAND`: instead, run this shell command with the markdown on stdin and `PI_SIDEBAR_DRAFT_TITLE`, `PI_SIDEBAR_DRAFT_SLUG`, `PI_SIDEBAR_DRAFT_KIND` (`full` or `outline`), `PI_SIDEBAR_DRAFT_DATE` and `PI_SIDEBAR_DRAFT_REPO` in its environment. The first line it prints is reported as where the draft went. Use it to file drafts in a notes app, such as an Obsidian vault through the Obsidian CLI.
 

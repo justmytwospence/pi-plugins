@@ -119,7 +119,7 @@ Checks can also suggest something worth sharing: a technique, result or lesson f
 - **Blog draft / outline:** one more request (built like a check) writes a full draft or a section outline, saves it as markdown with front matter, and adds it to Sidebar's thread for revisions.
 - **Memory:** posting, drafting, Not interested and Discard mark the topic as known.
 - **In Sidebar:** `/post` (with a confirm dialog), `/post edit`, `/post <text>`, `/draft`, `/draft outline`.
-- **Configuration:** `PI_SIDEBAR_BLUESKY_HANDLE` + `PI_SIDEBAR_BLUESKY_APP_PASSWORD` (an app password; `PI_SIDEBAR_BLUESKY_SERVICE` for another PDS), and `PI_SIDEBAR_DRAFTS_DIR` or `PI_SIDEBAR_DRAFTS_COMMAND` (markdown on stdin, `PI_SIDEBAR_DRAFT_TITLE`, `_SLUG`, `_KIND`, `_DATE`, `_REPO` in the environment; its first output line is reported). `PI_SIDEBAR_SHARE=0` keeps share notes off.
+- **Configuration:** `PI_SIDEBAR_BLUESKY_HANDLE` + `PI_SIDEBAR_BLUESKY_APP_PASSWORD` (sign-in goes straight to the account's PDS, resolved from the handle, so self-hosted PDSes work; `PI_SIDEBAR_BLUESKY_SERVICE` names it instead, `PI_SIDEBAR_BLUESKY_WEB` sets the post links' web app, default `https://bsky.app`, or `none`), and `PI_SIDEBAR_DRAFTS_DIR` or `PI_SIDEBAR_DRAFTS_COMMAND` (markdown on stdin, `PI_SIDEBAR_DRAFT_TITLE`, `_SLUG`, `_KIND`, `_DATE`, `_REPO` in the environment; its first output line is reported). `PI_SIDEBAR_SHARE=0` keeps share notes off.
 
 ## Why it costs little
 

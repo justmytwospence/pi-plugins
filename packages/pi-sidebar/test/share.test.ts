@@ -73,7 +73,8 @@ describe("share configuration", () => {
       PI_SIDEBAR_BLUESKY_SERVICE: "https://pds.example/",
       PI_SIDEBAR_DRAFTS_DIR: "~/drafts",
     });
-    expect(config).toEqual({ bluesky: { handle: "me.bsky.social", password: "app-pass", service: "https://pds.example" }, drafts: { dir: "/home/u/drafts" } });
+    expect(config).toEqual({ bluesky: { handle: "me.bsky.social", password: "app-pass", service: "https://pds.example", web: "https://bsky.app", plc: "https://plc.directory" }, drafts: { dir: "/home/u/drafts" } });
+    expect(shareConfig({ PI_SIDEBAR_BLUESKY_HANDLE: "me.example", PI_SIDEBAR_BLUESKY_APP_PASSWORD: "p", PI_SIDEBAR_BLUESKY_WEB: "none" }).bluesky).toEqual({ handle: "me.example", password: "p", plc: "https://plc.directory" });
     expect(shareSummary(config)).not.toContain("app-pass");
     expect(shareConfig({ PI_SIDEBAR_DRAFTS_DIR: "/d", PI_SIDEBAR_DRAFTS_COMMAND: "save" }).drafts).toEqual({ command: "save" });
     expect(shareConfig({ PI_SIDEBAR_SHARE: "0", PI_SIDEBAR_DRAFTS_DIR: "/d" })).toEqual({});
@@ -102,7 +103,7 @@ describe("Bluesky", () => {
     };
     return { fetch, calls };
   }
-  const config = { handle: "me.bsky.social", password: "secret-pass", service: "https://bsky.social" };
+  const config = { handle: "me.bsky.social", password: "secret-pass", service: "https://bsky.social", web: "https://bsky.app", plc: "https://plc.directory" };
 
   it("signs in, then creates a post record", async () => {
     const { fetch, calls } = fakeFetch();
@@ -115,6 +116,41 @@ describe("Bluesky", () => {
     const body = JSON.parse(calls[1]!.init.body);
     expect(body).toMatchObject({ repo: "did:plc:abc", collection: "app.bsky.feed.post", record: { $type: "app.bsky.feed.post", text: "Hello https://x.dev", createdAt: "1970-01-01T00:00:00.000Z" } });
     expect(body.record.facets).toHaveLength(1);
+  });
+
+  function pdsFetch(docs: Record<string, unknown>, wellKnown?: string) {
+    const calls: string[] = [];
+    const fetch: FetchFn = async (url) => {
+      calls.push(url);
+      if (url.endsWith("/.well-known/atproto-did")) return { ok: !!wellKnown, status: wellKnown ? 200 : 404, json: async () => ({}), text: async () => wellKnown ?? "" };
+      if (url in docs) return { ok: true, status: 200, json: async () => docs[url], text: async () => "" };
+      if (url.endsWith("createSession")) return { ok: true, status: 200, json: async () => ({ did: "did:plc:me", accessJwt: "j", handle: "bsky.me.example" }), text: async () => "" };
+      if (url.endsWith("createRecord")) return { ok: true, status: 200, json: async () => ({ uri: "at://did:plc:me/app.bsky.feed.post/rk" }), text: async () => "" };
+      return { ok: false, status: 404, json: async () => ({}), text: async () => "" };
+    };
+    return { fetch, calls };
+  }
+  const doc = (pds: string) => ({ id: "did:plc:me", service: [{ id: "#atproto_pds", type: "AtprotoPersonalDataServer", serviceEndpoint: pds }] });
+
+  it("posts straight to a self-hosted PDS resolved from the handle's DNS record", async () => {
+    const { fetch, calls } = pdsFetch({ "https://plc.directory/did:plc:me": doc("https://pds.me.example/") });
+    const resolveTxt = async (name: string) => (name === "_atproto.bsky.me.example" ? [["did=did:plc:me"]] : []);
+    const posted = await postToBluesky("hi", { handle: "bsky.me.example", password: "p", plc: "https://plc.directory" }, { fetch, resolveTxt });
+    expect(calls).toEqual(["https://plc.directory/did:plc:me", "https://pds.me.example/xrpc/com.atproto.server.createSession", "https://pds.me.example/xrpc/com.atproto.repo.createRecord"]);
+    expect(posted).toEqual({ uri: "at://did:plc:me/app.bsky.feed.post/rk", url: "at://did:plc:me/app.bsky.feed.post/rk" });
+  });
+
+  it("falls back to the handle's well-known DID, reads did:web documents, and refuses non-https PDSes", async () => {
+    const noDns = async () => { throw new Error("ENOTFOUND"); };
+    const web = pdsFetch({ "https://me.example/.well-known/did.json": doc("https://pds.me.example") }, "did:web:me.example\n");
+    const posted = await postToBluesky("hi", { handle: "me.example", password: "p", plc: "https://plc.directory", web: "https://deck.example" }, { fetch: web.fetch, resolveTxt: noDns });
+    expect(web.calls.slice(0, 3)).toEqual(["https://me.example/.well-known/atproto-did", "https://me.example/.well-known/did.json", "https://pds.me.example/xrpc/com.atproto.server.createSession"]);
+    expect(posted.url).toBe("https://deck.example/profile/bsky.me.example/post/rk");
+    const insecure = pdsFetch({ "https://plc.directory/did:plc:me": doc("http://pds.me.example") });
+    await expect(postToBluesky("hi", { handle: "did:plc:me", password: "p", plc: "https://plc.directory" }, { fetch: insecure.fetch })).rejects.toThrow(/no https PDS.*PI_SIDEBAR_BLUESKY_SERVICE/);
+    expect(insecure.calls.some((u) => u.includes("createSession"))).toBe(false);
+    const unknown = pdsFetch({});
+    await expect(postToBluesky("hi", { handle: "nobody.example", password: "p", plc: "https://plc.directory" }, { fetch: unknown.fetch, resolveTxt: noDns })).rejects.toThrow(/could not resolve the handle/);
   });
 
   it("reports failures without the password, and refuses empty or long posts", async () => {
@@ -258,7 +294,7 @@ describe("HeadsUp with sharing", () => {
     const { stream, sent } = stubStream(replies);
     const posts: string[] = [];
     const fetch: FetchFn = async (url, init) => {
-      if (url.endsWith("createRecord")) posts.push(JSON.parse(init.body).record.text);
+      if (url.endsWith("createRecord")) posts.push(JSON.parse(init.body!).record.text);
       const body = url.endsWith("createSession") ? { did: "did:plc:a", accessJwt: "j", handle: "me.bsky.social" } : { uri: "at://did:plc:a/app.bsky.feed.post/rk" };
       return { ok: true, status: 200, json: async () => body, text: async () => "" };
     };
@@ -270,7 +306,7 @@ describe("HeadsUp with sharing", () => {
     const settle = () => new Promise((r) => setTimeout(r, 10));
     return { headsUp, sent, notes, posts, written, dir, known, settle, edited: () => edited };
   }
-  const BSKY = { PI_SIDEBAR_BLUESKY_HANDLE: "me.bsky.social", PI_SIDEBAR_BLUESKY_APP_PASSWORD: "pw" };
+  const BSKY = { PI_SIDEBAR_BLUESKY_HANDLE: "me.bsky.social", PI_SIDEBAR_BLUESKY_APP_PASSWORD: "pw", PI_SIDEBAR_BLUESKY_SERVICE: "https://bsky.social" };
 
   it("drops share notes and leaves the prompt alone when sharing is off", async () => {
     const { headsUp, sent } = await setup([SHARE], {});
