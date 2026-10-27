@@ -165,6 +165,11 @@ describe("pi-bg", () => {
       expect(r.entries[0].content).toMatch(/settled/);
       expect(x.working.some((m) => m?.startsWith("Waiting on tests"))).toBe(true);
       expect(x.working.at(-1)).toBeUndefined();
+      // Pi took its indicator down at agent_end: the wait puts it back, and the continued run's turn owns it.
+      expect(x.visible).toEqual([true]);
+      for (const h of x.handlers.get("turn_start") ?? []) await h({}, x.ctx);
+      for (const h of x.handlers.get("agent_settled") ?? []) await h({}, x.ctx);
+      expect(x.visible).toEqual([true]);
       // Delivered in the turn: no wake-up follows.
       await new Promise((res) => setTimeout(res, 300));
       expect(x.sent).toEqual([]);
@@ -183,6 +188,7 @@ describe("pi-bg", () => {
       const h = x.handlers.get("agent_before_settle")![0];
       expect(await h({ type: "agent_before_settle", outcome: "aborted", entries: [], continue: false, context: { canContinue: false } }, x.ctx)).toEqual({});
       expect(x.working).toEqual([]);
+      expect(x.visible).toEqual([]);
       await x.shutdown();
     });
 
@@ -192,6 +198,10 @@ describe("pi-bg", () => {
       setTimeout(() => x.press("\x1b"), 300);
       expect(await settle(x)).toEqual({});
       expect(x.working.at(-1)).toBeUndefined();
+      // The run settles after the interrupted wait: the raised indicator comes down, the default stays shown.
+      expect(x.visible).toEqual([true]);
+      for (const h of x.handlers.get("agent_settled") ?? []) await h({}, x.ctx);
+      expect(x.visible).toEqual([true, false, true]);
       setTimeout(() => {
         x.state.pending = true;
       }, 300);

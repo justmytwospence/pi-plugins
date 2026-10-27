@@ -42,6 +42,8 @@ export function fakeCtx(cwd: string) {
   const status = new Map<string, string | undefined>();
   const notes: string[] = [];
   const working: (string | undefined)[] = [];
+  /** Every setWorkingVisible call, in order. */
+  const visible: boolean[] = [];
   const state = { pending: false, editorText: "", busy: false };
   const inputs = new Set<(data: string) => { consume?: boolean } | undefined>();
   const widgets = new Map<string, any>();
@@ -58,6 +60,7 @@ export function fakeCtx(cwd: string) {
       setWidget: (k: string, v: any) => (v ? widgets.set(k, v) : widgets.delete(k)),
       notify: (m: string) => notes.push(m),
       setWorkingMessage: (m?: string) => working.push(m),
+      setWorkingVisible: (v: boolean) => visible.push(v),
       select: async () => undefined,
       pasteToEditor: () => {},
       custom: (factory: any) =>
@@ -84,7 +87,7 @@ export function fakeCtx(cwd: string) {
     const o = opened[index];
     return o ? o.factory(tui, theme, undefined, o.resolve) : undefined;
   };
-  return { ctx, status, notes, working, state, widgets, widgetLines, widgetComponent, opened, press, overlay, theme };
+  return { ctx, status, notes, working, visible, state, widgets, widgetLines, widgetComponent, opened, press, overlay, theme };
 }
 
 export async function until(cond: () => boolean, ms = 5_000): Promise<void> {

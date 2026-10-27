@@ -632,6 +632,23 @@ export default function piBg(pi: ExtensionAPI) {
    * continuation valid; Pi re-checks it after committing the entries.
    */
   let settleWaiting = false;
+  /**
+   * Pi takes its working indicator down at agent_end, before this boundary, so a settle-wait put
+   * it back up (with the `Waiting on …` message) and it stays up until the run settles. A run the
+   * wait continues starts a turn, and Pi owns the indicator again.
+   */
+  let indicatorRaised = false;
+  const lowerIndicator = (c: ExtensionContext) => {
+    if (!indicatorRaised) return;
+    indicatorRaised = false;
+    try {
+      // Hidden takes it down; shown again only sets the default back, as no run is streaming now.
+      c.ui.setWorkingVisible?.(false);
+      c.ui.setWorkingVisible?.(true);
+    } catch {
+      // UI gone.
+    }
+  };
   const waitAtSettle = async (event: AgentBeforeSettleEvent, c: ExtensionContext): Promise<BoundaryResult> => {
     if (settleWaiting || !attached || !tui() || event.outcome !== "completed") return {};
     if (c.hasPendingMessages() || !agentJobs().length || [...waiters].some((w) => !w.silent)) return {};
@@ -645,6 +662,12 @@ export default function piBg(pi: ExtensionAPI) {
     settleWaiting = true;
     try {
       working.set();
+      try {
+        c.ui.setWorkingVisible?.(true);
+        indicatorRaised = true;
+      } catch {
+        // No indicator to raise: the message still reaches the footer's channel.
+      }
       const waiting = waitFor({ targets: new Set(), any: true, silent: false }, WAIT_DEFAULT_S * 1000, () => {
         if (!attached || generation !== sessionGeneration) return "aborted";
         if (c.hasPendingMessages()) return "message";
@@ -857,7 +880,13 @@ export default function piBg(pi: ExtensionAPI) {
     refresh();
   });
 
-  pi.on("agent_settled", (_event, c) => flushOwed(c));
+  pi.on("turn_start", () => {
+    indicatorRaised = false;
+  });
+  pi.on("agent_settled", (_event, c) => {
+    lowerIndicator(c);
+    flushOwed(c);
+  });
   pi.on("session_compact", (_event, c) => flushOwed(c));
 
   // The user's next message dismisses failures and stops they have had a chance to see.
