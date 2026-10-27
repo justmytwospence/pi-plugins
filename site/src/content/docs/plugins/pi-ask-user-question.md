@@ -98,6 +98,8 @@ RPC uses one native dialog per question. Single-select offers numbered options f
 
 While a dialog is open, the tool emits a `herdr:blocked` hold, released on answer, decline, or error. Herdr's own Pi integration consumes this event; pi-herdr is not required to handle blocked state. Elsewhere it has no effect.
 
+Other extensions can open the same dialog for their own questions: emit `{ version: 1 }` on the `pi-plugins.ask-user-question.v1` event channel and this component sets `ask(ctx, { questions }, { signal, label })` on it, which validates the questions like the tool, holds `herdr:blocked`, and returns the answers (with notes and the Review note) or the validation error. [Compaction plan](/plugins/pi-compact-plan/) uses it for its questions and review.
+
 Headless pi-subagents cannot use this tool. Workers return decisions and permission blockers to their parent instead of opening user dialogs.
 
 This tool records a choice, not an enforcement policy. The model must still honor the answer, and a selected option does not automatically change files or authorize unrelated commands. See [planning and review](/recipes/plan-review/) for using decisions in a larger workflow and [troubleshooting](/guides/troubleshooting/) for duplicate tools or missing UI.

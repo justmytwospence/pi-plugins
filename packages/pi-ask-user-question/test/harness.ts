@@ -37,6 +37,7 @@ export const KEYS = {
 export function harness(options: { active?: string[] } = {}) {
   const handlers = new Map<string, Handler[]>();
   const events: Array<{ channel: string; data: any }> = [];
+  const listeners = new Map<string, Array<(data: unknown) => void>>();
   let tool: any;
   let active = [...(options.active ?? ["read", "bash"])];
   const pi = {
@@ -55,8 +56,12 @@ export function harness(options: { active?: string[] } = {}) {
     events: {
       emit: (channel: string, data: unknown) => {
         events.push({ channel, data });
+        for (const listener of listeners.get(channel) ?? []) listener(data);
       },
-      on: () => () => undefined,
+      on: (channel: string, listener: (data: unknown) => void) => {
+        listeners.set(channel, [...(listeners.get(channel) ?? []), listener]);
+        return () => undefined;
+      },
     },
   };
   async function emit(event: string, payload: any, ctx: any) {

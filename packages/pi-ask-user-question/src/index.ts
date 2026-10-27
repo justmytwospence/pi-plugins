@@ -13,11 +13,28 @@ import { reconcile } from "./reconcile.ts";
 import { type Answer, type DialogResult, type Details, errorResult, toolResult } from "./result.ts";
 import { askWithDialogs } from "./rpc.ts";
 import { NO_UI_MESSAGE, normalize, type Params, ParamsSchema, type Question, TOOL_NAME, validate } from "./schema.ts";
+import { ASK_SERVICE_CHANNEL, type AskServiceFn, type AskServiceRequest } from "./service.ts";
 
 const LABEL_WIDTH = 60;
 
 export default function askUserQuestion(pi: ExtensionAPI) {
   let removed = false;
+
+  // The same dialog for other extensions' questions (service.ts).
+  const service: AskServiceFn = async (ctx, params, options = {}) => {
+    const questions = normalize(params);
+    if (!ctx.hasUI) return { error: "no_ui", message: NO_UI_MESSAGE };
+    const invalid = validate(questions);
+    if (invalid) return invalid;
+    if (options.signal?.aborted) return { cancelled: true, answers: [] };
+    return whileBlocked(pi.events, options.label ?? blockedLabel(questions), () => ask(pi, ctx, questions, options.signal));
+  };
+  pi.events.on(ASK_SERVICE_CHANNEL, (data) => {
+    const request = data as AskServiceRequest | undefined;
+    if (!request || request.version !== 1 || request.ask) return;
+    request.ask = service;
+    request.provider = "pi-ask-user-question";
+  });
 
   pi.on("before_agent_start", (_event, ctx) => {
     removed = reconcile(pi, ctx.hasUI, removed);

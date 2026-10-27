@@ -97,6 +97,7 @@ Nothing external: no network access, no model calls, no files read or written.
 
 - **Herdr**: while the user is being asked (terminal dialog or native dialogs), the tool emits `herdr:blocked` on Pi's event bus: `{ active: true, label }` when the dialog opens and `{ active: false }` when it closes, however it closes. The label is the question headers (or questions) joined by ` · `, cut to 60 characters. Herdr's Pi integration shows the pane as blocked for as long as the hold lasts. Outside Herdr nothing listens.
 - **Editor providers** (for example pi-vim): the `Type something.` and notes editors ask for an editor on the `pi-plugins.editor-factory.v1` event channel; a provider that answers supplies the editor, otherwise Pi's standard editor is used. Opening or reopening a field requests Insert mode through the optional editor protocol. The footer shows modal state, `i` in Normal mode, and whether Enter uses an answer or saves a note.
+- **Other extensions** (for example pi-compact-plan): emit `{ version: 1 }` on the `pi-plugins.ask-user-question.v1` event channel and this component sets `ask(ctx, { questions }, { signal, label })` on the request (`src/service.ts`). It validates the questions like the tool, shows the same dialog (native dialogs outside the terminal), holds `herdr:blocked`, and resolves with `{ cancelled, answers, note }` or `{ error, message }`.
 - **pi-subagents**: forwards a subagent child's native dialogs to you.
 - **pi-tool-gate**: `ask_user_question` is on its default allow list.
 
