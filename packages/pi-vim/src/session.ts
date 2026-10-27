@@ -12,6 +12,7 @@ import { createModeChangeHandler } from "./engine/mode-change-command.js";
 import {
   buildModeColorizers,
   buildOffBorderColor,
+  buildSelectionColor,
   resolveModeColors,
   type ThemeLike,
 } from "./engine/mode-colors.js";
@@ -82,6 +83,7 @@ export function resolveSessionConfig(
     borderSync,
     labelSync,
     offBorderColor: theme ? buildOffBorderColor(theme) : null,
+    selectionColor: theme ? buildSelectionColor(theme) : null,
     labelTransform: reverseVideo,
     displayLineMotion,
     ...toggles,

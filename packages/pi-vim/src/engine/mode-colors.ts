@@ -10,7 +10,10 @@ const TOKEN = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 
 export type ModeColorKey = keyof typeof MODE_COLORS;
 export type ModeColorizers = Record<ModeColorKey, (s: string) => string>;
-export type ThemeLike = { fg(token: string, text: string): string };
+export type ThemeLike = {
+  fg(token: string, text: string): string;
+  bg?(token: string, text: string): string;
+};
 
 export function resolveModeColors(
   colors?: ModeColorSettings,
@@ -94,4 +97,19 @@ export function isNeutralBorder(
   } catch {
     return false;
   }
+}
+
+// Paints the Visual selection with the theme's list-selection background.
+// Null when the theme has no usable `selectedBg`, so the engine falls back to
+// its own neutral background.
+export function buildSelectionColor(
+  theme: ThemeLike,
+): ((s: string) => string) | null {
+  if (typeof theme.bg !== "function") return null;
+  try {
+    theme.bg("selectedBg", "");
+  } catch {
+    return null;
+  }
+  return (s: string) => theme.bg!("selectedBg", s);
 }

@@ -102,8 +102,12 @@ import {
   clampVisualPosition,
   getInclusiveEndColumn,
   getVisualLineRange,
+  getVisualLineSpans,
   isVisualMode,
+  type LayoutRow,
+  type LayoutRowSpan,
   orderVisualEndpoints,
+  paintVisualRows,
   type VisualMode,
   type VisualPosition,
 } from "./visual.js";
@@ -481,7 +485,13 @@ export type ModalEditorOptions = {
   surround?: boolean;
   // Columns per shift for >, < and surround indentation. Default 2.
   shiftWidth?: number;
+  // Paints the Visual selection (normally the theme's `selectedBg`). Absent →
+  // a neutral grey background. Must not use reverse video: the host's fake
+  // cursor toggles it inside the selection.
+  selectionColor?: ((s: string) => string) | null;
 };
+
+const DEFAULT_SELECTION_COLOR = (s: string) => `\x1b[48;5;240m${s}\x1b[49m`;
 
 export class ModalEditor extends CustomEditor {
   private mode: Mode = "insert";
@@ -515,6 +525,7 @@ export class ModalEditor extends CustomEditor {
   private readonly targets: boolean;
   private readonly surround: boolean;
   private readonly shiftWidth: number;
+  private readonly selectionColor: (s: string) => string;
   private visualAnchor: VisualPosition | null = null;
   private pendingExCommand: string | null = null;
   private acceptingBracketedPasteInExCommand: boolean = false;
@@ -618,7 +629,41 @@ export class ModalEditor extends CustomEditor {
     this.targets = opts?.targets === true;
     this.surround = opts?.surround === true;
     this.shiftWidth = Math.max(1, Math.floor(opts?.shiftWidth ?? 2));
+    this.selectionColor = opts?.selectionColor ?? DEFAULT_SELECTION_COLOR;
     this.installModeBorderColorizer();
+    this.installVisualSelectionPainter();
+  }
+
+  /**
+   * The host editor has no selection concept, so wrap its (runtime-private)
+   * `layoutText` and paint the Visual selection into the rows it lays out.
+   * Rows keep their text indices for the cursor, so wrapping and scrolling
+   * stay the host's.
+   */
+  private installVisualSelectionPainter(): void {
+    const host = this as unknown as {
+      layoutText?: (width: number) => LayoutRow[];
+      buildVisualLineMap?: (width: number) => LayoutRowSpan[];
+    };
+    const layoutText = host.layoutText;
+    if (typeof layoutText !== "function" || typeof host.buildVisualLineMap !== "function") return;
+    host.layoutText = (width: number) => {
+      const rows = layoutText.call(this, width);
+      if (!isVisualMode(this.mode)) return rows;
+      try {
+        const lines = this.getLines();
+        const spans = getVisualLineSpans(
+          this.mode,
+          clampVisualPosition(this.getVisualAnchor(), lines),
+          this.getCursor(),
+          lines,
+        );
+        const map = host.buildVisualLineMap!.call(this, width);
+        return paintVisualRows(rows, map, spans, this.selectionColor, width, visibleWidth);
+      } catch {
+        return rows;
+      }
+    };
   }
 
   setClipboardFn(fn: (text: string, signal?: AbortSignal) => unknown): void {
