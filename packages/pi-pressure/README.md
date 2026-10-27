@@ -27,7 +27,7 @@ A signal must stay at warn or above for 10 s before the row shows; an interval t
 
 ## The row
 
-The signals that rose during the episode, then the busiest process (by memory when only memory is under pressure; `ps` runs only while the row shows, at most every 10 s). A signal gets an arrow, `↑` or `↓`, only while it is moving significantly: its time-weighted mean over the last 15 s differs from the minute before by at least a step (15 points of CPU, 0.3 load per core, one macOS memory or thermal level, 5 points of Linux memory stall, 5 MB/s of swap-ins). Reads that are too sparse to compare (Pi idle) give no arrow.
+The signals that rose during the episode, then the busiest process (by memory when only memory is under pressure; `ps` runs only while the row shows, at most every 10 s). When other processes share its name, as Pi sessions, `node` or `python` do, its working directory's base name tells it apart (`top pi (groundcover)`, `pi (this)` for this session), read with one `lsof` (macOS) or `/proc/<pid>/cwd` (Linux) for that process only; a working directory of `/` or your home adds nothing. A signal gets an arrow, `↑` or `↓`, only while it is moving significantly: its time-weighted mean over the last 15 s differs from the minute before by at least a step (15 points of CPU, 0.3 load per core, one macOS memory or thermal level, 5 points of Linux memory stall, 5 MB/s of swap-ins). Reads that are too sparse to compare (Pi idle) give no arrow.
 
 ## Controls
 

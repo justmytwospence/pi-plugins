@@ -40,7 +40,25 @@ export interface Reading {
   swapInBps?: number;
 }
 
-export interface ProcessRow { pid: number; cpu: number; rssKb: number; name: string }
+export interface ProcessRow {
+  pid: number; cpu: number; rssKb: number; name: string;
+  /** Which one, when several processes share the name: the working directory's base name, or `this` for Pi's own process. */
+  context?: string;
+}
+
+/** A process for a one-line status: `vitest`, or `pi (groundcover)` when its name alone is ambiguous. */
+export function processLabel(row: Pick<ProcessRow, "name" | "context">): string {
+  return row.context ? `${row.name} (${row.context})` : row.name;
+}
+
+/** A working directory as a short tag: its base name, nothing for / or the home directory. */
+export function cwdContext(cwd: string, home: string): string | undefined {
+  const dir = cwd.trim().replace(/\/+$/, "");
+  if (!dir || dir === home.replace(/\/+$/, "")) return undefined;
+  const base = path.basename(dir).replace(/\s*\u00b7\s*/g, " ").replace(/\s+/g, " ").replace(/[()]/g, "");
+  if (!base) return undefined;
+  return base.length > 20 ? `${base.slice(0, 19)}\u2026` : base;
+}
 
 export function cpuTimes(cpus: Pick<os.CpuInfo, "times">[]): CpuTimes {
   let idle = 0, total = 0;
@@ -130,6 +148,7 @@ export interface SamplerDeps {
   run: (command: string, args: string[]) => Promise<string>;
   read: (file: string) => Promise<string>;
   totalmem: () => number;
+  homedir: () => string;
 }
 
 export const run = (command: string, args: string[], timeout = 1_500): Promise<string> =>
@@ -148,6 +167,7 @@ export const defaultDeps: SamplerDeps = {
   run,
   read: (file) => readFile(file, "utf8"),
   totalmem: () => os.totalmem(),
+  homedir: () => os.homedir(),
 };
 
 const LINUX_PAGE = 4096;
@@ -166,6 +186,13 @@ export function createSampler(deps: SamplerDeps = defaultDeps, { darwinFallbackE
   let stats: { at: number; value?: DarwinMemoryStats } | undefined;
   const quiet = async <T>(work: () => Promise<T>): Promise<T | undefined> => {
     try { return await work(); } catch { return undefined; }
+  };
+  /** A process's working directory: lsof on macOS, /proc on Linux. */
+  const processCwd = async (pid: number): Promise<string | undefined> => {
+    if (deps.platform === "linux") return (await deps.run("readlink", [`/proc/${pid}/cwd`])).trim() || undefined;
+    if (deps.platform !== "darwin") return undefined;
+    const text = await deps.run("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"]);
+    return /^n(.+)$/m.exec(text)?.[1];
   };
   const darwinLevel = (level: number, at: number): MemoryReading =>
     darwin.memory?.source === "darwin" && darwin.memory.level === level ? darwin.memory : { source: "darwin", level, since: at };
@@ -223,7 +250,19 @@ export function createSampler(deps: SamplerDeps = defaultDeps, { darwinFallbackE
       if (!text) return [];
       const rows = parsePs(text, process.pid);
       rows.sort((a, b) => by === "cpu" ? b.cpu - a.cpu : b.rssKb - a.rssKb);
-      return rows.slice(0, count);
+      const picked = rows.slice(0, count);
+      // A name several processes share (many Pi sessions, node, python) says little:
+      // tell them apart by working directory, read only for the few shown.
+      const counts = new Map<string, number>();
+      for (const row of rows) counts.set(row.name, (counts.get(row.name) ?? 0) + 1);
+      await Promise.all(picked.map(async (row) => {
+        if ((counts.get(row.name) ?? 0) < 2) return;
+        if (row.pid === process.pid) { row.context = "this"; return; }
+        const cwd = await quiet(() => processCwd(row.pid));
+        const context = cwd === undefined ? undefined : cwdContext(cwd, deps.homedir());
+        if (context) row.context = context;
+      }));
+      return picked;
     },
   };
 }

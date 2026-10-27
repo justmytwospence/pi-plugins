@@ -6,7 +6,7 @@ import { describe, expect, test } from "vitest";
 import { ensureHelper, parseHelperLine, startHelper, type HelperLine } from "../src/darwin.ts";
 import { mergeConfig } from "../src/index.ts";
 import { bandLevel, createMonitor, darwinMemoryText, DEFAULTS, formatRate, formatStatus, topBy, trends } from "../src/pressure.ts";
-import { busyPercent, cpuTimes, createSampler, parseProcVmstat, parsePs, parsePsi, parseVmStat, processName, psiShare, type Reading, type SamplerDeps } from "../src/sample.ts";
+import { busyPercent, cpuTimes, createSampler, parseProcVmstat, cwdContext, parsePs, parsePsi, parseVmStat, processLabel, processName, psiShare, type Reading, type SamplerDeps } from "../src/sample.ts";
 
 const PSI = "some avg10=12.50 avg60=2.48 avg300=2.55 total=1000000\nfull avg10=3.10 avg60=0.00 avg300=0.00 total=200000\n";
 
@@ -83,6 +83,7 @@ describe("sampler", () => {
       run: async () => "2\n",
       read: async () => "",
       totalmem: () => GB64,
+      homedir: () => "/Users/me",
       ...over,
     };
   };
@@ -138,6 +139,29 @@ describe("sampler", () => {
     const sampler = createSampler(deps({ run: async () => "1 50.0 100 /bin/a\n2 10.0 900 /bin/b\n" }));
     expect((await sampler.top("cpu"))[0].name).toBe("a");
     expect((await sampler.top("memory"))[0].name).toBe("b");
+  });
+  test("a shared name is told apart by working directory, read only for the rows shown", async () => {
+    const calls: string[][] = [];
+    const ps = `11 30.0 900 pi\n12 5.0 800 pi\n13 1.0 700 /bin/vitest\n${process.pid} 0.5 600 node\n14 0.1 500 pi\n`;
+    const cwds: Record<string, string> = { 11: "/Users/me/Projects/groundcover", 12: "/Users/me", 14: "/" };
+    const sampler = createSampler(deps({ run: async (command, args) => {
+      if (command === "ps") return ps;
+      calls.push(args);
+      const cwd = cwds[args[2]];
+      if (!cwd) throw new Error("gone");
+      return `p${args[2]}\nfcwd\nn${cwd}\n`;
+    } }));
+    expect((await sampler.top("cpu", 3)).map(processLabel)).toEqual(["pi (groundcover)", "pi", "vitest"]);
+    expect(calls.map((a) => a[2])).toEqual(["11", "12"]);
+    // Pi's own process is `this`; a cwd of / says nothing.
+    expect((await sampler.top("memory", 5)).map(processLabel)).toEqual(["pi (groundcover)", "pi", "vitest", "pi (this)", "pi"]);
+    const linux = createSampler(deps({ platform: "linux", read: async () => "", run: async (command, args) => command === "ps" ? ps : (args[0] === "/proc/11/cwd" ? "/srv/app\n" : "") }));
+    expect(processLabel((await linux.top("cpu"))[0])).toBe("pi (app)");
+  });
+  test("working-directory tags", () => {
+    expect(cwdContext("/Users/me/Projects/uplft/.worktrees/feature-1362-deterministic-analyst-plan", "/Users/me")).toBe("feature-1362-determ\u2026");
+    expect(cwdContext("/Users/me/", "/Users/me")).toBeUndefined();
+    expect(cwdContext("/", "/Users/me")).toBeUndefined();
   });
 });
 

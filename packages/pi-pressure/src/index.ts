@@ -17,7 +17,7 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createMonitor, darwinMemoryText, DEFAULTS, formatBytes, formatRate, formatStatus, type Level, type Mode, type Paint, type PressureConfig, SIGNALS, topBy, type View } from "./pressure.ts";
 import { ensureHelper, startHelper } from "./darwin.ts";
-import { createSampler, type Sampler } from "./sample.ts";
+import { createSampler, processLabel, type Sampler } from "./sample.ts";
 
 export const STATUS_KEY = "pressure";
 const TOP_REFRESH_MS = 10_000;
@@ -93,8 +93,8 @@ export async function report(view: View | undefined, config: PressureConfig, sam
     if (r.swapInBps !== undefined) lines.push(`swap-in ${formatRate(r.swapInBps)}${arrow("swap")} · ${lv("swap")} (warn ${config.swapInMBps.warn}MB/s, hot ${config.swapInMBps.hot}MB/s)`);
   }
   const [cpu, memory] = await Promise.all([sampler.top("cpu", 5), sampler.top("memory", 5)]);
-  if (cpu.length) lines.push(`top cpu: ${cpu.map((p) => `${p.name} ${Math.round(p.cpu)}`).join(", ")}`);
-  if (memory.length) lines.push(`top memory: ${memory.map((p) => `${p.name} ${kb(p.rssKb)}`).join(", ")}`);
+  if (cpu.length) lines.push(`top cpu: ${cpu.map((p) => `${processLabel(p)} ${Math.round(p.cpu)}`).join(", ")}`);
+  if (memory.length) lines.push(`top memory: ${memory.map((p) => `${processLabel(p)} ${kb(p.rssKb)}`).join(", ")}`);
   return lines.join("\n");
 }
 
@@ -177,7 +177,7 @@ export default function pressureExtension(pi: ExtensionAPI): void {
         if (!top || reading.at - top.at >= TOP_REFRESH_MS) {
           const [row] = await sampler.top(topBy(view));
           if (epoch !== generation || !ctx) return;
-          top = { name: row?.name, at: reading.at };
+          top = { name: row ? processLabel(row) : undefined, at: reading.at };
         }
         publish(formatStatus(view, top.name, paint(ctx)));
       }

@@ -52,6 +52,6 @@ On macOS the row also shows memory used, as Activity Monitor counts it (app memo
 
 A level rises at its threshold and falls only once the value is a margin below it (5 points for CPU), so a value hovering on a threshold does not toggle the row. Free memory is deliberately not a signal: both kernels use spare memory as cache, so pressure and swap-ins are the honest measures.
 
-The busiest process comes from `ps`, which runs only while the row shows (at most every 10 seconds). It is ranked by CPU, or by resident memory when only memory is under pressure. Pi's own process is labeled `pi`.
+The busiest process comes from `ps`, which runs only while the row shows (at most every 10 seconds). It is ranked by CPU, or by resident memory when only memory is under pressure. Pi's own process is labeled `pi`. When other processes share the busiest one's name (many Pi sessions, `node`, `python`), its working directory's base name tells it apart: `top pi (groundcover)`, or `pi (this)` for the current session. Only the processes shown get that lookup (`lsof` on macOS, `/proc/<pid>/cwd` on Linux), and a working directory of `/` or home adds nothing.
 
 [GitHub source](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-pressure)
