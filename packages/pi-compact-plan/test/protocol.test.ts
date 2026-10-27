@@ -3,8 +3,11 @@ import { draftPrompt, MAX_QUESTIONS, parsePlan, refinePrompt, replyText } from "
 
 describe("parsePlan", () => {
   it("reads the JSON reply", () => {
-    const plan = parsePlan('{"questions":[{"question":"Keep approach A?","options":["Keep","Drop"]}],"draft":"Next task: x"}');
-    expect(plan).toEqual({ questions: [{ question: "Keep approach A?", options: ["Keep", "Drop"] }], draft: "Next task: x" });
+    const plan = parsePlan('{"questions":[{"question":"Keep approach A?","header":"Approach A","options":[{"label":"Keep","description":"It still matters"},"Drop"]}],"draft":"Next task: x"}');
+    expect(plan).toEqual({
+      questions: [{ question: "Keep approach A?", header: "Approach A", options: [{ label: "Keep", description: "It still matters" }, { label: "Drop", description: "" }] }],
+      draft: "Next task: x",
+    });
   });
 
   it("reads JSON in a code fence or with text around it", () => {
@@ -22,10 +25,10 @@ describe("parsePlan", () => {
   });
 
   it("caps and cleans the questions", () => {
-    const questions = Array.from({ length: 6 }, (_, i) => ({ question: `Q${i}`, options: ["a", "", 3, "b", "c", "d", "e"] }));
+    const questions = Array.from({ length: 6 }, (_, i) => ({ question: `Q${i}`, options: ["a", "", 3, "Other", "a", "b", "c", "d", "e"] }));
     const plan = parsePlan(JSON.stringify({ questions: [{ question: " " }, ...questions], draft: "D" }));
     expect(plan?.questions).toHaveLength(MAX_QUESTIONS);
-    expect(plan?.questions[0]).toEqual({ question: "Q0", options: ["a", "b", "c", "d"] });
+    expect(plan?.questions[0]).toEqual({ question: "Q0", header: "Q0", options: ["a", "b", "c", "d"].map((label) => ({ label, description: "" })) });
   });
 });
 
@@ -35,8 +38,13 @@ describe("prompts", () => {
     expect(draftPrompt("  ")).toContain("infer the most likely next step");
   });
 
-  it("lists the answers", () => {
-    expect(refinePrompt([{ question: "Keep A?", answer: "Drop it" }])).toContain("Q: Keep A?\nA: Drop it");
+  it("lists the answers and their notes", () => {
+    expect(refinePrompt([{ question: "Keep A?", answer: "Drop it", note: "but keep its test" }])).toContain("Q: Keep A?\nA: Drop it\nNote: but keep its test");
+  });
+
+  it("makes a header from the question when the model gives none or a long one", () => {
+    const plan = parsePlan(JSON.stringify({ questions: [{ question: "Is the flaky test in scope?", options: ["y", "n"] }, { question: "Q", header: "A very long header", options: [] }], draft: "D" }));
+    expect(plan?.questions.map((q) => q.header)).toEqual(["Is the flaky", "A very long…"]);
   });
 });
 

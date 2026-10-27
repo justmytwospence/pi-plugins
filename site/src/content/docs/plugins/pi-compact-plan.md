@@ -11,15 +11,15 @@ plugin: pi-compact-plan
 - **Controls:** `/compact-plan [what you will do next]`. Without an argument it asks; leave that empty to let the session infer the next step. Under the draft: compact with it, edit it, tell the session what to change, or cancel. Escape stops a request in flight.
 - **Settings:** None.
 - **Requirements, cost & privacy:** Pi 1.2+ with a UI. One request to the session's model (two if you answer its questions), sending the session's context; on supported APIs it reuses the session's last request so the context is read from the prompt cache.
-- **Integrations & limits:** Plain `/compact [instructions]` is unchanged. Text fields use the suite's editor, so [Vim editing](/plugins/pi-vim/) works in them when it is loaded. Its dialogs hold Herdr's blocked state, and its requests the working state. A request gives up after 3 minutes.
+- **Integrations & limits:** Plain `/compact [instructions]` is unchanged. With [Ask a question](/plugins/pi-ask-user-question/) loaded, the questions and the review use its dialog (typed answers, notes, Review tab); otherwise Pi's selects. Text fields use the suite's editor, so [Vim editing](/plugins/pi-vim/) works in them when it is loaded. Its dialogs hold Herdr's blocked state, and its requests the working state. A request gives up after 3 minutes.
 
 `/compact [instructions]` already takes focus instructions; the useful part of them is what only you know (what comes next), plus the session-specific details a generic summary flattens (exact paths, decisions and their reasons, open bugs). `/compact-plan` splits that work: you give the goal, the session writes the details.
 
 ## Flow
 
 1. `/compact-plan wire the retry into the CLI` (or `/compact-plan`, then type the goal).
-2. The session's model reads the conversation and your goal. If an answer would change what the summary keeps (an abandoned approach, a side issue), it asks up to 3 questions in Pi's select, each with suggested answers, `Type your own answer` and `Skip this question`, then revises the draft with your answers.
-3. The draft appears in the transcript the way plan mode shows a plan waiting for approval, with a select under it:
+2. The session's model reads the conversation and your goal. If an answer would change what the summary keeps (an abandoned approach, a side issue), it asks up to 3 questions, then revises the draft with your answers. With pi-ask-user-question loaded they are its dialog: options with descriptions, `Type something.` for your own answer, `n` to add a note to an option, and a Review tab (with a note on all answers) when there are several. Without it, each is a Pi select with `Type your own answer` and `Skip this question`.
+3. The draft appears in the transcript the way plan mode shows a plan waiting for approval, with the review under it (here pi-ask-user-question's dialog):
 
 ```
  Compaction focus · wire the retry into the CLI
@@ -31,17 +31,18 @@ plugin: pi-compact-plan
 
  Waiting for approval
 
- Compact with this focus?
-
- → Yes, compact with it
-   Edit the focus
-   No, change it
-   Cancel
+ Ask user ·  Compaction  ───────────────────────────────────────────
+ Compact with this focus? Or type what should change.
+ → 1. Yes, compact with it · Compact now. A note on this option is added to the focus.
+   2. Edit the focus · Open the draft in the editor. A note on this option is added to it first.
+   3. Cancel · Leave the session as it is.
+   4. Type something.
+ n note  ↑↓ navigate  enter select  escape/ctrl+c cancel
 ```
 
 *Example, not a screenshot.*
 
-4. **Edit the focus** opens the draft in the suite's editor (Normal mode with pi-vim): Enter or `:w` saves, Escape in Normal mode or `:q` discards. **No, change it** asks what should change and has the session revise the draft. **Yes** compacts with it; the status line becomes `✓ Compacted with this focus`, with how much of the drafting input came from the prompt cache, and your goal is placed in the empty prompt editor so you can send it next. **Cancel** (or Escape) leaves the session as it was.
+4. **Yes** compacts with the draft; a note on it (`n`) is added to the focus as an `Also:` line. **Edit the focus** opens the draft in the suite's editor (Normal mode with pi-vim): Enter or `:w` saves, Escape in Normal mode or `:q` discards. **Type something.** (or, with Pi's select, **No, change it**) tells the session what to change, and it revises the draft. **Cancel** or Escape leaves the session as it was. After compacting, the status line becomes `✓ Compacted with this focus`, with how much of the drafting input came from the prompt cache, and your goal is placed in the empty prompt editor so you can send it next.
 
 The draft block is a session entry that is never sent to the model; the outcome is recorded with it, so a resumed session draws the same block.
 
@@ -51,6 +52,6 @@ The drafting is a side request outside the session: nothing is added to the tran
 
 ## Enable and requirements
 
-Use [Install & select](/guides/install/) and select `packages/pi-compact-plan/src/index.ts`. It works on its own; pi-vim and pi-herdr are optional.
+Use [Install & select](/guides/install/) and select `packages/pi-compact-plan/src/index.ts`. It works on its own; pi-ask-user-question, pi-vim and pi-herdr are optional.
 
 Source: [packages/pi-compact-plan](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-compact-plan). The request splicing is adapted from [Sidebar](/plugins/pi-sidebar/).

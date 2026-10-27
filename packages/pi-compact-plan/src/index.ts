@@ -13,6 +13,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { convertToLlm, sessionEntryToContextMessages } from "@earendil-works/pi-coding-agent";
 import { matchesKey } from "@earendil-works/pi-tui";
+import { isAnswer, requestAsk, type ServiceQuestion } from "./ask-service.ts";
 import { holdBlocked, holdWorking } from "./herdr-blocked.ts";
 import { type Answer, draftPrompt, parsePlan, type Plan, refinePrompt, replyText, revisePrompt } from "./protocol.ts";
 import { entryText, isConversationRequest, splicePayload } from "./splice.ts";
@@ -27,6 +28,12 @@ export const APPROVE = "Yes, compact with it";
 export const EDIT = "Edit the focus";
 export const CHANGE = "No, change it";
 export const CANCEL = "Cancel";
+export const REVIEW_QUESTION = "Compact with this focus?";
+
+type Review =
+  | { action: "approve" | "edit"; note?: string }
+  | { action: "change"; feedback: string }
+  | { action: "cancel" | "none" };
 const TIMEOUT_MS = 180_000;
 const FALLBACK_MAX_TOKENS = 4_000;
 const SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
@@ -228,9 +235,27 @@ export default function piCompactPlan(pi: ExtensionAPI) {
 
   /** Asks the plan's questions; undefined when the user backs out. */
   async function askQuestions(ctx: ExtensionContext, plan: Plan): Promise<Answer[] | undefined> {
+    // pi-ask-user-question's dialog when it is loaded: typed answers, notes and a Review tab.
+    const service = requestAsk(pi.events);
+    if (service) {
+      const questions: ServiceQuestion[] = plan.questions.map((q) => ({ question: q.question, header: q.header, options: q.options, multiSelect: false }));
+      const result = await service(ctx, { questions }, { label: "Compaction plan" }).catch(() => undefined);
+      if (isAnswer(result)) {
+        if (result.cancelled) return undefined;
+        const answers: Answer[] = [];
+        for (const a of result.answers) {
+          const note = a.notes?.trim();
+          if ((a.kind === "option" || a.kind === "custom") && a.answer) answers.push({ question: a.question, answer: a.answer, ...(note ? { note } : {}) });
+          else if (note) answers.push({ question: a.question, answer: "(no choice)", note });
+        }
+        if (result.note?.trim()) answers.push({ question: "All of the above", answer: "(a note on the answers as a whole)", note: result.note.trim() });
+        return answers;
+      }
+      // Questions the dialog refuses (fewer than 2 options, say) are asked with Pi's selects.
+    }
     const answers: Answer[] = [];
     for (const q of plan.questions) {
-      const choice = await waiting(q.question, () => ctx.ui.select(q.question, [...q.options, WRITE_OWN, SKIP]));
+      const choice = await waiting(q.question, () => ctx.ui.select(q.question, [...q.options.map((o) => o.label), WRITE_OWN, SKIP]));
       if (choice === undefined) return undefined;
       if (choice === SKIP) continue;
       if (choice === WRITE_OWN) {
@@ -242,6 +267,41 @@ export default function piCompactPlan(pi: ExtensionAPI) {
       answers.push({ question: q.question, answer: choice });
     }
     return answers;
+  }
+
+  /** What to do with the draft: in pi-ask-user-question's dialog when loaded, else Pi's select. */
+  async function reviewChoice(ctx: ExtensionContext): Promise<Review> {
+    const service = requestAsk(pi.events);
+    if (service) {
+      const question: ServiceQuestion = {
+        question: `${REVIEW_QUESTION} Or type what should change.`,
+        header: "Compaction",
+        options: [
+          { label: APPROVE, description: "Compact now. A note on this option is added to the focus." },
+          { label: EDIT, description: "Open the draft in the editor. A note on this option is added to it first." },
+          { label: CANCEL, description: "Leave the session as it is." },
+        ],
+      };
+      const result = await service(ctx, { questions: [question] }, { label: "Compact with this focus?" }).catch(() => undefined);
+      if (isAnswer(result)) {
+        const a = result.answers[0];
+        if (result.cancelled || !a) return { action: "cancel" };
+        const note = a.notes?.trim() || undefined;
+        if (a.kind === "custom" && a.answer) return { action: "change", feedback: note ? `${a.answer}\n${note}` : a.answer };
+        if (a.answer === APPROVE) return { action: "approve", note };
+        if (a.answer === EDIT) return { action: "edit", note };
+        if (a.kind === "unanswered" && note) return { action: "change", feedback: note };
+        return { action: "cancel" };
+      }
+    }
+    const choice = await waiting(REVIEW_QUESTION, () => ctx.ui.select(REVIEW_QUESTION, [APPROVE, EDIT, CHANGE, CANCEL]));
+    if (choice === APPROVE) return { action: "approve" };
+    if (choice === EDIT) return { action: "edit" };
+    if (choice === CHANGE) {
+      const feedback = (await waiting("What should change?", () => askText(pi, ctx, "What should change?")))?.trim();
+      return feedback ? { action: "change", feedback } : { action: "none" };
+    }
+    return { action: "cancel" };
   }
 
   pi.registerCommand(COMMAND, {
@@ -309,9 +369,14 @@ export default function piCompactPlan(pi: ExtensionAPI) {
 
       for (;;) {
         state.status = "pending";
-        const choice = await waiting("Compact with this focus?", () => ctx.ui.select("Compact with this focus?", [APPROVE, EDIT, CHANGE, CANCEL]));
-        if (choice === APPROVE) break;
-        if (choice === EDIT) {
+        const review = await reviewChoice(ctx);
+        if (review.action === "none") continue;
+        if ((review.action === "approve" || review.action === "edit") && review.note) {
+          state.draft = `${state.draft}\n- **Also:** ${review.note.replace(/\s*\n\s*/gu, " ")}`;
+          state.edited = true;
+        }
+        if (review.action === "approve") break;
+        if (review.action === "edit") {
           const edited = await waiting("Edit the compaction focus", () =>
             askText(pi, ctx, "Edit the compaction focus", { initial: state.draft, hint: "enter save · esc in normal mode (or :q) discard changes" }),
           );
@@ -321,9 +386,8 @@ export default function piCompactPlan(pi: ExtensionAPI) {
           }
           continue;
         }
-        if (choice === CHANGE) {
-          const feedback = (await waiting("What should change?", () => askText(pi, ctx, "What should change?")))?.trim();
-          if (!feedback) continue;
+        if (review.action === "change") {
+          const feedback = review.feedback;
           state.status = "drafting";
           try {
             side.push(userText(revisePrompt(state.draft, feedback)));

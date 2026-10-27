@@ -5,9 +5,16 @@
 export const MAX_QUESTIONS = 3;
 export const MAX_OPTIONS = 4;
 
+export interface Option {
+  label: string;
+  description: string;
+}
+
 export interface Question {
   question: string;
-  options: string[];
+  /** A short chip label (12 characters or fewer), as ask_user_question's. */
+  header: string;
+  options: Option[];
 }
 
 export interface Plan {
@@ -18,6 +25,8 @@ export interface Plan {
 export interface Answer {
   question: string;
   answer: string;
+  /** A note the user added to the answer. */
+  note?: string;
 }
 
 const TAG = "compact-plan";
@@ -31,9 +40,9 @@ The user is about to run /compact on this session. Compaction replaces the conve
 What the user will do after compacting: ${stated}
 
 Reply with only a JSON object, no code fence and no other text:
-{"questions": [{"question": "...", "options": ["...", "..."]}], "draft": "..."}
+{"questions": [{"question": "...", "header": "...", "options": [{"label": "...", "description": "..."}]}], "draft": "..."}
 
-questions: 0 to ${MAX_QUESTIONS}, asked only when the answer would change what the summary must keep (for example whether an abandoned approach still matters, or whether some side issue is in scope). Usually []. Each has 2 to ${MAX_OPTIONS} short options; the user can also answer in their own words.
+questions: 0 to ${MAX_QUESTIONS}, asked only when the answer would change what the summary must keep (for example whether an abandoned approach still matters, or whether some side issue is in scope). Usually []. Each has a header of 12 characters or fewer, and 2 to ${MAX_OPTIONS} options with a short label (1-5 words) and a one-line description of what choosing it means for the summary. The user can also answer in their own words or add a note to an option, so never add an "Other" option.
 
 draft: the focus instructions, a Markdown list in this shape:
 - **Next task:** <the goal, sharpened with specifics from this session>
@@ -47,7 +56,7 @@ Be specific to this session, never generic. Under 250 words. If you ask question
 
 /** The follow-up request: the user's answers, and a revised draft. */
 export function refinePrompt(answers: readonly Answer[]): string {
-  const lines = answers.map((a) => `Q: ${a.question}\nA: ${a.answer}`).join("\n\n");
+  const lines = answers.map((a) => `Q: ${a.question}\nA: ${a.answer}${a.note ? `\nNote: ${a.note}` : ""}`).join("\n\n");
   return `<${TAG}>
 The user's answers:
 
@@ -74,15 +83,43 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+const RESERVED = /^(other|type something|type your own answer)\.?$/iu;
+
+function optionsOf(value: unknown): Option[] {
+  if (!Array.isArray(value)) return [];
+  const out: Option[] = [];
+  for (const item of value) {
+    const label = typeof item === "string" ? item : isObject(item) && typeof item.label === "string" ? item.label : "";
+    const clean = label.replace(/\s+/gu, " ").trim();
+    if (!clean || RESERVED.test(clean) || out.some((o) => o.label === clean)) continue;
+    const description = isObject(item) && typeof item.description === "string" ? item.description.trim() : "";
+    out.push({ label: clean, description });
+    if (out.length === MAX_OPTIONS) break;
+  }
+  return out;
+}
+
+/** A header for the dialog's chip: the model's, else the question's first words. */
+function headerOf(value: unknown, question: string): string {
+  const given = typeof value === "string" ? value.replace(/\s+/gu, " ").trim() : "";
+  if (given) return given.length > 12 ? `${given.slice(0, 11)}…` : given;
+  const words = question.replace(/[?.!]+$/u, "").split(/\s+/u);
+  let header = "";
+  for (const word of words) {
+    if ((header ? `${header} ${word}` : word).length > 12) break;
+    header = header ? `${header} ${word}` : word;
+  }
+  return header || question.slice(0, 11);
+}
+
 function questionsOf(value: unknown): Question[] {
   if (!Array.isArray(value)) return [];
   const out: Question[] = [];
   for (const item of value) {
     if (!isObject(item) || typeof item.question !== "string" || !item.question.trim()) continue;
-    const options = Array.isArray(item.options)
-      ? item.options.filter((o): o is string => typeof o === "string" && !!o.trim()).map((o) => o.trim()).slice(0, MAX_OPTIONS)
-      : [];
-    out.push({ question: item.question.trim(), options });
+    const question = item.question.trim();
+    if (out.some((q) => q.question === question)) continue;
+    out.push({ question, header: headerOf(item.header, question), options: optionsOf(item.options) });
     if (out.length === MAX_QUESTIONS) break;
   }
   return out;
