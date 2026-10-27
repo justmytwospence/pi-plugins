@@ -12,10 +12,10 @@
 // easing; in the steady state nothing runs.
 
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, totalmem } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createMonitor, DEFAULTS, formatRate, formatStatus, type Level, type Mode, type Paint, type PressureConfig, SIGNALS, topBy, type View } from "./pressure.ts";
+import { createMonitor, darwinMemoryText, DEFAULTS, formatBytes, formatRate, formatStatus, type Level, type Mode, type Paint, type PressureConfig, SIGNALS, topBy, type View } from "./pressure.ts";
 import { ensureHelper, startHelper } from "./darwin.ts";
 import { createSampler, type Sampler } from "./sample.ts";
 
@@ -83,7 +83,10 @@ export async function report(view: View | undefined, config: PressureConfig, sam
     lines.push(`cpu ${r.cpu === undefined ? "?" : Math.round(r.cpu)} busy${span}${arrow("cpu")} · ${lv("cpu")} (warn ${config.cpu.warn}, hot ${config.cpu.hot})`);
     lines.push(`load ${r.loadPerCore.toFixed(2)} per core${arrow("load")} · ${lv("load")} (warn ${config.loadPerCore.warn}, hot ${config.loadPerCore.hot})`);
     const m = r.memory;
-    if (m?.source === "darwin") lines.push(`memory pressure level ${m.level} (${DARWIN_LEVELS[m.level] ?? "unknown"})${arrow("mem")} · ${lv("mem")}`);
+    if (m?.source === "darwin") {
+      const numbers = darwinMemoryText(m);
+      lines.push(`memory ${numbers ? `${numbers} of ${formatBytes(totalmem())}; ` : ""}pressure level ${m.level} (${DARWIN_LEVELS[m.level] ?? "unknown"})${arrow("mem")} · ${lv("mem")}`);
+    }
     else if (m?.source === "psi") lines.push(`memory stall some ${m.some.toFixed(1)} full ${m.full.toFixed(1)}${span}${arrow("mem")} · ${lv("mem")} (some warn ${config.memorySome.warn}, hot ${config.memorySome.hot}; full warn ${config.memoryFull.warn}, hot ${config.memoryFull.hot})`);
     else lines.push("memory pressure unavailable on this platform");
     if (r.thermal) lines.push(`thermal ${THERMAL_STATES[r.thermal.state] ?? r.thermal.state}${arrow("heat")} · ${lv("heat")}`);

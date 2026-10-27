@@ -20,7 +20,7 @@ An always-on resource meter is noise most of the time. pi-pressure stays out of 
 Example row with pi-status-footer (illustration, not a screenshot):
 
 ```
- Pressure cpu 97 ↑ · load 1.6 · mem warn · thermal warn ↑ · top vitest
+ Pressure cpu 97 ↑ · load 1.6 · mem 83% used, 32GB compressed · thermal warn ↑ · top vitest
 ```
 
 Values take the level's color: muted once eased, warning, then error. A signal gets an arrow, `↑` or `↓`, only while it is moving significantly: its time-weighted mean over the last 15 seconds differs from the minute before by at least a step (15 points of CPU, 0.3 load per core, one macOS memory or thermal level, 5 points of Linux memory stall, 5 MB/s of swap-ins). Reads too sparse to compare, as when Pi is idle, give no arrow. When the terminal is narrow, the busiest process and eased signals go first; hot and warn signals stay. Without the footer, the same text appears in Pi's status row with level words: `pressure: cpu 97 ↑ hot · mem warn · top vitest`.
@@ -47,6 +47,8 @@ No OS sends an event for CPU load, and Linux pressure triggers need root on olde
 | Memory (Linux) | `/proc/pressure/memory` stall share over the interval, `some` / `full` | 10 / 2 | 40 / 5 |
 | Swap-in (Linux) | `/proc/vmstat` `pswpin`, MB/s | 10 | 50 |
 | Thermal (macOS) | Thermal state, pushed by the helper | serious (throttling) | critical |
+
+On macOS the row also shows memory used, as Activity Monitor counts it (app memory, wired and the compressor's physical pages, as a share of RAM), and the compressor's size, both from one `vm_stat` per read at most every 10 seconds: `mem 83% used, 32GB compressed`. They explain the level without setting it. The kernel decides the level from compressor occupancy and uncompressed headroom, with hysteresis, so warn can hold at a used share that looks moderate.
 
 A level rises at its threshold and falls only once the value is a margin below it (5 points for CPU), so a value hovering on a threshold does not toggle the row. Free memory is deliberately not a signal: both kernels use spare memory as cache, so pressure and swap-ins are the honest measures.
 

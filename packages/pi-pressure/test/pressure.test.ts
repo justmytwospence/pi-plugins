@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { ensureHelper, parseHelperLine, startHelper, type HelperLine } from "../src/darwin.ts";
 import { mergeConfig } from "../src/index.ts";
-import { bandLevel, createMonitor, DEFAULTS, formatRate, formatStatus, topBy, trends } from "../src/pressure.ts";
-import { busyPercent, cpuTimes, createSampler, parseProcVmstat, parsePs, parsePsi, processName, psiShare, type Reading, type SamplerDeps } from "../src/sample.ts";
+import { bandLevel, createMonitor, darwinMemoryText, DEFAULTS, formatRate, formatStatus, topBy, trends } from "../src/pressure.ts";
+import { busyPercent, cpuTimes, createSampler, parseProcVmstat, parsePs, parsePsi, parseVmStat, processName, psiShare, type Reading, type SamplerDeps } from "../src/sample.ts";
 
 const PSI = "some avg10=12.50 avg60=2.48 avg300=2.55 total=1000000\nfull avg10=3.10 avg60=0.00 avg300=0.00 total=200000\n";
 
@@ -49,6 +49,29 @@ describe("parsers", () => {
   });
 });
 
+const VM_STAT = `Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                    14448.
+Pages active:                                 834698.
+Pages wired down:                             360829.
+Pages purgeable:                               20762.
+Anonymous pages:                             1044661.
+Pages stored in compressor:                  3225355.
+Pages occupied by compressor:                2086480.
+`;
+const GB64 = 64 * 1024 ** 3;
+
+describe("vm_stat", () => {
+  test("used share as Activity Monitor counts it, and the compressor's physical size", () => {
+    const stats = parseVmStat(VM_STAT, GB64)!;
+    expect(stats.usedPercent).toBeCloseTo(((1044661 - 20762 + 360829 + 2086480) / 4194304) * 100);
+    expect(Math.round(stats.usedPercent)).toBe(83);
+    expect(stats.compressedBytes).toBe(2086480 * 16384);
+    expect(darwinMemoryText(stats)).toBe("83% used, 32GB compressed");
+    expect(parseVmStat("garbage", GB64)).toBeUndefined();
+    expect(parseVmStat(VM_STAT, 0)).toBeUndefined();
+  });
+});
+
 describe("sampler", () => {
   const deps = (over: Partial<SamplerDeps>, step = 2_000): SamplerDeps => {
     let t = 0, user = 0;
@@ -59,6 +82,7 @@ describe("sampler", () => {
       now: () => (t += step),
       run: async () => "2\n",
       read: async () => "",
+      totalmem: () => GB64,
       ...over,
     };
   };
@@ -75,20 +99,27 @@ describe("sampler", () => {
   });
   test("macOS: the helper's states replace sysctl; without it, one sysctl at most every 10 s", async () => {
     const calls: string[] = [];
-    const sampler = createSampler(deps({ run: async (command) => { calls.push(command); return "2\n"; } }));
-    for (let i = 0; i < 6; i++) await sampler.sample(); // 2 s apart
-    expect(calls).toEqual(["sysctl", "sysctl"]);
+    const sampler = createSampler(deps({ run: async (command) => { calls.push(command); return command === "vm_stat" ? VM_STAT : "2\n"; } }));
+    const first = await sampler.sample();
+    expect(first.memory).toMatchObject({ source: "darwin", level: 2, compressedBytes: 2086480 * 16384 });
+    for (let i = 0; i < 5; i++) await sampler.sample(); // 2 s apart
+    // sysctl and vm_stat each at most every 10 s.
+    expect(calls).toEqual(["sysctl", "vm_stat", "sysctl", "vm_stat"]);
     sampler.setDarwin({ memoryLevel: 4, thermalState: 2, at: 50_000 });
     const pushed = await sampler.sample();
-    expect(pushed.memory).toEqual({ source: "darwin", level: 4, since: 50_000 });
+    expect(pushed.memory).toMatchObject({ source: "darwin", level: 4, since: 50_000 });
+    expect(Math.round((pushed.memory as { usedPercent: number }).usedPercent)).toBe(83);
     expect(pushed.thermal).toEqual({ state: 2, since: 50_000 });
     // The same level again keeps its start time.
     sampler.setDarwin({ memoryLevel: 4, at: 60_000 });
     expect((await sampler.sample()).memory).toMatchObject({ since: 50_000 });
-    expect(calls).toHaveLength(2);
+    expect(calls.filter((c) => c === "sysctl")).toHaveLength(2);
     sampler.helperGone();
     for (let i = 0; i < 6; i++) await sampler.sample();
-    expect(calls.length).toBeGreaterThan(2);
+    expect(calls.filter((c) => c === "sysctl").length).toBeGreaterThan(2);
+    // Without vm_stat, the level alone.
+    const bare = createSampler(deps({ run: async (command) => { if (command === "vm_stat") throw new Error("ENOENT"); return "2\n"; } }));
+    expect((await bare.sample()).memory).toEqual({ source: "darwin", level: 2, since: 2_000 });
   });
   test("Linux: PSI share and swap-in rate over the interval; failures leave fields out", async () => {
     let some = 0, pswpin = 0;
@@ -247,6 +278,9 @@ describe("status", () => {
     expect(tagged).toContain("<warn>mem</> <warn>warn</>");
     expect(topBy(view)).toBe("cpu");
     expect(formatStatus({ ...view, visible: false }, "x")).toBeUndefined();
+    // macOS memory shows vm_stat's numbers before its level word.
+    m.step({ at: 300_000, since: 240_000, cpu: 97, loadPerCore: 1.6, memory: { source: "darwin", level: 2, since: 0, usedPercent: 83.2, compressedBytes: 32 * 1024 ** 3 } });
+    expect(formatStatus(m.view(), undefined)).toContain("mem 83% used, 32GB compressed warn");
   });
 });
 

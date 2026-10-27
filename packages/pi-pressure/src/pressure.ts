@@ -1,6 +1,6 @@
 // Turns readings into levels with hysteresis, decides when the row shows, and
 // formats the status pi-status-footer folds into its own row:
-//   pressure: cpu 97 ↑ hot · load 1.6 warn · mem warn · thermal warn · swap-in 40MB/s ↓ warn · top vitest
+//   pressure: cpu 97 ↑ hot · load 1.6 warn · mem 83% used, 32GB compressed warn · thermal warn · swap-in 40MB/s ↓ warn · top vitest
 // Items are ` · `-separated; each signal is `name [value] [↑|↓] level`, the
 // arrow only while it is moving significantly. Nothing ends in `%`
 // (herdr-web-ui reads a footer line ending in % $ # > as a shell prompt).
@@ -227,6 +227,19 @@ export function formatRate(bytesPerSecond: number): string {
   return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)}${units[unit]}/s`;
 }
 
+/** Bytes as a whole-ish size: `32GB`, `1.5GB`, `800MB`. */
+export function formatBytes(bytes: number): string {
+  return formatRate(bytes).replace("/s", "");
+}
+
+/** macOS memory's numbers for the row: `83% used, 32GB compressed`; empty until vm_stat has reported. */
+export function darwinMemoryText(memory: { usedPercent?: number; compressedBytes?: number }): string {
+  const parts: string[] = [];
+  if (memory.usedPercent !== undefined) parts.push(`${Math.round(memory.usedPercent)}% used`);
+  if (memory.compressedBytes !== undefined) parts.push(`${formatBytes(memory.compressedBytes)} compressed`);
+  return parts.join(", ");
+}
+
 export interface Paint { level(level: Level, text: string): string; dim(text: string): string }
 const plain: Paint = { level: (_level, text) => text, dim: (text) => text };
 
@@ -243,7 +256,7 @@ export function formatStatus(view: View, top: string | undefined, paint: Paint =
       const busy = r?.cpu;
       items.push(`${paint.level(level, "cpu")} ${value(busy === undefined ? "" : `${Math.round(busy)}`)}`);
     } else if (signal === "load") items.push(`${paint.level(level, "load")} ${value(r ? r.loadPerCore.toFixed(1) : "")}`);
-    else if (signal === "mem") items.push(`${paint.level(level, "mem")} ${value("")}`);
+    else if (signal === "mem") items.push(`${paint.level(level, "mem")} ${value(r?.memory?.source === "darwin" ? darwinMemoryText(r.memory) : "")}`);
     else if (signal === "heat") items.push(`${paint.level(level, "thermal")} ${value("")}`);
     else items.push(`${paint.level(level, "swap-in")} ${value(r?.swapInBps === undefined ? "" : formatRate(r.swapInBps))}`);
   }

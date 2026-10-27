@@ -15,8 +15,11 @@ export interface CpuTimes { idle: number; total: number }
 
 /** Memory pressure as the platform reports it. */
 export type MemoryReading =
-  /** macOS kern.memorystatus_vm_pressure_level: 1 normal, 2 warn, 4 critical; `since` is when it took this level. */
-  | { source: "darwin"; level: number; since: number }
+  /**
+   * macOS kern.memorystatus_vm_pressure_level: 1 normal, 2 warn, 4 critical; `since` is when it took this level.
+   * The level alone sets the signal's level; `usedPercent` and `compressedBytes` (from vm_stat) only describe it.
+   */
+  | { source: "darwin"; level: number; since: number; usedPercent?: number; compressedBytes?: number }
   /** Linux PSI, percent of time some/all tasks stalled on memory over the reading's interval. */
   | { source: "psi"; some: number; full: number };
 
@@ -78,6 +81,27 @@ export function parseProcVmstat(text: string): number | undefined {
   return match ? +match[1] : undefined;
 }
 
+export interface DarwinMemoryStats { usedPercent: number; compressedBytes: number }
+
+/**
+ * macOS `vm_stat`: memory used as Activity Monitor counts it (app memory, i.e.
+ * anonymous minus purgeable pages, plus wired, plus the compressor's physical
+ * pages) as a share of `totalBytes`, and the compressor's physical size.
+ */
+export function parseVmStat(text: string, totalBytes: number): DarwinMemoryStats | undefined {
+  const page = /page size of (\d+) bytes/.exec(text);
+  const count = (label: string) => {
+    const match = new RegExp(`^${label}:\\s+(\\d+)\\.?\\s*$`, "m").exec(text);
+    return match ? +match[1] : undefined;
+  };
+  const anonymous = count("Anonymous pages"), purgeable = count("Pages purgeable") ?? 0;
+  const wired = count("Pages wired down"), compressor = count("Pages occupied by compressor");
+  if (!page || anonymous === undefined || wired === undefined || compressor === undefined || !(totalBytes > 0)) return undefined;
+  const pageSize = +page[1];
+  const used = (Math.max(0, anonymous - purgeable) + wired + compressor) * pageSize;
+  return { usedPercent: Math.max(0, Math.min(100, (used / totalBytes) * 100)), compressedBytes: compressor * pageSize };
+}
+
 /** A process name fit for a one-line status: the command's base name, no separators, never ending in a prompt character. */
 export function processName(command: string): string {
   const base = path.basename(command.trim()) || command.trim();
@@ -105,6 +129,7 @@ export interface SamplerDeps {
   now: () => number;
   run: (command: string, args: string[]) => Promise<string>;
   read: (file: string) => Promise<string>;
+  totalmem: () => number;
 }
 
 export const run = (command: string, args: string[], timeout = 1_500): Promise<string> =>
@@ -122,6 +147,7 @@ export const defaultDeps: SamplerDeps = {
   now: () => Date.now(),
   run,
   read: (file) => readFile(file, "utf8"),
+  totalmem: () => os.totalmem(),
 };
 
 const LINUX_PAGE = 4096;
@@ -130,12 +156,14 @@ const LINUX_PAGE = 4096;
  * Reads on demand, keeping the previous counters to turn them into averages.
  * On macOS, memory and thermal come from the helper through `setDarwin`. Until
  * it reports (or when it cannot run), memory falls back to one `sysctl` per
- * read, at most every `darwinFallbackEveryMs`.
+ * read, at most every `darwinFallbackEveryMs`. Used memory and compressor size
+ * come from one `vm_stat` per read, at most as often.
  */
 export function createSampler(deps: SamplerDeps = defaultDeps, { darwinFallbackEveryMs = 10_000 } = {}) {
   let prev: { at: number; cpu: CpuTimes; psi?: Psi; pswpin?: number } | undefined;
   let darwin: { memory?: MemoryReading; thermal?: ThermalReading; live: boolean } = { live: false };
   let fallbackAt: number | undefined;
+  let stats: { at: number; value?: DarwinMemoryStats } | undefined;
   const quiet = async <T>(work: () => Promise<T>): Promise<T | undefined> => {
     try { return await work(); } catch { return undefined; }
   };
@@ -167,7 +195,10 @@ export function createSampler(deps: SamplerDeps = defaultDeps, { darwinFallbackE
           const level = await quiet(async () => Number.parseInt((await deps.run("sysctl", ["-n", "kern.memorystatus_vm_pressure_level"])).trim(), 10));
           if (level !== undefined && Number.isFinite(level)) darwin.memory = darwinLevel(level, at);
         }
-        if (darwin.memory) reading.memory = darwin.memory;
+        if (darwin.memory && (stats === undefined || at - stats.at >= darwinFallbackEveryMs)) {
+          stats = { at, value: await quiet(async () => parseVmStat(await deps.run("vm_stat", []), deps.totalmem())) };
+        }
+        if (darwin.memory) reading.memory = stats?.value ? { ...darwin.memory, ...stats.value } : darwin.memory;
         if (darwin.thermal) reading.thermal = darwin.thermal;
       } else if (deps.platform === "linux") {
         const [psi, pswpin] = await Promise.all([

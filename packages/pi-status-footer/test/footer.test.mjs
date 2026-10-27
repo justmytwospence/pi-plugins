@@ -556,6 +556,11 @@ test("pi-pressure's signals get their own row, with arrows while they move", () 
     { kind: "top", name: "vitest" },
   ]);
   assert.deepEqual(absorbed.rest, []);
+  // macOS mem carries a multi-word value; the level stays the last word.
+  assert.deepEqual(mod.parsePressureStatus("pressure: mem 83% used, 32GB compressed \u2191 warn \u00b7 top vitest"), [
+    { kind: "signal", name: "mem", value: "83% used, 32GB compressed", trend: "up", level: "warn" },
+    { kind: "top", name: "vitest" },
+  ]);
   const s = { ...fixture(), statuses: absorbed.rest, pressure: absorbed.pressure };
   assert.equal(plain(mod.renderFooter(s, 160, theme)[3]), " \uf2db  Pressure cpu  97 \u2191 \u00b7 load 1.6   \u00b7 mem warn \u2193 \u00b7 thermal hot    \u00b7 swap-in  40MB/s   \u00b7 top vitest");
   // Each signal keeps its width as its value, level and arrow change, so nothing after it moves.
