@@ -39,6 +39,11 @@
 - `toggleShortcut` toggles plan mode instead of opening the planner; the Settings step no longer
   edits it. New `plansDirectory` setting.
 
+### Patch Changes
+
+- Plan review no longer shows the previous plan when your agent writes the plan file and calls
+  `exit_plan_mode` in the same message: `exit_plan_mode` now runs sequentially, after the write.
+
 ## 1.0.0
 
 ### Major Changes

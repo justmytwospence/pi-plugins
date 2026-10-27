@@ -314,6 +314,11 @@ test("plan tools stay top-level so codemode cannot hide the inline plan review",
   assert.equal(tool(EXIT_TOOL).exposure, "model-only");
 });
 
+test("exit_plan_mode runs after a plan write in the same message, so it never reviews the previous plan", async () => {
+  const { tool } = await setup();
+  assert.equal((tool(EXIT_TOOL) as { executionMode?: string }).executionMode, "sequential");
+});
+
 test("enter_plan_mode lets your agent switch into plan mode itself", async () => {
   const { context, tool, inline, emit } = await setup();
   const result = await tool(ENTER_TOOL).execute("t1", {}, undefined, undefined, context.ctx);

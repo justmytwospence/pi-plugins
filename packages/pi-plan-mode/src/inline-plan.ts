@@ -380,6 +380,9 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     name: EXIT_TOOL,
     // Nested codemode calls have no transcript row to render the plan being approved.
     exposure: "model-only",
+    // The plan file is read when this runs: a write or edit to it in the same message must land
+    // first, or the review shows the previous plan. One sequential call makes the batch run in order.
+    executionMode: "sequential",
     label: "Exit plan mode",
     description:
       "In plan mode, once your plan is written to the plan file and complete: show it to the user and ask for approval to start implementing. It takes no arguments; it reads the plan file. Do not use it for research questions, and do not ask for approval any other way.",
