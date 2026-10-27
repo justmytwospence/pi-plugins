@@ -230,6 +230,25 @@ describe("clipboard mirror policy", () => {
     }
   });
 
+  it("yanking a collapsed paste registers and mirrors the pasted text", async () => {
+    const { editor } = createEditorWithSpy("");
+    const mirrored: string[] = [];
+    try {
+      editor.setClipboardFn(async (text) => {
+        mirrored.push(text);
+      });
+      const big = Array.from({ length: 15 }, (_, i) => `line ${i + 1}`).join("\n");
+      sendKeys(editor, ["i", `\x1b[200~${big}\x1b[201~`, "\x1b"]);
+      assert.match(editor.getText(), /^\[paste #1 \+15 lines\]$/);
+      sendKeys(editor, ["y", "y"]);
+      await nextClipboardDrain();
+      assert.equal(editor.getRegister(), `${big}\n`);
+      assert.deepEqual(mirrored, [`${big}\n`]);
+    } finally {
+      editor.setClipboardFn(() => {});
+    }
+  });
+
   it("replacing the writer after a failed mirror keeps put on the register", async () => {
     const { editor } = createEditorWithSpy("foo bar");
     try {

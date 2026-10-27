@@ -4472,12 +4472,29 @@ export class ModalEditor extends CustomEditor {
     return true;
   }
 
+  /**
+   * A collapsed paste (`[paste #1 +16 lines]`) is a placeholder for text the
+   * host keeps aside; yanking or deleting it registers (and mirrors) the
+   * pasted text itself, as the prompt would submit it.
+   */
+  private expandRegisterPasteMarkers(text: string): string {
+    if (!text.includes("[paste #")) return text;
+    const expand = (this as unknown as { expandPasteMarkers?: (t: string) => string }).expandPasteMarkers;
+    if (typeof expand !== "function") return text;
+    try {
+      return expand.call(this, text);
+    } catch {
+      return text;
+    }
+  }
+
   private writeToRegister(
     text: string,
     source: RegisterWriteSource = "mutation",
   ): void {
     if (this.blackHoleRegister) return;
     if (this.rowCtx) text = this.unwrapRegisterText(text);
+    text = this.expandRegisterPasteMarkers(text);
     this.unnamedRegister = text;
     const shouldMirror = text !== "" && this.shouldMirrorRegisterWrite(source);
     this.preferRegisterForPut = text !== "" && !shouldMirror;

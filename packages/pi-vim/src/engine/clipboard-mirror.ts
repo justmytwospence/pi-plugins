@@ -109,19 +109,39 @@ try {
 `;
 }
 
+/**
+ * Child-process source that prints the OS clipboard text. Prefers Pi's own
+ * `readClipboardText` (Wayland/X11 commands, then the native clipboard), which
+ * the package index does not export, so it is imported next to the resolved
+ * entry. Pi releases before that helper bundled `@mariozechner/clipboard`.
+ * Prints nothing when the clipboard holds no text.
+ */
 export function buildClipboardReadHelperSource(moduleUrl: string): string {
   return `
 import { createRequire } from "node:module";
 
-const require = createRequire(${JSON.stringify(moduleUrl)});
-const clipboard = require("@mariozechner/clipboard");
-if (!await clipboard.hasText()) {
-  process.exit(0);
+const moduleUrl = ${JSON.stringify(moduleUrl)};
+
+async function readPiClipboard() {
+  let mod;
+  try {
+    mod = await import(new URL("./utils/clipboard.js", moduleUrl).href);
+  } catch {
+    return undefined;
+  }
+  if (typeof mod.readClipboardText !== "function") return undefined;
+  return await mod.readClipboardText();
 }
-const text = await clipboard.getText();
-if (typeof text === "string") {
-  process.stdout.write(text);
+
+async function readLegacyClipboard() {
+  const clipboard = createRequire(moduleUrl)("@mariozechner/clipboard");
+  if (!(await clipboard.hasText())) return null;
+  return await clipboard.getText();
 }
+
+let text = await readPiClipboard();
+if (text === undefined) text = await readLegacyClipboard();
+if (typeof text === "string") process.stdout.write(text);
 `;
 }
 

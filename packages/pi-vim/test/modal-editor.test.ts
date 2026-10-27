@@ -8,9 +8,10 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, it } from "node:test";
 import { CURSOR_MARKER, TuiMainScreen, visibleWidth } from "@earendil-works/pi-tui";
 import {
@@ -465,36 +466,29 @@ function getClipboardHelperSourceWithMock(mockModuleSource: string): string {
   return buildClipboardWriteHelperSource(mockModuleUrl);
 }
 
-function getClipboardReadHelperSourceWithMock(
-  mockClipboardExpression: string,
-): string {
-  const mockModuleUrl = import.meta.url;
-  const helperSource = buildClipboardReadHelperSource(mockModuleUrl);
-  const requireLine = `const require = createRequire(${JSON.stringify(mockModuleUrl)});`;
-  const clipboardLine = 'const clipboard = require("@mariozechner/clipboard");';
-  const replacement = `const clipboard = ${mockClipboardExpression};`;
-  const mockedSource = helperSource.replace(
-    `${requireLine}\n${clipboardLine}`,
-    replacement,
-  );
-
-  assert.notEqual(
-    mockedSource,
-    helperSource,
-    "clipboard read helper require was not replaced",
-  );
-  assert.equal(
-    mockedSource.includes(clipboardLine),
-    false,
-    "real clipboard read helper require remains",
-  );
-  assert.equal(
-    mockedSource.includes(replacement),
-    true,
-    "mock clipboard object missing",
-  );
-
-  return mockedSource;
+/**
+ * A fake Pi install: `dist/index.js` plus, optionally, `dist/utils/clipboard.js`
+ * and a legacy `@mariozechner/clipboard` package. Returns the entry URL.
+ */
+async function makeFakePiInstall(files: {
+  piReader?: string;
+  legacyClipboard?: string;
+}): Promise<{ moduleUrl: string; dispose(): Promise<void> }> {
+  const root = await mkdtemp(join(tmpdir(), "pi-vim-clip-"));
+  const dist = join(root, "dist");
+  await mkdir(join(dist, "utils"), { recursive: true });
+  await writeFile(join(dist, "index.js"), "export {};\n");
+  if (files.piReader) await writeFile(join(dist, "utils", "clipboard.js"), files.piReader);
+  if (files.legacyClipboard) {
+    const pkg = join(root, "node_modules", "@mariozechner", "clipboard");
+    await mkdir(pkg, { recursive: true });
+    await writeFile(join(pkg, "package.json"), JSON.stringify({ name: "@mariozechner/clipboard", main: "index.js" }));
+    await writeFile(join(pkg, "index.js"), files.legacyClipboard);
+  }
+  return {
+    moduleUrl: pathToFileURL(join(dist, "index.js")).href,
+    dispose: () => rm(root, { recursive: true, force: true }),
+  };
 }
 
 function runClipboardHelperSource(
@@ -3622,21 +3616,57 @@ describe("delete operator — dw / de / db / d$ / d0 / dd", () => {
     assert.equal(result.stdout, "copy:payload");
   });
 
-  it("clipboard read helper treats no text as an empty successful read", async () => {
-    const helperSource = await getClipboardReadHelperSourceWithMock(
-      [
-        "{",
-        "  async hasText() { return false; },",
-        '  async getText() { throw new Error("No string found"); },',
-        "}",
-      ].join("\n"),
-    );
+  it("clipboard read helper uses Pi's readClipboardText next to the entry", async () => {
+    const install = await makeFakePiInstall({
+      piReader: 'export async function readClipboardText() { return "from-pi"; }\n',
+      legacyClipboard: 'module.exports = { hasText: async () => true, getText: async () => "legacy" };\n',
+    });
+    try {
+      const result = await runClipboardHelperSource(buildClipboardReadHelperSource(install.moduleUrl), "");
+      assert.equal(result.code, 0, result.stderr);
+      assert.equal(result.stdout, "from-pi");
+    } finally {
+      await install.dispose();
+    }
+  });
 
-    const result = await runClipboardHelperSource(helperSource, "");
+  it("clipboard read helper prints nothing when Pi reads no text", async () => {
+    const install = await makeFakePiInstall({
+      piReader: "export async function readClipboardText() { return null; }\n",
+    });
+    try {
+      const result = await runClipboardHelperSource(buildClipboardReadHelperSource(install.moduleUrl), "");
+      assert.equal(result.code, 0, result.stderr);
+      assert.equal(result.stdout, "");
+    } finally {
+      await install.dispose();
+    }
+  });
 
-    assert.equal(result.code, 0, result.stderr);
-    assert.equal(result.signal, null);
-    assert.equal(result.stdout, "");
+  it("clipboard read helper falls back to @mariozechner/clipboard on older Pi", async () => {
+    const install = await makeFakePiInstall({
+      legacyClipboard: 'module.exports = { hasText: async () => true, getText: async () => "legacy" };\n',
+    });
+    try {
+      const result = await runClipboardHelperSource(buildClipboardReadHelperSource(install.moduleUrl), "");
+      assert.equal(result.code, 0, result.stderr);
+      assert.equal(result.stdout, "legacy");
+    } finally {
+      await install.dispose();
+    }
+  });
+
+  it("clipboard read helper treats legacy no-text as an empty read", async () => {
+    const install = await makeFakePiInstall({
+      legacyClipboard: 'module.exports = { hasText: async () => false, getText: async () => { throw new Error("No string found"); } };\n',
+    });
+    try {
+      const result = await runClipboardHelperSource(buildClipboardReadHelperSource(install.moduleUrl), "");
+      assert.equal(result.code, 0, result.stderr);
+      assert.equal(result.stdout, "");
+    } finally {
+      await install.dispose();
+    }
   });
 
   it("active clipboard write receives no abort event when superseded", async () => {
