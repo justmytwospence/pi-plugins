@@ -280,7 +280,7 @@ describe("status", () => {
     expect(formatStatus({ ...view, visible: false }, "x")).toBeUndefined();
     // macOS memory shows vm_stat's numbers before its level word.
     m.step({ at: 300_000, since: 240_000, cpu: 97, loadPerCore: 1.6, memory: { source: "darwin", level: 2, since: 0, usedPercent: 83.2, compressedBytes: 32 * 1024 ** 3 } });
-    expect(formatStatus(m.view(), undefined)).toContain("mem 83% used, 32GB compressed warn");
+    expect(formatStatus(m.view(), undefined)).toContain("mem 83% used warn");
   });
 });
 

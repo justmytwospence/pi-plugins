@@ -125,13 +125,13 @@ export type PressureItem =
   | { kind: "signal"; name: "cpu" | "load" | "mem" | "thermal" | "swap-in"; value?: string; trend?: "up" | "down"; level: "ok" | "warn" | "hot" }
   | { kind: "top"; name: string };
 
-/** pi-pressure's status, `pressure: cpu 97 \u2191 hot \u00b7 mem 83% used, 32GB compressed warn \u00b7 swap-in 40MB/s \u2193 warn \u00b7 top vitest`, or undefined when any item is unfamiliar. */
+/** pi-pressure's status, `pressure: cpu 97 \u2191 hot \u00b7 mem 83% used warn \u00b7 swap-in 40MB/s \u2193 warn \u00b7 top vitest`, or undefined when any item is unfamiliar. */
 export function parsePressureStatus(text: string): PressureItem[] | undefined {
   const match = /^pressure: (.+)$/.exec(text);
   if (!match) return undefined;
   const items: PressureItem[] = [];
   for (const part of match[1].split(" \u00b7 ")) {
-    // The value may span words (macOS mem: `83% used, 32GB compressed`); the level is always last.
+    // The value may span words (macOS mem: `83% used`); the level is always last.
     const signal = /^(cpu|load|mem|thermal|swap-in)(?: ([^\u2191\u2193]+?))?(?: ([\u2191\u2193]))? (ok|warn|hot)$/.exec(part);
     const top = /^top (.+)$/.exec(part);
     if (signal) {

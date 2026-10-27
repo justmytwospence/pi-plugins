@@ -3,7 +3,7 @@
 A footer row that appears only while the machine is under CPU, memory or thermal pressure, and goes away once it eases. It does not poll.
 
 ```
- Pressure cpu 97 ↑ · load 1.6 · mem 83% used, 32GB compressed · thermal warn ↑ · top vitest
+ Pressure cpu 97 ↑ · load 1.6 · mem 83% used · thermal warn ↑ · top vitest
 ```
 
 (Example, not a screenshot.) With [pi-status-footer](../pi-status-footer) the row sits under the context and background rows, led by a microchip icon. Values are colored by level (muted ok, warning, error). Without it, the same text shows in Pi's status row as `pressure: cpu 97 ↑ hot · …`.
@@ -18,7 +18,7 @@ A footer row that appears only while the machine is under CPU, memory or thermal
 ## Signals
 
 - **CPU:** busy share of all cores over the interval (warn 85, hot 95), and the kernel's one-minute load per core (warn 1.5, hot 2.5).
-- **Memory, macOS:** the kernel's memory pressure level (2 warn, 4 critical) sets the level. The row shows two numbers from `vm_stat` (one run per read, at most every 10 s) beside it: memory used as Activity Monitor counts it (app memory, wired, and the compressor's physical pages, as a share of RAM) and the compressor's physical size. They explain the level but do not set it: the kernel decides it from compressor occupancy and uncompressed headroom, with hysteresis, so warn can hold at a used share that looks moderate. (`kern.memorystatus_level`, which `memory_pressure` calls "free percentage", is not used: it counts uncompressed pages, most of them in use.)
+- **Memory, macOS:** the kernel's memory pressure level (2 warn, 4 critical) sets the level. The row shows memory used beside it, as Activity Monitor counts it (app memory, wired, and the compressor's physical pages, as a share of RAM), from `vm_stat` (one run per read, at most every 10 s); `/pressure details` adds the compressor's physical size. These explain the level but do not set it: the kernel decides it from compressor occupancy and uncompressed headroom, with hysteresis, so warn can hold at a used share that looks moderate. (`kern.memorystatus_level`, which `memory_pressure` calls "free percentage", is not used: it counts uncompressed pages, most of them in use.)
 - **Memory, Linux:** PSI stall share (`/proc/pressure/memory`: `some` warn 10, hot 40; `full` warn 2, hot 5) and swap-ins from `/proc/vmstat` (warn 10 MB/s, hot 50 MB/s).
 - **Thermal, macOS:** `serious` (the system is throttling) is warn, `critical` is hot.
 - **Other platforms:** CPU only.
