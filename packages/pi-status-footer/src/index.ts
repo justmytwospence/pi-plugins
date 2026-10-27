@@ -175,6 +175,8 @@ export interface MarimoStatus {
   notebook: string;
   running?: { section: string; elapsed?: string };
   queued?: number; errors?: number;
+  /** The first error, e.g. `Model fit (KeyError) +1` (newer pi-marimo only). */
+  errorDetail?: string;
   /** The other notebooks pi-marimo follows, most recently used first (older versions sent only a count). */
   others?: string[] | number;
   /** The server: `:2718` when local, else `host[:port][/path]`. */
@@ -191,13 +193,13 @@ export function parseMarimoStatus(text: string): MarimoStatus | undefined {
   for (const part of parts) {
     const running = /^running (.+?)(?: \((\S+)\))?$/.exec(part);
     const queued = /^(\d+) queued$/.exec(part);
-    const errors = /^(\d+) errors?$/.exec(part);
+    const errors = /^(\d+) errors?(?:: (.+))?$/.exec(part);
     const others = /^\+(\d+) open$/.exec(part);
     const also = /^also (.+)$/.exec(part);
     if (/^:\d+(\/\S*)?$/.test(part) || /^[\w-]+(\.[\w-]+)+(:\d+)?(\/\S*)?$/.test(part)) status.where = part;
     else if (running) status.running = { section: running[1], elapsed: running[2] };
     else if (queued) status.queued = +queued[1];
-    else if (errors) status.errors = +errors[1];
+    else if (errors) { status.errors = +errors[1]; if (errors[2]) status.errorDetail = errors[2]; }
     else if (others) status.others = +others[1];
     else if (also) status.others = also[1].split(", ");
     else status.notes.push(part);
@@ -750,13 +752,15 @@ function marimoRow(m: MarimoStatus, width: number, theme: Paint): string {
   const run = m.running;
   const time = run?.elapsed ? theme.fg("dim", ` ${run.elapsed}`) : "";
   const deepest = run?.section.split(" › ").pop() ?? "";
+  const errorCount = theme.fg("error", `${m.errors} error${m.errors === 1 ? "" : "s"}`);
   return fitSegments([
     { text: `${theme.fg("muted", "Marimo")} ${theme.bold(theme.fg("accent", m.notebook))}`, short: theme.bold(theme.fg("accent", m.notebook)), separatorAfter: m.where ? (m.where.startsWith(":") ? "" : " ") : undefined, priority: 90 },
     { text: m.where ? theme.fg("dim", m.where) : "", priority: 75 },
     { text: run ? `${theme.fg("warning", "running")} ${run.section}${time}` : "",
       short: run ? `${theme.fg("warning", "running")} ${truncateToWidth(deepest, 30)}${time}` : "", priority: 100 },
     { text: m.queued ? theme.fg("muted", `${m.queued} queued`) : "", priority: 30 },
-    { text: m.errors ? theme.fg("error", `${m.errors} error${m.errors === 1 ? "" : "s"}`) : "", priority: 95 },
+    { text: m.errors ? `${errorCount}${m.errorDetail ? `${theme.fg("dim", ":")} ${theme.fg("muted", m.errorDetail)}` : ""}` : "",
+      short: m.errors ? errorCount : "", priority: 95 },
     ...(typeof m.others === "number"
       ? [{ text: m.others ? theme.fg("dim", `+${m.others} open`) : "", priority: 20 }]
       : [{ text: m.others?.length ? `${theme.fg("dim", "also")} ${theme.fg("muted", m.others.join(", "))}` : "",

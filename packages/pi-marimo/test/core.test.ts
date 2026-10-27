@@ -151,6 +151,13 @@ describe("render", () => {
     );
   });
 
+  test("status line names the first error", () => {
+    const nb = replay("kiosk-run.sse");
+    expect(statusText(statusParts(nb, attachment, "connected"))).toMatch(/ · 1 error: [^·]+ \(ZeroDivisionError\)$/);
+    const two = statusText({ notebook: "nb.py", connection: "connected", queued: 0, errors: 2, firstError: "Fit (KeyError)" });
+    expect(two).toBe("marimo: nb.py · 2 errors: Fit (KeyError) +1");
+  });
+
   test("snapshot outline", () => {
     const text = snapshot([{ notebook: replay("kiosk-run.sse"), attachment }]);
     expect(text).toContain("# Data loading  [MJUe]");

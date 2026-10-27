@@ -27,6 +27,8 @@ export interface StatusParts {
   running?: { section: string; cell: string; elapsed?: string };
   queued: number;
   errors: number;
+  /** Where the first error is and what it is, e.g. `Model fit (KeyError)`. */
+  firstError?: string;
   /** File names of the other notebooks followed, most recently used first. */
   others?: string[];
   /** Where the server is: `:2718` when local, else `host[:port][/path]` (no scheme). */
@@ -45,6 +47,16 @@ export function shortWhere(url: string): string | undefined {
   return `${u.host}${path}`;
 }
 
+/** The first failing cell, short: its deepest heading (else its name or id) and the error's kind. */
+export function errorLabel(nb: NotebookState): string | undefined {
+  const cell = nb.errors()[0];
+  if (!cell?.error) return undefined;
+  const section = nb.sectionPath(cell.id).pop();
+  const where = section ?? (cell.name !== "_" ? cell.name : `cell ${cell.id}`);
+  const kind = /^([A-Za-z_][\w.]*):/.exec(cell.error)?.[1] ?? cell.error;
+  return `${truncate(where, 32)} (${truncate(kind, 32)})`;
+}
+
 export function statusParts(nb: NotebookState, attachment: Attachment, connection: string, now = Date.now(), others: Attachment[] = []): StatusParts {
   const run = connection === "connected" ? nb.running() : undefined;
   return {
@@ -59,6 +71,7 @@ export function statusParts(nb: NotebookState, attachment: Attachment, connectio
       : undefined,
     queued: connection === "connected" ? nb.queued() : 0,
     errors: connection === "connected" ? nb.errors().length : 0,
+    firstError: connection === "connected" ? errorLabel(nb) : undefined,
     others: others.map((o) => basename(o.path)),
     where: shortWhere(attachment.url),
   };
@@ -68,7 +81,7 @@ export function statusParts(nb: NotebookState, attachment: Attachment, connectio
  * One line, e.g. `marimo: fit.py · running Data loading › Model fit (12s) · 2 queued · 1 error · also prep.py, plots.py`.
  * The shape is stable so footers can parse it: `marimo: <current file>`, then its server (`:port` when local,
  * else `host[/path]`), then ` · ` separated parts
- * about it, then `also <file>, <file>` naming the other notebooks followed.
+ * about it (errors as `2 errors: <heading> (<ErrorType>) +1`), then `also <file>, <file>` naming the other notebooks followed.
  */
 export function statusText(parts: StatusParts): string {
   const out = [`marimo: ${parts.notebook}`];
@@ -79,7 +92,10 @@ export function statusText(parts: StatusParts): string {
     out.push(`running ${where}${parts.running.elapsed ? ` (${parts.running.elapsed})` : ""}`);
   }
   if (parts.queued) out.push(`${parts.queued} queued`);
-  if (parts.errors) out.push(`${parts.errors} error${parts.errors === 1 ? "" : "s"}`);
+  if (parts.errors) {
+    const label = `${parts.errors} error${parts.errors === 1 ? "" : "s"}`;
+    out.push(parts.firstError ? `${label}: ${parts.firstError}${parts.errors > 1 ? ` +${parts.errors - 1}` : ""}` : label);
+  }
   if (parts.others?.length) out.push(`also ${parts.others.join(", ")}`);
   return out.join(" · ");
 }

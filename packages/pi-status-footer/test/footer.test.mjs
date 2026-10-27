@@ -626,6 +626,11 @@ test("each of pi-marimo's notebooks gets a row of its own, in key order", () => 
   assert.equal(rows[3], " \uf02d  Marimo fit.py \u00b7 running Model fit 3s");
   assert.equal(rows[4], " \uf02d  Marimo prep.py \u00b7 1 error");
   assert.equal(rows[5], " \uf02d  Marimo j.py");
+  const detailed = mod.absorbStatuses(new Map([["marimo", "marimo: fit.py \u00b7 :2718 \u00b7 2 errors: Model fit (KeyError) +1"]]), { claudeRow: true }).marimo;
+  assert.deepEqual(detailed, [{ notebook: "fit.py", where: ":2718", errors: 2, errorDetail: "Model fit (KeyError) +1", notes: [] }]);
+  const ds = { ...fixture(), marimo: detailed };
+  assert.equal(plain(mod.renderFooter(ds, 160, theme)[3]), " \uf02d  Marimo fit.py:2718 \u00b7 2 errors: Model fit (KeyError) +1");
+  assert.equal(plain(mod.renderFooter(ds, 30, theme)[3]), "\uf02d  fit.py:2718 \u00b7 2 errors");
   assert.match(rows[6], /Lens fit\.py/);
 });
 
