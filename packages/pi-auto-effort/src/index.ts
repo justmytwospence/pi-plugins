@@ -25,7 +25,7 @@ import {
 } from "./limits.ts";
 import { DEFAULT_EFFORT_UPDATES, type EffortUpdatesConfig, emptyState, restoreState, rewritePayload } from "./effort-updates.ts";
 import { DEFAULT_MID_RUN, MID_RUN_QUESTIONS, type MidRunConfig, globMatch, midRunSupported, runState, shouldAssess } from "./midrun.ts";
-import { DEFAULT_POLICY, type EffortState, type Judgment, LEVELS, type Policy, decide, trend } from "./policy.ts";
+import { DEFAULT_POLICY, type EffortState, type Judgment, LEVELS, type Mode, type Policy, decide, policyMode, trend } from "./policy.ts";
 import { clip, messageText } from "./transcript.ts";
 import { CodexPoller } from "./usage.ts";
 
@@ -186,6 +186,8 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     record: (readings) => readings.forEach((r) => tracker("openai-codex").record(r)),
   });
   let sessionOn = true;
+  // `/auto-effort direct|smoothed` for this session; undefined follows the settings.
+  let sessionMode: Mode | undefined;
   let applying = false;
   // Our own setThinkingLevel calls also emit thinking_level_select, during or just after the call.
   let ownLevel: string | undefined;
@@ -201,6 +203,12 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
   let generation = 0;
 
   const active = () => sessionOn && config.enabled && !pinned;
+
+  const configuredMode = (): Mode => sessionMode ?? policyMode(config.policy);
+  /** True when the model keeps its prompt cache across an effort change (mid-run or configuration_update). */
+  const cacheSafe = (ctx: ExtensionContext) => midRunSupported(ctx.model, [...midRunConfig(config.midRun).models, ...updateModels(config)]);
+  /** Direct only where a change is free; elsewhere every change costs a cache rewrite, so smoothed. */
+  const effectiveMode = (ctx: ExtensionContext): Mode => (configuredMode() === "direct" && cacheSafe(ctx) ? "direct" : "smoothed");
 
   const limits = () => limitsPolicy(config.limits);
   const limitsOn = () => active() && limits().enabled;
@@ -329,7 +337,8 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     const current = pi.getThinkingLevel();
     // The policy works from its own last pick; a level someone else set since replaces it.
     const base = baseline !== undefined && appliedLevel !== undefined && current === appliedLevel ? baseline : current;
-    const decision = decide(base, state, judgment, config.policy);
+    const mode = effectiveMode(ctx);
+    const decision = decide(base, state, judgment, config.policy, mode);
     state = decision.state;
     baseline = decision.level;
     lastReason = outcome.ok ? decision.reason : `unavailable: ${outcome.reason}`;
@@ -358,6 +367,7 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     pi.appendEntry(STATE_ENTRY, {
       ...state,
       ...extra,
+      mode,
       baseline,
       from: current,
       level: appliedLevel,
@@ -394,14 +404,16 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
   pi.on("turn_end", async (event, ctx) => {
     if (!active()) return;
     const mid = midRunConfig(config.midRun);
-    if (!mid.enabled || !midRunSupported(ctx.model, [...mid.models, ...updateModels(config)])) return;
+    if (!mid.enabled || !cacheSafe(ctx)) return;
     const results = (event.toolResults ?? []) as Array<{ isError?: boolean }>;
     const stop = (event.message as { stopReason?: string } | undefined)?.stopReason;
     const signal = ctx.signal;
     // A turn without tool results ends the run; an error or abort has no next request to change.
     if (!results.length || stop === "error" || stop === "aborted" || signal?.aborted) return;
     turnsSince++;
-    if (!shouldAssess(mid, turnsSince, results.filter((r) => r.isError).length)) return;
+    // Direct mode re-rates after every tool turn.
+    const cadence = effectiveMode(ctx) === "direct" ? { ...mid, everyTurns: 1 } : mid;
+    if (!shouldAssess(cadence, turnsSince, results.filter((r) => r.isError).length)) return;
     turnsSince = 0;
     const mine = generation;
     const outcome = await askJev(ctx.modelRegistry, config.jev, runState(ctx.sessionManager.getBranch(), mid.steps), MID_RUN_QUESTIONS, signal);
@@ -413,9 +425,9 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
   });
 
   pi.registerCommand("auto-effort", {
-    description: "auto-effort: status, limits, on, or off (this session)",
+    description: "auto-effort: status, limits, on, off, direct, or smoothed (this session)",
     getArgumentCompletions: (prefix: string) =>
-      ["status", "limits", "on", "off"].filter((o) => o.startsWith(prefix)).map((o) => ({ value: o, label: o })),
+      ["status", "limits", "on", "off", "direct", "smoothed"].filter((o) => o.startsWith(prefix)).map((o) => ({ value: o, label: o })),
     handler: async (args, ctx) => {
       const arg = args.trim();
       if (arg === "on" || arg === "off") {
@@ -434,6 +446,14 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
         ctx.ui.notify(`auto-effort ${arg} for this session${sessionOn ? "" : `; back to ${pi.getThinkingLevel()}`}`, "info");
         return;
       }
+      if (arg === "direct" || arg === "smoothed") {
+        sessionMode = arg;
+        generation++;
+        status(ctx);
+        const fallback = arg === "direct" && !cacheSafe(ctx) ? `; ${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "this model"} loses its cache on an effort change, so it stays smoothed` : "";
+        ctx.ui.notify(`auto-effort ${arg} for this session${fallback}`, "info");
+        return;
+      }
       if (arg === "limits") {
         ctx.ui.notify(limitLines(ctx).join("\n"), "info");
         return;
@@ -441,6 +461,7 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
       ctx.ui.notify(
         [
           `auto-effort ${active() ? "on" : pinned ? "off (--thinking was given)" : "off"}: ${pi.getThinkingLevel()} now, ceiling ${state.ceiling} (your last manual level), floor ${config.policy.floor}.`,
+          modeLine(configuredMode(), effectiveMode(ctx), sessionMode !== undefined),
           `Running average ${state.e === undefined ? "-" : state.e.toFixed(2)}, ${state.dwell} assessment${state.dwell === 1 ? "" : "s"} at this level${lastReason ? `, last decision: ${lastReason}` : ""}.`,
           ...(baseline !== undefined && baseline !== appliedLevel ? [`Without the limit: ${baseline}.`] : []),
           ...limitLines(ctx),
@@ -449,6 +470,14 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
       );
     },
   });
+}
+
+function modeLine(configured: Mode, effective: Mode, session: boolean) {
+  const source = session ? "this session" : "settings";
+  if (configured === effective) {
+    return effective === "direct" ? `Mode: direct (${source}): each score sets the level.` : `Mode: smoothed (${source}).`;
+  }
+  return `Mode: direct (${source}), smoothed on this model: an effort change here loses the prompt cache.`;
 }
 
 function levelDiffers(a: string, b: string) {

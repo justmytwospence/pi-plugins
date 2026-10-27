@@ -84,6 +84,40 @@ test("no mid-run change on other models, on the final turn, or when off", async 
   expect(u.jev.calls).toHaveLength(0);
 });
 
+test("direct mode re-rates after every tool turn and follows each score", async () => {
+  const { h, jev, ctx } = setup([1, 3, 0, 2]);
+  h.pi.setThinkingLevel("xhigh");
+  await h.emit("session_start", { type: "session_start" }, ctx);
+  await h.commands.get("auto-effort").handler("direct", ctx);
+  expect(ctx.ui.notes.at(-1)!.message).toBe("auto-effort direct for this session");
+  await h.emit("before_agent_start", { prompt: "refactor the sync engine" }, ctx);
+  expect(h.thinking).toBe("medium");
+  await h.emit("turn_end", turn(), ctx);
+  expect(h.thinking).toBe("xhigh");
+  await h.emit("turn_end", turn(), ctx);
+  expect(h.thinking).toBe("low");
+  await h.emit("turn_end", turn(), ctx);
+  expect(h.thinking).toBe("high");
+  expect(jev.calls).toHaveLength(4);
+  expect(h.entries.at(-1)?.data).toMatchObject({ phase: "run", mode: "direct", reason: "direct", level: "high" });
+  await h.commands.get("auto-effort").handler("status", ctx);
+  expect(ctx.ui.notes.at(-1)!.message).toContain("Mode: direct (this session)");
+});
+
+test("direct mode stays smoothed on a model that loses its cache on an effort change", async () => {
+  const { h, jev, ctx } = setup([0, 0], older);
+  h.pi.setThinkingLevel("xhigh");
+  await h.emit("session_start", { type: "session_start" }, ctx);
+  await h.commands.get("auto-effort").handler("direct", ctx);
+  expect(ctx.ui.notes.at(-1)!.message).toContain("stays smoothed");
+  await h.emit("before_agent_start", { prompt: "trivial" }, ctx);
+  expect(h.entries.at(-1)?.data).toMatchObject({ mode: "smoothed" });
+  for (let i = 0; i < 3; i++) await h.emit("turn_end", turn(), ctx);
+  expect(jev.calls).toHaveLength(1);
+  await h.commands.get("auto-effort").handler("status", ctx);
+  expect(ctx.ui.notes.at(-1)!.message).toContain("smoothed on this model");
+});
+
 test("a new prompt resets the turn count", async () => {
   const { h, jev, ctx } = setup([1, 1, 1, 1]);
   await h.emit("session_start", { type: "session_start" }, ctx);

@@ -8,7 +8,7 @@ plugin: pi-auto-effort
 
 - **Use it for:** Adapt reasoning to task difficulty while retaining your model and manual ceiling.
 - **Enable:** Select `packages/pi-auto-effort/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
-- **Controls:** `/auto-effort` status/limits/on/off. No global shortcut; stock thinking controls remain Pi's.
+- **Controls:** `/auto-effort` status/limits/on/off/direct/smoothed. No global shortcut; stock thinking controls remain Pi's.
 - **Settings:** `auto-effort.json` shared/user/project layers; low floor, 1500 ms Jev timeout, mid-run checks normally every 3 tool turns.
 - **Requirements, cost & privacy:** Optional paid Jev sees request/activity excerpts; unavailable judgments keep the baseline. Provider quota reads use credentials; reasoning changes affect cost/latency.
 - **Integrations & limits:** Optional footer; `--thinking` disables assessment. Explicit effort-update rewriting has its own switch; `/auto-effort off` does not disable it.
@@ -27,6 +27,8 @@ Jev classification requires Pi 0.99 or newer and classifier credentials managed 
 
 Jev rates difficulty from zero to three, corresponding to `low`, `medium`, `high` and `xhigh`. A running average, movement margin and minimum dwell keep small differences from constantly changing the level. A confident large increase can bypass gradual movement. Short acknowledgements keep the existing policy level.
 
+Setting `policy.mode` to `direct` (or `/auto-effort direct` for one session) drops the average: each score, rounded, sets the level, and on mid-run models Jev re-rates after every tool turn. Scores Jev is unsure of (confidence below `policy.minConfidence`, default 0.45) and acknowledgements keep the level. Because each change on other models can invalidate the cached prefix, `direct` stays `smoothed` there. Decision records name the mode in force, so you can compare periods of each.
+
 Your latest manual thinking selection becomes the ceiling. The default floor is `low`; selections below it, such as `off` and `minimal`, are left alone. Starting Pi with `--thinking` disables automatic assessment, including for explicitly configured subagents. Turning auto effort off restores the manual ceiling.
 
 Mid-run checks normally happen every three tool turns, or after a turn containing a failed tool call. They require Pi's `compat.supportsMidConvoEffort` capability or an explicitly allowed model. Other models change only at new prompts, avoiding effort changes on tool follow-ups that could invalidate the cached prefix.
@@ -41,6 +43,7 @@ The current `effortUpdates.models` defaults are `openai-codex/gpt-6-astra` and `
 | `/auto-effort limits` | Inspect usage windows and forecasts. |
 | `/auto-effort on` | Enable automatic effort for this session, subject to settings and `--thinking`. |
 | `/auto-effort off` | Disable it for this session and restore the ceiling. |
+| `/auto-effort direct` / `smoothed` | Set the policy mode for this session. |
 
 Configuration merges in this order: `~/.config/agents/auto-effort.json`, `~/.pi/agent/auto-effort.json`, `<project>/.agents/auto-effort.json`, then `<project>/.pi/auto-effort.json`. `$XDG_CONFIG_HOME` relocates the shared user directory. Objects merge; other values replace earlier ones.
 

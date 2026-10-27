@@ -43,6 +43,8 @@ Jev sees the request, the two before it, the last answer, and what the last run 
 
 **Smoothing.** A running average `e = alpha·score + (1 - alpha)·e_prev` (default alpha 0.5) moves the level up when it is at least `margin` (0.6) above it, and down when at least 0.6 below and the level has held for `minDwell` (2) assessments. A confident (`jumpConfidence` >= 0.6) score `jump` (1.5) or more above the level jumps straight to it. A go-ahead ("yes", "continue", "do it", above `ackThreshold` 0.7) keeps the level and leaves the average alone.
 
+**Direct mode.** With `policy.mode` set to `direct` (or `/auto-effort direct` for the session), each assessment's score, rounded, is the level, with no running average, margin or dwell. A go-ahead keeps the level, as does a score Jev is less than `minConfidence` (0.45) sure of. On mid-run models (below) it re-rates after every tool turn instead of every `midRun.everyTurns`. The average exists to stop the level flip-flopping, which costs something only where a change loses the prompt cache, so on every other model `direct` stays `smoothed`. Each state entry records the mode in force, so a stretch of each can be compared (for example with pi-trends' per-call effort and token counts).
+
 **Bounds.** Your latest manual level is the ceiling: any thinking-level change auto-effort did not make itself (`/thinking`, Pi's shortcut, a model switch that changes the level, or another extension such as plan mode). `policy.floor` (`low`) is the floor. Levels outside the managed range (`off`, `minimal`) are left alone, as is everything when the ceiling is below the floor. The policy never picks `max`; a `max` ceiling only caps it.
 
 **Mid-run.** A long run can change what it needs: mechanical edits after a hard design step, or a debugging stretch in the middle of a routine change. On models that take an effort change mid-conversation without losing the prompt cache (those Pi marks with `compat.supportsMidConvoEffort`, the effort-update models below, and any `midRun.models` globs), Jev re-rates the work between tool turns: every `midRun.everyTurns` (3) tool turns, or at once after a turn with `midRun.errorTurns` (1) or more failed tool calls. It sees the request that started the run, the agent's last `midRun.steps` (6) steps (what it said, the tools it called, what failed) and counts for the run so far. The same average, dwell, ceiling, floor and limits apply (dwell counts these assessments too). The check runs after the tools finish and before the next request, adding one Jev call every few turns.
@@ -66,10 +68,11 @@ On OpenAI Responses models whose backend accepts a `configuration_update` input 
 - `/auto-effort` or `/auto-effort status`: current level, ceiling, floor, running average, dwell, last decision, the level without the limit when one applies, and the limits lines.
 - `/auto-effort limits`: for each window of the current provider: use, elapsed share, projection, time to run out, reading age and tier.
 - `/auto-effort on`, `/auto-effort off`: for this session. Off restores the ceiling and turns off limits too.
+- `/auto-effort direct`, `/auto-effort smoothed`: the policy mode for this session, over `policy.mode`.
 
 The status shows `effort: high (auto →)`, or `effort: medium (auto ↓, limited: 5h 84%)` while a limit is in force. The arrow is where the level is heading: ↑ or ↓ when the running average sits at least half the margin (0.3) above or below the policy's own level (before any limit cut) and the ceiling or floor leaves room to move that way, → when it is holding. ↑ or ↓ usually appears one assessment before a change, while the average builds toward the margin or a lower level waits out its dwell.
 
-Each decision is an `auto-effort:state` session entry (never sent to the model; `phase` is `prompt` or `run`), with the score, confidence, level, baseline and any limit. When a session starts or resumes, the state is restored from the latest such entry on the current branch.
+Each decision is an `auto-effort:state` session entry (never sent to the model; `phase` is `prompt` or `run`, `mode` is `smoothed` or `direct`), with the score, confidence, level, baseline and any limit. When a session starts or resumes, the state is restored from the latest such entry on the current branch.
 
 ## Limits
 
@@ -107,7 +110,7 @@ The `agents` files are shared with the opencode and Claude Code ports of this pl
 {
   "enabled": true,
   "jev": { "enabled": true, "provider": "typesafe", "model": "jev-latest", "timeoutMs": 1500 },
-  "policy": { "floor": "low", "alpha": 0.5, "margin": 0.6, "jump": 1.5, "jumpConfidence": 0.6, "minDwell": 2, "ackThreshold": 0.7 },
+  "policy": { "mode": "smoothed", "floor": "low", "alpha": 0.5, "margin": 0.6, "jump": 1.5, "jumpConfidence": 0.6, "minDwell": 2, "ackThreshold": 0.7, "minConfidence": 0.45 },
   "midRun": { "enabled": true, "everyTurns": 3, "errorTurns": 1, "steps": 6, "models": [] },
   "effortUpdates": { "enabled": true, "models": ["openai-codex/gpt-6-astra", "openai-codex/gpt-6.1-sol"] },
   "limits": {
@@ -126,6 +129,7 @@ The `agents` files are shared with the opencode and Claude Code ports of this pl
 }
 ```
 
+- `policy.mode` is `smoothed` or `direct`; any other value is `smoothed`. `minConfidence` applies only to `direct`; `alpha`, `margin`, `jump`, `jumpConfidence` and `minDwell` only to `smoothed`.
 - `midRun.errorTurns` is how many failed tool calls in one turn trigger an early check (0 = never). `midRun.models` and `effortUpdates.models` are `provider/id` globs (`*` matches anything).
 - An invalid `limits`, `midRun` or `effortUpdates` value falls back to its default.
 - `"limits": { "enabled": false }` in the shared file turns limits off for every port; `/auto-effort off` turns them off with the rest for the session.
@@ -133,7 +137,7 @@ The `agents` files are shared with the opencode and Claude Code ports of this pl
 ## Requirements and costs
 
 - Pi 0.99 or newer for classifier models, and a configured classifier model; Pi resolves the credentials (`TYPESAFE_API_KEY` for its `typesafe` provider). Without Jev the level is never raised or lowered by score.
-- Each message you send makes one classifier request, and mid-run checks add one every few tool turns on supported models. These requests can be billed. Set `"enabled": false` or `"jev": { "enabled": false }` to stop them.
+- Each message you send makes one classifier request, and mid-run checks add one every few tool turns on supported models (every tool turn in `direct` mode: a run of N tool turns makes about 1 + N requests instead of 1 + N/3, each awaited before the next model request). These requests can be billed. Set `"enabled": false` or `"jev": { "enabled": false }` to stop them.
 - With limits on and a Codex model in use, it makes background requests to `chatgpt.com/backend-api/wham/usage` with Pi's Codex credential.
 - On disk it reads only the settings files above and writes nothing. In the session it appends `auto-effort:state` and `auto-effort:effort-updates` custom entries (never sent to the model).
 

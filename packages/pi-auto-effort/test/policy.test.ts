@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { applyLimit } from "../src/limits.ts";
-import { DEFAULT_POLICY, type EffortState, LEVELS, decide, trend } from "../src/policy.ts";
+import { DEFAULT_POLICY, type EffortState, LEVELS, type Policy, decide, policyMode, trend } from "../src/policy.ts";
 
 const fresh = (ceiling = "xhigh"): EffortState => ({ dwell: DEFAULT_POLICY.minDwell, ceiling });
 const j = (score: number, confidence = 0.9, ack = 0) => ({ score, confidence, ack });
@@ -78,6 +78,38 @@ describe("decide", () => {
     expect(state.e).toBeCloseTo(2);
     expect(state.dwell).toBe(10);
     expect(applyLimit(baseline, { steps: 0 }, DEFAULT_POLICY.floor, LEVELS).level).toBe("high");
+  });
+});
+
+describe("direct mode", () => {
+  const direct: Policy = { ...DEFAULT_POLICY, mode: "direct" };
+
+  test("the score sets the level both ways, with no dwell or margin", () => {
+    expect(decide("high", { e: 2, dwell: 0, ceiling: "xhigh" }, j(0.4), direct)).toMatchObject({ level: "low", reason: "direct", state: { e: 0.4, dwell: 0 } });
+    expect(decide("low", { e: 0, dwell: 0, ceiling: "xhigh" }, j(1.6, 0.5), direct)).toMatchObject({ level: "high", reason: "direct" });
+    expect(decide("medium", { e: 1, dwell: 0, ceiling: "xhigh" }, j(1.4), direct)).toMatchObject({ level: "medium", reason: "hold", state: { e: 1.4, dwell: 1 } });
+  });
+
+  test("the ceiling and floor bound it", () => {
+    expect(decide("medium", fresh("high"), j(3), direct).level).toBe("high");
+    expect(decide("high", fresh(), j(0), { ...direct, floor: "medium" }).level).toBe("medium");
+  });
+
+  test("a go-ahead or an unsure score keeps the level and the average", () => {
+    expect(decide("high", { e: 2, dwell: 0, ceiling: "xhigh" }, j(0, 0.9, 0.9), direct)).toMatchObject({ level: "high", reason: "ack", state: { e: 2 } });
+    expect(decide("high", { e: 2, dwell: 0, ceiling: "xhigh" }, j(0, 0.3), direct)).toMatchObject({ level: "high", reason: "unsure", state: { e: 2, dwell: 1 } });
+  });
+
+  test("levels outside the managed range and missing judgments are left alone", () => {
+    expect(decide("minimal", fresh(), j(3), direct)).toMatchObject({ level: "minimal", reason: "hold" });
+    expect(decide("high", fresh(), undefined, direct)).toMatchObject({ level: "high", reason: "unavailable" });
+  });
+
+  test("an explicit mode overrides the policy's, and anything but direct is smoothed", () => {
+    expect(decide("high", { e: 2, dwell: 0, ceiling: "xhigh" }, j(0), direct, "smoothed").level).toBe("high");
+    expect(decide("high", { e: 2, dwell: 0, ceiling: "xhigh" }, j(0), DEFAULT_POLICY, "direct").level).toBe("low");
+    expect(policyMode({ mode: "direct" })).toBe("direct");
+    expect(policyMode({ mode: "per-step" as never })).toBe("smoothed");
   });
 });
 
