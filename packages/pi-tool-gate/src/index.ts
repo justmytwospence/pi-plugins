@@ -93,7 +93,7 @@ export interface GateConfig extends Record<string, unknown> {
 
 export const DEFAULT_CONFIG: GateConfig = {
   enabled: true,
-  jev: { enabled: true, provider: "typesafe", model: "jev-latest", timeoutMs: 3_000 },
+  jev: { enabled: true, provider: "typesafe", model: "jev-latest", timeoutMs: 8_000 },
   thresholds: DEFAULT_THRESHOLDS,
   allowTools: [
     "codemode", "tool_search", "todo", "ask_user_question", "plan_mode_question", "plan_mode_complete",

@@ -2,7 +2,7 @@
 // `modelRegistry.classify()`), for one yes/no judgment. A trimmed copy of
 // packages/pi-tool-gate/src/jev.ts (same suite), so pi-sidebar has no sibling imports.
 
-export const JEV = { provider: "typesafe", model: "jev-latest", timeoutMs: 3_000 } as const;
+export const JEV = { provider: "typesafe", model: "jev-latest", timeoutMs: 5_000 } as const;
 
 type Answer = { type: "bool"; probability: number } | { type: string };
 
@@ -17,7 +17,7 @@ interface ClassifierRegistry {
 
 export type JevBool = { ok: true; probability: number } | { ok: false; reason: string };
 
-/** The probability that `question` is true of `state`. Never throws. */
+/** The probability that `question` is true of `state`. Never throws. A timed-out attempt is retried once. */
 export async function askJevBool(
   registry: unknown,
   state: Record<string, unknown>,
@@ -35,6 +35,18 @@ export async function askJevBool(
     model = undefined;
   }
   if (!model) return { ok: false, reason: `no classifier model ${JEV.provider}/${JEV.model}` };
+  const first = await attempt(reg as ClassifierRegistry, model, state, question, signal);
+  if (first.ok || !/timed out|timeout/iu.test(first.reason) || signal?.aborted) return first;
+  return attempt(reg as ClassifierRegistry, model, state, question, signal);
+}
+
+async function attempt(
+  reg: ClassifierRegistry,
+  model: unknown,
+  state: Record<string, unknown>,
+  question: { instructions: string; criteria: { true: string; false: string } },
+  signal?: AbortSignal,
+): Promise<JevBool> {
   try {
     const result = await reg.classify(model as never, { state, questions: { q: { type: "bool", ...question } } }, {
       timeoutMs: JEV.timeoutMs,

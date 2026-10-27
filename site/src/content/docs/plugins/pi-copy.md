@@ -62,7 +62,7 @@ Settings load from `~/.pi/agent/copy.json`, then `<project>/.pi/copy.json`. `PI_
     "enabled": true,
     "provider": "typesafe",
     "model": "jev-latest",
-    "timeoutMs": 3000
+    "timeoutMs": 5000
   },
   "rank": {
     "maxPieces": 120,

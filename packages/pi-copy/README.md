@@ -98,7 +98,7 @@ Outside fullscreen mode (`tuiMode: "regular"`, where the terminal's own scrollba
 
 ```json
 {
-  "jev": { "enabled": true, "provider": "typesafe", "model": "jev-latest", "timeoutMs": 3000 },
+  "jev": { "enabled": true, "provider": "typesafe", "model": "jev-latest", "timeoutMs": 5000 },
   "rank": { "maxPieces": 120, "pieceChars": 600, "stateBudgetChars": 60000, "copyableThreshold": 0.3, "wantWeight": 0.6 },
   "maxTurns": 30,
   "shortcut": "ctrl+shift+x",

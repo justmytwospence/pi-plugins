@@ -174,7 +174,7 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
 ```json
 {
   "enabled": true,
-  "jev": { "enabled": true, "provider": "typesafe", "model": "jev-latest", "timeoutMs": 3000 },
+  "jev": { "enabled": true, "provider": "typesafe", "model": "jev-latest", "timeoutMs": 8000 },
   "thresholds": {
     "irreversible": 0.9, "remoteChange": 0.85, "requested": 0.7, "exfiltration": 0.8,
     "impact": 2.5, "offTask": 0.1, "offTaskImpact": 2, "rule": 0.7

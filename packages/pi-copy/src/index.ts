@@ -31,7 +31,7 @@ export interface CopyConfig extends Record<string, unknown> {
 }
 
 export const DEFAULT_CONFIG: CopyConfig = {
-  jev: { enabled: true, provider: "typesafe", model: "jev-latest", timeoutMs: 3_000 },
+  jev: { enabled: true, provider: "typesafe", model: "jev-latest", timeoutMs: 5_000 },
   rank: DEFAULT_RANK,
   maxTurns: 30,
   shortcut: "ctrl+shift+x",

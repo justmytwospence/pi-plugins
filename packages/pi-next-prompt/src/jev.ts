@@ -64,7 +64,11 @@ export type JevOutcome =
   | { ok: true; answers: Record<string, ClassifierAnswer>; usage?: ClassifierUsage; model: string; latencyMs: number }
   | { ok: false; reason: string };
 
-/** Ask Jev one request. Never throws: every failure is `{ ok: false, reason }`. */
+/**
+ * Ask Jev one question set. Never throws: every failure is `{ ok: false, reason }`. A timed-out
+ * attempt is retried once with a fresh timeout: Jev's latency spikes now and then, and Pi does not
+ * retry classifier timeouts itself.
+ */
 export async function askJev(
   registry: unknown,
   config: JevConfig,
@@ -85,6 +89,29 @@ export async function askJev(
   }
   if (!model) return { ok: false, reason: `no classifier model ${config.provider}/${config.model}` };
   const started = Date.now();
+  let outcome = await attempt(reg as ClassifierRegistry, model, config, state, questions, signal);
+  if (!outcome.ok && outcome.reason === "timed out" && !signal?.aborted) {
+    outcome = await attempt(reg as ClassifierRegistry, model, config, state, questions, signal);
+  }
+  if (!outcome.ok) return outcome;
+  const result = outcome.result;
+  return {
+    ok: true,
+    answers: result.answers,
+    ...(result.usage ? { usage: result.usage } : {}),
+    model: result.model,
+    latencyMs: Date.now() - started,
+  };
+}
+
+async function attempt(
+  reg: ClassifierRegistry,
+  model: unknown,
+  config: JevConfig,
+  state: Record<string, unknown>,
+  questions: Record<string, ClassifierQuestion>,
+  signal?: AbortSignal,
+): Promise<{ ok: true; result: ClassifierResult } | { ok: false; reason: string }> {
   try {
     const result = await reg.classify(model as never, { state, questions }, {
       timeoutMs: config.timeoutMs,
@@ -93,13 +120,7 @@ export async function askJev(
     if (result.stopReason !== "stop") {
       return { ok: false, reason: describe(result.stopReason, result.errorMessage) };
     }
-    return {
-      ok: true,
-      answers: result.answers,
-      ...(result.usage ? { usage: result.usage } : {}),
-      model: result.model,
-      latencyMs: Date.now() - started,
-    };
+    return { ok: true, result };
   } catch (error) {
     return { ok: false, reason: describe("error", error instanceof Error ? error.message : String(error)) };
   }

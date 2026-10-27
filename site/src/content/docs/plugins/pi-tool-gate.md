@@ -9,7 +9,7 @@ plugin: pi-tool-gate
 - **Use it for:** Choose an approval policy for tool calls, escalating risky operations without treating the gate as a sandbox.
 - **Enable:** Select `packages/pi-tool-gate/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
 - **Controls:** `/mode`, `/gate`; Shift+Tab cycles only after remapping stock `app.thinking.cycle`, or choose another `cycleShortcut`.
-- **Settings:** `tool-gate.json` shared/user/project layers; default auto mode, paid Jev on, pushback on, 3000 ms classifier timeout.
+- **Settings:** `tool-gate.json` shared/user/project layers; default auto mode, paid Jev on, pushback on, 8000 ms classifier timeout (one retry on timeout).
 - **Requirements, cost & privacy:** Pi classifier/provider access for Jev; proposed arguments and clipped user intent can leave the machine. Fixed checks and manual mode are local.
 - **Integrations & limits:** Optional plan mode, footer and Herdr blocked state. The stock conflict skips shortcut registration; unavailable-classifier fallback is not fail-closed.
 
@@ -19,7 +19,7 @@ Tool gate brings Claude Code's permission modes to Pi and, in auto mode, reduces
 
 Follow [Install & select](/guides/install/) and select `packages/pi-tool-gate/src/index.ts`. The suite loads every entry by default, with one Git pin covering the selected entries.
 
-Classifier judgments require Pi 0.99 or newer and credentials for the configured provider. Defaults use `typesafe/jev-latest` through Pi's model registry, with `TYPESAFE_API_KEY` and a 3,000 ms timeout. Fixed checks do not require Jev, but the unavailable-classifier fallback is less protective, especially without a UI.
+Classifier judgments require Pi 0.99 or newer and credentials for the configured provider. Defaults use `typesafe/jev-latest` through Pi's model registry, with `TYPESAFE_API_KEY` and an 8,000 ms timeout; a timed-out request is retried once. Fixed checks do not require Jev, but the unavailable-classifier fallback is less protective, especially without a UI.
 
 **Jev calls are paid external requests.** Most gray-area calls require one judgment; an initially held call can make another request for a suggested workaround. Even a fixed-rule hold can use that workaround request. Classified calls add reported classifier usage to their tool result. Costs depend on volume and input, not just how many approval dialogs appear.
 
@@ -75,7 +75,7 @@ This `.pi/tool-gate.json` keeps the standard checks but asks immediately instead
     "enabled": true,
     "provider": "typesafe",
     "model": "jev-latest",
-    "timeoutMs": 3000
+    "timeoutMs": 8000
   }
 }
 ```
