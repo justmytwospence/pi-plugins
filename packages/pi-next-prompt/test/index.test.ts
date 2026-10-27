@@ -320,16 +320,24 @@ test("status distinguishes invalid tags and incomplete runs without classifying"
   expect(s.jev.calls).toHaveLength(0);
 });
 
-test("approval is not reported as display when a draft blocks it", async () => {
+test("a draft conceals an approved suggestion until the editor is empty", async () => {
   const s = await setup();
   s.ui.editorText = "existing draft";
   await s.run("go", ["Done.\n<next>Run tests</next>"]);
   const diagnostic = await status(s);
   expect(diagnostic).toContain("Vet: approved");
   expect(diagnostic).toContain("Editor: nonempty (display blocked)");
-  expect(diagnostic).toContain("Offer: none");
-  expect(diagnostic).not.toContain("shown");
+  expect(diagnostic).toContain("Offer: concealed");
   expect(s.ui.widgets.size).toBe(0);
+  expect(s.ui.press(TAB)).toBe(false);
+  expect(s.ui.editorText).toBe("existing draft");
+  // pi-stash's Ctrl+S clears the editor as the key reaches it; the suggestion takes its place.
+  s.ui.press("\x13");
+  s.ui.editorText = "";
+  await new Promise((r) => setTimeout(r, 0));
+  expect(s.ui.widgetLines("next-prompt")).toEqual(["→ Run tests  Tab to accept"]);
+  expect(s.ui.press(TAB)).toBe(true);
+  expect(s.ui.editorText).toBe("Run tests");
 });
 
 test("status exposes unobserved settlement boundaries rather than implying a veto", async () => {

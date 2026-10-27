@@ -418,8 +418,11 @@ export default function nextPrompt(pi: ExtensionAPI) {
     if (mine !== generation || !ui) return;
     vetState = verdict.show ? "approved" : "vetoed";
     lastVerdict = `"${candidate.suggestion}": ${vetState} (${verdict.reason})`;
-    if (!verdict.show || ui.getEditorText() !== "") return;
-    show(candidate.suggestion);
+    if (!verdict.show) return;
+    // A draft in the editor: keep the suggestion on offer, out of sight, so it appears once the
+    // editor is empty again (the draft stashed with pi-stash's Ctrl+S, or deleted).
+    if (ui.getEditorText() === "") show(candidate.suggestion);
+    else { conceal(); offered = candidate.suggestion; offerSource = undefined; }
   });
 
   pi.registerCommand("next-prompt", {
