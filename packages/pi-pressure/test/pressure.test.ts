@@ -6,7 +6,7 @@ import { describe, expect, test } from "vitest";
 import { ensureHelper, parseHelperLine, startHelper, type HelperLine } from "../src/darwin.ts";
 import { mergeConfig } from "../src/index.ts";
 import { bandLevel, createMonitor, darwinMemoryText, DEFAULTS, formatRate, formatStatus, topBy, trends } from "../src/pressure.ts";
-import { busyPercent, cpuTimes, createSampler, parseProcVmstat, cwdContext, parsePs, parsePsi, parseVmStat, processLabel, processName, psiShare, type Reading, type SamplerDeps } from "../src/sample.ts";
+import { busyPercent, cpuTimes, createSampler, parseProcVmstat, cwdContext, parsePs, parsePsi, parseVmStat, processLabel, processName, standouts, psiShare, type Reading, type SamplerDeps } from "../src/sample.ts";
 
 const PSI = "some avg10=12.50 avg60=2.48 avg300=2.55 total=1000000\nfull avg10=3.10 avg60=0.00 avg300=0.00 total=200000\n";
 
@@ -157,6 +157,22 @@ describe("sampler", () => {
     expect((await sampler.top("memory", 5)).map(processLabel)).toEqual(["pi (groundcover)", "pi", "vitest", "pi (this)", "pi"]);
     const linux = createSampler(deps({ platform: "linux", read: async () => "", run: async (command, args) => command === "ps" ? ps : (args[0] === "/proc/11/cwd" ? "/srv/app\n" : "") }));
     expect(processLabel((await linux.top("cpu"))[0])).toBe("pi (app)");
+  });
+  test("standouts: the few well above the rest, else just the busiest", async () => {
+    expect(standouts([97, 90, 5, 3])).toBe(2);
+    expect(standouts([95, 2, 1, 1])).toBe(1);
+    expect(standouts([80, 70, 60, 4])).toBe(3);
+    // An even spread, or nothing to compare against.
+    expect(standouts([30, 28, 26, 25])).toBe(1);
+    expect(standouts([50])).toBe(1);
+    expect(standouts([])).toBe(0);
+    expect(standouts([0, 0])).toBe(1);
+    // Never more than three, and a leader far below the first is not kept even before a big drop.
+    expect(standouts([90, 85, 80, 75, 1])).toBe(1);
+    expect(standouts([100, 10, 1, 0])).toBe(1);
+    const sampler = createSampler(deps({ run: async () => "1 97.0 100 /bin/a\n2 90.0 900 /bin/b\n3 5.0 50 /bin/c\n4 3.0 10 /bin/d\n" }));
+    expect((await sampler.top("cpu", "standouts")).map((r) => r.name)).toEqual(["a", "b"]);
+    expect((await sampler.top("memory", "standouts")).map((r) => r.name)).toEqual(["b"]);
   });
   test("working-directory tags", () => {
     expect(cwdContext("/Users/me/Projects/uplft/.worktrees/feature-1362-deterministic-analyst-plan", "/Users/me")).toBe("feature-1362-determ\u2026");

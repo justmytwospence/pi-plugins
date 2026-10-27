@@ -51,6 +51,24 @@ export function processLabel(row: Pick<ProcessRow, "name" | "context">): string 
   return row.context ? `${row.name} (${row.context})` : row.name;
 }
 
+/**
+ * How many of the leaders (values sorted high to low) stand out: the cut, among
+ * the first `max`, with the largest drop to the next value, if that drop is at
+ * least `gap` times and every leader kept is at least `floor` of the first.
+ * One otherwise, so an even spread names only the busiest.
+ */
+export function standouts(values: readonly number[], { max = 3, gap = 2, floor = 0.25 } = {}): number {
+  if (values.length < 2 || !(values[0] > 0)) return Math.min(1, values.length);
+  let best = 1, bestRatio = 0;
+  for (let k = 1; k <= Math.min(max, values.length); k++) {
+    if (values[k - 1] < values[0] * floor) break;
+    const next = values[k] ?? 0;
+    const ratio = next > 0 ? values[k - 1] / next : Infinity;
+    if (ratio > bestRatio) { best = k; bestRatio = ratio; }
+  }
+  return bestRatio >= gap ? best : 1;
+}
+
 /** A working directory as a short tag: its base name, nothing for / or the home directory. */
 export function cwdContext(cwd: string, home: string): string | undefined {
   const dir = cwd.trim().replace(/\/+$/, "");
@@ -245,12 +263,14 @@ export function createSampler(deps: SamplerDeps = defaultDeps, { darwinFallbackE
       return reading;
     },
     /** The busiest processes, by CPU or by resident memory. */
-    async top(by: "cpu" | "memory", count = 1): Promise<ProcessRow[]> {
+    /** The busiest processes: the first `count`, or with "standouts" the few well above the rest (see `standouts`). */
+    async top(by: "cpu" | "memory", count: number | "standouts" = 1): Promise<ProcessRow[]> {
       const text = await quiet(() => deps.run("ps", ["-A", "-o", "pid=,pcpu=,rss=,comm="]));
       if (!text) return [];
       const rows = parsePs(text, process.pid);
       rows.sort((a, b) => by === "cpu" ? b.cpu - a.cpu : b.rssKb - a.rssKb);
-      const picked = rows.slice(0, count);
+      const value = (row: ProcessRow) => by === "cpu" ? row.cpu : row.rssKb;
+      const picked = rows.slice(0, count === "standouts" ? standouts(rows.slice(0, 4).map(value)) : count);
       // A name several processes share (many Pi sessions, node, python) says little:
       // tell them apart by working directory, read only for the few shown.
       const counts = new Map<string, number>();

@@ -175,9 +175,9 @@ export default function pressureExtension(pi: ExtensionAPI): void {
         publish(undefined);
       } else {
         if (!top || reading.at - top.at >= TOP_REFRESH_MS) {
-          const [row] = await sampler.top(topBy(view));
+          const rows = await sampler.top(topBy(view), "standouts");
           if (epoch !== generation || !ctx) return;
-          top = { name: row ? processLabel(row) : undefined, at: reading.at };
+          top = { name: rows.length ? rows.map(processLabel).join(", ") : undefined, at: reading.at };
         }
         publish(formatStatus(view, top.name, paint(ctx)));
       }
