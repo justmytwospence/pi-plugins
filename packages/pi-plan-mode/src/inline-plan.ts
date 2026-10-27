@@ -21,13 +21,14 @@ import {
   getMarkdownTheme,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Spacer, Text } from "@earendil-works/pi-tui";
+import { Container } from "@earendil-works/pi-tui";
 import { editInTerminal, externalEditorCommand } from "./external-editor.js";
 import { askFeedback } from "./feedback-input.js";
 import { holdBlocked } from "./herdr-blocked.js";
 import { PlanMarkdown } from "./mermaid-art.js";
 import { expandHome } from "./plan-hook.js";
 import { PlanReviewViewport } from "./plan-review-viewport.js";
+import { type ReviewStatus, reviewBody, reviewTitle } from "./review-card.js";
 import { findBlockedCommandSegment, readCommand, type SafeSubcommands } from "./tool-policy.js";
 
 export const MODE_CHANGED = "permission-mode:changed";
@@ -384,8 +385,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       "In plan mode, once your plan is written to the plan file and complete: show it to the user and ask for approval to start implementing. It takes no arguments; it reads the plan file. Do not use it for research questions, and do not ask for approval any other way.",
     promptSnippet: "Ask the user to approve the plan in the plan file (plan mode only)",
     parameters: { type: "object", additionalProperties: false, properties: {} } as never,
-    renderCall: (_args, theme, context) =>
-      new Text(theme.fg("toolTitle", theme.bold(context.isPartial ? "Plan review" : "Plan")), 0, 0),
+    renderCall: (_args, theme, context) => reviewTitle(theme, context.isPartial ? "Plan review" : "Plan"),
     renderResult: (result, options, theme, context) => {
       const component = renderExit(result.details as ExitDetails | undefined, options, theme);
       return options.isPartial ? reviewViewport.wrap(context.toolCallId, component) : component;
@@ -564,39 +564,28 @@ const MODE_WORDS: Record<string, string> = {
   default: "approving edits manually",
 };
 
-const COLLAPSED_LINES = 12;
-
 function renderExit(
   details: ExitDetails | undefined,
   options: { expanded: boolean; isPartial: boolean },
   theme: Theme,
 ) {
-  const container = new Container();
   const plan = details?.plan;
-  if (!plan) return container;
+  if (!plan) return new Container();
   const outcome = details?.outcome ?? "pending";
-  const lines = plan.split("\n");
-  // The plan in full while you decide; folded after, until expanded.
-  const folded = outcome !== "pending" && !options.expanded && lines.length > COLLAPSED_LINES;
-  container.addChild(
-    new PlanMarkdown(folded ? lines.slice(0, COLLAPSED_LINES).join("\n") : plan, getMarkdownTheme(), theme),
-  );
-  if (folded) container.addChild(new Text(theme.fg("dim", `… ${lines.length - COLLAPSED_LINES} more lines`), 0, 0));
-  container.addChild(new Spacer(1));
-  const where = details?.planFile ? theme.fg("dim", ` · ${tildify(details.planFile)}`) : "";
-  const status =
+  const context = details?.planFile ? tildify(details.planFile) : undefined;
+  const status: ReviewStatus =
     outcome === "approved"
-      ? theme.fg(
-          "success",
-          `✓ Approved${details?.edited ? " (edited)" : ""}${details?.mode ? `, ${MODE_WORDS[details.mode] ?? details.mode}` : ""}`,
-        )
+      ? {
+          tone: "success",
+          text: `✓ Approved${details?.edited ? " (edited)" : ""}${details?.mode ? `, ${MODE_WORDS[details.mode] ?? details.mode}` : ""}`,
+          context,
+        }
       : outcome === "fresh"
-        ? theme.fg("success", "✓ Approved, implementing in a fresh session")
+        ? { tone: "success", text: "✓ Approved, implementing in a fresh session", context }
         : outcome === "kept"
-          ? theme.fg("warning", "Kept planning")
-          : theme.fg("muted", "Waiting for approval");
-  container.addChild(new Text(`${status}${where}`, 0, 0));
-  return container;
+          ? { tone: "warning", text: "Kept planning", context }
+          : { tone: "pending", text: "Waiting for approval", context };
+  return reviewBody(theme, plan, status, options, (text) => new PlanMarkdown(text, getMarkdownTheme(), theme));
 }
 
 function text(value: string) {
