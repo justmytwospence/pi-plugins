@@ -14,7 +14,7 @@ import { SidebarPanel, type StatusPart } from "./panel.ts";
 import { requestPinService, requestStash, type PromptPinService, type StashController } from "./contract.ts";
 import { HeadsUp, headsUpChange, headsUpChanged } from "./headsup/headsup.ts";
 import type { HeadsUpNote } from "./headsup/protocol.ts";
-import { isNoteMarker, noteMessages } from "./headsup/thread.ts";
+import { draftMessages, isNoteMarker, noteMessages, type NoteModel } from "./headsup/thread.ts";
 import { QUIZ_ENTRY, QuizMode, quizFromBranch } from "./quiz/mode.ts";
 import { QUIZ_NEXT, QUIZ_ROLE, QUIZ_START } from "./quiz/prompt.ts";
 import { RESET_ENTRY, threadFromBranch } from "./thread.ts";
@@ -58,6 +58,8 @@ const CHOICE_MS = 2_000;
 export const SIDEBAR_HEADSUP_HELP = [
   "/known          the last heads-up note was something you knew: it is not raised again",
   "/headsup        heads-up mode's state and cost (on | sidebar | off)",
+  "/post           publish the last share note's post on Bluesky (after a confirm); /post edit to change it first, /post <text> to publish that",
+  "/draft          write a blog draft from the last share note (/draft outline for a section outline)",
 ].join("\n");
 
 const PROBE = "pi-sidebar-probe";
@@ -125,6 +127,7 @@ export class SidebarController {
         return true;
       },
       model: () => this.sidebarModel(),
+      draftWritten: (note, draft, location) => this.appendThread(draftMessages(note, draft, location, this.noteModel(), Date.now())),
     }, {
       knowledgeDir: process.env[KNOWLEDGE_ENV] ?? path.join(getAgentDir(), "pi-sidebar", "knowledge"),
       logFile: path.join(getAgentDir(), "pi-sidebar", "headsup.log"),
@@ -616,12 +619,7 @@ export class SidebarController {
       }
       return;
     }
-    const request = this.main.request;
-    const model = this.main.ctx?.model;
-    const choice = this.sidebarModel();
-    const id = choice.kind === "other"
-      ? { api: choice.model.api, provider: choice.model.provider, model: choice.model.id }
-      : { api: request?.api ?? model?.api ?? "", provider: request?.provider ?? model?.provider ?? "", model: request?.model ?? model?.id ?? "" };
+    const id = this.noteModel();
     const notes = this.pendingNotes;
     this.pendingNotes = [];
     for (const note of notes) {
@@ -629,12 +627,89 @@ export class SidebarController {
       this.agent.appendMessages(messages).catch(() => {});
       // Without a panel yet, the one Sidebar builds when it opens shows the thread, note included.
       panel?.chat.seed(messages, (text) => (isNoteMarker(text) ? undefined : { text }));
-      panel?.chat.note("/known if you knew this · ask about it below");
+      panel?.chat.note(this.noteHint(note));
     }
     if (!panel) return;
     panel.scrollToEnd();
     if (!panel.focused) panel.unread = true;
     this.render();
+  }
+
+  /** The model a note's thread messages are attributed to (Sidebar's). */
+  private noteModel(): NoteModel {
+    const request = this.main.request;
+    const model = this.main.ctx?.model;
+    const choice = this.sidebarModel();
+    return choice.kind === "other"
+      ? { api: choice.model.api, provider: choice.model.provider, model: choice.model.id }
+      : { api: request?.api ?? model?.api ?? "", provider: request?.provider ?? model?.provider ?? "", model: request?.model ?? model?.id ?? "" };
+  }
+
+  private noteHint(note: HeadsUpNote): string {
+    if (note.kind !== "share") return "/known if you knew this · ask about it below";
+    const targets = this.headsUp.targets;
+    return [
+      ...(targets.bluesky && note.post ? ["/post to publish", "/post edit"] : []),
+      ...(targets.drafts ? ["/draft", "/draft outline"] : []),
+      "/known if not interested",
+    ].join(" · ");
+  }
+
+  /** Thread messages added outside a question (a saved blog draft), shown when Sidebar is open. */
+  private appendThread(messages: Parameters<SidebarAgent["appendMessages"]>[0]): void {
+    this.agent.appendMessages(messages).catch(() => {});
+    const panel = this.panel;
+    if (!panel) return;
+    panel.chat.seed(messages, (text) => (isNoteMarker(text) ? undefined : { text }));
+    panel.scrollToEnd();
+    if (!panel.focused) panel.unread = true;
+    this.render();
+  }
+
+  /** `/post`, `/post edit`, `/post <text>` in Sidebar. */
+  private async postCommand(arg: string): Promise<void> {
+    const note = this.headsUp.lastShare;
+    const ctx = this.main.ctx;
+    const bluesky = this.headsUp.share.bluesky;
+    if (!bluesky) return this.panel?.notice({ kind: "warning", text: "Bluesky is not configured: set PI_SIDEBAR_BLUESKY_HANDLE and PI_SIDEBAR_BLUESKY_APP_PASSWORD." });
+    const sub = arg.trim();
+    if (sub === "edit") {
+      if (!note?.post) return this.panel?.notice({ kind: "info", text: "No share note with a drafted post yet." });
+      this.panel?.input.setText(`/post ${note.post}`);
+      return;
+    }
+    const text = sub || note?.post;
+    if (!text) return this.panel?.notice({ kind: "info", text: "No share note with a drafted post yet; /post <text> publishes your own." });
+    if (!ctx) return;
+    const ok = await ctx.ui.confirm(`Post to Bluesky as @${bluesky.handle}?`, text);
+    if (!ok) return this.panel?.notice({ kind: "info", text: "Not posted." });
+    try {
+      const posted = await this.headsUp.publish(text, note);
+      if (note && this.headsUp.note.note === note) this.headsUp.hide();
+      this.panel?.chat.note(`Posted to Bluesky: ${posted.url}`);
+      this.panel?.scrollToEnd();
+      this.render();
+    } catch (error) {
+      this.panel?.notice({ kind: "error", text: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  /** `/draft` and `/draft outline` in Sidebar. */
+  private async draftCommand(arg: string): Promise<void> {
+    const note = this.headsUp.lastShare;
+    if (!this.headsUp.share.drafts) return this.panel?.notice({ kind: "warning", text: "No drafts destination: set PI_SIDEBAR_DRAFTS_DIR or PI_SIDEBAR_DRAFTS_COMMAND." });
+    if (!note) return this.panel?.notice({ kind: "info", text: "No share note to draft from yet." });
+    const sub = arg.trim().toLowerCase();
+    if (sub !== "" && sub !== "full" && sub !== "outline") return this.panel?.notice({ kind: "warning", text: `Unknown /draft argument "${sub}": /draft, /draft outline.` });
+    const kind = sub === "outline" ? "outline" : "full";
+    this.panel?.notice({ kind: "info", text: `Writing a blog ${kind === "full" ? "draft" : "outline"}…` });
+    try {
+      await this.headsUp.draft(note, kind);
+      if (this.headsUp.note.note === note) this.headsUp.hide();
+      this.panel?.clearNotice();
+    } catch (error) {
+      this.panel?.notice({ kind: "error", text: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   private async sidebarHeadsUp(arg: string): Promise<void> {
@@ -662,6 +737,14 @@ export class SidebarController {
       void this.sidebarHeadsUp(text.slice("/headsup".length));
       return;
     }
+    if (text === "/post" || /^\/post\s/.test(text)) {
+      void this.postCommand(text.slice("/post".length));
+      return;
+    }
+    if (text === "/draft" || text.startsWith("/draft ")) {
+      void this.draftCommand(text.slice("/draft".length));
+      return;
+    }
     if (text === "/new") {
       void this.reset();
       return;
@@ -675,7 +758,7 @@ export class SidebarController {
       return;
     }
     if (text.startsWith("/") && !this.isSidebarCommand(text)) {
-      this.panel?.notice({ kind: "warning", text: `Sidebar knows /new, /close, /model, /quiz, /known, /headsup, skills and prompt templates; ${text.split(/\s/)[0]} is a main-session command.` });
+      this.panel?.notice({ kind: "warning", text: `Sidebar knows /new, /close, /model, /quiz, /known, /headsup, /post, /draft, skills and prompt templates; ${text.split(/\s/)[0]} is a main-session command.` });
       return;
     }
     this.question(text);

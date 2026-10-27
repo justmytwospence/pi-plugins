@@ -15,6 +15,9 @@ import { HEADSUP_DEBUG_ENV, HEADSUP_ENTRY, HEADSUP_ENV, headsUpDefault, headsUpF
 import { proseMeasure, NoteState, quoteForMain, askSidebar, DISMISSED_MS, type NoteAction } from "./note.ts";
 import type { HeadsUpNote } from "./protocol.ts";
 import { HeadsUpScheduler, type Trigger } from "./scheduler.ts";
+import { postToBluesky, type FetchFn, type Posted } from "../share/bluesky.ts";
+import { shareConfig, shareEnabled, shareSummary, type ShareConfig } from "../share/config.ts";
+import { saveDraft, writeDraft, type Draft, type DraftKind, type SaveOptions } from "../share/draft.ts";
 
 export const HEADSUP_WIDGET = "pi-sidebar-headsup";
 /** After this many checks in a row that missed main's cache, checks pause for the session. */
@@ -51,6 +54,8 @@ export interface HeadsUpHost {
   askSidebar(text: string, ctx: ExtensionContext): boolean;
   /** Sidebar's model: checks run on it too (main's, sharing main's cache, unless another is chosen). */
   model?(): ModelChoice;
+  /** A blog draft was written and saved: Sidebar's thread can carry it for follow-up edits. */
+  draftWritten?(note: HeadsUpNote, draft: Draft, location: string): void;
 }
 
 /** A check's cache lifetime when the request did not say (Anthropic's and OpenAI's default). */
@@ -65,6 +70,10 @@ export interface HeadsUpOptions {
   stream?: StreamFn;
   now?: () => number;
   env?: NodeJS.ProcessEnv;
+  /** Share destinations (default: from the environment). */
+  share?: ShareConfig;
+  fetch?: FetchFn;
+  save?: SaveOptions;
 }
 
 export class HeadsUp {
@@ -88,6 +97,10 @@ export class HeadsUp {
   private store: ProfileStore | undefined;
   private readonly now: () => number;
   private readonly env: NodeJS.ProcessEnv;
+  /** Where share notes can go. */
+  readonly share: ShareConfig;
+  /** A share action (post or draft) in progress. */
+  private sharing = false;
 
   constructor(
     private readonly pi: ExtensionAPI,
@@ -99,6 +112,7 @@ export class HeadsUp {
     this.env = options.env ?? process.env;
     this.on = headsUpDefault(this.env);
     this.where = headsUpWhereDefault(this.env);
+    this.share = options.share ?? shareConfig(this.env);
 
     pi.on("agent_start", () => this.scheduler.runStarted(this.now()));
     pi.on("message_end", (event) => {
@@ -170,6 +184,7 @@ export class HeadsUp {
       lines.push(`Tokens: ${formatTokens(s.usage.cacheRead)} read from the cache, ${formatTokens(fresh)} new input, ${formatTokens(s.usage.output)} output.`);
       if (s.lastSkip) lines.push(`Last skip: ${s.lastSkip}.`);
     }
+    lines.push(shareSummary(this.share));
     lines.push(`Turn off for this session with /sidebar headsup off; set ${HEADSUP_ENV}=0 to start sessions with it off.`);
     return lines.join("\n");
   }
@@ -211,7 +226,10 @@ export class HeadsUp {
           signal: abort.signal,
           ...(this.options.stream ? { stream: this.options.stream } : {}),
           ...(foreign ? { foreign } : {}),
+          share: shareEnabled(this.share),
         });
+        // A share note the check was not asked for (sharing is off) is not shown.
+        if (result.outcome === "note" && result.note?.kind === "share" && !shareEnabled(this.share)) result = { ...result, outcome: "none" };
         if (!foreign) this.lastForeign = undefined;
         else if (result.outcome === "note" || result.outcome === "none") {
           this.lastForeign = { at: now, model: modelKey(foreign.model), ttl: result.cacheTtlMs ?? DEFAULT_TTL_MS };
@@ -267,8 +285,59 @@ export class HeadsUp {
     } catch { /* debugging only */ }
   }
 
+  /** Which share destinations the note may offer. */
+  get targets(): { bluesky: boolean; drafts: boolean } {
+    return { bluesky: !!this.share.bluesky, drafts: !!this.share.drafts };
+  }
+
+  /** The last share note shown, for /post and /draft in Sidebar. */
+  get lastShare(): HeadsUpNote | undefined {
+    return this.lastNote?.kind === "share" ? this.lastNote : undefined;
+  }
+
+  /** Publish a post on Bluesky; the note's topic is then known (not suggested again). */
+  async publish(text: string, note?: HeadsUpNote): Promise<Posted> {
+    if (!this.share.bluesky) throw new Error("Bluesky is not configured");
+    const posted = await postToBluesky(text, this.share.bluesky, { ...(this.options.fetch ? { fetch: this.options.fetch } : {}), now: this.now() });
+    if (note) await this.remember(note);
+    return posted;
+  }
+
+  /** Write a blog draft (or outline) from a share note and save it; returns where it went. */
+  async draft(note: HeadsUpNote, kind: DraftKind): Promise<{ draft: Draft; location: string }> {
+    const drafts = this.share.drafts;
+    const ctx = this.main.ctx;
+    if (!drafts) throw new Error("no drafts destination is configured");
+    if (!ctx) throw new Error("main's session is not ready");
+    const now = this.now();
+    const choice = this.host.model?.() ?? { kind: "same" as const };
+    if (choice.kind === "unavailable") throw new Error(`Sidebar's model ${choice.pattern} matches no model you are logged in to`);
+    const foreign = choice.kind === "other" ? this.foreign(choice.model, choice.label, choice.thinking, now) : undefined;
+    const result = await writeDraft(note, kind, {
+      main: this.main,
+      thinking: this.pi.getThinkingLevel(),
+      now,
+      ...(this.options.stream ? { stream: this.options.stream } : {}),
+      ...(foreign ? { foreign } : {}),
+    });
+    if (!result.ok) throw new Error(`the draft was not written: ${result.reason}`);
+    let repo: string | undefined;
+    try { repo = path.basename((await this.profile(ctx.cwd)).root); } catch { /* no repository */ }
+    const date = new Date(now).toISOString().slice(0, 10);
+    const location = await saveDraft(result.draft, { date, topic: note.topic, ...(repo ? { repo } : {}) }, drafts, { ...this.options.save, env: this.options.save?.env ?? this.env });
+    await this.remember(note);
+    this.host.draftWritten?.(note, result.draft, location);
+    return { draft: result.draft, location };
+  }
+
+  private async remember(note: HeadsUpNote): Promise<void> {
+    const ctx = this.main.ctx;
+    if (!ctx) return;
+    try { (await this.profile(ctx.cwd)).update((p) => markKnown(p, { id: note.topic, text: note.text, at: this.now() })); } catch { /* not remembered */ }
+  }
+
   private show(note: HeadsUpNote, ctx: ExtensionContext): void {
-    this.note.show(note);
+    this.note.show(note, this.targets);
     this.mount(ctx);
   }
 
@@ -328,6 +397,33 @@ export class HeadsUp {
     } else if (action.type === "turn-off") {
       this.setOn(false);
       ctx.ui.notify("Heads-up mode is off for this session. /sidebar headsup on turns it back on.", "info");
+    } else if (action.type === "edit-post") {
+      const edited = await ctx.ui.editor("Edit the Bluesky post", this.note.post);
+      if (edited !== undefined && this.note.note === note) this.note.post = edited.trim();
+    } else if (action.type === "publish" || action.type === "draft") {
+      if (this.sharing) return;
+      this.sharing = true;
+      const text = this.note.post;
+      this.note.setBusy(action.type === "publish" ? "Posting to Bluesky…" : `Writing a blog ${action.kind === "full" ? "draft" : "outline"}…`);
+      this.tui?.requestRender();
+      try {
+        if (action.type === "publish") {
+          const posted = await this.publish(text, note);
+          ctx.ui.notify(`Posted to Bluesky: ${posted.url}`, "info");
+        } else {
+          const { location } = await this.draft(note, action.kind);
+          ctx.ui.notify(`Blog ${action.kind === "full" ? "draft" : "outline"} saved: ${location}`, "info");
+        }
+        if (this.note.note === note) this.hide();
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+        // Back to where it was, so the user can retry, edit or discard.
+        if (this.note.note === note) this.note.phase = action.type === "publish" ? "post" : "note";
+      } finally {
+        this.sharing = false;
+      }
+      this.tui?.requestRender();
+      return;
     }
     if (!this.note.showing) return this.hide();
     if (this.note.phase === "dismissed") {

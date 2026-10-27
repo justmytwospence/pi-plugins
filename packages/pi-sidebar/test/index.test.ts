@@ -702,3 +702,47 @@ describe("status line", () => {
     expect(fitStatus(parts, 30, " · ")).toBe("◧ Sidebar · main idle 5s");
   });
 });
+
+describe("share commands in Sidebar", () => {
+  const NOTE = { topic: "cache-splice", kind: "share" as const, format: "both" as const, text: "Splice the cache.", detail: "Why.", post: "TIL: splice the cache." };
+
+  async function shareSetup(confirmed: boolean) {
+    const { pi, controller, ctx } = setup();
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    const headsUp = controller.headsUp as any;
+    headsUp.share = { bluesky: { handle: "me.bsky.social", password: "pw", service: "https://bsky.social" } };
+    headsUp.lastNote = NOTE;
+    const posts: string[] = [];
+    headsUp.publish = async (text: string) => { posts.push(text); return { uri: "at://x/app.bsky.feed.post/rk", url: "https://bsky.app/profile/me.bsky.social/post/rk" }; };
+    const confirms: Array<[string, string]> = [];
+    (ctx.ui as any).confirm = async (title: string, message: string) => { confirms.push([title, message]); return confirmed; };
+    controller.toggle(ctx as never);
+    const panel = panelOf(controller);
+    const submit = async (text: string) => { panel.input.setText(text); panel.input.handleInput("\r"); await new Promise((r) => setTimeout(r, 0)); };
+    return { panel, submit, posts, confirms };
+  }
+
+  it("/post edit puts the draft in Sidebar's composer, and /post <text> publishes that after a confirm", async () => {
+    const { panel, submit, posts, confirms } = await shareSetup(true);
+    await submit("/post edit");
+    expect(panel.input.getText()).toBe("/post TIL: splice the cache.");
+    await submit("/post My version.\nTwo lines.");
+    expect(confirms).toEqual([["Post to Bluesky as @me.bsky.social?", "My version.\nTwo lines."]]);
+    expect(posts).toEqual(["My version.\nTwo lines."]);
+    await submit("/post");
+    expect(posts.at(-1)).toBe("TIL: splice the cache.");
+  });
+
+  it("does not post when the confirm is declined", async () => {
+    const { submit, posts, confirms } = await shareSetup(false);
+    await submit("/post");
+    expect(confirms).toHaveLength(1);
+    expect(posts).toEqual([]);
+  });
+
+  it("/draft needs a drafts destination", async () => {
+    const { panel, submit } = await shareSetup(true);
+    await submit("/draft");
+    expect(panel.hasNotice()).toBe(true);
+  });
+});

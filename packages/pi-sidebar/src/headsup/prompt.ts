@@ -10,6 +10,18 @@ export const HEADSUP_ROLE = [
   "The topic id names the underlying issue, stably (the same issue later gets the same id).",
 ].join(" ");
 
+/** Added when sharing is on: the check may instead suggest something worth posting or blogging about. */
+export const HEADSUP_SHARE = [
+  "Second, and only when there is no note of the kinds above: the work may hold something worth sharing publicly, a genuinely interesting insight, technique, surprising result or hard-won lesson that other developers would value as a short social post or a blog post.",
+  "This is rarer still. Never suggest sharing anything confidential: secrets, credentials, private names, client or employer details, unreleased plans, internal hostnames or paths. Prefer the general lesson over the specifics of this codebase.",
+  'For such an idea, use kind="share" with format="post|blog|both" (post: fits one short post; blog: needs a longer write-up; both), the headsup sentence naming the idea, the headsup-detail giving the angle and why it would interest people, and, unless format is blog, a third block <headsup-post>a ready-to-publish post in the user\'s voice, first person, at most 280 characters, no hashtags unless natural, no emojis</headsup-post>.',
+].join(" ");
+
+/** The check's instructions, with or without share ideas. */
+export function headsUpRole(share: boolean): string {
+  return share ? `${HEADSUP_ROLE} ${HEADSUP_SHARE}` : HEADSUP_ROLE;
+}
+
 export interface HeadsUpStatusInput {
   liveText: string;
   known: readonly string[];

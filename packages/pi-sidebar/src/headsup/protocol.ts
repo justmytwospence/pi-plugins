@@ -1,21 +1,45 @@
 // A heads-up check's reply: <headsup-none/>, or one note with its explanation. Anything else
 // (prose, a tool call, a malformed block) counts as no note.
 
-export const HEADSUP_KINDS = ["tradeoff", "suspect-result", "risk", "context"] as const;
+export const HEADSUP_KINDS = ["tradeoff", "suspect-result", "risk", "context", "share"] as const;
 export type HeadsUpKind = (typeof HEADSUP_KINDS)[number];
+
+/** What a share note suits: a short social post, a blog post, or either. */
+export type ShareFormat = "post" | "blog" | "both";
+const SHARE_FORMATS: readonly ShareFormat[] = ["post", "blog", "both"];
 
 export interface HeadsUpNote {
   topic: string;
   kind: HeadsUpKind;
   text: string;
   detail: string;
+  /** Share notes: what the idea suits. */
+  format?: ShareFormat;
+  /** Share notes: a drafted social post (at most MAX_POST_GRAPHEMES). */
+  post?: string;
 }
+
+/** Bluesky's limit on a post's length, in graphemes. */
+export const MAX_POST_GRAPHEMES = 300;
 
 export const MAX_NOTE_CHARS = 200;
 const MAX_DETAIL_CHARS = 2000;
 
 const NOTE = /<headsup\b([^>]*)>([\s\S]*?)<\/headsup>/;
 const DETAIL = /<headsup-detail>([\s\S]*?)<\/headsup-detail>/;
+const POST = /<headsup-post>([\s\S]*?)<\/headsup-post>/;
+
+/** The graphemes of a text (what Bluesky counts). */
+export function graphemes(text: string): string[] {
+  return Array.from(new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text), (s) => s.segment);
+}
+
+/** A post's text kept within Bluesky's limit (line breaks kept, ends trimmed). */
+export function fitPost(text: string): string {
+  const trimmed = text.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  const parts = graphemes(trimmed);
+  return parts.length > MAX_POST_GRAPHEMES ? `${parts.slice(0, MAX_POST_GRAPHEMES - 1).join("").trimEnd()}…` : trimmed;
+}
 
 function attribute(attrs: string, name: string): string | undefined {
   const match = new RegExp(`\\b${name}\\s*=\\s*"([^"]*)"`).exec(attrs);
@@ -43,12 +67,17 @@ export function parseHeadsUp(reply: { text: string; toolCalls?: number }): Heads
   const kindRaw = attribute(note[1] ?? "", "kind");
   const kind = (HEADSUP_KINDS as readonly string[]).includes(kindRaw ?? "") ? (kindRaw as HeadsUpKind) : "context";
   const detail = clean(DETAIL.exec(text)?.[1] ?? "");
-  return {
+  const parsed: HeadsUpNote = {
     topic: topicId(attribute(note[1] ?? "", "topic"), body),
     kind,
     text: body.length > MAX_NOTE_CHARS ? `${body.slice(0, MAX_NOTE_CHARS - 1)}…` : body,
     detail: detail.length > MAX_DETAIL_CHARS ? `${detail.slice(0, MAX_DETAIL_CHARS - 1)}…` : detail,
   };
+  if (kind !== "share") return parsed;
+  const formatRaw = attribute(note[1] ?? "", "format");
+  const post = fitPost(POST.exec(text)?.[1] ?? "");
+  const format = (SHARE_FORMATS as readonly string[]).includes(formatRaw ?? "") ? (formatRaw as ShareFormat) : post ? "both" : "blog";
+  return { ...parsed, format, ...(post ? { post } : {}) };
 }
 
 /** The text and tool-call count of a pi-ai assistant message. */

@@ -106,6 +106,21 @@ During main's longer runs, heads-up mode occasionally checks for one thing you s
 - **Model:** checks run on Sidebar's model. On another model, a check reads main's session as a transcript with a cache of its own, so it pays for what main did since the last check; the first check after a pause longer than the cache's lifetime reads the whole transcript uncached.
 - **Cost:** on main's model, a check is one request built from main's last request, so main's prompt cache serves almost all of it. You pay for main's activity since, about 600 tokens of instructions, the reply, and main's thinking setting. Checks pause after two in a row miss the cache. `PI_SIDEBAR_HEADSUP_DEBUG=1` logs each check to `~/.pi/agent/pi-sidebar/headsup.log`.
 
+### Share notes
+
+Checks can also suggest something worth sharing: a technique, result or lesson from main's work, as a drafted short post, a blog post, or both. They are off until a destination is configured, a real heads-up always wins, and the check is told never to include secrets, private names or internal details. The example below is an illustration:
+
+```
+✦ heads up · worth sharing: Splicing a side request onto the agent's prompt cache.
+  1: Review post   2: Blog draft   3: Blog outline   4: Not interested   0: Dismiss
+```
+
+- **Review post:** shows the draft and its length, then **Post to Bluesky**, **Edit** (Pi's editor), **Back** or **Discard**. Nothing is published until you choose Post.
+- **Blog draft / outline:** one more request (built like a check) writes a full draft or a section outline, saves it as markdown with front matter, and adds it to Sidebar's thread for revisions.
+- **Memory:** posting, drafting, Not interested and Discard mark the topic as known.
+- **In Sidebar:** `/post` (with a confirm dialog), `/post edit`, `/post <text>`, `/draft`, `/draft outline`.
+- **Configuration:** `PI_SIDEBAR_BLUESKY_HANDLE` + `PI_SIDEBAR_BLUESKY_APP_PASSWORD` (an app password; `PI_SIDEBAR_BLUESKY_SERVICE` for another PDS), and `PI_SIDEBAR_DRAFTS_DIR` or `PI_SIDEBAR_DRAFTS_COMMAND` (markdown on stdin, `PI_SIDEBAR_DRAFT_TITLE`, `_SLUG`, `_KIND`, `_DATE`, `_REPO` in the environment; its first output line is reported). `PI_SIDEBAR_SHARE=0` keeps share notes off.
+
 ## Why it costs little
 
 Main keeps its last provider request in memory. Each Sidebar request is built from four parts:

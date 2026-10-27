@@ -121,6 +121,7 @@ Settings, read from the environment Pi starts with:
 - `PI_SIDEBAR_MIN_COLUMNS`: the narrowest half for a side-by-side split (default 80).
 - `PI_SIDEBAR_KNOWLEDGE`: where quiz mode and heads-up mode keep their knowledge profiles (default `~/.pi/agent/pi-sidebar/knowledge`).
 - `PI_SIDEBAR_HEADSUP`: `0` starts sessions with heads-up mode off; `sidebar` keeps it on but shows notes only in Sidebar. `PI_SIDEBAR_HEADSUP_DEBUG=1` logs its checks.
+- `PI_SIDEBAR_BLUESKY_HANDLE`, `PI_SIDEBAR_BLUESKY_APP_PASSWORD`, `PI_SIDEBAR_DRAFTS_DIR`, `PI_SIDEBAR_DRAFTS_COMMAND`: where [share notes](#share-notes) can go; any one turns them on.
 - `PI_SIDEBAR_MODELS`: your favorite models for Sidebar, comma-separated (default: Pi's own favorites, `enabledModels`). Each is `provider/id`, a bare id, or a glob whose newest match counts, so `anthropic/claude-opus-*` is always the latest Opus; `:level` sets the thinking level, as in `openai-codex/gpt-*-sol:high`.
 - `PI_SIDEBAR_MODEL`: the model new sessions start with: `same` (default) or a favorite.
 
@@ -188,6 +189,27 @@ Main never sees a note unless you send it to main.
 - **Debug log:** `PI_SIDEBAR_HEADSUP_DEBUG=1` logs every check (trigger, usage and raw reply) to `~/.pi/agent/pi-sidebar/headsup.log`.
 
 **No tools.** On main's model the check keeps main's tool declarations, because removing them would break the cache; on another model it declares none. A reply that calls a tool counts as having no note.
+
+### Share notes
+
+Heads-up checks can also suggest something worth sharing publicly: a technique, a surprising result or a hard-won lesson from main's work, drafted as a short social post, a blog post, or both. Share notes are off until you configure a destination, and a real heads-up always takes priority. The check never sees a destination's credentials, and its instructions forbid secrets, private names, client or employer details and internal paths.
+
+```
+✦ heads up · worth sharing: Splicing a side request onto the agent's prompt cache.
+  1: Review post   2: Blog draft   3: Blog outline   4: Not interested   0: Dismiss
+```
+*Illustration, not a screenshot.*
+
+- **Review post** shows the drafted post with its length (Bluesky allows 300 characters), then offers **Post to Bluesky**, **Edit** (Pi's editor, prefilled), **Back** and **Discard**. Nothing is published until you choose Post.
+- **Blog draft** and **Blog outline** write a full draft (800 to 1500 words) or a section-by-section outline with one more request built like a check (main's cache, or Sidebar's model), save it as markdown with front matter, and put it in Sidebar's thread so you can ask for revisions there.
+- **Not interested** (and Discard) marks the topic as known; posting or drafting does too, so the same idea is not suggested again.
+- **In Sidebar:** `/post` publishes the last share note's post after a confirm dialog, `/post edit` puts `/post <draft>` in Sidebar's composer to change it first, and `/post <text>` publishes that text. `/draft` and `/draft outline` write a blog draft.
+
+Configure destinations with environment variables (any one turns share notes on; `PI_SIDEBAR_SHARE=0` keeps them off):
+
+- `PI_SIDEBAR_BLUESKY_HANDLE` and `PI_SIDEBAR_BLUESKY_APP_PASSWORD`: post as this account with an [app password](https://bsky.app/settings/app-passwords). `PI_SIDEBAR_BLUESKY_SERVICE` sets another PDS (default `https://bsky.social`). Links and hashtags become rich-text links.
+- `PI_SIDEBAR_DRAFTS_DIR`: write drafts to `<dir>/<date>-<slug>.md` (never overwriting).
+- `PI_SIDEBAR_DRAFTS_COMMAND`: instead, run this shell command with the markdown on stdin and `PI_SIDEBAR_DRAFT_TITLE`, `PI_SIDEBAR_DRAFT_SLUG`, `PI_SIDEBAR_DRAFT_KIND` (`full` or `outline`), `PI_SIDEBAR_DRAFT_DATE` and `PI_SIDEBAR_DRAFT_REPO` in its environment. The first line it prints is reported as where the draft went. Use it to file drafts in a notes app, such as an Obsidian vault through the Obsidian CLI.
 
 ## How it stays current and cheap
 

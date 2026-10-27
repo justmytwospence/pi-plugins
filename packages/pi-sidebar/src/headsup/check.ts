@@ -1,6 +1,7 @@
 // One heads-up check: main's last provider request, byte for byte (so main's prompt cache serves
 // it), plus main's activity since, heads-up mode's fixed instructions and the status. A single
 // request through main's model registry, outside any Pi session, so main's extensions never see it.
+// Share drafts (a blog draft from a share note) go through the same request with other instructions.
 import { convertToLlm } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { anchorPayload, cachePreflight, mainLabel, MISS_MIN_TOKENS, MISS_RATIO, replayMessages } from "../child.ts";
@@ -10,7 +11,7 @@ import type { MainState } from "../main-state.ts";
 import { requestedCacheTtlMs, splicePayload } from "../splice.ts";
 import { describeLive, mainDelta } from "../transcript.ts";
 import type { CheckUsage } from "./mode.ts";
-import { foreignHeadsUpIntro, HEADSUP_ROLE, HEADSUP_SYSTEM, headsUpStatus } from "./prompt.ts";
+import { foreignHeadsUpIntro, HEADSUP_SYSTEM, headsUpRole, headsUpStatus } from "./prompt.ts";
 import { parseHeadsUp, replyOf, type HeadsUpNote } from "./protocol.ts";
 
 export type CheckResult =
@@ -32,6 +33,8 @@ export interface CheckInput {
   stream?: StreamFn;
   /** Check on another model than main's, reading main's session as a transcript. */
   foreign?: ForeignCheck;
+  /** Whether the check may also suggest something worth sharing. */
+  share?: boolean;
 }
 
 export interface ForeignCheck {
@@ -51,16 +54,36 @@ function userText(text: string, now: number): AgentMessage {
 }
 
 /** The messages after main's request: its activity since, the instructions, then the status. */
-export function checkMessages(delta: readonly AgentMessage[], liveText: string, known: readonly string[], recent: readonly string[], now: number): AgentMessage[] {
-  return [
-    ...delta,
-    userText(`<sidebar-headsup>\n${HEADSUP_ROLE}\n</sidebar-headsup>`, now),
-    userText(headsUpStatus({ liveText, known, recent, now }), now),
-  ];
+export function checkMessages(delta: readonly AgentMessage[], liveText: string, known: readonly string[], recent: readonly string[], now: number, share = false): AgentMessage[] {
+  return sideMessages(delta, headsUpRole(share), headsUpStatus({ liveText, known, recent, now }), now);
 }
 
-export async function runCheck(input: CheckInput): Promise<CheckResult> {
-  if (input.foreign) return runForeignCheck(input, input.foreign);
+function sideMessages(delta: readonly AgentMessage[], instructions: string, status: string, now: number): AgentMessage[] {
+  return [...delta, userText(`<sidebar-headsup>\n${instructions}\n</sidebar-headsup>`, now), userText(status, now)];
+}
+
+export interface SideInput {
+  main: MainState;
+  thinking?: string;
+  now?: number;
+  signal?: AbortSignal;
+  stream?: StreamFn;
+  foreign?: ForeignCheck;
+  /** Fixed instructions (the cached part of a foreign request ends just before them). */
+  instructions: string;
+  /** The part after them, given main's live state. */
+  status: (liveText: string) => string;
+  maxTokens?: number;
+}
+
+export type SideReply =
+  | { outcome: "skipped"; reason: string }
+  | { outcome: "failed"; reason: string; usage?: CheckUsage }
+  | { outcome: "reply"; text: string; toolCalls: number; usage: CheckUsage; missed: boolean; cacheTtlMs?: number };
+
+/** One side request about main's session, on main's cache or on another model's. */
+export async function sideRequest(input: SideInput): Promise<SideReply> {
+  if (input.foreign) return foreignRequest(input, input.foreign);
   const now = input.now ?? Date.now();
   const { main } = input;
   const ctx = main.ctx;
@@ -76,16 +99,17 @@ export async function runCheck(input: CheckInput): Promise<CheckResult> {
   const delta = mainDelta(ctx.sessionManager.getEntries() as never, request.leafId, ctx.sessionManager.getLeafId());
   if (delta.skipped) return { outcome: "skipped", reason: delta.skipped };
   const liveText = describeLive(main.live, delta, now);
-  const messages = convertToLlm(checkMessages(delta.messages, liveText, input.known, input.recent, now));
+  const messages = convertToLlm(sideMessages(delta.messages, input.instructions, input.status(liveText), now));
 
   let spliceError: string | undefined;
   const stream: StreamFn = input.stream ?? ((m, c, o) => ctx.modelRegistry.streamSimple(m as never, c as never, o as never));
-  let message: { content?: unknown; usage?: Partial<CheckUsage>; stopReason?: string; errorMessage?: string };
+  let message: Reply;
   try {
     message = (await stream(model, { systemPrompt: "", messages, tools: [] }, {
       ...(main.sessionId ? { sessionId: main.sessionId } : {}),
       ...(input.thinking && input.thinking !== "off" ? { reasoning: input.thinking } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
+      ...(input.maxTokens ? { maxTokens: input.maxTokens } : {}),
       maxRetries: 1,
       onPayload: (side: unknown) => {
         const result = splicePayload(request.api, request.payload, side, { sideBreakpoint: false });
@@ -94,26 +118,37 @@ export async function runCheck(input: CheckInput): Promise<CheckResult> {
         spliceError = result.reason;
         throw new Error(`heads-up check not sent: ${result.reason}`);
       },
-    }).result()) as typeof message;
+    }).result()) as Reply;
   } catch (error) {
     if (spliceError) return { outcome: "skipped", reason: spliceError };
     return { outcome: "failed", reason: error instanceof Error ? error.message : String(error) };
   }
   if (spliceError) return { outcome: "skipped", reason: spliceError };
-  const usage: CheckUsage = {
-    input: message.usage?.input ?? 0,
-    output: message.usage?.output ?? 0,
-    cacheRead: message.usage?.cacheRead ?? 0,
-    cacheWrite: message.usage?.cacheWrite ?? 0,
-  };
+  const usage = usageOf(message);
   if (message.stopReason === "error" || message.stopReason === "aborted") {
     return { outcome: "failed", reason: message.errorMessage ?? message.stopReason, usage };
   }
   const expected = main.promptTokens();
   const missed = expected >= MISS_MIN_TOKENS && usage.cacheRead < expected * MISS_RATIO;
-  const reply = replyOf(message);
+  return { outcome: "reply", ...replyOf(message), usage, missed };
+}
+
+export async function runCheck(input: CheckInput): Promise<CheckResult> {
+  const reply = await sideRequest({
+    main: input.main,
+    ...(input.thinking ? { thinking: input.thinking } : {}),
+    ...(input.now !== undefined ? { now: input.now } : {}),
+    ...(input.signal ? { signal: input.signal } : {}),
+    ...(input.stream ? { stream: input.stream } : {}),
+    ...(input.foreign ? { foreign: input.foreign } : {}),
+    instructions: headsUpRole(!!input.share),
+    status: (liveText) => headsUpStatus({ liveText, known: input.known, recent: input.recent, now: input.now ?? Date.now() }),
+  });
+  if (reply.outcome !== "reply") return reply;
   const note = parseHeadsUp(reply);
-  return note ? { outcome: "note", note, usage, missed, raw: reply.text } : { outcome: "none", usage, missed, raw: reply.text };
+  const extra = reply.cacheTtlMs !== undefined ? { cacheTtlMs: reply.cacheTtlMs } : {};
+  const base = { usage: reply.usage, missed: reply.missed, raw: reply.text, ...extra };
+  return note ? { outcome: "note", note, ...base } : { outcome: "none", ...base };
 }
 
 type Reply = { content?: unknown; usage?: Partial<CheckUsage>; stopReason?: string; errorMessage?: string };
@@ -128,10 +163,10 @@ function usageOf(message: Reply): CheckUsage {
 }
 
 /**
- * A check on another model: main's session as a transcript (the checks' own parts, so their cache
+ * A request on another model: main's session as a transcript (the checks' own parts, so their cache
  * builds up check by check), the instructions, then the status. Main's request is not needed.
  */
-async function runForeignCheck(input: CheckInput, foreign: ForeignCheck): Promise<CheckResult> {
+async function foreignRequest(input: SideInput, foreign: ForeignCheck): Promise<SideReply> {
   const now = input.now ?? Date.now();
   const { main } = input;
   const ctx = main.ctx;
@@ -140,11 +175,7 @@ async function runForeignCheck(input: CheckInput, foreign: ForeignCheck): Promis
   if (view.messages.length === 0) return { outcome: "skipped", reason: "main's session has nothing to read yet" };
   const liveText = describeLive(main.live, { messages: [], pending: view.pending }, now);
   const intro = foreignHeadsUpIntro({ sidebar: foreign.label, main: mainLabel(ctx) });
-  const messages = convertToLlm([
-    ...view.messages,
-    userText(`<sidebar-headsup>\n${intro}\n\n${HEADSUP_ROLE}\n</sidebar-headsup>`, now),
-    userText(headsUpStatus({ liveText, known: input.known, recent: input.recent, now }), now),
-  ]);
+  const messages = convertToLlm(sideMessages(view.messages, `${intro}\n\n${input.instructions}`, input.status(liveText), now));
   const stream: StreamFn = input.stream ?? ((m, c, o) => ctx.modelRegistry.streamSimple(m as never, c as never, o as never));
   const thinking = foreign.thinking ?? input.thinking;
   const mainId = main.sessionId ?? ctx.sessionManager.getSessionId();
@@ -155,6 +186,7 @@ async function runForeignCheck(input: CheckInput, foreign: ForeignCheck): Promis
       ...(mainId ? { sessionId: derivedSessionId(mainId, "headsup") } : {}),
       ...(thinking && thinking !== "off" ? { reasoning: thinking } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
+      ...(input.maxTokens ? { maxTokens: input.maxTokens } : {}),
       maxRetries: 1,
       // One breakpoint where the transcript ends: the next check reads it from the cache.
       onPayload: (payload: unknown) => {
@@ -173,8 +205,5 @@ async function runForeignCheck(input: CheckInput, foreign: ForeignCheck): Promis
   const total = usage.input + usage.cacheRead + usage.cacheWrite;
   // Only a check its own cache should have served can miss it.
   const missed = foreign.warm && view.continued && total >= MISS_MIN_TOKENS && usage.cacheRead < total * MISS_RATIO;
-  const reply = replyOf(message);
-  const note = parseHeadsUp(reply);
-  const extra = cacheTtlMs !== undefined ? { cacheTtlMs } : {};
-  return note ? { outcome: "note", note, usage, missed, raw: reply.text, ...extra } : { outcome: "none", usage, missed, raw: reply.text, ...extra };
+  return { outcome: "reply", ...replyOf(message), usage, missed, ...(cacheTtlMs !== undefined ? { cacheTtlMs } : {}) };
 }
