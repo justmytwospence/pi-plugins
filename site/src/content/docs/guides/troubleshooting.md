@@ -94,7 +94,7 @@ The widget exists only with overlay-visible tasks; `/todos` shows the full non-d
 - **A service disappeared on exit:** only services explicitly started with `keep: true` are intended to outlive the session.
 - **A notebook is missing:** check its server is running, registry discovery, cwd scope, hidden directories, and token access. `/marimo` pins notebooks outside automatic discovery’s set.
 - **The server is ready but a fit is still running:** readiness and kernel completion are different. With pi-marimo enabled, waiting on a recognized ready server can wait for its cells.
-- **Killing a marimo-pair job did not stop the cell:** stopping the client does not interrupt the kernel. Use the notebook view’s double-`x` interrupt or the browser stop control.
+- **Killing a marimo-pair job did not stop the cell:** with pi-marimo following the notebook (in the TUI), stopping the job interrupts its kernel. Otherwise stopping the client does not; use the notebook view’s double-`x` interrupt or the browser stop control.
 - **Browser edits appear late:** the exact-session connection does not see some browser edits until they run. The model’s notebook block is also intentionally fixed during a turn.
 
 See [background work](/recipes/background-work/) and [notebook sessions](/recipes/notebooks/) for correct waiting patterns.

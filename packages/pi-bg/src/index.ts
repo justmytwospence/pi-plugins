@@ -30,11 +30,14 @@
 //   reads  bg:external {id,label,state,summary?,result?}  outside work bg_wait can wait on (state
 //                                              running|done|failed); `result` is Markdown and bg_wait
 //                                              renders it as such
-//          bg:annotate {task,by,detail?,wait?}  what another extension knows about a task (pi-marimo: the
-//                                              kernel state of the notebook a server serves or a job drives);
-//                                              `wait` names outside work that bg_wait on the task waits for
-//                                              once it is up, and that bg_logs lists under the task. No
-//                                              detail clears it.
+//          bg:annotate {task,by,detail?,wait?,represented?}  what another extension knows about a task
+//                                              (pi-marimo: the kernel state of the notebook a server serves or
+//                                              a job drives); `wait` names outside work that bg_wait on the task
+//                                              waits for once it is up, and that bg_logs lists under the task.
+//                                              `represented`: that outside work's own rows (pi-marimo's notebook
+//                                              rows) stand for this running task, so /tasks and the pill leave
+//                                              it out, and bg_wait on that outside work waits on the task, whose
+//                                              result carries the output. No detail clears it.
 //          bg:probe {reply}                    reply() when pi-bg is loaded
 //
 // marimo without pi-marimo (marimo.ts): a `marimo edit nb.py` service is named `marimo nb.py` and is
@@ -87,6 +90,8 @@ export interface Annotation {
   by: string;
   detail: string;
   wait: string[];
+  /** Another source's rows (the outside work in `wait`) stand for this task while it runs. */
+  represented?: boolean;
 }
 
 export interface External {
@@ -168,6 +173,11 @@ export default function piBg(pi: ExtensionAPI) {
   };
   /** A running task's annotation. */
   const noteOf = (t: Task): Annotation | undefined => (t.status === "running" ? annotations.get(t.id) : undefined);
+  /** A running task another source's rows stand for: left out of /tasks and the pill. */
+  const represented = (t: Task): boolean => noteOf(t)?.represented === true;
+  /** The running task that drives this outside work and is shown as it, to wait on instead. */
+  const driverOf = (x: External): Task | undefined =>
+    x.state === "running" ? reg.running(sessionId).find((t) => represented(t) && noteOf(t)!.wait.includes(x.id)) : undefined;
   const waiters = new Set<Waiter>();
   const waitingMessages = new Map<string, string>();
   /** The same waits' `herdr:waiting` labels (what they wait on), by owner. */
@@ -267,7 +277,7 @@ export default function piBg(pi: ExtensionAPI) {
   const alerting = (t: Task) => (t.status === "failed" || t.status === "timeout") && (t.endedAt ?? 0) > dismissedAt && !reg.cleared.has(t.id);
   const pillOf = (now: number): ActivityPill | undefined => {
     void now;
-    const running = reg.running(sessionId);
+    const running = reg.running(sessionId).filter((t) => !represented(t));
     const failed = reg.list(sessionId).filter(alerting).length;
     if (!running.length && !failed) return undefined;
     // One task's progress, when exactly one running task has any: `2 tasks · fit 45%`.
@@ -295,7 +305,7 @@ export default function piBg(pi: ExtensionAPI) {
     noun: "task",
     // Running first (oldest first), then what ended (newest first).
     entries: (now) =>
-      [...reg.running(sessionId), ...reg.list(sessionId).filter((t) => t.status !== "running").sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))].map((t) => ({
+      [...reg.running(sessionId).filter((t) => !represented(t)), ...reg.list(sessionId).filter((t) => t.status !== "running").sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))].map((t) => ({
         key: t.id,
         label: t.name,
         detail: [noteOf(t)?.detail, t.status === "running" ? t.progress?.note : undefined, t.command.replace(/\s+/gu, " ").trim()].filter(Boolean).join(" · "),
@@ -771,7 +781,7 @@ export default function piBg(pi: ExtensionAPI) {
     if (typeof d.detail !== "string" || !d.detail) annotations.delete(d.task);
     else {
       const wait = Array.isArray(d.wait) ? d.wait.filter((w): w is string => typeof w === "string") : [];
-      annotations.set(d.task, { by: typeof d.by === "string" ? d.by : "", detail: d.detail, wait });
+      annotations.set(d.task, { by: typeof d.by === "string" ? d.by : "", detail: d.detail, wait, ...((d as { represented?: unknown }).represented === true ? { represented: true } : {}) });
     }
     // Only what draws: a bg:tasks snapshot here would bounce back to the annotator.
     pill.update();
@@ -1032,7 +1042,11 @@ export default function piBg(pi: ExtensionAPI) {
         // A server that is up, with outside work an extension tied to it (a marimo kernel): wait for that.
         const tied = t && t.status === "running" && t.kind === "service" && (t.ready || !t.readyPattern) ? (noteOf(t)?.wait ?? []) : [];
         const tiedRunning = tied.map(findExternal).filter((e): e is External => e?.state === "running");
-        if (x) {
+        const driver = x ? driverOf(x) : undefined;
+        if (driver) {
+          // Outside work a job drives: the job's end carries the output.
+          targets.add(driver.id);
+        } else if (x) {
           if (x.state !== "running") return blocks(consumeExternal(x));
           targets.add(x.id);
         } else if (!t) {

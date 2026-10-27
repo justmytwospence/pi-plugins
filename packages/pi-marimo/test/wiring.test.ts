@@ -102,7 +102,7 @@ function setup(branch: unknown[] = []) {
 }
 
 const pair = `bash .agents/skills/marimo-pair/scripts/execute-code.sh --url ${SERVER} --file nb.py - <<'PY'\nfit()\nPY`;
-const job = (status: string) => ({ id: "j1", kind: "job", cwd: CWD, command: pair, status, origin: "agent", willWake: status === "running" });
+const job = (status: string) => ({ id: "j1", name: "fit", kind: "job", cwd: CWD, command: pair, status, origin: "agent", willWake: status === "running" });
 const serverTask = { id: "s1", kind: "service", cwd: CWD, command: "uv run marimo edit --no-token nb.py", status: "running", origin: "agent", willWake: false };
 
 beforeEach(() => {
@@ -132,7 +132,8 @@ test("a run a waking pi-bg job drives: held in herdr, reported as outside work, 
   expect(x.of("bg:external")[0]).toEqual({ id: "marimo:nb.py", label: "nb.py: Slow model fit", state: "running" });
   expect(x.of("herdr:token").at(-1)).toEqual({ key: "marimo", value: "nb.py: Slow model fit" });
   const notes = x.of("bg:annotate");
-  expect(notes).toContainEqual({ task: "j1", by: "pi-marimo", detail: "nb.py: running Slow model fit · 1 queued", wait: ["marimo:nb.py"] });
+  // The job keeps the notebook busy: its notebook row stands for it. The server stays a task of its own.
+  expect(notes).toContainEqual({ task: "j1", by: "pi-marimo", detail: "nb.py: running Slow model fit · 1 queued", wait: ["marimo:nb.py"], represented: true });
   expect(notes).toContainEqual({ task: "s1", by: "pi-marimo", detail: "nb.py: running Slow model fit · 1 queued", wait: ["marimo:nb.py"] });
   const count = notes.length;
   // Unchanged state sends nothing new.
@@ -148,6 +149,23 @@ test("a run a waking pi-bg job drives: held in herdr, reported as outside work, 
   await until(() => x.of("bg:annotate").some((d) => d.task === "s1" && /idle/u.test(d.detail ?? "")));
   expect(x.of("bg:annotate").at(-1)).toMatchObject({ detail: "nb.py: idle · 1 error" });
   await x.fire("session_shutdown");
+});
+
+test("stopping a job that drives a run interrupts the kernel it was running cells in", async () => {
+  const calls: string[] = [];
+  vi.stubGlobal("fetch", async (url: string) => {
+    calls.push(url);
+    return { ok: true, status: 200, text: async () => '<html data-token="tok123">' };
+  });
+  const x = setup();
+  await startRun(x);
+  // Another task stopping touches nothing.
+  x.pi.events.emit("bg:killed", { id: "s1" });
+  x.pi.events.emit("bg:killed", { id: "j1" });
+  await until(() => calls.some((u) => u.endsWith("/api/kernel/interrupt")));
+  expect(calls.filter((u) => u.endsWith("/api/kernel/interrupt"))).toHaveLength(1);
+  await x.fire("session_shutdown");
+  vi.unstubAllGlobals();
 });
 
 test("a stopped covering job brings the notice back", async () => {
@@ -173,7 +191,7 @@ test("the notebooks as background work: a source for the hosts, its own pill alo
   const section = x.of("activity:section")[0]?.section;
   expect(section).toMatchObject({ id: "marimo", title: "notebooks", noun: "notebook" });
   const entries = section.entries(Date.now());
-  expect(entries).toEqual([expect.objectContaining({ key: JSON.stringify([SERVER, `${CWD}/nb.py`]), label: "nb.py", status: "running", detail: "running Slow model fit · 1 queued" })]);
+  expect(entries).toEqual([expect.objectContaining({ key: JSON.stringify([SERVER, `${CWD}/nb.py`]), label: "nb.py", status: "running", detail: "running Slow model fit · 1 queued · bg fit" })]);
   // Alone, its own pill; hosted (by pi-bg, then pi-subagents too), none; the last host leaving brings it back.
   await until(() => /1 notebook/u.test(x.pillText() ?? ""));
   section.setHosted(true, "pi-bg");

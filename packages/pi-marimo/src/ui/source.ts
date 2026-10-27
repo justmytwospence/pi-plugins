@@ -2,7 +2,8 @@
 // pi-subagents' runs:
 // - Rows in pi-bg's `/tasks` view, tagged `notebook`: running while a cell runs or is queued,
 //   failed when its last run broke cells (until the user's next message, or `x`), idle otherwise.
-//   Enter opens the notebook full screen (view.ts); `x` twice interrupts the kernel.
+//   Enter opens the notebook full screen (view.ts); `x` twice interrupts the kernel. While a pi-bg
+//   job drives the run, the row stands for that job too (pi-bg hides the job's own) and names it.
 // - A pill under the prompt, `1 notebook` while one is busy and `1 failed` while a failure is
 //   unseen; nothing for idle notebooks. A host draws it (pi-subagents' list, or pi-bg's pill);
 //   alone, pi-marimo draws its own, and Enter on it opens the busiest notebook.
@@ -36,6 +37,8 @@ export interface SourceActions {
   changed(): void;
   /** Whether a host shows the pill now. */
   hostedChanged(hosted: boolean): void;
+  /** The pi-bg jobs running this notebook's cells, whose rows this one stands for. */
+  drivers?(f: Followed): string[];
 }
 
 export class NotebookSource {
@@ -160,7 +163,7 @@ export class NotebookSource {
         key: path,
         stopToken: interruptKey(f),
         label: basename(f.attachment.path),
-        detail: [...kernelStateParts(f), ...lensParts(f)].join(" · "),
+        detail: [...kernelStateParts(f), ...lensParts(f), ...(run ? (this.actions.drivers?.(f) ?? []).map((name) => `bg ${name}`) : [])].join(" · "),
         status,
         stats,
         startedAt: run?.since ?? (ended ? ended.at - ended.ms : f.notebook.lastActivity),

@@ -23,7 +23,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { BgBridge } from "./bg.js";
-import { KernelHold } from "./core/hold.js";
+import { busy as kernelBusy, KernelHold } from "./core/hold.js";
 import { ambiguityNote, lensLines, lensStatusText, snapshot, STATE_TAG, statusParts, statusText } from "./core/render.js";
 import { basename } from "./core/io.js";
 import { nodeIo } from "./core/node-io.js";
@@ -125,7 +125,14 @@ export default function piMarimo(pi: ExtensionAPI): void {
   const hold = new KernelHold();
   let herdr: HerdrHold | undefined;
   pi.events?.on("herdr:ready", () => herdr?.resend());
-  const bg = new BgBridge(pi.events, (command) => watcher?.targeted(pairTargets(command)) ?? []);
+  const bg = new BgBridge(pi.events, (command) => watcher?.targeted(pairTargets(command)) ?? [], () => ctxRef?.mode === "tui");
+  // A stopped job that drove a run: its client is gone but the cells still run, so stop them too.
+  pi.events?.on("bg:killed", (data) => {
+    const paths = bg.killed((data as { id?: unknown } | undefined)?.id);
+    for (const f of watcher?.followed() ?? []) {
+      if (paths.includes(f.attachment.path) && f.connection === "connected" && kernelBusy(f)) void interruptKernel(f.attachment, process.env.MARIMO_TOKEN).catch(() => undefined);
+    }
+  });
   pi.events?.on("bg:tasks", (data) => {
     bg.onTasks((data as { tasks?: unknown } | undefined)?.tasks);
     if (hold.active) bg.noteCovered(hold.paths);
@@ -157,6 +164,7 @@ export default function piMarimo(pi: ExtensionAPI): void {
       ownPill.update();
     },
     hostedChanged: () => bindPill(),
+    drivers: (f) => bg.drivers(f.attachment.path),
   });
   const ownPill = new PillView({
     pill: (now) => source.pill(now),

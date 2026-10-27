@@ -517,6 +517,23 @@ describe("pi-bg", () => {
     await x.shutdown();
   }, 15_000);
 
+  it("marimo: a job the notebook rows stand for leaves /tasks and the pill, and bg_wait on the notebook waits on the job", async () => {
+    const x = await load();
+    const section = x.emitted.filter((e) => e.channel === "activity:section").map((e) => e.data.section).find((s: any) => s.id === "bg");
+    const start = x.textOf(await x.call("bg_run", { command: "sleep 2.5; echo fitted", kind: "job", name: "fit" }));
+    const id = /job (\w+)/u.exec(start)?.[1] ?? "";
+    expect(section.pill(Date.now())).toEqual({ label: "1 task" });
+    x.pi.events.emit("bg:external", { id: "marimo:fit.py", label: "fit.py: Model fit", state: "running" });
+    x.pi.events.emit("bg:annotate", { task: id, by: "pi-marimo", detail: "fit.py: running Model fit", wait: ["marimo:fit.py"], represented: true });
+    expect(section.entries(Date.now())).toEqual([]);
+    expect(section.pill(Date.now())).toBeUndefined();
+    // Waiting on the notebook returns the job's own result, with its output.
+    expect(x.textOf(await x.call("bg_wait", { id: "marimo:fit.py" }))).toMatch(/fit[\s\S]*fitted/u);
+    // Ended, the job is a row again (its log stays reachable).
+    expect(section.entries(Date.now())).toMatchObject([{ label: "fit", status: "done" }]);
+    await x.shutdown();
+  }, 10_000);
+
   it("hosts another source's pill while no one hosts it: one pill, `1 task · 1 notebook`; hosted itself, it lets go", async () => {
     const x = await load();
     const calls: Array<[boolean, string | undefined]> = [];
@@ -548,7 +565,7 @@ describe("pi-bg", () => {
   it("shows progress a task reports: the row, the pill, the waiting message, the agent's text and the snapshot", async () => {
     const { ACTIVITY_SECTION } = await import("../src/activity.ts");
     const x = await load();
-    const section = x.emitted.find((e) => e.channel === ACTIVITY_SECTION)?.data.section;
+    const section = x.emitted.filter((e) => e.channel === "activity:section").map((e) => e.data.section).find((s: any) => s.id === "bg");
     await expect(x.call("bg_run", { command: "true", kind: "job", progress: String.raw`\d+%` })).rejects.toThrow(/capture group/);
     const r = x.textOf(await x.call("bg_run", { command: `echo "450/1000 fold 3" > "$PI_BG_PROGRESS"; sleep 3`, kind: "job", name: "fit" }));
     expect(r).toMatch(/Started fit/);
