@@ -24,10 +24,11 @@ test("a tag inside prose is not a tag line and stays", () => {
   expect(extractNext(text)).toEqual({ text, found: false });
 });
 
-test("too long or empty suggestions are stripped but not offered", () => {
-  const long = "x".repeat(111);
-  expect(extractNext(`Done.\n<next>${long}</next>`)).toEqual({ text: "Done.", found: true });
-  expect(extractNext(`Done.\n<next>${"x".repeat(110)}</next>`).suggestion).toHaveLength(110);
+test("long suggestions are offered whole unless maxChars caps them; empty ones are stripped", () => {
+  const command = `!i pi mcp add obsidian --url https://obsidian.mcp.example.com/mcp --oauth-client-id obsidian-mcp --oauth-callback-port 8765`;
+  expect(extractNext(`Done.\n<next>${command}</next>`)).toEqual({ text: "Done.", suggestion: command, found: true });
+  expect(extractNext(`Done.\n<next>${"x".repeat(111)}</next>`, 110)).toEqual({ text: "Done.", found: true });
+  expect(extractNext(`Done.\n<next>${"x".repeat(110)}</next>`, 110).suggestion).toHaveLength(110);
   expect(extractNext("Done.\n<next>  </next>")).toEqual({ text: "Done.", found: true });
   expect(extractNext("Done.\n<next>abcdef</next>", 5)).toEqual({ text: "Done.", found: true });
 });

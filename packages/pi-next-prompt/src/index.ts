@@ -21,7 +21,7 @@ export interface NextPromptConfig extends Record<string, unknown> {
 export const DEFAULT_CONFIG: NextPromptConfig = {
   enabled: true,
   acceptKeys: ["tab", "right"],
-  maxChars: 110,
+  maxChars: 0,
   jev: { enabled: true, provider: "typesafe", model: "jev-latest", timeoutMs: 1_500, threshold: 0.6 },
 };
 
@@ -376,7 +376,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
     const request = data as { source?: unknown; text?: unknown } | undefined;
     const source = typeof request?.source === "string" ? request.source : undefined;
     if (!source) return;
-    const text = typeof request?.text === "string" ? request.text.replace(/\s+/g, " ").trim().slice(0, config.maxChars) : "";
+    const text = typeof request?.text === "string" ? request.text.replace(/\s+/g, " ").trim().slice(0, config.maxChars > 0 ? config.maxChars : undefined) : "";
     if (!text) {
       if (offerSource === source) hide();
       return;

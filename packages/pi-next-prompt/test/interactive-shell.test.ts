@@ -42,7 +42,7 @@ test("handoff guidance explicitly covers commands and requested manual tests", (
   expect(INTERACTIVE_INSTRUCTION).toContain("explicit requests to try or manually test an interactive feature");
   expect(INTERACTIVE_INSTRUCTION).toContain("pending next step even when implementation and automated checks are complete");
   expect(INTERACTIVE_INSTRUCTION).toContain("Tab only fills an editable draft and the user must press Enter to run it");
-  expect(INTERACTIVE_INSTRUCTION).toContain("Never include credentials or truncate a shell command");
+  expect(INTERACTIVE_INSTRUCTION).toContain("always give the complete command however long it is: never truncate");
 });
 
 test("no terminal means no handoff guidance", async () => {

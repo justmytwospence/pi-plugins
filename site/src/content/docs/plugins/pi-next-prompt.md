@@ -9,7 +9,7 @@ plugin: pi-next-prompt
 - **Use it for:** Offer one editable next step after a completed run, without a separate generation request.
 - **Enable:** Select `packages/pi-next-prompt/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
 - **Controls:** `/next-prompt` status/on/off; Tab/Right accept into an empty focused main editor, never submit.
-- **Settings:** `next-prompt.json` shared/user/project layers; enabled, Tab/Right, max 110 characters; Jev timeout 1500 ms, threshold 0.6.
+- **Settings:** `next-prompt.json` shared/user/project layers; enabled, Tab/Right, no length limit (`maxChars`, 0); Jev timeout 1500 ms, threshold 0.6.
 - **Requirements, cost & privacy:** Pi 1.0+ TUI; normal input/output tokens for suggestion instruction; optional paid Jev sees suggestion/request/answer excerpts.
 - **Integrations & limits:** Optional Vim/select-nav and interactive-shell capability probe. Missing classifier shows unvetted text; no prompt after failed/aborted runs. Suggestions are not authorization.
 
@@ -54,7 +54,7 @@ This project `.pi/next-prompt.json` keeps the default acceptance keys and length
 {
   "enabled": true,
   "acceptKeys": ["tab", "right"],
-  "maxChars": 110,
+  "maxChars": 0,
   "jev": { "enabled": false }
 }
 ```

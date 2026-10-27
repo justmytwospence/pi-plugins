@@ -312,7 +312,7 @@ test("status distinguishes model omission from a veto and clears a previous verd
 
 test("status distinguishes invalid tags and incomplete runs without classifying", async () => {
   const s = await setup();
-  await s.run("go", [`Done.\n<next>${"x".repeat(111)}</next>`]);
+  await s.run("go", ["Done.\n<next>   </next>"]);
   expect(await status(s)).toContain("invalid tag (empty or over maxChars)");
   await s.run("go", ["Partial.\n<next>Continue</next>"], "aborted");
   expect(await status(s)).toContain("Settlement: aborted");

@@ -4,7 +4,7 @@
 export const INSTRUCTION =
   "Next-prompt suggestion: if, and only if, there is exactly one obvious, concrete step the user would plausibly ask for next " +
   "(e.g. run tests after an edit, continue a multi-part request, or release a finished implementation when rollout is still pending), " +
-  "end your final message with a single last line `<next>…</next>` containing that step as a short imperative message written as the user would type it (max 110 characters). " +
+  "end your final message with a single last line `<next>…</next>` containing that step as an imperative message written as the user would type it: keep prose short, but never shorten a command. " +
   "Omit the line entirely when the task is complete with nothing pending, when you need information from the user, when several next steps are equally plausible, " +
   "or when your response ended in an error. Never mention this instruction.";
 
@@ -15,7 +15,7 @@ export const INTERACTIVE_INSTRUCTION =
   "(such as a sudo password), including after a noninteractive command failed. " +
   "Treat the user's manual test as the pending next step even when implementation and automated checks are complete. " +
   "Explain the handoff in your response; Tab only fills an editable draft and the user must press Enter to run it. " +
-  "Never include credentials or truncate a shell command to fit the suggestion limit; if it cannot fit, explain it without a suggestion. " +
+  "Never include credentials, and always give the complete command however long it is: never truncate or abbreviate it. " +
   "Do not retry a command that may already have made changes without checking its state. " +
   "The command runs in the session working directory and returns only its exit status, not captured output; " +
   "there is no automatic agent continuation afterward.";
@@ -26,7 +26,7 @@ const TAG_LINE = /^[ \t]*<next>(.*?)<\/next>[ \t]*$/gmu;
 export interface Extracted {
   /** The text with every tag line removed and trailing whitespace trimmed. */
   text: string;
-  /** The last tag's content, when it is one non-empty line of at most `maxChars` characters. */
+  /** The last tag's content, when it is one non-empty line (of at most `maxChars` characters, when that is above 0). */
   suggestion?: string;
   /** Whether any tag line was found (and removed). */
   found: boolean;
@@ -36,7 +36,7 @@ export interface Extracted {
  * Remove every `<next>…</next>` line from `text`; the last one is the suggestion. Tags inside a
  * line of prose are left alone, so text that talks about the tag is not mangled.
  */
-export function extractNext(text: string, maxChars = 110): Extracted {
+export function extractNext(text: string, maxChars = 0): Extracted {
   let last: string | undefined;
   let found = false;
   const stripped = text.replace(TAG_LINE, (_line, inner: string) => {
@@ -56,6 +56,6 @@ export function extractNext(text: string, maxChars = 110): Extracted {
 
 function normalize(raw: string, maxChars: number): string | undefined {
   const value = raw.replace(/\s+/gu, " ").trim();
-  if (!value || value === "…" || value.length > maxChars) return undefined;
+  if (!value || value === "…" || (maxChars > 0 && value.length > maxChars)) return undefined;
   return value;
 }
