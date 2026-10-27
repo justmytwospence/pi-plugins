@@ -45,6 +45,7 @@
       "./packages/pi-cc-render/src/index.ts",
       "./packages/pi-markdown-extras/src/index.ts",
       "./packages/pi-context/src/index.ts",
+      "./packages/pi-compact-plan/src/index.ts",
       "./packages/pi-trends/src/index.ts",
       "./packages/pi-pressure/src/index.ts",
       "./packages/pi-mcp-device-login/src/index.ts"

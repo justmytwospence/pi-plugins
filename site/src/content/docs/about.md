@@ -8,7 +8,7 @@ Pi Plugins is maintained by [Spencer Boucher](https://github.com/justmytwospence
 
 This documentation covers the Pi suite at [justmytwospence/pi-plugins](https://github.com/justmytwospence/pi-plugins). It is an independent personal project, not the official Pi documentation. For Pi itself, start at [pi.dev](https://pi.dev).
 
-All 33 components are exposed as selectable entries from one Git package. They can be independently enabled, not independently version-pinned within the suite.
+All 34 components are exposed as selectable entries from one Git package. They can be independently enabled, not independently version-pinned within the suite.
 
 ## Source and attribution
 

@@ -17,7 +17,7 @@ Status footer replaces Pi's footer, not its task widgets or tool rendering. It k
 
 ## Enable and requirements
 
-Select `packages/pi-status-footer/src/index.ts` using [Install & select](/guides/install/). All 33 suite entries load by default, and one Git pin versions the selected components together.
+Select `packages/pi-status-footer/src/index.ts` using [Install & select](/guides/install/). All 34 suite entries load by default, and one Git pin versions the selected components together.
 
 The footer runs in Pi's terminal UI; print, JSON and RPC sessions do not start its background work. Git supplies repository measurements. Each footer row leads with a Nerd Font icon (folder, git branch, robot with a brain before the reasoning level, tachometer, book, cogs, microchip, archive, hourglass; on the context row a plug for MCP and a magic wand for skills; in the notices row a shield for the tool gate, or a bell); without Nerd Font symbol support they draw as placeholders, and the status text stays readable. Use the suite's tested Pi version from the installation guide rather than assuming an older component minimum covers its current UI hooks.
 
