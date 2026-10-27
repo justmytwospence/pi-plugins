@@ -1,14 +1,18 @@
 # pi-compact-plan
 
-A Pi extension that turns compaction into a small plan. Run `/compact-plan <what you will do next>`: the session asks a question or two only when an answer changes what the summary must keep, then drafts focus instructions and opens them in an editor. Submit to compact with them (after any edits); Esc cancels.
+A Pi extension that turns compaction into a small plan. Run `/compact-plan <what you will do next>`: the session asks a question or two only when an answer changes what the summary must keep, then drafts focus instructions. The draft is shown in the transcript like a plan waiting for approval, with a select under it: compact with it, edit it (in the suite's editor, so pi-vim works there), tell the session what to change, or cancel.
 
 Example draft (illustration, not a screenshot):
 
 ```
-Next task: wire retry() from src/net/retry.ts into the CLI's fetch command
-Preserve verbatim: backoff is 2^n * 250ms capped at 8s; ...
-Preserve briefly: why the old wrapper was removed
-Drop: the caching tangent, the passing test runs
+ Compaction focus · wire the retry into the CLI
+
+ - Next task: wire retry() from src/net/retry.ts into the CLI's fetch command
+ - Preserve verbatim: backoff is 2^n * 250ms capped at 8s; ...
+ - Preserve briefly: why the old wrapper was removed
+ - Drop: the caching tangent, the passing test runs
+
+ Waiting for approval
 ```
 
 The drafting is a side request to the session's model, outside the session. Where the API allows, it reuses the session's last provider request byte for byte, so the conversation is read from the prompt cache.
@@ -44,4 +48,4 @@ npm run check
 
 ## License
 
-MIT. The request splicing is adapted from this suite's pi-sidebar.
+MIT. The request splicing is adapted from this suite's pi-sidebar; `editor-contract.ts`, `herdr-blocked.ts` and the text prompt follow pi-plan-mode.

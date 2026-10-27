@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isConversationRequest, splicePayload } from "../src/splice.ts";
+import { entryText, isConversationRequest, splicePayload } from "../src/splice.ts";
 
 const main = {
   model: "claude-x",
@@ -70,10 +70,20 @@ describe("splicePayload", () => {
 });
 
 describe("isConversationRequest", () => {
-  it("matches the session's system prompt and model", () => {
-    expect(isConversationRequest(main, "claude-x", "You are pi")).toBe(true);
-    expect(isConversationRequest(main, "claude-y", "You are pi")).toBe(false);
-    expect(isConversationRequest(main, "claude-x", "Summarize this")).toBe(false);
-    expect(isConversationRequest({ model: "gpt", instructions: 'say "hi"\nnow' }, "gpt", 'say "hi"\nnow')).toBe(true);
+  it("matches the session's model and a request that ends with its latest entry", () => {
+    expect(isConversationRequest(main, "claude-x", "do it")).toBe(true);
+    expect(isConversationRequest(main, "claude-y", "do it")).toBe(false);
+    expect(isConversationRequest(main, "claude-x", "Summarize the conversation")).toBe(false);
+    expect(isConversationRequest({ model: "gpt", input: [{ role: "user", content: 'say "hi"\nnow' }] }, "gpt", 'say "hi"\nnow')).toBe(true);
+    expect(isConversationRequest({ model: "gpt" }, "gpt", "x")).toBe(false);
+  });
+});
+
+describe("entryText", () => {
+  it("reads prompts, tool results and custom messages", () => {
+    expect(entryText({ type: "message", message: { role: "user", content: "hi" } })).toBe("hi");
+    expect(entryText({ type: "message", message: { role: "toolResult", content: [{ type: "text", text: "a" }, { type: "image" }] } })).toBe("a");
+    expect(entryText({ type: "custom_message", content: [{ type: "text", text: "c" }] })).toBe("c");
+    expect(entryText(undefined)).toBe("");
   });
 });

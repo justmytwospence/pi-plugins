@@ -35,11 +35,12 @@ Reply with only a JSON object, no code fence and no other text:
 
 questions: 0 to ${MAX_QUESTIONS}, asked only when the answer would change what the summary must keep (for example whether an abandoned approach still matters, or whether some side issue is in scope). Usually []. Each has 2 to ${MAX_OPTIONS} short options; the user can also answer in their own words.
 
-draft: the focus instructions, plain text in this shape:
-Next task: <the goal, sharpened with specifics from this session>
-Preserve verbatim: <exact paths, commands, identifiers, decisions with their reasons, open bugs, constraints the user stated>
-Preserve briefly: <background that is still relevant>
-Drop: <dead ends, finished subtasks, noisy tool output>
+draft: the focus instructions, a Markdown list in this shape:
+- **Next task:** <the goal, sharpened with specifics from this session>
+- **Preserve verbatim:** <exact paths, commands, identifiers, decisions with their reasons, open bugs, constraints the user stated>
+- **Preserve briefly:** <background that is still relevant>
+- **Drop:** <dead ends, finished subtasks, noisy tool output>
+Nested items are fine where a part has several points.
 Be specific to this session, never generic. Under 250 words. If you ask questions, still write your best draft.
 </${TAG}>`;
 }
@@ -53,6 +54,19 @@ The user's answers:
 ${lines}
 
 Revise the draft with these answers. Reply with only the JSON object, with "questions": [].
+</${TAG}>`;
+}
+
+/** A revision the user asked for, against the draft as it stands now (it may have been edited). */
+export function revisePrompt(draft: string, feedback: string): string {
+  return `<${TAG}>
+The current draft:
+
+${draft}
+
+The user wants this changed: ${feedback}
+
+Revise the draft accordingly. Reply with only the JSON object, with "questions": [].
 </${TAG}>`;
 }
 

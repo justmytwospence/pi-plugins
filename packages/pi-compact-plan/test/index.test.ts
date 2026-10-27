@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import piCompactPlan, { COMMAND, messagesSince, SKIP, WRITE_OWN } from "../src/index.ts";
+import piCompactPlan, { APPROVE, CANCEL, CHANGE, COMMAND, EDIT, messagesSince, SKIP, WRITE_OWN } from "../src/index.ts";
+import { ENTRY, OUTCOME_ENTRY } from "../src/view.ts";
 
 const SYSTEM = "You are pi, a coding agent.";
 const model = { api: "anthropic-messages", provider: "anthropic", id: "claude-x" };
@@ -25,7 +26,11 @@ function setup(options: { replies: string[]; ui?: Partial<Record<string, any>>; 
   const pi: any = {
     on: (event: string, h: any) => handlers.set(event, [...(handlers.get(event) ?? []), h]),
     registerCommand: (name: string, o: any) => commands.set(name, o),
+    registerEntryRenderer: () => undefined,
+    appendEntry: (customType: string, data: any) => entries.push({ customType, data: structuredClone(data) }),
+    events: { emit: () => undefined, on: () => () => undefined },
   };
+  const entries: Array<{ customType: string; data: any }> = [];
   piCompactPlan(pi);
 
   const branch = options.branch ?? [msg("u1", "user", "fix the bug"), msg("a1", "assistant", "fixed, tests pass")];
@@ -52,7 +57,7 @@ function setup(options: { replies: string[]; ui?: Partial<Record<string, any>>; 
   let editorText = "";
   const ui = {
     input: async () => "",
-    select: async () => undefined,
+    select: async (title: string, options: string[]) => (title === "Compact with this focus?" ? APPROVE : options[0]),
     editor: async (_t: string, prefill?: string) => prefill,
     notify: (m: string, t?: string) => notes.push([m, t]),
     setWidget: () => undefined,
@@ -75,6 +80,8 @@ function setup(options: { replies: string[]; ui?: Partial<Record<string, any>>; 
     },
     sessionManager: {
       getLeafId: () => "u1",
+      getLeafEntry: () => branch[0],
+      getSessionId: () => "session-1",
       getBranch: () => branch,
       buildSessionProjection: () => ({ messages: branch.map((e: any) => e.message) }),
     },
@@ -82,7 +89,7 @@ function setup(options: { replies: string[]; ui?: Partial<Record<string, any>>; 
   const mainPayload = { model: model.id, system: [{ type: "text", text: SYSTEM }], tools: [{ name: "bash" }], messages: [{ role: "user", content: [{ type: "text", text: "fix the bug" }] }] };
   const sendMain = () => handlers.get("before_provider_request")?.forEach((h) => h({ payload: mainPayload }, ctx));
   const run = (args: string) => commands.get(COMMAND).handler(args, ctx);
-  return { run, sendMain, requests, notes, compacts, handlers, ctx, getEditor: () => editorText };
+  return { run, sendMain, requests, notes, compacts, handlers, ctx, entries, getEditor: () => editorText };
 }
 
 const json = (draft: string, questions: unknown[] = []) => JSON.stringify({ questions, draft });
@@ -96,13 +103,15 @@ describe("/compact-plan", () => {
     const payload = t.requests[0]!.payload;
     expect(payload.system[0].text).toBe(SYSTEM);
     expect(payload.tools).toEqual([{ name: "bash" }]);
+    expect(t.requests[0]!.options.sessionId).toBe("session-1");
     // The session's request, then its final reply, then the drafting instructions.
     expect(payload.messages[0].content[0].text).toBe("fix the bug");
     expect(payload.messages[1].content[0].text).toBe("fixed, tests pass");
     expect(payload.messages[2].content[0].text).toContain("ship it");
     expect(t.compacts[0].customInstructions).toBe("Next task: ship it");
     expect(t.getEditor()).toBe("ship it");
-    expect(t.notes.at(-1)?.[0]).toMatch(/99% from cache/);
+    expect(t.entries.map((e) => e.customType)).toEqual([ENTRY, OUTCOME_ENTRY]);
+    expect(t.entries[1]!.data).toMatchObject({ status: "compacted", draft: "Next task: ship it", cached: 99, tokens: 10000 });
   });
 
   it("sends the session's context as a plain request without a captured one", async () => {
@@ -129,6 +138,7 @@ describe("/compact-plan", () => {
       replies: [json("first", [{ question: "Keep A?", options: ["Keep", "Drop"] }, { question: "Scope?", options: ["x"] }, { question: "Tests?", options: ["y"] }]), json("revised")],
       ui: {
         select: async (title: string, options: string[]) => {
+          if (title === "Compact with this focus?") return APPROVE;
           asked.push(title);
           expect(options.slice(-2)).toEqual([WRITE_OWN, SKIP]);
           return title === "Keep A?" ? "Drop" : title === "Scope?" ? WRITE_OWN : SKIP;
@@ -148,23 +158,48 @@ describe("/compact-plan", () => {
   });
 
   it("does not revise when every question is skipped", async () => {
-    const t = setup({ replies: [json("first", [{ question: "Q", options: ["a", "b"] }])], ui: { select: async () => SKIP } });
+    const t = setup({ replies: [json("first", [{ question: "Q", options: ["a", "b"] }])], ui: { select: async (title: string) => (title === "Q" ? SKIP : APPROVE) } });
     await t.run("next");
     expect(t.requests).toHaveLength(1);
     expect(t.compacts[0].customInstructions).toBe("first");
   });
 
-  it("uses the edited focus", async () => {
-    const t = setup({ replies: [json("D")], ui: { editor: async () => "  my focus  " } });
+  /** A select that answers the review prompt from a script, and the rest with their first option. */
+  const review = (...choices: string[]) => async (title: string, options: string[]) =>
+    title === "Compact with this focus?" ? choices.shift() : options[0];
+
+  it("edits the focus, then compacts with the edit", async () => {
+    const t = setup({ replies: [json("D")], ui: { select: review(EDIT, APPROVE), editor: async (_t: string, prefill: string) => `  ${prefill} plus mine  ` } });
     await t.run("next");
-    expect(t.compacts[0].customInstructions).toBe("my focus");
+    expect(t.compacts[0].customInstructions).toBe("D plus mine");
+    expect(t.entries[1]!.data).toMatchObject({ status: "compacted", edited: true });
   });
 
-  it("cancels on Esc in the editor, a question or the goal prompt", async () => {
-    for (const ui of [{ editor: async () => undefined }, { editor: async () => "   " }]) {
-      const t = setup({ replies: [json("D")], ui });
+  it("revises the draft with feedback, continuing the side conversation", async () => {
+    const t = setup({ replies: [json("D1"), json("D2")], ui: { select: review(CHANGE, APPROVE), input: async () => "keep the CI notes" } });
+    t.sendMain();
+    await t.run("next");
+    expect(t.requests).toHaveLength(2);
+    const messages = t.requests[1]!.payload.messages;
+    expect(messages.at(-2).role).toBe("assistant");
+    expect(messages.at(-1).content[0].text).toContain("The current draft:\n\nD1");
+    expect(messages.at(-1).content[0].text).toContain("keep the CI notes");
+    expect(t.compacts[0].customInstructions).toBe("D2");
+  });
+
+  it("keeps the draft when a revision fails", async () => {
+    const t = setup({ replies: [json("D1"), ""], ui: { select: review(CHANGE, APPROVE), input: async () => "x" } });
+    await t.run("next");
+    expect(t.notes.some(([m]) => m.includes("drafting failed"))).toBe(true);
+    expect(t.compacts[0].customInstructions).toBe("D1");
+  });
+
+  it("cancels from the review, a question or the goal prompt", async () => {
+    for (const choice of [CANCEL, undefined]) {
+      const t = setup({ replies: [json("D")], ui: { select: review(choice as string) } });
       await t.run("next");
       expect(t.compacts).toHaveLength(0);
+      expect(t.entries.at(-1)!.data.status).toBe("cancelled");
     }
     const q = setup({ replies: [json("D", [{ question: "Q", options: ["a"] }])], ui: { select: async () => undefined } });
     await q.run("next");
@@ -172,6 +207,13 @@ describe("/compact-plan", () => {
     const g = setup({ replies: [json("D")], ui: { input: async () => undefined } });
     await g.run("");
     expect(g.requests).toHaveLength(0);
+  });
+
+  it("records a failed compaction", async () => {
+    const t = setup({ replies: [json("D")] });
+    t.ctx.compact = (o: any) => o.onError(new Error("boom"));
+    await t.run("next");
+    expect(t.entries.at(-1)!.data).toMatchObject({ status: "failed", error: "boom" });
   });
 
   it("asks for the goal when none is given, and may leave it to the model", async () => {
@@ -186,6 +228,14 @@ describe("/compact-plan", () => {
     await t.run("next");
     expect(t.compacts).toHaveLength(0);
     expect(t.notes.at(-1)).toEqual(["compact-plan: drafting failed (the model sent an empty reply)", "error"]);
+  });
+
+  it("ignores a request that does not end with the session's latest entry (a summary request)", async () => {
+    const t = setup({ replies: [json("D")] });
+    t.ctx.sessionManager.getLeafEntry = () => msg("u9", "user", "something else entirely");
+    t.sendMain();
+    await t.run("next");
+    expect(t.requests[0]!.options.onPayload).toBeUndefined();
   });
 
   it("forgets the captured request after a compaction", async () => {

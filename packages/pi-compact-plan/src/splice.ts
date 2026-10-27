@@ -95,12 +95,29 @@ function spliceChat(main: Json, side: Json): SpliceResult {
   return { ok: true, payload };
 }
 
-/** Whether a provider request is the session's own conversation (not a side request on its model). */
-export function isConversationRequest(payload: unknown, modelId: string | undefined, systemPrompt: string): boolean {
+/** The text of a session entry's message (a prompt, a tool result, a custom message). */
+export function entryText(entry: unknown): string {
+  if (!isObject(entry)) return "";
+  const message = isObject(entry.message) ? entry.message : entry.type === "custom_message" ? entry : undefined;
+  const content = message?.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.filter((b): b is Json => isObject(b) && b.type === "text" && typeof b.text === "string").map((b) => b.text as string).join("\n");
+}
+
+/**
+ * Whether a provider request is the session's own conversation request: on the session's model,
+ * and ending with the session's latest entry. A compaction or branch summary request on the same
+ * model ends with its own instructions instead. (The system prompt is no test: providers and
+ * extensions rewrite it, and Codex moves it out of the request.)
+ */
+export function isConversationRequest(payload: unknown, modelId: string | undefined, leafText: string): boolean {
   if (!isObject(payload)) return false;
   if (modelId && typeof payload.model === "string" && payload.model !== modelId) return false;
-  const probe = systemPrompt.trim().slice(0, 200);
+  const list = Array.isArray(payload.messages) ? payload.messages : Array.isArray(payload.input) ? payload.input : undefined;
+  if (!list?.length) return false;
+  const probe = leafText.trim().slice(-200).trim();
   if (!probe) return true;
-  const system = JSON.stringify([payload.system, payload.instructions, Array.isArray(payload.messages) ? payload.messages[0] : undefined, Array.isArray(payload.input) ? payload.input[0] : undefined]);
-  return system.includes(JSON.stringify(probe).slice(1, -1));
+  const tail = JSON.stringify(list.slice(-3));
+  return tail.includes(JSON.stringify(probe).slice(1, -1));
 }
