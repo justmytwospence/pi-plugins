@@ -74,7 +74,8 @@ export interface Snapshot {
   autoEffort?: boolean; autoEffortDetail?: string; lean?: string; cache?: string; extraBilled?: number;
   /** A prompt stashed by @saadjs/pi-stash; text is its content when readable. */
   stash?: { text?: string };
-  marimo?: MarimoStatus;
+  /** pi-marimo's notebooks, one row each (keys `marimo`, `marimo-2`, ...). */
+  marimo?: MarimoStatus[];
   /** pi-marimo's open marimo-lens selections, shown on their own row under the marimo row. */
   lens?: LensStatus;
   bg?: BgItem[];
@@ -222,7 +223,7 @@ export function parseModeStatus(text: string): PermissionModeStatus | undefined 
   return { kind: MODE_KINDS[match[2]], label: `${glyph} ${match[2]} on`, ...(match[3] ? { key: match[3] } : {}) };
 }
 
-export interface AbsorbedStatuses { mode?: PermissionModeStatus; autoEffort: boolean; autoEffortDetail?: string; lean?: string; cache?: string; extraBilled?: number; stashed?: boolean; marimo?: MarimoStatus; lens?: LensStatus; bg?: BgItem[]; pressure?: PressureItem[]; /** Another extension owns the `mcp` status. */ mcp?: boolean; rest: string[] }
+export interface AbsorbedStatuses { mode?: PermissionModeStatus; autoEffort: boolean; autoEffortDetail?: string; lean?: string; cache?: string; extraBilled?: number; stashed?: boolean; marimo?: MarimoStatus[]; lens?: LensStatus; bg?: BgItem[]; pressure?: PressureItem[]; /** Another extension owns the `mcp` status. */ mcp?: boolean; rest: string[] }
 // Statuses from our own companion extensions that read better inside the footer
 // rows they describe. Each is optional: absent extensions publish nothing, and a
 // status whose text no longer matches the expected shape falls through to the
@@ -233,7 +234,7 @@ export interface AbsorbedStatuses { mode?: PermissionModeStatus; autoEffort: boo
 //   cache-guard       (pi-cache-guard)          "cache 4:12"           -> context row
 //   anthropic-billing (anthropic-billing-guard) "extra usage x3"       -> Claude limits row
 //   prompt-stash      (@saadjs/pi-stash)        "prompt stashed"       -> its own row under the editor
-//   marimo            (pi-marimo)               "marimo: nb.py · ..."  -> its own row under the context row
+//   marimo, marimo-N  (pi-marimo)               "marimo: nb.py · ..."  -> a row per notebook under the context row
 //   marimo-lens       (pi-marimo)               "lens: nb.py · S1 ..." -> its own row under the marimo row
 //   bg                (pi-bg)                   "bg: tests 2:14 · ..." -> its own row under that
 //   pressure          (pi-pressure)             "pressure: cpu 97 ↑ hot · ..." -> its own row under that
@@ -241,6 +242,7 @@ export interface AbsorbedStatuses { mode?: PermissionModeStatus; autoEffort: boo
 // Everything else (plan, gate, mcp, ...) stays in the status row.
 export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: { claudeRow: boolean }): AbsorbedStatuses {
   const result: AbsorbedStatuses = { autoEffort: false, rest: [] };
+  const notebooks: Array<[number, MarimoStatus]> = [];
   for (const [key, text] of [...statuses.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     const plainText = clean(text);
     const effort = key === "auto-effort" ? /^effort: \S+ \(auto(?: ([^()]+))?\)$/.exec(plainText) : null;
@@ -256,8 +258,10 @@ export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: {
     const billed = key === "anthropic-billing" ? /^extra usage x(\d+)$/.exec(plainText) : null;
     if (billed && options.claudeRow) { result.extraBilled = +billed[1]; continue; }
     if (key === "prompt-stash" && plainText === "prompt stashed") { result.stashed = true; continue; }
-    const marimo = key === "marimo" ? parseMarimoStatus(plainText) : undefined;
-    if (marimo) { result.marimo = marimo; continue; }
+    // One status per notebook: `marimo`, then `marimo-2`, `marimo-3`, ... in that order.
+    const slot = key === "marimo" ? 1 : /^marimo-(\d+)$/.exec(key)?.[1];
+    const marimo = slot !== undefined ? parseMarimoStatus(plainText) : undefined;
+    if (marimo) { notebooks.push([+slot!, marimo]); continue; }
     const lens = key === "marimo-lens" ? parseLensStatus(plainText) : undefined;
     if (lens) { result.lens = lens; continue; }
     const bg = key === "bg" ? parseBgStatus(plainText) : undefined;
@@ -280,6 +284,7 @@ export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: {
     if (key === MCP_STATUS_KEY) result.mcp = true;
     result.rest.push(key === MCP_STATUS_KEY ? text.replace(/\u{1f50c}[\ufe0e\ufe0f]?/u, "\uf1e6") : text);
   }
+  if (notebooks.length) result.marimo = notebooks.sort(([a], [b]) => a - b).map(([, m]) => m);
   return result;
 }
 
@@ -722,9 +727,9 @@ function stashRow(text: string | undefined, width: number, theme: Paint): string
   ], width, theme);
 }
 
-// The notebooks pi-marimo follows: the current one (used most recently) first,
-// with what its kernel is doing (the markdown section the running cell sits
-// under, its deepest heading when narrow), then the others by name.
+// A notebook pi-marimo follows, one row each: its name and what its kernel is
+// doing (the markdown section the running cell sits under, its deepest heading
+// when narrow). An older pi-marimo sent one row naming the others after `also`.
 // Open marimo-lens selections: what the user marked in the browser and has not had addressed.
 function lensRow(l: LensStatus, width: number, theme: Paint): string {
   const count = l.selections.length + (l.more ?? 0);
@@ -936,7 +941,7 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     { text: mcpText, priority: 25 },
     { text: skillsText, priority: 15 },
   ], w, theme)));
-  if (s.marimo) { const m = s.marimo; rows.push(row(ICONS.marimo, (w) => marimoRow(m, w, theme))); }
+  for (const m of s.marimo ?? []) rows.push(row(ICONS.marimo, (w) => marimoRow(m, w, theme)));
   if (s.lens) { const l = s.lens; rows.push(row(ICONS.lens, (w) => lensRow(l, w, theme))); }
   if (s.bg?.length) { const bg = s.bg; rows.push(row(ICONS.bg, (w) => bgRow(bg, w, theme))); }
   if (s.pressure?.length) { const p = s.pressure; rows.push(row(ICONS.pressure, (w) => pressureRow(p, w, theme))); }

@@ -9,17 +9,18 @@ import type { Cancellable, Io, StreamEnd } from "../src/core/io.js";
 const CWD = "/w";
 const SERVER = "http://127.0.0.1:2799";
 
-/** A marimo server with one session (`/w/nb.py`) whose /sse stream the test feeds. */
-const server = vi.hoisted(() => ({ feeds: [] as Array<(text: string) => void> }));
+/** A marimo server with one session (`/w/nb.py`, unless a test adds more) whose /sse streams the test feeds. */
+const server = vi.hoisted(() => ({ feeds: [] as Array<(text: string) => void>, urls: [] as string[], sessions: {} as Record<string, { path: string }> }));
 
 vi.mock("../src/core/node-io.js", () => ({
   nodeIo: (): Io => ({
     registryEntries: async () => [{ port: 2799, host: "127.0.0.1" }],
-    getJson: async (url: string) => (url.endsWith("/api/sessions") ? { s1: { path: `${CWD}/nb.py` } } : undefined),
-    stream(_url: string, _headers: Record<string, string>, onText: (text: string) => void): Cancellable<StreamEnd> {
+    getJson: async (url: string) => (url.endsWith("/api/sessions") ? server.sessions : undefined),
+    stream(url: string, _headers: Record<string, string>, onText: (text: string) => void): Cancellable<StreamEnd> {
       let end!: (e: StreamEnd) => void;
       const done = new Promise<StreamEnd>((r) => (end = r));
       server.feeds.push(onText);
+      server.urls.push(url);
       return { done, cancel: () => end({ ok: true }) };
     },
     realpath: async (p: string) => p,
@@ -106,6 +107,8 @@ const serverTask = { id: "s1", kind: "service", cwd: CWD, command: "uv run marim
 
 beforeEach(() => {
   server.feeds.length = 0;
+  server.urls.length = 0;
+  server.sessions = { s1: { path: `${CWD}/nb.py` } };
 });
 afterEach(async () => {
   vi.useRealTimers();
@@ -235,4 +238,30 @@ test("session scope: a notebook open under the cwd gets no footer until this ses
   server.feeds.at(-1)!(untilRunning);
   await until(() => /nb\.py/u.test(y.statuses.get("marimo") ?? ""));
   await y.fire("session_shutdown");
+});
+
+test("several notebooks at once: a footer line each, in file order, and each in full in context", async () => {
+  server.sessions = { s1: { path: `${CWD}/nb.py` }, s2: { path: `${CWD}/prep.py` } };
+  const x = setup();
+  await x.fire("session_start");
+  await until(() => server.feeds.length === 2);
+  for (const feed of server.feeds) feed(untilRunning);
+  // The agent works in prep.py last, so it is current, but the lines stay in file order.
+  await x.fire("tool_call", { input: { command: pair } });
+  await new Promise((r) => setTimeout(r, 5));
+  await x.fire("tool_call", { input: { command: pair.replace("nb.py", "prep.py") } });
+  await until(() => /prep\.py/u.test(x.statuses.get("marimo-2") ?? ""));
+  expect(x.statuses.get("marimo")).toMatch(/^marimo: nb\.py · :2799 · running Data loading › Slow model fit \(\w+\) · 1 queued$/u);
+  expect(x.statuses.get("marimo-2")).toMatch(/^marimo: prep\.py · :2799 · running /u);
+  await x.fire("before_agent_start");
+  const [context] = x.handlers.get("context")!;
+  const placed = (await context!({ messages: [{ role: "user", timestamp: 1 }] }, undefined)) as { messages: Array<{ content?: string }> };
+  const block = placed.messages[1]?.content ?? "";
+  expect(block).toMatch(/=== \/w\/prep\.py \(current;[\s\S]*=== \/w\/nb\.py \(also followed;/u);
+  expect(block).toContain("each is shown in full");
+  // Both list their code cells, not just the ones that need attention.
+  expect(block.match(/ {2}Hbol: defines mo, time\n/gu)).toHaveLength(2);
+  await x.fire("session_shutdown");
+  expect(x.statuses.get("marimo")).toBeUndefined();
+  expect(x.statuses.get("marimo-2")).toBeUndefined();
 });

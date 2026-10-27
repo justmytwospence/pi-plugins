@@ -1,8 +1,9 @@
 // pi-marimo: keeps Pi aware of the marimo notebook you are working in.
 //
-// - Footer: `marimo: <current file> · running <section> (12s) · 2 queued · 1 error · also <file>, <file>`
-//   through ctx.ui.setStatus("marimo", ...), so it shows in Pi's own footer and
-//   any footer that reads extension statuses.
+// - Footer: a status per notebook this session uses, `marimo: <file> · running <section> (12s) ·
+//   2 queued · 1 error`, through ctx.ui.setStatus("marimo", ...), then "marimo-2", "marimo-3", ...
+//   in file order, so each gets its own line in footers that lay them out (pi-status-footer) and
+//   all show in Pi's own footer.
 // - Session scope: footer, Lens and context cover only the notebooks this session uses (pinned, or
 //   worked in by its agent through marimo-pair, saved with the session). Other notebooks open under
 //   the cwd, such as one another session in this checkout works in, get a one-line mention in context.
@@ -39,6 +40,8 @@ import { NotebookView, type ViewActions } from "./ui/view.js";
 
 const ENTRY = "pi-marimo";
 const STATUS_KEY = "marimo";
+/** The status key of a notebook's footer line: `marimo`, then `marimo-2`, `marimo-3`, ... */
+const statusKey = (i: number): string => (i === 0 ? STATUS_KEY : `${STATUS_KEY}-${i + 1}`);
 // Open Lens selections get a status (and so a footer line) of their own.
 const LENS_STATUS_KEY = "marimo-lens";
 const OFFER_SOURCE = "pi-marimo";
@@ -103,7 +106,7 @@ export default function piMarimo(pi: ExtensionAPI): void {
   const seen = new Map<string, number>();
   let pending: ReturnType<typeof setTimeout> | undefined;
   let ticker: ReturnType<typeof setInterval> | undefined;
-  let lastStatus: string | undefined;
+  let lastStatus: string[] = [];
   let lastLensStatus: string | undefined;
   // Lens selections (path + selection id) already seen, so only new ones are offered as a next prompt.
   const lensSeen = new Set<string>();
@@ -171,14 +174,20 @@ export default function piMarimo(pi: ExtensionAPI): void {
   /** The followed notebooks this session uses, the current one first. */
   const mine = () => (watcher?.followed() ?? []).filter((f) => f.engaged);
 
-  const statusLine = (): string | undefined => {
-    if (!watcher) return undefined;
-    const [first, ...rest] = mine();
-    if (!first) {
-      const { mode } = watcher;
-      return mode.kind === "pinned" ? statusText({ notebook: mode.paths.map((p) => p.split("/").pop()).join(", "), connection: "not open", queued: 0, errors: 0 }) : undefined;
+  /**
+   * One footer line per notebook this session uses, and per pinned one that is not open, in file
+   * order so the lines hold still while the agent moves between notebooks.
+   */
+  const statusLines = (): string[] => {
+    if (!watcher) return [];
+    const now = Date.now();
+    const lines = mine().map((f) => ({ path: f.attachment.path, text: statusText(statusParts(f.notebook, f.attachment, f.connection, now)) }));
+    const { mode } = watcher;
+    if (mode.kind === "pinned") {
+      const open = new Set(watcher.followed().flatMap((f) => [f.attachment.path, f.canonicalPath]));
+      for (const p of mode.paths) if (!open.has(p)) lines.push({ path: p, text: statusText({ notebook: basename(p), connection: "not open", queued: 0, errors: 0 }) });
     }
-    return statusText(statusParts(first.notebook, first.attachment, first.connection, Date.now(), rest.map((f) => f.attachment)));
+    return lines.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)).map((l) => l.text);
   };
 
   const render = (): void => {
@@ -195,14 +204,14 @@ export default function piMarimo(pi: ExtensionAPI): void {
       bg.annotate(watcher.followed(), ctxRef.cwd);
       source.update(watcher.followed());
     }
-    const text = statusLine();
-    if (text !== lastStatus) {
-      lastStatus = text;
-      ctxRef?.ui.setStatus(STATUS_KEY, text);
+    const lines = statusLines();
+    for (let i = 0; i < Math.max(lines.length, lastStatus.length); i++) {
+      if (lines[i] !== lastStatus[i]) ctxRef?.ui.setStatus(statusKey(i), lines[i]);
     }
+    lastStatus = lines;
     lensUpdate();
     // Tick the elapsed time while a cell runs, and while a run waits out a disconnect.
-    const running = (watcher?.connection === "connected" && watcher.notebook.running()) || bg.needsTick();
+    const running = (watcher?.followed() ?? []).some((f) => f.connection === "connected" && f.notebook.running()) || bg.needsTick();
     if (running && !ticker) ticker = setInterval(render, 1000);
     if (!running && ticker) { clearInterval(ticker); ticker = undefined; }
   };
@@ -245,11 +254,12 @@ export default function piMarimo(pi: ExtensionAPI): void {
     pending ??= setTimeout(render, 150);
   };
 
-  /** The followed notebooks that are connected (only this session's with `own`), the current one first. */
+  /** The followed notebooks that are connected (only this session's with `own`), the current one first; this session's in full. */
   const stateEntries = (own = false) =>
     (watcher?.followed() ?? [])
       .filter((f) => f.connection === "connected" && f.notebook.ready && (!own || f.engaged))
-      .map((f) => ({ notebook: f.notebook, attachment: f.attachment, current: f.current, seenSeq: seen.get(f.attachment.path) ?? 0 }));
+      // Ranked, so the first is the current one; every notebook this session uses is shown in full.
+      .map((f, i) => ({ notebook: f.notebook, attachment: f.attachment, current: i === 0, full: i === 0 || f.engaged === true, seenSeq: seen.get(f.attachment.path) ?? 0 }));
 
   const setMode = (mode: Mode): void => {
     pi.appendEntry(ENTRY, { mode });
@@ -290,9 +300,10 @@ export default function piMarimo(pi: ExtensionAPI): void {
     ownPill.dispose();
     source.resetHosts();
     await previousWatcher?.stop();
-    previousContext?.ui.setStatus(STATUS_KEY, undefined);
+    for (let i = 0; i < lastStatus.length; i++) previousContext?.ui.setStatus(statusKey(i), undefined);
     previousContext?.ui.setStatus(LENS_STATUS_KEY, undefined);
-    lastStatus = lastLensStatus = undefined;
+    lastStatus = [];
+    lastLensStatus = undefined;
     lensSeen.clear();
     offering = busy = false;
   });
@@ -373,7 +384,7 @@ export default function piMarimo(pi: ExtensionAPI): void {
       }
       if (arg === "show") {
         const entries = stateEntries();
-        ctx.ui.notify(entries.length ? snapshot(entries, { refresh: "prompt" }) : statusLine() ?? "marimo: no notebook attached", "info");
+        ctx.ui.notify(entries.length ? snapshot(entries, { refresh: "prompt" }) : statusLines().join("\n") || "marimo: no notebook attached", "info");
         return;
       }
       // A checklist: pick notebooks to pin one at a time, then Done.

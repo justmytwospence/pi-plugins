@@ -164,6 +164,8 @@ export interface SnapshotEntry {
   notebook: NotebookState;
   attachment: Attachment;
   current?: boolean;
+  /** Shown in full (every cell) rather than as a short outline; defaults to whether it is current. */
+  full?: boolean;
   /** Edits from the browser after this change number are flagged as new. */
   seenSeq?: number;
 }
@@ -258,21 +260,24 @@ function section(nb: NotebookState, attachment: Attachment, current: boolean, o:
 
 /**
  * The followed notebooks in one block, the current one (used most recently)
- * first and in full; the others as a short outline (headings down to ##) with
+ * first. The current one, and any entry marked `full` (the notebooks a session
+ * works in), are in full; the others a short outline (headings down to ##) with
  * the cells that need attention.
  */
 export function snapshot(entries: SnapshotEntry[], options: SnapshotOptions = {}): string {
   const now = options.now ?? Date.now();
-  const sections = entries.map((e, i) => {
+  const shown = entries.map((e, i) => {
     const current = e.current ?? i === 0;
-    return section(e.notebook, e.attachment, current, {
-      seen: e.seenSeq ?? Number.POSITIVE_INFINITY,
-      now,
-      maxCells: current ? options.maxCells ?? 60 : 0,
-      maxLevel: current ? 6 : 2,
-    });
+    return { e, current, full: e.full ?? current };
   });
+  const sections = shown.map(({ e, current, full }) => section(e.notebook, e.attachment, current, {
+    seen: e.seenSeq ?? Number.POSITIVE_INFINITY,
+    now,
+    maxCells: full ? options.maxCells ?? 60 : 0,
+    maxLevel: full ? 6 : 2,
+  }));
   const many = entries.length > 1;
+  const outlines = shown.some((s) => !s.full);
   return [
     `<${STATE_TAG} notebooks="${entries.length}">`,
     `Live state of the marimo notebook${many ? "s" : ""} open in the user's browser, added automatically by pi-marimo (not`,
@@ -280,8 +285,9 @@ export function snapshot(entries: SnapshotEntry[], options: SnapshotOptions = {}
       ? ["written by the user). Taken when the user sent their latest message and not updated during the turn;",
         "earlier copies are removed. Check current values through marimo-pair before relying on them."]
       : ["written by the user). It is replaced with a fresh copy on every request, so trust this over older reads."]),
-    ...(many ? ["The current notebook (the one used most recently) comes first and in full; the others are outlines",
+    ...(many && outlines ? ["The current notebook (the one used most recently) comes first and in full; the others are outlines",
       "with only the cells that need attention."] : []),
+    ...(many && !outlines ? ["The current notebook (the one used most recently) comes first; each is shown in full."] : []),
     "Cells are listed in notebook order under their markdown headings, by cell id. Inspect or change cells",
     "through the marimo-pair skill, not by editing the .py file.",
     ...sections.flatMap((lines) => ["", ...lines]),

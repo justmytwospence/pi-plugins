@@ -34,15 +34,20 @@ Add `-ne` to disable your other discovered and configured extensions for that ru
 
 ### Footer
 
-Example: `marimo: fit.py · running Data loading › Model fit (12s) · 2 queued · 1 error · also prep.py, plots.py`.
+Example, with the agent working in two notebooks:
 
-It names every followed notebook. The first is the current one, with what its kernel is doing: the running part is the markdown heading path the running cell sits under (or `cell <name>`), so you can tell roughly what is running. `also` names the others. The status is published with `ctx.ui.setStatus("marimo", text)`, so it appears in Pi's built-in footer and in any footer that shows extension statuses.
+```text
+marimo: fit.py · :2718 · running Data loading › Model fit (12s) · 2 queued · 1 error
+marimo: prep.py · :2718 · idle
+```
 
-The shape is stable for footers that lay it out themselves: `marimo: <file>`, then ` · `-separated parts about the current notebook (a connection note such as `connecting`, `disconnected` or `not open`; `running <a › b> (<elapsed>)`; `<n> queued`; `<n> error(s)`), and last `also <file>, <file>`. [pi-status-footer](https://pi-plugins.vercel.app/plugins/pi-status-footer/) gives it a row of its own.
+Every notebook this session uses gets a line of its own with what its kernel is doing: the running part is the markdown heading path the running cell sits under (or `cell <name>`), so you can tell roughly what is running. The lines are in file-path order, so they hold still while the agent moves between notebooks. A pinned notebook that is not open gets a `not open` line. Each line is a status of its own, published with `ctx.ui.setStatus`: the first under the key `marimo`, the next under `marimo-2`, then `marimo-3`, and so on. Pi's built-in footer shows them side by side on its status line; [pi-status-footer](https://pi-plugins.vercel.app/plugins/pi-status-footer/) gives each a row.
+
+The shape is stable for footers that lay it out themselves: `marimo: <file>`, then ` · `-separated parts about that notebook: its server (`:port` when local, else `host[/path]`), a connection note such as `connecting`, `disconnected` or `not open`; `running <a › b> (<elapsed>)`; `<n> queued`; `<n> error(s)`. Versions before multi-notebook lines sent a single `marimo` status ending in `also <file>, <file>`.
 
 ### Context
 
-When you send a prompt, the state of every connected, followed notebook is taken once and placed right after that prompt for every model request of the turn. The current notebook comes first and in full: its outline (markdown headings), one line per code cell with what it defines, and what needs attention (running, queued, errors, stale, edited but not rerun, changed in the browser since Pi's last turn). The others follow as short outlines (headings down to `##`) with only the cells that need attention. When pi-bg is loaded and a notebook is running, the block also names the `bg_wait` ids, so the agent can wait inside its turn instead of ending it.
+When you send a prompt, the state of every connected, followed notebook is taken once and placed right after that prompt for every model request of the turn. The current notebook comes first, then the others this session uses, each in full: its outline (markdown headings), one line per code cell with what it defines, and what needs attention (running, queued, errors, stale, edited but not rerun, changed in the browser since Pi's last turn). So the agent can work in several notebooks at once without losing sight of any. `/marimo show` also lists notebooks this session does not use, as short outlines (headings down to `##`) with only the cells that need attention. When pi-bg is loaded and a notebook is running, the block also names the `bg_wait` ids, so the agent can wait inside its turn instead of ending it.
 
 The block is never stored in the session, so the model sees only the current turn's copy and old copies never pile up. It is taken once per prompt and kept in the same place through the turn so that the model's thinking written after it stays valid: Anthropic drops a thinking block when anything before it changes. At the next prompt the old copy is gone, which drops that earlier turn's thinking once. The state can be a turn old while the agent runs cells; the agent sees their results through marimo-pair.
 
@@ -102,7 +107,7 @@ marimo streams every kernel message to the browser over `/ws`, and the same stre
 
 **Which notebooks are this session's.** Following a notebook is not the same as showing it. The footer, the Lens line and offer, and the state in each turn's context cover only the notebooks this session uses: the pinned ones, or the ones its agent has worked in through marimo-pair (remembered in the session, so they survive a resume). A fresh session in a checkout where another session works in a notebook shows no footer; its context only names the other open notebooks, so the agent can pick one up when asked.
 
-**The current notebook.** The current one, first in the footer and in full in context, is the one this session's agent last worked in: Pi's tool calls are read for marimo-pair commands (`execute-code.sh` or `marimo pair execute`, by `--file`, `--session`, or `--url` when only one followed notebook is on that server), including calls made from codemode scripts. Two Pi sessions in two notebooks therefore each keep their own current notebook. Before the agent has touched any, it is the one used most recently by anyone: a running cell first, then the latest cell run (replayed on connect, so history counts) or edit.
+**The current notebook.** The current one, first in context, is the one this session's agent last worked in: Pi's tool calls are read for marimo-pair commands (`execute-code.sh` or `marimo pair execute`, by `--file`, `--session`, or `--url` when only one followed notebook is on that server), including calls made from codemode scripts. Two Pi sessions in two notebooks therefore each keep their own current notebook. Before the agent has touched any, it is the one used most recently by anyone: a running cell first, then the latest cell run (replayed on connect, so history counts) or edit.
 
 **Browser edits.** marimo does not echo an edit back to the consumer whose session id sent it, so pi-marimo connects under its own id and lets marimo find the session by file. When several sessions hold the same file (a closed tab's session can linger), that lookup would take the oldest, so it connects by the exact session id instead and does not see edits typed in the browser until they run.
 

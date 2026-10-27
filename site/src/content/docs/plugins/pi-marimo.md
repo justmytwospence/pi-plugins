@@ -71,7 +71,7 @@ Selection images, agent activity and reveals are not read. pi-marimo never resol
 
 ## Live view and kernel control
 
-The footer names every followed notebook, emphasizing the current file, running heading path, elapsed time, queued cells, and errors. A prompt pill appears during running or queued work, with a failure indicator retained until your next message.
+The footer gives every notebook this session uses a line of its own (status keys `marimo`, `marimo-2`, ... in file-path order), with its file, running heading path, elapsed time, queued cells, and errors. Each of them is in full in the turn's context, so the agent can work in several notebooks at once. A prompt pill appears during running or queued work, with a failure indicator retained until your next message.
 
 In the notebook view, `j`/`k` scroll, Tab switches notebooks, `o` opens the notebook in a browser, and Esc or `h` returns to Pi. Press `x` twice to interrupt the kernel.
 
@@ -94,6 +94,6 @@ IDs use paths relative to Pi's working directory, or absolute paths outside it. 
 
 Killing a background marimo-pair client does not interrupt the cells it started. Use the notebook interrupt control when that is your intent. An already-ready server's `bg_wait` can instead wait for its running notebook cells.
 
-pi-subagents can host the notebook pill in its fleet list. pi-status-footer gives notebook status its own row. With pi-herdr, agent-started kernel work that outlasts a turn can populate `$marimo` and produce a completion notification without changing the pane to working. Notifications are suppressed when a covering pi-bg job already supplies the completion wake-up.
+pi-subagents can host the notebook pill in its fleet list. pi-status-footer gives each notebook's status its own row. With pi-herdr, agent-started kernel work that outlasts a turn can populate `$marimo` and produce a completion notification without changing the pane to working. Notifications are suppressed when a covering pi-bg job already supplies the completion wake-up.
 
 See [notebook workflows](/recipes/notebooks/), [background work](/recipes/background-work/), [activity architecture](/architecture/activity/), and [troubleshooting](/guides/troubleshooting/). [Source and tests](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-marimo) document watcher behavior and the optional integrations.

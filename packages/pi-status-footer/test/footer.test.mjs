@@ -502,7 +502,7 @@ test("all optional footer rows fit both themes at every width, alone and combine
   const variants = [combined, ...["stash", "marimo", "bg", "cache", "lean", "autoEffort", "extraBilled"].map((key) => ({ ...fixture(), [key]: combined[key] })),
     { ...fixture(), stash: {} },
     ...["4:12", "1h05m", "cold", "cold?"].map((cache) => ({ ...fixture(), cache })),
-    ...["marimo: idle.py", "marimo: local.py · :2718", "marimo: remote.py · nb.example.com/lab · disconnected", "marimo: queued.py · 2 queued", "marimo: broken.py · 2 errors · not open", "marimo: older.py · +3 open", "marimo: /marimo to pick one"].map((text) => ({ ...fixture(), marimo: mod.parseMarimoStatus(text) })),
+    ...["marimo: idle.py", "marimo: local.py · :2718", "marimo: remote.py · nb.example.com/lab · disconnected", "marimo: queued.py · 2 queued", "marimo: broken.py · 2 errors · not open", "marimo: older.py · +3 open", "marimo: /marimo to pick one"].map((text) => ({ ...fixture(), marimo: [mod.parseMarimoStatus(text)] })),
     { ...fixture(), bg: mod.parseBgStatus("bg: api up · vite ready · lint ✗") },
     { ...fixture(), pressure: mod.parsePressureStatus("pressure: cpu 97 ↑ hot · load 1.6 warn · mem warn · swap-in 40MB/s ok · top Google Chrome Helper (R…") },
     { ...fixture(), context: { percent: null, tokens: null, contextWindow: 200_000 }, quotas: [], unavailableQuota: "Claude acct" },
@@ -588,7 +588,7 @@ test("pi-marimo's notebook gets its own row under the context row", () => {
   const absorbed = mod.absorbStatuses(new Map([
     ["marimo", "marimo: fit.py \u00b7 running Data loading \u203a Model fit (12s) \u00b7 2 queued \u00b7 1 error \u00b7 also prep.py, plots.py"],
   ]), { claudeRow: true });
-  assert.deepEqual(absorbed.marimo, { notebook: "fit.py", running: { section: "Data loading \u203a Model fit", elapsed: "12s" }, queued: 2, errors: 1, others: ["prep.py", "plots.py"], notes: [] });
+  assert.deepEqual(absorbed.marimo, [{ notebook: "fit.py", running: { section: "Data loading \u203a Model fit", elapsed: "12s" }, queued: 2, errors: 1, others: ["prep.py", "plots.py"], notes: [] }]);
   assert.deepEqual(absorbed.rest, []);
   const s = { ...fixture(), statuses: absorbed.rest, marimo: absorbed.marimo };
   const rows = mod.renderFooter(s, 160, theme).map(plain);
@@ -599,12 +599,29 @@ test("pi-marimo's notebook gets its own row under the context row", () => {
   assert.equal(plain(mod.renderFooter(s, 92, theme)[3]), " \uf02d  Marimo fit.py \u00b7 running Data loading \u203a Model fit 12s \u00b7 1 error \u00b7 also prep.py, plots.py");
   assert.equal(plain(mod.renderFooter(s, 58, theme)[3]), "\uf02d  fit.py \u00b7 running Model fit 12s \u00b7 1 error \u00b7 +2 more");
   // An older pi-marimo sent only a count.
-  assert.deepEqual(mod.absorbStatuses(new Map([["marimo", "marimo: fit.py \u00b7 +3 open"]]), { claudeRow: true }).marimo, { notebook: "fit.py", others: 3, notes: [] });
+  assert.deepEqual(mod.absorbStatuses(new Map([["marimo", "marimo: fit.py \u00b7 +3 open"]]), { claudeRow: true }).marimo, [{ notebook: "fit.py", others: 3, notes: [] }]);
 
   const idle = mod.absorbStatuses(new Map([["marimo", "marimo: fit.py \u00b7 disconnected"]]), { claudeRow: true }).marimo;
-  assert.deepEqual(idle, { notebook: "fit.py", notes: ["disconnected"] });
+  assert.deepEqual(idle, [{ notebook: "fit.py", notes: ["disconnected"] }]);
   // Another shape stays in the status row.
   assert.deepEqual(mod.absorbStatuses(new Map([["marimo", "notebook ready"]]), { claudeRow: true }).rest, ["notebook ready"]);
+});
+
+test("each of pi-marimo's notebooks gets a row of its own, in key order", () => {
+  const absorbed = mod.absorbStatuses(new Map([
+    ["marimo-10", "marimo: j.py"],
+    ["marimo-2", "marimo: prep.py \u00b7 1 error"],
+    ["marimo", "marimo: fit.py \u00b7 running Model fit (3s)"],
+    ["marimo-lens", "lens: fit.py \u00b7 S1"],
+    ["marimo-x", "marimo: stray.py"],
+  ]), { claudeRow: true });
+  assert.deepEqual(absorbed.marimo.map((m) => m.notebook), ["fit.py", "prep.py", "j.py"]);
+  assert.deepEqual(absorbed.rest, ["marimo: stray.py"]);
+  const rows = mod.renderFooter({ ...fixture(), statuses: absorbed.rest, marimo: absorbed.marimo, lens: absorbed.lens }, 160, theme).map(plain);
+  assert.equal(rows[3], " \uf02d  Marimo fit.py \u00b7 running Model fit 3s");
+  assert.equal(rows[4], " \uf02d  Marimo prep.py \u00b7 1 error");
+  assert.equal(rows[5], " \uf02d  Marimo j.py");
+  assert.match(rows[6], /Lens fit\.py/);
 });
 
 test("pi-marimo's Lens selections get their own row under the marimo row", () => {
