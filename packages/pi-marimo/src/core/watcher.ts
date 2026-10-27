@@ -199,6 +199,12 @@ export class MarimoWatcher {
    * alone when only one followed notebook is on it.
    */
   private match(t: PairTarget) {
+    const matches = this.candidates(t);
+    return matches.length === 1 ? matches[0] : undefined;
+  }
+
+  /** Every followed notebook a marimo-pair call could target (see match). */
+  private candidates(t: PairTarget): Follower[] {
     let matches = [...this.followers.values()];
     if (t.url) matches = matches.filter((f) => sameServer(f.target.url, t.url!));
     if (t.session) matches = matches.filter((f) => f.target.sessionId === t.session);
@@ -206,7 +212,18 @@ export class MarimoWatcher {
       const file = t.file.replace(/^\.\//, "");
       matches = matches.filter((f) => f.target.path === file || f.target.real === file || f.target.path.endsWith(`/${file}`) || f.target.real.endsWith(`/${file}`));
     } else if (!t.url) matches = [];
-    return matches.length === 1 ? matches[0] : undefined;
+    return matches;
+  }
+
+  /**
+   * The followed notebooks a marimo-pair call could mean when it names more than one (only a
+   * server with several of them on it, or a file several servers hold), so it counts for none.
+   * Empty when the call is clear, targets nothing followed, or has flags only the shell resolves.
+   */
+  ambiguous(t: PairTarget): Attachment[] {
+    if (t.unresolved) return [];
+    const matches = this.candidates(t);
+    return matches.length > 1 ? matches.map((f) => f.attachment) : [];
   }
 
   /** The paths of the followed notebooks these marimo-pair calls target. */

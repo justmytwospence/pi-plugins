@@ -84,6 +84,22 @@ export function statusText(parts: StatusParts): string {
   return out.join(" · ");
 }
 
+/** The marimo-pair flags that name exactly this notebook: its server and its file, as the server lists it. */
+export function pairFlags(attachment: Attachment): string {
+  const quote = (v: string) => (/^[\w@%+=:,./-]+$/u.test(v) ? v : `'${v.replace(/'/gu, `'\\''`)}'`);
+  return `--url ${quote(attachment.url)} --file ${quote(attachment.path)}`;
+}
+
+/** What to tell the agent about a marimo-pair call that could mean any of several followed notebooks. */
+export function ambiguityNote(candidates: Attachment[]): string {
+  return [
+    `pi-marimo: a marimo-pair call here could mean any of ${candidates.length} followed notebooks, so pi-marimo did not count it as work in any`,
+    "of them (its footer, context and waits follow only the notebooks it can tell you worked in). Name the notebook",
+    "with --file (or --session) on every call. To target each one:",
+    ...candidates.map((c) => `  ${basename(c.path)}: ${pairFlags(c)}`),
+  ].join("\n");
+}
+
 /** A short label for a cell: `id "name"` and the heading path it sits under. */
 function cellLabel(nb: NotebookState, id: string): string {
   const cell = nb.cells.get(id);
@@ -252,6 +268,7 @@ function section(nb: NotebookState, attachment: Attachment, current: boolean, o:
 
   return [
     `=== ${attachment.path} (${current ? "current" : "also followed"}; ${attachment.url}, session ${attachment.sessionId}) ===`,
+    `marimo-pair: ${pairFlags(attachment)}`,
     `Kernel: ${summary.length ? summary.join(", ") : "idle"}.`,
     ...lensLines(nb),
     ...lines,
@@ -289,7 +306,8 @@ export function snapshot(entries: SnapshotEntry[], options: SnapshotOptions = {}
       "with only the cells that need attention."] : []),
     ...(many && !outlines ? ["The current notebook (the one used most recently) comes first; each is shown in full."] : []),
     "Cells are listed in notebook order under their markdown headings, by cell id. Inspect or change cells",
-    "through the marimo-pair skill, not by editing the .py file.",
+    "through the marimo-pair skill, not by editing the .py file, passing the flags on each notebook's",
+    "marimo-pair line so every call names its notebook.",
     ...sections.flatMap((lines) => ["", ...lines]),
     `</${STATE_TAG}>`,
   ].join("\n");

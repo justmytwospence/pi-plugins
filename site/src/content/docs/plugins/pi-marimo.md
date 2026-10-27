@@ -71,7 +71,7 @@ Selection images, agent activity and reveals are not read. pi-marimo never resol
 
 ## Live view and kernel control
 
-The footer gives every notebook this session uses a line of its own (status keys `marimo`, `marimo-2`, ... in file-path order), with its file, running heading path, elapsed time, queued cells, and errors. Each of them is in full in the turn's context, so the agent can work in several notebooks at once. A prompt pill appears during running or queued work, with a failure indicator retained until your next message.
+The footer gives every notebook this session uses a line of its own (status keys `marimo`, `marimo-2`, ... in file-path order), with its file, running heading path, elapsed time, queued cells, and errors. In the turn's context, the current notebook and any other the agent worked in during the last three prompts are in full; the rest are outlines. Each notebook comes with the marimo-pair flags that name it, and a marimo-pair call that could mean several followed notebooks gets a note on its result listing them, since pi-marimo cannot count it as work in any. A prompt pill appears during running or queued work, with a failure indicator retained until your next message.
 
 In the notebook view, `j`/`k` scroll, Tab switches notebooks, `o` opens the notebook in a browser, and Esc or `h` returns to Pi. Press `x` twice to interrupt the kernel.
 

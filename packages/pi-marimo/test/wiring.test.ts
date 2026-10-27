@@ -240,7 +240,7 @@ test("session scope: a notebook open under the cwd gets no footer until this ses
   await y.fire("session_shutdown");
 });
 
-test("several notebooks at once: a footer line each, in file order, and each in full in context", async () => {
+test("several notebooks at once: a footer line each, in file order, recent ones in full in context, ambiguous calls flagged", async () => {
   server.sessions = { s1: { path: `${CWD}/nb.py` }, s2: { path: `${CWD}/prep.py` } };
   const x = setup();
   await x.fire("session_start");
@@ -261,6 +261,29 @@ test("several notebooks at once: a footer line each, in file order, and each in 
   expect(block).toContain("each is shown in full");
   // Both list their code cells, not just the ones that need attention.
   expect(block.match(/ {2}Hbol: defines mo, time\n/gu)).toHaveLength(2);
+  expect(block).toContain(`marimo-pair: --url ${SERVER} --file /w/nb.py`);
+
+  // A call naming only the server could mean either: its result says so, with each notebook's flags,
+  // and a codemode script's nested call gets the note on the script's result.
+  const [toolResult] = x.handlers.get("tool_result")!;
+  const vague = `bash .agents/skills/marimo-pair/scripts/execute-code.sh --url ${SERVER} - <<'PY'\nx\nPY`;
+  await x.fire("tool_call", { toolCallId: "t1", input: { command: vague } });
+  const result = (await toolResult!({ toolCallId: "t1", content: [{ type: "text", text: "ok" }] }, undefined)) as { content: Array<{ text: string }> };
+  expect(result.content[0]!.text).toBe("ok");
+  expect(result.content[1]!.text).toMatch(/could mean any of 2 followed notebooks[\s\S]*nb\.py: --url http:\/\/127\.0\.0\.1:2799 --file \/w\/nb\.py\n {2}prep\.py: /u);
+  await x.fire("tool_call", { toolCallId: "c1/1", parentToolCallId: "c1", input: { command: vague } });
+  expect(await toolResult!({ toolCallId: "c1/1", content: [] }, undefined)).toBeUndefined();
+  expect((await toolResult!({ toolCallId: "c1", content: [] }, undefined) as { content: unknown[] }).content).toHaveLength(1);
+  // A clear call gets nothing.
+  await x.fire("tool_call", { toolCallId: "t2", input: { command: pair } });
+  expect(await toolResult!({ toolCallId: "t2", content: [] }, undefined)).toBeUndefined();
+
+  // After three prompts without work in prep.py, it drops to an outline; nb.py, worked in just now, stays in full.
+  for (let i = 0; i < 3; i++) await x.fire("before_agent_start");
+  const later = ((await context!({ messages: [{ role: "user", timestamp: 1 }] }, undefined)) as { messages: Array<{ content?: string }> }).messages[1]?.content ?? "";
+  expect(later).toMatch(/=== \/w\/nb\.py \(current;/u);
+  expect(later.match(/ {2}Hbol: defines mo, time\n/gu)).toHaveLength(1);
+  expect(later).toContain("the others are outlines");
   await x.fire("session_shutdown");
   expect(x.statuses.get("marimo")).toBeUndefined();
   expect(x.statuses.get("marimo-2")).toBeUndefined();

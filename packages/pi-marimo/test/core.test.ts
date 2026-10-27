@@ -197,8 +197,25 @@ describe("render", () => {
     expect(text).toContain("=== /tmp/pmt/nb.py (current; http://127.0.0.1:2799, session s1) ===");
     expect(text).toContain("  lEQa: defines y");
     const prep = text.slice(text.indexOf("=== /w/prep.py"));
-    expect(prep).toContain("(also followed; http://127.0.0.1:2799, session s2) ===\nKernel: 1 cell with errors.\n# Prep  [m1]\n  … 2 more cells\n  c: z = 1 / 0 -- ERROR ZeroDivisionError: division by zero");
+    expect(prep).toContain("(also followed; http://127.0.0.1:2799, session s2) ===\nmarimo-pair: --url http://127.0.0.1:2799 --file /w/prep.py\nKernel: 1 cell with errors.\n# Prep  [m1]\n  … 2 more cells\n  c: z = 1 / 0 -- ERROR ZeroDivisionError: division by zero");
     expect(prep).not.toContain("Deep detail");
+    // Marked full, it lists every cell and heading too, and the block says each is in full.
+    const both = snapshot([
+      { notebook: current, attachment, current: true },
+      { notebook: other, attachment: { ...attachment, path: "/w/prep.py", sessionId: "s2" }, full: true },
+    ]);
+    expect(both).toContain("each is shown in full");
+    expect(both).toContain("  a: raw = load()");
+    expect(both).toContain("### Deep detail");
+  });
+
+  test("marimo-pair flags for a notebook, quoted when the shell needs it, and the note for an ambiguous call", async () => {
+    const { pairFlags, ambiguityNote } = await import("../src/core/render.js");
+    expect(pairFlags({ url: "http://127.0.0.1:2718", sessionId: "s1", path: "/w/fit.py" })).toBe("--url http://127.0.0.1:2718 --file /w/fit.py");
+    expect(pairFlags({ url: "http://127.0.0.1:2718", sessionId: "s1", path: "/w/my nb's.py" })).toBe("--url http://127.0.0.1:2718 --file '/w/my nb'\\''s.py'");
+    const note = ambiguityNote([{ url: "http://h:1", sessionId: "a", path: "/w/a.py" }, { url: "http://h:1", sessionId: "b", path: "/w/b.py" }]);
+    expect(note).toMatch(/^pi-marimo: a marimo-pair call here could mean any of 2 followed notebooks/u);
+    expect(note).toContain("  b.py: --url http://h:1 --file /w/b.py");
   });
 
   test("large notebooks fold quiet cells", () => {
@@ -251,7 +268,7 @@ PY`;
     expect(pairTargets(JSON.stringify({ command: `marimo pair execute --url "http://127.0.0.1:2718" --session s_ab12 --code-file -` }))).toEqual([
       { url: "http://127.0.0.1:2718", session: "s_ab12" },
     ]);
-    expect(pairTargets(`marimo pair execute --url $URL --file="$F" -c 'x'`)).toEqual([{}]);
+    expect(pairTargets(`marimo pair execute --url $URL --file="$F" -c 'x'`)).toEqual([{ unresolved: true }]);
     expect(pairTargets("ls -la")).toEqual([]);
   });
 });

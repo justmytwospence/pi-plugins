@@ -24,7 +24,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { BgBridge } from "./bg.js";
 import { KernelHold } from "./core/hold.js";
-import { lensLines, lensStatusText, snapshot, STATE_TAG, statusParts, statusText } from "./core/render.js";
+import { ambiguityNote, lensLines, lensStatusText, snapshot, STATE_TAG, statusParts, statusText } from "./core/render.js";
 import { basename } from "./core/io.js";
 import { nodeIo } from "./core/node-io.js";
 import { pairTargets } from "./core/touch.js";
@@ -46,6 +46,8 @@ const statusKey = (i: number): string => (i === 0 ? STATUS_KEY : `${STATUS_KEY}-
 const LENS_STATUS_KEY = "marimo-lens";
 const OFFER_SOURCE = "pi-marimo";
 const MESSAGE_TYPE = "pi-marimo-state";
+/** Besides the current notebook, the ones worked in during this many latest prompts are in full in context. */
+const FULL_PROMPTS = 3;
 
 type Entry = { type?: string; customType?: string; data?: unknown };
 
@@ -107,6 +109,11 @@ export default function piMarimo(pi: ExtensionAPI): void {
   let pending: ReturnType<typeof setTimeout> | undefined;
   let ticker: ReturnType<typeof setInterval> | undefined;
   let lastStatus: string[] = [];
+  /** Notes for top-level tool calls whose marimo-pair calls were ambiguous, by call id. */
+  const ambiguous = new Map<string, string>();
+  /** Prompts sent so far, and the prompt in which this session's agent last worked in each notebook (by path). */
+  let prompts = 0;
+  const touchedAt = new Map<string, number>();
   let lastLensStatus: string | undefined;
   // Lens selections (path + selection id) already seen, so only new ones are offered as a next prompt.
   const lensSeen = new Set<string>();
@@ -254,12 +261,16 @@ export default function piMarimo(pi: ExtensionAPI): void {
     pending ??= setTimeout(render, 150);
   };
 
-  /** The followed notebooks that are connected (only this session's with `own`), the current one first; this session's in full. */
+  /** Whether this session's agent worked in a notebook during one of the last FULL_PROMPTS prompts. */
+  const recent = (path: string): boolean => prompts - (touchedAt.get(path) ?? Number.NEGATIVE_INFINITY) < FULL_PROMPTS;
+
+  /** The followed notebooks that are connected (only this session's with `own`), the current one first. */
   const stateEntries = (own = false) =>
     (watcher?.followed() ?? [])
       .filter((f) => f.connection === "connected" && f.notebook.ready && (!own || f.engaged))
-      // Ranked, so the first is the current one; every notebook this session uses is shown in full.
-      .map((f, i) => ({ notebook: f.notebook, attachment: f.attachment, current: i === 0, full: i === 0 || f.engaged === true, seenSeq: seen.get(f.attachment.path) ?? 0 }));
+      // Ranked, so the first is the current one. It is in full, and so is every other notebook the
+      // agent worked in during the last few prompts; the rest are outlines, so the block stays small.
+      .map((f, i) => ({ notebook: f.notebook, attachment: f.attachment, current: i === 0, full: i === 0 || recent(f.attachment.path), seenSeq: seen.get(f.attachment.path) ?? 0 }));
 
   const setMode = (mode: Mode): void => {
     pi.appendEntry(ENTRY, { mode });
@@ -305,11 +316,15 @@ export default function piMarimo(pi: ExtensionAPI): void {
     lastStatus = [];
     lastLensStatus = undefined;
     lensSeen.clear();
+    ambiguous.clear();
+    touchedAt.clear();
+    prompts = 0;
     offering = busy = false;
   });
 
   pi.on("before_agent_start", async () => {
     turn = undefined;
+    prompts++;
     if (!watcher) return;
     watcher.refresh();
     await watcher.settle(2000);
@@ -324,13 +339,29 @@ export default function piMarimo(pi: ExtensionAPI): void {
 
   // The notebook this session's agent works in (through marimo-pair) becomes current for this
   // session, whatever other sessions or the browser do. Nested calls (codemode) arrive here too.
+  // A call that could mean several followed notebooks counts for none: say so on the result of the
+  // top-level call (a codemode script's, for its nested calls), naming the flags for each.
   pi.on("tool_call", (event) => {
     const targets = pairTargets(JSON.stringify(event.input ?? {}));
     if (!targets.length || !watcher) return undefined;
     const before = watcher.engaged().length;
     watcher.touch(targets);
     if (watcher.engaged().length !== before) pi.appendEntry(ENTRY, { engaged: watcher.engaged() });
+    for (const path of watcher.targeted(targets)) touchedAt.set(path, prompts);
+    const candidates = targets.map((t) => watcher!.ambiguous(t)).find((c) => c.length);
+    if (candidates) {
+      const root = String((event as { toolCallId?: unknown }).toolCallId ?? "").split("/")[0]!;
+      if (root) ambiguous.set(root, ambiguityNote(candidates));
+    }
     return undefined;
+  });
+
+  pi.on("tool_result", (event) => {
+    if (event.toolCallId.includes("/")) return undefined;
+    const note = ambiguous.get(event.toolCallId);
+    if (!note) return undefined;
+    ambiguous.delete(event.toolCallId);
+    return { content: [...event.content, { type: "text" as const, text: note }], ...(event.structuredContent !== undefined ? { structuredContent: event.structuredContent } : {}) };
   });
 
   pi.on("agent_start", () => {
