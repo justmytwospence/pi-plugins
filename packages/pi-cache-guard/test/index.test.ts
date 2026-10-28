@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import cacheGuard, { JEV_TIP, MODEL_OFFERS, type ModelOffers, OFFER_TIMEOUT_MS, choiceMenu, cleanOffers, modelInfo, statusText } from "../src/index.ts";
+import cacheGuard, { JEV_TIP, MODEL_OFFERS, type ModelOffers, OFFER_TIMEOUT_MS, OPTION_MAX, choiceMenu, cleanOffers, coldTitle, modelInfo, statusText } from "../src/index.ts";
 import { lastRequest, view } from "../src/clock.ts";
 import { HerdrReporter, alertHeld, soundFile } from "../src/herdr.ts";
 
@@ -352,10 +352,10 @@ describe("choices", () => {
     h.ui.answer = undefined;
     await h.emit("input", input("next"));
     expect(h.ui.menus[0]).toEqual([
-      "Send anyway (re-caches 601k tokens)",
+      "Send anyway",
       "Send, and stop asking in this session",
-      "Compact first, then send it (summary reads 601k tokens)",
-      "Start a new session with this prompt (no history to re-cache)",
+      "Compact first, then send",
+      "Start a new session with this prompt",
       "Keep the prompt in the editor",
     ]);
   });
@@ -484,8 +484,8 @@ describe("model offers", () => {
   const named = { ...opus, name: "Claude Opus 5.5" };
   const cold = () => harness([assistant(NOW - 900_000, 600_000)], named);
   const rest = [
-    "Compact first, then send it (summary reads 601k tokens)",
-    "Start a new session with this prompt (no history to re-cache)",
+    "Compact first, then send",
+    "Start a new session with this prompt",
     "Keep the prompt in the editor",
   ];
 
@@ -501,8 +501,8 @@ describe("model offers", () => {
     expect(await h.emit("input", input("next step"))).toEqual({ action: "continue" });
     expect(requests).toEqual([{ text: "next step", tokens: 601_000 }]);
     expect(h.ui.menus[0]).toEqual([
-      "Send with Sonnet 5.5 (Jev's pick; re-caches 601k tokens; enough for this)",
-      "Send with Claude Opus 5.5 (re-caches 601k tokens)",
+      "Send with Sonnet 5.5 (Jev's pick)",
+      "Send with Claude Opus 5.5",
       "Send, and stop asking in this session",
       ...rest,
     ]);
@@ -534,10 +534,10 @@ describe("model offers", () => {
     h.ui.answers = ["Send with Fable"];
     expect(await h.emit("input", input("go"))).toEqual({ action: "continue" });
     expect(h.ui.menus[0]).toEqual([
-      "Send anyway (re-caches 601k tokens)",
+      "Send anyway",
       "Send, and stop asking in this session",
-      "Send with Haiku 5 instead (re-caches 601k tokens)",
-      "Send with Fable 5.1 instead (re-caches 601k tokens; cheaper)",
+      "Send with Haiku 5 instead",
+      "Send with Fable 5.1 instead",
       ...rest,
     ]);
     expect(h.choices).toEqual([{ text: "go", model: "anthropic/claude-fable-5-1" }]);
@@ -552,7 +552,7 @@ describe("model offers", () => {
     await h.emit("session_start", {});
     h.ui.answer = undefined; // escape
     expect(await h.emit("input", input("keep me"))).toEqual({ action: "handled" });
-    expect(h.ui.menus[0]).toEqual(["Send anyway (re-caches 601k tokens)", "Send, and stop asking in this session", ...rest]);
+    expect(h.ui.menus[0]).toEqual(["Send anyway", "Send, and stop asking in this session", ...rest]);
     h.ui.answers = ["Compact", "Default"];
     await h.emit("input", input("compact me"));
     h.ui.answers = ["Send, and stop"];
@@ -582,9 +582,9 @@ describe("model offers", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(await pending).toEqual({ action: "handled" });
     expect(h.ui.menus[0]).toEqual([
-      "Send anyway (re-caches 601k tokens)",
+      "Send anyway",
       "Send, and stop asking in this session",
-      "Send with Haiku 5 instead (re-caches 601k tokens)",
+      "Send with Haiku 5 instead",
       ...rest,
     ]);
   });
@@ -600,11 +600,26 @@ describe("model offers", () => {
     const v = view(lastRequest([assistant(NOW - 900_000, 600_000)])!, modelInfo(opus as any, {})!, NOW, 3 * 3_600_000);
     const menu = choiceMenu(v, undefined, { current: "Opus", offers: [{ model: "a/x", label: "X", recommended: true }, { model: "a/y", label: "Y", recommended: true }] });
     expect(menu.slice(0, 4)).toEqual([
-      { choice: "model", model: "a/x", label: "Send with X (Jev's pick; re-caches 601k tokens)" },
-      { choice: "send", label: "Send with Opus (re-caches 601k tokens)" },
+      { choice: "model", model: "a/x", label: "Send with X (Jev's pick)" },
+      { choice: "send", label: "Send with Opus" },
       { choice: "mute", label: "Send, and stop asking in this session" },
-      { choice: "model", model: "a/y", label: "Send with Y instead (re-caches 601k tokens)" },
+      { choice: "model", model: "a/y", label: "Send with Y instead" },
     ]);
+  });
+
+  test("every option fits a 46-column phone, so no row wraps; counts and Jev's reason are in the title", () => {
+    const v = view(lastRequest([assistant(NOW - 900_000, 600_000)])!, modelInfo(opus as any, {})!, NOW, 3 * 3_600_000);
+    const long = "Claude Sonnet 5.5 Extended Thinking Preview";
+    const pick = { model: "a/x", label: long, recommended: true, note: "routine change" };
+    for (const jev of [{ ready: true, filtered: true }, { ready: false, filtered: false }]) {
+      const menu = choiceMenu(v, jev, { current: `${long} Current`, offers: [pick, { model: "a/y", label: `${long} Other` }] });
+      for (const item of menu) expect(item.label.length).toBeLessThanOrEqual(OPTION_MAX);
+      expect(menu[0]!.label).toMatch(/^Send with Claude Sonnet .*… \(Jev's pick\)$/u);
+    }
+    const title = coldTitle(v, { ready: true, filtered: true }, pick);
+    expect(title).toContain("Sending re-caches 601k tokens on any model; a summary reads up to 601k, Jev's compaction none; a new session starts empty.");
+    expect(title).toContain(`Jev's pick: ${long} (routine change).`);
+    expect(coldTitle(v, { ready: false, filtered: false, missing: true })).toContain(JEV_TIP);
   });
 });
 
@@ -732,11 +747,11 @@ describe("jev", () => {
     h.ui.answer = undefined;
     await h.emit("input", input("next"));
     expect(h.ui.menus[0]).toEqual([
-      "Send anyway (re-caches 601k tokens)",
+      "Send anyway",
       "Send, and stop asking in this session",
-      "Compact with Jev, then send it (~1s, no summary model)",
-      "Compact with a summary, then send it (summary reads up to 601k tokens)",
-      "Start a new session with this prompt (no history to re-cache)",
+      "Compact with Jev, then send (~1s)",
+      "Compact with a summary, then send",
+      "Start a new session with this prompt",
       "Keep the prompt in the editor",
     ]);
     expect(h.ui.titles[0]).not.toContain("Tip");
@@ -748,7 +763,7 @@ describe("jev", () => {
     h.ui.answer = undefined;
     await h.emit("input", input("next"));
     expect(h.ui.titles[0]).toContain(JEV_TIP);
-    expect(h.ui.menus[0]).toContain("Compact first, then send it (summary reads 601k tokens)");
+    expect(h.ui.menus[0]).toContain("Compact first, then send");
   });
 
   test("Compact with Jev judges the history against the held prompt, then sends it", async () => {
@@ -798,7 +813,7 @@ describe("jev", () => {
     h.ui.answer = undefined;
     await h.emit("input", input("next"));
     expect(h.ui.titles[1]).not.toContain("Tip");
-    expect(h.ui.menus[1]).toContain("Compact first, then send it (summary reads 601k tokens)");
+    expect(h.ui.menus[1]).toContain("Compact first, then send");
     // And back on.
     h.ui.answers = ["Turn Jev on", "Done"];
     await h.commands.get("cache-guard").handler("jev", h.ctx);

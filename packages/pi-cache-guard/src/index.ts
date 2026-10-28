@@ -17,7 +17,7 @@ import { JEV_LOGINS, type JevState, label, probe } from "./jev.ts";
 import { JEV_KEY_URL, JEV_PITCH } from "./lean.ts";
 import { type AssistantLike, NOTICE_TYPE, type Notice, detectMiss, noticeLine } from "./notices.ts";
 import { type Wire, cachePolicy, echoedRetention, requestedTtl } from "./policy.ts";
-import { MODEL_CHOICE, MODEL_OFFERS, type ModelChoice, type ModelOffer, type ModelOffers, collectOffers, noteSuffix, oneLine } from "./offers.ts";
+import { MODEL_CHOICE, MODEL_OFFERS, type ModelChoice, type ModelOffer, type ModelOffers, collectOffers, oneLine } from "./offers.ts";
 import { Text } from "@earendil-works/pi-tui";
 import {
   DEFAULT_SETTINGS,
@@ -33,7 +33,7 @@ import {
 } from "./core.ts";
 
 // Model choice in the cold-cache question: the events, their payloads and the offer cleaning.
-export { MODEL_CHOICE, MODEL_OFFERS, NOTE_MAX, OFFER_TIMEOUT_MS, type ModelChoice, type ModelOffer, type ModelOffers, cleanOffers, collectOffers } from "./offers.ts";
+export { MODEL_CHOICE, MODEL_OFFERS, OFFER_TIMEOUT_MS, type ModelChoice, type ModelOffer, type ModelOffers, cleanOffers, collectOffers } from "./offers.ts";
 
 const STATUS_KEY = NAME;
 const TICK_MS = 1_000;
@@ -131,48 +131,69 @@ export interface MenuItem {
 export const JEV_TIP = "Tip: /cache-guard jev sets up Jev, which compacts in about a second without a summary model reading the history (or turns this tip off).";
 
 /**
- * The ways through a cold cache, labelled with the tokens each re-sends uncached. Sending is first,
- * so Enter sends (on Jev's pick, when one is offered); Esc still keeps the prompt in the editor.
- * With Jev there are two compactions: Jev's, written in code, and a summary (which Jev filters first when
- * `filtered`, so its token count is an upper bound).
+ * The widest an option of the cold-cache question may be. Pi's own select wraps a longer option
+ * onto the next row with no `│` gutter, and Collie reads no dialog with such a row; at the
+ * 46-column phone width the cursor and padding leave 42. Counts and Jev's reason go in the title.
+ */
+export const OPTION_MAX = 42;
+
+/**
+ * The ways through a cold cache. Sending is first, so Enter sends (on Jev's pick, when one is
+ * offered); Esc still keeps the prompt in the editor. With Jev there are two compactions: Jev's,
+ * written in code, and a summary. Every option fits OPTION_MAX columns; the token counts each way
+ * re-sends are in the title (`coldTitle`).
  *
  * Model offers (`cache:model-offers`, cleaned): a recommended one (Jev's pick) goes first, so Enter
  * takes it, and "Send anyway" becomes "Send with <current model>"; every other offer follows the
  * mute line as "Send with <label> instead". Without offers the menu is the plain one.
  */
 export function choiceMenu(
-  v: CacheView,
+  _v: CacheView,
   jev: { ready: boolean; filtered: boolean } = { ready: false, filtered: false },
   models: { current?: string; offers?: readonly ModelOffer[] } = {},
 ): MenuItem[] {
-  const tokens = formatTokens(v.last.tokens);
-  const recaches = `re-caches ${tokens} tokens`;
   const offers = models.offers ?? [];
   const pick = offers.find((offer) => offer.recommended);
   const others = offers.filter((offer) => offer !== pick);
+  const fit = (prefix: string, name: string, suffix: string) => `${prefix}${oneLine(name, OPTION_MAX - prefix.length - suffix.length)}${suffix}`;
   const sends: MenuItem[] = pick
     ? [
-        { choice: "model", model: pick.model, label: `Send with ${pick.label} (Jev's pick; ${recaches}${noteSuffix(pick)})` },
-        { choice: "send", label: models.current ? `Send with ${models.current} (${recaches})` : `Send anyway (${recaches})` },
+        { choice: "model", model: pick.model, label: fit("Send with ", pick.label, " (Jev's pick)") },
+        { choice: "send", label: models.current ? fit("Send with ", models.current, "") : "Send anyway" },
       ]
-    : [{ choice: "send", label: `Send anyway (${recaches})` }];
-  const switches: MenuItem[] = others.map((offer) => ({
-    choice: "model", model: offer.model, label: `Send with ${offer.label} instead (${recaches}${noteSuffix(offer)})`,
-  }));
+    : [{ choice: "send", label: "Send anyway" }];
+  const switches: MenuItem[] = others.map((offer) => ({ choice: "model", model: offer.model, label: fit("Send with ", offer.label, " instead") }));
   const compactions: MenuItem[] = jev.ready
     ? [
-        { choice: "jev", label: "Compact with Jev, then send it (~1s, no summary model)" },
-        { choice: "compact", label: `Compact with a summary, then send it (summary reads ${jev.filtered ? "up to " : ""}${tokens} tokens)` },
+        { choice: "jev", label: "Compact with Jev, then send (~1s)" },
+        { choice: "compact", label: "Compact with a summary, then send" },
       ]
-    : [{ choice: "compact", label: `Compact first, then send it (summary reads ${tokens} tokens)` }];
+    : [{ choice: "compact", label: "Compact first, then send" }];
   return [
     ...sends,
     { choice: "mute", label: "Send, and stop asking in this session" },
     ...switches,
     ...compactions,
-    { choice: "fresh", label: "Start a new session with this prompt (no history to re-cache)" },
+    { choice: "fresh", label: "Start a new session with this prompt" },
     { choice: "keep", label: "Keep the prompt in the editor" },
   ];
+}
+
+/**
+ * The cold-cache question: the miss, what each way costs in tokens (sending re-caches the
+ * conversation on any model, a summary reads it once, a new session starts empty), and Jev's
+ * reason for its model pick when one is offered.
+ */
+export function coldTitle(
+  v: CacheView,
+  jev: { ready: boolean; filtered: boolean; missing?: boolean } = { ready: false, filtered: false },
+  pick?: ModelOffer,
+): string {
+  const tokens = formatTokens(v.last.tokens);
+  const summary = `a summary reads ${jev.ready && jev.filtered ? "up to " : ""}${tokens}`;
+  const ways = `Sending re-caches ${tokens} tokens on any model; ${summary}${jev.ready ? ", Jev's compaction none" : ""}; a new session starts empty.`;
+  const why = pick ? `\nJev's pick: ${pick.label}${pick.note ? ` (${pick.note})` : ""}.` : "";
+  return `Prompt cache miss. ${describeMiss(v.cold!, v.last.tokens, undefined)}\n${ways}${why}${jev.missing ? `\n${JEV_TIP}` : ""}`;
 }
 
 export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrReporter; alert?: (body: string) => void } = {}) {
@@ -438,7 +459,7 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
       requestOffers(event.text, v.last.tokens, model ? `${model.provider}/${model.id}` : undefined),
     ]);
     const menu = choiceMenu(v, { ready: jev.kind === "ready", filtered: settings.compact.filter }, { current: model?.name || model?.id, offers });
-    const title = `Prompt cache miss. ${describeMiss(v.cold, v.last.tokens, undefined)}${jev.kind === "missing" ? `\n${JEV_TIP}` : ""}`;
+    const title = coldTitle(v, { ready: jev.kind === "ready", filtered: settings.compact.filter, missing: jev.kind === "missing" }, offers.find((offer) => offer.recommended));
     const picked = await ask(() => context.ui.select(title, menu.map((item) => item.label)));
     const item = menu.find((entry) => entry.label === picked);
     const choice = item?.choice ?? "keep";

@@ -10,8 +10,6 @@ export const MODEL_OFFERS = "cache:model-offers";
 export const MODEL_CHOICE = "cache:model-choice";
 /** The longest the question waits for offers, counted from the emit. */
 export const OFFER_TIMEOUT_MS = 2_500;
-/** Longest note shown in a menu line; a longer one is left out. */
-export const NOTE_MAX = 32;
 /** Longest offer label; a longer one is cut. */
 const LABEL_MAX = 40;
 
@@ -23,7 +21,7 @@ export interface ModelOffer {
   label: string;
   /** Jev's pick: listed first, so Enter takes it. At most one is honored (the first). */
   recommended?: boolean;
-  /** A few words shown after the token count when short (at most NOTE_MAX characters). */
+  /** A few words on why, shown in the question with Jev's pick. */
   note?: string;
 }
 
@@ -93,11 +91,6 @@ export function cleanOffers(raw: readonly unknown[], current: string | undefined
     out.push({ model, label, ...(offer.recommended === true ? { recommended: true } : {}), ...(note ? { note } : {}) });
   }
   return out;
-}
-
-/** The note as a menu-line suffix, or "" when absent or too long for one line. */
-export function noteSuffix(offer: ModelOffer): string {
-  return offer.note && offer.note.length <= NOTE_MAX ? `; ${offer.note}` : "";
 }
 
 /** `text` on one line with single spaces, cut to `max` characters. */
