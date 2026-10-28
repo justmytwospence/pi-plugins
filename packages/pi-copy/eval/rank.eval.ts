@@ -1,11 +1,12 @@
 // Sessions ranked by live Jev through Pi's model registry: `npm run eval`. The piece the user is
 // after must be in the top 3 of Suggested.
-import { beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { DEFAULT_CONFIG } from "../src/index.ts";
 import { askJev } from "../src/jev.ts";
 import { piecesToJudge, rankQuestions, rankState, readJudgments, suggested } from "../src/rank.ts";
 import { extractSegments } from "../src/segments.ts";
 import { hasCredentials, installedRegistry } from "../../../evals/shared/registry.ts";
+import { Spend } from "../../../evals/shared/spend.ts";
 
 const u = (text: string) => ({ type: "message", message: { role: "user", content: text } });
 const a = (text: string) => ({ type: "message", message: { role: "assistant", content: [{ type: "text", text }] } });
@@ -67,12 +68,15 @@ describe.skipIf(!hasCredentials)("pi-copy live eval", () => {
   beforeAll(async () => {
     registry = await installedRegistry();
   });
+  const spend = new Spend();
+  afterAll(() => console.log(spend.line()));
 
   test.each(SESSIONS)("$name", async (s) => {
     const segments = extractSegments(s.entries);
     const pieces = piecesToJudge(segments, DEFAULT_CONFIG.rank);
     const recent = s.entries.filter((e: any) => e.message.role === "user").map((e: any) => e.message.content as string).slice(-3);
     const outcome = await askJev(registry, { ...DEFAULT_CONFIG.jev, timeoutMs: 15_000 }, rankState(pieces, recent, DEFAULT_CONFIG.rank), rankQuestions(pieces));
+    spend.addOutcome(outcome);
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
     const top = suggested(segments, readJudgments(pieces, outcome.answers), DEFAULT_CONFIG.rank).slice(0, 3);

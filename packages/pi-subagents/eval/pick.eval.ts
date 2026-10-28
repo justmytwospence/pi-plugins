@@ -1,10 +1,11 @@
 // Tasks routed by live Jev through Pi's model registry: `npm run eval`.
-import { beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { GENERAL, parseAgent } from "../src/agents.ts";
 import { DEFAULT_CONFIG } from "../src/index.ts";
 import { askJev } from "../src/jev.ts";
 import { DEFAULT_TIER_DESCRIPTIONS, pickQuestions, readPicks } from "../src/pick.ts";
 import { hasCredentials, installedRegistry } from "../../../evals/shared/registry.ts";
+import { Spend } from "../../../evals/shared/spend.ts";
 
 const agent = (name: string, description: string) => parseAgent(`---\nname: ${name}\ndescription: ${JSON.stringify(description)}\n---\n`, "user")!;
 const AGENTS = [
@@ -39,10 +40,13 @@ describe.skipIf(!hasCredentials)("pi-subagents live eval", () => {
   beforeAll(async () => {
     registry = await installedRegistry();
   });
+  const spend = new Spend();
+  afterAll(() => console.log(spend.line()));
 
   test.each(CASES)("$role: $task", async (c) => {
     const questions = pickQuestions({}, AGENTS, { models: { fast: "x", strong: "y" }, descriptions: DEFAULT_TIER_DESCRIPTIONS }, true);
     const outcome = await askJev(registry, { ...DEFAULT_CONFIG.jev, timeoutMs: 15_000 }, { task: c.task, parent_request: "(none)" }, questions);
+    spend.addOutcome(outcome);
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
     const picks = readPicks(outcome.answers);

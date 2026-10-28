@@ -4,12 +4,13 @@
 // replies to), intent: string, tool, args, label?: "allow" | "hold" | "either" }. A plain `user`
 // string is accepted for older files.
 import { readFileSync } from "node:fs";
-import { beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { DEFAULT_CONFIG } from "../src/index.ts";
 import { askJev } from "../src/jev.ts";
 import { judgeQuestions, judgeState, verdict } from "../src/judge.ts";
 import { pool } from "../../../evals/shared/pool.ts";
 import { hasCredentials, installedRegistry } from "../../../evals/shared/registry.ts";
+import { Spend } from "../../../evals/shared/spend.ts";
 
 interface Recorded {
   users?: string[];
@@ -30,6 +31,8 @@ describe.skipIf(!hasCredentials || records.length === 0)("tool-gate replay", () 
   beforeAll(async () => {
     registry = await installedRegistry();
   });
+  const spend = new Spend();
+  afterAll(() => console.log(spend.line()));
 
   test("replay", async () => {
     const tally = { allow: 0, hold: 0, wrong: 0, failed: 0 };
@@ -45,6 +48,7 @@ describe.skipIf(!hasCredentials || records.length === 0)("tool-gate replay", () 
         rules: [],
       });
       const outcome = await askJev(registry, { ...DEFAULT_CONFIG.jev, timeoutMs: 20_000 }, state, judgeQuestions([]));
+      spend.addOutcome(outcome);
       if (!outcome.ok) {
         tally.failed++;
         return;

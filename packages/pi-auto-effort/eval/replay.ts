@@ -22,8 +22,10 @@ import { type JevOutcome, askJev } from "../src/jev.ts";
 import { DEFAULT_POLICY, type Judgment, type Policy, decide } from "../src/policy.ts";
 import { isGoAhead } from "../src/prefilter.ts";
 import { messageText } from "../src/transcript.ts";
+import { Spend } from "../../../evals/shared/spend.ts";
 import { pool } from "../../../evals/shared/pool.ts";
 import { branchOf, type Session, type SessionEntry } from "../../../evals/shared/sessions.ts";
+import type { Metrics } from "../../../evals/shared/results.ts";
 import { table } from "../../../evals/shared/table.ts";
 
 const STATE_ENTRY = "auto-effort:state";
@@ -135,7 +137,21 @@ export function fromSession(session: Session): ReplaySession {
 /** One prompt's assessment: settled by the pre-filter, or Jev's outcome and the judgment in it. */
 export type Assessment = { kind: "go-ahead" } | { kind: "jev"; outcome: JevOutcome; judgment: Judgment | undefined };
 
+/** True when the variant asks Jev about the prompt: the pre-filter does not settle it. */
+export function needsJev(variant: Variant, prompt: Pick<ReplayPrompt, "text">): boolean {
+  return !(variant.prefilter && isGoAhead(prompt.text));
+}
+
+/** The Jev calls a run of `variants` over `sessions` makes: no Jev call, so safe for a dry run. */
+export function countCalls(sessions: readonly ReplaySession[], variants: readonly Variant[]): number {
+  let calls = 0;
+  for (const variant of variants) for (const session of sessions) for (const prompt of session.prompts) if (needsJev(variant, prompt)) calls++;
+  return calls;
+}
+
 export interface AssessOptions {
+  /** Adds each call's cost. */
+  spend?: Spend;
   concurrency?: number;
   timeoutMs?: number;
   /** Called after each Jev call with the number done and the number to do. */
@@ -150,13 +166,14 @@ export async function assess(registry: unknown, sessions: readonly ReplaySession
   const jobs: Array<() => Promise<void>> = [];
   sessions.forEach((session, s) => {
     session.prompts.forEach((prompt, k) => {
-      if (variant.prefilter && isGoAhead(prompt.text)) {
+      if (!needsJev(variant, prompt)) {
         out[s]![k] = { kind: "go-ahead" };
         return;
       }
       jobs.push(async () => {
         const state = effortState(prompt.text, session.branch.slice(0, prompt.index), { legacy: variant.legacy });
         const outcome = await askJev(registry, config, state, questions);
+        options.spend?.addOutcome(outcome);
         out[s]![k] = { kind: "jev", outcome, judgment: judgment(outcome, true) };
       });
     });
@@ -277,15 +294,42 @@ export function percentile(values: readonly number[], q: number): number | undef
 
 export interface VariantResult {
   variant: Variant;
+  spend: Spend;
   assessed: Assessment[][];
   steps: Step[][];
   summary: Summary;
 }
 
 export async function runVariant(registry: unknown, sessions: readonly ReplaySession[], variant: Variant, options: AssessOptions = {}): Promise<VariantResult> {
-  const assessed = await assess(registry, sessions, variant, options);
+  const spend = options.spend ?? new Spend();
+  const assessed = await assess(registry, sessions, variant, { ...options, spend });
   const steps = sessions.map((s, i) => walk(s, assessed[i]!));
-  return { variant, assessed, steps, summary: summarize(sessions, assessed, steps) };
+  return { variant, spend, assessed, steps, summary: summarize(sessions, assessed, steps) };
+}
+
+/** The numbers the report prints, as a flat object for the results history. */
+export function metricsOf(s: Summary): Metrics {
+  const p50 = percentile(s.latencies, 0.5);
+  const p95 = percentile(s.latencies, 0.95);
+  return {
+    sessions: s.sessions,
+    prompts: s.prompts,
+    settledByPrefilter: s.prefiltered,
+    jevCalls: s.calls,
+    jevFailures: s.failures,
+    ...(p50 !== undefined ? { p50 } : {}),
+    ...(p95 !== undefined ? { p95 } : {}),
+    overrides: s.overrides,
+    exact: s.exact,
+    withinOne: s.withinOne,
+    above: s.above,
+    below: s.below,
+    levelChangesPerSession: s.changes.length ? Math.round((s.changes.reduce((a, b) => a + b, 0) / s.changes.length) * 100) / 100 : 0,
+    levelChangesMax: s.changes.length ? Math.max(...s.changes) : 0,
+    live: s.live,
+    sameLevelAsLive: s.sameAsLive,
+    ...Object.fromEntries(THINKING.filter((l) => s.levels[l]).map((l) => [`level_${l}`, s.levels[l] as number])),
+  };
 }
 
 const pct = (n: number, of: number) => (of ? `${n} (${Math.round((100 * n) / of)}%)` : `${n}`);

@@ -1,10 +1,11 @@
 // Mid-run stretches rated by live Jev through Pi's model registry: `npm run eval`.
-import { beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { DEFAULT_CONFIG } from "../src/index.ts";
 import { askJev, choice } from "../src/jev.ts";
 import { JUDGED_LEVELS } from "../src/policy.ts";
 import { MID_RUN_QUESTIONS, runState } from "../src/midrun.ts";
 import { hasCredentials, installedRegistry } from "../../../evals/shared/registry.ts";
+import { Spend } from "../../../evals/shared/spend.ts";
 
 type Step = { said?: string; calls: Array<[string, Record<string, unknown>]>; failed?: string[] };
 
@@ -82,9 +83,12 @@ describe.skipIf(!hasCredentials)("auto-effort mid-run live eval", () => {
   beforeAll(async () => {
     registry = await installedRegistry();
   });
+  const spend = new Spend();
+  afterAll(() => console.log(spend.line()));
 
   test.each(CASES)("$name", async (c) => {
     const outcome = await askJev(registry, { ...DEFAULT_CONFIG.jev, timeoutMs: 10_000 }, runState(entries(c.request, c.steps), 6), MID_RUN_QUESTIONS);
+    spend.addOutcome(outcome);
     if (!outcome.ok) throw new Error(outcome.reason);
     const depth = choice(outcome.answers, "depth");
     const probabilities = depth?.probabilities ?? {};

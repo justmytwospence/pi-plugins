@@ -9,3 +9,4 @@ site/dist/
 site/.astro/
 .vercel
 .env*
+evals/results/

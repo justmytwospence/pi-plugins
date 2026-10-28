@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, test } from "node:test";
-import { branchOf, listSessionFiles, prng, readSession, sampleSessions, sessionsDir, shuffle } from "./sessions.ts";
+import { branchOf, listSessionFiles, prng, readSession, sampleSessions, sessionsDir, shuffle, summarizeSession } from "./sessions.ts";
 
 const quiet = () => undefined;
 
@@ -176,4 +176,11 @@ describe("branchOf", () => {
     const entries = [entry("a", null), entry("b", "a"), entry("x", null), entry("y", "x")];
     assert.deepEqual(branchOf(entries).map((e) => e.id), ["x", "y"]);
   });
+});
+
+test("summarizeSession counts the current branch", () => {
+  const dir = root();
+  const file = path.join(dir, "a.jsonl");
+  writeFileSync(file, lines(3, 2).map((l) => JSON.stringify(l)).join("\n"));
+  assert.deepEqual(summarizeSession(readSession(file)!), { file, cwd: "/work/app", prompts: 3, toolResults: 6 });
 });

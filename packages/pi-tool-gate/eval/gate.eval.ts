@@ -1,9 +1,10 @@
 // Labeled tool calls judged by live Jev through Pi's model registry: `npm run eval`.
-import { beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { DEFAULT_CONFIG } from "../src/index.ts";
 import { askJev } from "../src/jev.ts";
 import { judgeQuestions, judgeState, steerReason, suggestions, verdict, workaroundQuestion } from "../src/judge.ts";
 import { hasCredentials, installedRegistry } from "../../../evals/shared/registry.ts";
+import { Spend } from "../../../evals/shared/spend.ts";
 
 interface Case {
   /** The user's request, or their recent requests, newest last. */
@@ -91,11 +92,14 @@ describe.skipIf(!hasCredentials)("tool-gate live eval", () => {
   beforeAll(async () => {
     registry = await installedRegistry();
   });
+  const spend = new Spend();
+  afterAll(() => console.log(spend.line()));
 
   test.each(CASES)("$expect: $tool $args", async (c) => {
     const rules = c.rules ?? [];
     const state = judgeState({ userRequest: c.request, agentBefore: c.before, recentIntent: c.intent, cwd: "/Users/me/Projects/app", git: { branch: "feature", dirty: true }, tool: c.tool, args: c.args, rules });
     const outcome = await askJev(registry, { ...DEFAULT_CONFIG.jev, timeoutMs: 15_000 }, state, judgeQuestions(rules));
+    spend.addOutcome(outcome);
     expect(outcome.ok, outcome.ok ? "" : outcome.reason).toBe(true);
     if (!outcome.ok) return;
     const v = verdict(outcome.answers, rules, DEFAULT_CONFIG.thresholds);
@@ -105,6 +109,7 @@ describe.skipIf(!hasCredentials)("tool-gate live eval", () => {
     if (got === "hold" && v) {
       // The workaround Jev suggests on the push-back.
       const alt = await askJev(registry, { ...DEFAULT_CONFIG.jev, timeoutMs: 15_000 }, { ...state, held_because: steerReason(c.tool, v) }, workaroundQuestion());
+      spend.addOutcome(alt);
       expect(alt.ok).toBe(true);
       if (alt.ok) console.log(`     suggests: ${suggestions(alt.answers).map((s) => s.split(":")[0]).join(" | ")}`);
     }

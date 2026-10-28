@@ -1,11 +1,12 @@
 // Long, realistic tool logs trimmed by live Jev through Pi's model registry: `npm run eval`.
 // Every line that carries a failure must survive the trim.
-import { beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { DEFAULT_SETTINGS } from "../src/core.ts";
 import { JEV_MODELS, askJev } from "../src/jev.ts";
 import { assemble, boolAnswer, choiceAnswer, keepQuestions, keepState, makeBlocks, prefilter, trimQuestions } from "../src/lean.ts";
 import { extractUnits } from "../src/units.ts";
 import { hasCredentials, installedRegistry } from "../../../evals/shared/registry.ts";
+import { Spend } from "../../../evals/shared/spend.ts";
 
 const JEV = JEV_MODELS[0]!;
 
@@ -97,6 +98,8 @@ describe.skipIf(!hasCredentials)("Jev live eval", () => {
   beforeAll(async () => {
     registry = await installedRegistry();
   });
+  const spend = new Spend();
+  afterAll(() => console.log(spend.line()));
 
   test.each(CASES)("$name", async (c) => {
     const settings = DEFAULT_SETTINGS.trim;
@@ -108,6 +111,7 @@ describe.skipIf(!hasCredentials)("Jev live eval", () => {
       output: Object.fromEntries(blocks.map((b) => [b.id, b.text])),
     };
     const outcome = await askJev(registry, JEV, 30_000, state, trimQuestions(blocks));
+    spend.addOutcome(outcome);
     expect(outcome.ok, outcome.ok ? "" : outcome.reason).toBe(true);
     if (!outcome.ok) return;
     const kept = blocks.filter((b) => (boolAnswer(outcome.answers, `block::${b.id}`) ?? 1) >= settings.keepThreshold);
@@ -126,6 +130,7 @@ describe.skipIf(!hasCredentials)("Jev live eval", () => {
       { role: "toolResult", toolCallId: "c2", toolName: "bash", content: [{ type: "text", text: "FAIL test/retry.test.ts: POST request was retried 3 times (expected 0)" }], isError: true },
     ]);
     const outcome = await askJev(registry, JEV, 30_000, keepState("Make the retry tests pass.", units), keepQuestions(units));
+    spend.addOutcome(outcome);
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
     const keep = Object.fromEntries(units.map((u) => [u.id, choiceAnswer(outcome.answers, `keep::${u.id}`)]));

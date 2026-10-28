@@ -134,7 +134,7 @@ npm ci
 npm run check
 ```
 
-`npm run check` runs `tsc --noEmit` and the Vitest unit tests (`vitest run`). `npm run eval` runs live evals in `eval/` (with the helpers in the repository's `evals/shared/`) against Jev through the Pi installation on `PATH` (or `PI_PACKAGE_DIR`); they are skipped without `TYPESAFE_API_KEY`. `npm run eval` makes live, paid classifier requests; run it only with explicit authorization. For the full suite, the repository root's `npm run check` runs every component's check after the root loader test.
+`npm run check` runs `tsc --noEmit` and the Vitest unit tests (`vitest run`). `npm run eval` runs live evals in `eval/` (with the helpers in the repository's `evals/shared/`) against Jev through the Pi installation on `PATH` (or `PI_PACKAGE_DIR`); they are skipped without `TYPESAFE_API_KEY`. `npm run eval` makes live, paid classifier requests; run it only with explicit authorization. Each run prints `spend: $X over N calls`. For the full suite, the repository root's `npm run check` runs every component's check after the root loader test.
 
 ## License
 

@@ -1,9 +1,10 @@
 // Requests rated by live Jev through Pi's model registry: `npm run eval`.
-import { beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { DEFAULT_CONFIG, QUESTIONS, effortState } from "../src/index.ts";
 import { askJev, bool, choice } from "../src/jev.ts";
 import { JUDGED_LEVELS } from "../src/policy.ts";
 import { hasCredentials, installedRegistry } from "../../../evals/shared/registry.ts";
+import { Spend } from "../../../evals/shared/spend.ts";
 
 // depth: 0 trivial (low), 1 routine (medium), 2 multi-step (high), 3 hard (xhigh). The expected
 // level index under Jev's choice probabilities within 0.9 of the label passes.
@@ -35,12 +36,15 @@ describe.skipIf(!hasCredentials)("auto-effort live eval", () => {
   beforeAll(async () => {
     registry = await installedRegistry();
   });
+  const spend = new Spend();
+  afterAll(() => console.log(spend.line()));
 
   test.each(CASES)("$depth: $request", async (c) => {
     const entries = c.previous
       ? [{ type: "message", message: { role: "user", content: "earlier request" } }, { type: "message", message: { role: "assistant", content: [{ type: "text", text: c.previous }] } }]
       : [];
     const outcome = await askJev(registry, { ...DEFAULT_CONFIG.jev, timeoutMs: 15_000 }, effortState(c.request, entries), QUESTIONS);
+    spend.addOutcome(outcome);
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
     const depth = choice(outcome.answers, "depth");

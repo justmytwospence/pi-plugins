@@ -5,6 +5,9 @@ import {
   OLD,
   type ReplaySession,
   assess,
+  countCalls,
+  metricsOf,
+  needsJev,
   fromSession,
   notChosen,
   percentile,
@@ -165,6 +168,26 @@ describe("assess", () => {
     expect(fake.calls[1]!.questions.depth.instructions).toContain("agent_reply_untrusted");
     const first = out[0]![0]!;
     expect(first.kind === "jev" && first.judgment?.need.high).toBeCloseTo(0.75);
+  });
+
+  test("countCalls is what assess would call: the same predicate, no Jev, the old variant has no pre-filter", async () => {
+    expect(needsJev(CURRENT, { text: "thanks!" })).toBe(false);
+    expect(needsJev(OLD, { text: "thanks!" })).toBe(true);
+    expect(countCalls([replay], [CURRENT])).toBe(2);
+    expect(countCalls([replay], [CURRENT, OLD])).toBe(5);
+    const fake = fakeJev(() => answers(2));
+    await assess(fake.registry, [replay], CURRENT);
+    expect(fake.calls).toHaveLength(countCalls([replay], [CURRENT]));
+  });
+
+  test("runVariant counts spend per call and metricsOf flattens the summary", async () => {
+    const fake = fakeJev(() => answers(2));
+    const result = await runVariant(fake.registry, [replay], CURRENT);
+    expect(result.spend.calls).toBe(2);
+    const metrics = metricsOf(result.summary);
+    expect(metrics).toMatchObject({ sessions: 1, prompts: 3, settledByPrefilter: 1, jevCalls: 2, jevFailures: 0 });
+    expect(Object.values(metrics).every((v) => typeof v === "number")).toBe(true);
+    expect(metrics.p50).toBeTypeOf("number");
   });
 
   test("the old variant: every prompt to Jev, `last_outcome` and the old questions", async () => {

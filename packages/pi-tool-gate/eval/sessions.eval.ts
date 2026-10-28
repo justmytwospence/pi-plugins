@@ -11,161 +11,25 @@
 // gate stopped on its own (a push-back, chat or plan mode) are not labeled. A hold on an allowed
 // call is an extra prompt; an allow on a held call is a miss. Script content is read from disk now,
 // not as it was then.
-import { execFileSync } from "node:child_process";
-import path from "node:path";
+//
+// Planning lives in eval/sessions.ts, shared with the dry run (`npm run eval:dry -- tool-gate` at the
+// repository root, which makes no Jev call). Each run prints its spend and appends a record to
+// evals/results/tool-gate.jsonl (`npm run eval:last -- tool-gate`).
 import { beforeAll, describe, expect, test } from "vitest";
-import { loadConfig } from "../src/config.ts";
-import { BranchDownloads } from "../src/downloads.ts";
-import { grantsFile, loadGrants } from "../src/grants.ts";
-import { loadFileRules, localGrants } from "../src/permissions.ts";
-import { blockedBy, DEFAULT_CONFIG, type GateConfig, judgeStateOf, type Plan, planCall, scriptOfCall } from "../src/index.ts";
+import { DEFAULT_CONFIG } from "../src/index.ts";
 import { askJev } from "../src/jev.ts";
 import { judgeQuestions, verdict } from "../src/judge.ts";
-import { loadRules } from "../src/rules.ts";
 import { pool } from "../../../evals/shared/pool.ts";
 import { hasCredentials, installedRegistry } from "../../../evals/shared/registry.ts";
-import { branchOf, type Session, sampleSessions } from "../../../evals/shared/sessions.ts";
+import { record } from "../../../evals/shared/results.ts";
+import { sampleSessions } from "../../../evals/shared/sessions.ts";
+import { Spend } from "../../../evals/shared/spend.ts";
 import { table } from "../../../evals/shared/table.ts";
+import { collect, type Judged, outcomes, type Outcomes } from "./plans.ts";
 
 const CONCURRENCY = 8;
 const TIMEOUT_MS = 20_000;
 const COMPARE = process.env.EVAL_COMPARE === "1";
-const DOWNLOADED = /, downloaded in this session$/u;
-
-type Label = "allowed" | "held";
-
-interface Judged {
-  label: Label;
-  tool: string;
-  args: string;
-  rules: string[];
-  state: Record<string, unknown>;
-  /** The same state without the script, when the call runs one. */
-  bare?: Record<string, unknown>;
-}
-
-interface Row {
-  n: number;
-  allowed: number;
-  held: number;
-}
-
-interface Outcomes {
-  n: number;
-  failed: number;
-  holds: number;
-  /** Holds on calls the user allowed. */
-  extra: number;
-  /** Allows on calls the user held. */
-  misses: number;
-}
-
-const row = (): Row => ({ n: 0, allowed: 0, held: 0 });
-const outcomes = (): Outcomes => ({ n: 0, failed: 0, holds: 0, extra: 0, misses: 0 });
-const count = (r: Row, label: Label | undefined) => {
-  r.n++;
-  if (label) r[label]++;
-};
-
-/** The project's checkouts as the gate finds them: the git checkout and, for a worktree, its main one. */
-function projectsOf(cwd: string): string[] {
-  try {
-    const out = execFileSync("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 2_000,
-    });
-    const [top, common] = out.split("\n").map((l) => l.trim());
-    if (!top) return [path.resolve(cwd)];
-    const main = common && path.basename(common) === ".git" ? path.dirname(common) : undefined;
-    return main && main !== top ? [top, main] : [top];
-  } catch {
-    return [path.resolve(cwd)];
-  }
-}
-
-interface Message {
-  role?: string;
-  content?: unknown;
-  toolCallId?: string;
-  isError?: boolean;
-}
-
-/** Every labeled tool call of the sessions, planned as the gate does; the judged ones with their state. */
-export function collect(sessions: readonly Session[]) {
-  const walked = row();
-  const stopped = { n: 0 };
-  const clearAllow = row();
-  const clearHold = row();
-  const toJudge = row();
-  const downloaded = { holds: row(), added: row() };
-  const judged: Judged[] = [];
-
-  for (const session of sessions) {
-    const branch = branchOf(session.entries);
-    const cwd = session.cwd;
-    const config = loadConfig("tool-gate", DEFAULT_CONFIG, cwd) as GateConfig;
-    const projects = projectsOf(cwd);
-    const saved = loadGrants(projects[projects.length - 1] ?? cwd);
-    const grants = new Set(saved.map((g) => g.key));
-    // The rules in force on this machine: this project's saved ones and the config files'.
-    const permissions = [...localGrants(saved, grantsFile()).rules, ...loadFileRules(cwd).rules];
-    const rules = loadRules(cwd);
-    const results = new Map<string, Message>();
-    for (const entry of branch) {
-      const m = entry.type === "message" ? (entry.message as Message | undefined) : undefined;
-      if (m?.role === "toolResult" && typeof m.toolCallId === "string") results.set(m.toolCallId, m);
-    }
-    const tracker = new BranchDownloads(cwd);
-    branch.forEach((entry, i) => {
-      const m = entry.type === "message" ? (entry.message as Message | undefined) : undefined;
-      if (m?.role === "assistant" && Array.isArray(m.content)) {
-        // The conversation as it stood when the calls were made: up to the message that made them.
-        const before = branch.slice(0, i + 1);
-        for (const block of m.content as Array<{ type?: string; id?: string; name?: string; arguments?: unknown }>) {
-          if (block?.type !== "toolCall" || typeof block.id !== "string" || typeof block.name !== "string") continue;
-          const result = results.get(block.id);
-          if (!result) continue;
-          const who = blockedBy(result);
-          if (who === "gate") {
-            stopped.n++;
-            continue;
-          }
-          const label: Label = who === "user" ? "held" : "allowed";
-          count(walked, label);
-          const tool = block.name;
-          const input = (block.arguments ?? {}) as Record<string, unknown>;
-          const context = { config, projects, granted: (key: string) => grants.has(key), rules: permissions, root: projects[0] };
-          const p: Plan = planCall(tool, input, cwd, { ...context, downloads: tracker.downloads });
-          if (p.kind === "allow") count(clearAllow, label);
-          else if (p.kind === "deny") count(clearHold, label);
-          else if (p.kind === "ask") {
-            count(clearHold, label);
-            if (p.reasons.some((r) => DOWNLOADED.test(r))) {
-              count(downloaded.holds, label);
-              if (planCall(tool, input, cwd, context).kind !== "ask") count(downloaded.added, label);
-            }
-          } else {
-            count(toJudge, label);
-            const script = scriptOfCall(tool, input, cwd, tracker.downloads);
-            const call = { cwd, tool, args: p.args, rules };
-            judged.push({
-              label,
-              tool,
-              args: p.args,
-              rules,
-              state: judgeStateOf(before, { ...call, script }),
-              ...(script && COMPARE ? { bare: judgeStateOf(before, call) } : {}),
-            });
-          }
-        }
-      }
-      tracker.add(entry);
-    });
-  }
-
-  return { walked, stopped, clearAllow, clearHold, toJudge, downloaded, judged };
-}
 
 describe.skipIf(!hasCredentials)("tool-gate on real sessions", () => {
   let registry: unknown;
@@ -175,14 +39,16 @@ describe.skipIf(!hasCredentials)("tool-gate on real sessions", () => {
 
   test("replay", async () => {
     const { seed, sessions } = sampleSessions();
-    const { walked, stopped, clearAllow, clearHold, toJudge, downloaded, judged } = collect(sessions);
+    const { walked, stopped, clearAllow, clearHold, toJudge, downloaded, judged } = collect(sessions, COMPARE);
 
     const all = outcomes();
     const withScript = outcomes();
     const withoutContent = outcomes();
     const lines: string[] = [];
+    const spend = new Spend();
     const judge = async (j: Judged, state: Record<string, unknown>, script: boolean, into: Outcomes[]) => {
       const outcome = await askJev(registry, { ...DEFAULT_CONFIG.jev, timeoutMs: TIMEOUT_MS }, state, judgeQuestions(j.rules, { script }));
+      spend.addOutcome(outcome);
       for (const o of into) o.n++;
       if (!outcome.ok) {
         for (const o of into) o.failed++;
@@ -232,6 +98,31 @@ describe.skipIf(!hasCredentials)("tool-gate on real sessions", () => {
       return of.length > 25 ? [...of.slice(0, 25), `${kind.trim()}: ${of.length - 25} more`] : of;
     });
     console.log(`${sessions.length} sessions\n\n${plans}\n\n${jev}${shown.length ? `\n\n${shown.join("\n")}` : ""}`);
+    console.log(spend.line());
+    const metricsOf = (o: Outcomes) => ({ judged: o.n, failed: o.failed, holds: o.holds, extraPrompts: o.extra, misses: o.misses });
+    record("tool-gate", {
+      seed,
+      spend: spend.total,
+      calls: spend.calls,
+      metrics: {
+        sessions: sessions.length,
+        walked: walked.n,
+        clearAllow: clearAllow.n,
+        clearHold: clearHold.n,
+        downloadedHolds: downloaded.holds.n,
+        downloadedNewHolds: downloaded.added.n,
+        toJudge: toJudge.n,
+        toJudgeAllowed: toJudge.allowed,
+        toJudgeHeld: toJudge.held,
+        stoppedByGate: stopped.n,
+        ...metricsOf(all),
+        scriptJudged: withScript.n,
+        scriptHolds: withScript.holds,
+        scriptExtraPrompts: withScript.extra,
+        scriptMisses: withScript.misses,
+      },
+      ...(COMPARE ? { compare: metricsOf(withoutContent) } : {}),
+    });
     expect(all.failed).toBeLessThan(Math.max(1, all.n * 0.2));
   }, 3_600_000);
 });

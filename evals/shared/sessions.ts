@@ -182,14 +182,32 @@ export function sampleSessions(options: SampleOptions = {}): Sample {
   for (const { file } of files) {
     const session = readSession(file);
     if (!session) continue;
-    const branch = branchOf(session.entries);
-    const prompts = branch.filter((e) => roleOf(e) === "user").length;
-    const tools = branch.filter((e) => roleOf(e) === "toolResult").length;
-    if (prompts >= minPrompts && tools >= minTools) qualifying.push(session);
+    const { prompts, toolResults } = summarizeSession(session);
+    if (prompts >= minPrompts && toolResults >= minTools) qualifying.push(session);
   }
   const sessions = shuffle(qualifying, seed).slice(0, take);
   (options.log ?? console.log)(
     `sessions: EVAL_SEED=${seed}; ${sessions.length} sampled of ${qualifying.length} qualifying (>= ${minPrompts} prompts, >= ${minTools} tool results) among the newest ${files.length} in ${dir}`,
   );
   return { seed, sessions };
+}
+
+export interface SessionSummary {
+  file: string;
+  cwd: string;
+  /** User messages on the current branch. */
+  prompts: number;
+  /** toolResult messages on the current branch. */
+  toolResults: number;
+}
+
+/** A session's size as the sampler counted it, for the dry run. */
+export function summarizeSession(session: Session): SessionSummary {
+  const branch = branchOf(session.entries);
+  return {
+    file: session.file,
+    cwd: session.cwd,
+    prompts: branch.filter((e) => roleOf(e) === "user").length,
+    toolResults: branch.filter((e) => roleOf(e) === "toolResult").length,
+  };
 }
