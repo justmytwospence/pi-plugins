@@ -84,24 +84,27 @@ export async function judgeCall(toolName: string, input: unknown, host: GuardHos
   return askJev(host, toolName, info?.description, input, `the ${toolName} call`);
 }
 
-async function askJev(host: GuardHost, tool: string, description: string | undefined, input: unknown, what: string): Promise<Verdict> {
+/** The question Jev answers for a call the rules cannot settle. */
+export const CHANGE_QUESTION = {
+  instructions:
+    "An agent that must not change anything wants to make this tool call. Would running it change anything: create, modify or delete files; change git state; start, stop or signal processes; install software; or change remote or shared state (sending messages, posting, writing to services)? Reading files, searching, listing, fetching web pages and printing output change nothing.",
+  criteria: { true: "running it would change something", false: "it only reads or looks things up" },
+};
+
+/** What Jev is told about a call: the tool, its description, the arguments (as JSON, clipped) and the directory. */
+export function changeState(tool: string, description: string | undefined, input: unknown, cwd: string): Record<string, unknown> {
   let args = "";
   try { args = JSON.stringify(input) ?? ""; } catch { args = String(input); }
-  const answer = await askJevBool(
-    host.registry,
-    {
-      tool,
-      ...(description ? { tool_description: description.slice(0, 1_000) } : {}),
-      arguments: args.slice(0, 4_000),
-      working_directory: host.cwd,
-    },
-    {
-      instructions:
-        "An agent that must not change anything wants to make this tool call. Would running it change anything: create, modify or delete files; change git state; start, stop or signal processes; install software; or change remote or shared state (sending messages, posting, writing to services)? Reading files, searching, listing, fetching web pages and printing output change nothing.",
-      criteria: { true: "running it would change something", false: "it only reads or looks things up" },
-    },
-    host.signal,
-  );
+  return {
+    tool,
+    ...(description ? { tool_description: description.slice(0, 1_000) } : {}),
+    arguments: args.slice(0, 4_000),
+    working_directory: cwd,
+  };
+}
+
+async function askJev(host: GuardHost, tool: string, description: string | undefined, input: unknown, what: string): Promise<Verdict> {
+  const answer = await askJevBool(host.registry, changeState(tool, description, input, host.cwd), CHANGE_QUESTION, host.signal);
   if (!answer.ok) return refuse(`${what} could not be confirmed to change nothing (${answer.reason}), so it was not run. Use reading tools or plainly read-only commands.`);
   if (answer.probability < CHANGE_THRESHOLD) return { allowed: true, why: `${Math.round(answer.probability * 100)}% chance of a change` };
   return refuse(`${what} may change something (${Math.round(answer.probability * 100)}% likely), so it was not run.`);

@@ -1,4 +1,4 @@
-// Replays real Pi sessions through auto-effort's prompt-time decision (eval/replay.eval.ts). For
+// Replays real Pi sessions through auto-effort's prompt-time decision (eval/replay.target.ts). For
 // each sampled session's current branch and each user message on it: the Jev state the extension
 // would have built then (effortState over the entries before the message), the pre-filter, else a
 // live Jev call; then the prompts are walked in order through decide() with the default policy to

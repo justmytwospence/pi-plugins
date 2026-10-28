@@ -1,54 +1,38 @@
 #!/usr/bin/env node
-// `npm run -s eval:dry -- <auto-effort|tool-gate|all>`: what a live replay eval would call, without
-// calling Jev. Samples sessions exactly as the evals do (evals/shared/sessions.ts: EVAL_SEED,
-// EVAL_SAMPLE, EVAL_RECENT, EVAL_MIN_PROMPTS, EVAL_MIN_TOOLS), counts calls with the evals' own
-// functions (auto-effort: eval/replay.ts countCalls; tool-gate: eval/sessions.ts collect and
-// countCalls) and prints ONE JSON object on stdout; everything for humans goes to stderr.
-// EVAL_COMPARE=1 counts the old behaviour too. EVAL_COST_PER_CALL sets the per-call price estimate.
-import { countCalls as autoEffortCalls, CURRENT, fromSession, OLD } from "../packages/pi-auto-effort/eval/replay.ts";
-import { collect, countCalls as toolGateCalls } from "../packages/pi-tool-gate/eval/plans.ts";
-import { estimate } from "../evals/shared/spend.ts";
-import { sampleSessions, summarizeSession } from "../evals/shared/sessions.ts";
+// Deprecated alias of `npm run -s eval -- --dry --json <id>...`, kept so the /eval extension keeps working
+// until it reads the registry: `npm run -s eval:dry -- <auto-effort|tool-gate|all>` prints ONE JSON object on
+// stdout in the old shape, `{ seed, targets: { <name>: { sessions, estimatedCalls, notes } }, estimate }`; human
+// text goes to stderr. The old names map to target ids below (auto-effort: replay, tool-gate: sessions).
+// Everything is computed by the runner (evals/shared/runner.ts) from the targets in evals/targets.ts.
+import { createJiti } from "jiti";
 
-const TARGETS = ["auto-effort", "tool-gate"];
+const jiti = createJiti(import.meta.url, { interopDefault: true });
+const { runEval } = await jiti.import("../evals/shared/runner.ts");
+const { targets } = await jiti.import("../evals/targets.ts");
+const { sampleSessions, summarizeSession } = await jiti.import("../evals/shared/sessions.ts");
+const { estimate } = await jiti.import("../evals/shared/spend.ts");
+
+const IDS = { "auto-effort": "replay", "tool-gate": "sessions" };
 const target = process.argv[2];
-if (target !== "all" && !TARGETS.includes(target)) {
-  console.error(`usage: npm run -s eval:dry -- <${[...TARGETS, "all"].join("|")}>   (EVAL_SEED, EVAL_SAMPLE, EVAL_RECENT, EVAL_MIN_PROMPTS, EVAL_MIN_TOOLS, EVAL_COMPARE=1, EVAL_COST_PER_CALL)`);
+if (target !== "all" && !(target in IDS)) {
+  console.error(`usage: npm run -s eval:dry -- <${[...Object.keys(IDS), "all"].join("|")}>   (EVAL_SEED, EVAL_SAMPLE, EVAL_RECENT, EVAL_MIN_PROMPTS, EVAL_MIN_TOOLS, EVAL_COMPARE=1, EVAL_COST_PER_CALL); superseded by npm run -s eval -- --dry`);
   process.exit(2);
 }
-const wanted = target === "all" ? TARGETS : [target];
-const compare = process.env.EVAL_COMPARE === "1";
+const wanted = target === "all" ? Object.keys(IDS) : [target];
+const viaRunner = wanted.filter((name) => targets.some((t) => t.id === IDS[name]));
 const log = (line) => console.error(line);
 
-const { seed, sessions } = sampleSessions({ log });
-const described = sessions.map(summarizeSession);
-const targets = {};
+const sample = sampleSessions({ log });
+const described = sample.sessions.map(summarizeSession);
+const out = {};
 
-if (wanted.includes("auto-effort")) {
-  const replays = sessions.map(fromSession);
-  const variants = compare ? [CURRENT, OLD] : [CURRENT];
-  const prompts = replays.reduce((n, s) => n + s.prompts.length, 0);
-  const estimatedCalls = autoEffortCalls(replays, variants);
-  const settled = prompts - autoEffortCalls(replays, [CURRENT]);
-  targets["auto-effort"] = {
-    sessions: described,
-    estimatedCalls,
-    notes: `${prompts} prompts, ${settled} settled by the pre-filter` + (compare ? "; EVAL_COMPARE=1 adds the old behaviour, which has no pre-filter" : ""),
-  };
+if (viaRunner.length) {
+  const lines = [];
+  const code = await runEval(["--dry", "--json", ...viaRunner.map((name) => IDS[name])], { targets, sample: () => sample, io: { out: (line) => lines.push(line), err: log } });
+  if (code) process.exit(code);
+  const plan = JSON.parse(lines.at(-1));
+  for (const name of viaRunner) out[name] = { sessions: described, estimatedCalls: plan.targets[IDS[name]].calls, notes: plan.targets[IDS[name]].notes };
 }
 
-if (wanted.includes("tool-gate")) {
-  const collected = collect(sessions, compare);
-  const estimatedCalls = toolGateCalls(collected);
-  targets["tool-gate"] = {
-    sessions: described,
-    estimatedCalls,
-    notes: `${collected.walked.n} labeled calls walked, ${collected.judged.length} planned as judge` + (compare ? `, ${estimatedCalls - collected.judged.length} extra for script calls (EVAL_COMPARE=1)` : ""),
-  };
-}
-
-const total = Object.values(targets).reduce((n, t) => n + t.estimatedCalls, 0);
-const cost = estimate(total);
-for (const [name, t] of Object.entries(targets)) log(`${name}: ${t.estimatedCalls} calls (${t.notes})`);
-log(`${cost.note}: $${cost.usd.low.toFixed(4)} to $${cost.usd.high.toFixed(4)}`);
-console.log(JSON.stringify({ seed, targets, estimate: cost }));
+const cost = estimate(Object.values(out).reduce((n, t) => n + t.estimatedCalls, 0));
+console.log(JSON.stringify({ seed: sample.seed, targets: out, estimate: cost }));

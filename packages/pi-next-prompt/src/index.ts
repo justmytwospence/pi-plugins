@@ -74,7 +74,7 @@ export const QUESTIONS: Record<string, ClassifierQuestion> = {
   },
 };
 
-interface Pending {
+export interface Pending {
   suggestion: string;
   userPrompt: string;
   assistantTail: string;
@@ -85,19 +85,19 @@ export interface Verdict {
   reason: string;
 }
 
+/** What the vet tells Jev about a suggestion: the prompt and the response's tail, clipped, and the suggestion. */
+export function vetState(pending: Pending): Record<string, unknown> {
+  return {
+    last_user_prompt: clip(pending.userPrompt, 1_500),
+    assistant_text_tail: clipTail(pending.assistantTail, 2_000),
+    suggestion: pending.suggestion,
+  };
+}
+
 /** Jev's vote on a suggestion. Shown when Jev is off or unavailable: the model already abstains on its own. */
 export async function vet(registry: unknown, config: NextPromptConfig["jev"], pending: Pending): Promise<Verdict> {
   if (!config.enabled) return { show: true, reason: "judge off" };
-  const outcome = await askJev(
-    registry,
-    config,
-    {
-      last_user_prompt: clip(pending.userPrompt, 1_500),
-      assistant_text_tail: clipTail(pending.assistantTail, 2_000),
-      suggestion: pending.suggestion,
-    },
-    QUESTIONS,
-  );
+  const outcome = await askJev(registry, config, vetState(pending), QUESTIONS);
   if (!outcome.ok) return { show: true, reason: `judge unavailable (${outcome.reason}), shown anyway` };
   const p = bool(outcome.answers, "useful");
   if (p === undefined) return { show: true, reason: "judge gave no answer, shown anyway" };

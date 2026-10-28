@@ -78,3 +78,7 @@ An extension can offer a next prompt over Pi's event bus with `prompt:offer { so
 A suggestion is model-authored and can still be wrong or redundant, even after validation. It cannot know which of several unstated priorities you prefer. Do not expect a suggestion after every turn, and review accepted commands or requests before sending them.
 
 For editor or key conflicts, consult [Troubleshooting](/guides/troubleshooting/). The [source and tests](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-next-prompt) cover tag processing, editor behavior, lifecycle clearing and classifier fallback.
+
+## Checking the vet against your sessions
+
+Your saved sessions do not keep suggestions, so the repository's `vet` eval scores the vet on your real next messages instead. For each assistant turn you answered, it asks the vet once with your real next message as the suggestion and once with a message from another session, then reports how many real messages pass the 0.6 threshold, how many mismatched ones are hidden, and the real messages the vet scored lowest, which it would have hidden. It makes live, paid classifier requests, so it runs only on request (`npm run -s eval -- vet` from a checkout; `--dry` counts the requests first).

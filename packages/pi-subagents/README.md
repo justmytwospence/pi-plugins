@@ -266,7 +266,7 @@ npm ci
 npm run check
 ```
 
-`npm run check` runs `tsc --noEmit` and then `vitest run` (unit tests use a fake RPC child in place of Pi). `npm run eval` (helpers in the repository's `evals/shared/`) routes 15 tasks across six agents through live Jev via the installed Pi (skipped without `TYPESAFE_API_KEY`); it makes live, paid classifier requests, so run it only with explicit authorization. Each run prints `spend: $X over N calls`. For the full suite, the repository root's `npm run check` runs every component's check after the root loader test.
+`npm run check` runs `tsc --noEmit` and then `vitest run` (unit tests use a fake RPC child in place of Pi). `npm run eval` makes live, paid classifier requests; run it only with explicit authorization. It runs the package's eval target through the repository's one runner (`scripts/eval.mjs --package pi-subagents`; the target shape and the runner are in `evals/shared/`) against Jev through the Pi installation on `PATH` (or `PI_PACKAGE_DIR`), and it is skipped without `TYPESAFE_API_KEY`. The `pick` target (`eval/pick.target.ts`) routes 15 tasks across six agents through Jev, one request each for the role, tier and effort, and passes when every task gets the agent it was written for. Run it alone from the repository root with `npm run -s eval -- pick`; the runner prints `spend: $X over N calls`, appends a record to `evals/results/pick.jsonl` (git-ignored), and `npm run -s eval -- --dry pick` counts the requests without making any (`--list` shows every target). For the full suite, the repository root's `npm run check` runs every component's check after the root loader test.
 
 ## License
 

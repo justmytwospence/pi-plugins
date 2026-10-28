@@ -1,5 +1,5 @@
-// Plans every labeled tool call of sampled sessions as the gate does (eval/sessions.eval.ts uses this
-// and so does the dry run, `npm run eval:dry` at the repository root). No Jev call is made here.
+// Plans every labeled tool call of sampled sessions as the gate does (eval/sessions.target.ts uses this
+// for both its dry run, `npm run -s eval -- --dry sessions`, and its live run). No Jev call is made here.
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { loadConfig } from "../src/config.ts";

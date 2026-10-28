@@ -121,7 +121,7 @@ export function diff(prev: unknown, next: unknown): Delta {
   return out;
 }
 
-/** What `npm run eval:last` compares between two records: the numbers, not the stamps. */
+/** What `npm run -s eval -- --last` compares between two records: the numbers, not the stamps. */
 export function diffRecords(prev: ResultRecord, next: ResultRecord): Delta {
   const pick = (r: ResultRecord) => ({ spend: r.spend, calls: r.calls, metrics: r.metrics, ...(r.compare ? { compare: r.compare } : {}) });
   return diff(pick(prev), pick(next));

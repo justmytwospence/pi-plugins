@@ -8,7 +8,7 @@
     "skipLibCheck": true,
     "allowImportingTsExtensions": true,
     "types": ["node"],
-    "rootDir": "."
+    "rootDir": "../.."
   },
-  "include": ["src/**/*.ts", "test/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "eval/**/*.ts", "../../evals/shared/**/*.ts"]
 }

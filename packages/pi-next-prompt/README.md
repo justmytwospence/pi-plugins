@@ -116,7 +116,9 @@ npm ci
 npm run check
 ```
 
-`npm run check` runs `tsc --noEmit` and the Vitest unit tests (`vitest run`). For the full suite, the repository root's `npm run check` runs every component's check after the root loader test.
+`npm run check` runs `tsc --noEmit` (sources, tests, evals and the shared eval helpers) and the Vitest unit tests (`vitest run`). For the full suite, the repository root's `npm run check` runs every component's check after the root loader test.
+
+`npm run eval` makes live, paid classifier requests; run it only with explicit authorization. It runs the package's eval target through the repository's one runner (`scripts/eval.mjs --package pi-next-prompt`), skipped without `TYPESAFE_API_KEY`. The `vet` target (`eval/vet.target.ts`, engine in `eval/vet.ts`) measures how well the vet tells a useful suggestion from an unrelated one. Sessions never store suggestions (the `<next>` line is stripped), so it scores your real next messages instead: for each sampled session (the runner reads `$PI_CODING_AGENT_DIR/sessions`, default `~/.pi/agent/sessions`) and each assistant turn you answered, up to 12 turns per session, it asks the vet's own question with your real next message as the suggestion (skipping slash commands, `!` commands and messages under 3 or over 300 characters) and again with a next message from another sampled session. It reports how many real messages pass the 0.6 threshold, how many mismatched ones are hidden, the separation (the probability that a random real message scores above a random mismatched one), mean probabilities, Jev failures and the 10 lowest-scoring real messages, which the vet would have hidden. It passes when fewer than 20% of the requests fail. From the repository root: `npm run -s eval -- vet`, `npm run -s eval -- --dry vet` (counts the requests without making any) and `npm run -s eval -- --last vet`.
 
 ## License
 

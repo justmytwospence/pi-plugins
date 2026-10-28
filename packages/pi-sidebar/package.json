@@ -20,7 +20,8 @@
   "scripts": {
     "check": "npm run typecheck && npm test",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "eval": "node ../../scripts/eval.mjs --package pi-sidebar"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

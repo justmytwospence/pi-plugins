@@ -175,6 +175,10 @@ It aborts, sending nothing, if main's request vanishes mid-build, on an API or m
 - With Sidebar open, Collie reads only main's side of the split once `frames.toml` declares Sidebar's dividers (`panel_below` and `panel_beside`; see [remote clients](/guides/clients/)). A phone send types into whichever side holds the keys; when Sidebar does, Collie withholds Enter.
 - Models that drop earlier thinking when a new user message arrives (Claude models before Opus 4.5 and Sonnet 4.6) can miss the cache when asked during main's tool calls. The miss check catches it.
 
+## Checking the guard against your sessions
+
+The repository's `guard` eval compares Jev's judgment with the guard's own rules. It takes shell commands from your saved sessions that the read-only policy settles (cleared as read-only, or plainly writing), asks the guard's question about up to 150 of each kind, and reports how many read-only commands Jev would refuse and how many writing ones it would clear, with the worst examples. It makes live, paid classifier requests, so it runs only on request (`npm run -s eval -- guard` from a checkout; `--dry` counts the requests first).
+
 Claude Code's `/btw` and Codex's `/side` showed that a side question should reuse the main conversation's cache. [pi-herdr-btw](https://github.com/oscabriel/pi-herdr-btw) showed exact prompt replay; no code was copied from it.
 
 [GitHub source](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-sidebar)

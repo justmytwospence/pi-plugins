@@ -76,7 +76,8 @@
   "scripts": {
     "test": "node scripts/test-loader.mjs && node scripts/test-shortcuts.mjs && node scripts/test-contracts.mjs && node scripts/test-question-flow.mjs && node scripts/test-lifecycle.mjs && node --test \"evals/shared/*.test.ts\"",
     "check": "npm test && node scripts/check-components.mjs",
-    "eval:dry": "jiti scripts/eval-dry.mjs",
+    "eval": "node scripts/eval.mjs",
+    "eval:dry": "node scripts/eval-dry.mjs",
     "eval:last": "node scripts/eval-last.mjs",
     "check:clients": "node scripts/test-remote-clients.mjs",
     "postinstall": "node packages/pi-interactive-shell/scripts/prepare-pty.cjs"

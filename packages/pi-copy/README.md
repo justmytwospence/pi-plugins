@@ -134,7 +134,7 @@ npm ci
 npm run check
 ```
 
-`npm run check` runs `tsc --noEmit` and the Vitest unit tests (`vitest run`). `npm run eval` runs live evals in `eval/` (with the helpers in the repository's `evals/shared/`) against Jev through the Pi installation on `PATH` (or `PI_PACKAGE_DIR`); they are skipped without `TYPESAFE_API_KEY`. `npm run eval` makes live, paid classifier requests; run it only with explicit authorization. Each run prints `spend: $X over N calls`. For the full suite, the repository root's `npm run check` runs every component's check after the root loader test.
+`npm run check` runs `tsc --noEmit` and the Vitest unit tests (`vitest run`). `npm run eval` makes live, paid classifier requests; run it only with explicit authorization. It runs the package's eval target through the repository's one runner (`scripts/eval.mjs --package pi-copy`; the target shape and the runner are in `evals/shared/`) against Jev through the Pi installation on `PATH` (or `PI_PACKAGE_DIR`), and it is skipped without `TYPESAFE_API_KEY`. The `rank` target (`eval/rank.target.ts`) ranks five hand-written sessions with Jev and passes when the piece the user is after is in the top 3 of Suggested in every one of them. It makes five requests. Run it alone from the repository root with `npm run -s eval -- rank`; the runner prints `spend: $X over N calls`, appends a record to `evals/results/rank.jsonl` (git-ignored), and `npm run -s eval -- --dry rank` counts the requests without making any (`--list` shows every target). For the full suite, the repository root's `npm run check` runs every component's check after the root loader test.
 
 ## License
 

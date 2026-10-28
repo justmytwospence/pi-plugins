@@ -33,6 +33,25 @@ for (const entry of readdirSync(shared)) {
     assert(match[1].startsWith('node:') || match[1].startsWith('./'),`evals/shared/${entry} may import Node built-ins and its siblings only: ${match[1]}`);
   }
 }
+// The target list is explicit: evals/targets.ts imports the shared helpers and the packages' `eval/<id>.target.ts`
+// files and nothing else, and every such file is listed there, named after the id it declares.
+const targetsFile = readFileSync(resolve(root,'evals','targets.ts'),'utf8');
+for (const match of targetsFile.matchAll(/(?:from\s+|import\s*\(\s*|import\s+)["']([^"']+)["']/g)) {
+  assert(/^\.\/shared\/[\w.-]+\.ts$/.test(match[1]) || /^\.\.\/packages\/pi-[\w-]+\/eval\/[\w-]+\.target\.ts$/.test(match[1]),`evals/targets.ts may import shared helpers and packages' eval targets only: ${match[1]}`);
+}
+for (const name of readdirSync(resolve(root,'packages'))) {
+  const evalDir = resolve(root,'packages',name,'eval');
+  if (!existsSync(evalDir)) continue;
+  for (const entry of readdirSync(evalDir)) {
+    if (!entry.endsWith('.target.ts')) continue;
+    const stem = entry.slice(0,-'.target.ts'.length);
+    assert(targetsFile.includes(`../packages/${name}/eval/${entry}`),`evals/targets.ts must import packages/${name}/eval/${entry}`);
+    const code = readFileSync(resolve(evalDir,entry),'utf8');
+    assert(/export\s+default\s+defineEval\s*\(/.test(code),`${name}/eval/${entry} must default-export defineEval({...})`);
+    assert.equal(code.match(/^\s*id:\s*["']([^"']+)["']/m)?.[1],stem,`${name}/eval/${entry} must declare id: "${stem}"`);
+    assert.equal(code.match(/^\s*package:\s*["']([^"']+)["']/m)?.[1],name,`${name}/eval/${entry} must declare package: "${name}"`);
+  }
+}
 const hosts = new Set(['@earendil-works/pi-ai','@earendil-works/pi-agent-core','@earendil-works/pi-coding-agent','@earendil-works/pi-tui','typebox']);
 function* files(dir) {
   if (!existsSync(dir)) return;
@@ -73,4 +92,4 @@ for (const name of components) {
 const { plugins } = await import('../site/src/data/plugins.mjs');
 const names = plugins.map(p => p.id ?? p.name ?? p.slug);
 assert.deepEqual(new Set(names),new Set(components),'public catalog matches selectable manifest');
-console.log(`PASS ${components.length} component metadata, host peers, runtime independence, helper parity, shared eval helpers and public catalog`);
+console.log(`PASS ${components.length} component metadata, host peers, runtime independence, helper parity, shared eval helpers, eval target registry and public catalog`);
