@@ -53,11 +53,11 @@ Tool trimming runs before results enter context and points to a saved full-outpu
 
 ## Let effort move inside a ceiling
 
-Auto-effort rates the request but keeps your selected model. Your latest manual thinking level is its ceiling; the ordinary floor is low. Off/minimal levels stay alone. Starting Pi with explicit `--thinking` disables automatic effort changes, which is how subagent effort stays fixed.
+Auto-effort rates the request and, unless its opt-in model choice is on (which switches only when the cache is cold or the context small), keeps your selected model. In its default `ceiling` bounds your latest manual thinking level is the ceiling; `free` bounds let it go above it. The ordinary floor is low. Off/minimal levels stay alone. Starting Pi with explicit `--thinking` disables automatic effort changes, which is how subagent effort stays fixed.
 
 Mid-run adjustment is limited to models Pi marks compatible or explicitly configured effort-update models. Do not add broad `midRun.models` globs unless you accept the potential cache cost.
 
-`/auto-effort off` stops adaptation for the session and restores the ceiling. Classifier failure keeps the current level. Subscription-limit pressure can reduce effort below the policy’s own choice; `/auto-effort limits` explains the readings and forecast.
+`/auto-effort off` stops adaptation for the session and restores the ceiling. Classifier failure keeps the current level. Subscription-limit pressure raises how sure Jev must be before a higher level is used; `/auto-effort limits` explains the readings and forecast.
 
 ## Warming belongs to Pi
 

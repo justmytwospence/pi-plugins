@@ -1,11 +1,12 @@
 import { expect, test } from "vitest";
 import autoEffort from "../src/index.ts";
 import { CodexPoller, codexAccountId, retryAfterMs } from "../src/usage.ts";
-import { fakeJev, harness } from "./harness.ts";
+import { answers as depthAnswers, fakeJev, harness } from "./harness.ts";
 
 const M = 60_000;
 const t0 = Date.UTC(2026, 0, 1);
-const answers = (depth: number) => ({ depth: { type: "score", score: depth, confidence: 0.9 }, ack: { type: "bool", probability: 0.02 } });
+// need(medium) 0.9, need(high) 0.45: high with no pressure, medium at caution or critical.
+const answers = () => depthAnswers([0.1, 0.45, 0.35, 0.1], 0.02);
 
 function jwt(account: string) {
   const part = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
@@ -30,13 +31,13 @@ function setup(provider: string, options: { fetch?: typeof fetch; token?: () => 
   let clock = t0;
   const h = harness();
   autoEffort(h.pi, { now: () => clock, ...(options.fetch ? { fetch: options.fetch } : {}), codexTimeoutMs: 20 });
-  const jev = fakeJev(() => answers(3));
+  const jev = fakeJev(() => answers());
   const registry = Object.assign(jev.registry as object, { getApiKeyForProvider: async () => options.token?.() ?? jwt("acct-1") });
   const ctx = h.ctx({ modelRegistry: registry, model: { provider, id: "m" }, sessionManager: { getBranch: () => [] } });
   return { h, ctx, advance: (ms: number) => (clock += ms), now: () => clock };
 }
 
-test("Anthropic headers on a risky pace lower the level after a confirming prompt, and the level comes back when the window resets", async () => {
+test("Anthropic headers on a risky pace raise theta after a confirming prompt, and it comes back when the window resets", async () => {
   const { h, ctx, advance, now } = setup("anthropic");
   await h.emit("session_start", { type: "session_start" }, ctx);
   // 34% used with 80% of the 5h window left: projected 170% at reset.
@@ -47,23 +48,28 @@ test("Anthropic headers on a risky pace lower the level after a confirming promp
   advance(5 * M);
   await h.emit("after_provider_response", { type: "after_provider_response", status: 200, headers: anthropicHeaders(0.35, 240) }, ctx);
   await h.emit("before_agent_start", { prompt: "and the tests" }, ctx);
-  expect(h.thinking).toBe("low");
-  expect(h.entries.at(-1)?.data).toMatchObject({ baseline: "high", level: "low", limit: { tier: "critical", steps: 2, window: "5h" } });
-  expect(ctx.ui.status.get("auto-effort")).toBe("effort: low (auto →, limited: 5h 35%)");
-  expect(ctx.ui.notes.at(-1)?.message).toMatch(/^auto-effort: 5h window 35% used, projected \d+% at reset .*; effort lowered 2 levels$/);
+  expect(h.thinking).toBe("medium");
+  expect(h.entries.at(-1)?.data).toMatchObject({ level: "medium", reason: "down", theta: 0.85, p: 1, limit: { tier: "critical", window: "5h" } });
+  expect(ctx.ui.status.get("auto-effort")).toBe("effort: medium (auto → ≤high, limited: 5h 35%)");
+  expect(ctx.ui.notes.at(-1)?.message).toMatch(/^auto-effort: 5h window 35% used, projected \d+% at reset .*; critical: higher effort needs a clearer case$/);
+  const pressure = () => h.events.filter((e) => e.channel === "quota:pressure").map((e) => e.data);
+  expect(pressure()).toEqual([
+    { provider: "anthropic", tier: "none", p: 0 },
+    { provider: "anthropic", tier: "critical", p: 1, label: "5h critical" },
+  ]);
 
-  // A limited stretch does not drag the policy's own level down.
   advance(M);
   await h.emit("before_agent_start", { prompt: "more" }, ctx);
-  expect(h.entries.at(-1)?.data).toMatchObject({ baseline: "high", level: "low" });
+  expect(h.entries.at(-1)?.data).toMatchObject({ level: "medium", reason: "hold" });
 
   // The window rolls over: the cut lifts at the next prompt.
   advance(M);
   await h.emit("after_provider_response", { type: "after_provider_response", status: 200, headers: anthropicHeaders(0.01, 540) }, ctx);
   await h.emit("before_agent_start", { prompt: "next" }, ctx);
   expect(h.thinking).toBe("high");
-  expect(ctx.ui.status.get("auto-effort")).toBe("effort: high (auto →)");
+  expect(ctx.ui.status.get("auto-effort")).toBe("effort: high (auto → ≤high)");
   expect(ctx.ui.notes.at(-1)?.message).toBe("auto-effort: usage limit lifted; effort back to normal");
+  expect(pressure().at(-1)).toEqual({ provider: "anthropic", tier: "none", p: 0 });
   expect(now()).toBe(t0 + 7 * M);
 
   await h.commands.get("auto-effort").handler("limits", ctx);
@@ -96,7 +102,8 @@ test("Codex usage is polled with Pi's token and account, and caps the level", as
   });
   await h.emit("before_agent_start", { prompt: "hard" }, ctx);
   expect(h.thinking).toBe("medium");
-  expect(ctx.ui.status.get("auto-effort")).toBe("effort: medium (auto →, limited: 5h 80%)");
+  expect(ctx.ui.status.get("auto-effort")).toBe("effort: medium (auto → ≤high, limited: 5h 80%)");
+  expect(h.events.at(-1)).toEqual({ channel: "quota:pressure", data: { provider: "openai-codex", tier: "caution", p: 0.5, label: "5h caution" } });
   // Within 5 minutes no new request.
   await h.emit("agent_settled", { type: "agent_settled" }, ctx);
   expect(calls).toHaveLength(1);

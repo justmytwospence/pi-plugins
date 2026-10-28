@@ -1,6 +1,6 @@
 // Subscription limits: readings of the account's rate-limit windows (Anthropic 5h/7d, Codex
 // primary/secondary, Claude Code's spend limit), a forecast of where each window will be when it
-// resets, and a tier (none, caution, critical) that lowers the effort one or two levels. This file
+// resets, and a tier (none, caution, critical) that raises the bar for more effort. This file
 // is copied verbatim into the pi, opencode and Claude Code ports; it is pure (no I/O, no clock),
 // and readings live in process memory only.
 //
@@ -31,8 +31,6 @@ const rank = (t: Tier) => TIERS.indexOf(t);
 
 export interface Pressure {
   tier: Tier;
-  /** Levels to lower the effort by. */
-  steps: number;
   window?: string;
   /** The window's display name ("5h", "7d", "five_hour"). */
   label?: string;
@@ -64,7 +62,6 @@ export interface LimitsPolicy {
   enabled: boolean;
   caution: { used: number; projected: number };
   critical: { used: number; projected: number; exhaustMinutes: number };
-  steps: { caution: number; critical: number };
   /** A tier lifts only once the projected use at reset is at most this (caution) ... */
   exitProjected: number;
   /** ... and use is this far below the tier's threshold. */
@@ -82,7 +79,6 @@ export const DEFAULT_LIMITS: LimitsPolicy = {
   enabled: true,
   caution: { used: 0.75, projected: 1.0 },
   critical: { used: 0.9, projected: 1.5, exhaustMinutes: 30 },
-  steps: { caution: 1, critical: 2 },
   exitProjected: 0.95,
   hysteresis: 0.05,
   confirmMinutes: 5,
@@ -220,7 +216,7 @@ export class Tracker {
    * confirmations; `commit: false` looks without advancing (for status).
    */
   assess(now: number, policy: LimitsPolicy, commit = true): Pressure {
-    if (!policy.enabled) return { tier: "none", steps: 0 };
+    if (!policy.enabled) return { tier: "none" };
     let worst: { tier: Tier; ev: Evaluation; st: WindowState } | undefined;
     for (const [name, original] of [...this.windows]) {
       if (original.latest.resetsAt !== undefined && original.latest.resetsAt <= now) {
@@ -236,11 +232,10 @@ export class Tracker {
         (rank(st.tier) === rank(worst.tier) && (ev.view.projected ?? ev.view.used) > (worst.ev.view.projected ?? worst.ev.view.used));
       if (better) worst = { tier: st.tier, ev, st };
     }
-    if (!worst) return { tier: "none", steps: 0 };
+    if (!worst) return { tier: "none" };
     const { tier, ev } = worst;
     return {
       tier,
-      steps: tier === "none" ? 0 : Math.round(policy.steps[tier]),
       window: ev.view.window,
       label: ev.view.label,
       used: ev.view.used,
@@ -406,15 +401,6 @@ function clamp(x: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, x));
 }
 
-/** The effort to apply: `steps` below the baseline along `levels`, never below the floor. Unmanaged levels pass. */
-export function applyLimit(baseline: string, pressure: Pick<Pressure, "steps">, floor: string, levels: readonly string[]): { level: string; limited: boolean } {
-  const b = levels.indexOf(baseline);
-  const f = levels.indexOf(floor);
-  if (b < 0 || f < 0 || b <= f || pressure.steps <= 0) return { level: baseline, limited: false };
-  const level = levels[Math.max(f, b - pressure.steps)]!;
-  return { level, limited: level !== baseline };
-}
-
 // Parsers. Each is pure and ignores what it does not recognize.
 
 type HeaderMap = Record<string, string | undefined>;
@@ -550,7 +536,7 @@ export function pressureNotice(p: Pressure, now: number): string {
   const parts = [`${p.label ?? p.window} window ${pct(p.used ?? 0)} used`];
   if (p.projected !== undefined) parts.push(`projected ${pct(p.projected)} at reset`);
   const tail = p.exhaustsAt !== undefined && p.exhaustsAt > now ? ` (runs out in ~${duration(p.exhaustsAt - now)})` : "";
-  return `auto-effort: ${parts.join(", ")}${tail}; effort lowered ${p.steps === 1 ? "one level" : `${p.steps} levels`}`;
+  return `auto-effort: ${parts.join(", ")}${tail}; ${p.tier}: higher effort needs a clearer case`;
 }
 
 function pct(x: number): string {

@@ -1,10 +1,15 @@
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, test } from "vitest";
 import autoEffort, { effortState, thinkingPinned } from "../src/index.ts";
-import { assistantEntry, fakeJev, harness, userEntry } from "./harness.ts";
+import { answers, assistantEntry, fakeJev, harness, tierAnswer, userEntry } from "./harness.ts";
 
-const answers = (depth: number, ack = 0.05) => ({ depth: { type: "score", score: depth, confidence: 0.9 }, ack: { type: "bool", probability: ack } });
+type Depth = number | number[];
+// need(high) 0.3: under the relaxed theta 0.35, within the hysteresis of it.
+const BORDERLINE = [0.2, 0.5, 0.25, 0.05];
 
-function setup(script: number[]) {
+function setup(script: Depth[]) {
   const h = harness();
   autoEffort(h.pi);
   const queue = [...script];
@@ -24,27 +29,33 @@ test("custom starts preserve effort without a prompt assessment", async () => {
 });
 
 test("effort follows the requests, capped at the manual level", async () => {
-  const { h, ctx } = setup([0, 3, 3]);
+  const { h, ctx, jev } = setup([0, 3, 3]);
   await h.emit("session_start", { type: "session_start" }, ctx);
   await h.emit("before_agent_start", { prompt: "what does ls -a do?" }, ctx);
   expect(h.thinking).toBe("low");
   await h.emit("before_agent_start", { prompt: "redesign the sync engine" }, ctx);
   expect(h.thinking).toBe("high");
-  expect(h.entries.at(-1)).toMatchObject({ customType: "auto-effort:state", data: { reason: "jump", ceiling: "high" } });
-  expect(ctx.ui.status.get("auto-effort")).toBe("effort: high (auto →)");
+  expect(h.entries.at(-1)).toMatchObject({ customType: "auto-effort:state", data: { reason: "up", ceiling: "high", bounds: "ceiling", theta: 0.35, p: 0 } });
+  expect((h.entries.at(-1)?.data as { need: Record<string, number> }).need.xhigh).toBeCloseTo(0.7);
+  expect(ctx.ui.status.get("auto-effort")).toBe("effort: high (auto → ≤high)");
+  expect(jev.calls[0]?.questions.depth).toMatchObject({ type: "choice", criteria: { low: expect.any(String), medium: expect.any(String), high: expect.any(String), xhigh: expect.any(String) } });
+  expect(jev.calls[0]?.questions).not.toHaveProperty("tier");
 });
 
 test("the footer shows where the level is heading", async () => {
-  const { h, ctx } = setup([1, 2, 3]);
+  const { h, ctx } = setup([1, BORDERLINE, 3, BORDERLINE]);
   await h.emit("session_start", { type: "session_start" }, ctx);
   await h.emit("thinking_level_select", { type: "thinking_level_select", level: "xhigh", previousLevel: "high" }, ctx);
   await h.emit("before_agent_start", { prompt: "routine" }, ctx);
-  expect(ctx.ui.status.get("auto-effort")).toBe("effort: medium (auto →)");
-  // The average rises to 1.5: not enough to move, enough to point up.
+  expect(ctx.ui.status.get("auto-effort")).toBe("effort: medium (auto → ≤xhigh)");
+  // need(high) 0.3: not enough to move up, close enough to point up.
   await h.emit("before_agent_start", { prompt: "a bit harder" }, ctx);
-  expect(ctx.ui.status.get("auto-effort")).toBe("effort: medium (auto ↑)");
+  expect(ctx.ui.status.get("auto-effort")).toBe("effort: medium (auto ↑ ≤xhigh)");
   await h.emit("before_agent_start", { prompt: "hard" }, ctx);
-  expect(ctx.ui.status.get("auto-effort")).toBe("effort: xhigh (auto →)");
+  expect(ctx.ui.status.get("auto-effort")).toBe("effort: xhigh (auto → ≤xhigh)");
+  // need(xhigh) 0.05 is clearly below theta: straight down to medium, where need(high) 0.3 points up.
+  await h.emit("before_agent_start", { prompt: "a bit easier" }, ctx);
+  expect(ctx.ui.status.get("auto-effort")).toBe("effort: medium (auto ↑ ≤xhigh)");
 });
 
 test("a manual change becomes the new ceiling; own changes do not", async () => {
@@ -81,6 +92,7 @@ test("state is restored from the branch", async () => {
   const jev = fakeJev(() => answers(3));
   const ctx = h.ctx({
     modelRegistry: jev.registry,
+    // An entry from the smoothing policy: e and dwell are ignored, the ceiling is kept.
     sessionManager: { getBranch: () => [{ type: "custom", customType: "auto-effort:state", data: { e: 0.2, dwell: 0, ceiling: "xhigh" } }] },
   });
   h.pi.setThinkingLevel("low");
@@ -89,10 +101,10 @@ test("state is restored from the branch", async () => {
   expect(h.thinking).toBe("xhigh");
 });
 
-test("an entry from before the limits stage restores its level as the baseline; a manual change replaces it", async () => {
+test("an old entry restores its ceiling; a manual change replaces it", async () => {
   const h = harness();
   autoEffort(h.pi);
-  const jev = fakeJev(() => answers(1.4));
+  const jev = fakeJev(() => answers(1));
   const ctx = h.ctx({
     modelRegistry: jev.registry,
     sessionManager: { getBranch: () => [{ type: "custom", customType: "auto-effort:state", data: { e: 1, dwell: 5, ceiling: "xhigh", level: "medium" } }] },
@@ -100,30 +112,30 @@ test("an entry from before the limits stage restores its level as the baseline; 
   h.pi.setThinkingLevel("medium");
   await h.emit("session_start", { type: "session_start" }, ctx);
   await h.emit("before_agent_start", { prompt: "routine" }, ctx);
-  expect(h.entries.at(-1)?.data).toMatchObject({ baseline: "medium", level: "medium", reason: "hold" });
+  expect(h.entries.at(-1)?.data).toMatchObject({ level: "medium", reason: "hold", ceiling: "xhigh" });
+  expect(h.entries.at(-1)?.data).not.toHaveProperty("e");
   // You pick high: it is the new ceiling and the policy's starting point.
   h.pi.setThinkingLevel("high");
   await h.emit("before_agent_start", { prompt: "routine" }, ctx);
-  expect(h.entries.at(-1)?.data).toMatchObject({ from: "high", ceiling: "high", reason: "down", baseline: "medium" });
+  expect(h.entries.at(-1)?.data).toMatchObject({ from: "high", ceiling: "high", reason: "down", level: "medium" });
 });
 
 test("a /tree move rebuilds the state from the new branch", async () => {
   const h = harness();
   autoEffort(h.pi);
-  const jev = fakeJev(() => answers(1.4));
-  let branch: unknown[] = [{ type: "custom", customType: "auto-effort:state", data: { e: 2.5, dwell: 5, ceiling: "xhigh", baseline: "xhigh", level: "xhigh" } }];
+  const jev = fakeJev(() => answers(2));
+  let branch: unknown[] = [{ type: "custom", customType: "auto-effort:state", data: { ceiling: "xhigh", level: "xhigh" } }];
   const ctx = h.ctx({ modelRegistry: jev.registry, sessionManager: { getBranch: () => branch } });
   h.pi.setThinkingLevel("xhigh");
   await h.emit("session_start", { type: "session_start" }, ctx);
   expect(ctx.ui.status.get("auto-effort")).toMatch(/^effort: xhigh/u);
   // The user moves to a branch whose last state was low effort with a medium ceiling.
-  branch = [{ type: "custom", customType: "auto-effort:state", data: { e: 0.3, dwell: 5, ceiling: "medium", baseline: "low", level: "low" } }];
+  branch = [{ type: "custom", customType: "auto-effort:state", data: { ceiling: "medium", level: "low" } }];
   h.pi.setThinkingLevel("low");
   await h.emit("session_tree", { type: "session_tree", newLeafId: "x", oldLeafId: "y" }, ctx);
-  await h.emit("before_agent_start", { prompt: "routine" }, ctx);
-  // Judged from the restored average and ceiling, not the abandoned branch's.
-  expect(h.entries.at(-1)?.data).toMatchObject({ ceiling: "medium", from: "low" });
-  expect((h.entries.at(-1)?.data as { e: number }).e).toBeLessThan(1);
+  await h.emit("before_agent_start", { prompt: "multi-step" }, ctx);
+  // Capped at the restored ceiling, not the abandoned branch's.
+  expect(h.entries.at(-1)?.data).toMatchObject({ ceiling: "medium", from: "low", level: "medium" });
 });
 
 test("branch reconstruction restores the last reason and clears abandoned state on an empty branch", async () => {
@@ -133,8 +145,12 @@ test("branch reconstruction restores the last reason and clears abandoned state 
   await h.emit("session_start", { type: "session_start" }, ctx);
   await h.emit("before_agent_start", { prompt: "trivial" }, ctx);
   branch = [
-    { type: "custom", customType: "auto-effort:state", data: { e: 0, dwell: 0, ceiling: "high", reason: "down" } },
-    { type: "custom", customType: "auto-effort:state", data: { e: 2, dwell: 4, ceiling: "xhigh", baseline: "high", level: "low", reason: "hold" } },
+    { type: "custom", customType: "auto-effort:state", data: { ceiling: "high", reason: "down" } },
+    {
+      type: "custom",
+      customType: "auto-effort:state",
+      data: { ceiling: "xhigh", level: "low", reason: "hold", theta: 0.6, need: { low: 1, medium: 0.9, high: 0.55, xhigh: 0.1 } },
+    },
   ];
   const status = async () => {
     await h.commands.get("auto-effort").handler("status", ctx);
@@ -142,17 +158,18 @@ test("branch reconstruction restores the last reason and clears abandoned state 
   };
   const entries = h.entries.length;
   await h.emit("session_tree", { type: "session_tree", newLeafId: "b", oldLeafId: "a" }, ctx);
-  expect(await status()).toContain("Running average 2.00, 4 assessments at this level, last decision: hold.");
-  expect(await status()).toContain("Without the limit: high.");
-  expect(ctx.ui.status.get("auto-effort")).toBe("effort: low (auto →)");
+  expect(await status()).toContain("Bounds ceiling (settings): low to xhigh, your last manual level.");
+  expect(await status()).toContain("Jev: need(medium)=0.90 need(high)=0.55 need(xhigh)=0.10, θ=0.60 → low, last decision: hold.");
+  // need(medium) 0.9 clears theta 0.6: heading up.
+  expect(ctx.ui.status.get("auto-effort")).toBe("effort: low (auto ↑ ≤xhigh)");
 
   branch = [];
   await h.emit("session_tree", { type: "session_tree", newLeafId: null, oldLeafId: "b" }, ctx);
   const empty = await status();
-  expect(empty).toContain("ceiling low");
-  expect(empty).toContain("Running average -, 2 assessments at this level.");
+  expect(empty).toContain("low to low, your last manual level");
+  expect(empty).toContain("Jev: no assessment yet, θ=0.35.");
   expect(empty).not.toContain("last decision:");
-  expect(empty).not.toContain("Without the limit:");
+  expect(empty).toContain("Models: off (settings).");
   expect(h.entries).toHaveLength(entries);
 });
 
@@ -161,12 +178,12 @@ test.each(["session_start", "session_tree"])("%s restores a manual level chosen 
   ctx.sessionManager.getBranch = () => [
     // Our own change is before the assessment that records the original manual ceiling.
     { type: "thinking_level_change", thinkingLevel: "low" },
-    { type: "custom", customType: "auto-effort:state", data: { e: 1, dwell: 5, ceiling: "xhigh", baseline: "low", level: "low", reason: "down" } },
+    { type: "custom", customType: "auto-effort:state", data: { ceiling: "xhigh", level: "low", reason: "down" } },
     { type: "thinking_level_change", thinkingLevel: "medium" },
   ];
   await h.emit(event, { type: event }, ctx);
   await h.commands.get("auto-effort").handler("status", ctx);
-  expect(ctx.ui.notes.at(-1)!.message).toContain("ceiling medium");
+  expect(ctx.ui.notes.at(-1)!.message).toContain("low to medium, your last manual level");
   await h.emit("before_agent_start", { prompt: "hard" }, ctx);
   expect(h.thinking).toBe("medium");
   expect(h.entries.at(-1)?.data).toMatchObject({ ceiling: "medium" });
@@ -295,4 +312,240 @@ test("effortState describes the request and the previous run", () => {
 test("thinkingPinned", () => {
   expect(thinkingPinned(["node", "pi", "--thinking", "high"])).toBe(true);
   expect(thinkingPinned(["node", "pi", "--model", "x"])).toBe(false);
+});
+
+test("the command completes and lists bounds and models", () => {
+  const { h } = setup([]);
+  const complete = (prefix: string) => h.commands.get("auto-effort").getArgumentCompletions(prefix).map((o: { value: string }) => o.value);
+  expect(complete("")).toEqual(["status", "limits", "on", "off", "bounds ceiling", "bounds free", "models off", "models suggest", "models auto"]);
+  expect(complete("b")).toEqual(["bounds ceiling", "bounds free"]);
+  expect(complete("models ")).toEqual(["models off", "models suggest", "models auto"]);
+  expect(complete("direct")).toEqual([]);
+});
+
+test("/auto-effort bounds free: any level from the floor to xhigh; a manual change sets the level but is no cap", async () => {
+  const { h, ctx } = setup([3, 0, 3]);
+  await h.emit("session_start", { type: "session_start" }, ctx);
+  await h.commands.get("auto-effort").handler("bounds free", ctx);
+  expect(ctx.ui.notes.at(-1)!.message).toBe("auto-effort bounds free for this session: low to xhigh; your last manual level, high, is not a cap");
+  expect(ctx.ui.status.get("auto-effort")).toBe("effort: high (auto → free)");
+  await h.emit("before_agent_start", { prompt: "hard" }, ctx);
+  expect(h.thinking).toBe("xhigh");
+  expect(h.entries.at(-1)?.data).toMatchObject({ bounds: "free", ceiling: "high", level: "xhigh" });
+  // You pick medium: the level is medium now, and the next message moves from there either way.
+  h.pi.setThinkingLevel("medium");
+  expect(ctx.ui.status.get("auto-effort")).toBe("effort: medium (auto ↑ free)");
+  await h.emit("before_agent_start", { prompt: "trivial" }, ctx);
+  expect(h.thinking).toBe("low");
+  await h.emit("before_agent_start", { prompt: "hard again" }, ctx);
+  expect(h.thinking).toBe("xhigh");
+  await h.commands.get("auto-effort").handler("status", ctx);
+  expect(ctx.ui.notes.at(-1)!.message).toContain("Bounds free (this session): low to xhigh; your last manual level, medium, is not a cap.");
+  // Back to the ceiling: capped at your last manual level.
+  await h.commands.get("auto-effort").handler("bounds ceiling", ctx);
+  expect(ctx.ui.status.get("auto-effort")).toBe("effort: xhigh (auto → ≤medium)");
+  await h.commands.get("auto-effort").handler("bounds", ctx);
+  expect(ctx.ui.notes.at(-1)!.message).toBe("auto-effort bounds: ceiling. Use /auto-effort bounds ceiling or free.");
+});
+
+test("the footer detail never contains parentheses, so pi-status-footer can parse it", async () => {
+  const { h, ctx } = setup([2]);
+  await h.emit("session_start", { type: "session_start" }, ctx);
+  await h.emit("before_agent_start", { prompt: "x" }, ctx);
+  expect(ctx.ui.status.get("auto-effort")).toMatch(/^effort: \S+ \(auto(?: ([^()]+))?\)$/u);
+});
+
+describe("model choice", () => {
+  const HAIKU = { provider: "anthropic", id: "claude-haiku-4-5", name: "Haiku" };
+  const SONNET = { provider: "anthropic", id: "claude-sonnet-4-5", name: "Sonnet" };
+  const OPUS = { provider: "anthropic", id: "claude-opus-4-5", name: "Opus" };
+  const ALL = [HAIKU, SONNET, OPUS];
+  const EASY = { fast: 0.8, balanced: 0.15, strong: 0.05 };
+  const HARD = { fast: 0.02, balanced: 0.08, strong: 0.9 };
+
+  function project(models: Record<string, unknown>) {
+    const cwd = mkdtempSync(path.join(tmpdir(), "auto-effort-project-"));
+    mkdirSync(path.join(cwd, ".pi"));
+    writeFileSync(path.join(cwd, ".pi", "auto-effort.json"), JSON.stringify({ models }));
+    return cwd;
+  }
+
+  function setupModels(options: { mode?: string; model?: typeof OPUS; tiers?: Record<string, unknown>; tokens?: number; ack?: number } = {}) {
+    let clock = Date.UTC(2026, 0, 1);
+    const h = harness();
+    autoEffort(h.pi, { now: () => clock, env: {} });
+    const tier: Array<Record<string, number>> = [];
+    const jev = fakeJev((questions) => answers(1, options.ack ?? 0.05, questions.tier ? { tier: tierAnswer(tier.shift() ?? EASY) } : {}));
+    const registry = Object.assign(jev.registry as object, { find: (provider: string, id: string) => ALL.find((m) => m.provider === provider && m.id === id) });
+    const branch: unknown[] = [];
+    let tokens = options.tokens ?? 100_000;
+    const ctx = h.ctx({
+      cwd: project({
+        mode: options.mode ?? "auto",
+        tiers: options.tiers ?? { anthropic: { fast: "anthropic/claude-haiku-4-5", balanced: "anthropic/claude-sonnet-4-5", strong: "anthropic/claude-opus-4-5" } },
+      }),
+      model: options.model ?? OPUS,
+      modelRegistry: registry,
+      sessionManager: { getBranch: () => branch },
+      getContextUsage: () => ({ tokens, contextWindow: 200_000, percent: 0 }),
+    });
+    /** A finished exchange: the branch has an answer and the clock starts the cache TTL. */
+    const answered = async () => {
+      branch.push(userEntry("q"), assistantEntry("a"));
+      await h.emit("message_end", { type: "message_end", message: { role: "assistant" } }, ctx);
+    };
+    return {
+      h,
+      ctx,
+      jev,
+      tier,
+      answered,
+      advance: (ms: number) => (clock += ms),
+      setTokens: (n: number) => (tokens = n),
+      model: () => `${ctx.model.provider}/${ctx.model.id}`,
+      state: () => h.entries.filter((e) => e.customType === "auto-effort:state").at(-1)?.data as Record<string, any>,
+    };
+  }
+
+  test("auto picks a cheaper model on the first message, keeps it while the cache is warm, and returns to yours when it is cold", async () => {
+    const s = setupModels();
+    await s.h.emit("session_start", { type: "session_start" }, s.ctx);
+    s.tier.push(EASY);
+    await s.h.emit("before_agent_start", { prompt: "what does ls -a do?" }, s.ctx);
+    expect(Object.keys(s.jev.calls[0]!.questions.tier.criteria)).toEqual(["fast", "balanced", "strong"]);
+    expect(s.model()).toBe("anthropic/claude-haiku-4-5");
+    expect(s.ctx.ui.notes.at(-1)!.message).toBe("auto-effort: Haiku for this request; first message");
+    expect(s.ctx.ui.status.get("auto-effort")).toBe("effort: medium (auto → ≤high ≈haiku-4-5)");
+    expect(s.state()).toMatchObject({ manualModel: "anthropic/claude-opus-4-5", autoModel: "anthropic/claude-haiku-4-5", model: { tier: "fast", action: "switched", why: "first message" } });
+
+    // Warm cache and a large context: no tier question, no switch, even for hard work.
+    await s.answered();
+    s.advance(60_000);
+    await s.h.emit("before_agent_start", { prompt: "redesign the sync engine" }, s.ctx);
+    expect(s.jev.calls[1]!.questions).not.toHaveProperty("tier");
+    expect(s.model()).toBe("anthropic/claude-haiku-4-5");
+
+    // Past the 5-minute TTL the cache is cold: a hard request goes back to your model.
+    s.advance(301_000);
+    s.tier.push(HARD);
+    await s.h.emit("before_agent_start", { prompt: "now the hard part" }, s.ctx);
+    expect(s.jev.calls[2]!.questions).toHaveProperty("tier");
+    expect(s.model()).toBe("anthropic/claude-opus-4-5");
+    expect(s.ctx.ui.notes.at(-1)!.message).toBe("auto-effort: back to Opus; cache is cold");
+    expect(s.ctx.ui.status.get("auto-effort")).toBe("effort: medium (auto → ≤high)");
+    expect(s.state()).toMatchObject({ manualModel: "anthropic/claude-opus-4-5", model: { tier: "strong", action: "switched" } });
+    expect(s.state()).not.toHaveProperty("autoModel");
+    expect(s.h.modelChanges.map((m) => m.id)).toEqual(["claude-haiku-4-5", "claude-opus-4-5"]);
+  });
+
+  test("a small context counts as cheap to switch; pi-cache-guard's cache:state overrides the time estimate", async () => {
+    const s = setupModels({ tokens: 10_000 });
+    await s.h.emit("session_start", { type: "session_start" }, s.ctx);
+    await s.answered();
+    await s.h.emit("before_agent_start", { prompt: "rename tmp to buffer" }, s.ctx);
+    expect(s.state()).toMatchObject({ model: { why: "small context", action: "switched" } });
+    expect(s.model()).toBe("anthropic/claude-haiku-4-5");
+
+    s.setTokens(100_000);
+    // Warm by the clock, but pi-cache-guard says the cache is cold.
+    await s.answered();
+    s.h.pi.events.emit("cache:state", { cold: true, tokens: 100_000 });
+    s.tier.push(HARD);
+    await s.h.emit("before_agent_start", { prompt: "hard" }, s.ctx);
+    expect(s.state()).toMatchObject({ model: { why: "cache is cold", tier: "strong" } });
+    expect(s.model()).toBe("anthropic/claude-opus-4-5");
+
+    // Cold by the clock, but pi-cache-guard says it is warm (it kept the cache alive).
+    await s.answered();
+    s.h.pi.events.emit("cache:state", { cold: false, tokens: 100_000 });
+    s.advance(3_600_000);
+    const calls = s.jev.calls.length;
+    await s.h.emit("before_agent_start", { prompt: "trivial" }, s.ctx);
+    expect(s.jev.calls[calls]!.questions).not.toHaveProperty("tier");
+    expect(s.model()).toBe("anthropic/claude-opus-4-5");
+
+    // A warm cache of another model is no use to this one.
+    s.h.pi.events.emit("cache:state", { cold: false, tokens: 100_000, model: "anthropic/claude-haiku-4-5" });
+    await s.h.emit("before_agent_start", { prompt: "trivial" }, s.ctx);
+    expect(s.jev.calls.at(-1)!.questions).toHaveProperty("tier");
+    expect(s.state()).toMatchObject({ model: { why: "cache is cold" } });
+  });
+
+  test("with ceiling bounds no tier above your model is picked; free bounds allow it", async () => {
+    const s = setupModels({ model: SONNET });
+    await s.h.emit("session_start", { type: "session_start" }, s.ctx);
+    s.tier.push(HARD);
+    await s.h.emit("before_agent_start", { prompt: "hard" }, s.ctx);
+    expect(s.model()).toBe("anthropic/claude-sonnet-4-5");
+    expect(s.state()).toMatchObject({ model: { tier: "balanced", action: "keep" } });
+    expect(s.h.modelChanges).toEqual([]);
+
+    const f = setupModels({ model: SONNET });
+    await f.h.emit("session_start", { type: "session_start" }, f.ctx);
+    await f.h.commands.get("auto-effort").handler("bounds free", f.ctx);
+    f.tier.push(HARD);
+    await f.h.emit("before_agent_start", { prompt: "hard" }, f.ctx);
+    expect(f.model()).toBe("anthropic/claude-opus-4-5");
+  });
+
+  test("an unmapped manual model stands in for strong, and the provider is kept", async () => {
+    const mine = { provider: "anthropic", id: "claude-custom", name: "Custom" };
+    ALL.push(mine);
+    try {
+      const s = setupModels({
+        model: mine,
+        tiers: { anthropic: { fast: "anthropic/claude-haiku-4-5", balanced: "openai/gpt-5" }, openai: { fast: "openai/gpt-mini" } },
+      });
+      await s.h.emit("session_start", { type: "session_start" }, s.ctx);
+      await s.h.emit("before_agent_start", { prompt: "trivial" }, s.ctx);
+      // balanced names another provider: skipped. Your model is the strong tier.
+      expect(Object.keys(s.jev.calls[0]!.questions.tier.criteria)).toEqual(["fast", "strong"]);
+      expect(s.model()).toBe("anthropic/claude-haiku-4-5");
+      await s.answered();
+      s.advance(400_000);
+      s.tier.push({ fast: 0.1, strong: 0.9 });
+      await s.h.emit("before_agent_start", { prompt: "hard" }, s.ctx);
+      expect(s.model()).toBe("anthropic/claude-custom");
+    } finally {
+      ALL.pop();
+    }
+  });
+
+  test("suggest notifies with the /model command and does not switch; a manual pick becomes your model", async () => {
+    const s = setupModels({ mode: "off" });
+    await s.h.emit("session_start", { type: "session_start" }, s.ctx);
+    await s.h.emit("before_agent_start", { prompt: "trivial" }, s.ctx);
+    expect(s.jev.calls[0]!.questions).not.toHaveProperty("tier");
+    await s.h.commands.get("auto-effort").handler("models suggest", s.ctx);
+    expect(s.ctx.ui.notes.at(-1)!.message).toBe("auto-effort models suggest for this session");
+    await s.h.emit("before_agent_start", { prompt: "trivial" }, s.ctx);
+    expect(s.ctx.ui.notes.at(-1)!.message).toBe("auto-effort: Haiku would do; first message: /model anthropic/claude-haiku-4-5");
+    expect(s.h.modelChanges).toEqual([]);
+    expect(s.state()).toMatchObject({ model: { action: "suggest" } });
+
+    // You switch to Sonnet yourself: it is your model now, and the ceiling for tiers.
+    s.ctx.model = SONNET;
+    await s.h.emit("model_select", { type: "model_select", model: SONNET, previousModel: OPUS, source: "set" }, s.ctx);
+    await s.h.commands.get("auto-effort").handler("models auto", s.ctx);
+    s.tier.push(HARD);
+    await s.h.emit("before_agent_start", { prompt: "hard" }, s.ctx);
+    expect(s.state()).toMatchObject({ manualModel: "anthropic/claude-sonnet-4-5", model: { tier: "balanced", action: "keep" } });
+    await s.h.commands.get("auto-effort").handler("status", s.ctx);
+    expect(s.ctx.ui.notes.at(-1)!.message).toContain("Models: auto (this session), your model anthropic/claude-sonnet-4-5.");
+  });
+
+  test("a go-ahead keeps the model; /auto-effort off goes back to yours", async () => {
+    const s = setupModels();
+    await s.h.emit("session_start", { type: "session_start" }, s.ctx);
+    await s.h.emit("before_agent_start", { prompt: "trivial" }, s.ctx);
+    expect(s.model()).toBe("anthropic/claude-haiku-4-5");
+    await s.h.commands.get("auto-effort").handler("off", s.ctx);
+    expect(s.model()).toBe("anthropic/claude-opus-4-5");
+    expect(s.ctx.ui.status.get("auto-effort")).toBeUndefined();
+
+    const a = setupModels({ ack: 0.95 });
+    await a.h.emit("session_start", { type: "session_start" }, a.ctx);
+    await a.h.emit("before_agent_start", { prompt: "yes" }, a.ctx);
+    expect(a.model()).toBe("anthropic/claude-opus-4-5");
+  });
 });

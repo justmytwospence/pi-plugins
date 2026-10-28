@@ -1,10 +1,9 @@
 // Same fixtures in every port (only the imports differ): readings, the forecast, the tiers and
-// their confirmation, the parsers, and applyLimit.
+// their confirmation, and the parsers.
 import { expect, test } from "vitest";
 import {
   DEFAULT_LIMITS as P,
   Tracker,
-  applyLimit,
   limitsPolicy,
   readAnthropicHeaders,
   readClaudeCodeLimits,
@@ -37,9 +36,9 @@ const steady: [number, number][] = [[-120, 0.02], [-90, 0.14], [-60, 0.26], [-30
 test("absolute use enters a tier at once", () => {
   const t = new Tracker();
   t.record({ window: "5h", used: 0.76, resetsAt: at(120), at: t0 });
-  expect(t.assess(t0, P)).toMatchObject({ tier: "caution", steps: 1, window: "5h", reason: "used" });
+  expect(t.assess(t0, P)).toMatchObject({ tier: "caution", window: "5h", reason: "used" });
   t.record({ window: "5h", used: 0.91, resetsAt: at(120), at: at(1) });
-  expect(t.assess(at(1), P)).toMatchObject({ tier: "critical", steps: 2 });
+  expect(t.assess(at(1), P)).toMatchObject({ tier: "critical" });
 
   const r = new Tracker();
   for (const reading of readAnthropicHeaders({ "anthropic-ratelimit-unified-7d-utilization": "0.4", "anthropic-ratelimit-unified-7d-reset": String(at(600) / 1000), "anthropic-ratelimit-unified-7d-status": "rejected" }, t0)) r.record(reading);
@@ -59,7 +58,7 @@ test("a burst near the 5h reset goes critical at once: it runs out within 30 min
   const t = new Tracker();
   feed(t, "5h", at(60), burst);
   const p = t.assess(t0, P);
-  expect(p).toMatchObject({ tier: "critical", steps: 2, reason: "runs out soon", warming: false });
+  expect(p).toMatchObject({ tier: "critical", reason: "runs out soon", warming: false });
   expect(p.exhaustsAt! - t0).toBeLessThan(30 * M);
 });
 
@@ -144,7 +143,7 @@ test("old readings count as a minimum, but not for the weighted forecast", () =>
   abs.record({ window: "5h", used: 0.8, resetsAt: at(120), at: t0 });
   expect(abs.assess(at(20), P).tier).toBe("caution");
   // Past the reset the reading means nothing.
-  expect(abs.assess(at(121), P)).toMatchObject({ tier: "none", steps: 0 });
+  expect(abs.assess(at(121), P)).toMatchObject({ tier: "none" });
 });
 
 test("out-of-order readings are dropped; long gaps give no recent rate", () => {
@@ -161,13 +160,12 @@ test("out-of-order readings are dropped; long gaps give no recent rate", () => {
   expect(Math.abs(p.projected! - (0.4 + (0.1 / 60) * 100))).toBeLessThan(0.01);
 });
 
-test("the worst window wins, and the cut is applied once", () => {
+test("the worst window wins", () => {
   const t = new Tracker();
   t.record({ window: "5h", used: 0.8, resetsAt: at(120), at: t0 });
   t.record({ window: "7d", used: 0.95, resetsAt: at(3000), at: t0 });
   const p = t.assess(t0, P);
-  expect(p).toMatchObject({ tier: "critical", steps: 2, window: "7d" });
-  expect(applyLimit("xhigh", p, "low", ["low", "medium", "high", "xhigh", "max"]).level).toBe("medium");
+  expect(p).toMatchObject({ tier: "critical", window: "7d" });
 });
 
 test("spend windows never project", () => {
@@ -181,14 +179,15 @@ test("spend windows never project", () => {
 test("disabled: no pressure", () => {
   const t = new Tracker();
   t.record({ window: "5h", used: 0.99, resetsAt: at(60), at: t0 });
-  expect(t.assess(t0, { ...P, enabled: false })).toEqual({ tier: "none", steps: 0 });
+  expect(t.assess(t0, { ...P, enabled: false })).toEqual({ tier: "none" });
 });
 
 test("settings: invalid values fall back to the defaults", () => {
-  const p = limitsPolicy({ enabled: false, caution: { used: "high", projected: 1.2 }, steps: { critical: -1 }, extra: 1 });
+  const p = limitsPolicy({ enabled: false, caution: { used: "high", projected: 1.2 }, critical: { exhaustMinutes: -1 }, steps: { critical: 1 }, extra: 1 });
   expect(p.enabled).toBe(false);
   expect(p.caution).toEqual({ used: 0.75, projected: 1.2 });
-  expect(p.steps).toEqual({ caution: 1, critical: 2 });
+  expect(p.critical.exhaustMinutes).toBe(30);
+  expect(p).not.toHaveProperty("steps");
   expect(limitsPolicy(undefined)).toEqual(P);
 });
 
@@ -254,14 +253,4 @@ test("Claude Code rateLimits: percent, ISO reset, spend limit", () => {
     { window: "spend_limit", used: 1.015, at: t0, spend: true },
   ]);
   expect(readClaudeCodeLimits(undefined, t0)).toEqual([]);
-});
-
-test("applyLimit steps down the ladder, never below the floor, and leaves unmanaged levels alone", () => {
-  const L = ["low", "medium", "high", "xhigh", "max"];
-  expect(applyLimit("high", { steps: 1 }, "low", L)).toEqual({ level: "medium", limited: true });
-  expect(applyLimit("high", { steps: 2 }, "low", L)).toEqual({ level: "low", limited: true });
-  expect(applyLimit("medium", { steps: 2 }, "medium", L)).toEqual({ level: "medium", limited: false });
-  expect(applyLimit("low", { steps: 2 }, "medium", L)).toEqual({ level: "low", limited: false });
-  expect(applyLimit("off", { steps: 2 }, "low", L)).toEqual({ level: "off", limited: false });
-  expect(applyLimit("max", { steps: 0 }, "low", L)).toEqual({ level: "max", limited: false });
 });

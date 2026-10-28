@@ -1,6 +1,6 @@
 // Mid-run re-assessment: between tool turns of one run, Jev rates the work the agent is doing now
 // (not the request that started the run), so a long run can move up for a hard stretch and back
-// down for mechanical work. Only on models that take an effort change mid-conversation without
+// down for mechanical work, by the same threshold rule as a message (policy.ts). Only on models that take an effort change mid-conversation without
 // losing the prompt cache.
 import type { ClassifierQuestion } from "./jev.ts";
 import { clip, messageText } from "./transcript.ts";
@@ -24,15 +24,15 @@ export const DEFAULT_MID_RUN: MidRunConfig = { enabled: true, everyTurns: 3, err
 
 export const MID_RUN_QUESTIONS: Record<string, ClassifierQuestion> = {
   depth: {
-    type: "score",
+    type: "choice",
     instructions:
       "A coding agent is part-way through `request`. Given its `recent_steps` (oldest first) and `signals`, how much careful reasoning does its next step need?",
-    criteria: [
-      "Mechanical: reading files, running commands, applying a known fix, or reporting back",
-      "Routine: a clear single-file change or a straightforward check",
-      "Multi-step work, debugging with clear symptoms, or design inside a known pattern",
-      "Subtle design, a cross-cutting change, hard debugging (repeated failures, unclear cause), or correctness-critical work",
-    ],
+    criteria: {
+      low: "Mechanical: reading files, running commands, applying a known fix, or reporting back",
+      medium: "Routine: a clear single-file change or a straightforward check",
+      high: "Multi-step work, debugging with clear symptoms, or design inside a known pattern",
+      xhigh: "Subtle design, a cross-cutting change, hard debugging (repeated failures, unclear cause), or correctness-critical work",
+    },
   },
 };
 

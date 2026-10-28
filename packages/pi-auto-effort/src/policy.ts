@@ -1,146 +1,162 @@
-/** Thinking levels auto-effort moves between, lowest first; the index is the effort score. */
+// The threshold rule. Jev answers a choice over the four judged levels; need(L) is the probability
+// the work needs at least L (the sum of the probabilities for L and every level above it). The level
+// is the highest one within the bounds whose need clears a threshold theta, which rises with
+// subscription pressure: relaxed when there is none, tight when a window is critical. A level only
+// goes down once the current level's need is clearly below theta (hysteresis), so a borderline
+// answer does not flip-flop.
+
+/** Thinking levels auto-effort moves between, lowest first. */
 export const LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 export type Level = (typeof LEVELS)[number];
 
+/** The levels Jev chooses between, lowest first. The policy never picks `max`. */
+export const JUDGED_LEVELS = ["low", "medium", "high", "xhigh"] as const;
+const TOP = JUDGED_LEVELS.length - 1;
+
 /**
- * `smoothed`: a running average with a margin, a jump rule and a dwell before going down.
- * `direct`: each assessment's score sets the level (on models where a change keeps the cache).
+ * `ceiling`: your latest manual level is the highest auto-effort sets.
+ * `free`: any level from `floor` to `max`; a manual change sets the level now but is not a cap.
  */
-export type Mode = "smoothed" | "direct";
+export type Bounds = "ceiling" | "free";
 
 export interface Policy {
-  mode: Mode;
   /** Lowest level auto-effort sets. */
   floor: Level;
-  /** Weight of the newest score in the running average (1 = no smoothing). */
-  alpha: number;
-  /** The average must differ from the current level by this much to move. */
-  margin: number;
-  /** A single score this far above the current level jumps straight to it... */
-  jump: number;
-  /** ...when Jev is at least this confident. */
-  jumpConfidence: number;
-  /** Assessments (messages, and mid-run checks) a level must hold before it can go down. */
-  minDwell: number;
+  bounds: Bounds;
+  /** Highest level in `free` bounds (never above xhigh). */
+  max: Level;
+  /** theta with no subscription pressure (relaxed) and at critical pressure (tight). */
+  threshold: { relaxed: number; tight: number };
+  /** The level goes down only when the current level's need is below theta minus this. */
+  hysteresis: number;
   /** A go-ahead message ("yes", "continue") above this probability keeps the level. */
   ackThreshold: number;
-  /** Direct mode: a score Jev is less confident about than this keeps the level. */
-  minConfidence: number;
 }
 
 export const DEFAULT_POLICY: Policy = {
-  mode: "smoothed",
   floor: "low",
-  alpha: 0.5,
-  margin: 0.6,
-  jump: 1.5,
-  jumpConfidence: 0.6,
-  minDwell: 2,
+  bounds: "ceiling",
+  max: "xhigh",
+  threshold: { relaxed: 0.35, tight: 0.85 },
+  hysteresis: 0.1,
   ackThreshold: 0.7,
-  minConfidence: 0.45,
 };
 
-/** The configured mode; anything but `direct` is `smoothed`. */
-export function policyMode(policy: Pick<Policy, "mode">): Mode {
-  return policy.mode === "direct" ? "direct" : "smoothed";
-}
-
-export interface EffortState {
-  /** Running average of depth scores; undefined before the first judgment. */
-  e?: number;
-  /** Assessments since the level last changed. */
-  dwell: number;
-  /** The highest level auto-effort may set: your latest manual choice. */
-  ceiling: string;
-}
-
-export interface Judgment {
-  /** Depth score 0-3. */
-  score: number;
-  confidence: number;
-  /** Probability the message is a go-ahead relying on the earlier plan. */
-  ack: number;
+/** `raw` checked against the defaults; anything invalid keeps the default. Old keys are ignored. */
+export function policyConfig(raw: unknown): Policy {
+  const v = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const unit = (x: unknown, d: number) => (typeof x === "number" && Number.isFinite(x) && x >= 0 && x <= 1 ? x : d);
+  const level = (x: unknown, d: Level) => (typeof x === "string" && levelIndex(x) >= 0 && levelIndex(x) <= TOP ? (x as Level) : d);
+  const t = (v.threshold && typeof v.threshold === "object" ? v.threshold : {}) as Record<string, unknown>;
+  return {
+    floor: level(v.floor, DEFAULT_POLICY.floor),
+    bounds: v.bounds === "free" ? "free" : v.bounds === "ceiling" ? "ceiling" : DEFAULT_POLICY.bounds,
+    max: level(v.max, DEFAULT_POLICY.max),
+    threshold: { relaxed: unit(t.relaxed, DEFAULT_POLICY.threshold.relaxed), tight: unit(t.tight, DEFAULT_POLICY.threshold.tight) },
+    hysteresis: unit(v.hysteresis, DEFAULT_POLICY.hysteresis),
+    ackThreshold: unit(v.ackThreshold, DEFAULT_POLICY.ackThreshold),
+  };
 }
 
 export function levelIndex(level: string): number {
   return LEVELS.indexOf(level as Level);
 }
 
+export interface Judgment {
+  /** need(L) for each judged level: the probability the work needs at least L. */
+  need: Record<string, number>;
+  /** Probability the message is a go-ahead relying on the earlier plan. */
+  ack: number;
+}
+
+/**
+ * need(K) for each key of `order` (lowest first): the sum of the probabilities of K and every key
+ * after it. Probabilities are normalized over `order`; missing or invalid ones count as zero.
+ */
+export function cumulative(probabilities: Record<string, number>, order: readonly string[]): Record<string, number> {
+  const p = order.map((k) => {
+    const x = probabilities[k];
+    return typeof x === "number" && Number.isFinite(x) && x > 0 ? x : 0;
+  });
+  const total = p.reduce((a, b) => a + b, 0);
+  const out: Record<string, number> = {};
+  let sum = 0;
+  for (let i = order.length - 1; i >= 0; i--) {
+    sum += p[i]!;
+    out[order[i]!] = total > 0 ? Math.min(1, sum / total) : 0;
+  }
+  return out;
+}
+
+/** Subscription pressure 0-1 by tier: none 0, caution 0.5, critical 1. */
+export function pressureValue(tier: string | undefined): number {
+  return tier === "critical" ? 1 : tier === "caution" ? 0.5 : 0;
+}
+
+/** theta = relaxed + (tight - relaxed) * p. */
+export function threshold(policy: Pick<Policy, "threshold">, p: number): number {
+  const q = Math.min(1, Math.max(0, Number.isFinite(p) ? p : 0));
+  return policy.threshold.relaxed + (policy.threshold.tight - policy.threshold.relaxed) * q;
+}
+
+const EPS = 1e-9;
+
+/** The highest index in [lo, hi] whose key's need is at least theta, else lo. */
+export function pickIndex(need: Record<string, number>, order: readonly string[], lo: number, hi: number, theta: number): number {
+  for (let i = hi; i > lo; i--) if ((need[order[i]!] ?? 0) >= theta - EPS) return i;
+  return lo;
+}
+
+/**
+ * The managed range as level indexes, or undefined when the levels are left alone (a ceiling of
+ * off or minimal, or one below the floor). `ceiling` is your latest manual level.
+ */
+export function range(ceiling: string, policy: Pick<Policy, "floor" | "max">, bounds: Bounds): { floor: number; upper: number } | undefined {
+  const floor = Math.min(Math.max(0, levelIndex(policy.floor)), TOP);
+  if (bounds === "free") return { floor, upper: Math.min(Math.max(levelIndex(policy.max), floor), TOP) };
+  const c = levelIndex(ceiling);
+  if (c < 0 || c < floor) return undefined;
+  return { floor, upper: Math.min(c, TOP) };
+}
+
 export interface Decision {
   level: string;
-  state: EffortState;
-  reason: "ack" | "jump" | "up" | "down" | "hold" | "unavailable" | "direct" | "unsure";
+  reason: "ack" | "up" | "down" | "hold" | "unavailable";
+  theta: number;
 }
 
 /**
- * The next level for a message or mid-run check. `current` is the session's level now. Levels
- * outside the managed range (off, minimal), or a ceiling below the floor, are left alone. `mode`
- * overrides the policy's (a caller falls back to smoothed where a change would cost the cache).
+ * The next level for a message or mid-run check. `current` is the session's level now, `ceiling`
+ * your latest manual level, `p` the subscription pressure (0-1). Levels outside the managed range
+ * (off, minimal) are left alone.
  */
-export function decide(current: string, state: EffortState, judgment: Judgment | undefined, policy: Policy, mode: Mode = policyMode(policy)): Decision {
-  return mode === "direct" ? decideDirect(current, state, judgment, policy) : decideSmoothed(current, state, judgment, policy);
-}
-
-/**
- * Direct mode: the score, rounded and kept within the floor and ceiling, is the level. A go-ahead
- * or a score Jev is unsure of keeps it. The average tracks the latest score, so switching back to
- * smoothed starts from it.
- */
-export function decideDirect(current: string, state: EffortState, judgment: Judgment | undefined, policy: Policy): Decision {
-  const floor = levelIndex(policy.floor);
-  const ceiling = levelIndex(state.ceiling);
+export function decide(current: string, ceiling: string, judgment: Judgment | undefined, policy: Policy, p: number, bounds: Bounds = policy.bounds): Decision {
+  const theta = threshold(policy, p);
+  const r = range(ceiling, policy, bounds);
   const c = levelIndex(current);
-  if (c < 0 || ceiling < 0 || ceiling < floor) return { level: current, state: { ...state, dwell: state.dwell + 1 }, reason: "hold" };
-  if (!judgment) return { level: current, state: { ...state, dwell: state.dwell + 1 }, reason: "unavailable" };
-  if (judgment.ack > policy.ackThreshold) return { level: current, state: { ...state, dwell: state.dwell + 1 }, reason: "ack" };
-  if (judgment.confidence < policy.minConfidence) return { level: current, state: { ...state, dwell: state.dwell + 1 }, reason: "unsure" };
-  const e = judgment.score;
-  const target = Math.min(Math.max(Math.round(e), floor), ceiling);
-  if (target === c) return { level: current, state: { ...state, e, dwell: state.dwell + 1 }, reason: "hold" };
-  return { level: LEVELS[target] as string, state: { ...state, e, dwell: 0 }, reason: "direct" };
-}
-
-function decideSmoothed(current: string, state: EffortState, judgment: Judgment | undefined, policy: Policy): Decision {
-  const floor = levelIndex(policy.floor);
-  const ceiling = levelIndex(state.ceiling);
-  const c = levelIndex(current);
-  if (c < 0 || ceiling < 0 || ceiling < floor) return { level: current, state: { ...state, dwell: state.dwell + 1 }, reason: "hold" };
-  if (!judgment) return { level: current, state: { ...state, dwell: state.dwell + 1 }, reason: "unavailable" };
-  const s = judgment.score;
-  // A go-ahead's own score says nothing about the work it approves, so it leaves the average alone.
-  if (judgment.ack > policy.ackThreshold) return { level: current, state: { ...state, dwell: state.dwell + 1 }, reason: "ack" };
-  let e = state.e === undefined ? s : policy.alpha * s + (1 - policy.alpha) * state.e;
-  let target = c;
-  let reason: Decision["reason"] = "hold";
-  if (s - c >= policy.jump && judgment.confidence >= policy.jumpConfidence) {
-    target = Math.round(s);
-    reason = "jump";
-    // Lift the average with the jump so it does not pull the level straight back down.
-    e = Math.max(e, s);
-  } else if (e - c >= policy.margin) {
-    target = Math.round(e);
-    reason = "up";
-  } else if (c - e >= policy.margin && state.dwell >= policy.minDwell) {
-    target = Math.round(e);
-    reason = "down";
+  if (!r || c < 0) return { level: current, reason: "hold", theta };
+  if (!judgment) return { level: current, reason: "unavailable", theta };
+  // A go-ahead's own rating says nothing about the work it approves.
+  if (judgment.ack > policy.ackThreshold) return { level: current, reason: "ack", theta };
+  const target = pickIndex(judgment.need, JUDGED_LEVELS, r.floor, r.upper, theta);
+  if (target === c) return { level: current, reason: "hold", theta };
+  // Going down from a level inside the bounds needs a clear case.
+  if (target < c && c <= r.upper && c >= r.floor && (judgment.need[current] ?? 0) >= theta - policy.hysteresis - EPS) {
+    return { level: current, reason: "hold", theta };
   }
-  target = Math.min(Math.max(target, floor), ceiling);
-  const level = LEVELS[target] as string;
-  if (target === c) return { level: current, state: { ...state, e, dwell: state.dwell + 1 }, reason: "hold" };
-  return { level, state: { ...state, e, dwell: 0 }, reason };
+  return { level: LEVELS[target] as string, reason: target > c ? "up" : "down", theta };
 }
 
 /**
- * Where the level is heading: "up" or "down" when the running average sits at least half the
- * margin away from `level` and the bounds leave room to move that way, else undefined.
+ * Where the level is heading after the last judgment: "up" when the next level's need is within
+ * the hysteresis of theta and the bounds leave room, "down" when the current level holds only
+ * through the hysteresis, else undefined.
  */
-export function trend(level: string, state: EffortState, policy: Policy): "up" | "down" | undefined {
+export function trend(level: string, ceiling: string, need: Record<string, number> | undefined, theta: number | undefined, policy: Policy, bounds: Bounds = policy.bounds): "up" | "down" | undefined {
+  const r = range(ceiling, policy, bounds);
   const c = levelIndex(level);
-  const ceiling = levelIndex(state.ceiling);
-  const floor = levelIndex(policy.floor);
-  if (state.e === undefined || c < 0 || ceiling < 0) return undefined;
-  const threshold = policy.margin / 2;
-  if (state.e - c >= threshold && c < ceiling) return "up";
-  if (c - state.e >= threshold && c > floor) return "down";
+  if (!r || !need || theta === undefined || c < 0) return undefined;
+  if (c > r.floor && c <= TOP && (need[level] ?? 0) < theta - EPS) return "down";
+  if (c < r.upper && (need[JUDGED_LEVELS[c + 1]!] ?? 0) >= theta - policy.hysteresis - EPS) return "up";
   return undefined;
 }

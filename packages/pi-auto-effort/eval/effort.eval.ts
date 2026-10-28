@@ -1,10 +1,12 @@
 // Requests rated by live Jev through Pi's model registry: `npm run eval`.
 import { beforeAll, describe, expect, test } from "vitest";
 import { DEFAULT_CONFIG, QUESTIONS, effortState } from "../src/index.ts";
-import { askJev, bool, score } from "../src/jev.ts";
+import { askJev, bool, choice } from "../src/jev.ts";
+import { JUDGED_LEVELS } from "../src/policy.ts";
 import { hasCredentials, installedRegistry } from "./registry.ts";
 
-// depth: 0 trivial, 1 routine, 2 multi-step, 3 hard. Within 0.9 of the label passes.
+// depth: 0 trivial (low), 1 routine (medium), 2 multi-step (high), 3 hard (xhigh). The expected
+// level index under Jev's choice probabilities within 0.9 of the label passes.
 const CASES: Array<{ request: string; depth: number; ack?: boolean; previous?: string }> = [
   { request: "what does `git stash pop` do?", depth: 0 },
   { request: "rename the variable `tmp` to `buffer` in src/io.ts", depth: 0 },
@@ -41,10 +43,23 @@ describe.skipIf(!hasCredentials)("auto-effort live eval", () => {
     const outcome = await askJev(registry, { ...DEFAULT_CONFIG.jev, timeoutMs: 15_000 }, effortState(c.request, entries), QUESTIONS);
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) return;
-    const depth = score(outcome.answers, "depth");
+    const depth = choice(outcome.answers, "depth");
+    const expected = depth ? expectedIndex(depth.probabilities) : undefined;
     const ack = bool(outcome.answers, "ack") ?? 0;
-    console.log(`${c.depth}  got ${depth?.score.toFixed(2)} (conf ${depth?.confidence.toFixed(2)}) ack ${ack.toFixed(2)}  ${c.request.slice(0, 70)}  ${outcome.latencyMs} ms`);
+    console.log(`${c.depth}  got ${depth?.choice} (expected index ${expected?.toFixed(2)}) ack ${ack.toFixed(2)}  ${c.request.slice(0, 70)}  ${outcome.latencyMs} ms`);
     if (c.ack !== undefined) expect(ack > 0.7).toBe(c.ack);
-    if (!c.ack) expect(Math.abs((depth?.score ?? -9) - c.depth)).toBeLessThanOrEqual(0.9);
+    if (!c.ack) expect(Math.abs((expected ?? -9) - c.depth)).toBeLessThanOrEqual(0.9);
   });
 });
+
+/** The probability-weighted level index (0 low to 3 xhigh). */
+function expectedIndex(probabilities: Record<string, number>): number {
+  let sum = 0;
+  let total = 0;
+  JUDGED_LEVELS.forEach((level, i) => {
+    const p = probabilities[level] ?? 0;
+    sum += i * p;
+    total += p;
+  });
+  return total > 0 ? sum / total : -9;
+}

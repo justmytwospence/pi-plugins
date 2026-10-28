@@ -1,7 +1,7 @@
 {
   "name": "@justmytwospence/pi-auto-effort",
   "version": "0.1.2",
-  "description": "Sets Pi's thinking level per message you send: Jev rates how demanding it is, smoothed so effort does not flip-flop, capped at the level you chose.",
+  "description": "Sets Pi's thinking level per message you send: Jev rates how demanding it is, a threshold that tightens under quota pressure picks the level, capped at the level you chose.",
   "type": "module",
   "license": "MIT",
   "private": true,

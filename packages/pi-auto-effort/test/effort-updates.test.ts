@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
 import autoEffort, { effortUpdatesConfig } from "../src/index.ts";
 import { DEFAULT_EFFORT_UPDATES, emptyState, plan, restoreState, rewritePayload } from "../src/effort-updates.ts";
-import { fakeJev, harness, userEntry } from "./harness.ts";
+import { answers, fakeJev, harness, userEntry } from "./harness.ts";
 
 const user = (text: string) => ({ role: "user", content: [{ type: "input_text", text }] });
 const asst = (text: string, id?: string) => ({ type: "message", role: "assistant", ...(id ? { id, status: "completed" } : {}), content: [{ type: "output_text", text }] });
@@ -89,7 +89,7 @@ const astra = { provider: "openai-codex", id: "gpt-6-astra", compat: {} };
 function setup(model: unknown, branch: unknown[] = [userEntry("x")]) {
   const h = harness();
   autoEffort(h.pi);
-  const jev = fakeJev(() => ({ depth: { type: "score", score: 3, confidence: 0.9 }, ack: { type: "bool", probability: 0 } }));
+  const jev = fakeJev(() => answers(3, 0));
   const ctx = h.ctx({ modelRegistry: jev.registry, model, sessionManager: { getBranch: () => branch } });
   return { h, jev, ctx };
 }

@@ -1,9 +1,8 @@
 import { expect, test } from "vitest";
 import autoEffort, { midRunConfig } from "../src/index.ts";
 import { DEFAULT_MID_RUN, globMatch, midRunSupported, runState, shouldAssess } from "../src/midrun.ts";
-import { fakeJev, harness, userEntry } from "./harness.ts";
+import { answers, fakeJev, harness, userEntry } from "./harness.ts";
 
-const answers = (depth: number, ack = 0.05) => ({ depth: { type: "score", score: depth, confidence: 0.9 }, ack: { type: "bool", probability: ack } });
 const managed = { provider: "anthropic", id: "claude-opus-5", compat: { supportsMidConvoEffort: true } };
 const older = { provider: "anthropic", id: "claude-opus-4-7", compat: {} };
 
@@ -41,13 +40,11 @@ test("re-assesses every few tool turns on a managed-effort model, capped at the 
   expect(jev.calls).toHaveLength(1);
   await h.emit("turn_end", turn(), ctx);
   expect(jev.calls).toHaveLength(2);
-  expect(jev.calls[1]?.questions).toHaveProperty("depth");
+  expect(jev.calls[1]?.questions.depth).toMatchObject({ type: "choice", criteria: { low: expect.any(String), xhigh: expect.any(String) } });
   expect(jev.calls[1]?.questions).not.toHaveProperty("ack");
   expect(h.thinking).toBe("xhigh");
-  expect(h.entries.at(-1)?.data).toMatchObject({ phase: "run", reason: "jump", level: "xhigh" });
-  // Going down waits for the dwell: the level holds for two assessments first.
-  for (let i = 0; i < 6; i++) await h.emit("turn_end", turn(), ctx);
-  expect(h.thinking).toBe("xhigh");
+  expect(h.entries.at(-1)?.data).toMatchObject({ phase: "run", reason: "up", level: "xhigh" });
+  // Mechanical work: need(xhigh) is far below theta, so it goes down at the next check.
   for (let i = 0; i < 3; i++) await h.emit("turn_end", turn(), ctx);
   expect(h.thinking).toBe("low");
   expect(h.entries.at(-1)?.data).toMatchObject({ phase: "run", reason: "down" });
@@ -82,40 +79,6 @@ test("no mid-run change on other models, on the final turn, or when off", async 
   await u.h.commands.get("auto-effort").handler("off", u.ctx);
   await u.h.emit("turn_end", turn(1), u.ctx);
   expect(u.jev.calls).toHaveLength(0);
-});
-
-test("direct mode re-rates after every tool turn and follows each score", async () => {
-  const { h, jev, ctx } = setup([1, 3, 0, 2]);
-  h.pi.setThinkingLevel("xhigh");
-  await h.emit("session_start", { type: "session_start" }, ctx);
-  await h.commands.get("auto-effort").handler("direct", ctx);
-  expect(ctx.ui.notes.at(-1)!.message).toBe("auto-effort direct for this session");
-  await h.emit("before_agent_start", { prompt: "refactor the sync engine" }, ctx);
-  expect(h.thinking).toBe("medium");
-  await h.emit("turn_end", turn(), ctx);
-  expect(h.thinking).toBe("xhigh");
-  await h.emit("turn_end", turn(), ctx);
-  expect(h.thinking).toBe("low");
-  await h.emit("turn_end", turn(), ctx);
-  expect(h.thinking).toBe("high");
-  expect(jev.calls).toHaveLength(4);
-  expect(h.entries.at(-1)?.data).toMatchObject({ phase: "run", mode: "direct", reason: "direct", level: "high" });
-  await h.commands.get("auto-effort").handler("status", ctx);
-  expect(ctx.ui.notes.at(-1)!.message).toContain("Mode: direct (this session)");
-});
-
-test("direct mode stays smoothed on a model that loses its cache on an effort change", async () => {
-  const { h, jev, ctx } = setup([0, 0], older);
-  h.pi.setThinkingLevel("xhigh");
-  await h.emit("session_start", { type: "session_start" }, ctx);
-  await h.commands.get("auto-effort").handler("direct", ctx);
-  expect(ctx.ui.notes.at(-1)!.message).toContain("stays smoothed");
-  await h.emit("before_agent_start", { prompt: "trivial" }, ctx);
-  expect(h.entries.at(-1)?.data).toMatchObject({ mode: "smoothed" });
-  for (let i = 0; i < 3; i++) await h.emit("turn_end", turn(), ctx);
-  expect(jev.calls).toHaveLength(1);
-  await h.commands.get("auto-effort").handler("status", ctx);
-  expect(ctx.ui.notes.at(-1)!.message).toContain("smoothed on this model");
 });
 
 test("a new prompt resets the turn count", async () => {

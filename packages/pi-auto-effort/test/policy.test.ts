@@ -1,125 +1,129 @@
 import { describe, expect, test } from "vitest";
-import { applyLimit } from "../src/limits.ts";
-import { DEFAULT_POLICY, type EffortState, LEVELS, type Policy, decide, policyMode, trend } from "../src/policy.ts";
+import {
+  DEFAULT_POLICY,
+  JUDGED_LEVELS,
+  type Policy,
+  cumulative,
+  decide,
+  pickIndex,
+  policyConfig,
+  pressureValue,
+  range,
+  threshold,
+  trend,
+} from "../src/policy.ts";
 
-const fresh = (ceiling = "xhigh"): EffortState => ({ dwell: DEFAULT_POLICY.minDwell, ceiling });
-const j = (score: number, confidence = 0.9, ack = 0) => ({ score, confidence, ack });
+/** A judgment from [low, medium, high, xhigh] probabilities. */
+const j = (p: number[], ack = 0) => ({ need: cumulative({ low: p[0]!, medium: p[1]!, high: p[2]!, xhigh: p[3]! }, JUDGED_LEVELS), ack });
+const trivial = j([0.85, 0.1, 0.04, 0.01]);
+const routine = j([0.15, 0.7, 0.1, 0.05]);
+const multi = j([0.05, 0.2, 0.6, 0.15]);
+const hard = j([0.02, 0.03, 0.25, 0.7]);
+
+describe("need", () => {
+  test("need(L) is the probability of L or above, normalized", () => {
+    const need = cumulative({ low: 0.1, medium: 0.2, high: 0.3, xhigh: 0.4 }, JUDGED_LEVELS);
+    expect(need.low).toBeCloseTo(1);
+    expect(need.medium).toBeCloseTo(0.9);
+    expect(need.high).toBeCloseTo(0.7);
+    expect(need.xhigh).toBeCloseTo(0.4);
+    const unnormalized = cumulative({ low: 2, high: 2, bogus: 9, xhigh: Number.NaN }, JUDGED_LEVELS);
+    expect(unnormalized).toEqual({ low: 1, medium: 0.5, high: 0.5, xhigh: 0 });
+    expect(cumulative({}, JUDGED_LEVELS)).toEqual({ low: 0, medium: 0, high: 0, xhigh: 0 });
+  });
+
+  test("theta moves from relaxed to tight with pressure", () => {
+    expect(pressureValue("none")).toBe(0);
+    expect(pressureValue("caution")).toBe(0.5);
+    expect(pressureValue("critical")).toBe(1);
+    expect(threshold(DEFAULT_POLICY, 0)).toBeCloseTo(0.35);
+    expect(threshold(DEFAULT_POLICY, 0.5)).toBeCloseTo(0.6);
+    expect(threshold(DEFAULT_POLICY, 1)).toBeCloseTo(0.85);
+    expect(threshold(DEFAULT_POLICY, 7)).toBeCloseTo(0.85);
+  });
+
+  test("pickIndex takes the highest key clearing theta within the range, else the lowest", () => {
+    expect(pickIndex(multi.need, JUDGED_LEVELS, 0, 3, 0.35)).toBe(2);
+    expect(pickIndex(multi.need, JUDGED_LEVELS, 0, 1, 0.35)).toBe(1);
+    expect(pickIndex(multi.need, JUDGED_LEVELS, 1, 3, 0.99)).toBe(1);
+  });
+});
 
 describe("decide", () => {
-  test("a trivial first message steps down from the manual level", () => {
-    const d = decide("xhigh", fresh(), j(0), DEFAULT_POLICY);
-    expect(d).toMatchObject({ level: "low", reason: "down", state: { e: 0, dwell: 0 } });
+  test("the highest level whose need clears theta", () => {
+    expect(decide("high", "xhigh", trivial, DEFAULT_POLICY, 0)).toMatchObject({ level: "low", reason: "down" });
+    expect(decide("low", "xhigh", routine, DEFAULT_POLICY, 0)).toMatchObject({ level: "medium", reason: "up" });
+    expect(decide("low", "xhigh", multi, DEFAULT_POLICY, 0)).toMatchObject({ level: "high", reason: "up" });
+    expect(decide("low", "xhigh", hard, DEFAULT_POLICY, 0)).toMatchObject({ level: "xhigh", reason: "up", theta: 0.35 });
   });
 
-  test("going down waits for the dwell", () => {
-    const d = decide("high", { e: 2, dwell: 0, ceiling: "xhigh" }, j(0), DEFAULT_POLICY);
-    expect(d.level).toBe("high");
-    expect(d.state).toMatchObject({ e: 1, dwell: 1 });
-    const later = decide("high", { ...d.state, dwell: 2 }, j(0), DEFAULT_POLICY);
-    expect(later).toMatchObject({ level: "medium", reason: "down", state: { e: 0.5 } });
+  test("pressure raises theta: only clear needs keep a high level", () => {
+    // need(xhigh) 0.7: enough at caution (0.6), not at critical (0.85), where need(high) 0.95 is.
+    expect(decide("low", "xhigh", hard, DEFAULT_POLICY, 0.5).level).toBe("xhigh");
+    expect(decide("low", "xhigh", hard, DEFAULT_POLICY, 1).level).toBe("high");
+    // need(high) 0.75 is not enough at critical; need(medium) 0.95 is.
+    expect(decide("low", "xhigh", multi, DEFAULT_POLICY, 1).level).toBe("medium");
   });
 
-  test("a confident hard message jumps straight up", () => {
-    const d = decide("low", { e: 0, dwell: 0, ceiling: "xhigh" }, j(3, 0.8), DEFAULT_POLICY);
-    expect(d).toMatchObject({ level: "xhigh", reason: "jump", state: { e: 3 } });
-  });
-
-  test("a jump is not undone by the stale average", () => {
-    const jumped = decide("low", { e: 0, dwell: 5, ceiling: "xhigh" }, j(3, 0.8), DEFAULT_POLICY);
-    const d = decide(jumped.level, { ...jumped.state, dwell: 5 }, j(2.5), DEFAULT_POLICY);
-    expect(d).toMatchObject({ level: "xhigh", reason: "hold" });
-    expect(d.state.e).toBeCloseTo(2.75);
-  });
-
-  test("an unsure hard message moves up through the average", () => {
-    const d = decide("low", { e: 0.5, dwell: 0, ceiling: "xhigh" }, j(2.6, 0.3), DEFAULT_POLICY);
-    expect(d).toMatchObject({ level: "high", reason: "up" });
-    expect(d.state.e).toBeCloseTo(1.55);
-  });
-
-  test("small changes hold the level", () => {
-    const d = decide("medium", { e: 1, dwell: 5, ceiling: "xhigh" }, j(1.4), DEFAULT_POLICY);
-    expect(d).toMatchObject({ level: "medium", reason: "hold" });
+  test("hysteresis: going down needs the current level's need below theta minus the margin", () => {
+    // need(high) 0.3: under theta 0.35 but within 0.1 of it, so high holds.
+    const borderline = j([0.2, 0.5, 0.25, 0.05]);
+    expect(decide("high", "xhigh", borderline, DEFAULT_POLICY, 0)).toMatchObject({ level: "high", reason: "hold" });
+    // The same answer from below does not go up: raising uses theta directly.
+    expect(decide("medium", "xhigh", borderline, DEFAULT_POLICY, 0)).toMatchObject({ level: "medium", reason: "hold" });
+    // need(high) 0.2: clearly below, so it goes down.
+    expect(decide("high", "xhigh", j([0.3, 0.5, 0.15, 0.05]), DEFAULT_POLICY, 0)).toMatchObject({ level: "medium", reason: "down" });
+    expect(decide("high", "xhigh", borderline, { ...DEFAULT_POLICY, hysteresis: 0 }, 0)).toMatchObject({ level: "medium", reason: "down" });
   });
 
   test("a go-ahead keeps the level", () => {
-    const d = decide("high", { e: 2, dwell: 5, ceiling: "xhigh" }, j(0, 0.9, 0.95), DEFAULT_POLICY);
-    expect(d).toMatchObject({ level: "high", reason: "ack", state: { e: 2, dwell: 6 } });
+    expect(decide("high", "xhigh", j([0.9, 0.05, 0.03, 0.02], 0.95), DEFAULT_POLICY, 0)).toMatchObject({ level: "high", reason: "ack" });
   });
 
-  test("a go-ahead does not drag the average down for the next message", () => {
-    const ack = decide("high", { e: 2, dwell: 5, ceiling: "xhigh" }, j(0, 0.9, 0.95), DEFAULT_POLICY);
-    const next = decide("high", ack.state, j(1.5), DEFAULT_POLICY);
-    expect(next).toMatchObject({ level: "high", reason: "hold" });
-    expect(next.state.e).toBeCloseTo(1.75);
+  test("ceiling bounds: the manual level caps it, the floor holds it up", () => {
+    expect(decide("medium", "medium", hard, DEFAULT_POLICY, 0).level).toBe("medium");
+    expect(decide("high", "high", trivial, { ...DEFAULT_POLICY, floor: "medium" }, 0).level).toBe("medium");
+    // A max ceiling only caps: the policy never picks max.
+    expect(decide("max", "max", hard, DEFAULT_POLICY, 0)).toMatchObject({ level: "xhigh", reason: "down" });
   });
 
-  test("the manual level is the ceiling and low the floor", () => {
-    expect(decide("medium", { e: 1, dwell: 0, ceiling: "medium" }, j(3, 0.9), DEFAULT_POLICY).level).toBe("medium");
-    expect(decide("medium", { e: 0, dwell: 9, ceiling: "high" }, j(0), DEFAULT_POLICY).level).toBe("low");
-  });
-
-  test("levels outside the managed range and missing judgments are left alone", () => {
-    expect(decide("off", fresh("off"), j(3), DEFAULT_POLICY).level).toBe("off");
-    expect(decide("minimal", fresh("minimal"), j(3), DEFAULT_POLICY).level).toBe("minimal");
-    expect(decide("high", fresh(), undefined, DEFAULT_POLICY)).toMatchObject({ level: "high", reason: "unavailable" });
-  });
-
-  test("a limit on top never ratchets the policy's own level down, and lifting it restores that level", () => {
-    let baseline = "high";
-    let state: EffortState = { e: 2, dwell: 5, ceiling: "xhigh" };
-    for (let i = 0; i < 5; i++) {
-      const d = decide(baseline, state, j(2), DEFAULT_POLICY);
-      state = d.state;
-      baseline = d.level;
-      expect(applyLimit(baseline, { steps: 2 }, DEFAULT_POLICY.floor, LEVELS).level).toBe("low");
-    }
-    expect(baseline).toBe("high");
-    expect(state.e).toBeCloseTo(2);
-    expect(state.dwell).toBe(10);
-    expect(applyLimit(baseline, { steps: 0 }, DEFAULT_POLICY.floor, LEVELS).level).toBe("high");
-  });
-});
-
-describe("direct mode", () => {
-  const direct: Policy = { ...DEFAULT_POLICY, mode: "direct" };
-
-  test("the score sets the level both ways, with no dwell or margin", () => {
-    expect(decide("high", { e: 2, dwell: 0, ceiling: "xhigh" }, j(0.4), direct)).toMatchObject({ level: "low", reason: "direct", state: { e: 0.4, dwell: 0 } });
-    expect(decide("low", { e: 0, dwell: 0, ceiling: "xhigh" }, j(1.6, 0.5), direct)).toMatchObject({ level: "high", reason: "direct" });
-    expect(decide("medium", { e: 1, dwell: 0, ceiling: "xhigh" }, j(1.4), direct)).toMatchObject({ level: "medium", reason: "hold", state: { e: 1.4, dwell: 1 } });
-  });
-
-  test("the ceiling and floor bound it", () => {
-    expect(decide("medium", fresh("high"), j(3), direct).level).toBe("high");
-    expect(decide("high", fresh(), j(0), { ...direct, floor: "medium" }).level).toBe("medium");
-  });
-
-  test("a go-ahead or an unsure score keeps the level and the average", () => {
-    expect(decide("high", { e: 2, dwell: 0, ceiling: "xhigh" }, j(0, 0.9, 0.9), direct)).toMatchObject({ level: "high", reason: "ack", state: { e: 2 } });
-    expect(decide("high", { e: 2, dwell: 0, ceiling: "xhigh" }, j(0, 0.3), direct)).toMatchObject({ level: "high", reason: "unsure", state: { e: 2, dwell: 1 } });
+  test("free bounds: anything from the floor to policy.max, whatever the manual level", () => {
+    expect(decide("low", "low", hard, DEFAULT_POLICY, 0, "free").level).toBe("xhigh");
+    expect(decide("low", "low", hard, { ...DEFAULT_POLICY, max: "high" }, 0, "free").level).toBe("high");
+    // max is never above xhigh.
+    expect(range("low", { ...DEFAULT_POLICY, max: "max" }, "free")).toEqual({ floor: 0, upper: 3 });
+    expect(decide("low", "high", hard, { ...DEFAULT_POLICY, bounds: "free" }, 0).level).toBe("xhigh");
   });
 
   test("levels outside the managed range and missing judgments are left alone", () => {
-    expect(decide("minimal", fresh(), j(3), direct)).toMatchObject({ level: "minimal", reason: "hold" });
-    expect(decide("high", fresh(), undefined, direct)).toMatchObject({ level: "high", reason: "unavailable" });
-  });
-
-  test("an explicit mode overrides the policy's, and anything but direct is smoothed", () => {
-    expect(decide("high", { e: 2, dwell: 0, ceiling: "xhigh" }, j(0), direct, "smoothed").level).toBe("high");
-    expect(decide("high", { e: 2, dwell: 0, ceiling: "xhigh" }, j(0), DEFAULT_POLICY, "direct").level).toBe("low");
-    expect(policyMode({ mode: "direct" })).toBe("direct");
-    expect(policyMode({ mode: "per-step" as never })).toBe("smoothed");
+    expect(decide("off", "off", hard, DEFAULT_POLICY, 0)).toMatchObject({ level: "off", reason: "hold" });
+    expect(decide("minimal", "minimal", hard, DEFAULT_POLICY, 0).level).toBe("minimal");
+    expect(decide("minimal", "minimal", hard, DEFAULT_POLICY, 0, "free").level).toBe("minimal");
+    expect(decide("high", "xhigh", undefined, DEFAULT_POLICY, 0)).toMatchObject({ level: "high", reason: "unavailable" });
   });
 });
 
-test("trend points where the average is pulling, within the bounds", () => {
-  const s = (e: number | undefined, ceiling = "xhigh") => ({ e, dwell: 0, ceiling });
-  expect(trend("medium", s(1.5), DEFAULT_POLICY)).toBe("up");
-  expect(trend("medium", s(1.2), DEFAULT_POLICY)).toBeUndefined();
-  expect(trend("high", s(1.6), DEFAULT_POLICY)).toBe("down");
-  expect(trend("high", s(2.9, "high"), DEFAULT_POLICY)).toBeUndefined();
-  expect(trend("low", s(0, "high"), DEFAULT_POLICY)).toBeUndefined();
-  expect(trend("medium", s(undefined), DEFAULT_POLICY)).toBeUndefined();
-  expect(trend("minimal", s(3), DEFAULT_POLICY)).toBeUndefined();
+test("trend: up when the next level is close to theta, down when the level holds only through hysteresis", () => {
+  const borderline = j([0.2, 0.5, 0.25, 0.05]);
+  expect(trend("high", "xhigh", borderline.need, 0.35, DEFAULT_POLICY)).toBe("down");
+  expect(trend("medium", "xhigh", borderline.need, 0.35, DEFAULT_POLICY)).toBe("up");
+  // No room above the ceiling.
+  expect(trend("medium", "medium", borderline.need, 0.35, DEFAULT_POLICY)).toBeUndefined();
+  expect(trend("medium", "medium", borderline.need, 0.35, DEFAULT_POLICY, "free")).toBe("up");
+  expect(trend("high", "xhigh", multi.need, 0.35, DEFAULT_POLICY)).toBeUndefined();
+  expect(trend("low", "high", trivial.need, 0.35, DEFAULT_POLICY)).toBeUndefined();
+  expect(trend("medium", "xhigh", undefined, 0.35, DEFAULT_POLICY)).toBeUndefined();
+  expect(trend("minimal", "xhigh", hard.need, 0.35, DEFAULT_POLICY)).toBeUndefined();
+});
+
+test("policyConfig keeps valid values and ignores old and invalid keys", () => {
+  expect(policyConfig(undefined)).toEqual(DEFAULT_POLICY);
+  const old = { mode: "direct", alpha: 0.3, margin: 1, jump: 2, minDwell: 5, floor: "medium", bounds: "free" };
+  const p: Policy = policyConfig(old);
+  expect(p).toEqual({ ...DEFAULT_POLICY, floor: "medium", bounds: "free" });
+  expect(p).not.toHaveProperty("alpha");
+  expect(policyConfig({ floor: "max", max: "max", bounds: "loose", threshold: { relaxed: 2, tight: 0.9 }, hysteresis: -1 })).toEqual({
+    ...DEFAULT_POLICY,
+    threshold: { relaxed: 0.35, tight: 0.9 },
+  });
 });

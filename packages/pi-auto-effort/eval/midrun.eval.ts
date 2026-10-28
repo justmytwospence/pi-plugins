@@ -1,7 +1,8 @@
 // Mid-run stretches rated by live Jev through Pi's model registry: `npm run eval`.
 import { beforeAll, describe, expect, test } from "vitest";
 import { DEFAULT_CONFIG } from "../src/index.ts";
-import { askJev, score } from "../src/jev.ts";
+import { askJev, choice } from "../src/jev.ts";
+import { JUDGED_LEVELS } from "../src/policy.ts";
 import { MID_RUN_QUESTIONS, runState } from "../src/midrun.ts";
 import { hasCredentials, installedRegistry } from "./registry.ts";
 
@@ -30,7 +31,7 @@ function entries(request: string, steps: Step[]) {
   ];
 }
 
-// Expected depth band [min, max] for the next step.
+// Expected depth band [min, max] for the next step, as level indexes (0 low to 3 xhigh).
 const CASES: Array<{ name: string; request: string; steps: Step[]; min: number; max: number }> = [
   {
     name: "mechanical edits after the plan is settled",
@@ -85,9 +86,12 @@ describe.skipIf(!hasCredentials)("auto-effort mid-run live eval", () => {
   test.each(CASES)("$name", async (c) => {
     const outcome = await askJev(registry, { ...DEFAULT_CONFIG.jev, timeoutMs: 10_000 }, runState(entries(c.request, c.steps), 6), MID_RUN_QUESTIONS);
     if (!outcome.ok) throw new Error(outcome.reason);
-    const depth = score(outcome.answers, "depth");
-    console.log(`${c.name}: ${depth?.score.toFixed(2)} (confidence ${depth?.confidence.toFixed(2)})`);
-    expect(depth?.score).toBeGreaterThanOrEqual(c.min - 0.5);
-    expect(depth?.score).toBeLessThanOrEqual(c.max + 0.5);
+    const depth = choice(outcome.answers, "depth");
+    const probabilities = depth?.probabilities ?? {};
+    const expected = JUDGED_LEVELS.reduce((sum, level, i) => sum + i * (probabilities[level] ?? 0), 0);
+    console.log(`${c.name}: ${depth?.choice} (expected index ${expected.toFixed(2)}, confidence ${depth?.confidence.toFixed(2)})`);
+    expect(depth).toBeDefined();
+    expect(expected).toBeGreaterThanOrEqual(c.min - 0.5);
+    expect(expected).toBeLessThanOrEqual(c.max + 0.5);
   });
 });

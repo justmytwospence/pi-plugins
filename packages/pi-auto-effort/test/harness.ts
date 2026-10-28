@@ -1,4 +1,13 @@
 // A minimal fake of Pi's extension API: records handlers, commands, entries and UI calls.
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+// Settings files of the machine running the tests must not leak in: point the user-level config
+// directories at an empty temp directory.
+const isolated = mkdtempSync(path.join(tmpdir(), "auto-effort-test-"));
+process.env.XDG_CONFIG_HOME = path.join(isolated, "xdg");
+process.env.PI_CODING_AGENT_DIR = path.join(isolated, "pi");
 type Handler = (event: any, ctx: any) => unknown;
 
 export interface FakeJev {
@@ -24,8 +33,40 @@ export function usage(input: number) {
   return { input, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: input, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 }
 
+/** Depth answers by preset (0 trivial, 1 routine, 2 multi-step, 3 hard) or explicit [low, medium, high, xhigh] probabilities. */
+export const DEPTH: Record<number, number[]> = {
+  // need(medium) 0.15
+  0: [0.85, 0.1, 0.04, 0.01],
+  // need(medium) 0.85, need(high) 0.15
+  1: [0.15, 0.7, 0.1, 0.05],
+  // need(high) 0.75, need(xhigh) 0.15
+  2: [0.05, 0.2, 0.6, 0.15],
+  // need(high) 0.95, need(xhigh) 0.7
+  3: [0.02, 0.03, 0.25, 0.7],
+};
+
+export function depthAnswer(depth: number | number[]) {
+  const p = Array.isArray(depth) ? depth : DEPTH[depth]!;
+  const levels = ["low", "medium", "high", "xhigh"];
+  const probabilities = Object.fromEntries(levels.map((l, i) => [l, p[i] ?? 0]));
+  const best = p.indexOf(Math.max(...p));
+  return { type: "choice", choice: levels[best], probabilities, confidence: p[best] };
+}
+
+export function answers(depth: number | number[], ack = 0.05, extra: Record<string, unknown> = {}) {
+  return { depth: depthAnswer(depth), ack: { type: "bool", probability: ack }, ...extra };
+}
+
+export function tierAnswer(probabilities: Record<string, number>) {
+  const [choice] = Object.entries(probabilities).sort((a, b) => b[1] - a[1])[0] ?? ["?"];
+  return { type: "choice", choice, probabilities, confidence: Math.max(...Object.values(probabilities)) };
+}
+
 export function harness(options: { tools?: any[]; exec?: (cmd: string, args: string[]) => any } = {}) {
   const handlers = new Map<string, Handler[]>();
+  const events: Array<{ channel: string; data: any }> = [];
+  const listeners = new Map<string, Array<(data: unknown) => void>>();
+  const modelChanges: any[] = [];
   const commands = new Map<string, any>();
   const shortcuts = new Map<string, any>();
   const entries: Array<{ customType: string; data: unknown }> = [];
@@ -54,7 +95,23 @@ export function harness(options: { tools?: any[]; exec?: (cmd: string, args: str
       thinkingChanges.push(level);
       void emit("thinking_level_select", { type: "thinking_level_select", level, previousLevel: "?" });
     },
-    events: { emit: () => undefined, on: () => () => undefined },
+    events: {
+      emit: (channel: string, data: unknown) => {
+        events.push({ channel, data });
+        for (const listener of listeners.get(channel) ?? []) listener(data);
+      },
+      on: (channel: string, listener: (data: unknown) => void) => {
+        listeners.set(channel, [...(listeners.get(channel) ?? []), listener]);
+        return () => undefined;
+      },
+    },
+    setModel: async (model: any) => {
+      const previousModel = lastCtx?.model;
+      if (lastCtx) lastCtx.model = model;
+      modelChanges.push(model);
+      await emit("model_select", { type: "model_select", model, previousModel, source: "set" });
+      return true;
+    },
   };
   async function emit(event: string, payload: any, ctx?: any) {
     let result: unknown;
@@ -91,7 +148,7 @@ export function harness(options: { tools?: any[]; exec?: (cmd: string, args: str
     };
     return lastCtx;
   }
-  return { pi: pi as any, handlers, commands, shortcuts, entries, messages, emit, ctx, thinkingChanges, get thinking() { return thinking; } };
+  return { pi: pi as any, handlers, commands, shortcuts, entries, messages, events, modelChanges, emit, ctx, thinkingChanges, get thinking() { return thinking; } };
 }
 
 export function userEntry(text: string) {
