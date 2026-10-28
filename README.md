@@ -113,9 +113,9 @@ for dir in packages/*/; do (cd "$dir" && npm ci); done
 npm run check
 ```
 
-The configured SDK test target is **Pi 1.2.0**. `npm test` checks real loader selection/registration, shortcut conflicts, shared contracts, question routing, local `AgentSession` lifecycle and in-memory TUI input. It makes no live model calls and is not live PTY proof; terminal rendering, focus and reload still need interactive checks. `npm run check` runs these root tests and every component's own `check`, using the root manifest as the inventory.
+The configured SDK test target is **Pi 1.2.0**. `npm test` checks real loader selection/registration, shortcut conflicts, shared contracts, question routing, local `AgentSession` lifecycle, in-memory TUI input and the unit tests of the shared eval helpers. It makes no live model calls and is not live PTY proof; terminal rendering, focus and reload still need interactive checks. `npm run check` runs these root tests and every component's own `check`, using the root manifest as the inventory.
 
-Never run `npm run eval` without explicit authorization: evaluations make live, paid classifier calls.
+Never run `npm run eval` without explicit authorization: evaluations make live, paid classifier calls. They are manual, run per package, and their shared helpers live in `evals/shared/`.
 
 The documentation site in `site/` is a separate static Astro project with its own lockfile:
 

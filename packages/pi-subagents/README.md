@@ -266,7 +266,7 @@ npm ci
 npm run check
 ```
 
-`npm run check` runs `tsc --noEmit` and then `vitest run` (unit tests use a fake RPC child in place of Pi). `npm run eval` routes 15 tasks across six agents through live Jev via the installed Pi (skipped without `TYPESAFE_API_KEY`); it makes live, paid classifier requests, so run it only with explicit authorization. For the full suite, the repository root's `npm run check` runs every component's check after the root loader test.
+`npm run check` runs `tsc --noEmit` and then `vitest run` (unit tests use a fake RPC child in place of Pi). `npm run eval` (helpers in the repository's `evals/shared/`) routes 15 tasks across six agents through live Jev via the installed Pi (skipped without `TYPESAFE_API_KEY`); it makes live, paid classifier requests, so run it only with explicit authorization. For the full suite, the repository root's `npm run check` runs every component's check after the root loader test.
 
 ## License
 

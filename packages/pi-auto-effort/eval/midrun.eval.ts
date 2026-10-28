@@ -4,7 +4,7 @@ import { DEFAULT_CONFIG } from "../src/index.ts";
 import { askJev, choice } from "../src/jev.ts";
 import { JUDGED_LEVELS } from "../src/policy.ts";
 import { MID_RUN_QUESTIONS, runState } from "../src/midrun.ts";
-import { hasCredentials, installedRegistry } from "./registry.ts";
+import { hasCredentials, installedRegistry } from "../../../evals/shared/registry.ts";
 
 type Step = { said?: string; calls: Array<[string, Record<string, unknown>]>; failed?: string[] };
 

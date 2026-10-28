@@ -22,8 +22,9 @@ import { type JevOutcome, askJev } from "../src/jev.ts";
 import { DEFAULT_POLICY, type Judgment, type Policy, decide } from "../src/policy.ts";
 import { isGoAhead } from "../src/prefilter.ts";
 import { messageText } from "../src/transcript.ts";
-import type { Session, SessionEntry } from "./sessions.ts";
-import { branchOf } from "./sessions.ts";
+import { pool } from "../../../evals/shared/pool.ts";
+import { branchOf, type Session, type SessionEntry } from "../../../evals/shared/sessions.ts";
+import { table } from "../../../evals/shared/table.ts";
 
 const STATE_ENTRY = "auto-effort:state";
 
@@ -160,16 +161,11 @@ export async function assess(registry: unknown, sessions: readonly ReplaySession
       });
     });
   });
-  let next = 0;
   let done = 0;
-  const worker = async () => {
-    while (next < jobs.length) {
-      const job = jobs[next++]!;
-      await job();
-      options.progress?.(++done, jobs.length);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.max(1, Math.min(options.concurrency ?? 8, jobs.length)) }, worker));
+  await pool(jobs, options.concurrency ?? 8, async (job) => {
+    await job();
+    options.progress?.(++done, jobs.length);
+  });
   return out;
 }
 
@@ -290,13 +286,6 @@ export async function runVariant(registry: unknown, sessions: readonly ReplaySes
   const assessed = await assess(registry, sessions, variant, options);
   const steps = sessions.map((s, i) => walk(s, assessed[i]!));
   return { variant, assessed, steps, summary: summarize(sessions, assessed, steps) };
-}
-
-/** Columns padded to their widest cell; the first column left-aligned, the rest right-aligned. */
-export function table(rows: readonly (readonly string[])[]): string {
-  const widths: number[] = [];
-  for (const row of rows) row.forEach((cell, i) => (widths[i] = Math.max(widths[i] ?? 0, cell.length)));
-  return rows.map((row) => row.map((cell, i) => (i === 0 ? cell.padEnd(widths[i]!) : cell.padStart(widths[i]!))).join("  ").trimEnd()).join("\n");
 }
 
 const pct = (n: number, of: number) => (of ? `${n} (${Math.round((100 * n) / of)}%)` : `${n}`);

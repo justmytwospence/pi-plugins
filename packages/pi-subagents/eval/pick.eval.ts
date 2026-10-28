@@ -4,7 +4,7 @@ import { GENERAL, parseAgent } from "../src/agents.ts";
 import { DEFAULT_CONFIG } from "../src/index.ts";
 import { askJev } from "../src/jev.ts";
 import { DEFAULT_TIER_DESCRIPTIONS, pickQuestions, readPicks } from "../src/pick.ts";
-import { hasCredentials, installedRegistry } from "./registry.ts";
+import { hasCredentials, installedRegistry } from "../../../evals/shared/registry.ts";
 
 const agent = (name: string, description: string) => parseAgent(`---\nname: ${name}\ndescription: ${JSON.stringify(description)}\n---\n`, "user")!;
 const AGENTS = [

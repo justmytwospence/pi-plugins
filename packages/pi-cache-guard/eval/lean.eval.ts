@@ -5,7 +5,7 @@ import { DEFAULT_SETTINGS } from "../src/core.ts";
 import { JEV_MODELS, askJev } from "../src/jev.ts";
 import { assemble, boolAnswer, choiceAnswer, keepQuestions, keepState, makeBlocks, prefilter, trimQuestions } from "../src/lean.ts";
 import { extractUnits } from "../src/units.ts";
-import { hasCredentials, installedRegistry } from "./registry.ts";
+import { hasCredentials, installedRegistry } from "../../../evals/shared/registry.ts";
 
 const JEV = JEV_MODELS[0]!;
 

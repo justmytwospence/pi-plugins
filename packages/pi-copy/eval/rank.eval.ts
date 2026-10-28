@@ -5,7 +5,7 @@ import { DEFAULT_CONFIG } from "../src/index.ts";
 import { askJev } from "../src/jev.ts";
 import { piecesToJudge, rankQuestions, rankState, readJudgments, suggested } from "../src/rank.ts";
 import { extractSegments } from "../src/segments.ts";
-import { hasCredentials, installedRegistry } from "./registry.ts";
+import { hasCredentials, installedRegistry } from "../../../evals/shared/registry.ts";
 
 const u = (text: string) => ({ type: "message", message: { role: "user", content: text } });
 const a = (text: string) => ({ type: "message", message: { role: "assistant", content: [{ type: "text", text }] } });

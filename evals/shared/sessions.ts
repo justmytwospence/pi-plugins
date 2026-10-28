@@ -1,5 +1,5 @@
-// A sampler of real Pi sessions for replay evals. Package-agnostic: node builtins only, no imports
-// from the package's src, so the file can be copied verbatim into another package's eval folder.
+// A sampler of real Pi sessions for replay evals, shared by the packages' evals. Node builtins only,
+// no imports from any package.
 //
 // Sessions are the JSONL files Pi writes under `$PI_CODING_AGENT_DIR/sessions` (default
 // `~/.pi/agent/sessions`), one directory per working directory. Anything under a directory named

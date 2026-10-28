@@ -13,10 +13,9 @@ import {
   sessionLabel,
   runVariant,
   summarize,
-  table,
   walk,
 } from "../eval/replay.ts";
-import type { SessionEntry } from "../eval/sessions.ts";
+import type { SessionEntry } from "../../../evals/shared/sessions.ts";
 import { DEFAULT_POLICY } from "../src/policy.ts";
 import { answers, fakeJev } from "./harness.ts";
 
@@ -226,11 +225,10 @@ describe("the report", () => {
     expect(sessionLabel({ file: "x.jsonl", cwd: "/a/very-long-project-name-that-goes-on" })).toBe("very-long-project-name-… x.jsonl");
   });
 
-  test("percentile and table", () => {
+  test("percentile", () => {
     expect(percentile([], 0.5)).toBeUndefined();
     expect(percentile([5, 1, 3, 2, 4], 0.5)).toBe(3);
     expect(percentile(Array.from({ length: 100 }, (_, i) => i + 1), 0.95)).toBe(95);
-    expect(table([["a", "1"], ["long", "100"]])).toBe("a       1\nlong  100");
   });
 
   test("runVariant and report: one row per session and the totals side by side", async () => {

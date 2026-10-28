@@ -5,7 +5,9 @@ This repository is the development source for the Pi extension suite. Add or cha
 ## Checks
 
 - Root: `npm ci`, then `npm test` for actual Pi loader selection/registration tests.
-- Components: install each component's lockfile dependencies (`npm ci` in its directory), then `npm run check` there or run root `npm run check` for the full set. Do not run `npm run eval` without explicit authorization: it uses live paid classifier calls.
+- Components: install each component's lockfile dependencies (`npm ci` in its directory), then `npm run check` there or run root `npm run check` for the full set.
+- Live evals are manual and paid: `npm run eval` in a package (pi-auto-effort, pi-cache-guard, pi-copy, pi-subagents, pi-tool-gate) runs its `eval/**/*.eval.ts` against Jev, skipped without `TYPESAFE_API_KEY`. Do not run it without explicit authorization; neither `check` nor CI does.
+- Eval helpers shared by those packages live in `evals/shared/` (registry, session sampler, `pool`, `table`, and the Vitest config every `eval` script points at). It is dev-only: not a package, never in the `pi` manifest, and `scripts/test-contracts.mjs` lets only `eval/` files import it and holds its files to Node built-ins. Each package's `tsc` includes it; its unit tests are `node:test` files that root `npm test` runs. Put a helper there once two evals need it, not a copy per package.
 - Docs: `cd site && npm ci && npm run check && npm run build`. Documentation is static, separately deployed, and must not affect runtime installation.
 
 All npm installations follow the machine's release-age policy. Never bypass it.

@@ -16,7 +16,7 @@ npm ci
 npm test
 ```
 
-The [root package scripts](https://github.com/justmytwospence/pi-plugins/blob/main/package.json) configure **Pi 1.2.0** as the SDK test target. They run loader, shortcut, contract, question-flow and lifecycle checks. [The loader test](https://github.com/justmytwospence/pi-plugins/blob/main/scripts/test-loader.mjs) uses Pi's actual `DefaultResourceLoader` with temporary, in-memory package settings rather than merely importing each factory through a stub.
+The [root package scripts](https://github.com/justmytwospence/pi-plugins/blob/main/package.json) configure **Pi 1.2.0** as the SDK test target. They run loader, shortcut, contract, question-flow and lifecycle checks, then the shared eval helpers' unit tests. [The loader test](https://github.com/justmytwospence/pi-plugins/blob/main/scripts/test-loader.mjs) uses Pi's actual `DefaultResourceLoader` with temporary, in-memory package settings rather than merely importing each factory through a stub.
 
 The loader checks:
 
@@ -51,13 +51,13 @@ Once dependencies are installed for all components, run this from the repository
 npm run check
 ```
 
-That first runs the root SDK tests, then [scripts/check-components.mjs](https://github.com/justmytwospence/pi-plugins/blob/main/scripts/check-components.mjs). The script reads the component list from the root `package.json`'s `pi.extensions`, runs `npm run check` in each package, continues through component failures and returns a failing exit status if any component fails. It does not install dependencies or check the site.
+That first runs the root SDK tests (and the unit tests of the shared eval helpers), then [scripts/check-components.mjs](https://github.com/justmytwospence/pi-plugins/blob/main/scripts/check-components.mjs). The script reads the component list from the root `package.json`'s `pi.extensions`, runs `npm run check` in each package, continues through component failures and returns a failing exit status if any component fails. It does not install dependencies or check the site.
 
 ### Keep paid evaluations separate
 
 **Never run `npm run eval` without explicit authorization.** Evaluation scripts use live paid classifier calls; they are not part of the ordinary validation workflow. Missing credentials or a possible skip is not authorization to invoke them.
 
-For example, pi-subagents separates [ordinary tests](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-subagents/vitest.config.ts) under `test/**/*.test.ts` from [live evaluations](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-subagents/vitest.eval.config.ts) under `eval/**/*.eval.ts`.
+For example, pi-subagents separates [ordinary tests](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-subagents/vitest.config.ts) under `test/**/*.test.ts` from live evaluations under `eval/**/*.eval.ts`, which its `eval` script runs with the [shared eval config](https://github.com/justmytwospence/pi-plugins/blob/main/evals/shared/vitest.config.ts). Evals are manual, run per package, and only pi-auto-effort, pi-cache-guard, pi-copy, pi-subagents and pi-tool-gate have them. Their common helpers (the Pi model registry, the session sampler, a concurrency pool and a table printer) live in [evals/shared](https://github.com/justmytwospence/pi-plugins/tree/main/evals/shared), which is development-only: it is not a component, not in the `pi` manifest and not importable from a component's `src`.
 
 ### Integration changes need more than loading
 

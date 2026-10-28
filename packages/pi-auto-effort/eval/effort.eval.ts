@@ -3,7 +3,7 @@ import { beforeAll, describe, expect, test } from "vitest";
 import { DEFAULT_CONFIG, QUESTIONS, effortState } from "../src/index.ts";
 import { askJev, bool, choice } from "../src/jev.ts";
 import { JUDGED_LEVELS } from "../src/policy.ts";
-import { hasCredentials, installedRegistry } from "./registry.ts";
+import { hasCredentials, installedRegistry } from "../../../evals/shared/registry.ts";
 
 // depth: 0 trivial (low), 1 routine (medium), 2 multi-step (high), 3 hard (xhigh). The expected
 // level index under Jev's choice probabilities within 0.9 of the label passes.

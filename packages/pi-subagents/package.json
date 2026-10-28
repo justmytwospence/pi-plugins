@@ -20,7 +20,7 @@
     "check": "npm run typecheck && npm test",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "eval": "vitest run --config vitest.eval.config.ts"
+    "eval": "vitest run --config ../../evals/shared/vitest.config.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

@@ -8,7 +8,8 @@ import { beforeAll, describe, expect, test } from "vitest";
 import { DEFAULT_CONFIG } from "../src/index.ts";
 import { askJev } from "../src/jev.ts";
 import { judgeQuestions, judgeState, verdict } from "../src/judge.ts";
-import { hasCredentials, installedRegistry } from "./registry.ts";
+import { pool } from "../../../evals/shared/pool.ts";
+import { hasCredentials, installedRegistry } from "../../../evals/shared/registry.ts";
 
 interface Recorded {
   users?: string[];
@@ -33,7 +34,6 @@ describe.skipIf(!hasCredentials || records.length === 0)("tool-gate replay", () 
   test("replay", async () => {
     const tally = { allow: 0, hold: 0, wrong: 0, failed: 0 };
     const lines: string[] = [];
-    let next = 0;
     const one = async (r: Recorded) => {
       const state = judgeState({
         userRequest: r.users ?? [r.user ?? ""],
@@ -59,11 +59,7 @@ describe.skipIf(!hasCredentials || records.length === 0)("tool-gate replay", () 
         lines.push(`${ok ? "ok  " : "MISS"} ${got.padEnd(5)} ${r.args.replace(/\s+/gu, " ").slice(0, 110)}\n       ${v?.failures.join("; ")}  ${JSON.stringify(v?.scores)}`);
       }
     };
-    await Promise.all(
-      Array.from({ length: CONCURRENCY }, async () => {
-        while (next < records.length) await one(records[next++]!);
-      }),
-    );
+    await pool(records, CONCURRENCY, one);
     console.log(lines.join("\n"));
     console.log(`replay: ${tally.allow} allowed, ${tally.hold} held, ${tally.wrong} wrong, ${tally.failed} failed of ${records.length}`);
     expect(tally.wrong).toBeLessThanOrEqual(Math.ceil(records.length * 0.05));

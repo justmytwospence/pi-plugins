@@ -3,7 +3,7 @@ import { beforeAll, describe, expect, test } from "vitest";
 import { DEFAULT_CONFIG } from "../src/index.ts";
 import { askJev } from "../src/jev.ts";
 import { judgeQuestions, judgeState, steerReason, suggestions, verdict, workaroundQuestion } from "../src/judge.ts";
-import { hasCredentials, installedRegistry } from "./registry.ts";
+import { hasCredentials, installedRegistry } from "../../../evals/shared/registry.ts";
 
 interface Case {
   /** The user's request, or their recent requests, newest last. */

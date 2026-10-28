@@ -1,6 +1,6 @@
 // Real Pi sessions replayed through the gate, with live Jev: `npm run eval -- eval/sessions.eval.ts`.
 // Paid: one Jev request per call the gate would judge (two for a call that runs a script, with
-// EVAL_COMPARE=1). Samples recent sessions with eval/sessions.ts (EVAL_RECENT, EVAL_SAMPLE, EVAL_SEED,
+// EVAL_COMPARE=1). Samples recent sessions with evals/shared/sessions.ts (EVAL_RECENT, EVAL_SAMPLE, EVAL_SEED,
 // EVAL_MIN_PROMPTS, EVAL_MIN_TOOLS; the seed is printed), walks each current branch's tool calls in
 // order, plans each one as the gate does in auto mode (`planCall`: clear allows, always-held calls,
 // the directory policy, the judge) with this machine's settings, rules and project grants, and asks
@@ -22,8 +22,10 @@ import { blockedBy, DEFAULT_CONFIG, type GateConfig, judgeStateOf, type Plan, pl
 import { askJev } from "../src/jev.ts";
 import { judgeQuestions, verdict } from "../src/judge.ts";
 import { loadRules } from "../src/rules.ts";
-import { hasCredentials, installedRegistry } from "./registry.ts";
-import { branchOf, type Session, sampleSessions } from "./sessions.ts";
+import { pool } from "../../../evals/shared/pool.ts";
+import { hasCredentials, installedRegistry } from "../../../evals/shared/registry.ts";
+import { branchOf, type Session, sampleSessions } from "../../../evals/shared/sessions.ts";
+import { table } from "../../../evals/shared/table.ts";
 
 const CONCURRENCY = 8;
 const TIMEOUT_MS = 20_000;
@@ -195,7 +197,6 @@ describe.skipIf(!hasCredentials)("tool-gate on real sessions", () => {
       }
       return { hold, v };
     };
-    let next = 0;
     const one = async (j: Judged) => {
       const hasScript = j.state.script !== undefined;
       const got = await judge(j, j.state, hasScript, hasScript ? [all, withScript] : [all]);
@@ -206,38 +207,25 @@ describe.skipIf(!hasCredentials)("tool-gate on real sessions", () => {
         lines.push(`${kind} ${hasScript ? "[script] " : ""}${shown}\n       ${got.v?.failures.join("; ") ?? ""}`);
       }
     };
-    await Promise.all(
-      Array.from({ length: CONCURRENCY }, async () => {
-        while (next < judged.length) await one(judged[next++] as Judged);
-      }),
-    );
+    await pool(judged, CONCURRENCY, one);
 
-    const table = (header: string[], rows: (string | number)[][]) => {
-      const cells = [header, ...rows.map((r) => r.map(String))];
-      const widths = header.map((_, i) => Math.max(...cells.map((r) => (r[i] ?? "").length)));
-      return cells.map((r) => r.map((c, i) => (i === 0 ? c.padEnd(widths[i] as number) : c.padStart(widths[i] as number))).join("  ").trimEnd()).join("\n");
-    };
     const pct = (a: number, b: number) => (b ? `${Math.round((a / b) * 100)}%` : "-");
-    const plans = table(
+    const plans = table([
       ["calls (EVAL_SEED=" + seed + ")", "n", "user allowed", "user held"],
-      [
-        ["walked", walked.n, walked.allowed, walked.held],
-        ["  clear allow", clearAllow.n, clearAllow.allowed, clearAllow.held],
-        ["  clear hold", clearHold.n, clearHold.allowed, clearHold.held],
-        ["    downloaded code", downloaded.holds.n, downloaded.holds.allowed, downloaded.holds.held],
-        ["    of those, new holds", downloaded.added.n, downloaded.added.allowed, downloaded.added.held],
-        ["  judged", toJudge.n, toJudge.allowed, toJudge.held],
-        ["stopped by the gate itself", stopped.n, "", ""],
-      ],
-    );
-    const jev = table(
+      ["walked", walked.n, walked.allowed, walked.held],
+      ["  clear allow", clearAllow.n, clearAllow.allowed, clearAllow.held],
+      ["  clear hold", clearHold.n, clearHold.allowed, clearHold.held],
+      ["    downloaded code", downloaded.holds.n, downloaded.holds.allowed, downloaded.holds.held],
+      ["    of those, new holds", downloaded.added.n, downloaded.added.allowed, downloaded.added.held],
+      ["  judged", toJudge.n, toJudge.allowed, toJudge.held],
+      ["stopped by the gate itself", stopped.n, "", ""],
+    ]);
+    const jev = table([
       ["Jev", "n", "failed", "holds", "extra prompts", "misses"],
-      [
-        ["judged calls", all.n, all.failed, all.holds, `${all.extra} (${pct(all.extra, toJudge.allowed)})`, `${all.misses} (${pct(all.misses, toJudge.held)})`],
-        ["  running a script", withScript.n, withScript.failed, withScript.holds, withScript.extra, withScript.misses],
-        ...(COMPARE ? [["  same, without its content", withoutContent.n, withoutContent.failed, withoutContent.holds, withoutContent.extra, withoutContent.misses]] : []),
-      ],
-    );
+      ["judged calls", all.n, all.failed, all.holds, `${all.extra} (${pct(all.extra, toJudge.allowed)})`, `${all.misses} (${pct(all.misses, toJudge.held)})`],
+      ["  running a script", withScript.n, withScript.failed, withScript.holds, withScript.extra, withScript.misses],
+      ...(COMPARE ? [["  same, without its content", withoutContent.n, withoutContent.failed, withoutContent.holds, withoutContent.extra, withoutContent.misses]] : []),
+    ]);
     // The disagreements, at most 25 of each kind.
     const shown = ["EXTRA", "MISS "].flatMap((kind) => {
       const of = lines.filter((l) => l.startsWith(kind)).sort();

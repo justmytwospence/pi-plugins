@@ -74,7 +74,7 @@
     "@earendil-works/pi-coding-agent": "1.2.0"
   },
   "scripts": {
-    "test": "node scripts/test-loader.mjs && node scripts/test-shortcuts.mjs && node scripts/test-contracts.mjs && node scripts/test-question-flow.mjs && node scripts/test-lifecycle.mjs",
+    "test": "node scripts/test-loader.mjs && node scripts/test-shortcuts.mjs && node scripts/test-contracts.mjs && node scripts/test-question-flow.mjs && node scripts/test-lifecycle.mjs && node --test \"evals/shared/*.test.ts\"",
     "check": "npm test && node scripts/check-components.mjs",
     "check:clients": "node scripts/test-remote-clients.mjs",
     "postinstall": "node packages/pi-interactive-shell/scripts/prepare-pty.cjs"

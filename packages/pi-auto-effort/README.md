@@ -230,7 +230,7 @@ npm ci
 npm run check
 ```
 
-`npm run check` runs `tsc --noEmit` (sources, tests and evals) and the Vitest unit tests (`vitest run`). `npm run eval` makes live, paid classifier requests; run it only with explicit authorization. It runs the evals in `eval/` with live Jev through the Pi installation on `PATH` (or `PI_PACKAGE_DIR`), and they are skipped without `TYPESAFE_API_KEY`:
+`npm run check` runs `tsc --noEmit` (sources, tests, evals and the shared eval helpers) and the Vitest unit tests (`vitest run`). `npm run eval` makes live, paid classifier requests; run it only with explicit authorization. It runs the evals in `eval/` (helpers in the repository's `evals/shared/`) with live Jev through the Pi installation on `PATH` (or `PI_PACKAGE_DIR`), and they are skipped without `TYPESAFE_API_KEY`:
 
 - `effort.eval.ts` rates 20 requests and `midrun.eval.ts` several mid-run stretches.
 - `replay.eval.ts` replays your own recent Pi sessions. It samples session files under `$PI_CODING_AGENT_DIR/sessions` (default `~/.pi/agent/sessions`, without `subagents` directories), assesses every user message on each one's current branch as auto-effort would now (the pre-filter, else Jev with 8 calls at a time and a 20 s timeout), and walks the prompts through the default policy (free bounds, the pressure each prompt's state entry recorded). It compares the replayed levels with the levels you picked by hand after a prompt (a level change auto-effort did not make, nor Pi after a model switch; see `eval/replay.ts`) and prints one row per session and the totals: overrides, exact and within-one matches, misses above and below, levels, level changes per session, prompts settled by the pre-filter, Jev failures, latency p50 and p95, and agreement with the levels set live. It asserts only that fewer than 20% of the Jev calls fail. Run it alone with `npm run eval -- eval/replay.eval.ts`.
@@ -244,7 +244,7 @@ npm run check
 | `EVAL_SEED` | random | seed of the shuffle that picks them; always printed, so a run can be repeated |
 | `EVAL_COMPARE` | off | `1` also replays the old behaviour (no pre-filter, the agent's reply as `last_outcome` at 1,500 characters) side by side, which doubles the calls |
 
-`eval/sessions.ts`, the session sampler, uses only Node built-ins so other packages can copy it. For the full suite, the repository root's `npm run check` runs every component's check after the root loader test.
+`evals/shared/sessions.ts`, the session sampler, is shared with pi-tool-gate's evals and has its own unit tests there (`node --test`, run by the repository root's `npm test`). For the full suite, the repository root's `npm run check` runs every component's check after the root loader test.
 
 ## License
 
