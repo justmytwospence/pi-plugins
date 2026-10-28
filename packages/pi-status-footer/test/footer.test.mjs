@@ -634,6 +634,32 @@ test("each of pi-marimo's notebooks gets a row of its own, in key order", () => 
   assert.match(rows[6], /Lens fit\.py/);
 });
 
+test("a notebook open in no browser is dimmed and keeps pi-marimo's link, so a click opens it", () => {
+  const link = (url, text) => `\x1b]8;;${url}\x1b\\${text}\x1b]8;;\x1b\\`;
+  const waiting = `marimo: ${link("http://127.0.0.1:2718/", "0_kcore.py")} \u00b7 :2718 \u00b7 not open`;
+  const absorbed = mod.absorbStatuses(new Map([["marimo", waiting], ["marimo-2", "marimo: fit.py \u00b7 :2719 \u00b7 1 queued"]]), { claudeRow: true });
+  // Parsed like any notebook's status; only the waiting one carries a URL.
+  assert.deepEqual(absorbed.marimo, [
+    { notebook: "0_kcore.py", where: ":2718", notes: ["not open"], url: "http://127.0.0.1:2718/" },
+    { notebook: "fit.py", where: ":2719", queued: 1, notes: [] },
+  ]);
+  assert.deepEqual(absorbed.rest, []);
+  const paint = { fg: (color, text) => `<${color}>${text}</>`, bold: (text) => `<b>${text}</b>` };
+  const rows = mod.renderFooter({ ...fixture(), marimo: absorbed.marimo }, 160, paint);
+  const [first, second] = rows.slice(3, 5);
+  // The name is a link to the notebook, dim (not bold accent) with a dim note; open notebooks look as before.
+  assert.ok(first.includes(link("http://127.0.0.1:2718/", "<muted>0_kcore.py</>")));
+  assert.ok(first.includes("<dim>not open</>"));
+  assert.equal(plain(mod.renderFooter({ ...fixture(), marimo: absorbed.marimo }, 160, theme)[3]), " \uf02d  Marimo 0_kcore.py:2718 \u00b7 not open");
+  assert.ok(second.includes("<b><accent>fit.py</></b>"));
+  assert.ok(!second.includes("\x1b]8"));
+  // A narrow width keeps the link on the short name too.
+  assert.ok(mod.renderFooter({ ...fixture(), marimo: absorbed.marimo }, 40, paint)[3].includes("\x1b]8;;http://127.0.0.1:2718/"));
+  // Only http(s) targets are kept.
+  assert.equal(mod.osc8Url(`x ${link("file:///etc/passwd", "y")}`), undefined);
+  assert.equal(mod.osc8Url("plain"), undefined);
+});
+
 test("pi-marimo's Lens selections get their own row under the marimo row", () => {
   const absorbed = mod.absorbStatuses(new Map([
     ["marimo", "marimo: fit.py"],

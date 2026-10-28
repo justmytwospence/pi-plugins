@@ -14,7 +14,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { CustomEditor, getAgentDir, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { hyperlink, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { builtinMcpOwnsCommand, connectedMcpServers, countMcp, McpConfigReader, MCP_STATUS_KEY, type McpCount } from "./mcp.ts";
 import { SHOW_TIMER_AFTER_MS, WORKING_REFRESH_MS, WORKING_STATS_CHANNEL, workingMessage, WorkingStats, workingStatsService, type WorkingStatsRequest } from "./working.ts";
 import { WORKING_MESSAGE_EVENT, type WorkingMessageClaim } from "./working-message.ts";
@@ -183,6 +183,14 @@ export interface MarimoStatus {
   where?: string;
   /** Anything else ("disconnected", "not open", "/marimo to pick one"). */
   notes: string[];
+  /** Where the notebook opens, when pi-marimo linked its name (OSC 8): the row keeps the link, so a click opens it. */
+  url?: string;
+}
+
+/** The target of the first OSC 8 hyperlink in a status text (http and https only). */
+export function osc8Url(text: string): string | undefined {
+  const url = /\x1b\]8;[^;\x07\x1b]*;([^\x07\x1b]*)(?:\x07|\x1b\\)/.exec(text)?.[1];
+  return url && /^https?:\/\/[^\s\x00-\x1f\x7f]+$/.test(url) ? url : undefined;
 }
 
 export function parseMarimoStatus(text: string): MarimoStatus | undefined {
@@ -264,7 +272,12 @@ export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: {
     // One status per notebook: `marimo`, then `marimo-2`, `marimo-3`, ... in that order.
     const slot = key === "marimo" ? 1 : /^marimo-(\d+)$/.exec(key)?.[1];
     const marimo = slot !== undefined ? parseMarimoStatus(plainText) : undefined;
-    if (marimo) { notebooks.push([+slot!, marimo]); continue; }
+    if (marimo) {
+      const url = osc8Url(text);
+      if (url) marimo.url = url;
+      notebooks.push([+slot!, marimo]);
+      continue;
+    }
     const lens = key === "marimo-lens" ? parseLensStatus(plainText) : undefined;
     if (lens) { result.lens = lens; continue; }
     const bg = key === "bg" ? parseBgStatus(plainText) : undefined;
@@ -750,11 +763,18 @@ function lensRow(l: LensStatus, width: number, theme: Paint): string {
 
 function marimoRow(m: MarimoStatus, width: number, theme: Paint): string {
   const run = m.running;
+  // A notebook nobody has open (pi-marimo's server waiting for the user) is dimmed. Its name keeps
+  // pi-marimo's link, which Pi's fullscreen TUI opens on a click (and terminals do in regular mode).
+  const waiting = m.notes.includes("not open");
+  const name = (text: string) => {
+    const styled = waiting ? theme.fg("muted", text) : theme.bold(theme.fg("accent", text));
+    return m.url ? hyperlink(styled, m.url) : styled;
+  };
   const time = run?.elapsed ? theme.fg("dim", ` ${run.elapsed}`) : "";
   const deepest = run?.section.split(" › ").pop() ?? "";
   const errorCount = theme.fg("error", `${m.errors} error${m.errors === 1 ? "" : "s"}`);
   return fitSegments([
-    { text: `${theme.fg("muted", "Marimo")} ${theme.bold(theme.fg("accent", m.notebook))}`, short: theme.bold(theme.fg("accent", m.notebook)), separatorAfter: m.where ? (m.where.startsWith(":") ? "" : " ") : undefined, priority: 90 },
+    { text: `${theme.fg("muted", "Marimo")} ${name(m.notebook)}`, short: name(m.notebook), separatorAfter: m.where ? (m.where.startsWith(":") ? "" : " ") : undefined, priority: 90 },
     { text: m.where ? theme.fg("dim", m.where) : "", priority: 75 },
     { text: run ? `${theme.fg("warning", "running")} ${run.section}${time}` : "",
       short: run ? `${theme.fg("warning", "running")} ${truncateToWidth(deepest, 30)}${time}` : "", priority: 100 },
@@ -765,7 +785,7 @@ function marimoRow(m: MarimoStatus, width: number, theme: Paint): string {
       ? [{ text: m.others ? theme.fg("dim", `+${m.others} open`) : "", priority: 20 }]
       : [{ text: m.others?.length ? `${theme.fg("dim", "also")} ${theme.fg("muted", m.others.join(", "))}` : "",
         short: m.others?.length ? theme.fg("dim", `+${m.others.length} more`) : "", priority: 85 }]),
-    ...m.notes.map((note): Segment => ({ text: theme.fg("warning", note), priority: 80 })),
+    ...m.notes.map((note): Segment => ({ text: theme.fg(note === "not open" ? "dim" : "warning", note), priority: 80 })),
   ], width, theme);
 }
 
