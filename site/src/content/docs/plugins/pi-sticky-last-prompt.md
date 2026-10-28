@@ -39,7 +39,7 @@ Remove `npm:pi-sticky-last-prompt` first. A second sticky bar is detected and re
 
 ## What gets pinned
 
-The bar shows the latest prompt whose rows have all scrolled above the top of the viewport. While a prompt is still crossing the top edge, the bar is blank rather than repeating text that is directly beneath it. Text is collapsed to one line and truncated to the terminal width. Skill invocations count as prompts and are shown as `[skill] <name>`. What you tell the agent through the suite's dialogs counts too: your `ask_user_question` answers (pi-ask-user-question), your feedback when you keep planning (pi-plan-mode), and your message on a call you decline (pi-tool-gate). Those plugins offer their extractors over `pi.events` (channel `pi-plugins.user-words.v1`); either side works without the other.
+The bar shows the latest prompt whose rows have all scrolled above the top of the viewport. While a prompt is still crossing the top edge, the bar is blank rather than repeating text that is directly beneath it. Text is collapsed to one line and truncated to the terminal width. Skill invocations count as prompts and are shown as `[skill] <name>`. What you tell the agent through the suite's dialogs counts too: your `ask_user_question` answers (pi-ask-user-question) and your message on a call you decline (pi-tool-gate). Those plugins offer their extractors over `pi.events` (channel `pi-plugins.user-words.v1`); either side works without the other.
 
 With [pi-clear-screen](/plugins/pi-clear-screen/), a Ctrl+L clear keeps the latest prompt pinned at the top of the cleared view, so you still see what the conversation is answering.
 

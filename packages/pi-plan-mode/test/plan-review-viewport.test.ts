@@ -178,27 +178,24 @@ const longPlan =
     "\n",
   );
 
-test.each(["long", "short"])(
-  "actual SDK puts a %s plan at the top only after the picker has laid out",
-  async (size) => {
-    const h = setup(size === "long" ? longPlan : "# Beginning of plan\n\nDo it.");
-    const result = h.run();
-    const layout = await h.settle();
-    expect(h.scroll.scrollTop).toBe(h.top());
-    expect(h.scroll.isFollowingEnd).toBe(false);
-    expect(layout.lines[1]).toContain("Plan review");
-    expect(layout.lines[2]).toContain("Beginning of plan");
-    expect(layout.lines.join("\n")).toContain("Implement this plan?");
-    expect(h.widgets().size).toBe(1);
-    h.choose();
-    const approved = await result;
-    h.card.updateResult({ ...approved, isError: false }, false);
-    await h.settle();
-    expect(h.widgets().size).toBe(0);
-    expect(h.scroll.isFollowingEnd).toBe(true);
-    expect(h.card.render(64).length).toBeLessThan(size === "long" ? 40 : 12);
-  },
-);
+test.each(["long"])("actual SDK puts a %s plan at the top only after the picker has laid out", async (size) => {
+  const h = setup(size === "long" ? longPlan : "# Beginning of plan\n\nDo it.");
+  const result = h.run();
+  const layout = await h.settle();
+  expect(h.scroll.scrollTop).toBe(h.top());
+  expect(h.scroll.isFollowingEnd).toBe(false);
+  expect(layout.lines[1]).toContain("Plan review");
+  expect(layout.lines[2]).toContain("Beginning of plan");
+  expect(layout.lines.join("\n")).toContain("Implement this plan?");
+  expect(h.widgets().size).toBe(1);
+  h.choose();
+  const approved = await result;
+  h.card.updateResult({ ...approved, isError: false }, false);
+  await h.settle();
+  expect(h.widgets().size).toBe(0);
+  expect(h.scroll.isFollowingEnd).toBe(true);
+  expect(h.card.render(64).length).toBeLessThan(size === "long" ? 40 : 12);
+});
 
 test("ctrl+d and ctrl+u scroll the plan half a page while you decide, and only then", async () => {
   const h = setup(longPlan);
@@ -236,22 +233,30 @@ test("manual scrolling is not overwritten by rerenders or resizing away from the
   await result;
 });
 
-test.each(["width", "height"])(
-  "resize of %s keeps a reader at the beginning anchored, including short plans",
-  async (dimension) => {
-    const h = setup("# Beginning of plan\n\nDo it.");
-    const result = h.run();
-    await h.settle();
-    if (dimension === "width") h.terminal.columns = 31;
-    else h.terminal.rows = 55;
-    const layout = await h.settle();
-    expect(h.scroll.scrollTop).toBe(h.top());
-    expect(layout.lines[1]).toContain("Plan review");
-    expect(layout.lines[2]).toContain("Beginning of plan");
-    h.choose();
-    await result;
-  },
-);
+test("a short plan stays inline below the chat, unpadded, through resizes", async () => {
+  const h = setup("# Beginning of plan\n\nDo it.");
+  const result = h.run();
+  let layout = await h.settle();
+  const check = () => {
+    expect(h.scroll.isFollowingEnd).toBe(true);
+    expect(h.card.render(h.scroll.getContentWidth(h.terminal.columns)).length).toBeLessThan(
+      h.scroll.viewportHeight - 4,
+    );
+    const screen = layout.lines.join("\n");
+    expect(screen).toContain("Plan review");
+    expect(screen).toContain("Beginning of plan");
+    expect(screen).toContain("Implement this plan?");
+  };
+  check();
+  h.terminal.columns = 31;
+  layout = await h.settle();
+  check();
+  h.terminal.rows = 55;
+  layout = await h.settle();
+  check();
+  h.choose();
+  await result;
+});
 
 test("editing returns to the start of the revised plan", async () => {
   const h = setup(longPlan);
@@ -262,8 +267,9 @@ test("editing returns to the start of the revised plan", async () => {
   h.choose(2); // Edit the plan first, without a gate installed.
   await Promise.resolve();
   const layout = await h.settle();
-  expect(h.scroll.scrollTop).toBe(h.top());
-  expect(layout.lines[2]).toContain("Revised plan");
+  // The revision is short: it sits inline at the end, all of it in view.
+  expect(h.scroll.isFollowingEnd).toBe(true);
+  expect(layout.lines.join("\n")).toContain("Revised plan");
   h.choose();
   await result;
 });

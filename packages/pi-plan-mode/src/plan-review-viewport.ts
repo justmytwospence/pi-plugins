@@ -127,9 +127,23 @@ export class PlanReviewViewport {
           const view = scrollView(tui);
           if (!tui || !view || (review.view && review.view !== view)) return lines;
           review.view = view;
-          // Enough temporary tail to put even a short plan at the top. The call heading
-          // and Box bottom padding add two more rows; no transcript entries are added.
           const height = view.viewportHeight || tui.terminal.rows;
+          // A plan that fits (with the call heading and Box padding) stays inline below the chat:
+          // following the transcript's end already shows all of it.
+          if (lines.length + 2 <= height) {
+            if (review.jump) {
+              // A new review (or a revision shorter than the last) follows the end again.
+              review.jump = false;
+              queueMicrotask(() => {
+                if (this.review !== review) return;
+                view.scrollToEnd();
+                tui.requestRender();
+              });
+            }
+            return lines;
+          }
+          // A longer one gets enough temporary tail to put its top at the top of the view; no
+          // transcript entries are added.
           while (lines.length < height - 1) lines.push("");
           if (!review.queued) {
             // Capture this before layout can clamp scrollTop during a resize.

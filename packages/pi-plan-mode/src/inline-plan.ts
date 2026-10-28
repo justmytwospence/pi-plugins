@@ -23,7 +23,6 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { editInTerminal, externalEditorCommand } from "./external-editor.js";
-import { askFeedback } from "./feedback-input.js";
 import { holdBlocked } from "./herdr-blocked.js";
 import { PlanMarkdown } from "./mermaid-art.js";
 import { planDiff, renderPlanDiff } from "./plan-diff.js";
@@ -31,7 +30,6 @@ import { expandHome } from "./plan-hook.js";
 import { PlanReviewViewport } from "./plan-review-viewport.js";
 import { type ReviewStatus, reviewBody, reviewTitle } from "./review-card.js";
 import { findBlockedCommandSegment, readCommand, type SafeSubcommands } from "./tool-policy.js";
-import { offerUserWords } from "./user-words.js";
 
 export const MODE_CHANGED = "permission-mode:changed";
 export const MODE_SET = "permission-mode:set";
@@ -154,7 +152,7 @@ It is the only file you may write. Build the plan there as you go, with write an
 3. Write the plan: one line of context (why), the recommended approach (not every alternative), the files to change with their paths, existing code to reuse, and how to verify it end to end (tests, commands). Keep it short enough to scan.
 4. Call ${EXIT_TOOL} when the plan is complete; it shows the plan to the user for approval. Do not ask "is this plan okay?" or "should I proceed?" any other way; that is what ${EXIT_TOOL} does.
 
-End each turn by asking the user a question or by calling ${EXIT_TOOL}. After the user declines a plan, a plain reply also ends a turn well: when their feedback asks a question or opens a discussion, answer it and wait for them. If the user only asked a question that needs no code changes (research, an explanation), answer it and do not call ${EXIT_TOOL}.
+End each turn by asking the user a question or by calling ${EXIT_TOOL}. After the user declines a plan, their next message is their feedback: answer it in chat, and revise the plan and call ${EXIT_TOOL} again only once the change is clear. If the user only asked a question that needs no code changes (research, an explanation), answer it and do not call ${EXIT_TOOL}.
 </system-reminder>`;
 }
 
@@ -177,15 +175,6 @@ You can refer back to it if needed during implementation.
 ${plan}`;
 }
 
-/** What your agent hears when the user declines a plan and says why: their words, and how to answer them. */
-export function declinedText(feedback: string) {
-  return `The user declined the plan and said:
-
-${feedback}
-
-Reply to them first, in chat. If they asked a question, disagreed, or left the direction open, answer and end your turn there: do not revise the plan or call ${EXIT_TOOL} again until they have settled it. If they asked for a clear change, revise the plan file, say in a sentence or two what you changed, then call ${EXIT_TOOL} again.`;
-}
-
 export const ENTER_GUIDELINES = [
   `Call ${ENTER_TOOL} before starting a non-trivial implementation where planning first pays off: new features, changes across several files, architectural choices, several valid approaches, or unclear requirements. Do not use it for small fixes, single obvious changes, or pure research.`,
 ];
@@ -205,7 +194,7 @@ interface ExitDetails {
   outcome?: "pending" | "approved" | "fresh" | "kept";
   mode?: string;
   edited?: boolean;
-  /** What the user said should change, when they kept planning. */
+  /** What the user said should change (older sessions typed it in the review). */
   feedback?: string;
   /** The plan the user last declined, while a revision of it waits for review. */
   previous?: string;
@@ -394,12 +383,6 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     },
   });
 
-  // The feedback is the user's words: pi-sticky-last-prompt pins it like a prompt.
-  offerUserWords(pi, EXIT_TOOL, ({ result }) => {
-    const feedback = (result.details as ExitDetails | undefined)?.feedback;
-    return typeof feedback === "string" ? feedback : undefined;
-  });
-
   pi.registerTool({
     name: EXIT_TOOL,
     // Nested codemode calls have no transcript row to render the plan being approved.
@@ -481,23 +464,14 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             continue;
           }
           if (choice === undefined || choice === KEEP) {
-            const feedback =
-              choice === KEEP
-                ? (await askFeedback(pi, ctx, "What should change? (Enter to say it in the chat)"))?.trim()
-                : "";
-            const details: ExitDetails = { plan, planFile, outcome: "kept", ...(feedback ? { feedback } : {}) };
+            // You say what should change in the chat, as your next message.
+            const details: ExitDetails = { plan, planFile, outcome: "kept" };
             declined = plan;
-            if (feedback) {
-              return {
-                content: [{ type: "text", text: declinedText(feedback) }],
-                details,
-              } as never;
-            }
             return {
               content: [
                 {
                   type: "text",
-                  text: "The user wants to keep planning and did not approve the plan. Stop here and wait for them to say what to change.",
+                  text: "The user declined the plan and wants to keep planning. Stop here: their next message says what should change.",
                 },
               ],
               details,

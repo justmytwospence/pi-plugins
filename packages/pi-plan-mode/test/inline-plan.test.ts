@@ -150,26 +150,17 @@ test("exit_plan_mode needs a written plan, shows it, and implements it here once
   assert.equal(await emit("tool_call", { toolName: "edit", input: { path: "src/a.ts" } }), undefined);
 });
 
-test("keep planning sends your feedback back; Esc stops the turn", async () => {
-  const { mock, context, tool, inline } = await setup({
-    select: ["No, keep planning", undefined as never],
-    input: "use redis",
-  });
+test("keep planning ends the turn for your reply in the chat; the next review shows what changed", async () => {
+  const { mock, context, tool, inline } = await setup({ select: ["No, keep planning", undefined as never] });
   await mock.commands.get("plan")?.handler("", context.ctx);
   writeFileSync(inline().planFile, "# Plan\n");
+  const ui = (context.ctx as ExtensionContext).ui;
+  ui.input = async () => assert.fail("no separate feedback prompt");
   const kept = await tool(EXIT_TOOL).execute("t1", {}, undefined, undefined, context.ctx);
-  assert.match(kept.content[0]?.text ?? "", /declined the plan and said:\n\nuse redis\n\nReply to them first/u);
-  assert.equal(kept.terminate, undefined);
+  assert.match(kept.content[0]?.text ?? "", /declined the plan[\s\S]*next message/u);
+  assert.equal(kept.terminate, true);
+  assert.equal(kept.details.outcome, "kept");
   assert.equal(inline().active, true);
-  // pi-sticky-last-prompt pins the feedback as the user's words.
-  const extractors: [string, (call: unknown) => string | undefined][] = [];
-  mock.eventBus.emit("pi-plugins.user-words.v1", {
-    version: 1,
-    register: (name: string, extract: any) => extractors.push([name, extract]),
-  });
-  const exitWords = extractors.find(([name]) => name === EXIT_TOOL)?.[1];
-  assert.equal(exitWords?.({ toolName: EXIT_TOOL, args: {}, result: kept }), "use redis");
-  // The revision's review shows what changed since the declined plan.
   writeFileSync(inline().planFile, "# Plan\n\nUse redis\n");
   const updates: any[] = [];
   const escaped = await tool(EXIT_TOOL).execute(
@@ -180,54 +171,8 @@ test("keep planning sends your feedback back; Esc stops the turn", async () => {
     context.ctx,
   );
   assert.equal(updates[0]?.details.previous, "# Plan");
-  assert.equal(exitWords?.({ toolName: EXIT_TOOL, args: {}, result: escaped }), undefined);
   assert.equal(escaped.terminate, true);
   assert.equal(inline().active, true);
-});
-
-test("keep-planning feedback is typed in the suite's editor when one is loaded", async () => {
-  const { mock, context, tool, inline } = await setup({ select: ["No, keep planning"] });
-  await mock.commands.get("plan")?.handler("", context.ctx);
-  writeFileSync(inline().planFile, "# Plan\n");
-  let options: any;
-  let disposed = false;
-  mock.eventBus.on("pi-plugins.editor-factory.v1", (request) => {
-    (request as { factory?: unknown }).factory = (given: unknown) => {
-      options = given;
-      return {
-        focused: false,
-        render: () => ["[editor]"],
-        invalidate: () => {},
-        handleInput: () => {},
-        dispose: () => (disposed = true),
-      };
-    };
-  });
-  const ui = (context.ctx as ExtensionContext).ui;
-  ui.input = async () => assert.fail("pi's one-line input is not used when an editor provider answers");
-  let rendered: string[] = [];
-  (ui as unknown as { custom: unknown }).custom = (
-    factory: (
-      tui: unknown,
-      theme: unknown,
-      keys: unknown,
-      done: (value: unknown) => void,
-    ) => { render(w: number): string[]; dispose?(): void },
-  ) =>
-    new Promise((resolve) => {
-      const component = factory({}, { fg: (_c: string, t: string) => t }, {}, (value) => {
-        component.dispose?.();
-        resolve(value);
-      });
-      rendered = component.render(40);
-      options.onSubmit("use redis");
-    });
-  const kept = await tool(EXIT_TOOL).execute("t1", {}, undefined, undefined, context.ctx);
-  assert.equal(options.surface, "embedded");
-  assert.equal(options.initialMode, "insert");
-  assert.ok(rendered.includes("[editor]"));
-  assert.ok(disposed, "the editor is disposed when the prompt closes");
-  assert.match(kept.content[0]?.text ?? "", /declined the plan and said:\n\nuse redis\n\nReply to them first/u);
 });
 
 test("a fresh-session approval starts /plan's fresh session once the turn is over", async () => {
