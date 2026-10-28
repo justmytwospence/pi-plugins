@@ -68,16 +68,45 @@ function draw(source: string): ReturnType<typeof render> | null {
   }
 }
 
+const BLOCK_START = /^\s*(?:[-*+]|\d+[.)])\s|^\s*(?:```|~~~|>|#|\||-{3,}|\*{3,})/u;
+
+/**
+ * Prose a planner hard-wrapped at ~80 columns, rejoined so it reflows at the view's width (Pi's
+ * Markdown keeps each source newline as a line break). Hard breaks (two trailing spaces or a
+ * backslash), list items, quotes, tables and fenced code keep their lines.
+ */
+export function unwrapSoftBreaks(raw: string): string {
+  const out: string[] = [];
+  let fenced = false;
+  for (const line of raw.split("\n")) {
+    const previous = out.at(-1);
+    const fence = /^\s*(?:```|~~~)/u.test(line);
+    const join =
+      previous !== undefined &&
+      !fenced &&
+      !fence &&
+      line.trim() !== "" &&
+      previous.trim() !== "" &&
+      !BLOCK_START.test(line) &&
+      !/(?: {2}|\\)$/u.test(previous) &&
+      !/^\s*(?:\||>|#)/u.test(previous);
+    if (fence) fenced = !fenced;
+    if (join) out[out.length - 1] = `${previous.trimEnd()} ${line.trim()}`;
+    else out.push(line);
+  }
+  return out.join("\n");
+}
+
 /**
  * The plan with its top-level Mermaid blocks drawn as diagrams no wider than `width`. A wide
  * left-to-right flowchart is drawn top-down when that fits (terminals are narrower than they are
  * long); a diagram that still does not fit, or that grok-mermaid cannot draw, stays as its source.
  */
 export function mermaidArt(markdown: string, width: number, theme?: Theme): string {
-  if (!/```\s*mermaid/iu.test(markdown)) return markdown;
   return parser
     .lexer(markdown)
     .map((token) => {
+      if (token.type === "paragraph" || token.type === "list") return unwrapSoftBreaks(token.raw);
       if (!isMermaid(token as { type: string; lang?: string })) return token.raw;
       const source = normalizeMermaid((token as { text: string }).text);
       let art = draw(source);

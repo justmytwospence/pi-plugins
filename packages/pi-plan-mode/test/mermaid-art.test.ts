@@ -3,7 +3,7 @@ import { stripVTControlCharacters } from "node:util";
 import { getMarkdownTheme, initTheme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { test } from "vitest";
-import { mermaidArt, normalizeMermaid, PlanMarkdown } from "../src/mermaid-art.js";
+import { mermaidArt, normalizeMermaid, PlanMarkdown, unwrapSoftBreaks } from "../src/mermaid-art.js";
 
 initTheme("dark");
 
@@ -69,4 +69,12 @@ test("labels with semicolons are quoted, and a wide left-to-right chart is drawn
     rows.findIndex((line) => line.includes("GET/POST")) < rows.findIndex((line) => line.includes("Valid X-API-Key")),
     "top-down",
   );
+});
+
+test("hard-wrapped prose is rejoined, but lists, hard breaks and code keep their lines", () => {
+  assert.equal(unwrapSoftBreaks("one two\nthree four\n\nnext"), "one two three four\n\nnext");
+  assert.equal(unwrapSoftBreaks("a  \nb"), "a  \nb");
+  assert.equal(unwrapSoftBreaks("- a\n  b\n- c"), "- a b\n- c");
+  assert.equal(unwrapSoftBreaks("```\nx\ny\n```"), "```\nx\ny\n```");
+  assert.equal(mermaidArt("hello\nworld", 80), "hello world");
 });

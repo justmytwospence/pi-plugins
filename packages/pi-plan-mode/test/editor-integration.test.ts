@@ -57,7 +57,7 @@ function agent(): PlannerAgent {
     subagents: new SubagentTracker("A"),
     stats: { startedAt: 1, endedAt: 2, totalTokens: 0, costUsd: 0, toolCalls: 0, subagentTasks: 0 },
     revision: 1,
-    plan: Array.from({ length: 100 }, (_, i) => `line ${i}`).join("\n"),
+    plan: Array.from({ length: 100 }, (_, i) => `line ${i}`).join("\n\n"),
   } as PlannerAgent;
 }
 
