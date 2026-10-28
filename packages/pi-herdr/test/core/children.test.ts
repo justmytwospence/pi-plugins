@@ -264,3 +264,149 @@ describe("transport", () => {
     expect(w.f.of("agent.prompt")).toHaveLength(1);
   });
 });
+
+describe("peers", () => {
+  const peer = (w: ReturnType<typeof world>, over: { name?: string; machine?: string } = {}) =>
+    w.children.adopt({ name: over.name ?? "lead", paneId: "w5:p1", ...(over.machine ? { machine: over.machine } : {}), cwd: "/work", task: "Review it" });
+
+  it("awaits another agent's reply like a child's, then retires the record once it is acknowledged", async () => {
+    const w = world();
+    const rec = peer(w);
+    expect(rec).toMatchObject({ name: "lead", where: "peer", peer: true, awaiting: false });
+    expect(w.persisted).toEqual([]);
+    await w.children.send("lead", "Review it", "steer");
+    expect(w.f.of("agent.prompt")[0]!.params).toMatchObject({ target: "w5:p1", text: "Review it" });
+    expect(w.holds).toEqual([["lead", true]]);
+    expect(w.persisted.at(-1)).toMatchObject({ name: "lead", peer: true, awaiting: true });
+
+    w.state.agent.agent_status = "working";
+    await w.children.tick();
+    w.state.agent.agent_status = "idle";
+    w.state.agent.completion_seq = 9;
+    await w.children.tick();
+    expect(w.delivered).toHaveLength(1);
+    expect(w.delivered[0]!.text).toContain('Agent "lead" (pane w5:p1) replied:');
+    expect(w.delivered[0]!.reply).toBe("All done: 3 files changed.");
+    expect(w.holds.at(-1)).toEqual(["lead", false]);
+
+    w.children.acknowledge(rec);
+    expect(w.children.records.has("lead")).toBe(false);
+    expect(w.persisted.at(-1)).toMatchObject({ name: "lead", closed: true });
+  });
+
+  it("falls back to a labeled screen read when there is no session file to read", async () => {
+    const w = world();
+    // Another agent kind: herdr reports a session this host cannot read.
+    Object.assign(w.state.agent, { agent: "codex", completion_seq: 1 });
+    peer(w);
+    await w.children.send("lead", "go", "steer");
+    w.state.agent.agent_status = "working";
+    await w.children.tick();
+    w.state.agent.agent_status = "idle";
+    w.state.agent.completion_seq = 2;
+    await w.children.tick();
+    expect(w.delivered[0]!.text).toContain("a screen read (no session file of it is read)");
+    expect(w.delivered[0]!.text).toContain("working on it");
+    expect(w.f.of("agent.read")[0]!.params).toMatchObject({ target: "w5:p1", source: "recent_unwrapped" });
+  });
+
+  it("awaits a peer on another machine through callFor, polling slowly, with a screen read", async () => {
+    const w = world();
+    const remote = fakeCall({
+      "agent.get": () => ({ result: { agent: { ...w.state.agent, agent: "pi", agent_session: { kind: "path", value: "/nuc/s.jsonl" } } } }),
+      "agent.prompt": () => ({ result: {} }),
+      "agent.read": () => ({ result: { read: { text: "nuc screen" } } }),
+    });
+    const asked: string[] = [];
+    (w.children as any).deps.callFor = (machine: string) => { asked.push(machine); return remote.call; };
+    (w.children as any).deps.remotePollMs = 60_000;
+    const rec = peer(w, { machine: "NUC" });
+    expect(rec.name).toBe("NUC/lead");
+    await w.children.send("NUC/lead", "go", "steer");
+    expect(w.f.of("agent.get")).toEqual([]);
+    expect(remote.of("agent.prompt")).toHaveLength(1);
+    w.state.agent.agent_status = "working";
+    await w.children.tick();
+    await new Promise((r) => setTimeout(r, 5));
+    w.state.agent.agent_status = "idle";
+    w.state.agent.completion_seq = 3;
+    // Polled once a poll interval, not on every tick.
+    await w.children.tick();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(w.delivered).toHaveLength(0);
+    (w.children as any).deps.remotePollMs = 0;
+    await w.children.tick();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(w.delivered).toHaveLength(1);
+    expect(w.delivered[0]!.text).toContain('Agent "NUC/lead" (pane w5:p1 on NUC)');
+    expect(w.delivered[0]!.text).toContain("its session file is out of reach");
+    expect(w.delivered[0]!.text).toContain("nuc screen");
+    expect(asked.every((m) => m === "NUC")).toBe(true);
+    // Its file path is the NUC's, never read here.
+    expect(w.f.of("agent.get")).toEqual([]);
+  });
+
+  it("is told when the peer's pane closes before it replies", async () => {
+    const w = world();
+    peer(w);
+    await w.children.send("lead", "go", "steer");
+    w.state.paneGone = true;
+    await w.children.tick();
+    expect(w.delivered[0]!.text).toContain('Agent "lead" (pane w5:p1) was closed before it replied.');
+    expect(w.children.records.get("lead")?.closed).toBe(true);
+    w.children.acknowledge(w.children.records.get("lead")!);
+    expect(w.children.records.has("lead")).toBe(false);
+  });
+
+  it("reports a machine that stays unreachable instead of awaiting forever", async () => {
+    const w = world();
+    (w.children as any).deps.callFor = () => async () => ({ error: { code: "machine", message: "ssh: no route" } });
+    (w.children as any).deps.remotePollMs = 0;
+    const rec = peer(w, { machine: "NUC" });
+    rec.awaiting = true;
+    (w.children as any).deps.hold(rec, true);
+    for (let i = 0; i < 46; i++) {
+      await w.children.tick();
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    expect(w.delivered[0]?.text).toContain("could not be reached for a while");
+  });
+
+  it("is never interrupted or closed from here, and a failed first prompt leaves no record", async () => {
+    const w = world();
+    const rec = peer(w);
+    await expect(w.children.interrupt("lead")).rejects.toThrow("not a child of this session");
+    await expect(w.children.close("lead")).rejects.toThrow("not a child of this session");
+    w.state.agent.agent_status = "blocked";
+    await expect(w.children.send("lead", "go", "steer")).rejects.toThrow("waiting on a dialog");
+    w.children.discard(rec);
+    expect(w.children.records.has("lead")).toBe(false);
+    expect(w.persisted).toEqual([]);
+  });
+
+  it("reuses a peer's record for its pane, and refuses another pane while one is awaited", async () => {
+    const w = world();
+    const rec = peer(w);
+    expect(peer(w)).toBe(rec);
+    await w.children.send("lead", "go", "steer");
+    expect(() => w.children.adopt({ name: "lead", paneId: "w9:p9", cwd: "/work", task: "x" })).toThrow("already tracked in another pane");
+  });
+
+  it("restores an awaited peer, and not a retired one", () => {
+    const w = world();
+    const live = { name: "lead", paneId: "w5:p1", where: "peer" as const, peer: true, cwd: "/work", task: "t", createdAt: 1, awaiting: true, baseline: { completionSeq: 1 } };
+    const retired = { ...live, name: "old", paneId: "w6:p1", awaiting: false, closed: true };
+    const pending = { ...retired, name: "gone", pendingReply: "it closed" };
+    w.children.restore([live, retired, pending]);
+    expect([...w.children.records.keys()]).toEqual(["lead", "gone"]);
+    expect(w.holds).toEqual([["lead", true]]);
+    w.children.shutdown();
+  });
+
+  it("lists a peer as one", async () => {
+    const w = world();
+    peer(w, { machine: "NUC" });
+    (w.children as any).deps.callFor = () => async () => ({ result: { agent: { agent_status: "idle" } } });
+    expect(await w.children.list()).toContain("peer on NUC");
+  });
+});

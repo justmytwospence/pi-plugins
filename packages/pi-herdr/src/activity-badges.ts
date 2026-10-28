@@ -7,7 +7,7 @@ export class ActivityBadges extends Activity {
     if (!event?.active) { super.apply(channel, event); return; }
     const label = event.label?.trim() ?? "";
     const agents = /^subagents \((\d+)\)$/.exec(label);
-    const icon = agents ? "⑂" : label.startsWith("child ") ? "↳" : channel === "herdr:working" ? "≡" : "⌘";
+    const icon = agents ? "⑂" : label.startsWith("child ") || label.startsWith("agent ") ? "↳" : channel === "herdr:working" ? "≡" : "⌘";
     const parsed = agents ? Number(agents[1]) : 1;
     const count = Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 1;
     super.apply(channel, { ...event, label: `${icon} ${count}` });

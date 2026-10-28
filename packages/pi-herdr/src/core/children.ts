@@ -20,7 +20,12 @@ export type Where = "tab" | "split" | "worktree";
 export interface ChildRecord {
   name: string;
   paneId: string;
-  where: Where;
+  /** "peer": an agent this session did not start, whose reply to one message it awaits. */
+  where: Where | "peer";
+  /** A peer: another agent in herdr, awaited but never started, interrupted or closed from here. */
+  peer?: boolean;
+  /** A peer on a saved herdr machine (`herdr --machine`); its calls go through `callFor`. */
+  machine?: string;
   cwd: string;
   branch?: string;
   workspaceId?: string;
@@ -85,8 +90,12 @@ export interface ChildrenDeps {
   hold(rec: ChildRecord, active: boolean): void;
   pollMs?: number;
   readyPollMs?: number;
+  /** How often a peer on another machine is polled (default 5 s). */
+  remotePollMs?: number;
   /** False after runtime shutdown or navigation away from the owning conversation branch. */
   isCurrent?(): boolean;
+  /** The herdr API on a saved machine, for peers there. Without it a peer's `machine` is not reachable. */
+  callFor?(machine: string): Call;
   /**
    * Deliver a message some other way than typing it (pi-herdr's inbox, which leaves the child's
    * draft alone and can hold it while a dialog is open). Undefined: the child cannot take it that
@@ -166,12 +175,13 @@ export class Children {
   private scope(rec?: ChildRecord) {
     const generation = this.generation;
     const turnId = rec?.turnId;
+    const base: Call = rec?.machine && this.deps.callFor ? this.deps.callFor(rec.machine) : this.deps.call;
     const assert = () => {
       if (generation !== this.generation || this.deps.isCurrent?.() === false || (rec && (rec.turnId !== turnId || (this.records.has(rec.name) && this.records.get(rec.name) !== rec)))) throw new StaleChildOperation();
     };
     const call: Call = async (method, params, timeout) => {
       assert();
-      const result = await this.deps.call(method, params, timeout);
+      const result = await base(method, params, timeout);
       assert();
       return result;
     };
@@ -187,9 +197,11 @@ export class Children {
   restore(records: Iterable<ChildRecord>): void {
     this.generation++;
     this.stopLoop();
+    this.remote.clear();
     const saved = [...records];
     this.records.clear();
-    for (const rec of saved) this.records.set(rec.name, { ...rec });
+    // A peer that replied and was acknowledged is a tombstone: it only keeps older entries from reviving.
+    for (const rec of saved) if (!(rec.peer && rec.closed && !rec.pendingReply)) this.records.set(rec.name, { ...rec });
     for (const rec of this.records.values()) if (rec.awaiting && !rec.closed) this.deps.hold(rec, true);
     this.ensureLoop();
   }
@@ -245,6 +257,29 @@ export class Children {
     const tab = await call("tab.create", { workspace_id: workspaceId, cwd: path, label: name, focus: !!opts.focus });
     if (!tab.result?.root_pane?.pane_id) throw new Error(`herdr could not add a tab to the worktree's space: ${errorText(tab)}`);
     return { paneId: tab.result.root_pane.pane_id, workspaceId, cwd: path };
+  }
+
+  /**
+   * Start tracking another agent in herdr (a peer): the record `send` then prompts, awaits and hears
+   * back from like a child's. Nothing is saved until the first prompt succeeds; `discard` it if that
+   * fails. A peer is keyed `<machine>/<name>` on a saved machine, so names there cannot collide.
+   */
+  adopt(opts: { name: string; paneId: string; machine?: string; cwd: string; task: string }): ChildRecord {
+    const key = opts.machine ? `${opts.machine}/${opts.name}` : opts.name;
+    const existing = this.records.get(key);
+    if (existing?.peer && !existing.closed && existing.paneId === opts.paneId) {
+      existing.task = opts.task;
+      return existing;
+    }
+    if (existing && !existing.closed && (existing.awaiting || existing.queued?.length)) throw new Error(`"${key}" is already tracked in another pane (${existing.paneId}) and still awaited.`);
+    const rec: ChildRecord = { name: key, paneId: opts.paneId, where: "peer", peer: true, ...(opts.machine ? { machine: opts.machine } : {}), cwd: opts.cwd, task: opts.task, createdAt: Date.now(), awaiting: false };
+    this.records.set(key, rec);
+    return rec;
+  }
+
+  /** Forget an adopted peer whose first prompt failed. */
+  discard(rec: ChildRecord): void {
+    if (rec.peer && !rec.awaiting && !rec.queued?.length && !rec.pendingReply && this.records.get(rec.name) === rec) this.records.delete(rec.name);
   }
 
   async spawn(opts: SpawnOptions): Promise<ChildRecord> {
@@ -417,6 +452,21 @@ export class Children {
     this.deps.deliver(rec, text, reply);
   }
 
+  /** Peers on another machine: polled on their own, slowly (each poll is an ssh round trip). */
+  private readonly remote = new Map<ChildRecord, { last: number; busy: boolean; failures: number }>();
+
+  private pollRemote(rec: ChildRecord): void {
+    const now = Date.now();
+    const st = this.remote.get(rec) ?? { last: 0, busy: false, failures: 0 };
+    this.remote.set(rec, st);
+    if (st.busy || now - st.last < (this.deps.remotePollMs ?? 5_000)) return;
+    st.busy = true;
+    st.last = now;
+    void this.check(rec, st).catch(() => undefined).finally(() => {
+      st.busy = false;
+    });
+  }
+
   /** One pass over the awaited children. */
   async tick(): Promise<void> {
     if (this.ticking) return;
@@ -424,6 +474,10 @@ export class Children {
     try {
       for (const rec of [...this.records.values()]) {
         if ((!rec.awaiting && !rec.queued?.length) || rec.closed) continue;
+        if (rec.machine) {
+          this.pollRemote(rec);
+          continue;
+        }
         try {
           await this.check(rec);
         } catch (error) {
@@ -437,16 +491,43 @@ export class Children {
     }
   }
 
-  private async check(rec: ChildRecord): Promise<void> {
+  /** How a record is named in messages: a child with its layout, a peer with its machine. */
+  private label(rec: ChildRecord): string {
+    if (rec.peer) return `Agent "${rec.name}" (pane ${rec.paneId}${rec.machine ? ` on ${rec.machine}` : ""})`;
+    const where = rec.where === "worktree" && rec.branch ? `worktree ${rec.branch}` : rec.where;
+    return `Herdr child "${rec.name}" (${where}, pane ${rec.paneId})`;
+  }
+
+  /** Whether the agent's session file is one this host reads: a local one of the host's own kind. */
+  private readable(rec: ChildRecord, kind: string | undefined): boolean {
+    if (!rec.session || rec.machine) return false;
+    return !rec.peer || kind === this.deps.agent.kind;
+  }
+
+  /** The last lines of a peer's screen, the reply of last resort. */
+  private async screen(rec: ChildRecord, call: Call): Promise<string | undefined> {
+    const r = await call<{ read?: { text?: string } }>("agent.read", { target: rec.paneId, source: "recent_unwrapped", lines: 120 });
+    const text = r.result?.read?.text?.trim();
+    return text || undefined;
+  }
+
+  private async check(rec: ChildRecord, remote?: { failures: number }): Promise<void> {
     const { call, assert } = this.scope(rec);
     const a = await call<{ agent?: AgentInfo }>("agent.get", { target: rec.paneId });
     const info = a.result?.agent;
+    // A machine that cannot be reached for a while is reported, not awaited forever.
+    const transient = (code: string | undefined) => code === "timeout" || code === "socket" || (!!rec.machine && (code === "machine" || code === "closed" || code === "parse"));
+    if (remote && !info && transient(a.error?.code) && ++remote.failures >= 45) {
+      this.finish(rec, `${this.label(rec)} could not be reached for a while (${errorText(a)}), so its reply is not coming back. Use action=read when ${rec.machine} answers again.`, undefined);
+      return;
+    }
+    if (remote && info) remote.failures = 0;
     if (!info) {
-      if (a.error?.code === "timeout" || a.error?.code === "socket") return;
+      if (transient(a.error?.code)) return;
       const pane = await call("pane.get", { pane_id: rec.paneId });
-      if (pane.error?.code === "timeout" || pane.error?.code === "socket") return;
+      if (transient(pane.error?.code)) return;
       const gone = !!pane.error;
-      this.finish(rec, gone ? `Herdr child "${rec.name}" was closed before it replied.` : `${this.deps.agent.kind} exited in herdr child "${rec.name}"'s pane (${rec.paneId}) before it replied.`, undefined, gone);
+      this.finish(rec, gone ? `${this.label(rec)} was closed before it replied.` : `${rec.peer ? "The agent" : this.deps.agent.kind} exited in ${this.label(rec)}'s pane before it replied.`, undefined, gone);
       return;
     }
     if (info.agent_session?.value) rec.session = info.agent_session.value;
@@ -463,13 +544,21 @@ export class Children {
     const seq = info.completion_seq;
     const completed = (seq !== undefined && seq !== rec.baseline?.completionSeq) || rec.sawWorking;
     if (!completed) return;
-    const reply = rec.session ? await this.deps.agent.reply(rec) : undefined;
+    let reply = this.readable(rec, info.agent) ? await this.deps.agent.reply(rec) : undefined;
     assert();
+    let screen = false;
+    if (!reply && rec.peer) {
+      reply = await this.screen(rec, call);
+      assert();
+      screen = !!reply;
+    }
     if (!rec.awaiting || rec.closed) return;
-    const where = rec.where === "worktree" && rec.branch ? `worktree ${rec.branch}` : rec.where;
+    const label = this.label(rec);
     const text = reply
-      ? `Herdr child "${rec.name}" (${where}, pane ${rec.paneId}) replied:\n\n${reply}`
-      : `Herdr child "${rec.name}" (${where}, pane ${rec.paneId}) finished its turn, but its reply could not be read${rec.session ? ` from ${rec.session}` : ""}. Use action=read.`;
+      ? screen
+        ? `${label} finished its turn. Its screen follows, a screen read (${rec.machine ? "its session file is out of reach" : "no session file of it is read"}): a long reply can be cut short or start above what is shown, so ask it to write the answer to a file if you need all of it.\n\n${reply}`
+        : `${label} replied:\n\n${reply}`
+      : `${label} finished its turn, but its reply could not be read${rec.session ? ` from ${rec.session}` : ""}. Use action=read.`;
     this.finish(rec, text, reply);
     await this.flushQueue(rec);
   }
@@ -481,7 +570,7 @@ export class Children {
     const status = a.result?.agent?.agent_status ?? (rec.closed ? "closed" : "gone");
     if (a.result?.agent?.agent_session?.value) rec.session = a.result.agent.agent_session.value;
     if (status === "idle" || status === "done" || status === "closed" || status === "gone") {
-      const reply = rec.session ? await this.deps.agent.reply(rec) : undefined;
+      const reply = this.readable(rec, a.result?.agent?.agent) ? await this.deps.agent.reply(rec) : undefined;
       assert();
       return `${rec.name}: ${status}${rec.awaiting ? " (reply pending)" : ""}\n\n${reply ? `Last reply:\n${reply}` : "No reply yet."}`;
     }
@@ -490,7 +579,7 @@ export class Children {
   }
 
   async list(): Promise<string> {
-    if (!this.records.size) return "This session has started no herdr children.";
+    if (!this.records.size) return "This session has started no herdr children and awaits no other agent.";
     const { call } = this.scope();
     const rows: string[] = [];
     for (const rec of this.records.values()) {
@@ -499,7 +588,7 @@ export class Children {
         const a = await call<{ agent?: AgentInfo }>("agent.get", { target: rec.paneId });
         status = a.result?.agent?.agent_status ?? "gone";
       }
-      const where = rec.where === "worktree" && rec.branch ? `worktree ${rec.branch}` : rec.where;
+      const where = rec.peer ? `peer${rec.machine ? ` on ${rec.machine}` : ""}` : rec.where === "worktree" && rec.branch ? `worktree ${rec.branch}` : rec.where;
       rows.push(`${rec.name}  ${status}${rec.awaiting ? " (reply pending)" : ""}  ${where}  pane ${rec.paneId}  ${rec.task.replace(/\s+/gu, " ").slice(0, 70)}`);
     }
     return rows.join("\n");
@@ -507,6 +596,7 @@ export class Children {
 
   async interrupt(name: string): Promise<string> {
     const rec = this.get(name);
+    if (rec.peer) throw new Error(`${name} is another agent's pane, not a child of this session: it is not interrupted from here.`);
     const { call } = this.scope(rec);
     const r = await call("agent.send_keys", { target: rec.paneId, keys: ["esc"] });
     if (r.error) throw new Error(`herdr could not interrupt ${rec.name}: ${errorText(r)}`);
@@ -515,6 +605,7 @@ export class Children {
 
   async close(name: string): Promise<string> {
     const rec = this.get(name);
+    if (rec.peer) throw new Error(`${name} is another agent's pane, not a child of this session: it is not closed from here.`);
     const { call } = this.scope(rec);
     const r = await call("pane.close", { pane_id: rec.paneId });
     // Already gone (herdr says pane_not_found, not_found, ...): closing it is done.
@@ -531,6 +622,13 @@ export class Children {
   acknowledge(rec: ChildRecord): void {
     this.scope(rec).assert();
     delete rec.pendingReply;
+    if (rec.peer && !rec.awaiting && !rec.queued?.length) {
+      // A peer is tracked for one reply: retire it (a closed record keeps older entries from reviving).
+      rec.closed = true;
+      if (this.records.get(rec.name) === rec) this.records.delete(rec.name);
+      this.deps.persist({ ...rec });
+      return;
+    }
     this.save(rec);
   }
 
@@ -538,6 +636,7 @@ export class Children {
   shutdown(): void {
     this.generation++;
     this.stopLoop();
+    this.remote.clear();
     for (const rec of this.records.values()) if (rec.awaiting) this.deps.hold(rec, false);
   }
 

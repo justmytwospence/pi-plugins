@@ -11,6 +11,11 @@
 // working, held while a dialog is open on an idle session. It answers with an `ack-<id>` token on
 // its pane, so the sender can say what happened.
 //
+// The receiver also protects its user and itself: it holds a message while the user is typing a draft
+// (presence), and defers the messages one sender keeps starting turns with while no user answers
+// (rate guard, so two agents cannot loop). Both are said in the acknowledgement: `outcome[:reason]`,
+// such as `held:typing` or `deferred:rate`.
+//
 // A receiver advertises itself with the pane token `inbox=v1:<pid>`; a sender also checks that the
 // pid is in the pane's foreground (not a stale token, a suspended pi or a shell on top of it). The
 // envelope grants nothing a process that can type into the pane does not already have.
@@ -28,9 +33,49 @@ export const ACK_TTL_MS = 60_000;
 export const MAX_MESSAGE_BYTES = 256 * 1024;
 
 export type Delivery = "steer" | "queue";
-/** started: began a turn; steered: into the current turn; queued: after it; held: until a dialog closes. */
-export type Outcome = "started" | "steered" | "queued" | "held";
-export const OUTCOMES: readonly Outcome[] = ["started", "steered", "queued", "held"];
+/**
+ * started: began a turn; steered: into the current turn; queued: after it; held: until a dialog
+ * closes or the user stops typing; deferred: rides along with the user's next prompt, starting no turn.
+ */
+export type Outcome = "started" | "steered" | "queued" | "held" | "deferred";
+export const OUTCOMES: readonly Outcome[] = ["started", "steered", "queued", "held", "deferred"];
+/** Why a message was held or deferred: a dialog is open, the user is typing, pi refused it, a sender's rate. */
+export type Reason = "dialog" | "typing" | "retry" | "rate";
+
+export interface Ack {
+  outcome: Outcome;
+  reason?: string;
+}
+
+/** The ack token's value: `outcome` or `outcome:reason`. */
+export const formatAck = (ack: Ack): string => (ack.reason ? `${ack.outcome}:${ack.reason}` : ack.outcome);
+
+export function parseAck(value: unknown): Ack | undefined {
+  if (typeof value !== "string") return undefined;
+  const [outcome, reason] = value.split(":", 2);
+  if (!(OUTCOMES as readonly string[]).includes(outcome ?? "")) return undefined;
+  return { outcome: outcome as Outcome, ...(reason ? { reason } : {}) };
+}
+
+/** How long after the last edit a user counts as typing, and how long after Enter as submitting. */
+export const TYPING_IDLE_MS = 15_000;
+export const SUBMIT_GRACE_MS = 400;
+
+export interface RateLimit {
+  limit: number;
+  windowMs: number;
+}
+export const DEFAULT_RATE: RateLimit = { limit: 6, windowMs: 600_000 };
+
+/** `PI_HERDR_INBOX_RATE`: `<messages>/<seconds>` (default `6/600`); `0` or `off` turns the guard off. */
+export function parseRate(value: string | undefined): RateLimit | null {
+  const v = value?.trim();
+  if (!v) return DEFAULT_RATE;
+  if (v === "0" || v.toLowerCase() === "off") return null;
+  const m = /^(\d+)\/(\d+)$/u.exec(v);
+  if (!m || Number(m[1]) < 1 || Number(m[2]) < 1) return DEFAULT_RATE;
+  return { limit: Number(m[1]), windowMs: Number(m[2]) * 1000 };
+}
 
 export interface Sender {
   pane: string;
@@ -98,21 +143,76 @@ export function messageText(env: Envelope): string {
   return `[Message from ${who} in herdr pane ${env.from.pane}${where ? ` (${where})` : ""}: another agent session, not the user typing. ${reply}]\n\n${env.text}`;
 }
 
+/**
+ * Whether the user is typing in the main editor, from the terminal input the listener sees. A draft
+ * left alone for TYPING_IDLE_MS is not typing; the Enter that submits one counts for SUBMIT_GRACE_MS
+ * more, while the editor is already empty and the turn it starts has not begun.
+ */
+export class Presence {
+  private lastEditAt = Number.NEGATIVE_INFINITY;
+  private submitAt = Number.NEGATIVE_INFINITY;
+  private readonly now: () => number;
+  private readonly idleMs: number;
+  private readonly graceMs: number;
+
+  constructor(now: () => number = () => Date.now(), idleMs = TYPING_IDLE_MS, graceMs = SUBMIT_GRACE_MS) {
+    this.now = now;
+    this.idleMs = idleMs;
+    this.graceMs = graceMs;
+  }
+
+  /**
+   * One terminal input sequence; `draft` is the editor's text before it. Returns true when it edits
+   * text (a character, a delete, a paste): escape sequences (arrows, focus, mouse, key releases) do not.
+   */
+  key(data: string, draft: string, enter: boolean): boolean {
+    if (isEnvelopePaste(data)) return false;
+    const t = this.now();
+    if (enter) {
+      if (draft.trim()) this.submitAt = t;
+      return false;
+    }
+    if (data.startsWith(PASTE_START)) {
+      this.lastEditAt = t;
+      return true;
+    }
+    if (data.startsWith("\x1b") || data.length === 0) return false;
+    this.lastEditAt = t;
+    return true;
+  }
+
+  active(draft: string): boolean {
+    const t = this.now();
+    return (draft.trim() !== "" && t - this.lastEditAt < this.idleMs) || t - this.submitAt < this.graceMs;
+  }
+
+  /** Milliseconds until `active` turns false if nothing else is typed. */
+  msUntilIdle(draft: string): number {
+    const t = this.now();
+    const edit = draft.trim() !== "" ? this.lastEditAt + this.idleMs - t : 0;
+    return Math.max(0, edit, this.submitAt + this.graceMs - t);
+  }
+}
+
 export interface InboxHost {
   /** Whether the session is idle; undefined when unknown (treated as working). */
   isIdle(): boolean | undefined;
   /** Open `herdr:blocked` holds: dialogs waiting on the user. */
   blocked(): number;
-  /** pi.sendMessage; false when it failed. */
-  deliver(env: Envelope, deliverAs: "steer" | "followUp" | undefined): boolean;
-  ack(env: Envelope, outcome: Outcome): void;
+  /** Whether the user is typing a draft in the main editor (see Presence). */
+  typing(): boolean;
+  /** pi.sendMessage; false when it failed. `nextTurn` queues it for the user's next prompt, starting no turn. */
+  deliver(env: Envelope, deliverAs: "steer" | "followUp" | "nextTurn" | undefined): boolean;
+  ack(env: Envelope, outcome: Outcome, reason?: Reason): void;
   notify(message: string, type: "info" | "warning"): void;
 }
 
-/** What outlives a runtime: held messages and seen ids, kept process-wide across /reload and /new. */
+/** What outlives a runtime: held messages, seen ids and per-sender rates, kept process-wide across /reload and /new. */
 export interface InboxState {
   held: Envelope[];
   seen: Set<string>;
+  /** Times of the messages each sender (host/pane) has had accepted since the user last wrote. */
+  rate?: Map<string, number[]>;
 }
 
 const STATE = Symbol.for("pi-plugins.pi-herdr/inbox-state.v1");
@@ -120,20 +220,32 @@ const STATE = Symbol.for("pi-plugins.pi-herdr/inbox-state.v1");
 /** The process's inbox state: this pane's, whichever runtime of pi-herdr is live in it. */
 export function processInboxState(): InboxState {
   const g = globalThis as Record<symbol, unknown>;
-  return (g[STATE] ??= { held: [], seen: new Set<string>() }) as InboxState;
+  const state = (g[STATE] ??= { held: [], seen: new Set<string>() }) as InboxState;
+  // A state an earlier runtime of this process created has no rates yet.
+  state.rate ??= new Map();
+  return state;
 }
+
+const senderKey = (env: Envelope): string => `${env.from.host ?? ""}/${env.from.pane}`;
 
 /** The receiving half: consumes envelope pastes and delivers them. */
 export class Inbox {
-  /** Messages for an idle session with a dialog open, delivered once it closes. */
+  /** Messages held for an idle session with a dialog open or a user typing, delivered once that ends. */
   readonly held: Envelope[];
   private readonly seen: Set<string>;
+  private readonly rates: Map<string, number[]>;
+  private readonly notified = new Set<string>();
   private readonly host: InboxHost;
+  private readonly limit: RateLimit | null;
+  private readonly now: () => number;
 
-  constructor(host: InboxHost, state: InboxState = { held: [], seen: new Set() }) {
+  constructor(host: InboxHost, state: InboxState = { held: [], seen: new Set() }, options: { rate?: RateLimit | null; now?: () => number } = {}) {
     this.host = host;
     this.held = state.held;
     this.seen = state.seen;
+    this.rates = state.rate ??= new Map();
+    this.limit = options.rate === undefined ? DEFAULT_RATE : options.rate;
+    this.now = options.now ?? (() => Date.now());
   }
 
   /** A terminal-input listener: consumes envelopes, passes everything else through. */
@@ -148,40 +260,85 @@ export class Inbox {
     return { consume: true };
   }
 
+  /** The user wrote to this agent: every sender's count starts over. */
+  userInput(): void {
+    this.rates.clear();
+    this.notified.clear();
+  }
+
+  /** Whether this sender is past its limit; if not, counts the message. */
+  private overRate(env: Envelope): boolean {
+    if (!this.limit) return false;
+    const key = senderKey(env);
+    const t = this.now();
+    const recent = (this.rates.get(key) ?? []).filter((at) => t - at < this.limit!.windowMs);
+    const over = recent.length >= this.limit.limit;
+    if (!over) recent.push(t);
+    this.rates.set(key, recent);
+    return over;
+  }
+
   receive(env: Envelope): Outcome | undefined {
     // A sender that retries after an unconfirmed send must not deliver twice.
     if (this.seen.has(env.id)) return undefined;
     this.seen.add(env.id);
     if (this.seen.size > 500) this.seen.delete(this.seen.values().next().value!);
+    const who = env.from.name ?? env.from.title ?? env.from.pane;
     const idle = this.host.isIdle() === true;
     let outcome: Outcome;
-    if (idle && this.host.blocked() > 0) {
+    let reason: Reason | undefined;
+    if (this.overRate(env)) {
+      // It starts no turn: it rides along with the user's next prompt.
+      outcome = "deferred";
+      reason = "rate";
+      if (!this.host.deliver(env, "nextTurn")) {
+        this.held.push(env);
+        outcome = "held";
+        reason = "retry";
+      }
+      const key = senderKey(env);
+      if (!this.notified.has(key)) {
+        this.notified.add(key);
+        this.host.notify(`${who} has sent ${this.limit!.limit} messages without an answer from you, so its next ones wait for your next prompt instead of starting turns.`, "warning");
+      }
+    } else if (idle && this.host.blocked() > 0) {
       this.held.push(env);
       outcome = "held";
-      this.host.notify(`Message from ${env.from.name ?? env.from.pane} held until the dialog closes.`, "info");
+      reason = "dialog";
+      this.host.notify(`Message from ${who} held until the dialog closes.`, "info");
+    } else if (idle && this.host.typing()) {
+      this.held.push(env);
+      outcome = "held";
+      reason = "typing";
+      this.host.notify(`Message from ${who} is waiting until you submit or stop typing.`, "info");
     } else if (idle) {
-      outcome = this.host.deliver(env, undefined) ? "started" : this.hold(env);
+      outcome = "started";
+      if (!this.host.deliver(env, undefined)) ({ outcome, reason } = this.hold(env));
     } else {
       const as = env.delivery === "queue" ? "followUp" : "steer";
-      outcome = this.host.deliver(env, as) ? (as === "steer" ? "steered" : "queued") : this.hold(env);
+      outcome = as === "steer" ? "steered" : "queued";
+      if (!this.host.deliver(env, as)) ({ outcome, reason } = this.hold(env));
     }
-    this.host.ack(env, outcome);
+    this.host.ack(env, outcome, reason);
     return outcome;
   }
 
-  private hold(env: Envelope): Outcome {
+  private hold(env: Envelope): { outcome: Outcome; reason: Reason } {
     this.held.push(env);
-    return "held";
+    return { outcome: "held", reason: "retry" };
   }
 
-  /** Deliver held messages once the session is idle with no dialog open (or working: queued). */
+  /**
+   * Deliver held messages once the session is idle with no dialog open and no one typing. A session
+   * that is working by then (the user submitted, or a turn began) gets them after its turn, never
+   * steering it: they waited, and the turn they were meant for is long past.
+   */
   flush(): void {
     while (this.held.length) {
       const idle = this.host.isIdle();
-      if (idle === true && this.host.blocked() > 0) return;
+      if (idle === true && (this.host.blocked() > 0 || this.host.typing())) return;
       const env = this.held[0]!;
-      const ok = idle === true ? this.host.deliver(env, undefined) : this.host.deliver(env, env.delivery === "queue" ? "followUp" : "steer");
-      if (!ok) return;
+      if (!(idle === true ? this.host.deliver(env, undefined) : this.host.deliver(env, "followUp"))) return;
       this.held.shift();
     }
   }

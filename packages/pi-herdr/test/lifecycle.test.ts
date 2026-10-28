@@ -7,6 +7,7 @@ import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION, type 
 import { ChildrenActivity } from "../src/children-activity.ts";
 import { Children, type ChildRecord } from "../src/core/children.ts";
 import piHerdr from "../src/index.ts";
+import { processInboxState } from "../src/inbox.ts";
 import { fakeCall } from "./core/fake.ts";
 
 afterEach(() => vi.unstubAllEnvs());
@@ -99,6 +100,11 @@ function ctxOf(branch: unknown[], idle = true) {
 const offBranch: unknown[] = [];
 
 function inHerdr() {
+  // The inbox's held messages, seen ids and rates are process-wide (they survive /reload): a test starts clean.
+  const state = processInboxState();
+  state.held.length = 0;
+  state.seen.clear();
+  state.rate?.clear();
   vi.stubEnv("HERDR_ENV", "1");
   vi.stubEnv("HERDR_SOCKET_PATH", "/nonexistent/herdr.sock");
   vi.stubEnv("HERDR_PANE_ID", "w1:p1");
@@ -448,3 +454,274 @@ test("a message held behind a dialog survives /reload; the draft guard submits w
   expect(two.state.editor).toBe("my draft");
   await two.p.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, two.ctx);
 }, 10_000);
+
+/** A herdr with the parent pane and named agents whose state the test sets. */
+function agentsHerdr(agents: Record<string, Record<string, unknown>>) {
+  const byTarget = (target: string) => Object.values(agents).find((a) => a.name === target || a.pane_id === target);
+  const f = fakeCall({
+    "pane.get": (p) => ({ result: { pane: { pane_id: p.pane_id, workspace_id: "w1", tokens: {} } } }),
+    "agent.list": () => ({ result: { agents: Object.values(agents) } }),
+    "agent.get": (p) => {
+      const a = byTarget(p.target);
+      return a ? { result: { agent: { ...a } } } : { error: { code: "agent_not_found", message: "no" } };
+    },
+    "agent.prompt": () => ({ result: {} }),
+    "agent.read": () => ({ result: { read: { text: "the agent's screen" } } }),
+  });
+  return { f, agents };
+}
+const peerAgent = (name: string, pane: string, over: Record<string, unknown> = {}) => ({ name, pane_id: pane, agent: "codex", agent_status: "idle", cwd: "/repo", completion_seq: 1, state_change_seq: 1, ...over });
+const textOf = (r: any) => r.content[0].text as string;
+
+test("await_reply tracks any agent: its reply is a message, bg_wait can take it instead, and it is outside work for pi-bg", async () => {
+  inHerdr();
+  const w = agentsHerdr({ other: peerAgent("other", "w7:p1") });
+  const p = fakePi();
+  piHerdr(p.pi, { call: w.f.call, exec: async () => ({ code: 0, stdout: "", stderr: "" }), pollMs: 5 });
+  let idle = false;
+  const ctx = { ...ctxOf([]), isIdle: () => idle };
+  await p.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  const external = (state?: string) => p.emitted.filter(([c, d]) => c === "bg:external" && (!state || d.state === state)).map(([, d]) => d);
+
+  const sent = textOf(await p.tool().execute("t", { action: "send", name: "other", message: "Review the diff", await_reply: true }, undefined, undefined, ctx));
+  expect(sent).toContain("Typed into other's terminal");
+  expect(sent).toContain("bg_wait herdr:other");
+  expect(w.f.of("agent.prompt")[0]!.params).toMatchObject({ target: "w7:p1", text: "Review the diff" });
+  expect(external("running")).toEqual([expect.objectContaining({ id: "herdr:other", label: "agent other" })]);
+  expect(p.emitted.some(([c, d]) => c === "herdr:background" && d.active && d.label === "agent other")).toBe(true);
+  // Its turn runs and ends while pi is busy: the poll finds it and the reply is outside work, done.
+  w.agents.other!.agent_status = "working";
+  await new Promise((r) => setTimeout(r, 30));
+  w.agents.other!.agent_status = "idle";
+  w.agents.other!.completion_seq = 2;
+  await until(() => external("done").length === 1);
+  expect(external("done")[0]).toMatchObject({ id: "herdr:other", result: expect.stringContaining("the agent's screen") });
+  expect(external("done")[0]!.result).toContain('Agent "other" (pane w7:p1)');
+  expect(p.messages).toHaveLength(0);
+  // A bg_wait took it: it is not also delivered as a message, however often pi settles.
+  p.pi.events.emit("bg:external-consumed", { id: "herdr:other" });
+  idle = true;
+  await p.emit("agent_settled", { type: "agent_settled" }, ctx);
+  expect(p.messages).toHaveLength(0);
+  expect(p.entries.some((e) => e.customType === "pi-herdr:delivered")).toBe(true);
+  // The peer is retired: nothing is awaited, and a settle later still owes nothing.
+  expect(textOf(await p.tool().execute("t", { action: "list" }, undefined, undefined, ctx))).not.toContain("Children, and agents");
+  await p.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx);
+});
+
+test("an awaited reply nobody consumed is delivered once as a message when pi is idle", async () => {
+  inHerdr();
+  const w = agentsHerdr({ other: peerAgent("other", "w7:p1") });
+  const p = fakePi();
+  piHerdr(p.pi, { call: w.f.call, exec: async () => ({ code: 0, stdout: "", stderr: "" }), pollMs: 5 });
+  const ctx = { ...ctxOf([]), isIdle: () => true };
+  await p.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await p.tool().execute("t", { action: "send", name: "other", message: "go", await_reply: true }, undefined, undefined, ctx);
+  // The waiting tool refuses an awaited agent: its reply comes on its own.
+  await expect(p.tool().execute("t", { action: "wait", name: "other" }, undefined, undefined, ctx)).rejects.toThrow("bg_wait herdr:other");
+  await expect(p.tool().execute("t", { action: "interrupt", name: "other" }, undefined, undefined, ctx)).rejects.toThrow("only on this session's children");
+  w.agents.other!.agent_status = "working";
+  await new Promise((r) => setTimeout(r, 30));
+  w.agents.other!.agent_status = "idle";
+  w.agents.other!.completion_seq = 2;
+  await until(() => p.messages.length === 1);
+  expect(p.messages[0].message.customType).toBe("herdr-child");
+  expect(p.messages[0].message.content).toContain("a screen read");
+  await new Promise((r) => setTimeout(r, 30));
+  expect(p.messages).toHaveLength(1);
+  // A consume after the message is a no-op.
+  p.pi.events.emit("bg:external-consumed", { id: "herdr:other" });
+  expect(p.messages).toHaveLength(1);
+  await p.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx);
+});
+
+test("await_reply refuses a working agent without a delivery, discards a failed adoption, and ends outside work at shutdown", async () => {
+  inHerdr();
+  const w = agentsHerdr({ busy: peerAgent("busy", "w7:p1", { agent_status: "working" }), me: peerAgent("me", "w1:p1") });
+  const p = fakePi();
+  piHerdr(p.pi, { call: w.f.call, exec: async () => ({ code: 0, stdout: "", stderr: "" }), pollMs: 60_000 });
+  const ctx = ctxOf([]);
+  await p.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await expect(p.tool().execute("t", { action: "send", name: "busy", message: "x", await_reply: true }, undefined, undefined, ctx)).rejects.toThrow("delivery=steer");
+  await expect(p.tool().execute("t", { action: "send", name: "me", message: "x", await_reply: true }, undefined, undefined, ctx)).rejects.toThrow("own pane");
+  expect(w.f.of("agent.prompt")).toEqual([]);
+  expect(textOf(await p.tool().execute("t", { action: "list" }, undefined, undefined, ctx))).not.toContain("Children, and agents");
+  await p.tool().execute("t", { action: "send", name: "busy", message: "x", await_reply: true, delivery: "steer" }, undefined, undefined, ctx);
+  const list = textOf(await p.tool().execute("t", { action: "list" }, undefined, undefined, ctx));
+  expect(list).toContain("busy  w7:p1  codex working  [awaited]");
+  expect(list).toContain("peer");
+  await p.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx);
+  expect(p.emitted.filter(([c, d]) => c === "bg:external" && d.state === "failed").map(([, d]) => d.id)).toEqual(["herdr:busy"]);
+});
+
+test("broadcast: one result line per agent, nothing sent when a busy one has no delivery, and a directory selects", async () => {
+  inHerdr();
+  const w = agentsHerdr({
+    a: peerAgent("a", "w7:p1", { cwd: "/repo/one" }),
+    b: peerAgent("b", "w8:p1", { cwd: "/repo/two", agent_status: "working" }),
+    c: peerAgent("c", "w9:p1", { cwd: "/elsewhere" }),
+    me: peerAgent("me", "w1:p1", { cwd: "/repo" }),
+  });
+  const p = fakePi();
+  piHerdr(p.pi, { call: w.f.call, exec: async () => ({ code: 0, stdout: "", stderr: "" }), pollMs: 60_000 });
+  const ctx = ctxOf([]);
+  await p.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  const send = (params: Record<string, unknown>) => p.tool().execute("t", { action: "send", message: "heads up", ...params }, undefined, undefined, ctx);
+  await expect(send({ cwd_prefix: "/repo" })).rejects.toThrow("Nothing was sent: b is working");
+  expect(w.f.of("agent.prompt")).toEqual([]);
+  const out = textOf(await send({ cwd_prefix: "/repo", delivery: "steer" }));
+  expect(w.f.of("agent.prompt").map((l) => l.params.target).sort()).toEqual(["w7:p1", "w8:p1"]);
+  expect(out).toContain("a: Typed into a's terminal");
+  expect(out).toContain("b: Typed into b's terminal");
+  expect(out).not.toContain("c:");
+  expect(out).toContain("Its reply is not sent back");
+  // Named: a missing one and a failing one are lines, not errors; await_reply tracks each that took it.
+  w.f.log.length = 0;
+  const named = textOf(await send({ names: ["a", "ghost"], delivery: "steer", await_reply: true }));
+  expect(named).toContain("ghost: not sent: no such agent");
+  expect(named).toContain("Replies arrive as messages");
+  expect(textOf(await p.tool().execute("t", { action: "list" }, undefined, undefined, ctx))).toContain("[awaited]");
+  await expect(send({ names: ["a"], name: "b" })).rejects.toThrow("not both");
+  await p.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx);
+});
+
+/** A started pi-herdr with a terminal-input listener and an editor the test types into. */
+async function inboxPi(env: Record<string, string> = {}) {
+  inHerdr();
+  for (const [k, v] of Object.entries(env)) vi.stubEnv(k, v);
+  const { f } = herdr();
+  const p = fakePi();
+  piHerdr(p.pi, { call: f.call, exec: async () => ({ code: 0, stdout: "", stderr: "" }), pollMs: 60_000 });
+  let listener: ((data: string) => { consume?: boolean } | undefined) | undefined;
+  const state = { editor: "", idle: true };
+  const notes: string[] = [];
+  const base = ctxOf([]);
+  const ctx = {
+    ...base,
+    isIdle: () => state.idle,
+    ui: {
+      ...base.ui,
+      notify: (m: string) => void notes.push(m),
+      getEditorText: () => state.editor,
+      setEditorText: (t: string) => void (state.editor = t),
+      onTerminalInput: (fn: typeof listener) => { listener = fn; return () => void (listener = undefined); },
+    },
+  };
+  await p.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  const tokens = (source: string) => f.of("pane.report_metadata").filter((l) => l.params.source === source && l.params.tokens).flatMap((l) => Object.entries(l.params.tokens as Record<string, unknown>).map(([k, v]) => [k, (v as any)?.value ?? v] as const));
+  return { p, f, ctx, state, notes, tokens, input: (d: string) => listener!(d) };
+}
+const envelope = async (id: string, delivery: "steer" | "queue" = "steer") => (await import("../src/inbox.ts")).encodeEnvelope({ v: 1, id, from: { pane: "w9:p1", name: "lead", host: "mac" }, text: `do ${id}`, delivery });
+
+test("presence: a message waits while the user types, is acknowledged held:typing, and follows their turn once they submit", async () => {
+  vi.useFakeTimers();
+  try {
+    const t = await inboxPi();
+    t.state.editor = "my draft";
+    t.input("x");
+    t.state.editor = "my draftx";
+    expect(t.input(await envelope("aaa"))).toEqual({ consume: true });
+    expect(t.p.messages).toEqual([]);
+    expect(t.notes.some((n) => n.includes("waiting until you submit or stop typing"))).toBe(true);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(t.tokens("pi-herdr-inbox-ack")).toContainEqual(["ack-aaa", "held:typing"]);
+    expect(t.tokens("pi-herdr-inbox")).toContainEqual(["typing", "1"]);
+    // Still typing a second later: still held.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(t.p.messages).toEqual([]);
+    // The user submits; the turn starts (pi is busy now), and the message follows it.
+    t.input("\r");
+    t.state.editor = "";
+    t.state.idle = false;
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(t.p.messages).toHaveLength(1);
+    expect(t.p.messages[0].options).toEqual({ triggerTurn: true, deliverAs: "followUp" });
+    // The typing token ends with the burst.
+    await vi.advanceTimersByTimeAsync(16_000);
+    expect(t.tokens("pi-herdr-inbox")).toContainEqual(["typing", null]);
+    await t.p.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, t.ctx);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("presence: deleting the draft, or leaving it alone for 15 seconds, releases a held message to an idle session", async () => {
+  vi.useFakeTimers();
+  try {
+    const t = await inboxPi();
+    t.state.editor = "d";
+    t.input("d");
+    t.input(await envelope("bbb"));
+    expect(t.p.messages).toEqual([]);
+    t.input("\x7f");
+    t.state.editor = "";
+    await vi.advanceTimersByTimeAsync(400);
+    expect(t.p.messages).toHaveLength(1);
+    expect(t.p.messages[0].options).toEqual({ triggerTurn: true });
+    // A draft left alone: not typing any more.
+    t.state.editor = "draft";
+    t.input("t");
+    t.input(await envelope("ccc"));
+    expect(t.p.messages).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(16_000);
+    expect(t.p.messages).toHaveLength(2);
+    expect(t.state.editor).toBe("draft");
+    await t.p.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, t.ctx);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("rate guard: a sender past its limit is deferred to the user's next prompt, and the user's input starts the count over", async () => {
+  const t = await inboxPi({ PI_HERDR_INBOX_RATE: "2/600" });
+  t.input(await envelope("r1"));
+  t.input(await envelope("r2"));
+  expect(t.p.messages).toHaveLength(2);
+  t.input(await envelope("r3"));
+  // Deferred: it starts no turn, and rides along with the user's next prompt.
+  expect(t.p.messages).toHaveLength(3);
+  expect(t.p.messages[2].options).toEqual({ deliverAs: "nextTurn" });
+  expect(t.notes.some((n) => n.includes("2 messages without an answer from you"))).toBe(true);
+  await new Promise((r) => setTimeout(r, 5));
+  expect(t.tokens("pi-herdr-inbox-ack")).toContainEqual(["ack-r3", "deferred:rate"]);
+  // The agent's own sendUserMessage is not the user; an interactive prompt is.
+  await t.p.emit("input", { type: "input", text: "continue", source: "extension" }, t.ctx);
+  t.input(await envelope("r4"));
+  expect(t.p.messages[3].options).toEqual({ deliverAs: "nextTurn" });
+  await t.p.emit("input", { type: "input", text: "thanks", source: "interactive" }, t.ctx);
+  t.input(await envelope("r5"));
+  expect(t.p.messages[4].options).toEqual({ triggerTurn: true });
+  await t.p.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, t.ctx);
+});
+
+test("an awaited peer is a read-only row marked peer: never stoppable, counted apart in the pill, gone once replied", async () => {
+  const { f, state } = herdr();
+  const children = new Children({
+    call: f.call,
+    agent: { kind: "pi", args: () => [], reply: async () => "done" },
+    selfPane: "w1:p1",
+    exec: async () => ({ code: 0, stdout: "", stderr: "" }),
+    persist: (rec) => activity.observe(rec),
+    deliver: () => undefined,
+    hold: () => undefined,
+    pollMs: 60_000,
+    readyPollMs: 1,
+  });
+  let now = 1_000;
+  const activity = new ChildrenActivity(children, { changed: () => undefined, now: () => now });
+  const section = activity.section;
+  const rec = children.adopt({ name: "lead", paneId: "w5:p1", machine: "NUC", cwd: "/work", task: "Review it" });
+  (children as any).deps.callFor = () => f.call;
+  await children.send(rec.name, "Review it", "steer");
+  expect(section.entries(now)).toEqual([expect.objectContaining({ key: "NUC/lead", status: "running", detail: expect.stringContaining("peer on NUC · pane w5:p1 · Review it") })]);
+  expect(section.entries(now)[0]).not.toHaveProperty("stopToken");
+  expect(section.canStop?.("NUC/lead")).toBe(false);
+  section.stop?.("NUC/lead");
+  await new Promise((r) => setTimeout(r, 0));
+  expect(f.of("agent.send_keys")).toEqual([]);
+  expect(section.pill?.(now)).toEqual({ label: "1 awaited" });
+  const child = await children.spawn({ task: "Build it", name: "builder", cwd: "/repo" });
+  expect(section.pill?.(now)).toEqual({ label: "1 child · 1 awaited" });
+  void child;
+  void state;
+});

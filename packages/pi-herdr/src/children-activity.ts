@@ -6,6 +6,8 @@
 // pane of its own: Enter opens read-only details (its task, where it runs, its status and last reply
 // or screen) and never focuses or raises its pane; `x` only interrupts an awaited turn (Escape in
 // its pane, as action=interrupt does), and only while one is awaited; nothing here closes a pane.
+// Agents whose reply is awaited without being children (`peer` rows, from `send` with await_reply)
+// are listed and can be read, but never interrupted: they are not this session's to stop.
 // Ended rows (closed, or idle after replying) can be dismissed from the list.
 import { randomUUID } from "node:crypto";
 import { type Component, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
@@ -35,7 +37,7 @@ export interface ChildDetailsSource {
   read(): Promise<string>;
 }
 
-const where = (rec: ChildRecord) => (rec.where === "worktree" && rec.branch ? `worktree ${rec.branch}` : rec.where);
+const where = (rec: ChildRecord) => (rec.peer ? `peer${rec.machine ? ` on ${rec.machine}` : ""}` : rec.where === "worktree" && rec.branch ? `worktree ${rec.branch}` : rec.where);
 
 function elapsed(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -121,7 +123,7 @@ export class ChildDetails implements Component {
     const row = (s: string) => `${th.fg("accent", "│")} ${truncateToWidth(s, inner, "…", true)} ${th.fg("accent", "│")}`;
     const rule = row(th.fg("dim", "─".repeat(inner)));
     const rec = this.source.record();
-    const title = ` ◀ esc · herdr child ${rec?.name ?? ""} · read-only `;
+    const title = ` ◀ esc · ${rec?.peer ? "awaited agent" : "herdr child"} ${rec?.name ?? ""} · read-only `;
     const out = [th.fg("accent", `╭─${th.bold(truncateToWidth(title, Math.max(4, width - 3)))}${"─".repeat(Math.max(0, width - 3 - title.length))}╮`)];
     if (!rec) {
       out.push(row(th.fg("dim", "This child is no longer known.")));
@@ -187,12 +189,12 @@ export class ChildrenActivity {
       open: (key, ui) => this.open(key, ui, current),
       stop: (key) => {
         const rec = this.children.records.get(key);
-        // Interrupt only a turn this session asked for; never close the pane.
-        if (current() && rec?.awaiting && !rec.closed) return this.children.interrupt(rec.name).then(() => undefined);
+        // Interrupt only a turn this session asked for, of a child; never close the pane.
+        if (current() && rec?.awaiting && !rec.closed && !rec.peer) return this.children.interrupt(rec.name).then(() => undefined);
       },
       canStop: (key) => {
         const rec = this.children.records.get(key);
-        return current() && Boolean(rec?.awaiting && !rec.closed);
+        return current() && Boolean(rec?.awaiting && !rec.closed && !rec.peer);
       },
       dismiss: (key) => {
         const rec = this.children.records.get(key);
@@ -298,7 +300,7 @@ export class ChildrenActivity {
         status,
         stats,
         startedAt,
-        ...(running ? { stopToken: this.stopToken(rec) } : {}),
+        ...(running && !rec.peer ? { stopToken: this.stopToken(rec) } : {}),
         ...(endedAt !== undefined ? { endedAt } : {}),
       });
     }
@@ -308,8 +310,11 @@ export class ChildrenActivity {
   pill(now: number): ActivityPill | undefined {
     void now;
     if (!this.current()) return undefined;
-    const running = [...this.children.records.values()].filter((r) => r.awaiting && !r.closed).length;
-    return running ? { label: `${running} child${running === 1 ? "" : "ren"}` } : undefined;
+    const live = [...this.children.records.values()].filter((r) => r.awaiting && !r.closed);
+    const running = live.filter((r) => !r.peer).length;
+    const peers = live.length - running;
+    const parts = [running ? `${running} child${running === 1 ? "" : "ren"}` : "", peers ? `${peers} awaited` : ""].filter(Boolean);
+    return parts.length ? { label: parts.join(" · ") } : undefined;
   }
 
   private open(key: string, ui: unknown, current: () => boolean): Promise<void> {

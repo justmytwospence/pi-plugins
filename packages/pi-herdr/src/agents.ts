@@ -15,11 +15,11 @@ import {
   type Outcome,
   type Sender,
   ackTokenName,
+  parseAck,
   encodeEnvelope,
   INBOX_TOKEN,
   MAX_MESSAGE_BYTES,
   newMessageId,
-  OUTCOMES,
   parseInboxToken,
 } from "./inbox.ts";
 import { readReply } from "./session.ts";
@@ -39,6 +39,10 @@ export interface AgentInfo {
 }
 
 const SETTLED = new Set(["idle", "done", "blocked"]);
+/** A broadcast reaches at most this many agents. */
+export const MAX_BROADCAST = 20;
+/** The pane token pi-herdr sets while the user types a draft there. */
+export const TYPING_TOKEN = "typing";
 
 /** CLI arguments for the API methods this module uses, for `herdr --machine <m> ...`. */
 function cliArgs(method: string, p: Record<string, any>): string[] | undefined {
@@ -79,6 +83,8 @@ export interface SendResult {
   via: "inbox" | "prompt";
   /** What the receiver did with an inbox message; undefined when it did not confirm in time. */
   outcome?: Outcome;
+  /** Why it was held or deferred (`dialog`, `typing`, `retry`, `rate`). */
+  reason?: string;
   info: AgentInfo;
 }
 
@@ -99,12 +105,18 @@ const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve) 
   signal?.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true });
 });
 
-export const outcomeText = (name: string, outcome: Outcome | undefined): string => {
-  switch (outcome) {
+/** What an acknowledgement (`outcome` or `outcome:reason`, as its token carries it) means for the sender. */
+export const outcomeText = (name: string, ack: string | Outcome | undefined, reason?: string): string => {
+  const parsed = parseAck(reason ? `${ack}:${reason}` : ack);
+  switch (parsed?.outcome) {
     case "started": return `${name} was idle and started a turn on it.`;
     case "steered": return `${name} is working; it gets the message in its current turn, after the current tool call.`;
     case "queued": return `${name} is working; the message is queued for after its current turn.`;
-    case "held": return `${name} is waiting on a dialog for the user, so the message is held there and delivered when the dialog closes.`;
+    case "deferred": return `${name} has had many messages from this agent without the user answering it, so this one waits for the user's next prompt and starts no turn. Do not resend; stop messaging it until the user has answered.`;
+    case "held":
+      if (parsed.reason === "typing") return `${name}'s user is typing a draft in its pane, so the message is held there and delivered when they submit (it then follows their turn) or stop typing.`;
+      if (parsed.reason === "retry") return `${name}'s pi could not take the message just now, so it is held there and retried when its session is next idle.`;
+      return `${name} is waiting on a dialog for the user, so the message is held there and delivered when the dialog closes.`;
     default: return `${name} did not confirm receipt in time. It was sent once; check with action=read before sending again.`;
   }
 };
@@ -149,7 +161,7 @@ export class Agents {
    * agent has no inbox (the caller falls back to agent.prompt). Throws, sending nothing, when its pi
    * is not in front: typing into that pane would reach whatever is.
    */
-  async sendInbox(info: AgentInfo, text: string, delivery: Delivery, opts: { machine?: string; awaitsReply?: boolean } = {}): Promise<{ outcome?: Outcome } | undefined> {
+  async sendInbox(info: AgentInfo, text: string, delivery: Delivery, opts: { machine?: string; awaitsReply?: boolean } = {}): Promise<{ outcome?: Outcome; reason?: string; ack?: string } | undefined> {
     const state = await this.inboxState(info, opts.machine);
     if (state === "no") return undefined;
     if (state === "background") throw new Error(`${info.name ?? info.pane_id}'s pi is not in the foreground of its pane (suspended with Ctrl+Z, or a program runs on top of it), so nothing was sent: typing there would reach that program. Try again once pi is back in front.`);
@@ -163,13 +175,14 @@ export class Agents {
     while (Date.now() < deadline) {
       await sleep(step);
       const p = await call<{ pane?: { tokens?: Record<string, string> } }>("pane.get", { pane_id: info.pane_id });
-      const ack = p.result?.pane?.tokens?.[key];
-      if (ack && (OUTCOMES as readonly string[]).includes(ack)) return { outcome: ack as Outcome };
+      const raw = p.result?.pane?.tokens?.[key];
+      const ack = parseAck(raw);
+      if (ack) return { outcome: ack.outcome, ...(ack.reason ? { reason: ack.reason } : {}), ack: raw };
     }
     return {};
   }
 
-  async send(name: string, text: string, opts: { delivery?: Delivery; machine?: string }): Promise<SendResult> {
+  async send(name: string, text: string, opts: { delivery?: Delivery; machine?: string; awaitsReply?: boolean }): Promise<SendResult> {
     if (Buffer.byteLength(text) > MAX_MESSAGE_BYTES) throw new Error(`The message is over ${MAX_MESSAGE_BYTES / 1024} KB. Write it to a file and send the path instead.`);
     const info = await this.get(name, opts.machine);
     if (!opts.machine && info.pane_id === this.deps.selfPane) throw new Error("That is this session's own pane.");
@@ -177,8 +190,8 @@ export class Agents {
     const status = info.agent_status;
     // Steering derails the turn it lands in: that is the sender's choice to make, never a default.
     if ((status === "working" || status === "blocked") && !opts.delivery) throw new Error(`${label} is ${status} on a turn now, so nothing was sent. Read it (action=read) if you need to know what it is doing, then send again with delivery=steer to put the message into that turn (a correction to that work), or delivery=queue for after it (new or separate work).`);
-    const inbox = await this.sendInbox(info, text, opts.delivery ?? "steer", { machine: opts.machine });
-    if (inbox) return { via: "inbox", outcome: inbox.outcome, info };
+    const inbox = await this.sendInbox(info, text, opts.delivery ?? "steer", { machine: opts.machine, ...(opts.awaitsReply ? { awaitsReply: true } : {}) });
+    if (inbox) return { via: "inbox", outcome: inbox.outcome, ...(inbox.reason ? { reason: inbox.reason } : {}), info };
     // No inbox: herdr types the message into its terminal, after whatever draft is there.
     if (status === "blocked") throw new Error(`${label} is waiting on a dialog for the user and has no pi-herdr inbox to hold the message, so nothing was sent. Try again once the user has answered it.`);
     if (status === "working" && opts.delivery === "queue") throw new Error(`${label} has no pi-herdr inbox, so a message cannot be queued in it. Wait for it (action=wait) and send then, or use delivery=steer.`);
@@ -234,7 +247,42 @@ export class Agents {
     }
   }
 
-  async list(opts: { machine?: string; children?: Map<string, string> } = {}): Promise<string> {
+  /**
+   * The agents a broadcast reaches: the named ones, or every agent working in a directory or below
+   * it. Never this session's own pane; at most MAX_BROADCAST. Names that cannot be found come back
+   * as `missing`, so the caller can say so per target.
+   */
+  async targets(opts: { names?: string[]; cwdPrefix?: string; machine?: string }): Promise<{ infos: AgentInfo[]; missing: string[] }> {
+    const own = (a: AgentInfo) => !opts.machine && a.pane_id === this.deps.selfPane;
+    if (opts.names?.length) {
+      const names = [...new Set(opts.names.map((n) => n.trim()).filter(Boolean))];
+      if (names.length > MAX_BROADCAST) throw new Error(`That is ${names.length} agents; a broadcast reaches at most ${MAX_BROADCAST}.`);
+      const infos: AgentInfo[] = [];
+      const missing: string[] = [];
+      await Promise.all(names.map(async (n) => {
+        try { infos.push(await this.get(n, opts.machine)); } catch { missing.push(n); }
+      }));
+      // Keep the caller's order; the lookups ran in parallel.
+      const order = (a: AgentInfo) => names.findIndex((n) => n === a.name || n === a.pane_id);
+      infos.sort((a, b) => order(a) - order(b));
+      return { infos: infos.filter((a, i) => !own(a) && infos.findIndex((b) => b.pane_id === a.pane_id) === i), missing };
+    }
+    let prefix = opts.cwdPrefix?.trim() ?? "";
+    if (!prefix) throw new Error("A broadcast needs `names` or `cwd_prefix`.");
+    if (prefix.startsWith("~")) {
+      if (opts.machine) throw new Error(`Give cwd_prefix as an absolute path on ${opts.machine}: ~ is this machine's home.`);
+      prefix = `${process.env.HOME ?? ""}${prefix.slice(1)}`;
+    }
+    prefix = prefix.replace(/\/+$/u, "") || "/";
+    const r = await this.endpoint(opts.machine)<{ agents?: AgentInfo[] }>("agent.list", {});
+    if (r.error) throw new Error(`herdr could not list agents${opts.machine ? ` on ${opts.machine}` : ""}: ${errorText(r)}`);
+    const infos = (r.result?.agents ?? []).filter((a) => a.pane_id && !own(a) && !!a.cwd && (a.cwd === prefix || a.cwd.startsWith(prefix === "/" ? "/" : `${prefix}/`)));
+    if (infos.length > MAX_BROADCAST) throw new Error(`${infos.length} agents work under ${prefix}; a broadcast reaches at most ${MAX_BROADCAST}. Narrow the directory or name them.`);
+    return { infos, missing: [] };
+  }
+
+  /** `marks`: extra labels by pane id (this session's children and awaited peers), for the machine listed. */
+  async list(opts: { machine?: string; marks?: Map<string, string> } = {}): Promise<string> {
     const r = await this.endpoint(opts.machine)<{ agents?: AgentInfo[] }>("agent.list", {});
     if (r.error) throw new Error(`herdr could not list agents${opts.machine ? ` on ${opts.machine}` : ""}: ${errorText(r)}`);
     const agents = r.result?.agents ?? [];
@@ -243,12 +291,14 @@ export class Agents {
     return agents.map((a) => {
       const marks = [
         !opts.machine && a.pane_id === this.deps.selfPane ? "this session" : undefined,
-        !opts.machine && a.pane_id && opts.children?.has(a.pane_id) ? `child ${opts.children.get(a.pane_id)}` : undefined,
+        a.pane_id ? opts.marks?.get(a.pane_id) : undefined,
         parseInboxToken(a.tokens?.[INBOX_TOKEN]) !== undefined ? "inbox" : undefined,
+        a.tokens?.[TYPING_TOKEN] ? "typing" : undefined,
         a.focused ? "focused" : undefined,
       ].filter(Boolean).join(", ");
       const cwd = a.cwd && home && a.cwd.startsWith(home) ? `~${a.cwd.slice(home.length)}` : a.cwd ?? "";
-      return `${a.name ?? "-"}  ${a.pane_id}  ${a.agent ?? "?"} ${a.agent_status ?? "?"}${marks ? `  [${marks}]` : ""}  ${cwd}  ${(a.title ?? "").replace(/\s+/gu, " ").slice(0, 60)}`;
+      const summary = a.tokens?.summary?.replace(/\s+/gu, " ").trim();
+      return `${a.name ?? "-"}  ${a.pane_id}  ${a.agent ?? "?"} ${a.agent_status ?? "?"}${marks ? `  [${marks}]` : ""}  ${cwd}  ${(a.title ?? "").replace(/\s+/gu, " ").slice(0, 60)}${summary ? `  | ${summary}` : ""}`;
     }).join("\n");
   }
 }

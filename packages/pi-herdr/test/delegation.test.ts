@@ -32,6 +32,16 @@ test("Herdr guidance separates report-back delegation from persistent handoffs a
   expect(guidelines).toContain("not `herdr agent prompt` in bash");
   expect(guidelines).toContain("screen read and can be cut short");
   expect(guidelines).not.toContain("background job");
+  // Hearing back: await_reply, bg_wait, and no ping-pong.
+  expect(guidelines).toContain("send with await_reply and end your turn");
+  expect(guidelines).toContain("bg_wait herdr:<name>");
+  expect(guidelines).toContain("Do not start a back-and-forth");
+  expect(guidelines).toContain("held because the user is typing");
+  expect(guidelines).toContain("Broadcast sparingly");
+  expect(guidelines).toContain("reaches up to 20 agents");
+  expect(registered?.description).toContain("await_reply");
+  const props = JSON.stringify(registered?.parameters);
+  for (const key of ["await_reply", "names", "cwd_prefix", "timeout_ms"]) expect(props).toContain(`"${key}"`);
   const schema = JSON.stringify(registered?.parameters);
   expect(schema).toContain("user-requested independent branch/checkout");
   expect(schema).toContain("do not create a worktree without the user's request");
