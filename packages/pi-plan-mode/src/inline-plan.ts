@@ -21,11 +21,12 @@ import {
   getMarkdownTheme,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
-import { Container } from "@earendil-works/pi-tui";
+import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { editInTerminal, externalEditorCommand } from "./external-editor.js";
 import { askFeedback } from "./feedback-input.js";
 import { holdBlocked } from "./herdr-blocked.js";
 import { PlanMarkdown } from "./mermaid-art.js";
+import { planDiff, renderPlanDiff } from "./plan-diff.js";
 import { expandHome } from "./plan-hook.js";
 import { PlanReviewViewport } from "./plan-review-viewport.js";
 import { type ReviewStatus, reviewBody, reviewTitle } from "./review-card.js";
@@ -153,7 +154,7 @@ It is the only file you may write. Build the plan there as you go, with write an
 3. Write the plan: one line of context (why), the recommended approach (not every alternative), the files to change with their paths, existing code to reuse, and how to verify it end to end (tests, commands). Keep it short enough to scan.
 4. Call ${EXIT_TOOL} when the plan is complete; it shows the plan to the user for approval. Do not ask "is this plan okay?" or "should I proceed?" any other way; that is what ${EXIT_TOOL} does.
 
-End each turn by asking the user a question or by calling ${EXIT_TOOL}. If the user only asked a question that needs no code changes (research, an explanation), answer it and do not call ${EXIT_TOOL}.
+End each turn by asking the user a question or by calling ${EXIT_TOOL}. After the user declines a plan, a plain reply also ends a turn well: when their feedback asks a question or opens a discussion, answer it and wait for them. If the user only asked a question that needs no code changes (research, an explanation), answer it and do not call ${EXIT_TOOL}.
 </system-reminder>`;
 }
 
@@ -174,6 +175,15 @@ You can refer back to it if needed during implementation.
 
 ## Approved Plan${edited ? " (edited by user)" : ""}:
 ${plan}`;
+}
+
+/** What your agent hears when the user declines a plan and says why: their words, and how to answer them. */
+export function declinedText(feedback: string) {
+  return `The user declined the plan and said:
+
+${feedback}
+
+Reply to them first, in chat. If they asked a question, disagreed, or left the direction open, answer and end your turn there: do not revise the plan or call ${EXIT_TOOL} again until they have settled it. If they asked for a clear change, revise the plan file, say in a sentence or two what you changed, then call ${EXIT_TOOL} again.`;
 }
 
 export const ENTER_GUIDELINES = [
@@ -197,6 +207,8 @@ interface ExitDetails {
   edited?: boolean;
   /** What the user said should change, when they kept planning. */
   feedback?: string;
+  /** The plan the user last declined, while a revision of it waits for review. */
+  previous?: string;
 }
 
 export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): InlinePlanMode {
@@ -206,6 +218,8 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   /** Restored this session's state (so the gate's early broadcast does not clobber it). */
   let restored = false;
   let hostCtx: ExtensionContext | undefined;
+  /** The plan the user last declined: a revision's review shows what changed since. */
+  let declined: string | undefined;
   const reviewViewport = new PlanReviewViewport();
 
   const safely = (fn: () => void) => {
@@ -307,6 +321,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       told: latest?.told === true,
       ...(typeof latest?.planFile === "string" ? { planFile: latest.planFile } : {}),
     };
+    declined = lastDeclined(entries);
     restored = true;
     // The gate is the source of truth for the mode when it is there.
     if (gate) {
@@ -439,9 +454,10 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       try {
         for (;;) {
           reviewViewport.restart();
+          const previous = declined !== undefined && declined !== plan ? declined : undefined;
           onUpdate?.({
             content: [{ type: "text", text: plan }],
-            details: { plan, planFile, outcome: "pending" } satisfies ExitDetails,
+            details: { plan, planFile, outcome: "pending", ...(previous ? { previous } : {}) } satisfies ExitDetails,
           } as never);
           const choice = await ctx.ui.select(`Implement this plan? ${tildify(planFile)}`, choices(), { signal });
           if (choice === EDIT) {
@@ -470,14 +486,10 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
                 ? (await askFeedback(pi, ctx, "What should change? (Enter to say it in the chat)"))?.trim()
                 : "";
             const details: ExitDetails = { plan, planFile, outcome: "kept", ...(feedback ? { feedback } : {}) };
+            declined = plan;
             if (feedback) {
               return {
-                content: [
-                  {
-                    type: "text",
-                    text: `The user wants to keep planning and did not approve the plan. Their feedback:\n\n${feedback}\n\nRevise the plan file, then call ${EXIT_TOOL} again.`,
-                  },
-                ],
+                content: [{ type: "text", text: declinedText(feedback) }],
                 details,
               } as never;
             }
@@ -493,6 +505,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             } as never;
           }
           host.approved(plan, ctx);
+          declined = undefined;
           if (choice === APPROVE_FRESH) {
             // The fresh session gets the plan; this one is done.
             exitLocal(ctx, false);
@@ -552,6 +565,19 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   };
 }
 
+/** The plan last declined on this branch, unless a later review approved one. */
+function lastDeclined(entries: readonly unknown[]): string | undefined {
+  for (const entry of [...entries].reverse()) {
+    const message = (entry as { type?: string; message?: { role?: string; toolName?: string; details?: unknown } })
+      .message;
+    if (message?.role !== "toolResult" || message.toolName !== EXIT_TOOL) continue;
+    const details = message.details as ExitDetails | undefined;
+    if (details?.outcome === "kept") return details.plan;
+    if (details?.outcome === "approved" || details?.outcome === "fresh") return undefined;
+  }
+  return undefined;
+}
+
 function hasPlan(file: string | undefined) {
   return Boolean(file && readPlan(file));
 }
@@ -595,9 +621,22 @@ function renderExit(
       : outcome === "fresh"
         ? { tone: "success", text: "✓ Approved, implementing in a fresh session", context }
         : outcome === "kept"
-          ? { tone: "warning", text: "Kept planning", context }
+          ? {
+              tone: "warning",
+              text: details?.feedback ? `Kept planning: ${details.feedback}` : "Kept planning",
+              context,
+            }
           : { tone: "pending", text: "Waiting for approval", context };
-  return reviewBody(theme, plan, status, options, (text) => new PlanMarkdown(text, getMarkdownTheme(), theme));
+  const body = reviewBody(theme, plan, status, options, (text) => new PlanMarkdown(text, getMarkdownTheme(), theme));
+  const changes = outcome === "pending" && details?.previous ? planDiff(details.previous, plan) : [];
+  if (changes.length === 0) return body;
+  // While a revision waits for review, what changed since the declined plan comes first.
+  const container = new Container();
+  container.addChild(new Text(theme.fg("muted", "Changes since the plan you declined:"), 0, 0));
+  container.addChild(new Text(renderPlanDiff(theme, changes), 0, 0));
+  container.addChild(new Spacer(1));
+  container.addChild(body);
+  return container;
 }
 
 function text(value: string) {

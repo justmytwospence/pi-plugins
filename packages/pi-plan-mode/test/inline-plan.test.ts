@@ -158,7 +158,7 @@ test("keep planning sends your feedback back; Esc stops the turn", async () => {
   await mock.commands.get("plan")?.handler("", context.ctx);
   writeFileSync(inline().planFile, "# Plan\n");
   const kept = await tool(EXIT_TOOL).execute("t1", {}, undefined, undefined, context.ctx);
-  assert.match(kept.content[0]?.text ?? "", /keep planning[\s\S]*use redis/u);
+  assert.match(kept.content[0]?.text ?? "", /declined the plan and said:\n\nuse redis\n\nReply to them first/u);
   assert.equal(kept.terminate, undefined);
   assert.equal(inline().active, true);
   // pi-sticky-last-prompt pins the feedback as the user's words.
@@ -169,7 +169,17 @@ test("keep planning sends your feedback back; Esc stops the turn", async () => {
   });
   const exitWords = extractors.find(([name]) => name === EXIT_TOOL)?.[1];
   assert.equal(exitWords?.({ toolName: EXIT_TOOL, args: {}, result: kept }), "use redis");
-  const escaped = await tool(EXIT_TOOL).execute("t2", {}, undefined, undefined, context.ctx);
+  // The revision's review shows what changed since the declined plan.
+  writeFileSync(inline().planFile, "# Plan\n\nUse redis\n");
+  const updates: any[] = [];
+  const escaped = await tool(EXIT_TOOL).execute(
+    "t2",
+    {},
+    undefined,
+    (update: unknown) => updates.push(update),
+    context.ctx,
+  );
+  assert.equal(updates[0]?.details.previous, "# Plan");
   assert.equal(exitWords?.({ toolName: EXIT_TOOL, args: {}, result: escaped }), undefined);
   assert.equal(escaped.terminate, true);
   assert.equal(inline().active, true);
@@ -217,7 +227,7 @@ test("keep-planning feedback is typed in the suite's editor when one is loaded",
   assert.equal(options.initialMode, "insert");
   assert.ok(rendered.includes("[editor]"));
   assert.ok(disposed, "the editor is disposed when the prompt closes");
-  assert.match(kept.content[0]?.text ?? "", /keep planning[\s\S]*use redis/u);
+  assert.match(kept.content[0]?.text ?? "", /declined the plan and said:\n\nuse redis\n\nReply to them first/u);
 });
 
 test("a fresh-session approval starts /plan's fresh session once the turn is over", async () => {
