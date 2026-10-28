@@ -1,5 +1,5 @@
 // Cache-safe effort changes on OpenAI Responses models that take `configuration_update` input
-// items (GPT-6 Astra and GPT-6.1 Sol through the Codex subscription backend, verified live): the
+// items (GPT-6 Astra, GPT-6.1 Sol and GPT-6.1 Terra through the Codex subscription backend, verified live): the
 // request-level `reasoning.effort` stays at the conversation's first value, and each later change
 // is an item at the point in the input where it happened, replayed there on every later request.
 // Changing `reasoning.effort` itself would start a separate prompt cache for the new value.
@@ -17,10 +17,10 @@ export interface EffortUpdatesConfig {
 
 export const DEFAULT_EFFORT_UPDATES: EffortUpdatesConfig = {
   enabled: true,
-  models: ["openai-codex/gpt-6-astra", "openai-codex/gpt-6.1-sol"],
+  models: ["openai-codex/gpt-6-astra", "openai-codex/gpt-6.1-sol", "openai-codex/gpt-6.1-terra"],
 };
 
-/** Efforts both verified models accept. */
+/** Efforts the verified models accept. */
 const WIRE_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 
 export interface Transition {

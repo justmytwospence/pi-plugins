@@ -105,7 +105,7 @@ For `cache:model-offers` auto-effort runs the assessment it would run for the pr
 
 ## Effort updates (Codex)
 
-On OpenAI Responses models whose backend accepts a `configuration_update` input item, a change to the request's `reasoning.effort` starts a separate prompt cache, while the item changes effort from that point in the conversation. On the `effortUpdates.models` (default `openai-codex/gpt-6-astra` and `openai-codex/gpt-6.1-sol`, which the source records as verified live through the Codex subscription backend), auto-effort keeps the request's effort at the conversation's first value and turns every later change (its own, `/thinking`, or another extension's) into an item at the point it happened: after the latest tool result, or before your new message. Each item is replayed in place on later requests.
+On OpenAI Responses models whose backend accepts a `configuration_update` input item, a change to the request's `reasoning.effort` starts a separate prompt cache, while the item changes effort from that point in the conversation. On the `effortUpdates.models` (default `openai-codex/gpt-6-astra`, `openai-codex/gpt-6.1-sol` and `openai-codex/gpt-6.1-terra`, which the source records as verified live through the Codex subscription backend), auto-effort keeps the request's effort at the conversation's first value and turns every later change (its own, `/thinking`, or another extension's) into an item at the point it happened: after the latest tool result, or before your new message. Each item is replayed in place on later requests.
 
 - An item is never added for a change back to the effort already in force there, and there is at most one item per position (the backend rejects adjacent items).
 - A history rewritten under an item (compaction, a branch switch) starts a new baseline.
@@ -171,7 +171,7 @@ The `agents` files are shared with the opencode and Claude Code ports of this pl
   "jev": { "enabled": true, "provider": "typesafe", "model": "jev-latest", "timeoutMs": 1500 },
   "policy": { "floor": "low", "bounds": "free", "max": "xhigh", "threshold": { "relaxed": 0.5, "tight": 0.85 }, "hysteresis": 0.1, "ackThreshold": 0.7 },
   "midRun": { "enabled": true, "everyTurns": 3, "errorTurns": 1, "steps": 6, "models": [] },
-  "effortUpdates": { "enabled": true, "models": ["openai-codex/gpt-6-astra", "openai-codex/gpt-6.1-sol"] },
+  "effortUpdates": { "enabled": true, "models": ["openai-codex/gpt-6-astra", "openai-codex/gpt-6.1-sol", "openai-codex/gpt-6.1-terra"] },
   "models": { "mode": "auto", "maxSwitchTokens": 30000, "tiers": {} },
   "limits": {
     "enabled": true,

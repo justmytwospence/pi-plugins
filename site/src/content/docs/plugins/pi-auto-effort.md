@@ -33,7 +33,7 @@ The smoothing settings of earlier versions (`policy.mode`, `alpha`, `margin`, `j
 
 Mid-run checks normally happen every three tool turns, or after a turn containing a failed tool call. They require Pi's `compat.supportsMidConvoEffort` capability or an explicitly allowed model. Other models change only at new prompts, avoiding effort changes on tool follow-ups that could invalidate the cached prefix.
 
-The current `effortUpdates.models` defaults are `openai-codex/gpt-6-astra` and `openai-codex/gpt-6.1-sol`. For those entries, the extension keeps request-level effort stable and inserts `configuration_update` items for later changes. This rewriting remains active even with `/auto-effort off`; disable `effortUpdates.enabled` separately to stop it. Treat the list as implementation configuration, not a guarantee about every provider exposing similarly named models.
+The current `effortUpdates.models` defaults are `openai-codex/gpt-6-astra`, `openai-codex/gpt-6.1-sol` and `openai-codex/gpt-6.1-terra`. For those entries, the extension keeps request-level effort stable and inserts `configuration_update` items for later changes. This rewriting remains active even with `/auto-effort off`; disable `effortUpdates.enabled` separately to stop it. Treat the list as implementation configuration, not a guarantee about every provider exposing similarly named models.
 
 ## Model choice
 
