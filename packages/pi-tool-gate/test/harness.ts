@@ -79,13 +79,23 @@ export function harness(options: { tools?: any[]; exec?: (cmd: string, args: str
       selects: [] as Array<{ title: string; options: string[] }>,
       selectAnswers: [] as Array<string | undefined>,
       inputAnswers: [] as Array<string | undefined>,
+      inputs: [] as Array<{ title: string; placeholder?: string }>,
+      editors: [] as Array<{ title: string; prefill?: string }>,
+      editorAnswers: [] as Array<string | undefined>,
       notes: [] as Array<{ message: string; type?: string }>,
       status: new Map<string, string | undefined>(),
       select: async (title: string, opts: string[]) => {
         ui.selects.push({ title, options: opts });
         return ui.selectAnswers.shift();
       },
-      input: async () => ui.inputAnswers.shift(),
+      input: async (title: string, placeholder?: string) => {
+        ui.inputs.push({ title, placeholder });
+        return ui.inputAnswers.shift();
+      },
+      editor: async (title: string, prefill?: string) => {
+        ui.editors.push({ title, prefill });
+        return ui.editorAnswers.shift();
+      },
       confirm: async () => true,
       notify: (message: string, type?: string) => ui.notes.push({ message, type }),
       setStatus: (key: string, text: string | undefined) => ui.status.set(key, text),

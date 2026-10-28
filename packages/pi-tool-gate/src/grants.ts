@@ -1,14 +1,18 @@
-// Project grants: "always allow similar in this project" answers, kept across sessions. They live
-// outside the repository (`<agent dir>/tool-gate/project-grants.json`, keyed by the project's main
-// checkout, so its worktrees share them) because their keys hold this machine's absolute paths.
+// This machine's project grants: the rules and folder grants a user allowed "in this project", kept
+// across sessions. They live outside the repository (`<agent dir>/tool-gate/project-grants.json`,
+// keyed by the project's main checkout, so its worktrees share them) because their paths are this
+// machine's. The file keeps its original shape, a list of `{ key, label, added }` per project, so an
+// older version still reads it: permissions.ts reads the old keys (`bash:<key>`, `tool:<x>`,
+// `edit:<dir>`, `dir:read:/abs`) as rules or folders, and new rules are saved under keys of their own
+// (`allow:Bash(git push:*)`) that an older version lists as grants and never matches.
 import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { agentDir, isRecord } from "./config.ts";
 
 export interface Grant {
-  /** The same key an "allow similar for this session" grant adds (`dir:read:/abs`, `bash:npm test`, ...). */
+  /** What it grants: `allow:<rule>`, `ask:<rule>` or `deny:<rule>`, a folder (`dir:read:/abs`), or an old key (`bash:npm test`, `tool:web_fetch`, `edit:<dir>`). */
   key: string;
-  /** What it allows, as the dialog showed it. */
+  /** What it says, as the dialog or `/gate rules` showed it. */
   label: string;
   /** When it was granted (ISO). */
   added: string;

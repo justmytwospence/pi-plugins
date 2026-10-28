@@ -956,8 +956,11 @@ function heredocSubstitutions(body: string): string[] {
   return out;
 }
 
-/** What one simple command does, as `program [subcommand [subcommand]]`, or undefined for shell noise. */
-function partKey(tokens: string[]): string | undefined {
+/**
+ * What one simple command does, as `program [subcommand [subcommand]]`, or undefined for shell
+ * noise; with the program as it was typed (`bin/homelab`, `git`).
+ */
+function partInfo(tokens: string[]): { key: string; invoked: string } | undefined {
   let i = 0;
   while (i < tokens.length && LEADING_KEYWORDS.has(tokens[i] as string)) i++;
   const rest = tokens.slice(i);
@@ -969,36 +972,100 @@ function partKey(tokens: string[]): string | undefined {
   const first = p.name === "git" ? gitCommand(p.args)?.sub : positional[0];
   // Project scripts (`bin/homelab status`) usually take subcommands too.
   const invoked = rest.find((t) => path.basename(t) === p.name) ?? "";
+  const typed = invoked || p.name;
   const takesSubcommand = SUBCOMMAND_CLIS.has(p.name) || invoked.includes("/");
-  if (first === undefined || !WORD.test(first) || !takesSubcommand) return p.name;
-  if (!TWO_LEVEL.has(p.name)) return `${p.name} ${first}`;
+  if (first === undefined || !WORD.test(first) || !takesSubcommand) return { key: p.name, invoked: typed };
+  if (!TWO_LEVEL.has(p.name)) return { key: `${p.name} ${first}`, invoked: typed };
   const second = positional.slice(1).find((a) => WORD.test(a));
-  return second ? `${p.name} ${first} ${second}` : `${p.name} ${first}`;
+  return { key: second ? `${p.name} ${first} ${second}` : `${p.name} ${first}`, invoked: typed };
+}
+
+/** A simple command as the permission rules see it (`bashUnits`). */
+export interface BashUnit {
+  /** Its words, quotes removed, past the keywords that lead it (`do`, `then`). */
+  words: string[];
+  /** It only reads (as `isReadOnlyBash` counts a command). */
+  read: boolean;
+  /** What it does as `bashKeys` names it (`git push`); undefined for shell noise and what is not a program. */
+  key?: string;
+  /** The program as typed, when it names a key (`bin/homelab`). */
+  invoked?: string;
+  /** Not read-only and not a program this can name (`$(which x) y`, `export A=1`): only the call's whole text can say what it does. */
+  unparsed: boolean;
+  /** An assignment, wrapper option or git `-c` changes what it runs (`PATH=... git push`). */
+  unsafe: boolean;
+  /** It redirects output to a file. */
+  writes: boolean;
+  /** Its program past assignments and wrappers, when it has one. */
+  program?: { name: string; args: string[] };
+  /** The command a privilege wrapper (`sudo`, `doas`) runs, past its own options. */
+  inner?: { name: string; args: string[] };
+  /** From the text of `sh -c '...'` or `eval ...`, not the call itself. */
+  nested: boolean;
 }
 
 /**
- * Keys for "allow similar for this session": one per command in the call that does more than read,
- * skipping `cd`, `echo`, loop headers and the like. A later call is allowed when every key it has
- * was granted, so `cd /tmp/a && docker restart x` and `cd ~/b; docker restart x` match, and a grant
- * for `docker restart` never covers `rm`. Commands inside `$(...)`, backticks, `<(...)`, `>(...)`
- * and unquoted here-documents count like the others: `ls $(rm -rf x)` is keyed `rm`, not as a read.
+ * Every simple command in the call, in the order `bashKeys` visits them: past here-document bodies,
+ * inside `$(...)`, backticks, `<(...)`, `>(...)` and unquoted here-documents' substitutions, and
+ * inside `sh -c`/`eval` text (marked `nested`).
+ */
+export function bashUnits(command: string, extraReadOnly: readonly string[] = []): BashUnit[] {
+  const units: BashUnit[] = [];
+  const visit = (command: string, nested: boolean) => {
+    const { text: plain, expanding } = heredocs(command);
+    const { text, bodies } = extractSubstitutions(plain);
+    for (const tokens of splitCommand(text)) {
+      if (NOT_COMMANDS.has(tokens[0] ?? "")) continue;
+      let i = 0;
+      while (i < tokens.length && LEADING_KEYWORDS.has(tokens[i] as string)) i++;
+      const words = tokens.slice(i);
+      if (!words.length) continue;
+      const info = partInfo(tokens);
+      const read = isReadOnlyPart(words, extraReadOnly);
+      const p = program(words);
+      const g = p?.name === "git" ? gitCommand(p.args) : undefined;
+      let runs = p;
+      let inner: { name: string; args: string[] } | undefined;
+      if (p && (p.name === "sudo" || p.name === "doas")) {
+        runs = unwrapSudo(p.args);
+        if (runs) inner = { name: runs.name, args: runs.args };
+      }
+      units.push({
+        words,
+        read,
+        ...(info ? { key: info.key, invoked: info.invoked } : {}),
+        unparsed: !read && !info,
+        unsafe: Boolean(p?.unsafe || g?.unsafeGlobal),
+        writes: writeRedirects(words.join(" ")).length > 0,
+        ...(p ? { program: { name: p.name, args: p.args } } : {}),
+        ...(inner ? { inner } : {}),
+        nested,
+      });
+      for (const script of runs ? nestedCommands(runs) : []) visit(script, true);
+    }
+    for (const { body } of bodies) visit(body, nested);
+    for (const body of expanding) for (const inner of heredocSubstitutions(body)) visit(inner, nested);
+  };
+  visit(command, false);
+  return units;
+}
+
+/**
+ * What a call does, as keys: one per command in it that does more than read, skipping `cd`,
+ * `echo`, loop headers and the like. The permission rules offered for a call (permissions.ts) are
+ * built from them, so `cd /tmp/a && docker restart x` and `cd ~/b; docker restart x` are the same
+ * `docker restart`, and a rule for it never covers `rm`. Commands inside `$(...)`, backticks,
+ * `<(...)`, `>(...)` and unquoted here-documents count like the others: `ls $(rm -rf x)` is keyed
+ * `rm`, not as a read.
  */
 export function bashKeys(command: string, extraReadOnly: readonly string[] = []): string[] {
   const keys = new Set<string>();
   let unparsed = false;
-  const visit = (command: string) => {
-    const { text: plain, expanding } = heredocs(command);
-    const { text, bodies } = extractSubstitutions(plain);
-    for (const tokens of splitCommand(text)) {
-      if (isReadOnlyPart(tokens, extraReadOnly)) continue;
-      const key = partKey(tokens);
-      if (key) keys.add(key);
-      else if (!NOT_COMMANDS.has(tokens[0] ?? "")) unparsed = true;
-    }
-    for (const { body } of bodies) visit(body);
-    for (const body of expanding) for (const inner of heredocSubstitutions(body)) visit(inner);
-  };
-  visit(command);
+  for (const unit of bashUnits(command, extraReadOnly)) {
+    if (unit.nested || unit.read) continue;
+    if (unit.key) keys.add(unit.key);
+    else if (unit.unparsed) unparsed = true;
+  }
   // An opaque command is not a read: a grant for redirected reads must not cover env -S…
   // or an executable hidden in an expansion. Such grants cover only the exact opaque call.
   if (unparsed) keys.add(`unparsed shell: ${command.trim()}`);

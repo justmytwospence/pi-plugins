@@ -310,9 +310,10 @@ describe("the gate", () => {
     const first: any = await h.emit("tool_call", call("read", { path: "~/Projects/other/a.ts" }), ctx);
     expect(first.block).toBe(true);
     expect(first.reason).toMatch(/reads ~\/Projects\/other\/a\.ts, outside this project's directories/u);
-    ctx.ui.selectAnswers.push("Allow similar for this session (reads in ~/Projects/other)");
+    ctx.ui.selectAnswers.push("Allow folder for this session");
     expect(await h.emit("tool_call", call("read", { path: "~/Projects/other/a.ts" }, "t2"), ctx)).toBeUndefined();
-    expect(ctx.ui.selects[0]?.options[1]).toBe("Allow similar for this session (reads in ~/Projects/other)");
+    expect(ctx.ui.selects[0]?.options).toEqual(["Allow once", "Allow folder for this session", "Allow folder in this project", "Block", "Block with a message"]);
+    expect(ctx.ui.selects[0]?.title).toMatch(/\nFolder: reads in ~\/Projects\/other$/u);
     // The folder is granted for the session: no more asking, no Jev.
     expect(await h.emit("tool_call", call("bash", { command: "rg foo ~/Projects/other" }, "t3"), ctx)).toBeUndefined();
     expect(ctx.ui.selects).toHaveLength(1);
@@ -325,12 +326,9 @@ describe("the gate", () => {
     await first.h.emit("before_agent_start", { prompt: "x" }, first.ctx);
     const pushed: any = await first.h.emit("tool_call", call("read", { path: "~/Downloads/shot.png" }), first.ctx);
     expect(pushed.block).toBe(true);
-    first.ctx.ui.selectAnswers.push("Always allow similar in this project (reads in ~/Downloads)");
+    first.ctx.ui.selectAnswers.push("Allow folder in this project");
     expect(await first.h.emit("tool_call", call("read", { path: "~/Downloads/shot.png" }, "t2"), first.ctx)).toBeUndefined();
-    expect(first.ctx.ui.selects[0]?.options.slice(1, 3)).toEqual([
-      "Allow similar for this session (reads in ~/Downloads)",
-      "Always allow similar in this project (reads in ~/Downloads)",
-    ]);
+    expect(first.ctx.ui.selects[0]?.options.slice(1, 3)).toEqual(["Allow folder for this session", "Allow folder in this project"]);
     const stored = JSON.parse(readFileSync(path.join(configDir, "pi", "tool-gate", "project-grants.json"), "utf8"));
     expect(stored[app]).toEqual([expect.objectContaining({ key: `dir:read:${H}/Downloads`, label: "reads in ~/Downloads" })]);
 
@@ -341,7 +339,7 @@ describe("the gate", () => {
     expect(await second.h.emit("tool_call", call("read", { path: "~/Downloads/other.pdf" }), second.ctx)).toBeUndefined();
     expect(second.ctx.ui.selects).toHaveLength(0);
 
-    second.ctx.ui.selectAnswers.push(`reads in ~/Downloads (since ${new Date().toISOString().slice(0, 10)})`);
+    second.ctx.ui.selectAnswers.push("folder: reads in ~/Downloads (project (this machine))", "Remove");
     await second.h.commands.get("gate").handler("grants", second.ctx);
     expect(JSON.parse(readFileSync(path.join(configDir, "pi", "tool-gate", "project-grants.json"), "utf8"))).toEqual({});
     const again: any = await second.h.emit("tool_call", call("read", { path: "~/Downloads/other.pdf" }, "t3"), second.ctx);

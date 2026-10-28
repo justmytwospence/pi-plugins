@@ -16,7 +16,8 @@ import path from "node:path";
 import { beforeAll, describe, expect, test } from "vitest";
 import { loadConfig } from "../src/config.ts";
 import { BranchDownloads } from "../src/downloads.ts";
-import { loadGrants } from "../src/grants.ts";
+import { grantsFile, loadGrants } from "../src/grants.ts";
+import { loadFileRules, localGrants } from "../src/permissions.ts";
 import { blockedBy, DEFAULT_CONFIG, type GateConfig, judgeStateOf, type Plan, planCall, scriptOfCall } from "../src/index.ts";
 import { askJev } from "../src/jev.ts";
 import { judgeQuestions, verdict } from "../src/judge.ts";
@@ -103,7 +104,10 @@ export function collect(sessions: readonly Session[]) {
     const cwd = session.cwd;
     const config = loadConfig("tool-gate", DEFAULT_CONFIG, cwd) as GateConfig;
     const projects = projectsOf(cwd);
-    const grants = new Set(loadGrants(projects[projects.length - 1] ?? cwd).map((g) => g.key));
+    const saved = loadGrants(projects[projects.length - 1] ?? cwd);
+    const grants = new Set(saved.map((g) => g.key));
+    // The rules in force on this machine: this project's saved ones and the config files'.
+    const permissions = [...localGrants(saved, grantsFile()).rules, ...loadFileRules(cwd).rules];
     const rules = loadRules(cwd);
     const results = new Map<string, Message>();
     for (const entry of branch) {
@@ -129,9 +133,10 @@ export function collect(sessions: readonly Session[]) {
           count(walked, label);
           const tool = block.name;
           const input = (block.arguments ?? {}) as Record<string, unknown>;
-          const context = { config, projects, granted: (key: string) => grants.has(key) };
+          const context = { config, projects, granted: (key: string) => grants.has(key), rules: permissions, root: projects[0] };
           const p: Plan = planCall(tool, input, cwd, { ...context, downloads: tracker.downloads });
           if (p.kind === "allow") count(clearAllow, label);
+          else if (p.kind === "deny") count(clearHold, label);
           else if (p.kind === "ask") {
             count(clearHold, label);
             if (p.reasons.some((r) => DOWNLOADED.test(r))) {

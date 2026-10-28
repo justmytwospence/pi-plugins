@@ -83,18 +83,22 @@ test("a held call is pushed back with Jev's reasons and suggestion; the agent's 
 
   // The agent makes its case beside the identical call; the user sees both, with no message prompt.
   branch.push(assistantEntry("Publishing is the whole point of the release you asked for.", [{ type: "toolCall", id: "t2", name: "bash", arguments: {} }]));
-  ctx.ui.selectAnswers.push("Allow similar for this session (`npm publish`)");
+  ctx.ui.selectAnswers.push("Allow rule for this session");
   expect(await h.emit("tool_call", call("bash", { command: "npm publish" }, "t2"), ctx)).toBeUndefined();
   expect(ctx.ui.selects[0]?.title).toMatch(/Held: it changes something other people see/u);
   expect(ctx.ui.selects[0]?.title).toMatch(/Agent: Publishing is the whole point/u);
   expect(ctx.ui.selects[0]?.options).toEqual([
     "Allow once",
-    "Allow similar for this session (`npm publish`)",
-    "Always allow similar in this project (`npm publish`)",
+    "Allow rule for this session",
+    "Allow rule in this project",
+    "Allow rule everywhere",
+    "Edit the rule...",
     "Block",
     "Block with a message",
   ]);
-  // The grant covers the same program and subcommand without asking again, wherever it starts.
+  // The rule is in the question, not the rows.
+  expect(ctx.ui.selects[0]?.title).toMatch(/\nRule: Bash\(npm publish:\*\)$/u);
+  // The rule covers the same program and subcommand without asking again, wherever it starts.
   expect(await h.emit("tool_call", call("bash", { command: "npm publish --dry-run" }, "t3"), ctx)).toBeUndefined();
   expect(await h.emit("tool_call", call("bash", { command: "cd pkg && echo go; npm publish" }, "t4"), ctx)).toBeUndefined();
   expect(ctx.ui.selects).toHaveLength(1);
@@ -460,17 +464,22 @@ describe("scripts judged by content", () => {
   });
 });
 
-test("a grant for read-only substitutions does not cover a write hidden in one", async () => {
+test("a rule for a call with substitutions or redirects names that call, and a write hidden in a substitution is not covered", async () => {
   const { h, jev, ctx } = setup(risky);
   await h.emit("before_agent_start", { prompt: "x" }, ctx);
   const reads = "grep -c Admin $(ls cfg) > /tmp/out.txt";
   await h.emit("tool_call", call("bash", { command: reads }), ctx);
-  ctx.ui.selectAnswers.push("Allow similar for this session (`reads with substitutions or redirects`)");
+  ctx.ui.selectAnswers.push("Allow rule for this session");
   expect(await h.emit("tool_call", call("bash", { command: reads }, "t2"), ctx)).toBeUndefined();
+  expect(ctx.ui.selects[0]?.title).toMatch(/\nRule: Bash\(grep -c Admin \$\(ls cfg\) > \/tmp\/out\.txt\)$/u);
   const judged = jev.calls.length;
-  expect(await h.emit("tool_call", call("bash", { command: "ls -la $(ls cfg) > /tmp/out2.txt" }, "t3"), ctx)).toBeUndefined();
+  // The same call again runs without a judgment.
+  expect(await h.emit("tool_call", call("bash", { command: reads }, "t3"), ctx)).toBeUndefined();
   expect(jev.calls).toHaveLength(judged);
-  const hidden: any = await h.emit("tool_call", call("bash", { command: "ls $(rm -rf /tmp/foo)" }, "t4"), ctx);
+  // Another call, and a write hidden in a substitution, are not covered.
+  const other: any = await h.emit("tool_call", call("bash", { command: "ls -la $(ls cfg) > /tmp/out2.txt" }, "t4"), ctx);
+  expect(other.block).toBe(true);
+  const hidden: any = await h.emit("tool_call", call("bash", { command: "ls $(rm -rf /tmp/foo)" }, "t5"), ctx);
   expect(hidden.block).toBe(true);
   expect(jev.calls.length).toBeGreaterThan(judged);
 });

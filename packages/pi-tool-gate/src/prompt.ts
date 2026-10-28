@@ -34,6 +34,7 @@ import {
   Text,
   type TUI,
   truncateToWidth,
+  wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { beginComposition, type EditorCreator, editorOwnsCancel, inline, type ProseEditor } from "./editor.ts";
 import type { CallView } from "./view.ts";
@@ -51,12 +52,20 @@ export interface Approval {
   note?: string;
   /** Choices, the last of which is the refusal Esc picks; "Block with a message" is added after them. */
   options: string[];
+  /** What the allow choices add (rules, or folders), one entry each: shown under the question, so the choices stay short. */
+  grant?: string[];
+  /** The choice that opens the rule field, prefilled with `editText`; the answer carries the edited text. */
+  editRow?: string;
+  editText?: string;
+  /** Opens the rule field at once with this complaint about `editText`, an edit that was not a rule. */
+  editError?: string;
 }
 
-/** The user's answer: a choice from the options, and for a refusal with a message, the message. */
+/** The user's answer: a choice from the options, for a refusal with a message the message, for an edit the edited text. */
 export interface ApprovalAnswer {
   choice: string;
   message?: string;
+  edited?: string;
 }
 
 /** Ask the user to approve a call; resolves to the answer, or undefined if dismissed. */
@@ -79,6 +88,10 @@ export async function askApproval(
   }
   const choice = await ctx.ui.select(fallbackTitle, [...approval.options, BLOCK_WITH_MESSAGE]);
   if (choice === undefined) return undefined;
+  if (approval.editRow !== undefined && choice === approval.editRow) {
+    const edited = (await ctx.ui.editor("Edit the rule", approval.editText ?? ""))?.trim();
+    return edited ? { choice, edited } : { choice };
+  }
   if (choice !== BLOCK_WITH_MESSAGE) return { choice };
   const message = (await ctx.ui.input("Message for the agent", "why, or what to do instead"))?.trim();
   return message ? { choice: refuse, message } : { choice: refuse };
@@ -124,6 +137,9 @@ class ApprovalDialog implements Component {
   /** The message field, shown in place of the "Block with a message" row while open. */
   private readonly message: ProseEditor;
   private editing = false;
+  /** What the open field is for: the message to the agent, or the edited rule. */
+  private fieldKind: "message" | "rule" = "message";
+  private readonly drafts = { message: "", rule: "" };
   private emptyMessage = false;
   private hasFocus = false;
   private finished = false;
@@ -155,11 +171,16 @@ class ApprovalDialog implements Component {
       rows.length,
       getSelectListTheme(),
     );
-    this.list.onSelect = (item) => (item.value === BLOCK_WITH_MESSAGE ? this.openMessage() : this.finish({ choice: item.value }));
+    this.drafts.rule = a.editText ?? "";
+    this.list.onSelect = (item) => {
+      if (item.value === BLOCK_WITH_MESSAGE) this.openField("message");
+      else if (a.editRow !== undefined && item.value === a.editRow) this.openField("rule");
+      else this.finish({ choice: item.value });
+    };
     this.list.onCancel = () => this.finish({ choice: this.refuse });
     const editorTheme: EditorTheme = { borderColor: (s) => theme.fg("warning", s), selectList: getSelectListTheme() };
-    const submit = (text: string) => this.submitMessage(text);
-    this.message = createEditor?.(tui, editorTheme, keybindings, submit, () => this.closeMessage()) ?? (new Editor(tui, editorTheme) as ProseEditor);
+    const submit = (text: string) => this.submitField(text);
+    this.message = createEditor?.(tui, editorTheme, keybindings, submit, () => this.closeField()) ?? (new Editor(tui, editorTheme) as ProseEditor);
     this.message.onSubmit = submit;
 
     const bodyRows = () => (this.expanded ? undefined : Math.max(8, Math.floor(tui.terminal.rows * 0.4)));
@@ -201,16 +222,20 @@ class ApprovalDialog implements Component {
     // options, or a text box for the message, instead of a bare Enter/Esc card.
     options.addChild({
       render: (width: number) => {
-        const question = truncateToWidth(theme.fg("text", this.question()), Math.max(1, width));
-        const out = [question, "", ...this.list.render(width), ""];
+        const question = [truncateToWidth(theme.fg("text", this.question()), Math.max(1, width)), ...this.grantLines(width)];
+        const out = [...question, "", ...this.list.render(width), ""];
         const wrapHint = (text: string) => new Text(text, 0, 0).render(Math.max(1, width));
         if (!this.editing) {
           return [...out, ...wrapHint(`${rawKeyHint("n", "message")}  ${rawKeyHint("↑↓", "navigate")}  ${keyHint("tui.select.confirm", "select")}  ${keyHint("tui.select.cancel", "cancel")}`)];
         }
-        // The message field opens under the rows, as Pi's own text input: a title, then `›`.
+        // The field opens under the rows, as Pi's own text input: a title, then `›`.
+        const rule = this.fieldKind === "rule";
+        const plural = (this.a.grant?.length ?? 0) > 1;
         const title = this.emptyMessage
-          ? wrapHint(theme.fg("warning", "Type a message for the agent, or Esc to go back."))
-          : [theme.fg("accent", theme.bold("Message for the agent"))];
+          ? wrapHint(theme.fg("warning", rule ? "Type a rule, or Esc to go back." : "Type a message for the agent, or Esc to go back."))
+          : this.a.editError && rule
+            ? [theme.fg("accent", theme.bold(plural ? "Edit the rules" : "Edit the rule")), ...wrapHint(theme.fg("warning", this.a.editError))]
+            : [theme.fg("accent", theme.bold(rule ? (plural ? "Edit the rules (one per line)" : "Edit the rule") : "Message for the agent"))];
         const field = inline(selectTheme.selectedPrefix("› "), "", this.message, width, theme);
         return [...out, ...title, "", ...field, "", ...wrapHint(`${keyHint("tui.select.confirm", "submit")}  ${keyHint("tui.select.cancel", "cancel")}`)];
       },
@@ -219,6 +244,7 @@ class ApprovalDialog implements Component {
     this.root.addChild(options);
     this.footer.addChild(border());
     this.paint();
+    if (a.editError !== undefined && a.editRow !== undefined) this.openField("rule");
   }
 
   /** Bake the theme's colours into the text; again on every theme change. */
@@ -249,6 +275,12 @@ class ApprovalDialog implements Component {
     this.note.setText(theme.fg("muted", a.note ?? ""));
   }
 
+  /** The rules or folders the allow choices add, wrapped, under the question; long ones are cut. */
+  private grantLines(width: number): string[] {
+    const lines = (this.a.grant ?? []).flatMap((line) => wrapTextWithAnsi(this.theme.fg("text", line), Math.max(1, width)));
+    return lines.length > 8 ? [...lines.slice(0, 7), this.theme.fg("muted", "...")] : lines;
+  }
+
   /** One line naming the call: the question a phone's card shows over the options. */
   private question(): string {
     const v = this.a.view;
@@ -276,14 +308,14 @@ class ApprovalDialog implements Component {
     const kb = this.keybindings;
     if (this.editing) {
       this.emptyMessage = false;
-      if (kb.matches(data, "tui.select.cancel") && !editorOwnsCancel(this.message)) this.closeMessage();
+      if (kb.matches(data, "tui.select.cancel") && !editorOwnsCancel(this.message)) this.closeField();
       else this.message.handleInput(data);
     } else if (kb.matches(data, "app.tools.expand")) {
       this.expanded = !this.expanded;
       this.invalidate();
     } else {
       const key = data.length === 1 ? data : decodeKittyPrintable(data);
-      if (key === "n") this.openMessage();
+      if (key === "n") this.openField("message");
       else if (key === "j" || matchesKey(data, "ctrl+j")) this.list.handleInput("\x1b[B");
       else if (key === "k" || matchesKey(data, "ctrl+k")) this.list.handleInput("\x1b[A");
       else this.list.handleInput(data);
@@ -291,34 +323,39 @@ class ApprovalDialog implements Component {
     this.tui.requestRender();
   }
 
-  private openMessage(): void {
-    // Leave the highlight on the message row so the list shows what Enter will do.
-    this.list.setSelectedIndex(this.a.options.length);
+  private openField(kind: "message" | "rule"): void {
+    // Leave the highlight on the row that opened it so the list shows what Enter will do.
+    const row = kind === "rule" ? this.a.options.indexOf(this.a.editRow ?? "") : this.a.options.length;
+    this.list.setSelectedIndex(row >= 0 ? row : this.a.options.length);
+    this.fieldKind = kind;
     this.editing = true;
     this.emptyMessage = false;
+    this.message.setText(this.drafts[kind]);
     beginComposition(this.message);
     this.message.focused = this.hasFocus;
     this.tui.requestRender();
   }
 
-  private closeMessage(): void {
+  private closeField(): void {
+    if (this.editing) this.drafts[this.fieldKind] = this.message.getText();
     this.editing = false;
     this.emptyMessage = false;
     this.message.focused = false;
     this.tui.requestRender();
   }
 
-  private submitMessage(raw: string): void {
-    const message = raw.trim();
-    if (!message) {
-      // An empty message keeps the field open; plain Block is one Esc away.
+  private submitField(raw: string): void {
+    const text = raw.trim();
+    if (!text) {
+      // An empty field stays open; plain Block, or the old rule, is one Esc away.
       this.message.setText(raw);
       this.emptyMessage = true;
       beginComposition(this.message);
       this.tui.requestRender();
       return;
     }
-    this.finish({ choice: this.refuse, message });
+    if (this.fieldKind === "rule") this.finish({ choice: this.a.editRow ?? this.refuse, edited: text });
+    else this.finish({ choice: this.refuse, message: text });
   }
 
   private finish(answer: ApprovalAnswer): void {

@@ -1,6 +1,6 @@
 # pi-tool-gate
 
-A Pi extension that auto-approves tool calls, so you are only pulled in when a call is risky and the agent could not find a way around it. Fixed rules settle the clear cases without a model call (read-only calls run, a short list of dangerous calls is always held); [Jev](https://docs.typesafe.ai), through Pi's own classifier models, judges the gray zone. A held call is first blocked with an explanation and a suggested workaround for the agent; only if the agent retries it, or another held call of the same family, are you asked.
+A Pi extension that auto-approves tool calls, so you are only pulled in when a call is risky and the agent could not find a way around it. Fixed rules settle the clear cases without a model call (read-only calls run, a short list of dangerous calls is always held); [Jev](https://docs.typesafe.ai), through Pi's own classifier models, judges the gray zone. A held call is first blocked with an explanation and a suggested workaround for the agent; only if the agent retries it, or another held call of the same family, are you asked. Your own [permission rules](#permission-rules), in Claude Code's syntax (`Bash(git push:*)`, `Edit(src/**)`), allow, always ask about or deny specific calls, for the session, the project or everywhere.
 
 That is **auto mode**, one of the Claude Code permission modes the gate provides; Shift+Tab cycles them (see [Permission modes](#permission-modes)). It acts on every tool call (the `tool_call` event) and is not a sandbox: see [Limitations](#limitations).
 
@@ -37,7 +37,7 @@ As in Claude Code, the mode decides what runs without asking you. Shift+Tab (`cy
 | Mode | Status | Runs without asking |
 | --- | --- | --- |
 | chat | `⏸ chat mode on` | Read-only calls only ([clear cases](#1-clear-cases-no-model-call)); everything else is blocked without asking you, and the agent is told it is there to talk and answer questions. No Jev calls. Not in the cycle unless you add it to `modes`. |
-| manual (`default`) | `⏸ manual mode on` | Reads only ([clear cases](#1-clear-cases-no-model-call)); everything else asks you, with "allow similar" for the session. |
+| manual (`default`) | `⏸ manual mode on` | Reads only ([clear cases](#1-clear-cases-no-model-call)); everything else asks you, with [rules to allow](#the-approval-dialog) for the session, the project or everywhere. |
 | accept edits (`acceptEdits`) | `⏵⏵ accept edits on` | Reads, `edit`/`write` inside the project, and `mkdir`, `touch`, `rm`, `rmdir`, `mv`, `cp` and `sed` when every file they name is inside the project (after any `cd`; no redirects or expansions; `sed` without `w`/`e`). Credential files and the [always-held calls](#1-clear-cases-no-model-call) still ask. |
 | plan | `⏸ plan mode on` | Needs [pi-plan-mode](../pi-plan-mode/): edits are blocked except to its plan file; commands are judged as in auto mode. Approving the plan picks the next mode. |
 | auto | `⏵⏵ auto mode on` | Everything Jev and the fixed rules allow, below. The default. |
@@ -75,7 +75,7 @@ Commands nested in `sh -c '...'` (and other shells) and `eval` are checked again
 
 The gate keeps a list of the files the session downloaded: `curl -o f`/`--output f`, `curl -O url` (the URL's file name, under any `--output-dir`), `curl url > f`, `wget url` (the URL's file name, under any `-P`), `wget -O f`, `gh release download` (`-O f`; `-D dir` counts everything under that directory; otherwise each `-p` pattern), and `aria2c` (`-o f`, `-d dir`). Paths are resolved where the command runs, after any `cd` (and in `bg_run`'s `cwd`). A later `cp`, `mv` or `install` of a downloaded file makes the copy downloaded too (`mv` takes the mark with it), `chmod` keeps it and `rm` drops it. The list is rebuilt from the current branch's `bash` and `bg_run` calls whose results are not errors when a session starts and after `/tree` moves, and follows each finished call. Symlinks and `/tmp` versus `/private/tmp` resolve to the same file.
 
-A command that runs one is always held: `./f` or any path naming it as the program, `sh`/`bash`/`zsh`/`dash f`, `source f` or `. f`, `python`/`python3`/`node`/`ruby`/`perl`/`bun f`, `deno run f`, also behind `sudo`, wrappers, `sh -c`, `eval` and substitutions, and also when the same command downloads it first (`curl -o x url && sh x`). Auto mode pushes it back once with the reason `runs <f>, downloaded in this session`, then asks you; manual and accept-edits modes ask at once. The dialog offers Allow once and Block only: no "allow similar".
+A command that runs one is always held: `./f` or any path naming it as the program, `sh`/`bash`/`zsh`/`dash f`, `source f` or `. f`, `python`/`python3`/`node`/`ruby`/`perl`/`bun f`, `deno run f`, also behind `sudo`, wrappers, `sh -c`, `eval` and substitutions, and also when the same command downloads it first (`curl -o x url && sh x`). Auto mode pushes it back once with the reason `runs <f>, downloaded in this session`, then asks you; manual and accept-edits modes ask at once. The dialog offers Allow once and Block only: no rule, not even an exact one, opens it.
 
 ### 2. Jev for the gray zone
 
@@ -94,23 +94,144 @@ A shell call that runs a local script (`./deploy.sh`, `bash x.sh`, `python3 x.py
 
 A held call is blocked automatically the first time. The agent sees why (which checks failed and how sure Jev is, plus any quoted rules) and a suggested workaround, which Jev picks in a second request made only for held calls: preview it with a dry run, narrow it, make it reversible, keep it local, follow the project rule, skip it, or "no workaround, this is the user's call". The agent then does the job another way, drops the call, or makes its case in a short visible message and repeats the identical call.
 
-That retry, or another held call of the same family (same key, below) in the same user turn, is put to you with the hold reasons and the agent's case: Allow once, Allow similar for this session, Always allow similar in this project, Block, or Block with a message (always-held calls offer no "allow similar"). A message goes to the agent with the refusal, for example what to do instead, and the agent is told to follow it rather than to stop and ask you. Without a UI (print and JSON modes) the retry is blocked. Set `"pushBack": false` to be asked on the first hold.
+That retry, or another held call of the same family (same program and subcommand, or same folder) in the same user turn, is put to you with the hold reasons and the agent's case: Allow once, the rule that names the call for this session, this project or everywhere (or Edit the rule), Block, or Block with a message (always-held calls offer only Allow once and the blocks; see [the approval dialog](#the-approval-dialog)). A message goes to the agent with the refusal, for example what to do instead, and the agent is told to follow it rather than to stop and ask you. Without a UI (print and JSON modes) the retry is blocked. Set `"pushBack": false` to be asked on the first hold.
 
 Dialogs are shown one at a time. In Pi's terminal UI the dialog shows the call itself, highlighted: a long one-line shell command laid out one step per line (only whitespace changes), an edit or overwrite as a diff against the file, a new file in its language, any other tool's input as JSON. Below it are why it was held and the agent's case, rendered as Markdown. Long parts are clamped; Pi's `app.tools.expand` key (Ctrl+O by default) expands them. The choices end as Pi's own select does (a one-line question, the rows, Pi's key hint), so herdr-web-ui shows them as a chat card. `j`/`k`, Ctrl+J/Ctrl+K and the arrow keys move, Enter selects, Esc blocks, and `n` (or the Block with a message row) opens a `›` message field under the choices, laid out as Pi's text input: Enter blocks with it, Esc goes back to the choices. The field uses an editor provider such as pi-vim when one answers on the suite's editor-factory channel, as pi-ask-user-question's fields do. In other UI modes (RPC clients, and subagent dialogs forwarded by pi-subagents) the question is a plain select with a one-line summary, followed by a text input when you pick Block with a message.
-
-### Allow similar
-
-"Allow similar" names what it grants, for example ``Allow similar for this session (`docker restart`, `python3`)``. A shell call is keyed by each command in it that does more than read, as program plus subcommand when it takes one (`git push`, `docker compose up`, `gh repo create`, `bin/homelab status`); `cd`, `echo`, loop headers, assignments and here-document text are skipped. Commands inside `$(...)`, backticks, `<(...)`, `>(...)` and an unquoted here-document's substitutions are keyed like any other, so `ls $(rm -rf x)` is keyed `rm`. A later call runs unasked when every one of its keys, outside and inside substitutions, was granted, whatever directory it starts in. Calls whose commands all only read (held back only by a substitution or redirect) share one key; a program named by a substitution (`$(which x) y`) is keyed by the exact call. Edits and writes are keyed by tool and directory, other tools by name. Session grants are held in memory and never saved.
-
-"Always allow similar in this project" grants the same keys and saves them in `~/.pi/agent/tool-gate/project-grants.json` (under `PI_CODING_AGENT_DIR`), keyed by the project's main checkout so its worktrees share them. They stay outside the repository because they hold this machine's absolute paths. `/gate grants` lists them; picking one revokes it.
 
 ### Jev unavailable
 
 When Jev cannot answer (Jev off in settings, no classifier model, no credentials, an invalid key, a timeout or another error), the gate warns once and falls back to Pi's tool hints: with a UI it asks you about calls whose tool declares `destructiveHint: true`, or that lack `readOnlyHint` and do not declare both `destructiveHint: false` and `openWorldHint: false` (so tools with no hints are asked about); everything else is allowed. Without a UI every such call is allowed. The always-held rules still apply.
 
+## Permission rules
+
+Rules settle specific calls, in Claude Code's syntax and with its order: `deny` beats `ask` beats `allow`. They live in four scopes that are added together, and you write them in `tool-gate.json`, in the approval dialog (**Allow rule for this session / in this project / everywhere**) or with `/gate rules`.
+
+| List | A matching call |
+| --- | --- |
+| `deny` | Is blocked without asking you. The agent is told which rule it matched and that you forbade it, and not to look for a way around it. |
+| `ask` | Always asks you, in every mode but yolo, even in auto mode: no Jev call, no push-back. The dialog offers Allow once, Block and Block with a message. |
+| `allow` | Runs without a Jev call (and in manual mode without asking), when the rule covers it. |
+
+A deny rule applies in every mode, yolo and chat mode included. An allow rule never overrides a deny or an ask rule, the [always-held calls](#1-clear-cases-no-model-call) (below), or the [directory policy](#directories) for a shell command. In chat mode a rule does not make a command read-only, so it stays blocked; an ask rule asks only about calls that read there.
+
+### Syntax
+
+| Rule | Covers |
+| --- | --- |
+| `Bash(git push:*)` or `Bash(git push *)` | The command `git push` with any arguments: `git push`, `git push origin main`, not `git pushx`. A prefix of whole words. |
+| `Bash(npm test)` | Exactly that command: `npm test`, not `npm test -- --watch`. Compared as words, so quoting and spacing do not matter; a command with `$` or a backtick must match as written. |
+| `Bash` or `Bash(*)` | Every shell command. |
+| `Edit(src/**)`, `Write(...)`, `Read(...)` | A file path, as in `.gitignore`: relative to the project (the git checkout of the working directory) or `~/` or absolute. See [paths](#paths). |
+| `web_fetch`, `mcp__server`, `mcp__server__*` | A tool by name. `mcp__server` covers every tool of that server; `*` in a name is a wildcard. |
+
+`bash` and `bg_run` are `Bash`; `edit` is `Edit`; `write` is `Write`; `read`, `grep`, `find` and `ls` are `Read`. The four names are case-insensitive. Only `Bash`, `Edit`, `Write` and `Read` take a specifier: `WebFetch(domain:example.com)`-style rules are not supported, and a rule that cannot be read is ignored and listed by `/gate rules`. `*` is a wildcard only at the end of a `Bash` prefix (`:*` or a trailing ` *`); anywhere else in a command it is a literal asterisk. `Bash(git push && rm x)` is an exact rule for that whole call, never a prefix.
+
+### How a shell call is matched
+
+The call is split into its simple commands (at `;`, `&&`, `||`, `|`, `&` and newlines), plus the commands inside `$(...)`, backticks, `<(...)`, `>(...)`, an unquoted here-document's substitutions, and the text of `sh -c '...'`, `bash -c`, `eval` and `sudo`.
+
+- **Deny and ask** match when any of them matches, or the exact rule names the whole call. `Bash(rm -rf:*)` denies `git status && rm -rf x`, `ls $(rm -rf x)`, `bash -c 'rm -rf x'` and `sudo rm -rf x`.
+- **Allow** must cover every command that does more than read. `Bash(git push:*)` allows `cd sub && git push origin x; ls`, not `git push && rm -rf x`. Read-only commands (`ls`, `cat`, `cd`, `echo`, `git status`, ...) need no rule, unless they redirect output to a file. Text run by `sh -c` is not covered by a rule for what is inside it: the `bash -c '...'` command itself must be allowed (the dialog offers its exact text). A call held only for a substitution or a redirect, whose commands all read, needs a rule for each of them (or the exact text).
+- **What a command is called** includes the program as typed (`bin/homelab`; `./bin/homelab` is the same, `./git` is not `git`), the program past assignments and wrappers (`time npm test` is `npm test`), and for a prefix rule the program and subcommand it names (`git -C ../x push` is `git push`, `docker compose -f a.yml up` is `docker compose up`). An allow rule does not look past an assignment or wrapper option that changes what runs (`PATH=... git push`, `git -c ...`, `env -S`), or a program named by a path of its own.
+- **A command this cannot read as a program with arguments** (a program named by a substitution or variable, `export A=1`, `set -e`) is opened only by a rule naming the whole call.
+- **Always-held calls** (`sudo`, a force-push to main, a download piped to a shell, credential files, downloaded code) are never opened by a prefix rule, a bare tool rule or a wildcard path: only an exact rule does, `Bash(git push --force origin main)` for the whole command, `Edit(.env)` or `Read(.env)` for a credential file without wildcards. Downloaded code stays allow-once only, whatever the rule. Deny rules apply to all of them.
+
+### Paths
+
+`Edit`, `Write` and `Read` rules take gitignore-style patterns:
+
+- `src/**` is anchored at the project and covers everything below `src` and `src` itself (so `ls src` is a read of it); `**/*.test.ts` crosses directories; `*` and `?` stay within one path part. As in `.gitignore`, a pattern that matches a directory covers everything in it, so `src/*` covers `src/a/b.ts`.
+- A pattern with no slash matches at any depth (`*.env`, `generated`). `./package.json` is anchored at the project.
+- `~/notes/**` is under your home; `/etc/app/**` is an absolute path (Claude Code's `//etc/app/**` works too).
+- `edit` and `write` rules allow only their own tool, but a deny or ask rule for either covers both, as Claude Code's `Edit` rules do. `Read` rules cover `read`, `grep`, `find` and `ls`.
+- A path rule applies to Pi's file tools, not to the paths a shell command names; use the [directory policy](#directories) and the always-held credential files for those. An allow rule for `Edit`, `Write` or `Read` also opens the directory policy for that tool: `Edit(~/dotfiles/**)` lets `edit` write there without a folder grant (a [derived path](#directories) stays held).
+
+### Where rules live
+
+All scopes are added together; no scope overrides another's deny or ask.
+
+| Scope | Stored in | Changed by |
+| --- | --- | --- |
+| session | memory, never saved | the dialog, `/gate rules` |
+| project (this machine) | `~/.pi/agent/tool-gate/project-grants.json` (under `PI_CODING_AGENT_DIR`), keyed by the project's main checkout so its worktrees share it | the dialog, `/gate rules` |
+| project (shared) | `<project>/.agents/tool-gate.json` and `<project>/.pi/tool-gate.json`, `permissions` | you; read-only for `/gate rules` |
+| user | `~/.pi/agent/tool-gate.json` (`PI_CODING_AGENT_DIR` honored), `permissions` | the dialog, `/gate rules` |
+| user (shared) | `$XDG_CONFIG_HOME/agents/tool-gate.json` (default `~/.config/agents/`), `permissions` | you; read-only for `/gate rules` (it may be managed by another tool) |
+
+The machine-local project scope stays outside the repository because its rules and folder grants hold this machine's absolute paths. The files take Claude Code's `permissions` block:
+
+```json
+{
+  "permissions": {
+    "allow": ["Bash(npm test)", "Bash(git push:*)", "Edit(src/**)"],
+    "ask": ["Bash(git push --force:*)", "Read(notes/**)"],
+    "deny": ["Bash(rm -rf:*)", "Read(.env)", "mcp__untrusted"]
+  }
+}
+```
+
+The lists of all four files are added together (unlike the rest of `tool-gate.json`, where arrays replace). The `agents` files are read by the opencode and Claude Code ports of this plugin too, which ignore keys they do not know, and this package ignores the other keys Claude Code puts in a `permissions` block. Rules are re-read before each call.
+
+### The approval dialog
+
+A held call that rules can name offers them, with the rule in the question and short rows (at most 42 characters, so a phone client reads them without wrapping):
+
+```text
+Allow bash git push origin feature?
+Rule: Bash(git push:*)
+
+→ Allow once
+  Allow rule for this session
+  Allow rule in this project
+  Allow rule everywhere
+  Edit the rule...
+  Block
+  Block with a message
+```
+
+- **This session**, **in this project** and **everywhere** add the rule to the `allow` list of the session, the machine-local project scope or your user file. If it cannot be saved (a user file that is not valid JSON), the call is allowed for the session and a warning says so.
+- **Edit the rule...** opens the rule on a `›` line (one per line when there are several), checks it, and comes back to the dialog with the edited rule. A rule that is not one is refused with the reason and offered again as typed; Esc keeps the rule.
+- **The suggested rule** is today's key of the call as a prefix: program and subcommand when it takes one (`git push`, `docker compose up`, `gh repo create`, `bin/homelab status`), skipping `cd`, `echo`, loop headers and here-document text. For a call with several keys there is one rule each, all shown. A script runner names its script (`python3 scripts/x.py:*`, `node server.js:*`). `edit` and `write` offer their folder (`Edit(src/a/**)`; a file directly in the project, `Edit(./package.json)`), other tools their name (`web_fetch`, `mcp__server__tool`).
+- **The exact command** is offered instead of a prefix for programs whose arguments are the risk: `rm`, `mv`, `chmod`, `chown`, `dd`, `curl`, `wget`, `ssh`, `scp`, `rsync`, `nc`, `sudo`, `gh api`, and inline code (`python -c`, `node -e`, `bash -c`, `sh -c`, an interpreter fed on stdin). The whole call is the rule when the gate cannot read a command in it as a program with arguments (`export A=1`, a program named by a substitution), when its commands all read and are held only for a substitution or redirect, and when a here-document is fed to one of those risky programs (`git commit -F - <<EOF` is still a prefix). When a rule cannot be written back as exact (a command ending in a bare `*`), none is offered.
+- **Always-held calls** offer only Allow once, Block and Block with a message. Add an exact rule with `/gate rules add` to open one.
+- A hold by the [directory policy](#directories) offers the folder instead (`Allow folder for this session`, `in this project`; no everywhere), listed with the rules.
+
+Without Pi's terminal UI the same rows are a plain select, and Edit opens Pi's editor with the rule.
+
+### `/gate rules`
+
+`/gate rules` prints every rule grouped by list and scope with the file it comes from (and the folder grants, and any rule it could not read), then a picker: pick a rule to remove it (session, this machine's project and your own user file; a rule from a shared file says which file to edit), or **Add a rule...** to choose the list, the scope and the rule. Arguments work too:
+
+```text
+/gate rules list
+/gate rules add allow Bash(git push:*) --scope project
+/gate rules add deny Read(.env) --scope user
+/gate rules remove allow Bash(git push:*) [--scope session|project|user]
+```
+
+`--scope` is `session`, `project` (this machine's) or `user`; the default is `project`. `/gate grants` is the same command.
+
+### Older saved grants
+
+The project grants saved before rules existed are read as rules, in the machine-local project scope, with no rewrite until you change one: `bash:<key>` is `Bash(<key>:*)`, `tool:<x>` is `<x>`, `edit:<dir>` and `write:<dir>` are `Edit(<dir>/**)` and `Write(<dir>/**)`, an `unparsed shell:` key is the exact command, and `dir:` keys stay folder grants. A grant for reads with substitutions or redirects has no rule that says it and is no longer used. New rules are saved in the same file as entries with a key such as `allow:Bash(git push:*)`, which an older version lists as a grant and ignores. Rules match a program as typed, so a grant for a script run by its path (`bin/homelab status`, saved as `homelab status`) no longer covers `bin/homelab status`; allow it again.
+
+### Compared with Claude Code
+
+Same: the `allow`, `ask` and `deny` lists with deny, then ask, then allow; the rule syntax for `Bash(prefix:*)`, `Bash(exact)`, `Edit`, `Write`, `Read` and bare tool names; `mcp__server` for a server's tools; gitignore-style paths with `~/` and `//`-absolute; splitting compound commands so that a rule for one part does not allow the others; the same `permissions` block in a settings file.
+
+Different:
+
+- Only `Bash`, `Edit`, `Write` and `Read` take a specifier. There is no `WebFetch(domain:...)` or other tool specifier, and no managed (organization) scope. `*` is a wildcard only as a `Bash` prefix, not inside a command.
+- A path starting with `/` is absolute here; in Claude Code it is relative to the settings file's project and `//` is absolute. `//` works here too.
+- `Edit` and `Write` allow rules cover their own tool (Claude Code's `Edit` covers every file-writing tool); deny and ask rules cover both.
+- Path rules apply to Pi's file tools, not to the paths in shell commands.
+- A prefix rule also matches through global options and wrappers (`git -C x push`, `time git push`) and sees through `sudo`, `sh -c`, `eval` and substitutions for deny and ask. Allow rules never open the calls the gate always holds, except an exact rule, and never downloaded code.
+- The scopes are session, this machine's project, the project's shared files and your user files (in Claude Code, user, project, local and managed). Ask rules do not apply in yolo mode (deny rules do).
+- Modes, the judge and the directory policy are this plugin's own; `permissions.defaultMode` and `additionalDirectories` are not read (`directories` is the folder policy).
+
 ## Directories
 
-Pi has no directory boundary of its own, so the gate keeps one. In auto, manual and accept-edits modes (and for reads in chat and plan mode), a call is held when it touches a path outside its project's directories, before any Jev call. Auto mode pushes it back once, as with any held call, and then asks you. "Allow similar" grants that folder for the session, or always for the project: a folder under a private root (`~/Projects/other`), the private root itself for a file directly in it (`~/Downloads/shot.png` grants `~/Downloads`), else the file's directory, or the directory itself when the write is to an existing one (a writing command's working directory: `cd ~ && chezmoi apply` grants `~`, not `/Users`).
+Pi has no directory boundary of its own, so the gate keeps one. In auto, manual and accept-edits modes (and for reads in chat and plan mode), a call is held when it touches a path outside its project's directories, before any Jev call. Auto mode pushes it back once, as with any held call, and then asks you. The dialog's **Allow folder for this session** and **in this project** grant that folder (listed by `/gate rules` beside the rules): a folder under a private root (`~/Projects/other`), the private root itself for a file directly in it (`~/Downloads/shot.png` grants `~/Downloads`), else the file's directory, or the directory itself when the write is to an existing one (a writing command's working directory: `cd ~ && chezmoi apply` grants `~`, not `/Users`).
 
 - The project (the git checkout of the working directory, and the main checkout of a worktree) is always readable and writable.
 - Private roots (`directories.private`: `~/Projects`, `~/Documents`, `~/Desktop`, `~/Downloads`, iCloud Drive) are neither read nor written outside the project and its grants.
@@ -148,15 +269,15 @@ This is a heuristic over arguments. Paths a program builds at runtime are not se
 ## Commands
 
 - `/mode [chat|manual|accept-edits|plan|auto|yolo]`: switch modes; with no argument, pick one from a list of every mode.
-- `/gate` or `/gate status`: the mode and cycle, counts, Jev model, push-back setting, number of rules, session grants and project grants.
-- `/gate grants`: this project's saved grants; pick one to revoke it.
+- `/gate` or `/gate status`: the mode and cycle, counts, Jev model, push-back setting, number of project rules, permission rules by list and folder grants.
+- `/gate rules [list | add | remove]`: [permission rules](#gate-rules) and folder grants: list them, pick one to remove it, or add one. `/gate grants` is the same.
 - `/gate on`, `/gate off`: auto mode, or yolo mode.
 
 The status line shows the mode (`permission-mode` key, `⏵⏵ auto mode on (shift+tab to cycle)`) and, in auto and plan mode, `gate: N auto · P pushed back · M asked`. Every call Jev judges is recorded in the session as a `tool-gate:decision` custom entry (tool, clipped arguments, scores, failures, action, latency, input tokens), for tuning thresholds. Jev's token usage is added to the gated tool's result.
 
 ## Project rules
 
-Each top-level bullet (`-`, `*`, `+` or `1.`; indented lines continue it) in these files is a rule, checked on every judged call:
+These are guidance for Jev, not [permission rules](#permission-rules). Each top-level bullet (`-`, `*`, `+` or `1.`; indented lines continue it) in these files is a rule, checked on every judged call:
 
 1. `<project>/.agents/tool-gate-rules.md`
 2. `<project>/.pi/tool-gate-rules.md`
@@ -179,7 +300,7 @@ They are read in that order, duplicates dropped, at most 30. Files are re-read w
 3. `<project>/.agents/tool-gate.json`
 4. `<project>/.pi/tool-gate.json`
 
-The `agents` locations are shared with the opencode and Claude Code ports of this plugin; keys a port does not know are ignored. Settings are reloaded at session start and before each agent run. The defaults:
+The `agents` locations are shared with the opencode and Claude Code ports of this plugin; keys a port does not know are ignored. The `permissions` block (`allow`, `ask`, `deny`; see [permission rules](#permission-rules)) is the exception to the merge rule: the lists of every file are added together. Settings are reloaded at session start and before each agent run. The defaults:
 
 ```json
 {
@@ -243,7 +364,8 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
 - When Jev is unavailable and there is no UI, every call except the always-held ones is allowed.
 - Downloaded code is found by the forms above. Files whose names the command does not give (`gh release download` without `-O`, `-D` or `-p`, `curl -J`), files unpacked from a downloaded archive, downloads by other programs or tools, and a downloaded program run by bare name from `PATH` are not tracked.
 - A script's content is read when the call is judged; a script that changes it while it runs is not seen.
-- "Allow similar for this session" grants are held in memory; project grants are saved outside the repository. The mode is saved in the session.
+- Session rules and folder grants are held in memory; this machine's project rules are saved outside the repository. The mode is saved in the session.
+- Permission rules match by words, not by what a program does: `Bash(rm -rf:*)` does not deny `rm -fr x` or `rm -r -f x`, and a rule for a script's name does not follow what the script runs. Path rules cover Pi's file tools, not the paths a shell command names. Treat deny rules as guardrails, not as a sandbox.
 
 ## Development
 

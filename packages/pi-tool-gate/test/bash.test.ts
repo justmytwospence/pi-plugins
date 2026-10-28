@@ -409,6 +409,14 @@ test("bashKeys name what a call does, skipping shell noise and reads", () => {
   expect(bashKeys("env -Srm; npm test")).toEqual(["npm test", "unparsed shell: env -Srm; npm test"]);
 });
 
+test("bashKeys see through the keywords that lead a command, and lone keywords run nothing", () => {
+  expect(bashKeys("if grep -q x f; then npm test; fi")).toEqual(["npm test"]);
+  expect(bashKeys("if true\nthen\n  npm test\nfi")).toEqual(["npm test"]);
+  expect(bashKeys("{ npm test; }")).toEqual(["npm test"]);
+  expect(bashKeys("if true; then npm test; else make; fi")).toEqual(["make", "npm test"]);
+  expect(bashKeys("if git push; then rm -rf x; fi")).toEqual(["git push", "rm"]);
+});
+
 test("bashKeys key the commands inside substitutions: a grant for reads never covers a hidden write", () => {
   expect(bashKeys("ls $(rm -rf ~/foo)")).toEqual(["rm"]);
   expect(bashKeys("echo \"$(rm x)\"")).toEqual(["rm"]);

@@ -28,6 +28,7 @@ const themeModule = await import(new URL('./modes/interactive/theme/theme.js', s
 const jiti = createJiti(import.meta.url);
 const { QuestionDialog } = await jiti.import('../packages/pi-ask-user-question/src/dialog.ts');
 const { askApproval } = await jiti.import('../packages/pi-tool-gate/src/prompt.ts');
+const { ALLOW_ONCE, BLOCK, choiceLabels } = await jiti.import('../packages/pi-tool-gate/src/index.ts');
 const { CustomEditor } = await import(new URL('./modes/interactive/components/custom-editor.js', sdkUrl));
 const { sidebarScreen } = await import('./remote-clients/sidebar.mjs');
 const { TerminalPanel } = await jiti.import('../packages/pi-interactive-shell/src/panel.ts');
@@ -73,7 +74,25 @@ function questionLines(questions, width) {
   return dialog.render(width);
 }
 
-async function approvalLines(width) {
+// tool-gate's approval dialog as index.ts builds it: a fixed hold offers once or block; a held call
+// that rules can name also offers the rule for the session, the project and everywhere, with the rule
+// in the question (never in the rows) and the edit row; a folder hold offers the folder.
+function approvalOptions(kind, plural) {
+  if (!kind) return [ALLOW_ONCE, BLOCK];
+  const l = choiceLabels(kind, plural);
+  return [ALLOW_ONCE, l.session, l.project, ...(l.everywhere ? [l.everywhere] : []), ...(l.edit ? [l.edit] : []), BLOCK];
+}
+
+const RULE = { kind: 'rules', grant: ['Rule: Bash(git push:*)'], command: 'git push origin feature', held: 'it changes something other people see' };
+const RULES = {
+  kind: 'rules', plural: true,
+  grant: ['Rule: Bash(git push:*)', 'Rule: Bash(curl -s -X POST https://api.example.com/v1/deployments/1234567890/restart?force=true&notify=all)'],
+  command: 'cd ~/Projects/app && git push origin feature && curl -s -X POST https://api.example.com/v1/deployments/1234567890/restart',
+  held: 'it changes something other people see',
+};
+const FOLDER = { kind: 'dirs', grant: ['Folder: reads in ~/Projects/other'], tool: 'read', command: '', held: "reads ~/Projects/other/a.ts, outside this project's directories" };
+
+async function approvalLines(width, spec = {}) {
   let lines;
   const ctx = {
     mode: 'tui',
@@ -82,11 +101,14 @@ async function approvalLines(width) {
       select: async () => undefined,
     },
   };
+  const options = approvalOptions(spec.kind, spec.plural);
   void askApproval(ctx, {
-    view: { tool: 'bash', subject: '', body: { kind: 'code', lang: 'bash', text: 'git push --force origin main' } },
-    held: 'force-pushes main/master',
+    view: { tool: spec.tool ?? 'bash', subject: spec.tool === 'read' ? '~/Projects/other/a.ts' : '', body: { kind: 'code', lang: 'bash', text: spec.command ?? 'git push --force origin main' } },
+    held: spec.held ?? 'force-pushes main/master',
     agentCase: 'The rebase rewrote the branch.',
-    options: ['Allow once', 'Block'],
+    options,
+    ...(spec.grant ? { grant: spec.grant } : {}),
+    ...(spec.kind === 'rules' ? { editRow: choiceLabels('rules', spec.plural).edit, editText: spec.grant.map((g) => g.replace(/^Rule: /u, '')).join('\n') } : {}),
   }, 'Allow?');
   await new Promise((resolve) => setTimeout(resolve, 0));
   return lines;
@@ -117,6 +139,14 @@ const DIALOGS = [
   { name: 'ask single', lines: (w) => questionLines([question(false)], w), herdr: { options: 4, multi: false }, collie: { kind: 'prompt-select', options: 4 }, },
   { name: 'ask multi', lines: (w) => questionLines([question(true)], w), herdr: { multi: true }, collie: { kind: 'multi-select' }, },
   { name: 'tool-gate approval', lines: approvalLines, herdr: { options: 3, multi: false }, collie: { kind: 'prompt-select' }, },
+  ...[
+    ['tool-gate approval (rule)', RULE],
+    ['tool-gate approval (two rules)', RULES],
+    ['tool-gate approval (folder)', FOLDER],
+  ].map(([name, spec]) => {
+    const rows = [...approvalOptions(spec.kind, spec.plural), 'Block with a message'];
+    return { name, lines: (w) => approvalLines(w, spec), herdr: { options: rows.length, multi: false, labels: rows }, collie: { kind: 'prompt-select', wraps: rows } };
+  }),
   { name: 'pi select (plan approval)', lines: selectorLines, herdr: { options: 3, multi: false }, collie: { kind: 'prompt-select', options: 4 } },
   { name: 'cache-guard cold cache', lines: (w) => coldCacheLines(w, plainMenu), herdr: { options: plainMenu.length, multi: false, labels: plainMenu }, collie: { kind: 'prompt-select', options: plainMenu.length + 1, wraps: plainMenu } },
   { name: 'cache-guard cold cache (model offers)', lines: coldCacheLines, herdr: { options: coldMenu.length, multi: false, labels: coldMenu }, collie: { kind: 'prompt-select', options: coldMenu.length + 1, wraps: coldMenu } },

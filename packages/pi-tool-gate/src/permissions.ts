@@ -1,0 +1,673 @@
+// Permission rules, in Claude Code's syntax: `Bash(git push:*)` (a prefix), `Bash(npm test)` (one
+// exact command), `Edit(src/**)`, `Write(...)`, `Read(...)` (gitignore-style paths), or a bare tool
+// name (`web_fetch`, `mcp__server`). Three lists, `allow`, `ask` and `deny`, merged from every scope
+// (session, this project on this machine, the project's shared files, your user files); `deny`
+// beats `ask` beats `allow` wherever each was written.
+//
+// A shell call is taken apart into its simple commands (bash.ts `bashUnits`): the parts of `a && b`,
+// the commands inside `$(...)` and backticks, and the text of `sh -c` and `eval`. A deny or ask rule
+// matches when any of them does; an allow rule opens a call only when it covers every part that does
+// more than read. Calls the gate always holds (`alwaysAskBash`) are opened only by a rule naming the
+// exact command. Everything here is pure except loading and editing the rule files.
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
+import { type BashUnit, bashUnits, expandHome, READS_KEY, splitCommand } from "./bash.ts";
+import { agentDir, isRecord, sharedConfigDir } from "./config.ts";
+import type { Grant } from "./grants.ts";
+
+/** The lists in the order they win: a matching deny rule beats ask, ask beats allow. */
+export const LISTS = ["deny", "ask", "allow"] as const;
+export type RuleList = (typeof LISTS)[number];
+
+/** Where a rule was written: this session, this project on this machine, or your user settings. */
+export type Scope = "session" | "project" | "user";
+
+export interface Origin {
+  scope: Scope;
+  /** Written in a file the other ports read too (`.agents/tool-gate.json`, `~/.config/agents/tool-gate.json`), or the project's own. */
+  shared: boolean;
+  /** The file, or `this session`. */
+  source: string;
+  /** Whether the gate may change it (`/gate rules`): never a project's shared file, never `~/.config/agents`. */
+  writable: boolean;
+}
+
+export interface ScopedRule {
+  list: RuleList;
+  /** The rule normalized (`Bash(git push:*)`). */
+  text: string;
+  /** The rule as it is stored, which removing it must match. */
+  raw: string;
+  rule: Rule;
+  origin: Origin;
+  /** The key a machine-local project grant is stored under (a migrated grant keeps its old key). */
+  key?: string;
+}
+
+/** A rule in a file that this reader cannot use, kept to show the user. */
+export interface IgnoredRule {
+  list: RuleList;
+  raw: string;
+  error: string;
+  origin: Origin;
+}
+
+export interface Rule {
+  /** Normalized text. */
+  text: string;
+  /** `Bash`, `Edit`, `Write`, `Read`, or a tool name (with `*` wildcards; `mcp__server` covers the server's tools). */
+  tool: string;
+  /** A command rule: a prefix (`git push:*`) or an exact command; `tokens` is the command as words when it is one simple command. */
+  command?: { kind: "prefix" | "exact"; text: string; tokens?: string[] };
+  /** A path rule. */
+  path?: PathPattern;
+}
+
+export type Parsed = { ok: true; rule: Rule } | { ok: false; error: string };
+
+const FILE_TOOLS = new Set(["Edit", "Write", "Read"]);
+const NAMED = new Map([["bash", "Bash"], ["edit", "Edit"], ["write", "Write"], ["read", "Read"]]);
+
+/** The rule tool a Pi tool belongs to: `bash` and `bg_run` are Bash, `read`, `grep`, `find` and `ls` are Read; others keep their name. */
+export function ruleTool(tool: string): string {
+  if (tool === "bash" || tool === "bg_run") return "Bash";
+  if (tool === "edit") return "Edit";
+  if (tool === "write") return "Write";
+  if (tool === "read" || tool === "grep" || tool === "find" || tool === "ls") return "Read";
+  return tool;
+}
+
+/** Parse a rule: `Tool` or `Tool(specifier)`. */
+export function parseRule(raw: string): Parsed {
+  const text = raw.trim();
+  if (!text) return { ok: false, error: "The rule is empty." };
+  const shape = /^([^\s()]+)\s*(?:\(([\s\S]*)\))?$/u.exec(text);
+  if (!shape) return { ok: false, error: "Write a rule as Tool or Tool(specifier), for example Bash(git push:*)." };
+  const name = shape[1] as string;
+  const specifier = shape[2];
+  if (!/^[A-Za-z0-9_.*:-]+$/u.test(name)) return { ok: false, error: `"${name}" is not a tool name.` };
+  const tool = NAMED.get(name.toLowerCase()) ?? name;
+  if (specifier === undefined) return { ok: true, rule: { text: tool, tool } };
+  if (!specifier.trim()) return { ok: false, error: `${tool}() has nothing inside the parentheses; name the tool alone to cover every call.` };
+  if (tool === "Bash") return parseCommandRule(specifier);
+  if (FILE_TOOLS.has(tool)) {
+    const pattern = compilePath(specifier);
+    if (!pattern.ok) return pattern;
+    return { ok: true, rule: { text: `${tool}(${specifier.trim()})`, tool, path: pattern.pattern } };
+  }
+  return { ok: false, error: `${tool}(...) is not supported: only Bash, Edit, Write and Read take a specifier. Name the tool alone (${tool}).` };
+}
+
+/**
+ * The command's words with `./bin/x` spelled `bin/x`, which is the same program. `./git` is not
+ * `git`: a file in this directory, not the one on the path.
+ */
+function normalizeWords(words: readonly string[]): string[] {
+  const first = words[0];
+  return first !== undefined && /^\.\/.*\//u.test(first) ? [first.slice(2), ...words.slice(1)] : [...words];
+}
+
+function parseCommandRule(specifier: string): Parsed {
+  const s = specifier.trim();
+  if (s === "*") return { ok: true, rule: { text: "Bash", tool: "Bash" } };
+  const head = s.endsWith(":*") || s.endsWith(" *") ? s.slice(0, -2).trim() : undefined;
+  if (head !== undefined) {
+    const parts = splitCommand(head);
+    if (!head || parts.length !== 1) {
+      return { ok: false, error: "A prefix rule names one command followed by :* (or a space and *), for example Bash(git push:*)." };
+    }
+    return { ok: true, rule: { text: `Bash(${head}:*)`, tool: "Bash", command: { kind: "prefix", text: head, tokens: normalizeWords(parts[0] as string[]) } } };
+  }
+  const parts = splitCommand(s);
+  const tokens = parts.length === 1 ? normalizeWords(parts[0] as string[]) : undefined;
+  return { ok: true, rule: { text: `Bash(${s})`, tool: "Bash", command: { kind: "exact", text: s, ...(tokens ? { tokens } : {}) } } };
+}
+
+// ---- paths ----------------------------------------------------------------------------------
+
+/**
+ * A gitignore-style path pattern. `*` and `?` stay inside one path part, `**` crosses them, and a
+ * pattern naming a directory covers everything in it. Relative to the project: `src/**` is anchored
+ * there, `*.env` (no slash) matches at any depth. `~/x` is under home, `/x` (or Claude Code's `//x`)
+ * is an absolute path.
+ */
+export interface PathPattern {
+  spec: string;
+  anchor: "absolute" | "root" | "anywhere";
+  re: RegExp;
+  /** For `dir/**`, the directory itself too (listing it is reading it). */
+  dirRe?: RegExp;
+  /** The path, when the pattern has no wildcard. */
+  literal?: string;
+}
+
+function globSource(pattern: string): string {
+  let re = "";
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i] as string;
+    if (c === "*") {
+      if (pattern[i + 1] === "*") {
+        if (pattern[i + 2] === "/") {
+          re += "(?:.*/)?";
+          i += 2;
+        } else {
+          re += ".*";
+          i++;
+        }
+      } else re += "[^/]*";
+    } else if (c === "?") re += "[^/]";
+    else re += c.replace(/[.+^${}()|[\]\\]/gu, "\\$&");
+  }
+  return re;
+}
+
+function compilePath(specifier: string): { ok: true; pattern: PathPattern } | { ok: false; error: string } {
+  let p = specifier.trim();
+  if (p.startsWith("//")) p = p.slice(1);
+  p = expandHome(p);
+  let anchor: PathPattern["anchor"];
+  if (p.startsWith("/")) anchor = "absolute";
+  else {
+    const dotted = p.startsWith("./");
+    p = dotted ? p.slice(2) : p;
+    anchor = dotted || p.replace(/\/+$/u, "").includes("/") ? "root" : "anywhere";
+  }
+  if (p.length > 1) p = p.replace(/\/+$/u, "");
+  if (!p) return { ok: false, error: "The path is empty." };
+  try {
+    const literal = /[*?]/u.test(p) ? undefined : p;
+    const dir = p.endsWith("/**") && p.length > 3 ? p.slice(0, -3) : undefined;
+    return {
+      ok: true,
+      pattern: {
+        spec: specifier.trim(),
+        anchor,
+        re: new RegExp(`^${globSource(p)}$`, "u"),
+        ...(dir ? { dirRe: new RegExp(`^${globSource(dir)}$`, "u") } : {}),
+        ...(literal ? { literal } : {}),
+      },
+    };
+  } catch {
+    return { ok: false, error: `"${specifier.trim()}" is not a path pattern.` };
+  }
+}
+
+/** The directory prefixes of a path, shortest first, then the path itself. */
+function lineage(candidate: string): string[] {
+  const out: string[] = [];
+  for (let i = 1; i < candidate.length; i++) if (candidate[i] === "/") out.push(candidate.slice(0, i));
+  out.push(candidate);
+  return out;
+}
+
+/**
+ * Whether `file` (absolute) matches. With `exact`, only a pattern with no wildcard that names the
+ * file itself matches: what may open a call the gate always holds (a credential file).
+ */
+export function matchPath(pattern: PathPattern, file: string, root: string, exact = false): boolean {
+  let candidate = file;
+  if (pattern.anchor !== "absolute") {
+    const rel = path.relative(root, file);
+    if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return false;
+    candidate = rel;
+  }
+  if (exact) {
+    if (pattern.literal === undefined) return false;
+    return pattern.anchor === "anywhere" ? path.basename(file) === pattern.literal : candidate === pattern.literal;
+  }
+  if (pattern.anchor === "anywhere") return candidate.split("/").some((part) => pattern.re.test(part));
+  return lineage(candidate).some((prefix) => pattern.re.test(prefix) || pattern.dirRe?.test(prefix) === true);
+}
+
+// ---- commands -------------------------------------------------------------------------------
+
+const hasExpansion = (words: readonly string[]) => words.some((w) => /[$`]/u.test(w));
+
+function startsWith(prefix: readonly string[], words: readonly string[]): boolean {
+  return prefix.length <= words.length && prefix.every((t, i) => t === words[i]);
+}
+
+function sameWords(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((t, i) => t === b[i]);
+}
+
+/**
+ * The words a unit answers to. A rule is tried against the command as typed (without its `./`),
+ * against the program past assignments and wrappers (`time npm test` is `npm test`), against the
+ * program a `sudo` runs, and, for a prefix, against the program and subcommands it names
+ * (`git -C x push` is `git push`). Allow rules skip the last three for a unit an assignment, wrapper
+ * option or `git -c` changes (`PATH=... git push`), which is not the program it seems.
+ */
+function formsOf(u: BashUnit, blocking: boolean): { argv: string[][]; key?: string[] } {
+  const argv = [normalizeWords(u.words)];
+  const trusted = blocking || !u.unsafe;
+  if (u.program && trusted) argv.push([u.program.name, ...u.program.args]);
+  if (u.inner && blocking) argv.push([u.inner.name, ...u.inner.args]);
+  return { argv, ...(u.key && trusted ? { key: u.key.split(" ") } : {}) };
+}
+
+function unitMatches(rule: Rule, u: BashUnit, blocking: boolean): boolean {
+  const c = rule.command;
+  if (!c?.tokens) return false;
+  const forms = formsOf(u, blocking);
+  if (c.kind === "prefix") return forms.argv.some((f) => startsWith(c.tokens as string[], f)) || (forms.key !== undefined && startsWith(c.tokens, forms.key));
+  return forms.argv.some((f) => !hasExpansion(f) && sameWords(c.tokens as string[], f));
+}
+
+/** Whether an exact rule names this whole command: the same text, or the same single command in other spacing or quoting. */
+function sameCommand(rule: string, command: string): boolean {
+  if (rule.trim() === command.trim()) return true;
+  if (/[$`]/u.test(command) || /[$`]/u.test(rule)) return false;
+  const a = splitCommand(rule);
+  const b = splitCommand(command);
+  return a.length === 1 && b.length === 1 && sameWords(normalizeWords(a[0] as string[]), normalizeWords(b[0] as string[]));
+}
+
+// ---- matching a call ------------------------------------------------------------------------
+
+export interface Call {
+  tool: string;
+  input: Record<string, unknown>;
+  cwd: string;
+  /** The project's root, which relative path patterns are relative to (default `cwd`). */
+  root?: string;
+  /** Extra programs treated as read-only in shell commands. */
+  readOnlyCommands?: readonly string[];
+}
+
+const analyses = new WeakMap<Call, BashUnit[]>();
+
+function unitsOf(call: Call): BashUnit[] {
+  let found = analyses.get(call);
+  if (!found) {
+    found = bashUnits(String(call.input.command ?? ""), call.readOnlyCommands ?? []);
+    analyses.set(call, found);
+  }
+  return found;
+}
+
+function fileOf(call: Call): string | undefined {
+  const kind = ruleTool(call.tool);
+  if (kind === "Edit" || kind === "Write") return path.resolve(call.cwd, expandHome(String(call.input.path ?? "")));
+  if (kind === "Read") return path.resolve(call.cwd, expandHome(String(call.input.path ?? ".") || "."));
+  return undefined;
+}
+
+function nameMatches(pattern: string, tool: string): boolean {
+  if (pattern.includes("*")) return new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/gu, "\\$&").replace(/\*/gu, ".*")}$`, "u").test(tool);
+  return tool === pattern || (pattern.startsWith("mcp__") && tool.startsWith(`${pattern}__`));
+}
+
+/**
+ * Whether a rule's tool covers a Pi tool. To deny or ask, Edit and Write cover both file-writing
+ * tools, as Claude Code's Edit rules do; to allow, each covers its own.
+ */
+function covers(ruleName: string, tool: string, blocking: boolean): boolean {
+  const kind = ruleTool(tool);
+  if (ruleName === "Bash" || ruleName === "Edit" || ruleName === "Write" || ruleName === "Read") {
+    if (blocking && (ruleName === "Edit" || ruleName === "Write") && (kind === "Edit" || kind === "Write")) return true;
+    return kind === ruleName;
+  }
+  return nameMatches(ruleName, tool);
+}
+
+function bare(r: Rule): boolean {
+  return !r.command && !r.path;
+}
+
+/** Whether a deny or ask rule matches the call. */
+function blocks(r: Rule, call: Call): boolean {
+  if (!covers(r.tool, call.tool, true)) return false;
+  if (bare(r)) return true;
+  if (r.command) {
+    const command = String(call.input.command ?? "");
+    if (r.command.kind === "exact" && sameCommand(r.command.text, command)) return true;
+    return unitsOf(call).some((u) => unitMatches(r, u, true));
+  }
+  const file = fileOf(call);
+  return file !== undefined && r.path !== undefined && matchPath(r.path, file, call.root ?? call.cwd);
+}
+
+/** The deny rule that stops the call, else the ask rule that makes it ask, else undefined. */
+export function blocking(rules: readonly ScopedRule[], call: Call): ScopedRule | undefined {
+  for (const list of ["deny", "ask"] as const) {
+    const hit = rules.find((r) => r.list === list && blocks(r.rule, call));
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
+/**
+ * The allow rules that open the call, or undefined. A bare rule (`Bash`, `web_fetch`) covers every
+ * call of its tool; a command rule must cover every part of a shell call that does more than read,
+ * or be the call's exact text; a path rule covers the file. With `exact` (calls the gate always
+ * holds) only a rule naming the exact command, or a wildcard-free path, opens it.
+ */
+export function allowing(rules: readonly ScopedRule[], call: Call, exact = false): ScopedRule[] | undefined {
+  const mine = rules.filter((r) => r.list === "allow" && covers(r.rule.tool, call.tool, false));
+  if (!mine.length) return undefined;
+  const root = call.root ?? call.cwd;
+  if (ruleTool(call.tool) !== "Bash") {
+    const file = fileOf(call);
+    const hit = mine.find((r) =>
+      bare(r.rule) ? !exact : file !== undefined && r.rule.path !== undefined && matchPath(r.rule.path, file, root, exact));
+    return hit ? [hit] : undefined;
+  }
+  const command = String(call.input.command ?? "");
+  const whole = mine.find((r) => r.rule.command?.kind === "exact" && sameCommand(r.rule.command.text, command));
+  if (whole) return [whole];
+  if (exact) return undefined;
+  const everything = mine.find((r) => bare(r.rule));
+  if (everything) return [everything];
+  const units = unitsOf(call).filter((u) => !u.nested);
+  if (!units.length || units.some((u) => u.unparsed)) return undefined;
+  // Parts that do more than read need a rule. A call held only for a substitution or redirect, whose
+  // parts all read, needs one for each of its commands.
+  const acting = units.filter((u) => !u.read || u.writes);
+  const required = acting.length ? acting : units.filter((u) => u.key !== undefined);
+  if (!required.length) return undefined;
+  const used = new Set<ScopedRule>();
+  for (const u of required) {
+    const rule = mine.find((r) => unitMatches(r.rule, u, false));
+    if (!rule) return undefined;
+    used.add(rule);
+  }
+  return [...used];
+}
+
+/** The allow rule that covers writing or reading `file` with `tool`, for the directory policy (derived paths are never opened by one). */
+export function allowsPath(rules: readonly ScopedRule[], tool: string, file: string, root: string): boolean {
+  return rules.some((r) => r.list === "allow" && covers(r.rule.tool, tool, false) && r.rule.path !== undefined && matchPath(r.rule.path, file, root));
+}
+
+// ---- suggestions ----------------------------------------------------------------------------
+
+/** Programs whose arguments are the risk: their rules name the exact command. */
+const EXACT_PROGRAMS = new Set([
+  "rm", "mv", "chmod", "chown", "chgrp", "dd", "curl", "wget", "ssh", "scp", "rsync", "nc", "ncat", "netcat", "sudo", "doas", "eval",
+]);
+const SHELL_PROGRAMS = /^(?:sh|bash|zsh|dash|ksh|csh|tcsh|fish)$/u;
+const SCRIPT_RUNNERS = /^(?:sh|bash|zsh|dash|ksh|python[0-9.]*|node|nodejs|bun|ruby|perl|php)$/u;
+const INLINE_FLAGS: Array<[RegExp, RegExp]> = [
+  [SHELL_PROGRAMS, /^-[A-Za-z]*c[A-Za-z]*$/u],
+  [/^python[0-9.]*$/u, /^-[A-Za-z]*c$/u],
+  [/^(?:node|nodejs|bun)$/u, /^(?:-e|-p|--eval|--print)$/u],
+  [/^(?:ruby|perl)$/u, /^-[A-Za-z]*[eE]$/u],
+  [/^(?:php)$/u, /^-r$/u],
+  [/^(?:lua|osascript)$/u, /^-e$/u],
+];
+
+/** Inline code (`python -c`, `node -e`, `bash -c`), or an interpreter fed its script on stdin. */
+function runsInlineCode(u: BashUnit): boolean {
+  const p = u.program;
+  if (!p) return false;
+  if (p.name === "deno" && p.args[0] === "eval") return true;
+  if (INLINE_FLAGS.some(([name, flag]) => name.test(p.name) && p.args.some((a) => flag.test(a)))) return true;
+  return SCRIPT_RUNNERS.test(p.name) && !p.args.some((a) => a !== "-" && !a.startsWith("-"));
+}
+
+function quoteWord(word: string): string {
+  return /^[A-Za-z0-9_@%+=:,./~-]+$/u.test(word) ? word : `'${word.replace(/'/gu, "'\\''")}'`;
+}
+
+/** The rule for exactly this command, or undefined when its text could not be read back as exact (a trailing `*`). */
+function exactRule(command: string): string | undefined {
+  const text = command.trim();
+  if (!text) return undefined;
+  if (!/(?::| )\*$/u.test(text)) return `Bash(${text})`;
+  const parts = splitCommand(text);
+  return parts.length === 1 && !/[$`]/u.test(text) ? `Bash(${(parts[0] as string[]).map(quoteWord).join(" ")})` : undefined;
+}
+
+/**
+ * The rule for one command: a prefix of its program and subcommands, or exactly the command when its
+ * arguments are the risk (`exact`). Undefined when the command has an expansion that an exact rule
+ * could not name.
+ */
+function unitRule(u: BashUnit): { rule: string; exact: boolean } | undefined {
+  const name = u.program?.name ?? "";
+  const keyWords = (u.key ?? "").split(" ");
+  const exact = () => (hasExpansion(u.words) ? undefined : { rule: `Bash(${normalizeWords(u.words).map(quoteWord).join(" ")})`, exact: true });
+  if (EXACT_PROGRAMS.has(name) || u.key?.startsWith("gh api") || runsInlineCode(u)) return exact();
+  let words = keyWords;
+  const typed = normalizeWords([u.invoked ?? name])[0] as string;
+  if (u.invoked?.includes("/") && !/^\/(?:usr\/)?bin\//u.test(u.invoked)) words = [typed, ...keyWords.slice(1)];
+  // A script runner's prefix names the script: `python3 scripts/x.py`, not every `python3`. With options
+  // before the script, nothing short of the whole command does.
+  if (SCRIPT_RUNNERS.test(name) && keyWords.length === 1) {
+    const script = u.program?.args[0];
+    if (script === undefined || script.startsWith("-")) return exact();
+    words = [name, script];
+  }
+  return { rule: `Bash(${words.map(quoteWord).join(" ")}:*)`, exact: false };
+}
+
+/** The rules to offer for a shell call: one per key of `bashKeys`, each a prefix or, for risky programs, the exact command. */
+export function suggestBash(command: string, readOnlyCommands: readonly string[] = []): string[] {
+  const whole = exactRule(command);
+  const heredoc = /<<-?\s*\\?['"]?[A-Za-z_]/u.test(command);
+  const units = bashUnits(command, readOnlyCommands);
+  const acting = units.filter((u) => !u.nested && !u.read);
+  if (!acting.length || acting.some((u) => u.unparsed)) return whole ? [whole] : [];
+  const rules = new Set<string>();
+  for (const u of acting) {
+    const r = unitRule(u);
+    // A here-document is the program's input: when the program runs its input as code, or its
+    // arguments are the risk, only the whole call names it. `git commit -F - <<EOF` is a prefix.
+    if (!r || (heredoc && r.exact)) return whole ? [whole] : [];
+    rules.add(r.rule);
+  }
+  return [...rules].sort();
+}
+
+/**
+ * `Edit(src/a/**)` for a file in `src/a`: its folder, relative to the project when inside it, else
+ * under `~` or absolute. A file directly in the project, in home or in `/` is named itself, since a
+ * pattern for its folder would cover everything below it.
+ */
+function folderRule(kind: string, file: string, root: string): string {
+  const dir = path.dirname(file);
+  const home = homedir();
+  const rel = path.relative(root, dir);
+  let pattern: string;
+  if (rel === "") pattern = `./${path.basename(file)}`;
+  else if (!rel.startsWith("..") && !path.isAbsolute(rel)) pattern = `${rel}/**`;
+  else if (dir === home) pattern = `~/${path.basename(file)}`;
+  else if (dir.startsWith(`${home}/`)) pattern = `~/${path.relative(home, dir)}/**`;
+  else pattern = dir === "/" ? `/${path.basename(file)}` : `${dir}/**`;
+  return `${kind}(${pattern})`;
+}
+
+/**
+ * The rules the approval dialog offers to allow a call (none when no rule can name it): shell calls
+ * by what they run, `edit` and `write` by their folder, other tools by name. Reads are not offered.
+ */
+export function suggest(call: Call): string[] {
+  const kind = ruleTool(call.tool);
+  if (kind === "Bash") return suggestBash(String(call.input.command ?? ""), call.readOnlyCommands);
+  if (kind === "Edit" || kind === "Write") {
+    const file = fileOf(call);
+    return file ? [folderRule(kind, file, call.root ?? call.cwd)] : [];
+  }
+  if (kind === "Read") return [];
+  return parseRule(call.tool).ok ? [call.tool] : [];
+}
+
+// ---- grants saved before rules existed ------------------------------------------------------
+
+export type Migrated =
+  | { kind: "rule"; list: RuleList; text: string }
+  | { kind: "dir"; key: string; access: "read" | "write"; dir: string };
+
+/**
+ * What a saved project grant key means now: new keys are `allow:<rule>` (also `ask:`, `deny:`);
+ * `bash:<key>` is `Bash(<key>:*)`, `tool:<x>` is `<x>`, `edit:<dir>` and `write:<dir>` are
+ * `Edit(<dir>/**)` and `Write(<dir>/**)`; `dir:` keys stay folder grants. A key for reads with
+ * substitutions or redirects has no rule that says it and is dropped.
+ */
+export function migrateGrant(key: string): Migrated | undefined {
+  const listed = /^(allow|ask|deny):([\s\S]+)$/u.exec(key);
+  if (listed) return { kind: "rule", list: listed[1] as RuleList, text: listed[2] as string };
+  const dir = /^dir:(read|write):(.+)$/u.exec(key);
+  if (dir) return { kind: "dir", key, access: dir[1] as "read" | "write", dir: dir[2] as string };
+  const bash = /^bash:([\s\S]+)$/u.exec(key);
+  if (bash) {
+    const k = bash[1] as string;
+    if (k === READS_KEY) return undefined;
+    if (k.startsWith("unparsed shell: ")) {
+      const exact = exactRule(k.slice("unparsed shell: ".length));
+      return exact ? { kind: "rule", list: "allow", text: exact } : undefined;
+    }
+    return { kind: "rule", list: "allow", text: `Bash(${k}:*)` };
+  }
+  const tool = /^tool:(.+)$/u.exec(key);
+  if (tool) return { kind: "rule", list: "allow", text: tool[1] as string };
+  const folder = /^(edit|write):(.+)$/u.exec(key);
+  if (folder) return { kind: "rule", list: "allow", text: `${folder[1] === "edit" ? "Edit" : "Write"}(${(folder[2] as string).replace(/\/+$/u, "")}/**)` };
+  return undefined;
+}
+
+/** The key a rule is saved under in the machine-local project file. */
+export function ruleKey(list: RuleList, text: string): string {
+  return `${list}:${text}`;
+}
+
+export const SESSION: Origin = { scope: "session", shared: false, source: "this session", writable: true };
+
+export function localOrigin(file: string): Origin {
+  return { scope: "project", shared: false, source: file, writable: true };
+}
+
+/** Rules and folder grants in this project's machine-local grants, migrating the old keys. */
+export function localGrants(grants: readonly Grant[], file: string): { rules: ScopedRule[]; dirs: Extract<Migrated, { kind: "dir" }>[]; ignored: IgnoredRule[] } {
+  const rules: ScopedRule[] = [];
+  const dirs: Extract<Migrated, { kind: "dir" }>[] = [];
+  const ignored: IgnoredRule[] = [];
+  const origin = localOrigin(file);
+  for (const g of grants) {
+    const m = migrateGrant(g.key);
+    if (!m) continue;
+    if (m.kind === "dir") {
+      dirs.push(m);
+      continue;
+    }
+    const parsed = parseRule(m.text);
+    if (parsed.ok) rules.push({ list: m.list, text: parsed.rule.text, raw: m.text, rule: parsed.rule, origin, key: g.key });
+    else ignored.push({ list: m.list, raw: m.text, error: parsed.error, origin });
+  }
+  return { rules, dirs, ignored };
+}
+
+export function sessionRule(list: RuleList, raw: string): ScopedRule | undefined {
+  const parsed = parseRule(raw);
+  return parsed.ok ? { list, text: parsed.rule.text, raw, rule: parsed.rule, origin: SESSION } : undefined;
+}
+
+// ---- rule files -----------------------------------------------------------------------------
+
+const fileCache = new Map<string, { mtime: number; rules: ScopedRule[]; ignored: IgnoredRule[] }>();
+
+function readRuleFile(file: string, origin: Origin): { rules: ScopedRule[]; ignored: IgnoredRule[] } {
+  let mtime: number;
+  try {
+    mtime = statSync(file).mtimeMs;
+  } catch {
+    return { rules: [], ignored: [] };
+  }
+  const cached = fileCache.get(file);
+  if (cached && cached.mtime === mtime) return cached;
+  const rules: ScopedRule[] = [];
+  const ignored: IgnoredRule[] = [];
+  try {
+    const json: unknown = JSON.parse(readFileSync(file, "utf8"));
+    const permissions = isRecord(json) ? json.permissions : undefined;
+    if (isRecord(permissions)) {
+      for (const list of LISTS) {
+        const entries = permissions[list];
+        if (!Array.isArray(entries)) continue;
+        for (const raw of entries) {
+          if (typeof raw !== "string") continue;
+          const parsed = parseRule(raw);
+          if (parsed.ok) rules.push({ list, text: parsed.rule.text, raw, rule: parsed.rule, origin });
+          else ignored.push({ list, raw, error: parsed.error, origin });
+        }
+      }
+    }
+  } catch {
+    // Unreadable or invalid JSON: no rules from it, never a broken session.
+  }
+  const entry = { mtime, rules, ignored };
+  fileCache.set(file, entry);
+  return entry;
+}
+
+/**
+ * The rules written in the config files, user files first then the project's: `permissions.allow`,
+ * `.ask` and `.deny` of each of the four `tool-gate.json` locations (config.ts), added together
+ * rather than replacing one another. The block is Claude Code's, so the ports that read the file
+ * ignore it, and keys here that they do not know are theirs to ignore.
+ */
+export function loadFileRules(cwd: string): { rules: ScopedRule[]; ignored: IgnoredRule[] } {
+  const rules: ScopedRule[] = [];
+  const ignored: IgnoredRule[] = [];
+  // The files `loadConfig` reads for tool-gate.json, in its order; only your own user file is writable here.
+  const files: Array<[file: string, scope: Scope, writable: boolean]> = [
+    [path.join(sharedConfigDir(), "tool-gate.json"), "user", false],
+    [userRulesFile(), "user", true],
+    [path.join(cwd, ".agents", "tool-gate.json"), "project", false],
+    [path.join(cwd, ".pi", "tool-gate.json"), "project", false],
+  ];
+  for (const [file, scope, writable] of files) {
+    const origin: Origin = { scope, shared: !writable, source: file, writable };
+    const read = readRuleFile(file, origin);
+    rules.push(...read.rules);
+    ignored.push(...read.ignored);
+  }
+  return { rules, ignored };
+}
+
+/** Your user rules' file: `~/.pi/agent/tool-gate.json` (`PI_CODING_AGENT_DIR` honored). */
+export function userRulesFile(): string {
+  return path.join(agentDir(), "tool-gate.json");
+}
+
+/** Add a rule to, or remove it from, your user file, leaving everything else in it as it is. Throws when the file is not a JSON object. */
+export function editUserRules(op: "add" | "remove", list: RuleList, raw: string, file = userRulesFile()): void {
+  let json: Record<string, unknown> = {};
+  if (existsSync(file)) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(file, "utf8"));
+    } catch {
+      throw new Error(`${file} is not valid JSON`);
+    }
+    if (!isRecord(parsed)) throw new Error(`${file} is not a JSON object`);
+    json = parsed;
+  }
+  const permissions = isRecord(json.permissions) ? { ...json.permissions } : {};
+  const current: unknown[] = Array.isArray(permissions[list]) ? [...(permissions[list] as unknown[])] : [];
+  const next = op === "add" ? (current.includes(raw) ? current : [...current, raw]) : current.filter((entry) => entry !== raw);
+  if (next.length) permissions[list] = next;
+  else delete permissions[list];
+  if (Object.keys(permissions).length) json.permissions = permissions;
+  else delete json.permissions;
+  mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(json, null, 2)}\n`);
+  renameSync(tmp, file);
+  fileCache.delete(file);
+}
+
+// ---- describing -----------------------------------------------------------------------------
+
+export function scopeLabel(o: Origin): string {
+  if (o.scope === "session") return "session";
+  if (o.scope === "project") return o.shared ? "project (shared)" : "project (this machine)";
+  return o.shared ? "user (shared)" : "user";
+}
+
+/** Where a rule came from: the scope, and the file when it has one. */
+export function describeOrigin(o: Origin, shown: (file: string) => string = (f) => f): string {
+  return o.scope === "session" ? "session" : `${scopeLabel(o)}: ${shown(o.source)}`;
+}

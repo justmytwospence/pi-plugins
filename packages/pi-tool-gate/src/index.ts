@@ -39,6 +39,26 @@ import {
 } from "./dirs.ts";
 import { Downloads, downloadedRunReasons, downloadsOf, type Script, scriptFor, trackCall } from "./downloads.ts";
 import { addGrants, grantsFile, loadGrants, removeGrant } from "./grants.ts";
+import {
+  allowing,
+  allowsPath,
+  blocking,
+  type Call,
+  describeOrigin,
+  editUserRules,
+  type IgnoredRule,
+  loadFileRules,
+  localGrants,
+  migrateGrant,
+  parseRule,
+  type RuleList,
+  ruleKey,
+  type ScopedRule,
+  type Scope,
+  sessionRule,
+  suggest,
+} from "./permissions.ts";
+import { type DirGrant, rulesCommand, type RuleStore } from "./rules-command.ts";
 import { whileBlocked } from "./herdr.ts";
 import { type ClassifierUsage, type JevConfig, askJev } from "./jev.ts";
 import {
@@ -90,7 +110,7 @@ export function blockedBy(result: { content?: unknown; isError?: boolean }): "us
   if (!result.isError) return undefined;
   const text = resultText(result.content);
   if (text.startsWith(DECLINED) || text.startsWith(DECLINED_WITH_MESSAGE)) return "user";
-  if (/^(?:tool-gate held this |Chat mode is on: |Plan mode is on: |[a-z ]+ mode needs the user's approval for this )/u.test(text)) return "gate";
+  if (/^(?:tool-gate held this |tool-gate blocked this |Chat mode is on: |Plan mode is on: |[a-z ]+ mode needs the user's approval for this )/u.test(text)) return "gate";
   return undefined;
 }
 
@@ -140,39 +160,67 @@ export const DEFAULT_CONFIG: GateConfig = {
   directories: DEFAULT_DIRECTORIES,
 };
 
+/** The dialog's first and last rows. */
+export const ALLOW_ONCE = "Allow once";
+export const BLOCK = "Block";
+
+/**
+ * The rows that allow what is offered, short enough (at most 42 characters) that a phone client
+ * reads them without wrapping: the rules or folders themselves are in the question.
+ */
+export function choiceLabels(kind: "rules" | "dirs", plural: boolean): { session: string; project: string; everywhere?: string; edit?: string } {
+  const noun = kind === "dirs" ? (plural ? "folders" : "folder") : plural ? "rules" : "rule";
+  return {
+    session: `Allow ${noun} for this session`,
+    project: `Allow ${noun} in this project`,
+    ...(kind === "rules" ? { everywhere: `Allow ${noun} everywhere`, edit: `Edit the ${noun}...` } : {}),
+  };
+}
+
 const STATUS_KEY = "tool-gate";
 /** Records whether the agent was last told chat mode is on, so it hears each change once. */
 const CHAT_ENTRY = "tool-gate:chat-notice";
 const BUILTIN_READ = new Set(["read", "grep", "find", "ls"]);
 
-/** What the gate does with a call before any judgment: allow it, hold it, or ask the judge. */
+/** Why a plan allowed a call: an allow rule (never what chat mode means by read-only). */
+export const ALLOWED_BY_RULE = "allow rule";
+
+/** What the gate does with a call before any judgment: allow it, deny it, hold it, or ask the judge. */
 export type Plan =
   | { kind: "allow"; why: string }
+  | { kind: "deny"; rule: ScopedRule; args: string }
   | {
       kind: "ask";
       reasons: string[];
       key: string;
       args: string;
-      /** "Allow similar" for directory-policy holds: the folders it grants. */
-      similar?: Similar;
+      /** What the dialog's allow choices add: the folders of a directory-policy hold. */
+      offer?: Offer;
       /** Held only by the directory policy; otherwise the call only reads. */
       readOnly?: boolean;
       /** Configured advice for the agent (a derived path's hint), used instead of asking Jev for a workaround. */
       advice?: string;
+      /** An ask rule: it asks you at once, in every mode, with no push-back and no judgment. */
+      direct?: boolean;
     }
-  | { kind: "judge"; args: string; key: string; similar: Similar };
+  | { kind: "judge"; args: string; key: string; offer?: Offer };
 
-/** What "allow similar" grants (for the session or the project): every key, described for the user. */
-export interface Similar {
-  keys: string[];
-  /** One description per key. */
+/** What the dialog's allow choices add, for the session, the project or everywhere. */
+export interface Offer {
+  /** Rules, or folder grants (directory-policy holds, which have no everywhere). */
+  kind: "rules" | "dirs";
+  /** Rule texts, or folder grant keys (`dir:read:/abs`). */
+  items: string[];
+  /** How each shows in the question: the rule, or `reads in ~/Downloads`. */
   labels: string[];
-  label: string;
 }
 
-function similarOf(items: ReadonlyArray<readonly [key: string, label: string]>): Similar {
-  const labels = items.map(([, label]) => label);
-  return { keys: items.map(([key]) => key), labels, label: labels.join(", ") };
+function rulesOffer(rules: readonly string[]): Offer | undefined {
+  return rules.length ? { kind: "rules", items: [...rules], labels: [...rules] } : undefined;
+}
+
+function dirsOffer(items: ReadonlyArray<readonly [key: string, label: string]>): Offer {
+  return { kind: "dirs", items: items.map(([key]) => key), labels: items.map(([, label]) => label) };
 }
 
 export interface Annotations {
@@ -192,8 +240,12 @@ export interface PlanContext {
   projects?: readonly string[];
   /** A tool's annotations, for its read-only hint. */
   annotations?: (tool: string) => Annotations | undefined;
-  /** Whether an "allow similar" or directory key was granted. */
+  /** Whether a folder grant (`dir:read:/abs`) was made for the session or the project. */
   granted?: (key: string) => boolean;
+  /** Every permission rule in force (permissions.ts): session, project and user. */
+  rules?: readonly ScopedRule[];
+  /** The project's root, which relative path rules are relative to (default: the first of `projects`, else the working directory). */
+  root?: string;
   /** pi-plan-mode's plan file, always writable. */
   planFile?: string;
   /** Files this session downloaded: running one is always held. */
@@ -201,13 +253,27 @@ export interface PlanContext {
 }
 
 /**
- * What the gate does with a call before any judgment: read-only calls are allowed, always-held
+ * What the gate does with a call before any judgment. A deny rule stops it; an ask rule asks you
+ * (whatever else is true); read-only calls and calls an allow rule covers are allowed, always-held
  * calls (fixed rules, downloaded code) and calls outside the project's directories are held, and
- * the rest go to the judge. Pure: the caller looks up git, the project and grants first.
+ * the rest go to the judge. Pure: the caller looks up git, the project, rules and grants first.
  */
 export function planCall(tool: string, input: Record<string, unknown>, cwd: string, c: PlanContext): Plan {
-  const base = basePlan(tool, input, cwd, c);
-  const holds = base.kind === "allow" && base.why === "allow list" ? [] : directoryHolds(tool, input, cwd, c);
+  const call: Call = { tool, input, cwd, root: c.root ?? c.projects?.[0] ?? cwd, readOnlyCommands: c.config.readOnlyCommands };
+  const hit = c.rules?.length ? blocking(c.rules, call) : undefined;
+  const args = clip(SHELL_TOOLS.has(tool) ? String(input.command ?? "") : JSON.stringify(input), 6_000);
+  if (hit?.list === "deny") return { kind: "deny", rule: hit, args };
+  const planned = planWithHolds(tool, input, cwd, c, call);
+  if (!hit) return planned;
+  const reasons = [`matches the ask rule ${hit.text} (${describeOrigin(hit.origin, shown)})`, ...(planned.kind === "ask" ? planned.reasons : [])];
+  // Chat mode lets a call ask only when it reads.
+  const readOnly = planned.kind === "allow" ? planned.why !== ALLOWED_BY_RULE : planned.kind === "ask" && planned.readOnly === true;
+  return { kind: "ask", reasons, key: `rule:${hit.text}`, args, direct: true, readOnly, ...(planned.kind === "ask" && planned.advice ? { advice: planned.advice } : {}) };
+}
+
+function planWithHolds(tool: string, input: Record<string, unknown>, cwd: string, c: PlanContext, call: Call): Plan {
+  const base = basePlan(tool, input, cwd, c, call);
+  const holds = base.kind === "allow" && base.why === "allow list" ? [] : directoryHolds(tool, input, cwd, c, call);
   if (!holds.length) return base;
   const reasons = [...new Set(holds.map((v) =>
     v.hint !== undefined
@@ -216,14 +282,26 @@ export function planCall(tool: string, input: Record<string, unknown>, cwd: stri
   const hints = [...new Set(holds.flatMap((v) => (v.hint !== undefined ? [v.hint || "Edit its source instead."] : [])))];
   const advice = hints.length ? hints.join(" ") : undefined;
   const scopes = [...new Map(holds.map((v) => [grantKey(v), v])).values()];
-  const similar = similarOf(scopes.map((v) => [grantKey(v), `${v.access}s in ${shown(v.scope)}`] as const));
-  const args = base.kind === "allow" ? clip(SHELL_TOOLS.has(tool) ? String(input.command ?? "") : JSON.stringify(input), 6_000) : base.args;
+  const offer = dirsOffer(scopes.map((v) => [grantKey(v), `${v.access}s in ${shown(v.scope)}`] as const));
+  const args = base.kind === "allow" || base.kind === "deny" ? clip(SHELL_TOOLS.has(tool) ? String(input.command ?? "") : JSON.stringify(input), 6_000) : base.args;
   if (base.kind === "ask") return { ...base, reasons: [...base.reasons, ...reasons], key: `${base.key}; dirs`, advice };
-  return { kind: "ask", reasons, key: `dirs:${similar.keys.join("|")}`, args, similar, readOnly: base.kind === "allow", advice };
+  return {
+    kind: "ask",
+    reasons,
+    key: `dirs:${offer.items.join("|")}`,
+    args,
+    offer,
+    // A rule that allows a command does not make it read-only: chat mode lets only reads ask.
+    readOnly: base.kind === "allow" && base.why !== ALLOWED_BY_RULE,
+    advice,
+  };
 }
 
-/** Paths this call touches that the directory policy does not cover, minus granted folders. */
-function directoryHolds(tool: string, input: Record<string, unknown>, cwd: string, c: PlanContext) {
+/**
+ * Paths this call touches that the directory policy does not cover, minus granted folders and, for
+ * `edit`, `write` and the reading tools, files an allow rule for the tool names.
+ */
+function directoryHolds(tool: string, input: Record<string, unknown>, cwd: string, c: PlanContext, call: Call) {
   const { config } = c;
   if (config.directories.enabled === false) return [];
   let access: { reads: string[]; writes: string[] };
@@ -237,51 +315,56 @@ function directoryHolds(tool: string, input: Record<string, unknown>, cwd: strin
   const policy = resolvePolicy(config.directories, c.projects ?? [path.resolve(cwd)]);
   // The plan file pi-plan-mode hands out is always writable.
   if ((tool === "edit" || tool === "write") && c.planFile && access.writes[0] === c.planFile) return [];
-  return violations(policy, access).filter((v) => !c.granted?.(grantKey(v)));
+  const rules = c.rules ?? [];
+  const root = call.root ?? cwd;
+  const opened = (v: { file: string; hint?: string }) =>
+    v.hint === undefined && rules.length > 0 && (tool === "edit" || tool === "write" || BUILTIN_READ.has(tool)) && allowsPath(rules, tool, v.file, root);
+  return violations(policy, access).filter((v) => !c.granted?.(grantKey(v)) && !opened(v));
 }
 
-function basePlan(tool: string, input: Record<string, unknown>, cwd: string, c: PlanContext): Plan {
+function basePlan(tool: string, input: Record<string, unknown>, cwd: string, c: PlanContext, call: Call): Plan {
   const { config } = c;
+  const rules = c.rules ?? [];
   if (config.allowTools.includes(tool)) return { kind: "allow", why: "allow list" };
   if (SHELL_TOOLS.has(tool)) {
     const command = String(input.command ?? "");
     const dir = shellDir(tool, input, cwd);
-    const reasons = [
-      ...alwaysAskBash(command, dir, c.branch, c.ignored ?? new Set()),
-      ...(c.downloads ? downloadedRunReasons(command, dir, c.downloads) : []),
-    ];
-    if (reasons.length) return { kind: "ask", reasons, key: `fixed:${reasons.join("; ")}`, args: clip(command, 6_000) };
+    const downloaded = c.downloads ? downloadedRunReasons(command, dir, c.downloads) : [];
+    const reasons = [...alwaysAskBash(command, dir, c.branch, c.ignored ?? new Set()), ...downloaded];
+    // Always-held calls are opened by no prefix rule: only a rule naming the exact command does, and
+    // never for downloaded code, which is allow-once only.
+    if (reasons.length) {
+      if (downloaded.length || !allowing(rules, call, true)) {
+        return { kind: "ask", reasons, key: `fixed:${reasons.join("; ")}`, args: clip(command, 6_000) };
+      }
+      return { kind: "allow", why: ALLOWED_BY_RULE };
+    }
     if (isReadOnlyBash(command, config.readOnlyCommands)) return { kind: "allow", why: "read-only command" };
+    if (allowing(rules, call)) return { kind: "allow", why: ALLOWED_BY_RULE };
     const keys = bashKeys(command, config.readOnlyCommands);
-    return {
-      kind: "judge",
-      args: clip(command, 6_000),
-      key: `bash:${keys.join("|")}`,
-      similar: similarOf(keys.map((k) => [`bash:${k}`, `\`${k}\``] as const)),
-    };
+    return { kind: "judge", args: clip(command, 6_000), key: `bash:${keys.join("|")}`, offer: rulesOffer(suggest(call)) };
   }
   if (tool === "edit" || tool === "write") {
     const file = String(input.path ?? "");
     const reasons = alwaysAskPath(file);
-    if (reasons.length) return { kind: "ask", reasons, key: `fixed:${reasons.join("; ")}`, args: clip(JSON.stringify(input), 6_000) };
+    if (reasons.length) {
+      if (!allowing(rules, call, true)) return { kind: "ask", reasons, key: `fixed:${reasons.join("; ")}`, args: clip(JSON.stringify(input), 6_000) };
+      return { kind: "allow", why: ALLOWED_BY_RULE };
+    }
+    if (allowing(rules, call)) return { kind: "allow", why: ALLOWED_BY_RULE };
     const dir = path.dirname(path.resolve(cwd, expandHome(file)));
-    const shown = path.relative(cwd, dir) || ".";
-    return {
-      kind: "judge",
-      args: clip(JSON.stringify(input), 6_000),
-      key: `${tool}:${dir}`,
-      similar: similarOf([[`${tool}:${dir}`, `${tool}s in ${shown.startsWith("..") ? dir : shown}`]]),
-    };
+    return { kind: "judge", args: clip(JSON.stringify(input), 6_000), key: `${tool}:${dir}`, offer: rulesOffer(suggest(call)) };
   }
   if (BUILTIN_READ.has(tool)) {
     const file = String(input.path ?? "");
-    if (tool === "read" && file && isCredentialPath(expandHome(file))) {
+    if (tool === "read" && file && isCredentialPath(expandHome(file)) && !allowing(rules, call, true)) {
       return { kind: "ask", reasons: [`reads credentials (${file})`], key: `read:${file}`, args: clip(JSON.stringify(input), 2_000) };
     }
     return { kind: "allow", why: "read-only tool" };
   }
   if (c.annotations?.(tool)?.readOnlyHint === true) return { kind: "allow", why: "read-only hint" };
-  return { kind: "judge", args: clip(JSON.stringify(input), 6_000), key: `tool:${tool}`, similar: similarOf([[`tool:${tool}`, `${tool} calls`]]) };
+  if (allowing(rules, call)) return { kind: "allow", why: ALLOWED_BY_RULE };
+  return { kind: "judge", args: clip(JSON.stringify(input), 6_000), key: `tool:${tool}`, offer: rulesOffer(suggest(call)) };
 }
 
 /** The local script a shell call runs, for the judge to read (see `scriptFor`); undefined for other tools. */
@@ -321,10 +404,17 @@ export default function toolGate(pi: ExtensionAPI) {
   let pushedBack = 0;
   /** Calls (and families of calls) pushed back this user turn; a retry goes to the user. */
   const pushedBackThisTurn = new Set<string>();
-  const allowSimilar = new Set<string>();
-  /** "Always allow similar in this project" grants for the current project, from grants.ts. */
-  let projectGrants = new Set<string>();
-  const granted = (key: string) => allowSimilar.has(key) || projectGrants.has(key);
+  /** Rules allowed for this session, and the folders (`dir:read:/abs`): held in memory, never saved. */
+  let sessionRules: ScopedRule[] = [];
+  const sessionDirs = new Set<string>();
+  /** This project's saved folder grants and rules, from grants.ts, and the rules in the config files. */
+  let localDirs = new Map<string, DirGrant>();
+  let localRules: ScopedRule[] = [];
+  let fileRules: ScopedRule[] = [];
+  let ignoredRules: IgnoredRule[] = [];
+  /** Every rule in force, as of the last `refreshRules`. */
+  let allRules: readonly ScopedRule[] = [];
+  const granted = (key: string) => sessionDirs.has(key) || localDirs.has(key);
   /** Files this session downloaded (downloads.ts), rebuilt from the branch on start and tree moves. */
   let downloads = new Downloads();
   const pendingUsage = new Map<string, ClassifierUsage>();
@@ -492,8 +582,35 @@ export default function toolGate(pi: ExtensionAPI) {
     const checkouts = await projectOf(cwd);
     return checkouts[checkouts.length - 1] ?? path.resolve(cwd);
   };
-  const refreshProjectGrants = async (cwd: string) => {
-    projectGrants = new Set(loadGrants(await projectKey(cwd)).map((g) => g.key));
+  /** Reload what is saved (this project's grants, the config files) and merge it with the session's rules. */
+  const refreshRules = async (cwd: string) => {
+    const local = localGrants(loadGrants(await projectKey(cwd)), grantsFile());
+    localRules = local.rules;
+    localDirs = new Map(local.dirs.map((d) => [d.key, { key: d.key, access: d.access, dir: d.dir }]));
+    const files = loadFileRules(cwd);
+    fileRules = files.rules;
+    ignoredRules = [...local.ignored, ...files.ignored];
+    allRules = [...sessionRules, ...localRules, ...fileRules];
+    return allRules;
+  };
+
+  /** Add a rule the user chose, in a scope; throws when it cannot be saved. */
+  const addRule = async (scope: Scope, list: RuleList, text: string, cwd: string) => {
+    if (scope === "session") {
+      const rule = sessionRule(list, text);
+      if (rule && !sessionRules.some((r) => r.list === list && r.raw === text)) sessionRules = [...sessionRules, rule];
+    } else if (scope === "project") {
+      addGrants(await projectKey(cwd), [{ key: ruleKey(list, text), label: text }]);
+    } else editUserRules("add", list, text);
+    await refreshRules(cwd);
+  };
+
+  const removeRule = async (rule: ScopedRule, cwd: string) => {
+    if (rule.origin.scope === "session") sessionRules = sessionRules.filter((r) => r !== rule);
+    else if (rule.origin.scope === "project" && !rule.origin.shared) removeGrant(await projectKey(cwd), rule.key ?? ruleKey(rule.list, rule.raw));
+    else if (rule.origin.scope === "user" && rule.origin.writable) editUserRules("remove", rule.list, rule.raw);
+    else throw new Error(`${describeOrigin(rule.origin, shown)} is read-only here`);
+    await refreshRules(cwd);
   };
 
   /** The gate's plan for a call (`planCall`), after looking up git, the project and grants. */
@@ -511,6 +628,8 @@ export default function toolGate(pi: ExtensionAPI) {
       projects: checksPaths ? await projectOf(cwd) : undefined,
       annotations,
       granted,
+      rules: allRules,
+      root: (await projectOf(cwd))[0],
       planFile,
       downloads,
     });
@@ -522,53 +641,111 @@ export default function toolGate(pi: ExtensionAPI) {
   const ask = (
     ctx: ExtensionContext,
     q: { tool: string; input: Record<string, unknown>; held?: string; agentCase?: string; note?: string },
-    similar: Similar | undefined,
+    offer: Offer | undefined,
   ): Promise<{ block?: boolean; reason?: string } | undefined> => {
     const run = async () => {
-      const similarOption = similar ? `Allow similar for this session (${clip(similar.label, 80)})` : undefined;
-      const projectOption = similar ? `Always allow similar in this project (${clip(similar.label, 80)})` : undefined;
-      const options = ["Allow once", ...(similarOption && projectOption ? [similarOption, projectOption] : []), "Block"];
-      const title = [
-        `Allow? ${describeCall(q.tool, q.input)}`,
-        ...(q.held !== undefined ? [`Held: ${q.held}`] : []),
-        ...(q.held !== undefined || q.agentCase !== undefined
-          ? [`Agent: ${q.agentCase ? clip(q.agentCase.replace(/\s+/gu, " "), 600) : "(gave no reason)"}`]
-          : []),
-        ...(q.note ? [`(${q.note})`] : []),
-      ].join("\n");
+      let items = offer ? [...offer.items] : [];
+      /** An edit that was not a rule, to show again with what is wrong with it. */
+      let draft: string | undefined;
+      let problem: string | undefined;
       const view = await callView(q.tool, q.input, ctx.cwd);
       // Held only while the dialog is open, so queued approvals do not report blocked early.
       const label = clip(`Allow? ${describeCall(q.tool, q.input)}`.replace(/\s+/gu, " "), 60);
-      const answer = await whileBlocked(pi.events, label, () =>
-        askApproval(ctx, { view, held: q.held, agentCase: q.agentCase, note: q.note, options }, title, editorFactory),
-      );
-      if (answer?.choice === "Allow once") return undefined;
-      if (answer !== undefined && answer.choice === similarOption && similar) {
-        for (const key of similar.keys) allowSimilar.add(key);
-        return undefined;
-      }
-      if (answer !== undefined && answer.choice === projectOption && similar) {
-        for (const key of similar.keys) allowSimilar.add(key);
-        const project = await projectKey(ctx.cwd);
-        try {
-          addGrants(project, similar.keys.map((key, i) => ({ key, label: similar.labels[i] ?? key })));
-          for (const key of similar.keys) projectGrants.add(key);
-        } catch (error) {
-          ctx.ui.notify(`tool-gate: could not save the project grant (${(error as Error).message}); allowed for this session only.`, "warning");
+      for (;;) {
+        const labels = offer ? choiceLabels(offer.kind, items.length > 1) : undefined;
+        const options = [
+          ALLOW_ONCE,
+          ...(labels ? [labels.session, labels.project, ...(labels.everywhere ? [labels.everywhere] : []), ...(labels.edit ? [labels.edit] : [])] : []),
+          BLOCK,
+        ];
+        const shownItems = offer ? items.map((item, i) => clip(offer.kind === "dirs" ? (offer.labels[i] ?? item) : item, 200)) : [];
+        const noun = offer?.kind === "dirs" ? "Folder" : "Rule";
+        // One flat line per rule or folder: an indented list under a header reads as a dialog Collie cannot read.
+        const grant = shownItems.length ? shownItems.map((s) => `${noun}: ${s}`) : undefined;
+        const title = [
+          `Allow? ${describeCall(q.tool, q.input)}`,
+          ...(q.held !== undefined ? [`Held: ${q.held}`] : []),
+          ...(q.held !== undefined || q.agentCase !== undefined
+            ? [`Agent: ${q.agentCase ? clip(q.agentCase.replace(/\s+/gu, " "), 600) : "(gave no reason)"}`]
+            : []),
+          ...(q.note ? [`(${q.note})`] : []),
+          ...(grant ?? []),
+          ...(problem ? [problem] : []),
+        ].join("\n");
+        const answer = await whileBlocked(pi.events, label, () =>
+          askApproval(
+            ctx,
+            {
+              view,
+              held: q.held,
+              agentCase: q.agentCase,
+              note: q.note,
+              options,
+              ...(grant ? { grant } : {}),
+              ...(labels?.edit ? { editRow: labels.edit, editText: draft ?? items.join("\n"), ...(problem ? { editError: problem } : {}) } : {}),
+            },
+            title,
+            editorFactory,
+          ),
+        );
+        problem = undefined;
+        if (!answer) return { block: true, reason: DECLINED };
+        if (answer.choice === ALLOW_ONCE) return undefined;
+        if (offer && labels && answer.choice === labels.edit) {
+          // Rules typed by the user, one per line (one rule may span lines when it is the only one).
+          if (answer.edited === undefined) {
+            draft = undefined;
+            continue;
+          }
+          const typed = items.length === 1 ? [answer.edited.trim()] : answer.edited.split("\n").map((t) => t.trim()).filter(Boolean);
+          const parsed = typed.map((t) => ({ t, p: parseRule(t) }));
+          const bad = parsed.find((x) => !x.p.ok);
+          if (!typed.length || typed.some((t) => !t) || bad) {
+            draft = answer.edited;
+            const why = bad && !bad.p.ok ? bad.p.error : "Type at least one rule.";
+            problem = `Not a rule: ${why}`;
+            continue;
+          }
+          items = [...new Set(parsed.map((x) => (x.p.ok ? x.p.rule.text : x.t)))];
+          draft = undefined;
+          continue;
         }
-        return undefined;
+        if (offer && labels && (answer.choice === labels.session || answer.choice === labels.project || answer.choice === labels.everywhere)) {
+          const scope: Scope = answer.choice === labels.session ? "session" : answer.choice === labels.project ? "project" : "user";
+          try {
+            await grantOffer(offer, items, scope, ctx.cwd);
+          } catch (error) {
+            ctx.ui.notify(`tool-gate: could not save it (${(error as Error).message}); allowed for this session only.`, "warning");
+            await grantOffer(offer, items, "session", ctx.cwd);
+          }
+          return undefined;
+        }
+        if (answer.message) {
+          return {
+            block: true,
+            reason: `${DECLINED_WITH_MESSAGE}${answer.message}${DECLINED_WITH_MESSAGE_END}`,
+          };
+        }
+        return { block: true, reason: DECLINED };
       }
-      if (answer?.message) {
-        return {
-          block: true,
-          reason: `${DECLINED_WITH_MESSAGE}${answer.message}${DECLINED_WITH_MESSAGE_END}`,
-        };
-      }
-      return { block: true, reason: DECLINED };
     };
     const next = dialogs.then(run, run);
     dialogs = next.catch(() => undefined);
     return next;
+  };
+
+  /** What a choice in the dialog adds: rules to the allow list, or folder grants, in a scope. */
+  const grantOffer = async (offer: Offer, items: readonly string[], scope: Scope, cwd: string) => {
+    if (offer.kind === "rules") {
+      for (const text of items) await addRule(scope, "allow", text, cwd);
+      return;
+    }
+    if (scope === "session") {
+      for (const key of items) sessionDirs.add(key);
+      return;
+    }
+    addGrants(await projectKey(cwd), items.map((key) => ({ key, label: offer.labels[offer.items.indexOf(key)] ?? key })));
+    await refreshRules(cwd);
   };
 
   /** The state Jev judges a call in. */
@@ -592,7 +769,7 @@ export default function toolGate(pi: ExtensionAPI) {
       reason: string;
       /** Why it was held, one line for the user. */
       summary: string;
-      similar: Similar | undefined;
+      offer: Offer | undefined;
       state: Record<string, unknown>;
       /** Configured advice, used instead of asking Jev for a workaround. */
       advice?: string;
@@ -631,7 +808,7 @@ export default function toolGate(pi: ExtensionAPI) {
     status(ctx);
     if (!ctx.hasUI) return { block: true, reason: `${h.reason}\nBlocked: there is no user to approve it.` };
     const agentCase = callerText(ctx.sessionManager.getBranch(), h.toolCallId);
-    return ask(ctx, { tool: h.tool, input: h.input, held: h.summary, agentCase: clip(agentCase, 4_000) }, h.similar);
+    return ask(ctx, { tool: h.tool, input: h.input, held: h.summary, agentCase: clip(agentCase, 4_000) }, h.offer);
   };
 
   const describeCall = (tool: string, input: Record<string, unknown>) => {
@@ -696,28 +873,56 @@ export default function toolGate(pi: ExtensionAPI) {
     return undefined;
   };
 
-  /** Manual and accept-edits modes: you decide, with "allow similar" for the session. */
+  /** Manual and accept-edits modes: you decide, with rules to allow for the session, the project or everywhere. */
   const askUser = (
     ctx: ExtensionContext,
     tool: string,
     input: Record<string, unknown>,
-    p: Exclude<Plan, { kind: "allow" }>,
+    p: Exclude<Plan, { kind: "allow" | "deny" }>,
   ) => {
-    if (p.kind === "judge" && p.similar.keys.every(granted)) return allow(ctx);
     held++;
     status(ctx);
     if (!ctx.hasUI) {
       return { block: true, reason: `${MODE_NAMES[mode]} mode needs the user's approval for this ${tool} call, and there is no user to ask.` };
     }
-    return ask(ctx, { tool, input, ...(p.kind === "ask" ? { held: p.reasons.join("; ") } : {}) }, p.similar);
+    return ask(ctx, { tool, input, ...(p.kind === "ask" ? { held: p.reasons.join("; ") } : {}) }, p.offer);
+  };
+
+  /** A deny rule's refusal, which tells the agent who decided and not to look for a way around it. */
+  const deniedBy = (tool: string, rule: ScopedRule) => ({
+    block: true as const,
+    reason:
+      `tool-gate blocked this ${tool} call: it matches the deny rule ${rule.text} (${describeOrigin(rule.origin, shown)}). ` +
+      "The user forbade calls like this. Do not retry it or look for a way around it; if it matters, tell the user what you needed and let them decide.",
+  });
+
+  /**
+   * Deny rules stop a call and ask rules ask you at once, in every mode: no judgment, no push-back.
+   * Undefined when neither applies.
+   */
+  const ruleOutcome = (ctx: ExtensionContext, toolCallId: string, tool: string, input: Record<string, unknown>, p: Plan) => {
+    if (p.kind === "deny") return { result: deniedBy(tool, p.rule) };
+    if (p.kind !== "ask" || !p.direct) return undefined;
+    held++;
+    status(ctx);
+    const why = p.reasons.join("; ");
+    if (!ctx.hasUI) return { result: { block: true, reason: `tool-gate held this ${tool} call: it ${why}. There is no user to ask.` } };
+    const agentCase = clip(callerText(ctx.sessionManager.getBranch(), toolCallId), 4_000);
+    return { result: ask(ctx, { tool, input, held: why, agentCase }, undefined) };
   };
 
   pi.on("tool_call", async (event, ctx) => {
     const tool = event.toolName;
     const input = event.input as Record<string, unknown>;
 
+    await refreshRules(ctx.cwd);
+
     if (mode === "bypassPermissions") {
-      // Everything runs, except removing /, home, the project or a parent of them (as Claude Code).
+      // Everything runs, except what a deny rule forbids, and removing /, home, the project or a
+      // parent of them (as Claude Code).
+      const call: Call = { tool, input, cwd: ctx.cwd, root: (await projectOf(ctx.cwd))[0], readOnlyCommands: config.readOnlyCommands };
+      const forbidden = blocking(allRules, call);
+      if (forbidden?.list === "deny") return deniedBy(tool, forbidden);
       if (!SHELL_TOOLS.has(tool)) return undefined;
       const command = String(input.command ?? "");
       const critical = alwaysAskBash(command, ctx.cwd).filter((reason) => reason.startsWith("deletes "));
@@ -727,12 +932,12 @@ export default function toolGate(pi: ExtensionAPI) {
       return ask(ctx, { tool, input, held: critical.join("; ") }, undefined);
     }
 
-    await refreshProjectGrants(ctx.cwd);
-
     if (mode === "chat") {
-      // Talking, not acting: what the gate counts as read-only runs, nothing else does.
+      // Talking, not acting: what the gate counts as read-only runs, nothing else does (an allow rule
+      // does not make a command read-only).
       const p = await plan(tool, input, ctx.cwd);
-      if (p.kind === "allow") return allow(ctx);
+      if (p.kind === "deny") return deniedBy(tool, p.rule);
+      if (p.kind === "allow" && p.why !== ALLOWED_BY_RULE) return allow(ctx);
       // A read outside the project's directories: yours to allow, as in manual mode.
       if (p.kind === "ask" && p.readOnly) return askUser(ctx, tool, input, p);
       return {
@@ -754,7 +959,10 @@ export default function toolGate(pi: ExtensionAPI) {
 
     const p = await plan(tool, input, ctx.cwd);
 
+    const ruled = ruleOutcome(ctx, event.toolCallId, tool, input, p);
+    if (ruled) return ruled.result;
     if (p.kind === "allow") return allow(ctx);
+    if (p.kind === "deny") return undefined;
 
     if (mode === "default") return askUser(ctx, tool, input, p);
     if (mode === "acceptEdits") {
@@ -771,16 +979,10 @@ export default function toolGate(pi: ExtensionAPI) {
         family: p.key,
         reason: `tool-gate held this ${tool} call: it ${why}. Calls like this are always held, whatever the judge says.`,
         summary: why,
-        similar: p.similar,
+        offer: p.offer,
         state: await judgeStateFor(ctx, tool, p.args, []),
         advice: p.advice,
       });
-    }
-
-    if (p.similar.keys.every(granted)) {
-      auto++;
-      status(ctx);
-      return undefined;
     }
 
     const rules = loadRules(ctx.cwd);
@@ -805,7 +1007,7 @@ export default function toolGate(pi: ExtensionAPI) {
       }
       held++;
       status(ctx);
-      return ask(ctx, { tool, input, note: `Judge unavailable: ${outcome.reason}` }, p.similar);
+      return ask(ctx, { tool, input, note: `Judge unavailable: ${outcome.reason}` }, p.offer);
     }
 
     if (outcome.usage) pendingUsage.set(event.toolCallId, outcome.usage);
@@ -835,7 +1037,7 @@ export default function toolGate(pi: ExtensionAPI) {
       family: p.key,
       reason: steerReason(tool, v!),
       summary: `${v!.failures.join("; ")}${rules_}`,
-      similar: p.similar,
+      offer: p.offer,
       state,
     });
   });
@@ -897,10 +1099,39 @@ export default function toolGate(pi: ExtensionAPI) {
     },
   });
 
+  /** The rules in force for a project, and the ways `/gate rules` may change them. */
+  const ruleStore = async (cwd: string): Promise<RuleStore> => {
+    const project = await projectKey(cwd);
+    await refreshRules(cwd);
+    return {
+      project: shown(project),
+      rules: () => allRules,
+      ignored: () => ignoredRules,
+      dirs: () => [
+        ...[...sessionDirs].flatMap((key) => {
+          const d = migrateGrant(key);
+          return d?.kind === "dir" ? [{ key, access: d.access, dir: d.dir, scope: "session" as const }] : [];
+        }),
+        ...[...localDirs.values()].map((d) => ({ ...d, scope: "project" as const })),
+      ],
+      add: (scope, list, text) => addRule(scope, list, text, cwd),
+      remove: (rule) => removeRule(rule, cwd),
+      removeDir: async (d) => {
+        if (d.scope === "session") sessionDirs.delete(d.key);
+        else {
+          removeGrant(project, d.key);
+          await refreshRules(cwd);
+        }
+      },
+    };
+  };
+
   pi.registerCommand("gate", {
-    description: "tool-gate: status; on (auto mode) or off (yolo mode); grants (review or revoke this project's grants)",
+    description: "tool-gate: status; on (auto mode) or off (yolo mode); rules (list, add and remove permission rules; grants is the same)",
     getArgumentCompletions: (prefix: string) =>
-      ["status", "on", "off", "grants"].filter((o) => o.startsWith(prefix)).map((o) => ({ value: o, label: o })),
+      ["status", "on", "off", "rules", "rules list", "rules add", "rules remove", "grants"]
+        .filter((o) => o.startsWith(prefix))
+        .map((o) => ({ value: o, label: o })),
     handler: async (args, ctx) => {
       const arg = args.trim();
       if (arg === "on" || arg === "off") {
@@ -908,32 +1139,22 @@ export default function toolGate(pi: ExtensionAPI) {
         ctx.ui.notify(arg === "on" ? "Auto mode on" : "Yolo mode on: every call runs", "info");
         return;
       }
-      const project = await projectKey(ctx.cwd);
-      if (arg === "grants") {
-        const grants = loadGrants(project);
-        if (!grants.length) {
-          ctx.ui.notify(`No project grants for ${shown(project)}.`, "info");
-          return;
-        }
-        const labels = grants.map((g) => `${g.label}${g.added ? ` (since ${g.added.slice(0, 10)})` : ""}`);
-        const picked = await ctx.ui.select(`Project grants for ${shown(project)} (enter revokes)`, labels);
-        const grant = picked === undefined ? undefined : grants[labels.indexOf(picked)];
-        if (!grant) return;
-        removeGrant(project, grant.key);
-        projectGrants.delete(grant.key);
-        allowSimilar.delete(grant.key);
-        ctx.ui.notify(`Revoked: ${grant.label}.`, "info");
+      if (/^(rules|grants)(\s|$)/u.test(arg)) {
+        await rulesCommand(arg.replace(/^(rules|grants)\s*/u, ""), ctx, await ruleStore(ctx.cwd));
         return;
       }
+      const project = await projectKey(ctx.cwd);
+      await refreshRules(ctx.cwd);
       const rules = loadRules(ctx.cwd);
-      const projectCount = loadGrants(project).length;
+      const counts = (list: RuleList) => allRules.filter((r) => r.list === list).length;
       ctx.ui.notify(
         [
           `Mode: ${MODE_NAMES[mode]} (${MODE_DESCRIPTIONS[mode]}) Cycle: ${cycle().map((m) => MODE_NAMES[m]).join(" → ")}.`,
           `${auto} auto-approved, ${pushedBack} pushed back, ${held} asked this session.`,
           `Jev: ${config.jev.enabled ? `${config.jev.provider}/${config.jev.model}` : "off"}; push-back ${config.pushBack ? "on" : "off"}.`,
-          `${rules.length} project rule${rules.length === 1 ? "" : "s"}; ${allowSimilar.size} "allow similar" grant${allowSimilar.size === 1 ? "" : "s"} this session; ` +
-            `${projectCount} for this project (/gate grants; ${shown(grantsFile())}).`,
+          `${rules.length} project rule${rules.length === 1 ? "" : "s"} for Jev. Permission rules for ${shown(project)}: ` +
+            `${counts("allow")} allow, ${counts("ask")} ask, ${counts("deny")} deny; ${sessionRules.length} from this session; ` +
+            `${localDirs.size + sessionDirs.size} folder grant${localDirs.size + sessionDirs.size === 1 ? "" : "s"} (/gate rules; saved in ${shown(grantsFile())}).`,
           config.directories.enabled === false ? "Directory policy: off." : describePolicy(await policyFor(ctx.cwd)),
         ].join("\n"),
         "info",
