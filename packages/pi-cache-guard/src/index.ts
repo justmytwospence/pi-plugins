@@ -31,6 +31,7 @@ import {
   compactionFocus,
   herdrCacheValue,
   herdrExpiresValue,
+  expiringLabel,
   worthWarning,
 } from "./core.ts";
 
@@ -335,9 +336,10 @@ export default function cacheGuard(
       shown = text;
       ctx.ui.setStatus(STATUS_KEY, text);
     }
-    herdr.report(v ? herdrCacheValue(v.cold, v.last.tokens, undefined, settings) : undefined);
     const expiresAt = v && !running && !v.cold && v.remainingMs !== undefined && v.ttlMs !== undefined ? v.last.at + v.ttlMs : undefined;
     const soon = v ? herdrExpiresValue(expiresAt, v.last.tokens, undefined, Date.now(), settings) : undefined;
+    // One sidebar slot: cold (`❄ 601k`) or about to go cold (`⧗ 8m`), never both.
+    herdr.report(v ? (herdrCacheValue(v.cold, v.last.tokens, undefined, settings) ?? (soon && expiringLabel(soon.ttlMs))) : undefined);
     expiring.report(soon?.value, soon?.ttlMs);
   };
 

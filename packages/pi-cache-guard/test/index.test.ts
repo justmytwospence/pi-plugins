@@ -304,19 +304,26 @@ describe("herdr", () => {
     return { r, sent };
   }
 
-  test("reports the cache token only when a big cache goes cold, and clears it", async () => {
+  test("reports the cache token when a big cache is about to go cold or has, and clears it", async () => {
     const { r, sent } = reporter();
+    // Opus here caches for 5 minutes: inside the 10-minute window as soon as it is idle.
     const entries: unknown[] = [assistant(NOW - 60_000, 600_000)];
     const h = harnessWith(entries, r);
     await h.emit("session_start", {});
-    expect(sent).toEqual([{ key: "cache", value: undefined }]); // the first report always goes out
-    vi.advanceTimersByTime(60_000);
-    expect(sent.length).toBe(1); // still warm: nothing new
+    expect(sent).toEqual([{ key: "cache", value: "⧗ 4m" }]);
+    vi.advanceTimersByTime(59_000);
+    expect(sent.length).toBe(1); // same minute: nothing new
+    vi.advanceTimersByTime(2_000);
+    expect(sent.at(-1).value).toBe("⧗ 3m");
+    await h.emit("agent_start", {});
+    expect(sent.at(-1).value).toBeUndefined(); // a run keeps it warm
+    await h.emit("agent_settled", {});
+    expect(sent.at(-1).value).toBe("⧗ 3m");
     vi.advanceTimersByTime(200_000);
     expect(sent.at(-1)).toEqual({ key: "cache", value: "❄ 601k" });
     entries.push(assistant(Date.now(), 610_000));
     vi.advanceTimersByTime(1_000);
-    expect(sent.at(-1).value).toBeUndefined();
+    expect(sent.at(-1).value).toBe("⧗ 5m");
     vi.advanceTimersByTime(400_000);
     expect(sent.at(-1).value).toBe("❄ 611k");
     r.resend();

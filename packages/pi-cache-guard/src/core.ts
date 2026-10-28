@@ -215,6 +215,14 @@ export function herdrCacheValue(reason: ColdReason | undefined, tokens: number, 
 }
 
 /**
+ * The herdr `cache` token while the cache is about to go cold (`herdrExpiresValue` reports it):
+ * `⧗ 8m`, whole minutes left, rounded up. A narrow hourglass, so the row keeps its width like `❄`.
+ */
+export function expiringLabel(leftMs: number): string {
+  return `⧗ ${Math.max(1, Math.ceil(leftMs / 60_000))}m`;
+}
+
+/**
  * The herdr `cache_expires` token: the expiry as 13-digit epoch milliseconds (so it sorts as text),
  * with the time left as its TTL, while a warm cache whose miss would reach the warning threshold has
  * at most `herdr.expiringMinutes` left; else undefined (clear the token). `expiresAt` is undefined

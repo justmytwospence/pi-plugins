@@ -113,6 +113,14 @@ describe("herdr token", () => {
     expect(herdrCacheValue({ kind: "expired", idleMs: 1 }, 664_000, 3.19, mergeSettings(DEFAULT_SETTINGS, ['{"herdr":{"enabled":false}}']))).toBeUndefined();
   });
 
+  test("expiring label: whole minutes left, rounded up", async () => {
+    const { expiringLabel } = await import("../src/core.ts");
+    expect(expiringLabel(600_000)).toBe("⧗ 10m");
+    expect(expiringLabel(540_001)).toBe("⧗ 10m");
+    expect(expiringLabel(30_000)).toBe("⧗ 1m");
+    expect(expiringLabel(0)).toBe("⧗ 1m");
+  });
+
   test("cache_expires: big warm caches inside the window, as a sortable stamp with the time left", async () => {
     const { herdrExpiresValue } = await import("../src/core.ts");
     const now = 1_793_000_000_000;

@@ -172,7 +172,7 @@ Pi reads every setting except `warm` and `warn.confirmSeconds`, which are for po
 ```
 
 - `warn.minTokens` is the cold-cache question's threshold for every model; `0` asks on every cold cache. Pi ignores `warn.minCost` (the other ports still use it when they know prices). The Herdr `cache` and `cache_expires` tokens use the same threshold.
-- `herdr.expiringMinutes` is how long before expiry an idle session reports `cache_expires`; `0` turns that token off.
+- `herdr.expiringMinutes` is how long before expiry an idle session shows `⧗` in the `cache` token and reports `cache_expires`; `0` turns that token off.
 - An empty `jev.provider` picks the first provider that works; an empty `jev.model` uses that provider's default from the table.
 - `trim.keepThreshold` is the probability at which a block is kept. `compact.timeoutMs` is per Jev request.
 - `"enabled": false` turns everything off, Jev included; `"jev": { "enabled": false }` turns off only the Jev parts (and the tips).
@@ -187,11 +187,11 @@ Pi reads every setting except `warm` and `warn.confirmSeconds`, which are for po
 ## Optional integrations
 
 - pi-status-footer: folds the `cache-guard` and `lean-context` statuses into its context row. Optional; without it Pi shows the statuses as usual.
-- [Herdr](https://herdr.dev), through the suite's pi-herdr: the extension emits `herdr:token` on Pi's event bus with the pane token `cache`: `❄ 601k` (or `❄? 180k` for a guess from idle time) while the next prompt would re-cache at least the warning threshold, cleared while the cache is warm or small and when the session ends. It resends the token on `herdr:ready`. Without pi-herdr nothing listens. `"herdr": { "enabled": false }` turns it off. Example Herdr sidebar row in `~/.config/herdr/config.toml`:
+- [Herdr](https://herdr.dev), through the suite's pi-herdr: the extension emits `herdr:token` on Pi's event bus with the pane token `cache`: `❄ 601k` (or `❄? 180k` for a guess from idle time) while the next prompt would re-cache at least the warning threshold, and `⧗ 8m` (whole minutes left, rounded up) while such a cache is warm, the session idle, and at most `herdr.expiringMinutes` left; cleared otherwise (warm with time to spare, small, running) and when the session ends. It resends the token on `herdr:ready`. Without pi-herdr nothing listens. `"herdr": { "enabled": false }` turns it off. Example Herdr sidebar row in `~/.config/herdr/config.toml`:
 
 ```toml
 [ui.sidebar.agents]
-rows = [["state_icon", "workspace", { token = "$cache", fg = "#5f87d7", rules = [{ starts_with = "❄?", dim = true }] }]]
+rows = [["state_icon", "workspace", { token = "$cache", fg = "#5f87d7", rules = [{ starts_with = "❄?", dim = true }, { starts_with = "⧗", fg = "#d7875f" }] }]]
 ```
 
   It also reports `cache_expires` while the session is idle and its warm cache, at least the warning threshold, has at most `herdr.expiringMinutes` (default 10) left: the expiry as 13-digit epoch milliseconds, so it sorts as text, with the time left as its TTL. It is cleared when a run starts, when the cache goes cold and when the session ends; the TTL drops it if pi dies. A cache shorter than the window (Anthropic's 5 minutes) reports it as soon as the session settles. herdr-plugins' agent-cycle sorts on it to bring such a session up its queue; nothing needs it otherwise.
