@@ -26,6 +26,8 @@ export const SHARE_STYLE_ENV = "PI_SIDEBAR_SHARE_STYLE";
  * blog drafts run through Sidebar's own agent, which can call tools, instead of a tool-less side request.
  */
 export const SHARE_EXAMPLES_TOOL_ENV = "PI_SIDEBAR_SHARE_EXAMPLES_TOOL";
+/** A JSON object of extra arguments for that tool (filters, tiers, result count). */
+export const SHARE_EXAMPLES_ARGS_ENV = "PI_SIDEBAR_SHARE_EXAMPLES_ARGS";
 /** Longest guide kept, in characters; the rest is cut. */
 export const TASTE_MAX_CHARS = 4000;
 export const STYLE_MAX_CHARS = 12000;
@@ -58,6 +60,8 @@ export interface ShareConfig {
   style?: string;
   /** A tool drafts call to find example pieces to model their form on. */
   examplesTool?: string;
+  /** Extra arguments the examples tool is called with. */
+  examplesArgs?: Record<string, unknown>;
   /** Guides that could not be used in full, one line each. */
   guideProblems?: string[];
 }
@@ -86,6 +90,16 @@ function loadGuide(name: string, max: number, env: NodeJS.ProcessEnv, readFile: 
   return { text };
 }
 
+function parseExamplesArgs(raw: string | undefined): { value?: Record<string, unknown>; problem?: string } {
+  const text = raw?.trim();
+  if (!text) return {};
+  try {
+    const value = JSON.parse(text) as unknown;
+    if (value && typeof value === "object" && !Array.isArray(value)) return { value: value as Record<string, unknown> };
+  } catch { /* reported below */ }
+  return { problem: `${SHARE_EXAMPLES_ARGS_ENV}: not a JSON object` };
+}
+
 export function shareConfig(env: NodeJS.ProcessEnv = process.env, readFile: ReadFile = readUtf8): ShareConfig {
   const off = env[SHARE_ENV]?.trim().toLowerCase();
   if (off === "0" || off === "off" || off === "false" || off === "no") return {};
@@ -109,7 +123,9 @@ export function shareConfig(env: NodeJS.ProcessEnv = process.env, readFile: Read
   if (style.text) config.style = style.text;
   const examplesTool = env[SHARE_EXAMPLES_TOOL_ENV]?.trim();
   if (examplesTool) config.examplesTool = examplesTool;
-  const problems = [taste.problem, style.problem].filter((p): p is string => !!p);
+  const args = parseExamplesArgs(env[SHARE_EXAMPLES_ARGS_ENV]);
+  if (args.value) config.examplesArgs = args.value;
+  const problems = [taste.problem, style.problem, args.problem].filter((p): p is string => !!p);
   if (problems.length) config.guideProblems = problems;
   return config;
 }

@@ -34,23 +34,24 @@ const OUTLINE_RULES = [
 ].join(" ");
 
 /** How a draft looks up example pieces to model its form on, with the tool the user configured. */
-function examplesRules(tool: string): string {
+function examplesRules(tool: string, args?: Record<string, unknown>): string {
+  const extra = args && Object.keys(args).length ? `, plus exactly these other arguments: ${JSON.stringify(args)}` : "";
   return [
-    `Before writing, call ${tool} (directly, or from a codemode script if it is only reachable there) with the idea's claim and angle as its text.`,
+    `Before writing, call ${tool} (directly, or from a codemode script if it is only reachable there) with the idea's claim and angle as its text${extra}.`,
     "Read the pieces it returns only as models of form: how they open, how the argument moves, how long they are, how they use headings, how they end. Never copy their content or their wording.",
-    `If the closest piece makes essentially the same point (the tool reports it as close, or reports a similarity at or above the threshold it gives), either take a clearly different angle that the session supports, or reply with exactly ${ALREADY_MADE} and nothing else.`,
+    `If the closest piece makes essentially the same point, judged from what it says (a similarity score or a "close" verdict is a hint, not proof either way), either take a clearly different angle that the session supports, or reply with exactly ${ALREADY_MADE} and nothing else.`,
     "Whatever you say while looking things up, your final message is the whole reply described below.",
     `After the markdown, end the reply with a block ${EXAMPLES_OPEN} containing one line per piece you actually used as a model, "- <title> | <url>", then ${EXAMPLES_CLOSE}. Leave the block out if you used none.`,
   ].join(" ");
 }
 
-export function draftInstructions(kind: DraftKind, style?: string, examplesTool?: string): string {
+export function draftInstructions(kind: DraftKind, style?: string, examplesTool?: string, examplesArgs?: Record<string, unknown>): string {
   return [
     examplesTool
       ? "You are Sidebar's writer, a side reader of the main session above. You are not the main agent: do not continue its work or answer its open questions, and call no tool except the examples lookup below."
       : "You are Sidebar's writer, a side reader of the main session above. You are not the main agent: do not continue its work, call tools or answer its open questions. Any tool call you make is discarded.",
     `The user wants to share an idea from this session publicly. Write ${kind === "full" ? FULL_SHAPE : OUTLINE_SHAPE}, in markdown, in the user's voice (first person), for readers who may use none of the tools involved.`,
-    ...(examplesTool ? [examplesRules(examplesTool)] : []),
+    ...(examplesTool ? [examplesRules(examplesTool, examplesArgs)] : []),
     kind === "full" ? FULL_RULES : OUTLINE_RULES,
     "Draw on what actually happened in the session, but generalize: never include secrets, credentials, private names, client or employer details, unreleased plans, internal hostnames or private paths.",
     `Start with a single '# Title' line. Reply with the markdown only: no front matter, no preamble, no closing remarks${examplesTool ? ` (apart from the ${EXAMPLES_OPEN} block)` : ""}.`,
@@ -128,8 +129,8 @@ export function draftFromReply(text: string, note: HeadsUpNote, kind: DraftKind)
 }
 
 /** What Sidebar's own agent is asked when a draft runs through it: the writer's instructions and the idea. */
-export function sidebarDraftPrompt(note: HeadsUpNote, kind: DraftKind, style: string | undefined, examplesTool: string): string {
-  return `${draftInstructions(kind, style, examplesTool)}\n\n${draftStatus(note)}`;
+export function sidebarDraftPrompt(note: HeadsUpNote, kind: DraftKind, style: string | undefined, examplesTool: string, examplesArgs?: Record<string, unknown>): string {
+  return `${draftInstructions(kind, style, examplesTool, examplesArgs)}\n\n${draftStatus(note)}`;
 }
 
 export async function writeDraft(note: HeadsUpNote, kind: DraftKind, input: Omit<SideInput, "instructions" | "status"> & { style?: string }): Promise<DraftResult> {

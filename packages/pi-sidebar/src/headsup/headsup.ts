@@ -331,7 +331,7 @@ export class HeadsUp {
     const ended = (outcome: { location: string } | { error: string }) => { if (writeWithSidebar) this.host.draftSaved?.(outcome); };
     let result: DraftResult;
     if (examplesTool && writeWithSidebar) {
-      const prompt = sidebarDraftPrompt(note, kind, this.share.style, examplesTool);
+      const prompt = sidebarDraftPrompt(note, kind, this.share.style, examplesTool, this.share.examplesArgs);
       result = draftFromReply(await writeWithSidebar(prompt, `Writing a blog ${kind === "full" ? "draft" : "outline"}: ${note.text}`), note, kind);
     } else {
       const foreign = choice.kind === "other" ? this.foreign(choice.model, choice.label, choice.thinking, now) : undefined;

@@ -281,6 +281,18 @@ describe("blog drafts", () => {
     }
   });
 
+  it("passes configured extra arguments to the examples tool, and reports bad ones", () => {
+    const text = draftInstructions("outline", undefined, "mcp__server__similar", { prefer: "archive", min_words: 600, exclude_domains: ["github.com"] });
+    expect(text).toContain('with the idea\'s claim and angle as its text, plus exactly these other arguments: {"prefer":"archive","min_words":600,"exclude_domains":["github.com"]}.');
+    const env = { PI_SIDEBAR_DRAFTS_DIR: "/d", PI_SIDEBAR_SHARE_EXAMPLES_TOOL: "t", PI_SIDEBAR_SHARE_EXAMPLES_ARGS: '{"k": 5}' };
+    expect(shareConfig(env).examplesArgs).toEqual({ k: 5 });
+    for (const bad of ["[1]", "nope", "3"]) {
+      const config = shareConfig({ ...env, PI_SIDEBAR_SHARE_EXAMPLES_ARGS: bad });
+      expect(config.examplesArgs).toBeUndefined();
+      expect(config.guideProblems).toEqual(["PI_SIDEBAR_SHARE_EXAMPLES_ARGS: not a JSON object"]);
+    }
+  });
+
   it("tells the writer to look up examples with the configured tool, for form only", () => {
     const tool = "mcp__server__similar";
     for (const kind of ["full", "outline"] as const) {
@@ -288,7 +300,8 @@ describe("blog drafts", () => {
       expect(text).toContain(`Before writing, call ${tool} (directly, or from a codemode script if it is only reachable there) with the idea's claim and angle as its text.`);
       expect(text).toContain("only as models of form: how they open, how the argument moves, how long they are, how they use headings, how they end. Never copy their content or their wording.");
       expect(text).toContain('reply with exactly <draft-not-ready>already made by "<title>" (<url>)</draft-not-ready> and nothing else');
-      expect(text).toContain("a similarity at or above the threshold it gives");
+      expect(text).toContain('judged from what it says (a similarity score or a "close" verdict is a hint, not proof either way)');
+      expect(text).not.toContain("plus exactly these other arguments");
       expect(text).toContain('<draft-examples> containing one line per piece you actually used as a model, "- <title> | <url>", then </draft-examples>.');
       // The lookup comes before the form rules, and the existing rules stay.
       expect(text.indexOf("Before writing")).toBeLessThan(text.indexOf(kind === "full" ? "Open with the thesis" : "three to five beats"));
