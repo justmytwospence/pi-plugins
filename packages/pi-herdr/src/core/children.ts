@@ -6,7 +6,8 @@
 // ordinary interactive session in its own pane: you can watch it, type to it, take it over, and it
 // outlives this session's turn.
 //
-// The parent prompts the child through herdr (`agent.prompt`), then watches herdr's semantic state
+// The parent prompts the child through the host's transport when it has one (pi-herdr's inbox,
+// which leaves the child's draft alone), else herdr's `agent.prompt`, then watches herdr's semantic state
 // for that pane. When a turn the parent asked for settles (idle/done after it was seen working, or
 // a new `completion_seq`), the host reads the reply from the child's session, which herdr's
 // integration for that agent reports (a pi session file, an opencode session id). Turns the user
@@ -52,6 +53,8 @@ export interface SendResult {
   outcome: "sent" | "steered" | "queued";
   /** The child's state when the message arrived. */
   status: string;
+  /** What the child reported doing with it, when the transport delivered it. */
+  delivered?: string;
 }
 
 /** What differs between hosts: which agent herdr starts, how, and how its reply is read. */
@@ -84,6 +87,12 @@ export interface ChildrenDeps {
   readyPollMs?: number;
   /** False after runtime shutdown or navigation away from the owning conversation branch. */
   isCurrent?(): boolean;
+  /**
+   * Deliver a message some other way than typing it (pi-herdr's inbox, which leaves the child's
+   * draft alone and can hold it while a dialog is open). Undefined: the child cannot take it that
+   * way, and it is typed with agent.prompt. `outcome` is what the child reported doing with it.
+   */
+  transport?(rec: ChildRecord, text: string, delivery: Delivery, info: AgentInfo): Promise<{ outcome?: string } | undefined>;
 }
 
 export interface SpawnOptions {
@@ -127,7 +136,7 @@ export function childPreamble(kind: string, parentPane: string, rec: Pick<ChildR
   return `${lines.join(" ")}]\n\n`;
 }
 
-interface AgentInfo {
+export interface AgentInfo {
   name?: string;
   agent?: string;
   agent_status?: string;
@@ -322,21 +331,25 @@ export class Children {
     }
   }
 
-  /** Ask the child something; its reply arrives through deliver(). */
-  async prompt(rec: ChildRecord, text: string): Promise<void> {
+  /** Ask the child something; its reply arrives through deliver(). Returns the transport's outcome. */
+  async prompt(rec: ChildRecord, text: string, delivery: Delivery = "steer"): Promise<string | undefined> {
     const { call, assert } = this.scope(rec);
     if (rec.closed) throw new Error(`${rec.name} is closed.`);
     const a = await call<{ agent?: AgentInfo }>("agent.get", { target: rec.paneId });
     const info = a.result?.agent;
     if (!info) throw new Error(`${rec.name} is not running ${this.deps.agent.kind} any more (${errorText(a)}).`);
-    if (info.agent_status === "blocked") throw new Error(`${rec.name} is waiting on a dialog in its pane (${rec.paneId}); the user has to answer it there first.`);
     const baseline = { completionSeq: info.completion_seq, stateSeq: info.state_change_seq };
-    let r = await call("agent.prompt", { target: rec.paneId, text }, 15_000);
-    for (let i = 0; r.error?.code === "agent_not_ready" && i < 10; i++) {
-      await new Promise((res) => setTimeout(res, this.deps.readyPollMs ?? 500));
-      r = await call("agent.prompt", { target: rec.paneId, text }, 15_000);
+    const sent = this.deps.transport ? await this.deps.transport(rec, text, delivery, info) : undefined;
+    assert();
+    if (!sent) {
+      if (info.agent_status === "blocked") throw new Error(`${rec.name} is waiting on a dialog in its pane (${rec.paneId}); the user has to answer it there first.`);
+      let r = await call("agent.prompt", { target: rec.paneId, text }, 15_000);
+      for (let i = 0; r.error?.code === "agent_not_ready" && i < 10; i++) {
+        await new Promise((res) => setTimeout(res, this.deps.readyPollMs ?? 500));
+        r = await call("agent.prompt", { target: rec.paneId, text }, 15_000);
+      }
+      if (r.error) throw new Error(`herdr could not prompt ${rec.name}: ${errorText(r)}`);
     }
-    if (r.error) throw new Error(`herdr could not prompt ${rec.name}: ${errorText(r)}`);
     rec.baseline = baseline;
     rec.sawWorking = info.agent_status === "working";
     if (info.agent_session?.value) rec.session = info.agent_session.value;
@@ -347,6 +360,7 @@ export class Children {
     rec.awaiting = true;
     this.save(rec);
     this.ensureLoop();
+    return sent ? sent.outcome ?? "unconfirmed" : undefined;
   }
 
   /** The child's herdr state now ("gone" when herdr does not know it). */
@@ -372,8 +386,8 @@ export class Children {
       this.ensureLoop();
       return { rec, outcome: "queued", status };
     }
-    await this.prompt(rec, message);
-    return { rec, outcome: busy ? "steered" : "sent", status };
+    const delivered = await this.prompt(rec, message, delivery);
+    return { rec, outcome: busy ? "steered" : "sent", status, ...(delivered ? { delivered } : {}) };
   }
 
   /** Send the queued messages, as one, to a child whose turn has ended. */

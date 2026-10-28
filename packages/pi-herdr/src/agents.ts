@@ -1,0 +1,245 @@
+// Talking to any agent in herdr, not only this session's children: list them, message them through
+// the inbox (src/inbox.ts) when the target is a pi with pi-herdr, else `agent.prompt`, read what
+// they said and wait for them to finish. A saved herdr machine (`machine`, as in `herdr --machine`)
+// is reached through the CLI, which forwards the API over ssh.
+//
+// Reading a reply: a local pi's last reply comes from its session file, complete. A remote agent's
+// file is out of reach and other agents have none we read, so their reply is a screen read, which
+// can be cut short; the result says so when it is one.
+import type { Call, Reply } from "./core/herdr.ts";
+import { errorText } from "./core/herdr.ts";
+import type { Exec } from "./core/children.ts";
+import {
+  type Delivery,
+  type Envelope,
+  type Outcome,
+  type Sender,
+  ackTokenName,
+  encodeEnvelope,
+  INBOX_TOKEN,
+  MAX_MESSAGE_BYTES,
+  newMessageId,
+  OUTCOMES,
+  parseInboxToken,
+} from "./inbox.ts";
+import { readReply } from "./session.ts";
+
+export interface AgentInfo {
+  name?: string;
+  agent?: string;
+  agent_status?: string;
+  pane_id?: string;
+  cwd?: string;
+  title?: string;
+  focused?: boolean;
+  tokens?: Record<string, string>;
+  agent_session?: { kind?: string; value?: string };
+  state_change_seq?: number;
+  completion_seq?: number;
+}
+
+const SETTLED = new Set(["idle", "done", "blocked"]);
+
+/** CLI arguments for the API methods this module uses, for `herdr --machine <m> ...`. */
+function cliArgs(method: string, p: Record<string, any>): string[] | undefined {
+  switch (method) {
+    case "agent.list": return ["agent", "list"];
+    case "agent.get": return ["agent", "get", p.target];
+    case "pane.get": return ["pane", "get", p.pane_id];
+    case "pane.process_info": return ["pane", "process-info", "--pane", p.pane_id];
+    case "pane.send_text": return ["pane", "send-text", p.pane_id, p.text];
+    case "agent.prompt": return ["agent", "prompt", p.target, p.text];
+    case "agent.read": return ["agent", "read", p.target, "--source", String(p.source ?? "recent_unwrapped").replaceAll("_", "-"), "--lines", String(p.lines ?? 80)];
+    default: return undefined;
+  }
+}
+
+/** The herdr API on a saved machine, through `herdr --machine`. Resolves like socketCall. */
+export function machineCall(exec: Exec, machine: string, cwd: string): Call {
+  return async <T = any>(method: string, params: Record<string, unknown>): Promise<Reply<T>> => {
+    const args = cliArgs(method, params);
+    if (!args) return { error: { code: "unsupported", message: `${method} is not available on another machine` } };
+    const r = await exec("herdr", ["--machine", machine, ...args], cwd);
+    for (const out of [r.stdout, r.stderr]) {
+      const text = out.trim();
+      if (!text.startsWith("{")) continue;
+      try {
+        const reply = JSON.parse(text);
+        if (reply.error) return { error: reply.error };
+        if ("result" in reply) return { result: reply.result };
+      } catch { /* not JSON */ }
+    }
+    if (r.code === 0 && method === "agent.read") return { result: { read: { text: r.stdout } } as T };
+    if (r.code === 0) return { result: {} as T };
+    return { error: { code: r.code === 127 ? "socket" : "machine", message: (r.stderr || r.stdout).trim().slice(0, 300) || `herdr --machine ${machine} failed` } };
+  };
+}
+
+export interface SendResult {
+  via: "inbox" | "prompt";
+  /** What the receiver did with an inbox message; undefined when it did not confirm in time. */
+  outcome?: Outcome;
+  info: AgentInfo;
+}
+
+export interface AgentsDeps {
+  call: Call;
+  exec: Exec;
+  selfPane: string;
+  cwd(): string;
+  /** Who is sending: this pane, its agent name, host and directory. */
+  self(): Promise<Sender>;
+  ackPollMs?: number;
+  ackTimeoutMs?: number;
+  waitPollMs?: number;
+}
+
+const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve) => {
+  const t = setTimeout(resolve, ms);
+  signal?.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true });
+});
+
+export const outcomeText = (name: string, outcome: Outcome | undefined): string => {
+  switch (outcome) {
+    case "started": return `${name} was idle and started a turn on it.`;
+    case "steered": return `${name} is working; it gets the message in its current turn, after the current tool call.`;
+    case "queued": return `${name} is working; the message is queued for after its current turn.`;
+    case "held": return `${name} is waiting on a dialog for the user, so the message is held there and delivered when the dialog closes.`;
+    default: return `${name} did not confirm receipt in time. It was sent once; check with action=read before sending again.`;
+  }
+};
+
+export class Agents {
+  private readonly deps: AgentsDeps;
+  private readonly machines = new Map<string, Call>();
+
+  constructor(deps: AgentsDeps) {
+    this.deps = deps;
+  }
+
+  endpoint(machine?: string): Call {
+    if (!machine) return this.deps.call;
+    let c = this.machines.get(machine);
+    if (!c) this.machines.set(machine, (c = machineCall(this.deps.exec, machine, this.deps.cwd())));
+    return c;
+  }
+
+  async get(name: string, machine?: string): Promise<AgentInfo> {
+    const r = await this.endpoint(machine)<{ agent?: AgentInfo }>("agent.get", { target: name });
+    const info = r.result?.agent;
+    if (!info?.pane_id) throw new Error(`No agent "${name}"${machine ? ` on ${machine}` : ""}: ${errorText(r)}. action=list shows the agents.`);
+    return info;
+  }
+
+  /** Whether a pi-herdr inbox is listening in the agent's pane, in the foreground. */
+  async hasInbox(info: AgentInfo, machine?: string): Promise<boolean> {
+    const pid = parseInboxToken(info.tokens?.[INBOX_TOKEN]);
+    if (pid === undefined || !info.pane_id) return false;
+    const r = await this.endpoint(machine)<{ process_info?: { foreground_processes?: { pid?: number }[] } }>("pane.process_info", { pane_id: info.pane_id });
+    return !!r.result?.process_info?.foreground_processes?.some((p) => p.pid === pid);
+  }
+
+  /**
+   * Put an envelope into the agent's inbox and wait for its acknowledgement. Undefined when the
+   * agent has no inbox (the caller falls back to agent.prompt).
+   */
+  async sendInbox(info: AgentInfo, text: string, delivery: Delivery, opts: { machine?: string; awaitsReply?: boolean } = {}): Promise<{ outcome?: Outcome } | undefined> {
+    if (!(await this.hasInbox(info, opts.machine))) return undefined;
+    const call = this.endpoint(opts.machine);
+    const env: Envelope = { v: 1, id: newMessageId(), from: await this.deps.self(), text, delivery, ...(opts.awaitsReply ? { awaitsReply: true } : {}) };
+    const r = await call("pane.send_text", { pane_id: info.pane_id, text: encodeEnvelope(env) }, 10_000);
+    if (r.error) throw new Error(`herdr could not send to ${info.name ?? info.pane_id}: ${errorText(r)}`);
+    const key = ackTokenName(env.id);
+    const step = this.deps.ackPollMs ?? (opts.machine ? 500 : 150);
+    const deadline = Date.now() + (this.deps.ackTimeoutMs ?? (opts.machine ? 6_000 : 3_000));
+    while (Date.now() < deadline) {
+      await sleep(step);
+      const p = await call<{ pane?: { tokens?: Record<string, string> } }>("pane.get", { pane_id: info.pane_id });
+      const ack = p.result?.pane?.tokens?.[key];
+      if (ack && (OUTCOMES as readonly string[]).includes(ack)) return { outcome: ack as Outcome };
+    }
+    return {};
+  }
+
+  async send(name: string, text: string, opts: { delivery?: Delivery; machine?: string }): Promise<SendResult> {
+    if (Buffer.byteLength(text) > MAX_MESSAGE_BYTES) throw new Error(`The message is over ${MAX_MESSAGE_BYTES / 1024} KB. Write it to a file and send the path instead.`);
+    const info = await this.get(name, opts.machine);
+    if (!opts.machine && info.pane_id === this.deps.selfPane) throw new Error("That is this session's own pane.");
+    const label = info.name ?? info.pane_id!;
+    const inbox = await this.sendInbox(info, text, opts.delivery ?? "steer", { machine: opts.machine });
+    if (inbox) return { via: "inbox", outcome: inbox.outcome, info };
+    // No inbox: herdr types the message into its terminal, after whatever draft is there.
+    const status = info.agent_status;
+    if (status === "blocked") throw new Error(`${label} is waiting on a dialog for the user and has no pi-herdr inbox to hold the message, so nothing was sent. Try again once the user has answered it.`);
+    if (status === "working" && !opts.delivery) throw new Error(`${label} is working on a turn now, so nothing was sent. Send again with delivery=steer to put the message into that turn, or wait for it (action=wait) and then send.`);
+    if (status === "working" && opts.delivery === "queue") throw new Error(`${label} has no pi-herdr inbox, so a message cannot be queued in it. Wait for it (action=wait) and send then, or use delivery=steer.`);
+    const r = await this.endpoint(opts.machine)("agent.prompt", { target: info.pane_id, text }, 15_000);
+    if (r.error) throw new Error(`herdr could not prompt ${label}: ${errorText(r)}`);
+    return { via: "prompt", info };
+  }
+
+  /** The agent's last reply (local pi, idle) or its screen, labeled as such. */
+  async read(name: string, opts: { machine?: string; lines?: number } = {}): Promise<string> {
+    const info = await this.get(name, opts.machine);
+    const label = info.name ?? info.pane_id!;
+    const status = info.agent_status ?? "unknown";
+    const file = !opts.machine && info.agent === "pi" && info.agent_session?.kind === "path" ? info.agent_session.value : undefined;
+    const settled = status === "idle" || status === "done";
+    if (file && settled) {
+      const reply = readReply(file);
+      if (reply) return `${label}: ${status}\n\nLast reply:\n${reply}`;
+    }
+    const lines = Math.min(Math.max(opts.lines ?? 80, 10), 400);
+    const r = await this.endpoint(opts.machine)<{ read?: { text?: string } }>("agent.read", { target: info.pane_id, source: "recent_unwrapped", lines });
+    const why = file
+      ? settled ? "its session file has no reply text, so this is its screen" : `it is ${status}, so this is its screen`
+      : opts.machine ? `screen read from ${opts.machine}: its session file is out of reach` : `screen read: herdr reports no session file for this ${info.agent ?? "agent"}`;
+    const caveat = file ? "" : " The last lines of its terminal can cut a long reply short or leave out its start; if you need all of it, ask the agent to write it to a file and send you the path.";
+    return `${label}: ${status} (${why}.${caveat})\n\n${r.result?.read?.text ?? errorText(r)}`;
+  }
+
+  /**
+   * Wait until the agent's turn settles, then read it. An agent that is idle when the wait starts
+   * gets a few seconds to start (a message just sent); if it never does, that is said.
+   */
+  async wait(name: string, opts: { machine?: string; timeoutMs?: number; signal?: AbortSignal } = {}): Promise<string> {
+    const first = await this.get(name, opts.machine);
+    const label = first.name ?? first.pane_id!;
+    const step = this.deps.waitPollMs ?? (opts.machine ? 3_000 : 1_000);
+    const deadline = Date.now() + Math.min(Math.max(opts.timeoutMs ?? 600_000, 1_000), 3_600_000);
+    const startGrace = Date.now() + 5_000;
+    let active = !SETTLED.has(first.agent_status ?? "");
+    for (;;) {
+      if (opts.signal?.aborted) return `Stopped waiting for ${label}.`;
+      const info = await this.get(name, opts.machine).catch(() => undefined);
+      if (!info) return `${label} is gone: its pane closed or its agent exited.`;
+      const settled = SETTLED.has(info.agent_status ?? "");
+      // A short turn can start and settle between two polls: its state sequence still moved.
+      if (!settled || info.state_change_seq !== first.state_change_seq) active = true;
+      if (settled && (active || (Date.now() > startGrace && info.state_change_seq === first.state_change_seq))) {
+        const read = await this.read(name, { machine: opts.machine });
+        return active ? read : `${label} stayed ${info.agent_status} and did not start a turn.\n\n${read}`;
+      }
+      if (Date.now() > deadline) return `${label} is still ${info.agent_status} after the wait's timeout; it keeps going. Wait again or read it later.`;
+      await sleep(step, opts.signal);
+    }
+  }
+
+  async list(opts: { machine?: string; children?: Map<string, string> } = {}): Promise<string> {
+    const r = await this.endpoint(opts.machine)<{ agents?: AgentInfo[] }>("agent.list", {});
+    if (r.error) throw new Error(`herdr could not list agents${opts.machine ? ` on ${opts.machine}` : ""}: ${errorText(r)}`);
+    const agents = r.result?.agents ?? [];
+    if (!agents.length) return `No agents${opts.machine ? ` on ${opts.machine}` : ""}.`;
+    const home = process.env.HOME;
+    return agents.map((a) => {
+      const marks = [
+        !opts.machine && a.pane_id === this.deps.selfPane ? "this session" : undefined,
+        !opts.machine && a.pane_id && opts.children?.has(a.pane_id) ? `child ${opts.children.get(a.pane_id)}` : undefined,
+        parseInboxToken(a.tokens?.[INBOX_TOKEN]) !== undefined ? "inbox" : undefined,
+        a.focused ? "focused" : undefined,
+      ].filter(Boolean).join(", ");
+      const cwd = a.cwd && home && a.cwd.startsWith(home) ? `~${a.cwd.slice(home.length)}` : a.cwd ?? "";
+      return `${a.name ?? "-"}  ${a.pane_id}  ${a.agent ?? "?"} ${a.agent_status ?? "?"}${marks ? `  [${marks}]` : ""}  ${cwd}  ${(a.title ?? "").replace(/\s+/gu, " ").slice(0, 60)}`;
+    }).join("\n");
+  }
+}

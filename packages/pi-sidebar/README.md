@@ -264,7 +264,7 @@ A model reads its own conclusions back as settled, so a second opinion is worth 
 ## What Sidebar can use
 
 Everything main can, except changing anything. Read-only does not change the tool list: removing tools would change the request and lose the cache. Instead, every call passes one guard (`src/guard.ts`):
-- **Refused:** `edit`, `write`, `todo`, `ask_user_question`, plan mode's tools, `herdr_child`, and any tool marked destructive.
+- **Refused:** `edit`, `write`, `todo`, `ask_user_question`, plan mode's tools, `herdr`, and any tool marked destructive.
 - **Allowed:** reading and search tools, web search and fetch (including `web_enable`), `codemode` (each nested call passes the guard too), `tool_search`, pi-bg's `bg_wait`/`bg_logs`/`bg_kill`, and any tool marked read-only (MCP's `readOnlyHint`).
 - **Shell commands** (`bash`, `powershell`, pi-bg's `bg_run`): run when they only read. The policy is plan mode's, loosened for reading: flags such as `rg -i`, globs, `2>/dev/null` and `2>&1`, input redirection, `cd`, and `$VAR` set earlier in the same command or from `HOME`, `PWD`, `USER` and `TMPDIR`. Writes, `sed -i`, command substitution and unknown variables are never cleared by the policy.
 - **Anything else** (an unfamiliar command, a tool without hints): one Jev judgment (`typesafe/jev-latest` through Pi's classifier models, 5 s timeout, retried once on timeout) of whether the call would change anything. It is refused at 50% or more, or when Jev is unavailable.
@@ -295,7 +295,7 @@ On [another model](#another-model) it asks instead when that model's own cache i
 
 **Model behavior.** On models that drop earlier thinking when a new user message arrives (Claude models before Opus 4.5 and Sonnet 4.6), a question asked during main's tool calls can miss the cache. The miss check catches this.
 
-**Keys while Sidebar has focus:** typing goes only to Sidebar, except a prompt another program types into the pane (`herdr agent prompt`, pi-herdr's `send`, a phone client): a paste into Sidebar's empty composer followed by Enter within 0.7 s is sent to main instead (steering main's turn if it is working), with a notice in Sidebar. Main-only actions (stopping main, its thinking level) work again once main has focus; main's model keys pick Sidebar's model while Sidebar has focus. Transcript search and previous/next prompt jumps act on the focused half.
+**Keys while Sidebar has focus:** typing goes only to Sidebar, except a prompt another program types into the pane (`herdr agent prompt`, a phone client): a paste into Sidebar's empty composer followed by Enter within 0.7 s is sent to main instead (steering main's turn if it is working), with a notice in Sidebar. Messages from pi-herdr's `herdr` tool never reach Sidebar: pi-herdr takes them before any editor and delivers them to main. Main-only actions (stopping main, its thinking level) work again once main has focus; main's model keys pick Sidebar's model while Sidebar has focus. Transcript search and previous/next prompt jumps act on the focused half.
 
 ## Prior art
 

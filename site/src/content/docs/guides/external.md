@@ -38,7 +38,7 @@ To keep suite-owned interactive tool renderers, including pi-todo's `todo`, out 
 ```json
 {
   "excludeRenderers": [
-    "ask_user_question", "subagent", "herdr_child",
+    "ask_user_question", "subagent", "herdr",
     "bg_run", "bg_wait", "bg_logs", "bg_kill",
     "plan_mode_complete", "plan_subagents", "plan_ask_planner",
     "plan_mode_question", "plan_submit_merged", "exit_plan_mode", "todo"

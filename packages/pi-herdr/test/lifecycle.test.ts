@@ -350,3 +350,56 @@ async function until(check: () => boolean, ms = 2_000) {
     await new Promise((r) => setTimeout(r, 5));
   }
 }
+
+test("the inbox: advertised, envelopes delivered without the editor, acked, held behind a dialog", async () => {
+  inHerdr();
+  const { encodeEnvelope } = await import("../src/inbox.ts");
+  const { f } = herdr();
+  const p = fakePi();
+  piHerdr(p.pi, { call: f.call, exec: async () => ({ code: 0, stdout: "", stderr: "" }), pollMs: 60_000 });
+  let listener: ((data: string) => { consume?: boolean } | undefined) | undefined;
+  let editor = "my draft";
+  let idle = true;
+  const base = ctxOf([]);
+  const notes: string[] = [];
+  const ctx = {
+    ...base,
+    isIdle: () => idle,
+    ui: {
+      ...base.ui,
+      notify: (m: string) => void notes.push(m),
+      getEditorText: () => editor,
+      setEditorText: (t: string) => void (editor = t),
+      onTerminalInput: (fn: typeof listener) => { listener = fn; return () => void (listener = undefined); },
+    },
+  };
+  await p.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  const tokenReports = () => f.of("pane.report_metadata").filter((l) => l.params.tokens);
+  expect(tokenReports().find((l) => l.params.tokens.inbox)?.params).toMatchObject({ source: "pi-herdr-inbox", tokens: { inbox: `v1:${process.pid}` } });
+  const env = (id: string, delivery: "steer" | "queue" = "steer") => ({ v: 1 as const, id, from: { pane: "w9:p1", name: "lead" }, text: `do ${id}`, delivery });
+
+  expect(listener!(encodeEnvelope(env("aaa")))).toEqual({ consume: true });
+  expect(editor).toBe("my draft");
+  expect(p.messages.at(-1)).toMatchObject({ message: { customType: "herdr-message", display: true }, options: { triggerTurn: true } });
+  expect(p.messages.at(-1).message.content).toContain('pi agent "lead"');
+  await new Promise((r) => setTimeout(r, 0));
+  expect(tokenReports().some((l) => l.params.source === "pi-herdr-inbox-ack" && l.params.tokens["ack-aaa"] === "started")).toBe(true);
+
+  idle = false;
+  listener!(encodeEnvelope(env("bbb", "queue")));
+  expect(p.messages.at(-1).options).toEqual({ triggerTurn: true, deliverAs: "followUp" });
+
+  idle = true;
+  p.pi.events.emit("herdr:blocked", { active: true, label: "Allow?" });
+  const before = p.messages.length;
+  listener!(encodeEnvelope(env("ccc")));
+  expect(p.messages.length).toBe(before);
+  expect(notes.some((n) => n.includes("held until the dialog closes"))).toBe(true);
+  p.pi.events.emit("herdr:blocked", { active: false });
+  expect(p.messages.length).toBe(before + 1);
+  expect(p.messages.at(-1).message.content).toContain("do ccc");
+
+  await p.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx);
+  expect(listener).toBeUndefined();
+  expect(tokenReports().some((l) => l.params.source === "pi-herdr-inbox" && l.params.tokens.inbox === null)).toBe(true);
+});

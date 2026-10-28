@@ -24,7 +24,7 @@ function host(options: { probability?: number; jev?: boolean; tools?: Record<str
 
 describe("judgeCall", () => {
   it("refuses tools that change files or shared state", async () => {
-    for (const tool of ["edit", "write", "todo", "ask_user_question", "enter_plan_mode", "exit_plan_mode", "herdr_child"]) {
+    for (const tool of ["edit", "write", "todo", "ask_user_question", "enter_plan_mode", "exit_plan_mode", "herdr", "herdr_child"]) {
       const verdict = await judgeCall(tool, {}, host().host);
       expect(verdict.allowed, tool).toBe(false);
       if (!verdict.allowed) expect(verdict.reason).toMatch(/read-only/);

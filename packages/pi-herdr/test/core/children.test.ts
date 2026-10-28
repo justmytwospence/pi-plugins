@@ -239,3 +239,28 @@ describe("children", () => {
     expect(gone.get("c").closed).toBe(true);
   });
 });
+
+describe("transport", () => {
+  it("sends through the host's transport when it takes the message, even to a blocked child", async () => {
+    const w = world();
+    const sent: [string, string][] = [];
+    (w.children as any).deps.transport = async (_rec: ChildRecord, text: string, delivery: string) => {
+      sent.push([text, delivery]);
+      return { outcome: "held" };
+    };
+    const rec = await w.children.spawn({ task: "Do it", cwd: "/repo" });
+    expect(w.f.of("agent.prompt")).toEqual([]);
+    expect(sent[0]![0]).toContain("Do it");
+    w.state.agent.agent_status = "blocked";
+    const r = await w.children.send(rec.name, "and this", "steer");
+    expect(r).toMatchObject({ outcome: "steered", delivered: "held" });
+    expect(sent[1]).toEqual(["and this", "steer"]);
+  });
+
+  it("falls back to agent.prompt when the transport cannot take it", async () => {
+    const w = world();
+    (w.children as any).deps.transport = async () => undefined;
+    await w.children.spawn({ task: "Do it", cwd: "/repo" });
+    expect(w.f.of("agent.prompt")).toHaveLength(1);
+  });
+});

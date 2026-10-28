@@ -174,7 +174,7 @@ export function piInvocation(): { command: string; args: string[] } {
 }
 
 /** Human-led workflows must not be reachable by a report-back worker, even via codemode. */
-export const HEADLESS_EXCLUDED_TOOLS = ["enter_plan_mode", "exit_plan_mode", "ask_user_question", "herdr_child"];
+export const HEADLESS_EXCLUDED_TOOLS = ["enter_plan_mode", "exit_plan_mode", "ask_user_question", "herdr", "herdr_child"];
 export const HEADLESS_PROMPT = "You are a headless report-back worker, not a human-led session. Execute the assigned task within its scope. Do not enter plan mode, request user approval, ask the user questions, or start interactive agents. If a decision or permission is needed, stop and report the blocker to the parent agent; never grant yourself permission. Return your findings and changes to the parent.";
 
 export function childArgs(options: ChildOptions, promptFile?: string): string[] {

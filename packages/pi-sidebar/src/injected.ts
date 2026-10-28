@@ -1,4 +1,4 @@
-// Prompts typed into this pane by another program (`herdr agent prompt`, herdr_child's send, a
+// Prompts typed into this pane by another program (`herdr agent prompt`, an older pi-herdr's send, a
 // phone client) belong to main, even when Sidebar has focus. Herdr writes them as a bracketed paste
 // and, about 300 ms later, Enter. A paste into Sidebar's empty composer followed by Enter within
 // INJECTED_WINDOW_MS, with no other key between, is taken as one: the paste still lands in the
@@ -8,6 +8,12 @@ export const INJECTED_WINDOW_MS = 700;
 
 const PASTE_START = "\x1b[200~";
 const PASTE_END = "\x1b[201~";
+/**
+ * pi-herdr's inbox envelope (a paste starting with this marker): pi-herdr consumes it before any
+ * editor and delivers it to main itself, so it is neither a prompt nor a key here. Copied
+ * structurally from pi-herdr's `src/inbox.ts`; this package imports no sibling.
+ */
+export const ENVELOPE_PREFIX = `${PASTE_START}\u2063\u2063pi-herdr/v1 `;
 /** Terminal focus reports, which say nothing about what was typed. */
 const NEUTRAL = new Set(["\x1b[I", "\x1b[O"]);
 
@@ -21,6 +27,7 @@ export class InjectedPrompt {
    * before this sequence. Returns the prompt when this sequence is the Enter that submits one.
    */
   observe(data: string, composerEmpty: boolean, isEnter: (data: string) => boolean): string | undefined {
+    if (data.startsWith(ENVELOPE_PREFIX)) return undefined;
     if (data.startsWith(PASTE_START) && data.endsWith(PASTE_END)) {
       this.pending = composerEmpty ? { text: data.slice(PASTE_START.length, -PASTE_END.length).replace(/\r\n?/gu, "\n"), at: this.now() } : undefined;
       return undefined;

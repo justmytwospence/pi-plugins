@@ -32,7 +32,7 @@ Calling a section's `stop` delegates to its owner:
 - A pi-bg task stops its process group; a subagent stops its Pi child.
 - The [notebook source](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-marimo/src/ui/source.ts) interrupts a kernel, not the shell service that launched it.
 - Working planner rows stop that planner. Scout rows are observational and cannot be stopped independently from the activity list; stop their owning planner or use the planning screen. Opening either kind of row returns to `/planners`.
-- A stoppable Herdr child receives an interrupt for its awaited turn. **It never closes the pane.** Explicit `herdr_child close` remains a separate action.
+- A stoppable Herdr child receives an interrupt for its awaited turn. **It never closes the pane.** Explicit `herdr` action `close` remains a separate action.
 
 `/stop` is not a stop-everything command. pi-bg's [`/stop`](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-bg/src/index.ts) stops only pi-bg's own running tasks that this Pi process started; kept services adopted from an earlier session, subagent runs, notebooks, planners and Herdr children are untouched.
 

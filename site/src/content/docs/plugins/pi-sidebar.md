@@ -154,7 +154,7 @@ A second opinion is worth more from a model that did not write the work. `/model
 ## What it can use
 
 Everything main can, except changing anything. Sidebar loads the extensions behind main's tools, Pi's codemode, tool search and MCP, and main's skills and templates. One guard judges every call:
-- **Refused:** `edit`, `write`, `todo`, `ask_user_question`, plan mode's tools, `herdr_child`, and tools marked destructive.
+- **Refused:** `edit`, `write`, `todo`, `ask_user_question`, plan mode's tools, `herdr`, and tools marked destructive.
 - **Allowed:** reading, search and web tools, codemode (its nested calls are judged one by one), tool search, pi-bg's job readers, and tools marked read-only.
 - **Shell commands** (including pi-bg's `bg_run`): run when they only read. Plan mode's policy, loosened for flags like `rg -i`, globs, `2>/dev/null`, `cd` and variables set in the same command.
 - **Anything else:** a Jev judgment of whether the call would change anything, refused at 50% or more, or when Jev is unavailable.

@@ -94,8 +94,9 @@ export function toolIntent(name: string, args: unknown): string | undefined {
     case "ask_user_question":
       text = questions(a);
       break;
+    case "herdr":
     case "herdr_child":
-      text = [str(a.action), str(a.name), str(a.action) === "spawn" && !str(a.name) ? line(a.task) : undefined].filter(Boolean).join(" ");
+      text = [str(a.action), str(a.name), str(a.machine) ? `on ${str(a.machine)}` : undefined, str(a.action) === "spawn" && !str(a.name) ? line(a.task) : undefined].filter(Boolean).join(" ");
       break;
     case "bg_wait":
     case "bg_logs":

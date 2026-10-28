@@ -17,6 +17,7 @@ export const REFUSED_TOOLS = new Set([
   "ask_user_question",
   "enter_plan_mode",
   "exit_plan_mode",
+  "herdr",
   "herdr_child",
 ]);
 

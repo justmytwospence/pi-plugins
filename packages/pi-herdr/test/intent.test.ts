@@ -30,6 +30,8 @@ describe("toolIntent", () => {
     expect(toolIntent("ask_user_question", { questions: [{ header: "Scope", question: "Which?" }, { question: "And\nthen?" }] })).toBe("Scope · And");
     expect(toolIntent("herdr_child", { action: "spawn", task: "Fix the build\nnow" })).toBe("spawn Fix the build");
     expect(toolIntent("herdr_child", { action: "send", name: "fixer", message: "hi" })).toBe("send fixer");
+    expect(toolIntent("herdr", { action: "send", name: "explorer", machine: "NUC", message: "hi" })).toBe("send explorer on NUC");
+    expect(toolIntent("herdr", { action: "list" })).toBe("list");
     expect(toolIntent("bg_wait", {})).toBe("next to finish");
     expect(toolIntent("bg_logs", {})).toBe("all tasks");
     expect(toolIntent("bg_logs", { id: "c4a2b", grep: "error" })).toBe("c4a2b /error/");

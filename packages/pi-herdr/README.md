@@ -1,6 +1,6 @@
 # pi-herdr
 
-Pi's own [Herdr](https://herdr.dev) integration, beside the one Herdr installs (`herdr integration install pi`, which reports the pane's working/blocked/idle state and the session for resume). It shows pending background work, the session's title and model, and the branch's pull request in Herdr's sidebar; starts interactive Pi children in Herdr tabs, splits or worktree spaces with the `herdr_child` tool; and runs an event-bus bridge that other extensions use instead of talking to Herdr themselves.
+Pi's own [Herdr](https://herdr.dev) integration, beside the one Herdr installs (`herdr integration install pi`, which reports the pane's working/blocked/idle state and the session for resume). It shows pending background work, the session's title and model, and the branch's pull request in Herdr's sidebar; gives the agent one `herdr` tool to message, read and wait on any agent in Herdr (here or on a saved Herdr machine) and to start interactive Pi children in Herdr tabs, splits or worktree spaces; delivers messages from other Pi sessions without touching the editor's draft; and runs an event-bus bridge that other extensions use instead of talking to Herdr themselves.
 
 It acts only in an interactive (TUI) Pi inside Herdr. Outside Herdr nothing is registered. RPC and print sessions inside Herdr (subagents inherit their parent's `HERDR_PANE_ID`) report nothing and drop the tool.
 
@@ -54,18 +54,43 @@ rows = [
 ]
 ```
 
-## Herdr children
+## The `herdr` tool
 
-The `herdr_child` tool starts an interactive Pi in its own Herdr pane and gives it a task.
+One tool for every agent in Herdr: this machine's, or a saved Herdr machine's with `machine` (the label `herdr --machine` takes). `name` is an agent's Herdr name or pane id; this session's children go by their names.
 
 | action | parameters |
 |---|---|
+| `list` | optional `machine`: every agent with its pane, kind, state, directory and title, marked `this session`, `child <name>`, `inbox` (a Pi with pi-herdr, which takes messages without touching its draft) and `focused`; then this session's children with any pending reply |
+| `send` | `name`, `message`, optional `machine`. While the agent is working, `delivery` is required: `steer` puts the message into its current turn (Pi delivers it after the current tool call), `queue` delivers it once that turn ends. An idle agent gets it at once. The result says what happened (see below). A child's reply comes back as a message; any other agent's does not: use `wait` or `read` |
+| `read` | `name`, optional `lines` (default 80, 10-400), `machine`: a local Pi's last reply from its session file when it is idle; otherwise its screen, labeled as a screen read |
+| `wait` | `name`, optional `timeout_ms` (default 10 minutes, at most an hour), `machine`: waits for the agent's turn to end, then reads it as `read` does. An agent idle when the wait starts gets 5 seconds to start a turn. Not for children: their replies arrive by themselves |
 | `spawn` | `task`; optional `name` (lowercase, dashes; otherwise derived from the task and made unique), `where` (`tab` default, `split` beside this pane, or `worktree` with `branch`), `model` and `thinking` (default: this session's), `focus` (default false) |
-| `send` | `name`, `message`: ask it something more. While the child is working, `delivery` is required: `steer` puts the message into its current turn (Pi delivers it after the current tool call), `queue` holds it and sends it once that turn ends (several queued messages go as one, after the turn's reply). An idle child gets it at once. |
-| `read` | `name`, optional `lines` (default 80, 10-400): its last reply when idle, or its screen while it works |
-| `list` | this session's children: state, pending reply, layout, pane, task |
-| `interrupt` | `name`: sends Escape, ending its current turn; that turn still reports back when it settles |
-| `close` | `name`: close its pane |
+| `interrupt` | `name` of a child: sends Escape, ending its current turn; that turn still reports back when it settles |
+| `close` | `name` of a child: close its pane |
+
+Older sessions' `herdr_child` calls are the same actions on children; the tool was renamed `herdr` when it learned to reach every agent.
+
+### Messages between Pi sessions (the inbox)
+
+`herdr agent prompt` types a message into the target's terminal as a bracketed paste followed by Enter. In a Pi whose editor holds a draft, the paste lands in the draft (mid-draft in pi-vim's Normal mode) and the Enter sends both as one prompt; an open selector or dialog takes the keys instead; a dialog Herdr recognizes rejects the message; and the model cannot tell another agent wrote it.
+
+So each interactive pi-herdr listens for messages of its own:
+
+- **Advertised.** It sets the pane token `$inbox` to `v1:<pid>` (source `pi-herdr-inbox`, 90-second TTL, refreshed). A sender uses the inbox only if the token is there and that pid is in the pane's foreground (`pane.process_info`), so a stale token, a suspended Pi or a shell on top of it gets the fallback instead.
+- **Sent.** The message, its id and the sender (pane, agent name, host, directory) go as one bracketed paste whose payload starts with an invisible marker and is base64 JSON, written with `pane.send_text` and no Enter. Messages over 256 KB are refused; send a file path instead.
+- **Taken before the editor.** pi-tui hands a whole bracketed paste to terminal-input listeners as one string, before the editor, pi-vim or any overlay. pi-herdr consumes the envelope there, so the draft, cursor and Vim mode stay as they were, and delivers it with `pi.sendMessage` as a `herdr-message` that names the sender and says whether the reply goes back (it does for a child's parent).
+- **Delivered by the receiver's own state:** idle, it starts a turn (`started`); working, it steers the current turn (`steered`) or follows it (`queued`), as the sender asked; idle with a dialog open (a `herdr:blocked` hold, such as a question or an approval), it is held until the dialog closes (`held`), and the user sees a notice. A message is delivered once even if it arrives twice.
+- **Acknowledged.** The receiver sets the token `$ack-<id>` to that outcome for 60 seconds, and the sender's result says it, for example "held until the dialog closes". Without an acknowledgement within 3 seconds (6 on another machine), the result says it was sent once and is unconfirmed, so the agent reads before sending again.
+
+Agents without an inbox (another agent kind, or a Pi without this version) get `agent.prompt` as before, and the result says their draft was not protected; a blocked one is refused, and a working one cannot be queued. Children use the inbox too, so typing in a child's pane never collides with the parent's messages. The envelope grants nothing a process that can type into the pane cannot already do.
+
+### Prompts other programs type (the draft guard)
+
+Prompts typed into the pane without an envelope (herdr-web-ui, Collie, a Codex or Claude agent running `herdr agent prompt`, a script) still arrive as a paste and, about 300 ms later, Enter. When that would send your draft along with them, pi-herdr steps in, and only then: the editor held a draft before the paste that had no keystroke for 3 seconds (pasting a URL onto what you just typed and pressing Enter is your own), Enter came within 0.7 seconds with only focus reports between, and the paste landed in the main editor (not an overlay or Sidebar). It then sends the pasted text on its own and puts your draft back, with a notice. An injected command (`/...`, `!...`) is not run at all, since a command clears the editor late and some need it empty: your draft is kept and a warning names the command. `PI_HERDR_DRAFT_GUARD=0` turns the guard off.
+
+### Children
+
+A child is an interactive Pi in its own Herdr pane, started with `spawn` and given a task.
 
 **Starting.** A child runs `pi --name <name> [--model ...] [--thinking ...]` through Herdr. pi-herdr waits up to 90 seconds for it to accept input, then sends the task with a preamble telling it that it is a child and that its final reply to each parent message is sent back. If the child is blocked on a dialog, or never becomes ready, the task is not sent; the child is still recorded, so `send` works once the user has dealt with it.
 
@@ -114,6 +139,7 @@ Holds pair `{ active: true }` with `{ active: false }`; a release without `id` e
 |---|---|
 | `PI_HERDR_PR` | `0` turns the `$pr` token off |
 | `PI_HERDR_SUMMARY` | `0` keeps `$summary` but makes no model call (first sentence of the reply only) |
+| `PI_HERDR_DRAFT_GUARD` | `0` turns the draft guard off (prompts other programs type join your draft, as without pi-herdr) |
 | `PI_HERDR_SUMMARY_MODEL` | `provider/id` for the turn summary; default the first of `anthropic/claude-haiku-5-5`, `anthropic/claude-haiku-4-5` with credentials |
 | `HERDR_ENV`, `HERDR_SOCKET_PATH`, `HERDR_PANE_ID` | set by Herdr; pi-herdr is active only when `HERDR_ENV=1` and both others are set |
 
@@ -125,6 +151,7 @@ There is no settings file.
 - Herdr's own Pi integration (`herdr integration install pi`) for reading children's replies (it reports their session files) and for the pane title and agent name to apply.
 - `gh`, authenticated for the repository, for the `$pr` token (optional).
 - `git` for `where: "worktree"`.
+- A saved Herdr machine (`herdr machine add`, with API forwarding) for `machine`; pi-herdr runs `herdr --machine <label> ...` for it.
 - Each Herdr child is a full interactive Pi session using your configured model and credentials, billed like any session. pi-herdr's own model call is the `$summary` line: one small request per settled turn whose reply is longer than a line (Haiku, roughly 300 input and 20 output tokens, a few thousandths of a cent), through your configured credentials. `PI_HERDR_SUMMARY=0` turns it off. With pi-recap loaded, pi-recap makes that one request instead.
 - It writes nothing to disk except session entries (`pi-herdr:child`) in the current session.
 
@@ -143,9 +170,12 @@ Plan-mode planners and Herdr children are not entries in pi-bg's `/tasks` list; 
 ## Limitations
 
 - Display only: pi-herdr never changes the pane's working/blocked/idle state, which Herdr's Pi integration owns.
-- Children are started only from an interactive Pi in Herdr; RPC and print sessions do not get the tool.
+- The tool exists only in an interactive Pi in Herdr; RPC and print sessions (subagents) do not get it, and only an interactive Pi has an inbox.
+- Replies from another machine or a non-Pi agent are screen reads (Herdr's `agent.read`), which can cut a long reply short; the result says so. Messages to another machine are draft-safe, but a remote agent's reply never comes back on its own, even from a child (children start on this machine only).
+- Messages held behind a dialog live in memory: a `/reload` or a restart of the receiving Pi while one is held drops it.
+- The draft guard tells an injected prompt from your own paste by timing alone: a paste into a draft untouched for 3 seconds, then Enter within 0.7 seconds, is taken as injected.
 - A child's reply is read from its session file; if Herdr does not report the session, the parent is told to use `read`.
-- `src/core` (and `test/core`) is shared verbatim with opencode-herdr: the Herdr socket client, metadata reporters, children, PR status and text helpers. A host supplies a `ChildAgent` (which agent Herdr starts, its arguments, how its reply is read); `src/session.ts` is Pi's.
+- `src/core` (and `test/core`) is shared verbatim with opencode-herdr: the Herdr socket client, metadata reporters, children, PR status and text helpers. A host supplies a `ChildAgent` (which agent Herdr starts, its arguments, how its reply is read) and optionally a `transport` (pi-herdr's inbox; opencode-herdr has none and types with `agent.prompt`); `src/session.ts` is Pi's.
 
 ## Development
 
