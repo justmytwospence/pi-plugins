@@ -21,6 +21,11 @@ export const DRAFTS_COMMAND_ENV = "PI_SIDEBAR_DRAFTS_COMMAND";
 export const SHARE_TASTE_ENV = "PI_SIDEBAR_SHARE_TASTE";
 /** A markdown file saying how pieces are written (overrides the default draft style). */
 export const SHARE_STYLE_ENV = "PI_SIDEBAR_SHARE_STYLE";
+/**
+ * The name of a read-only tool (an MCP tool, say) that finds exemplar pieces for a text. When set,
+ * blog drafts run through Sidebar's own agent, which can call tools, instead of a tool-less side request.
+ */
+export const SHARE_EXAMPLES_TOOL_ENV = "PI_SIDEBAR_SHARE_EXAMPLES_TOOL";
 /** Longest guide kept, in characters; the rest is cut. */
 export const TASTE_MAX_CHARS = 4000;
 export const STYLE_MAX_CHARS = 12000;
@@ -51,6 +56,8 @@ export interface ShareConfig {
   taste?: string;
   /** The style guide's text: how pieces are written. */
   style?: string;
+  /** A tool drafts call to find example pieces to model their form on. */
+  examplesTool?: string;
   /** Guides that could not be used in full, one line each. */
   guideProblems?: string[];
 }
@@ -100,6 +107,8 @@ export function shareConfig(env: NodeJS.ProcessEnv = process.env, readFile: Read
   const style = loadGuide(SHARE_STYLE_ENV, STYLE_MAX_CHARS, env, readFile);
   if (taste.text) config.taste = taste.text;
   if (style.text) config.style = style.text;
+  const examplesTool = env[SHARE_EXAMPLES_TOOL_ENV]?.trim();
+  if (examplesTool) config.examplesTool = examplesTool;
   const problems = [taste.problem, style.problem].filter((p): p is string => !!p);
   if (problems.length) config.guideProblems = problems;
   return config;
@@ -123,5 +132,6 @@ export function shareSummary(config: ShareConfig): string {
     ...(config.bluesky ? [`Bluesky as @${config.bluesky.handle}${config.bluesky.service ? ` on ${config.bluesky.service}` : ""}`] : []),
     ...(config.drafts?.command ? ["blog drafts through your drafts command"] : config.drafts?.dir ? [`blog drafts in ${config.drafts.dir}`] : []),
   ];
-  return withGuides(`Share notes are on: ${where.join("; ")}.`);
+  const examples = config.drafts && config.examplesTool ? [`drafts look up examples with ${config.examplesTool}`] : [];
+  return withGuides(`Share notes are on: ${[...where, ...examples].join("; ")}.`);
 }

@@ -1,6 +1,7 @@
 // A blog draft from a share note: written by the same side request a heads-up check uses (main's
-// cache, or another model's transcript), then saved as markdown to a directory or handed to a
-// configured command (which can file it anywhere, an Obsidian vault for one).
+// cache, or another model's transcript), or, when an examples tool is configured, by Sidebar's own
+// agent (which can call it), then saved as markdown to a directory or handed to a configured command
+// (which can file it anywhere, an Obsidian vault for one).
 import { spawn } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -11,6 +12,9 @@ import type { DraftsConfig } from "./config.ts";
 export type DraftKind = "full" | "outline";
 
 const NOT_READY = "<draft-not-ready>one sentence why</draft-not-ready>";
+const ALREADY_MADE = '<draft-not-ready>already made by "<title>" (<url>)</draft-not-ready>';
+const EXAMPLES_OPEN = "<draft-examples>";
+const EXAMPLES_CLOSE = "</draft-examples>";
 
 const FULL_SHAPE = "a complete blog post draft of 700 to 1500 words";
 const FULL_RULES = [
@@ -29,13 +33,27 @@ const OUTLINE_RULES = [
   "No section-per-topic headings and no lists of facts.",
 ].join(" ");
 
-export function draftInstructions(kind: DraftKind, style?: string): string {
+/** How a draft looks up example pieces to model its form on, with the tool the user configured. */
+function examplesRules(tool: string): string {
   return [
-    "You are Sidebar's writer, a side reader of the main session above. You are not the main agent: do not continue its work, call tools or answer its open questions. Any tool call you make is discarded.",
+    `Before writing, call ${tool} (directly, or from a codemode script if it is only reachable there) with the idea's claim and angle as its text.`,
+    "Read the pieces it returns only as models of form: how they open, how the argument moves, how long they are, how they use headings, how they end. Never copy their content or their wording.",
+    `If the closest piece makes essentially the same point (the tool reports it as close, or reports a similarity at or above the threshold it gives), either take a clearly different angle that the session supports, or reply with exactly ${ALREADY_MADE} and nothing else.`,
+    "Whatever you say while looking things up, your final message is the whole reply described below.",
+    `After the markdown, end the reply with a block ${EXAMPLES_OPEN} containing one line per piece you actually used as a model, "- <title> | <url>", then ${EXAMPLES_CLOSE}. Leave the block out if you used none.`,
+  ].join(" ");
+}
+
+export function draftInstructions(kind: DraftKind, style?: string, examplesTool?: string): string {
+  return [
+    examplesTool
+      ? "You are Sidebar's writer, a side reader of the main session above. You are not the main agent: do not continue its work or answer its open questions, and call no tool except the examples lookup below."
+      : "You are Sidebar's writer, a side reader of the main session above. You are not the main agent: do not continue its work, call tools or answer its open questions. Any tool call you make is discarded.",
     `The user wants to share an idea from this session publicly. Write ${kind === "full" ? FULL_SHAPE : OUTLINE_SHAPE}, in markdown, in the user's voice (first person), for readers who may use none of the tools involved.`,
+    ...(examplesTool ? [examplesRules(examplesTool)] : []),
     kind === "full" ? FULL_RULES : OUTLINE_RULES,
     "Draw on what actually happened in the session, but generalize: never include secrets, credentials, private names, client or employer details, unreleased plans, internal hostnames or private paths.",
-    "Start with a single '# Title' line. Reply with the markdown only: no front matter, no preamble, no closing remarks.",
+    `Start with a single '# Title' line. Reply with the markdown only: no front matter, no preamble, no closing remarks${examplesTool ? ` (apart from the ${EXAMPLES_OPEN} block)` : ""}.`,
     `Exception: if the claim${kind === "full" ? "" : " or the beats"} cannot honestly be written from what happened in the session, do not pad or invent; reply with exactly ${NOT_READY} and nothing else.`,
     ...(style ? [`<share-style>\n${style}\n</share-style>`, "This style guide overrides the defaults above where they differ."] : []),
   ].join(" ");
@@ -45,25 +63,52 @@ export function draftStatus(note: HeadsUpNote): string {
   return [`<sidebar-share-idea topic="${note.topic}">`, note.text, ...(note.detail ? ["", note.detail] : []), "</sidebar-share-idea>"].join("\n");
 }
 
+/** A piece the draft took its form from. */
+export interface DraftExample {
+  title: string;
+  url: string;
+}
+
 export interface Draft {
   title: string;
   slug: string;
   kind: DraftKind;
   body: string;
+  /** Pieces the writer reported using as models of form, when it looked any up. */
+  examples?: DraftExample[];
 }
 
 export function slugify(text: string): string {
   return text.toLowerCase().normalize("NFKD").replace(/\p{M}+/gu, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "draft";
 }
 
+const EXAMPLES_BLOCK = /<draft-examples>([\s\S]*?)<\/draft-examples>/g;
+
+/** `- <title> | <url>` lines of an examples block (the url follows the last separator). */
+function parseExamples(blocks: readonly string[]): DraftExample[] {
+  const examples: DraftExample[] = [];
+  for (const line of blocks.flatMap((block) => block.split("\n"))) {
+    const item = line.trim().replace(/^(?:[-*]|\d+[.)])\s+/, "");
+    const cut = item.lastIndexOf(" | ");
+    if (cut < 0) continue;
+    const title = item.slice(0, cut).trim();
+    const url = item.slice(cut + 3).trim();
+    if (title && url) examples.push({ title, url });
+  }
+  return examples;
+}
+
 /** The reply as a draft: its title from the first heading (else the note), the rest kept. */
 export function parseDraft(text: string, note: HeadsUpNote, kind: DraftKind): Draft | undefined {
   if (notReady(text) !== undefined) return undefined;
-  const body = text.replace(/^```(?:markdown|md)?\n([\s\S]*)\n```\s*$/, "$1").trim();
+  const blocks = [...text.matchAll(EXAMPLES_BLOCK)].map((match) => match[1]!);
+  const bare = text.replace(EXAMPLES_BLOCK, "").trim();
+  const body = bare.replace(/^```(?:markdown|md)?\n([\s\S]*)\n```\s*$/, "$1").trim();
   if (!body) return undefined;
   const heading = /^#\s+(.+)$/m.exec(body)?.[1]?.trim();
   const title = heading || note.text.replace(/[.!?]$/, "");
-  return { title, slug: slugify(title), kind, body };
+  const examples = parseExamples(blocks);
+  return { title, slug: slugify(title), kind, body, ...(examples.length ? { examples } : {}) };
 }
 
 /** The reason the model gave for not writing a draft, or undefined when the reply is a draft. */
@@ -74,14 +119,24 @@ export function notReady(text: string): string | undefined {
 
 export type DraftResult = { ok: true; draft: Draft } | { ok: false; reason: string };
 
+/** A model's reply as a draft, or why there is none (the idea is not ready, or nothing was written). */
+export function draftFromReply(text: string, note: HeadsUpNote, kind: DraftKind): DraftResult {
+  const why = notReady(text);
+  if (why !== undefined) return { ok: false, reason: `the idea is not ready for a draft: ${why}` };
+  const draft = parseDraft(text, note, kind);
+  return draft ? { ok: true, draft } : { ok: false, reason: "the model wrote nothing" };
+}
+
+/** What Sidebar's own agent is asked when a draft runs through it: the writer's instructions and the idea. */
+export function sidebarDraftPrompt(note: HeadsUpNote, kind: DraftKind, style: string | undefined, examplesTool: string): string {
+  return `${draftInstructions(kind, style, examplesTool)}\n\n${draftStatus(note)}`;
+}
+
 export async function writeDraft(note: HeadsUpNote, kind: DraftKind, input: Omit<SideInput, "instructions" | "status"> & { style?: string }): Promise<DraftResult> {
   const { style, ...side } = input;
   const reply = await sideRequest({ ...side, instructions: draftInstructions(kind, style), status: () => draftStatus(note), maxTokens: kind === "full" ? 8000 : 3000 });
   if (reply.outcome !== "reply") return { ok: false, reason: reply.reason };
-  const why = notReady(reply.text);
-  if (why !== undefined) return { ok: false, reason: `the idea is not ready for a draft: ${why}` };
-  const draft = parseDraft(reply.text, note, kind);
-  return draft ? { ok: true, draft } : { ok: false, reason: "the model wrote nothing" };
+  return draftFromReply(reply.text, note, kind);
 }
 
 export interface DraftMeta {
@@ -103,6 +158,7 @@ export function draftMarkdown(draft: Draft, meta: DraftMeta): string {
     `status: ${draft.kind === "full" ? "draft" : "outline"}`,
     ...(meta.repo ? [`source: ${yamlString(meta.repo)}`] : []),
     `topic: ${yamlString(meta.topic)}`,
+    ...(draft.examples?.length ? ["examples:", ...draft.examples.map((example) => `  - ${yamlString(`${example.title} | ${example.url}`)}`)] : []),
     "tags: [blog-draft]",
     "---",
   ];

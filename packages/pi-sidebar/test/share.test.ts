@@ -4,7 +4,7 @@ import path from "node:path";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import { MainState } from "../src/main-state.ts";
-import { HeadsUp } from "../src/headsup/headsup.ts";
+import { HeadsUp, type HeadsUpHost } from "../src/headsup/headsup.ts";
 import { NoteState } from "../src/headsup/note.ts";
 import { HEADSUP_ROLE, headsUpRole } from "../src/headsup/prompt.ts";
 import { fitPost, graphemes, MAX_POST_GRAPHEMES, parseHeadsUp, type HeadsUpNote } from "../src/headsup/protocol.ts";
@@ -80,6 +80,8 @@ describe("share notes in the reply protocol", () => {
   });
 });
 
+const BSKY_ENV = { PI_SIDEBAR_BLUESKY_HANDLE: "me.bsky.social", PI_SIDEBAR_BLUESKY_APP_PASSWORD: "pw" };
+
 describe("share configuration", () => {
   it("is off until a destination is set", () => {
     expect(shareEnabled(shareConfig({}))).toBe(false);
@@ -100,6 +102,18 @@ describe("share configuration", () => {
     expect(shareSummary(config)).not.toContain("app-pass");
     expect(shareConfig({ PI_SIDEBAR_DRAFTS_DIR: "/d", PI_SIDEBAR_DRAFTS_COMMAND: "save" }).drafts).toEqual({ command: "save" });
     expect(shareConfig({ PI_SIDEBAR_SHARE: "0", PI_SIDEBAR_DRAFTS_DIR: "/d" })).toEqual({});
+  });
+
+  it("reads the examples tool, trimmed, and names it in the summary only for drafts", () => {
+    expect(shareConfig({ PI_SIDEBAR_SHARE_EXAMPLES_TOOL: "  mcp__server__similar  " })).toEqual({ examplesTool: "mcp__server__similar" });
+    expect(shareConfig({ PI_SIDEBAR_SHARE_EXAMPLES_TOOL: "  " })).toEqual({});
+    expect(shareConfig({ PI_SIDEBAR_SHARE: "0", PI_SIDEBAR_SHARE_EXAMPLES_TOOL: "t", PI_SIDEBAR_DRAFTS_DIR: "/d" })).toEqual({});
+    const config = shareConfig({ PI_SIDEBAR_DRAFTS_DIR: "/d", PI_SIDEBAR_SHARE_EXAMPLES_TOOL: "mcp__server__similar" });
+    expect(config).toEqual({ drafts: { dir: "/d" }, examplesTool: "mcp__server__similar" });
+    expect(shareSummary(config)).toBe("Share notes are on: blog drafts in /d; drafts look up examples with mcp__server__similar.");
+    expect(shareSummary(shareConfig({ PI_SIDEBAR_DRAFTS_DIR: "/d" }))).not.toContain("examples");
+    expect(shareSummary({ ...shareConfig(BSKY_ENV), examplesTool: "t" })).not.toContain("examples"); // no drafts, no lookups
+    expect(shareEnabled(shareConfig({ PI_SIDEBAR_SHARE_EXAMPLES_TOOL: "t" }))).toBe(false); // not a destination
   });
 
   const reader = (files: Record<string, string>) => (file: string) => {
@@ -258,6 +272,35 @@ describe("blog drafts", () => {
     }
   });
 
+  it("keeps the instructions as they were without an examples tool", () => {
+    for (const kind of ["full", "outline"] as const) {
+      expect(draftInstructions(kind, undefined, undefined)).toBe(draftInstructions(kind));
+      expect(draftInstructions(kind)).toContain("do not continue its work, call tools or answer its open questions. Any tool call you make is discarded.");
+      expect(draftInstructions(kind)).toContain("Reply with the markdown only: no front matter, no preamble, no closing remarks.");
+      expect(draftInstructions(kind)).not.toContain("draft-examples");
+    }
+  });
+
+  it("tells the writer to look up examples with the configured tool, for form only", () => {
+    const tool = "mcp__server__similar";
+    for (const kind of ["full", "outline"] as const) {
+      const text = draftInstructions(kind, "Never use semicolons.", tool);
+      expect(text).toContain(`Before writing, call ${tool} (directly, or from a codemode script if it is only reachable there) with the idea's claim and angle as its text.`);
+      expect(text).toContain("only as models of form: how they open, how the argument moves, how long they are, how they use headings, how they end. Never copy their content or their wording.");
+      expect(text).toContain('reply with exactly <draft-not-ready>already made by "<title>" (<url>)</draft-not-ready> and nothing else');
+      expect(text).toContain("a similarity at or above the threshold it gives");
+      expect(text).toContain('<draft-examples> containing one line per piece you actually used as a model, "- <title> | <url>", then </draft-examples>.');
+      // The lookup comes before the form rules, and the existing rules stay.
+      expect(text.indexOf("Before writing")).toBeLessThan(text.indexOf(kind === "full" ? "Open with the thesis" : "three to five beats"));
+      expect(text).toContain("Start with a single '# Title' line. Reply with the markdown only: no front matter, no preamble, no closing remarks (apart from the <draft-examples> block).");
+      expect(text).toContain("never include secrets");
+      expect(text).toContain(`reply with exactly ${"<draft-not-ready>one sentence why</draft-not-ready>"} and nothing else`);
+      expect(text).toContain("<share-style>\nNever use semicolons.\n</share-style>");
+      expect(text).not.toContain("Any tool call you make is discarded");
+      expect(text).toContain("call no tool except the examples lookup below");
+    }
+  });
+
   it("reads the not-ready reply as a refusal, never a draft", () => {
     const reply = "<draft-not-ready>No evidence in the session.</draft-not-ready>";
     expect(parseDraft(reply, note, "full")).toBeUndefined();
@@ -273,6 +316,51 @@ describe("blog drafts", () => {
     const md = draftMarkdown(draft, meta);
     expect(md).toMatch(/^---\ntitle: "Splice Your Cache"\ndate: 2026-10-22\nstatus: draft\nsource: "pi-plugins"\ntopic: "cache-splice"\ntags: \[blog-draft\]\n---\n\n# Splice/);
     expect(slugify("Ünïcode & Things!")).toBe("unicode-things");
+  });
+
+  it("strips the examples block from the draft and reads the pieces the writer used", () => {
+    const reply = [
+      "# Splice Your Cache",
+      "",
+      "Body | with a pipe.",
+      "",
+      "<draft-examples>",
+      "- How caching bit us | https://example.com/a",
+      "- Costs | and tradeoffs | https://example.com/b?x=1",
+      "* A starred line | https://example.com/c",
+      "not a piece",
+      "- no url |",
+      "</draft-examples>",
+    ].join("\n");
+    const draft = parseDraft(reply, note, "full")!;
+    expect(draft.body).toBe("# Splice Your Cache\n\nBody | with a pipe.");
+    expect(draft.examples).toEqual([
+      { title: "How caching bit us", url: "https://example.com/a" },
+      { title: "Costs | and tradeoffs", url: "https://example.com/b?x=1" },
+      { title: "A starred line", url: "https://example.com/c" },
+    ]);
+    const md = draftMarkdown(draft, meta);
+    expect(md).toContain('topic: "cache-splice"\nexamples:\n  - "How caching bit us | https://example.com/a"\n  - "Costs | and tradeoffs | https://example.com/b?x=1"\n  - "A starred line | https://example.com/c"\ntags: [blog-draft]\n---\n\n# Splice Your Cache');
+    expect(md).not.toContain("draft-examples");
+    // A fenced draft followed by the block, and the block inside the fence, both parse.
+    for (const fenced of ["```markdown\n# T\n\nBody\n```\n\n<draft-examples>\n- A | https://a.example\n</draft-examples>", "```markdown\n# T\n\nBody\n\n<draft-examples>\n- A | https://a.example\n</draft-examples>\n```"]) {
+      expect(parseDraft(fenced, note, "outline")).toMatchObject({ title: "T", body: "# T\n\nBody", examples: [{ title: "A", url: "https://a.example" }] });
+    }
+  });
+
+  it("leaves the examples out when there are none", () => {
+    expect("examples" in parseDraft("# T\n\nBody", note, "full")!).toBe(false);
+    const empty = parseDraft("# T\n\nBody\n\n<draft-examples>\n</draft-examples>", note, "full")!;
+    expect(empty.body).toBe("# T\n\nBody");
+    expect("examples" in empty).toBe(false);
+    expect(draftMarkdown(empty, meta)).not.toContain("examples:");
+    expect(parseDraft("<draft-examples>\n- A | https://a.example\n</draft-examples>", note, "full")).toBeUndefined();
+  });
+
+  it("reads the already-made reply as not ready", () => {
+    const reply = '<draft-not-ready>already made by "Old Post" (https://example.com/old)</draft-not-ready>';
+    expect(notReady(reply)).toBe('already made by "Old Post" (https://example.com/old)');
+    expect(parseDraft(reply, note, "full")).toBeUndefined();
   });
 
   it("saves to a directory without overwriting", async () => {
@@ -377,7 +465,7 @@ function stubStream(replies: string[]) {
 }
 
 describe("HeadsUp with sharing", () => {
-  async function setup(replies: string[], env: NodeJS.ProcessEnv, share?: ShareConfig) {
+  async function setup(replies: string[], env: NodeJS.ProcessEnv, share?: ShareConfig, host: Partial<HeadsUpHost> = {}) {
     const now = 1000;
     const pi = new FakePi();
     const main = new MainState(pi as never, () => now);
@@ -397,7 +485,7 @@ describe("HeadsUp with sharing", () => {
       return { ok: true, status: 200, json: async () => body, text: async () => "" };
     };
     const written: unknown[] = [];
-    const headsUp = new HeadsUp(pi as never, main, { deliver: () => false, askSidebar: () => true, draftWritten: (...args) => written.push(args) }, {
+    const headsUp = new HeadsUp(pi as never, main, { deliver: () => false, askSidebar: () => true, draftWritten: (...args) => written.push(args), ...host }, {
       knowledgeDir: path.join(dir, "k"), logFile: path.join(dir, "log"), run: async () => undefined, stream, now: () => now, env: { ...env, PI_SIDEBAR_DRAFTS_DIR: env.PI_SIDEBAR_DRAFTS_DIR ? path.join(dir, "drafts") : "" }, fetch,
       ...(share ? { share } : {}),
     });
@@ -492,6 +580,119 @@ describe("HeadsUp with sharing", () => {
     expect(written).toHaveLength(0);
     expect(existsSync(path.join(dir, "drafts"))).toBe(false);
     expect(known()).not.toContain("cache-splice");
+  });
+
+  describe("with an examples tool", () => {
+    const TOOL = "mcp__server__similar";
+    const REPLY = "# Splice Your Cache\n\nBody.\n\n<draft-examples>\n- How caching bit us | https://example.com/a\n</draft-examples>";
+    const examplesShare = () => ({ drafts: { dir: path.join(mkdtempSync(path.join(tmpdir(), "share-examples-")), "drafts") }, examplesTool: TOOL });
+    const draftsOf = (share: { drafts: { dir: string } }) => readdirSync(share.drafts.dir);
+
+    it("writes the draft through Sidebar's agent and files it with its examples", async () => {
+      const share = examplesShare();
+      const asked: Array<{ prompt: string; label: string }> = [];
+      const saved: unknown[] = [];
+      const host = { writeWithSidebar: async (prompt: string, label: string) => { asked.push({ prompt, label }); return REPLY; }, draftSaved: (outcome: unknown) => saved.push(outcome) };
+      const { headsUp, sent, notes, written, known, settle } = await setup([SHARE], {}, share, host);
+      await headsUp.check("turn");
+      expect(headsUp.summary()).toContain(`drafts look up examples with ${TOOL}`);
+      expect(headsUp.handleKey("2", true)).toBe(true);
+      await settle();
+      expect(sent).toHaveLength(1); // the check only: no side request for the draft
+      expect(asked).toHaveLength(1);
+      expect(asked[0]!.label).toBe("Writing a blog draft: Splicing a side request onto the main prompt cache.");
+      expect(asked[0]!.prompt).toContain(`Before writing, call ${TOOL}`);
+      expect(asked[0]!.prompt).toContain('<sidebar-share-idea topic="cache-splice">\nSplicing a side request onto the main prompt cache.\n\nA neat trick: reuse the cached prefix.\n</sidebar-share-idea>');
+      expect(asked[0]!.prompt.startsWith(draftInstructions("full", undefined, TOOL))).toBe(true);
+      const [file] = draftsOf(share);
+      expect(file).toBe("1970-01-01-splice-your-cache.md");
+      const markdown = readFileSync(path.join(share.drafts.dir, file!), "utf8");
+      expect(markdown).toContain('examples:\n  - "How caching bit us | https://example.com/a"\n');
+      expect(markdown).not.toContain("draft-examples");
+      expect(notes.at(-1)?.message).toMatch(/^Blog draft saved: .*splice-your-cache\.md$/);
+      expect(saved).toEqual([{ location: path.join(share.drafts.dir, file!) }]);
+      expect(written).toHaveLength(0); // the exchange is already in Sidebar's thread
+      expect(known()).toContain("cache-splice");
+      expect(headsUp.note.showing).toBe(false);
+    });
+
+    it("puts the style guide and the outline's shape into the Sidebar prompt", async () => {
+      const share = { ...examplesShare(), style: "Never use semicolons." };
+      const asked: string[] = [];
+      const { headsUp } = await setup([], {}, share, { writeWithSidebar: async (prompt) => { asked.push(prompt); return "# Outline\n\n- beat"; } });
+      await headsUp.draft(parseHeadsUp({ text: SHARE })!, "outline");
+      expect(asked[0]).toContain("three to five beats");
+      expect(asked[0]).toContain("<share-style>\nNever use semicolons.\n</share-style>");
+      expect(draftsOf(share)).toEqual(["1970-01-01-outline-outline.md"]);
+    });
+
+    it("falls back to the side request when the host cannot write with Sidebar", async () => {
+      const share = examplesShare();
+      const { headsUp, sent, written } = await setup(["# Title\n\nBody"], {}, share);
+      await headsUp.draft(parseHeadsUp({ text: SHARE })!, "full");
+      expect(sent).toHaveLength(1);
+      expect(JSON.stringify(sent[0].payload)).toContain("Any tool call you make is discarded");
+      expect(JSON.stringify(sent[0].payload)).not.toContain(TOOL);
+      expect(written).toHaveLength(1);
+      expect(draftsOf(share)).toHaveLength(1);
+    });
+
+    it("uses the side request when no examples tool is set, even when the host could write with Sidebar", async () => {
+      const share = { drafts: examplesShare().drafts };
+      let asked = 0;
+      const { headsUp, sent, written } = await setup(["# Title\n\nBody"], {}, share, { writeWithSidebar: async () => { asked++; return REPLY; }, draftSaved: () => { asked++; } });
+      await headsUp.draft(parseHeadsUp({ text: SHARE })!, "full");
+      expect(asked).toBe(0);
+      expect(sent).toHaveLength(1);
+      expect(written).toHaveLength(1);
+    });
+
+    it("saves nothing when Sidebar finds the idea already made", async () => {
+      const share = examplesShare();
+      const saved: unknown[] = [];
+      const reply = '<draft-not-ready>already made by "Old Post" (https://example.com/old)</draft-not-ready>';
+      const { headsUp, notes, written, known, settle } = await setup([SHARE], {}, share, { writeWithSidebar: async () => reply, draftSaved: (outcome) => saved.push(outcome) });
+      await headsUp.check("turn");
+      headsUp.handleKey("2", true);
+      await settle();
+      const message = 'the draft was not written: the idea is not ready for a draft: already made by "Old Post" (https://example.com/old)';
+      expect(notes.at(-1)).toEqual({ message, level: "error" });
+      expect(saved).toEqual([{ error: message }]);
+      expect(written).toHaveLength(0);
+      expect(existsSync(share.drafts.dir)).toBe(false);
+      expect(known()).not.toContain("cache-splice");
+      expect(headsUp.note.phase).toBe("note"); // back to where it was, to retry or discard
+    });
+
+    it("saves nothing when Sidebar writes nothing", async () => {
+      const share = examplesShare();
+      const { headsUp } = await setup([], {}, share, { writeWithSidebar: async () => "  " });
+      await expect(headsUp.draft(parseHeadsUp({ text: SHARE })!, "full")).rejects.toThrow("the draft was not written: the model wrote nothing");
+      expect(existsSync(share.drafts.dir)).toBe(false);
+    });
+
+    it("reports Sidebar's refusal as it is, without a line in its thread", async () => {
+      const share = examplesShare();
+      const saved: unknown[] = [];
+      const { headsUp, written } = await setup([], {}, share, {
+        writeWithSidebar: async () => { throw new Error("Sidebar is answering; try the draft again when it is done"); },
+        draftSaved: (outcome) => saved.push(outcome),
+      });
+      await expect(headsUp.draft(parseHeadsUp({ text: SHARE })!, "full")).rejects.toThrow("Sidebar is answering; try the draft again when it is done");
+      expect(saved).toEqual([]);
+      expect(written).toHaveLength(0);
+      expect(existsSync(share.drafts.dir)).toBe(false);
+    });
+
+    it("tells Sidebar's thread when saving fails", async () => {
+      const share = { ...examplesShare(), drafts: { command: "save-it" } };
+      const saved: Array<{ error?: string; location?: string }> = [];
+      const { headsUp } = await setup([], {}, share, { writeWithSidebar: async () => REPLY, draftSaved: (outcome) => saved.push(outcome) });
+      (headsUp as any).options.save = { runCommand: async () => ({ code: 2, stdout: "", stderr: "no vault\n" }), env: {} };
+      await expect(headsUp.draft(parseHeadsUp({ text: SHARE })!, "full")).rejects.toThrow(/exit 2\): no vault/);
+      expect(saved).toHaveLength(1);
+      expect(saved[0]!.error).toMatch(/exit 2\): no vault/);
+    });
   });
 
   it("marks a share idea the user is not interested in as known", async () => {

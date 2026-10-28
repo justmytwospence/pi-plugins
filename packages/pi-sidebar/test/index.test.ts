@@ -1,7 +1,11 @@
+import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Component } from "@earendil-works/pi-tui";
 import piSidebar from "../src/index.ts";
-import { SidebarController } from "../src/controller.ts";
+import { DRAFT_TIMEOUT_MS, SidebarController } from "../src/controller.ts";
+import { NOTE_MARKER } from "../src/headsup/thread.ts";
 import { SplitRoot } from "../src/layout.ts";
 import { fitStatus } from "../src/panel.ts";
 import { EXCHANGE_ENTRY, RESET_ENTRY } from "../src/thread.ts";
@@ -744,5 +748,179 @@ describe("share commands in Sidebar", () => {
     const { panel, submit } = await shareSetup(true);
     await submit("/draft");
     expect(panel.hasNotice()).toBe(true);
+  });
+});
+
+describe("blog drafts through Sidebar's agent", () => {
+  const NOTE = { topic: "cache-splice", kind: "share" as const, format: "both" as const, text: "Splice the cache.", detail: "Why." };
+  const text = (value: string) => [{ type: "text", text: value }];
+  const assistant = (value: string, stopReason = "stop", extra: object = {}) => ({ role: "assistant", content: text(value), stopReason, ...extra });
+
+  /** A controller whose Sidebar agent is stubbed: `ask` plays the turn `play` describes. */
+  async function draftSetup(options: { open?: boolean; play?: (prompt: string, agent: any) => Promise<void> | void } = {}) {
+    const { pi, controller, ctx } = setup();
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    if (options.open !== false) controller.toggle(ctx as never);
+    const agent = controller.agent as any;
+    const asked: Array<{ text: string; confirmed: boolean }> = [];
+    agent.ask = async (value: string, confirmed = false) => {
+      asked.push({ text: value, confirmed });
+      await options.play?.(value, agent);
+    };
+    /** The events and turn listeners of an answer, as the agent sends them. */
+    const answer = (prompt: string, added: unknown[]) => {
+      agent.emit({ type: "agent_start" });
+      agent.emit({ type: "message_start", message: { role: "user", content: text(prompt) } });
+      for (const listener of [...agent.turnListeners]) listener(added);
+      agent.emit({ type: "agent_end" });
+    };
+    const shown = () => (panelOf(controller)?.chat.render(400) as string[]).join("\n");
+    return { pi, controller, ctx, agent, asked, answer, shown };
+  }
+
+  it("resolves with the turn's final assistant text, hiding the instructions in the thread", async () => {
+    const { controller, agent, asked, shown } = await draftSetup();
+    const listeners = { turn: agent.turnListeners.size, event: agent.listeners.size };
+    const result = controller.writeWithSidebar("LONG WRITER INSTRUCTIONS", "Writing a blog draft: Splice the cache.");
+    // The turn: the prompt as an event, a lookup, then the draft.
+    agent.emit({ type: "message_start", message: { role: "user", content: text(asked[0]!.text) } });
+    for (const listener of [...agent.turnListeners]) {
+      listener([
+        { role: "user", content: text(asked[0]!.text) },
+        { ...assistant("Let me look for examples.", "toolUse"), content: [...text("Let me look for examples."), { type: "toolCall", id: "t1", name: "codemode", arguments: {} }] },
+        { role: "toolResult", toolCallId: "t1", content: text("[]") },
+        assistant("# Splice Your Cache\n\nBody."),
+      ]);
+    }
+    expect(await result).toBe("# Splice Your Cache\n\nBody.");
+    expect(asked).toHaveLength(1);
+    expect(asked[0]!.confirmed).toBe(true); // asked for explicitly: no cost confirm
+    expect(asked[0]!.text.startsWith(NOTE_MARKER)).toBe(true);
+    expect(asked[0]!.text).toContain("LONG WRITER INSTRUCTIONS");
+    const chat = shown();
+    expect(chat).toContain("Writing a blog draft: Splice the cache.");
+    expect(chat).not.toContain("LONG WRITER INSTRUCTIONS");
+    expect(agent.turnListeners.size).toBe(listeners.turn); // unsubscribed
+    expect(agent.listeners.size).toBe(listeners.event);
+  });
+
+  it("works while Sidebar is closed", async () => {
+    const { controller, agent, answer, asked } = await draftSetup({ open: false });
+    agent.ask = async (value: string) => { asked.push({ text: value, confirmed: true }); answer(value, [{ role: "user", content: text(value) }, assistant("# Done")]); };
+    expect(panelOf(controller)).toBeUndefined();
+    expect(await controller.writeWithSidebar("p", "label")).toBe("# Done");
+    expect(asked[0]!.text.startsWith(NOTE_MARKER)).toBe(true);
+  });
+
+  it("refuses while Sidebar is answering", async () => {
+    const { controller, agent, asked } = await draftSetup();
+    Object.defineProperty(agent, "idle", { get: () => false });
+    await expect(controller.writeWithSidebar("p", "label")).rejects.toThrow("Sidebar is answering; try the draft again when it is done");
+    expect(asked).toEqual([]);
+  });
+
+  it("rejects when the turn errors, is aborted, or never answers", async () => {
+    const { controller, agent, answer, asked } = await draftSetup();
+    const outcome = async (added: (prompt: string) => unknown[]) => {
+      agent.ask = async (value: string) => { asked.push({ text: value, confirmed: true }); answer(value, added(value)); };
+      return controller.writeWithSidebar("p", "label");
+    };
+    await expect(outcome(() => [assistant("", "error", { errorMessage: "overloaded" })])).rejects.toThrow("overloaded");
+    await expect(outcome(() => [assistant("half", "aborted")])).rejects.toThrow("Sidebar's answer was stopped");
+    await expect(outcome((prompt) => [{ role: "user", content: text(prompt) }])).rejects.toThrow("Sidebar did not answer");
+    // A question that ended without any turn.
+    agent.ask = async () => {};
+    await expect(controller.writeWithSidebar("p", "label")).rejects.toThrow("Sidebar did not answer");
+    // Sidebar's own refusal to send, then a failure to ask at all.
+    agent.ask = async () => agent.emit({ type: "sidebar_error", message: "Sidebar did not send: there is no copy of main's last request. Nothing was spent." });
+    await expect(controller.writeWithSidebar("p", "label")).rejects.toThrow(/there is no copy of main's last request/);
+    agent.ask = async () => { throw new Error("main's session is not ready yet"); };
+    await expect(controller.writeWithSidebar("p", "label")).rejects.toThrow("main's session is not ready yet");
+    expect(agent.turnListeners.size).toBe(1); // the quiz recorder's alone
+  });
+
+  it("gives up after ten minutes and stops the answer", async () => {
+    const { controller, agent } = await draftSetup({ play: () => new Promise(() => {}) });
+    agent.abort = vi.fn(async () => {});
+    vi.useFakeTimers();
+    try {
+      const result = controller.writeWithSidebar("p", "label");
+      const rejected = expect(result).rejects.toThrow("Sidebar did not finish the draft within 10 minutes");
+      await vi.advanceTimersByTimeAsync(DRAFT_TIMEOUT_MS - 1);
+      expect(agent.abort).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await rejected;
+      expect(agent.abort).toHaveBeenCalledTimes(1);
+      expect(agent.turnListeners.size).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("files a draft written through Sidebar and notes where it went, leaving the thread as it is", async () => {
+    const dir = path.join(mkdtempSync(path.join(tmpdir(), "sidebar-draft-")), "drafts");
+    const { pi, controller, agent, answer, shown } = await draftSetup({});
+    const headsUp = controller.headsUp as any;
+    headsUp.share = { drafts: { dir }, examplesTool: "mcp__server__similar" };
+    headsUp.lastNote = NOTE;
+    agent.ask = async (value: string) => {
+      answer(value, [
+        { role: "user", content: text(value) },
+        assistant("# Splice Your Cache\n\nBody.\n\n<draft-examples>\n- How caching bit us | https://example.com/a\n</draft-examples>"),
+      ]);
+    };
+    const { location } = await controller.headsUp.draft(NOTE, "full");
+    expect(readdirSync(dir)).toEqual([expect.stringMatching(/^\d{4}-\d\d-\d\d-splice-your-cache\.md$/)]);
+    expect(readFileSync(location, "utf8")).toContain('examples:\n  - "How caching bit us | https://example.com/a"');
+    const chat = shown();
+    expect(chat).toContain("Writing a blog draft: Splice the cache.");
+    expect(chat).toContain(`Saved to ${location}`);
+    expect(pi.entries.filter((entry) => entry.customType === EXCHANGE_ENTRY)).toEqual([]); // no second copy of the exchange
+  });
+
+  it("/draft through Sidebar says how it ended in the chat when the idea was already made", async () => {
+    const dir = path.join(mkdtempSync(path.join(tmpdir(), "sidebar-draft-")), "drafts");
+    const { controller, agent, answer, shown } = await draftSetup({});
+    const headsUp = controller.headsUp as any;
+    headsUp.share = { drafts: { dir }, examplesTool: "mcp__server__similar" };
+    headsUp.lastNote = NOTE;
+    agent.ask = async (value: string) => answer(value, [{ role: "user", content: text(value) }, assistant('<draft-not-ready>already made by "Old Post" (https://example.com/old)</draft-not-ready>')]);
+    const panel = panelOf(controller);
+    panel.input.setText("/draft");
+    panel.input.handleInput("\r");
+    await new Promise((r) => setTimeout(r, 10));
+    expect(shown()).toContain('already made by "Old Post" (https://example.com/old)');
+    expect(panel.hasNotice()).toBe(true); // the failure also shows as a notice
+    expect(readdirSync(path.dirname(dir))).toEqual([]); // nothing saved
+  });
+});
+
+describe("hidden prompts in Sidebar's thread", () => {
+  const user = (value: string) => ({ role: "user", content: [{ type: "text", text: value }] });
+
+  it("does not show a marked user message as the turn begins, only an ordinary one", async () => {
+    const { pi, controller, ctx } = setup();
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    controller.toggle(ctx as never);
+    const panel = panelOf(controller);
+    const shown = () => (panel.chat.render(200) as string[]).join("\n");
+    panel.apply({ type: "message_start", message: user(`${NOTE_MARKER}\nSECRET WRITER INSTRUCTIONS\n</sidebar-headsup-note>`) });
+    panel.apply({ type: "message_end", message: user(`${NOTE_MARKER}\nSECRET WRITER INSTRUCTIONS`) });
+    expect(panel.chat.empty).toBe(true);
+    expect(shown()).not.toContain("SECRET WRITER INSTRUCTIONS");
+    panel.apply({ type: "message_start", message: user("what is it doing") });
+    expect(shown()).toContain("what is it doing");
+  });
+
+  it("still starts the working row for a hidden prompt", async () => {
+    const { pi, controller, ctx } = setup();
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    controller.toggle(ctx as never);
+    const panel = panelOf(controller);
+    panel.apply({ type: "agent_start" });
+    panel.apply({ type: "message_start", message: user(`${NOTE_MARKER}\nx`) });
+    expect(panel.working.active).toBe(true);
+    panel.apply({ type: "agent_end" });
+    expect(panel.working.active).toBe(false);
   });
 });

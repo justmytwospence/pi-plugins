@@ -23,7 +23,8 @@ import {
   type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
 import { EDITOR_MODE, EDITOR_SURFACE, INPUT_CONTEXT, requestEditorFactory, requestWorkingStats, type EditorModeContext, type PinnedPrompt, type PromptPinService, type StashController, type SuiteEditor, type WorkingCounter } from "./contract.ts";
-import { PiChat } from "./pi-chat.ts";
+import { contentText, PiChat } from "./pi-chat.ts";
+import { isNoteMarker } from "./headsup/thread.ts";
 import { displayMessage } from "./quiz/protocol.ts";
 
 export interface StatusPart {
@@ -473,7 +474,10 @@ export class SidebarPanel {
 
   /** A Sidebar session event: the chat and the working row follow it. */
   apply(event: Record<string, unknown>): void {
-    this.chat.apply(event);
+    // A hidden-marker user message (a blog draft's long instructions) is never shown, as when seeded.
+    const message = event.message as { role?: string; content?: unknown } | undefined;
+    const hidden = event.type === "message_start" && message?.role === "user" && isNoteMarker(contentText(message.content));
+    if (!hidden) this.chat.apply(event);
     this.working.apply(event);
   }
 

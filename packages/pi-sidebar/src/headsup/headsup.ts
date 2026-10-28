@@ -17,7 +17,7 @@ import type { HeadsUpNote } from "./protocol.ts";
 import { HeadsUpScheduler, type Trigger } from "./scheduler.ts";
 import { postToBluesky, type FetchFn, type Posted } from "../share/bluesky.ts";
 import { shareConfig, shareEnabled, shareSummary, type ShareConfig } from "../share/config.ts";
-import { saveDraft, writeDraft, type Draft, type DraftKind, type SaveOptions } from "../share/draft.ts";
+import { draftFromReply, saveDraft, sidebarDraftPrompt, writeDraft, type Draft, type DraftKind, type DraftResult, type SaveOptions } from "../share/draft.ts";
 
 export const HEADSUP_WIDGET = "pi-sidebar-headsup";
 /** After this many checks in a row that missed main's cache, checks pause for the session. */
@@ -56,6 +56,17 @@ export interface HeadsUpHost {
   model?(): ModelChoice;
   /** A blog draft was written and saved: Sidebar's thread can carry it for follow-up edits. */
   draftWritten?(note: HeadsUpNote, draft: Draft, location: string): void;
+  /**
+   * Ask Sidebar's agent (which can call tools, unlike a side request) and resolve with the final
+   * assistant text of that turn. `label` says what is being written, for Sidebar's thread. Rejects
+   * when Sidebar cannot take the request now.
+   */
+  writeWithSidebar?(prompt: string, label: string): Promise<string>;
+  /**
+   * A draft written through `writeWithSidebar` was saved (`location`) or came to nothing (`error`):
+   * the exchange is already in Sidebar's thread, so this is only a line saying how it ended.
+   */
+  draftSaved?(outcome: { location: string } | { error: string }): void;
 }
 
 /** A check's cache lifetime when the request did not say (Anthropic's and OpenAI's default). */
@@ -313,22 +324,44 @@ export class HeadsUp {
     const now = this.now();
     const choice = this.host.model?.() ?? { kind: "same" as const };
     if (choice.kind === "unavailable") throw new Error(`Sidebar's model ${choice.pattern} matches no model you are logged in to`);
-    const foreign = choice.kind === "other" ? this.foreign(choice.model, choice.label, choice.thinking, now) : undefined;
-    const result = await writeDraft(note, kind, {
-      main: this.main,
-      thinking: this.pi.getThinkingLevel(),
-      now,
-      ...(this.options.stream ? { stream: this.options.stream } : {}),
-      ...(foreign ? { foreign } : {}),
-      ...(this.share.style ? { style: this.share.style } : {}),
-    });
-    if (!result.ok) throw new Error(`the draft was not written: ${result.reason}`);
+    // With an examples tool, the draft runs through Sidebar's agent (a side request cannot call it).
+    const examplesTool = this.share.examplesTool;
+    const writeWithSidebar = examplesTool ? this.host.writeWithSidebar?.bind(this.host) : undefined;
+    // Sidebar's thread already holds that exchange, so only how it ended is told there.
+    const ended = (outcome: { location: string } | { error: string }) => { if (writeWithSidebar) this.host.draftSaved?.(outcome); };
+    let result: DraftResult;
+    if (examplesTool && writeWithSidebar) {
+      const prompt = sidebarDraftPrompt(note, kind, this.share.style, examplesTool);
+      result = draftFromReply(await writeWithSidebar(prompt, `Writing a blog ${kind === "full" ? "draft" : "outline"}: ${note.text}`), note, kind);
+    } else {
+      const foreign = choice.kind === "other" ? this.foreign(choice.model, choice.label, choice.thinking, now) : undefined;
+      result = await writeDraft(note, kind, {
+        main: this.main,
+        thinking: this.pi.getThinkingLevel(),
+        now,
+        ...(this.options.stream ? { stream: this.options.stream } : {}),
+        ...(foreign ? { foreign } : {}),
+        ...(this.share.style ? { style: this.share.style } : {}),
+      });
+    }
+    if (!result.ok) {
+      const error = `the draft was not written: ${result.reason}`;
+      ended({ error });
+      throw new Error(error);
+    }
     let repo: string | undefined;
     try { repo = path.basename((await this.profile(ctx.cwd)).root); } catch { /* no repository */ }
     const date = new Date(now).toISOString().slice(0, 10);
-    const location = await saveDraft(result.draft, { date, topic: note.topic, ...(repo ? { repo } : {}) }, drafts, { ...this.options.save, env: this.options.save?.env ?? this.env });
+    let location: string;
+    try {
+      location = await saveDraft(result.draft, { date, topic: note.topic, ...(repo ? { repo } : {}) }, drafts, { ...this.options.save, env: this.options.save?.env ?? this.env });
+    } catch (error) {
+      ended({ error: error instanceof Error ? error.message : String(error) });
+      throw error;
+    }
     await this.remember(note);
-    this.host.draftWritten?.(note, result.draft, location);
+    if (writeWithSidebar) ended({ location });
+    else this.host.draftWritten?.(note, result.draft, location);
     return { draft: result.draft, location };
   }
 

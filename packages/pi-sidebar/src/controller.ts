@@ -14,7 +14,7 @@ import { SidebarPanel, type StatusPart } from "./panel.ts";
 import { requestPinService, requestStash, type PromptPinService, type StashController } from "./contract.ts";
 import { HeadsUp, headsUpChange, headsUpChanged } from "./headsup/headsup.ts";
 import type { HeadsUpNote } from "./headsup/protocol.ts";
-import { draftMessages, isNoteMarker, noteMessages, type NoteModel } from "./headsup/thread.ts";
+import { draftMessages, hiddenPrompt, isNoteMarker, noteMessages, turnReply, type NoteModel } from "./headsup/thread.ts";
 import { QUIZ_ENTRY, QuizMode, quizFromBranch } from "./quiz/mode.ts";
 import { QUIZ_NEXT, QUIZ_ROLE, QUIZ_START } from "./quiz/prompt.ts";
 import { RESET_ENTRY, threadFromBranch } from "./thread.ts";
@@ -54,6 +54,9 @@ export const MODEL_HELP = [
 
 /** How long a resolved model choice is reused (the header asks every second). */
 const CHOICE_MS = 2_000;
+
+/** How long a blog draft written through Sidebar's agent may take (it looks things up first). */
+export const DRAFT_TIMEOUT_MS = 10 * 60_000;
 
 export const SIDEBAR_HEADSUP_HELP = [
   "/known          the last heads-up note was something you knew: it is not raised again",
@@ -128,6 +131,8 @@ export class SidebarController {
       },
       model: () => this.sidebarModel(),
       draftWritten: (note, draft, location) => this.appendThread(draftMessages(note, draft, location, this.noteModel(), Date.now())),
+      writeWithSidebar: (prompt, label) => this.writeWithSidebar(prompt, label),
+      draftSaved: (outcome) => this.draftSaved(outcome),
     }, {
       knowledgeDir: process.env[KNOWLEDGE_ENV] ?? path.join(getAgentDir(), "pi-sidebar", "knowledge"),
       logFile: path.join(getAgentDir(), "pi-sidebar", "headsup.log"),
@@ -661,6 +666,60 @@ export class SidebarController {
     const panel = this.panel;
     if (!panel) return;
     panel.chat.seed(messages, (text) => (isNoteMarker(text) ? undefined : { text }));
+    panel.scrollToEnd();
+    if (!panel.focused) panel.unread = true;
+    this.render();
+  }
+
+  /**
+   * Ask Sidebar's agent for a blog draft and resolve with its final assistant text: a normal Sidebar
+   * request (the user asked for the draft, so there is no cost confirm), in the thread whether or not
+   * Sidebar is open. The long instructions are hidden behind the note marker; a chat note says what
+   * is being written.
+   */
+  writeWithSidebar(prompt: string, label: string): Promise<string> {
+    if (!this.agent.idle) return Promise.reject(new Error("Sidebar is answering; try the draft again when it is done"));
+    const panel = this.panel;
+    panel?.clearNotice();
+    panel?.chat.note(label);
+    panel?.scrollToEnd();
+    this.render();
+    return new Promise<string>((resolve, reject) => {
+      let settled = false;
+      const settle = (finish: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        offTurn();
+        offEvent();
+        finish();
+      };
+      // Subscribed before asking, so the turn's end cannot be missed.
+      const offTurn = this.agent.onTurn((added) => {
+        const reply = turnReply(added);
+        settle(() => (reply.ok ? resolve(reply.text) : reject(new Error(reply.reason))));
+      });
+      const offEvent = this.agent.onEvent((event) => {
+        if (event.type === "sidebar_error") settle(() => reject(new Error(String(event.message))));
+      });
+      const timer = setTimeout(() => {
+        void this.agent.abort();
+        settle(() => reject(new Error(`Sidebar did not finish the draft within ${Math.round(DRAFT_TIMEOUT_MS / 60_000)} minutes`)));
+      }, DRAFT_TIMEOUT_MS);
+      timer.unref?.();
+      this.agent.ask(hiddenPrompt(prompt), true).then(
+        // The turn's end has already settled this; a question that ended without one has no answer.
+        () => setTimeout(() => settle(() => reject(new Error("Sidebar did not answer"))), 0),
+        (error: unknown) => settle(() => reject(error instanceof Error ? error : new Error(String(error)))),
+      );
+    });
+  }
+
+  /** How a draft written through Sidebar ended, as a line in its thread view. */
+  private draftSaved(outcome: { location: string } | { error: string }): void {
+    const panel = this.panel;
+    if (!panel) return;
+    panel.chat.note("error" in outcome ? outcome.error : `Saved to ${outcome.location}`, "error" in outcome ? "error" : "info");
     panel.scrollToEnd();
     if (!panel.focused) panel.unread = true;
     this.render();

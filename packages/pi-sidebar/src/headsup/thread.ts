@@ -19,6 +19,24 @@ export function isNoteMarker(text: string): boolean {
   return text.trimStart().startsWith(NOTE_MARKER);
 }
 
+/**
+ * A request for Sidebar's agent that the thread never shows (a blog draft's long instructions):
+ * behind the same marker a note's hidden message carries, so seeding and live events both skip it.
+ */
+export function hiddenPrompt(text: string): string {
+  return `${NOTE_MARKER}\n${text}\n</sidebar-headsup-note>`;
+}
+
+/** What a turn ended with: the text of its last assistant message, or why there is none. */
+export function turnReply(added: readonly AgentMessage[]): { ok: true; text: string } | { ok: false; reason: string } {
+  const last = [...added].reverse().find((message) => message.role === "assistant") as { content?: unknown; stopReason?: string; errorMessage?: string } | undefined;
+  if (!last) return { ok: false, reason: "Sidebar did not answer" };
+  if (last.stopReason === "aborted") return { ok: false, reason: "Sidebar's answer was stopped" };
+  if (last.stopReason === "error") return { ok: false, reason: last.errorMessage || "Sidebar's answer failed" };
+  const blocks = Array.isArray(last.content) ? (last.content as Array<{ type?: string; text?: unknown }>) : [];
+  return { ok: true, text: blocks.filter((block) => block?.type === "text" && typeof block.text === "string").map((block) => block.text as string).join("\n") };
+}
+
 export interface NoteModel {
   api: string;
   provider: string;
