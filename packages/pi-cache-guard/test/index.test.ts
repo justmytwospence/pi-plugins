@@ -75,8 +75,9 @@ function harnessWith(entries: unknown[], herdr: HerdrReporter, model: any = opus
   const appended: Array<{ customType: string; data: any }> = [];
   const blocked: unknown[] = [];
   const alerts: string[] = [];
+  const states: unknown[] = [];
   const pi = {
-    events: { emit: (channel: string, data: unknown) => { if (channel === "herdr:blocked") blocked.push(data); }, on: () => () => undefined },
+    events: { emit: (channel: string, data: unknown) => { if (channel === "herdr:blocked") blocked.push(data); if (channel === "cache:state") states.push(data); }, on: () => () => undefined },
     on: (name: string, handler: any) => { handlers.set(name, [...(handlers.get(name) ?? []), handler]); return () => undefined; },
     registerCommand: (name: string, options: any) => commands.set(name, options),
     registerEntryRenderer: (type: string, renderer: any) => renderers.set(type, renderer),
@@ -139,7 +140,7 @@ function harnessWith(entries: unknown[], herdr: HerdrReporter, model: any = opus
     for (const handler of handlers.get(name) ?? []) result = (await handler(event, ctx)) ?? result;
     return result;
   };
-  return { emit, ui, ctx, commands, sent, sessions, appended, renderers, blocked, alerts };
+  return { emit, ui, ctx, commands, sent, sessions, appended, renderers, blocked, alerts, states };
 }
 
 const input = (text: string, extra: Record<string, unknown> = {}) => ({ type: "input", text, source: "interactive", ...extra });
@@ -180,6 +181,33 @@ describe("extension", () => {
     await c.emit("provider_stream_event", { provider: "openai-codex", model: "gpt-6-astra", data: { type: "response.completed", response: { prompt_cache_retention: "in_memory" } } });
     vi.advanceTimersByTime(1_000);
     expect(c.ui.status.get("cache-guard")).toBe("cache cold?");
+  });
+
+  test("emits cache:state on cold/warm changes, before each prompt and at agent start", async () => {
+    const h = harness([assistant(NOW - 60_000, 600_000)]);
+    await h.emit("session_start", {});
+    expect(h.states).toEqual([{ cold: false, tokens: 601_000, model: "anthropic/claude-opus-5-5" }]);
+    // Ticks while nothing changes send nothing.
+    vi.advanceTimersByTime(5_000);
+    expect(h.states).toHaveLength(1);
+    // The TTL runs out: one cold state.
+    vi.advanceTimersByTime(300_000);
+    expect(h.states.slice(1)).toEqual([{ cold: true, tokens: 601_000, model: "anthropic/claude-opus-5-5" }]);
+    vi.advanceTimersByTime(5_000);
+    expect(h.states).toHaveLength(2);
+    // A prompt and the run it starts each get a fresh value, changed or not.
+    await h.emit("input", input("/cache-guard status"));
+    await h.emit("agent_start", {});
+    expect(h.states).toHaveLength(4);
+    expect(h.states[3]).toEqual({ cold: true, tokens: 601_000, model: "anthropic/claude-opus-5-5" });
+    // A model switch is cold for the old model's cache.
+    const s = harness([assistant(NOW - 60_000, 600_000)], sonnet);
+    await s.emit("session_start", {});
+    expect(s.states).toEqual([{ cold: true, tokens: 601_000, model: "anthropic/claude-opus-5-5" }]);
+    // Nothing cached yet (or just compacted): cold, no tokens, the session's model.
+    const e = harness([]);
+    await e.emit("session_start", {});
+    expect(e.states).toEqual([{ cold: true, model: "anthropic/claude-opus-5-5" }]);
   });
 
   test("lets a warm prompt through without asking", async () => {

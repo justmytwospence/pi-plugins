@@ -83,6 +83,27 @@ export function statusText(v: CacheView | undefined): string | undefined {
   return undefined;
 }
 
+/** The event other extensions read the main session's prompt cache from (pi-auto-effort, for one). */
+export const CACHE_STATE = "cache:state";
+
+/**
+ * `cache:state`'s payload. `cold`: the next request re-writes the cache (expired, probably expired
+ * after a long idle, a model switch, or nothing cached yet: a new session or a fresh compaction).
+ * `tokens`: the cached context the last request left (absent when nothing is cached). `model`:
+ * `provider/id` of the model that cache belongs to (the session's model when nothing is cached).
+ */
+export interface CacheState {
+  cold: boolean;
+  tokens?: number;
+  model?: string;
+}
+
+/** The `cache:state` payload for a view of the cache (undefined: nothing cached) and the session's model. */
+export function cacheState(v: CacheView | undefined, model: { provider: string; id: string } | undefined): CacheState {
+  if (!v) return { cold: true, ...(model ? { model: `${model.provider}/${model.id}` } : {}) };
+  return { cold: v.cold !== undefined, tokens: v.last.tokens, model: `${v.last.provider}/${v.last.model}` };
+}
+
 /** What `/cache-guard fresh` hands the new session's runtime. */
 interface FreshStart {
   text: string;
@@ -218,10 +239,31 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
     return view(last, info, Date.now(), settings.warn.idleMinutes * 60_000);
   };
 
+  // The last `cache:state` sent, so ticks only emit changes.
+  let sentState: string | undefined;
+  /**
+   * Emits `cache:state` when the view changed since the last one (or always, with `force`: before a
+   * prompt and at agent start, so a listener deciding then has a fresh value). Off with `enabled: false`.
+   */
+  const emitState = (context: ExtensionContext, view: CacheView | undefined, force: boolean) => {
+    if (!settings.enabled) return;
+    const state = cacheState(view, context.model);
+    const key = JSON.stringify(state);
+    if (!force && key === sentState) return;
+    sentState = key;
+    try {
+      pi.events?.emit(CACHE_STATE, state);
+    } catch {
+      // A listener's failure is not ours.
+    }
+  };
+
   const publish = () => {
     if (!ctx) return;
     noteWarms(ctx);
-    const v = sessionOn && settings.enabled ? current(ctx) : undefined;
+    const full = settings.enabled ? current(ctx) : undefined;
+    emitState(ctx, full, false);
+    const v = sessionOn ? full : undefined;
     const text = statusText(v);
     if (text !== shown) {
       shown = text;
@@ -238,6 +280,7 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
     void herdr.clear();
     ctx = undefined;
     live = undefined;
+    sentState = undefined;
   };
 
   pi.on("session_start", (event, context) => {
@@ -253,6 +296,7 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
     settings = loadSettings(context.cwd);
     pendingMiss = undefined;
     seenWarm = new Set(recentWarms(context).map((entry) => entry.id!));
+    emitState(context, current(context), true);
     if (!context.hasUI) return;
     publish();
     timer = setInterval(publish, TICK_MS);
@@ -294,6 +338,10 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
     return new Text(theme.fg(color, text), 1, 0);
   });
   pi.on("agent_settled", (_event, context) => refresh(context, true));
+  // A fresh `cache:state` as each run starts (the prompt's own is sent from the input handler).
+  pi.on("agent_start", (_event, context) => {
+    if (ctx) emitState(context, current(context), true);
+  });
   pi.on("message_start", (event, context) => {
     const message = event.message as { role?: string; timestamp?: number; provider?: string; model?: string };
     if (message.role !== "assistant" || typeof message.timestamp !== "number") return;
@@ -305,6 +353,8 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
   });
 
   pi.on("input", async (event, context) => {
+    // Before any prompt goes out, listeners get the cache as it stands now.
+    if (ctx) emitState(context, current(context), true);
     let alerted = false;
     // Every dialog of the cold-cache flow holds `herdr:blocked`; the first also plays the sound and
     // posts a herdr notification, so a prompt sent just before switching away is not left unnoticed.

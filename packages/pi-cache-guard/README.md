@@ -175,6 +175,8 @@ Pi reads every setting except `warm` and `warn.confirmSeconds`, which are for po
 rows = [["state_icon", "workspace", { token = "$cache", fg = "#5f87d7", rules = [{ starts_with = "❄?", dim = true }] }]]
 ```
 
+- Other extensions (pi-auto-effort, for one) can read the main session's prompt cache from the `cache:state` event on Pi's event bus: `{ cold: boolean, tokens?: number, model?: "provider/id" }`. `cold` is true when the next request re-writes the cache: expired, probably expired after a long idle, a model switch, or nothing cached yet (a new session, a fresh compaction). `tokens` is the cached context the last request left (absent when nothing is cached); `model` is the model that cache belongs to (the session's model when nothing is cached). It is emitted at session start, whenever that view changes (cold and warm, a new response, a model switch), and again before each prompt and at each agent start, so a listener deciding then has a fresh value. The per-session `/cache-guard off` does not stop it; `"enabled": false` does. Without a listener nothing happens.
+
 ## Limitations
 
 - The clock is the API's guaranteed minimum, measured from each request's start; entries are deleted soon after it, not exactly at it. OpenAI keeps entries at least that long but may keep them longer. Where OpenAI guarantees nothing (`prompt_cache_retention`), entries can also go early, for example when a request lands on another machine. Other invalidations (tool or system prompt changes, an MCP server reconnecting) are not visible to it.
