@@ -60,7 +60,7 @@ format(d, 'yyyy')
 ```. user notes: only if it stays small. You can now continue with the user's answers in mind.
 ```
 
-Multi-select answers are the selected labels joined by `, ` (typed text counts as one more item). A question left blank on the Review tab reads `"…"="Unanswered"`. A follow-up that was never shown is left out of the text. Declining gives `User declined to answer questions`. The tool result's `details` carry the questions and one structured answer per question (`kind`: `option`, `custom`, `multi`, `unanswered`, or `skipped` for a follow-up that was never shown, plus `selected`, `notes` and `preview`). The transcript shows the answers in one block on the background of your own prompts (one line per answer, then the note), unanswered questions below it, or `Declined`.
+Multi-select answers are the selected labels joined by `, ` (typed text counts as one more item). A question left blank on the Review tab reads `"…"="Unanswered"`. A follow-up that was never shown is left out of the text. Declining gives `User declined to answer questions`. The tool result's `details` carry the questions and one structured answer per question (`kind`: `option`, `custom`, `multi`, `unanswered`, or `skipped` for a follow-up that was never shown, plus `selected`, `notes` and `preview`). The transcript shows one line per answer, or `Declined`.
 
 ## The dialog
 

@@ -158,9 +158,7 @@ type Classifier = (child: unknown) => { kind: "user"; text: string; tool?: boole
 /**
  * The user's words in a tool group (pi-cc-render's ToolGroupComponent, say): a non-plain
  * component whose direct children include such tool rows. Its rows cannot be split by child,
- * so the whole group anchors with the latest words in it. pi-cc-render keeps the dialog tools
- * that providers register by name ungrouped, so this fallback is for wildcard providers
- * (`"*"`, such as pi-tool-gate's declines), whose rows can still land in a group.
+ * so the whole group anchors with the latest words in it.
  */
 function groupedWords(child: unknown, classify: Classifier): string | undefined {
   const children = (child as { children?: unknown } | undefined)?.children;
