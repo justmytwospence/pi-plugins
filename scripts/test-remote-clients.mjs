@@ -155,10 +155,8 @@ const editor = new CustomEditor({ ...tui, terminal: { rows: HEIGHT, columns: 180
 editor.setText('next step');
 const idleFooter = (width) => [theme.fg('dim', ' pi-plugins · main · opus'.slice(0, width)), theme.fg('dim', ' Context 12% used · idle'.slice(0, width))];
 const IDLE = [['without Sidebar', { open: false }], ['Sidebar open, main focused', { focused: false }], ['Sidebar open, Sidebar focused', { focused: true }]];
-// Known gap: Collie finds the editor by its frame and knows nothing of Sidebar's split. Below main
-// it takes Sidebar's empty composer for the editor; beside main, no rule is a whole row, so it finds
-// none. A known screen that starts reading right fails, so this list cannot go stale.
-const KNOWN = { collie: (screen) => screen.name === 'idle editor' && screen.under.startsWith('Sidebar open') };
+// Collie reads only main's side of Sidebar's split through frames.toml's panel_below and
+// panel_beside declarations (Collie fork 1.24.0-frames.18b43859 and later).
 for (const width of [46, 120, 180]) {
   const baseline = screens.length;
   for (const [under, options] of IDLE) {
@@ -197,7 +195,6 @@ if (existsSync(path.join(collieDir, 'web/src/lib/frame-declarations.ts'))) resul
 else console.log('SKIP Collie: no checkout with frames.toml support (COLLIE_DIR)');
 
 let failures = 0;
-const known = [];
 screens.forEach((screen, i) => {
   const label = `${screen.name} @${screen.width} over ${screen.under}`;
   const problems = [];
@@ -215,11 +212,7 @@ screens.forEach((screen, i) => {
     if (h && JSON.stringify(h[i]) !== JSON.stringify(h[screen.idle])) problems.push(`herdr-web-ui: ${JSON.stringify(h[i])}, without Sidebar ${JSON.stringify(h[screen.idle])}`);
     const kinds = (r) => JSON.stringify({ blocks: r.blocks.filter((b) => b.kind !== 'raw'), composer: r.composer, draft: r.draft });
     if (c) {
-      const same = kinds(c[i]) === kinds(c[screen.idle]);
-      if (KNOWN.collie(screen)) {
-        if (same) problems.push('Collie: reads as without Sidebar now; drop it from KNOWN');
-        else known.push(`${label}\n  Collie: ${kinds(c[i])}, without Sidebar ${kinds(c[screen.idle])}`);
-      } else if (!same) problems.push(`Collie: ${kinds(c[i])}, without Sidebar ${kinds(c[screen.idle])}`);
+      if (kinds(c[i]) !== kinds(c[screen.idle])) problems.push(`Collie: ${kinds(c[i])}, without Sidebar ${kinds(c[screen.idle])}`);
     }
     report(label, problems);
     return;
@@ -253,6 +246,5 @@ function report(label, problems) {
     console.log(`FAIL ${label}\n  ${problems.join('\n  ')}`);
   } else console.log(`ok   ${label}`);
 }
-for (const line of known) console.log(`KNOWN ${line}`);
 assert.equal(failures, 0, `${failures} screen(s) not read as their client should read them`);
 console.log('PASS remote clients read every dialog');
