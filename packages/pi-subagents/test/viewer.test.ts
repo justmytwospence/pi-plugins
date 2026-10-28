@@ -223,7 +223,8 @@ test("a recorded run opens from its saved conversation, or else its task and out
   writeFileSync(record.outputPath, "the answer");
   const fallback = recordedRun(record);
   expect(fallback.conversation.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
-  expect(fallback.state).toMatchObject({ status: "stopped", turns: 2, endedAt: 9_000 });
+  // A record still saying running whose run no runtime owns: lost.
+  expect(fallback.state).toMatchObject({ status: "lost", turns: 2, endedAt: 9_000 });
   expect(fallback.state.sessionFile).toBeUndefined();
   const withNativeHistory = recordedRun({ ...record, sessionFile: "/missing/native-child.jsonl" });
   expect(withNativeHistory.state.sessionFile).toBe("/missing/native-child.jsonl");
@@ -240,6 +241,6 @@ test("a recorded run opens from its saved conversation, or else its task and out
   const v = new SessionView(fakeTui() as never, restored, plain, () => undefined, {}, undefined, { runs: () => [], actions: () => ({}), enabled: () => true });
   const out = text(v.render(80));
   expect(out).toContain("◉ t");
-  expect(out).toContain("■ stopped");
+  expect(out).toContain("? lost");
   v.dispose();
 });

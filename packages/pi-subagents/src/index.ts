@@ -8,6 +8,9 @@
 // With pi-bg installed the two work as one (activity.ts): pi-bg's background tasks are a section of
 // the subagents panel and are listed in FleetView, and async runs are outside work pi-bg's bg_wait
 // can wait on (`subagent:<id>`). Each works alone without the other.
+//
+// Running children outlive `/reload`: the old runtime parks them and the new one adopts them
+// (handoff.ts). Any other session end stops them, after recording that it did.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
@@ -18,12 +21,13 @@ import { type AgentDef, discoverAgents } from "./agents.ts";
 import { MENTION_TYPE, mentionGuidance, subagentAutocomplete } from "./mentions.ts";
 import { CACHE_RETENTIONS, type CacheRetention, Child, type ChildState, answerSubagentEnvProbes, requestSubagentEnv, subagentDepth, type Usage, addUsage, emptyUsage } from "./child.ts";
 import { agentDir, loadConfig } from "./config.ts";
-import { Conversation, type Message, readTranscript, transcriptWriter } from "./conversation.ts";
+import { Conversation, type Message, messageText, readTranscript, transcriptWriter } from "./conversation.ts";
+import { type Mode, type OwedResult, type Parcel, type ParkedCall, adopt, isParked, park, sessionKey } from "./handoff.ts";
 import { type JevConfig, askJev } from "./jev.ts";
 import { runLabel, taskLabel } from "./label.ts";
 import { DEFAULT_THRESHOLD, DEFAULT_TIER_DESCRIPTIONS, type Given, type Resolved, type Threshold, type Tier, pickQuestions, providerTiers, readPicks, resolve } from "./pick.ts";
-import { REFERENCE_TYPE, type RunRef, referenceContext, runAutocomplete } from "./references.ts";
-import { type Run, displayTokens, transcriptPath } from "./run.ts";
+import { REFERENCE_TYPE, type RunRef, compactTranscript, referenceContext, runAutocomplete } from "./references.ts";
+import { type Run, type RunLink, displayTokens, transcriptPath } from "./run.ts";
 import { clip, recentTexts } from "./transcript.ts";
 import { FleetView, SUCCESS_HINT_MS } from "./ui/fleet.ts";
 import type { ViewerActions } from "./ui/viewer.ts";
@@ -126,8 +130,8 @@ const TaskItem = Type.Object({
 
 const Params = Type.Object({
   action: Type.Optional(
-    Type.Union([Type.Literal("run"), Type.Literal("status"), Type.Literal("steer"), Type.Literal("stop"), Type.Literal("result")], {
-      description: "run (default), status, steer, stop, or result",
+    Type.Union([Type.Literal("run"), Type.Literal("status"), Type.Literal("steer"), Type.Literal("stop"), Type.Literal("result"), Type.Literal("resume")], {
+      description: "run (default), status, steer, stop, result, or resume",
     }),
   ),
   agent: Type.Optional(Type.String({ description: "Agent for a single task; omit to let it be chosen automatically" })),
@@ -141,7 +145,7 @@ const Params = Type.Object({
   cwd: Type.Optional(Type.String({ description: "Working directory (default: the session's)" })),
   model: Type.Optional(Type.String({ description: "provider/model for a single task; explicit models may cross providers" })),
   thinking: Type.Optional(Type.String({ description: "Thinking level for a single task" })),
-  id: Type.Optional(Type.String({ description: "Run id (or prefix) for status, steer, stop, result" })),
+  id: Type.Optional(Type.String({ description: "Run id (or prefix) for status, steer, stop, result, resume" })),
   message: Type.Optional(Type.String({ description: "Steering message for steer" })),
 });
 
@@ -170,9 +174,31 @@ export interface RunView {
 }
 
 interface Details {
-  mode: "single" | "parallel" | "chain";
+  mode: Mode;
   runs: RunView[];
 }
+
+/** A tool call whose outcome is still owed: what a `/reload` parks for the next runtime. */
+interface ActiveCall {
+  mode: Mode;
+  /** Its runs so far, ended or running. */
+  runs: Run[];
+  /** Its tasks that have not started yet. */
+  notStarted: () => number;
+  /** The session is reloading: the runs go on without this call (a foreground call returns at once). */
+  park: () => void;
+  /** Ends the call's herdr:background hold while this runtime can still say so. */
+  release?: () => void;
+}
+
+/** The error a run stopped by a session end is recorded with, by `session_shutdown` reason. */
+const SHUTDOWN_ERRORS: Record<string, string> = {
+  new: "stopped: session replaced (/new)",
+  resume: "stopped: session replaced (/resume)",
+  fork: "stopped: session replaced (/fork)",
+  quit: "stopped: pi quit",
+  reload: "stopped: the session reloaded",
+};
 
 function view(run: Run, withOutput = false): RunView {
   const s = run.state;
@@ -197,8 +223,16 @@ function view(run: Run, withOutput = false): RunView {
   };
 }
 
-/** A run record as saved in the session. */
-type RecordedRun = RunView & { outputPath: string; async: boolean };
+/** A run record as saved in the session; `cwd` is missing from records of earlier versions. */
+type RecordedRun = RunView & { outputPath: string; async: boolean; cwd?: string };
+
+/**
+ * A recorded status as it stands: a record still saying running whose run no runtime owns (not
+ * live, not parked for a reload) is lost, its process gone without a final record.
+ */
+export function recordedStatus(v: Pick<RunView, "id" | "status">): RunView["status"] {
+  return v.status === "running" && !isParked(v.id) ? "lost" : v.status;
+}
 
 /** A run known only from its record: its saved conversation, or else its task and output. */
 export function recordedRun(v: RecordedRun): Run {
@@ -224,10 +258,9 @@ export function recordedRun(v: RecordedRun): Run {
     thinking: v.thinking,
     byJev: v.byJev ?? { agent: false, model: false, thinking: false },
     ...(typeof v.pressure === "number" && v.pressure > 0 ? { pressure: v.pressure } : {}),
-    cwd: "",
+    cwd: v.cwd ?? "",
     async: Boolean(v.async),
-    // A record still "running" belongs to a process that is gone.
-    state: { status: v.status === "running" ? "stopped" : v.status, output: "", usage, turns: v.turns ?? 0, startedAt: 0, endedAt: (v.seconds ?? 0) * 1000, ...(v.sessionFile ? { sessionFile: v.sessionFile } : {}), ...(v.error ? { error: v.error } : {}) },
+    state: { status: recordedStatus(v), output: "", usage, turns: v.turns ?? 0, startedAt: 0, endedAt: (v.seconds ?? 0) * 1000, ...(v.sessionFile ? { sessionFile: v.sessionFile } : {}), ...(v.error ? { error: v.error } : {}) },
     conversation: Conversation.from(messages),
     outputPath: v.outputPath,
   };
@@ -247,6 +280,40 @@ export function truncateOutput(text: string, fullPath: string): string {
     cut = true;
   }
   return cut ? `${out}\n\n[Output truncated. Full output: ${fullPath}]` : out;
+}
+
+export const RESUME_HEADING = "You were interrupted before finishing. What you already did:";
+export const RESUME_FOOTER = "Check the working tree and current state before redoing anything; continue from where you left off.";
+
+/** The task of a run that continues an interrupted one: its task, then what it did (a compact transcript). */
+export function resumeTask(task: string, messages: readonly Message[]): string {
+  const done = compactTranscript(messages, task);
+  return `${task}\n\n${RESUME_HEADING}\n\n${done || "(nothing was recorded)"}\n\n${RESUME_FOOTER}`;
+}
+
+/** A run's final reply: its saved output, else what it holds in memory, else its conversation's last assistant text. */
+export function savedOutput(run: Run): string {
+  try {
+    return readFileSync(run.outputPath, "utf8");
+  } catch {
+    // Still running, or it never finished.
+  }
+  if (run.state.output) return run.state.output;
+  const messages = run.conversation.messages;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i] as Message;
+    const text = m.role === "assistant" ? messageText(m).trim() : "";
+    if (text) return text;
+  }
+  return "";
+}
+
+/** What `result` and `status` add for a run that did not finish. */
+function interruptedNote(run: Run): string | undefined {
+  const s = run.state;
+  if (s.status === "stopped") return `[Stopped before it finished${s.error ? ` (${clip(s.error, 200)})` : ""}; the output may be partial. action=resume with id ${run.id} continues it.]`;
+  if (s.status === "lost") return `[Lost: its pi process ended without recording how the run ended, so it stopped unfinished; the output may be partial. action=resume with id ${run.id} continues it.]`;
+  return undefined;
 }
 
 function shortId() {
@@ -277,6 +344,8 @@ export default function subagents(pi: ExtensionAPI) {
   const queued = { async: 0, sync: 0 };
   /** For each foreground run: move its whole call to the background. */
   const detachers = new Map<string, () => void>();
+  /** Calls whose outcome is still owed (handoff.ts parks them at a reload). */
+  const activeCalls = new Set<ActiveCall>();
 
   const widgetMode = (): WidgetMode => (WIDGET_MODES.includes(config.widget) ? config.widget : "off");
   /** Other extensions' sources whose pills end FleetView (pi-bg's tasks), while we host them. */
@@ -360,7 +429,7 @@ export default function subagents(pi: ExtensionAPI) {
 
   /** Our runs as a source for pi-bg's background-tasks dialog (activity.ts). */
   const runStatus = (r: Run): ActivityEntry["status"] =>
-    r.state.status === "running" ? "running" : r.state.status === "done" ? "done" : r.state.status === "stopped" ? "stopped" : "failed";
+    r.state.status === "running" ? "running" : r.state.status === "done" ? "done" : r.state.status === "stopped" || r.state.status === "lost" ? "stopped" : "failed";
   const ownSource: ActivitySection = {
     id: "subagents",
     title: "subagents",
@@ -474,18 +543,20 @@ export default function subagents(pi: ExtensionAPI) {
    * dropped when the user presses Esc. Several that pile up go out as one message.
    */
   const consumedResults = new Set<string>();
-  const owedResults: { content: string; details: unknown; runs?: Run[]; mode?: Details["mode"] }[] = [];
-  const deliverResult = (content: string, details?: unknown, runs?: Run[], mode?: Details["mode"]) => {
+  const owedResults: OwedResult[] = [];
+  /** Set while a session starts with adopted runs: their results wait until it has (pi-bg does the same). */
+  let holdFlush = false;
+  const deliverResult = (content: string, details?: unknown, runs?: Run[], mode?: Details["mode"], note?: string) => {
     if (!live) return;
-    owedResults.push({ content, details, runs, mode });
+    owedResults.push({ content, details, runs, mode, ...(note ? { note } : {}) });
     flushResults(sessionCtx);
   };
   const flushResults = (c: Pick<ExtensionContext, "isIdle"> | undefined) => {
-    if (!live || !owedResults.length || c?.isIdle?.() === false) return;
+    if (!live || holdFlush || !owedResults.length || c?.isIdle?.() === false) return;
     const items = owedResults.splice(0).flatMap((item) => {
       if (!item.runs) return [item];
       const unread = item.runs.filter((run) => !consumedResults.has(run.id));
-      return unread.length ? [{ ...item, runs: unread, content: `${finishedHeadline(item.mode, unread)}\n\n${unread.map(resultText).join("\n\n---\n\n")}`, details: { mode: item.mode, runs: unread.map((run) => view(run, true)) } }] : [];
+      return unread.length ? [{ ...item, runs: unread, content: `${finishedHeadline(item.mode, unread)}\n\n${unread.map(resultText).join("\n\n---\n\n")}${item.note ? `\n\n${item.note}` : ""}`, details: { mode: item.mode, runs: unread.map((run) => view(run, true)) } }] : [];
     });
     if (!items.length) return;
     safely(() => {
@@ -537,28 +608,39 @@ export default function subagents(pi: ExtensionAPI) {
     fleet.update();
   };
 
-  const findRun = (id: string | undefined) => {
-    if (!id) return undefined;
-    const exact = runs.get(id);
-    if (exact) return exact;
-    const matches = [...runs.values()].filter((r) => r.id.startsWith(id));
-    return matches.length === 1 ? matches[0] : undefined;
+  /** Saves the run's state as a `subagents:run` entry; `ending` overrides how it ended (a run a session end stops). */
+  const record = (run: Run, ending?: { status: RunView["status"]; error: string }) => {
+    safely(() => pi.appendEntry(RUN_ENTRY, { ...view(run), ...ending, outputPath: run.outputPath, async: run.async, cwd: run.cwd }));
   };
 
-  const record = (run: Run) => {
-    safely(() => pi.appendEntry(RUN_ENTRY, { ...view(run), outputPath: run.outputPath, async: run.async }));
-  };
-
-  /** This session's runs, newest first: live ones, then those known only from their records (before a reload). */
-  const allRuns = (ctx: Pick<ExtensionContext, "sessionManager">): Array<{ view: RunView; run: () => Run }> => {
+  /** The latest record of each of this session's runs that is not live (from before a reload, or a resumed session), by id. */
+  const recordedRuns = (ctx: Pick<ExtensionContext, "sessionManager"> | undefined): Map<string, RecordedRun> => {
     const latest = new Map<string, RecordedRun>();
-    for (const e of ctx.sessionManager.getBranch() as Array<{ type?: string; customType?: string; data?: RecordedRun }>) {
+    for (const e of (ctx?.sessionManager.getBranch() ?? []) as Array<{ type?: string; customType?: string; data?: RecordedRun }>) {
       if (e.type === "custom" && e.customType === RUN_ENTRY && e.data && !runs.has(e.data.id)) latest.set(e.data.id, e.data);
     }
-    return [
-      ...[...latest.values()].map((v) => ({ view: v, run: () => recordedRun(v) })),
+    return latest;
+  };
+
+  /** This session's runs, newest first: live ones, then those known only from their records. */
+  const allRuns = (ctx: Pick<ExtensionContext, "sessionManager">): Array<{ view: RunView; run: () => Run }> =>
+    [
+      ...[...recordedRuns(ctx).values()].map((v) => ({ view: { ...v, status: recordedStatus(v) }, run: () => recordedRun(v) })),
       ...[...runs.values()].map((r) => ({ view: view(r), run: () => r })),
     ].reverse();
+
+  /** A run by id or unique prefix: a live one (adopted after a reload included), else one known from this session's records. */
+  const findRun = (id: string | undefined, ctx?: Pick<ExtensionContext, "sessionManager">): { run: Run; live: boolean } | undefined => {
+    if (!id) return undefined;
+    const exact = runs.get(id);
+    if (exact) return { run: exact, live: true };
+    const recorded = recordedRuns(ctx);
+    const saved = recorded.get(id);
+    if (saved) return { run: recordedRun(saved), live: false };
+    const live = [...runs.values()].filter((r) => r.id.startsWith(id));
+    const old = [...recorded.values()].filter((v) => v.id.startsWith(id));
+    if (live.length + old.length !== 1) return undefined;
+    return live[0] ? { run: live[0], live: true } : { run: recordedRun(old[0] as RecordedRun), live: false };
   };
   /** The same runs, as `@run:` references. */
   const runRefs = (ctx: Pick<ExtensionContext, "sessionManager">): RunRef[] =>
@@ -602,15 +684,44 @@ export default function subagents(pi: ExtensionAPI) {
     return dir;
   };
 
+  /** Points a run's child at this runtime (its updates, its end); `onCallUpdate` streams a foreground call's progress. */
+  const bindRun = (run: Run, onCallUpdate?: () => void) => {
+    const link = run.link;
+    if (!link) return;
+    link.update = () => {
+      // Preserve the discovered path even if this runtime shuts down before the child finishes.
+      if (!link.sessionRecorded && run.state.sessionFile && run.state.status === "running") {
+        link.sessionRecorded = true;
+        record(run);
+      }
+      onCallUpdate?.();
+    };
+    link.ended = () => {
+      record(run);
+      refreshUI();
+    };
+    // It ended while parked: its final record is owed now.
+    if (link.missedEnd) {
+      link.missedEnd = false;
+      link.ended();
+    }
+  };
+  /** Lets go of a run's child: nothing in this runtime hears from it again. */
+  const unbindRun = (run: Run) => {
+    if (!run.link) return;
+    run.link.update = undefined;
+    run.link.ended = undefined;
+  };
+
   const startRun = (
     ctx: ExtensionContext,
     item: Item,
     resolved: Resolved,
-    options: { cwd: string; fork?: string; async: boolean; owner: AbortSignal; onUpdate: () => void },
+    options: { cwd: string; fork?: string; async: boolean; onUpdate: () => void },
   ): Run => {
     const id = shortId();
     const outputPath = path.join(agentDir(), "subagents", id, "output.md");
-    let sessionRecorded = false;
+    const link: RunLink = { done: Promise.resolve() };
     const child = new Child({
       task: item.task,
       cwd: options.cwd,
@@ -623,14 +734,10 @@ export default function subagents(pi: ExtensionAPI) {
       cacheRetention: CACHE_RETENTIONS.includes(config.childCacheRetention) ? config.childCacheRetention : "short",
       sessionDir: path.join(agentDir(), "subagents", "sessions"),
       env: requestSubagentEnv(pi.events),
+      // Through the link, not this runtime: after a reload the adopting runtime hears it.
       onUpdate: (state) => {
         run.state = state;
-        // Preserve the discovered path even if this runtime shuts down before the child finishes.
-        if (!sessionRecorded && state.sessionFile && state.status === "running" && !options.owner.aborted) {
-          sessionRecorded = true;
-          record(run);
-        }
-        options.onUpdate();
+        link.update?.();
       },
       onMessage: transcriptWriter(transcriptPath(outputPath)),
     });
@@ -651,12 +758,14 @@ export default function subagents(pi: ExtensionAPI) {
       child,
       conversation: child.conversation,
       outputPath,
+      link,
     };
     runs.set(id, run);
+    bindRun(run, options.onUpdate);
     child.start();
     record(run);
     refreshUI();
-    void child.done.then((state) => {
+    link.done = child.done.then((state) => {
       run.state = state;
       try {
         mkdirSync(path.dirname(outputPath), { recursive: true });
@@ -665,12 +774,78 @@ export default function subagents(pi: ExtensionAPI) {
         // The output stays in memory.
       }
       run.child = undefined;
-      if (!options.owner.aborted) {
-        record(run);
-        refreshUI();
+      try {
+        if (link.ended) link.ended();
+        else link.missedEnd = true;
+      } catch {
+        // A stale UI.
       }
     });
     return run;
+  };
+
+  /**
+   * At a reload: hands the calls whose outcome is still owed (their running children included) to
+   * the next runtime of this session, with the results queued and those already read.
+   */
+  const parkRuns = (key: string) => {
+    const calls: ParkedCall[] = [];
+    const taken = new Set<string>();
+    for (const active of activeCalls) {
+      active.park();
+      active.release?.();
+      const notStarted = active.notStarted();
+      if (!active.runs.length && !notStarted) continue;
+      calls.push({ mode: active.mode, runs: [...active.runs], notStarted });
+      for (const run of active.runs) taken.add(run.id);
+    }
+    activeCalls.clear();
+    // A running child outside any owed call (none is expected) goes along as a call of its own.
+    for (const run of runs.values()) if (run.child && run.state.status === "running" && !taken.has(run.id)) calls.push({ mode: "single", runs: [run], notStarted: 0 });
+    for (const run of runs.values()) unbindRun(run);
+    for (const call of calls) for (const run of call.runs) runs.delete(run.id);
+    park(key, { calls, owed: owedResults.splice(0), consumed: [...consumedResults] });
+  };
+
+  /** Takes over a call the previous runtime of this session parked: its runs are ours, and so is its result message. */
+  const adoptCall = (call: ParkedCall) => {
+    const owner = lifetime.signal;
+    const hold = `subagents:${++holdCount}`;
+    const release = () => safely(() => pi.events.emit("herdr:background", { active: false, id: hold }));
+    const active: ActiveCall = { mode: call.mode, runs: call.runs, notStarted: () => call.notStarted, park: () => undefined, release };
+    activeCalls.add(active);
+    safely(() => pi.events.emit("herdr:background", { active: true, label: `subagents (${call.runs.length || call.notStarted})`, id: hold }));
+    for (const run of call.runs) {
+      // A foreground call died with the old runtime: its runs go on as background ones.
+      run.async = true;
+      runs.set(run.id, run);
+      bindRun(run);
+      external(run);
+      if (run.state.status === "running") void run.link?.done.then(() => { if (!owner.aborted) external(run); });
+    }
+    void Promise.all(call.runs.map((run) => run.link?.done)).then(() => {
+      // A later reload parked it again; the runtime after that delivers it.
+      if (owner.aborted) return;
+      activeCalls.delete(active);
+      release();
+      // A chain that stopped at a step that did not succeed would not have gone on anyway.
+      const stoppedChain = call.mode === "chain" && call.runs.at(-1)?.state.status !== "done";
+      const n = stoppedChain ? 0 : call.notStarted;
+      const note = n ? `[${n} queued task${n === 1 ? "" : "s"} never started: the session reloaded first.]` : undefined;
+      if (!call.runs.length) {
+        if (note) deliverResult(`Subagent ${call.mode}: ${note.slice(1, -1)}`);
+        return;
+      }
+      const text = `${finishedHeadline(call.mode, call.runs)}\n\n${call.runs.map(resultText).join("\n\n---\n\n")}${note ? `\n\n${note}` : ""}`;
+      deliverResult(text, { mode: call.mode, runs: call.runs.map((r) => view(r, true)) }, call.runs, call.mode, note);
+    });
+  };
+
+  /** What the previous runtime of this session parked at a reload. */
+  const adoptParcel = (parcel: Parcel) => {
+    for (const id of parcel.consumed) consumedResults.add(id);
+    owedResults.push(...parcel.owed);
+    for (const call of parcel.calls) adoptCall(call);
   };
 
   /**
@@ -722,6 +897,20 @@ export default function subagents(pi: ExtensionAPI) {
     announce();
     // Our runs, for pi-bg's background-tasks dialog.
     if (boundUI) pi.events.emit(ACTIVITY_SECTION, { section: ownSource });
+    // After a reload: the runs the previous runtime parked. Results already due go out once the
+    // session is set up; a queued callback from an earlier session is inert.
+    const key = sessionKey(ctx.sessionManager);
+    const parcel = key ? adopt(key) : undefined;
+    if (parcel) {
+      holdFlush = true;
+      adoptParcel(parcel);
+      const owner = lifetime.signal;
+      setImmediate(() => {
+        if (owner.aborted) return;
+        holdFlush = false;
+        flushResults(sessionCtx);
+      });
+    }
     refreshUI();
   });
 
@@ -743,9 +932,23 @@ export default function subagents(pi: ExtensionAPI) {
     return { message: { customType: REFERENCE_TYPE, content: context, display: false } };
   });
 
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", (event, ctx) => {
+    const reason = (event as { reason?: string } | undefined)?.reason;
     lifetime.abort();
-    for (const run of runs.values()) run.child?.stop();
+    holdFlush = false;
+    // A reload keeps the children: the next runtime of this session adopts them (handoff.ts).
+    const key = reason === "reload" ? sessionKey((ctx ?? sessionCtx)?.sessionManager) : undefined;
+    if (key) parkRuns(key);
+    else {
+      // Recorded as stopped while the session still takes entries, so the record does not say running.
+      const error = SHUTDOWN_ERRORS[reason ?? ""] ?? "stopped: the session ended";
+      for (const run of runs.values()) {
+        if (run.child && run.state.status === "running") record(run, { status: "stopped", error });
+        unbindRun(run);
+        run.child?.stop();
+      }
+      activeCalls.clear();
+    }
     stopHosting();
     safely(() => pi.events.emit(ACTIVITY_GONE, { id: ownSource.id }));
     live = false;
@@ -771,44 +974,67 @@ export default function subagents(pi: ExtensionAPI) {
       name: "subagent",
       label: "Subagent",
       description:
-        "Each subagent adds its own context and token usage. action=run (default): a single `task`, parallel `tasks`, or a `chain` whose steps can use {previous}. Omit agent, model, or thinking to let them be chosen automatically; implicit models stay on the parent session's provider. `async: true` returns run ids at once and delivers each result as a message. action=status|steer|stop|result take `id` (steer also `message`).",
+        "Each subagent adds its own context and token usage. action=run (default): a single `task`, parallel `tasks`, or a `chain` whose steps can use {previous}. Omit agent, model, or thinking to let them be chosen automatically; implicit models stay on the parent session's provider. `async: true` returns run ids at once and delivers each result as a message. action=status|steer|stop|result|resume take `id` (steer also `message`); resume continues a stopped or lost run as a new one.",
       promptSnippet: "Delegate self-contained tasks to subagents with their own context windows",
       promptGuidelines: promptGuidelines(delegation),
       parameters: Params,
       async execute(_toolCallId, params, signal, onUpdate, ctx) {
         config = loadConfig("pi-subagents", DEFAULT_CONFIG, ctx.cwd);
         bindUI(ctx);
-        const action = params.action ?? "run";
+        let action = params.action ?? "run";
+
+        // A new run that continues a stopped or lost one: same agent, model, thinking, folder and mode.
+        if (action === "resume") {
+          const found = findRun(params.id, ctx);
+          if (!found) throw new Error(`No run ${params.id ?? "(missing id)"}. Use action=status to list runs.`);
+          const old = found.run;
+          if (old.child && old.state.status === "running") throw new Error(`Run ${old.id} is still running; steer it instead.`);
+          if (old.state.status !== "stopped" && old.state.status !== "lost") throw new Error(`Run ${old.id} is ${old.state.status}; only a stopped or lost run can be resumed.`);
+          params = {
+            action: "run",
+            task: resumeTask(old.task, old.conversation.messages),
+            label: `${runLabel(old).replace(/ \(resumed\)$/u, "")} (resumed)`,
+            agent: old.agent,
+            model: old.model,
+            thinking: old.thinking,
+            ...(old.cwd ? { cwd: old.cwd } : {}),
+            async: old.async,
+          };
+          action = "run";
+        }
 
         if (action !== "run") {
           if (action === "status" && !params.id) {
-            const all = [...runs.values()];
-            const text = all.length ? all.map((r) => `${r.id}  ${r.state.status.padEnd(7)} ${runLabel(r)} · ${r.agent}`).join("\n") : "No subagent runs in this session.";
-            return { content: [{ type: "text", text }], details: { mode: "single", runs: all.map((r) => view(r)) } as Details };
+            const all = allRuns(ctx).reverse();
+            const text = all.length ? all.map((e) => `${e.view.id}  ${e.view.status.padEnd(7)} ${runLabel(e.view)} · ${e.view.agent}`).join("\n") : "No subagent runs in this session.";
+            return { content: [{ type: "text", text }], details: { mode: "single", runs: all.map((e) => e.view) } as Details };
           }
-          const run = findRun(params.id);
-          if (!run) throw new Error(`No run ${params.id ?? "(missing id)"}. Use action=status to list runs.`);
+          const found = findRun(params.id, ctx);
+          if (!found) throw new Error(`No run ${params.id ?? "(missing id)"}. Use action=status to list runs.`);
+          const { run } = found;
+          const resumable = run.state.status === "stopped" || run.state.status === "lost";
+          const resumeHint = resumable ? ` action=resume with id ${run.id} continues it in a new run.` : "";
+          if ((action === "steer" || action === "stop") && !found.live) {
+            throw new Error(`Run ${run.id} is not running in this session (${run.state.status}); its record can be read with status or result.${resumeHint}`);
+          }
           if (action === "steer") {
             if (!params.message?.trim()) throw new Error("steer needs `message`.");
-            if (!run.child?.steer(params.message)) throw new Error(`Run ${run.id} is ${run.state.status}; only running runs can be steered.`);
+            if (!run.child?.steer(params.message)) throw new Error(`Run ${run.id} is ${run.state.status}; only running runs can be steered.${resumeHint}`);
             return { content: [{ type: "text", text: `Steered ${run.id}.` }], details: { mode: "single", runs: [view(run)] } as Details };
           }
           if (action === "stop") {
             run.child?.stop();
             return { content: [{ type: "text", text: `Stopping ${run.id}.` }], details: { mode: "single", runs: [view(run)] } as Details };
           }
+          const note = interruptedNote(run);
           if (action === "result") {
-            if (run.state.status !== "running") consumedResults.add(run.id);
-            let output = run.state.output;
-            try {
-              output = readFileSync(run.outputPath, "utf8");
-            } catch {
-              // still running or not written
-            }
-            const text = `[${runLabel(run)} · ${run.agent} · ${run.state.status}]\n\n${truncateOutput(output || "(no output yet)", run.outputPath)}`;
-            return { content: [{ type: "text", text }], details: { mode: "single", runs: [view(run, true)] } as Details };
+            if (found.live && run.state.status !== "running") consumedResults.add(run.id);
+            const output = savedOutput(run);
+            const text = `[${runLabel(run)} · ${run.agent} · ${run.state.status}]\n\n${truncateOutput(output || "(no output yet)", run.outputPath)}${note ? `\n\n${note}` : ""}`;
+            const shown = { ...view(run, true), ...(output ? { output: clip(output, 2_000) } : {}) };
+            return { content: [{ type: "text", text }], details: { mode: "single", runs: [shown] } as Details };
           }
-          return { content: [{ type: "text", text: JSON.stringify(view(run, true), null, 2) }], details: { mode: "single", runs: [view(run, true)] } as Details };
+          return { content: [{ type: "text", text: `${JSON.stringify(view(run, true), null, 2)}${note ? `\n\n${note}` : ""}` }], details: { mode: "single", runs: [view(run, true)] } as Details };
         }
 
         const mode: Details["mode"] = params.tasks?.length ? "parallel" : params.chain?.length ? "chain" : "single";
@@ -829,7 +1055,8 @@ export default function subagents(pi: ExtensionAPI) {
 
         /** Whether this call's runs are in the background: from the start (`async`), or once detached. */
         const owner = lifetime;
-        const call = { async: Boolean(params.async), detach: undefined as (() => void) | undefined };
+        // `parked`: the session reloaded and the next runtime took the runs over (handoff.ts).
+        const call = { async: Boolean(params.async), detach: undefined as (() => void) | undefined, parked: false };
         const preparation = new AbortController();
         const abortPreparation = () => { if (!call.async) preparation.abort(); };
         // Unlike turn cancellation, a session end always cancels background preparation too.
@@ -879,13 +1106,13 @@ export default function subagents(pi: ExtensionAPI) {
           const cwd = await cwdFor(item);
           if (!mayStart()) return undefined;
           dequeue();
-          const run = startRun(ctx, item, r, { cwd, ...(fork ? { fork } : {}), async: call.async, owner: owner.signal, onUpdate: update });
+          const run = startRun(ctx, item, r, { cwd, ...(fork ? { fork } : {}), async: call.async, onUpdate: update });
           started.push(run);
           if (call.async) external(run, chain);
           update();
           // A foreground run stops with the call, unless it has been moved to the background.
           const abort = () => {
-            if (!call.async) run.child?.stop();
+            if (!call.async && !call.parked) run.child?.stop();
           };
           signal?.addEventListener("abort", abort, { once: true });
           if (signal?.aborted) abort();
@@ -899,6 +1126,17 @@ export default function subagents(pi: ExtensionAPI) {
         };
 
         let waiting = items.length;
+        /** Set for a foreground call: it returns at once when a reload parks its runs. */
+        let onPark: () => void = () => undefined;
+        const active: ActiveCall = {
+          mode,
+          runs: started,
+          notStarted: () => waiting,
+          park: () => {
+            call.parked = true;
+            onPark();
+          },
+        };
         const kind = () => (call.async ? "async" : "sync");
         const execute = async (): Promise<Run[]> => {
           queued[kind()] += waiting;
@@ -954,9 +1192,11 @@ export default function subagents(pi: ExtensionAPI) {
           // Released by id: without one, pi-herdr ends the oldest hold, which may be another extension's.
           const hold = `subagents:${++holdCount}`;
           safely(() => pi.events.emit("herdr:background", { active: true, label: `subagents (${items.length})`, id: hold }));
+          active.release = () => safely(() => pi.events.emit("herdr:background", { active: false, id: hold }));
           void work
             .then((list) => {
               backgroundCount--;
+              activeCalls.delete(active);
               safely(() => pi.events.emit("herdr:background", { active: false, id: hold }));
               const text = list.filter(Boolean).map(resultText).join("\n\n---\n\n");
               if (owner.signal.aborted) return;
@@ -964,6 +1204,7 @@ export default function subagents(pi: ExtensionAPI) {
             })
             .catch((error: unknown) => {
               backgroundCount--;
+              activeCalls.delete(active);
               safely(() => pi.events.emit("herdr:background", { active: false, id: hold }));
               if (owner.signal.aborted) return;
               deliverResult(`Subagent ${mode} failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -972,6 +1213,7 @@ export default function subagents(pi: ExtensionAPI) {
 
         const ids = () => started.map((r) => `${r.id} (${runLabel(r)} · ${r.agent}, ${r.model}, ${r.thinking})`).join(", ");
 
+        activeCalls.add(active);
         if (call.async) {
           deliverLater(execute());
           // Let the runs start so their ids exist.
@@ -998,8 +1240,25 @@ export default function subagents(pi: ExtensionAPI) {
             resolve("detached");
           };
         });
+        // A reload while it runs: the call dies with this runtime, and the next one delivers the results as messages.
+        const parked = new Promise<"parked">((resolve) => {
+          onPark = () => resolve("parked");
+        });
         const work = execute();
-        const done = await Promise.race([work, detached]);
+        let done: Run[] | "detached" | "parked";
+        try {
+          done = await Promise.race([work, detached, parked]);
+        } catch (error) {
+          activeCalls.delete(active);
+          throw error;
+        }
+        if (done === "parked") {
+          void work.catch(() => undefined);
+          return {
+            content: [{ type: "text", text: `The session reloaded while this ${mode} ran: ${ids() || "nothing had started"}. Its results arrive as messages.` }],
+            details: details(),
+          };
+        }
         if (done === "detached") {
           deliverLater(work);
           return {
@@ -1007,6 +1266,7 @@ export default function subagents(pi: ExtensionAPI) {
             details: details(),
           };
         }
+        activeCalls.delete(active);
         for (const r of started) detachers.delete(r.id);
         if (!done.length) throw new Error(signal?.aborted ? "Cancelled before any subagent started." : "No subagent started.");
         const skipped = items.length - done.length;
@@ -1041,7 +1301,7 @@ export default function subagents(pi: ExtensionAPI) {
           return new Text(first?.type === "text" ? first.text : "", 0, 0);
         }
         const icon = (s: RunView["status"]) =>
-          s === "running" ? theme.fg("warning", "●") : s === "done" ? theme.fg("success", "✓") : s === "stopped" ? theme.fg("muted", "■") : theme.fg("error", "✗");
+          s === "running" ? theme.fg("warning", "●") : s === "done" ? theme.fg("success", "✓") : s === "stopped" ? theme.fg("muted", "■") : s === "lost" ? theme.fg("warning", "?") : theme.fg("error", "✗");
         const jev = (on: boolean, pressure?: number) => (on ? theme.fg("dim", jevMark(on, pressure)) : "");
         const sep = theme.fg("muted", " · ");
         const flat = (text: string) => text.replace(/\s+/gu, " ").trim();

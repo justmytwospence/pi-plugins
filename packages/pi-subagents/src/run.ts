@@ -26,6 +26,26 @@ export interface Run {
   /** The child's conversation; outlives the process. */
   conversation: Conversation;
   outputPath: string;
+  /** How the child reaches the runtime that owns the run now; set while the child runs. */
+  link?: RunLink;
+}
+
+/**
+ * The child's callbacks go through this instead of closures over one runtime: a `/reload` clears
+ * them in the old runtime (whose pi.* calls throw from then on) and the runtime that adopts the run
+ * sets its own (handoff.ts).
+ */
+export interface RunLink {
+  /** The child's state changed. */
+  update?: () => void;
+  /** The child ended and its output is saved. */
+  ended?: () => void;
+  /** The child ended while no runtime owned the run: the adopting runtime still owes its final record. */
+  missedEnd?: boolean;
+  /** The record carrying the child's session file has been written. */
+  sessionRecorded?: boolean;
+  /** Settles once the child has ended and its output is saved. */
+  done: Promise<void>;
 }
 
 /** Tokens to show for a run: input, output and cache writes. Cache reads re-count the same prefix every turn. */

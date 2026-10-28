@@ -41,7 +41,11 @@ export function addUsage(a: Usage, b: Partial<Usage> | undefined): Usage {
   };
 }
 
-export type ChildStatus = "running" | "done" | "failed" | "stopped";
+/**
+ * `lost` is never a live child's: it marks a recorded run whose last record says running while no
+ * runtime owns it any more (its pi process ended without a final record).
+ */
+export type ChildStatus = "running" | "done" | "failed" | "stopped" | "lost";
 
 export interface ChildState {
   status: ChildStatus;

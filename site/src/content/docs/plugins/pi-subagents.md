@@ -8,7 +8,7 @@ plugin: pi-subagents
 
 - **Use it for:** Delegate independent report-back work to headless Pi processes, with fresh or forked context.
 - **Enable:** Select `packages/pi-subagents/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
-- **Controls:** `subagent` run/status/result/steer/stop; `/subagents`. No global shortcut; fleet and conversation controls below.
+- **Controls:** `subagent` run/status/result/steer/stop/resume; `/subagents`. No global shortcut; fleet and conversation controls below.
 - **Settings:** `pi-subagents.json`: 8 tasks, concurrency 4, depth 2; async off, fresh context, short child cache retention; FleetView on.
 - **Requirements, cost & privacy:** Runnable Pi and provider access; Git only for worktrees, created directly without a helper CLI. Each child uses model tokens; optional paid Jev sees task text. Transcripts/results and native Pi child sessions are stored locally. Optional `sessionFile` in run details names the actual native session, separate from the compact viewer transcript; it does not imply full tracking by external clients. See [remote client compatibility](/guides/clients/).
 - **Integrations & limits:** Optional `/tasks`, consumed result waits, notebooks, planners and Herdr-child pills. Shared cwd is not isolation; headless workers cannot approve dialogs.
@@ -53,7 +53,7 @@ Example arguments for independent read-only reconnaissance:
 
 `async` defaults to false. When true, the call returns IDs immediately and later delivers `subagent-result` messages that start a turn; the first line names the runs and how they ended, which is what herdr-web-ui's chat shows on the collapsed message. Results due during a main-agent turn wait until it settles. Use `context: "fork"` to seed children from the current conversation rather than fresh context.
 
-Control an existing run with `action: "status"`, `"result"`, `"stop"`, or `"steer"`. These take an `id` or unique prefix; status without an ID lists runs. Steering additionally requires `message`:
+Control an existing run with `action: "status"`, `"result"`, `"stop"`, `"steer"`, or `"resume"`. These take an `id` or unique prefix; status without an ID lists live and recorded runs. Status and result also read a run known only from its record, and result notes when a stopped or lost run's output may be partial; steer and stop need a live run. Steering additionally requires `message`:
 
 ```json
 {
@@ -62,6 +62,8 @@ Control an existing run with `action: "status"`, `"result"`, `"stop"`, or `"stee
   "message": "Prioritize missing authorization checks; keep this read-only."
 }
 ```
+
+`resume` continues a `stopped` or `lost` run as a new run with the same agent, model, thinking level, working directory and mode, labelled `<label> (resumed)`. Its task is the original task, a section headed "You were interrupted before finishing. What you already did:" holding a compact transcript of the old run, and an instruction to check the working tree before redoing anything and to continue from where it left off. The new run starts from fresh context.
 
 `cwd` changes the working directory. `worktree: true` runs `git worktree add` into `<repo>/.worktrees/subagent-<slug>-<id>` (branch `subagent/<slug>-<id>`) for isolated task checkouts. Request that deliberately; a separate context alone is not an editing boundary.
 
@@ -111,7 +113,13 @@ With [pi-select-nav](/plugins/pi-select-nav/), Tab selects the fleet panel when 
 
 A child opens as a session of its own, drawn the way Pi draws main: Pi's own message and tool components, Pi's working row, queued steers, your editor (pi-vim's when loaded), the same subagent list with that session marked `◉`, and your footer. With [pi-status-footer](/plugins/pi-status-footer/), the footer and the editor's context gauge describe the child. Pi runs one live session per process and children are separate processes, so, as in Claude Code and Codex, this is main's screen drawn for another thread. Type and press Enter to steer it; Tab and Shift+Tab, or Ctrl+J and Ctrl+K, switch to the next or previous session (past the ends is main); Esc goes back to main (with pi-vim and a draft, Esc first leaves Insert mode), as a dim line over the list reminds you; `↓` at the editor's end enters the list, where Enter switches; Ctrl+C clears the editor and, on an empty one, twice stops the child. Your scroll keys, the mouse wheel, `app.tools.expand` and `app.thinking.toggle` work as in main. An ended run has no editor; a line says how it ended. Optional `label` names a task in lists and headings; when omitted, a short label is derived from the task text. Headless workers cannot use planning, user-question, or interactive-child tools. Extension dialogs are cancelled and returned as blockers, never forwarded to your UI or automatically approved.
 
-Returned replies are capped at 2000 lines or 50 KB. Full output is saved under `~/.pi/agent/subagents/<id>/output.md`, alongside `messages.jsonl`. Recorded transcripts remain inspectable after reload or resume; this is not a promise that a live child survives session teardown.
+Returned replies are capped at 2000 lines or 50 KB. Full output is saved under `~/.pi/agent/subagents/<id>/output.md`, alongside `messages.jsonl`. Recorded transcripts remain inspectable after reload or resume.
+
+## Reloads and session ends
+
+`/reload` keeps running children. The old runtime parks every call whose result is still owed in a process-wide registry keyed by the session file, and the reloaded extension adopts them: they are listed, steerable and stoppable again, `bg_wait subagent:<id>` works on them, and each call's result is delivered once, as a message, by the new runtime, including a result that came due during the reload. A foreground call in flight at the reload returns at once; its runs continue in the background and their results arrive as messages. Queued parallel tasks and later chain steps do not start after a reload, and the result says how many never started. Parked runs that no runtime adopts within 30 seconds are stopped.
+
+Any other session end (`/new`, `/resume`, `/fork`, quitting) stops running children, after recording each as `stopped` with the reason, such as `stopped: session replaced (/new)`. A record that still says running while no runtime owns the run, for example after a crash, reads as `lost`. Either can be continued with `resume`.
 
 ## Optional integrations and boundaries
 
@@ -119,4 +127,4 @@ With pi-bg, `/tasks` includes children and `bg_wait` accepts `subagent:<id>` for
 
 By default (`delegation: "economical"`), once the design is settled, hand the implementation that follows from it to a subagent with a precise spec and no `model`, then review the result; work directly when the spec would be as long as the work or the decisions left are judgment calls. With `delegation: "conservative"`, prefer direct work for routine investigation, diagnosis, and verification, and delegate only genuinely independent tasks with a clear payoff or when requested. Either way, avoid redundant audits, and prefer these headless children for report-back tasks. Choose pi-herdr's interactive children when a person needs an ongoing session to take over. See [background work](/recipes/background-work/), [activity integration](/architecture/activity/), and [troubleshooting](/guides/troubleshooting/).
 
-[Source and tests](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-subagents) cover RPC children, turn limits, result delivery, and the TUI views.
+[Source and tests](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-subagents) cover RPC children, turn limits, result delivery, reload handoff, and the TUI views.

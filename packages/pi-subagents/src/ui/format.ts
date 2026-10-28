@@ -50,6 +50,8 @@ export function statusIcon(status: ChildStatus, theme: Theme): string {
   if (status === "running") return theme.fg("accent", "●");
   if (status === "done") return theme.fg("success", "✓");
   if (status === "stopped") return theme.fg("muted", "■");
+  // A recorded run whose process went away without saying how it ended.
+  if (status === "lost") return theme.fg("warning", "?");
   return theme.fg("error", "✗");
 }
 
