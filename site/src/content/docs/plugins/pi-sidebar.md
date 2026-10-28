@@ -108,7 +108,7 @@ During main's longer runs, heads-up mode occasionally checks for one thing you s
 
 ### Share notes
 
-Checks can also suggest something worth sharing: a technique, result or lesson from main's work, as a drafted short post, a blog post, or both. They are off until a destination is configured, a real heads-up always wins, and the check is told never to include secrets, private names or internal details. The example below is an illustration:
+Checks can also suggest something worth sharing, as a drafted short post, a blog post, or both. The default bar is high: a specific claim someone could disagree with, a measurement that explains something, a named pattern recognizable beyond your setup, or a reversal learned the hard way, and it must matter to people who use none of your tools. Plumbing (how something was wired, configured, migrated or fixed), release notes and tool announcements never qualify, and an unsure check stays quiet. They are off until a destination is configured, a real heads-up always wins, and the check is told never to include secrets, private names or internal details. The example below is an illustration:
 
 ```
 ✦ heads up · worth sharing: Splicing a side request onto the agent's prompt cache.
@@ -116,10 +116,12 @@ Checks can also suggest something worth sharing: a technique, result or lesson f
 ```
 
 - **Review post:** shows the draft and its length, then **Post to Bluesky**, **Edit** (Pi's editor), **Back** or **Discard**. Nothing is published until you choose Post.
-- **Blog draft / outline:** one more request (built like a check) writes a full draft or a section outline, saves it as markdown with front matter, and adds it to Sidebar's thread for revisions.
+- **Blog draft / outline:** one more request (built like a check) writes a full draft (700 to 1500 words, an argument that opens with its thesis and uses claim-style headings only in long pieces) or a beat-based outline (claim, written-out hook, three to five beats with their evidence, strongest objection, written-out ending), saves it as markdown with front matter, and adds it to Sidebar's thread for revisions.
+- **Not ready:** if the claim or beats cannot honestly be written from the session, the writer says so; nothing is saved and Sidebar reports why.
 - **Memory:** posting, drafting, Not interested and Discard mark the topic as known.
 - **In Sidebar:** `/post` (with a confirm dialog), `/post edit`, `/post <text>`, `/draft`, `/draft outline`.
 - **Configuration:** `PI_SIDEBAR_BLUESKY_HANDLE` + `PI_SIDEBAR_BLUESKY_APP_PASSWORD` (sign-in goes straight to the account's PDS, resolved from the handle, so self-hosted PDSes work; `PI_SIDEBAR_BLUESKY_SERVICE` names it instead, `PI_SIDEBAR_BLUESKY_WEB` sets the post links' web app, default `https://bsky.app`, or `none`), and `PI_SIDEBAR_DRAFTS_DIR` or `PI_SIDEBAR_DRAFTS_COMMAND` (markdown on stdin, `PI_SIDEBAR_DRAFT_TITLE`, `_SLUG`, `_KIND`, `_DATE`, `_REPO` in the environment; its first output line is reported). `PI_SIDEBAR_SHARE=0` keeps share notes off.
+- **Guides:** `PI_SIDEBAR_SHARE_TASTE` and `PI_SIDEBAR_SHARE_STYLE` name markdown files (`~` expanded, read once at startup). The taste guide (cut at 4,000 characters) replaces the default bar for raising ideas and is applied strictly; confidentiality rules and the reply format stay. The style guide (cut at 12,000) is added to every draft and outline request and overrides the default style where they differ. Missing, empty or cut guides are reported by `/sidebar headsup`, which also lists the guides in use. Guides alone do not turn share notes on.
 
 ## Why it costs little
 

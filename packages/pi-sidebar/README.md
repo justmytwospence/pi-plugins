@@ -192,7 +192,7 @@ Main never sees a note unless you send it to main.
 
 ### Share notes
 
-Heads-up checks can also suggest something worth sharing publicly: a technique, a surprising result or a hard-won lesson from main's work, drafted as a short social post, a blog post, or both. Share notes are off until you configure a destination, and a real heads-up always takes priority. The check never sees a destination's credentials, and its instructions forbid secrets, private names, client or employer details and internal paths.
+Heads-up checks can also suggest something worth sharing publicly, drafted as a short social post, a blog post, or both. The default bar is high: an idea is raised only when the session yields a specific claim someone could disagree with, a measurement that explains something, a named pattern that would be recognizable beyond your setup, or a reversal learned the hard way, and it must matter to people who use none of your tools. How something was wired, configured, migrated or fixed, release notes and tool announcements never count, and when the check is unsure it stays quiet. Share notes are off until you configure a destination, and a real heads-up always takes priority. The check never sees a destination's credentials, and its instructions forbid secrets, private names, client or employer details and internal paths.
 
 ```
 ✦ heads up · worth sharing: Splicing a side request onto the agent's prompt cache.
@@ -201,7 +201,8 @@ Heads-up checks can also suggest something worth sharing publicly: a technique, 
 *Illustration, not a screenshot.*
 
 - **Review post** shows the drafted post with its length (Bluesky allows 300 characters), then offers **Post to Bluesky**, **Edit** (Pi's editor, prefilled), **Back** and **Discard**. Nothing is published until you choose Post.
-- **Blog draft** and **Blog outline** write a full draft (800 to 1500 words) or a section-by-section outline with one more request built like a check (main's cache, or Sidebar's model), save it as markdown with front matter, and put it in Sidebar's thread so you can ask for revisions there.
+- **Blog draft** and **Blog outline** write a full draft (700 to 1500 words) or an outline with one more request built like a check (main's cache, or Sidebar's model), save it as markdown with front matter, and put it in Sidebar's thread so you can ask for revisions there. A draft is an argument: it opens with the thesis or a surprising number, uses headings only as claims (and none under about 1200 words), backs each abstract point with a moment or number from the session, concedes the strongest objection and ends on an implication, a question or a request. An outline is built from beats instead of topic sections: the claim in one sentence, the hook written out, three to five beats each with its argument and evidence, the strongest objection, and the ending written out.
+- **Not ready:** when the claim or its beats cannot honestly be written from the session, the writer says so instead of padding. Nothing is saved, and Sidebar reports why.
 - **Not interested** (and Discard) marks the topic as known; posting or drafting does too, so the same idea is not suggested again.
 - **In Sidebar:** `/post` publishes the last share note's post after a confirm dialog, `/post edit` puts `/post <draft>` in Sidebar's composer to change it first, and `/post <text>` publishes that text. `/draft` and `/draft outline` write a blog draft.
 
@@ -209,6 +210,9 @@ Configure destinations with environment variables (any one turns share notes on;
 
 - `PI_SIDEBAR_BLUESKY_HANDLE` and `PI_SIDEBAR_BLUESKY_APP_PASSWORD`: post as this account (a handle or DID) with an app password (the account password also works). Sidebar signs in directly at the account's own PDS, which it resolves from the handle (its `_atproto` DNS record or `/.well-known/atproto-did`, then its DID document), so a self-hosted PDS works the same as a bsky.social account. `PI_SIDEBAR_BLUESKY_SERVICE` skips resolution and names the PDS; `PI_SIDEBAR_BLUESKY_PLC` sets the did:plc directory (default `https://plc.directory`). Post links point at `PI_SIDEBAR_BLUESKY_WEB` (default `https://bsky.app`; `none` reports the `at://` URI). Links and hashtags become rich-text links.
 - `PI_SIDEBAR_DRAFTS_DIR`: write drafts to `<dir>/<date>-<slug>.md` (never overwriting).
+- `PI_SIDEBAR_SHARE_TASTE`: a markdown file (`~` is expanded) saying what is interesting to you. It replaces the default bar for raising ideas, and the check applies it strictly; the rules against anything confidential and the reply format stay. Read once at startup and cut at 4,000 characters.
+- `PI_SIDEBAR_SHARE_STYLE`: a markdown file saying how your pieces are written (voice, structure, words to avoid). It is added to every draft or outline request and overrides the default style where they differ. Cut at 12,000 characters.
+- A guide that is missing, empty, unreadable or cut is reported by `/sidebar headsup`, which also lists the guides in use. Guides alone do not turn share notes on.
 - `PI_SIDEBAR_DRAFTS_COMMAND`: instead, run this shell command with the markdown on stdin and `PI_SIDEBAR_DRAFT_TITLE`, `PI_SIDEBAR_DRAFT_SLUG`, `PI_SIDEBAR_DRAFT_KIND` (`full` or `outline`), `PI_SIDEBAR_DRAFT_DATE` and `PI_SIDEBAR_DRAFT_REPO` in its environment. The first line it prints is reported as where the draft went. Use it to file drafts in a notes app, such as an Obsidian vault through the Obsidian CLI.
 
 ## How it stays current and cheap

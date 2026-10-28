@@ -227,6 +227,7 @@ export class HeadsUp {
           ...(this.options.stream ? { stream: this.options.stream } : {}),
           ...(foreign ? { foreign } : {}),
           share: shareEnabled(this.share),
+          ...(this.share.taste ? { taste: this.share.taste } : {}),
         });
         // A share note the check was not asked for (sharing is off) is not shown.
         if (result.outcome === "note" && result.note?.kind === "share" && !shareEnabled(this.share)) result = { ...result, outcome: "none" };
@@ -319,6 +320,7 @@ export class HeadsUp {
       now,
       ...(this.options.stream ? { stream: this.options.stream } : {}),
       ...(foreign ? { foreign } : {}),
+      ...(this.share.style ? { style: this.share.style } : {}),
     });
     if (!result.ok) throw new Error(`the draft was not written: ${result.reason}`);
     let repo: string | undefined;

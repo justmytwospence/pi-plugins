@@ -35,6 +35,8 @@ export interface CheckInput {
   foreign?: ForeignCheck;
   /** Whether the check may also suggest something worth sharing. */
   share?: boolean;
+  /** The user's taste guide, replacing the default bar for share ideas. */
+  taste?: string;
 }
 
 export interface ForeignCheck {
@@ -141,7 +143,7 @@ export async function runCheck(input: CheckInput): Promise<CheckResult> {
     ...(input.signal ? { signal: input.signal } : {}),
     ...(input.stream ? { stream: input.stream } : {}),
     ...(input.foreign ? { foreign: input.foreign } : {}),
-    instructions: headsUpRole(!!input.share),
+    instructions: headsUpRole(!!input.share, input.taste),
     status: (liveText) => headsUpStatus({ liveText, known: input.known, recent: input.recent, now: input.now ?? Date.now() }),
   });
   if (reply.outcome !== "reply") return reply;

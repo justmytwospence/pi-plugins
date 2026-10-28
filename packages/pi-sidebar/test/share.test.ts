@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { visibleWidth } from "@earendil-works/pi-tui";
@@ -11,8 +11,8 @@ import { fitPost, graphemes, MAX_POST_GRAPHEMES, parseHeadsUp, type HeadsUpNote 
 import { noteMessages } from "../src/headsup/thread.ts";
 import { ProfileStore } from "../src/quiz/profile.ts";
 import { facetsOf, postToBluesky, type FetchFn } from "../src/share/bluesky.ts";
-import { shareConfig, shareEnabled, shareSummary } from "../src/share/config.ts";
-import { draftMarkdown, parseDraft, saveDraft, slugify } from "../src/share/draft.ts";
+import { shareConfig, shareEnabled, shareSummary, STYLE_MAX_CHARS, TASTE_MAX_CHARS, type ShareConfig } from "../src/share/config.ts";
+import { draftInstructions, draftMarkdown, notReady, parseDraft, saveDraft, slugify } from "../src/share/draft.ts";
 import { FakePi, fakeCtx } from "./fake.ts";
 
 const SHARE = '<headsup topic="Cache Splice" kind="share" format="both">Splicing a side request onto the main prompt cache.</headsup><headsup-detail>A neat trick: reuse the cached prefix.</headsup-detail><headsup-post>TIL you can splice a side request onto your agent\'s cached prompt and pay almost nothing for it.</headsup-post>';
@@ -50,6 +50,28 @@ describe("share notes in the reply protocol", () => {
     expect(headsUpRole(true).startsWith(HEADSUP_ROLE)).toBe(true);
   });
 
+  it("raises the default bar for share ideas and keeps the output contract", () => {
+    const role = headsUpRole(true);
+    expect(role).toContain("Default to not raising");
+    expect(role).toContain("plumbing");
+    expect(role).toContain("Never suggest sharing anything confidential");
+    expect(role).toContain('format="post|blog|both"');
+    expect(role).toContain("<headsup-post>");
+    expect(role).toContain("at most 280 characters");
+  });
+
+  it("replaces the default bar with the taste guide, keeping confidentiality and the contract", () => {
+    const role = headsUpRole(true, "Only counterintuitive numbers.");
+    expect(role.startsWith(HEADSUP_ROLE)).toBe(true);
+    expect(role).toContain("<share-taste>\nOnly counterintuitive numbers.\n</share-taste>");
+    expect(role).toContain("strictly");
+    expect(role).toContain('kind="share"');
+    expect(role).toContain("<headsup-post>");
+    expect(role).toContain("Never suggest sharing anything confidential");
+    expect(role).not.toContain("Default to not raising");
+    expect(headsUpRole(false, "ignored")).toBe(HEADSUP_ROLE);
+  });
+
   it("carries the post into Sidebar's thread", () => {
     const note = parseHeadsUp({ text: SHARE })!;
     const body = (noteMessages(note, { api: "a", provider: "p", model: "m" }, 0)[1] as any).content[0].text;
@@ -78,6 +100,52 @@ describe("share configuration", () => {
     expect(shareSummary(config)).not.toContain("app-pass");
     expect(shareConfig({ PI_SIDEBAR_DRAFTS_DIR: "/d", PI_SIDEBAR_DRAFTS_COMMAND: "save" }).drafts).toEqual({ command: "save" });
     expect(shareConfig({ PI_SIDEBAR_SHARE: "0", PI_SIDEBAR_DRAFTS_DIR: "/d" })).toEqual({});
+  });
+
+  const reader = (files: Record<string, string>) => (file: string) => {
+    if (file in files) return files[file]!;
+    throw Object.assign(new Error(`ENOENT: no such file, open '${file}'`), { code: "ENOENT" });
+  };
+
+  it("reads the taste and style guides, trimmed, with ~ expanded", () => {
+    const seen: string[] = [];
+    const read = (file: string) => { seen.push(file); return reader({ "/home/u/guides/taste.md": "  Numbers first.\n\n", "/abs/style.md": "Short sentences.\n" })(file); };
+    const config = shareConfig({ HOME: "/home/u", PI_SIDEBAR_SHARE_TASTE: "~/guides/taste.md", PI_SIDEBAR_SHARE_STYLE: "/abs/style.md" }, read);
+    expect(config).toEqual({ taste: "Numbers first.", style: "Short sentences." });
+    expect(seen).toEqual(["/home/u/guides/taste.md", "/abs/style.md"]);
+    expect(shareEnabled(config)).toBe(false); // guides alone do not turn sharing on
+    expect(shareConfig({}, () => { throw new Error("not read"); })).toEqual({});
+  });
+
+  it("reports a missing or empty guide as a problem and uses none", () => {
+    const config = shareConfig({ PI_SIDEBAR_SHARE_TASTE: "/x", PI_SIDEBAR_SHARE_STYLE: "/empty.md", PI_SIDEBAR_DRAFTS_DIR: "/d" }, reader({ "/empty.md": " \n" }));
+    expect(config.taste).toBeUndefined();
+    expect(config.style).toBeUndefined();
+    expect(config.guideProblems).toEqual(["PI_SIDEBAR_SHARE_TASTE: cannot read /x: ENOENT", "PI_SIDEBAR_SHARE_STYLE: /empty.md is empty"]);
+    expect(config.drafts).toEqual({ dir: "/d" });
+  });
+
+  it("cuts an over-long guide and says so", () => {
+    const config = shareConfig(
+      { PI_SIDEBAR_SHARE_TASTE: "/t", PI_SIDEBAR_SHARE_STYLE: "/s" },
+      reader({ "/t": "t".repeat(TASTE_MAX_CHARS + 50), "/s": "s".repeat(STYLE_MAX_CHARS + 1) }),
+    );
+    expect(config.taste).toHaveLength(TASTE_MAX_CHARS);
+    expect(config.style).toHaveLength(STYLE_MAX_CHARS);
+    expect(config.guideProblems).toHaveLength(2);
+    expect(config.guideProblems![0]).toMatch(/PI_SIDEBAR_SHARE_TASTE: \/t is 4050 characters; cut to the first 4000/);
+    expect(config.guideProblems![1]).toMatch(/PI_SIDEBAR_SHARE_STYLE: .* cut to the first 12000/);
+    expect(TASTE_MAX_CHARS).toBe(4000);
+    expect(STYLE_MAX_CHARS).toBe(12000);
+  });
+
+  it("says which guides are in use and what is wrong with the others", () => {
+    const config = shareConfig({ PI_SIDEBAR_DRAFTS_DIR: "/d", PI_SIDEBAR_SHARE_TASTE: "/t", PI_SIDEBAR_SHARE_STYLE: "/missing" }, reader({ "/t": "Taste." }));
+    const summary = shareSummary(config);
+    expect(summary).toContain("Share notes are on");
+    expect(summary).toContain("Guides in use: your taste guide.");
+    expect(summary).toContain("Guide problem: PI_SIDEBAR_SHARE_STYLE: cannot read /missing: ENOENT");
+    expect(shareSummary(shareConfig({ PI_SIDEBAR_SHARE_STYLE: "/s" }, reader({ "/s": "Plain." })))).toMatch(/^Share notes are off.*your style guide/);
   });
 });
 
@@ -166,6 +234,36 @@ describe("Bluesky", () => {
 describe("blog drafts", () => {
   const note = parseHeadsUp({ text: SHARE })!;
   const meta = { date: "2026-10-22", repo: "pi-plugins", topic: note.topic };
+
+  it("writes the full draft as an argument and the outline as beats", () => {
+    const full = draftInstructions("full");
+    expect(full).toContain("700 to 1500 words");
+    expect(full).toContain("first two sentences");
+    expect(full).toContain("Concede the strongest objection");
+    expect(full).toContain("Start with a single '# Title' line");
+    expect(full).toContain("never include secrets");
+    expect(full).toContain("<draft-not-ready>");
+    expect(full).not.toContain("<share-style>");
+    const outline = draftInstructions("outline");
+    expect(outline).toContain("three to five beats");
+    expect(outline).toContain("the claim in one sentence");
+    expect(outline).toContain("No section-per-topic headings");
+  });
+
+  it("appends the style guide, which overrides the defaults", () => {
+    for (const kind of ["full", "outline"] as const) {
+      const text = draftInstructions(kind, "Never use semicolons.");
+      expect(text).toContain("<share-style>\nNever use semicolons.\n</share-style>");
+      expect(text).toContain("style guide overrides the defaults");
+    }
+  });
+
+  it("reads the not-ready reply as a refusal, never a draft", () => {
+    const reply = "<draft-not-ready>No evidence in the session.</draft-not-ready>";
+    expect(parseDraft(reply, note, "full")).toBeUndefined();
+    expect(notReady(reply)).toBe("No evidence in the session.");
+    expect(notReady("# Title\n\nBody")).toBeUndefined();
+  });
 
   it("takes the title from the first heading and adds front matter", () => {
     const draft = parseDraft("```markdown\n# Splice Your Cache\n\nBody.\n```", note, "full")!;
@@ -279,7 +377,7 @@ function stubStream(replies: string[]) {
 }
 
 describe("HeadsUp with sharing", () => {
-  async function setup(replies: string[], env: NodeJS.ProcessEnv) {
+  async function setup(replies: string[], env: NodeJS.ProcessEnv, share?: ShareConfig) {
     const now = 1000;
     const pi = new FakePi();
     const main = new MainState(pi as never, () => now);
@@ -301,6 +399,7 @@ describe("HeadsUp with sharing", () => {
     const written: unknown[] = [];
     const headsUp = new HeadsUp(pi as never, main, { deliver: () => false, askSidebar: () => true, draftWritten: (...args) => written.push(args) }, {
       knowledgeDir: path.join(dir, "k"), logFile: path.join(dir, "log"), run: async () => undefined, stream, now: () => now, env: { ...env, PI_SIDEBAR_DRAFTS_DIR: env.PI_SIDEBAR_DRAFTS_DIR ? path.join(dir, "drafts") : "" }, fetch,
+      ...(share ? { share } : {}),
     });
     const known = () => new ProfileStore(path.join(dir, "k"), "/repo").load().headsUp?.known.map((t) => t.id) ?? [];
     const settle = () => new Promise((r) => setTimeout(r, 10));
@@ -357,7 +456,7 @@ describe("HeadsUp with sharing", () => {
     await settle();
     const draftPayload = sent[1].payload;
     expect(draftPayload.messages[0]).toEqual(mainPayload().messages[0]);
-    expect(JSON.stringify(draftPayload)).toContain("section-by-section outline");
+    expect(JSON.stringify(draftPayload)).toContain("the strongest objection");
     expect(JSON.stringify(draftPayload)).toContain("sidebar-share-idea");
     expect(sent[1].options.maxTokens).toBe(3000);
     const files = readdirSync(path.join(dir, "drafts"));
@@ -366,6 +465,33 @@ describe("HeadsUp with sharing", () => {
     expect(written).toHaveLength(1);
     expect(known()).toContain("cache-splice");
     expect(headsUp.note.showing).toBe(false);
+  });
+
+  it("sends the taste guide in the check and the style guide in the draft", async () => {
+    const bsky = shareConfig(BSKY);
+    const share = { ...bsky, drafts: { dir: path.join(mkdtempSync(path.join(tmpdir(), "share-guides-")), "drafts") }, taste: "Only counterintuitive numbers.", style: "Never use semicolons." };
+    const { headsUp, sent, settle } = await setup([SHARE, "# Title\n\nBody"], { PI_SIDEBAR_DRAFTS_DIR: "set" }, share);
+    await headsUp.check("turn");
+    const check = JSON.stringify(sent[0].payload);
+    expect(check).toContain("<share-taste>");
+    expect(check).toContain("Only counterintuitive numbers.");
+    expect(check).toContain('kind=\\"share\\"');
+    expect(check).not.toContain("Default to not raising");
+    headsUp.handleKey("2", true);
+    await settle();
+    expect(JSON.stringify(sent[1].payload)).toContain("Never use semicolons.");
+  });
+
+  it("does not save a draft the model says is not ready", async () => {
+    const { headsUp, notes, written, dir, known, settle } = await setup([SHARE, "<draft-not-ready>The session shows no measurement.</draft-not-ready>"], { PI_SIDEBAR_DRAFTS_DIR: "set" });
+    await headsUp.check("turn");
+    headsUp.handleKey("2", true);
+    await settle();
+    expect(notes.at(-1)?.level).toBe("error");
+    expect(notes.at(-1)?.message).toContain("the idea is not ready for a draft: The session shows no measurement.");
+    expect(written).toHaveLength(0);
+    expect(existsSync(path.join(dir, "drafts"))).toBe(false);
+    expect(known()).not.toContain("cache-splice");
   });
 
   it("marks a share idea the user is not interested in as known", async () => {

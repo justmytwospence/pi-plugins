@@ -10,16 +10,32 @@ export const HEADSUP_ROLE = [
   "The topic id names the underlying issue, stably (the same issue later gets the same id).",
 ].join(" ");
 
-/** Added when sharing is on: the check may instead suggest something worth posting or blogging about. */
-export const HEADSUP_SHARE = [
-  "Second, and only when there is no note of the kinds above: the work may hold something worth sharing publicly, a genuinely interesting insight, technique, surprising result or hard-won lesson that other developers would value as a short social post or a blog post.",
-  "This is rarer still. Never suggest sharing anything confidential: secrets, credentials, private names, client or employer details, unreleased plans, internal hostnames or paths. Prefer the general lesson over the specifics of this codebase.",
-  'For such an idea, use kind="share" with format="post|blog|both" (post: fits one short post; blog: needs a longer write-up; both), the headsup sentence naming the idea, the headsup-detail giving the angle and why it would interest people, and, unless format is blog, a third block <headsup-post>a ready-to-publish post in the user\'s voice, first person, at most 280 characters, no hashtags unless natural, no emojis</headsup-post>.',
+const SHARE_INTRO = "Second, and only when there is no note of the kinds above: the work may hold something worth sharing publicly as a short social post or a blog post.";
+
+const SHARE_CONFIDENTIAL = "Never suggest sharing anything confidential: secrets, credentials, private names, client or employer details, unreleased plans, internal hostnames or paths.";
+
+const SHARE_CONTRACT = [
+  'For such an idea, use kind="share" with format="post|blog|both" (post: fits one short post; blog: needs a longer write-up; both), the headsup sentence stating the claim itself (not a topic label), the headsup-detail giving the angle, the evidence from this session and why people beyond this setup would care, and, unless format is blog, a third block <headsup-post>a ready-to-publish post in the user\'s voice</headsup-post>.',
+  'The post starts with the claim or the number, never "TIL" or "I built"; it ends on the implication or an honest open question; no hashtags, no emojis, at most 280 characters.',
 ].join(" ");
 
-/** The check's instructions, with or without share ideas. */
-export function headsUpRole(share: boolean): string {
-  return share ? `${HEADSUP_ROLE} ${HEADSUP_SHARE}` : HEADSUP_ROLE;
+/** The default bar for raising share ideas (replaced by the user's taste guide when there is one). */
+const SHARE_BAR = [
+  "The bar is high and most sessions clear it never. Raise a share idea only when the session yields at least one of: a specific claim someone could disagree with; a measurement from this session that explains something; a named pattern that would be recognizable beyond this setup; or a reversal learned the hard way (what was believed, what turned out true). It must also generalize to people who use none of these tools.",
+  "Never raise how something was wired, configured, migrated or fixed (plumbing), release notes, tool announcements, or anything only this codebase, homelab or dotfiles would care about.",
+  "Default to not raising: when unsure, do not.",
+].join(" ");
+
+/** Added when sharing is on: the check may instead suggest something worth posting or blogging about. */
+export const HEADSUP_SHARE = [SHARE_INTRO, SHARE_BAR, SHARE_CONFIDENTIAL, SHARE_CONTRACT].join(" ");
+
+/** The check's instructions, with or without share ideas (and the user's taste guide in place of the default bar). */
+export function headsUpRole(share: boolean, taste?: string): string {
+  if (!share) return HEADSUP_ROLE;
+  if (!taste) return `${HEADSUP_ROLE} ${HEADSUP_SHARE}`;
+  const guide = `<share-taste>\n${taste}\n</share-taste>`;
+  const strict = "Apply this guide strictly in place of any default bar: raise a share idea only when the session clearly meets it, and when unsure, do not raise one.";
+  return [HEADSUP_ROLE, SHARE_INTRO, guide, strict, SHARE_CONFIDENTIAL, SHARE_CONTRACT].join(" ");
 }
 
 export interface HeadsUpStatusInput {
