@@ -35,9 +35,10 @@ export interface Policy {
 
 export const DEFAULT_POLICY: Policy = {
   floor: "low",
-  bounds: "ceiling",
+  bounds: "free",
   max: "xhigh",
-  threshold: { relaxed: 0.35, tight: 0.85 },
+  // relaxed 0.5: the level is the median of Jev's distribution, unbiased.
+  threshold: { relaxed: 0.5, tight: 0.85 },
   hysteresis: 0.1,
   ackThreshold: 0.7,
 };

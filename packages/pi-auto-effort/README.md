@@ -1,6 +1,6 @@
 # pi-auto-effort
 
-A Pi extension that sets the thinking level for each message you send, and between tool turns of a long run where the model allows it without losing the prompt cache. [Jev](https://docs.typesafe.ai), called through Pi's classifier models (`ctx.modelRegistry.classify`), says which level the request needs before the turn starts; a level is picked only when Jev is confident enough that the work needs it, a bar that rises when a subscription window is on track to run out, and your latest manual level is the ceiling. Opt-in, it can also pick a cheaper or stronger model of the same provider for a message while switching costs nothing (the cache is cold).
+A Pi extension that sets the thinking level for each message you send, and between tool turns of a long run where the model allows it without losing the prompt cache. [Jev](https://docs.typesafe.ai), called through Pi's classifier models (`ctx.modelRegistry.classify`), says which level the request needs before the turn starts; a level is picked only when Jev is confident enough that the work needs it, a bar that rises when a subscription window is on track to run out. It also picks a model of the same provider for each message (Sonnet or Opus, Terra or Sol by default): a cheaper one only while switching costs nothing (the cache is cold), a stronger one whenever the work needs it, and with pi-cache-guard it offers both in the cold-cache dialog.
 
 Part of [Pi Plugins](https://github.com/justmytwospence/pi-plugins). Reference: <https://pi-plugins.vercel.app/plugins/pi-auto-effort/>.
 
@@ -41,14 +41,14 @@ Before each message you send, Jev answers a choice over four levels:
 
 Jev sees the request, the two before it, the last answer, and what the last run did (errors, files edited, tool calls). It also judges whether the message is a go-ahead.
 
-**The threshold rule.** Jev's answer is a probability for each level. `need(L)`, the probability that the work needs at least L, is the sum of the probabilities of L and every level above it. The level is the highest one within the bounds whose need is at least the threshold `θ`, else the floor. `θ = relaxed + (tight - relaxed)·p`, with `policy.threshold` `relaxed` 0.35 and `tight` 0.85, and `p` the subscription pressure: 0 with none, 0.5 at caution, 1 at critical (see [Limits](#limits)). Under pressure only work Jev is surer about gets the higher levels.
+**The threshold rule.** Jev's answer is a probability for each level. `need(L)`, the probability that the work needs at least L, is the sum of the probabilities of L and every level above it. The level is the highest one within the bounds whose need is at least the threshold `θ`, else the floor. `θ = relaxed + (tight - relaxed)·p`, with `policy.threshold` `relaxed` 0.5 and `tight` 0.85, and `p` the subscription pressure: 0 with none, 0.5 at caution, 1 at critical (see [Limits](#limits)). At 0.5 the level is the median of Jev's distribution, biased neither up nor down; under pressure only work Jev is surer about gets the higher levels.
 
 **No flip-flopping.** The level goes up as soon as a higher level clears `θ`, but goes down only once the current level's need is below `θ - policy.hysteresis` (0.1). A go-ahead ("yes", "continue", "do it", above `ackThreshold` 0.7) keeps the level.
 
 **Bounds.** `policy.bounds` sets the range:
 
-- `ceiling` (default): from `policy.floor` (`low`) up to your latest manual level, any thinking-level change auto-effort did not make itself (`/thinking`, Pi's shortcut, a model switch that changes the level, or another extension such as plan mode).
-- `free`: from `policy.floor` up to `policy.max` (`xhigh`; never `max`). A manual change sets the level now, and the next assessment moves on from it either way.
+- `free` (default): from `policy.floor` (`low`) up to `policy.max` (`xhigh`; never `max`). A manual change sets the level now, and the next assessment moves on from it either way.
+- `ceiling`: from `policy.floor` up to your latest manual level, any thinking-level change auto-effort did not make itself (`/thinking`, Pi's shortcut, a model switch that changes the level, or another extension such as plan mode).
 
 Levels outside the managed range (`off`, `minimal`) are left alone, as is everything in `ceiling` bounds when the ceiling is below the floor. The policy never picks `max`; a `max` ceiling only caps it.
 
@@ -60,20 +60,48 @@ Auto-effort is off when Pi was started with `--thinking` (so a subagent's explic
 
 **Older settings.** The smoothing policy's keys (`policy.mode`, `alpha`, `margin`, `jump`, `jumpConfidence`, `minDwell`, `minConfidence`) and `limits.steps` are ignored, as are the running average and dwell saved in older sessions (their ceiling is kept).
 
-## Model choice (opt-in)
+## Model choice
 
-With `models.mode` set to `suggest` or `auto` (or `/auto-effort models suggest|auto` for the session) and tiers configured for the current provider, auto-effort can pick a model for a message by the same rule. A model switch re-sends the whole conversation without a cached prefix, so it is considered only before a message you send, and only when switching is cheap:
+With `models.mode` `auto` (the default; `/auto-effort models off|auto` for the session) and tiers for the current provider, auto-effort picks a model for each message you send by the same rule. The same Jev request gets a `tier` choice over the provider's tiers (`fast` < `balanced` < `strong`), and the tier is the highest within the bounds whose need clears `θ`. The provider is kept: tiers are looked up for the current provider, and an entry naming another provider is skipped.
 
-- the session's first message;
-- the prompt cache is cold: pi-cache-guard's `cache:state` event says so when it is loaded, else the time since the last answer exceeds the model's cache lifetime (its `promptCache` metadata, else 5 minutes, or an hour with `PI_CACHE_RETENTION=long`);
-- or the context is below `models.maxSwitchTokens` (30000) tokens.
+**Tiers.** `models.tiers` maps a provider to its tier models. A provider without an entry gets a built-in preset, resolved from the models Pi has credentials for (`ctx.modelRegistry.getAvailable()`):
 
-Then the same Jev request gets a `tier` choice over the configured tiers (`fast` < `balanced` < `strong`), and the tier is the highest whose need clears `θ`. The provider is kept: tiers are looked up for the current provider, and an entry naming another provider is skipped.
+| Provider | balanced | strong |
+|---|---|---|
+| `anthropic` | newest `claude-sonnet-*` | newest `claude-opus-*` |
+| `openai-codex` | newest `*-terra` | newest `*-sol` |
 
-- `suggest` notifies, for example `auto-effort: Haiku would do; cache is cold: /model anthropic/claude-haiku-4-5`.
-- `auto` switches (`pi.setModel`), notifies, and adds `≈haiku-4-5` to the status.
+Newest is a numeric-aware sort of the id (`claude-sonnet-5-5` after `claude-sonnet-5`, `gpt-6.1-sol` after `gpt-6-sol`), skipping an id with an 8-digit date suffix when its undated alias exists. The presets have no `fast` tier: a small model is too weak for the main session. With a preset, your own model keeps its family's tier, so an older Sonnet you picked is your balanced model. An explicit `models.tiers[provider]` replaces the preset for that provider.
 
-The model you pick by hand is remembered as yours. When its tier is picked (a harder request with the cache cold), `auto` returns to it. In `ceiling` bounds no tier above your model's is picked; a model not in the tier map counts as `strong` (and stands in for `strong` when none is configured). A go-ahead keeps the model, and `/auto-effort off` returns to yours.
+**When it switches.** A model switch re-sends the whole conversation without a cached prefix, so it is considered only before a message you send, and the two directions differ:
+
+- **Down** (to a cheaper tier than the current model's) only when switching is cheap:
+  - the session's first message;
+  - the prompt cache is cold: pi-cache-guard's `cache:state` event says so when it is loaded; else the last cache activity (the last answer, or a later Pi cache-warming refresh) is older than the model's cache lifetime (its `promptCache` metadata, else 5 minutes, or an hour with `PI_CACHE_RETENTION=long`);
+  - or the context is below `models.maxSwitchTokens` (30000) tokens.
+- **Up** (to a stronger tier, including back to your own model after an auto downshift) on any message the rule picks it, even with a warm cache, accepting one cache rewrite. With a warm cache the `tier` question is asked only when a stronger tier, up to your own model, exists.
+
+It switches with `pi.setModel`, notifies (`auto-effort: Claude Sonnet 5.5 for this request; first message`, `auto-effort: back to Claude Opus 5.5; harder request, one cache rewrite`), and adds `≈sonnet-5-5` to the status while an auto pick is in use.
+
+The model you pick by hand is remembered as yours; an auto pick never changes it. When its tier is picked, auto returns to it. Automatic picks never go above your model's tier, whatever the effort bounds: the model you (or another extension, such as plan mode's implementation model) chose is the ceiling. Stronger models are only offered in pi-cache-guard's cold-cache dialog, where you choose. Model choice is off when Pi was started with `--model` (a Herdr child, a script). A model that is neither in the tier map nor of a preset family counts as `strong` (and stands in for `strong` when there is none). A go-ahead keeps the model, and `/auto-effort off` returns to yours.
+
+**pi-cache-guard's cold-cache dialog.** When pi-cache-guard holds a prompt because the cache is cold, it asks loaded extensions for models to offer, and auto-effort answers when it is on, `models.mode` is `auto` and the provider has two or more tiers. Two events on Pi's extension event bus carry this:
+
+```ts
+// pi-cache-guard, before the dialog: listeners push promises; it awaits them (about 2.5 s at most).
+pi.events.emit("cache:model-offers", { text, tokens, offers: [] as Array<Promise<ModelOffer[] | undefined>> });
+// pi-cache-guard, after the dialog: the chosen offer's provider/id, or null (send on the current model, compact, fresh or keep).
+pi.events.emit("cache:model-choice", { text, model: "anthropic/claude-sonnet-5-5" });
+
+interface ModelOffer {
+  model: string; // provider/id, never the current model
+  label: string; // the registry name, like "Claude Sonnet 5.5"
+  recommended?: boolean;
+  note?: string; // short, like "Jev: routine work"
+}
+```
+
+For `cache:model-offers` auto-effort runs the assessment it would run for the prompt (`depth`, `ack` and `tier` questions against the current branch), picks a tier by the rule over every tier (either direction: the cache is cold anyway, and you choose), and returns one offer per other tier model, lowest tier first, with `recommended` on its pick when that differs from the current model. The assessment is kept for the prompt with the same text, so the prompt does not ask Jev again. A `cache:model-choice` for the same text is applied before that prompt: a model is switched to as an auto pick (your own model stays yours), and `null` keeps the current model; either way auto-effort makes no model choice of its own for that prompt, but still sets the level. A choice or assessment for another text is discarded. The event names and types are exported (`MODEL_OFFERS_EVENT`, `MODEL_CHOICE_EVENT`, `ModelOffersEvent`, `ModelChoiceEvent`, `ModelOffer`).
 
 ## Effort updates (Codex)
 
@@ -87,19 +115,19 @@ On OpenAI Responses models whose backend accepts a `configuration_update` input 
 
 ## Commands
 
-- `/auto-effort` or `/auto-effort status`: current level, bounds, the last judgment (for example `Jev: need(medium)=0.90 need(high)=0.55 need(xhigh)=0.10, θ=0.60 (5h caution) → medium, last decision: hold.`), model choice, and the limits lines.
+- `/auto-effort` or `/auto-effort status`: current level, bounds, the last judgment (for example `Jev: need(medium)=0.90 need(high)=0.55 need(xhigh)=0.10, θ=0.68 (5h caution) → medium, last decision: hold.`), model choice (for example `Models: auto (settings): balanced claude-sonnet-5-5, strong claude-opus-5-5 (preset); your model anthropic/claude-opus-5-5.`), and the limits lines.
 - `/auto-effort limits`: for each window of the current provider: use, elapsed share, projection, time to run out, reading age and tier.
 - `/auto-effort on`, `/auto-effort off`: for this session. Off restores your manual level (and model) and turns off limits too.
-- `/auto-effort bounds ceiling|free`: the bounds for this session, over `policy.bounds`.
-- `/auto-effort models off|suggest|auto`: model choice for this session, over `models.mode`.
+- `/auto-effort bounds free|ceiling`: the bounds for this session, over `policy.bounds`.
+- `/auto-effort models off|auto`: model choice for this session, over `models.mode`.
 
-The status shows `effort: medium (auto ↑ ≤high)` in `ceiling` bounds (`≤` your manual level) and `effort: medium (auto ↑ free)` in `free` bounds, then `≈<model>` while auto picked a model and `, limited: 5h 84%` while a subscription window is under pressure, for example `effort: medium (auto → ≤high ≈haiku-4-5, limited: 5h 84%)`. The detail never contains parentheses, so pi-status-footer can parse it. The arrow is where the level is heading after the last judgment: ↑ when the next level's need is within the hysteresis of `θ` and the bounds leave room, ↓ when the level holds only through the hysteresis, → otherwise.
+The status shows `effort: medium (auto ↑ free)` in `free` bounds and `effort: medium (auto ↑ ≤high)` in `ceiling` bounds (`≤` your manual level), then `≈<model>` while auto picked a model and `, limited: 5h 84%` while a subscription window is under pressure, for example `effort: medium (auto → free ≈sonnet-5-5, limited: 5h 84%)`. The detail never contains parentheses, so pi-status-footer can parse it. The arrow is where the level is heading after the last judgment: ↑ when the next level's need is within the hysteresis of `θ` and the bounds leave room, ↓ when the level holds only through the hysteresis, → otherwise.
 
-Each decision is an `auto-effort:state` session entry (never sent to the model; `phase` is `prompt` or `run`), with `need` per level, `theta`, `p`, `bounds`, the ceiling, the level before and after, the reason, any limit, and the model choice and your model when model choice is on. When a session starts or resumes, the state is restored from the latest such entry on the current branch.
+Each decision is an `auto-effort:state` session entry (never sent to the model; `phase` is `prompt` or `run`), with `need` per level, `theta`, `p`, `bounds`, the ceiling, the level before and after, the reason, any limit, your model, and the model choice when one was considered (`action` `keep`, `switched`, `chosen` for your pick in pi-cache-guard's dialog, `missing` or `failed`). When a session starts or resumes, the state is restored from the latest such entry on the current branch.
 
 ## Limits
 
-When an Anthropic or Codex subscription window (5h, weekly) is on track to run out before it resets, auto-effort raises the threshold `θ`, so only work Jev is surer about gets the higher levels (and, with model choice, the stronger tiers).
+When an Anthropic or Codex subscription window (5h, weekly) is filling up or on track to run out before it resets, auto-effort raises the threshold `θ`, so only work Jev is surer about gets the higher levels (and the stronger tiers). Pressure never forces a step down by itself, so caution starts early and gently.
 
 **Sources.** Anthropic subscription (OAuth) responses carry `anthropic-ratelimit-unified-5h-*` and `-7d-*` headers (utilization, reset, status), read in `after_provider_response`; an API key gets token-bucket headers instead, which are ignored, so it is never limited. Codex windows are read from `x-codex-primary-*` / `x-codex-secondary-*` response headers when present, and from `GET https://chatgpt.com/backend-api/wham/usage` (Pi's default WebSocket transport carries no `x-codex-*` headers). That endpoint is polled only while limits are on and a Codex model is in use, with the token and account Pi itself sends: at most every 5 minutes, one request at a time, 5 s timeout, in the background (a prompt never waits for it). A 429 waits for `Retry-After`, else 15 minutes doubling to an hour; other failures wait 5 minutes doubling to an hour; a 401/403 stops polling until the token changes. A change of Codex account drops the old account's readings.
 
@@ -109,10 +137,10 @@ When an Anthropic or Codex subscription window (5h, weekly) is on track to run o
 
 | Tier | Pressure `p` | `θ` (defaults) | At once when | After a second assessment 5 minutes later when |
 |---|---|---|---|---|
-| caution | 0.5 | 0.60 | 75% used | the forecast runs out before 90% of the time to reset (warming up: projected 100% at reset) |
-| critical | 1 | 0.85 | 90% used, the provider reports it exceeded, or the forecast runs out within 30 minutes | projected 150% at reset |
+| caution | 0.5 | 0.675 | 60% used | the forecast reaches 90% used before 90% of the time to reset (warming up: projected 90% at reset) |
+| critical | 1 | 0.85 | 80% used, the provider reports it exceeded, or the forecast runs out within 60 minutes | projected 120% at reset |
 
-The worst window wins. The level never goes below `policy.floor`. A tier lifts after two assessments 5 minutes apart with the projection at most 95% at reset (for critical, at most 145%) and use 5 points under the tier's threshold. A window that resets clears its tier at once. Assessments happen at your prompts (and mid-run checks), so an idle session changes nothing. A tier change is announced with a notification.
+The worst window wins. The level never goes below `policy.floor`. A tier lifts after two assessments 5 minutes apart with the projection at most 95% at reset (for critical, at most 115%) and use 5 points under the tier's threshold. A window that resets clears its tier at once. Assessments happen at your prompts (and mid-run checks), so an idle session changes nothing. A tier change is announced with a notification.
 
 **The forecast.** Two rates from the window's history of readings: a recent one (the last hour, half-life 15 minutes; gaps over 30 minutes do not count) and a sustained one (the last 24 hours, half-life 6 hours), each weighting an interval by its length and recency. The recent burst decays toward the sustained rate over `tau = min(1 h, window / 5)`, and the forecast integrates that up to the reset: near a 5h reset a burst dominates, across a week it fades. Until a window has 3 readings spanning `min(1 h, window / 10)`, the linear pace (used divided by the fraction of the window elapsed, as in CodexBar) stands in, from 10% elapsed and 20% used. A reading older than 15 minutes still counts as a minimum (use only grows within a window) but not for the weighted forecast. A spend limit has no length, so only its absolute thresholds apply.
 
@@ -141,14 +169,14 @@ The `agents` files are shared with the opencode and Claude Code ports of this pl
 {
   "enabled": true,
   "jev": { "enabled": true, "provider": "typesafe", "model": "jev-latest", "timeoutMs": 1500 },
-  "policy": { "floor": "low", "bounds": "ceiling", "max": "xhigh", "threshold": { "relaxed": 0.35, "tight": 0.85 }, "hysteresis": 0.1, "ackThreshold": 0.7 },
+  "policy": { "floor": "low", "bounds": "free", "max": "xhigh", "threshold": { "relaxed": 0.5, "tight": 0.85 }, "hysteresis": 0.1, "ackThreshold": 0.7 },
   "midRun": { "enabled": true, "everyTurns": 3, "errorTurns": 1, "steps": 6, "models": [] },
   "effortUpdates": { "enabled": true, "models": ["openai-codex/gpt-6-astra", "openai-codex/gpt-6.1-sol"] },
-  "models": { "mode": "off", "maxSwitchTokens": 30000, "tiers": {} },
+  "models": { "mode": "auto", "maxSwitchTokens": 30000, "tiers": {} },
   "limits": {
     "enabled": true,
-    "caution":  { "used": 0.75, "projected": 1.0 },
-    "critical": { "used": 0.90, "projected": 1.5, "exhaustMinutes": 30 },
+    "caution":  { "used": 0.6, "projected": 0.9 },
+    "critical": { "used": 0.8, "projected": 1.2, "exhaustMinutes": 60 },
     "exitProjected": 0.95,
     "hysteresis": 0.05,
     "confirmMinutes": 5,
@@ -160,8 +188,9 @@ The `agents` files are shared with the opencode and Claude Code ports of this pl
 }
 ```
 
-- `policy.bounds` is `ceiling` or `free`; `policy.floor` and `policy.max` are `low` to `xhigh`; the thresholds, `hysteresis` and `ackThreshold` are 0 to 1. An invalid value keeps its default.
-- `models.tiers` maps a provider to the `provider/id` (or bare id) of its `fast`, `balanced` and `strong` models; any subset works. For example `"tiers": { "anthropic": { "fast": "anthropic/claude-haiku-4-5", "balanced": "anthropic/claude-sonnet-4-5", "strong": "anthropic/claude-opus-4-5" } }`.
+- `policy.bounds` is `free` or `ceiling`; `policy.floor` and `policy.max` are `low` to `xhigh`; the thresholds, `hysteresis` and `ackThreshold` are 0 to 1. An invalid value keeps its default.
+- `models.mode` is `off` or `auto`; any other value (including the retired `suggest`) means `auto`.
+- `models.tiers` maps a provider to the `provider/id` (or bare id) of its `fast`, `balanced` and `strong` models; any subset works, and an entry replaces the provider's preset. For example `"tiers": { "anthropic": { "fast": "anthropic/claude-haiku-4-5", "balanced": "anthropic/claude-sonnet-4-5", "strong": "anthropic/claude-opus-4-5" } }`; `"tiers": { "anthropic": {} }` turns model choice off for one provider.
 - `midRun.errorTurns` is how many failed tool calls in one turn trigger an early check (0 = never). `midRun.models` and `effortUpdates.models` are `provider/id` globs (`*` matches anything).
 - An invalid `limits`, `midRun`, `effortUpdates` or `models` value falls back to its default.
 - `"limits": { "enabled": false }` in the shared file turns limits off for every port; `/auto-effort off` turns them off with the rest for the session.
@@ -169,17 +198,18 @@ The `agents` files are shared with the opencode and Claude Code ports of this pl
 ## Requirements and costs
 
 - Pi 0.99 or newer for classifier models, and a configured classifier model; Pi resolves the credentials (`TYPESAFE_API_KEY` for its `typesafe` provider). Without Jev the level is never raised or lowered by score.
-- Each message you send makes one classifier request (model choice adds a question to it, not a request), and mid-run checks add one every few tool turns on supported models, each awaited before the next model request. These requests can be billed. Set `"enabled": false` or `"jev": { "enabled": false }` to stop them.
+- Each message you send makes one classifier request (model choice adds a question to it, not a request; a prompt held by pi-cache-guard's cold-cache dialog makes it while the dialog opens and reuses it), and mid-run checks add one every few tool turns on supported models, each awaited before the next model request. These requests can be billed. Set `"enabled": false` or `"jev": { "enabled": false }` to stop them.
 - With limits on and a Codex model in use, it makes background requests to `chatgpt.com/backend-api/wham/usage` with Pi's Codex credential.
-- With `models.mode` `auto` it switches the session's model (never the configured default for new sessions).
+- With `models.mode` `auto` (the default) it switches the session's model within the provider (never the configured default for new sessions); a step up with a warm cache re-writes the cache once. Set `"models": { "mode": "off" }` to keep your model.
 - On disk it reads only the settings files above and writes nothing. In the session it appends `auto-effort:state` and `auto-effort:effort-updates` custom entries (never sent to the model).
 
 ## Optional integrations
 
-- pi-status-footer renders the `auto-effort` status as `reasoning high · auto ↑ ≤xhigh`. Optional; without it Pi shows the status as usual.
-- pi-cache-guard's `cache:state` event (`{ cold, tokens?, model? }`) tells model choice whether the cache is cold and how large the context is. Optional; without it auto-effort estimates from the time since the last answer and Pi's context usage.
+- pi-status-footer renders the `auto-effort` status as `reasoning high · auto ↑ free`. Optional; without it Pi shows the status as usual.
+- pi-cache-guard's `cache:state` event (`{ cold, tokens?, model? }`) tells model choice whether the cache is cold and how large the context is. Optional; without it auto-effort estimates from the time since the last cache activity (an answer or a Pi cache-warming refresh) and Pi's context usage.
+- pi-cache-guard's cold-cache dialog offers auto-effort's models through `cache:model-offers` and reports your pick through `cache:model-choice` (see [Model choice](#model-choice)). Optional; without it the dialog offers no models and auto-effort chooses on its own.
 - Other extensions can listen for `quota:pressure` (see [Limits](#limits)).
-- Plan mode or any other extension that sets the thinking level sets the ceiling, like a manual change.
+- Plan mode or any other extension that sets the thinking level counts as a manual change (the ceiling in `ceiling` bounds).
 
 ## Limitations
 

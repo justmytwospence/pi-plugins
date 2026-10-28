@@ -5,8 +5,8 @@ import { answers as depthAnswers, fakeJev, harness } from "./harness.ts";
 
 const M = 60_000;
 const t0 = Date.UTC(2026, 0, 1);
-// need(medium) 0.9, need(high) 0.45: high with no pressure, medium at caution or critical.
-const answers = () => depthAnswers([0.1, 0.45, 0.35, 0.1], 0.02);
+// need(medium) 0.9, need(high) 0.55: high with no pressure (theta 0.5), medium at caution (0.675) or critical (0.85).
+const answers = () => depthAnswers([0.1, 0.35, 0.45, 0.1], 0.02);
 
 function jwt(account: string) {
   const part = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
@@ -50,7 +50,7 @@ test("Anthropic headers on a risky pace raise theta after a confirming prompt, a
   await h.emit("before_agent_start", { prompt: "and the tests" }, ctx);
   expect(h.thinking).toBe("medium");
   expect(h.entries.at(-1)?.data).toMatchObject({ level: "medium", reason: "down", theta: 0.85, p: 1, limit: { tier: "critical", window: "5h" } });
-  expect(ctx.ui.status.get("auto-effort")).toBe("effort: medium (auto → ≤high, limited: 5h 35%)");
+  expect(ctx.ui.status.get("auto-effort")).toBe("effort: medium (auto → free, limited: 5h 35%)");
   expect(ctx.ui.notes.at(-1)?.message).toMatch(/^auto-effort: 5h window 35% used, projected \d+% at reset .*; critical: higher effort needs a clearer case$/);
   const pressure = () => h.events.filter((e) => e.channel === "quota:pressure").map((e) => e.data);
   expect(pressure()).toEqual([
@@ -67,7 +67,7 @@ test("Anthropic headers on a risky pace raise theta after a confirming prompt, a
   await h.emit("after_provider_response", { type: "after_provider_response", status: 200, headers: anthropicHeaders(0.01, 540) }, ctx);
   await h.emit("before_agent_start", { prompt: "next" }, ctx);
   expect(h.thinking).toBe("high");
-  expect(ctx.ui.status.get("auto-effort")).toBe("effort: high (auto → ≤high)");
+  expect(ctx.ui.status.get("auto-effort")).toBe("effort: high (auto → free)");
   expect(ctx.ui.notes.at(-1)?.message).toBe("auto-effort: usage limit lifted; effort back to normal");
   expect(pressure().at(-1)).toEqual({ provider: "anthropic", tier: "none", p: 0 });
   expect(now()).toBe(t0 + 7 * M);
@@ -90,7 +90,7 @@ test("Codex usage is polled with Pi's token and account, and caps the level", as
   const calls: Array<{ url: string; headers: Record<string, string> }> = [];
   const fetchImpl = (async (url: string, init: RequestInit) => {
     calls.push({ url, headers: init.headers as Record<string, string> });
-    return new Response(usageBody(80));
+    return new Response(usageBody(70));
   }) as unknown as typeof fetch;
   const { h, ctx } = setup("openai-codex", { fetch: fetchImpl });
   await h.emit("session_start", { type: "session_start" }, ctx);
@@ -102,7 +102,7 @@ test("Codex usage is polled with Pi's token and account, and caps the level", as
   });
   await h.emit("before_agent_start", { prompt: "hard" }, ctx);
   expect(h.thinking).toBe("medium");
-  expect(ctx.ui.status.get("auto-effort")).toBe("effort: medium (auto → ≤high, limited: 5h 80%)");
+  expect(ctx.ui.status.get("auto-effort")).toBe("effort: medium (auto → free, limited: 5h 70%)");
   expect(h.events.at(-1)).toEqual({ channel: "quota:pressure", data: { provider: "openai-codex", tier: "caution", p: 0.5, label: "5h caution" } });
   // Within 5 minutes no new request.
   await h.emit("agent_settled", { type: "agent_settled" }, ctx);

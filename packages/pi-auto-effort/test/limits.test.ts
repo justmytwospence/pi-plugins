@@ -2,7 +2,7 @@
 // their confirmation, and the parsers.
 import { expect, test } from "vitest";
 import {
-  DEFAULT_LIMITS as P,
+  DEFAULT_LIMITS,
   Tracker,
   limitsPolicy,
   readAnthropicHeaders,
@@ -10,6 +10,9 @@ import {
   readCodexHeaders,
   readCodexUsage,
 } from "../src/limits.ts";
+
+// The fixtures were written for these thresholds; the defaults are earlier and gentler (tested below).
+const P = limitsPolicy({ caution: { used: 0.75, projected: 1.0 }, critical: { used: 0.9, projected: 1.5, exhaustMinutes: 30 } });
 
 const M = 60_000;
 const H = 60 * M;
@@ -185,10 +188,20 @@ test("disabled: no pressure", () => {
 test("settings: invalid values fall back to the defaults", () => {
   const p = limitsPolicy({ enabled: false, caution: { used: "high", projected: 1.2 }, critical: { exhaustMinutes: -1 }, steps: { critical: 1 }, extra: 1 });
   expect(p.enabled).toBe(false);
-  expect(p.caution).toEqual({ used: 0.75, projected: 1.2 });
-  expect(p.critical.exhaustMinutes).toBe(30);
+  expect(p.caution).toEqual({ used: 0.6, projected: 1.2 });
+  expect(p.critical.exhaustMinutes).toBe(60);
   expect(p).not.toHaveProperty("steps");
-  expect(limitsPolicy(undefined)).toEqual(P);
+  expect(limitsPolicy(undefined)).toEqual(DEFAULT_LIMITS);
+});
+
+test("defaults: caution from 60% used or 90% projected, critical from 80%, 120% projected or an hour left", () => {
+  expect(DEFAULT_LIMITS.caution).toEqual({ used: 0.6, projected: 0.9 });
+  expect(DEFAULT_LIMITS.critical).toEqual({ used: 0.8, projected: 1.2, exhaustMinutes: 60 });
+  const t = new Tracker();
+  t.record({ window: "5h", used: 0.61, resetsAt: at(120), at: t0 });
+  expect(t.assess(t0, DEFAULT_LIMITS)).toMatchObject({ tier: "caution", reason: "used" });
+  t.record({ window: "5h", used: 0.81, resetsAt: at(120), at: at(1) });
+  expect(t.assess(at(1), DEFAULT_LIMITS)).toMatchObject({ tier: "critical" });
 });
 
 test("Anthropic headers: case-insensitive, fractions, reset seconds; token-bucket headers ignored", () => {

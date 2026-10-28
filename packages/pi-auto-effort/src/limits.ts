@@ -77,8 +77,8 @@ export interface LimitsPolicy {
 
 export const DEFAULT_LIMITS: LimitsPolicy = {
   enabled: true,
-  caution: { used: 0.75, projected: 1.0 },
-  critical: { used: 0.9, projected: 1.5, exhaustMinutes: 30 },
+  caution: { used: 0.6, projected: 0.9 },
+  critical: { used: 0.8, projected: 1.2, exhaustMinutes: 60 },
   exitProjected: 0.95,
   hysteresis: 0.05,
   confirmMinutes: 5,
