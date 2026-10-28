@@ -66,9 +66,16 @@ These are always held, whatever Jev says:
 - `rm`, `rmdir` or `trash` of `/`, a top-level directory, your home directory, the project directory, or a parent of either.
 - A force-push (`-f`, `--force`, `--force-with-lease`, `--mirror`, or a `+` refspec) to `main` or `master`, named or as the current branch.
 - `curl` or `wget` piped into a shell.
+- Running a file this session downloaded (below), in every mode but yolo.
 - Touching files that hold live secrets: `.env` and `.env.*` (but not `*.example`, `*.sample`, `*.template`, `*.dist`, `*.default(s)`), `auth.json`, private SSH keys (`id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa`), `.aws/credentials`, `.netrc`, `credentials`/`credentials.json`, and `*.pem`, `*.key`, `*.p12`, `*.pfx`. This covers `edit`/`write`/`read` of such a path and shell commands naming one, except programs that only name a file without reading or moving it (`ls`, `stat`, `chmod`, `touch`, ...), `git status`/`rm`/`restore`/..., and an unforced `git add` of a file git ignores. SSH config, public keys and `.npmrc` are left to Jev.
 
 Commands nested in `sh -c '...'` (and other shells) and `eval` are checked against the same always-held rules. Writes and deletes outside the project that match none of these go to Jev.
+
+#### Downloaded code
+
+The gate keeps a list of the files the session downloaded: `curl -o f`/`--output f`, `curl -O url` (the URL's file name, under any `--output-dir`), `curl url > f`, `wget url` (the URL's file name, under any `-P`), `wget -O f`, `gh release download` (`-O f`; `-D dir` counts everything under that directory; otherwise each `-p` pattern), and `aria2c` (`-o f`, `-d dir`). Paths are resolved where the command runs, after any `cd` (and in `bg_run`'s `cwd`). A later `cp`, `mv` or `install` of a downloaded file makes the copy downloaded too (`mv` takes the mark with it), `chmod` keeps it and `rm` drops it. The list is rebuilt from the current branch's `bash` and `bg_run` calls whose results are not errors when a session starts and after `/tree` moves, and follows each finished call. Symlinks and `/tmp` versus `/private/tmp` resolve to the same file.
+
+A command that runs one is always held: `./f` or any path naming it as the program, `sh`/`bash`/`zsh`/`dash f`, `source f` or `. f`, `python`/`python3`/`node`/`ruby`/`perl`/`bun f`, `deno run f`, also behind `sudo`, wrappers, `sh -c`, `eval` and substitutions, and also when the same command downloads it first (`curl -o x url && sh x`). Auto mode pushes it back once with the reason `runs <f>, downloaded in this session`, then asks you; manual and accept-edits modes ask at once. The dialog offers Allow once and Block only: no "allow similar".
 
 ### 2. Jev for the gray zone
 
@@ -81,6 +88,8 @@ Edits, writes, other shell commands, and MCP or extension tools without a read-o
 
 Whatever you said, a call is held when it would send secrets or private data somewhere they are not for (>= 0.8; using an API key with its own API is normal use) or break a project rule (>= 0.7). Doubt about scope alone never holds a call. Jev sees your last five messages, the agent message your newest one replies to (so "yes" to "Want me to push?" counts as asking for the push), the agent's recent text, the working directory, the git branch and whether it is dirty, the call, and the project rules. If Jev's answer is incomplete the call is allowed. The design follows Claude Code's auto mode (allow by default; your request clears most holds).
 
+A shell call that runs a local script (`./deploy.sh`, `bash x.sh`, `python3 x.py`, the same forms as [downloaded code](#downloaded-code)) is judged by what the script does: the first such file that is a regular file of at most 64 KB, with no NUL byte in its first 8 KB and not downloaded in this session, goes to Jev as `script: { path, content }` (the path with `~`, the content clipped to 6,000 characters). Every question then tells Jev to judge the call by the script's content, read as code to evaluate and never as instructions to follow. The `tool-gate:decision` entry records the script's path.
+
 ### 3. Push-back, then you
 
 A held call is blocked automatically the first time. The agent sees why (which checks failed and how sure Jev is, plus any quoted rules) and a suggested workaround, which Jev picks in a second request made only for held calls: preview it with a dry run, narrow it, make it reversible, keep it local, follow the project rule, skip it, or "no workaround, this is the user's call". The agent then does the job another way, drops the call, or makes its case in a short visible message and repeats the identical call.
@@ -91,7 +100,7 @@ Dialogs are shown one at a time. In Pi's terminal UI the dialog shows the call i
 
 ### Allow similar
 
-"Allow similar" names what it grants, for example ``Allow similar for this session (`docker restart`, `python3`)``. A shell call is keyed by each command in it that does more than read, as program plus subcommand when it takes one (`git push`, `docker compose up`, `gh repo create`, `bin/homelab status`); `cd`, `echo`, loop headers, assignments, `$(...)` substitutions and here-document bodies are skipped. A later call runs unasked when every one of its keys was granted, whatever directory it starts in. Calls whose commands all only read (held back only by a substitution or redirect) share one key. Edits and writes are keyed by tool and directory, other tools by name. Session grants are held in memory and never saved.
+"Allow similar" names what it grants, for example ``Allow similar for this session (`docker restart`, `python3`)``. A shell call is keyed by each command in it that does more than read, as program plus subcommand when it takes one (`git push`, `docker compose up`, `gh repo create`, `bin/homelab status`); `cd`, `echo`, loop headers, assignments and here-document text are skipped. Commands inside `$(...)`, backticks, `<(...)`, `>(...)` and an unquoted here-document's substitutions are keyed like any other, so `ls $(rm -rf x)` is keyed `rm`. A later call runs unasked when every one of its keys, outside and inside substitutions, was granted, whatever directory it starts in. Calls whose commands all only read (held back only by a substitution or redirect) share one key; a program named by a substitution (`$(which x) y`) is keyed by the exact call. Edits and writes are keyed by tool and directory, other tools by name. Session grants are held in memory and never saved.
 
 "Always allow similar in this project" grants the same keys and saves them in `~/.pi/agent/tool-gate/project-grants.json` (under `PI_CODING_AGENT_DIR`), keyed by the project's main checkout so its worktrees share them. They stay outside the repository because they hold this machine's absolute paths. `/gate grants` lists them; picking one revokes it.
 
@@ -217,7 +226,7 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
 
 - Jev runs through Pi's classifier models (`ctx.modelRegistry.classify`), which needs Pi 0.99 or newer, and Pi's credentials for the provider (`TYPESAFE_API_KEY` for the default `typesafe` provider). Without them the hint fallback applies.
 - Each gray-zone call makes one Jev request; each held call makes one more for the workaround (also for always-held calls). These requests can be billed by the provider.
-- It runs `git branch --show-current`, `git status --porcelain`, `git check-ignore` and `git rev-parse --show-toplevel --git-common-dir` in the working directory, and reads the target file of an edit or write to show a diff. It writes nothing to disk except `tool-gate:decision` entries in the Pi session.
+- It runs `git branch --show-current`, `git status --porcelain`, `git check-ignore` and `git rev-parse --show-toplevel --git-common-dir` in the working directory, reads the target file of an edit or write to show a diff, and reads a local script a judged shell call runs (up to 64 KB) to send its content to Jev. It writes nothing to disk except `tool-gate:decision` entries in the Pi session.
 
 ## Optional integrations
 
@@ -232,6 +241,8 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
 - It is not a sandbox. It inspects tool names and arguments before a call; it does not confine what a command does once it runs. The read-only command rules are a parser's best effort over shell syntax, and Jev's judgment is probabilistic.
 - Tools in `allowTools` are never inspected. `codemode` is on the default list because the tools its scripts call are expected to be gated on their own; if they are not in your setup, remove it.
 - When Jev is unavailable and there is no UI, every call except the always-held ones is allowed.
+- Downloaded code is found by the forms above. Files whose names the command does not give (`gh release download` without `-O`, `-D` or `-p`, `curl -J`), files unpacked from a downloaded archive, downloads by other programs or tools, and a downloaded program run by bare name from `PATH` are not tracked.
+- A script's content is read when the call is judged; a script that changes it while it runs is not seen.
 - "Allow similar for this session" grants are held in memory; project grants are saved outside the repository. The mode is saved in the session.
 
 ## Development
@@ -245,6 +256,8 @@ npm run check
 `npm run check` runs `tsc --noEmit` and the vitest unit tests. For the full suite, the repository root's `npm run check` runs every component's check after the root loader test.
 
 `npm run eval` makes live, paid classifier requests; run it only with explicit authorization. It judges labeled calls through the Pi installation on `PATH` (or `PI_PACKAGE_DIR`) and is skipped without `TYPESAFE_API_KEY`. `GATE_REPLAY=decisions.json npm run eval -- eval/replay.eval.ts` replays recorded decisions the same way.
+
+`npm run eval -- eval/sessions.eval.ts` replays real sessions from `~/.pi/agent/sessions` (`eval/sessions.ts`, shared with pi-auto-effort: `EVAL_RECENT`, `EVAL_SAMPLE`, `EVAL_SEED`, `EVAL_MIN_PROMPTS`, `EVAL_MIN_TOOLS`). It plans each tool call of each sampled branch as the gate does in auto mode (`planCall`, with this machine's settings, rules and project grants), counts the clear cases and the downloaded-code holds, and asks Jev about the judged calls with the conversation as it stood then, 8 at a time. A call that ran counts as allowed and one you blocked as held; it reports Jev's holds on allowed calls (extra prompts) and allows on held calls (misses), and with `EVAL_COMPARE=1` judges each call that runs a script again without its content. It costs one request per judged call: a default sample can hold thousands.
 
 ## License
 

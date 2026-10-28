@@ -178,7 +178,7 @@ export function splitCommand(command: string): string[][] {
 }
 
 /** A simple command from `splitParts`: its tokens, and where its text starts in the command. */
-interface Part {
+export interface Part {
   tokens: string[];
   start: number;
 }
@@ -260,7 +260,7 @@ const WRAPPER_OPTION_WITH_VALUE: Record<string, Set<string>> = {
  * wrappers like `time`, `nice -n 10`, `env -i`, `nohup` and `timeout 5`. `unsafe` is set when an
  * assignment or wrapper option can change what the program does (`PATH=…`, `env -S …`).
  */
-function program(tokens: string[]): { name: string; args: string[]; unsafe: boolean } | undefined {
+export function program(tokens: string[]): { name: string; args: string[]; unsafe: boolean } | undefined {
   let i = 0;
   let unsafe = false;
   for (;;) {
@@ -307,7 +307,7 @@ export function writeRedirects(command: string): string[] {
 }
 
 /** `writeRedirects`, with where each redirect starts in the command. */
-function redirectsAt(command: string): { target: string; at: number }[] {
+export function redirectsAt(command: string): { target: string; at: number }[] {
   const targets: { target: string; at: number }[] = [];
   const re = /(?<![<>])(?:[0-9]*|&)(>>?|<>)\|?(&?)\s*([^\s;|&<>]*)/gu;
   // Match on a copy whose quoted and escaped characters are masked, so `sed 's/<[^>]*>/ /g'` has
@@ -715,6 +715,14 @@ function isProtectedDir(resolved: string, cwd: string): boolean {
   return isAncestorOf(homedir()) || isAncestorOf(path.resolve(cwd));
 }
 
+/** Tools whose `command` is a shell command, judged by the same rules: bash, and pi-bg's bg_run. */
+export const SHELL_TOOLS: ReadonlySet<string> = new Set(["bash", "bg_run"]);
+
+/** The directory a shell tool's command starts in: pi-bg's `bg_run` takes its own `cwd`. */
+export function shellDir(tool: string, input: Record<string, unknown>, cwd: string): string {
+  return tool !== "bash" && typeof input.cwd === "string" && input.cwd ? path.resolve(cwd, expandHome(input.cwd)) : cwd;
+}
+
 export function expandHome(file: string): string {
   if (file === "~" || file === "$HOME") return homedir();
   if (file.startsWith("~/")) return path.join(homedir(), file.slice(2));
@@ -728,7 +736,7 @@ const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish"]);
 const SUDO_WITH_VALUE = new Set(["-u", "-g", "-p", "-C", "-D", "-h", "-r", "-t", "-T", "-U", "--user", "--group", "--prompt", "--chdir", "--host"]);
 
 /** The command `sudo`/`doas` runs, past their options; undefined when there is none (`sudo -i`). */
-function unwrapSudo(args: string[]): { name: string; args: string[]; unsafe: boolean } | undefined {
+export function unwrapSudo(args: string[]): { name: string; args: string[]; unsafe: boolean } | undefined {
   let i = 0;
   while (i < args.length && (args[i] as string).startsWith("-")) {
     const opt = args[i++] as string;
@@ -739,7 +747,7 @@ function unwrapSudo(args: string[]): { name: string; args: string[]; unsafe: boo
 }
 
 /** Commands nested in `sh -c '…'` and `eval …`, which the fixed rules check too. */
-function nestedCommands(p: { name: string; args: string[] }): string[] {
+export function nestedCommands(p: { name: string; args: string[] }): string[] {
   if (p.name === "eval") return p.args.length ? [p.args.join(" ")] : [];
   if (!SHELLS.has(p.name)) return [];
   const i = p.args.findIndex((a) => /^-[a-zA-Z]*c/u.test(a));
@@ -820,7 +828,7 @@ const COMPOUND_CLOSERS = new Set(["}", "done", "fi", "esac"]);
  * Each simple command with the directory it runs in (for a `cd`, the one it leaves), following
  * `cd` along the way, also after a keyword (`then cd x`, `{ cd x`).
  */
-function locatedParts(command: string, cwd: string): (Part & { dir: string; redirectDir: string; cd: boolean })[] {
+export function locatedParts(command: string, cwd: string): (Part & { dir: string; redirectDir: string; cd: boolean })[] {
   let dir = cwd;
   /** Where each open compound command (`{ ...; }`, `if`, a loop, `case`) started. */
   const opened: string[] = [];
@@ -888,18 +896,64 @@ const SUBCOMMAND_CLIS = new Set([
 const WORD = /^[a-z][a-z0-9_:-]*$/u;
 
 /** The command with here-document bodies removed: they are input, not commands. */
-function withoutHeredocBodies(command: string): string {
+export function withoutHeredocBodies(command: string): string {
+  return heredocs(command).text;
+}
+
+/**
+ * The command with here-document bodies removed, and the bodies whose delimiter is unquoted
+ * (`<<EOF`, not `<<'EOF'`): the shell expands `$(...)` and backticks in those before the command runs.
+ */
+function heredocs(command: string): { text: string; expanding: string[] } {
   const out: string[] = [];
-  const pending: string[] = [];
+  const pending: { delimiter: string; expands: boolean; lines: string[] }[] = [];
+  const expanding: string[] = [];
   for (const line of command.split("\n")) {
-    if (pending.length) {
-      if (line.trim() === pending[0]) pending.shift();
+    const open = pending[0];
+    if (open) {
+      if (line.trim() === open.delimiter) {
+        pending.shift();
+        if (open.expands) expanding.push(open.lines.join("\n"));
+      } else open.lines.push(line);
       continue;
     }
     out.push(line);
-    for (const m of line.matchAll(/<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/gu)) pending.push(m[2] as string);
+    for (const m of line.matchAll(/<<-?\s*(\\?)(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2/gu)) {
+      pending.push({ delimiter: m[3] as string, expands: !m[1] && !m[2], lines: [] });
+    }
   }
-  return out.join("\n");
+  // An unterminated body still runs its substitutions.
+  for (const open of pending) if (open.expands) expanding.push(open.lines.join("\n"));
+  return { text: out.join("\n"), expanding };
+}
+
+/**
+ * The commands in `$(...)` and backticks in a here-document body. Quotes there are literal text,
+ * so only a backslash escapes; inside a substitution, quoting works as usual.
+ */
+function heredocSubstitutions(body: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (c === "\\") {
+      i++;
+    } else if (c === "$" && body[i + 1] === "(") {
+      const end = closingParen(body, i + 1);
+      // `$((...))` is arithmetic, not a command.
+      if (body[i + 2] !== "(") out.push(body.slice(i + 2, end));
+      i = end;
+    } else if (c === "`") {
+      let inner = "";
+      let j = i + 1;
+      for (; j < body.length && body[j] !== "`"; j++) {
+        if (body[j] === "\\" && /[`$\\]/u.test(body[j + 1] ?? "")) j++;
+        inner += body[j];
+      }
+      out.push(inner);
+      i = j;
+    }
+  }
+  return out;
 }
 
 /** What one simple command does, as `program [subcommand [subcommand]]`, or undefined for shell noise. */
@@ -926,18 +980,25 @@ function partKey(tokens: string[]): string | undefined {
  * Keys for "allow similar for this session": one per command in the call that does more than read,
  * skipping `cd`, `echo`, loop headers and the like. A later call is allowed when every key it has
  * was granted, so `cd /tmp/a && docker restart x` and `cd ~/b; docker restart x` match, and a grant
- * for `docker restart` never covers `rm`.
+ * for `docker restart` never covers `rm`. Commands inside `$(...)`, backticks, `<(...)`, `>(...)`
+ * and unquoted here-documents count like the others: `ls $(rm -rf x)` is keyed `rm`, not as a read.
  */
 export function bashKeys(command: string, extraReadOnly: readonly string[] = []): string[] {
-  const parts = splitCommand(withoutSubstitutions(withoutHeredocBodies(command)));
   const keys = new Set<string>();
   let unparsed = false;
-  for (const tokens of parts) {
-    if (isReadOnlyPart(tokens, extraReadOnly)) continue;
-    const key = partKey(tokens);
-    if (key) keys.add(key);
-    else if (!NOT_COMMANDS.has(tokens[0] ?? "")) unparsed = true;
-  }
+  const visit = (command: string) => {
+    const { text: plain, expanding } = heredocs(command);
+    const { text, bodies } = extractSubstitutions(plain);
+    for (const tokens of splitCommand(text)) {
+      if (isReadOnlyPart(tokens, extraReadOnly)) continue;
+      const key = partKey(tokens);
+      if (key) keys.add(key);
+      else if (!NOT_COMMANDS.has(tokens[0] ?? "")) unparsed = true;
+    }
+    for (const { body } of bodies) visit(body);
+    for (const body of expanding) for (const inner of heredocSubstitutions(body)) visit(inner);
+  };
+  visit(command);
   // An opaque command is not a read: a grant for redirected reads must not cover env -S…
   // or an executable hidden in an expansion. Such grants cover only the exact opaque call.
   if (unparsed) keys.add(`unparsed shell: ${command.trim()}`);
@@ -947,44 +1008,15 @@ export function bashKeys(command: string, extraReadOnly: readonly string[] = [])
 /** The "allow similar" key for calls whose commands all only read. */
 export const READS_KEY = "reads with substitutions or redirects";
 
-/** `$(...)` and backtick substitutions outside single quotes replaced by a placeholder word. */
-function withoutSubstitutions(command: string): string {
-  let out = "";
-  let single = false;
-  for (let i = 0; i < command.length; i++) {
-    const c = command[i] as string;
-    if (c === "'" ) single = !single;
-    if (!single && c === "$" && command[i + 1] === "(") {
-      let depth = 0;
-      let j = i + 1;
-      for (; j < command.length; j++) {
-        if (command[j] === "(") depth++;
-        else if (command[j] === ")" && --depth === 0) break;
-      }
-      out += "_";
-      i = j;
-      continue;
-    }
-    if (!single && c === "`") {
-      const end = command.indexOf("`", i + 1);
-      out += "_";
-      i = end < 0 ? command.length : end;
-      continue;
-    }
-    out += c;
-  }
-  return out;
-}
-
 /** The word a substitution leaves in place of itself for `bashPathAccess`: not path-like on its own. */
-const SUBSTITUTED = "$(...)";
+export const SUBSTITUTED = "$(...)";
 
 /**
  * `command` with each command substitution (`$(...)`, backticks) outside single quotes, and each
  * process substitution (`<(...)`, `>(...)`) outside quotes, replaced by `SUBSTITUTED`, and their
  * bodies with where each placeholder starts in the new text. Arithmetic (`$((...))`) becomes `0`.
  */
-function extractSubstitutions(command: string): { text: string; bodies: { body: string; at: number }[] } {
+export function extractSubstitutions(command: string): { text: string; bodies: { body: string; at: number }[] } {
   const bodies: { body: string; at: number }[] = [];
   let text = "";
   let quote: "'" | '"' | undefined;
@@ -1217,7 +1249,7 @@ function sshLocalFiles(args: readonly string[]): { reads: string[]; writes: stri
 }
 
 /** A simple command past the keywords that may lead it: `do ls` runs `ls`. `time` is left to `program`, with its options. */
-function withoutKeywords(tokens: string[]): string[] {
+export function withoutKeywords(tokens: string[]): string[] {
   let k = 0;
   while (k < tokens.length && tokens[k] !== "time" && LEADING_KEYWORDS.has(tokens[k] as string)) k++;
   return tokens.slice(k);

@@ -21,7 +21,9 @@ import {
   isAcceptEditsBash,
   isCredentialPath,
   isReadOnlyBash,
+  SHELL_TOOLS,
   secretGitAdds,
+  shellDir,
 } from "./bash.ts";
 import { loadConfig } from "./config.ts";
 import {
@@ -35,11 +37,13 @@ import {
   shown,
   violations,
 } from "./dirs.ts";
+import { Downloads, downloadedRunReasons, downloadsOf, type Script, scriptFor, trackCall } from "./downloads.ts";
 import { addGrants, grantsFile, loadGrants, removeGrant } from "./grants.ts";
 import { whileBlocked } from "./herdr.ts";
 import { type ClassifierUsage, type JevConfig, askJev } from "./jev.ts";
 import {
   DEFAULT_THRESHOLDS,
+  type JudgeInput,
   type Thresholds,
   WORKAROUNDS,
   judgeQuestions,
@@ -72,9 +76,23 @@ import { agentBeforeLatestUser, callerText, clip, clipTail, recentTexts, recentU
 import { offerUserWords, resultText } from "./user-words.ts";
 import { callView } from "./view.ts";
 
-/** A declined call's result, around the user's message to the agent. */
+/** A declined call's result (Block). */
+export const DECLINED = "The user declined this call. Do not retry it; continue without it, or ask the user how to proceed.";
+/** A declined call's result, around the user's message to the agent (Block with a message). */
 export const DECLINED_WITH_MESSAGE = "The user declined this call, with this message:\n\n";
 export const DECLINED_WITH_MESSAGE_END = "\n\nDo not retry the call as it was; follow the user's message.";
+
+/**
+ * Who stopped a call, read from its result: the user (Block, Block with a message, or Esc), or
+ * the gate on its own (a push-back, chat or plan mode, no user to ask). Undefined when it ran.
+ */
+export function blockedBy(result: { content?: unknown; isError?: boolean }): "user" | "gate" | undefined {
+  if (!result.isError) return undefined;
+  const text = resultText(result.content);
+  if (text.startsWith(DECLINED) || text.startsWith(DECLINED_WITH_MESSAGE)) return "user";
+  if (/^(?:tool-gate held this |Chat mode is on: |Plan mode is on: |[a-z ]+ mode needs the user's approval for this )/u.test(text)) return "gate";
+  return undefined;
+}
 
 /** The user's message in a call they declined with one, for pi-sticky-last-prompt's bar. */
 export function declinedMessage(result: { content?: unknown; isError?: boolean }): string | undefined {
@@ -126,10 +144,9 @@ const STATUS_KEY = "tool-gate";
 /** Records whether the agent was last told chat mode is on, so it hears each change once. */
 const CHAT_ENTRY = "tool-gate:chat-notice";
 const BUILTIN_READ = new Set(["read", "grep", "find", "ls"]);
-/** Tools whose `command` is a shell command, judged by the same rules: bash, and pi-bg's bg_run. */
-const SHELL_TOOLS = new Set(["bash", "bg_run"]);
 
-type Plan =
+/** What the gate does with a call before any judgment: allow it, hold it, or ask the judge. */
+export type Plan =
   | { kind: "allow"; why: string }
   | {
       kind: "ask";
@@ -146,7 +163,7 @@ type Plan =
   | { kind: "judge"; args: string; key: string; similar: Similar };
 
 /** What "allow similar" grants (for the session or the project): every key, described for the user. */
-interface Similar {
+export interface Similar {
   keys: string[];
   /** One description per key. */
   labels: string[];
@@ -158,10 +175,131 @@ function similarOf(items: ReadonlyArray<readonly [key: string, label: string]>):
   return { keys: items.map(([key]) => key), labels, label: labels.join(", ") };
 }
 
-interface Annotations {
+export interface Annotations {
   readOnlyHint?: boolean;
   destructiveHint?: boolean;
   openWorldHint?: boolean;
+}
+
+/** What the gate looked up about a call's surroundings, so that planning it is pure. */
+export interface PlanContext {
+  config: GateConfig;
+  /** The current git branch, for force-pushes without a refspec. */
+  branch?: string;
+  /** Secret files named in unforced `git add`s that git ignores (see `secretGitAdds`). */
+  ignored?: ReadonlySet<string>;
+  /** The project's checkouts, for the directory policy (default: the working directory). */
+  projects?: readonly string[];
+  /** A tool's annotations, for its read-only hint. */
+  annotations?: (tool: string) => Annotations | undefined;
+  /** Whether an "allow similar" or directory key was granted. */
+  granted?: (key: string) => boolean;
+  /** pi-plan-mode's plan file, always writable. */
+  planFile?: string;
+  /** Files this session downloaded: running one is always held. */
+  downloads?: Downloads;
+}
+
+/**
+ * What the gate does with a call before any judgment: read-only calls are allowed, always-held
+ * calls (fixed rules, downloaded code) and calls outside the project's directories are held, and
+ * the rest go to the judge. Pure: the caller looks up git, the project and grants first.
+ */
+export function planCall(tool: string, input: Record<string, unknown>, cwd: string, c: PlanContext): Plan {
+  const base = basePlan(tool, input, cwd, c);
+  const holds = base.kind === "allow" && base.why === "allow list" ? [] : directoryHolds(tool, input, cwd, c);
+  if (!holds.length) return base;
+  const reasons = [...new Set(holds.map((v) =>
+    v.hint !== undefined
+      ? `writes ${shown(v.file)}, a derived path (generated from a source elsewhere)`
+      : `${v.access === "write" ? "writes" : "reads"} ${shown(v.file)}, outside this project's directories`))];
+  const hints = [...new Set(holds.flatMap((v) => (v.hint !== undefined ? [v.hint || "Edit its source instead."] : [])))];
+  const advice = hints.length ? hints.join(" ") : undefined;
+  const scopes = [...new Map(holds.map((v) => [grantKey(v), v])).values()];
+  const similar = similarOf(scopes.map((v) => [grantKey(v), `${v.access}s in ${shown(v.scope)}`] as const));
+  const args = base.kind === "allow" ? clip(SHELL_TOOLS.has(tool) ? String(input.command ?? "") : JSON.stringify(input), 6_000) : base.args;
+  if (base.kind === "ask") return { ...base, reasons: [...base.reasons, ...reasons], key: `${base.key}; dirs`, advice };
+  return { kind: "ask", reasons, key: `dirs:${similar.keys.join("|")}`, args, similar, readOnly: base.kind === "allow", advice };
+}
+
+/** Paths this call touches that the directory policy does not cover, minus granted folders. */
+function directoryHolds(tool: string, input: Record<string, unknown>, cwd: string, c: PlanContext) {
+  const { config } = c;
+  if (config.directories.enabled === false) return [];
+  let access: { reads: string[]; writes: string[] };
+  if (SHELL_TOOLS.has(tool)) {
+    access = bashPathAccess(String(input.command ?? ""), shellDir(tool, input, cwd), config.readOnlyCommands, config.directories.exemptCommands, cwd);
+  } else if (tool === "edit" || tool === "write") {
+    access = { reads: [], writes: [path.resolve(cwd, expandHome(String(input.path ?? "")))] };
+  } else if (BUILTIN_READ.has(tool)) {
+    access = { reads: [path.resolve(cwd, expandHome(String(input.path ?? ".") || "."))], writes: [] };
+  } else return [];
+  const policy = resolvePolicy(config.directories, c.projects ?? [path.resolve(cwd)]);
+  // The plan file pi-plan-mode hands out is always writable.
+  if ((tool === "edit" || tool === "write") && c.planFile && access.writes[0] === c.planFile) return [];
+  return violations(policy, access).filter((v) => !c.granted?.(grantKey(v)));
+}
+
+function basePlan(tool: string, input: Record<string, unknown>, cwd: string, c: PlanContext): Plan {
+  const { config } = c;
+  if (config.allowTools.includes(tool)) return { kind: "allow", why: "allow list" };
+  if (SHELL_TOOLS.has(tool)) {
+    const command = String(input.command ?? "");
+    const dir = shellDir(tool, input, cwd);
+    const reasons = [
+      ...alwaysAskBash(command, dir, c.branch, c.ignored ?? new Set()),
+      ...(c.downloads ? downloadedRunReasons(command, dir, c.downloads) : []),
+    ];
+    if (reasons.length) return { kind: "ask", reasons, key: `fixed:${reasons.join("; ")}`, args: clip(command, 6_000) };
+    if (isReadOnlyBash(command, config.readOnlyCommands)) return { kind: "allow", why: "read-only command" };
+    const keys = bashKeys(command, config.readOnlyCommands);
+    return {
+      kind: "judge",
+      args: clip(command, 6_000),
+      key: `bash:${keys.join("|")}`,
+      similar: similarOf(keys.map((k) => [`bash:${k}`, `\`${k}\``] as const)),
+    };
+  }
+  if (tool === "edit" || tool === "write") {
+    const file = String(input.path ?? "");
+    const reasons = alwaysAskPath(file);
+    if (reasons.length) return { kind: "ask", reasons, key: `fixed:${reasons.join("; ")}`, args: clip(JSON.stringify(input), 6_000) };
+    const dir = path.dirname(path.resolve(cwd, expandHome(file)));
+    const shown = path.relative(cwd, dir) || ".";
+    return {
+      kind: "judge",
+      args: clip(JSON.stringify(input), 6_000),
+      key: `${tool}:${dir}`,
+      similar: similarOf([[`${tool}:${dir}`, `${tool}s in ${shown.startsWith("..") ? dir : shown}`]]),
+    };
+  }
+  if (BUILTIN_READ.has(tool)) {
+    const file = String(input.path ?? "");
+    if (tool === "read" && file && isCredentialPath(expandHome(file))) {
+      return { kind: "ask", reasons: [`reads credentials (${file})`], key: `read:${file}`, args: clip(JSON.stringify(input), 2_000) };
+    }
+    return { kind: "allow", why: "read-only tool" };
+  }
+  if (c.annotations?.(tool)?.readOnlyHint === true) return { kind: "allow", why: "read-only hint" };
+  return { kind: "judge", args: clip(JSON.stringify(input), 6_000), key: `tool:${tool}`, similar: similarOf([[`tool:${tool}`, `${tool} calls`]]) };
+}
+
+/** The local script a shell call runs, for the judge to read (see `scriptFor`); undefined for other tools. */
+export function scriptOfCall(tool: string, input: Record<string, unknown>, cwd: string, downloads?: Downloads): Script | undefined {
+  return SHELL_TOOLS.has(tool) ? scriptFor(String(input.command ?? ""), shellDir(tool, input, cwd), downloads) : undefined;
+}
+
+/**
+ * The state the judge sees for a call, from the branch as it stands when the call is made: the
+ * user's last five messages, the agent message the newest one replies to, and the agent's recent text.
+ */
+export function judgeStateOf(branch: readonly unknown[], call: Omit<JudgeInput, "userRequest" | "agentBefore" | "recentIntent">): Record<string, unknown> {
+  return judgeState({
+    userRequest: recentUserMessages(branch, 5).map((text, i, all) => clip(text, i === all.length - 1 ? 3_000 : 1_000)),
+    agentBefore: clipTail(agentBeforeLatestUser(branch), 1_500),
+    recentIntent: clipTail(recentTexts(branch).assistant, 2_000),
+    ...call,
+  });
 }
 
 export default function toolGate(pi: ExtensionAPI) {
@@ -187,6 +325,8 @@ export default function toolGate(pi: ExtensionAPI) {
   /** "Always allow similar in this project" grants for the current project, from grants.ts. */
   let projectGrants = new Set<string>();
   const granted = (key: string) => allowSimilar.has(key) || projectGrants.has(key);
+  /** Files this session downloaded (downloads.ts), rebuilt from the branch on start and tree moves. */
+  let downloads = new Downloads();
   const pendingUsage = new Map<string, ClassifierUsage>();
   let gitInfo: Promise<{ branch: string; dirty: boolean } | undefined> | undefined;
   let dialogs: Promise<unknown> = Promise.resolve();
@@ -356,82 +496,24 @@ export default function toolGate(pi: ExtensionAPI) {
     projectGrants = new Set(loadGrants(await projectKey(cwd)).map((g) => g.key));
   };
 
-  /** Paths this call touches that the directory policy does not cover, minus folders granted this session. */
-  const directoryHolds = async (tool: string, input: Record<string, unknown>, cwd: string) => {
-    if (config.directories.enabled === false) return [];
-    let access: { reads: string[]; writes: string[] };
-    if (SHELL_TOOLS.has(tool)) {
-      const dir = tool !== "bash" && typeof input.cwd === "string" && input.cwd ? path.resolve(cwd, expandHome(input.cwd)) : cwd;
-      access = bashPathAccess(String(input.command ?? ""), dir, config.readOnlyCommands, config.directories.exemptCommands, cwd);
-    } else if (tool === "edit" || tool === "write") {
-      access = { reads: [], writes: [path.resolve(cwd, expandHome(String(input.path ?? "")))] };
-    } else if (BUILTIN_READ.has(tool)) {
-      access = { reads: [path.resolve(cwd, expandHome(String(input.path ?? ".") || "."))], writes: [] };
-    } else return [];
-    const policy = await policyFor(cwd);
-    if (tool === "edit" || tool === "write") {
-      // The plan file pi-plan-mode hands out is always writable.
-      if (planFile && access.writes[0] === planFile) return [];
-    }
-    return violations(policy, access).filter((v) => !granted(grantKey(v)));
-  };
-
+  /** The gate's plan for a call (`planCall`), after looking up git, the project and grants. */
   const plan = async (tool: string, input: Record<string, unknown>, cwd: string): Promise<Plan> => {
-    const base = await basePlan(tool, input, cwd);
-    const holds = base.kind === "allow" && base.why === "allow list" ? [] : await directoryHolds(tool, input, cwd);
-    if (!holds.length) return base;
-    const reasons = [...new Set(holds.map((v) =>
-      v.hint !== undefined
-        ? `writes ${shown(v.file)}, a derived path (generated from a source elsewhere)`
-        : `${v.access === "write" ? "writes" : "reads"} ${shown(v.file)}, outside this project's directories`))];
-    const hints = [...new Set(holds.flatMap((v) => (v.hint !== undefined ? [v.hint || "Edit its source instead."] : [])))];
-    const advice = hints.length ? hints.join(" ") : undefined;
-    const scopes = [...new Map(holds.map((v) => [grantKey(v), v])).values()];
-    const similar = similarOf(scopes.map((v) => [grantKey(v), `${v.access}s in ${shown(v.scope)}`] as const));
-    const args = base.kind === "allow" ? clip(SHELL_TOOLS.has(tool) ? String(input.command ?? "") : JSON.stringify(input), 6_000) : base.args;
-    if (base.kind === "ask") return { ...base, reasons: [...base.reasons, ...reasons], key: `${base.key}; dirs`, advice };
-    return { kind: "ask", reasons, key: `dirs:${similar.keys.join("|")}`, args, similar, readOnly: base.kind === "allow", advice };
-  };
-
-  const basePlan = async (tool: string, input: Record<string, unknown>, cwd: string): Promise<Plan> => {
-    if (config.allowTools.includes(tool)) return { kind: "allow", why: "allow list" };
-    if (SHELL_TOOLS.has(tool)) {
-      const command = String(input.command ?? "");
-      // pi-bg's bg_run takes its own working directory.
-      if (tool !== "bash" && typeof input.cwd === "string" && input.cwd) cwd = path.resolve(cwd, expandHome(input.cwd));
-      const reasons = alwaysAskBash(command, cwd, (await git(cwd))?.branch, await ignoredByGit(secretGitAdds(command, cwd)));
-      if (reasons.length) return { kind: "ask", reasons, key: `fixed:${reasons.join("; ")}`, args: clip(command, 6_000) };
-      if (isReadOnlyBash(command, config.readOnlyCommands)) return { kind: "allow", why: "read-only command" };
-      const keys = bashKeys(command, config.readOnlyCommands);
-      return {
-        kind: "judge",
-        args: clip(command, 6_000),
-        key: `bash:${keys.join("|")}`,
-        similar: similarOf(keys.map((k) => [`bash:${k}`, `\`${k}\``] as const)),
-      };
-    }
-    if (tool === "edit" || tool === "write") {
-      const file = String(input.path ?? "");
-      const reasons = alwaysAskPath(file);
-      if (reasons.length) return { kind: "ask", reasons, key: `fixed:${reasons.join("; ")}`, args: clip(JSON.stringify(input), 6_000) };
-      const dir = path.dirname(path.resolve(cwd, expandHome(file)));
-      const shown = path.relative(cwd, dir) || ".";
-      return {
-        kind: "judge",
-        args: clip(JSON.stringify(input), 6_000),
-        key: `${tool}:${dir}`,
-        similar: similarOf([[`${tool}:${dir}`, `${tool}s in ${shown.startsWith("..") ? dir : shown}`]]),
-      };
-    }
-    if (BUILTIN_READ.has(tool)) {
-      const file = String(input.path ?? "");
-      if (tool === "read" && file && isCredentialPath(expandHome(file))) {
-        return { kind: "ask", reasons: [`reads credentials (${file})`], key: `read:${file}`, args: clip(JSON.stringify(input), 2_000) };
-      }
-      return { kind: "allow", why: "read-only tool" };
-    }
-    if (annotations(tool)?.readOnlyHint === true) return { kind: "allow", why: "read-only hint" };
-    return { kind: "judge", args: clip(JSON.stringify(input), 6_000), key: `tool:${tool}`, similar: similarOf([[`tool:${tool}`, `${tool} calls`]]) };
+    const listed = config.allowTools.includes(tool);
+    const shell = SHELL_TOOLS.has(tool) && !listed;
+    const dir = shellDir(tool, input, cwd);
+    const command = String(input.command ?? "");
+    const checksPaths = !listed && config.directories.enabled !== false &&
+      (SHELL_TOOLS.has(tool) || tool === "edit" || tool === "write" || BUILTIN_READ.has(tool));
+    return planCall(tool, input, cwd, {
+      config,
+      branch: shell ? (await git(dir))?.branch : undefined,
+      ignored: shell ? await ignoredByGit(secretGitAdds(command, dir)) : undefined,
+      projects: checksPaths ? await projectOf(cwd) : undefined,
+      annotations,
+      granted,
+      planFile,
+      downloads,
+    });
   };
 
   const editorFactory = embeddedEditorFactory(pi);
@@ -482,7 +564,7 @@ export default function toolGate(pi: ExtensionAPI) {
           reason: `${DECLINED_WITH_MESSAGE}${answer.message}${DECLINED_WITH_MESSAGE_END}`,
         };
       }
-      return { block: true, reason: "The user declined this call. Do not retry it; continue without it, or ask the user how to proceed." };
+      return { block: true, reason: DECLINED };
     };
     const next = dialogs.then(run, run);
     dialogs = next.catch(() => undefined);
@@ -490,19 +572,8 @@ export default function toolGate(pi: ExtensionAPI) {
   };
 
   /** The state Jev judges a call in. */
-  const judgeStateFor = async (ctx: ExtensionContext, tool: string, args: string, rules: readonly string[]) => {
-    const branch = ctx.sessionManager.getBranch();
-    return judgeState({
-      userRequest: recentUserMessages(branch, 5).map((text, i, all) => clip(text, i === all.length - 1 ? 3_000 : 1_000)),
-      agentBefore: clipTail(agentBeforeLatestUser(branch), 1_500),
-      recentIntent: clipTail(recentTexts(branch).assistant, 2_000),
-      cwd: ctx.cwd,
-      git: await git(ctx.cwd),
-      tool,
-      args,
-      rules,
-    });
-  };
+  const judgeStateFor = async (ctx: ExtensionContext, tool: string, args: string, rules: readonly string[], script?: Script) =>
+    judgeStateOf(ctx.sessionManager.getBranch(), { cwd: ctx.cwd, git: await git(ctx.cwd), tool, args, rules, script });
 
   /**
    * A held call. The first time in a user turn it is blocked with Jev's explanation and suggested
@@ -569,9 +640,23 @@ export default function toolGate(pi: ExtensionAPI) {
     return `${tool}: ${clip(JSON.stringify(input), 200)}`;
   };
 
+  /** Downloaded files as the branch stands: on a new, resumed or forked session, and after a tree move. */
+  const rebuildDownloads = (ctx: ExtensionContext) => {
+    try {
+      downloads = downloadsOf(ctx.sessionManager.getBranch(), ctx.cwd);
+    } catch {
+      downloads = new Downloads();
+    }
+  };
+
+  pi.on("session_tree", (_event, ctx) => {
+    rebuildDownloads(ctx);
+  });
+
   pi.on("session_start", (_event, ctx) => {
     hostCtx = ctx;
     config = loadConfig("tool-gate", DEFAULT_CONFIG, ctx.cwd);
+    rebuildDownloads(ctx);
     // A resumed session comes back in its mode; a new one starts in the configured mode.
     const entries = ctx.sessionManager.getBranch() as Array<{ type?: string; customType?: string; data?: unknown }>;
     const recorded = [...entries].reverse().find((entry) => entry.type === "custom" && entry.customType === MODE_ENTRY);
@@ -699,8 +784,10 @@ export default function toolGate(pi: ExtensionAPI) {
     }
 
     const rules = loadRules(ctx.cwd);
-    const state = await judgeStateFor(ctx, tool, p.args, rules);
-    const outcome = await askJev(ctx.modelRegistry, config.jev, state, judgeQuestions(rules), ctx.signal);
+    // A local script is judged by what it does: its content goes to the judge.
+    const script = scriptOfCall(tool, input, ctx.cwd, downloads);
+    const state = await judgeStateFor(ctx, tool, p.args, rules, script);
+    const outcome = await askJev(ctx.modelRegistry, config.jev, state, judgeQuestions(rules, { script: script !== undefined }), ctx.signal);
 
     if (!outcome.ok) {
       if (!warnedUnavailable && ctx.hasUI && !/off in settings/u.test(outcome.reason)) {
@@ -730,6 +817,7 @@ export default function toolGate(pi: ExtensionAPI) {
       scores: v?.scores,
       failures: v?.failures,
       action,
+      ...(script ? { script: script.path } : {}),
       latencyMs: outcome.latencyMs,
       inputTokens: outcome.usage?.input,
     });
@@ -752,7 +840,15 @@ export default function toolGate(pi: ExtensionAPI) {
     });
   });
 
-  pi.on("tool_result", (event) => {
+  pi.on("tool_result", (event, ctx) => {
+    // What a finished shell call downloaded, copied, moved or removed.
+    if (!event.isError && SHELL_TOOLS.has(event.toolName)) {
+      try {
+        trackCall(downloads, event.toolName, (event.input ?? {}) as Record<string, unknown>, ctx.cwd);
+      } catch {
+        // A command this cannot follow changes nothing.
+      }
+    }
     const usage = pendingUsage.get(event.toolCallId);
     if (!usage) return undefined;
     pendingUsage.delete(event.toolCallId);
@@ -768,7 +864,7 @@ export default function toolGate(pi: ExtensionAPI) {
       return file.startsWith(`${root}${path.sep}`) || (config.directories.enabled !== false && canWrite(await policyFor(cwd), file));
     }
     if (!SHELL_TOOLS.has(tool)) return false;
-    const dir = tool !== "bash" && typeof input.cwd === "string" && input.cwd ? path.resolve(cwd, expandHome(input.cwd)) : cwd;
+    const dir = shellDir(tool, input, cwd);
     // bg_run in another directory still counts only for files inside the project.
     return isAcceptEditsBash(String(input.command ?? ""), dir, config.readOnlyCommands) &&
       (dir === root || dir.startsWith(`${root}${path.sep}`));

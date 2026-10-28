@@ -1,9 +1,10 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { bashPathAccess } from "../src/bash.ts";
 import { DEFAULT_DIRECTORIES, canRead, canWrite, describePolicy, resolvePolicy, scopeOf, under, violations } from "../src/dirs.ts";
+import { Downloads, downloadedRunReasons, trackCall, trackCommand } from "../src/downloads.ts";
 import toolGate from "../src/index.ts";
 import { assistantEntry, fakeJev, harness, userEntry } from "./harness.ts";
 
@@ -149,6 +150,40 @@ describe("bashPathAccess", () => {
     expect(access("diff <(sort ~/.config/a) <(sort ~/.config/b)")).toEqual({ reads: [`${H}/.config/a`, `${H}/.config/b`], writes: [] });
     expect(access("echo '$(rm -rf ~/.config/q)' \\$(rm y)").writes).toEqual([]);
     expect(access('rg -n "export function (a|b)" src/a.ts; echo $((1 + 2))')).toEqual({ reads: [`${app}/src/a.ts`], writes: [] });
+  });
+});
+
+describe("downloaded files on disk", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), "pi-tool-gate-dl-"));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  test("a download is found by any path to it: after cd, through a symlink, under its real directory", () => {
+    const d = new Downloads();
+    mkdirSync(path.join(dir, "w"));
+    trackCommand(d, `cd ${dir}/w && curl -fsSLO https://h/tool.sh`, app);
+    writeFileSync(path.join(dir, "w", "tool.sh"), "echo hi\n");
+    symlinkSync(path.join(dir, "w", "tool.sh"), path.join(dir, "link.sh"));
+    expect(downloadedRunReasons("./w/tool.sh", dir, d)).toEqual(["runs ./w/tool.sh, downloaded in this session"]);
+    expect(downloadedRunReasons("sh link.sh", dir, d)).toEqual(["runs link.sh, downloaded in this session"]);
+    // macOS's /var is /private/var: the real path is the same file.
+    expect(downloadedRunReasons(`bash ${realpathSync(dir)}/w/tool.sh`, app, d)).toHaveLength(1);
+    expect(downloadedRunReasons("./w/other.sh", dir, d)).toEqual([]);
+  });
+
+  test("a copy into an existing directory lands under it; bg_run's cwd is where its command runs", () => {
+    const d = new Downloads();
+    mkdirSync(path.join(dir, "bin"));
+    trackCall(d, "bg_run", { command: "curl -o x https://h/x && cp x bin", cwd: dir }, app);
+    expect(d.has(path.join(dir, "x"))).toBe(true);
+    expect(d.has(path.join(dir, "bin", "x"))).toBe(true);
+    expect(d.has(path.join(dir, "bin"))).toBe(false);
+    expect(d.has(path.join(app, "x"))).toBe(false);
+    // Tools other than bash and bg_run download nothing.
+    trackCall(d, "write", { command: "curl -o y https://h/y", path: "y" }, dir);
+    expect(d.has(path.join(dir, "y"))).toBe(false);
   });
 });
 
