@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import cacheGuard, { JEV_TIP, modelInfo, statusText } from "../src/index.ts";
+import cacheGuard, { JEV_TIP, MODEL_OFFERS, type ModelOffers, OFFER_TIMEOUT_MS, choiceMenu, cleanOffers, modelInfo, statusText } from "../src/index.ts";
 import { lastRequest, view } from "../src/clock.ts";
 import { HerdrReporter, alertHeld, soundFile } from "../src/herdr.ts";
 
@@ -76,8 +76,19 @@ function harnessWith(entries: unknown[], herdr: HerdrReporter, model: any = opus
   const blocked: unknown[] = [];
   const alerts: string[] = [];
   const states: unknown[] = [];
+  const choices: unknown[] = [];
+  const listeners = new Map<string, Array<(data: any) => void>>();
+  const listen = (channel: string, fn: (data: any) => void) => listeners.set(channel, [...(listeners.get(channel) ?? []), fn]);
   const pi = {
-    events: { emit: (channel: string, data: unknown) => { if (channel === "herdr:blocked") blocked.push(data); if (channel === "cache:state") states.push(data); }, on: () => () => undefined },
+    events: {
+      emit: (channel: string, data: unknown) => {
+        if (channel === "herdr:blocked") blocked.push(data);
+        if (channel === "cache:state") states.push(data);
+        if (channel === "cache:model-choice") choices.push(data);
+        for (const fn of listeners.get(channel) ?? []) fn(data);
+      },
+      on: (channel: string, fn: (data: any) => void) => { listen(channel, fn); return () => undefined; },
+    },
     on: (name: string, handler: any) => { handlers.set(name, [...(handlers.get(name) ?? []), handler]); return () => undefined; },
     registerCommand: (name: string, options: any) => commands.set(name, options),
     registerEntryRenderer: (type: string, renderer: any) => renderers.set(type, renderer),
@@ -111,7 +122,7 @@ function harnessWith(entries: unknown[], herdr: HerdrReporter, model: any = opus
         ui.answers.shift();
         return new Promise<undefined>((resolve) => opts?.signal?.addEventListener("abort", () => resolve(undefined)));
       }
-      if (title.startsWith("Prompt cache miss.")) { ui.confirms.push(title); expect(options[0]).toMatch(/^Send anyway/); }
+      if (title.startsWith("Prompt cache miss.")) { ui.confirms.push(title); expect(options[0]).toMatch(/^Send /); }
       const answer = ui.answers.length ? ui.answers.shift() : ui.answer;
       return answer === undefined ? undefined : options.find((option) => option.startsWith(answer));
     },
@@ -140,7 +151,7 @@ function harnessWith(entries: unknown[], herdr: HerdrReporter, model: any = opus
     for (const handler of handlers.get(name) ?? []) result = (await handler(event, ctx)) ?? result;
     return result;
   };
-  return { emit, ui, ctx, commands, sent, sessions, appended, renderers, blocked, alerts, states };
+  return { emit, ui, ctx, commands, sent, sessions, appended, renderers, blocked, alerts, states, choices, listen };
 }
 
 const input = (text: string, extra: Record<string, unknown> = {}) => ({ type: "input", text, source: "interactive", ...extra });
@@ -464,6 +475,136 @@ describe("choices", () => {
     expect(h.ui.notes.filter((n) => n.includes("Last request:"))).toHaveLength(2);
     await h.emit("input", input("still asks"));
     expect(h.ui.confirms).toHaveLength(1);
+  });
+});
+
+describe("model offers", () => {
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(NOW); });
+  afterEach(() => vi.useRealTimers());
+  const named = { ...opus, name: "Claude Opus 5.5" };
+  const cold = () => harness([assistant(NOW - 900_000, 600_000)], named);
+  const rest = [
+    "Compact first, then send it (summary reads 601k tokens)",
+    "Start a new session with this prompt (no history to re-cache)",
+    "Keep the prompt in the editor",
+  ];
+
+  test("a recommended offer goes first, so Enter takes Jev's pick; the current model is named", async () => {
+    const h = cold();
+    const requests: any[] = [];
+    h.listen(MODEL_OFFERS, (payload: ModelOffers) => {
+      requests.push({ text: payload.text, tokens: payload.tokens });
+      payload.offers.push(Promise.resolve([{ model: "anthropic/claude-sonnet-5-5", label: "Sonnet 5.5", recommended: true, note: "enough for this" }]));
+    });
+    await h.emit("session_start", {});
+    h.ui.answers = ["Send with Sonnet"];
+    expect(await h.emit("input", input("next step"))).toEqual({ action: "continue" });
+    expect(requests).toEqual([{ text: "next step", tokens: 601_000 }]);
+    expect(h.ui.menus[0]).toEqual([
+      "Send with Sonnet 5.5 (Jev's pick; re-caches 601k tokens; enough for this)",
+      "Send with Claude Opus 5.5 (re-caches 601k tokens)",
+      "Send, and stop asking in this session",
+      ...rest,
+    ]);
+    expect(h.choices).toEqual([{ text: "next step", model: "anthropic/claude-sonnet-5-5" }]);
+    // The current model's line sends on it: no model chosen.
+    h.ui.answers = ["Send with Claude Opus"];
+    expect(await h.emit("input", input("again"))).toEqual({ action: "continue" });
+    expect(h.choices.at(-1)).toEqual({ text: "again", model: null });
+    // cache-guard never switches the model itself.
+    expect(h.sent).toEqual([]);
+  });
+
+  test("plain offers follow the mute line; bad, duplicate and current-model offers are dropped", async () => {
+    const h = cold();
+    h.listen(MODEL_OFFERS, (payload: ModelOffers) => {
+      payload.offers.push(Promise.resolve([
+        { model: "anthropic/claude-haiku-5", label: "Haiku 5", note: "a note far too long to fit on one menu line" },
+        { model: "anthropic/claude-opus-5-5", label: "Opus again" },
+        { model: "anthropic/claude-haiku-5", label: "Haiku twice" },
+        { model: "no-slash", label: "Broken" },
+        { model: "anthropic/claude-fable-5-1", label: "  " },
+        null,
+      ] as any));
+      payload.offers.push(Promise.resolve([{ model: "anthropic/claude-fable-5-1", label: "Fable\n5.1", note: "cheaper" }]));
+      payload.offers.push(Promise.reject(new Error("listener failed")));
+      payload.offers.push(Promise.resolve(undefined));
+    });
+    await h.emit("session_start", {});
+    h.ui.answers = ["Send with Fable"];
+    expect(await h.emit("input", input("go"))).toEqual({ action: "continue" });
+    expect(h.ui.menus[0]).toEqual([
+      "Send anyway (re-caches 601k tokens)",
+      "Send, and stop asking in this session",
+      "Send with Haiku 5 instead (re-caches 601k tokens)",
+      "Send with Fable 5.1 instead (re-caches 601k tokens; cheaper)",
+      ...rest,
+    ]);
+    expect(h.choices).toEqual([{ text: "go", model: "anthropic/claude-fable-5-1" }]);
+    h.ui.answers = ["Send anyway"];
+    expect(await h.emit("input", input("go"))).toEqual({ action: "continue" });
+    expect(h.choices.at(-1)).toEqual({ text: "go", model: null });
+  });
+
+  test("without offers the menu is unchanged, and every other answer chooses no model", async () => {
+    const h = cold();
+    h.listen(MODEL_OFFERS, () => undefined);
+    await h.emit("session_start", {});
+    h.ui.answer = undefined; // escape
+    expect(await h.emit("input", input("keep me"))).toEqual({ action: "handled" });
+    expect(h.ui.menus[0]).toEqual(["Send anyway (re-caches 601k tokens)", "Send, and stop asking in this session", ...rest]);
+    h.ui.answers = ["Compact", "Default"];
+    await h.emit("input", input("compact me"));
+    h.ui.answers = ["Send, and stop"];
+    await h.emit("input", input("mute me"));
+    expect(h.choices).toEqual([{ text: "keep me", model: null }, { text: "compact me", model: null }, { text: "mute me", model: null }]);
+    // No question, no choice event.
+    await h.emit("input", input("muted now"));
+    expect(h.choices).toHaveLength(3);
+    const w = harness([assistant(NOW - 60_000, 600_000)]);
+    await w.emit("session_start", {});
+    await w.emit("input", input("warm"));
+    expect(w.choices).toEqual([]);
+  });
+
+  test("offers not in after 2.5 s are left out; the question does not wait longer", async () => {
+    const h = cold();
+    h.listen(MODEL_OFFERS, (payload: ModelOffers) => {
+      payload.offers.push(new Promise(() => undefined));
+      payload.offers.push(Promise.resolve([{ model: "anthropic/claude-haiku-5", label: "Haiku 5" }]));
+      payload.offers.push(new Promise((resolve) => setTimeout(() => resolve([{ model: "anthropic/claude-fable-5-1", label: "Fable", recommended: true }]), 5_000)));
+    });
+    await h.emit("session_start", {});
+    h.ui.answer = undefined;
+    const pending = h.emit("input", input("slow"));
+    await vi.advanceTimersByTimeAsync(OFFER_TIMEOUT_MS - 1);
+    expect(h.ui.menus).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await pending).toEqual({ action: "handled" });
+    expect(h.ui.menus[0]).toEqual([
+      "Send anyway (re-caches 601k tokens)",
+      "Send, and stop asking in this session",
+      "Send with Haiku 5 instead (re-caches 601k tokens)",
+      ...rest,
+    ]);
+  });
+
+  test("cleanOffers keeps the first recommended pick and one line per label", () => {
+    expect(cleanOffers([
+      { model: "a/x", label: "X", recommended: true },
+      { model: "a/y", label: "x" },
+      { model: "a/z", label: "Z", recommended: "yes", note: 3 },
+      { model: "a/ w", label: "W" },
+      { model: "/w", label: "W" },
+    ], "a/cur")).toEqual([{ model: "a/x", label: "X", recommended: true }, { model: "a/z", label: "Z" }]);
+    const v = view(lastRequest([assistant(NOW - 900_000, 600_000)])!, modelInfo(opus as any, {})!, NOW, 3 * 3_600_000);
+    const menu = choiceMenu(v, undefined, { current: "Opus", offers: [{ model: "a/x", label: "X", recommended: true }, { model: "a/y", label: "Y", recommended: true }] });
+    expect(menu.slice(0, 4)).toEqual([
+      { choice: "model", model: "a/x", label: "Send with X (Jev's pick; re-caches 601k tokens)" },
+      { choice: "send", label: "Send with Opus (re-caches 601k tokens)" },
+      { choice: "mute", label: "Send, and stop asking in this session" },
+      { choice: "model", model: "a/y", label: "Send with Y instead (re-caches 601k tokens)" },
+    ]);
   });
 });
 

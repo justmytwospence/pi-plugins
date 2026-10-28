@@ -53,9 +53,24 @@ Prompt cache miss. The prompt cache expired 10m ago: this prompt re-caches 601k 
    Keep the prompt in the editor
 ```
 
+Example of the question with model offers (model names and the note are examples):
+
+```
+Prompt cache miss. The prompt cache expired 10m ago: this prompt re-caches 601k tokens.
+-> Send with Sonnet 5.5 (Jev's pick; re-caches 601k tokens)
+   Send with Claude Opus 5.5 (re-caches 601k tokens)
+   Send, and stop asking in this session
+   Send with Haiku 5 instead (re-caches 601k tokens; cheapest)
+   Compact with Jev, then send it (~1s, no summary model)
+   Compact with a summary, then send it (summary reads up to 601k tokens)
+   Start a new session with this prompt (no history to re-cache)
+   Keep the prompt in the editor
+```
+
 The token counts are the conversation the miss re-sends uncached: sending writes it to the cache again, a summary reads it once and continues on a small context, Jev's compaction needs no summary model, and a new session starts empty.
 
-- **Send anyway**, or **Send, and stop asking in this session.** Sending is first, so Enter sends as if nothing had asked. The second turns the question off for this session; the clock and the Herdr token keep running.
+- **Send anyway**, or **Send, and stop asking in this session.** Sending is first, so Enter sends as if nothing had asked (or on Jev's pick, below). The second turns the question off for this session; the clock and the Herdr token keep running.
+- **Send with another model** (only when another extension, such as pi-auto-effort, offers models). A miss re-caches the whole conversation whatever the model, so switching now loses no warm cache. An offer marked as Jev's pick comes first, as `Send with <model> (Jev's pick; ...)`, so Enter takes it, and **Send anyway** becomes `Send with <current model> (...)`; every other offer follows the mute line as `Send with <model> instead (...)`. A short note from the offer follows the token count. Taking one sends the prompt as **Send anyway** does; the extension that made the offer switches the model, cache-guard does not. The question waits for offers at most 2.5 s, while it looks for Jev. Without offers it is exactly as above (see [Optional integrations](#optional-integrations)).
 - **Compact with Jev** (when Jev is ready). Jev judges every message and tool call against the held prompt, and the summary is written in code from its choices: no LLM reads the history. If Jev fails, nothing is compacted and the prompt goes back in the editor with the reason.
 - **Compact with a summary** (labeled **Compact first** without Jev). Asks what the summary should keep: Pi's default summary, a summary focused on the held prompt (keep what it needs, drop the rest), or your own guidance. It then runs Pi's compaction and sends the prompt onto the small context. Compacting reads the history once, uncached, then continues on a small context; with Jev filtering on (`compact.filter`), Pi's summarizer reads only what Jev did not drop, so the token count shown is an upper bound. If compaction fails (for example the session is too small), the prompt goes back in the editor.
 - **Start a new session.** Opens a new session linked to this one (as its parent), on the same model and thinking level, and sends the prompt there, images included. Also available as `/cache-guard fresh`, which takes the editor's text.
@@ -177,11 +192,14 @@ rows = [["state_icon", "workspace", { token = "$cache", fg = "#5f87d7", rules = 
 
 - Other extensions (pi-auto-effort, for one) can read the main session's prompt cache from the `cache:state` event on Pi's event bus: `{ cold: boolean, tokens?: number, model?: "provider/id" }`. `cold` is true when the next request re-writes the cache: expired, probably expired after a long idle, a model switch, or nothing cached yet (a new session, a fresh compaction). `tokens` is the cached context the last request left (absent when nothing is cached); `model` is the model that cache belongs to (the session's model when nothing is cached). It is emitted at session start, whenever that view changes (cold and warm, a new response, a model switch), and again before each prompt and at each agent start, so a listener deciding then has a fresh value. The per-session `/cache-guard off` does not stop it; `"enabled": false` does. Without a listener nothing happens.
 
+- Other extensions can offer models in the cold-cache question. Before it opens, cache-guard emits `cache:model-offers` with a mutable payload `{ text, tokens, offers: [] }`: `text` is the held prompt as typed, `tokens` what the miss re-caches. A listener pushes into `offers`, while the emit runs (Pi calls listeners synchronously; anything pushed later is missed), a promise of `ModelOffer[]` or undefined, where `ModelOffer` is `{ model: "provider/id", label: string, recommended?: boolean, note?: string }`. cache-guard waits for all of them at most 2.5 s, keeps what arrived in time, and drops malformed offers, the current model, and repeated models or labels. Only the first `recommended` offer is Jev's pick; the rest are listed as plain offers. A `note` is shown only up to 32 characters, and labels are put on one line. When the question is answered, cache-guard emits `cache:model-choice` with `{ text, model }`: the taken offer's `provider/id`, or `null` for every other answer (send on the current model, mute, either compaction, a new session, keep). It is emitted whenever the question was shown, with offers or without. cache-guard never switches the model: the listener that made the offer applies it (pi-auto-effort, in `before_agent_start`). The event names and types are exported from `src/index.ts` (`MODEL_OFFERS`, `MODEL_CHOICE`, `ModelOffer`, `ModelOffers`, `ModelChoice`). Without a listener the question has no model lines.
+
 ## Limitations
 
 - The clock is the API's guaranteed minimum, measured from each request's start; entries are deleted soon after it, not exactly at it. OpenAI keeps entries at least that long but may keep them longer. Where OpenAI guarantees nothing (`prompt_cache_retention`), entries can also go early, for example when a request lands on another machine. Other invalidations (tool or system prompt changes, an MCP server reconnecting) are not visible to it.
 - After a compaction or branch summary there is no cached request to track until the next response.
 - The warning needs an interactive UI; prompts sent without one are never held.
+- The question is Pi's own select, which wraps a long option onto the next row. herdr-web-ui reads it at any width; Collie reads it only where every option fits on one row (74 columns and wider).
 
 ## Development
 
