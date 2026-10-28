@@ -105,7 +105,7 @@ test("codeSummary has goal, verbatim, notes and files", () => {
     previousSummary: "Earlier: set up the repo.",
     fileOps: { read: new Set(["src/http.ts"]), written: new Set(), edited: new Set(["src/retry.ts"]) },
   });
-  expect(summary).toMatch(/^# Compacted with Jev/u);
+  expect(summary).toMatch(/^# Compacted quickly/u);
   expect(summary).toContain("## Earlier summary\n\nEarlier: set up the repo.");
   expect(summary).toContain("- Add retries to the HTTP client. Max 3 attempts, exponential backoff.");
   expect(summary).toContain("**User:** Add retries");

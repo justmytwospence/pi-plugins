@@ -46,7 +46,7 @@ export const MODE_DESCRIPTIONS: Record<PermissionMode, string> = {
   default: "Ask before every edit, write and command that does more than read.",
   acceptEdits: "Edits, writes and filesystem commands inside the project run; other commands ask.",
   plan: "Read-only research and a plan to approve before anything changes (pi-plan-mode).",
-  auto: "Jev judges each call; you are asked only about risky ones the agent cannot work around.",
+  auto: "The gate judges each call; you are asked only about risky ones the agent cannot work around.",
   bypassPermissions: "Everything runs, except removing / , home, the project or a parent of them.",
 };
 

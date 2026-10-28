@@ -30,7 +30,7 @@ While it is on, your agent writes its plan to a plan file, by default `~/.pi/age
 
 When the plan is complete, your agent calls `exit_plan_mode` directly. Plan tools are model-only: calling them inside `codemode` is prohibited because nested calls have no inline plan renderer. The plan appears in the conversation and you choose:
 
-- **Yes, auto mode (Jev judges calls)**, **Yes, yolo mode**, **Yes, auto-accept project edits** or **Yes, manually approve edits** (with the gate, only its enabled modes, with manual approval when none of the others is enabled; otherwise **Yes, implement it**): implement here, in that permission mode. Auto mode asks Jev to judge each call; yolo mode runs everything except critical removals; auto-accept project edits permits project edits and filesystem commands without approval, while other commands follow the gate's normal approval policy.
+- **Yes, auto mode**, **Yes, yolo mode**, **Yes, auto-accept project edits** or **Yes, manually approve edits** (with the gate, only its enabled modes, with manual approval when none of the others is enabled; otherwise **Yes, implement it**): implement here, in that permission mode. Auto mode asks Jev to judge each call; yolo mode runs everything except critical removals; auto-accept project edits permits project edits and filesystem commands without approval, while other commands follow the gate's normal approval policy.
 - **Yes, in a fresh session with only the plan**: a child session starts with the plan once the current turn ends.
 - **Edit the plan first**: revise it in Pi's editor, then choose again.
 - **No, keep planning**: give feedback, or leave it empty and say it in the chat.

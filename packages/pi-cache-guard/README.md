@@ -45,10 +45,10 @@ Example of the question:
 
 ```
 Prompt cache miss. The prompt cache expired 10m ago: this prompt re-caches 601k tokens.
-Sending re-caches 601k tokens on any model; a summary reads up to 601k, Jev's compaction none; a new session starts empty.
+Sending re-caches 601k tokens on any model; a summary reads up to 601k, a quick compaction none; a new session starts empty.
 -> Send anyway
    Send, and stop asking in this session
-   Compact with Jev, then send (~1s)
+   Compact quickly, then send (~1s)
    Compact with a summary, then send
    Start a new session with this prompt
    Keep the prompt in the editor
@@ -58,23 +58,23 @@ Example of the question with model offers (model names and the note are examples
 
 ```
 Prompt cache miss. The prompt cache expired 10m ago: this prompt re-caches 601k tokens.
-Sending re-caches 601k tokens on any model; a summary reads up to 601k, Jev's compaction none; a new session starts empty.
-Jev's pick: Claude Sonnet 5.5 (routine change).
--> Send with Claude Sonnet 5.5 (Jev's pick)
+Sending re-caches 601k tokens on any model; a summary reads up to 601k, a quick compaction none; a new session starts empty.
+Recommended: Claude Sonnet 5.5 (routine change).
+-> Send with Claude Sonnet 5.5 (recommended)
    Send with Claude Opus 5.5
    Send, and stop asking in this session
    Send with Claude Haiku 5.5 instead
-   Compact with Jev, then send (~1s)
+   Compact quickly, then send (~1s)
    Compact with a summary, then send
    Start a new session with this prompt
    Keep the prompt in the editor
 ```
 
-The token counts, in the question, are the conversation the miss re-sends uncached: sending writes it to the cache again, a summary reads it once and continues on a small context, Jev's compaction needs no summary model, and a new session starts empty.
+The token counts, in the question, are the conversation the miss re-sends uncached: sending writes it to the cache again, a summary reads it once and continues on a small context, a quick compaction needs no summary model, and a new session starts empty.
 
-- **Send anyway**, or **Send, and stop asking in this session.** Sending is first, so Enter sends as if nothing had asked (or on Jev's pick, below). The second turns the question off for this session; the clock and the Herdr token keep running.
-- **Send with another model** (only when another extension, such as pi-auto-effort, offers models). A miss re-caches the whole conversation whatever the model, so switching now loses no warm cache. An offer marked as Jev's pick comes first, as `Send with <model> (Jev's pick)`, so Enter takes it, and **Send anyway** becomes `Send with <current model>`; every other offer follows the mute line as `Send with <model> instead`. Jev's reason (the offer's note) is a line of the question. Taking one sends the prompt as **Send anyway** does; the extension that made the offer switches the model, cache-guard does not. The question waits for offers at most 2.5 s, while it looks for Jev. Without offers it is exactly as above (see [Optional integrations](#optional-integrations)).
-- **Compact with Jev** (when Jev is ready). Jev judges every message and tool call against the held prompt, and the summary is written in code from its choices: no LLM reads the history. If Jev fails, nothing is compacted and the prompt goes back in the editor with the reason.
+- **Send anyway**, or **Send, and stop asking in this session.** Sending is first, so Enter sends as if nothing had asked (or on the recommended model, below). The second turns the question off for this session; the clock and the Herdr token keep running.
+- **Send with another model** (only when another extension, such as pi-auto-effort, offers models). A miss re-caches the whole conversation whatever the model, so switching now loses no warm cache. An offer marked recommended comes first, as `Send with <model> (recommended)`, so Enter takes it, and **Send anyway** becomes `Send with <current model>`; every other offer follows the mute line as `Send with <model> instead`. The reason (the offer's note) is a `Recommended:` line of the question. Taking one sends the prompt as **Send anyway** does; the extension that made the offer switches the model, cache-guard does not. The question waits for offers at most 2.5 s, while it looks for Jev. Without offers it is exactly as above (see [Optional integrations](#optional-integrations)).
+- **Compact quickly** (when Jev is set up). Jev judges every message and tool call against the held prompt, and the summary is written in code from its choices: no LLM reads the history. If Jev fails, nothing is compacted and the prompt goes back in the editor with the reason.
 - **Compact with a summary** (labeled **Compact first** without Jev). Asks what the summary should keep: Pi's default summary, a summary focused on the held prompt (keep what it needs, drop the rest), or your own guidance. It then runs Pi's compaction and sends the prompt onto the small context. Compacting reads the history once, uncached, then continues on a small context; with Jev filtering on (`compact.filter`), Pi's summarizer reads only what Jev did not drop, so the token count shown is an upper bound. If compaction fails (for example the session is too small), the prompt goes back in the editor.
 - **Start a new session.** Opens a new session linked to this one (as its parent), on the same model and thinking level, and sends the prompt there, images included. Also available as `/cache-guard fresh`, which takes the editor's text.
 - **Keep the prompt in the editor.** Esc does the same, and spends nothing. Images attached to the held prompt are not put back.
@@ -83,7 +83,7 @@ When the question holds a prompt it says so out loud, so a prompt you sent just 
 
 The question only ever opens in answer to a prompt you sent: nothing pops up on its own while you are away, so keys and remote clients (herdr-web-ui, Collie) never type into a dialog they did not expect. The `❄` status and Herdr token show a cold cache ahead of time; `/cache-guard compact` and `/cache-guard fresh` act on it before you type.
 
-When Jev is not set up (and not turned off), the question ends with a tip: `/cache-guard jev` sets it up, or turns it (and the tip) off.
+When Jev is not set up (and not turned off), the question ends with a tip: `/cache-guard jev` sets up quick compaction, or turns it (and the tip) off.
 
 It also asks when the selected model differs from the one the conversation was cached for (each model has its own cache). Past a typical lifetime, or `warn.idleMinutes` without one, the question is worded as a likelihood.
 
@@ -195,7 +195,7 @@ rows = [["state_icon", "workspace", { token = "$cache", fg = "#5f87d7", rules = 
 
 - Other extensions (pi-auto-effort, for one) can read the main session's prompt cache from the `cache:state` event on Pi's event bus: `{ cold: boolean, tokens?: number, model?: "provider/id" }`. `cold` is true when the next request re-writes the cache: expired, probably expired after a long idle, a model switch, or nothing cached yet (a new session, a fresh compaction). `tokens` is the cached context the last request left (absent when nothing is cached); `model` is the model that cache belongs to (the session's model when nothing is cached). It is emitted at session start, whenever that view changes (cold and warm, a new response, a model switch), and again before each prompt and at each agent start, so a listener deciding then has a fresh value. The per-session `/cache-guard off` does not stop it; `"enabled": false` does. Without a listener nothing happens.
 
-- Other extensions can offer models in the cold-cache question. Before it opens, cache-guard emits `cache:model-offers` with a mutable payload `{ text, tokens, offers: [] }`: `text` is the held prompt as typed, `tokens` what the miss re-caches. A listener pushes into `offers`, while the emit runs (Pi calls listeners synchronously; anything pushed later is missed), a promise of `ModelOffer[]` or undefined, where `ModelOffer` is `{ model: "provider/id", label: string, recommended?: boolean, note?: string }`. cache-guard waits for all of them at most 2.5 s, keeps what arrived in time, and drops malformed offers, the current model, and repeated models or labels. Only the first `recommended` offer is Jev's pick; the rest are listed as plain offers. A `note` is shown in the question with Jev's pick, and labels are put on one line and shortened to fit the 42-character option width. When the question is answered, cache-guard emits `cache:model-choice` with `{ text, model }`: the taken offer's `provider/id`, or `null` for every other answer (send on the current model, mute, either compaction, a new session, keep). It is emitted whenever the question was shown, with offers or without. cache-guard never switches the model: the listener that made the offer applies it (pi-auto-effort, in `before_agent_start`). The event names and types are exported from `src/index.ts` (`MODEL_OFFERS`, `MODEL_CHOICE`, `ModelOffer`, `ModelOffers`, `ModelChoice`). Without a listener the question has no model lines.
+- Other extensions can offer models in the cold-cache question. Before it opens, cache-guard emits `cache:model-offers` with a mutable payload `{ text, tokens, offers: [] }`: `text` is the held prompt as typed, `tokens` what the miss re-caches. A listener pushes into `offers`, while the emit runs (Pi calls listeners synchronously; anything pushed later is missed), a promise of `ModelOffer[]` or undefined, where `ModelOffer` is `{ model: "provider/id", label: string, recommended?: boolean, note?: string }`. cache-guard waits for all of them at most 2.5 s, keeps what arrived in time, and drops malformed offers, the current model, and repeated models or labels. Only the first `recommended` offer is the recommended one; the rest are listed as plain offers. A `note` is shown in the question as the recommendation, and labels are put on one line and shortened to fit the 42-character option width. When the question is answered, cache-guard emits `cache:model-choice` with `{ text, model }`: the taken offer's `provider/id`, or `null` for every other answer (send on the current model, mute, either compaction, a new session, keep). It is emitted whenever the question was shown, with offers or without. cache-guard never switches the model: the listener that made the offer applies it (pi-auto-effort, in `before_agent_start`). The event names and types are exported from `src/index.ts` (`MODEL_OFFERS`, `MODEL_CHOICE`, `ModelOffer`, `ModelOffers`, `ModelChoice`). Without a listener the question has no model lines.
 
 ## Limitations
 

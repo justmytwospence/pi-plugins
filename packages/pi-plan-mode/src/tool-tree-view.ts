@@ -90,7 +90,10 @@ export class ToolTreeView implements Component {
         },
         () => {
           if (this.closed) return;
-          this.jevStatus = { kind: "done", message: "Jev could not pick tools; using the defaults from settings." };
+          this.jevStatus = {
+            kind: "done",
+            message: "Tools could not be picked automatically; using the defaults from settings.",
+          };
           options.requestRender();
         },
       );
@@ -242,7 +245,7 @@ export class ToolTreeView implements Component {
     const selectedCount = all.filter((leaf) => leaf.selected).length;
     const jev =
       this.jevStatus?.kind === "pending"
-        ? `${theme.fg("accent", spinner())} ${theme.fg("muted", "Jev is picking the tools this task needs…")}`
+        ? `${theme.fg("accent", spinner())} ${theme.fg("muted", "Picking the tools this task needs…")}`
         : this.jevStatus?.kind === "done"
           ? theme.fg("muted", this.jevStatus.message)
           : undefined;
@@ -255,7 +258,7 @@ export class ToolTreeView implements Component {
         "Tools",
       ),
       ...(this.options.task ? [fieldLine(theme, width, "Task", this.options.task)] : []),
-      ...(jev ? [fieldLine(theme, width, "Jev", jev)] : []),
+      ...(jev ? [fieldLine(theme, width, "Auto", jev)] : []),
       ...this.options.notes.map((note) => fieldLine(theme, width, "", theme.fg("muted", note))),
       "",
     ];
@@ -308,7 +311,7 @@ export class ToolTreeView implements Component {
           : [
               ...(node.always ? [theme.fg("accent", "always")] : []),
               ...(node.jev !== undefined
-                ? [theme.fg(node.jev >= 0.5 ? "success" : "dim", `Jev ${Math.round(node.jev * 100)}%`)]
+                ? [theme.fg(node.jev >= 0.5 ? "success" : "dim", `${Math.round(node.jev * 100)}% suggested`)]
                 : []),
             ].join(theme.fg("dim", " · "));
         line = `${label} ${extra}`;
@@ -347,9 +350,9 @@ export class ToolTreeView implements Component {
       const node = row.node;
       text = node.detail || node.description || node.label;
       if (node.always) {
-        text = `${text}${text.endsWith(".") ? "" : "."} Always offered (alwaysOffer in settings): Jev scores it but never deselects it.`;
+        text = `${text}${text.endsWith(".") ? "" : "."} Always offered (alwaysOffer in settings): the automatic pick scores it but never deselects it.`;
       } else if (node.jevLocked && node.jev !== undefined) {
-        text = `${text}${text.endsWith(".") ? "" : "."} Jev scores it but leaves it as you set it.`;
+        text = `${text}${text.endsWith(".") ? "" : "."} the automatic pick scores it but leaves it as you set it.`;
       }
       if (node.children) {
         const all = leaves([node]);

@@ -128,7 +128,7 @@ export interface MenuItem {
 }
 
 /** Under the cold-cache question while Jev is not set up (and not turned off). */
-export const JEV_TIP = "Tip: /cache-guard jev sets up Jev, which compacts in about a second without a summary model reading the history (or turns this tip off).";
+export const JEV_TIP = "Tip: /cache-guard jev sets up quick compaction, which compacts in about a second without a summary model reading the history (or turns this tip off).";
 
 /**
  * The widest an option of the cold-cache question may be. Pi's own select wraps a longer option
@@ -143,7 +143,7 @@ export const OPTION_MAX = 42;
  * written in code, and a summary. Every option fits OPTION_MAX columns; the token counts each way
  * re-sends are in the title (`coldTitle`).
  *
- * Model offers (`cache:model-offers`, cleaned): a recommended one (Jev's pick) goes first, so Enter
+ * Model offers (`cache:model-offers`, cleaned): a recommended one (recommended) goes first, so Enter
  * takes it, and "Send anyway" becomes "Send with <current model>"; every other offer follows the
  * mute line as "Send with <label> instead". Without offers the menu is the plain one.
  */
@@ -158,14 +158,14 @@ export function choiceMenu(
   const fit = (prefix: string, name: string, suffix: string) => `${prefix}${oneLine(name, OPTION_MAX - prefix.length - suffix.length)}${suffix}`;
   const sends: MenuItem[] = pick
     ? [
-        { choice: "model", model: pick.model, label: fit("Send with ", pick.label, " (Jev's pick)") },
+        { choice: "model", model: pick.model, label: fit("Send with ", pick.label, " (recommended)") },
         { choice: "send", label: models.current ? fit("Send with ", models.current, "") : "Send anyway" },
       ]
     : [{ choice: "send", label: "Send anyway" }];
   const switches: MenuItem[] = others.map((offer) => ({ choice: "model", model: offer.model, label: fit("Send with ", offer.label, " instead") }));
   const compactions: MenuItem[] = jev.ready
     ? [
-        { choice: "jev", label: "Compact with Jev, then send (~1s)" },
+        { choice: "jev", label: "Compact quickly, then send (~1s)" },
         { choice: "compact", label: "Compact with a summary, then send" },
       ]
     : [{ choice: "compact", label: "Compact first, then send" }];
@@ -191,8 +191,8 @@ export function coldTitle(
 ): string {
   const tokens = formatTokens(v.last.tokens);
   const summary = `a summary reads ${jev.ready && jev.filtered ? "up to " : ""}${tokens}`;
-  const ways = `Sending re-caches ${tokens} tokens on any model; ${summary}${jev.ready ? ", Jev's compaction none" : ""}; a new session starts empty.`;
-  const why = pick ? `\nJev's pick: ${pick.label}${pick.note ? ` (${pick.note})` : ""}.` : "";
+  const ways = `Sending re-caches ${tokens} tokens on any model; ${summary}${jev.ready ? ", a quick compaction none" : ""}; a new session starts empty.`;
+  const why = pick ? `\nRecommended: ${pick.label}${pick.note ? ` (${pick.note})` : ""}.` : "";
   return `Prompt cache miss. ${describeMiss(v.cold!, v.last.tokens, undefined)}\n${ways}${why}${jev.missing ? `\n${JEV_TIP}` : ""}`;
 }
 
@@ -489,12 +489,12 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
         // Jev judges the history against the held prompt and writes the summary in code. Strict: if
         // Jev fails nothing is compacted (no surprise LLM summary), and the prompt goes back.
         lean.armJevCompaction({ goal: event.text, strict: true });
-        context.ui.notify("Compacting with Jev, then sending your prompt.", "info");
+        context.ui.notify("Compacting quickly, then sending your prompt.", "info");
         context.compact({
           onComplete: () => void pi.sendUserMessage(content),
           onError: (error) => {
             lean.disarm();
-            context.ui.notify(`Compaction with Jev did not run: ${lean.lastFailure() ?? error.message}. Your prompt is back in the editor.`, "warning");
+            context.ui.notify(`Quick compaction did not run: ${lean.lastFailure() ?? error.message}. Your prompt is back in the editor.`, "warning");
             context.ui.setEditorText(event.text);
           },
         });
@@ -590,11 +590,11 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
     const started = Date.now();
     context.compact({
       customInstructions: focus || undefined,
-      onComplete: () => context.ui.notify(`Compacted with Jev in ${((Date.now() - started) / 1000).toFixed(1)} s.`, "info"),
+      onComplete: () => context.ui.notify(`Compacted quickly in ${((Date.now() - started) / 1000).toFixed(1)} s.`, "info"),
       onError: (error) => {
         lean.disarm();
         onFailed?.();
-        context.ui.notify(`Compaction with Jev did not run: ${lean.lastFailure() ?? error.message}.`, "warning");
+        context.ui.notify(`Quick compaction did not run: ${lean.lastFailure() ?? error.message}.`, "warning");
       },
     });
   };
@@ -703,7 +703,7 @@ export function jevLine(jev: JevState, settings: Settings, savedChars: number): 
   if (jev.kind === "off") return "Jev: off (/cache-guard jev turns it on).";
   if (jev.kind === "missing") return `Jev: not set up (${jev.reason}); /cache-guard jev.`;
   const trim = settings.trim.enabled ? `trimming on${savedChars ? ` (${trimStatus(savedChars)?.replace("lean: ", "")} so far)` : ""}` : "trimming off";
-  const compaction = `Jev compaction from the cold-cache menu and /cache-guard compact${settings.compact.filter ? "; it filters /compact too" : ""}`;
+  const compaction = `Quick compaction from the cold-cache menu and /cache-guard compact${settings.compact.filter ? "; it filters /compact too" : ""}`;
   return `Jev: ${label(jev.target)}; ${trim}; ${compaction}.`;
 }
 

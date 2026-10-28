@@ -187,7 +187,7 @@ export function assemble(lines: readonly string[], keptBlocks: readonly Block[],
     } else omitted++;
   }
   if (omitted) out.push(`[… ${omitted} line${omitted === 1 ? "" : "s"} omitted …]`);
-  out.push("", `[Trimmed by Jev: kept ${keep.size} of ${lines.length} lines that matter for this step. Full output: ${fullPath} (read it with offset/limit).]`);
+  out.push("", `[Trimmed automatically: kept ${keep.size} of ${lines.length} lines that matter for this step. Full output: ${fullPath} (read it with offset/limit).]`);
   return { text: out.join("\n"), keptLines: keep.size, totalLines: lines.length };
 }
 
@@ -338,7 +338,7 @@ export function codeSummary(input: {
   const counts = { verbatim: 0, summarize: 0, drop: 0 };
   for (const unit of units) counts[keep.get(unit.id) ?? "summarize"]++;
   sections.push(
-    `# Compacted with Jev\n\nJev kept ${counts.verbatim} item${counts.verbatim === 1 ? "" : "s"} word for word, noted ${counts.summarize} and dropped ${counts.drop}; no LLM wrote this summary.${input.instructions ? `\nFocus: ${input.instructions}` : ""}`,
+    `# Compacted quickly\n\nKept ${counts.verbatim} item${counts.verbatim === 1 ? "" : "s"} word for word, noted ${counts.summarize} and dropped ${counts.drop}; no LLM wrote this summary.${input.instructions ? `\nFocus: ${input.instructions}` : ""}`,
   );
   if (input.previousSummary?.trim()) sections.push(`## Earlier summary\n\n${clip(input.previousSummary.trim(), 4_000)}`);
   const goals = units.filter((u) => u.kind === "user" && keep.get(u.id) !== "drop").map((u) => `- ${clip(u.text.replace(/\s+/gu, " "), 500)}`);

@@ -27,17 +27,17 @@ The warning threshold is `warn.minTokens`: the dialog appears when a cold cache 
 
 The dialog lets you send, send and stop asking for the session, compact first, open a linked fresh session, or keep the prompt in the editor. With Jev available, classifier-only compaction and a conventional summary are separate choices. Enter defaults to sending; Esc keeps the prompt. The headline and option labels give the tokens each path re-sends uncached.
 
-When another extension (such as [pi-auto-effort](/plugins/pi-auto-effort/)) offers models, the dialog also offers to send on one of them: a miss re-caches the conversation whatever the model, so switching then loses no warm cache. An offer marked as Jev's pick comes first, so Enter takes it, and the plain send is named after the current model; other offers follow the mute line. Taking one sends the prompt as a plain send does, and the extension that made the offer switches the model; cache guard never does. The dialog waits for offers at most 2.5 seconds, while it looks for Jev, and without offers it has no model lines. Example, with example model names:
+When another extension (such as [pi-auto-effort](/plugins/pi-auto-effort/)) offers models, the dialog also offers to send on one of them: a miss re-caches the conversation whatever the model, so switching then loses no warm cache. An offer marked recommended comes first, so Enter takes it, and the plain send is named after the current model; other offers follow the mute line. Taking one sends the prompt as a plain send does, and the extension that made the offer switches the model; cache guard never does. The dialog waits for offers at most 2.5 seconds, while it looks for Jev, and without offers it has no model lines. Example, with example model names:
 
 ```
 Prompt cache miss. The prompt cache expired 10m ago: this prompt re-caches 601k tokens.
-Sending re-caches 601k tokens on any model; a summary reads up to 601k, Jev's compaction none; a new session starts empty.
-Jev's pick: Claude Sonnet 5.5 (routine change).
--> Send with Claude Sonnet 5.5 (Jev's pick)
+Sending re-caches 601k tokens on any model; a summary reads up to 601k, a quick compaction none; a new session starts empty.
+Recommended: Claude Sonnet 5.5 (routine change).
+-> Send with Claude Sonnet 5.5 (recommended)
    Send with Claude Opus 5.5
    Send, and stop asking in this session
    Send with Claude Haiku 5.5 instead
-   Compact with Jev, then send (~1s)
+   Compact quickly, then send (~1s)
    Compact with a summary, then send
    Start a new session with this prompt
    Keep the prompt in the editor
@@ -91,8 +91,8 @@ If trimming cannot classify or save the full output, it leaves the content uncha
 
 [Status footer](/plugins/pi-status-footer/) optionally places the cache clock and `lean-context` savings estimate on its context row. With pi-herdr and Herdr present, the event-bus bridge can publish a `cache` pane token; `herdr.enabled: false` disables that integration. Neither sibling is required. Other extensions can also read the cache from the `cache:state` event: `{ cold, tokens?, model? }`, emitted at session start, on every change (cold or warm, a new response, a model switch), and again before each prompt and at each agent start. `cold` is also true when nothing is cached yet; top-level `enabled: false` stops the event.
 
-Model offers use two more events. Before the dialog opens, cache guard emits `cache:model-offers` with a mutable `{ text, tokens, offers: [] }` (the held prompt and the tokens the miss re-caches). A listener pushes into `offers`, synchronously during the emit, a promise of `{ model: "provider/id", label, recommended?, note? }[]` or undefined. Offers that arrive within 2.5 seconds are kept, minus malformed ones, the current model and repeats; only the first `recommended` offer counts as Jev's pick, and a `note` appears in the question with Jev's pick. Once the dialog is answered, `cache:model-choice` carries `{ text, model }`: the chosen offer's `provider/id`, or `null` for any other answer, emitted whenever the dialog was shown. The listener applies the model itself. Names and types (`MODEL_OFFERS`, `MODEL_CHOICE`, `ModelOffer`, `ModelOffers`, `ModelChoice`) are exported from `src/index.ts`.
+Model offers use two more events. Before the dialog opens, cache guard emits `cache:model-offers` with a mutable `{ text, tokens, offers: [] }` (the held prompt and the tokens the miss re-caches). A listener pushes into `offers`, synchronously during the emit, a promise of `{ model: "provider/id", label, recommended?, note? }[]` or undefined. Offers that arrive within 2.5 seconds are kept, minus malformed ones, the current model and repeats; only the first `recommended` offer counts as the recommendation, and a `note` appears in the question beside it. Once the dialog is answered, `cache:model-choice` carries `{ text, model }`: the chosen offer's `provider/id`, or `null` for any other answer, emitted whenever the dialog was shown. The listener applies the model itself. Names and types (`MODEL_OFFERS`, `MODEL_CHOICE`, `ModelOffer`, `ModelOffers`, `ModelChoice`) are exported from `src/index.ts`.
 
-The dialog is Pi's own select, which wraps a long option onto a second row that phone clients cannot read, so every option fits 42 characters and the token counts and Jev's reason are in the question. herdr-web-ui and Collie read it at every width. See [remote clients](/guides/clients/).
+The dialog is Pi's own select, which wraps a long option onto a second row that phone clients cannot read, so every option fits 42 characters and the token counts and the recommendation's reason are in the question. herdr-web-ui and Collie read it at every width. See [remote clients](/guides/clients/).
 
 This extension does not warm the cache itself. Pi's `cacheWarming` setting owns refresh requests and their costs. The clock cannot observe every invalidation, including system-prompt or tool changes, and a compacted summary is not lossless history. Consult [Troubleshooting](/guides/troubleshooting/) and the [source and tests](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-cache-guard) when actual behavior differs from an estimate.

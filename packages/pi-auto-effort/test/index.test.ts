@@ -96,7 +96,7 @@ test("Jev unavailable keeps the level; /auto-effort off restores the ceiling", a
   await h.emit("session_start", { type: "session_start" }, ctx);
   await h.emit("before_agent_start", { prompt: "x" }, ctx);
   expect(h.thinkingChanges).toEqual([]);
-  expect(h.entries.at(-1)?.data).toMatchObject({ reason: "unavailable: timed out" });
+  expect(h.entries.at(-1)?.data).toMatchObject({ reason: "assessment unavailable: timed out" });
 
   const s = setup([0]);
   await s.h.emit("session_start", { type: "session_start" }, s.ctx);
@@ -179,7 +179,7 @@ test("branch reconstruction restores the last reason and clears abandoned state 
   const entries = h.entries.length;
   await h.emit("session_tree", { type: "session_tree", newLeafId: "b", oldLeafId: "a" }, ctx);
   expect(await status()).toContain("Bounds ceiling (settings): low to xhigh, your last manual level.");
-  expect(await status()).toContain("Jev: need(medium)=0.90 need(high)=0.55 need(xhigh)=0.10, θ=0.60 → low, last decision: hold.");
+  expect(await status()).toContain("Assessment: need(medium)=0.90 need(high)=0.55 need(xhigh)=0.10, θ=0.60 → low, last decision: hold.");
   // need(medium) 0.9 clears theta 0.6: heading up.
   expect(ctx.ui.status.get("auto-effort")).toBe("effort: low (auto ↑ ≤xhigh)");
 
@@ -187,7 +187,7 @@ test("branch reconstruction restores the last reason and clears abandoned state 
   await h.emit("session_tree", { type: "session_tree", newLeafId: null, oldLeafId: "b" }, ctx);
   const empty = await status();
   expect(empty).toContain("low to low, your last manual level");
-  expect(empty).toContain("Jev: no assessment yet, θ=0.50.");
+  expect(empty).toContain("Assessment: none yet, θ=0.50.");
   expect(empty).not.toContain("last decision:");
   expect(empty).toContain("Models: auto (settings): no tiers for this provider.");
   expect(h.entries).toHaveLength(entries);
@@ -671,7 +671,7 @@ describe("model choice", () => {
       s.tier.push(ROUTINE);
       const { pushed, offers } = await s.offers("rename tmp to buffer");
       expect(pushed).toBe(1);
-      expect(offers).toEqual([[{ model: "anthropic/claude-sonnet-5-5", label: "Claude Sonnet 5.5", recommended: true, note: "Jev: routine work" }]]);
+      expect(offers).toEqual([[{ model: "anthropic/claude-sonnet-5-5", label: "Claude Sonnet 5.5", recommended: true, note: "routine work" }]]);
       expect(s.jev.calls).toHaveLength(1);
       expect(Object.keys(s.jev.calls[0]!.questions)).toEqual(["depth", "ack", "tier"]);
       expect(s.jev.calls[0]!.state.request).toBe("rename tmp to buffer");

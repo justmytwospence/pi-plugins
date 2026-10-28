@@ -73,8 +73,8 @@ test("a held call is pushed back with Jev's reasons and suggestion; the agent's 
   await h.emit("before_agent_start", { prompt: "x" }, ctx);
   const first: any = await h.emit("tool_call", call("bash", { command: "npm publish" }), ctx);
   expect(first.block).toBe(true);
-  expect(first.reason).toMatch(/Jev judged that it changes something other people see/u);
-  expect(first.reason).toMatch(/Jev suggests: Keep it local: .*; or Preview it first/u);
+  expect(first.reason).toMatch(/The gate judged that it changes something other people see/u);
+  expect(first.reason).toMatch(/A suggested workaround: Keep it local: .*; or Preview it first/u);
   expect(first.reason).toMatch(/make your case/u);
   expect(jev.calls[1]?.state).toMatchObject({ held_because: expect.stringMatching(/other people see/u) });
   expect(ctx.ui.selects).toHaveLength(0);
@@ -122,7 +122,7 @@ test("when Jev sees no workaround, the agent is told it is the user's decision",
   try {
     await h.emit("before_agent_start", { prompt: "x" }, ctx);
     const first: any = await h.emit("tool_call", call("bash", { command: "npm publish" }), ctx);
-    expect(first.reason).toMatch(/Jev sees no workaround/u);
+    expect(first.reason).toMatch(/No workaround is apparent/u);
     expect(first.reason).not.toMatch(/why the workarounds fall short/u);
   } finally {
     Object.assign(workaround.workaround, { choice: "local", probabilities: { local: 0.6, dry_run: 0.32, skip: 0.08 } });
@@ -148,7 +148,7 @@ test("always-ask calls skip the judgment, are pushed back first, then go to the 
   const first: any = await h.emit("tool_call", call("bash", { command: "git push --force origin main" }), ctx);
   expect(first.block).toBe(true);
   expect(first.reason).toMatch(/force-pushes main\/master. Calls like this are always held/u);
-  expect(first.reason).toMatch(/Jev suggests/u);
+  expect(first.reason).toMatch(/A suggested workaround/u);
   expect(ctx.ui.selects).toHaveLength(0);
   ctx.ui.selectAnswers.push("Allow once");
   expect(await h.emit("tool_call", call("bash", { command: "git push --force origin main" }, "t2"), ctx)).toBeUndefined();

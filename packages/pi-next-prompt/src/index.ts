@@ -87,7 +87,7 @@ export interface Verdict {
 
 /** Jev's vote on a suggestion. Shown when Jev is off or unavailable: the model already abstains on its own. */
 export async function vet(registry: unknown, config: NextPromptConfig["jev"], pending: Pending): Promise<Verdict> {
-  if (!config.enabled) return { show: true, reason: "Jev off" };
+  if (!config.enabled) return { show: true, reason: "judge off" };
   const outcome = await askJev(
     registry,
     config,
@@ -98,10 +98,10 @@ export async function vet(registry: unknown, config: NextPromptConfig["jev"], pe
     },
     QUESTIONS,
   );
-  if (!outcome.ok) return { show: true, reason: `Jev unavailable (${outcome.reason}), shown anyway` };
+  if (!outcome.ok) return { show: true, reason: `judge unavailable (${outcome.reason}), shown anyway` };
   const p = bool(outcome.answers, "useful");
-  if (p === undefined) return { show: true, reason: "Jev gave no answer, shown anyway" };
-  return { show: p >= config.threshold, reason: `Jev ${p.toFixed(2)} ${p >= config.threshold ? ">=" : "<"} ${config.threshold}` };
+  if (p === undefined) return { show: true, reason: "judge gave no answer, shown anyway" };
+  return { show: p >= config.threshold, reason: `judge ${p.toFixed(2)} ${p >= config.threshold ? ">=" : "<"} ${config.threshold}` };
 }
 
 type Block = { type?: string; text?: string };

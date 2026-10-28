@@ -101,9 +101,9 @@ async function askJev(host: GuardHost, tool: string, description: string | undef
     },
     host.signal,
   );
-  if (!answer.ok) return refuse(`${what} could not be confirmed to change nothing (Jev: ${answer.reason}), so it was not run. Use reading tools or plainly read-only commands.`);
-  if (answer.probability < CHANGE_THRESHOLD) return { allowed: true, why: `Jev: ${Math.round(answer.probability * 100)}% chance of a change` };
-  return refuse(`${what} may change something (Jev: ${Math.round(answer.probability * 100)}% likely), so it was not run.`);
+  if (!answer.ok) return refuse(`${what} could not be confirmed to change nothing (${answer.reason}), so it was not run. Use reading tools or plainly read-only commands.`);
+  if (answer.probability < CHANGE_THRESHOLD) return { allowed: true, why: `${Math.round(answer.probability * 100)}% chance of a change` };
+  return refuse(`${what} may change something (${Math.round(answer.probability * 100)}% likely), so it was not run.`);
 }
 
 /**

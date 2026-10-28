@@ -220,7 +220,7 @@ test("delegation picks the first prompt guideline (economical by default); a pro
   expect(promptGuidelines(undefined)[0]).toBe(economical[0]);
   expect(promptGuidelines("nonsense")[0]).toBe(economical[0]);
   expect(economical[0]).toMatch(/^Once the design is settled and what remains is implementation that follows from it/u);
-  expect(economical[0]).toContain("no model, so Jev picks a cheaper tier");
+  expect(economical[0]).toContain("no model, so a cheaper tier is picked automatically");
   expect(promptGuidelines("conservative")[0]).toMatch(/^Prefer direct work for routine investigation/u);
   expect(economical.slice(1)).toEqual(promptGuidelines("conservative").slice(1));
 
@@ -250,9 +250,9 @@ test("quota:pressure payloads are validated and clamped; the mark shows p", () =
   expect(readPressure({ provider: "x", p: Number.NaN })).toBeUndefined();
   expect(readPressure(null)).toBeUndefined();
   expect(jevMark(false, 0.5)).toBe("");
-  expect(jevMark(true)).toBe(" (Jev)");
-  expect(jevMark(true, 0)).toBe(" (Jev)");
-  expect(jevMark(true, 0.46)).toBe(" (Jev, p=0.5)");
+  expect(jevMark(true)).toBe(" (auto)");
+  expect(jevMark(true, 0)).toBe(" (auto)");
+  expect(jevMark(true, 0.46)).toBe(" (auto, p=0.5)");
 });
 
 test("quota pressure on the parent's provider tightens Jev's picks, and the row and record show it", async () => {
@@ -285,7 +285,7 @@ test("quota pressure on the parent's provider tightens Jev's picks, and the row 
     const calm = await tool.execute("t1", { task: "calm", async: true }, undefined, undefined, ctx);
     expect(calm.details.runs[0]).toMatchObject({ model: "p/big", thinking: "high", byJev: { model: true, thinking: true } });
     expect(calm.details.runs[0]).not.toHaveProperty("pressure");
-    expect(tool.renderResult(calm, { expanded: false }, plain).render(200).join("\n")).toContain("big (Jev) · high (Jev)");
+    expect(tool.renderResult(calm, { expanded: false }, plain).render(200).join("\n")).toContain("big (auto) · high (auto)");
 
     // Another provider's pressure does not count; the parent's does, latest wins.
     send("quota:pressure", { provider: "other", tier: "critical", p: 1 });
@@ -293,7 +293,7 @@ test("quota pressure on the parent's provider tightens Jev's picks, and the row 
     send("quota:pressure", { provider: "p", tier: "critical", p: 1 });
     const tight = await tool.execute("t2", { task: "tight", async: true }, undefined, undefined, ctx);
     expect(tight.details.runs[0]).toMatchObject({ model: "p/mid", thinking: "medium", pressure: 1 });
-    expect(tool.renderResult(tight, { expanded: false }, plain).render(200).join("\n")).toContain("mid (Jev, p=1.0) · medium (Jev, p=1.0)");
+    expect(tool.renderResult(tight, { expanded: false }, plain).render(200).join("\n")).toContain("mid (auto, p=1.0) · medium (auto, p=1.0)");
     const record = h.entries.filter((e) => e.customType === "subagents:run").map((e) => e.data as any).find((d) => d.id === tight.details.runs[0].id);
     expect(record).toMatchObject({ pressure: 1, byJev: { model: true, thinking: true } });
     await h.emit("session_shutdown", { type: "session_shutdown" }, ctx);

@@ -178,7 +178,7 @@ export function leanContext(pi: ExtensionAPI): Lean {
     const fail = (reason: string) => {
       failure = reason;
       if (request?.strict) return { cancel: true };
-      if (jevOnly && ctx.hasUI) ctx.ui.notify(`Jev compaction: ${reason}; using Pi's compaction.`, "warning");
+      if (jevOnly && ctx.hasUI) ctx.ui.notify(`Quick compaction: ${reason}; using Pi's compaction.`, "warning");
       return undefined;
     };
     if (!settings.enabled || (!jevOnly && !settings.compact.filter)) return undefined;
@@ -188,7 +188,7 @@ export function leanContext(pi: ExtensionAPI): Lean {
     const main = extractUnits(prep.messagesToSummarize, "U");
     const prefix = extractUnits(prep.turnPrefixMessages, "P");
     const units = [...main, ...prefix];
-    if (!units.length) return jevOnly ? fail("nothing for Jev to judge") : undefined;
+    if (!units.length) return jevOnly ? fail("nothing to judge") : undefined;
 
     const goal = request?.goal?.trim() || event.customInstructions?.trim() || lastUserMessages(event.branchEntries, 2);
     const judged = await judgeUnits(ctx, jev.target, units, goal, event.signal);
@@ -255,7 +255,7 @@ export function leanContext(pi: ExtensionAPI): Lean {
       }
     };
     await Promise.all(Array.from({ length: Math.max(1, settings.compact.concurrency) }, worker));
-    if (reason) return { ok: false as const, reason: `Jev failed (${reason})` };
+    if (reason) return { ok: false as const, reason: `classification failed (${reason})` };
     return { ok: true as const, keep, usage, latencyMs: Date.now() - started };
   }
 

@@ -1286,7 +1286,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           },
           {
             id: "jev",
-            label: "Jev picks tools",
+            label: "Auto-pick tools",
             section: "Preferences",
             value: () => (settings.jevToolSelection === false ? "off" : "on"),
             cycle: () => {
@@ -1294,7 +1294,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
               settings = { ...settings, jevToolSelection: next };
               saveSettings({ jevToolSelection: next });
             },
-            description: "Let Jev (TypeSafe) preselect the planners' tools from the task on the next step.",
+            description: "Preselect the planners' tools from the task on the next step (needs a TypeSafe classifier).",
           },
           {
             id: "rendered",

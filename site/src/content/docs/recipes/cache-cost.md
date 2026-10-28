@@ -32,7 +32,7 @@ Choose based on the work:
 
 - **Send** when the detailed history is still useful.
 - **Compact with a summary** when the story and reasoning need explaining.
-- **Compact with Jev** when an assembled selection of exact requirements, decisions and file notes is enough.
+- **Compact quickly** when an assembled selection of exact requirements, decisions and file notes is enough.
 - **Start fresh** when the next request is independent.
 
 A model switch can also make the cache cold. System/tool changes and other invalidations are not all visible to the clock.
@@ -55,7 +55,7 @@ Tool trimming runs before results enter context and points to a saved full-outpu
 
 Auto-effort rates the request and sets the thinking level from the floor (low) up to xhigh in its default `free` bounds; `ceiling` bounds cap it at your latest manual level. Off/minimal levels stay alone. Starting Pi with explicit `--thinking` disables automatic effort changes, which is how subagent effort stays fixed.
 
-Its model choice, on by default, also picks a tier of the same provider (Sonnet or Opus, Terra or Sol unless `models.tiers` says otherwise). Because a switch re-writes the cache, it steps down to a cheaper model only when the cache is cold, the context small or the session new, and steps up whenever the work needs it, accepting one cache rewrite. With cache guard loaded, a cold-cache warning also lists those models, with Jev's pick recommended, and your choice there decides the model for that prompt. Set `"models": { "mode": "off" }` in `auto-effort.json` to keep your selected model.
+Its model choice, on by default, also picks a tier of the same provider (Sonnet or Opus, Terra or Sol unless `models.tiers` says otherwise). Because a switch re-writes the cache, it steps down to a cheaper model only when the cache is cold, the context small or the session new, and steps up whenever the work needs it, accepting one cache rewrite. With cache guard loaded, a cold-cache warning also lists those models, with the automatic pick recommended, and your choice there decides the model for that prompt. Set `"models": { "mode": "off" }` in `auto-effort.json` to keep your selected model.
 
 Mid-run adjustment is limited to models Pi marks compatible or explicitly configured effort-update models. Do not add broad `midRun.models` globs unless you accept the potential cache cost.
 

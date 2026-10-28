@@ -501,7 +501,7 @@ describe("model offers", () => {
     expect(await h.emit("input", input("next step"))).toEqual({ action: "continue" });
     expect(requests).toEqual([{ text: "next step", tokens: 601_000 }]);
     expect(h.ui.menus[0]).toEqual([
-      "Send with Sonnet 5.5 (Jev's pick)",
+      "Send with Sonnet 5.5 (recommended)",
       "Send with Claude Opus 5.5",
       "Send, and stop asking in this session",
       ...rest,
@@ -600,7 +600,7 @@ describe("model offers", () => {
     const v = view(lastRequest([assistant(NOW - 900_000, 600_000)])!, modelInfo(opus as any, {})!, NOW, 3 * 3_600_000);
     const menu = choiceMenu(v, undefined, { current: "Opus", offers: [{ model: "a/x", label: "X", recommended: true }, { model: "a/y", label: "Y", recommended: true }] });
     expect(menu.slice(0, 4)).toEqual([
-      { choice: "model", model: "a/x", label: "Send with X (Jev's pick)" },
+      { choice: "model", model: "a/x", label: "Send with X (recommended)" },
       { choice: "send", label: "Send with Opus" },
       { choice: "mute", label: "Send, and stop asking in this session" },
       { choice: "model", model: "a/y", label: "Send with Y instead" },
@@ -614,11 +614,11 @@ describe("model offers", () => {
     for (const jev of [{ ready: true, filtered: true }, { ready: false, filtered: false }]) {
       const menu = choiceMenu(v, jev, { current: `${long} Current`, offers: [pick, { model: "a/y", label: `${long} Other` }] });
       for (const item of menu) expect(item.label.length).toBeLessThanOrEqual(OPTION_MAX);
-      expect(menu[0]!.label).toMatch(/^Send with Claude Sonnet .*… \(Jev's pick\)$/u);
+      expect(menu[0]!.label).toMatch(/^Send with Claude Sonnet .*… \(recommended\)$/u);
     }
     const title = coldTitle(v, { ready: true, filtered: true }, pick);
-    expect(title).toContain("Sending re-caches 601k tokens on any model; a summary reads up to 601k, Jev's compaction none; a new session starts empty.");
-    expect(title).toContain(`Jev's pick: ${long} (routine change).`);
+    expect(title).toContain("Sending re-caches 601k tokens on any model; a summary reads up to 601k, a quick compaction none; a new session starts empty.");
+    expect(title).toContain(`Recommended: ${long} (routine change).`);
     expect(coldTitle(v, { ready: false, filtered: false, missing: true })).toContain(JEV_TIP);
   });
 });
@@ -749,7 +749,7 @@ describe("jev", () => {
     expect(h.ui.menus[0]).toEqual([
       "Send anyway",
       "Send, and stop asking in this session",
-      "Compact with Jev, then send (~1s)",
+      "Compact quickly, then send (~1s)",
       "Compact with a summary, then send",
       "Start a new session with this prompt",
       "Keep the prompt in the editor",
@@ -770,7 +770,7 @@ describe("jev", () => {
     const registry = jevRegistry();
     const h = cold(registry);
     await h.emit("session_start", {});
-    h.ui.answers = ["Compact with Jev"];
+    h.ui.answers = ["Compact quickly"];
     expect(await h.emit("input", input("fix the parser"))).toEqual({ action: "handled" });
     const compaction = h.ui.compactions[0];
     expect(compaction.customInstructions).toBeUndefined();
@@ -785,12 +785,12 @@ describe("jev", () => {
   test("a failed Jev compaction cancels, says why and puts the prompt back", async () => {
     const h = cold(jevRegistry(failing));
     await h.emit("session_start", {});
-    h.ui.answers = ["Compact with Jev"];
+    h.ui.answers = ["Compact quickly"];
     await h.emit("input", input("fix the parser"));
     expect(await h.emit("session_before_compact", preparation())).toEqual({ cancel: true });
     h.ui.compactions[0].onError(new Error("Compaction cancelled"));
     expect(h.ui.editor).toBe("fix the parser");
-    expect(h.ui.notes.at(-1)).toBe("Compaction with Jev did not run: Jev failed (invalid API key). Your prompt is back in the editor.");
+    expect(h.ui.notes.at(-1)).toBe("Quick compaction did not run: classification failed (invalid API key). Your prompt is back in the editor.");
     expect(h.sent).toEqual([]);
   });
 
@@ -846,7 +846,7 @@ describe("jev", () => {
     const h = cold();
     await h.emit("session_start", {});
     await h.commands.get("cache-guard").handler("status", h.ctx);
-    expect(h.ui.notes.at(-1)).toContain("Jev: typesafe/jev-latest; trimming on; Jev compaction from the cold-cache menu and /cache-guard compact; it filters /compact too.");
+    expect(h.ui.notes.at(-1)).toContain("Jev: typesafe/jev-latest; trimming on; Quick compaction from the cold-cache menu and /cache-guard compact; it filters /compact too.");
     expect(existsSync(userFile())).toBe(false);
   });
 });

@@ -76,7 +76,7 @@ export async function askJev(
   questions: Record<string, ClassifierQuestion>,
   signal?: AbortSignal,
 ): Promise<JevOutcome> {
-  if (!config.enabled) return { ok: false, reason: "Jev is off in settings" };
+  if (!config.enabled) return { ok: false, reason: "the classifier is off in settings" };
   const reg = registry as Partial<ClassifierRegistry> | undefined;
   if (typeof reg?.findOfType !== "function" || typeof reg.classify !== "function") {
     return { ok: false, reason: "this Pi has no classifier models (needs Pi 0.99 or newer)" };

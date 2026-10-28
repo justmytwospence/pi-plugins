@@ -56,7 +56,7 @@ export function statusIcon(status: ChildStatus, theme: Theme): string {
 /** ` (Jev)` after a value Jev picked; ` (Jev, p=0.5)` when it was picked under quota pressure. */
 export function jev(on: boolean, theme: Theme, pressure?: number): string {
   if (!on) return "";
-  return theme.fg("dim", pressure && pressure > 0 ? ` (Jev, p=${pressure.toFixed(1)})` : " (Jev)");
+  return theme.fg("dim", pressure && pressure > 0 ? ` (auto, p=${pressure.toFixed(1)})` : " (auto)");
 }
 
 /** `claude-haiku-5 (Jev) · low (Jev)`: the model and effort, marking Jev's picks. */

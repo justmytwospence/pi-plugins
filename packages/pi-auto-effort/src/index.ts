@@ -754,7 +754,7 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     // A go-ahead's own need says nothing about the work, so the trend keeps the last one.
     if (j && decision.reason !== "ack") lastNeed = j.need;
     lastTheta = decision.theta;
-    lastReason = outcome.ok ? decision.reason : `unavailable: ${outcome.reason}`;
+    lastReason = outcome.ok ? decision.reason : `assessment unavailable: ${outcome.reason}`;
 
     // The effort bounds do not apply to models: an automatic pick stays at or below your model.
     const modelChoice = !model ? undefined : "chosen" in model ? model.chosen : await chooseModel(ctx, model.check, model.probabilities, j, decision.theta, "ceiling");
@@ -915,15 +915,15 @@ function boundsText(bounds: Bounds, manualLevel: string, policy: Policy) {
   return `${policy.floor} to ${manualLevel}, your last manual level`;
 }
 
-/** `Jev: need(medium)=0.90 need(high)=0.55 need(xhigh)=0.10, θ=0.70 (5h caution) → medium, last decision: hold.` */
+/** `Assessment: need(medium)=0.90 need(high)=0.55 need(xhigh)=0.10, θ=0.70 (5h caution) → medium, last decision: hold.` */
 function jevLine(need: Record<string, number> | undefined, theta: number, pressure: Pressure, level: string | undefined, reason: string) {
   const tag = pressure.tier !== "none" ? ` (${pressureTag(pressure)})` : "";
   const last = reason ? `, last decision: ${reason}` : "";
-  if (!need) return `Jev: no assessment yet, θ=${theta.toFixed(2)}${tag}${last}.`;
+  if (!need) return `Assessment: none yet, θ=${theta.toFixed(2)}${tag}${last}.`;
   const needs = JUDGED_LEVELS.slice(1)
     .map((l) => `need(${l})=${(need[l] ?? 0).toFixed(2)}`)
     .join(" ");
-  return `Jev: ${needs}, θ=${theta.toFixed(2)}${tag}${level ? ` → ${level}` : ""}${last}.`;
+  return `Assessment: ${needs}, θ=${theta.toFixed(2)}${tag}${level ? ` → ${level}` : ""}${last}.`;
 }
 
 /** `Models: auto (settings): balanced claude-sonnet-5-5, strong claude-opus-5-5 (preset); your model anthropic/claude-opus-5-5.` */

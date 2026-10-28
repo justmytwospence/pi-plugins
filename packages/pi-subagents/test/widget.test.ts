@@ -30,7 +30,7 @@ test("a running row: spinner, agent, Jev marks, model, effort, stats; activity b
   const lines = renderWidget({ runs: [r], queued: 0, now: 14_200, frame: 1, width: 200, theme: plain });
   expect(lines).toEqual([
     "● Subagents  1 running",
-    "└─ ⠙ Find where the config is loaded  scout (Jev) · claude-haiku-5 · low (Jev) · ↻3 · 12.3k tokens · $0.012 · 14s",
+    "└─ ⠙ Find where the config is loaded  scout (auto) · claude-haiku-5 · low (auto) · ↻3 · 12.3k tokens · $0.012 · 14s",
     "     ⎿  bash: npm test",
     "",
   ]);
@@ -39,7 +39,7 @@ test("a running row: spinner, agent, Jev marks, model, effort, stats; activity b
 test("picks made under quota pressure show p beside the model and effort marks", () => {
   const r = fakeRun({ byJev: { agent: true, model: true, thinking: true }, pressure: 0.46, state: { turns: 3, usage: usage(), startedAt: 0 } });
   const lines = renderWidget({ runs: [r], queued: 0, now: 14_200, frame: 1, width: 200, theme: plain });
-  expect(lines[1]).toContain("scout (Jev) · claude-haiku-5 (Jev, p=0.5) · low (Jev, p=0.5)");
+  expect(lines[1]).toContain("scout (auto) · claude-haiku-5 (auto, p=0.5) · low (auto, p=0.5)");
 });
 
 test("finished rows show a status icon; the queue gets a row; nothing to show is empty", () => {

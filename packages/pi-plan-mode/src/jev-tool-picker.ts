@@ -105,7 +105,7 @@ export async function pickToolsWithJev(input: PickToolsInput): Promise<JevToolPi
     if (result.stopReason !== "stop") {
       return {
         kind: "fallback",
-        reason: `Jev is unavailable (${describeError(result.stopReason, result.errorMessage)})`,
+        reason: `automatic picking is unavailable (${describeError(result.stopReason, result.errorMessage)})`,
       };
     }
     const probabilities: Record<string, number> = {};
@@ -114,7 +114,7 @@ export async function pickToolsWithJev(input: PickToolsInput): Promise<JevToolPi
       const answer = result.answers[`c${index}`];
       const value = answer?.type === "bool" ? answer.probability : undefined;
       if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
-        return { kind: "fallback", reason: "Jev returned an unexpected answer" };
+        return { kind: "fallback", reason: "the classifier returned an unexpected answer" };
       }
       probabilities[capability.id] = value;
       selected[capability.id] = value >= threshold;
@@ -123,7 +123,7 @@ export async function pickToolsWithJev(input: PickToolsInput): Promise<JevToolPi
   } catch (error: unknown) {
     return {
       kind: "fallback",
-      reason: `Jev is unavailable (${describeError("error", error instanceof Error ? error.message : String(error))})`,
+      reason: `automatic picking is unavailable (${describeError("error", error instanceof Error ? error.message : String(error))})`,
     };
   }
 }

@@ -103,7 +103,7 @@ test("Jev falls back gracefully without a classifier, a task, credentials, or a 
   }));
   assert.deepEqual(await pickToolsWithJev({ ...base, registry: noKey.registry }), {
     kind: "fallback",
-    reason: "Jev is unavailable (no TypeSafe credentials)",
+    reason: "automatic picking is unavailable (no TypeSafe credentials)",
   });
 
   const denied = fakeRegistry(() => ({
@@ -113,7 +113,7 @@ test("Jev falls back gracefully without a classifier, a task, credentials, or a 
   }));
   assert.deepEqual(await pickToolsWithJev({ ...base, registry: denied.registry }), {
     kind: "fallback",
-    reason: "Jev is unavailable (invalid API key)",
+    reason: "automatic picking is unavailable (invalid API key)",
   });
 
   const timeout = fakeRegistry(() => ({
@@ -123,19 +123,19 @@ test("Jev falls back gracefully without a classifier, a task, credentials, or a 
   }));
   assert.deepEqual(await pickToolsWithJev({ ...base, registry: timeout.registry }), {
     kind: "fallback",
-    reason: "Jev is unavailable (timed out)",
+    reason: "automatic picking is unavailable (timed out)",
   });
 
   const aborted = fakeRegistry(() => ({ stopReason: "aborted", answers: {} }));
   assert.deepEqual(await pickToolsWithJev({ ...base, registry: aborted.registry }), {
     kind: "fallback",
-    reason: "Jev is unavailable (cancelled)",
+    reason: "automatic picking is unavailable (cancelled)",
   });
 
   const malformed = fakeRegistry(() => bools({ c0: 0.9, c1: "yes" }));
   assert.deepEqual(await pickToolsWithJev({ ...base, registry: malformed.registry }), {
     kind: "fallback",
-    reason: "Jev returned an unexpected answer",
+    reason: "the classifier returned an unexpected answer",
   });
 });
 

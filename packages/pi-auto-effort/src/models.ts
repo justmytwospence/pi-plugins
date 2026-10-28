@@ -215,9 +215,9 @@ const TIER_CRITERIA: Record<ModelTier, string> = {
 
 /** A short reason for an offer, shown in pi-cache-guard's cold-cache dialog. */
 export const TIER_NOTES: Record<ModelTier, string> = {
-  fast: "Jev: simple work",
-  balanced: "Jev: routine work",
-  strong: "Jev: hard work",
+  fast: "simple work",
+  balanced: "routine work",
+  strong: "hard work",
 };
 
 /** The `tier` choice question over the plan's tiers. */

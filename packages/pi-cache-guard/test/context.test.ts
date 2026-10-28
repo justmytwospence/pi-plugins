@@ -182,7 +182,7 @@ test("a Jev compaction writes the summary in code, judged against the goal", asy
   const out: any = await emit("session_before_compact", compaction());
   expect(reg.calls[0]?.state.current_goal).toBe("fix the parser");
   expect(out.compaction.firstKeptEntryId).toBe("e9");
-  expect(out.compaction.summary).toMatch(/^# Compacted with Jev/u);
+  expect(out.compaction.summary).toMatch(/^# Compacted quickly/u);
   expect(out.compaction.summary).toContain("**User:** Use pnpm, never npm.");
   expect(out.compaction.summary).not.toContain("Exploring.");
   expect(out.compaction.summary).toContain("Modified: src/cache.ts");
@@ -202,9 +202,9 @@ test("strict: a Jev failure cancels the compaction and says why; overflow falls 
   await down.emit("session_start", {});
   down.lean.armJevCompaction({ strict: true });
   expect(await down.emit("session_before_compact", compaction())).toEqual({ cancel: true });
-  expect(down.lean.lastFailure()).toBe("Jev failed (timed out)");
+  expect(down.lean.lastFailure()).toBe("classification failed (timed out)");
   expect(await down.emit("session_before_compact", compaction("overflow"))).toBeUndefined();
-  expect(down.notes.at(-1)).toBe("Jev compaction: Jev failed (timed out); using Pi's compaction.");
+  expect(down.notes.at(-1)).toBe("Quick compaction: classification failed (timed out); using Pi's compaction.");
   // A failed /compact filter leaves Pi's compaction alone, quietly.
   const notes = down.notes.length;
   expect(await down.emit("session_before_compact", compaction("threshold"))).toBeUndefined();

@@ -195,7 +195,7 @@ function pct(p: number) {
 /** Why a call was held, in sentences the agent reads. */
 export function steerReason(tool: string, v: Verdict): string {
   const rules = v.brokenRules.map((rule) => `\n  - "${rule}"`).join("");
-  return `tool-gate held this ${tool} call. Jev judged that ${v.failures.join("; ")}.` + (rules ? `\nProject rules it appears to break:${rules}` : "");
+  return `tool-gate held this ${tool} call. The gate judged that ${v.failures.join("; ")}.` + (rules ? `\nProject rules it appears to break:${rules}` : "");
 }
 
 /** Workarounds Jev can suggest for a held call, keyed by choice id. */

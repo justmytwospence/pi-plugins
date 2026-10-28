@@ -97,7 +97,7 @@ interface ModelOffer {
   model: string; // provider/id, never the current model
   label: string; // the registry name, like "Claude Sonnet 5.5"
   recommended?: boolean;
-  note?: string; // short, like "Jev: routine work"
+  note?: string; // short, like "routine work"
 }
 ```
 
@@ -115,7 +115,7 @@ On OpenAI Responses models whose backend accepts a `configuration_update` input 
 
 ## Commands
 
-- `/auto-effort` or `/auto-effort status`: current level, bounds, the last judgment (for example `Jev: need(medium)=0.90 need(high)=0.55 need(xhigh)=0.10, θ=0.68 (5h caution) → medium, last decision: hold.`), model choice (for example `Models: auto (settings): balanced claude-sonnet-5-5, strong claude-opus-5-5 (preset); your model anthropic/claude-opus-5-5.`), and the limits lines.
+- `/auto-effort` or `/auto-effort status`: current level, bounds, the last judgment (for example `Assessment: need(medium)=0.90 need(high)=0.55 need(xhigh)=0.10, θ=0.68 (5h caution) → medium, last decision: hold.`), model choice (for example `Models: auto (settings): balanced claude-sonnet-5-5, strong claude-opus-5-5 (preset); your model anthropic/claude-opus-5-5.`), and the limits lines.
 - `/auto-effort limits`: for each window of the current provider: use, elapsed share, projection, time to run out, reading age and tier.
 - `/auto-effort on`, `/auto-effort off`: for this session. Off restores your manual level (and model) and turns off limits too.
 - `/auto-effort bounds free|ceiling`: the bounds for this session, over `policy.bounds`.

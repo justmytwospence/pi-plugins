@@ -73,7 +73,7 @@ export const DEFAULT_CONFIG: SubagentsConfig = {
 const CONSERVATIVE_GUIDELINE =
   "Prefer direct work for routine investigation, diagnosis, and verification. Do not delegate merely because work is long or multistep, or commission a redundant audit of work you are already doing. Delegate only genuinely independent tasks with a clear payoff or when requested; when delegating report-back work, use headless subagents rather than interactive Herdr sessions.";
 const ECONOMICAL_GUIDELINE =
-  "Once the design is settled and what remains is implementation that follows from it (applying a decided change across files, writing tests to a given spec, mechanical refactors, running checks and fixing what fails), delegate it to a subagent with a precise, self-contained spec and no model, so Jev picks a cheaper tier; then review the result (diff, check output) yourself instead of redoing it. Do it directly when the spec would be about as long as the work, the remaining decisions are judgment calls, or the work needs most of this conversation's context. Do not commission redundant audits of work you are already doing; use headless subagents rather than interactive Herdr sessions for report-back work.";
+  "Once the design is settled and what remains is implementation that follows from it (applying a decided change across files, writing tests to a given spec, mechanical refactors, running checks and fixing what fails), delegate it to a subagent with a precise, self-contained spec and no model, so a cheaper tier is picked automatically; then review the result (diff, check output) yourself instead of redoing it. Do it directly when the spec would be about as long as the work, the remaining decisions are judgment calls, or the work needs most of this conversation's context. Do not commission redundant audits of work you are already doing; use headless subagents rather than interactive Herdr sessions for report-back work.";
 
 /** The `subagent` tool's prompt guidelines for a `delegation` setting (anything unknown is the default, economical). */
 export function promptGuidelines(delegation: unknown): string[] {
@@ -105,10 +105,10 @@ export function readPressure(data: unknown): QuotaPressure | undefined {
   return { provider: d.provider, tier, p: Math.min(1, Math.max(0, d.p)), ...(typeof d.label === "string" ? { label: d.label } : {}) };
 }
 
-/** ` (Jev)`, or ` (Jev, p=0.5)` for a pick made under quota pressure. */
+/** ` (auto)`, or ` (auto, p=0.5)` for a pick made under quota pressure. */
 export function jevMark(on: boolean, pressure?: number): string {
   if (!on) return "";
-  return pressure && pressure > 0 ? ` (Jev, p=${pressure.toFixed(1)})` : " (Jev)";
+  return pressure && pressure > 0 ? ` (auto, p=${pressure.toFixed(1)})` : " (auto)";
 }
 
 const MAX_LINES = 2_000;
@@ -116,12 +116,12 @@ const MAX_BYTES = 50 * 1024;
 const RUN_ENTRY = "subagents:run";
 
 const TaskItem = Type.Object({
-  agent: Type.Optional(Type.String({ description: "Agent name; omit to let Jev choose" })),
+  agent: Type.Optional(Type.String({ description: "Agent name; omit to let it be chosen automatically" })),
   task: Type.String({ description: "The complete, self-contained task" }),
   label: Type.Optional(Type.String({ description: "Short task name for lists and headings; omit to derive from the task" })),
   cwd: Type.Optional(Type.String({ description: "Working directory for this task" })),
-  model: Type.Optional(Type.String({ description: "provider/model; omit for the agent's or Jev's tier on the parent's provider; explicit models may cross providers" })),
-  thinking: Type.Optional(Type.String({ description: "off|minimal|low|medium|high|xhigh|max; omit to let Jev choose" })),
+  model: Type.Optional(Type.String({ description: "provider/model; omit for the agent's or the automatic tier on the parent's provider; explicit models may cross providers" })),
+  thinking: Type.Optional(Type.String({ description: "off|minimal|low|medium|high|xhigh|max; omit to let it be chosen automatically" })),
 });
 
 const Params = Type.Object({
@@ -130,7 +130,7 @@ const Params = Type.Object({
       description: "run (default), status, steer, stop, or result",
     }),
   ),
-  agent: Type.Optional(Type.String({ description: "Agent for a single task; omit to let Jev choose" })),
+  agent: Type.Optional(Type.String({ description: "Agent for a single task; omit to let it be chosen automatically" })),
   task: Type.Optional(Type.String({ description: "A single task" })),
   label: Type.Optional(Type.String({ description: "Short name for a single task; omit to derive from the task" })),
   tasks: Type.Optional(Type.Array(TaskItem, { description: "Parallel tasks (up to 8, 4 at a time)" })),
@@ -771,7 +771,7 @@ export default function subagents(pi: ExtensionAPI) {
       name: "subagent",
       label: "Subagent",
       description:
-        "Each subagent adds its own context and token usage. action=run (default): a single `task`, parallel `tasks`, or a `chain` whose steps can use {previous}. Omit agent, model, or thinking to let Jev choose them; implicit models stay on the parent session's provider. `async: true` returns run ids at once and delivers each result as a message. action=status|steer|stop|result take `id` (steer also `message`).",
+        "Each subagent adds its own context and token usage. action=run (default): a single `task`, parallel `tasks`, or a `chain` whose steps can use {previous}. Omit agent, model, or thinking to let them be chosen automatically; implicit models stay on the parent session's provider. `async: true` returns run ids at once and delivers each result as a message. action=status|steer|stop|result take `id` (steer also `message`).",
       promptSnippet: "Delegate self-contained tasks to subagents with their own context windows",
       promptGuidelines: promptGuidelines(delegation),
       parameters: Params,

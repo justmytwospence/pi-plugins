@@ -542,9 +542,9 @@ export default function toolGate(pi: ExtensionAPI) {
       }
       const noWorkaround = ideas[0] === WORKAROUNDS.user_only;
       const advice = h.advice !== undefined ? h.advice : noWorkaround
-        ? "Jev sees no workaround: whether to do this is the user's decision."
+        ? "No workaround is apparent: whether to do this is the user's decision."
         : ideas.length
-          ? `Jev suggests: ${ideas.join("; or ")}.`
+          ? `A suggested workaround: ${ideas.join("; or ")}.`
           : "Look for a safer way: reversible, local, narrower, or previewed first.";
       return {
         block: true,
@@ -685,7 +685,7 @@ export default function toolGate(pi: ExtensionAPI) {
         tool,
         input,
         family: p.key,
-        reason: `tool-gate held this ${tool} call: it ${why}. Calls like this are always held, whatever Jev says.`,
+        reason: `tool-gate held this ${tool} call: it ${why}. Calls like this are always held, whatever the judge says.`,
         summary: why,
         similar: p.similar,
         state: await judgeStateFor(ctx, tool, p.args, []),
@@ -706,7 +706,7 @@ export default function toolGate(pi: ExtensionAPI) {
     if (!outcome.ok) {
       if (!warnedUnavailable && ctx.hasUI && !/off in settings/u.test(outcome.reason)) {
         warnedUnavailable = true;
-        ctx.ui.notify(`tool-gate: Jev unavailable (${outcome.reason}); asking for calls Pi's tool hints flag.`, "warning");
+        ctx.ui.notify(`tool-gate: judge unavailable (${outcome.reason}); asking for calls Pi's tool hints flag.`, "warning");
       }
       const hints = annotations(tool);
       const flagged =
@@ -719,7 +719,7 @@ export default function toolGate(pi: ExtensionAPI) {
       }
       held++;
       status(ctx);
-      return ask(ctx, { tool, input, note: `Jev unavailable: ${outcome.reason}` }, p.similar);
+      return ask(ctx, { tool, input, note: `Judge unavailable: ${outcome.reason}` }, p.similar);
     }
 
     if (outcome.usage) pendingUsage.set(event.toolCallId, outcome.usage);
