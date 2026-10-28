@@ -38,7 +38,7 @@ The first opens a checklist to pin notebooks. The second prints the state block 
 - `/marimo view` opens the full-screen notebook view.
 - Tab cycles followed notebooks in that view; `o` opens one in the browser.
 
-A notebook outside the current directory may need pinning. “Not open” means there is no matching open session; starting a server and opening the notebook are distinct from having a busy kernel.
+A notebook outside the current directory may need pinning. “Not open” means there is no matching open session; starting a server and opening the notebook are distinct from having a busy kernel. A server you started that serves one notebook under the working directory shows a dimmed `not open` footer line; click its name (or run `/marimo open`) to open the notebook in your browser.
 
 ## Make a change through the editing workflow
 

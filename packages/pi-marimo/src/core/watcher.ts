@@ -9,7 +9,7 @@
 
 import { type Cancellable, type Io, normalize, within } from "./io.js";
 import { NotebookState } from "./notebook.js";
-import { findNotebooks, type NotebookSession } from "./registry.js";
+import { findNotebooks, type NotebookSession, scanServers, type WaitingNotebook, waitingNotebook } from "./registry.js";
 import type { Attachment } from "./render.js";
 import { streamSession } from "./sse.js";
 import { type PairTarget, sameServer } from "./touch.js";
@@ -48,6 +48,14 @@ export interface Followed {
   touchedAt: number;
   /** Whether this session uses it: pinned, or its agent has worked in it (now or earlier in the session). */
   engaged?: boolean;
+}
+
+/** A running server whose notebook is open in no browser, as the hosts see it. */
+export interface Waiting extends WaitingNotebook {
+  /** The notebook's file with symlinks resolved, comparable with followed notebooks' `canonicalPath`. */
+  canonicalPath: string;
+  /** In pinned mode, the pinned path it matched (as pinned). */
+  pinned?: string;
 }
 
 /** Read a saved or configured mode, accepting the single-notebook form `{ kind: "pinned", path }`. */
@@ -147,6 +155,7 @@ export class MarimoWatcher {
   private realCwd?: string;
   private readonly realPaths = new Map<string, string>();
   private readonly empty = new NotebookState();
+  private waitingNow: Waiting[] = [];
   // Canonical paths of the notebooks this session's agent has worked in.
   private readonly engagedPaths = new Set<string>();
 
@@ -171,6 +180,15 @@ export class MarimoWatcher {
   /** Every followed notebook, the current one first, then by most recent use. */
   followed(): Followed[] {
     return this.ranked().map((f, i) => ({ attachment: f.attachment, canonicalPath: f.target.real, notebook: f.notebook, connection: f.connection, current: i === 0, touchedAt: f.touchedAt, engaged: this.mode.kind === "pinned" || this.engagedPaths.has(f.target.real) }));
+  }
+
+  /**
+   * Servers that run but have their notebook open in no browser, in file order: in auto mode those
+   * serving a notebook under the cwd (outside hidden directories, like followed notebooks), in
+   * pinned mode those serving a pinned one, none when off.
+   */
+  waiting(): Waiting[] {
+    return this.waitingNow;
   }
 
   get notebook(): NotebookState {
@@ -313,12 +331,33 @@ export class MarimoWatcher {
     return real;
   }
 
-  /** The notebooks to follow now, keyed by server and file. */
-  private async targets(): Promise<Map<string, Target>> {
+  /** The idle servers' notebooks that this mode shows (see waiting). */
+  private async scanWaiting(idle: string[]): Promise<Waiting[]> {
+    const mode = this.mode;
+    const found = (await Promise.all(idle.map((url) => waitingNotebook(this.options.io, url, this.options.token).catch(() => undefined)))).filter((w): w is WaitingNotebook => w !== undefined);
+    const withReal: Waiting[] = [];
+    for (const w of found) withReal.push({ ...w, canonicalPath: await this.real(w.path) });
+    let shown: Waiting[];
+    if (mode.kind === "pinned") {
+      const pinned = new Map<string, string>();
+      for (const p of mode.paths) pinned.set(await this.real(p), p);
+      shown = withReal.filter((w) => pinned.has(w.canonicalPath)).map((w) => ({ ...w, pinned: pinned.get(w.canonicalPath) }));
+    } else {
+      this.realCwd ??= await this.real(this.options.cwd);
+      const cwd = this.realCwd;
+      shown = withReal.filter((w) => within(w.canonicalPath, cwd) && !w.canonicalPath.slice(cwd.length).split("/").slice(0, -1).some((part) => part.startsWith(".")));
+    }
+    return shown.sort((a, b) => (a.canonicalPath < b.canonicalPath ? -1 : a.canonicalPath > b.canonicalPath ? 1 : a.url < b.url ? -1 : 1)).slice(0, this.options.maxNotebooks ?? 8);
+  }
+
+  /** The notebooks to follow now, keyed by server and file, and the servers waiting for their notebook to be opened. */
+  private async targets(): Promise<{ targets: Map<string, Target>; waiting: Waiting[] }> {
     const mode = this.mode;
     const out = new Map<string, Target>();
-    if (mode.kind === "off") return out;
-    const sessions = await this.list();
+    if (mode.kind === "off") return { targets: out, waiting: [] };
+    const servers = await scanServers(this.options.io, { token: this.options.token, extraUrls: this.options.extraUrls });
+    const sessions = servers.flatMap((s) => s.sessions);
+    const waiting = await this.scanWaiting(servers.filter((s) => s.sessions.length === 0).map((s) => s.url));
     const real = new Map<NotebookSession, string>();
     for (const s of sessions) real.set(s, await this.real(s.path));
     // Several sessions can hold one file (a closed tab's session lingers);
@@ -334,7 +373,7 @@ export class MarimoWatcher {
         const chosen = sessions.filter((s) => real.get(s) === path).pop();
         if (chosen) add(chosen);
       }
-      return out;
+      return { targets: out, waiting };
     }
     this.realCwd ??= await this.real(this.options.cwd);
     const cwd = this.realCwd;
@@ -345,7 +384,7 @@ export class MarimoWatcher {
     });
     for (const s of local) add(s);
     const max = this.options.maxNotebooks ?? 8;
-    return new Map([...out].slice(0, max));
+    return { targets: new Map([...out].slice(0, max)), waiting };
   }
 
   private reconcile(targets: Map<string, Target>): void {
@@ -370,9 +409,16 @@ export class MarimoWatcher {
   private async run(): Promise<void> {
     const pollMs = this.options.pollMs ?? 5000;
     while (!this.stopped) {
-      const targets = await this.targets().catch(() => undefined);
+      const scan = await this.targets().catch(() => undefined);
       if (this.stopped) break;
-      if (targets) this.reconcile(targets);
+      if (scan) {
+        this.reconcile(scan.targets);
+        const same = scan.waiting.length === this.waitingNow.length && scan.waiting.every((w, i) => w.url === this.waitingNow[i]!.url && w.path === this.waitingNow[i]!.path);
+        if (!same) {
+          this.waitingNow = scan.waiting;
+          this.options.onChange();
+        }
+      }
       if (!this.scanned) { this.scanned = true; this.options.onChange(); }
       const sleep = this.options.io.sleep(this.mode.kind === "off" ? 60_000 : pollMs);
       this.wake = sleep.cancel;

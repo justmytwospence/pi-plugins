@@ -52,6 +52,15 @@ export function nodeIo(options: { registryDir?: string; fetch?: typeof fetch } =
       }
     },
 
+    async postJson(url, headers, body, timeoutMs) {
+      try {
+        const response = await doFetch(url, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
+        return response.ok ? await response.json() : undefined;
+      } catch {
+        return undefined;
+      }
+    },
+
     stream(url, headers, onText): Cancellable<StreamEnd> {
       const controller = new AbortController();
       const done = (async (): Promise<StreamEnd> => {

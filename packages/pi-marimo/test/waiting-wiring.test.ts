@@ -1,0 +1,142 @@
+// index.ts with servers waiting for their notebook to be opened: the footer lines (an open
+// notebook's line unchanged, waiting ones `not open` and linked), and /marimo open.
+import { afterEach, expect, test, vi } from "vitest";
+import { setCapabilityOverrides } from "@earendil-works/pi-tui";
+import type { Cancellable, Io, StreamEnd } from "../src/core/io.js";
+
+const host = vi.hoisted(() => ({ sessions: {} as Record<string, Record<string, { path: string }>>, spawned: [] as Array<[string, string[]]> }));
+
+vi.mock("node:child_process", () => ({
+  spawn: (cmd: string, args: string[]) => {
+    host.spawned.push([cmd, args]);
+    return { on: () => ({ unref: () => undefined }), unref: () => undefined };
+  },
+}));
+vi.mock("../src/core/node-io.js", () => ({
+  nodeIo: (): Io => ({
+    registryEntries: async () => [2718, 2719].map((port) => ({ port, host: "127.0.0.1" })),
+    getJson: async (url: string) => (url.endsWith("/api/sessions") ? host.sessions[new URL(url).port] ?? {} : undefined),
+    postJson: async (url: string) => {
+      const port = new URL(url).port;
+      return { files: [{ path: port === "2718" ? "/w/0_first.py" : "/w/1_second.py", isDirectory: false, isMarimoFile: true }] };
+    },
+    stream: (): Cancellable<StreamEnd> => ({ done: new Promise(() => undefined), cancel: () => undefined }),
+    realpath: async (p: string) => p,
+    sleep(ms: number): Cancellable<void> {
+      let t: ReturnType<typeof setTimeout> | undefined;
+      let wake!: () => void;
+      const done = new Promise<void>((r) => { wake = r; t = setTimeout(r, ms); });
+      return { done, cancel: () => { clearTimeout(t); wake(); } };
+    },
+  }),
+}));
+
+const { default: piMarimo } = await import("../src/index.js");
+
+async function until(cond: () => boolean, ms = 3000): Promise<void> {
+  const end = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > end) throw new Error("timed out");
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
+function setup(select?: (title: string, options: string[]) => string | undefined) {
+  const handlers = new Map<string, Array<(e: unknown, c: unknown) => unknown>>();
+  let command: { handler: (args: string, ctx: unknown) => Promise<void> } | undefined;
+  const statuses = new Map<string, string | undefined>();
+  const notes: string[] = [];
+  const pi = {
+    on: (name: string, h: (e: unknown, c: unknown) => unknown) => void handlers.set(name, [...(handlers.get(name) ?? []), h]),
+    events: { on: () => undefined, emit: () => undefined },
+    registerCommand: (_name: string, c: typeof command) => void (command = c),
+    appendEntry: () => undefined,
+  };
+  const ui = {
+    setStatus: (key: string, text: string | undefined) => void statuses.set(key, text),
+    notify: (text: string) => void notes.push(text),
+    select: async (title: string, options: string[]) => select?.(title, options),
+    setWidget: () => undefined,
+    onTerminalInput: () => () => undefined,
+    getEditorText: () => "",
+  };
+  const ctx = { cwd: "/w", mode: "tui", isIdle: () => true, ui, sessionManager: { getBranch: () => [] } };
+  piMarimo(pi as never);
+  const fire = async (name: string) => { for (const h of handlers.get(name) ?? []) await h({}, ctx); };
+  const live = () => [...statuses].filter(([k, v]) => v !== undefined && k.startsWith("marimo") && k !== "marimo-lens").sort(([a], [b]) => a.localeCompare(b)).map(([, v]) => v);
+  return { fire, statuses, live, notes, run: (args: string) => command!.handler(args, ctx) };
+}
+
+afterEach(() => {
+  host.sessions = {};
+  host.spawned.length = 0;
+  setCapabilityOverrides({});
+});
+
+const link = (url: string, text: string) => `\x1b]8;;${url}\x1b\\${text}\x1b]8;;\x1b\\`;
+
+test("a running server whose notebook is open nowhere gets a linked `not open` footer line", async () => {
+  setCapabilityOverrides({ hyperlinks: true });
+  const x = setup();
+  await x.fire("session_start");
+  await until(() => x.live().length === 2);
+  expect(x.live()).toEqual([
+    `marimo: ${link("http://127.0.0.1:2718/", "0_first.py")} · :2718 · not open`,
+    `marimo: ${link("http://127.0.0.1:2719/", "1_second.py")} · :2719 · not open`,
+  ]);
+  await x.fire("session_shutdown");
+  expect(x.live()).toEqual([]);
+});
+
+test("without terminal hyperlinks the line is the plain shape", async () => {
+  setCapabilityOverrides({ hyperlinks: false });
+  const x = setup();
+  await x.fire("session_start");
+  await until(() => x.live().length === 2);
+  expect(x.live()[0]).toBe("marimo: 0_first.py · :2718 · not open");
+  await x.fire("session_shutdown");
+});
+
+test("a notebook opened in a browser leaves the waiting lines (and is not shown until the agent uses it)", async () => {
+  setCapabilityOverrides({ hyperlinks: false });
+  const x = setup();
+  await x.fire("session_start");
+  await until(() => x.live().length === 2);
+  host.sessions["2718"] = { s1: { path: "/w/0_first.py" } };
+  await x.fire("before_agent_start"); // rescans now instead of at the next poll
+  await until(() => x.live().length === 1);
+  expect(x.live()).toEqual(["marimo: 1_second.py · :2719 · not open"]);
+  await x.fire("session_shutdown");
+});
+
+test("/marimo open opens the one waiting notebook, or the picked one", async () => {
+  setCapabilityOverrides({ hyperlinks: false });
+  host.sessions["2718"] = { s1: { path: "/w/0_first.py" } };
+  const one = setup();
+  await one.fire("session_start");
+  await until(() => one.live().length === 1);
+  await one.run("open");
+  expect(host.spawned).toEqual([[process.platform === "darwin" ? "open" : "xdg-open", ["http://127.0.0.1:2719/"]]]);
+  expect(one.notes).toEqual(["marimo: opening 1_second.py"]);
+  await one.fire("session_shutdown");
+
+  host.spawned.length = 0;
+  host.sessions = {};
+  const two = setup((_title, options) => options[0]);
+  await two.fire("session_start");
+  await until(() => two.live().length === 2);
+  await two.run("open");
+  expect(host.spawned.map(([, args]) => args)).toEqual([["http://127.0.0.1:2718/"]]);
+  await two.fire("session_shutdown");
+
+  host.sessions = { "2718": { s1: { path: "/w/0_first.py" } }, "2719": { s2: { path: "/w/1_second.py" } } };
+  const none = setup();
+  await none.fire("session_start");
+  await none.fire("before_agent_start");
+  await until(() => none.live().length === 0);
+  host.spawned.length = 0;
+  await none.run("open");
+  expect(none.notes).toEqual(["marimo: no notebook is waiting to be opened"]);
+  expect(host.spawned).toEqual([]);
+  await none.fire("session_shutdown");
+});

@@ -34,6 +34,7 @@ No sibling extension is required. A custom footer, background manager, and Herdr
 | `/marimo off` | Stop following notebooks for this session. |
 | `/marimo show` | Print the current notebook-state snapshot for inspection. |
 | `/marimo view` | Open the live full-screen notebook view. |
+| `/marimo open` | Open a notebook whose server waits in no browser. |
 | `/marimo lens` | Print the open marimo-lens selections and recently addressed ones. |
 
 Auto mode follows up to eight notebooks and excludes hidden directories, including nested worktree directories. Pinned paths are remembered in the Pi session across reloads and server restarts; pinning a closed notebook does not start its server. These modes are session state, not a separate JSON settings file.
@@ -71,7 +72,7 @@ Selection images, agent activity and reveals are not read. pi-marimo never resol
 
 ## Live view and kernel control
 
-The footer gives every notebook this session uses a line of its own (status keys `marimo`, `marimo-2`, ... in file-path order), with its file, running heading path, elapsed time, queued cells, and errors. In the turn's context, the current notebook and any other the agent worked in during the last three prompts are in full; the rest are outlines. Each notebook comes with the marimo-pair flags that name it, and a marimo-pair call that could mean several followed notebooks gets a note on its result listing them, since pi-marimo cannot count it as work in any. A prompt pill appears during running or queued work, with a failure indicator retained until your next message.
+The footer gives every notebook this session uses a line of its own (status keys `marimo`, `marimo-2`, ... in file-path order), with its file, running heading path, elapsed time, queued cells, and errors. In the turn's context, the current notebook and any other the agent worked in during the last three prompts are in full; the rest are outlines. Each notebook comes with the marimo-pair flags that name it, and a marimo-pair call that could mean several followed notebooks gets a note on its result listing them, since pi-marimo cannot count it as work in any. A running server whose notebook is open in no browser gets a `not open` line too (`marimo: 0_kcore.py · :2718 · not open`, for servers under the working directory that serve one notebook; pinned ones when pinned). Its name is a terminal hyperlink to the server: in Pi's fullscreen TUI a click opens it (`open` on macOS, `xdg-open` elsewhere), and `/marimo open` does the same from the keyboard. A prompt pill appears during running or queued work, with a failure indicator retained until your next message.
 
 In the notebook view, `j`/`k` scroll, Tab switches notebooks, `o` opens the notebook in a browser, and Esc or `h` returns to Pi. Press `x` twice to interrupt the kernel.
 

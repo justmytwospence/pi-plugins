@@ -19,6 +19,8 @@ export interface Io {
   registryEntries(): Promise<unknown[]>;
   /** GET a JSON document; undefined on any failure. */
   getJson(url: string, headers: Record<string, string>, timeoutMs: number): Promise<unknown>;
+  /** POST a JSON body and parse the JSON answer; undefined on any failure. Hosts without it do not see waiting servers. */
+  postJson?(url: string, headers: Record<string, string>, body: unknown, timeoutMs: number): Promise<unknown>;
   /** GET a streaming body, handing over its text as it arrives. */
   stream(url: string, headers: Record<string, string>, onText: (text: string) => void): Cancellable<StreamEnd>;
   /** The path with symlinks resolved (macOS /tmp is /private/tmp); the path itself when that fails. */

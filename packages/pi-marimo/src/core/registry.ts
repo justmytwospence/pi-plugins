@@ -43,10 +43,40 @@ export async function listSessions(io: Io, url: string, token?: string): Promise
   });
 }
 
-/** Every notebook session open on every registered server, plus any extra server URLs. */
-export async function findNotebooks(io: Io, options: { token?: string; extraUrls?: string[] } = {}): Promise<NotebookSession[]> {
+/** A running server and the notebook sessions open on it (none: nobody has the notebook open). */
+export interface ServerSessions {
+  url: string;
+  sessions: NotebookSession[];
+}
+
+/** Every registered server (plus any extra server URLs) with its open sessions. */
+export async function scanServers(io: Io, options: { token?: string; extraUrls?: string[] } = {}): Promise<ServerSessions[]> {
   const urls = new Set(await serverUrls(io));
   for (const url of options.extraUrls ?? []) urls.add(url.replace(/\/$/, ""));
-  const lists = await Promise.all([...urls].map((url) => listSessions(io, url, options.token)));
-  return lists.flat();
+  return Promise.all([...urls].map(async (url) => ({ url, sessions: await listSessions(io, url, options.token) })));
+}
+
+/** Every notebook session open on every registered server, plus any extra server URLs. */
+export async function findNotebooks(io: Io, options: { token?: string; extraUrls?: string[] } = {}): Promise<NotebookSession[]> {
+  return (await scanServers(io, options)).flatMap((s) => s.sessions);
+}
+
+/** A running server whose one notebook is open in no browser: it is waiting for the user. */
+export interface WaitingNotebook {
+  url: string;
+  path: string;
+}
+
+/**
+ * The notebook a server with no sessions serves, from the file listing its home page uses
+ * (`marimo edit nb.py` lists exactly that file). A server serving a directory or several files
+ * has no single notebook to name, so it is not reported.
+ */
+export async function waitingNotebook(io: Io, url: string, token?: string): Promise<WaitingNotebook | undefined> {
+  const body = await io.postJson?.(`${url}/api/home/workspace_files`, authHeaders(token), {}, 2000);
+  const files = (body as { files?: unknown } | null | undefined)?.files;
+  if (!Array.isArray(files) || files.length !== 1) return undefined;
+  const file = files[0] as { path?: unknown; isDirectory?: unknown; isMarimoFile?: unknown } | null;
+  if (typeof file?.path !== "string" || !file.path || file.isDirectory === true || file.isMarimoFile === false) return undefined;
+  return { url, path: file.path };
 }

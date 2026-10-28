@@ -3,7 +3,9 @@
 // - Footer: a status per notebook this session uses, `marimo: <file> · running <section> (12s) ·
 //   2 queued · 1 error`, through ctx.ui.setStatus("marimo", ...), then "marimo-2", "marimo-3", ...
 //   in file order, so each gets its own line in footers that lay them out (pi-status-footer) and
-//   all show in Pi's own footer.
+//   all show in Pi's own footer. A running server whose notebook is open in no browser gets a
+//   `not open` line too, its name an OSC 8 link that a click opens (waiting.ts); `/marimo open` is
+//   the keyboard path.
 // - Session scope: footer, Lens and context cover only the notebooks this session uses (pinned, or
 //   worked in by its agent through marimo-pair, saved with the session). Other notebooks open under
 //   the cwd, such as one another session in this checkout works in, get a one-line mention in context.
@@ -24,18 +26,18 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { BgBridge } from "./bg.js";
 import { busy as kernelBusy, KernelHold } from "./core/hold.js";
-import { ambiguityNote, lensLines, lensStatusText, snapshot, STATE_TAG, statusParts, statusText } from "./core/render.js";
+import { ambiguityNote, lensLines, lensStatusText, shortWhere, snapshot, STATE_TAG, statusParts, statusText } from "./core/render.js";
 import { basename } from "./core/io.js";
 import { nodeIo } from "./core/node-io.js";
 import { pairTargets } from "./core/touch.js";
 import { MarimoWatcher, type Mode, parseMode } from "./core/watcher.js";
 import { HerdrHold } from "./herdr.js";
-import { spawn } from "node:child_process";
 import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION } from "./activity.js";
 import { FULL_SCREEN } from "./frame.ts";
 import { interruptKernel } from "./ui/interrupt.js";
 import { PillView } from "./pill.ts";
 import { NotebookSource } from "./ui/source.js";
+import { openUrl, waitingStatus, waitingUrl } from "./waiting.js";
 import { NotebookView, type ViewActions } from "./ui/view.js";
 
 const ENTRY = "pi-marimo";
@@ -144,14 +146,7 @@ export default function piMarimo(pi: ExtensionAPI): void {
   const viewActions: ViewActions = {
     followed: () => watcher?.followed() ?? [],
     interrupt: (f) => interruptKernel(f.attachment, process.env.MARIMO_TOKEN),
-    openInBrowser: (f) => {
-      const url = `${f.attachment.url}/?file=${encodeURIComponent(f.attachment.path)}`;
-      try {
-        spawn(process.platform === "darwin" ? "open" : "xdg-open", [url], { detached: true, stdio: "ignore" }).on("error", () => undefined).unref();
-      } catch {
-        // No opener: nothing to do.
-      }
-    },
+    openInBrowser: (f) => openUrl(`${f.attachment.url}/?file=${encodeURIComponent(f.attachment.path)}`),
   };
   const openView = (key: string, ui: unknown): Promise<void> =>
     (ui as ExtensionContext["ui"]).custom<void>((tui, theme, _keys, done) => new NotebookView(tui, theme, key, viewActions, () => done(undefined)), FULL_SCREEN);
@@ -190,16 +185,19 @@ export default function piMarimo(pi: ExtensionAPI): void {
   const mine = () => (watcher?.followed() ?? []).filter((f) => f.engaged);
 
   /**
-   * One footer line per notebook this session uses, and per pinned one that is not open, in file
-   * order so the lines hold still while the agent moves between notebooks.
+   * One footer line per notebook this session uses, per pinned one that is not open, and per
+   * running server whose notebook is open in no browser (watcher.waiting), in file order so the
+   * lines hold still while the agent moves between notebooks.
    */
   const statusLines = (): string[] => {
     if (!watcher) return [];
     const now = Date.now();
     const lines = mine().map((f) => ({ path: f.attachment.path, text: statusText(statusParts(f.notebook, f.attachment, f.connection, now)) }));
     const { mode } = watcher;
+    const waiting = watcher.waiting();
+    for (const w of waiting) lines.push({ path: w.canonicalPath, text: waitingStatus(w) });
     if (mode.kind === "pinned") {
-      const open = new Set(watcher.followed().flatMap((f) => [f.attachment.path, f.canonicalPath]));
+      const open = new Set([...watcher.followed().flatMap((f) => [f.attachment.path, f.canonicalPath]), ...waiting.flatMap((w) => [w.path, w.canonicalPath, w.pinned ?? w.path])]);
       for (const p of mode.paths) if (!open.has(p)) lines.push({ path: p, text: statusText({ notebook: basename(p), connection: "not open", queued: 0, errors: 0 }) });
     }
     return lines.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)).map((l) => l.text);
@@ -402,9 +400,9 @@ export default function piMarimo(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("marimo", {
-    description: "Choose the marimo notebooks Pi follows (view, auto, off, show, lens)",
+    description: "Choose the marimo notebooks Pi follows (view, open, auto, off, show, lens)",
     getArgumentCompletions: (prefix) =>
-      ["view", "auto", "off", "show", "lens"].filter((a) => a.startsWith(prefix.trim())).map((value) => ({ value, label: value })),
+      ["view", "open", "auto", "off", "show", "lens"].filter((a) => a.startsWith(prefix.trim())).map((value) => ({ value, label: value })),
     handler: async (args, ctx) => {
       if (!watcher) return;
       const arg = args.trim();
@@ -414,6 +412,18 @@ export default function piMarimo(pi: ExtensionAPI): void {
         const path = source.busiest();
         if (!path) ctx.ui.notify("marimo: no notebook followed", "info");
         else await openView(path, ctx.ui);
+        return;
+      }
+      if (arg === "open") {
+        // The keyboard path to a footer item's click: open a notebook whose server waits in no browser.
+        const waiting = watcher.waiting();
+        if (!waiting.length) { ctx.ui.notify("marimo: no notebook is waiting to be opened", "info"); return; }
+        const labels = waiting.map((w) => `${w.canonicalPath}  (${shortWhere(w.url)})`);
+        const choice = waiting.length === 1 ? labels[0] : await ctx.ui.select("Open which notebook?", labels);
+        const picked = choice === undefined ? undefined : waiting[labels.indexOf(choice)];
+        if (!picked) return;
+        openUrl(waitingUrl(picked));
+        ctx.ui.notify(`marimo: opening ${basename(picked.path)}`, "info");
         return;
       }
       if (arg === "lens") {

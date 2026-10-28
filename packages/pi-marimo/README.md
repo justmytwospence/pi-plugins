@@ -43,6 +43,10 @@ marimo: prep.py · :2718 · idle
 
 Every notebook this session uses gets a line of its own with what its kernel is doing: the running part is the markdown heading path the running cell sits under (or `cell <name>`), so you can tell roughly what is running. The lines are in file-path order, so they hold still while the agent moves between notebooks. A pinned notebook that is not open gets a `not open` line. Each line is a status of its own, published with `ctx.ui.setStatus`: the first under the key `marimo`, the next under `marimo-2`, then `marimo-3`, and so on. Pi's built-in footer shows them side by side on its status line; [pi-status-footer](https://pi-plugins.vercel.app/plugins/pi-status-footer/) gives each a row.
 
+**Servers waiting for you.** A running server whose notebook is open in no browser gets a line too, so you can see it is waiting: `marimo: 0_kcore.py · :2718 · not open`. pi-marimo asks the server which notebook it serves (a server started as `marimo edit nb.py` lists exactly that file) and shows those under Pi's working directory in `auto` mode (outside hidden directories, like followed notebooks), the pinned ones when pinned, none when `off`. Servers that serve a directory or several files have no one notebook to name and are not shown. The line goes away when the notebook is opened in a browser (it is then followed like any other notebook and shown once the agent works in it), or the server stops. pi-status-footer draws such a row dimmed.
+
+**Clicking a waiting notebook.** Where the terminal supports hyperlinks (Pi detects this; `PI_HYPERLINKS=1` forces it), the notebook's name in the line is an OSC 8 link to the server (`http://127.0.0.1:2718/`, whose home page serves that notebook). In Pi's fullscreen TUI (the default) Pi captures the mouse and opens an OSC 8 link under a click itself, with `open` on macOS and `xdg-open` elsewhere; in regular mode the terminal (herdr included) does it. pi-status-footer keeps the link in its row. Pi's footer API takes plain status text and has no click handler for statuses, so the link is the click handler. The keyboard path is `/marimo open` (a picker when several wait).
+
 The shape is stable for footers that lay it out themselves: `marimo: <file>`, then ` · `-separated parts about that notebook: its server (`:port` when local, else `host[/path]`), a connection note such as `connecting`, `disconnected` or `not open`; `running <a › b> (<elapsed>)`; `<n> queued`; `<n> error(s)`. Versions before multi-notebook lines sent a single `marimo` status ending in `also <file>, <file>`.
 
 ### Context
@@ -85,6 +89,7 @@ Interrupting stops the running cell; marimo drops the queue behind it.
 | `/marimo auto` | follow every notebook open under Pi's working directory (the default) |
 | `/marimo off` | follow nothing |
 | `/marimo view` | open the busiest notebook in the notebook view |
+| `/marimo open` | open a notebook whose server waits in no browser (a picker when several wait) |
 | `/marimo show` | print the state block the model sees |
 | `/marimo lens` | print the open Lens selections and the recently addressed ones |
 
@@ -154,7 +159,7 @@ Inside a [Herdr](https://herdr.dev) pane with [pi-herdr](https://pi-plugins.verc
 
 - Read-only: it never runs or edits cells or resolves Lens selections (the notebook view's interrupt is the one exception, on your keypress).
 - In `auto` mode, at most eight notebooks are followed, only those under Pi's working directory and outside hidden directories.
-- Only servers listed in marimo's server registry are followed.
+- Only servers listed in marimo's server registry are followed. Waiting servers are shown only when they serve one notebook.
 - The context block can be a turn old while the agent runs cells.
 - The pill and notebook view exist only in the TUI.
 - `src/core/` is plain ECMAScript behind a small `Io` interface (`node-io.ts` for Node and Bun), shared with the opencode and Claude Code ports.
