@@ -67,7 +67,8 @@ import {
 } from "./policy.ts";
 import { DEFAULT_PREFILTER, type PrefilterConfig, isGoAhead, prefilterConfig } from "./prefilter.ts";
 import { type Counts, countsFromBranch, describeCounts, emptyCounts, tally } from "./stats.ts";
-import { UNTRUSTED_NOTE, clip, messageText } from "./transcript.ts";
+import { clip, messageText } from "./transcript.ts";
+import { UNTRUSTED_REPLY } from "./untrusted.ts";
 import { CodexPoller } from "./usage.ts";
 
 export interface EffortConfig extends Record<string, unknown> {
@@ -193,7 +194,7 @@ const DEPTH_CRITERIA = {
 export const QUESTIONS: Record<string, ClassifierQuestion> = {
   depth: {
     type: "choice",
-    instructions: `How much careful reasoning does the work asked for in \`request\` need from a coding agent, given \`previous_requests\`, \`agent_reply_untrusted\` and \`signals\`? ${UNTRUSTED_NOTE}`,
+    instructions: `How much careful reasoning does the work asked for in \`request\` need from a coding agent, given \`previous_requests\`, \`agent_reply_untrusted\` and \`signals\`? ${UNTRUSTED_REPLY}`,
     criteria: DEPTH_CRITERIA,
   },
   ack: {

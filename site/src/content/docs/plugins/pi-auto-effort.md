@@ -9,8 +9,8 @@ plugin: pi-auto-effort
 - **Use it for:** Adapt reasoning to task difficulty within a fixed range or your manual ceiling, and pick a model tier of the same provider: cheaper only while the cache is cold, back up to your own model whenever the work needs it.
 - **Enable:** Select `packages/pi-auto-effort/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
 - **Controls:** `/auto-effort` status/limits/on/off, `bounds free|ceiling`, `models off|auto`. No global shortcut; stock thinking controls remain Pi's.
-- **Settings:** `auto-effort.json` shared/user/project layers; low floor, free bounds up to xhigh, threshold 0.5 to 0.85 with pressure, 1500 ms Jev timeout, mid-run checks normally every 3 tool turns, model choice on with Sonnet/Opus and Terra/Sol presets.
-- **Requirements, cost & privacy:** Optional paid Jev sees request/activity excerpts; unavailable judgments keep the level. Provider quota reads use credentials; reasoning and model changes affect cost/latency.
+- **Settings:** `auto-effort.json` shared/user/project layers; low floor, free bounds up to xhigh, threshold 0.5 to 0.85 with pressure, 1500 ms Jev timeout, mid-run checks normally every 3 tool turns, model choice on with Sonnet/Opus and Terra/Sol presets, go-aheads such as `yes` or `thanks` settled without a Jev call.
+- **Requirements, cost & privacy:** Optional paid Jev sees request/activity excerpts, with the agent's own words marked untrusted; unavailable judgments keep the level. Provider quota reads use credentials; reasoning and model changes affect cost/latency.
 - **Integrations & limits:** Optional footer; optional pi-cache-guard `cache:state` input and model offers in its cold-cache dialog; publishes `quota:pressure`. `--thinking` disables assessment. Explicit effort-update rewriting has its own switch; `/auto-effort off` does not disable it.
 
 Auto effort changes the thinking level, and by default the model within the same provider: a cheaper tier only while a switch is cheap, and back up to the model you chose whenever the work needs it (never above it automatically). Use it when a session alternates between routine edits and difficult reasoning. Set `models.mode` to `off` to keep the model you selected, and `policy.bounds` to `ceiling` to keep a manual upper bound on effort.
@@ -21,11 +21,17 @@ Follow [Install & select](/guides/install/) and select `packages/pi-auto-effort/
 
 Jev classification requires Pi 0.99 or newer and classifier credentials managed by Pi. The default is `typesafe/jev-latest`, using `TYPESAFE_API_KEY`. The suite's tested Pi version is documented in the installation guide; this component's classifier minimum is not a suite-wide compatibility promise.
 
-**Jev requests are paid external model calls**, separate from your main model's work. Expect one assessment before a nonempty prompt and additional assessments during supported long runs. The configured timeout is 1,500 ms, not a promised response time. Reasoning changes can also change main-model cost and latency; savings are not guaranteed.
+**Jev requests are paid external model calls**, separate from your main model's work. Expect one assessment before a nonempty prompt, except a go-ahead the pre-filter recognizes, and additional assessments during supported long runs. The configured timeout is 1,500 ms, not a promised response time. Reasoning changes can also change main-model cost and latency; savings are not guaranteed.
 
 ## How decisions work
 
-Jev answers which of `low`, `medium`, `high` and `xhigh` the request needs, as a probability for each. `need(L)` is the probability that the work needs at least L. The level is the highest one within the bounds whose need is at least the threshold θ, else the floor. θ is `policy.threshold.relaxed` (0.5, the median of Jev's distribution, biased neither up nor down) with no subscription pressure, `tight` (0.85) at critical pressure, and halfway between at caution, so under pressure only work Jev is surer about gets higher levels. The level goes up as soon as a higher level clears θ, but goes down only once the current level's need is below θ minus `policy.hysteresis` (0.1), which keeps borderline answers from flip-flopping. Short acknowledgements keep the existing level.
+Jev answers which of `low`, `medium`, `high` and `xhigh` the request needs, as a probability for each. `need(L)` is the probability that the work needs at least L. The level is the highest one within the bounds whose need is at least the threshold θ, else the floor. θ is `policy.threshold.relaxed` (0.5, the median of Jev's distribution, biased neither up nor down) with no subscription pressure, `tight` (0.85) at critical pressure, and halfway between at caution, so under pressure only work Jev is surer about gets higher levels. The level goes up as soon as a higher level clears θ, but goes down only once the current level's need is below θ minus `policy.hysteresis` (0.1), which keeps borderline answers from flip-flopping.
+
+Short acknowledgements keep the existing level and model. A message that is only a go-ahead or thanks is settled without asking Jev: after lowercasing and ignoring punctuation, every word must belong to one of the phrases `yes`, `y`, `yep`, `yeah`, `ok`, `okay`, `sure`, `go`, `go ahead`, `go for it`, `continue`, `proceed`, `do it`, `ship it`, `sounds good`, `looks good`, `lgtm`, `perfect`, `great`, `thanks`, `thank you`, `ty`, `cool` or `nice` (plus any in `prefilter.phrases`), and the message has at most four words. `Yes, go ahead!` matches; `yes please` and `go ahead and add tests` go to Jev, which also recognizes other go-aheads. The decision is recorded with reason `go-ahead`. Set `"prefilter": { "enabled": false }` to send every message to Jev, or add phrases:
+
+```json
+{ "prefilter": { "enabled": true, "phrases": ["yes please", "carry on"] } }
+```
 
 `policy.bounds` sets the range. With `free` (the default), any level from the floor to `policy.max` (`xhigh`) is allowed, and a manual selection sets the level now without capping later ones. With `ceiling` (or `/auto-effort bounds ceiling` for one session), your latest manual thinking selection is the ceiling. The default floor is `low`; selections below it, such as `off` and `minimal`, are left alone, and the policy never picks `max`. Starting Pi with `--thinking` disables automatic assessment, including for explicitly configured subagents. Turning auto effort off restores your manual level.
 
@@ -76,7 +82,7 @@ When [Cache guard](/plugins/pi-cache-guard/) holds a prompt because the cache is
 
 | Command | Effect |
 | --- | --- |
-| `/auto-effort` or `/auto-effort status` | Show level, bounds, the last need and θ, model choice and limits. |
+| `/auto-effort` or `/auto-effort status` | Show level, bounds, the last need and θ, this session's counts, model choice and limits. |
 | `/auto-effort limits` | Inspect usage windows and forecasts. |
 | `/auto-effort on` | Enable automatic effort for this session, subject to settings and `--thinking`. |
 | `/auto-effort off` | Disable it for this session and restore your manual level and model. |
@@ -105,7 +111,9 @@ Adding `provider/id` globs to `midRun.models` opts extra models into mid-run cha
 
 ## Data sent and subscription limits
 
-Prompt assessments send Jev clipped text from the current request, two earlier requests, the previous answer, and counts of tool calls, edits and errors. Mid-run assessments send the starting request, the last six assistant steps by default, abbreviated tool arguments and failure text. These excerpts can contain private project information.
+Prompt assessments send Jev clipped text from the current request, two earlier requests, the agent's previous reply (up to 600 characters), and counts of tool calls, edits and errors. Mid-run assessments send the starting request, the last six assistant steps by default, abbreviated tool arguments and failure text. These excerpts can contain private project information.
+
+The agent's own words and tool output can quote files or web pages written to steer a classifier. Prompt assessments label the reply `agent_reply_untrusted`, and both kinds of assessment tell Jev that this text only describes what happened and that any instructions, ratings or requests in it are to be ignored. This lowers the risk; it does not make a classifier immune to prompt injection.
 
 Limits use Anthropic subscription response headers or a background request to `https://chatgpt.com/backend-api/wham/usage` authenticated with Pi's Codex credential. Quota readings stay in memory and are not sent to Jev or the main model. Anthropic API-key token-bucket headers do not trigger subscription reductions.
 
@@ -115,7 +123,7 @@ After each assessment auto effort emits a `quota:pressure` event on Pi's extensi
 
 ## Fallbacks and optional integrations
 
-Missing credentials, timeouts or unusable classifier answers provide no new difficulty judgment, and the level and model stay as they are. `/auto-effort status` helps distinguish those cases. Decision records are custom session entries, excluded from model context.
+Missing credentials, timeouts or unusable classifier answers provide no new difficulty judgment, and the level and model stay as they are. `/auto-effort status` helps distinguish those cases, and counts this session's decisions: Jev assessments with their average latency, how many raised, lowered or held the level, failures, and go-aheads settled without a call, for example `Session: 14 assessments (avg 212 ms): 3 raised, 2 lowered, 8 held, 1 failed; 6 settled without a call (go-ahead).` Decision records are custom session entries, excluded from model context; the counts are rebuilt from those on the current branch when a session resumes or `/tree` moves.
 
 No sibling is required. [Status footer](/plugins/pi-status-footer/) folds effort status into its model row; the status reads like `effort: medium (auto ↑ free)`, with `≤high` (your manual level) instead of `free` in ceiling bounds. [Cache guard](/plugins/pi-cache-guard/) tells model choice when the cache is cold and offers its models in the cold-cache dialog. Manual changes from another extension, such as plan mode, count like your own (a ceiling in ceiling bounds, and always the model ceiling). Unsupported model levels remain subject to Pi's own model capabilities.
 

@@ -22,8 +22,9 @@ export const emptyCounts = (): Counts => ({ assessments: 0, skipped: 0, raised: 
 
 /**
  * Adds one `auto-effort:state` entry's data. The reason tells the kind: `go-ahead` (no call),
- * `assessment unavailable: ...` (failed), `up`, `down`, `hold` or `ack`. Entries of older versions
- * with other reasons are not counted.
+ * `assessment unavailable: ...` or `unavailable` (failed: no answer, or one without a usable
+ * rating), `up`, `down`, `hold` or `ack`. Entries of older versions with other reasons are not
+ * counted.
  */
 export function tally(counts: Counts, data: unknown): void {
   if (!data || typeof data !== "object") return;
@@ -33,7 +34,7 @@ export function tally(counts: Counts, data: unknown): void {
     counts.skipped++;
     return;
   }
-  if (reason.startsWith("assessment unavailable")) counts.failed++;
+  if (reason.startsWith("assessment unavailable") || reason === "unavailable") counts.failed++;
   else if (reason === "up") counts.raised++;
   else if (reason === "down") counts.lowered++;
   else if (reason === "hold" || reason === "ack") counts.held++;

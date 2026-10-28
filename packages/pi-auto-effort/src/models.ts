@@ -7,7 +7,7 @@
 // above it is picked.
 import type { ClassifierChoiceQuestion } from "./jev.ts";
 import { type Bounds, cumulative, pickIndex } from "./policy.ts";
-import { UNTRUSTED_NOTE } from "./transcript.ts";
+import { UNTRUSTED_REPLY } from "./untrusted.ts";
 
 export const TIERS = ["fast", "balanced", "strong"] as const;
 export type ModelTier = (typeof TIERS)[number];
@@ -227,7 +227,7 @@ export function tierQuestion(tiers: readonly TierModel[]): ClassifierChoiceQuest
   for (const t of tiers) criteria[t.tier] = TIER_CRITERIA[t.tier];
   return {
     type: "choice",
-    instructions: `Which class of model should a coding agent use for the work asked for in \`request\`, given \`previous_requests\`, \`agent_reply_untrusted\` and \`signals\`? Pick the cheapest class that will do it well. ${UNTRUSTED_NOTE}`,
+    instructions: `Which class of model should a coding agent use for the work asked for in \`request\`, given \`previous_requests\`, \`agent_reply_untrusted\` and \`signals\`? Pick the cheapest class that will do it well. ${UNTRUSTED_REPLY}`,
     criteria,
   };
 }

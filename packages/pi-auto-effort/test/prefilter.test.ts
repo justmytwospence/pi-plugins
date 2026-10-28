@@ -116,10 +116,12 @@ describe("before a prompt", () => {
   });
 
   test("it announces the pressure like any other decision", async () => {
-    const { h, ctx } = setup();
+    const { h, jev, ctx } = setup();
+    ctx.model = { provider: "anthropic", id: "claude-opus-4-5" };
     await h.emit("session_start", { type: "session_start" }, ctx);
     await h.emit("before_agent_start", { prompt: "thanks" }, ctx);
-    expect(h.events.filter((e) => e.channel === "quota:pressure")).toEqual([{ channel: "quota:pressure", data: { provider: "", tier: "none", p: 0 } }].slice(0, 0).concat(h.events.filter((e) => e.channel === "quota:pressure")));
+    expect(jev.calls).toHaveLength(0);
+    expect(h.events.filter((e) => e.channel === "quota:pressure")).toEqual([{ channel: "quota:pressure", data: { provider: "anthropic", tier: "none", p: 0 } }]);
   });
 
   test("a message with more than a go-ahead is assessed", async () => {
