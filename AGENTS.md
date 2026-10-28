@@ -24,7 +24,7 @@ Installing a new pin through the converge script writes `~/.pi/agent/reload-requ
 
 ## Remote clients
 
-herdr-web-ui and Collie read waiting Pi dialogs off the screen. Before changing a dialog's rendering, the footer, a below-editor widget or Sidebar's layout, read `docs/clients.md` and run `npm run check:clients` afterwards.
+herdr-web-ui and Collie read waiting Pi dialogs off the screen. Before changing a dialog's rendering, the footer, a below-editor widget or Sidebar's layout, read `docs/clients.md` and run `npm run check:clients` afterwards. Both clients must read every screen: fix a `FAIL` or `KNOWN` line (in the suite, `frames.toml` or the Collie fork) before calling the change done; never add an exception for it.
 
 ## Documentation ownership
 
