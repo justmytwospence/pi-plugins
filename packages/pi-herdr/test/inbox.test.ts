@@ -46,6 +46,8 @@ describe("envelope", () => {
   it("tells the model who sent it and whether its reply goes back", () => {
     expect(messageText(env())).toContain('Message from pi agent "lead" in herdr pane w1:p1 (mac, /r)');
     expect(messageText(env())).toContain("not sent back automatically");
+    expect(messageText(env())).toContain("do not message it back unless it asks");
+    expect(messageText(env({ from: { pane: "w1:p1", title: "Fix the parser" } }))).toContain('the pi session "Fix the parser"');
     expect(messageText(env({ awaitsReply: true }))).toContain("is sent back");
   });
 
@@ -140,24 +142,23 @@ describe("inbox", () => {
 describe("draft guard", () => {
   const ENTER = "\r";
   const paste = (t: string) => `${PASTE_START}${t}${PASTE_END}`;
-  function editor(text = "") {
+  function editor(text = "", accept = true) {
     let clock = 10_000;
-    const state = { text, notes: [] as string[], later: [] as (() => void)[] };
+    const state = { text, notes: [] as string[], submitted: [] as string[] };
     const guard = new DraftGuard({
       getText: () => state.text,
       setText: (t) => { state.text = t; },
       notify: (m) => state.notes.push(m),
-      later: (fn) => state.later.push(fn),
+      submit: (t) => { if (accept) state.submitted.push(t); return accept; },
       isEnter: (d) => d === ENTER,
     }, () => clock);
-    /** What the editor does with input the guard passes through. */
+    /** What the editor does with input the guard passes through: Enter submits and clears. */
     const type = (data: string) => {
       const r = guard.input(data);
       if (r?.consume) return "consumed";
       if (data === ENTER) {
         const sent = state.text;
         state.text = "";
-        for (const fn of state.later.splice(0)) fn();
         return sent;
       }
       state.text += data.startsWith(PASTE_START) ? data.slice(PASTE_START.length, -PASTE_END.length) : data;
@@ -166,13 +167,21 @@ describe("draft guard", () => {
     return { state, type, tick: (ms: number) => { clock += ms; } };
   }
 
-  it("sends an injected prompt alone and gives the idle draft back", () => {
+  it("sends an injected prompt alone without the editor, and the idle draft never leaves it", () => {
     const e = editor("my draft ");
     expect(e.type(paste("from elsewhere"))).toBeUndefined();
     e.tick(300);
-    expect(e.type(ENTER)).toBe("from elsewhere");
+    expect(e.type(ENTER)).toBe("consumed");
+    expect(e.state.submitted).toEqual(["from elsewhere"]);
     expect(e.state.text).toBe("my draft ");
     expect(e.state.notes[0]).toContain("your draft is back");
+  });
+
+  it("lets Enter through as before when pi refuses the prompt", () => {
+    const e = editor("my draft ", false);
+    e.type(paste("x"));
+    e.tick(300);
+    expect(e.type(ENTER)).toBe("my draft x");
   });
 
   it("does nothing without a draft", () => {
@@ -204,19 +213,20 @@ describe("draft guard", () => {
     expect(between.type(ENTER)).toBe("draft xy");
   });
 
-  it("ignores focus reports and envelopes", () => {
+  it("ignores focus reports between the paste and Enter", () => {
     const e = editor("draft ");
     e.type(paste("x"));
     expect(e.type("\x1b[I")).toBeUndefined();
     e.tick(100);
-    expect(e.type(ENTER)).toBe("x");
+    expect(e.type(ENTER)).toBe("consumed");
+    expect(e.state.submitted).toEqual(["x"]);
     expect(e.state.text).toBe("draft ");
   });
 
   it("does nothing when the paste did not land in the main editor", () => {
     let clock = 10_000;
     const state = { text: "draft" };
-    const guard = new DraftGuard({ getText: () => state.text, setText: (t) => { state.text = t; }, notify() {}, later() {}, isEnter: (d) => d === ENTER }, () => clock);
+    const guard = new DraftGuard({ getText: () => state.text, setText: (t) => { state.text = t; }, notify() {}, submit: () => true, isEnter: (d) => d === ENTER }, () => clock);
     guard.input(paste("into an overlay"));
     clock += 100;
     expect(guard.input(ENTER)).toBeUndefined();
@@ -229,6 +239,7 @@ describe("draft guard", () => {
     e.tick(300);
     expect(e.type(ENTER)).toBe("consumed");
     expect(e.state.text).toBe("draft");
+    expect(e.state.submitted).toEqual([]);
     expect(e.state.notes[0]).toContain("`/reload`");
   });
 });
@@ -275,11 +286,21 @@ describe("agents", () => {
     expect((await agents.send("other", "x", {})).outcome).toBeUndefined();
   });
 
-  it("falls back to agent.prompt when the inbox pid is not in the foreground", async () => {
-    const { f, agents } = make({ "pane.process_info": () => ({ result: { process_info: { foreground_processes: [{ pid: 1 }] } } }) });
+  it("falls back to agent.prompt when the agent has no inbox", async () => {
+    const { f, agents } = make({ "agent.get": () => ({ result: { agent: { ...target, tokens: {} } } }) });
     expect((await agents.send("other", "x", {})).via).toBe("prompt");
     expect(f.of("pane.send_text")).toEqual([]);
     expect(f.of("agent.prompt")[0]!.params).toMatchObject({ target: "w2:p1", text: "x" });
+  });
+
+  it("never sends into a pane whose pi is not in front, and never steers by default", async () => {
+    const bg = make({ "pane.process_info": () => ({ result: { process_info: { foreground_processes: [{ pid: 1 }] } } }) });
+    await expect(bg.agents.send("other", "x", {})).rejects.toThrow("not in the foreground");
+    expect(bg.f.of("agent.prompt")).toEqual([]);
+    expect(bg.f.of("pane.send_text")).toEqual([]);
+    const working = make({ "agent.get": () => ({ result: { agent: { ...target, agent_status: "working" } } }) });
+    await expect(working.agents.send("other", "x", {})).rejects.toThrow("delivery=steer");
+    expect(working.f.of("pane.send_text")).toEqual([]);
   });
 
   it("refuses this session's own pane, a missing agent and blocked targets without an inbox", async () => {

@@ -41,7 +41,7 @@ import { Bridge, type NotifyEvent, type SplitEvent, type TokenEvent } from "./br
 import { ChildrenActivity } from "./children-activity.ts";
 import { type ChildRecord, Children, type Exec, type Where } from "./core/children.ts";
 import { DraftGuard } from "./draft-guard.ts";
-import { ACK_TTL_MS, ackTokenName, Inbox, INBOX_SOURCE, INBOX_TOKEN, INBOX_TTL_MS, inboxTokenValue, messageText, type Outcome, type Sender } from "./inbox.ts";
+import { ACK_TTL_MS, ackTokenName, Inbox, INBOX_SOURCE, INBOX_TOKEN, INBOX_TTL_MS, inboxTokenValue, messageText, type Outcome, processInboxState, type Sender } from "./inbox.ts";
 import { type Call, herdrTarget, socketCall } from "./core/herdr.ts";
 import { displayAgent, firstUserText, titleFromPrompt } from "./identity.ts";
 import { PR_FIELDS, parsePrView, prToken } from "./core/pr.ts";
@@ -155,7 +155,7 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     stopInput?.();
     stopInput = undefined;
     guard?.reset();
-    inbox.reset();
+    // Held messages stay (process-wide): the next runtime in this pane delivers them.
     for (const t of ackTimers) clearTimeout(t);
     ackTimers.clear();
   };
@@ -281,8 +281,9 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     const me = await call<{ agent?: AgentInfo }>("agent.get", { target: target.paneId });
     let session: string | undefined;
     try { session = pi.getSessionName(); } catch { /* stale runtime */ }
-    const name = me.result?.agent?.name ?? (session && session !== recapName ? session : undefined);
-    return { pane: target.paneId, ...(name ? { name } : {}), host: hostname().split(".")[0], cwd };
+    const name = me.result?.agent?.name;
+    const title = (session && session !== recapName ? session : undefined) ?? promptTitle;
+    return { pane: target.paneId, ...(name ? { name } : title ? { title } : {}), host: hostname().split(".")[0], cwd };
   };
   const agents = new Agents({ call, exec: run, selfPane: target.paneId, cwd: () => cwd, self });
 
@@ -304,12 +305,16 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
       ackTimers.add(t);
     },
     notify: (message, type) => { safely(() => lastCtx?.ui.notify(message, type), false); },
-  });
+  }, processInboxState());
   const guard = process.env.PI_HERDR_DRAFT_GUARD === "0" ? undefined : new DraftGuard({
     getText: () => lastCtx?.ui.getEditorText() ?? "",
     setText: (text) => { lastCtx?.ui.setEditorText(text); },
     notify: (message, type) => { safely(() => lastCtx?.ui.notify(message, type), false); },
-    later: (fn) => { const t = setTimeout(() => { try { if (active) fn(); } catch { /* stale runtime */ } }, 0); t.unref?.(); },
+    submit: (text) => safely(() => {
+      // As Enter would: start a turn when idle, steer the one that is running.
+      if (lastCtx?.isIdle()) pi.sendUserMessage(text);
+      else pi.sendUserMessage(text, { deliverAs: "steer" });
+    }, false),
     isEnter: (data) => matchesKey(data, "enter"),
   });
 
@@ -467,6 +472,11 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     if (typeof ctx.ui.onTerminalInput === "function") {
       stopInput = ctx.ui.onTerminalInput((data) => inbox.input(data) ?? guard?.input(data));
       void inboxPane.setToken(INBOX_TOKEN, inboxTokenValue(process.pid), INBOX_TTL_MS);
+      // Messages held when the last runtime ended (/reload, /new) go in now.
+      if (inbox.held.length) {
+        ctx.ui.notify(`Delivering ${inbox.held.length} held message${inbox.held.length === 1 ? "" : "s"} from other agents.`, "info");
+        inbox.flush();
+      }
     }
 
     restoreBranch(ctx);
@@ -581,9 +591,10 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
         return v.trim();
       };
       const machine = params.machine?.trim() || undefined;
-      /** This session's live child by that name (children live on this machine). */
+      /** This session's live child by that name or pane id (children live on this machine). */
       const child = (name: string) => {
-        const rec = machine ? undefined : children.records.get(name);
+        if (machine) return undefined;
+        const rec = children.records.get(name) ?? [...children.records.values()].find((r) => r.paneId === name && !r.closed);
         return rec && !rec.closed ? rec : undefined;
       };
       const childOnly = (name: string) => {
@@ -608,7 +619,8 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
           return text(`Started herdr child "${rec.name}" in ${place}, pane ${rec.paneId}, and sent it the task. Its reply arrives as a message when its turn ends; do not poll.`);
         }
         case "send": {
-          const name = need(params.name, "name");
+          const asked = need(params.name, "name");
+          const name = child(asked)?.name ?? asked;
           const message = need(params.message, "message");
           if (child(name)) {
             if (!params.delivery) {
@@ -634,11 +646,13 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
           return text(`Typed into ${label}'s terminal with herdr agent prompt: ${r.info.agent ?? "the agent"} there has no pi-herdr inbox, so a draft in its editor would have gone in with the message. ${after}`);
         }
         case "read": {
-          const name = need(params.name, "name");
+          const asked = need(params.name, "name");
+          const name = child(asked)?.name ?? asked;
           return text(child(name) ? await children.read(name, params.lines) : await agents.read(name, { machine, lines: params.lines }));
         }
         case "wait": {
-          const name = need(params.name, "name");
+          const asked = need(params.name, "name");
+          const name = child(asked)?.name ?? asked;
           if (child(name)) throw new Error(`${name} is this session's child: its reply arrives as a message on its own. End your turn instead of waiting, or use action=read.`);
           return text(await agents.wait(name, { machine, timeoutMs: params.timeout_ms, signal }));
         }

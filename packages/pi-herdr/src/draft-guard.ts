@@ -1,8 +1,9 @@
 // The draft guard: a prompt another program types into this pane (`herdr agent prompt` from a
 // non-pi agent or a script, herdr-web-ui, Collie) without pi-herdr's envelope arrives as a
 // bracketed paste and, about 300 ms later, Enter. With a draft in the editor, the paste lands in
-// it and the Enter sends both as one prompt. The guard sends the injected text on its own and
-// gives the draft back.
+// it and the Enter sends both as one prompt. The guard takes that Enter, puts the draft back as it
+// was and submits the injected text itself (pi.sendUserMessage, steering a turn that is running,
+// as Enter would): the draft is never out of the editor, whatever the submit does.
 //
 // It acts only when it must, on what it can tell apart from your own typing:
 // - the editor held a draft before the paste, untouched for IDLE_MS (pasting a URL onto the end
@@ -23,8 +24,8 @@ export interface DraftHost {
   getText(): string;
   setText(text: string): void;
   notify(message: string, type: "info" | "warning"): void;
-  /** Run after the current input has been handled (the submit has cleared the editor). */
-  later(fn: () => void): void;
+  /** Submit a prompt without the editor; false when pi refused it. */
+  submit(text: string): boolean;
   isEnter(data: string): boolean;
 }
 
@@ -67,13 +68,11 @@ export class DraftGuard {
       this.host.notify(`Another program typed \`${text.split(/\s/u)[0]}\` into this pane while you had a draft. It was not run; your draft is kept.`, "warning");
       return { consume: true };
     }
-    this.host.setText(text);
-    this.host.later(() => {
-      if (this.host.getText() !== "") return;
-      this.host.setText(p.draft);
-      this.host.notify("Sent a prompt another program typed into this pane on its own; your draft is back.", "info");
-    });
-    return undefined;
+    // If pi refuses it, Enter goes on as it would have without the guard.
+    if (!this.host.submit(text)) return undefined;
+    this.host.setText(p.draft);
+    this.host.notify("Sent a prompt another program typed into this pane on its own; your draft is back.", "info");
+    return { consume: true };
   }
 
   reset(): void {

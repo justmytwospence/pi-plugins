@@ -35,6 +35,8 @@ export const OUTCOMES: readonly Outcome[] = ["started", "steered", "queued", "he
 export interface Sender {
   pane: string;
   name?: string;
+  /** Its session's title (name or first prompt), when it has no agent name. */
+  title?: string;
   host?: string;
   cwd?: string;
 }
@@ -88,11 +90,11 @@ export const ackTokenName = (id: string): string => `ack-${id}`;
 
 /** What the receiving model reads: who sent it, and whether its reply goes back. */
 export function messageText(env: Envelope): string {
-  const who = env.from.name ? `pi agent "${env.from.name}"` : "a pi agent";
+  const who = env.from.name ? `pi agent "${env.from.name}"` : env.from.title ? `the pi session "${env.from.title}"` : "a pi agent";
   const where = [env.from.host, env.from.cwd].filter(Boolean).join(", ");
   const reply = env.awaitsReply
     ? "Your final reply to it is sent back to that session."
-    : "Your reply is not sent back automatically; the sender can read it from your pane.";
+    : "Your reply is not sent back automatically; the sender reads it from your pane if it needs it, so do not message it back unless it asks you to.";
   return `[Message from ${who} in herdr pane ${env.from.pane}${where ? ` (${where})` : ""}: another agent session, not the user typing. ${reply}]\n\n${env.text}`;
 }
 
@@ -107,15 +109,31 @@ export interface InboxHost {
   notify(message: string, type: "info" | "warning"): void;
 }
 
+/** What outlives a runtime: held messages and seen ids, kept process-wide across /reload and /new. */
+export interface InboxState {
+  held: Envelope[];
+  seen: Set<string>;
+}
+
+const STATE = Symbol.for("pi-plugins.pi-herdr/inbox-state.v1");
+
+/** The process's inbox state: this pane's, whichever runtime of pi-herdr is live in it. */
+export function processInboxState(): InboxState {
+  const g = globalThis as Record<symbol, unknown>;
+  return (g[STATE] ??= { held: [], seen: new Set<string>() }) as InboxState;
+}
+
 /** The receiving half: consumes envelope pastes and delivers them. */
 export class Inbox {
   /** Messages for an idle session with a dialog open, delivered once it closes. */
-  readonly held: Envelope[] = [];
-  private readonly seen = new Set<string>();
+  readonly held: Envelope[];
+  private readonly seen: Set<string>;
   private readonly host: InboxHost;
 
-  constructor(host: InboxHost) {
+  constructor(host: InboxHost, state: InboxState = { held: [], seen: new Set() }) {
     this.host = host;
+    this.held = state.held;
+    this.seen = state.seen;
   }
 
   /** A terminal-input listener: consumes envelopes, passes everything else through. */

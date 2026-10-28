@@ -403,3 +403,48 @@ test("the inbox: advertised, envelopes delivered without the editor, acked, held
   expect(listener).toBeUndefined();
   expect(tokenReports().some((l) => l.params.source === "pi-herdr-inbox" && l.params.tokens.inbox === null)).toBe(true);
 });
+
+test("a message held behind a dialog survives /reload; the draft guard submits without the editor", async () => {
+  inHerdr();
+  const { encodeEnvelope } = await import("../src/inbox.ts");
+  const { f } = herdr();
+  const start = async () => {
+    const p = fakePi();
+    const submitted: unknown[] = [];
+    (p.pi as any).sendUserMessage = (text: string, options: unknown) => void submitted.push([text, options]);
+    piHerdr(p.pi, { call: f.call, exec: async () => ({ code: 0, stdout: "", stderr: "" }), pollMs: 60_000 });
+    let listener: ((data: string) => { consume?: boolean } | undefined) | undefined;
+    const state = { editor: "", idle: true };
+    const base = ctxOf([]);
+    const ctx = {
+      ...base,
+      isIdle: () => state.idle,
+      ui: {
+        ...base.ui,
+        getEditorText: () => state.editor,
+        setEditorText: (t: string) => void (state.editor = t),
+        onTerminalInput: (fn: typeof listener) => { listener = fn; return () => void (listener = undefined); },
+      },
+    };
+    await p.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+    return { p, ctx, state, submitted, input: (d: string) => listener!(d) };
+  };
+  const one = await start();
+  one.p.pi.events.emit("herdr:blocked", { active: true, label: "Allow?" });
+  one.input(encodeEnvelope({ v: 1, id: "reload1", from: { pane: "w9:p1" }, text: "survive", delivery: "steer" }));
+  expect(one.p.messages).toEqual([]);
+  await one.p.emit("session_shutdown", { type: "session_shutdown", reason: "reload" }, one.ctx);
+
+  const two = await start();
+  expect(two.p.messages.map((m) => m.message.content).join()).toContain("survive");
+
+  // Draft guard: a foreign paste and Enter into an idle draft.
+  two.state.editor = "my draft";
+  await new Promise((r) => setTimeout(r, 3_050));
+  expect(two.input("\x1b[200~from a script\x1b[201~")).toBeUndefined();
+  two.state.editor = "my draftfrom a script";
+  expect(two.input("\r")).toEqual({ consume: true });
+  expect(two.submitted).toEqual([["from a script", undefined]]);
+  expect(two.state.editor).toBe("my draft");
+  await two.p.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, two.ctx);
+}, 10_000);

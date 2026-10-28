@@ -131,20 +131,28 @@ export class Agents {
     return info;
   }
 
-  /** Whether a pi-herdr inbox is listening in the agent's pane, in the foreground. */
-  async hasInbox(info: AgentInfo, machine?: string): Promise<boolean> {
+  /**
+   * Whether a pi-herdr inbox listens in the agent's pane: `yes` when its pi is the pane's foreground
+   * process; `background` when the pane advertises one but that pi is not in front (suspended with
+   * Ctrl+Z, or a program runs on top of it), so anything typed would reach that program instead.
+   */
+  async inboxState(info: AgentInfo, machine?: string): Promise<"yes" | "no" | "background"> {
     const pid = parseInboxToken(info.tokens?.[INBOX_TOKEN]);
-    if (pid === undefined || !info.pane_id) return false;
+    if (pid === undefined || !info.pane_id) return "no";
     const r = await this.endpoint(machine)<{ process_info?: { foreground_processes?: { pid?: number }[] } }>("pane.process_info", { pane_id: info.pane_id });
-    return !!r.result?.process_info?.foreground_processes?.some((p) => p.pid === pid);
+    if (!r.result?.process_info) throw new Error(`herdr could not tell what runs in front in ${info.name ?? info.pane_id}'s pane, so nothing was sent: ${errorText(r)}`);
+    return r.result.process_info.foreground_processes?.some((p) => p.pid === pid) ? "yes" : "background";
   }
 
   /**
    * Put an envelope into the agent's inbox and wait for its acknowledgement. Undefined when the
-   * agent has no inbox (the caller falls back to agent.prompt).
+   * agent has no inbox (the caller falls back to agent.prompt). Throws, sending nothing, when its pi
+   * is not in front: typing into that pane would reach whatever is.
    */
   async sendInbox(info: AgentInfo, text: string, delivery: Delivery, opts: { machine?: string; awaitsReply?: boolean } = {}): Promise<{ outcome?: Outcome } | undefined> {
-    if (!(await this.hasInbox(info, opts.machine))) return undefined;
+    const state = await this.inboxState(info, opts.machine);
+    if (state === "no") return undefined;
+    if (state === "background") throw new Error(`${info.name ?? info.pane_id}'s pi is not in the foreground of its pane (suspended with Ctrl+Z, or a program runs on top of it), so nothing was sent: typing there would reach that program. Try again once pi is back in front.`);
     const call = this.endpoint(opts.machine);
     const env: Envelope = { v: 1, id: newMessageId(), from: await this.deps.self(), text, delivery, ...(opts.awaitsReply ? { awaitsReply: true } : {}) };
     const r = await call("pane.send_text", { pane_id: info.pane_id, text: encodeEnvelope(env) }, 10_000);
@@ -166,12 +174,13 @@ export class Agents {
     const info = await this.get(name, opts.machine);
     if (!opts.machine && info.pane_id === this.deps.selfPane) throw new Error("That is this session's own pane.");
     const label = info.name ?? info.pane_id!;
+    const status = info.agent_status;
+    // Steering derails the turn it lands in: that is the sender's choice to make, never a default.
+    if ((status === "working" || status === "blocked") && !opts.delivery) throw new Error(`${label} is ${status} on a turn now, so nothing was sent. Read it (action=read) if you need to know what it is doing, then send again with delivery=steer to put the message into that turn (a correction to that work), or delivery=queue for after it (new or separate work).`);
     const inbox = await this.sendInbox(info, text, opts.delivery ?? "steer", { machine: opts.machine });
     if (inbox) return { via: "inbox", outcome: inbox.outcome, info };
     // No inbox: herdr types the message into its terminal, after whatever draft is there.
-    const status = info.agent_status;
     if (status === "blocked") throw new Error(`${label} is waiting on a dialog for the user and has no pi-herdr inbox to hold the message, so nothing was sent. Try again once the user has answered it.`);
-    if (status === "working" && !opts.delivery) throw new Error(`${label} is working on a turn now, so nothing was sent. Send again with delivery=steer to put the message into that turn, or wait for it (action=wait) and then send.`);
     if (status === "working" && opts.delivery === "queue") throw new Error(`${label} has no pi-herdr inbox, so a message cannot be queued in it. Wait for it (action=wait) and send then, or use delivery=steer.`);
     const r = await this.endpoint(opts.machine)("agent.prompt", { target: info.pane_id, text }, 15_000);
     if (r.error) throw new Error(`herdr could not prompt ${label}: ${errorText(r)}`);
