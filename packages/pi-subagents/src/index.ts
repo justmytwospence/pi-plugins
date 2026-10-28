@@ -30,14 +30,14 @@ import type { ViewerActions } from "./ui/viewer.ts";
 import { elapsedMs, formatCount, formatElapsed, shortModel } from "./ui/format.ts";
 import { RunsWidget, WIDGET_MODES, type WidgetMode } from "./ui/widget.ts";
 
-/** How readily the main agent delegates: `conservative` (default) or `economical`. */
+/** How readily the main agent delegates: `economical` (default) or `conservative`. */
 export type Delegation = "conservative" | "economical";
 export const DELEGATIONS: readonly Delegation[] = ["conservative", "economical"];
 
 export interface SubagentsConfig extends Record<string, unknown> {
   /** `threshold`: how sure Jev must be to climb to a stronger tier or effort, from no quota pressure (`relaxed`) to full (`tight`). */
   jev: JevConfig & { threshold: Threshold };
-  /** The tool's first prompt guideline: delegate only clear wins (`conservative`) or hand settled implementation to cheaper tiers (`economical`). */
+  /** The tool's first prompt guideline: hand settled implementation to cheaper tiers (`economical`, default) or delegate only clear wins (`conservative`). */
   delegation: Delegation;
   /** Legacy tier defaults; only entries matching the parent's provider apply. */
   tiers: Partial<Record<Tier, string>>;
@@ -58,7 +58,7 @@ export interface SubagentsConfig extends Record<string, unknown> {
 
 export const DEFAULT_CONFIG: SubagentsConfig = {
   jev: { enabled: true, provider: "typesafe", model: "jev-latest", timeoutMs: 3_000, threshold: { ...DEFAULT_THRESHOLD } },
-  delegation: "conservative",
+  delegation: "economical",
   tiers: {},
   providerTiers: {},
   tierDescriptions: DEFAULT_TIER_DESCRIPTIONS,
@@ -75,10 +75,10 @@ const CONSERVATIVE_GUIDELINE =
 const ECONOMICAL_GUIDELINE =
   "Once the design is settled and what remains is implementation that follows from it (applying a decided change across files, writing tests to a given spec, mechanical refactors, running checks and fixing what fails), delegate it to a subagent with a precise, self-contained spec and no model, so Jev picks a cheaper tier; then review the result (diff, check output) yourself instead of redoing it. Do it directly when the spec would be about as long as the work, the remaining decisions are judgment calls, or the work needs most of this conversation's context. Do not commission redundant audits of work you are already doing; use headless subagents rather than interactive Herdr sessions for report-back work.";
 
-/** The `subagent` tool's prompt guidelines for a `delegation` setting (anything unknown is conservative). */
+/** The `subagent` tool's prompt guidelines for a `delegation` setting (anything unknown is the default, economical). */
 export function promptGuidelines(delegation: unknown): string[] {
   return [
-    delegation === "economical" ? ECONOMICAL_GUIDELINE : CONSERVATIVE_GUIDELINE,
+    delegation === "conservative" ? CONSERVATIVE_GUIDELINE : ECONOMICAL_GUIDELINE,
     "Give each subagent a complete, self-contained task: it cannot see this conversation unless context is fork.",
     "Give each task a short descriptive label; omit it to derive one deterministically from the task.",
     "Use parallel tasks for independent work and a chain when a step needs the previous step's output.",
@@ -763,7 +763,7 @@ export default function subagents(pi: ExtensionAPI) {
     }
   });
 
-  const delegationOf = (c: SubagentsConfig): Delegation => (DELEGATIONS.includes(c.delegation) ? c.delegation : "conservative");
+  const delegationOf = (c: SubagentsConfig): Delegation => (DELEGATIONS.includes(c.delegation) ? c.delegation : DEFAULT_CONFIG.delegation);
   let registeredDelegation: Delegation | undefined;
   const registerSubagentTool = (delegation: Delegation) => {
     registeredDelegation = delegation;

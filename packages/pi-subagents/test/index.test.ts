@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, test } from "vitest";
-import subagents, { jevMark, promptGuidelines, readPressure, truncateOutput } from "../src/index.ts";
+import subagents, { DEFAULT_CONFIG, jevMark, promptGuidelines, readPressure, truncateOutput } from "../src/index.ts";
 import { fakeJev, harness } from "./harness.ts";
 import { fakeUI, normalFocus, plain } from "./ui-helpers.ts";
 
@@ -110,7 +110,7 @@ test("b in FleetView moves a foreground call to the background; its result arriv
   }
 });
 
-test.each(["fast", "strong"])("a Sol parent routes Jev's %s tier within OpenAI despite legacy Anthropic defaults", async (tier) => {
+test.each([["fast", "luna"], ["balanced", "terra"], ["strong", "sol"]])("a Sol parent routes Jev's %s tier within OpenAI (%s) despite legacy Anthropic defaults", async (tier, name) => {
   const { setPiInvocation } = await import("../src/child.ts");
   setPiInvocation({ command: process.execPath, args: [path.join(import.meta.dirname, "fixtures", "fake-pi-loop.mjs")] });
   try {
@@ -126,13 +126,37 @@ test.each(["fast", "strong"])("a Sol parent routes Jev's %s tier within OpenAI d
     subagents(h.pi);
     const ctx = h.ctx({ cwd, ui: fakeUI(), model: { provider: "openai-codex", id: "gpt-6.1-sol" },
       modelRegistry: { ...jev.registry as object, getAll: () => [
-        { provider: "openai-codex", id: "gpt-6.1-sol" }, { provider: "openai-codex", id: "gpt-6.1-luna" },
+        { provider: "openai-codex", id: "gpt-6.1-sol" }, { provider: "openai-codex", id: "gpt-6.1-luna" }, { provider: "openai-codex", id: "gpt-6.1-terra" },
       ] },
     });
     await h.emit("session_start", { type: "session_start" }, ctx);
     const result = await tool.execute("t1", { task: "route me", async: true }, undefined, undefined, ctx);
     expect(jev.calls[0]?.questions).toHaveProperty("tier");
-    expect(result.content[0].text).toContain(`openai-codex/gpt-6.1-${tier === "fast" ? "luna" : "sol"}`);
+    expect(result.content[0].text).toContain(`openai-codex/gpt-6.1-${name}`);
+    await h.emit("session_shutdown", { type: "session_shutdown" }, ctx);
+  } finally {
+    setPiInvocation(undefined);
+  }
+});
+
+test.each([["fast", "claude-haiku-5"], ["balanced", "claude-sonnet-5-5"], ["strong", "claude-opus-5-5"]])("an unconfigured Opus parent routes Jev's %s tier to the newest registered %s", async (tier, id) => {
+  const { setPiInvocation } = await import("../src/child.ts");
+  setPiInvocation({ command: process.execPath, args: [path.join(import.meta.dirname, "fixtures", "fake-pi-loop.mjs")] });
+  try {
+    const jev = fakeJev(() => ({ tier: { type: "choice", choice: tier, confidence: 1, probabilities: {} } }));
+    const h = harness();
+    let tool: any;
+    h.pi.registerTool = (t: unknown) => void (tool = t);
+    subagents(h.pi);
+    const ctx = h.ctx({ cwd: mkdtempSync(path.join(tmpdir(), "subagents-presets-")), ui: fakeUI(), model: { provider: "anthropic", id: "claude-opus-5-5" },
+      modelRegistry: { ...jev.registry as object, getAll: () => [
+        "claude-haiku-4-5", "claude-haiku-5", "claude-sonnet-5-5-20260301", "claude-sonnet-5-5", "claude-opus-4-1", "claude-opus-5-5",
+      ].map((model) => ({ provider: "anthropic", id: model })) },
+    });
+    await h.emit("session_start", { type: "session_start" }, ctx);
+    const result = await tool.execute("t1", { task: "route me", async: true }, undefined, undefined, ctx);
+    expect(jev.calls[0]?.questions).toHaveProperty("tier");
+    expect(result.details.runs[0]).toMatchObject({ model: `anthropic/${id}`, byJev: { model: true } });
     await h.emit("session_shutdown", { type: "session_shutdown" }, ctx);
   } finally {
     setPiInvocation(undefined);
@@ -189,12 +213,15 @@ test("a run that ends after its session is gone calls no pi API (a stale runtime
   }
 });
 
-test("delegation picks the first prompt guideline; a project's setting re-registers the tool at session start", async () => {
-  expect(promptGuidelines(undefined)[0]).toMatch(/^Prefer direct work for routine investigation/u);
-  expect(promptGuidelines("conservative")[0]).toBe(promptGuidelines("nonsense")[0]);
+test("delegation picks the first prompt guideline (economical by default); a project's setting re-registers the tool at session start", async () => {
+  expect(DEFAULT_CONFIG.delegation).toBe("economical");
+  expect(DEFAULT_CONFIG.jev.threshold).toEqual({ relaxed: 0.5, tight: 0.85 });
   const economical = promptGuidelines("economical");
+  expect(promptGuidelines(undefined)[0]).toBe(economical[0]);
+  expect(promptGuidelines("nonsense")[0]).toBe(economical[0]);
   expect(economical[0]).toMatch(/^Once the design is settled and what remains is implementation that follows from it/u);
   expect(economical[0]).toContain("no model, so Jev picks a cheaper tier");
+  expect(promptGuidelines("conservative")[0]).toMatch(/^Prefer direct work for routine investigation/u);
   expect(economical.slice(1)).toEqual(promptGuidelines("conservative").slice(1));
 
   const h = harness();
@@ -202,14 +229,14 @@ test("delegation picks the first prompt guideline; a project's setting re-regist
   h.pi.registerTool = (t: { promptGuidelines: string[] }) => void registered.push(t.promptGuidelines);
   subagents(h.pi);
   expect(registered).toHaveLength(1);
-  expect(registered[0]![0]).toMatch(/^Prefer direct work/u);
+  expect(registered[0]![0]).toMatch(/^Once the design is settled/u);
   const cwd = mkdtempSync(path.join(tmpdir(), "subagents-delegation-"));
   mkdirSync(path.join(cwd, ".pi"));
-  writeFileSync(path.join(cwd, ".pi", "pi-subagents.json"), JSON.stringify({ delegation: "economical" }));
+  writeFileSync(path.join(cwd, ".pi", "pi-subagents.json"), JSON.stringify({ delegation: "conservative" }));
   const ctx = h.ctx({ cwd, ui: fakeUI() });
   await h.emit("session_start", { type: "session_start" }, ctx);
   expect(registered).toHaveLength(2);
-  expect(registered[1]![0]).toMatch(/^Once the design is settled/u);
+  expect(registered[1]![0]).toMatch(/^Prefer direct work/u);
   // The same setting again registers nothing new (the system prompt stays as it is).
   await h.emit("session_start", { type: "session_start" }, ctx);
   expect(registered).toHaveLength(2);

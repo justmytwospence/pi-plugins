@@ -22,7 +22,8 @@ export interface Threshold {
   relaxed: number;
   tight: number;
 }
-export const DEFAULT_THRESHOLD: Threshold = { relaxed: 0.35, tight: 0.85 };
+/** 0.5 is the median of Jev's answers: a stronger option is taken once it is at least as likely as not. */
+export const DEFAULT_THRESHOLD: Threshold = { relaxed: 0.5, tight: 0.85 };
 
 /** theta(p) = relaxed + (tight - relaxed) * p, with p (quota pressure) clamped to 0..1. */
 export function theta(pressure: number, threshold: Threshold = DEFAULT_THRESHOLD): number {
@@ -60,38 +61,69 @@ export interface TierConfig {
   descriptions: Record<Tier, string>;
 }
 
-/** Resolve defaults only within the parent's provider. Explicit call models bypass this policy. */
+/**
+ * Built-in tier models per provider, as id patterns over Pi's registry: the newest registered match
+ * fills a tier nothing is configured for. A provider without presets uses the parent's model.
+ */
+export const TIER_PRESETS: Record<string, Record<Tier, RegExp>> = {
+  anthropic: { fast: /^claude-haiku-/u, balanced: /^claude-sonnet-/u, strong: /^claude-opus-/u },
+  "openai-codex": { fast: /-luna$/u, balanced: /-terra$/u, strong: /-sol$/u },
+};
+/** Each tier's id suffix, where a preset prefers the parent's own generation (`gpt-6.1-sol` -> `gpt-6.1-luna`). */
+const GENERATIONS: Record<string, Record<Tier, string>> = { "openai-codex": { fast: "luna", balanced: "terra", strong: "sol" } };
+const DATED = /-(\d{8})$/u;
+
+/**
+ * Newest first: ids compared numerically with any 8-digit date suffix set aside, then an undated
+ * alias before its dated snapshots, then the later date.
+ */
+export function newestFirst(a: string, b: string): number {
+  const base = (id: string) => id.replace(DATED, "");
+  const byBase = base(b).localeCompare(base(a), "en", { numeric: true });
+  if (byBase) return byBase;
+  const dateA = a.match(DATED)?.[1];
+  const dateB = b.match(DATED)?.[1];
+  if (!dateA !== !dateB) return dateA ? 1 : -1;
+  return (dateB ?? "").localeCompare(dateA ?? "");
+}
+
+/**
+ * Tier models for the parent's provider: its `providerTiers` entry, then a matching legacy `tiers`
+ * entry, then the provider's preset over the registry (`available`), per tier. Only models on the
+ * parent's provider; presets only name registered models. Explicit call models bypass this.
+ */
 export function providerTiers(
   parentModel: string,
   configured: Partial<Record<Tier, string>>,
   byProvider: Record<string, Partial<Record<Tier, string>>> = {},
   available: readonly { provider: string; id: string }[] = [],
 ): Partial<Record<Tier, string>> {
-  const provider = parentModel.split("/")[0];
+  const provider = parentModel.split("/")[0]!;
   const sameProvider = (model: string | undefined) => model?.startsWith(`${provider}/`) ? model : undefined;
-  const models: Partial<Record<Tier, string>> = {};
-  // Prefer the matching Sol/Luna generation, and never invent a model absent from the registry.
   const parentId = parentModel.slice(provider.length + 1);
-  const sibling = (name: string) => {
-    const candidates = available.filter((m) => m.provider === provider && m.id.endsWith(`-${name}`))
-      .sort((a, b) => b.id.localeCompare(a.id, "en", { numeric: true }));
-    return candidates.find((m) => m.id === parentId.replace(/-(sol|luna)$/u, `-${name}`)) ?? candidates[0];
+  const presets = Object.hasOwn(TIER_PRESETS, provider) ? TIER_PRESETS[provider] : undefined;
+  const suffixes = Object.hasOwn(GENERATIONS, provider) ? GENERATIONS[provider] : undefined;
+  const generation = suffixes ? new RegExp(`-(${Object.values(suffixes).join("|")})$`, "u") : undefined;
+  const preset = (tier: Tier) => {
+    const pattern = presets?.[tier];
+    if (!pattern) return undefined;
+    const ids = available.filter((m) => m.provider === provider && pattern.test(m.id)).map((m) => m.id).sort(newestFirst);
+    const sibling = suffixes && generation?.test(parentId) ? parentId.replace(generation, `-${suffixes[tier]}`) : undefined;
+    const id = (sibling && ids.includes(sibling) ? sibling : undefined) ?? ids[0];
+    return id ? `${provider}/${id}` : undefined;
   };
-  const sol = provider === "openai-codex" ? sibling("sol") : undefined;
-  const luna = provider === "openai-codex" ? sibling("luna") : undefined;
+  const models: Partial<Record<Tier, string>> = {};
   for (const tier of ["fast", "balanced", "strong"] as const) {
-    const preset = tier === "fast" ? luna : sol;
-    const model = sameProvider(byProvider[provider]?.[tier]) ?? sameProvider(configured[tier]) ??
-      (preset ? `${provider}/${preset.id}` : undefined);
+    const model = sameProvider(byProvider[provider]?.[tier]) ?? sameProvider(configured[tier]) ?? preset(tier);
     if (model) models[tier] = model;
   }
   return models;
 }
 
 export const DEFAULT_TIER_DESCRIPTIONS: Record<Tier, string> = {
-  fast: "Lookups, searches, reading and summarizing, scripted or mechanical edits",
-  balanced: "Implementing a precisely specified change, ordinary implementation, debugging with clear symptoms, reviews, research",
-  strong: "Subtle design, hard debugging, cross-cutting changes, correctness-critical work",
+  fast: "Lookups, searches, reading and summarizing code or docs, scripted or mechanical edits, running checks and reporting results",
+  balanced: "Implementing a precisely specified change, ordinary implementation, debugging with clear symptoms, code reviews, multi-source research",
+  strong: "Only when a mistake is costly and the task is genuinely hard: subtle design, hard debugging without clear symptoms, cross-cutting correctness-critical changes",
 };
 
 /** What the caller or the agent file already decided; Jev fills only the gaps. */

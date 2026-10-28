@@ -49,7 +49,7 @@ Options:
 
 `action: "status" | "steer" | "stop" | "result"` take an `id` (or a unique prefix). `steer` also takes `message`, delivered to the running child as a steering message. `status` without an id lists this session's runs.
 
-Prefer direct work for routine investigation, diagnosis, and verification. Delegate only genuinely independent tasks with a clear payoff or when requested, not merely because work is long or multistep, and avoid redundant audits. When delegating report-back work, use headless subagents. This is the tool's default first prompt guideline (`"delegation": "conservative"`). With `"delegation": "economical"` that guideline instead tells the model to hand settled implementation (a decided change across files, tests to a given spec, mechanical refactors, running checks and fixing what fails) to a subagent with a precise, self-contained spec and no `model`, so Jev picks a cheaper tier, then review the result itself; and to work directly when the spec would be about as long as the work, the remaining decisions are judgment calls, or the work needs most of the conversation's context. The setting is read when the extension loads and at each session start (the tool is registered again when it changes), not per call. An interactive Herdr child ([pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/)) is for an explicit request or a clearly persistent, human-led session or handoff.
+Once the design is settled and what remains is implementation that follows from it (a decided change across files, tests to a given spec, mechanical refactors, running checks and fixing what fails), hand it to a subagent with a precise, self-contained spec and no `model`, so Jev picks a cheaper tier, then review the result instead of redoing it; work directly when the spec would be about as long as the work, the remaining decisions are judgment calls, or the work needs most of the conversation's context. Avoid redundant audits, and use headless subagents for report-back work. This is the tool's default first prompt guideline (`"delegation": "economical"`). With `"delegation": "conservative"` that guideline instead tells the model to prefer direct work for routine investigation, diagnosis and verification, and to delegate only genuinely independent tasks with a clear payoff or when requested, not merely because work is long or multistep. The setting is read when the extension loads and at each session start (the tool is registered again when it changes), not per call. An interactive Herdr child ([pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/)) is for an explicit request or a clearly persistent, human-led session or handoff.
 
 **Labels.** `label` is a short task name, not an agent role (for example `"Audit cache invalidation"` with `agent: "reviewer"`). Lists and headings show the task label first and the role second. Labels are whitespace-normalized and stripped of terminal control characters, without a fixed length cap. A missing or blank label uses the task's first nonempty line (without a Markdown heading or list prefix), with no model call. Each chain step gets its label before `{previous}` is expanded. The full task is still sent to the child and saved in run records.
 
@@ -151,10 +151,10 @@ You are a scout. ...
 
 ## How each choice is made
 
-For the agent, the model and the thinking level separately: explicit arguments, then the agent file, then Jev, then the defaults (`general`, the `balanced` tier, the parent's model and thinking level).
+For the agent, the model and the thinking level separately: explicit arguments, then the agent file, then Jev, then the defaults (`general`; the `balanced` tier's model, else the parent's model; the parent's thinking level).
 
 - **Provider.** Implicit model choices always stay on the parent's provider: an agent-file model or tier model from another provider is ignored. Pass an explicit `model` argument to cross providers.
-- **Jev's picks.** Jev picks the agent when its confidence is at least 0.5. It answers a model tier (`fast`, `balanced`, `strong`; asked when the parent's provider has at least one tier model, configured or from the `openai-codex` defaults below) and a thinking level (`low`, `medium`, `high`, `xhigh`) as probabilities over the options, and both are read by one rule: the highest option whose probability of being needed, counting it and every stronger option, reaches the bar theta, else the lowest option. theta = `relaxed + (tight - relaxed) * p` (`jev.threshold`, default 0.35 and 0.85), where p is the quota pressure on the parent's provider (below). Without Jev, or when its request fails, the defaults apply.
+- **Jev's picks.** Jev picks the agent when its confidence is at least 0.5. It answers a model tier (`fast`, `balanced`, `strong`; asked when the parent's provider has at least one tier model, configured or from the built-in presets below) and a thinking level (`low`, `medium`, `high`, `xhigh`) as probabilities over the options, and both are read by one rule: the highest option whose probability of being needed, counting it and every stronger option, reaches the bar theta, else the lowest option. theta = `relaxed + (tight - relaxed) * p` (`jev.threshold`, default 0.5 and 0.85), where p is the quota pressure on the parent's provider (below). The relaxed default, 0.5, picks the median of Jev's distribution over the options; a lower bar biases picks upward. Without Jev, or when its request fails, the defaults apply.
 - **Quota pressure.** [pi-auto-effort](https://pi-plugins.vercel.app/plugins/pi-auto-effort/) emits `quota:pressure` (`{ provider, tier: "none" | "caution" | "critical", p, label? }`, p from 0 to 1) on Pi's event bus; this package keeps the latest per provider. The closer the parent's provider is to its limit, the surer Jev must be before a stronger tier or effort, so picks drift toward cheaper ones. The run's record keeps p and its rows show it (`(Jev, p=0.5)`). Without pi-auto-effort p is 0 and the relaxed bar applies.
 - **Thinking.** Children always get an explicit `--thinking`, so [pi-auto-effort](https://pi-plugins.vercel.app/plugins/pi-auto-effort/) stays off in them.
 
@@ -169,8 +169,8 @@ For the agent, the model and the thinking level separately: explicit arguments, 
     "balanced": "anthropic/claude-sonnet-5-5",
     "strong": "anthropic/claude-opus-5-5"
   },
-  "jev": { "enabled": true, "provider": "typesafe", "model": "jev-latest", "timeoutMs": 3000, "threshold": { "relaxed": 0.35, "tight": 0.85 } },
-  "delegation": "conservative",
+  "jev": { "enabled": true, "provider": "typesafe", "model": "jev-latest", "timeoutMs": 3000, "threshold": { "relaxed": 0.5, "tight": 0.85 } },
+  "delegation": "economical",
   "maxParallel": 8,
   "concurrency": 4,
   "widget": "off",
@@ -184,9 +184,9 @@ For the agent, the model and the thinking level separately: explicit arguments, 
 |---|---|---|
 | `tiers` | `{}` | legacy tier models; only entries on the parent's provider apply |
 | `providerTiers` | `{}` | tier models per provider (below); take precedence over matching `tiers` |
-| `tierDescriptions` | built in | what Jev reads for each tier |
+| `tierDescriptions` | built in (below) | what Jev reads for each tier |
 | `jev` | as above | `enabled`, classifier `provider` and `model`, `timeoutMs`; `threshold`: the bar for a stronger tier or effort, `relaxed` without quota pressure, `tight` at full pressure (each 0 to 1) |
-| `delegation` | `"conservative"` | the tool's first prompt guideline: `"conservative"` delegates only clear wins; `"economical"` hands settled implementation to subagents on a cheaper tier (see [The `subagent` tool](#the-subagent-tool)) |
+| `delegation` | `"economical"` | the tool's first prompt guideline: `"economical"` hands settled implementation to subagents on a cheaper tier; `"conservative"` delegates only clear wins (see [The `subagent` tool](#the-subagent-tool)) |
 | `maxParallel` | 8 | most parallel tasks per call |
 | `concurrency` | 4 | parallel tasks running at once |
 | `widget` | `"off"` | `"off"`, `"background"` (async runs only) or `"all"` |
@@ -206,14 +206,27 @@ For the agent, the model and the thinking level separately: explicit arguments, 
     },
     "openai-codex": {
       "fast": "openai-codex/gpt-6-luna",
-      "balanced": "openai-codex/gpt-6.1-sol",
+      "balanced": "openai-codex/gpt-6-terra",
       "strong": "openai-codex/gpt-6.1-sol"
     }
   }
 }
 ```
 
-For `openai-codex`, missing tiers use registered models whose ids end in `-luna` (fast) or `-sol` (balanced and strong), preferring the parent's matching generation, otherwise the newest registered one. These defaults use only models present in Pi's registry. Other providers use the parent's model for any tier not configured.
+A tier with nothing configured for the parent's provider uses that provider's built-in preset, the newest matching model in Pi's registry:
+
+| provider | `fast` | `balanced` | `strong` |
+|---|---|---|---|
+| `anthropic` | `claude-haiku-*` | `claude-sonnet-*` | `claude-opus-*` |
+| `openai-codex` | `*-luna` | `*-terra` | `*-sol` |
+
+Newest means the highest id in a numeric-aware sort, an undated alias before its 8-digit dated snapshots (`claude-sonnet-5-5` before `claude-sonnet-5-5-20260301`), then the later date. For `openai-codex` the parent's own generation comes first when it is registered (a `gpt-6.1-sol` parent gets `gpt-6.1-luna` before a newer Luna). Presets only name registered models. Configured tiers still win per tier (`providerTiers`, then a matching `tiers` entry), and a tier with neither a configuration nor a registered preset, or any tier on another provider, uses the parent's model.
+
+The built-in `tierDescriptions`, which Jev reads to pick a tier:
+
+- `fast`: Lookups, searches, reading and summarizing code or docs, scripted or mechanical edits, running checks and reporting results
+- `balanced`: Implementing a precisely specified change, ordinary implementation, debugging with clear symptoms, code reviews, multi-source research
+- `strong`: Only when a mistake is costly and the task is genuinely hard: subtle design, hard debugging without clear symptoms, cross-cutting correctness-critical changes
 
 Children run with `PI_SUBAGENT=1` and `PI_SUBAGENT_DEPTH` set, which is how `maxDepth` is enforced, and with `PI_CACHE_RETENTION` set from `childCacheRetention`. Children work in quick turns and are discarded when done, so the 1-hour tier's higher cache-write price (2x input instead of 1.25x on Anthropic) rarely pays off for them even when the main session uses it.
 
