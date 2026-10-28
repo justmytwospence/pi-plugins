@@ -785,3 +785,26 @@ test("user-words providers register at session start; the bar and pin service us
   await h.emit("session_start", h.ctx);
   expect(bar(h.screen)?.render(80).join("")).toContain("my answer");
 });
+
+test("a tool group holding a row with the user's words anchors as a whole", () => {
+  class ToolGroupComponent {
+    constructor(readonly children: unknown[]) {}
+    render(): string[] {
+      return ["g1", "g2", "g3"];
+    }
+  }
+  const classify = makeClassifier(new Map([["ask", [({ result }: { result: { details?: unknown } }) => (result.details as { words?: string }).words]]]));
+  const result: AnchorIndex = { anchors: [], horizons: [] };
+  collectAnchors(
+    [
+      new Block(["x"]),
+      new ToolGroupComponent([toolRow("ask", { details: { words: "first" } }, ["a"]), toolRow("ask", { details: { words: "Pick me" } }, ["b"]), toolRow("bash", { content: [] }, ["c"])]),
+      new ToolGroupComponent([toolRow("bash", { content: [] }, ["d"])]),
+    ],
+    80,
+    0,
+    result,
+    classify,
+  );
+  expect(result.anchors.map(({ source: _source, ...anchor }) => anchor)).toEqual([{ start: 1, end: 4, text: "Pick me" }]);
+});

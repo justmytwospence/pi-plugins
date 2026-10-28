@@ -152,7 +152,24 @@ export function extractUserText(content: unknown): string {
   return parts.join("\n");
 }
 
-type Classifier = (child: unknown) => { kind: "user"; text: string } | { kind: "skill"; name: string } | undefined;
+/** `tool`: a tool row carrying the user's words; renderers may group it with other calls. */
+type Classifier = (child: unknown) => { kind: "user"; text: string; tool?: boolean } | { kind: "skill"; name: string } | undefined;
+
+/**
+ * The user's words in a tool group (pi-cc-render's ToolGroupComponent, say): a non-plain
+ * component whose direct children include such tool rows. Its rows cannot be split by child,
+ * so the whole group anchors with the latest words in it.
+ */
+function groupedWords(child: unknown, classify: Classifier): string | undefined {
+  const children = (child as { children?: unknown } | undefined)?.children;
+  if (!Array.isArray(children)) return undefined;
+  let words: string | undefined;
+  for (const kid of children) {
+    const kind = classify(kid);
+    if (kind?.kind === "user" && kind.tool) words = kind.text;
+  }
+  return words;
+}
 
 /**
  * User-words service (version 1): what the user told the agent through another plugin's dialog
@@ -209,7 +226,7 @@ export function makeClassifier(registry: UserWordsRegistry = new Map()): Classif
       return { kind: "skill", name: typeof name === "string" ? name : "" };
     }
     const words = userWordsOf(child, registry);
-    return words === undefined ? undefined : { kind: "user", text: words };
+    return words === undefined ? undefined : { kind: "user", text: words, tool: true };
   };
 }
 
@@ -224,7 +241,11 @@ export function collectAnchors(
   classify: Classifier = classifyPiComponent,
 ): number {
   for (const child of children) {
-    const kind = classify(child);
+    let kind = classify(child);
+    if (!kind && !isPlainContainer(child)) {
+      const words = groupedWords(child, classify);
+      if (words !== undefined) kind = { kind: "user", text: words };
+    }
     if (kind) {
       const height = renderLines(child, width).length;
       const text = kind.kind === "user" ? collapseWhitespace(kind.text) : collapseWhitespace(kind.name);
