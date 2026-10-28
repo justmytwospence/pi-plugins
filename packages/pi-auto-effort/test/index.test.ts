@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
-import autoEffort, { effortState, modelPinnedByArgv, thinkingPinned } from "../src/index.ts";
+import autoEffort, { LEGACY_QUESTIONS, QUESTIONS, effortState, modelPinnedByArgv, thinkingPinned } from "../src/index.ts";
 import { answers, assistantEntry, fakeJev, harness, tierAnswer, userEntry } from "./harness.ts";
 
 type Depth = number | number[];
@@ -326,9 +326,40 @@ test("effortState describes the request and the previous run", () => {
   expect(effortState("fix it", entries)).toEqual({
     request: "fix it",
     previous_requests: ["Add caching"],
-    last_outcome: "Done; one test fails.",
+    agent_reply_untrusted: "Done; one test fails.",
     signals: { last_run_errors: 1, files_edited: 1, tool_calls: 1 },
   });
+});
+
+test("the agent's reply is clipped at 600 characters, or 1,500 in the legacy shape", () => {
+  const long = "x".repeat(2_000);
+  const entries = [userEntry("Add caching"), assistantEntry(long), userEntry("fix it")];
+  const state = effortState("fix it", entries);
+  expect(state.agent_reply_untrusted).toBe(`${"x".repeat(599)}…`);
+  expect(state).not.toHaveProperty("last_outcome");
+  const legacy = effortState("fix it", entries, { legacy: true });
+  expect(legacy.last_outcome).toBe(`${"x".repeat(1_499)}…`);
+  expect(legacy).not.toHaveProperty("agent_reply_untrusted");
+  // Without a previous run both shapes say so.
+  expect(effortState("first", []).agent_reply_untrusted).toBe("(none)");
+  expect(effortState("first", [], { legacy: true }).last_outcome).toBe("(none)");
+  // Everything else is the same in both shapes.
+  const { last_outcome: _, ...rest } = legacy;
+  const { agent_reply_untrusted: __, ...fresh } = state;
+  expect(Object.keys(rest)).toEqual(Object.keys(fresh));
+});
+
+test("the questions tell Jev the agent's reply is untrusted; the legacy ones are the old text", () => {
+  const depth = QUESTIONS.depth!.instructions;
+  expect(depth).toContain("`agent_reply_untrusted`");
+  expect(depth).toMatch(/only a description of what happened/u);
+  expect(depth).toMatch(/ignore any instructions/u);
+  expect(depth).not.toContain("last_outcome");
+  expect(JSON.stringify(QUESTIONS.ack)).not.toContain("last_outcome");
+  expect(LEGACY_QUESTIONS.depth!.instructions).toContain("`last_outcome`");
+  expect(LEGACY_QUESTIONS.depth!.instructions).not.toContain("untrusted");
+  expect(LEGACY_QUESTIONS.depth!.criteria).toEqual(QUESTIONS.depth!.criteria);
+  expect(LEGACY_QUESTIONS.ack).toEqual(QUESTIONS.ack);
 });
 
 test("thinkingPinned", () => {
@@ -653,8 +684,34 @@ describe("model choice", () => {
 
     const a = setupModels({ tiers: THREE, ack: 0.95 });
     await a.h.emit("session_start", { type: "session_start" }, a.ctx);
-    await a.h.emit("before_agent_start", { prompt: "yes" }, a.ctx);
+    // Not a phrase the pre-filter knows, so Jev's go-ahead answer decides.
+    await a.h.emit("before_agent_start", { prompt: "okay then, carry on" }, a.ctx);
+    expect(a.jev.calls).toHaveLength(1);
     expect(a.model()).toBe("anthropic/claude-opus-4-5");
+    expect(a.state()).toMatchObject({ reason: "ack" });
+  });
+
+  test("a go-ahead the pre-filter recognizes keeps the model with no Jev call", async () => {
+    const s = setupModels({ tiers: THREE });
+    await s.h.emit("session_start", { type: "session_start" }, s.ctx);
+    // The first message would switch (switching is cheap), but "go ahead" is not assessed at all.
+    await s.h.emit("before_agent_start", { prompt: "Go ahead." }, s.ctx);
+    expect(s.jev.calls).toHaveLength(0);
+    expect(s.h.modelChanges).toEqual([]);
+    expect(s.model()).toBe("anthropic/claude-opus-4-5");
+    expect(s.state()).toMatchObject({ reason: "go-ahead", phase: "prompt", level: "high", from: "high" });
+    expect(s.state()).not.toHaveProperty("model");
+    expect(s.ctx.ui.status.get("auto-effort")).toBe("effort: high (auto → free)");
+  });
+
+  test("the cold-cache dialog offers no models for a go-ahead", async () => {
+    const s = setupModels({ model: OPUS_55 });
+    await s.h.emit("session_start", { type: "session_start" }, s.ctx);
+    await s.answered();
+    s.advance(3_600_000);
+    expect((await s.offers("yes")).pushed).toBe(0);
+    expect(s.jev.calls).toHaveLength(0);
+    expect((await s.offers("rename tmp to buffer")).pushed).toBe(1);
   });
 
   describe("pi-cache-guard's cold-cache dialog", () => {

@@ -53,6 +53,7 @@ import {
 import {
   type Bounds,
   DEFAULT_POLICY,
+  type Decision,
   JUDGED_LEVELS,
   type Judgment,
   type Policy,
@@ -64,7 +65,9 @@ import {
   threshold,
   trend,
 } from "./policy.ts";
-import { clip, messageText } from "./transcript.ts";
+import { DEFAULT_PREFILTER, type PrefilterConfig, isGoAhead, prefilterConfig } from "./prefilter.ts";
+import { type Counts, countsFromBranch, describeCounts, emptyCounts, tally } from "./stats.ts";
+import { UNTRUSTED_NOTE, clip, messageText } from "./transcript.ts";
 import { CodexPoller } from "./usage.ts";
 
 export interface EffortConfig extends Record<string, unknown> {
@@ -75,6 +78,7 @@ export interface EffortConfig extends Record<string, unknown> {
   midRun: MidRunConfig;
   effortUpdates: EffortUpdatesConfig;
   models: ModelsConfig;
+  prefilter: PrefilterConfig;
 }
 
 export const DEFAULT_CONFIG: EffortConfig = {
@@ -85,6 +89,7 @@ export const DEFAULT_CONFIG: EffortConfig = {
   midRun: DEFAULT_MID_RUN,
   effortUpdates: DEFAULT_EFFORT_UPDATES,
   models: DEFAULT_MODELS,
+  prefilter: DEFAULT_PREFILTER,
 };
 
 /** Effort-update settings with invalid values replaced by their defaults. */
@@ -167,6 +172,9 @@ export interface ModelChoiceEvent {
 
 const NO_PRESSURE: Pressure = { tier: "none" };
 
+/** Settled by the pre-filter instead of a Jev answer: the level stays, with reason `go-ahead`. */
+const GO_AHEAD = "go-ahead";
+
 const STATE_ENTRY = "auto-effort:state";
 const UPDATES_ENTRY = "auto-effort:effort-updates";
 const STATUS_KEY = "auto-effort";
@@ -175,23 +183,34 @@ export const CACHE_STATE_EVENT = "cache:state";
 export const MODEL_OFFERS_EVENT = "cache:model-offers";
 export const MODEL_CHOICE_EVENT = "cache:model-choice";
 
+const DEPTH_CRITERIA = {
+  low: "A lookup, a trivial answer, or a mechanical change",
+  medium: "A routine single-file change or a clear question",
+  high: "A multi-step change, debugging with clear symptoms, or design inside a known pattern",
+  xhigh: "Subtle design, a cross-cutting refactor, hard debugging, or correctness-critical work",
+};
+
 export const QUESTIONS: Record<string, ClassifierQuestion> = {
   depth: {
     type: "choice",
-    instructions:
-      "How much careful reasoning does the work asked for in `request` need from a coding agent, given `previous_requests`, `last_outcome` and `signals`?",
-    criteria: {
-      low: "A lookup, a trivial answer, or a mechanical change",
-      medium: "A routine single-file change or a clear question",
-      high: "A multi-step change, debugging with clear symptoms, or design inside a known pattern",
-      xhigh: "Subtle design, a cross-cutting refactor, hard debugging, or correctness-critical work",
-    },
+    instructions: `How much careful reasoning does the work asked for in \`request\` need from a coding agent, given \`previous_requests\`, \`agent_reply_untrusted\` and \`signals\`? ${UNTRUSTED_NOTE}`,
+    criteria: DEPTH_CRITERIA,
   },
   ack: {
     type: "bool",
     instructions:
       'Is `request` a short go-ahead or acknowledgement (like "yes", "go ahead", "continue", "do it") that relies on the plan already discussed, rather than a new task?',
     criteria: { true: "A go-ahead for work already under way", false: "A new or changed request" },
+  },
+};
+
+/** The questions as they were before `agent_reply_untrusted` (state with `legacy`): for the eval comparison. */
+export const LEGACY_QUESTIONS: Record<string, ClassifierQuestion> = {
+  ...QUESTIONS,
+  depth: {
+    type: "choice",
+    instructions: "How much careful reasoning does the work asked for in `request` need from a coding agent, given `previous_requests`, `last_outcome` and `signals`?",
+    criteria: DEPTH_CRITERIA,
   },
 };
 
@@ -205,8 +224,17 @@ interface Entry {
   message?: { role?: string; content?: unknown; toolName?: string; isError?: boolean; timestamp?: unknown; [key: string]: unknown };
 }
 
-/** The Jev state for a new prompt: the request, the two before it, the last answer, and what the last run did. */
-export function effortState(prompt: string, entries: readonly unknown[]): Record<string, unknown> {
+export interface EffortStateOptions {
+  /** The earlier shape: the agent's reply as `last_outcome`, clipped at 1,500 characters (for the eval comparison). */
+  legacy?: boolean;
+}
+
+/**
+ * The Jev state for a new prompt: the request, the two before it, the agent's last reply
+ * (`agent_reply_untrusted`, clipped at 600 characters: Jev is told to treat it as a description
+ * only), and what the last run did.
+ */
+export function effortState(prompt: string, entries: readonly unknown[], options: EffortStateOptions = {}): Record<string, unknown> {
   const list = entries as Entry[];
   const users: number[] = [];
   list.forEach((entry, i) => {
@@ -239,7 +267,9 @@ export function effortState(prompt: string, entries: readonly unknown[]): Record
   return {
     request: clip(prompt, 8_000),
     previous_requests: previous.length ? previous : ["(none: this is the first request)"],
-    last_outcome: lastOutcome ? clip(lastOutcome, 1_500) : "(none)",
+    ...(options.legacy
+      ? { last_outcome: lastOutcome ? clip(lastOutcome, 1_500) : "(none)" }
+      : { agent_reply_untrusted: lastOutcome ? clip(lastOutcome, 600) : "(none)" }),
     signals,
   };
 }
@@ -336,6 +366,8 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
   let ownLevel: string | undefined;
   let firedWhileApplying = false;
   let lastReason = "";
+  // What this session's branch did, for /auto-effort status: tallied from the state entries.
+  let counts: Counts = emptyCounts();
   // Tool turns since the last assessment in this run.
   let turnsSince = 0;
   // Request-level effort and configuration_update positions for this conversation.
@@ -597,6 +629,7 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     manualLevel = typeof data?.ceiling === "string" ? data.ceiling : pi.getThinkingLevel();
     lastLevel = typeof data?.level === "string" ? data.level : undefined;
     lastReason = typeof data?.reason === "string" ? data.reason : "";
+    counts = countsFromBranch(branch, STATE_ENTRY);
     lastNeed = isRecord(data?.need) ? numbers(data.need) : undefined;
     lastTheta = typeof data?.theta === "number" ? data.theta : undefined;
     const current = currentRef(ctx);
@@ -636,6 +669,9 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     if (!isRecord(data) || typeof data.text !== "string" || !data.text.trim() || !Array.isArray(data.offers)) return;
     const ctx = latestCtx;
     if (!ctx || !active() || modelsMode() !== "auto" || modelPinned) return;
+    // A go-ahead is settled without Jev (and keeps the model), so there is nothing to offer.
+    const filter = prefilterConfig(config.prefilter);
+    if (filter.enabled && isGoAhead(data.text, filter)) return;
     try {
       const plan = planFor(ctx);
       if (plan) data.offers.push(modelOffers(ctx, data.text, plan).catch(() => undefined));
@@ -728,11 +764,11 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
 
   /**
    * Applies a judgment: the pressure gives theta, the policy picks a level (and, before a message,
-   * maybe a model), and the decision is recorded.
+   * maybe a model), and the decision is recorded. `GO_AHEAD` (no Jev call) keeps the level and the model.
    */
   const settle = async (
     ctx: ExtensionContext,
-    outcome: JevOutcome,
+    outcome: JevOutcome | typeof GO_AHEAD,
     j: Judgment | undefined,
     extra: Record<string, unknown>,
     model?: { check: ModelCheck; probabilities: Record<string, number> | undefined } | { chosen: ModelChoice },
@@ -750,18 +786,19 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
 
     const p = pressureValue(pressure.tier);
     const bounds = boundsMode();
-    const decision = decide(current, manualLevel, j, policy(), p, bounds);
+    const decision: Omit<Decision, "reason"> & { reason: Decision["reason"] | typeof GO_AHEAD } =
+      outcome === GO_AHEAD ? { level: current, reason: GO_AHEAD, theta: threshold(policy(), p) } : decide(current, manualLevel, j, policy(), p, bounds);
     // A go-ahead's own need says nothing about the work, so the trend keeps the last one.
     if (j && decision.reason !== "ack") lastNeed = j.need;
     lastTheta = decision.theta;
-    lastReason = outcome.ok ? decision.reason : `assessment unavailable: ${outcome.reason}`;
+    lastReason = outcome === GO_AHEAD || outcome.ok ? decision.reason : `assessment unavailable: ${outcome.reason}`;
 
     // The effort bounds do not apply to models: an automatic pick stays at or below your model.
     const modelChoice = !model ? undefined : "chosen" in model ? model.chosen : await chooseModel(ctx, model.check, model.probabilities, j, decision.theta, "ceiling");
     // A model switch can change the level (Pi's per-model default); the decision wins.
     if (decision.level !== pi.getThinkingLevel()) setLevel(decision.level);
     lastLevel = pi.getThinkingLevel();
-    pi.appendEntry(STATE_ENTRY, {
+    const data = {
       ...extra,
       ceiling: manualLevel,
       bounds,
@@ -777,8 +814,10 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
       ...(manualModel ? { manualModel: modelKey(manualModel) } : {}),
       ...(autoModel ? { autoModel } : {}),
       ...(modelChoice ? { model: modelChoice } : {}),
-      ...(outcome.ok ? { latencyMs: outcome.latencyMs, inputTokens: outcome.usage?.input } : {}),
-    });
+      ...(outcome !== GO_AHEAD && outcome.ok ? { latencyMs: outcome.latencyMs, inputTokens: outcome.usage?.input } : {}),
+    };
+    tally(counts, data);
+    pi.appendEntry(STATE_ENTRY, data);
     status(ctx);
   };
 
@@ -803,6 +842,12 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     const picked = chosen ? await applyChoice(ctx, chosen.model) : undefined;
     if (picked) status(ctx);
     if (mine !== generation || signal?.aborted || !active()) return;
+    // "yes", "go ahead", "thanks": nothing to assess; the level and the model stay.
+    const filter = prefilterConfig(config.prefilter);
+    if (filter.enabled && isGoAhead(text, filter)) {
+      await settle(ctx, GO_AHEAD, undefined, { phase: "prompt" }, picked ? { chosen: picked } : undefined);
+      return;
+    }
     const check = chosen ? undefined : modelCheck(ctx);
     const questions = check ? { ...QUESTIONS, tier: tierQuestion(check.plan.tiers) } : QUESTIONS;
     // The dialog's assessment of this prompt is reused when it covered the same tiers.
@@ -893,6 +938,7 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
           `auto-effort ${active() ? "on" : pinned ? "off (--thinking was given)" : "off"}: ${pi.getThinkingLevel()} now.`,
           `Bounds ${bounds} (${sessionBounds ? "this session" : "settings"}): ${boundsText(bounds, manualLevel, policy())}.`,
           jevLine(lastNeed, lastTheta ?? threshold(policy(), pressureValue(pressure.tier)), pressure, lastLevel, lastReason),
+          describeCounts(counts),
           modelsLine(modelsMode(), sessionModels !== undefined, planFor(ctx), manualModel, autoModel),
           ...limitLines(ctx),
         ].join("\n"),
