@@ -143,24 +143,55 @@ describe("transcript", () => {
     expect(render(h.tool.renderCall({}, plainTheme, {}))).toBe("ask_user_question");
   });
 
-  test("the result: one line per answer, Unanswered, Declined", () => {
+  const details = {
+    questions: [],
+    cancelled: false,
+    answers: [
+      { index: 0, header: "Scope", question: "Which?", kind: "multi", answer: "Injected messages in main, Other transcript views", selected: ["Injected messages in main", "Other transcript views"] },
+      { index: 1, header: "Label", question: "Label?", kind: "custom", answer: "plain text please", notes: "like\ntyped prompts" },
+      { index: 2, header: "Target", question: "Where?", kind: "unanswered", answer: null },
+      { index: 3, header: "Later", question: "Later?", kind: "skipped", answer: null },
+    ],
+    note: "ship it",
+  };
+
+  test("the result: the answers in one block, unanswered questions below it, skipped ones hidden", () => {
     const h = setup();
-    const details = {
-      questions: [],
-      cancelled: false,
-      answers: [
-        { index: 0, header: "Library", question: "Which?", kind: "option", answer: "dayjs", notes: "small\nbundle" },
-        { index: 1, header: "Name", question: "Name?", kind: "custom", answer: "Temporal" },
-        { index: 2, header: "Target", question: "Where?", kind: "unanswered", answer: null },
-      ],
-    };
     expect(render(h.tool.renderResult({ content: [], details }, {}, plainTheme, {}))).toBe(
-      "✓ Library: dayjs · note: small bundle\n✓ Name: (wrote) Temporal\n- Target: Unanswered",
+      [
+        " Scope: Injected messages in main, Other transcript views",
+        " Label: (wrote) plain text please · note: like typed prompts",
+        " note: ship it",
+        "- Target: Unanswered",
+      ].join("\n"),
     );
+  });
+
+  test("no block when nothing is answered; Declined and errors stay a status line", () => {
+    const h = setup();
+    const none = { ...details, note: undefined, answers: [details.answers[2], details.answers[3]] };
+    expect(render(h.tool.renderResult({ content: [], details: none }, {}, plainTheme, {}))).toBe("- Target: Unanswered");
     expect(render(h.tool.renderResult({ content: [], details: { ...details, cancelled: true } }, {}, plainTheme, {}))).toBe("Declined");
     expect(
       render(h.tool.renderResult({ content: [{ type: "text", text: "Error: x" }], details: { ...details, error: "no_ui" } }, {}, plainTheme, {})),
     ).toBe("Error: x");
+  });
+
+  test("the answers wrap inside the block", () => {
+    const h = setup();
+    const long = { ...details, note: undefined, answers: [{ index: 0, header: "Why", question: "Why?", kind: "custom", answer: "word ".repeat(30).trim() }] };
+    const rows = h.tool.renderResult({ content: [], details: long }, {}, plainTheme, {}).render(40);
+    expect(rows.length).toBeGreaterThan(2);
+    expect(rows.every((row: string) => stripTerminalSequences(row).length === 40)).toBe(true);
+  });
+
+  test("the block carries the user message background; the unanswered line does not", () => {
+    const h = setup();
+    const markedTheme = { ...plainTheme, bg: (color: string, text: string) => `<${color}>${text}</${color}>` };
+    const rows: string[] = h.tool.renderResult({ content: [], details }, {}, markedTheme, {}).render(80);
+    expect(rows).toHaveLength(4);
+    for (const row of rows.slice(0, 3)) expect(row).toMatch(/^<userMessageBg> .*<\/userMessageBg>$/u);
+    expect(rows[3]).not.toContain("userMessageBg");
   });
 });
 

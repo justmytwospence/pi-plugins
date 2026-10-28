@@ -10,6 +10,7 @@ import piStartupHeader, { installEarlyStartupHeader } from "./feature/shell/star
 import agentSummary from "./feature/agent-summary/index.ts";
 import { installCompactThinking } from "./feature/compact-thinking.ts";
 import restoreInterruptedPrompt from "./feature/restore-interrupted-prompt.ts";
+import { keepUserWordToolsUngrouped } from "./user-words.ts";
 
 // renderer
 import claudeCodeStyle, { getCompactThinkingConfig } from "./renderer/index.ts";
@@ -28,6 +29,9 @@ export default function (pi: ExtensionAPI): void {
 	installBashHighlight();
 	installEarlyStartupHeader();
 	piStartupHeader(pi);
+
+	// dialog tools stay out of tool groups (registered before the render stack's own session_start)
+	keepUserWordToolsUngrouped(pi);
 
 	// render stack: the thinking controller is handed to the style layer as a query
 	claudeCodeStyle(pi, undefined, installCompactThinking(pi, getCompactThinkingConfig()));

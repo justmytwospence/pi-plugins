@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 
 // The config module reads its file at import time; isolate it from the real home directory.
 let agentDir: string;
@@ -244,6 +244,102 @@ describe("tool groups", () => {
     } finally {
       hooks.shutdown();
     }
+  });
+});
+
+describe("dialog tools stay out of tool groups", () => {
+  /** pi-sticky-last-prompt's side of pi-plugins.user-words.v1: a session start, answered by providers. */
+  async function startSession(providers: string[]) {
+    const { keepUserWordToolsUngrouped } = await import("../src/user-words.ts");
+    const handlers: Array<() => void> = [];
+    const listeners: Array<(data: any) => void> = [];
+    const pi = {
+      on: (event: string, handler: () => void) => {
+        if (event === "session_start") handlers.push(handler);
+      },
+      events: { on: (_channel: string, listener: (data: any) => void) => listeners.push(listener), emit: (_channel: string, data: unknown) => listeners.forEach((listener) => listener(data)) },
+    };
+    keepUserWordToolsUngrouped(pi as any);
+    const start = (names: string[]) => {
+      listeners.length = 0;
+      // Providers listen on the channel and register synchronously, as offerUserWords does.
+      listeners.push((request) => names.forEach((name) => request.register?.(name, () => undefined)));
+      handlers.forEach((handler) => handler());
+    };
+    start(providers);
+    return { start };
+  }
+
+  async function transcript(names: string[]) {
+    const { ToolExecutionComponent } = await import("@earendil-works/pi-coding-agent");
+    const { Container } = await import("@earendil-works/pi-tui");
+    const { installToolGrouping } = await import("../src/renderer/tool/grouping.ts");
+    const hooks = installToolGrouping(() => true);
+    hooks.setTheme(theme);
+    const root = new Container();
+    for (const [index, toolName] of names.entries()) {
+      const value = Object.create(ToolExecutionComponent.prototype);
+      Object.assign(value, {
+        toolName,
+        toolCallId: `${toolName}-${index}`,
+        args: { command: "echo" },
+        result: { content: [{ type: "text", text: "ok" }], isError: false },
+        isPartial: false,
+        executionStarted: true,
+        expanded: false,
+        imageComponents: [],
+        render: () => [`✓ ${toolName}`],
+        invalidate: () => {},
+        setExpanded: () => {},
+      });
+      root.addChild(value);
+    }
+    // What each row of the transcript is: a tool's name, or the tools of a group.
+    const shape = (root.children as any[]).map((child) =>
+      child.constructor.name === "ToolGroupComponent" ? (child.children as any[]).map((tool) => tool.toolName) : child.toolName,
+    );
+    return { hooks, shape };
+  }
+
+  afterEach(async () => {
+    (await import("../src/renderer/tool/grouping.ts")).clearUserWordTools();
+  });
+
+  test("a registered tool keeps its own row between groups; other tools still group", async () => {
+    await startSession(["ask_user_question"]);
+    const { hooks, shape } = await transcript(["bash", "read", "ask_user_question", "bash", "read", "grep"]);
+    try {
+      expect(shape).toEqual([["bash", "read"], "ask_user_question", ["bash", "read", "grep"]]);
+    } finally {
+      hooks.shutdown();
+    }
+  });
+
+  test("without providers every tool groups, and the wildcard registers no name", async () => {
+    await startSession([]);
+    const none = await transcript(["bash", "read", "ask_user_question"]);
+    try {
+      expect(none.shape).toEqual([["bash", "read", "ask_user_question"]]);
+    } finally {
+      none.hooks.shutdown();
+    }
+    const { userWordTools } = await import("../src/renderer/tool/grouping.ts");
+    await startSession(["*"]);
+    expect([...userWordTools]).toEqual([]);
+    const wild = await transcript(["bash", "read", "ask_user_question"]);
+    try {
+      expect(wild.shape).toEqual([["bash", "read", "ask_user_question"]]);
+    } finally {
+      wild.hooks.shutdown();
+    }
+  });
+
+  test("each session start asks again: the names are rebuilt, not accumulated", async () => {
+    const { userWordTools } = await import("../src/renderer/tool/grouping.ts");
+    const { start } = await startSession(["ask_user_question", "exit_plan_mode", "*"]);
+    expect([...userWordTools].sort()).toEqual(["ask_user_question", "exit_plan_mode"]);
+    start(["exit_plan_mode"]);
+    expect([...userWordTools]).toEqual(["exit_plan_mode"]);
   });
 });
 

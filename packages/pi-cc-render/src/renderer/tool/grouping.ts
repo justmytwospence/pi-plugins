@@ -37,6 +37,21 @@ import {
 
 const NON_GROUPABLE = new Set(["edit", "write", "apply_patch"]);
 
+/**
+ * Tools whose rows carry words the user typed into a dialog (an answer, plan feedback). They stay
+ * out of groups so those words show in the transcript; filled from pi-plugins.user-words.v1
+ * (see ../../user-words.ts).
+ */
+export const userWordTools = new Set<string>();
+
+export function addUserWordTool(name: string): void {
+	userWordTools.add(name);
+}
+
+export function clearUserWordTools(): void {
+	userWordTools.clear();
+}
+
 type Patch = {
 	owner: object;
 	active: boolean;
@@ -71,7 +86,9 @@ function toolTitle(tool: any): string {
 }
 
 function isGroupable(value: unknown): boolean {
-	return value instanceof ToolExecutionComponent && !NON_GROUPABLE.has(toolName(value));
+	if (!(value instanceof ToolExecutionComponent)) return false;
+	const name = toolName(value);
+	return !NON_GROUPABLE.has(name) && !userWordTools.has(name);
 }
 
 function isIgnorable(value: unknown): boolean {

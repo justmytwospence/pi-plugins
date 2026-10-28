@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { type ExtensionContext, initTheme } from "@earendil-works/pi-coding-agent";
+import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import { test } from "vitest";
 import planMode from "../src/index.js";
 import {
@@ -173,6 +174,48 @@ test("keep planning sends your feedback back; Esc stops the turn", async () => {
   assert.equal(exitWords?.({ toolName: EXIT_TOOL, args: {}, result: escaped }), undefined);
   assert.equal(escaped.terminate, true);
   assert.equal(inline().active, true);
+});
+
+test("the transcript shows kept-planning feedback in a user message block", async () => {
+  initTheme("dark");
+  const { tool } = await setup();
+  const exit = tool(EXIT_TOOL) as unknown as {
+    renderResult(
+      result: unknown,
+      options: unknown,
+      theme: unknown,
+      context: unknown,
+    ): { render(width: number): string[] };
+  };
+  // Unstyled text, with each background wrapped in a marker naming it.
+  const marked = {
+    fg: (_color: string, line: string) => line,
+    bold: (line: string) => line,
+    bg: (color: string, line: string) => `<${color}>${line}</${color}>`,
+  };
+  const view = (details: Record<string, unknown>) =>
+    exit
+      .renderResult({ content: [], details }, { expanded: false, isPartial: false }, marked, { toolCallId: "t1" })
+      .render(80);
+  const base = { plan: "# Plan\n\nDo it.", planFile: "/p/plan.md" };
+  const rows = view({ ...base, outcome: "kept", feedback: "use redis\nnot memcached" });
+  const text = rows.map((row) =>
+    stripTerminalSequences(row)
+      .replace(/<\/?userMessageBg>/gu, "")
+      .trimEnd(),
+  );
+  const status = text.findIndex((row) => row.startsWith("Kept planning"));
+  assert.ok(status >= 0, text.join("\n"));
+  assert.deepEqual(text.slice(status + 1), ["", " use redis", " not memcached"]);
+  for (const row of rows.slice(status + 2)) assert.match(row, /^<userMessageBg> .*<\/userMessageBg>$/u);
+  assert.doesNotMatch(rows[status] ?? "", /userMessageBg/u);
+  // No feedback, or another outcome: nothing after the status line.
+  for (const details of [
+    { ...base, outcome: "kept" },
+    { ...base, outcome: "approved", feedback: "ignored" },
+  ]) {
+    assert.doesNotMatch(view(details).join("\n"), /userMessageBg/u);
+  }
 });
 
 test("keep-planning feedback is typed in the suite's editor when one is loaded", async () => {

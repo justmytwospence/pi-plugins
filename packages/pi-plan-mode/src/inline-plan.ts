@@ -21,7 +21,7 @@ import {
   getMarkdownTheme,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
-import { Container } from "@earendil-works/pi-tui";
+import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { editInTerminal, externalEditorCommand } from "./external-editor.js";
 import { askFeedback } from "./feedback-input.js";
 import { holdBlocked } from "./herdr-blocked.js";
@@ -597,7 +597,13 @@ function renderExit(
         : outcome === "kept"
           ? { tone: "warning", text: "Kept planning", context }
           : { tone: "pending", text: "Waiting for approval", context };
-  return reviewBody(theme, plan, status, options, (text) => new PlanMarkdown(text, getMarkdownTheme(), theme));
+  const body = reviewBody(theme, plan, status, options, (text) => new PlanMarkdown(text, getMarkdownTheme(), theme));
+  // What the user said should change, drawn like a prompt of their own (pi's user message background).
+  if (outcome === "kept" && details?.feedback) {
+    body.addChild(new Spacer(1));
+    body.addChild(new Text(details.feedback, 1, 0, (line) => theme.bg("userMessageBg", line)));
+  }
+  return body;
 }
 
 function text(value: string) {

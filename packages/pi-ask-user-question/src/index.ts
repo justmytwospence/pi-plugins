@@ -4,7 +4,7 @@
 // dialogs (rpc.ts); without a UI the tool is withdrawn (reconcile.ts). While the user is being
 // asked, the tool holds `herdr:blocked`, so herdr shows the pane as blocked.
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { Container, Text } from "@earendil-works/pi-tui";
 import { QuestionDialog } from "./dialog.ts";
 import { embeddedEditorFactory } from "./editor.ts";
 import { whileBlocked } from "./herdr.ts";
@@ -77,7 +77,7 @@ export default function askUserQuestion(pi: ExtensionAPI) {
         const first = result.content[0];
         return new Text(first?.type === "text" ? first.text : "", 0, 0);
       }
-      return new Text(resultLines(details, result.content, theme).join("\n"), 0, 0);
+      return resultView(details, result.content, theme);
     },
   });
 }
@@ -103,22 +103,50 @@ export function blockedLabel(questions: readonly Question[]): string {
   return label.length > LABEL_WIDTH ? `${label.slice(0, LABEL_WIDTH - 1)}…` : label;
 }
 
-export function resultLines(details: Details, content: readonly { type: string; text?: string }[], theme: Theme): string[] {
+/**
+ * The transcript row under the tool header: the answers in one prompt-style block (the
+ * background pi gives the user's own messages), then any unanswered questions in a warning line.
+ * A decline or an error is a single status line.
+ */
+export function resultView(details: Details, content: readonly { type: string; text?: string }[], theme: Theme): Container {
+  const view = new Container();
   if (details.error) {
     const first = content[0];
-    return [theme.fg("error", first?.type === "text" ? (first.text ?? details.error) : details.error)];
+    view.addChild(new Text(theme.fg("error", first?.type === "text" ? (first.text ?? details.error) : details.error), 0, 0));
+    return view;
   }
-  if (details.cancelled) return [theme.fg("warning", "Declined")];
-  const lines = details.answers.filter((a) => a.kind !== "skipped").map((a) => answerLine(a, theme));
+  if (details.cancelled) {
+    view.addChild(new Text(theme.fg("warning", "Declined"), 0, 0));
+    return view;
+  }
+  const answered = answeredLines(details, theme);
+  if (answered.length) view.addChild(new Text(answered.join("\n"), 1, 0, (line) => theme.bg("userMessageBg", line)));
+  const unanswered = unansweredLines(details, theme);
+  if (unanswered.length) view.addChild(new Text(unanswered.join("\n"), 0, 0));
+  return view;
+}
+
+/** One `Header: answer` line per answered question, in question order, then the overall note. */
+export function answeredLines(details: Details, theme: Theme): string[] {
+  const lines = details.answers.filter((a) => a.kind !== "skipped" && a.kind !== "unanswered").map((a) => answerLine(a, theme));
   if (details.note) lines.push(theme.fg("dim", `note: ${details.note.replace(/\s+/gu, " ")}`));
   return lines;
 }
 
+/** Questions the user left unanswered (skipped follow-ups stay hidden). */
+export function unansweredLines(details: Details, theme: Theme): string[] {
+  return details.answers
+    .filter((a) => a.kind === "unanswered")
+    .map((a) => `${theme.fg("warning", "- ")}${theme.fg("accent", a.header || a.question)}: ${theme.fg("warning", "Unanswered")}${noteSuffix(a, theme)}`);
+}
+
+function noteSuffix(a: Answer, theme: Theme): string {
+  return a.notes ? theme.fg("dim", ` · note: ${a.notes.replace(/\s+/gu, " ")}`) : "";
+}
+
 function answerLine(a: Answer, theme: Theme): string {
   const header = theme.fg("accent", a.header || a.question);
-  const note = a.notes ? theme.fg("dim", ` · note: ${a.notes.replace(/\s+/gu, " ")}`) : "";
-  if (a.kind === "unanswered") return `${theme.fg("warning", "- ")}${header}: ${theme.fg("warning", "Unanswered")}${note}`;
   const value = (a.answer ?? "").replace(/\s*\n\s*/gu, " ");
   const wrote = a.kind === "custom" ? theme.fg("muted", "(wrote) ") : "";
-  return `${theme.fg("success", "✓ ")}${header}: ${wrote}${value}${note}`;
+  return `${header}: ${wrote}${value}${noteSuffix(a, theme)}`;
 }
