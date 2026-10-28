@@ -174,11 +174,25 @@ const READ_ONLY_PM: Record<string, Set<string>> = {
  * quoted text intact. Each part is tokenized with quotes removed.
  */
 export function splitCommand(command: string): string[][] {
-  const parts: string[][] = [];
+  return splitParts(command).map((p) => p.tokens);
+}
+
+/** A simple command from `splitParts`: its tokens, and where its text starts in the command. */
+interface Part {
+  tokens: string[];
+  start: number;
+}
+
+/** `splitCommand`, keeping where each part starts. */
+function splitParts(command: string): Part[] {
+  const parts: Part[] = [];
   let tokens: string[] = [];
   let token = "";
   let inToken = false;
   let quote: '"' | "'" | undefined;
+  let start = 0;
+  /** Where the last unquoted, unescaped `>` is: only that one makes `>&` and `>|` redirects. */
+  let redirectAt = -1;
   const endToken = () => {
     if (inToken) tokens.push(token);
     token = "";
@@ -186,7 +200,7 @@ export function splitCommand(command: string): string[][] {
   };
   const endPart = () => {
     endToken();
-    if (tokens.length) parts.push(tokens);
+    if (tokens.length) parts.push({ tokens, start });
     tokens = [];
   };
   for (let i = 0; i < command.length; i++) {
@@ -205,17 +219,19 @@ export function splitCommand(command: string): string[][] {
     } else if (c === "\\" && i + 1 < command.length) {
       if (command[++i] !== "\n") { token += command[i]; inToken = true; }
     } else if (c === ";" || c === "\n" || c === "|" || c === "&") {
-      // `2>&1` and `&>` stay inside the token stream as redirects, not separators.
-      if (c === "&" && (command[i - 1] === ">" || command[i + 1] === ">")) {
+      // `2>&1`, `&>` and `>|` stay inside the token stream as redirects, not separators.
+      if ((c === "&" && command[i + 1] === ">") || ((c === "&" || c === "|") && redirectAt === i - 1)) {
         token += c;
         inToken = true;
         continue;
       }
       endPart();
       if ((c === "|" || c === "&") && command[i + 1] === c) i++;
+      start = i + 1;
     } else if (c === " " || c === "\t") {
       endToken();
     } else {
+      if (c === ">") redirectAt = i;
       token += c;
       inToken = true;
     }
@@ -287,7 +303,12 @@ function program(tokens: string[]): { name: string; args: string[]; unsafe: bool
  * `/dev/null` or fd duplication (`2>&1`, `>&-`).
  */
 export function writeRedirects(command: string): string[] {
-  const targets: string[] = [];
+  return redirectsAt(command).map((r) => r.target);
+}
+
+/** `writeRedirects`, with where each redirect starts in the command. */
+function redirectsAt(command: string): { target: string; at: number }[] {
+  const targets: { target: string; at: number }[] = [];
   const re = /(?<![<>])(?:[0-9]*|&)(>>?|<>)\|?(&?)\s*([^\s;|&<>]*)/gu;
   // Match on a copy whose quoted and escaped characters are masked, so `sed 's/<[^>]*>/ /g'` has
   // no redirect; the target is then read back from the original and unquoted.
@@ -298,12 +319,13 @@ export function writeRedirects(command: string): string[] {
     const target = command.slice(start, (match.index ?? 0) + match[0].length).replace(/\\(.)|["']/gu, "$1");
     // `2>&1`, `>&-`: duplicating or closing a descriptor, not a file.
     if (dup && (/^\d+$/u.test(target) || target === "-")) continue;
+    const at = match.index ?? 0;
     // A redirect with no target is a syntax error, or something this parser does not follow.
     if (target === "") {
-      targets.push(">");
+      targets.push({ target: ">", at });
       continue;
     }
-    if (target !== "/dev/null") targets.push(target);
+    if (target !== "/dev/null") targets.push({ target, at });
   }
   return targets;
 }
@@ -787,16 +809,36 @@ const GIT_SECRET_SAFE = new Set(["status", "check-ignore", "ls-files", "rm", "re
 
 /** Calls `fn` for each simple command with the directory it runs in, following `cd` along the way. */
 function forEachPart(command: string, cwd: string, fn: (tokens: string[], dir: string) => void): void {
+  for (const part of locatedParts(command, cwd)) if (!part.cd) fn(part.tokens, part.dir);
+}
+
+/** Words that open and close a compound command. Alone in a part, a closer runs nothing. */
+const COMPOUND_OPENERS = new Set(["{", "if", "while", "until", "for", "select", "case"]);
+const COMPOUND_CLOSERS = new Set(["}", "done", "fi", "esac"]);
+
+/**
+ * Each simple command with the directory it runs in (for a `cd`, the one it leaves), following
+ * `cd` along the way, also after a keyword (`then cd x`, `{ cd x`).
+ */
+function locatedParts(command: string, cwd: string): (Part & { dir: string; redirectDir: string; cd: boolean })[] {
   let dir = cwd;
-  for (const tokens of splitCommand(command)) {
-    const p = program(tokens);
-    if (p?.name === "cd") {
-      const target = p.args.find((a) => !a.startsWith("-"));
-      dir = target ? path.resolve(dir, expandHome(target)) : homedir();
-      continue;
+  /** Where each open compound command (`{ ...; }`, `if`, a loop, `case`) started. */
+  const opened: string[] = [];
+  return splitParts(command).map((part) => {
+    const here = dir;
+    // A redirect after `}`, `done`, `fi` or `esac` applies to the compound command, from where it started.
+    let redirectDir = here;
+    for (const t of part.tokens) {
+      if (COMPOUND_CLOSERS.has(t)) redirectDir = opened.pop() ?? here;
+      else if (COMPOUND_OPENERS.has(t)) opened.push(here);
+      if (!LEADING_KEYWORDS.has(t)) break;
     }
-    fn(tokens, dir);
-  }
+    const p = program(withoutKeywords(part.tokens));
+    if (p?.name !== "cd") return { ...part, dir: here, redirectDir, cd: false };
+    const target = p.args.find((a) => !a.startsWith("-"));
+    dir = target ? path.resolve(dir, expandHome(target)) : homedir();
+    return { ...part, dir: here, redirectDir, cd: true };
+  });
 }
 
 /**
@@ -932,6 +974,76 @@ function withoutSubstitutions(command: string): string {
     out += c;
   }
   return out;
+}
+
+/** The word a substitution leaves in place of itself for `bashPathAccess`: not path-like on its own. */
+const SUBSTITUTED = "$(...)";
+
+/**
+ * `command` with each command substitution (`$(...)`, backticks) outside single quotes, and each
+ * process substitution (`<(...)`, `>(...)`) outside quotes, replaced by `SUBSTITUTED`, and their
+ * bodies with where each placeholder starts in the new text. Arithmetic (`$((...))`) becomes `0`.
+ */
+function extractSubstitutions(command: string): { text: string; bodies: { body: string; at: number }[] } {
+  const bodies: { body: string; at: number }[] = [];
+  let text = "";
+  let quote: "'" | '"' | undefined;
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i] as string;
+    if (quote === "'") {
+      if (c === "'") quote = undefined;
+      text += c;
+      continue;
+    }
+    if (c === "\\") {
+      text += command.slice(i, i + 2);
+      i++;
+      continue;
+    }
+    if (c === quote) quote = undefined;
+    else if (!quote && (c === "'" || c === '"')) quote = c;
+    else if (command[i + 1] === "(" && (c === "$" || (!quote && (c === "<" || c === ">")))) {
+      const end = closingParen(command, i + 1);
+      if (c === "$" && command[i + 2] === "(") text += "0";
+      else {
+        bodies.push({ body: command.slice(i + 2, end), at: text.length });
+        text += SUBSTITUTED;
+      }
+      i = end;
+      continue;
+    } else if (c === "`") {
+      let body = "";
+      let j = i + 1;
+      for (; j < command.length && command[j] !== "`"; j++) {
+        if (command[j] === "\\" && /[`$\\]/u.test(command[j + 1] ?? "")) j++;
+        body += command[j];
+      }
+      bodies.push({ body, at: text.length });
+      text += SUBSTITUTED;
+      i = j;
+      continue;
+    }
+    text += c;
+  }
+  return { text, bodies };
+}
+
+/** The index of the `)` closing the `(` at `open`, past quoted text and nested parentheses, or the end. */
+function closingParen(command: string, open: number): number {
+  let depth = 0;
+  let quote: "'" | '"' | undefined;
+  for (let i = open; i < command.length; i++) {
+    const c = command[i];
+    if (quote === "'") {
+      if (c === "'") quote = undefined;
+    } else if (c === "\\") i++;
+    else if (c === quote) quote = undefined;
+    else if (quote) continue;
+    else if (c === "'" || c === '"') quote = c;
+    else if (c === "(") depth++;
+    else if (c === ")" && --depth === 0) return i;
+  }
+  return command.length;
 }
 
 /** The filesystem commands accept-edits mode runs unasked, as Claude Code's does. */
@@ -1104,39 +1216,68 @@ function sshLocalFiles(args: readonly string[]): { reads: string[]; writes: stri
   return { reads, writes };
 }
 
+/** A simple command past the keywords that may lead it: `do ls` runs `ls`. `time` is left to `program`, with its options. */
+function withoutKeywords(tokens: string[]): string[] {
+  let k = 0;
+  while (k < tokens.length && tokens[k] !== "time" && LEADING_KEYWORDS.has(tokens[k] as string)) k++;
+  return tokens.slice(k);
+}
+
 /**
  * The files and directories a shell command reads and writes, as absolute paths, for the
  * directory policy. A heuristic: words that look like paths (a slash, `~`, `.`), resolved against
- * the directory each part runs in (after `cd`), plus write redirects. A read-only part reads what
- * it names; `rm`, `mv`, `mkdir`, `touch`, `tee`, `ln`, `chmod`... write it; `cp`, `rsync` and
- * `install` write their last operand; `sed -i` writes its files; any other program is assumed to
- * write what it names. A part run in another directory (`cd ../x && make`) reads that directory,
- * or writes it when the part does more than read. Commands in `sh -c` and `eval` are followed. A
- * part matching one of `exempt` (see `isExemptPart`) names no paths; its directory still counts.
+ * the directory each part runs in (after `cd`), plus write redirects (never `/dev/null`), resolved
+ * the same way. A read-only part reads what it names; `rm`, `mv`, `mkdir`, `touch`, `tee`, `ln`,
+ * `chmod`... write it; `cp`, `rsync` and `install` write their last operand; `sed -i` writes its
+ * files; any other program is assumed to write what it names. A part run in another directory
+ * (`cd ../x && make`) reads that directory, or writes it when the part does more than read. Shell
+ * keywords (`for ... in`, `do`, `then`, `done`) are not programs: a loop or `if` counts by the
+ * commands in it. Commands in `$(...)`, backticks, `<(...)`, `>(...)`, `sh -c` and `eval` are
+ * followed, in the directory their command runs in. A part matching one of `exempt` (see
+ * `isExemptPart`) names no paths; its directory still counts. `origin` is the directory the
+ * agent works in, when the command starts elsewhere (pi-bg's `bg_run` with its own `cwd`).
  */
 export function bashPathAccess(
   command: string,
   cwd: string,
   extra: readonly string[] = [],
   exempt: readonly string[] = [],
+  origin: string = cwd,
 ): { reads: string[]; writes: string[] } {
   const reads = new Set<string>();
   const writes = new Set<string>();
   const resolve = (dir: string, file: string) => path.resolve(dir, expandHome(file));
-  const text = withoutHeredocBodies(command);
-  for (const target of writeRedirects(text)) if (target !== ">") writes.add(resolve(cwd, target));
-  forEachPart(text, cwd, (raw, dir) => {
-    // Redirects (collected above) are not arguments: `2>/dev/null`, `> out`.
-    const tokens = raw.filter((t, i) => !REDIRECT.test(t) && !/^[0-9&]*(>>?|<>?|<)\|?&?$/u.test(raw[i - 1] ?? ""));
+  /** `origin` is where the agent's call runs: a part elsewhere reads or writes its directory. */
+  const visit = (command: string, cwd: string, origin: string) => {
+    const { text, bodies } = extractSubstitutions(withoutHeredocBodies(command));
+    const parts = locatedParts(text, cwd);
+    const partAt = (at: number) => parts.findLast((p) => p.start <= at);
+    for (const { target, at } of redirectsAt(text)) if (target !== ">") writes.add(resolve(partAt(at)?.redirectDir ?? cwd, target));
+    for (const part of parts) if (!part.cd) visitPart(part.tokens, part.dir, origin);
+    // A substitution runs where the command around it runs.
+    for (const { body, at } of bodies) visit(body, partAt(at)?.dir ?? cwd, origin);
+  };
+  const visitPart = (raw: string[], dir: string, origin: string) => {
+    // Redirects (collected by `visit`) are not arguments: `2>/dev/null`, `> out`.
+    const words = raw.filter((t, i) => !REDIRECT.test(t) && !/^[0-9&]*(>>?|<>?|<)\|?&?$/u.test(raw[i - 1] ?? ""));
     raw.forEach((t, i) => {
       const input = /^[0-9]*<([^<>]*)$/u.exec(t);
       const target = input ? input[1] || raw[i + 1] : undefined;
       if (target && pathLike(target)) reads.add(resolve(dir, target));
     });
+    const tokens = withoutKeywords(words);
+    const head = tokens[0];
+    // A loop header runs nothing; its list may name paths (`for f in ~/x/*.md`).
+    if (head === "for" || head === "select") {
+      const list = tokens.indexOf("in");
+      for (const w of list < 0 ? [] : tokens.slice(list + 1)) if (pathLike(w)) reads.add(resolve(dir, w));
+      return;
+    }
+    if (tokens.length === 1 && COMPOUND_CLOSERS.has(head as string)) return;
     const p = program(tokens);
     if (!p) return;
     const readOnly = isReadOnlyPart(tokens, extra);
-    if (dir !== path.resolve(cwd)) (readOnly ? reads : writes).add(dir);
+    if (dir !== origin) (readOnly ? reads : writes).add(dir);
     if (isExemptPart(p, exempt)) return;
     if (path.basename(p.name) === "ssh") {
       const own = sshLocalFiles(p.args);
@@ -1166,12 +1307,9 @@ export function bashPathAccess(
       const guessed = pathArgs(p.name === "eval" ? [] : args).filter((a) => plausibleFile(a, resolve(dir, a)));
       for (const f of guessed) writes.add(resolve(dir, f));
     }
-    for (const script of nested) {
-      const inner = bashPathAccess(script, dir, extra, exempt);
-      for (const f of inner.reads) reads.add(f);
-      for (const f of inner.writes) writes.add(f);
-    }
-  });
+    for (const script of nested) visit(script, dir, origin);
+  };
+  visit(command, cwd, path.resolve(origin));
   for (const f of writes) reads.delete(f);
   return { reads: [...reads], writes: [...writes] };
 }

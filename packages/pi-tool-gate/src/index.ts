@@ -362,8 +362,7 @@ export default function toolGate(pi: ExtensionAPI) {
     let access: { reads: string[]; writes: string[] };
     if (SHELL_TOOLS.has(tool)) {
       const dir = tool !== "bash" && typeof input.cwd === "string" && input.cwd ? path.resolve(cwd, expandHome(input.cwd)) : cwd;
-      access = bashPathAccess(String(input.command ?? ""), dir, config.readOnlyCommands, config.directories.exemptCommands);
-      if (dir !== path.resolve(cwd)) (isReadOnlyBash(String(input.command ?? ""), config.readOnlyCommands) ? access.reads : access.writes).push(dir);
+      access = bashPathAccess(String(input.command ?? ""), dir, config.readOnlyCommands, config.directories.exemptCommands, cwd);
     } else if (tool === "edit" || tool === "write") {
       access = { reads: [], writes: [path.resolve(cwd, expandHome(String(input.path ?? "")))] };
     } else if (BUILTIN_READ.has(tool)) {

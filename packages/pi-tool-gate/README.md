@@ -130,8 +130,9 @@ The gate finds paths in `read`, `grep`, `find` and `ls` arguments (reads) and `e
 - Read-only commands read them.
 - `rm`, `mv`, `mkdir`, `touch`, `tee`, `ln`, `chmod` and the like write them, `cp`, `rsync` and `install` write their last operand, and `sed -i` writes its files.
 - Any other program is assumed to write what it names.
-- Output redirects write their target, and input redirects read theirs.
+- Output redirects write their target, resolved where their command runs, and input redirects read theirs. A redirect to `/dev/null` is never a write.
 - A command run in another directory reads that directory, or writes it when the command does more than read.
+- Commands inside `$(...)`, backticks, `<(...)`, `>(...)`, `sh -c` and `eval` count like any other, run where the command around them runs. Shell keywords (`for ... in`, `do`, `then`, `done`) are not commands: a loop or `if` counts by the commands in it.
 
 This is a heuristic over arguments. Paths a program builds at runtime are not seen. Yolo mode ignores the policy, as Claude Code's bypass mode ignores its directories. `/gate` shows the resolved policy, and `"directories": { "enabled": false }` turns it off.
 

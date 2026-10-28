@@ -13,6 +13,13 @@ describe("splitCommand", () => {
   });
   test("keeps fd redirects in the command", () => {
     expect(splitCommand("npm test 2>&1 | tail -20")).toEqual([["npm", "test", "2>&1"], ["tail", "-20"]]);
+    expect(splitCommand("ls >| out; ls &>x")).toEqual([["ls", ">|", "out"], ["ls", "&>x"]]);
+  });
+  test("an escaped or quoted > does not make the next & or | a redirect", () => {
+    expect(splitCommand("echo \\>&rm -rf /")).toEqual([["echo", ">"], ["rm", "-rf", "/"]]);
+    expect(splitCommand("echo '>'|rm x")).toEqual([["echo", ">"], ["rm", "x"]]);
+    expect(isReadOnlyBash("echo \\>&rm -rf /")).toBe(false);
+    expect(alwaysAskBash("echo \\>&rm -rf /", cwd)).toEqual([expect.stringMatching(/^deletes \//u)]);
   });
 });
 

@@ -96,6 +96,60 @@ describe("bashPathAccess", () => {
     expect(access("sh -c 'cat ~/Projects/other/a'").reads).toEqual([`${P}/other/a`]);
     expect(access("cat > notes.md <<'EOF'\nsee ~/Projects/other/x\nEOF")).toEqual({ reads: [], writes: [`${app}/notes.md`] });
   });
+
+  const D = `${H}/.pi/agent/subagents`;
+
+  test("a /dev/null redirect is never a write: a read-only part in a cd'd directory only reads it", () => {
+    for (const redirect of ["2>/dev/null", "&>/dev/null", ">/dev/null 2>&1", "> /dev/null", "2> /dev/null >&2"]) {
+      expect(access(`cd ~/.pi/agent/subagents; wc -l x/messages.jsonl ${redirect}`)).toEqual({ reads: [D, `${D}/x/messages.jsonl`], writes: [] });
+    }
+  });
+
+  test("redirects write relative to the directory their command runs in", () => {
+    expect(access("cd ~/.pi/agent; echo {} > settings.json").writes).toEqual([`${H}/.pi/agent/settings.json`]);
+    expect(access("cd ~/.pi/agent && ls >| out; cat a > /tmp/b").writes).toEqual([`${H}/.pi/agent/out`, "/tmp/b"]);
+    expect(access("echo a > x; cd /tmp/s && echo b >> y").writes).toEqual([`${app}/x`, "/tmp/s/y"]);
+  });
+
+  test("loop and if keywords are not programs; the commands inside them still count", () => {
+    expect(access("cd ~/.pi/agent/subagents; for r in a b; do echo \"== $r\"; ls -la $r; done")).toEqual({ reads: [D], writes: [] });
+    expect(access("if test -d x; then cat x/a; else echo none; fi")).toEqual({ reads: [`${app}/x/a`], writes: [] });
+    expect(access("for f in ~/Projects/other/*.md; do echo $f; done").reads).toEqual([`${P}/other/*.md`]);
+    expect(access("cd ~/.pi/agent/subagents; for r in a b; do rm -rf $r ./$r.bak; done").writes).toEqual([D, `${D}/$r.bak`]);
+    expect(access("while true; do touch ~/.config/x; sleep 1; done").writes).toEqual([`${H}/.config/x`]);
+    expect(access("if true; then cp a ~/.config/b; fi").writes).toEqual([`${H}/.config/b`]);
+    expect(access("cd /tmp/s; for r in a; do make; done").writes).toEqual(["/tmp/s"]);
+    expect(access("for r in a; do echo $r; done > ~/.config/list").writes).toEqual([`${H}/.config/list`]);
+    expect(access("case $x in a) rm ~/.config/a;; esac").writes).toEqual([`${H}/.config/a`]);
+    expect(access("cd ~/.config; do time -p cat ./a; done")).toEqual({ reads: [`${H}/.config`, `${H}/.config/a`], writes: [] });
+    // A cd after a keyword is still followed.
+    expect(access("if cd ~/.config; then rm x; fi").writes).toEqual([`${H}/.config`]);
+    // A compound command's redirect applies where it starts.
+    expect(access("{ cd /tmp/s; make; } > log").writes).toEqual([`${app}/log`, "/tmp/s"]);
+    expect(access("cd /tmp/s; for r in a; do cd $r; ls; done > log; ls > b").writes).toEqual(["/tmp/s/log", "/tmp/s/$r/b"]);
+  });
+
+  test("a command started in another directory (bg_run's cwd) counts it by what each part does", () => {
+    expect(bashPathAccess("for r in a b; do ls -la $r 2>/dev/null; done", D, [], [], app)).toEqual({ reads: [D], writes: [] });
+    expect(bashPathAccess("f=$(ls | head -1); cat \"$f\"", D, [], [], app)).toEqual({ reads: [D], writes: [] });
+    expect(bashPathAccess("make", D, [], [], app)).toEqual({ reads: [], writes: [D] });
+    expect(bashPathAccess("x=$(make)", D, [], [], app)).toEqual({ reads: [], writes: [D] });
+    expect(bashPathAccess("ls > out", D, [], [], app)).toEqual({ reads: [D], writes: [`${D}/out`] });
+  });
+
+  test("command and process substitutions are commands of their own, run where their command runs", () => {
+    expect(access("f=$(ls -t $(find ~/.pi/agent/sessions -name '*.jsonl') | sed -n 3p); python3 - \"$f\"")).toEqual({
+      reads: [`${H}/.pi/agent/sessions`],
+      writes: [],
+    });
+    expect(access("x=$(rm -rf ~/.config/x)").writes).toEqual([`${H}/.config/x`]);
+    expect(access("echo \"$(cp a ~/.config/b)\" `touch ~/.config/c`").writes).toEqual([`${H}/.config/b`, `${H}/.config/c`]);
+    expect(access("cd ~/.config; v=$(touch ./y; make)").writes).toEqual([`${H}/.config`, `${H}/.config/y`]);
+    expect(access("x=$(echo a > ~/.config/z)").writes).toEqual([`${H}/.config/z`]);
+    expect(access("diff <(sort ~/.config/a) <(sort ~/.config/b)")).toEqual({ reads: [`${H}/.config/a`, `${H}/.config/b`], writes: [] });
+    expect(access("echo '$(rm -rf ~/.config/q)' \\$(rm y)").writes).toEqual([]);
+    expect(access('rg -n "export function (a|b)" src/a.ts; echo $((1 + 2))')).toEqual({ reads: [`${app}/src/a.ts`], writes: [] });
+  });
 });
 
 describe("policy", () => {
@@ -199,7 +253,7 @@ describe("the gate", () => {
   };
   const call = (toolName: string, input: Record<string, unknown>, id = "t1") => ({ type: "tool_call", toolCallId: id, toolName, input });
 
-  function setup(directories?: Record<string, unknown>) {
+  function setup(directories?: Record<string, unknown>, cwd = app) {
     if (directories) {
       mkdirSync(path.join(configDir, "xdg", "agents"), { recursive: true });
       writeFileSync(path.join(configDir, "xdg", "agents", "tool-gate.json"), JSON.stringify({ directories }));
@@ -208,7 +262,7 @@ describe("the gate", () => {
     toolGate(h.pi);
     const branch: any[] = [userEntry("Fix it"), assistantEntry("On it.")];
     const jev = fakeJev((q) => (q.workaround ? { workaround: { type: "choice", choice: "skip", probabilities: { skip: 1 }, confidence: 1 } } : safe));
-    const ctx = h.ctx({ cwd: app, modelRegistry: jev.registry, sessionManager: { getBranch: () => branch } });
+    const ctx = h.ctx({ cwd, modelRegistry: jev.registry, sessionManager: { getBranch: () => branch } });
     return { h, ctx, jev };
   }
 
@@ -284,6 +338,43 @@ describe("the gate", () => {
     expect(jev.calls).toHaveLength(0);
     expect(await h.emit("tool_call", call("bash", { command: "gen apply ~/.config/app/a.toml" }, "t2"), ctx)).toBeUndefined();
     expect(jev.calls.filter((c) => c.questions.workaround)).toHaveLength(0);
+  });
+
+  test("read-only calls in derived directories are not held as derived writes", async () => {
+    const hint = "Edit its source in ~/Projects/dotfiles instead.";
+    const { h, ctx, jev } = setup(
+      { derived: ["~/.config", "~/.local/bin", "~/.pi/agent"].map((p) => ({ path: p, hint })), exemptCommands: ["chezmoi apply"] },
+      `${P}/pi-plugins/packages/pi-tool-gate`,
+    );
+    await h.emit("session_start", {}, ctx);
+    await h.emit("before_agent_start", { prompt: "x" }, ctx);
+    const loop = `cd ~/.pi/agent/subagents; for r in nv5qou 342xs3; do echo "== $r"; ls -la $r; wc -l $r/messages.jsonl 2>/dev/null; tail -c 600 $r/output.md 2>/dev/null; done`;
+    const sessions = String.raw`cd ~/Projects/pi-plugins/packages/pi-tool-gate; rg -n "appendEntry\(" src/index.ts | head; rg -n "export function (commandKeys|keyOf|callKey|similar)" -A3 src/bash.ts src/index.ts | head -20; ls ~/.pi/agent/sessions | wc -l; find ~/.pi/agent/sessions -name '*.jsonl' -mtime -14 | wc -l; f=$(ls -t $(find ~/.pi/agent/sessions -name '*.jsonl') | sed -n 3p); python3 - "$f" <<'EOF'
+import json,sys,collections
+c=collections.Counter()
+for l in open(sys.argv[1]):
+    e=json.loads(l); t=e.get("type"); c[(t,e.get("customType"))]+=1
+print(c.most_common(20))
+EOF`;
+    for (const [i, command] of [loop, sessions, `${loop} >/dev/null 2>&1`, `cd ~/.pi/agent && ls &>/dev/null`].entries()) {
+      expect(await h.emit("tool_call", call("bash", { command }, `r${i}`), ctx)).toBeUndefined();
+    }
+    expect(ctx.ui.selects).toHaveLength(0);
+    expect(await h.emit("tool_call", call("bg_run", { command: "for r in a b; do wc -l $r/messages.jsonl 2>/dev/null; done", cwd: "~/.pi/agent/subagents", kind: "job" }, "bg"), ctx)).toBeUndefined();
+    expect(jev.calls.filter((c) => c.questions.workaround)).toHaveLength(0);
+    // Real writes there still are.
+    for (const [i, command] of [
+      "cd ~/.pi/agent/subagents; for r in a; do echo x > $r/out 2>/dev/null; done",
+      "cd ~/.pi/agent; f=$(ls | head -1); cp /tmp/a ./settings.json",
+      "x=$(sed -i s/a/b/ ~/.config/app/a.toml)",
+      "cd ~/.local/bin; echo x > tool",
+    ].entries()) {
+      const held: any = await h.emit("tool_call", call("bash", { command }, `w${i}`), ctx);
+      expect(held?.block).toBe(true);
+      expect(held.reason).toMatch(/writes ~\/\.(pi\/agent|config|local\/bin)\/\S+, a derived path/u);
+    }
+    const make: any = await h.emit("tool_call", call("bg_run", { command: "make", cwd: "~/.pi/agent/subagents", kind: "job" }, "bg2"), ctx);
+    expect(make.reason).toMatch(/writes ~\/\.pi\/agent\/subagents, a derived path/u);
   });
 
   test("off: no directory holds", async () => {
