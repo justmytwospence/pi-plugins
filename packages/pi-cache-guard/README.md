@@ -163,7 +163,7 @@ Pi reads every setting except `warm` and `warn.confirmSeconds`, which are for po
 {
   "enabled": true,
   "warn": { "enabled": true, "minTokens": 100000, "idleMinutes": 180, "sound": "Basso" },
-  "herdr": { "enabled": true },
+  "herdr": { "enabled": true, "expiringMinutes": 10 },
   "jev": { "enabled": true, "provider": "", "model": "", "timeoutMs": 2500 },
   "trim": { "enabled": true, "minChars": 12000, "readMinChars": 50000, "maxBlocks": 150, "stateBudgetChars": 60000,
             "keepThreshold": 0.4, "needsAllThreshold": 0.6, "maxKeptShare": 0.7, "headLines": 5, "tailLines": 20 },
@@ -171,7 +171,8 @@ Pi reads every setting except `warm` and `warn.confirmSeconds`, which are for po
 }
 ```
 
-- `warn.minTokens` is the cold-cache question's threshold for every model; `0` asks on every cold cache. Pi ignores `warn.minCost` (the other ports still use it when they know prices). The Herdr `cache` token uses the same threshold.
+- `warn.minTokens` is the cold-cache question's threshold for every model; `0` asks on every cold cache. Pi ignores `warn.minCost` (the other ports still use it when they know prices). The Herdr `cache` and `cache_expires` tokens use the same threshold.
+- `herdr.expiringMinutes` is how long before expiry an idle session reports `cache_expires`; `0` turns that token off.
 - An empty `jev.provider` picks the first provider that works; an empty `jev.model` uses that provider's default from the table.
 - `trim.keepThreshold` is the probability at which a block is kept. `compact.timeoutMs` is per Jev request.
 - `"enabled": false` turns everything off, Jev included; `"jev": { "enabled": false }` turns off only the Jev parts (and the tips).
@@ -192,6 +193,8 @@ Pi reads every setting except `warm` and `warn.confirmSeconds`, which are for po
 [ui.sidebar.agents]
 rows = [["state_icon", "workspace", { token = "$cache", fg = "#5f87d7", rules = [{ starts_with = "❄?", dim = true }] }]]
 ```
+
+  It also reports `cache_expires` while the session is idle and its warm cache, at least the warning threshold, has at most `herdr.expiringMinutes` (default 10) left: the expiry as 13-digit epoch milliseconds, so it sorts as text, with the time left as its TTL. It is cleared when a run starts, when the cache goes cold and when the session ends; the TTL drops it if pi dies. A cache shorter than the window (Anthropic's 5 minutes) reports it as soon as the session settles. herdr-plugins' agent-cycle sorts on it to bring such a session up its queue; nothing needs it otherwise.
 
 - Other extensions (pi-auto-effort, for one) can read the main session's prompt cache from the `cache:state` event on Pi's event bus: `{ cold: boolean, tokens?: number, model?: "provider/id" }`. `cold` is true when the next request re-writes the cache: expired, probably expired after a long idle, a model switch, or nothing cached yet (a new session, a fresh compaction). `tokens` is the cached context the last request left (absent when nothing is cached); `model` is the model that cache belongs to (the session's model when nothing is cached). It is emitted at session start, whenever that view changes (cold and warm, a new response, a model switch), and again before each prompt and at each agent start, so a listener deciding then has a fresh value. The per-session `/cache-guard off` does not stop it; `"enabled": false` does. Without a listener nothing happens.
 

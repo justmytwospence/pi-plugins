@@ -112,4 +112,20 @@ describe("herdr token", () => {
     expect(herdrCacheValue(undefined, 664_000, 3.19, DEFAULT_SETTINGS)).toBeUndefined();
     expect(herdrCacheValue({ kind: "expired", idleMs: 1 }, 664_000, 3.19, mergeSettings(DEFAULT_SETTINGS, ['{"herdr":{"enabled":false}}']))).toBeUndefined();
   });
+
+  test("cache_expires: big warm caches inside the window, as a sortable stamp with the time left", async () => {
+    const { herdrExpiresValue } = await import("../src/core.ts");
+    const now = 1_793_000_000_000;
+    expect(herdrExpiresValue(now + 600_000, 300_000, undefined, now, DEFAULT_SETTINGS)).toEqual({ value: "1793000600000", ttlMs: 600_000 });
+    expect(herdrExpiresValue(now + 601_000, 300_000, undefined, now, DEFAULT_SETTINGS)).toBeUndefined(); // not yet
+    expect(herdrExpiresValue(now, 300_000, undefined, now, DEFAULT_SETTINGS)).toBeUndefined(); // cold
+    expect(herdrExpiresValue(undefined, 300_000, undefined, now, DEFAULT_SETTINGS)).toBeUndefined();
+    expect(herdrExpiresValue(now + 60_000, 50_000, undefined, now, DEFAULT_SETTINGS)).toBeUndefined(); // small
+    expect(herdrExpiresValue(now + 60_000, 50_000, 0.6, now, DEFAULT_SETTINGS)).toEqual({ value: "1793000060000", ttlMs: 60_000 }); // priced: minCost
+    const wide = mergeSettings(DEFAULT_SETTINGS, ['{"herdr":{"expiringMinutes":59}}']);
+    expect(wide.herdr).toEqual({ enabled: true, expiringMinutes: 59 });
+    expect(herdrExpiresValue(now + 3_000_000, 300_000, undefined, now, wide)?.ttlMs).toBe(3_000_000);
+    expect(herdrExpiresValue(now + 60_000, 300_000, undefined, now, mergeSettings(DEFAULT_SETTINGS, ['{"herdr":{"expiringMinutes":0}}']))).toBeUndefined();
+    expect(herdrExpiresValue(now + 60_000, 300_000, undefined, now, mergeSettings(DEFAULT_SETTINGS, ['{"herdr":{"enabled":false}}']))).toBeUndefined();
+  });
 });

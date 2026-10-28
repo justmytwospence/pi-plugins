@@ -21,6 +21,7 @@ import { MODEL_CHOICE, MODEL_OFFERS, type ModelChoice, type ModelOffer, type Mod
 import { Text } from "@earendil-works/pi-tui";
 import {
   DEFAULT_SETTINGS,
+  HERDR_EXPIRES_TOKEN,
   NAME,
   type Settings,
   describeMiss,
@@ -29,6 +30,7 @@ import {
   formatTokens,
   compactionFocus,
   herdrCacheValue,
+  herdrExpiresValue,
   worthWarning,
 } from "./core.ts";
 
@@ -196,11 +198,21 @@ export function coldTitle(
   return `Prompt cache miss. ${describeMiss(v.cold!, v.last.tokens, undefined)}\n${ways}${why}${jev.missing ? `\n${JEV_TIP}` : ""}`;
 }
 
-export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrReporter; alert?: (body: string) => void } = {}) {
+export default function cacheGuard(
+  pi: ExtensionAPI,
+  options: { herdr?: HerdrReporter; expiring?: HerdrReporter; alert?: (body: string) => void } = {},
+) {
   // Inside a herdr pane (through pi-herdr): the `cache` token, so herdr's agents sidebar shows this
-  // session when doomed.
+  // session when doomed, and `cache_expires`, so a queue (herdr-plugins' agent-cycle) can bring an
+  // idle session up before its cache goes cold.
   const herdr = options.herdr ?? new HerdrReporter(pi.events);
-  pi.events?.on("herdr:ready", () => herdr.resend());
+  const expiring = options.expiring ?? new HerdrReporter(pi.events, HERDR_EXPIRES_TOKEN);
+  pi.events?.on("herdr:ready", () => {
+    herdr.resend();
+    expiring.resend();
+  });
+  // Between agent_start and agent_settled the session refreshes its cache with its own requests.
+  let running = false;
   // Jev: trimming tool output, and compaction.
   const lean: Lean = leanContext(pi);
   let ctx: ExtensionContext | undefined;
@@ -324,6 +336,9 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
       ctx.ui.setStatus(STATUS_KEY, text);
     }
     herdr.report(v ? herdrCacheValue(v.cold, v.last.tokens, undefined, settings) : undefined);
+    const expiresAt = v && !running && !v.cold && v.remainingMs !== undefined && v.ttlMs !== undefined ? v.last.at + v.ttlMs : undefined;
+    const soon = v ? herdrExpiresValue(expiresAt, v.last.tokens, undefined, Date.now(), settings) : undefined;
+    expiring.report(soon?.value, soon?.ttlMs);
   };
 
   const stop = () => {
@@ -332,8 +347,10 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
     if (ctx && shown !== undefined) ctx.ui.setStatus(STATUS_KEY, undefined);
     shown = undefined;
     void herdr.clear();
+    void expiring.clear();
     ctx = undefined;
     live = undefined;
+    running = false;
     sentState = undefined;
   };
 
@@ -391,10 +408,19 @@ export default function cacheGuard(pi: ExtensionAPI, options: { herdr?: HerdrRep
     const { text, color } = noticeLine(entry.data);
     return new Text(theme.fg(color, text), 1, 0);
   });
-  pi.on("agent_settled", (_event, context) => refresh(context, true));
+  pi.on("agent_settled", (_event, context) => {
+    running = false;
+    refresh(context, true);
+  });
   // A fresh `cache:state` as each run starts (the prompt's own is sent from the input handler).
   pi.on("agent_start", (_event, context) => {
-    if (ctx) emitState(context, current(context), true);
+    running = true;
+    if (ctx) {
+      emitState(context, current(context), true);
+      // A new run refreshes the cache: no longer about to expire.
+      ctx = context;
+      publish();
+    }
   });
   pi.on("message_start", (event, context) => {
     const message = event.message as { role?: string; timestamp?: number; provider?: string; model?: string };

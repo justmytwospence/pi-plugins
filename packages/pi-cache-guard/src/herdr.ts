@@ -11,33 +11,48 @@ export interface EventBus {
   emit(channel: string, data: unknown): void;
 }
 
-/** Reports the token when it changes; the first report (even "nothing") always goes out. */
+/**
+ * Reports one token (`cache` unless told otherwise) when it changes; the first report (even
+ * "nothing") always goes out. A value reported with a TTL is dropped by herdr when it runs out, so a
+ * crashed pi cannot leave it behind; while pi runs, the next report clears it on time anyway.
+ */
 export class HerdrReporter {
   private last: string | undefined | null = null;
+  // When the last value's TTL runs out (epoch ms), for a resend.
+  private deadline: number | undefined;
   private readonly events: EventBus | undefined;
+  private readonly key: string;
 
   // No parameter properties: Node's type stripping runs these sources too.
-  constructor(events: EventBus | undefined) {
+  constructor(events: EventBus | undefined, key: string = HERDR_TOKEN) {
     this.events = events;
+    this.key = key;
   }
 
-  report(value: string | undefined): void {
+  report(value: string | undefined, ttlMs?: number): void {
     if (!this.events || value === this.last) return;
     this.last = value;
-    this.events.emit("herdr:token", { key: HERDR_TOKEN, value });
+    this.deadline = value !== undefined && ttlMs !== undefined ? Date.now() + ttlMs : undefined;
+    this.emit(value, ttlMs);
   }
 
   /** pi-herdr became active after a report: send the current value again. */
   resend(): void {
-    if (this.events && typeof this.last === "string") this.events.emit("herdr:token", { key: HERDR_TOKEN, value: this.last });
+    if (!this.events || typeof this.last !== "string") return;
+    this.emit(this.last, this.deadline === undefined ? undefined : Math.max(1_000, this.deadline - Date.now()));
   }
 
   /** Clears the token (session end) and forgets what was reported. */
   clear(): Promise<boolean> {
     const had = typeof this.last === "string";
     this.last = null;
-    if (this.events && had) this.events.emit("herdr:token", { key: HERDR_TOKEN, value: undefined });
+    this.deadline = undefined;
+    if (this.events && had) this.emit(undefined);
     return Promise.resolve(true);
+  }
+
+  private emit(value: string | undefined, ttlMs?: number): void {
+    this.events!.emit("herdr:token", { key: this.key, value, ...(ttlMs !== undefined ? { ttlMs } : {}) });
   }
 }
 

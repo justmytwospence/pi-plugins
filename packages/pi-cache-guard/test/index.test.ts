@@ -333,6 +333,46 @@ describe("herdr", () => {
     expect(sent.map((p) => p.value)).toEqual([undefined]);
   });
 
+  test("cache_expires names the expiry of an idle big warm cache inside the window, with its TTL", async () => {
+    const { r } = reporter();
+    // Opus here caches for 5 minutes, inside the default 10-minute window from the start.
+    const entries: unknown[] = [assistant(NOW - 60_000, 600_000)];
+    const h = harnessWith(entries, r);
+    const sent: any[] = [];
+    h.listen("herdr:token", (data) => sent.push(data));
+    await h.emit("session_start", {});
+    const expiry = String(NOW + 240_000).padStart(13, "0");
+    expect(sent).toEqual([{ key: "cache_expires", value: expiry, ttlMs: 240_000 }]);
+    await h.emit("agent_start", {});
+    expect(sent.at(-1)).toEqual({ key: "cache_expires", value: undefined }); // a run refreshes it
+    await h.emit("agent_settled", {});
+    expect(sent.at(-1)).toEqual({ key: "cache_expires", value: expiry, ttlMs: 240_000 });
+    vi.advanceTimersByTime(100_000);
+    expect(sent.length).toBe(3); // the tick only reports changes
+    vi.advanceTimersByTime(141_000);
+    expect(sent.at(-1)).toEqual({ key: "cache_expires", value: undefined }); // cold
+    await h.emit("session_shutdown", {});
+    expect(sent.length).toBe(4);
+  });
+
+  test("cache_expires skips small caches", async () => {
+    const h = harnessWith([assistant(NOW - 60_000, 50_000)], reporter().r);
+    const sent: any[] = [];
+    h.listen("herdr:token", (data) => sent.push(data));
+    await h.emit("session_start", {});
+    vi.advanceTimersByTime(5_000);
+    expect(sent).toEqual([{ key: "cache_expires", value: undefined }]);
+  });
+
+  test("a resend carries the TTL that is left", () => {
+    const sent: any[] = [];
+    const r = new HerdrReporter({ emit: (_channel, data) => sent.push(data) }, "cache_expires");
+    r.report("1", 60_000);
+    vi.advanceTimersByTime(20_000);
+    r.resend();
+    expect(sent).toEqual([{ key: "cache_expires", value: "1", ttlMs: 60_000 }, { key: "cache_expires", value: "1", ttlMs: 40_000 }]);
+  });
+
   test("without an event bus nothing is sent", () => {
     const r = new HerdrReporter(undefined);
     r.report("❄ 1M");

@@ -51,6 +51,11 @@ export interface Settings {
   herdr: {
     /** Report the pane token `cache` to herdr (inside a herdr pane) so its agents sidebar can show doomed sessions. */
     enabled: boolean;
+    /**
+     * Report `cache_expires` (the expiry, epoch ms) while an idle session's big warm cache has at most
+     * this many minutes left, so a herdr queue can bring it up before it goes cold; 0 turns it off.
+     */
+    expiringMinutes: number;
   };
   jev: {
     /** Use Jev, TypeSafe's judgment model, to trim tool output and to compact. Off: neither, and no setup hints. */
@@ -102,7 +107,7 @@ export const DEFAULT_SETTINGS: Settings = {
     idleMinutes: { "5m": 30, "1h": 120 },
     prompt: "Cache keep-alive. Do not use tools or think. Reply with exactly: ok",
   },
-  herdr: { enabled: true },
+  herdr: { enabled: true, expiringMinutes: 10 },
   jev: { enabled: true, provider: "", model: "", timeoutMs: 2_500 },
   trim: {
     enabled: true,
@@ -121,6 +126,8 @@ export const DEFAULT_SETTINGS: Settings = {
 
 /** The herdr pane token the ports report (`herdr pane report-metadata --source cache-guard`). */
 export const HERDR_TOKEN = "cache";
+/** The herdr pane token naming when a big warm cache expires, inside the `herdr.expiringMinutes` window. */
+export const HERDR_EXPIRES_TOKEN = "cache_expires";
 export const HERDR_SOURCE = NAME;
 
 export const FIVE_MINUTES = 5 * 60_000;
@@ -183,6 +190,11 @@ export function warmDeadline(lastRealAt: number, ttlMs: number, settings: Settin
 /** Whether a re-cache of `tokens` (costing `cost`, when prices are known) is worth asking about. */
 export function worthWarning(tokens: number, cost: number | undefined, settings: Settings): boolean {
   if (!settings.enabled || !settings.warn.enabled) return false;
+  return bigMiss(tokens, cost, settings);
+}
+
+/** Whether a miss re-caching `tokens` (costing `cost`, when prices are known) reaches the warning threshold. */
+export function bigMiss(tokens: number, cost: number | undefined, settings: Settings): boolean {
   return cost !== undefined ? cost >= settings.warn.minCost : tokens >= settings.warn.minTokens;
 }
 
@@ -198,9 +210,30 @@ export type ColdReason =
  */
 export function herdrCacheValue(reason: ColdReason | undefined, tokens: number, cost: number | undefined, settings: Settings): string | undefined {
   if (!reason || !settings.enabled || !settings.herdr.enabled) return undefined;
-  const big = cost !== undefined ? cost >= settings.warn.minCost : tokens >= settings.warn.minTokens;
-  if (!big) return undefined;
+  if (!bigMiss(tokens, cost, settings)) return undefined;
   return `${reason.kind === "idle" ? "❄?" : "❄"} ${formatTokens(tokens)}`;
+}
+
+/**
+ * The herdr `cache_expires` token: the expiry as 13-digit epoch milliseconds (so it sorts as text),
+ * with the time left as its TTL, while a warm cache whose miss would reach the warning threshold has
+ * at most `herdr.expiringMinutes` left; else undefined (clear the token). `expiresAt` is undefined
+ * when the cache is cold or has no known lifetime. A running session refreshes its cache with its
+ * own requests, so the caller passes undefined then.
+ */
+export function herdrExpiresValue(
+  expiresAt: number | undefined,
+  tokens: number,
+  cost: number | undefined,
+  now: number,
+  settings: Settings,
+): { value: string; ttlMs: number } | undefined {
+  if (expiresAt === undefined || !settings.enabled || !settings.herdr.enabled) return undefined;
+  const windowMs = settings.herdr.expiringMinutes * 60_000;
+  const left = expiresAt - now;
+  if (!(windowMs > 0) || left <= 0 || left > windowMs) return undefined;
+  if (!bigMiss(tokens, cost, settings)) return undefined;
+  return { value: String(Math.floor(expiresAt)).padStart(13, "0"), ttlMs: left };
 }
 
 /**
