@@ -166,7 +166,7 @@ It aborts, sending nothing, if main's request vanishes mid-build, on an API or m
 
 - Sidebar uses Pi's fullscreen layout, which Pi does not publish as an API. [pi-clear-screen](/plugins/pi-clear-screen/), [pi-copy](/plugins/pi-copy/) and [pi-sticky-last-prompt](/plugins/pi-sticky-last-prompt/) read it the same way and work with Sidebar open.
 - While a dialog waits in main (one that holds `herdr:blocked`, such as a question from main, or any Pi select, confirm, input or extension dialog), Sidebar steps aside so the dialog renders full width for Herdr and its phone cards (herdr-web-ui, Collie).
-- Collie does not yet find main's editor while Sidebar is open: below main it reads Sidebar's composer as the editor, beside main it finds none. Close Sidebar before sending from Collie.
+- With Sidebar open, Collie reads only main's side of the split once `frames.toml` declares Sidebar's dividers (`panel_below` and `panel_beside`; see [remote clients](/guides/clients/)). A phone send types into whichever side holds the keys; when Sidebar does, Collie withholds Enter.
 - Models that drop earlier thinking when a new user message arrives (Claude models before Opus 4.5 and Sonnet 4.6) can miss the cache when asked during main's tool calls. The miss check catches it.
 
 Claude Code's `/btw` and Codex's `/side` showed that a side question should reuse the main conversation's cache. [pi-herdr-btw](https://github.com/oscabriel/pi-herdr-btw) showed exact prompt replay; no code was copied from it.
