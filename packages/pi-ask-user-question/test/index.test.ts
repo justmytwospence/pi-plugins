@@ -163,3 +163,12 @@ describe("transcript", () => {
     ).toBe("Error: x");
   });
 });
+
+test("offers its answers to pi-sticky-last-prompt over the user-words channel", () => {
+  const h = setup();
+  const registered: Array<[string, (call: unknown) => string | undefined]> = [];
+  h.pi.events.emit("pi-plugins.user-words.v1", { version: 1, register: (name: string, extract: any) => registered.push([name, extract]) });
+  expect(registered.map(([name]) => name)).toEqual(["ask_user_question"]);
+  const details = { questions: [], answers: [{ index: 0, header: "H", question: "Q", kind: "custom", answer: "use rg" }], cancelled: false };
+  expect(registered[0]![1]({ toolName: "ask_user_question", args: {}, result: { details } })).toBe("use rg");
+});

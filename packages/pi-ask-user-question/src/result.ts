@@ -93,6 +93,16 @@ export function toolResult(details: Details) {
   return { content: [{ type: "text" as const, text: envelope(details) }], details };
 }
 
+/** What the user told the agent, for pi-sticky-last-prompt's bar: the answers and notes, or undefined when declined. */
+export function userWords(details: Details | undefined): string | undefined {
+  if (!details || details.cancelled || !Array.isArray(details.answers)) return undefined;
+  const parts = details.answers
+    .filter((a) => a.kind !== "skipped" && a.kind !== "unanswered" && a.answer)
+    .map((a) => (a.notes ? `${a.answer} (${a.notes})` : String(a.answer)));
+  if (details.note) parts.push(details.note);
+  return parts.length ? parts.join(" · ") : undefined;
+}
+
 export function errorResult(questions: Question[], error: ErrorCode, message: string) {
   const details: Details = { questions, answers: [], cancelled: true, error };
   return { content: [{ type: "text" as const, text: message }], details };

@@ -30,6 +30,7 @@ import { expandHome } from "./plan-hook.js";
 import { PlanReviewViewport } from "./plan-review-viewport.js";
 import { type ReviewStatus, reviewBody, reviewTitle } from "./review-card.js";
 import { findBlockedCommandSegment, readCommand, type SafeSubcommands } from "./tool-policy.js";
+import { offerUserWords } from "./user-words.js";
 
 export const MODE_CHANGED = "permission-mode:changed";
 export const MODE_SET = "permission-mode:set";
@@ -194,6 +195,8 @@ interface ExitDetails {
   outcome?: "pending" | "approved" | "fresh" | "kept";
   mode?: string;
   edited?: boolean;
+  /** What the user said should change, when they kept planning. */
+  feedback?: string;
 }
 
 export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): InlinePlanMode {
@@ -376,6 +379,12 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     },
   });
 
+  // The feedback is the user's words: pi-sticky-last-prompt pins it like a prompt.
+  offerUserWords(pi, EXIT_TOOL, ({ result }) => {
+    const feedback = (result.details as ExitDetails | undefined)?.feedback;
+    return typeof feedback === "string" ? feedback : undefined;
+  });
+
   pi.registerTool({
     name: EXIT_TOOL,
     // Nested codemode calls have no transcript row to render the plan being approved.
@@ -460,7 +469,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
               choice === KEEP
                 ? (await askFeedback(pi, ctx, "What should change? (Enter to say it in the chat)"))?.trim()
                 : "";
-            const details: ExitDetails = { plan, planFile, outcome: "kept" };
+            const details: ExitDetails = { plan, planFile, outcome: "kept", ...(feedback ? { feedback } : {}) };
             if (feedback) {
               return {
                 content: [

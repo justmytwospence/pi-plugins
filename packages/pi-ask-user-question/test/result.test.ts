@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { DECLINED, envelope, makeAnswer, skippedAnswer, toolResult } from "../src/result.ts";
+import { DECLINED, envelope, makeAnswer, skippedAnswer, toolResult, userWords } from "../src/result.ts";
 import { q } from "./harness.ts";
 
 const questions = [
@@ -45,4 +45,18 @@ test("skipped follow-ups stay in details but not in the answer text", () => {
   expect(envelope({ questions: questions.slice(0, 2), answers, cancelled: false })).toBe(
     'User has answered your questions: "Which library?"="dayjs". You can now continue with the user\'s answers in mind.',
   );
+});
+
+test("userWords: the answers and notes the user gave, nothing when declined", () => {
+  const answers = [
+    makeAnswer(questions, 0, { kind: "option", label: "date-fns" }),
+    makeAnswer(questions, 1, { kind: "multi", selected: ["Auth", "Search"] }),
+    makeAnswer(questions, 2, { kind: "custom", text: "Keep it small" }, "only if cheap"),
+    makeAnswer(questions, 3, undefined),
+    skippedAnswer(questions, 3),
+  ];
+  expect(userWords({ questions, answers, cancelled: false, note: "ship it" })).toBe("date-fns · Auth, Search · Keep it small (only if cheap) · ship it");
+  expect(userWords({ questions, answers, cancelled: true })).toBeUndefined();
+  expect(userWords({ questions, answers: [makeAnswer(questions, 3, undefined)], cancelled: false })).toBeUndefined();
+  expect(userWords(undefined)).toBeUndefined();
 });

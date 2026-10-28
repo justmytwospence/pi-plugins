@@ -167,6 +167,15 @@ test("a block with a message passes the user's message to the agent", async () =
   expect(blocked.block).toBe(true);
   expect(blocked.reason).toMatch(/declined this call, with this message:\n\nPush to a feature branch instead\./u);
   expect(blocked.reason).not.toMatch(/ask the user how to proceed/u);
+  // Pi turns the block into an error result; pi-sticky-last-prompt reads the message back out.
+  const extractors: Array<[string, (call: unknown) => string | undefined]> = [];
+  h.pi.events.emit("pi-plugins.user-words.v1", { version: 1, register: (name: string, extract: any) => extractors.push([name, extract]) });
+  expect(extractors.map(([name]) => name)).toEqual(["*"]);
+  const words = extractors[0]![1];
+  const result = (text: string, isError = true) => ({ toolName: "bash", args: {}, result: { content: [{ type: "text", text }], isError } });
+  expect(words(result(blocked.reason))).toBe("Push to a feature branch instead.");
+  expect(words(result(blocked.reason, false))).toBeUndefined();
+  expect(words(result("The user declined this call. Do not retry it; continue without it, or ask the user how to proceed."))).toBeUndefined();
 });
 
 test("bg_run's command gets the bash rules", async () => {

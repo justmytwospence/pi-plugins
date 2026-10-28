@@ -69,7 +69,20 @@ import {
 } from "./modes.ts";
 import { loadRules } from "./rules.ts";
 import { agentBeforeLatestUser, callerText, clip, clipTail, recentTexts, recentUserMessages } from "./transcript.ts";
+import { offerUserWords, resultText } from "./user-words.ts";
 import { callView } from "./view.ts";
+
+/** A declined call's result, around the user's message to the agent. */
+export const DECLINED_WITH_MESSAGE = "The user declined this call, with this message:\n\n";
+export const DECLINED_WITH_MESSAGE_END = "\n\nDo not retry the call as it was; follow the user's message.";
+
+/** The user's message in a call they declined with one, for pi-sticky-last-prompt's bar. */
+export function declinedMessage(result: { content?: unknown; isError?: boolean }): string | undefined {
+  if (!result.isError) return undefined;
+  const text = resultText(result.content);
+  if (!text.startsWith(DECLINED_WITH_MESSAGE) || !text.endsWith(DECLINED_WITH_MESSAGE_END)) return undefined;
+  return text.slice(DECLINED_WITH_MESSAGE.length, text.length - DECLINED_WITH_MESSAGE_END.length).trim() || undefined;
+}
 
 export interface GateConfig extends Record<string, unknown> {
   enabled: boolean;
@@ -152,6 +165,9 @@ interface Annotations {
 }
 
 export default function toolGate(pi: ExtensionAPI) {
+  // A message on a declined call is the user's words: pi-sticky-last-prompt pins it like a prompt.
+  // Any tool can be declined, and blocked calls never reach tool_result, so read the result text.
+  offerUserWords(pi, "*", ({ result }) => declinedMessage(result));
   let config: GateConfig = DEFAULT_CONFIG;
   let mode: PermissionMode = "auto";
   /** The mode plan mode was entered from. */
@@ -464,7 +480,7 @@ export default function toolGate(pi: ExtensionAPI) {
       if (answer?.message) {
         return {
           block: true,
-          reason: `The user declined this call, with this message:\n\n${answer.message}\n\nDo not retry the call as it was; follow the user's message.`,
+          reason: `${DECLINED_WITH_MESSAGE}${answer.message}${DECLINED_WITH_MESSAGE_END}`,
         };
       }
       return { block: true, reason: "The user declined this call. Do not retry it; continue without it, or ask the user how to proceed." };

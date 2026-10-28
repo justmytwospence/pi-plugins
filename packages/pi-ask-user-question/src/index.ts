@@ -10,9 +10,10 @@ import { embeddedEditorFactory } from "./editor.ts";
 import { whileBlocked } from "./herdr.ts";
 import { DESCRIPTION, PROMPT_GUIDELINES, PROMPT_SNIPPET } from "./prompt.ts";
 import { reconcile } from "./reconcile.ts";
-import { type Answer, type DialogResult, type Details, errorResult, toolResult } from "./result.ts";
+import { type Answer, type DialogResult, type Details, errorResult, toolResult, userWords } from "./result.ts";
 import { askWithDialogs } from "./rpc.ts";
 import { NO_UI_MESSAGE, normalize, type Params, ParamsSchema, type Question, TOOL_NAME, validate } from "./schema.ts";
+import { offerUserWords } from "./user-words.ts";
 import { ASK_SERVICE_CHANNEL, type AskServiceFn, type AskServiceRequest } from "./service.ts";
 
 const LABEL_WIDTH = 60;
@@ -35,6 +36,9 @@ export default function askUserQuestion(pi: ExtensionAPI) {
     request.ask = service;
     request.provider = "pi-ask-user-question";
   });
+
+  // The answers are the user's words: pi-sticky-last-prompt pins them like a prompt.
+  offerUserWords(pi, TOOL_NAME, ({ result }) => userWords(result.details as Details | undefined));
 
   pi.on("before_agent_start", (_event, ctx) => {
     removed = reconcile(pi, ctx.hasUI, removed);

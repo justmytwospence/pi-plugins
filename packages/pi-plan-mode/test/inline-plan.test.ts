@@ -161,7 +161,16 @@ test("keep planning sends your feedback back; Esc stops the turn", async () => {
   assert.match(kept.content[0]?.text ?? "", /keep planning[\s\S]*use redis/u);
   assert.equal(kept.terminate, undefined);
   assert.equal(inline().active, true);
+  // pi-sticky-last-prompt pins the feedback as the user's words.
+  const extractors: [string, (call: unknown) => string | undefined][] = [];
+  mock.eventBus.emit("pi-plugins.user-words.v1", {
+    version: 1,
+    register: (name: string, extract: any) => extractors.push([name, extract]),
+  });
+  const exitWords = extractors.find(([name]) => name === EXIT_TOOL)?.[1];
+  assert.equal(exitWords?.({ toolName: EXIT_TOOL, args: {}, result: kept }), "use redis");
   const escaped = await tool(EXIT_TOOL).execute("t2", {}, undefined, undefined, context.ctx);
+  assert.equal(exitWords?.({ toolName: EXIT_TOOL, args: {}, result: escaped }), undefined);
   assert.equal(escaped.terminate, true);
   assert.equal(inline().active, true);
 });

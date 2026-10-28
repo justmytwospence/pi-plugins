@@ -1,9 +1,13 @@
-import { SkillInvocationMessageComponent, UserMessageComponent, type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
+import { SkillInvocationMessageComponent, ToolExecutionComponent, UserMessageComponent, type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
 import { expect, test } from "vitest";
 import { visibleWidth, type Component, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import stickyLastPrompt, {
   renderPinBar,
   PIN_CHANNEL,
+  USER_WORDS_CHANNEL,
+  makeClassifier,
+  type UserWordsExtractor,
+  type UserWordsRequest,
   type PromptPinRequest,
   findTranscriptView,
   CLEAR_SENTINEL,
@@ -47,6 +51,10 @@ function userMessage(text: string, lines: string[]): UserMessageComponent {
 }
 function skillMessage(name: string, lines: string[]): SkillInvocationMessageComponent {
   return Object.assign(Object.create(SkillInvocationMessageComponent.prototype) as SkillInvocationMessageComponent, { skillBlock: { name }, children: [], render: () => lines });
+}
+
+function toolRow(toolName: string, result: unknown, lines: string[], isPartial = false): ToolExecutionComponent {
+  return Object.assign(Object.create(ToolExecutionComponent.prototype) as ToolExecutionComponent, { toolName, args: {}, result, isPartial, children: [], render: () => lines });
 }
 
 function index(children: unknown[]): AnchorIndex {
@@ -720,4 +728,60 @@ test("a cut prompt keeps the bar's background through the ellipsis to the edge",
   const ellipsis = line.indexOf("…");
   expect(line.lastIndexOf("\x1b[0m", ellipsis)).toBeLessThan(line.lastIndexOf("\x1b[48;5;24m", ellipsis));
   expect(renderPinBar(styled, "short", 20)).not.toContain("…");
+});
+
+// ─── User words from other plugins' dialogs ───
+
+test("tool rows carrying the user's words count as prompts, per registered extractor", () => {
+  const ask: UserWordsExtractor = ({ result }) => (result.details as { words?: string } | undefined)?.words;
+  const any: UserWordsExtractor = ({ result }) => (result.isError ? "declined: use rg" : undefined);
+  const throws: UserWordsExtractor = () => {
+    throw new Error("bug");
+  };
+  const classify = makeClassifier(new Map([["ask", [throws, ask]], ["*", [any]]]));
+  const result: AnchorIndex = { anchors: [], horizons: [] };
+  collectAnchors(
+    [
+      toolRow("ask", { details: { words: "use  the\nsecond" } }, ["t1", "t2"]),
+      toolRow("ask", { details: {} }, ["t3"]),
+      toolRow("ask", { details: { words: "partial" } }, ["t4"], true),
+      toolRow("ask", undefined, ["t5"]),
+      toolRow("bash", { isError: true, content: [] }, ["t6"]),
+      toolRow("bash", { isError: false, content: [] }, ["t7"]),
+    ],
+    80,
+    0,
+    result,
+    classify,
+  );
+  expect(result.anchors.map(({ source: _source, ...anchor }) => anchor)).toEqual([
+    { start: 0, end: 2, text: "use the second" },
+    { start: 5, end: 6, text: "declined: use rg" },
+  ]);
+  const none: AnchorIndex = { anchors: [], horizons: [] };
+  collectAnchors([toolRow("ask", { details: { words: "x" } }, ["t"])], 80, 0, none);
+  expect(none.anchors).toEqual([]);
+});
+
+test("user-words providers register at session start; the bar and pin service use them", async () => {
+  const h = harness();
+  const extract: UserWordsExtractor = ({ result }) => (result.details as { words?: string }).words;
+  h.events.on(USER_WORDS_CHANNEL, (data) => (data as UserWordsRequest).register?.("ask", extract));
+  stickyLastPrompt(h.pi);
+  await h.emit("session_start", h.ctx);
+  h.screen.doc.children = [userMessage("older", ["u"]), toolRow("ask", { details: { words: "my answer" } }, ["a"]), new Block(["r1", "r2"])];
+  h.screen.sv.scrollTop = 2;
+  expect(bar(h.screen)?.render(80).join("")).toContain("my answer");
+  const request: PromptPinRequest = { version: 1 };
+  h.events.emit(PIN_CHANNEL, request);
+  expect(request.service?.anchor(h.screen.doc.children, 80, 2)?.text).toBe("my answer");
+  await h.emit("session_shutdown", h.ctx);
+  // Teardown drops the registry; a register call kept from that session stays ignored.
+  let stale: UserWordsRequest["register"];
+  h.events.on(USER_WORDS_CHANNEL, (data) => (stale = (data as UserWordsRequest).register));
+  await h.emit("session_start", h.ctx);
+  await h.emit("session_shutdown", h.ctx);
+  stale?.("ask", extract);
+  await h.emit("session_start", h.ctx);
+  expect(bar(h.screen)?.render(80).join("")).toContain("my answer");
 });

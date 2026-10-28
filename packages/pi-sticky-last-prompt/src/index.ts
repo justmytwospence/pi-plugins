@@ -3,6 +3,7 @@
 import { randomUUID } from "node:crypto";
 import {
   SkillInvocationMessageComponent,
+  ToolExecutionComponent,
   UserMessageComponent,
   type ExtensionAPI,
   type Theme,
@@ -153,16 +154,66 @@ export function extractUserText(content: unknown): string {
 
 type Classifier = (child: unknown) => { kind: "user"; text: string } | { kind: "skill"; name: string } | undefined;
 
-export const classifyPiComponent: Classifier = (child) => {
-  if (child instanceof UserMessageComponent) {
-    return { kind: "user", text: extractUserText((child as unknown as { text?: unknown }).text) };
-  }
-  if (child instanceof SkillInvocationMessageComponent) {
-    const name = (child as unknown as { skillBlock?: { name?: unknown } }).skillBlock?.name;
-    return { kind: "skill", name: typeof name === "string" ? name : "" };
+/**
+ * User-words service (version 1): what the user told the agent through another plugin's dialog
+ * (an ask_user_question answer, plan feedback, a message on a declined call) comes back as a
+ * tool result, not a user message. Providers say how to read those words out of their results.
+ * On each `session_start`, an active copy emits `{ version: 1, register }` on `USER_WORDS_CHANNEL`;
+ * providers listening there call `register(toolName, extract)` before `emit` returns (`"*"`
+ * matches any tool). Providers copy these declarations structurally; without this extension
+ * nothing asks them.
+ */
+export const USER_WORDS_CHANNEL = "pi-plugins.user-words.v1";
+
+export interface ToolCallView {
+  toolName: string;
+  args: unknown;
+  result: { content?: unknown; details?: unknown; isError?: boolean };
+}
+
+/** The user's words in a finished call's result, or undefined when it carries none. */
+export type UserWordsExtractor = (call: ToolCallView) => string | undefined;
+
+export interface UserWordsRequest {
+  version: 1;
+  register?: (toolName: string, extract: UserWordsExtractor) => void;
+}
+
+export type UserWordsRegistry = ReadonlyMap<string, readonly UserWordsExtractor[]>;
+
+function userWordsOf(child: unknown, registry: UserWordsRegistry): string | undefined {
+  if (registry.size === 0 || !(child instanceof ToolExecutionComponent)) return undefined;
+  // Renderer internals: the call's name, arguments and its final (not partial) result.
+  const call = child as unknown as { toolName?: unknown; args?: unknown; result?: ToolCallView["result"]; isPartial?: unknown };
+  if (typeof call.toolName !== "string" || !call.result || typeof call.result !== "object" || call.isPartial === true) return undefined;
+  const view: ToolCallView = { toolName: call.toolName, args: call.args, result: call.result };
+  for (const extract of [...(registry.get(call.toolName) ?? []), ...(registry.get("*") ?? [])]) {
+    try {
+      const words = extract(view);
+      if (typeof words === "string" && words.trim()) return words;
+    } catch {
+      // A provider's bug must not blank the bar.
+    }
   }
   return undefined;
-};
+}
+
+/** Pi's prompt components, plus tool rows that carry the user's words per `registry`. */
+export function makeClassifier(registry: UserWordsRegistry = new Map()): Classifier {
+  return (child) => {
+    if (child instanceof UserMessageComponent) {
+      return { kind: "user", text: extractUserText((child as unknown as { text?: unknown }).text) };
+    }
+    if (child instanceof SkillInvocationMessageComponent) {
+      const name = (child as unknown as { skillBlock?: { name?: unknown } }).skillBlock?.name;
+      return { kind: "skill", name: typeof name === "string" ? name : "" };
+    }
+    const words = userWordsOf(child, registry);
+    return words === undefined ? undefined : { kind: "user", text: words };
+  };
+}
+
+export const classifyPiComponent: Classifier = makeClassifier();
 
 /** Walk live document rows, including nested transcript rebuilds and zero-row clears. */
 export function collectAnchors(
@@ -245,15 +296,19 @@ export interface PromptPinRequest {
   provider?: string;
 }
 
-export const promptPinService: PromptPinService = {
-  anchor(children, width, top) {
-    const index: AnchorIndex = { anchors: [], horizons: [] };
-    collectAnchors(children, Math.max(1, Math.floor(width)), 0, index);
-    const selected = selectAnchor(index, top);
-    return selected ? { start: selected.start, end: selected.end, text: selected.text } : undefined;
-  },
-  bar: renderPinBar,
-};
+export function createPromptPinService(classify: Classifier = classifyPiComponent): PromptPinService {
+  return {
+    anchor(children, width, top) {
+      const index: AnchorIndex = { anchors: [], horizons: [] };
+      collectAnchors(children, Math.max(1, Math.floor(width)), 0, index, classify);
+      const selected = selectAnchor(index, top);
+      return selected ? { start: selected.start, end: selected.end, text: selected.text } : undefined;
+    },
+    bar: renderPinBar,
+  };
+}
+
+export const promptPinService: PromptPinService = createPromptPinService();
 
 const EMPTY_COMPONENT: Component = { render: () => [], invalidate: () => {} };
 
@@ -333,6 +388,9 @@ export default function stickyLastPrompt(pi: ExtensionAPI): void {
   let releasePatch: (() => void) | undefined;
   let paintedAnchor: UserAnchor | undefined;
   let serving = false;
+  const userWords = new Map<string, UserWordsExtractor[]>();
+  const classify = makeClassifier(userWords);
+  const pinService = createPromptPinService(classify);
   // Pi keeps this object and reads it on every render, so a narrower transcript moves the bar.
   const barOptions: OverlayOptions = { anchor: "top-left", row: 0, col: 0, width: "100%", nonCapturing: true };
 
@@ -413,7 +471,7 @@ export default function stickyLastPrompt(pi: ExtensionAPI): void {
       // Outer children identity + total height cannot detect nested, in-place, same-height
       // edits or skill expansion. Rewalk on each paint; component render caches still apply.
       const index: AnchorIndex = { anchors: [], horizons: [] };
-      collectAnchors(children, Math.floor(width), 0, index);
+      collectAnchors(children, Math.floor(width), 0, index, classify);
       return selectAnchor(index, sv.scrollTop);
     } catch {
       return undefined;
@@ -477,6 +535,7 @@ export default function stickyLastPrompt(pi: ExtensionAPI): void {
     paintedAnchor = undefined;
     warnedDuplicate = false;
     serving = false;
+    userWords.clear();
     for (const release of cleanup) {
       try {
         release?.();
@@ -491,6 +550,20 @@ export default function stickyLastPrompt(pi: ExtensionAPI): void {
     if (ctx.mode !== "tui" || !ctx.hasUI) return;
     const mine = generation;
     serving = true;
+    const request: UserWordsRequest = {
+      version: 1,
+      register: (toolName, extract) => {
+        if (mine !== generation || typeof toolName !== "string" || typeof extract !== "function") return;
+        const list = userWords.get(toolName) ?? [];
+        if (!list.includes(extract)) list.push(extract);
+        userWords.set(toolName, list);
+      },
+    };
+    try {
+      pi.events?.emit?.(USER_WORDS_CHANNEL, request);
+    } catch {
+      // A provider that throws only loses its own words.
+    }
     notify = (message) => ctx.ui.notify(message, "warning");
     removeWidget = () => ctx.ui.setWidget(widgetId, undefined);
     try {
@@ -513,7 +586,7 @@ export default function stickyLastPrompt(pi: ExtensionAPI): void {
   pi.events?.on?.(PIN_CHANNEL, (data: unknown) => {
     const request = data as PromptPinRequest | undefined;
     if (!serving || !request || request.version !== 1 || request.service) return;
-    request.service = promptPinService;
+    request.service = pinService;
     request.provider = "pi-sticky-last-prompt";
   });
 }
