@@ -31,8 +31,7 @@ const { askApproval } = await jiti.import('../packages/pi-tool-gate/src/prompt.t
 const { CustomEditor } = await import(new URL('./modes/interactive/components/custom-editor.js', sdkUrl));
 const { sidebarScreen } = await import('./remote-clients/sidebar.mjs');
 const { TerminalPanel } = await jiti.import('../packages/pi-interactive-shell/src/panel.ts');
-const { choiceMenu } = await jiti.import('../packages/pi-cache-guard/src/index.ts');
-const { describeMiss } = await jiti.import('../packages/pi-cache-guard/src/core.ts');
+const { choiceMenu, coldTitle } = await jiti.import('../packages/pi-cache-guard/src/index.ts');
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const herdrDir = process.env.HERDR_WEB_UI_DIR ?? latest(path.join(homedir(), '.local/share/herdr-web-ui'), /^remote-v\d+$/);
@@ -101,16 +100,15 @@ function selectorLines(width) {
 // pi-cache-guard's cold-cache question as its input handler builds it, with model offers from a
 // listener (pi-auto-effort): Jev's pick first, the current model named, a plain offer after the mute line.
 const coldView = { last: { provider: 'anthropic', model: 'claude-opus-5-5', at: 0, realAt: 0, tokens: 601_000 }, cold: { kind: 'expired', idleMs: 600_000 } };
-const coldMenu = choiceMenu(coldView, { ready: true, filtered: true }, {
-  current: 'Claude Opus 5.5',
-  offers: [
-    { model: 'anthropic/claude-sonnet-5-5', label: 'Sonnet 5.5', recommended: true },
-    { model: 'anthropic/claude-haiku-5', label: 'Haiku 5', note: 'cheapest' },
-  ],
-}).map((item) => item.label);
+const coldOffers = [
+  { model: 'anthropic/claude-sonnet-5-5', label: 'Claude Sonnet 5.5', recommended: true, note: 'routine change' },
+  { model: 'anthropic/claude-haiku-5-5', label: 'Claude Haiku 5.5' },
+];
+const coldMenu = choiceMenu(coldView, { ready: true, filtered: true }, { current: 'Claude Opus 5.5', offers: coldOffers }).map((item) => item.label);
 const plainMenu = choiceMenu(coldView, { ready: true, filtered: true }).map((item) => item.label);
 function coldCacheLines(width, menu = coldMenu) {
-  const selector = new ExtensionSelectorComponent(`Prompt cache miss. ${describeMiss(coldView.cold, coldView.last.tokens, undefined)}`, menu, () => {}, () => {});
+  const title = coldTitle(coldView, { ready: true, filtered: true }, menu === coldMenu ? coldOffers[0] : undefined);
+  const selector = new ExtensionSelectorComponent(title, menu, () => {}, () => {});
   return selector.render(width);
 }
 
@@ -123,10 +121,8 @@ const DIALOGS = [
   { name: 'cache-guard cold cache', lines: (w) => coldCacheLines(w, plainMenu), herdr: { options: plainMenu.length, multi: false, labels: plainMenu }, collie: { kind: 'prompt-select', options: plainMenu.length + 1, wraps: plainMenu } },
   { name: 'cache-guard cold cache (model offers)', lines: coldCacheLines, herdr: { options: coldMenu.length, multi: false, labels: coldMenu }, collie: { kind: 'prompt-select', options: coldMenu.length + 1, wraps: coldMenu } },
 ];
-// Known gap: Pi's own select (`ctx.ui.select`) wraps a long option onto the next row with no `│`
-// gutter, and Collie reads no dialog with such a row (herdr-web-ui joins it). cache-guard's longest
-// option (the summary compaction) wraps below 74 columns, with or without model offers. A known
-// screen that starts reading right fails, so this cannot go stale.
+// Pi's own select (`ctx.ui.select`) wraps a long option onto the next row with no `│` gutter, and
+// Collie reads no dialog with such a row. Every option of a Pi select must fit the narrowest width.
 const wrapsRow = (labels, width) => labels.some((label) => label.length > width - 4);
 
 const screens = [];
@@ -245,10 +241,8 @@ screens.forEach((screen, i) => {
     const read = [];
     if (card?.kind !== wanted) read.push(`Collie: ${card?.kind ?? 'no card'}, wanted ${wanted}`);
     else if (wanted === dialog.collie.kind && dialog.collie.options !== undefined && card.options.length !== dialog.collie.options) read.push(`Collie: options ${JSON.stringify(card.options)}`);
-    if (dialog.collie.wraps && wrapsRow(dialog.collie.wraps, screen.width)) {
-      if (!read.length) problems.push('Collie: reads a wrapped Pi select row now; drop it from KNOWN');
-      else known.push(`${label}\n  ${read.join('; ')} (an option wraps, and Pi's own select has no gutter)`);
-    } else problems.push(...read);
+    if (dialog.collie.wraps && wrapsRow(dialog.collie.wraps, screen.width)) read.push(`an option is wider than ${screen.width - 4} columns, and Pi's own select wraps it with no gutter`);
+    problems.push(...read);
   }
   report(label, problems);
 });
