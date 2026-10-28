@@ -36,6 +36,12 @@ test("a running row: spinner, agent, Jev marks, model, effort, stats; activity b
   ]);
 });
 
+test("picks made under quota pressure show p beside the model and effort marks", () => {
+  const r = fakeRun({ byJev: { agent: true, model: true, thinking: true }, pressure: 0.46, state: { turns: 3, usage: usage(), startedAt: 0 } });
+  const lines = renderWidget({ runs: [r], queued: 0, now: 14_200, frame: 1, width: 200, theme: plain });
+  expect(lines[1]).toContain("scout (Jev) · claude-haiku-5 (Jev, p=0.5) · low (Jev, p=0.5)");
+});
+
 test("finished rows show a status icon; the queue gets a row; nothing to show is empty", () => {
   const ok = fakeRun({ agent: "reviewer", state: { status: "done", turns: 5, startedAt: 0, endedAt: 52_000 } });
   const bad = fakeRun({ agent: "worker", state: { status: "failed", error: "pi exited (1)", startedAt: 0, endedAt: 3_000 } });

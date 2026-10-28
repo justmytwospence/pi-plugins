@@ -53,15 +53,16 @@ export function statusIcon(status: ChildStatus, theme: Theme): string {
   return theme.fg("error", "✗");
 }
 
-/** ` (Jev)` after a value Jev picked. */
-export function jev(on: boolean, theme: Theme): string {
-  return on ? theme.fg("dim", " (Jev)") : "";
+/** ` (Jev)` after a value Jev picked; ` (Jev, p=0.5)` when it was picked under quota pressure. */
+export function jev(on: boolean, theme: Theme, pressure?: number): string {
+  if (!on) return "";
+  return theme.fg("dim", pressure && pressure > 0 ? ` (Jev, p=${pressure.toFixed(1)})` : " (Jev)");
 }
 
 /** `claude-haiku-5 (Jev) · low (Jev)`: the model and effort, marking Jev's picks. */
 export function modelAndEffort(run: Run, theme: Theme, full = false): string {
   const model = run.state.model ?? run.model;
-  return `${full ? model : shortModel(model)}${jev(run.byJev.model, theme)} · ${run.thinking}${jev(run.byJev.thinking, theme)}`;
+  return `${full ? model : shortModel(model)}${jev(run.byJev.model, theme, run.pressure)} · ${run.thinking}${jev(run.byJev.thinking, theme, run.pressure)}`;
 }
 
 /** The task's first line, whitespace collapsed, clipped. */

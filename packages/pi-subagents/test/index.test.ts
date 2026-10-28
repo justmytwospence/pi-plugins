@@ -2,9 +2,9 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, test } from "vitest";
-import subagents, { truncateOutput } from "../src/index.ts";
+import subagents, { jevMark, promptGuidelines, readPressure, truncateOutput } from "../src/index.ts";
 import { fakeJev, harness } from "./harness.ts";
-import { fakeUI, normalFocus } from "./ui-helpers.ts";
+import { fakeUI, normalFocus, plain } from "./ui-helpers.ts";
 
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(path.join(tmpdir(), "subagents-agent-"));
 
@@ -184,6 +184,92 @@ test("a run that ends after its session is gone calls no pi API (a stale runtime
     // The stopped child ends now; nothing may throw (an unhandled rejection fails this test).
     await new Promise((r) => setTimeout(r, 300));
     expect(h.messages).toHaveLength(0);
+  } finally {
+    setPiInvocation(undefined);
+  }
+});
+
+test("delegation picks the first prompt guideline; a project's setting re-registers the tool at session start", async () => {
+  expect(promptGuidelines(undefined)[0]).toMatch(/^Prefer direct work for routine investigation/u);
+  expect(promptGuidelines("conservative")[0]).toBe(promptGuidelines("nonsense")[0]);
+  const economical = promptGuidelines("economical");
+  expect(economical[0]).toMatch(/^Once the design is settled and what remains is implementation that follows from it/u);
+  expect(economical[0]).toContain("no model, so Jev picks a cheaper tier");
+  expect(economical.slice(1)).toEqual(promptGuidelines("conservative").slice(1));
+
+  const h = harness();
+  const registered: string[][] = [];
+  h.pi.registerTool = (t: { promptGuidelines: string[] }) => void registered.push(t.promptGuidelines);
+  subagents(h.pi);
+  expect(registered).toHaveLength(1);
+  expect(registered[0]![0]).toMatch(/^Prefer direct work/u);
+  const cwd = mkdtempSync(path.join(tmpdir(), "subagents-delegation-"));
+  mkdirSync(path.join(cwd, ".pi"));
+  writeFileSync(path.join(cwd, ".pi", "pi-subagents.json"), JSON.stringify({ delegation: "economical" }));
+  const ctx = h.ctx({ cwd, ui: fakeUI() });
+  await h.emit("session_start", { type: "session_start" }, ctx);
+  expect(registered).toHaveLength(2);
+  expect(registered[1]![0]).toMatch(/^Once the design is settled/u);
+  // The same setting again registers nothing new (the system prompt stays as it is).
+  await h.emit("session_start", { type: "session_start" }, ctx);
+  expect(registered).toHaveLength(2);
+  await h.emit("session_shutdown", { type: "session_shutdown" }, ctx);
+});
+
+test("quota:pressure payloads are validated and clamped; the mark shows p", () => {
+  expect(readPressure({ provider: "anthropic", tier: "critical", p: 1.4, label: "5h 97%" })).toEqual({ provider: "anthropic", tier: "critical", p: 1, label: "5h 97%" });
+  expect(readPressure({ provider: "anthropic", tier: "weird", p: 0.2 })).toEqual({ provider: "anthropic", tier: "none", p: 0.2 });
+  expect(readPressure({ provider: "", p: 0.2 })).toBeUndefined();
+  expect(readPressure({ provider: "x", p: Number.NaN })).toBeUndefined();
+  expect(readPressure(null)).toBeUndefined();
+  expect(jevMark(false, 0.5)).toBe("");
+  expect(jevMark(true)).toBe(" (Jev)");
+  expect(jevMark(true, 0)).toBe(" (Jev)");
+  expect(jevMark(true, 0.46)).toBe(" (Jev, p=0.5)");
+});
+
+test("quota pressure on the parent's provider tightens Jev's picks, and the row and record show it", async () => {
+  const { setPiInvocation } = await import("../src/child.ts");
+  setPiInvocation({ command: process.execPath, args: [path.join(import.meta.dirname, "fixtures", "fake-pi-loop.mjs")] });
+  try {
+    const cwd = mkdtempSync(path.join(tmpdir(), "subagents-pressure-"));
+    mkdirSync(path.join(cwd, ".pi"));
+    writeFileSync(path.join(cwd, ".pi", "pi-subagents.json"), JSON.stringify({
+      providerTiers: { p: { fast: "p/small", balanced: "p/mid", strong: "p/big" } },
+    }));
+    const jev = fakeJev(() => ({
+      tier: { type: "choice", choice: "strong", confidence: 0.5, probabilities: { fast: 0.1, balanced: 0.4, strong: 0.5 } },
+      effort: { type: "choice", choice: "high", confidence: 0.5, probabilities: { low: 0.05, medium: 0.25, high: 0.5, xhigh: 0.2 } },
+    }));
+    const h = harness();
+    let tool: any;
+    const listeners = new Map<string, Array<(data: unknown) => void>>();
+    h.pi.events.on = (channel: string, fn: (data: unknown) => void) => {
+      listeners.set(channel, [...(listeners.get(channel) ?? []), fn]);
+      return () => undefined;
+    };
+    const send = (channel: string, data: unknown) => { for (const fn of listeners.get(channel) ?? []) fn(data); };
+    h.pi.registerTool = (t: unknown) => void (tool = t);
+    subagents(h.pi);
+    const ctx = h.ctx({ cwd, ui: fakeUI(), model: { provider: "p", id: "m" }, modelRegistry: { ...jev.registry as object, getAll: () => [] } });
+    await h.emit("session_start", { type: "session_start" }, ctx);
+
+    // No pressure known: p = 0, the relaxed bar.
+    const calm = await tool.execute("t1", { task: "calm", async: true }, undefined, undefined, ctx);
+    expect(calm.details.runs[0]).toMatchObject({ model: "p/big", thinking: "high", byJev: { model: true, thinking: true } });
+    expect(calm.details.runs[0]).not.toHaveProperty("pressure");
+    expect(tool.renderResult(calm, { expanded: false }, plain).render(200).join("\n")).toContain("big (Jev) · high (Jev)");
+
+    // Another provider's pressure does not count; the parent's does, latest wins.
+    send("quota:pressure", { provider: "other", tier: "critical", p: 1 });
+    send("quota:pressure", { provider: "p", tier: "caution", p: 0.2 });
+    send("quota:pressure", { provider: "p", tier: "critical", p: 1 });
+    const tight = await tool.execute("t2", { task: "tight", async: true }, undefined, undefined, ctx);
+    expect(tight.details.runs[0]).toMatchObject({ model: "p/mid", thinking: "medium", pressure: 1 });
+    expect(tool.renderResult(tight, { expanded: false }, plain).render(200).join("\n")).toContain("mid (Jev, p=1.0) · medium (Jev, p=1.0)");
+    const record = h.entries.filter((e) => e.customType === "subagents:run").map((e) => e.data as any).find((d) => d.id === tight.details.runs[0].id);
+    expect(record).toMatchObject({ pressure: 1, byJev: { model: true, thinking: true } });
+    await h.emit("session_shutdown", { type: "session_shutdown" }, ctx);
   } finally {
     setPiInvocation(undefined);
   }

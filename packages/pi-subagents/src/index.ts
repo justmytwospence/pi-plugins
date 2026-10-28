@@ -21,7 +21,7 @@ import { agentDir, loadConfig } from "./config.ts";
 import { Conversation, type Message, readTranscript, transcriptWriter } from "./conversation.ts";
 import { type JevConfig, askJev } from "./jev.ts";
 import { runLabel, taskLabel } from "./label.ts";
-import { DEFAULT_TIER_DESCRIPTIONS, type Given, type Resolved, type Tier, pickQuestions, providerTiers, readPicks, resolve } from "./pick.ts";
+import { DEFAULT_THRESHOLD, DEFAULT_TIER_DESCRIPTIONS, type Given, type Resolved, type Threshold, type Tier, pickQuestions, providerTiers, readPicks, resolve } from "./pick.ts";
 import { REFERENCE_TYPE, type RunRef, referenceContext, runAutocomplete } from "./references.ts";
 import { type Run, displayTokens, transcriptPath } from "./run.ts";
 import { clip, recentTexts } from "./transcript.ts";
@@ -30,8 +30,15 @@ import type { ViewerActions } from "./ui/viewer.ts";
 import { elapsedMs, formatCount, formatElapsed, shortModel } from "./ui/format.ts";
 import { RunsWidget, WIDGET_MODES, type WidgetMode } from "./ui/widget.ts";
 
+/** How readily the main agent delegates: `conservative` (default) or `economical`. */
+export type Delegation = "conservative" | "economical";
+export const DELEGATIONS: readonly Delegation[] = ["conservative", "economical"];
+
 export interface SubagentsConfig extends Record<string, unknown> {
-  jev: JevConfig;
+  /** `threshold`: how sure Jev must be to climb to a stronger tier or effort, from no quota pressure (`relaxed`) to full (`tight`). */
+  jev: JevConfig & { threshold: Threshold };
+  /** The tool's first prompt guideline: delegate only clear wins (`conservative`) or hand settled implementation to cheaper tiers (`economical`). */
+  delegation: Delegation;
   /** Legacy tier defaults; only entries matching the parent's provider apply. */
   tiers: Partial<Record<Tier, string>>;
   /** Provider-specific tier defaults, selected using the current parent model. */
@@ -50,7 +57,8 @@ export interface SubagentsConfig extends Record<string, unknown> {
 }
 
 export const DEFAULT_CONFIG: SubagentsConfig = {
-  jev: { enabled: true, provider: "typesafe", model: "jev-latest", timeoutMs: 3_000 },
+  jev: { enabled: true, provider: "typesafe", model: "jev-latest", timeoutMs: 3_000, threshold: { ...DEFAULT_THRESHOLD } },
+  delegation: "conservative",
   tiers: {},
   providerTiers: {},
   tierDescriptions: DEFAULT_TIER_DESCRIPTIONS,
@@ -61,6 +69,47 @@ export const DEFAULT_CONFIG: SubagentsConfig = {
   maxDepth: 2,
   childCacheRetention: "short",
 };
+
+const CONSERVATIVE_GUIDELINE =
+  "Prefer direct work for routine investigation, diagnosis, and verification. Do not delegate merely because work is long or multistep, or commission a redundant audit of work you are already doing. Delegate only genuinely independent tasks with a clear payoff or when requested; when delegating report-back work, use headless subagents rather than interactive Herdr sessions.";
+const ECONOMICAL_GUIDELINE =
+  "Once the design is settled and what remains is implementation that follows from it (applying a decided change across files, writing tests to a given spec, mechanical refactors, running checks and fixing what fails), delegate it to a subagent with a precise, self-contained spec and no model, so Jev picks a cheaper tier; then review the result (diff, check output) yourself instead of redoing it. Do it directly when the spec would be about as long as the work, the remaining decisions are judgment calls, or the work needs most of this conversation's context. Do not commission redundant audits of work you are already doing; use headless subagents rather than interactive Herdr sessions for report-back work.";
+
+/** The `subagent` tool's prompt guidelines for a `delegation` setting (anything unknown is conservative). */
+export function promptGuidelines(delegation: unknown): string[] {
+  return [
+    delegation === "economical" ? ECONOMICAL_GUIDELINE : CONSERVATIVE_GUIDELINE,
+    "Give each subagent a complete, self-contained task: it cannot see this conversation unless context is fork.",
+    "Give each task a short descriptive label; omit it to derive one deterministically from the task.",
+    "Use parallel tasks for independent work and a chain when a step needs the previous step's output.",
+    "Use worktree only when the user requests a worktree or branch isolation; otherwise ask first. An authorized worktree task remains a headless subagent.",
+  ];
+}
+
+/** `quota:pressure` from pi-auto-effort: how close a provider is to its usage limit. */
+export const QUOTA_PRESSURE = "quota:pressure";
+export interface QuotaPressure {
+  provider: string;
+  tier: "none" | "caution" | "critical";
+  /** 0..1 */
+  p: number;
+  label?: string;
+}
+
+/** A valid `quota:pressure` payload with `p` clamped to 0..1, or undefined. */
+export function readPressure(data: unknown): QuotaPressure | undefined {
+  if (typeof data !== "object" || data === null) return undefined;
+  const d = data as Record<string, unknown>;
+  if (typeof d.provider !== "string" || !d.provider || typeof d.p !== "number" || !Number.isFinite(d.p)) return undefined;
+  const tier = d.tier === "caution" || d.tier === "critical" ? d.tier : "none";
+  return { provider: d.provider, tier, p: Math.min(1, Math.max(0, d.p)), ...(typeof d.label === "string" ? { label: d.label } : {}) };
+}
+
+/** ` (Jev)`, or ` (Jev, p=0.5)` for a pick made under quota pressure. */
+export function jevMark(on: boolean, pressure?: number): string {
+  if (!on) return "";
+  return pressure && pressure > 0 ? ` (Jev, p=${pressure.toFixed(1)})` : " (Jev)";
+}
 
 const MAX_LINES = 2_000;
 const MAX_BYTES = 50 * 1024;
@@ -106,6 +155,8 @@ export interface RunView {
   model: string;
   thinking: string;
   byJev: Resolved["byJev"];
+  /** The quota pressure Jev's model or effort pick was made under, when above 0. */
+  pressure?: number;
   status: ChildState["status"];
   /** Native child history, when Pi reported its session path. */
   sessionFile?: string;
@@ -133,6 +184,7 @@ function view(run: Run, withOutput = false): RunView {
     model: s.model ?? run.model,
     thinking: run.thinking,
     byJev: run.byJev,
+    ...(run.pressure ? { pressure: run.pressure } : {}),
     status: s.status,
     ...(s.sessionFile ? { sessionFile: s.sessionFile } : {}),
     ...(s.activity ? { activity: s.activity } : {}),
@@ -171,6 +223,7 @@ export function recordedRun(v: RecordedRun): Run {
     model: v.model,
     thinking: v.thinking,
     byJev: v.byJev ?? { agent: false, model: false, thinking: false },
+    ...(typeof v.pressure === "number" && v.pressure > 0 ? { pressure: v.pressure } : {}),
     cwd: "",
     async: Boolean(v.async),
     // A record still "running" belongs to a process that is gone.
@@ -206,9 +259,17 @@ function slug(text: string) {
 
 export default function subagents(pi: ExtensionAPI) {
   // At the deepest level allowed, a subagent gets no subagent tool, so nesting cannot run away.
-  if (subagentDepth() >= loadConfig("pi-subagents", DEFAULT_CONFIG, process.cwd()).maxDepth) return;
+  const initial = loadConfig("pi-subagents", DEFAULT_CONFIG, process.cwd());
+  if (subagentDepth() >= initial.maxDepth) return;
   const runs = new Map<string, Run>();
-  let config: SubagentsConfig = DEFAULT_CONFIG;
+  let config: SubagentsConfig = initial;
+  /** The latest quota pressure per provider (pi-auto-effort's `quota:pressure`); none known is 0. */
+  const pressures = new Map<string, QuotaPressure>();
+  pi.events.on(QUOTA_PRESSURE, (data) => {
+    const pressure = readPressure(data);
+    if (pressure) pressures.set(pressure.provider, pressure);
+  });
+  const pressureFor = (provider: string) => pressures.get(provider)?.p ?? 0;
   let backgroundCount = 0;
   /** Numbers each async call's herdr:background hold. */
   let holdCount = 0;
@@ -519,7 +580,7 @@ export default function subagents(pi: ExtensionAPI) {
         let picks: ReturnType<typeof readPicks> | undefined;
         if (Object.keys(questions).length) {
           const outcome = await askJev(ctx.modelRegistry, config.jev, { task: clip(item.task, 6_000), parent_request: parentRequest || "(none)" }, questions, signal);
-          if (outcome.ok) picks = readPicks(outcome.answers);
+          if (outcome.ok) picks = readPicks(outcome.answers, { pressure: pressureFor(parent.model.split("/")[0]!), threshold: config.jev.threshold });
         }
         const resolved = resolve(given, agents, picks, tiers, parent);
         if ("error" in resolved) return resolved;
@@ -581,6 +642,7 @@ export default function subagents(pi: ExtensionAPI) {
       model: resolved.model,
       thinking: resolved.thinking,
       byJev: resolved.byJev,
+      ...(resolved.pressure ? { pressure: resolved.pressure } : {}),
       ...(resolved.tier ? { tier: resolved.tier } : {}),
       ...(resolved.agent.maxTurns ? { maxTurns: resolved.agent.maxTurns } : {}),
       cwd: options.cwd,
@@ -643,6 +705,8 @@ export default function subagents(pi: ExtensionAPI) {
     live = true;
     sessionCtx = ctx;
     config = loadConfig("pi-subagents", DEFAULT_CONFIG, ctx.cwd);
+    // The guidelines are part of the tool's registration: a project's `delegation` re-registers it.
+    if (delegationOf(config) !== registeredDelegation) registerSubagentTool(delegationOf(config));
     bindUI(ctx);
     if (boundUI && !autocompleteAdded && typeof ctx.ui.addAutocompleteProvider === "function") {
       autocompleteAdded = true;
@@ -699,310 +763,310 @@ export default function subagents(pi: ExtensionAPI) {
     }
   });
 
-  pi.registerTool({
-    name: "subagent",
-    label: "Subagent",
-    description:
-      "Each subagent adds its own context and token usage. action=run (default): a single `task`, parallel `tasks`, or a `chain` whose steps can use {previous}. Omit agent, model, or thinking to let Jev choose them; implicit models stay on the parent session's provider. `async: true` returns run ids at once and delivers each result as a message. action=status|steer|stop|result take `id` (steer also `message`).",
-    promptSnippet: "Delegate self-contained tasks to subagents with their own context windows",
-    promptGuidelines: [
-      "Prefer direct work for routine investigation, diagnosis, and verification. Do not delegate merely because work is long or multistep, or commission a redundant audit of work you are already doing. Delegate only genuinely independent tasks with a clear payoff or when requested; when delegating report-back work, use headless subagents rather than interactive Herdr sessions.",
-      "Give each subagent a complete, self-contained task: it cannot see this conversation unless context is fork.",
-      "Give each task a short descriptive label; omit it to derive one deterministically from the task.",
-      "Use parallel tasks for independent work and a chain when a step needs the previous step's output.",
-      "Use worktree only when the user requests a worktree or branch isolation; otherwise ask first. An authorized worktree task remains a headless subagent.",
-    ],
-    parameters: Params,
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      config = loadConfig("pi-subagents", DEFAULT_CONFIG, ctx.cwd);
-      bindUI(ctx);
-      const action = params.action ?? "run";
+  const delegationOf = (c: SubagentsConfig): Delegation => (DELEGATIONS.includes(c.delegation) ? c.delegation : "conservative");
+  let registeredDelegation: Delegation | undefined;
+  const registerSubagentTool = (delegation: Delegation) => {
+    registeredDelegation = delegation;
+    pi.registerTool({
+      name: "subagent",
+      label: "Subagent",
+      description:
+        "Each subagent adds its own context and token usage. action=run (default): a single `task`, parallel `tasks`, or a `chain` whose steps can use {previous}. Omit agent, model, or thinking to let Jev choose them; implicit models stay on the parent session's provider. `async: true` returns run ids at once and delivers each result as a message. action=status|steer|stop|result take `id` (steer also `message`).",
+      promptSnippet: "Delegate self-contained tasks to subagents with their own context windows",
+      promptGuidelines: promptGuidelines(delegation),
+      parameters: Params,
+      async execute(_toolCallId, params, signal, onUpdate, ctx) {
+        config = loadConfig("pi-subagents", DEFAULT_CONFIG, ctx.cwd);
+        bindUI(ctx);
+        const action = params.action ?? "run";
 
-      if (action !== "run") {
-        if (action === "status" && !params.id) {
-          const all = [...runs.values()];
-          const text = all.length ? all.map((r) => `${r.id}  ${r.state.status.padEnd(7)} ${runLabel(r)} · ${r.agent}`).join("\n") : "No subagent runs in this session.";
-          return { content: [{ type: "text", text }], details: { mode: "single", runs: all.map((r) => view(r)) } as Details };
-        }
-        const run = findRun(params.id);
-        if (!run) throw new Error(`No run ${params.id ?? "(missing id)"}. Use action=status to list runs.`);
-        if (action === "steer") {
-          if (!params.message?.trim()) throw new Error("steer needs `message`.");
-          if (!run.child?.steer(params.message)) throw new Error(`Run ${run.id} is ${run.state.status}; only running runs can be steered.`);
-          return { content: [{ type: "text", text: `Steered ${run.id}.` }], details: { mode: "single", runs: [view(run)] } as Details };
-        }
-        if (action === "stop") {
-          run.child?.stop();
-          return { content: [{ type: "text", text: `Stopping ${run.id}.` }], details: { mode: "single", runs: [view(run)] } as Details };
-        }
-        if (action === "result") {
-          if (run.state.status !== "running") consumedResults.add(run.id);
-          let output = run.state.output;
-          try {
-            output = readFileSync(run.outputPath, "utf8");
-          } catch {
-            // still running or not written
+        if (action !== "run") {
+          if (action === "status" && !params.id) {
+            const all = [...runs.values()];
+            const text = all.length ? all.map((r) => `${r.id}  ${r.state.status.padEnd(7)} ${runLabel(r)} · ${r.agent}`).join("\n") : "No subagent runs in this session.";
+            return { content: [{ type: "text", text }], details: { mode: "single", runs: all.map((r) => view(r)) } as Details };
           }
-          const text = `[${runLabel(run)} · ${run.agent} · ${run.state.status}]\n\n${truncateOutput(output || "(no output yet)", run.outputPath)}`;
-          return { content: [{ type: "text", text }], details: { mode: "single", runs: [view(run, true)] } as Details };
+          const run = findRun(params.id);
+          if (!run) throw new Error(`No run ${params.id ?? "(missing id)"}. Use action=status to list runs.`);
+          if (action === "steer") {
+            if (!params.message?.trim()) throw new Error("steer needs `message`.");
+            if (!run.child?.steer(params.message)) throw new Error(`Run ${run.id} is ${run.state.status}; only running runs can be steered.`);
+            return { content: [{ type: "text", text: `Steered ${run.id}.` }], details: { mode: "single", runs: [view(run)] } as Details };
+          }
+          if (action === "stop") {
+            run.child?.stop();
+            return { content: [{ type: "text", text: `Stopping ${run.id}.` }], details: { mode: "single", runs: [view(run)] } as Details };
+          }
+          if (action === "result") {
+            if (run.state.status !== "running") consumedResults.add(run.id);
+            let output = run.state.output;
+            try {
+              output = readFileSync(run.outputPath, "utf8");
+            } catch {
+              // still running or not written
+            }
+            const text = `[${runLabel(run)} · ${run.agent} · ${run.state.status}]\n\n${truncateOutput(output || "(no output yet)", run.outputPath)}`;
+            return { content: [{ type: "text", text }], details: { mode: "single", runs: [view(run, true)] } as Details };
+          }
+          return { content: [{ type: "text", text: JSON.stringify(view(run, true), null, 2) }], details: { mode: "single", runs: [view(run, true)] } as Details };
         }
-        return { content: [{ type: "text", text: JSON.stringify(view(run, true), null, 2) }], details: { mode: "single", runs: [view(run, true)] } as Details };
-      }
 
-      const mode: Details["mode"] = params.tasks?.length ? "parallel" : params.chain?.length ? "chain" : "single";
-      const rawItems: Item[] =
-        mode === "parallel"
-          ? (params.tasks as Item[])
-          : mode === "chain"
-            ? (params.chain as Item[])
-            : params.task
-              ? [{ task: params.task, ...(params.label ? { label: params.label } : {}), ...(params.agent ? { agent: params.agent } : {}), ...(params.model ? { model: params.model } : {}), ...(params.thinking ? { thinking: params.thinking } : {}) }]
-              : [];
-      // Resolve names before chain expansion: previous output must never rename a step.
-      const items = rawItems.map((item) => ({ ...item, label: taskLabel(item.task, item.label) }));
-      if (!items.length) throw new Error("run needs `task`, `tasks`, or `chain`.");
-      if (mode === "parallel" && items.length > config.maxParallel) throw new Error(`At most ${config.maxParallel} parallel tasks.`);
-      const fork = params.context === "fork" ? ctx.sessionManager.getSessionFile() : undefined;
-      if (params.context === "fork" && !fork) throw new Error("context: fork needs a saved session; this one is not persisted.");
+        const mode: Details["mode"] = params.tasks?.length ? "parallel" : params.chain?.length ? "chain" : "single";
+        const rawItems: Item[] =
+          mode === "parallel"
+            ? (params.tasks as Item[])
+            : mode === "chain"
+              ? (params.chain as Item[])
+              : params.task
+                ? [{ task: params.task, ...(params.label ? { label: params.label } : {}), ...(params.agent ? { agent: params.agent } : {}), ...(params.model ? { model: params.model } : {}), ...(params.thinking ? { thinking: params.thinking } : {}) }]
+                : [];
+        // Resolve names before chain expansion: previous output must never rename a step.
+        const items = rawItems.map((item) => ({ ...item, label: taskLabel(item.task, item.label) }));
+        if (!items.length) throw new Error("run needs `task`, `tasks`, or `chain`.");
+        if (mode === "parallel" && items.length > config.maxParallel) throw new Error(`At most ${config.maxParallel} parallel tasks.`);
+        const fork = params.context === "fork" ? ctx.sessionManager.getSessionFile() : undefined;
+        if (params.context === "fork" && !fork) throw new Error("context: fork needs a saved session; this one is not persisted.");
 
-      /** Whether this call's runs are in the background: from the start (`async`), or once detached. */
-      const owner = lifetime;
-      const call = { async: Boolean(params.async), detach: undefined as (() => void) | undefined };
-      const preparation = new AbortController();
-      const abortPreparation = () => { if (!call.async) preparation.abort(); };
-      // Unlike turn cancellation, a session end always cancels background preparation too.
-      const prepSignal = AbortSignal.any([owner.signal, preparation.signal]);
-      // A foreground call the user already interrupted spawns nothing: not before Jev's picks, not
-      // after them. A deliberate `async` call is the user's background work and goes on regardless.
-      const cancelled = () => !call.async && Boolean(signal?.aborted);
-      if (cancelled()) throw new Error("Cancelled before any subagent started.");
-      if (!live || owner.signal.aborted) throw new Error("The session ended before any subagent started.");
-      signal?.addEventListener("abort", abortPreparation);
-      let resolvedAll: Awaited<ReturnType<typeof plan>>;
-      try {
-        resolvedAll = await plan(ctx, items, discoverAgents(ctx.cwd), prepSignal);
-      } catch (error) {
-        signal?.removeEventListener("abort", abortPreparation);
-        throw error;
-      }
-      if (cancelled() || owner.signal.aborted || !live) {
-        signal?.removeEventListener("abort", abortPreparation);
-        throw new Error(cancelled() ? "Cancelled before any subagent started." : "The session ended before any subagent started.");
-      }
-      const failed = resolvedAll.find((r): r is { error: string } => "error" in r);
-      if (failed) {
-        signal?.removeEventListener("abort", abortPreparation);
-        throw new Error(failed.error);
-      }
-      const resolved = resolvedAll as Resolved[];
-
-      const started: Run[] = [];
-      const details = (): Details => ({ mode, runs: started.map((r) => view(r)) });
-      const update = () => {
-        if (live && !owner.signal.aborted) onUpdate?.({ content: [{ type: "text", text: `${started.filter((r) => r.state.status === "running").length} running` }], details: details() });
-      };
-
-      const cwdFor = async (item: Item) => {
-        const base = path.resolve(ctx.cwd, item.cwd ?? params.cwd ?? ".");
-        return params.worktree ? worktreeFor(base, item.task, prepSignal) : base;
-      };
-
-      /**
-       * Nothing queued spawns once the session is gone (a reload, /new: its result would reach no
-       * one), nor once a foreground call is cancelled; a deliberate async call keeps going.
-       */
-      const mayStart = () => live && !owner.signal.aborted && !prepSignal.aborted && !cancelled();
-      const runOne = async (item: Item, r: Resolved, dequeue: () => void, chain?: { step: number; of: number }): Promise<Run | undefined> => {
-        if (!mayStart()) return undefined;
-        const cwd = await cwdFor(item);
-        if (!mayStart()) return undefined;
-        dequeue();
-        const run = startRun(ctx, item, r, { cwd, ...(fork ? { fork } : {}), async: call.async, owner: owner.signal, onUpdate: update });
-        started.push(run);
-        if (call.async) external(run, chain);
-        update();
-        // A foreground run stops with the call, unless it has been moved to the background.
-        const abort = () => {
-          if (!call.async) run.child?.stop();
-        };
-        signal?.addEventListener("abort", abort, { once: true });
-        if (signal?.aborted) abort();
-        if (!call.async && call.detach) detachers.set(run.id, call.detach);
-        await run.child?.done;
-        signal?.removeEventListener("abort", abort);
-        detachers.delete(run.id);
-        // The chain stops at a step that did not succeed: that step is its last.
-        if (call.async && !owner.signal.aborted) external(run, chain && run.state.status === "done" ? chain : undefined);
-        return run;
-      };
-
-      let waiting = items.length;
-      const kind = () => (call.async ? "async" : "sync");
-      const execute = async (): Promise<Run[]> => {
-        queued[kind()] += waiting;
-        const dequeue = () => {
-          if (waiting <= 0) return;
-          waiting--;
-          queued[kind()]--;
-        };
+        /** Whether this call's runs are in the background: from the start (`async`), or once detached. */
+        const owner = lifetime;
+        const call = { async: Boolean(params.async), detach: undefined as (() => void) | undefined };
+        const preparation = new AbortController();
+        const abortPreparation = () => { if (!call.async) preparation.abort(); };
+        // Unlike turn cancellation, a session end always cancels background preparation too.
+        const prepSignal = AbortSignal.any([owner.signal, preparation.signal]);
+        // A foreground call the user already interrupted spawns nothing: not before Jev's picks, not
+        // after them. A deliberate `async` call is the user's background work and goes on regardless.
+        const cancelled = () => !call.async && Boolean(signal?.aborted);
+        if (cancelled()) throw new Error("Cancelled before any subagent started.");
+        if (!live || owner.signal.aborted) throw new Error("The session ended before any subagent started.");
+        signal?.addEventListener("abort", abortPreparation);
+        let resolvedAll: Awaited<ReturnType<typeof plan>>;
         try {
-          if (mode === "chain") {
-            let previous = "";
-            const done: Run[] = [];
-            for (const [index, item] of items.entries()) {
-              const run = await runOne({ ...item, task: item.task.replaceAll("{previous}", previous) }, resolved[index] as Resolved, dequeue, { step: index + 1, of: items.length });
-              if (!run) break;
-              done.push(run);
-              if (run.state.status !== "done") break;
-              previous = run.state.output;
-            }
-            return done;
-          }
-          const queue = items.map((item, index) => ({ item, index }));
-          const done: Run[] = [];
-          const worker = async () => {
-            for (let next = queue.shift(); next; next = queue.shift()) {
-              try {
-                const run = await runOne(next.item, resolved[next.index] as Resolved, dequeue);
-                if (!run) break;
-                done[next.index] = run;
-              } catch (error) {
-                preparation.abort();
-                for (const run of started) run.child?.stop();
-                throw error;
-              }
-            }
-          };
-          const workers = await Promise.allSettled(Array.from({ length: Math.max(1, Math.min(Math.floor(config.concurrency), items.length)) }, worker));
-          const failure = workers.find((result) => result.status === "rejected");
-          if (failure?.status === "rejected") throw failure.reason;
-          return done.filter(Boolean);
-        } finally {
-          // A chain that stopped early leaves steps that will never run.
-          queued[kind()] -= waiting;
-          waiting = 0;
+          resolvedAll = await plan(ctx, items, discoverAgents(ctx.cwd), prepSignal);
+        } catch (error) {
           signal?.removeEventListener("abort", abortPreparation);
-          refreshUI();
+          throw error;
         }
-      };
+        if (cancelled() || owner.signal.aborted || !live) {
+          signal?.removeEventListener("abort", abortPreparation);
+          throw new Error(cancelled() ? "Cancelled before any subagent started." : "The session ended before any subagent started.");
+        }
+        const failed = resolvedAll.find((r): r is { error: string } => "error" in r);
+        if (failed) {
+          signal?.removeEventListener("abort", abortPreparation);
+          throw new Error(failed.error);
+        }
+        const resolved = resolvedAll as Resolved[];
 
-      /** Report `work` as a message when it ends; meanwhile herdr shows background work. */
-      const deliverLater = (work: Promise<Run[]>) => {
-        backgroundCount++;
-        // Released by id: without one, pi-herdr ends the oldest hold, which may be another extension's.
-        const hold = `subagents:${++holdCount}`;
-        safely(() => pi.events.emit("herdr:background", { active: true, label: `subagents (${items.length})`, id: hold }));
-        void work
-          .then((list) => {
-            backgroundCount--;
-            safely(() => pi.events.emit("herdr:background", { active: false, id: hold }));
-            const text = list.filter(Boolean).map(resultText).join("\n\n---\n\n");
-            if (owner.signal.aborted) return;
-            deliverResult(`${finishedHeadline(mode, list.filter(Boolean))}\n\n${text}`, { mode, runs: list.filter(Boolean).map((r) => view(r, true)) }, list.filter(Boolean), mode);
-          })
-          .catch((error: unknown) => {
-            backgroundCount--;
-            safely(() => pi.events.emit("herdr:background", { active: false, id: hold }));
-            if (owner.signal.aborted) return;
-            deliverResult(`Subagent ${mode} failed: ${error instanceof Error ? error.message : String(error)}`);
-          });
-      };
-
-      const ids = () => started.map((r) => `${r.id} (${runLabel(r)} · ${r.agent}, ${r.model}, ${r.thinking})`).join(", ");
-
-      if (call.async) {
-        deliverLater(execute());
-        // Let the runs start so their ids exist.
-        await new Promise((r) => setTimeout(r, 50));
-        return {
-          content: [{ type: "text", text: `Started ${mode} in the background${started.length ? `: ${ids()}` : ""}. Results arrive as messages; use action=status, steer, stop, or result with an id meanwhile.${hasBg() && started.length ? ` If nothing else is left to do, bg_wait ${started.map((r) => `subagent:${r.id}`).join(" or ")} waits inside your turn until it ends.` : ""}` }],
-          details: details(),
+        const started: Run[] = [];
+        const details = (): Details => ({ mode, runs: started.map((r) => view(r)) });
+        const update = () => {
+          if (live && !owner.signal.aborted) onUpdate?.({ content: [{ type: "text", text: `${started.filter((r) => r.state.status === "running").length} running` }], details: details() });
         };
-      }
 
-      // In the foreground until the user moves the call to the background (b in FleetView or the viewer).
-      const detached = new Promise<"detached">((resolve) => {
-        call.detach = () => {
-          if (call.async) return;
-          queued.sync -= waiting;
-          queued.async += waiting;
-          call.async = true;
-          for (const r of started) {
-            r.async = true;
-            detachers.delete(r.id);
-            if (r.state.status === "running") external(r);
+        const cwdFor = async (item: Item) => {
+          const base = path.resolve(ctx.cwd, item.cwd ?? params.cwd ?? ".");
+          return params.worktree ? worktreeFor(base, item.task, prepSignal) : base;
+        };
+
+        /**
+         * Nothing queued spawns once the session is gone (a reload, /new: its result would reach no
+         * one), nor once a foreground call is cancelled; a deliberate async call keeps going.
+         */
+        const mayStart = () => live && !owner.signal.aborted && !prepSignal.aborted && !cancelled();
+        const runOne = async (item: Item, r: Resolved, dequeue: () => void, chain?: { step: number; of: number }): Promise<Run | undefined> => {
+          if (!mayStart()) return undefined;
+          const cwd = await cwdFor(item);
+          if (!mayStart()) return undefined;
+          dequeue();
+          const run = startRun(ctx, item, r, { cwd, ...(fork ? { fork } : {}), async: call.async, owner: owner.signal, onUpdate: update });
+          started.push(run);
+          if (call.async) external(run, chain);
+          update();
+          // A foreground run stops with the call, unless it has been moved to the background.
+          const abort = () => {
+            if (!call.async) run.child?.stop();
+          };
+          signal?.addEventListener("abort", abort, { once: true });
+          if (signal?.aborted) abort();
+          if (!call.async && call.detach) detachers.set(run.id, call.detach);
+          await run.child?.done;
+          signal?.removeEventListener("abort", abort);
+          detachers.delete(run.id);
+          // The chain stops at a step that did not succeed: that step is its last.
+          if (call.async && !owner.signal.aborted) external(run, chain && run.state.status === "done" ? chain : undefined);
+          return run;
+        };
+
+        let waiting = items.length;
+        const kind = () => (call.async ? "async" : "sync");
+        const execute = async (): Promise<Run[]> => {
+          queued[kind()] += waiting;
+          const dequeue = () => {
+            if (waiting <= 0) return;
+            waiting--;
+            queued[kind()]--;
+          };
+          try {
+            if (mode === "chain") {
+              let previous = "";
+              const done: Run[] = [];
+              for (const [index, item] of items.entries()) {
+                const run = await runOne({ ...item, task: item.task.replaceAll("{previous}", previous) }, resolved[index] as Resolved, dequeue, { step: index + 1, of: items.length });
+                if (!run) break;
+                done.push(run);
+                if (run.state.status !== "done") break;
+                previous = run.state.output;
+              }
+              return done;
+            }
+            const queue = items.map((item, index) => ({ item, index }));
+            const done: Run[] = [];
+            const worker = async () => {
+              for (let next = queue.shift(); next; next = queue.shift()) {
+                try {
+                  const run = await runOne(next.item, resolved[next.index] as Resolved, dequeue);
+                  if (!run) break;
+                  done[next.index] = run;
+                } catch (error) {
+                  preparation.abort();
+                  for (const run of started) run.child?.stop();
+                  throw error;
+                }
+              }
+            };
+            const workers = await Promise.allSettled(Array.from({ length: Math.max(1, Math.min(Math.floor(config.concurrency), items.length)) }, worker));
+            const failure = workers.find((result) => result.status === "rejected");
+            if (failure?.status === "rejected") throw failure.reason;
+            return done.filter(Boolean);
+          } finally {
+            // A chain that stopped early leaves steps that will never run.
+            queued[kind()] -= waiting;
+            waiting = 0;
+            signal?.removeEventListener("abort", abortPreparation);
+            refreshUI();
           }
-          refreshUI();
-          resolve("detached");
         };
-      });
-      const work = execute();
-      const done = await Promise.race([work, detached]);
-      if (done === "detached") {
-        deliverLater(work);
-        return {
-          content: [{ type: "text", text: `The user moved this ${mode} to the background: ${ids()}. Results arrive as messages; use action=status, steer, stop, or result with an id meanwhile.` }],
-          details: details(),
+
+        /** Report `work` as a message when it ends; meanwhile herdr shows background work. */
+        const deliverLater = (work: Promise<Run[]>) => {
+          backgroundCount++;
+          // Released by id: without one, pi-herdr ends the oldest hold, which may be another extension's.
+          const hold = `subagents:${++holdCount}`;
+          safely(() => pi.events.emit("herdr:background", { active: true, label: `subagents (${items.length})`, id: hold }));
+          void work
+            .then((list) => {
+              backgroundCount--;
+              safely(() => pi.events.emit("herdr:background", { active: false, id: hold }));
+              const text = list.filter(Boolean).map(resultText).join("\n\n---\n\n");
+              if (owner.signal.aborted) return;
+              deliverResult(`${finishedHeadline(mode, list.filter(Boolean))}\n\n${text}`, { mode, runs: list.filter(Boolean).map((r) => view(r, true)) }, list.filter(Boolean), mode);
+            })
+            .catch((error: unknown) => {
+              backgroundCount--;
+              safely(() => pi.events.emit("herdr:background", { active: false, id: hold }));
+              if (owner.signal.aborted) return;
+              deliverResult(`Subagent ${mode} failed: ${error instanceof Error ? error.message : String(error)}`);
+            });
         };
-      }
-      for (const r of started) detachers.delete(r.id);
-      if (!done.length) throw new Error(signal?.aborted ? "Cancelled before any subagent started." : "No subagent started.");
-      const skipped = items.length - done.length;
-      const text = `${mode === "chain" ? resultText(done.at(-1) as Run) : done.map(resultText).join("\n\n---\n\n")}${skipped > 0 && signal?.aborted ? `\n\n[Cancelled: ${skipped} queued task${skipped === 1 ? "" : "s"} never started.]` : ""}`;
-      const allFailed = done.every((r) => r.state.status !== "done");
-      return {
-        content: [{ type: "text", text }],
-        details: { mode, runs: done.map((r) => view(r, true)) } as Details,
-        usage: usageOf(done) as never,
-        ...(allFailed ? { isError: true } : {}),
-      };
-    },
 
-    renderCall(args, theme) {
-      const a = args as { action?: string; agent?: string; task?: string; label?: string; tasks?: unknown[]; chain?: unknown[]; async?: boolean; id?: string };
-      const action = a.action ?? "run";
-      const what =
-        action !== "run"
-          ? `${action}${a.id ? ` ${a.id}` : ""}`
-          : a.tasks?.length
-            ? `${a.tasks.length} parallel tasks`
-            : a.chain?.length
-              ? `chain of ${a.chain.length}`
-              : `${taskLabel(a.task ?? "", a.label)} · ${a.agent ?? "auto"}`;
-      return new Text(`${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("muted", what)}${a.async ? theme.fg("dim", " (async)") : ""}`, 0, 0);
-    },
+        const ids = () => started.map((r) => `${r.id} (${runLabel(r)} · ${r.agent}, ${r.model}, ${r.thinking})`).join(", ");
 
-    renderResult(result, { expanded }, theme) {
-      const d = result.details as Details | undefined;
-      if (!d?.runs?.length) {
-        const first = result.content[0];
-        return new Text(first?.type === "text" ? first.text : "", 0, 0);
-      }
-      const icon = (s: RunView["status"]) =>
-        s === "running" ? theme.fg("warning", "●") : s === "done" ? theme.fg("success", "✓") : s === "stopped" ? theme.fg("muted", "■") : theme.fg("error", "✗");
-      const jev = (on: boolean) => (on ? theme.fg("dim", " (Jev)") : "");
-      const sep = theme.fg("muted", " · ");
-      const flat = (text: string) => text.replace(/\s+/gu, " ").trim();
-      // Every run is exactly two clipped rows, so the block never changes height or reflows
-      // while runs progress: identity left and stats flush right, then what the run is doing
-      // (or ended with) below. Only expanded output wraps.
-      const rows: Row[] = [];
-      for (const r of d.runs) {
-        rows.push({
-          left: `${icon(r.status)} ${theme.fg("accent", runLabel(r))}${sep}${r.agent}${jev(r.byJev.agent)}${sep}${shortModel(r.model)}${jev(r.byJev.model)}${sep}${r.thinking}${jev(r.byJev.thinking)}`,
-          right: [formatElapsed(r.seconds * 1000), `${r.turns} turns`, ...(r.cost ? [`$${r.cost.toFixed(3)}`] : []), r.id],
+        if (call.async) {
+          deliverLater(execute());
+          // Let the runs start so their ids exist.
+          await new Promise((r) => setTimeout(r, 50));
+          return {
+            content: [{ type: "text", text: `Started ${mode} in the background${started.length ? `: ${ids()}` : ""}. Results arrive as messages; use action=status, steer, stop, or result with an id meanwhile.${hasBg() && started.length ? ` If nothing else is left to do, bg_wait ${started.map((r) => `subagent:${r.id}`).join(" or ")} waits inside your turn until it ends.` : ""}` }],
+            details: details(),
+          };
+        }
+
+        // In the foreground until the user moves the call to the background (b in FleetView or the viewer).
+        const detached = new Promise<"detached">((resolve) => {
+          call.detach = () => {
+            if (call.async) return;
+            queued.sync -= waiting;
+            queued.async += waiting;
+            call.async = true;
+            for (const r of started) {
+              r.async = true;
+              detachers.delete(r.id);
+              if (r.state.status === "running") external(r);
+            }
+            refreshUI();
+            resolve("detached");
+          };
         });
-        const detail = r.error
-          ? theme.fg("error", flat(r.error))
-          : r.status === "running"
-            ? theme.fg("dim", flat(r.activity ?? "starting…"))
-            : theme.fg("dim", flat(r.output?.split("\n").find((l) => l.trim()) ?? r.task));
-        rows.push({ left: `  ${theme.fg("muted", "└")} ${detail}` });
-        if (expanded && r.output) rows.push({ left: "", markdown: r.output.split("\n").slice(0, 40).join("\n"), indent: 4 });
-      }
-      return new RowsText(rows, (text) => theme.fg("dim", text));
-    },
-  });
+        const work = execute();
+        const done = await Promise.race([work, detached]);
+        if (done === "detached") {
+          deliverLater(work);
+          return {
+            content: [{ type: "text", text: `The user moved this ${mode} to the background: ${ids()}. Results arrive as messages; use action=status, steer, stop, or result with an id meanwhile.` }],
+            details: details(),
+          };
+        }
+        for (const r of started) detachers.delete(r.id);
+        if (!done.length) throw new Error(signal?.aborted ? "Cancelled before any subagent started." : "No subagent started.");
+        const skipped = items.length - done.length;
+        const text = `${mode === "chain" ? resultText(done.at(-1) as Run) : done.map(resultText).join("\n\n---\n\n")}${skipped > 0 && signal?.aborted ? `\n\n[Cancelled: ${skipped} queued task${skipped === 1 ? "" : "s"} never started.]` : ""}`;
+        const allFailed = done.every((r) => r.state.status !== "done");
+        return {
+          content: [{ type: "text", text }],
+          details: { mode, runs: done.map((r) => view(r, true)) } as Details,
+          usage: usageOf(done) as never,
+          ...(allFailed ? { isError: true } : {}),
+        };
+      },
+
+      renderCall(args, theme) {
+        const a = args as { action?: string; agent?: string; task?: string; label?: string; tasks?: unknown[]; chain?: unknown[]; async?: boolean; id?: string };
+        const action = a.action ?? "run";
+        const what =
+          action !== "run"
+            ? `${action}${a.id ? ` ${a.id}` : ""}`
+            : a.tasks?.length
+              ? `${a.tasks.length} parallel tasks`
+              : a.chain?.length
+                ? `chain of ${a.chain.length}`
+                : `${taskLabel(a.task ?? "", a.label)} · ${a.agent ?? "auto"}`;
+        return new Text(`${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("muted", what)}${a.async ? theme.fg("dim", " (async)") : ""}`, 0, 0);
+      },
+
+      renderResult(result, { expanded }, theme) {
+        const d = result.details as Details | undefined;
+        if (!d?.runs?.length) {
+          const first = result.content[0];
+          return new Text(first?.type === "text" ? first.text : "", 0, 0);
+        }
+        const icon = (s: RunView["status"]) =>
+          s === "running" ? theme.fg("warning", "●") : s === "done" ? theme.fg("success", "✓") : s === "stopped" ? theme.fg("muted", "■") : theme.fg("error", "✗");
+        const jev = (on: boolean, pressure?: number) => (on ? theme.fg("dim", jevMark(on, pressure)) : "");
+        const sep = theme.fg("muted", " · ");
+        const flat = (text: string) => text.replace(/\s+/gu, " ").trim();
+        // Every run is exactly two clipped rows, so the block never changes height or reflows
+        // while runs progress: identity left and stats flush right, then what the run is doing
+        // (or ended with) below. Only expanded output wraps.
+        const rows: Row[] = [];
+        for (const r of d.runs) {
+          rows.push({
+            left: `${icon(r.status)} ${theme.fg("accent", runLabel(r))}${sep}${r.agent}${jev(r.byJev.agent)}${sep}${shortModel(r.model)}${jev(r.byJev.model, r.pressure)}${sep}${r.thinking}${jev(r.byJev.thinking, r.pressure)}`,
+            right: [formatElapsed(r.seconds * 1000), `${r.turns} turns`, ...(r.cost ? [`$${r.cost.toFixed(3)}`] : []), r.id],
+          });
+          const detail = r.error
+            ? theme.fg("error", flat(r.error))
+            : r.status === "running"
+              ? theme.fg("dim", flat(r.activity ?? "starting…"))
+              : theme.fg("dim", flat(r.output?.split("\n").find((l) => l.trim()) ?? r.task));
+          rows.push({ left: `  ${theme.fg("muted", "└")} ${detail}` });
+          if (expanded && r.output) rows.push({ left: "", markdown: r.output.split("\n").slice(0, 40).join("\n"), indent: 4 });
+        }
+        return new RowsText(rows, (text) => theme.fg("dim", text));
+      },
+    });
+  };
+  registerSubagentTool(delegationOf(config));
 
   pi.registerCommand("subagents", {
     description: "Browse this session's subagent runs and view their conversations (/subagents [id], /subagents stop [id|all])",

@@ -1,8 +1,58 @@
 import type { AgentDef } from "./agents.ts";
-import { type ClassifierAnswer, type ClassifierQuestion, choice, score } from "./jev.ts";
+import { type ClassifierAnswer, type ClassifierQuestion, choice } from "./jev.ts";
 
 export type Tier = "fast" | "balanced" | "strong";
+/** Tiers and efforts, weakest first: the order the threshold rule climbs. */
+export const TIERS = ["fast", "balanced", "strong"] as const;
 export const EFFORTS = ["low", "medium", "high", "xhigh"] as const;
+
+/** The effort question's options, one description each. */
+export const EFFORT_DESCRIPTIONS: Record<(typeof EFFORTS)[number], string> = {
+  low: "A lookup, a search, or a mechanical change",
+  medium: "A routine change or a clear question",
+  high: "A multi-step change, debugging with clear symptoms, or design in a known pattern",
+  xhigh: "Subtle design, a cross-cutting change, hard debugging, or correctness-critical work",
+};
+
+/**
+ * How sure Jev must be before a pick climbs to a stronger tier or effort: `relaxed` with no quota
+ * pressure, `tight` at full pressure, linear in between.
+ */
+export interface Threshold {
+  relaxed: number;
+  tight: number;
+}
+export const DEFAULT_THRESHOLD: Threshold = { relaxed: 0.35, tight: 0.85 };
+
+/** theta(p) = relaxed + (tight - relaxed) * p, with p (quota pressure) clamped to 0..1. */
+export function theta(pressure: number, threshold: Threshold = DEFAULT_THRESHOLD): number {
+  const p = Number.isFinite(pressure) ? Math.min(1, Math.max(0, pressure)) : 0;
+  const relaxed = finite01(threshold.relaxed, DEFAULT_THRESHOLD.relaxed);
+  const tight = finite01(threshold.tight, DEFAULT_THRESHOLD.tight);
+  return relaxed + (tight - relaxed) * p;
+}
+
+function finite01(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : fallback;
+}
+
+/**
+ * The highest of `options` (weakest first) whose P(this option or stronger) reaches `bar`; else the
+ * lowest. An answer without probabilities counts its choice at its confidence.
+ */
+export function climb<T extends string>(options: readonly T[], answer: { choice: string; probabilities: Record<string, number>; confidence: number }, bar: number): T {
+  const probabilities = options.some((o) => Number.isFinite(answer.probabilities?.[o]))
+    ? answer.probabilities
+    : { [answer.choice]: answer.confidence };
+  let atLeast = 0;
+  for (let i = options.length - 1; i > 0; i--) {
+    const p = probabilities[options[i]!];
+    atLeast += Number.isFinite(p) ? p! : 0;
+    // A hair of slack, so 0.35 + 0.5 summed in floating point still meets 0.85.
+    if (atLeast >= bar - 1e-9) return options[i]!;
+  }
+  return options[0]!;
+}
 
 export interface TierConfig {
   /** `provider/model` per tier; a missing tier uses the parent's model. */
@@ -39,8 +89,8 @@ export function providerTiers(
 }
 
 export const DEFAULT_TIER_DESCRIPTIONS: Record<Tier, string> = {
-  fast: "Quick lookups, searches, mechanical edits, summarizing, simple scripted work",
-  balanced: "Ordinary implementation, debugging with clear symptoms, reviews, research",
+  fast: "Lookups, searches, reading and summarizing, scripted or mechanical edits",
+  balanced: "Implementing a precisely specified change, ordinary implementation, debugging with clear symptoms, reviews, research",
   strong: "Subtle design, hard debugging, cross-cutting changes, correctness-critical work",
 };
 
@@ -70,14 +120,9 @@ export function pickQuestions(given: Given, agents: readonly AgentDef[], tiers: 
   }
   if (!given.thinking) {
     questions.effort = {
-      type: "score",
+      type: "choice",
       instructions: "How much careful reasoning does `task` need from the agent doing it?",
-      criteria: [
-        "A lookup, a search, or a mechanical change",
-        "A routine change or a clear question",
-        "A multi-step change, debugging with clear symptoms, or design in a known pattern",
-        "Subtle design, a cross-cutting change, hard debugging, or correctness-critical work",
-      ],
+      criteria: { ...EFFORT_DESCRIPTIONS },
     };
   }
   return questions;
@@ -87,17 +132,26 @@ export interface Picks {
   agent?: string;
   tier?: Tier;
   thinking?: string;
+  /** The quota pressure the tier and effort were picked under, when above 0. */
+  pressure?: number;
 }
 
-/** Read Jev's answers: a role at confidence >= 0.5, a tier at >= 0.4 (else balanced), effort by score. */
-export function readPicks(answers: Record<string, ClassifierAnswer>): Picks {
+/**
+ * Read Jev's answers: a role at confidence >= 0.5; a tier and an effort by one rule, the highest
+ * option whose P(it or stronger) reaches theta(pressure), else the lowest. Quota pressure on the
+ * parent's provider (0..1) raises the bar, so picks move toward cheaper tiers and lower efforts.
+ */
+export function readPicks(answers: Record<string, ClassifierAnswer>, options: { pressure?: number; threshold?: Threshold } = {}): Picks {
   const picks: Picks = {};
+  const pressure = Number.isFinite(options.pressure) ? Math.min(1, Math.max(0, options.pressure!)) : 0;
+  const bar = theta(pressure, options.threshold);
   const role = choice(answers, "role");
   if (role && role.confidence >= 0.5) picks.agent = role.choice;
   const tier = choice(answers, "tier");
-  if (tier) picks.tier = tier.confidence >= 0.4 && ["fast", "balanced", "strong"].includes(tier.choice) ? (tier.choice as Tier) : "balanced";
-  const effort = score(answers, "effort");
-  if (effort) picks.thinking = EFFORTS[Math.min(3, Math.max(0, Math.round(effort.score)))];
+  if (tier) picks.tier = climb(TIERS, tier, bar);
+  const effort = choice(answers, "effort");
+  if (effort) picks.thinking = climb(EFFORTS, effort, bar);
+  if (pressure > 0 && (picks.tier || picks.thinking)) picks.pressure = pressure;
   return picks;
 }
 
@@ -108,6 +162,8 @@ export interface Resolved {
   /** Which choices Jev made, for display. */
   byJev: { agent: boolean; model: boolean; thinking: boolean };
   tier?: Tier;
+  /** The quota pressure Jev's model or effort pick was made under, when above 0. */
+  pressure?: number;
 }
 
 /**
@@ -148,5 +204,6 @@ export function resolve(
     byJev.thinking = true;
   }
   thinking ??= parent.thinking;
-  return { agent, model, thinking, byJev, ...(tier ? { tier } : {}) };
+  const pressure = picks?.pressure && (byJev.model || byJev.thinking) ? picks.pressure : undefined;
+  return { agent, model, thinking, byJev, ...(tier ? { tier } : {}), ...(pressure ? { pressure } : {}) };
 }

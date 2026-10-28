@@ -13,6 +13,8 @@ export interface Run {
   model: string;
   thinking: string;
   byJev: Resolved["byJev"];
+  /** The quota pressure (0..1) Jev's model or effort pick was made under, when above 0. */
+  pressure?: number;
   tier?: Tier;
   cwd: string;
   async: boolean;
