@@ -9,7 +9,7 @@ plugin: pi-marimo
 - **Use it for:** Keep notebook state visible, give the model a fixed notebook snapshot each turn, and read and steer an agent-edited notebook from the terminal instead of the browser.
 - **Enable:** Select `packages/pi-marimo/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
 - **Controls:** `/marimo` view/split/edit/new/stop/open/auto/off/show/lens/chart/inspect and notebook pinning. `ctrl+'` docks or closes the notebook this session uses (pi-sidebar's key, which it keeps when there is no notebook or Sidebar is open); `ctrl+]` switches focus while a notebook is docked; the notebook view's keys below (`?` lists them).
-- **Settings:** `marimo.json` shared/user/project layers: `maxNotebooks` (8), `context`, `liveCharts`, `view.outputs`, `view.split`, `view.autoSplit`, `server.command`. The follow mode is session state.
+- **Settings:** `marimo.json` shared/user/project layers: `maxNotebooks` (8), `context`, `liveCharts`, `view.outputs`, `view.code`, `view.split`, `view.autoSplit`, `server.command`. The follow mode is session state.
 - **Requirements, cost & privacy:** Running compatible marimo server; `MARIMO_TOKEN` for protected connections. No inference or execution for observation; summaries enter model input. Notebook execution has its own costs.
 - **Integrations & limits:** Optional background waits, FleetView, footer, Herdr, pi-next-prompt and pi-vim (the docked prompts and markdown editing). Cells are edited by the agent only, through marimo-pair; the view runs cells, interrupts, sets widgets, runs scratch code and makes Lens selections. Stopping a client job pi-marimo follows interrupts its cells.
 
@@ -168,6 +168,7 @@ Files merge in order: `~/.config/agents/marimo.json`, `~/.pi/agent/marimo.json`,
 | `context` | `true` | Put the notebooks' state in the model's context at each prompt. |
 | `liveCharts` | `true` | Run Plotly figures live; `false` draws pictures. |
 | `view.outputs` | `false` | Start the notebook view with the whole section in the detail. |
+| `view.code` | `"open"` | Cells' code in the detail, `"open"` or `"folded"` to its first line. |
 | `server.command` | `[]` | How `/marimo edit` and `/marimo new` start marimo; empty: `uv run marimo` in a uv project, else `marimo`. |
 
 When multiple marimo sessions hold the same file, attachment uses the exact session ID. In that situation, browser edits may not be visible until they execute. Connection status should therefore be checked before treating an outline as authoritative.

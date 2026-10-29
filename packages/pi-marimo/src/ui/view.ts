@@ -33,7 +33,7 @@ import type { EditorFactoryFn } from "../editor-contract.ts";
 import { Dock, type DockSpec } from "./dock.js";
 import { type Part, detailRows } from "./detail.js";
 import { helpLines } from "./help.js";
-import { type PaneTheme, outlineRows } from "./outline.js";
+import { type PaneTheme, outlineRows, spinner } from "./outline.js";
 import { MAX_WIDGETS, type Row, firstLine, foldedCells, selectableCells } from "./rows.js";
 import { cellTitle } from "./titles.js";
 import type { ScratchEvent, ScratchResult } from "./scratch.js";
@@ -48,7 +48,7 @@ export { selectableCells, type Row, type RowOptions } from "./rows.js";
 
 /** Banner, header, rule, rule above the hints, the hints, bottom border. */
 const CHROME = 6;
-const TICK_MS = 1_000;
+const TICK_MS = 100;
 /** The row the panes start at: banner, header, rule. */
 const ROWS_TOP = 3;
 /** From this many columns the outline and the detail sit side by side; narrower, one at a time. */
@@ -126,6 +126,8 @@ export interface ViewActions {
   liveCharts?: boolean;
   /** Start with the whole section in the detail pane (O toggles it). */
   outputs?: boolean;
+  /** Cells' code open (default) or folded to its first line; Enter flips one cell. */
+  code?: "open" | "folded";
   /** A marimo table's kernel functions (search, summaries...), for driving tables. */
   table?: TableRpc;
   /** Writes a table's selection to the kernel as the browser does. */
@@ -163,6 +165,7 @@ export class NotebookView implements Component {
   private follow = true;
   private cursor: string | undefined;
   /** Cells whose code shows in the detail. */
+  /** Cells whose code is flipped from the default (`view.code`). */
   private codeOpen = new Set<string>();
   /** The detail's scroll, in its own rows. */
   private detailScroll = 0;
@@ -238,11 +241,15 @@ export class NotebookView implements Component {
     this.live = live ?? new LiveCharts(() => { if (!this.closed) this.tui.requestRender(); }, undefined, undefined, undefined, () => Painter.for(this.tui), actions.docked ? "base" : "overlay");
     if (!actions.docked) Painter.for(this.tui)?.setExclusive(true);
     this.tui.requestRender();
+    // Ticks fast while a cell runs (the spinner turns), once a second otherwise.
+    let ticks = 0;
     this.timer = setInterval(() => {
-      if (!this.closed) {
-        this.syncConfirmation();
-        this.tui.requestRender();
-      }
+      if (this.closed) return;
+      const f = this.current();
+      const busy = !!f && (!!f.notebook.running() || f.notebook.queued() > 0);
+      if (!busy && ++ticks % 10 !== 0) return;
+      this.syncConfirmation();
+      this.tui.requestRender();
     }, TICK_MS);
     this.timer.unref?.();
   }
@@ -384,10 +391,17 @@ export class NotebookView implements Component {
       this.note = "Nothing to run.";
       return;
     }
-    this.note = `Running ${what}…`;
+    // Shown as queued at once; marimo's own status replaces it as the run starts.
+    const marked = cells.filter((c) => c.status === "idle" && !f.notebook.isMarkdown(c));
+    for (const c of marked) c.status = "queued";
+    this.note = undefined;
+    this.follow = cells.length > 1;
     this.actions.run(f, cells.map((c) => ({ id: c.id, code: c.code }))).then(
-      () => { if (!this.closed) { this.note = `Started ${what}.`; this.follow = true; this.tui.requestRender(); } },
-      (e: unknown) => { if (!this.closed) { this.note = `Could not run: ${message(e)}`; this.tui.requestRender(); } },
+      () => { if (!this.closed) this.tui.requestRender(); },
+      (e: unknown) => {
+        for (const c of marked) if (c.status === "queued") c.status = "idle";
+        if (!this.closed) { this.note = `Could not run ${what}: ${message(e)}`; this.tui.requestRender(); }
+      },
     );
   }
 
@@ -587,7 +601,7 @@ export class NotebookView implements Component {
     const text = editableMarkdown(cell.code);
     if (text === undefined) {
       this.note = "This markdown is built in Python (an f-string); ask the agent (a), or open it in the browser (o).";
-      this.codeOpen.add(cell.id);
+      this.setCode(cell.id, true);
       return;
     }
     this.openDock({
@@ -840,6 +854,14 @@ export class NotebookView implements Component {
     if (!this.codeOpen.delete(id)) this.codeOpen.add(id);
   }
 
+  private codeShown(id: string): boolean {
+    return (this.actions.code !== "folded") !== this.codeOpen.has(id);
+  }
+
+  private setCode(id: string, open: boolean): void {
+    if (this.codeShown(id) !== open) this.toggleCode(id);
+  }
+
   /** The pane under a column and a page row (from the first row under the header); the rule between stacked panes is neither. */
   private paneAt(x: number, line: number): "outline" | "detail" | undefined {
     const { shows, detailLeft, outlineHeight } = this.panes;
@@ -1036,7 +1058,7 @@ export class NotebookView implements Component {
       const c = this.cursorCell(f);
       if (!c || !nb.agentChanges.has(c.id)) this.note = "The agent has not changed this cell since your last message.";
       else {
-        if (!this.diffs.delete(c.id)) { this.diffs.add(c.id); this.codeOpen.add(c.id); }
+        if (!this.diffs.delete(c.id)) { this.diffs.add(c.id); this.setCode(c.id, true); }
         this.cursor = c.id;
         this.reveal = true;
       }
@@ -1114,7 +1136,13 @@ export class NotebookView implements Component {
     const nb = f.notebook;
     const busy = nb.running() || nb.queued() > 0;
     const errors = nb.errors().length;
-    const state = [...kernelStateParts(f), ...lensParts(f)].join(" · ");
+    // What runs, by its title, with the spinner; else the kernel's state.
+    const run = nb.running();
+    const queued = nb.queued();
+    const state = run
+      ? [th.bold(th.fg("accent", `${spinner(Date.now())} running ${cellTitle(nb, run.cell)}${run.since ? ` ${elapsed(Date.now() - run.since)}` : ""}`)), queued ? th.fg("accent", `${queued} queued`) : "", errors ? th.fg("error", `${errors} error${errors === 1 ? "" : "s"}`) : "", ...lensParts(f)].filter(Boolean).join(" · ")
+      : queued && f.connection === "connected" ? [th.fg("accent", `◌ ${queued} queued`), ...lensParts(f)].join(" · ")
+        : [...kernelStateParts(f), ...lensParts(f)].join(" · ");
     const dot = th.fg("dim", " · ");
     const working = this.actions.agentBusy?.() === true ? `${dot}${th.fg("accent", "agent working")}` : "";
     const servers = this.actions.servers?.(f) ?? [];
@@ -1325,7 +1353,7 @@ export class NotebookView implements Component {
           return lines;
         };
         const d = detailRows(nb, th, Date.now(), {
-          cell, width: dw, codeOpen: this.codeOpen.has(cell.id), diff: this.diffs.has(cell.id), section: this.section,
+          cell, width: dw, codeOpen: this.codeShown(cell.id), diff: this.diffs.has(cell.id), section: this.section,
           table: tableSource, tableCard, partFocus: this.part,
           ...(this.widget ? { widgetFocus: this.widget } : {}),
           imageRows: dh - 1, vega: this.vega, plotly: this.plotly,
@@ -1425,13 +1453,14 @@ export class NotebookView implements Component {
       else hints.push(cell && f.notebook.isMarkdown(cell) ? "enter edit" : "enter code");
     }
     const more: string[] = [];
+    if (connected && this.actions.run && cell && !f.notebook.isMarkdown(cell)) more.push(busy ? "x interrupt" : "r run");
     if (this.lastParts.length > 1) more.push("n/p parts");
     if (this.lastParts.some((p) => p.kind === "table") && this.actions.table) more.push("t table");
     if (cell?.output?.widgets?.length && this.actions.setWidget) more.push("w widgets");
     if (f && cell && f.notebook.agentChanges.has(cell.id)) more.push("d diff");
     if (f && (cell?.error || f.notebook.errors().length)) more.push("e next error");
     if (f && this.live.rects.length) more.push("i inspect chart");
-    if (busy) more.push("x interrupt");
+    if (busy && !more.includes("x interrupt")) more.push("x interrupt");
     if (f && this.actions.ask) more.push("a ask");
     if (connected && this.actions.scratch) more.push(": python");
     hints.push(...more.slice(0, 6 - hints.length));

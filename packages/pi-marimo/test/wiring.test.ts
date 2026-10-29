@@ -218,7 +218,7 @@ test("the notebooks as background work: a source for the hosts, its own pill alo
   expect(x.customs.at(-1)?.options).toMatchObject({ overlay: true, overlayOptions: { width: "100%" } });
   const screen = view.render(100).join("\n");
   expect(screen).toMatch(/◀ esc · Notebook nb\.py · not your main session/u);
-  expect(screen).toMatch(/Data loading[\s\S]*Slow model fit[\s\S]*▌ {2}● y /u);
+  expect(screen).toMatch(/Data loading[\s\S]*Slow model fit[\s\S]*▌ {2}[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] y /u);
   expect(screen).not.toContain("lEQa");
   view.handleInput("x");
   expect(view.render(100).join("\n")).toMatch(/x again to interrupt/u);

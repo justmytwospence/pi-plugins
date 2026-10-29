@@ -88,6 +88,8 @@ export const DEFAULT_CONFIG = {
   view: {
     /** Open the notebook view with the whole section in the detail pane (O toggles it). */
     outputs: false,
+    /** Cells' code in the detail: "open", or "folded" to its first line (Enter flips a cell). */
+    code: "open",
     /** Open the notebook view docked beside the chat instead of full screen (Pi's fullscreen mode). */
     split: false,
     /** Dock a notebook beside the chat when the agent starts running its cells. */
@@ -356,6 +358,7 @@ export default function piMarimo(pi: ExtensionAPI): void {
       ...viewActions,
       liveCharts: config.liveCharts,
       outputs: config.view.outputs,
+      code: config.view.code === "folded" ? "folded" : "open",
       keybindings: keys,
       ...(suite ? { editorFactory: suite.factory } : {}),
       // Docking waits for the overlay to close, or Pi's focus restore takes focus back from the docked view.

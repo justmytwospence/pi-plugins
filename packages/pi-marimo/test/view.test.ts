@@ -145,7 +145,7 @@ test("j/k move the cursor between cells; the detail shows the cell's output, fol
   f.notebook.apply("cell-op", { cell_id: "a", status: "running", timestamp: 1 });
   f.notebook.apply("cell-op", { cell_id: "a", console: [{ channel: "stdout", mimetype: "text/plain", data: "hi\n" }], output: { channel: "output", mimetype: "text/html", data: "<span>value &amp; more</span>" } });
   f.notebook.apply("cell-op", { cell_id: "a", status: "idle", timestamp: 2 });
-  const v = make(f);
+  const v = make(f, { code: "folded" });
   try {
     const first = screen(v);
     expect(first).toMatch(/▌  first/u);
@@ -211,11 +211,11 @@ test("following keeps the cursor on the running cell until the user moves; f fol
   f.notebook.apply("cell-op", { cell_id: "c40", status: "running", timestamp: 1 });
   const v = make(f);
   try {
-    expect(screen(v)).toMatch(/▌● v40 = 40/u);
+    expect(screen(v)).toMatch(/▌[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] v40 = 40/u);
     v.handleInput("k");
     expect(screen(v)).toMatch(/▌  v39 = 39/u);
     v.handleInput("f");
-    expect(screen(v)).toMatch(/▌● v40 = 40/u);
+    expect(screen(v)).toMatch(/▌[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] v40 = 40/u);
   } finally { v.dispose(); }
 });
 
@@ -254,7 +254,9 @@ test("a failed run shows the reason in the footer", async () => {
   try {
     v.handleInput("r");
     await new Promise((r) => setTimeout(r, 5));
-    expect(screen(v)).toContain("Could not run: marimo answered 500");
+    expect(screen(v)).toContain("Could not run x = 1: marimo answered 500");
+    // The cell shown as queued at once goes back to idle.
+    expect(f.notebook.cells.get("a")!.status).toBe("idle");
   } finally { v.dispose(); }
 });
 
@@ -925,7 +927,7 @@ test("n and p walk a cell's parts and Enter acts on the focused one", () => {
   f.notebook.apply("cell-op", { cell_id: "a", output: { channel: "output", mimetype: "text/html", data: slider } });
   // The error output was replaced by the widget; set the error again through the cell's own state.
   f.notebook.cells.get("a")!.error = "KeyError: k";
-  const v = make(f, { setWidget: () => {} });
+  const v = make(f, { setWidget: () => {}, code: "folded" });
   try {
     // The focused part's rows carry the accent bar; there are no labels.
     const focused = () => screen(v).split("\n").filter((l) => / │ ▌/u.test(l)).join("\n");
@@ -1071,7 +1073,7 @@ test("ctrl+j and ctrl+k move through a filter's matches, while typing it and aft
 test("focusing the code does not move it: the bar takes the block's first column", () => {
   const f = nbWith([{ id: "a", code: "x = 1\ny = 2" }]);
   const bgTheme = { ...theme, bg: (c: string, t: string) => `<${c}>${t}</${c}>` };
-  const v = new NotebookView(tui as any, bgTheme as any, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {} }, () => {});
+  const v = new NotebookView(tui as any, bgTheme as any, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {}, code: "folded" }, () => {});
   try {
     v.handleInput("\r");
     const column = () => { const l = v.render(100).find((x) => x.includes("y = 2"))!; return l.indexOf("y = 2"); };
@@ -1079,5 +1081,39 @@ test("focusing the code does not move it: the bar takes the block's first column
     v.handleInput("n");
     expect(v.render(100).join("\n")).toContain("<toolPendingBg>▌y = 2");
     expect(column()).toBe(before);
+  } finally { v.dispose(); }
+});
+
+test("r shows the cell queued at once, then marimo's run: a spinner in the outline, the detail and the header", () => {
+  const f = nbWith([{ id: "a", code: "x = 1", name: "load" }, { id: "b", code: "y = x" }]);
+  const run = vi.fn(async () => {});
+  const v = make(f, { run });
+  try {
+    expect(screen(v)).toContain("r run");
+    v.handleInput("r");
+    expect(run).toHaveBeenCalledOnce();
+    let text = screen(v);
+    expect(text).toMatch(/▌◌ load +queued/u);
+    expect(text).toContain("◌ queued");
+    expect(text).toContain("◌ 1 queued");
+    f.notebook.apply("cell-op", { cell_id: "a", status: "running", timestamp: Date.now() / 1000 });
+    text = screen(v);
+    expect(text).toMatch(/▌[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] load/u);
+    expect(text).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] running load \d+s/u);
+    expect(text).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] running \d+s/u);
+    expect(text).toContain("x interrupt");
+  } finally { v.dispose(); }
+});
+
+test("code is open by default; Enter folds a cell's code and opens it again", () => {
+  const f = nbWith([{ id: "a", code: "x = 1\ny = 2" }]);
+  const v = make(f);
+  try {
+    expect(screen(v)).toContain("│ y = 2");
+    v.handleInput("\r");
+    expect(screen(v)).toContain("x = 1  ⋯ +1");
+    expect(screen(v)).not.toContain("y = 2");
+    v.handleInput("\r");
+    expect(screen(v)).toContain("│ y = 2");
   } finally { v.dispose(); }
 });

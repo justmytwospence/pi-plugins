@@ -10,7 +10,7 @@ import { truncate } from "../core/notebook.js";
 import { elapsed, formatDuration } from "../core/render.js";
 import type { FrameTheme } from "../frame.ts";
 import { clean, outputRows } from "./outputs.js";
-import { type PaneTheme, cellGlyph, headingText } from "./outline.js";
+import { type PaneTheme, cellGlyph, headingText, spinner } from "./outline.js";
 import { MAX_WIDGETS, type Row, type RowOptions, diffLines, safeHighlight, safeMarkdown } from "./rows.js";
 import { cellTitle, sectionOf } from "./titles.js";
 import { widgetLine, widgetValue } from "./widgets.js";
@@ -136,8 +136,8 @@ export function detailRows(nb: NotebookState, theme: FrameTheme, now: number, o:
 
   const statusOf = (cell: Cell): string => {
     const parts: string[] = [];
-    if (cell.status === "running") parts.push(theme.fg("accent", `running${cell.runningSince ? ` ${elapsed(now - cell.runningSince)}` : ""}`));
-    else if (cell.status === "queued") parts.push(theme.fg("muted", "queued"));
+    if (cell.status === "running") parts.push(theme.bold(theme.fg("accent", `${spinner(now)} running${cell.runningSince ? ` ${elapsed(now - cell.runningSince)}` : ""}`)));
+    else if (cell.status === "queued") parts.push(theme.fg("accent", "◌ queued"));
     if (cell.blocked) parts.push(theme.fg("error", "not run: an ancestor failed"));
     if (cell.disabled) parts.push(dim("disabled"));
     if (cell.stale) parts.push(theme.fg("warning", "stale"));
@@ -197,7 +197,7 @@ export function detailRows(nb: NotebookState, theme: FrameTheme, now: number, o:
         proseOf(cell, width - 1).forEach((line) => rows.push({ text: `${selected || focused ? theme.fg("accent", "▌") : " "}${line}`, part: index }));
         continue;
       }
-      push(`${selected ? theme.fg("accent", "▌") : " "}${cellGlyph(nb, theme, cell)} ${selected ? theme.bold(cellTitle(nb, cell)) : dim(cellTitle(nb, cell))}`);
+      push(`${selected ? theme.fg("accent", "▌") : " "}${cellGlyph(nb, theme, cell, now)} ${selected ? theme.bold(cellTitle(nb, cell)) : dim(cellTitle(nb, cell))}`);
       resultBlock(cell, { textLines: 12, tableRows: 10 }, 5);
     }
     return { rows, widgetRows, parts, ...(focusRow !== undefined ? { focusRow } : {}) };

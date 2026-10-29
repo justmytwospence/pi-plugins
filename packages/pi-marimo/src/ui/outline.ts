@@ -23,9 +23,13 @@ export const headingText = (theme: FrameTheme, h: { level: number; text: string 
   h.level === 1 ? theme.bold(theme.fg("accent", h.text)) : h.level === 2 ? theme.bold(h.text) : theme.fg("muted", h.text);
 
 /** The glyph at the start of a code cell's line. */
-export function cellGlyph(nb: NotebookState, theme: FrameTheme, c: Cell): string {
+/** A spinner frame for `now` (ms): what is running turns. */
+export const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+export const spinner = (now: number): string => SPINNER[Math.floor(now / 100) % SPINNER.length]!;
+
+export function cellGlyph(nb: NotebookState, theme: FrameTheme, c: Cell, now = Date.now()): string {
   return c.status === "running"
-    ? theme.fg("accent", "●")
+    ? theme.fg("accent", spinner(now))
     : c.error || c.blocked
       ? theme.fg("error", "✗")
       : c.status === "queued"
@@ -85,7 +89,7 @@ export function outlineRows(nb: NotebookState, theme: PaneTheme, now: number, o:
     const marked = marks.get(cell.id);
     const tags = marked ? ` ${theme.fg("warning", marked.join(" "))}` : "";
     const title = cellTitle(nb, cell);
-    const left = `${bar(here)}${underHeading ? "  " : ""}${cellGlyph(nb, theme, cell)} ${here ? theme.bold(title) : title}${tags}`;
+    const left = `${bar(here)}${underHeading ? "  " : ""}${cellGlyph(nb, theme, cell, now)} ${here ? theme.bold(title) : title}${tags}`;
     const badge = cellBadge(nb, cell, now, theme);
     const badgeWidth = visibleWidth(badge);
     const cut = truncateToWidth(left, Math.max(1, width - badgeWidth - (badgeWidth ? 1 : 0)), "…");

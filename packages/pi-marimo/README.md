@@ -220,6 +220,7 @@ The view's actions are separate requests to the session's kernel endpoints, as t
 | `context` | `true` | put the notebooks' state in the model's context at each prompt |
 | `liveCharts` | `true` | run Plotly figures live in the view and the transcript; `false` draws pictures |
 | `view.outputs` | `false` | start the notebook view with the whole section in the detail (`O` toggles it) |
+| `view.code` | `"open"` | cells' code in the detail: `"open"`, or `"folded"` to its first line; Enter flips one cell |
 | `view.split` | `false` | open the notebook view docked beside the chat (Pi's fullscreen mode) |
 | `view.autoSplit` | `true` | dock a notebook beside the chat when the agent starts running its cells |
 | `server.command` | `[]` | how `/marimo edit` and `/marimo new` start marimo, e.g. `["uvx", "--with", "pandas", "marimo"]`; empty: `uv run marimo` in a uv project, else `marimo` |
