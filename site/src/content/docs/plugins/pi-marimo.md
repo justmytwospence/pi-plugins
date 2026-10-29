@@ -11,7 +11,7 @@ plugin: pi-marimo
 - **Controls:** `/marimo` view/split/edit/new/stop/open/auto/off/show/lens/chart/inspect and notebook pinning. `ctrl+'` docks or closes the notebook this session uses (pi-sidebar's key, which it keeps when there is no notebook or Sidebar is open); `ctrl+]` switches focus while a notebook is docked; the notebook view's keys below (`?` lists them).
 - **Settings:** `marimo.json` shared/user/project layers: `maxNotebooks` (8), `context`, `liveCharts`, `view.outputs`, `view.split`, `view.autoSplit`, `server.command`. The follow mode is session state.
 - **Requirements, cost & privacy:** Running compatible marimo server; `MARIMO_TOKEN` for protected connections. No inference or execution for observation; summaries enter model input. Notebook execution has its own costs.
-- **Integrations & limits:** Optional background waits, FleetView, footer, Herdr, pi-next-prompt and pi-vim (the docked prompts). Cells are edited by the agent only, through marimo-pair; the view runs cells, interrupts, sets widgets, runs scratch code and makes Lens selections. Stopping a client job pi-marimo follows interrupts its cells.
+- **Integrations & limits:** Optional background waits, FleetView, footer, Herdr, pi-next-prompt and pi-vim (the docked prompts and markdown editing). Cells are edited by the agent only, through marimo-pair; the view runs cells, interrupts, sets widgets, runs scratch code and makes Lens selections. Stopping a client job pi-marimo follows interrupts its cells.
 
 pi-marimo makes notebook state visible to Pi without asking the model to inspect it repeatedly. It follows open notebooks, adds an outline and attention summary to each turn, and gives you a live notebook view where you read the notebook (prose, tables, charts, variables, what the agent changed) and steer it (run cells, drive widgets, run Python in the kernel, mark results, ask the agent about a cell). It can start a notebook's server itself, so the browser is not needed even to begin. It provides no editing tools: the agent changes cells through marimo-pair.
 
@@ -105,19 +105,22 @@ An example (not a real screenshot):
 │     ○ drink, title +2 4 inputs │ ▸ code · 8 lines                            │
 │     ✗ forecast        KeyError │                                             │
 │ ──────────────────────────────────────────────────────────────────────────── │
-│ ↑↓ cells · enter code · n next error                       ? keys · esc back │
+│ ↑↓ cells · enter code · e next error                       ? keys · esc back │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
 | Key | Action |
 | --- | --- |
-| `j` / `k`, arrows; `[` / `]` | Move between cells; between sections |
+| `j` / `k`, arrows | Move between cells |
+| `Ctrl-J` / `Ctrl-K`, `]` / `[` | Next and previous section |
+| `n` / `p` | Next and previous part of the cell (error, printed output, output, controls, code); each markdown cell of a section is a part |
 | `Ctrl-U` / `Ctrl-D`, `PgUp` / `PgDn`, `Space` | Scroll the detail |
 | `g` / `G` | First and last cell |
-| `Enter`, `l` | Open or fold the cell's code |
+| `Enter`, `l` | Act on the focused part; otherwise open or fold the code, or edit a markdown cell |
+| `t` | Drive the cell's marimo table |
 | `O` | The whole section in the detail, or the cell alone |
 | `z` / `Z` | Fold the section at the cursor; fold every section (again: unfold all) |
-| `n` / `N` | The next or previous failed cell |
+| `e` / `E` | The next or previous failed cell |
 | `c` / `C`, `d` | The next or previous cell the agent changed since your last message; its diff |
 | `<` / `>` | Upstream and downstream cells in the dataflow |
 | `v` | The variables pane (Enter goes to the defining cell, `>` to the first use) |
@@ -135,7 +138,15 @@ An example (not a real screenshot):
 | `?` | Every key |
 | `Esc`, `q`, `h` | Back to Pi |
 
-The mouse wheel scrolls the pane under it, a click selects a cell or a widget, a second click or a double click opens the code, and a click on the `▸ code` line folds or opens it.
+The mouse wheel scrolls the pane under it, a click selects a cell, widget or part, a second click or a double click acts on it, and a click on the code line folds or opens it. Open code is drawn as a block on Pi's pending-tool background.
+
+### Tables
+
+`t` drives a `mo.ui.table` through the table's own kernel functions, as the browser does, so paging, sorting, search and filters happen in marimo and work on large tables. Keys: `h` `j` `k` `l` move; `[` `]` page; `g` / `G` first and last page; `+` / `-` page size; `s` sort (`S` adds a sort); `/` search; `f` filter the column (`> 5`, `1..10`, `in a, b`, `null`, `!null`, `~regex`, `!text`), `F` clears; Space selects, and the selection is written to the kernel so dependent cells rerun; Enter shows the row as a card; `i` the column's statistics and top values; `c` column summaries with sparklines; `y` / `Y` copy the cell or row; `D` saves the table as CSV in Pi's working directory; `r` refreshes; `Esc` leaves. Frozen, hidden, justified and wrapped columns, data types and cell styles are drawn. A table keeps its state until its cell reruns.
+
+### Markdown
+
+Markdown cells show only as rendered markdown. `Enter` edits one in the suite's editor (pi-vim when loaded) and saves it through marimo's code mode, so the browser updates at once and the edit is not counted as an agent change. Markdown built in Python (an f-string) is not editable here.
 
 The observation connection is a read-only kiosk SSE consumer: it neither edits cells nor takes over the browser session. The view's actions are separate kernel requests (`/api/kernel/run`, `/interrupt`, `/set_ui_element_value`, `/set_model_value` for Lens, `/execute` for the scratchpad), so “read-only observation” does not mean every UI action is passive. Browser opening uses the platform's `open` or `xdg-open` utility.
 

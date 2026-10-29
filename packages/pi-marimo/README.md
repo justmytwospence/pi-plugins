@@ -91,19 +91,22 @@ From 100 columns the panes sit side by side. Narrower (as when docked beside the
 │     ○ drink, title +2 4 inputs │ ▸ code · 8 lines                            │
 │     ✗ forecast        KeyError │                                             │
 │ ──────────────────────────────────────────────────────────────────────────── │
-│ ↑↓ cells · enter code · n next error                       ? keys · esc back │
+│ ↑↓ cells · enter code · e next error                       ? keys · esc back │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
 
 | key | |
 |---|---|
-| `j`/`k`, `↑`/`↓` | the next or previous cell; `[` `]` the previous or next section |
+| `j`/`k`, `↑`/`↓` | the next or previous cell |
+| `ctrl+j`/`ctrl+k` (or `]` `[`) | the next or previous section |
+| `n`/`p` | the next or previous part of the cell: error, printed output, output, controls, code (each markdown cell of a section); the focused part is marked with an accent bar |
 | `^U`/`^D`, PgUp/PgDn, Space | scroll the detail; `g`/`G` the first or last cell |
-| Enter, `l` | open or fold the cell's code |
+| Enter, `l` | act on the focused part: open a table, a live chart or the controls, fold the code; with no part focused, open or fold the code, or edit a markdown cell |
+| `t` | drive the cell's marimo table (below) |
 | `O` | the whole section in the detail, or the cell alone |
 | `z` / `Z` | fold the section the cursor is in / fold every section (again: unfold all) |
-| `n`/`N` | the next or previous failed cell |
+| `e`/`E` | the next or previous failed cell |
 | `c`/`C`, `d` | the next or previous cell the agent changed; its diff |
 | `<` / `>` | a cell this one uses (upstream), one that uses it (downstream) |
 | `v` | the variables: name, type, value, defining cell, uses (Enter goes to the cell, `>` to the first use) |
@@ -125,7 +128,31 @@ From 100 columns the panes sit side by side. Narrower (as when docked beside the
 | `ctrl+'` | anywhere: dock the notebook this session uses, or close the docked one (pi-sidebar's key; with no notebook, or Sidebar open, it stays Sidebar's) |
 | Esc, `q`, `h`, `←`, Ctrl+C | back to Pi (docked: Esc goes to the chat, `q` closes) |
 
-The mouse wheel scrolls the pane under it, a click selects a cell (or a widget), a second click or a double click opens its code, and a click on the `▸ code` line folds or opens it.
+The mouse wheel scrolls the pane under it, a click selects a cell (or a widget, or a part), a second click or a double click acts on it, and a click on the `▸ code` line folds or opens it.
+
+An open cell's code is drawn as a block on Pi's pending-tool background (the `│` gutter where the theme has no background).
+
+#### Tables
+
+`t` (or Enter on the `table` part) drives a `mo.ui.table` through the table's own kernel functions, as the browser does: paging, sorting, search and filters happen in marimo, so they work on tables of any size. The grid shows frozen, hidden, justified and wrapped columns, data types, cell styles, and a footer with the rows shown, the page, the sorts and the selection. Each table keeps its state (page, sort, search, filters, cursor) until its cell reruns.
+
+| key | |
+|---|---|
+| `h`/`j`/`k`/`l` | move; past the page's edge the page turns |
+| `[` `]`, `g`/`G`, `+`/`-` | previous or next page; first or last page; page size |
+| `s`/`S` | sort by the column (off, ascending, descending); `S` adds it to the sorts |
+| `/` | search; empty clears |
+| `f`, `F` | filter the column (`> 5`, `1..10`, `in a, b`, `null`, `!null`, `~regex`, `^start`, `end$`, `!text` negates); clear filters and search |
+| Space, `x` | select the row (or cell); the selection goes to the kernel, so cells that read the table rerun |
+| Enter, `i` | the row as a card; the column's statistics, distribution and top values |
+| `c` | column summaries with sparklines |
+| `y`/`Y` | copy the cell or the row (OSC 52, needs a terminal that allows it) |
+| `D` | save the whole table as CSV in Pi's working directory (never overwrites) |
+| `r`, Esc | refresh; close the card, then leave |
+
+#### Markdown
+
+Markdown cells show only as rendered markdown. Enter edits one in the suite's editor (pi-vim when loaded); Enter saves, `esc` cancels. The edit is saved through marimo's code mode (as marimo-pair does), so the browser shows it at once, and it is not counted as an agent change. Markdown built in Python (`mo.md(f"...")`) cannot be edited here: Enter shows its code instead.
 
 #### Docked beside the chat
 
