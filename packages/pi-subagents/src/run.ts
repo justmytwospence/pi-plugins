@@ -16,6 +16,8 @@ export interface Run {
   /** The quota pressure (0..1) Jev's model or effort pick was made under, when above 0. */
   pressure?: number;
   tier?: Tier;
+  /** Why the pick differs from Jev's answer (the Haiku guard). */
+  note?: string;
   cwd: string;
   async: boolean;
   state: ChildState;

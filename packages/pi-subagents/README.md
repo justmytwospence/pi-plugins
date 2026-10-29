@@ -1,6 +1,6 @@
 # pi-subagents
 
-Delegates tasks to Pi subagents. Each subagent is a separate headless `pi --mode rpc` process with its own context window, started by the `subagent` tool: a single task, up to eight parallel tasks, or a chain whose steps receive the previous step's output, in the foreground or async, with fresh or forked context, optionally each in a new worktree. When a call leaves the agent role, model or thinking level open, Jev (through Pi's classifier models) picks them, one request per task.
+Delegates tasks to Pi subagents. Each subagent is a separate headless `pi --mode rpc` process with its own context window, started by the `subagent` tool: a single task, up to eight parallel tasks, or a chain whose steps receive the previous step's output, in the foreground or async, with fresh or forked context, optionally each in a new worktree. When a call leaves the agent role open, Jev (through Pi's classifier models) picks one, one request per task; built-in roles such as `explorer`, `worker` and `reviewer` bring their own model and effort per provider, and `general` has Jev pick a model tier and thinking level.
 
 In the TUI, FleetView under the prompt lists the running subagents, and any run opens as its own session, drawn the way Pi draws main's, with Tab switching between main and the subagents as in Claude Code.
 
@@ -35,7 +35,7 @@ Add `-ne` to disable your other discovered and configured extensions for that ru
 `action: "run"` (the default) takes one of:
 
 - `task` (with optional `label`, `agent`, `model`, `thinking`): a single task;
-- `tasks: [{ label?, agent?, task, cwd?, model?, thinking? }]`: parallel tasks, at most `maxParallel` (8) per call, `concurrency` (4) at a time;
+- `tasks: [{ label?, agent?, task, cwd?, model?, thinking? }]`: parallel tasks, at most `maxParallel` (8) per call, `concurrency` (4) at a time, or one at a time while the parent's provider is under `critical` quota pressure (the result and a notice say so);
 - `chain: [...]`: steps in order; `{previous}` in a step's task is replaced by the previous step's output, and the chain stops at the first step that does not succeed.
 
 Options:
@@ -49,13 +49,13 @@ Options:
 
 `action: "status" | "steer" | "stop" | "result" | "resume"` take an `id` (or a unique prefix). `steer` also takes `message`, delivered to the running child as a steering message. `status` without an id lists this session's runs, live and recorded. `status` and `result` also work on a run known only from its record (after a `/resume`, or one that ended with an earlier pi): `result` returns its saved output (`output.md`, else the last assistant text in `messages.jsonl`), with a note when it was stopped or lost that the output may be partial. `steer` and `stop` need a live run; on a recorded one they fail and point to `resume`.
 
-`action: "resume"` continues a `stopped` or `lost` run as a new run with the same agent, model, thinking level, working directory (the session's, for records saved before records kept it) and mode (async or foreground), labelled `<label> (resumed)`. Its task is the original task, then `You were interrupted before finishing. What you already did:` with a compact transcript of the old run (the same one `@run:` references use, rebuilt from its `messages.jsonl`), then `Check the working tree and current state before redoing anything; continue from where you left off.` The new run has a fresh context, not the old child's session.
+`action: "resume"` continues a `stopped` or `lost` run, or one that failed on the account's rate limit, as a new run with the same agent, model, thinking level, working directory (the session's, for records saved before records kept it) and mode (async or foreground), labelled `<label> (resumed)`. Its task is the original task, then `You were interrupted before finishing. What you already did:` with a compact transcript of the old run (the same one `@run:` references use, rebuilt from its `messages.jsonl`), then `Check the working tree and current state before redoing anything; continue from where you left off.` The new run has a fresh context, not the old child's session.
 
-Once the design is settled and what remains is implementation that follows from it (a decided change across files, tests to a given spec, mechanical refactors, running checks and fixing what fails), hand it to a subagent with a precise, self-contained spec and no `model`, so Jev picks a cheaper tier, then review the result instead of redoing it; work directly when the spec would be about as long as the work, the remaining decisions are judgment calls, or the work needs most of the conversation's context. Avoid redundant audits, and use headless subagents for report-back work. This is the tool's default first prompt guideline (`"delegation": "economical"`). With `"delegation": "conservative"` that guideline instead tells the model to prefer direct work for routine investigation, diagnosis and verification, and to delegate only genuinely independent tasks with a clear payoff or when requested, not merely because work is long or multistep. The setting is read when the extension loads and at each session start (the tool is registered again when it changes), not per call. An interactive Herdr child ([pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/)) is for an explicit request or a clearly persistent, human-led session or handoff.
+**When to delegate.** The tool's default first prompt guideline (`"delegation": "economical"`) follows Anthropic's measured result for sub-agents: delegate work that runs in parallel, is larger than one context, or is routine with a long tail (a settled change across files, tests to a given spec, mechanical refactors, running checks and fixing what fails), with a precise, self-contained spec and no `model`, so the role's cheaper model is picked; then review the result instead of redoing it. Everything else stays in the main session, at lower effort when it is routine: cheaper subagents trade cost for a few points of pass rate. Avoid redundant audits, and use headless subagents for report-back work. With `"delegation": "conservative"` that guideline instead tells the model to prefer direct work for routine investigation, diagnosis and verification, and to delegate only genuinely independent tasks with a clear payoff or when requested. Both settings add a one-line guide to choosing a role ([Agents](#agents)). The setting is read when the extension loads and at each session start (the tool is registered again when it changes), not per call. An interactive Herdr child ([pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/)) is for an explicit request or a clearly persistent, human-led session or handoff.
 
 **Labels.** `label` is a short task name, not an agent role (for example `"Audit cache invalidation"` with `agent: "reviewer"`). Lists and headings show the task label first and the role second. Labels are whitespace-normalized and stripped of terminal control characters, without a fixed length cap. A missing or blank label uses the task's first nonempty line (without a Markdown heading or list prefix), with no model call. Each chain step gets its label before `{previous}` is expanded. The full task is still sent to the child and saved in run records.
 
-**Results.** A foreground call returns each child's final reply, cut to 2,000 lines or 50 KB, with the full text in `~/.pi/agent/subagents/<id>/output.md`; each finished message of the child's conversation is appended to `messages.jsonl` beside it. A foreground result also reports the children's combined token usage and cost. The tool row shows each run's task label, agent role, model and thinking level (each marked `(auto)` where it was chosen automatically, or `(auto, p=0.5)` for a model or effort picked under quota pressure), status, time, turns, cost and current activity. Run records are saved as `subagents:run` session entries.
+**Results.** A foreground call returns each child's final reply, cut to 2,000 lines or 50 KB, with the full text in `~/.pi/agent/subagents/<id>/output.md`; each finished message of the child's conversation is appended to `messages.jsonl` beside it. A foreground result also reports the children's combined token usage and cost. The tool row shows each run's task label, agent role, model and thinking level (each marked `(auto)` where it was chosen automatically, or `(auto, p=0.5)` for a model or effort picked under quota pressure, and the Haiku guard's reason when it applied), status, time, turns, cost and current activity. A run that ends on the account's rate limit (`rate_limit_error` or HTTP 429, after Pi's own retries) is `failed` with the error `account rate limit reached; resume it after the window resets`, and its result names the `resume` action; nothing retries it automatically. Run records are saved as `subagents:run` session entries.
 
 **Delivery.** An unread async result that comes due while the agent is working waits for the turn to settle before it is sent; several go out as one message. Reading a completed run with `subagent result` or `bg_wait subagent:<id>` consumes that result and suppresses its pending announcement. Running snapshots do not consume future results. Partially read batches announce only unread members. A run that ends after its session is gone calls nothing in Pi.
 
@@ -130,13 +130,19 @@ Runs from a resumed session, or that ended before an earlier `/reload`, open fro
 
 ## Agents
 
-Built-in roles work without any agent files:
+Built-in roles work without any agent files. Each role but `general` has a profile: a model and a fixed thinking level per provider (why these models: [Choosing subagent models](https://pi-plugins.vercel.app/guides/subagent-models/)):
 
-- `general`: Pi's default tools, for any self-contained task;
-- `explorer`: codebase exploration without changes, returning findings with file and line references;
-- `reviewer`: independent review without changes for bugs, regressions, security risks and missing tests.
+| role | for | Anthropic | Codex | tools |
+|---|---|---|---|---|
+| `general` | anything no other role fits | Jev's tier and effort | Jev's tier and effort | default |
+| `explorer` | recon, search, tracing code | Sonnet 5.5, low | `gpt-6-luna`, high | read-only |
+| `worker` | implementing a clear spec, running checks | Sonnet 5.5, medium | `gpt-6.1-sol`, medium | default |
+| `reviewer` | independent review of changes | Opus 5.5, high | `gpt-6.1-sol`, high | read-only |
+| `researcher` | web and documentation questions | Sonnet 5.5, medium | `gpt-6.1-terra`, medium | default |
+| `writer` | docs, summaries, write-ups | Sonnet 5.5, medium | `gpt-6.1-terra`, medium | default |
+| `planner` | design and hard analysis without edits | Opus 5.5, high | `gpt-6.1-sol`, high | read-only |
 
-`explorer` and `reviewer` get the tools `read`, `grep`, `find`, `ls` and `bash`, and no pinned model or thinking level. Their no-change instructions are not a sandbox: `bash` can still modify files.
+Read-only roles get the tools `read`, `grep`, `find`, `ls` and `bash`; their no-change instructions are not a sandbox: `bash` can still modify files. Astra and Fable are never chosen automatically; pass `model` to use them. A profile model that Pi's registry does not list becomes the newest registered model of the same family (`claude-sonnet-*`, `claude-opus-*`, `*-luna`, `*-terra`, `*-sol`); with none, and on any provider without a profile, the role falls back to Jev's tier and effort like `general`. A fixed thinking level is clamped to the levels the model supports.
 
 Agent files in `~/.pi/agent/agents/*.md` and in the nearest `.pi/agents/` directory at or above the working directory add or override roles (project files win over user files, which win over built-ins). Example:
 
@@ -145,21 +151,23 @@ Agent files in `~/.pi/agent/agents/*.md` and in the nearest `.pi/agents/` direct
 name: scout
 description: "Fast read-only recon: returns the relevant files, types, and functions"
 tools: read, grep, find, ls, bash
-model: anthropic/claude-haiku-5
-thinking: low
+models:
+  anthropic: anthropic/claude-haiku-5:low
+  openai-codex: openai-codex/gpt-6-luna:high
 ---
 You are a scout. ...
 ```
 
-`name` and `description` are required; `tools`, `model`, `thinking` (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) and `maxTurns` (also `max_turns`) are optional. The body is appended to the child's system prompt. At `maxTurns` turns the child is told to stop calling tools and answer; if it calls tools again, it is stopped with its output so far, marked as possibly partial. Quote descriptions that contain a colon.
+`name` and `description` are required; `tools`, `models`, `model`, `thinking` (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) and `maxTurns` (also `max_turns`) are optional. `models` maps a provider to `provider/id`, optionally with `:thinking`; a parent on that provider uses it, a parent on another provider falls back to the tier rules. `model` is one model for every provider (used only when the parent is on its provider). A file overrides a built-in role of the same name whole, profile included. The body is appended to the child's system prompt. At `maxTurns` turns the child is told to stop calling tools and answer; if it calls tools again, it is stopped with its output so far, marked as possibly partial. Quote descriptions that contain a colon.
 
 ## How each choice is made
 
-For the agent, the model and the thinking level separately: explicit arguments, then the agent file, then Jev, then the defaults (`general`; the `balanced` tier's model, else the parent's model; the parent's thinking level).
+For the agent, the model and the thinking level separately: explicit arguments, then the agent (its profile for the parent's provider, else its `model` and `thinking`), then Jev, then the defaults (`general`; the `balanced` tier's model, else the parent's model; the parent's thinking level). A named role whose profile fixes the model and effort is not asked about them; when the role is left to Jev, one request asks the role, tier and effort, and a profiled role ignores the tier and effort answers.
 
-- **Provider.** Implicit model choices always stay on the parent's provider: an agent-file model or tier model from another provider is ignored. Pass an explicit `model` argument to cross providers.
+- **Provider.** Implicit model choices always stay on the parent's provider: a profile, agent-file model or tier model from another provider is ignored, so a Codex parent never gets an Anthropic child unless you pass `model`.
+- **Haiku guard.** Haiku's price steps up past 100,000 prompt tokens. When Jev's tier for a run without a profile is `fast` on Haiku and the run forks the parent's context, or the parent's context is already past 100,000 tokens, the pick becomes `balanced`; the row says why (`not Haiku: forked context`).
 - **Jev's picks.** Jev picks the agent when its confidence is at least 0.5. It answers a model tier (`fast`, `balanced`, `strong`; asked when the parent's provider has at least one tier model, configured or from the built-in presets below) and a thinking level (`low`, `medium`, `high`, `xhigh`) as probabilities over the options, and both are read by one rule: the highest option whose probability of being needed, counting it and every stronger option, reaches the bar theta, else the lowest option. theta = `relaxed + (tight - relaxed) * p` (`jev.threshold`, default 0.5 and 0.85), where p is the quota pressure on the parent's provider (below). The relaxed default, 0.5, picks the median of Jev's distribution over the options; a lower bar biases picks upward. Without Jev, or when its request fails, the defaults apply.
-- **Quota pressure.** [pi-auto-effort](https://pi-plugins.vercel.app/plugins/pi-auto-effort/) emits `quota:pressure` (`{ provider, tier: "none" | "caution" | "critical", p, label? }`, p from 0 to 1) on Pi's event bus; this package keeps the latest per provider. The closer the parent's provider is to its limit, the surer Jev must be before a stronger tier or effort, so picks drift toward cheaper ones. The run's record keeps p and its rows show it (`(Jev, p=0.5)`). Without pi-auto-effort p is 0 and the relaxed bar applies.
+- **Quota pressure.** [pi-auto-effort](https://pi-plugins.vercel.app/plugins/pi-auto-effort/) emits `quota:pressure` (`{ provider, tier: "none" | "caution" | "critical", p, label? }`, p from 0 to 1) on Pi's event bus; this package keeps the latest per provider. The closer the parent's provider is to its limit, the surer Jev must be before a stronger tier or effort, so picks drift toward cheaper ones; at `critical`, parallel tasks run one at a time. The run's record keeps p and its rows show it (`(Jev, p=0.5)`). Without pi-auto-effort p is 0 and the relaxed bar applies.
 - **Thinking.** Children always get an explicit `--thinking`, so [pi-auto-effort](https://pi-plugins.vercel.app/plugins/pi-auto-effort/) stays off in them.
 
 ## Configuration
@@ -190,7 +198,7 @@ For the agent, the model and the thinking level separately: explicit arguments, 
 | `providerTiers` | `{}` | tier models per provider (below); take precedence over matching `tiers` |
 | `tierDescriptions` | built in (below) | what Jev reads for each tier |
 | `jev` | as above | `enabled`, classifier `provider` and `model`, `timeoutMs`; `threshold`: the bar for a stronger tier or effort, `relaxed` without quota pressure, `tight` at full pressure (each 0 to 1) |
-| `delegation` | `"economical"` | the tool's first prompt guideline: `"economical"` hands settled implementation to subagents on a cheaper tier; `"conservative"` delegates only clear wins (see [The `subagent` tool](#the-subagent-tool)) |
+| `delegation` | `"economical"` | the tool's first prompt guideline: `"economical"` delegates parallel, larger-than-one-context and routine long-tail work; `"conservative"` delegates only clear wins (see [The `subagent` tool](#the-subagent-tool)) |
 | `maxParallel` | 8 | most parallel tasks per call |
 | `concurrency` | 4 | parallel tasks running at once |
 | `widget` | `"off"` | `"off"`, `"background"` (async runs only) or `"all"` |
@@ -248,7 +256,7 @@ Each works alone; with a sibling loaded they work together through Pi's event bu
 - **[pi-bg](https://pi-plugins.vercel.app/plugins/pi-bg/).** FleetView ends with pi-bg's pill (`2 tasks`, `· 1 failed`); `↓` moves through the subagents to it, and Enter opens pi-bg's `/tasks` view, which lists this session's runs mixed in with its shells, tagged `agent` (Enter opens a run's conversation, `x` twice stops it, `x` on an ended one dismisses it). pi-bg then draws no pill of its own; with `"fleetView": false` it does. Each async run is outside work that pi-bg's `bg_wait subagent:<id>` can wait on inside the turn; the async result names the ids, and a chain's intermediate steps say the chain goes on. The wait returns the bounded worker output and consumes it, so no duplicate result message follows.
 - **[pi-marimo](https://pi-plugins.vercel.app/plugins/pi-marimo/).** FleetView ends with its pill (`1 notebook`) too; Enter on it opens the busiest notebook full screen.
 - **[pi-sidebar](https://pi-plugins.vercel.app/plugins/pi-sidebar/).** Before each child starts, this package emits `{ version: 1, env: {} }` on the `pi-plugins.subagent-env.v1` event channel and adds whatever listeners put in `env` (uppercase names, string values) to the child's environment. It answers a probe (`{ version: 1, env, probe: true }`) by setting `supported: true`. Sidebar uses this to run its read-only guard inside the subagents it starts.
-- **[pi-auto-effort](https://pi-plugins.vercel.app/plugins/pi-auto-effort/).** Its `quota:pressure` events raise the bar for Jev's tier and effort picks as the parent's provider nears its limit (see [How each choice is made](#how-each-choice-is-made)).
+- **[pi-auto-effort](https://pi-plugins.vercel.app/plugins/pi-auto-effort/).** Its `quota:pressure` events raise the bar for Jev's tier and effort picks as the parent's provider nears its limit, and at `critical` run parallel tasks one at a time (see [How each choice is made](#how-each-choice-is-made)).
 - **[pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/).** Async (or backgrounded) calls hold `herdr:background` while they run, which pi-herdr shows in the pane's `$bg` token.
 
 ## Limitations
@@ -266,7 +274,7 @@ npm ci
 npm run check
 ```
 
-`npm run check` runs `tsc --noEmit` and then `vitest run` (unit tests use a fake RPC child in place of Pi). `npm run eval` makes live, paid classifier requests; run it only with explicit authorization. It runs the package's eval target through the repository's one runner (`scripts/eval.mjs --package pi-subagents`; the target shape and the runner are in `evals/shared/`) against Jev through the Pi installation on `PATH` (or `PI_PACKAGE_DIR`), and it is skipped without `TYPESAFE_API_KEY`. The `pick` target (`eval/pick.target.ts`) routes 15 tasks across six agents through Jev, one request each for the role, tier and effort, and passes when every task gets the agent it was written for. Run it alone from the repository root with `npm run -s eval -- pick`; the runner prints `spend: $X over N calls`, appends a record to `evals/results/pick.jsonl` (git-ignored), and `npm run -s eval -- --dry pick` counts the requests without making any (`--list` shows every target). For the full suite, the repository root's `npm run check` runs every component's check after the root loader test.
+`npm run check` runs `tsc --noEmit` and then `vitest run` (unit tests use a fake RPC child in place of Pi). `npm run eval` makes live, paid classifier requests; run it only with explicit authorization. It runs the package's eval target through the repository's one runner (`scripts/eval.mjs --package pi-subagents`; the target shape and the runner are in `evals/shared/`) against Jev through the Pi installation on `PATH` (or `PI_PACKAGE_DIR`), and it is skipped without `TYPESAFE_API_KEY`. The `pick` target (`eval/pick.target.ts`) routes 19 tasks across the seven built-in roles through Jev, one request each for the role, tier and effort, and passes when every task gets the role it was written for. The `profiles` target (`eval/profiles.target.ts`) replays the `subagents:run` records of your sampled sessions (at most 300 runs, one role question each): it reports the share of each role, the model and effort each implies on the run's provider, and an estimated cost (the run's turns at the median cost per turn observed for that model) against the actual cost. It cannot judge answer quality. Run it alone from the repository root with `npm run -s eval -- pick`; the runner prints `spend: $X over N calls`, appends a record to `evals/results/pick.jsonl` (git-ignored), and `npm run -s eval -- --dry pick` counts the requests without making any (`--list` shows every target). For the full suite, the repository root's `npm run check` runs every component's check after the root loader test.
 
 ## License
 

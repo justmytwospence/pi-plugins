@@ -103,7 +103,7 @@ export function mentionGuidance(prompt: string, agents: readonly AgentDef[]): st
   for (const name of names) {
     const agent = known.get(name.toLowerCase());
     if (agent) {
-      const traits = [agent.tools ? `tools: ${agent.tools.join(", ")}` : undefined, agent.model ? `model: ${agent.model}` : undefined, agent.thinking ? `thinking: ${agent.thinking}` : undefined].filter(Boolean).join("; ");
+      const traits = [agent.tools ? `tools: ${agent.tools.join(", ")}` : undefined, agent.model ? `model: ${agent.model}` : undefined, agent.models ? `models: ${Object.values(agent.models).map((m) => `${m.model}${m.thinking ? ` (${m.thinking})` : ""}`).join(", ")}` : undefined, agent.thinking ? `thinking: ${agent.thinking}` : undefined].filter(Boolean).join("; ");
       lines.push(`- @subagent:${name} -> subagent(agent: "${agent.name}"): ${agent.description}${traits ? ` (${traits})` : ""}`);
     } else {
       lines.push(`- @subagent:${name}: no agent of that name is defined. Ask the user, or use one that is: ${agents.map((a) => a.name).join(", ")}.`);

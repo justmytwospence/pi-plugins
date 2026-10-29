@@ -56,34 +56,34 @@ describe("the pick eval target", () => {
 
   test("plan counts one request per task, with the three questions, without Jev", async () => {
     const plan = await pick.plan({ sample: () => { throw new Error("no sessions"); }, compare: false, env: {}, log: () => undefined });
-    expect(plan).toEqual({ calls: 15, notes: "15 tasks, one request each with 3 questions (role, tier, effort)" });
+    expect(plan).toEqual({ calls: 19, notes: "19 tasks, one request each with 3 questions (role, tier, effort)" });
   });
 
   test("a live run makes the planned requests and passes when every task gets its role", async () => {
     const fake = fakeJev((questions, state) => routed(questions, state, expected));
     const r = run(["pick"], fake.registry);
     expect(await r.code).toBe(0);
-    expect(fake.calls).toEqual(Array(15).fill(3));
-    expect(r.out.join("\n")).toMatch(/^scout\s+got scout\s+conf 0\.90 tier balanced effort medium/mu);
-    expect(r.out.join("\n")).toMatch(/spend: \$0\.0150 over 15 calls/u);
+    expect(fake.calls).toEqual(Array(19).fill(3));
+    expect(r.out.join("\n")).toMatch(/^explorer\s+got explorer\s+conf 0\.90 tier balanced effort medium/mu);
+    expect(r.out.join("\n")).toMatch(/spend: \$0\.0190 over 19 calls/u);
     const [recorded] = last("pick", 1, r.env);
-    expect(recorded).toMatchObject({ calls: 15, metrics: { cases: 15, correct: 15, accuracy: 1, misses: 0, "correct.01-scout": 1 } });
+    expect(recorded).toMatchObject({ calls: 19, metrics: { cases: 19, correct: 19, accuracy: 1, misses: 0, "correct.01-explorer": 1 } });
   });
 
   test("a task routed to the wrong agent is a miss and fails the target", async () => {
-    const fake = fakeJev((questions, state) => routed(questions, state, () => "scout"));
+    const fake = fakeJev((questions, state) => routed(questions, state, () => "explorer"));
     const r = run(["pick", "--json"], fake.registry);
     expect(await r.code).toBe(1);
     const result = JSON.parse(r.out.at(-1)!);
-    expect(result.targets.pick).toMatchObject({ pass: false, metrics: { correct: 3, misses: 12 } });
-    expect(r.err.join("\n")).toContain("expected planner, got scout: Write a step-by-step implementation plan");
+    expect(result.targets.pick).toMatchObject({ pass: false, metrics: { correct: 3, misses: 16 } });
+    expect(r.err.join("\n")).toContain("expected planner, got explorer: Write a step-by-step implementation plan");
   });
 
   test("Jev calls that give no answer are counted as failures, and fail the target", async () => {
     const fake = fakeJev(() => ({ stopReason: "error", errorMessage: "boom" }));
     const r = run(["pick", "--json"], fake.registry);
     expect(await r.code).toBe(1);
-    expect(JSON.parse(r.out.at(-1)!)).toMatchObject({ pass: false, targets: { pick: { pass: false, failures: 15, calls: 15 } } });
+    expect(JSON.parse(r.out.at(-1)!)).toMatchObject({ pass: false, targets: { pick: { pass: false, failures: 19, calls: 19 } } });
   });
 
   test("with no key it skips cleanly: exit 0, no request", async () => {

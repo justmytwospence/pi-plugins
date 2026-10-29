@@ -10,6 +10,7 @@ import guard from "../packages/pi-sidebar/eval/guard.target.ts";
 import lean from "../packages/pi-cache-guard/eval/lean.target.ts";
 import midrun from "../packages/pi-auto-effort/eval/midrun.target.ts";
 import pick from "../packages/pi-subagents/eval/pick.target.ts";
+import profiles from "../packages/pi-subagents/eval/profiles.target.ts";
 import rank from "../packages/pi-copy/eval/rank.target.ts";
 import replay from "../packages/pi-auto-effort/eval/replay.target.ts";
 import replayFile from "../packages/pi-tool-gate/eval/replay-file.target.ts";
@@ -24,6 +25,7 @@ export const targets: readonly EvalTarget[] = [
   lean,
   midrun,
   pick,
+  profiles,
   rank,
   replay,
   replayFile,

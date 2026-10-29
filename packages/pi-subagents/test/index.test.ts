@@ -219,8 +219,8 @@ test("delegation picks the first prompt guideline (economical by default); a pro
   const economical = promptGuidelines("economical");
   expect(promptGuidelines(undefined)[0]).toBe(economical[0]);
   expect(promptGuidelines("nonsense")[0]).toBe(economical[0]);
-  expect(economical[0]).toMatch(/^Once the design is settled and what remains is implementation that follows from it/u);
-  expect(economical[0]).toContain("no model, so a cheaper tier is picked automatically");
+  expect(economical[0]).toMatch(/^Delegate work that can run in parallel/u);
+  expect(economical[0]).toContain("no model, so the role's cheaper model is picked");
   expect(promptGuidelines("conservative")[0]).toMatch(/^Prefer direct work for routine investigation/u);
   expect(economical.slice(1)).toEqual(promptGuidelines("conservative").slice(1));
 
@@ -229,7 +229,7 @@ test("delegation picks the first prompt guideline (economical by default); a pro
   h.pi.registerTool = (t: { promptGuidelines: string[] }) => void registered.push(t.promptGuidelines);
   subagents(h.pi);
   expect(registered).toHaveLength(1);
-  expect(registered[0]![0]).toMatch(/^Once the design is settled/u);
+  expect(registered[0]![0]).toMatch(/^Delegate work that can run in parallel/u);
   const cwd = mkdtempSync(path.join(tmpdir(), "subagents-delegation-"));
   mkdirSync(path.join(cwd, ".pi"));
   writeFileSync(path.join(cwd, ".pi", "pi-subagents.json"), JSON.stringify({ delegation: "conservative" }));

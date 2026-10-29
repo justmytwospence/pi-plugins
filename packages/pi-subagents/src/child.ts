@@ -174,6 +174,14 @@ export function piInvocation(): { command: string; args: string[] } {
 }
 
 /** Human-led workflows must not be reachable by a report-back worker, even via codemode. */
+/** The one-line error of a run that ended on the account's rate limit (Pi has already retried it). */
+export const RATE_LIMIT_ERROR = "account rate limit reached; resume it after the window resets";
+
+/** Whether a child's error is the provider's rate limit: Anthropic's `rate_limit_error`, or an HTTP 429. */
+export function isRateLimit(error: string | undefined): boolean {
+  return Boolean(error) && (error === RATE_LIMIT_ERROR || /rate_limit_error|rate limit|\b429\b|too many requests/iu.test(error!));
+}
+
 export const HEADLESS_EXCLUDED_TOOLS = ["enter_plan_mode", "exit_plan_mode", "ask_user_question", "herdr", "herdr_child"];
 export const HEADLESS_PROMPT = "You are a headless report-back worker, not a human-led session. Execute the assigned task within its scope. Do not enter plan mode, request user approval, ask the user questions, or start interactive agents. If a decision or permission is needed, stop and report the blocker to the parent agent; never grant yourself permission. Return your findings and changes to the parent.";
 
@@ -303,6 +311,7 @@ export class Child {
     this.state.endedAt = Date.now();
     this.state.activity = undefined;
     if (error) this.state.error = error;
+    if (status === "failed" && isRateLimit(this.state.error)) this.state.error = RATE_LIMIT_ERROR;
     this.conversation.close();
     this.update();
     this.settle(this.state);

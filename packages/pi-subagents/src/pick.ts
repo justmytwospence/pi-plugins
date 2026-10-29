@@ -1,4 +1,4 @@
-import type { AgentDef } from "./agents.ts";
+import { type AgentDef, type ProfileModel, THINKING_LEVELS } from "./agents.ts";
 import { type ClassifierAnswer, type ClassifierQuestion, choice } from "./jev.ts";
 
 export type Tier = "fast" | "balanced" | "strong";
@@ -120,6 +120,90 @@ export function providerTiers(
   return models;
 }
 
+/** A registered model as far as this package reads it (Pi's `Model`, structurally). */
+export interface AvailableModel {
+  provider: string;
+  id: string;
+  reasoning?: boolean;
+  thinkingLevelMap?: Record<string, string | null | undefined>;
+}
+
+/** The thinking levels a registered model supports, as Pi computes them (`getSupportedThinkingLevels`). */
+export function supportedThinking(model: AvailableModel): string[] {
+  if (model.reasoning === false) return ["off"];
+  return THINKING_LEVELS.filter((level) => {
+    const mapped = model.thinkingLevelMap?.[level];
+    if (mapped === null) return false;
+    if (level === "xhigh" || level === "max") return mapped !== undefined;
+    return true;
+  });
+}
+
+/** `level`, or the nearest level the model supports (up first, then down), as Pi clamps it. Unknown models pass through. */
+export function clampThinking(level: string, model: AvailableModel | undefined): string {
+  if (!model || model.reasoning === undefined) return level;
+  const supported = supportedThinking(model);
+  if (supported.includes(level)) return level;
+  const index = THINKING_LEVELS.indexOf(level as (typeof THINKING_LEVELS)[number]);
+  if (index < 0) return level;
+  for (let i = index; i < THINKING_LEVELS.length; i++) if (supported.includes(THINKING_LEVELS[i]!)) return THINKING_LEVELS[i]!;
+  for (let i = index - 1; i >= 0; i--) if (supported.includes(THINKING_LEVELS[i]!)) return THINKING_LEVELS[i]!;
+  return level;
+}
+
+/**
+ * A role's profile model on `provider`, checked against the registry: used as is when registered or
+ * when the registry lists nothing for the provider; else the newest registered model of the same
+ * preset family (a stale Sonnet id becomes the newest Sonnet); else none (the tier rules apply).
+ */
+export function profileModel(entry: ProfileModel | undefined, provider: string, available: readonly AvailableModel[] = []): ProfileModel | undefined {
+  if (!entry || !entry.model.startsWith(`${provider}/`)) return undefined;
+  const id = entry.model.slice(provider.length + 1);
+  const registered = available.filter((m) => m.provider === provider);
+  if (!registered.length || registered.some((m) => m.id === id)) return entry;
+  const presets = Object.hasOwn(TIER_PRESETS, provider) ? TIER_PRESETS[provider] : undefined;
+  const family = presets ? Object.values(presets).find((pattern) => pattern.test(id)) : undefined;
+  const newest = family ? registered.map((m) => m.id).filter((m) => family.test(m)).sort(newestFirst)[0] : undefined;
+  return newest ? { ...entry, model: `${provider}/${newest}` } : undefined;
+}
+
+/**
+ * What an agent fixes for a parent on `parentModel`'s provider: its profile model there, else its
+ * `model` when on that provider (an implicit model never leaves the parent's provider), and the
+ * profile's thinking, else the agent's, clamped to what the model supports when it is registered.
+ */
+export function agentDefaults(agent: AgentDef, parentModel: string, available: readonly AvailableModel[] = []): { model?: string; thinking?: string } {
+  const provider = parentModel.split("/")[0]!;
+  const entry = agent.models && Object.hasOwn(agent.models, provider) ? agent.models[provider] : undefined;
+  const fromProfile = profileModel(entry, provider, available);
+  const model = fromProfile?.model ?? (agent.model?.startsWith(`${provider}/`) ? agent.model : undefined);
+  let thinking = fromProfile?.thinking ?? agent.thinking;
+  if (thinking && model) thinking = clampThinking(thinking, available.find((m) => `${m.provider}/${m.id}` === model));
+  return { ...(model ? { model } : {}), ...(thinking ? { thinking } : {}) };
+}
+
+/** Haiku's price multiplies past this many prompt tokens. */
+export const HAIKU_CONTEXT_LIMIT = 100_000;
+
+/** What the run brings to its child's context, for the Haiku guard. */
+export interface RunContextInfo {
+  /** The run forks the parent's conversation. */
+  fork?: boolean;
+  /** The parent's context now, in tokens. */
+  parentTokens?: number;
+}
+
+/**
+ * Why the fast tier must not be Haiku for this run (it forks the parent's context, or the parent's
+ * context is past Haiku's long-context price step), or undefined when Haiku is fine.
+ */
+export function haikuGuard(fastModel: string | undefined, info: RunContextInfo = {}): string | undefined {
+  if (!fastModel?.startsWith("anthropic/") || !/claude-haiku-/u.test(fastModel)) return undefined;
+  if (info.fork) return "not Haiku: forked context";
+  if ((info.parentTokens ?? 0) > HAIKU_CONTEXT_LIMIT) return `not Haiku: parent context ${Math.round(info.parentTokens! / 1000)}k`;
+  return undefined;
+}
+
 export const DEFAULT_TIER_DESCRIPTIONS: Record<Tier, string> = {
   fast: "Lookups, searches, reading and summarizing code or docs, scripted or mechanical edits, running checks and reporting results",
   balanced: "Implementing a precisely specified change, ordinary implementation, debugging with clear symptoms, code reviews, multi-source research",
@@ -133,13 +217,16 @@ export interface Given {
   thinking?: string;
 }
 
-/** The Jev questions for the gaps in `given`, or {} when nothing is left to decide. */
+/**
+ * The Jev questions for the gaps in `given`, or {} when nothing is left to decide. Fill `given` with
+ * what a named agent fixes (`agentDefaults`), so a profiled role is not asked for a tier or effort.
+ */
 export function pickQuestions(given: Given, agents: readonly AgentDef[], tiers: TierConfig, askTier: boolean): Record<string, ClassifierQuestion> {
   const questions: Record<string, ClassifierQuestion> = {};
   if (!given.agent && agents.length > 1) {
     questions.role = {
       type: "choice",
-      instructions: "Which agent is best suited to carry out `task`?",
+      instructions: "Which agent is best suited to carry out `task`? Choose general only when no other agent's description fits.",
       criteria: Object.fromEntries(agents.map((a) => [a.name, a.description])),
     };
   }
@@ -196,11 +283,22 @@ export interface Resolved {
   tier?: Tier;
   /** The quota pressure Jev's model or effort pick was made under, when above 0. */
   pressure?: number;
+  /** Why the pick differs from Jev's answer (the Haiku guard), for display. */
+  note?: string;
+}
+
+export interface ResolveOptions {
+  /** Pi's registered models, to check profile models and clamp their thinking. */
+  available?: readonly AvailableModel[];
+  /** The run's context, for the Haiku guard. */
+  context?: RunContextInfo;
 }
 
 /**
- * Precedence for each choice: explicit arguments, then the agent file, then Jev, then defaults
- * (`general`, the balanced tier, the parent's model and thinking level).
+ * Precedence for each choice: explicit arguments, then the agent (its profile for the parent's
+ * provider, else its own `model` and `thinking`), then Jev, then defaults (`general`, the balanced
+ * tier, the parent's model and thinking level). A role whose profile fixes the model and thinking
+ * ignores Jev's tier and effort answers.
  */
 export function resolve(
   given: Given,
@@ -208,6 +306,7 @@ export function resolve(
   picks: Picks | undefined,
   tiers: TierConfig,
   parent: { model: string; thinking: string },
+  options: ResolveOptions = {},
 ): Resolved | { error: string } {
   const byJev = { agent: false, model: false, thinking: false };
   let agentName = given.agent;
@@ -221,21 +320,27 @@ export function resolve(
 
   // Agent files are defaults too: switching the main session's provider must not silently
   // launch children against a different subscription. Only an explicit call model may do that.
-  const agentModel = agent.model?.startsWith(`${parent.model.split("/")[0]}/`) ? agent.model : undefined;
-  let model = given.model ?? agentModel;
+  const defaults = agentDefaults(agent, parent.model, options.available);
+  const provider = parent.model.split("/")[0];
+  let model = given.model ?? defaults.model;
   let tier: Tier | undefined;
+  let note: string | undefined;
   if (!model) {
     tier = picks?.tier ?? "balanced";
-    const tierModel = tiers.models[tier]?.startsWith(`${parent.model.split("/")[0]}/`) ? tiers.models[tier] : undefined;
+    if (tier === "fast") {
+      note = haikuGuard(tiers.models.fast, options.context);
+      if (note) tier = "balanced";
+    }
+    const tierModel = tiers.models[tier]?.startsWith(`${provider}/`) ? tiers.models[tier] : undefined;
     model = tierModel ?? parent.model;
     byJev.model = picks?.tier !== undefined && tierModel !== undefined;
   }
-  let thinking = given.thinking ?? agent.thinking;
+  let thinking = given.thinking ?? defaults.thinking;
   if (!thinking && picks?.thinking) {
     thinking = picks.thinking;
     byJev.thinking = true;
   }
   thinking ??= parent.thinking;
   const pressure = picks?.pressure && (byJev.model || byJev.thinking) ? picks.pressure : undefined;
-  return { agent, model, thinking, byJev, ...(tier ? { tier } : {}), ...(pressure ? { pressure } : {}) };
+  return { agent, model, thinking, byJev, ...(tier ? { tier } : {}), ...(pressure ? { pressure } : {}), ...(note ? { note } : {}) };
 }

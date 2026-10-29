@@ -2,8 +2,9 @@
 // One tool, `subagent`: run a single task, parallel tasks, or a chain (with `{previous}`), in the
 // foreground or async, with fresh or forked context, optionally in a new worktree; then status,
 // steer, stop, and result by run id. When the call leaves the agent, model, or effort open, Jev
-// (through Pi's own classifier models) picks them: the agent definition, a model tier from your
-// settings, and a thinking level.
+// (through Pi's own classifier models) picks them: the agent definition (a role's profile then fixes
+// the model and effort on the parent's provider), else a model tier from your settings and a thinking
+// level.
 //
 // With pi-bg installed the two work as one (activity.ts): pi-bg's background tasks are a section of
 // the subagents panel and are listed in FleetView, and async runs are outside work pi-bg's bg_wait
@@ -19,13 +20,13 @@ import { Type } from "typebox";
 import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION, type ActivityEntry, type ActivitySection, FLEET_HOST_PRIORITY, hostOutranks, readHost } from "./activity.ts";
 import { type AgentDef, discoverAgents } from "./agents.ts";
 import { MENTION_TYPE, mentionGuidance, subagentAutocomplete } from "./mentions.ts";
-import { CACHE_RETENTIONS, type CacheRetention, Child, type ChildState, answerSubagentEnvProbes, requestSubagentEnv, subagentDepth, type Usage, addUsage, emptyUsage } from "./child.ts";
+import { CACHE_RETENTIONS, type CacheRetention, Child, type ChildState, answerSubagentEnvProbes, isRateLimit, requestSubagentEnv, subagentDepth, type Usage, addUsage, emptyUsage } from "./child.ts";
 import { agentDir, loadConfig } from "./config.ts";
 import { Conversation, type Message, messageText, readTranscript, transcriptWriter } from "./conversation.ts";
 import { type Mode, type OwedResult, type Parcel, type ParkedCall, adopt, isParked, park, sessionKey } from "./handoff.ts";
 import { type JevConfig, askJev } from "./jev.ts";
 import { runLabel, taskLabel } from "./label.ts";
-import { DEFAULT_THRESHOLD, DEFAULT_TIER_DESCRIPTIONS, type Given, type Resolved, type Threshold, type Tier, pickQuestions, providerTiers, readPicks, resolve } from "./pick.ts";
+import { type AvailableModel, DEFAULT_THRESHOLD, DEFAULT_TIER_DESCRIPTIONS, type Given, type Resolved, type Threshold, type Tier, agentDefaults, pickQuestions, providerTiers, readPicks, resolve } from "./pick.ts";
 import { REFERENCE_TYPE, type RunRef, compactTranscript, referenceContext, runAutocomplete } from "./references.ts";
 import { type Run, type RunLink, displayTokens, transcriptPath } from "./run.ts";
 import { clip, recentTexts } from "./transcript.ts";
@@ -77,12 +78,16 @@ export const DEFAULT_CONFIG: SubagentsConfig = {
 const CONSERVATIVE_GUIDELINE =
   "Prefer direct work for routine investigation, diagnosis, and verification. Do not delegate merely because work is long or multistep, or commission a redundant audit of work you are already doing. Delegate only genuinely independent tasks with a clear payoff or when requested; when delegating report-back work, use headless subagents rather than interactive Herdr sessions.";
 const ECONOMICAL_GUIDELINE =
-  "Once the design is settled and what remains is implementation that follows from it (applying a decided change across files, writing tests to a given spec, mechanical refactors, running checks and fixing what fails), delegate it to a subagent with a precise, self-contained spec and no model, so a cheaper tier is picked automatically; then review the result (diff, check output) yourself instead of redoing it. Do it directly when the spec would be about as long as the work, the remaining decisions are judgment calls, or the work needs most of this conversation's context. Do not commission redundant audits of work you are already doing; use headless subagents rather than interactive Herdr sessions for report-back work.";
+  "Delegate work that can run in parallel, is larger than one context, or is routine with a long tail (a settled change applied across files, tests to a given spec, mechanical refactors, running checks and fixing what fails): give it a precise, self-contained spec and no model, so the role's cheaper model is picked, then review the result (diff, check output) instead of redoing it. Otherwise keep the work in this session, at lower effort when it is routine: cheaper subagents trade cost for a few points of pass rate, and a spec about as long as the work, judgment calls, or work that needs this conversation's context belong here. Do not commission redundant audits of work you are already doing; use headless subagents rather than interactive Herdr sessions for report-back work.";
+/** The built-in roles, one line each; shared by both delegation settings. */
+const ROLES_GUIDELINE =
+  "Choosing a role (omit agent to have one picked): explorer for search, recon and tracing code; worker to implement a clear spec and run checks; reviewer for an independent review of changes; researcher for web and docs questions; writer for docs, summaries and write-ups; planner for design and hard analysis without edits; general for anything else (its model follows the task's difficulty).";
 
 /** The `subagent` tool's prompt guidelines for a `delegation` setting (anything unknown is the default, economical). */
 export function promptGuidelines(delegation: unknown): string[] {
   return [
     delegation === "conservative" ? CONSERVATIVE_GUIDELINE : ECONOMICAL_GUIDELINE,
+    ROLES_GUIDELINE,
     "Give each subagent a complete, self-contained task: it cannot see this conversation unless context is fork.",
     "Give each task a short descriptive label; omit it to derive one deterministically from the task.",
     "Use parallel tasks for independent work and a chain when a step needs the previous step's output.",
@@ -107,6 +112,15 @@ export function readPressure(data: unknown): QuotaPressure | undefined {
   if (typeof d.provider !== "string" || !d.provider || typeof d.p !== "number" || !Number.isFinite(d.p)) return undefined;
   const tier = d.tier === "caution" || d.tier === "critical" ? d.tier : "none";
   return { provider: d.provider, tier, p: Math.min(1, Math.max(0, d.p)), ...(typeof d.label === "string" ? { label: d.label } : {}) };
+}
+
+/**
+ * Parallel tasks in flight at once: the configured number, or 1 while the parent's provider is under
+ * `critical` quota pressure (a fan-out then only spends the last of the window faster).
+ */
+export function effectiveConcurrency(configured: number, pressure: QuotaPressure | undefined): number {
+  if (pressure?.tier === "critical") return 1;
+  return Math.max(1, Number.isFinite(configured) ? Math.floor(configured) : 1);
 }
 
 /** ` (auto)`, or ` (auto, p=0.5)` for a pick made under quota pressure. */
@@ -161,6 +175,8 @@ export interface RunView {
   byJev: Resolved["byJev"];
   /** The quota pressure Jev's model or effort pick was made under, when above 0. */
   pressure?: number;
+  /** Why the pick differs from Jev's answer (the Haiku guard). */
+  note?: string;
   status: ChildState["status"];
   /** Native child history, when Pi reported its session path. */
   sessionFile?: string;
@@ -211,6 +227,7 @@ function view(run: Run, withOutput = false): RunView {
     thinking: run.thinking,
     byJev: run.byJev,
     ...(run.pressure ? { pressure: run.pressure } : {}),
+    ...(run.note ? { note: run.note } : {}),
     status: s.status,
     ...(s.sessionFile ? { sessionFile: s.sessionFile } : {}),
     ...(s.activity ? { activity: s.activity } : {}),
@@ -258,6 +275,7 @@ export function recordedRun(v: RecordedRun): Run {
     thinking: v.thinking,
     byJev: v.byJev ?? { agent: false, model: false, thinking: false },
     ...(typeof v.pressure === "number" && v.pressure > 0 ? { pressure: v.pressure } : {}),
+    ...(typeof v.note === "string" && v.note ? { note: v.note } : {}),
     cwd: v.cwd ?? "",
     async: Boolean(v.async),
     state: { status: recordedStatus(v), output: "", usage, turns: v.turns ?? 0, startedAt: 0, endedAt: (v.seconds ?? 0) * 1000, ...(v.sessionFile ? { sessionFile: v.sessionFile } : {}), ...(v.error ? { error: v.error } : {}) },
@@ -308,9 +326,15 @@ export function savedOutput(run: Run): string {
   return "";
 }
 
+/** Whether a run can be resumed: stopped, lost, or failed on the account's rate limit. */
+export function resumable(state: Pick<ChildState, "status" | "error">): boolean {
+  return state.status === "stopped" || state.status === "lost" || (state.status === "failed" && isRateLimit(state.error));
+}
+
 /** What `result` and `status` add for a run that did not finish. */
 function interruptedNote(run: Run): string | undefined {
   const s = run.state;
+  if (s.status === "failed" && isRateLimit(s.error)) return `[Failed: the account's rate limit was reached (Pi already retried). Do not retry at once: after the usage window resets, action=resume with id ${run.id} continues it.]`;
   if (s.status === "stopped") return `[Stopped before it finished${s.error ? ` (${clip(s.error, 200)})` : ""}; the output may be partial. action=resume with id ${run.id} continues it.]`;
   if (s.status === "lost") return `[Lost: its pi process ended without recording how the run ended, so it stopped unfinished; the output may be partial. action=resume with id ${run.id} continues it.]`;
   return undefined;
@@ -647,24 +671,35 @@ export default function subagents(pi: ExtensionAPI) {
     allRuns(ctx).map((e) => ({ id: e.view.id, agent: e.view.agent, task: e.view.task, ...(e.view.label ? { label: e.view.label } : {}), status: e.view.status, model: e.view.model, run: e.run }));
 
   /** Jev's picks for the gaps in each item, one request per item, in parallel. */
-  const plan = async (ctx: ExtensionContext, items: Item[], agents: AgentDef[], signal: AbortSignal | undefined) => {
+  const plan = async (ctx: ExtensionContext, items: Item[], agents: AgentDef[], signal: AbortSignal | undefined, fork: boolean) => {
     const parent = { model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "", thinking: pi.getThinkingLevel() };
+    const available = (ctx.modelRegistry?.getAll?.() ?? []) as AvailableModel[];
     const tiers = {
-      models: providerTiers(parent.model, config.tiers, config.providerTiers, ctx.modelRegistry?.getAll?.() ?? []),
+      models: providerTiers(parent.model, config.tiers, config.providerTiers, available),
       descriptions: config.tierDescriptions,
     };
+    let parentTokens: number | undefined;
+    try {
+      parentTokens = ctx.getContextUsage?.()?.tokens ?? undefined;
+    } catch {
+      // No usage known: the guard looks at the fork only.
+    }
+    const context = { fork, ...(parentTokens ? { parentTokens } : {}) };
     const askTier = Object.values(tiers.models).some(Boolean);
     const parentRequest = clip(recentTexts(ctx.sessionManager.getBranch()).user, 2_000);
     return Promise.all(
       items.map(async (item) => {
         const given: Given = { ...(item.agent ? { agent: item.agent } : {}), ...(item.model ? { model: item.model } : {}), ...(item.thinking ? { thinking: item.thinking } : {}) };
-        const questions = pickQuestions(given, agents, tiers, askTier);
+        // A named role with a profile fixes the model and effort: Jev is not asked for them.
+        const named = item.agent ? agents.find((a) => a.name === item.agent) : undefined;
+        const fixed = named ? agentDefaults(named, parent.model, available) : {};
+        const questions = pickQuestions({ ...fixed, ...given }, agents, tiers, askTier);
         let picks: ReturnType<typeof readPicks> | undefined;
         if (Object.keys(questions).length) {
           const outcome = await askJev(ctx.modelRegistry, config.jev, { task: clip(item.task, 6_000), parent_request: parentRequest || "(none)" }, questions, signal);
           if (outcome.ok) picks = readPicks(outcome.answers, { pressure: pressureFor(parent.model.split("/")[0]!), threshold: config.jev.threshold });
         }
-        const resolved = resolve(given, agents, picks, tiers, parent);
+        const resolved = resolve(given, agents, picks, tiers, parent, { available, context });
         if ("error" in resolved) return resolved;
         if (!resolved.model) return { error: "No model: the session has no model selected; pass `model`." };
         return resolved;
@@ -751,6 +786,7 @@ export default function subagents(pi: ExtensionAPI) {
       byJev: resolved.byJev,
       ...(resolved.pressure ? { pressure: resolved.pressure } : {}),
       ...(resolved.tier ? { tier: resolved.tier } : {}),
+      ...(resolved.note ? { note: resolved.note } : {}),
       ...(resolved.agent.maxTurns ? { maxTurns: resolved.agent.maxTurns } : {}),
       cwd: options.cwd,
       async: options.async,
@@ -866,8 +902,9 @@ export default function subagents(pi: ExtensionAPI) {
   const resultText = (run: Run) => {
     const s = run.state;
     const head = `[${runLabel(run)} · ${run.agent} · ${s.model ?? run.model} · ${run.thinking} · ${s.status}${s.error ? `: ${clip(s.error, 300)}` : ""}]`;
+    const limited = s.status === "failed" && isRateLimit(s.error) ? interruptedNote(run) : undefined;
     // A blank line keeps the Markdown answer from running into the header when it is rendered.
-    return `${head}\n\n${truncateOutput(s.output || "(no output)", run.outputPath)}`;
+    return `${head}\n\n${truncateOutput(s.output || "(no output)", run.outputPath)}${limited ? `\n\n${limited}` : ""}`;
   };
 
   const usageOf = (list: Run[]): Usage => list.reduce((sum, r) => addUsage(sum, r.state.usage), emptyUsage());
@@ -974,7 +1011,7 @@ export default function subagents(pi: ExtensionAPI) {
       name: "subagent",
       label: "Subagent",
       description:
-        "Each subagent adds its own context and token usage. action=run (default): a single `task`, parallel `tasks`, or a `chain` whose steps can use {previous}. Omit agent, model, or thinking to let them be chosen automatically; implicit models stay on the parent session's provider. `async: true` returns run ids at once and delivers each result as a message. action=status|steer|stop|result|resume take `id` (steer also `message`); resume continues a stopped or lost run as a new one.",
+        "Each subagent adds its own context and token usage: delegate work that runs in parallel, exceeds one context, or is routine with a long tail; keep the rest in this session. action=run (default): a single `task`, parallel `tasks`, or a `chain` whose steps can use {previous}. Omit agent, model, or thinking to let them be chosen automatically: a role (explorer, worker, reviewer, researcher, writer, planner) brings its own model and effort, general follows the task's difficulty; implicit models stay on the parent session's provider. `async: true` returns run ids at once and delivers each result as a message. action=status|steer|stop|result|resume take `id` (steer also `message`); resume continues a stopped or lost run, or one that hit the rate limit, as a new one.",
       promptSnippet: "Delegate self-contained tasks to subagents with their own context windows",
       promptGuidelines: promptGuidelines(delegation),
       parameters: Params,
@@ -989,7 +1026,7 @@ export default function subagents(pi: ExtensionAPI) {
           if (!found) throw new Error(`No run ${params.id ?? "(missing id)"}. Use action=status to list runs.`);
           const old = found.run;
           if (old.child && old.state.status === "running") throw new Error(`Run ${old.id} is still running; steer it instead.`);
-          if (old.state.status !== "stopped" && old.state.status !== "lost") throw new Error(`Run ${old.id} is ${old.state.status}; only a stopped or lost run can be resumed.`);
+          if (!resumable(old.state)) throw new Error(`Run ${old.id} is ${old.state.status}; only a stopped or lost run can be resumed (or one that failed on the rate limit).`);
           params = {
             action: "run",
             task: resumeTask(old.task, old.conversation.messages),
@@ -1012,8 +1049,7 @@ export default function subagents(pi: ExtensionAPI) {
           const found = findRun(params.id, ctx);
           if (!found) throw new Error(`No run ${params.id ?? "(missing id)"}. Use action=status to list runs.`);
           const { run } = found;
-          const resumable = run.state.status === "stopped" || run.state.status === "lost";
-          const resumeHint = resumable ? ` action=resume with id ${run.id} continues it in a new run.` : "";
+          const resumeHint = resumable(run.state) ? ` action=resume with id ${run.id} continues it in a new run.` : "";
           if ((action === "steer" || action === "stop") && !found.live) {
             throw new Error(`Run ${run.id} is not running in this session (${run.state.status}); its record can be read with status or result.${resumeHint}`);
           }
@@ -1069,7 +1105,7 @@ export default function subagents(pi: ExtensionAPI) {
         signal?.addEventListener("abort", abortPreparation);
         let resolvedAll: Awaited<ReturnType<typeof plan>>;
         try {
-          resolvedAll = await plan(ctx, items, discoverAgents(ctx.cwd), prepSignal);
+          resolvedAll = await plan(ctx, items, discoverAgents(ctx.cwd), prepSignal, Boolean(fork));
         } catch (error) {
           signal?.removeEventListener("abort", abortPreparation);
           throw error;
@@ -1084,6 +1120,14 @@ export default function subagents(pi: ExtensionAPI) {
           throw new Error(failed.error);
         }
         const resolved = resolvedAll as Resolved[];
+        const parentProvider = ctx.model?.provider ?? "";
+        const quota = pressures.get(parentProvider);
+        const concurrency = effectiveConcurrency(config.concurrency, quota);
+        const quotaNote =
+          mode === "parallel" && items.length > 1 && concurrency === 1 && quota?.tier === "critical"
+            ? `[Quota pressure on ${parentProvider} is critical${quota.label ? ` (${quota.label})` : ""}: these ${items.length} tasks run one at a time.]`
+            : undefined;
+        if (quotaNote && ctx.hasUI) safely(() => ctx.ui.notify(`subagents: ${quotaNote.slice(1, -1)}`, "warning"));
 
         const started: Run[] = [];
         const details = (): Details => ({ mode, runs: started.map((r) => view(r)) });
@@ -1173,7 +1217,7 @@ export default function subagents(pi: ExtensionAPI) {
                 }
               }
             };
-            const workers = await Promise.allSettled(Array.from({ length: Math.max(1, Math.min(Math.floor(config.concurrency), items.length)) }, worker));
+            const workers = await Promise.allSettled(Array.from({ length: Math.min(concurrency, items.length) }, worker));
             const failure = workers.find((result) => result.status === "rejected");
             if (failure?.status === "rejected") throw failure.reason;
             return done.filter(Boolean);
@@ -1219,7 +1263,7 @@ export default function subagents(pi: ExtensionAPI) {
           // Let the runs start so their ids exist.
           await new Promise((r) => setTimeout(r, 50));
           return {
-            content: [{ type: "text", text: `Started ${mode} in the background${started.length ? `: ${ids()}` : ""}. Results arrive as messages; use action=status, steer, stop, or result with an id meanwhile.${hasBg() && started.length ? ` If nothing else is left to do, bg_wait ${started.map((r) => `subagent:${r.id}`).join(" or ")} waits inside your turn until it ends.` : ""}` }],
+            content: [{ type: "text", text: `Started ${mode} in the background${started.length ? `: ${ids()}` : ""}. Results arrive as messages; use action=status, steer, stop, or result with an id meanwhile.${hasBg() && started.length ? ` If nothing else is left to do, bg_wait ${started.map((r) => `subagent:${r.id}`).join(" or ")} waits inside your turn until it ends.` : ""}${quotaNote ? `\n\n${quotaNote}` : ""}` }],
             details: details(),
           };
         }
@@ -1270,7 +1314,7 @@ export default function subagents(pi: ExtensionAPI) {
         for (const r of started) detachers.delete(r.id);
         if (!done.length) throw new Error(signal?.aborted ? "Cancelled before any subagent started." : "No subagent started.");
         const skipped = items.length - done.length;
-        const text = `${mode === "chain" ? resultText(done.at(-1) as Run) : done.map(resultText).join("\n\n---\n\n")}${skipped > 0 && signal?.aborted ? `\n\n[Cancelled: ${skipped} queued task${skipped === 1 ? "" : "s"} never started.]` : ""}`;
+        const text = `${mode === "chain" ? resultText(done.at(-1) as Run) : done.map(resultText).join("\n\n---\n\n")}${skipped > 0 && signal?.aborted ? `\n\n[Cancelled: ${skipped} queued task${skipped === 1 ? "" : "s"} never started.]` : ""}${quotaNote ? `\n\n${quotaNote}` : ""}`;
         const allFailed = done.every((r) => r.state.status !== "done");
         return {
           content: [{ type: "text", text }],
@@ -1311,7 +1355,7 @@ export default function subagents(pi: ExtensionAPI) {
         const rows: Row[] = [];
         for (const r of d.runs) {
           rows.push({
-            left: `${icon(r.status)} ${theme.fg("accent", runLabel(r))}${sep}${r.agent}${jev(r.byJev.agent)}${sep}${shortModel(r.model)}${jev(r.byJev.model, r.pressure)}${sep}${r.thinking}${jev(r.byJev.thinking, r.pressure)}`,
+            left: `${icon(r.status)} ${theme.fg("accent", runLabel(r))}${sep}${r.agent}${jev(r.byJev.agent)}${sep}${shortModel(r.model)}${jev(r.byJev.model, r.pressure)}${r.note ? theme.fg("dim", ` (${r.note})`) : ""}${sep}${r.thinking}${jev(r.byJev.thinking, r.pressure)}`,
             right: [formatElapsed(r.seconds * 1000), `${r.turns} turns`, ...(r.cost ? [`$${r.cost.toFixed(3)}`] : []), r.id],
           });
           const detail = r.error
