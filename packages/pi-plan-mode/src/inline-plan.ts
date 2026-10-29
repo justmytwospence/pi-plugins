@@ -568,7 +568,11 @@ function renderExit(
               text: details?.feedback ? `Kept planning: ${details.feedback}` : "Kept planning",
             }
           : { tone: "pending", text: "Waiting for approval" };
-  const body = reviewBody(theme, plan, status, options, (text) => new PlanMarkdown(text, getMarkdownTheme(), theme));
+  const card = reviewBody(theme, plan, status, options, (text) => new PlanMarkdown(text, getMarkdownTheme(), theme));
+  // While it waits, one more row of the card's background under the status, above the question.
+  const body = new Container();
+  body.addChild(card);
+  if (outcome === "pending") body.addChild(new Spacer(1));
   const changes = outcome === "pending" && details?.previous ? planDiff(details.previous, plan) : [];
   if (changes.length === 0) return body;
   // While a revision waits for review, what changed since the declined plan comes first.
