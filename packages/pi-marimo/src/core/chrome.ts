@@ -131,3 +131,9 @@ export function sharedChrome(): ChromeHost {
   }
   return shared;
 }
+
+/** Ends the shared browser (the session ends or the extension reloads: a reload loads a fresh copy of this module). */
+export function stopSharedChrome(): void {
+  shared?.stop();
+  shared = undefined;
+}

@@ -151,3 +151,9 @@ export function sharedPlotly(): ChartRenderer & { daemon: PlotlyDaemon } {
   }
   return shared;
 }
+
+/** Ends the shared renderer's process and its browser. */
+export function stopSharedPlotly(): void {
+  shared?.daemon.stop();
+  shared = undefined;
+}

@@ -43,6 +43,8 @@ import { openUrl, waitingStatus, waitingUrl } from "./waiting.js";
 import { NotebookView, type ViewActions } from "./ui/view.js";
 import { ChatChart, type ChartEntry, disposeCharts, latestChart } from "./ui/chat-chart.js";
 import { Painter } from "./ui/painter.js";
+import { stopSharedChrome } from "./core/chrome.js";
+import { stopSharedPlotly } from "./core/plotly.js";
 import { VegaRenderer } from "./core/vega.js";
 import type { Followed } from "./core/watcher.js";
 import { Type } from "typebox";
@@ -421,6 +423,9 @@ export default function piMarimo(pi: ExtensionAPI): void {
     inspectOff = undefined;
     disposeCharts();
     Painter.for(tuiRef)?.retire();
+    // The browsers end with the session: a reload would otherwise leave them running with no owner.
+    stopSharedChrome();
+    stopSharedPlotly();
     chartComponents.clear();
     const previousContext = ctxRef;
     ctxRef = undefined;
