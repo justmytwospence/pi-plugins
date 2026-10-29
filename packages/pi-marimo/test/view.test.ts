@@ -1036,3 +1036,21 @@ test("the mouse drives widgets: a press on a slider sets it and a drag moves it,
     expect(v.render(100).join("\n")).toContain("▸ on");
   } finally { v.dispose(); }
 });
+
+test("ctrl+j and ctrl+k move through a filter's matches, while typing it and after", () => {
+  const f = nbWith([{ id: "h", code: 'mo.md("# H")' }, { id: "a", code: "xa = 1", name: "load_a" }, { id: "b", code: "y = 2" }, { id: "c", code: "xc = 3", name: "load_c" }]);
+  const v = make(f);
+  try {
+    v.handleInput("/");
+    for (const ch of "load") v.handleInput(ch);
+    expect(screen(v)).toMatch(/▌○ load_a/u);
+    v.handleInput("\n");
+    expect(v[INPUT_CONTEXT]()).toBe("filter");
+    expect(screen(v)).toMatch(/▌○ load_c/u);
+    v.handleInput("\x0b");
+    expect(screen(v)).toMatch(/▌○ load_a/u);
+    v.handleInput("\r");
+    v.handleInput("\n");
+    expect(screen(v)).toMatch(/▌○ load_c/u);
+  } finally { v.dispose(); }
+});

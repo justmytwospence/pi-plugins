@@ -391,6 +391,19 @@ export class NotebookView implements Component {
 
   private typeFilter(data: string): void {
     const vars = this.mode === "variables";
+    // ctrl+j/ctrl+k (and the arrows) move through the matches while typing.
+    const by = matchesKey(data, "ctrl+j") || matchesKey(data, "down") ? 1 : matchesKey(data, "ctrl+k") || matchesKey(data, "up") ? -1 : 0;
+    if (by) {
+      const f = this.current();
+      if (vars) {
+        const list = f ? variableList(f.notebook, this.varFilter) : [];
+        const at = list.findIndex((v) => v.name === this.varCursor);
+        this.varCursor = list[Math.max(0, Math.min(list.length - 1, at + by))]?.name ?? this.varCursor;
+        this.reveal = true;
+      } else if (f) this.step(f, by as 1 | -1);
+      this.tui.requestRender();
+      return;
+    }
     let text = vars ? this.varFilter : this.filter;
     if (matchesKey(data, "escape")) {
       text = "";
@@ -985,7 +998,8 @@ export class NotebookView implements Component {
       const c = this.cursorCell(f);
       if (c) this.cursor = c.id;
       this.reveal = true;
-    } else if (f && nb && (data === "[" || matchesKey(data, "ctrl+k"))) this.step(f, -1, (c) => nb.headings(c).length > 0, "No section here.");
+    } else if (f && nb && this.filter && (matchesKey(data, "ctrl+k") || matchesKey(data, "ctrl+j"))) this.step(f, matchesKey(data, "ctrl+j") ? 1 : -1);
+    else if (f && nb && (data === "[" || matchesKey(data, "ctrl+k"))) this.step(f, -1, (c) => nb.headings(c).length > 0, "No section here.");
     else if (f && nb && (data === "]" || matchesKey(data, "ctrl+j"))) this.step(f, 1, (c) => nb.headings(c).length > 0, "No section here.");
     else if (data === "n" || data === "p") {
       if (!this.lastParts.length) this.note = "This cell has one part.";
