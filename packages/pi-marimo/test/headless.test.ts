@@ -48,9 +48,13 @@ test("attach resolves with the session id once the kernel is ready, and holds th
   const [a, b] = await Promise.all([h.attach("http://127.0.0.1:2719", "/w/b.py"), h.attach("http://127.0.0.1:2719", "/w/b.py")]);
   expect(a).toBe(b);
   expect(FakeSocket.all).toHaveLength(2);
+  // Sessions on servers Pi started stay open through a reload.
+  h.closeAll((url) => url === "http://127.0.0.1:2719");
+  expect(h.has("http://127.0.0.1:2718", "/w/a.py")).toBe(false);
+  expect(h.has("http://127.0.0.1:2719", "/w/b.py")).toBe(true);
   h.closeAll();
   expect(FakeSocket.all.every((s) => s.closed)).toBe(true);
-  expect(h.has("http://127.0.0.1:2718", "/w/a.py")).toBe(false);
+  expect(h.has("http://127.0.0.1:2719", "/w/b.py")).toBe(false);
 });
 
 test("an unreachable server and a kernel that never starts reject, and leave nothing held", async () => {

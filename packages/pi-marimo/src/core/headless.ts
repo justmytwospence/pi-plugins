@@ -89,11 +89,12 @@ export class HeadlessSessions {
     return started;
   }
 
-  /** Lets go of every session (the servers end them after their TTL). */
-  closeAll(): void {
-    for (const { socket } of this.held.values()) {
+  /** Lets go of every session (the servers end them after their TTL), except those on servers `keep` names. */
+  closeAll(keep: (serverUrl: string) => boolean = () => false): void {
+    for (const [key, { socket }] of this.held) {
+      if (keep(key.slice(0, key.indexOf("\0")))) continue;
       try { socket.close(); } catch { /* already closed */ }
+      this.held.delete(key);
     }
-    this.held.clear();
   }
 }

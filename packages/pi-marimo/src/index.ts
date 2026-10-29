@@ -609,7 +609,8 @@ export default function piMarimo(pi: ExtensionAPI): void {
     if (previousContext?.mode === "tui") pi.events?.emit(ACTIVITY_GONE, { id: source.section.id });
     ownPill.dispose();
     source.resetHosts();
-    headless.closeAll();
+    // A session on a server Pi started stays open, as the server does: a reload must not end its kernel.
+    headless.closeAll((url) => ownServers().find(url) !== undefined);
     await previousWatcher?.stop();
     for (let i = 0; i < lastStatus.length; i++) previousContext?.ui.setStatus(statusKey(i), undefined);
     previousContext?.ui.setStatus(LENS_STATUS_KEY, undefined);
