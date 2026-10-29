@@ -343,7 +343,14 @@ export default function piMarimo(pi: ExtensionAPI): void {
       .finally(() => { fullOpen = false; });
   };
   const split = new NotebookSplit(pi, (tui, theme, key, host, close, state) =>
-    new NotebookView(tui, theme, key, { ...viewOptions(getKeybindings()), docked: host, ...(state ? { initial: state } : {}) }, close));
+    new NotebookView(tui, theme, key, { ...viewOptions(getKeybindings()), docked: host, ...(state ? { initial: state } : {}) }, close), {
+    // ctrl+' docks the notebook this session uses now (else Sidebar's ctrl+' does its own thing).
+    active: () => {
+      const f = mine().find((o) => o.connection === "connected" && o.notebook.ready);
+      return f ? notebookKey(f) : undefined;
+    },
+    busy: () => fullOpen,
+  });
   const openView = async (key: string, ui: unknown): Promise<void> => {
     if (config.view.split && ctxRef && split.open(ctxRef, key, { focus: true, quiet: true })) return;
     await openFull(key, ui);

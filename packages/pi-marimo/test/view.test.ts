@@ -752,27 +752,38 @@ test("wide, the outline and the detail sit side by side, every line exactly as w
   } finally { v.dispose(); }
 });
 
-test("narrow, the outline fills the view; Enter shows the cell's detail, Esc comes back to the outline, and Esc again leaves", () => {
+test("narrow, a few outline rows around the cursor sit above the detail, and the mouse knows which is which", () => {
   const f = notebookWithResults();
   let closed = false;
   const v = new NotebookView(tui as any, theme2, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {} }, () => { closed = true; });
+  const ev = (type: string, y: number, extra = {}) => ({ type, button: type === "wheel" ? "none" : "left", x: 10, y, screenX: 10, screenY: y, width: 80, height: 28, shift: false, alt: false, ctrl: false, ...extra }) as any;
   try {
     for (const l of v.render(80)) expect(visibleWidth(l)).toBe(80);
     v.handleInput("j");
     v.handleInput("j");
     v.handleInput("j");
-    let text = v.render(80).join("\n");
-    expect(text).toMatch(/▌ {2}✗ model +KeyError/u);
-    expect(text).not.toContain("Traceback");
-    expect(text).toContain("enter open");
+    const lines = v.render(80);
+    const text = lines.join("\n");
+    // The outline (with the cursor's neighbours), a rule, then the cell's detail with its traceback.
+    expect(text).toMatch(/daily[\s\S]*▌ {2}✗ model +KeyError[\s\S]*chart[\s\S]*─{20,}[\s\S]*Traceback \(most recent call last\)/u);
+    expect(text).toContain("enter code");
+    const rule = lines.findIndex((l, i) => i > 2 && /│ ─{20,} │/u.test(l));
+    expect(rule).toBeGreaterThan(3);
+    expect(rule).toBeLessThan(12);
+    // Enter opens the code in place.
     v.handleInput("\r");
-    text = v.render(80).join("\n");
-    expect(text).toContain("Traceback (most recent call last)");
-    expect(text).not.toContain("imports");
-    for (const l of v.render(80)) expect(visibleWidth(l)).toBe(80);
-    v.handleInput("\x1b");
-    expect(closed).toBe(false);
-    expect(v.render(80).join("\n")).toContain("Coffee sales");
+    expect(v.render(80).join("\n")).toContain("model = boom(daily)");
+    // A click on an outline row selects it; a click on the detail's code line folds the code.
+    const row = v.render(80).findIndex((l) => l.includes("○ chart"));
+    v.handleMouse(ev("click", row, { clickCount: 1 }));
+    expect(v.render(80).join("\n")).toMatch(/▌ {2}○ chart/u);
+    v.handleInput("k");
+    const code = v.render(80).findIndex((l) => l.includes("▾ code"));
+    v.handleMouse(ev("click", code));
+    expect(v.render(80).join("\n")).toContain("▸ code · 1 line");
+    // The wheel over the outline moves the cursor.
+    v.handleMouse(ev("wheel", 4, { wheelDelta: 1 }));
+    expect(v.render(80).join("\n")).toMatch(/▌ {2}○ chart/u);
     v.handleInput("\x1b");
     expect(closed).toBe(true);
   } finally { v.dispose(); }

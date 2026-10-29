@@ -6,7 +6,7 @@ import { SplitRoot } from "../src/ui/split-layout.ts";
 const theme = { fg: (_: string, t: string) => t, bold: (t: string) => t };
 const leaf = (): Component => ({ render: () => [], invalidate() {} });
 
-function setup(opts: { fullscreen?: boolean } = {}) {
+function setup(opts: { fullscreen?: boolean; active?: () => string | undefined; busy?: () => boolean } = {}) {
   const main = leaf();
   const editor = leaf();
   const tui: any = {
@@ -41,10 +41,10 @@ function setup(opts: { fullscreen?: boolean } = {}) {
   };
   const views: any[] = [];
   const split = new NotebookSplit(pi, (_t, _th, key) => {
-    const v = { render: () => ["NB"], invalidate() {}, handleInput: vi.fn(), handleMouse: () => undefined, dispose: vi.fn(), notebook: key };
+    const v = { render: () => ["NB"], invalidate() {}, handleInput: vi.fn(), handleMouse: () => undefined, dispose: vi.fn(), snapshot: () => ({ cursor: `at-${key}` }), notebook: key, made: [_t, _th, key] as unknown[] };
     views.push(v);
     return v as never;
-  });
+  }, { active: opts.active, busy: opts.busy, toggleKeys: ["ctrl+'"] });
   split.listen(ctx);
   const fire = (name: string, ...a: unknown[]) => { for (const fn of handlers.get(name) ?? []) fn(...a); };
   return { split, tui, main, editor, pi, ctx, views, emitted, fire, input: (d: string) => input!(d) };
@@ -130,5 +130,29 @@ describe("NotebookSplit", () => {
     s.fire("input", { source: "interactive" });
     s.split.autoOpen(s.ctx, "k");
     expect(s.split.isOpen).toBe(true);
+  });
+
+  it("ctrl+' docks the active notebook and closes it again, back where it was; with no notebook or Sidebar open, the key is Sidebar's", () => {
+    let active: string | undefined;
+    let busy = false;
+    const s = setup({ active: () => active, busy: () => busy });
+    const make = vi.spyOn(s.split as any, "make");
+    const CTRL_QUOTE = "\x1b[39;5u";
+    expect(s.input(CTRL_QUOTE)).toBeUndefined();
+    active = "k";
+    busy = true;
+    expect(s.input(CTRL_QUOTE)).toBeUndefined();
+    busy = false;
+    expect(s.input(CTRL_QUOTE)).toEqual({ consume: true });
+    expect(s.split.isOpen).toBe(true);
+    expect(s.tui.focused).toBe(s.views[0]);
+    expect(s.input(CTRL_QUOTE)).toEqual({ consume: true });
+    expect(s.split.isOpen).toBe(false);
+    s.input(CTRL_QUOTE);
+    expect(make.mock.calls.at(-1)?.[5]).toEqual({ cursor: "at-k" });
+    s.split.close();
+    s.pi.events.emit("pi-plugins.side-panel.v1", { id: "pi-sidebar", open: true });
+    expect(s.input(CTRL_QUOTE)).toBeUndefined();
+    expect(s.split.isOpen).toBe(false);
   });
 });

@@ -12,6 +12,19 @@ import type { DockedHost, NotebookView, ViewState } from "./view.js";
 export const SIDE_PANEL_CHANNEL = "pi-plugins.side-panel.v1";
 export const SIDE_PANEL_ID = "pi-marimo";
 export const FOCUS_KEY = "ctrl+]";
+/** Sidebar's toggle keys (PI_SIDEBAR_KEYS, default ctrl+'), which toggle the docked notebook while one is active. */
+export function toggleKeys(raw: string | undefined = process.env.PI_SIDEBAR_KEYS): string[] {
+  const keys = (raw ?? "").split(",").map((k) => k.trim().toLowerCase()).filter(Boolean);
+  return keys.length ? keys : ["ctrl+'"];
+}
+
+export interface SplitOptions {
+  /** The notebook ctrl+' docks: the one this session uses now, if any. */
+  active?(): string | undefined;
+  /** Something else holds the screen (the full-screen notebook view): ctrl+' is left alone. */
+  busy?(): boolean;
+  toggleKeys?: string[];
+}
 export const DEFAULT_SPLIT_RATIO = 0.55;
 const HERDR_BLOCKED = "herdr:blocked";
 const PROBE = "pi-marimo-split-probe";
@@ -61,8 +74,11 @@ export class NotebookSplit {
   /** The user closed the split since their last message: auto-docking stays away. */
   private suppressed = false;
   private release: (() => void) | undefined;
+  private ctx: ExtensionContext | undefined;
+  /** Where each notebook's docked view was when it closed, so docking it again comes back there. */
+  private readonly states = new Map<string, ViewState>();
 
-  constructor(private readonly pi: ExtensionAPI, private readonly make: MakeDockedView) {
+  constructor(private readonly pi: ExtensionAPI, private readonly make: MakeDockedView, private readonly options: SplitOptions = {}) {
     pi.on("ui_prompt_start" as never, (() => { this.prompts += 1; this.render(); }) as never);
     pi.on("ui_prompt_end" as never, (() => { this.prompts = Math.max(0, this.prompts - 1); this.render(); }) as never);
     pi.events?.on?.(HERDR_BLOCKED, (data: unknown) => {
@@ -152,7 +168,7 @@ export class NotebookSplit {
       this.pi.events?.emit?.(SIDE_PANEL_CHANNEL, { id: SIDE_PANEL_ID, open: true });
     }
     const host: DockedHost = { focused: () => this.focused, focusMain: () => this.focusMain() };
-    this.view = this.make(tui, theme, key, host, () => this.closeByUser(), o.state);
+    this.view = this.make(tui, theme, key, host, () => this.closeByUser(), o.state ?? this.states.get(key));
     this.host.view = this.view;
     old?.dispose();
     if (!this.layout!.mount()) {
@@ -203,6 +219,7 @@ export class NotebookSplit {
       return;
     }
     const had = this.focused;
+    if (this.view) this.states.set(this.view.notebook, this.view.snapshot());
     this.layout.unmount();
     this.view?.dispose();
     this.host.view = undefined;
@@ -217,8 +234,25 @@ export class NotebookSplit {
     this.close();
   }
 
-  /** The terminal-input listener: ctrl+] and Herdr's reserved prefix+h/j/k/l keys. */
+  /**
+   * ctrl+' (Sidebar's key): closes the docked notebook, or docks the active one when neither it nor
+   * Sidebar is open. With no active notebook, or Sidebar open, the key is Sidebar's.
+   */
+  private toggle(): { consume: true } | undefined {
+    if (this.collapsed || !this.ctx) return undefined;
+    if (this.isOpen) {
+      this.closeByUser();
+      return { consume: true };
+    }
+    if (this.otherPanel || this.options.busy?.()) return undefined;
+    const key = this.options.active?.();
+    if (!key) return undefined;
+    return this.open(this.ctx, key, { focus: true }) ? { consume: true } : undefined;
+  }
+
+  /** The terminal-input listener: ctrl+' toggles, ctrl+] and Herdr's reserved prefix+h/j/k/l keys move focus. */
   handleKey(data: string): { consume: true } | undefined {
+    if ((this.options.toggleKeys ?? toggleKeys()).some((k) => matchesKey(data, k as never))) return this.toggle();
     if (!this.isOpen || this.collapsed || !this.tui) return undefined;
     if (matchesKey(data, FOCUS_KEY as never)) {
       if (this.focused) {
@@ -244,6 +278,7 @@ export class NotebookSplit {
   listen(ctx: ExtensionContext): void {
     this.release?.();
     this.release = undefined;
+    this.ctx = ctx;
     if (ctx.mode === "tui" && typeof ctx.ui.onTerminalInput === "function") {
       this.release = ctx.ui.onTerminalInput((data) => this.handleKey(data));
     }
@@ -257,6 +292,8 @@ export class NotebookSplit {
     this.prompts = 0;
     this.otherPanel = undefined;
     this.suppressed = false;
+    this.ctx = undefined;
+    this.states.clear();
     this.tui = undefined;
     this.layout = undefined;
   }

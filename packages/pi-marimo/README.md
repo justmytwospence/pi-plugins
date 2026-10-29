@@ -77,7 +77,7 @@ A marimo-pair call that could mean more than one followed notebook (only `--url`
 
 The outline is the headings and one short line per code cell: its status, a title (its name, else what it defines that other cells use, else what it shows: `imports`, `daily, smooth`, `chart`, `controls`), and one badge at the end: how long it has run, `queued`, the error's type (`KeyError`), `blocked`, `stale`, `new` or `changed` (by the agent), else the output's shape (`1,204×8`, `chart`, `4 inputs`). Cell ids are never shown. The selected cell has an accent bar and Pi's selection background. The detail shows the cell as a reader wants it: prose rendered, the output large (tables are grids of the first page marimo sends; PNG figures, Vega-Lite and Plotly charts are drawn inline on terminals with Kitty graphics (Ghostty, herdr, Kitty), and Plotly figures run live there, see Optional integrations), an error with its traceback, the cell's widgets, its Lens selections, the code folded to `▸ code · 12 lines` (Enter opens it), and its dataflow by name (`uses df · used by plot`). `O` stacks the whole section in the detail, the way the notebook reads in a browser (`view.outputs` in the settings starts there); `O` again shows the cell alone. Variable values are in the `v` pane.
 
-From 100 columns the panes sit side by side. Narrower, the outline fills the view, Enter opens the cell's detail full width and Esc (or `h`) comes back. An example (not a real screenshot):
+From 100 columns the panes sit side by side. Narrower (as when docked beside the chat), they stack like a mail app's list above its reading pane: a few outline rows with the selected cell in the middle, a rule, and the detail under it. An example of the side-by-side layout (not a real screenshot):
 
 ```text
 ╭─ ◀ esc · Notebook coffee.py · not your main session ─────────────────────────╮
@@ -100,7 +100,7 @@ From 100 columns the panes sit side by side. Narrower, the outline fills the vie
 |---|---|
 | `j`/`k`, `↑`/`↓` | the next or previous cell; `[` `]` the previous or next section |
 | `^U`/`^D`, PgUp/PgDn, Space | scroll the detail; `g`/`G` the first or last cell |
-| Enter, `l` | open or fold the cell's code (narrow: open its detail) |
+| Enter, `l` | open or fold the cell's code |
 | `O` | the whole section in the detail, or the cell alone |
 | `z` / `Z` | fold the section the cursor is in / fold every section (again: unfold all) |
 | `n`/`N` | the next or previous failed cell |
@@ -122,13 +122,14 @@ From 100 columns the panes sit side by side. Narrower, the outline fills the vie
 | `?` | every key |
 | `\|` | dock beside the chat, or back to full screen |
 | `ctrl+]` | docked: switch between the chat and the notebook |
+| `ctrl+'` | anywhere: dock the notebook this session uses, or close the docked one (pi-sidebar's key; with no notebook, or Sidebar open, it stays Sidebar's) |
 | Esc, `q`, `h`, `←`, Ctrl+C | back to Pi (docked: Esc goes to the chat, `q` closes) |
 
 The mouse wheel scrolls the pane under it, a click selects a cell (or a widget), a second click or a double click opens its code, and a click on the `▸ code` line folds or opens it.
 
 #### Docked beside the chat
 
-`|` in the full-screen view docks the notebook beside the chat instead (and `|` again goes back to full screen), keeping your place. `/marimo split [file]` docks the busiest notebook, or the one named; with no file while docked it closes the split. With `view.split` set, Enter on a row and `/marimo view` open docked. When the agent starts running a notebook's cells while it works, the notebook docks by itself without taking focus (`view.autoSplit`); it does not when the split is already open, a full-screen view is open, pi-sidebar is open, or you closed the split since your last message. Runs you start from the browser never move your screen.
+`ctrl+'` docks the notebook this session uses (focused, back where you left it) and closes it again, from the chat or the notebook. `|` in the full-screen view docks the notebook beside the chat instead (and `|` again goes back to full screen), keeping your place. `/marimo split [file]` docks the busiest notebook, or the one named; with no file while docked it closes the split. With `view.split` set, Enter on a row and `/marimo view` open docked. When the agent starts running a notebook's cells while it works, the notebook docks by itself without taking focus (`view.autoSplit`); it does not when the split is already open, a full-screen view is open, pi-sidebar is open, or you closed the split since your last message. Runs you start from the browser never move your screen.
 
 The chat reflows into its half, so you keep typing while the notebook runs. `ctrl+]` (or Herdr's `prefix+h`/`prefix+l`, with pi-sidebar's Herdr plugin) moves focus between the chat and the notebook, a click in a half focuses it, Esc in the notebook goes back to the chat and `q` closes the split. The notebook gets 55% of the width; drag the divider to resize (for the rest of the Pi process, not saved). While a Pi dialog is up the split collapses and the chat has the full width. [pi-sidebar](https://pi-plugins.vercel.app/plugins/pi-sidebar/) uses the same right-hand side: opening one closes the other. Docking needs Pi's fullscreen mode (`"tuiMode": "fullscreen"` in Pi's settings); otherwise the view opens full screen.
 

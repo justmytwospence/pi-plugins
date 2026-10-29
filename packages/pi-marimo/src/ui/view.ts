@@ -52,6 +52,8 @@ const ROWS_TOP = 3;
 const SPLIT_MIN = 100;
 /** The outline's width in the split: a third of the view, within limits. */
 const outlineWidth = (width: number): number => Math.max(28, Math.min(44, Math.floor((width - 4) * 0.32)));
+/** Rows the stacked outline takes above the detail: about a third of the page, 2 to 8. */
+const stackedOutlineRows = (page: number): number => Math.max(2, Math.min(8, Math.round(page * 0.3), page - 4));
 /** Between the panes. */
 const SEPARATOR_WIDTH = 3;
 /** Lines of a scratch run shown above its prompt, at most. */
@@ -148,14 +150,16 @@ export class NotebookView implements Component {
   private codeOpen = new Set<string>();
   /** The detail's scroll, in its own rows. */
   private detailScroll = 0;
-  /** Narrow view: the detail fills the view instead of the outline. */
-  private narrowDetail = false;
   /** Which cell (and view) the detail last drew, so a new one starts at its top. */
   private detailKey = "";
   private lastOutline: Row[] = [];
   private lastDetail: Row[] = [];
   /** Where the panes are: the outline's width, the detail's left column, which panes show. */
-  private panes: { lw: number; detailLeft: number; shows: "both" | "outline" | "detail" } = { lw: 28, detailLeft: 0, shows: "both" };
+  /**
+   * Where the panes are: side by side (`both`), or `stacked` when narrow: a few outline rows around the
+   * cursor above a rule, the detail under it, as a mail app's list above its reading pane.
+   */
+  private panes: { lw: number; detailLeft: number; detailTop: number; outlineHeight: number; shows: "both" | "stacked" } = { lw: 28, detailLeft: 0, detailTop: 0, outlineHeight: 0, shows: "both" };
   private filter = "";
   /** Typing a filter: keys go to it. */
   private typing = false;
@@ -390,7 +394,6 @@ export class NotebookView implements Component {
     this.diffs.clear();
     this.codeOpen.clear();
     this.detailScroll = 0;
-    this.narrowDetail = false;
     this.widget = undefined;
   }
 
@@ -601,30 +604,30 @@ export class NotebookView implements Component {
     }
   }
 
-  /** Enter (or a double click): open or fold the cell's code, drill into the detail when only the outline shows, or go to the variable's cell. */
+  /** Enter (or a double click): open or fold the cell's code, or go to the variable's cell. */
   private activate(f: Followed): void {
     if (this.mode === "variables") return this.variablesKey(f, "\r");
     const c = this.cursorCell(f);
     if (!c) return;
     this.cursor = c.id;
     this.reveal = true;
-    if (this.panes.shows === "outline") this.narrowDetail = true;
-    else this.toggleCode(c.id);
+    this.toggleCode(c.id);
   }
 
   private toggleCode(id: string): void {
     if (!this.codeOpen.delete(id)) this.codeOpen.add(id);
   }
 
-  /** The pane an x column is over. */
-  private paneAt(x: number): "outline" | "detail" {
-    const { shows, detailLeft } = this.panes;
-    return shows === "detail" || (shows === "both" && x >= detailLeft) ? "detail" : "outline";
+  /** The pane under a column and a page row (from the first row under the header); the rule between stacked panes is neither. */
+  private paneAt(x: number, line: number): "outline" | "detail" | undefined {
+    const { shows, detailLeft, outlineHeight } = this.panes;
+    if (shows === "both") return x >= detailLeft ? "detail" : "outline";
+    return line < outlineHeight ? "outline" : line > outlineHeight ? "detail" : undefined;
   }
 
-  /** ^D, PgDn and the like: the detail scrolls (the outline follows the cursor); with only the outline showing, it scrolls. */
+  /** ^D, PgDn and the like: the detail scrolls (the outline follows the cursor). */
   private scrollBy(by: number): void {
-    if (this.mode === "cells" && this.panes.shows !== "outline") this.detailScroll = Math.max(0, this.detailScroll + by);
+    if (this.mode === "cells") this.detailScroll = Math.max(0, this.detailScroll + by);
     else this.move(by);
   }
 
@@ -662,11 +665,6 @@ export class NotebookView implements Component {
     }
     if (this.mode === "variables") {
       this.variablesKey(f, data);
-      this.tui.requestRender();
-      return;
-    }
-    if (this.narrowDetail && this.panes.shows === "detail" && (matchesKey(data, "escape") || data === "h" || matchesKey(data, "left"))) {
-      this.narrowDetail = false;
       this.tui.requestRender();
       return;
     }
@@ -771,7 +769,6 @@ export class NotebookView implements Component {
       this.section = !this.section;
       sectionMode = this.section;
       this.note = this.section ? "Section view: the whole section." : "Cell view.";
-      if (this.panes.shows === "outline") this.narrowDetail = true;
       this.reveal = true;
     } else if (f && nb && data === "z") {
       const c = this.cursorCell(f);
@@ -803,7 +800,6 @@ export class NotebookView implements Component {
         if (!this.diffs.delete(c.id)) { this.diffs.add(c.id); this.codeOpen.add(c.id); }
         this.cursor = c.id;
         this.reveal = true;
-        if (this.panes.shows === "outline") this.narrowDetail = true;
       }
     } else if (f && data === "v") {
       this.mode = "variables";
@@ -830,15 +826,14 @@ export class NotebookView implements Component {
         this.cursor = c.id;
         this.follow = false;
         this.reveal = true;
-        if (this.panes.shows === "outline") this.narrowDetail = true;
       }
     } else if (f && data === "a") this.openAsk(f);
     else if (f && data === ":") this.openScratch(f);
     else if (f && data === "m") this.openMark(f);
     else if (f && data === "i") {
       const c = this.cursorCell(f);
-      if (c && this.panes.shows !== "outline" && this.live.inspect(c.output)) this.note = "";
-      else this.note = "Select a cell with a live chart first (in a narrow view, open its detail), then i.";
+      if (c && this.live.inspect(c.output)) this.note = "";
+      else this.note = "Select a cell with a live chart first, then i.";
     } else if (f && (matchesKey(data, "enter") || matchesKey(data, "l"))) this.activate(f);
     else if (f && data === "r") {
       const c = this.cursorCell(f);
@@ -1013,22 +1008,29 @@ export class NotebookView implements Component {
         if (cells.some((c) => c.id === target)) this.cursor = target;
       }
       if (!this.cursor || !cells.some((c) => c.id === this.cursor)) this.cursor = cells[0]?.id;
-      // The outline and the detail side by side, or one of them filling the view.
+      // The outline and the detail side by side; narrower, a few outline rows around the cursor above the detail.
       const split = width >= SPLIT_MIN;
       const lw = split ? outlineWidth(width) : inner;
       const dw = split ? inner - lw - SEPARATOR_WIDTH : inner;
-      const shows = split ? "both" : this.narrowDetail ? "detail" : "outline";
-      if (split) this.narrowDetail = false;
-      this.panes = { lw, detailLeft: split ? 2 + lw + SEPARATOR_WIDTH : 2, shows };
+      const shows = split ? "both" : "stacked";
+      const oh = split ? page : stackedOutlineRows(page);
+      const dh = split ? page : page - oh - 1;
+      const detailTop = split ? 0 : oh + 1;
+      this.panes = { lw, detailLeft: split ? 2 + lw + SEPARATOR_WIDTH : 2, detailTop, outlineHeight: oh, shows };
       const outline = (): ReturnType<typeof outlineRows> => outlineRows(nb, th as PaneTheme, Date.now(), { cursor: this.cursor, folded: this.folded, filter: this.filter, width: lw });
       let built = outline();
       const at = this.cursor !== undefined ? built.cellRows.get(this.cursor) : undefined;
-      if (this.follow && running && built.running !== undefined) {
+      if (!split) {
+        // Stacked: the cursor's neighbours, the cursor in the middle.
+        const centre = this.follow && running && built.running !== undefined ? built.running : at;
+        if (centre !== undefined) this.scroll = Math.max(0, Math.min(centre - Math.floor((oh - 1) / 2), built.rows.length - oh));
+        this.reveal = false;
+      } else if (this.follow && running && built.running !== undefined) {
         this.scroll = Math.min(Math.max(0, built.rows.length - page), Math.max(0, built.running - Math.floor(page / 3)));
         this.reveal = false;
       } else this.place(built.rows.length, at, page);
       // Scrolled away from the cursor: it moves to the nearest cell on screen.
-      if (at !== undefined && !this.follow && !this.widget && shows !== "detail" && (at < this.scroll || at >= this.scroll + page)) {
+      if (split && at !== undefined && !this.follow && !this.widget && (at < this.scroll || at >= this.scroll + page)) {
         const visible = cells.filter((c) => { const r = built.cellRows.get(c.id); return r !== undefined && r >= this.scroll && r < this.scroll + page; });
         const pick = at < this.scroll ? visible[0] : visible.at(-1);
         if (pick) {
@@ -1039,13 +1041,13 @@ export class NotebookView implements Component {
       this.lastOutline = built.rows;
       // The detail: the cursor's cell (or its section), at its own scroll.
       this.live.beginFrame();
-      const cell = shows === "outline" ? undefined : cells.find((c) => c.id === this.cursor);
+      const cell = cells.find((c) => c.id === this.cursor);
       let detail: Row[] = [];
       if (cell) {
         const d = detailRows(nb, th, Date.now(), {
           cell, width: dw, codeOpen: this.codeOpen.has(cell.id), diff: this.diffs.has(cell.id), section: this.section,
           ...(this.widget ? { widgetFocus: this.widget } : {}),
-          imageRows: page - 1, vega: this.vega, plotly: this.plotly,
+          imageRows: dh - 1, vega: this.vega, plotly: this.plotly,
           ...(this.actions.liveCharts === false ? {} : { live: this.live }),
           onVega: () => { if (!this.closed) this.tui.requestRender(); },
         });
@@ -1058,9 +1060,9 @@ export class NotebookView implements Component {
         const focused = this.widget ? d.widgetRows.get(`${this.widget.cell}\0${this.widget.index}`) : undefined;
         if (focused !== undefined) {
           if (focused < this.detailScroll) this.detailScroll = focused;
-          else if (focused >= this.detailScroll + page) this.detailScroll = focused - page + 1;
+          else if (focused >= this.detailScroll + dh) this.detailScroll = focused - dh + 1;
         }
-        this.detailScroll = Math.max(0, Math.min(this.detailScroll, Math.max(0, detail.length - page)));
+        this.detailScroll = Math.max(0, Math.min(this.detailScroll, Math.max(0, detail.length - dh)));
       }
       this.lastDetail = detail;
       // An image draws only when its whole block is on screen; otherwise a note stands in for it.
@@ -1068,7 +1070,7 @@ export class NotebookView implements Component {
         const r = detail[i];
         if (!r?.image) return true;
         const start = i - r.image.index;
-        return start >= this.detailScroll && start + r.image.height <= this.detailScroll + page;
+        return start >= this.detailScroll && start + r.image.height <= this.detailScroll + dh;
       };
       const detailText = (i: number): string => {
         const r = detail[i];
@@ -1076,12 +1078,13 @@ export class NotebookView implements Component {
         return r.image.index === 0 ? r.image.alt : r.text;
       };
       for (let i = 0; i < page; i++) {
-        const di = this.detailScroll + i;
+        const left = i < oh ? built.rows[this.scroll + i]?.text ?? (this.filter && !cells.length && i === 0 ? th.fg("dim", `No cell matches "${this.filter}".`) : "") : "";
+        if (!split && i === oh) { out.push(row(th.fg("dim", "─".repeat(inner)))); continue; }
+        if (!split && i < oh) { out.push(row(left)); continue; }
+        const di = this.detailScroll + i - detailTop;
         const r = detail[di];
         if (r?.image?.live && r.image.index === 0 && visible(di)) this.live.rects.push({ top: out.length, left: this.panes.detailLeft + 2, geometry: r.image.live.geometry, output: r.image.live.output });
-        const left = built.rows[this.scroll + i]?.text ?? (this.filter && !cells.length && i === 0 ? th.fg("dim", `No cell matches "${this.filter}".`) : "");
-        if (shows === "both") out.push(row(`${fit(left, lw)}${th.fg("dim", " │ ")}${fit(detailText(di), dw)}`));
-        else out.push(row(shows === "detail" ? detailText(di) : left));
+        out.push(row(split ? `${fit(left, lw)}${th.fg("dim", " │ ")}${fit(detailText(di), dw)}` : detailText(di)));
       }
       this.live.endFrame();
     }
@@ -1126,7 +1129,7 @@ export class NotebookView implements Component {
     if (this.note) return withNav(th.fg("warning", this.note));
     const cell = f ? this.cursorCell(f) : undefined;
     const hints: string[] = [];
-    if (f) hints.push("↑↓ cells", this.panes.shows === "outline" ? "enter open" : "enter code");
+    if (f) hints.push("↑↓ cells", "enter code");
     const more: string[] = [];
     if (f && this.live.rects.length) more.push("i inspect chart");
     if (cell?.output?.widgets?.length && this.actions.setWidget) more.push("w widgets");
@@ -1159,7 +1162,11 @@ export class NotebookView implements Component {
     if (event.type === "wheel") {
       if (this.help || this.dock) return { handled: true };
       const by = event.wheelDelta ?? 0;
-      if (this.mode === "cells" && this.paneAt(event.x) === "detail") this.detailScroll = Math.max(0, this.detailScroll + by);
+      const pane = this.mode === "cells" ? this.paneAt(event.x, event.y - ROWS_TOP) : undefined;
+      const f = this.current();
+      if (pane === "detail") this.detailScroll = Math.max(0, this.detailScroll + by);
+      // The stacked outline is centred on the cursor: the wheel moves the cursor.
+      else if (pane === "outline" && this.panes.shows === "stacked") { if (f && by) this.step(f, by > 0 ? 1 : -1); }
       else this.move(by);
       this.tui.requestRender();
       return { handled: true };
@@ -1184,8 +1191,8 @@ export class NotebookView implements Component {
         this.varCursor = r.variable;
         if (again || twice) this.activate(f);
       }
-    } else if (this.paneAt(event.x) === "detail") {
-      const r = this.lastDetail[this.detailScroll + line];
+    } else if (this.paneAt(event.x, line) === "detail") {
+      const r = this.lastDetail[this.detailScroll + line - this.panes.detailTop];
       if (r?.widget && this.actions.setWidget && f.connection === "connected") {
         this.widget = { cell: r.widget.cell, index: r.widget.index, sub: 0 };
         if (!this.section) this.cursor = r.widget.cell;
@@ -1194,7 +1201,7 @@ export class NotebookView implements Component {
         const c = this.cursorCell(f);
         if (c) this.toggleCode(c.id);
       }
-    } else {
+    } else if (this.paneAt(event.x, line) === "outline") {
       const r = this.lastOutline[this.scroll + line];
       if (r?.cell) {
         const again = this.cursor === r.cell;
