@@ -18,14 +18,12 @@ import { PlanMarkdown } from "./mermaid-art.js";
 import { type DiffLine, planDiff, planDiffText, renderPlanDiff } from "./plan-diff.js";
 import { inPlan, isPlanFile, planName, planPaths, readPlan, tildify } from "./plan-file.js";
 import { expandHome } from "./plan-hook.js";
-import { consultantAccess } from "./planner/access.js";
-import { PlannerAgent } from "./planner/agent.js";
+import { type PlannerAccessConfig, PlannerAgent } from "./planner/agent.js";
 import { CONSULT_WRAP_UP, consultMessage, reviewRequest, reviewVerdict } from "./planner/prompt.js";
 import { type PlannerSessionFactory, plannerSessionDir } from "./planner/session.js";
 import { formatCost } from "./planners.js";
 import { type ReviewStatus, reviewBody, reviewTitle } from "./review-card.js";
 import type { Usage } from "./scout-process.js";
-import type { SafeSubcommands } from "./tool-policy.js";
 
 export const EXEC_ENTRY = "plan-mode:exec";
 export const EXEC_STATUS_KEY = "plan-exec";
@@ -53,8 +51,8 @@ export interface ExecState {
 }
 
 export interface ExecHost {
-  safeSubcommands(): SafeSubcommands | undefined;
-  guardExtensionPath: string;
+  /** What the planner on call on `spec` may use (planner/access.ts consultantAccess). */
+  consultantAccess(ctx: ExtensionContext, planFile: string, spec: ModelSpec): PlannerAccessConfig;
   createSession?: PlannerSessionFactory;
   restoreModel(ctx: ExtensionContext, spec: ModelSpec): Promise<unknown>;
 }
@@ -186,7 +184,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       spec,
       name: planner.name,
       cwd: ctx.cwd,
-      access: consultantAccess(state.planFile, host.safeSubcommands(), host.guardExtensionPath),
+      access: host.consultantAccess(ctx, state.planFile, spec),
       timeoutMs: CONSULT_TIMEOUT_MS,
       wrapUpMessage: CONSULT_WRAP_UP,
       sessionDir: plannerSessionDir(),

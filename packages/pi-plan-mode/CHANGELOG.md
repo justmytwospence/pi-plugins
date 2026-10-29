@@ -30,8 +30,9 @@
 
 - Exec mode follows any approved plan: the footer shows `exec <plan>` (on pi-status-footer's
   permission-mode row), and the model that planned stays on call. After a handoff, the implementer
-  gets `ask_planner`, which asks a copy of the planning session (read-only tools, and the plan file
-  as its only writable file) for a decision and shows any plan amendment as a diff; asks are counted
+  gets `ask_planner`, which asks a copy of the planning session (every planner toolset, such as web
+  research and MCP, command grants and read-only subagents, with the plan file as its only writable
+  file) for a decision and shows any plan amendment as a diff; asks are counted
   in the footer with their cost. The first edit of each file the plan does not list gets a note,
   never a block. `finish_plan` ends exec mode with your choice: **Yes, done** (back to the planning
   model), **Have the planner review it**, or **No, keep going**. `/planners`' Implement step writes

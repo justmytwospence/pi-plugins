@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { test, vi } from "vitest";
-import { otherTools, otherToolsNode, resolveAccess } from "../src/planner/access.js";
+import { consultantAccess, otherTools, otherToolsNode, resolveAccess } from "../src/planner/access.js";
 import { type PlannerAccessConfig, PlannerAgent } from "../src/planner/agent.js";
 import { plannerExtension } from "../src/planner/extension.js";
 import type { PlannerSessionFactory, PlannerSessionOptions } from "../src/planner/session.js";
@@ -440,4 +440,46 @@ test("the soft timer steers with the configured wrap-up message", async () => {
   } finally {
     vi.useRealTimers();
   }
+});
+
+test("the planner on call gets every toolset, grant and subagents, and may write only the plan file", () => {
+  const config = consultantAccess({
+    planFile: "/plans/calm-river.md",
+    toolsets: {
+      web: {
+        label: "Web research",
+        extensions: ["/ext/web"],
+        tools: ["web_search", "fetch_content"],
+        // Off by default for /planners; the planner on call gets it anyway.
+        enabled: false,
+        scouts: true,
+      },
+    },
+    grants: {
+      jev: {
+        label: "Jev judgments",
+        commands: ["~/.local/bin/jev-ask"],
+        skills: ["/skills/jev"],
+        enabled: false,
+        planMode: true,
+      },
+    },
+    mcpCatalog: [],
+    scout: { provider: "anthropic", modelId: "claude-sonnet-5-5", thinkingLevel: "low" },
+    guardExtensionPath: "/ext/guard",
+    expandPath: (path) => path,
+  });
+  for (const tool of ["read", "bash", "web_search", "fetch_content", "plan_subagents", "edit", "write"])
+    assert.ok(config.tools.includes(tool), tool);
+  assert.ok(!config.tools.includes("plan_mode_question"));
+  assert.ok(!config.tools.includes("plan_mode_complete"));
+  assert.ok(config.extensions.includes("/ext/web"));
+  assert.deepEqual(config.skills, ["/skills/jev"]);
+  assert.equal(config.policy.planFile, "/plans/calm-river.md");
+  assert.deepEqual(config.policy.grantPrefixes, ["~/.local/bin/jev-ask"]);
+  assert.equal(config.policy.scouts?.spec.modelId, "claude-sonnet-5-5");
+  assert.match(
+    config.systemPrompt[0] ?? "",
+    /## Planner on call[\s\S]*web_search, fetch_content[\s\S]*jev-ask[\s\S]*plan_subagents/u,
+  );
 });

@@ -28,13 +28,24 @@ export interface PlannerTaskInput {
 
 /** The first message a planner gets: the task, and what it may use. */
 export function plannerTaskPrompt(input: PlannerTaskInput) {
-  const research = describedTools(input.tools);
   return [
     ...(input.planners > 1
       ? [
           "Another model is planning the same task in parallel without seeing your work; the user will compare the plans, combine them, or pick one.",
         ]
       : []),
+    ...plannerToolNotes(input),
+    "",
+    "## Task",
+    "",
+    input.task.trim() || "Plan the task discussed in the conversation so far.",
+  ].join("\n");
+}
+
+/** What a planner (or the planner on call) may use beyond reading files, one line each. */
+export function plannerToolNotes(input: Omit<PlannerTaskInput, "task" | "planners">): string[] {
+  const research = describedTools(input.tools);
+  return [
     ...(research.length > 0
       ? [
           `Research beyond the repository whenever outside knowledge matters (library and API docs, versions, known issues, prior art) with ${research.join(", ")}.`,
@@ -53,11 +64,7 @@ export function plannerTaskPrompt(input: PlannerTaskInput) {
           `For broad or independent investigations, delegate to read-only subagents with plan_subagents (they run on ${input.scoutLabel}; give each a self-contained task and run independent ones in one call). Verify anything decisive yourself, and write the plan yourself.`,
         ]
       : []),
-    "",
-    "## Task",
-    "",
-    input.task.trim() || "Plan the task discussed in the conversation so far.",
-  ].join("\n");
+  ];
 }
 
 /**
@@ -126,7 +133,7 @@ export function consultMessage(message: string, from: "main" | "implementer" = "
 }
 
 /** The planner on call's role, appended to its system prompt. */
-export function consultantSystemPrompt(planFile: string) {
+export function consultantSystemPrompt(planFile: string, toolNotes: readonly string[] = []) {
   return [
     "## Planner on call",
     "",
@@ -136,6 +143,7 @@ export function consultantSystemPrompt(planFile: string) {
     "- When your answer changes the plan, edit the plan file first: change the affected sections in place, and add a dated line under a `## Amendments` heading at its end saying what changed and why.",
     "- When the question is a product decision only the user can make, say so, and give the exact question the implementer should ask the user, with your recommendation.",
     "- Keep answers short: the implementer has the plan.",
+    ...(toolNotes.length > 0 ? ["", ...toolNotes] : []),
   ].join("\n");
 }
 

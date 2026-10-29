@@ -97,9 +97,18 @@ export function subagentWorkerModel(
   events: { emit(channel: string, data: unknown): void },
   parent: ModelSpec,
 ): ModelSpec | undefined {
+  return subagentRoleModel(events, "worker", parent);
+}
+
+/** The model pi-subagents gives `role` for a session on `parent`; undefined without pi-subagents. */
+export function subagentRoleModel(
+  events: { emit(channel: string, data: unknown): void },
+  role: string,
+  parent: ModelSpec,
+): ModelSpec | undefined {
   const request: { role: string; parent: string; thinking?: string; reply?: { model?: unknown; thinking?: unknown } } =
     {
-      role: "worker",
+      role,
       parent: formatModelKey(parent),
       ...(parent.thinkingLevel ? { thinking: parent.thinkingLevel } : {}),
     };

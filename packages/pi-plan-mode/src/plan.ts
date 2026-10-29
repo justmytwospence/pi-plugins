@@ -46,6 +46,7 @@ import {
   type ModelSpec,
   parseModelSpec,
   sameModel,
+  subagentRoleModel,
   subagentWorkerModel,
 } from "./implementation-models.js";
 import { type Approval, type HandoffTarget, handsOffToAnotherModel, registerInlinePlanMode } from "./inline-plan.js";
@@ -66,7 +67,7 @@ import { modelCatalog } from "./model-catalog.js";
 import { exportPlanToFile } from "./plan-export.js";
 import { planName, plansDirectoryPath, writePlanFile } from "./plan-file.js";
 import { expandHome, runPlanCompleteHook } from "./plan-hook.js";
-import { type OtherTool, otherTools, otherToolsNode, resolveAccess } from "./planner/access.js";
+import { consultantAccess, type OtherTool, otherTools, otherToolsNode, resolveAccess } from "./planner/access.js";
 import { type PlannerAccessConfig, PlannerAgent } from "./planner/agent.js";
 import {
   planDeliveryText,
@@ -667,8 +668,27 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
 
   // Exec mode: following an approved plan, with the planner on call and finish_plan.
   const exec = registerExec(pi, {
-    safeSubcommands: () => settings.safeSubcommands,
-    guardExtensionPath: EXTENSION_ENTRY_PATH,
+    // As capable as a /planners planner given every tool: toolsets (web, MCP), grants, subagents.
+    consultantAccess: (ctx, planFile, spec) => {
+      const toolsets = settings.plannerToolsets ?? {};
+      const scout = settings.scoutModelMap?.[formatModelKey(spec)] ?? subagentRoleModel(pi.events, "explorer", spec);
+      return consultantAccess({
+        planFile,
+        toolsets,
+        grants: settings.commandGrants ?? {},
+        mcpCatalog: Object.values(toolsets).some((toolset) => toolset.mcp)
+          ? buildMcpCatalog(safeAllTools(pi), readConfiguredMcpServers(ctx.cwd, getAgentDir()))
+          : [],
+        scout,
+        ...(settings.safeSubcommands ? { safeSubcommands: settings.safeSubcommands } : {}),
+        guardExtensionPath: EXTENSION_ENTRY_PATH,
+        expandPath: expandHome,
+        scoutProviderExtensions: extensionsForProvider(
+          resolveProviderExtensions(safeCommands(pi), settings.providerExtensions, expandHome),
+          scout?.provider,
+        ),
+      });
+    },
     ...(dependencies.createSession ? { createSession: dependencies.createSession } : {}),
     restoreModel: (ctx, spec) => applyRuntime(ctx, spec),
   });
