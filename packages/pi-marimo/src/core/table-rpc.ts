@@ -107,8 +107,8 @@ export async function searchTable(t: RpcTarget, objectId: string, args: SearchAr
   return parseSearch(await callFunction(t, objectId, "search", args, o), (ref) => fileText(t, ref, o));
 }
 
-export async function columnSummaries(t: RpcTarget, objectId: string, o: RpcOptions = {}): Promise<ColumnSummaries> {
-  const value = record(await callFunction(t, objectId, "get_column_summaries", {}, o));
+export function parseSummaries(raw: unknown): ColumnSummaries {
+  const value = record(raw);
   return {
     stats: record(value.stats) as ColumnSummaries["stats"],
     bins: record(value.bin_values) as ColumnSummaries["bins"],
@@ -116,9 +116,17 @@ export async function columnSummaries(t: RpcTarget, objectId: string, o: RpcOpti
   };
 }
 
-export async function topK(t: RpcTarget, objectId: string, column: string, k: number, o: RpcOptions = {}): Promise<Array<[string, number]>> {
-  const value = record(await callFunction(t, objectId, "calculate_top_k_rows", { column, k }, o));
+export function parseTopK(raw: unknown): Array<[string, number]> {
+  const value = record(raw);
   return Array.isArray(value.data) ? value.data.filter((e): e is [string, number] => Array.isArray(e) && e.length >= 2) : [];
+}
+
+export async function columnSummaries(t: RpcTarget, objectId: string, o: RpcOptions = {}): Promise<ColumnSummaries> {
+  return parseSummaries(await callFunction(t, objectId, "get_column_summaries", {}, o));
+}
+
+export async function topK(t: RpcTarget, objectId: string, column: string, k: number, o: RpcOptions = {}): Promise<Array<[string, number]>> {
+  return parseTopK(await callFunction(t, objectId, "calculate_top_k_rows", { column, k }, o));
 }
 
 export async function downloadCsv(t: RpcTarget, objectId: string, o: RpcOptions = {}): Promise<{ filename: string; text: string }> {

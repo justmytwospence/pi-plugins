@@ -5,9 +5,10 @@ import { generateDiffString, getMarkdownTheme, highlightCode, renderDiff } from 
 import { Markdown } from "@earendil-works/pi-tui";
 import type { Geometry } from "../core/live.js";
 import type { Cell, NotebookState } from "../core/notebook.js";
-import type { CellOutput } from "../core/output.js";
+import type { CellOutput, TableData } from "../core/output.js";
 import type { ChartRenderer, VegaRenderer } from "../core/vega.js";
 import type { LiveCharts } from "./live-charts.js";
+import type { TableRender } from "./table.js";
 
 /** Widgets listed under a cell, at most. */
 export const MAX_WIDGETS = 8;
@@ -19,6 +20,10 @@ export interface Row {
   /** The `▸ code` line of the detail, which a click opens or folds. */
   code?: boolean;
   widget?: { cell: string; index: number };
+  /** A part label of the detail (its index in the parts list), or a line of a part the label heads. */
+  part?: number;
+  /** A body row of a table grid: its index within the page. */
+  tableRow?: number;
   /** A line of the variables pane. */
   variable?: string;
   /** One line of an inline image: its place in the block, the block's height, and what shows when the block is not fully on screen. */
@@ -38,6 +43,8 @@ export interface RowOptions {
   /** Runs charts live in a browser page the mouse can drive; a chart it cannot run falls back to the static image. */
   live?: LiveCharts;
   onVega?: () => void;
+  /** The marimo table behind a cell's output, as the view drives it (its current page and cursor), when it does. */
+  table?: (cell: Cell) => { data: TableData; render?: TableRender; /** What the table's label adds: `sorted by cups`. */ note?: string } | undefined;
 }
 
 export const firstLine = (code: string) => code.split("\n").find((l) => l.trim())?.trim() ?? "";

@@ -4,7 +4,8 @@
 // error with its traceback, folded code, dataflow). Narrower than SPLIT_MIN columns the outline
 // fills the view and Enter drills into the detail (Esc comes back). It follows the running cell
 // until you move. Keys (also `?`):
-//   j/k move between cells, [ ] between sections, z/Z fold; Enter/l opens the cell's code; n/N
+//   j/k move between cells, ctrl+j/ctrl+k (or ] [) between sections, n/p between a cell's parts,
+//   z/Z fold; Enter acts on the part (or opens the code; markdown: edits it); t drives a table; e/E
 //   errors, c/C the agent's changes, d its diff; < > upstream/downstream; ^D/^U/PgDn/PgUp/Space
 //   scroll the detail; O stacks the whole section in the detail; / filters; v lists the variables;
 //   r/R/A run cells, x twice interrupts; w drives the cell's widgets; : runs Python in the kernel;
@@ -20,7 +21,8 @@ import { sharedPlotly } from "../core/plotly.js";
 import { LiveCharts } from "./live-charts.js";
 import { Painter } from "./painter.js";
 import { type Cell, truncate } from "../core/notebook.js";
-import { summarizeOutput, type Widget } from "../core/output.js";
+import { editableMarkdown, markdownCellCode } from "../core/markdown.js";
+import { summarizeOutput, type TableData, type Widget } from "../core/output.js";
 import { elapsed, shortWhere } from "../core/render.js";
 import type { Followed } from "../core/watcher.js";
 import { kernelStateParts, lensParts } from "../bg.js";
@@ -29,13 +31,14 @@ import { interruptKey, notebookKey, notebookPath } from "./identity.js";
 import { banner, bottom, row as frameRow, rule as frameRule, type FrameTheme } from "../frame.ts";
 import type { EditorFactoryFn } from "../editor-contract.ts";
 import { Dock, type DockSpec } from "./dock.js";
-import { detailRows } from "./detail.js";
+import { type Part, detailRows } from "./detail.js";
 import { helpLines } from "./help.js";
 import { type PaneTheme, outlineRows } from "./outline.js";
 import { MAX_WIDGETS, type Row, firstLine, foldedCells, selectableCells } from "./rows.js";
 import { cellTitle } from "./titles.js";
 import type { ScratchEvent, ScratchResult } from "./scratch.js";
-import { tableLines } from "./table.js";
+import { columnCard, rowCard, tableLines } from "./table.js";
+import { type TableRpc, type TableSession, parseFilter, tableSession } from "./table-session.js";
 import { variableList, variableRows } from "./variables.js";
 import { type WidgetAction, nextValue, typeable, typedValue, widgetValue } from "./widgets.js";
 
@@ -118,6 +121,14 @@ export interface ViewActions {
   liveCharts?: boolean;
   /** Start with the whole section in the detail pane (O toggles it). */
   outputs?: boolean;
+  /** A marimo table's kernel functions (search, summaries...), for driving tables. */
+  table?: TableRpc;
+  /** Writes a table's selection to the kernel as the browser does. */
+  setTableSelection?(f: Followed, cell: Cell, objectId: string, value: unknown[]): void;
+  /** Saves the whole table as CSV in Pi's working directory; resolves with the file name. */
+  saveTable?(f: Followed, cell: Cell, objectId: string): Promise<string>;
+  /** Replaces a cell's code through marimo's code mode and reruns it. */
+  editCell?(f: Followed, cell: Cell, code: string): Promise<void>;
   /** Pi's keybindings and the suite's editor, for the docked prompts. */
   keybindings?: unknown;
   editorFactory?: EditorFactoryFn;
@@ -181,6 +192,13 @@ export class NotebookView implements Component {
   private diffs = new Set<string>();
   private varCursor: string | undefined;
   private varFilter = "";
+  /** The focused part of the cursor's cell (n/p), an index into `lastParts`. */
+  private part: number | undefined;
+  private partCell: string | undefined;
+  private scrollToPart = false;
+  private lastParts: Part[] = [];
+  /** The table the keys drive (table mode). */
+  private table: { cell: string; objectId: string } | undefined;
   /** The widget the keys drive. */
   private widget: { cell: string; index: number; sub: number } | undefined;
   private help = false;
@@ -274,6 +292,14 @@ export class NotebookView implements Component {
     } else this.note = "Docking is not available here.";
   }
 
+  /** A new cursor cell starts without a focused part. */
+  private syncPart(): void {
+    if (this.partCell !== this.cursor) {
+      this.part = undefined;
+      this.partCell = this.cursor;
+    }
+  }
+
   private current(): Followed | undefined {
     return this.actions.followed().find((f) => notebookKey(f) === this.key);
   }
@@ -330,6 +356,7 @@ export class NotebookView implements Component {
     if (inner) this.folded.delete(inner);
     this.filter = "";
     this.mode = "cells";
+    this.table = undefined;
     this.cursor = id;
     this.follow = false;
     this.reveal = true;
@@ -395,6 +422,8 @@ export class NotebookView implements Component {
     this.codeOpen.clear();
     this.detailScroll = 0;
     this.widget = undefined;
+    this.table = undefined;
+    this.part = undefined;
   }
 
   // --- docked prompts -------------------------------------------------------------------------
@@ -516,6 +545,140 @@ export class NotebookView implements Component {
     });
   }
 
+  private openEditMarkdown(f: Followed, cell: Cell): void {
+    const text = editableMarkdown(cell.code);
+    if (text === undefined) {
+      this.note = "This markdown is built in Python (an f-string); ask the agent (a), or open it in the browser (o).";
+      this.codeOpen.add(cell.id);
+      return;
+    }
+    this.openDock({
+      kind: "markdown",
+      title: `Edit markdown · ${cellTitle(f.notebook, cell)}`,
+      hint: "enter saves · shift+enter new line · esc cancels (pi-vim: :w saves)",
+      initial: text,
+      submit: (edited) => {
+        this.closeDock();
+        if (edited.replace(/\s+$/u, "") === text.replace(/\s+$/u, "")) { this.note = "No change."; this.tui.requestRender(); return; }
+        const edit = this.actions.editCell;
+        if (!edit) { this.note = "Not available here."; this.tui.requestRender(); return; }
+        this.note = "Saving…";
+        edit(f, cell, markdownCellCode(edited)).then(
+          () => { if (!this.closed) { this.note = "Saved; marimo re-renders it."; this.tui.requestRender(); } },
+          (e: unknown) => { if (!this.closed) { this.note = `Could not save: ${message(e)}`; this.tui.requestRender(); } },
+        );
+        this.tui.requestRender();
+      },
+      cancel: () => { this.closeDock(); this.tui.requestRender(); },
+    });
+  }
+
+  /** The session and current data of a cell's marimo table, when the view can drive it. */
+  private tableFor(f: Followed, cell: Cell): { session: TableSession; data: TableData } | undefined {
+    const t = cell.output?.table;
+    if (!t?.objectId || !this.actions.table || f.connection !== "connected") return undefined;
+    const session = tableSession(`${this.key}\0${t.objectId}`, cell, t);
+    session.onChange = () => { if (!this.closed) this.tui.requestRender(); };
+    return { session, data: session.data() };
+  }
+
+  private copy(text: string): void {
+    const terminal = (this.tui as unknown as { terminal?: { write?(d: string): void } }).terminal;
+    if (terminal?.write) {
+      terminal.write(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`);
+      this.note = "Copied.";
+    } else this.note = "Copying needs a terminal.";
+  }
+
+  private tableKey(f: Followed | undefined, data: string): void {
+    const cell = f && this.table ? f.notebook.cells.get(this.table.cell) : undefined;
+    const t = f && cell ? this.tableFor(f, cell) : undefined;
+    const rpc = this.actions.table;
+    if (!f || !cell || !t || !rpc || !this.table) { this.table = undefined; return; }
+    const s = t.session;
+    const objectId = this.table.objectId;
+    this.note = undefined;
+    if (matchesKey(data, "escape") || data === "q" || matchesKey(data, "ctrl+c")) {
+      if (s.card) s.closeCard();
+      else this.table = undefined;
+      return;
+    }
+    if (data === "?") { this.help = true; return; }
+    if (data === "j" || matchesKey(data, "down")) s.move(f, rpc, 1, 0);
+    else if (data === "k" || matchesKey(data, "up")) s.move(f, rpc, -1, 0);
+    else if (data === "h" || matchesKey(data, "left")) s.move(f, rpc, 0, -1);
+    else if (data === "l" || matchesKey(data, "right")) s.move(f, rpc, 0, 1);
+    else if (data === "]" || matchesKey(data, "pageDown")) s.setPage(f, rpc, s.page + 1);
+    else if (data === "[" || matchesKey(data, "pageUp")) s.setPage(f, rpc, s.page - 1);
+    else if (data === "g") s.setPage(f, rpc, 0);
+    else if (data === "G") {
+      const n = s.pageCount();
+      if (n === undefined) this.note = "marimo did not count the rows: ] pages forward.";
+      else s.setPage(f, rpc, n - 1);
+    } else if (data === "+") s.setPageSize(f, rpc, 1);
+    else if (data === "-") s.setPageSize(f, rpc, -1);
+    else if (data === "s" || data === "S") s.toggleSort(f, rpc, s.columnName(), data === "S");
+    else if (data === "/") {
+      this.openDock({
+        kind: "table",
+        title: `Search ${cellTitle(f.notebook, cell)}`,
+        hint: "enter search · empty clears · esc cancel",
+        initial: s.query,
+        submit: (text) => { this.closeDock(); s.setQuery(f, rpc, text); this.tui.requestRender(); },
+        cancel: () => { this.closeDock(); this.tui.requestRender(); },
+      });
+    } else if (data === "f") {
+      const column = s.columnName();
+      const kind = t.data.fieldTypes?.[column]?.kind ?? "string";
+      this.openDock({
+        kind: "table",
+        title: `Filter ${column} (${kind}): > 5 · 1..10 · in a, b · null · !null · ~regex · text`,
+        hint: "enter filter · esc cancel",
+        submit: (text) => {
+          const parsed = parseFilter(column, kind, text);
+          if ("error" in parsed) { this.note = parsed.error; this.tui.requestRender(); return; }
+          this.closeDock();
+          s.addFilter(f, rpc, parsed);
+          this.tui.requestRender();
+        },
+        cancel: () => { this.closeDock(); this.tui.requestRender(); },
+      });
+    } else if (data === "F") s.clearFilters(f, rpc);
+    else if (data === " " || data === "x") {
+      const value = this.actions.setTableSelection ? s.toggleSelect(f.notebook) : undefined;
+      if (!value) this.note = "This table has no selection.";
+      else this.actions.setTableSelection!(f, cell, objectId, value);
+    } else if (matchesKey(data, "enter")) s.openRow();
+    else if (data === "i") s.openColumn(f, rpc);
+    else if (data === "c") s.toggleSummaries(f, rpc);
+    else if (data === "y") this.copy(s.cellValue());
+    else if (data === "Y") this.copy(s.toTsv());
+    else if (data === "D") {
+      const save = this.actions.saveTable;
+      if (!save) this.note = "Not available here.";
+      else {
+        this.note = "Saving…";
+        save(f, cell, objectId).then(
+          (name) => { if (!this.closed) { this.note = `Saved ${name}.`; this.tui.requestRender(); } },
+          (e: unknown) => { if (!this.closed) { this.note = `Could not save: ${message(e)}`; this.tui.requestRender(); } },
+        );
+      }
+    } else if (data === "r") void s.refresh(f, rpc);
+  }
+
+  /** `t`: drive the table of the cursor's cell (or the focused part). */
+  private enterTable(f: Followed, cell: Cell | undefined): void {
+    const focused = this.part !== undefined ? this.lastParts[this.part] : undefined;
+    const target = focused?.kind === "table" ? f.notebook.cells.get(focused.cell) : cell;
+    const hasTable = !!target?.output?.table?.objectId;
+    if (!target || !hasTable) { this.note = "This cell shows no table marimo can page."; return; }
+    if (!this.actions.table || f.connection !== "connected") { this.note = "This cell shows no table marimo can page: the table needs a connected notebook."; return; }
+    this.table = { cell: target.id, objectId: target.output!.table!.objectId! };
+    this.cursor = target.id;
+    this.follow = false;
+    this.reveal = true;
+  }
+
   // --- keys -----------------------------------------------------------------------------------
 
   /** The widgets of the driven cell, or undefined (and widget mode ends) when they are gone. */
@@ -610,8 +773,29 @@ export class NotebookView implements Component {
     const c = this.cursorCell(f);
     if (!c) return;
     this.cursor = c.id;
+    this.syncPart();
     this.reveal = true;
-    this.toggleCode(c.id);
+    const p = this.part !== undefined ? this.lastParts[this.part] : undefined;
+    const target = p ? f.notebook.cells.get(p.cell) : undefined;
+    if (p && target) {
+      switch (p.kind) {
+        case "table": this.enterTable(f, target); break;
+        case "chart":
+          if (!this.live.inspect(target.output)) this.note = "Not a live chart.";
+          break;
+        case "widgets":
+          if (!this.actions.setWidget) this.note = "Widgets cannot be driven here.";
+          else if (f.connection !== "connected") this.note = "The notebook is not connected.";
+          else this.widget = { cell: target.id, index: 0, sub: 0 };
+          break;
+        case "code": this.toggleCode(target.id); break;
+        case "markdown": this.openEditMarkdown(f, target); break;
+        default: this.note = "e jumps to the next failed cell.";
+      }
+      return;
+    }
+    if (f.notebook.isMarkdown(c)) this.openEditMarkdown(f, c);
+    else this.toggleCode(c.id);
   }
 
   private toggleCode(id: string): void {
@@ -649,6 +833,11 @@ export class NotebookView implements Component {
     const f = this.current();
     if (this.widget) {
       this.widgetKey(f, data);
+      this.tui.requestRender();
+      return;
+    }
+    if (this.table && this.mode === "cells") {
+      this.tableKey(f, data);
       this.tui.requestRender();
       return;
     }
@@ -757,6 +946,7 @@ export class NotebookView implements Component {
     this.armedUnmark = undefined;
     this.note = undefined;
     const nb = f?.notebook;
+    this.syncPart();
     if (matchesKey(data, "shift+tab")) this.switchNotebook(-1);
     else if (matchesKey(data, "tab")) this.switchNotebook(1);
     else if (matchesKey(data, "o") && f) {
@@ -788,8 +978,17 @@ export class NotebookView implements Component {
       const c = this.cursorCell(f);
       if (c) this.cursor = c.id;
       this.reveal = true;
-    } else if (f && nb && data === "[") this.step(f, -1, (c) => nb.headings(c).length > 0, "No section here.");
-    else if (f && nb && data === "]") this.step(f, 1, (c) => nb.headings(c).length > 0, "No section here.");
+    } else if (f && nb && (data === "[" || matchesKey(data, "ctrl+k"))) this.step(f, -1, (c) => nb.headings(c).length > 0, "No section here.");
+    else if (f && nb && (data === "]" || matchesKey(data, "ctrl+j"))) this.step(f, 1, (c) => nb.headings(c).length > 0, "No section here.");
+    else if (data === "n" || data === "p") {
+      if (!this.lastParts.length) this.note = "This cell has one part.";
+      else {
+        const last = this.lastParts.length - 1;
+        if (data === "n") this.part = this.part === undefined ? 0 : Math.min(last, this.part + 1);
+        else this.part = this.part === undefined ? last : Math.max(0, this.part - 1);
+        this.scrollToPart = true;
+      }
+    } else if (f && data === "t") this.enterTable(f, this.cursorCell(f));
     else if (f && nb && (data === "c" || data === "C")) {
       if (![...nb.agentChanges.keys()].some((id) => nb.cells.has(id))) this.note = "The agent has not changed a cell since your last message.";
       else this.step(f, data === "c" ? 1 : -1, (c) => nb.agentChanges.has(c.id), "The agent has not changed a cell since your last message.");
@@ -839,8 +1038,8 @@ export class NotebookView implements Component {
       const c = this.cursorCell(f);
       if (c) this.startRun(f, [c], cellTitle(f.notebook, c));
       else this.note = "No cell selected.";
-    } else if (f && data === "n") this.step(f, 1, (c) => !!c.error);
-    else if (f && data === "N") this.step(f, -1, (c) => !!c.error);
+    } else if (f && data === "e") this.step(f, 1, (c) => !!c.error);
+    else if (f && data === "E") this.step(f, -1, (c) => !!c.error);
     else if (data === "f") {
       this.follow = true;
       this.reveal = true;
@@ -926,7 +1125,8 @@ export class NotebookView implements Component {
     const th = this.theme;
     const out = [frameRule(width, th)];
     if (dock.kind === "scratch" && this.scratch) out.push(...this.scratchLines(width - 4).map((l) => frameRow(l, width, th)));
-    const room = Math.max(3, Math.max(4, Math.floor(this.tui.terminal.rows / 2)) - out.length);
+    const half = dock.kind === "markdown" ? Math.max(6, Math.floor(this.tui.terminal.rows * 0.6)) : Math.max(4, Math.floor(this.tui.terminal.rows / 2));
+    const room = Math.max(3, half - out.length);
     out.push(...dock.render(width - 4, room).map((l) => frameRow(l, width, th)));
     this.lastDock = out.length;
     return out;
@@ -1044,18 +1244,66 @@ export class NotebookView implements Component {
       const cell = cells.find((c) => c.id === this.cursor);
       let detail: Row[] = [];
       if (cell) {
+        this.syncPart();
+        // A table the view drives: its page, cursor and selection; a cell that needs its rows asks for them once.
+        const tableSource = (c: Cell) => {
+          const t = this.tableFor(f, c);
+          if (!t) return undefined;
+          const s = t.session;
+          if (c.id === cell.id && s.needsFetch() && this.actions.table) void s.refresh(f, this.actions.table);
+          const focused = this.table?.cell === c.id;
+          if (focused) s.ensureVisible(dw - 6);
+          const picked = s.selection(nb);
+          const cells = new Set<string>();
+          const rows = new Set<string>();
+          for (const v of picked) {
+            if (typeof v === "object" && v !== null) cells.add(`${String((v as { rowId?: unknown }).rowId)}\0${String((v as { columnName?: unknown }).columnName)}`);
+            else rows.add(String(v));
+          }
+          const status = [s.query ? `search "${s.query}"` : "", s.filters.length ? `${s.filters.length} filter${s.filters.length === 1 ? "" : "s"}` : "", picked.length ? `${picked.length} selected` : "", s.loading ? "loading…" : "", s.error ?? ""].filter(Boolean).join(" · ");
+          const sorted = s.sort.map((x) => `sorted ${x.by}`).join(", ");
+          const note = [sorted, s.filters.length || s.query ? "filtered" : ""].filter(Boolean).join(" · ");
+          return {
+            data: t.data,
+            ...(note ? { note } : {}),
+            render: {
+              focused, cursorRow: s.row, cursorCol: s.col, colOffset: s.colOffset, selected: rows, selectedCells: cells, sort: s.sort,
+              ...(s.summariesOn && s.summaries ? { summaries: s.summaries } : {}),
+              ...(status ? { status } : {}),
+              rowIdOf: (i: number) => s.rowId(i), firstRow: s.page * s.pageSize,
+              ...(t.data.totalRows !== undefined ? { totalRows: t.data.totalRows } : {}),
+            },
+          };
+        };
+        const tableCard = (c: Cell): string[] | undefined => {
+          const t = this.tableFor(f, c);
+          const card = t?.session.card;
+          if (!t || !card || this.table?.cell !== c.id) return undefined;
+          const lines = card.kind === "row"
+            ? rowCard(t.data, card.index, dw - 2, th as PaneTheme, t.session.page * t.session.pageSize + card.index)
+            : columnCard(t.data, card.column, t.session.summaries, card.top, dw - 2, th as PaneTheme);
+          return lines;
+        };
         const d = detailRows(nb, th, Date.now(), {
           cell, width: dw, codeOpen: this.codeOpen.has(cell.id), diff: this.diffs.has(cell.id), section: this.section,
+          table: tableSource, tableCard, partFocus: this.part,
           ...(this.widget ? { widgetFocus: this.widget } : {}),
           imageRows: dh - 1, vega: this.vega, plotly: this.plotly,
           ...(this.actions.liveCharts === false ? {} : { live: this.live }),
           onVega: () => { if (!this.closed) this.tui.requestRender(); },
         });
         detail = d.rows;
+        this.lastParts = d.parts;
+        if (this.part !== undefined && this.part >= d.parts.length) this.part = d.parts.length ? d.parts.length - 1 : undefined;
         const key = `${cell.id}\0${this.section}`;
         if (key !== this.detailKey) {
           this.detailKey = key;
           this.detailScroll = this.section && d.focusRow !== undefined ? Math.max(0, d.focusRow - 2) : 0;
+        }
+        if (this.scrollToPart) {
+          const at = this.part !== undefined ? d.parts[this.part] : undefined;
+          if (at) this.detailScroll = Math.max(0, at.row - 1);
+          this.scrollToPart = false;
         }
         const focused = this.widget ? d.widgetRows.get(`${this.widget.cell}\0${this.widget.index}`) : undefined;
         if (focused !== undefined) {
@@ -1117,6 +1365,7 @@ export class NotebookView implements Component {
       const text = this.mode === "variables" ? this.varFilter : this.filter;
       return `${th.fg("accent", "/")} ${text}${th.fg("dim", "▏")}  ${th.fg("dim", "enter keep · esc clear")}`;
     }
+    if (this.table) return withNav(noted("table: hjkl move · [ ] page · s sort · / search · f filter · space select · enter row · i column · c summary · y copy · D csv · esc done"));
     if (this.widget) return withNav(noted("widget: h/l change · space toggle · enter type · j/k next · esc done"));
     if (this.mode === "variables") return withNav(noted(`enter its cell · > first use · ${this.varFilter ? `/ ${this.varFilter}` : "/ filter"} · v back`));
     const connected = !!f && f.connection === "connected";
@@ -1129,12 +1378,19 @@ export class NotebookView implements Component {
     if (this.note) return withNav(th.fg("warning", this.note));
     const cell = f ? this.cursorCell(f) : undefined;
     const hints: string[] = [];
-    if (f) hints.push("↑↓ cells", "enter code");
+    const focused = this.part !== undefined ? this.lastParts[this.part] : undefined;
+    if (f) {
+      hints.push("↑↓ cells");
+      if (focused) hints.push(`enter ${focused.kind === "markdown" ? "edit" : focused.kind === "table" || focused.kind === "chart" || focused.kind === "widgets" || focused.kind === "code" ? (focused.kind === "widgets" ? "widgets" : focused.kind) : ""}`.trim());
+      else hints.push(cell && f.notebook.isMarkdown(cell) ? "enter edit" : "enter code");
+    }
     const more: string[] = [];
-    if (f && this.live.rects.length) more.push("i inspect chart");
+    if (this.lastParts.length > 1) more.push("n/p parts");
+    if (this.lastParts.some((p) => p.kind === "table") && this.actions.table) more.push("t table");
     if (cell?.output?.widgets?.length && this.actions.setWidget) more.push("w widgets");
     if (f && cell && f.notebook.agentChanges.has(cell.id)) more.push("d diff");
-    if (f && (cell?.error || f.notebook.errors().length)) more.push("n next error");
+    if (f && (cell?.error || f.notebook.errors().length)) more.push("e next error");
+    if (f && this.live.rects.length) more.push("i inspect chart");
     if (busy) more.push("x interrupt");
     if (f && this.actions.ask) more.push("a ask");
     if (connected && this.actions.scratch) more.push(": python");
@@ -1193,13 +1449,21 @@ export class NotebookView implements Component {
       }
     } else if (this.paneAt(event.x, line) === "detail") {
       const r = this.lastDetail[this.detailScroll + line - this.panes.detailTop];
-      if (r?.widget && this.actions.setWidget && f.connection === "connected") {
+      if (this.table && r?.tableRow !== undefined) {
+        const t = f.notebook.cells.get(this.table.cell);
+        const tf = t ? this.tableFor(f, t) : undefined;
+        if (tf) { tf.session.row = r.tableRow; tf.session.card = undefined; }
+      } else if (r?.part !== undefined && !r.widget && !r.code) {
+        this.part = r.part;
+        if (twice) this.activate(f);
+      } else if (r?.widget && this.actions.setWidget && f.connection === "connected") {
         this.widget = { cell: r.widget.cell, index: r.widget.index, sub: 0 };
         if (!this.section) this.cursor = r.widget.cell;
         this.follow = false;
       } else if (r?.code) {
         const c = this.cursorCell(f);
-        if (c) this.toggleCode(c.id);
+        if (r.part !== undefined) this.part = r.part;
+        if (c) this.toggleCode(this.lastParts[r.part ?? -1]?.cell ?? c.id);
       }
     } else if (this.paneAt(event.x, line) === "outline") {
       const r = this.lastOutline[this.scroll + line];
@@ -1208,6 +1472,7 @@ export class NotebookView implements Component {
         this.cursor = r.cell;
         this.follow = false;
         this.widget = undefined;
+        this.table = undefined;
         if (again || twice) this.activate(f);
       }
     }

@@ -37,6 +37,8 @@ import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION, stopp
 import { FULL_SCREEN } from "./frame.ts";
 import { interruptKernel, runCells, setUiValues } from "./ui/interrupt.js";
 import { runScratch } from "./ui/scratch.js";
+import { callFunction, downloadCsv, fileText } from "./core/table-rpc.js";
+import { cellTitle } from "./ui/titles.js";
 import { WidgetSender } from "./ui/widgets.js";
 import { markCell, unmarkSelection } from "./ui/lens-mark.js";
 import { askMessage } from "./ask.js";
@@ -290,6 +292,7 @@ export default function piMarimo(pi: ExtensionAPI): void {
     if (out?.plotly) return renderPng(sharedPlotly(), out.plotly);
     return undefined;
   };
+  const tokenOpt = process.env.MARIMO_TOKEN ? { token: process.env.MARIMO_TOKEN } : {};
   const viewActions: ViewActions = {
     followed: () => watcher?.followed() ?? [],
     interrupt: (f) => interruptKernel(f.attachment, process.env.MARIMO_TOKEN),
@@ -320,6 +323,30 @@ export default function piMarimo(pi: ExtensionAPI): void {
       return markCell(f, cell, note, { ...(process.env.MARIMO_TOKEN ? { token: process.env.MARIMO_TOKEN } : {}), ...(png ? { png } : {}) });
     },
     unmark: (f, id) => unmarkSelection(f, id, process.env.MARIMO_TOKEN ? { token: process.env.MARIMO_TOKEN } : {}),
+    table: {
+      call: (f, id, fn, args) => callFunction(f, id, fn, args, tokenOpt),
+      file: (f, ref) => fileText(f, ref, tokenOpt),
+    },
+    setTableSelection: (f, cell, objectId, value) => {
+      f.notebook.setUserValue(cell.id, objectId, cell.output?.table?.label || "table selection", value);
+      widgetSender.set(f.attachment, objectId, value);
+      schedule();
+    },
+    saveTable: async (f, cell, objectId) => {
+      const { text } = await downloadCsv(f, objectId, tokenOpt);
+      const base = cellTitle(f.notebook, cell).replace(/[^\w.-]+/g, "-").replace(/^-+|-+$/g, "") || "table";
+      const dir = ctxRef?.cwd ?? process.cwd();
+      let name = `${base}.csv`;
+      for (let n = 2; existsSync(resolve(dir, name)); n++) name = `${base}-${n}.csv`;
+      writeFileSync(resolve(dir, name), text);
+      return name;
+    },
+    editCell: async (f, cell, code) => {
+      f.notebook.expectEdit(cell.id, code);
+      const id = JSON.stringify(cell.id);
+      const result = await runScratch(f.attachment, `import marimo._code_mode as cm\nasync with cm.get_context() as ctx:\n    ctx.edit_cell(${id}, code=${JSON.stringify(code)})\n    ctx.run_cell(${id})\n`, process.env.MARIMO_TOKEN, () => {});
+      if (!result.success) throw new Error("marimo did not take the edit");
+    },
   };
   let fullOpen = false;
   /** The view's actions, read fresh each time a view opens (settings, and the suite's editor from pi-vim). */

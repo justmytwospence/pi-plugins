@@ -168,14 +168,14 @@ test("j/k move the cursor between cells; the detail shows the cell's output, fol
   } finally { v.dispose(); }
 });
 
-test("n and N jump between failed cells; / filters by name, variable or code and Esc clears", () => {
+test("e and E jump between failed cells; / filters by name, variable or code and Esc clears", () => {
   const f = nbWith([{ id: "a", code: "x = 1", name: "load" }, { id: "b", code: "boom()" }, { id: "c", code: "z = 3" }]);
   f.notebook.apply("cell-op", { cell_id: "b", status: "idle", output: { channel: "marimo-error", mimetype: "application/vnd.marimo+error", data: [{ type: "exception", exception_type: "E", msg: "m" }] } });
   const v = make(f);
   try {
-    v.handleInput("n");
+    v.handleInput("e");
     expect(screen(v)).toMatch(/▌✗ boom\(\) +E/u);
-    v.handleInput("N");
+    v.handleInput("E");
     expect(screen(v)).toMatch(/▌✗ boom\(\) +E/u);
     expect(screen(v)).toContain("E: m");
     v.handleInput("/");
@@ -456,9 +456,9 @@ test("a table output is a grid in the detail, and its shape is the outline's bad
   const v = make(f);
   try {
     expect(screen(v)).toMatch(/▌○ table +1×2/u);
-    expect(screen(v)).toMatch(/city {2}\s*pop/u);
-    expect(screen(v)).toContain("Oslo  709000");
-    expect(screen(v)).toContain("1 of 1 rows · 2 columns");
+    expect(screen(v)).toMatch(/city\s*┃\s*pop/u);
+    expect(screen(v)).toMatch(/Oslo\s*┃\s*709,000/u);
+    expect(screen(v)).toContain("rows 1–1 of 1");
   } finally { v.dispose(); }
 });
 
@@ -793,7 +793,7 @@ test("the detail of a failed cell: its error, the traceback, the code folded to 
   const f = notebookWithResults();
   const v = make(f);
   try {
-    v.handleInput("n");
+    v.handleInput("e");
     const text = screen(v);
     expect(text).toMatch(/▌ {2}✗ model +KeyError/u);
     expect(text).toContain("KeyError: 'revenue'");
@@ -867,7 +867,7 @@ test("| docks the full-screen view with its state, and undocks the docked one", 
     v.handleInput("|");
     expect(dock).toHaveBeenCalledWith(notebookKey(f), expect.objectContaining({ cursor: "cell-10", codeOpen: ["cell-10"], section: true }));
     expect(done).toHaveBeenCalled();
-  } finally { v.handleInput("O"); v.dispose(); }
+  } finally { v.dispose(); const reset = make(f); reset.handleInput("O"); reset.dispose(); }
   const undock = vi.fn();
   const d = new NotebookView(tui as any, theme2, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {}, docked: { focused: () => true, focusMain: () => {} }, undock }, () => {});
   try {
@@ -883,5 +883,115 @@ test("a view started from a state shows the same cell and code", () => {
     const text = screen(v);
     expect(text).toContain("▌○ cell-10");
     expect(text).toContain("▾ code");
+  } finally { v.dispose(); }
+});
+
+// --- parts, tables, markdown editing, code blocks ---
+
+test("ctrl+j and ctrl+k move between sections", () => {
+  const f = nbWith([{ id: "h1", code: 'mo.md("# One")' }, { id: "a", code: "a = 1" }, { id: "h2", code: 'mo.md("# Two")' }, { id: "c", code: "c = 3" }]);
+  const v = make(f);
+  try {
+    expect(screen(v)).toMatch(/▌ One/u);
+    v.handleInput("\n");
+    expect(screen(v)).toMatch(/▌ Two/u);
+    v.handleInput("\x0b");
+    expect(screen(v)).toMatch(/▌ One/u);
+  } finally { v.dispose(); }
+});
+
+test("n and p walk a cell's parts and Enter acts on the focused one", () => {
+  const f = nbWith([{ id: "a", code: "x = 1\nprint(x)" }, { id: "b", code: "y = 2" }]);
+  const slider = "<marimo-ui-element object-id='a-0' random-id='x'><marimo-slider data-initial-value='1' data-label='&quot;s&quot;' data-start='0' data-stop='2' data-step='1' data-steps='[]'></marimo-slider></marimo-ui-element>";
+  f.notebook.apply("cell-op", { cell_id: "a", status: "idle", console: [{ channel: "stdout", mimetype: "text/plain", data: "one\ntwo\n" }], output: { channel: "marimo-error", mimetype: "application/vnd.marimo+error", data: [{ type: "exception", exception_type: "KeyError", msg: "k" }] } });
+  f.notebook.apply("cell-op", { cell_id: "a", output: { channel: "output", mimetype: "text/html", data: slider } });
+  // The error output was replaced by the widget; set the error again through the cell's own state.
+  f.notebook.cells.get("a")!.error = "KeyError: k";
+  const v = make(f, { setWidget: () => {} });
+  try {
+    const focused = () => screen(v).split("\n").find((l) => l.includes("▌ ") && /error|printed|controls|code/u.test(l)) ?? "";
+    screen(v);
+    v.handleInput("n");
+    expect(focused()).toContain("error");
+    v.handleInput("n");
+    expect(focused()).toContain("printed");
+    v.handleInput("n");
+    expect(focused()).toContain("controls");
+    v.handleInput("n");
+    expect(focused()).toContain("code");
+    v.handleInput("\r");
+    expect(screen(v)).toContain("▾ code");
+    v.handleInput("p");
+    expect(focused()).toContain("controls");
+    v.handleInput("j");
+    v.handleInput("k");
+    expect(screen(v)).not.toMatch(/▌ controls/u);
+  } finally { v.dispose(); }
+});
+
+const tableHtml = (selection = "multi") => `<marimo-ui-element object-id='t-0' random-id='r'><marimo-table data-data='&quot;[{&#92;&quot;city&#92;&quot;:&#92;&quot;Oslo&#92;&quot;,&#92;&quot;pop&#92;&quot;:709000,&#92;&quot;_marimo_row_id&#92;&quot;:&#92;&quot;0&#92;&quot;}]&quot;' data-total-rows='30' data-total-columns='2' data-page-size='1' data-selection='&quot;${selection}&quot;' data-field-types='[[&quot;city&quot;,[&quot;string&quot;,&quot;object&quot;]],[&quot;pop&quot;,[&quot;integer&quot;,&quot;int64&quot;]]]'></marimo-table></marimo-ui-element>`;
+
+test("t drives a marimo table: paging, sorting and selection go through the kernel", async () => {
+  const { clearTableSessions } = await import("../src/ui/table-session.js");
+  clearTableSessions();
+  const f = nbWith([{ id: "a", code: "df" }]);
+  f.notebook.apply("cell-op", { cell_id: "a", status: "idle", output: { channel: "output", mimetype: "text/html", data: tableHtml() } });
+  const calls: any[] = [];
+  const call = vi.fn(async (_f: unknown, _id: string, fn: string, args: any) => {
+    calls.push({ fn, args });
+    return { data: JSON.stringify([{ city: "Rome", pop: 5, _marimo_row_id: "9" }]), total_rows: 30 };
+  });
+  const setTableSelection = vi.fn();
+  const v = make(f, { table: { call, file: async () => "[]" }, setTableSelection });
+  try {
+    v.render(100);
+    v.handleInput("t");
+    expect(screen(v)).toContain("table: hjkl move");
+    v.handleInput("]");
+    await Promise.resolve();
+    expect(calls.at(-1)).toMatchObject({ fn: "search", args: { page_number: 1, page_size: 1 } });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen(v)).toContain("Rome");
+    v.handleInput("s");
+    expect(calls.at(-1)?.args.sort).toEqual([{ by: "city", descending: false }]);
+    await new Promise((r) => setTimeout(r, 0));
+    v.handleInput(" ");
+    expect(setTableSelection).toHaveBeenCalledWith(f, expect.anything(), "t-0", ["9"]);
+    v.handleInput("\r");
+    expect(screen(v)).toContain("row 1");
+    v.handleInput("\x1b");
+    expect(screen(v)).not.toContain("row 1");
+    expect(screen(v)).toContain("table: hjkl move");
+    v.handleInput("\x1b");
+    expect(screen(v)).not.toContain("table: hjkl move");
+  } finally { v.dispose(); clearTableSessions(); }
+});
+
+test("Enter on a markdown cell edits it and saves through editCell", () => {
+  const f = nbWith([{ id: "m", code: 'mo.md("# Title")' }, { id: "a", code: "x = 1" }]);
+  const editCell = vi.fn(async () => {});
+  const v = make(f, { editCell });
+  try {
+    expect(screen(v)).not.toContain("▸ code");
+    v.handleInput("\r");
+    const text = screen(v);
+    expect(text).toContain("Edit markdown");
+    expect(text).toContain("# Title");
+    v.handleInput("!");
+    v.handleInput("\r");
+    expect(editCell).toHaveBeenCalledWith(f, expect.objectContaining({ id: "m" }), 'mo.md(r"""\n# Title!\n""")');
+  } finally { v.dispose(); }
+});
+
+test("code has a background block when the theme has one", () => {
+  const f = nbWith([{ id: "a", code: "x = 1\ny = 2" }]);
+  const bgTheme = { ...theme, bg: (c: string, t: string) => `<${c}>${t}</${c}>` };
+  const v = new NotebookView(tui as any, bgTheme as any, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {} }, () => {});
+  try {
+    screen(v);
+    v.handleInput("\r");
+    const text = screen(v);
+    expect(text).toContain("<toolPendingBg>");
+    expect(text).not.toContain("│ y = 2");
   } finally { v.dispose(); }
 });

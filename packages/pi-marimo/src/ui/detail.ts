@@ -4,20 +4,27 @@
 // as a document, the selected cell marked. No cell ids and no Python reprs: values are in the
 // variables pane.
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { markdownText } from "../core/markdown.js";
+import { editableMarkdown } from "../core/markdown.js";
 import type { Cell, NotebookState } from "../core/notebook.js";
 import { truncate } from "../core/notebook.js";
 import { elapsed, formatDuration } from "../core/render.js";
 import type { FrameTheme } from "../frame.ts";
 import { clean, outputRows } from "./outputs.js";
-import { cellGlyph, headingText } from "./outline.js";
+import { type PaneTheme, cellGlyph, headingText } from "./outline.js";
 import { MAX_WIDGETS, type Row, type RowOptions, diffLines, safeHighlight, safeMarkdown } from "./rows.js";
-import { cellTitle, sectionOf } from "./titles.js";
+import { cellTitle, outputShape, sectionOf } from "./titles.js";
 import { widgetLine, widgetValue } from "./widgets.js";
 
 /** How much of an open cell's code shows. */
 const MAX_CODE_LINES = 40;
-const FSTRING_MD = /\bmo\s*\.\s*md\s*\(\s*(?:[rR]?[fF]|[fF][rR])/u;
+
+/** A focusable piece of the detail: what `n` and `p` walk and Enter acts on. */
+export interface Part {
+  kind: "error" | "printed" | "output" | "table" | "chart" | "widgets" | "code" | "markdown";
+  cell: string;
+  /** Its row in the detail. */
+  row: number;
+}
 
 export interface DetailOptions extends RowOptions {
   /** The selected cell. */
@@ -33,6 +40,10 @@ export interface DetailOptions extends RowOptions {
   widgetFocus?: { cell: string; index: number; sub: number } | undefined;
   highlight?: (code: string) => string[];
   markdown?: (text: string, width: number) => string[];
+  /** The focused part (an index into the returned `parts`). */
+  partFocus?: number | undefined;
+  /** A row or column card that replaces the table's grid. */
+  tableCard?: (cell: Cell) => string[] | undefined;
 }
 
 /** `left` and `right` on one line of `width`, the right one flush right. */
@@ -42,7 +53,7 @@ function sides(left: string, right: string, width: number): string {
   return `${cut}${" ".repeat(Math.max(rw ? 1 : 0, width - visibleWidth(cut) - rw))}${right}`;
 }
 
-export function detailRows(nb: NotebookState, theme: FrameTheme, now: number, o: DetailOptions): { rows: Row[]; widgetRows: Map<string, number>; focusRow?: number } {
+export function detailRows(nb: NotebookState, theme: FrameTheme, now: number, o: DetailOptions): { rows: Row[]; widgetRows: Map<string, number>; focusRow?: number; parts: Part[] } {
   const rows: Row[] = [];
   const widgetRows = new Map<string, number>();
   const width = Math.max(10, o.width);
@@ -51,10 +62,24 @@ export function detailRows(nb: NotebookState, theme: FrameTheme, now: number, o:
   const sub: RowOptions = { ...o, pad: "", width, imageRows: Math.max(2, o.section ? Math.min(page - 4, Math.floor(page * 0.6)) : page - 4) };
   const push = (text: string) => rows.push({ text });
   const dim = (text: string) => theme.fg("dim", text);
+  const pane = theme as PaneTheme;
+  const parts: Part[] = [];
+  const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+  /** A part's label row: dim, or on the selection background with the accent bar when focused. */
+  const label = (kind: Part["kind"], cell: Cell, word: string, detail = "", extra: Partial<Row> = {}) => {
+    const index = parts.length;
+    const focused = o.partFocus === index;
+    const tail = detail ? dim(` · ${detail}`) : "";
+    let text = focused ? `${theme.fg("accent", "▌")} ${theme.bold(theme.fg("accent", word))}${tail}` : `  ${dim(word)}${tail}`;
+    if (focused && pane.bg) text = pane.bg("selectedBg", truncateToWidth(text, width, "…", true));
+    parts.push({ kind, cell: cell.id, row: rows.length });
+    rows.push({ text, part: index, ...extra });
+  };
 
   /** A markdown cell as prose, trailing blank lines dropped. */
   const proseOf = (cell: Cell, w = width): string[] => {
-    const md = FSTRING_MD.test(cell.code) ? undefined : markdownText(cell.code);
+    const md = editableMarkdown(cell.code);
     const text = md ?? (cell.output?.kind === "text" ? cell.output.text : undefined);
     let lines = text !== undefined ? (md !== undefined ? (o.markdown ?? safeMarkdown)(md, w) : text.split("\n")) : nb.headings(cell).map((h) => headingText(theme, h));
     lines = [...lines];
@@ -65,6 +90,7 @@ export function detailRows(nb: NotebookState, theme: FrameTheme, now: number, o:
   /** The widgets of a cell's output, focusable. */
   const widgetBlock = (cell: Cell) => {
     const widgets = cell.output?.widgets ?? [];
+    if (widgets.length) label("widgets", cell, "controls", String(widgets.length));
     widgets.slice(0, MAX_WIDGETS).forEach((w, index) => {
       const focused = o.widgetFocus?.cell === cell.id && o.widgetFocus.index === index;
       widgetRows.set(`${cell.id}\0${index}`, rows.length);
@@ -73,19 +99,25 @@ export function detailRows(nb: NotebookState, theme: FrameTheme, now: number, o:
     if (widgets.length > MAX_WIDGETS) push(dim(`… ${widgets.length - MAX_WIDGETS} more widgets: o opens the notebook`));
   };
 
-  /** `▸ code · N lines`, or the code (or the agent's diff) under `▾ code`. */
+  /** `▸ code · N lines`, or the code (or the agent's diff) under `▾ code`, on a background block where the theme has one. */
   const codeBlock = (cell: Cell, open: boolean, diff: boolean) => {
     const source = cell.code.replace(/\s+$/u, "");
     const total = source ? source.split("\n").length : 0;
     if (!open) {
-      rows.push({ text: dim(`▸ code · ${total} line${total === 1 ? "" : "s"}`), code: true });
+      label("code", cell, "▸ code", plural(total, "line"), { code: true });
       return;
     }
     const change = nb.agentChanges.get(cell.id);
     const lines = diff && change ? diffLines(change.before, cell.code) : (o.highlight ?? safeHighlight)(source.split("\n").map(clean).join("\n"));
-    rows.push({ text: dim(diff && change ? "▾ code · the agent's change" : "▾ code"), code: true });
-    for (const line of lines.slice(0, MAX_CODE_LINES)) push(`${dim("│")} ${line}`);
-    if (lines.length > MAX_CODE_LINES) push(dim(`│ … ${lines.length - MAX_CODE_LINES} more lines`));
+    label("code", cell, "▾ code", diff && change ? "the agent's change" : "", { code: true });
+    const bg = pane.bg ? pane.bg.bind(pane) : undefined;
+    const start = bg ? bg("toolPendingBg", "\u0000").split("\u0000")[0] ?? "" : "";
+    // Highlighted code resets its colors mid-line: the background opens again after each reset.
+    const block = (line: string): string => bg!("toolPendingBg", truncateToWidth(`${line.replace(/\x1b\[0m|\x1b\[49m/gu, (m) => m + start)}`, width, "…", true));
+    if (bg) push(block(""));
+    for (const line of lines.slice(0, MAX_CODE_LINES)) push(bg ? block(` ${line}`) : `${dim("│")} ${line}`);
+    if (lines.length > MAX_CODE_LINES) push(bg ? block(` ${dim(`… ${lines.length - MAX_CODE_LINES} more lines`)}`) : dim(`│ … ${lines.length - MAX_CODE_LINES} more lines`));
+    if (bg) push(block(""));
   };
 
   const statusOf = (cell: Cell): string => {
@@ -106,11 +138,27 @@ export function detailRows(nb: NotebookState, theme: FrameTheme, now: number, o:
 
   /** Error, traceback, what it printed, and the output. */
   const resultBlock = (cell: Cell, limits: { textLines: number; tableRows: number }, printed: number) => {
-    if (cell.error) push(theme.fg("error", truncate(cell.error, 300)));
+    if (cell.error) {
+      label("error", cell, "error", /^([A-Za-z_][\w.]*)(?::|$)/u.exec(cell.error)?.[1] ?? "");
+      push(theme.fg("error", truncate(cell.error, 300)));
+    }
     const lines = cell.console ?? [];
     for (const l of lines.filter((x) => x.stream === "stderr")) push(theme.fg("warning", clean(l.text)));
-    for (const l of lines.filter((x) => x.stream === "stdout").slice(-printed)) push(`${dim("▍")} ${clean(l.text)}`);
-    rows.push(...outputRows(cell, theme, sub, limits));
+    const stdout = lines.filter((x) => x.stream === "stdout");
+    if (stdout.length) label("printed", cell, "printed", plural(stdout.length, "line"));
+    for (const l of stdout.slice(-printed)) push(`${dim("▍")} ${clean(l.text)}`);
+    const output = cell.output;
+    let shown = outputRows(cell, theme, sub, limits);
+    if (output && shown.length) {
+      if (output.table) {
+        const note = o.table?.(cell)?.note;
+        label("table", cell, "table", [outputShape(cell), note].filter(Boolean).join(" · "));
+        const card = o.tableCard?.(cell);
+        if (card) shown = card.map((text): Row => ({ text: `${theme.fg("accent", "▍")} ${text}` }));
+      } else if (output.kind === "image" || output.kind === "chart") label("chart", cell, "chart");
+      else label("output", cell, "output");
+    }
+    rows.push(...shown);
     widgetBlock(cell);
   };
 
@@ -128,28 +176,40 @@ export function detailRows(nb: NotebookState, theme: FrameTheme, now: number, o:
       if (rows.length) push("");
       if (selected) focusRow = rows.length;
       if (nb.isMarkdown(cell)) {
-        proseOf(cell, width - 1).forEach((line) => push(`${selected ? theme.fg("accent", "▌") : " "}${line}`));
+        const index = parts.length;
+        const focused = o.partFocus === index;
+        parts.push({ kind: "markdown", cell: cell.id, row: rows.length });
+        proseOf(cell, width - 1).forEach((line) => rows.push({ text: `${selected || focused ? theme.fg("accent", "▌") : " "}${line}`, part: index }));
         continue;
       }
       push(`${selected ? theme.fg("accent", "▌") : " "}${cellGlyph(nb, theme, cell)} ${selected ? theme.bold(cellTitle(nb, cell)) : dim(cellTitle(nb, cell))}`);
       resultBlock(cell, { textLines: 12, tableRows: 10 }, 5);
     }
-    return { rows, widgetRows, ...(focusRow !== undefined ? { focusRow } : {}) };
+    return { rows, widgetRows, parts, ...(focusRow !== undefined ? { focusRow } : {}) };
   }
 
   const cell = o.cell;
   if (nb.isMarkdown(cell)) {
-    rows.push(...proseOf(cell).map((text): Row => ({ text })));
+    /** One markdown cell as a part: the accent bar when focused, prose beside it. */
+    const prose = (c: Cell) => {
+      const index = parts.length;
+      const focused = o.partFocus === index;
+      parts.push({ kind: "markdown", cell: c.id, row: rows.length });
+      const bar = focused ? theme.fg("accent", "▌") + " " : "  ";
+      for (const line of proseOf(c, width - 2)) rows.push({ text: `${bar}${line}`, part: index });
+    };
+    prose(cell);
     const cells = nb.ordered();
     for (let i = cells.findIndex((c) => c.id === cell.id) + 1; i > 0 && i < cells.length; i++) {
       const next = cells[i]!;
       if (!nb.isMarkdown(next) || nb.headings(next).length) break;
       push("");
-      rows.push(...proseOf(next).map((text): Row => ({ text })));
+      prose(next);
     }
     push("");
-    codeBlock(cell, o.codeOpen, false);
-    return { rows, widgetRows };
+    if (editableMarkdown(cell.code) !== undefined) push(dim("  enter edits the markdown"));
+    else codeBlock(cell, o.codeOpen, false);
+    return { rows, widgetRows, parts };
   }
 
   const title = cellTitle(nb, cell);
@@ -173,5 +233,5 @@ export function detailRows(nb: NotebookState, theme: FrameTheme, now: number, o:
     push("");
     push(dim(flow.join(" · ")));
   }
-  return { rows, widgetRows };
+  return { rows, widgetRows, parts };
 }

@@ -6,7 +6,7 @@ import type { CellOutput } from "../core/output.js";
 import type { FrameTheme } from "../frame.ts";
 import { liveGeometry } from "./live-charts.js";
 import type { Row, RowOptions } from "./rows.js";
-import { tableLines } from "./table.js";
+import { tableGrid } from "./table.js";
 
 /** The default indent of everything under a cell's line; the detail pane passes none. */
 export const PAD = "      ";
@@ -80,7 +80,14 @@ export function outputRows(cell: Cell, theme: FrameTheme, opts: RowOptions, limi
   const inline = output?.image && getCapabilities().images ? inlineImage(output, theme, pad, opts) : undefined;
   if (inline) out.push(...inline);
   else if (output?.table) {
-    for (const line of tableLines(output.table, (opts.width ?? 80) - pad.length - 2, theme, limits.tableRows)) push(`${pad}${theme.fg("accent", "▍")} ${line}`);
+    const driven = opts.table?.(cell) ?? { data: output.table };
+    const data = driven.data;
+    const have = data.records?.length ? data.records.length : data.rows.length;
+    if (!have && (data.dataRef || data.lazy)) push(`${pad}${theme.fg("accent", "▍")} ${theme.fg("dim", "loading table…")}`);
+    else {
+      const grid = tableGrid(data, (opts.width ?? 80) - pad.length - 2, theme, Math.min(limits.tableRows, Math.max(1, have)), driven.render);
+      grid.lines.forEach((line, i) => out.push({ text: `${pad}${theme.fg("accent", "▍")} ${line}`, ...(grid.rowAt[i] !== undefined ? { tableRow: grid.rowAt[i]! } : {}) }));
+    }
   } else if (output && !(output.kind === "widgets" && !output.text)) {
     const text = output.kind === "text" || output.kind === "other" ? output.text : theme.fg("dim", chartNote ?? output.text);
     const lines = text.split("\n");

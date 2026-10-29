@@ -2,10 +2,10 @@
 import type { FrameTheme } from "../frame.ts";
 
 const GROUPS: Array<[string, string[]]> = [
-  ["Move", ["j/k ↑/↓ cell · [ ] section · g/G first/last · ^U/^D PgUp/PgDn space scroll the detail · f follow the running cell"]],
+  ["Move", ["j/k ↑/↓ cell · ctrl+j/ctrl+k (or ] [) section · n/p parts of the cell · g/G first/last · ^U/^D PgUp/PgDn space scroll the detail · f follow the running cell"]],
   ["Look", [
-    "enter/l a cell's code · O the whole section, or the cell · z fold section · Z fold all",
-    "n/N next/previous error · c/C next/previous agent change · d diff of an agent change · < > upstream/downstream cell",
+    "enter acts on the part (or code; markdown: edit) · t table · O the whole section, or the cell · z fold section · Z fold all",
+    "e/E next/previous error · c/C next/previous agent change · d diff of an agent change · < > upstream/downstream cell",
     "/ filter · v variables · i drive an expanded live chart",
   ]],
   ["Act", [
@@ -16,6 +16,8 @@ const GROUPS: Array<[string, string[]]> = [
   ["Notebooks", ["tab/shift+tab next/previous · | dock beside the chat, or full screen again · esc, q, h back to Pi"]],
   ["Docked", ["ctrl+' dock or close the active notebook · ctrl+] (or Herdr prefix+h/l) chat ⇄ notebook · esc back to the chat · q close · drag the divider to resize · click a side to focus it"]],
   ["Widgets", ["j/k next/previous · h/l change (H/L ×10) · space toggle or press · enter type a value · esc done"]],
+  ["Tables", ["hjkl move · [ ] page · g/G first/last page · +/- page size · s sort (S add) · / search · f filter (F clear) · space select · enter row · i column · c summaries · y/Y copy cell/row · D save csv · r refresh · esc done"]],
+  ["Markdown", ["enter edits a markdown cell in the editor (pi-vim when loaded) · saved through marimo, re-rendered at once"]],
   ["Variables", ["j/k move · enter its cell · > first cell that uses it · / filter · v or esc back"]],
   ["Mouse", ["wheel scrolls the pane under it · click selects · double-click opens the code"]],
 ];

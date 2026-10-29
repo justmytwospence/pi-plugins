@@ -6,7 +6,7 @@ import { Editor, type EditorTheme, type TUI, matchesKey } from "@earendil-works/
 import { type EditorFactoryFn, type SuiteEditor, markEmbedded } from "../editor-contract.ts";
 import type { FrameTheme } from "../frame.ts";
 
-export type DockKind = "ask" | "scratch" | "mark" | "value";
+export type DockKind = "ask" | "scratch" | "mark" | "value" | "markdown" | "table";
 
 export interface DockSpec {
   kind: DockKind;
