@@ -119,3 +119,21 @@ test("while a full-screen view is open, images Pi places in the transcript are w
   tui.doRender();
   expect(writes).toEqual(["\x1b_Ga=T,f=100,i=5;AAAA\x1b\\"]);
 });
+
+test("a reload's painter retires the earlier one: its charts go and it stops drawing", () => {
+  const { tui, writes } = fakeTui(["", ""]);
+  const first = Painter.for(tui)!;
+  const slot = first.add({ cols: 10, rows: 2 });
+  first.present(slot, PNG);
+  tui.screen[0] = marker(slot);
+  tui.doRender();
+  // A fresh copy of the module would make its own class; retiring is how it hands over.
+  first.retire();
+  expect(writes.at(-1)).toMatch(/a=d,d=I/u);
+  writes.length = 0;
+  tui.doRender();
+  expect(writes).toEqual([]);
+  const second = Painter.for(tui)!;
+  expect(second).not.toBe(first);
+  expect(Painter.for(tui)).toBe(second);
+});

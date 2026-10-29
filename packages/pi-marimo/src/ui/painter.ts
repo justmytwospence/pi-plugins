@@ -59,7 +59,9 @@ export function upload(png: string, image: number): string {
 const removePlacements = (image: number) => `\x1b_Ga=d,d=i,i=${image},q=2\x1b\\`;
 const removeImage = (image: number) => `\x1b_Ga=d,d=I,i=${image},q=2\x1b\\`;
 
-const painters = new WeakMap<object, Painter>();
+/** The painter installed on a TUI, shared across reloads of the extension (each reload loads a fresh copy of this module). */
+const SLOT = Symbol.for("pi-marimo/painter");
+interface Retirable { retire?(): void }
 
 export class Painter {
   private readonly slots = new Map<number, Slot>();
@@ -71,16 +73,19 @@ export class Painter {
   /** Full-screen views open (the notebook view): images of the transcript underneath are taken off the screen. */
   private exclusive = 0;
   private wipe = false;
+  retired = false;
 
   /** The painter for a TUI, hooking its renders once; undefined when the TUI cannot report its screen. */
   static for(tui: unknown): Painter | undefined {
     const t = tui as Partial<PaintableTui> | undefined;
     if (!t || typeof t.getScreenLines !== "function" || typeof t.doRender !== "function" || typeof t.terminal?.write !== "function") return undefined;
-    let p = painters.get(t);
-    if (!p) {
-      p = new Painter(t as PaintableTui);
-      painters.set(t, p);
-    }
+    const holder = t as { [SLOT]?: Painter & Retirable };
+    const current = holder[SLOT];
+    if (current instanceof Painter && !current.retired) return current;
+    // A painter from an earlier load of the extension: it stops drawing and takes its images away.
+    current?.retire?.();
+    const p = new Painter(t as PaintableTui);
+    holder[SLOT] = p;
     return p;
   }
 
@@ -89,6 +94,7 @@ export class Painter {
     const original = terminal.write.bind(terminal);
     this.write = original;
     terminal.write = (data: string) => {
+      if (this.retired) return original(data);
       if (data.includes("a=d,d=A")) this.cleared = "images";
       else if (data.includes("a=d,d=a") && this.cleared !== "images") this.cleared = "placements";
       // Pi places transcript images even under an overlay; while a view covers the screen they are wiped after the render.
@@ -98,8 +104,15 @@ export class Painter {
     const render = tui.doRender.bind(tui);
     tui.doRender = () => {
       render();
-      this.afterRender();
+      if (!this.retired) this.afterRender();
     };
+  }
+
+  /** Stops drawing for good (the extension reloads or the session ends): every chart's images go. */
+  retire(): void {
+    if (this.retired) return;
+    for (const id of [...this.slots.keys()]) this.remove(id);
+    this.retired = true;
   }
 
   /** A full-screen view opens or closes. While one is open, no transcript image shows through it. */
@@ -122,6 +135,7 @@ export class Painter {
 
   /** Shows a new frame: uploaded to the image not on screen, placed above the current one, which goes after. */
   present(slot: number, png: string): void {
+    if (this.retired) return;
     const s = this.slots.get(slot);
     if (!s || png === s.frame) return;
     s.frame = png;

@@ -42,6 +42,7 @@ import { NotebookSource, type Unopened } from "./ui/source.js";
 import { openUrl, waitingStatus, waitingUrl } from "./waiting.js";
 import { NotebookView, type ViewActions } from "./ui/view.js";
 import { ChatChart, type ChartEntry, disposeCharts, latestChart } from "./ui/chat-chart.js";
+import { Painter } from "./ui/painter.js";
 import { VegaRenderer } from "./core/vega.js";
 import type { Followed } from "./core/watcher.js";
 import { Type } from "typebox";
@@ -419,6 +420,7 @@ export default function piMarimo(pi: ExtensionAPI): void {
     inspectOff?.();
     inspectOff = undefined;
     disposeCharts();
+    Painter.for(tuiRef)?.retire();
     chartComponents.clear();
     const previousContext = ctxRef;
     ctxRef = undefined;
