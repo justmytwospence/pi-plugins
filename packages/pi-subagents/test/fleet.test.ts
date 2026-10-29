@@ -336,6 +336,10 @@ test("pill rows (notebooks): listed above the label, selected and opened like ru
   expect(ui.press(KEY.enter)).toBe(true);
   await new Promise((r) => setTimeout(r, 0));
   expect(opened).toEqual(["b"]);
+  // Back out of the view: the same row is selected again.
+  expect(ui.render("subagents-fleet")[2]).toMatch(/^\x1b\[7m ● b\.py/u);
+  expect(ui.press(KEY.up)).toBe(true);
+  expect(ui.render("subagents-fleet")[1]).toMatch(/^\x1b\[7m ○ a\.py/u);
   fleet.dispose();
 });
 

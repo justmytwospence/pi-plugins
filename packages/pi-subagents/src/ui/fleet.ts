@@ -449,8 +449,7 @@ export class FleetView {
     this.viewing = key;
     const cleared = () => this.viewerClosed(key);
     if (entry.kind === "row") {
-      // The row's own view (a notebook); it owns the keyboard until it closes.
-      this.active = false;
+      // The row's own view (a notebook); it owns the keyboard until it closes, and the row is selected again after.
       this.closeViewer = () => undefined;
       const ui = this.ui;
       const { section, row } = entry;

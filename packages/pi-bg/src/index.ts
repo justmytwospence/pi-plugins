@@ -278,12 +278,10 @@ export default function piBg(pi: ExtensionAPI) {
   };
   const pill = new PillView({
     pill: (now) => combinedPill(now),
-    open: () => {
-      if (ctx) openDialog(ctx.ui).catch(() => undefined);
-    },
+    open: () => (ctx ? openDialog(ctx.ui).catch(() => undefined) : undefined),
     openRow: (key) => {
       const g = guestRow(key);
-      if (g && ctx) g.section.open(g.key, ctx.ui).catch(() => undefined);
+      return g && ctx ? g.section.open(g.key, ctx.ui).catch(() => undefined) : undefined;
     },
     canStopRow: (row) => {
       const g = guestRow(row.key);

@@ -349,3 +349,37 @@ it("a row with its own styled line draws it after the status glyph, on the selec
   expect(renderPill(pill, { index: 0 }, 80, { ...theme, bg: (c: string, t: string) => `<${c}>${t}</>` })[0]).toBe(`<selectedBg> ○ Marimo a.py:2718 · idle${" ".repeat(80 - 26)}</>`);
   expect(NotebookPill).toBeDefined();
 });
+
+it("going back out of a row's view selects that row again, not the prompt", async () => {
+  const { PillView: NotebookPill } = await import(new URL("../../pi-marimo/src/pill.ts", import.meta.url).href);
+  for (const [View, widgetKey] of [[PillView, "pi-bg-pill"], [NotebookPill, "pi-marimo-pill"]] as const) {
+    const editor = new Editor(tui as any, { borderColor: (s: string) => s } as any);
+    const c = fakeCtx("/w");
+    let close!: () => void;
+    const openRow = vi.fn(() => new Promise<void>((resolve) => { close = resolve; }));
+    const rows = ["a", "b", "c"].map((k) => ({ key: k, label: `${k}.py`, detail: "", status: "done" as const, stats: "", startedAt: 0 }));
+    const pill = new View({ pill: () => ({ label: "", rows }), open: () => {}, openRow }, widgetKey);
+    pill.setUI(c.ctx.ui as any);
+    pill.update();
+    const widget = c.widgets.get(widgetKey)({ ...tui, getFocusedComponent: () => editor }, theme);
+    try {
+      pill.handleKey("\x1b[B");
+      pill.handleKey("\x1b[B");
+      pill.handleKey("\r");
+      expect(openRow).toHaveBeenCalledWith("b");
+      expect(pill.isSelected).toBe(false);
+      close();
+      await new Promise((r) => setTimeout(r, 0));
+      expect(pill.isSelected).toBe(true);
+      // The second row is the selected one: Enter opens it again.
+      pill.handleKey("\r");
+      expect(openRow).toHaveBeenLastCalledWith("b");
+      close();
+      await new Promise((r) => setTimeout(r, 0));
+      // Esc still goes back to the prompt.
+      expect(pill.handleKey("\x1b")).toEqual({ consume: true });
+      expect(pill.isSelected).toBe(false);
+      expect(widget.render(100).length).toBe(3);
+    } finally { pill.dispose(); }
+  }
+});

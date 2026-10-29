@@ -179,12 +179,8 @@ export default function piMarimo(pi: ExtensionAPI): void {
   });
   const ownPill = new PillView({
     pill: (now) => source.pill(now),
-    open: () => {
-      if (ctxRef) void source.section.openDialog?.(ctxRef.ui).catch(() => undefined);
-    },
-    openRow: (key) => {
-      if (ctxRef) void source.section.open(key, ctxRef.ui).catch(() => undefined);
-    },
+    open: () => (ctxRef ? source.section.openDialog?.(ctxRef.ui)?.catch(() => undefined) : undefined),
+    openRow: (key) => (ctxRef ? source.section.open(key, ctxRef.ui).catch(() => undefined) : undefined),
     canStopRow: (row) => stoppable(source.section, row),
     stopRow: (key) => source.section.stop?.(key),
   }, "pi-marimo-pill");

@@ -305,7 +305,9 @@ describe("pi-bg", () => {
     expect(lines.join("\n")).toMatch(/\[ ● flaky  sleep 2; echo bad; exit 3/u);
     dialog.handleInput("\x1b");
     await until(() => x.sent.length > 0, 5_000);
-    // Failed: the pill keeps a red count until the user's next message.
+    // Failed: the pill keeps a red count until the user's next message. Back out of the dialog, it is selected again.
+    expect(x.widgetLines()?.[0]).toMatch(/^\[ tasks +· 1 failed +enter view · esc back +\]$/u);
+    expect(x.press("\x1b")).toBe(true);
     expect(x.widgetLines()).toEqual([" tasks  · 1 failed"]);
     for (const h of x.handlers.get("input") ?? []) await h({ source: "interactive", text: "ok" }, x.ctx);
     expect(x.widgets.has("pi-bg-pill")).toBe(false);

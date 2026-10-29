@@ -97,9 +97,9 @@ export interface PillUI {
 export interface PillSource {
   pill(now: number): ActivityPill | undefined;
   /** Enter or a click on the label: open the dialog. */
-  open(): void;
-  /** Enter or a click on a row: open that row's view. */
-  openRow?(key: string): void;
+  open(): void | Promise<unknown>;
+  /** Enter or a click on a row: open that row's view. The selection returns to the row when the promise settles. */
+  openRow?(key: string): void | Promise<unknown>;
   /** `x` twice on a running row. */
   stopRow?(key: string): void | Promise<void>;
   /** Whether `x` applies to this row now; without it, none does. */
@@ -166,8 +166,9 @@ export class PillView {
             if (e.type === "press") return { handled: true, render: false };
             if (e.type !== "click") return undefined;
             const slot = pillSlots(this.source.pill(Date.now()))[e.y];
+            const index = e.y;
             this.deselect();
-            this.openSlot(slot);
+            this.openSlot(slot, index);
             return { handled: true };
           },
           invalidate: () => undefined,
@@ -219,8 +220,9 @@ export class PillView {
     this.clamp(pill);
     const at = slots[this.index];
     if (matchesKey(data, "enter") || matchesKey(data, "l") || matchesKey(data, "right")) {
+      const index = this.index;
       this.deselect();
-      this.openSlot(at);
+      this.openSlot(at, index);
       return { consume: true };
     }
     if (matchesKey(data, "escape") || matchesKey(data, "h") || matchesKey(data, "left")) {
@@ -268,10 +270,26 @@ export class PillView {
     if (this.armed !== undefined && !(at?.kind === "row" && rowStopKey(at.row) === this.armed)) this.armed = undefined;
   }
 
-  private openSlot(slot: ReturnType<typeof pillSlots>[number] | undefined): void {
+  /** Opens a slot's view; when it closes, the selection comes back to the slot that was open, like going back in a list. */
+  private openSlot(slot: ReturnType<typeof pillSlots>[number] | undefined, index: number): void {
     if (!slot) return;
-    if (slot.kind === "row") this.source.openRow?.(slot.row.key);
-    else this.source.open();
+    const generation = this.generation;
+    let result: void | Promise<unknown>;
+    try {
+      result = slot.kind === "row" ? this.source.openRow?.(slot.row.key) : this.source.open();
+    } catch {
+      return;
+    }
+    if (!result || typeof (result as Promise<unknown>).then !== "function") return;
+    const back = () => {
+      if (generation !== this.generation || !this.ui || !this.registered || this.selected || !this.editorFocused()) return;
+      this.selected = true;
+      this.index = index;
+      this.armed = undefined;
+      this.clamp(this.source.pill(Date.now()));
+      this.tui?.requestRender();
+    };
+    (result as Promise<unknown>).then(back, back);
   }
 
   private deselect(): void {
