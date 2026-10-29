@@ -60,7 +60,34 @@ const SCRATCH_ROWS = 12;
 /** One cell or its whole section in the detail: the choice holds for the rest of the Pi process. */
 let sectionMode: boolean | undefined;
 
+/** What the docked view needs from the split that hosts it. */
+export interface DockedHost { focused(): boolean; focusMain(): void }
+
+/** The view's own state, carried over when it moves between full screen and docked. */
+export interface ViewState {
+  cursor?: string;
+  follow: boolean;
+  scroll: number;
+  detailScroll: number;
+  codeOpen: string[];
+  folded: string[];
+  diffs: string[];
+  section: boolean;
+  filter: string;
+  mode: "cells" | "variables";
+  varCursor?: string;
+  varFilter: string;
+}
+
 export interface ViewActions {
+  /** Set when the view is docked beside the chat. */
+  docked?: DockedHost;
+  /** Start from this state (a view that moved between full screen and docked). */
+  initial?: ViewState;
+  /** `|` in the full-screen view: dock it beside the chat. */
+  dock?(key: string, state: ViewState): void;
+  /** `|` in the docked view: back to full screen. */
+  undock?(key: string, state: ViewState): void;
   /** The notebooks followed now. */
   followed(): Followed[];
   interrupt(f: Followed): Promise<void>;
@@ -102,6 +129,13 @@ interface ScratchState {
   running: boolean;
   started: number;
   abort: AbortController;
+}
+
+/** `╭─ Notebook nb.py · ctrl+] focus ──╮` for the docked view: no "back" arrow, it sits beside the chat. */
+function dockedBanner(file: string, width: number, th: FrameTheme, focused: boolean): string {
+  const label = ` Notebook ${file} · ${focused ? "ctrl+] chat" : "ctrl+] focus"} `;
+  const text = truncateToWidth(label, Math.max(4, width - 3));
+  return th.fg("accent", `╭─${th.bold(text)}${"─".repeat(Math.max(0, width - 3 - visibleWidth(text)))}╮`);
 }
 
 const message = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -169,8 +203,9 @@ export class NotebookView implements Component {
     this.vega = vega;
     this.plotly = plotly;
     this.section = sectionMode ?? actions.outputs ?? false;
-    this.live = live ?? new LiveCharts(() => { if (!this.closed) this.tui.requestRender(); }, undefined, undefined, undefined, () => Painter.for(this.tui), "overlay");
-    Painter.for(this.tui)?.setExclusive(true);
+    if (actions.initial) this.restore(actions.initial);
+    this.live = live ?? new LiveCharts(() => { if (!this.closed) this.tui.requestRender(); }, undefined, undefined, undefined, () => Painter.for(this.tui), actions.docked ? "base" : "overlay");
+    if (!actions.docked) Painter.for(this.tui)?.setExclusive(true);
     this.tui.requestRender();
     this.timer = setInterval(() => {
       if (!this.closed) {
@@ -179,6 +214,60 @@ export class NotebookView implements Component {
       }
     }, TICK_MS);
     this.timer.unref?.();
+  }
+
+  get notebook(): string {
+    return this.key;
+  }
+
+  snapshot(): ViewState {
+    return {
+      ...(this.cursor !== undefined ? { cursor: this.cursor } : {}),
+      follow: this.follow,
+      scroll: this.scroll,
+      detailScroll: this.detailScroll,
+      codeOpen: [...this.codeOpen],
+      folded: [...this.folded],
+      diffs: [...this.diffs],
+      section: this.section,
+      filter: this.filter,
+      mode: this.mode,
+      ...(this.varCursor !== undefined ? { varCursor: this.varCursor } : {}),
+      varFilter: this.varFilter,
+    };
+  }
+
+  private restore(s: ViewState): void {
+    this.cursor = s.cursor;
+    this.follow = s.follow;
+    this.scroll = s.scroll;
+    this.detailScroll = s.detailScroll;
+    this.codeOpen = new Set(s.codeOpen);
+    this.folded = new Set(s.folded);
+    this.diffs = new Set(s.diffs);
+    this.section = s.section;
+    this.filter = s.filter;
+    this.mode = s.mode;
+    this.varCursor = s.varCursor;
+    this.varFilter = s.varFilter;
+    // So the detail's scroll survives the first render.
+    this.detailKey = `${s.cursor ?? ""}\0${s.section}`;
+  }
+
+  /** Esc: docked, back to the chat; full screen, out of the view. */
+  private leave(): void {
+    if (this.actions.docked) this.actions.docked.focusMain();
+    else this.close();
+  }
+
+  private toggleDock(): void {
+    if (this.actions.docked) {
+      if (this.actions.undock) this.actions.undock(this.key, this.snapshot());
+      else this.note = "Not available here.";
+    } else if (this.actions.dock) {
+      this.actions.dock(this.key, this.snapshot());
+      this.close();
+    } else this.note = "Docking is not available here.";
   }
 
   private current(): Followed | undefined {
@@ -481,7 +570,7 @@ export class NotebookView implements Component {
     const list = f ? variableList(f.notebook, this.varFilter) : [];
     const at = Math.max(0, list.findIndex((v) => v.name === this.varCursor));
     const moveTo = (i: number) => { this.varCursor = list[Math.max(0, Math.min(list.length - 1, i))]?.name; this.reveal = true; };
-    if (matchesKey(data, "ctrl+c")) { this.close(); return; }
+    if (matchesKey(data, "ctrl+c")) { this.leave(); return; }
     if (matchesKey(data, "escape") && this.varFilter) { this.varFilter = ""; this.varCursor = undefined; return; }
     if (matchesKey(data, "escape") || data === "v" || data === "q" || data === "h" || matchesKey(data, "left")) {
       this.mode = "cells";
@@ -560,6 +649,11 @@ export class NotebookView implements Component {
       this.tui.requestRender();
       return;
     }
+    if (data === "|") {
+      this.toggleDock();
+      this.tui.requestRender();
+      return;
+    }
     if (data === "?") {
       this.help = true;
       this.note = undefined;
@@ -582,8 +676,12 @@ export class NotebookView implements Component {
       this.tui.requestRender();
       return;
     }
-    if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || matchesKey(data, "q") || matchesKey(data, "h") || matchesKey(data, "left")) {
+    if (this.actions.docked && data === "q") {
       this.close();
+      return;
+    }
+    if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || matchesKey(data, "q") || matchesKey(data, "h") || matchesKey(data, "left")) {
+      this.leave();
       return;
     }
     const page = this.viewport();
@@ -867,7 +965,7 @@ export class NotebookView implements Component {
     this.syncConfirmation();
     const f = this.current();
     const file = basename(f?.attachment.path ?? notebookPath(this.key));
-    const out = [banner(`Notebook ${file}`, width, th)];
+    const out = [this.actions.docked ? dockedBanner(file, width, th, this.actions.docked.focused()) : banner(`Notebook ${file}`, width, th)];
     if (!f && this.dock) this.closeDock();
     if (!f) this.widget = undefined;
     else if (this.widget) this.drivenWidgets(f);
@@ -997,13 +1095,13 @@ export class NotebookView implements Component {
       const id = /(?:^|,)i=(\d+)(?:,|$)/u.exec(m[1]!)?.[1];
       if (id !== undefined) ids.add(Number(id));
     }
-    Painter.for(this.tui)?.setViewImages(ids);
+    if (!this.actions.docked) Painter.for(this.tui)?.setViewImages(ids);
     return out;
   }
 
   private footer(f: Followed | undefined, inner: number): string {
     const th = this.theme;
-    const nav = th.fg("dim", "? keys · esc back");
+    const nav = th.fg("dim", this.actions.docked ? "? keys · esc chat · q close" : "? keys · esc back");
     const withNav = (left: string) => {
       const gap = inner - visibleWidth(left) - visibleWidth(nav);
       return gap >= 1 ? `${left}${" ".repeat(gap)}${nav}` : left;
@@ -1111,7 +1209,7 @@ export class NotebookView implements Component {
   }
 
   dispose(): void {
-    if (!this.closed) Painter.for(this.tui)?.setExclusive(false);
+    if (!this.closed && !this.actions.docked) Painter.for(this.tui)?.setExclusive(false);
     this.closed = true;
     clearInterval(this.timer);
     this.scratch?.abort.abort();

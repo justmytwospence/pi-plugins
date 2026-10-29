@@ -46,7 +46,9 @@ import { PillView } from "./pill.ts";
 import { notebookKey } from "./ui/identity.js";
 import { NotebookSource, type Unopened } from "./ui/source.js";
 import { openUrl, waitingStatus, waitingUrl } from "./waiting.js";
-import { NotebookView, type ViewActions } from "./ui/view.js";
+import { NotebookView, type ViewActions, type ViewState } from "./ui/view.js";
+import { NotebookSplit } from "./ui/split.ts";
+import { getKeybindings } from "@earendil-works/pi-tui";
 import { ChatChart, type ChartEntry, disposeCharts, latestChart } from "./ui/chat-chart.js";
 import { Painter } from "./ui/painter.js";
 import { stopSharedChrome } from "./core/chrome.js";
@@ -84,6 +86,10 @@ export const DEFAULT_CONFIG = {
   view: {
     /** Open the notebook view with the whole section in the detail pane (O toggles it). */
     outputs: false,
+    /** Open the notebook view docked beside the chat instead of full screen (Pi's fullscreen mode). */
+    split: false,
+    /** Dock a notebook beside the chat when the agent starts running its cells. */
+    autoSplit: true,
   },
   server: {
     /** How /marimo edit and /marimo new start marimo; [] picks `uv run marimo` when the cwd has uv.lock, else `marimo`. */
@@ -94,7 +100,8 @@ export type Config = typeof DEFAULT_CONFIG;
 
 /** The `/marimo` subcommands, with what each does, for completion and the unknown-subcommand warning. */
 const SUBCOMMANDS: Array<[string, string]> = [
-  ["view", "open the busiest notebook, or the one named, full screen"],
+  ["view", "open the busiest notebook, or the one named (full screen, or docked with view.split)"],
+  ["split", "dock the busiest notebook, or the one named, beside the chat (again: close it)"],
   ["edit", "start a notebook here and open it, no browser needed"],
   ["new", "create a notebook, start it and open it"],
   ["stop", "stop a notebook server Pi started"],
@@ -233,6 +240,8 @@ export default function piMarimo(pi: ExtensionAPI): void {
   // Per notebook path: browser edits after this change number are flagged as new.
   const seen = new Map<string, number>();
   let pending: ReturnType<typeof setTimeout> | undefined;
+  /** Followed notebooks that were running or queued at the last render, to spot a run that starts. */
+  let wasBusy = new Set<string>();
   let ticker: ReturnType<typeof setInterval> | undefined;
   let lastStatus: string[] = [];
   /** Notes for top-level tool calls whose marimo-pair calls were ambiguous, by call id. */
@@ -312,18 +321,33 @@ export default function piMarimo(pi: ExtensionAPI): void {
     },
     unmark: (f, id) => unmarkSelection(f, id, process.env.MARIMO_TOKEN ? { token: process.env.MARIMO_TOKEN } : {}),
   };
-  const openView = (key: string, ui: unknown): Promise<void> =>
-    (ui as ExtensionContext["ui"]).custom<void>((tui, theme, keys, done) => {
-      // Settings are read each time a view opens; the suite's editor (pi-vim) is asked for then too.
-      const suite = pi.events ? requestEditorFactory(pi.events) : undefined;
-      return new NotebookView(tui, theme, key, {
-        ...viewActions,
-        liveCharts: config.liveCharts,
-        outputs: config.view.outputs,
-        keybindings: keys,
-        ...(suite ? { editorFactory: suite.factory } : {}),
-      }, () => done(undefined));
-    }, FULL_SCREEN);
+  let fullOpen = false;
+  /** The view's actions, read fresh each time a view opens (settings, and the suite's editor from pi-vim). */
+  const viewOptions = (keys: unknown): ViewActions => {
+    const suite = pi.events ? requestEditorFactory(pi.events) : undefined;
+    return {
+      ...viewActions,
+      liveCharts: config.liveCharts,
+      outputs: config.view.outputs,
+      keybindings: keys,
+      ...(suite ? { editorFactory: suite.factory } : {}),
+      // Docking waits for the overlay to close, or Pi's focus restore takes focus back from the docked view.
+      dock: (key, state) => { setTimeout(() => { if (ctxRef && !split.open(ctxRef, key, { focus: true, state })) void openFull(key, ctxRef.ui, state); }, 0); },
+      undock: (key, state) => { split.close(); if (ctxRef) void openFull(key, ctxRef.ui, state); },
+    };
+  };
+  const openFull = (key: string, ui: unknown, state?: ViewState): Promise<void> => {
+    fullOpen = true;
+    return (ui as ExtensionContext["ui"]).custom<void>((tui, theme, keys, done) =>
+      new NotebookView(tui, theme, key, { ...viewOptions(keys), ...(state ? { initial: state } : {}) }, () => done(undefined)), FULL_SCREEN)
+      .finally(() => { fullOpen = false; });
+  };
+  const split = new NotebookSplit(pi, (tui, theme, key, host, close, state) =>
+    new NotebookView(tui, theme, key, { ...viewOptions(getKeybindings()), docked: host, ...(state ? { initial: state } : {}) }, close));
+  const openView = async (key: string, ui: unknown): Promise<void> => {
+    if (config.view.split && ctxRef && split.open(ctxRef, key, { focus: true, quiet: true })) return;
+    await openFull(key, ui);
+  };
   const source: NotebookSource = new NotebookSource({
     followed: viewActions.followed,
     open: openView,
@@ -494,6 +518,13 @@ export default function piMarimo(pi: ExtensionAPI): void {
       bg.annotate(watcher.followed(), ctxRef.cwd);
       source.update(watcher.followed());
     }
+    // A notebook this session uses starts running while the agent works: dock it beside the chat.
+    if (ctxRef?.mode === "tui" && watcher) {
+      const busyNow = new Set(mine().filter((f) => f.connection === "connected" && (f.notebook.running() || f.notebook.queued() > 0)).map(notebookKey));
+      const started = [...busyNow].find((k) => !wasBusy.has(k));
+      if (started && config.view.autoSplit !== false && !fullOpen && ctxRef.isIdle() === false) split.autoOpen(ctxRef, started);
+      wasBusy = busyNow;
+    }
     // In the TUI the notebooks are rows under the prompt (ui/source.ts); other modes keep the footer lines.
     const lines = ctxRef?.mode === "tui" ? [] : statusLines();
     for (let i = 0; i < Math.max(lines.length, lastStatus.length); i++) {
@@ -576,6 +607,7 @@ export default function piMarimo(pi: ExtensionAPI): void {
     watcher.start();
     if (ctx.mode === "tui") {
       ctx.ui.setWidget("pi-marimo-tui", (tui) => { tuiRef = tui; return { render: () => [], invalidate() {} }; });
+      split.listen(ctx);
     }
     source.resetHosts();
     bindPill();
@@ -592,6 +624,8 @@ export default function piMarimo(pi: ExtensionAPI): void {
     inspectOff?.();
     inspectOff = undefined;
     disposeCharts();
+    split.shutdown();
+    wasBusy = new Set();
     Painter.for(tuiRef)?.retire();
     // The browsers end with the session: a reload would otherwise leave them running with no owner.
     stopSharedChrome();
@@ -768,6 +802,15 @@ export default function piMarimo(pi: ExtensionAPI): void {
         const path = source.busiest();
         if (!path) ctx.ui.notify("marimo: no notebook followed", "info");
         else await openView(path, ctx.ui);
+        return;
+      }
+      if (word === "split") {
+        const f = rest ? watcher.followed().find((o) => o.attachment.path.endsWith(rest) || o.canonicalPath?.endsWith(rest)) : undefined;
+        if (rest && !f) { ctx.ui.notify(`marimo: no followed notebook matches ${rest}`, "info"); return; }
+        if (!rest && split.isOpen) { split.closeByUser(); return; }
+        const key = f ? notebookKey(f) : source.busiest();
+        if (!key) { ctx.ui.notify("marimo: no notebook followed", "info"); return; }
+        split.open(ctx, key, { focus: true });
         return;
       }
       if (word === "edit") {

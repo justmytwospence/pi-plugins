@@ -817,3 +817,60 @@ test("the view's own picture stays on screen while the painter takes the transcr
     expect(after).not.toContain("a=d,d=a");
   } finally { v.dispose(); setCapabilities({ images: null, trueColor: true, hyperlinks: false } as any); }
 });
+
+// --- docked beside the chat ---
+test("docked: the banner says how to switch, Esc goes to the chat, q closes, and it never wipes the chat's pictures", async () => {
+  const { setCapabilities } = await import("@earendil-works/pi-tui");
+  const f = nbWith([{ id: "a", code: "x = 1" }]);
+  const writes: string[] = [];
+  const painted = { requestRender: () => {}, getScreenLines: () => [] as string[], doRender: () => {}, terminal: { rows: 28, write: (d: string) => { writes.push(d); } } };
+  setCapabilities({ images: "kitty", trueColor: true, hyperlinks: false } as any);
+  const focusMain = vi.fn();
+  const done = vi.fn();
+  const v = new NotebookView(painted as any, theme2, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {}, docked: { focused: () => false, focusMain } }, done);
+  try {
+    const lines = v.render(100);
+    expect(lines[0]).toContain("Notebook nb.py · ctrl+] focus");
+    expect(lines.join("\n")).toContain("esc chat · q close");
+    v.handleInput("\x1b");
+    expect(focusMain).toHaveBeenCalledOnce();
+    expect(done).not.toHaveBeenCalled();
+    v.handleInput("q");
+    expect(done).toHaveBeenCalledOnce();
+    painted.terminal.write("x");
+    painted.doRender();
+    expect(writes.join("")).not.toContain("a=d,d=a");
+  } finally { v.dispose(); setCapabilities({ images: null, trueColor: true, hyperlinks: false } as any); }
+});
+
+test("| docks the full-screen view with its state, and undocks the docked one", () => {
+  const cells = Array.from({ length: 12 }, (_, i) => ({ id: `cell-${i}`, code: `x = ${i}` }));
+  const f = nbWith(cells);
+  const dock = vi.fn();
+  const done = vi.fn();
+  const v = new NotebookView(tui as any, theme2, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {}, dock }, done);
+  try {
+    for (let i = 0; i < 10; i++) v.handleInput("j");
+    v.handleInput("\r");
+    v.handleInput("O");
+    v.handleInput("|");
+    expect(dock).toHaveBeenCalledWith(notebookKey(f), expect.objectContaining({ cursor: "cell-10", codeOpen: ["cell-10"], section: true }));
+    expect(done).toHaveBeenCalled();
+  } finally { v.handleInput("O"); v.dispose(); }
+  const undock = vi.fn();
+  const d = new NotebookView(tui as any, theme2, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {}, docked: { focused: () => true, focusMain: () => {} }, undock }, () => {});
+  try {
+    d.handleInput("|");
+    expect(undock).toHaveBeenCalledOnce();
+  } finally { d.dispose(); }
+});
+
+test("a view started from a state shows the same cell and code", () => {
+  const f = nbWith(Array.from({ length: 12 }, (_, i) => ({ id: `cell-${i}`, code: `x = ${i}`, name: `cell-${i}` })));
+  const v = make(f, { initial: { cursor: "cell-10", codeOpen: ["cell-10"], section: false, follow: false, scroll: 0, detailScroll: 0, folded: [], diffs: [], filter: "", mode: "cells", varFilter: "" } });
+  try {
+    const text = screen(v);
+    expect(text).toContain("▌○ cell-10");
+    expect(text).toContain("▾ code");
+  } finally { v.dispose(); }
+});
