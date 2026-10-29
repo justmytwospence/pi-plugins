@@ -94,3 +94,50 @@ describe("chart specs", () => {
     expect(summarizeOutput({ channel: "output", mimetype: "application/vnd.vegalite.v6+json", data: `{"d":"${"x".repeat(1_600_000)}"}` })?.vega).toBeUndefined();
   });
 });
+
+describe("tables, widgets and tracebacks", () => {
+  // As marimo 0.25 writes mo.ui.table([{a: 1, b: "x"}, {a: 2, b: "y"}]): single quotes, the rows a JSON string of JSON.
+  const table = `<marimo-ui-element object-id='Hbol-0' random-id='r'><marimo-table data-initial-value='[]' data-label='null' data-data='&quot;[{&#92;&quot;a&#92;&quot;:1,&#92;&quot;b&#92;&quot;:&#92;&quot;x&#92;&quot;},{&#92;&quot;a&#92;&quot;:2,&#92;&quot;b&#92;&quot;:&#92;&quot;y&#92;&quot;}]&quot;' data-total-rows='2' data-total-columns='2' data-field-types='[[&quot;a&quot;,[&quot;integer&quot;,&quot;int64&quot;]],[&quot;b&quot;,[&quot;string&quot;,&quot;object&quot;]]]'></marimo-table></marimo-ui-element>`;
+
+  test("a marimo table keeps its first page, its row count and which columns are numbers; it is no widget", () => {
+    const out = summarizeOutput({ channel: "output", mimetype: "text/html", data: table })!;
+    expect(out).toMatchObject({ kind: "table", text: "[table, 2 rows]" });
+    expect(out.table).toEqual({ columns: ["a", "b"], numeric: [true, false], rows: [["1", "x"], ["2", "y"]], totalRows: 2, totalColumns: 2 });
+    expect(out.widgets).toBeUndefined();
+    expect(summarizeOutput({ channel: "output", mimetype: "text/html", data: "<marimo-table data-total-rows='&quot;too_many&quot;' data-data='[]'></marimo-table>" })?.text).toBe("[table, many rows]");
+  });
+
+  test("an HTML table with little around it is a table; one inside prose stays text", () => {
+    const html = "<table><thead><tr><th>name</th><th>n</th></tr></thead><tbody><tr><td>a</td><td>1,200</td></tr><tr><td>b</td><td>3.5</td></tr></tbody></table>";
+    const out = summarizeOutput({ channel: "output", mimetype: "text/html", data: html })!;
+    expect(out.kind).toBe("table");
+    expect(out.table).toMatchObject({ columns: ["name", "n"], numeric: [false, true], rows: [["a", "1,200"], ["b", "3.5"]] });
+    const prose = `<p>${"A long explanation of the numbers. ".repeat(4)}</p>${html}`;
+    expect(summarizeOutput({ channel: "output", mimetype: "text/html", data: prose })?.kind).toBe("text");
+  });
+
+  test("widgets: their kind, label, value and range, as marimo writes them", () => {
+    const slider = "<marimo-ui-element object-id='Hbol-0' random-id='x'><marimo-slider data-initial-value='0.3' data-label='&quot;&lt;span class=&#92;&quot;markdown&#92;&quot;&gt;alpha&lt;/span&gt;&quot;' data-start='0' data-stop='1' data-step='0.1' data-steps='[]' data-disabled='false'></marimo-slider></marimo-ui-element>";
+    const dropdown = "<marimo-ui-element object-id='Hbol-1' random-id='y'><marimo-dropdown data-initial-value='[&quot;Two&quot;]' data-label='null' data-options='[&quot;One&quot;,&quot;Two&quot;]' data-allow-select-none='false'></marimo-dropdown></marimo-ui-element>";
+    const checkbox = "<marimo-ui-element object-id='Hbol-2' random-id='z'><marimo-checkbox data-initial-value='true' data-label='&quot;c&quot;' data-disabled='true'></marimo-checkbox></marimo-ui-element>";
+    const text = "<marimo-ui-element object-id='Hbol-3' random-id='t'><marimo-text data-initial-value='&quot;hi&quot;' data-label='&quot;t&quot;'></marimo-text></marimo-ui-element>";
+    const button = "<marimo-ui-element object-id='Hbol-4' random-id='b'><marimo-button data-initial-value='0' data-label='&quot;go&quot;'></marimo-button></marimo-ui-element>";
+    const other = "<marimo-ui-element object-id='Hbol-5' random-id='o'><marimo-file-browser data-initial-value='[]'></marimo-file-browser></marimo-ui-element>";
+    const out = summarizeOutput({ channel: "output", mimetype: "text/html", data: `<div>${slider}${dropdown}${checkbox}${text}${button}${other}</div>` })!;
+    expect(out.kind).toBe("widgets");
+    expect(out.widgets?.map((w) => w.kind)).toEqual(["slider", "dropdown", "checkbox", "text", "button", "other"]);
+    expect(out.widgets?.[0]).toMatchObject({ objectId: "Hbol-0", label: "alpha", initial: 0.3, start: 0, stop: 1, step: 0.1, steps: [], disabled: false });
+    expect(out.widgets?.[1]).toMatchObject({ label: "", initial: ["Two"], options: ["One", "Two"] });
+    expect(out.widgets?.[2]).toMatchObject({ initial: true, disabled: true });
+    expect(out.widgets?.[5]).toMatchObject({ kind: "other", tag: "marimo-file-browser" });
+    // A widget beside text keeps both.
+    const both = summarizeOutput({ channel: "output", mimetype: "text/html", data: `<div>${slider}<p>value 0.3</p></div>` })!;
+    expect(both).toMatchObject({ kind: "text", text: "value 0.3" });
+    expect(both.widgets).toHaveLength(1);
+  });
+
+  test("a traceback is highlighted HTML on the console: it reads as plain stderr", () => {
+    const lines = appendConsole(undefined, { channel: "stderr", mimetype: "application/vnd.marimo+traceback", data: '<pre><span class="gt">Traceback (most recent call last):</span>\n  File <span class="s">"x.py"</span>\n<span class="ne">ZeroDivisionError</span>: division by zero</pre>' });
+    expect(lines?.map((l) => `${l.stream}:${l.text}`)).toEqual(["stderr:Traceback (most recent call last):", 'stderr:  File "x.py"', "stderr:ZeroDivisionError: division by zero"]);
+  });
+});

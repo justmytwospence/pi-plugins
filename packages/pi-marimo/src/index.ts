@@ -45,8 +45,10 @@ import { ChatChart, type ChartEntry, disposeCharts, latestChart } from "./ui/cha
 import { Painter } from "./ui/painter.js";
 import { stopSharedChrome } from "./core/chrome.js";
 import { stopSharedPlotly } from "./core/plotly.js";
-import { VegaRenderer } from "./core/vega.js";
+import { type ChartRenderer, VegaRenderer } from "./core/vega.js";
+import { sharedPlotly } from "./core/plotly.js";
 import type { Followed } from "./core/watcher.js";
+import { loadConfig } from "./config.ts";
 import { Type } from "typebox";
 
 const ENTRY = "pi-marimo";
@@ -60,6 +62,49 @@ const MESSAGE_TYPE = "pi-marimo-state";
 const CHART_ENTRY = "pi-marimo-chart";
 /** Besides the current notebook, the ones worked in during this many latest prompts are in full in context. */
 const FULL_PROMPTS = 3;
+
+/** `marimo.json` (config.ts: ~/.config/agents, ~/.pi/agent, then the project's .agents and .pi). */
+export const DEFAULT_CONFIG = {
+  /** Most notebooks followed at once in auto mode. */
+  maxNotebooks: 8,
+  /** Put the notebooks' state in the model's context at each prompt. */
+  context: true,
+  /** Run Plotly figures live (hover, zoom) in the view and the transcript; false draws pictures. */
+  liveCharts: true,
+  view: {
+    /** Open the notebook view with every cell's output shown (O toggles it). */
+    outputs: false,
+  },
+  server: {
+    /** How /marimo edit and /marimo new start marimo; [] picks `uv run marimo` when the cwd has uv.lock, else `marimo`. */
+    command: [] as string[],
+  },
+};
+export type Config = typeof DEFAULT_CONFIG;
+
+/** The `/marimo` subcommands, with what each does, for completion and the unknown-subcommand warning. */
+const SUBCOMMANDS: Array<[string, string]> = [
+  ["view", "open the busiest notebook, or the one named, full screen"],
+  ["open", "open a waiting notebook in the browser"],
+  ["auto", "follow every notebook open under this directory"],
+  ["off", "follow nothing"],
+  ["show", "print the state block the model sees"],
+  ["lens", "print the open Lens selections"],
+  ["chart", "show a cell's chart in the transcript"],
+  ["inspect", "drive the newest transcript chart from the keyboard"],
+];
+
+/** A chart spec drawn to a PNG by one of the renderers, waiting at most `ms`; undefined when it fails or takes longer. */
+export function renderPng(renderer: Pick<ChartRenderer, "request" | "peek">, spec: string, ms = 10_000): Promise<string | undefined> {
+  return new Promise<string | undefined>((resolve) => {
+    const timer = setTimeout(() => resolve(undefined), ms);
+    timer.unref?.();
+    const finish = (png: string | undefined) => { clearTimeout(timer); resolve(png); };
+    const state = renderer.request(spec, () => { const s = renderer.peek(spec); finish(s?.status === "ready" ? s.png : undefined); });
+    if (state.status === "ready") finish(state.png);
+    else if (state.status === "failed") finish(undefined);
+  });
+}
 
 type Entry = { type?: string; customType?: string; data?: unknown };
 
@@ -121,6 +166,7 @@ export default function piMarimo(pi: ExtensionAPI): void {
   const chartComponents = new Map<string, ChatChart>();
   const vega = new VegaRenderer();
   let inspectOff: (() => void) | undefined;
+  let config: Config = DEFAULT_CONFIG;
 
   /** A notebook cell's chart as a transcript entry: a Plotly figure to run live, else a picture. */
   const chartEntry = async (cellRef: string, notebook?: string): Promise<ChartEntry> => {
@@ -132,14 +178,15 @@ export default function piMarimo(pi: ExtensionAPI): void {
       if (!cell) continue;
       const base = { path: f.attachment.path, cell: cell.id, label: cell.name !== "_" ? cell.name : cell.id };
       const out = cell.output;
-      if (out?.plotly) return { ...base, plotly: out.plotly };
+      if (out?.plotly && config.liveCharts !== false) return { ...base, plotly: out.plotly };
       if (out?.image) return { ...base, png: out.image.data };
+      if (out?.plotly) {
+        const png = await renderPng(sharedPlotly(), out.plotly, 120_000);
+        if (png) return { ...base, png };
+        return { ...base, note: "[chart: could not draw the Plotly figure]" };
+      }
       if (out?.vega) {
-        const png = await new Promise<string | undefined>((resolve) => {
-          const state = vega.request(out.vega!, () => { const s = vega.peek(out.vega!); resolve(s?.status === "ready" ? s.png : undefined); });
-          if (state.status === "ready") resolve(state.png);
-          else if (state.status === "failed") resolve(undefined);
-        });
+        const png = await renderPng(vega, out.vega, 120_000);
         if (png) return { ...base, png };
         return { ...base, note: "[chart: could not draw the Vega-Lite spec]" };
       }
@@ -212,7 +259,7 @@ export default function piMarimo(pi: ExtensionAPI): void {
     lastRun: (f) => source.lastRun(f),
   };
   const openView = (key: string, ui: unknown): Promise<void> =>
-    (ui as ExtensionContext["ui"]).custom<void>((tui, theme, _keys, done) => new NotebookView(tui, theme, key, viewActions, () => done(undefined)), FULL_SCREEN);
+    (ui as ExtensionContext["ui"]).custom<void>((tui, theme, _keys, done) => new NotebookView(tui, theme, key, { ...viewActions, liveCharts: config.liveCharts }, () => done(undefined)), FULL_SCREEN);
   const source: NotebookSource = new NotebookSource({
     followed: viewActions.followed,
     open: openView,
@@ -400,7 +447,9 @@ export default function piMarimo(pi: ExtensionAPI): void {
     ctxRef = ctx;
     herdr = ctx.mode === "tui" ? new HerdrHold(pi.events) : undefined;
     await watcher?.stop();
-    watcher = new MarimoWatcher({ io: nodeIo(), cwd: ctx.cwd, token: process.env.MARIMO_TOKEN, onChange: schedule });
+    config = loadConfig("marimo", DEFAULT_CONFIG, ctx.cwd);
+    const maxNotebooks = Math.max(1, Math.min(32, Math.floor(Number(config.maxNotebooks) || DEFAULT_CONFIG.maxNotebooks)));
+    watcher = new MarimoWatcher({ io: nodeIo(), cwd: ctx.cwd, token: process.env.MARIMO_TOKEN, maxNotebooks, onChange: schedule });
     const branch = ctx.sessionManager.getBranch() as Entry[];
     watcher.mode = savedMode(branch) ?? { kind: "auto" };
     watcher.engage(savedEngaged(branch));
@@ -464,7 +513,8 @@ export default function piMarimo(pi: ExtensionAPI): void {
     if (ctxRef) bg.external(watcher.followed(), ctxRef.cwd);
     const note = others.length ? `Other marimo notebooks open under this directory, not used in this session (work in one through marimo-pair to follow it): ${others.join(", ")}` : "";
     const text = entries.length ? withWaitHint(snapshot(entries, { refresh: "prompt" }), bg.runningIds(), pi) : "";
-    turn = text || note ? { text: [text, note].filter(Boolean).join("\n") } : undefined;
+    // `context: false` in marimo.json: the view and footer only, nothing in the model's context.
+    turn = config.context !== false && (text || note) ? { text: [text, note].filter(Boolean).join("\n") } : undefined;
   });
 
   // The notebook this session's agent works in (through marimo-pair) becomes current for this
@@ -554,12 +604,17 @@ export default function piMarimo(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("marimo", {
-    description: "Choose the marimo notebooks Pi follows (view, open, auto, off, show, lens, chart <cell>, inspect)",
+    description: `Choose and open marimo notebooks (${SUBCOMMANDS.map(([name]) => name).join(", ")})`,
     getArgumentCompletions: (prefix) =>
-      ["view", "open", "auto", "off", "show", "lens", "chart", "inspect"].filter((a) => a.startsWith(prefix.trim())).map((value) => ({ value, label: value })),
+      SUBCOMMANDS.filter(([name]) => name.startsWith(prefix.trim())).map(([value, description]) => ({ value, label: value, description })),
     handler: async (args, ctx) => {
       if (!watcher) return;
       const arg = args.trim();
+      const word = arg.split(/\s+/u)[0] ?? "";
+      if (word && !SUBCOMMANDS.some(([name]) => name === word)) {
+        ctx.ui.notify(`marimo: unknown subcommand "${word}". Use one of: ${SUBCOMMANDS.map(([name]) => name).join(", ")}, or /marimo alone to pick notebooks.`, "warning");
+        return;
+      }
       if (arg === "chart" || arg.startsWith("chart ")) {
         const ref = arg.slice(5).trim();
         if (!ref) { ctx.ui.notify("marimo: /marimo chart <cell name or id>", "info"); return; }

@@ -13,7 +13,7 @@ const identical = [
   ['packages/pi-plan-mode/src/app/pi-chat.ts','packages/pi-sidebar/src/pi-chat.ts','packages/pi-subagents/src/ui/pi-chat.ts'],
   ['pi-auto-effort','pi-copy','pi-next-prompt','pi-subagents','pi-tool-gate'].map(p => `packages/${p}/src/jev.ts`),
   ['pi-auto-effort','pi-copy','pi-next-prompt','pi-subagents'].map(p => `packages/${p}/src/transcript.ts`),
-  ['pi-auto-effort','pi-next-prompt','pi-tool-gate'].map(p => `packages/${p}/src/config.ts`),
+  ['pi-auto-effort','pi-next-prompt','pi-tool-gate','pi-marimo'].map(p => `packages/${p}/src/config.ts`),
   ['pi-copy','pi-subagents'].map(p => `packages/${p}/src/config.ts`),
   ['pi-ask-user-question','pi-copy','pi-tool-gate'].map(p => `packages/${p}/src/herdr.ts`),
   ['pi-plan-mode','pi-compact-plan'].map(p => `packages/${p}/src/editor-contract.ts`),

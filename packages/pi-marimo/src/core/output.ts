@@ -1,6 +1,36 @@
 // What a cell printed, kept compact for the notebook view (never for the agent's snapshot): the
-// last output as text (HTML stripped, tables and images named), and the last console lines.
-export type OutputKind = "text" | "table" | "image" | "chart" | "other";
+// last output as text (HTML stripped, images named), its table's first page and its widgets, and
+// the last console lines.
+export type OutputKind = "text" | "table" | "image" | "chart" | "widgets" | "other";
+
+/** The rows a table output carries (marimo sends its first page), as text. */
+export interface TableData {
+  columns: string[];
+  numeric: boolean[];
+  rows: string[][];
+  /** How many rows the whole table has (`many`: marimo did not count them). */
+  totalRows?: number | "many";
+  totalColumns?: number;
+}
+
+export type WidgetKind = "slider" | "number" | "range-slider" | "checkbox" | "switch" | "text" | "text-area" | "dropdown" | "radio" | "multiselect" | "button" | "date" | "other";
+
+/** A marimo UI element in an output (`<marimo-ui-element object-id>`), with what the view needs to show and drive it. */
+export interface Widget {
+  objectId: string;
+  kind: WidgetKind;
+  /** The element's tag, `marimo-slider`. */
+  tag: string;
+  label: string;
+  /** The value the element was created with (its current one may differ: NotebookState.uiValues). */
+  initial: unknown;
+  options: string[];
+  start?: number;
+  stop?: number;
+  step?: number;
+  steps: number[];
+  disabled: boolean;
+}
 
 export interface CellOutput {
   kind: OutputKind;
@@ -11,6 +41,10 @@ export interface CellOutput {
   vega?: string;
   /** A Plotly figure (JSON text with `data` and `layout`), likewise. */
   plotly?: string;
+  /** A table's first page, when the output is a table. */
+  table?: TableData;
+  /** The UI elements the output shows. */
+  widgets?: Widget[];
 }
 
 export interface ConsoleLine {
@@ -101,6 +135,147 @@ export function htmlToText(html: string): string {
 
 const clip = (text: string): string => (text.length <= MAX_TEXT ? text : `${text.slice(0, MAX_TEXT - 1)}…`);
 
+/** The attributes of an opening tag, entity-decoded. */
+export function attributes(tag: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const re = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*(?:'([^']*)'|"([^"]*)"|([^\s>]+))/gu;
+  for (let m = re.exec(tag); m; m = re.exec(tag)) out[m[1]!] = decode(m[2] ?? m[3] ?? m[4] ?? "");
+  return out;
+}
+
+function json(value: string | undefined): unknown {
+  if (value === undefined) return undefined;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+}
+
+const MAX_TABLE_ROWS = 50;
+const MAX_TABLE_COLUMNS = 50;
+
+function cellText(value: unknown): string {
+  const text = value === null || value === undefined ? "" : typeof value === "string" ? value : typeof value === "number" || typeof value === "boolean" ? String(value) : JSON.stringify(value) ?? "";
+  const flat = text.replace(/\s+/gu, " ");
+  return flat.length <= 200 ? flat : `${flat.slice(0, 199)}…`;
+}
+
+/** A `<marimo-table>`'s first page (marimo double-encodes it: a JSON string of the JSON rows) and its row count. */
+export function marimoTable(html: string): { table?: TableData; totalRows?: number | "many" } | undefined {
+  const tag = /<marimo-table\b[^>]*>/iu.exec(html)?.[0];
+  if (!tag) return undefined;
+  const a = attributes(tag);
+  const total = json(a["data-total-rows"]);
+  const totalRows = typeof total === "number" && Number.isFinite(total) ? total : total === "too_many" ? "many" as const : undefined;
+  let data = json(a["data-data"]);
+  if (typeof data === "string" && data.trimStart().startsWith("[")) data = json(data);
+  const objects = Array.isArray(data) ? data.filter((r): r is Record<string, unknown> => r !== null && typeof r === "object" && !Array.isArray(r)) : [];
+  const out: { table?: TableData; totalRows?: number | "many" } = totalRows !== undefined ? { totalRows } : {};
+  if (!objects.length) return out;
+  const columns = Object.keys(objects[0]!).filter((k) => !k.startsWith("_marimo")).slice(0, MAX_TABLE_COLUMNS);
+  const types = json(a["data-field-types"]);
+  const numericNames = new Set<string>();
+  if (Array.isArray(types)) {
+    for (const entry of types) {
+      if (!Array.isArray(entry) || typeof entry[0] !== "string") continue;
+      const type = Array.isArray(entry[1]) ? entry[1][0] : undefined;
+      if (type === "integer" || type === "number") numericNames.add(entry[0]);
+    }
+  }
+  const columnsTotal = json(a["data-total-columns"]);
+  out.table = {
+    columns,
+    numeric: columns.map((c) => numericNames.has(c)),
+    rows: objects.slice(0, MAX_TABLE_ROWS).map((r) => columns.map((c) => cellText(r[c]))),
+    ...(totalRows !== undefined ? { totalRows } : {}),
+    ...(typeof columnsTotal === "number" && Number.isFinite(columnsTotal) ? { totalColumns: columnsTotal } : {}),
+  };
+  return out;
+}
+
+const NUMBER = /^-?[\d,]*\.?\d+(?:e[-+]?\d+)?%?$/iu;
+
+/** The first HTML `<table>` (pandas, markdown tables) as rows; undefined without a body row. */
+export function htmlTable(html: string): TableData | undefined {
+  const table = /<table\b[\s\S]*?<\/table>/iu.exec(html)?.[0];
+  if (!table) return undefined;
+  const rows: Array<{ header: boolean; cells: string[] }> = [];
+  for (const tr of table.match(/<tr\b[\s\S]*?<\/tr>/giu) ?? []) {
+    const cells: string[] = [];
+    const re = /<(t[hd])\b[^>]*>([\s\S]*?)<\/\1>/giu;
+    for (let m = re.exec(tr); m; m = re.exec(tr)) cells.push(htmlToText(m[2] ?? "").replace(/\s+/gu, " ").trim());
+    if (cells.length) rows.push({ header: /<th\b/iu.test(tr), cells });
+  }
+  const headerAt = rows.findIndex((r) => r.header);
+  const header = headerAt === 0 ? rows[0]! : undefined;
+  const body = (header ? rows.slice(1) : rows).slice(0, MAX_TABLE_ROWS);
+  if (!body.length) return undefined;
+  const width = Math.max(header?.cells.length ?? 0, ...body.map((r) => r.cells.length));
+  const columns = Array.from({ length: width }, (_, i) => header?.cells[i] ?? `col ${i + 1}`);
+  const cells = body.map((r) => Array.from({ length: width }, (_, i) => r.cells[i] ?? ""));
+  return {
+    columns,
+    numeric: columns.map((_, i) => cells.some((r) => r[i]) && cells.every((r) => !r[i] || NUMBER.test(r[i]!))),
+    rows: cells,
+  };
+}
+
+const WIDGET_KINDS: Record<string, WidgetKind> = {
+  "marimo-slider": "slider",
+  "marimo-number": "number",
+  "marimo-range-slider": "range-slider",
+  "marimo-checkbox": "checkbox",
+  "marimo-switch": "switch",
+  "marimo-text": "text",
+  "marimo-text-area": "text-area",
+  "marimo-dropdown": "dropdown",
+  "marimo-radio": "radio",
+  "marimo-multiselect": "multiselect",
+  "marimo-button": "button",
+  "marimo-date": "date",
+};
+/** UI elements drawn some other way: tables, charts, anywidgets (Lens among them). */
+const NOT_WIDGETS = new Set(["marimo-table", "marimo-plotly", "marimo-vega", "marimo-anywidget"]);
+const MAX_WIDGETS = 16;
+
+const finite = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+
+/** The UI elements an output shows; every `data-*` attribute marimo writes is JSON. */
+export function parseWidgets(html: string): Widget[] {
+  const out: Widget[] = [];
+  const re = /<marimo-ui-element\b([^>]*)>\s*<(marimo-[a-z-]+)\b([^>]*)>/giu;
+  for (let m = re.exec(html); m && out.length < MAX_WIDGETS; m = re.exec(html)) {
+    const objectId = attributes(m[1] ?? "")["object-id"];
+    const tag = (m[2] ?? "").toLowerCase();
+    if (!objectId || NOT_WIDGETS.has(tag)) continue;
+    const a = attributes(m[3] ?? "");
+    const label = json(a["data-label"]);
+    const options = json(a["data-options"]);
+    const steps = json(a["data-steps"]);
+    const start = finite(json(a["data-start"]));
+    const stop = finite(json(a["data-stop"]));
+    const step = finite(json(a["data-step"]));
+    out.push({
+      objectId,
+      kind: WIDGET_KINDS[tag] ?? "other",
+      tag,
+      label: label === null || label === undefined ? "" : htmlToText(String(label)).replace(/\s+/gu, " ").trim(),
+      initial: json(a["data-initial-value"]),
+      options: Array.isArray(options) ? options.filter((o): o is string => typeof o === "string") : [],
+      ...(start !== undefined ? { start } : {}),
+      ...(stop !== undefined ? { stop } : {}),
+      ...(step !== undefined ? { step } : {}),
+      steps: Array.isArray(steps) ? steps.filter((s): s is number => typeof s === "number" && Number.isFinite(s)) : [],
+      disabled: json(a["data-disabled"]) === true,
+    });
+  }
+  return out;
+}
+
+const rowCount = (n: number | "many" | undefined): string =>
+  n === undefined ? "[table]" : n === "many" ? "[table, many rows]" : `[table, ${n} row${n === 1 ? "" : "s"}]`;
+
 /** A cell-op `output` as something to show, or undefined for an empty output (or an error: see Cell.error). */
 export function summarizeOutput(raw: unknown): CellOutput | undefined {
   const output = record(raw);
@@ -117,21 +292,29 @@ export function summarizeOutput(raw: unknown): CellOutput | undefined {
     return { kind: "chart", text: `[chart ${mime}]`, ...(vega ? { vega } : {}) };
   }
   if (mime === "text/html" && typeof data === "string") {
-    const table = /<marimo-table\b[^>]*?data-total-rows=(?:"|&quot;)?(\d+)/iu.exec(data);
-    if (table) return { kind: "table", text: `[table, ${table[1]} row${table[1] === "1" ? "" : "s"}]` };
-    if (/<marimo-table\b/iu.test(data)) return { kind: "table", text: "[table]" };
+    const widgets = parseWidgets(data);
+    const extra = widgets.length ? { widgets } : {};
+    const marimo = marimoTable(data);
+    if (marimo) return { kind: "table", text: rowCount(marimo.totalRows), ...(marimo.table ? { table: marimo.table } : {}), ...extra };
     // matplotlib and PIL figures arrive as an <img> with a PNG data URL.
     const img = /<img\b[^>]*?\bsrc=["']?(data:image\/png;base64,[A-Za-z0-9+/=\s]+)/iu.exec(data);
     const embedded = img ? pngOf(img[1]!) : undefined;
     // mo.ui.altair_chart: the spec sits in the element's data-spec attribute.
     const spec = /<marimo-vega\b[^>]*?\bdata-spec=(?:'([^']*)'|"([^"]*)")/iu.exec(data);
     const vega = spec ? vegaOf(decode(spec[1] ?? spec[2] ?? "")) : undefined;
-    if (vega) return { kind: "chart", text: "[chart vega-lite]", vega };
+    if (vega) return { kind: "chart", text: "[chart vega-lite]", vega, ...extra };
     const plotly = plotlyFrom(data);
-    if (plotly) return { kind: "chart", text: "[chart plotly]", plotly };
+    if (plotly) return { kind: "chart", text: "[chart plotly]", plotly, ...extra };
     const text = htmlToText(data);
-    if (embedded && !text) return { kind: "image", text: "[image png]", image: embedded };
-    if (text) return { kind: "text", text: clip(text) };
+    if (embedded && !text) return { kind: "image", text: "[image png]", image: embedded, ...extra };
+    // A table with little around it (a pandas frame, a markdown table) is drawn as one.
+    const table = htmlTable(data);
+    if (table) {
+      const around = htmlToText(data.replace(/<table\b[\s\S]*?<\/table>/iu, ""));
+      if (around.length <= 80) return { kind: "table", text: rowCount(table.rows.length), table, ...extra };
+    }
+    if (text) return { kind: "text", text: clip(text), ...extra };
+    if (widgets.length) return { kind: "widgets", text: "", widgets };
     if (/<(?:img|svg|iframe|canvas|marimo-[a-z-]+)\b/iu.test(data)) return { kind: "chart", text: "[interactive output: o opens the notebook]" };
     return undefined;
   }
@@ -151,8 +334,10 @@ export function consoleLines(raw: unknown): { reset: boolean; lines: ConsoleLine
   for (const item of items) {
     const o = record(item);
     if (typeof o.data !== "string" || !o.data) continue;
-    const text = o.mimetype === "text/html" ? htmlToText(o.data) : o.data;
-    const stream = o.channel === "stderr" ? "stderr" : "stdout";
+    // Tracebacks are highlighted HTML on stderr.
+    const traceback = o.mimetype === "application/vnd.marimo+traceback";
+    const text = o.mimetype === "text/html" || traceback ? htmlToText(o.data) : o.data;
+    const stream = o.channel === "stderr" || traceback ? "stderr" : "stdout";
     for (const line of text.replace(/\r/gu, "\n").split("\n")) lines.push({ stream, text: line });
   }
   return { reset: false, lines };

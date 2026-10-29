@@ -61,6 +61,8 @@ function setup(branch: unknown[] = [], mode = "tui") {
   const sent: Array<[string, any]> = [];
   const entries: Array<{ type: string; customType: string; data: any }> = [];
   const statuses = new Map<string, string | undefined>();
+  const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
+  const notes: Array<[string, string | undefined]> = [];
   const pi = {
     on: (name: string, h: (e: unknown, c: unknown) => unknown) => void handlers.set(name, [...(handlers.get(name) ?? []), h]),
     events: {
@@ -70,7 +72,7 @@ function setup(branch: unknown[] = [], mode = "tui") {
         for (const h of listeners.get(ch) ?? []) h(d);
       },
     },
-    registerCommand: () => undefined,
+    registerCommand: (name: string, spec: { handler: (args: string, ctx: unknown) => Promise<void> }) => void commands.set(name, spec),
     registerEntryRenderer: () => undefined,
     registerTool: () => undefined,
     appendEntry: () => undefined,
@@ -80,7 +82,7 @@ function setup(branch: unknown[] = [], mode = "tui") {
   const customs: any[] = [];
   const ui = {
     setStatus: (key: string, text: string | undefined) => void statuses.set(key, text),
-    notify: () => undefined,
+    notify: (message: string, type?: string) => void notes.push([message, type]),
     setWidget: (key: string, w: unknown) => void (w ? widgets.set(key, w) : widgets.delete(key)),
     onTerminalInput: () => () => undefined,
     getEditorText: () => "",
@@ -101,7 +103,9 @@ function setup(branch: unknown[] = [], mode = "tui") {
     const w = widgets.get("pi-marimo-pill") ?? [...widgets.values()][0];
     return w ? w({ requestRender: () => undefined }, { fg: (_c: string, t: string) => t, bold: (t: string) => t }).render(80).join("\n") : undefined;
   };
-  return { pi, fire, sent, of, widgets, customs, pillText, ui, entries, statuses, handlers };
+  /** Runs `/name args` as pi would. */
+  const command = (name: string, args: string) => commands.get(name)!.handler(args, ctx);
+  return { pi, fire, sent, of, widgets, customs, pillText, ui, entries, statuses, handlers, command, notes };
 }
 
 const pair = `bash .agents/skills/marimo-pair/scripts/execute-code.sh --url ${SERVER} --file nb.py - <<'PY'\nfit()\nPY`;
@@ -314,4 +318,38 @@ test("several notebooks at once: a footer line each, in file order, recent ones 
   await x.fire("session_shutdown");
   expect(x.statuses.get("marimo")).toBeUndefined();
   expect(x.statuses.get("marimo-2")).toBeUndefined();
+});
+
+test("/marimo names its subcommands when given one it does not know", async () => {
+  const x = setup([], "rpc");
+  await x.fire("session_start");
+  await x.command("marimo", "bogus thing");
+  expect(x.notes.at(-1)).toEqual([expect.stringMatching(/^marimo: unknown subcommand "bogus"\. Use one of: view, .*inspect, or \/marimo alone to pick notebooks\.$/u), "warning"]);
+  await x.fire("session_shutdown");
+});
+
+test("marimo.json context: false keeps the notebooks out of the model's context", async () => {
+  const { mkdtempSync, writeFileSync, mkdirSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "pi-marimo-wiring-"));
+  mkdirSync(join(dir, "agent"));
+  writeFileSync(join(dir, "agent", "marimo.json"), JSON.stringify({ context: false }));
+  const saved = { agent: process.env.PI_CODING_AGENT_DIR, xdg: process.env.XDG_CONFIG_HOME };
+  process.env.PI_CODING_AGENT_DIR = join(dir, "agent");
+  process.env.XDG_CONFIG_HOME = join(dir, "xdg");
+  try {
+    const x = setup([], "rpc");
+    await x.fire("session_start");
+    await until(() => server.feeds.length > 0);
+    server.feeds.at(-1)!(untilRunning);
+    await x.fire("tool_call", { input: { command: pair } });
+    await x.fire("before_agent_start");
+    const [context] = x.handlers.get("context")!;
+    expect(await context!({ messages: [{ role: "user", timestamp: 1 }] }, undefined)).toBeUndefined();
+    await x.fire("session_shutdown");
+  } finally {
+    if (saved.agent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = saved.agent;
+    if (saved.xdg === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = saved.xdg;
+  }
 });

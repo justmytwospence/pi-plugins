@@ -46,6 +46,8 @@ export interface ViewActions {
   stopServers?(f: Followed): number;
   /** How the notebook's last run went: `ran 2m 3s · 1 error · 5m ago`. */
   lastRun?(f: Followed): string | undefined;
+  /** Run Plotly figures live (default); false draws them as pictures. */
+  liveCharts?: boolean;
 }
 
 const firstLine = (code: string) => code.split("\n").find((l) => l.trim())?.trim() ?? "";
@@ -538,7 +540,7 @@ export class NotebookView implements Component {
       if (this.follow && running && cells.some((c) => c.id === running.cell.id)) this.cursor = running.cell.id;
       if (!this.cursor || !cells.some((c) => c.id === this.cursor)) this.cursor = cells[0]?.id;
       this.live.beginFrame();
-      const built = notebookRows(nb, th, Date.now(), { cursor: this.cursor, expanded: this.expanded, filter: this.filter, imageRows: page - 1, width, vega: this.vega, plotly: this.plotly, live: this.live, onVega: () => { if (!this.closed) this.tui.requestRender(); } });
+      const built = notebookRows(nb, th, Date.now(), { cursor: this.cursor, expanded: this.expanded, filter: this.filter, imageRows: page - 1, width, vega: this.vega, plotly: this.plotly, ...(this.actions.liveCharts === false ? {} : { live: this.live }), onVega: () => { if (!this.closed) this.tui.requestRender(); } });
       const rows = built.rows;
       const max = Math.max(0, rows.length - page);
       const at = this.cursor !== undefined ? built.cellRows.get(this.cursor) : undefined;
@@ -556,7 +558,7 @@ export class NotebookView implements Component {
         const pick = at < this.scroll ? visible[0] : visible.at(-1);
         if (pick) {
           this.cursor = pick.id;
-          const again = notebookRows(nb, th, Date.now(), { cursor: this.cursor, expanded: this.expanded, filter: this.filter, imageRows: page - 1, width, vega: this.vega, plotly: this.plotly, live: this.live, onVega: () => { if (!this.closed) this.tui.requestRender(); } });
+          const again = notebookRows(nb, th, Date.now(), { cursor: this.cursor, expanded: this.expanded, filter: this.filter, imageRows: page - 1, width, vega: this.vega, plotly: this.plotly, ...(this.actions.liveCharts === false ? {} : { live: this.live }), onVega: () => { if (!this.closed) this.tui.requestRender(); } });
           rows.splice(0, rows.length, ...again.rows);
         }
       }
