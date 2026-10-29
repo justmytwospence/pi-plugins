@@ -44,7 +44,8 @@ let nextImageId = 0x5a000000 + Math.floor(Math.random() * 0x100000);
 const imageId = (): number => (nextImageId = (nextImageId + 1) & 0x7fffffff);
 
 /** The zero-width marker that finds a chart on screen: a colour set and reset, unique per chart. */
-export const marker = (id: number): string => `\x1b[38;2;7;${(id >> 8) & 255};${id & 255}m\x1b[39m`;
+export const marker = (id: number): string => `${markerOpen(id)}\x1b[39m`;
+const markerOpen = (id: number): string => `\x1b[38;2;7;${(id >> 8) & 255};${id & 255}m`;
 
 export function upload(png: string, image: number): string {
   if (png.length <= CHUNK) return `\x1b_Ga=t,f=100,q=2,i=${image};${png}\x1b\\`;
@@ -262,7 +263,9 @@ export class Painter {
     for (const s of this.slots.values()) {
       if (cleared === "images") s.uploaded.clear();
       if (cleared) s.placed = undefined;
-      const m = marker(s.id);
+      // Its opening code only: a pass that restyles the line (the docked split dims the half without
+      // focus) may put codes after it, between it and its reset.
+      const m = markerOpen(s.id);
       const row = screen.findIndex((line) => line.includes(m));
       const image = s.buffers[s.shown];
       if (row < 0 || !s.frame) {

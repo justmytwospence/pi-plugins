@@ -168,3 +168,15 @@ test("an image Pi drew is placed again when Pi rewrites a row it covers (the cha
   tui.doRender();
   expect(writes).toEqual(["\x1b[4;1H\x1b[2Kchat"]);
 });
+
+test("a chart's marker is still found when the line is restyled around it (the docked notebook dimmed while the chat has focus)", async () => {
+  const { faintColumns } = await import("../src/ui/split-layout.js");
+  const { tui, writes } = fakeTui(["", "", ""]);
+  const p = Painter.for(tui)!;
+  const slot = p.add({ cols: 10, rows: 2 });
+  p.present(slot, PNG);
+  tui.screen[1] = faintColumns(`chat │ ▍ ${marker(slot)}`, 5, 40);
+  tui.doRender();
+  expect(writes.at(-1)).toContain("\x1b[2;10H");
+  expect(placements(writes.at(-1)!)).toHaveLength(1);
+});
