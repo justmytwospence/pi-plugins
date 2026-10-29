@@ -326,13 +326,13 @@ test("pill rows (notebooks): listed above the label, selected and opened like ru
   fleet.update();
   const idle = ui.render("subagents-fleet");
   expect(idle).toHaveLength(3);
-  expect(idle[0]).toMatch(/^ ○ ○ a\.py {2}:2718 · idle/u);
-  expect(idle[1]).toMatch(/^ ○ ● b\.py {2}:2719 · running Fit +0:12$/u);
+  expect(idle[0]).toMatch(/^ {2}○ a\.py {2}:2718 · idle/u);
+  expect(idle[1]).toMatch(/^ {2}● b\.py {2}:2719 · running Fit +0:12$/u);
   expect(ui.press(KEY.down)).toBe(true);
   expect(ui.render("subagents-fleet")[0]).toContain("↑/↓ select · enter view");
-  expect(ui.render("subagents-fleet")[1]).toMatch(/^ ● ○ a\.py/u);
+  expect(ui.render("subagents-fleet")[1]).toMatch(/^ ›○ a\.py/u);
   expect(ui.press(KEY.down)).toBe(true);
-  expect(ui.render("subagents-fleet")[2]).toMatch(/^ ● ● b\.py/u);
+  expect(ui.render("subagents-fleet")[2]).toMatch(/^ ›● b\.py/u);
   expect(ui.press(KEY.enter)).toBe(true);
   await new Promise((r) => setTimeout(r, 0));
   expect(opened).toEqual(["b"]);
