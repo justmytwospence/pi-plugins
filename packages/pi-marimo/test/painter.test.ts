@@ -153,3 +153,18 @@ test("a reload's painter retires the earlier one: its charts go and it stops dra
   expect(second).not.toBe(first);
   expect(Painter.for(tui)).toBe(second);
 });
+
+test("an image Pi drew is placed again when Pi rewrites a row it covers (the chat beside a docked notebook)", () => {
+  const { tui, writes } = fakeTui(["chat │ ▍ \x1b_Ga=T,f=100,q=2,C=1,c=60,r=3,i=42;AAAA\x1b\\", "chat │ ▍", "chat │ ▍", "chat"]);
+  Painter.for(tui);
+  // Pi rewrites the row under the image only.
+  tui.terminal.write("\x1b[2;1H\x1b[2Kchat more │ ▍");
+  writes.length = 0;
+  tui.doRender();
+  expect(writes.join("")).toContain("\x1b[1;10H\x1b_Ga=p,i=42,p=7,c=60,r=3,C=1,q=2");
+  // A frame that touches no covered row places nothing.
+  writes.length = 0;
+  tui.terminal.write("\x1b[4;1H\x1b[2Kchat");
+  tui.doRender();
+  expect(writes).toEqual(["\x1b[4;1H\x1b[2Kchat"]);
+});

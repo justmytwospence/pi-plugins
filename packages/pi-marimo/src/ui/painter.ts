@@ -74,6 +74,8 @@ export class Painter {
   private exclusive = 0;
   /** Images Pi placed while a view is open that are not the view's own: their placements go after the render (`all`: one without an id). */
   private wipe: Set<number> | "all" | undefined;
+  /** Screen rows Pi wrote since the last render ended. */
+  private written = new Set<number>();
   /** The images the open view draws itself (Pi's image lines in it), which stay. */
   private viewImages = new Set<number>();
   retired = false;
@@ -98,6 +100,8 @@ export class Painter {
     this.write = original;
     terminal.write = (data: string) => {
       if (this.retired) return original(data);
+      // The rows Pi rewrote this frame (it writes a row as `CSI row;1H CSI 2K text`).
+      for (const m of data.matchAll(/\x1b\[(\d+);1H/gu)) this.written.add(Number(m[1]) - 1);
       if (data.includes("a=d,d=A")) this.cleared = "images";
       else if (data.includes("a=d,d=a") && this.cleared !== "images") this.cleared = "placements";
       // Pi places transcript images even under an overlay; while a view covers the screen they are wiped after the
@@ -210,6 +214,34 @@ export class Painter {
     return layouts.some((o) => o.row < row + rows && row < o.row + o.height && o.col < col + cols && col < o.col + o.width);
   }
 
+  /**
+   * Pi's images (a picture in the docked notebook, beside a chat that keeps changing) are lost when Pi
+   * rewrites a row they cover: herdr and Ghostty clear the cells it erases, and Pi redraws images only
+   * when an anchor row changes (or on WezTerm), and then writes the rows under it afterwards. Each such image is
+   * placed again where it is, as placement 7 of its image, so the repeats replace one another.
+   */
+  private replaceImages(written: Set<number>): string {
+    let out = "";
+    let screen: string[];
+    try { screen = this.tui.getScreenLines(); } catch { return ""; }
+    screen.forEach((line, row) => {
+      const at = line.indexOf("\x1b_G");
+      if (at < 0) return;
+      const controls = /^\x1b_G([^;\x1b]*)/u.exec(line.slice(at))?.[1] ?? "";
+      const get = (k: string) => /(?:^|,)X=(\d+)(?:,|$)/u.source.replace("X", k);
+      const id = new RegExp(get("i"), "u").exec(controls)?.[1];
+      const rows = Number(new RegExp(get("r"), "u").exec(controls)?.[1] ?? 0);
+      const cols = new RegExp(get("c"), "u").exec(controls)?.[1];
+      if (!id || rows < 2 || !cols) return;
+      let touched = false;
+      for (let r = row + 1; r < row + rows; r++) if (written.has(r)) { touched = true; break; }
+      if (!touched) return;
+      const col = visibleWidth(line.slice(0, at));
+      out += `\x1b7\x1b[${row + 1};${col + 1}H\x1b_Ga=p,i=${id},p=7,c=${cols},r=${rows},C=1,q=2\x1b\\\x1b8`;
+    });
+    return out;
+  }
+
   /** After Pi drew a frame: put each chart where its marker is now, or take it away when the marker is gone. */
   private afterRender(): void {
     let out = "";
@@ -220,6 +252,9 @@ export class Painter {
       } else for (const id of this.wipe) out += removePlacements(id);
       this.wipe = undefined;
     }
+    const written = this.written;
+    this.written = new Set();
+    if (!this.exclusive && written.size) out += this.replaceImages(written);
     if (!this.slots.size) { this.cleared = undefined; if (out) this.write(out); return; }
     const screen = this.tui.getScreenLines();
     const cleared = this.cleared;
