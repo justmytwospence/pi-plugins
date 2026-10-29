@@ -112,12 +112,13 @@ export function detailRows(nb: NotebookState, theme: FrameTheme, now: number, o:
     const p = part("code", cell);
     const bg = pane.bg ? pane.bg.bind(pane) : undefined;
     const start = bg ? bg("toolPendingBg", "\u0000").split("\u0000")[0] ?? "" : "";
-    const inner = width - 2;
+    // The block starts at the pane's left edge; the focused part's accent bar takes its first column.
+    const inner = p.focused ? width - 1 : width;
     // Highlighted code resets its colors mid-line: the background opens again after each reset.
     const block = (line: string): string => bg
       ? bg("toolPendingBg", truncateToWidth(` ${line.replace(/\x1b\[0m|\x1b\[49m/gu, (m) => m + start)}`, inner, "…", true))
       : `${dim("│")} ${line}`;
-    const add = (line: string) => p.add(`${p.bar()} ${block(line)}`, { code: true });
+    const add = (line: string) => p.add(`${p.focused ? p.bar() : ""}${block(line)}`, { code: true });
     if (!open) {
       const first = all.find((l) => l.trim()) ?? "";
       const rest = all.length - 1;

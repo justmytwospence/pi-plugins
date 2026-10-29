@@ -924,7 +924,7 @@ test("n and p walk a cell's parts and Enter acts on the focused one", () => {
   const v = make(f, { setWidget: () => {} });
   try {
     // The focused part's rows carry the accent bar; there are no labels.
-    const focused = () => screen(v).split("\n").filter((l) => / │ ▌ /u.test(l) || /^│ ▌ /u.test(l)).join("\n");
+    const focused = () => screen(v).split("\n").filter((l) => / │ ▌/u.test(l) || /^│ ▌/u.test(l)).join("\n");
     expect(v.render(100).slice(3, -3).map((l) => l.split(" │ ")[1] ?? "").join("\n")).not.toMatch(/\bprinted\b/u);
     v.handleInput("n");
     expect(focused()).toContain("KeyError: k");
