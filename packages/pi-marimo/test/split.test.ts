@@ -146,6 +146,12 @@ describe("NotebookSplit", () => {
     expect(s.input(CTRL_QUOTE)).toEqual({ consume: true });
     expect(s.split.isOpen).toBe(true);
     expect(s.tui.focused).toBe(s.views[0]);
+    // The kitty protocol's release and repeat events of the same key change nothing.
+    expect(s.input("\x1b[39;5:3u")).toBeUndefined();
+    expect(s.input("\x1b[39;5:2u")).toEqual({ consume: true });
+    expect(s.split.isOpen).toBe(true);
+    expect(s.input("\x1b[93;5:3u")).toBeUndefined();
+    expect(s.tui.focused).toBe(s.views[0]);
     expect(s.input(CTRL_QUOTE)).toEqual({ consume: true });
     expect(s.split.isOpen).toBe(false);
     s.input(CTRL_QUOTE);

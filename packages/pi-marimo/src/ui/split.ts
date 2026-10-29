@@ -4,7 +4,7 @@
 // through the event `pi-plugins.side-panel.v1`: opening one closes the other.
 import { execFile } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { type Component, type TUI, type TuiMouseEvent, type TuiMouseEventResult, matchesKey } from "@earendil-works/pi-tui";
+import { type Component, type TUI, type TuiMouseEvent, type TuiMouseEventResult, isKeyRelease, isKeyRepeat, matchesKey } from "@earendil-works/pi-tui";
 import type { FrameTheme } from "../frame.ts";
 import { type LayoutTui, SplitLayout, canSplit, dividerLines, muteEditorBorders } from "./split-layout.ts";
 import type { DockedHost, NotebookView, ViewState } from "./view.js";
@@ -252,7 +252,12 @@ export class NotebookSplit {
 
   /** The terminal-input listener: ctrl+' toggles, ctrl+] and Herdr's reserved prefix+h/j/k/l keys move focus. */
   handleKey(data: string): { consume: true } | undefined {
-    if ((this.options.toggleKeys ?? toggleKeys()).some((k) => matchesKey(data, k as never))) return this.toggle();
+    // With the kitty keyboard protocol a key also arrives as its release (and repeats while held), and
+    // listeners see those before Pi filters them: acting on them would undo every toggle at once.
+    if (isKeyRelease(data)) return undefined;
+    const repeat = isKeyRepeat(data);
+    if ((this.options.toggleKeys ?? toggleKeys()).some((k) => matchesKey(data, k as never))) return repeat ? (this.isOpen ? { consume: true } : undefined) : this.toggle();
+    if (repeat && (matchesKey(data, FOCUS_KEY as never) || Object.values(NAV_KEYS).some((k) => matchesKey(data, k as never)))) return this.isOpen ? { consume: true } : undefined;
     if (!this.isOpen || this.collapsed || !this.tui) return undefined;
     if (matchesKey(data, FOCUS_KEY as never)) {
       if (this.focused) {
