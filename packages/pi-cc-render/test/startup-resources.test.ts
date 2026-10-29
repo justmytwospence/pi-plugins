@@ -113,6 +113,17 @@ describe("startup resources", () => {
     expect(sections.Extensions!.groups[1]!.items).toEqual(["bg", "todo"]);
   });
 
+  test("reads enabled MCP server names from an mcp.json", async () => {
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { readMcpServerNames } = await import("../src/feature/shell/startup-resources.ts");
+    const file = join(mkdtempSync(join(tmpdir(), "mcp-")), "mcp.json");
+    writeFileSync(file, JSON.stringify({ mcpServers: { a: {}, b: { enabled: false }, c: { enabled: true } } }));
+    expect(readMcpServerNames(file)).toEqual(["a", "c"]);
+    expect(readMcpServerNames(join(tmpdir(), "missing-mcp.json"))).toEqual([]);
+  });
+
   test("formats token counts compactly", () => {
     expect(formatTokens(210)).toBe("210");
     expect(formatTokens(1000)).toBe("1k");

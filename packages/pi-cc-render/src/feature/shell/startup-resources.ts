@@ -1,4 +1,6 @@
-import { InteractiveMode } from "@earendil-works/pi-coding-agent";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { InteractiveMode, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { config } from "../../config/config.ts";
 import { STARTUP_RESOURCES_PATCH, patchRegistry } from "../../utils/patch-keys.ts";
@@ -392,6 +394,38 @@ export function collectSections(mode: any, options?: { extensions?: any[] }): Re
 	return sections;
 }
 
+// ---- MCP servers (pi's own listing has no such section) ----
+
+/** Enabled server names in one mcp.json; empty when the file is missing or broken. */
+export function readMcpServerNames(file: string): string[] {
+	try {
+		const servers = (JSON.parse(readFileSync(file, "utf8")) as { mcpServers?: unknown })?.mcpServers;
+		if (!servers || typeof servers !== "object" || Array.isArray(servers)) return [];
+		return Object.entries(servers as Record<string, unknown>)
+			.filter(([, entry]) => entry && typeof entry === "object" && (entry as { enabled?: unknown }).enabled !== false)
+			.map(([name]) => name);
+	} catch {
+		return [];
+	}
+}
+
+/** The configured MCP servers as a section: the user's mcp.json plus the trusted project's, names once, sorted. */
+export function collectMcpSection(mode: any): ResourceSection | undefined {
+	let names: string[] = [];
+	try {
+		names = readMcpServerNames(path.join(getAgentDir(), "mcp.json"));
+		const cwd = mode?.sessionManager?.getCwd?.() as string | undefined;
+		if (cwd && mode?.settingsManager?.isProjectTrusted?.()) {
+			names.push(...readMcpServerNames(path.join(cwd, ".pi", "mcp.json")));
+		}
+	} catch {
+		return undefined;
+	}
+	const unique = [...new Set(names)].sort(compareNames);
+	if (unique.length === 0) return undefined;
+	return { title: "MCP", count: unique.length, layout: "grid", groups: [{ items: unique }] };
+}
+
 // ---- Wiring ----
 
 type StartupResourcesPatch = {
@@ -426,6 +460,18 @@ function replaceSections(mode: any, options: unknown): void {
 	const titled = children.map((child) => [child, sectionTitle(child)] as const).filter(([, t]) => t);
 	if (titled.length === 0) return;
 	const sections = collectSections(mode, options as { extensions?: any[] } | undefined);
+	const mcp = collectMcpSection(mode);
+	if (mcp) {
+		// Right after Extensions (else the last titled section), followed by the same one-line spacer pi uses.
+		const anchor = titled.find(([, title]) => title === "Extensions") ?? titled[titled.length - 1]!;
+		const at = children.indexOf(anchor[0]);
+		const component = {
+			render: (width: number) => renderSection(mcp, width, hostTheme?.() ?? PLAIN_THEME),
+			invalidate() {},
+		};
+		const spacer = { render: () => [""], invalidate() {} };
+		children.splice(at + 2, 0, component, spacer);
+	}
 	for (const [child, title] of titled) {
 		const section = sections[title!];
 		if (!section) continue;
