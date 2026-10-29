@@ -147,7 +147,9 @@ test("j/k move the cursor between cells and Enter expands its code, console and 
     expect(open).toContain("▍ hi");
     expect(open).toContain("▍ value & more");
     v.handleInput("\r");
-    expect(screen(v)).not.toContain("value & more");
+    expect(screen(v)).not.toContain("▍ value & more");
+    // Collapsed, the outline still names what it output.
+    expect(screen(v)).toContain("“value & more”");
   } finally { v.dispose(); }
 });
 
@@ -410,4 +412,280 @@ test("the keyboard pointer drives a live chart without a mouse: arrows move it, 
     expect(live.inspecting).toBe(false);
     expect(rings.at(-1)).toBeNull();
   } finally { v.dispose(); setCapabilities({ images: null, trueColor: true, hyperlinks: false } as any); }
+});
+
+// --- reading and steering: outputs, folds, mouse, help, variables, agent changes, widgets, docks ---
+const press = (v: NotebookView, keys: string) => { for (const k of keys) v.handleInput(k); };
+
+test("O shows every cell's output under it and the markdown as prose; O again goes back to the outline", () => {
+  const f = nbWith([{ id: "m", code: 'mo.md("""\n# Title\n\nSome prose here.\n""")' }, { id: "a", code: "x = 1" }]);
+  f.notebook.apply("cell-op", { cell_id: "a", status: "idle", output: { channel: "output", mimetype: "text/plain", data: "forty-two" } });
+  const v = make(f);
+  try {
+    expect(screen(v)).not.toContain("Some prose here.");
+    expect(screen(v)).toContain("“forty-two”");
+    v.handleInput("O");
+    expect(screen(v)).toContain("Some prose here.");
+    expect(screen(v)).toContain("▍ forty-two");
+    v.handleInput("j");
+    expect(screen(v)).toContain("O outline");
+  } finally { v.handleInput("O"); v.dispose(); }
+});
+
+test("an expanded table output is a grid", () => {
+  const table = `<marimo-ui-element object-id='a-0' random-id='r'><marimo-table data-data='&quot;[{&#92;&quot;city&#92;&quot;:&#92;&quot;Oslo&#92;&quot;,&#92;&quot;pop&#92;&quot;:709000}]&quot;' data-total-rows='1' data-total-columns='2' data-field-types='[[&quot;pop&quot;,[&quot;integer&quot;,&quot;int64&quot;]]]'></marimo-table></marimo-ui-element>`;
+  const f = nbWith([{ id: "a", code: "df" }]);
+  f.notebook.apply("cell-op", { cell_id: "a", status: "idle", output: { channel: "output", mimetype: "text/html", data: table } });
+  const v = make(f);
+  try {
+    expect(screen(v)).toContain("table 1×2");
+    v.handleInput("\r");
+    expect(screen(v)).toMatch(/city {2}\s*pop/u);
+    expect(screen(v)).toContain("Oslo  709000");
+    expect(screen(v)).toContain("1 of 1 rows · 2 columns");
+  } finally { v.dispose(); }
+});
+
+test("z folds the section the cursor is in, Z folds every one, [ and ] go between sections", () => {
+  const f = nbWith([{ id: "h1", code: 'mo.md("# One")' }, { id: "a", code: "a = 1" }, { id: "b", code: "b = 2" }, { id: "h2", code: 'mo.md("# Two")' }, { id: "c", code: "c = 3" }]);
+  f.notebook.apply("cell-op", { cell_id: "b", status: "idle", output: { channel: "marimo-error", mimetype: "application/vnd.marimo+error", data: [{ type: "exception", exception_type: "E", msg: "m" }] } });
+  const v = make(f);
+  try {
+    expect(screen(v)).toMatch(/● One/u);
+    v.handleInput("j");
+    v.handleInput("z");
+    const folded = screen(v);
+    expect(folded).toMatch(/● One {2}▸ 2 cells · 1 error/u);
+    expect(folded).not.toContain("○ a");
+    expect(folded).toContain("○ c");
+    v.handleInput("]");
+    expect(screen(v)).toMatch(/● Two/u);
+    v.handleInput("Z");
+    expect(screen(v)).toContain("○ a");
+    v.handleInput("Z");
+    expect(screen(v)).toMatch(/Two {2}▸ 1 cell/u);
+    expect(screen(v)).not.toContain("○ c");
+    v.handleInput("[");
+    expect(screen(v)).toMatch(/● One/u);
+  } finally { v.dispose(); }
+});
+
+test("Shift+Tab goes to the previous notebook, Tab to the next", () => {
+  const a = nbWith([{ id: "a", code: "x = 1" }]);
+  const b = nbWith([{ id: "b", code: "y = 1" }]);
+  b.attachment = { ...b.attachment, path: "/w/other.py" };
+  const v = new NotebookView(tui as any, theme2, notebookKey(a), { followed: () => [a, b], interrupt: async () => {}, openInBrowser: () => {} }, () => {});
+  try {
+    v.handleInput("\x1b[Z");
+    expect(screen(v)).toContain("Notebook other.py");
+    v.handleInput("\t");
+    expect(screen(v)).toContain("Notebook nb.py");
+  } finally { v.dispose(); }
+});
+
+test("the mouse: the wheel scrolls, a click selects a cell, a second click (or a double click) expands it", () => {
+  const f = followed();
+  const v = new NotebookView(tui as any, theme, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {} }, () => {});
+  const ev = (type: string, y: number, extra = {}) => ({ type, button: type === "wheel" ? "none" : "left", x: 10, y, screenX: 10, screenY: y, width: 100, height: 28, shift: false, alt: false, ctrl: false, ...extra }) as any;
+  try {
+    v.render(100);
+    expect(v.handleMouse(ev("wheel", 10, { wheelDelta: 3 }))).toEqual({ handled: true });
+    expect(v.render(100)[5]).toContain("cell-3");
+    expect(v.handleMouse(ev("press", 7))).toEqual({ handled: true, render: false });
+    v.handleMouse(ev("click", 7));
+    expect(screen(v)).toMatch(/● ○ cell-5/u);
+    expect(screen(v)).not.toContain("│ x = 1");
+    v.handleMouse(ev("click", 7, { clickCount: 2 }));
+    expect(screen(v)).toContain("│ x = 1");
+    // Outside the rows, and moves, are left alone.
+    expect(v.handleMouse(ev("click", 1))).toBeUndefined();
+    expect(v.handleMouse(ev("move", 7, { button: "none" }))).toBeUndefined();
+  } finally { v.dispose(); }
+});
+
+test("? lists every key and any key closes it", () => {
+  const f = nbWith([{ id: "a", code: "x = 1" }]);
+  const v = make(f);
+  try {
+    expect(screen(v)).toContain("? keys · esc back");
+    v.handleInput("?");
+    expect(screen(v)).toContain("Notebook view keys");
+    expect(screen(v)).toContain("Widgets");
+    v.handleInput("j");
+    expect(screen(v)).not.toContain("Notebook view keys");
+  } finally { v.dispose(); }
+});
+
+function dataflow(): Followed {
+  const f = nbWith([{ id: "a", code: "x = 1", name: "load" }, { id: "b", code: "y = x + 1" }, { id: "c", code: "z = y * x" }]);
+  f.notebook.apply("variables", { variables: [{ name: "x", declared_by: ["a"], used_by: ["b", "c"] }, { name: "y", declared_by: ["b"], used_by: ["c"] }, { name: "z", declared_by: ["c"], used_by: [] }] });
+  f.notebook.apply("variable-values", { variables: [{ name: "x", value: "1", datatype: "int" }] });
+  return f;
+}
+
+test("v lists the variables; Enter goes to the cell that defines one, > to the first that uses it", () => {
+  const f = dataflow();
+  const v = make(f);
+  try {
+    v.handleInput("v");
+    const pane = screen(v);
+    expect(pane).toMatch(/● x\s+int\s+1\s+← load · 2 uses/u);
+    expect(pane).toMatch(/ y\s+.*← b · 1 use/u);
+    v.handleInput("j");
+    v.handleInput("\r");
+    expect(screen(v)).toMatch(/● ○ b/u);
+    v.handleInput("v");
+    v.handleInput("g");
+    v.handleInput(">");
+    expect(screen(v)).toMatch(/● ○ b/u);
+    v.handleInput("\r");
+    expect(screen(v)).toContain("⇄ uses x ← load · used by c");
+    expect(screen(v)).not.toContain("= x (int)");
+  } finally { v.dispose(); }
+});
+
+test("< and > follow the dataflow up and down", () => {
+  const f = dataflow();
+  const v = make(f);
+  try {
+    v.handleInput("G");
+    v.handleInput("<");
+    expect(screen(v)).toMatch(/● ○ b/u);
+    v.handleInput("<");
+    expect(screen(v)).toMatch(/● ○ load/u);
+    v.handleInput("<");
+    expect(screen(v)).toContain("No upstream cell.");
+    v.handleInput(">");
+    expect(screen(v)).toMatch(/● ○ b/u);
+  } finally { v.dispose(); }
+});
+
+test("the agent's changes since the last prompt: marked, counted, c jumps to them, d shows the diff, removed cells listed", () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  try {
+    vi.setSystemTime(1_000_000);
+    const f = nbWith([{ id: "a", code: "x = 1" }, { id: "b", code: "y = x + 1" }, { id: "c", code: "z = 3" }]);
+    vi.setSystemTime(1_010_000);
+    f.notebook.apply("notebook-document-transaction", { transaction: { source: "code-mode", changes: [{ type: "set-code", cellId: "b", code: "y = x + 2" }, { type: "delete-cell", cellId: "c" }] } });
+    const v = make(f);
+    try {
+      const text = screen(v);
+      expect(text).toMatch(/○ b .*changed by the agent/u);
+      expect(text).toContain("agent: 1 changed · 1 removed");
+      expect(text).toContain("Removed by the agent since your last message");
+      expect(text).toMatch(/✗ c {2}z = 3/u);
+      v.handleInput("c");
+      expect(screen(v)).toMatch(/● ○ b/u);
+      v.handleInput("d");
+      const diff = screen(v);
+      expect(diff).toMatch(/-\s*\d+ y = x \+ 1/u);
+      expect(diff).toMatch(/\+\s*\d+ y = x \+ 2/u);
+      v.handleInput("k");
+      v.handleInput("d");
+      expect(screen(v)).toContain("The agent has not changed this cell since your last message.");
+    } finally { v.dispose(); }
+  } finally { vi.useRealTimers(); }
+});
+
+const widgetHtml = [
+  "<marimo-ui-element object-id='a-0' random-id='1'><marimo-slider data-initial-value='3' data-label='&quot;n&quot;' data-start='0' data-stop='10' data-steps='[]'></marimo-slider></marimo-ui-element>",
+  "<marimo-ui-element object-id='a-1' random-id='2'><marimo-checkbox data-initial-value='true' data-label='&quot;on&quot;'></marimo-checkbox></marimo-ui-element>",
+  "<marimo-ui-element object-id='a-2' random-id='3'><marimo-text data-initial-value='&quot;hi&quot;' data-label='&quot;t&quot;'></marimo-text></marimo-ui-element>",
+].join("");
+
+test("w drives a cell's widgets: h/l change a slider, space a checkbox, Enter types a text's value", () => {
+  const f = nbWith([{ id: "a", code: "n = mo.ui.slider(0, 10)" }]);
+  f.notebook.apply("cell-op", { cell_id: "a", status: "idle", output: { channel: "output", mimetype: "text/html", data: widgetHtml } });
+  const setWidget = vi.fn((g: Followed, cell: any, w: any, value: unknown) => g.notebook.setUserValue(cell.id, w.objectId, w.label, value));
+  const v = make(f, { setWidget });
+  try {
+    expect(screen(v)).toMatch(/◆ n {2}━+●─+ {2}3 {2}0–10/u);
+    expect(screen(v)).toContain("w widgets");
+    v.handleInput("w");
+    expect(screen(v)).toContain("widget: h/l change");
+    v.handleInput("l");
+    expect(setWidget).toHaveBeenLastCalledWith(f, expect.objectContaining({ id: "a" }), expect.objectContaining({ objectId: "a-0" }), 4);
+    expect(screen(v)).toMatch(/▸ n {2}━+●─+ {2}4 {2}0–10/u);
+    v.handleInput("j");
+    v.handleInput(" ");
+    expect(setWidget).toHaveBeenLastCalledWith(f, expect.anything(), expect.objectContaining({ objectId: "a-1" }), false);
+    v.handleInput("j");
+    v.handleInput("\r");
+    expect(v[INPUT_CONTEXT]()).toBe("editor");
+    press(v, "!");
+    v.handleInput("\r");
+    expect(setWidget).toHaveBeenLastCalledWith(f, expect.anything(), expect.objectContaining({ objectId: "a-2" }), "hi!");
+    expect(v[INPUT_CONTEXT]()).toBe("viewer");
+    v.handleInput("\x1b");
+    expect(screen(v)).not.toContain("widget: h/l change");
+  } finally { v.dispose(); }
+});
+
+test("a asks the agent about the cell from a prompt docked in the view", () => {
+  const f = nbWith([{ id: "a", code: "x = 1", name: "load" }]);
+  const ask = vi.fn();
+  const v = make(f, { ask, agentBusy: () => true });
+  try {
+    v.handleInput("a");
+    expect(v[INPUT_CONTEXT]()).toBe("editor");
+    const open = screen(v);
+    expect(open).toContain("Ask the agent about load in nb.py");
+    expect(open).toContain("the agent is working: this goes in as a follow-up");
+    for (const width of [46, 120]) for (const l of v.render(width)) expect(visibleWidth(l)).toBeLessThanOrEqual(width);
+    press(v, "why?");
+    v.handleInput("\r");
+    expect(ask).toHaveBeenCalledExactlyOnceWith(f, expect.objectContaining({ id: "a" }), "why?");
+    expect(v[INPUT_CONTEXT]()).toBe("viewer");
+    expect(screen(v)).toContain("Sent to the agent.");
+  } finally { v.dispose(); }
+});
+
+test(": runs Python in the kernel and shows what it printed and returned", async () => {
+  const f = nbWith([{ id: "a", code: "x = 1" }]);
+  const scratch = vi.fn(async (_f: Followed, _code: string, onEvent: (e: any) => void) => {
+    onEvent({ stream: "stdout", text: "two" });
+    onEvent({ stream: "stderr", text: "careful" });
+    return { success: true, output: { mimetype: "text/plain", data: "'ok'" } };
+  });
+  const v = make(f, { scratch });
+  try {
+    v.handleInput(":");
+    expect(screen(v)).toContain("Python in nb.py's kernel");
+    press(v, "1+1");
+    v.handleInput("\r");
+    expect(scratch).toHaveBeenCalledWith(f, "1+1", expect.any(Function), expect.any(AbortSignal));
+    await new Promise((r) => setTimeout(r, 0));
+    const text = screen(v);
+    expect(text).toContain(">>> 1+1");
+    expect(text).toContain("two");
+    expect(text).toContain("careful");
+    expect(text).toContain("'ok'");
+    v.handleInput("\x1b");
+    expect(screen(v)).not.toContain(">>> 1+1");
+  } finally { v.dispose(); }
+});
+
+test("m marks the cell for the agent through Lens (or says there is none), M twice removes its mark", async () => {
+  const f = nbWith([{ id: "a", code: "x = 1" }]);
+  const mark = vi.fn(async () => "S1");
+  const unmark = vi.fn(async () => {});
+  const v = make(f, { mark, unmark });
+  try {
+    v.handleInput("m");
+    expect(screen(v)).toContain("No Lens in this notebook");
+    const lensState = (selections: unknown[]) => ({ revision: selections.length, nextLabel: `S${selections.length + 1}`, currentSelectionId: null, selections, history: [] });
+    f.notebook.apply("model-lifecycle", { model_id: "m1", message: { method: "open", state: { _state: lensState([]), _lens_id: "l" } } });
+    v.handleInput("m");
+    expect(screen(v)).toContain("Note for the agent on a (Lens S1)");
+    press(v, "look");
+    v.handleInput("\r");
+    expect(mark).toHaveBeenCalledExactlyOnceWith(f, expect.objectContaining({ id: "a" }), "look");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen(v)).toContain("Marked S1.");
+    f.notebook.apply("model-lifecycle", { model_id: "m1", message: { method: "update", state: { _state: lensState([{ id: "sel-1", label: "S1", note: "look", target: { kind: "notebook", cellIds: ["a"] } }]) } } });
+    v.handleInput("M");
+    expect(screen(v)).toContain("M again removes S1");
+    v.handleInput("M");
+    expect(unmark).toHaveBeenCalledExactlyOnceWith(f, "sel-1");
+  } finally { v.dispose(); }
 });

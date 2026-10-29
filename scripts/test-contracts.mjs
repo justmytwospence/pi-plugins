@@ -16,7 +16,7 @@ const identical = [
   ['pi-auto-effort','pi-next-prompt','pi-tool-gate','pi-marimo'].map(p => `packages/${p}/src/config.ts`),
   ['pi-copy','pi-subagents'].map(p => `packages/${p}/src/config.ts`),
   ['pi-ask-user-question','pi-copy','pi-tool-gate'].map(p => `packages/${p}/src/herdr.ts`),
-  ['pi-plan-mode','pi-compact-plan'].map(p => `packages/${p}/src/editor-contract.ts`),
+  ['pi-plan-mode','pi-compact-plan','pi-marimo'].map(p => `packages/${p}/src/editor-contract.ts`),
   ['pi-plan-mode','pi-compact-plan'].map(p => `packages/${p}/src/herdr-blocked.ts`),
   ['pi-plan-mode','pi-compact-plan'].map(p => `packages/${p}/src/review-card.ts`),
   ['packages/pi-cc-render/src/renderer/tool/bash-layout.ts','packages/pi-tool-gate/src/bash-layout.ts'],

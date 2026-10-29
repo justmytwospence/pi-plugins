@@ -1,37 +1,53 @@
-// A notebook, full screen (frame.ts): a header (kernel state, cell counts, last run, the server),
-// then the outline (headings) with one line per code cell, its status, what it defines, and its
-// error, live. It follows the running cell until you move.
-//   j/k or ↑↓ move the cursor between cells; ^U/^D, PgUp/PgDn scroll; g/G first/last cell;
-//   Enter or l expands the cell under the cursor (its code, console and output); n/N jump to the
-//   next/previous failed cell; f follows the running cell again; / filters cells by name, variable
-//   or code (Esc clears); r runs the cell, R every stale cell, A every cell (the last two need
-//   pressing twice); x twice interrupts the kernel; o opens the notebook in the browser;
-//   Tab goes to the next followed notebook; Esc, q, ← or h goes back.
-import { type Component, Image, type TUI, type TuiMouseEvent, type TuiMouseEventResult, getCapabilities, matchesKey, visibleWidth } from "@earendil-works/pi-tui";
+// A notebook, full screen (frame.ts), where you read and steer it. A header (kernel state, cell
+// counts, the agent's changes, the server), then the notebook (rows.ts): the outline with one line
+// per code cell, or (`O`) every cell's output under it with the markdown as prose. It follows the
+// running cell until you move. Keys (also `?`):
+//   j/k move between cells, [ ] between sections, z/Z fold; Enter/l expands a cell (code, dataflow,
+//   console, output); n/N errors, c/C the agent's changes, d its diff; < > upstream/downstream;
+//   / filters; v lists the variables; r/R/A run cells, x twice interrupts; w drives the cell's
+//   widgets; : runs Python in the kernel; a asks the agent about the cell; m marks it for the agent
+//   (Lens), M twice removes a mark; i drives an expanded live chart; o opens the browser; S twice
+//   stops the server; Tab/Shift+Tab switch notebooks; Esc, q, ← or h goes back. The mouse wheel
+//   scrolls, a click selects, a double click expands.
+// The prompts (ask, Python, a Lens note, a widget's value) dock at the bottom (dock.ts).
+import { type Component, type TUI, type TuiMouseEvent, type TuiMouseEventResult, matchesKey, visibleWidth } from "@earendil-works/pi-tui";
 import { basename } from "../core/io.js";
-import type { CellOutput } from "../core/output.js";
-import { ChartRenderer, VegaRenderer as VegaRendererImpl, type VegaRenderer } from "../core/vega.js";
+import { type ChartRenderer, VegaRenderer as VegaRendererImpl, type VegaRenderer } from "../core/vega.js";
 import { sharedPlotly } from "../core/plotly.js";
-import { LiveCharts, type LiveRect, liveGeometry } from "./live-charts.js";
+import { LiveCharts } from "./live-charts.js";
 import { Painter } from "./painter.js";
-import type { Geometry } from "../core/live.js";
-import type { Cell, NotebookState } from "../core/notebook.js";
+import { type Cell, truncate } from "../core/notebook.js";
+import { summarizeOutput, type Widget } from "../core/output.js";
 import { elapsed } from "../core/render.js";
-import { truncate } from "../core/notebook.js";
 import type { Followed } from "../core/watcher.js";
 import { kernelStateParts, lensParts } from "../bg.js";
 import { INPUT_CONTEXT } from "../activity.js";
 import { interruptKey, notebookKey, notebookPath } from "./identity.js";
 import { banner, bottom, row as frameRow, rule as frameRule, type FrameTheme } from "../frame.ts";
+import type { EditorFactoryFn } from "../editor-contract.ts";
+import { Dock, type DockSpec } from "./dock.js";
+import { helpLines } from "./help.js";
+import { PAD } from "./outputs.js";
+import { MAX_WIDGETS, type Row, cellLabel, firstLine, foldedCells, notebookRows, selectableCells } from "./rows.js";
+import type { ScratchEvent, ScratchResult } from "./scratch.js";
+import { tableLines } from "./table.js";
+import { variableList, variableRows } from "./variables.js";
+import { type WidgetAction, nextValue, typeable, typedValue, widgetValue } from "./widgets.js";
+
+export { lensSection, notebookLines, notebookRows, selectableCells, type Row, type RowOptions } from "./rows.js";
 
 /** Banner, three header lines, two rules, hints, bottom border. */
 const CHROME = 8;
-/** How much of an expanded cell shows: its code, its output. */
-const MAX_CODE_LINES = 40;
-const MAX_OUTPUT_LINES = 30;
 const TICK_MS = 1_000;
-/** The column a cell's image starts at: the frame's border and space, then the cell's six-space indent, bar and space. */
-const LIVE_LEFT = 2 + 6 + 2;
+/** The row the notebook starts at: banner, three header lines, a rule. */
+const ROWS_TOP = 5;
+/** The column a cell's image starts at: the frame's border and space, then the cell's indent, bar and space. */
+const LIVE_LEFT = 2 + PAD.length + 2;
+/** Lines of a scratch run shown above its prompt, at most. */
+const SCRATCH_ROWS = 12;
+
+/** Outline or every output: the choice holds for the rest of the Pi process. */
+let outputsMode: boolean | undefined;
 
 export interface ViewActions {
   /** The notebooks followed now. */
@@ -40,203 +56,44 @@ export interface ViewActions {
   openInBrowser(f: Followed): void;
   /** Runs these cells (id and current code) in the notebook's kernel. */
   run?(f: Followed, cells: Array<{ id: string; code: string }>): Promise<void>;
-  /** The pi-bg servers standing for this notebook. */
+  /** The servers standing for this notebook (pi-bg's, and one Pi started). */
   servers?(f: Followed): string[];
-  /** Asks pi-bg to stop the servers standing for this notebook; how many. */
+  /** Stops the servers standing for this notebook; how many. */
   stopServers?(f: Followed): number;
   /** How the notebook's last run went: `ran 2m 3s · 1 error · 5m ago`. */
   lastRun?(f: Followed): string | undefined;
+  /** Whether the main agent is working now. */
+  agentBusy?(): boolean;
+  /** Sends the main agent a message about the notebook (and the cell). */
+  ask?(f: Followed, cell: Cell | undefined, text: string): void;
+  /** Runs Python in the notebook's kernel, streaming what it prints. */
+  scratch?(f: Followed, code: string, onEvent: (e: ScratchEvent) => void, signal: AbortSignal): Promise<ScratchResult>;
+  /** Sets one of a cell's widgets. */
+  setWidget?(f: Followed, cell: Cell, widget: Widget, value: unknown): void;
+  /** Marks a cell for the agent as a Lens selection; resolves with its label. */
+  mark?(f: Followed, cell: Cell, note: string): Promise<string>;
+  /** Removes a Lens selection. */
+  unmark?(f: Followed, selectionId: string): Promise<void>;
   /** Run Plotly figures live (default); false draws them as pictures. */
   liveCharts?: boolean;
+  /** Start with every cell's output shown. */
+  outputs?: boolean;
+  /** Pi's keybindings and the suite's editor, for the docked prompts. */
+  keybindings?: unknown;
+  editorFactory?: EditorFactoryFn;
 }
 
-const firstLine = (code: string) => code.split("\n").find((l) => l.trim())?.trim() ?? "";
-
-/** One display line; a cell's own line carries its id. */
-export interface Row {
-  text: string;
-  cell?: string;
-  /** One line of an inline image: its place in the block, the block's height, and what shows when the block is not fully on screen. */
-  image?: { index: number; height: number; alt: string; live?: { output: CellOutput; geometry: Geometry } };
+interface ScratchState {
+  code: string;
+  lines: ScratchEvent[];
+  result?: ScratchResult;
+  error?: string;
+  running: boolean;
+  started: number;
+  abort: AbortController;
 }
 
-/** Cells the inline image of an output may be wide, and high at most. */
-const IMAGE_WIDTH = 60;
-const IMAGE_ROWS = 14;
-const images = new WeakMap<CellOutput, Image>();
-
-export interface RowOptions {
-  cursor?: string | undefined;
-  expanded?: ReadonlySet<string>;
-  filter?: string;
-  /** Draw image outputs inline with at most this many rows (default: when the terminal shows images, 14; 0 never). */
-  imageRows?: number;
-  /** The width the view draws at, for sizing images. */
-  width?: number;
-  /** Turns Vega-Lite chart outputs into images; `onVega` runs when one finishes. */
-  vega?: VegaRenderer;
-  plotly?: ChartRenderer;
-  /** Runs charts live in a browser page the mouse can drive; a chart it cannot run falls back to the static image. */
-  live?: LiveCharts;
-  onVega?: () => void;
-}
-
-/** The code cells the cursor can stand on: every one, or those matching the filter (name, variables, code). */
-export function selectableCells(nb: NotebookState, filter = ""): Cell[] {
-  const q = filter.trim().toLowerCase();
-  return nb.ordered().filter((c) => {
-    if (nb.isMarkdown(c)) return false;
-    if (!q) return true;
-    return [c.name, c.id, ...(nb.defs.get(c.id) ?? []), c.code, c.error ?? ""].some((t) => t.toLowerCase().includes(q));
-  });
-}
-
-const clean = (line: string) => line.replace(/\x1b\[[0-9;?]*[A-Za-z]/gu, "").replace(/\t/gu, "    ").replace(/[\x00-\x08\x0b-\x1f\x7f]/gu, "");
-
-/** An image output as rows: the first carries the terminal's image sequence, the rest are empty rows it covers. */
-function inlineImage(output: CellOutput, theme: FrameTheme, pad: string, opts: RowOptions): Row[] | undefined {
-  const maxRows = Math.min(IMAGE_ROWS, opts.imageRows ?? IMAGE_ROWS);
-  if (maxRows < 2 || !output.image) return undefined;
-  let img = images.get(output);
-  if (!img) {
-    img = new Image(output.image.data, output.image.mime, { fallbackColor: (t) => theme.fg("dim", t) }, { maxWidthCells: IMAGE_WIDTH, maxHeightCells: maxRows });
-    images.set(output, img);
-  }
-  const lines = img.render(Math.max(10, Math.min(IMAGE_WIDTH + 2, (opts.width ?? 80) - 12)));
-  if (!lines.some((l) => l.includes("\x1b_G"))) return undefined;
-  const bar = `${pad}${theme.fg("accent", "▍")} `;
-  const alt = `${bar}${theme.fg("dim", "[image png: scroll until it fits on screen]")}`;
-  return lines.map((line, index) => ({ text: index === 0 ? `${bar}${line}` : bar.trimEnd(), image: { index, height: lines.length, alt } }));
-}
-
-/** The expanded part of a cell: its code, what it printed, what it output. */
-function expandedRows(cell: Cell, theme: FrameTheme, opts: RowOptions = {}): Array<string | Row> {
-  const out: Array<string | Row> = [];
-  const pad = "      ";
-  const code = cell.code.replace(/\s+$/u, "").split("\n");
-  for (const line of code.slice(0, MAX_CODE_LINES)) out.push(`${pad}${theme.fg("dim", "│")} ${clean(line)}`);
-  if (code.length > MAX_CODE_LINES) out.push(`${pad}${theme.fg("dim", `│ … ${code.length - MAX_CODE_LINES} more lines`)}`);
-  const printed = cell.console ?? [];
-  for (const l of printed) out.push(`${pad}${theme.fg("dim", "▍")} ${l.stream === "stderr" ? theme.fg("warning", clean(l.text)) : clean(l.text)}`);
-  const output = cell.output;
-  let chartNote: string | undefined;
-  let whyStatic: string | undefined;
-  if (output?.plotly) {
-    const images = getCapabilities().images;
-    if (!images) whyStatic = undefined;
-    else if (!opts.live) whyStatic = "live charts are off";
-    else if (images !== "kitty") whyStatic = `this terminal reports images=${String(images)}, live charts need kitty`;
-    else if ((opts.imageRows ?? IMAGE_ROWS) < 4) whyStatic = "the view is too short";
-  }
-  if (output?.plotly && opts.live && getCapabilities().images && !whyStatic) {
-    const geometry = liveGeometry(Math.min(IMAGE_WIDTH, (opts.width ?? 80) - 12), Math.min(IMAGE_ROWS, opts.imageRows ?? IMAGE_ROWS));
-    const state = opts.live.state(output, output.plotly, geometry);
-    if (state.status === "ready") {
-      const bar = `${pad}${theme.fg("accent", "▍")} `;
-      const alt = `${bar}${theme.fg("dim", "[chart: scroll until it fits on screen]")}`;
-      const lines = opts.live.lines(state);
-      out.push(...lines.map((line, index): Row => ({ text: index === 0 ? `${bar}${line}` : bar.trimEnd(), image: { index, height: lines.length, alt, live: { output, geometry: state.geometry } } })));
-      return out;
-    }
-    if (state.status === "opening") chartNote = "[chart: starting…]";
-    else whyStatic = `live chart failed: ${state.reason.slice(0, 120)}`;
-  }
-  if (whyStatic) out.push(`${pad}${theme.fg("warning", "▍")} ${theme.fg("warning", `static image (${whyStatic})`)}`);
-  const chart = output?.vega ? { spec: output.vega, via: opts.vega } : output?.plotly ? { spec: output.plotly, via: opts.plotly } : undefined;
-  if (output && chart?.via && !output.image && !(chartNote && output.plotly) && getCapabilities().images && (opts.imageRows ?? IMAGE_ROWS) >= 2) {
-    const state = chart.via.request(chart.spec, opts.onVega ?? (() => undefined));
-    if (state.status === "ready") output.image = { mime: "image/png", data: state.png };
-    else chartNote = state.status === "rendering" ? "[chart: drawing…]" : `[chart: could not draw (${state.reason.slice(0, 80)}); o opens the notebook]`;
-  }
-  const inline = output?.image && getCapabilities().images ? inlineImage(output, theme, pad, opts) : undefined;
-  if (inline) out.push(...inline);
-  else if (output) {
-    const text = output.kind === "text" || output.kind === "other" ? output.text : theme.fg("dim", chartNote ?? output.text);
-    const lines = text.split("\n");
-    for (const line of lines.slice(0, MAX_OUTPUT_LINES)) out.push(`${pad}${theme.fg("accent", "▍")} ${clean(line)}`);
-    if (lines.length > MAX_OUTPUT_LINES) out.push(`${pad}${theme.fg("dim", `▍ … ${lines.length - MAX_OUTPUT_LINES} more lines`)}`);
-  } else if (!printed.length && !cell.error) {
-    out.push(`${pad}${theme.fg("dim", cell.status === "idle" && !cell.lastRunCode ? "▍ (not run)" : "▍ (no output)")}`);
-  }
-  return out;
-}
-
-/** The notebook as rows: headings, then a line per code cell (its error under it, its code and output when expanded). */
-export function notebookRows(nb: NotebookState, theme: FrameTheme, now: number, opts: RowOptions = {}): { rows: Row[]; running?: number; cellRows: Map<string, number> } {
-  const filtering = !!opts.filter?.trim();
-  const rows: Row[] = (filtering ? [] : lensSection(nb, theme)).map((text) => ({ text }));
-  const shown = new Set(selectableCells(nb, opts.filter).map((c) => c.id));
-  const cellRows = new Map<string, number>();
-  let running: number | undefined;
-  // Each cell's open Lens selections, tagged on its row.
-  const marks = new Map<string, string[]>();
-  for (const s of nb.lens.selections()) for (const id of s.cells) marks.set(id, [...marks.get(id) ?? [], s.label]);
-  const icon = (c: Cell) =>
-    c.status === "running"
-      ? theme.fg("accent", "●")
-      : c.error || c.blocked
-        ? theme.fg("error", "✗")
-        : c.status === "queued"
-          ? theme.fg("muted", "◌")
-          : c.stale || nb.edited(c)
-            ? theme.fg("warning", "○")
-            : theme.fg("dim", "○");
-  for (const cell of nb.ordered()) {
-    const headings = nb.headings(cell);
-    if (!filtering) for (const h of headings) rows.push({ text: `${"  ".repeat(Math.max(0, h.level - 1))}${h.level === 1 ? theme.bold(theme.fg("accent", h.text)) : theme.bold(h.text)}` });
-    if (nb.isMarkdown(cell) || !shown.has(cell.id)) continue;
-    const notes: string[] = [];
-    if (cell.status === "running") notes.push(theme.fg("accent", `running${cell.runningSince ? ` ${elapsed(now - cell.runningSince)}` : ""}`));
-    else if (cell.status === "queued") notes.push(theme.fg("muted", "queued"));
-    if (cell.blocked) notes.push(theme.fg("error", "not run: an ancestor failed"));
-    if (cell.disabled) notes.push(theme.fg("dim", "disabled"));
-    if (cell.stale) notes.push(theme.fg("warning", "stale"));
-    if (nb.edited(cell)) notes.push(theme.fg("warning", "edited, not rerun"));
-    const defs = nb.defs.get(cell.id) ?? [];
-    const label = cell.name !== "_" ? cell.name : cell.id;
-    const what = defs.length ? `→ ${truncate(defs.join(", "), 80)}` : theme.fg("dim", truncate(firstLine(cell.code) || "(empty)", 80));
-    if (cell.status === "running") running = rows.length;
-    const marked = marks.get(cell.id);
-    const here = opts.cursor === cell.id;
-    const open = opts.expanded?.has(cell.id);
-    cellRows.set(cell.id, rows.length);
-    rows.push({
-      cell: cell.id,
-      text: `${here ? theme.fg("accent", "●") : open ? theme.fg("dim", "▾") : " "} ${icon(cell)} ${here ? theme.bold(label) : theme.fg("muted", label)}${marked ? ` ${theme.fg("warning", marked.join(" "))}` : ""}  ${what}${notes.length ? `  ${notes.join(theme.fg("dim", " · "))}` : ""}`,
-    });
-    if (cell.error) rows.push({ text: `      ${theme.fg("error", truncate(cell.error, 200))}` });
-    if (open) for (const r of expandedRows(cell, theme, opts)) rows.push(typeof r === "string" ? { text: r } : r);
-  }
-  return { rows, ...(running !== undefined ? { running } : {}), cellRows };
-}
-
-/** The notebook as display lines (see notebookRows). */
-export function notebookLines(nb: NotebookState, theme: FrameTheme, now: number, opts: RowOptions = {}): { lines: string[]; running?: number } {
-  const { rows, running } = notebookRows(nb, theme, now, { ...opts, imageRows: 0 });
-  return { lines: rows.map((r) => r.text), ...(running !== undefined ? { running } : {}) };
-}
-
-/** Open marimo-lens selections (label, note, where, image) and the latest addressed ones, above the outline. */
-export function lensSection(nb: NotebookState, theme: FrameTheme): string[] {
-  const open = nb.lens.selections();
-  const history = nb.lens.history().slice(-3);
-  if (!open.length && !history.length) return [];
-  const current = nb.lens.current()?.id;
-  const where = (cells: string[]) => cells.map((id) => {
-    const c = nb.cells.get(id);
-    return c && c.name !== "_" ? c.name : id;
-  }).join(", ");
-  const lines = [theme.bold(theme.fg("accent", "Lens"))];
-  for (const s of open) {
-    const meta = [where(s.cells), s.image && s.image !== "available" ? `image ${s.image}` : "", s.previous !== undefined ? "reopened" : ""].filter(Boolean).join(" \u00b7 ");
-    lines.push(`  ${theme.fg("warning", s.label)}${s.id === current ? theme.fg("dim", "*") : " "} ${s.note ? truncate(s.note.replace(/\s+/g, " "), 120) : theme.fg("dim", s.what ?? "(no note)")}${meta ? `  ${theme.fg("dim", meta)}` : ""}`);
-  }
-  for (const h of history) {
-    lines.push(`  ${theme.fg("success", "\u2713")} ${theme.fg("dim", h.label)} ${theme.fg("dim", truncate(h.summary ?? h.note ?? "", 120))}`);
-  }
-  lines.push("");
-  return lines;
-}
+const message = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 export class NotebookView implements Component {
   private scroll = 0;
@@ -253,8 +110,24 @@ export class NotebookView implements Component {
   private armedRun: { what: "stale" | "all"; target: string } | undefined;
   /** `S` waits for a second press, like `x`. */
   private armedStop: string | undefined;
+  /** `M` waits for a second press: the selection it removes. */
+  private armedUnmark: { id: string; label: string } | undefined;
   private note: string | undefined;
   private closed = false;
+  private mode: "cells" | "variables" = "cells";
+  private outputs: boolean;
+  private folded = new Set<string>();
+  private diffs = new Set<string>();
+  private varCursor: string | undefined;
+  private varFilter = "";
+  /** The widget the keys drive. */
+  private widget: { cell: string; index: number; sub: number } | undefined;
+  private help = false;
+  private dock: Dock | undefined;
+  private scratch: ScratchState | undefined;
+  private lastRows: Row[] = [];
+  private lastPage = 0;
+  private lastDock = 0;
   private readonly vega: VegaRenderer;
   private readonly plotly: ChartRenderer;
   private readonly live: LiveCharts;
@@ -272,6 +145,7 @@ export class NotebookView implements Component {
   ) {
     this.vega = vega;
     this.plotly = plotly;
+    this.outputs = outputsMode ?? actions.outputs ?? false;
     this.live = live ?? new LiveCharts(() => { if (!this.closed) this.tui.requestRender(); }, undefined, undefined, undefined, () => Painter.for(this.tui), "overlay");
     Painter.for(this.tui)?.setExclusive(true);
     this.tui.requestRender();
@@ -293,23 +167,24 @@ export class NotebookView implements Component {
     if (!f || f.connection !== "connected" || (!f.notebook.running() && f.notebook.queued() === 0) || interruptKey(f) !== this.armedTarget) this.armedTarget = undefined;
     if (!f || interruptKey(f) !== this.armedStop) this.armedStop = undefined;
     if (!f || f.connection !== "connected" || (this.armedRun && this.armedRun.target !== interruptKey(f))) this.armedRun = undefined;
+    if (!f || (this.armedUnmark && !f.notebook.lens.selections().some((s) => s.id === this.armedUnmark!.id))) this.armedUnmark = undefined;
   }
 
   private viewport(): number {
-    return Math.max(3, this.tui.terminal.rows - CHROME);
+    return Math.max(3, this.tui.terminal.rows - CHROME - this.lastDock);
   }
 
-  /** Read-only scrolling content: global listeners leave its keys alone (typing a filter takes them). */
-  [INPUT_CONTEXT](): "viewer" | "filter" {
-    return this.typing ? "filter" : "viewer";
+  /** Read-only scrolling content: global listeners leave its keys alone (a filter or a docked prompt takes them). */
+  [INPUT_CONTEXT](): "viewer" | "filter" | "editor" {
+    return this.dock ? "editor" : this.typing ? "filter" : "viewer";
   }
 
   private cells(f: Followed): Cell[] {
-    return selectableCells(f.notebook, this.filter);
+    return selectableCells(f.notebook, this.filter, { outputs: this.outputs, folded: this.folded });
   }
 
   /** Move the cursor to the next/previous selectable cell that passes `want` (wrapping). */
-  private step(f: Followed, by: 1 | -1, want: (c: Cell) => boolean = () => true): void {
+  private step(f: Followed, by: 1 | -1, want: (c: Cell) => boolean = () => true, none = "No such cell."): void {
     const cells = this.cells(f);
     if (!cells.length) return;
     const at = Math.max(0, cells.findIndex((c) => c.id === (this.cursor ?? cells[0]!.id)));
@@ -322,7 +197,7 @@ export class NotebookView implements Component {
         return;
       }
     }
-    this.note = "No such cell.";
+    this.note = none;
   }
 
   private cursorCell(f: Followed): Cell | undefined {
@@ -330,8 +205,18 @@ export class NotebookView implements Component {
     return cells.find((c) => c.id === this.cursor) ?? cells[0];
   }
 
-  private label(c: Cell): string {
-    return c.name !== "_" ? c.name : c.id;
+  /** Put the cursor on a cell, opening the fold that hides it. */
+  private goTo(f: Followed, id: string): void {
+    const head = foldedCells(f.notebook, this.folded).get(id);
+    if (head) this.folded.delete(head);
+    // A fold inside the opened one may still hide it.
+    const inner = foldedCells(f.notebook, this.folded).get(id);
+    if (inner) this.folded.delete(inner);
+    this.filter = "";
+    this.mode = "cells";
+    this.cursor = id;
+    this.follow = false;
+    this.reveal = true;
   }
 
   private startRun(f: Followed, cells: Cell[], what: string): void {
@@ -350,30 +235,299 @@ export class NotebookView implements Component {
     this.note = `Running ${what}…`;
     this.actions.run(f, cells.map((c) => ({ id: c.id, code: c.code }))).then(
       () => { if (!this.closed) { this.note = `Started ${what}.`; this.follow = true; this.tui.requestRender(); } },
-      (e: unknown) => { if (!this.closed) { this.note = `Could not run: ${e instanceof Error ? e.message : String(e)}`; this.tui.requestRender(); } },
+      (e: unknown) => { if (!this.closed) { this.note = `Could not run: ${message(e)}`; this.tui.requestRender(); } },
     );
   }
 
   private typeFilter(data: string): void {
+    const vars = this.mode === "variables";
+    let text = vars ? this.varFilter : this.filter;
     if (matchesKey(data, "escape")) {
-      this.filter = "";
+      text = "";
       this.typing = false;
     } else if (matchesKey(data, "enter")) this.typing = false;
-    else if (matchesKey(data, "backspace")) this.filter = this.filter.slice(0, -1);
-    else if (!data.startsWith("\x1b") && data >= " ") this.filter += data;
-    this.cursor = undefined;
+    else if (matchesKey(data, "backspace")) text = text.slice(0, -1);
+    else if (!data.startsWith("\x1b") && data >= " ") text += data;
+    if (vars) {
+      this.varFilter = text;
+      this.varCursor = undefined;
+    } else {
+      this.filter = text;
+      this.cursor = undefined;
+    }
     this.scroll = 0;
     this.follow = false;
     this.reveal = true;
     this.tui.requestRender();
   }
 
+  /** Moves to the next (or previous) followed notebook, starting it afresh. */
+  private switchNotebook(by: 1 | -1): void {
+    const all = this.actions.followed();
+    const i = all.findIndex((o) => notebookKey(o) === this.key);
+    const next = all[((i + by) % Math.max(1, all.length) + all.length) % Math.max(1, all.length)];
+    if (!next || notebookKey(next) === this.key) return;
+    this.key = notebookKey(next);
+    this.scroll = 0;
+    this.follow = true;
+    this.cursor = undefined;
+    this.filter = "";
+    this.varFilter = "";
+    this.varCursor = undefined;
+    this.folded.clear();
+    this.diffs.clear();
+    this.widget = undefined;
+  }
+
+  // --- docked prompts -------------------------------------------------------------------------
+
+  private openDock(spec: DockSpec): void {
+    this.dock?.dispose();
+    this.dock = new Dock(this.tui, this.theme, spec, this.actions.editorFactory, this.actions.keybindings);
+    this.note = undefined;
+  }
+
+  private closeDock(): void {
+    this.dock?.dispose();
+    this.dock = undefined;
+    if (!this.scratch?.running) this.scratch = undefined;
+  }
+
+  private openAsk(f: Followed): void {
+    const ask = this.actions.ask;
+    if (!ask) { this.note = "Not available here."; return; }
+    const cell = this.cursorCell(f);
+    const file = basename(f.attachment.path);
+    const busy = this.actions.agentBusy?.() === true;
+    this.openDock({
+      kind: "ask",
+      title: cell ? `Ask the agent about ${cellLabel(cell)} in ${file}` : `Ask the agent about ${file}`,
+      hint: `enter send · esc cancel${busy ? " · the agent is working: this goes in as a follow-up" : ""}`,
+      submit: (text) => {
+        if (!text.trim()) return;
+        this.closeDock();
+        ask(f, cell, text);
+        this.note = "Sent to the agent.";
+        this.tui.requestRender();
+      },
+      cancel: () => { this.closeDock(); this.tui.requestRender(); },
+    });
+  }
+
+  private openScratch(f: Followed): void {
+    const run = this.actions.scratch;
+    if (!run) { this.note = "Not available here."; return; }
+    if (f.connection !== "connected") { this.note = "The notebook is not connected."; return; }
+    const idle = "enter run · esc close";
+    this.openDock({
+      kind: "scratch",
+      title: `Python in ${basename(f.attachment.path)}'s kernel · a scratch cell, nothing is saved`,
+      hint: idle,
+      submit: (code) => {
+        if (!code.trim() || this.scratch?.running) return;
+        const dock = this.dock;
+        dock?.addToHistory(code);
+        dock?.setText("");
+        dock?.setHint("running… · esc cancels (marimo interrupts the kernel)");
+        const state: ScratchState = { code, lines: [], running: true, started: Date.now(), abort: new AbortController() };
+        this.scratch = state;
+        run(f, code, (e) => {
+          state.lines.push(e);
+          if (state.lines.length > 200) state.lines.splice(0, state.lines.length - 200);
+          if (!this.closed) this.tui.requestRender();
+        }, state.abort.signal).then(
+          (r) => { state.result = r; },
+          (e: unknown) => { state.error = state.abort.signal.aborted || (e instanceof Error && e.name === "AbortError") ? "cancelled" : message(e); },
+        ).finally(() => {
+          state.running = false;
+          if (this.dock === dock) dock?.setHint(idle);
+          if (!this.closed) this.tui.requestRender();
+        });
+        this.tui.requestRender();
+      },
+      cancel: () => {
+        if (this.scratch?.running) {
+          this.scratch.abort.abort();
+          this.note = "Cancelled: marimo interrupts the kernel when a scratch run is cancelled.";
+        } else this.closeDock();
+        this.tui.requestRender();
+      },
+    });
+  }
+
+  private openMark(f: Followed): void {
+    const mark = this.actions.mark;
+    if (!mark) { this.note = "Not available here."; return; }
+    if (!f.notebook.lens.present) { this.note = "No Lens in this notebook (marimo-lens mounts one when it is installed). a asks the agent about this cell instead."; return; }
+    if (f.connection !== "connected") { this.note = "The notebook is not connected."; return; }
+    const cell = this.cursorCell(f);
+    if (!cell) { this.note = "No cell selected."; return; }
+    const next = f.notebook.lens.instances()[0]?.nextLabel ?? "S1";
+    this.openDock({
+      kind: "mark",
+      title: `Note for the agent on ${cellLabel(cell)} (Lens ${next})`,
+      hint: "enter mark · esc cancel · the note may be empty",
+      submit: (note) => {
+        this.closeDock();
+        this.note = "Marking…";
+        mark(f, cell, note.trim()).then(
+          (label) => { if (!this.closed) { this.note = `Marked ${label}. a asks the agent to address it.`; this.tui.requestRender(); } },
+          (e: unknown) => { if (!this.closed) { this.note = `Lens did not take the mark: ${message(e)}`; this.tui.requestRender(); } },
+        );
+        this.tui.requestRender();
+      },
+      cancel: () => { this.closeDock(); this.tui.requestRender(); },
+    });
+  }
+
+  private openValue(f: Followed, cell: Cell, w: Widget): void {
+    const value = widgetValue(f.notebook, w);
+    this.openDock({
+      kind: "value",
+      title: `${w.label || w.kind}: new value`,
+      hint: "enter set · esc cancel",
+      initial: value === undefined || value === null ? "" : String(value),
+      submit: (text) => {
+        const typed = typedValue(w, text);
+        if ("error" in typed) { this.note = typed.error; this.tui.requestRender(); return; }
+        this.closeDock();
+        this.actions.setWidget?.(f, cell, w, typed.value);
+        this.tui.requestRender();
+      },
+      cancel: () => { this.closeDock(); this.tui.requestRender(); },
+    });
+  }
+
+  // --- keys -----------------------------------------------------------------------------------
+
+  /** The widgets of the driven cell, or undefined (and widget mode ends) when they are gone. */
+  private drivenWidgets(f: Followed | undefined): { cell: Cell; widgets: Widget[] } | undefined {
+    const w = this.widget;
+    const cell = w && f ? f.notebook.cells.get(w.cell) : undefined;
+    const widgets = cell?.output?.widgets?.slice(0, MAX_WIDGETS) ?? [];
+    if (!f || !cell || !widgets.length || f.connection !== "connected") {
+      this.widget = undefined;
+      return undefined;
+    }
+    if (w!.index >= widgets.length) w!.index = widgets.length - 1;
+    return { cell, widgets };
+  }
+
+  private widgetKey(f: Followed | undefined, data: string): void {
+    const driven = this.drivenWidgets(f);
+    if (!driven || !f) { this.note = "The widgets are gone."; return; }
+    const focus = this.widget!;
+    const w = driven.widgets[focus.index]!;
+    if (matchesKey(data, "escape") || data === "w" || data === "q") { this.widget = undefined; return; }
+    if (matchesKey(data, "shift+tab") || matchesKey(data, "up") || data === "k") {
+      focus.index = (focus.index - 1 + driven.widgets.length) % driven.widgets.length;
+      focus.sub = 0;
+      this.reveal = true;
+      return;
+    }
+    if (matchesKey(data, "tab") || matchesKey(data, "down") || data === "j") {
+      focus.index = (focus.index + 1) % driven.widgets.length;
+      focus.sub = 0;
+      this.reveal = true;
+      return;
+    }
+    const act = (action: WidgetAction) => {
+      if (w.disabled) { this.note = "This widget is disabled."; return; }
+      const next = nextValue(w, widgetValue(f.notebook, w), action, focus.sub);
+      if (!next) { this.note = typeable(w) ? "enter types a value" : undefined; return; }
+      focus.sub = next.sub;
+      this.note = undefined;
+      if (next.send) this.actions.setWidget?.(f, driven.cell, w, next.value);
+    };
+    if (matchesKey(data, "left") || data === "h") act("dec");
+    else if (matchesKey(data, "right") || data === "l") act("inc");
+    else if (data === "H") act("dec10");
+    else if (data === "L") act("inc10");
+    else if (data === " ") act("toggle");
+    else if (matchesKey(data, "enter")) {
+      if (typeable(w) && !w.disabled) this.openValue(f, driven.cell, w);
+      else act("toggle");
+    }
+  }
+
+  private variablesKey(f: Followed | undefined, data: string): void {
+    const page = this.viewport();
+    const list = f ? variableList(f.notebook, this.varFilter) : [];
+    const at = Math.max(0, list.findIndex((v) => v.name === this.varCursor));
+    const moveTo = (i: number) => { this.varCursor = list[Math.max(0, Math.min(list.length - 1, i))]?.name; this.reveal = true; };
+    if (matchesKey(data, "ctrl+c")) { this.close(); return; }
+    if (matchesKey(data, "escape") && this.varFilter) { this.varFilter = ""; this.varCursor = undefined; return; }
+    if (matchesKey(data, "escape") || data === "v" || data === "q" || data === "h" || matchesKey(data, "left")) {
+      this.mode = "cells";
+      this.scroll = 0;
+      this.reveal = true;
+      return;
+    }
+    if (matchesKey(data, "shift+tab")) { this.switchNotebook(-1); this.mode = "variables"; return; }
+    if (matchesKey(data, "tab")) { this.switchNotebook(1); this.mode = "variables"; return; }
+    if (data === "/") { this.typing = true; this.varFilter = ""; return; }
+    if (matchesKey(data, "down") || data === "j") return moveTo(at + 1);
+    if (matchesKey(data, "up") || data === "k") return moveTo(at - 1);
+    if (matchesKey(data, "home") || data === "g") { this.scroll = 0; return moveTo(0); }
+    if (matchesKey(data, "end") || data === "G") return moveTo(list.length - 1);
+    if (matchesKey(data, "ctrl+u")) return this.move(-Math.max(1, Math.floor(page / 2)));
+    if (matchesKey(data, "ctrl+d")) return this.move(Math.max(1, Math.floor(page / 2)));
+    if (matchesKey(data, "pageUp")) return this.move(-page);
+    if (matchesKey(data, "pageDown") || matchesKey(data, "space")) return this.move(page);
+    const v = list[at];
+    if (!f || !v) return;
+    if (matchesKey(data, "enter") || data === "l" || matchesKey(data, "right")) {
+      if (v.definedBy && f.notebook.cells.has(v.definedBy)) this.goTo(f, v.definedBy);
+      else this.note = `No cell defines ${v.name}.`;
+    } else if (data === ">") {
+      const user = f.notebook.order.find((id) => v.usedBy.includes(id));
+      if (user) this.goTo(f, user);
+      else this.note = `No cell uses ${v.name}.`;
+    }
+  }
+
+  /** Enter (or a double click): expand the cell, or go to the variable's cell. */
+  private activate(f: Followed): void {
+    if (this.mode === "variables") return this.variablesKey(f, "\r");
+    const c = this.cursorCell(f);
+    if (!c) return;
+    this.cursor = c.id;
+    if (!this.expanded.delete(c.id)) this.expanded.add(c.id);
+    this.reveal = true;
+  }
+
   handleInput(data: string): void {
     if (this.closed) return;
     this.syncConfirmation();
+    if (this.help) {
+      this.help = false;
+      this.tui.requestRender();
+      return;
+    }
+    if (this.dock) {
+      this.dock.handleInput(data);
+      this.tui.requestRender();
+      return;
+    }
     if (this.live.inspecting && this.live.key(data)) { this.tui.requestRender(); return; }
     if (this.typing) return this.typeFilter(data);
     const f = this.current();
+    if (this.widget) {
+      this.widgetKey(f, data);
+      this.tui.requestRender();
+      return;
+    }
+    if (data === "?") {
+      this.help = true;
+      this.note = undefined;
+      this.tui.requestRender();
+      return;
+    }
+    if (this.mode === "variables") {
+      this.variablesKey(f, data);
+      this.tui.requestRender();
+      return;
+    }
     if (matchesKey(data, "escape") && this.filter) {
       this.filter = "";
       this.cursor = undefined;
@@ -398,7 +552,7 @@ export class NotebookView implements Component {
         this.note = "Interrupting…";
         this.actions.interrupt(f).then(
           () => { if (!this.closed) { this.note = "Interrupted."; this.tui.requestRender(); } },
-          (e: unknown) => { if (!this.closed) { this.note = `Could not interrupt: ${e instanceof Error ? e.message : String(e)}`; this.tui.requestRender(); } },
+          (e: unknown) => { if (!this.closed) { this.note = `Could not interrupt: ${message(e)}`; this.tui.requestRender(); } },
         );
       }
       this.tui.requestRender();
@@ -429,41 +583,117 @@ export class NotebookView implements Component {
       this.tui.requestRender();
       return;
     }
+    if (f && data === "M") {
+      this.armedTarget = undefined;
+      this.armedRun = undefined;
+      this.armedStop = undefined;
+      const unmark = this.actions.unmark;
+      const c = this.cursorCell(f);
+      const selection = c ? f.notebook.lens.selections().filter((s) => s.cells.includes(c.id)).at(-1) : undefined;
+      if (!unmark) this.note = "Not available here.";
+      else if (!selection) { this.armedUnmark = undefined; this.note = "No Lens selection on this cell."; }
+      else if (this.armedUnmark?.id !== selection.id) {
+        this.armedUnmark = { id: selection.id, label: selection.label };
+        this.note = `M again removes ${selection.label}`;
+      } else {
+        this.armedUnmark = undefined;
+        const label = selection.label;
+        this.note = `Removing ${label}…`;
+        unmark(f, selection.id).then(
+          () => { if (!this.closed) { this.note = `Removed ${label}.`; this.tui.requestRender(); } },
+          (e: unknown) => { if (!this.closed) { this.note = `Could not remove ${label}: ${message(e)}`; this.tui.requestRender(); } },
+        );
+      }
+      this.tui.requestRender();
+      return;
+    }
     this.armedTarget = undefined;
     this.armedRun = undefined;
     this.armedStop = undefined;
+    this.armedUnmark = undefined;
     this.note = undefined;
-    if (matchesKey(data, "tab")) {
-      const all = this.actions.followed();
-      const i = all.findIndex((o) => notebookKey(o) === this.key);
-      const next = all[(i + 1) % Math.max(1, all.length)];
-      if (next) {
-        this.key = notebookKey(next);
-        this.scroll = 0;
-        this.follow = true;
-        this.cursor = undefined;
-        this.filter = "";
-      }
-    } else if (matchesKey(data, "o") && f) {
+    const nb = f?.notebook;
+    if (matchesKey(data, "shift+tab")) this.switchNotebook(-1);
+    else if (matchesKey(data, "tab")) this.switchNotebook(1);
+    else if (matchesKey(data, "o") && f) {
       this.actions.openInBrowser(f);
       this.note = "Opened in the browser.";
     } else if (data === "/") {
       this.typing = true;
       this.filter = "";
-    } else if (f && data === "i") {
+    } else if (data === "O") {
+      this.outputs = !this.outputs;
+      outputsMode = this.outputs;
+      this.note = this.outputs ? "Every cell's output is shown; O for the outline." : "The outline; O shows every cell's output.";
+      this.reveal = true;
+    } else if (f && nb && data === "z") {
+      const c = this.cursorCell(f);
+      const cells = nb.ordered();
+      const at = c ? cells.findIndex((x) => x.id === c.id) : -1;
+      const head = c && nb.headings(c).length ? c : cells.slice(0, Math.max(0, at)).reverse().find((x) => nb.headings(x).length > 0);
+      if (!head) this.note = "No section here.";
+      else {
+        if (!this.folded.delete(head.id)) this.folded.add(head.id);
+        this.cursor = head.id;
+        this.follow = false;
+        this.reveal = true;
+      }
+    } else if (f && nb && data === "Z") {
+      if (this.folded.size) this.folded.clear();
+      else for (const c of nb.ordered()) if (nb.headings(c).length) this.folded.add(c.id);
+      const c = this.cursorCell(f);
+      if (c) this.cursor = c.id;
+      this.reveal = true;
+    } else if (f && nb && data === "[") this.step(f, -1, (c) => nb.headings(c).length > 0, "No section here.");
+    else if (f && nb && data === "]") this.step(f, 1, (c) => nb.headings(c).length > 0, "No section here.");
+    else if (f && nb && (data === "c" || data === "C")) {
+      if (![...nb.agentChanges.keys()].some((id) => nb.cells.has(id))) this.note = "The agent has not changed a cell since your last message.";
+      else this.step(f, data === "c" ? 1 : -1, (c) => nb.agentChanges.has(c.id), "The agent has not changed a cell since your last message.");
+    } else if (f && nb && data === "d") {
+      const c = this.cursorCell(f);
+      if (!c || !nb.agentChanges.has(c.id)) this.note = "The agent has not changed this cell since your last message.";
+      else {
+        if (!this.diffs.delete(c.id)) { this.diffs.add(c.id); this.expanded.add(c.id); }
+        this.cursor = c.id;
+        this.reveal = true;
+      }
+    } else if (f && data === "v") {
+      this.mode = "variables";
+      this.scroll = 0;
+      this.reveal = true;
+    } else if (f && nb && (data === "<" || data === ">")) {
+      const c = this.cursorCell(f);
+      const order = nb.order;
+      const here = c ? order.indexOf(c.id) : -1;
+      const candidates = c ? (data === "<" ? nb.parents(c.id) : nb.children(c.id)) : [];
+      const pick = data === "<"
+        ? [...candidates].reverse().find((id) => order.indexOf(id) < here) ?? candidates[0]
+        : candidates.find((id) => order.indexOf(id) > here) ?? candidates[0];
+      if (!pick) this.note = data === "<" ? "No upstream cell." : "No downstream cell.";
+      else this.goTo(f, pick);
+    } else if (f && data === "w") {
+      const c = this.cursorCell(f);
+      const widgets = c?.output?.widgets?.slice(0, MAX_WIDGETS) ?? [];
+      if (!c || !widgets.length) this.note = "This cell shows no widgets.";
+      else if (!this.actions.setWidget) this.note = "Widgets cannot be driven here.";
+      else if (f.connection !== "connected") this.note = "The notebook is not connected.";
+      else {
+        this.widget = { cell: c.id, index: 0, sub: 0 };
+        this.cursor = c.id;
+        this.follow = false;
+        this.reveal = true;
+      }
+    } else if (f && data === "a") this.openAsk(f);
+    else if (f && data === ":") this.openScratch(f);
+    else if (f && data === "m") this.openMark(f);
+    else if (f && data === "i") {
       const c = this.cursorCell(f);
       if (c && this.expanded.has(c.id) && this.live.inspect(c.output)) this.note = "";
       else this.note = "Expand a live chart (enter) first, then i.";
-    } else if (f && (matchesKey(data, "enter") || matchesKey(data, "l"))) {
+    } else if (f && (matchesKey(data, "enter") || matchesKey(data, "l"))) this.activate(f);
+    else if (f && data === "r") {
       const c = this.cursorCell(f);
-      if (c) {
-        this.cursor = c.id;
-        if (!this.expanded.delete(c.id)) this.expanded.add(c.id);
-        this.reveal = true;
-      }
-    } else if (f && data === "r") {
-      const c = this.cursorCell(f);
-      if (c) this.startRun(f, [c], this.label(c));
+      if (c) this.startRun(f, [c], cellLabel(c));
       else this.note = "No cell selected.";
     } else if (f && data === "n") this.step(f, 1, (c) => !!c.error);
     else if (f && data === "N") this.step(f, -1, (c) => !!c.error);
@@ -493,6 +723,8 @@ export class NotebookView implements Component {
     this.scroll = Math.max(0, by === -Infinity ? 0 : this.scroll + by);
   }
 
+  // --- drawing --------------------------------------------------------------------------------
+
   /** `✗ fit.py  running Model fit`, then what the notebook holds and when it last ran. */
   private header(f: Followed, file: string): string[] {
     const th = this.theme;
@@ -502,19 +734,80 @@ export class NotebookView implements Component {
     const stale = code.filter((c) => c.stale || nb.edited(c)).length;
     const errors = nb.errors().length;
     const state = [...kernelStateParts(f), ...lensParts(f)].join(" · ");
+    const working = this.actions.agentBusy?.() === true ? `${th.fg("dim", " · ")}${th.fg("accent", "agent working")}` : "";
     const servers = this.actions.servers?.(f) ?? [];
+    const changes = [...nb.agentChanges.values()];
+    const edited = changes.filter((c) => c.kind === "edited" || c.kind === "moved" || c.kind === "renamed").length;
+    const created = changes.filter((c) => c.kind === "created").length;
+    const removed = changes.filter((c) => c.kind === "deleted").length;
+    const agent = changes.length ? th.fg("accent", `agent: ${[edited ? `${edited} changed` : "", created ? `${created} new` : "", removed ? `${removed} removed` : ""].filter(Boolean).join(" · ")}`) : "";
     const counts = [
       `${code.length} cell${code.length === 1 ? "" : "s"}`,
       stale ? th.fg("warning", `${stale} stale`) : "",
       errors ? th.fg("error", `${errors} error${errors === 1 ? "" : "s"}`) : "",
+      agent,
       this.actions.lastRun?.(f) ?? "",
       servers.length ? `server ${servers.join(", ")}` : "",
     ].filter(Boolean).join(th.fg("dim", " · "));
     return [
-      `${busy ? th.fg("accent", "●") : errors ? th.fg("error", "✗") : th.fg("dim", "○")} ${th.bold(file)}  ${state}`,
+      `${busy ? th.fg("accent", "●") : errors ? th.fg("error", "✗") : th.fg("dim", "○")} ${th.bold(file)}  ${state}${working}`,
       counts,
       th.fg("dim", `${f.attachment.path} · ${f.attachment.url} · session ${f.attachment.sessionId}`),
     ];
+  }
+
+  /** A scratch run's result, as lines. */
+  private resultLines(output: { mimetype: string; data: string }, inner: number): string[] {
+    const th = this.theme;
+    if (output.mimetype.startsWith("image/")) return [th.fg("dim", "[image]")];
+    if (output.mimetype === "text/html") {
+      const summary = summarizeOutput({ channel: "output", mimetype: output.mimetype, data: output.data });
+      if (summary?.table) return tableLines(summary.table, inner, th, 8);
+      return summary?.text ? summary.text.split("\n") : [];
+    }
+    return output.data ? output.data.split("\n") : [];
+  }
+
+  /** What the scratch run printed and returned, newest last. */
+  private scratchLines(inner: number): string[] {
+    const s = this.scratch;
+    if (!s) return [];
+    const th = this.theme;
+    const lines = [th.fg("accent", `>>> ${truncate(firstLine(s.code), 200)}`)];
+    for (const e of s.lines) lines.push(e.stream === "stderr" ? th.fg("warning", e.text) : e.text);
+    if (s.running) lines.push(th.fg("dim", `running ${elapsed(Date.now() - s.started)}`));
+    else if (s.error) lines.push(s.error === "cancelled" ? th.fg("dim", "cancelled") : th.fg("error", `✗ ${s.error}`));
+    else if (s.result && !s.result.success) lines.push(th.fg("error", "✗ failed (the traceback is above)"));
+    else if (s.result?.output) lines.push(...this.resultLines(s.result.output, inner));
+    return lines.slice(-SCRATCH_ROWS);
+  }
+
+  /** The docked prompt, with a scratch run above it: full frame rows. */
+  private dockRows(width: number): string[] {
+    const dock = this.dock;
+    if (!dock) {
+      this.lastDock = 0;
+      return [];
+    }
+    const th = this.theme;
+    const out = [frameRule(width, th)];
+    if (dock.kind === "scratch" && this.scratch) out.push(...this.scratchLines(width - 4).map((l) => frameRow(l, width, th)));
+    const room = Math.max(3, Math.max(4, Math.floor(this.tui.terminal.rows / 2)) - out.length);
+    out.push(...dock.render(width - 4, room).map((l) => frameRow(l, width, th)));
+    this.lastDock = out.length;
+    return out;
+  }
+
+  /** Scroll so row `at` shows when asked to, within the rows there are. */
+  private place(length: number, at: number | undefined, page: number): void {
+    const max = Math.max(0, length - page);
+    if (this.reveal && at !== undefined) {
+      if (this.scroll === Number.MAX_SAFE_INTEGER) this.scroll = max;
+      if (at < this.scroll) this.scroll = at;
+      else if (at >= this.scroll + page) this.scroll = at - page + 1;
+    }
+    this.scroll = Math.max(0, Math.min(this.scroll, max));
+    this.reveal = false;
   }
 
   render(width: number): string[] {
@@ -526,62 +819,104 @@ export class NotebookView implements Component {
     const f = this.current();
     const file = basename(f?.attachment.path ?? notebookPath(this.key));
     const out = [banner(`Notebook ${file}`, width, th)];
+    if (!f && this.dock) this.closeDock();
+    if (!f) this.widget = undefined;
+    else if (this.widget) this.drivenWidgets(f);
+    const dock = this.dockRows(width);
     const page = this.viewport();
+    this.lastPage = page;
     if (!f) {
       out.push(row(th.bold(file)), row(th.fg("dim", "No longer followed.")), row(""), rule);
       for (let i = 0; i < page; i++) out.push(row(""));
+      this.lastRows = [];
+    } else if (this.help) {
+      for (const line of this.header(f, file)) out.push(row(line));
+      out.push(rule);
+      const rows = helpLines(th).map((text): Row => ({ text }));
+      this.lastRows = rows;
+      for (let i = 0; i < page; i++) out.push(row(rows[i]?.text ?? ""));
+    } else if (this.mode === "variables") {
+      for (const line of this.header(f, file)) out.push(row(line));
+      out.push(rule);
+      const nb = f.notebook;
+      const list = variableList(nb, this.varFilter);
+      if (!this.varCursor || !list.some((v) => v.name === this.varCursor)) this.varCursor = list[0]?.name;
+      let built = variableRows(list, nb, th, this.varCursor, width - 4, this.varFilter);
+      const at = this.varCursor !== undefined ? built.index.get(this.varCursor) : undefined;
+      this.place(built.rows.length, at, page);
+      // Scrolled away from the cursor: it moves to the nearest variable on screen.
+      if (at !== undefined && (at < this.scroll || at >= this.scroll + page)) {
+        const pick = list[at < this.scroll ? this.scroll : Math.min(list.length - 1, this.scroll + page - 1)];
+        if (pick) {
+          this.varCursor = pick.name;
+          built = variableRows(list, nb, th, this.varCursor, width - 4, this.varFilter);
+        }
+      }
+      this.lastRows = built.rows;
+      for (let i = 0; i < page; i++) out.push(row(built.rows[this.scroll + i]?.text ?? ""));
     } else {
       for (const line of this.header(f, file)) out.push(row(line));
       out.push(rule);
       const nb = f.notebook;
       const cells = this.cells(f);
       const running = nb.running();
-      // Following: the cursor stays on the running cell.
-      if (this.follow && running && cells.some((c) => c.id === running.cell.id)) this.cursor = running.cell.id;
+      // Following: the cursor stays on the running cell, or on the fold that hides it.
+      if (this.follow && running) {
+        const head = this.filter ? undefined : foldedCells(nb, this.folded).get(running.cell.id);
+        const target = head ?? running.cell.id;
+        if (cells.some((c) => c.id === target)) this.cursor = target;
+      }
       if (!this.cursor || !cells.some((c) => c.id === this.cursor)) this.cursor = cells[0]?.id;
       this.live.beginFrame();
-      const built = notebookRows(nb, th, Date.now(), { cursor: this.cursor, expanded: this.expanded, filter: this.filter, imageRows: page - 1, width, vega: this.vega, plotly: this.plotly, ...(this.actions.liveCharts === false ? {} : { live: this.live }), onVega: () => { if (!this.closed) this.tui.requestRender(); } });
+      const options = () => ({
+        cursor: this.cursor, expanded: this.expanded, filter: this.filter, imageRows: page - 1, width, vega: this.vega, plotly: this.plotly,
+        ...(this.actions.liveCharts === false ? {} : { live: this.live }),
+        onVega: () => { if (!this.closed) this.tui.requestRender(); },
+        outputs: this.outputs, folded: this.folded, diffs: this.diffs,
+        ...(this.widget ? { widgetFocus: this.widget } : {}),
+      });
+      const built = notebookRows(nb, th, Date.now(), options());
       const rows = built.rows;
       const max = Math.max(0, rows.length - page);
-      const at = this.cursor !== undefined ? built.cellRows.get(this.cursor) : undefined;
-      if (this.follow && running && built.running !== undefined) this.scroll = Math.min(max, Math.max(0, built.running - Math.floor(page / 3)));
-      else if (this.reveal && at !== undefined) {
-        if (this.scroll === Number.MAX_SAFE_INTEGER) this.scroll = max;
-        if (at < this.scroll) this.scroll = at;
-        else if (at >= this.scroll + page) this.scroll = at - page + 1;
-      } else if (this.follow) this.scroll = Math.min(this.scroll, max);
-      this.scroll = Math.max(0, Math.min(this.scroll, max));
-      this.reveal = false;
+      const at = this.widget
+        ? built.widgetRows.get(`${this.widget.cell}\0${this.widget.index}`) ?? built.cellRows.get(this.widget.cell)
+        : this.cursor !== undefined ? built.cellRows.get(this.cursor) : undefined;
+      if (this.follow && running && built.running !== undefined) {
+        this.scroll = Math.min(max, Math.max(0, built.running - Math.floor(page / 3)));
+        this.reveal = false;
+      } else this.place(rows.length, at, page);
       // Scrolled away from the cursor: it moves to the nearest cell on screen.
-      if (at !== undefined && !this.follow && (at < this.scroll || at >= this.scroll + page)) {
+      if (at !== undefined && !this.follow && !this.widget && (at < this.scroll || at >= this.scroll + page)) {
         const visible = cells.filter((c) => { const r = built.cellRows.get(c.id); return r !== undefined && r >= this.scroll && r < this.scroll + page; });
         const pick = at < this.scroll ? visible[0] : visible.at(-1);
         if (pick) {
           this.cursor = pick.id;
-          const again = notebookRows(nb, th, Date.now(), { cursor: this.cursor, expanded: this.expanded, filter: this.filter, imageRows: page - 1, width, vega: this.vega, plotly: this.plotly, ...(this.actions.liveCharts === false ? {} : { live: this.live }), onVega: () => { if (!this.closed) this.tui.requestRender(); } });
+          const again = notebookRows(nb, th, Date.now(), options());
           rows.splice(0, rows.length, ...again.rows);
         }
       }
+      this.lastRows = rows;
       // An image draws only when its whole block is on screen; otherwise a note stands in for it.
-      const visible = (at: number): boolean => {
-        const r = rows[at];
+      const visible = (i: number): boolean => {
+        const r = rows[i];
         if (!r?.image) return true;
-        const start = at - r.image.index;
+        const start = i - r.image.index;
         return start >= this.scroll && start + r.image.height <= this.scroll + page;
       };
-      const textOf = (at: number): string | undefined => {
-        const r = rows[at];
-        if (!r?.image || visible(at)) return r?.text;
+      const textOf = (i: number): string | undefined => {
+        const r = rows[i];
+        if (!r?.image || visible(i)) return r?.text;
         return r.image.index === 0 ? r.image.alt : r.text;
       };
       for (let i = 0; i < page; i++) {
-        const at = this.scroll + i;
-        const r = rows[at];
-        if (r?.image?.live && r.image.index === 0 && visible(at)) this.live.rects.push({ top: out.length, left: LIVE_LEFT, geometry: r.image.live.geometry, output: r.image.live.output });
-        out.push(row(textOf(at) ?? (this.filter && !cells.length && i === 0 ? th.fg("dim", `No cell matches "${this.filter}".`) : "")));
+        const index = this.scroll + i;
+        const r = rows[index];
+        if (r?.image?.live && r.image.index === 0 && visible(index)) this.live.rects.push({ top: out.length, left: LIVE_LEFT, geometry: r.image.live.geometry, output: r.image.live.output });
+        out.push(row(textOf(index) ?? (this.filter && !cells.length && i === 0 ? th.fg("dim", `No cell matches "${this.filter}".`) : "")));
       }
       this.live.endFrame();
     }
+    out.push(...dock);
     out.push(rule);
     out.push(row(this.footer(f, width - 4)));
     out.push(bottom(width, th));
@@ -590,8 +925,21 @@ export class NotebookView implements Component {
 
   private footer(f: Followed | undefined, inner: number): string {
     const th = this.theme;
+    const nav = th.fg("dim", "? keys · esc back");
+    const withNav = (left: string) => {
+      const gap = inner - visibleWidth(left) - visibleWidth(nav);
+      return gap >= 1 ? `${left}${" ".repeat(gap)}${nav}` : left;
+    };
+    const noted = (hint: string) => (this.note ? `${th.fg("warning", this.note)}  ${th.fg("dim", hint)}` : th.fg("dim", hint));
+    if (this.help) return th.fg("dim", "any key closes");
+    if (this.dock) return this.note ? th.fg("warning", this.note) : th.fg("dim", "esc closes the prompt");
     if (this.live.inspecting) return `${th.fg("accent", "chart")} ${th.fg("dim", "arrows or hjkl move (shift: farther) · space starts/ends a drag · +/- zoom · 0 reset · esc done")}`;
-    if (this.typing) return `${th.fg("accent", "/")} ${this.filter}${th.fg("dim", "▏")}  ${th.fg("dim", "enter keep · esc clear")}`;
+    if (this.typing) {
+      const text = this.mode === "variables" ? this.varFilter : this.filter;
+      return `${th.fg("accent", "/")} ${text}${th.fg("dim", "▏")}  ${th.fg("dim", "enter keep · esc clear")}`;
+    }
+    if (this.widget) return withNav(noted("widget: h/l change · space toggle · enter type · j/k next · esc done"));
+    if (this.mode === "variables") return withNav(noted(`enter its cell · > first use · ${this.varFilter ? `/ ${this.varFilter}` : "/ filter"} · v back`));
     const connected = !!f && f.connection === "connected";
     const busy = connected && (f.notebook.running() || f.notebook.queued() > 0);
     const hints: string[] = [];
@@ -607,10 +955,14 @@ export class NotebookView implements Component {
     if (f) hints.push(this.filter ? th.fg("accent", `/ ${this.filter}`) : "/ filter");
     if (f) hints.push("o browser");
     if (this.actions.followed().length > 1) hints.push("tab next");
+    if (f && this.actions.ask) hints.push("a ask");
+    if (connected && this.actions.scratch) hints.push(": python");
+    const cell = f ? this.cursorCell(f) : undefined;
+    if (cell?.output?.widgets?.length && this.actions.setWidget) hints.push("w widgets");
+    if (f?.notebook.lens.present && this.actions.mark) hints.push("m mark");
+    if (f) hints.push("v variables", this.outputs ? "O outline" : "O outputs");
     const left = this.note ? `${th.fg("warning", this.note)}  ${th.fg("dim", hints.join(" · "))}` : th.fg("dim", hints.join(" · "));
-    const nav = th.fg("dim", "j/k f g/G · esc back");
-    const gap = inner - visibleWidth(left) - visibleWidth(nav);
-    return gap >= 1 ? `${left}${" ".repeat(gap)}${nav}` : left;
+    return withNav(left);
   }
 
   /** A theme change or resize: the terminal may have dropped image data with the redraw, so live charts upload their frames again. */
@@ -624,15 +976,56 @@ export class NotebookView implements Component {
     this.done();
   }
 
-  /** A mouse event over a live chart goes to its page; anywhere else it is left to the TUI. */
+  /** A live chart takes the mouse over it; elsewhere the wheel scrolls, a click selects, a double click expands. */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-    return this.live.mouse(event);
+    const live = this.live.mouse(event);
+    if (live) return live;
+    if (this.closed) return undefined;
+    if (event.type === "wheel") {
+      if (this.help || this.dock) return { handled: true };
+      this.move(event.wheelDelta ?? 0);
+      this.tui.requestRender();
+      return { handled: true };
+    }
+    if (event.button !== "left" || event.y < ROWS_TOP || event.y >= ROWS_TOP + this.lastPage) return undefined;
+    // Pi turns a press and release into a click only for the component that took the press.
+    if (event.type === "press") return { handled: true, render: false };
+    if (event.type !== "click") return undefined;
+    if (this.help) {
+      this.help = false;
+      this.tui.requestRender();
+      return { handled: true };
+    }
+    const f = this.current();
+    const r = this.lastRows[this.scroll + event.y - ROWS_TOP];
+    if (!f || !r || this.dock) return { handled: true };
+    const twice = (event.clickCount ?? 1) >= 2;
+    if (r.variable) {
+      const again = this.varCursor === r.variable;
+      this.varCursor = r.variable;
+      if (again || twice) this.activate(f);
+    } else if (r.widget && this.actions.setWidget && f.connection === "connected") {
+      this.widget = { cell: r.widget.cell, index: r.widget.index, sub: 0 };
+      this.cursor = r.widget.cell;
+      this.follow = false;
+    } else if (r.cell) {
+      const again = this.cursor === r.cell;
+      this.cursor = r.cell;
+      this.follow = false;
+      this.widget = undefined;
+      if (again || twice) this.activate(f);
+    }
+    this.tui.requestRender();
+    return { handled: true };
   }
 
   dispose(): void {
     if (!this.closed) Painter.for(this.tui)?.setExclusive(false);
     this.closed = true;
     clearInterval(this.timer);
+    this.scratch?.abort.abort();
+    this.dock?.dispose();
+    this.dock = undefined;
     this.live.dispose();
   }
 }
