@@ -65,7 +65,7 @@ import {
 import { buildMcpCatalog, readConfiguredMcpServers } from "./mcp-tools.js";
 import { modelCatalog } from "./model-catalog.js";
 import { exportPlanToFile } from "./plan-export.js";
-import { planName, plansDirectoryPath, writePlanFile } from "./plan-file.js";
+import { plansDirectoryPath, planTitle, writePlanFile } from "./plan-file.js";
 import { expandHome, runPlanCompleteHook } from "./plan-hook.js";
 import { consultantAccess, type OtherTool, otherTools, otherToolsNode, resolveAccess } from "./planner/access.js";
 import { type PlannerAccessConfig, PlannerAgent } from "./planner/agent.js";
@@ -825,7 +825,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     (message, options, theme) => {
       const details = message.details;
       const body = typeof message.content === "string" ? message.content : "";
-      const head = `▸ Plan ${details?.planFile ? planName(details.planFile) : ""} handed off to ${details?.implementer ?? "the implementer"}${details?.planner ? ` · ${details.planner} on call` : ""}`;
+      const head = `▸ Implementing ${details?.planFile ? `"${planTitle(details.planFile)}"` : "the plan"} · ${details?.implementer ?? "the implementer"}${details?.planner ? ` · ${details.planner} on call` : ""}`;
       return renderCollapsedMarkdown(head, body, options.expanded, theme, details?.lines);
     },
   );

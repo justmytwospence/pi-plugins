@@ -145,7 +145,7 @@ test("a restored exec state turns its tools on and shows the footer status", asy
   const { mock, context } = await setup();
   assert.ok(mock.rawPi.getActiveTools().includes(ASK_TOOL));
   assert.ok(mock.rawPi.getActiveTools().includes(FINISH_TOOL));
-  assert.equal(context.statuses.get(EXEC_STATUS_KEY), "exec calm-river · Claude Opus 5.5 on call");
+  assert.equal(context.statuses.get(EXEC_STATUS_KEY), "exec mode on · Claude Opus 5.5 on call");
   for (const name of [ASK_TOOL, FINISH_TOOL]) {
     const registered = mock.tools.find((candidate) => candidate.name === name) as any;
     assert.equal(registered.exposure, "model-only");
@@ -159,7 +159,7 @@ test("without a planner on call, only finish_plan is active", async () => {
   const { mock, context } = await setup({ planner: false });
   assert.ok(!mock.rawPi.getActiveTools().includes(ASK_TOOL));
   assert.ok(mock.rawPi.getActiveTools().includes(FINISH_TOOL));
-  assert.equal(context.statuses.get(EXEC_STATUS_KEY), "exec calm-river");
+  assert.equal(context.statuses.get(EXEC_STATUS_KEY), "exec mode on");
   const ask = mock.tools.find((candidate) => candidate.name === ASK_TOOL) as unknown as Tool;
   const result = await ask.execute("1", { message: "x" }, undefined, undefined, context.ctx);
   assert.match(result.content[0]?.text ?? "", /No planner is on call/u);
@@ -262,7 +262,10 @@ test("finish_plan: a clean review loops with a note and drops the review row", a
   });
   const result = await tool(FINISH_TOOL).execute("1", { report: "Done." }, undefined, undefined, context.ctx);
   assert.equal(result.details.outcome, "done");
-  assert.match(selects[1]?.title ?? "", /found nothing to fix\./u);
+  assert.match(selects[1]?.title ?? "", /Claude Opus 5\.5 found nothing to fix/u);
+  assert.equal(result.details.reviewClean, true);
+  assert.equal(result.details.review, "Everything matches the plan.");
+  assert.equal(result.details.reviewer, "Claude Opus 5.5");
   assert.deepEqual(selects[1]?.options, [FINISH_DONE, FINISH_KEEP]);
   assert.equal(latest().active, false);
 });
@@ -292,4 +295,53 @@ test("enter_plan_mode refuses while exec mode is on", async () => {
   const { context, tool } = await setup();
   const result = await tool(ENTER_TOOL).execute("1", {}, undefined, undefined, context.ctx);
   assert.match(result.content[0]?.text ?? "", /implementing an approved plan \(exec mode\)/u);
+});
+
+test("finish_plan shows what changed in the question and the card, and flags files outside the plan", async () => {
+  const { context, tool, emit, selects, planFile } = await setup({ select: [FINISH_DONE] });
+  const dir = planFile.slice(0, planFile.lastIndexOf("/"));
+  for (const path of ["src/a.ts", "src/other.ts", planFile]) {
+    const full = path === planFile ? path : join(dir, path);
+    await emit("tool_result", { toolName: "edit", input: { path: full }, content: [], isError: false });
+  }
+  const updates: any[] = [];
+  const result = await tool(FINISH_TOOL).execute(
+    "1",
+    { report: "Done." },
+    undefined,
+    (update: unknown) => updates.push(update),
+    context.ctx,
+  );
+  assert.deepEqual(result.details.changes.edited, ["src/a.ts", "src/other.ts"]);
+  assert.deepEqual(result.details.changes.outside, ["src/other.ts"]);
+  assert.equal(selects[0]?.title, "Accept the implementation? 2 files edited · 1 outside the plan");
+  assert.equal(updates[0]?.details.outcome, "pending");
+  assert.deepEqual(updates[0]?.details.changes.edited, ["src/a.ts", "src/other.ts"]);
+  assert.doesNotMatch(selects[0]?.title ?? "", /calm-river|\.md/u, "no plan file name in the question");
+});
+
+test("finish_plan puts the planner's review on the card while it works and after, clean or not", async () => {
+  const { context, tool, selects } = await setup({
+    select: [FINISH_REVIEW, FINISH_DONE],
+    script: () => ({ reply: "All steps are in.\nVerdict: done" }),
+  });
+  const updates: any[] = [];
+  const result = await tool(FINISH_TOOL).execute(
+    "1",
+    { report: "Done." },
+    undefined,
+    (update: unknown) => updates.push(update),
+    context.ctx,
+  );
+  assert.ok(
+    updates.some((update) => update.details.reviewing),
+    "progress while the planner reviews",
+  );
+  const last = updates.at(-1)?.details;
+  assert.equal(last.review, "All steps are in.");
+  assert.equal(last.reviewClean, true);
+  assert.equal(last.reviewing, undefined);
+  assert.equal(result.details.outcome, "done");
+  assert.equal(result.details.review, "All steps are in.");
+  assert.equal(selects.length, 2);
 });

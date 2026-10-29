@@ -119,14 +119,14 @@ async function approvalLines(width, spec = {}) {
 // The widest first row: 42 characters, the most a Pi select row may have (docs/clients.md).
 const PLAN_CHOICES = [handoffLabel('Claude Sonnet 5.5', 'xhigh'), keepLabel('Claude Opus 5.5'), EDIT, KEEP];
 function selectorLines(width) {
-  const selector = new ExtensionSelectorComponent('Implement this plan? ~/.pi/agent/plans/example.md', PLAN_CHOICES, () => {}, () => {});
+  const selector = new ExtensionSelectorComponent('Implement this plan?', PLAN_CHOICES, () => {}, () => {});
   return selector.render(width);
 }
 
 // exec mode's acceptance question (finish_plan).
 const FINISH = [FINISH_DONE, FINISH_REVIEW, FINISH_KEEP];
 function finishLines(width) {
-  const selector = new ExtensionSelectorComponent('Accept the implementation of calm-river? ~/.pi/agent/plans/calm-river.md', FINISH, () => {}, () => {});
+  const selector = new ExtensionSelectorComponent('Accept the implementation? 12 files edited · 3 outside the plan · Claude Opus 5.5 found nothing to fix', FINISH, () => {}, () => {});
   return selector.render(width);
 }
 

@@ -28,7 +28,7 @@ import { holdBlocked } from "./herdr-blocked.js";
 import { type ModelSpec, sameModel } from "./implementation-models.js";
 import { PlanMarkdown } from "./mermaid-art.js";
 import { planDiff, renderPlanDiff } from "./plan-diff.js";
-import { newPlanFile, plansDirectoryPath, readPlan, tildify } from "./plan-file.js";
+import { newPlanFile, plansDirectoryPath, readPlan } from "./plan-file.js";
 import { expandHome } from "./plan-hook.js";
 import { PlanReviewViewport } from "./plan-review-viewport.js";
 import { type ReviewStatus, reviewBody, reviewTitle } from "./review-card.js";
@@ -424,7 +424,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             content: [{ type: "text", text: plan }],
             details: { plan, planFile, outcome: "pending", ...(previous ? { previous } : {}) } satisfies ExitDetails,
           } as never);
-          const choice = await ctx.ui.select(`Implement this plan? ${tildify(planFile)}`, choices(), { signal });
+          const choice = await ctx.ui.select("Implement this plan?", choices(), { signal });
           if (choice === EDIT) {
             // In your external editor when one is set (pi's externalEditor, or $VISUAL / $EDITOR),
             // else in pi's own.
@@ -550,7 +550,6 @@ function renderExit(
   const plan = details?.plan;
   if (!plan) return new Container();
   const outcome = details?.outcome ?? "pending";
-  const context = details?.planFile ? tildify(details.planFile) : undefined;
   const status: ReviewStatus =
     outcome === "approved" || outcome === "handoff"
       ? {
@@ -560,17 +559,15 @@ function renderExit(
               ? `, handed off${details?.handoff ? ` to ${details.handoff}` : ""}`
               : ", implementing here"
           }${details?.mode ? `, ${MODE_WORDS[details.mode] ?? details.mode}` : ""}`,
-          context,
         }
       : outcome === "fresh"
-        ? { tone: "success", text: "✓ Approved, implementing in a fresh session", context }
+        ? { tone: "success", text: "✓ Approved, implementing in a fresh session" }
         : outcome === "kept"
           ? {
               tone: "warning",
               text: details?.feedback ? `Kept planning: ${details.feedback}` : "Kept planning",
-              context,
             }
-          : { tone: "pending", text: "Waiting for approval", context };
+          : { tone: "pending", text: "Waiting for approval" };
   const body = reviewBody(theme, plan, status, options, (text) => new PlanMarkdown(text, getMarkdownTheme(), theme));
   const changes = outcome === "pending" && details?.previous ? planDiff(details.previous, plan) : [];
   if (changes.length === 0) return body;

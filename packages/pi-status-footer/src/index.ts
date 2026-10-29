@@ -71,7 +71,7 @@ export interface Snapshot {
   quotas: Quota[]; unavailableQuota?: string; statuses: string[]; now: number;
   /** Folded in from companion extensions' statuses when they are installed. */
   mode?: PermissionModeStatus;
-  /** pi-plan-mode's exec status: `calm-river · Claude Opus 5.5 on call`. */
+  /** pi-plan-mode's exec mode, shown as a mode: what follows `exec mode on · ` (empty when nothing does), e.g. `Claude Opus 5.5 on call · 2 asks`. */
   exec?: string;
   autoEffort?: boolean; autoEffortDetail?: string; lean?: string; cache?: string; extraBilled?: number;
   /** A prompt stashed by @saadjs/pi-stash; text is its content when readable. */
@@ -228,6 +228,9 @@ export interface PermissionModeStatus {
 const MODE_KINDS: Record<string, PermissionModeStatus["kind"]> = {
   "chat mode": "chat", "manual mode": "manual", "accept edits": "acceptEdits", "plan mode": "plan", "auto mode": "auto", "yolo mode": "bypass", "bypass permissions": "bypass",
 };
+const MODE_NAMES: Record<PermissionModeStatus["kind"], string> = {
+  chat: "chat", manual: "manual", acceptEdits: "accept edits", plan: "plan", auto: "auto", bypass: "yolo",
+};
 export function parseModeStatus(text: string): PermissionModeStatus | undefined {
   const match = /^(⏸|⏵⏵) (chat mode|manual mode|accept edits|plan mode|auto mode|yolo mode|bypass permissions) on(?: \((.+) to cycle\))?$/u.exec(text);
   if (!match) return undefined;
@@ -252,7 +255,7 @@ export interface AbsorbedStatuses { mode?: PermissionModeStatus; exec?: string; 
 //   bg                (pi-bg)                   "bg: tests 2:14 · ..." -> its own row under that
 //   pressure          (pi-pressure)             "pressure: cpu 97 ↑ hot · ..." -> its own row under that
 //   permission-mode   (pi-tool-gate, pi-plan-mode) "⏵⏵ auto mode on (shift+tab to cycle)" -> the model row
-//   plan-exec        (pi-plan-mode) "exec calm-river · Claude Opus 5.5 on call" -> the permission-mode row, after the mode
+//   plan-exec        (pi-plan-mode) "exec mode on · Claude Opus 5.5 on call" -> the permission-mode row, in place of the mode (which follows it, dim)
 // Everything else (plan, gate, mcp, ...) stays in the status row.
 export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: { claudeRow: boolean }): AbsorbedStatuses {
   const result: AbsorbedStatuses = { autoEffort: false, rest: [] };
@@ -289,8 +292,8 @@ export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: {
     if (pressure) { result.pressure = pressure; continue; }
     const mode = key === "permission-mode" ? parseModeStatus(plainText) : undefined;
     if (mode) { result.mode = mode; continue; }
-    const exec = key === "plan-exec" ? /^exec (\S.*)$/u.exec(plainText) : null;
-    if (exec) { result.exec = exec[1]; continue; }
+    const exec = key === "plan-exec" ? /^exec mode on(?: · (\S.*))?$/u.exec(plainText) : null;
+    if (exec) { result.exec = exec[1] ?? ""; continue; }
     const plan = key === "plan" ? /^plan: (.+) \((\/plan(?:ners)?)\)$/.exec(plainText) : null;
     if (plan) {
       result.rest.push(`Plan ${plan[1].replace(/cut off \(resume in (\/plan(?:ners)?)\)/g, "cut off · resume in $1")} · ${plan[2]}`);
@@ -944,10 +947,15 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   // modes where Jev judges) follows it there. The cycle-key hint is not shown.
   const gateStatus = s.mode ? s.statuses.find((status) => /^Gate /.test(stripVTControlCharacters(status))) : undefined;
   const statuses = gateStatus ? s.statuses.filter((status) => status !== gateStatus) : s.statuses;
-  const execText = s.exec ? `${theme.fg("accent", "exec")} ${theme.fg("muted", clean(s.exec))}` : "";
-  if (s.mode || s.exec) rows.push(row(ICONS.gate, (w) => fitSegments([
-    { text: modeText, priority: 100 },
-    { text: execText, priority: 90 },
+  // Exec mode (pi-plan-mode) takes the mode's place, as another mode would; the permission mode
+  // underneath keeps deciding what runs, so it follows, dim, and Shift+Tab still changes it.
+  const exec = s.exec !== undefined;
+  const execText = exec ? theme.fg("accent", `${ICONS.running} exec mode on`) : "";
+  const underlying = exec && s.mode ? theme.fg("dim", ` · ${MODE_NAMES[s.mode.kind]}`) : "";
+  const execDetail = exec && s.exec ? theme.fg("muted", clean(s.exec)) : "";
+  if (s.mode || exec) rows.push(row(ICONS.gate, (w) => fitSegments([
+    { text: exec ? `${execText}${underlying}` : modeText, priority: 100 },
+    { text: execDetail, priority: 90 },
     { text: gateStatus ? gateStatus.replace(/[\r\n\t]/g, " ") : "", priority: 50 },
   ], w, theme)));
 

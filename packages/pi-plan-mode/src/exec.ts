@@ -1,8 +1,10 @@
-// Exec mode: the session state while an approved plan is being implemented. The footer shows it
-// (status `plan-exec`), the planner that wrote the plan can stay on call through ask_planner,
-// edits to files the plan does not list get a note once, and finish_plan ends it with the user's
-// acceptance or the planner's review. It is entered by approving a plan (plan.ts calls `begin`)
-// and ended by finish_plan, or replaced by approving a newer plan.
+// Exec mode: a mode of your main chat while an approved plan is being implemented. The footer shows
+// it where the permission mode is (status `plan-exec`; the permission mode underneath still decides
+// what runs), the planner that wrote the plan can stay on call through ask_planner, edits to files
+// the plan does not list get a note once, and finish_plan ends it with the user's acceptance or the
+// planner's review, both shown in the transcript. It is entered only by approving a plan (plan.ts
+// calls `begin`; no key cycles to it) and ended by finish_plan, or replaced by approving a newer plan.
+import { execFile } from "node:child_process";
 import { relative, resolve } from "node:path";
 import {
   type ExtensionAPI,
@@ -10,13 +12,13 @@ import {
   getMarkdownTheme,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Text } from "@earendil-works/pi-tui";
+import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { setToolsActive } from "./active-tools.js";
 import { holdBlocked } from "./herdr-blocked.js";
 import { type ModelSpec, parseModelSpec } from "./implementation-models.js";
 import { PlanMarkdown } from "./mermaid-art.js";
 import { type DiffLine, planDiff, planDiffText, renderPlanDiff } from "./plan-diff.js";
-import { inPlan, isPlanFile, planName, planPaths, readPlan, tildify } from "./plan-file.js";
+import { inPlan, isPlanFile, planPaths, planTitle, readPlan, tildify } from "./plan-file.js";
 import { expandHome } from "./plan-hook.js";
 import { type PlannerAccessConfig, PlannerAgent } from "./planner/agent.js";
 import { CONSULT_WRAP_UP, consultMessage, reviewRequest, reviewVerdict } from "./planner/prompt.js";
@@ -72,11 +74,29 @@ interface AskDetails {
   activity?: string;
 }
 
+/** What the implementation touched, for the user's decision. */
+interface ChangeSummary {
+  /** Files the agent edited or wrote, relative to the project. */
+  edited: string[];
+  /** Of those, the files the plan does not list. */
+  outside: string[];
+  /** `git diff --shortstat HEAD`, when the project is a repository with changes. */
+  git?: string;
+}
+
 interface FinishDetails {
   report: string;
   planFile: string;
   outcome: "pending" | "done" | "review" | "kept";
+  changes?: ChangeSummary;
+  /** The planner that reviewed (or is reviewing) the work. */
+  reviewer?: string;
+  /** While the planner reviews: what it is doing. */
+  reviewing?: string;
+  /** The planner's review without its verdict line. */
   review?: string;
+  /** The review's verdict: nothing to fix. */
+  reviewClean?: boolean;
 }
 
 const NOT_ACTIVE = "No approved plan is being implemented.";
@@ -85,6 +105,8 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
   let state: ExecState | undefined;
   let agent: PlannerAgent | undefined;
   const noted = new Set<string>();
+  /** Files the agent edited or wrote with its tools while this mode was on. */
+  const touched = new Set<string>();
   let hostCtx: ExtensionContext | undefined;
 
   const safely = (fn: () => void) => {
@@ -99,7 +121,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     if (!ctx?.hasUI) return;
     let text: string | undefined;
     if (state?.active) {
-      text = `exec ${planName(state.planFile)}`;
+      text = "exec mode on";
       if (state.planner) text += ` · ${state.planner.name} on call`;
       if (state.asks > 0)
         text += ` · ${state.asks} ${state.asks === 1 ? "ask" : "asks"} · ${formatCost(state.costUsd)}`;
@@ -128,6 +150,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     hostCtx = ctx;
     disposeAgent();
     noted.clear();
+    touched.clear();
     state = { ...next };
     if (options.record) persist();
     setTools();
@@ -140,6 +163,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     persist();
     disposeAgent();
     noted.clear();
+    touched.clear();
     setToolsActive(pi, EXEC_TOOLS, false);
     state = undefined;
     updateStatus(ctx);
@@ -157,6 +181,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     hostCtx = ctx;
     disposeAgent();
     noted.clear();
+    touched.clear();
     const entries = ctx.sessionManager.getBranch() as Array<{ type?: string; customType?: string; data?: unknown }>;
     const latest = [...entries]
       .reverse()
@@ -342,22 +367,34 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
           : "";
       const planFile = current.planFile;
       const plannerName = current.planner?.name;
-      onUpdate?.({
-        content: [{ type: "text", text: report }],
-        details: { report, planFile, outcome: "pending" } satisfies FinishDetails,
-      } as never);
+      const changes = await summarizeChanges(current, touched, ctx.cwd);
+      let review: { by: string; text: string; clean: boolean } | undefined;
+      const show = (extra: Partial<FinishDetails> = {}) =>
+        onUpdate?.({
+          content: [{ type: "text", text: report }],
+          details: {
+            report,
+            planFile,
+            outcome: "pending",
+            changes,
+            ...(review ? { reviewer: review.by, review: review.text, reviewClean: review.clean } : {}),
+            ...extra,
+          } satisfies FinishDetails,
+        } as never);
+      show();
       const releaseBlocked = holdBlocked(pi.events, "Review the implementation");
       ctx.ui.setWorkingVisible?.(false);
-      let clean = false;
-      let note = "";
+      const done = (outcome: FinishDetails["outcome"]): FinishDetails => ({
+        report,
+        planFile,
+        outcome,
+        changes,
+        ...(review ? { reviewer: review.by, review: review.text, reviewClean: review.clean } : {}),
+      });
       try {
         for (;;) {
-          const options = [FINISH_DONE, ...(plannerName && !clean ? [FINISH_REVIEW] : []), FINISH_KEEP];
-          const choice = await ctx.ui.select(
-            `Accept the implementation of ${planName(planFile)}? ${tildify(planFile)}${note ? ` ${note}` : ""}`,
-            options,
-            { signal },
-          );
+          const options = [FINISH_DONE, ...(plannerName && !review ? [FINISH_REVIEW] : []), FINISH_KEEP];
+          const choice = await ctx.ui.select(acceptTitle(changes, review), options, { signal });
           if (choice === FINISH_DONE) {
             const finished = current;
             end(ctx);
@@ -371,32 +408,44 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
                   text: "The user accepted the implementation; the plan is done and exec mode is over. Stop here.",
                 },
               ],
-              details: { report, planFile, outcome: "done" } satisfies FinishDetails,
+              details: done("done"),
               terminate: true,
             } as never;
           }
           if (choice === FINISH_REVIEW) {
             const planner = consultant(ctx);
-            if (!planner || !plannerName) {
-              note = "";
-              continue;
+            if (!planner || !plannerName) continue;
+            const progress = () => show({ reviewer: plannerName, reviewing: planner.stats.lastActivity ?? "thinking" });
+            const unsubscribe = planner.subscribe(progress);
+            const onAbort = () => void planner.stop();
+            signal?.addEventListener("abort", onAbort, { once: true });
+            progress();
+            let result: Awaited<ReturnType<PlannerAgent["consult"]>>;
+            try {
+              result = await planner.consult(
+                reviewRequest(report),
+                ctx,
+                "implementer",
+                signal,
+                "Review the implementation",
+              );
+            } finally {
+              unsubscribe();
+              signal?.removeEventListener("abort", onAbort);
             }
-            const result = await planner.consult(
-              reviewRequest(report),
-              ctx,
-              "implementer",
-              signal,
-              "Review the implementation",
-            );
+            if (signal?.aborted) return text("Stopped waiting for the planner.");
             record(result.usage, ctx);
             if (result.error) {
               ctx.ui.notify(`The planner could not review it: ${result.error}`, "warning");
+              show();
               continue;
             }
             const reply = result.reply.trim();
-            if (reviewVerdict(reply) === "done") {
-              clean = true;
-              note = `${plannerName} found nothing to fix.`;
+            const clean = reviewVerdict(reply) === "done";
+            review = { by: plannerName, text: withoutVerdict(reply), clean };
+            if (clean) {
+              // The review stays on screen above the question; the user decides.
+              show();
               continue;
             }
             return {
@@ -406,7 +455,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
                   text: `The user had the planner review your work, and it found:\n\n${reply}\n\nFix these within the plan, then call finish_plan again.`,
                 },
               ],
-              details: { report, planFile, outcome: "review", review: reply } satisfies FinishDetails,
+              details: done("review"),
               usage: result.usage,
             } as never;
           }
@@ -417,7 +466,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
                 text: "The user wants more done before accepting it. Stop here: their next message says what.",
               },
             ],
-            details: { report, planFile, outcome: "kept" } satisfies FinishDetails,
+            details: done("kept"),
             terminate: true,
           } as never;
         }
@@ -433,6 +482,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     if (!state?.active || event.isError) return undefined;
     if (event.toolName !== "edit" && event.toolName !== "write") return undefined;
     const file = resolve(ctx.cwd, expandHome(String((event.input as { path?: unknown })?.path ?? "")));
+    if (!isPlanFile(file, ctx.cwd, state.planFile)) touched.add(file);
     if (noted.has(file)) return undefined;
     const hasPlanner = Boolean(state.planner);
     let note: string | undefined;
@@ -508,16 +558,70 @@ function renderAsk(details: AskDetails | undefined, options: { expanded: boolean
   return container;
 }
 
+const MAX_LISTED = 10;
+
+/** What the question puts beside "Accept?": what changed, and what the planner's review found. */
+function acceptTitle(changes: ChangeSummary, review: { by: string; clean: boolean } | undefined): string {
+  const parts: string[] = [];
+  if (changes.edited.length > 0) {
+    parts.push(`${changes.edited.length} ${changes.edited.length === 1 ? "file" : "files"} edited`);
+  }
+  if (changes.outside.length > 0) parts.push(`${changes.outside.length} outside the plan`);
+  if (review?.clean) parts.push(`${review.by} found nothing to fix`);
+  return `Accept the implementation?${parts.length > 0 ? ` ${parts.join(" · ")}` : ""}`;
+}
+
+/** A review without its closing `Verdict:` line, which the card shows as its own heading. */
+function withoutVerdict(reply: string): string {
+  return reply.replace(/\n?[ \t]*`?verdict:\s*(?:done|changes needed)`?[ \t]*\s*$/iu, "").trim();
+}
+
+function gitShortstat(cwd: string): Promise<string | undefined> {
+  return new Promise((done) => {
+    try {
+      execFile("git", ["--no-optional-locks", "diff", "--shortstat", "HEAD"], { cwd, timeout: 4000 }, (error, stdout) =>
+        done(error ? undefined : stdout.trim() || undefined),
+      );
+    } catch {
+      done(undefined);
+    }
+  });
+}
+
+async function summarizeChanges(state: ExecState, touched: ReadonlySet<string>, cwd: string): Promise<ChangeSummary> {
+  const files = [...touched];
+  const paths = planPaths(readPlan(state.planFile));
+  const shown = (list: string[]) => list.map((file) => relative(cwd, file) || file).sort();
+  const git = await gitShortstat(cwd);
+  return {
+    edited: shown(files),
+    outside: paths.length > 0 ? shown(files.filter((file) => !inPlan(file, cwd, paths))) : [],
+    ...(git ? { git } : {}),
+  };
+}
+
+/** The changes as Markdown, under the implementer's report. */
+function changesMarkdown(changes: ChangeSummary | undefined): string {
+  if (!changes || (changes.edited.length === 0 && !changes.git)) return "";
+  const lines = ["**Changed**", ""];
+  for (const file of changes.edited.slice(0, MAX_LISTED)) {
+    lines.push(`- \`${file}\`${changes.outside.includes(file) ? " (not in the plan)" : ""}`);
+  }
+  if (changes.edited.length > MAX_LISTED) lines.push(`- … and ${changes.edited.length - MAX_LISTED} more`);
+  if (changes.git) lines.push("", `git diff against HEAD: ${changes.git}`);
+  return `\n\n${lines.join("\n")}`;
+}
+
 function renderFinish(
   details: FinishDetails | undefined,
   options: { expanded: boolean; isPartial: boolean },
   theme: Theme,
 ) {
   if (!details?.report) return new Container();
-  const context = tildify(details.planFile);
+  const context = planTitle(details.planFile);
   const status: ReviewStatus =
     details.outcome === "done"
-      ? { tone: "success", text: "✓ Done", context }
+      ? { tone: "success", text: "✓ Accepted", context }
       : details.outcome === "review"
         ? { tone: "warning", text: "Sent back with the planner's review", context }
         : details.outcome === "kept"
@@ -525,15 +629,26 @@ function renderFinish(
           : { tone: "pending", text: "Waiting for acceptance", context };
   const body = reviewBody(
     theme,
-    details.report,
+    `${details.report}${changesMarkdown(details.changes)}`,
     status,
     options,
     (md) => new PlanMarkdown(md, getMarkdownTheme(), theme),
   );
-  if (details.outcome !== "review" || !details.review) return body;
+  if (!details.review && !details.reviewing) return body;
+  // The planner's review, in full, under the status (and so just above the question).
   const container = new Container();
   container.addChild(body);
-  container.addChild(new PlanMarkdown(details.review, getMarkdownTheme(), theme));
+  container.addChild(new Spacer(1));
+  const by = details.reviewer ?? "The planner";
+  if (details.reviewing && !details.review) {
+    container.addChild(new Text(theme.fg("muted", `${by} is reviewing · ${details.reviewing}`), 0, 0));
+    return container;
+  }
+  const verdict = details.reviewClean ? "found nothing to fix" : "found changes to make";
+  container.addChild(
+    new Text(theme.fg("toolTitle", theme.bold(`Review by ${by}`)) + theme.fg("dim", ` · ${verdict}`), 0, 0),
+  );
+  if (details.review) container.addChild(new PlanMarkdown(details.review, getMarkdownTheme(), theme));
   return container;
 }
 

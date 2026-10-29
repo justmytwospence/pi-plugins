@@ -4,6 +4,12 @@
 
 ### Minor Changes
 
+- Exec mode reads as a mode of your chat: its footer label takes the permission mode's place
+  (`exec mode on · auto`), and plans are named by their first heading, not their random file name,
+  in the footer, the handoff row, the approval question and the cards. `finish_plan`'s card lists
+  the files edited (flagging those outside the plan) and the git diffstat; the planner's review
+  appears on it in full, with live progress, whether it is clean or not.
+
 - Plan approval offers **Yes, yolo mode** when pi-tool-gate's cycle includes yolo.
 - A planner's question is a picker at the bottom of its lane, as in pi-ask-user-question: options,
   `Type something.` and `Skip`; arrows or `j`/`k` move, digits jump, Enter picks, typing on
@@ -28,8 +34,8 @@
 
 ### Major Changes
 
-- Exec mode follows any approved plan: the footer shows `exec <plan>` (on pi-status-footer's
-  permission-mode row), and the model that planned stays on call. After a handoff, the implementer
+- Exec mode follows any approved plan: the footer shows `exec mode on` (on pi-status-footer's
+  permission-mode row, in the mode's place, with the permission mode underneath dim after it), and the model that planned stays on call. After a handoff, the implementer
   gets `ask_planner`, which asks a copy of the planning session (every planner toolset, such as web
   research and MCP, command grants and read-only subagents, with the plan file as its only writable
   file) for a decision and shows any plan amendment as a diff; asks are counted

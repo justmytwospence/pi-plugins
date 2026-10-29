@@ -79,9 +79,27 @@ export function isPlanFile(path: unknown, cwd: string, planFile: string): boolea
   return resolve(cwd, expandHome(String(path ?? ""))) === resolve(planFile);
 }
 
-/** The plan file's name without `.md`, e.g. `calm-river`. */
+/** The plan file's name without `.md`, e.g. `calm-river`. Only a file name: never show it as what the plan is. */
 export function planName(file: string): string {
   return basename(file).replace(/\.md$/u, "");
+}
+
+/**
+ * What the plan is called for the user: its first heading (else its first line), with Markdown
+ * marks removed and long titles cut, e.g. `Toy demo: greet.mjs CLI`. "the plan" when it has none.
+ */
+export function planTitle(file: string, max = 60): string {
+  const line = readPlan(file)
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l && !/^(```|---)/u.test(l));
+  const title = (line ?? "")
+    .replace(/^#+\s*/u, "")
+    .replace(/^plan\s*:\s*(?=\S)/iu, "")
+    .replace(/[`*_]/gu, "")
+    .trim();
+  if (!title) return "the plan";
+  return title.length > max ? `${title.slice(0, max - 1).trimEnd()}…` : title;
 }
 
 /** The plan file's trimmed contents, or "" when it is missing. */
