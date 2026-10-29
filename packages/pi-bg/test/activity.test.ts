@@ -256,12 +256,12 @@ it("a pill with rows: ↓ selects the first row, ↑↓ move through rows and la
       const idle = widget.render(100);
       expect(idle).toHaveLength(3);
       expect(idle[0]).toContain("a.py");
-      expect(idle[1]).toMatch(/● b\.py {2}:2719 · running Fit +0:12/u);
+      expect(idle[1]).toMatch(/○ b\.py {2}:2719 · running Fit +0:12/u);
       expect(idle[2]).toContain("1 task");
       expect(pill.handleKey("\x1b[B")).toEqual({ consume: true });
       // No hint line under the rows; the selected one is on the selection background.
       expect(widget.render(100)).toHaveLength(3);
-      expect(widget.render(100)[0]).toContain("\x1b[7m");
+      expect(widget.render(100)[0]).toContain(" ● a.py");
       expect(pill.handleKey("\x1b[B")).toEqual({ consume: true });
       expect(pill.handleKey("\r")).toEqual({ consume: true });
       expect(openRow).toHaveBeenCalledExactlyOnceWith("b");
@@ -336,17 +336,18 @@ it("the combined pill, with no label of its own, lists a hosted guest's rows", a
   const widget = [...c.widgets.values()].at(-1);
   expect(widget).toBeDefined();
   const text = widget({ ...tui, getFocusedComponent: () => undefined }, theme).render(100).join("\n");
-  expect(text).toMatch(/● nb\.py {2}:2718 +0:03/u);
+  expect(text).toMatch(/○ nb\.py {2}:2718 +0:03/u);
 });
 
-it("a row with its own styled line draws it after the status glyph, on the selection background while selected", async () => {
+it("a row with its own styled line draws it after the dot, which is filled while selected", async () => {
   const { PillView: NotebookPill } = await import(new URL("../../pi-marimo/src/pill.ts", import.meta.url).href);
   const { renderPill } = await import("../src/pill.ts");
   const row = { key: "a", label: "a.py", detail: "", status: "done" as const, stats: "", startedAt: 0, line: (t: { fg(c: string, s: string): string }) => `Marimo ${t.fg("accent", "a.py")}:2718 · idle` };
   const pill = { label: "", rows: [row] };
   expect(renderPill(pill, false, 80, theme)).toEqual([" ○ Marimo a.py:2718 · idle"]);
-  expect(renderPill(pill, { index: 0 }, 80, theme)[0]).toBe(`\x1b[7m ○ Marimo a.py:2718 · idle${" ".repeat(80 - 26)}\x1b[27m`);
-  expect(renderPill(pill, { index: 0 }, 80, { ...theme, bg: (c: string, t: string) => `<${c}>${t}</>` })[0]).toBe(`<selectedBg> ○ Marimo a.py:2718 · idle${" ".repeat(80 - 26)}</>`);
+  expect(renderPill(pill, { index: 0 }, 80, theme)[0]).toBe(" ● Marimo a.py:2718 · idle");
+  // A failed row says so at the right, before its stats.
+  expect(renderPill({ label: "", rows: [{ ...row, status: "failed" as const }] }, false, 30, theme)[0]).toBe(" ○ Marimo a.py:2718 · idle   ✗");
   expect(NotebookPill).toBeDefined();
 });
 

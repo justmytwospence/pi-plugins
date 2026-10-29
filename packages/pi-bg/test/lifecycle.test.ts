@@ -138,7 +138,7 @@ describe("session cleanup", () => {
     expect(first.reads).not.toHaveBeenCalled();
     expect(reg.off).toHaveBeenCalledOnce();
     expect(reg.listeners.size).toBe(1);
-    expect(next.widgetLines()).toEqual([" 1 task "]);
+    expect(next.widgetLines()).toEqual([" ○ 1 task"]);
     expect(vi.getTimerCount()).toBe(2); // One current status interval and startup immediate.
     first.reads.mockClear();
     next.reads.mockClear();
@@ -270,7 +270,7 @@ describe("pill cleanup", () => {
     const next = session();
     pill.setUI(next.ctx.ui as any);
     pill.update();
-    expect(next.widgetLines()).toEqual([" work "]);
+    expect(next.widgetLines()).toEqual([" ○ work"]);
     expect(savedInput("\x1b[B")).toBeUndefined();
     expect(savedWidget.render(80)).toEqual([]);
     expect(next.press("\x1b[B")).toBe(true);
@@ -281,7 +281,7 @@ describe("pill cleanup", () => {
     inputSubscription.mockRestore();
     pill.setUI(c.ctx.ui as any);
     pill.update();
-    expect(c.widgetLines()).toEqual([" work "]);
+    expect(c.widgetLines()).toEqual([" ○ work"]);
     expect(savedInput("\x1b[B")).toBeUndefined();
     expect(savedWidget.render(80)).toEqual([]);
     expect(savedWidget.handleMouse({ type: "click", button: "left" })).toBeUndefined();

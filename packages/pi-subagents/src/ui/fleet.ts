@@ -91,7 +91,7 @@ export interface FleetFrame {
   note?: string;
   now: number;
   width: number;
-  theme: Theme & { inverse?(text: string): string; bg?(color: string, text: string): string };
+  theme: Theme & { inverse?(text: string): string };
 }
 
 export function renderFleet({ roster, selected, current, active, stopArmed, canBackground, normalKeys = true, note, now, width, theme }: FleetFrame): string[] {
@@ -101,13 +101,7 @@ export function renderFleet({ roster, selected, current, active, stopArmed, canB
   const pills = roster.flatMap((e, i) => (e.kind === "pill" || e.kind === "row" ? [{ e, i }] : []));
   const sel = Math.min(selected, Math.max(0, roster.length - 1));
   const chosen = active ? roster[sel] : undefined;
-  // The selected row is drawn on pi's selection background, as in the tasks dialog and pi-bg's rows.
-  const highlight = (text: string) => {
-    const clipped = truncateToWidth(text, width, "");
-    const padded = `${clipped}${" ".repeat(Math.max(0, width - visibleWidth(clipped)))}`;
-    return theme.bg ? theme.bg("selectedBg", padded) : theme.inverse ? theme.inverse(padded) : `\x1b[7m${padded}\x1b[27m`;
-  };
-  const bullet = (i: number) => (i === current ? theme.fg("text", "◉") : theme.fg("dim", "○"));
+  const bullet = (i: number) => (active && i === sel ? theme.fg("accent", "●") : i === current ? theme.fg("text", "◉") : theme.fg("dim", "○"));
   if (runs.length) {
     const stoppable = normalKeys && chosen?.kind === "run" && chosen.run.state.status === "running";
     const dismissable = normalKeys && chosen?.kind === "run" && chosen.run.state.status !== "running";
@@ -126,8 +120,7 @@ export function renderFleet({ roster, selected, current, active, stopArmed, canB
     if (hint !== undefined) lines.push(truncateToWidth(` ${hint}`, width));
     // Bold for the selected row and for the session shown now, as for the runs below.
     const mainOn = (active && sel === 0) || current === 0;
-    const mainLine = ` ${bullet(0)} ${mainOn ? theme.bold(theme.fg("text", "main")) : theme.fg("muted", "main")}`;
-    lines.push(active && sel === 0 ? highlight(mainLine) : truncateToWidth(mainLine, width));
+    lines.push(truncateToWidth(` ${bullet(0)} ${mainOn ? theme.bold(theme.fg("text", "main")) : theme.fg("muted", "main")}`, width));
     // Runs are roster rows 1..runs.length; scroll so the selected one shows.
     const visible = Math.min(MAX_ROWS, runs.length);
     const selRun = chosen?.kind === "run" ? sel - 1 : current !== undefined && roster[current]?.kind === "run" ? current - 1 : 0;
@@ -142,8 +135,7 @@ export function renderFleet({ roster, selected, current, active, stopArmed, canB
       const cost = formatCost(run.state.usage.cost.total);
       const stats = `${formatElapsed(elapsedMs(run, now))} · ↓ ${formatCount(displayTokens(run.state.usage))} tokens${cost ? ` · ${cost}` : ""}`;
       const done = run.state.status === "running" ? "" : `${statusIcon(run.state.status, theme)} `;
-      const rows = taskRows(prefix, identity, done + theme.fg(on ? "text" : "dim", stats), width, true);
-      lines.push(...(active && i + 1 === sel ? rows.map(highlight) : rows));
+      lines.push(...taskRows(prefix, identity, done + theme.fg(on ? "text" : "dim", stats), width, true));
     }
     const below = runs.length - (start + visible);
     if (below > 0) lines.push(rightAlign("", theme.fg("dim", `↓ ${below} more`), width));
@@ -153,22 +145,20 @@ export function renderFleet({ roster, selected, current, active, stopArmed, canB
     if (e.kind === "row") {
       const on = active && i === sel;
       const armed = on && stopArmed;
-      const icon = e.row.status === "running" ? theme.fg("accent", "●") : e.row.status === "failed" ? theme.fg("error", "✗") : e.row.status === "stopped" ? theme.fg("warning", "■") : theme.fg("dim", "○");
       const name = on ? theme.bold(theme.fg("text", e.row.label)) : theme.fg("muted", e.row.label);
-      const lead = ` ${icon} `;
-      const rows = e.row.line
-        ? [truncateToWidth(`${lead}${e.row.line(theme)}${armed ? `  ${theme.fg("error", "x again to stop")}` : ""}`, width)]
-        : taskRows(lead, `${name}${e.row.detail ? `  ${theme.fg("dim", e.row.detail)}` : ""}`, theme.fg(on ? "text" : "dim", armed ? "x again to stop" : e.row.stats), width, true);
-      lines.push(...(on ? rows.map(highlight) : rows));
+      const lead = ` ${bullet(i)} `;
+      // How it ended goes before the stats, as for a run: `✗` failed, `■` stopped.
+      const end = e.row.status === "failed" ? `${theme.fg("error", "✗")} ` : e.row.status === "stopped" ? `${theme.fg("warning", "■")} ` : "";
+      const tail = armed ? theme.fg("error", "x again to stop") : e.row.line ? "" : theme.fg(on ? "text" : "dim", e.row.stats);
+      lines.push(...taskRows(lead, e.row.line ? e.row.line(theme) : `${name}${e.row.detail ? `  ${theme.fg("dim", e.row.detail)}` : ""}`, `${end}${tail}`.trimEnd(), width, true));
       continue;
     }
     if (e.kind !== "pill") continue;
     const on = active && i === sel;
-    const label = theme.fg(on ? "text" : "muted", ` ${e.pill.label} `);
+    const label = ` ${bullet(i)} ${on ? theme.bold(theme.fg("text", e.pill.label)) : theme.fg("muted", e.pill.label)}`;
     const alert = e.pill.alert ? ` ${theme.fg("dim", "·")} ${theme.fg("error", e.pill.alert)}` : "";
     const hint = on && !runs.length && !pills.some((p) => p.e.kind === "row") ? theme.fg("dim", normalKeys ? "  l/enter view · h/esc back" : "  enter view · esc back") : "";
-    const pillLine = `${label}${alert}${hint}`;
-    lines.push(on ? highlight(pillLine) : truncateToWidth(pillLine, width));
+    lines.push(truncateToWidth(`${label}${alert}${hint}`, width));
   }
   if (note) lines.push(truncateToWidth(` ${theme.fg("dim", note)}`, width));
   // Pi puts the footer right under below-editor widgets.

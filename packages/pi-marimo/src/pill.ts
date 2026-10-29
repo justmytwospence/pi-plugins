@@ -35,28 +35,29 @@ export function pillSlots(pill: ActivityPill | undefined): Array<{ kind: "row"; 
   return [...(pill.rows ?? []).map((row) => ({ kind: "row" as const, row })), ...(pill.label || pill.alert ? [{ kind: "label" as const }] : [])];
 }
 
-/** The selection style of every list under the prompt and of the tasks dialog: the whole row on pi's selection background. */
-export function highlight(theme: Theme, text: string, width: number): string {
-  const padded = `${truncateToWidth(text, width, "")}${" ".repeat(Math.max(0, width - visibleWidth(truncateToWidth(text, width, ""))))}`;
-  return theme.bg ? theme.bg("selectedBg", padded) : theme.inverse ? theme.inverse(padded) : `\x1b[7m${padded}\x1b[27m`;
+/** The selection mark of every list under the prompt, the tasks dialog and the subagents list: a filled dot for the selected row, a hollow one for the rest. */
+export const bullet = (selected: boolean, theme: Theme): string => (selected ? theme.fg("accent", "●") : theme.fg("dim", "○"));
+
+/** What an ended row says about how it ended, before its stats: `✗` failed, `■` stopped; running and done rows say nothing. */
+export function endMark(status: ActivityEntry["status"], theme: Theme): string {
+  return status === "failed" ? theme.fg("error", "✗") : status === "stopped" ? theme.fg("warning", "■") : "";
 }
 
-/** One row: ` ○ fit.py  :2718 · idle                         2:14`, on the selection background while selected. */
+/** One row: ` ○ fit.py  :2718 · idle                         ✗ 2:14`, the dot filled and the name bold while selected. */
 function renderRow(row: ActivityEntry, selected: boolean, width: number, theme: Theme): string {
-  const icon = row.status === "running" ? theme.fg("accent", "●") : row.status === "failed" ? theme.fg("error", "✗") : row.status === "stopped" ? theme.fg("warning", "■") : theme.fg("dim", "○");
   // A source's own styled line (pi-marimo's notebooks) is drawn as it is.
-  let line: string;
-  if (row.line) line = ` ${icon} ${row.line(theme)}`;
-  else {
-    const left = ` ${icon} ${selected ? theme.bold(theme.fg("text", row.label)) : theme.fg("muted", row.label)}${row.detail ? `  ${theme.fg("dim", row.detail)}` : ""}`;
-    const right = row.stats ? theme.fg(selected ? "text" : "dim", row.stats) : "";
-    const gap = width - visibleWidth(left) - visibleWidth(right) - 1;
-    line = right && gap >= 2 ? `${left}${" ".repeat(gap)}${right}` : left;
-  }
-  return selected ? highlight(theme, line, width) : truncateToWidth(line, width);
+  const body = row.line ? row.line(theme) : `${selected ? theme.bold(theme.fg("text", row.label)) : theme.fg("muted", row.label)}${row.detail ? `  ${theme.fg("dim", row.detail)}` : ""}`;
+  const left = ` ${bullet(selected, theme)} ${body}`;
+  const stats = row.line || !row.stats ? "" : theme.fg(selected ? "text" : "dim", row.stats);
+  const right = [endMark(row.status, theme), stats].filter(Boolean).join(" ");
+  if (!right) return truncateToWidth(left, width);
+  // The right side (how it ended, its stats) is kept; the name gives way.
+  const room = Math.max(8, width - visibleWidth(right) - 1);
+  const fitted = truncateToWidth(left, room);
+  return truncateToWidth(`${fitted}${" ".repeat(Math.max(1, width - visibleWidth(fitted) - visibleWidth(right)))}${right}`, width);
 }
 
-/** The pill's lines: its rows, the label line (on the selection background when selected, with a key hint), and `x again to stop` under the rows while one is armed. */
+/** The pill's lines: its rows, the label line (a filled dot when selected, with a key hint), and `x again to stop` under the rows while one is armed. */
 export function renderPill(pill: ActivityPill | undefined, selected: boolean | PillSelection, width: number, theme: Theme, stoppableRow: (row: ActivityEntry) => boolean = () => false): string[] {
   if (!pill) return [];
   const slots = pillSlots(pill);
@@ -68,11 +69,10 @@ export function renderPill(pill: ActivityPill | undefined, selected: boolean | P
       return;
     }
     const on = sel?.index === i;
-    const label = theme.fg(on ? "text" : "muted", ` ${pill.label} `);
+    const label = on ? theme.bold(theme.fg("text", pill.label)) : theme.fg("muted", pill.label);
     const alert = pill.alert ? `${theme.fg("dim", "·")} ${theme.fg("error", pill.alert)}` : "";
     const hint = on ? theme.fg("dim", "  enter view · esc back") : "";
-    const line = `${label}${alert ? ` ${alert}` : ""}${hint}`;
-    lines.push(on ? highlight(theme, line, width) : truncateToWidth(line, width));
+    lines.push(truncateToWidth(` ${bullet(on, theme)} ${label}${alert ? ` ${alert}` : ""}${hint}`, width));
   });
   // The only line under the rows is the confirmation `x` asks for.
   const at = sel ? slots[sel.index] : undefined;

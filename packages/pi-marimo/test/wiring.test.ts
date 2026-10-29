@@ -196,14 +196,14 @@ test("the notebooks as background work: a source for the hosts, its own pill alo
   const entries = section.entries(Date.now());
   expect(entries).toEqual([expect.objectContaining({ key: JSON.stringify([SERVER, `${CWD}/nb.py`]), label: "nb.py", status: "running", detail: "running Slow model fit · 1 queued · bg fit · server s1" })]);
   // Alone, its own pill; hosted (by pi-bg, then pi-subagents too), none; the last host leaving brings it back.
-  await until(() => /● Marimo nb\.py:2799 · running Data loading › Slow model fit/u.test(x.pillText() ?? ""));
+  await until(() => /○ Marimo nb\.py:2799 · running Data loading › Slow model fit/u.test(x.pillText() ?? ""));
   section.setHosted(true, "pi-bg");
   expect([...x.widgets.keys()].filter((k) => k !== "pi-marimo-tui").length).toBe(0);
   section.setHosted(true);
   section.setHosted(false, "pi-bg");
   expect([...x.widgets.keys()].filter((k) => k !== "pi-marimo-tui").length).toBe(0);
   x.pi.events.emit("activity:gone", { id: "subagents" });
-  await until(() => /● Marimo nb\.py/u.test(x.pillText() ?? ""));
+  await until(() => /○ Marimo nb\.py/u.test(x.pillText() ?? ""));
   // The rows are the pill's: a host draws them and opens a row with the section's open(key).
   expect(section.pill(Date.now())).toMatchObject({ label: "", rows: [{ key: entries[0].key, label: "nb.py", status: "running" }] });
   // In the TUI the notebooks are rows under the prompt, not footer lines.
@@ -224,7 +224,7 @@ test("the notebooks as background work: a source for the hosts, its own pill alo
   view.dispose();
   // The run ends with an error: its row reads failed until the user's next message.
   server.feeds.at(-1)!(rest);
-  await until(() => /✗ Marimo nb\.py/u.test(x.pillText() ?? ""));
+  await until(() => /Marimo nb\.py.*✗/u.test(x.pillText() ?? ""));
   expect(section.entries(Date.now())[0]).toMatchObject({ status: "failed", stats: expect.stringMatching(/^ran \d+s · 1 error/u) });
   await x.fire("input", { source: "interactive" });
   await until(() => !/✗/u.test(x.pillText() ?? ""));

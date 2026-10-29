@@ -60,7 +60,7 @@ test("hosting: a source offered before or after our session start ends FleetView
   expect(emitted.some(([c]) => c === ACTIVITY_HOST)).toBe(true);
   expect(tasks.calls.hosted).toEqual([true]);
   // No runs: FleetView is just the pill.
-  expect(ui.render("subagents-fleet")).toEqual([" 2 tasks ", ""]);
+  expect(ui.render("subagents-fleet")).toEqual([" ○ 2 tasks", ""]);
   // Offered again: still shown, not toggled.
   h.pi.events.emit(ACTIVITY_SECTION, { section: tasks.section });
   expect(tasks.calls.hosted).toEqual([true]);
@@ -84,7 +84,7 @@ test("prompt Tab reaches the hosted background pill and stops at shutdown", asyn
   const request = { handled: false, phase: "enter" };
   h.pi.events.emit("activity:prompt-tab", request);
   expect(request.handled).toBe(true);
-  expect(ui.render("subagents-fleet")[0]).toContain("\x1b[7m");
+  expect(ui.render("subagents-fleet")[0]).toContain("● 2 tasks");
   expect(ui.editorText).toBe("preserved draft");
   expect(ui.press("\t")).toBe(true);
   expect(ui.press("\r")).toBe(true);
