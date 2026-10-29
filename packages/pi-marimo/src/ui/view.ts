@@ -13,6 +13,7 @@ import type { CellOutput } from "../core/output.js";
 import { ChartRenderer, VegaRenderer as VegaRendererImpl, type VegaRenderer } from "../core/vega.js";
 import { sharedPlotly } from "../core/plotly.js";
 import { LiveCharts, type LiveRect, liveGeometry } from "./live-charts.js";
+import { Painter } from "./painter.js";
 import type { Geometry } from "../core/live.js";
 import type { Cell, NotebookState } from "../core/notebook.js";
 import { elapsed } from "../core/render.js";
@@ -270,7 +271,7 @@ export class NotebookView implements Component {
   ) {
     this.vega = vega;
     this.plotly = plotly;
-    this.live = live ?? new LiveCharts(() => { if (!this.closed) this.tui.requestRender(); });
+    this.live = live ?? new LiveCharts(() => { if (!this.closed) this.tui.requestRender(); }, undefined, undefined, undefined, () => Painter.for(this.tui));
     this.timer = setInterval(() => {
       if (!this.closed) {
         this.syncConfirmation();

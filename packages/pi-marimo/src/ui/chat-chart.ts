@@ -4,6 +4,7 @@
 import { type Component, Image, type TuiMouseEvent, type TuiMouseEventResult, getCapabilities, truncateToWidth } from "@earendil-works/pi-tui";
 import type { CellOutput } from "../core/output.js";
 import { LiveCharts, liveGeometry } from "./live-charts.js";
+import { Painter } from "./painter.js";
 
 /** What the transcript keeps for a chart: enough to draw it again after a restart. */
 export interface ChartEntry {
@@ -42,9 +43,9 @@ export class ChatChart implements Component {
   readonly live: LiveCharts;
   private image: Image | undefined;
 
-  constructor(readonly entry: ChartEntry, private readonly theme: Theme, requestRender: () => void, live?: LiveCharts) {
+  constructor(readonly entry: ChartEntry, private readonly theme: Theme, requestRender: () => void, live?: LiveCharts, tui?: () => unknown) {
     this.output = { kind: "chart", text: entry.label, ...(entry.plotly ? { plotly: entry.plotly } : {}) };
-    this.live = live ?? new LiveCharts(requestRender);
+    this.live = live ?? new LiveCharts(requestRender, undefined, undefined, undefined, () => Painter.for(tui?.()));
     charts.push(this);
     if (charts.length > 8) charts.shift()?.dispose();
   }

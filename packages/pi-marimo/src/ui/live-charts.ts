@@ -4,6 +4,7 @@ import { allocateImageId, getCellDimensions, matchesKey, type TuiMouseEvent } fr
 import type { CellOutput } from "../core/output.js";
 import { type ChromeHost, sharedChrome } from "../core/chrome.js";
 import { type Geometry, LiveChart, type Pointer } from "../core/live.js";
+import type { Painter } from "./painter.js";
 
 /** What a live page must do for the view (LiveChart does; tests stand in). */
 export interface LivePage {
@@ -15,7 +16,7 @@ export type OpenLive = (host: ChromeHost, figure: string, geometry: Geometry, on
 
 export type LiveState =
   | { status: "opening" }
-  | { status: "ready"; page: LivePage; frame: string; imageId: number; geometry: Geometry; buffers: [number, number]; shown: 0 | 1 }
+  | { status: "ready"; page: LivePage; frame: string; imageId: number; geometry: Geometry; buffers: [number, number]; shown: 0 | 1; slot?: number }
   | { status: "failed"; reason: string };
 
 /** Where a drawn chart sits in the view's lines, and what to send events to. */
@@ -79,10 +80,19 @@ export class LiveCharts {
     private readonly host: () => ChromeHost = sharedChrome,
     private readonly open: OpenLive = LiveChart.open,
     private readonly write: Write = stdoutWrite,
+    /** Draws frames without flicker where the TUI allows it (painter.ts); otherwise the lines place them. */
+    private readonly painter: () => Painter | undefined = () => undefined,
   ) {}
 
   /** Uploads a frame to the hidden buffer and shows it. */
   private present(state: Extract<LiveState, { status: "ready" }>, png: string): void {
+    const painter = this.painter();
+    if (painter) {
+      state.slot ??= painter.add(state.geometry);
+      state.frame = png;
+      painter.present(state.slot, png);
+      return;
+    }
     const next = state.shown === 0 ? 1 : 0;
     this.write(transmission(png, state.buffers[next]));
     state.frame = png;
@@ -92,6 +102,8 @@ export class LiveCharts {
 
   /** The lines that place a ready chart. */
   lines(state: Extract<LiveState, { status: "ready" }>): string[] {
+    const painter = state.slot !== undefined ? this.painter() : undefined;
+    if (painter && state.slot !== undefined) return painter.lines(state.slot, state.geometry.rows);
     return placementLines(state.imageId, state.geometry);
   }
 
@@ -99,7 +111,7 @@ export class LiveCharts {
   refresh(): void {
     setTimeout(() => {
       let any = false;
-      for (const state of this.states.values()) if (state.status === "ready") { this.present(state, state.frame); any = true; }
+      for (const state of this.states.values()) if (state.status === "ready" && state.slot === undefined) { const f = state.frame; state.frame = ""; this.present(state, f); any = true; }
       if (any) this.onChange();
     }, 0);
   }
@@ -114,7 +126,7 @@ export class LiveCharts {
   endFrame(): void {
     for (const [output, state] of this.states) {
       if (this.seen.has(output)) continue;
-      if (state.status === "ready") state.page.close();
+      if (state.status === "ready") { state.page.close(); if (state.slot !== undefined) this.painter()?.remove(state.slot); }
       this.states.delete(output);
     }
     if (this.states.size === 0 && !this.idle) {
@@ -129,7 +141,7 @@ export class LiveCharts {
     const key = `${geometry.cols}x${geometry.rows}@${geometry.cellW}x${geometry.cellH}`;
     const known = this.states.get(output);
     if (known && known.key === key) return known;
-    if (known?.status === "ready") known.page.close();
+    if (known?.status === "ready") { known.page.close(); if (known.slot !== undefined) this.painter()?.remove(known.slot); }
     const fresh: LiveState & { key: string } = { status: "opening", key };
     this.states.set(output, fresh);
     this.open(this.host(), figure, geometry, (png) => {
@@ -226,7 +238,7 @@ export class LiveCharts {
 
   dispose(): void {
     if (this.idle) clearTimeout(this.idle);
-    for (const state of this.states.values()) if (state.status === "ready") state.page.close();
+    for (const state of this.states.values()) if (state.status === "ready") { state.page.close(); if (state.slot !== undefined) this.painter()?.remove(state.slot); }
     this.states.clear();
   }
 }

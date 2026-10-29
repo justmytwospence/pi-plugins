@@ -524,7 +524,7 @@ export default function piMarimo(pi: ExtensionAPI): void {
     if (!entry.data) return undefined;
     const known = chartComponents.get(entry.id);
     if (known) return known;
-    const chart = new ChatChart(entry.data, theme, () => tuiRef?.requestRender());
+    const chart = new ChatChart(entry.data, theme, () => tuiRef?.requestRender(), undefined, () => tuiRef);
     chartComponents.set(entry.id, chart);
     return chart;
   });

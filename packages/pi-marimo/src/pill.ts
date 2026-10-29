@@ -56,7 +56,7 @@ function renderRow(row: ActivityEntry, selected: boolean, width: number, theme: 
   return selected ? highlight(theme, line, width) : truncateToWidth(line, width);
 }
 
-/** The pill's lines: its rows, the label line (inverse when selected, with a key hint), and a hint under the rows while one is selected. */
+/** The pill's lines: its rows, the label line (on the selection background when selected, with a key hint), and `x again to stop` under the rows while one is armed. */
 export function renderPill(pill: ActivityPill | undefined, selected: boolean | PillSelection, width: number, theme: Theme, stoppableRow: (row: ActivityEntry) => boolean = () => false): string[] {
   if (!pill) return [];
   const slots = pillSlots(pill);
@@ -74,12 +74,9 @@ export function renderPill(pill: ActivityPill | undefined, selected: boolean | P
     const line = `${label}${alert ? ` ${alert}` : ""}${hint}`;
     lines.push(on ? highlight(theme, line, width) : truncateToWidth(line, width));
   });
+  // The only line under the rows is the confirmation `x` asks for.
   const at = sel ? slots[sel.index] : undefined;
-  if (at?.kind === "row") {
-    const armed = sel!.armed === rowStopKey(at.row);
-    const stop = armed ? theme.fg("error", " · x again to stop") : stoppableRow(at.row) ? theme.fg("dim", " · x stop") : "";
-    lines.push(truncateToWidth(theme.fg("dim", "   enter view · ↑↓ move · esc back") + stop, width));
-  }
+  if (at?.kind === "row" && sel!.armed === rowStopKey(at.row)) lines.push(truncateToWidth(theme.fg("error", "   x again to stop"), width));
   return lines;
 }
 
