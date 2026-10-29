@@ -43,7 +43,7 @@ No sibling extension is required. A custom footer, background manager, and Herdr
 
 An unknown subcommand gets a warning listing these.
 
-Auto mode follows up to eight notebooks (`maxNotebooks`) and excludes hidden directories, including nested worktree directories. Notebooks opened with `/marimo edit` or `/marimo new` are followed wherever they are. Pinned paths are remembered in the Pi session across reloads and server restarts; pinning a closed notebook does not start its server (`/marimo edit` does). The mode is session state.
+Auto mode follows up to eight notebooks (`maxNotebooks`) and excludes hidden directories (including nested worktree directories) and other Git repositories below the working directory, so starting Pi in a directory of projects follows none of theirs. Notebooks opened with `/marimo edit` or `/marimo new` are followed wherever they are. Pinned paths are remembered in the Pi session across reloads and server restarts; pinning a closed notebook does not start its server (`/marimo edit` does). The mode is session state.
 
 ## Start notebooks from Pi
 

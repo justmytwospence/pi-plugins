@@ -138,7 +138,7 @@ marimo streams every kernel message to the browser over `/ws`, and the same stre
 
 The view's actions are separate requests to the session's kernel endpoints, as the browser's buttons make them: `/api/kernel/run`, `/interrupt`, `/set_ui_element_value`, `/set_model_value` (a Lens command) and `/execute` (the scratchpad), with marimo's server token.
 
-**Which notebooks.** In `auto` mode it follows every notebook open under Pi's working directory, up to eight (`maxNotebooks`), found through marimo's server registry (`$XDG_STATE_HOME/marimo/servers`, default `~/.local/state/marimo/servers`, written by servers started with `--no-token`) and each server's `/api/sessions`. Notebooks inside a hidden directory under the working directory (`.worktrees/`, `.claude/worktrees/`) are left out. Notebooks opened with `/marimo edit` or `/marimo new` are followed wherever they are. Token-protected servers are reached with `MARIMO_TOKEN`. `/marimo` pins a set instead.
+**Which notebooks.** In `auto` mode it follows every notebook open under Pi's working directory, up to eight (`maxNotebooks`), found through marimo's server registry (`$XDG_STATE_HOME/marimo/servers`, default `~/.local/state/marimo/servers`, written by servers started with `--no-token`) and each server's `/api/sessions`. Notebooks inside a hidden directory under the working directory (`.worktrees/`, `.claude/worktrees/`) or inside another Git repository below it (a directory of projects such as `~/Projects`, a submodule) are left out. Notebooks opened with `/marimo edit` or `/marimo new` are followed wherever they are. Token-protected servers are reached with `MARIMO_TOKEN`. `/marimo` pins a set instead.
 
 **Which notebooks are this session's.** The rows, footer, Lens line and context cover only the notebooks this session uses: the pinned ones, the ones it opened, and the ones its agent has worked in through marimo-pair (remembered in the session). The current one, first in context, is the one this session's agent last worked in, read from its marimo-pair calls (`execute-code.sh` or `marimo pair execute`, by `--file`, `--session`, or `--url` when only one followed notebook is on that server), including calls from codemode scripts. A marimo-pair call at a server whose notebook is open in no browser opens it first, without a browser.
 
@@ -219,7 +219,7 @@ A Lens selection you make while Pi is idle offers `Use Lens to address S1 in fit
 - Tables show the first page marimo sends; no paging, sorting or filtering.
 - Widget values changed in a browser show in the view after a reconnect (marimo sends kiosk viewers no live widget values); the ones set from Pi show at once.
 - The agent's changes are any code-mode change, whichever agent made it.
-- In `auto` mode, at most `maxNotebooks` notebooks are followed, only those under Pi's working directory and outside hidden directories, plus the ones opened with `/marimo edit|new`.
+- In `auto` mode, at most `maxNotebooks` notebooks are followed, only those under Pi's working directory, outside hidden directories and other Git repositories below it, plus the ones opened with `/marimo edit|new`.
 - Only servers listed in marimo's server registry are followed. Waiting servers are shown only when they serve one notebook.
 - The context block can be a turn old while the agent runs cells.
 - The rows and the notebook view exist only in the TUI.

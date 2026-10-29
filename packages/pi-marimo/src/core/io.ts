@@ -23,6 +23,8 @@ export interface Io {
   postJson?(url: string, headers: Record<string, string>, body: unknown, timeoutMs: number): Promise<unknown>;
   /** GET a streaming body, handing over its text as it arrives. */
   stream(url: string, headers: Record<string, string>, onText: (text: string) => void): Cancellable<StreamEnd>;
+  /** Whether a file or directory exists. Hosts without it treat other repositories under the cwd as the cwd's. */
+  exists?(path: string): Promise<boolean>;
   /** The path with symlinks resolved (macOS /tmp is /private/tmp); the path itself when that fails. */
   realpath(path: string): Promise<string>;
   sleep(ms: number): Cancellable<void>;

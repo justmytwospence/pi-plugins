@@ -1,6 +1,6 @@
 // The Io of a Node or Bun host (pi, opencode).
 
-import { readdir, readFile, realpath } from "node:fs/promises";
+import { access, readdir, readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Cancellable, Io, StreamEnd } from "./io.js";
@@ -84,6 +84,15 @@ export function nodeIo(options: { registryDir?: string; fetch?: typeof fetch } =
         }
       })();
       return { done, cancel: () => controller.abort() };
+    },
+
+    async exists(path) {
+      try {
+        await access(path);
+        return true;
+      } catch {
+        return false;
+      }
     },
 
     async realpath(path) {

@@ -160,6 +160,8 @@ export class MarimoWatcher {
   private readonly engagedPaths = new Set<string>();
   // Canonical paths of the notebooks this session opened itself (/marimo edit, /marimo new): followed in any mode but off.
   private readonly includedPaths = new Set<string>();
+  // Directories below the cwd, by whether they hold a Git repository of their own.
+  private readonly repoDirs = new Map<string, boolean>();
 
   constructor(private readonly options: WatcherOptions) {}
 
@@ -345,6 +347,30 @@ export class MarimoWatcher {
     return real;
   }
 
+  /**
+   * Whether auto mode counts a notebook as the cwd's: under it, not in a hidden directory there
+   * (.worktrees, .claude/worktrees: other checkouts), and not in another Git repository below it
+   * (a directory of projects such as ~/Projects holds many; a submodule is its own repository too).
+   */
+  private async local(path: string, cwd: string): Promise<boolean> {
+    if (!within(path, cwd)) return false;
+    const dirs = path.slice(cwd.length).split("/").filter(Boolean).slice(0, -1);
+    if (dirs.some((part) => part.startsWith("."))) return false;
+    const exists = this.options.io.exists;
+    if (!exists) return true;
+    let dir = cwd === "/" ? "" : cwd;
+    for (const part of dirs) {
+      dir = `${dir}/${part}`;
+      let repo = this.repoDirs.get(dir);
+      if (repo === undefined) {
+        repo = await exists(`${dir}/.git`).catch(() => false);
+        this.repoDirs.set(dir, repo);
+      }
+      if (repo) return false;
+    }
+    return true;
+  }
+
   /** The idle servers' notebooks that this mode shows (see waiting). */
   private async scanWaiting(idle: string[]): Promise<Waiting[]> {
     const mode = this.mode;
@@ -359,7 +385,8 @@ export class MarimoWatcher {
     } else {
       this.realCwd ??= await this.real(this.options.cwd);
       const cwd = this.realCwd;
-      shown = withReal.filter((w) => this.includedPaths.has(w.canonicalPath) || (within(w.canonicalPath, cwd) && !w.canonicalPath.slice(cwd.length).split("/").slice(0, -1).some((part) => part.startsWith("."))));
+      shown = [];
+      for (const w of withReal) if (this.includedPaths.has(w.canonicalPath) || (await this.local(w.canonicalPath, cwd))) shown.push(w);
     }
     return shown.sort((a, b) => (a.canonicalPath < b.canonicalPath ? -1 : a.canonicalPath > b.canonicalPath ? 1 : a.url < b.url ? -1 : 1)).slice(0, this.options.maxNotebooks ?? 8);
   }
@@ -394,11 +421,8 @@ export class MarimoWatcher {
     for (const s of sessions) if (this.includedPaths.has(real.get(s)!)) add(s);
     this.realCwd ??= await this.real(this.options.cwd);
     const cwd = this.realCwd;
-    // Under the cwd, but not in a hidden directory there (.worktrees, .claude/worktrees: other checkouts).
-    const local = sessions.filter((s) => {
-      const path = real.get(s)!;
-      return within(path, cwd) && !path.slice(cwd.length).split("/").slice(0, -1).some((part) => part.startsWith("."));
-    });
+    const local: NotebookSession[] = [];
+    for (const s of sessions) if (await this.local(real.get(s)!, cwd)) local.push(s);
     for (const s of local) add(s);
     const max = this.options.maxNotebooks ?? 8;
     return { targets: new Map([...out].slice(0, max)), waiting };
