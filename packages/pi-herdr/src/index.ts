@@ -70,6 +70,7 @@ const PR_POLL_MS = 3 * 60_000;
 /** The last upstream sha per base that a drift note was sent for. */
 const DRIFT_ENTRY = "pi-herdr:drift-seen";
 const DRIFT_MESSAGE = "herdr-drift";
+const CREW_COMMAND_MESSAGE = "herdr-crew-command";
 /** `PI_HERDR_CREW_REMOTE_MS`: how often the coordinator compares the bases with the remote (default 5 minutes, 0 never). */
 const crewRemoteMs = (): number => {
   const raw = process.env.PI_HERDR_CREW_REMOTE_MS?.trim();
@@ -858,6 +859,94 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     return message ? { message } : undefined;
   });
 
+  /** One crew operation, shared by the tool's `crew` action and `/crew`. */
+  const crewOp = async (op: "status" | "claim" | "sync", ctx: ExtensionContext, takeover: boolean): Promise<string> => {
+    const me = await crewMe(ctx, true);
+    if (op === "status") return crew.status(me, children.records);
+    if (op === "claim") {
+      const claimed = await crew.claim(me, takeover);
+      await startCrewWatches(ctx);
+      return claimed.text;
+    }
+    const synced = await syncCrew(crew, { call, exec: run, selfPane: target.paneId }, me, {
+      children: children.records,
+      uniqueName: (wanted) => children.uniqueName(wanted),
+      attach: (opts) => children.attach(opts),
+      ...(dependencies.pollMs ? { readyPollMs: dependencies.pollMs } : {}),
+    }, takeover);
+    await startCrewWatches(ctx);
+    return synced;
+  };
+
+  // `/crew`: the same operations without a model turn. Its output goes into the conversation as a
+  // displayed message that starts no turn, so the agent knows what the user did on its next prompt.
+  const CREW_SUBCOMMANDS = ["sync", "claim", "rule", "rules", "fetch"];
+  // Test fakes of pi may have no commands.
+  if (typeof pi.registerCommand === "function") pi.registerCommand("crew", {
+    description: "This repository's worktree crew: board (no argument), sync, claim [--takeover], rule <text>, rules (edit), fetch",
+    getArgumentCompletions: (prefix: string) => {
+      const p = prefix.trimStart();
+      if (/^(sync|claim)\s+/u.test(p)) return ["--takeover"].map((o) => ({ value: `${p.split(/\s+/u)[0]} ${o}`, label: o }));
+      return CREW_SUBCOMMANDS.filter((c) => c.startsWith(p)).map((value) => ({ value, label: value }));
+    },
+    handler: async (args: string, ctx: ExtensionContext) => {
+      if (!active || ctx.mode !== "tui") return;
+      const raw = (args ?? "").trim();
+      const [sub = "", ...rest] = raw.split(/\s+/u);
+      const post = (body: string) => {
+        let idle = true;
+        try { idle = ctx.isIdle(); } catch { /* stale */ }
+        safely(() => pi.sendMessage(
+          { customType: CREW_COMMAND_MESSAGE, content: `[/crew${raw ? ` ${raw}` : ""}, run by the user; not a request]\n\n${body}`, display: true },
+          idle ? {} : { deliverAs: "nextTurn" },
+        ), false);
+      };
+      try {
+        const takeover = rest.includes("--takeover");
+        switch (sub) {
+          case "":
+          case "status":
+            return post(await crewOp("status", ctx, false));
+          case "sync":
+          case "claim":
+            return post(await crewOp(sub, ctx, takeover));
+          case "rule": {
+            const rule = raw.slice(sub.length).trim();
+            if (!rule) return ctx.ui.notify("Usage: /crew rule <text>", "warning");
+            const repo = await crew.repo(ctx.cwd);
+            if (!repo) return ctx.ui.notify(`${ctx.cwd} is not in a git repository, so it has no crew.`, "error");
+            return post(crew.addDirective(repo, rule));
+          }
+          case "rules": {
+            const repo = await crew.repo(ctx.cwd);
+            if (!repo) return ctx.ui.notify(`${ctx.cwd} is not in a git repository, so it has no crew.`, "error");
+            const path = crew.ensureDirectives(repo);
+            const editor = process.env.VISUAL?.trim() || process.env.EDITOR?.trim() || "vi";
+            const quoted = `'${path.replaceAll("'", "'\\''")}'`;
+            await bridge.split({
+              command: `${editor} ${quoted}`,
+              cwd: ctx.cwd,
+              done: (ok, message) => {
+                // The split opens now and closes when the editor exits; every pi rereads the file on its next run.
+                safely(() => ctx.ui.notify(ok ? `Editing ${path} beside this pane; every pi in the repository gets the saved rules from its next run.` : `Could not open the directives: ${message || "the split failed"}`, ok ? "info" : "error"), false);
+              },
+            });
+            return;
+          }
+          case "fetch": {
+            if (!crewWatch) return ctx.ui.notify("Only the crew's coordinator fetches; /crew claim or /crew sync makes this session it.", "warning");
+            const moved = await crewWatch.checkRemote();
+            return post(moved ? "A base moved on the remote: fetched it. Worktree sessions recompute their drift now." : "No base moved on the remote.");
+          }
+          default:
+            return ctx.ui.notify(`Unknown /crew subcommand "${sub}". Use: /crew, /crew sync, /crew claim [--takeover], /crew rule <text>, /crew rules, /crew fetch`, "warning");
+        }
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+      }
+    },
+  });
+
   pi.registerTool({
     name: TOOL,
     label: "Herdr",
@@ -993,22 +1082,7 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
         }
         case "crew": {
           if (machine) throw new Error("A crew is this machine's worktree sessions; drop `machine`.");
-          const me = await crewMe(ctx, true);
-          const op = params.op ?? "status";
-          if (op === "status") return text(await crew.status(me, children.records));
-          if (op === "claim") {
-            const claimed = await crew.claim(me, !!params.takeover);
-            await startCrewWatches(ctx);
-            return text(claimed.text);
-          }
-          const synced = await syncCrew(crew, { call, exec: run, selfPane: target.paneId }, me, {
-            children: children.records,
-            uniqueName: (wanted) => children.uniqueName(wanted),
-            attach: (opts) => children.attach(opts),
-            ...(dependencies.pollMs ? { readyPollMs: dependencies.pollMs } : {}),
-          }, !!params.takeover);
-          await startCrewWatches(ctx);
-          return text(synced);
+          return text(await crewOp(params.op ?? "status", ctx, !!params.takeover));
         }
         case "interrupt":
           return text(await children.interrupt(childOnly(need(params.name, "name"))));

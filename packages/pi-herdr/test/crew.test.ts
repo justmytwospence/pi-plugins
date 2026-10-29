@@ -210,15 +210,19 @@ describe("index.ts wiring", () => {
     const handlers = new Map<string, Array<(e: any, c: any) => unknown>>();
     const bus = createEventBus();
     let tool: any;
+    const commands = new Map<string, any>();
+    const sent: any[] = [];
+    const notes: Array<[string, string]> = [];
     const pi = {
       on: (event: string, fn: any) => { handlers.set(event, [...(handlers.get(event) ?? []), fn]); return () => undefined; },
       events: { on: bus.on, emit: (channel: string, data: unknown) => bus.emit(channel, data) },
       appendEntry: (customType: string, data: unknown) => { manager.appendCustomEntry(customType, structuredClone(data)); },
-      sendMessage: () => undefined,
+      sendMessage: (message: any, options: any) => sent.push({ message, options }),
       registerTool: (t: any) => { tool = t; },
+      registerCommand: (name: string, c: any) => commands.set(name, c),
       getActiveTools: () => [], setActiveTools: () => undefined, getThinkingLevel: () => "medium", getSessionName: () => undefined,
     };
-    const ctx = { mode: "tui", hasUI: true, cwd, model: { id: "m" }, ui: { notify: () => undefined }, sessionManager: manager, isIdle: () => true };
+    const ctx = { mode: "tui", hasUI: true, cwd, model: { id: "m" }, ui: { notify: (m: string, t: string) => notes.push([t, m]) }, sessionManager: manager, isIdle: () => true };
     const emit = async (event: string, payload: any = {}) => {
       const out: any[] = [];
       for (const fn of handlers.get(event) ?? []) out.push(await fn(payload, ctx));
@@ -229,8 +233,37 @@ describe("index.ts wiring", () => {
       const [result] = await emit("before_agent_start", event);
       return { result, section: event.systemPromptOptions.sections.crew };
     };
-    return { pi: pi as unknown as ExtensionAPI, manager, emit, prompt, tool: () => tool, ctx };
+    const command = (args: string) => commands.get("crew").handler(args, ctx);
+    return { pi: pi as unknown as ExtensionAPI, manager, emit, prompt, tool: () => tool, ctx, command, commands, sent, notes };
   }
+
+  it("/crew runs the crew operations with no turn: board, sync, rule; completes subcommands; refuses fetch outside the coordinator", async () => {
+    const h = herdr(g);
+    const p = harness(g.root);
+    piHerdr(p.pi, { call: h.f.call, exec: realExec, pollMs: 1 });
+    await p.emit("session_start");
+    const crew = p.commands.get("crew");
+    expect(crew.getArgumentCompletions("r").map((c: any) => c.value)).toEqual(["rule", "rules"]);
+    expect(crew.getArgumentCompletions("sync ").map((c: any) => c.value)).toEqual(["sync --takeover"]);
+
+    await p.command("fetch");
+    expect(p.notes.at(-1)).toEqual(["warning", expect.stringContaining("Only the crew's coordinator fetches")]);
+    await p.command("");
+    expect(p.sent.at(-1).message).toMatchObject({ customType: "herdr-crew-command", display: true });
+    expect(p.sent.at(-1).message.content).toContain("no coordinator");
+    expect(p.sent.at(-1).options).toEqual({});
+
+    await p.command("sync");
+    expect(p.sent.at(-1).message.content).toContain("[/crew sync, run by the user; not a request]");
+    expect(p.sent.at(-1).message.content).toContain("This session now coordinates");
+    await p.command("rule Draft PRs only; never request reviewers.");
+    await p.command("rule - No force pushes to develop.");
+    expect(readFileSync(join(g.root, ".git/pi-crew/directives.md"), "utf8")).toBe("- Draft PRs only; never request reviewers.\n- No force pushes to develop.\n");
+    expect((await p.prompt()).section).toContain("- No force pushes to develop.");
+    await p.command("bogus");
+    expect(p.notes.at(-1)![0]).toBe("warning");
+    await p.emit("session_shutdown");
+  });
 
   it("crew sync makes this session the coordinator; its prompts then carry one update per change, and members get the link", async () => {
     const h = herdr(g);

@@ -342,6 +342,26 @@ export class Crew {
     return this.read(this.directivesPath(repo))?.trim() || undefined;
   }
 
+  /** The directives file, created empty if missing; returns its path. */
+  ensureDirectives(repo: Repo): string {
+    const path = this.directivesPath(repo);
+    mkdirSync(repo.dir, { recursive: true });
+    try {
+      writeFileSync(path, "", { flag: "wx" });
+    } catch { /* it exists */ }
+    return path;
+  }
+
+  /** Append one rule (`- <text>`) to the directives; returns what to tell the user. */
+  addDirective(repo: Repo, rule: string): string {
+    const path = this.ensureDirectives(repo);
+    const current = this.read(path) ?? "";
+    const line = `- ${rule.replace(/^[-*]\s+/u, "").replace(/\s+/gu, " ").trim()}`;
+    writeFileSync(path, `${current}${current && !current.endsWith("\n") ? "\n" : ""}${line}\n`);
+    this.files.delete(path);
+    return `Added to the directives (${path}); every pi in the repository gets them in its system prompt from its next run:\n\n${this.directives(repo) ?? line}`;
+  }
+
   coordinator(repo: Repo): Coordinator | undefined {
     const raw = this.read(join(repo.dir, COORDINATOR_FILE));
     if (!raw) return undefined;

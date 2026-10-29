@@ -170,6 +170,17 @@ Nothing is added when nothing changed, and it never starts a turn. The first upd
 - `claim`: makes this session the coordinator. Another session whose pane still runs Pi in the repository keeps the role unless `takeover` is set, which the agent sets only when you said so. A coordinator without a Herdr name is named `<repo>-coord`, so members can message it by name.
 - `sync`: claims, then for each linked worktree: a Pi already there becomes this session's child (named after its branch if it had no name); a worktree with no agent gets its space opened (without focus, or a tab in its open space) and `pi --continue` started there, which resumes its latest session (a fresh one if it has none), with no task sent, and becomes a child too. Worktrees running another agent are left alone. Running it again changes nothing that is already in place.
 
+**`/crew`.** The same operations without asking the agent, and without a model turn. The output goes into the conversation as a displayed message that starts no turn, so the agent sees what you did on your next prompt (while a turn runs, it waits for the next one). Subcommands tab-complete.
+
+| command | |
+|---|---|
+| `/crew` | the board, as `status` |
+| `/crew sync [--takeover]` | `sync` |
+| `/crew claim [--takeover]` | `claim` |
+| `/crew rule <text>` | appends `- <text>` to the directives (creating the file); works in any session of the repository |
+| `/crew rules` | opens the directives in `$VISUAL` or `$EDITOR` (else `vi`) in a split beside the pane, which closes when the editor exits; every pi rereads the file on its next run |
+| `/crew fetch` | the coordinator's remote check now, instead of at its next trigger |
+
 A coordinator restarted in the same pane keeps the role; one resumed in another pane takes it back on its first run (its file names its session). Members do not see a moved coordinator until then.
 
 ### Drift and overlap
