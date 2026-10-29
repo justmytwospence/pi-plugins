@@ -26,7 +26,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { BgBridge } from "./bg.js";
 import { busy as kernelBusy, KernelHold } from "./core/hold.js";
-import { ambiguityNote, lensLines, lensStatusText, shortWhere, snapshot, STATE_TAG, statusParts, statusText } from "./core/render.js";
+import { ambiguityNote, lensLines, lensStatusText, relativePath, shortWhere, snapshot, STATE_TAG, statusParts, statusText } from "./core/render.js";
 import { basename } from "./core/io.js";
 import { nodeIo } from "./core/node-io.js";
 import { HeadlessSessions } from "./core/headless.js";
@@ -55,6 +55,10 @@ import { type ChartRenderer, VegaRenderer } from "./core/vega.js";
 import { sharedPlotly } from "./core/plotly.js";
 import type { Followed } from "./core/watcher.js";
 import { loadConfig } from "./config.ts";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { realpath } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { NOTEBOOK_TEMPLATE, findNotebookFiles, ownServers, serverCommand } from "./servers.js";
 import { Type } from "typebox";
 
 const ENTRY = "pi-marimo";
@@ -91,6 +95,9 @@ export type Config = typeof DEFAULT_CONFIG;
 /** The `/marimo` subcommands, with what each does, for completion and the unknown-subcommand warning. */
 const SUBCOMMANDS: Array<[string, string]> = [
   ["view", "open the busiest notebook, or the one named, full screen"],
+  ["edit", "start a notebook here and open it, no browser needed"],
+  ["new", "create a notebook, start it and open it"],
+  ["stop", "stop a notebook server Pi started"],
   ["open", "open a waiting notebook in the browser"],
   ["auto", "follow every notebook open under this directory"],
   ["off", "follow nothing"],
@@ -114,15 +121,20 @@ export function renderPng(renderer: Pick<ChartRenderer, "request" | "peek">, spe
 
 type Entry = { type?: string; customType?: string; data?: unknown };
 
-function savedEngaged(entries: readonly Entry[]): string[] {
+/** The latest list a session entry saved under `key` (`engaged`, `included`). */
+function savedList(entries: readonly Entry[], key: "engaged" | "included"): string[] {
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i];
     if (entry?.type !== "custom" || entry.customType !== ENTRY) continue;
-    const engaged = (entry.data as { engaged?: unknown } | undefined)?.engaged;
-    if (Array.isArray(engaged)) return engaged.filter((p): p is string => typeof p === "string");
+    const list = (entry.data as Record<string, unknown> | undefined)?.[key];
+    if (Array.isArray(list)) return list.filter((p): p is string => typeof p === "string");
   }
   return [];
 }
+
+const savedEngaged = (entries: readonly Entry[]): string[] => savedList(entries, "engaged");
+/** The notebooks this session opened itself (/marimo edit, /marimo new), followed wherever they are. */
+const savedIncluded = (entries: readonly Entry[]): string[] => savedList(entries, "included");
 
 function savedMode(entries: readonly Entry[]): Mode | undefined {
   for (let i = entries.length - 1; i >= 0; i--) {
@@ -274,8 +286,8 @@ export default function piMarimo(pi: ExtensionAPI): void {
     interrupt: (f) => interruptKernel(f.attachment, process.env.MARIMO_TOKEN),
     openInBrowser: (f) => openUrl(`${f.attachment.url}/?file=${encodeURIComponent(f.attachment.path)}`),
     run: (f, cells) => runCells(f.attachment, cells, process.env.MARIMO_TOKEN),
-    servers: (f) => bg.servers(f.attachment.path),
-    stopServers: (f) => bg.stopServers(f.attachment.path),
+    servers: (f) => [...bg.servers(f.attachment.path), ...(ownServers().find(f.attachment.url) ? ["started by Pi"] : [])],
+    stopServers: (f) => bg.stopServers(f.attachment.path) + (ownServers().stop(f.attachment.url) ? 1 : 0),
     lastRun: (f) => source.lastRun(f),
     agentBusy: () => ctxRef?.isIdle() === false,
     ask: (f, cell, text) => {
@@ -365,6 +377,61 @@ export default function piMarimo(pi: ExtensionAPI): void {
     watcher?.refresh();
     await watcher?.settle(3000);
   };
+  /**
+   * `/marimo edit` and `/marimo new`: follow the file wherever it is, and open it in the view. A
+   * session already holding it is followed; a server waiting for it is opened without a browser;
+   * else Pi starts one (servers.ts).
+   */
+  const openFile = async (abs: string, ctx: ExtensionContext): Promise<void> => {
+    if (!watcher) return;
+    if (watcher.mode.kind === "off") { ctx.ui.notify("marimo: following is off; /marimo auto turns it back on", "warning"); return; }
+    const real = await realpath(abs).catch(() => abs);
+    watcher.include([real]);
+    watcher.engage([real]);
+    pi.appendEntry(ENTRY, { included: watcher.included() });
+    pi.appendEntry(ENTRY, { engaged: watcher.engaged() });
+    const find = () => watcher?.followed().find((f) => f.canonicalPath === real || f.attachment.path === abs);
+    // Rescan until the watcher follows it (including the path again makes the next scan one to wait for).
+    const follow = async (tries: number) => {
+      for (let i = 0; i < tries && watcher && !find(); i++) {
+        watcher.include([real]);
+        await watcher.settle(3000);
+        if (!find()) await new Promise((r) => setTimeout(r, 300));
+      }
+      return find();
+    };
+    let f = await follow(1);
+    let url = f?.attachment.url;
+    try {
+      if (!f) {
+        const waiting = watcher.waiting().find((w) => w.canonicalPath === real || w.path === abs);
+        if (waiting) {
+          url = waiting.url;
+          await attachWaiting(waiting);
+        } else {
+          let server = ownServers().byFile(abs);
+          if (!server) {
+            const command = serverCommand(config.server.command, ctx.cwd);
+            ctx.ui.notify(`marimo: starting ${basename(abs)} (${command.join(" ")})…`, "info");
+            server = await ownServers().start({ command, file: abs, cwd: ctx.cwd });
+          }
+          url = server.url;
+          await attachWaiting({ url: server.url, path: abs });
+        }
+        f = await follow(10);
+      }
+    } catch (e) {
+      ctx.ui.notify(`marimo: ${e instanceof Error ? e.message : String(e)}`, "warning");
+      return;
+    }
+    if (!f) {
+      ctx.ui.notify(`marimo: ${basename(abs)} is running${url ? ` at ${url}` : ""}, but Pi could not follow it yet; /marimo view opens it once it appears`, "warning");
+      return;
+    }
+    if (ctx.mode === "tui") await openView(notebookKey(f), ctx.ui);
+    else ctx.ui.notify(`marimo: ${basename(abs)} is open at ${f.attachment.url}`, "info");
+  };
+
   /** The waiting notebooks a marimo-pair call names (by server, by file, or both). */
   const waitingFor = (targets: ReturnType<typeof pairTargets>): Waiting[] => {
     const out = new Map<string, Waiting>();
@@ -505,6 +572,7 @@ export default function piMarimo(pi: ExtensionAPI): void {
     const branch = ctx.sessionManager.getBranch() as Entry[];
     watcher.mode = savedMode(branch) ?? { kind: "auto" };
     watcher.engage(savedEngaged(branch));
+    watcher.include(savedIncluded(branch));
     watcher.start();
     if (ctx.mode === "tui") {
       ctx.ui.setWidget("pi-marimo-tui", (tui) => { tuiRef = tui; return { render: () => [], invalidate() {} }; });
@@ -660,8 +728,14 @@ export default function piMarimo(pi: ExtensionAPI): void {
 
   pi.registerCommand("marimo", {
     description: `Choose and open marimo notebooks (${SUBCOMMANDS.map(([name]) => name).join(", ")})`,
-    getArgumentCompletions: (prefix) =>
-      SUBCOMMANDS.filter(([name]) => name.startsWith(prefix.trim())).map(([value, description]) => ({ value, label: value, description })),
+    getArgumentCompletions: async (prefix) => {
+      const edit = /^edit\s+(.*)$/u.exec(prefix);
+      if (edit) {
+        const files = await findNotebookFiles(ctxRef?.cwd ?? process.cwd()).catch(() => []);
+        return files.filter((f) => f.startsWith(edit[1] ?? "")).map((f) => ({ value: `edit ${f}`, label: f }));
+      }
+      return SUBCOMMANDS.filter(([name]) => name.startsWith(prefix.trim())).map(([value, description]) => ({ value, label: value, description }));
+    },
     handler: async (args, ctx) => {
       if (!watcher) return;
       const arg = args.trim();
@@ -670,25 +744,76 @@ export default function piMarimo(pi: ExtensionAPI): void {
         ctx.ui.notify(`marimo: unknown subcommand "${word}". Use one of: ${SUBCOMMANDS.map(([name]) => name).join(", ")}, or /marimo alone to pick notebooks.`, "warning");
         return;
       }
-      if (arg === "chart" || arg.startsWith("chart ")) {
+      if (word === "chart") {
         const ref = arg.slice(5).trim();
         if (!ref) { ctx.ui.notify("marimo: /marimo chart <cell name or id>", "info"); return; }
         try { pi.appendEntry(CHART_ENTRY, await chartEntry(ref)); } catch (e) { ctx.ui.notify(`marimo: ${e instanceof Error ? e.message : String(e)}`, "warning"); }
         return;
       }
-      if (arg === "inspect") {
+      if (word === "inspect") {
         if (!inspectLatest(ctx.ui)) ctx.ui.notify("marimo: no live chart in the transcript (/marimo chart <cell> shows one)", "info");
         return;
       }
-      if (arg === "auto") { setMode({ kind: "auto" }); ctx.ui.notify("marimo: following every notebook open under this directory", "info"); return; }
-      if (arg === "off") { setMode({ kind: "off" }); ctx.ui.notify("marimo: off", "info"); return; }
-      if (arg === "view") {
+      if (word === "auto") { setMode({ kind: "auto" }); ctx.ui.notify("marimo: following every notebook open under this directory", "info"); return; }
+      if (word === "off") { setMode({ kind: "off" }); ctx.ui.notify("marimo: off", "info"); return; }
+      const rest = arg.slice(word.length).trim();
+      if (word === "view") {
+        if (rest) {
+          const f = watcher.followed().find((o) => o.attachment.path.endsWith(rest) || o.canonicalPath?.endsWith(rest));
+          if (!f) ctx.ui.notify(`marimo: no followed notebook matches ${rest}`, "info");
+          else await openView(notebookKey(f), ctx.ui);
+          return;
+        }
         const path = source.busiest();
         if (!path) ctx.ui.notify("marimo: no notebook followed", "info");
         else await openView(path, ctx.ui);
         return;
       }
-      if (arg === "open") {
+      if (word === "edit") {
+        let file = rest;
+        if (!file) {
+          const files = await findNotebookFiles(ctx.cwd);
+          if (!files.length) { ctx.ui.notify("marimo: no marimo notebook under this directory; /marimo new <file> creates one", "info"); return; }
+          const choice = await ctx.ui.select("Open which notebook?", files);
+          if (!choice) return;
+          file = choice;
+        }
+        const abs = resolve(ctx.cwd, file);
+        if (!existsSync(abs)) { ctx.ui.notify(`marimo: ${file} does not exist; /marimo new ${file} creates it`, "warning"); return; }
+        await openFile(abs, ctx);
+        return;
+      }
+      if (word === "new") {
+        if (!rest) { ctx.ui.notify("marimo: /marimo new <file.py>", "info"); return; }
+        if (!rest.endsWith(".py")) { ctx.ui.notify("marimo: a new notebook needs a .py file", "warning"); return; }
+        const abs = resolve(ctx.cwd, rest);
+        if (existsSync(abs)) { ctx.ui.notify(`marimo: ${rest} exists; /marimo edit ${rest} opens it`, "warning"); return; }
+        try {
+          mkdirSync(dirname(abs), { recursive: true });
+          writeFileSync(abs, NOTEBOOK_TEMPLATE, { flag: "wx" });
+        } catch (e) {
+          ctx.ui.notify(`marimo: could not write ${rest}: ${e instanceof Error ? e.message : String(e)}`, "warning");
+          return;
+        }
+        await openFile(abs, ctx);
+        return;
+      }
+      if (word === "stop") {
+        const own = ownServers().list();
+        if (!own.length) { ctx.ui.notify("marimo: no notebook server was started by Pi", "info"); return; }
+        let picked = rest ? own.find((s) => s.file.endsWith(rest)) : own.length === 1 ? own[0] : undefined;
+        if (!picked && rest) { ctx.ui.notify(`marimo: no notebook server Pi started serves ${rest}`, "info"); return; }
+        if (!picked) {
+          const labels = own.map((s) => `${relativePath(s.file, ctx.cwd)}  (${shortWhere(s.url)})`);
+          const choice = await ctx.ui.select("Stop which notebook server?", labels);
+          picked = choice === undefined ? undefined : own[labels.indexOf(choice)];
+          if (!picked) return;
+        }
+        ownServers().stop(picked.url);
+        ctx.ui.notify(`marimo: stopped ${basename(picked.file)}`, "info");
+        return;
+      }
+      if (word === "open") {
         // The keyboard path to a footer item's click: open a notebook whose server waits in no browser.
         const waiting = watcher.waiting();
         if (!waiting.length) { ctx.ui.notify("marimo: no notebook is waiting to be opened", "info"); return; }
@@ -700,12 +825,12 @@ export default function piMarimo(pi: ExtensionAPI): void {
         ctx.ui.notify(`marimo: opening ${basename(picked.path)}`, "info");
         return;
       }
-      if (arg === "lens") {
+      if (word === "lens") {
         const parts = stateEntries().map((e) => ({ path: e.attachment.path, lines: lensLines(e.notebook) })).filter((p) => p.lines.length);
         ctx.ui.notify(parts.length ? parts.map((p) => [p.path, ...p.lines].join("\n")).join("\n\n") : "marimo: no Lens selections in the followed notebooks", "info");
         return;
       }
-      if (arg === "show") {
+      if (word === "show") {
         const entries = stateEntries();
         ctx.ui.notify(entries.length ? snapshot(entries, { refresh: "prompt" }) : statusLines().join("\n") || "marimo: no notebook attached", "info");
         return;
