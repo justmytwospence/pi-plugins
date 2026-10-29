@@ -7,6 +7,8 @@ import {
   MEDIUM_SKILL_TOKENS,
   VERY_HEAVY_SKILL_TOKENS,
   skillTokenColor,
+  skillTokenColors,
+  windowShareColor,
   groupEntries,
   layoutGrid,
   packageItemName,
@@ -151,6 +153,19 @@ describe("startup resources", () => {
     expect(skillTokenColor(MEDIUM_SKILL_TOKENS)).toBe("muted");
     expect(skillTokenColor(HEAVY_SKILL_TOKENS)).toBe("warning");
     expect(skillTokenColor(VERY_HEAVY_SKILL_TOKENS)).toBe("error");
+  });
+
+  test("outliers against the list median move up a tier", () => {
+    expect(skillTokenColors([60, 60, 60, 150])).toEqual(["dim", "dim", "dim", "warning"]);
+    expect(skillTokenColors([150, 150, 150])).toEqual(["muted", "muted", "muted"]);
+    expect(skillTokenColors([])).toEqual([]);
+  });
+
+  test("heading total is colored by share of the context window", () => {
+    expect(windowShareColor(1000, undefined)).toBe("dim");
+    expect(windowShareColor(2000, 200_000)).toBe("dim");
+    expect(windowShareColor(6000, 200_000)).toBe("warning");
+    expect(windowShareColor(12000, 200_000)).toBe("error");
   });
 
   test("groupEntries keeps token estimates aligned with the sorted names", () => {

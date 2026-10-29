@@ -39,6 +39,8 @@ export type ResourceSection = {
 	count: number;
 	/** Estimated tokens the whole section adds to every request; shown on the heading when above zero. */
 	tokens?: number;
+	/** The model's context window, when known; colors the heading total by its share of it. */
+	contextWindow?: number;
 	/** "lines" lists one entry per line (context files); "grid" packs short names into columns. */
 	layout: "lines" | "grid";
 	groups: ResourceGroup[];
@@ -57,11 +59,44 @@ export const MEDIUM_SKILL_TOKENS = 100;
 export const HEAVY_SKILL_TOKENS = 180;
 export const VERY_HEAVY_SKILL_TOKENS = 300;
 
-/** Theme color for a skill's token count, by how heavy it is. */
+const TIER_COLORS = ["dim", "muted", "warning", "error"] as const;
+
+function tierOf(tokens: number): number {
+	if (tokens >= VERY_HEAVY_SKILL_TOKENS) return 3;
+	if (tokens >= HEAVY_SKILL_TOKENS) return 2;
+	if (tokens >= MEDIUM_SKILL_TOKENS) return 1;
+	return 0;
+}
+
+/** Theme color for a skill's token count by its absolute weight. */
 export function skillTokenColor(tokens: number): string {
-	if (tokens >= VERY_HEAVY_SKILL_TOKENS) return "error";
-	if (tokens >= HEAVY_SKILL_TOKENS) return "warning";
-	if (tokens >= MEDIUM_SKILL_TOKENS) return "muted";
+	return TIER_COLORS[tierOf(tokens)]!;
+}
+
+/** An entry at least this many times the list's median (and not light) is an outlier and moves up one tier. */
+export const OUTLIER_FACTOR = 2;
+
+/** Colors for a whole list: absolute tiers, with outliers against the list's median bumped one tier. */
+export function skillTokenColors(tokens: number[]): string[] {
+	const sorted = [...tokens].sort((a, b) => a - b);
+	const median = sorted.length ? sorted[Math.floor(sorted.length / 2)]! : 0;
+	return tokens.map((count) => {
+		const tier = tierOf(count);
+		const outlier = tier >= 1 && median > 0 && count >= median * OUTLIER_FACTOR;
+		return TIER_COLORS[Math.min(3, tier + (outlier ? 1 : 0))]!;
+	});
+}
+
+/** Share of the context window (percent) at which the always-loaded cost turns warning, then error. */
+export const WINDOW_WARN_PERCENT = 3;
+export const WINDOW_ERROR_PERCENT = 6;
+
+/** Heading color for a section's total by its share of the model's context window; dim when the window is unknown. */
+export function windowShareColor(tokens: number, contextWindow?: number): string {
+	if (!contextWindow || contextWindow <= 0) return "dim";
+	const percent = (tokens / contextWindow) * 100;
+	if (percent >= WINDOW_ERROR_PERCENT) return "error";
+	if (percent >= WINDOW_WARN_PERCENT) return "warning";
 	return "dim";
 }
 
@@ -213,7 +248,9 @@ export function renderSection(
 	width: number,
 	theme: StartupTheme,
 ): string[] {
-	const cost = section.tokens ? ` ${theme.fg("dim", `· ~${formatTokens(section.tokens)} tok`)}` : "";
+	const cost = section.tokens
+		? ` ${theme.fg(windowShareColor(section.tokens, section.contextWindow), `· ~${formatTokens(section.tokens)} tok`)}`
+		: "";
 	const heading = `${theme.bold(theme.fg("mdHeading", section.title))} ${theme.fg("dim", String(section.count))}${cost}`;
 	const lines = [heading];
 	for (const group of section.groups) {
@@ -228,11 +265,11 @@ export function renderSection(
 			if (group.tokens) lines.push(...linesWithTokens(group, indent, width, theme));
 			else for (const item of group.items) lines.push(truncateToWidth(`${" ".repeat(indent)}${item}`, width));
 		} else {
+			const colors = group.tokens ? skillTokenColors(group.tokens) : [];
 			const items = group.tokens
-				? group.items.map((item, index) => {
-						const tokens = group.tokens![index]!;
-						return `${item} ${theme.fg(skillTokenColor(tokens), `~${formatTokens(tokens)}`)}`;
-					})
+				? group.items.map(
+						(item, index) => `${item} ${theme.fg(colors[index]!, `~${formatTokens(group.tokens![index]!)}`)}`,
+					)
 				: group.items;
 			lines.push(...layoutGrid(items, width, indent));
 		}
@@ -259,6 +296,7 @@ function localExtensionName(label: string): string {
 export function collectSections(mode: any, options?: { extensions?: any[] }): Record<string, ResourceSection> {
 	const loader = mode.session.resourceLoader;
 	const sections: Record<string, ResourceSection> = {};
+	const contextWindow = mode.session?.model?.contextWindow as number | undefined;
 
 	const appendSources = loader.getAppendSystemPromptSources() as any[];
 	const appendTexts = (loader.getAppendSystemPrompt?.() ?? []) as string[];
@@ -280,6 +318,7 @@ export function collectSections(mode: any, options?: { extensions?: any[] }): Re
 			title: "Context",
 			count: contextFiles.length,
 			tokens: total,
+			contextWindow,
 			layout: "lines",
 			groups: [
 				{
@@ -296,6 +335,7 @@ export function collectSections(mode: any, options?: { extensions?: any[] }): Re
 			title: "Skills",
 			count: skills.length,
 			tokens: skills.reduce((sum, skill) => sum + skillPromptTokens(skill), 0),
+			contextWindow,
 			layout: "grid",
 			groups: groupEntries(
 				skills.map((skill) => ({
