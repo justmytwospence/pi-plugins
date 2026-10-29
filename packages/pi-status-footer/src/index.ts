@@ -71,6 +71,8 @@ export interface Snapshot {
   quotas: Quota[]; unavailableQuota?: string; statuses: string[]; now: number;
   /** Folded in from companion extensions' statuses when they are installed. */
   mode?: PermissionModeStatus;
+  /** pi-plan-mode's exec status: `calm-river · Claude Opus 5.5 on call`. */
+  exec?: string;
   autoEffort?: boolean; autoEffortDetail?: string; lean?: string; cache?: string; extraBilled?: number;
   /** A prompt stashed by @saadjs/pi-stash; text is its content when readable. */
   stash?: { text?: string };
@@ -234,7 +236,7 @@ export function parseModeStatus(text: string): PermissionModeStatus | undefined 
   return { kind: MODE_KINDS[match[2]], label: `${glyph} ${match[2]} on`, ...(match[3] ? { key: match[3] } : {}) };
 }
 
-export interface AbsorbedStatuses { mode?: PermissionModeStatus; autoEffort: boolean; autoEffortDetail?: string; lean?: string; cache?: string; extraBilled?: number; stashed?: boolean; marimo?: MarimoStatus[]; lens?: LensStatus; bg?: BgItem[]; pressure?: PressureItem[]; /** Another extension owns the `mcp` status. */ mcp?: boolean; rest: string[] }
+export interface AbsorbedStatuses { mode?: PermissionModeStatus; exec?: string; autoEffort: boolean; autoEffortDetail?: string; lean?: string; cache?: string; extraBilled?: number; stashed?: boolean; marimo?: MarimoStatus[]; lens?: LensStatus; bg?: BgItem[]; pressure?: PressureItem[]; /** Another extension owns the `mcp` status. */ mcp?: boolean; rest: string[] }
 // Statuses from our own companion extensions that read better inside the footer
 // rows they describe. Each is optional: absent extensions publish nothing, and a
 // status whose text no longer matches the expected shape falls through to the
@@ -250,6 +252,7 @@ export interface AbsorbedStatuses { mode?: PermissionModeStatus; autoEffort: boo
 //   bg                (pi-bg)                   "bg: tests 2:14 · ..." -> its own row under that
 //   pressure          (pi-pressure)             "pressure: cpu 97 ↑ hot · ..." -> its own row under that
 //   permission-mode   (pi-tool-gate, pi-plan-mode) "⏵⏵ auto mode on (shift+tab to cycle)" -> the model row
+//   plan-exec        (pi-plan-mode) "exec calm-river · Claude Opus 5.5 on call" -> the permission-mode row, after the mode
 // Everything else (plan, gate, mcp, ...) stays in the status row.
 export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: { claudeRow: boolean }): AbsorbedStatuses {
   const result: AbsorbedStatuses = { autoEffort: false, rest: [] };
@@ -286,6 +289,8 @@ export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: {
     if (pressure) { result.pressure = pressure; continue; }
     const mode = key === "permission-mode" ? parseModeStatus(plainText) : undefined;
     if (mode) { result.mode = mode; continue; }
+    const exec = key === "plan-exec" ? /^exec (\S.*)$/u.exec(plainText) : null;
+    if (exec) { result.exec = exec[1]; continue; }
     const plan = key === "plan" ? /^plan: (.+) \((\/plan(?:ners)?)\)$/.exec(plainText) : null;
     if (plan) {
       result.rest.push(`Plan ${plan[1].replace(/cut off \(resume in (\/plan(?:ners)?)\)/g, "cut off · resume in $1")} · ${plan[2]}`);
@@ -939,8 +944,10 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   // modes where Jev judges) follows it there. The cycle-key hint is not shown.
   const gateStatus = s.mode ? s.statuses.find((status) => /^Gate /.test(stripVTControlCharacters(status))) : undefined;
   const statuses = gateStatus ? s.statuses.filter((status) => status !== gateStatus) : s.statuses;
-  if (s.mode) rows.push(row(ICONS.gate, (w) => fitSegments([
+  const execText = s.exec ? `${theme.fg("accent", "exec")} ${theme.fg("muted", clean(s.exec))}` : "";
+  if (s.mode || s.exec) rows.push(row(ICONS.gate, (w) => fitSegments([
     { text: modeText, priority: 100 },
+    { text: execText, priority: 90 },
     { text: gateStatus ? gateStatus.replace(/[\r\n\t]/g, " ") : "", priority: 50 },
   ], w, theme)));
 
@@ -1423,7 +1430,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       context: current.getContextUsage() ?? { tokens: null, contextWindow: current.model?.contextWindow ?? 0, percent: null },
       totals, cacheHit, git: { ...git, branch: git.branch ?? branch ?? undefined },
       quotas, unavailableQuota,
-      statuses: absorbed.rest, mode: absorbed.mode, autoEffort: absorbed.autoEffort, autoEffortDetail: absorbed.autoEffortDetail, lean: absorbed.lean, cache: absorbed.cache, extraBilled: absorbed.extraBilled,
+      statuses: absorbed.rest, mode: absorbed.mode, exec: absorbed.exec, autoEffort: absorbed.autoEffort, autoEffortDetail: absorbed.autoEffortDetail, lean: absorbed.lean, cache: absorbed.cache, extraBilled: absorbed.extraBilled,
       stash: absorbed.stashed ? { text: stashedPrompt() } : undefined,
       marimo: absorbed.marimo, lens: absorbed.lens, bg: absorbed.bg, pressure: absorbed.pressure, borderGauge, compact: blockedHolds > 0,
       // Yield to an extension that publishes its own mcp status (pi-mcp-adapter).

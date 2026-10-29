@@ -1728,6 +1728,20 @@ test("the permission mode gets its own row in its color; plan runs point at /pla
   assert.deepEqual(mod.absorbStatuses(new Map([["permission-mode", "something else"]]), { claudeRow: false }).rest, ["something else"]);
 });
 
+test("pi-plan-mode's exec status follows the permission mode on its row", () => {
+  const absorbed = mod.absorbStatuses(new Map([
+    ["permission-mode", "⏵⏵ auto mode on (shift+tab to cycle)"],
+    ["plan-exec", "exec calm-river · Claude Opus 5.5 on call"],
+  ]), { claudeRow: false });
+  assert.equal(absorbed.exec, "calm-river · Claude Opus 5.5 on call");
+  assert.deepEqual(absorbed.rest, []);
+  const s = { ...fixture(), mode: absorbed.mode, exec: absorbed.exec, statuses: absorbed.rest };
+  assert.equal(mod.renderFooter(s, 160, theme).map(plain)[2], " \uf510  \u{f0211} auto mode on · exec calm-river · Claude Opus 5.5 on call");
+  // Without a mode the row is still drawn.
+  assert.equal(mod.renderFooter({ ...s, mode: undefined }, 160, theme).map(plain)[2], " \uf510  exec calm-river · Claude Opus 5.5 on call");
+  assert.deepEqual(mod.absorbStatuses(new Map([["plan-exec", "something else"]]), { claudeRow: false }).rest, ["something else"]);
+});
+
 test("a waiting dialog compacts the footer to one row for herdr-web-ui", () => {
   const s = fixture();
   s.stash = { text: "draft" };
