@@ -64,6 +64,20 @@ describe("waitingNotebook", () => {
     expect(await waitingNotebook(fakeIo(), "http://127.0.0.1:2718")).toEqual({ url: "http://127.0.0.1:2718", path: "/w/nb.py" });
   });
 
+  test("sends marimo's server token from the page, as marimo 0.25 requires", async () => {
+    const sent: Array<Record<string, string>> = [];
+    const io = {
+      ...fakeIo(),
+      getText: async (url: string) => (url === "http://127.0.0.1:2718/" ? '<html><marimo-server-token data-token="tok42"></html>' : undefined),
+      postJson: async (_url: string, headers: Record<string, string>) => {
+        sent.push(headers);
+        return headers["Marimo-Server-Token"] === "tok42" ? { files: [file("/w/nb.py")] } : { error: "Missing server token" };
+      },
+    };
+    expect(await waitingNotebook(io, "http://127.0.0.1:2718", "secret")).toEqual({ url: "http://127.0.0.1:2718", path: "/w/nb.py" });
+    expect(sent[0]).toEqual({ Authorization: "Bearer secret", "Marimo-Server-Token": "tok42" });
+  });
+
   test("a directory, several files, a non-notebook, a failure or a host without POST name nothing", async () => {
     const io = fakeIo();
     hosted.servers = [

@@ -73,7 +73,11 @@ export interface WaitingNotebook {
  * has no single notebook to name, so it is not reported.
  */
 export async function waitingNotebook(io: Io, url: string, token?: string): Promise<WaitingNotebook | undefined> {
-  const body = await io.postJson?.(`${url}/api/home/workspace_files`, authHeaders(token), {}, 2000);
+  const auth = authHeaders(token);
+  // marimo 0.25 also wants its server token (in the page it serves, `data-token="..."`) on this call.
+  const page = await io.getText?.(`${url}/`, auth, 2000);
+  const serverToken = page ? /data-token="([^"]*)"/u.exec(page)?.[1] : undefined;
+  const body = await io.postJson?.(`${url}/api/home/workspace_files`, serverToken ? { ...auth, "Marimo-Server-Token": serverToken } : auth, {}, 2000);
   const files = (body as { files?: unknown } | null | undefined)?.files;
   if (!Array.isArray(files) || files.length !== 1) return undefined;
   const file = files[0] as { path?: unknown; isDirectory?: unknown; isMarimoFile?: unknown } | null;

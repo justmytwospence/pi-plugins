@@ -52,6 +52,15 @@ export function nodeIo(options: { registryDir?: string; fetch?: typeof fetch } =
       }
     },
 
+    async getText(url, headers, timeoutMs) {
+      try {
+        const response = await doFetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+        return response.ok ? await response.text() : undefined;
+      } catch {
+        return undefined;
+      }
+    },
+
     async postJson(url, headers, body, timeoutMs) {
       try {
         const response = await doFetch(url, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
