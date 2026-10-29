@@ -182,11 +182,14 @@ export class TodoOverlay {
 
 	/** The panel, indented one column so it lines up with the transcript and other widgets. */
 	private renderWidget(theme: Theme, width: number): string[] {
-		return this.renderPanel(theme, Math.max(0, width - 1)).map((line) => (line ? ` ${line}` : line));
+		const lines = this.renderPanel(theme, Math.max(0, width - 1)).map((line) => (line ? ` ${line}` : line));
+		// Blank rows, not nothing: keeping the dock's height stops the transcript viewport from resizing
+		// under the scroll position (which made the panel flicker back in half-hidden).
+		return this.isScrolledBack() ? lines.map(() => "") : lines;
 	}
 
 	private renderPanel(theme: Theme, width: number): string[] {
-		if (this.suppressed || this.isScrolledBack()) return [];
+		if (this.suppressed) return [];
 		const snapshot = this.getSnapshot();
 		const overlayTasks = this.selectOverlayTasks(snapshot);
 		if (overlayTasks.length === 0) return [];
