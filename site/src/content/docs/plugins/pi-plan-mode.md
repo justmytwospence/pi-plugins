@@ -8,7 +8,7 @@ plugin: pi-plan-mode
 
 - **Use it for:** Research before implementation in the main conversation, or compare two constrained planners.
 - **Enable:** Select `packages/pi-plan-mode/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
-- **Controls:** `/plan`, `/planners`; enter/exit and active-run tools below; approving a plan chooses who implements it. No standalone shortcut by default; gate Shift+Tab needs an explicit stock remap.
+- **Controls:** `/plan`, `/planners`; enter/exit and active-run tools below; approving a plan chooses who implements it and starts exec mode (`ask_planner`, `finish_plan`). No standalone shortcut by default; gate Shift+Tab needs an explicit stock remap.
 - **Settings:** `pi-plan-mode.json`; `toggleShortcut` unset, implementation context keep, export `PLAN.md`; optional paid Jev tool selection on.
 - **Requirements, cost & privacy:** TUI and provider access for `/planners`; normal plan mode uses the main session. Planners/helpers each consume model usage; selected tools can send repository data externally.
 - **Integrations & limits:** Optional gate, activity views, footer and Herdr. Planner/scout entries join `/tasks` and FleetView; `/stop` remains shell-only. Read-only policies are not a sandbox.
@@ -36,6 +36,17 @@ When the plan is complete, your agent calls `exit_plan_mode` directly. Plan tool
 - **No, keep planning**: the turn ends and you say what should change in the chat. The agent answers there, and the next review starts with the lines that changed since the plan you declined.
 
 The approval returns the permission mode to what it was before planning (with pi-tool-gate; auto when that is unknown and in the cycle, else manual approval). The handoff target is `implementationModelMap[planning model]` when available, else pi-subagents' `worker` model, else the planning model. Plans are written to a handoff standard (Summary, Decisions, Changes, Steps, Verification, Out of scope, Handoff notes) so the implementer makes no decisions.
+
+### Exec mode
+
+Approving a plan starts exec mode, a session state (not a permission mode; Shift+Tab never enters it) that lasts until the work is accepted. With [pi-status-footer](/plugins/pi-status-footer/) the footer shows it on the permission-mode row, for example `exec calm-river · Claude Opus 5.5 on call · 2 asks · $0.31`.
+
+- **Planner on call.** After a handoff, the model that planned stays on call and your implementing agent gets `ask_planner`: it asks when the plan does not fit what it finds, and waits for a decision. The planner is a copy of the planning conversation, opened the first time it is asked, so it keeps its research context. It reads the current files, including the implementer's changes, and runs read-only commands; the only file it may write is the plan file. When its answer changes the plan it edits the file and adds a dated line under `## Amendments`, and the tool row shows the diff. Each ask is a planning-model turn over the planning context; its cost counts in the footer and the session totals.
+- **Keeping the planning model on it** has no planner on call: the implementer is the planner, so `ask_planner` is not offered.
+- **Unplanned files.** The first edit or write of each file the plan does not list (paths in backticks) gets a note appended to the tool result: ask the planner, or record the departure under `## Amendments` when there is none. Nothing is blocked, and a plan that names no paths gets no notes.
+- **`finish_plan`.** When the plan is done and its Verification passes, your agent calls `finish_plan` with its report and you choose **Yes, done** (ends exec mode and, when the session is still on the model the handoff switched to, switches back to the planning model), **Have the planner review it** (only with a planner on call: it checks the changes against the plan and ends with a verdict; a clean verdict returns to the choice with a note, otherwise its findings go back to your agent to fix before calling `finish_plan` again), or **No, keep going** (the turn ends; your next message says what).
+
+Approving a newer plan replaces exec mode. `enter_plan_mode` is refused while it is on; `/plan` and Shift+Tab still plan. A reload or resume restores it from the session.
 
 In Pi's fullscreen terminal mode, **Plan review** scrolls the main chat to the beginning of the plan when the approval picker opens, including for short plans. Scroll the chat to read the rest; ordinary redraws do not move you back. Editing the plan returns to its beginning, and closing review restores following the latest message. Regular terminal mode and RPC keep their usual presentation because Pi does not own their chat scrollback. Once you decide, a plan longer than 12 lines folds in the transcript (`… N more lines (ctrl+o to expand)`). [Compaction plan](/plugins/pi-compact-plan/) draws its compaction focus with the same review card.
 
@@ -76,7 +87,7 @@ While the run is active, M has two tools:
 
 The **Write plan M** and **Revise plan M** actions request that synthesis for you. Planner-internal tools are separate: `plan_mode_question` asks in-lane questions, `plan_mode_complete` submits plan versions, and `plan_subagents` starts research helpers.
 
-Choose **Implement…** to pick the plan (M first, once there is one) and review the implementation model, effort, and context before starting. Context can keep this conversation plus the plan, or start a child session with only the plan. `implementationModelMap` supplies defaults based on the model that authored the plan; otherwise pi-subagents' `worker` model is used, else the main session's model.
+Choose **Implement…** to pick the plan (M first, once there is one) and review the implementation model, effort, and context before starting. Context can keep this conversation plus the plan, or start a child session with only the plan. `implementationModelMap` supplies defaults based on the model that authored the plan; otherwise pi-subagents' `worker` model is used, else the main session's model. The plan is written to a plan file and starts exec mode; the author planner (A or B) stays on call, and plan M only with a fresh context (a child session, not an in-place handoff).
 
 **Export…** picks a plan and a path and writes it to Markdown without initiating implementation. **Discard** stops the planners and drops the plans; Esc hides the screen and keeps them.
 
@@ -108,6 +119,8 @@ Invalid settings fall back to defaults and are not overwritten. Saves support sy
 Planner sessions omit edit/write tools, restrict shell commands through a reviewed policy, and limit MCP access to selected tools. This reduces accidental mutation; it is not an operating-system sandbox. Selected extension tools and configured commands still run with Pi's permissions, and reading repository files can expose sensitive data to the chosen provider.
 
 In particular, `safeSubcommands` fully trusts matching command prefixes and bypasses checking of the **entire submitted shell command**, including trailing chains and redirects. Do not use it as a harmless read-only allowlist. Even default Git inspection can invoke configured helpers unless the relevant negative flags suppress them.
+
+The planner on call can read files and run read-only commands but has no web or MCP access and cannot run tests; it may write only the plan file. Its session is a seeded copy under `~/.pi/agent/plan-mode/planners/`.
 
 M is only instructed to leave files alone during planning; it is not constrained by the planners' read-only tool policy. Implementation and exports intentionally write files.
 

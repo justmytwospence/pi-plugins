@@ -117,9 +117,49 @@ export function planFailureText(id: string, model: string, error: string) {
   return `Planner ${id} (${model}) failed: ${error}. The user can retry it from /planners (talk to it, or reload once the cause is fixed).`;
 }
 
-/** How a question from your main agent reaches a planner. */
-export function consultMessage(message: string) {
+/** How a question reaches a planner: from your main agent, or from the agent implementing its plan. */
+export function consultMessage(message: string, from: "main" | "implementer" = "main") {
+  if (from === "implementer") {
+    return `[From the implementing agent, which is carrying out your approved plan. Answer it directly; amend the plan file only if your answer changes the plan.]\n\n${message.trim()}`;
+  }
   return `[From the user's main agent, which is talking the plans over with the user. Answer it directly; resubmit your plan with plan_mode_complete only if your answer changes it.]\n\n${message.trim()}`;
+}
+
+/** The planner on call's role, appended to its system prompt. */
+export function consultantSystemPrompt(planFile: string) {
+  return [
+    "## Planner on call",
+    "",
+    `The conversation above is where you planned this task. The user approved your plan, which is in the plan file ${planFile}, and handed it to another model, which is implementing it in a separate session in the same working directory. It asks you when the plan does not fit what it finds; its messages start with "[From the implementing agent".`,
+    "- Check the current files before you answer: they include the implementer's changes. You can read files and run read-only commands; the only file you may write is the plan file.",
+    "- Decide. Answer with what to do, where and why, as concretely as the plan itself; do not hand the decision back.",
+    "- When your answer changes the plan, edit the plan file first: change the affected sections in place, and add a dated line under a `## Amendments` heading at its end saying what changed and why.",
+    "- When the question is a product decision only the user can make, say so, and give the exact question the implementer should ask the user, with your recommendation.",
+    "- Keep answers short: the implementer has the plan.",
+  ].join("\n");
+}
+
+/** Steers the planner on call when its time is almost up. */
+export const CONSULT_WRAP_UP =
+  "Time is almost up. Stop investigating and answer now with your best decision; amend the plan file first if your answer changes the plan.";
+
+/** What the planner on call is asked when the user wants its review of finished work. */
+export function reviewRequest(report: string) {
+  return [
+    "[From the implementing agent, which reports your plan as done. The user asked you to review the work before accepting it.]",
+    "",
+    "Review the implementation against your plan (the plan file has its current version): read the changes (git status, git diff) and the files they touch, and check every step and every Verification item. List only what is missing or wrong, each with the file and what to do. You cannot run the tests; say which checks the implementer must still run, if any. End with exactly one line: `Verdict: done` when nothing needs to change, or `Verdict: changes needed`.",
+    "",
+    "The implementer's report:",
+    "",
+    report.trim(),
+  ].join("\n");
+}
+
+/** The planner's verdict on a review: its last `Verdict:` line; anything but `done` means changes. */
+export function reviewVerdict(reply: string): "done" | "changes" {
+  const matches = [...reply.matchAll(/^\s*`?verdict:\s*(done|changes needed)`?\s*$/gimu)];
+  return matches.at(-1)?.[1]?.toLowerCase() === "done" ? "done" : "changes";
 }
 
 /** What Write plan M (or Revise plan M, once there is one) asks your main agent to do. */

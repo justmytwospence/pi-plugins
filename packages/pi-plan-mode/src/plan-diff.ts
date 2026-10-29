@@ -48,3 +48,10 @@ export function renderPlanDiff(theme: Theme, lines: DiffLine[]): string {
     )
     .join("\n");
 }
+
+/** The diff as plain text, for a tool result: `…` for a gap, `+ text` or `- text` otherwise. */
+export function planDiffText(lines: DiffLine[]): string {
+  return lines
+    .map((line) => (line.kind === "gap" ? "…" : line.kind === "added" ? `+ ${line.text}` : `- ${line.text}`))
+    .join("\n");
+}

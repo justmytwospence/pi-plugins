@@ -4,6 +4,7 @@
 // from the providers your session registered, so subscriptions and custom providers work unchanged.
 
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import {
   type AgentSession,
   type AgentSessionEvent,
@@ -63,6 +64,41 @@ export const createPlannerSession: PlannerSessionFactory = async (host, options)
   return run;
 };
 
+/** Where planner sessions are stored. */
+export function plannerSessionDir() {
+  return join(getAgentDir(), "plan-mode", "planners");
+}
+
+/** A new session in `dir` seeded with `seed`, ending with the seed-end marker. */
+export function seedSessionManager(cwd: string, dir: string, seed: readonly unknown[]): SessionManager {
+  const sessionManager = SessionManager.create(cwd, dir);
+  for (const message of seed) {
+    try {
+      sessionManager.appendMessage(message as never);
+    } catch {
+      // A message Pi will not store (e.g. a custom extension message) is just left out.
+    }
+  }
+  sessionManager.appendCustomEntry(PLANNER_SEED_END_ENTRY, {});
+  return sessionManager;
+}
+
+/** Write a seeded session to disk; its file, or undefined when nothing was persisted. */
+export function writeSeededSession(cwd: string, dir: string, messages: readonly unknown[]): string | undefined {
+  const sessionManager = seedSessionManager(cwd, dir, messages);
+  return sessionManager.isPersisted() ? sessionManager.getSessionFile() : undefined;
+}
+
+/** The messages of a stored session's current branch; [] when it is missing or unreadable. */
+export function readSessionMessages(file: string, cwd: string): unknown[] {
+  if (!existsSync(file)) return [];
+  try {
+    return SessionManager.open(file, undefined, cwd).buildSessionProjection().messages as unknown[];
+  } catch {
+    return [];
+  }
+}
+
 async function openSession(host: ExtensionContext, options: PlannerSessionOptions): Promise<PlannerSessionHandle> {
   const agentDir = getAgentDir();
   const settingsManager = SettingsManager.create(options.cwd, agentDir);
@@ -98,15 +134,7 @@ async function openSession(host: ExtensionContext, options: PlannerSessionOption
   if (options.storage.kind === "open") {
     sessionManager = SessionManager.open(options.storage.file, undefined, options.cwd);
   } else {
-    sessionManager = SessionManager.create(options.cwd, options.storage.dir);
-    for (const message of options.storage.seed) {
-      try {
-        sessionManager.appendMessage(message as never);
-      } catch {
-        // A message Pi will not store (e.g. a custom extension message) is just left out.
-      }
-    }
-    sessionManager.appendCustomEntry(PLANNER_SEED_END_ENTRY, {});
+    sessionManager = seedSessionManager(options.cwd, options.storage.dir, options.storage.seed);
   }
 
   const { session } = await createAgentSession({

@@ -28,6 +28,14 @@
 
 ### Major Changes
 
+- Exec mode follows any approved plan: the footer shows `exec <plan>` (on pi-status-footer's
+  permission-mode row), and the model that planned stays on call. After a handoff, the implementer
+  gets `ask_planner`, which asks a copy of the planning session (read-only tools, and the plan file
+  as its only writable file) for a decision and shows any plan amendment as a diff; asks are counted
+  in the footer with their cost. The first edit of each file the plan does not list gets a note,
+  never a block. `finish_plan` ends exec mode with your choice: **Yes, done** (back to the planning
+  model), **Have the planner review it**, or **No, keep going**. `/planners`' Implement step writes
+  a plan file and starts exec mode with the author planner on call.
 - Plans are handoff-ready and approval picks who implements. Every plan (plan mode, `/planners` and
   plan M) is written to one standard (Summary, Decisions, Changes, Steps, Verification, Out of
   scope, Handoff notes) so a cheaper model can implement it without making a decision. The approval

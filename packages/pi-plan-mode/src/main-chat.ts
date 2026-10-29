@@ -10,6 +10,7 @@ import {
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text } from "@earendil-works/pi-tui";
+import { setToolsActive } from "./active-tools.js";
 import { PiChat, piChatTheme } from "./app/pi-chat.js";
 import type { ModelSpec } from "./implementation-models.js";
 import type { PlannerAgent, PlannerStats, PlannerStatus } from "./planner/agent.js";
@@ -136,20 +137,7 @@ export function registerMainChat(pi: ExtensionAPI, bridge: MainChatBridge) {
 
 /** Turn the main agent's run tools on while a run is active, and off again after. */
 export function setMainToolsActive(pi: ExtensionAPI, active: boolean) {
-  let current: string[];
-  try {
-    current = pi.getActiveTools();
-  } catch {
-    return;
-  }
-  const others = current.filter((name) => !(MAIN_TOOLS as readonly string[]).includes(name));
-  const next = active ? [...others, ...MAIN_TOOLS] : others;
-  if (next.length === current.length && next.every((name) => current.includes(name))) return;
-  try {
-    pi.setActiveTools(next);
-  } catch {
-    // A session without tool control keeps what it has.
-  }
+  setToolsActive(pi, MAIN_TOOLS, active);
 }
 
 /** How many of your conversation's latest messages the M pane starts with. */

@@ -13,7 +13,7 @@ import type { SafeSubcommands } from "../tool-policy.js";
 import { isBuiltinTool } from "../tool-policy.js";
 import { leaves, type ToolNode, treeToSelection } from "../tool-tree.js";
 import type { PlannerAccessConfig } from "./agent.js";
-import { plannerSystemPrompt } from "./prompt.js";
+import { consultantSystemPrompt, plannerSystemPrompt } from "./prompt.js";
 
 const READ_TOOLS = ["read", "grep", "find", "ls"];
 /** Tools that make no sense in a planner: it asks you with plan_mode_question instead. */
@@ -141,6 +141,28 @@ export function resolveAccess(input: ResolveAccessInput): ResolvedAccess {
     ...(access.mcpAllow ? { mcpAllow: access.mcpAllow } : {}),
     grants,
     ...(scouts ? { scoutLabel: formatModelSpec(scouts) } : {}),
+  };
+}
+
+/** What the planner on call may use: read the code, run read-only commands, write only the plan file. */
+export function consultantAccess(
+  planFile: string,
+  safeSubcommands: SafeSubcommands | undefined,
+  guardExtensionPath: string,
+): PlannerAccessConfig {
+  const tools = [...READ_TOOLS, "bash", "edit", "write"];
+  return {
+    tools,
+    extensions: [],
+    skills: [],
+    systemPrompt: [consultantSystemPrompt(planFile)],
+    policy: {
+      tools: new Set(tools),
+      grantPrefixes: [],
+      ...(safeSubcommands ? { safeSubcommands } : {}),
+      guardExtensionPath,
+      planFile,
+    },
   };
 }
 

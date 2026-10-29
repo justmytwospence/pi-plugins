@@ -8,7 +8,7 @@ import { formatModelSpec, type ModelSpec } from "../implementation-models.js";
 import { describeToolArgs, PlannerTrace } from "../planner-trace.js";
 import { buildPlannerConversation, buildPlannerTranscript, PLANNER_SEED_END_ENTRY } from "../planners.js";
 import type { PlanModeQuestion, PlanModeQuestionAnswer } from "../question-tool.js";
-import { PLAN_SUBAGENTS_TOOL_NAME } from "../scout-process.js";
+import { addUsage as addUsageTo, emptyUsage, PLAN_SUBAGENTS_TOOL_NAME, type Usage } from "../scout-process.js";
 import { SubagentTracker } from "../subagent-progress.js";
 import { type PlannerPolicy, plannerExtension } from "./extension.js";
 import {
@@ -70,6 +70,8 @@ export interface PlannerAgentOptions {
   name: string;
   cwd: string;
   access: PlannerAccessConfig;
+  /** What a working planner is steered with at 80% of the time limit; default: ask it to submit its plan. */
+  wrapUpMessage?: string;
   /** Per turn: at 80% the planner is asked to wrap up, at the limit it is stopped. */
   timeoutMs: number;
   /** Where new planner sessions are stored. */
@@ -115,6 +117,7 @@ export class PlannerAgent {
   private unsubscribe: (() => void) | undefined;
   private softTimer: ReturnType<typeof setTimeout> | undefined;
   private hardTimer: ReturnType<typeof setTimeout> | undefined;
+  private turnUsage = emptyUsage();
   private disposed = false;
   private turnEpoch = 0;
   private readonly operationId = randomUUID();
@@ -214,8 +217,8 @@ export class PlannerAgent {
     from: string,
     signal?: AbortSignal,
     shown?: string,
-  ): Promise<{ reply: string; revised: boolean; error?: string }> {
-    if (this.disposed) return { reply: "", revised: false, error: "the planner is closed" };
+  ): Promise<{ reply: string; revised: boolean; error?: string; usage: Usage }> {
+    if (this.disposed) return { reply: "", revised: false, error: "the planner is closed", usage: emptyUsage() };
     const before = this.revision;
     this.lastReply = "";
     const settled = new Promise<void>((resolve) => {
@@ -228,6 +231,7 @@ export class PlannerAgent {
       reply: this.lastReply,
       revised: this.revision > before,
       ...(this.status === "failed" && this.error ? { error: this.error } : {}),
+      usage: { ...this.turnUsage, cost: { ...this.turnUsage.cost } },
     };
   }
 
@@ -394,6 +398,7 @@ export class PlannerAgent {
 
   private beginTurn() {
     this.turnEpoch++;
+    this.turnUsage = emptyUsage();
     this.status = "working";
     this.error = undefined;
     this.stats = {
@@ -418,7 +423,7 @@ export class PlannerAgent {
         this.stats.wrappingUp = true;
         this.stats.lastActivity = "asked to wrap up";
         this.record("Time is almost up: asked the planner to finish now.", "warning");
-        void session.steer(WRAP_UP_MESSAGE).catch(() => undefined);
+        void session.steer(this.options.wrapUpMessage ?? WRAP_UP_MESSAGE).catch(() => undefined);
         this.changed();
       },
       Math.max(1, Math.floor(limit * SOFT_DEADLINE_FRACTION)),
@@ -510,6 +515,7 @@ export class PlannerAgent {
     this.stats.totalTokens += typeof usage.totalTokens === "number" ? usage.totalTokens : 0;
     const cost = isRecord(usage.cost) ? usage.cost.total : undefined;
     this.stats.costUsd += typeof cost === "number" ? cost : 0;
+    addUsageTo(this.turnUsage, usage as never);
   }
 
   private fail(error: unknown) {

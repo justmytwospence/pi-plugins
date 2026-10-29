@@ -107,6 +107,7 @@ function setup(plan: string, scrollbar: "always" | "hidden" = "always") {
     handoffTarget: () => undefined,
     handoff() {},
     implementHere: () => "implement",
+    executing: () => false,
     toggleKey: () => undefined,
   });
   inline.enter(ctx);

@@ -113,6 +113,8 @@ export interface InlineHost {
   handoff(approval: Approval, who: HandoffTarget | undefined): void;
   /** Implement it here, by the agent that planned it; returns the tool result's text. */
   implementHere(ctx: ExtensionContext, approval: Approval): string;
+  /** Whether an approved plan is being implemented (exec mode). */
+  executing(): boolean;
   /** The key that toggles plan mode without pi-tool-gate, for the status line. */
   toggleKey(): string | undefined;
 }
@@ -358,6 +360,11 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     promptGuidelines: ENTER_GUIDELINES,
     parameters: { type: "object", additionalProperties: false, properties: {} } as never,
     async execute(_id, _params, _signal, _onUpdate, ctx) {
+      if (host.executing()) {
+        return text(
+          "You are implementing an approved plan (exec mode): follow it and call finish_plan when it is done; do not start planning again unless the user asks.",
+        );
+      }
       if (state.active) return text("You are already in plan mode.");
       hostCtx = ctx;
       enter(ctx);
@@ -466,7 +473,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
               content: [
                 {
                   type: "text",
-                  text: `The user approved the plan and handed it off to ${who?.targetName ?? "a fresh context"}, which implements it in this session from the plan alone. Stop here and do nothing else.`,
+                  text: `The user approved the plan and handed it off to ${who?.targetName ?? "a fresh context"}, which implements it in this session from the plan alone${who ? "; you stay on call to answer its questions" : ""}. Stop here and do nothing else.`,
                 },
               ],
               details: {

@@ -86,6 +86,7 @@ async function setup(
       getBranch: () => mock.entries.map((entry) => ({ type: "custom", ...entry })),
       getEntries: () => [],
       getSessionFile: () => "/main.jsonl",
+      buildSessionProjection: () => ({ messages: [{ role: "user", content: "plan it", timestamp: 1 }] }),
     },
   });
   const gateEvents: Array<{ channel: string; data: any }> = [];
@@ -181,6 +182,13 @@ test("exit_plan_mode needs a written plan, shows it, and implements it here once
     /^The user approved your plan\.[\s\S]*## Approved plan\n\n# Plan\n\n1\. Do it$/u,
   );
   assert.equal(inline().active, false);
+  const exec = mock.entries.filter((entry) => entry.customType === "plan-mode:exec").at(-1)?.data as any;
+  assert.equal(exec.active, true, "implementing here starts exec mode");
+  assert.equal(exec.planFile, planFile);
+  assert.equal(exec.planner, undefined, "the implementer is the planner");
+  const refused = await tool(ENTER_TOOL).execute("t3", {}, undefined, undefined, context.ctx);
+  assert.match(refused.content[0]?.text ?? "", /exec mode/u);
+  assert.equal(inline().active, false, "exec mode does not re-enter planning");
   assert.equal(context.statuses.get("permission-mode"), undefined);
   // The result told your agent: no separate notice.
   assert.equal(await emit("before_agent_start", { prompt: "go" }), undefined);
@@ -237,15 +245,24 @@ test("a handoff compacts the context down to the plan and continues on the targe
   assert.equal(result.terminate, true);
   assert.equal(result.details.outcome, "handoff");
   assert.equal(result.details.handoff, "Claude Sonnet 5.5");
+  assert.match(result.content[0]?.text ?? "", /you stay on call/u);
   const settled = await emit("agent_before_settle", { outcome: "completed" });
   assert.equal(settled.continue, true);
-  assert.equal(settled.entries[0].type, "compaction");
-  assert.equal(settled.entries[0].firstKeptEntryId, null);
-  assert.equal(settled.entries[1].type, "custom_message");
-  assert.equal(settled.entries[1].customType, "plan-mode-handoff");
-  assert.equal(settled.entries[1].display, true);
-  assert.match(settled.entries[1].content, /## Approved plan\n\n# Plan\n\n1\. Do it$/u);
-  assert.equal(settled.entries[1].details.implementer, "Claude Sonnet 5.5");
+  assert.equal(settled.entries[0].type, "custom");
+  assert.equal(settled.entries[0].customType, "plan-mode:exec");
+  assert.equal(settled.entries[0].data.active, true);
+  assert.equal(settled.entries[0].data.planner.name, "Claude Opus 5.5");
+  assert.equal(settled.entries[0].data.restore, "anthropic/claude-opus-5-5");
+  assert.ok(existsSync(settled.entries[0].data.planner.sessionFile), "the seeded planner session is on disk");
+  assert.equal(settled.entries[1].type, "compaction");
+  assert.equal(settled.entries[1].firstKeptEntryId, null);
+  assert.equal(settled.entries[2].type, "custom_message");
+  assert.equal(settled.entries[2].customType, "plan-mode-handoff");
+  assert.equal(settled.entries[2].display, true);
+  assert.match(settled.entries[2].content, /ask_planner/u);
+  assert.match(settled.entries[2].content, /## Approved plan\n\n# Plan\n\n1\. Do it$/u);
+  assert.equal(settled.entries[2].details.implementer, "Claude Sonnet 5.5");
+  assert.equal(settled.entries[2].details.planner, "Claude Opus 5.5");
   assert.deepEqual(
     mock.setModels.map((model: any) => model.id),
     ["claude-sonnet-5-5"],

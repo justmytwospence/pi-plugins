@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { initTheme } from "@earendil-works/pi-coding-agent";
-import { test } from "vitest";
+import { test, vi } from "vitest";
 import { otherTools, otherToolsNode, resolveAccess } from "../src/planner/access.js";
 import { type PlannerAccessConfig, PlannerAgent } from "../src/planner/agent.js";
 import { plannerExtension } from "../src/planner/extension.js";
@@ -66,6 +66,30 @@ test("the planner policy keeps planning read-only and limited to the chosen tool
 
   await tools.get("plan_mode_complete")?.execute("1", { plan: "# Plan" });
   assert.deepEqual(plans, ["# Plan"]);
+});
+
+test("with a plan file, edit and write may change that file only", async () => {
+  const { toolCall } = loadExtension(
+    plannerExtension({
+      ...access(["read", "edit", "write"]).policy,
+      planFile: "/plans/calm-river.md",
+      ask: async () => undefined,
+      onPlan: () => undefined,
+    }) as never,
+  );
+  assert.equal(await toolCall("write", { path: "/plans/calm-river.md" }), undefined);
+  assert.equal(await toolCall("edit", { path: "/plans/calm-river.md" }), undefined);
+  assert.match((await toolCall("edit", { path: "src/a.ts" }))?.reason ?? "", /read-only/u);
+  assert.match((await toolCall("write", { path: "/plans/other.md" }))?.reason ?? "", /read-only/u);
+  const relative = loadExtension(
+    plannerExtension({
+      ...access(["edit"]).policy,
+      planFile: "/repo/plan.md",
+      ask: async () => undefined,
+      onPlan: () => undefined,
+    }) as never,
+  );
+  assert.equal(await relative.toolCall("edit", { path: "plan.md" }), undefined, "relative to the cwd");
 });
 
 test("planner questions go to the lane, and a skipped question says so", async () => {
@@ -373,4 +397,47 @@ test("an in-process planner session is shut down like Pi's own runtime does: abo
     dispose: () => void failing.push("dispose"),
   } as never);
   assert.deepEqual(failing, ["dispose"]);
+});
+
+test("consult returns the usage of that turn only", async () => {
+  let cost = 0.05;
+  const { factory } = fakeSessions(async (_prompt, run) => {
+    run.emit({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "answer" }],
+        usage: { totalTokens: 100, cost: { total: cost } },
+      },
+    });
+  });
+  const planner = agent(factory);
+  const first = await planner.consult("one", {} as never, "implementer");
+  assert.equal(first.reply, "answer");
+  assert.equal(first.usage.cost.total, 0.05);
+  assert.equal(first.usage.totalTokens, 100);
+  cost = 0.2;
+  const second = await planner.consult("two", {} as never, "implementer");
+  assert.equal(second.usage.cost.total, 0.2);
+  assert.ok(Math.abs(planner.stats.costUsd - 0.25) < 1e-9, "the lane's total keeps adding up");
+});
+
+test("the soft timer steers with the configured wrap-up message", async () => {
+  vi.useFakeTimers();
+  try {
+    let release: () => void = () => undefined;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { factory, sent } = fakeSessions(async () => pending);
+    const planner = agent(factory, { timeoutMs: 1_000, wrapUpMessage: "wrap" });
+    await planner.start("task", {} as never);
+    vi.advanceTimersByTime(800);
+    assert.deepEqual(sent.at(-1), { kind: "steer", text: "wrap" });
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    planner.dispose();
+  } finally {
+    vi.useRealTimers();
+  }
 });

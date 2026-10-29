@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { planDiff } from "../src/plan-diff.js";
+import { planDiff, planDiffText } from "../src/plan-diff.js";
 
 test("a plan diff lists changed lines only, with a gap between separate runs", () => {
   const before = "# Plan\n\n1. Pin data\n2. Keep it\n3. Same\n4. Old tail";
@@ -13,4 +13,9 @@ test("a plan diff lists changed lines only, with a gap between separate runs", (
     { kind: "added", text: "4. New tail" },
   ]);
   assert.deepEqual(planDiff("same", "same"), []);
+});
+
+test("a plan diff as text marks gaps, additions and removals", () => {
+  assert.equal(planDiffText(planDiff("a\nb\nc\nd", "a\nB\nc\nD")), "- b\n+ B\n…\n- d\n+ D");
+  assert.equal(planDiffText([]), "");
 });

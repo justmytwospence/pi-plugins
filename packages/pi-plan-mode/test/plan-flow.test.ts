@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
 import planMode from "../src/index.js";
@@ -327,6 +328,14 @@ test("/planners opens on the settings, goes through tools, plans with two planne
   await opened;
   await flush();
   assert.match(mock.sentUserMessages.at(-1)?.text ?? "", /# Merged plan/u);
+  const exec = mock.entries.filter((entry) => entry.customType === "plan-mode:exec").at(-1)?.data as {
+    active: boolean;
+    planFile: string;
+    planner?: unknown;
+  };
+  assert.equal(exec.active, true, "implementing starts exec mode");
+  assert.equal(exec.planner, undefined, "plan M kept in this conversation has no planner on call");
+  assert.ok(existsSync(exec.planFile), "the plan is written to a plan file");
   const stored = mock.entries.filter((entry) => entry.customType === "plan-run").at(-1)?.data as {
     state: string;
     merged?: { plan: string; revision: number };

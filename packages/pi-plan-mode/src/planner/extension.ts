@@ -20,6 +20,7 @@ import {
   type McpGuardVerdict,
   mcpToolIdentity,
 } from "../mcp-tools.js";
+import { isPlanFile } from "../plan-file.js";
 import {
   normalizePlanModeQuestionParams,
   PLAN_MODE_QUESTION_PARAMS,
@@ -64,6 +65,8 @@ export interface PlannerPolicy {
   grantPrefixes: readonly string[];
   safeSubcommands?: SafeSubcommands;
   scouts?: PlannerScouts;
+  /** The one file edit and write may change (the plan file, for the planner on call). */
+  planFile?: string;
   /** Path of this package's entry, which scouts load to enforce an MCP allowlist. */
   guardExtensionPath: string;
   /** Show questions in the planner's lane and wait for your answers; undefined when you skip them. */
@@ -193,6 +196,12 @@ export function plannerExtension(policy: PlannerPolicy): ExtensionFactory {
       const name = event.toolName;
       if (name === PLAN_MODE_QUESTION_TOOL_NAME || name === PLAN_MODE_COMPLETE_TOOL_NAME) return undefined;
       if (scouts && name === PLAN_SUBAGENTS_TOOL_NAME) return undefined;
+      if (
+        (name === "edit" || name === "write") &&
+        policy.planFile &&
+        isPlanFile((event.input as Record<string, unknown>).path, ctx.cwd, policy.planFile)
+      )
+        return undefined;
       if (BLOCKED_TOOLS.has(name)) return { block: true, reason: `Planning is read-only: '${name}' is blocked.` };
       const mcp = checkMcp(toolByName(name), name, event.input, policy.mcpAllow);
       if (mcp) return mcp.allowed ? undefined : { block: true, reason: mcp.reason };

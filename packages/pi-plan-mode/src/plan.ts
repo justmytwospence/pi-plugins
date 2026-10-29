@@ -34,6 +34,7 @@ import {
   readInputContext,
   requestEditorFactory,
 } from "./editor-contract.js";
+import { EXEC_ENTRY, type ExecState, registerExec } from "./exec.js";
 import { editExternally, externalEditorCommand, prepareEditor } from "./external-editor.js";
 import { HANDOFF_MESSAGE_TYPE, HANDOFF_SUMMARY, implementationBrief } from "./handoff.js";
 import { HERDR_BLOCKED_CHANNEL, holdBlocked, holdWorking, isOwnEmit } from "./herdr-blocked.js";
@@ -63,7 +64,7 @@ import {
 import { buildMcpCatalog, readConfiguredMcpServers } from "./mcp-tools.js";
 import { modelCatalog } from "./model-catalog.js";
 import { exportPlanToFile } from "./plan-export.js";
-import { planName } from "./plan-file.js";
+import { planName, plansDirectoryPath, writePlanFile } from "./plan-file.js";
 import { expandHome, runPlanCompleteHook } from "./plan-hook.js";
 import { type OtherTool, otherTools, otherToolsNode, resolveAccess } from "./planner/access.js";
 import { type PlannerAccessConfig, PlannerAgent } from "./planner/agent.js";
@@ -75,7 +76,13 @@ import {
   resumeMessage,
   writeMergedRequest,
 } from "./planner/prompt.js";
-import { inheritProviders, type PlannerSessionFactory } from "./planner/session.js";
+import {
+  inheritProviders,
+  type PlannerSessionFactory,
+  plannerSessionDir,
+  readSessionMessages,
+  writeSeededSession,
+} from "./planner/session.js";
 import { PlannerActivity } from "./planner-activity.js";
 import { buildPlannerTranscript } from "./planners.js";
 import { extensionsForProvider, resolveProviderExtensions } from "./provider-extensions.js";
@@ -658,6 +665,14 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     clearBranch();
   });
 
+  // Exec mode: following an approved plan, with the planner on call and finish_plan.
+  const exec = registerExec(pi, {
+    safeSubcommands: () => settings.safeSubcommands,
+    guardExtensionPath: EXTENSION_ENTRY_PATH,
+    ...(dependencies.createSession ? { createSession: dependencies.createSession } : {}),
+    restoreModel: (ctx, spec) => applyRuntime(ctx, spec),
+  });
+
   // Inline plan mode in your own conversation (Claude Code's): /plan, Shift+Tab, enter_plan_mode.
   const inline = registerInlinePlanMode(pi, {
     safeSubcommands: () => settings.safeSubcommands,
@@ -685,8 +700,23 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     handoff: (approval, who) => {
       pendingHandoff = { approval, who };
     },
-    implementHere: (_ctx, a) =>
-      implementationBrief({ plan: a.plan, planFile: a.planFile, context: "here", own: true, edited: a.edited }),
+    implementHere: (ctx, a) => {
+      const planning = sessionSpecOf(ctx);
+      exec.begin(
+        ctx,
+        {
+          active: true,
+          planFile: a.planFile,
+          implementer: planning ? modelCatalog(ctx).name(planning) : "this model",
+          implementerModel: planning ? formatModelKey(planning) : "",
+          asks: 0,
+          costUsd: 0,
+        },
+        { record: true },
+      );
+      return implementationBrief({ plan: a.plan, planFile: a.planFile, context: "here", own: true, edited: a.edited });
+    },
+    executing: () => exec.active,
     toggleKey: () => configuredPlanModeToggleShortcut(settings),
   });
 
@@ -706,10 +736,41 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       return undefined;
     }
     const { approval, who } = handoff;
+    let sessionFile: string | undefined;
+    if (who) {
+      try {
+        sessionFile = writeSeededSession(
+          ctx.cwd,
+          plannerSessionDir(),
+          ctx.sessionManager.buildSessionProjection().messages,
+        );
+      } catch (error: unknown) {
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            `The planner could not be put on call (${errorText(error)}); the handoff goes ahead without it.`,
+            "warning",
+          );
+        }
+      }
+    }
     const switched = who && handsOffToAnotherModel(who) ? await applyRuntime(ctx, who.target) : false;
     const implementer = who && switched ? who.targetName : (who?.planningName ?? "this model");
+    const planner =
+      sessionFile && who ? { spec: formatModelSpec(who.planning), name: who.planningName, sessionFile } : undefined;
+    const execState: ExecState = {
+      active: true,
+      planFile: approval.planFile,
+      implementer,
+      implementerModel: who ? formatModelKey(switched ? who.target : who.planning) : "",
+      ...(planner ? { planner } : {}),
+      ...(who && switched ? { restore: formatModelSpec(who.planning) } : {}),
+      asks: 0,
+      costUsd: 0,
+    };
+    exec.begin(ctx, execState, { record: false });
     return {
       entries: [
+        { type: "custom" as const, customType: EXEC_ENTRY, data: execState },
         {
           type: "compaction" as const,
           summary: HANDOFF_SUMMARY,
@@ -723,22 +784,28 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
             plan: approval.plan,
             planFile: approval.planFile,
             context: "fresh",
+            ...(planner ? { planner: planner.name } : {}),
             edited: approval.edited,
           }),
           display: true,
-          details: { planFile: approval.planFile, implementer, lines: approval.plan.split("\n").length },
+          details: {
+            planFile: approval.planFile,
+            implementer,
+            ...(planner ? { planner: planner.name } : {}),
+            lines: approval.plan.split("\n").length,
+          },
         },
       ],
       continue: true,
     };
   });
 
-  pi.registerMessageRenderer<{ planFile?: string; implementer?: string; lines?: number }>(
+  pi.registerMessageRenderer<{ planFile?: string; implementer?: string; planner?: string; lines?: number }>(
     HANDOFF_MESSAGE_TYPE,
     (message, options, theme) => {
       const details = message.details;
       const body = typeof message.content === "string" ? message.content : "";
-      const head = `▸ Plan ${details?.planFile ? planName(details.planFile) : ""} handed off to ${details?.implementer ?? "the implementer"}`;
+      const head = `▸ Plan ${details?.planFile ? planName(details.planFile) : ""} handed off to ${details?.implementer ?? "the implementer"}${details?.planner ? ` · ${details.planner} on call` : ""}`;
       return renderCollapsedMarkdown(head, body, options.expanded, theme, details?.lines);
     },
   );
@@ -1769,21 +1836,58 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
   ) {
     const plan = source.plan;
     hook(ctx, source);
+    const authorFile = run?.agents.find((agent) => agent.id === source.id)?.sessionFile;
     disposeRun("implemented");
-    if (context === "clear") return implementFresh(ctx, target, implementationBrief({ plan, context: "fresh" }));
+    const before = sessionSpecOf(ctx);
+    const catalog = modelCatalog(ctx);
+    const planFile = writePlanFile(plansDirectoryPath(settings.plansDirectory), plan);
+    let planner: ExecState["planner"];
+    try {
+      if (source.id !== MERGED_ID && authorFile && source.spec) {
+        const file = writeSeededSession(ctx.cwd, plannerSessionDir(), readSessionMessages(authorFile, ctx.cwd));
+        if (file) planner = { spec: formatModelSpec(source.spec), name: source.name, sessionFile: file };
+      } else if (source.id === MERGED_ID && context === "clear") {
+        const spec = source.spec ?? before;
+        const file = spec
+          ? writeSeededSession(ctx.cwd, plannerSessionDir(), ctx.sessionManager.buildSessionProjection().messages)
+          : undefined;
+        if (file && spec) planner = { spec: formatModelSpec(spec), name: catalog.name(spec), sessionFile: file };
+      }
+    } catch (error: unknown) {
+      ctx.ui.notify(`The planner could not be put on call (${errorText(error)}); implementing without it.`, "warning");
+    }
+    const state: ExecState = {
+      active: true,
+      planFile,
+      implementer: catalog.name(target),
+      implementerModel: formatModelKey(target),
+      ...(planner ? { planner } : {}),
+      ...(before && !sameModel(before, target) ? { restore: formatModelSpec(before) } : {}),
+      asks: 0,
+      costUsd: 0,
+    };
+    const brief = implementationBrief({
+      plan,
+      planFile,
+      context: context === "clear" ? "fresh" : "here",
+      ...(planner ? { planner: planner.name } : {}),
+    });
+    if (context === "clear") return implementFresh(ctx, target, state, brief);
     await applyRuntime(ctx, target);
-    pi.sendUserMessage(implementationBrief({ plan, context: "here" }));
+    exec.begin(ctx, state, { record: true });
+    pi.sendUserMessage(brief);
   }
 
-  /** A fresh session (a child of this one) that gets only the plan, on `target` if given. */
-  async function implementFresh(ctx: ExtensionCommandContext, target: ModelSpec | undefined, brief: string) {
+  /** A fresh session (a child of this one) that gets only the plan, on `target`. */
+  async function implementFresh(ctx: ExtensionCommandContext, target: ModelSpec, state: ExecState, brief: string) {
     const parentSession = ctx.sessionManager.getSessionFile();
     try {
       await ctx.waitForIdle();
       await ctx.newSession({
         ...(parentSession ? { parentSession } : {}),
         setup: async (sessionManager) => {
-          if (target) sessionManager.appendCustomEntry(RUNTIME_ENTRY, { model: formatModelSpec(target) });
+          sessionManager.appendCustomEntry(RUNTIME_ENTRY, { model: formatModelSpec(target) });
+          sessionManager.appendCustomEntry(EXEC_ENTRY, state);
         },
         withSession: async (fresh) => {
           await fresh.sendUserMessage(brief);
@@ -1922,10 +2026,6 @@ function restoreAccess(stored: StoredAccess | undefined, settings: PlanModeSetti
       guardExtensionPath: EXTENSION_ENTRY_PATH,
     },
   };
-}
-
-function plannerSessionDir() {
-  return join(getAgentDir(), "plan-mode", "planners");
 }
 
 function availableModels(ctx: ExtensionContext): ModelSpec[] {

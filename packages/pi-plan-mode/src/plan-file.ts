@@ -105,3 +105,27 @@ export function tildify(file: string) {
   const home = process.env.HOME;
   return home && file.startsWith(`${home}/`) ? `~/${file.slice(home.length + 1)}` : file;
 }
+
+/** The paths a plan names: every backtick span that looks like a file or directory path. */
+export function planPaths(plan: string): string[] {
+  const paths = new Set<string>();
+  for (const match of plan.matchAll(/`([^`\n]+)`/gu)) {
+    const span = (match[1] ?? "")
+      .trim()
+      .replace(/:\d+(-\d+)?$/u, "")
+      .replace(/#L\d+.*$/u, "");
+    if (!span || /\s/u.test(span) || span.includes("://") || span.startsWith("-")) continue;
+    if (!span.includes("/") && !/^[\w.-]+\.[A-Za-z0-9]+$/u.test(span)) continue;
+    paths.add(span.replace(/^\.\//u, ""));
+  }
+  return [...paths];
+}
+
+/** Whether `file` (absolute) is one of the plan's `paths`: the same file, a path suffix, or inside a listed directory. */
+export function inPlan(file: string, cwd: string, paths: readonly string[]): boolean {
+  return paths.some((p) => {
+    if (resolve(cwd, expandHome(p)) === file) return true;
+    if (!p.startsWith("/") && !p.startsWith("~") && file.endsWith(`/${p}`)) return true;
+    return p.endsWith("/") && file.startsWith(`${resolve(cwd, expandHome(p))}/`);
+  });
+}
