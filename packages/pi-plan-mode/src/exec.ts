@@ -29,6 +29,7 @@ import type { Usage } from "./scout-process.js";
 export const EXEC_ENTRY = "plan-mode:exec";
 export const EXEC_STATUS_KEY = "plan-exec";
 export const ASK_TOOL = "ask_planner";
+export const BACK_COMMAND = "plan-back";
 export const FINISH_TOOL = "finish_plan";
 export const EXEC_TOOLS = [FINISH_TOOL, ASK_TOOL] as const;
 /** Per question to the planner on call. */
@@ -42,8 +43,10 @@ export interface ExecState {
   /** `provider/id` the handoff switched to; "" when unknown */
   implementerModel: string;
   planner?: { spec: string; name: string; sessionFile: string };
-  /** Model spec to return to on "Yes, done" */
+  /** Model spec to return to when finish_plan ends exec mode */
   restore?: string;
+  /** The planning conversation's last entry, which finish_plan navigates back to (in-place handoffs). */
+  returnTo?: string;
   asks: number;
   costUsd: number;
 }
@@ -364,6 +367,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       const now = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
       const restored = Boolean(spec && now === finished.implementerModel);
       if (spec && restored) await host.restoreModel(ctx, spec);
+      if (finished.returnTo && ctx.hasUI) pendingReturn = { leaf: finished.returnTo, report };
       return {
         content: [{ type: "text", text: "The implementation is reported and exec mode is over. Stop here." }],
         details: {
@@ -376,6 +380,44 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
         } satisfies FinishDetails,
         terminate: true,
       } as never;
+    },
+  });
+
+  // Back to the planning conversation: a tool cannot navigate the session tree, a command can, and a
+  // command sent once the turn has settled runs outside the streaming turn.
+  let pendingReturn: { leaf: string; report: string } | undefined;
+  pi.on("agent_settled", (event) => {
+    if (!pendingReturn) return;
+    if (event.aborted) {
+      pendingReturn = undefined;
+      return;
+    }
+    pi.sendUserMessage(`/${BACK_COMMAND}`, { expandPromptTemplates: true });
+  });
+  pi.registerCommand(BACK_COMMAND, {
+    description: "Return to the planning conversation after an implementation (runs by itself)",
+    handler: async (_args, ctx) => {
+      const back = pendingReturn;
+      pendingReturn = undefined;
+      if (!back) return;
+      try {
+        await ctx.navigateTree(back.leaf, {
+          summarize: true,
+          customInstructions:
+            "Summarize the implementation that followed this plan: what changed, the verification results, and each deviation from the plan.",
+        });
+      } catch (error: unknown) {
+        ctx.ui.notify(
+          `Could not return to the planning conversation: ${error instanceof Error ? error.message : String(error)}. Use /tree.`,
+          "warning",
+        );
+        return;
+      }
+      pi.sendMessage({
+        customType: "plan-mode-finish",
+        content: `The plan was implemented. Implementer's report:\n\n${back.report}`,
+        display: true,
+      });
     },
   });
 
@@ -432,6 +474,7 @@ function validState(data: unknown): ExecState | undefined {
     implementerModel: typeof entry.implementerModel === "string" ? entry.implementerModel : "",
     ...(valid ? { planner: { spec: planner.spec, name: planner.name, sessionFile: planner.sessionFile } } : {}),
     ...(typeof entry.restore === "string" ? { restore: entry.restore } : {}),
+    ...(typeof entry.returnTo === "string" ? { returnTo: entry.returnTo } : {}),
     asks: typeof entry.asks === "number" ? entry.asks : 0,
     costUsd: typeof entry.costUsd === "number" ? entry.costUsd : 0,
   };

@@ -62,6 +62,7 @@ async function setup(
   options: {
     planner?: boolean;
     restore?: boolean;
+    returnTo?: string;
     plan?: string;
     script?: (prompt: string) => { reply: string; amend?: () => void };
     select?: Array<string | undefined>;
@@ -116,6 +117,7 @@ async function setup(
           },
         }),
     ...(options.restore === false ? {} : { restore: "anthropic/claude-opus-5-5:high" }),
+    ...(options.returnTo ? { returnTo: options.returnTo } : {}),
     asks: 0,
     costUsd: 0,
   };

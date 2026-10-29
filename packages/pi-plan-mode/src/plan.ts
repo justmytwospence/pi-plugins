@@ -756,6 +756,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       return undefined;
     }
     const { approval, who } = handoff;
+    const returnTo = ctx.sessionManager.getLeafId?.() ?? undefined;
     let sessionFile: string | undefined;
     if (who) {
       try {
@@ -784,6 +785,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       implementerModel: who ? formatModelKey(switched ? who.target : who.planning) : "",
       ...(planner ? { planner } : {}),
       ...(who && switched ? { restore: formatModelSpec(who.planning) } : {}),
+      ...(returnTo ? { returnTo } : {}),
       asks: 0,
       costUsd: 0,
     };
