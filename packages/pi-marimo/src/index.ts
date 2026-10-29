@@ -160,6 +160,7 @@ export default function piMarimo(pi: ExtensionAPI): void {
     },
     hostedChanged: () => bindPill(),
     drivers: (f) => bg.drivers(f.attachment.path),
+    servers: (f) => bg.servers(f.attachment.path),
   });
   const ownPill = new PillView({
     pill: (now) => source.pill(now),

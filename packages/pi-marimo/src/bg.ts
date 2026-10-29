@@ -15,6 +15,8 @@
 //   and waits on the job when bg_wait names the notebook (its result carries the call's output). The
 //   notebook row names the job. Stopping such a job (bg:killed) interrupts the kernels it drove,
 //   since killing the marimo-pair client alone leaves the cells running.
+// - A `marimo edit` server of a followed notebook is likewise represented by that notebook's row for
+//   as long as it runs, idle or busy, so the pill does not count `6 tasks` beside the 6 notebooks.
 //
 // A notebook's id is `marimo:` and its path relative to the cwd (absolute outside it), so it stays
 // the same whatever else is followed; pi-bg also takes `marimo:<file>` when only one matches.
@@ -93,6 +95,8 @@ export class BgBridge {
   private runs = new Map<string, Run>();
   /** Running jobs whose notebook rows stand for them, with the notebooks they keep busy. */
   private driving = new Map<string, string[]>();
+  /** Running `marimo edit` servers whose notebook rows stand for them, with the notebooks they serve. */
+  private serving = new Map<string, string[]>();
 
   constructor(
     private readonly events: EventBus | undefined,
@@ -105,6 +109,11 @@ export class BgBridge {
   /** The names of the running pi-bg jobs that keep this notebook busy. */
   drivers(path: string): string[] {
     return [...this.driving].filter(([, paths]) => paths.includes(path)).map(([id]) => this.tasks.find((t) => t.id === id)?.name ?? id);
+  }
+
+  /** The names of the running pi-bg services that serve this notebook (shown on its row instead of in /tasks). */
+  servers(path: string): string[] {
+    return [...this.serving].filter(([, paths]) => paths.includes(path)).map(([id]) => this.tasks.find((t) => t.id === id)?.name ?? id);
   }
 
   /** A pi-bg task was stopped: the notebooks it was driving, which still run cells (to interrupt). */
@@ -171,8 +180,12 @@ export class BgBridge {
       const driven = t.kind === "job" && this.represent() ? hits.filter(busy) : [];
       if (driven.length) this.driving.set(t.id, driven.map((f) => f.attachment.path));
       else this.driving.delete(t.id);
+      // A server of a followed notebook is that notebook's row, busy or idle.
+      const served_ = served && this.represent() ? hits : [];
+      if (served_.length) this.serving.set(t.id, served_.map((f) => f.attachment.path));
+      else this.serving.delete(t.id);
       const note = hits.length
-        ? { task: t.id, by: "pi-marimo", detail: hits.map(kernelState).join(" · "), wait: hits.map((f) => BgBridge.id(f.attachment.path, cwd)), ...(driven.length ? { represented: true } : {}) }
+        ? { task: t.id, by: "pi-marimo", detail: hits.map(kernelState).join(" · "), wait: hits.map((f) => BgBridge.id(f.attachment.path, cwd)), ...(driven.length || served_.length ? { represented: true } : {}) }
         : { task: t.id, by: "pi-marimo" };
       const key = JSON.stringify(note);
       if ((this.notes.get(t.id) ?? JSON.stringify({ task: t.id, by: "pi-marimo" })) === key) continue;
@@ -181,6 +194,7 @@ export class BgBridge {
     }
     for (const id of this.notes.keys()) if (!live.has(id)) this.notes.delete(id);
     for (const id of this.driving.keys()) if (!live.has(id)) this.driving.delete(id);
+    for (const id of this.serving.keys()) if (!live.has(id)) this.serving.delete(id);
   }
 
   /** Reports busy notebooks to pi-bg as outside work, and their end. */

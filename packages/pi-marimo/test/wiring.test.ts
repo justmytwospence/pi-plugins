@@ -132,9 +132,9 @@ test("a run a waking pi-bg job drives: held in herdr, reported as outside work, 
   expect(x.of("bg:external")[0]).toEqual({ id: "marimo:nb.py", label: "nb.py: Slow model fit", state: "running" });
   expect(x.of("herdr:token").at(-1)).toEqual({ key: "marimo", value: "nb.py: Slow model fit" });
   const notes = x.of("bg:annotate");
-  // The job keeps the notebook busy: its notebook row stands for it. The server stays a task of its own.
+  // The job keeps the notebook busy: its notebook row stands for it. The server's row stands for it too.
   expect(notes).toContainEqual({ task: "j1", by: "pi-marimo", detail: "nb.py: running Slow model fit · 1 queued", wait: ["marimo:nb.py"], represented: true });
-  expect(notes).toContainEqual({ task: "s1", by: "pi-marimo", detail: "nb.py: running Slow model fit · 1 queued", wait: ["marimo:nb.py"] });
+  expect(notes).toContainEqual({ task: "s1", by: "pi-marimo", detail: "nb.py: running Slow model fit · 1 queued", wait: ["marimo:nb.py"], represented: true });
   const count = notes.length;
   // Unchanged state sends nothing new.
   x.pi.events.emit("bg:tasks", { tasks: [job("running"), serverTask] });
@@ -191,7 +191,7 @@ test("the notebooks as background work: a source for the hosts, its own pill alo
   const section = x.of("activity:section")[0]?.section;
   expect(section).toMatchObject({ id: "marimo", title: "notebooks", noun: "notebook" });
   const entries = section.entries(Date.now());
-  expect(entries).toEqual([expect.objectContaining({ key: JSON.stringify([SERVER, `${CWD}/nb.py`]), label: "nb.py", status: "running", detail: "running Slow model fit · 1 queued · bg fit" })]);
+  expect(entries).toEqual([expect.objectContaining({ key: JSON.stringify([SERVER, `${CWD}/nb.py`]), label: "nb.py", status: "running", detail: "running Slow model fit · 1 queued · bg fit · server s1" })]);
   // Alone, its own pill; hosted (by pi-bg, then pi-subagents too), none; the last host leaving brings it back.
   await until(() => /1 notebook/u.test(x.pillText() ?? ""));
   section.setHosted(true, "pi-bg");
@@ -218,6 +218,9 @@ test("the notebooks as background work: a source for the hosts, its own pill alo
   // The run ends with an error: failed in the pill until the user's next message.
   server.feeds.at(-1)!(rest);
   await until(() => /failed/u.test(x.pillText() ?? ""));
+  // Nothing runs now: the pill counts the failed notebook, not the bare word `notebooks`.
+  expect(x.pillText()).toMatch(/1 notebook\b.*failed/u);
+  expect(x.pillText()).not.toMatch(/notebooks/u);
   expect(section.entries(Date.now())[0]).toMatchObject({ status: "failed", stats: expect.stringMatching(/^ran \d+s · 1 error/u) });
   await x.fire("input", { source: "interactive" });
   await until(() => x.widgets.size === 0 || !/failed/u.test(x.pillText() ?? ""));

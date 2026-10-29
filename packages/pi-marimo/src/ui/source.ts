@@ -39,6 +39,8 @@ export interface SourceActions {
   hostedChanged(hosted: boolean): void;
   /** The pi-bg jobs running this notebook's cells, whose rows this one stands for. */
   drivers?(f: Followed): string[];
+  /** The pi-bg servers standing for this notebook. */
+  servers?(f: Followed): string[];
 }
 
 export class NotebookSource {
@@ -163,7 +165,7 @@ export class NotebookSource {
         key: path,
         stopToken: interruptKey(f),
         label: basename(f.attachment.path),
-        detail: [...kernelStateParts(f), ...lensParts(f), ...(run ? (this.actions.drivers?.(f) ?? []).map((name) => `bg ${name}`) : [])].join(" · "),
+        detail: [...kernelStateParts(f), ...lensParts(f), ...(run ? (this.actions.drivers?.(f) ?? []).map((name) => `bg ${name}`) : []), ...(this.actions.servers?.(f) ?? []).map((name) => `server ${name}`)].join(" · "),
         status,
         stats,
         startedAt: run?.since ?? (ended ? ended.at - ended.ms : f.notebook.lastActivity),
@@ -180,10 +182,11 @@ export class NotebookSource {
     const selections = followed.reduce((n, f) => n + this.lensNew(f), 0);
     if (!running && !failed && !selections) return undefined;
     const label = [
-      running ? `${running} notebook${running === 1 ? "" : "s"}` : failed ? "notebooks" : "",
+      running ? `${running} notebook${running === 1 ? "" : "s"}` : failed ? `${failed} notebook${failed === 1 ? "" : "s"}` : "",
       selections ? `${selections} selection${selections === 1 ? "" : "s"}` : "",
     ].filter(Boolean).join(" · ");
-    return { label, ...(failed ? { alert: `${failed} failed` } : {}) };
+    // With nothing running, the label already counts the failed notebooks: `1 notebook · failed`.
+    return { label, ...(failed ? { alert: running ? `${failed} failed` : "failed" } : {}) };
   }
 
   /** The notebook to open from the pill: a running one, then a failed one, then the current one. */
