@@ -110,7 +110,7 @@ From 100 columns the panes sit side by side. Narrower (as when docked beside the
 | `c`/`C`, `d` | the next or previous cell the agent changed; its diff |
 | `<` / `>` | a cell this one uses (upstream), one that uses it (downstream) |
 | `v` | the variables: name, type, value, defining cell, uses (Enter goes to the cell, `>` to the first use) |
-| `/` | filter cells (or variables) by name, variable, code or error; Esc clears |
+| `/` | find a cell (or variable) by name, variable, code or error: the list narrows as you type, `ctrl+j`/`ctrl+k` move through the matches, Enter goes to one and shows everything again, Esc goes back |
 | `f` | follow the running cell again |
 | `r`, `R`, `A` | run the cell; every stale cell; every cell (the last two need a second press) |
 | `x` | twice: interrupt the kernel, as the stop button does |

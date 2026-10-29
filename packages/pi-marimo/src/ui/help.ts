@@ -6,7 +6,7 @@ const GROUPS: Array<[string, string[]]> = [
   ["Look", [
     "enter acts on the part (or code; markdown: edit) · t table · O the whole section, or the cell · tab (z) fold the section · shift+tab (Z) fold all, again unfold all",
     "e/E next/previous error · c/C next/previous agent change · d diff of an agent change · < > upstream/downstream cell",
-    "/ filter · v variables · i drive an expanded live chart",
+    "/ find a cell (enter goes there, esc goes back) · v variables · i drive an expanded live chart",
   ]],
   ["Act", [
     "r run cell · R run stale (twice) · A run all (twice) · x interrupt (twice) · w drive widgets",
@@ -18,7 +18,7 @@ const GROUPS: Array<[string, string[]]> = [
   ["Widgets", ["j/k next/previous · h/l change (H/L ×10) · space toggle or press · enter type a value · esc done"]],
   ["Tables", ["hjkl move · [ ] page · g/G first/last page · +/- page size · s sort (S add) · / search · f filter (F clear) · space select · enter row · i column · c summaries · y/Y copy cell/row · D save csv · r refresh · esc done"]],
   ["Markdown", ["enter edits a markdown cell in the editor (pi-vim when loaded) · saved through marimo, re-rendered at once"]],
-  ["Variables", ["j/k move · enter its cell · > first cell that uses it · / filter · v or esc back"]],
+  ["Variables", ["j/k move · enter its cell · > first cell that uses it · / find a variable (enter goes there, esc goes back) · v or esc back"]],
   ["Mouse", ["wheel scrolls the pane under it · click selects · double-click opens the code"]],
 ];
 

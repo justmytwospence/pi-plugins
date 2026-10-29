@@ -125,7 +125,7 @@ An example (not a real screenshot):
 | `<` / `>` | Upstream and downstream cells in the dataflow |
 | `v` | The variables pane (Enter goes to the defining cell, `>` to the first use) |
 | `f` | Follow the running cell again |
-| `/` | Filter cells (or variables); `Esc` clears it |
+| `/` | Find a cell (or variable): `Ctrl+J`/`Ctrl+K` move through matches, `Enter` goes there, `Esc` goes back |
 | `r`, `R` / `A` | Run the cell; every stale cell or every cell (press twice) |
 | `x` | Press twice to interrupt the kernel |
 | `w` | Drive the cell's widgets |

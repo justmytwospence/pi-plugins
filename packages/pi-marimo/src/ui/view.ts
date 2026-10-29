@@ -179,6 +179,8 @@ export class NotebookView implements Component {
   private filter = "";
   /** Typing a filter: keys go to it. */
   private typing = false;
+  /** Where the cursor was when `/` started, for Esc. */
+  private findFrom: string | undefined;
   /** Scroll the cursor's cell into view on the next render (after a move, not after scrolling). */
   private reveal = false;
   private armedTarget: string | undefined;
@@ -405,10 +407,26 @@ export class NotebookView implements Component {
       return;
     }
     let text = vars ? this.varFilter : this.filter;
-    if (matchesKey(data, "escape")) {
-      text = "";
+    // `/` finds: Enter goes to the match under the cursor and shows everything again; Esc goes back.
+    if (matchesKey(data, "escape") || matchesKey(data, "enter")) {
+      const found = matchesKey(data, "enter");
       this.typing = false;
-    } else if (matchesKey(data, "enter")) this.typing = false;
+      if (vars) {
+        this.varFilter = "";
+        if (!found) this.varCursor = this.findFrom;
+      } else {
+        this.filter = "";
+        const target = found ? this.cursor : this.findFrom;
+        const f = this.current();
+        if (f && target) this.goTo(f, target);
+        else this.cursor = target;
+      }
+      this.findFrom = undefined;
+      this.follow = false;
+      this.reveal = true;
+      this.tui.requestRender();
+      return;
+    }
     else if (matchesKey(data, "backspace")) text = text.slice(0, -1);
     else if (!data.startsWith("\x1b") && data >= " ") text += data;
     if (vars) {
@@ -766,7 +784,7 @@ export class NotebookView implements Component {
     }
     if (data === "{") { this.switchNotebook(-1); this.mode = "variables"; return; }
     if (data === "}") { this.switchNotebook(1); this.mode = "variables"; return; }
-    if (data === "/") { this.typing = true; this.varFilter = ""; return; }
+    if (data === "/") { this.typing = true; this.findFrom = this.varCursor; this.varFilter = ""; return; }
     if (matchesKey(data, "down") || data === "j") return moveTo(at + 1);
     if (matchesKey(data, "up") || data === "k") return moveTo(at - 1);
     if (matchesKey(data, "home") || data === "g") { this.scroll = 0; return moveTo(0); }
@@ -974,6 +992,7 @@ export class NotebookView implements Component {
       this.note = "Opened in the browser.";
     } else if (data === "/") {
       this.typing = true;
+      this.findFrom = this.cursor;
       this.filter = "";
     } else if (data === "O") {
       this.section = !this.section;

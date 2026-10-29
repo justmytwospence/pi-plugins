@@ -183,13 +183,20 @@ test("e and E jump between failed cells; / filters by name, variable or code and
     v.handleInput("/");
     expect(v[INPUT_CONTEXT]()).toBe("filter");
     for (const ch of "load") v.handleInput(ch);
-    v.handleInput("\r");
-    expect(v[INPUT_CONTEXT]()).toBe("viewer");
     const filtered = screen(v);
     expect(filtered).toContain("load");
     expect(filtered).not.toContain("boom()");
-    v.handleInput("\x1b");
+    // Enter goes to the match and shows every cell again.
+    v.handleInput("\r");
+    expect(v[INPUT_CONTEXT]()).toBe("viewer");
+    expect(screen(v)).toMatch(/▌○ load/u);
     expect(screen(v)).toContain("boom()");
+    // Esc while finding goes back to where the cursor was.
+    v.handleInput("j");
+    v.handleInput("/");
+    for (const ch of "load") v.handleInput(ch);
+    v.handleInput("\x1b");
+    expect(screen(v)).toMatch(/▌✗ boom\(\)/u);
     // Esc with no filter goes back.
     let closed = false;
     const w = new NotebookView(tui as any, theme2, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {} }, () => { closed = true; });
@@ -1049,8 +1056,10 @@ test("ctrl+j and ctrl+k move through a filter's matches, while typing it and aft
     expect(screen(v)).toMatch(/▌○ load_c/u);
     v.handleInput("\x0b");
     expect(screen(v)).toMatch(/▌○ load_a/u);
-    v.handleInput("\r");
     v.handleInput("\n");
-    expect(screen(v)).toMatch(/▌○ load_c/u);
+    v.handleInput("\r");
+    // Found: every cell shows again, the cursor on the match.
+    expect(screen(v)).toMatch(/▌ +○ load_c/u);
+    expect(screen(v)).toContain("y = 2");
   } finally { v.dispose(); }
 });
