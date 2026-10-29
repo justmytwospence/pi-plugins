@@ -28,6 +28,8 @@ const OVERLAY_MORE = "more";
 const OVERLAY_EXPAND_HINT = "{key} to expand";
 const OVERLAY_COLLAPSED = "collapsed";
 
+type TailDoc = { children?: unknown[]; addChild(c: unknown): void; removeChild(c: unknown): void };
+
 export class TodoOverlay {
 	private uiCtx: ExtensionUIContext | undefined;
 	private widgetRegistered = false;
@@ -51,6 +53,7 @@ export class TodoOverlay {
 		// Identity-compare so repeat session_start handlers are idempotent;
 		// on identity change (/reload) invalidate so update() re-registers.
 		if (ctx !== this.uiCtx) {
+			this.detachTail();
 			this.uiCtx = ctx;
 			this.widgetRegistered = false;
 			this.tui = undefined;
@@ -76,8 +79,10 @@ export class TodoOverlay {
 				WIDGET_KEY,
 				(tui, factoryTheme) => {
 					this.tui = tui;
+					this.ensureTail();
 					return {
-						render: (width: number) => this.renderWidget(this.uiCtx?.theme ?? factoryTheme, width),
+						render: (width: number) =>
+							this.tail ? [] : this.renderWidget(this.uiCtx?.theme ?? factoryTheme, width),
 						invalidate: () => {
 							// No rendered strings are cached. Pi invalidates on theme changes;
 							// the next render reads uiCtx.theme.
@@ -88,6 +93,7 @@ export class TodoOverlay {
 			);
 			this.widgetRegistered = true;
 		} else {
+			this.ensureTail();
 			this.tui?.requestRender();
 		}
 	}
@@ -129,20 +135,23 @@ export class TodoOverlay {
 
 	private allDone = false;
 
-	/** The panel belongs to the end of the conversation: hide it while the transcript is scrolled back. */
-	private isScrolledBack(): boolean {
-		const view = this.findScrollView();
-		return view !== undefined && view.isFollowingEnd === false;
-	}
+	/**
+	 * In fullscreen the panel is the last child of the scrolling document (after the chat container, so new
+	 * messages land above it): it sits at the end of the history and scrolls away with it. Without a
+	 * scroll view (inline mode) it stays a dock widget.
+	 */
+	private tail: { render(width: number): string[]; invalidate(): void } | undefined;
+	private tailDoc: { children?: unknown[]; addChild(c: unknown): void; removeChild(c: unknown): void } | undefined;
 
-	private findScrollView(): { isFollowingEnd: boolean; primary?: boolean } | undefined {
+	private findDocument(): TailDoc | undefined {
 		const seen = new Set<unknown>();
-		const walk = (node: unknown, depth: number): { isFollowingEnd: boolean } | undefined => {
+		const walk = (node: unknown, depth: number): TailDoc | undefined => {
 			if (!node || typeof node !== "object" || seen.has(node) || depth > 6) return undefined;
 			seen.add(node);
-			const c = node as { isFollowingEnd?: unknown; scrollToEnd?: unknown; primary?: unknown; entries?: { component?: unknown }[] };
-			if (typeof c.isFollowingEnd === "boolean" && typeof c.scrollToEnd === "function" && c.primary === true) {
-				return c as { isFollowingEnd: boolean };
+			const c = node as { primary?: unknown; scrollToEnd?: unknown; child?: unknown; entries?: { component?: unknown }[] };
+			if (c.primary === true && typeof c.scrollToEnd === "function") {
+				const doc = c.child as Partial<TailDoc> | undefined;
+				if (doc && typeof doc.addChild === "function" && typeof doc.removeChild === "function") return doc as TailDoc;
 			}
 			for (const entry of Array.isArray(c.entries) ? c.entries : []) {
 				const found = walk(entry?.component, depth + 1);
@@ -152,6 +161,31 @@ export class TodoOverlay {
 		};
 		const root = (this.tui as unknown as { layoutRoot?: unknown } | undefined)?.layoutRoot;
 		return walk(root, 0);
+	}
+
+	private ensureTail(): void {
+		if (!this.tui) return;
+		const doc = this.tailDoc ?? this.findDocument();
+		if (!doc) return;
+		if (!this.tail) {
+			this.tail = {
+				render: (width: number) => {
+					const theme = this.uiCtx?.theme;
+					if (!theme) return [];
+					const lines = this.renderWidget(theme, width);
+					return lines.length > 0 ? ["", ...lines] : lines;
+				},
+				invalidate: () => {},
+			};
+		}
+		this.tailDoc = doc;
+		if (!doc.children?.includes(this.tail)) doc.addChild(this.tail);
+	}
+
+	private detachTail(): void {
+		if (this.tail && this.tailDoc) this.tailDoc.removeChild(this.tail);
+		this.tail = undefined;
+		this.tailDoc = undefined;
 	}
 
 	private getSnapshot() {
@@ -182,10 +216,7 @@ export class TodoOverlay {
 
 	/** The panel, indented one column so it lines up with the transcript and other widgets. */
 	private renderWidget(theme: Theme, width: number): string[] {
-		const lines = this.renderPanel(theme, Math.max(0, width - 1)).map((line) => (line ? ` ${line}` : line));
-		// Blank rows, not nothing: keeping the dock's height stops the transcript viewport from resizing
-		// under the scroll position (which made the panel flicker back in half-hidden).
-		return this.isScrolledBack() ? lines.map(() => "") : lines;
+		return this.renderPanel(theme, Math.max(0, width - 1)).map((line) => (line ? ` ${line}` : line));
 	}
 
 	private renderPanel(theme: Theme, width: number): string[] {
@@ -313,6 +344,7 @@ export class TodoOverlay {
 	}
 
 	dispose(): void {
+		this.detachTail();
 		if (this.uiCtx) this.uiCtx.setWidget(WIDGET_KEY, undefined);
 		this.widgetRegistered = false;
 		this.tui = undefined;
