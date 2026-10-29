@@ -4,8 +4,8 @@
 //   failed when its last run broke cells (until the user's next message, or `x`), idle otherwise.
 //   Enter opens the notebook full screen (view.ts); `x` twice interrupts the kernel. While a pi-bg
 //   job drives the run, the row stands for that job too (pi-bg hides the job's own) and names it.
-// - A pill under the prompt, `1 notebook` while one is busy and `1 failed` while a failure is
-//   unseen; nothing for idle notebooks. A host draws it (pi-subagents' list, or pi-bg's pill);
+// - A pill under the prompt, `6 notebooks` (idle ones too), `6 notebooks · 1 running` while a cell
+//   runs and `1 failed` while a failure is unseen, so there is always something to select. A host draws it (pi-subagents' list, or pi-bg's pill);
 //   alone, pi-marimo draws its own, and Enter on it opens the busiest notebook.
 // - marimo-lens selections the user made since their last message add `2 selections` to the pill,
 //   and every open selection is counted in the notebook's row.
@@ -177,16 +177,19 @@ export class NotebookSource {
   pill(now: number): ActivityPill | undefined {
     void now;
     const followed = this.actions.followed();
+    // Every live notebook counts, idle ones too, so the pill is always there to select and open.
+    const live = followed.filter((f) => f.connection === "connected" || this.runs.has(notebookKey(f)));
     const running = followed.filter((f) => this.runs.has(notebookKey(f))).length;
     const failed = followed.filter((f) => this.alerting(notebookKey(f))).length;
     const selections = followed.reduce((n, f) => n + this.lensNew(f), 0);
-    if (!running && !failed && !selections) return undefined;
+    const total = Math.max(live.length, running + failed);
+    if (!total && !selections) return undefined;
     const label = [
-      running ? `${running} notebook${running === 1 ? "" : "s"}` : failed ? `${failed} notebook${failed === 1 ? "" : "s"}` : "",
+      total ? `${total} notebook${total === 1 ? "" : "s"}` : "",
+      running ? `${running} running` : "",
       selections ? `${selections} selection${selections === 1 ? "" : "s"}` : "",
-    ].filter(Boolean).join(" · ");
-    // With nothing running, the label already counts the failed notebooks: `1 notebook · failed`.
-    return { label, ...(failed ? { alert: running ? `${failed} failed` : "failed" } : {}) };
+    ].filter(Boolean).join(" \u00b7 ");
+    return { label, ...(failed ? { alert: `${failed} failed` } : {}) };
   }
 
   /** The notebook to open from the pill: a running one, then a failed one, then the current one. */

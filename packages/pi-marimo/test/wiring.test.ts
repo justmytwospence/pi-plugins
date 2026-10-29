@@ -218,12 +218,13 @@ test("the notebooks as background work: a source for the hosts, its own pill alo
   // The run ends with an error: failed in the pill until the user's next message.
   server.feeds.at(-1)!(rest);
   await until(() => /failed/u.test(x.pillText() ?? ""));
-  // Nothing runs now: the pill counts the failed notebook, not the bare word `notebooks`.
-  expect(x.pillText()).toMatch(/1 notebook\b.*failed/u);
-  expect(x.pillText()).not.toMatch(/notebooks/u);
+  // Nothing runs now: the pill still counts the notebook, with the failure beside it.
+  expect(x.pillText()).toMatch(/1 notebook\b(?! ·\s*1 running).*1 failed/u);
   expect(section.entries(Date.now())[0]).toMatchObject({ status: "failed", stats: expect.stringMatching(/^ran \d+s · 1 error/u) });
   await x.fire("input", { source: "interactive" });
-  await until(() => x.widgets.size === 0 || !/failed/u.test(x.pillText() ?? ""));
+  await until(() => !/failed/u.test(x.pillText() ?? ""));
+  // Idle, nothing failed: the pill stays, to select and open the notebooks.
+  expect(x.pillText()).toMatch(/1 notebook\b/u);
   expect(section.entries(Date.now())[0]).toMatchObject({ status: "done" });
   await x.fire("session_shutdown");
   expect(x.of("activity:gone")).toEqual([{ id: "subagents" }, { id: "marimo" }]);
