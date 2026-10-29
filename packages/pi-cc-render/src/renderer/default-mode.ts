@@ -219,8 +219,9 @@ export function createCcstyleTool(
 	originalTool: any,
 	writeExecutionMetadata: WriteExecutionMetadataStore,
 ): any {
-	const toolName = originalTool.name;
-	const label = originalTool.label || toolName;
+	// Definitions restored from a session can lack a name; never let that crash the render.
+	const toolName: string = typeof originalTool.name === "string" ? originalTool.name : "";
+	const label: string = originalTool.label || toolName;
 	const defaultTitle =
 		backgroundTaskTitle(toolName) ?? (label === toolName ? humanizeToolLabel(label) : label);
 	// MCP tools use the real tool name exposed by the adapter, without humanizing it

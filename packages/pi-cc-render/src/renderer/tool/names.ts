@@ -218,7 +218,7 @@ const BACKGROUND_TITLES: Readonly<Record<string, string>> = {
 
 /** The title a pi-bg tool row uses, in single and grouped cards alike. */
 export function backgroundTaskTitle(toolName: string): string | undefined {
-	return BACKGROUND_TITLES[toolName.toLowerCase()];
+	return typeof toolName === "string" ? BACKGROUND_TITLES[toolName.toLowerCase()] : undefined;
 }
 
 function backgroundTaskSummary(name: string, args: any): ToolCallSummary | undefined {
