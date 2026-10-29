@@ -3,16 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
-import {
-  ASK_TOOL,
-  EXEC_ENTRY,
-  EXEC_STATUS_KEY,
-  type ExecState,
-  FINISH_DONE,
-  FINISH_KEEP,
-  FINISH_REVIEW,
-  FINISH_TOOL,
-} from "../src/exec.js";
+import { ASK_TOOL, EXEC_ENTRY, EXEC_STATUS_KEY, type ExecState, FINISH_TOOL } from "../src/exec.js";
 import planMode from "../src/index.js";
 import { ENTER_TOOL } from "../src/inline-plan.js";
 import type { PlannerSessionFactory, PlannerSessionOptions } from "../src/planner/session.js";
@@ -223,12 +214,12 @@ test("without a planner the tripwire points at the plan file's amendments", asyn
   assert.doesNotMatch(noted.content[0].text, /ask_planner/u);
 });
 
-test("finish_plan: Yes, done ends exec mode and returns to the planning model", async () => {
-  const { mock, context, tool, latest, selects } = await setup({ select: [FINISH_DONE] });
+test("finish_plan ends exec mode without asking and returns to the planning model", async () => {
+  const { mock, context, tool, latest, selects } = await setup();
   const result = await tool(FINISH_TOOL).execute("1", { report: "Done." }, undefined, undefined, context.ctx);
   assert.equal(result.terminate, true);
   assert.equal(result.details.outcome, "done");
-  assert.deepEqual(selects[0]?.options, [FINISH_DONE, FINISH_REVIEW, FINISH_KEEP]);
+  assert.equal(selects.length, 0);
   assert.equal(latest().active, false);
   assert.ok(!mock.rawPi.getActiveTools().includes(FINISH_TOOL));
   assert.ok(!mock.rawPi.getActiveTools().includes(ASK_TOOL));
@@ -240,55 +231,10 @@ test("finish_plan: Yes, done ends exec mode and returns to the planning model", 
 });
 
 test("finish_plan leaves the model alone when the session is no longer on the implementer's", async () => {
-  const { mock, context, tool } = await setup({ select: [FINISH_DONE] });
+  const { mock, context, tool } = await setup();
   (context.ctx as any).model = opus;
   await tool(FINISH_TOOL).execute("1", { report: "Done." }, undefined, undefined, context.ctx);
   assert.equal(mock.setModels.length, 0);
-});
-
-test("finish_plan: No, keep going ends the turn and exec mode stays", async () => {
-  const { context, tool, latest, mock } = await setup({ select: [FINISH_KEEP] });
-  const result = await tool(FINISH_TOOL).execute("1", { report: "Done." }, undefined, undefined, context.ctx);
-  assert.equal(result.terminate, true);
-  assert.equal(result.details.outcome, "kept");
-  assert.equal(latest().active, true);
-  assert.ok(mock.rawPi.getActiveTools().includes(FINISH_TOOL));
-});
-
-test("finish_plan: a clean review loops with a note and drops the review row", async () => {
-  const { context, tool, selects, latest } = await setup({
-    select: [FINISH_REVIEW, FINISH_DONE],
-    script: () => ({ reply: "Everything matches the plan.\nVerdict: done" }),
-  });
-  const result = await tool(FINISH_TOOL).execute("1", { report: "Done." }, undefined, undefined, context.ctx);
-  assert.equal(result.details.outcome, "done");
-  assert.match(selects[1]?.title ?? "", /Claude Opus 5\.5 found nothing to fix/u);
-  assert.equal(result.details.reviewClean, true);
-  assert.equal(result.details.review, "Everything matches the plan.");
-  assert.equal(result.details.reviewer, "Claude Opus 5.5");
-  assert.deepEqual(selects[1]?.options, [FINISH_DONE, FINISH_KEEP]);
-  assert.equal(latest().active, false);
-});
-
-test("finish_plan: a review with changes comes back to the implementer and is not terminating", async () => {
-  const { context, tool, latest } = await setup({
-    select: [FINISH_REVIEW],
-    script: () => ({ reply: "src/a.ts misses the error case.\nVerdict: changes needed" }),
-  });
-  const result = await tool(FINISH_TOOL).execute("1", { report: "Done." }, undefined, undefined, context.ctx);
-  assert.equal(result.terminate, undefined);
-  assert.equal(result.details.outcome, "review");
-  assert.match(result.content[0]?.text ?? "", /src\/a\.ts misses the error case/u);
-  assert.equal(result.usage.cost.total, 0.05);
-  assert.equal(latest().active, true);
-  assert.equal(latest().asks, 1);
-});
-
-test("finish_plan without a planner offers only done or keep going", async () => {
-  const { context, tool, selects } = await setup({ planner: false, select: [FINISH_KEEP] });
-  await tool(FINISH_TOOL).execute("1", { report: "Done." }, undefined, undefined, context.ctx);
-  assert.deepEqual(selects[0]?.options, ["Yes, done", "No, keep going"]);
-  for (const option of selects[0]?.options ?? []) assert.ok(option.length <= 42);
 });
 
 test("enter_plan_mode refuses while exec mode is on", async () => {
@@ -297,51 +243,14 @@ test("enter_plan_mode refuses while exec mode is on", async () => {
   assert.match(result.content[0]?.text ?? "", /implementing an approved plan \(exec mode\)/u);
 });
 
-test("finish_plan shows what changed in the question and the card, and flags files outside the plan", async () => {
-  const { context, tool, emit, selects, planFile } = await setup({ select: [FINISH_DONE] });
+test("finish_plan reports what changed and flags files outside the plan", async () => {
+  const { context, tool, emit, planFile } = await setup();
   const dir = planFile.slice(0, planFile.lastIndexOf("/"));
   for (const path of ["src/a.ts", "src/other.ts", planFile]) {
     const full = path === planFile ? path : join(dir, path);
     await emit("tool_result", { toolName: "edit", input: { path: full }, content: [], isError: false });
   }
-  const updates: any[] = [];
-  const result = await tool(FINISH_TOOL).execute(
-    "1",
-    { report: "Done." },
-    undefined,
-    (update: unknown) => updates.push(update),
-    context.ctx,
-  );
+  const result = await tool(FINISH_TOOL).execute("1", { report: "Done." }, undefined, undefined, context.ctx);
   assert.deepEqual(result.details.changes.edited, ["src/a.ts", "src/other.ts"]);
   assert.deepEqual(result.details.changes.outside, ["src/other.ts"]);
-  assert.equal(selects[0]?.title, "Accept the implementation? 2 files edited · 1 outside the plan");
-  assert.equal(updates[0]?.details.outcome, "pending");
-  assert.deepEqual(updates[0]?.details.changes.edited, ["src/a.ts", "src/other.ts"]);
-  assert.doesNotMatch(selects[0]?.title ?? "", /calm-river|\.md/u, "no plan file name in the question");
-});
-
-test("finish_plan puts the planner's review on the card while it works and after, clean or not", async () => {
-  const { context, tool, selects } = await setup({
-    select: [FINISH_REVIEW, FINISH_DONE],
-    script: () => ({ reply: "All steps are in.\nVerdict: done" }),
-  });
-  const updates: any[] = [];
-  const result = await tool(FINISH_TOOL).execute(
-    "1",
-    { report: "Done." },
-    undefined,
-    (update: unknown) => updates.push(update),
-    context.ctx,
-  );
-  assert.ok(
-    updates.some((update) => update.details.reviewing),
-    "progress while the planner reviews",
-  );
-  const last = updates.at(-1)?.details;
-  assert.equal(last.review, "All steps are in.");
-  assert.equal(last.reviewClean, true);
-  assert.equal(last.reviewing, undefined);
-  assert.equal(result.details.outcome, "done");
-  assert.equal(result.details.review, "All steps are in.");
-  assert.equal(selects.length, 2);
 });
