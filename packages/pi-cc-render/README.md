@@ -2,13 +2,13 @@
 
 Claude Code-style transcript rendering for Pi: one-line tool summaries that expand on click or Ctrl+O, consecutive tool calls grouped into a card, rich side-by-side or unified diffs for `edit` and `write`, a codemode call tree, syntax-highlighted `!` command output, compact thinking with the provider's summary as its title (when Pi hides thinking blocks; Ctrl+O opens it with the tool output, as in Claude Code), a per-turn tool summary, and a startup header. In fullscreen mode cards react to hover, click to expand, and a back-to-bottom button appears when you scroll up.
 
-Example of a tool card and a grouped card (illustration, not a screenshot):
+Example of a tool card and a grouped card (illustration, not a screenshot). A bash row says what the command does: a `# description` comment on its first line, else a summary of the parsed command (for example `Run check (npm), then git status in app`); short one-liners such as `ls -la` stay as they are:
 
 ~~~
   Read src/index.ts (offset=1, limit=40)
   ↳ 40 lines · click to show more
 
-  Bash ls -la · Grep "renderToken" src · Edit src/index.ts (+3 -1)
+  Bash Run check (npm) in pi-cc-render · Grep "renderToken" src · Edit src/index.ts (+3 -1)
   ↳ 3 tools · click to show more
 ~~~
 
@@ -70,6 +70,8 @@ Panel changes apply to the current transcript immediately and are saved. Feature
   "enableAgentSummary": true, // per-turn tool summary after agent_end (2+ tools)
   "restoreInterruptedPrompt": true, // Escape before the model responds puts the prompt back in the editor
   "highlightBashOutput": true, // syntax-highlight ! / !! output when its language is known (applies at once)
+  "readableBash": true, // bash rows show a description or summary; expanded Input is the formatted, highlighted command
+  "expandedBashInputMaxLines": 20, // expanded Input lines for a bash call (never below expandedInputMaxLines)
 
   // ui
   "expandedInputMaxLines": 5, // expanded tool Input lines; overflow shows a hint
@@ -95,6 +97,10 @@ Panel changes apply to the current transcript immediately and are saved. Feature
   "dimThinkingText": false // dim thinking body text
 }
 ```
+
+### Readable bash calls
+
+A collapsed `bash` row shows, in order: the first line of the command when it is a `# description` comment (not a shebang); otherwise a deterministic summary of the parsed command (no model call), such as `Search "x" in src`, `git log (5 commits)`, `Run check (npm)`, `Read a.ts (lines 1-40)`, `Run python script (30 lines)`, `On nuc: chezmoi update`; otherwise the command. The summary drops `cd x &&` (shown as `in x`), env prefixes, redirects, and trailing `| head` or `| grep` filters, and shows the first step plus `(+N more steps)` for long chains. Commands of 40 characters or fewer on one line show themselves. The expanded Input is the command alone, formatted with shfmt (`sh-syntax`, an optional dependency loaded on first use; without it only the line breaking below applies), with long `&&`, `||`, `|` and `;` chains put one step per line, highlighted as bash, and a `# timeout` line when one was set. Set `readableBash` to `false` for the old rendering.
 
 ### Interrupted prompts
 
@@ -122,7 +128,7 @@ Compared with pi-cc-extensions 0.9.10, this component does not include the custo
 
 ## Requirements and costs
 
-Nothing external. It reads `~/.pi/agent/pi-cc-render.json` at load and writes it when the panel changes a value. Diff syntax highlighting loads `@shikijs/cli` lazily and only when it is resolvable.
+Nothing external. It reads `~/.pi/agent/pi-cc-render.json` at load and writes it when the panel changes a value. Diff syntax highlighting loads `@shikijs/cli` lazily and only when it is resolvable; bash formatting loads `sh-syntax` the same way.
 
 ## Limitations
 

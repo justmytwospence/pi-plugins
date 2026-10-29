@@ -1,6 +1,7 @@
 import { Text, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { inspect } from "node:util";
 import { config } from "../../config/config.ts";
+import { formatBashCommand } from "./bash-format.ts";
 import { createCodeBlockHighlighter } from "./diff/diff-highlight.ts";
 import { showMoreHintText } from "./show-more-hint.ts";
 import { TOOL_LOADING_INTERVAL_MS, toolLoadingIcon } from "../../utils/tool-loading-icon.ts";
@@ -716,9 +717,44 @@ export type ToolInputBody = { text: string; codeBlock?: InputCodeBlock };
 /** Decide colorable args by field name: the `code` of codemode / mcpscript is a JS script. */
 const INPUT_CODE_LANGUAGES: Record<string, string> = { code: "javascript" };
 
+/** A shell tool call: a command string and at most a timeout. */
+function bashArgs(args: unknown): { command: string; timeout?: unknown } | undefined {
+	if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
+	const record = args as Record<string, unknown>;
+	if (typeof record.command !== "string" || !record.command.trim()) return undefined;
+	if (Object.keys(record).some((key) => key !== "command" && key !== "timeout")) return undefined;
+	return { command: record.command, timeout: record.timeout };
+}
+
+/** Expanded Input of a shell call: the formatted command alone, highlighted as bash. */
+function formatBashInputBody(
+	shell: { command: string; timeout?: unknown },
+	maxChars: number,
+	onReady?: () => void,
+): ToolInputBody {
+	let code = sanitizeToolResultText(formatBashCommand(shell.command, onReady));
+	if (shell.timeout !== undefined && shell.timeout !== null) code += `\n# timeout: ${String(shell.timeout)}s`;
+	if (code.length > maxChars) return { text: `${code.slice(0, maxChars)}…` };
+	const stripped = code
+		.replace(/\t/g, "   ")
+		.split("\n")
+		.map((line) => line.replace(/^[ \t]*/, ""))
+		.join("\n");
+	return { text: code, codeBlock: { startLine: 0, language: "bash", code: stripped, standalone: true } };
+}
+
 /** Pretty-print tool call args for the expanded Input section. */
-export function formatToolInputBody(args: unknown, maxChars = 8_000): ToolInputBody {
+export function formatToolInputBody(
+	args: unknown,
+	maxChars = 8_000,
+	/** Called when asynchronous formatting (shfmt) finishes and the body should be requested again. */
+	onReady?: () => void,
+): ToolInputBody {
 	if (args === undefined || args === null) return { text: "" };
+	if (config.readableBash) {
+		const shell = bashArgs(args);
+		if (shell) return formatBashInputBody(shell, maxChars, onReady);
+	}
 	if (typeof args !== "object") {
 		const text = sanitizeToolResultText(String(args));
 		return { text: text.length > maxChars ? `${text.slice(0, maxChars)}…` : text };
@@ -833,10 +869,15 @@ export function renderExpandedToolResult(
 	/** mode=on expanded cards are flush left; compact etc. keep the default leading space */
 	flushLeft = false,
 ): ExpandedToolIoView | ExpandedToolResultText | Text {
-	const { text: inputBody, codeBlock } = formatToolInputBody(args);
+	const { text: inputBody, codeBlock } = formatToolInputBody(args, 8_000, () => {
+		if (typeof context?.invalidate === "function") context.invalidate();
+	});
 	const outputBody = body;
 	const maxOutputLines = config.expandedOutputMaxLines;
-	const maxInputLines = config.expandedInputMaxLines;
+	const maxInputLines =
+		config.readableBash && codeBlock?.language === "bash"
+			? Math.max(config.expandedInputMaxLines, config.expandedBashInputMaxLines)
+			: config.expandedInputMaxLines;
 
 	// Prefer structured Input/Output when we have args or non-empty output.
 	if (inputBody.trim() || outputBody.trim()) {

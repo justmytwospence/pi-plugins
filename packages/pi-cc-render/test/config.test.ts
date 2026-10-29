@@ -87,6 +87,8 @@ describe("normalizeConfig", () => {
       enableAgentSummary: true,
       restoreInterruptedPrompt: true,
       highlightBashOutput: true,
+      readableBash: true,
+      expandedBashInputMaxLines: 20,
     });
   });
 

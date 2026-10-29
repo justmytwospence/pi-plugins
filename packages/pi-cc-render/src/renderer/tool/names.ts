@@ -3,6 +3,7 @@ import type { ThemeColor } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { config } from "../../config/config.ts";
 import { oneLine } from "../../utils/format.ts";
+import { bashLabel } from "./bash-label.ts";
 import { headTruncateToWidth } from "./result.ts";
 
 /** With inputClip=0 there is no character cap; truncation is left to the actual width at render time. */
@@ -155,6 +156,9 @@ function pathSummary(
 		path: { prefix, value: path },
 	};
 }
+
+/** Commands up to this long, on one line, keep showing themselves instead of a description. */
+const SHORT_COMMAND_LENGTH = 40;
 
 /** Tools whose input is a shell command. */
 const SHELL_TOOL_NAMES = new Set(["bash", "powershell", "pwsh", "sh", "zsh", "cmd"]);
@@ -353,6 +357,13 @@ export function toolCallSummary(
 			main: variant === "grouping" ? "Read ..." : title,
 			detail,
 		};
+	}
+	if (SHELL_TOOL_NAMES.has(name) && config.readableBash && typeof args.command === "string") {
+		// A leading `# description` or a summary of what the command does; the raw command is in the expanded Input
+		const label = bashLabel(args.command);
+		// A short one-liner already reads better than its description (`ls -la`, `git status`)
+		const shortOneLiner = args.command.length <= SHORT_COMMAND_LENGTH && !args.command.includes("\n");
+		if (label.source === "comment" || (label.source === "heuristic" && !shortOneLiner)) return { main: `${title} ${clip(label.text)}`, detail: "" };
 	}
 	if (variant === "grouping" && SHELL_TOOL_NAMES.has(name)) {
 		// Group rows keep a placeholder when command is missing, so they don't end up with just a title like single tool cards

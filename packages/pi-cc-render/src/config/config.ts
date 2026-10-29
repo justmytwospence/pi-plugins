@@ -62,6 +62,9 @@ export type Config = {
 	enableAgentSummary: boolean;
 	restoreInterruptedPrompt: boolean;
 	highlightBashOutput: boolean;
+	/** Bash rows say what the command does (comment or summary) and expanded Input is formatted and highlighted. */
+	readableBash: boolean;
+	expandedBashInputMaxLines: number;
 };
 
 const AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
@@ -138,6 +141,8 @@ export const DEFAULT_CONFIG: Config = {
 	enableAgentSummary: true,
 	restoreInterruptedPrompt: true,
 	highlightBashOutput: true,
+	readableBash: true,
+	expandedBashInputMaxLines: 20,
 };
 
 function pickEnum<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
@@ -244,6 +249,13 @@ export function normalizeConfig(input: unknown): Config {
 		enableAgentSummary: source.enableAgentSummary !== false,
 		restoreInterruptedPrompt: source.restoreInterruptedPrompt !== false,
 		highlightBashOutput: source.highlightBashOutput !== false,
+		readableBash: source.readableBash !== false,
+		expandedBashInputMaxLines: pickPositiveInt(
+			source.expandedBashInputMaxLines,
+			DEFAULT_CONFIG.expandedBashInputMaxLines,
+			1,
+			5_000,
+		),
 	};
 }
 
@@ -294,6 +306,8 @@ export function formatConfigStatus(source: Config = config): string {
 		`agentSummary=${source.enableAgentSummary ? "on" : "off"}`,
 		`restorePrompt=${source.restoreInterruptedPrompt ? "on" : "off"}`,
 		`bashHighlight=${source.highlightBashOutput ? "on" : "off"}`,
+		`readableBash=${source.readableBash ? "on" : "off"}`,
+		`expandedBashInput=${source.expandedBashInputMaxLines}`,
 	].join(" · ");
 }
 

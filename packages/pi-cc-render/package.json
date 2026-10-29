@@ -34,7 +34,8 @@
     "typebox": "*"
   },
   "optionalDependencies": {
-    "@shikijs/cli": "^4.4.3"
+    "@shikijs/cli": "^4.4.3",
+    "sh-syntax": "^0.7.0"
   },
   "repository": {
     "type": "git",

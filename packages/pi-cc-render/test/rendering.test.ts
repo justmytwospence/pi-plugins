@@ -82,6 +82,9 @@ describe("tool summaries", () => {
     const bash = toolCallSummary("bash", { command: "ls -la" });
     expect(`${bash.main} ${bash.detail}`).toContain("Bash");
     expect(`${bash.main} ${bash.detail}`).toContain("ls -la");
+    const long = toolCallSummary("bash", { command: "cd ~/Projects/app && npm run check 2>&1 | tail -20 && git status" });
+    expect(long.main).toBe("Bash Run check (npm), then git status in app");
+    expect(toolCallSummary("bash", { command: "# Run the tests\nnpm test" }).main).toBe("Bash Run the tests");
     const read = toolCallSummary("read", { path: "/tmp/project/src/index.ts" }, { cwd: "/tmp/project" });
     expect(`${read.main} ${read.detail} ${read.path ?? ""}`).toContain("src/index.ts");
     expect(stripTerminalSequences(fitToolCallSummary(bash, 12)).length).toBeLessThanOrEqual(12);

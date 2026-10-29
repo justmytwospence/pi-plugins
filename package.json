@@ -68,6 +68,7 @@
     "grok-mermaid": "^0.2.2",
     "marked": "^18.0.11",
     "node-pty": "1.1.0",
+    "sh-syntax": "^0.7.0",
     "shiki": "^4.5.0"
   },
   "devDependencies": {
