@@ -1,4 +1,5 @@
 import {
+	compositeTuiLine,
 	getKeybindings,
 	matchesKey,
 	truncateToWidth,
@@ -124,6 +125,46 @@ export function disableOfficialScrollToEnd(tui: any): void {
 	// Replace rather than remove: Pi composites this label over the transcript's last row (an overlay that
 	// takes no dock row) and handles the click itself. Only the wording and colors are ours.
 	tui.scrollToEndIndicator = scrollIndicatorLabel;
+	installIndicatorPlacement(tui);
+}
+
+const PLACEMENT_KEY = "__ccScrollIndicatorOriginal";
+const ANSI_RE = /\x1b\[[0-9;:?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+
+/**
+ * While the agent works, the status line ("Working ...") sits a row or two under the transcript. Pi
+ * composites the button on the transcript's last row; move it onto that status row instead, where
+ * there is room beside the text. The click area follows (it is the rect Pi hit-tests).
+ */
+function installIndicatorPlacement(tui: any): void {
+	if (typeof tui.compositeScrollToEndIndicator !== "function" || tui[PLACEMENT_KEY]) return;
+	const original = tui.compositeScrollToEndIndicator;
+	tui[PLACEMENT_KEY] = { original };
+	tui.compositeScrollToEndIndicator = function (this: any, screen: string[], layout: unknown, width: number) {
+		const result: string[] = original.call(this, screen, layout, width);
+		const rect = this.scrollToEndIndicatorRect as { row: number; column: number; width: number } | undefined;
+		if (!rect || typeof this.scrollToEndIndicator !== "function") return result;
+		let target = -1;
+		for (let row = rect.row + 1; row <= rect.row + 2 && row < screen.length; row++) {
+			const plain = (screen[row] ?? "").replace(ANSI_RE, "").trim();
+			if (!plain) continue;
+			if (!/^[─━│┌┐└┘╭╮╰╯├┤┬┴┼═║]/u.test(plain)) target = row;
+			break;
+		}
+		if (target < 0) return result;
+		const text = truncateToWidth(String(this.scrollToEndIndicator()), rect.width, "");
+		const out = [...result];
+		out[rect.row] = screen[rect.row] ?? "";
+		out[target] = compositeTuiLine(screen[target] ?? "", text, rect.column, rect.width, width);
+		this.scrollToEndIndicatorRect = { row: target, column: rect.column, width: rect.width };
+		return out;
+	};
+}
+
+function removeIndicatorPlacement(tui: any): void {
+	const saved = tui[PLACEMENT_KEY]?.original;
+	if (typeof saved === "function") tui.compositeScrollToEndIndicator = saved;
+	tui[PLACEMENT_KEY] = undefined;
 }
 
 let scrollIndicatorTheme: any = null;
@@ -148,6 +189,7 @@ export function restoreOfficialScrollToEnd(tui: any): void {
 	const original = tui[OFFICIAL_SCROLL_TO_END_KEY]?.original;
 	if (typeof original === "function") tui.scrollToEndIndicator = original;
 	tui[OFFICIAL_SCROLL_TO_END_KEY] = undefined;
+	removeIndicatorPlacement(tui);
 }
 
 /** on/compact use the dock button; off restores pi's native Jump to latest. */
