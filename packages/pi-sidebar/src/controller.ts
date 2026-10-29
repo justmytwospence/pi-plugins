@@ -67,6 +67,8 @@ export const SIDEBAR_HEADSUP_HELP = [
 
 const PROBE = "pi-sidebar-probe";
 const HERDR_BLOCKED = "herdr:blocked";
+const SIDE_PANEL = "pi-plugins.side-panel.v1";
+const SIDE_PANEL_ID = "pi-sidebar";
 
 type FocusTui = TUI & { getFocusedComponent?(): Component | null };
 
@@ -99,6 +101,7 @@ export class SidebarController {
   private layout: SplitLayout | undefined;
   private mainFocus: Component | null = null;
   private blocked = 0;
+  private otherPanel: string | undefined;
   /** Sidebar steps aside: a dialog holds `herdr:blocked` or a UI prompt is open in main. */
   private get collapsed(): boolean {
     return this.blocked > 0 || this.prompts > 0;
@@ -191,6 +194,13 @@ export class SidebarController {
       const active = (data as { active?: unknown } | undefined)?.active === true;
       this.blocked = Math.max(0, this.blocked + (active ? 1 : -1));
       this.render();
+    });
+    // One right-hand panel at a time: another plugin's (pi-marimo's docked notebook) closes Sidebar, and opening Sidebar closes it.
+    pi.events?.on?.(SIDE_PANEL, (data: unknown) => {
+      const d = data as { id?: unknown; open?: unknown } | undefined;
+      if (typeof d?.id !== "string" || d.id === SIDE_PANEL_ID) return;
+      if (d.open === true) { this.otherPanel = d.id; if (this.isOpen) this.close(); }
+      else if (this.otherPanel === d.id) this.otherPanel = undefined;
     });
   }
 
@@ -290,6 +300,7 @@ export class SidebarController {
         }),
       });
     }
+    if (!this.isOpen) this.pi.events?.emit?.(SIDE_PANEL, { id: SIDE_PANEL_ID, open: true });
     if (!this.layout!.mount()) return false;
     this.startTicker();
     // A note showing above main's editor moves into Sidebar's thread.
@@ -320,6 +331,7 @@ export class SidebarController {
       } else this.injected.reset();
       const direction = navDirection(data);
       if (direction) {
+        if (!this.isOpen && this.otherPanel) return undefined;
         const target = navTarget(direction, this.isOpen && !this.collapsed, this.layout?.orientation ?? "right", !!this.panel?.focused);
         if (target === "sidebar") this.focusSidebar();
         else if (target === "main") this.focusMain();
@@ -373,7 +385,9 @@ export class SidebarController {
   close(): void {
     if (!this.layout) return;
     const hadFocus = !!this.panel?.focused;
+    const was = this.isOpen;
     this.layout.unmount();
+    if (was) this.pi.events?.emit?.(SIDE_PANEL, { id: SIDE_PANEL_ID, open: false });
     this.stopTicker();
     if (hadFocus) this.focusMain();
   }

@@ -442,6 +442,24 @@ describe("opening and focus", () => {
     expect(controller.isOpen).toBe(false);
   });
 
+  it("gives the right-hand side to another panel and leaves Herdr's keys to it", async () => {
+    const { pi, controller, ctx } = setup();
+    let input: ((data: string) => unknown) | undefined;
+    (ctx.ui as { onTerminalInput?: unknown }).onTerminalInput = (handler: (data: string) => unknown) => { input = handler; return () => {}; };
+    const seen: unknown[] = [];
+    pi.events.on("pi-plugins.side-panel.v1", (d: unknown) => seen.push(d));
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    controller.toggle(ctx as never);
+    expect(controller.isOpen).toBe(true);
+    expect(seen).toContainEqual({ id: "pi-sidebar", open: true });
+    pi.events.emit("pi-plugins.side-panel.v1", { id: "pi-marimo", open: true });
+    expect(controller.isOpen).toBe(false);
+    expect(seen).toContainEqual({ id: "pi-sidebar", open: false });
+    expect(input!("\x1b[108;8u")).toBeUndefined();
+    pi.events.emit("pi-plugins.side-panel.v1", { id: "pi-marimo", open: false });
+    expect(input!("\x1b[108;8u")).toEqual({ consume: true });
+  });
+
   it("collapses while a dialog holds herdr:blocked", () => {
     const { pi, controller, tui, ctx } = setup();
     controller.openOrFocus(ctx as never);
