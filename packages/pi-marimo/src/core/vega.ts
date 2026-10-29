@@ -35,27 +35,27 @@ export const uvRunner: VegaRunner = (spec) =>
     child.stdin.end(spec);
   });
 
-export type VegaState = { status: "rendering" } | { status: "ready"; png: string } | { status: "failed"; reason: string };
+export type ChartState = { status: "rendering" } | { status: "ready"; png: string } | { status: "failed"; reason: string };
 
 /** Renders each distinct spec once, remembering the outcome; `peek` reads it, `request` starts it. */
-export class VegaRenderer {
-  private readonly states = new Map<string, VegaState>();
+export class ChartRenderer {
+  private readonly states = new Map<string, ChartState>();
   constructor(private readonly run: VegaRunner = uvRunner, private readonly max = 24) {}
 
   private key(spec: string): string {
     return createHash("sha1").update(spec).digest("hex");
   }
 
-  peek(spec: string): VegaState | undefined {
+  peek(spec: string): ChartState | undefined {
     return this.states.get(this.key(spec));
   }
 
   /** Starts rendering unless it already has; `onDone` runs when it settles. */
-  request(spec: string, onDone: () => void): VegaState {
+  request(spec: string, onDone: () => void): ChartState {
     const key = this.key(spec);
     const known = this.states.get(key);
     if (known) return known;
-    const state: VegaState = { status: "rendering" };
+    const state: ChartState = { status: "rendering" };
     this.states.set(key, state);
     if (this.states.size > this.max) this.states.delete(this.states.keys().next().value as string);
     this.run(spec).then(
@@ -65,3 +65,6 @@ export class VegaRenderer {
     return state;
   }
 }
+
+/** The Vega-Lite renderer; the Plotly one is the same class with another runner (plotly.ts). */
+export { ChartRenderer as VegaRenderer };

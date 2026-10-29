@@ -296,3 +296,22 @@ test("a Vega-Lite chart shows a drawing note, then the image once the renderer f
     setCapabilities({ images: null, trueColor: true, hyperlinks: false } as any);
   } finally { v.dispose(); setCapabilities({ images: null, trueColor: true, hyperlinks: false } as any); }
 });
+
+test("a Plotly figure is drawn through its own renderer", async () => {
+  const { setCapabilities } = await import("@earendil-works/pi-tui");
+  const { ChartRenderer } = await import("../src/core/vega.js");
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAAFUlEQVR42mP8z8BQz0AEYBxVSF+FABJADveWkH6oAAAAAElFTkSuQmCC";
+  const f = nbWith([{ id: "a", code: "fig" }]);
+  f.notebook.apply("cell-op", { cell_id: "a", status: "idle", output: { channel: "output", mimetype: "text/html", data: `<marimo-plotly data-figure='{&quot;data&quot;:[],&quot;layout&quot;:{}}'></marimo-plotly>` } });
+  const asked: string[] = [];
+  const plotly = new ChartRenderer(async (spec) => { asked.push(spec); return png; });
+  const v = new NotebookView(tui as any, theme2, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {} }, () => {}, undefined, plotly);
+  try {
+    setCapabilities({ images: "kitty", trueColor: true, hyperlinks: false } as any);
+    v.handleInput("l");
+    v.render(100);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(asked).toEqual(['{"data":[],"layout":{}}']);
+    expect(v.render(100).filter((l) => l.includes("\x1b_G"))).toHaveLength(1);
+  } finally { v.dispose(); setCapabilities({ images: null, trueColor: true, hyperlinks: false } as any); }
+});

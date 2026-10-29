@@ -10,7 +10,8 @@
 import { type Component, Image, type TUI, getCapabilities, matchesKey, visibleWidth } from "@earendil-works/pi-tui";
 import { basename } from "../core/io.js";
 import type { CellOutput } from "../core/output.js";
-import { VegaRenderer as VegaRendererImpl, type VegaRenderer } from "../core/vega.js";
+import { ChartRenderer, VegaRenderer as VegaRendererImpl, type VegaRenderer } from "../core/vega.js";
+import { sharedPlotly } from "../core/plotly.js";
 import type { Cell, NotebookState } from "../core/notebook.js";
 import { elapsed } from "../core/render.js";
 import { truncate } from "../core/notebook.js";
@@ -67,6 +68,7 @@ export interface RowOptions {
   width?: number;
   /** Turns Vega-Lite chart outputs into images; `onVega` runs when one finishes. */
   vega?: VegaRenderer;
+  plotly?: ChartRenderer;
   onVega?: () => void;
 }
 
@@ -109,8 +111,9 @@ function expandedRows(cell: Cell, theme: FrameTheme, opts: RowOptions = {}): Arr
   for (const l of printed) out.push(`${pad}${theme.fg("dim", "▍")} ${l.stream === "stderr" ? theme.fg("warning", clean(l.text)) : clean(l.text)}`);
   const output = cell.output;
   let chartNote: string | undefined;
-  if (output?.vega && !output.image && opts.vega && getCapabilities().images && (opts.imageRows ?? IMAGE_ROWS) >= 2) {
-    const state = opts.vega.request(output.vega, opts.onVega ?? (() => undefined));
+  const chart = output?.vega ? { spec: output.vega, via: opts.vega } : output?.plotly ? { spec: output.plotly, via: opts.plotly } : undefined;
+  if (output && chart?.via && !output.image && getCapabilities().images && (opts.imageRows ?? IMAGE_ROWS) >= 2) {
+    const state = chart.via.request(chart.spec, opts.onVega ?? (() => undefined));
     if (state.status === "ready") output.image = { mime: "image/png", data: state.png };
     else chartNote = state.status === "rendering" ? "[chart: drawing…]" : `[chart: could not draw (${state.reason.slice(0, 80)}); o opens the notebook]`;
   }
@@ -222,6 +225,7 @@ export class NotebookView implements Component {
   private note: string | undefined;
   private closed = false;
   private readonly vega: VegaRenderer;
+  private readonly plotly: ChartRenderer;
   private readonly timer: ReturnType<typeof setInterval>;
 
   constructor(
@@ -231,8 +235,10 @@ export class NotebookView implements Component {
     private readonly actions: ViewActions,
     private readonly done: () => void,
     vega: VegaRenderer = new VegaRendererImpl(),
+    plotly: ChartRenderer = sharedPlotly(),
   ) {
     this.vega = vega;
+    this.plotly = plotly;
     this.timer = setInterval(() => {
       if (!this.closed) {
         this.syncConfirmation();
@@ -492,7 +498,7 @@ export class NotebookView implements Component {
       // Following: the cursor stays on the running cell.
       if (this.follow && running && cells.some((c) => c.id === running.cell.id)) this.cursor = running.cell.id;
       if (!this.cursor || !cells.some((c) => c.id === this.cursor)) this.cursor = cells[0]?.id;
-      const built = notebookRows(nb, th, Date.now(), { cursor: this.cursor, expanded: this.expanded, filter: this.filter, imageRows: page - 1, width, vega: this.vega, onVega: () => { if (!this.closed) this.tui.requestRender(); } });
+      const built = notebookRows(nb, th, Date.now(), { cursor: this.cursor, expanded: this.expanded, filter: this.filter, imageRows: page - 1, width, vega: this.vega, plotly: this.plotly, onVega: () => { if (!this.closed) this.tui.requestRender(); } });
       const rows = built.rows;
       const max = Math.max(0, rows.length - page);
       const at = this.cursor !== undefined ? built.cellRows.get(this.cursor) : undefined;
@@ -510,7 +516,7 @@ export class NotebookView implements Component {
         const pick = at < this.scroll ? visible[0] : visible.at(-1);
         if (pick) {
           this.cursor = pick.id;
-          const again = notebookRows(nb, th, Date.now(), { cursor: this.cursor, expanded: this.expanded, filter: this.filter, imageRows: page - 1, width, vega: this.vega, onVega: () => { if (!this.closed) this.tui.requestRender(); } });
+          const again = notebookRows(nb, th, Date.now(), { cursor: this.cursor, expanded: this.expanded, filter: this.filter, imageRows: page - 1, width, vega: this.vega, plotly: this.plotly, onVega: () => { if (!this.closed) this.tui.requestRender(); } });
           rows.splice(0, rows.length, ...again.rows);
         }
       }

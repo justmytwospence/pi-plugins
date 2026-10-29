@@ -9,6 +9,8 @@ export interface CellOutput {
   image?: { mime: "image/png"; data: string };
   /** A Vega or Vega-Lite spec (JSON text) the view can turn into `image`, for a chart. */
   vega?: string;
+  /** A Plotly figure (JSON text with `data` and `layout`), likewise. */
+  plotly?: string;
 }
 
 export interface ConsoleLine {
@@ -44,6 +46,41 @@ function decode(text: string): string {
     if (hex) return String.fromCodePoint(parseInt(hex, 16));
     return ENTITIES[String(name).toLowerCase()] ?? whole;
   });
+}
+
+/** The JSON value starting at `from` in `text` (an object or array), found by balancing brackets outside strings. */
+function jsonAt(text: string, from: number): { json: string; end: number } | undefined {
+  let i = from;
+  while (/\s/u.test(text[i] ?? "")) i++;
+  const open = text[i];
+  if (open !== "{" && open !== "[") return undefined;
+  let depth = 0;
+  let inString = false;
+  for (let j = i; j < text.length; j++) {
+    const c = text[j]!;
+    if (inString) {
+      if (c === "\\") j++;
+      else if (c === '"') inString = false;
+    } else if (c === '"') inString = true;
+    else if (c === "{" || c === "[") depth++;
+    else if ((c === "}" || c === "]") && --depth === 0) return { json: text.slice(i, j + 1), end: j + 1 };
+  }
+  return undefined;
+}
+
+/** A Plotly figure from marimo's HTML: `<marimo-plotly data-figure>` (mo.ui.plotly) or a figure's own `Plotly.newPlot(id, data, layout, ...)` page in an iframe. */
+export function plotlyFrom(html: string): string | undefined {
+  const attr = /<marimo-plotly\b[^>]*?\bdata-figure=(?:'([^']*)'|"([^"]*)")/iu.exec(html);
+  if (attr) return vegaOf(decode(attr[1] ?? attr[2] ?? ""));
+  const srcdoc = /<iframe\b[^>]*?\bsrcdoc=(?:'([^']*)'|"([^"]*)")/iu.exec(html);
+  const page = srcdoc ? decode(srcdoc[1] ?? srcdoc[2] ?? "") : html;
+  const call = /Plotly\.newPlot\(\s*(?:"[^"]*"|'[^']*')\s*,/u.exec(page);
+  if (!call) return undefined;
+  const data = jsonAt(page, call.index + call[0].length);
+  if (!data || !data.json.startsWith("[")) return undefined;
+  const after = /^\s*,/u.exec(page.slice(data.end));
+  const layout = after ? jsonAt(page, data.end + after[0].length) : undefined;
+  return vegaOf(`{"data":${data.json},"layout":${layout && layout.json.startsWith("{") ? layout.json : "{}"}}`);
 }
 
 /** HTML as plain text: block ends become newlines, tags go, entities are decoded. */
@@ -90,6 +127,8 @@ export function summarizeOutput(raw: unknown): CellOutput | undefined {
     const spec = /<marimo-vega\b[^>]*?\bdata-spec=(?:'([^']*)'|"([^"]*)")/iu.exec(data);
     const vega = spec ? vegaOf(decode(spec[1] ?? spec[2] ?? "")) : undefined;
     if (vega) return { kind: "chart", text: "[chart vega-lite]", vega };
+    const plotly = plotlyFrom(data);
+    if (plotly) return { kind: "chart", text: "[chart plotly]", plotly };
     const text = htmlToText(data);
     if (embedded && !text) return { kind: "image", text: "[image png]", image: embedded };
     if (text) return { kind: "text", text: clip(text) };
