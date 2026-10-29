@@ -118,7 +118,15 @@ function expandedRows(cell: Cell, theme: FrameTheme, opts: RowOptions = {}): Arr
   for (const l of printed) out.push(`${pad}${theme.fg("dim", "▍")} ${l.stream === "stderr" ? theme.fg("warning", clean(l.text)) : clean(l.text)}`);
   const output = cell.output;
   let chartNote: string | undefined;
-  if (output?.plotly && opts.live && getCapabilities().images === "kitty" && (opts.imageRows ?? IMAGE_ROWS) >= 4) {
+  let whyStatic: string | undefined;
+  if (output?.plotly) {
+    const images = getCapabilities().images;
+    if (!images) whyStatic = undefined;
+    else if (!opts.live) whyStatic = "live charts are off";
+    else if (images !== "kitty") whyStatic = `this terminal reports images=${String(images)}, live charts need kitty`;
+    else if ((opts.imageRows ?? IMAGE_ROWS) < 4) whyStatic = "the view is too short";
+  }
+  if (output?.plotly && opts.live && getCapabilities().images && !whyStatic) {
     const geometry = liveGeometry(Math.min(IMAGE_WIDTH, (opts.width ?? 80) - 12), Math.min(IMAGE_ROWS, opts.imageRows ?? IMAGE_ROWS));
     const state = opts.live.state(output, output.plotly, geometry);
     if (state.status === "ready") {
@@ -129,7 +137,9 @@ function expandedRows(cell: Cell, theme: FrameTheme, opts: RowOptions = {}): Arr
       return out;
     }
     if (state.status === "opening") chartNote = "[chart: starting…]";
+    else whyStatic = `live chart failed: ${state.reason.slice(0, 120)}`;
   }
+  if (whyStatic) out.push(`${pad}${theme.fg("warning", "▍")} ${theme.fg("warning", `static image (${whyStatic})`)}`);
   const chart = output?.vega ? { spec: output.vega, via: opts.vega } : output?.plotly ? { spec: output.plotly, via: opts.plotly } : undefined;
   if (output && chart?.via && !output.image && !(chartNote && output.plotly) && getCapabilities().images && (opts.imageRows ?? IMAGE_ROWS) >= 2) {
     const state = chart.via.request(chart.spec, opts.onVega ?? (() => undefined));

@@ -316,6 +316,7 @@ test("a Plotly figure is drawn through its own renderer", async () => {
     await new Promise((r) => setTimeout(r, 0));
     v.render(100);
     await new Promise((r) => setTimeout(r, 0));
+    expect(screen(v)).toContain("static image (live chart failed: no browser)");
     expect(asked).toEqual(['{"data":[],"layout":{}}']);
     expect(v.render(100).filter((l) => l.includes("\x1b_G"))).toHaveLength(1);
   } finally { v.dispose(); setCapabilities({ images: null, trueColor: true, hyperlinks: false } as any); }
