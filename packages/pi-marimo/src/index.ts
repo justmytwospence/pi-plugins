@@ -32,11 +32,11 @@ import { nodeIo } from "./core/node-io.js";
 import { pairTargets } from "./core/touch.js";
 import { MarimoWatcher, type Mode, parseMode } from "./core/watcher.js";
 import { HerdrHold } from "./herdr.js";
-import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION } from "./activity.js";
+import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION, stoppable } from "./activity.js";
 import { FULL_SCREEN } from "./frame.ts";
 import { interruptKernel, runCells } from "./ui/interrupt.js";
 import { PillView } from "./pill.ts";
-import { NotebookSource } from "./ui/source.js";
+import { NotebookSource, type Unopened } from "./ui/source.js";
 import { openUrl, waitingStatus, waitingUrl } from "./waiting.js";
 import { NotebookView, type ViewActions } from "./ui/view.js";
 
@@ -165,12 +165,20 @@ export default function piMarimo(pi: ExtensionAPI): void {
     hostedChanged: () => bindPill(),
     drivers: (f) => bg.drivers(f.attachment.path),
     servers: (f) => bg.servers(f.attachment.path),
+    engaged: () => mine(),
+    unopened: () => unopened(),
+    openUrl,
   });
   const ownPill = new PillView({
     pill: (now) => source.pill(now),
     open: () => {
       if (ctxRef) void source.section.openDialog?.(ctxRef.ui).catch(() => undefined);
     },
+    openRow: (key) => {
+      if (ctxRef) void source.section.open(key, ctxRef.ui).catch(() => undefined);
+    },
+    canStopRow: (row) => stoppable(source.section, row),
+    stopRow: (key) => source.section.stop?.(key),
   }, "pi-marimo-pill");
   /** pi-marimo draws its own pill only in the TUI, and only while no host (pi-subagents, pi-bg) shows it. */
   const bindPill = () => {
@@ -188,6 +196,20 @@ export default function piMarimo(pi: ExtensionAPI): void {
 
   /** The followed notebooks this session uses, the current one first. */
   const mine = () => (watcher?.followed() ?? []).filter((f) => f.engaged);
+
+  /** Notebooks with no session to follow: running servers open in no browser, and pinned files not open. */
+  const unopened = (): Unopened[] => {
+    if (!watcher) return [];
+    const out: Unopened[] = [];
+    const waiting = watcher.waiting();
+    for (const w of waiting) out.push({ key: `waiting:${w.url}\0${w.canonicalPath}`, path: w.canonicalPath, where: shortWhere(w.url), state: "not open", url: waitingUrl(w) });
+    const { mode } = watcher;
+    if (mode.kind === "pinned") {
+      const open = new Set([...watcher.followed().flatMap((f) => [f.attachment.path, f.canonicalPath]), ...waiting.flatMap((w) => [w.path, w.canonicalPath, w.pinned ?? w.path])]);
+      for (const p of mode.paths) if (!open.has(p)) out.push({ key: `pinned:${p}`, path: p, state: "not open" });
+    }
+    return out;
+  };
 
   /**
    * One footer line per notebook this session uses, per pinned one that is not open, and per
@@ -222,7 +244,8 @@ export default function piMarimo(pi: ExtensionAPI): void {
       bg.annotate(watcher.followed(), ctxRef.cwd);
       source.update(watcher.followed());
     }
-    const lines = statusLines();
+    // In the TUI the notebooks are rows under the prompt (ui/source.ts); other modes keep the footer lines.
+    const lines = ctxRef?.mode === "tui" ? [] : statusLines();
     for (let i = 0; i < Math.max(lines.length, lastStatus.length); i++) {
       if (lines[i] !== lastStatus[i]) ctxRef?.ui.setStatus(statusKey(i), lines[i]);
     }

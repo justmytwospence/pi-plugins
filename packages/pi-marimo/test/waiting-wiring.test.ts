@@ -41,14 +41,15 @@ async function until(cond: () => boolean, ms = 3000): Promise<void> {
   }
 }
 
-function setup(select?: (title: string, options: string[]) => string | undefined) {
+function setup(select?: (title: string, options: string[]) => string | undefined, mode = "rpc") {
   const handlers = new Map<string, Array<(e: unknown, c: unknown) => unknown>>();
   let command: { handler: (args: string, ctx: unknown) => Promise<void> } | undefined;
   const statuses = new Map<string, string | undefined>();
   const notes: string[] = [];
+  let offered: any;
   const pi = {
     on: (name: string, h: (e: unknown, c: unknown) => unknown) => void handlers.set(name, [...(handlers.get(name) ?? []), h]),
-    events: { on: () => undefined, emit: () => undefined },
+    events: { on: () => undefined, emit: (ch: string, d: any) => void (ch === "activity:section" && (offered = d.section)) },
     registerCommand: (_name: string, c: typeof command) => void (command = c),
     appendEntry: () => undefined,
   };
@@ -60,11 +61,11 @@ function setup(select?: (title: string, options: string[]) => string | undefined
     onTerminalInput: () => () => undefined,
     getEditorText: () => "",
   };
-  const ctx = { cwd: "/w", mode: "tui", isIdle: () => true, ui, sessionManager: { getBranch: () => [] } };
+  const ctx = { cwd: "/w", mode, isIdle: () => true, ui, sessionManager: { getBranch: () => [] } };
   piMarimo(pi as never);
   const fire = async (name: string) => { for (const h of handlers.get(name) ?? []) await h({}, ctx); };
   const live = () => [...statuses].filter(([k, v]) => v !== undefined && k.startsWith("marimo") && k !== "marimo-lens").sort(([a], [b]) => a.localeCompare(b)).map(([, v]) => v);
-  return { fire, statuses, live, notes, run: (args: string) => command!.handler(args, ctx) };
+  return { fire, statuses, live, notes, section: () => offered, run: (args: string) => command!.handler(args, ctx) };
 }
 
 afterEach(() => {
@@ -139,4 +140,23 @@ test("/marimo open opens the one waiting notebook, or the picked one", async () 
   expect(none.notes).toEqual(["marimo: no notebook is waiting to be opened"]);
   expect(host.spawned).toEqual([]);
   await none.fire("session_shutdown");
+});
+
+test("in the TUI the footer lines give way to rows under the prompt: waiting servers are rows, and Enter opens them in the browser", async () => {
+  setCapabilityOverrides({ hyperlinks: true });
+  const x = setup(undefined, "tui");
+  await x.fire("session_start");
+  await until(() => (x.section()?.pill(Date.now())?.rows?.length ?? 0) === 2);
+  const rows = x.section().pill(Date.now()).rows;
+  expect(rows.map((r: any) => [r.label, r.detail, r.status])).toEqual([
+    ["0_first.py", ":2718 · not open", "done"],
+    ["1_second.py", ":2719 · not open", "done"],
+  ]);
+  // Nothing in the footer.
+  expect(x.live()).toEqual([]);
+  await x.section().open(rows[1].key, {});
+  expect(host.spawned).toEqual([[process.platform === "darwin" ? "open" : "xdg-open", ["http://127.0.0.1:2719/"]]]);
+  // A server's row is not stoppable: it is not a run.
+  expect(x.section().canStop(rows[1].key)).toBe(false);
+  await x.fire("session_shutdown");
 });

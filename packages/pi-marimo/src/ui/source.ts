@@ -4,12 +4,15 @@
 //   failed when its last run broke cells (until the user's next message, or `x`), idle otherwise.
 //   Enter opens the notebook full screen (view.ts); `x` twice interrupts the kernel. While a pi-bg
 //   job drives the run, the row stands for that job too (pi-bg hides the job's own) and names it.
-// - A pill under the prompt, `6 notebooks` (idle ones too), `6 notebooks · 1 running` while a cell
-//   runs and `1 failed` while a failure is unseen, so there is always something to select. A host draws it (pi-subagents' list, or pi-bg's pill);
-//   alone, pi-marimo draws its own, and Enter on it opens the busiest notebook.
+// - Rows under the prompt, one per notebook this session uses (`○ fit.py :2718 · idle`), plus servers
+//   open in no browser and pinned files not open; they replace the footer lines. They are the pill's
+//   `rows` (activity.ts), so a host (pi-subagents' list, or pi-bg's pill) draws them, and alone
+//   pi-marimo draws its own. ↓ at the prompt selects them, Enter opens the notebook's view (a server
+//   open in no browser opens in the browser), `x` twice interrupts a running one.
 // - marimo-lens selections the user made since their last message add `2 selections` to the pill,
 //   and every open selection is counted in the notebook's row.
 import { basename } from "../core/io.js";
+import { shortWhere } from "../core/render.js";
 import { interruptKey, notebookKey } from "./identity.js";
 import { elapsed } from "../core/render.js";
 import type { Followed } from "../core/watcher.js";
@@ -41,6 +44,24 @@ export interface SourceActions {
   drivers?(f: Followed): string[];
   /** The pi-bg servers standing for this notebook. */
   servers?(f: Followed): string[];
+  /** The followed notebooks this session uses, which the rows under the prompt list (default: all followed). */
+  engaged?(): Followed[];
+  /** Opens a URL in the browser. */
+  openUrl?(url: string): void;
+  /** Notebooks with no session to follow yet (a running server open in no browser, a pinned file not open). */
+  unopened?(): Unopened[];
+}
+
+/** A notebook listed in the rows under the prompt that is not followed: opening it opens its server in the browser. */
+export interface Unopened {
+  key: string;
+  path: string;
+  /** Its server, `:2718`, when known. */
+  where?: string | undefined;
+  /** `not open`. */
+  state: string;
+  /** Where Enter takes you, when there is a server. */
+  url?: string | undefined;
 }
 
 export class NotebookSource {
@@ -60,7 +81,14 @@ export class NotebookSource {
       title: "notebooks",
       noun: "notebook",
       entries: (now) => this.entries(now),
-      open: (key, ui) => this.actions.open(key, ui),
+      open: (key, ui) => {
+        const other = this.actions.unopened?.().find((u) => u.key === key);
+        if (other) {
+          if (other.url) this.actions.openUrl?.(other.url);
+          return Promise.resolve();
+        }
+        return this.actions.open(key, ui);
+      },
       canStop: (key) => {
         const f = this.actions.followed().find((o) => notebookKey(o) === key);
         return !!f && f.connection === "connected" && busy(f);
@@ -154,8 +182,8 @@ export class NotebookSource {
     return f.notebook.lens.selections().filter((s) => (this.lensSince.get(`${path}\0${s.id}`) ?? 0) > this.dismissedAt).length;
   }
 
-  entries(now: number): ActivityEntry[] {
-    return this.actions.followed().map((f) => {
+  entries(now: number, list: Followed[] = this.actions.followed()): ActivityEntry[] {
+    return list.map((f) => {
       const path = notebookKey(f);
       const run = this.runs.get(path);
       const ended = this.ended.get(path);
@@ -174,22 +202,32 @@ export class NotebookSource {
     });
   }
 
+  /**
+   * The rows under the prompt, one per notebook this session uses, then those not open anywhere, in
+   * file order so they hold still: `○ fit.py  :2718 · idle`, `● fit.py  :2718 · running Model fit  0:12`.
+   */
+  rows(now: number): ActivityEntry[] {
+    const engaged = this.actions.engaged?.() ?? this.actions.followed();
+    const followed = this.entries(now, engaged).map((e, i) => {
+      const f = engaged[i]!;
+      const where = shortWhere(f.attachment.url);
+      // The connection and `idle` are already in the detail.
+      const stats = e.stats === "idle" || e.stats === f.connection ? "" : e.stats;
+      return { path: f.attachment.path, entry: { ...e, detail: [where, e.detail].filter(Boolean).join(" · "), stats } };
+    });
+    const unopened = (this.actions.unopened?.() ?? []).map((u) => ({
+      path: u.path,
+      entry: { key: u.key, label: basename(u.path), detail: [u.where, u.state].filter(Boolean).join(" · "), status: "done" as const, stats: "", startedAt: 0 },
+    }));
+    return [...followed, ...unopened].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)).map((r) => r.entry);
+  }
+
+  /** Rows for the notebooks (selectable like tasks and subagents), plus `2 selections` while new ones wait for a reply. */
   pill(now: number): ActivityPill | undefined {
-    void now;
-    const followed = this.actions.followed();
-    // Every live notebook counts, idle ones too, so the pill is always there to select and open.
-    const live = followed.filter((f) => f.connection === "connected" || this.runs.has(notebookKey(f)));
-    const running = followed.filter((f) => this.runs.has(notebookKey(f))).length;
-    const failed = followed.filter((f) => this.alerting(notebookKey(f))).length;
-    const selections = followed.reduce((n, f) => n + this.lensNew(f), 0);
-    const total = Math.max(live.length, running + failed);
-    if (!total && !selections) return undefined;
-    const label = [
-      total ? `${total} notebook${total === 1 ? "" : "s"}` : "",
-      running ? `${running} running` : "",
-      selections ? `${selections} selection${selections === 1 ? "" : "s"}` : "",
-    ].filter(Boolean).join(" \u00b7 ");
-    return { label, ...(failed ? { alert: `${failed} failed` } : {}) };
+    const rows = this.rows(now);
+    const selections = this.actions.followed().reduce((n, f) => n + this.lensNew(f), 0);
+    if (!rows.length && !selections) return undefined;
+    return { label: selections ? `${selections} selection${selections === 1 ? "" : "s"}` : "", ...(rows.length ? { rows } : {}) };
   }
 
   /** How the notebook's last run went, for its view: `ran 2m 3s · 1 error · 5m ago`. */

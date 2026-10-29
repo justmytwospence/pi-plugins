@@ -67,6 +67,7 @@ import {
   hostOutranks,
   readHost,
   stableKey,
+  stoppable,
 } from "./activity.ts";
 import { type DialogResult, TasksDialog } from "./dialog.ts";
 import { FULL_SCREEN } from "./frame.ts";
@@ -252,23 +253,45 @@ export default function piBg(pi: ExtensionAPI) {
   const tui = () => ctx?.mode === "tui";
   /** Our pill and our guests': `2 tasks · 1 notebook`. */
   const combinedPill = (now: number): ActivityPill | undefined => {
-    const pills = [pillOf(now)];
+    const own = pillOf(now);
+    const parts: Array<{ pill: ActivityPill | undefined; section?: ActivitySection }> = [{ pill: own }];
     for (const s of guests.values()) {
       try {
-        pills.push(s.pill?.(now));
+        parts.push({ pill: s.pill?.(now), section: s });
       } catch {
         // Another extension's bug must not break the pill.
       }
     }
-    const shown = pills.filter((p): p is ActivityPill => !!p);
+    const shown = parts.filter((p): p is { pill: ActivityPill; section?: ActivitySection } => !!p.pill);
     if (!shown.length) return undefined;
-    const alerts = shown.map((p) => p.alert).filter(Boolean);
-    return { label: shown.map((p) => p.label).join(" · "), ...(alerts.length ? { alert: alerts.join(" · ") } : {}) };
+    const labels = shown.map((p) => p.pill.label).filter(Boolean);
+    const alerts = shown.map((p) => p.pill.alert).filter(Boolean);
+    // A guest's rows keep the guest's identity in their key, so a click or Enter reaches its own view.
+    const rows = shown.flatMap((p) => (p.pill.rows ?? []).map((r) => (p.section ? { ...r, key: stableKey(p.section.id, r.key) } : r)));
+    return { label: labels.join(" \u00b7 "), ...(alerts.length ? { alert: alerts.join(" \u00b7 ") } : {}), ...(rows.length ? { rows } : {}) };
+  };
+  /** The guest that offered a combined row, and the row's own key. */
+  const guestRow = (key: string): { section: ActivitySection; key: string } | undefined => {
+    const at = key.indexOf("\0");
+    const section = at > 0 ? guests.get(key.slice(0, at)) : undefined;
+    return section ? { section, key: key.slice(at + 1) } : undefined;
   };
   const pill = new PillView({
     pill: (now) => combinedPill(now),
     open: () => {
       if (ctx) openDialog(ctx.ui).catch(() => undefined);
+    },
+    openRow: (key) => {
+      const g = guestRow(key);
+      if (g && ctx) g.section.open(g.key, ctx.ui).catch(() => undefined);
+    },
+    canStopRow: (row) => {
+      const g = guestRow(row.key);
+      return !!g && stoppable(g.section, { ...row, key: g.key });
+    },
+    stopRow: (key) => {
+      const g = guestRow(key);
+      return g?.section.stop?.(g.key);
     },
   }, "pi-bg-pill");
   const bindPill = () => pill.setUI(attached && tui() && !hosted() ? (ctx?.ui as any) : undefined);

@@ -234,3 +234,107 @@ it("a real pi-vim main editor yields only idle navigation; pending/visual/EX/emb
     expect(mainEditorFocused({ [INPUT_CONTEXT]: () => "editor", [Symbol.for("pi-plugins.editor-surface.v1")]: "embedded" })).toBe(false);
   } finally { pill.dispose(); editor.dispose(); }
 });
+
+it("a pill with rows: ↓ selects the first row, ↑↓ move through rows and label, Enter opens the row, Esc and ↑ past the first go back", async () => {
+  const { PillView: NotebookPill } = await import(new URL("../../pi-marimo/src/pill.ts", import.meta.url).href);
+  for (const [View, widgetKey] of [[PillView, "pi-bg-pill"], [NotebookPill, "pi-marimo-pill"]] as const) {
+    const editor = new Editor(tui as any, { borderColor: (s: string) => s } as any);
+    editor.setText("draft");
+    const c = fakeCtx("/w");
+    const open = vi.fn();
+    const openRow = vi.fn();
+    const rows = [
+      { key: "a", label: "a.py", detail: ":2718 · idle", status: "done" as const, stats: "", startedAt: 0 },
+      { key: "b", label: "b.py", detail: ":2719 · running Fit", status: "running" as const, stats: "0:12", startedAt: 0 },
+    ];
+    const pill = new View({ pill: () => ({ label: "1 task", rows }), open, openRow }, widgetKey);
+    pill.setUI(c.ctx.ui as any);
+    pill.update();
+    const widget = c.widgets.get(widgetKey)({ ...tui, getFocusedComponent: () => editor }, theme);
+    try {
+      // Rows first, then the label line.
+      const idle = widget.render(100);
+      expect(idle).toHaveLength(3);
+      expect(idle[0]).toContain("a.py");
+      expect(idle[1]).toMatch(/● b\.py {2}:2719 · running Fit +0:12/u);
+      expect(idle[2]).toContain("1 task");
+      expect(pill.handleKey("\x1b[B")).toEqual({ consume: true });
+      expect(widget.render(100)).toHaveLength(4);
+      expect(widget.render(100)[3]).toContain("enter view");
+      expect(pill.handleKey("\x1b[B")).toEqual({ consume: true });
+      expect(pill.handleKey("\r")).toEqual({ consume: true });
+      expect(openRow).toHaveBeenCalledExactlyOnceWith("b");
+      expect(pill.isSelected).toBe(false);
+      // The label line opens the dialog.
+      pill.handleKey("\x1b[B");
+      pill.handleKey("\x1b[B");
+      pill.handleKey("\x1b[B");
+      pill.handleKey("\x1b[B");
+      pill.handleKey("\r");
+      expect(open).toHaveBeenCalledOnce();
+      // ↑ past the first row, and Esc, go back to the prompt; the draft is untouched.
+      pill.handleKey("\x1b[B");
+      expect(pill.handleKey("\x1b[A")).toEqual({ consume: true });
+      expect(pill.isSelected).toBe(false);
+      pill.handleKey("\x1b[B");
+      pill.handleKey("\x1b[B");
+      expect(pill.handleKey("\x1b")).toEqual({ consume: true });
+      expect(pill.isSelected).toBe(false);
+      expect(editor.getText()).toBe("draft");
+    } finally { pill.dispose(); }
+  }
+});
+
+it("x twice stops the selected running row in pi-vim normal mode, and a row that cannot be stopped is not offered", async () => {
+  const { MainEditor } = await import(new URL("../../pi-vim/src/index.ts", import.meta.url).href);
+  const editor = new MainEditor(tui, { ...theme, borderColor: (s: string) => s }, { matches: () => false });
+  const c = fakeCtx("/w");
+  const stopRow = vi.fn(async () => {});
+  const rows = [
+    { key: "a", label: "a.py", detail: "idle", status: "done" as const, stats: "", startedAt: 0 },
+    { key: "b", label: "b.py", detail: "running", status: "running" as const, stats: "", startedAt: 0, stopToken: "t1" },
+  ];
+  const pill = new PillView({ pill: () => ({ label: "", rows }), open: () => {}, openRow: () => {}, stopRow, canStopRow: (r) => r.status === "running" }, "pi-bg-pill");
+  pill.setUI(c.ctx.ui as any);
+  pill.update();
+  const widget = c.widgets.get("pi-bg-pill")({ ...tui, getFocusedComponent: () => editor }, theme);
+  try {
+    editor.setText("abc");
+    editor.handleInput("\x1b");
+    editor.handleInput("$");
+    expect(pill.handleKey("j")).toEqual({ consume: true });
+    // On the idle row, x is not the pill's.
+    expect(widget.render(100).at(-1)).not.toContain("x stop");
+    pill.handleKey("j");
+    expect(widget.render(100).at(-1)).toContain("x stop");
+    expect(pill.handleKey("x")).toEqual({ consume: true });
+    expect(stopRow).not.toHaveBeenCalled();
+    expect(widget.render(100).at(-1)).toContain("x again to stop");
+    // Moving away cancels the arming.
+    pill.handleKey("k");
+    pill.handleKey("j");
+    expect(pill.handleKey("x")).toEqual({ consume: true });
+    expect(stopRow).not.toHaveBeenCalled();
+    expect(pill.handleKey("x")).toEqual({ consume: true });
+    expect(stopRow).toHaveBeenCalledExactlyOnceWith("b");
+    // No label, no label line: the rows are the whole pill.
+    expect(widget.render(100).filter((l: string) => l.trim()).length).toBe(3);
+  } finally { pill.dispose(); editor.dispose(); }
+});
+
+it("the combined pill, with no label of its own, lists a hosted guest's rows", async () => {
+  const { default: piBg } = await import("../src/index.ts");
+  const f = fakePi();
+  const c = fakeCtx("/fixture");
+  piBg(f.pi as any);
+  for (const h of f.handlers.get("session_start") ?? []) await h({ reason: "startup" }, c.ctx);
+  const open = async () => {};
+  const stop = async () => {};
+  const row = { key: "nb", label: "nb.py", detail: ":2718", status: "running" as const, stats: "0:03", startedAt: 0, stopToken: "s1" };
+  const guest = { id: "marimo", title: "notebooks", noun: "notebook", entries: () => [row], open, stop, canStop: () => true, pill: () => ({ label: "", rows: [row] }), setHosted: () => {} };
+  f.pi.events.emit("activity:section", { section: guest });
+  const widget = [...c.widgets.values()].at(-1);
+  expect(widget).toBeDefined();
+  const text = widget({ ...tui, getFocusedComponent: () => undefined }, theme).render(100).join("\n");
+  expect(text).toMatch(/● nb\.py {2}:2718 +0:03/u);
+});

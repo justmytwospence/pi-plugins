@@ -55,7 +55,7 @@ async function until(cond: () => boolean, ms = 3_000): Promise<void> {
   }
 }
 
-function setup(branch: unknown[] = []) {
+function setup(branch: unknown[] = [], mode = "tui") {
   const handlers = new Map<string, Array<(e: unknown, c: unknown) => unknown>>();
   const listeners = new Map<string, Array<(d: unknown) => void>>();
   const sent: Array<[string, any]> = [];
@@ -87,7 +87,7 @@ function setup(branch: unknown[] = []) {
       return Promise.resolve();
     },
   };
-  const ctx = { cwd: CWD, mode: "tui", isIdle: () => true, ui, sessionManager: { getBranch: () => branch } };
+  const ctx = { cwd: CWD, mode, isIdle: () => true, ui, sessionManager: { getBranch: () => branch } };
   piMarimo(pi as never);
   const fire = async (name: string, event: unknown = {}) => {
     for (const h of handlers.get(name) ?? []) await h(event, ctx);
@@ -193,14 +193,18 @@ test("the notebooks as background work: a source for the hosts, its own pill alo
   const entries = section.entries(Date.now());
   expect(entries).toEqual([expect.objectContaining({ key: JSON.stringify([SERVER, `${CWD}/nb.py`]), label: "nb.py", status: "running", detail: "running Slow model fit · 1 queued · bg fit · server s1" })]);
   // Alone, its own pill; hosted (by pi-bg, then pi-subagents too), none; the last host leaving brings it back.
-  await until(() => /1 notebook/u.test(x.pillText() ?? ""));
+  await until(() => /● nb\.py {2}:2799 · running Slow model fit/u.test(x.pillText() ?? ""));
   section.setHosted(true, "pi-bg");
   expect(x.widgets.size).toBe(0);
   section.setHosted(true);
   section.setHosted(false, "pi-bg");
   expect(x.widgets.size).toBe(0);
   x.pi.events.emit("activity:gone", { id: "subagents" });
-  await until(() => /1 notebook/u.test(x.pillText() ?? ""));
+  await until(() => /● nb\.py/u.test(x.pillText() ?? ""));
+  // The rows are the pill's: a host draws them and opens a row with the section's open(key).
+  expect(section.pill(Date.now())).toMatchObject({ label: "", rows: [{ key: entries[0].key, label: "nb.py", status: "running" }] });
+  // In the TUI the notebooks are rows under the prompt, not footer lines.
+  expect([...x.statuses].filter(([k, v]) => v !== undefined && k.startsWith("marimo") && k !== "marimo-lens")).toEqual([]);
   // The view: the outline, the running cell, and x twice interrupts the kernel.
   await section.open(entries[0].key, x.ui);
   const view = x.customs.at(-1)?.view;
@@ -215,16 +219,14 @@ test("the notebooks as background work: a source for the hosts, its own pill alo
   const post = calls.find(([u]) => u.endsWith("/api/kernel/interrupt"))?.[1];
   expect(post.headers).toMatchObject({ "Marimo-Session-Id": "s1", "Marimo-Server-Token": "tok123" });
   view.dispose();
-  // The run ends with an error: failed in the pill until the user's next message.
+  // The run ends with an error: its row reads failed until the user's next message.
   server.feeds.at(-1)!(rest);
-  await until(() => /failed/u.test(x.pillText() ?? ""));
-  // Nothing runs now: the pill still counts the notebook, with the failure beside it.
-  expect(x.pillText()).toMatch(/1 notebook\b(?! ·\s*1 running).*1 failed/u);
+  await until(() => /✗ nb\.py/u.test(x.pillText() ?? ""));
   expect(section.entries(Date.now())[0]).toMatchObject({ status: "failed", stats: expect.stringMatching(/^ran \d+s · 1 error/u) });
   await x.fire("input", { source: "interactive" });
-  await until(() => !/failed/u.test(x.pillText() ?? ""));
-  // Idle, nothing failed: the pill stays, to select and open the notebooks.
-  expect(x.pillText()).toMatch(/1 notebook\b/u);
+  await until(() => !/✗/u.test(x.pillText() ?? ""));
+  // Idle, nothing failed: the row stays, to select and open the notebook.
+  expect(x.pillText()).toMatch(/○ nb\.py {2}:2799 · idle/u);
   expect(section.entries(Date.now())[0]).toMatchObject({ status: "done" });
   await x.fire("session_shutdown");
   expect(x.of("activity:gone")).toEqual([{ id: "subagents" }, { id: "marimo" }]);
@@ -235,7 +237,7 @@ test("the notebooks as background work: a source for the hosts, its own pill alo
 });
 
 test("session scope: a notebook open under the cwd gets no footer until this session works in it, and stays after resuming", async () => {
-  const x = setup();
+  const x = setup([], "rpc");
   await x.fire("session_start");
   await until(() => server.feeds.length > 0);
   server.feeds.at(-1)!(untilRunning);
@@ -254,7 +256,7 @@ test("session scope: a notebook open under the cwd gets no footer until this ses
   await x.fire("session_shutdown");
 
   // Resumed: shown without another touch.
-  const y = setup(x.entries);
+  const y = setup(x.entries, "rpc");
   await y.fire("session_start");
   await until(() => server.feeds.length > 1);
   server.feeds.at(-1)!(untilRunning);
@@ -264,7 +266,7 @@ test("session scope: a notebook open under the cwd gets no footer until this ses
 
 test("several notebooks at once: a footer line each, in file order, recent ones in full in context, ambiguous calls flagged", async () => {
   server.sessions = { s1: { path: `${CWD}/nb.py` }, s2: { path: `${CWD}/prep.py` } };
-  const x = setup();
+  const x = setup([], "rpc");
   await x.fire("session_start");
   await until(() => server.feeds.length === 2);
   for (const feed of server.feeds) feed(untilRunning);

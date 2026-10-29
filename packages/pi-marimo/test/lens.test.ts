@@ -105,12 +105,12 @@ describe("marimo-lens", () => {
     const f: Followed = { attachment, notebook: nb, connection: "connected", current: true, touchedAt: 0 };
     const source = new NotebookSource({ followed: () => [f], open: async () => {}, interrupt: async () => {}, changed: () => {}, hostedChanged: () => {} });
     source.update([f], 1000);
-    expect(source.pill(1000)).toEqual({ label: "1 notebook" });
+    expect(source.pill(1000)).toMatchObject({ label: "", rows: [{ label: "fit.py", status: "done" }] });
     nb.apply("model-lifecycle", open(state([selection(1, "chart", "x"), selection(2, "chart")])));
     source.update([f], 2000);
-    expect(source.pill(2000)).toEqual({ label: "1 notebook · 2 selections" });
+    expect(source.pill(2000)).toMatchObject({ label: "2 selections", rows: [{ label: "fit.py" }] });
     expect(source.entries(2000)[0]!.detail).toBe("idle · 2 selections");
     source.seen(3000);
-    expect(source.pill(3000)).toEqual({ label: "1 notebook" });
+    expect(source.pill(3000)).toMatchObject({ label: "", rows: [{ label: "fit.py" }] });
   });
 });

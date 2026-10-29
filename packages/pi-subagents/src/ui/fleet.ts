@@ -12,7 +12,7 @@
 // change, autocomplete or another focused surface releases the virtual selection immediately.
 // Adapted from tintinweb/pi-subagents (MIT): https://github.com/tintinweb/pi-subagents
 import { type TUI, isKeyRelease, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import { type ActivityPill, type ActivitySection, focusedComponent, leavesPromptDown, mainEditorFocused, readEditorMode } from "../activity.ts";
+import { type ActivityEntry, type ActivityPill, type ActivitySection, focusedComponent, leavesPromptDown, mainEditorFocused, readEditorMode, stoppable as rowStoppable } from "../activity.ts";
 import type { Run } from "../run.ts";
 import { runLabel } from "../label.ts";
 import { displayTokens } from "../run.ts";
@@ -26,9 +26,17 @@ const TICK_MS = 250;
 /** How long the hint after a subagent succeeds stays, as in Claude Code. */
 export const SUCCESS_HINT_MS = 30_000;
 
-export type FleetEntry = { kind: "main" } | { kind: "run"; run: Run } | { kind: "pill"; section: ActivitySection; pill: ActivityPill };
+export type FleetEntry =
+  | { kind: "main" }
+  | { kind: "run"; run: Run }
+  | { kind: "pill"; section: ActivitySection; pill: ActivityPill }
+  /** One of a pill's rows (pi-marimo's notebooks), selected and opened like a run. */
+  | { kind: "row"; section: ActivitySection; row: ActivityEntry };
 
-const entryKey = (e: FleetEntry) => (e.kind === "run" ? `run:${e.run.id}` : e.kind === "pill" ? `pill:${e.section.id}` : "main");
+/** What a stop on this entry would act on: a run's session, a row's stop token. A change cancels the arming. */
+const targetOf = (e: FleetEntry | undefined): unknown => (e?.kind === "run" ? (e.run.child ?? e.run) : e?.kind === "row" ? (e.row.stopToken ?? "") : undefined);
+
+const entryKey = (e: FleetEntry) => (e.kind === "run" ? `run:${e.run.id}` : e.kind === "pill" ? `pill:${e.section.id}` : e.kind === "row" ? `row:${e.section.id}\0${e.row.key}` : "main");
 
 /** A failed or stopped run the user has not seen yet: it ended after their last message and is not dismissed. */
 export function held(run: Run, dismissedAt: number, dismissed: ReadonlySet<string>): boolean {
@@ -58,7 +66,10 @@ export function fleetRoster(
     } catch {
       // Another extension's bug must not break the list.
     }
-    return pill ? [{ kind: "pill" as const, section, pill }] : [];
+    if (!pill) return [];
+    const rows = (pill.rows ?? []).map((row) => ({ kind: "row" as const, section, row }));
+    // A pill with no label of its own (its rows say it all) is only its rows.
+    return [...rows, ...(pill.label || pill.alert ? [{ kind: "pill" as const, section, pill }] : [])];
   });
   return [...(listed.length ? [{ kind: "main" as const }] : []), ...listed.map((run) => ({ kind: "run" as const, run })), ...pills];
 }
@@ -87,7 +98,7 @@ export function renderFleet({ roster, selected, current, active, stopArmed, canB
   if (!roster.length && !note) return [];
   const lines: string[] = [];
   const runs = roster.flatMap((e) => (e.kind === "run" ? [e.run] : []));
-  const pills = roster.flatMap((e, i) => (e.kind === "pill" ? [{ e, i }] : []));
+  const pills = roster.flatMap((e, i) => (e.kind === "pill" || e.kind === "row" ? [{ e, i }] : []));
   const sel = Math.min(selected, Math.max(0, roster.length - 1));
   const chosen = active ? roster[sel] : undefined;
   const bullet = (i: number) => (active && i === sel ? theme.fg("accent", "●") : i === current ? theme.fg("text", "◉") : theme.fg("dim", "○"));
@@ -98,8 +109,8 @@ export function renderFleet({ roster, selected, current, active, stopArmed, canB
       ? undefined
       : stopArmed && stoppable
         ? theme.fg("error", `x again to stop ${runLabel(chosen.run)}`)
-        : chosen?.kind === "pill"
-          ? theme.fg("dim", normalKeys ? "j/k select · l/enter view · h/esc back" : "↑/↓ select · enter view · esc back")
+        : chosen?.kind === "pill" || chosen?.kind === "row"
+          ? theme.fg("dim", `${normalKeys ? "j/k select · l/enter view" : "↑/↓ select · enter view"}${chosen.kind === "row" && rowStoppable(chosen.section, chosen.row) && normalKeys ? " · x stop" : ""} · ${normalKeys ? "h/esc" : "esc"} back`)
           : theme.fg(
               "dim",
               `${normalKeys ? "j/k select · l/enter view" : "↑/↓ select · enter view"}${stoppable ? " · x stop" : ""}${dismissable ? " · x dismiss" : ""}${stoppable && canBackground ? " · b background" : ""} · ${normalKeys ? "h/esc" : "esc"} back`,
@@ -127,14 +138,27 @@ export function renderFleet({ roster, selected, current, active, stopArmed, canB
     const below = runs.length - (start + visible);
     if (below > 0) lines.push(rightAlign("", theme.fg("dim", `↓ ${below} more`), width));
   }
+  // With no runs, the hint for a selected row (a notebook) tops the list, where the runs' hint would be.
+  if (!runs.length && chosen?.kind === "row") {
+    const canStop = normalKeys && rowStoppable(chosen.section, chosen.row);
+    lines.push(truncateToWidth(` ${stopArmed && canStop ? theme.fg("error", "x again to stop") : theme.fg("dim", `${normalKeys ? "j/k select · l/enter view" : "↑/↓ select · enter view"}${canStop ? " · x stop" : ""} · ${normalKeys ? "h/esc" : "esc"} back`)}`, width));
+  }
   // The pills: Claude Code's background-tasks indicator, inverse while selected.
   const inverse = (s: string) => (theme.inverse ? theme.inverse(s) : `\x1b[7m${s}\x1b[27m`);
   for (const { e, i } of pills) {
+    if (e.kind === "row") {
+      const on = active && i === sel;
+      const armed = on && stopArmed;
+      const icon = e.row.status === "running" ? theme.fg("accent", "●") : e.row.status === "failed" ? theme.fg("error", "✗") : e.row.status === "stopped" ? theme.fg("warning", "■") : theme.fg("dim", "○");
+      const name = on ? theme.bold(theme.fg("text", e.row.label)) : theme.fg("muted", e.row.label);
+      lines.push(...taskRows(` ${bullet(i)} ${icon} `, `${name}${e.row.detail ? `  ${theme.fg("dim", e.row.detail)}` : ""}`, theme.fg(on ? "text" : "dim", armed ? "x again to stop" : e.row.stats), width, true));
+      continue;
+    }
     if (e.kind !== "pill") continue;
     const on = active && i === sel;
     const label = on ? inverse(` ${e.pill.label} `) : theme.fg("muted", ` ${e.pill.label} `);
     const alert = e.pill.alert ? ` ${theme.fg("dim", "·")} ${theme.fg("error", e.pill.alert)}` : "";
-    const hint = on && !runs.length ? theme.fg("dim", normalKeys ? "  l/enter view · h/esc back" : "  enter view · esc back") : "";
+    const hint = on && !runs.length && !pills.some((p) => p.e.kind === "row") ? theme.fg("dim", normalKeys ? "  l/enter view · h/esc back" : "  enter view · esc back") : "";
     lines.push(truncateToWidth(`${label}${alert}${hint}`, width));
   }
   if (note) lines.push(truncateToWidth(` ${theme.fg("dim", note)}`, width));
@@ -255,7 +279,7 @@ export class FleetView {
             const entry = roster[this.selected];
             const canBackground = entry?.kind === "run" && Boolean(this.source.actions(entry.run).canBackground?.());
             const now = Date.now();
-            const stopArmed = this.stopArmed && entry?.kind === "run" && entryKey(entry) === this.armedKey && (entry.run.child ?? entry.run) === this.armedTarget;
+            const stopArmed = this.stopArmed && (entry?.kind === "run" || entry?.kind === "row") && entryKey(entry) === this.armedKey && targetOf(entry) === this.armedTarget;
             // Below the main prompt, main is the session shown.
             const current = roster[0]?.kind === "main" ? 0 : undefined;
             return renderFleet({ roster, selected: this.selected, current, active: this.active, stopArmed, canBackground, normalKeys: readEditorMode(this.focused())?.state === "normal", note: this.source.note?.(now), now, width, theme: ui.theme ?? factoryTheme });
@@ -322,7 +346,7 @@ export class FleetView {
     this.reselect(roster);
     const entry = roster[this.selected];
     // Armed only for the row that was selected when x was first pressed.
-    const armed = this.stopArmed && entry?.kind === "run" && entryKey(entry) === this.armedKey && (entry.run.child ?? entry.run) === this.armedTarget;
+    const armed = this.stopArmed && (entry?.kind === "run" || entry?.kind === "row") && entryKey(entry) === this.armedKey && targetOf(entry) === this.armedTarget;
     this.stopArmed = false;
     this.armedKey = undefined;
     this.armedTarget = undefined;
@@ -333,6 +357,13 @@ export class FleetView {
         this.stopArmed = true;
         this.armedKey = entryKey(entry);
         this.armedTarget = entry.run.child ?? entry.run;
+      }
+    } else if (matchesKey(data, "x") && entry?.kind === "row" && rowStoppable(entry.section, entry.row)) {
+      if (armed) this.invoke(() => entry.section.stop?.(entry.row.key));
+      else {
+        this.stopArmed = true;
+        this.armedKey = entryKey(entry);
+        this.armedTarget = targetOf(entry);
       }
     } else if (matchesKey(data, "x") && entry?.kind === "run") {
       // An ended run: dismissed now instead of at the user's next message.
@@ -405,6 +436,17 @@ export class FleetView {
     const key = entryKey(entry);
     this.viewing = key;
     const cleared = () => this.viewerClosed(key);
+    if (entry.kind === "row") {
+      // The row's own view (a notebook); it owns the keyboard until it closes.
+      this.active = false;
+      this.closeViewer = () => undefined;
+      const ui = this.ui;
+      const { section, row } = entry;
+      Promise.resolve()
+        .then(() => section.open(row.key, ui))
+        .then(cleared, cleared);
+      return;
+    }
     if (entry.kind === "pill") {
       // The section's own dialog; it owns the keyboard until it closes.
       this.active = false;

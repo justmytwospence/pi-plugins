@@ -107,9 +107,16 @@ export interface ActivityEntry {
 
 /** The compact label a source shows under the prompt, Claude Code's footer pill: `2 tasks, 1 service`. */
 export interface ActivityPill {
+  /** May be empty when `rows` say it all (pi-marimo's notebooks). */
   label: string;
   /** Something failed or was stopped and has not been seen: drawn in the error color. */
   alert?: string;
+  /**
+   * Rows listed above the label, one per piece of work, that the user selects and opens like the
+   * pill itself (pi-marimo's notebooks). A host opens one with the section's `open(key, ui)` and
+   * stops it with `stop(key)` when `stoppable`.
+   */
+  rows?: ActivityEntry[];
 }
 
 export interface ActivitySection {

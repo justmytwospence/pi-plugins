@@ -6,7 +6,7 @@ import { KEY, fakeRun, fakeUI, normalFocus, plain } from "./ui-helpers.ts";
 
 afterEach(() => vi.useRealTimers());
 
-const names = (roster: ReturnType<typeof fleetRoster>) => roster.map((e) => (e.kind === "main" ? "main" : e.kind === "run" ? e.run.agent : e.pill.label));
+const names = (roster: ReturnType<typeof fleetRoster>) => roster.map((e) => (e.kind === "main" ? "main" : e.kind === "run" ? e.run.agent : e.kind === "row" ? e.row.label : e.pill.label));
 
 test("the roster: main, running and viewed runs earliest first, failures until the next message or x; then pills", () => {
   const now = 100_000;
@@ -300,6 +300,42 @@ test("a pill: ↓ selects it when there are no runs; Enter opens its dialog, whi
   await new Promise((r) => setTimeout(r, 0));
   expect(ui.press(KEY.down)).toBe(true);
   expect(ui.press(KEY.escape)).toBe(true);
+  fleet.dispose();
+});
+
+test("pill rows (notebooks): listed above the label, selected and opened like runs, x twice stops a running one", async () => {
+  const ui = fakeUI();
+  const opened: string[] = [];
+  const stopped: string[] = [];
+  const rows = [
+    { key: "a", label: "a.py", detail: ":2718 · idle", status: "done" as const, stats: "", startedAt: 0 },
+    { key: "b", label: "b.py", detail: ":2719 · running Fit", status: "running" as const, stats: "0:12", startedAt: 0, stopToken: "t" },
+  ];
+  const notebooks = {
+    id: "marimo",
+    title: "notebooks",
+    entries: () => rows,
+    open: async (key: string) => void opened.push(key),
+    stop: (key: string) => void stopped.push(key),
+    pill: () => ({ label: "", rows }),
+  };
+  const roster = fleetRoster([], 0, undefined, [notebooks]);
+  expect(names(roster)).toEqual(["a.py", "b.py"]);
+  const fleet = new FleetView({ runs: () => [], enabled: () => true, actions: () => ({}), sections: () => [notebooks] });
+  fleet.setUI(ui);
+  fleet.update();
+  const idle = ui.render("subagents-fleet");
+  expect(idle).toHaveLength(3);
+  expect(idle[0]).toMatch(/^ ○ ○ a\.py {2}:2718 · idle/u);
+  expect(idle[1]).toMatch(/^ ○ ● b\.py {2}:2719 · running Fit +0:12$/u);
+  expect(ui.press(KEY.down)).toBe(true);
+  expect(ui.render("subagents-fleet")[0]).toContain("↑/↓ select · enter view");
+  expect(ui.render("subagents-fleet")[1]).toMatch(/^ ● ○ a\.py/u);
+  expect(ui.press(KEY.down)).toBe(true);
+  expect(ui.render("subagents-fleet")[2]).toMatch(/^ ● ● b\.py/u);
+  expect(ui.press(KEY.enter)).toBe(true);
+  await new Promise((r) => setTimeout(r, 0));
+  expect(opened).toEqual(["b"]);
   fleet.dispose();
 });
 
