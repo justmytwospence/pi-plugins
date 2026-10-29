@@ -30,6 +30,7 @@ export const EXEC_ENTRY = "plan-mode:exec";
 export const EXEC_STATUS_KEY = "plan-exec";
 export const ASK_TOOL = "ask_planner";
 export const BACK_COMMAND = "plan-back";
+export const FINISH_MESSAGE_TYPE = "plan-mode-finish";
 export const FINISH_TOOL = "finish_plan";
 export const EXEC_TOOLS = [FINISH_TOOL, ASK_TOOL] as const;
 /** Per question to the planner on call. */
@@ -91,6 +92,8 @@ interface FinishDetails {
   implementer?: string;
   /** The model the session went back to, when it did. */
   returnedTo?: string;
+  /** One line on how it went, from pi-recap when it is loaded (shown on the card back in the planning conversation). */
+  headline?: string;
   /** Questions put to the planner on call, and what they cost. */
   asks?: number;
   costUsd?: number;
@@ -367,17 +370,18 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       const now = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
       const restored = Boolean(spec && now === finished.implementerModel);
       if (spec && restored) await host.restoreModel(ctx, spec);
-      if (finished.returnTo && ctx.hasUI) pendingReturn = { leaf: finished.returnTo, report };
+      const details: FinishDetails = {
+        report,
+        planFile: finished.planFile,
+        changes,
+        implementer: finished.implementer,
+        ...(restored && finished.planner ? { returnedTo: finished.planner.name } : {}),
+        ...(finished.asks > 0 ? { asks: finished.asks, costUsd: finished.costUsd } : {}),
+      };
+      if (finished.returnTo && ctx.hasUI) pendingReturn = { leaf: finished.returnTo, details };
       return {
         content: [{ type: "text", text: "The implementation is reported and exec mode is over. Stop here." }],
-        details: {
-          report,
-          planFile: finished.planFile,
-          changes,
-          implementer: finished.implementer,
-          ...(restored && finished.planner ? { returnedTo: finished.planner.name } : {}),
-          ...(finished.asks > 0 ? { asks: finished.asks, costUsd: finished.costUsd } : {}),
-        } satisfies FinishDetails,
+        details,
         terminate: true,
       } as never;
     },
@@ -385,7 +389,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
 
   // Back to the planning conversation: a tool cannot navigate the session tree, a command can, and a
   // command sent once the turn has settled runs outside the streaming turn.
-  let pendingReturn: { leaf: string; report: string } | undefined;
+  let pendingReturn: { leaf: string; details: FinishDetails } | undefined;
   pi.on("agent_settled", (event) => {
     if (!pendingReturn) return;
     if (event.aborted) {
@@ -400,12 +404,12 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       const back = pendingReturn;
       pendingReturn = undefined;
       if (!back) return;
+      // Asked while still on the implementation branch, where the turn it recaps is.
+      const headline = await recapHeadline(pi, 5_000);
       try {
-        await ctx.navigateTree(back.leaf, {
-          summarize: true,
-          customInstructions:
-            "Summarize the implementation that followed this plan: what changed, the verification results, and each deviation from the plan.",
-        });
+        // No model summary of the branch: the implementer's report is the summary, and it goes in as a
+        // message the planner reads.
+        await ctx.navigateTree(back.leaf, { summarize: false });
       } catch (error: unknown) {
         ctx.ui.notify(
           `Could not return to the planning conversation: ${error instanceof Error ? error.message : String(error)}. Use /tree.`,
@@ -413,13 +417,18 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
         );
         return;
       }
+      const details: FinishDetails = { ...back.details, ...(headline ? { headline } : {}) };
       pi.sendMessage({
-        customType: "plan-mode-finish",
-        content: `The plan was implemented. Implementer's report:\n\n${back.report}`,
+        customType: FINISH_MESSAGE_TYPE,
+        content: finishMessageText(details),
+        details,
         display: true,
       });
     },
   });
+  pi.registerMessageRenderer<FinishDetails>(FINISH_MESSAGE_TYPE, (message, options, theme) =>
+    renderFinish(message.details, { expanded: options.expanded, isPartial: false }, theme),
+  );
 
   // Tripwire: a note on the first edit of each file the plan does not list. It never blocks.
   pi.on("tool_result", (event, ctx) => {
@@ -577,6 +586,10 @@ function renderFinish(
 ) {
   if (!details?.report) return new Container();
   const container = new Container();
+  if (details.headline) {
+    container.addChild(new Text(theme.fg("dim", theme.bold(`※ ${details.headline}`)), 0, 0));
+    container.addChild(new Spacer(1));
+  }
   const lines = details.report.split("\n");
   const folded = !options.expanded && lines.length > COLLAPSED_LINES;
   const shown = folded ? lines.slice(0, COLLAPSED_LINES).join("\n") : details.report;
@@ -601,6 +614,48 @@ function renderFinish(
   container.addChild(new Spacer(1));
   container.addChild(new Text(reviewStatusLine(theme, { tone: "success", text: "✓ Finished", context }), 0, 0));
   return container;
+}
+
+/** pi-recap's one-line recap of the turn just ended, when it is loaded; undefined otherwise or when slow. */
+async function recapHeadline(pi: ExtensionAPI, timeoutMs: number): Promise<string | undefined> {
+  let answer: Promise<string | undefined> | undefined;
+  try {
+    pi.events.emit("recap:summary", {
+      reply: (summary: Promise<string | undefined>) => {
+        answer = summary;
+      },
+    });
+  } catch {
+    return undefined;
+  }
+  if (!answer) return undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const slow = new Promise<undefined>((done) => {
+    timer = setTimeout(() => done(undefined), timeoutMs);
+  });
+  try {
+    return (await Promise.race([answer, slow]))?.trim() || undefined;
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** What the planner reads once it is back: the implementer's report and what it touched. */
+function finishMessageText(details: FinishDetails): string {
+  const lines = [
+    `The plan was implemented${details.implementer ? ` by ${details.implementer}` : ""}. Its report:`,
+    "",
+    details.report || "(no report)",
+  ];
+  const changes = details.changes;
+  if (changes && changes.edited.length > 0) {
+    lines.push("", `Files edited: ${changes.edited.join(", ")}`);
+    if (changes.outside.length > 0) lines.push(`Not in the plan: ${changes.outside.join(", ")}`);
+    if (changes.git) lines.push(`git diff against HEAD: ${changes.git}`);
+  }
+  return lines.join("\n");
 }
 
 function text(value: string) {
