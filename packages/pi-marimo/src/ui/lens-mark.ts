@@ -8,7 +8,8 @@ import type { Cell, NotebookState } from "../core/notebook.js";
 import { truncate } from "../core/notebook.js";
 import type { Followed } from "../core/watcher.js";
 import { setModelValue } from "./interrupt.js";
-import { cellLabel, firstLine } from "./rows.js";
+import { firstLine } from "./rows.js";
+import { cellTitle } from "./titles.js";
 
 /** The document Pi's selections say they were made in (the browser names its page `document:<uuid>`). */
 export const LENS_DOCUMENT_ID = `document:pi-marimo-${randomBytes(6).toString("hex")}`;
@@ -65,7 +66,7 @@ export async function markCell(f: Followed, cell: Cell, note: string, o: LensCal
     note,
     documentId: LENS_DOCUMENT_ID,
     createdAt: new Date().toISOString(),
-    what: `Cell ${cellLabel(cell)}`,
+    what: `Cell ${cellTitle(f.notebook, cell)}`,
     detail: outputDetail(cell),
     ...(info && png ? { image: { ...info, base64: png } } : {}),
   });

@@ -83,13 +83,12 @@ describe("marimo-lens", () => {
     expect(lensStatusText([{ notebook: notebook(), attachment }])).toBeUndefined();
   });
 
-  test("the notebook view lists selections and tags their cells", () => {
+  test("the notebook view tags selections on their rows and lists them in the cell's detail", () => {
     const nb = notebook();
     nb.apply("model-lifecycle", open(state([selection(1, "chart", "make this blue")])));
     const { lines } = notebookLines(nb, theme, Date.now());
-    expect(lines[0]).toBe("Lens");
-    expect(lines[1]).toBe("  S1  make this blue  by_year");
-    expect(lines.find((l) => l.includes("by_year  →") || l.includes("by_year S1"))).toContain("by_year S1");
+    expect(lines.join("\n")).not.toContain("Lens");
+    expect(lines.find((l) => l.includes("by_year"))).toContain("by_year S1");
     const f: Followed = { attachment, notebook: nb, connection: "connected", current: true, touchedAt: 0 };
     const view = new NotebookView({ requestRender: () => {}, terminal: { rows: 20 } } as any, theme, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {} }, () => {});
     try {
@@ -98,6 +97,8 @@ describe("marimo-lens", () => {
         for (const l of out) expect(visibleWidth(l)).toBeLessThanOrEqual(width);
         expect(out.join("\n")).toContain("idle · 1 selection");
       }
+      view.handleInput("j");
+      expect(view.render(120).join("\n")).toMatch(/S1 make this blue/u);
     } finally { view.dispose(); }
   });
 

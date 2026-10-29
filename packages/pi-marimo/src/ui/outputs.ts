@@ -8,7 +8,7 @@ import { liveGeometry } from "./live-charts.js";
 import type { Row, RowOptions } from "./rows.js";
 import { tableLines } from "./table.js";
 
-/** The indent of everything under a cell's line. `LIVE_LEFT` in view.ts counts on these six spaces. */
+/** The default indent of everything under a cell's line; the detail pane passes none. */
 export const PAD = "      ";
 /** Cells the inline image of an output may be wide, and high at most. */
 export const IMAGE_WIDTH = 60;
@@ -41,7 +41,7 @@ export function consoleRows(cell: Cell, theme: FrameTheme, max: number): Row[] {
 /** A cell's output: an image or chart when the terminal draws them, a table's grid, else its text. */
 export function outputRows(cell: Cell, theme: FrameTheme, opts: RowOptions, limits: { textLines: number; tableRows: number }): Row[] {
   const out: Row[] = [];
-  const pad = PAD;
+  const pad = opts.pad ?? PAD;
   const push = (text: string) => out.push({ text });
   const output = cell.output;
   let chartNote: string | undefined;
@@ -76,7 +76,7 @@ export function outputRows(cell: Cell, theme: FrameTheme, opts: RowOptions, limi
   const inline = output?.image && getCapabilities().images ? inlineImage(output, theme, pad, opts) : undefined;
   if (inline) out.push(...inline);
   else if (output?.table) {
-    for (const line of tableLines(output.table, (opts.width ?? 80) - 4 - PAD.length - 2, theme, limits.tableRows)) push(`${pad}${theme.fg("accent", "▍")} ${line}`);
+    for (const line of tableLines(output.table, (opts.width ?? 80) - pad.length - 2, theme, limits.tableRows)) push(`${pad}${theme.fg("accent", "▍")} ${line}`);
   } else if (output && !(output.kind === "widgets" && !output.text)) {
     const text = output.kind === "text" || output.kind === "other" ? output.text : theme.fg("dim", chartNote ?? output.text);
     const lines = text.split("\n");

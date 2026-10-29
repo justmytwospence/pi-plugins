@@ -218,7 +218,8 @@ test("the notebooks as background work: a source for the hosts, its own pill alo
   expect(x.customs.at(-1)?.options).toMatchObject({ overlay: true, overlayOptions: { width: "100%" } });
   const screen = view.render(100).join("\n");
   expect(screen).toMatch(/◀ esc · Notebook nb\.py · not your main session/u);
-  expect(screen).toMatch(/Data loading[\s\S]*Slow model fit[\s\S]*● lEQa {2}→ y {2}running/u);
+  expect(screen).toMatch(/Data loading[\s\S]*Slow model fit[\s\S]*▌ {2}● y /u);
+  expect(screen).not.toContain("lEQa");
   view.handleInput("x");
   expect(view.render(100).join("\n")).toMatch(/x again to interrupt/u);
   view.handleInput("x");
@@ -369,10 +370,13 @@ test("the agent's changes show in the view until the user's next prompt", async 
   vi.useRealTimers();
   await section.open(section.entries(Date.now())[0].key, x.ui);
   const view = x.customs.at(-1)?.view;
-  await until(() => /PKri .*changed by the agent/u.test(view.render(120).join("\n")));
-  expect(view.render(120).join("\n")).toContain("agent: 1 changed");
+  await until(() => view.render(120).join("\n").includes("agent: 1 changed"));
+  view.handleInput("j");
+  expect(view.render(120).join("\n")).toContain("changed by the agent");
+  expect(view.render(120).join("\n")).not.toContain("PKri");
   await x.fire("before_agent_start");
   expect(view.render(120).join("\n")).not.toContain("changed by the agent");
+  expect(view.render(120).join("\n")).not.toContain("agent: 1 changed");
   view.dispose();
   await x.fire("session_shutdown");
 });

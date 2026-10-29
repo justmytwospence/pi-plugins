@@ -82,7 +82,7 @@ export const DEFAULT_CONFIG = {
   /** Run Plotly figures live (hover, zoom) in the view and the transcript; false draws pictures. */
   liveCharts: true,
   view: {
-    /** Open the notebook view with every cell's output shown (O toggles it). */
+    /** Open the notebook view with the whole section in the detail pane (O toggles it). */
     outputs: false,
   },
   server: {

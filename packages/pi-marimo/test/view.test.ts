@@ -11,24 +11,30 @@ const theme = { fg: (_: string, text: string) => text, bold: (text: string) => t
 const tui = { requestRender: () => {}, terminal: { rows: 28 } };
 function followed(url = "http://fixture.invalid", sessionId = "s"): Followed {
   const notebook = new NotebookState();
-  notebook.apply("kernel-ready", { cell_ids: Array.from({ length: 100 }, (_, i) => `cell-${i}`), codes: Array(100).fill("x = 1"), names: Array(100).fill("_") });
+  notebook.apply("kernel-ready", { cell_ids: Array.from({ length: 100 }, (_, i) => `cell-${i}`), codes: Array(100).fill("x = 1"), names: Array.from({ length: 100 }, (_, i) => `cell-${i}`) });
   return { attachment: { path: "/w/nb.py", url, sessionId }, notebook, connection: "connected", current: true, touchedAt: 0 };
 }
 function busy(f: Followed) { f.notebook.apply("cell-op", { cell_id: "cell-0", status: "running" }); }
 
-test("notebook detail uses Ctrl-U/D half-page primary and Page keys full-page", () => {
-  const f = followed();
+test("^U/^D scroll the detail by half a page and the page keys by a whole one; j/k move the cursor", () => {
+  const f = nbWith([{ id: "a", code: "x = 1", name: "long" }, { id: "b", code: "y = 2", name: "next" }]);
+  f.notebook.apply("cell-op", { cell_id: "a", status: "idle", output: { channel: "output", mimetype: "text/plain", data: Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n") } });
   const view = new NotebookView(tui as any, theme, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {} }, () => {});
   try {
-    view.handleInput("g");
+    expect(view.render(100).join("\n")).toContain("▍ line 0");
     view.handleInput("\x04");
-    expect(view.render(100)[5]).toContain("cell-10");
+    let text = view.render(100).join("\n");
+    expect(text).not.toContain("▍ line 0");
+    expect(text).toContain("▍ line 9");
+    expect(text).toMatch(/▌○ long/u);
     view.handleInput("\x1b[6~");
-    expect(view.render(100)[5]).toContain("cell-30");
+    expect(view.render(100).join("\n")).toContain("▸ code");
     view.handleInput("\x15");
-    expect(view.render(100)[5]).toContain("cell-20");
     view.handleInput("\x1b[5~");
-    expect(view.render(100)[5]).toContain("cell-0");
+    text = view.render(100).join("\n");
+    expect(text).toContain("▍ line 0");
+    view.handleInput("j");
+    expect(view.render(100).join("\n")).toMatch(/▌○ next/u);
     expect(view[INPUT_CONTEXT]()).toBe("viewer");
   } finally { view.dispose(); }
 });
@@ -63,8 +69,8 @@ test("two servers hosting the same file have distinct stable rows, interrupts an
   expect(interrupt).toHaveBeenCalledExactlyOnceWith(b);
   const view = new NotebookView(tui as any, theme, rows[1]!.key, { followed: () => [a, b], interrupt, openInBrowser: () => {} }, () => {});
   try {
-    expect(view.render(100).join("\n")).toContain("http://server-b.invalid");
-    expect(view.render(100).join("\n")).not.toContain("http://server-a.invalid");
+    expect(view.render(100).join("\n")).toContain("server-b.invalid");
+    expect(view.render(100).join("\n")).not.toContain("server-a.invalid");
   } finally { view.dispose(); }
   const before = notebookKey(b);
   b.attachment.sessionId = "reconnected";
@@ -114,42 +120,51 @@ const make = (f: Followed, extra: Partial<ConstructorParameters<typeof NotebookV
   new NotebookView(tui as any, theme2, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {}, ...extra }, () => {});
 const screen = (v: NotebookView) => v.render(100).join("\n");
 
-test("the header counts cells, stale and failed ones, and names the server and the last run", () => {
+test("the header is one line: state, the agent, the last run and where the server is; the path and URL are on the ? page", () => {
   const f = nbWith([{ id: "a", code: "x = 1" }, { id: "b", code: "y = x" }, { id: "m", code: 'mo.md("# T")' }]);
   f.notebook.apply("cell-op", { cell_id: "b", status: "idle", stale_inputs: true, output: { channel: "marimo-error", mimetype: "application/vnd.marimo+error", data: [{ type: "exception", exception_type: "ValueError", msg: "bad" }] } });
   const v = make(f, { servers: () => ["nb-server"], lastRun: () => "ran 3s · 1 error · 1m ago" });
   try {
-    const text = screen(v);
-    expect(text).toContain("2 cells");
-    expect(text).toContain("1 stale");
-    expect(text).toContain("1 error");
-    expect(text).toContain("server nb-server");
-    expect(text).toContain("ran 3s · 1 error · 1m ago");
-    expect(text).toContain("http://fixture.invalid");
+    const lines = v.render(100);
+    expect(lines[1]).toContain("nb.py");
+    expect(lines[1]).toContain("idle · 1 error");
+    expect(lines[1]).toContain("ran 3s · 1 error · 1m ago");
+    expect(lines[1]).toContain("server nb-server");
+    const text = lines.join("\n");
+    expect(text).not.toContain("2 cells");
+    expect(text).not.toContain("http://fixture.invalid");
+    expect(text).not.toContain("/w/nb.py");
+    expect(text).not.toContain("session s");
+    v.handleInput("?");
+    expect(screen(v)).toContain("/w/nb.py · http://fixture.invalid · server nb-server");
   } finally { v.dispose(); }
 });
 
-test("j/k move the cursor between cells and Enter expands its code, console and output", () => {
-  const f = nbWith([{ id: "a", code: "print('hi')\nx = 1" }, { id: "b", code: "y = 2" }]);
+test("j/k move the cursor between cells; the detail shows the cell's output, folds its code, and Enter opens it", () => {
+  const f = nbWith([{ id: "a", code: "print('hi')\nx = 1", name: "first" }, { id: "b", code: "y = 2", name: "second" }]);
   f.notebook.apply("cell-op", { cell_id: "a", status: "running", timestamp: 1 });
   f.notebook.apply("cell-op", { cell_id: "a", console: [{ channel: "stdout", mimetype: "text/plain", data: "hi\n" }], output: { channel: "output", mimetype: "text/html", data: "<span>value &amp; more</span>" } });
   f.notebook.apply("cell-op", { cell_id: "a", status: "idle", timestamp: 2 });
   const v = make(f);
   try {
-    expect(screen(v)).toMatch(/● ○ a/u);
+    const first = screen(v);
+    expect(first).toMatch(/▌○ first/u);
+    expect(first).toContain("▍ hi");
+    expect(first).toContain("▍ value & more");
+    expect(first).toContain("▸ code · 2 lines");
+    expect(first).not.toContain("print('hi')");
     v.handleInput("j");
-    expect(screen(v)).toMatch(/● ○ b/u);
+    expect(screen(v)).toMatch(/▌○ second/u);
+    expect(screen(v)).not.toContain("▍ value & more");
     v.handleInput("k");
     v.handleInput("\r");
     const open = screen(v);
-    expect(open).toMatch(/● ○ a/u);
+    expect(open).toMatch(/▌○ first/u);
+    expect(open).toContain("▾ code");
     expect(open).toContain("│ print('hi')");
-    expect(open).toContain("▍ hi");
-    expect(open).toContain("▍ value & more");
     v.handleInput("\r");
-    expect(screen(v)).not.toContain("▍ value & more");
-    // Collapsed, the outline still names what it output.
-    expect(screen(v)).toContain("“value & more”");
+    expect(screen(v)).not.toContain("│ print('hi')");
+    expect(screen(v)).toContain("▸ code · 2 lines");
   } finally { v.dispose(); }
 });
 
@@ -159,9 +174,10 @@ test("n and N jump between failed cells; / filters by name, variable or code and
   const v = make(f);
   try {
     v.handleInput("n");
-    expect(screen(v)).toMatch(/● ✗ b/u);
+    expect(screen(v)).toMatch(/▌✗ boom\(\) +E/u);
     v.handleInput("N");
-    expect(screen(v)).toMatch(/● ✗ b/u);
+    expect(screen(v)).toMatch(/▌✗ boom\(\) +E/u);
+    expect(screen(v)).toContain("E: m");
     v.handleInput("/");
     expect(v[INPUT_CONTEXT]()).toBe("filter");
     for (const ch of "load") v.handleInput(ch);
@@ -186,11 +202,11 @@ test("following keeps the cursor on the running cell until the user moves; f fol
   f.notebook.apply("cell-op", { cell_id: "c40", status: "running", timestamp: 1 });
   const v = make(f);
   try {
-    expect(screen(v)).toMatch(/● ● c40/u);
+    expect(screen(v)).toMatch(/▌● v40 = 40/u);
     v.handleInput("k");
-    expect(screen(v)).toMatch(/● ○ c39/u);
+    expect(screen(v)).toMatch(/▌○ v39 = 39/u);
     v.handleInput("f");
-    expect(screen(v)).toMatch(/● ● c40/u);
+    expect(screen(v)).toMatch(/▌● v40 = 40/u);
   } finally { v.dispose(); }
 });
 
@@ -245,7 +261,6 @@ test("S stops the server the notebook's row stands for, after a second press, an
   } finally { none.dispose(); }
   const v = make(f, { servers: () => ["marimo nb.py"], stopServers });
   try {
-    expect(screen(v)).toContain("S stop server");
     v.handleInput("S");
     expect(screen(v)).toContain("S again to stop the server");
     v.handleInput("j");
@@ -265,7 +280,6 @@ test("a png output draws inline only when its whole block is on screen, and only
   const v = make(f);
   try {
     setCapabilities({ images: null, trueColor: true, hyperlinks: false } as any);
-    v.handleInput("l");
     expect(screen(v)).toContain("[image png]");
     expect(screen(v)).not.toContain("\x1b_G");
     setCapabilities({ images: "kitty", trueColor: true, hyperlinks: false } as any);
@@ -274,7 +288,7 @@ test("a png output draws inline only when its whole block is on screen, and only
     expect(shown.filter((l) => l.includes("\x1b_G"))).toHaveLength(1);
     expect(shown.every((l) => visibleWidth(l) === 100)).toBe(true);
     // The agent-facing outline never carries image escapes.
-    expect(notebookLines(f.notebook, theme2, 0, { expanded: new Set(["a"]) }).lines.join("\n")).not.toContain("\x1b_G");
+    expect(notebookLines(f.notebook, theme2, 0).lines.join("\n")).not.toContain("\x1b_G");
   } finally { v.dispose(); setCapabilities({ images: null, trueColor: true, hyperlinks: false } as any); }
 });
 
@@ -289,7 +303,6 @@ test("a Vega-Lite chart shows a drawing note, then the image once the renderer f
   const v = new NotebookView(tui as any, theme2, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {} }, () => {}, renderer);
   try {
     setCapabilities({ images: "kitty", trueColor: true, hyperlinks: false } as any);
-    v.handleInput("l");
     expect(screen(v)).toContain("drawing");
     release(png);
     await new Promise((r) => setTimeout(r, 0));
@@ -313,7 +326,6 @@ test("a Plotly figure is drawn through its own renderer", async () => {
   const v = new NotebookView(tui as any, theme2, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {} }, () => {}, undefined, plotly, noLive);
   try {
     setCapabilities({ images: "kitty", trueColor: true, hyperlinks: false } as any);
-    v.handleInput("l");
     v.render(100);
     await new Promise((r) => setTimeout(r, 0));
     v.render(100);
@@ -330,7 +342,7 @@ test("a live Plotly chart is drawn from its page's frames, and the mouse over it
   const png = "iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAAFUlEQVR42mP8z8BQz0AEYBxVSF+FABJADveWkH6oAAAAAElFTkSuQmCC";
   setCellDimensions({ widthPx: 9, heightPx: 18 });
   setCapabilities({ images: "kitty", trueColor: true, hyperlinks: false } as any);
-  const f = nbWith([{ id: "a", code: "fig" }]);
+  const f = nbWith([{ id: "a", code: "fig" }, { id: "b", code: "y = 2" }]);
   f.notebook.apply("cell-op", { cell_id: "a", status: "idle", output: { channel: "output", mimetype: "text/html", data: `<marimo-plotly data-figure='{&quot;data&quot;:[],&quot;layout&quot;:{}}'></marimo-plotly>` } });
   const events: any[] = [];
   let closed = false;
@@ -338,7 +350,6 @@ test("a live Plotly chart is drawn from its page's frames, and the mouse over it
   const written: string[] = [];
   const v = new NotebookView(tui as any, theme2, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {} }, () => {}, undefined, undefined, live);
   try {
-    v.handleInput("l");
     expect(screen(v)).toContain("starting");
     await new Promise((r) => setTimeout(r, 0));
     const shown = v.render(100);
@@ -361,8 +372,8 @@ test("a live Plotly chart is drawn from its page's frames, and the mouse over it
     expect(events.at(-1)).toMatchObject({ type: "drag" });
     v.handleMouse(ev("release", 0, 0));
     expect(v.handleMouse(ev("move", 0, 0, { button: "none" }))).toBeUndefined();
-    // Collapsing the cell closes its page.
-    v.handleInput("l");
+    // Moving to a cell without the chart closes its page.
+    v.handleInput("j");
     v.render(100);
     expect(closed).toBe(true);
   } finally { v.dispose(); setCapabilities({ images: null, trueColor: true, hyperlinks: false } as any); }
@@ -382,11 +393,11 @@ test("the keyboard pointer drives a live chart without a mouse: arrows move it, 
   const v = new NotebookView(tui as any, theme2, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {} }, () => {}, undefined, undefined, live);
   try {
     v.handleInput("i");
-    expect(screen(v)).toContain("Expand a live chart");
-    v.handleInput("l");
+    expect(screen(v)).toContain("Select a cell with a live chart");
     v.render(100);
     await new Promise((r) => setTimeout(r, 0));
     v.render(100);
+    v.handleInput("j");
     expect(screen(v)).toContain("i inspect chart");
     v.handleInput("i");
     expect(live.inspecting).toBe(true);
@@ -417,29 +428,34 @@ test("the keyboard pointer drives a live chart without a mouse: arrows move it, 
 // --- reading and steering: outputs, folds, mouse, help, variables, agent changes, widgets, docks ---
 const press = (v: NotebookView, keys: string) => { for (const k of keys) v.handleInput(k); };
 
-test("O shows every cell's output under it and the markdown as prose; O again goes back to the outline", () => {
+test("O stacks the cell's whole section in the detail, the markdown as prose; O again shows the cell alone", () => {
   const f = nbWith([{ id: "m", code: 'mo.md("""\n# Title\n\nSome prose here.\n""")' }, { id: "a", code: "x = 1" }]);
   f.notebook.apply("cell-op", { cell_id: "a", status: "idle", output: { channel: "output", mimetype: "text/plain", data: "forty-two" } });
   const v = make(f);
   try {
+    v.handleInput("j");
     expect(screen(v)).not.toContain("Some prose here.");
-    expect(screen(v)).toContain("“forty-two”");
+    expect(screen(v)).toContain("▍ forty-two");
     v.handleInput("O");
     expect(screen(v)).toContain("Some prose here.");
     expect(screen(v)).toContain("▍ forty-two");
-    v.handleInput("j");
-    expect(screen(v)).toContain("O outline");
+    expect(screen(v)).toContain("Section view: the whole section.");
+    expect(screen(v)).toMatch(/▌○ x = 1/u);
+    v.handleInput("O");
+    expect(screen(v)).not.toContain("Some prose here.");
+    expect(screen(v)).toContain("Cell view.");
+    v.handleInput("O");
+    expect(screen(v)).toContain("Some prose here.");
   } finally { v.handleInput("O"); v.dispose(); }
 });
 
-test("an expanded table output is a grid", () => {
+test("a table output is a grid in the detail, and its shape is the outline's badge", () => {
   const table = `<marimo-ui-element object-id='a-0' random-id='r'><marimo-table data-data='&quot;[{&#92;&quot;city&#92;&quot;:&#92;&quot;Oslo&#92;&quot;,&#92;&quot;pop&#92;&quot;:709000}]&quot;' data-total-rows='1' data-total-columns='2' data-field-types='[[&quot;pop&quot;,[&quot;integer&quot;,&quot;int64&quot;]]]'></marimo-table></marimo-ui-element>`;
   const f = nbWith([{ id: "a", code: "df" }]);
   f.notebook.apply("cell-op", { cell_id: "a", status: "idle", output: { channel: "output", mimetype: "text/html", data: table } });
   const v = make(f);
   try {
-    expect(screen(v)).toContain("table 1×2");
-    v.handleInput("\r");
+    expect(screen(v)).toMatch(/▌○ table +1×2/u);
     expect(screen(v)).toMatch(/city {2}\s*pop/u);
     expect(screen(v)).toContain("Oslo  709000");
     expect(screen(v)).toContain("1 of 1 rows · 2 columns");
@@ -451,22 +467,22 @@ test("z folds the section the cursor is in, Z folds every one, [ and ] go betwee
   f.notebook.apply("cell-op", { cell_id: "b", status: "idle", output: { channel: "marimo-error", mimetype: "application/vnd.marimo+error", data: [{ type: "exception", exception_type: "E", msg: "m" }] } });
   const v = make(f);
   try {
-    expect(screen(v)).toMatch(/● One/u);
+    expect(screen(v)).toMatch(/▌ One/u);
     v.handleInput("j");
     v.handleInput("z");
     const folded = screen(v);
-    expect(folded).toMatch(/● One {2}▸ 2 cells · 1 error/u);
-    expect(folded).not.toContain("○ a");
-    expect(folded).toContain("○ c");
+    expect(folded).toMatch(/▌ One {2}▸ 2 cells · 1 error/u);
+    expect(folded).not.toContain("a = 1");
+    expect(folded).toContain("c = 3");
     v.handleInput("]");
-    expect(screen(v)).toMatch(/● Two/u);
+    expect(screen(v)).toMatch(/▌ Two/u);
     v.handleInput("Z");
-    expect(screen(v)).toContain("○ a");
+    expect(screen(v)).toContain("a = 1");
     v.handleInput("Z");
     expect(screen(v)).toMatch(/Two {2}▸ 1 cell/u);
-    expect(screen(v)).not.toContain("○ c");
+    expect(screen(v)).not.toContain("c = 3");
     v.handleInput("[");
-    expect(screen(v)).toMatch(/● One/u);
+    expect(screen(v)).toMatch(/▌ One/u);
   } finally { v.dispose(); }
 });
 
@@ -483,20 +499,25 @@ test("Shift+Tab goes to the previous notebook, Tab to the next", () => {
   } finally { v.dispose(); }
 });
 
-test("the mouse: the wheel scrolls, a click selects a cell, a second click (or a double click) expands it", () => {
+test("the mouse: the wheel scrolls the pane under it, a click selects a cell, a second click (or a double click) opens its code, a click on the code line toggles it", () => {
   const f = followed();
   const v = new NotebookView(tui as any, theme, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {} }, () => {});
   const ev = (type: string, y: number, extra = {}) => ({ type, button: type === "wheel" ? "none" : "left", x: 10, y, screenX: 10, screenY: y, width: 100, height: 28, shift: false, alt: false, ctrl: false, ...extra }) as any;
   try {
     v.render(100);
     expect(v.handleMouse(ev("wheel", 10, { wheelDelta: 3 }))).toEqual({ handled: true });
-    expect(v.render(100)[5]).toContain("cell-3");
+    expect(v.render(100)[3]).toContain("cell-3");
     expect(v.handleMouse(ev("press", 7))).toEqual({ handled: true, render: false });
     v.handleMouse(ev("click", 7));
-    expect(screen(v)).toMatch(/● ○ cell-5/u);
-    expect(screen(v)).not.toContain("│ x = 1");
+    expect(screen(v)).toMatch(/▌○ cell-7/u);
+    expect(screen(v)).not.toContain("▾ code");
     v.handleMouse(ev("click", 7, { clickCount: 2 }));
     expect(screen(v)).toContain("│ x = 1");
+    // On the detail: the wheel scrolls it, a click on its code line folds the code.
+    v.handleMouse(ev("click", 7, { x: 60 }));
+    expect(screen(v)).toContain("▸ code · 1 line");
+    v.handleMouse(ev("click", 7, { x: 60 }));
+    expect(screen(v)).toContain("▾ code");
     // Outside the rows, and moves, are left alone.
     expect(v.handleMouse(ev("click", 1))).toBeUndefined();
     expect(v.handleMouse(ev("move", 7, { button: "none" }))).toBeUndefined();
@@ -530,17 +551,17 @@ test("v lists the variables; Enter goes to the cell that defines one, > to the f
     v.handleInput("v");
     const pane = screen(v);
     expect(pane).toMatch(/● x\s+int\s+1\s+← load · 2 uses/u);
-    expect(pane).toMatch(/ y\s+.*← b · 1 use/u);
+    expect(pane).toMatch(/ y\s+.*← y · 1 use/u);
     v.handleInput("j");
     v.handleInput("\r");
-    expect(screen(v)).toMatch(/● ○ b/u);
+    expect(screen(v)).toMatch(/▌○ y/u);
     v.handleInput("v");
     v.handleInput("g");
     v.handleInput(">");
-    expect(screen(v)).toMatch(/● ○ b/u);
-    v.handleInput("\r");
-    expect(screen(v)).toContain("⇄ uses x ← load · used by c");
+    expect(screen(v)).toMatch(/▌○ y/u);
+    expect(screen(v)).toContain("uses x · used by z");
     expect(screen(v)).not.toContain("= x (int)");
+    expect(screen(v)).not.toContain("<");
   } finally { v.dispose(); }
 });
 
@@ -550,13 +571,13 @@ test("< and > follow the dataflow up and down", () => {
   try {
     v.handleInput("G");
     v.handleInput("<");
-    expect(screen(v)).toMatch(/● ○ b/u);
+    expect(screen(v)).toMatch(/▌○ y/u);
     v.handleInput("<");
-    expect(screen(v)).toMatch(/● ○ load/u);
+    expect(screen(v)).toMatch(/▌○ load/u);
     v.handleInput("<");
     expect(screen(v)).toContain("No upstream cell.");
     v.handleInput(">");
-    expect(screen(v)).toMatch(/● ○ b/u);
+    expect(screen(v)).toMatch(/▌○ y/u);
   } finally { v.dispose(); }
 });
 
@@ -570,12 +591,12 @@ test("the agent's changes since the last prompt: marked, counted, c jumps to the
     const v = make(f);
     try {
       const text = screen(v);
-      expect(text).toMatch(/○ b .*changed by the agent/u);
+      expect(text).toMatch(/○ y = x \+ 2 +changed/u);
       expect(text).toContain("agent: 1 changed · 1 removed");
-      expect(text).toContain("Removed by the agent since your last message");
-      expect(text).toMatch(/✗ c {2}z = 3/u);
+      expect(text).toMatch(/✗ Removed: z = 3/u);
       v.handleInput("c");
-      expect(screen(v)).toMatch(/● ○ b/u);
+      expect(screen(v)).toMatch(/▌○ y = x \+ 2/u);
+      expect(screen(v)).toContain("changed by the agent");
       v.handleInput("d");
       const diff = screen(v);
       expect(diff).toMatch(/-\s*\d+ y = x \+ 1/u);
@@ -666,7 +687,7 @@ test(": runs Python in the kernel and shows what it printed and returned", async
 });
 
 test("m marks the cell for the agent through Lens (or says there is none), M twice removes its mark", async () => {
-  const f = nbWith([{ id: "a", code: "x = 1" }]);
+  const f = nbWith([{ id: "a", code: "x = 1", name: "chart" }]);
   const mark = vi.fn(async () => "S1");
   const unmark = vi.fn(async () => {});
   const v = make(f, { mark, unmark });
@@ -676,7 +697,7 @@ test("m marks the cell for the agent through Lens (or says there is none), M twi
     const lensState = (selections: unknown[]) => ({ revision: selections.length, nextLabel: `S${selections.length + 1}`, currentSelectionId: null, selections, history: [] });
     f.notebook.apply("model-lifecycle", { model_id: "m1", message: { method: "open", state: { _state: lensState([]), _lens_id: "l" } } });
     v.handleInput("m");
-    expect(screen(v)).toContain("Note for the agent on a (Lens S1)");
+    expect(screen(v)).toContain("Note for the agent on chart (Lens S1)");
     press(v, "look");
     v.handleInput("\r");
     expect(mark).toHaveBeenCalledExactlyOnceWith(f, expect.objectContaining({ id: "a" }), "look");
@@ -687,5 +708,89 @@ test("m marks the cell for the agent through Lens (or says there is none), M twi
     expect(screen(v)).toContain("M again removes S1");
     v.handleInput("M");
     expect(unmark).toHaveBeenCalledExactlyOnceWith(f, "sel-1");
+  } finally { v.dispose(); }
+});
+
+// --- the outline and the detail ---
+function notebookWithResults(): Followed {
+  const f = nbWith([
+    { id: "Zx1a", code: "import marimo as mo\nimport pandas as pd" },
+    { id: "Hd2b", code: 'mo.md("# Coffee sales")' },
+    { id: "Ld3c", code: "daily = load()\nsmooth = daily.rolling(7).mean()" },
+    { id: "Bm4d", code: "model = boom(daily)" },
+    { id: "Ch5e", code: "alt.Chart(daily)" },
+  ]);
+  f.notebook.apply("variables", { variables: [
+    { name: "mo", declared_by: ["Zx1a"], used_by: ["Hd2b"] }, { name: "pd", declared_by: ["Zx1a"], used_by: [] },
+    { name: "daily", declared_by: ["Ld3c"], used_by: ["Bm4d", "Ch5e"] }, { name: "smooth", declared_by: ["Ld3c"], used_by: [] }, { name: "model", declared_by: ["Bm4d"], used_by: [] },
+  ] });
+  f.notebook.apply("variable-values", { variables: [{ name: "mo", value: "<module 'marimo'>", datatype: "module" }, { name: "pd", value: "<module 'pandas'>", datatype: "module" }, { name: "daily", value: "<Series object at 0x1042>", datatype: "Series" }] });
+  f.notebook.apply("cell-op", { cell_id: "Ld3c", status: "idle" });
+  f.notebook.apply("cell-op", { cell_id: "Bm4d", status: "idle", console: [{ channel: "stderr", mimetype: "text/plain", data: "Traceback (most recent call last):\n  File \"cell\", line 1\nKeyError: 'revenue'\n" }], output: { channel: "marimo-error", mimetype: "application/vnd.marimo+error", data: [{ type: "exception", exception_type: "KeyError", msg: "'revenue'" }] } });
+  f.notebook.apply("cell-op", { cell_id: "Ch5e", status: "idle", output: { channel: "output", mimetype: "image/png", data: "iVBOR" } });
+  return f;
+}
+
+test("wide, the outline and the detail sit side by side, every line exactly as wide as the view, with no ids and no reprs", () => {
+  const v = make(notebookWithResults());
+  try {
+    for (const width of [100, 140]) {
+      const lines = v.render(width);
+      for (const l of lines) expect(visibleWidth(l)).toBe(width);
+      const text = lines.join("\n");
+      // The title is where its markdown cell is, after the imports cell, and the cells are titled by what they are.
+      expect(text).toMatch(/imports[\s\S]*Coffee sales[\s\S]*daily[\s\S]*model[\s\S]*chart/u);
+      expect(text).toMatch(/▌ ?○ imports.* │ imports/u);
+      for (const id of ["Zx1a", "Hd2b", "Ld3c", "Bm4d", "Ch5e"]) expect(text).not.toContain(id);
+    }
+    v.handleInput("j");
+    v.handleInput("j");
+    const detail = screen(v);
+    expect(detail).toMatch(/▌ {2}○ daily/u);
+        expect(detail).not.toContain("<Series object");
+    expect(detail).toContain("used by model, chart");
+  } finally { v.dispose(); }
+});
+
+test("narrow, the outline fills the view; Enter shows the cell's detail, Esc comes back to the outline, and Esc again leaves", () => {
+  const f = notebookWithResults();
+  let closed = false;
+  const v = new NotebookView(tui as any, theme2, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {} }, () => { closed = true; });
+  try {
+    for (const l of v.render(80)) expect(visibleWidth(l)).toBe(80);
+    v.handleInput("j");
+    v.handleInput("j");
+    v.handleInput("j");
+    let text = v.render(80).join("\n");
+    expect(text).toMatch(/▌ {2}✗ model +KeyError/u);
+    expect(text).not.toContain("Traceback");
+    expect(text).toContain("enter open");
+    v.handleInput("\r");
+    text = v.render(80).join("\n");
+    expect(text).toContain("Traceback (most recent call last)");
+    expect(text).not.toContain("imports");
+    for (const l of v.render(80)) expect(visibleWidth(l)).toBe(80);
+    v.handleInput("\x1b");
+    expect(closed).toBe(false);
+    expect(v.render(80).join("\n")).toContain("Coffee sales");
+    v.handleInput("\x1b");
+    expect(closed).toBe(true);
+  } finally { v.dispose(); }
+});
+
+test("the detail of a failed cell: its error, the traceback, the code folded to a line count that Enter opens", () => {
+  const f = notebookWithResults();
+  const v = make(f);
+  try {
+    v.handleInput("n");
+    const text = screen(v);
+    expect(text).toMatch(/▌ {2}✗ model +KeyError/u);
+    expect(text).toContain("KeyError: 'revenue'");
+    expect(text).toContain("Traceback (most recent call last)");
+    expect(text).toContain("▸ code · 1 line");
+    expect(text).not.toContain("boom(daily)");
+    v.handleInput("\r");
+    expect(screen(v)).toContain("model = boom(daily)");
+    expect(screen(v)).toContain("▾ code");
   } finally { v.dispose(); }
 });

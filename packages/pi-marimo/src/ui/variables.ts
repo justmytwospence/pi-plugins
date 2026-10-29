@@ -3,7 +3,8 @@
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { NotebookState } from "../core/notebook.js";
 import type { FrameTheme } from "../frame.ts";
-import { cellLabel, type Row } from "./rows.js";
+import type { Row } from "./rows.js";
+import { cellTitle } from "./titles.js";
 
 export interface VariableRow {
   name: string;
@@ -40,7 +41,7 @@ export function variableRows(list: VariableRow[], nb: NotebookState, theme: Fram
     index.set(v.name, i);
     const here = v.name === cursor;
     const from = v.definedBy ? nb.cells.get(v.definedBy) : undefined;
-    const where = from ? cellLabel(from) : v.definedBy ?? "?";
+    const where = from ? cellTitle(nb, from) : "?";
     const uses = v.usedBy.length ? theme.fg("dim", ` · ${v.usedBy.length} use${v.usedBy.length === 1 ? "" : "s"}`) : "";
     return { variable: v.name, text: `${here ? theme.fg("accent", "●") : " "} ${here ? theme.bold(fit(v.name, 20)) : fit(v.name, 20)} ${theme.fg("dim", fit(v.datatype, 14))} ${fit(v.value, valueWidth)} ${theme.fg("dim", `← ${where}`)}${uses}` };
   });
