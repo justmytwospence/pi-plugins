@@ -295,11 +295,30 @@ export default function piMarimo(pi: ExtensionAPI): void {
     return undefined;
   };
   const tokenOpt = process.env.MARIMO_TOKEN ? { token: process.env.MARIMO_TOKEN } : {};
+  /**
+   * Runs a kernel action as an editor of the notebook. marimo refuses actions (403, or 500 for a gone
+   * consumer) from a session id whose browser tab has closed, which leaves the notebook with no one
+   * allowed to run it; Pi then opens the notebook itself (a headless session, as `/marimo edit` does)
+   * and acts through that.
+   */
+  const withEditor = async <T,>(f: Followed, act: (target: { url: string; sessionId: string }) => Promise<T>): Promise<T> => {
+    const own = headless.has(f.attachment.url, f.attachment.path)
+      ? await headless.attach(f.attachment.url, f.attachment.path, process.env.MARIMO_TOKEN).catch(() => undefined)
+      : undefined;
+    const first = own ? { url: f.attachment.url, sessionId: own } : f.attachment;
+    try {
+      return await act(first);
+    } catch (e) {
+      if (own || !/marimo answered (403|500)/u.test(e instanceof Error ? e.message : String(e))) throw e;
+      const sessionId = await headless.attach(f.attachment.url, f.attachment.path, process.env.MARIMO_TOKEN);
+      return act({ url: f.attachment.url, sessionId });
+    }
+  };
   const viewActions: ViewActions = {
     followed: () => watcher?.followed() ?? [],
-    interrupt: (f) => interruptKernel(f.attachment, process.env.MARIMO_TOKEN),
+    interrupt: (f) => withEditor(f, (t) => interruptKernel(t, process.env.MARIMO_TOKEN)),
     openInBrowser: (f) => openUrl(`${f.attachment.url}/?file=${encodeURIComponent(f.attachment.path)}`),
-    run: (f, cells) => runCells(f.attachment, cells, process.env.MARIMO_TOKEN),
+    run: (f, cells) => withEditor(f, (t) => runCells(t, cells, process.env.MARIMO_TOKEN)),
     servers: (f) => [...bg.servers(f.attachment.path), ...(ownServers().find(f.attachment.url) ? ["started by Pi"] : [])],
     stopServers: (f) => bg.stopServers(f.attachment.path) + (ownServers().stop(f.attachment.url) ? 1 : 0),
     lastRun: (f) => source.lastRun(f),
@@ -314,7 +333,7 @@ export default function piMarimo(pi: ExtensionAPI): void {
       const idle = ctxRef?.isIdle() !== false;
       pi.sendUserMessage(askMessage(text, f, cell, ctxRef?.cwd ?? ""), idle ? undefined : { deliverAs: "followUp" });
     },
-    scratch: (f, code, onEvent, signal) => runScratch(f.attachment, code, process.env.MARIMO_TOKEN, onEvent, signal),
+    scratch: (f, code, onEvent, signal) => withEditor(f, (t) => runScratch(t, code, process.env.MARIMO_TOKEN, onEvent, signal)),
     setWidget: (f, cell, w, value) => {
       f.notebook.setUserValue(cell.id, w.objectId, w.label, value);
       widgetSender.set(f.attachment, w.objectId, value);
@@ -346,7 +365,7 @@ export default function piMarimo(pi: ExtensionAPI): void {
     editCell: async (f, cell, code) => {
       f.notebook.expectEdit(cell.id, code);
       const id = JSON.stringify(cell.id);
-      const result = await runScratch(f.attachment, `import marimo._code_mode as cm\nasync with cm.get_context() as ctx:\n    ctx.edit_cell(${id}, code=${JSON.stringify(code)})\n    ctx.run_cell(${id})\n`, process.env.MARIMO_TOKEN, () => {});
+      const result = await withEditor(f, (t) => runScratch(t, `import marimo._code_mode as cm\nasync with cm.get_context() as ctx:\n    ctx.edit_cell(${id}, code=${JSON.stringify(code)})\n    ctx.run_cell(${id})\n`, process.env.MARIMO_TOKEN, () => {}));
       if (!result.success) throw new Error("marimo did not take the edit");
     },
   };
