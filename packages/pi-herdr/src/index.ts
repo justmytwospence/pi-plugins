@@ -34,6 +34,7 @@
 // follow-up queued mid-turn is dropped when the user presses Esc), each awaited turn's reply once,
 // and nothing calls pi after session_shutdown (a stale runtime throws).
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { hostname } from "node:os";
 import { matchesKey } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -44,7 +45,8 @@ import { ActivityBadges } from "./activity-badges.ts";
 import { Agents, type AgentInfo, MAX_BROADCAST, outcomeText, TYPING_TOKEN } from "./agents.ts";
 import { Bridge, type NotifyEvent, type SplitEvent, type TokenEvent } from "./bridge.ts";
 import { ChildrenActivity } from "./children-activity.ts";
-import { Crew, CREW_MESSAGE, type Me, SECTION as CREW_SECTION, SEEN_ENTRY, type Seen, syncCrew } from "./crew.ts";
+import { BASE_TOKEN, Crew, CREW_MESSAGE, CrewWatch, type CrewWatchDeps, DRIFT_TOKEN, type Me, type Repo, SECTION as CREW_SECTION, SEEN_ENTRY, type Seen, syncCrew } from "./crew.ts";
+import { computeDrift, currentBranch, defaultBase, driftMatters, driftNote, driftToken, RefWatcher } from "./drift.ts";
 import { type ChildRecord, Children, type Exec, type Where } from "./core/children.ts";
 import { DraftGuard } from "./draft-guard.ts";
 import { ACK_TTL_MS, ackTokenName, type Delivery, formatAck, Inbox, INBOX_SOURCE, INBOX_TOKEN, INBOX_TTL_MS, inboxTokenValue, messageText, type Outcome, parseRate, Presence, processInboxState, type Reason, type Sender, TYPING_IDLE_MS } from "./inbox.ts";
@@ -65,6 +67,16 @@ const TYPING_TTL_MS = 30_000;
 const HELD_POLL_MS = 300;
 const PR_TTL_MS = 10 * 60_000;
 const PR_POLL_MS = 3 * 60_000;
+/** The last upstream sha per base that a drift note was sent for. */
+const DRIFT_ENTRY = "pi-herdr:drift-seen";
+const DRIFT_MESSAGE = "herdr-drift";
+/** `PI_HERDR_CREW_REMOTE_MS`: how often the coordinator compares the bases with the remote (default 5 minutes, 0 never). */
+const crewRemoteMs = (): number => {
+  const raw = process.env.PI_HERDR_CREW_REMOTE_MS?.trim();
+  if (!raw) return 5 * 60_000;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? (n === 0 ? 0 : Math.max(n, 10_000)) : 5 * 60_000;
+};
 
 const exec: Exec = (cmd, args, cwd) =>
   new Promise((resolve) => {
@@ -114,6 +126,8 @@ const Params = Type.Object({
 /** Test seams: the herdr call and process runner (pi passes nothing). */
 export interface HerdrDependencies {
   call?: Call;
+  /** Tests: the coordinator's herdr event subscription. */
+  subscribe?: CrewWatchDeps["subscribe"];
   exec?: Exec;
   pollMs?: number;
 }
@@ -185,6 +199,7 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     ackTimers.clear();
   };
   const clearTimers = () => {
+    stopCrewWatches();
     for (const t of [refreshTimer, prTimer]) if (t) clearInterval(t);
     if (prSoon) clearTimeout(prSoon);
     refreshTimer = prTimer = prSoon = undefined;
@@ -217,26 +232,132 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     void pane.setToken("task", title);
   };
 
+  /** This pane's space, for its tokens (`pr`, `drift`). */
+  const ensureWorkspace = async (current: () => boolean): Promise<WorkspaceReporter | undefined> => {
+    if (workspace) return workspace;
+    const self = await call("pane.get", { pane_id: target.paneId });
+    if (!current()) return undefined;
+    const id: string | undefined = self.result?.pane?.workspace_id;
+    if (!id) return undefined;
+    workspace ??= new WorkspaceReporter(call, id);
+    return workspace;
+  };
+
   const refreshPr = async () => {
     if (!branchCurrent() || !prEnabled) return;
     const epoch = generation;
     const current = () => epoch === generation && branchCurrent();
-    if (!workspace) {
-      const self = await call("pane.get", { pane_id: target.paneId });
-      if (!current()) return;
-      const id: string | undefined = self.result?.pane?.workspace_id;
-      if (!id) return;
-      workspace = new WorkspaceReporter(call, id);
-    }
+    const ws = await ensureWorkspace(current);
+    if (!ws) return;
     const r = await run("gh", ["pr", "view", "--json", PR_FIELDS], cwd);
     if (!current()) return;
     if (r.code === 127) {
       prEnabled = false;
       return;
     }
-    if (r.code === 0) return void workspace.setToken("pr", prToken(parsePrView(r.stdout)), PR_TTL_MS);
+    if (r.code === 0) {
+      const view = parsePrView(r.stdout);
+      const base = view?.state?.toUpperCase() === "OPEN" ? view.baseRefName?.trim() || undefined : undefined;
+      if (base !== prBase) {
+        prBase = base;
+        scheduleDrift(0);
+      }
+      return void ws.setToken("pr", prToken(view), PR_TTL_MS);
+    }
     // No PR for this branch (or not a GitHub repo): clear. Other failures (network) keep the last.
-    if (/no pull requests found|not a git repository|no git remotes|none of the git remotes/iu.test(r.stderr)) void workspace.setToken("pr", undefined);
+    if (/no pull requests found|not a git repository|no git remotes|none of the git remotes/iu.test(r.stderr)) void ws.setToken("pr", undefined);
+  };
+
+  // Base drift (drift.ts): a worktree session in a crew's repository watches the shared refs and
+  // recomputes on their changes and its own turns; the coordinator (CrewWatch) fetches.
+  let prBase: string | undefined;
+  let driftSeen: Record<string, string> = {};
+  let refWatch: RefWatcher | undefined;
+  let crewWatch: CrewWatch | undefined;
+  let driftSoon: ReturnType<typeof setTimeout> | undefined;
+  let driftRunning = false;
+  let driftAgain = false;
+  const crewRepo = async (): Promise<Repo | undefined> => {
+    const repo = await crew.repo(cwd);
+    return repo && existsSync(repo.dir) ? repo : undefined;
+  };
+  const recomputeDrift = async (): Promise<void> => {
+    if (!branchCurrent()) return;
+    if (driftRunning) { driftAgain = true; return; }
+    driftRunning = true;
+    const epoch = generation;
+    const current = () => epoch === generation && branchCurrent();
+    try {
+      if (!(await crewRepo()) || !current()) return;
+      const [branch, base] = await Promise.all([currentBranch(run, cwd), prBase ? Promise.resolve(prBase) : defaultBase(run, cwd)]);
+      const ws = await ensureWorkspace(current);
+      if (!ws || !current()) return;
+      if (!branch || !base || branch === base) {
+        void ws.setToken(DRIFT_TOKEN, undefined);
+        void ws.setToken(BASE_TOKEN, undefined);
+        return;
+      }
+      void ws.setToken(BASE_TOKEN, base, PR_TTL_MS);
+      const d = await computeDrift(run, cwd, base);
+      if (!current()) return;
+      void ws.setToken(DRIFT_TOKEN, driftToken(d), PR_TTL_MS);
+      if (d && driftMatters(d) && d.upstreamSha && driftSeen[base] !== d.upstreamSha) {
+        driftSeen = { ...driftSeen, [base]: d.upstreamSha };
+        const seen = driftSeen;
+        safely(() => { pi.appendEntry(DRIFT_ENTRY, seen); anchorBranch(); });
+        // Passive: it rides along with the next prompt and starts no turn.
+        safely(() => pi.sendMessage({ customType: DRIFT_MESSAGE, content: driftNote(d), display: true, details: { base, upstreamSha: d.upstreamSha } }, { deliverAs: "nextTurn" }));
+      }
+    } catch {
+      // git or herdr failed: the next event tries again.
+    } finally {
+      driftRunning = false;
+      if (driftAgain) { driftAgain = false; scheduleDrift(500); }
+    }
+  };
+  function scheduleDrift(ms: number) {
+    if (!refWatch || !branchCurrent()) return;
+    if (driftSoon) clearTimeout(driftSoon);
+    driftSoon = setTimeout(() => { driftSoon = undefined; void recomputeDrift(); }, ms);
+    driftSoon.unref?.();
+  }
+  const stopCrewWatches = () => {
+    refWatch?.close();
+    crewWatch?.close();
+    refWatch = crewWatch = undefined;
+    if (driftSoon) clearTimeout(driftSoon);
+    driftSoon = undefined;
+  };
+  /** Start or stop the coordinator's CrewWatch to match whether this session coordinates the crew. */
+  const syncCoordinatorWatch = async (me: Me): Promise<void> => {
+    const repo = await crewRepo();
+    const coordinates = !!repo && crew.isCoordinator(crew.coordinator(repo), me);
+    if (!active) return;
+    if (!coordinates) {
+      crewWatch?.close();
+      crewWatch = undefined;
+      return;
+    }
+    if (crewWatch) return;
+    crewWatch = new CrewWatch({
+      crew,
+      repo: repo!,
+      exec: run,
+      remoteMs: crewRemoteMs(),
+      ...(dependencies.subscribe ? { subscribe: dependencies.subscribe } : dependencies.call ? {} : { socketPath: target.socketPath }),
+    });
+  };
+  /** At session start: watch the refs if this checkout's repository has a crew; coordinate if this session does. */
+  const startCrewWatches = async (ctx: ExtensionContext) => {
+    const epoch = generation;
+    const repo = await crewRepo();
+    if (!repo || epoch !== generation || !active) return;
+    refWatch?.close();
+    refWatch = new RefWatcher({ common: repo.common, kinds: ["remotes", "heads"], onChange: () => scheduleDrift(0) });
+    scheduleDrift(0);
+    let session: string | undefined;
+    try { session = ctx.sessionManager.getSessionFile(); } catch { /* stale */ }
+    await syncCoordinatorWatch({ paneId: target.paneId, ...(session ? { session } : {}), cwd: ctx.cwd });
   };
 
   const schedulePr = (ms: number) => {
@@ -531,8 +652,10 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     delivered.clear();
     const saved = new Map<string, ChildRecord>();
     crew.seen = undefined;
+    driftSeen = {};
     for (const e of ctx.sessionManager.getBranch() as any[]) {
       if (e.type === "custom" && e.customType === SEEN_ENTRY && e.data && typeof e.data === "object") crew.seen = e.data as Seen;
+      if (e.type === "custom" && e.customType === DRIFT_ENTRY && e.data && typeof e.data === "object") driftSeen = { ...(e.data as Record<string, string>) };
       if (e.type === "custom" && e.customType === CHILD_ENTRY && e.data?.name) saved.set(e.data.name, e.data as ChildRecord);
       if (e.type === "custom" && e.customType === DELIVERY_ENTRY) restoreReceipt(e.data?.key);
       // The message itself is also a durable receipt if shutdown happened before its marker.
@@ -611,6 +734,8 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
 
     restoreBranch(ctx);
     crewReclaimed = false;
+    prBase = undefined;
+    void startCrewWatches(ctx).catch(() => undefined);
 
     refreshTimer = setInterval(() => {
       void pane.refresh();
@@ -672,7 +797,7 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     if (!crewReclaimed) {
       // A coordinator restarted in its pane, or resumed in another, keeps its crew.
       crewReclaimed = true;
-      await crew.reclaim(me, async () => (await crewMe(ctx, true)).name).catch(() => false);
+      if (await crew.reclaim(me, async () => (await crewMe(ctx, true)).name).catch(() => false)) await syncCoordinatorWatch(me).catch(() => undefined);
     }
     try {
       const section = await crew.section(me);
@@ -681,7 +806,7 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     if (event.messageType !== "user") return undefined;
     let digest: Awaited<ReturnType<Crew["digest"]>>;
     try {
-      digest = await crew.digest(me);
+      digest = await crew.digest(me, crewWatch?.overlaps);
     } catch {
       return undefined;
     }
@@ -718,6 +843,9 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     return undefined;
   });
   pi.on("agent_settled", () => {
+    // Commits and rebases happen in turns; the coordinator's turn may have merged or pushed.
+    scheduleDrift(1_500);
+    void crewWatch?.checkRemote().catch(() => false);
     schedulePr(5_000);
     flushOwed();
     inbox.flush();
@@ -868,13 +996,19 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
           const me = await crewMe(ctx, true);
           const op = params.op ?? "status";
           if (op === "status") return text(await crew.status(me, children.records));
-          if (op === "claim") return text((await crew.claim(me, !!params.takeover)).text);
-          return text(await syncCrew(crew, { call, exec: run, selfPane: target.paneId }, me, {
+          if (op === "claim") {
+            const claimed = await crew.claim(me, !!params.takeover);
+            await startCrewWatches(ctx);
+            return text(claimed.text);
+          }
+          const synced = await syncCrew(crew, { call, exec: run, selfPane: target.paneId }, me, {
             children: children.records,
             uniqueName: (wanted) => children.uniqueName(wanted),
             attach: (opts) => children.attach(opts),
             ...(dependencies.pollMs ? { readyPollMs: dependencies.pollMs } : {}),
-          }, !!params.takeover));
+          }, !!params.takeover);
+          await startCrewWatches(ctx);
+          return text(synced);
         }
         case "interrupt":
           return text(await children.interrupt(childOnly(need(params.name, "name"))));

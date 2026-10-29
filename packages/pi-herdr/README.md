@@ -39,6 +39,7 @@ Add `-ne` to disable your other discovered and configured extensions for that ru
 - **`$summary` pane token**: one line (at most 80 characters) on what the last turn did, or what the agent waits on, for notification tools (herdr-native-notify shows it as an alert's body instead of the session title). As a turn settles, a small model (Haiku by default, thinking off) summarizes it from the prompt, the tool calls and the final reply; this runs before Pi reports the turn finished, so the token is set when the done alert fires (about 1-2 seconds; a 4-second cap). A reply that is already one short line is used as is, with no model call; without a model, on an error, a timeout or an interrupted turn, the reply's first sentence stands in. While a dialog holds `herdr:blocked`, the token is its question at once (a pending `ask_user_question`'s first question, else the dialog's label, such as tool-gate's `Allow? …`). It is cleared as each run starts.
 - **Tool-row summaries for herdr-web-ui**: each tool call whose arguments herdr-web-ui cannot summarize (no `command`, `path`, `pattern` or `url`, as with `subagent`, `codemode`, `ask_user_question`, `bg_wait`, `web_search`) gets a one-line `intent` field before Pi saves the message: the subagent labels, the comment a script opens with, the question headers, the job id or the query. herdr-web-ui's chat shows it on the call's row instead of the bare tool name. No provider sends the field to the model; `bash`, `read`, `edit`, `write` and `todo` keep herdr-web-ui's own labels.
 - **`$pr` space token**: the pull request for the checkout's branch, from `gh pr view`: for example `#123 ✓ approved`, `#123 draft …`, `#123 ✗ changes`, `#123 review`, `#123 merged`, `#123 closed` (`✓` all checks passed, `✗` one failed, `…` some still running). Checked shortly after the session starts, a few seconds after each turn, and every 3 minutes; cleared when the branch has no PR or the session ends. Network failures keep the last value. `PI_HERDR_PR=0` turns it off; it also turns itself off for the session when `gh` is not installed.
+- **`$drift` space token**: in a repository with a crew (see [Crews](#crews)), how far a worktree's branch is behind its base on the remote: `↓3 develop`, `↓3 develop · 2 overlap` (2 files it changed also changed upstream) or `↓3 develop ✗ conflict` (a rebase would conflict, git 2.38 or later); cleared when it is not behind. A second, undisplayed token `$crew_base` names the base, for the coordinator. Both come from events, not a timer (see [Drift and overlap](#drift-and-overlap)).
 
 Example sidebar rows that render them, in Herdr's `~/.config/herdr/config.toml`:
 
@@ -156,7 +157,7 @@ Everything else comes from Herdr's `session.snapshot`: each space's checkout and
 **The coordinator's crew update.** Each prompt you send the coordinator (not runs started by a child's reply or a message) compares the crew with what the coordinator last saw: each linked worktree's agent state, completion count, `$summary` and PR, worktrees without a space or agent, worktrees that went away. If anything changed, one `herdr-crew` message goes in with that prompt, one line per worktree (at most 12, each at most 160 characters), for example:
 
 ```text
-[Crew since your last turn, from pi-herdr, not the user: worktree sessions whose state, last turn or PR changed]
+[Crew since your last turn, from pi-herdr, not the user: worktree sessions whose state, last turn, PR or base drift changed, and new overlaps between branches]
 - feature/1396-contract-windows (contract-windows w9D:p1, idle, #1442 ✓ approved): Rebased onto develop, checks green
 - feature/1429-coverage: no space and no agent; herdr action=crew op=sync starts its pi
 ```
@@ -170,6 +171,16 @@ Nothing is added when nothing changed, and it never starts a turn. The first upd
 - `sync`: claims, then for each linked worktree: a Pi already there becomes this session's child (named after its branch if it had no name); a worktree with no agent gets its space opened (without focus, or a tab in its open space) and `pi --continue` started there, which resumes its latest session (a fresh one if it has none), with no task sent, and becomes a child too. Worktrees running another agent are left alone. Running it again changes nothing that is already in place.
 
 A coordinator restarted in the same pane keeps the role; one resumed in another pane takes it back on its first run (its file names its session). Members do not see a moved coordinator until then.
+
+### Drift and overlap
+
+Each worktree session learns on its own when its base branch moves under it, and the coordinator sees it, with no timers in the sessions: everything runs on events.
+
+- **One fetcher.** Only the coordinator fetches (`git fetch origin <bases>`), so worktrees never fetch at once and fight over ref locks. It fetches when Herdr's `workspace.metadata_updated` event shows a crew space's `$pr` turning `merged` (one long-lived `events.subscribe` connection, reconnected with backoff and reconciled after `events_lost`), and when a cheap `git ls-remote origin <bases>` finds a base's sha changed: after each of its turns, and every `PI_HERDR_CREW_REMOTE_MS` (default 5 minutes, `0` never) for merges outside the crew. At most one fetch in 30 seconds.
+- **Every session watches the shared refs.** `fs.watch` on the repository's shared `refs/` and `packed-refs` sees any fetch, pull, commit, rebase or push in any checkout (yours in a terminal too). A worktree session then recomputes its drift, as it does after each of its own turns: its base is its PR's `baseRefName`, else `origin/HEAD`; `behind` counts `HEAD..origin/<base>`; overlap is the files changed on both sides since the merge base; and with git 2.38 or later, `git merge-tree --write-tree` predicts conflicts without touching the checkout.
+- **What it shows.** The `$drift` space token always. When the drift touches the session's own files (overlap or conflict) and the upstream sha is new, one passive `herdr-drift` note naming the newest upstream commits and the files, delivered with the next prompt (it starts no turn) and saying to rebase only if you or a directive says so. The coordinator's crew update carries each worktree's drift, and a line for each new or changed pair of crew branches that change the same files (`- overlap: feature/a ↔ feature/b: would conflict in cube/x.js`), recomputed whenever a branch or base ref changes; `crew status` lists them too.
+
+Nothing rebases on its own: a directive such as "rebase onto the base when it moves and nothing conflicts" does that.
 
 ## The event-bus bridge
 
@@ -193,6 +204,7 @@ Holds pair `{ active: true }` with `{ active: false }`; a release without `id` e
 | variable | |
 |---|---|
 | `PI_HERDR_PR` | `0` turns the `$pr` token off |
+| `PI_HERDR_CREW_REMOTE_MS` | how often a crew's coordinator compares its bases with the remote with `git ls-remote` (default `300000`, 5 minutes; at least 10 seconds; `0` never) |
 | `PI_HERDR_SUMMARY` | `0` keeps `$summary` but makes no model call (first sentence of the reply only) |
 | `PI_HERDR_INBOX_RATE` | `<messages>/<seconds>`: how many messages one sender may have accepted without the user writing before the next ones are deferred to the user's next prompt (default `6/600`; `0` turns the guard off) |
 | `PI_HERDR_DRAFT_GUARD` | `0` turns the draft guard off (prompts other programs type join your draft, as without pi-herdr) |

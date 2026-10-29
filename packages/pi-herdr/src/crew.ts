@@ -17,6 +17,8 @@ import type { Call } from "./core/herdr.ts";
 import { errorText } from "./core/herdr.ts";
 import type { ChildRecord, Exec } from "./core/children.ts";
 import { slugName } from "./core/children.ts";
+import { defaultBase, type Overlap, overlapLine, RefWatcher, siblingOverlaps } from "./drift.ts";
+import { HerdrSubscription } from "./events.ts";
 
 export const CREW_DIR = "pi-crew";
 export const COORDINATOR_FILE = "coordinator.json";
@@ -27,6 +29,11 @@ export const SEEN_ENTRY = "pi-herdr:crew-seen";
 export const CREW_MESSAGE = "herdr-crew";
 /** The system prompt section (an XML tag) every pi in a crew's repository gets. */
 export const SECTION = "crew";
+/** The workspace token a worktree session sets for its base drift. */
+export const DRIFT_TOKEN = "drift";
+/** The workspace token a worktree session sets for its branch's base (not displayed). */
+export const BASE_TOKEN = "crew_base";
+const OVERLAP_KEY = "overlap:";
 /** At most this many lines in one crew update. */
 export const MAX_DIGEST_LINES = 12;
 const MAX_LINE = 160;
@@ -96,6 +103,10 @@ export interface BoardRow {
   main: boolean;
   workspaceIds: string[];
   pr?: string;
+  /** The worktree session's base drift (its space's `drift` token), e.g. `↓3 develop · 2 overlap`. */
+  drift?: string;
+  /** The branch's base as its session reports it (its space's `crew_base` token). */
+  base?: string;
   agents: BoardAgent[];
 }
 
@@ -145,6 +156,10 @@ export function board(snapshot: Snapshot, worktrees: Worktree[], repo: Repo): Bo
     wsRow.set(ws.workspace_id, row);
     const pr = oneLine(ws.tokens?.pr);
     if (pr && !row.pr) row.pr = pr;
+    const drift = oneLine(ws.tokens?.[DRIFT_TOKEN]);
+    if (drift && !row.drift) row.drift = drift;
+    const base = oneLine(ws.tokens?.[BASE_TOKEN]);
+    if (base && !row.base) row.base = base;
   }
   const longest = (cwd: string) => {
     let best: BoardRow | undefined;
@@ -174,8 +189,12 @@ const clip = (s: string, max = MAX_LINE) => (s.length > max ? `${s.slice(0, max 
 const fingerprint = (row: BoardRow) => JSON.stringify([
   row.workspaceIds.length > 0,
   row.pr ?? null,
+  row.drift ?? null,
   row.agents.map((a) => [a.paneId, a.kind, a.status, a.completionSeq ?? null, a.summary ?? null]),
 ]);
+
+/** A worktree's PR and drift, as one parenthetical suffix. */
+const badges = (row: BoardRow) => [row.pr, row.drift].filter(Boolean).join(", ");
 
 /** One worktree's line in a crew update. */
 export function rowLine(row: BoardRow): string {
@@ -183,19 +202,20 @@ export function rowLine(row: BoardRow): string {
   const lead = pi[0] ?? row.agents[0];
   if (!lead) {
     const where = row.workspaceIds.length ? "its space is open but no agent runs there" : "no space and no agent";
-    return clip(`- ${row.label}: ${where}${row.pr ? ` (${row.pr})` : ""}; herdr action=crew op=sync starts its pi`);
+    return clip(`- ${row.label}: ${where}${badges(row) ? ` (${badges(row)})` : ""}; herdr action=crew op=sync starts its pi`);
   }
   const more = row.agents.length > 1 ? `, +${row.agents.length - 1} more agent${row.agents.length > 2 ? "s" : ""}` : "";
   const who = `${lead.name ? `${lead.name} ` : ""}${lead.paneId}${lead.kind === "pi" ? "" : ` ${lead.kind}`}`;
-  return clip(`- ${row.label} (${who}, ${lead.status}${row.pr ? `, ${row.pr}` : ""}${more}): ${lead.summary ?? "no turn summary yet"}`);
+  return clip(`- ${row.label} (${who}, ${lead.status}${badges(row) ? `, ${badges(row)}` : ""}${more}): ${lead.summary ?? "no turn summary yet"}`);
 }
 
 /**
- * The coordinator's crew update: one line per linked worktree whose session, state, last turn or
- * PR changed since `seen`, and one for each worktree that went away. Undefined when nothing
- * changed. `seen` undefined (the first update) lists every worktree.
+ * The coordinator's crew update: one line per linked worktree whose session, state, last turn, PR
+ * or drift changed since `seen`, one for each worktree that went away, and one for each pair of
+ * branches whose shared files (or predicted conflict) are new. Undefined when nothing changed.
+ * `seen` undefined (the first update) lists every worktree and overlap.
  */
-export function crewDigest(rows: BoardRow[], seen: Seen | undefined): { text: string; seen: Seen } | undefined {
+export function crewDigest(rows: BoardRow[], seen: Seen | undefined, overlaps: Overlap[] = []): { text: string; seen: Seen } | undefined {
   const next: Seen = {};
   const lines: string[] = [];
   for (const row of rows) {
@@ -204,12 +224,18 @@ export function crewDigest(rows: BoardRow[], seen: Seen | undefined): { text: st
     next[row.path] = fp;
     if (seen?.[row.path] !== fp) lines.push(rowLine(row));
   }
-  for (const path of Object.keys(seen ?? {})) if (!(path in next)) lines.push(clip(`- ${basename(path)}: its worktree is gone`));
+  for (const path of Object.keys(seen ?? {})) if (!path.startsWith(OVERLAP_KEY) && !(path in next)) lines.push(clip(`- ${basename(path)}: its worktree is gone`));
+  for (const o of overlaps) {
+    const key = `${OVERLAP_KEY}${o.a}\u0000${o.b}`;
+    const fp = JSON.stringify([o.files, o.conflicts ?? null]);
+    next[key] = fp;
+    if (seen?.[key] !== fp) lines.push(clip(overlapLine(o)));
+  }
   if (!lines.length) return undefined;
   const shown = lines.slice(0, MAX_DIGEST_LINES);
   if (lines.length > shown.length) shown.push(`- … and ${lines.length - shown.length} more (herdr action=crew shows them all)`);
   const head = seen
-    ? "[Crew since your last turn, from pi-herdr, not the user: worktree sessions whose state, last turn or PR changed]"
+    ? "[Crew since your last turn, from pi-herdr, not the user: worktree sessions whose state, last turn, PR or base drift changed, and new overlaps between branches]"
     : "[Crew status from pi-herdr, not the user: every worktree session; later prompts list only what changed]";
   return { text: `${head}\n${shown.join("\n")}`, seen: next };
 }
@@ -380,11 +406,21 @@ export class Crew {
   }
 
   /** The coordinator's crew update for this prompt, or undefined (not the coordinator, nothing changed). */
-  async digest(me: Me): Promise<{ text: string; seen: Seen } | undefined> {
+  async digest(me: Me, overlaps?: Overlap[]): Promise<{ text: string; seen: Seen } | undefined> {
     const repo = await this.repo(me.cwd);
     if (!repo || !this.isCoordinator(this.coordinator(repo), me)) return undefined;
     const rows = (await this.rows(repo)).map((r) => ({ ...r, agents: r.agents.filter((a) => a.paneId !== me.paneId) }));
-    return crewDigest(rows, this.seen);
+    return crewDigest(rows, this.seen, overlaps ?? []);
+  }
+
+  /** Pairs of the crew's branches that change the same files, each against its own base. */
+  async overlaps(repo: Repo, rows?: BoardRow[]): Promise<Overlap[]> {
+    const all = rows ?? await this.rows(repo);
+    const fallback = await defaultBase(this.deps.exec, repo.root);
+    const branches = all
+      .filter((r) => !r.main && r.branch && (r.base ?? fallback))
+      .map((r) => ({ label: r.label, branch: r.branch!, base: (r.base ?? fallback)! }));
+    return branches.length > 1 ? siblingOverlaps(this.deps.exec, repo.root, branches) : [];
   }
 
   /**
@@ -440,6 +476,7 @@ export class Crew {
     const repo = await this.repo(me.cwd);
     if (!repo) throw new Error(`${me.cwd} is not in a git repository, so it has no crew.`);
     const rows = await this.rows(repo);
+    const overlaps = await this.overlaps(repo, rows).catch(() => []);
     const c = this.coordinator(repo);
     const coord = !c
       ? "no coordinator (op=claim or op=sync makes this session it)"
@@ -453,8 +490,9 @@ export class Crew {
       const agents = row.agents.length
         ? row.agents.map((a) => `${a.kind}${a.name ? ` ${a.name}` : ""} ${a.paneId} ${a.status}${a.paneId === me.paneId ? " [this session]" : childPanes.has(a.paneId) ? " [child]" : ""}${a.summary ? ` | ${a.summary}` : ""}`).join("; ")
         : "no agent";
-      return `- ${row.label} (${place}${row.pr ? `, ${row.pr}` : ""}): ${agents}`;
+      return `- ${row.label} (${[place, row.pr, row.drift].filter(Boolean).join(", ")}): ${agents}`;
     });
+    if (overlaps.length) lines.push(...overlaps.map(overlapLine));
     const path = this.directivesPath(repo);
     const directives = this.directives(repo);
     return [
@@ -553,4 +591,152 @@ export function crewAgentName(row: Pick<BoardRow, "label">): string {
     .replace(/-+$/u, "");
   if (!slug) return "worktree";
   return /^[a-z]/u.test(slug) ? slug : `w-${slug}`.slice(0, 24).replace(/-+$/u, "");
+}
+
+export interface CrewWatchDeps {
+  crew: Crew;
+  repo: Repo;
+  exec: Exec;
+  /** herdr's socket, for the `workspace.metadata_updated` subscription. */
+  socketPath?: string;
+  /** Tests: replaces the subscription. */
+  subscribe?: (onEvent: (e: { event: string; data: any }) => void, onResync: () => void) => { close(): void };
+  /** How often to compare the bases with the remote (`git ls-remote`); 0 never. */
+  remoteMs: number;
+  /** At most one fetch in this long (default 30 s); a trigger inside it fetches when it ends. */
+  minFetchGapMs?: number;
+  /** Debounce for ref changes (default 3 s). */
+  debounceMs?: number;
+  now?: () => number;
+  /** The sibling overlaps were recomputed. */
+  onOverlaps?(overlaps: Overlap[]): void;
+}
+
+/**
+ * The coordinator's side of drift: it alone fetches the crew's bases, so worktrees never fetch at
+ * once, and only when something says a base may have moved: a crew PR turning merged (herdr's
+ * `workspace.metadata_updated` event), the coordinator's own turn ending, or a cheap
+ * `git ls-remote` every `remoteMs` that finds a base's sha changed (a merge outside the crew).
+ * The fetch updates the shared refs; every session's RefWatcher takes it from there. It also keeps
+ * the sibling overlaps, recomputed when any branch or base ref changes.
+ */
+export class CrewWatch {
+  overlaps: Overlap[] = [];
+  private readonly deps: CrewWatchDeps;
+  private readonly prs = new Map<string, string | undefined>();
+  private sub: { close(): void } | undefined;
+  private refs: RefWatcher | undefined;
+  private remoteTimer: ReturnType<typeof setInterval> | undefined;
+  private fetchTimer: ReturnType<typeof setTimeout> | undefined;
+  private lastFetch = Number.NEGATIVE_INFINITY;
+  private checking = false;
+  private closed = false;
+
+  constructor(deps: CrewWatchDeps) {
+    this.deps = deps;
+    const onEvent = (e: { event: string; data: any }) => this.onEvent(e);
+    const onResync = () => void this.checkRemote();
+    this.sub = deps.subscribe
+      ? deps.subscribe(onEvent, onResync)
+      : deps.socketPath
+        ? new HerdrSubscription({ socketPath: deps.socketPath, subscriptions: [{ type: "workspace.metadata_updated" }], onEvent, onResync })
+        : undefined;
+    this.refs = new RefWatcher({ common: deps.repo.common, kinds: ["heads", "remotes"], debounceMs: deps.debounceMs ?? 3_000, onChange: () => void this.recompute() });
+    if (deps.remoteMs > 0) {
+      this.remoteTimer = setInterval(() => void this.checkRemote(), deps.remoteMs);
+      this.remoteTimer.unref?.();
+    }
+    void this.recompute();
+  }
+
+  private now() {
+    return this.deps.now?.() ?? Date.now();
+  }
+
+  /** A crew space's PR turned merged: its base moved. */
+  onEvent(e: { event: string; data: any }): void {
+    if (this.closed || e.event !== "workspace_metadata_updated") return;
+    const ws: SnapshotWorkspace | undefined = e.data?.workspace;
+    if (!ws?.workspace_id || ws.worktree?.repo_key !== this.deps.repo.common || ws.worktree?.is_linked_worktree === false) return;
+    const pr = oneLine(ws.tokens?.pr);
+    const known = this.prs.has(ws.workspace_id);
+    const prev = this.prs.get(ws.workspace_id);
+    this.prs.set(ws.workspace_id, pr);
+    if (known && pr !== prev && /\bmerged$/u.test(pr ?? "")) void this.fetch();
+  }
+
+  /** The bases the crew's branches are measured against. */
+  async bases(): Promise<string[]> {
+    const out = new Set<string>();
+    const fallback = await defaultBase(this.deps.exec, this.deps.repo.root);
+    if (fallback) out.add(fallback);
+    try {
+      for (const r of await this.deps.crew.rows(this.deps.repo)) if (!r.main && r.base) out.add(r.base);
+    } catch { /* herdr unreachable: the default base only */ }
+    return [...out].filter((b) => /^[\w./-]+$/u.test(b));
+  }
+
+  /** Fetch only if a base's sha on the remote differs from the local remote-tracking ref. */
+  async checkRemote(): Promise<boolean> {
+    if (this.closed || this.checking) return false;
+    this.checking = true;
+    try {
+      const bases = await this.bases();
+      if (!bases.length) return false;
+      const { exec, repo } = this.deps;
+      const remote = await exec("git", ["ls-remote", "origin", ...bases.map((b) => `refs/heads/${b}`)], repo.root);
+      if (remote.code !== 0) return false;
+      const shas = new Map<string, string>();
+      for (const line of remote.stdout.split("\n")) {
+        const [sha, ref] = line.trim().split(/\s+/u);
+        if (sha && ref?.startsWith("refs/heads/")) shas.set(ref.slice(11), sha);
+      }
+      const moved: string[] = [];
+      for (const [base, sha] of shas) {
+        const local = await exec("git", ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${base}`], repo.root);
+        if (local.stdout.trim() !== sha) moved.push(base);
+      }
+      if (!moved.length) return false;
+      await this.fetch(moved);
+      return true;
+    } finally {
+      this.checking = false;
+    }
+  }
+
+  /** `git fetch origin <bases>`, at most once per `minFetchGapMs`; a trigger inside the gap fetches when it ends. */
+  async fetch(bases?: string[]): Promise<void> {
+    if (this.closed) return;
+    const gap = this.deps.minFetchGapMs ?? 30_000;
+    const wait = this.lastFetch + gap - this.now();
+    if (wait > 0) {
+      if (!this.fetchTimer) {
+        this.fetchTimer = setTimeout(() => { this.fetchTimer = undefined; void this.fetch(bases); }, wait);
+        this.fetchTimer.unref?.();
+      }
+      return;
+    }
+    this.lastFetch = this.now();
+    const list = bases ?? await this.bases();
+    if (!list.length || this.closed) return;
+    await this.deps.exec("git", ["fetch", "--quiet", "--no-tags", "origin", ...list], this.deps.repo.root);
+  }
+
+  /** Recompute the sibling overlaps (a branch or base ref changed). */
+  async recompute(): Promise<void> {
+    if (this.closed) return;
+    try {
+      this.overlaps = await this.deps.crew.overlaps(this.deps.repo);
+      if (!this.closed) this.deps.onOverlaps?.(this.overlaps);
+    } catch { /* keep the last */ }
+  }
+
+  close(): void {
+    this.closed = true;
+    this.sub?.close();
+    this.refs?.close();
+    if (this.remoteTimer) clearInterval(this.remoteTimer);
+    if (this.fetchTimer) clearTimeout(this.fetchTimer);
+    this.sub = this.refs = this.remoteTimer = this.fetchTimer = undefined;
+  }
 }

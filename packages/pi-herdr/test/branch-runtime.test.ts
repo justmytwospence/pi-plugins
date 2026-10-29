@@ -354,17 +354,18 @@ test("repeated session_start cancels refresh/PR timers and releases old holds be
     { active: true, label: "child new", id: "child:new" },
   ]);
   await vi.advanceTimersByTimeAsync(1_500);
-  expect(run).not.toHaveBeenCalled(); // the startup session's delayed PR was cancelled
+  const gh = () => run.mock.calls.filter((c: any[]) => c[0] === "gh");
+  expect(gh()).toHaveLength(0); // the startup session's delayed PR was cancelled
   await vi.advanceTimersByTimeAsync(500);
-  expect(run).toHaveBeenCalledTimes(1);
+  expect(gh()).toHaveLength(1);
   await p.emit("agent_settled"); // a pending 5s PR refresh must also be discarded
   await vi.advanceTimersByTimeAsync(500);
   await p.emit("session_start", { reason: "fork" }); await drain();
   expect(vi.getTimerCount()).toBe(4);
   await vi.advanceTimersByTimeAsync(2_000);
-  expect(run).toHaveBeenCalledTimes(2);
+  expect(gh()).toHaveLength(2);
   await vi.advanceTimersByTimeAsync(298_000);
-  expect(run).toHaveBeenCalledTimes(3); // only this generation's 3-minute PR poll
+  expect(gh()).toHaveLength(3); // only this generation's 3-minute PR poll
   const holds = p.emitted.filter(([c]) => c === "herdr:background").map(([, d]) => d);
   expect(holds.slice(-2)).toEqual([{ active: false, id: "child:new" }, { active: true, label: "child new", id: "child:new" }]);
   const bg = x.f.of("pane.report_metadata").filter((c) => c.params.tokens && "bg" in c.params.tokens).at(-1);
@@ -374,5 +375,5 @@ test("repeated session_start cancels refresh/PR timers and releases old holds be
   const calls = x.f.log.length;
   await vi.advanceTimersByTimeAsync(300_000);
   expect(x.f.log).toHaveLength(calls);
-  expect(run).toHaveBeenCalledTimes(3);
+  expect(gh()).toHaveLength(3);
 });

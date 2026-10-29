@@ -10,6 +10,8 @@ export interface PrView {
   isDraft?: boolean;
   reviewDecision?: string | null;
   statusCheckRollup?: { status?: string; conclusion?: string | null; state?: string }[];
+  /** The branch the PR merges into. */
+  baseRefName?: string;
 }
 
 /** ✓ every check passed, ✗ one failed, … some still run; undefined without checks. */
@@ -51,4 +53,4 @@ export function parsePrView(stdout: string): PrView | undefined {
   }
 }
 
-export const PR_FIELDS = "number,state,isDraft,reviewDecision,statusCheckRollup";
+export const PR_FIELDS = "number,state,isDraft,reviewDecision,statusCheckRollup,baseRefName";

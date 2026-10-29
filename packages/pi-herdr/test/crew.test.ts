@@ -2,16 +2,25 @@
 // prompt section, claims and sync against a real git repository with worktrees, and index.ts's
 // wiring with a fake pi and a fake herdr.
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createEventBus, SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Children, type ChildRecord, type Exec } from "../src/core/children.ts";
-import { board, Crew, CREW_MESSAGE, crewDigest, MAX_DIGEST_LINES, parseWorktrees, type Repo, sectionText, SEEN_ENTRY, type Snapshot, syncCrew } from "../src/crew.ts";
+import { board, Crew, CREW_MESSAGE, CrewWatch, crewDigest, MAX_DIGEST_LINES, parseWorktrees, type Repo, sectionText, SEEN_ENTRY, type Snapshot, syncCrew } from "../src/crew.ts";
 import piHerdr from "../src/index.ts";
 import { PI_CHILD } from "../src/session.ts";
 import { fakeCall } from "./core/fake.ts";
+import { remoteRepo } from "./git-fixture.ts";
+
+const until = async (ok: () => boolean, ms = 3_000) => {
+  const end = Date.now() + ms;
+  while (!ok()) {
+    if (Date.now() > end) throw new Error("timed out");
+    await new Promise((r) => setTimeout(r, 20));
+  }
+};
 
 const REPO: Repo = { common: "/r/.git", root: "/r", dir: "/r/.git/pi-crew" };
 const TREES = parseWorktrees([
@@ -262,4 +271,129 @@ describe("index.ts wiring", () => {
     await m.emit("session_shutdown");
     await p.emit("session_shutdown");
   });
+});
+
+describe("drift and overlap in the crew", () => {
+  it("puts a worktree's drift on its line and new overlaps on their own lines, once", () => {
+    const s = snap();
+    s.workspaces![1]!.tokens = { pr: "#12 draft", drift: "↓2 main · 1 overlap" };
+    const overlaps = [{ a: "feature/a", b: "b", files: ["x.js"] }];
+    const first = crewDigest(board(s, TREES, REPO), undefined, overlaps)!;
+    expect(first.text).toContain("- feature/a (feat-a w2:p1, idle, #12 draft, ↓2 main · 1 overlap): Added the parser");
+    expect(first.text).toContain("- overlap: feature/a ↔ b: 1 shared file (x.js)");
+    expect(crewDigest(board(s, TREES, REPO), first.seen, overlaps)).toBeUndefined();
+    const worse = crewDigest(board(s, TREES, REPO), first.seen, [{ ...overlaps[0]!, conflicts: ["x.js"] }])!;
+    expect(worse.text.split("\n").slice(1)).toEqual(["- overlap: feature/a ↔ b: would conflict in x.js"]);
+    // An overlap that went away is dropped silently, never reported as a gone worktree.
+    expect(crewDigest(board(s, TREES, REPO), worse.seen, [])).toBeUndefined();
+  });
+});
+
+describe("CrewWatch", () => {
+  let r: ReturnType<typeof remoteRepo>;
+  beforeEach(() => { r = remoteRepo(); });
+  afterEach(() => r.cleanup());
+
+  function watch(extra: Partial<ConstructorParameters<typeof CrewWatch>[0]> = {}) {
+    const calls: string[][] = [];
+    const exec: Exec = async (cmd, args, cwd) => { calls.push([cmd, ...args]); return realExec(cmd, args, cwd); };
+    const f = fakeCall({ "session.snapshot": () => ({ result: { snapshot: { workspaces: [], agents: [] } } }) });
+    const crew = new Crew({ call: f.call, exec, selfPane: "w1:p1" });
+    const repo: Repo = { common: r.common, root: r.root, dir: join(r.common, "pi-crew") };
+    let push: ((e: any) => void) | undefined;
+    const w = new CrewWatch({ crew, repo, exec, remoteMs: 0, minFetchGapMs: 0, debounceMs: 50, subscribe: (onEvent) => { push = onEvent; return { close: () => undefined }; }, ...extra });
+    const fetches = () => calls.filter((c) => c[1] === "fetch");
+    return { w, calls, fetches, push: (e: any) => push!(e) };
+  }
+  const ws = (pr: string) => ({ event: "workspace_metadata_updated", data: { workspace: { workspace_id: "w2", tokens: { pr }, worktree: { repo_key: r.common, is_linked_worktree: true, checkout_path: r.a } } } });
+
+  it("fetches when a crew PR turns merged, not on other metadata", async () => {
+    const x = watch();
+    x.push(ws("#1 ✓ approved"));
+    x.push(ws("#1 ✓ approved"));
+    x.push({ event: "workspace_metadata_updated", data: { workspace: { workspace_id: "w9", tokens: { pr: "#9 merged" }, worktree: { repo_key: "/elsewhere/.git" } } } });
+    await new Promise((res) => setTimeout(res, 50));
+    expect(x.fetches()).toHaveLength(0);
+    x.push(ws("#1 merged"));
+    await until(() => x.fetches().length === 1);
+    expect(x.fetches()[0]).toEqual(["git", "fetch", "--quiet", "--no-tags", "origin", "main"]);
+    x.w.close();
+  });
+
+  it("checks the remote cheaply and fetches only when a base moved", async () => {
+    const x = watch();
+    expect(await x.w.checkRemote()).toBe(false);
+    expect(x.calls.some((c) => c[1] === "ls-remote")).toBe(true);
+    expect(x.fetches()).toHaveLength(0);
+    r.upstream("other.txt", "moved\n", "upstream move", false);
+    expect(await x.w.checkRemote()).toBe(true);
+    expect(x.fetches()).toHaveLength(1);
+    expect(await x.w.checkRemote()).toBe(false);
+    x.w.close();
+  });
+
+  it("recomputes sibling overlaps when a branch moves", async () => {
+    const seen: number[] = [];
+    const x = watch({ onOverlaps: (o) => seen.push(o.length) });
+    await until(() => seen.length >= 1);
+    expect(x.w.overlaps).toEqual([]);
+    r.commit(r.a, "shared.txt", "one\nA\nthree\n");
+    r.commit(r.b, "shared.txt", "one\nB\nthree\n");
+    // The fake snapshot has no spaces, so rows come from git worktree list with the default base.
+    await until(() => x.w.overlaps.length === 1, 4_000);
+    expect(x.w.overlaps[0]).toMatchObject({ a: "a", b: "b", files: ["shared.txt"] });
+    x.w.close();
+  });
+});
+
+describe("drift in a worktree session (index.ts)", () => {
+  let r: ReturnType<typeof remoteRepo>;
+  beforeEach(() => {
+    r = remoteRepo();
+    vi.stubEnv("HERDR_ENV", "1"); vi.stubEnv("HERDR_SOCKET_PATH", "/fixture/no-socket");
+    vi.stubEnv("HERDR_PANE_ID", "w2:p1"); vi.stubEnv("PI_HERDR_PR", "0");
+  });
+  afterEach(() => { r.cleanup(); vi.unstubAllEnvs(); });
+
+  it("shows drift on its space and gets one passive note when the base moves under its files", async () => {
+    mkdirSync(join(r.common, "pi-crew"), { recursive: true });
+    r.commit(r.a, "shared.txt", "one\nTWO-a\nthree\n");
+    const f = fakeCall({ "pane.get": (p) => ({ result: { pane: { pane_id: p.pane_id, workspace_id: "w2" } } }) });
+    const manager = SessionManager.inMemory(r.a);
+    const handlers = new Map<string, Array<(e: any, c: any) => unknown>>();
+    const sent: any[] = [];
+    const bus = createEventBus();
+    const pi = {
+      on: (event: string, fn: any) => { handlers.set(event, [...(handlers.get(event) ?? []), fn]); return () => undefined; },
+      events: { on: bus.on, emit: (c: string, d: unknown) => bus.emit(c, d) },
+      appendEntry: (t: string, d: unknown) => { manager.appendCustomEntry(t, structuredClone(d)); },
+      sendMessage: (message: any, options: any) => sent.push({ message, options }),
+      registerTool: () => undefined,
+      getActiveTools: () => [], setActiveTools: () => undefined, getThinkingLevel: () => "medium", getSessionName: () => undefined,
+    };
+    const ctx = { mode: "tui", hasUI: true, cwd: r.a, model: { id: "m" }, ui: { notify: () => undefined }, sessionManager: manager, isIdle: () => true };
+    const emit = async (event: string, payload: any = {}) => { for (const fn of handlers.get(event) ?? []) await fn(payload, ctx); };
+    piHerdr(pi as unknown as ExtensionAPI, { call: f.call, exec: realExec, pollMs: 1 });
+    await emit("session_start");
+    const driftTokens = () => f.of("workspace.report_metadata").filter((c) => c.params.tokens && "drift" in c.params.tokens).map((c) => c.params.tokens.drift);
+    await until(() => f.of("workspace.report_metadata").some((c) => c.params.tokens?.crew_base === "main"));
+    expect(sent).toHaveLength(0);
+
+    r.upstream("other.txt", "y\n");
+    await until(() => driftTokens().includes("↓1 main"), 5_000);
+    expect(sent).toHaveLength(0); // behind, but not on its files: the token only
+
+    r.upstream("shared.txt", "one\nTWO-main\nthree\n");
+    await until(() => sent.length === 1, 5_000);
+    expect(sent[0].options).toEqual({ deliverAs: "nextTurn" });
+    expect(sent[0].message.customType).toBe("herdr-drift");
+    expect(sent[0].message.content).toContain("shared.txt");
+    expect(driftTokens().at(-1)).toMatch(/^↓2 main (✗ conflict|· 1 overlap)$/u);
+
+    // The same upstream again (its own turn ending) is not a second note.
+    await emit("agent_settled");
+    await new Promise((res) => setTimeout(res, 2_000));
+    expect(sent).toHaveLength(1);
+    await emit("session_shutdown");
+  }, 15_000);
 });

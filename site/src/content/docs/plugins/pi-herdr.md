@@ -9,7 +9,7 @@ plugin: pi-herdr
 - **Use it for:** Add pane metadata, message any agent in Herdr without touching its draft, and start deliberate human-accessible child sessions.
 - **Enable:** Select `packages/pi-herdr/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
 - **Controls:** the `herdr` tool: list/send/read/wait for any agent (optionally on a saved Herdr `machine`), `await_reply` and `bg_wait herdr:<name>` to hear back, broadcast with `names`/`cwd_prefix`; spawn/interrupt/close for children; `crew` to coordinate a repository's worktree sessions (directives, crew updates, sync). No global shortcut; child activities offer read-only inspection.
-- **Settings:** No plugin JSON settings. Child location: tab; focus: false; model/effort inherit the parent. `PI_HERDR_PR=0` disables PR polling; `PI_HERDR_SUMMARY=0` disables the summary model call, `PI_HERDR_SUMMARY_MODEL` picks its model; `PI_HERDR_DRAFT_GUARD=0` turns off the draft guard; `PI_HERDR_INBOX_RATE` sets the loop guard (default `6/600`, `0` off).
+- **Settings:** No plugin JSON settings. Child location: tab; focus: false; model/effort inherit the parent. `PI_HERDR_PR=0` disables PR polling; `PI_HERDR_SUMMARY=0` disables the summary model call, `PI_HERDR_SUMMARY_MODEL` picks its model; `PI_HERDR_DRAFT_GUARD=0` turns off the draft guard; `PI_HERDR_INBOX_RATE` sets the loop guard (default `6/600`, `0` off); `PI_HERDR_CREW_REMOTE_MS` sets how often a crew's coordinator checks the remote (default 5 minutes, `0` never).
 - **Requirements, cost & privacy:** Interactive Herdr socket/pane, Pi/provider access for children; Git for worktrees, `gh` for PRs. Herdr socket operations create/open checkouts; no external worktree CLI. The `$summary` line is one small Haiku request per settled turn; children are paid sessions.
 - **Integrations & limits:** Optional event-bus bridge, `/tasks`/FleetView child entries (awaited agents as `peer` rows, never stoppable), and pi-bg `bg:external` for awaited replies. An activity stop interrupts an awaited turn, never closes the pane. Herdr itself owns pane state.
 
@@ -131,10 +131,12 @@ A crew is one repository's worktree sessions, coordinated from one Pi session, u
 - **Crew updates.** Each prompt you send the coordinator carries one compact block listing the worktrees whose state, last turn, or PR changed since its last turn. That includes turns you ran in a worktree yourself. It has at most 12 lines, is added only when something changed, and never starts a turn.
 - **Sync.** `crew` with `op: "sync"` claims the role, makes the Pi already running in each worktree a child, and opens a space for each worktree without an agent, where it runs `pi --continue` to resume that worktree's latest session. It is idempotent. `op: "status"` shows the whole board and the directives. A claim never takes the role from another live coordinator without `takeover`.
 
+- **Drift and overlap.** Each worktree session learns when its base moves under it, on events rather than timers. Only the coordinator fetches: when Herdr's `workspace.metadata_updated` event shows a crew PR turning merged, or when a cheap `git ls-remote` (after each of its turns and every `PI_HERDR_CREW_REMOTE_MS`, default 5 minutes) finds a base's sha changed. Every session watches the repository's shared refs, so any fetch, commit or rebase makes worktree sessions recompute how far they are behind, which of their files also changed upstream, and (git 2.38 or later) whether a rebase would conflict. That shows as a `$drift` space token, as one passive note when it touches the session's own files, and in the coordinator's crew update together with pairs of branches that change the same files. Nothing rebases unless a directive says so.
+
 Example update (illustrative):
 
 ```text
-[Crew since your last turn, from pi-herdr, not the user: worktree sessions whose state, last turn or PR changed]
+[Crew since your last turn, from pi-herdr, not the user: worktree sessions whose state, last turn, PR or base drift changed, and new overlaps between branches]
 - feature/1396-contract-windows (contract-windows w9D:p1, idle, #1442 ✓ approved): Rebased onto develop, checks green
 ```
 
