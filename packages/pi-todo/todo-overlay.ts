@@ -129,6 +129,31 @@ export class TodoOverlay {
 
 	private allDone = false;
 
+	/** The panel belongs to the end of the conversation: hide it while the transcript is scrolled back. */
+	private isScrolledBack(): boolean {
+		const view = this.findScrollView();
+		return view !== undefined && view.isFollowingEnd === false;
+	}
+
+	private findScrollView(): { isFollowingEnd: boolean; primary?: boolean } | undefined {
+		const seen = new Set<unknown>();
+		const walk = (node: unknown, depth: number): { isFollowingEnd: boolean } | undefined => {
+			if (!node || typeof node !== "object" || seen.has(node) || depth > 6) return undefined;
+			seen.add(node);
+			const c = node as { isFollowingEnd?: unknown; scrollToEnd?: unknown; primary?: unknown; entries?: { component?: unknown }[] };
+			if (typeof c.isFollowingEnd === "boolean" && typeof c.scrollToEnd === "function" && c.primary === true) {
+				return c as { isFollowingEnd: boolean };
+			}
+			for (const entry of Array.isArray(c.entries) ? c.entries : []) {
+				const found = walk(entry?.component, depth + 1);
+				if (found) return found;
+			}
+			return undefined;
+		};
+		const root = (this.tui as unknown as { layoutRoot?: unknown } | undefined)?.layoutRoot;
+		return walk(root, 0);
+	}
+
 	private getSnapshot() {
 		const state = getRenderState();
 		if (this.lastNextId !== undefined && state.nextId < this.lastNextId) {
@@ -161,7 +186,7 @@ export class TodoOverlay {
 	}
 
 	private renderPanel(theme: Theme, width: number): string[] {
-		if (this.suppressed) return [];
+		if (this.suppressed || this.isScrolledBack()) return [];
 		const snapshot = this.getSnapshot();
 		const overlayTasks = this.selectOverlayTasks(snapshot);
 		if (overlayTasks.length === 0) return [];
