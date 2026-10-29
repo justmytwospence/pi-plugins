@@ -282,7 +282,10 @@ export default function piMarimo(pi: ExtensionAPI): void {
   // prompt while one is busy, and a full-screen view of each (ui/view.ts).
   // Widget changes from the view, a held key coalesced into one call.
   const widgetSender = new WidgetSender(
-    (target, id, value) => setUiValues(target, [id], [value], process.env.MARIMO_TOKEN),
+    (target, id, value) => {
+      const f = watcher?.followed().find((o) => o.attachment.url === target.url && o.attachment.sessionId === target.sessionId) ?? watcher?.followed().find((o) => o.attachment.url === target.url);
+      return f ? withEditor(f, (t) => setUiValues(t, [id], [value], process.env.MARIMO_TOKEN)) : setUiValues(target, [id], [value], process.env.MARIMO_TOKEN);
+    },
     120,
     (e) => ctxRef?.ui.notify(`marimo: could not set the widget: ${e instanceof Error ? e.message : String(e)}`, "warning"),
   );
@@ -295,6 +298,12 @@ export default function piMarimo(pi: ExtensionAPI): void {
     return undefined;
   };
   const tokenOpt = process.env.MARIMO_TOKEN ? { token: process.env.MARIMO_TOKEN } : {};
+  const headless = new HeadlessSessions();
+  // Function-call results come back only to the session that asked: from Pi's own sessions, into the notebook's state.
+  headless.onMessage = (url, file, op, data) => {
+    const f = watcher?.followed().find((o) => o.attachment.url === url && o.attachment.path === file);
+    f?.notebook.apply(op, data);
+  };
   /**
    * Runs a kernel action as an editor of the notebook. marimo refuses actions (403, or 500 for a gone
    * consumer) from a session id whose browser tab has closed, which leaves the notebook with no one
@@ -345,7 +354,7 @@ export default function piMarimo(pi: ExtensionAPI): void {
     },
     unmark: (f, id) => unmarkSelection(f, id, process.env.MARIMO_TOKEN ? { token: process.env.MARIMO_TOKEN } : {}),
     table: {
-      call: (f, id, fn, args) => callFunction(f, id, fn, args, tokenOpt),
+      call: (f, id, fn, args) => withEditor(f, (t) => callFunction({ attachment: t, notebook: f.notebook }, id, fn, args, tokenOpt)),
       file: (f, ref) => fileText(f, ref, tokenOpt),
     },
     setTableSelection: (f, cell, objectId, value) => {
@@ -450,7 +459,6 @@ export default function piMarimo(pi: ExtensionAPI): void {
   const mine = () => (watcher?.followed() ?? []).filter((f) => f.engaged);
 
   /** Notebooks this process opened without a browser (core/headless.ts), so marimo-pair has a session to talk to. */
-  const headless = new HeadlessSessions();
   /** Opens a waiting notebook's session on its server, and waits for the watcher to follow it. */
   const attachWaiting = async (w: Pick<Waiting, "url" | "path">): Promise<void> => {
     await headless.attach(w.url, w.path, process.env.MARIMO_TOKEN);

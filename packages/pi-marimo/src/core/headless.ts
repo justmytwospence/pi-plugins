@@ -33,6 +33,9 @@ export class HeadlessSessions {
   private readonly held = new Map<string, Held>();
   private readonly starting = new Map<string, Promise<string>>();
 
+  /** Messages that arrive on a held session (marimo answers a function call only to the session that made it). */
+  onMessage: ((serverUrl: string, file: string, op: string, data: unknown) => void) | undefined;
+
   constructor(private readonly Socket: SocketCtor | null | undefined = (globalThis as { WebSocket?: SocketCtor }).WebSocket) {}
 
   private static key(serverUrl: string, file: string): string {
@@ -73,7 +76,14 @@ export class HeadlessSessions {
       const timer = setTimeout(() => fail("the kernel did not start"), waitMs);
       timer.unref?.();
       socket.onmessage = (e) => {
-        if (settled || !String(e.data).includes('"kernel-ready"')) return;
+        const text = String(e.data);
+        if (settled && this.onMessage && text.includes('"function-call-result"')) {
+          try {
+            const msg = JSON.parse(text) as { op?: string; data?: unknown };
+            if (msg.op) this.onMessage(serverUrl, file, msg.op, msg.data);
+          } catch { /* not JSON */ }
+        }
+        if (settled || !text.includes('"kernel-ready"')) return;
         settled = true;
         clearTimeout(timer);
         this.held.set(key, { sessionId, socket });
