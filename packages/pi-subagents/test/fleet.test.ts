@@ -329,17 +329,17 @@ test("pill rows (notebooks): listed above the label, selected and opened like ru
   expect(idle[0]).toMatch(/^ ○ a\.py {2}:2718 · idle/u);
   expect(idle[1]).toMatch(/^ ● b\.py {2}:2719 · running Fit +0:12$/u);
   expect(ui.press(KEY.down)).toBe(true);
-  expect(ui.render("subagents-fleet")[0]).toContain("↑/↓ select · enter view");
-  expect(ui.render("subagents-fleet")[1]).toMatch(/^\x1b\[7m ○ a\.py/u);
+    expect(ui.render("subagents-fleet")[0]).toMatch(/^\x1b\[7m ○ a\.py/u);
+  expect(ui.render("subagents-fleet")).toHaveLength(3);
   expect(ui.press(KEY.down)).toBe(true);
-  expect(ui.render("subagents-fleet")[2]).toMatch(/^\x1b\[7m ● b\.py/u);
+  expect(ui.render("subagents-fleet")[1]).toMatch(/^\x1b\[7m ● b\.py/u);
   expect(ui.press(KEY.enter)).toBe(true);
   await new Promise((r) => setTimeout(r, 0));
   expect(opened).toEqual(["b"]);
   // Back out of the view: the same row is selected again.
-  expect(ui.render("subagents-fleet")[2]).toMatch(/^\x1b\[7m ● b\.py/u);
+  expect(ui.render("subagents-fleet")[1]).toMatch(/^\x1b\[7m ● b\.py/u);
   expect(ui.press(KEY.up)).toBe(true);
-  expect(ui.render("subagents-fleet")[1]).toMatch(/^\x1b\[7m ○ a\.py/u);
+  expect(ui.render("subagents-fleet")[0]).toMatch(/^\x1b\[7m ○ a\.py/u);
   fleet.dispose();
 });
 

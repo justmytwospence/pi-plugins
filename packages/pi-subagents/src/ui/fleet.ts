@@ -115,8 +115,10 @@ export function renderFleet({ roster, selected, current, active, stopArmed, canB
       ? undefined
       : stopArmed && stoppable
         ? theme.fg("error", `x again to stop ${runLabel(chosen.run)}`)
-        : chosen?.kind === "pill" || chosen?.kind === "row"
-          ? theme.fg("dim", `${normalKeys ? "j/k select · l/enter view" : "↑/↓ select · enter view"}${chosen.kind === "row" && rowStoppable(chosen.section, chosen.row) && normalKeys ? " · x stop" : ""} · ${normalKeys ? "h/esc" : "esc"} back`)
+        : chosen?.kind === "pill"
+          ? theme.fg("dim", normalKeys ? "j/k select · l/enter view · h/esc back" : "↑/↓ select · enter view · esc back")
+          : chosen?.kind === "row"
+            ? undefined
           : theme.fg(
               "dim",
               `${normalKeys ? "j/k select · l/enter view" : "↑/↓ select · enter view"}${stoppable ? " · x stop" : ""}${dismissable ? " · x dismiss" : ""}${stoppable && canBackground ? " · b background" : ""} · ${normalKeys ? "h/esc" : "esc"} back`,
@@ -145,11 +147,6 @@ export function renderFleet({ roster, selected, current, active, stopArmed, canB
     }
     const below = runs.length - (start + visible);
     if (below > 0) lines.push(rightAlign("", theme.fg("dim", `↓ ${below} more`), width));
-  }
-  // With no runs, the hint for a selected row (a notebook) tops the list, where the runs' hint would be.
-  if (!runs.length && chosen?.kind === "row") {
-    const canStop = normalKeys && rowStoppable(chosen.section, chosen.row);
-    lines.push(truncateToWidth(` ${stopArmed && canStop ? theme.fg("error", "x again to stop") : theme.fg("dim", `${normalKeys ? "j/k select · l/enter view" : "↑/↓ select · enter view"}${canStop ? " · x stop" : ""} · ${normalKeys ? "h/esc" : "esc"} back`)}`, width));
   }
   // The pills: Claude Code's background-tasks indicator, and the rows (notebooks) some of them carry.
   for (const { e, i } of pills) {

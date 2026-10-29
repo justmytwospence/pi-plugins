@@ -259,8 +259,9 @@ it("a pill with rows: ↓ selects the first row, ↑↓ move through rows and la
       expect(idle[1]).toMatch(/● b\.py {2}:2719 · running Fit +0:12/u);
       expect(idle[2]).toContain("1 task");
       expect(pill.handleKey("\x1b[B")).toEqual({ consume: true });
-      expect(widget.render(100)).toHaveLength(4);
-      expect(widget.render(100)[3]).toContain("enter view");
+      // No hint line under the rows; the selected one is on the selection background.
+      expect(widget.render(100)).toHaveLength(3);
+      expect(widget.render(100)[0]).toContain("\x1b[7m");
       expect(pill.handleKey("\x1b[B")).toEqual({ consume: true });
       expect(pill.handleKey("\r")).toEqual({ consume: true });
       expect(openRow).toHaveBeenCalledExactlyOnceWith("b");
@@ -304,9 +305,8 @@ it("x twice stops the selected running row in pi-vim normal mode, and a row that
     editor.handleInput("$");
     expect(pill.handleKey("j")).toEqual({ consume: true });
     // On the idle row, x is not the pill's.
-    expect(widget.render(100).at(-1)).not.toContain("x stop");
     pill.handleKey("j");
-    expect(widget.render(100).at(-1)).toContain("x stop");
+    expect(widget.render(100)).toHaveLength(2);
     expect(pill.handleKey("x")).toEqual({ consume: true });
     expect(stopRow).not.toHaveBeenCalled();
     expect(widget.render(100).at(-1)).toContain("x again to stop");
@@ -318,7 +318,7 @@ it("x twice stops the selected running row in pi-vim normal mode, and a row that
     expect(pill.handleKey("x")).toEqual({ consume: true });
     expect(stopRow).toHaveBeenCalledExactlyOnceWith("b");
     // No label, no label line: the rows are the whole pill.
-    expect(widget.render(100).filter((l: string) => l.trim()).length).toBe(3);
+    expect(widget.render(100).filter((l: string) => l.trim()).length).toBe(2);
   } finally { pill.dispose(); editor.dispose(); }
 });
 
