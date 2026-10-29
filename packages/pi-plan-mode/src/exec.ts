@@ -12,7 +12,7 @@ import {
   getMarkdownTheme,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Spacer, Text } from "@earendil-works/pi-tui";
+import { type Component, Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { setToolsActive } from "./active-tools.js";
 import { type ModelSpec, parseModelSpec } from "./implementation-models.js";
 import { PlanMarkdown } from "./mermaid-art.js";
@@ -23,7 +23,7 @@ import { type PlannerAccessConfig, PlannerAgent } from "./planner/agent.js";
 import { CONSULT_WRAP_UP, consultMessage } from "./planner/prompt.js";
 import { type PlannerSessionFactory, plannerSessionDir } from "./planner/session.js";
 import { formatCost } from "./planners.js";
-import { type ReviewStatus, reviewBody, reviewTitle } from "./review-card.js";
+import { COLLAPSED_LINES, reviewStatusLine, reviewTitle } from "./review-card.js";
 import type { Usage } from "./scout-process.js";
 
 export const EXEC_ENTRY = "plan-mode:exec";
@@ -83,16 +83,14 @@ interface ChangeSummary {
 interface FinishDetails {
   report: string;
   planFile: string;
-  outcome: "pending" | "done" | "review" | "kept";
   changes?: ChangeSummary;
-  /** The planner that reviewed (or is reviewing) the work. */
-  reviewer?: string;
-  /** While the planner reviews: what it is doing. */
-  reviewing?: string;
-  /** The planner's review without its verdict line. */
-  review?: string;
-  /** The review's verdict: nothing to fix. */
-  reviewClean?: boolean;
+  /** Who implemented it, e.g. `Claude Sonnet 5.5`. */
+  implementer?: string;
+  /** The model the session went back to, when it did. */
+  returnedTo?: string;
+  /** Questions put to the planner on call, and what they cost. */
+  asks?: number;
+  costUsd?: number;
 }
 
 const NOT_ACTIVE = "No approved plan is being implemented.";
@@ -349,8 +347,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
         },
       },
     } as never,
-    renderCall: (_args, theme, context) =>
-      reviewTitle(theme, context.isPartial ? "Implementation review" : "Implementation"),
+    renderCall: (_args, theme) => reviewTitle(theme, "Implementation complete"),
     renderResult: (result, options, theme) => renderFinish(result.details as FinishDetails | undefined, options, theme),
     async execute(_id, params: unknown, _signal, _onUpdate, ctx) {
       hostCtx = ctx;
@@ -365,10 +362,18 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       end(ctx);
       const spec = parseModelSpec(finished.restore);
       const now = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
-      if (spec && now === finished.implementerModel) await host.restoreModel(ctx, spec);
+      const restored = Boolean(spec && now === finished.implementerModel);
+      if (spec && restored) await host.restoreModel(ctx, spec);
       return {
         content: [{ type: "text", text: "The implementation is reported and exec mode is over. Stop here." }],
-        details: { report, planFile: finished.planFile, outcome: "done", changes } satisfies FinishDetails,
+        details: {
+          report,
+          planFile: finished.planFile,
+          changes,
+          implementer: finished.implementer,
+          ...(restored && finished.planner ? { returnedTo: finished.planner.name } : {}),
+          ...(finished.asks > 0 ? { asks: finished.asks, costUsd: finished.costUsd } : {}),
+        } satisfies FinishDetails,
         terminate: true,
       } as never;
     },
@@ -481,16 +486,45 @@ async function summarizeChanges(state: ExecState, touched: ReadonlySet<string>, 
   };
 }
 
-/** The changes as Markdown, under the implementer's report. */
-function changesMarkdown(changes: ChangeSummary | undefined): string {
-  if (!changes || (changes.edited.length === 0 && !changes.git)) return "";
-  const lines = ["**Changed**", ""];
+/** `+20 -2` colored from `git diff --shortstat`'s `20 insertions(+), 2 deletions(-)`. */
+function diffstat(theme: Theme, git: string): string {
+  const files = /(\d+) files? changed/u.exec(git)?.[1];
+  const added = /(\d+) insertions?\(\+\)/u.exec(git)?.[1];
+  const removed = /(\d+) deletions?\(-\)/u.exec(git)?.[1];
+  const parts = [
+    ...(added ? [theme.fg("success", `+${added}`)] : []),
+    ...(removed ? [theme.fg("error", `-${removed}`)] : []),
+  ];
+  if (parts.length === 0) return theme.fg("dim", git);
+  return `${parts.join(" ")}${files ? theme.fg("dim", ` across ${files} ${files === "1" ? "file" : "files"} (git diff against HEAD)`) : ""}`;
+}
+
+/** What the implementation touched: a heading with counts, one row per file, then the diffstat. */
+function renderChanges(theme: Theme, changes: ChangeSummary | undefined): Component[] {
+  if (!changes || (changes.edited.length === 0 && !changes.git)) return [];
+  const rows: string[] = [];
+  const counts = [
+    ...(changes.edited.length > 0
+      ? [`${changes.edited.length} ${changes.edited.length === 1 ? "file" : "files"} edited`]
+      : []),
+    ...(changes.outside.length > 0 ? [`${changes.outside.length} outside the plan`] : []),
+  ];
+  rows.push(
+    theme.fg("toolTitle", theme.bold("Changed")) +
+      (counts.length > 0 ? theme.fg("dim", ` · ${counts.join(" · ")}`) : ""),
+  );
   for (const file of changes.edited.slice(0, MAX_LISTED)) {
-    lines.push(`- \`${file}\`${changes.outside.includes(file) ? " (not in the plan)" : ""}`);
+    rows.push(
+      changes.outside.includes(file)
+        ? `  ${theme.fg("warning", "!")} ${file} ${theme.fg("warning", "not in the plan")}`
+        : `  ${theme.fg("dim", "•")} ${file}`,
+    );
   }
-  if (changes.edited.length > MAX_LISTED) lines.push(`- … and ${changes.edited.length - MAX_LISTED} more`);
-  if (changes.git) lines.push("", `git diff against HEAD: ${changes.git}`);
-  return `\n\n${lines.join("\n")}`;
+  if (changes.edited.length > MAX_LISTED) {
+    rows.push(theme.fg("dim", `  … and ${changes.edited.length - MAX_LISTED} more`));
+  }
+  if (changes.git) rows.push(`  ${diffstat(theme, changes.git)}`);
+  return [new Spacer(1), new Text(rows.join("\n"), 0, 0)];
 }
 
 function renderFinish(
@@ -499,37 +533,30 @@ function renderFinish(
   theme: Theme,
 ) {
   if (!details?.report) return new Container();
-  const context = planTitle(details.planFile);
-  const status: ReviewStatus =
-    details.outcome === "done"
-      ? { tone: "success", text: "✓ Finished", context }
-      : details.outcome === "review"
-        ? { tone: "warning", text: "Sent back with the planner's review", context }
-        : details.outcome === "kept"
-          ? { tone: "warning", text: "Kept going", context }
-          : { tone: "pending", text: "Waiting for acceptance", context };
-  const body = reviewBody(
-    theme,
-    `${details.report}${changesMarkdown(details.changes)}`,
-    status,
-    options,
-    (md) => new PlanMarkdown(md, getMarkdownTheme(), theme),
-  );
-  if (!details.review && !details.reviewing) return body;
-  // The planner's review, in full, under the status (and so just above the question).
   const container = new Container();
-  container.addChild(body);
-  container.addChild(new Spacer(1));
-  const by = details.reviewer ?? "The planner";
-  if (details.reviewing && !details.review) {
-    container.addChild(new Text(theme.fg("muted", `${by} is reviewing · ${details.reviewing}`), 0, 0));
-    return container;
+  const lines = details.report.split("\n");
+  const folded = !options.expanded && lines.length > COLLAPSED_LINES;
+  const shown = folded ? lines.slice(0, COLLAPSED_LINES).join("\n") : details.report;
+  container.addChild(new PlanMarkdown(shown, getMarkdownTheme(), theme));
+  if (folded) {
+    const more = lines.length - COLLAPSED_LINES;
+    container.addChild(
+      new Text(theme.fg("dim", `… ${more} more line${more === 1 ? "" : "s"} (ctrl+o to expand)`), 0, 0),
+    );
   }
-  const verdict = details.reviewClean ? "found nothing to fix" : "found changes to make";
-  container.addChild(
-    new Text(theme.fg("toolTitle", theme.bold(`Review by ${by}`)) + theme.fg("dim", ` · ${verdict}`), 0, 0),
-  );
-  if (details.review) container.addChild(new PlanMarkdown(details.review, getMarkdownTheme(), theme));
+  for (const part of renderChanges(theme, details.changes)) container.addChild(part);
+  const who = details.implementer
+    ? details.returnedTo && details.returnedTo !== details.implementer
+      ? `${details.implementer} → ${details.returnedTo}`
+      : details.implementer
+    : undefined;
+  const asks =
+    details.asks && details.asks > 0
+      ? `${details.asks} ${details.asks === 1 ? "ask" : "asks"} to the planner${details.costUsd !== undefined ? ` · ${formatCost(details.costUsd)}` : ""}`
+      : undefined;
+  const context = [planTitle(details.planFile), who, asks].filter(Boolean).join(" · ");
+  container.addChild(new Spacer(1));
+  container.addChild(new Text(reviewStatusLine(theme, { tone: "success", text: "✓ Finished", context }), 0, 0));
   return container;
 }
 

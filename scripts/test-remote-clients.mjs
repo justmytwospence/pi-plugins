@@ -33,7 +33,6 @@ const { CustomEditor } = await import(new URL('./modes/interactive/components/cu
 const { sidebarScreen } = await import('./remote-clients/sidebar.mjs');
 const { TerminalPanel } = await jiti.import('../packages/pi-interactive-shell/src/panel.ts');
 const { handoffLabel, keepLabel, EDIT, KEEP } = await jiti.import('../packages/pi-plan-mode/src/inline-plan.ts');
-const { FINISH_DONE, FINISH_REVIEW, FINISH_KEEP } = await jiti.import('../packages/pi-plan-mode/src/exec.ts');
 const { choiceMenu, coldTitle } = await jiti.import('../packages/pi-cache-guard/src/index.ts');
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
@@ -123,13 +122,6 @@ function selectorLines(width) {
   return selector.render(width);
 }
 
-// exec mode's acceptance question (finish_plan).
-const FINISH = [FINISH_DONE, FINISH_REVIEW, FINISH_KEEP];
-function finishLines(width) {
-  const selector = new ExtensionSelectorComponent('Accept the implementation? 12 files edited · 3 outside the plan · Claude Opus 5.5 found nothing to fix', FINISH, () => {}, () => {});
-  return selector.render(width);
-}
-
 // pi-cache-guard's cold-cache question as its input handler builds it, with model offers from a
 // listener (pi-auto-effort): Jev's pick first, the current model named, a plain offer after the mute line.
 const coldView = { last: { provider: 'anthropic', model: 'claude-opus-5-5', at: 0, realAt: 0, tokens: 601_000 }, cold: { kind: 'expired', idleMs: 600_000 } };
@@ -159,7 +151,6 @@ const DIALOGS = [
     return { name, lines: (w) => approvalLines(w, spec), herdr: { options: rows.length, multi: false, labels: rows }, collie: { kind: 'prompt-select', wraps: rows } };
   }),
   { name: 'pi select (plan approval)', lines: selectorLines, herdr: { options: 4, multi: false, labels: PLAN_CHOICES }, collie: { kind: 'prompt-select', options: 5, wraps: PLAN_CHOICES } },
-  { name: 'pi select (finish plan)', lines: finishLines, herdr: { options: 3, multi: false, labels: FINISH }, collie: { kind: 'prompt-select', options: 4, wraps: FINISH } },
   { name: 'cache-guard cold cache', lines: (w) => coldCacheLines(w, plainMenu), herdr: { options: plainMenu.length, multi: false, labels: plainMenu }, collie: { kind: 'prompt-select', options: plainMenu.length + 1, wraps: plainMenu } },
   { name: 'cache-guard cold cache (model offers)', lines: coldCacheLines, herdr: { options: coldMenu.length, multi: false, labels: coldMenu }, collie: { kind: 'prompt-select', options: coldMenu.length + 1, wraps: coldMenu } },
 ];

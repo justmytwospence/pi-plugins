@@ -218,8 +218,9 @@ test("finish_plan ends exec mode without asking and returns to the planning mode
   const { mock, context, tool, latest, selects } = await setup();
   const result = await tool(FINISH_TOOL).execute("1", { report: "Done." }, undefined, undefined, context.ctx);
   assert.equal(result.terminate, true);
-  assert.equal(result.details.outcome, "done");
   assert.equal(selects.length, 0);
+  assert.equal(result.details.implementer, "Claude Sonnet 5.5");
+  assert.equal(result.details.returnedTo, "Claude Opus 5.5");
   assert.equal(latest().active, false);
   assert.ok(!mock.rawPi.getActiveTools().includes(FINISH_TOOL));
   assert.ok(!mock.rawPi.getActiveTools().includes(ASK_TOOL));
@@ -253,4 +254,22 @@ test("finish_plan reports what changed and flags files outside the plan", async 
   const result = await tool(FINISH_TOOL).execute("1", { report: "Done." }, undefined, undefined, context.ctx);
   assert.deepEqual(result.details.changes.edited, ["src/a.ts", "src/other.ts"]);
   assert.deepEqual(result.details.changes.outside, ["src/other.ts"]);
+});
+
+test("the finish card shows the report, the changes and a status line, at narrow and wide widths", async () => {
+  const { context, tool, emit, planFile } = await setup();
+  const dir = planFile.slice(0, planFile.lastIndexOf("/"));
+  for (const path of ["src/a.ts", "src/other.ts"]) {
+    await emit("tool_result", { toolName: "edit", input: { path: join(dir, path) }, content: [], isError: false });
+  }
+  const result = await tool(FINISH_TOOL).execute("1", { report: "Added the flag." }, undefined, undefined, context.ctx);
+  const theme = { fg: (_role: string, text: string) => text, bold: (text: string) => text };
+  const card = (tool(FINISH_TOOL) as any).renderResult(result, { expanded: false, isPartial: false }, theme);
+  for (const width of [46, 120]) {
+    const text = card.render(width).join("\n").replace(/\s+/gu, " ");
+    assert.match(text, /Added the flag\./u);
+    assert.match(text, /Changed · 2 files edited · 1 outside the plan/u);
+    assert.match(text, /! src\/other\.ts not in the plan/u);
+    assert.match(text, /✓ Finished · .*Claude Sonnet 5\.5 → Claude Opus 5\.5/u);
+  }
 });
