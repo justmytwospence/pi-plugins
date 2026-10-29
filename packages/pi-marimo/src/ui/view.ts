@@ -7,8 +7,9 @@
 //   or code (Esc clears); r runs the cell, R every stale cell, A every cell (the last two need
 //   pressing twice); x twice interrupts the kernel; o opens the notebook in the browser;
 //   Tab goes to the next followed notebook; Esc, q, ← or h goes back.
-import { type Component, type TUI, matchesKey, visibleWidth } from "@earendil-works/pi-tui";
+import { type Component, Image, type TUI, getCapabilities, matchesKey, visibleWidth } from "@earendil-works/pi-tui";
 import { basename } from "../core/io.js";
+import type { CellOutput } from "../core/output.js";
 import type { Cell, NotebookState } from "../core/notebook.js";
 import { elapsed } from "../core/render.js";
 import { truncate } from "../core/notebook.js";
@@ -46,12 +47,23 @@ const firstLine = (code: string) => code.split("\n").find((l) => l.trim())?.trim
 export interface Row {
   text: string;
   cell?: string;
+  /** One line of an inline image: its place in the block, the block's height, and what shows when the block is not fully on screen. */
+  image?: { index: number; height: number; alt: string };
 }
+
+/** Cells the inline image of an output may be wide, and high at most. */
+const IMAGE_WIDTH = 60;
+const IMAGE_ROWS = 14;
+const images = new WeakMap<CellOutput, Image>();
 
 export interface RowOptions {
   cursor?: string | undefined;
   expanded?: ReadonlySet<string>;
   filter?: string;
+  /** Draw image outputs inline with at most this many rows (default: when the terminal shows images, 14; 0 never). */
+  imageRows?: number;
+  /** The width the view draws at, for sizing images. */
+  width?: number;
 }
 
 /** The code cells the cursor can stand on: every one, or those matching the filter (name, variables, code). */
@@ -66,9 +78,25 @@ export function selectableCells(nb: NotebookState, filter = ""): Cell[] {
 
 const clean = (line: string) => line.replace(/\x1b\[[0-9;?]*[A-Za-z]/gu, "").replace(/\t/gu, "    ").replace(/[\x00-\x08\x0b-\x1f\x7f]/gu, "");
 
+/** An image output as rows: the first carries the terminal's image sequence, the rest are empty rows it covers. */
+function inlineImage(output: CellOutput, theme: FrameTheme, pad: string, opts: RowOptions): Row[] | undefined {
+  const maxRows = Math.min(IMAGE_ROWS, opts.imageRows ?? IMAGE_ROWS);
+  if (maxRows < 2 || !output.image) return undefined;
+  let img = images.get(output);
+  if (!img) {
+    img = new Image(output.image.data, output.image.mime, { fallbackColor: (t) => theme.fg("dim", t) }, { maxWidthCells: IMAGE_WIDTH, maxHeightCells: maxRows });
+    images.set(output, img);
+  }
+  const lines = img.render(Math.max(10, Math.min(IMAGE_WIDTH + 2, (opts.width ?? 80) - 12)));
+  if (!lines.some((l) => l.includes("\x1b_G"))) return undefined;
+  const bar = `${pad}${theme.fg("accent", "▍")} `;
+  const alt = `${bar}${theme.fg("dim", "[image png: scroll until it fits on screen]")}`;
+  return lines.map((line, index) => ({ text: index === 0 ? `${bar}${line}` : bar.trimEnd(), image: { index, height: lines.length, alt } }));
+}
+
 /** The expanded part of a cell: its code, what it printed, what it output. */
-function expandedRows(cell: Cell, theme: FrameTheme): string[] {
-  const out: string[] = [];
+function expandedRows(cell: Cell, theme: FrameTheme, opts: RowOptions = {}): Array<string | Row> {
+  const out: Array<string | Row> = [];
   const pad = "      ";
   const code = cell.code.replace(/\s+$/u, "").split("\n");
   for (const line of code.slice(0, MAX_CODE_LINES)) out.push(`${pad}${theme.fg("dim", "│")} ${clean(line)}`);
@@ -76,7 +104,9 @@ function expandedRows(cell: Cell, theme: FrameTheme): string[] {
   const printed = cell.console ?? [];
   for (const l of printed) out.push(`${pad}${theme.fg("dim", "▍")} ${l.stream === "stderr" ? theme.fg("warning", clean(l.text)) : clean(l.text)}`);
   const output = cell.output;
-  if (output) {
+  const inline = output?.image && getCapabilities().images ? inlineImage(output, theme, pad, opts) : undefined;
+  if (inline) out.push(...inline);
+  else if (output) {
     const text = output.kind === "text" || output.kind === "other" ? output.text : theme.fg("dim", output.text);
     const lines = text.split("\n");
     for (const line of lines.slice(0, MAX_OUTPUT_LINES)) out.push(`${pad}${theme.fg("accent", "▍")} ${clean(line)}`);
@@ -131,14 +161,14 @@ export function notebookRows(nb: NotebookState, theme: FrameTheme, now: number, 
       text: `${here ? theme.fg("accent", open ? "▾" : "▸") : " "} ${icon(cell)} ${here ? theme.bold(label) : theme.fg("muted", label)}${marked ? ` ${theme.fg("warning", marked.join(" "))}` : ""}  ${what}${notes.length ? `  ${notes.join(theme.fg("dim", " · "))}` : ""}`,
     });
     if (cell.error) rows.push({ text: `      ${theme.fg("error", truncate(cell.error, 200))}` });
-    if (open) for (const text of expandedRows(cell, theme)) rows.push({ text });
+    if (open) for (const r of expandedRows(cell, theme, opts)) rows.push(typeof r === "string" ? { text: r } : r);
   }
   return { rows, ...(running !== undefined ? { running } : {}), cellRows };
 }
 
 /** The notebook as display lines (see notebookRows). */
 export function notebookLines(nb: NotebookState, theme: FrameTheme, now: number, opts: RowOptions = {}): { lines: string[]; running?: number } {
-  const { rows, running } = notebookRows(nb, theme, now, opts);
+  const { rows, running } = notebookRows(nb, theme, now, { ...opts, imageRows: 0 });
   return { lines: rows.map((r) => r.text), ...(running !== undefined ? { running } : {}) };
 }
 
@@ -449,7 +479,7 @@ export class NotebookView implements Component {
       // Following: the cursor stays on the running cell.
       if (this.follow && running && cells.some((c) => c.id === running.cell.id)) this.cursor = running.cell.id;
       if (!this.cursor || !cells.some((c) => c.id === this.cursor)) this.cursor = cells[0]?.id;
-      const built = notebookRows(nb, th, Date.now(), { cursor: this.cursor, expanded: this.expanded, filter: this.filter });
+      const built = notebookRows(nb, th, Date.now(), { cursor: this.cursor, expanded: this.expanded, filter: this.filter, imageRows: page - 1, width });
       const rows = built.rows;
       const max = Math.max(0, rows.length - page);
       const at = this.cursor !== undefined ? built.cellRows.get(this.cursor) : undefined;
@@ -467,11 +497,18 @@ export class NotebookView implements Component {
         const pick = at < this.scroll ? visible[0] : visible.at(-1);
         if (pick) {
           this.cursor = pick.id;
-          const again = notebookRows(nb, th, Date.now(), { cursor: this.cursor, expanded: this.expanded, filter: this.filter });
+          const again = notebookRows(nb, th, Date.now(), { cursor: this.cursor, expanded: this.expanded, filter: this.filter, imageRows: page - 1, width });
           rows.splice(0, rows.length, ...again.rows);
         }
       }
-      for (let i = 0; i < page; i++) out.push(row(rows[this.scroll + i]?.text ?? (this.filter && !cells.length && i === 0 ? th.fg("dim", `No cell matches "${this.filter}".`) : "")));
+      // An image draws only when its whole block is on screen; otherwise a note stands in for it.
+      const textOf = (at: number): string | undefined => {
+        const r = rows[at];
+        if (!r?.image) return r?.text;
+        const start = at - r.image.index;
+        return start >= this.scroll && start + r.image.height <= this.scroll + page ? r.text : r.image.index === 0 ? r.image.alt : r.text;
+      };
+      for (let i = 0; i < page; i++) out.push(row(textOf(this.scroll + i) ?? (this.filter && !cells.length && i === 0 ? th.fg("dim", `No cell matches "${this.filter}".`) : "")));
     }
     out.push(rule);
     out.push(row(this.footer(f, width - 4)));

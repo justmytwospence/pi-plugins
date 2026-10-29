@@ -5,6 +5,8 @@ export type OutputKind = "text" | "table" | "image" | "chart" | "other";
 export interface CellOutput {
   kind: OutputKind;
   text: string;
+  /** A PNG the view can draw inline (base64, no data: prefix), when the output is small enough. */
+  image?: { mime: "image/png"; data: string };
 }
 
 export interface ConsoleLine {
@@ -13,6 +15,13 @@ export interface ConsoleLine {
 }
 
 const MAX_TEXT = 8_000;
+/** Largest PNG kept for inline drawing, as base64 characters (about 1.5 MB of image). */
+const MAX_IMAGE = 2_000_000;
+
+const pngOf = (data: string): CellOutput["image"] | undefined => {
+  const b64 = data.replace(/^data:image\/png;base64,/iu, "").replace(/\s+/gu, "");
+  return b64.length > 0 && b64.length <= MAX_IMAGE && /^[A-Za-z0-9+/]+=*$/u.test(b64) ? { mime: "image/png", data: b64 } : undefined;
+};
 const MAX_CONSOLE_LINES = 40;
 
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
@@ -53,13 +62,20 @@ export function summarizeOutput(raw: unknown): CellOutput | undefined {
   const data = output.data;
   if (output.channel === "marimo-error" || mime.includes("marimo+error") || mime.includes("marimo+traceback")) return undefined;
   if (data === null || data === undefined || data === "") return undefined;
-  if (mime.startsWith("image/")) return { kind: "image", text: `[image ${mime.slice(6)}]` };
+  if (mime.startsWith("image/")) {
+    const image = mime === "image/png" && typeof data === "string" ? pngOf(data) : undefined;
+    return { kind: "image", text: `[image ${mime.slice(6)}]`, ...(image ? { image } : {}) };
+  }
   if (/vega|plotly|altair|bokeh/iu.test(mime)) return { kind: "chart", text: `[chart ${mime}]` };
   if (mime === "text/html" && typeof data === "string") {
     const table = /<marimo-table\b[^>]*?data-total-rows=(?:"|&quot;)?(\d+)/iu.exec(data);
     if (table) return { kind: "table", text: `[table, ${table[1]} row${table[1] === "1" ? "" : "s"}]` };
     if (/<marimo-table\b/iu.test(data)) return { kind: "table", text: "[table]" };
+    // matplotlib and PIL figures arrive as an <img> with a PNG data URL.
+    const img = /<img\b[^>]*?\bsrc=["']?(data:image\/png;base64,[A-Za-z0-9+/=\s]+)/iu.exec(data);
+    const embedded = img ? pngOf(img[1]!) : undefined;
     const text = htmlToText(data);
+    if (embedded && !text) return { kind: "image", text: "[image png]", image: embedded };
     if (text) return { kind: "text", text: clip(text) };
     if (/<(?:img|svg|iframe|canvas|marimo-[a-z-]+)\b/iu.test(data)) return { kind: "chart", text: "[interactive output: o opens the notebook]" };
     return undefined;

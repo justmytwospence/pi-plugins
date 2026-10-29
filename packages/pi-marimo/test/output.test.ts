@@ -9,7 +9,7 @@ describe("cell output for the notebook view", () => {
     expect(htmlToText("<div><b>a</b> &amp; b</div><p>second</p><script>x()</script>")).toBe("a & b\nsecond");
     expect(summarizeOutput({ channel: "output", mimetype: "text/plain", data: "42" })).toEqual({ kind: "text", text: "42" });
     expect(summarizeOutput({ channel: "output", mimetype: "text/html", data: '<marimo-table data-total-rows="12" data-data="[]"></marimo-table>' })).toEqual({ kind: "table", text: "[table, 12 rows]" });
-    expect(summarizeOutput({ channel: "output", mimetype: "image/png", data: "iVBOR" })).toEqual({ kind: "image", text: "[image png]" });
+    expect(summarizeOutput({ channel: "output", mimetype: "image/png", data: "iVBOR" })).toMatchObject({ kind: "image", text: "[image png]" });
     expect(summarizeOutput({ channel: "output", mimetype: "application/vnd.vegalite.v5+json", data: "{}" })?.kind).toBe("chart");
     expect(summarizeOutput({ channel: "output", mimetype: "text/html", data: "<marimo-plotly data-figure='x'></marimo-plotly>" })?.kind).toBe("chart");
     expect(summarizeOutput({ channel: "output", mimetype: "text/plain", data: "" })).toBeUndefined();
@@ -65,5 +65,17 @@ describe("running cells", () => {
   test("a rejected run throws with marimo's status", async () => {
     const fetchImpl = async (_url: string, init?: { method?: string }) => init?.method === "POST" ? { ok: false, status: 500, text: async () => "" } : { ok: true, status: 200, text: async () => '<html data-token="t5">' };
     await expect(runCells({ url: "http://h:2", sessionId: "s" }, [{ id: "a", code: "" }], undefined, fetchImpl as never)).rejects.toThrow("marimo answered 500");
+  });
+});
+
+describe("inline images", () => {
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAAFUlEQVR42mP8z8BQz0AEYBxVSF+FABJADveWkH6oAAAAAElFTkSuQmCC";
+  test("a png output, bare or as a data URL in an <img>, keeps its bytes; other images and huge ones do not", () => {
+    expect(summarizeOutput({ channel: "output", mimetype: "image/png", data: png })?.image).toEqual({ mime: "image/png", data: png });
+    expect(summarizeOutput({ channel: "output", mimetype: "image/png", data: `data:image/png;base64,${png}` })?.image?.data).toBe(png);
+    const html = summarizeOutput({ channel: "output", mimetype: "text/html", data: `<img src='data:image/png;base64,${png}'/>` });
+    expect(html).toMatchObject({ kind: "image", image: { data: png } });
+    expect(summarizeOutput({ channel: "output", mimetype: "image/jpeg", data: png })?.image).toBeUndefined();
+    expect(summarizeOutput({ channel: "output", mimetype: "image/png", data: "A".repeat(2_000_001) })?.image).toBeUndefined();
   });
 });

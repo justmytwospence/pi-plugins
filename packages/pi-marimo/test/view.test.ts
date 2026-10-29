@@ -2,7 +2,8 @@ import { expect, test, vi } from "vitest";
 import { NotebookState } from "../src/core/notebook.js";
 import type { Followed } from "../src/core/watcher.js";
 import { INPUT_CONTEXT } from "../src/activity.js";
-import { NotebookView } from "../src/ui/view.js";
+import { NotebookView, notebookLines } from "../src/ui/view.js";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { NotebookSource } from "../src/ui/source.js";
 import { notebookKey } from "../src/ui/identity.js";
 
@@ -252,4 +253,25 @@ test("S stops the server the notebook's row stands for, after a second press, an
     expect(stopServers).toHaveBeenCalledExactlyOnceWith(f);
     expect(screen(v)).toContain("Stopping the marimo server");
   } finally { v.dispose(); }
+});
+
+test("a png output draws inline only when its whole block is on screen, and only on a terminal that shows images", async () => {
+  const { setCapabilities } = await import("@earendil-works/pi-tui");
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAAFUlEQVR42mP8z8BQz0AEYBxVSF+FABJADveWkH6oAAAAAElFTkSuQmCC";
+  const f = nbWith([{ id: "a", code: "plot()" }]);
+  f.notebook.apply("cell-op", { cell_id: "a", status: "idle", output: { channel: "output", mimetype: "image/png", data: png } });
+  const v = make(f);
+  try {
+    setCapabilities({ images: null, trueColor: true, hyperlinks: false } as any);
+    v.handleInput("l");
+    expect(screen(v)).toContain("[image png]");
+    expect(screen(v)).not.toContain("\x1b_G");
+    setCapabilities({ images: "kitty", trueColor: true, hyperlinks: false } as any);
+    v.invalidate?.();
+    const shown = v.render(100);
+    expect(shown.filter((l) => l.includes("\x1b_G"))).toHaveLength(1);
+    expect(shown.every((l) => visibleWidth(l) === 100)).toBe(true);
+    // The agent-facing outline never carries image escapes.
+    expect(notebookLines(f.notebook, theme2, 0, { expanded: new Set(["a"]) }).lines.join("\n")).not.toContain("\x1b_G");
+  } finally { v.dispose(); setCapabilities({ images: null, trueColor: true, hyperlinks: false } as any); }
 });
