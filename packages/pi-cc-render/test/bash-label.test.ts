@@ -53,6 +53,7 @@ describe("bashLabel", () => {
 		["cat > /tmp/a.txt <<EOF\na\nb\nEOF", "Write /tmp/a.txt (2 lines)"],
 		["ls -la ~/.pi/agent", "List ~/.pi/agent"],
 		["ssh spencer@nuc 'which shfmt'", "On nuc: which shfmt"],
+		["docker ps --format '{{.Names}}' --filter status=running", "docker ps"],
 		["npx vitest run", "Run vitest (npx)"],
 		["uv run pytest -q", "Run pytest (uv)"],
 		["FOO=1 sudo docker compose logs foo", "docker compose logs foo"],

@@ -592,7 +592,9 @@ function describeStep(step: Step, depth: number): string | undefined {
 	if (PACKAGE_MANAGERS.has(program)) return describePackageManager(program, args);
 	if (SCRIPT_RUNNERS.has(program) || /^python3?\.\d+$/.test(program)) return describeScriptRunner(program, step, args);
 	if (SUBCOMMAND_TOOLS.has(program)) {
-		const rest = positionals(args, new Set(["-f", "-n", "-p", "--namespace", "--context", "--profile", "--region"]));
+		const values = new Set(["-f", "-n", "-p", "-o", "--namespace", "--context", "--profile", "--region", "--format", "--filter", "--output", "--tail", "--since"]);
+		// Subcommand words only: option values such as `--format '{{.Names}}'` are not part of the name
+		const rest = positionals(args, values).filter((word) => /^\w[\w.-]*$/.test(word));
 		return rest.length ? `${program} ${clipText(rest.slice(0, program === "docker" ? 3 : 2).join(" "), 40)}` : program;
 	}
 	const first = positionals(args)[0];
