@@ -53,7 +53,7 @@ If the notebook is outside the current directory, use `/marimo` to pin it instea
 
 ## What enters model context
 
-At each prompt, pi-marimo captures followed notebooks once. The current notebook receives the full outline and code-cell summaries; other notebooks receive shorter outlines and cells needing attention. Summaries identify definitions, running or queued work, errors, stale cells, edits not rerun, and detected browser changes since the preceding turn. Cell outputs are discarded by the watcher.
+At each prompt, pi-marimo captures followed notebooks once. The current notebook receives the full outline and code-cell summaries; other notebooks receive shorter outlines and cells needing attention. Summaries identify definitions, running or queued work, errors, stale cells, edits not rerun, and detected browser changes since the preceding turn. The watcher keeps a cell's last output and console only for the notebook view; neither reaches the model's context.
 
 That block stays immediately after the prompt for every model request in the turn. It is not saved as permanent session history. Keeping it fixed avoids changing the prefix before newly generated thinking blocks during the same turn.
 
@@ -72,11 +72,26 @@ Selection images, agent activity and reveals are not read. pi-marimo never resol
 
 ## Live view and kernel control
 
-The footer gives every notebook this session uses a line of its own (status keys `marimo`, `marimo-2`, ... in file-path order), with its file, running heading path, elapsed time, queued cells, and errors. In the turn's context, the current notebook and any other the agent worked in during the last three prompts are in full; the rest are outlines. Each notebook comes with the marimo-pair flags that name it, and a marimo-pair call that could mean several followed notebooks gets a note on its result listing them, since pi-marimo cannot count it as work in any. A running server whose notebook is open in no browser gets a `not open` line too (`marimo: 0_kcore.py · :2718 · not open`, for servers under the working directory that serve one notebook; pinned ones when pinned). Its name is a terminal hyperlink to the server: in Pi's fullscreen TUI a click opens it (`open` on macOS, `xdg-open` elsewhere), and `/marimo open` does the same from the keyboard. A prompt pill appears during running or queued work, with a failure indicator retained until your next message.
+The footer gives every notebook this session uses a line of its own (status keys `marimo`, `marimo-2`, ... in file-path order), with its file, running heading path, elapsed time, queued cells, and errors. In the turn's context, the current notebook and any other the agent worked in during the last three prompts are in full; the rest are outlines. Each notebook comes with the marimo-pair flags that name it, and a marimo-pair call that could mean several followed notebooks gets a note on its result listing them, since pi-marimo cannot count it as work in any. A running server whose notebook is open in no browser gets a `not open` line too (`marimo: 0_kcore.py · :2718 · not open`, for servers under the working directory that serve one notebook; pinned ones when pinned). Its name is a terminal hyperlink to the server: in Pi's fullscreen TUI a click opens it (`open` on macOS, `xdg-open` elsewhere), and `/marimo open` does the same from the keyboard. A prompt pill under the editor counts the live notebooks (`6 notebooks`, idle ones too), adds `· 1 running` while a cell runs, and shows a failure indicator until your next message. `↓` at the bottom of the prompt (or Tab, with pi-select-nav) selects it and Enter opens the notebook list (pi-bg's `/tasks`), where Enter opens a notebook's view.
 
-In the notebook view, `j`/`k` scroll, Tab switches notebooks, `o` opens the notebook in a browser, and Esc or `h` returns to Pi. Press `x` twice to interrupt the kernel.
+The notebook view opens with a header (kernel state, cell, stale and error counts, the last run, the pi-bg server) above the outline, and follows the running cell until you move.
 
-The observation connection is a read-only kiosk SSE consumer: it neither edits cells nor takes over the browser session. The explicit interrupt action is a separate kernel-control request, so “read-only observation” does not mean every UI action is passive. Browser opening uses the platform's `open` or `xdg-open` utility.
+| Key | Action |
+| --- | --- |
+| `j` / `k`, arrows | Move the cursor between cells |
+| `Ctrl-U` / `Ctrl-D`, `PgUp` / `PgDn`, `g` / `G` | Scroll; first and last cell |
+| `Enter`, `l` | Expand the cell: its code, console lines and last output (HTML as text; tables, images and charts are named, so press `o` to see a chart) |
+| `n` / `N` | Jump to the next or previous failed cell |
+| `f` | Follow the running cell again |
+| `/` | Filter cells by name, variable or code; `Esc` clears it |
+| `r` | Run the cell under the cursor, with its current code |
+| `R` / `A` | Run every stale cell, or every cell (press twice) |
+| `x` | Press twice to interrupt the kernel |
+| `S` | Press twice to stop the pi-bg server this notebook stands for (with pi-bg) |
+| `Tab`, `o` | Next notebook; open in the browser |
+| `Esc`, `q`, `h` | Back to Pi |
+
+The observation connection is a read-only kiosk SSE consumer: it neither edits cells nor takes over the browser session. The interrupt and run actions are separate kernel-control requests (`/api/kernel/interrupt`, `/api/kernel/run`), so “read-only observation” does not mean every UI action is passive. Browser opening uses the platform's `open` or `xdg-open` utility.
 
 When multiple marimo sessions hold the same file, attachment uses the exact session ID. In that situation, browser edits may not be visible until they execute. Connection status should therefore be checked before treating an outline as authoritative.
 
