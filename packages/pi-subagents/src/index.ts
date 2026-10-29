@@ -96,6 +96,38 @@ export function promptGuidelines(delegation: unknown): string[] {
   ];
 }
 
+/**
+ * `subagents:role-model`: another extension asks which model and effort a role gets for a parent on
+ * `parent` (pi-plan-mode, for the model that implements a handed-off plan). Answered synchronously by
+ * setting `reply`, with no Jev call: the role's profile on the parent's provider, else the balanced
+ * tier, else the parent's model, as an implicit pick resolves it.
+ */
+export const ROLE_MODEL = "subagents:role-model";
+export interface RoleModelRequest {
+  role: string;
+  /** `provider/id` */
+  parent: string;
+  thinking?: string;
+  reply?: { model: string; thinking: string; source: ChoiceSource["model"] };
+}
+export function roleModel(
+  data: unknown,
+  agents: readonly AgentDef[],
+  config: Pick<SubagentsConfig, "tiers" | "providerTiers" | "tierDescriptions">,
+  available: readonly AvailableModel[],
+  fallbackThinking: string,
+): RoleModelRequest["reply"] | undefined {
+  if (!data || typeof data !== "object") return undefined;
+  const request = data as Partial<RoleModelRequest>;
+  if (request.reply) return undefined;
+  if (typeof request.role !== "string" || typeof request.parent !== "string" || !/^[^/]+\/.+/u.test(request.parent)) return undefined;
+  const tiers = { models: providerTiers(request.parent, config.tiers, config.providerTiers, available), descriptions: config.tierDescriptions };
+  const thinking = request.thinking || fallbackThinking;
+  const resolved = resolve({ agent: request.role }, agents, undefined, tiers, { model: request.parent, thinking }, { available });
+  if ("error" in resolved || !resolved.model) return undefined;
+  return { model: resolved.model, thinking: resolved.thinking, source: resolved.source.model };
+}
+
 /** `quota:pressure` from pi-auto-effort: how close a provider is to its usage limit. */
 export const QUOTA_PRESSURE = "quota:pressure";
 export interface QuotaPressure {
@@ -567,6 +599,12 @@ export default function subagents(pi: ExtensionAPI) {
       // The runtime went stale between the check and the call.
     }
   };
+  pi.events.on(ROLE_MODEL, (data) => {
+    const ctx = sessionCtx;
+    if (!live || !ctx) return;
+    const reply = roleModel(data, discoverAgents(ctx.cwd), config, (ctx.modelRegistry?.getAll?.() ?? []) as AvailableModel[], pi.getThinkingLevel());
+    if (reply) (data as RoleModelRequest).reply = reply;
+  });
   /**
    * Results owed to the agent. Sent only while pi is idle: a follow-up queued during a turn is
    * dropped when the user presses Esc. Several that pile up go out as one message.
