@@ -121,7 +121,17 @@ export function disableOfficialScrollToEnd(tui: any): void {
 	if (!tui[OFFICIAL_SCROLL_TO_END_KEY]) {
 		tui[OFFICIAL_SCROLL_TO_END_KEY] = { original: current };
 	}
-	tui.scrollToEndIndicator = undefined;
+	// Replace rather than remove: Pi composites this label over the transcript's last row (an overlay that
+	// takes no dock row) and handles the click itself. Only the wording and colors are ours.
+	tui.scrollToEndIndicator = scrollIndicatorLabel;
+}
+
+let scrollIndicatorTheme: any = null;
+
+function scrollIndicatorLabel(): string {
+	const text = `[ ↓ ${scrollButtonText()} ]`;
+	if (!scrollIndicatorTheme) return text;
+	return scrollIndicatorTheme.fg(getScrollButtonHovered() ? "text" : "accent", text);
 }
 
 /** Restores the host overlay on /ccstyle off or teardown. */
@@ -291,12 +301,8 @@ function scrollButtonText(): string {
 	return `${count} new message${count === 1 ? "" : "s"} · ${shortcut}`;
 }
 
-export function renderScrollButton(width: number, theme: any): string[] {
-	if (!getScrollButtonVisible() || !fullscreenLazyTui(getToolMouseTui())) return [];
-	const label = theme.fg(
-		getScrollButtonHovered() ? "text" : "accent",
-		`[ ↓ ${scrollButtonText()} ]`,
-	);
-	const leftPad = Math.max(0, Math.floor((width - visibleWidth(label)) / 2));
-	return [`${" ".repeat(leftPad)}${truncateToWidth(label, width, "…")}`];
+/** The button is Pi's own overlay on the transcript's last row (see disableOfficialScrollToEnd); it has no dock row. */
+export function renderScrollButton(_width: number, theme: any): string[] {
+	scrollIndicatorTheme = theme;
+	return [];
 }
