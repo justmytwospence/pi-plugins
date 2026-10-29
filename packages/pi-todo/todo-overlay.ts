@@ -142,16 +142,24 @@ export class TodoOverlay {
 	 */
 	private tail: { render(width: number): string[]; invalidate(): void } | undefined;
 	private tailDoc: { children?: unknown[]; addChild(c: unknown): void; removeChild(c: unknown): void } | undefined;
+	/** The scroll view around the document, for its viewport and content heights. */
+	private tailView: { viewportHeight?: number; contentHeight?: number } | undefined;
+	/** Rows the tail returned on its last render, to tell the rest of the document's height from the total. */
+	private lastTailRows = 0;
+	private lastTotal = -1;
+	private lastPad = 0;
 
-	private findDocument(): TailDoc | undefined {
+	private findDocument(): { doc: TailDoc; view: NonNullable<TodoOverlay["tailView"]> } | undefined {
 		const seen = new Set<unknown>();
-		const walk = (node: unknown, depth: number): TailDoc | undefined => {
+		const walk = (node: unknown, depth: number): { doc: TailDoc; view: NonNullable<TodoOverlay["tailView"]> } | undefined => {
 			if (!node || typeof node !== "object" || seen.has(node) || depth > 6) return undefined;
 			seen.add(node);
 			const c = node as { primary?: unknown; scrollToEnd?: unknown; child?: unknown; entries?: { component?: unknown }[] };
 			if (c.primary === true && typeof c.scrollToEnd === "function") {
 				const doc = c.child as Partial<TailDoc> | undefined;
-				if (doc && typeof doc.addChild === "function" && typeof doc.removeChild === "function") return doc as TailDoc;
+				if (doc && typeof doc.addChild === "function" && typeof doc.removeChild === "function") {
+					return { doc: doc as TailDoc, view: node as NonNullable<TodoOverlay["tailView"]> };
+				}
 			}
 			for (const entry of Array.isArray(c.entries) ? c.entries : []) {
 				const found = walk(entry?.component, depth + 1);
@@ -165,8 +173,10 @@ export class TodoOverlay {
 
 	private ensureTail(): void {
 		if (!this.tui) return;
-		const doc = this.tailDoc ?? this.findDocument();
+		const found = this.tailDoc ? undefined : this.findDocument();
+		const doc = this.tailDoc ?? found?.doc;
 		if (!doc) return;
+		if (found) this.tailView = found.view;
 		if (!this.tail) {
 			this.tail = {
 				render: (width: number) => {
@@ -175,7 +185,27 @@ export class TodoOverlay {
 					const lines = this.renderWidget(theme, width);
 					// No trailing blank: the dock's own spacer above the editor already provides one.
 					while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
-					return lines.length > 0 ? ["", ...lines] : lines;
+					if (lines.length === 0) {
+						this.lastTailRows = 0;
+						return lines;
+					}
+					// A transcript shorter than the window leaves the panel right under it; push it down to the
+					// bottom of the window, just above the editor. Measured from the previous frame.
+					const view = this.tailView;
+					const viewport = view?.viewportHeight ?? 0;
+					const total = view?.contentHeight ?? 0;
+					// A render without a new frame in between (same total) keeps the pad, so it cannot oscillate.
+					if (total !== this.lastTotal) {
+						const others = Math.max(0, total - this.lastTailRows);
+						this.lastPad = viewport > 0 ? Math.max(0, viewport - others - lines.length - 1) : 0;
+						this.lastTotal = total;
+					}
+					const pad = this.lastPad;
+					const out = [...Array<string>(pad).fill(""), "", ...lines];
+					const changed = out.length !== this.lastTailRows;
+					this.lastTailRows = out.length;
+					if (changed) queueMicrotask(() => this.tui?.requestRender());
+					return out;
 				},
 				invalidate: () => {},
 			};
@@ -188,6 +218,10 @@ export class TodoOverlay {
 		if (this.tail && this.tailDoc) this.tailDoc.removeChild(this.tail);
 		this.tail = undefined;
 		this.tailDoc = undefined;
+		this.tailView = undefined;
+		this.lastTailRows = 0;
+		this.lastTotal = -1;
+		this.lastPad = 0;
 	}
 
 	private getSnapshot() {
