@@ -17,6 +17,14 @@ describe("cell output for the notebook view", () => {
     expect(summarizeOutput({ channel: "output", mimetype: "text/plain", data: "x".repeat(20_000) })!.text.length).toBeLessThanOrEqual(8_000);
   });
 
+  test("mo.md output (text/markdown carrying HTML) becomes text, not raw HTML", () => {
+    const data = '<span class="markdown prose dark:prose-invert contents"><h2 id="a">Slow fit</h2><span class="paragraph">Some text.</span></span>';
+    const out = summarizeOutput({ channel: "output", mimetype: "text/markdown", data });
+    expect(out?.kind).toBe("text");
+    expect(out?.text).toContain("Slow fit");
+    expect(out?.text).not.toContain("<span");
+  });
+
   test("console lines append per message, a cleared console empties, a rerun starts over", () => {
     let lines = appendConsole(undefined, [{ channel: "stdout", mimetype: "text/plain", data: "one\ntwo\n" }]);
     lines = appendConsole(lines, { channel: "stderr", mimetype: "text/plain", data: "warn\n" });

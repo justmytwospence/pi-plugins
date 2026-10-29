@@ -32,11 +32,11 @@ interface Ended {
   summary: string;
 }
 
-/** `Marimo fit.py:2718 · running Model fit 0:12 · 2 queued · 1 error: ...`: the notebook as the footer drew it, in the same colors. */
+/** `fit.py:2718 · running Model fit 0:12 · 2 queued · 1 error: ...`: the notebook as the footer drew it, in the same colors. */
 export function footerLine(name: string, where: string | undefined, parts: string[] | ((th: ActivityTheme) => string[]), waiting = false) {
   return (th: ActivityTheme): string => {
     const label = waiting ? th.fg("muted", name) : th.bold(th.fg("accent", name));
-    const head = `${th.fg("muted", "Marimo")} ${label}${where ? `${where.startsWith(":") ? "" : " "}${th.fg("dim", where)}` : ""}`;
+    const head = `${label}${where ? `${where.startsWith(":") ? "" : " "}${th.fg("dim", where)}` : ""}`;
     const rest = typeof parts === "function" ? parts(th) : parts;
     return [head, ...rest.filter(Boolean)].join(th.fg("dim", " · "));
   };

@@ -299,6 +299,8 @@ export function summarizeOutput(raw: unknown): CellOutput | undefined {
     const vega = /vnd\.vega(?:lite)?\b/iu.test(mime) ? vegaOf(data) : undefined;
     return { kind: "chart", text: `[chart ${mime}]`, ...(vega ? { vega } : {}) };
   }
+  // mo.md arrives as text/markdown whose data is already HTML.
+  if (mime === "text/markdown" && typeof data === "string") return summarizeOutput({ ...output, mimetype: "text/html" });
   if (mime === "text/html" && typeof data === "string") {
     const widgets = parseWidgets(data);
     const extra = widgets.length ? { widgets } : {};
