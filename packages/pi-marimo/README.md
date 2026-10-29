@@ -120,9 +120,17 @@ From 100 columns the panes sit side by side. Narrower, the outline fills the vie
 | `S` | twice: stop the server (pi-bg's, or one Pi started) |
 | Tab, Shift+Tab | the next or previous notebook |
 | `?` | every key |
-| Esc, `q`, `h`, `←`, Ctrl+C | back to Pi |
+| `\|` | dock beside the chat, or back to full screen |
+| `ctrl+]` | docked: switch between the chat and the notebook |
+| Esc, `q`, `h`, `←`, Ctrl+C | back to Pi (docked: Esc goes to the chat, `q` closes) |
 
 The mouse wheel scrolls the pane under it, a click selects a cell (or a widget), a second click or a double click opens its code, and a click on the `▸ code` line folds or opens it.
+
+#### Docked beside the chat
+
+`|` in the full-screen view docks the notebook beside the chat instead (and `|` again goes back to full screen), keeping your place. `/marimo split [file]` docks the busiest notebook, or the one named; with no file while docked it closes the split. With `view.split` set, Enter on a row and `/marimo view` open docked. When the agent starts running a notebook's cells while it works, the notebook docks by itself without taking focus (`view.autoSplit`); it does not when the split is already open, a full-screen view is open, pi-sidebar is open, or you closed the split since your last message. Runs you start from the browser never move your screen.
+
+The chat reflows into its half, so you keep typing while the notebook runs. `ctrl+]` (or Herdr's `prefix+h`/`prefix+l`, with pi-sidebar's Herdr plugin) moves focus between the chat and the notebook, a click in a half focuses it, Esc in the notebook goes back to the chat and `q` closes the split. The notebook gets 55% of the width; drag the divider to resize (for the rest of the Pi process, not saved). While a Pi dialog is up the split collapses and the chat has the full width. [pi-sidebar](https://pi-plugins.vercel.app/plugins/pi-sidebar/) uses the same right-hand side: opening one closes the other. Docking needs Pi's fullscreen mode (`"tuiMode": "fullscreen"` in Pi's settings); otherwise the view opens full screen.
 
 ### Pairing from the view
 
@@ -138,6 +146,7 @@ The mouse wheel scrolls the pane under it, a click selects a cell (or a widget),
 |---|---|
 | `/marimo` | a checklist of open notebooks (any number, from anywhere) to pin; pick to toggle, then Done; also offers Auto and Off |
 | `/marimo view [file]` | the busiest notebook (running, else failed, else the current one), or the one named, in the notebook view |
+| `/marimo split [file]` | dock the busiest notebook, or the one named, beside the chat; again with no file: close it |
 | `/marimo edit [file]` | open a notebook here, starting its server when none serves it |
 | `/marimo new <file.py>` | create a notebook, start it and open it |
 | `/marimo stop [file]` | stop a notebook server Pi started |
@@ -183,6 +192,8 @@ The view's actions are separate requests to the session's kernel endpoints, as t
 | `context` | `true` | put the notebooks' state in the model's context at each prompt |
 | `liveCharts` | `true` | run Plotly figures live in the view and the transcript; `false` draws pictures |
 | `view.outputs` | `false` | start the notebook view with the whole section in the detail (`O` toggles it) |
+| `view.split` | `false` | open the notebook view docked beside the chat (Pi's fullscreen mode) |
+| `view.autoSplit` | `true` | dock a notebook beside the chat when the agent starts running its cells |
 | `server.command` | `[]` | how `/marimo edit` and `/marimo new` start marimo, e.g. `["uvx", "--with", "pandas", "marimo"]`; empty: `uv run marimo` in a uv project, else `marimo` |
 
 | variable | |

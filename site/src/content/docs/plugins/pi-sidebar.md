@@ -13,7 +13,7 @@ plugin: pi-sidebar
 - **Requirements, cost & privacy:** Requires Pi's fullscreen mode. On main's model, each question reads main's context from main's cache, plus a small new part, and Sidebar asks first when that cache has probably expired. On another model, the first question reads main's transcript uncached once, and later ones read it from that model's own cache. The thread is stored as hidden entries in main's session.
 - **Integrations & limits:** Works with Anthropic Messages, OpenAI Responses (including Codex) and Chat Completions. Sidebar uses main's tools, skills and templates; a guard refuses calls that would change anything, but it is not a sandbox. An optional pi-vim composer is supported. Sidebar steps aside while a dialog waits in main.
 
-`pi-sidebar` splits Pi's fullscreen layout in two. Main's transcript, editor and footer reflow into one half, and Sidebar fills the other: side by side when each half keeps 80 columns, otherwise below main.
+`pi-sidebar` splits Pi's fullscreen layout in two. Main's transcript, editor and footer reflow into one half, and Sidebar fills the other: side by side when each half keeps 80 columns, otherwise below main. Sidebar shares the right-hand side with pi-marimo's docked notebook view: opening one closes the other (event `pi-plugins.side-panel.v1`).
 
 Sidebar is a second agent inside main's Pi process. It sees main's latest state:
 - everything main has committed;
