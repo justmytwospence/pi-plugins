@@ -330,9 +330,9 @@ test("pill rows (notebooks): listed above the label, selected and opened like ru
   expect(idle[1]).toMatch(/^ ● b\.py {2}:2719 · running Fit +0:12$/u);
   expect(ui.press(KEY.down)).toBe(true);
   expect(ui.render("subagents-fleet")[0]).toContain("↑/↓ select · enter view");
-  expect(ui.render("subagents-fleet")[1]).toMatch(/^ ›○ a\.py/u);
+  expect(ui.render("subagents-fleet")[1]).toMatch(/^›○ a\.py/u);
   expect(ui.press(KEY.down)).toBe(true);
-  expect(ui.render("subagents-fleet")[2]).toMatch(/^ ›● b\.py/u);
+  expect(ui.render("subagents-fleet")[2]).toMatch(/^›● b\.py/u);
   expect(ui.press(KEY.enter)).toBe(true);
   await new Promise((r) => setTimeout(r, 0));
   expect(opened).toEqual(["b"]);
