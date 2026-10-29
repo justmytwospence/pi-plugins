@@ -1,7 +1,7 @@
 // A notebook chart in the chat transcript: the same live chart as the notebook view (a page of the
 // sandboxed browser, frames drawn in place), shown under a one-line caption. The mouse over it goes
 // to the page; `/marimo inspect` drives the latest one from the keyboard.
-import { type Component, Image, type TuiMouseEvent, type TuiMouseEventResult, getCapabilities, truncateToWidth } from "@earendil-works/pi-tui";
+import { type Component, Image, type TuiMouseEvent, type TuiMouseEventResult, getCapabilities, getPngDimensions, truncateToWidth } from "@earendil-works/pi-tui";
 import type { CellOutput } from "../core/output.js";
 import { LiveCharts, liveGeometry } from "./live-charts.js";
 import { Painter } from "./painter.js";
@@ -42,10 +42,14 @@ export class ChatChart implements Component {
   private readonly output: CellOutput;
   readonly live: LiveCharts;
   private image: Image | undefined;
+  private readonly tui: () => unknown;
+  /** A picture drawn by the painter: its slot and size. */
+  private still: { slot: number; geometry: { cols: number; rows: number } } | undefined;
 
   constructor(readonly entry: ChartEntry, private readonly theme: Theme, requestRender: () => void, live?: LiveCharts, tui?: () => unknown) {
     this.output = { kind: "chart", text: entry.label, ...(entry.plotly ? { plotly: entry.plotly } : {}) };
-    this.live = live ?? new LiveCharts(requestRender, undefined, undefined, undefined, () => Painter.for(tui?.()));
+    this.tui = () => tui?.();
+    this.live = live ?? new LiveCharts(requestRender, undefined, undefined, undefined, () => Painter.for(this.tui()));
     charts.push(this);
     if (charts.length > 8) charts.shift()?.dispose();
   }
@@ -66,6 +70,18 @@ export class ChatChart implements Component {
         return lines;
       }
       lines.push(th.fg("dim", `${pad}${state.status === "opening" ? "[chart: starting…]" : `[chart: could not draw (${state.reason.slice(0, 100)})]`}`));
+      return lines;
+    }
+    const painter = this.entry.png && getCapabilities().images === "kitty" ? Painter.for(this.tui()) : undefined;
+    if (this.entry.png && painter) {
+      // Pictures go through the painter too, so they hide under overlays like the live charts.
+      if (!this.still) {
+        const dims = getPngDimensions(this.entry.png);
+        const geometry = liveGeometry(Math.min(MAX_COLS, width - LEFT - 1), MAX_ROWS, dims ? dims.heightPx / dims.widthPx : 0.6);
+        this.still = { slot: painter.add(geometry), geometry };
+        painter.present(this.still.slot, this.entry.png);
+      }
+      lines.push(...painter.lines(this.still.slot, this.still.geometry.rows).map((l, i) => (i === 0 ? `${pad}${l}` : "")));
       return lines;
     }
     if (this.entry.png && getCapabilities().images) {
@@ -92,6 +108,8 @@ export class ChatChart implements Component {
   }
 
   dispose(): void {
+    if (this.still) Painter.for(this.tui())?.remove(this.still.slot);
+    this.still = undefined;
     this.live.dispose();
   }
 }

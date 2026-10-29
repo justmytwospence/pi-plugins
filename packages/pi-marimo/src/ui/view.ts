@@ -271,7 +271,9 @@ export class NotebookView implements Component {
   ) {
     this.vega = vega;
     this.plotly = plotly;
-    this.live = live ?? new LiveCharts(() => { if (!this.closed) this.tui.requestRender(); }, undefined, undefined, undefined, () => Painter.for(this.tui));
+    this.live = live ?? new LiveCharts(() => { if (!this.closed) this.tui.requestRender(); }, undefined, undefined, undefined, () => Painter.for(this.tui), "overlay");
+    Painter.for(this.tui)?.setExclusive(true);
+    this.tui.requestRender();
     this.timer = setInterval(() => {
       if (!this.closed) {
         this.syncConfirmation();
@@ -630,6 +632,7 @@ export class NotebookView implements Component {
   }
 
   dispose(): void {
+    if (!this.closed) Painter.for(this.tui)?.setExclusive(false);
     this.closed = true;
     clearInterval(this.timer);
     this.live.dispose();

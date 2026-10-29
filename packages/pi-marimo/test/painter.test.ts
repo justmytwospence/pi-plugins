@@ -77,3 +77,45 @@ test("scrolled partly off the bottom the placement is cropped; with the marker g
   tui.doRender();
   expect(deletes(writes.at(-1)!)).toHaveLength(1);
 });
+
+test("a transcript chart under an overlay is taken away and comes back when the overlay closes; a chart inside the overlay stays", () => {
+  const { tui, writes } = fakeTui(["", "", "", ""]);
+  (tui as any).renderedOverlayLayouts = [];
+  const p = Painter.for(tui)!;
+  const base = p.add({ cols: 10, rows: 2 });
+  const inView = p.add({ cols: 10, rows: 2 }, "overlay");
+  p.present(base, PNG);
+  p.present(inView, PNG);
+  tui.screen[0] = marker(base);
+  tui.screen[2] = marker(inView);
+  tui.doRender();
+  expect(placements(writes.join(""))).toHaveLength(2);
+  writes.length = 0;
+  (tui as any).renderedOverlayLayouts = [{ row: 0, col: 0, width: 80, height: 4 }];
+  tui.doRender();
+  expect(deletes(writes.join(""))).toHaveLength(1);
+  expect(placements(writes.join(""))).toHaveLength(0);
+  writes.length = 0;
+  (tui as any).renderedOverlayLayouts = [];
+  tui.doRender();
+  expect(placements(writes.join(""))).toHaveLength(1);
+});
+
+test("while a full-screen view is open, images Pi places in the transcript are wiped after each render", () => {
+  const { tui, writes } = fakeTui(["", ""]);
+  const p = Painter.for(tui)!;
+  p.setExclusive(true);
+  tui.doRender();
+  expect(writes.join("")).toContain("a=d,d=a");
+  writes.length = 0;
+  tui.doRender();
+  expect(writes).toEqual([]);
+  tui.terminal.write("\x1b_Ga=T,f=100,i=5;AAAA\x1b\\");
+  tui.doRender();
+  expect(writes.at(-1)).toContain("a=d,d=a");
+  p.setExclusive(false);
+  writes.length = 0;
+  tui.terminal.write("\x1b_Ga=T,f=100,i=5;AAAA\x1b\\");
+  tui.doRender();
+  expect(writes).toEqual(["\x1b_Ga=T,f=100,i=5;AAAA\x1b\\"]);
+});

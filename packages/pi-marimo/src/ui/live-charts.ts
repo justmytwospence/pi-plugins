@@ -82,13 +82,14 @@ export class LiveCharts {
     private readonly write: Write = stdoutWrite,
     /** Draws frames without flicker where the TUI allows it (painter.ts); otherwise the lines place them. */
     private readonly painter: () => Painter | undefined = () => undefined,
+    private readonly layer: "base" | "overlay" = "base",
   ) {}
 
   /** Uploads a frame to the hidden buffer and shows it. */
   private present(state: Extract<LiveState, { status: "ready" }>, png: string): void {
     const painter = this.painter();
     if (painter) {
-      state.slot ??= painter.add(state.geometry);
+      state.slot ??= painter.add(state.geometry, this.layer);
       state.frame = png;
       painter.present(state.slot, png);
       return;

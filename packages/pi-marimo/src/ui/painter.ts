@@ -11,7 +11,13 @@ export interface PaintableTui {
   doRender(): void;
   terminal: { write(data: string): void; rows: number };
   fullRedraws?: number;
+  /** Where overlays were drawn in the last frame (pi-tui internals; optional). */
+  renderedOverlayLayouts?: Array<{ row: number; col: number; width: number; height: number }>;
+  hasOverlay?(): boolean;
 }
+
+/** Charts drawn in the transcript sit under overlays; charts drawn inside an overlay (the notebook view) do not. */
+export type Layer = "base" | "overlay";
 
 export interface Geometry {
   cols: number;
@@ -20,6 +26,7 @@ export interface Geometry {
 
 interface Slot {
   id: number;
+  layer: Layer;
   geometry: Geometry;
   buffers: [number, number];
   shown: 0 | 1;
@@ -61,6 +68,9 @@ export class Painter {
   private readonly write: (data: string) => void;
   /** Pi deleted placements (and maybe data) in what it last wrote. */
   private cleared: "placements" | "images" | undefined;
+  /** Full-screen views open (the notebook view): images of the transcript underneath are taken off the screen. */
+  private exclusive = 0;
+  private wipe = false;
 
   /** The painter for a TUI, hooking its renders once; undefined when the TUI cannot report its screen. */
   static for(tui: unknown): Painter | undefined {
@@ -81,6 +91,8 @@ export class Painter {
     terminal.write = (data: string) => {
       if (data.includes("a=d,d=A")) this.cleared = "images";
       else if (data.includes("a=d,d=a") && this.cleared !== "images") this.cleared = "placements";
+      // Pi places transcript images even under an overlay; while a view covers the screen they are wiped after the render.
+      if (this.exclusive && /\x1b_G[^;\x1b]*a=[Tp]/u.test(data)) this.wipe = true;
       original(data);
     };
     const render = tui.doRender.bind(tui);
@@ -90,10 +102,16 @@ export class Painter {
     };
   }
 
+  /** A full-screen view opens or closes. While one is open, no transcript image shows through it. */
+  setExclusive(open: boolean): void {
+    this.exclusive = Math.max(0, this.exclusive + (open ? 1 : -1));
+    if (open) this.wipe = true;
+  }
+
   /** A new chart slot; its rows are `lines()`, its frames go through `present()`. */
-  add(geometry: Geometry): number {
+  add(geometry: Geometry, layer: Layer = "base"): number {
     const id = this.nextSlot++;
-    this.slots.set(id, { id, geometry, buffers: [imageId(), imageId()], shown: 0, frame: "", uploaded: new Set() });
+    this.slots.set(id, { id, layer, geometry, buffers: [imageId(), imageId()], shown: 0, frame: "", uploaded: new Set() });
     return id;
   }
 
@@ -145,13 +163,24 @@ export class Painter {
     return `\x1b7\x1b[${row + 1};${col + 1}H\x1b_Ga=p,i=${image},p=1,c=${s.geometry.cols},r=${rows}${crop},C=1,z=${this.z},q=2\x1b\\\x1b8`;
   }
 
+  private covered(row: number, col: number, rows: number, cols: number): boolean {
+    const layouts = this.tui.renderedOverlayLayouts;
+    if (!Array.isArray(layouts)) return this.tui.hasOverlay?.() ?? false;
+    return layouts.some((o) => o.row < row + rows && row < o.row + o.height && o.col < col + cols && col < o.col + o.width);
+  }
+
   /** After Pi drew a frame: put each chart where its marker is now, or take it away when the marker is gone. */
   private afterRender(): void {
-    if (!this.slots.size) { this.cleared = undefined; return; }
+    let out = "";
+    if (this.exclusive && this.wipe) {
+      this.wipe = false;
+      out += "\x1b_Ga=d,d=a,q=2\x1b\\";
+      this.cleared = this.cleared === "images" ? "images" : "placements";
+    }
+    if (!this.slots.size) { this.cleared = undefined; if (out) this.write(out); return; }
     const screen = this.tui.getScreenLines();
     const cleared = this.cleared;
     this.cleared = undefined;
-    let out = "";
     for (const s of this.slots.values()) {
       if (cleared === "images") s.uploaded.clear();
       if (cleared) s.placed = undefined;
@@ -165,6 +194,11 @@ export class Painter {
       const line = screen[row]!;
       const col = visibleWidth(line.slice(0, line.indexOf(m)));
       const rows = Math.min(s.geometry.rows, screen.length - row);
+      // Pi keeps image lines of the transcript on top of overlays; a transcript chart under an overlay is hidden instead.
+      if (s.layer === "base" && this.covered(row, col, rows, s.geometry.cols)) {
+        if (s.placed) { out += removePlacements(s.placed.image); s.placed = undefined; }
+        continue;
+      }
       if (s.placed && s.placed.row === row && s.placed.col === col && s.placed.rows === rows && s.placed.image === image) continue;
       const before = s.placed;
       if (!s.uploaded.has(image)) { out += upload(s.frame, image); s.uploaded.add(image); }
