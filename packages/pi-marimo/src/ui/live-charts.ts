@@ -1,6 +1,6 @@
 // The live charts of a notebook view: which expanded outputs have a running page, the latest frame of
 // each, and where on screen each is drawn so the mouse can reach it.
-import { allocateImageId, encodeKitty, getCellDimensions, matchesKey, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import { allocateImageId, getCellDimensions, matchesKey, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import type { CellOutput } from "../core/output.js";
 import { type ChromeHost, sharedChrome } from "../core/chrome.js";
 import { type Geometry, LiveChart, type Pointer } from "../core/live.js";
@@ -15,7 +15,7 @@ export type OpenLive = (host: ChromeHost, figure: string, geometry: Geometry, on
 
 export type LiveState =
   | { status: "opening" }
-  | { status: "ready"; page: LivePage; frame: string; imageId: number; geometry: Geometry }
+  | { status: "ready"; page: LivePage; frame: string; imageId: number; geometry: Geometry; buffers: [number, number]; shown: 0 | 1 }
   | { status: "failed"; reason: string };
 
 /** Where a drawn chart sits in the view's lines, and what to send events to. */
@@ -33,10 +33,35 @@ export function liveGeometry(maxCols: number, maxRows: number, aspect = 0.6): Ge
   return { cols, rows, cellW: cell.widthPx, cellH: cell.heightPx };
 }
 
-/** The Kitty sequence and blank rows for a frame: a block `rows` lines high, drawn at its first line. */
-export function frameLines(png: string, geometry: Geometry, imageId: number): string[] {
-  return [encodeKitty(png, { columns: geometry.cols, rows: geometry.rows, imageId, moveCursor: false }), ...Array.from({ length: geometry.rows - 1 }, () => "")];
+/**
+ * Frames are double-buffered: each new frame is uploaded, out of band, to the image that is not on
+ * screen (a=t, which shows nothing), and the line then places that image (a=p). The renderer only
+ * swaps a short placement, so the picture changes in one step instead of being cleared and
+ * re-uploaded, which flickers.
+ */
+export function placementLines(imageId: number, geometry: Geometry): string[] {
+  return [`\x1b_Ga=p,i=${imageId},p=1,c=${geometry.cols},r=${geometry.rows},C=1,q=2\x1b\\`, ...Array.from({ length: geometry.rows - 1 }, () => "")];
 }
+
+/** The upload of a PNG to an image id, without placing it: chunked as the protocol asks. */
+export function transmission(png: string, imageId: number): string {
+  const CHUNK = 4096;
+  if (png.length <= CHUNK) return `\x1b_Ga=t,f=100,q=2,i=${imageId};${png}\x1b\\`;
+  let out = "";
+  for (let at = 0; at < png.length; at += CHUNK) {
+    const last = at + CHUNK >= png.length;
+    out += at === 0 ? `\x1b_Ga=t,f=100,q=2,i=${imageId},m=1;${png.slice(at, at + CHUNK)}\x1b\\` : `\x1b_Gm=${last ? 0 : 1};${png.slice(at, at + CHUNK)}\x1b\\`;
+  }
+  return out;
+}
+
+/** Kept for callers that draw a single frame inline (and tests). */
+export function frameLines(png: string, geometry: Geometry, imageId: number): string[] {
+  return [`${transmission(png, imageId).replace("a=t,", "a=T,").replace(`i=${imageId}`, `i=${imageId},c=${geometry.cols},r=${geometry.rows},C=1`)}`, ...Array.from({ length: geometry.rows - 1 }, () => "")];
+}
+
+export type Write = (data: string) => void;
+const stdoutWrite: Write = (data) => { process.stdout.write(data); };
 
 const IDLE_MS = 5 * 60_000;
 
@@ -53,7 +78,31 @@ export class LiveCharts {
     private readonly onChange: () => void,
     private readonly host: () => ChromeHost = sharedChrome,
     private readonly open: OpenLive = LiveChart.open,
+    private readonly write: Write = stdoutWrite,
   ) {}
+
+  /** Uploads a frame to the hidden buffer and shows it. */
+  private present(state: Extract<LiveState, { status: "ready" }>, png: string): void {
+    const next = state.shown === 0 ? 1 : 0;
+    this.write(transmission(png, state.buffers[next]));
+    state.frame = png;
+    state.shown = next;
+    state.imageId = state.buffers[next];
+  }
+
+  /** The lines that place a ready chart. */
+  lines(state: Extract<LiveState, { status: "ready" }>): string[] {
+    return placementLines(state.imageId, state.geometry);
+  }
+
+  /** After the terminal may have dropped image data (a full redraw), upload the current frames again. */
+  refresh(): void {
+    setTimeout(() => {
+      let any = false;
+      for (const state of this.states.values()) if (state.status === "ready") { this.present(state, state.frame); any = true; }
+      if (any) this.onChange();
+    }, 0);
+  }
 
   /** Call before building the rows of a frame. */
   beginFrame(): void {
@@ -85,13 +134,15 @@ export class LiveCharts {
     this.states.set(output, fresh);
     this.open(this.host(), figure, geometry, (png) => {
       const now = this.states.get(output);
-      if (now && now.key === key && now.status === "ready") { now.frame = png; this.onChange(); }
+      if (now && now.key === key && now.status === "ready" && png !== now.frame) { this.present(now, png); this.onChange(); }
     }).then(
       (page) => {
         const now = this.states.get(output);
         const frame = (page as { frame?: string }).frame ?? "";
         if (!now || now !== fresh) { page.close(); return; }
-        this.states.set(output, { status: "ready", page, frame, imageId: allocateImageId(), geometry, key });
+        const ready = { status: "ready" as const, page, frame: "", imageId: 0, geometry, key, buffers: [allocateImageId(), allocateImageId()] as [number, number], shown: 1 as 0 | 1 };
+        this.present(ready, frame);
+        this.states.set(output, ready);
         this.onChange();
       },
       (e: unknown) => {

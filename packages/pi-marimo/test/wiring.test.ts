@@ -71,6 +71,9 @@ function setup(branch: unknown[] = [], mode = "tui") {
       },
     },
     registerCommand: () => undefined,
+    registerEntryRenderer: () => undefined,
+    registerTool: () => undefined,
+    appendEntry: () => undefined,
     appendEntry: (customType: string, data: unknown) => void entries.push({ type: "custom", customType, data }),
   };
   const widgets = new Map<string, any>();
@@ -195,10 +198,10 @@ test("the notebooks as background work: a source for the hosts, its own pill alo
   // Alone, its own pill; hosted (by pi-bg, then pi-subagents too), none; the last host leaving brings it back.
   await until(() => /● Marimo nb\.py:2799 · running Data loading › Slow model fit/u.test(x.pillText() ?? ""));
   section.setHosted(true, "pi-bg");
-  expect(x.widgets.size).toBe(0);
+  expect([...x.widgets.keys()].filter((k) => k !== "pi-marimo-tui").length).toBe(0);
   section.setHosted(true);
   section.setHosted(false, "pi-bg");
-  expect(x.widgets.size).toBe(0);
+  expect([...x.widgets.keys()].filter((k) => k !== "pi-marimo-tui").length).toBe(0);
   x.pi.events.emit("activity:gone", { id: "subagents" });
   await until(() => /● Marimo nb\.py/u.test(x.pillText() ?? ""));
   // The rows are the pill's: a host draws them and opens a row with the section's open(key).

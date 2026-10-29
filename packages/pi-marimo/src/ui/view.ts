@@ -12,7 +12,7 @@ import { basename } from "../core/io.js";
 import type { CellOutput } from "../core/output.js";
 import { ChartRenderer, VegaRenderer as VegaRendererImpl, type VegaRenderer } from "../core/vega.js";
 import { sharedPlotly } from "../core/plotly.js";
-import { LiveCharts, type LiveRect, frameLines, liveGeometry } from "./live-charts.js";
+import { LiveCharts, type LiveRect, liveGeometry } from "./live-charts.js";
 import type { Geometry } from "../core/live.js";
 import type { Cell, NotebookState } from "../core/notebook.js";
 import { elapsed } from "../core/render.js";
@@ -132,7 +132,7 @@ function expandedRows(cell: Cell, theme: FrameTheme, opts: RowOptions = {}): Arr
     if (state.status === "ready") {
       const bar = `${pad}${theme.fg("accent", "▍")} `;
       const alt = `${bar}${theme.fg("dim", "[chart: scroll until it fits on screen]")}`;
-      const lines = frameLines(state.frame, state.geometry, state.imageId);
+      const lines = opts.live.lines(state);
       out.push(...lines.map((line, index): Row => ({ text: index === 0 ? `${bar}${line}` : bar.trimEnd(), image: { index, height: lines.length, alt, live: { output, geometry: state.geometry } } })));
       return out;
     }
@@ -612,7 +612,10 @@ export class NotebookView implements Component {
     return gap >= 1 ? `${left}${" ".repeat(gap)}${nav}` : left;
   }
 
-  invalidate(): void {}
+  /** A theme change or resize: the terminal may have dropped image data with the redraw, so live charts upload their frames again. */
+  invalidate(): void {
+    this.live.refresh();
+  }
 
   private close(): void {
     if (this.closed) return;

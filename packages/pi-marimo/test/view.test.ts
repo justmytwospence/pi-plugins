@@ -332,7 +332,8 @@ test("a live Plotly chart is drawn from its page's frames, and the mouse over it
   f.notebook.apply("cell-op", { cell_id: "a", status: "idle", output: { channel: "output", mimetype: "text/html", data: `<marimo-plotly data-figure='{&quot;data&quot;:[],&quot;layout&quot;:{}}'></marimo-plotly>` } });
   const events: any[] = [];
   let closed = false;
-  const live = new LiveCharts(() => {}, () => ({ stop() {} }) as any, async () => ({ frame: png, pointer: (p: any) => events.push(p), close: () => { closed = true; } }));
+  const live = new LiveCharts(() => {}, () => ({ stop() {} }) as any, async () => ({ frame: png, pointer: (p: any) => events.push(p), close: () => { closed = true; } }), (d: string) => { written.push(d); });
+  const written: string[] = [];
   const v = new NotebookView(tui as any, theme2, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {} }, () => {}, undefined, undefined, live);
   try {
     v.handleInput("l");
@@ -340,6 +341,9 @@ test("a live Plotly chart is drawn from its page's frames, and the mouse over it
     await new Promise((r) => setTimeout(r, 0));
     const shown = v.render(100);
     expect(shown.filter((l) => l.includes("\x1b_G"))).toHaveLength(1);
+    // The frame was uploaded out of band and the line only places it.
+    expect(written.at(-1)).toMatch(/^\x1b_Ga=t,f=100,q=2,i=\d+;/u);
+    expect(shown.find((l) => l.includes("\x1b_G"))).toMatch(/\x1b_Ga=p,i=\d+,p=1,c=\d+,r=\d+,C=1,q=2\x1b\\/u);
     expect(live.rects).toHaveLength(1);
     const r = live.rects[0]!;
     expect(shown[r.top]).toContain("\x1b_G");
@@ -372,7 +376,7 @@ test("the keyboard pointer drives a live chart without a mouse: arrows move it, 
   f.notebook.apply("cell-op", { cell_id: "a", status: "idle", output: { channel: "output", mimetype: "text/html", data: `<marimo-plotly data-figure='{&quot;data&quot;:[],&quot;layout&quot;:{}}'></marimo-plotly>` } });
   const events: any[] = [];
   const rings: any[] = [];
-  const live = new LiveCharts(() => {}, () => ({ stop() {} }) as any, async () => ({ frame: png, pointer: (p: any) => events.push(p), cursor: (c: any) => rings.push(c && { x: c.x, y: c.y }), close: () => {} }));
+  const live = new LiveCharts(() => {}, () => ({ stop() {} }) as any, async () => ({ frame: png, pointer: (p: any) => events.push(p), cursor: (c: any) => rings.push(c && { x: c.x, y: c.y }), close: () => {} }), () => {});
   const v = new NotebookView(tui as any, theme2, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {} }, () => {}, undefined, undefined, live);
   try {
     v.handleInput("i");

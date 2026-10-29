@@ -51,6 +51,9 @@ function setup(select?: (title: string, options: string[]) => string | undefined
     on: (name: string, h: (e: unknown, c: unknown) => unknown) => void handlers.set(name, [...(handlers.get(name) ?? []), h]),
     events: { on: () => undefined, emit: (ch: string, d: any) => void (ch === "activity:section" && (offered = d.section)) },
     registerCommand: (_name: string, c: typeof command) => void (command = c),
+    registerEntryRenderer: () => undefined,
+    registerTool: () => undefined,
+    appendEntry: () => undefined,
     appendEntry: () => undefined,
   };
   const ui = {

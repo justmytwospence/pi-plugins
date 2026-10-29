@@ -41,6 +41,10 @@ import { notebookKey } from "./ui/identity.js";
 import { NotebookSource, type Unopened } from "./ui/source.js";
 import { openUrl, waitingStatus, waitingUrl } from "./waiting.js";
 import { NotebookView, type ViewActions } from "./ui/view.js";
+import { ChatChart, type ChartEntry, disposeCharts, latestChart } from "./ui/chat-chart.js";
+import { VegaRenderer } from "./core/vega.js";
+import type { Followed } from "./core/watcher.js";
+import { Type } from "typebox";
 
 const ENTRY = "pi-marimo";
 const STATUS_KEY = "marimo";
@@ -50,6 +54,7 @@ const statusKey = (i: number): string => (i === 0 ? STATUS_KEY : `${STATUS_KEY}-
 const LENS_STATUS_KEY = "marimo-lens";
 const OFFER_SOURCE = "pi-marimo";
 const MESSAGE_TYPE = "pi-marimo-state";
+const CHART_ENTRY = "pi-marimo-chart";
 /** Besides the current notebook, the ones worked in during this many latest prompts are in full in context. */
 const FULL_PROMPTS = 3;
 
@@ -108,6 +113,55 @@ export function withWaitHint(text: string, running: string[], pi: Pick<Extension
 export default function piMarimo(pi: ExtensionAPI): void {
   let watcher: MarimoWatcher | undefined;
   let ctxRef: ExtensionContext | undefined;
+  /** Pi's TUI, captured through an empty widget, so transcript charts can ask for a redraw. */
+  let tuiRef: { requestRender(): void } | undefined;
+  const chartComponents = new Map<string, ChatChart>();
+  const vega = new VegaRenderer();
+  let inspectOff: (() => void) | undefined;
+
+  /** A notebook cell's chart as a transcript entry: a Plotly figure to run live, else a picture. */
+  const chartEntry = async (cellRef: string, notebook?: string): Promise<ChartEntry> => {
+    const followed = watcher?.followed() ?? [];
+    const pool: Followed[] = notebook ? followed.filter((f) => f.attachment.path.endsWith(notebook) || f.canonicalPath?.endsWith(notebook)) : followed;
+    const ref = cellRef.trim();
+    for (const f of pool) {
+      const cell = f.notebook.ordered().find((c) => c.id === ref || c.name === ref);
+      if (!cell) continue;
+      const base = { path: f.attachment.path, cell: cell.id, label: cell.name !== "_" ? cell.name : cell.id };
+      const out = cell.output;
+      if (out?.plotly) return { ...base, plotly: out.plotly };
+      if (out?.image) return { ...base, png: out.image.data };
+      if (out?.vega) {
+        const png = await new Promise<string | undefined>((resolve) => {
+          const state = vega.request(out.vega!, () => { const s = vega.peek(out.vega!); resolve(s?.status === "ready" ? s.png : undefined); });
+          if (state.status === "ready") resolve(state.png);
+          else if (state.status === "failed") resolve(undefined);
+        });
+        if (png) return { ...base, png };
+        return { ...base, note: "[chart: could not draw the Vega-Lite spec]" };
+      }
+      return { ...base, note: out ? `[no chart: the cell's output is ${out.text}]` : "[no output: run the cell first]" };
+    }
+    const names = pool.flatMap((f) => f.notebook.ordered().filter((c) => c.output?.plotly || c.output?.image || c.output?.vega).map((c) => (c.name !== "_" ? c.name : c.id)));
+    throw new Error(`No cell "${ref}" in ${pool.length ? pool.map((f) => basename(f.attachment.path)).join(", ") : "the followed notebooks"}.${names.length ? ` Cells with charts: ${names.join(", ")}.` : ""}`);
+  };
+
+  /** Starts the keyboard pointer on the newest transcript chart; keys go to it until Esc. */
+  const inspectLatest = (ui: ExtensionContext["ui"]): boolean => {
+    const chart = latestChart();
+    if (!chart?.inspect()) return false;
+    inspectOff?.();
+    inspectOff = ui.onTerminalInput((data) => {
+      if (!chart.live.inspecting) { inspectOff?.(); inspectOff = undefined; return undefined; }
+      chart.live.key(data);
+      tuiRef?.requestRender();
+      if (!chart.live.inspecting) { inspectOff?.(); inspectOff = undefined; ui.setStatus("marimo-inspect", undefined); }
+      return { consume: true };
+    });
+    ui.setStatus("marimo-inspect", "chart: arrows or hjkl move · space drag · +/- zoom · 0 reset · esc done");
+    tuiRef?.requestRender();
+    return true;
+  };
   // Per notebook path: browser edits after this change number are flagged as new.
   const seen = new Map<string, number>();
   let pending: ReturnType<typeof setTimeout> | undefined;
@@ -348,6 +402,9 @@ export default function piMarimo(pi: ExtensionAPI): void {
     watcher.mode = savedMode(branch) ?? { kind: "auto" };
     watcher.engage(savedEngaged(branch));
     watcher.start();
+    if (ctx.mode === "tui") {
+      ctx.ui.setWidget("pi-marimo-tui", (tui) => { tuiRef = tui; return { render: () => [], invalidate() {} }; });
+    }
     source.resetHosts();
     bindPill();
     offer();
@@ -359,6 +416,10 @@ export default function piMarimo(pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", async () => {
+    inspectOff?.();
+    inspectOff = undefined;
+    disposeCharts();
+    chartComponents.clear();
     const previousContext = ctxRef;
     ctxRef = undefined;
     const previousWatcher = watcher;
@@ -459,13 +520,49 @@ export default function piMarimo(pi: ExtensionAPI): void {
     return { messages: placed.messages as typeof event.messages };
   });
 
+  pi.registerEntryRenderer<ChartEntry>(CHART_ENTRY, (entry, _options, theme) => {
+    if (!entry.data) return undefined;
+    const known = chartComponents.get(entry.id);
+    if (known) return known;
+    const chart = new ChatChart(entry.data, theme, () => tuiRef?.requestRender());
+    chartComponents.set(entry.id, chart);
+    return chart;
+  });
+
+  pi.registerTool({
+    name: "marimo_chart",
+    label: "Chart",
+    description: "Show a chart from a followed marimo notebook in the chat transcript, where the user sees it inline: Plotly figures run live (hover, zoom, pan, from the mouse or with /marimo inspect), other figures as pictures. Use it whenever you would show the user a notebook chart. Give the cell by name or id; the notebook only when several are followed.",
+    promptSnippet: "Show a notebook chart inline in the transcript",
+    parameters: Type.Object({
+      cell: Type.String({ description: "The cell whose output is the chart: its name or id" }),
+      notebook: Type.Optional(Type.String({ description: "The notebook's file name or path, when several are followed" })),
+    }),
+    async execute(_id, params) {
+      const entry = await chartEntry(params.cell, params.notebook);
+      pi.appendEntry(CHART_ENTRY, entry);
+      const how = entry.plotly ? "live (Plotly)" : entry.png ? "as a picture" : entry.note ?? "";
+      return { content: [{ type: "text", text: `Showed ${entry.label} from ${basename(entry.path)} in the transcript ${how}.` }], details: { cell: entry.cell } };
+    },
+  });
+
   pi.registerCommand("marimo", {
-    description: "Choose the marimo notebooks Pi follows (view, open, auto, off, show, lens)",
+    description: "Choose the marimo notebooks Pi follows (view, open, auto, off, show, lens, chart <cell>, inspect)",
     getArgumentCompletions: (prefix) =>
-      ["view", "open", "auto", "off", "show", "lens"].filter((a) => a.startsWith(prefix.trim())).map((value) => ({ value, label: value })),
+      ["view", "open", "auto", "off", "show", "lens", "chart", "inspect"].filter((a) => a.startsWith(prefix.trim())).map((value) => ({ value, label: value })),
     handler: async (args, ctx) => {
       if (!watcher) return;
       const arg = args.trim();
+      if (arg === "chart" || arg.startsWith("chart ")) {
+        const ref = arg.slice(5).trim();
+        if (!ref) { ctx.ui.notify("marimo: /marimo chart <cell name or id>", "info"); return; }
+        try { pi.appendEntry(CHART_ENTRY, await chartEntry(ref)); } catch (e) { ctx.ui.notify(`marimo: ${e instanceof Error ? e.message : String(e)}`, "warning"); }
+        return;
+      }
+      if (arg === "inspect") {
+        if (!inspectLatest(ctx.ui)) ctx.ui.notify("marimo: no live chart in the transcript (/marimo chart <cell> shows one)", "info");
+        return;
+      }
       if (arg === "auto") { setMode({ kind: "auto" }); ctx.ui.notify("marimo: following every notebook open under this directory", "info"); return; }
       if (arg === "off") { setMode({ kind: "off" }); ctx.ui.notify("marimo: off", "info"); return; }
       if (arg === "view") {
