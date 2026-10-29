@@ -31,8 +31,8 @@ export function cellGlyph(nb: NotebookState, theme: FrameTheme, c: Cell): string
       : c.status === "queued"
         ? theme.fg("muted", "◌")
         : c.stale || nb.edited(c)
-          ? theme.fg("warning", "○")
-          : theme.fg("dim", "○");
+          ? theme.fg("warning", "•")
+          : " ";
 }
 
 /** The notebook as outline rows, in notebook order. */

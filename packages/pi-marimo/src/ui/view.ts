@@ -1123,7 +1123,7 @@ export class NotebookView implements Component {
     const created = changes.filter((c) => c.kind === "created").length;
     const removed = changes.filter((c) => c.kind === "deleted").length;
     const agent = changes.length ? `${dot}${th.fg("accent", `agent: ${[edited ? `${edited} changed` : "", created ? `${created} new` : "", removed ? `${removed} removed` : ""].filter(Boolean).join(" · ")}`)}` : "";
-    const left = `${busy ? th.fg("accent", "●") : errors ? th.fg("error", "✗") : th.fg("dim", "○")} ${th.bold(file)}  ${state}${working}${agent}`;
+    const left = `${busy ? `${th.fg("accent", "●")} ` : errors ? `${th.fg("error", "✗")} ` : ""}${th.bold(file)}  ${state}${working}${agent}`;
     const right = th.fg("dim", [this.actions.lastRun?.(f) ?? "", shortWhere(f.attachment.url) ?? "", servers.length ? `server ${servers.join(", ")}` : ""].filter(Boolean).join(" · "));
     const gap = inner - visibleWidth(left) - visibleWidth(right);
     return visibleWidth(right) && gap >= 2 ? `${left}${" ".repeat(gap)}${right}` : left;

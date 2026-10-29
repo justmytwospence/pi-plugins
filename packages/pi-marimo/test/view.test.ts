@@ -26,7 +26,7 @@ test("^U/^D scroll the detail by half a page and the page keys by a whole one; j
     let text = view.render(100).join("\n");
     expect(text).not.toContain("▍ line 0");
     expect(text).toContain("▍ line 9");
-    expect(text).toMatch(/▌○ long/u);
+    expect(text).toMatch(/▌  long/u);
     view.handleInput("\x1b[6~");
     expect(view.render(100).join("\n")).toContain("│ x = 1");
     view.handleInput("\x15");
@@ -34,7 +34,7 @@ test("^U/^D scroll the detail by half a page and the page keys by a whole one; j
     text = view.render(100).join("\n");
     expect(text).toContain("▍ line 0");
     view.handleInput("j");
-    expect(view.render(100).join("\n")).toMatch(/▌○ next/u);
+    expect(view.render(100).join("\n")).toMatch(/▌  next/u);
     expect(view[INPUT_CONTEXT]()).toBe("viewer");
   } finally { view.dispose(); }
 });
@@ -148,7 +148,7 @@ test("j/k move the cursor between cells; the detail shows the cell's output, fol
   const v = make(f);
   try {
     const first = screen(v);
-    expect(first).toMatch(/▌○ first/u);
+    expect(first).toMatch(/▌  first/u);
     expect(first).toContain("▍ hi");
     expect(first).toContain("▍ value & more");
     // Folded: the first line, dim, and how many more.
@@ -156,12 +156,12 @@ test("j/k move the cursor between cells; the detail shows the cell's output, fol
     expect(first).not.toContain("x = 1");
     expect(v.render(100).slice(3, -3).join("\n")).not.toMatch(/\bcode\b/u);
     v.handleInput("j");
-    expect(screen(v)).toMatch(/▌○ second/u);
+    expect(screen(v)).toMatch(/▌  second/u);
     expect(screen(v)).not.toContain("▍ value & more");
     v.handleInput("k");
     v.handleInput("\r");
     const open = screen(v);
-    expect(open).toMatch(/▌○ first/u);
+    expect(open).toMatch(/▌  first/u);
     expect(open).toContain("│ x = 1");
     expect(open).not.toContain("⋯ +1");
     v.handleInput("\r");
@@ -189,7 +189,7 @@ test("e and E jump between failed cells; / filters by name, variable or code and
     // Enter goes to the match and shows every cell again.
     v.handleInput("\r");
     expect(v[INPUT_CONTEXT]()).toBe("viewer");
-    expect(screen(v)).toMatch(/▌○ load/u);
+    expect(screen(v)).toMatch(/▌  load/u);
     expect(screen(v)).toContain("boom()");
     // Esc while finding goes back to where the cursor was.
     v.handleInput("j");
@@ -213,7 +213,7 @@ test("following keeps the cursor on the running cell until the user moves; f fol
   try {
     expect(screen(v)).toMatch(/▌● v40 = 40/u);
     v.handleInput("k");
-    expect(screen(v)).toMatch(/▌○ v39 = 39/u);
+    expect(screen(v)).toMatch(/▌  v39 = 39/u);
     v.handleInput("f");
     expect(screen(v)).toMatch(/▌● v40 = 40/u);
   } finally { v.dispose(); }
@@ -449,7 +449,7 @@ test("O stacks the cell's whole section in the detail, the markdown as prose; O 
     expect(screen(v)).toContain("Some prose here.");
     expect(screen(v)).toContain("▍ forty-two");
     expect(screen(v)).toContain("Section view: the whole section.");
-    expect(screen(v)).toMatch(/▌○ x = 1/u);
+    expect(screen(v)).toMatch(/▌  x = 1/u);
     v.handleInput("O");
     expect(screen(v)).not.toContain("Some prose here.");
     expect(screen(v)).toContain("Cell view.");
@@ -464,7 +464,7 @@ test("a table output is a grid in the detail, and its shape is the outline's bad
   f.notebook.apply("cell-op", { cell_id: "a", status: "idle", output: { channel: "output", mimetype: "text/html", data: table } });
   const v = make(f);
   try {
-    expect(screen(v)).toMatch(/▌○ table +1×2/u);
+    expect(screen(v)).toMatch(/▌  table +1×2/u);
     expect(screen(v)).toMatch(/city\s*┃\s*pop/u);
     expect(screen(v)).toMatch(/Oslo\s*┃\s*709,000/u);
     expect(screen(v)).toContain("rows 1–1 of 1");
@@ -525,7 +525,7 @@ test("the mouse: the wheel scrolls the pane under it, a click selects a cell, a 
     expect(v.render(100)[3]).toContain("cell-3");
     expect(v.handleMouse(ev("press", 7))).toEqual({ handled: true, render: false });
     v.handleMouse(ev("click", 7));
-    expect(screen(v)).toMatch(/▌○ cell-7/u);
+    expect(screen(v)).toMatch(/▌  cell-7/u);
     expect(screen(v)).toContain("│ x = 1");
     v.handleMouse(ev("click", 7, { clickCount: 2 }));
     expect(screen(v)).toContain("│ x = 1");
@@ -568,11 +568,11 @@ test("v lists the variables; Enter goes to the cell that defines one, > to the f
     expect(pane).toMatch(/ y\s+.*← y · 1 use/u);
     v.handleInput("j");
     v.handleInput("\r");
-    expect(screen(v)).toMatch(/▌○ y/u);
+    expect(screen(v)).toMatch(/▌  y/u);
     v.handleInput("v");
     v.handleInput("g");
     v.handleInput(">");
-    expect(screen(v)).toMatch(/▌○ y/u);
+    expect(screen(v)).toMatch(/▌  y/u);
     expect(screen(v)).toContain("uses x · used by z");
     expect(screen(v)).not.toContain("= x (int)");
     expect(screen(v)).not.toContain("<");
@@ -585,13 +585,13 @@ test("< and > follow the dataflow up and down", () => {
   try {
     v.handleInput("G");
     v.handleInput("<");
-    expect(screen(v)).toMatch(/▌○ y/u);
+    expect(screen(v)).toMatch(/▌  y/u);
     v.handleInput("<");
-    expect(screen(v)).toMatch(/▌○ load/u);
+    expect(screen(v)).toMatch(/▌  load/u);
     v.handleInput("<");
     expect(screen(v)).toContain("No upstream cell.");
     v.handleInput(">");
-    expect(screen(v)).toMatch(/▌○ y/u);
+    expect(screen(v)).toMatch(/▌  y/u);
   } finally { v.dispose(); }
 });
 
@@ -605,11 +605,11 @@ test("the agent's changes since the last prompt: marked, counted, c jumps to the
     const v = make(f);
     try {
       const text = screen(v);
-      expect(text).toMatch(/○ y = x \+ 2 +changed/u);
+      expect(text).toMatch(/  y = x \+ 2 +changed/u);
       expect(text).toContain("agent: 1 changed · 1 removed");
       expect(text).toMatch(/✗ Removed: z = 3/u);
       v.handleInput("c");
-      expect(screen(v)).toMatch(/▌○ y = x \+ 2/u);
+      expect(screen(v)).toMatch(/▌  y = x \+ 2/u);
       expect(screen(v)).toContain("changed by the agent");
       v.handleInput("d");
       const diff = screen(v);
@@ -754,13 +754,13 @@ test("wide, the outline and the detail sit side by side, every line exactly as w
       const text = lines.join("\n");
       // The title is where its markdown cell is, after the imports cell, and the cells are titled by what they are.
       expect(text).toMatch(/imports[\s\S]*Coffee sales[\s\S]*daily[\s\S]*model[\s\S]*chart/u);
-      expect(text).toMatch(/▌ ?○ imports.* │ imports/u);
+      expect(text).toMatch(/▌ ?  imports.* │ imports/u);
       for (const id of ["Zx1a", "Hd2b", "Ld3c", "Bm4d", "Ch5e"]) expect(text).not.toContain(id);
     }
     v.handleInput("j");
     v.handleInput("j");
     const detail = screen(v);
-    expect(detail).toMatch(/▌ {2}○ daily/u);
+    expect(detail).toMatch(/▌ {2}  daily/u);
         expect(detail).not.toContain("<Series object");
     expect(detail).toContain("used by model, chart");
   } finally { v.dispose(); }
@@ -791,16 +791,16 @@ test("narrow, a few outline rows around the cursor sit above the detail, and the
     v.handleInput("\r");
     expect(v.render(80).join("\n")).toContain("model = boom(daily)");
     // A click on an outline row selects it; a click on the detail's code line folds the code.
-    const row = v.render(80).findIndex((l) => l.includes("○ chart"));
+    const row = v.render(80).findIndex((l) => l.includes("  chart"));
     v.handleMouse(ev("click", row, { clickCount: 1 }));
-    expect(v.render(80).join("\n")).toMatch(/▌ {2}○ chart/u);
+    expect(v.render(80).join("\n")).toMatch(/▌ {2}  chart/u);
     v.handleInput("k");
     const code = v.render(80).findIndex((l) => l.includes("│ model = boom(daily)"));
     v.handleMouse(ev("click", code));
     expect(v.render(80).join("\n")).toContain("│ model = boom(daily)");
     // The wheel over the outline moves the cursor.
     v.handleMouse(ev("wheel", 4, { wheelDelta: 1 }));
-    expect(v.render(80).join("\n")).toMatch(/▌ {2}○ chart/u);
+    expect(v.render(80).join("\n")).toMatch(/▌ {2}  chart/u);
     v.handleInput("\x1b");
     expect(closed).toBe(true);
   } finally { v.dispose(); }
@@ -895,7 +895,7 @@ test("a view started from a state shows the same cell and code", () => {
   const v = make(f, { initial: { cursor: "cell-10", codeOpen: ["cell-10"], section: false, follow: false, scroll: 0, detailScroll: 0, folded: [], diffs: [], filter: "", mode: "cells", varFilter: "" } });
   try {
     const text = screen(v);
-    expect(text).toContain("▌○ cell-10");
+    expect(text).toContain("▌  cell-10");
     expect(text).toContain("│ x = 10");
   } finally { v.dispose(); }
 });
@@ -1050,16 +1050,16 @@ test("ctrl+j and ctrl+k move through a filter's matches, while typing it and aft
   try {
     v.handleInput("/");
     for (const ch of "load") v.handleInput(ch);
-    expect(screen(v)).toMatch(/▌○ load_a/u);
+    expect(screen(v)).toMatch(/▌  load_a/u);
     v.handleInput("\n");
     expect(v[INPUT_CONTEXT]()).toBe("filter");
-    expect(screen(v)).toMatch(/▌○ load_c/u);
+    expect(screen(v)).toMatch(/▌  load_c/u);
     v.handleInput("\x0b");
-    expect(screen(v)).toMatch(/▌○ load_a/u);
+    expect(screen(v)).toMatch(/▌  load_a/u);
     v.handleInput("\n");
     v.handleInput("\r");
     // Found: every cell shows again, the cursor on the match.
-    expect(screen(v)).toMatch(/▌ +○ load_c/u);
+    expect(screen(v)).toMatch(/▌ +  load_c/u);
     expect(screen(v)).toContain("y = 2");
   } finally { v.dispose(); }
 });

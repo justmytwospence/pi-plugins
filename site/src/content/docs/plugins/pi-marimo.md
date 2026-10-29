@@ -95,14 +95,14 @@ An example (not a real screenshot):
 
 ```text
 ╭─ esc · Notebook coffee.py · not your main session ───────────────────────────╮
-│ ○ coffee.py  idle                         ran 12s · 1 error · 2m ago · :2742 │
+│ coffee.py  idle                           ran 12s · 1 error · 2m ago · :2742 │
 │ ──────────────────────────────────────────────────────────────────────────── │
-│  ○ imports                     │ drinks, sales · Coffee shop explorer › Data │
+│    imports                     │ drinks, sales · Coffee shop explorer › Data │
 │    Coffee shop explorer        │                                             │
 │      Data                      │ ▍ day         drink      cups  weekend      │
-│ ▌  ○ drinks, sales       450×4 │ ▍ 2026-01-01  latte        63  false        │
+│ ▌    drinks, sales       450×4 │ ▍ 2026-01-01  latte        63  false        │
 │      Controls                  │ ▍ 10 of 450 rows · 4 columns                │
-│     ○ drink, title +2 4 inputs │   sales = load_sales()  ⋯ +7                │
+│       drink, title +2 4 inputs │   sales = load_sales()  ⋯ +7                │
 │     ✗ forecast        KeyError │                                             │
 │ ──────────────────────────────────────────────────────────────────────────── │
 │ ↑↓ cells · enter code · e next error                       ? keys · esc back │
