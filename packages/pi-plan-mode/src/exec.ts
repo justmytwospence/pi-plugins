@@ -608,7 +608,7 @@ function renderFinish(
     : undefined;
   const asks =
     details.asks && details.asks > 0
-      ? `${details.asks} ${details.asks === 1 ? "ask" : "asks"} to the planner${details.costUsd !== undefined ? ` · ${formatCost(details.costUsd)}` : ""}`
+      ? `${details.asks} ${details.asks === 1 ? "consultation" : "consultations"} with the planner${details.costUsd !== undefined ? ` · ${formatCost(details.costUsd)}` : ""}`
       : undefined;
   const context = [planTitle(details.planFile), who, asks].filter(Boolean).join(" · ");
   container.addChild(new Spacer(1));
@@ -649,6 +649,12 @@ function finishMessageText(details: FinishDetails): string {
     "",
     details.report || "(no report)",
   ];
+  lines.push(
+    "",
+    details.asks
+      ? `It consulted you ${details.asks} ${details.asks === 1 ? "time" : "times"} (ask_planner)${details.costUsd !== undefined ? `, costing ${formatCost(details.costUsd)}` : ""}.`
+      : "It did not consult you (ask_planner) while implementing.",
+  );
   const changes = details.changes;
   if (changes && changes.edited.length > 0) {
     lines.push("", `Files edited: ${changes.edited.join(", ")}`);

@@ -285,4 +285,5 @@ test("/plan-back works without pi-recap: the card just has no headline", async (
   await command.handler("", { navigateTree: async () => ({ cancelled: false }), ui: { notify() {} } });
   assert.equal(messages[0].details.headline, undefined);
   assert.match(messages[0].content, /All done\./u);
+  assert.match(messages[0].content, /did not consult you/u);
 });
