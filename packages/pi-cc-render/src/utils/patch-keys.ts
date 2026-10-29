@@ -54,6 +54,7 @@ export const FLUSH_DOCKED_BASH_PATCH = Symbol.for("pi.ccstyle.flush-docked-bash-
 export const BASH_HIGHLIGHT_PATCH = Symbol.for("pi.ccstyle.bash-highlight-patch");
 export const EARLY_STARTUP_HEADER_PATCH = Symbol.for("pi.ccstyle.early-startup-header-patch");
 export const EARLY_STARTUP_HEADER_SWAP_KEY = Symbol.for("pi.ccstyle.early-startup-header-swap");
+export const STARTUP_RESOURCES_PATCH = Symbol.for("pi.ccstyle.startup-resources-patch");
 export const TOOL_HOVER_STATE_KEY = Symbol.for("pi.ccstyle.tool-hover-state");
 
 // ── rich diff component marker ──

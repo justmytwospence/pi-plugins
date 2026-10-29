@@ -4,6 +4,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { config } from "../../config/config.ts";
 import { ansi16ToRgb, ansi256ToRgb } from "../../utils/ansi-color.ts";
 import { stripAnsi } from "../../utils/ansi-text.ts";
+import { setStartupResourcesTheme } from "./startup-resources.ts";
 import {
 	EARLY_STARTUP_HEADER_PATCH,
 	EARLY_STARTUP_HEADER_SWAP_KEY,
@@ -292,12 +293,15 @@ function headerFactory(): (
 	render(width: number): string[];
 	invalidate(): void;
 } {
-	return (_tui: unknown, theme: any) => ({
-		render(width: number): string[] {
-			return renderHeaderLines(width, theme);
-		},
-		invalidate() {},
-	});
+	return (_tui: unknown, theme: any) => {
+		setStartupResourcesTheme(() => theme);
+		return {
+			render(width: number): string[] {
+				return renderHeaderLines(width, theme);
+			},
+			invalidate() {},
+		};
+	};
 }
 
 /** Installs the startup header per config. When disabled, leaves the slot alone so other extensions' headers are not cleared. */
@@ -376,6 +380,7 @@ export function clearStartupHeader(ctx: any): void {
 
 export default function piStartupHeader(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
+		if (ctx.hasUI) setStartupResourcesTheme(() => ctx.ui.theme);
 		applyStartupHeader(ctx);
 	});
 

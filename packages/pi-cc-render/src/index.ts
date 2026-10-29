@@ -5,6 +5,7 @@ import { config } from "./config/config.ts";
 import { installBashHighlight } from "./feature/shell/bash-highlight.ts";
 import { installFlushDockedBash } from "./feature/shell/flush-docked-bash.ts";
 import piStartupHeader, { installEarlyStartupHeader } from "./feature/shell/startup-header.ts";
+import { installStartupResources } from "./feature/shell/startup-resources.ts";
 
 // features
 import agentSummary from "./feature/agent-summary/index.ts";
@@ -27,6 +28,7 @@ export default function (pi: ExtensionAPI): void {
 	installFlushDockedBash();
 	installBashHighlight();
 	installEarlyStartupHeader();
+	installStartupResources();
 	piStartupHeader(pi);
 
 	// render stack: the thinking controller is handed to the style layer as a query
