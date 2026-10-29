@@ -1,8 +1,8 @@
 # pi-marimo
 
-Pi follows the [marimo](https://marimo.io) notebooks you are working in, so it knows what they look like and what they are doing without being asked. It shows what each notebook's kernel is running in the footer, places the notebooks' current state in the model's context when you send a prompt, and, in the TUI, offers a pill and a full-screen notebook view while a notebook is busy.
+Pi follows the [marimo](https://marimo.io) notebooks you work in with an agent, and gives you a terminal view of them that you read and steer in, so you need the browser much less. The agent edits cells through the [marimo-pair](https://github.com/marimo-team/marimo-pair) skill; pi-marimo shows what each notebook's kernel is doing, puts the notebooks' state in the model's context when you send a prompt, and in the TUI lets you read the notebook (prose, tables, charts, variables, the agent's changes), run cells, drive widgets, run Python in the kernel, mark results for the agent, ask the agent about a cell, and start notebooks without a browser at all.
 
-It only reads. It pairs with the [marimo-pair](https://github.com/marimo-team/marimo-pair) skill, which is how the agent inspects and changes a notebook. It also follows [marimo-lens](https://marimo-team.github.io/marimo-lens/) selections, the results you point at in the browser, and offers to address them.
+Cells are only ever changed by the agent. What you do in the view (running cells, interrupting, setting widgets, the scratchpad, Lens marks) goes through marimo's own kernel endpoints, as the browser's buttons do. pi-marimo also follows [marimo-lens](https://marimo-team.github.io/marimo-lens/) selections, the results you point at, whether you make them in the browser or in the view.
 
 Part of [Pi Plugins](https://github.com/justmytwospence/pi-plugins). Reference: <https://pi-plugins.vercel.app/plugins/pi-marimo/>.
 
@@ -30,108 +30,155 @@ pi -e ./packages/pi-marimo
 
 Add `-ne` to disable your other discovered and configured extensions for that run (an explicit `-e` still loads). No `npm install` is needed to run it: the package.json has no `dependencies`; Pi supplies its peer dependencies.
 
-## Usage
-
-### Footer
-
-Example, with the agent working in two notebooks:
+## Start a notebook from Pi
 
 ```text
-marimo: fit.py · :2718 · running Data loading › Model fit (12s) · 2 queued · 1 error
-marimo: prep.py · :2718 · idle
+/marimo new notebooks/fit.py
+/marimo edit notebooks/prep.py
 ```
 
-Every notebook this session uses gets a line of its own with what its kernel is doing: the running part is the markdown heading path the running cell sits under (or `cell <name>`), so you can tell roughly what is running. The lines are in file-path order, so they hold still while the agent moves between notebooks. A pinned notebook that is not open gets a `not open` line. Each line is a status of its own, published with `ctx.ui.setStatus`: the first under the key `marimo`, the next under `marimo-2`, then `marimo-3`, and so on. Pi's built-in footer shows them side by side on its status line; [pi-status-footer](https://pi-plugins.vercel.app/plugins/pi-status-footer/) gives each a row.
+`/marimo new` writes an empty notebook and `/marimo edit` opens an existing one (without a file, `/marimo edit` offers the notebooks under the working directory; completion lists them too). Either way pi-marimo uses a session that already holds the notebook, opens one on a server that waits for it, or starts `marimo edit <file> --headless --no-token --skip-update-check` on a free port, then opens the notebook's session without a browser and shows it in the notebook view. The marimo command is `uv run marimo` when the working directory has a `uv.lock`, else `marimo` on the PATH; `server.command` in the settings names another.
 
-**Servers waiting for you.** A running server whose notebook is open in no browser gets a line too, so you can see it is waiting: `marimo: 0_kcore.py · :2718 · not open`. pi-marimo asks the server which notebook it serves (a server started as `marimo edit nb.py` lists exactly that file) and shows those under Pi's working directory in `auto` mode (outside hidden directories, like followed notebooks), the pinned ones when pinned, none when `off`. Servers that serve a directory or several files have no one notebook to name and are not shown. The line goes away when the notebook is opened in a browser (it is then followed like any other notebook and shown once the agent works in it), or the server stops. pi-status-footer draws such a row dimmed.
+A server Pi starts belongs to the Pi process: it keeps running across `/reload` and session switches and stops when Pi exits, with `/marimo stop` (a picker when there are several), or with `S` twice in its notebook view. A notebook opened this way is followed wherever it is (also outside the working directory, or in pinned mode) and counts as this session's.
 
-**Clicking a waiting notebook.** Where the terminal supports hyperlinks (Pi detects this; `PI_HYPERLINKS=1` forces it), the notebook's name in the line is an OSC 8 link to the server (`http://127.0.0.1:2718/`, whose home page serves that notebook). In Pi's fullscreen TUI (the default) Pi captures the mouse and opens an OSC 8 link under a click itself, with `open` on macOS and `xdg-open` elsewhere; in regular mode the terminal (herdr included) does it. pi-status-footer keeps the link in its row. Pi's footer API takes plain status text and has no click handler for statuses, so the link is the click handler. The keyboard path is `/marimo open` (a picker when several wait).
+## Usage
 
-The shape is stable for footers that lay it out themselves: `marimo: <file>`, then ` · `-separated parts about that notebook: its server (`:port` when local, else `host[/path]`), a connection note such as `connecting`, `disconnected` or `not open`; `running <a › b> (<elapsed>)`; `<n> queued`; `<n> error(s)`. Versions before multi-notebook lines sent a single `marimo` status ending in `also <file>, <file>`.
+### Rows under the prompt (TUI) and footer lines (elsewhere)
+
+In the TUI every notebook this session uses is a row under the prompt, in file-path order, as are running servers whose notebook is open in no browser and pinned files that are not open. Example:
+
+```text
+ ○ Marimo prep.py:2718 · idle
+ ● Marimo fit.py:2718 · running Data loading › Model fit 0:12 · 2 queued
+```
+
+`↓` at the bottom of the prompt selects the rows (`j` in pi-vim's normal mode); `↑`/`↓` move, Enter opens the notebook view (a server open in no browser is opened here first), `x` twice interrupts a running notebook, Esc goes back. A row reads `✗` after a run broke cells, until your next message. With [pi-bg](https://pi-plugins.vercel.app/plugins/pi-bg/) or [pi-subagents](https://pi-plugins.vercel.app/plugins/pi-subagents/) the rows share the space with their tasks and agents, and `/tasks` lists the notebooks too.
+
+Outside the TUI (RPC, print) the same is a footer line per notebook, through `ctx.ui.setStatus` under the keys `marimo`, `marimo-2`, ... in file-path order, for example:
+
+```text
+marimo: fit.py · :2718 · running Data loading › Model fit (12s) · 2 queued · 1 error: Model fit (KeyError)
+marimo: prep.py · :2718 · not open
+```
+
+The shape is stable for footers that lay it out themselves: `marimo: <file>`, then ` · `-separated parts: its server (`:port` when local, else `host[/path]`), a connection note (`connecting`, `disconnected`, `not open`), `running <a › b> (<elapsed>)`, `<n> queued`, `<n> error(s)`. A waiting server's name is an OSC 8 link to it where the terminal shows links; `/marimo open` is the keyboard path. Open Lens selections get a status of their own, key `marimo-lens` (`lens: fit.py · S1 "make this blue" · S2`).
 
 ### Context
 
-When you send a prompt, the state of every connected, followed notebook is taken once and placed right after that prompt for every model request of the turn. The current notebook comes first and in full: its outline (markdown headings), one line per code cell with what it defines, and what needs attention (running, queued, errors, stale, edited but not rerun, changed in the browser since Pi's last turn). Every other notebook the agent worked in during the last three prompts is in full too, so it can work in several at once without losing sight of any. The others this session uses follow as short outlines (headings down to `##`) with only the cells that need attention, which keeps the block small when many are open. Each notebook's header is followed by its `marimo-pair: --url <server> --file <path>` line, the flags that name exactly that notebook.
+When you send a prompt, the state of every connected notebook this session uses is taken once and placed right after that prompt for every model request of the turn. The current notebook comes first and in full: its outline (markdown headings), one line per code cell with what it defines, and what needs attention (running, queued, errors, stale, edited but not rerun, changed in the browser since Pi's last turn, a widget you set from Pi). Every other notebook the agent worked in during the last three prompts is in full too; the rest are short outlines. Each notebook comes with its `marimo-pair: --url <server> --file <path>` line, the flags that name exactly that notebook, and its open Lens selections. Notebooks open under the working directory that this session does not use are only named, so the agent can pick one up when asked.
 
-**Ambiguous calls.** A marimo-pair call that could mean more than one followed notebook (only `--url`, with several notebooks on that server) counts as work in none of them, because pi-marimo cannot tell which one it changed. When that happens, pi-marimo adds a note to the tool's result saying so, with the flags for each candidate. For a call inside a codemode script, the note goes on the script's result. Calls whose flags are shell variables are left alone. When pi-bg is loaded and a notebook is running, the block also names the `bg_wait` ids, so the agent can wait inside its turn instead of ending it.
+The block is never stored in the session and stays in the same place through the turn, so the model's thinking after it stays valid (Anthropic drops a thinking block when anything before it changes). It can be a turn old while the agent runs cells; the agent sees their results through marimo-pair. `"context": false` in the settings leaves it out.
 
-The block is never stored in the session, so the model sees only the current turn's copy and old copies never pile up. It is taken once per prompt and kept in the same place through the turn so that the model's thinking written after it stays valid: Anthropic drops a thinking block when anything before it changes. At the next prompt the old copy is gone, which drops that earlier turn's thinking once. The state can be a turn old while the agent runs cells; the agent sees their results through marimo-pair.
+A marimo-pair call that could mean more than one followed notebook (only `--url`, with several notebooks on that server) counts as work in none of them; pi-marimo adds a note to the tool's result with the flags for each candidate. With pi-bg, the block names the `bg_wait` ids of running notebooks.
 
-### Pill and notebook view (TUI)
+### The notebook view (TUI)
 
-While a notebook runs a cell or has cells queued, a pill under the prompt reads `1 notebook`, plus `1 failed` in the error color when a run broke cells, until your next typed message. Idle notebooks show no pill. When pi-subagents or pi-bg is loaded, the pill joins theirs instead of being drawn on its own (see below).
+`/marimo view` (or Enter on a row) opens a notebook full screen, under a banner that says it is not your main session: a header (kernel state, cell counts, stale cells and errors, what the agent changed, the last run, the server), then the notebook, live. It follows the running cell until you move.
 
-| pill key | action |
+It starts as the outline: the headings, and one line per code cell with its status, what it defines, what needs attention, how long it last ran, and what it output (`table 1,204×8`, `chart`, `“accuracy 0.93”`), with the cell's widgets under it. `O` switches to every cell's output under its line and the markdown cells as prose, the way the notebook reads in a browser (`view.outputs` in the settings starts there). Enter expands a cell: its code (highlighted), its dataflow (`uses df ← load · used by plot`) and variable values, its console (tracebacks as text), and its whole output. Tables are grids of the first page marimo sends; PNG figures, Vega-Lite and Plotly charts are drawn inline on terminals with Kitty graphics (Ghostty, herdr, Kitty), and Plotly figures run live there (see Optional integrations).
+
+| key | |
 |---|---|
-| `↓` (prompt empty, or cursor at the end of its last line) | select the pill; also `j` in pi-vim's idle Normal mode |
-| Enter, `l`, `→`, or a mouse click | open the busiest notebook (running, else failed, else the current one) |
-| Esc, `↑`, `k`, `h`, `←` | back to the prompt |
+| `j`/`k`, `↑`/`↓` | the next or previous cell; `[` `]` the previous or next section |
+| `^U`/`^D`, PgUp/PgDn, Space, `g`/`G` | scroll; the first or last cell |
+| Enter, `l` | expand or collapse the cell |
+| `O` | every cell's output, or the outline |
+| `z` / `Z` | fold the section the cursor is in / fold every section (again: unfold all) |
+| `n`/`N` | the next or previous failed cell |
+| `c`/`C`, `d` | the next or previous cell the agent changed; its diff |
+| `<` / `>` | a cell this one uses (upstream), one that uses it (downstream) |
+| `v` | the variables: name, type, value, defining cell, uses (Enter goes to the cell, `>` to the first use) |
+| `/` | filter cells (or variables) by name, variable, code or error; Esc clears |
+| `f` | follow the running cell again |
+| `r`, `R`, `A` | run the cell; every stale cell; every cell (the last two need a second press) |
+| `x` | twice: interrupt the kernel, as the stop button does |
+| `w` | drive the cell's widgets (below) |
+| `:` | run Python in the kernel (below) |
+| `a` | ask the agent about the cell (below) |
+| `m`, `M` | mark the cell for the agent through Lens; `M` twice removes its mark |
+| `i` | drive an expanded live chart from the keyboard |
+| `o` | open the notebook in the browser |
+| `S` | twice: stop the server (pi-bg's, or one Pi started) |
+| Tab, Shift+Tab | the next or previous notebook |
+| `?` | every key |
+| Esc, `q`, `h`, `←`, Ctrl+C | back to Pi |
 
-The notebook view (also `/marimo view`) is full screen under a banner that says it is not your main session: the notebook's outline, one line per code cell with its status, what it defines and its error, updated live. It keeps the running cell in view until you scroll.
+The mouse wheel scrolls, a click selects a cell (or a widget), a second click or a double click expands it.
 
-| view key | action |
-|---|---|
-| `↑`/`↓`, `k`/`j` | scroll one line |
-| PgUp, PgDn or Space | scroll one page |
-| Home/`g`, End/`G` | top; end (End resumes following the running cell) |
-| `x` twice | interrupt the kernel, as the stop button in the browser does; only while a cell runs or is queued |
-| `o` | open the notebook in the browser (`open` on macOS, otherwise `xdg-open`) |
-| Tab | next followed notebook |
-| Esc, `q`, `h`, `←`, Ctrl+C | back |
+### Pairing from the view
 
-Interrupting stops the running cell; marimo drops the queue behind it.
+- **Ask the agent (`a`).** A prompt docks at the bottom of the view (pi-vim's editor when it is loaded, else Pi's). Enter sends your message to the main agent with where you were looking: `(From pi-marimo's notebook view: about cell Hbol "fit" under "Model fit" in notebooks/fit.py. marimo-pair: --url … --file …)`. It goes in as a follow-up when the agent is working. The view stays open, so you watch the agent work through the notebook; the header says `agent working`.
+- **The agent's changes.** Cells the agent changed through marimo-pair since your last message are marked (`changed by the agent`, `new from the agent`), counted in the header (`agent: 2 changed · 1 new · 1 removed`) and listed at the end when removed. `c`/`C` go to them, `d` shows a change as a diff. Any agent using marimo-pair counts, as marimo cannot tell sessions apart. They clear with your next prompt.
+- **Widgets (`w`).** Sliders, numbers, range sliders, dropdowns, radios, multiselects, checkboxes, switches, text, dates and buttons can be driven from the view: `j`/`k` (or Tab) pick one, `h`/`l` change it (`H`/`L` ten steps), Space toggles or presses, Enter types a value; Esc is done. Each change reaches the kernel as moving it in the browser does (`set_ui_element_value`), so the cells that read it rerun, and the next context tells the agent what you set. Other widgets are named, with `o` to open the browser.
+- **Scratchpad (`:`).** Python against the notebook's globals, in marimo's scratchpad (the endpoint `marimo pair execute` uses): nothing is saved and no cell changes. What it prints streams above the prompt, then its result (a table as a grid). Enter runs, the prompt stays for the next line; Esc while it runs cancels it, which makes marimo interrupt the kernel.
+- **Lens marks (`m`).** With a Lens in the notebook (marimo-lens mounts one when it is installed), `m` asks for a note and makes a real Lens selection on the cell, with its picture when Pi has one (a PNG, or a chart Pi drew). It is Lens's like one made in the browser: it shows in the footer, the context and the browser, the agent's Lens skill reads and resolves it, and pi-next-prompt offers `Use Lens to address S3 in fit.py`. `M` twice removes the cell's latest selection. Without a Lens, `m` says so; `a` then asks about the cell instead.
 
 ### `/marimo`
 
 | command | |
 |---|---|
 | `/marimo` | a checklist of open notebooks (any number, from anywhere) to pin; pick to toggle, then Done; also offers Auto and Off |
+| `/marimo view [file]` | the busiest notebook (running, else failed, else the current one), or the one named, in the notebook view |
+| `/marimo edit [file]` | open a notebook here, starting its server when none serves it |
+| `/marimo new <file.py>` | create a notebook, start it and open it |
+| `/marimo stop [file]` | stop a notebook server Pi started |
+| `/marimo open` | open a notebook whose server waits in no browser, in the browser |
 | `/marimo auto` | follow every notebook open under Pi's working directory (the default) |
 | `/marimo off` | follow nothing |
-| `/marimo view` | open the busiest notebook in the notebook view |
-| `/marimo open` | open a notebook whose server waits in no browser (a picker when several wait) |
 | `/marimo show` | print the state block the model sees |
 | `/marimo lens` | print the open Lens selections and the recently addressed ones |
+| `/marimo chart <cell>` | put a cell's chart in the transcript |
+| `/marimo inspect` | drive the newest transcript chart from the keyboard |
 
-The chosen mode is saved as a `pi-marimo` session entry and restored with the session.
-
-### marimo-lens
-
-[marimo-lens](https://marimo-team.github.io/marimo-lens/) is a widget that lets you mark part of a rendered result (a bar, a row, a region) and attach a note, as selection `S1`, `S2`, ... When a notebook has a Lens mounted, pi-marimo follows its selections from the same stream. It runs nothing in the kernel.
-
-- **Context:** the state block lists each notebook's open selections: label, note, the producing cell and the heading it sits under, what was marked, and the image status. The latest addressed selections follow with their summaries. The block tells the agent to work through the marimo-lens skill that ships with the notebook's package (`import marimo_lens; help(marimo_lens.agent)` through marimo-pair), which reads the images and resolves the selections.
-- **Footer:** open selections get a status of their own, key `marimo-lens`, so the `marimo` line does not grow: `lens: fit.py · S1 "make this blue" · S2 · also prep.py 1`. pi-status-footer draws it as a separate row. It is cleared when nothing is open.
-- **Next prompt:** with [pi-next-prompt](https://pi-plugins.vercel.app/plugins/pi-next-prompt/), a selection you make while Pi is idle offers `Use Lens to address S1 in fit.py` (or `... my open selections in fit.py`) as ghost text. Tab fills it in; it is not sent. A selection made during a turn is offered when the turn ends, unless the turn addressed it. The offer goes out over Pi's event bus (`prompt:offer`); without pi-next-prompt nothing happens.
-- **Pill and view:** selections made since your last message add `2 selections` to the pill. Enter opens that notebook. The notebook view lists open selections (`*` marks the current one) and the latest addressed ones above the outline, and tags each selected cell's row with its labels. pi-bg's `/tasks` row counts open selections.
-
-Lens keeps its selections in a synced widget trait, which marimo sends to every frontend (`model-lifecycle` messages) and replays to late joiners. Selection images, agent activity and reveals do not travel there and are not read.
+An unknown subcommand is named with the list. The follow mode is saved as a `pi-marimo` session entry and restored with the session, as are the notebooks this session works in and the ones it opened itself.
 
 ## How it works
 
-marimo streams every kernel message to the browser over `/ws`, and the same stream over `/sse`. pi-marimo subscribes to each notebook session's `/sse` stream as a *kiosk* consumer: a read-only viewer that cannot run or edit code and never takes the notebook over from your browser. On connect marimo replays the session, and from then on pi-marimo receives the cell document, each cell's status and errors, and the dataflow graph. Outputs are dropped. Nothing runs in the kernel. It follows notebooks across page reloads (which change the session id) and server restarts.
+marimo streams every kernel message to the browser over `/ws`, and the same stream over `/sse`. pi-marimo subscribes to each notebook session's `/sse` stream as a *kiosk* consumer: a read-only viewer that never takes the notebook over from your browser. On connect marimo replays the session; from then on pi-marimo receives the cell document, each cell's status, errors, console and output, the dataflow graph and the variable values. It follows notebooks across page reloads (which change the session id) and server restarts.
 
-**Which notebooks.** In `auto` mode it follows every notebook open under Pi's working directory, up to eight, found through marimo's server registry (`$XDG_STATE_HOME/marimo/servers`, default `~/.local/state/marimo/servers`, written by servers started with `--no-token`) and each server's `/api/sessions`. Notebooks inside a hidden directory under the working directory (`.worktrees/`, `.claude/worktrees/`: other checkouts) are left out. Token-protected servers are reached with `MARIMO_TOKEN`. `/marimo` pins a set instead.
+The view's actions are separate requests to the session's kernel endpoints, as the browser's buttons make them: `/api/kernel/run`, `/interrupt`, `/set_ui_element_value`, `/set_model_value` (a Lens command) and `/execute` (the scratchpad), with marimo's server token.
 
-**Which notebooks are this session's.** Following a notebook is not the same as showing it. The footer, the Lens line and offer, and the state in each turn's context cover only the notebooks this session uses: the pinned ones, or the ones its agent has worked in through marimo-pair (remembered in the session, so they survive a resume). A fresh session in a checkout where another session works in a notebook shows no footer; its context only names the other open notebooks, so the agent can pick one up when asked.
+**Which notebooks.** In `auto` mode it follows every notebook open under Pi's working directory, up to eight (`maxNotebooks`), found through marimo's server registry (`$XDG_STATE_HOME/marimo/servers`, default `~/.local/state/marimo/servers`, written by servers started with `--no-token`) and each server's `/api/sessions`. Notebooks inside a hidden directory under the working directory (`.worktrees/`, `.claude/worktrees/`) are left out. Notebooks opened with `/marimo edit` or `/marimo new` are followed wherever they are. Token-protected servers are reached with `MARIMO_TOKEN`. `/marimo` pins a set instead.
 
-**The current notebook.** The current one, first in context, is the one this session's agent last worked in: Pi's tool calls are read for marimo-pair commands (`execute-code.sh` or `marimo pair execute`, by `--file`, `--session`, or `--url` when only one followed notebook is on that server), including calls made from codemode scripts. Two Pi sessions in two notebooks therefore each keep their own current notebook. Before the agent has touched any, it is the one used most recently by anyone: a running cell first, then the latest cell run (replayed on connect, so history counts) or edit.
+**Which notebooks are this session's.** The rows, footer, Lens line and context cover only the notebooks this session uses: the pinned ones, the ones it opened, and the ones its agent has worked in through marimo-pair (remembered in the session). The current one, first in context, is the one this session's agent last worked in, read from its marimo-pair calls (`execute-code.sh` or `marimo pair execute`, by `--file`, `--session`, or `--url` when only one followed notebook is on that server), including calls from codemode scripts. A marimo-pair call at a server whose notebook is open in no browser opens it first, without a browser.
 
-**Browser edits.** marimo does not echo an edit back to the consumer whose session id sent it, so pi-marimo connects under its own id and lets marimo find the session by file. When several sessions hold the same file (a closed tab's session can linger), that lookup would take the oldest, so it connects by the exact session id instead and does not see edits typed in the browser until they run.
+**Browser edits.** marimo does not echo an edit back to the consumer whose session id sent it, so pi-marimo connects under its own id and lets marimo find the session by file. When several sessions hold the same file (a closed tab's session can linger), it connects by the exact session id and does not see edits typed in the browser until they run.
 
 ## Configuration
 
+`marimo.json`, read in this order, each on top of the last (objects merge, other values replace, a value of the wrong type is ignored): `~/.config/agents/marimo.json` (`$XDG_CONFIG_HOME`), `~/.pi/agent/marimo.json`, then the project's `.agents/marimo.json` and `.pi/marimo.json`. Read at each session start; the view's settings when a view opens.
+
+```json
+{
+  "maxNotebooks": 8,
+  "context": true,
+  "liveCharts": true,
+  "view": { "outputs": false },
+  "server": { "command": [] }
+}
+```
+
+| key | default | |
+|---|---|---|
+| `maxNotebooks` | `8` | notebooks followed at once in `auto` mode (1 to 32) |
+| `context` | `true` | put the notebooks' state in the model's context at each prompt |
+| `liveCharts` | `true` | run Plotly figures live in the view and the transcript; `false` draws pictures |
+| `view.outputs` | `false` | open the notebook view with every cell's output shown (`O` toggles it) |
+| `server.command` | `[]` | how `/marimo edit` and `/marimo new` start marimo, e.g. `["uvx", "--with", "pandas", "marimo"]`; empty: `uv run marimo` in a uv project, else `marimo` |
+
 | variable | |
 |---|---|
-| `MARIMO_TOKEN` | access token for token-protected marimo servers (sent as a bearer token; also used to interrupt) |
+| `MARIMO_TOKEN` | access token for token-protected marimo servers (sent as a bearer token, also for the view's actions) |
 | `XDG_STATE_HOME` | where marimo's server registry is read (`$XDG_STATE_HOME/marimo/servers`) |
 
-The follow mode (`auto`, pinned paths, `off`) is set with `/marimo` and stored per session. There is no settings file.
+The follow mode (`auto`, pinned paths, `off`) is set with `/marimo` and stored per session.
 
 ## Requirements and costs
 
-- Running marimo servers listed in marimo's server registry (servers started with `--no-token` write it). `MARIMO_TOKEN` is sent to servers that need an access token.
-- No model or classifier calls of its own; the state block adds tokens to each prompt's context while notebooks are followed (`/marimo off` stops that).
-- It writes nothing to disk except the `pi-marimo` session entry.
+- marimo (verified with 0.25), with servers listed in its registry (`--no-token`; `/marimo edit` starts them so). `MARIMO_TOKEN` is sent to servers that need an access token.
+- No model or classifier calls of its own; the state block adds tokens to each prompt's context (`"context": false` or `/marimo off` stops that).
+- `/marimo new` writes the new notebook file; otherwise pi-marimo writes only its `pi-marimo` session entries. What you run in the view (cells, widgets, the scratchpad) runs in your kernel and costs what it costs there.
+- Lens marks need marimo-lens with its command protocol 6 (marimo-lens 0.2); a Lens on another version answers with an error, which the view shows.
 
 ## Optional integrations
 
@@ -142,30 +189,40 @@ Each is optional and goes through Pi's event bus; without the sibling nothing ha
 The notebooks are one more source in the activity protocol (`src/activity.ts`, copied verbatim into pi-bg, pi-subagents, pi-marimo, pi-herdr and pi-plan-mode).
 
 - **[pi-bg](https://pi-plugins.vercel.app/plugins/pi-bg/)'s `/tasks`** lists followed notebooks beside the tasks and agents, tagged `notebook`: running while a cell runs or is queued, failed when its last run broke cells. Enter opens the notebook view, `x` twice interrupts the kernel, and `x` on an idle notebook clears its failure alert.
-- **Pills.** With [pi-subagents](https://pi-plugins.vercel.app/plugins/pi-subagents/), the pill ends its FleetView list (Enter opens the busiest notebook); with only pi-bg, it joins pi-bg's pill (`2 tasks · 1 notebook`, Enter opens `/tasks`). pi-marimo draws its own pill only when no host shows it.
+- **Rows.** With [pi-subagents](https://pi-plugins.vercel.app/plugins/pi-subagents/), the notebook rows end its list; with only pi-bg, they join pi-bg's pill. pi-marimo draws its own rows only when no host shows them.
 
 ### pi-bg's `bg_wait` and tasks
 
-- **Waiting on a notebook.** While a followed notebook has a cell running or queued, it is outside work that `bg_wait` can wait on, under the id `marimo:` plus its path from the cwd (`marimo:nb.py`, `marimo:notebooks/fit.py`; absolute outside the cwd). pi-bg also accepts `marimo:fit.py` when only one notebook matches. The run ends as `done`, or `failed` when cells broke during it (errors already there when it began do not count), when the notebook stays disconnected for 8 seconds (a browser reload reconnects sooner and the run goes on), or when it is no longer followed; the summary says what the run took (`ran 4m12s · 1 error`).
-- **Tasks that are notebooks.** A pi-bg task tied to a followed notebook gets its kernel state (`bg:annotate`): a `marimo edit nb.py` (or `marimo run`) service by the notebook it serves, resolved from the task's directory, and a job by the notebook its marimo-pair calls target. pi-bg shows the state in the task's row (`nb.py: running Model fit · 2 queued`, `nb.py: idle · 1 error`), lists the notebook under the task in `bg_logs`, and `bg_wait` on a server that is up waits for its running cells.
-- **Inline images.** An expanded cell whose output is a PNG (a matplotlib or PIL figure, bare or as an `<img>` data URL, up to about 1.5 MB) is drawn in the view through the terminal's Kitty graphics, in herdr and Ghostty as well as plain Kitty. The picture shows only when its whole block fits on screen (otherwise a note says to scroll), and on a terminal without image support the output stays the `[image png]` label. Altair and other Vega-Lite charts (a plain chart or `mo.ui.altair_chart`) are drawn too: the view hands the chart's spec to `uv run --with vl-convert-python`, which renders it without a browser (about a second the first time, then cached per spec), so it needs `uv` on the PATH. The chart shows `[chart: drawing…]` meanwhile, and a failed render says why. Plotly figures (a plain figure or `mo.ui.plotly`) are drawn by a sandboxed headless Chrome: one long-lived `uv run --with plotly --with kaleido` process keeps it warm, so a 2D figure takes tens of milliseconds and a 3D or map one under a second, after the first. The browser is Chrome for Testing, downloaded once (about 320 MB) into `~/.cache/pi-marimo/chrome` (`PI_MARIMO_CHROME_DIR` moves it; `BROWSER_PATH` uses a browser you name instead), never the Chrome you use. That first figure takes several seconds while it downloads. The process ends after five idle minutes and with Pi. Map tiles load from the network. Bokeh and other widgets stay named. The agent's snapshot never carries images.
-- **Live Plotly charts.** On a Kitty-graphics terminal (Ghostty, herdr, Kitty), a Plotly figure in an expanded cell is not a picture but a running chart: the figure lives in a page of a sandboxed headless Chrome (Chrome for Testing in `~/.cache/pi-marimo/chrome`, a throwaway profile, never your own browser), and the mouse over it goes to that page as real mouse events. Hover shows the tooltips, drag zooms or pans (the modebar tools work too), the wheel zooms, and each change comes back as a fresh frame drawn in place, about 40 ms later. Hover needs a terminal that reports mouse movement (Pi's fullscreen mode, outside tmux and possibly herdr, which may forward only clicks, drags and the wheel). The keyboard works everywhere: with a chart expanded, `i` starts a pointer (an orange ring) that arrows or `hjkl` move (shift goes farther), which shows the tooltips; space starts a drag and space again ends it (a box zoom, or a pan with the pan tool), `+` and `-` zoom, `0` resets, and Esc hands the keys back. If the browser or `uv` is missing the chart falls back to the static image below. Clicks and selections do not flow back to the notebook's `mo.ui.plotly`; this is view-only. The browser ends five minutes after the last live chart closes and with Pi.
-- **Charts in the chat.** `/marimo chart <cell>` (and the `marimo_chart` tool, which the agent uses to show you a chart) puts a cell's chart into the transcript: a Plotly figure runs live there just as in the view (hover, drag to zoom, the wheel), and `/marimo inspect` drives the newest one from the keyboard (the same keys as `i` in the view, until Esc). Other charts appear as pictures. The entry keeps the figure, so the chart comes back after a restart or resume.
-- **No flicker.** Pi's renderer clears every image placement when an image line changes, and herdr deletes a replaced image before uploading the new one, so a chart drawn through the lines flashes on each frame. In Pi's fullscreen mode the chart's rows are plain text to Pi (a zero-width marker on the first) and pi-marimo places the frames itself (`src/ui/painter.ts`): after each render it puts the frame where the marker is, and a new frame goes to a second image placed above the old one, which is removed only afterwards. Elsewhere the lines place the frames as before. Charts in the transcript, pictures included, are taken off the screen while an overlay covers them, and while the notebook view is open the transcript's other images (Pi keeps image lines on top of overlays) are cleared until it closes.
-- **One row per run.** While a pi-bg job's marimo-pair calls keep a notebook busy, in the TUI the notebook's row stands for the job: pi-bg leaves the job out of `/tasks` and its pill until it ends, the notebook row names it (`running Model fit · bg fit`), and `bg_wait marimo:<file>` waits on the job, whose result carries the call's output. `x` twice on the row interrupts the kernel, which also ends the call. Stopping the job (`bg_kill`, `/stop`) interrupts the kernels it was running cells in, since killing the marimo-pair client alone leaves them running. Servers keep their own rows.
-- **One notice per run.** When every notebook of a kernel hold (below) is driven by a pi-bg job that will wake the agent, the hold keeps its token but skips its "finished" notification: the wake-up already says so. If you stop that job, it wakes no one, so the notification comes back.
+- **Waiting on a notebook.** While a followed notebook has a cell running or queued, it is outside work that `bg_wait` can wait on, under the id `marimo:` plus its path from the cwd (`marimo:nb.py`, `marimo:notebooks/fit.py`; absolute outside the cwd). pi-bg also accepts `marimo:fit.py` when only one notebook matches. The run ends as `done`, or `failed` when cells broke during it (errors already there when it began do not count), when the notebook stays disconnected for 8 seconds, or when it is no longer followed; the summary says what the run took (`ran 4m12s · 1 error`).
+- **Tasks that are notebooks.** A pi-bg task tied to a followed notebook gets its kernel state (`bg:annotate`): a `marimo edit nb.py` (or `marimo run`) service by the notebook it serves, and a job by the notebook its marimo-pair calls target. pi-bg shows the state in the task's row (`nb.py: running Model fit · 2 queued`), lists the notebook under the task in `bg_logs`, and `bg_wait` on a server that is up waits for its running cells.
+- **One row per run.** While a pi-bg job's marimo-pair calls keep a notebook busy, in the TUI the notebook's row stands for the job (`running Model fit · bg fit`), and `bg_wait marimo:<file>` waits on the job, whose result carries the call's output. Stopping the job (`bg_kill`, `/stop`) interrupts the kernels it was running cells in, since killing the marimo-pair client alone leaves them running.
+- **One notice per run.** When every notebook of a kernel hold (below) is driven by a pi-bg job that will wake the agent, the hold skips its "finished" notification: the wake-up already says so.
+
+### Charts
+
+- **Inline images.** An expanded (or, in outputs mode, any) cell whose output is a PNG (a matplotlib or PIL figure, bare or as an `<img>` data URL, up to about 1.5 MB) is drawn through the terminal's Kitty graphics, in herdr and Ghostty as well as plain Kitty. The picture shows only when its whole block fits on screen. Altair and other Vega-Lite charts are drawn by `uv run --with vl-convert-python` (needs `uv`), cached per spec. Plotly figures are drawn by a sandboxed headless Chrome (Chrome for Testing, downloaded once into `~/.cache/pi-marimo/chrome`; `PI_MARIMO_CHROME_DIR` moves it, `BROWSER_PATH` uses one you name), never the Chrome you use. The agent's snapshot never carries images.
+- **Live Plotly charts.** On a Kitty-graphics terminal, a Plotly figure in the view is a running chart: the mouse over it goes to its page (hover tooltips, drag to zoom or pan, the wheel zooms), and `i` drives it from the keyboard (arrows or `hjkl` move a pointer, space drags, `+`/`-` zoom, `0` resets, Esc hands the keys back). `"liveCharts": false` draws pictures instead. Clicks and selections do not flow back to `mo.ui.plotly`.
+- **Charts in the chat.** `/marimo chart <cell>` (and the `marimo_chart` tool, which the agent uses to show you a chart) puts a cell's chart into the transcript, a Plotly figure live as in the view, and `/marimo inspect` drives the newest one from the keyboard. The entry keeps the figure, so the chart comes back after a restart or resume.
+- **No flicker.** In Pi's fullscreen mode pi-marimo places chart frames itself (`src/ui/painter.ts`), a new frame above the old one before the old one goes, and transcript pictures are taken off the screen while an overlay covers them.
 
 ### pi-herdr
 
-Inside a [Herdr](https://herdr.dev) pane with [pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/) (it does the Herdr work through its event-bus bridge, and only in an interactive Pi), a turn that ends while a notebook the agent worked in during that turn is still running or has cells queued starts a *kernel hold*. It lasts until every such notebook is quiet, disconnected or no longer followed, or until the next prompt. During it the pane token `marimo` names the file and what runs (`fit.py: Model fit`, or `fit.py: 3 queued`); add `$marimo` to a row in Herdr's `[ui.sidebar.agents]` to show it. At the end the token is cleared and a Herdr notification (for example `fit.py finished`, `ran 4m12s · 1 error`) plays the done sound, unless the pane is focused. The pane's state stays Herdr's own: pi-marimo only sets the token and sends the notification.
+Inside a [Herdr](https://herdr.dev) pane with [pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/), a turn that ends while a notebook the agent worked in during that turn is still running starts a *kernel hold*: the pane token `marimo` names the file and what runs (`fit.py: Model fit`) until every such notebook is quiet, then a Herdr notification (`fit.py finished`, `ran 4m12s · 1 error`) plays the done sound, unless the pane is focused. Add `$marimo` to a row in Herdr's `[ui.sidebar.agents]` to show it.
+
+### pi-next-prompt
+
+A Lens selection you make while Pi is idle offers `Use Lens to address S1 in fit.py` (or `... my open selections in fit.py`) as ghost text through `prompt:offer`. A selection made during a turn is offered when the turn ends, unless the turn addressed it.
 
 ## Limitations
 
-- Read-only: it never runs or edits cells or resolves Lens selections (the notebook view's interrupt is the one exception, on your keypress).
-- In `auto` mode, at most eight notebooks are followed, only those under Pi's working directory and outside hidden directories.
+- Cells are changed by the agent only (through marimo-pair); the view runs, interrupts, sets widgets, runs scratch code and makes Lens selections, and never edits code.
+- Tables show the first page marimo sends; no paging, sorting or filtering.
+- Widget values changed in a browser show in the view after a reconnect (marimo sends kiosk viewers no live widget values); the ones set from Pi show at once.
+- The agent's changes are any code-mode change, whichever agent made it.
+- In `auto` mode, at most `maxNotebooks` notebooks are followed, only those under Pi's working directory and outside hidden directories, plus the ones opened with `/marimo edit|new`.
 - Only servers listed in marimo's server registry are followed. Waiting servers are shown only when they serve one notebook.
 - The context block can be a turn old while the agent runs cells.
-- The pill and notebook view exist only in the TUI.
+- The rows and the notebook view exist only in the TUI.
 - `src/core/` is plain ECMAScript behind a small `Io` interface (`node-io.ts` for Node and Bun), shared with the opencode and Claude Code ports.
 
 ## Development
@@ -176,7 +233,7 @@ npm ci
 npm run check
 ```
 
-`npm run check` runs `tsc --noEmit` and then `vitest run`, including an end-to-end test that starts `marimo edit --headless --no-token` on a scratch notebook; it is skipped when `marimo` is not on `PATH`. For the full suite, the repository root's `npm run check` runs every component's check after the root loader test.
+`npm run check` runs `tsc --noEmit` and then `vitest run`. Two end-to-end tests run against a real marimo only with `PI_MARIMO_LIVE_TEST=1` and `marimo` on `PATH` (`PI_MARIMO_LIVE_TEST=1 npx vitest run test/e2e.test.ts test/e2e-actions.test.ts`): one follows notebooks on a scratch server, the other has Pi start a server and runs cells, sets a widget, runs the scratchpad and, when marimo-lens is installed, makes and removes a Lens selection. For the full suite, the repository root's `npm run check` runs every component's check after the root loader test.
 
 ## License
 

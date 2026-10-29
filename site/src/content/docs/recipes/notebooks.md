@@ -1,12 +1,20 @@
 ---
 title: Notebook sessions
-description: Observe marimo notebook state, distinguish server readiness from kernel completion, and wait safely.
+description: Start a marimo notebook from Pi, pair with the agent on it from the terminal, distinguish server readiness from kernel completion, and wait safely.
 ---
 **Use:** [pi-marimo](/plugins/pi-marimo/). Add [pi-bg](/plugins/pi-bg/) for process management and waiting. Use the separate [marimo-pair](https://github.com/marimo-team/marimo-pair) workflow to inspect and edit notebooks.
 
-Pi-marimo observes notebook state. Its kiosk SSE connection does not run or edit code and does not take the browser’s editing session over. Its explicit interrupt control is a separate action.
+Pi-marimo observes notebook state. Its kiosk SSE connection does not run or edit code and does not take the browser’s editing session over. The notebook view's actions (run, interrupt, widgets, the scratchpad, Lens marks) are separate kernel requests you make on purpose.
 
-## Start a local notebook server
+## Start the notebook from Pi
+
+```text
+/marimo new notebooks/fit.py
+```
+
+This writes an empty notebook, starts `marimo edit --headless --no-token` on it (through `uv run marimo` in a uv project), opens its session without a browser and shows the notebook view. `/marimo edit notebooks/fit.py` does the same for an existing notebook. The server lives as long as Pi, or until `/marimo stop`.
+
+## Or start a local notebook server yourself
 
 If marimo is already installed in your Python environment, ask Pi to start a service:
 
@@ -49,6 +57,17 @@ Ask the agent to use marimo-pair, not to treat pi-marimo as an editing tool:
 Pi-marimo detects supported marimo-pair tool calls to identify the current notebook. It follows kernel events continuously, but inserts a **single state snapshot per user prompt**, held stable for the rest of the turn. That avoids rewriting the prefix under the model’s existing thinking on every request.
 
 For the latest output during a turn, the agent should use marimo-pair’s results. The observation block is intentionally not a substitute for them. Outputs are dropped from the SSE observer; outlines, state, variables and errors are what matter.
+
+## Pair from the view
+
+Open the notebook view (`/marimo view`, or Enter on its row under the prompt) and keep it open while the agent works:
+
+- `a` asks the agent about the cell under the cursor; the message names the cell and the marimo-pair flags.
+- `c` jumps to the cells the agent changed since your last message; `d` shows a change as a diff.
+- `w` drives the cell's widgets (`h`/`l` change a slider, Space a checkbox); dependent cells rerun.
+- `:` runs Python against the notebook's globals without touching a cell, for a quick look at a value.
+- `m` marks a result for the agent through marimo-lens, as pointing at it in the browser would.
+- `O` shows every cell's output (tables as grids, charts inline on Kitty-graphics terminals), `v` the variables, `?` every key.
 
 ## Wait for cells, not just the server
 

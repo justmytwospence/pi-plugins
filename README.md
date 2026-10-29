@@ -18,7 +18,7 @@ All 34 references include activation, controls, defaults, requirements, costs an
 | [pi-subagents](https://pi-plugins.vercel.app/plugins/pi-subagents/) | Delegate bounded tasks to headless Pi workers. |
 | [pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/) | Coordinate interactive handoffs and Herdr pane metadata. |
 | [pi-recap](https://pi-plugins.vercel.app/plugins/pi-recap/) | See where a session stands when you come back to it. |
-| [pi-marimo](https://pi-plugins.vercel.app/plugins/pi-marimo/) | Follow notebook state and running cells alongside the chat. |
+| [pi-marimo](https://pi-plugins.vercel.app/plugins/pi-marimo/) | Follow marimo notebooks alongside the chat, and read and steer them from the terminal. |
 | [pi-sidebar](https://pi-plugins.vercel.app/plugins/pi-sidebar/) | Chat read-only beside a working session, on its prompt cache. |
 | [pi-reload-all](https://pi-plugins.vercel.app/plugins/pi-reload-all/) | Reload every Pi session, here and on Herdr's machines, once each is idle. |
 | [pi-mcp-device-login](https://pi-plugins.vercel.app/plugins/pi-mcp-device-login/) | Sign in to OAuth MCP servers with a code, no localhost redirect. |
