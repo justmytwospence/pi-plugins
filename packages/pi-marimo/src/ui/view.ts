@@ -55,8 +55,11 @@ const ROWS_TOP = 3;
 const SPLIT_MIN = 100;
 /** The outline's width in the split: a third of the view, within limits. */
 const outlineWidth = (width: number): number => Math.max(28, Math.min(44, Math.floor((width - 4) * 0.32)));
-/** Rows the stacked outline takes above the detail: about a third of the page, 2 to 8. */
-const stackedOutlineRows = (page: number): number => Math.max(2, Math.min(8, Math.round(page * 0.3), page - 4));
+/** Rows the stacked outline takes above the detail: about a third of the page, odd (as many rows above the cursor as below it), 1 to 9. */
+const stackedOutlineRows = (page: number): number => {
+  const rows = Math.max(1, Math.min(9, Math.round(page * 0.3), page - 4));
+  return rows % 2 ? rows : rows - 1;
+};
 /** Between the panes. */
 const SEPARATOR_WIDTH = 3;
 /** Lines of a scratch run shown above its prompt, at most. */

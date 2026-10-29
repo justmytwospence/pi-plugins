@@ -768,6 +768,9 @@ test("narrow, a few outline rows around the cursor sit above the detail, and the
     expect(text).toMatch(/daily[\s\S]*▌ {2}✗ model +KeyError[\s\S]*chart[\s\S]*─{20,}[\s\S]*Traceback \(most recent call last\)/u);
     expect(text).toContain("enter code");
     const rule = lines.findIndex((l, i) => i > 2 && /│ ─{20,} │/u.test(l));
+    // As many outline rows above the cursor as below it.
+    const cursorRow = lines.findIndex((l) => l.includes("▌  ✗ model"));
+    expect(cursorRow - 3).toBe(rule - 1 - cursorRow);
     expect(rule).toBeGreaterThan(3);
     expect(rule).toBeLessThan(12);
     // Enter opens the code in place.
