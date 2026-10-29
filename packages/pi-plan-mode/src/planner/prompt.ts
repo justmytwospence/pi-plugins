@@ -1,4 +1,5 @@
 import { describeGrants, type ResolvedGrant } from "../command-grants.js";
+import { PLAN_STANDARD } from "../handoff.js";
 import { MCP_GATEWAY_TOOL } from "../mcp-tools.js";
 import { describedTools, mcpToolsNote } from "../planners.js";
 import { buildPlanModePrompt } from "../prompt.js";
@@ -124,8 +125,8 @@ export function consultMessage(message: string) {
 /** What Write plan M (or Revise plan M, once there is one) asks your main agent to do. */
 export function writeMergedRequest(revise: boolean) {
   return revise
-    ? "Revise plan M: fold in what we have discussed since you recorded it, and record the complete revised plan with plan_submit_merged."
-    : "Write plan M: merge the planners' plans and what we have decided here into one complete implementation plan. Where they disagree, pick one approach and say why. Record it with plan_submit_merged.";
+    ? "Revise plan M: fold in what we have discussed since you recorded it, and record the complete revised plan with plan_submit_merged, to the same standard as before."
+    : `Write plan M: merge the planners' plans and what we have decided here into one complete implementation plan. Where they disagree, pick one approach and say why. Write it to this standard:\n\n${PLAN_STANDARD}\n\nRecord it with plan_submit_merged.`;
 }
 
 /** Guidance for your main agent while a planning run is active (its tools' guidelines). */

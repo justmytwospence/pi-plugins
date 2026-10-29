@@ -2,7 +2,7 @@
 
 A Pi extension with two ways to plan before anything changes:
 
-- **Plan mode**, as in Claude Code, in your own conversation: `/plan` (or Shift+Tab with [pi-tool-gate](../pi-tool-gate/) after an explicit stock thinking-key remap) turns it on, your agent researches read-only and writes its plan to a plan file, then shows you the plan and asks how to proceed.
+- **Plan mode**, as in Claude Code, in your own conversation: `/plan` (or Shift+Tab with [pi-tool-gate](../pi-tool-gate/) after an explicit stock thinking-key remap) turns it on, your agent researches read-only and writes its plan to a plan file, then shows you the plan and asks who implements it.
 - **`/planners`**, a full-screen planner for two models at once: both plan the same task read-only while you watch, answer their questions, and talk to them. Once both plans are in, a pane below them is your own main agent, which got every plan, talks them over with you, questions the planners, and writes the merged plan when you ask. Then you implement the plan you like, with the model, effort, and context you choose.
 
 It acts only while plan mode is on, when you run `/plan` or `/planners` (or press the shortcut you configured), while a planning run you started is alive, and when your agent calls `enter_plan_mode` or `exit_plan_mode`.
@@ -46,13 +46,15 @@ While plan mode is on:
 - Your agent is told (once, with your next message, or right away mid-turn) to research, ask you what it cannot find out, and write its plan to a **plan file**, `~/.pi/agent/plans/<two-words>.md` (`plansDirectory` moves it). One file per session: entering plan mode again continues it.
 - `edit` and `write` are blocked except for the plan file. Commands: with pi-tool-gate, the gate judges them as in auto mode (as Claude Code's classifier does while planning); without it, only read-only commands run (the [shell policy](./docs/settings.md)).
 - When the plan is ready, your agent calls `exit_plan_mode`. The plan shows in the chat (Mermaid diagrams drawn as terminal diagrams, top-down when a left-to-right chart is too wide) and you choose:
-  - **Yes, auto mode** / **Yes, yolo mode** / **Yes, auto-accept project edits** / **Yes, manually approve edits** (with pi-tool-gate, those of its enabled modes, with manual approval when none of the others is enabled; without it, **Yes, implement it**): plan mode ends and your agent starts implementing in this conversation, in that permission mode.
-  - **Yes, in a fresh session with only the plan**: once this turn ends, a new session (a child of this one) starts with the plan as its first message.
+  - `Yes, hand off to <model> (<effort>)`: a cheaper model implements it in this session. When this turn ends, the context is compacted down to the plan (a compaction marker), the model is switched, and a collapsed handoff message (`ctrl+o` expands it) carries the plan and how to implement it; implementation starts at once. When the target is the planning model at the same effort, the row reads **Yes, in a fresh context**.
+  - `Yes, keep <planning model> on it`: the agent that planned it implements it here, with the whole conversation. Without a session model the two rows are **Yes, in a fresh context** and **Yes, implement it here**.
   - **Edit the plan first**: edit it in your external editor (Pi's `externalEditor` setting, else `$VISUAL` / `$EDITOR`; a Markdown editor such as [edamame](https://github.com/mijowi/edamame) keeps it rendered while you edit), or in Pi's editor when none is set; the file is updated and you choose again. The approval tells your agent the plan was edited.
   - **No, keep planning**: say what should change (or leave it empty, or press Esc, and say it in the chat). With an editor provider such as pi-vim the field is that editor (Enter or `:w` sends, Escape in Normal mode or `:q` cancels). Plan mode stays on.
-- Leaving plan mode another way (Shift+Tab, or the shortcut) tells your agent it may now make changes.
+- Approving a plan returns the permission mode to what it was before planning (with pi-tool-gate; auto when that is unknown and auto is in the cycle, else manual approval). Leaving plan mode another way (Shift+Tab, or the shortcut) tells your agent it may now make changes.
 
-The plan tools are model-only: your agent calls them directly, never inside `codemode`. This keeps the plan's inline renderer visible while you approve it. Auto mode uses Jev to judge each call; auto-accept project edits allows project edits and filesystem commands without approval, while other commands follow the gate's normal approval policy.
+The handoff target is `implementationModelMap[planning model]` when that model is available, else the model pi-subagents gives its `worker` role (reusing its user agents and provider tiers), else the planning model. Plans are written to a handoff standard: Summary, Decisions, Changes (files, signatures, behavior), Steps, Verification, Out of scope and Handoff notes, so the implementer makes no decisions.
+
+The plan tools are model-only: your agent calls them directly, never inside `codemode`. This keeps the plan's inline renderer visible while you approve it.
 
 In Pi's fullscreen terminal mode, **Plan review** scrolls the chat to the beginning of the plan when the approval picker opens. Short plans get temporary trailing space so their beginning is at the top too. Scroll the chat to read; redraws leave your position alone. After editing, review starts at the revised plan's beginning. Closing review removes the space and follows the latest message again. Regular terminal mode and RPC keep their usual presentation; their scrollback is not controlled by this extension.
 
@@ -139,7 +141,7 @@ You can keep talking to either planner in Review, too.
 
 ### 5. Implement
 
-The same row page: which plan, the **model**, its **effort**, and the **context** (this conversation plus the plan, or a fresh session with only the plan). Defaults come from `implementationModelMap` (keyed by the model that wrote the plan), else your session's model. Enter closes the planner and starts implementing.
+The same row page: which plan, the **model**, its **effort**, and the **context** (this conversation plus the plan, or a fresh session with only the plan). Defaults come from `implementationModelMap` (keyed by the model that wrote the plan), else pi-subagents' `worker` model, else your session's model. A fresh session is a child session that gets the implementation brief and the plan. Enter closes the planner and starts implementing.
 
 ### Leaving, stopping and reopening
 
@@ -221,7 +223,8 @@ Planner sessions are stored under `~/.pi/agent/plan-mode/planners/`; runs are sa
 - `planners`: planner A and (optionally) B, preselected on the Settings step.
 - `scoutModelMap`: planner model to the model its subagents run on.
 - `plannerTimeoutSeconds`: the per-turn time limit (default 2700, 45 minutes).
-- `implementationModelMap`, `defaultImplementationContext` (`keep` or `clear`): Implement step defaults.
+- `implementationModelMap`: the model `/plan`'s handoff and `/planners`' Implement step default to, keyed by the planning model; unmapped models use pi-subagents' worker model, else the planning model (`/plan`) or your session's model (`/planners`).
+- `defaultImplementationContext` (`keep` or `clear`): the Implement step's context default.
 - `defaultPlanExportPath`: the export path (default `PLAN.md`, relative to the project).
 - `toggleShortcut`: a key that toggles plan mode (with pi-tool-gate, it cycles the gate's modes instead, like the gate's own Shift+Tab); none by default. Do not set it to the gate's key. It changes after `/reload`.
 - `plansDirectory`: where plan mode writes plan files (default `~/.pi/agent/plans`; `~` is expanded).
@@ -243,7 +246,8 @@ Planner sessions are stored under `~/.pi/agent/plan-mode/planners/`; runs are sa
 
 ## Optional integrations
 
-- **pi-tool-gate**: owns the permission mode. Plan mode joins its configured permission-mode cycle (Shift+Tab needs an explicit stock `app.thinking.cycle` remap), the gate judges commands while planning, and approving a plan picks the gate's next mode. They talk over Pi's event bus (`permission-mode:changed`, `permission-mode:set`, `permission-mode:cycle`, `permission-mode:plan-provider`; see pi-tool-gate's `src/modes.ts`). Without the gate, plan mode enforces a read-only shell itself and shows `⏸ plan mode on` in the footer.
+- **pi-tool-gate**: owns the permission mode. Plan mode joins its configured permission-mode cycle (Shift+Tab needs an explicit stock `app.thinking.cycle` remap), the gate judges commands while planning, and approving a plan returns to the mode you were in before planning (auto when unknown). They talk over Pi's event bus (`permission-mode:changed`, `permission-mode:set`, `permission-mode:cycle`, `permission-mode:plan-provider`; see pi-tool-gate's `src/modes.ts`). Without the gate, plan mode enforces a read-only shell itself and shows `⏸ plan mode on` in the footer.
+- **pi-subagents**: answers `subagents:role-model` on Pi's event bus (`{ role, parent, thinking?, reply? }`) with the model and effort its `worker` role gets for the planning model; plan mode uses it as the default handoff target. Without it, the planning model is the default.
 - **Herdr**: while any planner is working, the extension holds `herdr:working` on Pi's event bus (`{ active: true, label: "Planning" }`, then `{ active: false }`), so pi-herdr shows the pending run in Herdr's sidebar; while a planner waits for your answers it also holds `herdr:blocked` (`label: "Planner question"`). Outside Herdr, or without pi-herdr, nothing listens.
 - **pi-anthropic-auth** (or any extension named in `providerExtensions`): forwarded to planners and subagents on that provider.
 - **Custom editors** such as pi-vim's: the Task box uses the editor component your main editor uses, so its modes work there (pi-vim's `:q` leaves the box instead of quitting Pi).
@@ -273,6 +277,8 @@ src/
 ├── index.ts            # entry: the planner app, or the MCP guard inside a subagent
 ├── plan.ts             # /plan and /planners: settings, tools, runs, implement, export, restore
 ├── inline-plan.ts      # plan mode in your conversation: plan file, enter/exit tools, approval
+├── handoff.ts          # the plan standard and the implementation brief
+├── plan-file.ts        # plan files: names, paths, reading and writing
 ├── main-chat.ts        # your main agent as M: delivered plans, the run tools, the M pane's view
 ├── app/                # the full-screen pages: options rows, lanes, frame
 ├── planner/            # in-process planner sessions: agent, session, policy extension, access, prompts

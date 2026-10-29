@@ -1,3 +1,5 @@
+import { PLAN_STANDARD } from "./handoff.js";
+
 const PLAN_CONTEXT_MARKER = "[CODEX-LIKE PLAN MODE ACTIVE]";
 
 export function buildPlanModePrompt() {
@@ -47,15 +49,11 @@ Never end with prose that merely announces you are about to present, write, or f
 
 ## Completion rule
 
-Only call plan_mode_complete when the plan leaves no implementation decisions unresolved. Pass the complete plan as Markdown with:
+Only call plan_mode_complete when the plan leaves no implementation decisions unresolved. Pass the complete plan as Markdown, with a clear title, written to this standard:
 
-- A clear title
-- A brief summary
-- Important changes to behavior, public APIs, interfaces, or types
-- Test cases and verification scenarios
-- Explicit assumptions and defaults chosen where needed
+${PLAN_STANDARD}
 
-Keep the plan concise, human and agent digestible, and free of open decisions. Prefer grouped behavior-level changes over file-by-file or symbol-by-symbol inventories. Do not ask "should I proceed?"; plan_mode_complete opens the Plan-mode ready flow.
+Record any assumption or default you chose under Decisions. Do not ask "should I proceed?"; plan_mode_complete opens the Plan-mode ready flow.
 
 If the user requests revisions after a completed plan, the next plan_mode_complete call must contain a complete replacement, not a delta. If there is not enough information for a complete replacement, continue planning with plan_mode_question instead of calling plan_mode_complete.`;
 }

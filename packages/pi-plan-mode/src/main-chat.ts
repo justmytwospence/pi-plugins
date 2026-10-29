@@ -301,16 +301,19 @@ function renderPlanMessage(
   const body = contentText(message.content);
   if (details?.kind === "failure") return new Text(theme.fg("error", `✗ ${body}`), 0, 0);
   const version = details?.revision && details.revision > 1 ? ` v${details.revision}` : "";
-  const head = theme.fg(
-    "accent",
-    theme.bold(`▸ Plan ${details?.id ?? "?"}${version} from planner ${details?.id ?? "?"} · ${details?.model ?? ""}`),
-  );
+  const head = `▸ Plan ${details?.id ?? "?"}${version} from planner ${details?.id ?? "?"} · ${details?.model ?? ""}`;
+  return renderCollapsedMarkdown(head, body, expanded, theme, details?.lines);
+}
+
+/** A bold accent head that expands (ctrl+o) into Markdown; collapsed, it shows `N lines · ctrl+o to expand`. */
+export function renderCollapsedMarkdown(head: string, body: string, expanded: boolean, theme: Theme, lines?: number) {
+  const styled = theme.fg("accent", theme.bold(head));
   if (!expanded) {
-    const size = details?.lines ? `${details.lines} lines` : "";
-    return new Text(`${head}  ${theme.fg("dim", `${size}${size ? " · " : ""}ctrl+o to expand`)}`, 0, 0);
+    const size = lines ? `${lines} lines` : "";
+    return new Text(`${styled}  ${theme.fg("dim", `${size}${size ? " · " : ""}ctrl+o to expand`)}`, 0, 0);
   }
   return {
-    render: (width: number) => [head, ...new Markdown(body, 0, 0, getMarkdownTheme()).render(width)],
+    render: (width: number) => [styled, ...new Markdown(body, 0, 0, getMarkdownTheme()).render(width)],
     invalidate() {},
   };
 }

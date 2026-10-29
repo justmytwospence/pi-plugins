@@ -16,6 +16,9 @@ import {
 } from "../src/inline-plan.js";
 import { createMockContext, createMockPi } from "./shared/support.js";
 
+const opus = { provider: "anthropic", id: "claude-opus-5-5", name: "Claude Opus 5.5", reasoning: true };
+const sonnet = { provider: "anthropic", id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", reasoning: true };
+
 type Tool = {
   exposure?: string;
   name: string;
@@ -30,12 +33,30 @@ async function setup(
     cycle?: string[];
     plansDirectory?: string;
     cwd?: string;
+    /** Give the session a model (opus) with a sonnet handoff target. */
+    models?: boolean;
+    prePlanMode?: string;
   } = {},
 ) {
   const mock = createMockPi();
   const plansDirectory = options.plansDirectory ?? mkdtempSync(join(tmpdir(), "plans-"));
   await planMode(mock.pi, {
-    readSettings: async () => ({ thinkingLevel: "inherit" as const, jevToolSelection: false, plansDirectory }),
+    readSettings: async () => ({
+      thinkingLevel: "inherit" as const,
+      jevToolSelection: false,
+      plansDirectory,
+      ...(options.models
+        ? {
+            implementationModelMap: {
+              "anthropic/claude-opus-5-5": {
+                provider: "anthropic",
+                modelId: "claude-sonnet-5-5",
+                thinkingLevel: "high",
+              },
+            },
+          }
+        : {}),
+    }),
   });
   const answers = [...(options.select ?? [])];
   const selects: Array<{ title: string; options: string[] }> = [];
@@ -48,6 +69,18 @@ async function setup(
       return answers.shift();
     },
     input: async () => options.input,
+    ...(options.models
+      ? {
+          model: opus,
+          modelRegistry: {
+            getApiKeyAndHeaders: async () => ({ ok: false, error: "missing" }),
+            getAvailable: () => [opus, sonnet],
+            getAll: () => [opus, sonnet],
+            find: (provider: string, id: string) => [opus, sonnet].find((m) => m.provider === provider && m.id === id),
+            isUsingOAuth: () => false,
+          },
+        }
+      : {}),
     sessionManager: {
       getSessionId: () => "s",
       getBranch: () => mock.entries.map((entry) => ({ type: "custom", ...entry })),
@@ -60,7 +93,11 @@ async function setup(
     // A stand-in for pi-tool-gate: it takes mode requests and announces every change.
     let mode = "auto";
     const announce = () =>
-      mock.eventBus.emit(MODE_CHANGED, { mode, cycle: options.cycle ?? ["default", "acceptEdits", "plan", "auto"] });
+      mock.eventBus.emit(MODE_CHANGED, {
+        mode,
+        cycle: options.cycle ?? ["default", "acceptEdits", "plan", "auto"],
+        ...(options.prePlanMode && mode === "plan" ? { prePlanMode: options.prePlanMode } : {}),
+      });
     mock.eventBus.on(MODE_SET, (data) => {
       gateEvents.push({ channel: MODE_SET, data });
       mode = (data as { mode: string }).mode;
@@ -116,7 +153,7 @@ test("/plan with a task enters plan mode and sends the task", async () => {
 });
 
 test("exit_plan_mode needs a written plan, shows it, and implements it here once approved", async () => {
-  const { mock, context, tool, emit, inline, selects } = await setup({ select: ["Yes, implement it"] });
+  const { mock, context, tool, emit, inline, selects } = await setup({ select: ["Yes, implement it here"] });
   const outside = await tool(EXIT_TOOL).execute("t0", {}, undefined, undefined, context.ctx);
   assert.match(outside.content[0]?.text ?? "", /not in plan mode/u);
   await mock.commands.get("plan")?.handler("", context.ctx);
@@ -134,14 +171,14 @@ test("exit_plan_mode needs a written plan, shows it, and implements it here once
   );
   assert.equal(updates[0]?.details.outcome, "pending", "the plan shows while you decide");
   assert.deepEqual(selects[0]?.options, [
-    "Yes, implement it",
-    "Yes, in a fresh session",
+    "Yes, in a fresh context",
+    "Yes, implement it here",
     "Edit the plan",
     "No, keep planning",
   ]);
   assert.match(
     result.content[0]?.text ?? "",
-    /^User has approved your plan[\s\S]*## Approved Plan:\n# Plan\n\n1\. Do it$/u,
+    /^The user approved your plan\.[\s\S]*## Approved plan\n\n# Plan\n\n1\. Do it$/u,
   );
   assert.equal(inline().active, false);
   assert.equal(context.statuses.get("permission-mode"), undefined);
@@ -175,28 +212,65 @@ test("keep planning ends the turn for your reply in the chat; the next review sh
   assert.equal(inline().active, true);
 });
 
-test("a fresh-session approval starts /plan's fresh session once the turn is over", async () => {
-  const { mock, context, tool, emit, inline } = await setup({ select: ["Yes, in a fresh session"] });
+test("with a model, approval offers a handoff to the mapped model or keeping the planning model", async () => {
+  const { mock, context, tool, inline, selects } = await setup({ models: true, select: [undefined as never] });
   await mock.commands.get("plan")?.handler("", context.ctx);
   writeFileSync(inline().planFile, "# Plan\n");
+  await tool(EXIT_TOOL).execute("t1", {}, undefined, undefined, context.ctx);
+  assert.deepEqual(selects[0]?.options, [
+    "Yes, hand off to Claude Sonnet 5.5 (high)",
+    "Yes, keep Claude Opus 5.5 on it",
+    "Edit the plan",
+    "No, keep planning",
+  ]);
+  for (const option of selects[0]?.options ?? []) assert.ok(option.length <= 42, option);
+});
+
+test("a handoff compacts the context down to the plan and continues on the target model, once", async () => {
+  const { mock, context, tool, emit, inline } = await setup({
+    models: true,
+    select: ["Yes, hand off to Claude Sonnet 5.5 (high)"],
+  });
+  await mock.commands.get("plan")?.handler("", context.ctx);
+  writeFileSync(inline().planFile, "# Plan\n\n1. Do it\n");
   const result = await tool(EXIT_TOOL).execute("t1", {}, undefined, undefined, context.ctx);
   assert.equal(result.terminate, true);
-  await emit("agent_settled", {});
-  assert.equal(mock.sentUserMessages.at(-1)?.text, "/plan --implement-fresh");
-  let created: any;
-  (context.ctx as any).newSession = async (options: any) => {
-    created = options;
-  };
-  await mock.commands.get("plan")?.handler("--implement-fresh", context.ctx);
-  assert.ok(created?.withSession, "a fresh session gets the plan");
-  await emit("agent_settled", {});
-  assert.equal(mock.sentUserMessages.length, 1, "only once");
+  assert.equal(result.details.outcome, "handoff");
+  assert.equal(result.details.handoff, "Claude Sonnet 5.5");
+  const settled = await emit("agent_before_settle", { outcome: "completed" });
+  assert.equal(settled.continue, true);
+  assert.equal(settled.entries[0].type, "compaction");
+  assert.equal(settled.entries[0].firstKeptEntryId, null);
+  assert.equal(settled.entries[1].type, "custom_message");
+  assert.equal(settled.entries[1].customType, "plan-mode-handoff");
+  assert.equal(settled.entries[1].display, true);
+  assert.match(settled.entries[1].content, /## Approved plan\n\n# Plan\n\n1\. Do it$/u);
+  assert.equal(settled.entries[1].details.implementer, "Claude Sonnet 5.5");
+  assert.deepEqual(
+    mock.setModels.map((model: any) => model.id),
+    ["claude-sonnet-5-5"],
+  );
+  assert.equal(await emit("agent_before_settle", { outcome: "completed" }), undefined, "only once");
+});
+
+test("a handoff does nothing, and says so, when the turn did not complete", async () => {
+  const { mock, context, tool, emit, inline } = await setup({
+    models: true,
+    select: ["Yes, hand off to Claude Sonnet 5.5 (high)"],
+  });
+  await mock.commands.get("plan")?.handler("", context.ctx);
+  writeFileSync(inline().planFile, "# Plan\n");
+  await tool(EXIT_TOOL).execute("t1", {}, undefined, undefined, context.ctx);
+  assert.equal(await emit("agent_before_settle", { outcome: "aborted" }), undefined);
+  assert.equal(mock.setModels.length, 0);
+  assert.match(context.notifications.at(-1)?.message ?? "", /handoff did not happen/u);
+  assert.equal(await emit("agent_before_settle", { outcome: "completed" }), undefined);
 });
 
 test("with pi-tool-gate, plan mode is the gate's mode: /plan asks it, approval picks the next mode", async () => {
   const { mock, context, tool, inline, gateEvents, selects } = await setup({
     gate: true,
-    select: ["Yes, accept edits"],
+    select: ["Yes, implement it here"],
   });
   assert.ok(
     gateEvents.some((event) => event.channel === PLAN_PROVIDER),
@@ -213,10 +287,16 @@ test("with pi-tool-gate, plan mode is the gate's mode: /plan asks it, approval p
   assert.ok(gateEvents.some((event) => event.channel === PLAN_PROVIDER && event.data.planFile === planFile));
   writeFileSync(planFile, "# Plan\n");
   await tool(EXIT_TOOL).execute("t1", {}, undefined, undefined, context.ctx);
-  assert.deepEqual(selects[0]?.options.slice(0, 3), ["Yes, auto mode", "Yes, accept edits", "Yes, approve each edit"]);
+  assert.deepEqual(selects[0]?.options, [
+    "Yes, in a fresh context",
+    "Yes, implement it here",
+    "Edit the plan",
+    "No, keep planning",
+  ]);
   assert.deepEqual(
     gateEvents.filter((event) => event.channel === MODE_SET).map((event) => event.data.mode),
-    ["plan", "acceptEdits"],
+    ["plan", "auto"],
+    "without a recorded mode, approval returns to auto",
   );
   assert.equal(inline().active, false);
   // Leaving plan mode with Shift+Tab (the gate's cycle) leaves it here too.
@@ -226,8 +306,8 @@ test("with pi-tool-gate, plan mode is the gate's mode: /plan asks it, approval p
   assert.equal(inline().active, false);
 });
 
-test("with the gate's chat mode enabled: approval offers only enabled modes; leaving into chat grants nothing", async () => {
-  const { mock, context, tool, emit, inline, selects } = await setup({
+test("with the gate's chat mode enabled, leaving into chat grants nothing", async () => {
+  const { mock, context, tool, emit, inline } = await setup({
     gate: true,
     cycle: ["chat", "plan", "auto"],
     select: [undefined as never],
@@ -236,40 +316,27 @@ test("with the gate's chat mode enabled: approval offers only enabled modes; lea
   writeFileSync(inline().planFile, "# Plan\n");
   await emit("before_agent_start", { prompt: "x" });
   await tool(EXIT_TOOL).execute("t1", {}, undefined, undefined, context.ctx);
-  assert.deepEqual(selects[0]?.options, [
-    "Yes, auto mode",
-    "Yes, in a fresh session",
-    "Edit the plan",
-    "No, keep planning",
-  ]);
   mock.eventBus.emit(MODE_CHANGED, { mode: "chat", cycle: ["chat", "plan", "auto"] });
   const notice = await emit("before_agent_start", { prompt: "y" });
   assert.match(notice.message.content, /left plan mode/u);
   assert.doesNotMatch(notice.message.content, /may now make edits/u);
 });
 
-test("with the gate's yolo mode enabled, approval offers it and switches the gate to it", async () => {
-  const { mock, context, tool, inline, gateEvents, selects } = await setup({
+test("approval returns the gate to the mode it was in before planning", async () => {
+  const { mock, context, tool, inline, gateEvents } = await setup({
     gate: true,
+    prePlanMode: "bypassPermissions",
     cycle: ["chat", "plan", "bypassPermissions", "auto"],
-    select: ["Yes, yolo mode"],
+    select: ["Yes, implement it here"],
   });
   await mock.commands.get("plan")?.handler("", context.ctx);
   writeFileSync(inline().planFile, "# Plan\n");
   const result = await tool(EXIT_TOOL).execute("t1", {}, undefined, undefined, context.ctx);
-  assert.deepEqual(selects[0]?.options, [
-    "Yes, auto mode",
-    "Yes, yolo mode",
-    "Yes, in a fresh session",
-    "Edit the plan",
-    "No, keep planning",
-  ]);
   assert.equal(result.details.mode, "bypassPermissions");
   assert.deepEqual(
     gateEvents.filter((event) => event.channel === MODE_SET).map((event) => event.data.mode),
     ["plan", "bypassPermissions"],
   );
-  assert.equal(inline().active, false);
 });
 
 test("plan tools stay top-level so codemode cannot hide the inline plan review", async () => {

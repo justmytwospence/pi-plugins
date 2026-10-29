@@ -28,6 +28,17 @@
 
 ### Major Changes
 
+- Plans are handoff-ready and approval picks who implements. Every plan (plan mode, `/planners` and
+  plan M) is written to one standard (Summary, Decisions, Changes, Steps, Verification, Out of
+  scope, Handoff notes) so a cheaper model can implement it without making a decision. The approval
+  rows are now `Yes, hand off to <model>`, `Yes, keep <planning model> on it`, **Edit the plan**
+  and **No, keep planning**; the per-permission-mode rows (auto, yolo, accept edits, approve each
+  edit) and **Yes, in a fresh session** are gone, and approving returns the permission mode to what
+  it was before planning. A handoff compacts the context down to the plan, switches the model in
+  the same session and starts implementing at once. The default target is `implementationModelMap`,
+  then pi-subagents' `worker` model, then the planning model; `/planners`' Implement step uses the
+  same resolver and the same implementation brief.
+
 - `/plan` is plan mode in your own conversation, as in Claude Code: your agent researches read-only,
   writes its plan to a plan file (`~/.pi/agent/plans/<two-words>.md`, the only file it may write),
   and calls `exit_plan_mode`, which shows the plan and asks you to implement it here (in the

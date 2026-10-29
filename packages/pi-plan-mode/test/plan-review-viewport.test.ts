@@ -104,7 +104,9 @@ function setup(plan: string, scrollbar: "always" | "hidden" = "always") {
     safeSubcommands: () => undefined,
     plansDirectory: () => directory,
     approved() {},
-    implementFresh() {},
+    handoffTarget: () => undefined,
+    handoff() {},
+    implementHere: () => "implement",
     toggleKey: () => undefined,
   });
   inline.enter(ctx);
@@ -274,7 +276,7 @@ test("editing returns to the start of the revised plan", async () => {
   await result;
 });
 
-test.each(["escape", "keep", "fresh", "abort"])(
+test.each(["escape", "keep", "handoff", "abort"])(
   "%s closes review, clears queued jumps and restores follow",
   async (ending) => {
     const h = setup(longPlan);
@@ -292,7 +294,7 @@ test.each(["escape", "keep", "fresh", "abort"])(
     h.frame(); // Leave an anchor microtask queued while the user dismisses review.
     if (ending === "escape") h.mode.extensionSelector?.handleInput?.("\x1b");
     else if (ending === "abort") abort.abort();
-    else h.choose(ending === "keep" ? 3 : 1);
+    else h.choose(ending === "keep" ? 3 : 0);
     const final = await result;
     h.card.updateResult({ ...final, isError: false }, false);
     await h.settle();

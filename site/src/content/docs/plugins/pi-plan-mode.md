@@ -8,14 +8,14 @@ plugin: pi-plan-mode
 
 - **Use it for:** Research before implementation in the main conversation, or compare two constrained planners.
 - **Enable:** Select `packages/pi-plan-mode/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
-- **Controls:** `/plan`, `/planners`; enter/exit and active-run tools below. No standalone shortcut by default; gate Shift+Tab needs an explicit stock remap.
+- **Controls:** `/plan`, `/planners`; enter/exit and active-run tools below; approving a plan chooses who implements it. No standalone shortcut by default; gate Shift+Tab needs an explicit stock remap.
 - **Settings:** `pi-plan-mode.json`; `toggleShortcut` unset, implementation context keep, export `PLAN.md`; optional paid Jev tool selection on.
 - **Requirements, cost & privacy:** TUI and provider access for `/planners`; normal plan mode uses the main session. Planners/helpers each consume model usage; selected tools can send repository data externally.
 - **Integrations & limits:** Optional gate, activity views, footer and Herdr. Planner/scout entries join `/tasks` and FleetView; `/stop` remains shell-only. Read-only policies are not a sandbox.
 
 pi-plan-mode separates researching a change from implementing it, in two ways:
 
-- **Plan mode** (`/plan`, or Shift+Tab with [pi-tool-gate](/plugins/pi-tool-gate/) after an [explicit stock-key remap](/guides/keyboard/#resolve-the-two-stock-conflicts)) works in your own conversation, as Claude Code's does: your agent researches read-only, writes a plan file, and asks you to approve it.
+- **Plan mode** (`/plan`, or Shift+Tab with [pi-tool-gate](/plugins/pi-tool-gate/) after an [explicit stock-key remap](/guides/keyboard/#resolve-the-two-stock-conflicts)) works in your own conversation, as Claude Code's does: your agent researches read-only, writes a plan file, and asks you to approve it and who implements it.
 - **`/planners`** opens a full-screen workflow with Settings, Tools, Planning, Review, and Implement steps. Two planner sessions investigate the same task; you can steer them, answer questions, compare proposals, and explicitly choose the plan to implement.
 
 ## Plan mode
@@ -30,10 +30,12 @@ While it is on, your agent writes its plan to a plan file, by default `~/.pi/age
 
 When the plan is complete, your agent calls `exit_plan_mode` directly. Plan tools are model-only: calling them inside `codemode` is prohibited because nested calls have no inline plan renderer. The plan appears in the conversation and you choose:
 
-- **Yes, auto mode**, **Yes, yolo mode**, **Yes, auto-accept project edits** or **Yes, manually approve edits** (with the gate, only its enabled modes, with manual approval when none of the others is enabled; otherwise **Yes, implement it**): implement here, in that permission mode. Auto mode asks Jev to judge each call; yolo mode runs everything except critical removals; auto-accept project edits permits project edits and filesystem commands without approval, while other commands follow the gate's normal approval policy.
-- **Yes, in a fresh session with only the plan**: a child session starts with the plan once the current turn ends.
+- `Yes, hand off to <model> (<effort>)`: a cheaper model implements the plan in this session. Once the current turn ends, the context is compacted down to the plan, the model is switched, and a collapsed handoff message (`ctrl+o` expands it) carries the plan and how to implement it; implementation starts at once. When the target is the planning model at the same effort, the row reads **Yes, in a fresh context**.
+- `Yes, keep <planning model> on it`: the agent that planned it implements it here, with the whole conversation. Without a session model the two rows are **Yes, in a fresh context** and **Yes, implement it here**.
 - **Edit the plan first**: revise it in Pi's editor, then choose again.
 - **No, keep planning**: the turn ends and you say what should change in the chat. The agent answers there, and the next review starts with the lines that changed since the plan you declined.
+
+The approval returns the permission mode to what it was before planning (with pi-tool-gate; auto when that is unknown and in the cycle, else manual approval). The handoff target is `implementationModelMap[planning model]` when available, else pi-subagents' `worker` model, else the planning model. Plans are written to a handoff standard (Summary, Decisions, Changes, Steps, Verification, Out of scope, Handoff notes) so the implementer makes no decisions.
 
 In Pi's fullscreen terminal mode, **Plan review** scrolls the main chat to the beginning of the plan when the approval picker opens, including for short plans. Scroll the chat to read the rest; ordinary redraws do not move you back. Editing the plan returns to its beginning, and closing review restores following the latest message. Regular terminal mode and RPC keep their usual presentation because Pi does not own their chat scrollback. Once you decide, a plan longer than 12 lines folds in the transcript (`… N more lines (ctrl+o to expand)`). [Compaction plan](/plugins/pi-compact-plan/) draws its compaction focus with the same review card.
 
@@ -74,7 +76,7 @@ While the run is active, M has two tools:
 
 The **Write plan M** and **Revise plan M** actions request that synthesis for you. Planner-internal tools are separate: `plan_mode_question` asks in-lane questions, `plan_mode_complete` submits plan versions, and `plan_subagents` starts research helpers.
 
-Choose **Implement…** to pick the plan (M first, once there is one) and review the implementation model, effort, and context before starting. Context can keep this conversation plus the plan, or start a fresh session with only the plan. `implementationModelMap` supplies defaults based on the model that authored the plan; otherwise the main session's model is used.
+Choose **Implement…** to pick the plan (M first, once there is one) and review the implementation model, effort, and context before starting. Context can keep this conversation plus the plan, or start a child session with only the plan. `implementationModelMap` supplies defaults based on the model that authored the plan; otherwise pi-subagents' `worker` model is used, else the main session's model.
 
 **Export…** picks a plan and a path and writes it to Markdown without initiating implementation. **Discard** stops the planners and drops the plans; Esc hides the screen and keeps them.
 
@@ -115,6 +117,6 @@ Esc offers Hide, Stop planning, or Back. Hiding leaves planners running; `/plann
 
 Planners and their research scouts offer activity entries to `/tasks` and pills to FleetView (or the pi-bg fallback host). Enter on an entry opens `/planners`; double-`x` stops a working planner row. Scout rows are observational, not independently stoppable from the list; stop their owning planner or use the planning screen. `/stop` still stops only pi-bg shell tasks. The planning screen remains available without any activity host.
 
-Web tools, MCP servers, classifier selection, and completion hooks are optional. With pi-herdr, planner work emits `herdr:working` holds for background visibility; without it, planning still works. Use pi-diff-review after implementation to inspect the actual changes rather than treating an accepted plan as proof of correct execution.
+With pi-tool-gate, approving a plan returns to the permission mode you were in before planning (auto when unknown). With pi-subagents, plan mode asks it over the event bus (`subagents:role-model`) which model its `worker` role gets for the planning model, and defaults the handoff to that. Web tools, MCP servers, classifier selection, and completion hooks are optional. With pi-herdr, planner work emits `herdr:working` holds for background visibility; without it, planning still works. Use pi-diff-review after implementation to inspect the actual changes rather than treating an accepted plan as proof of correct execution.
 
 See [planning and review](/recipes/plan-review/), [activity architecture](/architecture/activity/), and [troubleshooting](/guides/troubleshooting/). [Source and tests](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-plan-mode) cover planner flow, shell policy, persistence, and implementation handoff.

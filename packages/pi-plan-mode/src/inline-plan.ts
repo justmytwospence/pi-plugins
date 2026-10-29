@@ -1,8 +1,9 @@
 // Inline plan mode, as Claude Code does it: in your own conversation, no extra screen. While it is
 // on, your agent researches read-only and writes its plan to a plan file (the only file it may
-// write), then calls exit_plan_mode, which shows you the plan and asks how to proceed: implement
-// it here (in the permission mode you pick), implement it in a fresh session, edit it first, or
-// keep planning. Shift+Tab (pi-tool-gate's mode cycle) or /plan enters it.
+// write), then calls exit_plan_mode, which shows you the plan and asks who implements it: hand it
+// off to a cheaper model in this session (the host compacts the context down to the plan and
+// switches the model), keep the planning model on it, edit the plan first, or keep planning. The
+// permission mode returns to what it was before planning. Shift+Tab (pi-tool-gate's mode cycle) or /plan enters it.
 //
 // With pi-tool-gate installed, the gate owns the mode (manual, accept edits, plan, auto, bypass):
 // plan mode is one step of its Shift+Tab cycle, and it judges commands while planning (as Claude
@@ -12,20 +13,22 @@
 //   permission-mode:set            any  -> gate   { mode }
 //   permission-mode:cycle          any  -> gate   {}
 //   permission-mode:plan-provider  plan -> gate   { planFile? }
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import {
   type ExtensionAPI,
   type ExtensionContext,
-  getAgentDir,
   getMarkdownTheme,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { editInTerminal, externalEditorCommand } from "./external-editor.js";
+import { implementationBrief, PLAN_STANDARD } from "./handoff.js";
 import { holdBlocked } from "./herdr-blocked.js";
+import { type ModelSpec, sameModel } from "./implementation-models.js";
 import { PlanMarkdown } from "./mermaid-art.js";
 import { planDiff, renderPlanDiff } from "./plan-diff.js";
+import { newPlanFile, plansDirectoryPath, readPlan, tildify } from "./plan-file.js";
 import { expandHome } from "./plan-hook.js";
 import { PlanReviewViewport } from "./plan-review-viewport.js";
 import { type ReviewStatus, reviewBody, reviewTitle } from "./review-card.js";
@@ -51,14 +54,65 @@ interface InlineState {
   told: boolean;
 }
 
+export interface HandoffTarget {
+  target: ModelSpec;
+  targetName: string;
+  planning: ModelSpec;
+  planningName: string;
+}
+
+export interface Approval {
+  plan: string;
+  planFile: string;
+  edited: boolean;
+}
+
+/** Whether a handoff changes the model or its effort (else it is only a fresh context). */
+export function handsOffToAnotherModel(who: HandoffTarget): boolean {
+  return (
+    !sameModel(who.target, who.planning) ||
+    (who.target.thinkingLevel ?? undefined) !== (who.planning.thinkingLevel ?? undefined)
+  );
+}
+
+/** Every approval option must fit in this many characters (docs/clients.md): remote clients wrap rows without a gutter. */
+export const OPTION_MAX = 42;
+export const EDIT = "Edit the plan";
+export const KEEP = "No, keep planning";
+export const FRESH_CONTEXT = "Yes, in a fresh context";
+export const HERE = "Yes, implement it here";
+
+function clip(name: string, max: number) {
+  return name.length <= max ? name : `${name.slice(0, Math.max(0, max - 1))}…`;
+}
+
+export function handoffLabel(name: string, effort?: string): string {
+  const prefix = "Yes, hand off to ";
+  if (effort) {
+    const full = `${prefix}${name} (${effort})`;
+    if (full.length <= OPTION_MAX) return full;
+  }
+  return `${prefix}${clip(name, OPTION_MAX - prefix.length)}`;
+}
+
+export function keepLabel(name: string): string {
+  const prefix = "Yes, keep ";
+  const suffix = " on it";
+  return `${prefix}${clip(name, OPTION_MAX - prefix.length - suffix.length)}${suffix}`;
+}
+
 export interface InlineHost {
   safeSubcommands(): SafeSubcommands | undefined;
   /** Where plan files go (default `~/.pi/agent/plans`). */
   plansDirectory(): string | undefined;
   /** Run the plan-complete hook for an approved plan. */
   approved(plan: string, ctx: ExtensionContext): void;
-  /** Implement `plan` in a fresh session, once your agent's turn has ended. */
-  implementFresh(plan: string): void;
+  /** The model a handoff goes to and the planning model, with names; undefined without a session model. */
+  handoffTarget(ctx: ExtensionContext): HandoffTarget | undefined;
+  /** Hand the approved plan off once this turn ends (fresh context, `who.target`'s model). */
+  handoff(approval: Approval, who: HandoffTarget | undefined): void;
+  /** Implement it here, by the agent that planned it; returns the tool result's text. */
+  implementHere(ctx: ExtensionContext, approval: Approval): string;
   /** The key that toggles plan mode without pi-tool-gate, for the status line. */
   toggleKey(): string | undefined;
 }
@@ -72,72 +126,6 @@ export interface InlinePlanMode {
   toggle(ctx: ExtensionContext): void;
 }
 
-const ADJECTIVES = [
-  "amber",
-  "bold",
-  "brisk",
-  "calm",
-  "clear",
-  "crisp",
-  "deft",
-  "eager",
-  "fair",
-  "gentle",
-  "keen",
-  "lively",
-  "lucid",
-  "mellow",
-  "nimble",
-  "quiet",
-  "rapid",
-  "steady",
-  "sunny",
-  "swift",
-  "tidy",
-  "vivid",
-  "warm",
-  "wise",
-];
-const NOUNS = [
-  "anchor",
-  "beacon",
-  "brook",
-  "canyon",
-  "cedar",
-  "comet",
-  "delta",
-  "ember",
-  "falcon",
-  "fern",
-  "harbor",
-  "heron",
-  "lantern",
-  "maple",
-  "meadow",
-  "orbit",
-  "otter",
-  "pine",
-  "quarry",
-  "river",
-  "sparrow",
-  "summit",
-  "tide",
-  "willow",
-];
-
-function pick<T>(list: readonly T[]): T {
-  return list[Math.floor(Math.random() * list.length)] as T;
-}
-
-/** A new plan file path with a memorable name, e.g. `~/.pi/agent/plans/calm-river.md`. */
-export function newPlanFile(directory: string): string {
-  for (let i = 0; i < 20; i++) {
-    const candidate = join(directory, `${pick(ADJECTIVES)}-${pick(NOUNS)}.md`);
-    if (!existsSync(candidate)) return candidate;
-  }
-  return join(directory, `plan-${Date.now().toString(36)}.md`);
-}
-
 export function enterPlanText(planFile: string, existing: boolean, gate: boolean) {
   return `<system-reminder>
 Plan mode is active. The user wants you to research and plan before anything changes. You MUST NOT make any edits (except to the plan file below), run commands that change files or the system, commit, or otherwise make changes, even if asked to; this supersedes any other instructions. ${gate ? "Commands are judged before they run; stick to ones that only read." : "Only read-only shell commands run."}
@@ -149,8 +137,11 @@ It is the only file you may write. Build the plan there as you go, with write an
 ## How to plan
 1. Explore: read the relevant code with read-only tools (and read-only subagents for broad searches, if you have them). Reuse what exists; find the functions and utilities a change should build on.
 2. Ask: when requirements, scope or a trade-off is unclear, ask the user (with your question tool, if you have one) rather than guessing. Do not ask what the code can tell you.
-3. Write the plan: one line of context (why), the recommended approach (not every alternative), the files to change with their paths, existing code to reuse, and how to verify it end to end (tests, commands). Keep it short enough to scan.
+3. Write the plan in the plan file to the standard under "The plan" below.
 4. Call ${EXIT_TOOL} when the plan is complete; it shows the plan to the user for approval. Do not ask "is this plan okay?" or "should I proceed?" any other way; that is what ${EXIT_TOOL} does.
+
+## The plan
+${PLAN_STANDARD}
 
 End each turn by asking the user a question or by calling ${EXIT_TOOL}. After the user declines a plan, their next message is their feedback: answer it in chat, and revise the plan and call ${EXIT_TOOL} again only once the change is clear. If the user only asked a question that needs no code changes (research, an explanation), answer it and do not call ${EXIT_TOOL}.
 </system-reminder>`;
@@ -165,34 +156,18 @@ You have left plan mode.${may}${planFile && existsSync(planFile) ? ` The plan fi
 </system-reminder>`;
 }
 
-export function approvedText(plan: string, planFile: string, edited: boolean) {
-  return `User has approved your plan. You can now start coding. Start with updating your todo list if applicable.
-
-Your plan has been saved to: ${planFile}
-You can refer back to it if needed during implementation.
-
-## Approved Plan${edited ? " (edited by user)" : ""}:
-${plan}`;
-}
-
 export const ENTER_GUIDELINES = [
   `Call ${ENTER_TOOL} before starting a non-trivial implementation where planning first pays off: new features, changes across several files, architectural choices, several valid approaches, or unclear requirements. Do not use it for small fixes, single obvious changes, or pure research.`,
 ];
 
-const APPROVE_AUTO = "Yes, auto mode";
-const APPROVE_YOLO = "Yes, yolo mode";
-const APPROVE_EDITS = "Yes, accept edits";
-const APPROVE_MANUAL = "Yes, approve each edit";
-const APPROVE_HERE = "Yes, implement it";
-const APPROVE_FRESH = "Yes, in a fresh session";
-const EDIT = "Edit the plan";
-const KEEP = "No, keep planning";
-
 interface ExitDetails {
   plan?: string;
   planFile?: string;
-  outcome?: "pending" | "approved" | "fresh" | "kept";
+  outcome?: "pending" | "approved" | "fresh" | "handoff" | "kept";
+  /** The permission mode requested on approval (older sessions: the one picked). */
   mode?: string;
+  /** The model the plan was handed off to. */
+  handoff?: string;
   edited?: boolean;
   /** What the user said should change (older sessions typed it in the review). */
   feedback?: string;
@@ -203,7 +178,7 @@ interface ExitDetails {
 export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): InlinePlanMode {
   let state: InlineState = { active: false, told: false };
   /** pi-tool-gate owns the mode; its current mode and cycle. */
-  let gate: { mode: string; cycle: string[] } | undefined;
+  let gate: { mode: string; cycle: string[]; prePlanMode?: string } | undefined;
   /** Restored this session's state (so the gate's early broadcast does not clobber it). */
   let restored = false;
   let hostCtx: ExtensionContext | undefined;
@@ -219,7 +194,14 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     }
   };
 
-  const plansDir = () => resolve(expandHome(host.plansDirectory() ?? join(getAgentDir(), "plans")));
+  const plansDir = () => plansDirectoryPath(host.plansDirectory());
+
+  /** The mode to return to after approval: the one before planning, else auto when it is in the cycle. */
+  const resumeMode = () => {
+    const before = gate?.prePlanMode;
+    if (before && ["default", "acceptEdits", "auto", "bypassPermissions"].includes(before)) return before;
+    return gate?.cycle.includes("auto") ? "auto" : "default";
+  };
 
   const persist = () => safely(() => pi.appendEntry(INLINE_ENTRY, { ...state }));
 
@@ -292,9 +274,13 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   };
 
   pi.events.on(MODE_CHANGED, (data) => {
-    const event = data as { mode?: unknown; cycle?: unknown } | undefined;
+    const event = data as { mode?: unknown; cycle?: unknown; prePlanMode?: unknown } | undefined;
     if (typeof event?.mode !== "string") return;
-    gate = { mode: event.mode, cycle: Array.isArray(event.cycle) ? event.cycle.map(String) : [] };
+    gate = {
+      mode: event.mode,
+      cycle: Array.isArray(event.cycle) ? event.cycle.map(String) : [],
+      ...(typeof event.prePlanMode === "string" ? { prePlanMode: event.prePlanMode } : {}),
+    };
     if (!restored) return;
     if (event.mode === "plan") enterLocal(hostCtx);
     else exitLocal(hostCtx);
@@ -414,22 +400,11 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       }
       if (!ctx.hasUI) return text("There is no user to approve the plan. Stay in plan mode.");
       let edited = false;
-      const choices = () => {
-        const cycle = gate?.cycle ?? [];
-        const here = gate
-          ? [
-              ...(cycle.includes("auto") ? [APPROVE_AUTO] : []),
-              ...(cycle.includes("bypassPermissions") ? [APPROVE_YOLO] : []),
-              ...(cycle.includes("acceptEdits") ? [APPROVE_EDITS] : []),
-              // Manual approval when it is in the cycle, or when nothing else is.
-              ...(cycle.includes("default") ||
-              !(cycle.includes("auto") || cycle.includes("bypassPermissions") || cycle.includes("acceptEdits"))
-                ? [APPROVE_MANUAL]
-                : []),
-            ]
-          : [APPROVE_HERE];
-        return [...here, APPROVE_FRESH, EDIT, KEEP];
-      };
+      const who = host.handoffTarget(ctx);
+      const handoffRow =
+        !who || !handsOffToAnotherModel(who) ? FRESH_CONTEXT : handoffLabel(who.targetName, who.target.thinkingLevel);
+      const hereRow = who ? keepLabel(who.planningName) : HERE;
+      const choices = () => [handoffRow, hereRow, EDIT, KEEP];
       reviewViewport.begin(ctx, id);
       const releaseBlocked = holdBlocked(pi.events, "Review the plan");
       // The agent is waiting on the user: the Working row only takes a plan line.
@@ -478,39 +453,35 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
               terminate: true,
             } as never;
           }
+          const approval: Approval = { plan, planFile, edited };
           host.approved(plan, ctx);
           declined = undefined;
-          if (choice === APPROVE_FRESH) {
-            // The fresh session gets the plan; this one is done.
-            exitLocal(ctx, false);
-            if (gate) requestMode(gate.cycle.includes("auto") ? "auto" : "default");
-            host.implementFresh(plan);
+          // This result tells your agent it left plan mode.
+          exitLocal(ctx, false);
+          const mode = gate ? resumeMode() : undefined;
+          if (mode) requestMode(mode);
+          if (choice === handoffRow) {
+            host.handoff(approval, who);
             return {
               content: [
                 {
                   type: "text",
-                  text: "The user approved the plan; it will be implemented in a fresh session. Stop here and do nothing else.",
+                  text: `The user approved the plan and handed it off to ${who?.targetName ?? "a fresh context"}, which implements it in this session from the plan alone. Stop here and do nothing else.`,
                 },
               ],
-              details: { plan, planFile, outcome: "fresh", edited } satisfies ExitDetails,
+              details: {
+                plan,
+                planFile,
+                outcome: "handoff",
+                edited,
+                ...(who ? { handoff: who.targetName } : {}),
+                ...(mode ? { mode } : {}),
+              } satisfies ExitDetails,
               terminate: true,
             } as never;
           }
-          const mode =
-            choice === APPROVE_AUTO
-              ? "auto"
-              : choice === APPROVE_YOLO
-                ? "bypassPermissions"
-                : choice === APPROVE_EDITS
-                  ? "acceptEdits"
-                  : choice === APPROVE_MANUAL
-                    ? "default"
-                    : undefined;
-          // This result tells your agent it left plan mode.
-          exitLocal(ctx, false);
-          if (mode) requestMode(mode);
           return {
-            content: [{ type: "text", text: approvedText(plan, planFile, edited) }],
+            content: [{ type: "text", text: host.implementHere(ctx, approval) }],
             details: { plan, planFile, outcome: "approved", edited, ...(mode ? { mode } : {}) } satisfies ExitDetails,
           } as never;
         }
@@ -547,26 +518,14 @@ function lastDeclined(entries: readonly unknown[]): string | undefined {
     if (message?.role !== "toolResult" || message.toolName !== EXIT_TOOL) continue;
     const details = message.details as ExitDetails | undefined;
     if (details?.outcome === "kept") return details.plan;
-    if (details?.outcome === "approved" || details?.outcome === "fresh") return undefined;
+    if (details?.outcome === "approved" || details?.outcome === "handoff" || details?.outcome === "fresh")
+      return undefined;
   }
   return undefined;
 }
 
 function hasPlan(file: string | undefined) {
   return Boolean(file && readPlan(file));
-}
-
-function readPlan(file: string) {
-  try {
-    return readFileSync(file, "utf8").trim();
-  } catch {
-    return "";
-  }
-}
-
-function tildify(file: string) {
-  const home = process.env.HOME;
-  return home && file.startsWith(`${home}/`) ? `~/${file.slice(home.length + 1)}` : file;
 }
 
 const MODE_WORDS: Record<string, string> = {
@@ -586,10 +545,14 @@ function renderExit(
   const outcome = details?.outcome ?? "pending";
   const context = details?.planFile ? tildify(details.planFile) : undefined;
   const status: ReviewStatus =
-    outcome === "approved"
+    outcome === "approved" || outcome === "handoff"
       ? {
           tone: "success",
-          text: `✓ Approved${details?.edited ? " (edited)" : ""}${details?.mode ? `, ${MODE_WORDS[details.mode] ?? details.mode}` : ""}`,
+          text: `✓ Approved${details?.edited ? " (edited)" : ""}${
+            outcome === "handoff"
+              ? `, handed off${details?.handoff ? ` to ${details.handoff}` : ""}`
+              : ", implementing here"
+          }${details?.mode ? `, ${MODE_WORDS[details.mode] ?? details.mode}` : ""}`,
           context,
         }
       : outcome === "fresh"

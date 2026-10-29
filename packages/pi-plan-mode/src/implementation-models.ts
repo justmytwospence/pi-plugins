@@ -89,87 +89,60 @@ export function snapshotAvailableImplementationModels(ctx: ExtensionContext): Av
   });
 }
 
-export function findAvailableImplementationModel(
-  models: readonly AvailableImplementationModel[],
-  configured: ImplementationModelOverride | undefined,
-): AvailableImplementationModel | undefined {
-  if (!configured) return undefined;
-  return models.find((model) => model.provider === configured.provider && model.id === configured.modelId);
+/** pi-subagents' channel (its src/index.ts ROLE_MODEL): which model and effort a role gets for a parent model. */
+export const ROLE_MODEL_CHANNEL = "subagents:role-model";
+
+/** The model pi-subagents gives its worker role for a session on `parent`; undefined without pi-subagents. */
+export function subagentWorkerModel(
+  events: { emit(channel: string, data: unknown): void },
+  parent: ModelSpec,
+): ModelSpec | undefined {
+  const request: { role: string; parent: string; thinking?: string; reply?: { model?: unknown; thinking?: unknown } } =
+    {
+      role: "worker",
+      parent: formatModelKey(parent),
+      ...(parent.thinkingLevel ? { thinking: parent.thinkingLevel } : {}),
+    };
+  try {
+    events.emit(ROLE_MODEL_CHANNEL, request);
+  } catch {
+    return undefined;
+  }
+  const spec = parseModelSpec(request.reply?.model);
+  if (!spec) return undefined;
+  const thinking = request.reply?.thinking;
+  const level = (MODEL_SPEC_THINKING_LEVELS as readonly unknown[]).includes(thinking)
+    ? (thinking as ModelSpecThinkingLevel)
+    : undefined;
+  return { provider: spec.provider, modelId: spec.modelId, ...(level ? { thinkingLevel: level } : {}) };
 }
 
-export interface ImplementationDefaultsInput {
-  /** The model that authored the plan being implemented. */
-  planModel: ImplementationModelOverride | undefined;
-  /** The session's current model; a default equal to it is reported as "current model". */
-  sessionModel: ImplementationModelOverride | undefined;
-  /** Plan-model key (`provider/modelId`) to implementation model spec. */
-  modelMap: Readonly<Record<string, ModelSpec>> | undefined;
-  defaultModel: ImplementationModelOverride | undefined;
-  defaultThinkingLevel: ModelSpecThinkingLevel | undefined;
-  defaultContext: ImplementationContextChoice | undefined;
-  available: readonly AvailableImplementationModel[];
-}
-
-export type ImplementationModelSource = "map" | "default" | "plan";
-
-export interface ResolvedImplementationDefaults {
-  /** Undefined means "keep the session's current model". */
-  model?: ImplementationModelOverride;
-  thinkingLevel?: ModelSpecThinkingLevel;
-  context: ImplementationContextChoice;
-  modelSource: ImplementationModelSource;
-  /** Configured targets skipped because they are not currently available. */
-  unavailable: ImplementationModelOverride[];
-}
+export type ImplementationSource = "map" | "subagents" | "fallback";
 
 /**
- * Pick the implementation defaults for a plan: the plan model's entry in the model map wins, then
- * the global default implementation model, then the planning model itself.
+ * The default implementing model for a plan written on `planModel`: its implementationModelMap entry,
+ * then pi-subagents' worker model, then `fallback`. A candidate missing from a non-empty `available`
+ * list is skipped.
  */
-export function resolveImplementationDefaults(input: ImplementationDefaultsInput): ResolvedImplementationDefaults {
-  const unavailable: ImplementationModelOverride[] = [];
-  const context = input.defaultContext ?? "keep";
-  const mapped = input.planModel ? input.modelMap?.[formatModelKey(input.planModel)] : undefined;
-  if (mapped) {
-    const available = findAvailableImplementationModel(input.available, mapped);
-    if (available) {
-      const thinkingLevel = mapped.thinkingLevel ?? input.defaultThinkingLevel;
-      return {
-        ...(sameModel(mapped, input.sessionModel)
-          ? {}
-          : { model: { provider: mapped.provider, modelId: mapped.modelId } }),
-        ...(thinkingLevel ? { thinkingLevel } : {}),
-        context,
-        modelSource: "map",
-        unavailable,
-      };
-    }
-    unavailable.push({ provider: mapped.provider, modelId: mapped.modelId });
+export function implementationTarget(input: {
+  planModel: ModelSpec | undefined;
+  map: Readonly<Record<string, ModelSpec>> | undefined;
+  worker: ModelSpec | undefined;
+  fallback: ModelSpec | undefined;
+  available: readonly { provider: string; id: string }[];
+}): { spec: ModelSpec; source: ImplementationSource } | undefined {
+  const usable = (spec: ModelSpec) =>
+    input.available.length === 0 ||
+    input.available.some((model) => model.provider === spec.provider && model.id === spec.modelId);
+  const mapped = input.planModel ? input.map?.[formatModelKey(input.planModel)] : undefined;
+  if (mapped && usable(mapped)) {
+    const thinkingLevel = mapped.thinkingLevel ?? input.planModel?.thinkingLevel;
+    return {
+      spec: { provider: mapped.provider, modelId: mapped.modelId, ...(thinkingLevel ? { thinkingLevel } : {}) },
+      source: "map",
+    };
   }
-  if (input.defaultModel) {
-    if (findAvailableImplementationModel(input.available, input.defaultModel)) {
-      return {
-        ...(sameModel(input.defaultModel, input.sessionModel) ? {} : { model: { ...input.defaultModel } }),
-        ...(input.defaultThinkingLevel ? { thinkingLevel: input.defaultThinkingLevel } : {}),
-        context,
-        modelSource: "default",
-        unavailable,
-      };
-    }
-    unavailable.push({ ...input.defaultModel });
-  }
-  // A plan picked from another model's candidate falls back to that model, not the session's.
-  const planModel =
-    input.planModel &&
-    !sameModel(input.planModel, input.sessionModel) &&
-    findAvailableImplementationModel(input.available, input.planModel)
-      ? { provider: input.planModel.provider, modelId: input.planModel.modelId }
-      : undefined;
-  return {
-    ...(planModel ? { model: planModel } : {}),
-    ...(input.defaultThinkingLevel ? { thinkingLevel: input.defaultThinkingLevel } : {}),
-    context,
-    modelSource: "plan",
-    unavailable,
-  };
+  if (input.worker && usable(input.worker)) return { spec: input.worker, source: "subagents" };
+  if (input.fallback) return { spec: input.fallback, source: "fallback" };
+  return undefined;
 }

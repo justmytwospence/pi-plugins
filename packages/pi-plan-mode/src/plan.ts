@@ -35,17 +35,19 @@ import {
   requestEditorFactory,
 } from "./editor-contract.js";
 import { editExternally, externalEditorCommand, prepareEditor } from "./external-editor.js";
-import { formatImplementationPrompt } from "./handoff.js";
+import { HANDOFF_MESSAGE_TYPE, HANDOFF_SUMMARY, implementationBrief } from "./handoff.js";
 import { HERDR_BLOCKED_CHANNEL, holdBlocked, holdWorking, isOwnEmit } from "./herdr-blocked.js";
 import {
   formatModelKey,
   formatModelSpec,
   type ImplementationContextChoice,
+  implementationTarget,
   type ModelSpec,
   parseModelSpec,
   sameModel,
+  subagentWorkerModel,
 } from "./implementation-models.js";
-import { registerInlinePlanMode } from "./inline-plan.js";
+import { type Approval, type HandoffTarget, handsOffToAnotherModel, registerInlinePlanMode } from "./inline-plan.js";
 import { type JevToolPick, pickToolsWithJev } from "./jev-tool-picker.js";
 import { runLaneCommand } from "./lane-commands.js";
 import { isAuthError, loginInDialog, providerName } from "./login.js";
@@ -55,11 +57,13 @@ import {
   PLAN_MESSAGE_TYPE,
   type PlanMessageDetails,
   registerMainChat,
+  renderCollapsedMarkdown,
   setMainToolsActive,
 } from "./main-chat.js";
 import { buildMcpCatalog, readConfiguredMcpServers } from "./mcp-tools.js";
 import { modelCatalog } from "./model-catalog.js";
 import { exportPlanToFile } from "./plan-export.js";
+import { planName } from "./plan-file.js";
 import { expandHome, runPlanCompleteHook } from "./plan-hook.js";
 import { type OtherTool, otherTools, otherToolsNode, resolveAccess } from "./planner/access.js";
 import { type PlannerAccessConfig, PlannerAgent } from "./planner/agent.js";
@@ -91,8 +95,6 @@ import { type ToolPreselection, ToolTreeView } from "./tool-tree-view.js";
 import { effortText } from "./ui-kit.js";
 
 const EXTENSION_ENTRY_PATH = fileURLToPath(new URL("./index.ts", import.meta.url));
-/** /plan's argument that starts the fresh session an approved plan asked for. */
-const FRESH_ARG = "--implement-fresh";
 const RUN_ENTRY = "plan-run";
 const RUNTIME_ENTRY = "plan-implementation-runtime";
 const RUNTIME_CONSUMED_ENTRY = "plan-implementation-runtime-consumed";
@@ -594,8 +596,23 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     if ((event as { source?: string }).source === "interactive") activity.seen();
   });
 
+  /** An approved plan to hand off once the turn that approved it ends. */
+  let pendingHandoff: { approval: Approval; who: HandoffTarget | undefined } | undefined;
+
+  /** The session's model with its effort (none when the effort is off). */
+  const sessionSpecOf = (ctx: ExtensionContext): ModelSpec | undefined => {
+    if (!ctx.model) return undefined;
+    const level = pi.getThinkingLevel();
+    return {
+      provider: ctx.model.provider,
+      modelId: ctx.model.id,
+      ...(level && level !== "off" ? { thinkingLevel: level as ThinkingLevel } : {}),
+    };
+  };
+
   /** Stop old work without saving into the newly selected branch. */
   const clearBranch = () => {
+    pendingHandoff = undefined;
     branchEpoch++;
     const hadUI = hostCtx?.mode === "tui";
     hostCtx = undefined;
@@ -642,22 +659,89 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
   });
 
   // Inline plan mode in your own conversation (Claude Code's): /plan, Shift+Tab, enter_plan_mode.
-  let freshPlan: string | undefined;
   const inline = registerInlinePlanMode(pi, {
     safeSubcommands: () => settings.safeSubcommands,
     plansDirectory: () => settings.plansDirectory,
     approved: (plan, ctx) => hook(ctx, { id: "plan", name: "plan", revision: 1, plan, spec: undefined }),
-    implementFresh: (plan) => {
-      freshPlan = plan;
+    handoffTarget: (ctx) => {
+      const planning = sessionSpecOf(ctx);
+      if (!planning) return undefined;
+      const catalog = modelCatalog(ctx);
+      const target = implementationTarget({
+        planModel: planning,
+        map: settings.implementationModelMap,
+        worker: subagentWorkerModel(pi.events, planning),
+        fallback: planning,
+        available: catalog.available,
+      });
+      if (!target) return undefined;
+      return {
+        target: target.spec,
+        targetName: catalog.name(target.spec),
+        planning,
+        planningName: catalog.name(planning),
+      };
     },
+    handoff: (approval, who) => {
+      pendingHandoff = { approval, who };
+    },
+    implementHere: (_ctx, a) =>
+      implementationBrief({ plan: a.plan, planFile: a.planFile, context: "here", own: true, edited: a.edited }),
     toggleKey: () => configuredPlanModeToggleShortcut(settings),
   });
-  // An approved plan to build in a fresh session: once your agent's turn is over, /plan starts it
-  // (a session switch needs a command's context).
-  pi.on("agent_settled", () => {
-    if (freshPlan === undefined) return;
-    safely(() => pi.sendUserMessage(`/plan ${FRESH_ARG}`, { expandPromptTemplates: true }));
+
+  // An approved plan handed off: once the turn that approved it ends, compact the context down to
+  // the plan, switch the model and continue with the implementation brief.
+  pi.on("agent_before_settle", async (event, ctx) => {
+    const handoff = pendingHandoff;
+    pendingHandoff = undefined;
+    if (!handoff) return undefined;
+    if (event.outcome !== "completed") {
+      if (ctx.hasUI) {
+        ctx.ui.notify(
+          "The handoff did not happen: the turn did not complete. Run /plan and approve the plan again.",
+          "warning",
+        );
+      }
+      return undefined;
+    }
+    const { approval, who } = handoff;
+    const switched = who && handsOffToAnotherModel(who) ? await applyRuntime(ctx, who.target) : false;
+    const implementer = who && switched ? who.targetName : (who?.planningName ?? "this model");
+    return {
+      entries: [
+        {
+          type: "compaction" as const,
+          summary: HANDOFF_SUMMARY,
+          firstKeptEntryId: null,
+          details: { planMode: { handoff: approval.planFile } },
+        },
+        {
+          type: "custom_message" as const,
+          customType: HANDOFF_MESSAGE_TYPE,
+          content: implementationBrief({
+            plan: approval.plan,
+            planFile: approval.planFile,
+            context: "fresh",
+            edited: approval.edited,
+          }),
+          display: true,
+          details: { planFile: approval.planFile, implementer, lines: approval.plan.split("\n").length },
+        },
+      ],
+      continue: true,
+    };
   });
+
+  pi.registerMessageRenderer<{ planFile?: string; implementer?: string; lines?: number }>(
+    HANDOFF_MESSAGE_TYPE,
+    (message, options, theme) => {
+      const details = message.details;
+      const body = typeof message.content === "string" ? message.content : "";
+      const head = `▸ Plan ${details?.planFile ? planName(details.planFile) : ""} handed off to ${details?.implementer ?? "the implementer"}`;
+      return renderCollapsedMarkdown(head, body, options.expanded, theme, details?.lines);
+    },
+  );
 
   pi.registerCommand("plan", {
     description: "Plan mode: research read-only and write a plan to approve before anything changes",
@@ -667,20 +751,6 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       if (!runtimeActive || epoch !== branchEpoch) return;
       hostCtx = ctx;
       const task = args.trim();
-      if (task === FRESH_ARG) {
-        const plan = freshPlan;
-        freshPlan = undefined;
-        if (plan === undefined) return;
-        const target = ctx.model ? { provider: ctx.model.provider, modelId: ctx.model.id } : undefined;
-        const level = pi.getThinkingLevel();
-        const source: PlanSource = { id: "plan", name: "plan", revision: 1, plan, spec: undefined };
-        await implementFresh(
-          ctx,
-          source,
-          target && level && level !== "off" ? { ...target, thinkingLevel: level as ThinkingLevel } : target,
-        );
-        return;
-      }
       if (!inline.active) inline.enter(ctx);
       else if (!task && ctx.hasUI) {
         ctx.ui.notify(`Plan mode is on. The plan file is ${inline.planFile ?? "not chosen yet"}.`, "info");
@@ -1444,9 +1514,15 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
         let author = first;
         const ready = sources;
         const defaults = (source: PlanSource) => {
-          const mapped = source.spec ? settings.implementationModelMap?.[formatModelKey(source.spec)] : undefined;
-          const base = mapped ?? sessionSpec ?? source.spec ?? (models[0] as ModelSpec);
-          return withEffort(base, mapped?.thinkingLevel);
+          const planModel = source.spec ?? sessionSpec;
+          const target = implementationTarget({
+            planModel,
+            map: settings.implementationModelMap,
+            worker: planModel ? subagentWorkerModel(pi.events, planModel) : undefined,
+            fallback: sessionSpec ?? source.spec ?? models[0],
+            available: catalog.available,
+          });
+          return withEffort(target?.spec ?? (models[0] as ModelSpec));
         };
         let target = defaults(author);
         let context: ImplementationContextChoice = configuredImplementationContext(settings);
@@ -1694,13 +1770,13 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     const plan = source.plan;
     hook(ctx, source);
     disposeRun("implemented");
-    if (context === "clear") return implementFresh(ctx, source, target);
+    if (context === "clear") return implementFresh(ctx, target, implementationBrief({ plan, context: "fresh" }));
     await applyRuntime(ctx, target);
-    pi.sendUserMessage(formatImplementationPrompt(plan, false));
+    pi.sendUserMessage(implementationBrief({ plan, context: "here" }));
   }
 
   /** A fresh session (a child of this one) that gets only the plan, on `target` if given. */
-  async function implementFresh(ctx: ExtensionCommandContext, source: PlanSource, target: ModelSpec | undefined) {
+  async function implementFresh(ctx: ExtensionCommandContext, target: ModelSpec | undefined, brief: string) {
     const parentSession = ctx.sessionManager.getSessionFile();
     try {
       await ctx.waitForIdle();
@@ -1710,7 +1786,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           if (target) sessionManager.appendCustomEntry(RUNTIME_ENTRY, { model: formatModelSpec(target) });
         },
         withSession: async (fresh) => {
-          await fresh.sendUserMessage(formatImplementationPrompt(source.plan, true));
+          await fresh.sendUserMessage(brief);
         },
       });
     } catch (error: unknown) {
@@ -1718,13 +1794,16 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     }
   }
 
-  async function applyRuntime(ctx: ExtensionContext, target: ModelSpec) {
+  /** Switch to `target`'s model and effort; true when the session ends on the target model. */
+  async function applyRuntime(ctx: ExtensionContext, target: ModelSpec): Promise<boolean> {
     const epoch = branchEpoch;
     const current = ctx.model;
+    let onTarget = true;
     if (!current || current.provider !== target.provider || current.id !== target.modelId) {
       const model = ctx.modelRegistry.find(target.provider, target.modelId);
       const switched = model && (await pi.setModel(model));
-      if (epoch !== branchEpoch || !runtimeActive) return;
+      if (epoch !== branchEpoch || !runtimeActive) return false;
+      onTarget = Boolean(switched);
       if (!switched) {
         ctx.ui.notify(
           `Could not switch to ${formatModelSpec(target)}; implementing with the current model.`,
@@ -1733,6 +1812,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       }
     }
     if (target.thinkingLevel) pi.setThinkingLevel(target.thinkingLevel as never);
+    return onTarget;
   }
 
   /** A fresh implementation session applies the model and effort chosen for it, once. */

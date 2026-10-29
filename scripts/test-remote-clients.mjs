@@ -32,6 +32,7 @@ const { ALLOW_ONCE, BLOCK, choiceLabels } = await jiti.import('../packages/pi-to
 const { CustomEditor } = await import(new URL('./modes/interactive/components/custom-editor.js', sdkUrl));
 const { sidebarScreen } = await import('./remote-clients/sidebar.mjs');
 const { TerminalPanel } = await jiti.import('../packages/pi-interactive-shell/src/panel.ts');
+const { handoffLabel, keepLabel, EDIT, KEEP } = await jiti.import('../packages/pi-plan-mode/src/inline-plan.ts');
 const { choiceMenu, coldTitle } = await jiti.import('../packages/pi-cache-guard/src/index.ts');
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
@@ -114,8 +115,10 @@ async function approvalLines(width, spec = {}) {
   return lines;
 }
 
+// The widest first row: 42 characters, the most a Pi select row may have (docs/clients.md).
+const PLAN_CHOICES = [handoffLabel('Claude Sonnet 5.5', 'xhigh'), keepLabel('Claude Opus 5.5'), EDIT, KEEP];
 function selectorLines(width) {
-  const selector = new ExtensionSelectorComponent('Implement this plan? ~/.pi/agent/plans/example.md', ['Implement', 'Implement in yolo mode', 'Keep planning'], () => {}, () => {});
+  const selector = new ExtensionSelectorComponent('Implement this plan? ~/.pi/agent/plans/example.md', PLAN_CHOICES, () => {}, () => {});
   return selector.render(width);
 }
 
@@ -147,7 +150,7 @@ const DIALOGS = [
     const rows = [...approvalOptions(spec.kind, spec.plural), 'Block with a message'];
     return { name, lines: (w) => approvalLines(w, spec), herdr: { options: rows.length, multi: false, labels: rows }, collie: { kind: 'prompt-select', wraps: rows } };
   }),
-  { name: 'pi select (plan approval)', lines: selectorLines, herdr: { options: 3, multi: false }, collie: { kind: 'prompt-select', options: 4 } },
+  { name: 'pi select (plan approval)', lines: selectorLines, herdr: { options: 4, multi: false, labels: PLAN_CHOICES }, collie: { kind: 'prompt-select', options: 5, wraps: PLAN_CHOICES } },
   { name: 'cache-guard cold cache', lines: (w) => coldCacheLines(w, plainMenu), herdr: { options: plainMenu.length, multi: false, labels: plainMenu }, collie: { kind: 'prompt-select', options: plainMenu.length + 1, wraps: plainMenu } },
   { name: 'cache-guard cold cache (model offers)', lines: coldCacheLines, herdr: { options: coldMenu.length, multi: false, labels: coldMenu }, collie: { kind: 'prompt-select', options: coldMenu.length + 1, wraps: coldMenu } },
 ];
