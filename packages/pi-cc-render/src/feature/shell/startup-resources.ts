@@ -9,7 +9,9 @@ import { STARTUP_RESOURCES_PATCH, patchRegistry } from "../../utils/patch-keys.t
  * Pi prints each section as one comma-joined run of labels, which for extensions means a wall of repeated
  * `owner/repo:packages/pi-x/src` paths. Here every section gets a heading with a count, entries are grouped
  * by where they come from (scope or package), shown by short name and laid out in aligned columns.
- * The expanded view (ctrl+o) is left to pi.
+ * Context files and skills are what the model carries in every request, so they also show an estimated
+ * token cost: a total on the heading, per-file counts for context files (largest first) and a dim count
+ * after only the heavy skills. The expanded view (ctrl+o) is left to pi.
  */
 
 type Scope = "user" | "project" | "path";
@@ -20,17 +22,23 @@ export type ResourceEntry = {
 	/** Package source label (npm name or git owner/repo); undefined for local files. */
 	source?: string;
 	scope: Scope;
+	/** Estimated tokens this entry adds to every request; undefined when it adds none or is not measured. */
+	tokens?: number;
 };
 
 export type ResourceGroup = {
 	/** Sub-heading; undefined when the section needs none. */
 	label?: string;
 	items: string[];
+	/** Estimated tokens per item, parallel to `items`; present only when the section measures them. */
+	tokens?: number[];
 };
 
 export type ResourceSection = {
 	title: string;
 	count: number;
+	/** Estimated tokens the whole section adds to every request; shown on the heading when above zero. */
+	tokens?: number;
 	/** "lines" lists one entry per line (context files); "grid" packs short names into columns. */
 	layout: "lines" | "grid";
 	groups: ResourceGroup[];
@@ -44,9 +52,31 @@ export type StartupTheme = {
 const SCOPE_ORDER: Scope[] = ["project", "user", "path"];
 const INDENT = 2;
 const COLUMN_GAP = 3;
+/** A skill costing at least this many tokens gets its count shown next to its name; lighter ones stay plain. */
+export const HEAVY_SKILL_TOKENS = 180;
 
 function compareNames(a: string, b: string): number {
 	return a.localeCompare(b);
+}
+
+/** Characters / 4, the heuristic pi's compaction and /context use. */
+export function estimateTokens(text: string): number {
+	return Math.max(0, Math.ceil(text.length / 4));
+}
+
+/** `210` below a thousand, `1.4k` above, `12k` from ten thousand. */
+export function formatTokens(tokens: number): string {
+	if (tokens < 1000) return String(tokens);
+	const thousands = tokens / 1000;
+	return thousands < 10 ? `${thousands.toFixed(1).replace(/\.0$/, "")}k` : `${Math.round(thousands)}k`;
+}
+
+/** What one skill adds to the system prompt: the `<skill>` block pi renders (name, description, location). */
+export function skillPromptTokens(skill: { name: string; description?: string; filePath?: string; disableModelInvocation?: boolean }): number {
+	if (skill.disableModelInvocation) return 0;
+	return estimateTokens(
+		`  <skill>\n    <name>${skill.name}</name>\n    <description>${skill.description ?? ""}</description>\n    <location>${skill.filePath ?? ""}</location>\n  </skill>`,
+	);
 }
 
 /** Short name for one extension inside a multi-extension package: `packages/pi-x/src` becomes `pi-x`. */
@@ -68,6 +98,15 @@ function stripSharedPrefix(items: string[], prefix: string): string[] {
 	return items.map((item) => item.slice(prefix.length));
 }
 
+/** Names sorted alphabetically, with their token estimates alongside when any entry has one. */
+function sortedItems(entries: ResourceEntry[]): Pick<ResourceGroup, "items" | "tokens"> {
+	const sorted = [...entries].sort((a, b) => compareNames(a.name, b.name));
+	const items = sorted.map((entry) => entry.name);
+	return sorted.some((entry) => entry.tokens !== undefined)
+		? { items, tokens: sorted.map((entry) => entry.tokens ?? 0) }
+		: { items };
+}
+
 /**
  * Groups entries by origin: local files per scope, then packages that contribute several entries (own
  * sub-heading with a count), then every single-entry package together. `singleton` picks what a lone package
@@ -77,11 +116,11 @@ export function groupEntries(
 	entries: ResourceEntry[],
 	singleton: "source" | "name",
 ): ResourceGroup[] {
-	const locals = new Map<Scope, string[]>();
+	const locals = new Map<Scope, ResourceEntry[]>();
 	const packages = new Map<string, { source: string; scope: Scope; entries: ResourceEntry[] }>();
 	for (const entry of entries) {
 		if (entry.source === undefined) {
-			locals.set(entry.scope, [...(locals.get(entry.scope) ?? []), entry.name]);
+			locals.set(entry.scope, [...(locals.get(entry.scope) ?? []), entry]);
 			continue;
 		}
 		const key = `${entry.scope}\0${entry.source}`;
@@ -93,14 +132,15 @@ export function groupEntries(
 	const groups: ResourceGroup[] = [];
 	for (const scope of SCOPE_ORDER) {
 		const items = locals.get(scope);
-		if (items) groups.push({ label: scope, items: items.sort(compareNames) });
+		if (items) groups.push({ label: scope, ...sortedItems(items) });
 	}
 
-	const lone: string[] = [];
+	const lone: ResourceEntry[] = [];
 	const multi = [...packages.values()]
 		.filter((group) => {
 			if (group.entries.length > 1) return true;
-			lone.push(singleton === "source" ? group.source : group.entries[0]!.name);
+			const only = group.entries[0]!;
+			lone.push(singleton === "source" ? { ...only, name: group.source } : only);
 			return false;
 		})
 		.sort((a, b) => compareNames(a.source, b.source));
@@ -110,13 +150,17 @@ export function groupEntries(
 			"pi-",
 		);
 		const label = group.scope === "user" ? group.source : `${group.source} (${group.scope})`;
-		groups.push({ label, items: names.sort(compareNames) });
+		groups.push({
+			label,
+			...sortedItems(group.entries.map((entry, index) => ({ ...entry, name: names[index]! }))),
+		});
 	}
-	if (lone.length > 0) groups.push({ label: "packages", items: lone.sort(compareNames) });
+	if (lone.length > 0) groups.push({ label: "packages", ...sortedItems(lone) });
 
 	// A lone local group needs no sub-heading: the section title already says what it is.
 	if (groups.length === 1 && groups[0]!.label !== undefined && packages.size === 0) {
-		groups[0] = { items: groups[0]!.items };
+		const { label: _label, ...unlabelled } = groups[0]!;
+		groups[0] = unlabelled;
 	}
 	return groups;
 }
@@ -143,12 +187,24 @@ export function layoutGrid(items: string[], width: number, indent: number): stri
 	return lines;
 }
 
+/** Right-aligned token counts after the names, so sizes line up down the list. */
+function linesWithTokens(group: ResourceGroup, indent: number, width: number, theme: StartupTheme): string[] {
+	const counts = group.tokens!.map((tokens) => `~${formatTokens(tokens)}`);
+	const nameWidth = Math.max(...group.items.map((item) => visibleWidth(item)));
+	const countWidth = Math.max(...counts.map((count) => count.length));
+	return group.items.map((item, index) => {
+		const gap = " ".repeat(nameWidth - visibleWidth(item) + 2 + countWidth - counts[index]!.length);
+		return truncateToWidth(`${" ".repeat(indent)}${item}${gap}${theme.fg("dim", counts[index]!)}`, width);
+	});
+}
+
 export function renderSection(
 	section: ResourceSection,
 	width: number,
 	theme: StartupTheme,
 ): string[] {
-	const heading = `${theme.bold(theme.fg("mdHeading", section.title))} ${theme.fg("dim", String(section.count))}`;
+	const cost = section.tokens ? ` ${theme.fg("dim", `· ~${formatTokens(section.tokens)} tok`)}` : "";
+	const heading = `${theme.bold(theme.fg("mdHeading", section.title))} ${theme.fg("dim", String(section.count))}${cost}`;
 	const lines = [heading];
 	for (const group of section.groups) {
 		const nested = group.label !== undefined;
@@ -159,9 +215,17 @@ export function renderSection(
 		}
 		const indent = nested ? INDENT * 2 : INDENT;
 		if (section.layout === "lines") {
-			for (const item of group.items) lines.push(truncateToWidth(`${" ".repeat(indent)}${item}`, width));
+			if (group.tokens) lines.push(...linesWithTokens(group, indent, width, theme));
+			else for (const item of group.items) lines.push(truncateToWidth(`${" ".repeat(indent)}${item}`, width));
 		} else {
-			lines.push(...layoutGrid(group.items, width, indent));
+			const items = group.tokens
+				? group.items.map((item, index) =>
+						group.tokens![index]! >= HEAVY_SKILL_TOKENS
+							? `${item} ${theme.fg("dim", `~${group.tokens![index]}`)}`
+							: item,
+					)
+				: group.items;
+			lines.push(...layoutGrid(items, width, indent));
 		}
 	}
 	return lines;
@@ -187,17 +251,33 @@ export function collectSections(mode: any, options?: { extensions?: any[] }): Re
 	const loader = mode.session.resourceLoader;
 	const sections: Record<string, ResourceSection> = {};
 
-	const contextFiles = [
-		...(loader.getSystemPromptSource() ? [loader.getSystemPromptSource()] : []),
-		...loader.getAppendSystemPromptSources(),
-		...loader.getAgentsFiles().agentsFiles,
+	const appendSources = loader.getAppendSystemPromptSources() as any[];
+	const appendTexts = (loader.getAppendSystemPrompt?.() ?? []) as string[];
+	const contextFiles: Array<{ path: string; tokens: number }> = [
+		...(loader.getSystemPromptSource()
+			? [{ path: loader.getSystemPromptSource().path, tokens: estimateTokens(loader.getSystemPrompt?.() ?? "") }]
+			: []),
+		...appendSources.map((file, index) => ({ path: file.path, tokens: estimateTokens(appendTexts[index] ?? "") })),
+		...(loader.getAgentsFiles().agentsFiles as any[]).map((file) => ({
+			path: file.path,
+			tokens: estimateTokens(file.content ?? ""),
+		})),
 	];
 	if (contextFiles.length > 0) {
+		// Largest first; equal sizes keep pi's order (stable sort).
+		const bySize = [...contextFiles].sort((a, b) => b.tokens - a.tokens);
+		const total = bySize.reduce((sum, file) => sum + file.tokens, 0);
 		sections.Context = {
 			title: "Context",
 			count: contextFiles.length,
+			tokens: total,
 			layout: "lines",
-			groups: [{ items: contextFiles.map((file: any) => mode.formatContextPath(file.path)) }],
+			groups: [
+				{
+					items: bySize.map((file) => mode.formatContextPath(file.path)),
+					tokens: bySize.map((file) => file.tokens),
+				},
+			],
 		};
 	}
 
@@ -206,9 +286,14 @@ export function collectSections(mode: any, options?: { extensions?: any[] }): Re
 		sections.Skills = {
 			title: "Skills",
 			count: skills.length,
+			tokens: skills.reduce((sum, skill) => sum + skillPromptTokens(skill), 0),
 			layout: "grid",
 			groups: groupEntries(
-				skills.map((skill) => ({ name: skill.name, ...entryOrigin(mode, skill.sourceInfo) })),
+				skills.map((skill) => ({
+					name: skill.name,
+					tokens: skillPromptTokens(skill),
+					...entryOrigin(mode, skill.sourceInfo),
+				})),
 				"name",
 			),
 		};

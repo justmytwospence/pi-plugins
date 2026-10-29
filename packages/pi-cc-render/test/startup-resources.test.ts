@@ -2,6 +2,8 @@ import { InteractiveMode } from "@earendil-works/pi-coding-agent";
 import { describe, expect, test } from "vitest";
 import {
   collectSections,
+  formatTokens,
+  HEAVY_SKILL_TOKENS,
   groupEntries,
   layoutGrid,
   packageItemName,
@@ -78,7 +80,12 @@ describe("startup resources", () => {
         resourceLoader: {
           getSystemPromptSource: () => undefined,
           getAppendSystemPromptSources: () => [],
-          getAgentsFiles: () => ({ agentsFiles: [{ path: "/work/AGENTS.md" }] }),
+          getAgentsFiles: () => ({
+            agentsFiles: [
+              { path: "/work/AGENTS.md", content: "x".repeat(400) },
+              { path: "/work/BIG.md", content: "x".repeat(4000) },
+            ],
+          }),
           getSkills: () => ({ skills: [{ name: "herdr", sourceInfo: { source: "local", scope: "user" } }] }),
           getExtensions: () => ({
             extensions: [
@@ -91,10 +98,62 @@ describe("startup resources", () => {
       },
     }).map(([key, value]) => [key, { value }])));
     const sections = collectSections(mode);
-    expect(sections.Context!.groups[0]!.items).toEqual(["AGENTS.md"]);
-    expect(sections.Skills!.groups).toEqual([{ items: ["herdr"] }]);
+    expect(sections.Context!.groups[0]!.items).toEqual(["BIG.md", "AGENTS.md"]);
+    expect(sections.Context!.groups[0]!.tokens).toEqual([1000, 100]);
+    expect(sections.Context!.tokens).toBe(1100);
+    expect(sections.Skills!.groups).toEqual([{ items: ["herdr"], tokens: [expect.any(Number)] }]);
+    expect(sections.Skills!.tokens).toBeGreaterThan(0);
     expect(sections.Extensions!.count).toBe(3);
     expect(sections.Extensions!.groups.map((group) => group.label)).toEqual(["user", expect.stringContaining("repo")]);
     expect(sections.Extensions!.groups[1]!.items).toEqual(["bg", "todo"]);
+  });
+
+  test("formats token counts compactly", () => {
+    expect(formatTokens(210)).toBe("210");
+    expect(formatTokens(1000)).toBe("1k");
+    expect(formatTokens(1440)).toBe("1.4k");
+    expect(formatTokens(12600)).toBe("13k");
+  });
+
+  test("context files show a total and right-aligned counts", () => {
+    const lines = renderSection(
+      {
+        title: "Context",
+        count: 2,
+        tokens: 1500,
+        layout: "lines",
+        groups: [{ items: ["~/big.md", "a.md"], tokens: [1400, 100] }],
+      },
+      80,
+      plainTheme,
+    );
+    expect(lines).toEqual(["Context 2 · ~1.5k tok", "  ~/big.md  ~1.4k", "  a.md       ~100"]);
+  });
+
+  test("skills annotate only the heavy ones and keep alphabetical order", () => {
+    const lines = renderSection(
+      {
+        title: "Skills",
+        count: 3,
+        tokens: 400,
+        layout: "grid",
+        groups: [{ items: ["apple", "bee", "cat"], tokens: [20, HEAVY_SKILL_TOKENS + 50, 30] }],
+      },
+      80,
+      plainTheme,
+    );
+    expect(lines[0]).toBe("Skills 3 · ~400 tok");
+    expect(lines[1]).toBe(`  apple      bee ~${HEAVY_SKILL_TOKENS + 50}   cat`);
+  });
+
+  test("groupEntries keeps token estimates aligned with the sorted names", () => {
+    const groups = groupEntries(
+      [
+        { name: "b", scope: "user", tokens: 2 },
+        { name: "a", scope: "user", tokens: 1 },
+      ],
+      "name",
+    );
+    expect(groups).toEqual([{ items: ["a", "b"], tokens: [1, 2] }]);
   });
 });
