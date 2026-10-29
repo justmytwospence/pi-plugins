@@ -173,6 +173,8 @@ export class TodoOverlay {
 					const theme = this.uiCtx?.theme;
 					if (!theme) return [];
 					const lines = this.renderWidget(theme, width);
+					// No trailing blank: the dock's own spacer above the editor already provides one.
+					while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
 					return lines.length > 0 ? ["", ...lines] : lines;
 				},
 				invalidate: () => {},

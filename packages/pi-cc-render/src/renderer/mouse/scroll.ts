@@ -128,10 +128,18 @@ export function disableOfficialScrollToEnd(tui: any): void {
 
 let scrollIndicatorTheme: any = null;
 
+/** A solid pill: the accent color as background, the theme's own background as light text. */
 function scrollIndicatorLabel(): string {
-	const text = `[ ↓ ${scrollButtonText()} ]`;
-	if (!scrollIndicatorTheme) return text;
-	return scrollIndicatorTheme.fg(getScrollButtonHovered() ? "text" : "accent", text);
+	const text = ` ↓ ${scrollButtonText()} `;
+	const theme = scrollIndicatorTheme;
+	try {
+		const bg = String(theme.getFgAnsi(getScrollButtonHovered() ? "text" : "accent")).replace("\x1b[38;", "\x1b[48;");
+		const fg = String(theme.getBgAnsi("userMessageBg")).replace("\x1b[48;", "\x1b[38;");
+		if (bg.startsWith("\x1b[48;") && fg.startsWith("\x1b[38;")) return `${bg}${fg}\x1b[1m${text}\x1b[0m`;
+	} catch {
+		// fall through to the plain label
+	}
+	return theme ? theme.fg("accent", text) : text;
 }
 
 /** Restores the host overlay on /ccstyle off or teardown. */
@@ -294,9 +302,18 @@ export function updateScrollButtonFromInput(tui: any, data: string): void {
 }
 
 /** Show the original label when there is no new content; otherwise show the accumulated count. */
+/** The first key bound to the viewport's scroll-to-bottom action, so the label shows the key that works. */
+function scrollBottomKey(): string {
+	try {
+		return getKeybindings().getKeys("tui.altScreen.bottom" as Keybinding)[0] ?? SCROLL_BOTTOM_SHORTCUT;
+	} catch {
+		return SCROLL_BOTTOM_SHORTCUT;
+	}
+}
+
 function scrollButtonText(): string {
 	const count = getScrollButtonNewCount();
-	const shortcut = formatShortcut(SCROLL_BOTTOM_SHORTCUT);
+	const shortcut = formatShortcut(scrollBottomKey());
 	if (count <= 0) return `Back to bottom · ${shortcut}`;
 	return `${count} new message${count === 1 ? "" : "s"} · ${shortcut}`;
 }
