@@ -993,7 +993,15 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     const age = Math.max(0, s.now - quota.updated);
     const expired = quota.windows.some((w) => w.reset !== undefined && w.reset <= s.now);
     const stale = age >= QUOTA_STALE_MS || expired;
-    const windows = quota.windows.map((w): Segment => {
+    // Fable's weekly pool shows only when over trajectory (used above the elapsed share
+    // of its 7 days) and under 48 hours from reset.
+    const shown = quota.windows.filter((w) => {
+      if (!/^fable$/i.test(w.label)) return true;
+      if (w.reset === undefined || w.reset <= s.now) return false;
+      const left = w.reset - s.now;
+      return left < 48 * 3600_000 && w.used > (1 - left / (7 * 86400_000)) * 100;
+    });
+    const windows = shown.map((w): Segment => {
       let reset = "";
       // Expired windows share the row's reset-due alert; do not repeat it.
       if (w.reset !== undefined && w.reset > s.now) reset = `${sep}${theme.fg("dim", `resets in ${duration(w.reset - s.now)}`)}`;

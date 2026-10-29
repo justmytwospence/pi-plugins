@@ -195,6 +195,7 @@ test("all widths 1..240 fit in both real Pi themes, including ANSI and wide Unic
 test("narrow layout protects model, context and the most-used quota", () => {
   const s = fixture();
   s.quotas[0].windows[2].used = 99;
+  s.quotas[0].windows[2].reset = now + 86400_000;
   const rows = mod.renderFooter(s, 40, theme);
   assert.match(rows[1], /opus-5\.5/);
   assert.match(rows[2], /Context\s+28%/);
@@ -1801,4 +1802,15 @@ test("pi-recap's automatic session name stays off the footer; a name you set sho
   assert.equal(mod.ownName("Parser work", "Fixed the parser"), "Parser work");
   assert.equal(mod.ownName("Parser work", undefined), "Parser work");
   assert.equal(mod.ownName(undefined, undefined), undefined);
+});
+
+test("Fable quota shows only over trajectory and within 48 hours of reset", () => {
+  const show = (used, days) => {
+    const s = fixture();
+    s.quotas[0].windows[2] = { label: "Fable", used, reset: now + days * 86400_000 };
+    return /Fable/.test(mod.renderFooter(s, 200, theme).join("\n"));
+  };
+  assert.equal(show(68, 3), false);
+  assert.equal(show(10, 1), false);
+  assert.equal(show(90, 1), true);
 });
