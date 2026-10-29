@@ -58,6 +58,8 @@ export interface SourceActions {
   engaged?(): Followed[];
   /** Opens a URL in the browser. */
   openUrl?(url: string): void;
+  /** Enter on a notebook open nowhere: starts its session here, then shows it. Without it, the browser opens. */
+  openUnopened?(u: Unopened): Promise<void>;
   /** Notebooks with no session to follow yet (a running server open in no browser, a pinned file not open). */
   unopened?(): Unopened[];
 }
@@ -70,8 +72,11 @@ export interface Unopened {
   where?: string | undefined;
   /** `not open`. */
   state: string;
-  /** Where Enter takes you, when there is a server. */
+  /** Where the browser opens it, when there is a server. */
   url?: string | undefined;
+  /** Its server and the file it serves, which Enter opens headlessly (core/headless.ts). */
+  server?: string | undefined;
+  file?: string | undefined;
 }
 
 export class NotebookSource {
@@ -94,6 +99,10 @@ export class NotebookSource {
       open: (key, ui) => {
         const other = this.actions.unopened?.().find((u) => u.key === key);
         if (other) {
+          if (this.actions.openUnopened && other.server) {
+            // No browser needed; if the server cannot be reached this way, the browser is the fallback.
+            return this.actions.openUnopened(other).catch(() => { if (other.url) this.actions.openUrl?.(other.url); });
+          }
           if (other.url) this.actions.openUrl?.(other.url);
           return Promise.resolve();
         }

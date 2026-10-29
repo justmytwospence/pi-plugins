@@ -63,7 +63,7 @@ function setup(select?: (title: string, options: string[]) => string | undefined
   };
   const ctx = { cwd: "/w", mode, isIdle: () => true, ui, sessionManager: { getBranch: () => [] } };
   piMarimo(pi as never);
-  const fire = async (name: string) => { for (const h of handlers.get(name) ?? []) await h({}, ctx); };
+  const fire = async (name: string, event: unknown = {}) => { for (const h of handlers.get(name) ?? []) await h(event, ctx); };
   const live = () => [...statuses].filter(([k, v]) => v !== undefined && k.startsWith("marimo") && k !== "marimo-lens").sort(([a], [b]) => a.localeCompare(b)).map(([, v]) => v);
   return { fire, statuses, live, notes, section: () => offered, run: (args: string) => command!.handler(args, ctx) };
 }
@@ -72,6 +72,7 @@ afterEach(() => {
   host.sessions = {};
   host.spawned.length = 0;
   setCapabilityOverrides({});
+  vi.unstubAllGlobals();
 });
 
 const link = (url: string, text: string) => `\x1b]8;;${url}\x1b\\${text}\x1b]8;;\x1b\\`;
@@ -159,4 +160,61 @@ test("in the TUI the footer lines give way to rows under the prompt: waiting ser
   // A server's row is not stoppable: it is not a run.
   expect(x.section().canStop(rows[1].key)).toBe(false);
   await x.fire("session_shutdown");
+});
+
+test("a marimo-pair call at a server whose notebook is open nowhere opens it first, without a browser", async () => {
+  setCapabilityOverrides({ hyperlinks: false });
+  const sockets: Array<{ url: string }> = [];
+  class FakeSocket {
+    onmessage: ((e: { data: unknown }) => void) | null = null;
+    onerror: (() => void) | null = null;
+    onclose: (() => void) | null = null;
+    constructor(readonly url: string) {
+      sockets.push(this);
+      // The server starts the kernel and lists the session.
+      queueMicrotask(() => {
+        host.sessions[new URL(url).port] = { s_new: { path: new URL(url).port === "2718" ? "/w/0_first.py" : "/w/1_second.py" } };
+        this.onmessage?.({ data: '{"op": "kernel-ready", "data": {}}' });
+      });
+    }
+    close() {}
+  }
+  vi.stubGlobal("WebSocket", FakeSocket);
+  const x = setup(undefined, "tui");
+  await x.fire("session_start");
+  await until(() => (x.section()?.pill(Date.now())?.rows?.length ?? 0) === 2);
+  await x.fire("tool_call", { toolCallId: "t1", input: { command: "bash /s/marimo-pair/scripts/execute-code.sh --url http://127.0.0.1:2719 -c 'print(1)'" } });
+  // Only the server the call names was opened, through the page's own WebSocket address.
+  expect(sockets).toHaveLength(1);
+  const url = new URL(sockets[0]!.url);
+  expect(url.origin).toBe("ws://127.0.0.1:2719");
+  expect(url.pathname).toBe("/ws");
+  expect(url.searchParams.get("file")).toBe("/w/1_second.py");
+  expect(url.searchParams.get("session_id")).toMatch(/^s_/u);
+  expect(host.spawned).toEqual([]);
+  // Unrelated calls and calls that name no server open nothing.
+  await x.fire("tool_call", { toolCallId: "t2", input: { command: "ls" } });
+  expect(sockets).toHaveLength(1);
+  await x.fire("session_shutdown");
+  vi.unstubAllGlobals();
+});
+
+test("Enter on a `not open` row opens the notebook here and shows its view; if it cannot, the browser opens instead", async () => {
+  setCapabilityOverrides({ hyperlinks: false });
+  class FailingSocket {
+    onerror: (() => void) | null = null;
+    onmessage = null;
+    onclose: (() => void) | null = null;
+    constructor() { queueMicrotask(() => this.onerror?.()); }
+    close() {}
+  }
+  vi.stubGlobal("WebSocket", FailingSocket);
+  const x = setup(undefined, "tui");
+  await x.fire("session_start");
+  await until(() => (x.section()?.pill(Date.now())?.rows?.length ?? 0) === 2);
+  const rows = x.section().pill(Date.now()).rows;
+  await x.section().open(rows[0].key, {});
+  expect(host.spawned).toEqual([[process.platform === "darwin" ? "open" : "xdg-open", ["http://127.0.0.1:2718/"]]]);
+  await x.fire("session_shutdown");
+  vi.unstubAllGlobals();
 });

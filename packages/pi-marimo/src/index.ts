@@ -29,13 +29,15 @@ import { busy as kernelBusy, KernelHold } from "./core/hold.js";
 import { ambiguityNote, lensLines, lensStatusText, shortWhere, snapshot, STATE_TAG, statusParts, statusText } from "./core/render.js";
 import { basename } from "./core/io.js";
 import { nodeIo } from "./core/node-io.js";
-import { pairTargets } from "./core/touch.js";
-import { MarimoWatcher, type Mode, parseMode } from "./core/watcher.js";
+import { HeadlessSessions } from "./core/headless.js";
+import { pairTargets, sameServer } from "./core/touch.js";
+import { MarimoWatcher, type Mode, type Waiting, parseMode } from "./core/watcher.js";
 import { HerdrHold } from "./herdr.js";
 import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION, stoppable } from "./activity.js";
 import { FULL_SCREEN } from "./frame.ts";
 import { interruptKernel, runCells } from "./ui/interrupt.js";
 import { PillView } from "./pill.ts";
+import { notebookKey } from "./ui/identity.js";
 import { NotebookSource, type Unopened } from "./ui/source.js";
 import { openUrl, waitingStatus, waitingUrl } from "./waiting.js";
 import { NotebookView, type ViewActions } from "./ui/view.js";
@@ -168,6 +170,12 @@ export default function piMarimo(pi: ExtensionAPI): void {
     engaged: () => mine(),
     unopened: () => unopened(),
     openUrl,
+    openUnopened: async (u) => {
+      if (!u.server || !u.file) return;
+      await attachWaiting({ url: u.server, path: u.file });
+      const f = watcher?.followed().find((o) => o.attachment.path === u.file || o.canonicalPath === u.file);
+      if (f) await openView(notebookKey(f), ctxRef?.ui);
+    },
   });
   const ownPill = new PillView({
     pill: (now) => source.pill(now),
@@ -197,12 +205,35 @@ export default function piMarimo(pi: ExtensionAPI): void {
   /** The followed notebooks this session uses, the current one first. */
   const mine = () => (watcher?.followed() ?? []).filter((f) => f.engaged);
 
+  /** Notebooks this process opened without a browser (core/headless.ts), so marimo-pair has a session to talk to. */
+  const headless = new HeadlessSessions();
+  /** Opens a waiting notebook's session on its server, and waits for the watcher to follow it. */
+  const attachWaiting = async (w: Pick<Waiting, "url" | "path">): Promise<void> => {
+    await headless.attach(w.url, w.path, process.env.MARIMO_TOKEN);
+    watcher?.refresh();
+    await watcher?.settle(3000);
+  };
+  /** The waiting notebooks a marimo-pair call names (by server, by file, or both). */
+  const waitingFor = (targets: ReturnType<typeof pairTargets>): Waiting[] => {
+    const out = new Map<string, Waiting>();
+    for (const t of targets) {
+      if (t.unresolved || (!t.url && !t.file)) continue;
+      for (const w of watcher?.waiting() ?? []) {
+        const file = t.file;
+        const fileOk = !file || w.path === file || w.canonicalPath === file || w.path.endsWith(`/${file}`) || w.canonicalPath.endsWith(`/${file}`);
+        const urlOk = !t.url || sameServer(t.url, w.url);
+        if (fileOk && urlOk) out.set(`${w.url}\0${w.path}`, w);
+      }
+    }
+    return [...out.values()];
+  };
+
   /** Notebooks with no session to follow: running servers open in no browser, and pinned files not open. */
   const unopened = (): Unopened[] => {
     if (!watcher) return [];
     const out: Unopened[] = [];
     const waiting = watcher.waiting();
-    for (const w of waiting) out.push({ key: `waiting:${w.url}\0${w.canonicalPath}`, path: w.canonicalPath, where: shortWhere(w.url), state: "not open", url: waitingUrl(w) });
+    for (const w of waiting) out.push({ key: `waiting:${w.url}\0${w.canonicalPath}`, path: w.canonicalPath, where: shortWhere(w.url), state: "not open", url: waitingUrl(w), server: w.url, file: w.path });
     const { mode } = watcher;
     if (mode.kind === "pinned") {
       const open = new Set([...watcher.followed().flatMap((f) => [f.attachment.path, f.canonicalPath]), ...waiting.flatMap((w) => [w.path, w.canonicalPath, w.pinned ?? w.path])]);
@@ -344,6 +375,7 @@ export default function piMarimo(pi: ExtensionAPI): void {
     if (previousContext?.mode === "tui") pi.events?.emit(ACTIVITY_GONE, { id: source.section.id });
     ownPill.dispose();
     source.resetHosts();
+    headless.closeAll();
     await previousWatcher?.stop();
     for (let i = 0; i < lastStatus.length; i++) previousContext?.ui.setStatus(statusKey(i), undefined);
     previousContext?.ui.setStatus(LENS_STATUS_KEY, undefined);
@@ -375,9 +407,13 @@ export default function piMarimo(pi: ExtensionAPI): void {
   // session, whatever other sessions or the browser do. Nested calls (codemode) arrive here too.
   // A call that could mean several followed notebooks counts for none: say so on the result of the
   // top-level call (a codemode script's, for its nested calls), naming the flags for each.
-  pi.on("tool_call", (event) => {
+  pi.on("tool_call", async (event) => {
     const targets = pairTargets(JSON.stringify(event.input ?? {}));
     if (!targets.length || !watcher) return undefined;
+    // A marimo-pair call at a server whose notebook is open in no browser: open it here first (no browser needed).
+    const unopened = waitingFor(targets);
+    if (unopened.length) await Promise.allSettled(unopened.map((w) => attachWaiting(w)));
+    if (!watcher) return undefined;
     const before = watcher.engaged().length;
     watcher.touch(targets);
     if (watcher.engaged().length !== before) pi.appendEntry(ENTRY, { engaged: watcher.engaged() });
