@@ -101,16 +101,32 @@ test("a transcript chart under an overlay is taken away and comes back when the 
   expect(placements(writes.join(""))).toHaveLength(1);
 });
 
-test("while a full-screen view is open, images Pi places in the transcript are wiped after each render", () => {
+test("while a full-screen view is open, images Pi places in the transcript are taken away after each render, the view's own stay", () => {
   const { tui, writes } = fakeTui(["", ""]);
   const p = Painter.for(tui)!;
+  // Opening wipes at once, before the view draws anything.
   p.setExclusive(true);
-  tui.doRender();
   expect(writes.join("")).toContain("a=d,d=a");
   writes.length = 0;
   tui.doRender();
   expect(writes).toEqual([]);
+  // A transcript image: its placements go after the render.
   tui.terminal.write("\x1b_Ga=T,f=100,i=5;AAAA\x1b\\");
+  tui.doRender();
+  expect(deletes(writes.at(-1)!)).toEqual([5]);
+  expect(writes.join("")).not.toContain("a=d,d=a");
+  // The view's own image (and its re-placement) stays; a transcript one in the same write still goes.
+  p.setViewImages([7]);
+  writes.length = 0;
+  tui.terminal.write("\x1b_Ga=T,f=100,q=2,C=1,c=60,r=13,i=7,m=1;AAAA\x1b\\\x1b_Gm=0;BB\x1b\\");
+  tui.terminal.write("\x1b_Ga=p,q=2,i=7\x1b\\");
+  tui.doRender();
+  expect(writes.slice(2)).toEqual([]);
+  tui.terminal.write("\x1b_Ga=p,q=2,i=7\x1b\\\x1b_Ga=p,q=2,i=5\x1b\\");
+  tui.doRender();
+  expect(deletes(writes.at(-1)!)).toEqual([5]);
+  // An image without an id cannot be told apart: everything goes.
+  tui.terminal.write("\x1b_Ga=T,f=100;AAAA\x1b\\");
   tui.doRender();
   expect(writes.at(-1)).toContain("a=d,d=a");
   p.setExclusive(false);

@@ -72,7 +72,10 @@ export class Painter {
   private cleared: "placements" | "images" | undefined;
   /** Full-screen views open (the notebook view): images of the transcript underneath are taken off the screen. */
   private exclusive = 0;
-  private wipe = false;
+  /** Images Pi placed while a view is open that are not the view's own: their placements go after the render (`all`: one without an id). */
+  private wipe: Set<number> | "all" | undefined;
+  /** The images the open view draws itself (Pi's image lines in it), which stay. */
+  private viewImages = new Set<number>();
   retired = false;
 
   /** The painter for a TUI, hooking its renders once; undefined when the TUI cannot report its screen. */
@@ -97,8 +100,20 @@ export class Painter {
       if (this.retired) return original(data);
       if (data.includes("a=d,d=A")) this.cleared = "images";
       else if (data.includes("a=d,d=a") && this.cleared !== "images") this.cleared = "placements";
-      // Pi places transcript images even under an overlay; while a view covers the screen they are wiped after the render.
-      if (this.exclusive && /\x1b_G[^;\x1b]*a=[Tp]/u.test(data)) this.wipe = true;
+      // Pi places transcript images even under an overlay; while a view covers the screen they are wiped after the
+      // render, all but the view's own.
+      if (this.exclusive && this.wipe !== "all") {
+        for (const m of data.matchAll(/\x1b_G([^;\x1b]*)/gu)) {
+          const controls = m[1]!;
+          if (!/(?:^|,)a=[Tp](?:,|$)/u.test(controls)) continue;
+          const id = /(?:^|,)i=(\d+)(?:,|$)/u.exec(controls)?.[1];
+          if (id === undefined) { this.wipe = "all"; break; }
+          if (this.viewImages.has(Number(id))) continue;
+          const ids: Set<number> = this.wipe ?? new Set();
+          ids.add(Number(id));
+          this.wipe = ids;
+        }
+      }
       original(data);
     };
     const render = tui.doRender.bind(tui);
@@ -115,10 +130,22 @@ export class Painter {
     this.retired = true;
   }
 
-  /** A full-screen view opens or closes. While one is open, no transcript image shows through it. */
+  /**
+   * A full-screen view opens or closes. While one is open, no transcript image shows through it: what
+   * is placed goes now, before the view draws its own images.
+   */
   setExclusive(open: boolean): void {
     this.exclusive = Math.max(0, this.exclusive + (open ? 1 : -1));
-    if (open) this.wipe = true;
+    if (!this.exclusive) { this.viewImages.clear(); this.wipe = undefined; }
+    if (open && !this.retired) {
+      this.write("\x1b_Ga=d,d=a,q=2\x1b\\");
+      this.cleared = this.cleared === "images" ? "images" : "placements";
+    }
+  }
+
+  /** The images the open view draws in this frame (their ids), which the wipe leaves alone. */
+  setViewImages(ids: Iterable<number>): void {
+    this.viewImages = new Set(ids);
   }
 
   /** A new chart slot; its rows are `lines()`, its frames go through `present()`. */
@@ -187,9 +214,11 @@ export class Painter {
   private afterRender(): void {
     let out = "";
     if (this.exclusive && this.wipe) {
-      this.wipe = false;
-      out += "\x1b_Ga=d,d=a,q=2\x1b\\";
-      this.cleared = this.cleared === "images" ? "images" : "placements";
+      if (this.wipe === "all") {
+        out += "\x1b_Ga=d,d=a,q=2\x1b\\";
+        this.cleared = this.cleared === "images" ? "images" : "placements";
+      } else for (const id of this.wipe) out += removePlacements(id);
+      this.wipe = undefined;
     }
     if (!this.slots.size) { this.cleared = undefined; if (out) this.write(out); return; }
     const screen = this.tui.getScreenLines();

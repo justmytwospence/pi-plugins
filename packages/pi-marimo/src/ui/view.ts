@@ -991,6 +991,13 @@ export class NotebookView implements Component {
     out.push(rule);
     out.push(row(this.footer(f, width - 4)));
     out.push(bottom(width, th));
+    // The images this frame draws stay when the painter wipes the transcript's from under the view.
+    const ids = new Set<number>();
+    for (const line of out) if (line.includes("\x1b_G")) for (const m of line.matchAll(/\x1b_G([^;\x1b]*)/gu)) {
+      const id = /(?:^|,)i=(\d+)(?:,|$)/u.exec(m[1]!)?.[1];
+      if (id !== undefined) ids.add(Number(id));
+    }
+    Painter.for(this.tui)?.setViewImages(ids);
     return out;
   }
 

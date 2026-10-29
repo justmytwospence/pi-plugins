@@ -794,3 +794,26 @@ test("the detail of a failed cell: its error, the traceback, the code folded to 
     expect(screen(v)).toContain("▾ code");
   } finally { v.dispose(); }
 });
+
+test("the view's own picture stays on screen while the painter takes the transcript's away", async () => {
+  const { setCapabilities } = await import("@earendil-works/pi-tui");
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAAFUlEQVR42mP8z8BQz0AEYBxVSF+FABJADveWkH6oAAAAAElFTkSuQmCC";
+  const f = nbWith([{ id: "a", code: "plot()" }]);
+  f.notebook.apply("cell-op", { cell_id: "a", status: "idle", output: { channel: "output", mimetype: "image/png", data: png } });
+  const writes: string[] = [];
+  const painted = { requestRender: () => {}, getScreenLines: () => [] as string[], doRender: () => {}, terminal: { rows: 28, write: (d: string) => { writes.push(d); } } };
+  setCapabilities({ images: "kitty", trueColor: true, hyperlinks: false } as any);
+  const v = new NotebookView(painted as any, theme2, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {} }, () => {});
+  try {
+    const line = v.render(120).find((l) => l.includes("\x1b_G"))!;
+    const id = /(?:,|G)i=(\d+)/u.exec(line)![1];
+    writes.length = 0;
+    // Pi writes the frame, with the view's picture and a transcript image under the overlay.
+    painted.terminal.write(`${line}\x1b_Ga=p,q=2,i=999\x1b\\`);
+    painted.doRender();
+    const after = writes.slice(1).join("");
+    expect(after).toContain("a=d,d=i,i=999");
+    expect(after).not.toContain(`i=${id},`);
+    expect(after).not.toContain("a=d,d=a");
+  } finally { v.dispose(); setCapabilities({ images: null, trueColor: true, hyperlinks: false } as any); }
+});
