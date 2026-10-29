@@ -20,8 +20,12 @@ import { MCP_NOTIFY_PATCH, STARTUP_RESOURCES_PATCH, patchRegistry } from "../../
  * Readable replacement for the collapsed startup listing ([Context] / [Skills] / [Prompts] / [Extensions]).
  *
  * Pi prints each section as one comma-joined run of labels, which for extensions means a wall of repeated
- * `owner/repo:packages/pi-x/src` paths. Here every section gets a heading with a count, entries are grouped
- * by where they come from (scope or package), shown by short name and laid out in aligned columns.
+ * `owner/repo:packages/pi-x/src` paths. Here every section gets a heading with a count, and every section
+ * (Context, Skills, Prompts, Extensions, MCP) is split the same way: by level (project, then user, then
+ * path or extension), each level labelled with its count even when it is the only one. Inside a level,
+ * local entries come first, then packages (one sub-heading per package with several entries, the rest
+ * together under `packages`), as pi's own expanded listing nests them. Entries show by short name in
+ * aligned columns.
  * Context files and skills are what the model carries in every request, so they also show an estimated
  * token cost: a total on the heading, per-file counts for context files (largest first) and a count
  * after every skill, colored by weight (dim, muted, warning, error). The expanded view (ctrl+o) is left to pi.
@@ -43,6 +47,8 @@ export type ResourceGroup = {
 	/** Sub-heading; undefined when the section needs none. */
 	label?: string;
 	items: string[];
+	/** Groups nested under this one, after its own items (a level's packages). */
+	children?: ResourceGroup[];
 	/** Estimated tokens per item, parallel to `items`; present only when the section measures them. */
 	tokens?: number[];
 	/** A colored word after an item, parallel to `items` (grid layout); undefined entries have none. */
@@ -97,9 +103,12 @@ export function skillTokenColor(tokens: number): string {
 /** An entry at least this many times the list's median (and not light) is an outlier and moves up one tier. */
 export const OUTLIER_FACTOR = 2;
 
-/** Colors for a whole list: absolute tiers, with outliers against the list's median bumped one tier. */
-export function skillTokenColors(tokens: number[]): string[] {
-	const sorted = [...tokens].sort((a, b) => a - b);
+/**
+ * Colors for a list: absolute tiers, with outliers against the median bumped one tier. The median is taken
+ * over `reference` (the whole section, so a level with few skills is judged against all of them).
+ */
+export function skillTokenColors(tokens: number[], reference: number[] = tokens): string[] {
+	const sorted = [...reference].sort((a, b) => a - b);
 	const median = sorted.length ? sorted[Math.floor(sorted.length / 2)]! : 0;
 	return tokens.map((count) => {
 		const tier = tierOf(count);
@@ -177,61 +186,53 @@ function sortedItems(entries: ResourceEntry[]): Pick<ResourceGroup, "items" | "t
 }
 
 /**
- * Groups entries by origin: local files per scope, then packages that contribute several entries (own
- * sub-heading with a count), then every single-entry package together. `singleton` picks what a lone package
- * entry is listed as: its package name (extensions) or its own name (skills, prompts).
+ * Groups entries by level (project, user, path), every level labelled. Inside a level: its local entries,
+ * then packages that contribute several entries (own sub-heading with a count), then every single-entry
+ * package together under `packages`. `singleton` picks what a lone package entry is listed as: its package
+ * name (extensions) or its own name (skills, prompts).
  */
 export function groupEntries(
 	entries: ResourceEntry[],
 	singleton: "source" | "name",
 ): ResourceGroup[] {
-	const locals = new Map<Scope, ResourceEntry[]>();
-	const packages = new Map<string, { source: string; scope: Scope; entries: ResourceEntry[] }>();
-	for (const entry of entries) {
-		if (entry.source === undefined) {
-			locals.set(entry.scope, [...(locals.get(entry.scope) ?? []), entry]);
-			continue;
-		}
-		const key = `${entry.scope}\0${entry.source}`;
-		const existing = packages.get(key);
-		if (existing) existing.entries.push(entry);
-		else packages.set(key, { source: entry.source, scope: entry.scope, entries: [entry] });
-	}
-
 	const groups: ResourceGroup[] = [];
 	for (const scope of SCOPE_ORDER) {
-		const items = locals.get(scope);
-		if (items) groups.push({ label: scope, ...sortedItems(items) });
-	}
-
-	const lone: ResourceEntry[] = [];
-	const multi = [...packages.values()]
-		.filter((group) => {
-			if (group.entries.length > 1) return true;
-			const only = group.entries[0]!;
-			lone.push(singleton === "source" ? { ...only, name: group.source } : only);
-			return false;
-		})
-		.sort((a, b) => compareNames(a.source, b.source));
-	for (const group of multi) {
-		const names = stripSharedPrefix(
-			group.entries.map((entry) => entry.name),
-			"pi-",
-		);
-		const label = group.scope === "user" ? group.source : `${group.source} (${group.scope})`;
+		const inScope = entries.filter((entry) => entry.scope === scope);
+		if (inScope.length === 0) continue;
+		const packages = new Map<string, ResourceEntry[]>();
+		for (const entry of inScope) {
+			if (entry.source !== undefined) packages.set(entry.source, [...(packages.get(entry.source) ?? []), entry]);
+		}
+		const children: ResourceGroup[] = [];
+		const lone: ResourceEntry[] = [];
+		for (const [source, list] of [...packages].sort(([a], [b]) => compareNames(a, b))) {
+			if (list.length === 1) {
+				lone.push(singleton === "source" ? { ...list[0]!, name: source } : list[0]!);
+				continue;
+			}
+			const names = stripSharedPrefix(
+				list.map((entry) => entry.name),
+				"pi-",
+			);
+			children.push({ label: source, ...sortedItems(list.map((entry, index) => ({ ...entry, name: names[index]! }))) });
+		}
+		if (lone.length > 0) children.push({ label: "packages", ...sortedItems(lone) });
 		groups.push({
-			label,
-			...sortedItems(group.entries.map((entry, index) => ({ ...entry, name: names[index]! }))),
+			label: scope,
+			...sortedItems(inScope.filter((entry) => entry.source === undefined)),
+			...(children.length > 0 ? { children } : {}),
 		});
 	}
-	if (lone.length > 0) groups.push({ label: "packages", ...sortedItems(lone) });
-
-	// A lone local group needs no sub-heading: the section title already says what it is.
-	if (groups.length === 1 && groups[0]!.label !== undefined && packages.size === 0) {
-		const { label: _label, ...unlabelled } = groups[0]!;
-		groups[0] = unlabelled;
-	}
 	return groups;
+}
+
+/** Entries in a group and everything nested under it. */
+export function groupCount(group: ResourceGroup): number {
+	return group.items.length + (group.children ?? []).reduce((sum, child) => sum + groupCount(child), 0);
+}
+
+function allGroups(groups: ResourceGroup[]): ResourceGroup[] {
+	return groups.flatMap((group) => [group, ...allGroups(group.children ?? [])]);
 }
 
 /** Column-major grid (reads down, like `ls`) that never splits an entry and never exceeds `width`. */
@@ -256,15 +257,71 @@ export function layoutGrid(items: string[], width: number, indent: number): stri
 	return lines;
 }
 
-/** Right-aligned token counts after the names, so sizes line up down the list. */
-function linesWithTokens(group: ResourceGroup, indent: number, width: number, theme: StartupTheme): string[] {
-	const counts = group.tokens!.map((tokens) => `~${formatTokens(tokens)}`);
-	const nameWidth = Math.max(...group.items.map((item) => visibleWidth(item)));
-	const countWidth = Math.max(...counts.map((count) => count.length));
-	return group.items.map((item, index) => {
-		const gap = " ".repeat(nameWidth - visibleWidth(item) + 2 + countWidth - counts[index]!.length);
-		return truncateToWidth(`${" ".repeat(indent)}${item}${gap}${theme.fg("dim", counts[index]!)}`, width);
-	});
+type RenderContext = {
+	section: ResourceSection;
+	width: number;
+	theme: StartupTheme;
+	/** Every token count in the section: the reference for outlier colors. */
+	allTokens: number[];
+	/** Lines layout: the column the token counts end at, so they line up across every group. */
+	countEnd: number;
+};
+
+function lineCount(tokens: number): string {
+	return `~${formatTokens(tokens)}`;
+}
+
+function renderGroupItems(group: ResourceGroup, indent: number, ctx: RenderContext): string[] {
+	const { section, width, theme } = ctx;
+	if (section.layout === "lines") {
+		return group.items.map((item, index) => {
+			const head = `${" ".repeat(indent)}${item}`;
+			if (!group.tokens) return truncateToWidth(head, width);
+			const count = lineCount(group.tokens[index]!);
+			const gap = " ".repeat(Math.max(2, ctx.countEnd - visibleWidth(head) - count.length));
+			return truncateToWidth(`${head}${gap}${theme.fg("dim", count)}`, width);
+		});
+	}
+	const colors = group.tokens ? skillTokenColors(group.tokens, ctx.allTokens) : [];
+	const items = group.tokens
+		? group.items.map((item, index) => `${item} ${theme.fg(colors[index]!, lineCount(group.tokens![index]!))}`)
+		: group.marks
+			? group.items.map((item, index) => {
+					const mark = group.marks![index];
+					return mark ? `${item} ${theme.fg(mark.color, mark.text)}` : item;
+				})
+			: group.items;
+	return layoutGrid(items, width, indent);
+}
+
+function renderGroup(group: ResourceGroup, indent: number, ctx: RenderContext): string[] {
+	const lines: string[] = [];
+	const nested = group.label !== undefined;
+	if (nested) {
+		lines.push(
+			`${" ".repeat(indent)}${ctx.theme.fg("accent", group.label!)} ${ctx.theme.fg("dim", String(groupCount(group)))}`,
+		);
+	}
+	const inner = nested ? indent + INDENT : indent;
+	lines.push(...renderGroupItems(group, inner, ctx));
+	for (const child of group.children ?? []) lines.push(...renderGroup(child, inner, ctx));
+	return lines;
+}
+
+/** Where the token counts of a lines section end: the widest name plus a two-space gap plus the widest count. */
+function countColumn(groups: ResourceGroup[], indent: number): number {
+	let names = 0;
+	let counts = 0;
+	const visit = (group: ResourceGroup, at: number) => {
+		const inner = group.label !== undefined ? at + INDENT : at;
+		group.items.forEach((item, index) => {
+			names = Math.max(names, inner + visibleWidth(item));
+			if (group.tokens) counts = Math.max(counts, lineCount(group.tokens[index]!).length);
+		});
+		for (const child of group.children ?? []) visit(child, inner);
+	};
+	for (const group of groups) visit(group, indent);
+	return names + 2 + counts;
 }
 
 export function renderSection(
@@ -277,33 +334,15 @@ export function renderSection(
 		: "";
 	const attention = section.attention ? ` ${theme.fg("warning", `· ${section.attention}`)}` : "";
 	const heading = `${theme.bold(theme.fg("mdHeading", section.title))} ${theme.fg("dim", String(section.count))}${cost}${attention}`;
+	const ctx: RenderContext = {
+		section,
+		width,
+		theme,
+		allTokens: allGroups(section.groups).flatMap((group) => group.tokens ?? []),
+		countEnd: countColumn(section.groups, INDENT),
+	};
 	const lines = [heading];
-	for (const group of section.groups) {
-		const nested = group.label !== undefined;
-		if (nested) {
-			lines.push(
-				`${" ".repeat(INDENT)}${theme.fg("accent", group.label!)} ${theme.fg("dim", String(group.items.length))}`,
-			);
-		}
-		const indent = nested ? INDENT * 2 : INDENT;
-		if (section.layout === "lines") {
-			if (group.tokens) lines.push(...linesWithTokens(group, indent, width, theme));
-			else for (const item of group.items) lines.push(truncateToWidth(`${" ".repeat(indent)}${item}`, width));
-		} else {
-			const colors = group.tokens ? skillTokenColors(group.tokens) : [];
-			const items = group.tokens
-				? group.items.map(
-						(item, index) => `${item} ${theme.fg(colors[index]!, `~${formatTokens(group.tokens![index]!)}`)}`,
-					)
-				: group.marks
-					? group.items.map((item, index) => {
-							const mark = group.marks![index];
-							return mark ? `${item} ${theme.fg(mark.color, mark.text)}` : item;
-						})
-					: group.items;
-			lines.push(...layoutGrid(items, width, indent));
-		}
-	}
+	for (const group of section.groups) lines.push(...renderGroup(group, INDENT, ctx));
 	for (const note of section.notes ?? []) {
 		lines.push(truncateToWidth(`${" ".repeat(INDENT)}${theme.fg(note.color, note.text)}`, width));
 	}
@@ -321,6 +360,25 @@ function entryOrigin(mode: any, sourceInfo: SourceInfoLike): Pick<ResourceEntry,
 		: { scope };
 }
 
+function isWithin(child: string, parent: string): boolean {
+	const relative = path.relative(parent, child);
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+/**
+ * The level of a context file: user for the agent directory (global AGENTS.md, SYSTEM.md, APPEND_SYSTEM.md),
+ * project for a file in the working directory, under it (`.pi/SYSTEM.md`) or in one of its ancestors (the
+ * AGENTS.md files pi picks up walking up from it), path for anything else (a file given on the command line).
+ */
+export function contextScope(file: string, agentDir: string, cwd?: string): Scope {
+	const absolute = path.resolve(cwd ?? "/", file);
+	if (isWithin(absolute, path.resolve(agentDir))) return "user";
+	if (cwd && (isWithin(absolute, path.resolve(cwd)) || isWithin(path.resolve(cwd), path.dirname(absolute)))) {
+		return "project";
+	}
+	return "path";
+}
+
 function localExtensionName(label: string): string {
 	return label.replace(/\.(ts|js|mjs)$/, "");
 }
@@ -333,6 +391,8 @@ export function collectSections(mode: any, options?: { extensions?: any[] }): Re
 
 	const appendSources = loader.getAppendSystemPromptSources() as any[];
 	const appendTexts = (loader.getAppendSystemPrompt?.() ?? []) as string[];
+	const cwd = mode.sessionManager?.getCwd?.() as string | undefined;
+	const agentDir = (loader.agentDir as string | undefined) ?? getAgentDir();
 	const contextFiles: Array<{ path: string; tokens: number }> = [
 		...(loader.getSystemPromptSource()
 			? [{ path: loader.getSystemPromptSource().path, tokens: estimateTokens(loader.getSystemPrompt?.() ?? "") }]
@@ -344,21 +404,27 @@ export function collectSections(mode: any, options?: { extensions?: any[] }): Re
 		})),
 	];
 	if (contextFiles.length > 0) {
-		// Largest first; equal sizes keep pi's order (stable sort).
-		const bySize = [...contextFiles].sort((a, b) => b.tokens - a.tokens);
-		const total = bySize.reduce((sum, file) => sum + file.tokens, 0);
+		const total = contextFiles.reduce((sum, file) => sum + file.tokens, 0);
+		const groups: ResourceGroup[] = [];
+		for (const scope of SCOPE_ORDER) {
+			// Largest first; equal sizes keep pi's order (stable sort).
+			const inScope = contextFiles
+				.filter((file) => contextScope(file.path, agentDir, cwd) === scope)
+				.sort((a, b) => b.tokens - a.tokens);
+			if (inScope.length === 0) continue;
+			groups.push({
+				label: scope,
+				items: inScope.map((file) => mode.formatContextPath(file.path)),
+				tokens: inScope.map((file) => file.tokens),
+			});
+		}
 		sections.Context = {
 			title: "Context",
 			count: contextFiles.length,
 			tokens: total,
 			contextWindow,
 			layout: "lines",
-			groups: [
-				{
-					items: bySize.map((file) => mode.formatContextPath(file.path)),
-					tokens: bySize.map((file) => file.tokens),
-				},
-			],
+			groups,
 		};
 	}
 

@@ -27,7 +27,7 @@ describe("startup resources", () => {
     expect(packageItemName("src")).toBe("src");
   });
 
-  test("groups locals by scope, multi-entry packages with counts and single packages together", () => {
+  test("groups by level first, then locals, multi-entry packages and single packages together", () => {
     const entries: ResourceEntry[] = [
       { name: "worktree", scope: "user" },
       { name: "eval", scope: "user" },
@@ -35,18 +35,57 @@ describe("startup resources", () => {
       { name: "pi-a", source: "me/repo", scope: "user" },
       { name: "src", source: "@x/solo", scope: "user" },
       { name: "src", source: "other", scope: "user" },
+      { name: "local", scope: "project" },
+      { name: "src", source: "proj-pkg", scope: "project" },
     ];
     expect(groupEntries(entries, "source")).toEqual([
-      { label: "user", items: ["eval", "worktree"] },
-      { label: "me/repo", items: ["a", "b"] },
-      { label: "packages", items: ["@x/solo", "other"] },
+      { label: "project", items: ["local"], children: [{ label: "packages", items: ["proj-pkg"] }] },
+      {
+        label: "user",
+        items: ["eval", "worktree"],
+        children: [
+          { label: "me/repo", items: ["a", "b"] },
+          { label: "packages", items: ["@x/solo", "other"] },
+        ],
+      },
     ]);
   });
 
-  test("a lone local group drops its sub-heading", () => {
+  test("a lone level keeps its label", () => {
     expect(groupEntries([{ name: "b", scope: "user" }, { name: "a", scope: "user" }], "name")).toEqual([
-      { items: ["a", "b"] },
+      { label: "user", items: ["a", "b"] },
     ]);
+  });
+
+  test("a level with only packages lists them under it", () => {
+    expect(
+      renderSection(
+        {
+          title: "Extensions",
+          count: 3,
+          layout: "grid",
+          groups: groupEntries(
+            [
+              { name: "pi-a", source: "me/repo", scope: "user" },
+              { name: "pi-b", source: "me/repo", scope: "user" },
+              { name: "x", scope: "project" },
+            ],
+            "source",
+          ),
+        },
+        80,
+        plainTheme,
+      ),
+    ).toEqual(["Extensions 3", "  project 1", "    x", "  user 2", "    me/repo 2", "      a   b"]);
+  });
+
+  test("context files are placed by level", async () => {
+    const { contextScope } = await import("../src/feature/shell/startup-resources.ts");
+    expect(contextScope("/h/.pi/agent/AGENTS.md", "/h/.pi/agent", "/work/repo")).toBe("user");
+    expect(contextScope("/work/repo/AGENTS.md", "/h/.pi/agent", "/work/repo")).toBe("project");
+    expect(contextScope("/work/AGENTS.md", "/h/.pi/agent", "/work/repo")).toBe("project");
+    expect(contextScope("/work/repo/.pi/SYSTEM.md", "/h/.pi/agent", "/work/repo")).toBe("project");
+    expect(contextScope("/elsewhere/prompt.md", "/h/.pi/agent", "/work/repo")).toBe("path");
   });
 
   test("grid runs down columns and stays within the width", () => {
@@ -64,12 +103,12 @@ describe("startup resources", () => {
         title: "Extensions",
         count: 3,
         layout: "grid",
-        groups: [{ label: "me/repo", items: ["a", "b"] }, { label: "packages", items: ["solo"] }],
+        groups: [{ label: "user", items: [], children: [{ label: "me/repo", items: ["a", "b"] }, { label: "packages", items: ["solo"] }] }],
       },
       80,
       plainTheme,
     );
-    expect(lines).toEqual(["Extensions 3", "  me/repo 2", "    a   b", "  packages 1", "    solo"]);
+    expect(lines).toEqual(["Extensions 3", "  user 3", "    me/repo 2", "      a   b", "    packages 1", "      solo"]);
   });
 
   test("collects sections from a mode built on pi's own path helpers", () => {
@@ -85,8 +124,10 @@ describe("startup resources", () => {
         resourceLoader: {
           getSystemPromptSource: () => undefined,
           getAppendSystemPromptSources: () => [],
+          agentDir: "/h/.pi/agent",
           getAgentsFiles: () => ({
             agentsFiles: [
+              { path: "/h/.pi/agent/AGENTS.md", content: "x".repeat(800) },
               { path: "/work/AGENTS.md", content: "x".repeat(400) },
               { path: "/work/BIG.md", content: "x".repeat(4000) },
             ],
@@ -103,14 +144,18 @@ describe("startup resources", () => {
       },
     }).map(([key, value]) => [key, { value }])));
     const sections = collectSections(mode);
+    expect(sections.Context!.groups.map((group) => group.label)).toEqual(["project", "user"]);
     expect(sections.Context!.groups[0]!.items).toEqual(["BIG.md", "AGENTS.md"]);
     expect(sections.Context!.groups[0]!.tokens).toEqual([1000, 100]);
-    expect(sections.Context!.tokens).toBe(1100);
-    expect(sections.Skills!.groups).toEqual([{ items: ["herdr"], tokens: [expect.any(Number)] }]);
+    expect(sections.Context!.groups[1]!.tokens).toEqual([200]);
+    expect(sections.Context!.tokens).toBe(1300);
+    expect(sections.Skills!.groups).toEqual([{ label: "user", items: ["herdr"], tokens: [expect.any(Number)] }]);
     expect(sections.Skills!.tokens).toBeGreaterThan(0);
     expect(sections.Extensions!.count).toBe(3);
-    expect(sections.Extensions!.groups.map((group) => group.label)).toEqual(["user", expect.stringContaining("repo")]);
-    expect(sections.Extensions!.groups[1]!.items).toEqual(["bg", "todo"]);
+    expect(sections.Extensions!.groups.map((group) => group.label)).toEqual(["user"]);
+    expect(sections.Extensions!.groups[0]!.items).toEqual(["worktree"]);
+    expect(sections.Extensions!.groups[0]!.children!.map((group) => group.label)).toEqual([expect.stringContaining("repo")]);
+    expect(sections.Extensions!.groups[0]!.children![0]!.items).toEqual(["bg", "todo"]);
   });
 
   test("MCP servers are listed by the level they are configured at", async () => {
@@ -247,12 +292,21 @@ describe("startup resources", () => {
         count: 2,
         tokens: 1500,
         layout: "lines",
-        groups: [{ items: ["~/big.md", "a.md"], tokens: [1400, 100] }],
+        groups: [
+          { label: "project", items: ["a.md"], tokens: [100] },
+          { label: "user", items: ["~/big.md"], tokens: [1400] },
+        ],
       },
       80,
       plainTheme,
     );
-    expect(lines).toEqual(["Context 2 · ~1.5k tok", "  ~/big.md  ~1.4k", "  a.md       ~100"]);
+    expect(lines).toEqual([
+      "Context 2 · ~1.5k tok",
+      "  project 1",
+      "    a.md       ~100",
+      "  user 1",
+      "    ~/big.md  ~1.4k",
+    ]);
   });
 
   test("skills all show counts, colored by weight, and keep alphabetical order", () => {
@@ -296,6 +350,6 @@ describe("startup resources", () => {
       ],
       "name",
     );
-    expect(groups).toEqual([{ items: ["b", "a"], tokens: [2, 1] }]);
+    expect(groups).toEqual([{ label: "user", items: ["b", "a"], tokens: [2, 1] }]);
   });
 });
