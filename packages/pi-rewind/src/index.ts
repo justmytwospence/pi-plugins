@@ -12,6 +12,8 @@
  * - On /tree or /fork to a checkpointed entry, offers to restore files.
  *   Only differing files are rewritten; files created since are deleted.
  *   Files that could not be deleted or written are reported by name.
+ * - A `rewind:keep-files` event on Pi's bus (sent by pi-plan-mode before it returns to the planning
+ *   conversation) skips the offer for the next /tree, within 10 seconds.
  * - /rewind-undo restores the state saved just before the last restore. The
  *   undo slot belongs to the session and repository it was made in; after a
  *   failed undo it is kept, so the undo can be retried.
@@ -305,6 +307,14 @@ export default function (pi: ExtensionAPI) {
 		else ctx.ui.notify(`Rewind: restored ${n} file${n === 1 ? "" : "s"} (/rewind-undo to revert)`, "info");
 	}
 
+	// Another plugin that moves the conversation on purpose while keeping the files (pi-plan-mode returning
+	// to the planner after an implementation) announces it, so the next /tree is not offered a restore that
+	// would undo that work. The announcement lapses after a few seconds if no /tree follows.
+	let skipTreeUntil = 0;
+	pi.events?.on("rewind:keep-files", () => {
+		skipTreeUntil = Date.now() + 10_000;
+	});
+
 	pi.on("session_start", () => {
 		pending = [];
 		lastUndo = undefined;
@@ -342,6 +352,10 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_before_tree", async (event, ctx) => {
+		if (skipTreeUntil > Date.now()) {
+			skipTreeUntil = 0;
+			return;
+		}
 		await offerRestore(ctx, lookup(ctx, event.preparation.targetId, true));
 	});
 

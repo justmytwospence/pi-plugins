@@ -106,7 +106,12 @@ test("a write that git refuses is reported, not swallowed", async () => {
 function harness(root: string, sessionId: string) {
 	const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
 	const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
+	const bus = new Map<string, Array<(data: unknown) => void>>();
 	const pi = {
+		events: {
+			on: (name: string, handler: (data: unknown) => void) => bus.set(name, [...(bus.get(name) ?? []), handler]),
+			emit: (name: string, data: unknown) => (bus.get(name) ?? []).forEach((h) => h(data)),
+		},
 		on: (name: string, handler: (event: unknown, ctx: unknown) => unknown) => {
 			handlers.set(name, [...(handlers.get(name) ?? []), handler]);
 			return () => undefined;
@@ -135,7 +140,7 @@ function harness(root: string, sessionId: string) {
 	const emit = async (name: string, event: unknown) => {
 		for (const h of handlers.get(name) ?? []) await h(event, ctx);
 	};
-	return { ctx, entries, notes, emit, undo: (c: unknown = ctx) => commands.get("rewind-undo")!.handler("", c) };
+	return { ctx, entries, notes, emit, bus: (name: string) => (bus.get(name) ?? []).forEach((h) => h({})), undo: (c: unknown = ctx) => commands.get("rewind-undo")!.handler("", c) };
 }
 
 test("/tree restores, /rewind-undo reverts and redoes, and the slot is scoped to the session and repository", async () => {
@@ -338,4 +343,20 @@ test("a pending pre-checkpoint retains the repository it was captured in", async
 	const post = data.checkpoints.find((cp) => cp.kind === "post")!;
 	assert.equal(fs.realpathSync(pre.root), fs.realpathSync(original.root));
 	assert.equal(fs.realpathSync(post.root), fs.realpathSync(current.root));
+});
+
+test("a rewind:keep-files announcement skips the restore offer for the next /tree only", async () => {
+	const { root, write } = repo();
+	const tree0 = (await snapshot(root)) as string;
+	const h = harness(root, "s1");
+	h.entries.push({ id: "u1", type: "message", message: { role: "user", content: "x" } });
+	h.entries.push({ id: "c1", type: "custom", customType: "rewind-checkpoint", data: { checkpoints: [{ entryId: "u1", kind: "pre", root, tree: tree0 }] } });
+	await h.emit("session_start", { type: "session_start" });
+	write("a.txt", "edited\n");
+	h.bus("rewind:keep-files");
+	await h.emit("session_before_tree", { preparation: { targetId: "u1" } });
+	assert.equal(h.notes.length, 0);
+	assert.equal(readFileSync(join(root, "a.txt"), "utf8"), "edited\n");
+	await h.emit("session_before_tree", { preparation: { targetId: "u1" } });
+	assert.match(h.notes.at(-1)!.message, /restored 1 file/);
 });

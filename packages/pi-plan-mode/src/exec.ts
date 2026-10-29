@@ -406,6 +406,13 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       if (!back) return;
       // Asked while still on the implementation branch, where the turn it recaps is.
       const headline = await recapHeadline(pi, 5_000);
+      // Keep the files: the implementation's changes are the point, and pi-rewind (when loaded) would
+      // otherwise offer to restore them to how they were at the plan.
+      try {
+        pi.events.emit("rewind:keep-files", {});
+      } catch {
+        // No event bus.
+      }
       try {
         // No model summary of the branch: the implementer's report is the summary, and it goes in as a
         // message the planner reads.

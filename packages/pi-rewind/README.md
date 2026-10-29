@@ -71,3 +71,7 @@ npm run check
 ## License
 
 MIT. See [LICENSE](./LICENSE).
+
+## Keeping files on purpose
+
+A plugin that moves the conversation while meaning to keep the files (pi-plan-mode returning to the planner after an implementation) sends `rewind:keep-files` on Pi's event bus first. The next `/tree` within 10 seconds is then not offered a restore. Nothing needs either plugin to be loaded.
