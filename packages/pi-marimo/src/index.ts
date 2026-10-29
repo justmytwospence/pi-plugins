@@ -35,7 +35,13 @@ import { MarimoWatcher, type Mode, type Waiting, parseMode } from "./core/watche
 import { HerdrHold } from "./herdr.js";
 import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION, stoppable } from "./activity.js";
 import { FULL_SCREEN } from "./frame.ts";
-import { interruptKernel, runCells } from "./ui/interrupt.js";
+import { interruptKernel, runCells, setUiValues } from "./ui/interrupt.js";
+import { runScratch } from "./ui/scratch.js";
+import { WidgetSender } from "./ui/widgets.js";
+import { markCell, unmarkSelection } from "./ui/lens-mark.js";
+import { askMessage } from "./ask.js";
+import { requestEditorFactory } from "./editor-contract.ts";
+import type { Cell } from "./core/notebook.js";
 import { PillView } from "./pill.ts";
 import { notebookKey } from "./ui/identity.js";
 import { NotebookSource, type Unopened } from "./ui/source.js";
@@ -249,6 +255,20 @@ export default function piMarimo(pi: ExtensionAPI): void {
 
   // The notebooks as background work (ui/source.ts): rows in pi-bg's /tasks view, a pill under the
   // prompt while one is busy, and a full-screen view of each (ui/view.ts).
+  // Widget changes from the view, a held key coalesced into one call.
+  const widgetSender = new WidgetSender(
+    (target, id, value) => setUiValues(target, [id], [value], process.env.MARIMO_TOKEN),
+    120,
+    (e) => ctxRef?.ui.notify(`marimo: could not set the widget: ${e instanceof Error ? e.message : String(e)}`, "warning"),
+  );
+  /** A cell's picture for a Lens mark: its PNG, else its chart drawn to one (at most 10 s). */
+  const chartPng = async (cell: Cell): Promise<string | undefined> => {
+    const out = cell.output;
+    if (out?.image) return out.image.data;
+    if (out?.vega) return renderPng(vega, out.vega);
+    if (out?.plotly) return renderPng(sharedPlotly(), out.plotly);
+    return undefined;
+  };
   const viewActions: ViewActions = {
     followed: () => watcher?.followed() ?? [],
     interrupt: (f) => interruptKernel(f.attachment, process.env.MARIMO_TOKEN),
@@ -257,9 +277,41 @@ export default function piMarimo(pi: ExtensionAPI): void {
     servers: (f) => bg.servers(f.attachment.path),
     stopServers: (f) => bg.stopServers(f.attachment.path),
     lastRun: (f) => source.lastRun(f),
+    agentBusy: () => ctxRef?.isIdle() === false,
+    ask: (f, cell, text) => {
+      // Asking about a notebook is working in it: it becomes this session's, and current.
+      if (watcher) {
+        const before = watcher.engaged().length;
+        watcher.touch([{ url: f.attachment.url, file: f.attachment.path }]);
+        if (watcher.engaged().length !== before) pi.appendEntry(ENTRY, { engaged: watcher.engaged() });
+      }
+      const idle = ctxRef?.isIdle() !== false;
+      pi.sendUserMessage(askMessage(text, f, cell, ctxRef?.cwd ?? ""), idle ? undefined : { deliverAs: "followUp" });
+    },
+    scratch: (f, code, onEvent, signal) => runScratch(f.attachment, code, process.env.MARIMO_TOKEN, onEvent, signal),
+    setWidget: (f, cell, w, value) => {
+      f.notebook.setUserValue(cell.id, w.objectId, w.label, value);
+      widgetSender.set(f.attachment, w.objectId, value);
+      schedule();
+    },
+    mark: async (f, cell, note) => {
+      const png = await chartPng(cell);
+      return markCell(f, cell, note, { ...(process.env.MARIMO_TOKEN ? { token: process.env.MARIMO_TOKEN } : {}), ...(png ? { png } : {}) });
+    },
+    unmark: (f, id) => unmarkSelection(f, id, process.env.MARIMO_TOKEN ? { token: process.env.MARIMO_TOKEN } : {}),
   };
   const openView = (key: string, ui: unknown): Promise<void> =>
-    (ui as ExtensionContext["ui"]).custom<void>((tui, theme, _keys, done) => new NotebookView(tui, theme, key, { ...viewActions, liveCharts: config.liveCharts }, () => done(undefined)), FULL_SCREEN);
+    (ui as ExtensionContext["ui"]).custom<void>((tui, theme, keys, done) => {
+      // Settings are read each time a view opens; the suite's editor (pi-vim) is asked for then too.
+      const suite = pi.events ? requestEditorFactory(pi.events) : undefined;
+      return new NotebookView(tui, theme, key, {
+        ...viewActions,
+        liveCharts: config.liveCharts,
+        outputs: config.view.outputs,
+        keybindings: keys,
+        ...(suite ? { editorFactory: suite.factory } : {}),
+      }, () => done(undefined));
+    }, FULL_SCREEN);
   const source: NotebookSource = new NotebookSource({
     followed: viewActions.followed,
     open: openView,
@@ -468,6 +520,7 @@ export default function piMarimo(pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", async () => {
+    widgetSender.dispose();
     inspectOff?.();
     inspectOff = undefined;
     disposeCharts();
@@ -515,6 +568,8 @@ export default function piMarimo(pi: ExtensionAPI): void {
     const text = entries.length ? withWaitHint(snapshot(entries, { refresh: "prompt" }), bg.runningIds(), pi) : "";
     // `context: false` in marimo.json: the view and footer only, nothing in the model's context.
     turn = config.context !== false && (text || note) ? { text: [text, note].filter(Boolean).join("\n") } : undefined;
+    // The state is taken: the agent's changes and the user's widget values before this prompt are no longer new.
+    for (const f of watcher.followed()) f.notebook.markPrompt();
   });
 
   // The notebook this session's agent works in (through marimo-pair) becomes current for this

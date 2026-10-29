@@ -353,3 +353,26 @@ test("marimo.json context: false keeps the notebooks out of the model's context"
     if (saved.xdg === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = saved.xdg;
   }
 });
+
+test("the agent's changes show in the view until the user's next prompt", async () => {
+  const x = setup();
+  await x.fire("session_start");
+  await until(() => server.feeds.length > 0);
+  server.feeds.at(-1)!(untilRunning);
+  await x.fire("tool_call", { input: { command: pair } });
+  const section = x.of("activity:section")[0]?.section;
+  await until(() => section.entries(Date.now()).length > 0);
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(Date.now() + 5_000);
+  const tx = { op: "notebook-document-transaction", data: { op: "notebook-document-transaction", transaction: { source: "code-mode", changes: [{ type: "set-code", cellId: "PKri", code: "z = y / 1" }] } } };
+  server.feeds.at(-1)!(`data: ${JSON.stringify(tx)}\n\n`);
+  vi.useRealTimers();
+  await section.open(section.entries(Date.now())[0].key, x.ui);
+  const view = x.customs.at(-1)?.view;
+  await until(() => /PKri .*changed by the agent/u.test(view.render(120).join("\n")));
+  expect(view.render(120).join("\n")).toContain("agent: 1 changed");
+  await x.fire("before_agent_start");
+  expect(view.render(120).join("\n")).not.toContain("changed by the agent");
+  view.dispose();
+  await x.fire("session_shutdown");
+});
