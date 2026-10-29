@@ -143,9 +143,12 @@ function stripSharedPrefix(items: string[], prefix: string): string[] {
 	return items.map((item) => item.slice(prefix.length));
 }
 
-/** Names sorted alphabetically, with their token estimates alongside when any entry has one. */
+/** Names sorted alphabetically, or by token cost (heaviest first, ties alphabetical) when any entry has one. */
 function sortedItems(entries: ResourceEntry[]): Pick<ResourceGroup, "items" | "tokens"> {
-	const sorted = [...entries].sort((a, b) => compareNames(a.name, b.name));
+	const measured = entries.some((entry) => entry.tokens !== undefined);
+	const sorted = [...entries].sort(
+		(a, b) => (measured ? (b.tokens ?? 0) - (a.tokens ?? 0) : 0) || compareNames(a.name, b.name),
+	);
 	const items = sorted.map((entry) => entry.name);
 	return sorted.some((entry) => entry.tokens !== undefined)
 		? { items, tokens: sorted.map((entry) => entry.tokens ?? 0) }

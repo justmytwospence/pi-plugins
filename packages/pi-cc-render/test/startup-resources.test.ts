@@ -168,7 +168,7 @@ describe("startup resources", () => {
     expect(windowShareColor(12000, 200_000)).toBe("error");
   });
 
-  test("groupEntries keeps token estimates aligned with the sorted names", () => {
+  test("groupEntries sorts measured entries by tokens, heaviest first, keeping estimates aligned", () => {
     const groups = groupEntries(
       [
         { name: "b", scope: "user", tokens: 2 },
@@ -176,6 +176,6 @@ describe("startup resources", () => {
       ],
       "name",
     );
-    expect(groups).toEqual([{ items: ["a", "b"], tokens: [1, 2] }]);
+    expect(groups).toEqual([{ items: ["b", "a"], tokens: [2, 1] }]);
   });
 });
