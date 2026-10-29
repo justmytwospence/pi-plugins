@@ -34,6 +34,9 @@ export interface WatcherOptions {
 
 type Target = NotebookSession & { real: string; shared: boolean };
 
+/** How long a server that named no single notebook is left alone before it is asked again. */
+const WAITING_RETRY_MS = 60_000;
+
 const consumerId = (): string => `pi-marimo-${Math.random().toString(36).slice(2, 10)}`;
 
 /** A followed notebook, as the hosts see it. */
@@ -160,6 +163,8 @@ export class MarimoWatcher {
   private readonly engagedPaths = new Set<string>();
   // Canonical paths of the notebooks this session opened itself (/marimo edit, /marimo new): followed in any mode but off.
   private readonly includedPaths = new Set<string>();
+  // What each idle server said it serves, so it is asked once, not every poll.
+  private readonly waitingProbes = new Map<string, { at: number; found?: WaitingNotebook }>();
   // Directories below the cwd, by whether they hold a Git repository of their own.
   private readonly repoDirs = new Map<string, boolean>();
 
@@ -374,7 +379,18 @@ export class MarimoWatcher {
   /** The idle servers' notebooks that this mode shows (see waiting). */
   private async scanWaiting(idle: string[]): Promise<Waiting[]> {
     const mode = this.mode;
-    const found = (await Promise.all(idle.map((url) => waitingNotebook(this.options.io, url, this.options.token).catch(() => undefined)))).filter((w): w is WaitingNotebook => w !== undefined);
+    // Asking a server which notebook it serves costs a page load and a POST, and the answer does not
+    // change while it runs: ask once (again after a while when it named none), not on every poll.
+    const now = Date.now();
+    const idleSet = new Set(idle);
+    for (const url of this.waitingProbes.keys()) if (!idleSet.has(url)) this.waitingProbes.delete(url);
+    const found = (await Promise.all(idle.map(async (url) => {
+      const known = this.waitingProbes.get(url);
+      if (known && (known.found || now - known.at < WAITING_RETRY_MS)) return known.found;
+      const w = await waitingNotebook(this.options.io, url, this.options.token).catch(() => undefined);
+      this.waitingProbes.set(url, { at: now, ...(w ? { found: w } : {}) });
+      return w;
+    }))).filter((w): w is WaitingNotebook => w !== undefined);
     const withReal: Waiting[] = [];
     for (const w of found) withReal.push({ ...w, canonicalPath: await this.real(w.path) });
     let shown: Waiting[];

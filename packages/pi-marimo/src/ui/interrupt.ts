@@ -4,14 +4,15 @@
 // page marimo serves, `data-token="..."`) besides the access token of a protected server.
 import { authHeaders } from "../core/registry.js";
 
-type Fetch = (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) => Promise<{ ok: boolean; status: number; text(): Promise<string> }>;
+type Fetch = (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal }) => Promise<{ ok: boolean; status: number; text(): Promise<string> }>;
 
 const serverTokens = new Map<string, string>();
 
 async function serverToken(url: string, auth: Record<string, string>, fetchImpl: Fetch, fresh: boolean): Promise<string> {
   const known = serverTokens.get(url);
   if (known !== undefined && !fresh) return known;
-  const page = await fetchImpl(`${url}/`, { headers: auth });
+  // Never left waiting on a server that does not answer.
+  const page = await fetchImpl(`${url}/`, { headers: auth, signal: AbortSignal.timeout(5_000) });
   const found = /data-token="([^"]*)"/u.exec(await page.text())?.[1] ?? "";
   serverTokens.set(url, found);
   return found;
@@ -28,6 +29,7 @@ export async function kernelPost(target: { url: string; sessionId: string }, end
   const post = async (fresh: boolean) =>
     fetchImpl(`${target.url}/api/kernel/${endpoint}`, {
       method: "POST",
+      signal: AbortSignal.timeout(15_000),
       headers: await kernelHeaders(target, token, fetchImpl, fresh),
       body: JSON.stringify(body),
     });

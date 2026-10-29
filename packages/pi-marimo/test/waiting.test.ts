@@ -108,6 +108,16 @@ describe("the watcher's waiting servers", () => {
     expect(w.followed().map((f) => f.attachment.path)).toEqual(["/w/e.py"]);
   });
 
+  test("an idle server is asked which notebook it serves once, not on every poll", async () => {
+    hosted.servers = [{ port: 2718, files: [file("/w/a.py")] }, { port: 2719, files: [file("/w/x.py"), file("/w/y.py")] }];
+    const w = await watch({ kind: "auto" });
+    await until(() => w.waiting().length === 1);
+    await new Promise((r) => setTimeout(r, 300));
+    // Several polls later: one question each (the one naming no single notebook waits a minute to be asked again).
+    expect(hosted.posts.filter((u) => u.includes(":2718/")).length).toBe(1);
+    expect(hosted.posts.filter((u) => u.includes(":2719/")).length).toBe(1);
+  });
+
   test("pinned: only the pinned notebook; off: none; a notebook opened in a browser stops waiting", async () => {
     hosted.servers = [{ port: 2718, files: [file("/w/a.py")] }, { port: 2719, files: [file("/w/b.py")] }];
     const w = await watch({ kind: "pinned", paths: ["/w/b.py"] });
