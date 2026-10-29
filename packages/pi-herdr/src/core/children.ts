@@ -277,6 +277,33 @@ export class Children {
     return rec;
   }
 
+  /**
+   * Record an agent already running in another pane (a worktree's session, for a crew's
+   * coordinator) as a child: saved at once, with no task sent. `send` then prompts it and its reply
+   * comes back like a spawned child's; `close` closes its pane. Attaching a pane that is already
+   * this session's child returns that record.
+   */
+  attach(opts: { name: string; paneId: string; cwd: string; branch?: string; workspaceId?: string; session?: string; task?: string }): ChildRecord {
+    const same = [...this.records.values()].find((r) => !r.closed && !r.peer && r.paneId === opts.paneId);
+    if (same) return same;
+    const existing = this.records.get(opts.name);
+    if (existing && !existing.closed && (existing.awaiting || existing.queued?.length)) throw new Error(`"${opts.name}" is already tracked in another pane (${existing.paneId}) and still awaited.`);
+    const rec: ChildRecord = {
+      name: opts.name,
+      paneId: opts.paneId,
+      where: "worktree",
+      cwd: opts.cwd,
+      ...(opts.branch ? { branch: opts.branch } : {}),
+      ...(opts.workspaceId ? { workspaceId: opts.workspaceId } : {}),
+      ...(opts.session ? { session: opts.session } : {}),
+      task: opts.task ?? `the session already working in ${opts.branch ? `branch ${opts.branch}` : opts.cwd} (attached)`,
+      createdAt: Date.now(),
+      awaiting: false,
+    };
+    this.save(rec);
+    return rec;
+  }
+
   /** Forget an adopted peer whose first prompt failed. */
   discard(rec: ChildRecord): void {
     if (rec.peer && !rec.awaiting && !rec.queued?.length && !rec.pendingReply && this.records.get(rec.name) === rec) this.records.delete(rec.name);

@@ -68,6 +68,26 @@ describe("names", () => {
 });
 
 describe("children", () => {
+  it("attaches a running agent as a child without prompting it, then hears back from what it is sent", async () => {
+    const w = world();
+    const rec = w.children.attach({ name: "feature-x", paneId: "w9:p1", cwd: "/repo/.worktrees/feature-x", branch: "feature/x", workspaceId: "w9", session: "/sessions/child.jsonl" });
+    expect(rec).toMatchObject({ name: "feature-x", where: "worktree", branch: "feature/x", awaiting: false });
+    expect(rec.task).toContain("branch feature/x");
+    expect(w.f.of("agent.prompt")).toHaveLength(0);
+    expect(w.persisted.at(-1)).toMatchObject({ name: "feature-x", paneId: "w9:p1" });
+    // The same pane again is the same child, whatever name is asked for.
+    expect(w.children.attach({ name: "other", paneId: "w9:p1", cwd: "/repo/.worktrees/feature-x" })).toBe(rec);
+
+    await w.children.send("feature-x", "rebase onto develop");
+    w.state.agent.agent_status = "working";
+    await w.children.tick();
+    w.state.agent.agent_status = "idle";
+    w.state.agent.completion_seq = 9;
+    await w.children.tick();
+    expect(w.delivered).toHaveLength(1);
+    expect(w.delivered[0]!.reply).toBe("All done: 3 files changed.");
+  });
+
   it("spawns in a tab, prompts with the preamble, and delivers the reply after the turn", async () => {
     const w = world();
     const rec = await w.children.spawn({ task: "Review the auth module", cwd: "/repo", model: "anthropic/claude-opus-5-5", thinking: "high" });

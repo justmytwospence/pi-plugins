@@ -8,7 +8,7 @@ plugin: pi-herdr
 
 - **Use it for:** Add pane metadata, message any agent in Herdr without touching its draft, and start deliberate human-accessible child sessions.
 - **Enable:** Select `packages/pi-herdr/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
-- **Controls:** the `herdr` tool: list/send/read/wait for any agent (optionally on a saved Herdr `machine`), `await_reply` and `bg_wait herdr:<name>` to hear back, broadcast with `names`/`cwd_prefix`; spawn/interrupt/close for children. No global shortcut; child activities offer read-only inspection.
+- **Controls:** the `herdr` tool: list/send/read/wait for any agent (optionally on a saved Herdr `machine`), `await_reply` and `bg_wait herdr:<name>` to hear back, broadcast with `names`/`cwd_prefix`; spawn/interrupt/close for children; `crew` to coordinate a repository's worktree sessions (directives, crew updates, sync). No global shortcut; child activities offer read-only inspection.
 - **Settings:** No plugin JSON settings. Child location: tab; focus: false; model/effort inherit the parent. `PI_HERDR_PR=0` disables PR polling; `PI_HERDR_SUMMARY=0` disables the summary model call, `PI_HERDR_SUMMARY_MODEL` picks its model; `PI_HERDR_DRAFT_GUARD=0` turns off the draft guard; `PI_HERDR_INBOX_RATE` sets the loop guard (default `6/600`, `0` off).
 - **Requirements, cost & privacy:** Interactive Herdr socket/pane, Pi/provider access for children; Git for worktrees, `gh` for PRs. Herdr socket operations create/open checkouts; no external worktree CLI. The `$summary` line is one small Haiku request per settled turn; children are paid sessions.
 - **Integrations & limits:** Optional event-bus bridge, `/tasks`/FleetView child entries (awaited agents as `peer` rows, never stoppable), and pi-bg `bg:external` for awaited replies. An activity stop interrupts an awaited turn, never closes the pane. Herdr itself owns pane state.
@@ -69,6 +69,7 @@ One tool reaches every agent in Herdr, on this machine or, with `machine`, on a 
 | `spawn` | Required `task`; optional `name`, `where`, `branch`, `model`, `thinking`, `focus`. |
 | `interrupt` | A child's `name`; sends Escape to end its current turn. |
 | `close` | A child's `name`; closes the pane, retaining the session file. |
+| `crew` | `op`: `status` (default), `claim` or `sync`; optional `takeover`. The repository's worktree sessions, coordinated from this session; see [Crews](#crews). |
 
 The tool was called `herdr_child` before it reached agents other than children.
 
@@ -121,6 +122,21 @@ Model and thinking default to the parent's choices, and focus defaults to false.
 Each reply to a parent-sent task or `send` message arrives as a `herdr-child` message, read from the child's session file and triggering a parent turn. Do not poll the screen to discover completion. Messages the user types directly into the child's pane do not produce automatic parent replies.
 
 Pending replies hold `herdr:background`. Child records are saved in the parent session, allowing listing, sending, and pending-reply tracking after restart or resume. This is coordination state, not a guarantee that an externally closed pane can be recovered automatically.
+
+## Crews
+
+A crew is one repository's worktree sessions, coordinated from one Pi session, usually in the main checkout's Herdr space, with a Pi in each worktree's child space. Its state lives in `<git-common-dir>/pi-crew/`, shared by every worktree and never committed: `coordinator.json` names the coordinating session, and `directives.md` holds standing rules in plain Markdown. Everything else comes from Herdr's snapshot: each space's checkout and PR token, and each agent's state, completion count, and last-turn summary.
+
+- **Directives everywhere.** Every Pi with pi-herdr in the repository gets a `crew` system prompt section on every run, so the rules survive compaction and restarts. Members also learn who coordinates them and when to message it: a decision outside their branch, a finding that changes other branches' work, or a blocking branch. They are told not to report routine progress.
+- **Crew updates.** Each prompt you send the coordinator carries one compact block listing the worktrees whose state, last turn, or PR changed since its last turn. That includes turns you ran in a worktree yourself. It has at most 12 lines, is added only when something changed, and never starts a turn.
+- **Sync.** `crew` with `op: "sync"` claims the role, makes the Pi already running in each worktree a child, and opens a space for each worktree without an agent, where it runs `pi --continue` to resume that worktree's latest session. It is idempotent. `op: "status"` shows the whole board and the directives. A claim never takes the role from another live coordinator without `takeover`.
+
+Example update (illustrative):
+
+```text
+[Crew since your last turn, from pi-herdr, not the user: worktree sessions whose state, last turn or PR changed]
+- feature/1396-contract-windows (contract-windows w9D:p1, idle, #1442 ✓ approved): Rebased onto develop, checks green
+```
 
 ## Shared activity views
 

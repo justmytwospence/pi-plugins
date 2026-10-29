@@ -1,6 +1,6 @@
 # pi-herdr
 
-Pi's own [Herdr](https://herdr.dev) integration, beside the one Herdr installs (`herdr integration install pi`, which reports the pane's working/blocked/idle state and the session for resume). It shows pending background work, the session's title and model, and the branch's pull request in Herdr's sidebar; gives the agent one `herdr` tool to message, read and wait on any agent in Herdr (here or on a saved Herdr machine) and to start interactive Pi children in Herdr tabs, splits or worktree spaces; delivers messages from other Pi sessions without touching the editor's draft; and runs an event-bus bridge that other extensions use instead of talking to Herdr themselves.
+Pi's own [Herdr](https://herdr.dev) integration, beside the one Herdr installs (`herdr integration install pi`, which reports the pane's working/blocked/idle state and the session for resume). It shows pending background work, the session's title and model, and the branch's pull request in Herdr's sidebar; gives the agent one `herdr` tool to message, read and wait on any agent in Herdr (here or on a saved Herdr machine) and to start interactive Pi children in Herdr tabs, splits or worktree spaces; coordinates a repository's worktree sessions as a crew (shared directives, a coordinator that sees each one's progress); delivers messages from other Pi sessions without touching the editor's draft; and runs an event-bus bridge that other extensions use instead of talking to Herdr themselves.
 
 It acts only in an interactive (TUI) Pi inside Herdr. Outside Herdr nothing is registered. RPC and print sessions inside Herdr (subagents inherit their parent's `HERDR_PANE_ID`) report nothing and drop the tool.
 
@@ -68,6 +68,7 @@ One tool for every agent in Herdr: this machine's, or a saved Herdr machine's wi
 | `spawn` | `task`; optional `name` (lowercase, dashes; otherwise derived from the task and made unique), `where` (`tab` default, `split` beside this pane, or `worktree` with `branch`), `model` and `thinking` (default: this session's), `focus` (default false) |
 | `interrupt` | `name` of a child: sends Escape, ending its current turn; that turn still reports back when it settles |
 | `close` | `name` of a child: close its pane |
+| `crew` | `op`: `status` (default), `claim` or `sync`, optional `takeover`: this repository's worktree sessions, coordinated from this session (see [Crews](#crews)) |
 
 Older sessions' `herdr_child` calls are the same actions on children; the tool was renamed `herdr` when it learned to reach every agent.
 
@@ -135,6 +136,41 @@ Once an interactive session is appropriate:
 
 Tabs and splits share files and are not isolated parallel editors. A separate feature or PR may benefit from a worktree, but ask first unless the user requested a worktree or branch isolation. Never create a new space or checkout merely because work is delegated, long or parallel. Keep the user's focus unchanged unless asked to switch.
 
+## Crews
+
+A crew is one repository's worktree sessions, coordinated from one Pi session, usually in the main checkout: the pattern where you run a coordinator in the repository's main Herdr space and a Pi in each worktree's child space. Without it they only stay in step through messages you prompt by hand; with it, standing rules reach every session on their own, the coordinator sees what each one did without asking, and a restarted coordinator gets its crew back with one call.
+
+A crew's state lives in `<git-common-dir>/pi-crew/` (for a normal checkout, `.git/pi-crew/`), which every worktree of the repository shares and Git never commits:
+
+- `coordinator.json`: the pane, session and Herdr name of the coordinating session, written by a claim.
+- `directives.md`: standing rules for every session in the repository, plain Markdown that you or the coordinator edit (it has no tool of its own: the coordinator uses `edit` or `write`).
+
+Everything else comes from Herdr's `session.snapshot`: each space's checkout and `$pr` token, each agent's state, completion count and `$summary` line. Members run nothing extra.
+
+**The `crew` prompt section.** Every Pi with pi-herdr whose checkout belongs to a repository with a `pi-crew/` directory gets a `crew` section in its system prompt on every run, so it survives compaction and restarts, and Pi records a changed section in the transcript:
+
+- the directives, when the file has any;
+- in a member (any other session in the repository, while the coordinator's pane still runs Pi there): who coordinates it and when to message it: only for a decision outside its branch, a finding that changes other branches' work, or another branch blocking it; never for routine progress, which the coordinator sees on its own;
+- in the coordinator: its role, that crew updates are status rather than requests, and that rules for every session go into the directives file instead of messages.
+
+**The coordinator's crew update.** Each prompt you send the coordinator (not runs started by a child's reply or a message) compares the crew with what the coordinator last saw: each linked worktree's agent state, completion count, `$summary` and PR, worktrees without a space or agent, worktrees that went away. If anything changed, one `herdr-crew` message goes in with that prompt, one line per worktree (at most 12, each at most 160 characters), for example:
+
+```text
+[Crew since your last turn, from pi-herdr, not the user: worktree sessions whose state, last turn or PR changed]
+- feature/1396-contract-windows (contract-windows w9D:p1, idle, #1442 ✓ approved): Rebased onto develop, checks green
+- feature/1429-coverage: no space and no agent; herdr action=crew op=sync starts its pi
+```
+
+Nothing is added when nothing changed, and it never starts a turn. The first update after a claim lists every worktree. What the coordinator has seen is a `pi-herdr:crew-seen` session entry, so `/resume` does not repeat it. Turns you run by hand in a worktree show up here through their `$summary` line, though their replies are still not sent back.
+
+**`crew` actions.**
+
+- `status`: every worktree (from `git worktree list`) with its space, agents (marked `[this session]` or `[child]`), PR and last-turn summary, then the directives.
+- `claim`: makes this session the coordinator. Another session whose pane still runs Pi in the repository keeps the role unless `takeover` is set, which the agent sets only when you said so. A coordinator without a Herdr name is named `<repo>-coord`, so members can message it by name.
+- `sync`: claims, then for each linked worktree: a Pi already there becomes this session's child (named after its branch if it had no name); a worktree with no agent gets its space opened (without focus, or a tab in its open space) and `pi --continue` started there, which resumes its latest session (a fresh one if it has none), with no task sent, and becomes a child too. Worktrees running another agent are left alone. Running it again changes nothing that is already in place.
+
+A coordinator restarted in the same pane keeps the role; one resumed in another pane takes it back on its first run (its file names its session). Members do not see a moved coordinator until then.
+
 ## The event-bus bridge
 
 Other extensions emit these on `pi.events` and pi-herdr does the Herdr work, so they need no Herdr code. Without pi-herdr, or outside an interactive Pi in Herdr, nothing listens and the events do nothing.
@@ -199,6 +235,7 @@ Plan-mode planners, Herdr children and awaited agents are not pi-bg tasks; they 
 - The sender's identity in a message is what the sender says it is: anything that can type into the pane can claim to be another agent, just as it could type a prompt.
 - The draft guard tells an injected prompt from your own paste by timing alone: a paste into a draft untouched for 3 seconds, then Enter within 0.7 seconds, is taken as injected.
 - A child's reply is read from its session file; if Herdr does not report the session, the parent is told to use `read`.
+- A crew is this machine's sessions only, and Herdr does not keep tokens across a server restart, so a crew update may show `no turn summary yet` for a worktree until its next turn. Directives are trusted like `AGENTS.md`: anything that can write the repository's `.git` directory can change them.
 - `src/core` (and `test/core`) is shared verbatim with opencode-herdr: the Herdr socket client, metadata reporters, children, PR status and text helpers. A host supplies a `ChildAgent` (which agent Herdr starts, its arguments, how its reply is read) and optionally a `transport` (pi-herdr's inbox; opencode-herdr has none and types with `agent.prompt`); `src/session.ts` is Pi's.
 
 ## Development

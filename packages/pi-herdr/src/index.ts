@@ -44,6 +44,7 @@ import { ActivityBadges } from "./activity-badges.ts";
 import { Agents, type AgentInfo, MAX_BROADCAST, outcomeText, TYPING_TOKEN } from "./agents.ts";
 import { Bridge, type NotifyEvent, type SplitEvent, type TokenEvent } from "./bridge.ts";
 import { ChildrenActivity } from "./children-activity.ts";
+import { Crew, CREW_MESSAGE, type Me, SECTION as CREW_SECTION, SEEN_ENTRY, type Seen, syncCrew } from "./crew.ts";
 import { type ChildRecord, Children, type Exec, type Where } from "./core/children.ts";
 import { DraftGuard } from "./draft-guard.ts";
 import { ACK_TTL_MS, ackTokenName, type Delivery, formatAck, Inbox, INBOX_SOURCE, INBOX_TOKEN, INBOX_TTL_MS, inboxTokenValue, messageText, type Outcome, parseRate, Presence, processInboxState, type Reason, type Sender, TYPING_IDLE_MS } from "./inbox.ts";
@@ -76,9 +77,15 @@ const exec: Exec = (cmd, args, cwd) =>
 
 const Params = Type.Object({
   action: Type.Union(
-    [Type.Literal("list"), Type.Literal("send"), Type.Literal("read"), Type.Literal("wait"), Type.Literal("spawn"), Type.Literal("interrupt"), Type.Literal("close")],
-    { description: "list agents; send a message to any agent; read its last reply or screen; wait for its turn to end, then read it (not for children); spawn a child; interrupt a child's turn (Escape); close a child's pane" },
+    [Type.Literal("list"), Type.Literal("send"), Type.Literal("read"), Type.Literal("wait"), Type.Literal("spawn"), Type.Literal("interrupt"), Type.Literal("close"), Type.Literal("crew")],
+    { description: "list agents; send a message to any agent; read its last reply or screen; wait for its turn to end, then read it (not for children); spawn a child; interrupt a child's turn (Escape); close a child's pane; crew: this repository's worktree sessions, coordinated from this session (op)" },
   ),
+  op: Type.Optional(
+    Type.Union([Type.Literal("status"), Type.Literal("claim"), Type.Literal("sync")], {
+      description: "crew: status (default) shows every worktree's session, state, PR and last turn, and the directives; claim makes this session the repository's coordinator; sync claims, then opens each worktree's space, resumes its pi there if none runs, and makes each one your child",
+    }),
+  ),
+  takeover: Type.Optional(Type.Boolean({ description: "crew claim/sync: take the coordinator role from another live session; only when the user said so" })),
   task: Type.Optional(Type.String({ description: "spawn: the complete, self-contained task" })),
   name: Type.Optional(Type.String({ description: "spawn: a short name for the child (lowercase, dashes); otherwise from the task. send/read/wait: the agent's herdr name or pane id (a child's name works too; not needed when broadcasting). interrupt/close: which child" })),
   machine: Type.Optional(Type.String({ description: "list/send/read/wait: a saved herdr machine (its label, as in `herdr --machine`) instead of this one" })),
@@ -332,6 +339,16 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     return { pane: target.paneId, ...(name ? { name } : title ? { title } : {}), host: hostname().split(".")[0], cwd };
   };
   const agents = new Agents({ call, exec: run, selfPane: target.paneId, cwd: () => cwd, self });
+  const crew = new Crew({ call, exec: run, selfPane: target.paneId });
+  /** Whether this session's first run has checked that a coordinator it was keeps the role. */
+  let crewReclaimed = false;
+  /** This session as a crew sees it; `named` also asks herdr for this pane's agent name. */
+  const crewMe = async (ctx: ExtensionContext, named = false): Promise<Me> => {
+    let session: string | undefined;
+    try { session = ctx.sessionManager.getSessionFile(); } catch { /* stale runtime */ }
+    const name = named ? (await call<{ agent?: AgentInfo }>("agent.get", { target: target.paneId })).result?.agent?.name : undefined;
+    return { paneId: target.paneId, ...(session ? { session } : {}), ...(name ? { name } : {}), cwd: ctx.cwd };
+  };
 
   const draftText = () => {
     try { return lastCtx?.ui.getEditorText() ?? ""; } catch { return ""; }
@@ -513,7 +530,9 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     // Receipts belong to this history, not abandoned sibling branches.
     delivered.clear();
     const saved = new Map<string, ChildRecord>();
+    crew.seen = undefined;
     for (const e of ctx.sessionManager.getBranch() as any[]) {
+      if (e.type === "custom" && e.customType === SEEN_ENTRY && e.data && typeof e.data === "object") crew.seen = e.data as Seen;
       if (e.type === "custom" && e.customType === CHILD_ENTRY && e.data?.name) saved.set(e.data.name, e.data as ChildRecord);
       if (e.type === "custom" && e.customType === DELIVERY_ENTRY) restoreReceipt(e.data?.key);
       // The message itself is also a durable receipt if shutdown happened before its marker.
@@ -591,6 +610,7 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     }
 
     restoreBranch(ctx);
+    crewReclaimed = false;
 
     refreshTimer = setInterval(() => {
       void pane.refresh();
@@ -640,10 +660,36 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     updateIdentity();
   });
   pi.on("session_info_changed", () => updateIdentity());
-  pi.on("before_agent_start", (event, ctx) => {
+  pi.on("before_agent_start", async (event, ctx) => {
     lastCtx = ctx;
     if (!promptTitle && "prompt" in event) promptTitle = titleFromPrompt(event.prompt);
     updateIdentity(ctx);
+    if (!active || ctx.mode !== "tui") return undefined;
+    // Crews (crew.ts): the directives and the coordinator link in every pi of the repository, and
+    // the coordinator's update on each prompt the user sends it.
+    const epoch = generation;
+    const me = await crewMe(ctx);
+    if (!crewReclaimed) {
+      // A coordinator restarted in its pane, or resumed in another, keeps its crew.
+      crewReclaimed = true;
+      await crew.reclaim(me, async () => (await crewMe(ctx, true)).name).catch(() => false);
+    }
+    try {
+      const section = await crew.section(me);
+      if (section && epoch === generation) event.systemPromptOptions.sections[CREW_SECTION] = section;
+    } catch { /* no crew this run */ }
+    if (event.messageType !== "user") return undefined;
+    let digest: Awaited<ReturnType<Crew["digest"]>>;
+    try {
+      digest = await crew.digest(me);
+    } catch {
+      return undefined;
+    }
+    if (!digest || epoch !== generation || !branchCurrent()) return undefined;
+    const seen = digest.seen;
+    crew.seen = seen;
+    safely(() => { pi.appendEntry(SEEN_ENTRY, seen); anchorBranch(); });
+    return { message: { customType: CREW_MESSAGE, content: digest.text, display: true } };
   });
   // A turn's summary replaces the last one; it is cleared as a run starts so an alert never shows
   // a stale one, and set before settling, so it is there when herdr's integration reports done.
@@ -688,7 +734,7 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     name: TOOL,
     label: "Herdr",
     description:
-      "Herdr: talk to any agent in herdr (on this machine, or on a saved herdr machine with `machine`) and start persistent, human-led pi sessions (children) for an explicit interactive-session request or a clear handoff to the user. Children are not for delegated work whose purpose is to report back to this session: use a headless subagent instead, even for long or multi-step tasks. action=list shows the agents. send (name, message; delivery when the agent is working) messages any agent; a pi with pi-herdr gets it through its inbox, which never touches the draft in its editor, and the result says whether it started a turn, was steered, queued, held (a dialog is open, or its user is typing) or deferred (it has had many messages from you without its user answering). With await_reply, any agent's answer to that message arrives as a message when its turn ends, like a child's; `bg_wait herdr:<name>` waits for it, alone or with others. send with `names` or `cwd_prefix` instead of `name` broadcasts to several agents at once, with one result line each. read (name) returns its last reply or its screen; wait (name) blocks until its turn ends, then reads it (prefer await_reply). spawn takes `task` (plus optional name, where, branch, model, thinking, focus): a tab shares this checkout in the existing space; a split is for side-by-side interaction; a worktree gets its own space and requires a user-requested independent branch/checkout. A child's replies arrive as messages, so do not poll or wait on it. interrupt and close act on children only.",
+      "Herdr: talk to any agent in herdr (on this machine, or on a saved herdr machine with `machine`) and start persistent, human-led pi sessions (children) for an explicit interactive-session request or a clear handoff to the user. Children are not for delegated work whose purpose is to report back to this session: use a headless subagent instead, even for long or multi-step tasks. action=list shows the agents. send (name, message; delivery when the agent is working) messages any agent; a pi with pi-herdr gets it through its inbox, which never touches the draft in its editor, and the result says whether it started a turn, was steered, queued, held (a dialog is open, or its user is typing) or deferred (it has had many messages from you without its user answering). With await_reply, any agent's answer to that message arrives as a message when its turn ends, like a child's; `bg_wait herdr:<name>` waits for it, alone or with others. send with `names` or `cwd_prefix` instead of `name` broadcasts to several agents at once, with one result line each. read (name) returns its last reply or its screen; wait (name) blocks until its turn ends, then reads it (prefer await_reply). spawn takes `task` (plus optional name, where, branch, model, thinking, focus): a tab shares this checkout in the existing space; a split is for side-by-side interaction; a worktree gets its own space and requires a user-requested independent branch/checkout. A child's replies arrive as messages, so do not poll or wait on it. interrupt and close act on children only. crew (op status|claim|sync) coordinates this repository's worktree sessions from this session: status shows each one's state, PR and last turn; sync opens every worktree's space, resumes its pi and makes it your child; standing rules for all of them go in the directives file it names.",
     promptSnippet: "Message, read and wait on any herdr agent; start persistent human-led pi sessions in herdr for interactive requests or user handoffs, not report-back subagents",
     promptGuidelines: [
       "Start a herdr child (herdr action=spawn) only for an explicit interactive-session request or a clear persistent, human-led handoff that the user will continue independently. Duration, complexity, the user possibly wanting to watch, and a child's ability to report back are not reasons to use one instead of a headless subagent.",
@@ -699,6 +745,7 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
       "Message another agent (a child or any other, here or on a saved herdr machine) with herdr action=send, not `herdr agent prompt` in bash: a pi with pi-herdr gets it through its inbox without touching the user's draft there, and the result says whether it started a turn, was steered in, was queued, is held behind a dialog or its user's typing, or was deferred. If the target is working, choose delivery: steer for a correction to the work it is doing now; queue for new or separate work that should not derail its current turn.",
       "To hear an agent's answer, send with await_reply and end your turn: the answer arrives as a message, like a child's. To wait on one or several while you work, `bg_wait herdr:<name>` (a remote agent is `herdr:<machine>/<name>`). Use action=wait only without pi-bg, and action=read for a look at its screen. A reply from another machine or a non-pi agent is a screen read and can be cut short; when you need a long answer from one, ask it to write the answer to a file and send you the path.",
       "Do not start a back-and-forth with another agent: a message you were sent says whether your reply goes back on its own, and when it does not, answer only if it asked you to. An agent that has had many messages from you without its user answering gets the next ones deferred (the result says so): stop and tell the user instead of resending. When the result says a message is held because the user is typing or a dialog is open, do not resend it; it is delivered on its own.",
+      "Use herdr action=crew only when the user wants this session to coordinate the repository's worktree sessions, or it already does: op=sync sets up or restores every worktree's space and session, op=status shows them all.",
       `Broadcast sparingly: send with \`names\` or \`cwd_prefix\` reaches up to ${MAX_BROADCAST} agents with the same message, only for something every one of them needs; a working agent in the set needs \`delivery\`, or nothing is sent.`,
     ],
     parameters: Params,
@@ -815,6 +862,19 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
           const all = await agents.list({ machine, marks });
           const own = [...children.records.values()].filter((r) => !machine || r.machine === machine);
           return text(own.length ? `${all}\n\nChildren, and agents whose reply is awaited:\n${await children.list()}` : all);
+        }
+        case "crew": {
+          if (machine) throw new Error("A crew is this machine's worktree sessions; drop `machine`.");
+          const me = await crewMe(ctx, true);
+          const op = params.op ?? "status";
+          if (op === "status") return text(await crew.status(me, children.records));
+          if (op === "claim") return text((await crew.claim(me, !!params.takeover)).text);
+          return text(await syncCrew(crew, { call, exec: run, selfPane: target.paneId }, me, {
+            children: children.records,
+            uniqueName: (wanted) => children.uniqueName(wanted),
+            attach: (opts) => children.attach(opts),
+            ...(dependencies.pollMs ? { readyPollMs: dependencies.pollMs } : {}),
+          }, !!params.takeover));
         }
         case "interrupt":
           return text(await children.interrupt(childOnly(need(params.name, "name"))));
