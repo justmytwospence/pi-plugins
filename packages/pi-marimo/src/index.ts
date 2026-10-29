@@ -34,7 +34,7 @@ import { MarimoWatcher, type Mode, parseMode } from "./core/watcher.js";
 import { HerdrHold } from "./herdr.js";
 import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION } from "./activity.js";
 import { FULL_SCREEN } from "./frame.ts";
-import { interruptKernel } from "./ui/interrupt.js";
+import { interruptKernel, runCells } from "./ui/interrupt.js";
 import { PillView } from "./pill.ts";
 import { NotebookSource } from "./ui/source.js";
 import { openUrl, waitingStatus, waitingUrl } from "./waiting.js";
@@ -147,6 +147,10 @@ export default function piMarimo(pi: ExtensionAPI): void {
     followed: () => watcher?.followed() ?? [],
     interrupt: (f) => interruptKernel(f.attachment, process.env.MARIMO_TOKEN),
     openInBrowser: (f) => openUrl(`${f.attachment.url}/?file=${encodeURIComponent(f.attachment.path)}`),
+    run: (f, cells) => runCells(f.attachment, cells, process.env.MARIMO_TOKEN),
+    servers: (f) => bg.servers(f.attachment.path),
+    stopServers: (f) => bg.stopServers(f.attachment.path),
+    lastRun: (f) => source.lastRun(f),
   };
   const openView = (key: string, ui: unknown): Promise<void> =>
     (ui as ExtensionContext["ui"]).custom<void>((tui, theme, _keys, done) => new NotebookView(tui, theme, key, viewActions, () => done(undefined)), FULL_SCREEN);

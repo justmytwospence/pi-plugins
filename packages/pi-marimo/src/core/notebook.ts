@@ -4,6 +4,7 @@
 // (variables). Only what an agent needs is kept; outputs are dropped.
 
 import { LensTracker } from "./lens.js";
+import { type CellOutput, type ConsoleLine, appendConsole, summarizeOutput } from "./output.js";
 import { type Heading, headingsFromCode, isMarkdownCell, sameCode } from "./markdown.js";
 
 export type EditSource = "frontend" | "code-mode" | "kernel" | string;
@@ -23,6 +24,9 @@ export interface Cell {
   error?: string;
   /** The cell did not run because an ancestor failed. */
   blocked?: string;
+  /** What the cell last output and printed, for the notebook view only (never in the agent's snapshot). */
+  output?: CellOutput;
+  console?: ConsoleLine[];
   /** Code the kernel last ran for this cell, when known. */
   lastRunCode?: string;
   /** Who last changed the code, and at which change number. */
@@ -257,6 +261,7 @@ export class NotebookState {
         // The previous run's error is about to be replaced.
         cell.error = undefined;
         cell.blocked = undefined;
+        cell.console = undefined;
       }
       if (data.status === "running") {
         const at = typeof data.timestamp === "number" ? data.timestamp * 1000 : Date.now();
@@ -274,8 +279,11 @@ export class NotebookState {
       cell.stale = data.stale_inputs;
       changed = true;
     }
+    // Outputs and console lines are for the view: they never mark the state changed.
+    if ("console" in data) cell.console = appendConsole(cell.console, data.console);
     if (data.output !== null && typeof data.output === "object") {
       const output = record(data.output);
+      cell.output = summarizeOutput(output);
       const { error, blocked } = output.channel === "marimo-error" ? describeError(output) : {};
       if (error !== cell.error || blocked !== cell.blocked) {
         cell.error = error;

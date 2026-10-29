@@ -116,6 +116,13 @@ export class BgBridge {
     return [...this.serving].filter(([, paths]) => paths.includes(path)).map(([id]) => this.tasks.find((t) => t.id === id)?.name ?? id);
   }
 
+  /** Asks pi-bg to stop the servers standing for this notebook; how many were asked. */
+  stopServers(path: string): number {
+    const ids = [...this.serving].filter(([, paths]) => paths.includes(path)).map(([id]) => id);
+    for (const id of ids) this.emit("bg:stop", { task: id });
+    return ids.length;
+  }
+
   /** A pi-bg task was stopped: the notebooks it was driving, which still run cells (to interrupt). */
   killed(id: unknown): string[] {
     const paths = typeof id === "string" ? this.driving.get(id) ?? [] : [];

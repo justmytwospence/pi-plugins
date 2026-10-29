@@ -192,6 +192,12 @@ export class NotebookSource {
     return { label, ...(failed ? { alert: `${failed} failed` } : {}) };
   }
 
+  /** How the notebook's last run went, for its view: `ran 2m 3s · 1 error · 5m ago`. */
+  lastRun(f: Followed, now = Date.now()): string | undefined {
+    const ended = this.ended.get(notebookKey(f));
+    return ended ? `${ended.summary} · ${elapsed(now - ended.at)} ago` : undefined;
+  }
+
   /** The notebook to open from the pill: a running one, then a failed one, then the current one. */
   busiest(): string | undefined {
     const followed = this.actions.followed();

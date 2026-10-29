@@ -175,6 +175,17 @@ describe("pi-bg's tasks annotated with the kernel state", () => {
     expect(bridge.servers("/p/nb/fit.py")).toEqual([]);
   });
 
+  test("stopServers asks pi-bg to stop the servers a notebook's row stands for", () => {
+    const b = bus();
+    const bridge = new BgBridge(b, () => [], () => true);
+    bridge.onTasks([task({}), task({ id: "t2", command: "marimo edit other.py" })]);
+    bridge.annotate([nb()], "/p");
+    b.sent.length = 0;
+    expect(bridge.stopServers("/p/nb/fit.py")).toBe(1);
+    expect(b.sent).toEqual([["bg:stop", { task: "t" }]]);
+    expect(bridge.stopServers("/p/elsewhere.py")).toBe(0);
+  });
+
   test("a server's notebook is found from its own directory; queued, idle and disconnected read plainly", () => {
     const b = bus();
     const bridge = new BgBridge(b, () => []);
