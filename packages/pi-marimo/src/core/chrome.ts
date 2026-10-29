@@ -50,6 +50,17 @@ export const hostHtml = (plotlyJs: string): string => `<!doctype html><meta char
 <div id="g"></div>
 <script src="file://${plotlyJs}"></script>
 <script>
+window.__cur = (x, y) => {
+  let c = document.getElementById("cur");
+  if (!c) {
+    c = document.createElement("div");
+    c.id = "cur";
+    c.style.cssText = "position:fixed;pointer-events:none;width:14px;height:14px;margin:-7px 0 0 -7px;border:2px solid #e8590c;border-radius:50%;box-shadow:0 0 0 1px #fff;z-index:99999";
+    document.body.appendChild(c);
+  }
+  if (x === null) c.style.display = "none";
+  else { c.style.display = "block"; c.style.left = x + "px"; c.style.top = y + "px"; }
+};
 window.show = async (fig, w, h) => {
   const el = document.getElementById("g");
   const layout = Object.assign({}, fig.layout || {}, { width: w, height: h, autosize: false });

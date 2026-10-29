@@ -356,6 +356,7 @@ export class NotebookView implements Component {
   handleInput(data: string): void {
     if (this.closed) return;
     this.syncConfirmation();
+    if (this.live.inspecting && this.live.key(data)) { this.tui.requestRender(); return; }
     if (this.typing) return this.typeFilter(data);
     const f = this.current();
     if (matchesKey(data, "escape") && this.filter) {
@@ -434,6 +435,10 @@ export class NotebookView implements Component {
     } else if (data === "/") {
       this.typing = true;
       this.filter = "";
+    } else if (f && data === "i") {
+      const c = this.cursorCell(f);
+      if (c && this.expanded.has(c.id) && this.live.inspect(c.output)) this.note = "";
+      else this.note = "Expand a live chart (enter) first, then i.";
     } else if (f && (matchesKey(data, "enter") || matchesKey(data, "l"))) {
       const c = this.cursorCell(f);
       if (c) {
@@ -570,11 +575,13 @@ export class NotebookView implements Component {
 
   private footer(f: Followed | undefined, inner: number): string {
     const th = this.theme;
+    if (this.live.inspecting) return `${th.fg("accent", "chart")} ${th.fg("dim", "arrows or hjkl move (shift: farther) · space starts/ends a drag · +/- zoom · 0 reset · esc done")}`;
     if (this.typing) return `${th.fg("accent", "/")} ${this.filter}${th.fg("dim", "▏")}  ${th.fg("dim", "enter keep · esc clear")}`;
     const connected = !!f && f.connection === "connected";
     const busy = connected && (f.notebook.running() || f.notebook.queued() > 0);
     const hints: string[] = [];
     if (f) hints.push("enter expand");
+    if (f && this.live.rects.length) hints.push("i inspect chart");
     if (connected && this.actions.run) hints.push("r run");
     if (this.armedRun?.what === "stale") hints.push(th.fg("error", "R again to run stale cells"));
     else if (this.armedRun?.what === "all") hints.push(th.fg("error", "A again to run all cells"));

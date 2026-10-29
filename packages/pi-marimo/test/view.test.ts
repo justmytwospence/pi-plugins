@@ -360,3 +360,49 @@ test("a live Plotly chart is drawn from its page's frames, and the mouse over it
     expect(closed).toBe(true);
   } finally { v.dispose(); setCapabilities({ images: null, trueColor: true, hyperlinks: false } as any); }
 });
+
+test("the keyboard pointer drives a live chart without a mouse: arrows move it, space drags, plus zooms, esc leaves", async () => {
+  const { setCapabilities, setCellDimensions } = await import("@earendil-works/pi-tui");
+  const { LiveCharts } = await import("../src/ui/live-charts.js");
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAAFUlEQVR42mP8z8BQz0AEYBxVSF+FABJADveWkH6oAAAAAElFTkSuQmCC";
+  setCellDimensions({ widthPx: 9, heightPx: 18 });
+  setCapabilities({ images: "kitty", trueColor: true, hyperlinks: false } as any);
+  const f = nbWith([{ id: "a", code: "fig" }]);
+  f.notebook.apply("cell-op", { cell_id: "a", status: "idle", output: { channel: "output", mimetype: "text/html", data: `<marimo-plotly data-figure='{&quot;data&quot;:[],&quot;layout&quot;:{}}'></marimo-plotly>` } });
+  const events: any[] = [];
+  const rings: any[] = [];
+  const live = new LiveCharts(() => {}, () => ({ stop() {} }) as any, async () => ({ frame: png, pointer: (p: any) => events.push(p), cursor: (c: any) => rings.push(c && { x: c.x, y: c.y }), close: () => {} }));
+  const v = new NotebookView(tui as any, theme2, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {} }, () => {}, undefined, undefined, live);
+  try {
+    v.handleInput("i");
+    expect(screen(v)).toContain("Expand a live chart");
+    v.handleInput("l");
+    v.render(100);
+    await new Promise((r) => setTimeout(r, 0));
+    v.render(100);
+    expect(screen(v)).toContain("i inspect chart");
+    v.handleInput("i");
+    expect(live.inspecting).toBe(true);
+    expect(screen(v)).toContain("space starts/ends a drag");
+    const start = events.at(-1);
+    v.handleInput("\x1b[C"); // right
+    expect(events.at(-1)).toMatchObject({ type: "move", x: start.x + 0.5, y: start.y });
+    v.handleInput("J"); // shift-down: farther
+    expect(events.at(-1)).toMatchObject({ type: "move", y: start.y + 3 });
+    v.handleInput(" ");
+    expect(events.at(-1)).toMatchObject({ type: "press", button: "left" });
+    v.handleInput("h");
+    expect(events.at(-1)).toMatchObject({ type: "drag", button: "left" });
+    v.handleInput(" ");
+    expect(events.at(-1)).toMatchObject({ type: "release" });
+    v.handleInput("+");
+    expect(events.at(-1)).toMatchObject({ type: "wheel", wheelDelta: -3 });
+    v.handleInput("0");
+    expect(events.at(-1)).toMatchObject({ type: "dblclick" });
+    expect(rings.at(-1)).not.toBeNull();
+    // The pointer holds every key while it is on (j does not move the notebook cursor), and esc hands them back.
+    v.handleInput("\x1b");
+    expect(live.inspecting).toBe(false);
+    expect(rings.at(-1)).toBeNull();
+  } finally { v.dispose(); setCapabilities({ images: null, trueColor: true, hyperlinks: false } as any); }
+});

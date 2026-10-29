@@ -13,7 +13,7 @@ export interface Geometry {
 }
 
 export interface Pointer {
-  type: "move" | "press" | "release" | "drag" | "wheel";
+  type: "move" | "press" | "release" | "drag" | "wheel" | "dblclick";
   /** Position in cells from the image's top-left corner (fractions allowed). */
   x: number;
   y: number;
@@ -110,6 +110,13 @@ export class LiveChart {
     if (this.closed) return;
     const at = toPage(this.geometry, p.x, p.y);
     const button = BUTTON[p.button ?? "none"];
+    if (p.type === "dblclick") {
+      // Plotly's double click resets the zoom: two quick clicks.
+      const click = (count: number) => this.cmd("Input.dispatchMouseEvent", { type: "mousePressed", ...at, button: "left", buttons: 1, clickCount: count })
+        .then(() => this.cmd("Input.dispatchMouseEvent", { type: "mouseReleased", ...at, button: "left", buttons: 0, clickCount: count }));
+      void click(1).then(() => click(2)).then(() => this.capture(), () => undefined);
+      return;
+    }
     let params: Record<string, unknown>;
     if (p.type === "wheel") params = { type: "mouseWheel", ...at, deltaX: 0, deltaY: (p.wheelDelta ?? 0) * 100 };
     else if (p.type === "press") params = { type: "mousePressed", ...at, button, buttons: 1, clickCount: 1 };
@@ -119,6 +126,13 @@ export class LiveChart {
     if (this.trailing) clearTimeout(this.trailing);
     this.trailing = setTimeout(() => void this.capture(), 120);
     this.trailing.unref?.();
+  }
+
+  /** Shows a ring where the keyboard pointer is (cells from the corner), or hides it with `null`. */
+  cursor(at: { x: number; y: number } | null): void {
+    if (this.closed) return;
+    const page = at ? toPage(this.geometry, at.x, at.y) : undefined;
+    void this.cmd("Runtime.evaluate", { expression: page ? `window.__cur(${page.x}, ${page.y})` : "window.__cur(null)" }).then(() => this.capture(), () => undefined);
   }
 
   close(): void {

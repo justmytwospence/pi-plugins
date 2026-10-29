@@ -1,6 +1,6 @@
 // The live charts of a notebook view: which expanded outputs have a running page, the latest frame of
 // each, and where on screen each is drawn so the mouse can reach it.
-import { allocateImageId, encodeKitty, getCellDimensions, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import { allocateImageId, encodeKitty, getCellDimensions, matchesKey, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import type { CellOutput } from "../core/output.js";
 import { type ChromeHost, sharedChrome } from "../core/chrome.js";
 import { type Geometry, LiveChart, type Pointer } from "../core/live.js";
@@ -8,6 +8,7 @@ import { type Geometry, LiveChart, type Pointer } from "../core/live.js";
 /** What a live page must do for the view (LiveChart does; tests stand in). */
 export interface LivePage {
   pointer(p: Pointer): void;
+  cursor?(at: { x: number; y: number } | null): void;
   close(): void;
 }
 export type OpenLive = (host: ChromeHost, figure: string, geometry: Geometry, onFrame: (png: string) => void) => Promise<LivePage>;
@@ -44,6 +45,8 @@ export class LiveCharts {
   private seen = new Set<CellOutput>();
   rects: LiveRect[] = [];
   private pressed: LiveRect | undefined;
+  /** The keyboard pointer: which chart, where (cells from its corner), and whether a drag is down. */
+  private pointerMode: { output: CellOutput; x: number; y: number; down: boolean } | undefined;
   private idle: ReturnType<typeof setTimeout> | undefined;
 
   constructor(
@@ -112,6 +115,62 @@ export class LiveCharts {
     if (e.type === "release") this.pressed = undefined;
     state.page.pointer({ type, x: e.x - target.left + 0.5, y: e.y - target.top + 0.5, button: e.button, ...(e.wheelDelta !== undefined ? { wheelDelta: e.wheelDelta } : {}) });
     return { handled: true, ...(e.type === "press" ? { capture: true } : {}) };
+  }
+
+  get inspecting(): boolean {
+    return this.pointerMode !== undefined;
+  }
+
+  /** Starts the keyboard pointer on a chart that is running, in its middle; false when there is none. */
+  inspect(output: CellOutput | undefined): boolean {
+    const state = output ? this.states.get(output) : undefined;
+    if (!output || state?.status !== "ready") return false;
+    this.pointerMode = { output, x: state.geometry.cols / 2, y: state.geometry.rows / 2, down: false };
+    state.page.cursor?.(this.pointerMode);
+    state.page.pointer({ type: "move", x: this.pointerMode.x, y: this.pointerMode.y });
+    return true;
+  }
+
+  leave(): void {
+    const m = this.pointerMode;
+    this.pointerMode = undefined;
+    const state = m ? this.states.get(m.output) : undefined;
+    if (m && state?.status === "ready") {
+      if (m.down) state.page.pointer({ type: "release", x: m.x, y: m.y, button: "left" });
+      state.page.cursor?.(null);
+    }
+  }
+
+  /** Keys while the keyboard pointer is on: arrows or hjkl move it (shift: farther), space starts and ends a drag, +/- zoom, 0 resets, esc leaves. Returns whether it used the key. */
+  key(data: string): boolean {
+    const m = this.pointerMode;
+    const state = m ? this.states.get(m.output) : undefined;
+    if (!m || state?.status !== "ready") { this.pointerMode = undefined; return false; }
+    if (matchesKey(data, "escape") || data === "q" || data === "i") { this.leave(); return true; }
+    const g = state.geometry;
+    const move = (dx: number, dy: number) => {
+      m.x = Math.max(0.25, Math.min(g.cols - 0.25, m.x + dx));
+      m.y = Math.max(0.25, Math.min(g.rows - 0.25, m.y + dy));
+      state.page.cursor?.(m);
+      state.page.pointer(m.down ? { type: "drag", x: m.x, y: m.y, button: "left" } : { type: "move", x: m.x, y: m.y });
+    };
+    const small = 0.5;
+    const big = 3;
+    if (matchesKey(data, "left") || data === "h") move(-small, 0);
+    else if (matchesKey(data, "right") || data === "l") move(small, 0);
+    else if (matchesKey(data, "up") || data === "k") move(0, -small);
+    else if (matchesKey(data, "down") || data === "j") move(0, small);
+    else if (matchesKey(data, "shift+left") || data === "H") move(-big, 0);
+    else if (matchesKey(data, "shift+right") || data === "L") move(big, 0);
+    else if (matchesKey(data, "shift+up") || data === "K") move(0, -big);
+    else if (matchesKey(data, "shift+down") || data === "J") move(0, big);
+    else if (data === " " || matchesKey(data, "enter")) {
+      m.down = !m.down;
+      state.page.pointer({ type: m.down ? "press" : "release", x: m.x, y: m.y, button: "left" });
+    } else if (data === "+" || data === "=") state.page.pointer({ type: "wheel", x: m.x, y: m.y, wheelDelta: -3 });
+    else if (data === "-" || data === "_") state.page.pointer({ type: "wheel", x: m.x, y: m.y, wheelDelta: 3 });
+    else if (data === "0") state.page.pointer({ type: "dblclick", x: m.x, y: m.y });
+    return true;
   }
 
   dispose(): void {
