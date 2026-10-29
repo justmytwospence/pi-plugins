@@ -10,8 +10,8 @@ import { STARTUP_RESOURCES_PATCH, patchRegistry } from "../../utils/patch-keys.t
  * `owner/repo:packages/pi-x/src` paths. Here every section gets a heading with a count, entries are grouped
  * by where they come from (scope or package), shown by short name and laid out in aligned columns.
  * Context files and skills are what the model carries in every request, so they also show an estimated
- * token cost: a total on the heading, per-file counts for context files (largest first) and a dim count
- * after only the heavy skills. The expanded view (ctrl+o) is left to pi.
+ * token cost: a total on the heading, per-file counts for context files (largest first) and a count
+ * after every skill, colored by weight (dim, muted, warning, error). The expanded view (ctrl+o) is left to pi.
  */
 
 type Scope = "user" | "project" | "path";
@@ -52,8 +52,18 @@ export type StartupTheme = {
 const SCOPE_ORDER: Scope[] = ["project", "user", "path"];
 const INDENT = 2;
 const COLUMN_GAP = 3;
-/** A skill costing at least this many tokens gets its count shown next to its name; lighter ones stay plain. */
+/** Skill cost tiers (tokens per request): below MEDIUM is light (dim), from HEAVY up warns, from VERY_HEAVY up errors. */
+export const MEDIUM_SKILL_TOKENS = 100;
 export const HEAVY_SKILL_TOKENS = 180;
+export const VERY_HEAVY_SKILL_TOKENS = 300;
+
+/** Theme color for a skill's token count, by how heavy it is. */
+export function skillTokenColor(tokens: number): string {
+	if (tokens >= VERY_HEAVY_SKILL_TOKENS) return "error";
+	if (tokens >= HEAVY_SKILL_TOKENS) return "warning";
+	if (tokens >= MEDIUM_SKILL_TOKENS) return "muted";
+	return "dim";
+}
 
 function compareNames(a: string, b: string): number {
 	return a.localeCompare(b);
@@ -219,11 +229,10 @@ export function renderSection(
 			else for (const item of group.items) lines.push(truncateToWidth(`${" ".repeat(indent)}${item}`, width));
 		} else {
 			const items = group.tokens
-				? group.items.map((item, index) =>
-						group.tokens![index]! >= HEAVY_SKILL_TOKENS
-							? `${item} ${theme.fg("dim", `~${group.tokens![index]}`)}`
-							: item,
-					)
+				? group.items.map((item, index) => {
+						const tokens = group.tokens![index]!;
+						return `${item} ${theme.fg(skillTokenColor(tokens), `~${formatTokens(tokens)}`)}`;
+					})
 				: group.items;
 			lines.push(...layoutGrid(items, width, indent));
 		}

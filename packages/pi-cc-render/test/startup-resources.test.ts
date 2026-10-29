@@ -4,6 +4,9 @@ import {
   collectSections,
   formatTokens,
   HEAVY_SKILL_TOKENS,
+  MEDIUM_SKILL_TOKENS,
+  VERY_HEAVY_SKILL_TOKENS,
+  skillTokenColor,
   groupEntries,
   layoutGrid,
   packageItemName,
@@ -130,7 +133,7 @@ describe("startup resources", () => {
     expect(lines).toEqual(["Context 2 · ~1.5k tok", "  ~/big.md  ~1.4k", "  a.md       ~100"]);
   });
 
-  test("skills annotate only the heavy ones and keep alphabetical order", () => {
+  test("skills all show counts, colored by weight, and keep alphabetical order", () => {
     const lines = renderSection(
       {
         title: "Skills",
@@ -143,7 +146,11 @@ describe("startup resources", () => {
       plainTheme,
     );
     expect(lines[0]).toBe("Skills 3 · ~400 tok");
-    expect(lines[1]).toBe(`  apple      bee ~${HEAVY_SKILL_TOKENS + 50}   cat`);
+    expect(lines[1]).toBe(`  apple ~20   bee ~${HEAVY_SKILL_TOKENS + 50}    cat ~30`);
+    expect(skillTokenColor(20)).toBe("dim");
+    expect(skillTokenColor(MEDIUM_SKILL_TOKENS)).toBe("muted");
+    expect(skillTokenColor(HEAVY_SKILL_TOKENS)).toBe("warning");
+    expect(skillTokenColor(VERY_HEAVY_SKILL_TOKENS)).toBe("error");
   });
 
   test("groupEntries keeps token estimates aligned with the sorted names", () => {
