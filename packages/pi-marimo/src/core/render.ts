@@ -20,6 +20,18 @@ export function elapsed(ms: number): string {
   return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
 }
 
+/** A run's length for a cell row: `340ms`, `2.4s`, `3m05s`. */
+export function formatDuration(ms: number): string {
+  if (ms < 1000) return `${Math.max(1, Math.round(ms))}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  return elapsed(ms);
+}
+
+/** A path relative to the cwd when it is inside it, else as it is (as pi-bg's ids name notebooks). */
+export function relativePath(path: string, cwd: string): string {
+  return path.startsWith(`${cwd}/`) ? path.slice(cwd.length + 1) : path;
+}
+
 export interface StatusParts {
   notebook: string;
   /** "connected" | "connecting" | "disconnected" */
@@ -236,6 +248,9 @@ function section(nb: NotebookState, attachment: Attachment, current: boolean, o:
     if (cell.stale && !staleCommon) out.push("stale");
     if (nb.edited(cell)) out.push("edited, not rerun");
     if (cell.editedBy === "frontend" && cell.editSeq > seen) out.push("changed by the user in the browser");
+    for (const s of nb.userSets.values()) {
+      if (s.cell === cell.id) out.push(`the user set ${s.label ? `"${truncate(s.label, 40)}"` : "a widget"} to ${truncate(JSON.stringify(s.value) ?? "null", 60)} from Pi`);
+    }
     return out;
   };
 

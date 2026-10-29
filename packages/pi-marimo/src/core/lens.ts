@@ -40,6 +40,8 @@ export interface LensReceipt {
 
 export interface LensState {
   revision: number;
+  /** The label the next new selection must take (`S4`). */
+  nextLabel: string;
   current?: string;
   selections: LensSelection[];
   history: LensReceipt[];
@@ -99,7 +101,83 @@ export function parseLensState(raw: unknown): LensState | undefined {
   const selections = s.selections.map(parseSelection).filter((x): x is LensSelection => !!x);
   const history = (Array.isArray(s.history) ? s.history : []).map(parseReceipt).filter((x): x is LensReceipt => !!x);
   const current = str(s.currentSelectionId);
-  return { revision: s.revision, current: current && selections.some((x) => x.id === current) ? current : undefined, selections, history };
+  return { revision: s.revision, nextLabel: str(s.nextLabel) ?? "S1", current: current && selections.some((x) => x.id === current) ? current : undefined, selections, history };
+}
+
+/** marimo-lens 0.2.3's `marimo-lens.command` protocol; a Lens on another version answers with an error, which the view shows. */
+export const LENS_PROTOCOL_VERSION = 6;
+/** Request ids pi-marimo sends start with this, so their answers can be told apart. */
+export const LENS_REQUEST_PREFIX = "pi-marimo-";
+
+export interface LensInstance {
+  modelId: string;
+  revision: number;
+  nextLabel: string;
+}
+
+export interface LensResponse {
+  ok: boolean;
+  code?: string;
+  message?: string;
+  at: number;
+}
+
+export interface LensImage {
+  width: number;
+  height: number;
+  sha256: string;
+  base64: string;
+}
+
+/** A selection made from Pi's notebook view: one cell, with the user's note and, when there is one, a picture of its output. */
+export interface LensMark {
+  requestId: string;
+  selectionId: string;
+  label: string;
+  revision: number;
+  cellId: string;
+  note: string;
+  documentId: string;
+  createdAt: string;
+  /** What was marked, for Lens's description (nonblank). */
+  what: string;
+  detail?: string;
+  image?: LensImage;
+}
+
+/** The `selection.put` command for a mark, and its buffers (the PNG, base64). */
+export function lensMarkCommand(m: LensMark): { content: Record<string, unknown>; buffers: string[] } {
+  const snapshot = m.image
+    ? { status: "available", mediaType: "image/png", width: m.image.width, height: m.image.height, sha256: m.image.sha256, capturedAt: m.createdAt, id: `image:${m.selectionId}` }
+    : { status: "failed", capturedAt: m.createdAt, error: "Marked in Pi's terminal notebook view, which has no picture of this output." };
+  return {
+    content: {
+      protocol: "marimo-lens.command",
+      version: LENS_PROTOCOL_VERSION,
+      requestId: m.requestId,
+      type: "selection.put",
+      payload: {
+        expectedRevision: m.revision,
+        imageAction: m.image ? "replace" : "clear",
+        selection: {
+          id: m.selectionId,
+          label: m.label,
+          note: m.note,
+          target: { kind: "notebook", cellIds: [m.cellId], documentId: m.documentId, documentPath: "/" },
+          createdAt: m.createdAt,
+          anchor: { kind: "point", x: 0.5, y: 0.5 },
+          description: { label: truncate(m.what.trim() || "Cell", 256), ...(m.detail?.trim() ? { detail: truncate(m.detail.trim(), 512) } : {}) },
+          snapshot,
+        },
+      },
+    },
+    buffers: m.image ? [m.image.base64] : [],
+  };
+}
+
+/** The `selection.delete` command. */
+export function lensDeleteCommand(o: { requestId: string; selectionId: string; revision: number }): Record<string, unknown> {
+  return { protocol: "marimo-lens.command", version: LENS_PROTOCOL_VERSION, requestId: o.requestId, type: "selection.delete", payload: { selectionId: o.selectionId, expectedRevision: o.revision } };
 }
 
 /**
@@ -110,6 +188,8 @@ export class LensTracker {
   private models = new Map<string, LensState>();
   /** Ids of models known to be something other than Lens: their updates are ignored. */
   private others = new Set<string>();
+  /** Lens's answers to pi-marimo's commands, by request id (the latest 20; kept across resets). */
+  private responses = new Map<string, LensResponse>();
 
   reset(): void {
     this.models.clear();
@@ -126,6 +206,15 @@ export class LensTracker {
     if (method === "close") {
       this.others.delete(id);
       return this.models.delete(id);
+    }
+    if (method === "custom") {
+      const content = record(message.content);
+      const requestId = str(content.requestId);
+      if (content.protocol !== "marimo-lens.response" || !requestId?.startsWith(LENS_REQUEST_PREFIX)) return false;
+      const error = record(content.error);
+      this.responses.set(requestId, { ok: content.ok === true, ...(str(error.code) ? { code: str(error.code) } : {}), ...(str(error.message) ? { message: str(error.message) } : {}), at: Date.now() });
+      while (this.responses.size > 20) this.responses.delete(this.responses.keys().next().value as string);
+      return true;
     }
     if (method !== "open" && method !== "update") return false;
     const state = record(message.state);
@@ -152,6 +241,16 @@ export class LensTracker {
   /** Whether any Lens is mounted. */
   get present(): boolean {
     return this.models.size > 0;
+  }
+
+  /** Each mounted Lens: where to send commands, and the revision and label a new selection must match. */
+  instances(): LensInstance[] {
+    return [...this.models].map(([modelId, s]) => ({ modelId, revision: s.revision, nextLabel: s.nextLabel }));
+  }
+
+  /** Lens's answer to one of pi-marimo's commands, once it came. */
+  response(requestId: string): LensResponse | undefined {
+    return this.responses.get(requestId);
   }
 
   /** Open selections of every Lens, in state order. */

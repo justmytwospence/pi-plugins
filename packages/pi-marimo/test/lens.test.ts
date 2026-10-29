@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { NotebookState } from "../src/core/notebook.js";
+import { lensDeleteCommand, lensMarkCommand } from "../src/core/lens.js";
 import { lensLines, lensStatusText, snapshot } from "../src/core/render.js";
 import type { Followed } from "../src/core/watcher.js";
 import { NotebookView, notebookLines } from "../src/ui/view.js";
@@ -112,5 +113,39 @@ describe("marimo-lens", () => {
     expect(source.entries(2000)[0]!.detail).toBe("idle · 2 selections");
     source.seen(3000);
     expect(source.pill(3000)).toMatchObject({ label: "", rows: [{ label: "fit.py" }] });
+  });
+  test("each Lens: its model, revision and next label; answers to pi-marimo's commands, only those", () => {
+    const nb = notebook();
+    nb.apply("model-lifecycle", open(state([selection(1, "chart")])));
+    expect(nb.lens.instances()).toEqual([{ modelId: "m1", revision: 1, nextLabel: "S2" }]);
+    const answer = (requestId: string, ok: boolean) => ({ model_id: "m1", message: { method: "custom", content: { protocol: "marimo-lens.response", requestId, ok, revision: 1, payload: {}, ...(ok ? {} : { error: { code: "revision_conflict", message: "Lens moved on." } }) } } });
+    expect(nb.apply("model-lifecycle", answer("pi-marimo-1", false))).toBe(true);
+    expect(nb.lens.response("pi-marimo-1")).toMatchObject({ ok: false, code: "revision_conflict", message: "Lens moved on." });
+    expect(nb.apply("model-lifecycle", answer("browser-1", true))).toBe(false);
+    expect(nb.lens.response("browser-1")).toBeUndefined();
+  });
+
+  test("the commands a mark and an unmark send", () => {
+    const base = { requestId: "pi-marimo-r", selectionId: "pi-s", label: "S2", revision: 3, cellId: "chart", note: "why?", documentId: "document:pi-marimo-x", createdAt: "2026-10-16T10:00:00.000Z", what: "Cell by_year", detail: "chart output" };
+    const plain = lensMarkCommand(base);
+    expect(plain.buffers).toEqual([]);
+    expect(plain.content).toEqual({
+      protocol: "marimo-lens.command", version: 6, requestId: "pi-marimo-r", type: "selection.put",
+      payload: {
+        expectedRevision: 3, imageAction: "clear",
+        selection: {
+          id: "pi-s", label: "S2", note: "why?",
+          target: { kind: "notebook", cellIds: ["chart"], documentId: "document:pi-marimo-x", documentPath: "/" },
+          createdAt: "2026-10-16T10:00:00.000Z", anchor: { kind: "point", x: 0.5, y: 0.5 },
+          description: { label: "Cell by_year", detail: "chart output" },
+          snapshot: { status: "failed", capturedAt: "2026-10-16T10:00:00.000Z", error: "Marked in Pi's terminal notebook view, which has no picture of this output." },
+        },
+      },
+    });
+    const pictured = lensMarkCommand({ ...base, image: { width: 10, height: 8, sha256: "a".repeat(64), base64: "iVBOR" } });
+    expect(pictured.buffers).toEqual(["iVBOR"]);
+    expect((pictured.content.payload as any).imageAction).toBe("replace");
+    expect((pictured.content.payload as any).selection.snapshot).toEqual({ status: "available", mediaType: "image/png", width: 10, height: 8, sha256: "a".repeat(64), capturedAt: "2026-10-16T10:00:00.000Z", id: "image:pi-s" });
+    expect(lensDeleteCommand({ requestId: "pi-marimo-d", selectionId: "pi-s", revision: 4 })).toEqual({ protocol: "marimo-lens.command", version: 6, requestId: "pi-marimo-d", type: "selection.delete", payload: { selectionId: "pi-s", expectedRevision: 4 } });
   });
 });

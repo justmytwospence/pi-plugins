@@ -158,6 +158,8 @@ export class MarimoWatcher {
   private waitingNow: Waiting[] = [];
   // Canonical paths of the notebooks this session's agent has worked in.
   private readonly engagedPaths = new Set<string>();
+  // Canonical paths of the notebooks this session opened itself (/marimo edit, /marimo new): followed in any mode but off.
+  private readonly includedPaths = new Set<string>();
 
   constructor(private readonly options: WatcherOptions) {}
 
@@ -179,7 +181,7 @@ export class MarimoWatcher {
 
   /** Every followed notebook, the current one first, then by most recent use. */
   followed(): Followed[] {
-    return this.ranked().map((f, i) => ({ attachment: f.attachment, canonicalPath: f.target.real, notebook: f.notebook, connection: f.connection, current: i === 0, touchedAt: f.touchedAt, engaged: this.mode.kind === "pinned" || this.engagedPaths.has(f.target.real) }));
+    return this.ranked().map((f, i) => ({ attachment: f.attachment, canonicalPath: f.target.real, notebook: f.notebook, connection: f.connection, current: i === 0, touchedAt: f.touchedAt, engaged: this.mode.kind === "pinned" || this.engagedPaths.has(f.target.real) || this.includedPaths.has(f.target.real) }));
   }
 
   /**
@@ -267,6 +269,18 @@ export class MarimoWatcher {
     return touched;
   }
 
+  /** Follow these notebooks (canonical paths) in auto and pinned mode alike, wherever they are. */
+  include(paths: readonly string[]): void {
+    for (const p of paths) this.includedPaths.add(p);
+    this.scanned = false;
+    this.wake?.();
+  }
+
+  /** Canonical paths of the notebooks this session opened itself, to save with the session. */
+  included(): string[] {
+    return [...this.includedPaths];
+  }
+
   /** Canonical paths of the notebooks this session has worked in, to save with the session. */
   engaged(): string[] {
     return [...this.engagedPaths];
@@ -341,11 +355,11 @@ export class MarimoWatcher {
     if (mode.kind === "pinned") {
       const pinned = new Map<string, string>();
       for (const p of mode.paths) pinned.set(await this.real(p), p);
-      shown = withReal.filter((w) => pinned.has(w.canonicalPath)).map((w) => ({ ...w, pinned: pinned.get(w.canonicalPath) }));
+      shown = withReal.filter((w) => pinned.has(w.canonicalPath) || this.includedPaths.has(w.canonicalPath)).map((w) => (pinned.has(w.canonicalPath) ? { ...w, pinned: pinned.get(w.canonicalPath) } : w));
     } else {
       this.realCwd ??= await this.real(this.options.cwd);
       const cwd = this.realCwd;
-      shown = withReal.filter((w) => within(w.canonicalPath, cwd) && !w.canonicalPath.slice(cwd.length).split("/").slice(0, -1).some((part) => part.startsWith(".")));
+      shown = withReal.filter((w) => this.includedPaths.has(w.canonicalPath) || (within(w.canonicalPath, cwd) && !w.canonicalPath.slice(cwd.length).split("/").slice(0, -1).some((part) => part.startsWith("."))));
     }
     return shown.sort((a, b) => (a.canonicalPath < b.canonicalPath ? -1 : a.canonicalPath > b.canonicalPath ? 1 : a.url < b.url ? -1 : 1)).slice(0, this.options.maxNotebooks ?? 8);
   }
@@ -373,8 +387,11 @@ export class MarimoWatcher {
         const chosen = sessions.filter((s) => real.get(s) === path).pop();
         if (chosen) add(chosen);
       }
+      for (const s of sessions) if (this.includedPaths.has(real.get(s)!)) add(s);
       return { targets: out, waiting };
     }
+    // Notebooks this session opened itself (/marimo edit) come first, wherever they are.
+    for (const s of sessions) if (this.includedPaths.has(real.get(s)!)) add(s);
     this.realCwd ??= await this.real(this.options.cwd);
     const cwd = this.realCwd;
     // Under the cwd, but not in a hidden directory there (.worktrees, .claude/worktrees: other checkouts).
