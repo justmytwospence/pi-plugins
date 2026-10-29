@@ -46,7 +46,9 @@ export function detailRows(nb: NotebookState, theme: FrameTheme, now: number, o:
   const rows: Row[] = [];
   const widgetRows = new Map<string, number>();
   const width = Math.max(10, o.width);
-  const sub: RowOptions = { ...o, pad: "", width };
+  // A chart takes the pane's width, and as much of its height as fits under the title (a section shares it).
+  const page = o.imageRows ?? 14;
+  const sub: RowOptions = { ...o, pad: "", width, imageRows: Math.max(2, o.section ? Math.min(page - 4, Math.floor(page * 0.6)) : page - 4) };
   const push = (text: string) => rows.push({ text });
   const dim = (text: string) => theme.fg("dim", text);
 

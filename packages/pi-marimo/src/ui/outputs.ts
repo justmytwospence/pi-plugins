@@ -10,23 +10,27 @@ import { tableLines } from "./table.js";
 
 /** The default indent of everything under a cell's line; the detail pane passes none. */
 export const PAD = "      ";
-/** Cells the inline image of an output may be wide, and high at most. */
-export const IMAGE_WIDTH = 60;
+/** Rows an inline image may take when the caller does not say; its width is the pane's. */
 export const IMAGE_ROWS = 14;
-const images = new WeakMap<CellOutput, Image>();
+/** The columns a picture may take: the pane's width less the indent and the bar. */
+const imageCols = (opts: RowOptions, pad: string): number => Math.max(10, (opts.width ?? 80) - pad.length - 2);
+const images = new WeakMap<CellOutput, { key: string; img: Image }>();
 
 export const clean = (line: string) => line.replace(/\x1b\[[0-9;?]*[A-Za-z]/gu, "").replace(/\t/gu, "    ").replace(/[\x00-\x08\x0b-\x1f\x7f]/gu, "");
 
 /** An image output as rows: the first carries the terminal's image sequence, the rest are empty rows it covers. */
 function inlineImage(output: CellOutput, theme: FrameTheme, pad: string, opts: RowOptions): Row[] | undefined {
-  const maxRows = Math.min(IMAGE_ROWS, opts.imageRows ?? IMAGE_ROWS);
+  const maxRows = opts.imageRows ?? IMAGE_ROWS;
   if (maxRows < 2 || !output.image) return undefined;
-  let img = images.get(output);
-  if (!img) {
-    img = new Image(output.image.data, output.image.mime, { fallbackColor: (t) => theme.fg("dim", t) }, { maxWidthCells: IMAGE_WIDTH, maxHeightCells: maxRows });
-    images.set(output, img);
+  const cols = imageCols(opts, pad);
+  // One Image per output and size: a resize or another pane width draws it anew.
+  const key = `${cols}x${maxRows}`;
+  let held = images.get(output);
+  if (!held || held.key !== key) {
+    held = { key, img: new Image(output.image.data, output.image.mime, { fallbackColor: (t) => theme.fg("dim", t) }, { maxWidthCells: cols, maxHeightCells: maxRows }) };
+    images.set(output, held);
   }
-  const lines = img.render(Math.max(10, Math.min(IMAGE_WIDTH + 2, (opts.width ?? 80) - 12)));
+  const lines = held.img.render(cols);
   if (!lines.some((l) => l.includes("\x1b_G"))) return undefined;
   const bar = `${pad}${theme.fg("accent", "▍")} `;
   const alt = `${bar}${theme.fg("dim", "[image png: scroll until it fits on screen]")}`;
@@ -54,7 +58,7 @@ export function outputRows(cell: Cell, theme: FrameTheme, opts: RowOptions, limi
     else if ((opts.imageRows ?? IMAGE_ROWS) < 4) whyStatic = "the view is too short";
   }
   if (output?.plotly && opts.live && getCapabilities().images && !whyStatic) {
-    const geometry = liveGeometry(Math.min(IMAGE_WIDTH, (opts.width ?? 80) - 12), Math.min(IMAGE_ROWS, opts.imageRows ?? IMAGE_ROWS));
+    const geometry = liveGeometry(imageCols(opts, pad), opts.imageRows ?? IMAGE_ROWS);
     const state = opts.live.state(output, output.plotly, geometry);
     if (state.status === "ready") {
       const bar = `${pad}${theme.fg("accent", "▍")} `;
