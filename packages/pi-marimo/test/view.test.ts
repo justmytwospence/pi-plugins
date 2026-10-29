@@ -136,13 +136,13 @@ test("j/k move the cursor between cells and Enter expands its code, console and 
   f.notebook.apply("cell-op", { cell_id: "a", status: "idle", timestamp: 2 });
   const v = make(f);
   try {
-    expect(screen(v)).toMatch(/▸ ○ a/u);
+    expect(screen(v)).toMatch(/\x1b\[7m  ○ a/u);
     v.handleInput("j");
-    expect(screen(v)).toMatch(/▸ ○ b/u);
+    expect(screen(v)).toMatch(/\x1b\[7m  ○ b/u);
     v.handleInput("k");
     v.handleInput("\r");
     const open = screen(v);
-    expect(open).toMatch(/▾ ○ a/u);
+    expect(open).toMatch(/\x1b\[7m▾ ○ a/u);
     expect(open).toContain("│ print('hi')");
     expect(open).toContain("▍ hi");
     expect(open).toContain("▍ value & more");
@@ -157,9 +157,9 @@ test("n and N jump between failed cells; / filters by name, variable or code and
   const v = make(f);
   try {
     v.handleInput("n");
-    expect(screen(v)).toMatch(/▸ ✗ b/u);
+    expect(screen(v)).toMatch(/\x1b\[7m  ✗ b/u);
     v.handleInput("N");
-    expect(screen(v)).toMatch(/▸ ✗ b/u);
+    expect(screen(v)).toMatch(/\x1b\[7m  ✗ b/u);
     v.handleInput("/");
     expect(v[INPUT_CONTEXT]()).toBe("filter");
     for (const ch of "load") v.handleInput(ch);
@@ -184,11 +184,11 @@ test("following keeps the cursor on the running cell until the user moves; f fol
   f.notebook.apply("cell-op", { cell_id: "c40", status: "running", timestamp: 1 });
   const v = make(f);
   try {
-    expect(screen(v)).toMatch(/▸ ● c40/u);
+    expect(screen(v)).toMatch(/\x1b\[7m  ● c40/u);
     v.handleInput("k");
-    expect(screen(v)).toMatch(/▸ ○ c39/u);
+    expect(screen(v)).toMatch(/\x1b\[7m  ○ c39/u);
     v.handleInput("f");
-    expect(screen(v)).toMatch(/▸ ● c40/u);
+    expect(screen(v)).toMatch(/\x1b\[7m  ● c40/u);
   } finally { v.dispose(); }
 });
 

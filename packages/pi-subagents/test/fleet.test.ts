@@ -41,7 +41,7 @@ test("rows: the selection, stats flush right, a status icon once finished, and s
   const active = renderFleet({ roster, selected: 2, active: true, now: 60_000, width: 100, theme: plain });
   expect(active[0]).toContain("j/k select · l/enter view · x dismiss · h/esc back");
   expect(active[1]).toBe(" ○ main");
-  expect(active[3]).toMatch(/^ ● Review the diff {2}reviewer/u);
+  expect(active[3]).toMatch(/^\x1b\[7m ○ Review the diff {2}reviewer/u);
   // A pill, and the note after a success.
   const tasks = { id: "bg", title: "tasks", entries: () => [], open: async () => undefined, pill: () => ({ label: "2 tasks", alert: "1 failed" }) };
   const withPill = fleetRoster([a], 60_000, undefined, [tasks]);
@@ -57,7 +57,7 @@ test("rows: the selection, stats flush right, a status icon once finished, and s
   expect(top.at(-2)?.trim()).toBe("↓ 3 more");
   const bottom = renderFleet({ roster: many, selected: 8, active: true, now: 0, width: 60, theme: plain });
   expect(bottom[2]?.trim()).toBe("↑ 3 more");
-  expect(bottom.some((l) => l.includes("● Task 7  a7"))).toBe(true);
+  expect(bottom.some((l) => l.includes("\x1b[7m ○ Task 7  a7"))).toBe(true);
   expect(renderFleet({ roster: [], selected: 0, active: false, now: 0, width: 60, theme: plain })).toEqual([]);
 });
 
@@ -79,13 +79,13 @@ test("Tab routing selects and cycles tasks through main without draft replacemen
   ui.editorText = "keep this draft";
   expect(fleet.tab(true)).toBe(false);
   expect(fleet.tab()).toBe(true);
-  expect(ui.render("subagents-fleet")[2]).toMatch(/● Find config/u);
+  expect(ui.render("subagents-fleet")[2]).toMatch(/\x1b\[7m ○ Find config/u);
   expect(ui.press("\t")).toBe(true);
-  expect(ui.render("subagents-fleet")[3]).toMatch(/● Fix config/u);
+  expect(ui.render("subagents-fleet")[3]).toMatch(/\x1b\[7m ○ Fix config/u);
   expect(ui.press("\t")).toBe(true);
-  expect(ui.render("subagents-fleet")[1]).toBe(" ● main");
+  expect(ui.render("subagents-fleet")[1]).toMatch(/^\x1b\[7m ◉ main/u);
   expect(ui.press("\t")).toBe(true);
-  expect(ui.render("subagents-fleet")[2]).toMatch(/● Find config/u);
+  expect(ui.render("subagents-fleet")[2]).toMatch(/\x1b\[7m ○ Find config/u);
   expect(ui.editorText).toBe("keep this draft");
   expect(ui.press(KEY.escape)).toBe(true);
   expect(fleet.tab(true)).toBe(false);
@@ -102,13 +102,13 @@ test("↓ at an empty prompt enters the list; arrows select; Esc or ↑ past mai
   ui.editorText = "";
   expect(ui.press(KEY.down)).toBe(true);
   expect(ui.render("subagents-fleet")[0]).toContain("j/k select");
-  expect(ui.render("subagents-fleet")[2]).toMatch(/● Find config {2}scout/u);
+  expect(ui.render("subagents-fleet")[2]).toMatch(/\x1b\[7m ○ Find config {2}scout/u);
   expect(ui.press(KEY.down)).toBe(true);
   expect(ui.press(KEY.down)).toBe(true);
-  expect(ui.render("subagents-fleet")[3]).toMatch(/● Fix config {2}worker/u);
+  expect(ui.render("subagents-fleet")[3]).toMatch(/\x1b\[7m ○ Fix config {2}worker/u);
   expect(ui.press(KEY.up)).toBe(true);
   expect(ui.press(KEY.up)).toBe(true);
-  expect(ui.render("subagents-fleet")[1]).toBe(" ● main");
+  expect(ui.render("subagents-fleet")[1]).toMatch(/^\x1b\[7m ◉ main/u);
   expect(ui.press(KEY.up)).toBe(true);
   expect(ui.render("subagents-fleet")[0]).toBe(" ◉ main");
   expect(ui.press(KEY.up)).toBe(false);
@@ -136,13 +136,13 @@ test("Ctrl+J/Ctrl+K stay the editor's until the list is selected, then cycle it 
   // Selected (here with ↓ at the prompt's end), they cycle the rows.
   ui.editorText = "";
   expect(ui.press(KEY.down)).toBe(true);
-  expect(ui.render("subagents-fleet")[2]).toMatch(/● Find config/u);
+  expect(ui.render("subagents-fleet")[2]).toMatch(/\x1b\[7m ○ Find config/u);
   expect(ui.press("\n")).toBe(true);
-  expect(ui.render("subagents-fleet")[3]).toMatch(/● Fix config/u);
+  expect(ui.render("subagents-fleet")[3]).toMatch(/\x1b\[7m ○ Fix config/u);
   expect(ui.press("\n")).toBe(true);
-  expect(ui.render("subagents-fleet")[1]).toBe(" ● main");
+  expect(ui.render("subagents-fleet")[1]).toMatch(/^\x1b\[7m ◉ main/u);
   expect(ui.press("\x0b")).toBe(true);
-  expect(ui.render("subagents-fleet")[3]).toMatch(/● Fix config/u);
+  expect(ui.render("subagents-fleet")[3]).toMatch(/\x1b\[7m ○ Fix config/u);
   expect(ui.press(KEY.escape)).toBe(true);
   expect(ui.press("\n")).toBe(false);
   // A dialog has the keyboard, or there is no list: the keys stay the editor's.
@@ -176,7 +176,7 @@ test("Enter opens the viewer, which owns the keys; closing it returns to the sam
   expect(ui.customs).toHaveLength(0);
   // Back in the list; the finished run has now dropped out, so the selection clamps.
   expect(ui.press(KEY.up)).toBe(true);
-  expect(ui.render("subagents-fleet")[1]).toBe(" ● main");
+  expect(ui.render("subagents-fleet")[1]).toMatch(/^\x1b\[7m ◉ main/u);
   ui.press(KEY.down);
   ui.press(KEY.enter);
   ui.customs[0]!.component.handleInput(KEY.enter);
@@ -291,7 +291,7 @@ test("a pill: ↓ selects it when there are no runs; Enter opens its dialog, whi
   fleet.update();
   expect(ui.render("subagents-fleet")).toEqual([" 2 tasks ", ""]);
   expect(ui.press(KEY.down)).toBe(true);
-  expect(ui.render("subagents-fleet")[0]).toBe("\x1b[7m 2 tasks \x1b[27m  enter view · esc back");
+  expect(ui.render("subagents-fleet")[0]).toMatch(/^\x1b\[7m 2 tasks +enter view · esc back +\x1b\[27m$/u);
   expect(ui.press(KEY.enter)).toBe(true);
   await Promise.resolve();
   expect(opened).toBe(1);
@@ -330,9 +330,9 @@ test("pill rows (notebooks): listed above the label, selected and opened like ru
   expect(idle[1]).toMatch(/^ ● b\.py {2}:2719 · running Fit +0:12$/u);
   expect(ui.press(KEY.down)).toBe(true);
   expect(ui.render("subagents-fleet")[0]).toContain("↑/↓ select · enter view");
-  expect(ui.render("subagents-fleet")[1]).toMatch(/^›○ a\.py/u);
+  expect(ui.render("subagents-fleet")[1]).toMatch(/^\x1b\[7m ○ a\.py/u);
   expect(ui.press(KEY.down)).toBe(true);
-  expect(ui.render("subagents-fleet")[2]).toMatch(/^›● b\.py/u);
+  expect(ui.render("subagents-fleet")[2]).toMatch(/^\x1b\[7m ● b\.py/u);
   expect(ui.press(KEY.enter)).toBe(true);
   await new Promise((r) => setTimeout(r, 0));
   expect(opened).toEqual(["b"]);
@@ -356,7 +356,7 @@ test("↓ leaves a draft for the list once the cursor is at its end; vim's j doe
   expect(ui.press(KEY.down)).toBe(false);
   editor.cursor = { line: 0, col: 7 };
   expect(ui.press(KEY.down)).toBe(true);
-  expect(ui.render("subagents-fleet")[2]).toMatch(/● Find config {2}scout/u);
+  expect(ui.render("subagents-fleet")[2]).toMatch(/\x1b\[7m ○ Find config {2}scout/u);
   // Escape goes back; insert-mode h remains typing; ← with a draft stays in the editor.
   expect(ui.press(KEY.escape)).toBe(true);
   expect(ui.press(KEY.left)).toBe(false);
@@ -366,9 +366,9 @@ test("↓ leaves a draft for the list once the cursor is at its end; vim's j doe
   editor.cursor = { line: 0, col: 6 };
   expect(ui.press("j")).toBe(true);
   expect(ui.press("j")).toBe(true);
-  expect(ui.render("subagents-fleet")[3]).toMatch(/● Fix config {2}worker/u);
+  expect(ui.render("subagents-fleet")[3]).toMatch(/\x1b\[7m ○ Fix config {2}worker/u);
   expect(ui.press("k")).toBe(true);
-  expect(ui.render("subagents-fleet")[2]).toMatch(/● Find config {2}scout/u);
+  expect(ui.render("subagents-fleet")[2]).toMatch(/\x1b\[7m ○ Find config {2}scout/u);
   expect(ui.press("l")).toBe(true);
   expect(ui.customs).toHaveLength(1);
   fleet.dispose();
@@ -391,6 +391,6 @@ test("Tab in a subagent's session switches to the next one; back in main, the li
   await Promise.resolve();
   await Promise.resolve();
   expect(ui.customs).toHaveLength(0);
-  expect(ui.render("subagents-fleet").join("\n")).toMatch(/● Fix config/u);
+  expect(ui.render("subagents-fleet").join("\n")).toMatch(/\x1b\[7m ○ Fix config/u);
   fleet.dispose();
 });

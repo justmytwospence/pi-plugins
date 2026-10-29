@@ -16,6 +16,7 @@ export interface Theme {
   fg(color: string, text: string): string;
   bold(text: string): string;
   inverse?(text: string): string;
+  bg?(color: string, text: string): string;
 }
 
 /** Which slot of a pill is selected (rows first, then the label line) and which row `x` has armed. */
@@ -34,18 +35,25 @@ export function pillSlots(pill: ActivityPill | undefined): Array<{ kind: "row"; 
   return [...(pill.rows ?? []).map((row) => ({ kind: "row" as const, row })), ...(pill.label || pill.alert ? [{ kind: "label" as const }] : [])];
 }
 
-const inverseOf = (theme: Theme) => (s: string) => (theme.inverse ? theme.inverse(s) : `\x1b[7m${s}\x1b[27m`);
+/** The selection style of every list under the prompt and of the tasks dialog: the whole row on pi's selection background. */
+export function highlight(theme: Theme, text: string, width: number): string {
+  const padded = `${truncateToWidth(text, width, "")}${" ".repeat(Math.max(0, width - visibleWidth(truncateToWidth(text, width, ""))))}`;
+  return theme.bg ? theme.bg("selectedBg", padded) : theme.inverse ? theme.inverse(padded) : `\x1b[7m${padded}\x1b[27m`;
+}
 
-/** One row: `○ fit.py  :2718 · idle                         2:14`, the label inverse while selected. */
+/** One row: ` ○ fit.py  :2718 · idle                         2:14`, on the selection background while selected. */
 function renderRow(row: ActivityEntry, selected: boolean, width: number, theme: Theme): string {
   const icon = row.status === "running" ? theme.fg("accent", "●") : row.status === "failed" ? theme.fg("error", "✗") : row.status === "stopped" ? theme.fg("warning", "■") : theme.fg("dim", "○");
-  // A source's own styled line (pi-marimo's notebooks): a cursor chevron marks the selected row.
-  if (row.line) return truncateToWidth(`${selected ? theme.fg("accent", "›") : " "}${icon} ${row.line(theme)}`, width);
-  const label = selected ? inverseOf(theme)(` ${row.label} `) : ` ${theme.fg("muted", row.label)}`;
-  const left = ` ${icon}${label}${row.detail ? `  ${theme.fg("dim", row.detail)}` : ""}`;
-  const right = row.stats ? theme.fg("dim", row.stats) : "";
-  const gap = width - visibleWidth(left) - visibleWidth(right) - 1;
-  return truncateToWidth(right && gap >= 2 ? `${left}${" ".repeat(gap)}${right}` : left, width);
+  // A source's own styled line (pi-marimo's notebooks) is drawn as it is.
+  let line: string;
+  if (row.line) line = ` ${icon} ${row.line(theme)}`;
+  else {
+    const left = ` ${icon} ${selected ? theme.bold(theme.fg("text", row.label)) : theme.fg("muted", row.label)}${row.detail ? `  ${theme.fg("dim", row.detail)}` : ""}`;
+    const right = row.stats ? theme.fg(selected ? "text" : "dim", row.stats) : "";
+    const gap = width - visibleWidth(left) - visibleWidth(right) - 1;
+    line = right && gap >= 2 ? `${left}${" ".repeat(gap)}${right}` : left;
+  }
+  return selected ? highlight(theme, line, width) : truncateToWidth(line, width);
 }
 
 /** The pill's lines: its rows, the label line (inverse when selected, with a key hint), and a hint under the rows while one is selected. */
@@ -60,10 +68,11 @@ export function renderPill(pill: ActivityPill | undefined, selected: boolean | P
       return;
     }
     const on = sel?.index === i;
-    const label = on ? inverseOf(theme)(` ${pill.label} `) : theme.fg("muted", ` ${pill.label} `);
+    const label = theme.fg(on ? "text" : "muted", ` ${pill.label} `);
     const alert = pill.alert ? `${theme.fg("dim", "·")} ${theme.fg("error", pill.alert)}` : "";
     const hint = on ? theme.fg("dim", "  enter view · esc back") : "";
-    lines.push(truncateToWidth(`${label}${alert ? ` ${alert}` : ""}${hint}`, width));
+    const line = `${label}${alert ? ` ${alert}` : ""}${hint}`;
+    lines.push(on ? highlight(theme, line, width) : truncateToWidth(line, width));
   });
   const at = sel ? slots[sel.index] : undefined;
   if (at?.kind === "row") {

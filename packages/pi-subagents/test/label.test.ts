@@ -64,14 +64,14 @@ test("long descriptions use the available width and wrap intact instead of being
   expect(taskLabel("unused", label)).toBe(label);
   for (const width of [24, 50, 200]) {
     const fleet = renderFleet({ roster: fleetRoster([run], 1_000), selected: 1, active: true, now: 1_000, width, theme: plain });
-    expect(fleet.join("\n").replace(/\s+/gu, " ")).toContain(label);
+    expect(fleet.join("\n").replace(/\x1b\[[0-9;]*m/gu, "").replace(/\s+/gu, " ")).toContain(label);
     expect(fleet.every((line) => visibleWidth(line) <= width)).toBe(true);
     const widget = renderSection({ runs: [run], queued: 0, now: 1_000, frame: 0, width, theme: plain, maxLines: 3 });
     expect(widget.lines.join("\n").replace(/\s+/gu, " ")).toContain(label);
     expect(widget.lines.every((line) => visibleWidth(line) <= width)).toBe(true);
     expect(widget.lines.join("\n")).not.toContain("+0 more");
     expect(widget.targets.slice(1).every((target) => target === run.id)).toBe(true);
-    if (width === 200) expect(fleet[2]).toContain(label);
+    if (width === 200) expect(fleet[2]?.replace(/\x1b\[[0-9;]*m/gu, "")).toContain(label);
   }
   const wide = fakeRun({ label: "界".repeat(90) });
   const fleet = renderFleet({ roster: fleetRoster([wide], 0), selected: 1, active: true, now: 0, width: 50, theme: plain });

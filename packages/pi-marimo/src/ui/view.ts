@@ -21,6 +21,7 @@ import type { Followed } from "../core/watcher.js";
 import { kernelStateParts, lensParts } from "../bg.js";
 import { INPUT_CONTEXT } from "../activity.js";
 import { interruptKey, notebookKey, notebookPath } from "./identity.js";
+import { highlight } from "../pill.ts";
 import { banner, bottom, row as frameRow, rule as frameRule, type FrameTheme } from "../frame.ts";
 
 /** Banner, three header lines, two rules, hints, bottom border. */
@@ -189,7 +190,7 @@ export function notebookRows(nb: NotebookState, theme: FrameTheme, now: number, 
     cellRows.set(cell.id, rows.length);
     rows.push({
       cell: cell.id,
-      text: `${here ? theme.fg("accent", open ? "▾" : "▸") : " "} ${icon(cell)} ${here ? theme.bold(label) : theme.fg("muted", label)}${marked ? ` ${theme.fg("warning", marked.join(" "))}` : ""}  ${what}${notes.length ? `  ${notes.join(theme.fg("dim", " · "))}` : ""}`,
+      text: `${open ? theme.fg("dim", "▾") : " "} ${icon(cell)} ${here ? theme.bold(label) : theme.fg("muted", label)}${marked ? ` ${theme.fg("warning", marked.join(" "))}` : ""}  ${what}${notes.length ? `  ${notes.join(theme.fg("dim", " · "))}` : ""}`,
     });
     if (cell.error) rows.push({ text: `      ${theme.fg("error", truncate(cell.error, 200))}` });
     if (open) for (const r of expandedRows(cell, theme, opts)) rows.push(typeof r === "string" ? { text: r } : r);
@@ -563,7 +564,10 @@ export class NotebookView implements Component {
         const at = this.scroll + i;
         const r = rows[at];
         if (r?.image?.live && r.image.index === 0 && visible(at)) this.live.rects.push({ top: out.length, left: LIVE_LEFT, geometry: r.image.live.geometry, output: r.image.live.output });
-        out.push(row(textOf(at) ?? (this.filter && !cells.length && i === 0 ? th.fg("dim", `No cell matches "${this.filter}".`) : "")));
+        const text = textOf(at);
+        // The cursor's row is on pi's selection background, as in every list under the prompt.
+        const line = text !== undefined && r?.cell !== undefined && r.cell === this.cursor ? highlight(th as Parameters<typeof highlight>[0], text, width - 4) : text;
+        out.push(row(line ?? (this.filter && !cells.length && i === 0 ? th.fg("dim", `No cell matches "${this.filter}".`) : "")));
       }
       this.live.endFrame();
     }

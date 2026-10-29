@@ -8,6 +8,7 @@
 import { type Component, type TUI, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { type ActivityEntry, type ActivitySection, INPUT_CONTEXT, dismissable, stableKey, stopKey, stoppable } from "./activity.ts";
 import { banner, bottom, row as frameRow, rule as frameRule } from "./frame.ts";
+import { highlight } from "./pill.ts";
 
 /** Banner, summary, rule, rule, hints, bottom border. */
 const CHROME = 6;
@@ -194,10 +195,12 @@ export class TasksDialog implements Component {
         const e = r.entry;
         const name = on ? th.bold(th.fg("text", e.label)) : e.label;
         const tag = mixed ? `${th.fg("muted", nounOf(r.section).padEnd(tagWidth))} ` : "";
-        const left = `${on ? th.fg("accent", "❯") : " "} ${icon(e.status, th)} ${tag}${name}  ${th.fg("dim", e.detail)}`;
+        const left = ` ${icon(e.status, th)} ${tag}${name}  ${th.fg("dim", e.detail)}`;
         const right = th.fg(on ? "text" : "dim", e.stats);
         const gap = inner - visibleWidth(right) - 1;
-        lines.push(visibleWidth(left) < gap ? `${left}${" ".repeat(gap - visibleWidth(left))} ${right}` : `${truncateToWidth(left, Math.max(8, gap), "…")} ${right}`);
+        const line = visibleWidth(left) < gap ? `${left}${" ".repeat(gap - visibleWidth(left))} ${right}` : `${truncateToWidth(left, Math.max(8, gap), "…")} ${right}`;
+        // The selected row is on pi's selection background, as in the lists under the prompt.
+        lines.push(on ? highlight(th as Parameters<typeof highlight>[0], line, inner) : line);
         n++;
       }
     }

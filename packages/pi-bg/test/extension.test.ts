@@ -292,7 +292,7 @@ describe("pi-bg", () => {
     expect(x.widgetLines()).toEqual([" 1 task "]);
     // ↓ at an empty prompt selects it; Enter opens the dialog.
     expect(x.press("\x1b[B")).toBe(true);
-    expect(x.widgetLines()?.[0]).toBe("[ 1 task ]  enter view · esc back");
+    expect(x.widgetLines()?.[0]).toMatch(/^\[ 1 task +enter view · esc back +\]$/u);
     expect(x.press("\r")).toBe(true);
     expect(x.opened).toHaveLength(1);
     const dialog = x.overlay(0);
@@ -302,7 +302,7 @@ describe("pi-bg", () => {
     // It covers the screen.
     expect(lines).toHaveLength(40);
     // One source: no tags.
-    expect(lines.join("\n")).toMatch(/❯ ● flaky  sleep 2; echo bad; exit 3 +0:0\d/u);
+    expect(lines.join("\n")).toMatch(/\[ ● flaky  sleep 2; echo bad; exit 3/u);
     dialog.handleInput("\x1b");
     await until(() => x.sent.length > 0, 5_000);
     // Failed: the pill keeps a red count until the user's next message.
@@ -320,7 +320,7 @@ describe("pi-bg", () => {
     void x.commands.get("tasks").handler("", x.ctx);
     await until(() => x.opened.length === 1);
     let dialog = x.overlay(0);
-    expect(dialog.render(100).join("\n")).toMatch(/slow  echo one; sleep 3 +waiting · 0:0\d/u);
+    expect(dialog.render(100).join("\n")).toMatch(/slow  echo one; sleep 3 +waiting/u);
     await waiting;
     // Enter: the log viewer; when it closes, the dialog again on the same task.
     dialog.handleInput("\r");
@@ -330,7 +330,7 @@ describe("pi-bg", () => {
     viewer.handleInput("\x1b");
     await until(() => x.opened.length === 3);
     dialog = x.overlay(2);
-    expect(dialog.render(100).join("\n")).toContain("❯ ● slow");
+    expect(dialog.render(100).join("\n")).toContain("[ ● slow");
     dialog.handleInput("x");
     expect(dialog.render(100).at(-2)).toContain("x again to stop slow");
     dialog.handleInput("x");

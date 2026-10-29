@@ -339,12 +339,13 @@ it("the combined pill, with no label of its own, lists a hosted guest's rows", a
   expect(text).toMatch(/● nb\.py {2}:2718 +0:03/u);
 });
 
-it("a row with its own styled line draws it after the status glyph, with a chevron while selected", async () => {
+it("a row with its own styled line draws it after the status glyph, on the selection background while selected", async () => {
   const { PillView: NotebookPill } = await import(new URL("../../pi-marimo/src/pill.ts", import.meta.url).href);
   const { renderPill } = await import("../src/pill.ts");
   const row = { key: "a", label: "a.py", detail: "", status: "done" as const, stats: "", startedAt: 0, line: (t: { fg(c: string, s: string): string }) => `Marimo ${t.fg("accent", "a.py")}:2718 · idle` };
   const pill = { label: "", rows: [row] };
   expect(renderPill(pill, false, 80, theme)).toEqual([" ○ Marimo a.py:2718 · idle"]);
-  expect(renderPill(pill, { index: 0 }, 80, theme)[0]).toBe("›○ Marimo a.py:2718 · idle");
+  expect(renderPill(pill, { index: 0 }, 80, theme)[0]).toBe(`\x1b[7m ○ Marimo a.py:2718 · idle${" ".repeat(80 - 26)}\x1b[27m`);
+  expect(renderPill(pill, { index: 0 }, 80, { ...theme, bg: (c: string, t: string) => `<${c}>${t}</>` })[0]).toBe(`<selectedBg> ○ Marimo a.py:2718 · idle${" ".repeat(80 - 26)}</>`);
   expect(NotebookPill).toBeDefined();
 });
