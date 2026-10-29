@@ -151,7 +151,7 @@ export function renderFleet({ roster, selected, current, active, stopArmed, canB
       const armed = on && stopArmed;
       const icon = e.row.status === "running" ? theme.fg("accent", "●") : e.row.status === "failed" ? theme.fg("error", "✗") : e.row.status === "stopped" ? theme.fg("warning", "■") : theme.fg("dim", "○");
       const name = on ? theme.bold(theme.fg("text", e.row.label)) : theme.fg("muted", e.row.label);
-      lines.push(...taskRows(` ${active && i === sel ? theme.fg("accent", "›") : " "}${icon} `, `${name}${e.row.detail ? `  ${theme.fg("dim", e.row.detail)}` : ""}`, theme.fg(on ? "text" : "dim", armed ? "x again to stop" : e.row.stats), width, true));
+      lines.push(...taskRows(`${active && i === sel ? theme.fg("accent", "›") : " "}${icon} `, `${name}${e.row.detail ? `  ${theme.fg("dim", e.row.detail)}` : ""}`, theme.fg(on ? "text" : "dim", armed ? "x again to stop" : e.row.stats), width, true));
       continue;
     }
     if (e.kind !== "pill") continue;
