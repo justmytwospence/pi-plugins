@@ -39,6 +39,8 @@ const inverseOf = (theme: Theme) => (s: string) => (theme.inverse ? theme.invers
 /** One row: `○ fit.py  :2718 · idle                         2:14`, the label inverse while selected. */
 function renderRow(row: ActivityEntry, selected: boolean, width: number, theme: Theme): string {
   const icon = row.status === "running" ? theme.fg("accent", "●") : row.status === "failed" ? theme.fg("error", "✗") : row.status === "stopped" ? theme.fg("warning", "■") : theme.fg("dim", "○");
+  // A source's own styled line (pi-marimo's notebooks): a cursor chevron marks the selected row.
+  if (row.line) return truncateToWidth(`${selected ? theme.fg("accent", "›") : " "}${icon} ${row.line(theme)}`, width);
   const label = selected ? inverseOf(theme)(` ${row.label} `) : ` ${theme.fg("muted", row.label)}`;
   const left = ` ${icon}${label}${row.detail ? `  ${theme.fg("dim", row.detail)}` : ""}`;
   const right = row.stats ? theme.fg("dim", row.stats) : "";

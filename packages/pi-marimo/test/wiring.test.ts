@@ -193,14 +193,14 @@ test("the notebooks as background work: a source for the hosts, its own pill alo
   const entries = section.entries(Date.now());
   expect(entries).toEqual([expect.objectContaining({ key: JSON.stringify([SERVER, `${CWD}/nb.py`]), label: "nb.py", status: "running", detail: "running Slow model fit · 1 queued · bg fit · server s1" })]);
   // Alone, its own pill; hosted (by pi-bg, then pi-subagents too), none; the last host leaving brings it back.
-  await until(() => /● nb\.py {2}:2799 · running Slow model fit/u.test(x.pillText() ?? ""));
+  await until(() => /● Marimo nb\.py:2799 · running Data loading › Slow model fit/u.test(x.pillText() ?? ""));
   section.setHosted(true, "pi-bg");
   expect(x.widgets.size).toBe(0);
   section.setHosted(true);
   section.setHosted(false, "pi-bg");
   expect(x.widgets.size).toBe(0);
   x.pi.events.emit("activity:gone", { id: "subagents" });
-  await until(() => /● nb\.py/u.test(x.pillText() ?? ""));
+  await until(() => /● Marimo nb\.py/u.test(x.pillText() ?? ""));
   // The rows are the pill's: a host draws them and opens a row with the section's open(key).
   expect(section.pill(Date.now())).toMatchObject({ label: "", rows: [{ key: entries[0].key, label: "nb.py", status: "running" }] });
   // In the TUI the notebooks are rows under the prompt, not footer lines.
@@ -221,12 +221,12 @@ test("the notebooks as background work: a source for the hosts, its own pill alo
   view.dispose();
   // The run ends with an error: its row reads failed until the user's next message.
   server.feeds.at(-1)!(rest);
-  await until(() => /✗ nb\.py/u.test(x.pillText() ?? ""));
+  await until(() => /✗ Marimo nb\.py/u.test(x.pillText() ?? ""));
   expect(section.entries(Date.now())[0]).toMatchObject({ status: "failed", stats: expect.stringMatching(/^ran \d+s · 1 error/u) });
   await x.fire("input", { source: "interactive" });
   await until(() => !/✗/u.test(x.pillText() ?? ""));
   // Idle, nothing failed: the row stays, to select and open the notebook.
-  expect(x.pillText()).toMatch(/○ nb\.py {2}:2799 · idle/u);
+  expect(x.pillText()).toMatch(/○ Marimo nb\.py:2799 · 1 error: Slow model fit/u);
   expect(section.entries(Date.now())[0]).toMatchObject({ status: "done" });
   await x.fire("session_shutdown");
   expect(x.of("activity:gone")).toEqual([{ id: "subagents" }, { id: "marimo" }]);

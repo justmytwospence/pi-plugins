@@ -338,3 +338,13 @@ it("the combined pill, with no label of its own, lists a hosted guest's rows", a
   const text = widget({ ...tui, getFocusedComponent: () => undefined }, theme).render(100).join("\n");
   expect(text).toMatch(/● nb\.py {2}:2718 +0:03/u);
 });
+
+it("a row with its own styled line draws it after the status glyph, with a chevron while selected", async () => {
+  const { PillView: NotebookPill } = await import(new URL("../../pi-marimo/src/pill.ts", import.meta.url).href);
+  const { renderPill } = await import("../src/pill.ts");
+  const row = { key: "a", label: "a.py", detail: "", status: "done" as const, stats: "", startedAt: 0, line: (t: { fg(c: string, s: string): string }) => `Marimo ${t.fg("accent", "a.py")}:2718 · idle` };
+  const pill = { label: "", rows: [row] };
+  expect(renderPill(pill, false, 80, theme)).toEqual([" ○ Marimo a.py:2718 · idle"]);
+  expect(renderPill(pill, { index: 0 }, 80, theme)[0]).toBe("›○ Marimo a.py:2718 · idle");
+  expect(NotebookPill).toBeDefined();
+});

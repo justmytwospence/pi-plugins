@@ -12,13 +12,13 @@
 // - marimo-lens selections the user made since their last message add `2 selections` to the pill,
 //   and every open selection is counted in the notebook's row.
 import { basename } from "../core/io.js";
-import { shortWhere } from "../core/render.js";
+import { shortWhere, statusParts } from "../core/render.js";
 import { interruptKey, notebookKey } from "./identity.js";
 import { elapsed } from "../core/render.js";
 import type { Followed } from "../core/watcher.js";
 import { busy } from "../core/hold.js";
 import { kernelStateParts, lensParts } from "../bg.js";
-import type { ActivityEntry, ActivityPill, ActivitySection } from "../activity.js";
+import type { ActivityEntry, ActivityPill, ActivitySection, ActivityTheme } from "../activity.js";
 
 interface Run {
   since: number;
@@ -30,6 +30,16 @@ interface Ended {
   ms: number;
   failed: boolean;
   summary: string;
+}
+
+/** `Marimo fit.py:2718 · running Model fit 0:12 · 2 queued · 1 error: ...`: the notebook as the footer drew it, in the same colors. */
+export function footerLine(name: string, where: string | undefined, parts: string[] | ((th: ActivityTheme) => string[]), waiting = false) {
+  return (th: ActivityTheme): string => {
+    const label = waiting ? th.fg("muted", name) : th.bold(th.fg("accent", name));
+    const head = `${th.fg("muted", "Marimo")} ${label}${where ? `${where.startsWith(":") ? "" : " "}${th.fg("dim", where)}` : ""}`;
+    const rest = typeof parts === "function" ? parts(th) : parts;
+    return [head, ...rest.filter(Boolean)].join(th.fg("dim", " · "));
+  };
 }
 
 export interface SourceActions {
@@ -213,11 +223,30 @@ export class NotebookSource {
       const where = shortWhere(f.attachment.url);
       // The connection and `idle` are already in the detail.
       const stats = e.stats === "idle" || e.stats === f.connection ? "" : e.stats;
-      return { path: f.attachment.path, entry: { ...e, detail: [where, e.detail].filter(Boolean).join(" · "), stats } };
+      const sp = statusParts(f.notebook, f.attachment, f.connection, now);
+      const ended = this.ended.get(notebookKey(f));
+      const extras = [...lensParts(f), ...(this.runs.has(notebookKey(f)) ? (this.actions.drivers?.(f) ?? []).map((n) => `bg ${n}`) : []), ...(this.actions.servers?.(f) ?? []).map((n) => `server ${n}`)];
+      const line = footerLine(sp.notebook, where, (th) => [
+        sp.connection !== "connected" ? th.fg("warning", sp.connection) : "",
+        sp.running ? `${th.fg("warning", "running")} ${sp.running.section || `cell ${sp.running.cell}`}${sp.running.elapsed ? th.fg("dim", ` ${sp.running.elapsed}`) : ""}` : "",
+        sp.queued ? th.fg("muted", `${sp.queued} queued`) : "",
+        sp.errors ? `${th.fg("error", `${sp.errors} error${sp.errors === 1 ? "" : "s"}`)}${sp.firstError ? `${th.fg("dim", ":")} ${th.fg("muted", sp.firstError)}${sp.errors > 1 ? th.fg("muted", ` +${sp.errors - 1}`) : ""}` : ""}` : "",
+        ...extras.map((x) => th.fg("dim", x)),
+        ...(!sp.running && ended ? [th.fg("dim", `${ended.summary} · ${elapsed(now - ended.at)} ago`)] : []),
+      ]);
+      return { path: f.attachment.path, entry: { ...e, detail: [where, e.detail].filter(Boolean).join(" · "), stats, line } };
     });
     const unopened = (this.actions.unopened?.() ?? []).map((u) => ({
       path: u.path,
-      entry: { key: u.key, label: basename(u.path), detail: [u.where, u.state].filter(Boolean).join(" · "), status: "done" as const, stats: "", startedAt: 0 },
+      entry: {
+        key: u.key,
+        label: basename(u.path),
+        detail: [u.where, u.state].filter(Boolean).join(" · "),
+        status: "done" as const,
+        stats: "",
+        startedAt: 0,
+        line: footerLine(basename(u.path), u.where, (th) => [th.fg("dim", u.state)], true),
+      },
     }));
     return [...followed, ...unopened].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)).map((r) => r.entry);
   }

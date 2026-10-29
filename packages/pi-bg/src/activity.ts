@@ -103,6 +103,11 @@ export interface ActivityEntry {
   /** Optional identity of the current stop target (e.g. a kernel session or awaited child turn).
    * Changes invalidate confirmation without changing this work's stable row key. */
   stopToken?: string;
+  /**
+   * A ready-styled line for a row under the prompt (pi-marimo draws notebooks as the footer did):
+   * hosts draw it after the status glyph instead of the label, detail and stats.
+   */
+  line?(theme: ActivityTheme): string;
 }
 
 /** The compact label a source shows under the prompt, Claude Code's footer pill: `2 tasks, 1 service`. */
