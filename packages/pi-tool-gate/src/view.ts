@@ -5,6 +5,7 @@ import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { generateDiffString, getLanguageFromPath } from "@earendil-works/pi-coding-agent";
 import { expandHome } from "./bash.ts";
+import { layoutBash } from "./bash-layout.ts";
 
 export type CallBody =
   | { kind: "code"; lang: string | undefined; text: string }
@@ -48,49 +49,9 @@ export async function callView(tool: string, input: Record<string, unknown>, cwd
   return { tool, subject: "", body: { kind: "code", lang: "json", text: clipLines(JSON.stringify(input, null, 2) ?? "{}") } };
 }
 
-/**
- * Lay a one-line command out one step per line, breaking after top-level `&&`, `||`, `|` and `;`.
- * Only whitespace changes; scripts that already span lines, heredocs and case arms are left alone.
- */
+/** A command laid out one step per line (see bash-layout.ts, shared with pi-cc-render). */
 export function formatBash(command: string): string {
-  const cmd = command.trim();
-  if (cmd.length <= 80 || cmd.includes("\n") || /<<|;;/u.test(cmd)) return cmd;
-  const steps: string[] = [];
-  let start = 0;
-  let depth = 0;
-  let quote: string | undefined;
-  for (let i = 0; i < cmd.length; i++) {
-    const c = cmd[i] as string;
-    if (quote) {
-      if (c === "\\" && quote !== "'") i++;
-      else if (c === quote) quote = undefined;
-      continue;
-    }
-    if (c === "\\") {
-      i++;
-      continue;
-    }
-    if (c === "'" || c === '"' || c === "`") {
-      quote = c;
-      continue;
-    }
-    if (c === "#" && (i === 0 || /\s/u.test(cmd[i - 1] as string))) break;
-    if (c === "(") depth++;
-    else if (c === ")") depth = Math.max(0, depth - 1);
-    if (depth) continue;
-    let op: string | undefined;
-    if (cmd.startsWith("&&", i) || cmd.startsWith("||", i)) op = cmd.slice(i, i + 2);
-    else if (c === "|" && cmd[i - 1] !== ">") op = cmd[i + 1] === "&" ? "|&" : "|";
-    else if (c === ";") op = ";";
-    if (!op) continue;
-    const step = cmd.slice(start, i).trim();
-    if (step) steps.push(op === ";" ? `${step};` : `${step} ${op}`);
-    i += op.length - 1;
-    start = i + 1;
-  }
-  const rest = cmd.slice(start).trim();
-  if (rest) steps.push(rest);
-  return steps.length < 2 ? cmd : steps.join("\n  ");
+  return layoutBash(command);
 }
 
 function editsOf(input: Record<string, unknown>): Array<{ oldText: string; newText: string }> {

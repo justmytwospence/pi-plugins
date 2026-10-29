@@ -1,4 +1,5 @@
 import { getLanguageFromPath, highlightCode } from "@earendil-works/pi-coding-agent";
+import { splitBashSegments } from "../bash-heredoc.ts";
 import { sanitizeAnsiForThemedOutput } from "./ansi-utils.ts";
 import { sanitizeToolResultText } from "../../../utils/tool-result-sanitize.ts";
 import { MAX_HL_CHARS, shikiHighlightCache } from "./shiki-highlight.ts";
@@ -125,6 +126,32 @@ export function createCodeBlockHighlighter(
 		resolve();
 		return highlighted ?? fallback;
 	};
+}
+
+/** Leading indentation removed from a highlighted row, keeping its colour codes. */
+function stripRowIndent(row: string): string {
+	let out = row;
+	for (;;) {
+		const next = out.replace(/^((?:\x1b\[[0-9;]*m)*)[ \t]+/u, "$1");
+		if (next === out) return out;
+		out = next;
+	}
+}
+
+/**
+ * Bash command coloring: shell lines as bash, heredoc bodies in their own language (python, javascript, sql,
+ * or the extension of the file `cat > f <<EOF` writes). Rows have their leading indentation stripped,
+ * as createCodeBlockHighlighter's callers expect, but the code is highlighted with its indentation intact.
+ */
+export function createBashBlockHighlighter(
+	code: string,
+	theme: DiffTheme,
+	invalidate?: () => void,
+): () => string[] {
+	const parts = splitBashSegments(code.replace(/\r/g, "")).map((segment) =>
+		createCodeBlockHighlighter(segment.lines.join("\n"), segment.language, theme, invalidate),
+	);
+	return () => parts.flatMap((part) => part().map(stripRowIndent));
 }
 
 export function highlightDiffLine(

@@ -2,7 +2,7 @@ import { Text, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil
 import { inspect } from "node:util";
 import { config } from "../../config/config.ts";
 import { formatBashCommand } from "./bash-format.ts";
-import { createCodeBlockHighlighter } from "./diff/diff-highlight.ts";
+import { createBashBlockHighlighter, createCodeBlockHighlighter } from "./diff/diff-highlight.ts";
 import { showMoreHintText } from "./show-more-hint.ts";
 import { TOOL_LOADING_INTERVAL_MS, toolLoadingIcon } from "../../utils/tool-loading-icon.ts";
 import { getToolMouseTui } from "../mouse/scroll.ts";
@@ -342,6 +342,17 @@ export class ExpandedToolIoView {
 	 * Register the Input code block: cli-highlight synchronously as a baseline, shiki upgrades asynchronously, and once it lands
 	 * redraw via invalidate. Built only once per code and theme (the view caches lines by width).
 	 */
+	private highlighter(block: InputCodeBlock): () => string[] {
+		const redraw = () => {
+			// The view's own line cache + the outer tool card (clears paint cache and calls requestRender)
+			this.invalidate();
+			invalidateIoView(this);
+		};
+		return block.language === "bash"
+			? createBashBlockHighlighter(block.code, this.theme, redraw)
+			: createCodeBlockHighlighter(block.code, block.language, this.theme, redraw);
+	}
+
 	setInputCode(block: InputCodeBlock | undefined): void {
 		if (!block) {
 			if (this.inputCode) {
@@ -361,11 +372,7 @@ export class ExpandedToolIoView {
 			standalone: block.standalone,
 			code: block.code,
 			theme: this.theme,
-			rows: createCodeBlockHighlighter(block.code, block.language, this.theme, () => {
-				// The view's own line cache + the outer tool card (clears paint cache and calls requestRender)
-				this.invalidate();
-				invalidateIoView(this);
-			}),
+			rows: this.highlighter(block),
 		};
 		this.invalidate();
 	}
@@ -618,11 +625,16 @@ function wrapInputLine(
 	}
 	const lead = /^[ \t]*/.exec(source)?.[0] ?? "";
 	const leadWidth = visibleWidth(lead);
-	const parts = wrapTextWithAnsi(styledBody, Math.max(1, contentWidth - leadWidth));
+	const room = Math.max(1, contentWidth - leadWidth);
+	let parts = wrapTextWithAnsi(styledBody, room);
+	// A wrapped line hangs two cells under its start, so the continuation does not read as a new line
+	const hang = parts.length > 1 && room > 8 ? "  " : "";
+	if (hang) parts = wrapTextWithAnsi(styledBody, room - hang.length);
 	const rows = parts.length ? parts : [styledBody];
-	if (!leadWidth) return rows;
+	if (!leadWidth && !hang) return rows;
 	const prefix = theme.fg("muted", lead);
-	return rows.map((row) => prefix + row);
+	const hanging = theme.fg("muted", lead + hang);
+	return rows.map((row, index) => (index === 0 ? prefix : hanging) + row);
 }
 
 /** True when body needs truncation at the given line limit (source lines or wrapped rows). */
@@ -735,12 +747,11 @@ function formatBashInputBody(
 	let code = sanitizeToolResultText(formatBashCommand(shell.command, onReady));
 	if (shell.timeout !== undefined && shell.timeout !== null) code += `\n# timeout: ${String(shell.timeout)}s`;
 	if (code.length > maxChars) return { text: `${code.slice(0, maxChars)}…` };
-	const stripped = code
-		.replace(/\t/g, "   ")
-		.split("\n")
-		.map((line) => line.replace(/^[ \t]*/, ""))
-		.join("\n");
-	return { text: code, codeBlock: { startLine: 0, language: "bash", code: stripped, standalone: true } };
+	// Highlighted with its indentation (a heredoc body is Python or JSON); the highlighter strips it per row
+	return {
+		text: code,
+		codeBlock: { startLine: 0, language: "bash", code: code.replace(/\t/g, "   "), standalone: true },
+	};
 }
 
 /** Pretty-print tool call args for the expanded Input section. */

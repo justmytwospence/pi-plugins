@@ -1,14 +1,15 @@
 import { describe, expect, test } from "vitest";
-import { breakLongLines, formatBashCommand } from "../src/renderer/tool/bash-format.ts";
+import { formatBashCommand } from "../src/renderer/tool/bash-format.ts";
+import { layoutBash } from "../src/renderer/tool/bash-layout.ts";
 
-describe("breakLongLines", () => {
+describe("layoutBash", () => {
 	test("leaves short lines alone", () => {
-		expect(breakLongLines("cd x && ls")).toBe("cd x && ls");
+		expect(layoutBash("cd x && ls")).toBe("cd x && ls");
 	});
 
 	test("puts each step of a long chain on its own line", () => {
 		const command = `cd ~/Projects/pi-plugins/packages/pi-cc-render && npm run check 2>&1 | grep -E "Tests|FAIL" | tail -20`;
-		expect(breakLongLines(command)).toBe(
+		expect(layoutBash(command)).toBe(
 			[
 				"cd ~/Projects/pi-plugins/packages/pi-cc-render &&",
 				'  npm run check 2>&1 |',
@@ -20,17 +21,17 @@ describe("breakLongLines", () => {
 
 	test("does not break inside quotes, substitutions or comments", () => {
 		const line = `echo "${"a && b ".repeat(20)}" $(ls | wc -l) # x && y`;
-		expect(breakLongLines(line)).toBe(line);
+		expect(layoutBash(line)).toBe(line);
 	});
 
 	test("keeps heredoc bodies verbatim", () => {
 		const text = `cat > f <<'EOF'\n${"x && y | z ".repeat(12)}\nEOF\nls`;
-		expect(breakLongLines(text)).toBe(text);
+		expect(layoutBash(text)).toBe(text);
 	});
 
 	test("does not split compound headers on semicolons", () => {
 		const line = `for file in ${"packages/a ".repeat(10)}; do echo $file; done`;
-		expect(breakLongLines(line)).toBe(line);
+		expect(layoutBash(line)).toBe(line);
 	});
 });
 
@@ -67,5 +68,21 @@ describe("expanded Input of a shell call", () => {
 	test("other tools keep the key: value layout", async () => {
 		const { formatToolInputBody } = await import("../src/renderer/tool/result.ts");
 		expect(formatToolInputBody({ command: "ls", other: 1 }).text).toBe("command: ls\nother: 1");
+	});
+});
+
+describe("heredoc bodies", () => {
+	test("take the language of the program or the file they write", async () => {
+		const { splitBashSegments, heredocLanguage } = await import("../src/renderer/tool/bash-heredoc.ts");
+		expect(heredocLanguage("python3 - <<'EOF'")).toBe("python");
+		expect(heredocLanguage("cd x && .venv/bin/python - <<EOF")).toBe("python");
+		expect(heredocLanguage("node - <<EOF")).toBe("javascript");
+		expect(heredocLanguage("cat > /tmp/a.json <<EOF")).toBe("json");
+		expect(heredocLanguage("cat <<EOF")).toBeUndefined();
+		expect(splitBashSegments("python3 - <<'EOF'\nimport os\nprint(os.name)\nEOF\nls")).toEqual([
+			{ language: "bash", lines: ["python3 - <<'EOF'"] },
+			{ language: "python", lines: ["import os", "print(os.name)"] },
+			{ language: "bash", lines: ["EOF", "ls"] },
+		]);
 	});
 });
