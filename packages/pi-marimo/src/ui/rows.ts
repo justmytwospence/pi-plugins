@@ -37,6 +37,8 @@ export interface RowOptions {
   width?: number;
   /** The indent of an output's rows (default: six spaces; the detail pane has none). */
   pad?: string;
+  /** The bar at the start of an output's rows (default: an accent `▍`); the detail dims it, or marks the focused part. */
+  bar?: string;
   /** Turns Vega-Lite chart outputs into images; `onVega` runs when one finishes. */
   vega?: VegaRenderer;
   plotly?: ChartRenderer;

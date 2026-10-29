@@ -28,7 +28,7 @@ test("^U/^D scroll the detail by half a page and the page keys by a whole one; j
     expect(text).toContain("▍ line 9");
     expect(text).toMatch(/▌○ long/u);
     view.handleInput("\x1b[6~");
-    expect(view.render(100).join("\n")).toContain("▸ code");
+    expect(view.render(100).join("\n")).toContain("│ x = 1");
     view.handleInput("\x15");
     view.handleInput("\x1b[5~");
     text = view.render(100).join("\n");
@@ -151,8 +151,10 @@ test("j/k move the cursor between cells; the detail shows the cell's output, fol
     expect(first).toMatch(/▌○ first/u);
     expect(first).toContain("▍ hi");
     expect(first).toContain("▍ value & more");
-    expect(first).toContain("▸ code · 2 lines");
-    expect(first).not.toContain("print('hi')");
+    // Folded: the first line, dim, and how many more.
+    expect(first).toContain("│ print('hi')  ⋯ +1");
+    expect(first).not.toContain("x = 1");
+    expect(v.render(100).slice(3, -3).join("\n")).not.toMatch(/\bcode\b/u);
     v.handleInput("j");
     expect(screen(v)).toMatch(/▌○ second/u);
     expect(screen(v)).not.toContain("▍ value & more");
@@ -160,11 +162,11 @@ test("j/k move the cursor between cells; the detail shows the cell's output, fol
     v.handleInput("\r");
     const open = screen(v);
     expect(open).toMatch(/▌○ first/u);
-    expect(open).toContain("▾ code");
-    expect(open).toContain("│ print('hi')");
+    expect(open).toContain("│ x = 1");
+    expect(open).not.toContain("⋯ +1");
     v.handleInput("\r");
-    expect(screen(v)).not.toContain("│ print('hi')");
-    expect(screen(v)).toContain("▸ code · 2 lines");
+    expect(screen(v)).not.toContain("│ x = 1");
+    expect(screen(v)).toContain("│ print('hi')  ⋯ +1");
   } finally { v.dispose(); }
 });
 
@@ -483,18 +485,25 @@ test("z folds the section the cursor is in, Z folds every one, [ and ] go betwee
     expect(screen(v)).not.toContain("c = 3");
     v.handleInput("[");
     expect(screen(v)).toMatch(/▌ One/u);
+    // Tab and Shift+Tab fold as z and Z do.
+    v.handleInput("\x1b[Z");
+    expect(screen(v)).toContain("a = 1");
+    v.handleInput("\t");
+    expect(screen(v)).toMatch(/▌ One {2}▸ 2 cells/u);
+    v.handleInput("\t");
+    expect(screen(v)).toContain("a = 1");
   } finally { v.dispose(); }
 });
 
-test("Shift+Tab goes to the previous notebook, Tab to the next", () => {
+test("{ goes to the previous notebook, } to the next", () => {
   const a = nbWith([{ id: "a", code: "x = 1" }]);
   const b = nbWith([{ id: "b", code: "y = 1" }]);
   b.attachment = { ...b.attachment, path: "/w/other.py" };
   const v = new NotebookView(tui as any, theme2, notebookKey(a), { followed: () => [a, b], interrupt: async () => {}, openInBrowser: () => {} }, () => {});
   try {
-    v.handleInput("\x1b[Z");
+    v.handleInput("{");
     expect(screen(v)).toContain("Notebook other.py");
-    v.handleInput("\t");
+    v.handleInput("}");
     expect(screen(v)).toContain("Notebook nb.py");
   } finally { v.dispose(); }
 });
@@ -510,14 +519,12 @@ test("the mouse: the wheel scrolls the pane under it, a click selects a cell, a 
     expect(v.handleMouse(ev("press", 7))).toEqual({ handled: true, render: false });
     v.handleMouse(ev("click", 7));
     expect(screen(v)).toMatch(/▌○ cell-7/u);
-    expect(screen(v)).not.toContain("▾ code");
+    expect(screen(v)).toContain("│ x = 1");
     v.handleMouse(ev("click", 7, { clickCount: 2 }));
     expect(screen(v)).toContain("│ x = 1");
-    // On the detail: the wheel scrolls it, a click on its code line folds the code.
-    v.handleMouse(ev("click", 7, { x: 60 }));
-    expect(screen(v)).toContain("▸ code · 1 line");
-    v.handleMouse(ev("click", 7, { x: 60 }));
-    expect(screen(v)).toContain("▾ code");
+    // On the detail: a click on the code folds or opens it (one line either way here).
+    const codeRow = v.render(100).findIndex((l) => l.includes("│ x = 1"));
+    expect(v.handleMouse(ev("click", codeRow, { x: 60 }))).toEqual({ handled: true });
     // Outside the rows, and moves, are left alone.
     expect(v.handleMouse(ev("click", 1))).toBeUndefined();
     expect(v.handleMouse(ev("move", 7, { button: "none" }))).toBeUndefined();
@@ -781,9 +788,9 @@ test("narrow, a few outline rows around the cursor sit above the detail, and the
     v.handleMouse(ev("click", row, { clickCount: 1 }));
     expect(v.render(80).join("\n")).toMatch(/▌ {2}○ chart/u);
     v.handleInput("k");
-    const code = v.render(80).findIndex((l) => l.includes("▾ code"));
+    const code = v.render(80).findIndex((l) => l.includes("│ model = boom(daily)"));
     v.handleMouse(ev("click", code));
-    expect(v.render(80).join("\n")).toContain("▸ code · 1 line");
+    expect(v.render(80).join("\n")).toContain("│ model = boom(daily)");
     // The wheel over the outline moves the cursor.
     v.handleMouse(ev("wheel", 4, { wheelDelta: 1 }));
     expect(v.render(80).join("\n")).toMatch(/▌ {2}○ chart/u);
@@ -801,11 +808,8 @@ test("the detail of a failed cell: its error, the traceback, the code folded to 
     expect(text).toMatch(/▌ {2}✗ model +KeyError/u);
     expect(text).toContain("KeyError: 'revenue'");
     expect(text).toContain("Traceback (most recent call last)");
-    expect(text).toContain("▸ code · 1 line");
-    expect(text).not.toContain("boom(daily)");
-    v.handleInput("\r");
-    expect(screen(v)).toContain("model = boom(daily)");
-    expect(screen(v)).toContain("▾ code");
+    expect(text).toContain("│ model = boom(daily)");
+    expect(v.render(100).slice(3, -3).join("\n")).not.toMatch(/\b(error|code|printed)\b/u);
   } finally { v.dispose(); }
 });
 
@@ -885,7 +889,7 @@ test("a view started from a state shows the same cell and code", () => {
   try {
     const text = screen(v);
     expect(text).toContain("▌○ cell-10");
-    expect(text).toContain("▾ code");
+    expect(text).toContain("│ x = 10");
   } finally { v.dispose(); }
 });
 
@@ -912,23 +916,26 @@ test("n and p walk a cell's parts and Enter acts on the focused one", () => {
   f.notebook.cells.get("a")!.error = "KeyError: k";
   const v = make(f, { setWidget: () => {} });
   try {
-    const focused = () => screen(v).split("\n").find((l) => l.includes("▌ ") && /error|printed|controls|code/u.test(l)) ?? "";
-    screen(v);
+    // The focused part's rows carry the accent bar; there are no labels.
+    const focused = () => screen(v).split("\n").filter((l) => / │ ▌ /u.test(l) || /^│ ▌ /u.test(l)).join("\n");
+    expect(v.render(100).slice(3, -3).map((l) => l.split(" │ ")[1] ?? "").join("\n")).not.toMatch(/\bprinted\b/u);
     v.handleInput("n");
-    expect(focused()).toContain("error");
+    expect(focused()).toContain("KeyError: k");
     v.handleInput("n");
-    expect(focused()).toContain("printed");
+    expect(focused()).toContain("one");
     v.handleInput("n");
-    expect(focused()).toContain("controls");
+    expect(focused()).toMatch(/◆ s/u);
     v.handleInput("n");
-    expect(focused()).toContain("code");
+    expect(focused()).toContain("x = 1");
+    expect(screen(v)).toContain("⋯ +1");
     v.handleInput("\r");
-    expect(screen(v)).toContain("▾ code");
+    expect(screen(v)).not.toContain("⋯ +1");
+    expect(screen(v)).toContain("print(x)");
     v.handleInput("p");
-    expect(focused()).toContain("controls");
+    expect(focused()).toMatch(/◆ s/u);
     v.handleInput("j");
     v.handleInput("k");
-    expect(screen(v)).not.toMatch(/▌ controls/u);
+    expect(focused()).toBe("");
   } finally { v.dispose(); }
 });
 
@@ -975,7 +982,7 @@ test("Enter on a markdown cell edits it and saves through editCell", () => {
   const editCell = vi.fn(async () => {});
   const v = make(f, { editCell });
   try {
-    expect(screen(v)).not.toContain("▸ code");
+    expect(screen(v)).not.toContain("│ mo.md");
     v.handleInput("\r");
     const text = screen(v);
     expect(text).toContain("Edit markdown");
@@ -996,5 +1003,36 @@ test("code has a background block when the theme has one", () => {
     const text = screen(v);
     expect(text).toContain("<toolPendingBg>");
     expect(text).not.toContain("│ y = 2");
+  } finally { v.dispose(); }
+});
+
+test("the mouse drives widgets: a press on a slider sets it and a drag moves it, a click toggles a checkbox, the wheel steps the focused one", () => {
+  const f = nbWith([{ id: "a", code: "n = mo.ui.slider(0, 10)" }]);
+  f.notebook.apply("cell-op", { cell_id: "a", status: "idle", output: { channel: "output", mimetype: "text/html", data: widgetHtml } });
+  const setWidget = vi.fn((g: Followed, cell: any, w: any, value: unknown) => g.notebook.setUserValue(cell.id, w.objectId, w.label, value));
+  const v = make(f, { setWidget });
+  const ev = (type: string, x: number, y: number, extra = {}) => ({ type, button: type === "wheel" ? "none" : "left", x, y, screenX: x, screenY: y, width: 100, height: 28, shift: false, alt: false, ctrl: false, ...extra }) as any;
+  try {
+    const lines = v.render(100);
+    const sliderRow = lines.findIndex((l) => l.includes("◆ n "));
+    const boxRow = lines.findIndex((l) => l.includes("◆ on "));
+    // Where the slider's bar starts: the line's text, from the frame's border.
+    const strip = (l: string) => l.replace(/\x1b\[[0-9;]*m/gu, "");
+    const barAt = strip(lines[sliderRow]!).indexOf("━");
+    // The press at the bar's last cell sets the top value and captures the drag.
+    expect(v.handleMouse(ev("press", barAt + 15, sliderRow))).toEqual({ handled: true, capture: true });
+    expect(setWidget).toHaveBeenLastCalledWith(f, expect.objectContaining({ id: "a" }), expect.objectContaining({ objectId: "a-0" }), 10);
+    v.handleMouse(ev("drag", barAt, sliderRow));
+    expect(setWidget).toHaveBeenLastCalledWith(f, expect.anything(), expect.objectContaining({ objectId: "a-0" }), 0);
+    v.handleMouse(ev("release", barAt, sliderRow));
+    // The wheel over the focused slider steps it; up is more.
+    v.handleMouse(ev("wheel", barAt, sliderRow, { wheelDelta: -1 }));
+    expect(setWidget).toHaveBeenLastCalledWith(f, expect.anything(), expect.objectContaining({ objectId: "a-0" }), 1);
+    // A click on the checkbox toggles it.
+    const boxAt = strip(v.render(100)[boxRow]!).indexOf("[x]");
+    v.handleMouse(ev("press", boxAt, boxRow));
+    v.handleMouse(ev("click", boxAt, boxRow));
+    expect(setWidget).toHaveBeenLastCalledWith(f, expect.anything(), expect.objectContaining({ objectId: "a-1" }), false);
+    expect(v.render(100).join("\n")).toContain("▸ on");
   } finally { v.dispose(); }
 });

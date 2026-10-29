@@ -40,7 +40,7 @@ import type { ScratchEvent, ScratchResult } from "./scratch.js";
 import { columnCard, rowCard, tableLines } from "./table.js";
 import { type TableRpc, type TableSession, parseFilter, tableSession } from "./table-session.js";
 import { variableList, variableRows } from "./variables.js";
-import { type WidgetAction, nextValue, typeable, typedValue, widgetValue } from "./widgets.js";
+import { type WidgetAction, nextValue, typeable, typedValue, widgetHit, widgetValue } from "./widgets.js";
 
 export { notebookLines, outlineRows } from "./outline.js";
 export { detailRows } from "./detail.js";
@@ -60,6 +60,8 @@ const stackedOutlineRows = (page: number): number => {
   const rows = Math.max(1, Math.min(9, Math.round(page * 0.3), page - 4));
   return rows % 2 ? rows : rows - 1;
 };
+/** Columns before a widget's line in the detail: the part's bar, a space, the widget's glyph and a space. */
+const WIDGET_TEXT = 4;
 /** Between the panes. */
 const SEPARATOR_WIDTH = 3;
 /** Lines of a scratch run shown above its prompt, at most. */
@@ -204,6 +206,8 @@ export class NotebookView implements Component {
   private table: { cell: string; objectId: string } | undefined;
   /** The widget the keys drive. */
   private widget: { cell: string; index: number; sub: number } | undefined;
+  /** A slider being dragged with the mouse. */
+  private dragging: { cell: string; index: number } | undefined;
   private help = false;
   private dock: Dock | undefined;
   private scratch: ScratchState | undefined;
@@ -747,8 +751,8 @@ export class NotebookView implements Component {
       this.reveal = true;
       return;
     }
-    if (matchesKey(data, "shift+tab")) { this.switchNotebook(-1); this.mode = "variables"; return; }
-    if (matchesKey(data, "tab")) { this.switchNotebook(1); this.mode = "variables"; return; }
+    if (data === "{") { this.switchNotebook(-1); this.mode = "variables"; return; }
+    if (data === "}") { this.switchNotebook(1); this.mode = "variables"; return; }
     if (data === "/") { this.typing = true; this.varFilter = ""; return; }
     if (matchesKey(data, "down") || data === "j") return moveTo(at + 1);
     if (matchesKey(data, "up") || data === "k") return moveTo(at - 1);
@@ -950,8 +954,8 @@ export class NotebookView implements Component {
     this.note = undefined;
     const nb = f?.notebook;
     this.syncPart();
-    if (matchesKey(data, "shift+tab")) this.switchNotebook(-1);
-    else if (matchesKey(data, "tab")) this.switchNotebook(1);
+    if (data === "{") this.switchNotebook(-1);
+    else if (data === "}") this.switchNotebook(1);
     else if (matchesKey(data, "o") && f) {
       this.actions.openInBrowser(f);
       this.note = "Opened in the browser.";
@@ -963,7 +967,7 @@ export class NotebookView implements Component {
       sectionMode = this.section;
       this.note = this.section ? "Section view: the whole section." : "Cell view.";
       this.reveal = true;
-    } else if (f && nb && data === "z") {
+    } else if (f && nb && (data === "z" || matchesKey(data, "tab"))) {
       const c = this.cursorCell(f);
       const cells = nb.ordered();
       const at = c ? cells.findIndex((x) => x.id === c.id) : -1;
@@ -975,7 +979,7 @@ export class NotebookView implements Component {
         this.follow = false;
         this.reveal = true;
       }
-    } else if (f && nb && data === "Z") {
+    } else if (f && nb && (data === "Z" || matchesKey(data, "shift+tab"))) {
       if (this.folded.size) this.folded.clear();
       else for (const c of nb.ordered()) if (nb.headings(c).length) this.folded.add(c.id);
       const c = this.cursorCell(f);
@@ -1414,15 +1418,72 @@ export class NotebookView implements Component {
   }
 
   /** A live chart takes the mouse over it; elsewhere the wheel scrolls the pane under it, a click selects, a double click opens the code. */
+  /** The widget under the pointer in the detail, and the column inside its line (after the bar and its glyph). */
+  private widgetAt(event: TuiMouseEvent): { f: Followed; cell: Cell; w: Widget; index: number; col: number } | undefined {
+    const f = this.current();
+    const line = event.y - ROWS_TOP;
+    if (!f || this.mode !== "cells" || this.paneAt(event.x, line) !== "detail") return undefined;
+    const r = this.lastDetail[this.detailScroll + line - this.panes.detailTop];
+    if (!r?.widget) return undefined;
+    const cell = f.notebook.cells.get(r.widget.cell);
+    const w = cell?.output?.widgets?.[r.widget.index];
+    return cell && w ? { f, cell, w, index: r.widget.index, col: event.x - this.panes.detailLeft - WIDGET_TEXT } : undefined;
+  }
+
+  /** A click (or a drag) on a widget: focuses it, and does what the click means at that place on its control. */
+  private clickWidget(at: { f: Followed; cell: Cell; w: Widget; index: number; col: number }, dragging = false): boolean {
+    const { f, cell, w, index } = at;
+    if (!this.actions.setWidget || f.connection !== "connected") return false;
+    const sub = this.widget?.cell === cell.id && this.widget.index === index ? this.widget.sub : 0;
+    this.widget = { cell: cell.id, index, sub };
+    if (!this.section) this.cursor = cell.id;
+    this.follow = false;
+    const hit = widgetHit(w, widgetValue(f.notebook, w), at.col);
+    if (!hit) return false;
+    if (w.disabled) { this.note = "This widget is disabled."; return false; }
+    if ("type" in hit) { if (!dragging) this.openValue(f, cell, w); return false; }
+    if ("value" in hit) {
+      if (hit.sub !== undefined) this.widget.sub = hit.sub;
+      this.actions.setWidget(f, cell, w, hit.value);
+      return hit.drag === true;
+    }
+    if (dragging) return false;
+    const next = nextValue(w, widgetValue(f.notebook, w), hit.action, this.widget.sub);
+    if (next) {
+      this.widget.sub = next.sub;
+      if (next.send) this.actions.setWidget(f, cell, w, next.value);
+    }
+    return false;
+  }
+
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     const live = this.live.mouse(event);
     if (live) return live;
     if (this.closed) return undefined;
+    // A slider dragged with the mouse follows it until the button goes up.
+    if (this.dragging && (event.type === "drag" || event.type === "release")) {
+      const at = this.widgetAt({ ...event, y: Math.max(ROWS_TOP, event.y) });
+      const f = this.current();
+      const cell = f?.notebook.cells.get(this.dragging.cell);
+      const w = cell?.output?.widgets?.[this.dragging.index];
+      if (f && cell && w) this.clickWidget({ f, cell, w, index: this.dragging.index, col: at?.cell.id === cell.id && at.index === this.dragging.index ? at.col : event.x - this.panes.detailLeft - WIDGET_TEXT }, true);
+      if (event.type === "release") this.dragging = undefined;
+      this.tui.requestRender();
+      return { handled: true };
+    }
     if (event.type === "wheel") {
       if (this.help || this.dock) return { handled: true };
       const by = event.wheelDelta ?? 0;
       const pane = this.mode === "cells" ? this.paneAt(event.x, event.y - ROWS_TOP) : undefined;
       const f = this.current();
+      // Over the focused widget the wheel changes it (up: more); elsewhere it scrolls.
+      const over = this.widgetAt(event);
+      if (over && by && this.widget?.cell === over.cell.id && this.widget.index === over.index && this.actions.setWidget && !over.w.disabled) {
+        const next = nextValue(over.w, widgetValue(over.f.notebook, over.w), by < 0 ? "inc" : "dec", this.widget.sub);
+        if (next?.send) this.actions.setWidget(over.f, over.cell, over.w, next.value);
+        this.tui.requestRender();
+        return { handled: true };
+      }
       if (pane === "detail") this.detailScroll = Math.max(0, this.detailScroll + by);
       // The stacked outline is centred on the cursor: the wheel moves the cursor.
       else if (pane === "outline" && this.panes.shows === "stacked") { if (f && by) this.step(f, by > 0 ? 1 : -1); }
@@ -1431,8 +1492,17 @@ export class NotebookView implements Component {
       return { handled: true };
     }
     if (event.button !== "left" || event.y < ROWS_TOP || event.y >= ROWS_TOP + this.lastPage) return undefined;
-    // Pi turns a press and release into a click only for the component that took the press.
-    if (event.type === "press") return { handled: true, render: false };
+    if (event.type === "press") {
+      // A press on a slider's bar sets it there and drags it from then on.
+      const at = this.dock || this.help ? undefined : this.widgetAt(event);
+      if (at && at.w.kind.endsWith("slider") && this.clickWidget(at)) {
+        this.dragging = { cell: at.cell.id, index: at.index };
+        this.tui.requestRender();
+        return { handled: true, capture: true };
+      }
+      // Pi turns a press and release into a click only for the component that took the press.
+      return { handled: true, render: false };
+    }
     if (event.type !== "click") return undefined;
     if (this.help) {
       this.help = false;
@@ -1460,9 +1530,10 @@ export class NotebookView implements Component {
         this.part = r.part;
         if (twice) this.activate(f);
       } else if (r?.widget && this.actions.setWidget && f.connection === "connected") {
-        this.widget = { cell: r.widget.cell, index: r.widget.index, sub: 0 };
-        if (!this.section) this.cursor = r.widget.cell;
-        this.follow = false;
+        const at = this.widgetAt(event);
+        // A slider was set by its press already.
+        if (at && !(at.w.kind.endsWith("slider") && widgetHit(at.w, widgetValue(f.notebook, at.w), at.col))) this.clickWidget(at);
+        else if (at) this.widget = { cell: at.cell.id, index: at.index, sub: this.widget?.sub ?? 0 };
       } else if (r?.code) {
         const c = this.cursorCell(f);
         if (r.part !== undefined) this.part = r.part;

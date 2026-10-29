@@ -32,7 +32,7 @@ function inlineImage(output: CellOutput, theme: FrameTheme, pad: string, opts: R
   }
   const lines = held.img.render(cols);
   if (!lines.some((l) => l.includes("\x1b_G"))) return undefined;
-  const bar = `${pad}${theme.fg("accent", "▍")} `;
+  const bar = `${pad}${opts.bar ?? theme.fg("accent", "▍")} `;
   const alt = `${bar}${theme.fg("dim", "[image png: scroll until it fits on screen]")}`;
   return lines.map((line, index) => ({ text: index === 0 ? `${bar}${line}` : bar.trimEnd(), image: { index, height: lines.length, alt } }));
 }
@@ -61,7 +61,7 @@ export function outputRows(cell: Cell, theme: FrameTheme, opts: RowOptions, limi
     const geometry = liveGeometry(imageCols(opts, pad), opts.imageRows ?? IMAGE_ROWS);
     const state = opts.live.state(output, output.plotly, geometry);
     if (state.status === "ready") {
-      const bar = `${pad}${theme.fg("accent", "▍")} `;
+      const bar = `${pad}${opts.bar ?? theme.fg("accent", "▍")} `;
       const alt = `${bar}${theme.fg("dim", "[chart: scroll until it fits on screen]")}`;
       const lines = opts.live.lines(state);
       out.push(...lines.map((line, index): Row => ({ text: index === 0 ? `${bar}${line}` : bar.trimEnd(), image: { index, height: lines.length, alt, live: { output, geometry: state.geometry } } })));
@@ -83,16 +83,16 @@ export function outputRows(cell: Cell, theme: FrameTheme, opts: RowOptions, limi
     const driven = opts.table?.(cell) ?? { data: output.table };
     const data = driven.data;
     const have = data.records?.length ? data.records.length : data.rows.length;
-    if (!have && (data.dataRef || data.lazy)) push(`${pad}${theme.fg("accent", "▍")} ${theme.fg("dim", "loading table…")}`);
+    if (!have && (data.dataRef || data.lazy)) push(`${pad}${opts.bar ?? theme.fg("accent", "▍")} ${theme.fg("dim", "loading table…")}`);
     else {
       const grid = tableGrid(data, (opts.width ?? 80) - pad.length - 2, theme, Math.min(limits.tableRows, Math.max(1, have)), driven.render);
-      grid.lines.forEach((line, i) => out.push({ text: `${pad}${theme.fg("accent", "▍")} ${line}`, ...(grid.rowAt[i] !== undefined ? { tableRow: grid.rowAt[i]! } : {}) }));
+      grid.lines.forEach((line, i) => out.push({ text: `${pad}${opts.bar ?? theme.fg("accent", "▍")} ${line}`, ...(grid.rowAt[i] !== undefined ? { tableRow: grid.rowAt[i]! } : {}) }));
     }
   } else if (output && !(output.kind === "widgets" && !output.text)) {
     const text = output.kind === "text" || output.kind === "other" ? output.text : theme.fg("dim", chartNote ?? output.text);
     const lines = text.split("\n");
-    for (const line of lines.slice(0, limits.textLines)) push(`${pad}${theme.fg("accent", "▍")} ${clean(line)}`);
-    if (lines.length > limits.textLines) push(`${pad}${theme.fg("dim", `▍ … ${lines.length - limits.textLines} more lines`)}`);
+    for (const line of lines.slice(0, limits.textLines)) push(`${pad}${opts.bar ?? theme.fg("accent", "▍")} ${clean(line)}`);
+    if (lines.length > limits.textLines) push(`${pad}${opts.bar ?? theme.fg("dim", "▍")} ${theme.fg("dim", `… ${lines.length - limits.textLines} more lines`)}`);
   }
   return out;
 }

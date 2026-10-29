@@ -102,7 +102,7 @@ An example (not a real screenshot):
 │      Data                      │ ▍ day         drink      cups  weekend      │
 │ ▌  ○ drinks, sales       450×4 │ ▍ 2026-01-01  latte        63  false        │
 │      Controls                  │ ▍ 10 of 450 rows · 4 columns                │
-│     ○ drink, title +2 4 inputs │ ▸ code · 8 lines                            │
+│     ○ drink, title +2 4 inputs │   sales = load_sales()  ⋯ +7                │
 │     ✗ forecast        KeyError │                                             │
 │ ──────────────────────────────────────────────────────────────────────────── │
 │ ↑↓ cells · enter code · e next error                       ? keys · esc back │
@@ -119,7 +119,7 @@ An example (not a real screenshot):
 | `Enter`, `l` | Act on the focused part; otherwise open or fold the code, or edit a markdown cell |
 | `t` | Drive the cell's marimo table |
 | `O` | The whole section in the detail, or the cell alone |
-| `z` / `Z` | Fold the section at the cursor; fold every section (again: unfold all) |
+| `Tab` (`z`), `Shift+Tab` (`Z`) | Fold the section at the cursor; fold every section (again: unfold all) |
 | `e` / `E` | The next or previous failed cell |
 | `c` / `C`, `d` | The next or previous cell the agent changed since your last message; its diff |
 | `<` / `>` | Upstream and downstream cells in the dataflow |
@@ -134,7 +134,7 @@ An example (not a real screenshot):
 | `m`, `M` | Mark the cell for the agent through Lens; remove its mark (press twice) |
 | `i` | Drive the selected cell's live chart from the keyboard |
 | `S` | Press twice to stop the server (pi-bg's, or one Pi started) |
-| `Tab`, `Shift+Tab`, `o` | Next and previous notebook; open in the browser |
+| `}`, `{`, `o` | Next and previous notebook; open in the browser |
 | `?` | Every key |
 | `Esc`, `q`, `h` | Back to Pi |
 
@@ -154,7 +154,7 @@ The observation connection is a read-only kiosk SSE consumer: it neither edits c
 
 - **Ask (`a`):** a prompt docked at the bottom of the view (pi-vim's editor when loaded) sends the main agent your message with the notebook, cell, section, Lens selections and marimo-pair flags; as a follow-up while the agent works. The view stays open; the header says `agent working`.
 - **The agent's changes:** cells changed through marimo-pair since your last message are marked and counted (`agent: 2 changed · 1 new · 1 removed`); `c`/`C` jump to them, `d` shows the diff, removed cells are listed at the end. Any agent using marimo-pair counts. They clear with your next prompt.
-- **Widgets (`w`):** sliders, numbers, ranges, dropdowns, radios, multiselects, checkboxes, switches, text, dates and buttons: `j`/`k` pick, `h`/`l` change (`H`/`L` ten steps), Space toggles or presses, Enter types a value. Changes go to the kernel as in the browser, so dependent cells rerun, and the next context names them. Values changed in a browser show after a reconnect.
+- **Widgets (`w`):** sliders, numbers, ranges, dropdowns, radios, multiselects, checkboxes, switches, text, dates and buttons: `j`/`k` pick, `h`/`l` change (`H`/`L` ten steps), Space toggles or presses, Enter types a value. With the mouse, press and drag a slider, click a checkbox, button, option or arrow, and use the wheel on the focused widget. Changes go to the kernel as in the browser, so dependent cells rerun, and the next context names them. Values changed in a browser show after a reconnect.
 - **Scratchpad (`:`):** Python against the notebook's globals in marimo's scratchpad (as `marimo pair execute` runs it); nothing is saved. Output streams above the prompt, then the result. Esc during a run cancels it, and marimo interrupts the kernel.
 - **Lens marks (`m`):** see marimo-lens selections above.
 

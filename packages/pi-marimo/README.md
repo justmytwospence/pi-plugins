@@ -88,7 +88,7 @@ From 100 columns the panes sit side by side. Narrower (as when docked beside the
 │      Data                      │ ▍ day         drink      cups  weekend      │
 │ ▌  ○ drinks, sales       450×4 │ ▍ 2026-01-01  latte        63  false        │
 │      Controls                  │ ▍ 10 of 450 rows · 4 columns                │
-│     ○ drink, title +2 4 inputs │ ▸ code · 8 lines                            │
+│     ○ drink, title +2 4 inputs │   sales = load_sales()  ⋯ +7                │
 │     ✗ forecast        KeyError │                                             │
 │ ──────────────────────────────────────────────────────────────────────────── │
 │ ↑↓ cells · enter code · e next error                       ? keys · esc back │
@@ -100,12 +100,12 @@ From 100 columns the panes sit side by side. Narrower (as when docked beside the
 |---|---|
 | `j`/`k`, `↑`/`↓` | the next or previous cell |
 | `ctrl+j`/`ctrl+k` (or `]` `[`) | the next or previous section |
-| `n`/`p` | the next or previous part of the cell: error, printed output, output, controls, code (each markdown cell of a section); the focused part is marked with an accent bar |
+| `n`/`p` | the next or previous part of the cell: error, printed output, output, controls, code (each markdown cell of a section); nothing is labeled: each part has a bar in its first column, and the focused one's turns into the accent `▌` |
 | `^U`/`^D`, PgUp/PgDn, Space | scroll the detail; `g`/`G` the first or last cell |
 | Enter, `l` | act on the focused part: open a table, a live chart or the controls, fold the code; with no part focused, open or fold the code, or edit a markdown cell |
 | `t` | drive the cell's marimo table (below) |
 | `O` | the whole section in the detail, or the cell alone |
-| `z` / `Z` | fold the section the cursor is in / fold every section (again: unfold all) |
+| Tab (`z`) / Shift+Tab (`Z`) | fold the section the cursor is in / fold every section (again: unfold all) |
 | `e`/`E` | the next or previous failed cell |
 | `c`/`C`, `d` | the next or previous cell the agent changed; its diff |
 | `<` / `>` | a cell this one uses (upstream), one that uses it (downstream) |
@@ -121,16 +121,16 @@ From 100 columns the panes sit side by side. Narrower (as when docked beside the
 | `i` | drive the selected cell's live chart from the keyboard |
 | `o` | open the notebook in the browser |
 | `S` | twice: stop the server (pi-bg's, or one Pi started) |
-| Tab, Shift+Tab | the next or previous notebook |
+| `}`, `{` | the next or previous notebook |
 | `?` | every key |
 | `\|` | dock beside the chat, or back to full screen |
 | `ctrl+]` | docked: switch between the chat and the notebook |
 | `ctrl+'` | anywhere: dock the notebook this session uses, or close the docked one (pi-sidebar's key; with no notebook, or Sidebar open, it stays Sidebar's) |
 | Esc, `q`, `h`, `←`, Ctrl+C | back to Pi (docked: Esc goes to the chat, `q` closes) |
 
-The mouse wheel scrolls the pane under it, a click selects a cell (or a widget, or a part), a second click or a double click acts on it, and a click on the `▸ code` line folds or opens it.
+The mouse wheel scrolls the pane under it, a click selects a cell (or a widget, or a part), a second click or a double click acts on it, and a click on the code folds or opens it.
 
-An open cell's code is drawn as a block on Pi's pending-tool background (the `│` gutter where the theme has no background).
+A cell's code is a block on Pi's pending-tool background (a `│` gutter where the theme has none): folded, it is its first line, dimmed, with `⋯ +N` for the rest; Enter or a click opens it. Nothing in the detail is labeled; the parts read by their design: an error's red bar, a printed line's dim bar, an output's bar, the widgets' `◆`, the code's background.
 
 #### Tables
 
@@ -164,7 +164,7 @@ The chat reflows into its half, so you keep typing while the notebook runs. `ctr
 
 - **Ask the agent (`a`).** A prompt docks at the bottom of the view (pi-vim's editor when it is loaded, else Pi's). Enter sends your message to the main agent with where you were looking: `(From pi-marimo's notebook view: about cell Hbol "fit" under "Model fit" in notebooks/fit.py. marimo-pair: --url … --file …)`. It goes in as a follow-up when the agent is working. The view stays open, so you watch the agent work through the notebook; the header says `agent working`.
 - **The agent's changes.** Cells the agent changed through marimo-pair since your last message are marked (`changed by the agent`, `new from the agent`), counted in the header (`agent: 2 changed · 1 new · 1 removed`) and listed at the end when removed. `c`/`C` go to them, `d` shows a change as a diff. Any agent using marimo-pair counts, as marimo cannot tell sessions apart. They clear with your next prompt.
-- **Widgets (`w`).** Sliders, numbers, range sliders, dropdowns, radios, multiselects, checkboxes, switches, text, dates and buttons can be driven from the view: `j`/`k` (or Tab) pick one, `h`/`l` change it (`H`/`L` ten steps), Space toggles or presses, Enter types a value; Esc is done. Each change reaches the kernel as moving it in the browser does (`set_ui_element_value`), so the cells that read it rerun, and the next context tells the agent what you set. Other widgets are named, with `o` to open the browser.
+- **Widgets (`w`).** Sliders, numbers, range sliders, dropdowns, radios, multiselects, checkboxes, switches, text, dates and buttons can be driven from the view: `j`/`k` (or Tab) pick one, `h`/`l` change it (`H`/`L` ten steps), Space toggles or presses, Enter types a value; Esc is done. The mouse works too: press on a slider's bar sets it there and dragging moves it, a click toggles a checkbox or switch, presses a button, steps a number or a choice on its `‹` `›`, toggles a multiselect's option, and opens the prompt for a text or date; the wheel over the focused widget steps it. Each change reaches the kernel as moving it in the browser does (`set_ui_element_value`), so the cells that read it rerun, and the next context tells the agent what you set. Other widgets are named, with `o` to open the browser.
 - **Scratchpad (`:`).** Python against the notebook's globals, in marimo's scratchpad (the endpoint `marimo pair execute` uses): nothing is saved and no cell changes. What it prints streams above the prompt, then its result (a table as a grid). Enter runs, the prompt stays for the next line; Esc while it runs cancels it, which makes marimo interrupt the kernel.
 - **Lens marks (`m`).** With a Lens in the notebook (marimo-lens mounts one when it is installed), `m` asks for a note and makes a real Lens selection on the cell, with its picture when Pi has one (a PNG, or a chart Pi drew). It is Lens's like one made in the browser: it shows in the footer, the context and the browser, the agent's Lens skill reads and resolves it, and pi-next-prompt offers `Use Lens to address S3 in fit.py`. `M` twice removes the cell's latest selection. Without a Lens, `m` says so; `a` then asks about the cell instead.
 
@@ -274,7 +274,6 @@ A Lens selection you make while Pi is idle offers `Use Lens to address S1 in fit
 ## Limitations
 
 - Cells are changed by the agent only (through marimo-pair); the view runs, interrupts, sets widgets, runs scratch code and makes Lens selections, and never edits code.
-- Tables show the first page marimo sends; no paging, sorting or filtering.
 - Widget values changed in a browser show in the view after a reconnect (marimo sends kiosk viewers no live widget values); the ones set from Pi show at once.
 - The agent's changes are any code-mode change, whichever agent made it.
 - In `auto` mode, at most `maxNotebooks` notebooks are followed, only those under Pi's working directory, outside hidden directories and other Git repositories below it, plus the ones opened with `/marimo edit|new`.

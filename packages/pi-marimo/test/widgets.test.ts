@@ -1,7 +1,7 @@
 import { afterEach, expect, test, vi } from "vitest";
 import type { Widget } from "../src/core/output.js";
 import { NotebookState } from "../src/core/notebook.js";
-import { WidgetSender, nextValue, typedValue, widgetLine, widgetValue } from "../src/ui/widgets.js";
+import { WidgetSender, nextValue, typedValue, widgetHit, widgetLine, widgetValue } from "../src/ui/widgets.js";
 
 const theme = { fg: (_: string, text: string) => text, bold: (text: string) => text };
 const w = (over: Partial<Widget>): Widget => ({ objectId: "a-0", kind: "slider", tag: "marimo-slider", label: "n", initial: 3, options: [], steps: [], disabled: false, ...over });
@@ -66,4 +66,28 @@ test("the sender sends only a widget's last value, after the delay", async () =>
   await vi.advanceTimersByTimeAsync(130);
   expect(sent).toEqual([["a-1", true], ["a-0", 3]]);
   sender.dispose();
+});
+
+test("a click on a widget's line: where on its control says what it does", () => {
+  // `n  ` is the label: clicks there only focus.
+  expect(widgetHit(w({ start: 0, stop: 10 }), 3, 1)).toBeUndefined();
+  expect(widgetHit(w({ start: 0, stop: 10 }), 3, 3)).toEqual({ value: 0, drag: true });
+  expect(widgetHit(w({ start: 0, stop: 10 }), 3, 3 + 15)).toEqual({ value: 10, drag: true });
+  expect(widgetHit(w({ start: 0, stop: 100, steps: [1, 5, 10, 50] }), 5, 3 + 15)).toEqual({ value: 50, drag: true });
+  // The nearer knob of a range moves.
+  expect(widgetHit(w({ kind: "range-slider", start: 0, stop: 10 }), [2, 8], 3 + 14)).toEqual({ value: [2, 9], sub: 1, drag: true });
+  // ‹ 5 ›: the arrows step, the number is typed.
+  const num = w({ kind: "number", label: "", start: 0, stop: 10 });
+  expect(widgetHit(num, 5, 0)).toEqual({ action: "dec" });
+  expect(widgetHit(num, 5, 2)).toEqual({ type: true });
+  expect(widgetHit(num, 5, 4)).toEqual({ action: "inc" });
+  const drop = w({ kind: "dropdown", label: "", options: ["a", "bb"] });
+  expect(widgetHit(drop, ["bb"], 0)).toEqual({ action: "dec" });
+  expect(widgetHit(drop, ["bb"], 5)).toEqual({ action: "inc" });
+  // A multiselect's option toggles where it is drawn.
+  const multi = w({ kind: "multiselect", label: "", options: ["x", "yy", "z"] });
+  expect(widgetHit(multi, ["yy"], 3)).toEqual({ value: [], sub: 1 });
+  expect(widgetHit(multi, ["yy"], 7)).toEqual({ value: ["yy", "z"], sub: 2 });
+  expect(widgetHit(w({ kind: "checkbox", label: "" }), true, 1)).toEqual({ action: "toggle" });
+  expect(widgetHit(w({ kind: "text", label: "" }), "hi", 1)).toEqual({ type: true });
 });

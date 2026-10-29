@@ -5,6 +5,7 @@ import type { NotebookState } from "../core/notebook.js";
 import { truncate } from "../core/notebook.js";
 import type { Widget } from "../core/output.js";
 import type { FrameTheme } from "../frame.ts";
+import { visibleWidth } from "@earendil-works/pi-tui";
 
 /** The widget's current value: the one set since it was created (from Pi, or replayed by marimo), else its initial one. */
 export function widgetValue(nb: NotebookState, w: Widget): unknown {
@@ -177,6 +178,77 @@ export function nextValue(w: Widget, value: unknown, action: WidgetAction, sub: 
     case "button":
       if (action === "dec" || action === "dec10") return undefined;
       return { value: (Number(value) || 0) + 1, sub, send: true };
+    default:
+      return undefined;
+  }
+}
+
+/** A slider's value at a place along its bar (0..1): a step of its own, or a multiple of its step. */
+function valueAt(w: Widget, p: number): number {
+  const q = Math.max(0, Math.min(1, p));
+  if (w.steps.length > 1) return w.steps[Math.round(q * (w.steps.length - 1))]!;
+  const start = w.start ?? 0;
+  const stop = w.stop ?? 1;
+  const step = w.step ?? (Number.isInteger(start) && Number.isInteger(stop) && stop - start >= 10 ? 1 : (stop - start) / 100);
+  const raw = start + q * (stop - start);
+  const snapped = step > 0 ? start + Math.round((raw - start) / step) * step : raw;
+  return Number(Math.max(start, Math.min(stop, snapped)).toFixed(Math.max(decimals(step), decimals(start))));
+}
+
+/** What a click does at a column of a widget's line (as widgetLine draws it, from its first column). */
+export type WidgetHit =
+  | { action: WidgetAction; sub?: number }
+  | { value: unknown; sub?: number; drag?: boolean }
+  | { type: true };
+
+export function widgetHit(w: Widget, value: unknown, col: number): WidgetHit | undefined {
+  const label = w.label && w.kind !== "button" ? visibleWidth(w.label) + 2 : 0;
+  const c = col - label;
+  if (c < 0) return undefined;
+  switch (w.kind) {
+    case "slider":
+      return c < BAR ? { value: valueAt(w, c / (BAR - 1)), drag: true } : undefined;
+    case "range-slider": {
+      if (c >= BAR) return undefined;
+      const pair = Array.isArray(value) ? value.map((x) => Number(x) || 0) : [w.start ?? 0, w.stop ?? 0];
+      const v = valueAt(w, c / (BAR - 1));
+      // The nearer knob moves, and never past the other.
+      const h = Math.abs(v - pair[0]!) <= Math.abs(v - pair[1]!) ? 0 : 1;
+      const next = [...pair];
+      next[h] = h === 0 ? Math.min(v, pair[1]!) : Math.max(v, pair[0]!);
+      return { value: next, sub: h, drag: true };
+    }
+    case "number": {
+      const end = 2 + visibleWidth(fmt(value)) + 1;
+      return c <= 1 ? { action: "dec" } : c >= end && c <= end + 1 ? { action: "inc" } : c < end ? { type: true } : undefined;
+    }
+    case "checkbox":
+      return c < 3 ? { action: "toggle" } : undefined;
+    case "switch":
+      return c < 5 ? { action: "toggle" } : undefined;
+    case "text":
+    case "text-area":
+    case "date":
+      return { type: true };
+    case "dropdown":
+    case "radio": {
+      const current = w.kind === "dropdown" ? (Array.isArray(value) ? value[0] : undefined) : value;
+      const end = 2 + visibleWidth(current === undefined || current === null ? "none" : String(current)) + 1;
+      return c <= 1 ? { action: "dec" } : c <= end + 1 ? { action: "inc" } : undefined;
+    }
+    case "multiselect": {
+      const chosen = new Set(Array.isArray(value) ? value.map(String) : []);
+      let at = 0;
+      for (let i = 0; i < w.options.length; i++) {
+        const o = w.options[i]!;
+        const len = visibleWidth(chosen.has(o) ? `[${o}]` : o);
+        if (c >= at && c < at + len) return { value: chosen.has(o) ? [...chosen].filter((x) => x !== o) : [...chosen, o], sub: i };
+        at += len + 1;
+      }
+      return undefined;
+    }
+    case "button":
+      return c < visibleWidth(`[ ${w.label || "button"} ]`) ? { action: "toggle" } : undefined;
     default:
       return undefined;
   }
