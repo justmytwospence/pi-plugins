@@ -305,13 +305,58 @@ test("a Plotly figure is drawn through its own renderer", async () => {
   f.notebook.apply("cell-op", { cell_id: "a", status: "idle", output: { channel: "output", mimetype: "text/html", data: `<marimo-plotly data-figure='{&quot;data&quot;:[],&quot;layout&quot;:{}}'></marimo-plotly>` } });
   const asked: string[] = [];
   const plotly = new ChartRenderer(async (spec) => { asked.push(spec); return png; });
-  const v = new NotebookView(tui as any, theme2, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {} }, () => {}, undefined, plotly);
+  // The live browser is unavailable, so the figure falls back to the static render.
+  const { LiveCharts } = await import("../src/ui/live-charts.js");
+  const noLive = new LiveCharts(() => {}, () => ({ stop() {} }) as any, async () => { throw new Error("no browser"); });
+  const v = new NotebookView(tui as any, theme2, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {} }, () => {}, undefined, plotly, noLive);
   try {
     setCapabilities({ images: "kitty", trueColor: true, hyperlinks: false } as any);
     v.handleInput("l");
     v.render(100);
     await new Promise((r) => setTimeout(r, 0));
+    v.render(100);
+    await new Promise((r) => setTimeout(r, 0));
     expect(asked).toEqual(['{"data":[],"layout":{}}']);
     expect(v.render(100).filter((l) => l.includes("\x1b_G"))).toHaveLength(1);
+  } finally { v.dispose(); setCapabilities({ images: null, trueColor: true, hyperlinks: false } as any); }
+});
+
+test("a live Plotly chart is drawn from its page's frames, and the mouse over it goes to that page", async () => {
+  const { setCapabilities, setCellDimensions } = await import("@earendil-works/pi-tui");
+  const { LiveCharts } = await import("../src/ui/live-charts.js");
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAAFUlEQVR42mP8z8BQz0AEYBxVSF+FABJADveWkH6oAAAAAElFTkSuQmCC";
+  setCellDimensions({ widthPx: 9, heightPx: 18 });
+  setCapabilities({ images: "kitty", trueColor: true, hyperlinks: false } as any);
+  const f = nbWith([{ id: "a", code: "fig" }]);
+  f.notebook.apply("cell-op", { cell_id: "a", status: "idle", output: { channel: "output", mimetype: "text/html", data: `<marimo-plotly data-figure='{&quot;data&quot;:[],&quot;layout&quot;:{}}'></marimo-plotly>` } });
+  const events: any[] = [];
+  let closed = false;
+  const live = new LiveCharts(() => {}, () => ({ stop() {} }) as any, async () => ({ frame: png, pointer: (p: any) => events.push(p), close: () => { closed = true; } }));
+  const v = new NotebookView(tui as any, theme2, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {} }, () => {}, undefined, undefined, live);
+  try {
+    v.handleInput("l");
+    expect(screen(v)).toContain("starting");
+    await new Promise((r) => setTimeout(r, 0));
+    const shown = v.render(100);
+    expect(shown.filter((l) => l.includes("\x1b_G"))).toHaveLength(1);
+    expect(live.rects).toHaveLength(1);
+    const r = live.rects[0]!;
+    expect(shown[r.top]).toContain("\x1b_G");
+    expect(shown.every((l) => visibleWidth(l) === 100)).toBe(true);
+    const ev = (type: string, x: number, y: number, extra = {}) => ({ type, button: "left", x, y, screenX: x, screenY: y, width: 100, height: 40, shift: false, alt: false, ctrl: false, ...extra }) as any;
+    // Hover inside the chart reaches the page, in cells from its corner; outside it is left alone.
+    expect(v.handleMouse(ev("move", r.left + 3, r.top + 2, { button: "none" }))).toEqual({ handled: true });
+    expect(events.at(-1)).toMatchObject({ type: "move", x: 3.5, y: 2.5 });
+    expect(v.handleMouse(ev("move", 0, 0, { button: "none" }))).toBeUndefined();
+    // A press captures the drag, which keeps going when the pointer leaves the chart.
+    expect(v.handleMouse(ev("press", r.left + 1, r.top + 1))).toEqual({ handled: true, capture: true });
+    expect(v.handleMouse(ev("drag", 0, 0))).toEqual({ handled: true });
+    expect(events.at(-1)).toMatchObject({ type: "drag" });
+    v.handleMouse(ev("release", 0, 0));
+    expect(v.handleMouse(ev("move", 0, 0, { button: "none" }))).toBeUndefined();
+    // Collapsing the cell closes its page.
+    v.handleInput("l");
+    v.render(100);
+    expect(closed).toBe(true);
   } finally { v.dispose(); setCapabilities({ images: null, trueColor: true, hyperlinks: false } as any); }
 });

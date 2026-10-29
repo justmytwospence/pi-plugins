@@ -7,11 +7,13 @@
 //   or code (Esc clears); r runs the cell, R every stale cell, A every cell (the last two need
 //   pressing twice); x twice interrupts the kernel; o opens the notebook in the browser;
 //   Tab goes to the next followed notebook; Esc, q, ← or h goes back.
-import { type Component, Image, type TUI, getCapabilities, matchesKey, visibleWidth } from "@earendil-works/pi-tui";
+import { type Component, Image, type TUI, type TuiMouseEvent, type TuiMouseEventResult, getCapabilities, matchesKey, visibleWidth } from "@earendil-works/pi-tui";
 import { basename } from "../core/io.js";
 import type { CellOutput } from "../core/output.js";
 import { ChartRenderer, VegaRenderer as VegaRendererImpl, type VegaRenderer } from "../core/vega.js";
 import { sharedPlotly } from "../core/plotly.js";
+import { LiveCharts, type LiveRect, frameLines, liveGeometry } from "./live-charts.js";
+import type { Geometry } from "../core/live.js";
 import type { Cell, NotebookState } from "../core/notebook.js";
 import { elapsed } from "../core/render.js";
 import { truncate } from "../core/notebook.js";
@@ -27,6 +29,8 @@ const CHROME = 8;
 const MAX_CODE_LINES = 40;
 const MAX_OUTPUT_LINES = 30;
 const TICK_MS = 1_000;
+/** The column a cell's image starts at: the frame's border and space, then the cell's six-space indent, bar and space. */
+const LIVE_LEFT = 2 + 6 + 2;
 
 export interface ViewActions {
   /** The notebooks followed now. */
@@ -50,7 +54,7 @@ export interface Row {
   text: string;
   cell?: string;
   /** One line of an inline image: its place in the block, the block's height, and what shows when the block is not fully on screen. */
-  image?: { index: number; height: number; alt: string };
+  image?: { index: number; height: number; alt: string; live?: { output: CellOutput; geometry: Geometry } };
 }
 
 /** Cells the inline image of an output may be wide, and high at most. */
@@ -69,6 +73,8 @@ export interface RowOptions {
   /** Turns Vega-Lite chart outputs into images; `onVega` runs when one finishes. */
   vega?: VegaRenderer;
   plotly?: ChartRenderer;
+  /** Runs charts live in a browser page the mouse can drive; a chart it cannot run falls back to the static image. */
+  live?: LiveCharts;
   onVega?: () => void;
 }
 
@@ -111,8 +117,20 @@ function expandedRows(cell: Cell, theme: FrameTheme, opts: RowOptions = {}): Arr
   for (const l of printed) out.push(`${pad}${theme.fg("dim", "▍")} ${l.stream === "stderr" ? theme.fg("warning", clean(l.text)) : clean(l.text)}`);
   const output = cell.output;
   let chartNote: string | undefined;
+  if (output?.plotly && opts.live && getCapabilities().images === "kitty" && (opts.imageRows ?? IMAGE_ROWS) >= 4) {
+    const geometry = liveGeometry(Math.min(IMAGE_WIDTH, (opts.width ?? 80) - 12), Math.min(IMAGE_ROWS, opts.imageRows ?? IMAGE_ROWS));
+    const state = opts.live.state(output, output.plotly, geometry);
+    if (state.status === "ready") {
+      const bar = `${pad}${theme.fg("accent", "▍")} `;
+      const alt = `${bar}${theme.fg("dim", "[chart: scroll until it fits on screen]")}`;
+      const lines = frameLines(state.frame, state.geometry, state.imageId);
+      out.push(...lines.map((line, index): Row => ({ text: index === 0 ? `${bar}${line}` : bar.trimEnd(), image: { index, height: lines.length, alt, live: { output, geometry: state.geometry } } })));
+      return out;
+    }
+    if (state.status === "opening") chartNote = "[chart: starting…]";
+  }
   const chart = output?.vega ? { spec: output.vega, via: opts.vega } : output?.plotly ? { spec: output.plotly, via: opts.plotly } : undefined;
-  if (output && chart?.via && !output.image && getCapabilities().images && (opts.imageRows ?? IMAGE_ROWS) >= 2) {
+  if (output && chart?.via && !output.image && !(chartNote && output.plotly) && getCapabilities().images && (opts.imageRows ?? IMAGE_ROWS) >= 2) {
     const state = chart.via.request(chart.spec, opts.onVega ?? (() => undefined));
     if (state.status === "ready") output.image = { mime: "image/png", data: state.png };
     else chartNote = state.status === "rendering" ? "[chart: drawing…]" : `[chart: could not draw (${state.reason.slice(0, 80)}); o opens the notebook]`;
@@ -226,6 +244,7 @@ export class NotebookView implements Component {
   private closed = false;
   private readonly vega: VegaRenderer;
   private readonly plotly: ChartRenderer;
+  private readonly live: LiveCharts;
   private readonly timer: ReturnType<typeof setInterval>;
 
   constructor(
@@ -236,9 +255,11 @@ export class NotebookView implements Component {
     private readonly done: () => void,
     vega: VegaRenderer = new VegaRendererImpl(),
     plotly: ChartRenderer = sharedPlotly(),
+    live?: LiveCharts,
   ) {
     this.vega = vega;
     this.plotly = plotly;
+    this.live = live ?? new LiveCharts(() => { if (!this.closed) this.tui.requestRender(); });
     this.timer = setInterval(() => {
       if (!this.closed) {
         this.syncConfirmation();
@@ -498,7 +519,8 @@ export class NotebookView implements Component {
       // Following: the cursor stays on the running cell.
       if (this.follow && running && cells.some((c) => c.id === running.cell.id)) this.cursor = running.cell.id;
       if (!this.cursor || !cells.some((c) => c.id === this.cursor)) this.cursor = cells[0]?.id;
-      const built = notebookRows(nb, th, Date.now(), { cursor: this.cursor, expanded: this.expanded, filter: this.filter, imageRows: page - 1, width, vega: this.vega, plotly: this.plotly, onVega: () => { if (!this.closed) this.tui.requestRender(); } });
+      this.live.beginFrame();
+      const built = notebookRows(nb, th, Date.now(), { cursor: this.cursor, expanded: this.expanded, filter: this.filter, imageRows: page - 1, width, vega: this.vega, plotly: this.plotly, live: this.live, onVega: () => { if (!this.closed) this.tui.requestRender(); } });
       const rows = built.rows;
       const max = Math.max(0, rows.length - page);
       const at = this.cursor !== undefined ? built.cellRows.get(this.cursor) : undefined;
@@ -516,18 +538,29 @@ export class NotebookView implements Component {
         const pick = at < this.scroll ? visible[0] : visible.at(-1);
         if (pick) {
           this.cursor = pick.id;
-          const again = notebookRows(nb, th, Date.now(), { cursor: this.cursor, expanded: this.expanded, filter: this.filter, imageRows: page - 1, width, vega: this.vega, plotly: this.plotly, onVega: () => { if (!this.closed) this.tui.requestRender(); } });
+          const again = notebookRows(nb, th, Date.now(), { cursor: this.cursor, expanded: this.expanded, filter: this.filter, imageRows: page - 1, width, vega: this.vega, plotly: this.plotly, live: this.live, onVega: () => { if (!this.closed) this.tui.requestRender(); } });
           rows.splice(0, rows.length, ...again.rows);
         }
       }
       // An image draws only when its whole block is on screen; otherwise a note stands in for it.
+      const visible = (at: number): boolean => {
+        const r = rows[at];
+        if (!r?.image) return true;
+        const start = at - r.image.index;
+        return start >= this.scroll && start + r.image.height <= this.scroll + page;
+      };
       const textOf = (at: number): string | undefined => {
         const r = rows[at];
-        if (!r?.image) return r?.text;
-        const start = at - r.image.index;
-        return start >= this.scroll && start + r.image.height <= this.scroll + page ? r.text : r.image.index === 0 ? r.image.alt : r.text;
+        if (!r?.image || visible(at)) return r?.text;
+        return r.image.index === 0 ? r.image.alt : r.text;
       };
-      for (let i = 0; i < page; i++) out.push(row(textOf(this.scroll + i) ?? (this.filter && !cells.length && i === 0 ? th.fg("dim", `No cell matches "${this.filter}".`) : "")));
+      for (let i = 0; i < page; i++) {
+        const at = this.scroll + i;
+        const r = rows[at];
+        if (r?.image?.live && r.image.index === 0 && visible(at)) this.live.rects.push({ top: out.length, left: LIVE_LEFT, geometry: r.image.live.geometry, output: r.image.live.output });
+        out.push(row(textOf(at) ?? (this.filter && !cells.length && i === 0 ? th.fg("dim", `No cell matches "${this.filter}".`) : "")));
+      }
+      this.live.endFrame();
     }
     out.push(rule);
     out.push(row(this.footer(f, width - 4)));
@@ -566,8 +599,14 @@ export class NotebookView implements Component {
     this.done();
   }
 
+  /** A mouse event over a live chart goes to its page; anywhere else it is left to the TUI. */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    return this.live.mouse(event);
+  }
+
   dispose(): void {
     this.closed = true;
     clearInterval(this.timer);
+    this.live.dispose();
   }
 }
