@@ -140,4 +140,10 @@ describe("tables, widgets and tracebacks", () => {
     const lines = appendConsole(undefined, { channel: "stderr", mimetype: "application/vnd.marimo+traceback", data: '<pre><span class="gt">Traceback (most recent call last):</span>\n  File <span class="s">"x.py"</span>\n<span class="ne">ZeroDivisionError</span>: division by zero</pre>' });
     expect(lines?.map((l) => `${l.stream}:${l.text}`)).toEqual(["stderr:Traceback (most recent call last):", 'stderr:  File "x.py"', "stderr:ZeroDivisionError: division by zero"]);
   });
+
+  test("a mimebundle (marimo 0.25's matplotlib figures) shows its PNG", () => {
+    const png = "iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAAFUlEQVR42mP8z8BQz0AEYBxVSF+FABJADveWkH6oAAAAAElFTkSuQmCC";
+    expect(summarizeOutput({ channel: "output", mimetype: "application/vnd.marimo+mimebundle", data: { "image/png": `data:image/png;base64,${png}`, "text/plain": "<Figure>" } })).toMatchObject({ kind: "image", image: { data: png } });
+    expect(summarizeOutput({ channel: "output", mimetype: "application/vnd.marimo+mimebundle", data: JSON.stringify({ "text/plain": "42" }) })).toEqual({ kind: "text", text: "42" });
+  });
 });

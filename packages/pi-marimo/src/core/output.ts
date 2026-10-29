@@ -283,6 +283,14 @@ export function summarizeOutput(raw: unknown): CellOutput | undefined {
   const data = output.data;
   if (output.channel === "marimo-error" || mime.includes("marimo+error") || mime.includes("marimo+traceback")) return undefined;
   if (data === null || data === undefined || data === "") return undefined;
+  // A mimebundle (matplotlib figures in marimo 0.25): the richest form the view can show.
+  if (mime.includes("mimebundle")) {
+    const bundle = typeof data === "string" ? (() => { try { return record(JSON.parse(data)); } catch { return {}; } })() : record(data);
+    for (const kind of ["image/png", "application/vnd.vegalite.v5+json", "application/vnd.vegalite.v6+json", "text/html", "image/svg+xml", "text/markdown", "text/plain"]) {
+      if (bundle[kind] !== undefined && bundle[kind] !== null && bundle[kind] !== "") return summarizeOutput({ channel: output.channel, mimetype: kind, data: bundle[kind] });
+    }
+    return undefined;
+  }
   if (mime.startsWith("image/")) {
     const image = mime === "image/png" && typeof data === "string" ? pngOf(data) : undefined;
     return { kind: "image", text: `[image ${mime.slice(6)}]`, ...(image ? { image } : {}) };
