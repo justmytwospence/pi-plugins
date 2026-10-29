@@ -275,3 +275,24 @@ test("a png output draws inline only when its whole block is on screen, and only
     expect(notebookLines(f.notebook, theme2, 0, { expanded: new Set(["a"]) }).lines.join("\n")).not.toContain("\x1b_G");
   } finally { v.dispose(); setCapabilities({ images: null, trueColor: true, hyperlinks: false } as any); }
 });
+
+test("a Vega-Lite chart shows a drawing note, then the image once the renderer finishes", async () => {
+  const { setCapabilities } = await import("@earendil-works/pi-tui");
+  const { VegaRenderer } = await import("../src/core/vega.js");
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAAFUlEQVR42mP8z8BQz0AEYBxVSF+FABJADveWkH6oAAAAAElFTkSuQmCC";
+  const f = nbWith([{ id: "a", code: "chart" }]);
+  f.notebook.apply("cell-op", { cell_id: "a", status: "idle", output: { channel: "output", mimetype: "application/vnd.vegalite.v6+json", data: '{"mark":"bar"}' } });
+  let release!: (png: string) => void;
+  const renderer = new VegaRenderer(() => new Promise<string>((r) => { release = r; }));
+  const v = new NotebookView(tui as any, theme2, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {} }, () => {}, renderer);
+  try {
+    setCapabilities({ images: "kitty", trueColor: true, hyperlinks: false } as any);
+    v.handleInput("l");
+    expect(screen(v)).toContain("drawing");
+    release(png);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(v.render(100).filter((l) => l.includes("\x1b_G"))).toHaveLength(1);
+    // Without image support it stays the label and never starts a render.
+    setCapabilities({ images: null, trueColor: true, hyperlinks: false } as any);
+  } finally { v.dispose(); setCapabilities({ images: null, trueColor: true, hyperlinks: false } as any); }
+});

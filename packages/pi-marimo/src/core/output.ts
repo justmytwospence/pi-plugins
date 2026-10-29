@@ -7,6 +7,8 @@ export interface CellOutput {
   text: string;
   /** A PNG the view can draw inline (base64, no data: prefix), when the output is small enough. */
   image?: { mime: "image/png"; data: string };
+  /** A Vega or Vega-Lite spec (JSON text) the view can turn into `image`, for a chart. */
+  vega?: string;
 }
 
 export interface ConsoleLine {
@@ -17,6 +19,13 @@ export interface ConsoleLine {
 const MAX_TEXT = 8_000;
 /** Largest PNG kept for inline drawing, as base64 characters (about 1.5 MB of image). */
 const MAX_IMAGE = 2_000_000;
+/** Largest chart spec kept, in characters (Vega-Lite specs carry their data). */
+const MAX_SPEC = 1_500_000;
+
+const vegaOf = (spec: unknown): string | undefined => {
+  const text = typeof spec === "string" ? spec : spec !== null && typeof spec === "object" ? JSON.stringify(spec) : "";
+  return text.length > 1 && text.length <= MAX_SPEC && text.trimStart().startsWith("{") ? text : undefined;
+};
 
 const pngOf = (data: string): CellOutput["image"] | undefined => {
   const b64 = data.replace(/^data:image\/png;base64,/iu, "").replace(/\s+/gu, "");
@@ -66,7 +75,10 @@ export function summarizeOutput(raw: unknown): CellOutput | undefined {
     const image = mime === "image/png" && typeof data === "string" ? pngOf(data) : undefined;
     return { kind: "image", text: `[image ${mime.slice(6)}]`, ...(image ? { image } : {}) };
   }
-  if (/vega|plotly|altair|bokeh/iu.test(mime)) return { kind: "chart", text: `[chart ${mime}]` };
+  if (/vega|plotly|altair|bokeh/iu.test(mime)) {
+    const vega = /vnd\.vega(?:lite)?\b/iu.test(mime) ? vegaOf(data) : undefined;
+    return { kind: "chart", text: `[chart ${mime}]`, ...(vega ? { vega } : {}) };
+  }
   if (mime === "text/html" && typeof data === "string") {
     const table = /<marimo-table\b[^>]*?data-total-rows=(?:"|&quot;)?(\d+)/iu.exec(data);
     if (table) return { kind: "table", text: `[table, ${table[1]} row${table[1] === "1" ? "" : "s"}]` };
@@ -74,6 +86,10 @@ export function summarizeOutput(raw: unknown): CellOutput | undefined {
     // matplotlib and PIL figures arrive as an <img> with a PNG data URL.
     const img = /<img\b[^>]*?\bsrc=["']?(data:image\/png;base64,[A-Za-z0-9+/=\s]+)/iu.exec(data);
     const embedded = img ? pngOf(img[1]!) : undefined;
+    // mo.ui.altair_chart: the spec sits in the element's data-spec attribute.
+    const spec = /<marimo-vega\b[^>]*?\bdata-spec=(?:'([^']*)'|"([^"]*)")/iu.exec(data);
+    const vega = spec ? vegaOf(decode(spec[1] ?? spec[2] ?? "")) : undefined;
+    if (vega) return { kind: "chart", text: "[chart vega-lite]", vega };
     const text = htmlToText(data);
     if (embedded && !text) return { kind: "image", text: "[image png]", image: embedded };
     if (text) return { kind: "text", text: clip(text) };

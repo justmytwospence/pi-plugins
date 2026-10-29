@@ -79,3 +79,18 @@ describe("inline images", () => {
     expect(summarizeOutput({ channel: "output", mimetype: "image/png", data: "A".repeat(2_000_001) })?.image).toBeUndefined();
   });
 });
+
+describe("chart specs", () => {
+  const spec = { $schema: "https://vega.github.io/schema/vega-lite/v6.json", mark: "bar", data: { values: [{ a: 1 }] } };
+  test("a Vega-Lite mimetype and mo.ui.altair_chart's data-spec both keep the spec", () => {
+    expect(summarizeOutput({ channel: "output", mimetype: "application/vnd.vegalite.v6+json", data: JSON.stringify(spec) })).toMatchObject({ kind: "chart", vega: JSON.stringify(spec) });
+    expect(summarizeOutput({ channel: "output", mimetype: "application/vnd.vegalite.v5+json", data: spec })?.vega).toBe(JSON.stringify(spec));
+    const attr = JSON.stringify(spec).replace(/"/gu, "&quot;");
+    expect(summarizeOutput({ channel: "output", mimetype: "text/html", data: `<marimo-ui-element><marimo-vega data-initial-value='{}' data-spec='${attr}'></marimo-vega></marimo-ui-element>` })?.vega).toBe(JSON.stringify(spec));
+  });
+  test("plotly and oversized or malformed specs keep only their label", () => {
+    expect(summarizeOutput({ channel: "output", mimetype: "text/html", data: "<marimo-plotly data-figure='x'></marimo-plotly>" })?.vega).toBeUndefined();
+    expect(summarizeOutput({ channel: "output", mimetype: "application/vnd.vegalite.v6+json", data: "x".repeat(10) })?.vega).toBeUndefined();
+    expect(summarizeOutput({ channel: "output", mimetype: "application/vnd.vegalite.v6+json", data: `{"d":"${"x".repeat(1_600_000)}"}` })?.vega).toBeUndefined();
+  });
+});
