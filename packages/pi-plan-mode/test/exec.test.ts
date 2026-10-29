@@ -275,3 +275,14 @@ test("the finish card shows the report, the changes and a status line, at narrow
     assert.match(text, /✓ Finished · .*Claude Sonnet 5\.5 → Claude Opus 5\.5/u);
   }
 });
+
+test("/plan-back works without pi-recap: the card just has no headline", async () => {
+  const { mock, context, tool } = await setup({ returnTo: "leaf-1" });
+  await tool(FINISH_TOOL).execute("1", { report: "All done." }, undefined, undefined, context.ctx);
+  const messages: any[] = [];
+  (mock.rawPi as any).sendMessage = (message: unknown) => messages.push(message);
+  const command = (mock as any).commands.get("plan-back");
+  await command.handler("", { navigateTree: async () => ({ cancelled: false }), ui: { notify() {} } });
+  assert.equal(messages[0].details.headline, undefined);
+  assert.match(messages[0].content, /All done\./u);
+});

@@ -48,6 +48,7 @@ A name you set yourself (`/name`, `--name`) is never replaced; clear it (`/name`
 - **The line.** After 3 minutes idle the recap is appended to the transcript as a custom session entry, which stays in the scrollback and is never sent to the model. It is drawn like Claude Code's, but bold throughout: a dim bold `※` and `recap:`, then the text in dim bold italic, wrapped under the label at [pi-prose-width](https://pi-plugins.vercel.app/plugins/pi-prose-width/)'s measure when that is loaded.
 - **When.** As in Claude Code, an automatic recap needs at least 3 prompts in the session and 2 more since the previous recap. It is also skipped after an interrupted run, or when it is just the reply's own short line (already on screen). A new run, tree navigation or a new session before the delay cancels it.
 - **Shared with pi-herdr.** pi-herdr asks for the recap as the turn settles (`recap:summary` on Pi's event bus) and writes it to its `$summary` pane token, which notification tools show as the alert's body. Without pi-recap, pi-herdr writes its own, last-turn-only summary.
+- **Shared with pi-plan-mode.** When a plan implemented in place finishes, pi-plan-mode asks for the recap over the same `recap:summary` event and heads the finish card in the planning conversation with it. Neither needs the other: without pi-recap the card has no heading, and pi-recap does nothing special without pi-plan-mode.
 
 ## Commands
 

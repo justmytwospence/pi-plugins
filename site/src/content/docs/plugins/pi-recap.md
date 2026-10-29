@@ -39,4 +39,6 @@ The recap is a custom session entry: it stays in the scrollback, is saved with t
 
 pi-herdr's `$summary` pane token is the text notification tools show when a turn ends. With Recap loaded, pi-herdr asks for the recap over Pi's event bus (`recap:summary`) and uses it, so the notification and the recap line match, from one request. Blocked dialogs still get their question from pi-herdr. Without Recap, pi-herdr writes its own last-turn summary.
 
+pi-plan-mode asks for the same recap when a plan implemented in place finishes, and heads its finish card in the planning conversation with it. Neither plugin needs the other: without Recap the card has no heading.
+
 Source: [packages/pi-recap](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-recap). The idea comes from [pi-away](https://github.com/Pringled/pi-extensions/tree/main/packages/pi-away) (MIT).
