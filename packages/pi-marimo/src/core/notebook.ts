@@ -7,6 +7,15 @@ import { LensTracker } from "./lens.js";
 import { type CellOutput, type ConsoleLine, appendConsole, summarizeOutput } from "./output.js";
 import { type Heading, headingsFromCode, isMarkdownCell, sameCode } from "./markdown.js";
 
+/** Ids of the function calls pi-marimo makes (table paging and the like); their results are kept for the caller. */
+export const FUNCTION_CALL_PREFIX = "pi-marimo-fn-";
+
+export interface FunctionResult {
+  ok: boolean;
+  message?: string;
+  value: unknown;
+}
+
 export type EditSource = "frontend" | "code-mode" | "kernel" | string;
 
 export interface Cell {
@@ -118,6 +127,9 @@ export class NotebookState {
   agentChanges = new Map<string, AgentChange>();
   /** Widget values the user set from Pi since their last prompt, by object id. Kept across reconnects too. */
   userSets = new Map<string, UserSet>();
+  /** Results of kernel function calls made from Pi (`function-call-result`), by call id; the newest 50. */
+  functionResults = new Map<string, FunctionResult>();
+  private expectedEdits = new Map<string, string>();
   ready = false;
   /** Increments on every document change. */
   seq = 0;
@@ -188,9 +200,26 @@ export class NotebookState {
         return this.removeUi(data);
       case "model-lifecycle":
         return this.lens.apply(data);
+      case "function-call-result":
+        return this.functionResult(data);
       default:
         return false;
     }
+  }
+
+  private functionResult(data: Record<string, unknown>): boolean {
+    const id = typeof data.function_call_id === "string" ? data.function_call_id : "";
+    if (!id.startsWith(FUNCTION_CALL_PREFIX)) return false;
+    const status = record(data.status);
+    const message = typeof status.message === "string" ? status.message : typeof status.title === "string" ? status.title : undefined;
+    this.functionResults.set(id, { ok: status.code === "ok", ...(message !== undefined ? { message } : {}), value: data.return_value });
+    while (this.functionResults.size > 50) this.functionResults.delete(this.functionResults.keys().next().value as string);
+    return false;
+  }
+
+  /** The next `set-code` for this cell with exactly this code is Pi's own edit (a markdown cell edited in the view), not the agent's. */
+  expectEdit(cellId: string, code: string): void {
+    this.expectedEdits.set(cellId, code);
   }
 
   private kernelReady(data: Record<string, unknown>): boolean {
@@ -284,10 +313,12 @@ export class NotebookState {
         case "set-code": {
           const cell = this.ensure(id);
           const code = typeof change.code === "string" ? change.code : "";
+          const mine = this.expectedEdits.get(id) === code;
+          if (mine) this.expectedEdits.delete(id);
           // The browser respelling a markdown cell is not an edit.
           if (cell.code !== code && sameCode(cell.code, code)) cell.code = code;
           else if (cell.code !== code) {
-            if (agent) {
+            if (agent && !mine) {
               if (!entry || entry.kind === "moved" || entry.kind === "renamed") this.agentChanges.set(id, { kind: "edited", before: entry?.before ?? cell.code, at: now });
               else entry.at = now;
             }

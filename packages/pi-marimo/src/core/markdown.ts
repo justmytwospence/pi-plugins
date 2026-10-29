@@ -107,3 +107,20 @@ export function sameCode(a: string, b: string): boolean {
   const markdown = markdownText(a);
   return markdown !== undefined && markdown === markdownText(b);
 }
+
+/** `mo.md(f"...")`: markdown built in Python, whose text is not the cell's literal. */
+export const FSTRING_MD = /\bmo\s*\.\s*md\s*\(\s*(?:[rR]?[fF]|[fF][rR])/u;
+
+/** The markdown text of a cell the view can edit as text; undefined for an f-string or any other cell. */
+export function editableMarkdown(code: string): string | undefined {
+  if (FSTRING_MD.test(code)) return undefined;
+  return markdownText(code);
+}
+
+/** Code for a markdown cell with this text: a raw triple-quoted string where the text allows one. */
+export function markdownCellCode(text: string): string {
+  const body = text.replace(/\s+$/u, "");
+  if (!body.includes('"""')) return `mo.md(r"""\n${body}\n""")`;
+  if (!body.includes("'''")) return `mo.md(r'''\n${body}\n''')`;
+  return `mo.md("""\n${body.replace(/\\/g, "\\\\").replace(/"""/g, '\\"\\"\\"')}\n""")`;
+}

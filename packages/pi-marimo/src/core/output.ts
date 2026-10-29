@@ -11,6 +11,32 @@ export interface TableData {
   /** How many rows the whole table has (`many`: marimo did not count them). */
   totalRows?: number | "many";
   totalColumns?: number;
+  /** The `<marimo-ui-element>` object id around the table: its kernel functions are called by it. Absent for HTML tables. */
+  objectId?: string;
+  /** The parsed rows, as marimo sent them (with `_marimo_row_id`). */
+  records?: Array<Record<string, unknown>>;
+  /** `data-field-types`: each column's kind (`integer`, `string`, `boolean`, `datetime`...) and dtype. */
+  fieldTypes?: Record<string, { kind: string; dtype: string }>;
+  /** Keys of a row that are no column (a pandas index). */
+  rowHeaders?: string[];
+  selection?: "single" | "multi" | "single-cell" | "multi-cell";
+  initialValue?: unknown;
+  pageSize?: number;
+  pagination?: boolean;
+  label?: string;
+  banner?: string;
+  hidden?: string[];
+  freezeLeft?: string[];
+  freezeRight?: string[];
+  justify?: Record<string, "left" | "center" | "right">;
+  wrapped?: string[];
+  /** Pixel widths. */
+  widths?: Record<string, number>;
+  cellStyles?: Record<string, Record<string, Record<string, unknown>>>;
+  show?: { summaries: boolean; types: boolean; search: boolean; filters: boolean; download: boolean; pageSize: boolean };
+  /** Where the rows are, when marimo sent a file or data URL instead of inline JSON. */
+  dataRef?: string;
+  lazy?: boolean;
 }
 
 export type WidgetKind = "slider" | "number" | "range-slider" | "checkbox" | "switch" | "text" | "text-area" | "dropdown" | "radio" | "multiselect" | "button" | "date" | "other";
@@ -155,42 +181,101 @@ function json(value: string | undefined): unknown {
 const MAX_TABLE_ROWS = 50;
 const MAX_TABLE_COLUMNS = 50;
 
-function cellText(value: unknown): string {
+export function cellText(value: unknown): string {
   const text = value === null || value === undefined ? "" : typeof value === "string" ? value : typeof value === "number" || typeof value === "boolean" ? String(value) : JSON.stringify(value) ?? "";
   const flat = text.replace(/\s+/gu, " ");
   return flat.length <= 200 ? flat : `${flat.slice(0, 199)}…`;
 }
 
-/** A `<marimo-table>`'s first page (marimo double-encodes it: a JSON string of the JSON rows) and its row count. */
+const strList = (v: unknown): string[] | undefined => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : undefined);
+const flag = (v: unknown, fallback: boolean): boolean => (typeof v === "boolean" ? v : v === undefined || v === null ? fallback : Boolean(v));
+const SELECTIONS = new Set(["single", "multi", "single-cell", "multi-cell"]);
+
+/** A `<marimo-table>`'s first page (marimo double-encodes it: a JSON string of the JSON rows), its row count and its settings. */
 export function marimoTable(html: string): { table?: TableData; totalRows?: number | "many" } | undefined {
-  const tag = /<marimo-table\b[^>]*>/iu.exec(html)?.[0];
-  if (!tag) return undefined;
+  const found = /<marimo-table\b[^>]*>/iu.exec(html);
+  const tag = found?.[0];
+  if (!tag || !found) return undefined;
   const a = attributes(tag);
   const total = json(a["data-total-rows"]);
   const totalRows = typeof total === "number" && Number.isFinite(total) ? total : total === "too_many" ? "many" as const : undefined;
   let data = json(a["data-data"]);
-  if (typeof data === "string" && data.trimStart().startsWith("[")) data = json(data);
+  let dataRef: string | undefined;
+  if (typeof data === "string") {
+    if (data.trimStart().startsWith("[")) data = json(data);
+    else if (data) dataRef = data;
+  }
   const objects = Array.isArray(data) ? data.filter((r): r is Record<string, unknown> => r !== null && typeof r === "object" && !Array.isArray(r)) : [];
   const out: { table?: TableData; totalRows?: number | "many" } = totalRows !== undefined ? { totalRows } : {};
-  if (!objects.length) return out;
-  const columns = Object.keys(objects[0]!).filter((k) => !k.startsWith("_marimo")).slice(0, MAX_TABLE_COLUMNS);
+  const fieldTypes: Record<string, { kind: string; dtype: string }> = {};
   const types = json(a["data-field-types"]);
-  const numericNames = new Set<string>();
   if (Array.isArray(types)) {
     for (const entry of types) {
       if (!Array.isArray(entry) || typeof entry[0] !== "string") continue;
-      const type = Array.isArray(entry[1]) ? entry[1][0] : undefined;
-      if (type === "integer" || type === "number") numericNames.add(entry[0]);
+      const [kind, dtype] = Array.isArray(entry[1]) ? entry[1] : [];
+      fieldTypes[entry[0]] = { kind: typeof kind === "string" ? kind : "string", dtype: typeof dtype === "string" ? dtype : "" };
     }
   }
+  const typed = Object.keys(fieldTypes);
+  if (!objects.length && !dataRef && !typed.length) return out;
+  const hidden = strList(json(a["data-hidden-columns"])) ?? [];
+  const first = objects[0] ?? {};
+  const keys = Object.keys(first).filter((k) => !k.startsWith("_marimo"));
+  const rowHeaders = typed.length ? keys.filter((k) => !(k in fieldTypes)) : [];
+  const names = (typed.length ? typed : keys).filter((c) => !hidden.includes(c)).slice(0, MAX_TABLE_COLUMNS);
   const columnsTotal = json(a["data-total-columns"]);
-  out.table = {
-    columns,
-    numeric: columns.map((c) => numericNames.has(c)),
-    rows: objects.slice(0, MAX_TABLE_ROWS).map((r) => columns.map((c) => cellText(r[c]))),
+  const selection = json(a["data-selection"]);
+  const pageSize = json(a["data-page-size"]);
+  const label = json(a["data-label"]);
+  const banner = json(a["data-banner-text"]);
+  const justify = json(a["data-text-justify-columns"]);
+  const widths = json(a["data-column-widths"]);
+  const styles = json(a["data-cell-styles"]);
+  const objectId = (() => {
+    let id: string | undefined;
+    const re = /<marimo-ui-element\b([^>]*)>/giu;
+    for (let m = re.exec(html.slice(0, found.index)); m; m = re.exec(html.slice(0, found.index))) id = attributes(m[1] ?? "")["object-id"] ?? id;
+    return id;
+  })();
+  const kindOf = (c: string): string => fieldTypes[c]?.kind ?? "";
+  const rows = objects.slice(0, MAX_TABLE_ROWS);
+  const columnWidths = record(widths);
+  const justified = record(justify);
+  const table: TableData = {
+    columns: names,
+    numeric: names.map((c) => kindOf(c) === "integer" || kindOf(c) === "number"),
+    rows: rows.map((r) => names.map((c) => cellText(r[c]))),
     ...(totalRows !== undefined ? { totalRows } : {}),
     ...(typeof columnsTotal === "number" && Number.isFinite(columnsTotal) ? { totalColumns: columnsTotal } : {}),
+    ...(objectId ? { objectId } : {}),
+    records: rows,
+    ...(typed.length ? { fieldTypes } : {}),
+    ...(rowHeaders.length ? { rowHeaders } : {}),
+    ...(typeof selection === "string" && SELECTIONS.has(selection) ? { selection: selection as TableData["selection"] } : {}),
+    ...(a["data-initial-value"] !== undefined ? { initialValue: json(a["data-initial-value"]) } : {}),
+    ...(typeof pageSize === "number" && pageSize > 0 ? { pageSize } : {}),
+    ...(typeof json(a["data-pagination"]) === "boolean" ? { pagination: json(a["data-pagination"]) as boolean } : {}),
+    ...(typeof label === "string" && label ? { label: htmlToText(label).replace(/\s+/gu, " ").trim() } : {}),
+    ...(typeof banner === "string" && banner ? { banner } : {}),
+    ...(hidden.length ? { hidden } : {}),
+    ...(strList(json(a["data-freeze-columns-left"]))?.length ? { freezeLeft: strList(json(a["data-freeze-columns-left"])) } : {}),
+    ...(strList(json(a["data-freeze-columns-right"]))?.length ? { freezeRight: strList(json(a["data-freeze-columns-right"])) } : {}),
+    ...(Object.keys(justified).length ? { justify: Object.fromEntries(Object.entries(justified).filter(([, v]) => v === "left" || v === "center" || v === "right")) as TableData["justify"] } : {}),
+    ...(strList(json(a["data-wrapped-columns"]))?.length ? { wrapped: strList(json(a["data-wrapped-columns"])) } : {}),
+    ...(Object.keys(columnWidths).length ? { widths: Object.fromEntries(Object.entries(columnWidths).filter((e): e is [string, number] => typeof e[1] === "number")) } : {}),
+    ...(Object.keys(record(styles)).length ? { cellStyles: record(styles) as TableData["cellStyles"] } : {}),
+    show: {
+      summaries: flag(json(a["data-show-column-summaries"]), true),
+      types: flag(json(a["data-show-data-types"]), true),
+      search: flag(json(a["data-show-search"]), true),
+      filters: flag(json(a["data-show-filters"]), true),
+      download: flag(json(a["data-show-download"]), true),
+      pageSize: flag(json(a["data-show-page-size-selector"]), true),
+    },
+    ...(dataRef ? { dataRef } : {}),
+    ...(json(a["data-lazy"]) === true ? { lazy: true } : {}),
   };
+  out.table = table;
   return out;
 }
 

@@ -110,7 +110,7 @@ describe("tables, widgets and tracebacks", () => {
   test("a marimo table keeps its first page, its row count and which columns are numbers; it is no widget", () => {
     const out = summarizeOutput({ channel: "output", mimetype: "text/html", data: table })!;
     expect(out).toMatchObject({ kind: "table", text: "[table, 2 rows]" });
-    expect(out.table).toEqual({ columns: ["a", "b"], numeric: [true, false], rows: [["1", "x"], ["2", "y"]], totalRows: 2, totalColumns: 2 });
+    expect(out.table).toMatchObject({ columns: ["a", "b"], numeric: [true, false], rows: [["1", "x"], ["2", "y"]], totalRows: 2, totalColumns: 2 });
     expect(out.widgets).toBeUndefined();
     expect(summarizeOutput({ channel: "output", mimetype: "text/html", data: "<marimo-table data-total-rows='&quot;too_many&quot;' data-data='[]'></marimo-table>" })?.text).toBe("[table, many rows]");
   });
