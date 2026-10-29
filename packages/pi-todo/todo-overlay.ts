@@ -36,6 +36,8 @@ export class TodoOverlay {
 	private hiddenCompletedTaskIds = new Set<number>();
 	private lastNextId: number | undefined;
 	private collapsed = false;
+	/** The user expanded the panel while every task is complete (which collapses it by itself). */
+	private expandedWhenAllDone = false;
 	private suppressed = false;
 
 	/** Hide the widget while a dialog waits on the user (it needs the rows), keeping its state. */
@@ -106,7 +108,15 @@ export class TodoOverlay {
 	}
 
 	toggleCollapse(): void {
-		this.collapsed = !this.collapsed;
+		if (this.allDone) {
+			// Fully completed lists start collapsed; the shortcut opens or closes them.
+			const open = this.collapsed || !this.expandedWhenAllDone;
+			this.collapsed = false;
+			this.expandedWhenAllDone = open;
+			if (!open) this.collapsed = true;
+		} else {
+			this.collapsed = !this.collapsed;
+		}
 		// Forced full redraw on the collapsed↔expanded height step, mirroring the
 		// lane-dock's requestRender(shapeChanged); distinct from the non-forced
 		// requestRender() refresh paths in update()/hideCompletedTasksFromPreviousTurn().
@@ -116,6 +126,8 @@ export class TodoOverlay {
 	isRegistered(): boolean {
 		return this.widgetRegistered;
 	}
+
+	private allDone = false;
 
 	private getSnapshot() {
 		const state = getRenderState();
@@ -155,6 +167,15 @@ export class TodoOverlay {
 		if (overlayTasks.length === 0) return [];
 
 		const overlayState = { tasks: overlayTasks, nextId: snapshot.nextId };
+		this.allDone = overlayTasks.every((task) => task.status === "completed");
+		if (!this.allDone) this.expandedWhenAllDone = false;
+		const collapsed = this.allDone ? this.collapsed || !this.expandedWhenAllDone : this.collapsed;
+		if (collapsed && this.allDone) {
+			// Collapsed, but still hides after the user's next message.
+			for (const task of overlayTasks) {
+				if (!this.hiddenCompletedTaskIds.has(task.id)) this.completedTaskIdsPendingHide.add(task.id);
+			}
+		}
 		const truncate = (line: string): string => truncateToWidth(line, width, "…");
 		const counts = selectTodoCounts(overlayState);
 		const hasActive = selectHasActive(overlayState);
@@ -172,7 +193,7 @@ export class TodoOverlay {
 		// not displayed while collapsed aren't queued to hide. Resolve the key live
 		// (rebinding still needs /reload). "off" can occur after collapsing and
 		// editing config, so show a static localized label rather than a fake key.
-		if (this.collapsed) {
+		if (collapsed) {
 			const key = resolveCollapseKey();
 			const hint =
 				key === COLLAPSE_KEY_OFF
@@ -269,6 +290,7 @@ export class TodoOverlay {
 		this.tui = undefined;
 		this.uiCtx = undefined;
 		this.collapsed = false;
+		this.expandedWhenAllDone = false;
 		this.resetCompletedDisplayState();
 	}
 }

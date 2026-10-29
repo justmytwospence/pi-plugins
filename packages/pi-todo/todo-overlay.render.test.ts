@@ -142,10 +142,29 @@ describe("TodoOverlay — per-task formatting", () => {
 			{ action: "create", subject: "done" },
 			{ action: "update", id: 1, status: "completed" },
 		]);
+		// All tasks complete: collapsed by itself, user can still expand it.
+		expect(widget.render(200)[0]).toContain("(1/1)");
+		overlay.toggleCollapse();
 		const firstRender = widget.render(200);
 		expect(firstRender[1]).toContain("✓");
 		expect(firstRender[1]).toContain("done");
 		expect(widget.render(200)[1]).toContain("done");
+		overlay.hideCompletedTasksFromPreviousTurn();
+		expect(widget.render(200)).toEqual([]);
+	});
+});
+
+describe("TodoOverlay — all-complete auto-collapse", () => {
+	it("collapses when every task is complete, expands on toggle, and still hides after the next turn", async () => {
+		const { widget, overlay } = await setup([
+			{ action: "create", subject: "done" },
+			{ action: "update", id: 1, status: "completed" },
+		]);
+		expect(widget.render(200)).toEqual([" ○ Todos (1/1)  ctrl+shift+t to expand", ""]);
+		overlay.toggleCollapse();
+		expect(widget.render(200).join("\n")).toContain("done");
+		overlay.toggleCollapse();
+		expect(widget.render(200)[0]).toContain("(1/1)");
 		overlay.hideCompletedTasksFromPreviousTurn();
 		expect(widget.render(200)).toEqual([]);
 	});
@@ -315,6 +334,7 @@ describe("TodoOverlay — collapse/expand render", () => {
 	it("collapsed render short-circuits before completed-display tracking (no task queued for hide while collapsed)", async () => {
 		const { widget, overlay } = await setup([
 			{ action: "create", subject: "done" },
+			{ action: "create", subject: "open" },
 			{ action: "update", id: 1, status: "completed" },
 		]);
 		overlay.toggleCollapse(); // collapse

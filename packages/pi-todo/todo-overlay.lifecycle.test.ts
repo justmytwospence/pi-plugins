@@ -236,11 +236,14 @@ describe("TodoOverlay — lifecycle", () => {
 			theme: typeof identityTheme,
 		) => { render: (w: number) => string[]; invalidate: () => void };
 		const widget = factory({ requestRender: vi.fn() }, identityTheme);
+		// A fully completed list starts collapsed; expand it to see the task.
+		expect(widget.render(200).join("\n")).toContain("(1/1)");
+		overlay.toggleCollapse();
 		expect(widget.render(200).join("\n")).toContain("done");
 		overlay.hideCompletedTasksFromPreviousTurn();
 		expect(widget.render(200)).toEqual([]);
 		overlay.resetCompletedDisplayState();
-		expect(widget.render(200).join("\n")).toContain("done");
+		expect(widget.render(200).join("\n")).toContain("(1/1)");
 	});
 
 	it("hideCompletedTasksFromPreviousTurn() is a no-op when nothing is pending hide", () => {
