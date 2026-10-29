@@ -79,7 +79,7 @@ Panel changes apply to the current transcript immediately and are saved. Feature
   "expandedPreviewMaxLines": 40, // max lines for expanded TaskList bodies
   "expandedCardBackground": "userMessageBg", // theme bg slot: userMessageBg, toolPendingBg, customMessageBg, selectedBg, searchMatchBg, toolSuccessBg, toolErrorBg
   "inputClip": 0, // path/command clip length in summaries; 0 = fit width, else 8..500
-  "showStartupHeader": true, // logo and tips header on new sessions, plus the regrouped Context/Skills/Extensions listing
+  "showStartupHeader": true, // logo and tips header on new sessions, plus the regrouped Context/Skills/Extensions listing and an MCP section (servers by level, marked when they need a sign-in or failed; it replaces Pi's "MCP servers need attention" warning)
   "scrollStepLines": 3, // fullscreen mouse wheel step (1..50)
 
   // diff

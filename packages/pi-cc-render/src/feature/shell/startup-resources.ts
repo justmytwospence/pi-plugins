@@ -1,9 +1,20 @@
-import { readFileSync } from "node:fs";
 import path from "node:path";
 import { InteractiveMode, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { config } from "../../config/config.ts";
-import { STARTUP_RESOURCES_PATCH, patchRegistry } from "../../utils/patch-keys.ts";
+import {
+	CONNECTING_GRACE_MS,
+	type McpEntry,
+	type McpLevel,
+	type McpStatus,
+	configWarning,
+	connectedNames,
+	loadMcpEntries,
+	mcpState,
+	parseAttentionMessage,
+	parseOutcomeMessage,
+} from "./mcp-servers.ts";
+import { MCP_NOTIFY_PATCH, STARTUP_RESOURCES_PATCH, patchRegistry } from "../../utils/patch-keys.ts";
 
 /**
  * Readable replacement for the collapsed startup listing ([Context] / [Skills] / [Prompts] / [Extensions]).
@@ -34,7 +45,11 @@ export type ResourceGroup = {
 	items: string[];
 	/** Estimated tokens per item, parallel to `items`; present only when the section measures them. */
 	tokens?: number[];
+	/** A colored word after an item, parallel to `items` (grid layout); undefined entries have none. */
+	marks?: Array<ResourceMark | undefined>;
 };
+
+export type ResourceMark = { text: string; color: string };
 
 export type ResourceSection = {
 	title: string;
@@ -46,6 +61,10 @@ export type ResourceSection = {
 	/** "lines" lists one entry per line (context files); "grid" packs short names into columns. */
 	layout: "lines" | "grid";
 	groups: ResourceGroup[];
+	/** Shown after the heading in the warning color. */
+	attention?: string;
+	/** Lines under the last group, indented, each in its own color (what went wrong, per server). */
+	notes?: ResourceMark[];
 };
 
 export type StartupTheme = {
@@ -256,7 +275,8 @@ export function renderSection(
 	const cost = section.tokens
 		? ` ${theme.fg(windowShareColor(section.tokens, section.contextWindow), `· ~${formatTokens(section.tokens)} tok`)}`
 		: "";
-	const heading = `${theme.bold(theme.fg("mdHeading", section.title))} ${theme.fg("dim", String(section.count))}${cost}`;
+	const attention = section.attention ? ` ${theme.fg("warning", `· ${section.attention}`)}` : "";
+	const heading = `${theme.bold(theme.fg("mdHeading", section.title))} ${theme.fg("dim", String(section.count))}${cost}${attention}`;
 	const lines = [heading];
 	for (const group of section.groups) {
 		const nested = group.label !== undefined;
@@ -275,9 +295,17 @@ export function renderSection(
 				? group.items.map(
 						(item, index) => `${item} ${theme.fg(colors[index]!, `~${formatTokens(group.tokens![index]!)}`)}`,
 					)
-				: group.items;
+				: group.marks
+					? group.items.map((item, index) => {
+							const mark = group.marks![index];
+							return mark ? `${item} ${theme.fg(mark.color, mark.text)}` : item;
+						})
+					: group.items;
 			lines.push(...layoutGrid(items, width, indent));
 		}
+	}
+	for (const note of section.notes ?? []) {
+		lines.push(truncateToWidth(`${" ".repeat(INDENT)}${theme.fg(note.color, note.text)}`, width));
 	}
 	return lines;
 }
@@ -396,34 +424,83 @@ export function collectSections(mode: any, options?: { extensions?: any[] }): Re
 
 // ---- MCP servers (pi's own listing has no such section) ----
 
-/** Enabled server names in one mcp.json; empty when the file is missing or broken. */
-export function readMcpServerNames(file: string): string[] {
+const MCP_LEVELS: McpLevel[] = ["project", "user", "extension"];
+
+const MCP_MARKS: Record<Exclude<McpStatus, "connected">, ResourceMark> = {
+	"needs-auth": { text: "needs sign-in", color: "warning" },
+	failed: { text: "failed", color: "error" },
+	connecting: { text: "connecting", color: "dim" },
+};
+
+/** The servers configured for this session, each with the level it is active at. */
+export function collectMcpEntries(mode: any): McpEntry[] {
 	try {
-		const servers = (JSON.parse(readFileSync(file, "utf8")) as { mcpServers?: unknown })?.mcpServers;
-		if (!servers || typeof servers !== "object" || Array.isArray(servers)) return [];
-		return Object.entries(servers as Record<string, unknown>)
-			.filter(([, entry]) => entry && typeof entry === "object" && (entry as { enabled?: unknown }).enabled !== false)
-			.map(([name]) => name);
+		const cwd = mode?.sessionManager?.getCwd?.() as string | undefined;
+		const registered = (mode?.session?.extensionRunner?.runtime?.mcpServers?.list?.() ?? []) as Array<{ name: string }>;
+		return loadMcpEntries({
+			userFile: path.join(getAgentDir(), "mcp.json"),
+			projectFile: cwd && mode?.settingsManager?.isProjectTrusted?.() ? path.join(cwd, ".pi", "mcp.json") : undefined,
+			registered: registered.map((server) => server.name),
+		});
 	} catch {
 		return [];
 	}
 }
 
-/** The configured MCP servers as a section: the user's mcp.json plus the trusted project's, names once, sorted. */
-export function collectMcpSection(mode: any): ResourceSection | undefined {
-	let names: string[] = [];
+function connectedServers(mode: any): Set<string> {
 	try {
-		names = readMcpServerNames(path.join(getAgentDir(), "mcp.json"));
-		const cwd = mode?.sessionManager?.getCwd?.() as string | undefined;
-		if (cwd && mode?.settingsManager?.isProjectTrusted?.()) {
-			names.push(...readMcpServerNames(path.join(cwd, ".pi", "mcp.json")));
-		}
+		return connectedNames((mode?.session?.getAllTools?.() ?? []) as any[]);
 	} catch {
-		return undefined;
+		return new Set();
 	}
-	const unique = [...new Set(names)].sort(compareNames);
-	if (unique.length === 0) return undefined;
-	return { title: "MCP", count: unique.length, layout: "grid", groups: [{ items: unique }] };
+}
+
+/** The MCP section: servers under the level they are configured at, with a mark on any that is not (yet) usable. */
+export function buildMcpSection(
+	entries: McpEntry[],
+	status: (name: string) => McpStatus | undefined,
+	detail: (name: string) => string | undefined = () => undefined,
+): ResourceSection | undefined {
+	if (entries.length === 0) return undefined;
+	const sorted = [...entries].sort((a, b) => compareNames(a.name, b.name));
+	const groups: ResourceGroup[] = [];
+	const notes: ResourceMark[] = [];
+	let needAuth = 0;
+	let failed = 0;
+	for (const level of MCP_LEVELS) {
+		const inLevel = sorted.filter((entry) => entry.level === level);
+		if (inLevel.length === 0) continue;
+		const marks = inLevel.map((entry) => {
+			const state = status(entry.name);
+			if (state === "needs-auth") needAuth++;
+			if (state === "failed") {
+				failed++;
+				const why = detail(entry.name);
+				if (why) notes.push({ text: `${entry.name}: ${why}`, color: "error" });
+			}
+			return state && state !== "connected" ? MCP_MARKS[state] : undefined;
+		});
+		groups.push({ label: level, items: inLevel.map((entry) => entry.name), ...(marks.some(Boolean) ? { marks } : {}) });
+	}
+	const problems = [needAuth && `${needAuth} need${needAuth === 1 ? "s" : ""} sign-in`, failed && `${failed} failed`].filter(Boolean);
+	return {
+		title: "MCP",
+		count: entries.length,
+		layout: "grid",
+		groups,
+		...(problems.length > 0 ? { attention: `${problems.join(", ")}, /mcp to fix` } : {}),
+		...(notes.length > 0 ? { notes } : {}),
+	};
+}
+
+/** The configured MCP servers as a section, with their live state; undefined when none are configured. */
+export function collectMcpSection(mode: any, entries: McpEntry[] = collectMcpEntries(mode)): ResourceSection | undefined {
+	const connected = connectedServers(mode);
+	return buildMcpSection(
+		entries,
+		(name) => mcpState.status(name, connected),
+		(name) => mcpState.detail(name),
+	);
 }
 
 // ---- Wiring ----
@@ -453,6 +530,27 @@ function sectionTitle(child: any): string | undefined {
 	}
 }
 
+let mcpWatch: ReturnType<typeof setInterval> | undefined;
+
+/** Asks for a repaint when the set of connected servers changes, while connections are still settling. */
+function watchMcpState(mode: any): void {
+	if (mcpWatch) clearInterval(mcpWatch);
+	let last = [...connectedServers(mode)].sort().join(",");
+	const timer = setInterval(() => {
+		const now = [...connectedServers(mode)].sort().join(",");
+		if (now !== last) {
+			last = now;
+			mode?.ui?.requestRender?.();
+		}
+		if (Date.now() - mcpState.mountedAt > 2 * CONNECTING_GRACE_MS) {
+			clearInterval(timer);
+			if (mcpWatch === timer) mcpWatch = undefined;
+		}
+	}, 1000);
+	timer.unref?.();
+	mcpWatch = timer;
+}
+
 /** Swaps the collapsed rendering of each pi startup section for ours; the expanded rendering stays pi's. */
 function replaceSections(mode: any, options: unknown): void {
 	const children: any[] = mode?.loadedResourcesContainer?.children;
@@ -460,17 +558,20 @@ function replaceSections(mode: any, options: unknown): void {
 	const titled = children.map((child) => [child, sectionTitle(child)] as const).filter(([, t]) => t);
 	if (titled.length === 0) return;
 	const sections = collectSections(mode, options as { extensions?: any[] } | undefined);
-	const mcp = collectMcpSection(mode);
-	if (mcp) {
+	const mcpEntries = collectMcpEntries(mode);
+	if (mcpEntries.length > 0) {
 		// Right after Extensions (else the last titled section), followed by the same one-line spacer pi uses.
 		const anchor = titled.find(([, title]) => title === "Extensions") ?? titled[titled.length - 1]!;
 		const at = children.indexOf(anchor[0]);
-		const component = {
-			render: (width: number) => renderSection(mcp, width, hostTheme?.() ?? PLAIN_THEME),
-			invalidate() {},
+		const render = (width: number) => {
+			const section = collectMcpSection(mode, mcpEntries);
+			return section ? renderSection(section, width, hostTheme?.() ?? PLAIN_THEME) : [];
 		};
+		const component = { render, invalidate() {} };
 		const spacer = { render: () => [""], invalidate() {} };
 		children.splice(at + 2, 0, component, spacer);
+		mcpState.mount();
+		watchMcpState(mode);
 	}
 	for (const [child, title] of titled) {
 		const section = sections[title!];
@@ -508,4 +609,53 @@ export function installStartupResources(): void {
 	};
 	prototype.showLoadedResources = patch.installed;
 	patchRegistry.install(STARTUP_RESOURCES_PATCH, patch);
+	installMcpNotify(prototype);
+}
+
+type McpNotifyPatch = {
+	active: boolean;
+	original: (...args: any[]) => unknown;
+	installed: (...args: any[]) => unknown;
+};
+
+/**
+ * Pi's MCP extension reports servers that need a sign-in or failed as one warning. Once the startup listing's
+ * MCP section is on screen it shows the same thing next to each server, so the warning is taken in (its
+ * configuration lines, which belong to no server, still show) and the later reconnect and sign-in confirmations
+ * update the marks.
+ */
+export function installMcpNotify(prototype: any): void {
+	if (typeof prototype.showExtensionNotify !== "function") return;
+	const previous = patchRegistry.get<McpNotifyPatch>(MCP_NOTIFY_PATCH);
+	if (previous) previous.active = false;
+	const original =
+		previous && prototype.showExtensionNotify === previous.installed ? previous.original : prototype.showExtensionNotify;
+	const patch: McpNotifyPatch = {
+		active: true,
+		original,
+		installed: function (this: any, message: string, type?: string, ...rest: any[]) {
+			if (patch.active && config.showStartupHeader && mcpState.mounted && typeof message === "string") {
+				try {
+					const report = parseAttentionMessage(message);
+					if (report) {
+						mcpState.record(report, connectedServers(this));
+						this.ui?.requestRender?.();
+						return report.configLines.length > 0
+							? original.call(this, configWarning(report), type, ...rest)
+							: undefined;
+					}
+					const outcome = parseOutcomeMessage(message);
+					if (outcome) {
+						mcpState.outcome(outcome.name, outcome.state, connectedServers(this));
+						this.ui?.requestRender?.();
+					}
+				} catch {
+					// Show the message as pi wrote it rather than lose it.
+				}
+			}
+			return original.call(this, message, type, ...rest);
+		},
+	};
+	prototype.showExtensionNotify = patch.installed;
+	patchRegistry.install(MCP_NOTIFY_PATCH, patch);
 }

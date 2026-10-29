@@ -113,15 +113,124 @@ describe("startup resources", () => {
     expect(sections.Extensions!.groups[1]!.items).toEqual(["bg", "todo"]);
   });
 
-  test("reads enabled MCP server names from an mcp.json", async () => {
+  test("MCP servers are listed by the level they are configured at", async () => {
     const { mkdtempSync, writeFileSync } = await import("node:fs");
     const { tmpdir } = await import("node:os");
     const { join } = await import("node:path");
-    const { readMcpServerNames } = await import("../src/feature/shell/startup-resources.ts");
-    const file = join(mkdtempSync(join(tmpdir(), "mcp-")), "mcp.json");
-    writeFileSync(file, JSON.stringify({ mcpServers: { a: {}, b: { enabled: false }, c: { enabled: true } } }));
-    expect(readMcpServerNames(file)).toEqual(["a", "c"]);
-    expect(readMcpServerNames(join(tmpdir(), "missing-mcp.json"))).toEqual([]);
+    const { loadMcpEntries } = await import("../src/feature/shell/mcp-servers.ts");
+    const dir = mkdtempSync(join(tmpdir(), "mcp-"));
+    const userFile = join(dir, "user.json");
+    const projectFile = join(dir, "project.json");
+    writeFileSync(
+      userFile,
+      JSON.stringify({
+        mcpServers: {
+          a: { command: "x" },
+          off: { command: "x", enabled: false },
+          gated: { url: "https://x", enabled: false },
+          tuned: { command: "x" },
+          "dash-name": { command: "x" },
+        },
+      }),
+    );
+    writeFileSync(
+      projectFile,
+      JSON.stringify({
+        mcpServers: {
+          local: { command: "y" },
+          gated: { enabled: true },
+          tuned: { exposure: "direct" },
+          dash_name: { enabled: false },
+        },
+      }),
+    );
+    expect(loadMcpEntries({ userFile, projectFile, registered: ["a", "ext"] })).toEqual([
+      { name: "a", level: "user" },
+      { name: "gated", level: "project" },
+      { name: "tuned", level: "user" },
+      { name: "local", level: "project" },
+      { name: "ext", level: "extension" },
+    ]);
+    expect(loadMcpEntries({ userFile })).toHaveLength(3);
+    expect(loadMcpEntries({ userFile: join(dir, "missing.json") })).toEqual([]);
+  });
+
+  test("pi's attention warning is read per server and its configuration lines kept apart", async () => {
+    const { parseAttentionMessage, parseOutcomeMessage, configWarning } = await import("../src/feature/shell/mcp-servers.ts");
+    const report = parseAttentionMessage(
+      "MCP servers need attention:\n  config: /x/mcp.json: bad\n  obsidian: failed: http request failed: body error\n  my-vercel: needs sign-in\nRun /mcp to fix.",
+    )!;
+    expect(report.problems.get("obsidian")).toEqual({ status: "failed", detail: "http request failed: body error" });
+    expect(report.problems.get("my_vercel")).toEqual({ status: "needs-auth" });
+    expect(report.configLines).toEqual(["config: /x/mcp.json: bad"]);
+    expect(configWarning(report)).toBe("MCP configuration needs attention:\n  config: /x/mcp.json: bad\nRun /mcp to fix.");
+    expect(parseAttentionMessage("Something else")).toBeUndefined();
+    expect(parseOutcomeMessage('Signed in to MCP server "v" (3 tools).')).toEqual({ name: "v", state: "connected" });
+    expect(parseOutcomeMessage('Reconnected to MCP server "v" (failed: no).')).toEqual({ name: "v", state: "failed" });
+  });
+
+  test("server state: problems win, tools appearing later clear them, connecting fades after the grace period", async () => {
+    const { McpState, CONNECTING_GRACE_MS, parseAttentionMessage } = await import("../src/feature/shell/mcp-servers.ts");
+    const state = new McpState();
+    state.mount(1000);
+    expect(state.status("a", new Set(), 1000)).toBe("connecting");
+    expect(state.status("a", new Set(["a"]), 1000)).toBe("connected");
+    expect(state.status("a", new Set(), 1000 + CONNECTING_GRACE_MS)).toBeUndefined();
+    state.record(parseAttentionMessage("MCP servers need attention:\n  a: needs sign-in\n  b: failed: boom\nRun /mcp to fix.")!, new Set(["b"]));
+    expect(state.status("a", new Set(), 1000)).toBe("needs-auth");
+    expect(state.status("c", new Set(), 1000)).toBeUndefined();
+    expect(state.status("a", new Set(["a"]), 1000)).toBe("connected");
+    expect(state.status("b", new Set(["b"]), 1000)).toBe("failed");
+    expect(state.detail("b")).toBe("boom");
+    state.outcome("b", "connected", new Set(["b"]));
+    expect(state.status("b", new Set(["b"]), 1000)).toBe("connected");
+  });
+
+  test("the MCP section groups by level and marks servers that need attention", async () => {
+    const { buildMcpSection } = await import("../src/feature/shell/startup-resources.ts");
+    const section = buildMcpSection(
+      [
+        { name: "vercel", level: "user" },
+        { name: "obsidian", level: "user" },
+        { name: "local", level: "project" },
+      ],
+      (name) => (name === "vercel" ? "needs-auth" : name === "obsidian" ? "failed" : "connected"),
+      (name) => (name === "obsidian" ? "http request failed" : undefined),
+    )!;
+    expect(renderSection(section, 100, plainTheme)).toEqual([
+      "MCP 3 · 1 needs sign-in, 1 failed, /mcp to fix",
+      "  project 1",
+      "    local",
+      "  user 2",
+      "    obsidian failed        vercel needs sign-in",
+      "  obsidian: http request failed",
+    ]);
+    expect(buildMcpSection([], () => undefined)).toBeUndefined();
+    expect(renderSection(buildMcpSection([{ name: "a", level: "user" }], () => "connected")!, 80, plainTheme)).toEqual([
+      "MCP 1",
+      "  user 1",
+      "    a",
+    ]);
+  });
+
+  test("the attention warning is taken in once the MCP section is mounted, other messages pass through", async () => {
+    const { installMcpNotify } = await import("../src/feature/shell/startup-resources.ts");
+    const { mcpState } = await import("../src/feature/shell/mcp-servers.ts");
+    const shown: string[] = [];
+    const proto: any = { showExtensionNotify: (message: string) => void shown.push(message) };
+    installMcpNotify(proto);
+    const mode = Object.create(proto, { ui: { value: { requestRender: () => {} } }, session: { value: { getAllTools: () => [] } } });
+    const warning = "MCP servers need attention:\n  obsidian: failed: boom\nRun /mcp to fix.";
+    mcpState.mounted = false;
+    mode.showExtensionNotify(warning, "warning");
+    expect(shown).toEqual([warning]);
+    mcpState.mount();
+    mode.showExtensionNotify(warning, "warning");
+    mode.showExtensionNotify("hello", "info");
+    expect(shown).toEqual([warning, "hello"]);
+    expect(mcpState.status("obsidian", new Set())).toBe("failed");
+    mode.showExtensionNotify("MCP servers need attention:\n  config: /x: bad\n  obsidian: failed\nRun /mcp to fix.", "warning");
+    expect(shown[2]).toBe("MCP configuration needs attention:\n  config: /x: bad\nRun /mcp to fix.");
   });
 
   test("formats token counts compactly", () => {
