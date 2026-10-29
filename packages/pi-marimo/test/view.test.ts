@@ -797,7 +797,11 @@ test("narrow, a few outline rows around the cursor sit above the detail, and the
     v.handleInput("k");
     const code = v.render(80).findIndex((l) => l.includes("│ model = boom(daily)"));
     v.handleMouse(ev("click", code));
-    expect(v.render(80).join("\n")).toContain("│ model = boom(daily)");
+    // Focused by the click, the code keeps its column: its gutter becomes the accent bar.
+    const after = v.render(80);
+    expect(after.join("\n")).toContain("▌ model = boom(daily)");
+    expect(after.find((l) => l.includes("▌ model = boom"))!.indexOf("▌ model")).toBe(v.render(80)[code]!.indexOf("▌ model"));
+    expect(after.find((l) => l.includes("▌ model = boom"))!.indexOf("▌ model")).toBe(after[code]!.indexOf("▌ model"));
     // The wheel over the outline moves the cursor.
     v.handleMouse(ev("wheel", 4, { wheelDelta: 1 }));
     expect(v.render(80).join("\n")).toMatch(/▌ {2}  chart/u);
@@ -1061,5 +1065,19 @@ test("ctrl+j and ctrl+k move through a filter's matches, while typing it and aft
     // Found: every cell shows again, the cursor on the match.
     expect(screen(v)).toMatch(/▌ +  load_c/u);
     expect(screen(v)).toContain("y = 2");
+  } finally { v.dispose(); }
+});
+
+test("focusing the code does not move it: the bar takes the block's first column", () => {
+  const f = nbWith([{ id: "a", code: "x = 1\ny = 2" }]);
+  const bgTheme = { ...theme, bg: (c: string, t: string) => `<${c}>${t}</${c}>` };
+  const v = new NotebookView(tui as any, bgTheme as any, notebookKey(f), { followed: () => [f], interrupt: async () => {}, openInBrowser: () => {} }, () => {});
+  try {
+    v.handleInput("\r");
+    const column = () => { const l = v.render(100).find((x) => x.includes("y = 2"))!; return l.indexOf("y = 2"); };
+    const before = column();
+    v.handleInput("n");
+    expect(v.render(100).join("\n")).toContain("<toolPendingBg>▌y = 2");
+    expect(column()).toBe(before);
   } finally { v.dispose(); }
 });
