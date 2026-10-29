@@ -517,6 +517,18 @@ describe("pi-bg", () => {
     await x.shutdown();
   }, 15_000);
 
+  it("bg:stop stops this session's running task (pi-marimo's S in a notebook view), and only that", async () => {
+    const x = await load();
+    const start = x.textOf(await x.call("bg_run", { command: "sleep 30", kind: "service", name: "srv" }));
+    const id = /service (\w+)/u.exec(start)?.[1] ?? "";
+    x.pi.events.emit("bg:stop", { task: "nope" });
+    x.pi.events.emit("bg:stop", {});
+    expect(x.emitted.some((e) => e.channel === "bg:killed")).toBe(false);
+    x.pi.events.emit("bg:stop", { task: id });
+    await until(() => x.emitted.some((e) => e.channel === "bg:killed" && e.data.id === id), 5_000);
+    await x.shutdown();
+  }, 15_000);
+
   it("marimo: a job the notebook rows stand for leaves /tasks and the pill, and bg_wait on the notebook waits on the job", async () => {
     const x = await load();
     const section = x.emitted.filter((e) => e.channel === "activity:section").map((e) => e.data.section).find((s: any) => s.id === "bg");

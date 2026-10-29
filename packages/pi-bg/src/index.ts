@@ -38,6 +38,8 @@
 //                                              rows) stand for this running task, so /tasks and the pill leave
 //                                              it out, and bg_wait on that outside work waits on the task, whose
 //                                              result carries the output. No detail clears it.
+//          bg:stop {task}                      stop this session's running task (pi-marimo's `S` in a notebook
+//                                              view stops the server its row stands for)
 //          bg:probe {reply}                    reply() when pi-bg is loaded
 //
 // marimo without pi-marimo (marimo.ts): a `marimo edit nb.py` service is named `marimo nb.py` and is
@@ -802,6 +804,11 @@ export default function piBg(pi: ExtensionAPI) {
         w.resolve("done");
       }
     }
+  });
+  pi.events.on("bg:stop", (data) => {
+    const id = (data as { task?: unknown } | undefined)?.task;
+    const t = typeof id === "string" ? reg.find(id, sessionId) : undefined;
+    if (t && t.status === "running") void stopTask(t, "user").catch(() => undefined);
   });
   pi.events.on("bg:probe", (data) => {
     (data as { reply?: () => void } | undefined)?.reply?.();
