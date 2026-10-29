@@ -14,6 +14,7 @@ import { type AgentDef, BUILTIN_AGENTS } from "../src/agents.ts";
 import { DEFAULT_CONFIG } from "../src/index.ts";
 import { askJev } from "../src/jev.ts";
 import { type AvailableModel, DEFAULT_TIER_DESCRIPTIONS, agentDefaults, pickQuestions, readPicks } from "../src/pick.ts";
+import { SOURCES, modelSource } from "../src/stats.ts";
 import { clip } from "../src/transcript.ts";
 
 /** At most this many runs are asked about (one Jev call each). */
@@ -30,6 +31,8 @@ export interface RecordedRun {
   model: string;
   thinking: string;
   status: string;
+  /** Where the run's model came from; `unknown` for records from before `source` was kept. */
+  modelSource: ReturnType<typeof modelSource>;
   turns: number;
   tokens: number;
   cost: number;
@@ -66,6 +69,7 @@ export function collectRuns(sessions: readonly Pick<Session, "entries">[]): Reco
         model: str(d.model),
         thinking: str(d.thinking),
         status: str(d.status),
+        modelSource: modelSource(d as { source?: { model?: string } }),
         turns: num(d.turns),
         tokens: num(d.tokens),
         cost: num(d.cost),
@@ -185,11 +189,17 @@ export default defineEval({
       rows.push([role, b.runs, pct(b.runs / n), usd(b.actual), usd(b.estimated), impl]);
     }
     rows.push(["total", n, n ? "100%" : "-", usd(actual), usd(estimated), actual > 0 ? `estimated/actual ${(estimated / actual).toFixed(2)}` : ""]);
+    const bySource = Object.fromEntries(SOURCES.map((x) => [x, runs.filter((r) => r.modelSource === x).length])) as Record<(typeof SOURCES)[number], number>;
+    const recordedSource = n - bySource.unknown;
+    const sourceLine = recordedSource
+      ? `Model chosen by (${recordedSource} of ${n} runs recorded it): ${SOURCES.filter((x) => x !== "unknown").map((x) => `${x} ${pct(bySource[x] / recordedSource)}`).join(", ")}; ${bySource.unknown} not recorded (older runs).`
+      : `Model chosen by: not recorded (${n} runs predate the source record).`;
     const perTurn = [...medians].sort((a, b) => b[1].runs - a[1].runs).map(([model, m]) => `  ${model}: ${usd(m.perTurn)}/turn over ${m.runs} runs`);
     const report = [
       `profiles: EVAL_SEED=${seed}, ${n} of ${all.length} recorded runs in ${sessions.length} sessions (at most ${MAX_RUNS})`,
       ctx.table(rows),
       `${changedAgent} runs would get another agent than they had; ${unpriced} runs are estimated at their actual cost for lack of per-turn data on the implied model.`,
+      sourceLine,
       "Median cost per turn by model (all efforts together), from the same runs:",
       ...(perTurn.length ? perTurn : ["  (no run with turns and a cost)"]),
       "Estimates assume the same number of turns on the implied model. This cannot judge answer quality: a cheaper role may answer worse or need more turns.",
@@ -207,6 +217,10 @@ export default defineEval({
       changedAgent,
       unpriced,
     };
+    for (const x of SOURCES) {
+      metrics[`source.${x}`] = bySource[x];
+      if (x !== "unknown") metrics[`sourceShare.${x}`] = recordedSource ? bySource[x] / recordedSource : 0;
+    }
     for (const [role, b] of buckets) {
       metrics[`share.${role}`] = n ? b.runs / n : 0;
       metrics[`runs.${role}`] = b.runs;

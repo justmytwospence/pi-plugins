@@ -109,11 +109,19 @@ describe("the profiles eval target", () => {
     expect(text).toMatch(/^total\s+4\s+100%\s+\$3\.65\s+\$2\.15\s+estimated\/actual 0\.59$/mu);
     expect(text).toContain("3 runs would get another agent than they had; 1 runs are estimated at their actual cost");
     expect(text).toContain("cannot judge answer quality");
+    expect(text).toContain("Model chosen by: not recorded (4 runs predate the source record).");
     expect(text).toMatch(/spend: \$0\.0040 over 4 calls/u);
     const [recorded] = last("profiles", 1, r.env);
-    expect(recorded).toMatchObject({ seed: 7, calls: 4, metrics: { runs: 4, recorded: 4, sessions: 2, jevFailures: 0, "share.explorer": 0.5, "runs.writer": 1, unpriced: 1, changedAgent: 3 } });
+    expect(recorded).toMatchObject({ seed: 7, calls: 4, metrics: { runs: 4, recorded: 4, sessions: 2, jevFailures: 0, "share.explorer": 0.5, "runs.writer": 1, unpriced: 1, changedAgent: 3, "source.unknown": 4, "source.explicit": 0 } });
     expect(recorded!.metrics.actualCost).toBeCloseTo(3.65);
     expect(recorded!.metrics.estimatedCost).toBeCloseTo(2.15);
+  });
+
+  test("reports the source of the model where records have it", () => {
+    const runs = collectRuns([
+      { entries: [record({ id: "a", task: "t", model: "m/x", source: { model: "profile", thinking: "profile" } }), record({ id: "b", task: "t", model: "m/x", source: { model: "explicit" } }), record({ id: "c", task: "t", model: "m/x" })] },
+    ]);
+    expect(runs.map((r) => r.modelSource)).toEqual(["profile", "explicit", "unknown"]);
   });
 
   test("fails, with the failures counted, when 20% or more of the calls do not answer", async () => {

@@ -26,9 +26,10 @@ import { Conversation, type Message, messageText, readTranscript, transcriptWrit
 import { type Mode, type OwedResult, type Parcel, type ParkedCall, adopt, isParked, park, sessionKey } from "./handoff.ts";
 import { type JevConfig, askJev } from "./jev.ts";
 import { runLabel, taskLabel } from "./label.ts";
-import { type AvailableModel, DEFAULT_THRESHOLD, DEFAULT_TIER_DESCRIPTIONS, type Given, type Resolved, type Threshold, type Tier, agentDefaults, pickQuestions, providerTiers, readPicks, resolve } from "./pick.ts";
+import { type AvailableModel, type ChoiceSource, DEFAULT_THRESHOLD, DEFAULT_TIER_DESCRIPTIONS, type Given, type Resolved, type Threshold, type Tier, agentDefaults, pickQuestions, providerTiers, readPicks, resolve } from "./pick.ts";
 import { REFERENCE_TYPE, type RunRef, compactTranscript, referenceContext, runAutocomplete } from "./references.ts";
 import { type Run, type RunLink, displayTokens, transcriptPath } from "./run.ts";
+import { computeStats, formatStats, latestPerRun, readAllRuns, runRecords } from "./stats.ts";
 import { clip, recentTexts } from "./transcript.ts";
 import { FleetView, SUCCESS_HINT_MS } from "./ui/fleet.ts";
 import type { ViewerActions } from "./ui/viewer.ts";
@@ -138,8 +139,8 @@ const TaskItem = Type.Object({
   task: Type.String({ description: "The complete, self-contained task" }),
   label: Type.Optional(Type.String({ description: "Short task name for lists and headings; omit to derive from the task" })),
   cwd: Type.Optional(Type.String({ description: "Working directory for this task" })),
-  model: Type.Optional(Type.String({ description: "provider/model; omit for the agent's or the automatic tier on the parent's provider; explicit models may cross providers" })),
-  thinking: Type.Optional(Type.String({ description: "off|minimal|low|medium|high|xhigh|max; omit to let it be chosen automatically" })),
+  model: Type.Optional(Type.String({ description: "provider/model. Leave empty: the agent's role brings its own model and effort. Set only when the user named a model or the task needs a different one; explicit models may cross providers" })),
+  thinking: Type.Optional(Type.String({ description: "off|minimal|low|medium|high|xhigh|max. Leave empty: the role brings its own effort. Set only when the user named a level or the task needs a different one" })),
 });
 
 const Params = Type.Object({
@@ -157,8 +158,8 @@ const Params = Type.Object({
   context: Type.Optional(Type.Union([Type.Literal("fresh"), Type.Literal("fork")], { description: "fresh (default) or fork this conversation" })),
   worktree: Type.Optional(Type.Boolean({ description: "Run each task in a new git worktree, only when the user requests a worktree or branch isolation; otherwise ask (default false)" })),
   cwd: Type.Optional(Type.String({ description: "Working directory (default: the session's)" })),
-  model: Type.Optional(Type.String({ description: "provider/model for a single task; explicit models may cross providers" })),
-  thinking: Type.Optional(Type.String({ description: "Thinking level for a single task" })),
+  model: Type.Optional(Type.String({ description: "provider/model. Leave empty: the agent's role brings its own model and effort. Set only when the user named a model or the task needs a different one; explicit models may cross providers" })),
+  thinking: Type.Optional(Type.String({ description: "off|minimal|low|medium|high|xhigh|max. Leave empty: the role brings its own effort. Set only when the user named a level or the task needs a different one" })),
   id: Type.Optional(Type.String({ description: "Run id (or prefix) for status, steer, stop, result, resume" })),
   message: Type.Optional(Type.String({ description: "Steering message for steer" })),
 });
@@ -173,6 +174,8 @@ export interface RunView {
   model: string;
   thinking: string;
   byJev: Resolved["byJev"];
+  /** Where the model and thinking came from; absent on records from before it was kept. */
+  source?: ChoiceSource;
   /** The quota pressure Jev's model or effort pick was made under, when above 0. */
   pressure?: number;
   /** Why the pick differs from Jev's answer (the Haiku guard). */
@@ -226,6 +229,7 @@ function view(run: Run, withOutput = false): RunView {
     model: s.model ?? run.model,
     thinking: run.thinking,
     byJev: run.byJev,
+    ...(run.source ? { source: run.source } : {}),
     ...(run.pressure ? { pressure: run.pressure } : {}),
     ...(run.note ? { note: run.note } : {}),
     status: s.status,
@@ -274,6 +278,7 @@ export function recordedRun(v: RecordedRun): Run {
     model: v.model,
     thinking: v.thinking,
     byJev: v.byJev ?? { agent: false, model: false, thinking: false },
+    ...(v.source ? { source: v.source } : {}),
     ...(typeof v.pressure === "number" && v.pressure > 0 ? { pressure: v.pressure } : {}),
     ...(typeof v.note === "string" && v.note ? { note: v.note } : {}),
     cwd: v.cwd ?? "",
@@ -784,6 +789,7 @@ export default function subagents(pi: ExtensionAPI) {
       model: resolved.model,
       thinking: resolved.thinking,
       byJev: resolved.byJev,
+      source: resolved.source,
       ...(resolved.pressure ? { pressure: resolved.pressure } : {}),
       ...(resolved.tier ? { tier: resolved.tier } : {}),
       ...(resolved.note ? { note: resolved.note } : {}),
@@ -1011,7 +1017,7 @@ export default function subagents(pi: ExtensionAPI) {
       name: "subagent",
       label: "Subagent",
       description:
-        "Each subagent adds its own context and token usage: delegate work that runs in parallel, exceeds one context, or is routine with a long tail; keep the rest in this session. action=run (default): a single `task`, parallel `tasks`, or a `chain` whose steps can use {previous}. Omit agent, model, or thinking to let them be chosen automatically: a role (explorer, worker, reviewer, researcher, writer, planner) brings its own model and effort, general follows the task's difficulty; implicit models stay on the parent session's provider. `async: true` returns run ids at once and delivers each result as a message. action=status|steer|stop|result|resume take `id` (steer also `message`); resume continues a stopped or lost run, or one that hit the rate limit, as a new one.",
+        "Each subagent adds its own context and token usage: delegate work that runs in parallel, exceeds one context, or is routine with a long tail; keep the rest in this session. action=run (default): a single `task`, parallel `tasks`, or a `chain` whose steps can use {previous}. Pass a role as `agent` (explorer, worker, reviewer, researcher, writer, planner; general follows the task's difficulty) and leave `model` and `thinking` empty: the role brings its own model and effort. Set them only when the user named one or the task needs something other than the role's. `async: true` returns run ids at once and delivers each result as a message. action=status|steer|stop|result|resume take `id` (steer also `message`); resume continues a stopped or lost run, or one that hit the rate limit, as a new one.",
       promptSnippet: "Delegate self-contained tasks to subagents with their own context windows",
       promptGuidelines: promptGuidelines(delegation),
       parameters: Params,
@@ -1373,9 +1379,17 @@ export default function subagents(pi: ExtensionAPI) {
   registerSubagentTool(delegationOf(config));
 
   pi.registerCommand("subagents", {
-    description: "Browse this session's subagent runs and view their conversations (/subagents [id], /subagents stop [id|all])",
+    description: "Browse this session's subagent runs and view their conversations (/subagents [id], /subagents stop [id|all], /subagents stats [all])",
     handler: async (args, ctx) => {
       const [verb, target] = args.trim().split(/\s+/u);
+      if (verb === "stats") {
+        const all = args.split(/\s+/u).some((a) => a === "all" || a === "--all");
+        const records = all
+          ? readAllRuns(path.join(agentDir(), "sessions"))
+          : runRecords((ctx.sessionManager.getBranch() ?? []) as Array<{ type?: string; customType?: string; data?: unknown }>);
+        ctx.ui.notify(formatStats(computeStats(latestPerRun(records)), all ? "in all sessions" : "in this session", Math.max(40, Math.min(process.stdout.columns || 100, 120))), "info");
+        return;
+      }
       if (verb === "stop") {
         const running = [...runs.values()].filter((r) => r.child && r.state.status === "running");
         const chosen = target === "all" || (!target && running.length === 1) ? running : target ? running.filter((r) => r.id.startsWith(target)) : [];

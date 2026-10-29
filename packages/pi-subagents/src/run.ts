@@ -2,7 +2,7 @@
 import path from "node:path";
 import type { Child, ChildState, Usage } from "./child.ts";
 import type { Conversation } from "./conversation.ts";
-import type { Resolved, Tier } from "./pick.ts";
+import type { ChoiceSource, Resolved, Tier } from "./pick.ts";
 
 export interface Run {
   id: string;
@@ -13,6 +13,8 @@ export interface Run {
   model: string;
   thinking: string;
   byJev: Resolved["byJev"];
+  /** Where the model and thinking came from; absent on records from before it was kept. */
+  source?: ChoiceSource;
   /** The quota pressure (0..1) Jev's model or effort pick was made under, when above 0. */
   pressure?: number;
   tier?: Tier;

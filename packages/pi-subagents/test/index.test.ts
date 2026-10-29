@@ -53,6 +53,9 @@ test("the UI binds in the TUI only; /subagents lists recorded runs and opens one
   await command.handler("stop", ctx);
   expect(ui.notes.at(-1)).toBe("No subagents are running.");
 
+  await command.handler("stats", ctx);
+  expect(ui.notes.at(-1)).toMatch(/1 runs, \$0\.0000 total, in this session[\s\S]*unknown\s+1\s+100%[\s\S]*scout\s+1/u);
+
   await h.emit("session_shutdown", { type: "session_shutdown" }, ctx);
   expect(ui.inputHandlers.size).toBe(0);
 });
@@ -295,7 +298,7 @@ test("quota pressure on the parent's provider tightens Jev's picks, and the row 
     expect(tight.details.runs[0]).toMatchObject({ model: "p/mid", thinking: "medium", pressure: 1 });
     expect(tool.renderResult(tight, { expanded: false }, plain).render(200).join("\n")).toContain("mid (auto, p=1.0) · medium (auto, p=1.0)");
     const record = h.entries.filter((e) => e.customType === "subagents:run").map((e) => e.data as any).find((d) => d.id === tight.details.runs[0].id);
-    expect(record).toMatchObject({ pressure: 1, byJev: { model: true, thinking: true } });
+    expect(record).toMatchObject({ pressure: 1, byJev: { model: true, thinking: true }, source: { model: "tier", thinking: "jev" } });
     await h.emit("session_shutdown", { type: "session_shutdown" }, ctx);
   } finally {
     setPiInvocation(undefined);

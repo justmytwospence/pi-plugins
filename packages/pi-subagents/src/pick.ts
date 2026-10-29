@@ -274,6 +274,14 @@ export function readPicks(answers: Record<string, ClassifierAnswer>, options: { 
   return picks;
 }
 
+/** Where the model and thinking level of a run came from. */
+export interface ChoiceSource {
+  /** explicit: the call's argument; profile: the agent's profile or file; tier: the automatic tier pick; default: the parent's. */
+  model: "explicit" | "profile" | "tier" | "default";
+  /** explicit: the call's argument; profile: the agent's profile or file; jev: Jev's effort pick; default: the parent's. */
+  thinking: "explicit" | "profile" | "jev" | "default";
+}
+
 export interface Resolved {
   agent: AgentDef;
   model: string;
@@ -281,6 +289,8 @@ export interface Resolved {
   /** Which choices Jev made, for display. */
   byJev: { agent: boolean; model: boolean; thinking: boolean };
   tier?: Tier;
+  /** Where each choice came from. */
+  source: ChoiceSource;
   /** The quota pressure Jev's model or effort pick was made under, when above 0. */
   pressure?: number;
   /** Why the pick differs from Jev's answer (the Haiku guard), for display. */
@@ -324,6 +334,7 @@ export function resolve(
   const provider = parent.model.split("/")[0];
   let model = given.model ?? defaults.model;
   let tier: Tier | undefined;
+  const source: ChoiceSource = { model: given.model ? "explicit" : defaults.model ? "profile" : "default", thinking: given.thinking ? "explicit" : defaults.thinking ? "profile" : "default" };
   let note: string | undefined;
   if (!model) {
     tier = picks?.tier ?? "balanced";
@@ -334,13 +345,15 @@ export function resolve(
     const tierModel = tiers.models[tier]?.startsWith(`${provider}/`) ? tiers.models[tier] : undefined;
     model = tierModel ?? parent.model;
     byJev.model = picks?.tier !== undefined && tierModel !== undefined;
+    if (tierModel) source.model = "tier";
   }
   let thinking = given.thinking ?? defaults.thinking;
   if (!thinking && picks?.thinking) {
     thinking = picks.thinking;
     byJev.thinking = true;
+    source.thinking = "jev";
   }
   thinking ??= parent.thinking;
   const pressure = picks?.pressure && (byJev.model || byJev.thinking) ? picks.pressure : undefined;
-  return { agent, model, thinking, byJev, ...(tier ? { tier } : {}), ...(pressure ? { pressure } : {}), ...(note ? { note } : {}) };
+  return { agent, model, thinking, byJev, source, ...(tier ? { tier } : {}), ...(pressure ? { pressure } : {}), ...(note ? { note } : {}) };
 }

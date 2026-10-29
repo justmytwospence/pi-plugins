@@ -174,3 +174,23 @@ test("precedence: arguments, agent file, Jev, defaults", () => {
   expect(resolve({}, agents, undefined, tiers, parent)).toMatchObject({ agent: { name: "general" }, model: parent.model, thinking: "medium" });
   expect(resolve({ agent: "nope" }, agents, undefined, tiers, parent)).toEqual({ error: expect.stringMatching(/Unknown agent "nope"/u) });
 });
+
+test("resolve records the source of the model and thinking of every combination", () => {
+  const src = (r: ReturnType<typeof resolve>) => (r as { source: unknown }).source;
+  const tierOnly = { models: { fast: "anthropic/claude-haiku-5" }, descriptions: DEFAULT_TIER_DESCRIPTIONS };
+  // Explicit arguments win over a profile or file.
+  expect(src(resolve({ agent: "scout", model: "x/y", thinking: "low" }, agents, { thinking: "high" }, tiers, parent))).toEqual({ model: "explicit", thinking: "explicit" });
+  // The agent file's model and thinking are the profile.
+  expect(src(resolve({ agent: "scout" }, agents, undefined, tiers, parent))).toEqual({ model: "profile", thinking: "default" });
+  expect(src(resolve({ agent: "reviewer" }, agents, { tier: "strong" }, tiers, parent))).toEqual({ model: "tier", thinking: "profile" });
+  // Jev's picks.
+  expect(src(resolve({}, [GENERAL], { tier: "fast", thinking: "low" }, tiers, parent))).toEqual({ model: "tier", thinking: "jev" });
+  expect(src(resolve({ model: "x/y" }, [GENERAL], { thinking: "low" }, tiers, parent))).toEqual({ model: "explicit", thinking: "jev" });
+  expect(src(resolve({ thinking: "max" }, [GENERAL], { tier: "strong" }, tiers, parent))).toEqual({ model: "tier", thinking: "explicit" });
+  // Nothing fixed it: the parent's model and thinking.
+  const other = { model: "openai/x", thinking: "medium" };
+  expect(src(resolve({}, [GENERAL], { tier: "strong" }, tierOnly, other))).toEqual({ model: "default", thinking: "default" });
+  expect(src(resolve({}, [GENERAL], undefined, tierOnly, other))).toEqual({ model: "default", thinking: "default" });
+  // The balanced tier model with no Jev answer is still a tier pick.
+  expect(src(resolve({}, [GENERAL], undefined, { models: { balanced: "anthropic/claude-sonnet-5-5" }, descriptions: DEFAULT_TIER_DESCRIPTIONS }, parent))).toEqual({ model: "tier", thinking: "default" });
+});
