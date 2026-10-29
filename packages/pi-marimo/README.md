@@ -48,8 +48,8 @@ A server Pi starts belongs to the Pi process: it keeps running across `/reload` 
 In the TUI every notebook this session uses is a row under the prompt, in file-path order, as are running servers whose notebook is open in no browser and pinned files that are not open. Example:
 
 ```text
- ○ Marimo prep.py:2718 · idle
- ● Marimo fit.py:2718 · running Data loading › Model fit 0:12 · 2 queued
+ ○ prep.py:2718 · idle
+ ● fit.py:2718 · running Data loading › Model fit 0:12 · 2 queued
 ```
 
 `↓` at the bottom of the prompt selects the rows (`j` in pi-vim's normal mode); `↑`/`↓` move, Enter opens the notebook view (a server open in no browser is opened here first), `x` twice interrupts a running notebook, Esc goes back. A row reads `✗` after a run broke cells, until your next message. With [pi-bg](https://pi-plugins.vercel.app/plugins/pi-bg/) or [pi-subagents](https://pi-plugins.vercel.app/plugins/pi-subagents/) the rows share the space with their tasks and agents, and `/tasks` lists the notebooks too.
@@ -73,16 +73,35 @@ A marimo-pair call that could mean more than one followed notebook (only `--url`
 
 ### The notebook view (TUI)
 
-`/marimo view` (or Enter on a row) opens a notebook full screen, under a banner that says it is not your main session: a header (kernel state, cell counts, stale cells and errors, what the agent changed, the last run, the server), then the notebook, live. It follows the running cell until you move.
+`/marimo view` (or Enter on a row) opens a notebook full screen, under a banner that says it is not your main session, with a one-line header (kernel state, what the agent changed, when it last ran, the server's port) and two panes: an outline on the left and the selected cell on the right. It follows the running cell until you move.
 
-It starts as the outline: the headings, and one line per code cell with its status, what it defines, what needs attention, how long it last ran, and what it output (`table 1,204×8`, `chart`, `“accuracy 0.93”`), with the cell's widgets under it. `O` switches to every cell's output under its line and the markdown cells as prose, the way the notebook reads in a browser (`view.outputs` in the settings starts there). Enter expands a cell: its code (highlighted), its dataflow (`uses df ← load · used by plot`) and variable values, its console (tracebacks as text), and its whole output. Tables are grids of the first page marimo sends; PNG figures, Vega-Lite and Plotly charts are drawn inline on terminals with Kitty graphics (Ghostty, herdr, Kitty), and Plotly figures run live there (see Optional integrations).
+The outline is the headings and one short line per code cell: its status, a title (its name, else what it defines that other cells use, else what it shows: `imports`, `daily, smooth`, `chart`, `controls`), and one badge at the end: how long it has run, `queued`, the error's type (`KeyError`), `blocked`, `stale`, `new` or `changed` (by the agent), else the output's shape (`1,204×8`, `chart`, `4 inputs`). Cell ids are never shown. The selected cell has an accent bar and Pi's selection background. The detail shows the cell as a reader wants it: prose rendered, the output large (tables are grids of the first page marimo sends; PNG figures, Vega-Lite and Plotly charts are drawn inline on terminals with Kitty graphics (Ghostty, herdr, Kitty), and Plotly figures run live there, see Optional integrations), an error with its traceback, the cell's widgets, its Lens selections, the code folded to `▸ code · 12 lines` (Enter opens it), and its dataflow by name (`uses df · used by plot`). `O` stacks the whole section in the detail, the way the notebook reads in a browser (`view.outputs` in the settings starts there); `O` again shows the cell alone. Variable values are in the `v` pane.
+
+From 100 columns the panes sit side by side. Narrower, the outline fills the view, Enter opens the cell's detail full width and Esc (or `h`) comes back. An example (not a real screenshot):
+
+```text
+╭─ ◀ esc · Notebook coffee.py · not your main session ─────────────────────────╮
+│ ○ coffee.py  idle                         ran 12s · 1 error · 2m ago · :2742 │
+│ ──────────────────────────────────────────────────────────────────────────── │
+│  ○ imports                     │ drinks, sales · Coffee shop explorer › Data │
+│    Coffee shop explorer        │                                             │
+│      Data                      │ ▍ day         drink      cups  weekend      │
+│ ▌  ○ drinks, sales       450×4 │ ▍ 2026-01-01  latte        63  false        │
+│      Controls                  │ ▍ 10 of 450 rows · 4 columns                │
+│     ○ drink, title +2 4 inputs │ ▸ code · 8 lines                            │
+│     ✗ forecast        KeyError │                                             │
+│ ──────────────────────────────────────────────────────────────────────────── │
+│ ↑↓ cells · enter code · n next error                       ? keys · esc back │
+╰──────────────────────────────────────────────────────────────────────────────╯
+```
+
 
 | key | |
 |---|---|
 | `j`/`k`, `↑`/`↓` | the next or previous cell; `[` `]` the previous or next section |
-| `^U`/`^D`, PgUp/PgDn, Space, `g`/`G` | scroll; the first or last cell |
-| Enter, `l` | expand or collapse the cell |
-| `O` | every cell's output, or the outline |
+| `^U`/`^D`, PgUp/PgDn, Space | scroll the detail; `g`/`G` the first or last cell |
+| Enter, `l` | open or fold the cell's code (narrow: open its detail) |
+| `O` | the whole section in the detail, or the cell alone |
 | `z` / `Z` | fold the section the cursor is in / fold every section (again: unfold all) |
 | `n`/`N` | the next or previous failed cell |
 | `c`/`C`, `d` | the next or previous cell the agent changed; its diff |
@@ -96,14 +115,14 @@ It starts as the outline: the headings, and one line per code cell with its stat
 | `:` | run Python in the kernel (below) |
 | `a` | ask the agent about the cell (below) |
 | `m`, `M` | mark the cell for the agent through Lens; `M` twice removes its mark |
-| `i` | drive an expanded live chart from the keyboard |
+| `i` | drive the selected cell's live chart from the keyboard |
 | `o` | open the notebook in the browser |
 | `S` | twice: stop the server (pi-bg's, or one Pi started) |
 | Tab, Shift+Tab | the next or previous notebook |
 | `?` | every key |
 | Esc, `q`, `h`, `←`, Ctrl+C | back to Pi |
 
-The mouse wheel scrolls, a click selects a cell (or a widget), a second click or a double click expands it.
+The mouse wheel scrolls the pane under it, a click selects a cell (or a widget), a second click or a double click opens its code, and a click on the `▸ code` line folds or opens it.
 
 ### Pairing from the view
 
@@ -163,7 +182,7 @@ The view's actions are separate requests to the session's kernel endpoints, as t
 | `maxNotebooks` | `8` | notebooks followed at once in `auto` mode (1 to 32) |
 | `context` | `true` | put the notebooks' state in the model's context at each prompt |
 | `liveCharts` | `true` | run Plotly figures live in the view and the transcript; `false` draws pictures |
-| `view.outputs` | `false` | open the notebook view with every cell's output shown (`O` toggles it) |
+| `view.outputs` | `false` | start the notebook view with the whole section in the detail (`O` toggles it) |
 | `server.command` | `[]` | how `/marimo edit` and `/marimo new` start marimo, e.g. `["uvx", "--with", "pandas", "marimo"]`; empty: `uv run marimo` in a uv project, else `marimo` |
 
 | variable | |
@@ -200,7 +219,7 @@ The notebooks are one more source in the activity protocol (`src/activity.ts`, c
 
 ### Charts
 
-- **Inline images.** An expanded (or, in outputs mode, any) cell whose output is a PNG (a matplotlib or PIL figure, bare or as an `<img>` data URL, up to about 1.5 MB) is drawn through the terminal's Kitty graphics, in herdr and Ghostty as well as plain Kitty. The picture shows only when its whole block fits on screen. Altair and other Vega-Lite charts are drawn by `uv run --with vl-convert-python` (needs `uv`), cached per spec. Plotly figures are drawn by a sandboxed headless Chrome (Chrome for Testing, downloaded once into `~/.cache/pi-marimo/chrome`; `PI_MARIMO_CHROME_DIR` moves it, `BROWSER_PATH` uses one you name), never the Chrome you use. The agent's snapshot never carries images.
+- **Inline images.** A cell whose output is a PNG (a matplotlib or PIL figure, bare or as an `<img>` data URL, up to about 1.5 MB) is drawn through the terminal's Kitty graphics, in herdr and Ghostty as well as plain Kitty. The picture shows only when its whole block fits on screen. Altair and other Vega-Lite charts are drawn by `uv run --with vl-convert-python` (needs `uv`), cached per spec. Plotly figures are drawn by a sandboxed headless Chrome (Chrome for Testing, downloaded once into `~/.cache/pi-marimo/chrome`; `PI_MARIMO_CHROME_DIR` moves it, `BROWSER_PATH` uses one you name), never the Chrome you use. The agent's snapshot never carries images.
 - **Live Plotly charts.** On a Kitty-graphics terminal, a Plotly figure in the view is a running chart: the mouse over it goes to its page (hover tooltips, drag to zoom or pan, the wheel zooms), and `i` drives it from the keyboard (arrows or `hjkl` move a pointer, space drags, `+`/`-` zoom, `0` resets, Esc hands the keys back). `"liveCharts": false` draws pictures instead. Clicks and selections do not flow back to `mo.ui.plotly`.
 - **Charts in the chat.** `/marimo chart <cell>` (and the `marimo_chart` tool, which the agent uses to show you a chart) puts a cell's chart into the transcript, a Plotly figure live as in the view, and `/marimo inspect` drives the newest one from the keyboard. The entry keeps the figure, so the chart comes back after a restart or resume.
 - **No flicker.** In Pi's fullscreen mode pi-marimo places chart frames itself (`src/ui/painter.ts`), a new frame above the old one before the old one goes, and transcript pictures are taken off the screen while an overlay covers them.

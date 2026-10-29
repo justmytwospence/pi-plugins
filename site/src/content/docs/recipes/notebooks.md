@@ -67,7 +67,7 @@ Open the notebook view (`/marimo view`, or Enter on its row under the prompt) an
 - `w` drives the cell's widgets (`h`/`l` change a slider, Space a checkbox); dependent cells rerun.
 - `:` runs Python against the notebook's globals without touching a cell, for a quick look at a value.
 - `m` marks a result for the agent through marimo-lens, as pointing at it in the browser would.
-- `O` shows every cell's output (tables as grids, charts inline on Kitty-graphics terminals), `v` the variables, `?` every key.
+- The view is an outline of the cells and the selected cell's detail (output, error with traceback, folded code; tables as grids, charts inline on Kitty-graphics terminals). `O` stacks the whole section in the detail, `v` lists the variables, `?` every key.
 
 ## Wait for cells, not just the server
 

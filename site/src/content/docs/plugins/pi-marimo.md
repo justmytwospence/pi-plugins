@@ -87,14 +87,33 @@ Selection images, agent activity and reveals are not read. pi-marimo never resol
 
 In the TUI every notebook this session uses is a row under the prompt, in file-path order (`○ fit.py  :2718 · idle`, `● fit.py  :2718 · running Data loading › Model fit  0:12`, `✗` after a failed run until your next message), as are running servers whose notebook is open in no browser and pinned files that are not open. Outside the TUI (RPC, print) the same information is a footer line per notebook (status keys `marimo`, `marimo-2`, ... in file-path order), with its file, running heading path, elapsed time, queued cells, and errors. In the turn's context, the current notebook and any other the agent worked in during the last three prompts are in full; the rest are outlines. Each notebook comes with the marimo-pair flags that name it, and a marimo-pair call that could mean several followed notebooks gets a note on its result listing them, since pi-marimo cannot count it as work in any. A running server whose notebook is open in no browser gets a `not open` line too (`marimo: 0_kcore.py · :2718 · not open`, for servers under the working directory that serve one notebook; pinned ones when pinned). In the footer form its name is a terminal hyperlink to the server; in the TUI, Enter on its row starts the notebook's session here, with no browser (see below), and shows its view; `/marimo open` opens it in the browser (`open` on macOS, `xdg-open` elsewhere) from the keyboard, and `o` does the same in the view. `↓` at the bottom of the prompt selects the rows (`j`/`k` in pi-vim's normal mode); `↑`/`↓` move, Enter opens the notebook's view (a server open in no browser is started here first), `x` twice interrupts a running one, Esc goes back to the prompt. With pi-bg or pi-subagents the rows share the panel with `N tasks` and the subagent list, and `/tasks` still lists the notebooks too.
 
-The notebook view opens with a header (kernel state, cell, stale and error counts, the agent's changes, the last run, the server) above the notebook, and follows the running cell until you move. It starts as the outline: headings, and one line per code cell with its status, what it defines, what needs attention, how long it ran and what it output (`table 1,204×8`, `chart`, `“accuracy 0.93”`), with its widgets under it. `O` shows every cell's output under its line and the markdown as prose (`view.outputs` starts there). An expanded cell shows its highlighted code, its dataflow and variable values, its console (tracebacks as text) and its whole output; tables are grids of the first page marimo sends, and PNG, Vega-Lite and Plotly charts are drawn inline on Kitty-graphics terminals.
+The notebook view opens with a one-line header (kernel state, the agent's changes, the last run, the server's port) above two panes, and follows the running cell until you move. The outline on the left is the headings and one short line per code cell: its status, a title (its name, else what it defines that other cells use, else what it shows: `imports`, `daily, smooth`, `chart`, `controls`) and one badge (how long it has run, `queued`, the error's type, `blocked`, `stale`, `new` or `changed` by the agent, else the output's shape: `1,204×8`, `chart`, `4 inputs`). Cell ids are never shown. The detail on the right is the selected cell as a reader wants it: prose rendered, the output large, an error with its traceback, widgets, Lens selections, the code folded to `▸ code · 12 lines` (Enter opens it) and the dataflow by name. `O` stacks the whole section in the detail (`view.outputs` starts there). Tables are grids of the first page marimo sends, and PNG, Vega-Lite and Plotly charts are drawn inline on Kitty-graphics terminals. From 100 columns the panes sit side by side; narrower, the outline fills the view, Enter opens the detail full width and Esc comes back.
+
+An example (not a real screenshot):
+
+```text
+╭─ esc · Notebook coffee.py · not your main session ───────────────────────────╮
+│ ○ coffee.py  idle                         ran 12s · 1 error · 2m ago · :2742 │
+│ ──────────────────────────────────────────────────────────────────────────── │
+│  ○ imports                     │ drinks, sales · Coffee shop explorer › Data │
+│    Coffee shop explorer        │                                             │
+│      Data                      │ ▍ day         drink      cups  weekend      │
+│ ▌  ○ drinks, sales       450×4 │ ▍ 2026-01-01  latte        63  false        │
+│      Controls                  │ ▍ 10 of 450 rows · 4 columns                │
+│     ○ drink, title +2 4 inputs │ ▸ code · 8 lines                            │
+│     ✗ forecast        KeyError │                                             │
+│ ──────────────────────────────────────────────────────────────────────────── │
+│ ↑↓ cells · enter code · n next error                       ? keys · esc back │
+╰──────────────────────────────────────────────────────────────────────────────╯
+```
 
 | Key | Action |
 | --- | --- |
 | `j` / `k`, arrows; `[` / `]` | Move between cells; between sections |
-| `Ctrl-U` / `Ctrl-D`, `PgUp` / `PgDn`, `g` / `G` | Scroll; first and last cell |
-| `Enter`, `l` | Expand or collapse the cell |
-| `O` | Every cell's output, or the outline |
+| `Ctrl-U` / `Ctrl-D`, `PgUp` / `PgDn`, `Space` | Scroll the detail |
+| `g` / `G` | First and last cell |
+| `Enter`, `l` | Open or fold the cell's code (narrow: open its detail) |
+| `O` | The whole section in the detail, or the cell alone |
 | `z` / `Z` | Fold the section at the cursor; fold every section (again: unfold all) |
 | `n` / `N` | The next or previous failed cell |
 | `c` / `C`, `d` | The next or previous cell the agent changed since your last message; its diff |
@@ -108,13 +127,13 @@ The notebook view opens with a header (kernel state, cell, stale and error count
 | `:` | Run Python in the kernel's scratchpad |
 | `a` | Ask the agent about the cell |
 | `m`, `M` | Mark the cell for the agent through Lens; remove its mark (press twice) |
-| `i` | Drive an expanded live chart from the keyboard |
+| `i` | Drive the selected cell's live chart from the keyboard |
 | `S` | Press twice to stop the server (pi-bg's, or one Pi started) |
 | `Tab`, `Shift+Tab`, `o` | Next and previous notebook; open in the browser |
 | `?` | Every key |
 | `Esc`, `q`, `h` | Back to Pi |
 
-The mouse wheel scrolls, a click selects a cell or a widget, a second click or a double click expands it.
+The mouse wheel scrolls the pane under it, a click selects a cell or a widget, a second click or a double click opens the code, and a click on the `▸ code` line folds or opens it.
 
 The observation connection is a read-only kiosk SSE consumer: it neither edits cells nor takes over the browser session. The view's actions are separate kernel requests (`/api/kernel/run`, `/interrupt`, `/set_ui_element_value`, `/set_model_value` for Lens, `/execute` for the scratchpad), so “read-only observation” does not mean every UI action is passive. Browser opening uses the platform's `open` or `xdg-open` utility.
 
@@ -135,7 +154,7 @@ Files merge in order: `~/.config/agents/marimo.json`, `~/.pi/agent/marimo.json`,
 | `maxNotebooks` | `8` | Notebooks followed at once in auto mode (1 to 32). |
 | `context` | `true` | Put the notebooks' state in the model's context at each prompt. |
 | `liveCharts` | `true` | Run Plotly figures live; `false` draws pictures. |
-| `view.outputs` | `false` | Open the notebook view with every cell's output shown. |
+| `view.outputs` | `false` | Start the notebook view with the whole section in the detail. |
 | `server.command` | `[]` | How `/marimo edit` and `/marimo new` start marimo; empty: `uv run marimo` in a uv project, else `marimo`. |
 
 When multiple marimo sessions hold the same file, attachment uses the exact session ID. In that situation, browser edits may not be visible until they execute. Connection status should therefore be checked before treating an outline as authoritative.
