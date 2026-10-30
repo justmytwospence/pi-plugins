@@ -125,9 +125,10 @@ export class HistoryPicker implements Component, Focusable {
     const selectedRow = lines.findIndex(line => stripVTControlCharacters(line).startsWith("› "));
     lines.push(...footer);
     if (this.focused && selectedRow >= 0) {
-      // Leave one row of breathing room below the selected item. The native
-      // dock has a three-row minimum, which can itself be clipped by the root
-      // on tiny terminals; anchoring the following row keeps the item in view.
+      // Layout only: index.ts hides the hardware cursor while this picker is
+      // active; Input's fake cursor remains the visible filter caret. Leave a
+      // row below the selection so the native dock's three-row minimum still
+      // keeps the selected item visible when the root clips tiny terminals.
       const anchor = Math.min(selectedRow + 1, lines.length - 1);
       lines[anchor] = CURSOR_MARKER + lines[anchor];
     }

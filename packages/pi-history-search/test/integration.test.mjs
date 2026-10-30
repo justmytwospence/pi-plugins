@@ -34,7 +34,7 @@ const entries = texts => texts.map((text, index) => ({
   timestamp: new Date(0).toISOString(), message: { role: 'user', content: [{ type: 'text', text }], timestamp: 0 },
 }));
 
-async function fixture(t, { vim = false, mode = 'tui', bindings = {}, draft = 'al', sdk = false } = {}) {
+async function fixture(t, { vim = false, mode = 'tui', bindings = {}, draft = 'al', sdk = false, hardwareCursor = true } = {}) {
   const previous = getKeybindings();
   const keys = new KeybindingsManager({ 'tui.editor.historyPrevious': 'ctrl+p', 'tui.editor.historyNext': 'ctrl+n', ...bindings });
   setKeybindings(keys);
@@ -43,7 +43,16 @@ async function fixture(t, { vim = false, mode = 'tui', bindings = {}, draft = 'a
   const notices = [], widgets = [], submissions = [];
   let focus, main, picker, close, pending, customOptions, opens = 0, renders = 0, removed = 0, reads = 0;
   let branch = entries(['alpha old', 'unrelated', 'alpha new']), session = 'session', leaf = 'leaf';
-  const tui = { requestRender() { renders++; }, getFocusedComponent: () => focus, terminal: { rows: 30, columns: 80 } };
+  // Delegate cursor state to the real public TuiBase API, including its hide
+  // side effect, without starting a terminal or scheduling render timers.
+  const terminal = { rows: 30, columns: 80, hideCursor() {} };
+  const cursorUi = new TuiBase(terminal, hardwareCursor);
+  cursorUi.requestRender = () => { renders++; };
+  const tui = {
+    requestRender() { renders++; }, getFocusedComponent: () => focus, terminal,
+    getShowHardwareCursor: () => cursorUi.getShowHardwareCursor(),
+    setShowHardwareCursor: enabled => cursorUi.setShowHardwareCursor(enabled),
+  };
   function wire(editor) {
     editor.focused = true;
     editor.onSubmit = text => submissions.push(text);
@@ -516,6 +525,114 @@ test('shutdown closes outstanding picker and UI failures release the open guard'
   f.ctx.ui.custom = custom;
   f.send(SEARCH); assert.equal(f.opens, 2); f.close(undefined); await f.pending;
 });
+
+for (const hardwareCursor of [true, false]) {
+  for (const sdk of [false, true]) for (const accept of [false, true]) {
+    test(`hardware cursor restores before native done and continuation (${hardwareCursor}, ${sdk ? 'SDK' : 'fixture'}, ${accept ? 'accept' : 'cancel'})`, async t => {
+      const f = await fixture(t, { draft: '', hardwareCursor, sdk });
+      const custom = f.ctx.ui.custom;
+      let doneCalls = 0, continued = false;
+      f.ctx.ui.custom = (factory, options) => custom((ui, theme, keys, done) => {
+        assert.equal(ui.getShowHardwareCursor(), hardwareCursor, 'do not hide before the custom factory runs');
+        const component = factory(ui, theme, keys, value => {
+          doneCalls++;
+          assert.equal(ui.getShowHardwareCursor(), hardwareCursor, 'restore synchronously before native done');
+          assert.equal(continued, false);
+          done(value);
+        });
+        assert.equal(ui.getShowHardwareCursor(), false, 'hide while the picker owns the dock');
+        return component;
+      }, options);
+      f.send(SEARCH);
+      if (sdk) await Promise.resolve();
+      const pending = f.pending.then(() => { continued = true; });
+      assert.equal(f.tui.getShowHardwareCursor(), false);
+      f.send(accept ? '\r' : ESC);
+      assert.equal(doneCalls, 1);
+      assert.equal(f.tui.getShowHardwareCursor(), hardwareCursor);
+      assert.equal(continued, false, 'restoration must not wait for the pending search');
+      assert.equal(f.main.getText(), '', 'acceptance is still pending');
+      await pending;
+      assert.equal(f.main.getText(), accept ? 'alpha new' : '');
+      assert.equal(f.tui.getShowHardwareCursor(), hardwareCursor);
+      // A finally from the old search must not overwrite a subsequent setting.
+      f.tui.setShowHardwareCursor(!hardwareCursor);
+      f.close(undefined);
+      assert.equal(f.tui.getShowHardwareCursor(), !hardwareCursor, 'late duplicate close is inert');
+    });
+  }
+
+  for (const event of ['input', 'session_tree', 'session_shutdown', 'session_start']) {
+    test(`hardware cursor restores synchronously on ${event} (initial ${hardwareCursor})`, async t => {
+      const f = await fixture(t, { draft: '', hardwareCursor });
+      f.send(SEARCH);
+      const pending = f.pending, close = f.close;
+      assert.equal(f.tui.getShowHardwareCursor(), false);
+      const emitted = f.emit(event);
+      assert.equal(f.tui.getShowHardwareCursor(), hardwareCursor, 'event restores before its promise continuation');
+      f.tui.setShowHardwareCursor(!hardwareCursor);
+      await emitted;
+      await pending;
+      close('stale selection');
+      assert.equal(f.tui.getShowHardwareCursor(), !hardwareCursor, 'finally and stale close cannot restore twice');
+      assert.equal(f.main.getText(), '');
+    });
+  }
+
+  for (const failure of ['factory', 'async UI']) {
+    test(`hardware cursor restores after ${failure} failure (initial ${hardwareCursor})`, async t => {
+      const f = await fixture(t, { draft: '', hardwareCursor });
+      const custom = f.ctx.ui.custom;
+      const setCursor = f.tui.setShowHardwareCursor;
+      const error = new Error(`${failure} failed`);
+      if (failure === 'factory') {
+        // Throw inside the factory after the public setter has mutated state.
+        // Restoration must be registered before a fallible hide operation.
+        let failed = false;
+        f.tui.setShowHardwareCursor = enabled => {
+          setCursor(enabled);
+          if (!enabled && !failed) { failed = true; throw error; }
+        };
+      } else {
+        f.ctx.ui.custom = async factory => {
+          factory(f.tui, theme, f.keys, () => assert.fail('rejected UI must not call done'));
+          assert.equal(f.tui.getShowHardwareCursor(), false);
+          await Promise.resolve();
+          throw error;
+        };
+      }
+      await f.command('');
+      assert.equal(f.tui.getShowHardwareCursor(), hardwareCursor);
+      assert.deepEqual(f.notices.at(-1), { message: `history-search: ${error.message}`, type: 'error' });
+      f.tui.setShowHardwareCursor = setCursor;
+      f.ctx.ui.custom = custom;
+      f.send(SEARCH);
+      assert.equal(f.tui.getShowHardwareCursor(), false, 'failure releases the open guard');
+      f.send(ESC);
+      await f.pending;
+      assert.equal(f.tui.getShowHardwareCursor(), hardwareCursor);
+    });
+  }
+
+  test(`hardware cursor restores even when native done throws (initial ${hardwareCursor})`, async t => {
+    const f = await fixture(t, { draft: '', hardwareCursor });
+    let picker;
+    f.ctx.ui.custom = factory => new Promise(resolve => {
+      picker = factory(f.tui, theme, f.keys, () => {
+        assert.equal(f.tui.getShowHardwareCursor(), hardwareCursor, 'restore before throwing native done');
+        resolve(undefined);
+        throw new Error('native done failed');
+      });
+    });
+    const pending = f.command('');
+    assert.equal(f.tui.getShowHardwareCursor(), false);
+    assert.throws(() => picker.handleInput(ESC), /native done failed/);
+    assert.equal(f.tui.getShowHardwareCursor(), hardwareCursor);
+    f.tui.setShowHardwareCursor(!hardwareCursor);
+    await pending;
+    assert.equal(f.tui.getShowHardwareCursor(), !hardwareCursor, 'finally does not restore again after done throws');
+  });
+}
 
 test('real Vim engine dispatch: Insert searches; Normal Ctrl+R redoes without invoking the shortcut', async t => {
   const f = await fixture(t, { vim: true, draft: '' });

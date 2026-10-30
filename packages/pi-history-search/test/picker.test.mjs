@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CURSOR_MARKER, KeybindingsManager, TUI_KEYBINDINGS, getKeybindings, setKeybindings, visibleWidth } from '@earendil-works/pi-tui';
+import { CURSOR_MARKER, KeybindingsManager, TUI_KEYBINDINGS, getKeybindings, setKeybindings, visibleWidth, renderFakeCursor } from '@earendil-works/pi-tui';
 import { HistoryPicker } from '../src/picker.ts';
 
 const theme = { fg: (_color, text) => text, bold: (text) => text };
@@ -168,6 +168,49 @@ test('focus propagates cursor marker and every row fits narrow/wide Unicode widt
   for (const width of [1, 20, 46, 120]) {
     for (const line of f.picker.render(width)) assert.ok(visibleWidth(line) <= width, `${width}: ${line}`);
   }
+});
+
+test('focused marker is only a following-row layout anchor, not a selection caret', () => {
+  const f = fixture(Array.from({ length: 20 }, (_, i) => `prompt ${i}`));
+  f.picker.focused = true;
+  for (const height of [Infinity, 13, 8, 6, 3, 2, 1]) {
+    for (let i = 0; i < 20; i++) {
+      const lines = f.picker.render(46, height);
+      const cursors = lines.filter(line => line.includes(CURSOR_MARKER));
+      assert.equal(cursors.length, 1);
+      const selection = lines.findIndex(line => line.replaceAll(CURSOR_MARKER, '').startsWith('› '));
+      assert.equal(lines.findIndex(line => line.includes(CURSOR_MARKER)), Math.min(selection + 1, lines.length - 1));
+      assert.ok(!lines.some(line => line.includes(`›${CURSOR_MARKER}`)));
+      f.send('down');
+    }
+    f.send('up');
+  }
+  f.picker.focused = false;
+  assert.ok(f.picker.render(46).every(line => !line.includes(CURSOR_MARKER)));
+});
+
+test('Input fake caret stays in the filter, never on the selection or clipping anchor', () => {
+  for (const prompts of [['xyz match'], ['no match']]) {
+    const f = fixture(prompts, 'xyz');
+    f.picker.focused = true;
+    f.send('\x1b[D');
+    const lines = f.picker.render(46);
+    const filter = lines.find(line => line.startsWith('search: '));
+    assert.ok(filter.replaceAll(CURSOR_MARKER, '').includes(`xy${renderFakeCursor('z')}`), filter);
+    const fakeStart = renderFakeCursor('').split('\x1b_pi:/fc\x07')[0];
+    assert.equal(lines.filter(line => line.includes(fakeStart)).length, 1, 'exactly one visible fake caret');
+    assert.ok(lines.filter(line => !line.startsWith('search: ')).every(line => !line.includes(fakeStart)),
+      'layout anchor and result chevron cannot draw an orphan caret');
+  }
+});
+
+test('no matches retain the real query cursor, including cursor movement', () => {
+  const f = fixture(['alpha'], 'xyz');
+  f.picker.focused = true;
+  f.send('\x1b[D');
+  const lines = f.picker.render(46);
+  assert.equal(lines.filter(line => line.includes(CURSOR_MARKER)).length, 1);
+  assert.ok(lines.find(line => line.includes(CURSOR_MARKER)).startsWith(`search: xy${CURSOR_MARKER}`));
 });
 
 test('previews cannot inject ANSI, OSC, C0/C1, cursor markers, or multiline text', () => {
