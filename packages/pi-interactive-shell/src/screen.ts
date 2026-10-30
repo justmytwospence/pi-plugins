@@ -183,15 +183,31 @@ export class TerminalScreen {
     return lines;
   }
 
-  /** Static, sanitized buffer rows; the omitted count includes blank screen rows. */
+  /** Static, sanitized occupied rows; the omitted count includes meaningful blank rows. */
   headTail(height: number): { head: string[]; tail: string[]; omitted: number } {
     height = Math.max(0, Math.floor(height) || 0);
+    const buffer = this.terminal.buffer.active;
     const rows = this.terminal.rows;
-    const total = this.maxScrollback + rows;
+    const physicalTotal = this.maxScrollback + rows;
+    const cell = buffer.getNullCell();
+    let occupiedEnd = 0;
+    for (let y = physicalTotal - 1; y >= 0; y--) {
+      const line = buffer.getLine(y);
+      if (!line) continue;
+      let occupied = false;
+      for (let x = 0; x < this.terminal.cols; x++) {
+        const current = line.getCell(x, cell);
+        if (current && (current.getChars() !== "" || cellSgr(current) !== "")) { occupied = true; break; }
+      }
+      if (occupied) { occupiedEnd = y + 1; break; }
+    }
+    const cursorEnd = buffer.baseY + buffer.cursorY;
+    const total = Math.max(0, Math.min(physicalTotal, Math.max(cursorEnd, occupiedEnd)));
     const slice = (start: number, count: number): string[] => {
       const lines: string[] = [];
       while (count > 0) {
-        const offset = Math.max(0, Math.min(this.maxScrollback, total - rows - start));
+        // Address physical buffer rows, not the shortened snapshot extent.
+        const offset = Math.max(0, Math.min(this.maxScrollback, physicalTotal - rows - start));
         const skip = start - (this.maxScrollback - offset);
         const chunk = this.render(offset, false).slice(skip, skip + count);
         lines.push(...chunk);
@@ -202,8 +218,8 @@ export class TerminalScreen {
     };
     if (total <= height) return { head: [], tail: slice(0, total), omitted: 0 };
     if (!this.maxScrollback || height < 3) {
-      const count = Math.min(height, rows);
-      return { head: [], tail: this.render(0, false).slice(rows - count), omitted: 0 };
+      const count = Math.min(height, total);
+      return { head: [], tail: slice(total - count, count), omitted: 0 };
     }
     const head = Math.floor((height - 1) / 2);
     const tail = height - 1 - head;

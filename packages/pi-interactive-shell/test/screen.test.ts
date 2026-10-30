@@ -340,14 +340,14 @@ test("disposes the emulator/listeners once and settles pending flushes", async (
 });
 
 
-test.each([0, 1, 2, 3, 4, 5, 6])("head-tail uses the bottom viewport without scrollback at height %i", async height => {
+test.each([0, 1, 2, 3, 4, 5, 6])("head-tail uses the last occupied rows without scrollback at height %i", async height => {
   const { screen } = create(8, 4);
   screen.write("first\r\nsecond");
   await screen.flush();
   const result = screen.headTail(height);
   expect(result.head).toEqual([]);
   expect(result.omitted).toBe(0);
-  expect(result.tail).toEqual(screen.render(0, false).slice(4 - Math.min(height, 4)));
+  expect(result.tail).toEqual(screen.render(0, false).slice(Math.max(0, 2 - height), 2));
   expect(result.tail.join("")).not.toContain(CURSOR_MARKER);
 });
 
@@ -376,8 +376,50 @@ test("head-tail includes all rows when exactly fitting or larger, without omissi
   }
   expect(screen.headTail(3).omitted).toBe(3); // Blank buffer rows count too.
   for (const height of [0, 1, 2]) {
-    expect(screen.headTail(height)).toEqual({ head: [], tail: screen.render(0, false).slice(3 - height), omitted: 0 });
+    expect(screen.headTail(height).tail.map(line => stripTerminalSequences(line).trimEnd()))
+      .toEqual(["a", "", "c", "d", "e"].slice(5 - height));
   }
+});
+
+test.each([
+  { output: "", rows: [] },
+  { output: "hello", rows: ["hello"] },
+  { output: "hello\n", rows: ["hello"] },
+  { output: "hello\n\n", rows: ["hello", ""] },
+  { output: "\n", rows: [""] },
+  { output: "a\n\nb", rows: ["a", "", " b"] },
+  { output: " ", rows: [""] },
+  { output: "a\r\nb\x1b[1;1H", rows: ["a", "b"] },
+  { output: "hello\x1b[2J\x1b[H", rows: [] },
+])("head-tail excludes unprinted padding while retaining meaningful rows: %j", async ({ output, rows }) => {
+  const { screen } = create(12, 8);
+  screen.write(output);
+  await screen.flush();
+  expect(plain(screen)).toHaveLength(8); // Live PTY dimensions do not shrink.
+  const snapshot = screen.headTail(8);
+  expect(snapshot.head).toEqual([]);
+  expect(snapshot.omitted).toBe(0);
+  expect(snapshot.tail.map(line => stripTerminalSequences(line).trimEnd())).toEqual(rows);
+  expect(snapshot.tail).toHaveLength(rows.length);
+});
+
+test("head-tail retains explicitly styled blank cells even with cursor back at origin", async () => {
+  const { screen } = create(12, 8);
+  screen.write("\x1b[41m \x1b[0m\x1b[H");
+  await screen.flush();
+  const snapshot = screen.headTail(8);
+  expect(snapshot.tail).toHaveLength(1);
+  expect(snapshot.tail[0]).toContain("\x1b[41m");
+});
+
+test("head-tail excludes the pending blank cursor row from long-history omission counts", async () => {
+  const { screen } = create(12, 4);
+  screen.write(Array.from({ length: 12 }, (_, i) => `row${i}`).join("\r\n") + "\r\n");
+  await screen.flush();
+  const snapshot = screen.headTail(5);
+  expect(snapshot.head.map(line => stripTerminalSequences(line).trimEnd())).toEqual(["row0", "row1"]);
+  expect(snapshot.tail.map(line => stripTerminalSequences(line).trimEnd())).toEqual(["row10", "row11"]);
+  expect(snapshot.omitted).toBe(8);
 });
 
 test("head-tail preserves styles and sanitized cells, with no live cursor or raw escapes", async () => {

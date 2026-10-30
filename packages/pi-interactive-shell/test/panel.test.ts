@@ -306,6 +306,27 @@ test("inline uses half the terminal including four frame rows, ignoring footer h
   await h.panel.shutdown();
 });
 
+test.each([
+  { output: "", body: 0 },
+  { output: "one line", body: 1 },
+  { output: "one line\n", body: 1 },
+  { output: "one line\n\n", body: 2 },
+])("retained inline frame shrinks to occupied output for %j", async ({ output, body }) => {
+  const h = await setup(undefined, undefined, false, true);
+  const live = h.panel.render(98);
+  expect(live).toHaveLength(15);
+  if (output) h.data(output);
+  h.exit(0);
+  await vi.waitFor(() => expect(h.done).toHaveBeenCalledOnce());
+  const [result, snapshot] = h.done.mock.calls[0];
+  expect(result.exitCode).toBe(0);
+  const lines = snapshot.render(98);
+  expect(lines).toHaveLength(4 + body);
+  expect(plain(lines)).toContain("output retained for this session");
+  if (body) expect(plain(lines)).toContain("one line");
+  expect(h.tui.terminal.rows).toBe(30);
+});
+
 test.each([false, true])("inline exit auto-finishes with frozen head-tail before disposal (autoClose %s)", async autoClose => {
   const h = await setup(undefined, undefined, autoClose, true);
   h.panel.render(98);

@@ -24,6 +24,7 @@ export default function(pi) {
   let calls = 0;
   let todoTail;
   let beforeOffer;
+  let priorSnapshots;
   const todoState = () => {
     const document = tui?.getPrimaryScrollView?.()?.child;
     const children = document?.children ?? [];
@@ -91,7 +92,19 @@ export default function(pi) {
       const panel = children.find(child => child.constructor.name === "TerminalPanel");
       const lines = panel ? panel.render(tui.terminal.columns - 2) : [];
       const text = lines.join("\\n");
-      const rendered = children.map(child => child.render(tui.terminal.columns).join("\\n"));
+      const renderedLines = children.map(child => child.render(tui.terminal.columns));
+      const rendered = renderedLines.map(lines => lines.join("\\n"));
+      const frozen = children.flatMap((child, index) => rendered[index].includes("output retained for this session")
+        ? [{ child, index, text: rendered[index], height: renderedLines[index].length }] : []);
+      // Keep reference/text comparisons in memory; report only geometry and booleans.
+      if (!terminal && !priorSnapshots && frozen.some(frame => frame.text.includes("SCROLL_000") && frame.text.includes("SCROLL_079"))) {
+        priorSnapshots = frozen;
+      }
+      const priorSnapshotsUnchanged = !!priorSnapshots && priorSnapshots.every(frame =>
+        children[frame.index] === frame.child && rendered[frame.index] === frame.text);
+      if (!terminal && priorSnapshots && priorSnapshotsUnchanged) {
+        priorSnapshots.push(...frozen.filter(frame => !priorSnapshots.some(prior => prior.child === frame.child)));
+      }
       const retained = rendered.findIndex(text => text.includes("output retained for this session") && text.includes("TERMINAL_ONLY:dummy-handoff-input"));
       const status = rendered.findIndex(text => text.includes("interactive command exited with code 0"));
       const continuation = rendered.findIndex(text => text.includes("CONTINUATION_FINAL_SENTINEL"));
@@ -103,6 +116,7 @@ export default function(pi) {
         beforeOffer, ...todoState(),
         layout: resolved.source ?? resolved.reason, focus: focus?.constructor.name,
         retained, status, continuation,
+        frozenHeights: frozen.map(frame => frame.height), priorSnapshotsUnchanged,
         frozenScroll: rendered.some(text => text.includes("SCROLL_000") && text.includes("SCROLL_079")),
         frozenScrollHead: rendered.some(text => text.includes("SCROLL_000")),
         frozenScrollTail: rendered.some(text => text.includes("SCROLL_079")),
@@ -301,7 +315,27 @@ def run(mode):
             assert snapshot()["width"] == 110
             send(b"\r")
             completed()
-            assert snapshot()["frozenScroll"], snapshot()
+            long_retained = snapshot()
+            assert long_retained["frozenScroll"], long_retained
+            assert long_retained["priorSnapshotsUnchanged"], long_retained
+            prior_heights = long_retained["frozenHeights"]
+            # Long output still uses a bounded head/tail preview, not all 80 rows.
+            assert 6 <= prior_heights[-1] < 80 + 4, long_retained
+            todo_keys = ("documentChildren", "todoTailAtThree", "todoTailLast", "todoTailPlain", "todoTailVisible")
+            for fixture, height in (("!i printf 'SHORT_%s\\n' SNAPSHOT_FIXTURE", 5), ("!i :", 4)):
+                submit(fixture)
+                completed()
+                shrunk = snapshot()
+                # One occupied body row plus four frame rows, then framing only.
+                assert shrunk["frozenHeights"] == [*prior_heights, height], shrunk
+                assert height < long_retained["frozenHeights"][-1], shrunk
+                assert shrunk["priorSnapshotsUnchanged"] and shrunk["frozenScroll"], shrunk
+                assert shrunk["retained"] == long_retained["retained"], shrunk
+                assert shrunk["calls"] == 4, shrunk
+                assert all(shrunk[key] == long_retained[key] for key in todo_keys), shrunk
+                if mode == "fullscreen":
+                    assert all(shrunk[key] for key in todo_keys[1:]), shrunk
+                prior_heights = shrunk["frozenHeights"]
             submit("!i read -p STOP_READY value")
             send(b"\x1dq")
             assert snapshot()["stop"]
@@ -326,9 +360,10 @@ def run(mode):
             assert sum(any(c.get("text") == "CONTINUATION_FINAL_SENTINEL" for c in e.get("message", {}).get("content", []) if isinstance(c, dict)) for e in entries) == 1
             assert "dummy-handoff-input" not in sessions and "MENU_DONE:" not in sessions
             assert "SCROLL_000" not in sessions and "SCROLL_079" not in sessions
+            assert "SHORT_SNAPSHOT_FIXTURE" not in sessions
             excluded = [json.loads(line) for line in sessions.splitlines() if "EXCLUDED_HANDOFF_OUTPUT" in line]
             assert excluded and all(item.get("message", {}).get("excludeFromContext") is True for item in excluded), excluded
-            print(f"PASS {mode}: real todo/offer_terminal calls, active todo tail preserved, tagless final, exact Tab/Enter, single continuation, inline/editor ownership, retained head/tail, privacy, Ctrl+C, program keys, expansion, wheel/keyboard scroll, resize, stop, reload, ordinary bash and exclusion")
+            print(f"PASS {mode}: real todo/offer_terminal calls, active todo tail preserved, tagless final, exact Tab/Enter, single continuation, inline/editor ownership, retained head/tail and short/empty shrink, privacy, Ctrl+C, program keys, expansion, wheel/keyboard scroll, resize, stop, reload, ordinary bash and exclusion")
         finally:
             if child.poll() is None:
                 os.killpg(child.pid, signal.SIGKILL)
