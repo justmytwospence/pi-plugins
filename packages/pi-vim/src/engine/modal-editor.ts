@@ -576,6 +576,8 @@ export class ModalEditor extends CustomEditor {
 
   private unnamedRegister: string = "";
   private preferRegisterForPut = false;
+  /** Last clipboard text this editor wrote or read; null when unknown. */
+  private lastKnownClipboard: string | null = null;
   private displayLineMotion = false;
   private hostOnChange: ((text: string) => void) | undefined;
   private rowCtx: RowSpace | null = null;
@@ -4500,6 +4502,7 @@ export class ModalEditor extends CustomEditor {
     this.preferRegisterForPut = text !== "" && !shouldMirror;
     if (!shouldMirror) return;
 
+    this.lastKnownClipboard = text;
     this.clipboardMirror.mirror(text);
   }
 
@@ -5204,22 +5207,40 @@ export class ModalEditor extends CustomEditor {
   private static readonly PUT_SIZE_LIMIT = 512 * 1024; // 512 KB safety cap
 
   private getPasteRegisterText(): string {
-    // A failed or skipped mirror leaves the OS clipboard stale relative to
+    // A failed or pending mirror leaves the OS clipboard stale relative to
     // the register, so the register must win until a mirror lands again.
     if (
-      this.preferRegisterForPut ||
       this.clipboardMirror.hasPendingWrite() ||
       (this.unnamedRegister !== "" && this.clipboardMirror.lastWriteFailed())
     ) {
       return this.unnamedRegister;
     }
 
+    let clipboardText: string | null = null;
     try {
-      const clipboardText = this.clipboardReadFn();
-      return clipboardText ?? this.unnamedRegister;
+      clipboardText = this.clipboardReadFn();
     } catch {
+      clipboardText = null;
+    }
+
+    if (this.preferRegisterForPut) {
+      // The register holds a local delete/change that was not mirrored. It
+      // wins unless the clipboard changed since we last saw it (a yank from
+      // another session or app), which is then newer.
+      const known = this.lastKnownClipboard;
+      if (clipboardText && known !== null && clipboardText !== known) {
+        this.lastKnownClipboard = clipboardText;
+        this.preferRegisterForPut = false;
+        return clipboardText;
+      }
+      if (known === null && clipboardText !== null) {
+        this.lastKnownClipboard = clipboardText;
+      }
       return this.unnamedRegister;
     }
+
+    if (clipboardText !== null) this.lastKnownClipboard = clipboardText;
+    return clipboardText ?? this.unnamedRegister;
   }
 
   private moveCursorToPreviousGraphemeStart(): void {

@@ -372,3 +372,21 @@ describe("clipboard mirror policy", () => {
     });
   }
 });
+
+describe("yank policy paste source", () => {
+  it("pastes a local delete, then a newer external clipboard", async () => {
+    const { editor } = createEditorWithSpy("foo bar");
+    let clip: string | null = "old";
+    editor.setClipboardReadFn(() => clip);
+    editor.setClipboardMirrorPolicy("yank");
+
+    sendKeys(editor, ["d", "w"]); // register "foo ", not mirrored
+    sendKeys(editor, ["P"]);
+    assert.equal(editor.getText(), "foo bar");
+
+    clip = "EXT"; // yanked elsewhere
+    sendKeys(editor, ["P"]);
+    assert.ok(editor.getText().includes("EXT"));
+  });
+});
+
