@@ -92,33 +92,39 @@ function fixture(handlers: Parameters<typeof fakeCall>[0] = {}, width = 120) {
     select: vi.fn(async (_title: string, _items: string[]): Promise<string | undefined> => FORK_DESTINATIONS[0]),
     notify: vi.fn(), ...forbidden,
   };
-  const ctx = { mode: "tui", hasUI: true, cwd: "/checkout", model: { provider: "anthropic", id: "current-model" }, sessionManager: manager, modelRegistry: registry, ui, ...forbidden };
+  const ctx = { mode: "tui", hasUI: true, isIdle: vi.fn(() => true), cwd: "/checkout", model: { provider: "anthropic", id: "current-model" }, sessionManager: manager, modelRegistry: registry, ui, ...forbidden };
   const pi = { registerCommand: vi.fn(), getThinkingLevel: vi.fn(() => "high"), events: { emit: vi.fn() }, ...forbidden };
   let generation = 1;
   const uniqueName = vi.fn(async (_wanted: string) => "available-fork");
   const deps = { call: fake.call, selfPane: "self", uniqueName, runtimeCurrent: () => { const captured = generation; return () => generation === captured; } };
   registerTreeFork(pi as unknown as ExtensionAPI, deps);
-  const command = pi.registerCommand.mock.calls[0] as unknown as [string, { description: string; handler: (args: string, ctx: ExtensionCommandContext) => Promise<unknown> }];
+  const commands = new Map(pi.registerCommand.mock.calls as unknown as [string, { description: string; handler: (args: string, ctx: ExtensionCommandContext) => Promise<unknown> }][]);
+  const command = ["tree-fork", commands.get("tree-fork")!] as const;
   const run = (args = "") => command[1].handler(args, ctx as unknown as ExtensionCommandContext);
+  const runHere = (args = "") => commands.get("fork-here")!.handler(args, ctx as unknown as ExtensionCommandContext);
   const snapshot = () => ({ bytes: readFileSync(manager.getSessionFile()!), entries: structuredClone(manager.getEntries()), leaf: manager.getLeafId(), id: manager.getSessionId(), file: manager.getSessionFile() });
   const before = snapshot();
-  const assertUntouched = () => { expect(snapshot()).toEqual(before); for (const spy of Object.values(forbidden)) expect(spy).not.toHaveBeenCalled(); };
+  const assertNoSourceActions = () => { for (const spy of Object.values(forbidden)) expect(spy).not.toHaveBeenCalled(); };
+  const assertUntouched = () => { expect(snapshot()).toEqual(before); assertNoSourceActions(); };
   const holds = () => pi.events.emit.mock.calls.map((args) => args as unknown as [string, { active: boolean; id: string; label?: string }]);
   const assertReleased = () => {
     const events = holds(); expect(events.length % 2).toBe(0);
     const starts = events.filter(([, e]) => e.active);
     expect(new Set(starts.map(([, e]) => e.id)).size).toBe(starts.length);
     for (const [event, hold] of starts) {
-      expect(event).toBe("herdr:blocked"); expect(hold).toMatchObject({ label: "Fork session tree", id: expect.stringMatching(/^tree-fork:/) });
+      expect(event).toBe("herdr:blocked");
+      const direct = hold.id.startsWith("fork-here:");
+      expect(hold).toMatchObject({ label: direct ? "Fork current session" : "Fork session tree", id: expect.stringMatching(direct ? /^fork-here:/ : /^tree-fork:/) });
       expect(events.filter(([, e]) => !e.active && e.id === hold.id)).toHaveLength(1);
     }
   };
-  return { dir, manager, question, tip, tool, toolResult, hiddenLeaf, registry, screens, custom, fake, ctx, ui, pi, deps, command, run, uniqueName, snapshot, assertUntouched, holds, assertReleased, stale: () => { generation++; } };
+  return { dir, manager, question, tip, tool, toolResult, hiddenLeaf, registry, screens, custom, fake, ctx, ui, pi, deps, command, run, runHere, commands, uniqueName, snapshot, assertUntouched, assertNoSourceActions, holds, assertReleased, stale: () => { generation++; } };
 }
 
-test("registers only the independent tree-fork command and tolerates registration-less hosts", () => {
+test("registers both independent fork commands and tolerates registration-less hosts", () => {
   const f = fixture();
-  expect(f.pi.registerCommand).toHaveBeenCalledTimes(1);
+  expect(f.pi.registerCommand).toHaveBeenCalledTimes(2);
+  expect([...f.commands.keys()]).toEqual(["tree-fork", "fork-here"]);
   expect(f.command[0]).toBe("tree-fork");
   expect(f.command[1].description).toBe("Fork a session-tree point into a new Herdr tab or split");
   expect(() => registerTreeFork({} as ExtensionAPI, f.deps)).not.toThrow();
@@ -592,4 +598,263 @@ test("current completed final tip remains selectable without trailing hidden met
   const file = f.fake.of("agent.start")[0].params.args.at(-1) as string;
   expect(SessionManager.open(file).getBranch().at(-1)).toMatchObject({ parentId: f.tip });
   expect(f.snapshot()).toEqual(before); f.assertReleased();
+});
+
+test.each(FORK_DESTINATIONS)("fork-here opens %s at exact hidden compaction/custom ancestry without a picker or prompt", async (destination) => {
+  const f = fixture();
+  const compaction = f.manager.appendCompaction("Hidden summary", f.question, 100, { preserved: true }, true);
+  const leaf = f.manager.appendCustomEntry("hidden-context", { keep: "exact current context" });
+  const before = f.snapshot(); const branch = structuredClone(f.manager.getBranch());
+  const tree = vi.spyOn(f.manager, "getTree").mockImplementation(() => { throw new Error("Direct fork must not project a picker"); });
+  f.ui.select.mockResolvedValue(destination);
+  f.uniqueName.mockImplementation(async () => {
+    expect(f.holds().map(([, hold]) => hold.active)).toEqual([true, false]);
+    return "available-fork";
+  });
+  await f.runHere();
+  expect(tree).not.toHaveBeenCalled(); expect(f.screens.picker).not.toHaveBeenCalled();
+  expect(f.ui.select).toHaveBeenCalledWith(FORK_TITLE, FORK_DESTINATIONS);
+  expect(f.screens.loader).toHaveBeenCalledTimes(1); expect(f.registry.complete).toHaveBeenCalledTimes(1);
+  expect(f.uniqueName).toHaveBeenCalledWith("tree-fork-navigation");
+  const start = f.fake.of("agent.start")[0].params; const file = start.args.at(-1) as string;
+  expect(start).toEqual({ name: "available-fork", kind: "pi", pane_id: "new-pane", timeout_ms: 90_000, args: ["--name", "Tree fork navigation", "--model", "anthropic/current-model", "--thinking", "high", "--session", file] });
+  const fork = SessionManager.open(file);
+  expect(fork.getSessionId()).not.toBe(f.manager.getSessionId());
+  expect(fork.getHeader()).toMatchObject({ parentSession: before.file, cwd: "/checkout" });
+  expect(fork.getBranch().slice(0, -1)).toEqual(branch);
+  expect(fork.getEntry(compaction)).toMatchObject({ summary: "Hidden summary", firstKeptEntryId: f.question, details: { preserved: true } });
+  expect(fork.getBranch().at(-1)).toMatchObject({ customType: FORK_BOUNDARY, parentId: leaf, data: { entryId: leaf, sourceSessionId: before.id } });
+  expect(f.fake.log.map(({ method }) => method)).toEqual(destination === FORK_DESTINATIONS[0] ? ["pane.get", "tab.create", "agent.start"] : ["pane.get", "pane.layout", "pane.split", "agent.start"]);
+  expect(f.fake.of(destination === FORK_DESTINATIONS[0] ? "tab.create" : "pane.split")[0].params).toMatchObject({ cwd: "/checkout", focus: false });
+  expect(f.snapshot()).toEqual(before); f.assertReleased();
+  f.assertNoSourceActions();
+});
+
+test("fork-here preserves an idle interrupted assistant leaf without silently rewinding", async () => {
+  const f = fixture();
+  const leaf = f.manager.appendMessage({
+    role: "assistant", content: [{ type: "text", text: "Interrupted partial answer" }],
+    api: "anthropic-messages", provider: "anthropic", model: "fixture",
+    usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: "aborted", timestamp: 3,
+  });
+  const before = f.snapshot(); const branch = structuredClone(f.manager.getBranch());
+  await f.runHere("Interrupted context");
+  expect(f.ctx.isIdle).toHaveReturnedWith(true); expect(f.screens.picker).not.toHaveBeenCalled();
+  const file = f.fake.of("agent.start")[0].params.args.at(-1) as string;
+  const fork = SessionManager.open(file);
+  expect(fork.getBranch().slice(0, -1)).toEqual(branch);
+  expect(fork.getEntry(leaf)).toMatchObject({ message: { stopReason: "aborted", content: [{ type: "text", text: "Interrupted partial answer" }] } });
+  expect(fork.getBranch().at(-1)).toMatchObject({ parentId: leaf, customType: FORK_BOUNDARY, data: { entryId: leaf } });
+  expect(f.snapshot()).toEqual(before); f.assertNoSourceActions(); f.assertReleased();
+});
+
+test("fork-here rejects an unpersisted current leaf without creating a file/pane and resets guard", async () => {
+  const f = fixture(); const files = readdirSync(f.dir);
+  vi.spyOn(f.manager, "getLeafId").mockReturnValue("not-persisted");
+  await f.runHere("Unpersisted context");
+  expect(f.ui.notify).toHaveBeenCalledWith(expect.stringContaining("selected entry not-persisted was not persisted yet"), "error");
+  expect(f.ui.select).toHaveBeenCalledTimes(1); expect(f.screens.picker).not.toHaveBeenCalled();
+  expect(f.uniqueName).toHaveBeenCalledTimes(1); expect(f.fake.log).toEqual([]); expect(readdirSync(f.dir)).toEqual(files); f.assertReleased();
+  vi.restoreAllMocks(); f.assertUntouched(); f.ui.select.mockResolvedValue(undefined);
+  await f.runHere(); expect(f.ui.select).toHaveBeenCalledTimes(2); f.assertReleased();
+});
+
+test.each(FORK_DESTINATIONS)("fork-here explicit multiword title preserves case/spaces and collision slug in %s", async (destination) => {
+  const f = fixture(); f.ui.select.mockResolvedValue(destination); f.uniqueName.mockResolvedValue("oauth-callback-retries-2");
+  await f.runHere("  OAuth  Callback Retries  ");
+  expect(f.ui.custom).not.toHaveBeenCalled(); expect(f.registry.complete).not.toHaveBeenCalled(); expect(f.registry.find).not.toHaveBeenCalled();
+  expect(f.uniqueName).toHaveBeenCalledWith("oauth-callback-retries");
+  const start = f.fake.of("agent.start")[0].params;
+  expect(start.name).toBe("oauth-callback-retries-2"); expect(start.args.slice(0, 2)).toEqual(["--name", "OAuth  Callback Retries"]);
+  if (destination === FORK_DESTINATIONS[0]) expect(f.fake.of("tab.create")[0].params.label).toBe("OAuth  Callback Retries");
+  expect(f.ui.notify).toHaveBeenCalledWith("Fork opened: OAuth  Callback Retries (oauth-callback-retries-2, new-pane). Original session unchanged.", "info");
+  f.assertReleased(); f.assertUntouched();
+});
+
+test.each(["rpc", "print", "no-ui", "unsaved", "missing", "empty-file", "no-leaf", "active"])("fork-here guards %s before any dialog or side effects and resets", async (guard) => {
+  const f = fixture();
+  if (guard === "rpc" || guard === "print") f.ctx.mode = guard;
+  if (guard === "no-ui") f.ctx.hasUI = false;
+  if (guard === "unsaved") vi.spyOn(f.manager, "getSessionFile").mockReturnValue(undefined);
+  if (guard === "missing" || guard === "empty-file") {
+    const file = join(f.dir, "unusable.jsonl");
+    if (guard === "empty-file") writeFileSync(file, "");
+    vi.spyOn(f.manager, "getSessionFile").mockReturnValue(file);
+  }
+  if (guard === "no-leaf") vi.spyOn(f.manager, "getLeafId").mockReturnValue(null);
+  if (guard === "active") f.ctx.isIdle.mockReturnValue(false);
+  const files = readdirSync(f.dir); await f.runHere();
+  const warning = guard === "active" ? "Wait for the current turn to finish before using /fork-here." : guard === "no-leaf" ? "This session has no current point to fork." : ["unsaved", "missing", "empty-file"].includes(guard) ? "Save this session before using /fork-here." : "/fork-here requires interactive Pi in Herdr.";
+  expect(f.ui.notify).toHaveBeenCalledWith(warning, "warning");
+  expect(f.ui.custom).not.toHaveBeenCalled(); expect(f.ui.select).not.toHaveBeenCalled(); expect(f.holds()).toEqual([]);
+  expect(f.fake.log).toEqual([]); expect(f.uniqueName).not.toHaveBeenCalled(); expect(readdirSync(f.dir)).toEqual(files);
+  vi.restoreAllMocks(); f.ctx.mode = "tui"; f.ctx.hasUI = true; f.ctx.isIdle.mockReturnValue(true);
+  f.assertUntouched(); f.ui.select.mockResolvedValue(undefined); await f.runHere(); expect(f.ui.select).toHaveBeenCalledTimes(1); f.assertReleased();
+});
+
+test.each(["bad\u0000title", "bad\ttitle", "bad\u001btitle", "bad\u007ftitle", "bad\u0085title", "two\nlines", "two\rlines", "\nTrimmed newline", "Trimmed tab\t", "two\u2028lines", "two\u2029lines", "x".repeat(61)])("fork-here rejects invalid title %j without effects and resets", async (title) => {
+  const f = fixture(); const files = readdirSync(f.dir); await f.runHere(title);
+  expect(f.ui.notify).toHaveBeenCalledWith("Usage: /fork-here [name] (one line, at most 60 characters).", "warning");
+  expect(f.ui.select).not.toHaveBeenCalled(); expect(f.ui.custom).not.toHaveBeenCalled(); expect(f.holds()).toEqual([]);
+  expect(f.registry.complete).not.toHaveBeenCalled(); expect(f.uniqueName).not.toHaveBeenCalled(); expect(f.fake.log).toEqual([]); expect(readdirSync(f.dir)).toEqual(files);
+  f.assertUntouched(); f.ui.select.mockResolvedValue(undefined); await f.runHere("Valid title"); expect(f.ui.select).toHaveBeenCalledTimes(1); f.assertReleased();
+});
+
+test("fork-here accepts a 60-character title and whitespace-only arguments use automatic naming", async () => {
+  const f = fixture(); await f.runHere("x".repeat(60));
+  expect(f.fake.of("agent.start")[0].params.args.slice(0, 2)).toEqual(["--name", "x".repeat(60)]);
+  expect(f.ui.custom).not.toHaveBeenCalled(); await f.runHere("   ");
+  expect(f.registry.complete).toHaveBeenCalledTimes(1); expect(f.screens.picker).not.toHaveBeenCalled(); f.assertReleased(); f.assertUntouched();
+});
+
+test.each(["destination", "naming", "uniqueName"])("fork-here rechecks idle after %s before creating files", async (stage) => {
+  const f = fixture(); const files = readdirSync(f.dir);
+  if (stage === "destination") f.ui.select.mockImplementation(async () => { f.ctx.isIdle.mockReturnValue(false); return FORK_DESTINATIONS[0]; });
+  if (stage === "naming") f.registry.complete.mockImplementation(async () => { f.ctx.isIdle.mockReturnValue(false); return { stopReason: "stop", content: [{ type: "text", text: "Topic title" }] }; });
+  if (stage === "uniqueName") f.uniqueName.mockImplementation(async () => { f.ctx.isIdle.mockReturnValue(false); return "available-fork"; });
+  await f.runHere();
+  expect(f.ui.notify).toHaveBeenCalledWith("Wait for the current turn to finish before using /fork-here.", "warning");
+  expect(f.fake.log).toEqual([]); expect(readdirSync(f.dir)).toEqual(files); f.assertReleased(); f.assertUntouched();
+  f.ctx.isIdle.mockReturnValue(true); f.ui.select.mockResolvedValue(undefined); const calls = f.ui.select.mock.calls.length;
+  await f.runHere(); expect(f.ui.select).toHaveBeenCalledTimes(calls + 1); f.assertReleased();
+});
+
+test.each(["destination", "loader"])("fork-here cancellation at %s releases holds/guard and creates nothing", async (stage) => {
+  const f = fixture(); const files = readdirSync(f.dir);
+  const result = deferred<{ stopReason: string; content: { type: string; text: string }[] }>();
+  if (stage === "destination") f.ui.select.mockResolvedValue(undefined);
+  else {
+    f.registry.complete.mockReturnValue(result.promise);
+    f.screens.loader.mockImplementation((loader) => { loader.handleInput("\u001b"); expect(loader.signal.aborted).toBe(true); });
+  }
+  await f.runHere(); await f.runHere();
+  expect(f.ui.select).toHaveBeenCalledTimes(2); expect(f.screens.picker).not.toHaveBeenCalled();
+  expect(f.uniqueName).not.toHaveBeenCalled(); expect(f.fake.log).toEqual([]); expect(readdirSync(f.dir)).toEqual(files);
+  result.resolve({ stopReason: "stop", content: [{ type: "text", text: "Late title" }] }); await Promise.resolve();
+  expect(f.fake.log).toEqual([]); f.assertReleased(); f.assertUntouched();
+});
+
+test("fork-here snapshots leaf, name context, cwd, model and thinking before destination awaits", async () => {
+  const f = fixture(); const original = structuredClone(f.manager.getBranch());
+  f.ui.select.mockImplementation(async () => {
+    f.manager.appendSessionInfo("Future title"); f.manager.appendCustomEntry("future-hidden", {});
+    f.manager.appendMessage({ role: "user", content: "Unrelated later prompt", timestamp: 3 });
+    f.ctx.cwd = "/later"; f.ctx.model.id = "later-model"; f.pi.getThinkingLevel.mockReturnValue("low");
+    return FORK_DESTINATIONS[0];
+  });
+  await f.runHere();
+  const payload = JSON.parse((f.registry.complete.mock.calls[0][1] as { messages: { content: { text: string }[] }[] }).messages[0].content[0].text);
+  expect(payload).toEqual({ dialogue: [{ role: "user", text: "Searchable question" }, { role: "assistant", text: "Current answer" }] });
+  const args = f.fake.of("agent.start")[0].params.args as string[];
+  expect(args).toContain("anthropic/current-model"); expect(args).toContain("high");
+  const fork = SessionManager.open(args.at(-1)!);
+  expect(fork.getBranch().slice(0, -1)).toEqual(original); expect(fork.getBranch().at(-1)).toMatchObject({ parentId: f.hiddenLeaf });
+  expect(f.fake.of("tab.create")[0].params.cwd).toBe("/checkout"); f.assertReleased();
+});
+
+test.each(["destination", "naming", "uniqueName"])("fork-here runtime replacement during %s cancels and resets", async (stage) => {
+  const f = fixture(); const files = readdirSync(f.dir);
+  if (stage === "destination") f.ui.select.mockImplementation(async () => { f.stale(); return FORK_DESTINATIONS[0]; });
+  if (stage === "naming") f.registry.complete.mockImplementation(async () => { f.stale(); return { stopReason: "stop", content: [{ type: "text", text: "Topic title" }] }; });
+  if (stage === "uniqueName") f.uniqueName.mockImplementation(async () => { f.stale(); return "available-fork"; });
+  await f.runHere();
+  expect(f.ui.notify).toHaveBeenCalledWith(expect.stringContaining("switched or reloaded"), "error");
+  expect(f.fake.log).toEqual([]); expect(readdirSync(f.dir)).toEqual(files); f.assertReleased(); f.assertUntouched();
+  f.ui.select.mockResolvedValue(undefined); const calls = f.ui.select.mock.calls.length; await f.runHere(); expect(f.ui.select).toHaveBeenCalledTimes(calls + 1); f.assertReleased();
+});
+
+test.each([
+  ["getSessionId", "destination"], ["getSessionFile", "destination"],
+  ["getSessionId", "naming"], ["getSessionFile", "naming"],
+  ["getSessionId", "uniqueName"], ["getSessionFile", "uniqueName"],
+] as const)("fork-here rejects source identity replacement %s during %s", async (method, stage) => {
+  const f = fixture(); const files = readdirSync(f.dir);
+  const replace = () => { vi.spyOn(f.manager, method).mockReturnValue("replacement"); };
+  if (stage === "destination") f.ui.select.mockImplementation(async () => { replace(); return FORK_DESTINATIONS[0]; });
+  if (stage === "naming") f.registry.complete.mockImplementation(async () => { replace(); return { stopReason: "stop", content: [{ type: "text", text: "Topic title" }] }; });
+  if (stage === "uniqueName") f.uniqueName.mockImplementation(async () => { replace(); return "available-fork"; });
+  await f.runHere();
+  expect(f.ui.notify).toHaveBeenCalledWith(expect.stringContaining("switched or reloaded"), "error");
+  expect(f.fake.log).toEqual([]); expect(readdirSync(f.dir)).toEqual(files); f.assertReleased();
+  vi.restoreAllMocks(); f.assertUntouched(); f.ui.select.mockResolvedValue(undefined); await f.runHere(); expect(f.ui.select).toHaveBeenCalledTimes(2); f.assertReleased();
+});
+
+test.each(["tree-first", "direct-first"])("fork commands share concurrency while destination is pending: %s", async (order) => {
+  const f = fixture(); const entered = deferred<void>(); const wait = deferred<string | undefined>();
+  f.ui.select.mockImplementationOnce(() => { entered.resolve(); return wait.promise; });
+  const first = order === "tree-first" ? f.run : f.runHere; const second = order === "tree-first" ? f.runHere : f.run;
+  const pending = first(); await entered.promise; const calls = f.ui.custom.mock.calls.length;
+  await second();
+  expect(f.ui.notify).toHaveBeenCalledWith(order === "tree-first" ? "/fork-here is already open." : "/tree-fork is already open.", "warning");
+  expect(f.ui.select).toHaveBeenCalledTimes(1); expect(f.ui.custom).toHaveBeenCalledTimes(calls);
+  wait.resolve(undefined); await pending; f.assertReleased(); f.assertUntouched();
+  f.ui.select.mockResolvedValue(undefined); f.screens.picker.mockImplementation((_picker, done) => done(undefined));
+  await second(); expect(f.ui.notify.mock.calls.filter(([message]) => String(message).includes("already open"))).toHaveLength(1); f.assertReleased();
+});
+
+test.each(["destination", "uniqueName"])("fork-here errors in %s release holds/guard without creating files", async (stage) => {
+  const f = fixture(); const files = readdirSync(f.dir);
+  if (stage === "destination") f.ui.select.mockRejectedValueOnce(new Error("destination failed"));
+  else f.uniqueName.mockRejectedValueOnce(new Error("unique name failed"));
+  await f.runHere(); expect(f.ui.notify).toHaveBeenCalledWith(expect.stringContaining("failed"), "error");
+  expect(f.fake.log).toEqual([]); expect(readdirSync(f.dir)).toEqual(files); f.assertReleased(); f.assertUntouched();
+  f.ui.select.mockResolvedValue(undefined); const calls = f.ui.select.mock.calls.length; await f.runHere(); expect(f.ui.select).toHaveBeenCalledTimes(calls + 1); f.assertReleased();
+});
+
+test.each([
+  ["tree-first", "naming"], ["direct-first", "naming"],
+  ["tree-first", "startup"], ["direct-first", "startup"],
+] as const)("fork commands share concurrency %s during %s, even after interaction hold releases", async (order, stage) => {
+  const entered = deferred<void>(); const wait = deferred<void>();
+  const f = fixture(stage === "startup" ? { "agent.start": async () => { entered.resolve(); await wait.promise; return { result: {} }; } } : {});
+  if (stage === "naming") f.registry.complete.mockImplementation(async () => { entered.resolve(); await wait.promise; return { stopReason: "stop", content: [{ type: "text", text: "Topic title" }] }; });
+  const first = order === "tree-first" ? f.run : f.runHere; const second = order === "tree-first" ? f.runHere : f.run;
+  const pending = first(); await entered.promise;
+  const customCalls = f.ui.custom.mock.calls.length;
+  expect(f.holds().map(([, hold]) => hold.active)).toEqual(stage === "naming" ? [true] : [true, false]);
+  await second();
+  expect(f.ui.notify).toHaveBeenCalledWith(order === "tree-first" ? "/fork-here is already open." : "/tree-fork is already open.", "warning");
+  expect(f.ui.select).toHaveBeenCalledTimes(1); expect(f.ui.custom).toHaveBeenCalledTimes(customCalls);
+  wait.resolve(); await pending; expect(f.fake.of("agent.start")).toHaveLength(1); f.assertReleased(); f.assertUntouched();
+  f.ui.select.mockResolvedValue(undefined); f.screens.picker.mockImplementation((_picker, done) => done(undefined));
+  await second(); expect(f.ui.notify.mock.calls.filter(([message]) => String(message).includes("already open"))).toHaveLength(1); f.assertReleased();
+});
+
+test.each(["pane.get", "tab.create", "agent.start"])("fork-here runtime replacement during %s preserves safe startup recovery and resets", async (stage) => {
+  const f = fixture();
+  f.deps.call = (async (method, params, timeout) => {
+    const reply = await f.fake.call(method, params, timeout);
+    if (method === stage) f.stale();
+    return reply;
+  }) as Call;
+  await f.runHere("Recovery title");
+  expect(f.fake.of("agent.start")).toHaveLength(stage === "agent.start" ? 1 : 0);
+  expect(f.fake.of("pane.close")).toEqual(stage === "tab.create" ? [{ method: "pane.close", params: { pane_id: "new-pane" } }] : []);
+  expect(f.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/switched or reloaded.*Session file retained/), "error");
+  expect(f.ui.notify.mock.calls.some(([message]) => String(message).startsWith("Fork opened"))).toBe(false);
+  expect(readdirSync(f.dir)).toHaveLength(2); f.assertReleased(); f.assertUntouched();
+  f.ui.select.mockResolvedValue(undefined); await f.runHere(); expect(f.ui.select).toHaveBeenCalledTimes(2); f.assertReleased();
+});
+
+test("fork-here thrown transport failure retains possibly running pane/file and releases guard", async () => {
+  const f = fixture({ "agent.start": () => { throw new Error("connection disappeared"); } });
+  await f.runHere("Recovery title");
+  const file = f.fake.of("agent.start")[0].params.args.at(-1) as string;
+  expect(f.fake.of("agent.start")).toHaveLength(1); expect(f.fake.of("pane.close")).toEqual([]);
+  expect(readFileSync(file, "utf8")).toContain(FORK_BOUNDARY);
+  expect(f.ui.notify).toHaveBeenCalledWith(expect.stringContaining(`connection disappeared. Session file retained: ${file}. Fork pane: new-pane`), "error");
+  f.assertReleased(); f.assertUntouched(); f.ui.select.mockResolvedValue(undefined); await f.runHere(); expect(f.ui.select).toHaveBeenCalledTimes(2); f.assertReleased();
+});
+
+test.each(["agent_not_ready", "timeout", "socket", "closed", "parse", "invalid_request", "agent_start_failed"])("fork-here startup %s preserves recovery and resets guard", async (code) => {
+  const f = fixture({ "agent.start": () => failure(code) }); await f.runHere("Recovery title");
+  expect(f.fake.of("agent.start")).toHaveLength(1);
+  const preserve = ["agent_not_ready", "timeout", "socket", "closed", "parse"].includes(code);
+  expect(f.fake.of("pane.close")).toEqual(preserve ? [] : [{ method: "pane.close", params: { pane_id: "new-pane" } }]);
+  const file = f.fake.of("agent.start")[0].params.args.at(-1) as string;
+  expect(readFileSync(file, "utf8")).toContain(FORK_BOUNDARY);
+  expect(f.ui.notify).toHaveBeenCalledWith(expect.stringContaining(`Session file retained: ${file}. Fork pane: new-pane`), "error");
+  if (code === "agent_not_ready") expect(f.ui.notify).toHaveBeenCalledWith(expect.stringContaining("waiting on a startup dialog; answer it in that pane"), "error");
+  f.assertReleased(); f.assertUntouched(); f.ui.select.mockResolvedValue(undefined); await f.runHere(); expect(f.ui.select).toHaveBeenCalledTimes(2); f.assertReleased();
 });

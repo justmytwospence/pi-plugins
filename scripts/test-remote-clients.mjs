@@ -271,9 +271,11 @@ async function gatePickerLines(width, command) {
   return lines;
 }
 
-// Render both steps through the real /tree-fork command, cancelling before any file or pane
-// creation. The first step must remain Pi's native tree, not a select-shaped replacement.
-async function treeForkLines(width, step, filter = 'default') {
+// Render through the actual fork commands, cancelling before any file or pane creation.
+// /tree-fork starts with Pi's native tree; /fork-here with an explicit name goes straight
+// to the same destination dialog, without constructing a tree or naming loader.
+async function treeForkLines(width, step, filter = 'default', command = 'tree-fork') {
+  const direct = command === 'fork-here';
   const commands = new Map();
   const notifications = [];
   const events = new EventEmitter();
@@ -307,12 +309,16 @@ async function treeForkLines(width, step, filter = 'default') {
   const entries = [user, tool, result, commentary, assistant, metadata];
   const tree = entries.reduceRight((children, entry) => [{ entry, children }], []);
   const before = structuredClone(tree);
-  let customCalls = 0;
-  await commands.get('tree-fork').handler('', {
-    hasUI: true, mode: 'tui', cwd: '/tmp/pi-plugins',
+  let customCalls = 0, selectCalls = 0;
+  assert.ok(commands.has(command), `/${command} must be registered`);
+  await commands.get(command).handler(direct ? 'API design review' : '', {
+    hasUI: true, mode: 'tui', cwd: '/tmp/pi-plugins', isIdle: () => true,
     sessionManager: {
       getSessionFile: () => new URL(import.meta.url).pathname,
-      getTree: () => tree,
+      getTree: () => {
+        assert.equal(direct, false, '/fork-here must not build a projected tree');
+        return tree;
+      },
       getBranch: id => {
         const index = entries.findIndex(entry => entry.id === id);
         assert.notEqual(index, -1, 'naming context must use an original entry');
@@ -323,6 +329,7 @@ async function treeForkLines(width, step, filter = 'default') {
     },
     ui: {
       custom: async factory => {
+        assert.equal(direct, false, '/fork-here must show no tree picker or naming loader');
         assert.equal(++customCalls, 1, 'cancel before opening the naming loader');
         assert.ok(blocked, '/tree-fork tree must hold herdr:blocked');
         const picker = factory(tui, theme, kb, () => {});
@@ -348,8 +355,11 @@ async function treeForkLines(width, step, filter = 'default') {
         return step === 'tree' ? undefined : 'reply';
       },
       select: async (title, options) => {
-        assert.ok(blocked, '/tree-fork destination must hold herdr:blocked');
+        assert.equal(++selectCalls, 1, `/${command} must show exactly one destination dialog`);
+        assert.ok(blocked, `/${command} destination must hold herdr:blocked`);
+        assert.equal(title, 'Open fork in Herdr?');
         assert.equal(title, FORK_TITLE);
+        assert.deepEqual(options, ['New tab', 'Split beside this pane']);
         assert.deepEqual(options, FORK_DESTINATIONS);
         lines = new ExtensionSelectorComponent(title, options, () => {}, () => {}).render(width);
         return undefined;
@@ -359,10 +369,11 @@ async function treeForkLines(width, step, filter = 'default') {
   });
   assert.deepEqual(tree, before, 'projecting and browsing must not change source entries or parent links');
   assert.equal(assistant.parentId, 'commentary', 'source keeps its original internal ancestry');
-  assert.equal(customCalls, 1, 'cancellation never enters naming');
-  assert.deepEqual(notifications, [], 'cancelled /tree-fork must not report an error');
-  assert.ok(lines, `/tree-fork must render ${step}`);
-  assert.equal(blocked, false, '/tree-fork cancellation must release herdr:blocked');
+  assert.equal(customCalls, direct ? 0 : 1, 'direct fork skips the tree; cancellation never enters naming');
+  assert.equal(selectCalls, step === 'destination' ? 1 : 0, `/${command} must render only the requested step`);
+  assert.deepEqual(notifications, [], `cancelled /${command} must not report an error`);
+  assert.ok(lines, `/${command} must render ${step}`);
+  assert.equal(blocked, false, `/${command} cancellation must release herdr:blocked`);
   return lines;
 }
 
@@ -374,7 +385,11 @@ const DIALOGS = [
     herdr: { options: labels.length, multi: false, labels },
     collie: { kind: 'prompt-select', options: labels.length + 1, labels, wraps: labels },
   })),
-  { name: '/tree-fork destination', lines: w => treeForkLines(w, 'destination'), question: FORK_TITLE, herdr: { options: FORK_DESTINATIONS.length, multi: false, labels: FORK_DESTINATIONS }, collie: { kind: 'prompt-select', options: FORK_DESTINATIONS.length + 1, labels: FORK_DESTINATIONS, wraps: FORK_DESTINATIONS } },
+  ...['tree-fork', 'fork-here'].map(command => ({
+    name: `/${command} destination`, lines: w => treeForkLines(w, 'destination', 'default', command), question: FORK_TITLE,
+    herdr: { options: FORK_DESTINATIONS.length, multi: false, labels: FORK_DESTINATIONS },
+    collie: { kind: 'prompt-select', options: FORK_DESTINATIONS.length + 1, labels: FORK_DESTINATIONS, wraps: FORK_DESTINATIONS },
+  })),
   ...['default', 'all'].map(filter => ({
     name: `/tree-fork native tree (${filter})`, lines: w => treeForkLines(w, 'tree', filter), nativeTree: true,
   })),

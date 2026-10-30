@@ -137,6 +137,14 @@ Once an interactive session is appropriate:
 
 Tabs and splits share files and are not isolated parallel editors. A separate feature or PR may benefit from a worktree, but ask first unless the user requested a worktree or branch isolation. Never create a new space or checkout merely because work is delegated, long or parallel. Keep the user's focus unchanged unless asked to switch.
 
+## Fork the current session
+
+`/fork-here [name]` forks the exact persisted current leaf at invocation, without a history picker. It includes trailing hidden entries such as compaction, labels and custom context, not just the last visible answer. A saved, nonempty session with a current leaf is required. The source must be idle both when invoked and before the fork file is created; otherwise it warns `Wait for the current turn to finish before using /fork-here.` It never aborts the source or silently rewinds an interrupted session.
+
+It immediately asks **Open fork in Herdr?** with the same **New tab** (default) and **Split beside this pane** choices as `/tree-fork`. For example, `/fork-here API design review` uses `API design review` as the display/session title and skips the naming loader and model request. The optional name is trimmed, preserves spaces and case, and must be one line without control characters, at most 60 characters. Without a name, it uses the existing semantic topic naming after destination confirmation, with the model, timeout and fallbacks described below. Cancelling creates no file or pane.
+
+The fork starts idle with an empty editor and no task or prompt sent, using the current model and thinking level. It is an independent interactive session, not a report-back child. The original session and draft are unaffected, and focus stays in the original pane. Both sessions share the same checkout and working directory; no workspace, worktree or branch is created. The display title is separate from the unique Herdr handle, which may gain a collision suffix. The startup recovery rules below apply to both commands. Pi's built-in `/fork` is unchanged; use `/tree-fork` to choose an earlier point.
+
 ## Fork a tree point
 
 `/tree-fork` opens Pi's native session-tree picker, then asks **Open fork in Herdr?**: **New tab** (default) or **Split beside this pane**. The picker shows nonempty user prompts (including image-only prompts) and completed text answers. It hides tool calls and results, commentary, thinking-only or empty answers, interrupted or incomplete responses, and other internal records. Its initial selection is the nearest visible ancestor of the current point, when one exists. Native search, folding and filters operate on these visible points; label editing is disabled. `/tree` keeps its usual behavior. A saved session with a visible fork point is required.
@@ -244,7 +252,7 @@ There is no settings file.
 - `git` for `where: "worktree"`.
 - A saved Herdr machine (`herdr machine add`, with API forwarding) for `machine`; pi-herdr runs `herdr --machine <label> ...` for it.
 - Each Herdr child is a full interactive Pi session using your configured model and credentials, billed like any session. pi-herdr also makes a bounded fork-naming request when needed (see [Fork a tree point](#fork-a-tree-point)). Its `$summary` model call is one small request per settled turn whose reply is longer than a line (Haiku, roughly 300 input and 20 output tokens, a few thousandths of a cent), through your configured credentials. `PI_HERDR_SUMMARY=0` disables both kinds of call. With pi-recap loaded, pi-recap makes that one request instead.
-- It saves coordination entries in Pi sessions, writes crew state under `<git-common-dir>/pi-crew/`, and `/tree-fork` creates a separate ordinary Pi session file without changing the source session file.
+- It saves coordination entries in Pi sessions, writes crew state under `<git-common-dir>/pi-crew/`, and `/fork-here` and `/tree-fork` create separate ordinary Pi session files without changing the source session file.
 
 ## Optional integrations
 
