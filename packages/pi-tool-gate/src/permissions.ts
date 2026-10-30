@@ -9,12 +9,16 @@
 // matches when any of them does; an allow rule opens a call only when it covers every part that does
 // more than read. Calls the gate always holds (`alwaysAskBash`) are opened only by a rule naming the
 // exact command. Everything here is pure except loading and editing the rule files.
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { mkdir, open, rename, unlink, writeFile } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { type BashUnit, bashUnits, expandHome, READS_KEY, splitCommand } from "./bash.ts";
 import { agentDir, isRecord, sharedConfigDir } from "./config.ts";
 import type { Grant } from "./grants.ts";
+import { type ProjectContext, projectFiles } from "./project.ts";
 
 /** The lists in the order they win: a matching deny rule beats ask, ask beats allow. */
 export const LISTS = ["deny", "ask", "allow"] as const;
@@ -29,7 +33,7 @@ export interface Origin {
   shared: boolean;
   /** The file, or `this session`. */
   source: string;
-  /** Whether the gate may change it (`/gate rules`): never a project's shared file, never `~/.config/agents`. */
+  /** Whether the gate may change it: only the configured project destination and unmanaged user file. */
   writable: boolean;
 }
 
@@ -659,22 +663,47 @@ export function sessionRule(list: RuleList, raw: string): ScopedRule | undefined
 
 // ---- rule files -----------------------------------------------------------------------------
 
-const fileCache = new Map<string, { mtime: number; rules: ScopedRule[]; ignored: IgnoredRule[] }>();
+export interface PolicyLoadError {
+  source: string;
+  error: string;
+}
 
-function readRuleFile(file: string, origin: Origin): { rules: ScopedRule[]; ignored: IgnoredRule[] } {
-  let mtime: number;
+export interface FileRules {
+  rules: ScopedRule[];
+  ignored: IgnoredRule[];
+  errors: PolicyLoadError[];
+}
+
+export interface PersistenceOptions {
+  project?: "local" | "shared";
+  userWritable?: boolean;
+}
+
+/** Missing files are normal; existing invalid policies must remain visible to the caller. */
+function readPolicy(file: string): Record<string, unknown> {
+  let source: string;
   try {
-    mtime = statSync(file).mtimeMs;
-  } catch {
-    return { rules: [], ignored: [] };
+    source = readFileSync(file, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw error;
   }
-  const cached = fileCache.get(file);
-  if (cached && cached.mtime === mtime) return cached;
+  let json: unknown;
+  try {
+    json = JSON.parse(source);
+  } catch {
+    throw new Error(`${file} is not valid JSON`);
+  }
+  if (!isRecord(json)) throw new Error(`${file} is not a JSON object`);
+  return json;
+}
+
+function readRuleFile(file: string, origin: Origin): FileRules {
   const rules: ScopedRule[] = [];
   const ignored: IgnoredRule[] = [];
+  const errors: PolicyLoadError[] = [];
   try {
-    const json: unknown = JSON.parse(readFileSync(file, "utf8"));
-    const permissions = isRecord(json) ? json.permissions : undefined;
+    const permissions = readPolicy(file).permissions;
     if (isRecord(permissions)) {
       for (const list of LISTS) {
         const entries = permissions[list];
@@ -687,37 +716,36 @@ function readRuleFile(file: string, origin: Origin): { rules: ScopedRule[]; igno
         }
       }
     }
-  } catch {
-    // Unreadable or invalid JSON: no rules from it, never a broken session.
+  } catch (error) {
+    errors.push({ source: file, error: error instanceof Error ? error.message : String(error) });
   }
-  const entry = { mtime, rules, ignored };
-  fileCache.set(file, entry);
-  return entry;
+  return { rules, ignored, errors };
 }
 
-/**
- * The rules written in the config files, user files first then the project's: `permissions.allow`,
- * `.ask` and `.deny` of each of the four `tool-gate.json` locations (config.ts), added together
- * rather than replacing one another. The block is Claude Code's, so the ports that read the file
- * ignore it, and keys here that they do not know are theirs to ignore.
- */
-export function loadFileRules(cwd: string): { rules: ScopedRule[]; ignored: IgnoredRule[] } {
+/** Merged permission lists, user scopes then active shared policy and main-checkout local policy. */
+export function loadFileRules(project: ProjectContext | string, options: PersistenceOptions = {}): FileRules {
+  const context = typeof project === "string" ? { cwd: project, root: project, main: project, isGit: false } : project;
   const rules: ScopedRule[] = [];
   const ignored: IgnoredRule[] = [];
-  // The files `loadConfig` reads for tool-gate.json, in its order; only your own user file is writable here.
-  const files: Array<[file: string, scope: Scope, writable: boolean]> = [
-    [path.join(sharedConfigDir(), "tool-gate.json"), "user", false],
-    [userRulesFile(), "user", true],
-    [path.join(cwd, ".agents", "tool-gate.json"), "project", false],
-    [path.join(cwd, ".pi", "tool-gate.json"), "project", false],
+  const errors: PolicyLoadError[] = [];
+  const local = path.join(context.main, ".pi", "tool-gate.local.json");
+  const destination = options.project === "shared" ? path.join(context.root, ".pi", "tool-gate.json") : local;
+  const files: Origin[] = [
+    { scope: "user", shared: true, source: path.join(sharedConfigDir(), "tool-gate.json"), writable: false },
+    { scope: "user", shared: false, source: userRulesFile(), writable: options.userWritable !== false },
+    ...projectFiles(context).map((file): Origin => ({
+      scope: "project", shared: file !== local, source: file, writable: file === destination,
+    })),
   ];
-  for (const [file, scope, writable] of files) {
-    const origin: Origin = { scope, shared: !writable, source: file, writable };
-    const read = readRuleFile(file, origin);
+  // Read afresh: neither same-tick file replacements nor changed persistence options may retain
+  // stale policy or origins.
+  for (const origin of files) {
+    const read = readRuleFile(origin.source, origin);
     rules.push(...read.rules);
     ignored.push(...read.ignored);
+    errors.push(...read.errors);
   }
-  return { rules, ignored };
+  return { rules, ignored, errors };
 }
 
 /** Your user rules' file: `~/.pi/agent/tool-gate.json` (`PI_CODING_AGENT_DIR` honored). */
@@ -725,38 +753,92 @@ export function userRulesFile(): string {
   return path.join(agentDir(), "tool-gate.json");
 }
 
-/** Add a rule to, or remove it from, your user file, leaving everything else in it as it is. Throws when the file is not a JSON object. */
-export function editUserRules(op: "add" | "remove", list: RuleList, raw: string, file = userRulesFile()): void {
-  let json: Record<string, unknown> = {};
-  if (existsSync(file)) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(readFileSync(file, "utf8"));
-    } catch {
-      throw new Error(`${file} is not valid JSON`);
+const mutations = new Map<string, Promise<void>>();
+
+/** Serialize in-process writers as well as other sessions, rereading only after acquiring the lock. */
+async function editPolicy(file: string, mutate: (json: Record<string, unknown>) => void): Promise<void> {
+  file = path.resolve(file);
+  const previous = mutations.get(file) ?? Promise.resolve();
+  const pending = previous.catch(() => {}).then(async () => {
+    await mkdir(path.dirname(file), { recursive: true });
+    const lockFile = `${file}.lock`;
+    const deadline = Date.now() + 2_000;
+    let lock;
+    while (!lock) {
+      try {
+        lock = await open(lockFile, "wx");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw new Error("Policy file is busy; no changes were saved.");
+        await delay(Math.min(50, remaining));
+        if (Date.now() >= deadline) throw new Error("Policy file is busy; no changes were saved.");
+      }
     }
-    if (!isRecord(parsed)) throw new Error(`${file} is not a JSON object`);
-    json = parsed;
+    const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      const json = readPolicy(file);
+      mutate(json);
+      await writeFile(tmp, `${JSON.stringify(json, null, 2)}\n`, { flag: "wx" });
+      await rename(tmp, file);
+    } finally {
+      try {
+        await unlink(tmp).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
+      } finally {
+        try { await lock.close(); } finally { await unlink(lockFile); }
+      }
+    }
+  });
+  mutations.set(file, pending);
+  try {
+    await pending;
+  } finally {
+    if (mutations.get(file) === pending) mutations.delete(file);
   }
-  const permissions = isRecord(json.permissions) ? { ...json.permissions } : {};
-  const current: unknown[] = Array.isArray(permissions[list]) ? [...(permissions[list] as unknown[])] : [];
-  const next = op === "add" ? (current.includes(raw) ? current : [...current, raw]) : current.filter((entry) => entry !== raw);
-  if (next.length) permissions[list] = next;
-  else delete permissions[list];
-  if (Object.keys(permissions).length) json.permissions = permissions;
-  else delete json.permissions;
-  mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify(json, null, 2)}\n`);
-  renameSync(tmp, file);
-  fileCache.delete(file);
+}
+
+function editList(json: Record<string, unknown>, section: string, list: string, op: "add" | "remove", raw: string, equivalent = (entry: unknown) => entry === raw): void {
+  const block = isRecord(json[section]) ? { ...json[section] } : {};
+  const current: unknown[] = Array.isArray(block[list]) ? [...block[list] as unknown[]] : [];
+  const next = op === "add" ? (current.some(equivalent) ? current : [...current, raw]) : current.filter((entry) => !equivalent(entry));
+  if (next.length) block[list] = next;
+  else delete block[list];
+  if (Object.keys(block).length) json[section] = block;
+  else delete json[section];
+}
+
+/** Add/remove a rule without changing unrelated policy fields. Rejects invalid existing JSON. */
+export async function editRulesFile(file: string, operation: "add" | "remove", list: RuleList, raw: string): Promise<void> {
+  await editPolicy(file, (json) => editList(json, "permissions", list, operation, raw));
+}
+
+function homeGrant(dir: string): string {
+  if (dir === "*") return dir;
+  const absolute = path.resolve(expandHome(dir));
+  const home = homedir();
+  return absolute === home ? "~" : absolute.startsWith(`${home}${path.sep}`) ? `~/${path.relative(home, absolute)}` : absolute;
+}
+
+/** Store home-relative directory grants, deduplicating absolute and home-relative spellings. */
+export async function editDirectoryGrant(file: string, operation: "add" | "remove", access: "read" | "write", dir: string): Promise<void> {
+  if (operation === "add" && /[*?]/u.test(dir)) {
+    throw new Error("This folder contains wildcard characters and cannot be saved as a literal grant. Allow once instead.");
+  }
+  const normalized = homeGrant(dir);
+  await editPolicy(file, (json) => editList(json, "directories", access, operation, normalized,
+    (entry) => typeof entry === "string" && homeGrant(entry) === normalized));
+}
+
+/** Backward-compatible user-file wrapper; callers must await the save. */
+export async function editUserRules(op: "add" | "remove", list: RuleList, raw: string, file = userRulesFile()): Promise<void> {
+  await editRulesFile(file, op, list, raw);
 }
 
 // ---- describing -----------------------------------------------------------------------------
 
 export function scopeLabel(o: Origin): string {
   if (o.scope === "session") return "session";
-  if (o.scope === "project") return o.shared ? "project (shared)" : "project (this machine)";
+  if (o.scope === "project") return o.shared ? "project (shared)" : path.basename(o.source) === "project-grants.json" ? "project (this machine)" : "project (local)";
   return o.shared ? "user (shared)" : "user";
 }
 

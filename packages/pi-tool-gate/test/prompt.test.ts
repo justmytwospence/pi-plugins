@@ -64,6 +64,20 @@ describe("the approval dialog's rule rows", () => {
     expect(await d.answer).toEqual({ choice: "Block" });
   });
 
+  test.each([46, 120])("managed globals keep project saves and session choices readable at %s columns", async (width) => {
+    const options = OPTIONS.filter((row) => row !== "Allow rule everywhere");
+    const d = open(approval({ options, grant: ["Rule: Bash(git push:*)", "Project saves: ~/repo/.pi/tool-gate.json (shared)"] }), width);
+    await Promise.resolve();
+    const text = d.screen();
+    expect(text).not.toContain("Allow rule everywhere");
+    expect(text).toContain("Allow rule for this session");
+    expect(text).toContain("Allow rule in this project");
+    expect(text).toContain("Project saves:");
+    expect(text.split("\n").every((line) => line.length <= width)).toBe(true);
+    d.press(DOWN, DOWN, ENTER);
+    expect(await d.answer).toEqual({ choice: "Allow rule in this project" });
+  });
+
   test("long rules wrap, and a very long list is cut", async () => {
     const long = `Rule: Bash(${"curl -s https://example.com/api/x ".repeat(12)})`;
     const d = open(approval({ grant: Array.from({ length: 6 }, () => long) }), 46);

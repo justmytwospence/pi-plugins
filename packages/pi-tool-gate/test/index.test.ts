@@ -1,4 +1,5 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -202,6 +203,73 @@ describe("pending decisions are invalidated by mode and branch changes", () => {
   });
 });
 
+describe("resolved project policy integration", () => {
+  const git = (dir: string, ...args: string[]) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" });
+  const writePolicy = (dir: string, value: unknown) => {
+    mkdirSync(path.join(dir, ".pi"), { recursive: true });
+    writeFileSync(path.join(dir, ".pi", "tool-gate.json"), JSON.stringify(value));
+  };
+  function actualGit(cwd: string) {
+    const h = harness({ exec: (cmd, args) => {
+      try { return { code: 0, stdout: execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }), stderr: "" }; }
+      catch { return { code: 1, stdout: "", stderr: "" }; }
+    } });
+    toolGate(h.pi);
+    const jev = fakeJev(() => safe);
+    return { h, jev, ctx: h.ctx({ cwd, modelRegistry: jev.registry }) };
+  }
+  test("root and nested launches use the same config, permission anchors and Markdown guidance", async () => {
+    const root = realpathSync(configDir);
+    git(root, "init", "-q");
+    const nested = path.join(root, "components");
+    mkdirSync(nested);
+    writePolicy(root, { pushBack: false, permissions: { allow: ["Edit(src/**)"], deny: ["Bash(npm publish:*)"] } });
+    writeFileSync(path.join(root, ".pi", "tool-gate-rules.md"), "- Never deploy production.\n");
+    for (const cwd of [root, nested]) {
+      const s = actualGit(cwd);
+      await s.h.emit("session_start", {}, s.ctx);
+      expect(await s.h.emit("tool_call", call("edit", { path: path.relative(cwd, path.join(root, "src", "a.ts")), edits: [] }), s.ctx)).toBeUndefined();
+      expect(await s.h.emit("tool_call", call("bash", { command: "npm publish" }), s.ctx)).toMatchObject({ block: true, reason: expect.stringContaining("deny rule") });
+      expect(await s.h.emit("tool_call", call("bash", { command: "npm test" }), s.ctx)).toBeUndefined();
+      expect(s.jev.calls[0]?.questions["rule::0"].instructions).toContain("Never deploy production.");
+    }
+  });
+  test("a worktree uses only active shared policy, inherits main local saves, and saves locally to main", async () => {
+    const root = realpathSync(configDir);
+    git(root, "init", "-q");
+    git(root, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "fixture");
+    const worktree = path.join(root, "worktree");
+    git(root, "worktree", "add", "-qb", "fixture", worktree);
+    writePolicy(root, { permissions: { deny: ["Bash(npm test:*)"] } });
+    writePolicy(worktree, { defaultMode: "manual", permissions: { allow: ["Bash(npm test:*)"] } });
+    writeFileSync(path.join(root, ".pi", "tool-gate.local.json"), JSON.stringify({ permissions: { allow: ["web_fetch"] }, unrelated: 7 }));
+    const s = actualGit(worktree);
+    await s.h.emit("session_start", {}, s.ctx);
+    expect(await s.h.emit("tool_call", call("bash", { command: "npm test" }), s.ctx)).toBeUndefined();
+    expect(await s.h.emit("tool_call", call("web_fetch", {}), s.ctx)).toBeUndefined();
+    s.ctx.ui.selectAnswers.push("Allow rule in this project");
+    expect(await s.h.emit("tool_call", call("bash", { command: "npm publish" }), s.ctx)).toBeUndefined();
+    expect(JSON.parse(readFileSync(path.join(root, ".pi", "tool-gate.local.json"), "utf8"))).toEqual({ unrelated: 7, permissions: { allow: ["web_fetch", "Bash(npm publish:*)"] } });
+    expect(s.jev.calls).toHaveLength(0);
+  });
+});
+
+test("invalid Git main-checkout metadata blocks calls without writing local state", async () => {
+  const root = realpathSync(configDir);
+  const h = harness({ exec: (_cmd, args) => ({ code: 0, stdout: args.includes("--show-toplevel") || args.includes("--git-common-dir") ? `${root}\n` : args.includes("--absolute-git-dir") ? `${root}/missing-metadata\n` : "", stderr: "" }) });
+  toolGate(h.pi);
+  const jev = fakeJev(() => safe);
+  const ctx = h.ctx({ cwd: root, modelRegistry: jev.registry });
+  await h.emit("session_start", {}, ctx);
+  await h.emit("before_agent_start", { prompt: "x" }, ctx);
+  for (const tool of ["read", "bash", "tool_search"]) {
+    expect(await h.emit("tool_call", call(tool, { path: "source.ts", command: "git status" }), ctx)).toMatchObject({ block: true, reason: expect.stringContaining("Policy resolution error") });
+  }
+  expect(ctx.ui.selects).toHaveLength(0);
+  expect(jev.calls).toHaveLength(0);
+  expect(() => readFileSync(path.join(root, ".pi/tool-gate.local.json"))).toThrow();
+});
+
 test("read-only calls pass without Jev", async () => {
   const { h, jev, ctx } = setup(safe);
   await h.emit("before_agent_start", { prompt: "x" }, ctx);
@@ -249,7 +317,7 @@ test("a held call is pushed back with Jev's reasons and suggestion; the agent's 
     "Block with a message",
   ]);
   // The rule is in the question, not the rows.
-  expect(ctx.ui.selects[0]?.title).toMatch(/\nRule: Bash\(npm publish:\*\)$/u);
+  expect(ctx.ui.selects[0]?.title).toMatch(/\nRule: Bash\(npm publish:\*\)\nProject saves:/u);
   // The rule covers the same program and subcommand without asking again, wherever it starts.
   expect(await h.emit("tool_call", call("bash", { command: "npm publish --dry-run" }, "t3"), ctx)).toBeUndefined();
   expect(await h.emit("tool_call", call("bash", { command: "cd pkg && echo go; npm publish" }, "t4"), ctx)).toBeUndefined();
@@ -623,7 +691,7 @@ test("a rule for a call with substitutions or redirects names that call, and a w
   await h.emit("tool_call", call("bash", { command: reads }), ctx);
   ctx.ui.selectAnswers.push("Allow rule for this session");
   expect(await h.emit("tool_call", call("bash", { command: reads }, "t2"), ctx)).toBeUndefined();
-  expect(ctx.ui.selects[0]?.title).toMatch(/\nRule: Bash\(grep -c Admin \$\(ls cfg\) > \/tmp\/out\.txt\)$/u);
+  expect(ctx.ui.selects[0]?.title).toMatch(/\nRule: Bash\(grep -c Admin \$\(ls cfg\) > \/tmp\/out\.txt\)\nProject saves:/u);
   const judged = jev.calls.length;
   // The same call again runs without a judgment.
   expect(await h.emit("tool_call", call("bash", { command: reads }, "t3"), ctx)).toBeUndefined();

@@ -294,7 +294,8 @@ describe("the gate", () => {
   };
   const call = (toolName: string, input: Record<string, unknown>, id = "t1") => ({ type: "tool_call", toolCallId: id, toolName, input });
 
-  function setup(directories?: Record<string, unknown>, cwd = app) {
+  function setup(directories?: Record<string, unknown>, cwd = path.join(configDir, "app")) {
+    mkdirSync(cwd, { recursive: true });
     if (directories) {
       mkdirSync(path.join(configDir, "xdg", "agents"), { recursive: true });
       writeFileSync(path.join(configDir, "xdg", "agents", "tool-gate.json"), JSON.stringify({ directories }));
@@ -319,11 +320,37 @@ describe("the gate", () => {
     ctx.ui.selectAnswers.push("Allow folder for this session");
     expect(await h.emit("tool_call", call("read", { path: "~/Projects/other/a.ts" }, "t2"), ctx)).toBeUndefined();
     expect(ctx.ui.selects[0]?.options).toEqual(["Allow once", "Allow folder for this session", "Allow folder in this project", "Block", "Block with a message"]);
-    expect(ctx.ui.selects[0]?.title).toMatch(/\nFolder: reads in ~\/Projects\/other$/u);
+    expect(ctx.ui.selects[0]?.title).toMatch(/\nFolder: reads in ~\/Projects\/other\nProject saves:/u);
     // The folder is granted for the session: no more asking, no Jev.
     expect(await h.emit("tool_call", call("bash", { command: "rg foo ~/Projects/other" }, "t3"), ctx)).toBeUndefined();
     expect(ctx.ui.selects).toHaveLength(1);
     expect(jev.calls.filter((c) => !c.questions.workaround)).toHaveLength(0);
+  });
+
+  test.each(["a*b", "a?b"])("wildcard folder %s offers only once or exact in-memory session access", async (folder) => {
+    const { h, ctx } = setup();
+    await h.emit("session_start", {}, ctx);
+    await h.emit("before_agent_start", { prompt: "x" }, ctx);
+    const file = `~/Projects/${folder}/a.ts`;
+    expect((await h.emit("tool_call", call("read", { path: file }), ctx) as any)?.block).toBe(true);
+    ctx.ui.selectAnswers.push("Allow once");
+    expect(await h.emit("tool_call", call("read", { path: file }, "once"), ctx)).toBeUndefined();
+    expect(ctx.ui.selects[0]?.options).toEqual(["Allow once", "Allow folder for this session", "Block", "Block with a message"]);
+    expect(ctx.ui.selects[0]?.title).not.toContain("Project saves:");
+
+    ctx.ui.selectAnswers.push("Allow folder for this session");
+    expect(await h.emit("tool_call", call("read", { path: file }, "session"), ctx)).toBeUndefined();
+    expect(ctx.ui.selects).toHaveLength(2); // Allow once did not grant the folder.
+    expect(await h.emit("tool_call", call("read", { path: `~/Projects/${folder}/other.ts` }, "same"), ctx)).toBeUndefined();
+    expect(ctx.ui.selects).toHaveLength(2);
+    // Neither character expands to another folder in an in-memory grant.
+    ctx.ui.selectAnswers.push("Block");
+    expect((await h.emit("tool_call", call("read", { path: "~/Projects/axb/a.ts" }, "different"), ctx) as any)?.block).toBe(true);
+    expect(ctx.ui.selects).toHaveLength(2); // A different folder gets its own push-back.
+    expect((await h.emit("tool_call", call("read", { path: "~/Projects/axb/a.ts" }, "different-retry"), ctx) as any)?.block).toBe(true);
+    expect(ctx.ui.selects).toHaveLength(3);
+    expect(ctx.ui.selects[2]?.options).toContain("Allow folder in this project");
+    expect(() => readFileSync(path.join(ctx.cwd, ".pi", "tool-gate.local.json"))).toThrow();
   });
 
   test("a project grant outlives the session and can be revoked with /gate grants", async () => {
@@ -335,8 +362,9 @@ describe("the gate", () => {
     first.ctx.ui.selectAnswers.push("Allow folder in this project");
     expect(await first.h.emit("tool_call", call("read", { path: "~/Downloads/shot.png" }, "t2"), first.ctx)).toBeUndefined();
     expect(first.ctx.ui.selects[0]?.options.slice(1, 3)).toEqual(["Allow folder for this session", "Allow folder in this project"]);
-    const stored = JSON.parse(readFileSync(path.join(configDir, "pi", "tool-gate", "project-grants.json"), "utf8"));
-    expect(stored[app]).toEqual([expect.objectContaining({ key: `dir:read:${H}/Downloads`, label: "reads in ~/Downloads" })]);
+    const saved = path.join(first.ctx.cwd, ".pi", "tool-gate.local.json");
+    const stored = JSON.parse(readFileSync(saved, "utf8"));
+    expect(stored.directories.read).toEqual(["~/Downloads"]);
 
     // A new session in the same project: no asking.
     const second = setup();
@@ -345,9 +373,9 @@ describe("the gate", () => {
     expect(await second.h.emit("tool_call", call("read", { path: "~/Downloads/other.pdf" }), second.ctx)).toBeUndefined();
     expect(second.ctx.ui.selects).toHaveLength(0);
 
-    second.ctx.ui.selectAnswers.push("folder: reads in ~/Downloads (project (this machine))", "Remove");
+    second.ctx.ui.selectAnswers.push("folder: reads in ~/Downloads (project (local))", "Remove");
     await second.h.commands.get("gate").handler("grants", second.ctx);
-    expect(JSON.parse(readFileSync(path.join(configDir, "pi", "tool-gate", "project-grants.json"), "utf8"))).toEqual({});
+    expect(JSON.parse(readFileSync(saved, "utf8"))).toEqual({});
     const again: any = await second.h.emit("tool_call", call("read", { path: "~/Downloads/other.pdf" }, "t3"), second.ctx);
     expect(again.block).toBe(true);
   });

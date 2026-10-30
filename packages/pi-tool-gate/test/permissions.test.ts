@@ -1,4 +1,5 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -11,6 +12,8 @@ import {
   type Call,
   describeOrigin,
   editUserRules,
+  editRulesFile,
+  editDirectoryGrant,
   loadFileRules,
   localGrants,
   migrateGrant,
@@ -696,14 +699,15 @@ describe("rule files", () => {
     expect(describeOrigin(rule("allow", "web_fetch").origin)).toBe("session");
   });
 
-  test("a rule this cannot read is listed as ignored, and the rest of the file still counts; bad JSON counts for nothing", () => {
+  test("invalid rules remain visible and malformed files produce load errors", () => {
     write(path.join(cwd, ".agents", "tool-gate.json"), {
       permissions: { allow: ["WebFetch(domain:x)", "Bash(git status)", 7, "Bash()"], ask: "not a list", deny: ["Bash(rm:*)"] },
     });
     write(path.join(cwd, ".pi", "tool-gate.json"), "{ not json");
-    const { rules: found, ignored } = loadFileRules(cwd);
+    const { rules: found, ignored, errors } = loadFileRules(cwd);
     expect(found.map((r) => r.text)).toEqual(["Bash(rm:*)", "Bash(git status)"]);
     expect(ignored.map((r) => r.raw)).toEqual(["WebFetch(domain:x)", "Bash()"]);
+    expect(errors).toEqual([{ source: path.join(cwd, ".pi", "tool-gate.json"), error: expect.stringContaining("not valid JSON") }]);
   });
 
   test("ambiguous persisted rules stay visible and produce warnings", () => {
@@ -728,37 +732,176 @@ describe("rule files", () => {
     expect(loadFileRules(cwd).rules.map((r) => r.text)).toEqual(["a_tool", "b_tool"]);
   });
 
-  test("editing the user file adds and removes a rule and leaves the rest of the file alone", () => {
+  test("active shared and main local policy are merged; only the configured destination is writable", () => {
+    const main = path.join(root, "main");
+    const project = { cwd: path.join(cwd, "nested"), root: cwd, main, isGit: true };
+    const agents = path.join(cwd, ".agents", "tool-gate.json");
+    const shared = path.join(cwd, ".pi", "tool-gate.json");
+    const local = path.join(main, ".pi", "tool-gate.local.json");
+    write(agents, { permissions: { allow: ["agents_tool"] } });
+    write(shared, { permissions: { allow: ["shared_tool"] } });
+    write(local, { permissions: { allow: ["local_tool"] } });
+    write(path.join(main, ".pi", "tool-gate.json"), { permissions: { deny: ["main_tool"] } });
+    write(path.join(project.cwd, ".pi", "tool-gate.json"), { permissions: { deny: ["nested_tool"] } });
+    write(userRulesFile(), { permissions: { allow: ["user_tool"] } });
+    const loaded = loadFileRules(project);
+    expect(loaded.errors).toEqual([]);
+    expect(loaded.rules.map((r) => r.text)).toEqual(["user_tool", "agents_tool", "shared_tool", "local_tool"]);
+    expect(loaded.rules.map((r) => r.origin.writable)).toEqual([true, false, false, true]);
+    expect(loaded.rules.map((r) => r.origin.shared)).toEqual([false, true, true, false]);
+    // No origin cache may retain writability after persistence changes, even without a file edit.
+    const managed = loadFileRules(project, { project: "shared", userWritable: false });
+    expect(managed.rules.map((r) => r.origin.writable)).toEqual([false, false, true, false]);
+    expect(managed.rules.map((r) => r.origin.source)).toEqual([userRulesFile(), agents, shared, local]);
+    expect(loadFileRules(project).rules.map((r) => r.origin.writable)).toEqual([true, false, false, true]);
+  });
+
+  test("nonobject policies are errors, missing files are normal, and replacements need no mtime change", () => {
+    expect(loadFileRules(cwd)).toEqual({ rules: [], ignored: [], errors: [] });
+    const file = path.join(cwd, ".pi", "tool-gate.json");
+    for (const value of ["null", "[]", "true", "7", '"text"']) {
+      write(file, value);
+      expect(loadFileRules(cwd).errors).toEqual([{ source: file, error: `${file} is not a JSON object` }]);
+    }
+    const stamp = new Date(1_000);
+    write(file, { permissions: { allow: ["a_tool"] } });
+    utimesSync(file, stamp, stamp);
+    expect(loadFileRules(cwd).rules[0]?.text).toBe("a_tool");
+    write(file, { permissions: { deny: ["b_tool"] } });
+    utimesSync(file, stamp, stamp);
+    expect(loadFileRules(cwd).rules.map((r) => [r.list, r.text])).toEqual([["deny", "b_tool"]]);
+  });
+
+  test("concurrent rules and directory saves preserve every update and unrelated fields", async () => {
+    const file = path.join(cwd, ".pi", "tool-gate.json");
+    write(file, { unrelated: { keep: true }, directories: { enabled: true } });
+    await Promise.all(Array.from({ length: 20 }, (_, i) => Promise.all([
+      editRulesFile(file, "add", "allow", `tool_${i}`),
+      editDirectoryGrant(file, "add", "read", `/external/${i}`),
+    ])));
+    const json = JSON.parse(readFileSync(file, "utf8"));
+    expect(json.permissions.allow).toHaveLength(20);
+    expect(json.directories.read).toHaveLength(20);
+    expect(json.unrelated).toEqual({ keep: true });
+    expect(json.directories.enabled).toBe(true);
+    expect(readdirSync(path.dirname(file))).toEqual(["tool-gate.json"]);
+  });
+
+  test("separate processes coordinate through the same lock", async () => {
+    const file = path.join(cwd, ".pi", "tool-gate.json");
+    const module = new URL("../src/permissions.ts", import.meta.url).href;
+    const child = (id: number) => new Promise<void>((resolve, reject) => {
+      const script = `import { editRulesFile, editDirectoryGrant } from ${JSON.stringify(module)};
+        for (let i = 0; i < 10; i++) {
+          await editRulesFile(${JSON.stringify(file)}, "add", "allow", "child_${id}_" + i);
+          await editDirectoryGrant(${JSON.stringify(file)}, "add", "read", "/child/${id}/" + i);
+        }`;
+      const process = spawn(globalThis.process.execPath, ["--input-type=module", "-e", script], { stdio: ["ignore", "ignore", "pipe"] });
+      let stderr = "";
+      process.stderr.on("data", (data) => { stderr += String(data); });
+      process.on("error", reject);
+      process.on("exit", (code) => code === 0 ? resolve() : reject(new Error(stderr || `child exited ${code}`)));
+    });
+    await Promise.all([child(0), child(1), editRulesFile(file, "add", "deny", "parent_tool")]);
+    const json = JSON.parse(readFileSync(file, "utf8"));
+    expect(json.permissions.allow).toHaveLength(20);
+    expect(json.permissions.deny).toEqual(["parent_tool"]);
+    expect(json.directories.read).toHaveLength(20);
+    expect(existsSync(`${file}.lock`)).toBe(false);
+  });
+
+  test("an owned lock is cleaned up on rejection and queued writes can recover", async () => {
+    const file = userRulesFile();
+    for (const value of ["{ nope", "null", "[1]", '"text"']) {
+      write(file, value);
+      await expect(editRulesFile(file, "add", "allow", "web_fetch")).rejects.toThrow(/not valid JSON|not a JSON object/u);
+      await expect(editDirectoryGrant(file, "add", "read", "/external")).rejects.toThrow(/not valid JSON|not a JSON object/u);
+      expect(readFileSync(file, "utf8")).toBe(value);
+      expect(readdirSync(path.dirname(file))).toEqual(["tool-gate.json"]);
+    }
+    write(file, {});
+    await editRulesFile(file, "add", "ask", "web_fetch");
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ permissions: { ask: ["web_fetch"] } });
+  });
+
+  test("busy policies time out without deleting another process's lock or changing the file", async () => {
+    const file = userRulesFile();
+    write(file, { keep: true });
+    write(`${file}.lock`, "other writer");
+    await expect(editRulesFile(file, "add", "allow", "web_fetch")).rejects.toThrow("Policy file is busy; no changes were saved.");
+    expect(readFileSync(`${file}.lock`, "utf8")).toBe("other writer");
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ keep: true });
+  });
+
+  test.each(["*", "/external/a*b", "/external/a?b"])("literal folder saves reject %s before touching policy storage", async (dir) => {
+    const file = path.join(root, "untouched", "tool-gate.json");
+    const message = "This folder contains wildcard characters and cannot be saved as a literal grant. Allow once instead.";
+    for (const access of ["read", "write"] as const) {
+      await expect(editDirectoryGrant(file, "add", access, dir)).rejects.toThrow(message);
+      expect(existsSync(path.dirname(file))).toBe(false);
+      // Rejection precedes even opening an existing malformed policy or its lock.
+      write(file, "{ invalid");
+      write(`${file}.lock`, "other writer");
+      await expect(editDirectoryGrant(file, "add", access, dir)).rejects.toThrow(message);
+      expect(readFileSync(file, "utf8")).toBe("{ invalid");
+      expect(readFileSync(`${file}.lock`, "utf8")).toBe("other writer");
+      rmSync(path.dirname(file), { recursive: true });
+    }
+  });
+
+  test("authored directory glob grants can still be removed", async () => {
+    const file = userRulesFile();
+    write(file, { directories: { read: ["*", "~/Projects/a?b"], write: ["/external/a*b"] }, keep: true });
+    await editDirectoryGrant(file, "remove", "read", "*");
+    await editDirectoryGrant(file, "remove", "read", `${homedir()}/Projects/a?b`);
+    await editDirectoryGrant(file, "remove", "write", "/external/a*b");
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ keep: true });
+  });
+
+  test("directory grants normalize home paths and deduplicate equivalent spellings", async () => {
+    const file = userRulesFile();
+    write(file, { directories: { enabled: true, read: ["~/notes"], write: ["/external"] }, keep: true });
+    await editDirectoryGrant(file, "add", "read", `${homedir()}/notes/`);
+    await editDirectoryGrant(file, "add", "read", `${homedir()}/Projects/app`);
+    await editDirectoryGrant(file, "add", "read", homedir());
+    await editDirectoryGrant(file, "add", "read", "/outside/home/");
+    expect(JSON.parse(readFileSync(file, "utf8")).directories.read).toEqual(["~/notes", "~/Projects/app", "~", "/outside/home"]);
+    await editDirectoryGrant(file, "remove", "read", `${homedir()}/notes`);
+    await editDirectoryGrant(file, "remove", "write", "/external/");
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ directories: { enabled: true, read: ["~/Projects/app", "~", "/outside/home"] }, keep: true });
+  });
+
+  test("editing the user file adds and removes a rule and leaves the rest of the file alone", async () => {
     const file = userRulesFile();
     expect(file).toBe(path.join(root, "pi", "tool-gate.json"));
     write(file, { pushBack: false, jev: { enabled: false }, permissions: { deny: ["Bash(rm:*)"], defaultMode: "plan" } });
-    editUserRules("add", "allow", "Bash(git push:*)");
-    editUserRules("add", "allow", "Bash(git push:*)");
-    editUserRules("add", "allow", "web_fetch");
+    await editUserRules("add", "allow", "Bash(git push:*)");
+    await editUserRules("add", "allow", "Bash(git push:*)");
+    await editUserRules("add", "allow", "web_fetch");
     expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
       pushBack: false,
       jev: { enabled: false },
       permissions: { deny: ["Bash(rm:*)"], defaultMode: "plan", allow: ["Bash(git push:*)", "web_fetch"] },
     });
-    editUserRules("remove", "allow", "Bash(git push:*)");
-    editUserRules("remove", "deny", "Bash(rm:*)");
+    await editUserRules("remove", "allow", "Bash(git push:*)");
+    await editUserRules("remove", "deny", "Bash(rm:*)");
     expect(JSON.parse(readFileSync(file, "utf8")).permissions).toEqual({ defaultMode: "plan", allow: ["web_fetch"] });
-    editUserRules("remove", "allow", "web_fetch");
+    await editUserRules("remove", "allow", "web_fetch");
     expect(JSON.parse(readFileSync(file, "utf8")).permissions).toEqual({ defaultMode: "plan" });
     expect(loadFileRules(cwd).rules).toEqual([]);
   });
 
-  test("a file that is not a JSON object is not overwritten", () => {
+  test("a file that is not a JSON object is not overwritten", async () => {
     const file = userRulesFile();
     write(file, "{ nope");
-    expect(() => editUserRules("add", "allow", "web_fetch")).toThrow(/not valid JSON/u);
+    await expect(editUserRules("add", "allow", "web_fetch")).rejects.toThrow(/not valid JSON/u);
     expect(readFileSync(file, "utf8")).toBe("{ nope");
     write(file, "[1]");
-    expect(() => editUserRules("add", "allow", "web_fetch")).toThrow(/not a JSON object/u);
+    await expect(editUserRules("add", "allow", "web_fetch")).rejects.toThrow(/not a JSON object/u);
   });
 
-  test("a missing file is created with the rule", () => {
-    editUserRules("add", "ask", "Bash(npm publish:*)");
+  test("a missing file is created with the rule", async () => {
+    await editUserRules("add", "ask", "Bash(npm publish:*)");
     expect(JSON.parse(readFileSync(userRulesFile(), "utf8"))).toEqual({ permissions: { ask: ["Bash(npm publish:*)"] } });
   });
 });

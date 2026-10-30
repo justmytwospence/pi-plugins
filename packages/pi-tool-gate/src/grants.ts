@@ -1,10 +1,5 @@
-// This machine's project grants: the rules and folder grants a user allowed "in this project", kept
-// across sessions. They live outside the repository (`<agent dir>/tool-gate/project-grants.json`,
-// keyed by the project's main checkout, so its worktrees share them) because their paths are this
-// machine's. The file keeps its original shape, a list of `{ key, label, added }` per project, so an
-// older version still reads it: permissions.ts reads the old keys (`bash:<key>`, `tool:<x>`,
-// `edit:<dir>`, `dir:read:/abs`) as rules or folders, and new rules are saved under keys of their own
-// (`allow:Bash(git push:*)`) that an older version lists as grants and never matches.
+// Legacy machine-local approvals, keyed by the project's main checkout. Read and explicit removal
+// remain supported; new approvals belong to project policy files. Never migrate these at startup.
 import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { agentDir, isRecord } from "./config.ts";
@@ -64,16 +59,19 @@ export function loadGrants(project: string, file = grantsFile()): Grant[] {
   return readAll(file)[project] ?? [];
 }
 
-/** Adds grants to a project, replacing any with the same key. */
-export function addGrants(project: string, grants: readonly Omit<Grant, "added">[], file = grantsFile()) {
-  const data = { ...readAll(file) };
-  const added = new Date().toISOString();
-  const keys = new Set(grants.map((g) => g.key));
-  data[project] = [...(data[project] ?? []).filter((g) => !keys.has(g.key)), ...grants.map((g) => ({ ...g, added }))];
-  writeAll(file, data);
+/** Missing legacy state is normal; existing malformed state must not silently disappear. */
+export function legacyGrantErrors(file = grantsFile()): string[] {
+  try {
+    const value: unknown = JSON.parse(readFileSync(file, "utf8"));
+    return isRecord(value) ? [] : [`${file}: Legacy grants JSON must be an object.`];
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? [] : [`${file}: Could not load legacy grants JSON.`];
+  }
 }
 
 export function removeGrant(project: string, key: string, file = grantsFile()) {
+  const errors = legacyGrantErrors(file);
+  if (errors.length) throw new Error(errors.join("\n"));
   const data = { ...readAll(file) };
   const rest = (data[project] ?? []).filter((g) => g.key !== key);
   if (rest.length) data[project] = rest;

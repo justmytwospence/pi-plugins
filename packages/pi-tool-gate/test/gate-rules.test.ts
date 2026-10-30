@@ -1,14 +1,16 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import toolGate, { ALLOW_ONCE, BLOCK, choiceLabels, DECLINED, blockedBy } from "../src/index.ts";
 import { assistantEntry, fakeJev, harness, userEntry } from "./harness.ts";
+import { parseRule, type ScopedRule } from "../src/permissions.ts";
+import { formatRules, rulesCommand, type RuleStore, type ScopedDir } from "../src/rules-command.ts";
 
 let root: string;
 let cwd: string;
 beforeEach(() => {
-  root = mkdtempSync(path.join(tmpdir(), "pi-tool-gate-rules-"));
+  root = realpathSync(mkdtempSync(path.join(tmpdir(), "pi-tool-gate-rules-")));
   cwd = path.join(root, "app");
   mkdirSync(cwd);
   vi.stubEnv("XDG_CONFIG_HOME", path.join(root, "xdg"));
@@ -36,6 +38,7 @@ const workaround = { workaround: { type: "choice", choice: "local", probabilitie
 
 const projectGrantsFile = () => path.join(root, "pi", "tool-gate", "project-grants.json");
 const userFile = () => path.join(root, "pi", "tool-gate.json");
+const projectFile = (persistence: "local" | "shared" = "local") => path.join(cwd, ".pi", persistence === "local" ? "tool-gate.local.json" : "tool-gate.json");
 const write = (file: string, value: unknown) => {
   mkdirSync(path.dirname(file), { recursive: true });
   writeFileSync(file, typeof value === "string" ? value : JSON.stringify(value, null, 2));
@@ -60,7 +63,7 @@ const start = async (s: Setup) => {
 };
 const run = (s: Setup, tool: string, input: Record<string, unknown>, id = "t1"): Promise<any> => s.h.emit("tool_call", call(tool, input, id), s.ctx);
 const gate = (s: Setup, args: string) => s.h.commands.get("gate").handler(args, s.ctx);
-const notes = (s: Setup) => s.ctx.ui.notes.map((n: { message: string }) => n.message);
+const notes = (s: Setup): string[] => s.ctx.ui.notes.map((n: { message: string }) => n.message);
 
 describe("allowing rules from the dialog", () => {
   test("for the session: the rule covers the call and its arguments and runs without a judgment, nothing else", async () => {
@@ -79,14 +82,15 @@ describe("allowing rules from the dialog", () => {
     expect(notes(s).at(-1)).toMatch(/allow\n {2}session\n {4}Bash\(npm publish:\*\)/u);
   });
 
-  test("for the project: saved on this machine under a key an older version reads as a grant, and a new session honors it", async () => {
+  test("for the project: saved as local permission rules, and a new session honors it", async () => {
     const first = setup(risky);
     await start(first);
     await run(first, "bash", { command: "npm publish" });
     first.ctx.ui.selectAnswers.push("Allow rule in this project");
     expect(await run(first, "bash", { command: "npm publish" }, "t2")).toBeUndefined();
-    const stored = JSON.parse(readFileSync(projectGrantsFile(), "utf8"));
-    expect(stored[cwd]).toEqual([{ key: "allow:Bash(npm publish:*)", label: "Bash(npm publish:*)", added: expect.any(String) }]);
+    const stored = JSON.parse(readFileSync(projectFile(), "utf8"));
+    expect(stored.permissions.allow).toEqual(["Bash(npm publish:*)"]);
+    expect(() => readFileSync(projectGrantsFile(), "utf8")).toThrow();
 
     const second = setup(risky);
     await start(second);
@@ -115,17 +119,68 @@ describe("allowing rules from the dialog", () => {
     expect(second.judged()).toBe(0);
   });
 
-  test("a rule that cannot be saved still allows the call, for the session, and says so", async () => {
-    write(userFile(), "{ not json");
+  test.each(["user", "project"] as const)("malformed %s policy blocks until corrected, without a session-only fallback", async (scope) => {
+    const file = scope === "user" ? userFile() : projectFile();
+    write(file, "{ not json");
     const s = setup(risky);
     await start(s);
-    await run(s, "bash", { command: "npm publish" });
-    s.ctx.ui.selectAnswers.push("Allow rule everywhere");
-    expect(await run(s, "bash", { command: "npm publish" }, "t0")).toBeUndefined();
-    expect(notes(s).at(-1)).toMatch(/could not save it \(.*not valid JSON\); allowed for this session only/u);
-    expect(readFileSync(userFile(), "utf8")).toBe("{ not json");
-    expect(await run(s, "bash", { command: "npm publish" }, "t2")).toBeUndefined();
-    expect(s.ctx.ui.selects).toHaveLength(1);
+    const warnings = notes(s).filter((note) => note.includes(file));
+    expect(warnings).toHaveLength(1);
+    for (const id of ["t1", "t2"]) {
+      expect((await run(s, "bash", { command: "npm publish" }, id)).block).toBe(true);
+    }
+    expect(s.ctx.ui.selects).toHaveLength(0);
+    expect(s.judged()).toBe(0);
+    expect(notes(s).filter((note) => note.includes(file))).toEqual(warnings);
+    expect(readFileSync(file, "utf8")).toBe("{ not json");
+    // Only exact diagnosis is allowed; unrelated reads and repeat calls cannot escalate.
+    expect(await run(s, "read", { path: file }, "inspect")).toBeUndefined();
+    expect(await run(s, "read", { path: path.relative(cwd, file) }, "relative-inspect")).toBeUndefined();
+    for (const [tool, input] of [
+      ["read", { path: path.join(cwd, "unrelated.ts") }],
+      ["read", { path: `${file}.backup` }],
+      ["bash", { command: "cat " + file }],
+      ["bash", { command: "git status" }],
+      ["grep", { pattern: "policy" }],
+      ["find", { pattern: "*" }],
+      ["codemode", { code: "return 1" }],
+      ["tool_search", { query: "read" }],
+    ] as const) for (const id of ["first", "retry"]) {
+      expect(await run(s, tool, input, id)).toMatchObject({ block: true, reason: expect.stringContaining("policy-load error") });
+    }
+    expect(s.ctx.ui.selects).toHaveLength(0);
+    expect(s.judged()).toBe(0);
+    await gate(s, "rules list");
+    expect(notes(s).at(-1)).toContain(file);
+    expect(notes(s).at(-1)).toContain("diagnostics");
+    write(file, { permissions: { allow: ["Bash(npm publish:*)"] } });
+    await s.h.emit("before_agent_start", { prompt: "Policy corrected" }, s.ctx);
+    expect(await run(s, "bash", { command: "npm publish" }, "corrected")).toBeUndefined();
+    expect(s.ctx.ui.selects).toHaveLength(0);
+  });
+
+  test("broken-policy diagnosis cannot override a surviving deny or credential protection", async () => {
+    const file = projectFile();
+    write(file, "{");
+    write(userFile(), { permissions: { deny: [`Read(${file})`] } });
+    const s = setup();
+    await start(s);
+    expect(await run(s, "read", { path: file })).toMatchObject({ block: true, reason: expect.stringContaining("deny rule") });
+    expect(s.ctx.ui.selects).toHaveLength(0);
+
+    // A malformed policy symlinked to credentials remains protected via either spelling.
+    const secretCwd = path.join(root, "secret-project");
+    const secretPolicy = path.join(secretCwd, ".pi", "tool-gate.json");
+    const credentials = path.join(root, "credentials.json");
+    write(credentials, "{");
+    mkdirSync(path.dirname(secretPolicy), { recursive: true });
+    symlinkSync(credentials, secretPolicy);
+    const secret = setup(safe, { cwd: secretCwd });
+    await start(secret);
+    expect(await run(secret, "read", { path: secretPolicy })).toMatchObject({ block: true, reason: expect.stringContaining("policy-load error") });
+    expect(await run(secret, "read", { path: credentials })).toMatchObject({ block: true, reason: expect.stringContaining("policy-load error") });
+    expect(secret.ctx.ui.selects).toHaveLength(0);
+    expect(secret.judged()).toBe(0);
   });
 
   test("a call with several keys offers one rule each, all in the question", async () => {
@@ -136,7 +191,7 @@ describe("allowing rules from the dialog", () => {
     s.ctx.ui.selectAnswers.push("Allow rules for this session");
     expect(await run(s, "bash", { command }, "t2")).toBeUndefined();
     const { title, options } = s.ctx.ui.selects[0];
-    expect(title).toMatch(/\nRule: Bash\(git push:\*\)\nRule: Bash\(npm test:\*\)\nRule: Bash\(rm -rf build\)$/u);
+    expect(title).toMatch(/\nRule: Bash\(git push:\*\)\nRule: Bash\(npm test:\*\)\nRule: Bash\(rm -rf build\)\nProject saves: .*tool-gate\.local\.json \(local\)$/u);
     expect(options).toEqual(["Allow once", "Allow rules for this session", "Allow rules in this project", "Allow rules everywhere", "Edit the rules...", "Block", "Block with a message"]);
     // Each part is covered on its own, in another order.
     expect(await run(s, "bash", { command: "rm -rf build; git push && npm test" }, "t3")).toBeUndefined();
@@ -149,7 +204,7 @@ describe("allowing rules from the dialog", () => {
     await run(s, "edit", { path: "src/a/b.ts", edits: [] });
     s.ctx.ui.selectAnswers.push("Allow rule for this session");
     expect(await run(s, "edit", { path: "src/a/b.ts", edits: [] }, "t2")).toBeUndefined();
-    expect(s.ctx.ui.selects[0]?.title).toMatch(/\nRule: Edit\(src\/a\/\*\*\)$/u);
+    expect(s.ctx.ui.selects[0]?.title).toMatch(/\nRule: Edit\(src\/a\/\*\*\)\nProject saves: .*tool-gate\.local\.json \(local\)$/u);
     expect(await run(s, "edit", { path: "src/a/c/d.ts", edits: [] }, "t3")).toBeUndefined();
     expect((await run(s, "edit", { path: "src/other.ts", edits: [] }, "t4")).block).toBe(true);
     // Edit rules do not allow the write tool.
@@ -158,8 +213,73 @@ describe("allowing rules from the dialog", () => {
     await run(s, "web_fetch", { url: "https://example.com" }, "t6");
     s.ctx.ui.selectAnswers.push("Allow rule for this session");
     expect(await run(s, "web_fetch", { url: "https://example.com" }, "t7")).toBeUndefined();
-    expect(s.ctx.ui.selects.at(-1)?.title).toMatch(/\nRule: web_fetch$/u);
+    expect(s.ctx.ui.selects.at(-1)?.title).toMatch(/\nRule: web_fetch\nProject saves: .*tool-gate\.local\.json \(local\)$/u);
     expect(await run(s, "web_fetch", { url: "https://other.example" }, "t8")).toBeUndefined();
+  });
+});
+
+describe("project persistence and managed user policy", () => {
+  test.each(["local", "shared"] as const)("project approval saves to the %s policy and names its destination", async (persistence) => {
+    write(userFile(), { persistence: { project: persistence } });
+    const s = setup(risky);
+    await start(s);
+    await run(s, "bash", { command: "npm publish" });
+    s.ctx.ui.selectAnswers.push("Allow rule in this project");
+    expect(await run(s, "bash", { command: "npm publish" }, "save")).toBeUndefined();
+    expect(s.ctx.ui.selects.at(-1)?.title).toContain(projectFile(persistence));
+    expect(JSON.parse(readFileSync(projectFile(persistence), "utf8")).permissions.allow).toEqual(["Bash(npm publish:*)"]);
+    await gate(s, "rules remove allow Bash(npm publish:*) --scope project");
+    expect(notes(s).at(-1)).toBe("Removed from allow: Bash(npm publish:*).");
+    expect(JSON.parse(readFileSync(projectFile(persistence), "utf8")).permissions?.allow ?? []).toEqual([]);
+  });
+
+  test.each(["local", "shared"] as const)("folder approvals save to and can be removed from the %s project policy", async (persistence) => {
+    write(userFile(), { persistence: { project: persistence }, directories: { enabled: true } });
+    const folder = "~/Projects/tool-gate-command-outside";
+    const file = `${homedir()}/Projects/tool-gate-command-outside/a.txt`;
+    const s = setup(safe);
+    await start(s);
+    expect((await run(s, "read", { path: file })).block).toBe(true);
+    s.ctx.ui.selectAnswers.push("Allow folder in this project");
+    expect(await run(s, "read", { path: file }, "save")).toBeUndefined();
+    expect(s.ctx.ui.selects.at(-1)?.title).toContain(projectFile(persistence));
+    expect(JSON.parse(readFileSync(projectFile(persistence), "utf8")).directories.read).toEqual([folder]);
+    expect(() => readFileSync(projectGrantsFile(), "utf8")).toThrow();
+    const fresh = setup(safe);
+    await start(fresh);
+    expect(await run(fresh, "read", { path: file })).toBeUndefined();
+    await gate(fresh, "rules list");
+    expect(notes(fresh).at(-1)).toContain(`project (${persistence}): ${projectFile(persistence)}`);
+    expect(notes(fresh).at(-1)).toContain(`reads in ${folder}`);
+    fresh.ctx.ui.selectAnswers.push(`folder: reads in ${folder} (project (${persistence}))`, "Remove");
+    await gate(fresh, "rules");
+    expect(notes(fresh).at(-1)).toBe(`Removed: reads in ${folder}.`);
+    expect(JSON.parse(readFileSync(projectFile(persistence), "utf8")).directories?.read ?? []).toEqual([]);
+  });
+
+  test("managed globals hide persistent user approvals, retain session approval and refuse user edits", async () => {
+    write(userFile(), { persistence: { userWritable: false }, permissions: { allow: ["web_fetch"] } });
+    const before = readFileSync(userFile(), "utf8");
+    const s = setup(risky);
+    await start(s);
+    await run(s, "bash", { command: "npm publish" });
+    s.ctx.ui.selectAnswers.push("Allow rule for this session");
+    expect(await run(s, "bash", { command: "npm publish" }, "session")).toBeUndefined();
+    expect(s.ctx.ui.selects.at(-1)?.options).not.toContain("Allow rule everywhere");
+    const message = "User rules are managed. Edit their source and deploy it; this command made no changes.";
+    await gate(s, "rules add allow Bash(git push:*) --scope user");
+    expect(notes(s).at(-1)).toBe(message);
+    await gate(s, "rules remove allow web_fetch --scope user");
+    expect(notes(s).at(-1)).toBe(message);
+    s.ctx.ui.selectAnswers.push("allow: web_fetch (user)");
+    await gate(s, "rules");
+    expect(notes(s).at(-1)).toBe(message);
+    s.ctx.ui.selectAnswers.push("Add a rule...", "allow", undefined);
+    await gate(s, "rules");
+    expect(s.ctx.ui.selects.at(-1)?.options).toEqual(["This session", "This project (local)"]);
+    expect(readFileSync(userFile(), "utf8")).toBe(before);
+    await gate(s, "rules list");
+    expect(notes(s).at(-1)).toContain(userFile());
   });
 });
 
@@ -205,7 +325,7 @@ describe("the dialog", () => {
     expect(await run(s, "bash", { command: "git push origin feature" }, "t2")).toBeUndefined();
     expect(s.ctx.ui.editors).toEqual([{ title: "Edit the rule", prefill: "Bash(git push:*)" }]);
     // The dialog came back with the edited rule in the question.
-    expect(s.ctx.ui.selects[1]?.title).toMatch(/\nRule: Bash\(git push origin:\*\)$/u);
+    expect(s.ctx.ui.selects[1]?.title).toMatch(/\nRule: Bash\(git push origin:\*\)\nProject saves: .*tool-gate\.local\.json \(local\)$/u);
     expect(await run(s, "bash", { command: "git push origin other" }, "t3")).toBeUndefined();
     expect((await run(s, "bash", { command: "git push upstream other" }, "t4")).block).toBe(true);
   });
@@ -220,8 +340,8 @@ describe("the dialog", () => {
     expect(s.ctx.ui.editors.map((e: { prefill?: string }) => e.prefill)).toEqual(["Bash(git push:*)", "WebFetch(domain:example.com)", "Bash(git push:*)"]);
     expect(s.ctx.ui.selects[1]?.title).toMatch(/\nNot a rule: WebFetch\(\.\.\.\) is not supported/u);
     expect(s.ctx.ui.selects[2]?.title).not.toMatch(/Not a rule/u);
-    expect(s.ctx.ui.selects[3]?.title).toMatch(/\nRule: Bash\(git push:\*\)$/u);
-    expect(JSON.parse(readFileSync(projectGrantsFile(), "utf8"))[cwd]).toEqual([expect.objectContaining({ key: "allow:Bash(git push:*)" })]);
+    expect(s.ctx.ui.selects[3]?.title).toMatch(/\nRule: Bash\(git push:\*\)\nProject saves: .*tool-gate\.local\.json \(local\)$/u);
+    expect(JSON.parse(readFileSync(projectFile(), "utf8")).permissions.allow).toEqual(["Bash(git push:*)"]);
   });
 
   test("with several rules the editor holds one per line", async () => {
@@ -233,7 +353,7 @@ describe("the dialog", () => {
     s.ctx.ui.editorAnswers.push("Bash(npm test)\n\nBash(git push origin:*)\n");
     expect(await run(s, "bash", { command }, "t2")).toBeUndefined();
     expect(s.ctx.ui.editors[0]).toEqual({ title: "Edit the rule", prefill: "Bash(git push:*)\nBash(npm test:*)" });
-    expect(s.ctx.ui.selects[1]?.title).toMatch(/\nRule: Bash\(npm test\)\nRule: Bash\(git push origin:\*\)$/u);
+    expect(s.ctx.ui.selects[1]?.title).toMatch(/\nRule: Bash\(npm test\)\nRule: Bash\(git push origin:\*\)\nProject saves: .*tool-gate\.local\.json \(local\)$/u);
     expect(await run(s, "bash", { command: "npm test && git push origin x" }, "t3")).toBeUndefined();
     expect((await run(s, "bash", { command: "npm test -- a && git push origin x" }, "t4")).block).toBe(true);
   });
@@ -278,7 +398,7 @@ describe("saved grants from before rules existed", () => {
 
     await gate(s, "rules list");
     expect(notes(s).at(-1)).toMatch(/allow\n {2}project \(this machine\): .*project-grants\.json\n {4}Bash\(npm publish:\*\)\n {4}web_fetch\n {4}Edit\(.*\/src\/\*\*\)/u);
-    expect(notes(s).at(-1)).toMatch(/folders\n {2}project \(this machine\)\n {4}reads in .*\/shared/u);
+    expect(notes(s).at(-1)).toMatch(/folders\n {2}project \(this machine\): .*project-grants\.json\n {4}reads in .*\/shared/u);
 
     // Removing one rewrites the file, and keeps the rest in the old shape.
     s.ctx.ui.selectAnswers.push("allow: web_fetch (project (this machine))", "Remove");
@@ -549,7 +669,7 @@ describe("modes", () => {
     await run(s, "bash", { command: "npm publish" });
     s.ctx.ui.selectAnswers.push("Block");
     await run(s, "bash", { command: "npm publish" }, "t2");
-    expect(s.ctx.ui.selects[0]?.title).toMatch(/\nRule: Bash\(npm publish:\*\)$/u);
+    expect(s.ctx.ui.selects[0]?.title).toMatch(/\nRule: Bash\(npm publish:\*\)\nProject saves: .*tool-gate\.local\.json \(local\)$/u);
   });
 });
 
@@ -563,10 +683,10 @@ describe("/gate rules", () => {
     await start(s);
     s.ctx.ui.selectAnswers.push(undefined);
     await gate(s, "rules");
-    const listing = notes(s)[0] ?? "";
+    const listing = notes(s).at(-1) ?? "";
     expect(listing).toMatch(/^Permission rules for .*app \(deny beats ask beats allow\):\ndeny\n {2}user \(shared\): .*xdg\/agents\/tool-gate\.json\n {4}Bash\(rm -rf \/:\*\)\nask\n {2}user: .*pi\/tool-gate\.json\n {4}Bash\(npm publish:\*\)\nallow\n/u);
     expect(listing).toMatch(/allow\n {2}project \(this machine\): .*project-grants\.json\n {4}Bash\(npm test:\*\)\n {2}project \(shared\): .*\.agents\/tool-gate\.json\n {4}Edit\(src\/\*\*\)\n {2}user: .*pi\/tool-gate\.json\n {4}web_fetch/u);
-    expect(listing).toMatch(/folders\n {2}project \(this machine\)\n {4}writes in .*\/out/u);
+    expect(listing).toMatch(/folders\n {2}project \(this machine\): .*project-grants\.json\n {4}writes in .*\/out/u);
     expect(listing).toMatch(/ignored \(not usable rules\)\n {2}allow: WebFetch\(domain:x\.example\): WebFetch\(\.\.\.\) is not supported.*\[project \(shared\): .*\.agents\/tool-gate\.json\]/u);
     // Then a picker: every rule and folder, grouped by list, and the way to add one.
     const picker = s.ctx.ui.selects[0];
@@ -640,14 +760,14 @@ describe("/gate rules", () => {
     expect(await run(s, "bash", { command: "npm publish" })).toBeUndefined();
 
     await gate(s, "rules add allow Bash(git push *) --scope project");
-    expect(JSON.parse(readFileSync(projectGrantsFile(), "utf8"))[cwd]).toEqual([expect.objectContaining({ key: "allow:Bash(git push:*)", label: "Bash(git push:*)" })]);
-    // The default scope is the project, on this machine.
+    expect(JSON.parse(readFileSync(projectFile(), "utf8")).permissions.allow).toEqual(["Bash(git push:*)"]);
+    // The default scope is the project's local policy file.
     await gate(s, "rules add deny Bash(rm -rf:*)");
-    expect(JSON.parse(readFileSync(projectGrantsFile(), "utf8"))[cwd].map((g: { key: string }) => g.key)).toEqual(["allow:Bash(git push:*)", "deny:Bash(rm -rf:*)"]);
+    expect(JSON.parse(readFileSync(projectFile(), "utf8")).permissions).toEqual({ allow: ["Bash(git push:*)"], deny: ["Bash(rm -rf:*)"] });
 
     await gate(s, "rules add ask Edit(docs/**) --scope user");
     expect(JSON.parse(readFileSync(userFile(), "utf8"))).toEqual({ permissions: { ask: ["Edit(docs/**)"] } });
-    expect((await run(s, "bash", { command: "rm -rf x" }, "t2")).reason).toMatch(/deny rule Bash\(rm -rf:\*\) \(project \(this machine\)/u);
+    expect((await run(s, "bash", { command: "rm -rf x" }, "t2")).reason).toMatch(/deny rule Bash\(rm -rf:\*\) \(project \(local\)/u);
     s.ctx.ui.selectAnswers.push("Allow once");
     expect(await run(s, "edit", { path: "docs/a.md", edits: [] }, "t3")).toBeUndefined();
     expect(s.ctx.ui.selects.at(-1)?.title).toMatch(/matches the ask rule Edit\(docs\/\*\*\) \(user: /u);
@@ -681,11 +801,11 @@ describe("/gate rules", () => {
     expect(notes(s).at(-1)).toBe("Removed from allow: Bash(git push:*).");
     await gate(s, "rules list");
     expect(notes(s).at(-1)).not.toMatch(/session\n/u);
-    expect(notes(s).at(-1)).toMatch(/project \(this machine\)/u);
+    expect(notes(s).at(-1)).toMatch(/project \(local\)/u);
     await gate(s, "rules remove allow Bash(git push:*) --scope session");
     expect(notes(s).at(-1)).toBe("No allow rule Bash(git push:*) in session.");
     await gate(s, "rules remove allow Bash(git push:*)");
-    expect(JSON.parse(readFileSync(projectGrantsFile(), "utf8"))).toEqual({});
+    expect(JSON.parse(readFileSync(projectFile(), "utf8")).permissions?.allow ?? []).toEqual([]);
   });
 
   test("Add a rule... asks the list, the scope and the rule, and asks again for a rule that is not one", async () => {
@@ -700,7 +820,7 @@ describe("/gate rules", () => {
       "Add to allow: where?",
     ]);
     expect(s.ctx.ui.selects[1]?.options).toEqual(["allow", "ask", "deny"]);
-    expect(s.ctx.ui.selects[2]?.options).toEqual(["This session", "This project (this machine)", "Everywhere (your user settings)"]);
+    expect(s.ctx.ui.selects[2]?.options).toEqual(["This session", "This project (local)", "Everywhere (your user settings)"]);
     expect(s.ctx.ui.inputs).toHaveLength(2);
     expect(notes(s).some((n: string) => /Write a rule as Tool or Tool\(specifier\)/u.test(n))).toBe(true);
     expect(notes(s).at(-1)).toBe("Added to allow: Bash(npm publish:*) (this session).");
@@ -723,6 +843,19 @@ describe("/gate rules", () => {
     expect(notes(s).at(-1)).toMatch(/Permission rules for .*app: 1 allow, 0 ask, 1 deny; 0 from this session; 0 folder grants/u);
   });
 
+  test.each(["local", "shared"] as const)("interactive add labels and saves the %s project scope", async (persistence) => {
+    write(userFile(), { persistence: { project: persistence } });
+    const s = setup();
+    await start(s);
+    s.ctx.ui.selectAnswers.push("Add a rule...", "ask", `This project (${persistence})`);
+    s.ctx.ui.inputAnswers.push("Bash(npm publish:*)");
+    await gate(s, "rules");
+    expect(s.ctx.ui.selects.at(-1)?.options).toContain(`This project (${persistence})`);
+    for (const option of s.ctx.ui.selects.at(-1)?.options ?? []) expect(option.length).toBeLessThan(42);
+    expect(notes(s).at(-1)).toBe(`Added to ask: Bash(npm publish:*) (this project (${persistence})).`);
+    expect(JSON.parse(readFileSync(projectFile(persistence), "utf8")).permissions.ask).toEqual(["Bash(npm publish:*)"]);
+  });
+
   test("a no-UI session lists without a picker", async () => {
     write(userFile(), { permissions: { allow: ["web_fetch"] } });
     const s = setup(safe);
@@ -730,5 +863,121 @@ describe("/gate rules", () => {
     await gate(s, "rules list");
     expect(notes(s).at(-1)).toMatch(/allow\n {2}user: .*\n {4}web_fetch/u);
     expect(s.ctx.ui.selects).toHaveLength(0);
+  });
+});
+
+/** Isolate the command contract from policy loading and persistence in index.ts. */
+function commandStore(overrides: Partial<RuleStore> = {}) {
+  const s = setup();
+  const store: RuleStore = {
+    project: cwd,
+    rules: () => [],
+    ignored: () => [],
+    dirs: () => [],
+    add: vi.fn(async () => {}),
+    remove: vi.fn(async () => {}),
+    removeDir: vi.fn(async () => {}),
+    ...overrides,
+  };
+  const command = (args: string) => rulesCommand(args, s.ctx, store);
+  return { s, store, command };
+}
+
+function commandRule(scope: "session" | "project" | "user", writable = true): ScopedRule {
+  const parsed = parseRule("web_fetch");
+  if (!parsed.ok) throw new Error(parsed.error);
+  return {
+    list: "allow", text: parsed.rule.text, raw: parsed.rule.text, rule: parsed.rule,
+    origin: { scope, writable, shared: false, source: scope === "session" ? "this session" : userFile() },
+  };
+}
+
+const commandDir = (overrides: Partial<ScopedDir> = {}): ScopedDir => ({
+  key: `dir:read:${root}/outside`, access: "read", dir: `${root}/outside`, scope: "project", ...overrides,
+});
+
+describe("RuleStore command contract", () => {
+  const managed = "User rules are managed. Edit their source and deploy it; this command made no changes.";
+
+  test.each(["add allow web_fetch --scope user", "remove allow web_fetch --scope user", "remove allow missing --scope user"])("managed globals refuse %s without mutation", async (args) => {
+    const { s, store, command } = commandStore({ userWritable: false, rules: () => [commandRule("user")] });
+    await command(args);
+    expect(notes(s).at(-1)).toBe(managed);
+    expect(store.add).not.toHaveBeenCalled();
+    expect(store.remove).not.toHaveBeenCalled();
+  });
+
+  test.each([true, false])("interactive managed user removal is refused even when origin writable is %s", async (writable) => {
+    const { s, store, command } = commandStore({ userWritable: false, rules: () => [commandRule("user", writable)] });
+    s.ctx.ui.selectAnswers.push("allow: web_fetch (user)");
+    await command("");
+    expect(notes(s).at(-1)).toBe(managed);
+    expect(s.ctx.ui.selects).toHaveLength(1);
+    expect(store.remove).not.toHaveBeenCalled();
+  });
+
+  test.each(["local", "shared"] as const)("managed interactive scope choices name %s and omit user settings", async (projectPersistence) => {
+    const { s, store, command } = commandStore({ userWritable: false, projectPersistence });
+    s.ctx.ui.selectAnswers.push("Add a rule...", "allow", `This project (${projectPersistence})`);
+    s.ctx.ui.inputAnswers.push("web_fetch");
+    await command("");
+    expect(s.ctx.ui.selects.at(-1)?.options).toEqual(["This session", `This project (${projectPersistence})`]);
+    for (const option of s.ctx.ui.selects.at(-1)?.options ?? []) expect(option.length).toBeLessThan(42);
+    expect(store.add).toHaveBeenCalledWith("project", "allow", "web_fetch");
+  });
+
+  test("lists empty loaded sources, diagnostics, and real folder storage paths", () => {
+    const local = projectFile();
+    const shared = projectFile("shared");
+    const { store } = commandStore({
+      sources: () => [userFile(), shared, userFile()],
+      diagnostics: () => ["Malformed policy: fix the source", "Legacy grants are still loaded"],
+      dirs: () => [commandDir({ source: local, writable: true }), commandDir({ source: shared, shared: true, writable: false })],
+    });
+    const listing = formatRules(store);
+    expect(listing).toContain(`project (local): ${local}`);
+    expect(listing).toContain(`project (shared): ${shared}`);
+    expect(listing).toContain(`sources\n  ${userFile()}\n  ${shared}`);
+    expect(listing).toContain("diagnostics\n  Malformed policy: fix the source\n  Legacy grants are still loaded");
+    expect(listing).not.toContain("project-grants.json");
+  });
+
+  test("readonly folder removal names the actual source and never offers Remove", async () => {
+    const dir = commandDir({ source: projectFile("shared"), writable: false, shared: true });
+    const { s, store, command } = commandStore({ dirs: () => [dir] });
+    s.ctx.ui.selectAnswers.push(`folder: reads in ${dir.dir} (project (shared))`);
+    await command("");
+    expect(notes(s).at(-1)).toContain(`${dir.source}; /gate rules does not edit that file.`);
+    expect(s.ctx.ui.selects).toHaveLength(1);
+    expect(store.removeDir).not.toHaveBeenCalled();
+  });
+
+  test.each([false, true])("folder removal catches errors with legacy metadata omitted: %s", async (legacy) => {
+    const dir = commandDir(legacy ? {} : { source: projectFile(), writable: true });
+    const { s, store, command } = commandStore({ dirs: () => [dir], removeDir: vi.fn(async () => { throw new Error("Policy file is busy; no changes were saved."); }) });
+    s.ctx.ui.selectAnswers.push(`folder: reads in ${dir.dir} (project (${legacy ? "this machine" : "local"}))`, "Remove");
+    await expect(command("")).resolves.toBeUndefined();
+    expect(store.removeDir).toHaveBeenCalledWith(dir);
+    expect(notes(s).at(-1)).toBe("Could not remove it: Policy file is busy; no changes were saved.");
+    expect(s.ctx.ui.selects.at(-1)?.title).toContain(legacy ? projectGrantsFile() : projectFile());
+  });
+
+  test.each(["arguments", "picker"])("rule removal catches persistence errors via %s", async (route) => {
+    const rule = commandRule("session");
+    const { s, store, command } = commandStore({ rules: () => [rule], remove: vi.fn(async () => { throw new Error("cannot write policy"); }) });
+    if (route === "picker") s.ctx.ui.selectAnswers.push("allow: web_fetch (session)", "Remove");
+    await expect(command(route === "picker" ? "" : "remove allow web_fetch --scope session")).resolves.toBeUndefined();
+    expect(store.remove).toHaveBeenCalledWith(rule);
+    expect(notes(s).at(-1)).toBe("Could not remove it: cannot write policy");
+  });
+
+  test("a writable project folder can be removed and its confirmation names its source", async () => {
+    const dir = commandDir({ source: projectFile(), writable: true });
+    const { s, store, command } = commandStore({ dirs: () => [dir] });
+    s.ctx.ui.selectAnswers.push(`folder: reads in ${dir.dir} (project (local))`, "Remove");
+    await command("");
+    expect(store.removeDir).toHaveBeenCalledWith(dir);
+    expect(s.ctx.ui.selects.at(-1)?.title).toContain(projectFile());
+    expect(notes(s).at(-1)).toBe(`Removed: reads in ${dir.dir}.`);
   });
 });

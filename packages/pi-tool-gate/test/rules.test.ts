@@ -1,6 +1,6 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { MAX_RULES, RULES_FILE, loadRules, parseRules } from "../src/rules.ts";
 
 test("top-level bullets are rules; indented lines continue them; fences are skipped", () => {
@@ -24,11 +24,18 @@ test("top-level bullets are rules; indented lines continue them; fences are skip
   ]);
 });
 
+const roots: string[] = [];
+afterEach(() => {
+  vi.unstubAllEnvs();
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
 /** Temp dirs for the four rules files, env pointed at them; `write` takes a dir and bullets. */
 function setup() {
   const root = mkdtempSync("/tmp/rules-");
-  process.env.XDG_CONFIG_HOME = path.join(root, "xdg");
-  process.env.PI_CODING_AGENT_DIR = path.join(root, "pi");
+  roots.push(root);
+  vi.stubEnv("XDG_CONFIG_HOME", path.join(root, "xdg"));
+  vi.stubEnv("PI_CODING_AGENT_DIR", path.join(root, "pi"));
   const cwd = path.join(root, "project");
   const dirs = {
     sharedProject: path.join(cwd, ".agents"),
@@ -51,6 +58,23 @@ test("rules come from .agents, .pi, ~/.config/agents and ~/.pi/agent in that ord
   write(dirs.piProject, ["pi project", "shared user"]);
   write(dirs.sharedProject, ["shared project", "pi project"]);
   expect(loadRules(cwd)).toEqual(["shared project", "pi project", "shared user", "pi user"]);
+});
+
+test("context loads active-root Markdown only, not launch-directory or main-checkout Markdown", () => {
+  const { cwd: root, dirs, write } = setup();
+  const cwd = path.join(root, "components");
+  const main = path.join(root, "..", "main");
+  write(dirs.sharedProject, ["active agents"]);
+  write(dirs.piProject, ["active pi"]);
+  write(dirs.sharedUser, ["user"]);
+  write(path.join(cwd, ".pi"), ["wrong launch"]);
+  write(path.join(main, ".agents"), ["wrong main agents"]);
+  write(path.join(main, ".pi"), ["wrong main pi"]);
+  const project = { cwd, root, main, isGit: true };
+  expect(loadRules(project)).toEqual(["active agents", "active pi", "user"]);
+  expect(loadRules({ ...project, cwd: root })).toEqual(loadRules(project));
+  rmSync(path.join(dirs.piProject, RULES_FILE));
+  expect(loadRules(project)).toEqual(["active agents", "user"]);
 });
 
 test("rules are capped at the maximum across files", () => {

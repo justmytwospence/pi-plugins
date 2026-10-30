@@ -2,7 +2,7 @@
 // for both its dry run, `npm run -s eval -- --dry sessions`, and its live run). No Jev call is made here.
 import { execFileSync } from "node:child_process";
 import path from "node:path";
-import { loadConfig } from "../src/config.ts";
+import { loadConfig } from "../src/policy-config.ts";
 import { BranchDownloads } from "../src/downloads.ts";
 import { grantsFile, loadGrants } from "../src/grants.ts";
 import { loadFileRules, localGrants } from "../src/permissions.ts";

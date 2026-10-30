@@ -10,6 +10,7 @@
 // under either approval setting. Plan commands still use the existing judge, not a shell sandbox.
 // Manual and accept-edits remain explicit legacy approval settings.
 import path from "node:path";
+import { readFileSync, realpathSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   alwaysAskBash,
@@ -24,7 +25,9 @@ import {
   secretGitAdds,
   shellDir,
 } from "./bash.ts";
-import { loadConfig } from "./config.ts";
+import { isRecord } from "./config.ts";
+import { loadConfig, policyIssues, policyFiles } from "./policy-config.ts";
+import { type ProjectContext, projectFiles, projectSaveFile, resolveProject } from "./project.ts";
 import {
   DEFAULT_DIRECTORIES,
   type DirectoriesConfig,
@@ -37,7 +40,7 @@ import {
   violations,
 } from "./dirs.ts";
 import { Downloads, downloadedRunReasons, downloadsOf, type Script, scriptFor, trackCall } from "./downloads.ts";
-import { addGrants, grantsFile, loadGrants, removeGrant } from "./grants.ts";
+import { grantsFile, legacyGrantErrors, loadGrants, removeGrant } from "./grants.ts";
 import {
   allowing,
   allowsPath,
@@ -45,13 +48,15 @@ import {
   type Call,
   describeOrigin,
   editUserRules,
+  editRulesFile,
+  editDirectoryGrant,
+  ruleWarning,
   type IgnoredRule,
   loadFileRules,
   localGrants,
   migrateGrant,
   parseRule,
   type RuleList,
-  ruleKey,
   type ScopedRule,
   type Scope,
   sessionRule,
@@ -162,6 +167,7 @@ export interface GateConfig extends Record<string, unknown> {
   approvalShortcut: string;
   /** Which directories this project reads and writes without asking (dirs.ts). */
   directories: DirectoriesConfig;
+  persistence: { project: "local" | "shared"; userWritable: boolean };
 }
 
 export const DEFAULT_CONFIG: GateConfig = {
@@ -181,6 +187,7 @@ export const DEFAULT_CONFIG: GateConfig = {
   cycleShortcut: "shift+tab",
   approvalShortcut: "alt+a",
   directories: DEFAULT_DIRECTORIES,
+  persistence: { project: "local", userWritable: true },
 };
 
 /** The dialog's first and last rows. */
@@ -191,12 +198,12 @@ export const BLOCK = "Block";
  * The rows that allow what is offered, short enough (at most 42 characters) that a phone client
  * reads them without wrapping: the rules or folders themselves are in the question.
  */
-export function choiceLabels(kind: "rules" | "dirs", plural: boolean): { session: string; project: string; everywhere?: string; edit?: string } {
+export function choiceLabels(kind: "rules" | "dirs", plural: boolean, userWritable = true): { session: string; project: string; everywhere?: string; edit?: string } {
   const noun = kind === "dirs" ? (plural ? "folders" : "folder") : plural ? "rules" : "rule";
   return {
     session: `Allow ${noun} for this session`,
     project: `Allow ${noun} in this project`,
-    ...(kind === "rules" ? { everywhere: `Allow ${noun} everywhere`, edit: `Edit the ${noun}...` } : {}),
+    ...(kind === "rules" ? { ...(userWritable ? { everywhere: `Allow ${noun} everywhere` } : {}), edit: `Edit the ${noun}...` } : {}),
   };
 }
 
@@ -450,6 +457,14 @@ export default function toolGate(pi: ExtensionAPI) {
   let gitInfo: Promise<{ branch: string; dirty: boolean } | undefined> | undefined;
   let dialogs: Promise<unknown> = Promise.resolve();
   let warnedUnavailable = false;
+  let projectContext: ProjectContext | undefined;
+  let projectLaunch: string | undefined;
+  let policyLoadErrors: string[] = [];
+  let erroredPolicyFiles: string[] = [];
+  let policyDiagnostics: string[] = [];
+  let warnedPolicy = false;
+  let fileDirs: Array<DirGrant & { source: string; writable: boolean; shared: boolean }> = [];
+  const MANAGED = "User rules are managed. Edit their source and deploy it; this command made no changes.";
 
   const annotations = (tool: string): Annotations | undefined => {
     const info = pi.getAllTools().find((t) => t.name === tool) as { annotations?: Annotations } | undefined;
@@ -631,40 +646,74 @@ export default function toolGate(pi: ExtensionAPI) {
     return ignored;
   };
 
-  /** The project's checkouts: the git checkout `cwd` is in and, for a worktree, its main checkout. */
-  const projects = new Map<string, Promise<string[]>>();
-  const projectOf = (cwd: string) => {
-    let found = projects.get(cwd);
-    if (!found) {
-      found = (async () => {
-        try {
-          const out = await pi.exec("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"], { timeout: 2_000 });
-          const [top, common] = out.stdout.split("\n").map((l) => l.trim());
-          if (out.code !== 0 || !top) return [path.resolve(cwd)];
-          const main = common && path.basename(common) === ".git" ? path.dirname(common) : undefined;
-          return main && main !== top ? [top, main] : [top];
-        } catch {
-          return [path.resolve(cwd)];
-        }
-      })();
-      projects.set(cwd, found);
+  const contextFor = async (cwd: string, refresh = false) => {
+    if (!refresh && projectContext && projectLaunch === path.resolve(cwd)) return projectContext;
+    const next = await resolveProject(cwd, pi.exec.bind(pi));
+    if (projectContext && (projectContext.root !== next.root || projectContext.main !== next.main)) {
+      invalidate();
+      gitInfo = undefined;
+      sessionRules = [];
+      sessionDirs.clear();
     }
-    return found;
+    projectContext = next;
+    projectLaunch = path.resolve(cwd);
+    return next;
   };
+  // Main is only for local persistence and legacy keys, never active project access.
+  const projectOf = async (cwd: string) => [(await contextFor(cwd)).root];
   const policyFor = async (cwd: string): Promise<Policy> => resolvePolicy(config.directories, await projectOf(cwd));
-  /** Where project grants are kept: the main checkout, so a project's worktrees share them. */
-  const projectKey = async (cwd: string) => {
-    const checkouts = await projectOf(cwd);
-    return checkouts[checkouts.length - 1] ?? path.resolve(cwd);
-  };
+  const projectKey = async (cwd: string) => (await contextFor(cwd)).main;
+  const destination = async (cwd: string) => projectSaveFile(await contextFor(cwd), config.persistence.project);
   /** Reload what is saved (this project's grants, the config files) and merge it with the session's rules. */
   const refreshRules = async (cwd: string) => {
-    const epoch = revision;
-    const local = localGrants(loadGrants(await projectKey(cwd)), grantsFile());
-    if (epoch !== revision) return allRules;
+    let project: ProjectContext;
+    try {
+      project = await contextFor(cwd, true);
+    } catch (error) {
+      policyLoadErrors = [`Policy resolution error: ${error instanceof Error ? error.message : String(error)}`];
+      erroredPolicyFiles = [];
+      policyDiagnostics = [...policyLoadErrors];
+      if (!warnedPolicy && hostCtx?.hasUI) {
+        warnedPolicy = true;
+        hostCtx.ui.notify(`tool-gate policy diagnostics:\n${policyDiagnostics.join("\n")}\nSee /gate.`, "warning");
+      }
+      return;
+    }
+    config = loadConfig("tool-gate", DEFAULT_CONFIG, project);
+    const local = localGrants(loadGrants(project.main), grantsFile());
     localRules = local.rules;
     localDirs = new Map(local.dirs.map((d) => [d.key, { key: d.key, access: d.access, dir: d.dir }]));
-    const files = loadFileRules(cwd);
+    const files = loadFileRules(project, config.persistence);
+    const issues = policyIssues(project);
+    const legacyErrors = legacyGrantErrors();
+    policyLoadErrors = [...issues.map(issue => issue.message), ...legacyErrors];
+    erroredPolicyFiles = [...issues.map(issue => issue.file), ...(legacyErrors.length ? [grantsFile()] : [])];
+    fileDirs = [];
+    const target = projectSaveFile(project, config.persistence.project);
+    for (const file of projectFiles(project)) {
+      try {
+        const json: unknown = JSON.parse(readFileSync(file, "utf8"));
+        if (!isRecord(json) || !isRecord(json.directories)) continue;
+        for (const access of ["read", "write"] as const) {
+          const entries = json.directories[access];
+          if (!Array.isArray(entries)) continue;
+          for (const dir of entries) if (typeof dir === "string") {
+            const absolute = path.resolve(project.root, expandHome(dir));
+            fileDirs.push({ key: `dir:${access}:${absolute}`, access, dir, source: file, writable: file === target, shared: file !== path.join(project.main, ".pi", "tool-gate.local.json") });
+          }
+        }
+      } catch { /* policyErrors reports malformed files; missing files are normal. */ }
+    }
+    policyDiagnostics = [
+      ...policyLoadErrors,
+      ...(loadGrants(project.main).length ? [`Legacy grants: ${shown(grantsFile())}; migrate explicitly before removing.`] : []),
+      ...files.ignored.map((r) => `Invalid ${r.list} rule ${r.raw} in ${shown(r.origin.source)}: ${r.error}; it provides no protection.`),
+      ...files.rules.flatMap((r) => { const warning = ruleWarning(r.list, r.rule); return warning ? [`${r.text} in ${shown(r.origin.source)}: ${warning}.`] : []; }),
+    ];
+    if (policyDiagnostics.length && !warnedPolicy && hostCtx?.hasUI) {
+      warnedPolicy = true;
+      hostCtx.ui.notify(`tool-gate policy diagnostics:\n${policyDiagnostics.join("\n")}\nSee /gate.`, "warning");
+    }
     fileRules = files.rules;
     ignoredRules = [...local.ignored, ...files.ignored];
     allRules = [...sessionRules, ...localRules, ...fileRules];
@@ -677,15 +726,19 @@ export default function toolGate(pi: ExtensionAPI) {
       const rule = sessionRule(list, text);
       if (rule && !sessionRules.some((r) => r.list === list && r.raw === text)) sessionRules = [...sessionRules, rule];
     } else if (scope === "project") {
-      addGrants(await projectKey(cwd), [{ key: ruleKey(list, text), label: text }]);
-    } else editUserRules("add", list, text);
+      await editRulesFile(await destination(cwd), "add", list, text);
+    } else {
+      if (!config.persistence.userWritable) throw new Error(MANAGED);
+      await editUserRules("add", list, text);
+    }
     await refreshRules(cwd);
   };
 
   const removeRule = async (rule: ScopedRule, cwd: string) => {
     if (rule.origin.scope === "session") sessionRules = sessionRules.filter((r) => r !== rule);
-    else if (rule.origin.scope === "project" && !rule.origin.shared) removeGrant(await projectKey(cwd), rule.key ?? ruleKey(rule.list, rule.raw));
-    else if (rule.origin.scope === "user" && rule.origin.writable) editUserRules("remove", rule.list, rule.raw);
+    else if (rule.origin.scope === "user" && !config.persistence.userWritable) throw new Error(MANAGED);
+    else if (rule.origin.scope === "project" && rule.key) removeGrant(await projectKey(cwd), rule.key);
+    else if (rule.origin.writable) await editRulesFile(rule.origin.source, "remove", rule.list, rule.raw);
     else throw new Error(`${describeOrigin(rule.origin, shown)} is read-only here`);
     await refreshRules(cwd);
   };
@@ -698,7 +751,7 @@ export default function toolGate(pi: ExtensionAPI) {
     const command = String(input.command ?? "");
     const checksPaths = !listed && config.directories.enabled !== false &&
       (SHELL_TOOLS.has(tool) || tool === "edit" || tool === "write" || BUILTIN_READ.has(tool));
-    return planCall(tool, input, cwd, {
+    return planCall(tool, input, (await contextFor(cwd)).cwd, {
       config,
       branch: shell ? (await git(dir))?.branch : undefined,
       ignored: shell ? await ignoredByGit(secretGitAdds(command, dir)) : undefined,
@@ -732,16 +785,17 @@ export default function toolGate(pi: ExtensionAPI) {
       // Held only while the dialog is open, so queued approvals do not report blocked early.
       const label = clip(`Allow? ${describeCall(q.tool, q.input)}`.replace(/\s+/gu, " "), 60);
       for (;;) {
-        const labels = offer ? choiceLabels(offer.kind, items.length > 1) : undefined;
+        const labels = offer ? choiceLabels(offer.kind, items.length > 1, config.persistence.userWritable) : undefined;
+        const canSaveFolder = offer?.kind !== "dirs" || !items.some((key) => /[*?]/u.test(key));
         const options = [
           ALLOW_ONCE,
-          ...(labels ? [labels.session, labels.project, ...(labels.everywhere ? [labels.everywhere] : []), ...(labels.edit ? [labels.edit] : [])] : []),
+          ...(labels ? [labels.session, ...(canSaveFolder ? [labels.project, ...(labels.everywhere ? [labels.everywhere] : [])] : []), ...(labels.edit ? [labels.edit] : [])] : []),
           BLOCK,
         ];
         const shownItems = offer ? items.map((item, i) => clip(offer.kind === "dirs" ? (offer.labels[i] ?? item) : item, 200)) : [];
         const noun = offer?.kind === "dirs" ? "Folder" : "Rule";
         // One flat line per rule or folder: an indented list under a header reads as a dialog Collie cannot read.
-        const grant = shownItems.length ? shownItems.map((s) => `${noun}: ${s}`) : undefined;
+        const grant = shownItems.length ? [...shownItems.map((s) => `${noun}: ${s}`), ...(canSaveFolder ? [`Project saves: ${shown(await destination(ctx.cwd))} (${config.persistence.project})`] : [])] : undefined;
         const title = [
           `Allow? ${describeCall(q.tool, q.input)}`,
           ...(q.held !== undefined ? [`Held: ${q.held}`] : []),
@@ -791,7 +845,7 @@ export default function toolGate(pi: ExtensionAPI) {
           draft = undefined;
           continue;
         }
-        if (offer && labels && (answer.choice === labels.session || answer.choice === labels.project || answer.choice === labels.everywhere)) {
+        if (offer && labels && (answer.choice === labels.session || (canSaveFolder && (answer.choice === labels.project || answer.choice === labels.everywhere)))) {
           const scope: Scope = answer.choice === labels.session ? "session" : answer.choice === labels.project ? "project" : "user";
           try {
             await grantOffer(offer, items, scope, ctx.cwd);
@@ -825,7 +879,10 @@ export default function toolGate(pi: ExtensionAPI) {
       for (const key of items) sessionDirs.add(key);
       return;
     }
-    addGrants(await projectKey(cwd), items.map((key) => ({ key, label: offer.labels[offer.items.indexOf(key)] ?? key })));
+    for (const key of items) {
+      const grant = migrateGrant(key);
+      if (grant?.kind === "dir") await editDirectoryGrant(await destination(cwd), "add", grant.access, grant.dir);
+    }
     await refreshRules(cwd);
   };
 
@@ -911,11 +968,12 @@ export default function toolGate(pi: ExtensionAPI) {
     }
   };
 
-  const restore = (ctx: ExtensionContext, newSession: boolean) => {
+  const restore = async (ctx: ExtensionContext, newSession: boolean) => {
     invalidate();
     pendingUsage.clear();
     hostCtx = ctx;
-    config = loadConfig("tool-gate", DEFAULT_CONFIG, ctx.cwd);
+    projectContext = undefined;
+    config = structuredClone(DEFAULT_CONFIG);
     rebuildDownloads(ctx);
     sessionRules = [];
     sessionDirs.clear();
@@ -926,7 +984,8 @@ export default function toolGate(pi: ExtensionAPI) {
     ignoredRules = [];
     gitInfo = undefined;
     dialogs = Promise.resolve();
-    if (newSession) { auto = 0; held = 0; pushedBack = 0; warnedUnavailable = false; }
+    if (newSession) { auto = 0; held = 0; pushedBack = 0; warnedUnavailable = false; warnedPolicy = false; }
+    await refreshRules(ctx.cwd);
     const entries = ctx.sessionManager.getBranch();
     const restored = restoreBranchModes(entries, defaults(config));
     workflow = restored.workflow;
@@ -948,8 +1007,9 @@ export default function toolGate(pi: ExtensionAPI) {
     hostCtx = undefined;
   });
 
-  pi.on("before_agent_start", (_event, ctx) => {
-    config = loadConfig("tool-gate", DEFAULT_CONFIG, ctx.cwd);
+  pi.on("before_agent_start", async (_event, ctx) => {
+    hostCtx = ctx;
+    await refreshRules(ctx.cwd);
     pushedBackThisTurn.clear();
     gitInfo = undefined;
     // A removed plan provider must not strand a restored session in planning.
@@ -1015,6 +1075,23 @@ export default function toolGate(pi: ExtensionAPI) {
 
       await refreshRules(ctx.cwd);
       if (stale()) return staleResult();
+      if (policyLoadErrors.length) {
+        // Only direct diagnosis of the broken file is safe. Never enter retry/approval handling.
+        const forbidden = blocking(allRules, { tool, input, cwd: ctx.cwd, root: projectContext?.root ?? ctx.cwd, readOnlyCommands: config.readOnlyCommands });
+        if (forbidden?.list === "deny") return deniedBy(tool, forbidden);
+        if (tool === "read" && typeof input.path === "string") {
+          const file = path.resolve(ctx.cwd, expandHome(input.path));
+          try {
+            const canonical = realpathSync(file);
+            const canonicalDeny = blocking(allRules, { tool, input: { ...input, path: canonical }, cwd: ctx.cwd, root: projectContext?.root ?? ctx.cwd, readOnlyCommands: config.readOnlyCommands });
+            if (canonicalDeny?.list === "deny") return deniedBy(tool, canonicalDeny);
+            if (!isCredentialPath(file) && !isCredentialPath(canonical) && erroredPolicyFiles.some(policy => {
+              try { return realpathSync(policy) === canonical; } catch { return false; }
+            })) return allow(ctx);
+          } catch { /* A nonexistent path is not an errored policy file. */ }
+        }
+        return { block: true, reason: `tool-gate blocked this call: policy-load error. Correct the policy before requesting permission.\n${policyLoadErrors.join("\n")}` };
+      }
 
       if (effectiveWorkflow() === "chat") {
         // Talking, not acting: what the gate counts as read-only runs, nothing else does (an allow rule
@@ -1034,7 +1111,7 @@ export default function toolGate(pi: ExtensionAPI) {
       }
 
       if (effectiveWorkflow() === "plan" && (tool === "edit" || tool === "write")) {
-        const forbidden = blocking(allRules, { tool, input, cwd: ctx.cwd, root: (await projectOf(ctx.cwd))[0], readOnlyCommands: config.readOnlyCommands });
+        const forbidden = blocking(allRules, { tool, input, cwd: (await contextFor(ctx.cwd)).cwd, root: (await projectOf(ctx.cwd))[0], readOnlyCommands: config.readOnlyCommands });
         if (stale()) return staleResult();
         if (forbidden?.list === "deny") return deniedBy(tool, forbidden);
         const file = path.resolve(ctx.cwd, expandHome(String(input.path ?? "")));
@@ -1048,7 +1125,7 @@ export default function toolGate(pi: ExtensionAPI) {
       if (approval === "bypassPermissions" && effectiveWorkflow() !== "plan") {
         // Everything runs, except what a deny rule forbids, and removing /, home, the project or a
         // parent of them (as Claude Code). Exhausted analysis cannot rule out such a removal.
-        const call: Call = { tool, input, cwd: ctx.cwd, root: (await projectOf(ctx.cwd))[0], readOnlyCommands: config.readOnlyCommands };
+        const call: Call = { tool, input, cwd: (await contextFor(ctx.cwd)).cwd, root: (await projectOf(ctx.cwd))[0], readOnlyCommands: config.readOnlyCommands };
         if (stale()) return staleResult();
         const forbidden = blocking(allRules, call);
         if (forbidden?.list === "deny") return deniedBy(tool, forbidden);
@@ -1095,7 +1172,7 @@ export default function toolGate(pi: ExtensionAPI) {
         });
       }
 
-      const rules = loadRules(ctx.cwd);
+      const rules = loadRules(await contextFor(ctx.cwd));
       // A local script is judged by what it does: its content goes to the judge.
       const script = scriptOfCall(tool, input, ctx.cwd, downloads);
       const state = await judgeStateFor(ctx, tool, p.args, rules, script);
@@ -1179,7 +1256,7 @@ export default function toolGate(pi: ExtensionAPI) {
 
   /** Accept-edits mode: edits and filesystem commands inside the project. */
   const acceptsEdit = async (tool: string, input: Record<string, unknown>, cwd: string) => {
-    const root = path.resolve(cwd);
+    const root = (await contextFor(cwd)).root;
     if (tool === "edit" || tool === "write") {
       // Inside the project, or a directory it may write (the plan has already held any other).
       const file = path.resolve(cwd, expandHome(String(input.path ?? "")));
@@ -1251,7 +1328,11 @@ export default function toolGate(pi: ExtensionAPI) {
     const project = await projectKey(cwd);
     await refreshRules(cwd);
     return {
-      project: shown(project),
+      project: shown((await contextFor(cwd)).root),
+      projectPersistence: config.persistence.project,
+      userWritable: config.persistence.userWritable,
+      sources: () => policyFiles(projectContext ?? cwd).filter((file) => { try { readFileSync(file); return true; } catch { return false; } }),
+      diagnostics: () => policyDiagnostics,
       rules: () => allRules,
       ignored: () => ignoredRules,
       dirs: () => [
@@ -1259,14 +1340,17 @@ export default function toolGate(pi: ExtensionAPI) {
           const d = migrateGrant(key);
           return d?.kind === "dir" ? [{ key, access: d.access, dir: d.dir, scope: "session" as const }] : [];
         }),
-        ...[...localDirs.values()].map((d) => ({ ...d, scope: "project" as const })),
+        ...[...localDirs.values()].map((d) => ({ ...d, scope: "project" as const, source: grantsFile(), writable: true })),
+        ...fileDirs.map((d) => ({ ...d, scope: "project" as const })),
       ],
       add: (scope, list, text) => addRule(scope, list, text, cwd),
       remove: (rule) => removeRule(rule, cwd),
       removeDir: async (d) => {
         if (d.scope === "session") sessionDirs.delete(d.key);
         else {
-          removeGrant(project, d.key);
+          if (d.writable === false) throw new Error(`${d.source} is read-only here`);
+          if (d.source && d.source !== grantsFile()) await editDirectoryGrant(d.source, "remove", d.access, d.dir);
+          else removeGrant(project, d.key);
           await refreshRules(cwd);
         }
       },
@@ -1292,7 +1376,7 @@ export default function toolGate(pi: ExtensionAPI) {
       }
       const project = await projectKey(ctx.cwd);
       await refreshRules(ctx.cwd);
-      const rules = loadRules(ctx.cwd);
+      const rules = loadRules(await contextFor(ctx.cwd));
       const counts = (list: RuleList) => allRules.filter((r) => r.list === list).length;
       ctx.ui.notify(
         [
@@ -1301,8 +1385,9 @@ export default function toolGate(pi: ExtensionAPI) {
           `Jev: ${config.jev.enabled ? `${config.jev.provider}/${config.jev.model}` : "off"}; push-back ${config.pushBack ? "on" : "off"}.`,
           `${rules.length} project rule${rules.length === 1 ? "" : "s"} for Jev. Permission rules for ${shown(project)}: ` +
             `${counts("allow")} allow, ${counts("ask")} ask, ${counts("deny")} deny; ${sessionRules.length} from this session; ` +
-            `${localDirs.size + sessionDirs.size} folder grant${localDirs.size + sessionDirs.size === 1 ? "" : "s"} (/gate rules; saved in ${shown(grantsFile())}).`,
+            `${localDirs.size + sessionDirs.size} folder grant${localDirs.size + sessionDirs.size === 1 ? "" : "s"} (/gate rules; saved in ${shown(await destination(ctx.cwd))}).`,
           config.directories.enabled === false ? "Directory policy: off." : describePolicy(await policyFor(ctx.cwd)),
+          ...policyDiagnostics,
         ].join("\n"),
         "info",
       );

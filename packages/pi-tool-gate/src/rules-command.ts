@@ -1,8 +1,9 @@
 // `/gate rules`: list, add and remove the permission rules (permissions.ts) in force for this
-// project, and the folder grants beside them (Claude Code's additional directories). Rules from a
-// project's shared files and from `~/.config/agents` are read-only here: the answer names the file.
+// project, and the folder grants beside them (Claude Code's additional directories).
+// Read-only sources stay read-only here: the answer names the file.
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { shown } from "./dirs.ts";
+import { grantsFile } from "./grants.ts";
 import { type IgnoredRule, LISTS, parseRule, type Origin, type RuleList, ruleWarning, type Scope, type ScopedRule, scopeLabel } from "./permissions.ts";
 
 /** A folder the project or session may read or write beyond the policy: `dir:read:/abs`. */
@@ -14,12 +15,20 @@ export interface DirGrant {
 
 export interface ScopedDir extends DirGrant {
   scope: "session" | "project";
+  /** Omitted for legacy callers; they store project grants in project-grants.json. */
+  source?: string;
+  writable?: boolean;
+  shared?: boolean;
 }
 
 /** What the command needs from the gate: the rules in force, and ways to change the ones it may. */
 export interface RuleStore {
   /** The project, for titles. */
   project: string;
+  projectPersistence?: "local" | "shared";
+  userWritable?: boolean;
+  sources?: () => readonly string[];
+  diagnostics?: () => readonly string[];
   rules(): readonly ScopedRule[];
   ignored(): readonly IgnoredRule[];
   dirs(): readonly ScopedDir[];
@@ -29,16 +38,18 @@ export interface RuleStore {
 }
 
 export const ADD_A_RULE = "Add a rule...";
-const SCOPES: Array<{ label: string; scope: Scope }> = [
+const MANAGED_USER_RULES = "User rules are managed. Edit their source and deploy it; this command made no changes.";
+const scopes = (store: RuleStore): Array<{ label: string; scope: Scope }> => [
   { label: "This session", scope: "session" },
-  { label: "This project (this machine)", scope: "project" },
-  { label: "Everywhere (your user settings)", scope: "user" },
+  { label: `This project (${store.projectPersistence ?? "local"})`, scope: "project" },
+  ...(store.userWritable === false ? [] : [{ label: "Everywhere (your user settings)", scope: "user" as const }]),
 ];
 const SCOPE_ORDER = (o: Origin) => (o.scope === "session" ? 0 : o.scope === "project" ? (o.shared ? 2 : 1) : o.shared ? 4 : 3);
 
 const sourceOf = (o: Origin) => (o.scope === "session" ? "this session" : shown(o.source));
 const dirLabel = (d: ScopedDir) => `${d.access}s in ${shown(d.dir)}`;
-const dirScope = (d: ScopedDir) => (d.scope === "session" ? "session" : "project (this machine)");
+const dirScope = (d: ScopedDir) => d.scope === "session" ? "session" : d.shared ? "project (shared)" : d.source && !d.source.endsWith("project-grants.json") ? "project (local)" : "project (this machine)";
+const dirSource = (d: ScopedDir) => d.scope === "session" ? "this session" : shown(d.source ?? grantsFile());
 
 /** Rules grouped by list, then by scope and file, then the folders and any rule that could not be read. */
 export function formatRules(store: RuleStore): string {
@@ -62,15 +73,21 @@ export function formatRules(store: RuleStore): string {
   const dirs = store.dirs();
   out.push("folders");
   if (!dirs.length) out.push("  none");
-  for (const scope of ["session", "project"] as const) {
-    const group = dirs.filter((d) => d.scope === scope);
-    if (group.length) out.push(`  ${scope === "session" ? "session" : "project (this machine)"}`, ...group.map((d) => `    ${dirLabel(d)}`));
+  const folderGroups = new Map<string, ScopedDir[]>();
+  for (const d of dirs) {
+    const heading = d.scope === "session" ? "session" : `${dirScope(d)}: ${dirSource(d)}`;
+    folderGroups.set(heading, [...(folderGroups.get(heading) ?? []), d]);
   }
+  for (const [heading, group] of folderGroups) out.push(`  ${heading}`, ...group.map((d) => `    ${dirLabel(d)}`));
   const ignored = store.ignored();
   if (ignored.length) {
     out.push("ignored (not usable rules)");
     for (const r of ignored) out.push(`  ${r.list}: ${r.raw}: ${r.error} [${scopeLabel(r.origin)}: ${sourceOf(r.origin)}]`);
   }
+  const sources = store.sources?.() ?? [];
+  if (sources.length) out.push("sources", ...[...new Set(sources)].map((source) => `  ${shown(source)}`));
+  const diagnostics = store.diagnostics?.() ?? [];
+  if (diagnostics.length) out.push("diagnostics", ...diagnostics.map((diagnostic) => `  ${diagnostic}`));
   return out.join("\n");
 }
 
@@ -105,6 +122,10 @@ function parseArgs(rest: string): { list: RuleList; text: string; scope?: Scope 
 }
 
 async function add(ctx: ExtensionContext, store: RuleStore, list: RuleList, text: string, scope: Scope) {
+  if (scope === "user" && store.userWritable === false) {
+    ctx.ui.notify(MANAGED_USER_RULES, "warning");
+    return false;
+  }
   const parsed = parseRule(text);
   if (!parsed.ok) {
     ctx.ui.notify(parsed.error, "warning");
@@ -116,7 +137,7 @@ async function add(ctx: ExtensionContext, store: RuleStore, list: RuleList, text
     ctx.ui.notify(`Could not save the rule: ${(error as Error).message}`, "warning");
     return false;
   }
-  const where = SCOPES.find((s) => s.scope === scope)?.label.toLowerCase() ?? scope;
+  const where = scopes(store).find((s) => s.scope === scope)?.label.toLowerCase() ?? scope;
   const warning = ruleWarning(list, parsed.rule);
   ctx.ui.notify(`Added to ${list}: ${parsed.rule.text} (${where}).${warning ? ` Warning: it ${warning}.` : ""}`, warning ? "warning" : "info");
   return true;
@@ -125,8 +146,9 @@ async function add(ctx: ExtensionContext, store: RuleStore, list: RuleList, text
 async function addInteractively(ctx: ExtensionContext, store: RuleStore) {
   const list = await ctx.ui.select("Add a rule: which list? (deny beats ask beats allow)", [...LISTS].reverse());
   if (!isList(list)) return;
-  const where = await ctx.ui.select(`Add to ${list}: where?`, SCOPES.map((s) => s.label));
-  const scope = SCOPES.find((s) => s.label === where)?.scope;
+  const choices = scopes(store);
+  const where = await ctx.ui.select(`Add to ${list}: where?`, choices.map((s) => s.label));
+  const scope = choices.find((s) => s.label === where)?.scope;
   if (!scope) return;
   for (;;) {
     const text = (await ctx.ui.input(`${list} rule (Bash(git push:*), Edit(src/**), web_fetch)`, "Bash(git push:*)"))?.trim();
@@ -138,13 +160,26 @@ async function addInteractively(ctx: ExtensionContext, store: RuleStore) {
 async function pick(ctx: ExtensionContext, store: RuleStore, entry: Entry) {
   if (entry.kind === "dir") {
     const d = entry.dir;
-    const choice = await ctx.ui.select(`folder: ${dirLabel(d)}\nScope: ${dirScope(d)}`, ["Remove", "Cancel"]);
+    if (d.writable === false) {
+      ctx.ui.notify(`${dirLabel(d)} is in ${dirSource(d)}; /gate rules does not edit that file. Edit it to change the folder grant.`, "info");
+      return;
+    }
+    const choice = await ctx.ui.select(`folder: ${dirLabel(d)}\nScope: ${dirScope(d)} (${dirSource(d)})`, ["Remove", "Cancel"]);
     if (choice !== "Remove") return;
-    await store.removeDir(d);
+    try {
+      await store.removeDir(d);
+    } catch (error) {
+      ctx.ui.notify(`Could not remove it: ${(error as Error).message}`, "warning");
+      return;
+    }
     ctx.ui.notify(`Removed: ${dirLabel(d)}.`, "info");
     return;
   }
   const { rule } = entry;
+  if (rule.origin.scope === "user" && store.userWritable === false) {
+    ctx.ui.notify(MANAGED_USER_RULES, "warning");
+    return;
+  }
   if (!rule.origin.writable) {
     const shared = rule.origin.shared && rule.origin.scope === "user" ? ", which the opencode and Claude Code ports read too" : "";
     ctx.ui.notify(`${rule.text} is in ${sourceOf(rule.origin)}${shared}; /gate rules does not edit that file. Edit it to change the rule.`, "info");
@@ -184,6 +219,10 @@ export async function rulesCommand(args: string, ctx: ExtensionContext, store: R
       ctx.ui.notify(parsed, "warning");
       return;
     }
+    if (parsed.scope === "user" && store.userWritable === false) {
+      ctx.ui.notify(MANAGED_USER_RULES, "warning");
+      return;
+    }
     const wanted = parseRule(parsed.text);
     const text = wanted.ok ? wanted.rule.text : parsed.text;
     const found = store.rules().filter((r) => r.list === parsed.list && (r.text === text || r.raw === parsed.text));
@@ -192,13 +231,18 @@ export async function rulesCommand(args: string, ctx: ExtensionContext, store: R
       ctx.ui.notify(`No ${parsed.list} rule ${parsed.text}${parsed.scope ? ` in ${parsed.scope}` : ""}.`, "warning");
       return;
     }
-    const removable = inScope.filter((r) => r.origin.writable);
+    const removable = inScope.filter((r) => r.origin.writable && !(r.origin.scope === "user" && store.userWritable === false));
     if (!removable.length) {
       const first = inScope[0] as ScopedRule;
-      ctx.ui.notify(`${first.text} is in ${sourceOf(first.origin)}; /gate rules does not edit that file. Edit it to change the rule.`, "warning");
+      ctx.ui.notify(first.origin.scope === "user" && store.userWritable === false ? MANAGED_USER_RULES : `${first.text} is in ${sourceOf(first.origin)}; /gate rules does not edit that file. Edit it to change the rule.`, "warning");
       return;
     }
-    for (const r of removable) await store.remove(r);
+    try {
+      for (const r of removable) await store.remove(r);
+    } catch (error) {
+      ctx.ui.notify(`Could not remove it: ${(error as Error).message}`, "warning");
+      return;
+    }
     ctx.ui.notify(`Removed from ${parsed.list}: ${text}.`, "info");
     return;
   }
