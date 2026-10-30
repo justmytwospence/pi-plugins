@@ -51,6 +51,8 @@ export interface HeadsUpHost {
   askSidebar(text: string, ctx: ExtensionContext): boolean;
   /** Sidebar's model: checks run on it too (main's, sharing main's cache, unless another is chosen). */
   model?(): ModelChoice;
+  /** A dialog (a plan's approval, a question) has main's focus: the note stays out of its way. */
+  dialogOpen?(): boolean;
   /** A blog draft was written and saved: Sidebar's thread can carry it for follow-up edits. */
   draftWritten?(note: HeadsUpNote, draft: Draft, location: string): void;
   /**
@@ -376,7 +378,7 @@ export class HeadsUp {
         HEADSUP_WIDGET,
         (tui, theme) => {
           this.tui = tui;
-          return { render: (width: number) => this.note.lines(width, theme, proseMeasure()), invalidate() {} };
+          return { render: (width: number) => this.host.dialogOpen?.() ? [] : this.note.lines(width, theme, proseMeasure()), invalidate() {} };
         },
         { placement: "aboveEditor" },
       );

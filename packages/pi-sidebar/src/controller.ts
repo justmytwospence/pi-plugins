@@ -128,6 +128,11 @@ export class SidebarController {
     this.main.onChange(() => this.render());
     this.headsUp = new HeadsUp(pi, this.main, {
       deliver: (note) => this.deliverNote(note),
+      dialogOpen: () => {
+        if (!this.mainEditor || this.panel?.focused) return false;
+        const focused = this.hostTui?.getFocusedComponent?.() ?? null;
+        return focused !== null && focused !== this.mainEditor;
+      },
       askSidebar: (text, ctx) => {
         this.openOrFocus(ctx);
         if (!this.isOpen) return false;
