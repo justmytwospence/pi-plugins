@@ -53,6 +53,8 @@ export interface HeadsUpHost {
   model?(): ModelChoice;
   /** A dialog (a plan's approval, a question) has main's focus: the note stays out of its way. */
   dialogOpen?(): boolean;
+  /** Sidebar is open beside main: it already shows the note in its thread, so main's copy is hidden. */
+  sidebarOpen?(): boolean;
   /** A blog draft was written and saved: Sidebar's thread can carry it for follow-up edits. */
   draftWritten?(note: HeadsUpNote, draft: Draft, location: string): void;
   /**
@@ -378,7 +380,7 @@ export class HeadsUp {
         HEADSUP_WIDGET,
         (tui, theme) => {
           this.tui = tui;
-          return { render: (width: number) => this.host.dialogOpen?.() ? [] : this.note.lines(width, theme, proseMeasure()), invalidate() {} };
+          return { render: (width: number) => this.host.dialogOpen?.() || this.host.sidebarOpen?.() ? [] : this.note.lines(width, theme, proseMeasure()), invalidate() {} };
         },
         { placement: "aboveEditor" },
       );
@@ -397,7 +399,7 @@ export class HeadsUp {
    * empty (no dialog, no Sidebar focus). Only the digits on screen are taken.
    */
   handleKey(data: string, editorIdle: boolean): boolean {
-    if (!editorIdle) return false;
+    if (!editorIdle || this.host.sidebarOpen?.()) return false;
     const action = this.note.action(data);
     if (!action) return false;
     void this.act(action);

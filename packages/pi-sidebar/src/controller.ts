@@ -133,6 +133,7 @@ export class SidebarController {
         const focused = this.hostTui?.getFocusedComponent?.() ?? null;
         return focused !== null && focused !== this.mainEditor;
       },
+      sidebarOpen: () => this.isOpen,
       askSidebar: (text, ctx) => {
         this.openOrFocus(ctx);
         if (!this.isOpen) return false;
