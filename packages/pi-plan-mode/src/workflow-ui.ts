@@ -22,7 +22,7 @@ export const WORKFLOW_EXPLANATIONS: Record<WorkflowKind, string> = {
 };
 
 export function workflowBadge(theme: Pick<Theme, "fg" | "bold">, mode: WorkflowKind): string {
-  return theme.bold(theme.fg(WORKFLOW_ROLES[mode], `[${mode.toUpperCase()}]`));
+  return theme.bold(theme.fg(WORKFLOW_ROLES[mode], `${mode.toUpperCase()}`));
 }
 
 export function registerWorkflowRenderer(pi: ExtensionAPI): void {

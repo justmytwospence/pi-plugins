@@ -84,14 +84,14 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle' } = {})
   }, width, theme);
   const plain = lines.map(stripVTControlCharacters);
   const kind = absorbed.exec !== undefined ? 'exec' : absorbed.workflow?.kind;
-  const badge = kind ? `[${kind.toUpperCase()}]` : undefined;
+  const badge = kind?.toUpperCase();
   assert.doesNotMatch(plain.join('\n'), /workflow: (work|chat|plan|exec)/iu, 'raw provider status must not leak into the footer');
   if (compact) {
     assert.equal(lines.length, 1, 'blocked footer must stay one row');
     if (badge) assert.ok(plain[0].includes(badge), 'blocked footer keeps the uppercase workflow badge');
     assert.ok(!plain[0].includes('Approvals'), 'blocked footer must not merge approvals into the workflow badge');
   } else {
-    const workflow = plain.filter(line => /\[(WORK|CHAT|PLAN|EXEC)\]/u.test(line));
+    const workflow = plain.filter(line => /\b(WORK|CHAT|PLAN|EXEC)\b/u.test(line));
     const approvals = plain.filter(line => line.includes('Approvals'));
     assert.equal(workflow.length, kind ? 1 : 0, 'workflow badge keeps its own row, including exec fallback');
     if (badge) {

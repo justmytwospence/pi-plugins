@@ -510,9 +510,9 @@ describe("visible workflow transitions", () => {
     };
     const previous = mode === "work" ? "exec" : "work";
     const rendered = renderer!({ content: "fallback", details: { version: 1, previous, mode } }, { expanded: false }, theme);
-    expect(rendered.render(200).map((line: string) => line.trimEnd())).toEqual([`<bold><${role}>[${mode.toUpperCase()}]</${role}></bold><dim> · </dim><muted>${explanation}</muted>`]);
-    expect(theme.fg.mock.calls).toEqual([[role, `[${mode.toUpperCase()}]`], ["dim", " · "], ["muted", explanation]]);
-    expect(theme.bold.mock.calls).toEqual([[`<${role}>[${mode.toUpperCase()}]</${role}>`]]);
+    expect(rendered.render(200).map((line: string) => line.trimEnd())).toEqual([`<bold><${role}>${mode.toUpperCase()}</${role}></bold><dim> · </dim><muted>${explanation}</muted>`]);
+    expect(theme.fg.mock.calls).toEqual([[role, `${mode.toUpperCase()}`], ["dim", " · "], ["muted", explanation]]);
+    expect(theme.bold.mock.calls).toEqual([[`<${role}>${mode.toUpperCase()}</${role}>`]]);
   });
 
   test.each([

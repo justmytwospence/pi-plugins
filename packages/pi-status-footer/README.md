@@ -85,7 +85,7 @@ readings fresh; the working row is independent of the footer mode.
    countdowns when supported. Last, since they are usually the longest rows.
 
 The bold bracketed workflow badge is a landmark in the footer and on workflow
-transitions in the transcript: `[WORK]`, `[CHAT]`, `[PLAN]` or `[EXEC]`.
+transitions in the transcript: `WORK`, `CHAT`, `PLAN` or `EXEC`.
 Their theme roles are `success`, `thinkingLow`, `customMessageLabel` and
 `warning`, respectively; actual hues depend on the theme. Explanations, key hints
 and other secondary details stay subdued. Approvals remain a separate axis.
