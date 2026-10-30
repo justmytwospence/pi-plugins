@@ -5256,7 +5256,15 @@ export class ModalEditor extends CustomEditor {
         result = clipboardText;
       }
       if (clipboardText !== null) this.lastKnownClipboard = clipboardText;
-      if (shared) this.lastSeenSharedTs = shared.ts;
+      if (shared) {
+        this.lastSeenSharedTs = shared.ts;
+        if (result === reg) {
+          // Delivered: keep it in this session's register for repeats, and
+          // scrub the shared copy from disk.
+          this.unnamedRegister = reg;
+          this.sharedRegister.clear(shared.ts);
+        }
+      }
       return result;
     }
 

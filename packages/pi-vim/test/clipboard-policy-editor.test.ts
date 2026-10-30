@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { mkdtempSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createFileSharedRegister } from "../src/engine/shared-register.js";
 import { createEditorWithSpy, sendKeys, setInternalCursor } from "./harness.js";
 
 function nextImmediate(): Promise<void> {
@@ -398,6 +402,9 @@ describe("shared register across sessions", () => {
     const store = {
       read: () => shared,
       write: (text: string) => (shared = { text, ts: ++ts }),
+      clear: (t: number) => {
+        if (shared?.ts === t) shared = null;
+      },
     };
     const a = createEditorWithSpy("one\ntwo");
     const b = createEditorWithSpy("x");
@@ -417,5 +424,23 @@ describe("shared register across sessions", () => {
     assert.deepEqual(a.clipboardWrites, ["one"]);
     sendKeys(b.editor, ["p"]);
     assert.equal(b.editor.getText(), "x\ntwo\none");
+  });
+});
+
+describe("shared register file scrubbing", () => {
+  it("removes the entry when cleared and expires it after the TTL", async () => {
+    const path = join(mkdtempSync(join(tmpdir(), "pivim-")), "reg.json");
+    const store = createFileSharedRegister(path, 30);
+    const e = store.write("secret");
+    assert.equal(store.read()?.text, "secret");
+    store.clear(e!.ts + 1); // a different entry: untouched
+    assert.ok(existsSync(path));
+    store.clear(e!.ts);
+    assert.equal(existsSync(path), false);
+
+    store.write("again");
+    await new Promise((r) => setTimeout(r, 80));
+    assert.equal(existsSync(path), false);
+    assert.equal(store.read(), null);
   });
 });
