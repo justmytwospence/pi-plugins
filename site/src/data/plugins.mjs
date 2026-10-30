@@ -29,6 +29,7 @@ export const groups = [
   ] },
   { title: "Make it yours", eyebrow: "04 / Terminal craft", description: "Small, focused improvements to the place you spend your working day.", plugins: [
     { name: "pi-vim", label: "Vim editing", description: "Modal editing for the prompt and for text fields inside suite dialogs." },
+    { name: "pi-history-search", label: "Prompt history", description: "Fuzzy prompt recall and prefix history matching on the current session branch." },
     { name: "pi-stash", label: "Prompt stash", description: "Set a half-written prompt aside, run a command, and get it back." },
     { name: "pi-copy", label: "Copy picker", description: "Pick useful fragments from the session instead of copying a whole reply." },
     { name: "pi-next-prompt", label: "Next prompt", description: "An optional next step in the editor. Accept it; never auto-send it." },

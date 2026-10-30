@@ -47,7 +47,8 @@
       "./packages/pi-compact-plan/src/index.ts",
       "./packages/pi-trends/src/index.ts",
       "./packages/pi-pressure/src/index.ts",
-      "./packages/pi-mcp-device-login/src/index.ts"
+      "./packages/pi-mcp-device-login/src/index.ts",
+      "./packages/pi-history-search/src/index.ts"
     ],
     "themes": [
       "./packages/pi-cc-render/themes/cc-dark.json",

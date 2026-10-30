@@ -21,6 +21,7 @@ import { createJiti } from 'jiti';
 import { initTheme } from '@earendil-works/pi-coding-agent';
 import { stripVTControlCharacters } from 'node:util';
 import { setKeybindings } from '@earendil-works/pi-tui';
+const { TuiBase } = await import(new URL('./tui.js', import.meta.resolve('@earendil-works/pi-tui')));
 
 const sdkUrl = import.meta.resolve('@earendil-works/pi-coding-agent');
 const { KeybindingsManager } = await import(new URL('./core/keybindings.js', sdkUrl));
@@ -33,6 +34,8 @@ const { default: toolGate, ALLOW_ONCE, BLOCK, choiceLabels } = await jiti.import
 const { CustomEditor } = await import(new URL('./modes/interactive/components/custom-editor.js', sdkUrl));
 const { sidebarScreen } = await import('./remote-clients/sidebar.mjs');
 const { TerminalPanel } = await jiti.import('../packages/pi-interactive-shell/src/panel.ts');
+const { HistoryPicker } = await jiti.import('../packages/pi-history-search/src/picker.ts');
+const { default: historySearch } = await jiti.import('../packages/pi-history-search/src/index.ts');
 const { pickApproval, createApprovalState, handoffLabel, HERE: IMPLEMENT_HERE, COMPACT_HERE, EDIT, KEEP } = await jiti.import('../packages/pi-plan-mode/src/approval-picker.ts');
 const { registerExec, FINISH_MESSAGE_TYPE } = await jiti.import('../packages/pi-plan-mode/src/exec.ts');
 const { createNegotiation } = await jiti.import('../packages/pi-plan-mode/src/negotiation.ts');
@@ -399,6 +402,28 @@ async function treeForkLines(width, step, filter = 'default', command = 'tree-fo
   return lines;
 }
 
+// Real prompt-history components: filter input stays terminal-owned, never a remote composer.
+function historyPrompts(variant) {
+  return variant === 'long/Unicode'
+    ? ['調査する 👩🏽‍💻 café — ' + 'A long prompt with multiple lines\n'.repeat(12), '\x1b[31mUnsafe styling\x1b[0m\nsecond line', 'Fix Unicode rendering 界界界']
+    : ['Review the API design\nKeep the existing public interface.', 'Fix the history picker', 'Run the unit tests'];
+}
+function historyLines(width, variant) {
+  const picker = new HistoryPicker(historyPrompts(variant), '', theme, kb, () => {}, () => {});
+  picker.focused = true;
+  if (variant === 'filtered') picker.handleInput('history');
+  if (variant === 'no-match') picker.handleInput('zzzz-no-match');
+  const lines = picker.render(width);
+  const plain = lines.map(stripVTControlCharacters).join('\n');
+  assert.match(plain, /Prompt history/);
+  if (variant === 'filtered') {
+    assert.match(plain, /Fix the history picker/);
+    assert.doesNotMatch(plain, /Review the API design/);
+  }
+  if (variant === 'no-match') assert.match(plain, /No matches/);
+  return lines;
+}
+
 // Each dialog, and what each client must make of it.
 const DIALOGS = [
   { name: 'plan exec override confirmation', lines: overrideLines, question: 'Finish without planner acceptance?', herdr: { options: 2, multi: false, labels: ['Finish without review', 'Keep paused'] }, collie: { kind: 'prompt-select', options: 3, labels: ['Finish without review', 'Keep paused'], wraps: ['Finish without review', 'Keep paused'] } },
@@ -413,7 +438,10 @@ const DIALOGS = [
     collie: { kind: 'prompt-select', options: FORK_DESTINATIONS.length + 1, labels: FORK_DESTINATIONS, wraps: FORK_DESTINATIONS },
   })),
   ...['default', 'all'].map(filter => ({
-    name: `/tree-fork native tree (${filter})`, lines: w => treeForkLines(w, 'tree', filter), nativeTree: true,
+    name: `/tree-fork native tree (${filter})`, lines: w => treeForkLines(w, 'tree', filter), terminalPicker: true,
+  })),
+  ...['initial', 'filtered', 'no-match', 'long/Unicode'].map(variant => ({
+    name: `prompt history (${variant})`, lines: w => historyLines(w, variant), terminalPicker: true,
   })),
   { name: 'ask single', lines: (w) => questionLines([question(false)], w), herdr: { options: 4, multi: false }, collie: { kind: 'prompt-select', options: 4 }, },
   { name: 'ask multi', lines: (w) => questionLines([question(true)], w), herdr: { multi: true }, collie: { kind: 'multi-select' }, },
@@ -567,6 +595,58 @@ for (const width of [46, 120]) {
   await panel.shutdown();
 }
 
+// Exercise the real extension overlay, not just a picker replacing the editor dock.
+// A short centered overlay can otherwise leave a live editor frame/composer exposed below it.
+async function historyOverlayScreen(width, variant, base) {
+  const overlayTui = new TuiBase({ rows: HEIGHT, columns: width, hideCursor() {} });
+  overlayTui.requestRender = () => {};
+  const main = new CustomEditor(overlayTui, themeModule.getEditorTheme(), kb);
+  main.setText('Review');
+  overlayTui.setFocus(main);
+  const events = new Map(), commands = new Map();
+  historySearch({
+    on: (name, handler) => events.set(name, handler), registerShortcut() {},
+    registerCommand: (name, spec) => commands.set(name, spec),
+  });
+  let close;
+  const ctx = { mode: 'tui', sessionManager: {
+    getBranch: () => historyPrompts(variant).map((text, index) => ({ type: 'message', id: String(index), message: { role: 'user', content: text } })),
+    getSessionId: () => 'remote-client-fixture', getLeafId: () => 'leaf',
+  }, ui: {
+    getEditorText: () => main.getExpandedText(), setEditorText: () => assert.fail('cancel must not mutate the draft'),
+    notify: message => assert.fail(message), onTerminalInput: () => () => {},
+    setWidget: (_key, factory) => { factory?.(overlayTui); },
+    custom: (factory, options) => new Promise(resolve => {
+      close = value => { overlayTui.hideOverlay(); resolve(value); };
+      const picker = factory(overlayTui, theme, kb, close);
+      overlayTui.showOverlay(picker, options.overlayOptions);
+      picker.handleInput('\x15'); // clear the real expanded draft seed via Input
+      if (variant === 'filtered') picker.handleInput('history');
+      if (variant === 'no-match') picker.handleInput('zzzz-no-match');
+    }),
+  } };
+  await events.get('session_start')({}, ctx);
+  const pending = commands.get('history-search').handler('', ctx);
+  const screen = overlayTui.compositeOverlays(base, width, HEIGHT);
+  assert.equal(screen.length, HEIGHT, 'real overlay occupies terminal height');
+  close(undefined);
+  await pending;
+  await events.get('session_shutdown')({}, ctx);
+  assert.equal(main.getText(), 'Review');
+  return screen;
+}
+for (const width of [46, 120, 180]) {
+  for (const variant of ['initial', 'filtered', 'no-match', 'long/Unicode']) {
+    for (const [under, rows] of Object.entries(UNDERS)) {
+      for (const sidebar of [false, true]) {
+        const { lines: base } = sidebarScreen({ width, height: HEIGHT, dock: w => editor.render(w), footer: rows, open: sidebar, collapsed: true });
+        const lines = await historyOverlayScreen(width, variant, base);
+        screens.push({ name: `prompt history (${variant})`, width, under: `${under}, real overlay${sidebar ? ', Sidebar open' : ''}`, ansi: lines.join('\n') });
+      }
+    }
+  }
+}
+
 const dir = mkdtempSync(path.join(tmpdir(), 'pi-remote-clients-'));
 const screensFile = path.join(dir, 'screens.json');
 writeFileSync(screensFile, JSON.stringify(screens.map((s) => ({ ...s, text: stripVTControlCharacters(s.ansi) }))));
@@ -611,19 +691,19 @@ screens.forEach((screen, i) => {
   }
   const dialog = DIALOGS.find((d) => d.name === screen.name);
   const h = results.herdr?.[i];
-  if (dialog.nativeTree) {
-    // Native tree navigation stays terminal-only. Collie may mirror the whole pane with
+  if (dialog.terminalPicker) {
+    // Tree navigation and searchable prompt history stay terminal-only. Collie may mirror the whole pane with
     // its declared Escape control, but must not lift a selection card or partial dialog.
     const c = results.collie?.[i];
-    if (h) problems.push(`herdr-web-ui: native tree misidentified as question: ${JSON.stringify(h)}`);
+    if (h) problems.push(`herdr-web-ui: terminal picker misidentified as question: ${JSON.stringify(h)}`);
     if (c) {
       const mirrors = c.blocks.filter(b => b.kind === 'unread-dialog');
       if (mirrors.length > 1 || c.blocks.some(b => b.kind !== 'raw' && b.kind !== 'unread-dialog') || mirrors.some(b =>
         b.wholePane !== true || b.cancel?.key !== 'Escape' || b.cancel?.agent !== 'pi' ||
         typeof b.cancel?.signature !== 'string' || !b.cancel.signature.trim()
-      )) problems.push(`Collie: native tree must be raw or one Escape-only whole-pane mirror: ${JSON.stringify(c.blocks)}`);
+      )) problems.push(`Collie: terminal picker must be raw or one Escape-only whole-pane mirror: ${JSON.stringify(c.blocks)}`);
     }
-    if (c && ['empty', 'draft'].includes(c.composer)) problems.push(`Collie: native tree misidentified as composer: ${c.composer}`);
+    if (c && ['empty', 'draft'].includes(c.composer)) problems.push(`Collie: terminal picker misidentified as composer: ${c.composer}`);
     report(label, problems);
     return;
   }

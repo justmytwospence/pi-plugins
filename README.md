@@ -1,12 +1,12 @@
 # Pi Plugins
 
-A modular suite of 33 extensions for [Pi](https://pi.dev): background work, subagents, planning, review, context awareness and terminal ergonomics. Every component can be enabled on its own; one Git ref versions the whole suite. It is not a fork of Pi.
+A modular suite of 34 extensions for [Pi](https://pi.dev): background work, subagents, planning, review, context awareness and terminal ergonomics. Every component can be enabled on its own; one Git ref versions the whole suite. It is not a fork of Pi.
 
 **[Documentation](https://pi-plugins.vercel.app)** · **[Keymap & focus](https://pi-plugins.vercel.app/guides/keyboard/)** · **[Requirements, cost & privacy](https://pi-plugins.vercel.app/guides/requirements/)** · **[Development & testing](https://pi-plugins.vercel.app/development/)**
 
 ## Choose your plugins
 
-All 33 references include activation, controls, defaults, requirements, costs and limitations. Start with the workflow you need; companions are optional.
+All 34 references include activation, controls, defaults, requirements, costs and limitations. Start with the workflow you need; companions are optional.
 
 ### Run & coordinate
 
@@ -49,6 +49,7 @@ All 33 references include activation, controls, defaults, requirements, costs an
 | Plugin | Use it to… |
 | --- | --- |
 | [pi-vim](https://pi-plugins.vercel.app/plugins/pi-vim/) | Edit modally; open files or an external editor from the prompt. |
+| [pi-history-search](https://pi-plugins.vercel.app/plugins/pi-history-search/) | Fuzzy-search session prompts and browse matching prefixes. |
 | [pi-stash](https://pi-plugins.vercel.app/plugins/pi-stash/) | Set a draft aside and restore it after a command. |
 | [pi-copy](https://pi-plugins.vercel.app/plugins/pi-copy/) | Copy a useful fragment instead of an entire reply. |
 | [pi-next-prompt](https://pi-plugins.vercel.app/plugins/pi-next-prompt/) | Accept an editable next step, never auto-send it. |

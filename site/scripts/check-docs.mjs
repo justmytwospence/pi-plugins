@@ -18,7 +18,7 @@ const manifest = JSON.parse(await readFile(path.join(root, "package.json"), "utf
 const entries = manifest.pi.extensions.map((entry) => entry.replace(/^\.\//, ""));
 const names = entries.map((entry) => entry.split("/")[1]).sort();
 const catalog = plugins.map((plugin) => plugin.name).sort();
-if (names.length !== 33) fail("Expected 33 suite entries; update the public count deliberately when the manifest changes.");
+if (names.length !== 34) fail("Expected 34 suite entries; update the public count deliberately when the manifest changes.");
 if (new Set(catalog).size !== catalog.length) fail("Duplicate plugin in catalog.");
 if (JSON.stringify(names) !== JSON.stringify(catalog)) fail("Catalog does not match the root suite manifest.");
 if (manifest.devDependencies?.["@earendil-works/pi-coding-agent"] !== keymapSdkVersion) fail("Re-audit the keymap baseline when the configured Pi SDK test target changes.");
