@@ -208,6 +208,40 @@ test("scoped availability filters defaults, including an empty catalog", () => {
   assert.deepEqual(choices("openai", planModel.modelId, []), []);
 });
 
+test("available scope offers authenticated targets outside the cycling shortlist", () => {
+  const astra = { provider: "openai-codex", id: "gpt-6-astra" };
+  const sol = { provider: astra.provider, id: "gpt-6-sol" };
+  const terra = { provider: astra.provider, id: "gpt-6-terra" };
+  const ctx = {
+    modelRegistry: { getAvailable: () => [astra, sol, terra] },
+    scopedModels: [{ model: astra }, { model: sol }],
+  } as unknown as ExtensionContext;
+  const planModel = { provider: astra.provider, modelId: astra.id };
+  const target = { provider: terra.provider, modelId: terra.id };
+  const available = snapshotAvailableImplementationModels(ctx, "available");
+  assert.deepEqual(modelCatalog(ctx).available, [astra, sol]);
+  assert.deepEqual(modelCatalog(ctx, "available").available, [astra, sol, terra]);
+  assert.deepEqual(
+    implementationChoices({ planModel, map: undefined, available }).map(({ spec }) => spec.modelId),
+    [sol.id, terra.id],
+  );
+  assert.deepEqual(
+    implementationChoices({ planModel, map: { "openai-codex/gpt-6-astra": [target] }, available }).map(
+      ({ spec }) => spec,
+    ),
+    [target],
+  );
+  assert.deepEqual(implementationChoices({ planModel, map: { "openai-codex/gpt-6-astra": [] }, available }), []);
+  assert.deepEqual(
+    implementationChoices({
+      planModel,
+      map: { "openai-codex/gpt-6-astra": [{ ...target, modelId: "unavailable" }] },
+      available,
+    }),
+    [],
+  );
+});
+
 test("effort normalization retains supported/default levels and rounds unsupported requests down", () => {
   const supported = [undefined, "low", "medium", "high"] as const;
   assert.equal(normalizeEffort("medium", supported), "medium");

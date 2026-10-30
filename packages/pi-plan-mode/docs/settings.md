@@ -5,7 +5,7 @@
 Settings live in `<getAgentDir()>/pi-plan-mode.json` (normally `~/.pi/agent/pi-plan-mode.json`).
 The file may be a symlink; saves write through it, preserve unknown fields, and publish atomically.
 The Settings step of `/planners` edits planners, efforts, subagent models, the time limit, Jev tool
-selection, rendered plans, completion review, the default implementation context, the export path, and the shortcut;
+selection, rendered plans, completion review and revision limit, the default implementation context, the export path, and the shortcut;
 everything else is edited in the file. An invalid file is ignored (defaults apply) and never overwritten.
 
 ### Implementation choices and effort
@@ -46,8 +46,8 @@ OpenAI families match `gpt-<numeric dotted generation>-astra|sol|terra` IDs on `
 `openai-codex`; Anthropic families match `claude-fable|opus|sonnet-<numeric dash generation>`
 IDs on `anthropic`. Defaults never cross provider IDs. Each target family prefers a same-generation
 sibling, otherwise the highest available numeric generation, with lexical model-ID tie breaking.
-Unrecognized aliases or snapshot formats do not generate defaults. Only available/scoped models
-are offered, even when that catalog is empty. Explicit mappings may cross providers and override
+Unrecognized aliases or snapshot formats do not generate defaults. Only authenticated available models
+are offered, independently of the cycling shortlist (`enabledModels`/scoped models), even when the available catalog is empty. Inline handoff choices and `/planners` implementation targets use this full availability catalog; the `/planners` planning-model picker remains cycling-scoped. Explicit mappings may cross providers and override
 defaults; unavailable, duplicate and same-model targets are filtered, preserving the first effort
 choice. There is no pi-subagents worker fallback or same-model pseudo-handoff.
 
@@ -76,19 +76,22 @@ an explicit fresh child. Its Here context choices are **keep conversation** and 
 
 ### Completion review
 
-`completionReview` (boolean, default `true`) enables a targeted review by the on-call planner when
-`finish_plan` is called after an actual handoff. Direct execution does not use this workflow. Toggle it with **Completion review** in `/planners` Settings. The review is
-an additional model turn, with its cost shown separately from implementation consultations. If disabled,
-the completion card remains but the review is skipped; if there is no planner on call, no review is made.
+`completionReview` (boolean, default `true`) controls completion review after an actual handoff. Toggle **Completion review** in `/planners` Settings; **Review revisions** cycles `completionMaxRevisions` through 0–5 (default 2). The limit is snapshotted at execution start, so changing it does not reset an active run. Direct execution remains ordinary chat.
 
-The colored **Implementation complete** card separates the implementer's required `report`,
-`verification` and `concerns` fields from the planner's assessment and consultation count.
-Verification, outstanding issues, verdict and count stay visible when collapsed; Ctrl+O expands
-only the longer implementation and assessment narratives. The reviewer inspects relevant files, working-tree changes and commit
-history, distinguishing inspected evidence from reported checks. It is instructed not to run tests or
-mutate files; its tool policy is not a sandbox. Failed or unavailable reviews are reported as such, not
-as success. The assessment is informational, not user approval or an automatic implementation of findings;
-`finish_plan` still ends exec mode.
+**`finish_plan` submits for completion review; it does not itself end exec mode.** The implementer supplies nonempty `report`, `verification` (including checks not run) and `concerns`. Only an explicit structured **Accepted** decision completes reviewed work. The planner reviews the approved plan and amendments, current files and commit history; it does not rerun tests, treat reported checks as independently verified, or introduce new preferences. Changes requested return to the same implementer context for fixes or evidence-backed disputes. Each later submission must respond exactly once to every outstanding finding by ID, with status `addressed`, `disputed` or `blocked` and an explanation.
+
+`completionMaxRevisions` is an integer from 0–5, default **2**: the initial review plus two fix-and-review cycles means at most three reviews before pausing. Zero still performs the initial review. Failures do not consume revision cycles and are never automatically retried. Exhausted revisions, human-only checks or decisions, unavailable planners, invalid/empty replies, timeout and cancellation pause visibly with exec mode, model and implementation context intact. Calling `finish_plan` again cannot bypass the pause or reset the budget.
+
+Explicit recovery uses `/plan-exec` (without arguments, shows phase, findings and actions):
+
+- `/plan-exec retry`: after a failed or interrupted review, authorize one retry of the saved submission without resetting counts or costs.
+- `/plan-exec resume <answer>`: answer a user-needed question or authorize one extra revision-and-review cycle after budget exhaustion. Each further extension requires another explicit command. Human answers remain user-provided evidence.
+- `/plan-exec accept`: while paused, confirm **Finish without planner acceptance?** with **Finish without review**, or choose **Keep paused**. Confirmation produces **Completed by user override**, preserving findings and limitations, never **Accepted**. No interactive UI means no override.
+- `/plan-exec stop`: abandon the execution as **Implementation stopped**, without claiming completion, restoring the model or returning to the planner.
+
+With `completionReview: false`, completion is explicitly **Completed without review**. Accepted, configured no-review and confirmed override are final outcomes; only then does normal model restoration and return-to-planning navigation run. If return navigation fails, the saved return remains retryable with `/plan-back`. Paused work survives reload; interrupted in-flight exchanges restore paused, without another paid request.
+
+Consultations and reviews are readable transcript cards: **Consultation N** shows Question, Planner decision and (when expanded) Plan amendment; pending calls show **Planner thinking…** and activity. **Review N** shows the submitted report and verification, previous findings paired with implementer responses, then the planner's evidence, limitations and findings. Pending exchanges and the latest unresolved review stay fully visible; older narratives fold to 12 lines and Ctrl+O expands the recorded exchange. Consultation summaries use the actual decision's first paragraph, not a generated success claim. Cards use explicit labels as well as semantic colors: green for accepted; amber for changes, user-needed, no-review or override; red for review failure. Unfinished work is never labeled Finished. The footer keeps `exec mode on · `, then the phase (`implementing`, `consulting`, `review N`, `revising · N findings` or `paused · user needed/review unavailable`), consultation count including zero, and separate cumulative consultation and review costs; no extra footer row is added. Final cards retain verification, accepted evidence, revision summaries and remaining limitations with separate consultation/review totals.
 
 ### Rendered plans
 

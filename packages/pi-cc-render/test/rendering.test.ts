@@ -126,7 +126,7 @@ describe("renderer gates", () => {
 });
 
 describe("own result rows", () => {
-  test.each(["bg_run", "finish_plan"])("%s with ccstyleOwnResult keeps its result row under the styled call row", async (name) => {
+  test.each(["bg_run", "ask_planner", "finish_plan"])("%s with ccstyleOwnResult keeps its result row under the styled call row", async (name) => {
     const { createCcstyleTool } = await import("../src/renderer/default-mode.ts");
     const own = { name, label: "Background", ccstyleOwnResult: true, renderResult: () => ({ render: () => ["↳ fit running · 45%"], invalidate() {} }) };
     const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t, bg: (_c: string, t: string) => t };
@@ -237,6 +237,8 @@ describe("tool groups", () => {
   test.each([
     { name: "exit_plan_mode", before: ["todo"], after: ["bash"] },
     { name: "exit_plan_mode", before: ["read", "todo"], after: ["bash", "read"] },
+    { name: "ask_planner", before: ["todo"], after: ["bash"] },
+    { name: "ask_planner", before: ["read", "todo"], after: ["bash", "read"] },
     { name: "finish_plan", before: ["todo"], after: ["bash"] },
     { name: "finish_plan", before: ["read", "todo"], after: ["bash", "read"] },
   ])("$name stays standalone between $before and $after", async ({ name, before, after }) => {
@@ -260,6 +262,48 @@ describe("tool groups", () => {
         }
       }
       expect(plain(root.render(80)).join("\n")).toContain("Waiting for approval");
+    } finally {
+      hooks.shutdown();
+    }
+  });
+
+  test.each(["ask_planner", "finish_plan"])("%s preserves colored owned partial and final bodies beside grouped tools", async (name) => {
+    const { createCcstyleTool } = await import("../src/renderer/default-mode.ts");
+    const { hooks, root, tool } = await groupedTools(false);
+    const { initTheme } = await import("@earendil-works/pi-coding-agent");
+    initTheme("dark", false);
+    const themeUrl = new URL("./modes/interactive/theme/theme.js", import.meta.resolve("@earendil-works/pi-coding-agent"));
+    const { theme: cardTheme } = await import(themeUrl.href);
+    // Load actual sibling cards without including its sources in this package's rootDir.
+    const cardsPath = new URL("../../pi-plan-mode/src/exec-cards.ts", import.meta.url).href;
+    const { renderAsk, renderFinish } = await import(cardsPath);
+    const options = { expanded: false, isPartial: true };
+    const owned = createCcstyleTool({
+      name,
+      ccstyleOwnResult: true,
+      renderResult: (_result: unknown, opts: { expanded: boolean; isPartial: boolean }) => name === "ask_planner"
+        ? renderAsk({ question: "Keep the approved scope?", planner: "Planner", number: 1, pending: opts.isPartial, reply: "Preserve the approved scope.", costUsd: 0.01 }, opts, cardTheme)
+        : renderFinish({ report: "Implemented approved scope.", verification: "Unit tests passed.", concerns: "None", planFile: "/tmp/plan.md", round: 1, pending: opts.isPartial, decision: opts.isPartial ? undefined : { outcome: "changes_requested", summary: "Preserve the approved scope.", evidence: [], limitations: [], findings: [{ id: "F1", title: "Scope boundary", detail: "Keep the agreed boundary.", requestedChange: "Remove unrelated changes." }] } }, opts, cardTheme),
+    }, new Map() as any);
+    const exchange = tool(name, []);
+    exchange.isPartial = true;
+    exchange.render = (width: number) => owned.renderResult({ content: [] }, options, cardTheme, { state: {} }).render(width);
+    try {
+      for (const component of [tool("read", ["Read a.ts"]), tool("todo", ["Tasks"]), exchange, tool("bash", ["Bash npm test"]), tool("read", ["Read b.ts"])]) root.addChild(component);
+      expect(root.children).toHaveLength(3);
+      expect(root.children[1]).toBe(exchange);
+      for (const sibling of [root.children[0], root.children[2]] as any[]) expect(sibling.constructor.name).toBe("ToolGroupComponent");
+      for (const width of [46, 120]) {
+        for (const isPartial of [true, false]) {
+          options.isPartial = exchange.isPartial = isPartial;
+          const lines = root.render(width);
+          const text = plain(lines).join("\n");
+          expect(text).toContain(isPartial ? (name === "ask_planner" ? "Planner thinking…" : "Reviewing") : "Preserve the approved scope.");
+          if (!isPartial && name === "finish_plan") expect(text).toContain("Scope boundary");
+          expect(lines.some((line) => /\x1b\[[\d;]+m/.test(line))).toBe(true);
+          expect(text).not.toContain("lines returned");
+        }
+      }
     } finally {
       hooks.shutdown();
     }

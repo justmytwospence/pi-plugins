@@ -1745,6 +1745,30 @@ test("pi-plan-mode's exec mode takes the permission mode's place on its row", ()
   assert.deepEqual(mod.absorbStatuses(new Map([["plan-exec", "something else"]]), { claudeRow: false }).rest, ["something else"]);
 });
 
+test("exec negotiation phases stay on the existing mode row, ahead of counts and costs", () => {
+  for (const phase of ["implementing", "consulting", "review 1", "review 3", "revising · 2 findings", "paused · user needed", "paused · review unavailable"]) {
+    for (const count of [0, 2]) {
+      const detail = `${phase} · ${count} consultations · $0.31 consult · $0.42 review`;
+      const absorbed = mod.absorbStatuses(new Map([
+        ["permission-mode", "⏵⏵ auto mode on (shift+tab to cycle)"],
+        ["plan-exec", `exec mode on · ${detail}`],
+      ]), { claudeRow: false });
+      assert.equal(absorbed.exec, detail);
+      assert.deepEqual(absorbed.rest, []);
+      const s = { ...fixture(), mode: absorbed.mode, exec: absorbed.exec, statuses: absorbed.rest };
+      for (const width of [46, 120]) {
+        const rows = mod.renderFooter(s, width, theme).map(plain);
+        assert.equal(rows.length, mod.renderFooter({ ...s, exec: "" }, width, theme).length);
+        assert.ok(rows.every(row => visibleWidth(row) <= width));
+        assert.match(rows[2], /exec mode on/);
+        assert.ok(rows[2].includes(phase.split(" · ")[0]), `${width}: ${rows[2]}`);
+        if (width === 120) assert.ok(rows[2].includes(detail), rows[2]);
+        assert.equal(mod.renderFooter({ ...s, compact: true }, width, theme).length, 1);
+      }
+    }
+  }
+});
+
 test("a waiting dialog compacts the footer to one row for herdr-web-ui", () => {
   const s = fixture();
   s.stash = { text: "draft" };

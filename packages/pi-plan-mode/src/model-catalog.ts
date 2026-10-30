@@ -33,10 +33,10 @@ export function normalizeEffort(
 }
 
 /** Friendly names and supported efforts from the model registry. */
-export function modelCatalog(ctx: ExtensionContext) {
+export function modelCatalog(ctx: ExtensionContext, scope: "scoped" | "available" = "scoped") {
   let available: RegistryModel[] = [];
   try {
-    available = snapshotAvailableImplementationModels(ctx) as RegistryModel[];
+    available = snapshotAvailableImplementationModels(ctx, scope) as RegistryModel[];
   } catch {
     available = [];
   }

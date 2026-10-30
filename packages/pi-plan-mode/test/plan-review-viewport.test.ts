@@ -168,10 +168,10 @@ function setup(plan: string, scrollbar: "always" | "hidden" = "always", withTodo
     return frame();
   };
   frame();
-  const run = () =>
+  const run = (params: { changes?: string[] } = {}) =>
     definition.execute(
       "review-id",
-      {},
+      params,
       undefined,
       (update) => {
         card.updateResult({ ...update, isError: false }, true);
@@ -207,11 +207,44 @@ function setup(plan: string, scrollbar: "always" | "hidden" = "always", withTodo
     frame,
     top,
     widgets,
+    planFile: inline.planFile as string,
     replaceRenderer: (next: TuiAltScreen) => {
       activeRenderer = next;
     },
   };
 }
+
+test.each([46, 120].flatMap((width) => [true, false].map((summary) => ({ width, summary }))))(
+  "revised approval at $width columns (summary: $summary) shows the full-plan start, not a raw diff",
+  async ({ width, summary }) => {
+    const h = setup("# Declined plan\n\nOld storage choice.");
+    h.terminal.columns = width;
+    const initial = h.run();
+    await h.settle();
+    h.choose(3);
+    await initial;
+    writeFileSync(h.planFile, `# Revised beginning\n\n${longPlan}`);
+    const revised = h.run(summary ? { changes: ["Use Redis for storage."] } : {});
+    const layout = await h.settle();
+    const screen = layout.lines.map(stripTerminalSequences).join("\n");
+    if (summary) {
+      expect(screen).toContain("What changed");
+      expect(screen).toContain("Use Redis for storage.");
+    } else {
+      expect(screen).toContain("Plan revised since your last review.");
+      expect(screen).not.toContain("What changed");
+    }
+    expect(screen).toContain("Revised beginning");
+    expect(screen).not.toContain("Changes since the plan you declined:");
+    expect(screen).not.toContain("Old storage choice.");
+    const before = h.scroll.scrollTop;
+    expect(h.press("\x04")).toBe(true);
+    await h.settle();
+    expect(h.scroll.scrollTop).toBeGreaterThan(before);
+    h.choose();
+    await revised;
+  },
+);
 
 const longPlan =
   "# Beginning of plan\n\n" +

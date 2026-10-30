@@ -43,6 +43,7 @@ async function setup(
     models?: boolean;
     prePlanMode?: string;
     switchFails?: boolean;
+    implementationModelMap?: Record<string, Array<{ provider: string; modelId: string }>>;
   } = {},
 ) {
   const mock = createMockPi();
@@ -53,6 +54,7 @@ async function setup(
       thinkingLevel: "inherit" as const,
       jevToolSelection: false,
       plansDirectory,
+      ...(options.implementationModelMap ? { implementationModelMap: options.implementationModelMap } : {}),
       ...(options.models
         ? {
             implementationModelMap: {
@@ -438,6 +440,61 @@ test("keep planning ends the turn for your reply in the chat; the next review sh
   assert.equal(inline().active, true);
 });
 
+test("revision summaries are bounded, suppressed on first/identical plans and cleared after editing", async () => {
+  const h = await setup();
+  await h.mock.commands.get("plan")?.handler("", h.context.ctx);
+  const file = h.inline().planFile;
+  const exit = h.tool(EXIT_TOOL);
+  const definition = h.mock.tools.find((candidate) => candidate.name === EXIT_TOOL);
+  const schema = definition?.parameters as unknown as {
+    properties: {
+      changes: { minItems: number; maxItems: number; items: { minLength: number; maxLength: number; pattern: string } };
+    };
+    required?: string[];
+  };
+  assert.equal(schema.properties.changes.minItems, 1);
+  assert.equal(schema.properties.changes.maxItems, 5);
+  assert.equal(schema.properties.changes.items.minLength, 1);
+  assert.equal(schema.properties.changes.items.maxLength, 240);
+  assert.ok(new RegExp(schema.properties.changes.items.pattern).test("Scope changed"));
+  assert.equal(new RegExp(schema.properties.changes.items.pattern).test(" "), false);
+  assert.equal(schema.required, undefined);
+  writeFileSync(file, "# Original");
+  const updates: any[] = [];
+  const submit = (params: unknown) =>
+    exit.execute("summary", params, undefined, (update: any) => updates.push(update), h.context.ctx);
+  await submit({ changes: ["Not a revision yet"] });
+  assert.equal(updates.at(-1).details.changes, undefined);
+  await submit({ changes: ["Identical"] });
+  assert.equal(updates.at(-1).details.changes, undefined);
+  writeFileSync(file, "# Revised\n\nUse Redis.");
+  await submit({ changes: ["Use Redis instead of SQLite."] });
+  assert.deepEqual(updates.at(-1).details.changes, ["Use Redis instead of SQLite."]);
+  writeFileSync(file, "# Revised again");
+  let selection = 0;
+  (h.context.ctx as ExtensionContext).ui.select = async () => (selection++ === 0 ? "Edit the plan" : undefined);
+  (h.context.ctx as ExtensionContext).ui.editor = async () => "# User-edited";
+  const editor = process.env.EDITOR;
+  const visual = process.env.VISUAL;
+  delete process.env.EDITOR;
+  delete process.env.VISUAL;
+  try {
+    await submit({ changes: ["Agent summary"] });
+    assert.deepEqual(updates.at(-2).details.changes, ["Agent summary"]);
+    assert.equal(updates.at(-1).details.changes, undefined);
+    assert.equal(updates.at(-1).details.plan, "# User-edited");
+  } finally {
+    if (editor !== undefined) process.env.EDITOR = editor;
+    if (visual !== undefined) process.env.VISUAL = visual;
+  }
+  for (const changes of [[], [" "], ["x".repeat(241)], Array(6).fill("x"), "x", [1]]) {
+    const before = updates.length;
+    const result = await submit({ changes });
+    assert.match(result.content[0]?.text ?? "", /1–5 nonempty strings/u);
+    assert.equal(updates.length, before);
+  }
+});
+
 test("with a model, approval offers direct choices first and configured handoffs after them", async () => {
   const { mock, context, tool, inline, selects } = await setup({ models: true, select: [undefined as never] });
   await mock.commands.get("plan")?.handler("", context.ctx);
@@ -451,6 +508,42 @@ test("with a model, approval offers direct choices first and configured handoffs
     "No, keep planning",
   ]);
   for (const option of selects[0]?.options ?? []) assert.ok(option.length <= 42, option);
+});
+
+test("inline handoffs use authenticated availability, not the cycling shortlist", async () => {
+  const astra = { provider: "openai-codex", id: "gpt-6-astra", name: "Astra" };
+  const sol = { ...astra, id: "gpt-6-sol", name: "Sol" };
+  const terra = { ...astra, id: "gpt-6-terra", name: "Terra" };
+  for (const targets of [undefined, [terra.id], [], ["unavailable"]]) {
+    const h = await setup({
+      implementationModelMap: targets
+        ? { "openai-codex/gpt-6-astra": targets.map((modelId) => ({ provider: astra.provider, modelId })) }
+        : undefined,
+    });
+    const ctx = h.context.ctx as ExtensionContext;
+    ctx.model = astra as ExtensionContext["model"];
+    Object.assign(ctx, { scopedModels: [{ model: astra }, { model: sol }] });
+    Object.assign(ctx.modelRegistry, {
+      getAvailable: () => [astra, sol, terra],
+      find: (provider: string, id: string) => [astra, sol, terra].find((m) => m.provider === provider && m.id === id),
+    });
+    await h.mock.commands.get("plan")?.handler("", ctx);
+    writeFileSync(h.inline().planFile, "# Plan");
+    await h.tool(EXIT_TOOL).execute("availability", {}, undefined, undefined, ctx);
+    const choices = h.selects[0]?.options ?? [];
+    assert.equal(
+      choices.some((choice) => choice.includes("hand off to Sol")),
+      targets === undefined,
+    );
+    assert.equal(
+      choices.some((choice) => choice.includes("hand off to Terra")),
+      targets === undefined || targets.includes(terra.id),
+    );
+    assert.equal(
+      choices.some((choice) => choice.includes("unavailable")),
+      false,
+    );
+  }
 });
 
 test("a handoff compacts the context down to the plan and continues on the target model, once", async () => {

@@ -7,6 +7,7 @@ import { MAX_PENDING_IMPLEMENTATION_MODEL_IDENTIFIER_LENGTH } from "../src/imple
 import {
   awaitPlanModeSettingsWrites,
   configuredAlwaysOffer,
+  configuredCompletionMaxRevisions,
   configuredImplementationModel,
   configuredImplementationModelMap,
   configuredImplementationPlanRetention,
@@ -21,6 +22,35 @@ import {
   serializeImplementationModelMap,
   updatePlanModeSettings,
 } from "../src/settings.js";
+
+test("completion revision limits default, validate, persist and reset", async () => {
+  assert.equal(configuredCompletionMaxRevisions({ thinkingLevel: "inherit" }), 2);
+  for (const maximum of [0, 1, 2, 3, 4, 5]) {
+    assert.equal(normalizePlanModeSettings({ completionMaxRevisions: maximum })?.completionMaxRevisions, maximum);
+  }
+  for (const maximum of [-1, 6, 1.5, NaN, Infinity, null, "2", true, []]) {
+    assert.equal(normalizePlanModeSettings({ completionMaxRevisions: maximum }), undefined);
+  }
+  const directory = await mkdtemp(join(tmpdir(), "revision-settings-"));
+  const settingsPath = join(directory, "settings.json");
+  try {
+    await writeFile(settingsPath, JSON.stringify({ unrelated: true }));
+    for (const maximum of [0, 5]) {
+      const saved = await updatePlanModeSettings({ completionMaxRevisions: maximum }, { settingsPath });
+      assert.equal(configuredCompletionMaxRevisions(saved), maximum);
+      assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
+        unrelated: true,
+        completionMaxRevisions: maximum,
+      });
+    }
+    await assert.rejects(updatePlanModeSettings({ completionMaxRevisions: 6 }, { settingsPath }));
+    const reset = await updatePlanModeSettings({ completionMaxRevisions: null }, { settingsPath });
+    assert.equal(configuredCompletionMaxRevisions(reset), 2);
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), { unrelated: true });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("implementation model maps migrate scalar strings and normalized objects to lists", () => {
   const normalized = normalizePlanModeSettings({

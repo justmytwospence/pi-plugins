@@ -953,7 +953,14 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   const execText = exec ? theme.fg("accent", `${ICONS.running} exec mode on`) : "";
   const underlying = exec && s.mode ? theme.fg("dim", ` · ${MODE_NAMES[s.mode.kind]}`) : "";
   const execDetail = exec && s.exec ? theme.fg("muted", clean(s.exec)) : "";
-  if (s.mode || exec) rows.push(row(ICONS.gate, (w) => fitSegments([
+  const negotiation = exec && s.exec ? /^(implementing|consulting|review \d+|revising(?: · \d+ findings)?|paused(?: · (?:user needed|review unavailable))?)(?: · (.*))?$/u.exec(clean(s.exec)) : null;
+  if (s.mode || exec) rows.push(row(ICONS.gate, (w) => fitSegments(negotiation ? [
+    // Keep phase attached to the mode so fitting drops costs, never the useful phase first.
+    { text: `${execText}${sep}${theme.fg("muted", negotiation[1])}`, short: `${execText}${sep}${theme.fg("muted", negotiation[1].split(" · ")[0])}`, priority: 120 },
+    { text: negotiation[2] ? theme.fg("muted", negotiation[2]) : "", priority: 90 },
+    { text: s.mode ? theme.fg("dim", MODE_NAMES[s.mode.kind]) : "", priority: 40 },
+    { text: gateStatus ? gateStatus.replace(/[\r\n\t]/g, " ") : "", priority: 50 },
+  ] : [
     { text: exec ? `${execText}${underlying}` : modeText, priority: 100 },
     { text: execDetail, priority: 90 },
     { text: gateStatus ? gateStatus.replace(/[\r\n\t]/g, " ") : "", priority: 50 },

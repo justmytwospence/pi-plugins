@@ -98,6 +98,7 @@ function setup(
     login?: (providerId: string, show: (dialog: never) => void) => Promise<void>;
     settings?: Partial<PlanModeSettings>;
     thinkingLevel?: string;
+    configureContext?: (ctx: ExtensionContext) => void;
   } = {},
 ) {
   const mock = createMockPi({ thinkingLevel: options.thinkingLevel ?? "high" });
@@ -135,11 +136,12 @@ function setup(
       getSessionId: () => "main",
     },
   });
+  options.configureContext?.(context.ctx as ExtensionContext);
   (context.ctx as { sendUserMessage?: unknown }).sendUserMessage = async (text: string) => sent.push(text);
   return { mock, context, sessions, sent, ready, harness: () => harness };
 }
 
-async function implementationScreen(options: Parameters<typeof setup>[0] = {}) {
+async function implementationScreen(options: Parameters<typeof setup>[0] & { planModel?: string } = {}) {
   const state = setup(options);
   await state.ready;
   state.mock.entries.push({
@@ -152,14 +154,19 @@ async function implementationScreen(options: Parameters<typeof setup>[0] = {}) {
       planners: [
         {
           id: "A",
-          spec: "anthropic/claude-sonnet-5-5:low",
+          spec: options.planModel ?? "anthropic/claude-sonnet-5-5:low",
           name: SONNET.name,
           plan: "# Exact A\n\nDo A.",
           revision: 1,
         },
         { id: "B", spec: "anthropic/claude-opus-5-5:low", name: OPUS.name, plan: "# Exact B\n\nDo B.", revision: 1 },
       ],
-      merged: { plan: "# Exact M\n\nDo M.", revision: 1, name: SONNET.name, spec: "anthropic/claude-sonnet-5-5" },
+      merged: {
+        plan: "# Exact M\n\nDo M.",
+        revision: 1,
+        name: SONNET.name,
+        spec: options.planModel ?? "anthropic/claude-sonnet-5-5",
+      },
     },
   });
   for (const handler of state.mock.events.get("session_start") ?? []) await handler({}, state.context.ctx);
@@ -464,6 +471,54 @@ test("/planners mode uses configured distinct targets and preserves effort acros
   assert.match(state.mock.sentUserMessages.at(-1)?.text ?? "", /finish_plan/u);
 });
 
+test("/planners implementation offers available Terra outside the planning shortlist", async () => {
+  const astra = { ...SONNET, provider: "openai-codex", id: "gpt-6-astra", name: "Astra" };
+  const sol = { ...astra, id: "gpt-6-sol", name: "Sol" };
+  const terra = { ...astra, id: "gpt-6-terra", name: "Terra" };
+  const configureContext = (ctx: ExtensionContext) => {
+    ctx.model = astra as ExtensionContext["model"];
+    Object.assign(ctx, { scopedModels: [{ model: astra }, { model: sol }] });
+    Object.assign(ctx.modelRegistry, {
+      getAvailable: () => [astra, sol, terra],
+      find: (provider: string, id: string) =>
+        [astra, sol, terra].find((model) => model.provider === provider && model.id === id),
+    });
+  };
+  const state = await implementationScreen({
+    configureContext,
+    planModel: `${astra.provider}/${astra.id}`,
+    settings: { planners: [{ provider: astra.provider, modelId: astra.id }] },
+  });
+  state.focus("Mode");
+  state.app.handleInput("\u001b[C");
+  assert.match(state.app.render().join("\n"), /Model\s+Sol/u);
+  state.focus("Model");
+  state.app.handleInput("\u001b[C");
+  assert.match(state.app.render().join("\n"), /Model\s+‹ Terra ›/u);
+  state.focus("Mode");
+  state.app.handleInput("\u001b[C");
+  state.app.handleInput("\r");
+  await state.opened;
+
+  const planning = setup({
+    configureContext,
+    settings: { planners: [{ provider: astra.provider, modelId: astra.id }] },
+  });
+  await planning.ready;
+  const opened = planning.mock.commands.get("planners")?.handler("", planning.context.ctx);
+  await flush();
+  const app = planning.harness();
+  assert.ok(app);
+  for (let i = 0; i < 5 && !/Planner A\s+‹/u.test(app.render().join("\n")); i++) app.handleInput("\u001b[B");
+  assert.match(app.render().join("\n"), /Planner A\s+‹ Astra ›/u);
+  app.handleInput("\u001b[C");
+  assert.match(app.render().join("\n"), /Planner A\s+‹ Sol ›/u);
+  app.handleInput("\u001b[C");
+  assert.match(app.render().join("\n"), /Planner A\s+‹ Astra ›/u);
+  app.handleInput("\u001b");
+  await opened;
+});
+
 test("/planners genuine handoff retains the fresh-child path", async () => {
   const state = await implementationScreen({ settings: { implementationModelMap: implementationMap } });
   let child:
@@ -670,7 +725,9 @@ test("the implementation brief requires honest structured completion fields in e
     assert.match(brief, /finish_plan with three required nonempty fields: report/u);
     assert.match(brief, /verification \(checks and their results, including anything not run\)/u);
     assert.match(brief, /concerns \(.*failures, and remaining work; use None only when accurate\)/u);
-    assert.match(brief, /informational, not user approval/u);
+    assert.match(brief, /submits for completion review, not unconditional completion/u);
+    assert.match(brief, /evidence-backed disputes[\s\S]*responses covering every finding exactly once/u);
+    assert.match(brief, /do not work around the pause/u);
   }
 });
 
@@ -690,6 +747,15 @@ test("the Completion review settings row defaults on and toggles both ways", asy
   assert.match(app.render().join("\n"), /Completion review\s+‹ off ›/u);
   app.handleInput("\u001b[D");
   assert.match(app.render().join("\n"), /Completion review\s+‹ on ›/u);
+  app.handleInput("\u001b[B");
+  assert.match(app.render().join("\n"), /Review revisions\s+‹ 2 ›/u);
+  app.handleInput("\u001b[D");
+  app.handleInput("\u001b[D");
+  assert.match(app.render().join("\n"), /Review revisions\s+‹ 0 ›/u);
+  app.handleInput("\u001b[D");
+  assert.match(app.render().join("\n"), /Review revisions\s+‹ 5 ›/u);
+  app.handleInput("\u001b[C");
+  assert.match(app.render().join("\n"), /Review revisions\s+‹ 0 ›/u);
   app.handleInput("\u001b");
   await opened;
 });

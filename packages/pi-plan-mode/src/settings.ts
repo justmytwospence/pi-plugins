@@ -131,8 +131,10 @@ export interface PlanModeSettings {
   jevToolSelection?: boolean;
   /** /planners: a finished plan's lane shows it as a rendered page (terminal-browser embed); default true. */
   renderedPlans?: boolean;
-  /** Ask the existing planner on call for an informational completion assessment; default true. */
+  /** Require structured acceptance from the planner on call before completion; default true. */
   completionReview?: boolean;
+  /** Automatic fix cycles after the initial completion review (0–5, default 2). */
+  completionMaxRevisions?: number;
   /**
    * Tools planners are always offered: preselected, and Jev scores them but never deselects them.
    * Each entry names a toolset, command grant, MCP server, or Other tool by id or name (`web`,
@@ -165,6 +167,7 @@ export interface PlanModeSettingsPatch {
   jevToolSelection?: boolean | null;
   renderedPlans?: boolean | null;
   completionReview?: boolean | null;
+  completionMaxRevisions?: number | null;
 }
 export interface UpdatePlanModeSettingsOptions {
   settingsPath?: string;
@@ -314,6 +317,11 @@ export function normalizePlanModeSettings(value: unknown): PlanModeSettings | un
     const enabled = Reflect.get(value, "completionReview");
     if (typeof enabled !== "boolean") return undefined;
     settings.completionReview = enabled;
+  }
+  if (Object.hasOwn(value, "completionMaxRevisions")) {
+    const maximum = Reflect.get(value, "completionMaxRevisions");
+    if (typeof maximum !== "number" || !Number.isInteger(maximum) || maximum < 0 || maximum > 5) return undefined;
+    settings.completionMaxRevisions = maximum;
   }
   if (Object.hasOwn(value, "jevThreshold")) {
     const threshold = Reflect.get(value, "jevThreshold");
@@ -669,11 +677,17 @@ export function updatePlanModeSettings(
     else if (patch.renderedPlans !== undefined) updated.renderedPlans = patch.renderedPlans;
     if (patch.completionReview === null) delete updated.completionReview;
     else if (patch.completionReview !== undefined) updated.completionReview = patch.completionReview;
+    if (patch.completionMaxRevisions === null) delete updated.completionMaxRevisions;
+    else if (patch.completionMaxRevisions !== undefined) updated.completionMaxRevisions = patch.completionMaxRevisions;
     const settings = normalizePlanModeSettings(updated);
     if (!settings) throw invalidSettingsError(settingsPath, "invalid settings shape");
     await publishSettings(settingsPath, updated, options.signal, options.beforeRename);
     return settings;
   });
+}
+
+export function configuredCompletionMaxRevisions(settings: PlanModeSettings): number {
+  return settings.completionMaxRevisions ?? 2;
 }
 
 export async function awaitPlanModeSettingsWrites(settingsPath = planModeSettingsPath()): Promise<void> {

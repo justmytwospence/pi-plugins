@@ -2,29 +2,51 @@
 // it where the permission mode is (status `plan-exec`; the permission mode underneath still decides
 // what runs), the planner that wrote the plan can stay on call through ask_planner, edits to files
 // the plan does not list get a note once, and finish_plan ends it with a structured completion report
-// and an optional informational planner assessment, both shown in the transcript. It is entered only by approving a plan (plan.ts
-// calls `begin`; no key cycles to it) and ended by finish_plan, or replaced by approving a newer plan.
+// and bounded planner acceptance. Pauses keep the implementation context and require explicit user
+// recovery. It is entered only by approving a plan (plan.ts calls begin).
+
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { relative, resolve } from "node:path";
-import {
-  type ExtensionAPI,
-  type ExtensionContext,
-  getMarkdownTheme,
-  type Theme,
-} from "@earendil-works/pi-coding-agent";
-import { type Component, Container, Spacer, Text } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Container, Text } from "@earendil-works/pi-tui";
 import { setToolsActive } from "./active-tools.js";
+import {
+  type AskDetails,
+  assessmentSummary,
+  type ChangeSummary,
+  changeSummaryText,
+  ExecCardRefresh,
+  type FinishDetails,
+  finishContext,
+  finishTone,
+  renderAsk,
+  renderFinish,
+} from "./exec-cards.js";
+import { holdBlocked } from "./herdr-blocked.js";
 import { type ModelSpec, parseModelSpec } from "./implementation-models.js";
-import { PlanMarkdown } from "./mermaid-art.js";
-import { type DiffLine, planDiff, planDiffText, renderPlanDiff } from "./plan-diff.js";
-import { inPlan, isPlanFile, planPaths, planTitle, readPlan, tildify } from "./plan-file.js";
+import {
+  createNegotiation,
+  type FindingResponse,
+  finishReview,
+  type NegotiationState,
+  outstanding,
+  parseReviewDecision,
+  type ReviewDecision,
+  recoverNegotiation,
+  restoreNegotiation,
+  startReview,
+  validateResponses,
+} from "./negotiation.js";
+import { planDiff, planDiffText } from "./plan-diff.js";
+import { inPlan, isPlanFile, planPaths, readPlan, tildify } from "./plan-file.js";
 import { expandHome } from "./plan-hook.js";
 import { type PlannerAccessConfig, PlannerAgent } from "./planner/agent.js";
-import { CONSULT_WRAP_UP, consultMessage, reviewRequest, reviewVerdict } from "./planner/prompt.js";
+import { CONSULT_WRAP_UP, consultMessage, reviewRequest } from "./planner/prompt.js";
 import { type PlannerSessionFactory, plannerSessionDir } from "./planner/session.js";
 import { formatCost } from "./planners.js";
-import { COLLAPSED_LINES, type ReviewTone, reviewCard, reviewStatusLine, reviewTitle } from "./review-card.js";
-import type { Usage } from "./scout-process.js";
+import { reviewCard, reviewTitle } from "./review-card.js";
+import { emptyUsage, type Usage } from "./scout-process.js";
 
 export const EXEC_ENTRY = "plan-mode:exec";
 export const EXEC_STATUS_KEY = "plan-exec";
@@ -50,6 +72,10 @@ export interface ExecState {
   returnTo?: string;
   asks: number;
   costUsd: number;
+  negotiation?: NegotiationState;
+  touched?: string[];
+  pendingReturn?: { leaf: string; details: FinishDetails };
+  completion?: FinishDetails;
 }
 
 export interface ExecHost {
@@ -58,6 +84,7 @@ export interface ExecHost {
   createSession?: PlannerSessionFactory;
   restoreModel(ctx: ExtensionContext, spec: ModelSpec): Promise<unknown>;
   completionReview(): boolean;
+  completionMaxRevisions(): number;
 }
 
 export interface ExecController {
@@ -65,58 +92,27 @@ export interface ExecController {
   begin(ctx: ExtensionContext, state: ExecState, options: { record: boolean }): void;
 }
 
-interface AskDetails {
-  question: string;
-  reply?: string;
-  planner: string;
-  changes?: DiffLine[];
-  costUsd?: number;
-  pending?: boolean;
-  activity?: string;
-}
-
-/** What the implementation touched, for the user's decision. */
-interface ChangeSummary {
-  /** Files the agent edited or wrote, relative to the project. */
-  edited: string[];
-  /** Of those, the files the plan does not list. */
-  outside: string[];
-  /** `git diff --shortstat HEAD`, when the project is a repository with changes. */
-  git?: string;
-}
-
-type CompletionAssessment =
-  | { state: "reviewed"; planner: string; narrative: string; verdict: "done" | "changes" | "unclear"; costUsd: number }
-  | { state: "disabled" }
-  | { state: "unavailable"; reason: string }
-  | { state: "failed"; reason: string; costUsd?: number };
-
-interface FinishDetails {
-  report: string;
-  /** Optional only for completion messages saved before structured reports were introduced. */
-  verification?: string;
-  concerns?: string;
-  assessment?: CompletionAssessment;
-  pending?: boolean;
-  activity?: string;
-  planFile: string;
-  changes?: ChangeSummary;
-  /** Who implemented it, e.g. `Claude Sonnet 5.5`. */
-  implementer?: string;
-  /** The model the session went back to, when it did. */
-  returnedTo?: string;
-  /** One line on how it went, from pi-recap when it is loaded (shown on the card back in the planning conversation). */
-  headline?: string;
-  /** Questions put to the planner on call, and what they cost. */
-  asks?: number;
-  costUsd?: number;
-}
-
 const NOT_ACTIVE = "No approved plan is being implemented.";
 
 export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
   let state: ExecState | undefined;
+  let epoch = 0;
+  const cards = new ExecCardRefresh();
+  const currentExchange = () => {
+    const n = state?.active ? state.negotiation : undefined;
+    const last = n?.history.at(-1);
+    return n
+      ? {
+          executionId: n.executionId,
+          exchangeId: n.latestExchangeId,
+          unresolvedReviewId: last?.decision && last.decision.outcome !== "accepted" ? last.id : undefined,
+        }
+      : undefined;
+  };
+  let pendingReturn: { leaf: string; details: FinishDetails } | undefined;
+  const live = (current: ExecState, token: number) => state === current && epoch === token;
   let agent: PlannerAgent | undefined;
+  let agentPurpose: "consult" | "review" | undefined;
   const noted = new Set<string>();
   /** Files the agent edited or wrote with its tools while this mode was on. */
   const touched = new Set<string>();
@@ -131,13 +127,20 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
   };
 
   const updateStatus = (ctx: ExtensionContext | undefined = hostCtx) => {
+    cards.refresh();
     if (!ctx?.hasUI) return;
     let text: string | undefined;
     if (state?.active) {
-      text = "exec mode on";
-      if (state.planner) text += ` · ${state.planner.name} on call`;
-      if (state.asks > 0)
-        text += ` · ${state.asks} ${state.asks === 1 ? "ask" : "asks"} · ${formatCost(state.costUsd)}`;
+      const n = state.negotiation;
+      const phase =
+        n?.phase === "reviewing"
+          ? `review ${n.attempts}`
+          : n?.phase === "revising"
+            ? `revising · ${outstanding(n).length} findings`
+            : n?.phase === "paused"
+              ? `paused · ${n.pause?.reason === "user_needed" || n.pause?.reason === "exhausted" ? "user needed" : "review unavailable"}`
+              : (n?.phase ?? "implementing");
+      text = `exec mode on · ${phase} · ${state.asks} consultations · ${formatCost(state.costUsd)} consult · ${formatCost(n?.reviewCostUsd ?? 0)} review`;
     }
     safely(() => ctx.ui.setStatus(EXEC_STATUS_KEY, text));
   };
@@ -145,6 +148,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
   const disposeAgent = () => {
     agent?.dispose();
     agent = undefined;
+    agentPurpose = undefined;
   };
 
   const setTools = () => {
@@ -154,17 +158,26 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
 
   const persist = () => {
     if (state) {
-      const snapshot = { ...state };
+      state.touched = [...touched];
+      const snapshot = structuredClone(state);
       safely(() => pi.appendEntry(EXEC_ENTRY, snapshot));
     }
   };
 
   const begin = (ctx: ExtensionContext, next: ExecState, options: { record: boolean }) => {
+    epoch++;
+    cards.begin(ctx);
+    pendingReturn = undefined;
     hostCtx = ctx;
     disposeAgent();
     noted.clear();
     touched.clear();
-    state = { ...next };
+    for (const file of next.touched ?? []) touched.add(file);
+    // record:false handoffs persist this same input in the host's compaction transaction.
+    // Seed it before cloning so that the very first durable entry snapshots the budget/identity.
+    next.negotiation = createNegotiation(randomUUID(), host.completionMaxRevisions?.() ?? 2);
+    next.touched = [...touched];
+    state = structuredClone(next);
     if (options.record) persist();
     setTools();
     updateStatus(ctx);
@@ -172,14 +185,59 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
 
   const end = (ctx: ExtensionContext) => {
     if (!state) return;
-    state = { ...state, active: false };
+    state.active = false;
+    cards.end();
     persist();
     disposeAgent();
     noted.clear();
-    touched.clear();
     setToolsActive(pi, EXEC_TOOLS, false);
-    state = undefined;
     updateStatus(ctx);
+  };
+
+  const finalize = async (
+    current: ExecState,
+    token: number,
+    details: FinishDetails,
+    ctx: ExtensionContext,
+    usage?: Usage,
+  ) => {
+    if (!live(current, token)) return text("Execution changed; finalization discarded.");
+    if (current.returnTo && ctx.hasUI && details.completion !== "stopped") {
+      pendingReturn = { leaf: current.returnTo, details: structuredClone(details) };
+      current.pendingReturn = pendingReturn;
+    }
+    current.completion = structuredClone(details);
+    end(ctx);
+    if (details.completion !== "stopped") {
+      const spec = parseModelSpec(current.restore);
+      const now = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
+      if (spec && now === current.implementerModel) {
+        let restored = false;
+        try {
+          restored = (await host.restoreModel(ctx, spec)) !== false;
+        } catch {
+          /* The final report remains durable even when restoration fails. */
+        }
+        if (!live(current, token)) return text("Execution changed during model restoration.");
+        if (restored && current.planner) details.returnedTo = current.planner.name;
+        if (!restored) details.action = "Planning model restoration failed; select the model manually.";
+      }
+    }
+    if (live(current, token)) {
+      current.completion = structuredClone(details);
+      persist();
+    }
+    if (pendingReturn && live(current, token)) {
+      pendingReturn.details = structuredClone(details);
+      current.pendingReturn = pendingReturn;
+      persist();
+    }
+    return {
+      content: [{ type: "text", text: `${finishMessageText(details)}\n\nExec mode is over. Stop here.` }],
+      details,
+      ...(usage ? { usage } : {}),
+      terminate: true,
+    } as never;
   };
 
   const record = (usage: Usage, ctx: ExtensionContext) => {
@@ -191,6 +249,8 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
   };
 
   const restore = (ctx: ExtensionContext) => {
+    epoch++;
+    cards.begin(ctx);
     hostCtx = ctx;
     disposeAgent();
     noted.clear();
@@ -200,6 +260,19 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       .reverse()
       .find((entry) => entry.type === "custom" && entry.customType === EXEC_ENTRY)?.data;
     state = validState(latest);
+    pendingReturn = state?.pendingReturn;
+    if (state) {
+      for (const file of state.touched ?? []) touched.add(file);
+      state.negotiation ??= createNegotiation(randomUUID(), host.completionMaxRevisions?.() ?? 2);
+      const n = state.negotiation;
+      if (n.phase === "reviewing" || n.phase === "consulting") {
+        if (n.phase === "reviewing") n.history.at(-1)!.error = "Review interrupted by reload.";
+        n.phase = "paused";
+        n.pause = { reason: "interrupted", action: "Exchange interrupted by reload; no paid request was retried." };
+      }
+      persist();
+    }
+    if (!state?.active) cards.end();
     setTools();
     updateStatus(ctx);
   };
@@ -207,16 +280,20 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
   pi.on("session_start", (_event, ctx) => restore(ctx));
   pi.on("session_tree", (_event, ctx) => restore(ctx));
   pi.on("session_shutdown", () => {
+    epoch++;
+    cards.end();
     disposeAgent();
     hostCtx = undefined;
   });
 
   /** The planner on call, opened on its seeded session the first time it is asked. */
-  const consultant = (ctx: ExtensionContext): PlannerAgent | undefined => {
+  const consultant = (ctx: ExtensionContext, purpose: "consult" | "review" = "consult"): PlannerAgent | undefined => {
+    if (agent && agentPurpose !== purpose) disposeAgent();
     if (agent) return agent;
     const planner = state?.planner;
     const spec = parseModelSpec(planner?.spec);
     if (!state || !planner || !spec) return undefined;
+    agentPurpose = purpose;
     agent = new PlannerAgent({
       id: "P",
       spec,
@@ -224,7 +301,10 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       cwd: ctx.cwd,
       access: host.consultantAccess(ctx, state.planFile, spec),
       timeoutMs: CONSULT_TIMEOUT_MS,
-      wrapUpMessage: CONSULT_WRAP_UP,
+      wrapUpMessage:
+        purpose === "review"
+          ? "Time is almost up. Stop investigating. Do not modify files or run tests. Return the required strict JSON review decision now, with explicit limitations; missing human-only evidence requires user_needed."
+          : CONSULT_WRAP_UP,
       sessionDir: plannerSessionDir(),
       seed: [],
       sessionFile: planner.sessionFile,
@@ -244,6 +324,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
   pi.registerTool({
     name: ASK_TOOL,
     ...flags,
+    ...{ ccstyleOwnResult: true },
     label: "Ask planner",
     description:
       "Ask the planner that wrote the plan you are implementing, and wait for its answer. It keeps its full research context and can read the current files, including your changes. Use it when the plan does not fit what you find: a step cannot be done as written, a fact it states is wrong, a change it does not list is needed, or it leaves a choice open. It answers with a decision, and amends the plan file when the plan changes.",
@@ -270,13 +351,18 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       if (question) container.addChild(new Text(theme.fg("muted", question), 0, 0));
       return container;
     },
-    renderResult: (result, options, theme) => renderAsk(result.details as AskDetails | undefined, options, theme),
+    renderResult: (result, options, theme) =>
+      renderAsk(result.details as AskDetails | undefined, options, theme, currentExchange),
     async execute(_id, params: unknown, signal, onUpdate, ctx) {
       hostCtx = ctx;
       const current = state;
       if (!current?.active || !current.planner) {
         return text("No planner is on call: you are not implementing a handed-off plan.");
       }
+      const token = epoch;
+      const n = current.negotiation!;
+      if (n.phase === "paused" || n.phase === "reviewing")
+        return { content: [{ type: "text", text: pauseText(n) }], details: undefined, terminate: true } as never;
       const message =
         typeof (params as { message?: unknown })?.message === "string"
           ? (params as { message: string }).message.trim()
@@ -284,17 +370,32 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       if (!message) return text("Say what you found and what you need decided.");
       const planner = consultant(ctx);
       if (!planner) {
-        return text(
-          "The planner's session is missing; decide within the plan, and ask the user about anything it leaves open.",
-        );
+        const error = "The planner's session is missing; ask the user about anything the approved plan leaves open.";
+        return {
+          content: [{ type: "text", text: error }],
+          details: {
+            question: message,
+            planner: current.planner.name,
+            error,
+            executionId: n.executionId,
+            number: current.asks + 1,
+          },
+        } as never;
       }
+      const previousPhase = n.phase;
+      n.phase = "consulting";
+      n.latestExchangeId = `${n.executionId}:consult:${current.asks + 1}`;
+      persist();
+      updateStatus(ctx);
+      const askIdentity = { number: current.asks + 1, executionId: n.executionId, exchangeId: n.latestExchangeId };
       const before = readPlan(current.planFile);
       const name = current.planner.name;
       const progress = () => {
+        if (!live(current, token)) return;
         const activity = planner.stats.lastActivity ?? "thinking";
         onUpdate?.({
           content: [{ type: "text", text: `${name}: ${activity}` }],
-          details: { question: message, planner: name, pending: true, activity } satisfies AskDetails,
+          details: { ...askIdentity, question: message, planner: name, pending: true, activity } satisfies AskDetails,
         } as never);
       };
       const unsubscribe = planner.subscribe(progress);
@@ -303,12 +404,36 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       let result: Awaited<ReturnType<PlannerAgent["consult"]>>;
       try {
         result = await planner.consult(consultMessage(message, "implementer"), ctx, "implementer", signal, message);
+      } catch (error) {
+        if (!live(current, token)) return text("Execution changed; discarded stale consultation.");
+        n.phase = previousPhase;
+        disposeAgent();
+        persist();
+        updateStatus(ctx);
+        return {
+          content: [{ type: "text", text: `Planner consultation failed: ${String(error)}` }],
+          details: { ...askIdentity, question: message, planner: name, error: String(error) },
+        } as never;
       } finally {
         unsubscribe();
         signal?.removeEventListener("abort", onAbort);
       }
-      if (signal?.aborted) return text("Stopped waiting for the planner.");
+      if (!live(current, token)) return text("Execution changed; discarded stale planner response.");
+      n.phase = previousPhase;
+      if (signal?.aborted || result.error) disposeAgent();
       record(result.usage, ctx);
+      if (signal?.aborted)
+        return {
+          content: [{ type: "text", text: "Stopped waiting for the planner." }],
+          details: {
+            ...askIdentity,
+            question: message,
+            planner: name,
+            error: "Consultation cancelled.",
+            costUsd: result.usage.cost.total,
+          },
+          usage: result.usage,
+        } as never;
       if (result.error) {
         return {
           content: [
@@ -317,7 +442,13 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
               text: `The planner failed: ${result.error}. Decide within the plan, and ask the user about anything it leaves open.`,
             },
           ],
-          details: { question: message, planner: name, costUsd: result.usage.cost.total } satisfies AskDetails,
+          details: {
+            ...askIdentity,
+            error: result.error,
+            question: message,
+            planner: name,
+            costUsd: result.usage.cost.total,
+          } satisfies AskDetails,
           usage: result.usage,
         } as never;
       }
@@ -332,6 +463,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       return {
         content: [{ type: "text", text: `${body}${amended}` }],
         details: {
+          ...askIdentity,
           question: message,
           reply,
           planner: name,
@@ -349,16 +481,29 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     ...{ ccstyleOwnResult: true },
     label: "Finish plan",
     description:
-      "Finish implementing the approved plan: report what changed, verification results, and outstanding issues honestly. This ends exec mode even if the informational planner assessment finds changes needed.",
-    promptSnippet: "Report an approved plan as done",
+      "Submit implementation for completion review. Only explicit acceptance or configured no-review completion ends exec. Address requested findings and resubmit; paused reviews require user recovery.",
+    promptSnippet: "Submit an approved plan for completion review",
     promptGuidelines: [
-      "When implementation of an approved plan is finished, call finish_plan with report, verification, and concerns. Include failed or unrun checks and remaining work; use concerns: None only when accurate.",
+      "Submit report, verification and concerns honestly. On subsequent submissions respond exactly once to each outstanding finding with addressed, disputed or blocked and evidence. Never work around a paused review or reset its budget.",
     ],
     parameters: {
       type: "object",
       additionalProperties: false,
       required: ["report", "verification", "concerns"],
       properties: {
+        responses: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["id", "status", "response"],
+            properties: {
+              id: { type: "string", minLength: 1 },
+              status: { type: "string", enum: ["addressed", "disputed", "blocked"] },
+              response: { type: "string", minLength: 1 },
+            },
+          },
+        },
         report: {
           type: "string",
           minLength: 1,
@@ -376,12 +521,37 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
         },
       },
     } as never,
-    renderCall: (_args, theme) => reviewTitle(theme, "Implementation complete"),
-    renderResult: (result, options, theme) => renderFinish(result.details as FinishDetails | undefined, options, theme),
+    renderCall: (_args, theme) => reviewTitle(theme, "Implementation review"),
+    renderResult: (result, options, theme) =>
+      renderFinish(result.details as FinishDetails | undefined, options, theme, currentExchange),
     async execute(_id, params: unknown, signal, onUpdate, ctx) {
       hostCtx = ctx;
       const current = state;
       if (!current?.active) return text(NOT_ACTIVE);
+      const token = epoch;
+      let n = current.negotiation!;
+      if (n.phase === "paused") {
+        const previous = n.history.at(-1);
+        const details: FinishDetails = {
+          ...(n.latestReport ?? {
+            report: "No report submitted.",
+            verification: "Unknown.",
+            concerns: "Execution paused.",
+          }),
+          planFile: current.planFile,
+          negotiation: structuredClone(n),
+          decision: previous?.decision,
+          error: previous?.error,
+          executionId: n.executionId,
+          exchangeId: n.latestExchangeId,
+          round: n.attempts,
+          question: n.pause?.question,
+          action: pauseText(n),
+          asks: current.asks,
+          costUsd: current.costUsd,
+        };
+        return { content: [{ type: "text", text: pauseText(n) }], details, terminate: true } as never;
+      }
       const fields = params as Record<string, unknown> | undefined;
       const field = (key: string) => (typeof fields?.[key] === "string" ? fields[key].trim() : "");
       const report = field("report");
@@ -392,28 +562,59 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
           "Retry finish_plan with nonempty report (what changed), verification (checks and results, including anything not run), and concerns (deviations, failures, and remaining work; use None only when accurate). Exec mode is still active.",
         );
       }
+      let responses: FindingResponse[];
+      try {
+        responses = validateResponses(fields?.responses, outstanding(n));
+      } catch (error) {
+        return text(String(error));
+      }
+      const saved = n.latestReport;
+      const submission = n.history.at(-1)?.error && saved ? saved : { report, verification, concerns };
+      const changes = await summarizeChanges(current, touched, ctx.cwd);
+      if (!live(current, token)) return text("Execution changed; submission discarded.");
       const details: FinishDetails = {
-        report,
-        verification,
-        concerns,
+        ...submission,
+        responses,
+        previousFindings: structuredClone(outstanding(n)),
+        executionId: n.executionId,
+        report: submission.report,
         planFile: current.planFile,
-        changes: await summarizeChanges(current, touched, ctx.cwd),
+        changes,
         implementer: current.implementer,
         asks: current.asks,
         costUsd: current.costUsd,
       };
       let usage: Usage | undefined;
+      if (!host.completionReview()) {
+        details.assessment = { state: "disabled" };
+        details.completion = "no_review";
+        details.negotiation = structuredClone(n);
+        return await finalize(current, token, details, ctx);
+      }
       try {
-        if (!host.completionReview()) details.assessment = { state: "disabled" };
-        else if (!current.planner) {
-          details.assessment = { state: "unavailable", reason: "No planner is on call." };
-        } else {
-          const planner = consultant(ctx);
+        n = startReview(n, submission, responses);
+      } catch (error) {
+        return text(String(error));
+      }
+      current.negotiation = n;
+      details.exchangeId = n.latestExchangeId;
+      details.round = n.attempts;
+      details.negotiation = structuredClone(n);
+      persist();
+      updateStatus(ctx);
+      let decision: ReviewDecision | undefined;
+      let reviewCost = 0;
+      try {
+        if (!current.planner) details.assessment = { state: "unavailable", reason: "No planner is on call." };
+        else {
+          const planner = consultant(ctx, "review");
           if (!planner) {
             details.assessment = { state: "unavailable", reason: "The planner's session is missing or invalid." };
           } else {
             const baseline = planner.stats.costUsd;
+            const baselineTokens = planner.stats.totalTokens;
             const progress = () => {
+              if (!live(current, token)) return;
               safely(() =>
                 onUpdate?.({
                   content: [{ type: "text", text: "Planner reviewing…" }],
@@ -425,12 +626,14 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
             const controller = new AbortController();
             let timer: ReturnType<typeof setTimeout> | undefined;
             let interrupted: "cancelled" | "timed out" | undefined;
+            let stopping: Promise<void> | undefined;
             let interrupt: (reason: "cancelled" | "timed out") => void = () => undefined;
             const stopped = new Promise<undefined>((done) => {
               interrupt = (reason) => {
+                if (interrupted) return;
                 interrupted = reason;
                 controller.abort();
-                void planner.stop().catch(() => undefined);
+                stopping = planner.stop().catch(() => undefined);
                 done(undefined);
               };
             });
@@ -444,9 +647,14 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
                 ? undefined
                 : await Promise.race([
                     planner.consult(
-                      reviewRequest(report, {
-                        verification,
-                        concerns,
+                      reviewRequest(submission.report, {
+                        verification: submission.verification,
+                        concerns: submission.concerns,
+                        previousFindings: outstanding(n),
+                        responses,
+                        userEvidence: n.userAnswers,
+                        remainingRevisions:
+                          Math.max(0, n.maxRevisions - n.revisionsUsed) + (n.revisionAuthorized ? 1 : 0),
                         planFile: current.planFile,
                         changes: changeSummaryText(details.changes),
                       }),
@@ -456,8 +664,29 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
                     ),
                     stopped,
                   ]);
+              // Drain asynchronous final abort usage before disposal; broken aborts get bounded cleanup.
+              if (stopping) {
+                let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+                try {
+                  await Promise.race([
+                    stopping,
+                    new Promise<void>((resolve) => {
+                      cleanupTimer = setTimeout(resolve, 5000);
+                    }),
+                  ]);
+                } finally {
+                  clearTimeout(cleanupTimer);
+                }
+              }
+              if (!live(current, token)) return text("Execution changed; discarded stale review.");
               usage = result?.usage;
-              const costUsd = usage?.cost.total ?? Math.max(0, planner.stats.costUsd - baseline);
+              const costUsd = Math.max(usage?.cost.total ?? 0, planner.stats.costUsd - baseline, 0);
+              if (interrupted && (!usage || usage.cost.total < costUsd)) {
+                usage = emptyUsage();
+                usage.cost.total = costUsd;
+                usage.totalTokens = Math.max(0, planner.stats.totalTokens - baselineTokens);
+              }
+              reviewCost = costUsd;
               if (interrupted || signal?.aborted) {
                 details.assessment = {
                   state: "failed",
@@ -469,19 +698,21 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
               } else if (!result?.reply.trim()) {
                 details.assessment = { state: "failed", reason: "The planner returned an empty reply.", costUsd };
               } else {
+                decision = parseReviewDecision(result.reply);
                 details.assessment = {
                   state: "reviewed",
                   planner: current.planner.name,
                   narrative: result.reply.trim(),
-                  verdict: reviewVerdict(result.reply),
+                  verdict: decision.outcome === "accepted" ? "done" : "changes",
                   costUsd,
                 };
               }
             } catch (error: unknown) {
+              reviewCost = Math.max(0, planner.stats.costUsd - baseline);
               details.assessment = {
                 state: "failed",
                 reason: error instanceof Error ? error.message : String(error),
-                costUsd: Math.max(0, planner.stats.costUsd - baseline),
+                costUsd: reviewCost,
               };
             } finally {
               clearTimeout(timer);
@@ -492,27 +723,169 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
         }
       } catch (error: unknown) {
         details.assessment = { state: "failed", reason: error instanceof Error ? error.message : String(error) };
-      } finally {
-        end(ctx);
       }
-      const spec = parseModelSpec(current.restore);
-      const now = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
-      const restored = Boolean(spec && now === current.implementerModel);
-      if (spec && restored) await host.restoreModel(ctx, spec);
-      if (restored && current.planner) details.returnedTo = current.planner.name;
-      if (current.returnTo && ctx.hasUI) pendingReturn = { leaf: current.returnTo, details };
+      if (!live(current, token)) return text("Execution changed; discarded stale review.");
+      let error =
+        details.assessment?.state === "failed" || details.assessment?.state === "unavailable"
+          ? details.assessment.reason
+          : undefined;
+      n = finishReview(n, { decision, error, costUsd: reviewCost });
+      error = n.history.at(-1)?.error ?? error;
+      if (error) {
+        disposeAgent();
+        details.assessment = { state: "failed", reason: error, costUsd: reviewCost };
+      }
+      current.negotiation = n;
+      decision = n.history.at(-1)?.decision;
+      Object.assign(details, {
+        negotiation: structuredClone(n),
+        decision,
+        error,
+        pauseReason: n.pause?.reason,
+        question: n.pause?.question,
+        action: n.phase === "paused" ? pauseText(n) : undefined,
+      });
+      persist();
+      updateStatus(ctx);
+      if (decision?.outcome === "accepted") {
+        details.completion = "accepted";
+        return await finalize(current, token, details, ctx, usage);
+      }
       return {
-        content: [{ type: "text", text: `${finishMessageText(details)}\n\nExec mode is over. Stop here.` }],
+        content: [
+          {
+            type: "text",
+            text: `${finishMessageText(details)}\n\n${n.phase === "paused" ? pauseText(n) : "Exec remains active. Fix the findings or provide evidence-backed disputes, then submit finish_plan with a response for every finding."}`,
+          },
+        ],
         details,
         ...(usage ? { usage } : {}),
-        terminate: true,
+        ...(n.phase === "paused" ? { terminate: true } : {}),
       } as never;
+    },
+  });
+
+  pi.registerCommand("plan-exec", {
+    description: "Inspect or explicitly recover a paused implementation: retry, resume <answer>, accept, stop",
+    handler: async (args, ctx) => {
+      const current = state;
+      if (!current?.active) {
+        ctx.ui.notify(NOT_ACTIVE, "info");
+        return;
+      }
+      const token = epoch;
+      const n = current.negotiation!;
+      const [action, ...words] = args.trim().split(/\s+/u);
+      const findings = outstanding(n)
+        .map((f) => `${f.id}: ${f.title}\n${f.detail}\nRequested: ${f.requestedChange}`)
+        .join("\n\n");
+      if (!action) {
+        ctx.ui.notify(`${n.phase}\n${findings}\n${pauseText(n)}`, "info");
+        return;
+      }
+      if (!ctx.isIdle()) {
+        ctx.ui.notify("Wait until the implementer is idle.", "warning");
+        return;
+      }
+      if ((action === "stop" || action === "accept") && words.length) {
+        ctx.ui.notify("Usage: /plan-exec [retry | resume <answer> | accept | stop]", "warning");
+        return;
+      }
+      if (action === "stop") {
+        const report = n.latestReport ?? {
+          report: "Implementation stopped.",
+          verification: "Not provided.",
+          concerns: "Execution abandoned; no completion claimed.",
+        };
+        const details: FinishDetails = {
+          ...report,
+          planFile: current.planFile,
+          negotiation: structuredClone(n),
+          completion: "stopped",
+          executionId: n.executionId,
+        };
+        current.pendingReturn = undefined;
+        pendingReturn = undefined;
+        await finalize(current, token, details, ctx);
+        if (live(current, token))
+          pi.sendMessage({
+            customType: FINISH_MESSAGE_TYPE,
+            content: finishMessageText(details),
+            details,
+            display: true,
+          });
+        return;
+      }
+      if (action === "accept") {
+        if (n.phase !== "paused") {
+          ctx.ui.notify("Only a paused execution can be overridden.", "warning");
+          return;
+        }
+        if (!ctx.hasUI) {
+          ctx.ui.notify("A UI confirmation is required; execution remains paused.", "warning");
+          return;
+        }
+        const release = holdBlocked(pi.events, "Finish without planner acceptance?");
+        let answer: string | undefined;
+        try {
+          answer = await ctx.ui.select("Finish without planner acceptance?", ["Finish without review", "Keep paused"]);
+        } finally {
+          release();
+        }
+        if (!live(current, token) || answer !== "Finish without review" || !ctx.isIdle()) return;
+        const details: FinishDetails = {
+          ...(n.latestReport ?? { report: "No report submitted.", verification: "Unknown.", concerns: "Unreviewed." }),
+          planFile: current.planFile,
+          negotiation: structuredClone(n),
+          decision: n.history.at(-1)?.decision,
+          completion: "user_override",
+          executionId: n.executionId,
+          asks: current.asks,
+          costUsd: current.costUsd,
+        };
+        await finalize(current, token, details, ctx);
+        if (live(current, token) && pendingReturn)
+          pi.sendUserMessage(`/${BACK_COMMAND}`, { expandPromptTemplates: true });
+        if (live(current, token))
+          pi.sendMessage({
+            customType: FINISH_MESSAGE_TYPE,
+            content: finishMessageText(details),
+            details,
+            display: true,
+          });
+        return;
+      }
+      if (
+        (action !== "retry" && action !== "resume") ||
+        (action === "retry" && words.length) ||
+        (action === "resume" && !words.join(" ").trim())
+      ) {
+        ctx.ui.notify("Usage: /plan-exec [retry | resume <answer> | accept | stop]", "warning");
+        return;
+      }
+      try {
+        current.negotiation = recoverNegotiation(n, action);
+      } catch (error) {
+        ctx.ui.notify(String(error), "warning");
+        return;
+      }
+      if (action === "resume") {
+        current.negotiation.userAnswers ??= [];
+        current.negotiation.userAnswers.push(words.join(" "));
+      }
+      disposeAgent();
+      persist();
+      updateStatus(ctx);
+      pi.sendUserMessage(
+        action === "retry"
+          ? "The user authorized one retry of the interrupted/failed completion review. Resubmit finish_plan using the saved report and finding responses; do not make unrelated changes. No revision counts were reset."
+          : `The user resumed this implementation. User-provided evidence/answer (not independent automated verification): ${words.join(" ")}\nOutstanding findings:\n${findings}\nAddress these in the existing context, then submit finish_plan with per-finding responses. An exhausted budget gets one additional revision-and-review cycle only; further extensions require another explicit /plan-exec resume command.`,
+      );
     },
   });
 
   // Back to the planning conversation: a tool cannot navigate the session tree, a command can, and a
   // command sent once the turn has settled runs outside the streaming turn.
-  let pendingReturn: { leaf: string; details: FinishDetails } | undefined;
   pi.on("agent_settled", (event) => {
     if (!pendingReturn) return;
     // Keep the report available to /plan-back even when review cancellation aborts the turn.
@@ -523,10 +896,13 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     description: "Return to the planning conversation after an implementation (runs by itself)",
     handler: async (_args, ctx) => {
       const back = pendingReturn;
-      pendingReturn = undefined;
-      if (!back) return;
+      if (!back || !ctx.isIdle()) return;
+      const token = epoch;
+      const owner = state;
+      const sessionId = ctx.sessionManager.getSessionId();
       // Asked while still on the implementation branch, where the turn it recaps is.
       const headline = await recapHeadline(pi, 5_000);
+      if (epoch !== token || state !== owner || pendingReturn !== back) return;
       // Keep the files: the implementation's changes are the point, and pi-rewind (when loaded) would
       // otherwise offer to restore them to how they were at the plan.
       try {
@@ -534,17 +910,49 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       } catch {
         // No event bus.
       }
+      // Clear durably on the source branch before leaving it, not on the destination branch.
+      pendingReturn = undefined;
+      if (owner) {
+        owner.pendingReturn = undefined;
+        persist();
+      }
+      // persist() appended the clearing entry and advanced the source leaf. Compare against
+      // that leaf, not the pre-persist leaf, when deciding whether a failed return is retryable.
+      const sourceLeaf = ctx.sessionManager.getLeafId?.();
       try {
         // No model summary of the branch: the implementer's report is the summary, and it goes in as a
         // message the planner reads.
         await ctx.navigateTree(back.leaf, { summarize: false });
       } catch (error: unknown) {
+        const leaf = ctx.sessionManager.getLeafId?.();
+        if (
+          epoch === token &&
+          state === owner &&
+          ctx.sessionManager.getSessionId() === sessionId &&
+          (!sourceLeaf || leaf === sourceLeaf)
+        ) {
+          pendingReturn = back;
+          if (owner) {
+            owner.pendingReturn = back;
+            persist();
+          }
+        }
         ctx.ui.notify(
-          `Could not return to the planning conversation: ${error instanceof Error ? error.message : String(error)}. Use /tree.`,
+          `Could not return to the planning conversation: ${error instanceof Error ? error.message : String(error)}. Retry /plan-back (the completion report is saved), or use /tree.`,
           "warning",
         );
         return;
       }
+      // Our own navigation may cause exactly one session_tree restore. Any other epoch/session/leaf
+      // change is external and must not receive a stale completion message or tombstone.
+      if (
+        ctx.sessionManager.getSessionId() !== sessionId ||
+        (epoch !== token && (epoch !== token + 1 || state?.active))
+      )
+        return;
+      const leaf = ctx.sessionManager.getLeafId?.();
+      if (leaf && leaf !== back.leaf) return;
+      pendingReturn = undefined;
       const details: FinishDetails = { ...back.details, ...(headline ? { headline } : {}) };
       pi.sendMessage({
         customType: FINISH_MESSAGE_TYPE,
@@ -557,8 +965,16 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
   pi.registerMessageRenderer<FinishDetails>(FINISH_MESSAGE_TYPE, (message, options, theme) =>
     reviewCard(
       theme,
-      "Implementation complete",
-      renderFinish(message.details, { expanded: options.expanded, isPartial: false }, theme),
+      message.details?.completion === "stopped"
+        ? "Implementation stopped"
+        : message.details?.completion === "accepted"
+          ? "Accepted"
+          : message.details?.completion === "no_review"
+            ? "Completed without review"
+            : message.details?.completion === "user_override"
+              ? "Completed by user override"
+              : "Implementation review",
+      renderFinish(message.details, { expanded: options.expanded, isPartial: false }, theme, currentExchange),
       finishTone(message.details),
     ),
   );
@@ -568,7 +984,10 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     if (!state?.active || event.isError) return undefined;
     if (event.toolName !== "edit" && event.toolName !== "write") return undefined;
     const file = resolve(ctx.cwd, expandHome(String((event.input as { path?: unknown })?.path ?? "")));
-    if (!isPlanFile(file, ctx.cwd, state.planFile)) touched.add(file);
+    if (!isPlanFile(file, ctx.cwd, state.planFile)) {
+      touched.add(file);
+      persist();
+    }
     if (noted.has(file)) return undefined;
     const hasPlanner = Boolean(state.planner);
     let note: string | undefined;
@@ -602,7 +1021,10 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
 function validState(data: unknown): ExecState | undefined {
   if (!data || typeof data !== "object") return undefined;
   const entry = data as Partial<ExecState>;
-  if (entry.active !== true || typeof entry.planFile !== "string" || !entry.planFile) return undefined;
+  if (typeof entry.active !== "boolean" || typeof entry.planFile !== "string" || !entry.planFile) return undefined;
+  if (!entry.active && !entry.pendingReturn) return undefined;
+  const negotiation = entry.negotiation === undefined ? undefined : restoreNegotiation(entry.negotiation);
+  if (entry.negotiation !== undefined && !negotiation) return undefined;
   const planner = entry.planner;
   const valid =
     planner &&
@@ -610,42 +1032,31 @@ function validState(data: unknown): ExecState | undefined {
     typeof planner.name === "string" &&
     typeof planner.sessionFile === "string";
   return {
-    active: true,
+    active: entry.active,
     planFile: entry.planFile,
+    ...(negotiation ? { negotiation } : {}),
+    ...(entry.completion && typeof entry.completion.report === "string"
+      ? { completion: structuredClone(entry.completion) }
+      : {}),
+    ...(Array.isArray(entry.touched) && entry.touched.every((p) => typeof p === "string")
+      ? { touched: [...entry.touched] }
+      : {}),
+    ...(entry.pendingReturn &&
+    typeof entry.pendingReturn.leaf === "string" &&
+    entry.pendingReturn.details &&
+    typeof entry.pendingReturn.details.report === "string"
+      ? { pendingReturn: structuredClone(entry.pendingReturn) }
+      : {}),
     implementer: typeof entry.implementer === "string" ? entry.implementer : "this model",
     implementerModel: typeof entry.implementerModel === "string" ? entry.implementerModel : "",
     ...(valid ? { planner: { spec: planner.spec, name: planner.name, sessionFile: planner.sessionFile } } : {}),
     ...(typeof entry.restore === "string" ? { restore: entry.restore } : {}),
     ...(typeof entry.returnTo === "string" ? { returnTo: entry.returnTo } : {}),
-    asks: typeof entry.asks === "number" ? entry.asks : 0,
-    costUsd: typeof entry.costUsd === "number" ? entry.costUsd : 0,
+    asks: Number.isSafeInteger(entry.asks) && entry.asks! >= 0 ? entry.asks! : 0,
+    costUsd:
+      typeof entry.costUsd === "number" && Number.isFinite(entry.costUsd) && entry.costUsd >= 0 ? entry.costUsd : 0,
   };
 }
-
-function renderAsk(details: AskDetails | undefined, options: { expanded: boolean; isPartial: boolean }, theme: Theme) {
-  const container = new Container();
-  if (!details) return container;
-  if (details.pending) {
-    container.addChild(new Text(theme.fg("muted", `${details.planner} · ${details.activity ?? "thinking"}`), 0, 0));
-    return container;
-  }
-  if (details.reply) container.addChild(new PlanMarkdown(details.reply, getMarkdownTheme(), theme));
-  if (details.changes && details.changes.length > 0) {
-    container.addChild(new Text(theme.fg("muted", "Amended the plan:"), 0, 0));
-    container.addChild(new Text(renderPlanDiff(theme, details.changes), 0, 0));
-  }
-  container.addChild(
-    new Text(
-      theme.fg("dim", `${details.planner}${details.costUsd !== undefined ? ` · ${formatCost(details.costUsd)}` : ""}`),
-      0,
-      0,
-    ),
-  );
-  void options;
-  return container;
-}
-
-const MAX_LISTED = 10;
 
 function gitShortstat(cwd: string): Promise<string | undefined> {
   return new Promise((done) => {
@@ -669,174 +1080,6 @@ async function summarizeChanges(state: ExecState, touched: ReadonlySet<string>, 
     outside: paths.length > 0 ? shown(files.filter((file) => !inPlan(file, cwd, paths))) : [],
     ...(git ? { git } : {}),
   };
-}
-
-/** `+20 -2` colored from `git diff --shortstat`'s `20 insertions(+), 2 deletions(-)`. */
-function diffstat(theme: Theme, git: string): string {
-  const files = /(\d+) files? changed/u.exec(git)?.[1];
-  const added = /(\d+) insertions?\(\+\)/u.exec(git)?.[1];
-  const removed = /(\d+) deletions?\(-\)/u.exec(git)?.[1];
-  const parts = [
-    ...(added ? [theme.fg("success", `+${added}`)] : []),
-    ...(removed ? [theme.fg("error", `-${removed}`)] : []),
-  ];
-  if (parts.length === 0) return theme.fg("dim", git);
-  return `${parts.join(" ")}${files ? theme.fg("dim", ` across ${files} ${files === "1" ? "file" : "files"} (git diff against HEAD)`) : ""}`;
-}
-
-/** What the implementation touched: a heading with counts, one row per file, then the diffstat. */
-function renderChanges(theme: Theme, changes: ChangeSummary | undefined): Component[] {
-  if (!changes || (changes.edited.length === 0 && !changes.git)) return [];
-  const rows: string[] = [];
-  const counts = [
-    ...(changes.edited.length > 0
-      ? [`${changes.edited.length} ${changes.edited.length === 1 ? "file" : "files"} edited`]
-      : []),
-    ...(changes.outside.length > 0 ? [`${changes.outside.length} outside the plan`] : []),
-  ];
-  rows.push(
-    theme.fg("toolTitle", theme.bold("Changed")) +
-      (counts.length > 0 ? theme.fg("dim", ` · ${counts.join(" · ")}`) : ""),
-  );
-  for (const file of changes.edited.slice(0, MAX_LISTED)) {
-    rows.push(
-      changes.outside.includes(file)
-        ? `  ${theme.fg("warning", "!")} ${file} ${theme.fg("warning", "not in the plan")}`
-        : `  ${theme.fg("dim", "•")} ${file}`,
-    );
-  }
-  if (changes.edited.length > MAX_LISTED) {
-    rows.push(theme.fg("dim", `  … and ${changes.edited.length - MAX_LISTED} more`));
-  }
-  if (changes.git) rows.push(`  ${diffstat(theme, changes.git)}`);
-  return [new Spacer(1), new Text(rows.join("\n"), 0, 0)];
-}
-
-function renderFinish(
-  details: FinishDetails | undefined,
-  options: { expanded: boolean; isPartial: boolean },
-  theme: Theme,
-) {
-  const container = new Container();
-  const section = (label: string, value: string, fold = false) => {
-    if (container.children.length > 0) container.addChild(new Spacer(1));
-    container.addChild(reviewTitle(theme, label));
-    const lines = value.split("\n");
-    const folded = fold && !options.expanded && lines.length > COLLAPSED_LINES;
-    container.addChild(
-      new PlanMarkdown(folded ? lines.slice(0, COLLAPSED_LINES).join("\n") : value, getMarkdownTheme(), theme),
-    );
-    if (folded) {
-      const more = lines.length - COLLAPSED_LINES;
-      container.addChild(
-        new Text(theme.fg("dim", `… ${more} more line${more === 1 ? "" : "s"} (ctrl+o to expand)`), 0, 0),
-      );
-    }
-  };
-  if (details?.headline) container.addChild(new Text(theme.fg("dim", theme.bold(`※ ${details.headline}`)), 0, 0));
-  section("What changed", details?.report || "Not provided.", true);
-  section("Verification", details?.verification || "Not provided; verification is unknown.");
-  section("Outstanding issues", details?.concerns || "Not provided; outstanding issues are unknown.");
-  section("Planner assessment", assessmentSummary(details));
-  if (details?.assessment?.state === "reviewed") {
-    const narrative = new Container();
-    const lines = details.assessment.narrative.split("\n");
-    const folded = !options.expanded && lines.length > COLLAPSED_LINES;
-    narrative.addChild(
-      new PlanMarkdown(
-        folded ? lines.slice(0, COLLAPSED_LINES).join("\n") : details.assessment.narrative,
-        getMarkdownTheme(),
-        theme,
-      ),
-    );
-    if (folded) {
-      const more = lines.length - COLLAPSED_LINES;
-      narrative.addChild(
-        new Text(theme.fg("dim", `… ${more} more line${more === 1 ? "" : "s"} (ctrl+o to expand)`), 0, 0),
-      );
-    }
-    container.addChild(narrative);
-  }
-  for (const part of renderChanges(theme, details?.changes)) container.addChild(part);
-  container.addChild(new Spacer(1));
-  const tone = finishTone(details);
-  container.addChild(
-    new Text(
-      reviewStatusLine(theme, {
-        tone,
-        text: details?.pending
-          ? "Planner reviewing…"
-          : tone === "success"
-            ? "Finished · assessed done"
-            : tone === "error"
-              ? "Finished · attention needed"
-              : "Finished · review limitations",
-        context: finishContext(details),
-      }),
-      0,
-      0,
-    ),
-  );
-  return container;
-}
-
-function finishTone(details: FinishDetails | undefined): ReviewTone {
-  if (details?.pending) return "pending";
-  const assessment = details?.assessment;
-  if (assessment?.state === "failed" || (assessment?.state === "reviewed" && assessment.verdict === "changes"))
-    return "error";
-  return assessment?.state === "reviewed" &&
-    assessment.verdict === "done" &&
-    details?.concerns?.trim().toLowerCase() === "none"
-    ? "success"
-    : "warning";
-}
-
-function assessmentSummary(details: FinishDetails | undefined): string {
-  if (details?.pending) return `Planner reviewing…${details.activity ? ` (${details.activity})` : ""}`;
-  const assessment = details?.assessment;
-  if (!assessment) return "Unavailable: no planner assessment was recorded.";
-  switch (assessment.state) {
-    case "disabled":
-      return "Disabled: automatic completion review is off.";
-    case "unavailable":
-      return `Unavailable: ${assessment.reason}`;
-    case "failed":
-      return `Review failed: ${assessment.reason}`;
-    case "reviewed": {
-      const verdict =
-        assessment.verdict === "done"
-          ? "done"
-          : assessment.verdict === "changes"
-            ? "changes needed"
-            : "unclear (no unambiguous final verdict)";
-      return `${assessment.planner} · Verdict: ${verdict}. Informational assessment, not user approval.`;
-    }
-  }
-}
-
-function finishContext(details: FinishDetails | undefined): string {
-  const asks = details?.asks ?? 0;
-  const assessment = details?.assessment;
-  const reviewCost = assessment && "costUsd" in assessment ? assessment.costUsd : undefined;
-  const who =
-    details?.returnedTo && details.returnedTo !== details.implementer
-      ? `${details.implementer ?? "Unknown implementer"} → ${details.returnedTo}`
-      : (details?.implementer ?? "Unknown implementer");
-  return [
-    details?.planFile ? planTitle(details.planFile) : "Plan",
-    who,
-    `${asks} ${asks === 1 ? "consultation" : "consultations"}${details?.costUsd !== undefined ? ` · ${formatCost(details.costUsd)}` : ""}`,
-    ...(reviewCost !== undefined ? [`review ${formatCost(reviewCost)}`] : []),
-  ].join(" · ");
-}
-
-function changeSummaryText(changes: ChangeSummary | undefined): string {
-  return [
-    `Files edited: ${changes?.edited.join(", ") || "none recorded"}`,
-    `Not in the plan: ${changes?.outside.join(", ") || "none recorded"}`,
-    `git diff against HEAD: ${changes?.git || "no summary available (does not rule out committed work)"}`,
-  ].join("\n");
 }
 
 /** pi-recap's one-line recap of the turn just ended, when it is loaded; undefined otherwise or when slow. */
@@ -868,7 +1111,22 @@ async function recapHeadline(pi: ExtensionAPI, timeoutMs: number): Promise<strin
 /** What the planner reads once it is back: the implementer's report and what it touched. */
 function finishMessageText(details: FinishDetails): string {
   return [
-    "Implementation complete",
+    details.completion === "accepted"
+      ? "Accepted"
+      : details.completion === "no_review"
+        ? "Completed without review"
+        : details.completion === "user_override"
+          ? "Completed by user override"
+          : details.completion === "stopped"
+            ? "Implementation stopped"
+            : "Implementation review",
+    ...(details.negotiation
+      ? [
+          "",
+          `Negotiation record (${details.negotiation.attempts} review rounds; cumulative review cost ${formatCost(details.negotiation.reviewCostUsd)}):`,
+          JSON.stringify(details.negotiation, null, 2),
+        ]
+      : []),
     ...(details.headline ? ["", details.headline] : []),
     "",
     "What changed",
@@ -883,11 +1141,23 @@ function finishMessageText(details: FinishDetails): string {
     "Planner assessment",
     assessmentSummary(details),
     ...(details.assessment?.state === "reviewed" ? [details.assessment.narrative] : []),
+    ...(details.question ? ["", "User question", details.question] : []),
+    ...(details.action ? ["", "Next action", details.action] : []),
     "",
     changeSummaryText(details.changes),
     "",
     finishContext(details),
   ].join("\n");
+}
+
+function pauseText(n: NegotiationState): string {
+  const recovery =
+    n.pause?.reason === "failure" || n.pause?.reason === "interrupted"
+      ? "/plan-exec retry to authorize one review retry using the saved report."
+      : n.pause?.reason === "exhausted"
+        ? "/plan-exec resume <answer> to provide evidence and authorize one extra revision-and-review cycle."
+        : "/plan-exec resume <answer> to provide the requested user answer or evidence and resume implementation.";
+  return `Exec ${n.phase}. ${n.pause?.action ?? ""}${n.pause?.question ? `\nQuestion: ${n.pause.question}` : ""}\nUser recovery: ${recovery}\nOr /plan-exec accept for a confirmed unreviewed override, or /plan-exec stop to abandon execution without claiming completion. No automatic retry; agents cannot authorize recovery.`;
 }
 
 function text(value: string) {

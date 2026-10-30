@@ -33,6 +33,9 @@ const { CustomEditor } = await import(new URL('./modes/interactive/components/cu
 const { sidebarScreen } = await import('./remote-clients/sidebar.mjs');
 const { TerminalPanel } = await jiti.import('../packages/pi-interactive-shell/src/panel.ts');
 const { pickApproval, createApprovalState, handoffLabel, HERE: IMPLEMENT_HERE, COMPACT_HERE, EDIT, KEEP } = await jiti.import('../packages/pi-plan-mode/src/approval-picker.ts');
+const { registerExec } = await jiti.import('../packages/pi-plan-mode/src/exec.ts');
+const { createNegotiation } = await jiti.import('../packages/pi-plan-mode/src/negotiation.ts');
+const { renderFooter, absorbStatuses } = await jiti.import('../packages/pi-status-footer/src/index.ts');
 const { choiceMenu, coldTitle } = await jiti.import('../packages/pi-cache-guard/src/index.ts');
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
@@ -57,6 +60,7 @@ const footer = (width) => [theme.fg('dim', ` pi-plugins · main · opus · Conte
 const UNDERS = {
   footer: (width) => footer(width),
   'pill+footer': (width) => [theme.fg('muted', ' 1 task '), '', ...footer(width)],
+  'paused phase footer': (width) => phaseFooter(width),
 };
 
 const question = (multiSelect, options = 3) => ({
@@ -156,8 +160,57 @@ function coldCacheLines(width, menu = coldMenu) {
   return selector.render(width);
 }
 
+// Exercise the actual command's ctx.ui.select call, not a copy of its question/options.
+let overrideStatus;
+async function overrideLines(width) {
+  const commands = new Map();
+  const handlers = new Map();
+  let lines, selected = false;
+  const pi = {
+    on: (name, handler) => handlers.set(name, handler), registerTool() {}, registerMessageRenderer() {},
+    registerCommand: (name, spec) => commands.set(name, spec),
+    getActiveTools: () => [], setActiveTools() {}, appendEntry() {},
+    events: { emit() {} },
+  };
+  const ctx = {
+    hasUI: true, mode: 'tui', isIdle: () => true,
+    ui: {
+      setStatus: (key, value) => { if (key === 'plan-exec') overrideStatus = value; },
+      notify: (message) => { throw new Error(message); },
+      select: async (title, options) => {
+        selected = true;
+        lines = new ExtensionSelectorComponent(title, options, () => {}, () => {}).render(width);
+        return 'Keep paused';
+      },
+    },
+  };
+  const exec = registerExec(pi, { completionReview: () => true, completionMaxRevisions: () => 2 });
+  const negotiation = createNegotiation('remote-client-fixture', 2);
+  negotiation.phase = 'paused';
+  negotiation.pause = { reason: 'user_needed', action: 'Provide human verification.', question: 'Did the browser readiness check pass?' };
+  ctx.sessionManager = { getBranch: () => [{ type: 'custom', customType: 'plan-mode:exec', data: { active: true, planFile: '/tmp/client-plan.md', implementer: 'Terra', implementerModel: 'openai-codex/gpt-6.1-terra', asks: 0, costUsd: 0, negotiation } }] };
+  await handlers.get('session_start')({}, ctx);
+  await commands.get('plan-exec').handler('accept', ctx);
+  assert.ok(selected, 'actual /plan-exec accept must open a confirmation');
+  assert.ok(exec.active, 'declining the fixture confirmation must leave execution paused');
+  assert.match(overrideStatus, /^exec mode on · paused · user needed/u);
+  return lines;
+}
+
+function phaseFooter(width) {
+  assert.ok(overrideStatus, 'render the actual override command before its phase footer');
+  const absorbed = absorbStatuses(new Map([['plan-exec', overrideStatus]]), { claudeRow: false });
+  return renderFooter({
+    cwd: '/tmp/pi-plugins', model: 'claude-opus-5-5', provider: 'anthropic',
+    context: { tokens: 24000, contextWindow: 200000, percent: 12 },
+    git: { project: 'pi-plugins', branch: 'main' },
+    statuses: absorbed.rest, exec: absorbed.exec, phase: 'paused · user needed', compact: true,
+  }, width, theme);
+}
+
 // Each dialog, and what each client must make of it.
 const DIALOGS = [
+  { name: 'plan exec override confirmation', lines: overrideLines, question: 'Finish without planner acceptance?', herdr: { options: 2, multi: false, labels: ['Finish without review', 'Keep paused'] }, collie: { kind: 'prompt-select', options: 3, labels: ['Finish without review', 'Keep paused'], wraps: ['Finish without review', 'Keep paused'] } },
   { name: 'ask single', lines: (w) => questionLines([question(false)], w), herdr: { options: 4, multi: false }, collie: { kind: 'prompt-select', options: 4 }, },
   { name: 'ask multi', lines: (w) => questionLines([question(true)], w), herdr: { multi: true }, collie: { kind: 'multi-select' }, },
   { name: 'tool-gate approval', lines: approvalLines, herdr: { options: 3, multi: false }, collie: { kind: 'prompt-select' }, },

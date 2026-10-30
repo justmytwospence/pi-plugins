@@ -151,15 +151,33 @@ export function consultantSystemPrompt(planFile: string, toolNotes: readonly str
 export const CONSULT_WRAP_UP =
   "Time is almost up. Stop investigating and answer now with your best decision; amend the plan file first if your answer changes the plan.";
 
-/** A targeted, informational review by the existing planner on call, not a user approval gate. */
+/** Completion gate: only the strict JSON accepted outcome authorizes completion. */
 export function reviewRequest(
   report: string,
-  context?: { verification: string; concerns: string; planFile: string; changes: string },
+  context?: {
+    verification: string;
+    concerns: string;
+    planFile: string;
+    changes: string;
+    previousFindings?: import("../negotiation.js").Finding[];
+    responses?: import("../negotiation.js").FindingResponse[];
+    remainingRevisions?: number;
+    userEvidence?: string[];
+  },
 ) {
   return [
-    "[From the implementing agent, which reports your plan as done. Give a targeted completion assessment, not user approval.]",
+    "[Implementation submitted for completion review against the approved plan and approved amendments only.]",
     "",
-    "Review the implementation against the current plan. Inspect relevant tracked files and commit history as well as git status and the working-tree diff: work may already be committed, so git diff HEAD alone is not sufficient. Give a concise assessment of what met the plan, evidence you actually inspected, deviations, and remaining risks. Explicitly distinguish implementer-reported checks from independently observed evidence, and state limitations where evidence cannot establish a claim. Do not modify any files (including the plan) or run tests, even if your tools or grants permit it. Identify changes still needed with the file and what to do. This is informational: do not start further implementation. End with exactly `Verdict: done` when nothing needs to change, or `Verdict: changes needed`.",
+    "Inspect relevant current tracked files and commit history, git status and working-tree diff; committed work may not appear in git diff HEAD. Do not modify any files, including the plan, or run tests, even if tools/grants permit. No new preferences, scope expansion or plan changes. Distinguish implementer-reported checks from evidence you actually inspected; do not claim independent verification of reported tests. Give reasons supporting acceptance as well as problems. Human-only verification, permissions and product/scope decisions require user_needed with an exact question and recommendation, not inferred acceptance.",
+    'Return ONLY one JSON object (optionally in one json fence), no prose outside: {"outcome":"accepted|changes_requested|user_needed","summary":"nonempty","evidence":["inspected evidence"],"limitations":["limitations"],"findings":[{"id":"stable unique ID","title":"nonempty","detail":"nonempty","requestedChange":"nonempty"}]}. Use exact enum values. Accepted requires no findings; changes_requested requires at least one. user_needed additionally requires nonempty question and recommendation. Evidence/limitations are arrays of nonempty strings (empty arrays allowed). At most 30 findings, total response at most 64 KiB. Retained findings keep their IDs; new findings must use fresh IDs. Evaluate implementer responses and evidence-backed disputes explicitly.',
+    ...(context
+      ? [
+          `Remaining automatic revision allowance: ${context.remainingRevisions ?? 0}`,
+          `User-provided answers (not independently verified): ${JSON.stringify(context.userEvidence ?? [])}`,
+          `Previous findings: ${JSON.stringify(context.previousFindings ?? [])}`,
+          `Implementer responses: ${JSON.stringify(context.responses ?? [])}`,
+        ]
+      : []),
     ...(context ? ["", `Plan file: ${context.planFile}`, "", "Change summary:", context.changes] : []),
     "",
     "The implementer's report (what changed):",
@@ -169,26 +187,6 @@ export function reviewRequest(
       ? ["", "Implementer-reported verification:", context.verification, "", "Outstanding issues:", context.concerns]
       : []),
   ].join("\n");
-}
-
-/** Only an unambiguous final verdict is an assessment; absent or malformed verdicts are unclear. */
-export function reviewVerdict(reply: string): "done" | "changes" | "unclear" {
-  const parse = (line: string) => {
-    const text = line.trim();
-    const bare = text.startsWith("`") && text.endsWith("`") ? text.slice(1, -1) : text;
-    return /^verdict:\s*(done|changes needed)$/iu.exec(bare)?.[1]?.toLowerCase();
-  };
-  const lines = reply.trim().split("\n");
-  const final = parse(lines.at(-1) ?? "");
-  if (!final) return "unclear";
-  if (
-    lines.some((line) => {
-      const verdict = parse(line);
-      return verdict !== undefined && verdict !== final;
-    })
-  )
-    return "unclear";
-  return final === "done" ? "done" : "changes";
 }
 
 /** What Write plan M (or Revise plan M, once there is one) asks your main agent to do. */

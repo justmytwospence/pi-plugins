@@ -76,11 +76,14 @@ export function sameModel(
   );
 }
 
-export function snapshotAvailableImplementationModels(ctx: ExtensionContext): AvailableImplementationModel[] {
+export function snapshotAvailableImplementationModels(
+  ctx: ExtensionContext,
+  scope: "scoped" | "available" = "scoped",
+): AvailableImplementationModel[] {
   const getAvailable = ctx.modelRegistry.getAvailable;
   const availableModels = typeof getAvailable === "function" ? getAvailable.call(ctx.modelRegistry) : [];
   const scopedModels = ctx.scopedModels ?? [];
-  if (scopedModels.length === 0) return availableModels;
+  if (scope === "available" || scopedModels.length === 0) return availableModels;
   return scopedModels.flatMap((entry) => {
     const availableModel = availableModels.find(
       (model) => model.provider === entry.model.provider && model.id === entry.model.id,

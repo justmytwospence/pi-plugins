@@ -87,6 +87,7 @@ import { buildPlannerTranscript } from "./planners.js";
 import { extensionsForProvider, resolveProviderExtensions } from "./provider-extensions.js";
 import {
   configuredAlwaysOffer,
+  configuredCompletionMaxRevisions,
   configuredImplementationContext,
   configuredPlanExportPath,
   configuredPlanModeToggleShortcut,
@@ -675,6 +676,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
   // Exec mode: following an approved plan, with the planner on call and finish_plan.
   const exec = registerExec(pi, {
     completionReview: () => settings.completionReview !== false,
+    completionMaxRevisions: () => configuredCompletionMaxRevisions(settings),
     // As capable as a /planners planner given every tool: toolsets (web, MCP), grants, subagents.
     consultantAccess: (ctx, planFile, spec) => {
       const toolsets = settings.plannerToolsets ?? {};
@@ -708,7 +710,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     implementationChoices: (ctx) => {
       const planning = sessionSpecOf(ctx);
       if (!planning) return undefined;
-      const catalog = modelCatalog(ctx);
+      const catalog = modelCatalog(ctx, "available");
       return {
         planning,
         planningName: catalog.name(planning),
@@ -1342,6 +1344,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       // --- Settings ----------------------------------------------------------------------------
 
       const catalog = modelCatalog(ctx);
+      const implementationCatalog = modelCatalog(ctx, "available");
       const models = availableModels(ctx);
       const sessionLevel = pi.getThinkingLevel() as ThinkingLevel;
       const effortsOf = (spec: ModelSpec): ThinkingLevel[] =>
@@ -1540,7 +1543,19 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
               saveSettings({ completionReview: next });
             },
             description:
-              "Ask the planner on call for a targeted completion assessment (an extra model turn, cost shown separately). It inspects evidence without running tests; this is not user approval. No planner on call means no review.",
+              "Require planner acceptance to complete handed-off work (extra model turns, cost shown separately). It inspects evidence without running tests. An unavailable planner pauses execution.",
+          },
+          {
+            id: "completion-max-revisions",
+            label: "Review revisions",
+            value: () => String(configuredCompletionMaxRevisions(settings)),
+            cycle: (direction) => {
+              const next = (configuredCompletionMaxRevisions(settings) + direction + 6) % 6;
+              settings = { ...settings, completionMaxRevisions: next };
+              saveSettings({ completionMaxRevisions: next });
+            },
+            description:
+              "Automatic fix cycles permitted after the initial completion review (0–5). Zero still reviews once; exhausted cycles pause for the user.",
           },
           {
             id: "context",
@@ -1677,7 +1692,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           implementationChoices({
             planModel: author.spec ?? sessionSpec,
             map: settings.implementationModelMap,
-            available: catalog.available,
+            available: implementationCatalog.available,
           })
             .map(({ spec }) => spec)
             .filter((spec) => !sessionSpec || !sameModel(spec, sessionSpec));
@@ -1727,7 +1742,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           {
             id: "model",
             label: "Model",
-            value: () => catalog.name(target),
+            value: () => implementationCatalog.name(target),
             cycle: (direction) => {
               if (mode === "here") return;
               remember();
@@ -1741,9 +1756,18 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           {
             id: "effort",
             label: "Effort",
-            value: () => (effortsOf(target).length ? effortText(theme, target.thinkingLevel) : theme.fg("dim", "n/a")),
+            value: () =>
+              implementationCatalog.efforts(target).some(Boolean)
+                ? effortText(theme, target.thinkingLevel)
+                : theme.fg("dim", "n/a"),
             cycle: (direction) => {
-              target = cycleEffort(target, direction);
+              const levels = implementationCatalog
+                .efforts(target)
+                .filter((level): level is ThinkingLevel => level !== undefined);
+              if (levels.length) {
+                const index = Math.max(0, levels.indexOf(target.thinkingLevel ?? sessionLevel));
+                target = { ...target, thinkingLevel: levels[(index + direction + levels.length) % levels.length] };
+              }
             },
             description: "How hard the implementing model thinks.",
           },
@@ -1967,7 +1991,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     hook(ctx, source);
     const authorFile = run?.agents.find((agent) => agent.id === source.id)?.sessionFile;
     const before = sessionSpecOf(ctx);
-    const catalog = modelCatalog(ctx);
+    const catalog = modelCatalog(ctx, "available");
     const planFile = writePlanFile(plansDirectoryPath(settings.plansDirectory), plan);
     if (mode === "here" || (before && sameModel(before, target))) {
       disposeRun("implemented");
@@ -2027,7 +2051,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
   }
 
   function normalizedSpec(ctx: ExtensionContext, spec: ModelSpec, level: ModelSpec["thinkingLevel"]): ModelSpec {
-    const thinkingLevel = normalizeEffort(level, modelCatalog(ctx).efforts(spec));
+    const thinkingLevel = normalizeEffort(level, modelCatalog(ctx, "available").efforts(spec));
     return { provider: spec.provider, modelId: spec.modelId, ...(thinkingLevel ? { thinkingLevel } : {}) };
   }
 

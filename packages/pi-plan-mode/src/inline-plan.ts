@@ -31,7 +31,6 @@ export { EDIT, HERE, handoffLabel, KEEP, OPTION_MAX } from "./approval-picker.js
 import { holdBlocked } from "./herdr-blocked.js";
 import { type ModelSpec, type ModelSpecThinkingLevel, sameModel } from "./implementation-models.js";
 import { PlanMarkdown } from "./mermaid-art.js";
-import { planDiff, renderPlanDiff } from "./plan-diff.js";
 import { newPlanFile, plansDirectoryPath, readPlan } from "./plan-file.js";
 import { expandHome } from "./plan-hook.js";
 import { PlanReviewViewport } from "./plan-review-viewport.js";
@@ -124,7 +123,7 @@ It is the only file you may write. Build the plan there as you go, with write an
 1. Explore: read the relevant code with read-only tools (and read-only subagents for broad searches, if you have them). Reuse what exists; find the functions and utilities a change should build on.
 2. Ask: when requirements, scope or a trade-off is unclear, ask the user (with your question tool, if you have one) rather than guessing. Do not ask what the code can tell you.
 3. Write the plan in the plan file to the standard under "The plan" below.
-4. Call ${EXIT_TOOL} when the plan is complete; it shows the plan to the user for approval. Do not ask "is this plan okay?" or "should I proceed?" any other way; that is what ${EXIT_TOOL} does.
+4. On revised submissions, supply ${EXIT_TOOL}'s optional changes: 1–5 concise decision/scope changes since the declined plan, not copied paragraphs. Call ${EXIT_TOOL} when the plan is complete; it shows the plan to the user for approval. Do not ask "is this plan okay?" or "should I proceed?" any other way; that is what ${EXIT_TOOL} does.
 
 ## The plan
 ${PLAN_STANDARD}
@@ -159,6 +158,8 @@ interface ExitDetails {
   feedback?: string;
   /** The plan the user last declined, while a revision of it waits for review. */
   previous?: string;
+  /** Concise agent-supplied decision/scope changes, only for a differing declined plan. */
+  changes?: string[];
 }
 
 export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): InlinePlanMode {
@@ -370,15 +371,39 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     executionMode: "sequential",
     label: "Exit plan mode",
     description:
-      "In plan mode, once your plan is written to the plan file and complete: show it to the user and ask for approval to start implementing. It takes no arguments; it reads the plan file. Do not use it for research questions, and do not ask for approval any other way.",
+      "In plan mode, once your plan is written to the plan file and complete: show it to the user and ask for approval to start implementing. It reads the plan file; optionally provide changes on revised submissions (concise decision/scope changes since the declined plan, not copied paragraphs). Do not use it for research questions, and do not ask for approval any other way.",
     promptSnippet: "Ask the user to approve the plan in the plan file (plan mode only)",
-    parameters: { type: "object", additionalProperties: false, properties: {} } as never,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        changes: {
+          type: "array",
+          minItems: 1,
+          maxItems: 5,
+          items: { type: "string", minLength: 1, maxLength: 240, pattern: "\\S" },
+          description:
+            "Concise decision/scope changes since the last declined plan, not copied paragraphs. Omit on first submission.",
+        },
+      },
+    } as never,
     renderCall: (_args, theme, context) => reviewTitle(theme, context.isPartial ? "Plan review" : "Plan"),
     renderResult: (result, options, theme, context) => {
       const component = renderExit(result.details as ExitDetails | undefined, options, theme);
       return options.isPartial ? reviewViewport.wrap(context.toolCallId, component) : component;
     },
-    async execute(id, _params, signal, onUpdate, ctx) {
+    async execute(id, params, signal, onUpdate, ctx) {
+      const supplied = (params as { changes?: unknown } | undefined)?.changes;
+      if (
+        supplied !== undefined &&
+        (!Array.isArray(supplied) ||
+          supplied.length < 1 ||
+          supplied.length > 5 ||
+          !supplied.every((item) => typeof item === "string" && item.trim().length > 0 && item.length <= 240))
+      ) {
+        return text("changes must contain 1–5 nonempty strings, each at most 240 characters.");
+      }
+      let changes = supplied as string[] | undefined;
       hostCtx = ctx;
       if (!state.active || !state.planFile) {
         return text("You are not in plan mode. This tool only asks the user to approve a plan in plan mode.");
@@ -391,6 +416,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
         );
       }
       if (!ctx.hasUI) return text("There is no user to approve the plan. Stay in plan mode.");
+      const submittedPlan = plan;
       let edited = false;
       const models = host.implementationChoices(ctx);
       const pickerState = createApprovalState();
@@ -401,10 +427,16 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       try {
         for (;;) {
           reviewViewport.restart();
-          const previous = declined !== undefined && declined !== plan ? declined : undefined;
+          const baseline = declined ?? (edited ? submittedPlan : undefined);
+          const previous = baseline !== undefined && baseline !== plan ? baseline : undefined;
           onUpdate?.({
             content: [{ type: "text", text: plan }],
-            details: { plan, planFile, outcome: "pending", ...(previous ? { previous } : {}) } satisfies ExitDetails,
+            details: {
+              plan,
+              planFile,
+              outcome: "pending",
+              ...(previous ? { previous, ...(changes ? { changes: [...changes] } : {}) } : {}),
+            } satisfies ExitDetails,
           } as never);
           const picked = await pickApproval(ctx, { ...models, targets: models?.targets ?? [] }, pickerState, signal);
           const choice = picked?.choice;
@@ -419,6 +451,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
               ctx.ui.notify(`${command.split(" ")[0]} did not save the plan.`, "warning");
             if (revised?.trim() && revised.trim() !== plan) {
               plan = revised.trim();
+              changes = undefined;
               edited = true;
               try {
                 writeFileSync(planFile, `${plan}\n`);
@@ -430,7 +463,12 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
           }
           if (choice === undefined || choice.kind === "keep") {
             // You say what should change in the chat, as your next message.
-            const details: ExitDetails = { plan, planFile, outcome: "kept" };
+            const details: ExitDetails = {
+              plan,
+              planFile,
+              outcome: "kept",
+              ...(previous ? { previous, ...(changes ? { changes: [...changes] } : {}) } : {}),
+            };
             declined = plan;
             return {
               content: [
@@ -471,6 +509,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
                 plan,
                 planFile,
                 outcome: "handoff",
+                ...(previous ? { previous, ...(changes ? { changes: [...changes] } : {}) } : {}),
                 edited,
                 ...(who ? { handoff: who.targetName } : {}),
                 ...(mode ? { mode } : {}),
@@ -487,13 +526,27 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
                   text: "The user approved the plan. Stop here; implementation continues in this session after compaction to the approved plan.",
                 },
               ],
-              details: { plan, planFile, outcome: "approved", edited, ...(mode ? { mode } : {}) } satisfies ExitDetails,
+              details: {
+                plan,
+                planFile,
+                outcome: "approved",
+                edited,
+                ...(previous ? { previous, ...(changes ? { changes: [...changes] } : {}) } : {}),
+                ...(mode ? { mode } : {}),
+              } satisfies ExitDetails,
               terminate: true,
             } as never;
           }
           return {
             content: [{ type: "text", text: host.implementHere(ctx, approval) }],
-            details: { plan, planFile, outcome: "approved", edited, ...(mode ? { mode } : {}) } satisfies ExitDetails,
+            details: {
+              plan,
+              planFile,
+              outcome: "approved",
+              edited,
+              ...(previous ? { previous, ...(changes ? { changes: [...changes] } : {}) } : {}),
+              ...(mode ? { mode } : {}),
+            } satisfies ExitDetails,
           } as never;
         }
       } finally {
@@ -577,12 +630,20 @@ function renderExit(
   const body = new Container();
   body.addChild(card);
   if (outcome === "pending") body.addChild(new Spacer(1));
-  const changes = outcome === "pending" && details?.previous ? planDiff(details.previous, plan) : [];
-  if (changes.length === 0) return body;
-  // While a revision waits for review, what changed since the declined plan comes first.
+  if (outcome !== "pending" || !details?.previous || details.previous === plan) return body;
+  // The full current plan remains authoritative; never guess a semantic summary from a diff.
   const container = new Container();
-  container.addChild(new Text(theme.fg("muted", "Changes since the plan you declined:"), 0, 0));
-  container.addChild(new Text(renderPlanDiff(theme, changes), 0, 0));
+  if (details.changes?.length) {
+    container.addChild(
+      new PlanMarkdown(
+        `### What changed\n\n${details.changes.map((change) => `- ${change}`).join("\n")}`,
+        getMarkdownTheme(),
+        theme,
+      ),
+    );
+  } else {
+    container.addChild(new Text("Plan revised since your last review.", 0, 0));
+  }
   container.addChild(new Spacer(1));
   container.addChild(body);
   return container;

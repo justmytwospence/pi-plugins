@@ -2,23 +2,25 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { test, vi } from "vitest";
-import { ASK_TOOL, CONSULT_TIMEOUT_MS, EXEC_ENTRY, EXEC_STATUS_KEY, type ExecState, FINISH_TOOL } from "../src/exec.js";
+import {
+  ASK_TOOL,
+  CONSULT_TIMEOUT_MS,
+  EXEC_ENTRY,
+  EXEC_STATUS_KEY,
+  type ExecState,
+  FINISH_TOOL,
+  registerExec,
+} from "../src/exec.js";
 import planMode from "../src/index.js";
-import { ENTER_TOOL } from "../src/inline-plan.js";
-import { reviewVerdict } from "../src/planner/prompt.js";
 import type { PlannerSessionFactory, PlannerSessionOptions } from "../src/planner/session.js";
 import { createMockContext, createMockPi } from "./shared/support.js";
 
 initTheme("dark");
 const completion = { report: "Done.", verification: "npm test: passed; live checks not run.", concerns: "None" };
-const theme = {
-  fg: (_role: string, text: string) => text,
-  bg: (_role: string, text: string) => text,
-  bold: (text: string) => text,
-};
 
 const opus = { provider: "anthropic", id: "claude-opus-5-5", name: "Claude Opus 5.5", reasoning: true };
 const sonnet = { provider: "anthropic", id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", reasoning: true };
@@ -28,7 +30,7 @@ type Tool = { name: string; execute(...args: unknown[]): Promise<Result> };
 
 /** A fake planner session: each prompt runs `script`, which answers (and may amend the plan file). */
 type ScriptReply = { reply: string; amend?: () => void; error?: string };
-function fakeSessions(script: (prompt: string) => ScriptReply | Promise<ScriptReply>) {
+function fakeSessions(script: (prompt: string) => ScriptReply | Promise<ScriptReply>, abortDelayMs = 0) {
   const created: PlannerSessionOptions[] = [];
   const prompts: string[] = [];
   let aborts = 0;
@@ -69,6 +71,7 @@ function fakeSessions(script: (prompt: string) => ScriptReply | Promise<ScriptRe
       steer: async () => undefined,
       abort: async () => {
         aborts += 1;
+        if (abortDelayMs) await new Promise((resolve) => setTimeout(resolve, abortDelayMs));
         stop?.();
       },
     };
@@ -108,6 +111,8 @@ async function setup(
     planner?: boolean;
     plannerSpec?: string;
     completionReview?: boolean;
+    completionMaxRevisions?: number;
+    abortDelayMs?: number;
     hasUI?: boolean;
     restore?: boolean;
     returnTo?: string;
@@ -117,11 +122,26 @@ async function setup(
   } = {},
 ) {
   const mock = createMockPi();
-  const sessions = fakeSessions(options.script ?? (() => ({ reply: "Use the cache.\nVerdict: done" })));
+  const sessions = fakeSessions(
+    options.script ??
+      (() => ({
+        reply: JSON.stringify({
+          outcome: "accepted",
+          summary: "Meets plan.",
+          evidence: ["Inspected files."],
+          limitations: [],
+          findings: [],
+        }),
+      })),
+    options.abortDelayMs,
+  );
   await planMode(mock.pi, {
     readSettings: async () => ({
       thinkingLevel: "inherit" as const,
       jevToolSelection: false,
+      ...(options.completionMaxRevisions === undefined
+        ? {}
+        : { completionMaxRevisions: options.completionMaxRevisions }),
       ...(options.completionReview === undefined ? {} : { completionReview: options.completionReview }),
     }),
     createSession: sessions.factory,
@@ -149,6 +169,8 @@ async function setup(
     },
     sessionManager: {
       getSessionId: () => "s",
+      // Every appendEntry advances the source leaf, as in SessionManager.
+      getLeafId: () => `entry-${mock.entries.length}`,
       getBranch: () => mock.entries.map((entry) => ({ type: "custom", ...entry })),
       getEntries: () => [],
       getSessionFile: () => "/main.jsonl",
@@ -190,7 +212,10 @@ test("a restored exec state turns its tools on and shows the footer status", asy
   const { mock, context } = await setup();
   assert.ok(mock.rawPi.getActiveTools().includes(ASK_TOOL));
   assert.ok(mock.rawPi.getActiveTools().includes(FINISH_TOOL));
-  assert.equal(context.statuses.get(EXEC_STATUS_KEY), "exec mode on · Claude Opus 5.5 on call");
+  assert.equal(
+    context.statuses.get(EXEC_STATUS_KEY),
+    "exec mode on · implementing · 0 consultations · $0.00 consult · $0.00 review",
+  );
   for (const name of [ASK_TOOL, FINISH_TOOL]) {
     const registered = mock.tools.find((candidate) => candidate.name === name) as any;
     assert.equal(registered.exposure, "model-only");
@@ -204,7 +229,10 @@ test("without a planner on call, only finish_plan is active", async () => {
   const { mock, context } = await setup({ planner: false });
   assert.ok(!mock.rawPi.getActiveTools().includes(ASK_TOOL));
   assert.ok(mock.rawPi.getActiveTools().includes(FINISH_TOOL));
-  assert.equal(context.statuses.get(EXEC_STATUS_KEY), "exec mode on");
+  assert.equal(
+    context.statuses.get(EXEC_STATUS_KEY),
+    "exec mode on · implementing · 0 consultations · $0.00 consult · $0.00 review",
+  );
   const ask = mock.tools.find((candidate) => candidate.name === ASK_TOOL) as unknown as Tool;
   const result = await ask.execute("1", { message: "x" }, undefined, undefined, context.ctx);
   assert.match(result.content[0]?.text ?? "", /No planner is on call/u);
@@ -230,7 +258,7 @@ test("ask_planner opens the seeded session, asks as the implementer, and reports
   assert.match(text, /\+ Change `src\/a\.ts` and `src\/b\.ts`\./u);
   assert.equal(latest().asks, 1);
   assert.ok(Math.abs(latest().costUsd - 0.05) < 1e-9);
-  assert.match(context.statuses.get(EXEC_STATUS_KEY) ?? "", /1 ask · \$0\.05$/u);
+  assert.match(context.statuses.get(EXEC_STATUS_KEY) ?? "", /1 consultations · \$0\.05 consult · \$0\.00 review$/u);
   assert.equal(result.usage.cost.total, 0.05);
 });
 
@@ -268,425 +296,393 @@ test("without a planner the tripwire points at the plan file's amendments", asyn
   assert.doesNotMatch(noted.content[0].text, /ask_planner/u);
 });
 
-test("finish_plan reviews by default without a user dialog and returns to the planning model", async () => {
-  const { mock, context, tool, latest, selects } = await setup();
-  const result = await tool(FINISH_TOOL).execute("1", completion, undefined, undefined, context.ctx);
-  assert.equal(result.terminate, true);
-  assert.equal(selects.length, 0);
-  assert.equal(result.details.implementer, "Claude Sonnet 5.5");
-  assert.equal(result.details.returnedTo, "Claude Opus 5.5");
-  assert.equal(latest().active, false);
-  assert.ok(!mock.rawPi.getActiveTools().includes(FINISH_TOOL));
-  assert.ok(!mock.rawPi.getActiveTools().includes(ASK_TOOL));
-  assert.equal(context.statuses.get(EXEC_STATUS_KEY), undefined);
-  assert.deepEqual(
-    mock.setModels.map((model: any) => model.id),
-    ["claude-opus-5-5"],
-  );
-});
-
-test("finish_plan leaves the model alone when the session is no longer on the implementer's", async () => {
-  const { mock, context, tool } = await setup();
-  (context.ctx as any).model = opus;
-  await tool(FINISH_TOOL).execute("1", completion, undefined, undefined, context.ctx);
-  assert.equal(mock.setModels.length, 0);
-});
-
-test("enter_plan_mode refuses while exec mode is on", async () => {
-  const { context, tool } = await setup();
-  const result = await tool(ENTER_TOOL).execute("1", {}, undefined, undefined, context.ctx);
-  assert.match(result.content[0]?.text ?? "", /implementing an approved plan \(exec mode\)/u);
-});
-
-test("finish_plan reports what changed and flags files outside the plan", async () => {
-  const { context, tool, emit, planFile } = await setup();
-  const dir = planFile.slice(0, planFile.lastIndexOf("/"));
-  for (const path of ["src/a.ts", "src/other.ts", planFile]) {
-    const full = path === planFile ? path : join(dir, path);
-    await emit("tool_result", { toolName: "edit", input: { path: full }, content: [], isError: false });
-  }
-  const result = await tool(FINISH_TOOL).execute("1", completion, undefined, undefined, context.ctx);
-  assert.deepEqual(result.details.changes.edited, ["src/a.ts", "src/other.ts"]);
-  assert.deepEqual(result.details.changes.outside, ["src/other.ts"]);
-});
-
-test("the finish card shows the report, the changes and a status line, at narrow and wide widths", async () => {
-  const { context, tool, emit, planFile } = await setup();
-  const dir = planFile.slice(0, planFile.lastIndexOf("/"));
-  for (const path of ["src/a.ts", "src/other.ts"]) {
-    await emit("tool_result", { toolName: "edit", input: { path: join(dir, path) }, content: [], isError: false });
-  }
-  const result = await tool(FINISH_TOOL).execute(
-    "1",
-    { ...completion, report: "Added the flag." },
-    undefined,
-    undefined,
-    context.ctx,
-  );
-  const theme = { fg: (_role: string, text: string) => text, bold: (text: string) => text };
-  const card = (tool(FINISH_TOOL) as any).renderResult(result, { expanded: false, isPartial: false }, theme);
-  for (const width of [46, 120]) {
-    const text = card.render(width).join("\n").replace(/\s+/gu, " ");
-    assert.match(text, /Added the flag\./u);
-    assert.match(text, /Changed · 2 files edited · 1 outside the plan/u);
-    assert.match(text, /! src\/other\.ts not in the plan/u);
-    assert.match(text, /Finished · assessed done/u);
-    assert.match(text, /Claude Sonnet 5\.5 → Claude Opus 5\.5/u);
-    assert.match(text, /0 consultations/u);
-    assert.match(text, /review \$0\.05/u);
-    assert.ok((card.render(width) as string[]).every((line) => visibleWidth(line) <= width));
-  }
-});
-
-test("finish_plan opts into its own result and exposes the required schema", async () => {
-  const { tool } = await setup();
-  const registered = tool(FINISH_TOOL) as any;
-  assert.equal(registered.ccstyleOwnResult, true);
-  assert.deepEqual(registered.parameters.required, ["report", "verification", "concerns"]);
-  for (const key of ["report", "verification", "concerns"])
-    assert.equal(registered.parameters.properties[key].minLength, 1);
-});
-
-test("completion status colors require explicit done and None concerns, not report wording", async () => {
-  const { tool, planFile } = await setup();
-  for (const [assessment, concerns, expected] of [
-    [{ state: "reviewed", verdict: "done" }, "  nOnE  ", "success"],
-    [{ state: "reviewed", verdict: "done" }, "A migration remains", "warning"],
-    [{ state: "reviewed", verdict: "done" }, undefined, "warning"],
-    [{ state: "reviewed", verdict: "unclear" }, "None", "warning"],
-    [{ state: "disabled" }, "None", "warning"],
-    [{ state: "unavailable", reason: "No session" }, "None", "warning"],
-    [{ state: "failed", reason: "Review failed" }, "None", "error"],
-    [{ state: "reviewed", verdict: "changes" }, "None", "error"],
-  ] as const) {
-    const colors: string[] = [];
-    const coloredTheme = {
-      ...theme,
-      fg: (role: string, text: string) => {
-        if (text.startsWith("Finished ·")) colors.push(role);
-        return text;
-      },
-    };
-    const details = {
-      ...completion,
-      report: "Everything passed; complete success!",
-      planFile,
-      concerns,
-      assessment: { planner: "Planner", narrative: "Evidence", costUsd: 0, ...assessment },
-    };
-    const lines = (tool(FINISH_TOOL) as any)
-      .renderResult({ details }, { expanded: false, isPartial: false }, coloredTheme)
-      .render(46);
-    assert.ok(lines.length > 0);
-    assert.deepEqual(colors, [expected]);
-  }
-});
-
-test("completion narratives fold but verification, issues and verdict remain visible at real widths", async () => {
-  const report = Array.from({ length: 22 }, (_, i) => `Implementation line ${i}`).join("\n");
-  const narrative = Array.from({ length: 22 }, (_, i) => `Assessment line ${i}`).join("\n");
-  const verification = `${Array.from({ length: 18 }, (_, i) => `Check ${i}: passed`).join("\n")}\nVERIFICATION END`;
-  const concerns = `${Array.from({ length: 18 }, (_, i) => `Risk ${i}: needs follow-up`).join("\n")}\nCONCERNS END`;
-  const { tool, context } = await setup({ script: () => ({ reply: `${narrative}\nVerdict: changes needed` }) });
-  const updates: Result[] = [];
-  const result = await tool(FINISH_TOOL).execute(
-    "1",
-    { report, verification, concerns },
-    undefined,
-    (update: Result) => updates.push(update),
-    context.ctx,
-  );
-  const render = (value: Result, width: number, expanded = false, isPartial = false) => {
-    const lines = (tool(FINISH_TOOL) as any)
-      .renderResult(value, { expanded, isPartial }, theme)
-      .render(width) as string[];
-    assert.ok(
-      lines.every((line) => visibleWidth(line) <= width),
-      `overflow at ${width}`,
-    );
-    return lines.join("\n").replace(/\s+/gu, " ");
-  };
-  for (const width of [46, 120]) {
-    const collapsed = render(result, width);
-    for (const label of [
-      "What changed",
-      "Verification",
-      "Outstanding issues",
-      "Planner assessment",
-      "VERIFICATION END",
-      "CONCERNS END",
-      "Verdict: changes needed",
-      "0 consultations",
-      "review $0.05",
-    ])
-      assert.ok(collapsed.includes(label), label);
-    assert.ok(!collapsed.includes("Implementation line 21"));
-    assert.ok(!collapsed.includes("Assessment line 21"));
-    assert.match(collapsed, /ctrl\+o to expand/u);
-    const expanded = render(result, width, true);
-    assert.ok(expanded.includes("Implementation line 21"));
-    assert.ok(expanded.includes("Assessment line 21"));
-    const update = updates[0];
-    assert.ok(update);
-    const partial = render(update, width, false, true);
-    assert.match(partial, /Planner reviewing…/u);
-    assert.ok(partial.includes("VERIFICATION END"));
-    assert.ok(partial.includes("CONCERNS END"));
-  }
-});
-
-test("legacy finish details render unknown verification and assessment, never invented success", async () => {
-  const { mock, tool, planFile } = await setup();
-  const details = { report: "Old completion report", planFile, asks: 2, costUsd: 0.1 };
-  for (const width of [46, 120]) {
-    const lines = (tool(FINISH_TOOL) as any)
-      .renderResult({ details }, { expanded: false, isPartial: false }, theme)
-      .render(width) as string[];
-    const text = lines.join("\n").replace(/\s+/gu, " ");
-    assert.match(text, /Old completion report/u);
-    assert.match(text, /verification is unknown/u);
-    assert.match(text, /outstanding issues are unknown/u);
-    assert.match(text, /no planner assessment was recorded/u);
-    assert.match(text, /2 consultations · \$0\.10/u);
-    assert.doesNotMatch(text, /assessed done/u);
-    assert.ok(lines.every((line) => visibleWidth(line) <= width));
-    const renderer = mock.messageRenderers.get("plan-mode-finish");
-    assert.ok(renderer);
-    const custom = (renderer({ details }, { expanded: false }, theme) as any).render(width) as string[];
-    assert.ok(custom.every((line) => visibleWidth(line) <= width));
-    assert.match(custom.join("\n"), /Implementation complete/u);
-  }
-});
-
-test("/plan-back works without pi-recap: the card just has no headline", async () => {
-  const { mock, context, tool } = await setup({ returnTo: "leaf-1" });
-  await tool(FINISH_TOOL).execute("1", { ...completion, report: "All done." }, undefined, undefined, context.ctx);
-  const messages: any[] = [];
-  (mock.rawPi as any).sendMessage = (message: unknown) => messages.push(message);
-  const command = (mock as any).commands.get("plan-back");
-  await command.handler("", { navigateTree: async () => ({ cancelled: false }), ui: { notify() {} } });
-  assert.equal(messages[0].details.headline, undefined);
-  assert.match(messages[0].content, /All done\./u);
-  assert.match(messages[0].content, /0 consultations/u);
-  assert.equal(messages[0].details.assessment.verdict, "done");
-  assert.match(messages[0].content, /Verdict: done/u);
-  assert.match(messages[0].content, /review \$0\.05/u);
-  const renderer = mock.messageRenderers.get("plan-mode-finish");
-  assert.ok(renderer);
-  for (const width of [46, 120]) {
-    const lines = (renderer(messages[0], { expanded: false }, theme) as any).render(width) as string[];
-    assert.ok(lines.every((line) => visibleWidth(line) <= width));
-    const text = lines.join("\n").replace(/\s+/gu, " ");
-    assert.match(text, /Implementation complete/u);
-    assert.match(text, /All done\./u);
-    assert.match(text, /Verdict: done/u);
-    assert.match(text, /0 consultations/u);
-  }
-});
-
-test("targeted review keeps evidence, separate usage, and consultation counts", async () => {
-  const { tool, context, sessions, latest, planFile } = await setup({
-    script: () => ({ reply: "Inspected tracked src/a.ts and history; tests are reported only.\nVerdict: done" }),
+const decision = (outcome = "accepted", extra = {}) =>
+  JSON.stringify({
+    outcome,
+    summary: "Reviewed.",
+    evidence: ["Read current implementation."],
+    limitations: [],
+    findings:
+      outcome === "changes_requested"
+        ? [{ id: "F1", title: "Fix", detail: "Incorrect.", requestedChange: "Fix it." }]
+        : [],
+    ...extra,
   });
-  await tool(ASK_TOOL).execute("ask", { message: "Which file?" }, undefined, undefined, context.ctx);
-  const result = await tool(FINISH_TOOL).execute("finish", completion, undefined, undefined, context.ctx);
-  assert.equal(sessions.created.length, 1, "reuse the seeded on-call session");
-  assert.equal(sessions.prompts.length, 2);
-  const prompt = sessions.prompts[1] ?? "";
-  for (const field of [completion.report, completion.verification, completion.concerns, planFile])
-    assert.ok(prompt.includes(field));
-  assert.match(prompt, /tracked files and commit history/u);
-  assert.match(prompt, /Do not modify any files.*or run tests/u);
-  assert.match(prompt, /distinguish implementer-reported checks from independently observed evidence/u);
-  assert.equal(result.details.assessment.state, "reviewed");
-  assert.equal(result.details.assessment.verdict, "done");
-  assert.equal(result.details.assessment.costUsd, 0.05);
-  assert.equal(result.details.asks, 1);
-  assert.equal(result.details.costUsd, 0.05);
-  assert.equal(latest().asks, 1, "review is not another ask_planner consultation");
+const submit = (s: Awaited<ReturnType<typeof setup>>, extra = {}, signal?: AbortSignal) =>
+  s.tool(FINISH_TOOL).execute("finish", { ...completion, ...extra }, signal, undefined, s.context.ctx);
+const command = async (s: Awaited<ReturnType<typeof setup>>, args: string) => {
+  const cmd = s.mock.commands.get("plan-exec") as any;
+  await cmd.handler(args, s.context.ctx);
+};
+test("accepted first submission finalizes with exactly one review usage", async () => {
+  const s = await setup();
+  const result = await submit(s);
+  assert.equal(s.latest().active, false);
+  assert.equal(result.details.completion, "accepted");
+  assert.equal(s.latest().negotiation?.attempts, 1);
+  assert.equal(s.latest().negotiation?.reviewCostUsd, 0.05);
+  assert.equal(s.latest().asks, 0);
+  assert.equal(s.mock.setModels.length, 1);
   assert.equal(result.usage.cost.total, 0.05);
-  assert.equal(sessions.disposals, 1);
-  assert.equal(sessions.subscriptions, 0);
-  assert.match(result.content[0]?.text ?? "", /1 consultation/u);
 });
-
-test("disabled review and no planner end honestly without opening a session", async () => {
-  for (const options of [{ completionReview: false }, { planner: false }]) {
-    const { tool, context, sessions, latest } = await setup(options);
-    const result = await tool(FINISH_TOOL).execute("1", completion, undefined, undefined, context.ctx);
-    assert.equal(result.details.assessment.state, "completionReview" in options ? "disabled" : "unavailable");
-    assert.equal(sessions.created.length, 0);
-    assert.equal(latest().active, false);
-    assert.match(result.content[0]?.text ?? "", /0 consultations/u);
-  }
-});
-
-test("an invalid on-call session and a thrown review preserve completion without inventing success", async () => {
-  for (const options of [
-    { plannerSpec: "invalid" },
-    {
-      script: () => {
-        throw new Error("review crashed");
-      },
-    },
-  ]) {
-    const { tool, context, latest } = await setup(options);
-    const result = await tool(FINISH_TOOL).execute("1", completion, undefined, undefined, context.ctx);
-    assert.ok(["unavailable", "failed"].includes(result.details.assessment.state));
-    assert.equal(result.details.report, completion.report);
-    assert.equal(result.details.asks, 0);
-    assert.equal(latest().active, false);
-  }
-});
-
-test("timed out review preserves completion and releases subscriptions", async () => {
-  let started!: () => void;
-  const running = new Promise<void>((resolve) => {
-    started = resolve;
+for (const status of ["addressed", "disputed"])
+  test(status + " finding then acceptance preserves implementer context until acceptance", async () => {
+    let calls = 0;
+    const s = await setup({ script: () => ({ reply: decision(++calls === 1 ? "changes_requested" : "accepted") }) });
+    const first = await submit(s);
+    assert.equal(first.terminate, undefined);
+    assert.equal(s.latest().active, true);
+    assert.equal(s.latest().negotiation?.phase, "revising");
+    assert.equal(s.mock.setModels.length, 0);
+    assert.equal(s.latest().pendingReturn, undefined);
+    const bad = await submit(s);
+    assert.match(bad.content[0].text, /responses|finding/i);
+    assert.equal(calls, 1);
+    const second = await submit(s, { responses: [{ id: "F1", status, response: "Evidence checked." }] });
+    assert.equal(second.details.completion, "accepted");
+    assert.equal(second.usage.cost.total, 0.05);
+    assert.equal(s.latest().negotiation?.reviewCostUsd, 0.1);
   });
-  const { tool, context, sessions, latest } = await setup({
-    script: async () => {
-      started();
-      return new Promise<ScriptReply>(() => {});
-    },
+test("reusing a resolved finding ID pauses as a visible review failure", async () => {
+  let calls = 0;
+  const s = await setup({
+    script: () => ({
+      reply: decision("changes_requested", {
+        findings: [{ id: ++calls === 2 ? "F2" : "F1", title: "Fix", detail: "Incorrect.", requestedChange: "Fix it." }],
+      }),
+    }),
   });
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  await submit(s);
+  await submit(s, { responses: [{ id: "F1", status: "addressed", response: "Fixed." }] });
+  const result = await submit(s, { responses: [{ id: "F2", status: "addressed", response: "Fixed." }] });
+  assert.equal(s.latest().negotiation?.pause?.reason, "failure");
+  assert.match(result.details.error, /previously resolved finding ID/);
+  assert.equal(result.details.assessment.state, "failed");
+  assert.equal(result.details.decision, undefined);
+  assert.equal(result.terminate, true);
+});
+
+test("two revision cycles exhaust after three reviews; paused calls cannot spend", async () => {
+  const s = await setup({ script: () => ({ reply: decision("changes_requested") }) });
+  await submit(s);
+  const responses = [{ id: "F1", status: "addressed", response: "Fixed." }];
+  await submit(s, { responses });
+  await submit(s, { responses });
+  assert.equal(s.latest().negotiation?.attempts, 3);
+  assert.equal(s.latest().negotiation?.revisionsUsed, 2);
+  assert.equal(s.latest().negotiation?.phase, "paused");
+  assert.equal(s.latest().active, true);
+  const blocked = await submit(s, { responses });
+  assert.equal(blocked.terminate, true);
+  assert.equal(s.sessions.prompts.length, 3);
+  assert.equal(s.mock.setModels.length, 0);
+  await command(s, "resume Try once more");
+  await submit(s, { responses });
+  assert.equal(s.latest().negotiation?.attempts, 4);
+  assert.equal(s.latest().negotiation?.phase, "paused");
+});
+for (const reply of [
+  "",
+  "Verdict: done",
+  "{",
+  decision("user_needed", { question: "Human check?", recommendation: "Verify it." }),
+])
+  test("invalid or human-needed review pauses: " + reply.slice(0, 15), async () => {
+    const s = await setup({ script: () => ({ reply }) });
+    const result = await submit(s);
+    assert.equal(result.terminate, true);
+    assert.equal(s.latest().active, true);
+    assert.equal(s.latest().negotiation?.phase, "paused");
+    assert.equal(s.latest().pendingReturn, undefined);
+  });
+test("unavailable planner pauses; disabled review completes without acceptance", async () => {
+  const s = await setup({ planner: false });
+  await submit(s);
+  assert.equal(s.latest().negotiation?.phase, "paused");
+  const disabled = await setup({ completionReview: false });
+  const result = await submit(disabled);
+  assert.equal(result.details.completion, "no_review");
+  assert.equal(disabled.sessions.prompts.length, 0);
+});
+test("explicit retry preserves costs and uses saved report", async () => {
+  let calls = 0;
+  const s = await setup({ script: () => ({ reply: ++calls === 1 ? "invalid" : decision() }) });
+  await submit(s);
+  await command(s, "retry");
+  const result = await submit(s, { report: "Unrelated replacement" });
+  assert.equal(result.details.report, completion.report);
+  assert.equal(s.latest().negotiation?.attempts, 2);
+  assert.equal(s.latest().negotiation?.revisionsUsed, 0);
+  assert.equal(s.latest().negotiation?.reviewCostUsd, 0.1);
+});
+test("reload pauses interrupted reviews and restores touched paths", async () => {
+  const s = await setup();
+  await s.emit("tool_result", { toolName: "write", input: { path: "src/a.ts" }, content: [], isError: false });
+  const saved = structuredClone(s.latest());
+  saved.negotiation!.phase = "consulting";
+  s.mock.entries.push({ customType: EXEC_ENTRY, data: saved });
+  await s.emit("session_tree", {});
+  assert.equal(s.latest().negotiation?.pause?.reason, "interrupted");
+  assert.ok(s.latest().touched?.some((p) => p.endsWith("src/a.ts")));
+});
+test("cancelled and timed out reviews pause without returning to planner", async () => {
   try {
-    const finish = tool(FINISH_TOOL).execute("1", completion, undefined, undefined, context.ctx);
-    await running;
-    await vi.advanceTimersByTimeAsync(CONSULT_TIMEOUT_MS);
-    const result = await finish;
-    assert.equal(result.details.assessment.state, "failed");
-    assert.match(result.details.assessment.reason, /timed out/u);
-    assert.equal(result.details.report, completion.report);
-    assert.equal(result.details.asks, 0);
-    assert.equal(latest().active, false);
-    assert.equal(sessions.subscriptions, 0);
+    for (const cancel of [true, false]) {
+      const s = await setup({ script: () => new Promise(() => {}) });
+      const controller = new AbortController();
+      if (!cancel) vi.useFakeTimers();
+      const resultPromise = submit(s, {}, controller.signal);
+      await vi.waitFor(() => assert.equal(s.sessions.prompts.length, 1));
+      if (cancel) controller.abort();
+      else await vi.advanceTimersByTimeAsync(CONSULT_TIMEOUT_MS);
+      const result = await resultPromise;
+      assert.equal(result.terminate, true);
+      assert.equal(s.latest().active, true);
+      assert.equal(s.latest().negotiation?.phase, "paused");
+      assert.equal(s.latest().pendingReturn, undefined);
+      vi.useRealTimers();
+    }
   } finally {
     vi.useRealTimers();
   }
 });
-
-test("missing or blank completion fields leave exec active and instruct retry", async () => {
-  for (const params of [
-    {},
-    { report: "Done" },
-    ...Object.keys(completion).map((key) => ({ ...completion, [key]: "  " })),
-  ]) {
-    const { tool, context, latest, sessions } = await setup();
-    const result = await tool(FINISH_TOOL).execute("1", params, undefined, undefined, context.ctx);
-    assert.match(result.content[0]?.text ?? "", /Retry finish_plan.*report.*verification.*concerns/u);
-    assert.equal(result.terminate, undefined);
-    assert.equal(latest().active, true);
-    assert.equal(sessions.created.length, 0);
-  }
+test("stale review after tree change does not charge or finalize new state", async () => {
+  let resolveReply!: (v: ScriptReply) => void;
+  const s = await setup({
+    script: () =>
+      new Promise((resolve) => {
+        resolveReply = resolve;
+      }),
+  });
+  const pending = submit(s);
+  await vi.waitFor(() => assert.equal(typeof resolveReply, "function"));
+  await s.emit("session_tree", {});
+  resolveReply({ reply: decision() });
+  await pending;
+  assert.equal(s.latest().active, true);
+  assert.equal(s.latest().negotiation?.reviewCostUsd, 0);
+});
+test("override requires confirmation, stop abandons without completion", async () => {
+  const s = await setup({ script: () => ({ reply: "invalid" }), select: ["Keep paused", "Finish without review"] });
+  await submit(s);
+  await command(s, "accept");
+  assert.equal(s.latest().active, true);
+  await command(s, "accept");
+  assert.equal(s.latest().active, false);
+  assert.equal(s.latest().pendingReturn, undefined);
+  const stopped = await setup();
+  await command(stopped, "stop");
+  assert.equal(stopped.latest().active, false);
 });
 
-test("review verdicts require an unambiguous final line", () => {
-  for (const [reply, expected] of [
-    ["Evidence.\nVerdict: done", "done"],
-    ["Evidence.\n`Verdict: changes needed`", "changes"],
-    [" VERDICT: DONE \n", "done"],
-    ["Looks good", "unclear"],
-    ["Verdict: done\nBut more text follows", "unclear"],
-    ["Verdict: done\nVerdict: changes needed", "unclear"],
-    ["Verdict: maybe", "unclear"],
-    ["", "unclear"],
-  ] as const)
-    assert.equal(reviewVerdict(reply), expected, reply);
+test("zero revision setting is snapshotted at legacy migration", async () => {
+  const s = await setup({ completionMaxRevisions: 0, script: () => ({ reply: decision("changes_requested") }) });
+  assert.equal(s.latest().negotiation?.maxRevisions, 0);
+  await submit(s);
+  assert.equal(s.latest().negotiation?.pause?.reason, "exhausted");
+  assert.equal(s.latest().negotiation?.attempts, 1);
+  assert.equal(s.latest().negotiation?.revisionsUsed, 0);
+});
+test("human answers survive reload and reach the next reviewer as user-provided evidence", async () => {
+  let calls = 0;
+  const s = await setup({
+    script: () => ({
+      reply:
+        ++calls === 1 ? decision("user_needed", { question: "Permission?", recommendation: "Ask user." }) : decision(),
+    }),
+  });
+  await submit(s);
+  await command(s, "retry");
+  assert.equal(s.latest().negotiation?.phase, "paused");
+  await command(s, "resume User verified readiness manually");
+  await s.emit("session_tree", {});
+  const result = await submit(s);
+  assert.equal(result.details.completion, "accepted");
+  assert.match(s.sessions.prompts.at(-1) ?? "", /User-provided answers.*User verified readiness manually/);
+});
+test("failed return navigation persists and can be retried after reload", async () => {
+  const s = await setup({ returnTo: "planning-leaf" });
+  await submit(s);
+  assert.equal(s.latest().pendingReturn?.leaf, "planning-leaf");
+  const ctx = s.context.ctx as any;
+  ctx.navigateTree = async () => {
+    throw new Error("not now");
+  };
+  const back = s.mock.commands.get("plan-back")!;
+  await back.handler("", ctx);
+  assert.ok(s.latest().pendingReturn);
+  await s.emit("session_tree", {});
+  ctx.navigateTree = async (leaf: string) => {
+    ctx.sessionManager.getLeafId = () => leaf;
+  };
+  await back.handler("", ctx);
+  assert.equal(s.mock.sentMessages.length, 1);
+  assert.equal(s.latest().pendingReturn, undefined);
+  assert.match(JSON.stringify(s.mock.sentMessages.at(-1)), /Negotiation record/);
+});
+test("failed return after a real leaf switch does not restore the old retry record", async () => {
+  const s = await setup({ returnTo: "planning-leaf" });
+  await submit(s);
+  const ctx = s.context.ctx as any;
+  ctx.navigateTree = async () => {
+    ctx.sessionManager.getLeafId = () => "other-branch";
+    throw new Error("navigation switched before failing");
+  };
+  await s.mock.commands.get("plan-back")!.handler("", ctx);
+  assert.equal(s.latest().pendingReturn, undefined);
+  const entries = s.mock.entries.length;
+  await s.mock.commands.get("plan-back")!.handler("", ctx);
+  await s.emit("agent_settled", { aborted: false });
+  assert.equal(s.mock.entries.length, entries);
+  assert.equal(s.mock.sentMessages.length, 0);
+  assert.equal(s.mock.sentUserMessages.length, 0);
 });
 
-test("changes-needed, unclear, failed and empty reviews retain the report through /plan-back", async () => {
-  for (const [answer, state, verdict] of [
-    [{ reply: "Fix src/a.ts.\nVerdict: changes needed" }, "reviewed", "changes"],
-    [{ reply: "Evidence is insufficient." }, "reviewed", "unclear"],
-    [{ reply: "", error: "provider unavailable" }, "failed", undefined],
-    [{ reply: "   " }, "failed", undefined],
-  ] as const) {
-    const { mock, context, tool, sessions, latest } = await setup({ returnTo: "leaf", script: () => answer });
-    const result = await tool(FINISH_TOOL).execute("1", completion, undefined, undefined, context.ctx);
-    assert.equal(result.details.assessment.state, state);
-    assert.equal(result.details.assessment.verdict, verdict);
-    assert.equal(result.details.report, completion.report);
-    assert.equal(latest().active, false);
-    assert.equal(result.details.asks, 0);
-    assert.equal(sessions.subscriptions, 0);
-    const messages: any[] = [];
-    (mock.rawPi as any).sendMessage = (message: unknown) => messages.push(message);
-    await mock.commands
-      .get("plan-back")
-      ?.handler("", { navigateTree: async () => ({ cancelled: false }), ui: { notify() {} } } as never);
-    assert.deepEqual(messages[0].details, result.details);
-    assert.ok(messages[0].content.includes(completion.report));
-    assert.ok(messages[0].content.includes(completion.verification));
-    assert.match(messages[0].content, /Planner assessment/u);
-    const renderer = mock.messageRenderers.get("plan-mode-finish");
-    assert.ok(renderer);
-    for (const width of [46, 120]) {
-      const lines = (renderer(messages[0], { expanded: false }, theme) as any).render(width) as string[];
-      assert.ok(lines.every((line) => visibleWidth(line) <= width));
-      assert.match(lines.join("\n"), /Implementation complete/u);
+test("paused tool-result cards expose reason-specific recovery at narrow and wide widths", async () => {
+  const theme = {
+    fg: (_role: string, text: string) => text,
+    bg: (_role: string, text: string) => text,
+    bold: (text: string) => text,
+  };
+  for (const reason of ["failure", "interrupted", "user_needed", "exhausted"] as const) {
+    const s = await setup({
+      completionMaxRevisions: 0,
+      script: () => ({
+        reply:
+          reason === "user_needed"
+            ? decision("user_needed", { question: "Human check?", recommendation: "Verify it." })
+            : reason === "exhausted"
+              ? decision("changes_requested")
+              : "invalid",
+      }),
+    });
+    let result: Result;
+    if (reason === "interrupted") {
+      const saved = structuredClone(s.latest());
+      saved.negotiation!.phase = "consulting";
+      s.mock.entries.push({ customType: EXEC_ENTRY, data: saved });
+      await s.emit("session_tree", {});
+      result = await submit(s);
+    } else result = await submit(s);
+    assert.equal(result.details.negotiation.pause.reason, reason);
+    const calls = s.sessions.prompts.length;
+    const blocked = await submit(s);
+    assert.equal(s.sessions.prompts.length, calls, "rendering and paused calls must not retry");
+    const tool = s.mock.tools.find((candidate) => candidate.name === FINISH_TOOL) as any;
+    // Exercise both the initial pause result and the already-paused guard result, not fabricated details.
+    for (const paused of [result, blocked]) {
+      for (const width of [46, 120]) {
+        const lines = tool.renderResult(paused, { expanded: false, isPartial: false }, theme).render(width);
+        assert.ok(lines.every((line: string) => visibleWidth(line) <= width));
+        const text = stripVTControlCharacters(lines.join("\n")).replace(/\s+/gu, " ");
+        assert.ok(text.includes("Next action"));
+        assert.ok(text.includes("/plan-exec accept"));
+        assert.ok(text.includes("/plan-exec stop"));
+        assert.ok(text.includes("No automatic retry"));
+        assert.ok(text.includes("agents cannot authorize recovery"));
+        if (reason === "failure" || reason === "interrupted") {
+          assert.ok(text.includes("/plan-exec retry"));
+          assert.ok(!text.includes("/plan-exec resume"));
+        } else {
+          assert.ok(text.includes("/plan-exec resume <answer>"));
+          assert.ok(!text.includes("/plan-exec retry"));
+          if (reason === "exhausted") assert.ok(text.includes("one extra revision-and-review cycle"));
+          else assert.ok(text.includes("Human check?"));
+        }
+      }
     }
   }
 });
 
-test("cancelling review still ends exec, restores the model and preserves the return report", async () => {
-  let started!: () => void;
-  const running = new Promise<void>((resolve) => {
-    started = resolve;
-  });
-  const { mock, tool, context, sessions, latest, emit } = await setup({
-    returnTo: "leaf",
-    script: async () => {
-      started();
-      return new Promise<ScriptReply>(() => {});
-    },
-  });
-  const controller = new AbortController();
-  const updates: Result[] = [];
-  const finish = tool(FINISH_TOOL).execute(
-    "1",
-    completion,
-    controller.signal,
-    (update: Result) => updates.push(update),
-    context.ctx,
-  );
-  await running;
-  assert.ok(updates.some((update) => update.details.pending));
-  controller.abort();
-  const result = await finish;
-  assert.equal(result.details.assessment.state, "failed");
-  assert.match(result.details.assessment.reason, /cancel/u);
-  assert.equal(result.details.report, completion.report);
-  assert.equal(result.details.asks, 0);
-  assert.equal(latest().active, false);
-  assert.ok(sessions.aborts > 0);
-  assert.equal(sessions.subscriptions, 0);
-  assert.equal(mock.setModels.length, 1);
-  await emit("agent_settled", { aborted: true });
-  const messages: any[] = [];
-  (mock.rawPi as any).sendMessage = (message: unknown) => messages.push(message);
-  await mock.commands
-    .get("plan-back")
-    ?.handler("", { navigateTree: async () => ({ cancelled: false }), ui: { notify() {} } } as never);
-  assert.deepEqual(messages[0].details, result.details);
+test("stale override confirmation cannot finalize a restored execution", async () => {
+  const s = await setup({ script: () => ({ reply: "invalid" }) });
+  await submit(s);
+  let done!: (answer: string) => void;
+  (s.context.ctx as any).ui.select = () =>
+    new Promise((resolve) => {
+      done = resolve;
+    });
+  const accepting = command(s, "accept");
+  await vi.waitFor(() => assert.equal(typeof done, "function"));
+  await s.emit("session_tree", {});
+  done("Finish without review");
+  await accepting;
+  assert.equal(s.latest().active, true);
+  assert.equal(s.mock.setModels.length, 0);
+});
+test("no UI override refuses and no return leaf does not schedule navigation", async () => {
+  const s = await setup({ hasUI: false, script: () => ({ reply: "invalid" }) });
+  await submit(s);
+  await command(s, "accept");
+  assert.equal(s.latest().active, true);
+  assert.equal(s.selects.length, 0);
+  const accepted = await setup({ returnTo: "planner", hasUI: false });
+  await submit(accepted);
+  await accepted.emit("agent_settled", { aborted: false });
+  assert.equal(accepted.mock.sentUserMessages.length, 0);
 });
 
-test("no UI or no return leaf avoids tree return, and navigation failure keeps its notice", async () => {
-  for (const options of [{ hasUI: false, returnTo: "leaf" }, {}]) {
-    const { tool, context, emit, mock } = await setup(options);
-    await tool(FINISH_TOOL).execute("1", completion, undefined, undefined, context.ctx);
-    await emit("agent_settled", { aborted: false });
-    assert.equal(mock.sentUserMessages.length, 0);
-  }
-  const { mock, context, tool } = await setup({ returnTo: "leaf" });
-  await tool(FINISH_TOOL).execute("1", completion, undefined, undefined, context.ctx);
-  const notes: string[] = [];
-  await mock.commands.get("plan-back")?.handler("", {
-    navigateTree: async () => {
-      throw new Error("missing leaf");
-    },
-    ui: { notify: (text: string) => notes.push(text) },
-  } as never);
-  assert.match(notes[0] ?? "", /Could not return.*missing leaf.*\/tree/u);
+test("cancellation drains delayed abort usage exactly once before disposal", async () => {
+  const s = await setup({ abortDelayMs: 40, script: () => new Promise(() => {}) });
+  const abort = new AbortController();
+  const pending = submit(s, {}, abort.signal);
+  await vi.waitFor(() => assert.equal(s.sessions.prompts.length, 1));
+  abort.abort();
+  const result = await pending;
+  assert.equal(result.usage.cost.total, 0.05);
+  assert.equal(s.latest().negotiation?.reviewCostUsd, 0.05);
+  assert.equal(s.latest().negotiation?.history[0].costUsd, 0.05);
+  await submit(s);
+  assert.equal(s.latest().negotiation?.reviewCostUsd, 0.05);
+});
+test("idle override explicitly schedules return and successful return clears source branch", async () => {
+  const s = await setup({
+    returnTo: "planning",
+    script: () => ({ reply: "invalid" }),
+    select: ["Finish without review"],
+  });
+  await submit(s);
+  await command(s, "accept");
+  assert.ok(s.mock.sentUserMessages.some((m) => m.text === "/plan-back"));
+  const ctx = s.context.ctx as any;
+  ctx.navigateTree = async (leaf: string) => {
+    assert.equal(s.latest().pendingReturn, undefined, "source must be cleared before navigation");
+    ctx.sessionManager.getLeafId = () => leaf;
+  };
+  await s.mock.commands.get("plan-back")!.handler("", ctx);
+  await s.emit("session_tree", {});
+  await s.emit("agent_settled", { aborted: false });
+  assert.equal(s.mock.sentUserMessages.filter((m) => m.text === "/plan-back").length, 1);
+});
+test("failed model restoration is recorded and not labeled returned", async () => {
+  const s = await setup({ returnTo: "planning" });
+  s.mock.rawPi.setModel = async () => false;
+  const result = await submit(s);
+  assert.equal(result.details.returnedTo, undefined);
+  assert.match(result.details.action, /restoration failed/);
+  assert.match(s.latest().pendingReturn?.details.action ?? "", /restoration failed/);
+});
+test("record:false begin seeds its host transaction with fresh identity and snapshotted budget", () => {
+  const mock = createMockPi();
+  const ctx = createMockContext({ mode: "tui" }).ctx;
+  const exec = registerExec(mock.pi, {
+    consultantAccess: () => ({}) as never,
+    restoreModel: async () => true,
+    completionReview: () => true,
+    completionMaxRevisions: () => 0,
+  });
+  const state: ExecState = {
+    active: true,
+    planFile: "/approved.md",
+    implementer: "Model",
+    implementerModel: "",
+    asks: 0,
+    costUsd: 0,
+  };
+  exec.begin(ctx, state, { record: false });
+  assert.equal(mock.entries.length, 0);
+  assert.equal(state.negotiation?.maxRevisions, 0);
+  const id = state.negotiation?.executionId;
+  exec.begin(ctx, state, { record: false });
+  assert.notEqual(state.negotiation?.executionId, id);
 });
