@@ -19,6 +19,7 @@ import type {
   EditorModeContext,
   EditorSnapshot as DraftSnapshot,
 } from "../contract.js";
+import type { SharedRegisterStore } from "./shared-register.js";
 import {
   ClipboardMirror,
   type ClipboardReadFn,
@@ -576,6 +577,9 @@ export class ModalEditor extends CustomEditor {
 
   private unnamedRegister: string = "";
   private preferRegisterForPut = false;
+  private sharedRegister: SharedRegisterStore | null = null;
+  /** ts of the shared register entry this editor last wrote or pasted. */
+  private lastSeenSharedTs = 0;
   /** Last clipboard text this editor wrote or read; null when unknown. */
   private lastKnownClipboard: string | null = null;
   private displayLineMotion = false;
@@ -680,6 +684,9 @@ export class ModalEditor extends CustomEditor {
   }
   setClipboardReadFn(fn: ClipboardReadFn): void {
     this.clipboardReadFn = fn;
+  }
+  setSharedRegister(store: SharedRegisterStore | null): void {
+    this.sharedRegister = store;
   }
   setClipboardMirrorPolicy(policy: ClipboardMirrorPolicy): void {
     this.clipboardMirrorPolicy = policy;
@@ -4498,12 +4505,19 @@ export class ModalEditor extends CustomEditor {
     if (this.rowCtx) text = this.unwrapRegisterText(text);
     text = this.expandRegisterPasteMarkers(text);
     this.unnamedRegister = text;
+    if (text !== "" && this.sharedRegister) {
+      const entry = this.sharedRegister.write(text);
+      if (entry) this.lastSeenSharedTs = entry.ts;
+    }
     const shouldMirror = text !== "" && this.shouldMirrorRegisterWrite(source);
     this.preferRegisterForPut = text !== "" && !shouldMirror;
     if (!shouldMirror) return;
 
-    this.lastKnownClipboard = text;
-    this.clipboardMirror.mirror(text);
+    // The system clipboard gets text without the linewise trailing newline;
+    // the shared register keeps it, so p still pastes linewise.
+    const clipText = text.length > 1 && text.endsWith("\n") ? text.slice(0, -1) : text;
+    this.lastKnownClipboard = clipText;
+    this.clipboardMirror.mirror(clipText);
   }
 
   private getCurrentLineAndCol(): { line: string; col: number } {
@@ -5221,6 +5235,29 @@ export class ModalEditor extends CustomEditor {
       clipboardText = this.clipboardReadFn();
     } catch {
       clipboardText = null;
+    }
+
+    if (this.sharedRegister) {
+      const shared = this.sharedRegister.read();
+      const reg = shared?.text ?? this.unnamedRegister;
+      const unchangedSinceSeen = !shared || shared.ts === this.lastSeenSharedTs;
+      const strip = reg.endsWith("\n") ? reg.slice(0, -1) : reg;
+      const known = this.lastKnownClipboard;
+      let result = reg;
+      if (
+        clipboardText &&
+        clipboardText !== reg &&
+        clipboardText !== strip &&
+        known !== null &&
+        clipboardText !== known &&
+        unchangedSinceSeen
+      ) {
+        // Copied outside pi (or by a non-vi path) after the register.
+        result = clipboardText;
+      }
+      if (clipboardText !== null) this.lastKnownClipboard = clipboardText;
+      if (shared) this.lastSeenSharedTs = shared.ts;
+      return result;
     }
 
     if (this.preferRegisterForPut) {

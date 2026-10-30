@@ -243,7 +243,7 @@ describe("clipboard mirror policy", () => {
       sendKeys(editor, ["y", "y"]);
       await nextClipboardDrain();
       assert.equal(editor.getRegister(), `${big}\n`);
-      assert.deepEqual(mirrored, [`${big}\n`]);
+      assert.deepEqual(mirrored, [big]); // no trailing line break on the system clipboard
     } finally {
       editor.setClipboardFn(() => {});
     }
@@ -390,3 +390,32 @@ describe("yank policy paste source", () => {
   });
 });
 
+
+describe("shared register across sessions", () => {
+  it("shares deletes between editors, mirrors only yanks, keeps yy linewise", async () => {
+    let shared: { text: string; ts: number } | null = null;
+    let ts = 0;
+    const store = {
+      read: () => shared,
+      write: (text: string) => (shared = { text, ts: ++ts }),
+    };
+    const a = createEditorWithSpy("one\ntwo");
+    const b = createEditorWithSpy("x");
+    for (const e of [a, b]) {
+      e.editor.setSharedRegister(store);
+      e.editor.setClipboardMirrorPolicy("yank");
+      e.editor.setClipboardReadFn(() => a.clipboardWrites.at(-1) ?? null);
+    }
+    sendKeys(a.editor, ["d", "d"]);
+    await nextImmediate();
+    assert.deepEqual(a.clipboardWrites, []);
+    sendKeys(b.editor, ["p"]);
+    assert.equal(b.editor.getText(), "x\ntwo");
+
+    sendKeys(a.editor, ["y", "y"]);
+    await nextClipboardDrain();
+    assert.deepEqual(a.clipboardWrites, ["one"]);
+    sendKeys(b.editor, ["p"]);
+    assert.equal(b.editor.getText(), "x\ntwo\none");
+  });
+});

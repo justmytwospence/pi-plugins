@@ -8,6 +8,7 @@
  * `pi-plugins.editor-factory.v1` provider and a once-per-process diagnostic
  * when the standalone pi-vim package is loaded next to this one.
  */
+import { createFileSharedRegister } from "./engine/shared-register.js";
 import {
   CustomEditor,
   type ExtensionAPI,
@@ -161,6 +162,7 @@ export default function piVim(pi: ExtensionAPI) {
       const editor = new MainEditor(options.tui, options.theme, options.keybindings, config.editorOptions);
       current.main.add(editor);
       editor.setClipboardMirrorPolicy(config.clipboardMirrorPolicy);
+      editor.setSharedRegister(createFileSharedRegister());
       editor.setQuitFn(() => ctx.shutdown());
       editor.setNotifyFn((message) => ctx.ui.notify(message, "warning"));
       editor.setExCommandSettings(config.exCommand);
@@ -191,6 +193,7 @@ export default function piVim(pi: ExtensionAPI) {
       () => current.embedded.delete(editor),
     );
     editor.setClipboardMirrorPolicy(current.config.clipboardMirrorPolicy);
+    editor.setSharedRegister(createFileSharedRegister());
     editor.setModeChangeFn(current.config.modeChangeFor("embedded"));
     current.embedded.add(editor);
     return editor;
