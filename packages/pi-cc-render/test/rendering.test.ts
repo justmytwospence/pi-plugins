@@ -131,8 +131,10 @@ describe("own result rows", () => {
     const own = { name: "bg_run", label: "Background", ccstyleOwnResult: true, renderResult: () => ({ render: () => ["↳ fit running · 45%"], invalidate() {} }) };
     const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t, bg: (_c: string, t: string) => t };
     const wrapped = createCcstyleTool(own, new Map() as any);
-    const lines = wrapped.renderResult({ content: [{ type: "text", text: "Started" }] }, { expanded: false, isPartial: false }, theme, { state: {} }).render(80);
-    expect(lines[0]).toBe("   ↳ fit running · 45%");
+    for (const isPartial of [true, false]) {
+      const lines = wrapped.renderResult({ content: [{ type: "text", text: "Started" }] }, { expanded: false, isPartial }, theme, { state: {} }).render(80);
+      expect(lines[0]).toBe("   ↳ fit running · 45%");
+    }
     const plain = createCcstyleTool({ ...own, ccstyleOwnResult: undefined }, new Map() as any);
     const generic = plain.renderResult({ content: [{ type: "text", text: "Started" }] }, { expanded: false, isPartial: false }, theme, { state: {} }).render(80);
     expect(stripTerminalSequences(generic[0])).toMatch(/1 line returned/);
@@ -199,7 +201,7 @@ describe("startup header", () => {
 describe("tool groups", () => {
   const IMAGE_ROW = "\x1b_Ga=T,f=100,q=2,C=1;AAAA\x1b\\";
 
-  async function groupedTools() {
+  async function groupedTools(populate = true) {
     const { ToolExecutionComponent } = await import("@earendil-works/pi-coding-agent");
     const { Container } = await import("@earendil-works/pi-tui");
     const { installToolGrouping } = await import("../src/renderer/tool/grouping.ts");
@@ -224,11 +226,42 @@ describe("tool groups", () => {
       return value;
     };
     const root = new Container();
-    root.addChild(tool("bash", ["✓ Bash echo"]));
-    root.addChild(tool("read", ["✓ Read a.png", "Read image file [image/png]"], [[IMAGE_ROW, "", ""]]));
+    if (populate) {
+      root.addChild(tool("bash", ["✓ Bash echo"]));
+      root.addChild(tool("read", ["✓ Read a.png", "Read image file [image/png]"], [[IMAGE_ROW, "", ""]]));
+    }
     const group = root.children[0] as any;
-    return { hooks, group };
+    return { hooks, group, root, tool };
   }
+
+  test.each([
+    { before: ["todo"], after: ["bash"] },
+    { before: ["read", "todo"], after: ["bash", "read"] },
+  ])("exit_plan_mode stays standalone between $before and $after", async ({ before, after }) => {
+    const { hooks, root, tool } = await groupedTools(false);
+    try {
+      const preceding = before.map((name) => tool(name, [`✓ ${name}`]));
+      const exit = tool("exit_plan_mode", ["Plan", "Do it", "Waiting for approval"]);
+      exit.isPartial = true;
+      const following = after.map((name) => tool(name, [`✓ ${name}`]));
+      for (const component of [...preceding, exit, ...following]) root.addChild(component);
+
+      expect(root.children).toHaveLength(3);
+      expect(root.children[1]).toBe(exit);
+      for (const [index, tools] of [[0, preceding], [2, following]] as const) {
+        const sibling = root.children[index] as any;
+        if (tools.length === 1) expect(sibling).toBe(tools[0]);
+        else {
+          expect(sibling.constructor.name).toBe("ToolGroupComponent");
+          expect(sibling.children).toEqual(tools);
+          expect(sibling.children).not.toContain(exit);
+        }
+      }
+      expect(plain(root.render(80)).join("\n")).toContain("Waiting for approval");
+    } finally {
+      hooks.shutdown();
+    }
+  });
 
   test("a group draws its children's images, collapsed and expanded, once each", async () => {
     const { hooks, group } = await groupedTools();

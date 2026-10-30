@@ -11,6 +11,7 @@ import {
   type Component,
   Container,
   ScrollView,
+  stripTerminalSequences,
   type Terminal,
   Text,
   TuiAltScreen,
@@ -24,6 +25,14 @@ import { renderLayoutFrame } from "../node_modules/@earendil-works/pi-tui/dist/l
 import { EXIT_TOOL, registerInlinePlanMode } from "../src/inline-plan.js";
 import { PlanReviewViewport } from "../src/plan-review-viewport.js";
 import { createMockContext, createMockPi } from "./shared/support.js";
+
+// Each component lockfile installs its own SDK copy. Share the fixture's real SDK
+// classes with cc-render so its prototype patches and instanceof checks hit the host.
+vi.mock(
+  "../../pi-cc-render/node_modules/@earendil-works/pi-coding-agent",
+  async () => import("@earendil-works/pi-coding-agent"),
+);
+vi.mock("../../pi-cc-render/node_modules/@earendil-works/pi-tui", async () => import("@earendil-works/pi-tui"));
 
 class MemoryTerminal implements Terminal {
   columns = 64;
@@ -47,12 +56,14 @@ class MemoryTerminal implements Terminal {
 }
 
 const directories: string[] = [];
+const rendererCleanups: (() => void)[] = [];
 afterEach(() => {
+  for (const cleanup of rendererCleanups.splice(0).reverse()) cleanup();
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
   vi.restoreAllMocks();
 });
 
-function setup(plan: string, scrollbar: "always" | "hidden" = "always") {
+function setup(plan: string, scrollbar: "always" | "hidden" = "always", withTodo = false) {
   initTheme("dark", false);
   const terminal = new MemoryTerminal();
   const renderer = new TuiAltScreen(terminal);
@@ -115,6 +126,12 @@ function setup(plan: string, scrollbar: "always" | "hidden" = "always") {
   const definition = mock.tools.find((tool) => tool.name === EXIT_TOOL) as unknown as ToolDefinition;
   const card = new ToolExecutionComponent(EXIT_TOOL, "review-id", {}, {}, definition, reference, "/fixture");
   card.markExecutionStarted();
+  if (withTodo) {
+    const todo = new ToolExecutionComponent("todo", "todo-id", {}, {}, undefined, reference, "/fixture");
+    todo.markExecutionStarted();
+    todo.updateResult({ content: [{ type: "text", text: "Plan ready for review" }], isError: false }, false);
+    chat.addChild(todo);
+  }
   chat.addChild(card);
   const internals = renderer as unknown as { currentLayout: ReturnType<typeof renderLayoutFrame> };
   const frame = () => {
@@ -198,6 +215,59 @@ test.each(["long"])("actual SDK puts a %s plan at the top only after the picker 
   expect(h.widgets().size).toBe(0);
   expect(h.scroll.isFollowingEnd).toBe(true);
   expect(h.card.render(64).length).toBeLessThan(size === "long" ? 40 : 12);
+});
+
+test.each(["long", "short"])("cc-render keeps a pending %s plan visible after todo", async (size) => {
+  // Test-only sibling imports: do not introduce a runtime plugin dependency or
+  // pull cc-render's source tree into plan-mode's TypeScript rootDir.
+  const defaultModePath = new URL("../../pi-cc-render/src/renderer/default-mode.ts", import.meta.url).pathname;
+  const groupingPath = new URL("../../pi-cc-render/src/renderer/tool/grouping.ts", import.meta.url).pathname;
+  const { installDefaultMode } = await import(defaultModePath);
+  const { installToolGrouping, ToolGroupComponent } = await import(groupingPath);
+  const styled = installDefaultMode(new Map());
+  rendererCleanups.push(() => styled.shutdown());
+  const grouping = installToolGrouping(() => true);
+  rendererCleanups.push(() => grouping.shutdown());
+  const h = setup(size === "long" ? longPlan : "# Beginning of plan\n\nDo it.", "always", true);
+  grouping.setTheme(h.ctx.ui.theme);
+  const result = h.run();
+  try {
+    const layout = await h.settle();
+    const screen = layout.lines.map(stripTerminalSequences).join("\n");
+    expect(h.chat.children).toContain(h.card);
+    expect(h.chat.children.some((child) => child instanceof ToolGroupComponent)).toBe(false);
+    // Prove the styled call wrapper really ran, not just the native SDK renderer.
+    expect(stripTerminalSequences(h.card.render(64).join("\n"))).toContain("Exit plan mode present plan");
+    expect(screen).toContain("Beginning of plan");
+    expect(screen).toContain(size === "long" ? "Step 1:" : "Do it.");
+    expect(screen).toContain("Implement this plan?");
+    expect(h.widgets().size).toBe(1);
+    if (size === "long") {
+      expect(h.scroll.scrollTop).toBe(h.top());
+      expect(h.scroll.isFollowingEnd).toBe(false);
+      const start = h.scroll.scrollTop;
+      const half = Math.floor(h.scroll.viewportHeight / 2);
+      expect(h.press("\x04")).toBe(true);
+      await h.settle();
+      expect(h.scroll.scrollTop).toBe(start + half);
+      expect(h.press("\x15")).toBe(true);
+      await h.settle();
+      expect(h.scroll.scrollTop).toBe(start);
+    } else {
+      expect(h.scroll.isFollowingEnd).toBe(true);
+      expect(h.card.render(h.scroll.getContentWidth(h.terminal.columns)).length).toBeLessThan(
+        h.scroll.viewportHeight - 4,
+      );
+    }
+  } finally {
+    h.choose();
+    const approved = await result;
+    h.card.updateResult({ ...approved, isError: false }, false);
+    await h.settle();
+  }
+  expect(h.widgets().size).toBe(0);
+  expect(h.keyHandlers.size).toBe(0);
+  expect(h.scroll.isFollowingEnd).toBe(true);
 });
 
 test("ctrl+d and ctrl+u scroll the plan half a page while you decide, and only then", async () => {

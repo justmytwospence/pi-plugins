@@ -378,6 +378,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
 
   pi.registerTool({
     name: EXIT_TOOL,
+    ...{ ccstyleOwnResult: true },
     // Nested codemode calls have no transcript row to render the plan being approved.
     exposure: "model-only",
     // The plan file is read when this runs: a write or edit to it in the same message must land

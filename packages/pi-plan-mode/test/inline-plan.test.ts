@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { stripVTControlCharacters } from "node:util";
+import { type ExtensionContext, initTheme, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
 import planMode from "../src/index.js";
 import {
@@ -171,6 +172,40 @@ test("exit_plan_mode needs a written plan, shows it, and implements it here once
     context.ctx,
   );
   assert.equal(updates[0]?.details.outcome, "pending", "the plan shows while you decide");
+  const exit = mock.tools.find((candidate) => candidate.name === EXIT_TOOL);
+  assert.equal(exit?.ccstyleOwnResult, true, "cc-render must preserve the plan's own result renderer");
+  initTheme("dark", false);
+  const theme = {
+    fg: (_role: string, text: string) => text,
+    bg: (_role: string, text: string) => text,
+    bold: (text: string) => text,
+  } as ExtensionContext["ui"]["theme"];
+  const pending = (exit as unknown as ToolDefinition).renderResult?.(
+    updates[0],
+    { expanded: false, isPartial: true },
+    theme,
+    {
+      toolCallId: "t2",
+      args: {},
+      state: {},
+      invalidate() {},
+      lastComponent: undefined,
+      cwd: (context.ctx as ExtensionContext).cwd,
+      executionStarted: true,
+      argsComplete: true,
+      isPartial: true,
+      expanded: false,
+      showImages: false,
+      isError: false,
+      durationMs: undefined,
+      outputPad: 0,
+    },
+  );
+  assert.ok(pending, "the pending review has a result component");
+  const rendered = pending.render(80).map(stripVTControlCharacters).join("\n");
+  assert.match(rendered, /Plan/u);
+  assert.match(rendered, /1\. Do it/u);
+  assert.match(rendered, /Waiting for approval/u);
   assert.deepEqual(selects[0]?.options, [
     "Yes, in a fresh context",
     "Yes, implement it here",
