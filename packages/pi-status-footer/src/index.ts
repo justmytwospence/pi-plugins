@@ -978,7 +978,7 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     rows.push(row(ICONS.workflow, (w) => fitSegments([
       { text: badge, priority: 130 },
       { text: phase ? theme.fg("muted", phase) : "", priority: 120 },
-      { text: theme.fg("muted", detail || WORKFLOW_EXPLANATIONS[workflow.kind]), priority: 70 },
+      { text: theme.fg("muted", detail || (phase ? "" : WORKFLOW_EXPLANATIONS[workflow.kind])), priority: 70 },
       { text: theme.fg("dim", workflow.kind === "exec" ? "/plan-exec" : workflow.key ?? ""), priority: 30 },
     ], w, theme)));
   }

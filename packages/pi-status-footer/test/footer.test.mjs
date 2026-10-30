@@ -1738,7 +1738,8 @@ test("pi-plan-mode's exec workflow preserves a separate approvals row", () => {
   assert.deepEqual(absorbed.rest, []);
   const s = { ...fixture(), mode: absorbed.mode, exec: absorbed.exec, statuses: absorbed.rest };
   const rows = mod.renderFooter(s, 160, theme).map(plain);
-  assert.match(rows[2], /\[EXEC\] · Claude Opus 5.5 on call · implementing approved plan · \/plan-exec/);
+  assert.match(rows[2], /\[EXEC\] · Claude Opus 5.5 on call · \/plan-exec/);
+  assert.doesNotMatch(rows[2], /implementing approved plan/);
   assert.match(rows[3], /Approvals · auto · shift\+tab/);
   // Without a mode, or a planner on call, the row is still drawn.
   const standalone = mod.renderFooter({ ...s, mode: undefined }, 160, theme).map(plain);
@@ -1747,6 +1748,17 @@ test("pi-plan-mode's exec workflow preserves a separate approvals row", () => {
   assert.equal(mod.absorbStatuses(new Map([["plan-exec", "exec mode on"]]), { claudeRow: false }).exec, "");
   assert.match(mod.renderFooter({ ...s, exec: "" }, 160, theme).map(plain)[2], /\[EXEC\] · implementing approved plan · \/plan-exec/);
   assert.deepEqual(mod.absorbStatuses(new Map([["plan-exec", "something else"]]), { claudeRow: false }).rest, ["something else"]);
+});
+
+test("phase-only exec statuses supersede the static explanation", () => {
+  for (const phase of ["paused · user needed", "review 2", "implementing"]) {
+    for (const width of [46, 120]) {
+      const row = plain(mod.renderFooter({ ...fixture(), exec: phase }, width, theme)[2]);
+      assert.ok(row.includes("[EXEC]"), row);
+      assert.ok(row.includes(phase), row);
+      assert.doesNotMatch(row, /implementing approved plan/);
+    }
+  }
 });
 
 test("exec negotiation phases stay on the workflow row, ahead of counts and costs", () => {
