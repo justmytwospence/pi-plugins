@@ -49,6 +49,7 @@ import { BASE_TOKEN, Crew, CREW_MESSAGE, CrewWatch, type CrewWatchDeps, DRIFT_TO
 import { computeDrift, currentBranch, defaultBase, driftMatters, driftNote, driftToken, RefWatcher } from "./drift.ts";
 import { type ChildRecord, Children, type Exec, type Where } from "./core/children.ts";
 import { DraftGuard } from "./draft-guard.ts";
+import { FORK_BOUNDARY } from "./fork-session.ts";
 import { ACK_TTL_MS, ackTokenName, type Delivery, formatAck, Inbox, INBOX_SOURCE, INBOX_TOKEN, INBOX_TTL_MS, inboxTokenValue, messageText, type Outcome, parseRate, Presence, processInboxState, type Reason, type Sender, TYPING_IDLE_MS } from "./inbox.ts";
 import { type Call, herdrTarget, socketCall } from "./core/herdr.ts";
 import { displayAgent, firstUserText, titleFromPrompt } from "./identity.ts";
@@ -56,6 +57,7 @@ import { PR_FIELDS, parsePrView, prToken } from "./core/pr.ts";
 import { PaneReporter, WorkspaceReporter } from "./core/report.ts";
 import { withIntents } from "./intent.ts";
 import { PI_CHILD } from "./session.ts";
+import { registerTreeFork } from "./tree-fork.ts";
 import { blockedSummary, type SummaryRegistry, turnSummary } from "./summary.ts";
 
 const TOOL = "herdr";
@@ -655,6 +657,11 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     crew.seen = undefined;
     driftSeen = {};
     for (const e of ctx.sessionManager.getBranch() as any[]) {
+      if (e.type === "custom" && e.customType === FORK_BOUNDARY) {
+        saved.clear();
+        crew.seen = undefined;
+        driftSeen = {};
+      }
       if (e.type === "custom" && e.customType === SEEN_ENTRY && e.data && typeof e.data === "object") crew.seen = e.data as Seen;
       if (e.type === "custom" && e.customType === DRIFT_ENTRY && e.data && typeof e.data === "object") driftSeen = { ...(e.data as Record<string, string>) };
       if (e.type === "custom" && e.customType === CHILD_ENTRY && e.data?.name) saved.set(e.data.name, e.data as ChildRecord);
@@ -877,6 +884,16 @@ export default function piHerdr(pi: ExtensionAPI, dependencies: HerdrDependencie
     await startCrewWatches(ctx);
     return synced;
   };
+
+  registerTreeFork(pi, {
+    call,
+    selfPane: target.paneId,
+    uniqueName: (wanted) => children.uniqueName(wanted),
+    runtimeCurrent: () => {
+      const epoch = generation;
+      return () => epoch === generation && branchCurrent();
+    },
+  });
 
   // `/crew`: the same operations without a model turn. Its output goes into the conversation as a
   // displayed message that starts no turn, so the agent knows what the user did on its next prompt.

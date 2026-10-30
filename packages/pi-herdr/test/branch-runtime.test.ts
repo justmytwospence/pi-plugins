@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { createEventBus, SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION, type ActivitySection } from "../src/activity.ts";
 import { type ChildRecord, Children } from "../src/core/children.ts";
+import { FORK_BOUNDARY } from "../src/fork-session.ts";
 import piHerdr from "../src/index.ts";
 import { PI_CHILD } from "../src/session.ts";
 import { fakeCall } from "./core/fake.ts";
@@ -61,6 +62,122 @@ function socketFixture() {
 }
 const deps = (call: any) => ({ call, exec: async () => ({ code: 0, stdout: "", stderr: "" }), pollMs: 1_000 });
 const save = (p: ReturnType<typeof harness>, r: ChildRecord) => p.manager.appendCustomEntry("pi-herdr:child", r);
+
+const forkRecords: Array<[string, ChildRecord]> = [
+  ["awaiting", rec()],
+  ["pendingReply", { ...rec("worker", false), pendingReply: "source reply" }],
+  ["queued", { ...rec("worker", false), queued: ["source follow-up"] }],
+];
+
+function copySession(manager: SessionManager) {
+  const header = SessionManager.inMemory("/repo").getHeader()!;
+  return SessionManager.inMemory("/repo", undefined, structuredClone([header, ...manager.getBranch()]));
+}
+
+test.each(forkRecords)("tree-fork boundary isolates inherited %s children through reload and a fresh runtime without changing the source", async (_kind, record) => {
+  const source = harness();
+  save(source, structuredClone(record));
+  const original = structuredClone(source.manager.getBranch());
+  const fork = harness(copySession(source.manager)); const x = socketFixture();
+  expect(fork.manager.getSessionId()).not.toBe(source.manager.getSessionId());
+  fork.manager.appendCustomEntry(FORK_BOUNDARY, {});
+  piHerdr(fork.pi, deps(x.f.call));
+  const isolated = async (p: ReturnType<typeof harness>) => {
+    expect(p.section().entries(Date.now())).toEqual([]);
+    expect(p.section().canStop?.("worker")).toBe(false);
+    await p.section().stop?.("worker");
+    await p.emit("agent_settled");
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(p.messages).toEqual([]);
+    expect(p.rawPi.appendEntry).not.toHaveBeenCalled();
+    expect(x.f.of("agent.get")).toEqual([]);
+    expect(x.f.of("agent.prompt")).toEqual([]);
+    expect(x.f.of("agent.send_keys")).toEqual([]);
+    expect(PI_CHILD.reply).not.toHaveBeenCalled();
+    expect(p.emitted.filter(([c, d]) => c === "herdr:background" && d.active)).toEqual([]);
+  };
+  await fork.emit("session_start", { reason: "fork" });
+  await isolated(fork);
+  await fork.emit("session_start", { reason: "reload" });
+  await isolated(fork);
+  await fork.emit("session_shutdown");
+  const fresh = harness(copySession(fork.manager));
+  piHerdr(fresh.pi, deps(x.f.call)); await fresh.emit("session_start");
+  await isolated(fresh);
+  await fresh.emit("session_shutdown");
+  expect(vi.getTimerCount()).toBe(0);
+
+  // Copying the branch and appending the marker never abandons the source's children.
+  expect(source.manager.getBranch()).toEqual(original);
+  const sx = socketFixture(); source.state.idle = false;
+  piHerdr(source.pi, deps(sx.f.call)); await source.emit("session_start");
+  expect(source.section().entries(Date.now()).map((e) => e.key)).toEqual(["worker"]);
+  source.state.idle = true;
+  await source.emit("agent_settled");
+  sx.state.seq = 2;
+  await vi.advanceTimersByTimeAsync(1_000);
+  if (record.pendingReply) expect(source.messages.map((m) => m.message.content)).toEqual(["source reply"]);
+  else expect(sx.f.of("agent.get").length).toBeGreaterThan(0);
+  if (record.queued) expect(sx.f.of("agent.prompt")).toHaveLength(1);
+  await source.emit("session_shutdown");
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+test("tree-fork restores post-boundary awaiting, pendingReply and queued records normally", async () => {
+  const p = harness(); const x = socketFixture();
+  for (const [, record] of forkRecords) save(p, { ...structuredClone(record), name: `inherited-${record.awaiting ? "awaiting" : record.pendingReply ? "reply" : "queued"}` });
+  p.manager.appendCustomEntry(FORK_BOUNDARY, {});
+  save(p, { ...rec("new-awaiting"), paneId: "w1:p3" });
+  save(p, { ...rec("new-reply", false), paneId: "w1:p4", pendingReply: "new reply" });
+  save(p, { ...rec("new-queued", false), paneId: "w1:p5", queued: ["new follow-up"] });
+  piHerdr(p.pi, deps(x.f.call)); await p.emit("session_start");
+  expect(p.section().entries(1_000).map((e) => e.key).sort()).toEqual(["new-awaiting", "new-queued", "new-reply"]);
+  expect(p.messages.map((m) => m.message.content)).toEqual(["new reply"]);
+  x.state.seq = 2;
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(PI_CHILD.reply).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(PI_CHILD.reply).mock.calls[0][0]).toMatchObject({ name: "new-awaiting", paneId: "w1:p3" });
+  expect(p.messages).toHaveLength(2);
+  expect(p.messages[1].message.content).toContain("Fixture reply");
+  expect(x.f.of("agent.get").map((c) => c.params.target)).toEqual(expect.arrayContaining(["w1:p3", "w1:p5"]));
+  expect(x.f.of("agent.get").every((c) => c.params.target !== "w1:p2")).toBe(true);
+  expect(x.f.of("agent.prompt")).toHaveLength(1);
+  expect(x.f.of("agent.prompt")[0].params).toMatchObject({ target: "w1:p5", text: "new follow-up" });
+  await p.emit("session_shutdown");
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+test("session_tree honors each fork boundary on the active ancestry, including navigation back before it", async () => {
+  const p = harness(); const x = socketFixture();
+  save(p, rec());
+  const sourceLeaf = p.manager.getLeafId()!;
+  const boundary = p.manager.appendCustomEntry(FORK_BOUNDARY, {});
+  // Reusing the name must select only the record on this side of the marker.
+  save(p, { ...rec("worker", false), paneId: "w1:p9" });
+  const forkLeaf = p.manager.getLeafId()!;
+  const secondBoundary = p.manager.appendCustomEntry(FORK_BOUNDARY, {});
+  piHerdr(p.pi, deps(x.f.call)); await p.emit("session_start");
+  expect(p.section().entries(1_000)).toEqual([]);
+  for (const leaf of [sourceLeaf, boundary, forkLeaf, secondBoundary, forkLeaf, boundary]) {
+    p.manager.branch(leaf);
+    await p.emit("session_tree", { type: "session_tree" });
+    const entries = p.section().entries(Date.now());
+    if (leaf === sourceLeaf || leaf === forkLeaf) {
+      expect(entries.map((e) => e.key)).toEqual(["worker"]);
+      expect(entries[0].detail).toContain(leaf === sourceLeaf ? "w1:p2" : "w1:p9");
+    } else {
+      expect(entries).toEqual([]);
+      await p.emit("agent_settled");
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+  }
+  expect(x.f.of("agent.get")).toEqual([]);
+  expect(x.f.of("agent.prompt")).toEqual([]);
+  expect(PI_CHILD.reply).not.toHaveBeenCalled();
+  expect(p.messages).toEqual([]);
+  await p.emit("session_shutdown");
+  expect(vi.getTimerCount()).toBe(0);
+});
 
 test("session_tree subscribes to active branch changes, removes abandoned children and ignores an old poll even after a new branch is live", async () => {
   const p = harness(); const x = socketFixture();

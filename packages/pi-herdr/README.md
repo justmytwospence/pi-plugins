@@ -137,6 +137,16 @@ Once an interactive session is appropriate:
 
 Tabs and splits share files and are not isolated parallel editors. A separate feature or PR may benefit from a worktree, but ask first unless the user requested a worktree or branch isolation. Never create a new space or checkout merely because work is delegated, long or parallel. Keep the user's focus unchanged unless asked to switch.
 
+## Fork a tree point
+
+`/tree-fork` opens Pi's native session-tree picker, then asks **Open fork in Herdr?**: **New tab** (default) or **Split beside this pane**. `/tree` keeps its usual behavior. The picker supports native search, folding and filters, but not label editing. A saved, nonempty session is required; cancelling either step creates no file or pane.
+
+The fork includes the selected entry and its ancestry, including assistant replies or the current tip: every selection means **continue after this entry**. A selected user message stays in the history and is not resubmitted. The new session inherits the current model and thinking level and normal conversation/extension context, but starts idle with an empty editor, no prompt and no model call. It is independent, not a child or subagent: it does not automatically report back or inherit ownership of the original session's children.
+
+The original conversation, editor draft and running response stay untouched, and focus stays in the original pane. The new tab or split uses the same Herdr workspace and working directory: **both sessions share checkout files**, not an isolated worktree or branch.
+
+If startup is blocked on a dialog, answer it in the new pane. An uncertain startup (such as a transport timeout) keeps the pane rather than risking closing a running Pi; check it before retrying. Launch failures retain the new session file and report its path for recovery with `pi --session <path>`. A definitive failed start may close the new pane, but never deletes that file.
+
 ## Crews
 
 A crew is one repository's worktree sessions, coordinated from one Pi session, usually in the main checkout: the pattern where you run a coordinator in the repository's main Herdr space and a Pi in each worktree's child space. Without it they only stay in step through messages you prompt by hand; with it, standing rules reach every session on their own, the coordinator sees what each one did without asking, and a restarted coordinator gets its crew back with one call.
@@ -232,7 +242,7 @@ There is no settings file.
 - `git` for `where: "worktree"`.
 - A saved Herdr machine (`herdr machine add`, with API forwarding) for `machine`; pi-herdr runs `herdr --machine <label> ...` for it.
 - Each Herdr child is a full interactive Pi session using your configured model and credentials, billed like any session. pi-herdr's own model call is the `$summary` line: one small request per settled turn whose reply is longer than a line (Haiku, roughly 300 input and 20 output tokens, a few thousandths of a cent), through your configured credentials. `PI_HERDR_SUMMARY=0` turns it off. With pi-recap loaded, pi-recap makes that one request instead.
-- It writes nothing to disk except session entries (`pi-herdr:child`) in the current session.
+- It saves coordination entries in Pi sessions, writes crew state under `<git-common-dir>/pi-crew/`, and `/tree-fork` creates a separate ordinary Pi session file without changing the source session file.
 
 ## Optional integrations
 

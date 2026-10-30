@@ -38,6 +38,7 @@ const { registerExec, FINISH_MESSAGE_TYPE } = await jiti.import('../packages/pi-
 const { createNegotiation } = await jiti.import('../packages/pi-plan-mode/src/negotiation.ts');
 const { renderFooter, absorbStatuses } = await jiti.import('../packages/pi-status-footer/src/index.ts');
 const { choiceMenu, coldTitle } = await jiti.import('../packages/pi-cache-guard/src/index.ts');
+const { registerTreeFork, FORK_TITLE, FORK_DESTINATIONS } = await jiti.import('../packages/pi-herdr/src/tree-fork.ts');
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const herdrDir = process.env.HERDR_WEB_UI_DIR ?? latest(path.join(homedir(), '.local/share/herdr-web-ui'), /^remote-v\d+$/);
@@ -266,6 +267,55 @@ async function gatePickerLines(width, command) {
   return lines;
 }
 
+// Render both steps through the real /tree-fork command, cancelling before any file or pane
+// creation. The first step must remain Pi's native tree, not a select-shaped replacement.
+async function treeForkLines(width, step) {
+  const commands = new Map();
+  const notifications = [];
+  const events = new EventEmitter();
+  let blocked = false, lines;
+  events.on('herdr:blocked', ({ active }) => { blocked = active; });
+  registerTreeFork({
+    registerCommand: (name, spec) => commands.set(name, spec), events,
+    getThinkingLevel: () => 'high',
+  }, {
+    selfPane: 'source', runtimeCurrent: () => () => true,
+    call: async () => { throw new Error('cancelled fixture must not call Herdr'); },
+    uniqueName: async () => { throw new Error('cancelled fixture must not create a fork'); },
+  });
+  const user = { type: 'message', id: 'user', parentId: null, timestamp: '2026-01-01T00:00:00Z', message: { role: 'user', content: 'Review the API design', timestamp: 0 } };
+  const assistant = { type: 'message', id: 'reply', parentId: 'user', timestamp: '2026-01-01T00:00:01Z', message: { role: 'assistant', content: [{ type: 'text', text: 'The API review is complete.' }], timestamp: 1 } };
+  await commands.get('tree-fork').handler('', {
+    hasUI: true, mode: 'tui', cwd: '/tmp/pi-plugins',
+    sessionManager: {
+      getSessionFile: () => new URL(import.meta.url).pathname,
+      getTree: () => [{ entry: user, children: [{ entry: assistant, children: [] }] }],
+      getSessionId: () => 'fixture', getLeafId: () => 'reply', getSessionDir: () => '/tmp',
+    },
+    ui: {
+      custom: async factory => {
+        assert.ok(blocked, '/tree-fork tree must hold herdr:blocked');
+        const picker = factory(tui, theme, kb, () => {});
+        assert.equal(picker.getTreeList().onLabelEdit, undefined, 'tree selection must disable label editing');
+        if (step === 'tree') lines = picker.render(width);
+        return step === 'tree' ? undefined : 'reply';
+      },
+      select: async (title, options) => {
+        assert.ok(blocked, '/tree-fork destination must hold herdr:blocked');
+        assert.equal(title, FORK_TITLE);
+        assert.deepEqual(options, FORK_DESTINATIONS);
+        lines = new ExtensionSelectorComponent(title, options, () => {}, () => {}).render(width);
+        return undefined;
+      },
+      notify: message => notifications.push(message),
+    },
+  });
+  assert.deepEqual(notifications, [], 'cancelled /tree-fork must not report an error');
+  assert.ok(lines, `/tree-fork must render ${step}`);
+  assert.equal(blocked, false, '/tree-fork cancellation must release herdr:blocked');
+  return lines;
+}
+
 // Each dialog, and what each client must make of it.
 const DIALOGS = [
   { name: 'plan exec override confirmation', lines: overrideLines, question: 'Finish without planner acceptance?', herdr: { options: 2, multi: false, labels: ['Finish without review', 'Keep paused'] }, collie: { kind: 'prompt-select', options: 3, labels: ['Finish without review', 'Keep paused'], wraps: ['Finish without review', 'Keep paused'] } },
@@ -274,6 +324,8 @@ const DIALOGS = [
     herdr: { options: labels.length, multi: false, labels },
     collie: { kind: 'prompt-select', options: labels.length + 1, labels, wraps: labels },
   })),
+  { name: '/tree-fork destination', lines: w => treeForkLines(w, 'destination'), question: FORK_TITLE, herdr: { options: FORK_DESTINATIONS.length, multi: false, labels: FORK_DESTINATIONS }, collie: { kind: 'prompt-select', options: FORK_DESTINATIONS.length + 1, labels: FORK_DESTINATIONS, wraps: FORK_DESTINATIONS } },
+  { name: '/tree-fork native tree', lines: w => treeForkLines(w, 'tree'), nativeTree: true },
   { name: 'ask single', lines: (w) => questionLines([question(false)], w), herdr: { options: 4, multi: false }, collie: { kind: 'prompt-select', options: 4 }, },
   { name: 'ask multi', lines: (w) => questionLines([question(true)], w), herdr: { multi: true }, collie: { kind: 'multi-select' }, },
   { name: 'tool-gate approval', lines: approvalLines, herdr: { options: 3, multi: false }, collie: { kind: 'prompt-select' }, },
@@ -470,6 +522,15 @@ screens.forEach((screen, i) => {
   }
   const dialog = DIALOGS.find((d) => d.name === screen.name);
   const h = results.herdr?.[i];
+  if (dialog.nativeTree) {
+    // Native tree navigation is terminal-only: neither a question card nor a composer.
+    const c = results.collie?.[i];
+    if (h) problems.push(`herdr-web-ui: native tree misidentified as question: ${JSON.stringify(h)}`);
+    if (c?.blocks.some(b => b.kind !== 'raw')) problems.push(`Collie: native tree misidentified as card: ${JSON.stringify(c.blocks)}`);
+    if (c && ['empty', 'draft'].includes(c.composer)) problems.push(`Collie: native tree misidentified as composer: ${c.composer}`);
+    report(label, problems);
+    return;
+  }
   if (h !== undefined) {
     if (h === null) problems.push('herdr-web-ui: no card');
     else {

@@ -8,7 +8,7 @@ plugin: pi-herdr
 
 - **Use it for:** Add pane metadata, message any agent in Herdr without touching its draft, and start deliberate human-accessible child sessions.
 - **Enable:** Select `packages/pi-herdr/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
-- **Controls:** `/crew` (board, sync, claim, rule, rules, fetch) and the `herdr` tool: list/send/read/wait for any agent (optionally on a saved Herdr `machine`), `await_reply` and `bg_wait herdr:<name>` to hear back, broadcast with `names`/`cwd_prefix`; spawn/interrupt/close for children; `crew` to coordinate a repository's worktree sessions (directives, crew updates, sync). No global shortcut; child activities offer read-only inspection.
+- **Controls:** `/tree-fork` (tree point → new tab or split), `/crew` (board, sync, claim, rule, rules, fetch) and the `herdr` tool: list/send/read/wait for any agent (optionally on a saved Herdr `machine`), `await_reply` and `bg_wait herdr:<name>` to hear back, broadcast with `names`/`cwd_prefix`; spawn/interrupt/close for children; `crew` to coordinate a repository's worktree sessions (directives, crew updates, sync). No global shortcut; child activities offer read-only inspection.
 - **Settings:** No plugin JSON settings. Child location: tab; focus: false; model/effort inherit the parent. `PI_HERDR_PR=0` disables PR polling; `PI_HERDR_SUMMARY=0` disables the summary model call, `PI_HERDR_SUMMARY_MODEL` picks its model; `PI_HERDR_DRAFT_GUARD=0` turns off the draft guard; `PI_HERDR_INBOX_RATE` sets the loop guard (default `6/600`, `0` off); `PI_HERDR_CREW_REMOTE_MS` sets how often a crew's coordinator checks the remote (default 5 minutes, `0` never).
 - **Requirements, cost & privacy:** Interactive Herdr socket/pane, Pi/provider access for children; Git for worktrees, `gh` for PRs. Herdr socket operations create/open checkouts; no external worktree CLI. The `$summary` line is one small Haiku request per settled turn; children are paid sessions.
 - **Integrations & limits:** Optional event-bus bridge, `/tasks`/FleetView child entries (awaited agents as `peer` rows, never stoppable), and pi-bg `bg:external` for awaited replies. An activity stop interrupts an awaited turn, never closes the pane. Herdr itself owns pane state.
@@ -96,6 +96,18 @@ Agents without an inbox (other agent kinds, older Pi) get `agent.prompt`, and th
 Every awaited reply is also outside work for [pi-bg](/plugins/pi-bg/): `bg_wait herdr:<name>` (a saved machine's is `herdr:<machine>/<name>`) waits for it, alone or with others, and a reply `bg_wait` hands over is not delivered again as a message. Typing ends the wait like any `bg_wait`.
 
 `send` with `names` or `cwd_prefix` (every agent in that directory or below it) broadcasts to at most 20 agents, never this pane. If any target is working or blocked and no `delivery` was given, nothing is sent and the result names them. The result is one line per agent.
+
+## Fork a tree point
+
+Run `/tree-fork` in interactive Pi inside Herdr. First choose a point in Pi's native session-tree picker, with its usual search, folding and filters (label editing is disabled). Then **Open fork in Herdr?** offers **New tab** (default) or **Split beside this pane**. `/tree` is unchanged. The session must be saved and nonempty; cancelling either screen creates no file or pane.
+
+Every choice means **continue after this entry**: the fork includes the selected entry and its ancestry, including assistant replies and the current tip, without later descendants or sibling branches. Selecting a user message keeps it in history, not as an automatically resubmitted prompt.
+
+The fork is a separate ordinary Pi session file, inheriting normal conversation/extension context and the current model and thinking level. It starts idle, with an empty editor, no prompt and no model call. It is an independent human-led session, not a subagent or tracked child: there is no automatic reporting back, and it does not take ownership of the original's children.
+
+The original conversation, draft and running response stay untouched, and focus stays in the original pane. The fork opens in the same Herdr workspace and working directory. **Tabs and splits share checkout files**; this does not create an isolated worktree or branch.
+
+If a startup dialog blocks the new session, answer it in its pane. An uncertain startup, such as a transport timeout, retains the pane: check it before retrying. Launch errors report the retained session file path, recoverable with `pi --session <path>`. A definitive failed start may close only the new pane; the file remains.
 
 ## Interactive children
 
