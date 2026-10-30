@@ -1,12 +1,12 @@
 # Pi Plugins
 
-A modular suite of 34 extensions for [Pi](https://pi.dev): background work, subagents, planning, review, context awareness and terminal ergonomics. Every component can be enabled on its own; one Git ref versions the whole suite. It is not a fork of Pi.
+A modular suite of 33 extensions for [Pi](https://pi.dev): background work, subagents, planning, review, context awareness and terminal ergonomics. Every component can be enabled on its own; one Git ref versions the whole suite. It is not a fork of Pi.
 
 **[Documentation](https://pi-plugins.vercel.app)** · **[Keymap & focus](https://pi-plugins.vercel.app/guides/keyboard/)** · **[Requirements, cost & privacy](https://pi-plugins.vercel.app/guides/requirements/)** · **[Development & testing](https://pi-plugins.vercel.app/development/)**
 
 ## Choose your plugins
 
-All 34 references include activation, controls, defaults, requirements, costs and limitations. Start with the workflow you need; companions are optional.
+All 33 references include activation, controls, defaults, requirements, costs and limitations. Start with the workflow you need; companions are optional.
 
 ### Run & coordinate
 
@@ -18,7 +18,6 @@ All 34 references include activation, controls, defaults, requirements, costs an
 | [pi-subagents](https://pi-plugins.vercel.app/plugins/pi-subagents/) | Delegate bounded tasks to headless Pi workers. |
 | [pi-herdr](https://pi-plugins.vercel.app/plugins/pi-herdr/) | Coordinate interactive handoffs and Herdr pane metadata. |
 | [pi-recap](https://pi-plugins.vercel.app/plugins/pi-recap/) | See where a session stands when you come back to it. |
-| [pi-marimo](https://pi-plugins.vercel.app/plugins/pi-marimo/) | Follow marimo notebooks alongside the chat, and read and steer them from the terminal. |
 | [pi-sidebar](https://pi-plugins.vercel.app/plugins/pi-sidebar/) | Chat read-only beside a working session, on its prompt cache. |
 | [pi-reload-all](https://pi-plugins.vercel.app/plugins/pi-reload-all/) | Reload every Pi session, here and on Herdr's machines, once each is idle. |
 | [pi-mcp-device-login](https://pi-plugins.vercel.app/plugins/pi-mcp-device-login/) | Sign in to OAuth MCP servers with a code, no localhost redirect. |
@@ -61,6 +60,8 @@ All 34 references include activation, controls, defaults, requirements, costs an
 | [pi-clear-screen](https://pi-plugins.vercel.app/plugins/pi-clear-screen/) | Clear the fullscreen view without deleting context. |
 | [pi-appearance-resync](https://pi-plugins.vercel.app/plugins/pi-appearance-resync/) | Retry delayed terminal light/dark reports. |
 | [pi-herdr-scrollbar-width](https://pi-plugins.vercel.app/plugins/pi-herdr-scrollbar-width/) | Fix one-column wrapping at fullscreen exit inside Herdr. |
+
+Notebooks: [pi-marimo](https://github.com/justmytwospence/pi-marimo) is a separate package (`pi install npm:pi-marimo`) that integrates with these components.
 
 Some features make paid classifier requests or patch private TUI hooks. **Ctrl+L and Shift+Tab need explicit stock-key remaps** before the suite shortcuts work; see the [keymap](https://pi-plugins.vercel.app/guides/keyboard/#resolve-the-two-stock-conflicts). Read [requirements](https://pi-plugins.vercel.app/guides/requirements/) before enabling everything.
 

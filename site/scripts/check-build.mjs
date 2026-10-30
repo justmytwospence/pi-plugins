@@ -6,6 +6,8 @@ import { load } from "cheerio";
 const dist = fileURLToPath(new URL("../dist/", import.meta.url));
 const origin = "https://pi-plugins.vercel.app";
 const errors = [];
+// Astro redirect stubs (<meta http-equiv="refresh">) that are expected, by route, with their target.
+const redirects = new Map([["/plugins/pi-marimo/", "https://github.com/justmytwospence/pi-marimo"]]);
 async function walk(dir) {
   return (await Promise.all((await readdir(dir, { withFileTypes: true })).map((entry) => entry.isDirectory() ? walk(path.join(dir, entry.name)) : path.join(dir, entry.name)))).flat();
 }
@@ -23,7 +25,16 @@ if (!home || !home(".pp-hero").length || !home(".pp-install code").first().text(
   errors.push("Landing page must render the custom hero and real suite install command.");
 }
 let links = 0;
+for (const [route, target] of redirects) {
+  const page = pages.get(route);
+  if (!page) errors.push(route + ": expected redirect stub is missing.");
+  else if (!page.$('meta[http-equiv="refresh"]').attr("content")?.includes(target)) errors.push(route + ": redirect stub does not point to " + target);
+}
 for (const [route, { $ }] of pages) {
+  if ($('meta[http-equiv="refresh"]').length) {
+    if (!redirects.has(route)) errors.push(route + ": unexpected redirect page.");
+    continue;
+  }
   if ($("h1").length !== 1) errors.push(route + ": expected one h1.");
   if (!$("title").text().includes("Pi Plugins")) errors.push(route + ": missing branded title.");
   if (!($('meta[name="description"]').attr("content") || "").trim()) errors.push(route + ": missing description.");

@@ -6,17 +6,15 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const manifest = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'));
 const components = manifest.pi.extensions.map(p => p.split('/')[2]);
 const identical = [
-  ['pi-bg','pi-subagents','pi-marimo','pi-plan-mode','pi-herdr'].map(p => `packages/${p}/src/activity.ts`),
+  ['pi-bg','pi-subagents','pi-plan-mode','pi-herdr'].map(p => `packages/${p}/src/activity.ts`),
   ['pi-bg','pi-status-footer'].map(p => `packages/${p}/src/working-message.ts`),
-  ['pi-bg','pi-marimo'].map(p => `packages/${p}/src/pill.ts`),
-  ['pi-bg','pi-marimo'].map(p => `packages/${p}/src/frame.ts`),
   ['packages/pi-plan-mode/src/app/pi-chat.ts','packages/pi-sidebar/src/pi-chat.ts','packages/pi-subagents/src/ui/pi-chat.ts'],
   ['pi-auto-effort','pi-copy','pi-next-prompt','pi-subagents','pi-tool-gate'].map(p => `packages/${p}/src/jev.ts`),
   ['pi-auto-effort','pi-copy','pi-next-prompt','pi-subagents'].map(p => `packages/${p}/src/transcript.ts`),
-  ['pi-auto-effort','pi-next-prompt','pi-tool-gate','pi-marimo'].map(p => `packages/${p}/src/config.ts`),
+  ['pi-auto-effort','pi-next-prompt','pi-tool-gate'].map(p => `packages/${p}/src/config.ts`),
   ['pi-copy','pi-subagents'].map(p => `packages/${p}/src/config.ts`),
   ['pi-ask-user-question','pi-copy','pi-tool-gate'].map(p => `packages/${p}/src/herdr.ts`),
-  ['pi-plan-mode','pi-compact-plan','pi-marimo'].map(p => `packages/${p}/src/editor-contract.ts`),
+  ['pi-plan-mode','pi-compact-plan'].map(p => `packages/${p}/src/editor-contract.ts`),
   ['pi-plan-mode','pi-compact-plan'].map(p => `packages/${p}/src/herdr-blocked.ts`),
   ['pi-plan-mode','pi-compact-plan'].map(p => `packages/${p}/src/review-card.ts`),
   ['packages/pi-cc-render/src/renderer/tool/bash-layout.ts','packages/pi-tool-gate/src/bash-layout.ts'],

@@ -22,7 +22,7 @@ The configured SDK test target is **Pi 1.2.0**, covering loader selection, local
 | Diff review and rewind | A Git repository. Snapshots include non-ignored untracked files and are not a backup service. |
 | Herdr integration | An interactive Pi in Herdr. Herdr’s own Pi integration owns working/blocked/idle state. PR metadata also needs an authenticated `gh` command. |
 | Herdr worktree children | Git plus the active Herdr socket's worktree create/open operations. No external worktree CLI; normal child tabs share the existing checkout. |
-| Notebook observation | A running marimo server with the registry/session/SSE interfaces the extension uses. Token-protected servers need `MARIMO_TOKEN`. Editing is a separate marimo-pair workflow. |
+| Notebook observation | [pi-marimo](https://github.com/justmytwospence/pi-marimo) (a separate package): A running marimo server with the registry/session/SSE interfaces the extension uses. Token-protected servers need `MARIMO_TOKEN`. Editing is a separate marimo-pair workflow. |
 | Status footer | Optional provider quota sources; its row icons are Nerd Font glyphs that need terminal font support. Basic session rows do not require a Claude Code account. |
 | Clipboard picker | Pi’s clipboard support in your terminal environment. Optional Jev ranking. |
 | CC render | `@shikijs/cli` is an optional dependency of the component but a regular dependency of the root suite; it supplies diff syntax highlighting; hover, click and wheel need fullscreen mode and SGR mouse reporting. Patches private Pi rendering members. |

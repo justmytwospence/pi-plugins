@@ -127,14 +127,6 @@
       ]
     },
     {
-      "name": "pi-marimo",
-      "source": "git:github.com/justmytwospence/pi-marimo@a7b8af49843b7a1f6ad20f6cca0e22d082682580",
-      "commit": "a7b8af49843b7a1f6ad20f6cca0e22d082682580",
-      "extensions": [
-        "./src/index.ts"
-      ]
-    },
-    {
       "name": "pi-cache-guard",
       "source": "git:github.com/justmytwospence/pi-cache-guard@87c89228a9b750910455ae2d977bb583f780fd69",
       "commit": "87c89228a9b750910455ae2d977bb583f780fd69",

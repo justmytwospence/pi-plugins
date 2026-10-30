@@ -7,7 +7,6 @@ export const groups = [
     { name: "pi-subagents", label: "Subagents", description: "Separate Pi processes, parallel tasks and conversations you can inspect." },
     { name: "pi-herdr", label: "Herdr", description: "Pane metadata, interactive children and a shared event-bus bridge." },
     { name: "pi-recap", label: "Recap", description: "One line on where the session stands when you come back, matching the notification." },
-    { name: "pi-marimo", label: "Notebooks", description: "Live notebooks beside your conversation: read and steer them from the terminal, no browser needed." },
     { name: "pi-sidebar", label: "Sidebar", description: "A live, read-only side chat beside the main session, served from its prompt cache." },
     { name: "pi-reload-all", label: "Reload all", description: "Reload every Pi session on every Herdr machine, each when its turn ends and its editor is empty." },
     { name: "pi-mcp-device-login", label: "MCP device sign-in", description: "Sign in to OAuth MCP servers with a code when the browser is on another machine." },

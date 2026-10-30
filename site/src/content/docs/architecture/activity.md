@@ -9,7 +9,7 @@ For usage, see [background work and subagents](/recipes/background-work/) and [n
 
 ## Sources own work; hosts own presentation
 
-The `ActivitySection` contract has **five identical copies**: [pi-bg](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-bg/src/activity.ts), [pi-subagents](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-subagents/src/activity.ts), [pi-marimo](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-marimo/src/activity.ts), [pi-plan-mode](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-plan-mode/src/activity.ts) and [pi-herdr](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-herdr/src/activity.ts). Keep all five synchronized; there is no shared runtime package or required sibling import.
+The `ActivitySection` contract has **five identical copies** (four in the suite, plus pi-marimo's in its own repository): [pi-bg](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-bg/src/activity.ts), [pi-subagents](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-subagents/src/activity.ts), [pi-marimo](https://github.com/justmytwospence/pi-marimo/blob/main/src/activity.ts), [pi-plan-mode](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-plan-mode/src/activity.ts) and [pi-herdr](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-herdr/src/activity.ts). Keep all five synchronized; there is no shared runtime package or required sibling import.
 
 A section supplies `id`, `title`, `entries(now)` and `open(key, ui)`. Optional methods provide `stop`, `canStop`, `dismiss`, `pill`, `openDialog` and `setHosted`. Entries carry a source-local key, label, detail, status, statistics and timestamps. The source decides which finished entries remain visible and what stopping or dismissing means.
 
@@ -30,7 +30,7 @@ In [pi-bg's `/tasks` dialog](https://github.com/justmytwospence/pi-plugins/blob/
 Calling a section's `stop` delegates to its owner:
 
 - A pi-bg task stops its process group; a subagent stops its Pi child.
-- The [notebook source](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-marimo/src/ui/source.ts) interrupts a kernel, not the shell service that launched it.
+- The [notebook source](https://github.com/justmytwospence/pi-marimo/blob/main/src/ui/source.ts) interrupts a kernel, not the shell service that launched it.
 - Working planner rows stop that planner. Scout rows are observational and cannot be stopped independently from the activity list; stop their owning planner or use the planning screen. Opening either kind of row returns to `/planners`.
 - A stoppable Herdr child receives an interrupt for its awaited turn. **It never closes the pane.** Explicit `herdr` action `close` remains a separate action.
 
@@ -73,11 +73,11 @@ The fallback aggregation and return to an independent pill are covered by [pi-bg
 | `bg:annotate` | A sibling supplies `{ task, by, detail?, wait? }` for a known pi-bg task. Missing detail clears the annotation. |
 | `bg:killed` | pi-bg reports `{ id, command, cwd }` after explicitly stopping a task. |
 
-Async subagents publish external IDs as `subagent:<id>`. `bg_wait` returns a completed child's bounded result directly and acknowledges consumption, so pi-subagents suppresses the duplicate follow-up. Without a consuming wait or explicit completed-result read, pi-subagents delivers its normal result message. A running snapshot or a summary-only wait does not consume the child result. pi-marimo publishes `marimo:<path>` IDs while cells run or queue. Its [background bridge](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-marimo/src/bg.ts) ends them when the run completes, fails, disconnects beyond its grace period or is no longer followed.
+Async subagents publish external IDs as `subagent:<id>`. `bg_wait` returns a completed child's bounded result directly and acknowledges consumption, so pi-subagents suppresses the duplicate follow-up. Without a consuming wait or explicit completed-result read, pi-subagents delivers its normal result message. A running snapshot or a summary-only wait does not consume the child result. pi-marimo publishes `marimo:<path>` IDs while cells run or queue. Its [background bridge](https://github.com/justmytwospence/pi-marimo/blob/main/src/bg.ts) ends them when the run completes, fails, disconnects beyond its grace period or is no longer followed.
 
 Notebook annotations connect a shell server or job to its kernel state. Once a server is ready, `bg_wait` can wait for its annotated notebook runs rather than merely reporting server readiness. Annotation updates redraw activity but deliberately do not emit another `bg:tasks` snapshot, avoiding a feedback loop.
 
-The same bridge uses `willWake` snapshots to suppress a second notebook-finished notification when waking pi-bg jobs cover every held notebook. [Bridge tests](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-marimo/test/bg.test.ts) cover completion, disconnect grace, stable IDs, annotations and notification coverage. Without pi-bg, no sibling listener provides its wait tools; the producers retain their own behavior.
+The same bridge uses `willWake` snapshots to suppress a second notebook-finished notification when waking pi-bg jobs cover every held notebook. [Bridge tests](https://github.com/justmytwospence/pi-marimo/blob/main/test/bg.test.ts) cover completion, disconnect grace, stable IDs, annotations and notification coverage. Without pi-bg, no sibling listener provides its wait tools; the producers retain their own behavior.
 
 ## Wait messages take priority over footer statistics
 
@@ -102,7 +102,7 @@ pi-bg uses `bg:<id>` holds for running agent jobs and outcomes still owed; it do
 
 The collector produces the `bg` pane token. Herdr's own agent integration remains responsible for idle, working and done state; this extension does not redefine those states. [pi-herdr's entry point](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-herdr/src/index.ts) registers nothing without a Herdr target and activates reporting only for TUI sessions. RPC/print children must not report as the parent's pane.
 
-Optional bridge events include `herdr:probe` with a reply callback, the `herdr:ready` startup announcement, and `herdr:token`, `herdr:notify`, `herdr:zoom` and `herdr:split`. pi-bg probes before offering its follow-in-a-split action. pi-marimo uses a separate `marimo` token and resends it on `herdr:ready`; this is not a `herdr:background` hold. See the [bridge implementation](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-herdr/src/bridge.ts) and [notebook Herdr tests](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-marimo/test/herdr.test.ts).
+Optional bridge events include `herdr:probe` with a reply callback, the `herdr:ready` startup announcement, and `herdr:token`, `herdr:notify`, `herdr:zoom` and `herdr:split`. pi-bg probes before offering its follow-in-a-split action. pi-marimo uses a separate `marimo` token and resends it on `herdr:ready`; this is not a `herdr:background` hold. See the [bridge implementation](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-herdr/src/bridge.ts) and [notebook Herdr tests](https://github.com/justmytwospence/pi-marimo/blob/main/test/herdr.test.ts).
 
 ## Cleanup follows ownership
 
@@ -110,7 +110,7 @@ Optional bridge events include `herdr:probe` with a reply callback, the `herdr:r
 
 - **pi-bg** disposes its pill and timer, releases guest sources and Herdr holds, aborts waiters and unsubscribes from registry updates. Reload preserves tasks. Other session shutdowns kill non-kept tasks; kept services are exempt and can remain for later adoption. The process-level [registry](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-bg/src/registry.ts) preserves task state across reloads.
 - **pi-subagents** stops its children, releases hosted sources, announces its departure and disposes its views. It marks the runtime no longer live so late child completions cannot call stale Pi APIs. A [shutdown regression test](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-subagents/test/index.test.ts) checks that late completion produces no result message.
-- **pi-marimo** clears render timers, releases its kernel hold, marks outstanding external runs failed through `stopAll()`, withdraws its source, disposes its pill and stops watching. This stops observation, not the notebook server. See its [lifecycle handlers](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-marimo/src/index.ts).
+- **pi-marimo** clears render timers, releases its kernel hold, marks outstanding external runs failed through `stopAll()`, withdraws its source, disposes its pill and stops watching. This stops observation, not the notebook server. See its [lifecycle handlers](https://github.com/justmytwospence/pi-marimo/blob/main/src/index.ts).
 - **pi-plan-mode** withdraws planner/scout activities and stops planner sessions on teardown; persisted interrupted research can resume when the run is restored.
 - **pi-herdr** withdraws its child activity source, stops child polling, releases child holds, resets bridge state and clears its reported tokens and timers. [Child shutdown](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-herdr/src/core/children.ts) retains saved records; it does not close the interactive child panes.
 

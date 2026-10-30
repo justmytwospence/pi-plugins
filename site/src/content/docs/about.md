@@ -8,7 +8,7 @@ Pi Plugins is maintained by [Spencer Boucher](https://github.com/justmytwospence
 
 This documentation covers the Pi suite at [justmytwospence/pi-plugins](https://github.com/justmytwospence/pi-plugins). It is an independent personal project, not the official Pi documentation. For Pi itself, start at [pi.dev](https://pi.dev).
 
-All 34 components are exposed as selectable entries from one Git package. They can be independently enabled, not independently version-pinned within the suite.
+All 33 components are exposed as selectable entries from one Git package. They can be independently enabled, not independently version-pinned within the suite.
 
 ## Source and attribution
 
@@ -27,7 +27,7 @@ See the [suite license](https://github.com/justmytwospence/pi-plugins/blob/main/
 Some components share implementation or configuration conventions with projects for other harnesses. These are **related links**, not products installed by this suite, a migration path, or a promise of feature parity:
 
 - [opencode-herdr](https://github.com/justmytwospence/opencode-herdr)
-- [opencode-marimo](https://github.com/justmytwospence/opencode-marimo) and [claude-marimo](https://github.com/justmytwospence/claude-marimo)
+- [pi-marimo](https://github.com/justmytwospence/pi-marimo), [opencode-marimo](https://github.com/justmytwospence/opencode-marimo) and [claude-marimo](https://github.com/justmytwospence/claude-marimo)
 - [claude-cache-guard](https://github.com/justmytwospence/claude-cache-guard), [opencode-cache-guard](https://github.com/justmytwospence/opencode-cache-guard) and [codex-cache-guard](https://github.com/justmytwospence/codex-cache-guard)
 
 ## About the illustrations

@@ -35,7 +35,6 @@
       "./packages/pi-auto-effort/src/index.ts",
       "./packages/pi-appearance-resync/src/index.ts",
       "./packages/pi-copy/src/index.ts",
-      "./packages/pi-marimo/src/index.ts",
       "./packages/pi-cache-guard/src/index.ts",
       "./packages/pi-next-prompt/src/index.ts",
       "./packages/pi-interactive-shell/src/index.ts",

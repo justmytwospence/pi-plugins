@@ -242,7 +242,7 @@ All optional; each sibling works without pi-herdr, and pi-herdr works without th
 - **[pi-subagents](https://pi-plugins.vercel.app/plugins/pi-subagents/)** holds `herdr:background` while async runs work.
 - **[pi-plan-mode](https://pi-plugins.vercel.app/plugins/pi-plan-mode/)** holds `herdr:working` for its planner runs.
 - **[pi-recap](https://pi-plugins.vercel.app/plugins/pi-recap/)** supplies a settled turn's `$summary` line: pi-herdr asks it over `recap:summary { reply(promise) }` and uses its recap (which also lists the session's earlier prompts to the model) instead of making its own call, so the notification and pi-recap's idle recap line are the same text. Blocked dialogs still get their question from pi-herdr.
-- **[pi-marimo](https://pi-plugins.vercel.app/plugins/pi-marimo/)** sets the `$marimo` token and a notification while a notebook the agent started keeps running after its turn.
+- **[pi-marimo](https://github.com/justmytwospence/pi-marimo)** sets the `$marimo` token and a notification while a notebook the agent started keeps running after its turn.
 
 Plan-mode planners, Herdr children and awaited agents are not pi-bg tasks; they only send holds (and, for awaited replies, `bg:external` outside work), and are stopped from their own interfaces (children with `interrupt` or `close`; an awaited agent that is not a child is never stopped from here). Children and awaited agents also show in `/tasks` through the activity source, awaited agents as `peer` rows without a stop.
 

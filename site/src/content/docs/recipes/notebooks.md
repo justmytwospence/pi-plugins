@@ -2,7 +2,7 @@
 title: Notebook sessions
 description: Start a marimo notebook from Pi, pair with the agent on it from the terminal, distinguish server readiness from kernel completion, and wait safely.
 ---
-**Use:** [pi-marimo](/plugins/pi-marimo/). Add [pi-bg](/plugins/pi-bg/) for process management and waiting. Use the separate [marimo-pair](https://github.com/marimo-team/marimo-pair) workflow to inspect and edit notebooks.
+**Use:** [pi-marimo](https://github.com/justmytwospence/pi-marimo), a separate package (`pi install npm:pi-marimo`). Add [pi-bg](/plugins/pi-bg/) for process management and waiting. Use the separate [marimo-pair](https://github.com/marimo-team/marimo-pair) workflow to inspect and edit notebooks.
 
 Pi-marimo observes notebook state. Its kiosk SSE connection does not run or edit code and does not take the browser’s editing session over. The notebook view's actions (run, interrupt, widgets, the scratchpad, Lens marks) are separate kernel requests you make on purpose.
 
@@ -96,4 +96,4 @@ New cell errors make the observed run fail; old errors present before the run ar
 
 Pi-subagents can host the notebook pill. Pi-bg can include notebook entries in its task view. Status-footer gives the notebook a dedicated row. Inside Herdr, pi-herdr can show a notebook token and completion notice without claiming ownership of the pane’s state.
 
-None of those siblings is required for the basic notebook observer. See [requirements](/guides/requirements/) for external tools and the [reference](/plugins/pi-marimo/) for connection limitations.
+None of those siblings is required for the basic notebook observer. See [requirements](/guides/requirements/) for external tools and the [reference](https://github.com/justmytwospence/pi-marimo) for connection limitations.

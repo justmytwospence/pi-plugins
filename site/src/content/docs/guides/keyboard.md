@@ -161,7 +161,6 @@ These keys are **local to the named focused surface**, not global shortcuts. No 
 | Question tabs / Review | Tab/Shift+Tab or Left/Right; Review Enter submits | Local to the questionnaire. Escape from a text field retains the draft; otherwise declines. |
 | Sidebar open / close / move | Ctrl+' opens or closes Sidebar. In Herdr, prefix+h/l moves between main and Sidebar (with its Herdr plugin). In Sidebar, your own scroll, search, editor and app keys apply (pi-vim's Ctrl+U/D in Normal mode, Ctrl+G to the end, Ctrl+Shift+F search, Ctrl+J/K in lists); drag the divider to resize | [pi-sidebar](/plugins/pi-sidebar/); `PI_SIDEBAR_KEYS` replaces Ctrl+' (comma-separated). Needs a terminal that reports Ctrl+' (kitty keyboard protocol). `/sidebar` opens or closes it. |
 | Read-only log viewer | Ctrl+U/D scrolls where supported; Escape returns | Focused viewer, not global. A subagent's session has an editor, which owns editing keys. |
-| Notebook view | j/k scroll, Tab notebook, `o` browser, double-`x` interrupt, Escape/`h` return | [pi-marimo](/plugins/pi-marimo/); interrupt targets the kernel, not its server process. |
 
 Stock selection action IDs, configurable in `keybindings.json`:
 

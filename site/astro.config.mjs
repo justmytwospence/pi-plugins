@@ -3,6 +3,7 @@ import starlight from "@astrojs/starlight";
 import { groups } from "./src/data/plugins.mjs";
 
 export default defineConfig({
+  redirects: { "/plugins/pi-marimo": "https://github.com/justmytwospence/pi-marimo" },
   site: "https://pi-plugins.vercel.app",
   output: "static",
   trailingSlash: "always",

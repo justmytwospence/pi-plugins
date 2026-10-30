@@ -7,8 +7,7 @@
 // be stopped; Esc, `h`, or `↑` past the first goes back to the prompt.
 // It is drawn only while no host shows the source's pill (activity.ts): pi-subagents' list under the
 // prompt, or pi-bg's pill for pi-marimo.
-// This file is copied verbatim into pi-bg and pi-marimo (src/pill.ts); change it in both
-// (scripts/test-contracts.mjs checks they stay identical).
+// pi-marimo (its own repository, justmytwospence/pi-marimo) keeps an identical copy as src/pill.ts; change it in both.
 import { type TUI, type TuiMouseEvent, type TuiMouseEventResult, isKeyRelease, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { type ActivityEntry, type ActivityPill, focusedComponent, leavesPromptDown, mainEditorFocused, readEditorMode } from "./activity.ts";
 
