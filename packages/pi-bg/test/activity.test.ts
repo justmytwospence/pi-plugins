@@ -17,9 +17,9 @@ const source = (id: string, entries: () => ActivityEntry[], stop?: ActivitySecti
 const options = (sections: ActivitySection[]) => ({ sections: () => sections, ownId: "bg", canFollow: false });
 
 describe("activity contract and dialog", () => {
-  it("keeps all five package-local protocol copies byte-identical", () => {
+  it("keeps all four suite-resident package-local protocol copies byte-identical", () => {
     const original = fs.readFileSync(new URL("../src/activity.ts", import.meta.url), "utf8");
-    for (const name of ["pi-subagents", "pi-marimo", "pi-herdr", "pi-plan-mode"]) {
+    for (const name of ["pi-subagents", "pi-herdr", "pi-plan-mode"]) {
       expect(fs.readFileSync(new URL(`../../${name}/src/activity.ts`, import.meta.url), "utf8")).toBe(original);
     }
   });
@@ -91,28 +91,25 @@ describe("activity contract and dialog", () => {
     } finally { dialog.dispose(); }
   });
 
-  it("uses a real sibling notebook producer without importing it at runtime", async () => {
-    const { NotebookSource } = await import(new URL("../../pi-marimo/src/ui/source.ts", import.meta.url).href);
-    const { NotebookState } = await import(new URL("../../pi-marimo/src/core/notebook.ts", import.meta.url).href);
-    const notebook = new NotebookState();
-    notebook.apply("kernel-ready", { cell_ids: ["cell"], codes: ["x = 1"], names: ["_"] });
-    notebook.apply("cell-op", { cell_id: "cell", status: "running" });
-    const followed = { attachment: { path: "/w/nb.py", url: "http://fixture.invalid", sessionId: "s" }, notebook, connection: "connected", current: true };
-    const interrupt = vi.fn(async () => {});
-    const open = vi.fn(async () => {});
-    const other = { ...followed, attachment: { ...followed.attachment, url: "http://other.invalid" } };
-    const nb = new NotebookSource({ followed: () => [followed, other], interrupt, open, changed: () => {}, hostedChanged: () => {} });
-    nb.update([followed, other], 100);
-    const otherKey = nb.section.entries(100)[1].key;
+  it("targets the selected notebook-style contract key, not the same filename on another server", async () => {
+    const firstKey = stableKey("http://fixture.invalid", "/w/nb.py");
+    const otherKey = stableKey("http://other.invalid", "/w/nb.py");
+    const interrupt = vi.fn(async (_key: string) => {});
+    const open = vi.fn(async (_key: string, _ctx: unknown) => {});
+    const section: ActivitySection = {
+      id: "marimo", title: "notebooks",
+      entries: () => [firstKey, otherKey].map((key) => ({ ...entry(key, 100), label: "nb.py" })),
+      stop: interrupt, open,
+    };
     let result: any;
-    const dialog = new TasksDialog(tui as any, theme, { ...options([nb.section]), initialKey: stableKey("marimo", otherKey) }, (picked) => { result = picked; });
+    const dialog = new TasksDialog(tui as any, theme, { ...options([section]), initialKey: stableKey("marimo", otherKey) }, (picked) => { result = picked; });
     try {
       dialog.handleInput("x");
       dialog.handleInput("x");
       await Promise.resolve();
-      expect(interrupt).toHaveBeenCalledExactlyOnceWith(other);
+      expect(interrupt).toHaveBeenCalledExactlyOnceWith(otherKey);
       dialog.handleInput("\r");
-      expect(result.section).toBe(nb.section);
+      expect(result.section).toBe(section);
       await result.section.open(result.key, {});
       expect(open).toHaveBeenCalledExactlyOnceWith(otherKey, {});
     } finally { dialog.dispose(); }
@@ -181,28 +178,25 @@ it("Tab can select a background pill with a draft, cycle safely and return with 
   } finally { pill.dispose(); }
 });
 
-it("both pills leave typed navigation letters to the native editor", async () => {
-  const { PillView: NotebookPill } = await import(new URL("../../pi-marimo/src/pill.ts", import.meta.url).href);
-  for (const [View, widgetKey] of [[PillView, "pi-bg-pill"], [NotebookPill, "pi-marimo-pill"]] as const) {
-    const editor = new Editor(tui as any, { borderColor: (s: string) => s } as any);
-    const c = fakeCtx("/w");
-    const open = vi.fn();
-    const pill = new View({ pill: () => ({ label: "work" }), open }, widgetKey);
-    pill.setUI(c.ctx.ui as any);
-    pill.update();
-    c.widgets.get(widgetKey)({ ...tui, getFocusedComponent: () => editor }, theme).render(100);
-    try {
-      for (const key of ["h", "j", "k", "l", "\x15", "\x04"]) {
-        expect(pill.handleKey("\x1b[B")).toEqual({ consume: true });
-        expect(pill.handleKey(key)).toBeUndefined();
-        expect(pill.isSelected).toBe(false);
-      }
-      expect(open).not.toHaveBeenCalled();
-      pill.handleKey("\x1b[B");
-      expect(pill.handleKey("\r")).toEqual({ consume: true });
-      expect(open).toHaveBeenCalledOnce();
-    } finally { pill.dispose(); }
-  }
+it("the local pill leaves typed navigation letters to the native editor", () => {
+  const editor = new Editor(tui as any, { borderColor: (s: string) => s } as any);
+  const c = fakeCtx("/w");
+  const open = vi.fn();
+  const pill = new PillView({ pill: () => ({ label: "work" }), open }, "pi-bg-pill");
+  pill.setUI(c.ctx.ui as any);
+  pill.update();
+  c.widgets.get("pi-bg-pill")({ ...tui, getFocusedComponent: () => editor }, theme).render(100);
+  try {
+    for (const key of ["h", "j", "k", "l", "\x15", "\x04"]) {
+      expect(pill.handleKey("\x1b[B")).toEqual({ consume: true });
+      expect(pill.handleKey(key)).toBeUndefined();
+      expect(pill.isSelected).toBe(false);
+    }
+    expect(open).not.toHaveBeenCalled();
+    pill.handleKey("\x1b[B");
+    expect(pill.handleKey("\r")).toEqual({ consume: true });
+    expect(open).toHaveBeenCalledOnce();
+  } finally { pill.dispose(); }
 });
 
 it("a real pi-vim main editor yields only idle navigation; pending/visual/EX/embedded focus stays owned", async () => {
@@ -236,54 +230,51 @@ it("a real pi-vim main editor yields only idle navigation; pending/visual/EX/emb
 });
 
 it("a pill with rows: ↓ selects the first row, ↑↓ move through rows and label, Enter opens the row, Esc and ↑ past the first go back", async () => {
-  const { PillView: NotebookPill } = await import(new URL("../../pi-marimo/src/pill.ts", import.meta.url).href);
-  for (const [View, widgetKey] of [[PillView, "pi-bg-pill"], [NotebookPill, "pi-marimo-pill"]] as const) {
-    const editor = new Editor(tui as any, { borderColor: (s: string) => s } as any);
-    editor.setText("draft");
-    const c = fakeCtx("/w");
-    const open = vi.fn();
-    const openRow = vi.fn();
-    const rows = [
-      { key: "a", label: "a.py", detail: ":2718 · idle", status: "done" as const, stats: "", startedAt: 0 },
-      { key: "b", label: "b.py", detail: ":2719 · running Fit", status: "running" as const, stats: "0:12", startedAt: 0 },
-    ];
-    const pill = new View({ pill: () => ({ label: "1 task", rows }), open, openRow }, widgetKey);
-    pill.setUI(c.ctx.ui as any);
-    pill.update();
-    const widget = c.widgets.get(widgetKey)({ ...tui, getFocusedComponent: () => editor }, theme);
-    try {
-      // Rows first, then the label line.
-      const idle = widget.render(100);
-      expect(idle).toHaveLength(3);
-      expect(idle[0]).toContain("a.py");
-      expect(idle[1]).toMatch(/○ b\.py {2}:2719 · running Fit +0:12/u);
-      expect(idle[2]).toContain("1 task");
-      expect(pill.handleKey("\x1b[B")).toEqual({ consume: true });
-      // No hint line under the rows; the selected one is on the selection background.
-      expect(widget.render(100)).toHaveLength(3);
-      expect(widget.render(100)[0]).toContain(" ● a.py");
-      expect(pill.handleKey("\x1b[B")).toEqual({ consume: true });
-      expect(pill.handleKey("\r")).toEqual({ consume: true });
-      expect(openRow).toHaveBeenCalledExactlyOnceWith("b");
-      expect(pill.isSelected).toBe(false);
-      // The label line opens the dialog.
-      pill.handleKey("\x1b[B");
-      pill.handleKey("\x1b[B");
-      pill.handleKey("\x1b[B");
-      pill.handleKey("\x1b[B");
-      pill.handleKey("\r");
-      expect(open).toHaveBeenCalledOnce();
-      // ↑ past the first row, and Esc, go back to the prompt; the draft is untouched.
-      pill.handleKey("\x1b[B");
-      expect(pill.handleKey("\x1b[A")).toEqual({ consume: true });
-      expect(pill.isSelected).toBe(false);
-      pill.handleKey("\x1b[B");
-      pill.handleKey("\x1b[B");
-      expect(pill.handleKey("\x1b")).toEqual({ consume: true });
-      expect(pill.isSelected).toBe(false);
-      expect(editor.getText()).toBe("draft");
-    } finally { pill.dispose(); }
-  }
+  const editor = new Editor(tui as any, { borderColor: (s: string) => s } as any);
+  editor.setText("draft");
+  const c = fakeCtx("/w");
+  const open = vi.fn();
+  const openRow = vi.fn();
+  const rows = [
+    { key: "a", label: "a.py", detail: ":2718 · idle", status: "done" as const, stats: "", startedAt: 0 },
+    { key: "b", label: "b.py", detail: ":2719 · running Fit", status: "running" as const, stats: "0:12", startedAt: 0 },
+  ];
+  const pill = new PillView({ pill: () => ({ label: "1 task", rows }), open, openRow }, "pi-bg-pill");
+  pill.setUI(c.ctx.ui as any);
+  pill.update();
+  const widget = c.widgets.get("pi-bg-pill")({ ...tui, getFocusedComponent: () => editor }, theme);
+  try {
+    // Rows first, then the label line.
+    const idle = widget.render(100);
+    expect(idle).toHaveLength(3);
+    expect(idle[0]).toContain("a.py");
+    expect(idle[1]).toMatch(/○ b\.py {2}:2719 · running Fit +0:12/u);
+    expect(idle[2]).toContain("1 task");
+    expect(pill.handleKey("\x1b[B")).toEqual({ consume: true });
+    // No hint line under the rows; the selected one is on the selection background.
+    expect(widget.render(100)).toHaveLength(3);
+    expect(widget.render(100)[0]).toContain(" ● a.py");
+    expect(pill.handleKey("\x1b[B")).toEqual({ consume: true });
+    expect(pill.handleKey("\r")).toEqual({ consume: true });
+    expect(openRow).toHaveBeenCalledExactlyOnceWith("b");
+    expect(pill.isSelected).toBe(false);
+    // The label line opens the dialog.
+    pill.handleKey("\x1b[B");
+    pill.handleKey("\x1b[B");
+    pill.handleKey("\x1b[B");
+    pill.handleKey("\x1b[B");
+    pill.handleKey("\r");
+    expect(open).toHaveBeenCalledOnce();
+    // ↑ past the first row, and Esc, go back to the prompt; the draft is untouched.
+    pill.handleKey("\x1b[B");
+    expect(pill.handleKey("\x1b[A")).toEqual({ consume: true });
+    expect(pill.isSelected).toBe(false);
+    pill.handleKey("\x1b[B");
+    pill.handleKey("\x1b[B");
+    expect(pill.handleKey("\x1b")).toEqual({ consume: true });
+    expect(pill.isSelected).toBe(false);
+    expect(editor.getText()).toBe("draft");
+  } finally { pill.dispose(); }
 });
 
 it("x twice stops the selected running row in pi-vim normal mode, and a row that cannot be stopped is not offered", async () => {
@@ -340,7 +331,6 @@ it("the combined pill, with no label of its own, lists a hosted guest's rows", a
 });
 
 it("a row with its own styled line draws it after the dot, which is filled while selected", async () => {
-  const { PillView: NotebookPill } = await import(new URL("../../pi-marimo/src/pill.ts", import.meta.url).href);
   const { renderPill } = await import("../src/pill.ts");
   const row = { key: "a", label: "a.py", detail: "", status: "done" as const, stats: "", startedAt: 0, line: (t: { fg(c: string, s: string): string }) => `Marimo ${t.fg("accent", "a.py")}:2718 · idle` };
   const pill = { label: "", rows: [row] };
@@ -348,39 +338,35 @@ it("a row with its own styled line draws it after the dot, which is filled while
   expect(renderPill(pill, { index: 0 }, 80, theme)[0]).toBe(" ● Marimo a.py:2718 · idle");
   // A failed row says so at the right, before its stats.
   expect(renderPill({ label: "", rows: [{ ...row, status: "failed" as const }] }, false, 30, theme)[0]).toBe(" ○ Marimo a.py:2718 · idle   ✗");
-  expect(NotebookPill).toBeDefined();
 });
 
 it("going back out of a row's view selects that row again, not the prompt", async () => {
-  const { PillView: NotebookPill } = await import(new URL("../../pi-marimo/src/pill.ts", import.meta.url).href);
-  for (const [View, widgetKey] of [[PillView, "pi-bg-pill"], [NotebookPill, "pi-marimo-pill"]] as const) {
-    const editor = new Editor(tui as any, { borderColor: (s: string) => s } as any);
-    const c = fakeCtx("/w");
-    let close!: () => void;
-    const openRow = vi.fn(() => new Promise<void>((resolve) => { close = resolve; }));
-    const rows = ["a", "b", "c"].map((k) => ({ key: k, label: `${k}.py`, detail: "", status: "done" as const, stats: "", startedAt: 0 }));
-    const pill = new View({ pill: () => ({ label: "", rows }), open: () => {}, openRow }, widgetKey);
-    pill.setUI(c.ctx.ui as any);
-    pill.update();
-    const widget = c.widgets.get(widgetKey)({ ...tui, getFocusedComponent: () => editor }, theme);
-    try {
-      pill.handleKey("\x1b[B");
-      pill.handleKey("\x1b[B");
-      pill.handleKey("\r");
-      expect(openRow).toHaveBeenCalledWith("b");
-      expect(pill.isSelected).toBe(false);
-      close();
-      await new Promise((r) => setTimeout(r, 0));
-      expect(pill.isSelected).toBe(true);
-      // The second row is the selected one: Enter opens it again.
-      pill.handleKey("\r");
-      expect(openRow).toHaveBeenLastCalledWith("b");
-      close();
-      await new Promise((r) => setTimeout(r, 0));
-      // Esc still goes back to the prompt.
-      expect(pill.handleKey("\x1b")).toEqual({ consume: true });
-      expect(pill.isSelected).toBe(false);
-      expect(widget.render(100).length).toBe(3);
-    } finally { pill.dispose(); }
-  }
+  const editor = new Editor(tui as any, { borderColor: (s: string) => s } as any);
+  const c = fakeCtx("/w");
+  let close!: () => void;
+  const openRow = vi.fn(() => new Promise<void>((resolve) => { close = resolve; }));
+  const rows = ["a", "b", "c"].map((k) => ({ key: k, label: `${k}.py`, detail: "", status: "done" as const, stats: "", startedAt: 0 }));
+  const pill = new PillView({ pill: () => ({ label: "", rows }), open: () => {}, openRow }, "pi-bg-pill");
+  pill.setUI(c.ctx.ui as any);
+  pill.update();
+  const widget = c.widgets.get("pi-bg-pill")({ ...tui, getFocusedComponent: () => editor }, theme);
+  try {
+    pill.handleKey("\x1b[B");
+    pill.handleKey("\x1b[B");
+    pill.handleKey("\r");
+    expect(openRow).toHaveBeenCalledWith("b");
+    expect(pill.isSelected).toBe(false);
+    close();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(pill.isSelected).toBe(true);
+    // The second row is the selected one: Enter opens it again.
+    pill.handleKey("\r");
+    expect(openRow).toHaveBeenLastCalledWith("b");
+    close();
+    await new Promise((r) => setTimeout(r, 0));
+    // Esc still goes back to the prompt.
+    expect(pill.handleKey("\x1b")).toEqual({ consume: true });
+    expect(pill.isSelected).toBe(false);
+    expect(widget.render(100).length).toBe(3);
+  } finally { pill.dispose(); }
 });
