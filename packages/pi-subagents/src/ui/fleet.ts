@@ -16,7 +16,7 @@ import { type ActivityEntry, type ActivityPill, type ActivitySection, focusedCom
 import type { Run } from "../run.ts";
 import { runLabel } from "../label.ts";
 import { displayTokens } from "../run.ts";
-import { type Theme, dimAll, elapsedMs, formatCost, formatCount, formatElapsed, jev, modelAndEffort, rightAlign, statusIcon, taskRows } from "./format.ts";
+import { type Theme, dimAll, elapsedMs, formatCost, formatCount, formatElapsed, jev, modelAndEffort, rightAlign, statusIcon } from "./format.ts";
 import { type SessionSource, type ViewerActions, type ViewerUI, openViewer } from "./viewer.ts";
 
 const FLEET_KEY = "subagents-fleet";
@@ -94,6 +94,15 @@ export interface FleetFrame {
   theme: Theme & { inverse?(text: string): string };
 }
 
+/** Keep each task on one full-width line; move stats below only when they do not fit. */
+function taskRows(prefix: string, identity: string, metadata: string, width: number): string[] {
+  const left = prefix + identity;
+  if (visibleWidth(left) + visibleWidth(metadata) + 1 <= width) return [rightAlign(left, metadata, width)];
+  const lines = [truncateToWidth(left, width)];
+  if (metadata) lines.push(rightAlign("", metadata, width));
+  return lines;
+}
+
 export function renderFleet({ roster, selected, current, active, stopArmed, canBackground, normalKeys = true, note, now, width, theme }: FleetFrame): string[] {
   if (!roster.length && !note) return [];
   const lines: string[] = [];
@@ -135,7 +144,7 @@ export function renderFleet({ roster, selected, current, active, stopArmed, canB
       const cost = formatCost(run.state.usage.cost.total);
       const stats = `${formatElapsed(elapsedMs(run, now))} · ↓ ${formatCount(displayTokens(run.state.usage))} tokens${cost ? ` · ${cost}` : ""}`;
       const done = run.state.status === "running" ? "" : `${statusIcon(run.state.status, theme)} `;
-      lines.push(...taskRows(prefix, identity, done + theme.fg(on ? "text" : "dim", stats), width, true));
+      lines.push(...taskRows(prefix, identity, done + theme.fg(on ? "text" : "dim", stats), width));
     }
     const below = runs.length - (start + visible);
     if (below > 0) lines.push(rightAlign("", theme.fg("dim", `↓ ${below} more`), width));
@@ -150,7 +159,7 @@ export function renderFleet({ roster, selected, current, active, stopArmed, canB
       // How it ended goes before the stats, as for a run: `✗` failed, `■` stopped.
       const end = e.row.status === "failed" ? `${theme.fg("error", "✗")} ` : e.row.status === "stopped" ? `${theme.fg("warning", "■")} ` : "";
       const tail = armed ? theme.fg("error", "x again to stop") : e.row.line ? "" : theme.fg(on ? "text" : "dim", e.row.stats);
-      lines.push(...taskRows(lead, e.row.line ? e.row.line(theme) : `${name}${e.row.detail ? `  ${theme.fg("dim", e.row.detail)}` : ""}`, `${end}${tail}`.trimEnd(), width, true));
+      lines.push(...taskRows(lead, e.row.line ? e.row.line(theme) : `${name}${e.row.detail ? `  ${theme.fg("dim", e.row.detail)}` : ""}`, `${end}${tail}`.trimEnd(), width));
       continue;
     }
     if (e.kind !== "pill") continue;

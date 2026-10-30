@@ -63,6 +63,33 @@ test("rows: the selection, stats flush right, a status icon once finished, and s
   expect(renderFleet({ roster: [], selected: 0, active: false, now: 0, width: 60, theme: plain })).toEqual([]);
 });
 
+test.each([46, 120])("long fleet tasks use the full %i columns without wrapping, keeping status and stats", (width) => {
+  const run = fakeRun({ task: "Find config ".repeat(40), state: { status: "failed", startedAt: 0, endedAt: 60_000 } });
+  const lines = renderFleet({ roster: fleetRoster([run], 60_000, undefined, [], 0), selected: 0, active: false, now: 60_000, width, theme: plain });
+  expect(lines).toHaveLength(4); // main, truncated task, stats, footer spacer
+  expect(lines[1]?.replace(/\x1b\[[0-9;]*m/gu, "")).toBe(` ○ ${run.task}`.slice(0, width - 3) + "...");
+  expect(visibleWidth(lines[1]!)).toBe(width);
+  expect(lines[2]?.trim()).toBe("✗ 1m00s · ↓ 0 tokens");
+  expect(visibleWidth(lines[2]!)).toBe(width);
+});
+
+test.each([46, 120])("unicode and styled fleet activity tasks do not wrap at %i columns", (width) => {
+  const label = "界e\u0301🚀 ".repeat(60);
+  const row = { key: "task", label, detail: "worker", status: "stopped" as const, stats: "12s", startedAt: 0 };
+  const section = { id: "bg", title: "tasks", entries: () => [row], open: async () => undefined, pill: () => ({ label: "", rows: [row] }) };
+  const theme = { ...plain, fg: (_color: string, text: string) => `\x1b[36m${text}\x1b[39m` };
+  const frame = { roster: fleetRoster([], 0, undefined, [section]), selected: 0, active: false, now: 0, width, theme };
+  for (const custom of [false, true]) {
+    const lines = renderFleet(custom ? { ...frame, roster: [{ kind: "row", section, row: { ...row, line: () => theme.fg("dim", label) } }] } : frame);
+    expect(lines).toHaveLength(3); // truncated task, status/stats, spacer
+    expect(visibleWidth(lines[0]!)).toBeGreaterThanOrEqual(width - 1);
+    expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+    expect(lines[0]).toContain("...");
+    expect(lines[1]).toContain("■");
+    if (!custom) expect(lines[1]).toContain("12s");
+  }
+});
+
 function setup() {
   const ui = fakeUI();
   normalFocus(ui);
