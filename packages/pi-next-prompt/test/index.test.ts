@@ -3,7 +3,7 @@ import path from "node:path";
 import { beforeEach, expect, test } from "vitest";
 import nextPrompt, { DEFAULT_CONFIG, SECTION, ghostLine, processAssistant, vet } from "../src/index.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { INSTRUCTION } from "../src/tag.ts";
+import { INSTRUCTION, PROMPT_OFFER_INSTRUCTION } from "../src/tag.ts";
 import { fakeJev, harness } from "./harness.ts";
 
 const TAB = "\t";
@@ -48,7 +48,7 @@ async function setup(answer: (q: any, s: any) => any = () => ({ useful: { type: 
 test("the instruction is added as one prompt section", async () => {
   const { run } = await setup();
   const { options } = await run("fix it", ["Fixed."]);
-  expect(options.sections).toEqual({ [SECTION]: INSTRUCTION });
+  expect(options.sections).toEqual({ [SECTION]: INSTRUCTION + PROMPT_OFFER_INSTRUCTION });
 });
 
 test("custom starts retain guidance and the last user prompt", async () => {
@@ -56,7 +56,7 @@ test("custom starts retain guidance and the last user prompt", async () => {
   await run("fix the tests", ["Working."]);
   const options = { sections: {} };
   await h.emit("before_agent_start", { messageType: "custom", message: { content: "Job finished" }, systemPromptOptions: options }, ctx);
-  expect(options.sections).toEqual({ [SECTION]: INSTRUCTION });
+  expect(options.sections).toEqual({ [SECTION]: INSTRUCTION + PROMPT_OFFER_INSTRUCTION });
   await h.emit("agent_start", {}, ctx);
   await h.emit("message_end", { message: assistant("Done.\n<next>Review the diff</next>") }, ctx);
   await h.emit("agent_before_settle", { outcome: "completed", entries: [], continue: false }, ctx);
@@ -64,10 +64,10 @@ test("custom starts retain guidance and the last user prompt", async () => {
   expect(jev.calls.at(-1)?.state.last_user_prompt).toBe("fix the tests");
 });
 
-test("no UI, no instruction", async () => {
+test.each([{ hasUI: false }, { mode: "rpc" }, { mode: "print" }])("noninteractive contexts get neither instruction (%j)", async overrides => {
   const h = harness();
   nextPrompt(h.pi);
-  const ctx = h.ctx({ hasUI: false });
+  const ctx = h.ctx(overrides);
   await h.emit("session_start", {}, ctx);
   const options = { sections: {} };
   await h.emit("before_agent_start", { prompt: "x", systemPromptOptions: options }, ctx);

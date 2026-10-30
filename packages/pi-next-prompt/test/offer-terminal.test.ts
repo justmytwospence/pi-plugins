@@ -48,7 +48,7 @@ test.each([false, true])("acknowledges only actual output, preserving raw shell 
   expect(done).toBe(false); // Neither the widget factory nor the ghost cursor preflight is a render.
   expect(render()?.length).toBeGreaterThan(0);
   const result = await promise;
-  expect(result.details).toMatchObject({ status: "displayed", text: `!i ${command}`, surface: ghost ? "ghost" : "widget" });
+  expect(result.details).toMatchObject({ status: "displayed", kind: "terminal", text: `!i ${command}`, surface: ghost ? "ghost" : "widget" });
   expect(result.content[0].text).toContain(`!i ${command}`);
   expect(ctx.ui.editorWrites).toEqual([]);
 });
@@ -175,6 +175,41 @@ test("already-aborted tool never installs an offer", async () => {
   controller.abort();
   expect((await execute("true", controller.signal)).details.reason).toContain("aborted");
   expect(ctx.ui.widgets.size).toBe(0);
+});
+
+test.each(["prompt", "terminal"])("cross-tool ownership conflicts never replace the %s offer", async first => {
+  const { h, ctx, offer, execute } = await setup();
+  const prompt = () => h.tools.get("offer_prompt").execute("prompt", { text: "/fixture one  two" }, undefined, undefined, ctx);
+  if (first === "terminal") await offer("true");
+  else {
+    const pending = prompt();
+    ctx.ui.widgetLines("next-prompt");
+    expect((await pending).details.kind).toBe("prompt");
+  }
+  const conflict = await (first === "terminal" ? prompt() : execute("true"));
+  expect(conflict.details).toMatchObject({ status: "blocked", kind: first === "terminal" ? "prompt" : "terminal" });
+  expect(conflict.details.reason).toContain("different explicit offer");
+  const accepted: unknown[] = [];
+  h.pi.events.on("interactive-shell:suggestion-accepted", (value: unknown) => accepted.push(value));
+  expect(ctx.ui.press("\t")).toBe(true);
+  expect(ctx.ui.editorText).toBe(first === "terminal" ? "!i true" : "/fixture one  two");
+  expect(accepted).toEqual(first === "terminal" ? [{ text: "!i true" }] : []);
+});
+
+test("only terminal offers inspect shell support and preserve guard ordering", async () => {
+  const { h, ctx, execute } = await setup({ shell: false });
+  const inspect = vi.fn(({ reply }: any) => reply({ available: false, reason: "fixture unavailable" }));
+  h.pi.events.on("interactive-shell:inspect", inspect);
+  ctx.ui.editorText = "draft";
+  expect((await execute("true")).details.reason).toBe("editor contains a draft");
+  expect(inspect).not.toHaveBeenCalled();
+  ctx.ui.editorText = "";
+  expect((await execute("true")).details.reason).toContain("fixture unavailable");
+  expect(inspect).toHaveBeenCalledTimes(1);
+  const pending = h.tools.get("offer_prompt").execute("prompt", { text: "/fixture" }, undefined, undefined, ctx);
+  ctx.ui.widgetLines("next-prompt");
+  expect((await pending).details.status).toBe("displayed");
+  expect(inspect).toHaveBeenCalledTimes(1);
 });
 
 test("normal typing invalidates an explicit offer rather than reappearing", async () => {

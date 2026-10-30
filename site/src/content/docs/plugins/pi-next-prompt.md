@@ -6,14 +6,14 @@ plugin: pi-next-prompt
 
 ## Quick reference
 
-- **Use it for:** Offer one editable next step after a completed run, without a separate generation request.
+- **Use it for:** Offer one automatic next step or a verified requested prompt/slash-command handoff, without a separate generation request.
 - **Enable:** Select `packages/pi-next-prompt/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
 - **Controls:** `/next-prompt` status/on/off; Tab/Right accept into an empty focused main editor, never submit.
 - **Settings:** `next-prompt.json` shared/user/project layers; enabled, Tab/Right, no length limit (`maxChars`, 0); Jev timeout 1500 ms, threshold 0.6.
 - **Requirements, cost & privacy:** Pi 1.0+ TUI; normal input/output tokens for suggestion instruction; optional paid Jev sees suggestion/request/answer excerpts.
-- **Integrations & limits:** Optional Vim/select-nav and interactive-shell inspection. Model-only `offer_terminal` acknowledges rendered terminal suggestions; ordinary tags retain optional Jev vetting. Missing classifier shows unvetted tags; failed/aborted runs clear offers. Suggestions are not authorization.
+- **Integrations & limits:** Optional Vim/select-nav and interactive-shell inspection. Model-only `offer_prompt`/`offer_terminal` acknowledge rendered suggestions; prompt offers need no shell support, and ordinary tags retain optional Jev vetting. Missing classifier shows unvetted tags; failed/aborted runs clear offers. Suggestions are not authorization.
 
-Next prompt offers a likely follow-up after a completed run. It is deliberately selective: a finished task, an unresolved question or several equally plausible directions should produce no suggestion. Accepting text never sends it automatically.
+Next prompt offers a likely follow-up after a completed run. Automatic suggestions are deliberately selective: a finished task, an unresolved question or several equally plausible directions should produce no suggestion. Explicit requested handoffs use a verified tool instead of this heuristic. Accepting text never sends it automatically.
 
 ## Enable and requirements
 
@@ -21,17 +21,29 @@ Use [Install & select](/guides/install/) and select `packages/pi-next-prompt/src
 
 Suggestions need Pi's interactive terminal UI. Print mode, RPC hosts and ordinary headless subagents receive no suggestion instruction, even when an RPC host reports UI support. No companion extension is required, and Jev is optional rather than a prerequisite for showing text.
 
-The main model receives an additional prompt section and may emit a tag or call `offer_terminal` for a suggestion. There is no separate generative request. **Optional Jev validation is a paid external classifier call**, however, so “no extra generation” does not mean “no extra model cost.”
+The main model receives an additional prompt section and may emit a tag or call `offer_prompt`/`offer_terminal` for a suggestion. There is no separate generative request. **Optional Jev validation is a paid external classifier call**, however, so “no extra generation” does not mean “no extra model cost.”
 
 ## Accept, edit or ignore
 
-An ordinary tag suggestion appears as dim text in an empty editor after a completed run. An explicit terminal offer can render during the response, but cannot be accepted until successful settlement. Press Tab or Right to copy it into the editor, then review, edit and send it normally. With [pi-stash](/plugins/pi-stash/) and nothing stashed, Ctrl+S moves the suggestion into the stash instead, so it comes back like a stashed draft. For example, a suggestion to run a specific test should remain an editable proposal, not permission to execute that test without your next message.
+An ordinary tag suggestion appears as dim text in an empty editor after a completed run. An explicit prompt or terminal offer can render during the response, but cannot be accepted until successful settlement. Press Tab or Right to copy it into the editor, then review, edit and send it normally. With [pi-stash](/plugins/pi-stash/) and nothing stashed, Ctrl+S moves the suggestion into the stash instead, so it comes back like a stashed draft. For example, a suggestion to run a specific test should remain an editable proposal, not permission to execute that test without your next message.
 
-Typing hides an ordinary tag suggestion. Deleting everything you typed brings it back until a prompt is sent. If a draft is already in the editor when the run completes, an ordinary tag suggestion waits out of sight (an explicit terminal offer instead rejects a nonempty editor): stash the draft with pi-stash's Ctrl+S (or delete it) and the suggestion appears in the empty editor. A new run, a submitted prompt, compaction, tree navigation, a model change or a session switch clears it. Failed and aborted runs do not show suggestions.
+Typing hides an ordinary tag suggestion. Deleting everything you typed brings it back until a prompt is sent. If a draft is already in the editor when the run completes, an ordinary tag suggestion waits out of sight (an explicit prompt or terminal offer instead rejects a nonempty editor): stash the draft with pi-stash's Ctrl+S (or delete it) and the suggestion appears in the empty editor. A new run, a submitted prompt, compaction, tree navigation, a model change or a session switch clears it. Failed and aborted runs do not show suggestions.
 
 The acceptance keys are intercepted only while a suggestion is offered, the editor is empty, and the focused component is the main prompt editor: not an editor embedded in a dialog, not while autocomplete is open, and, with pi-vim, only in an idle Insert or Normal state (not during a pending command, Visual mode or an EX line). Otherwise the focused component handles Right normally. With [pi-select-nav](/plugins/pi-select-nav/), Tab accepts explicit completion or selects available task panels instead of triggering implicit file completion. A selected task panel keeps Tab for navigation, even if a new suggestion arrives. With pi-vim, accepting also moves the editor to Insert mode at the end of the text; it still does not submit.
 
 The extension wraps rendering rather than replacing the editor. Editors drawing Pi's software or hardware cursor, including pi-vim, can show inline ghost text. If no compatible cursor is drawn, the fallback is a dim line below the editor with an acceptance hint naming the first configured key.
+
+## Verified prompt handoffs
+
+When you ask the model to put ordinary text or a Pi slash command in your prompt, it should call `offer_prompt({text})` with the complete exact text before claiming it is available. Prose or a `<next>` tag is not an explicit verified handoff. No interactive-shell extension or shell inspector is required.
+
+The input is exactly one nonempty line. Blank input, leading/trailing whitespace, C0/C1 controls, line breaks and any text beginning `!` are rejected; shell handoffs use `offer_terminal`. Quotes and internal spaces are preserved byte-for-byte, with no prefix or normalization. For example, `/marimo new examples/viewer-demo.py` is offered unchanged, not run by the tool. Slash names are not checked against a partial command registry. A positive `maxChars` rejects rather than truncates; visual clipping never shortens accepted text. Never include credentials.
+
+`displayed` means the ghost or fallback widget included the suggestion in actual component output within one second. It is not proof you saw it, not an editor insertion and not submission. Mounting or queuing alone is insufficient. Only after that receipt may the model claim an offer and explain: after the response finishes successfully, Tab/Right copies it into the prompt, then Enter submits it. Neither the tool nor acceptance executes anything or overwrites a draft.
+
+`blocked` is a tool error with a concrete reason. Blockers include disabled suggestions, non-TUI or unattached UI, non-main focus or autocomplete, a nonempty draft, an existing external offer or a different outstanding explicit offer, invalid/overlong input, timeout, abort or reset. Identical same-kind offers are idempotent; prompt and terminal offers cannot replace each other. Draft entry or focus loss invalidates ownership; reset, reload/shutdown or unsuccessful settlement clears it. Prompt offers have no shell-layout prerequisite.
+
+Explicit offers bypass Jev, outrank automatic tags and survive tagless or conflicting-tag final answers. They can render while busy but acceptance waits for successful settlement. Automatic tags remain optional and vetted as configured. Prompt acceptance emits no shell-continuation signal; Enter uses Pi's ordinary prompt/command handling. If blocked, the model should state the blocker and show the complete proposed text plainly without claiming an offer or insertion. This mechanism does not guarantee model compliance with those instructions.
 
 ## Optional interactive-shell next step
 
@@ -75,15 +87,15 @@ Acceptance keys use pi-tui key identifiers, such as `tab`, `right` or `ctrl+f`. 
 
 ## Data sent and fallback behavior
 
-For ordinary nonterminal suggestions, the main model writes a final `<next>...</next>` line under the added instruction; interactive handoffs use `offer_terminal` instead. The extension strips recognized tag lines at `message_end` before storing the assistant response, keeping them out of the saved answer and later conversation context. The tag may briefly be visible during streaming. Once you accept and send a suggestion, it is naturally an ordinary user message.
+For ordinary nonterminal suggestions, the main model writes a final `<next>...</next>` line under the added instruction; explicit requested text/slash handoffs use `offer_prompt`, and shell handoffs use `offer_terminal`. Explicit offers bypass Jev; their tool inputs and receipts use ordinary tool-call history rather than stripped tag lines. The extension strips recognized tag lines at `message_end` before storing the assistant response, keeping them out of the saved answer and later conversation context. The tag may briefly be visible during streaming. Once you accept and send a suggestion, it is naturally an ordinary user message.
 
-For an ordinary tag candidate (not an explicit terminal offer), Jev receives the suggestion itself, up to 1,500 characters of the latest user prompt and up to 2,000 characters from the end of the assistant answer. Those excerpts may contain private project details. The classifier checks whether the proposal is concrete, relevant and not already completed; this is not a safety or authorization check.
+For an ordinary tag candidate (not an explicit prompt or terminal offer), Jev receives the suggestion itself, up to 1,500 characters of the latest user prompt and up to 2,000 characters from the end of the assistant answer. Those excerpts may contain private project details. The classifier checks whether the proposal is concrete, relevant and not already completed; this is not a safety or authorization check.
 
 A probability below 0.6 hides the proposal by default. Disabled Jev, missing credentials, timeouts or missing answers **show the proposal anyway**. There is no classifier request when the main model supplies no candidate. `/next-prompt status` helps distinguish a rejected candidate from one shown without validation.
 
 ## Offers from other extensions
 
-An extension can offer a next prompt over Pi's event bus with `prompt:offer { source, text }`, and withdraw it with `{ source }` and no text. An offer appears only while Pi is idle and never replaces the model's own suggestion. It goes through no Jev check and is cleared by your next prompt, and nothing is sent. Unlike `offer_terminal`, busy-time external offers are dropped, not displayed pending settlement; they do not provide the tool's render acknowledgement or model-authored command continuation. An explicit terminal tool call does not overwrite an existing external offer. pi-marimo uses it when you make a new marimo-lens selection.
+An extension can offer a next prompt over Pi's event bus with `prompt:offer { source, text }`, and withdraw it with `{ source }` and no text. An offer appears only while Pi is idle and never replaces the model's own suggestion. It goes through no Jev check and is cleared by your next prompt, and nothing is sent. Unlike `offer_prompt`/`offer_terminal`, busy-time external offers are dropped, not displayed pending settlement; they do not provide the tool's render acknowledgement or model-authored command continuation. Neither explicit tool overwrites an existing external offer. pi-marimo uses it when you make a new marimo-lens selection.
 
 ## Limitations and related documentation
 

@@ -9,7 +9,7 @@ vi.mock("../../pi-interactive-shell/src/handoff.ts", async importOriginal => ({
   },
 }));
 import nextPrompt, { SECTION } from "../src/index.ts";
-import { INSTRUCTION, INTERACTIVE_INSTRUCTION } from "../src/tag.ts";
+import { INSTRUCTION, INTERACTIVE_INSTRUCTION, PROMPT_OFFER_INSTRUCTION } from "../src/tag.ts";
 const { default: interactiveShell } = await import(new URL("../../pi-interactive-shell/src/index.ts", import.meta.url).href);
 import { fakeJev, harness } from "./harness.ts";
 
@@ -47,7 +47,7 @@ async function setup(first: boolean, tty = true, explicit = false) {
 
 test.each([false, true])("optional capability and Tab-only acceptance work in both registration orders (%s)", async first => {
   const { h, ctx, sections } = await setup(first);
-  expect(sections[SECTION]).toBe(INSTRUCTION + INTERACTIVE_INSTRUCTION);
+  expect(sections[SECTION]).toBe(INSTRUCTION + PROMPT_OFFER_INSTRUCTION + INTERACTIVE_INSTRUCTION);
   const accepted: unknown[] = [];
   h.pi.events.on("interactive-shell:suggestion-accepted", (data: unknown) => accepted.push(data));
   expect(ctx.ui.press("\t")).toBe(true);
@@ -109,7 +109,7 @@ test("handoff guidance explicitly covers commands and requested manual tests", (
 
 test("no terminal means no handoff guidance", async () => {
   const { sections } = await setup(false, false);
-  expect(sections[SECTION]).toBe(INSTRUCTION);
+  expect(sections[SECTION]).toBe(INSTRUCTION + PROMPT_OFFER_INSTRUCTION);
 });
 
 test("typing a draft prevents accepting a command", async () => {

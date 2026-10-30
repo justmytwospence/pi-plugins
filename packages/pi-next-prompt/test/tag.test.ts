@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { INSTRUCTION, extractNext } from "../src/tag.ts";
+import { INSTRUCTION, PROMPT_OFFER_INSTRUCTION, extractNext } from "../src/tag.ts";
 
 test("a last tag line is removed and becomes the suggestion", () => {
   expect(extractNext("Edited a.ts.\n\n<next>Run the tests</next>")).toEqual({ text: "Edited a.ts.", suggestion: "Run the tests", found: true });
@@ -31,6 +31,17 @@ test("long suggestions are offered whole unless maxChars caps them; empty ones a
   expect(extractNext(`Done.\n<next>${"x".repeat(110)}</next>`, 110).suggestion).toHaveLength(110);
   expect(extractNext("Done.\n<next>  </next>")).toEqual({ text: "Done.", found: true });
   expect(extractNext("Done.\n<next>abcdef</next>", 5)).toEqual({ text: "Done.", found: true });
+});
+
+test("explicit handoffs require the tool and a displayed receipt independently of optional tags", () => {
+  expect(PROMPT_OFFER_INSTRUCTION).toContain("use offer_prompt with the complete exact text");
+  expect(PROMPT_OFFER_INSTRUCTION).toContain("Only status displayed");
+  expect(PROMPT_OFFER_INSTRUCTION).toContain("not inserted until the user accepts");
+  expect(PROMPT_OFFER_INSTRUCTION).toContain("Do not rely on prose or a <next> tag");
+  expect(PROMPT_OFFER_INSTRUCTION).toContain("Tab/Right then Enter after the response finishes");
+  expect(PROMPT_OFFER_INSTRUCTION).toContain("On blocked, state the blocker");
+  expect(PROMPT_OFFER_INSTRUCTION).toContain("Shell handoffs use offer_terminal");
+  expect(PROMPT_OFFER_INSTRUCTION).toContain("Never include credentials");
 });
 
 test("the instruction is short", () => {

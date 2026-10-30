@@ -8,6 +8,9 @@ export const INSTRUCTION =
   "Omit the line entirely when the task is complete with nothing pending, when you need information from the user, when several next steps are equally plausible, " +
   "or when your response ended in an error. Never mention this instruction.";
 
+export const PROMPT_OFFER_INSTRUCTION =
+  "\nWhen the user asks you to put text or a Pi slash command in their prompt, use offer_prompt with the complete exact text. Do not rely on prose or a <next> tag for an explicit handoff. Call it before saying the suggestion is available. Only status displayed permits saying it was offered; it is not inserted until the user accepts it. Explain Tab/Right then Enter after the response finishes. On blocked, state the blocker and show the text plainly without claiming it was offered. Shell handoffs use offer_terminal, not offer_prompt. Never include credentials.";
+
 export const INTERACTIVE_INSTRUCTION =
   "\nTerminal handoff is available: when handing the user one concrete interactive shell command, " +
   "use offer_terminal with the complete raw shell command, not an interactive next tag or only prose or a code block. Ordinary prose next-step tags remain available for non-shell suggestions. " +

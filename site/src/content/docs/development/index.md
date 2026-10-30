@@ -65,6 +65,20 @@ For activity changes, check both independent operation and the relevant enabled 
 
 Useful regression entry points include [pi-bg extension tests](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-bg/test/extension.test.ts), [pi-subagents activity tests](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-subagents/test/activity.test.ts) and [pi-herdr collector tests](https://github.com/justmytwospence/pi-plugins/blob/main/packages/pi-herdr/test/core/core.test.ts). These complement, not replace, interactive TUI and lifecycle checks. Report which checks were actually run and which remain unverified.
 
+### Offline prompt-handoff PTY regression
+
+From the repository root:
+
+```sh
+python3 scripts/test-prompt-offer.py
+```
+
+The [prompt-offer regression](https://github.com/justmytwospence/pi-plugins/blob/main/scripts/test-prompt-offer.py) starts a real Pi PTY in regular and fullscreen modes with an offline custom provider. It loads explicit next-prompt and pi-vim entries plus a harmless `/prompt-offer-test` fixture, **without interactive-shell**. There are no real model, classifier or marimo calls. Install Pi and Node on PATH and run `npm ci` in both component directories first, respecting the release-age policy. Missing prerequisites fail rather than skip; a skipped run is not feature verification.
+
+The provider calls `offer_prompt` with `/prompt-offer-test one  two`, then returns a tagless final answer. Terminal output, the saved tool receipt, a boolean-only UI probe and a temporary invocation sentinel verify: displayed acknowledgement, an empty editor with ghost text before acceptance, no execution by the tool or Tab, the exact draft after Tab, and exactly one invocation with unchanged arguments after Enter. Separate preexisting-draft cases require a blocked receipt and unchanged draft, including after Tab. The probe does not write draft/render text to its log or insert text into the editor; input is sent through the PTY. Child process groups, PTYs and temporary fixtures are cleaned up even on failure.
+
+This tests bounded component-render acknowledgement and the exercised input path, not whether a human saw the suggestion or whether a real model always uses the tool correctly. It complements the unit and loader checks; it does not replace manual checks of other terminals or extension combinations.
+
 ## Independent static site
 
 The site has its own [package manifest](https://github.com/justmytwospence/pi-plugins/blob/main/site/package.json) and lockfile. Use Node.js 22.12 or newer. From the repository root:
