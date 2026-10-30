@@ -8,6 +8,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { config } from "../../config/config.ts";
 import { isLazyProxyTui } from "../../utils/fullscreen-detect.ts";
+import { walkComponentTree } from "../../utils/component-tree.ts";
 import { parseSgrMousePackets } from "./packets.ts";
 import {
 	OFFICIAL_SCROLL_TO_END_KEY,
@@ -151,8 +152,42 @@ export function restoreOfficialScrollToEnd(tui: any): void {
 	tui[OFFICIAL_SCROLL_TO_END_KEY] = undefined;
 }
 
+const DOCK_SPACER_KEY = "__ccDockSpacerHidden";
+
+function isSpacer(value: any): boolean {
+	return Boolean(value) && typeof value.lines === "number" && typeof value.setLines === "function" && !value.children;
+}
+
+/**
+ * Pi keeps a blank row between the transcript and the editor (a Spacer at the top of the above-editor
+ * widget area). It sits outside the scrolling area, so cards cannot paint it and it shows as a gap under
+ * them. Zero it, including the one Pi adds each time it rebuilds that area.
+ */
+export function hideDockSpacer(tui: any): void {
+	if (!tui) return;
+	try {
+		walkComponentTree(tui, (node: any) => {
+			if (node.layoutType !== "vstack" || !Array.isArray(node.entries) || node.entries.length < 6) return;
+			const above = node.entries[2]?.component;
+			if (!above || !Array.isArray(above.children) || typeof above.addChild !== "function") return;
+			for (const child of above.children) if (isSpacer(child)) child.setLines(0);
+			if (above[DOCK_SPACER_KEY]) return false;
+			above[DOCK_SPACER_KEY] = true;
+			const addChild = above.addChild.bind(above);
+			above.addChild = (child: any, ...rest: any[]) => {
+				if (isSpacer(child)) child.setLines(0);
+				return addChild(child, ...rest);
+			};
+			return false;
+		});
+	} catch {
+		// A lazy Proxy mid-switch: try again next frame.
+	}
+}
+
 /** on/compact use the dock button; off restores pi's native Jump to latest. */
 export function syncOfficialScrollToEnd(tui: any): void {
+	hideDockSpacer(tui);
 	if (toolMouseInteractionActive()) disableOfficialScrollToEnd(tui);
 	else restoreOfficialScrollToEnd(tui);
 }
