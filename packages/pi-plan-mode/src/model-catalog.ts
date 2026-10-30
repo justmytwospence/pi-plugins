@@ -18,6 +18,20 @@ type RegistryModel = {
   cost?: { input?: number; output?: number };
 };
 
+/** Normalize a requested effort to supported levels; undefined retains the model default. */
+export function normalizeEffort(
+  requested: ModelSpecThinkingLevel | undefined,
+  supported: readonly (ModelSpecThinkingLevel | undefined)[],
+): ModelSpecThinkingLevel | undefined {
+  if (requested === undefined) return undefined;
+  const levels = supported.filter((level): level is ModelSpecThinkingLevel => level !== undefined);
+  const requestedIndex = MODEL_SPEC_THINKING_LEVELS.indexOf(requested);
+  return (
+    MODEL_SPEC_THINKING_LEVELS.filter((level, index) => index <= requestedIndex && levels.includes(level)).at(-1) ??
+    levels[0]
+  );
+}
+
 /** Friendly names and supported efforts from the model registry. */
 export function modelCatalog(ctx: ExtensionContext) {
   let available: RegistryModel[] = [];
@@ -26,8 +40,9 @@ export function modelCatalog(ctx: ExtensionContext) {
   } catch {
     available = [];
   }
-  const find = (spec: { provider: string; modelId: string }) =>
-    available.find((model) => model.provider === spec.provider && model.id === spec.modelId);
+  const find = (spec: { provider: string; modelId: string }): RegistryModel | undefined =>
+    available.find((model) => model.provider === spec.provider && model.id === spec.modelId) ??
+    ctx.modelRegistry.find?.(spec.provider, spec.modelId);
   return {
     available,
     name(spec: { provider: string; modelId: string }) {

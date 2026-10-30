@@ -5,7 +5,6 @@
 // (main-chat.ts).
 
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   CustomEditor,
@@ -36,20 +35,19 @@ import {
 } from "./editor-contract.js";
 import { EXEC_ENTRY, type ExecState, registerExec } from "./exec.js";
 import { editExternally, externalEditorCommand, prepareEditor } from "./external-editor.js";
-import { HANDOFF_MESSAGE_TYPE, HANDOFF_SUMMARY, implementationBrief } from "./handoff.js";
+import { directImplementationBrief, HANDOFF_MESSAGE_TYPE, HANDOFF_SUMMARY, implementationBrief } from "./handoff.js";
 import { HERDR_BLOCKED_CHANNEL, holdBlocked, holdWorking, isOwnEmit } from "./herdr-blocked.js";
 import {
   formatModelKey,
   formatModelSpec,
   type ImplementationContextChoice,
-  implementationTarget,
+  implementationChoices,
   type ModelSpec,
   parseModelSpec,
   sameModel,
   subagentRoleModel,
-  subagentWorkerModel,
 } from "./implementation-models.js";
-import { type Approval, type HandoffTarget, handsOffToAnotherModel, registerInlinePlanMode } from "./inline-plan.js";
+import { type Approval, type HandoffTarget, registerInlinePlanMode } from "./inline-plan.js";
 import { type JevToolPick, pickToolsWithJev } from "./jev-tool-picker.js";
 import { runLaneCommand } from "./lane-commands.js";
 import { isAuthError, loginInDialog, providerName } from "./login.js";
@@ -63,7 +61,7 @@ import {
   setMainToolsActive,
 } from "./main-chat.js";
 import { buildMcpCatalog, readConfiguredMcpServers } from "./mcp-tools.js";
-import { modelCatalog } from "./model-catalog.js";
+import { modelCatalog, normalizeEffort } from "./model-catalog.js";
 import { exportPlanToFile } from "./plan-export.js";
 import { plansDirectoryPath, planTitle, writePlanFile } from "./plan-file.js";
 import { expandHome, runPlanCompleteHook } from "./plan-hook.js";
@@ -113,6 +111,7 @@ const MERGED_ID = "M";
 /** The effort a subagent model starts at until you change it. */
 const SUBAGENT_EFFORT = "medium";
 const TIME_LIMITS = [15, 30, 45, 60, 90, 120, 180] as const;
+type ConsultantSeed = { spec: string; name: string; messages: Parameters<typeof writeSeededSession>[2] };
 
 export interface PlanDependencies {
   readSettings?(): Promise<PlanModeSettings>;
@@ -604,23 +603,30 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     if ((event as { source?: string }).source === "interactive") activity.seen();
   });
 
-  /** An approved plan to hand off once the turn that approved it ends. */
-  let pendingHandoff: { approval: Approval; who: HandoffTarget | undefined } | undefined;
+  /** Operations owned by this runtime and branch, consumed exactly once. */
+  let pendingOperation:
+    | { kind: "compact-here"; approval: Approval; epoch: number }
+    | { kind: "handoff"; approval: Approval; who: HandoffTarget | undefined; epoch: number }
+    | undefined;
+  let pendingCompaction:
+    | { marker: string; epoch: number; planFile: string; brief: string; overridden: boolean }
+    | undefined;
 
-  /** The session's model with its effort (none when the effort is off). */
+  /** The session's model with its current effort, including off. */
   const sessionSpecOf = (ctx: ExtensionContext): ModelSpec | undefined => {
     if (!ctx.model) return undefined;
     const level = pi.getThinkingLevel();
     return {
       provider: ctx.model.provider,
       modelId: ctx.model.id,
-      ...(level && level !== "off" ? { thinkingLevel: level as ThinkingLevel } : {}),
+      ...(level ? { thinkingLevel: level as ThinkingLevel } : {}),
     };
   };
 
   /** Stop old work without saving into the newly selected branch. */
   const clearBranch = () => {
-    pendingHandoff = undefined;
+    pendingOperation = undefined;
+    pendingCompaction = undefined;
     branchEpoch++;
     const hadUI = hostCtx?.mode === "tui";
     hostCtx = undefined;
@@ -699,43 +705,30 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     safeSubcommands: () => settings.safeSubcommands,
     plansDirectory: () => settings.plansDirectory,
     approved: (plan, ctx) => hook(ctx, { id: "plan", name: "plan", revision: 1, plan, spec: undefined }),
-    handoffTarget: (ctx) => {
+    implementationChoices: (ctx) => {
       const planning = sessionSpecOf(ctx);
       if (!planning) return undefined;
       const catalog = modelCatalog(ctx);
-      const target = implementationTarget({
-        planModel: planning,
-        map: settings.implementationModelMap,
-        worker: subagentWorkerModel(pi.events, planning),
-        fallback: planning,
-        available: catalog.available,
-      });
-      if (!target) return undefined;
       return {
-        target: target.spec,
-        targetName: catalog.name(target.spec),
         planning,
         planningName: catalog.name(planning),
+        defaultThinkingLevel: settings.defaultImplementationThinkingLevel,
+        targets: implementationChoices({
+          planModel: planning,
+          map: settings.implementationModelMap,
+          available: catalog.available,
+        }).map(({ spec }) => ({ target: spec, targetName: catalog.name(spec) })),
       };
     },
     handoff: (approval, who) => {
-      pendingHandoff = { approval, who };
+      pendingOperation = { kind: "handoff", approval, who, epoch: branchEpoch };
     },
-    implementHere: (ctx, a) => {
-      const planning = sessionSpecOf(ctx);
-      exec.begin(
-        ctx,
-        {
-          active: true,
-          planFile: a.planFile,
-          implementer: planning ? modelCatalog(ctx).name(planning) : "this model",
-          implementerModel: planning ? formatModelKey(planning) : "",
-          asks: 0,
-          costUsd: 0,
-        },
-        { record: true },
-      );
-      return implementationBrief({ plan: a.plan, planFile: a.planFile, context: "here", own: true, edited: a.edited });
+    compactHere: (approval) => {
+      pendingOperation = { kind: "compact-here", approval, epoch: branchEpoch };
+    },
+    implementHere: (ctx, approval) => {
+      applyDirectEffort(ctx, approval.thinkingLevel);
+      return directImplementationBrief(approval);
     },
     executing: () => exec.active,
     toggleKey: () => configuredPlanModeToggleShortcut(settings),
@@ -744,10 +737,10 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
   // An approved plan handed off: once the turn that approved it ends, compact the context down to
   // the plan, switch the model and continue with the implementation brief.
   pi.on("agent_before_settle", async (event, ctx) => {
-    const handoff = pendingHandoff;
-    pendingHandoff = undefined;
-    if (!handoff) return undefined;
-    if (event.outcome !== "completed") {
+    const operation = pendingOperation;
+    pendingOperation = undefined;
+    if (!operation || operation.epoch !== branchEpoch || !runtimeActive) return undefined;
+    if (event.outcome !== "completed" || ctx.signal?.aborted) {
       if (ctx.hasUI) {
         ctx.ui.notify(
           "The handoff did not happen: the turn did not complete. Run /plan and approve the plan again.",
@@ -756,36 +749,66 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       }
       return undefined;
     }
-    const { approval, who } = handoff;
+    const { approval } = operation;
+    if (operation.kind === "compact-here") {
+      applyDirectEffort(ctx, approval.thinkingLevel);
+      return {
+        entries: [
+          {
+            type: "compaction" as const,
+            summary: "The approved implementation plan follows.",
+            firstKeptEntryId: null,
+            details: { planMode: { direct: approval.planFile } },
+          },
+          {
+            type: "custom_message" as const,
+            customType: "plan-mode-implementation",
+            content: directImplementationBrief(approval),
+            display: true,
+            details: { planFile: approval.planFile, lines: approval.plan.split("\n").length },
+          },
+        ],
+        continue: true,
+      };
+    }
+    const { who } = operation;
+    if (!who || sameModel(who.planning, who.target)) {
+      ctx.ui.notify("The handoff needs a distinct model. Run /plan and approve the plan again.", "warning");
+      return undefined;
+    }
+    const target = normalizedSpec(
+      ctx,
+      who.target,
+      approval.thinkingLevel ?? who.target.thinkingLevel ?? settings.defaultImplementationThinkingLevel ?? "medium",
+    );
     const returnTo = ctx.sessionManager.getLeafId?.() ?? undefined;
+    if (!(await applyRuntime(ctx, target)) || operation.epoch !== branchEpoch || !runtimeActive || ctx.signal?.aborted)
+      return undefined;
     let sessionFile: string | undefined;
-    if (who) {
-      try {
-        sessionFile = writeSeededSession(
-          ctx.cwd,
-          plannerSessionDir(),
-          ctx.sessionManager.buildSessionProjection().messages,
+    try {
+      sessionFile = writeSeededSession(
+        ctx.cwd,
+        plannerSessionDir(),
+        ctx.sessionManager.buildSessionProjection().messages,
+      );
+    } catch (error: unknown) {
+      if (ctx.hasUI) {
+        ctx.ui.notify(
+          `The planner could not be put on call (${errorText(error)}); the handoff goes ahead without it.`,
+          "warning",
         );
-      } catch (error: unknown) {
-        if (ctx.hasUI) {
-          ctx.ui.notify(
-            `The planner could not be put on call (${errorText(error)}); the handoff goes ahead without it.`,
-            "warning",
-          );
-        }
       }
     }
-    const switched = who && handsOffToAnotherModel(who) ? await applyRuntime(ctx, who.target) : false;
-    const implementer = who && switched ? who.targetName : (who?.planningName ?? "this model");
+    const implementer = who.targetName;
     const planner =
       sessionFile && who ? { spec: formatModelSpec(who.planning), name: who.planningName, sessionFile } : undefined;
     const execState: ExecState = {
       active: true,
       planFile: approval.planFile,
       implementer,
-      implementerModel: who ? formatModelKey(switched ? who.target : who.planning) : "",
+      implementerModel: formatModelKey(target),
       ...(planner ? { planner } : {}),
-      ...(who && switched ? { restore: formatModelSpec(who.planning) } : {}),
+      restore: formatModelSpec(who.planning),
       ...(returnTo ? { returnTo } : {}),
       asks: 0,
       costUsd: 0,
@@ -820,6 +843,39 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
         },
       ],
       continue: true,
+    };
+  });
+
+  pi.registerMessageRenderer<{ planFile?: string; lines?: number }>(
+    "plan-mode-implementation",
+    (message, options, theme) =>
+      renderCollapsedMarkdown(
+        "Implementing approved plan",
+        typeof message.content === "string" ? message.content : "",
+        options.expanded,
+        theme,
+        message.details?.lines,
+      ),
+  );
+
+  pi.on("session_before_compact", (event, ctx) => {
+    const pending = pendingCompaction;
+    if (!pending || event.customInstructions !== pending.marker) return;
+    if (!runtimeActive || pending.epoch !== branchEpoch || event.signal.aborted || pending.overridden) {
+      pendingCompaction = undefined;
+      if (runtimeActive && pending.epoch === branchEpoch)
+        ctx.ui.notify("Plan compaction was cancelled; implementation did not start.", "warning");
+      return { cancel: true };
+    }
+    pending.overridden = true;
+    return {
+      compaction: {
+        summary: pending.brief,
+        // Pi's projection accepts the same discard-all sentinel as settle compactions.
+        firstKeptEntryId: null as unknown as string,
+        tokensBefore: event.preparation.tokensBefore,
+        details: { planMode: { direct: pending.planFile } },
+      },
     };
   });
 
@@ -1615,18 +1671,32 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       const implementPage = (first: PlanSource) => {
         let author = first;
         const ready = sources;
-        const defaults = (source: PlanSource) => {
-          const planModel = source.spec ?? sessionSpec;
-          const target = implementationTarget({
-            planModel,
+        let mode: "here" | "handoff" = "here";
+        const efforts = new Map<string, ModelSpec>();
+        const choices = () =>
+          implementationChoices({
+            planModel: author.spec ?? sessionSpec,
             map: settings.implementationModelMap,
-            worker: planModel ? subagentWorkerModel(pi.events, planModel) : undefined,
-            fallback: sessionSpec ?? source.spec ?? models[0],
             available: catalog.available,
-          });
-          return withEffort(target?.spec ?? (models[0] as ModelSpec));
+          })
+            .map(({ spec }) => spec)
+            .filter((spec) => !sessionSpec || !sameModel(spec, sessionSpec));
+        const remembered = (spec: ModelSpec, direct = false) =>
+          efforts.get(formatModelKey(spec)) ??
+          normalizedSpec(
+            ctx,
+            spec,
+            direct ? sessionLevel : (spec.thinkingLevel ?? settings.defaultImplementationThinkingLevel ?? "medium"),
+          );
+        const here = sessionSpec ?? firstPlanner;
+        let target = remembered(here, true);
+        const remember = () => efforts.set(formatModelKey(target), target);
+        const resetTarget = () => {
+          remember();
+          const offered = choices();
+          if (!offered.length) mode = "here";
+          target = remembered(mode === "here" ? here : (offered[0] as ModelSpec), mode === "here");
         };
-        let target = defaults(author);
         let context: ImplementationContextChoice = configuredImplementationContext(settings);
         const optionRows: OptionRow[] = [
           {
@@ -1638,19 +1708,35 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
               const list = ready();
               const index = list.findIndex((source) => source.id === author.id);
               author = list[(index + direction + list.length) % list.length] ?? author;
-              target = defaults(author);
+              resetTarget();
             },
             description: "Which plan to implement.",
             hidden: () => ready().length < 2,
+          },
+          {
+            id: "mode",
+            label: "Mode",
+            value: () => (mode === "here" ? "Here" : "Handoff"),
+            cycle: () => {
+              mode = mode === "here" ? "handoff" : "here";
+              resetTarget();
+            },
+            hidden: () => choices().length === 0,
+            description: "Implement normally in this conversation, or hand off to a configured model.",
           },
           {
             id: "model",
             label: "Model",
             value: () => catalog.name(target),
             cycle: (direction) => {
-              target = cycleModel(target, direction, false) ?? target;
+              if (mode === "here") return;
+              remember();
+              const offered = choices();
+              const index = offered.findIndex((spec) => sameModel(spec, target));
+              const next = offered[(index + direction + offered.length) % offered.length];
+              if (next) target = remembered(next);
             },
-            description: `The model that implements. ${catalog.details(target)}`,
+            description: "The model that implements; handoffs use only the plan author's configured targets.",
           },
           {
             id: "effort",
@@ -1665,11 +1751,17 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
             id: "context",
             label: "Context",
             value: () =>
-              context === "clear" ? "fresh session with only the plan" : "this conversation, plus the plan",
+              mode === "here"
+                ? context === "clear"
+                  ? "compact to plan (same session)"
+                  : "keep conversation"
+                : context === "clear"
+                  ? "fresh session with only the plan"
+                  : "this conversation, plus the plan",
             cycle: () => {
               context = context === "clear" ? "keep" : "clear";
             },
-            description: "Keep your conversation and add the plan, or start a fresh session that gets only the plan.",
+            description: "Here keeps the same session. Handoff can instead start a fresh child with only the plan.",
           },
         ];
         return new OptionsPage(theme, {
@@ -1682,7 +1774,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
             label: "implement",
             run: () => {
               close();
-              void implement(ctx, author, target, context);
+              void implement(ctx, author, target, context, mode);
             },
           },
           back: { label: "back to the plans", run: () => show(lanes(true)) },
@@ -1868,25 +1960,47 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     source: PlanSource,
     target: ModelSpec,
     context: ImplementationContextChoice,
+    mode: "here" | "handoff",
   ) {
+    const epoch = branchEpoch;
     const plan = source.plan;
     hook(ctx, source);
     const authorFile = run?.agents.find((agent) => agent.id === source.id)?.sessionFile;
-    disposeRun("implemented");
     const before = sessionSpecOf(ctx);
     const catalog = modelCatalog(ctx);
     const planFile = writePlanFile(plansDirectoryPath(settings.plansDirectory), plan);
+    if (mode === "here" || (before && sameModel(before, target))) {
+      disposeRun("implemented");
+      applyDirectEffort(ctx, target.thinkingLevel);
+      const brief = directImplementationBrief({ plan, planFile });
+      if (context === "clear") compactDirect(ctx, planFile, brief);
+      else pi.sendUserMessage(brief);
+      return;
+    }
+    // A failed switch must never silently turn a handoff into ordinary execution.
+    if (context !== "clear" && (!(await applyRuntime(ctx, target)) || epoch !== branchEpoch || !runtimeActive)) return;
+    disposeRun("implemented");
     let planner: ExecState["planner"];
+    let consultant: ConsultantSeed | undefined;
     try {
       if (source.id !== MERGED_ID && authorFile && source.spec) {
-        const file = writeSeededSession(ctx.cwd, plannerSessionDir(), readSessionMessages(authorFile, ctx.cwd));
-        if (file) planner = { spec: formatModelSpec(source.spec), name: source.name, sessionFile: file };
+        consultant = {
+          spec: formatModelSpec(source.spec),
+          name: source.name,
+          messages: readSessionMessages(authorFile, ctx.cwd),
+        };
       } else if (source.id === MERGED_ID && context === "clear") {
         const spec = source.spec ?? before;
-        const file = spec
-          ? writeSeededSession(ctx.cwd, plannerSessionDir(), ctx.sessionManager.buildSessionProjection().messages)
-          : undefined;
-        if (file && spec) planner = { spec: formatModelSpec(spec), name: catalog.name(spec), sessionFile: file };
+        if (spec)
+          consultant = {
+            spec: formatModelSpec(spec),
+            name: catalog.name(spec),
+            messages: ctx.sessionManager.buildSessionProjection().messages,
+          };
+      }
+      if (consultant && context !== "clear") {
+        const file = writeSeededSession(ctx.cwd, plannerSessionDir(), consultant.messages);
+        if (file) planner = { spec: consultant.spec, name: consultant.name, sessionFile: file };
       }
     } catch (error: unknown) {
       ctx.ui.notify(`The planner could not be put on call (${errorText(error)}); implementing without it.`, "warning");
@@ -1905,26 +2019,102 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       plan,
       planFile,
       context: context === "clear" ? "fresh" : "here",
-      ...(planner ? { planner: planner.name } : {}),
+      ...(planner || consultant ? { planner: planner?.name ?? consultant?.name } : {}),
     });
-    if (context === "clear") return implementFresh(ctx, target, state, brief);
-    await applyRuntime(ctx, target);
+    if (context === "clear") return implementFresh(ctx, target, state, brief, consultant);
     exec.begin(ctx, state, { record: true });
     pi.sendUserMessage(brief);
   }
 
+  function normalizedSpec(ctx: ExtensionContext, spec: ModelSpec, level: ModelSpec["thinkingLevel"]): ModelSpec {
+    const thinkingLevel = normalizeEffort(level, modelCatalog(ctx).efforts(spec));
+    return { provider: spec.provider, modelId: spec.modelId, ...(thinkingLevel ? { thinkingLevel } : {}) };
+  }
+
+  function applyDirectEffort(ctx: ExtensionContext, level: ModelSpec["thinkingLevel"]) {
+    const current = sessionSpecOf(ctx);
+    if (!current) return;
+    const normalized = normalizedSpec(ctx, current, level ?? current.thinkingLevel);
+    if (normalized.thinkingLevel) pi.setThinkingLevel(normalized.thinkingLevel as never);
+  }
+
+  /** Replace only this explicitly requested compaction; never intercept ordinary compaction. */
+  function compactDirect(ctx: ExtensionCommandContext, planFile: string, brief: string) {
+    const pending = {
+      marker: `plan-mode-direct:${randomUUID()}`,
+      epoch: branchEpoch,
+      planFile,
+      brief,
+      overridden: false,
+    };
+    pendingCompaction = pending;
+    const valid = () => pendingCompaction === pending && pending.epoch === branchEpoch && runtimeActive;
+    const fail = (error: Error) => {
+      if (!valid()) return;
+      pendingCompaction = undefined;
+      ctx.ui.notify(`Plan compaction failed; implementation did not start: ${errorText(error)}`, "warning");
+    };
+    try {
+      ctx.compact({
+        customInstructions: pending.marker,
+        onComplete: (result) => {
+          if (!valid()) return;
+          pendingCompaction = undefined;
+          if (!pending.overridden) {
+            ctx.ui.notify("Plan compaction was cancelled; implementation did not start.", "warning");
+            return;
+          }
+          const details = result.details as { planMode?: { direct?: unknown } } | undefined;
+          if (
+            result.summary !== pending.brief ||
+            result.firstKeptEntryId !== null ||
+            details?.planMode?.direct !== pending.planFile
+          ) {
+            ctx.ui.notify(
+              "Plan compaction was replaced; implementation did not start. The plan file was retained.",
+              "warning",
+            );
+            return;
+          }
+          pi.sendUserMessage(brief);
+        },
+        onError: fail,
+      });
+    } catch (error: unknown) {
+      fail(error instanceof Error ? error : new Error(errorText(error)));
+    }
+  }
+
   /** A fresh session (a child of this one) that gets only the plan, on `target`. */
-  async function implementFresh(ctx: ExtensionCommandContext, target: ModelSpec, state: ExecState, brief: string) {
+  async function implementFresh(
+    ctx: ExtensionCommandContext,
+    target: ModelSpec,
+    state: ExecState,
+    brief: string,
+    consultant?: ConsultantSeed,
+  ) {
+    const epoch = branchEpoch;
     const parentSession = ctx.sessionManager.getSessionFile();
     try {
       await ctx.waitForIdle();
+      if (!runtimeActive || epoch !== branchEpoch) return;
       await ctx.newSession({
         ...(parentSession ? { parentSession } : {}),
         setup: async (sessionManager) => {
-          sessionManager.appendCustomEntry(RUNTIME_ENTRY, { model: formatModelSpec(target) });
-          sessionManager.appendCustomEntry(EXEC_ENTRY, state);
+          sessionManager.appendCustomEntry(RUNTIME_ENTRY, {
+            model: formatModelSpec(target),
+            exec: state,
+            ...(consultant ? { consultant } : {}),
+          });
         },
         withSession: async (fresh) => {
+          if (!fresh.model || !sameModel({ provider: fresh.model.provider, modelId: fresh.model.id }, target)) {
+            fresh.ui.notify(
+              "The selected implementation model could not be activated. Approve the plan again.",
+              "warning",
+            );
+            return;
+          }
           await fresh.sendUserMessage(brief);
         },
       });
@@ -1940,18 +2130,24 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     let onTarget = true;
     if (!current || current.provider !== target.provider || current.id !== target.modelId) {
       const model = ctx.modelRegistry.find(target.provider, target.modelId);
-      const switched = model && (await pi.setModel(model));
-      if (epoch !== branchEpoch || !runtimeActive) return false;
+      let switched = false;
+      try {
+        switched = Boolean(model && (await pi.setModel(model)));
+      } catch {
+        // Rejected switches fail closed just like an unsuccessful switch.
+      }
+      if (epoch !== branchEpoch || !runtimeActive || ctx.signal?.aborted) return false;
       onTarget = Boolean(switched);
       if (!switched) {
         ctx.ui.notify(
-          `Could not switch to ${formatModelSpec(target)}; implementing with the current model.`,
+          `Could not switch to ${formatModelSpec(target)}. Implementation did not start; approve the plan again to choose another model.`,
           "warning",
         );
       }
     }
-    if (target.thinkingLevel) pi.setThinkingLevel(target.thinkingLevel as never);
-    return onTarget;
+    if (onTarget && runtimeActive && epoch === branchEpoch && !ctx.signal?.aborted && target.thinkingLevel)
+      pi.setThinkingLevel(target.thinkingLevel as never);
+    return onTarget && runtimeActive && epoch === branchEpoch && !ctx.signal?.aborted;
   }
 
   /** A fresh implementation session applies the model and effort chosen for it, once. */
@@ -1964,7 +2160,22 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     if (entries.some((entry) => entry.type === "custom" && entry.customType === RUNTIME_CONSUMED_ENTRY)) return;
     const spec = parseModelSpec((pending.data as { model?: unknown } | undefined)?.model);
     pi.appendEntry(RUNTIME_CONSUMED_ENTRY, {});
-    if (spec) await applyRuntime(ctx, spec);
+    if (spec && (await applyRuntime(ctx, spec))) {
+      const { exec: state, consultant } = pending.data as { exec?: ExecState; consultant?: ConsultantSeed };
+      if (!state) return;
+      if (consultant) {
+        try {
+          const sessionFile = writeSeededSession(ctx.cwd, plannerSessionDir(), consultant.messages);
+          if (sessionFile) state.planner = { spec: consultant.spec, name: consultant.name, sessionFile };
+        } catch (error: unknown) {
+          ctx.ui.notify(
+            `The planner could not be put on call (${errorText(error)}); implementing without it.`,
+            "warning",
+          );
+        }
+      }
+      pi.appendEntry(EXEC_ENTRY, state);
+    }
   }
 }
 

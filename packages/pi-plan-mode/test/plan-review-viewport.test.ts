@@ -10,6 +10,7 @@ import {
 import {
   type Component,
   Container,
+  getKeybindings,
   ScrollView,
   stripTerminalSequences,
   type Terminal,
@@ -75,7 +76,13 @@ function setup(plan: string, scrollbar: "always" | "hidden" = "always", withTodo
   const document = new Container();
   document.addChild(chat);
   const scroll = new ScrollView(document, { primary: true, follow: "end", scrollbar });
-  const editor = new Text("Your prompt", 0, 0);
+  let editorText = "Your prompt";
+  const editor = Object.assign(new Text(editorText, 0, 0), {
+    getText: () => editorText,
+    setText: (value: string) => {
+      editorText = value;
+    },
+  });
   const editorContainer = new Container();
   editorContainer.addChild(editor);
   const above = new Container();
@@ -92,15 +99,22 @@ function setup(plan: string, scrollbar: "always" | "hidden" = "always", withTodo
     extensionWidgetsAbove: new Map(),
     extensionWidgetsBelow: new Map(),
     programStatus: { setBlocked() {} },
+    keybindings: getKeybindings(),
     disposeActiveSelector() {},
   }) as {
     setExtensionWidget: ExtensionContext["ui"]["setWidget"];
-    showExtensionSelector: ExtensionContext["ui"]["select"];
-    extensionSelector?: Component;
+    showExtensionCustom: ExtensionContext["ui"]["custom"];
   };
   const ctx = createMockContext({ mode: "tui", hasUI: true }).ctx as ExtensionToolContext;
   ctx.ui.setWidget = mode.setExtensionWidget.bind(mode);
-  ctx.ui.select = mode.showExtensionSelector.bind(mode);
+  ctx.ui.custom = mode.showExtensionCustom.bind(mode);
+  ctx.model = {
+    provider: "anthropic",
+    id: "claude-opus-5-5",
+    name: "Opus",
+    reasoning: true,
+  } as ExtensionContext["model"];
+  ctx.modelRegistry.find = (() => ctx.model) as typeof ctx.modelRegistry.find;
   // Raw terminal input, as Pi hands it to extensions before the focused component.
   const keyHandlers = new Set<(data: string) => { consume?: boolean } | undefined>();
   ctx.ui.onTerminalInput = (handler) => {
@@ -115,7 +129,12 @@ function setup(plan: string, scrollbar: "always" | "hidden" = "always", withTodo
     safeSubcommands: () => undefined,
     plansDirectory: () => directory,
     approved() {},
-    handoffTarget: () => undefined,
+    implementationChoices: () => ({
+      planning: { provider: "anthropic", modelId: "claude-opus-5-5", thinkingLevel: "medium" },
+      planningName: "Opus",
+      targets: [],
+    }),
+    compactHere() {},
     handoff() {},
     implementHere: () => "implement",
     executing: () => false,
@@ -159,8 +178,9 @@ function setup(plan: string, scrollbar: "always" | "hidden" = "always", withTodo
       },
       ctx,
     );
+  const picker = () => editorContainer.children[0] as Component;
   const choose = (index = 0) => {
-    const selector = mode.extensionSelector as Component;
+    const selector = picker();
     for (let i = 0; i < index; i++) selector.handleInput?.("\x1b[B");
     selector.handleInput?.("\r");
   };
@@ -180,6 +200,7 @@ function setup(plan: string, scrollbar: "always" | "hidden" = "always", withTodo
     mock,
     run,
     choose,
+    picker,
     press,
     keyHandlers,
     settle,
@@ -306,6 +327,37 @@ test("manual scrolling is not overwritten by rerenders or resizing away from the
   await result;
 });
 
+test("effort arrows keep the same picker, selected row and transcript position", async () => {
+  const h = setup(longPlan);
+  const result = h.run();
+  await h.settle();
+  h.picker().handleInput?.("\x1b[B"); // Compact here, not the default row.
+  h.scroll.scrollBy(9);
+  await h.settle();
+  const position = h.scroll.scrollTop;
+  const picker = h.picker();
+  const before = picker.render(64).map(stripTerminalSequences).join("\n");
+  expect(before).toContain("→ Yes, compact plan and implement here");
+  expect(before).toContain("effort: medium");
+  const jump = vi.spyOn(h.scroll, "scrollTo");
+  picker.handleInput?.("\x1b[C");
+  await h.settle();
+  expect(h.picker()).toBe(picker);
+  expect(h.scroll.scrollTop).toBe(position);
+  expect(jump).not.toHaveBeenCalled();
+  const after = picker.render(64).map(stripTerminalSequences).join("\n");
+  expect(after).toContain("→ Yes, compact plan and implement here");
+  expect(after).not.toContain("effort: medium");
+  picker.handleInput?.("\x1b[D");
+  await h.settle();
+  expect(h.scroll.scrollTop).toBe(position);
+  expect(picker.render(64).map(stripTerminalSequences).join("\n")).toContain("effort: medium");
+  h.choose();
+  await result;
+  expect(h.keyHandlers.size).toBe(0);
+  expect(h.widgets().size).toBe(0);
+});
+
 test("a short plan stays inline below the chat, unpadded, through resizes", async () => {
   const h = setup("# Beginning of plan\n\nDo it.");
   const result = h.run();
@@ -343,11 +395,14 @@ test("editing returns to the start of the revised plan", async () => {
   // The revision is short: it sits inline at the end, all of it in view.
   expect(h.scroll.isFollowingEnd).toBe(true);
   expect(layout.lines.join("\n")).toContain("Revised plan");
+  expect(h.picker().render(64).map(stripTerminalSequences).join("\n")).toContain("→ Edit the plan");
+  h.picker().handleInput?.("\x1b[A");
+  h.picker().handleInput?.("\x1b[A");
   h.choose();
   await result;
 });
 
-test.each(["escape", "keep", "handoff", "abort"])(
+test.each(["escape", "keep", "compact", "abort"])(
   "%s closes review, clears queued jumps and restores follow",
   async (ending) => {
     const h = setup(longPlan);
@@ -362,10 +417,12 @@ test.each(["escape", "keep", "handoff", "abort"])(
       },
       h.ctx,
     );
+    // ui.custom installs its component asynchronously, unlike the SDK selector.
+    await Promise.resolve();
     h.frame(); // Leave an anchor microtask queued while the user dismisses review.
-    if (ending === "escape") h.mode.extensionSelector?.handleInput?.("\x1b");
+    if (ending === "escape") h.picker().handleInput?.("\x1b");
     else if (ending === "abort") abort.abort();
-    else h.choose(ending === "keep" ? 3 : 0);
+    else h.choose(ending === "keep" ? 3 : 1);
     const final = await result;
     h.card.updateResult({ ...final, isError: false }, false);
     await h.settle();
@@ -376,7 +433,7 @@ test.each(["escape", "keep", "handoff", "abort"])(
 
 test("a thrown dialog error releases review resources", async () => {
   const h = setup(longPlan);
-  h.ctx.ui.select = async () => {
+  h.ctx.ui.custom = async () => {
     throw new Error("dialog failed");
   };
   await expect(h.run()).rejects.toThrow("dialog failed");

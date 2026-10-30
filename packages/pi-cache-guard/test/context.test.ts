@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { compact } from "@earendil-works/pi-coding-agent";
 import { expect, test, vi } from "vitest";
 
 import { DECISION_TYPE, leanContext } from "../src/context.ts";
@@ -173,6 +174,78 @@ const compaction = (reason = "manual", customInstructions?: string) => ({
     fileOps: { read: new Set<string>(), written: new Set<string>(), edited: new Set(["src/cache.ts"]) },
     settings: {},
   },
+});
+
+const directMarker = "plan-mode-direct:550e8400-e29b-41d4-a716-446655440000";
+
+test.each(["manual", "threshold", "overflow"])("direct plan compaction bypasses %s filtering without consuming an armed request", async (reason) => {
+  for (const armed of [false, true]) {
+    const { lean, reg, emit, entries, notes } = setup(keepFirstDropSecond);
+    await emit("session_start", {});
+    if (armed) lean.armJevCompaction({ goal: "reserved quick goal", strict: true });
+    vi.mocked(compact).mockClear();
+
+    expect(await emit("session_before_compact", compaction(reason, directMarker))).toBeUndefined();
+    expect(reg.calls).toHaveLength(0);
+    expect(compact).not.toHaveBeenCalled();
+    expect(entries).toHaveLength(0);
+    expect(notes).toHaveLength(0);
+
+    const next: any = await emit("session_before_compact", compaction());
+    expect(reg.calls).toHaveLength(1);
+    expect(next.compaction.details.cacheGuard.mode).toBe(armed ? "jev" : "filtered");
+    if (armed) {
+      expect(reg.calls[0]?.state.current_goal).toBe("reserved quick goal");
+      expect(compact).not.toHaveBeenCalled();
+      const after: any = await emit("session_before_compact", compaction());
+      expect(after.compaction.details.cacheGuard.mode).toBe("filtered");
+    }
+  }
+});
+
+test("direct plan compaction preserves the previous failure", async () => {
+  const { lean, reg, emit } = setup(() => ({ stopReason: "error", errorMessage: "Request timed out", answers: {} }));
+  await emit("session_start", {});
+  lean.armJevCompaction({ strict: true });
+  expect(await emit("session_before_compact", compaction())).toEqual({ cancel: true });
+  const failure = lean.lastFailure();
+  expect(failure).toBe("classification failed (timed out)");
+  const calls = reg.calls.length;
+  vi.mocked(compact).mockClear();
+  expect(await emit("session_before_compact", compaction("manual", directMarker))).toBeUndefined();
+  expect(lean.lastFailure()).toBe(failure);
+  expect(reg.calls).toHaveLength(calls);
+  expect(compact).not.toHaveBeenCalled();
+});
+
+test.each([
+  undefined,
+  "keep the plan",
+  "plan-mode-direct:",
+  "plan-mode-direct:not-a-uuid",
+  "plan-mode-direct:550e8400e29b41d4a716446655440000",
+  "plan-mode-direct:550e8400-e29b-41d4-a716-44665544000g",
+  ` ${directMarker}`,
+  `${directMarker} `,
+  `${directMarker}\n`,
+  `${directMarker}\nextra`,
+  `prefix:${directMarker}`,
+  directMarker.replace("plan-mode-direct", "PLAN-MODE-DIRECT"),
+])("ordinary or malformed instructions retain compaction behavior: %j", async (instructions) => {
+  for (const armed of [false, true]) {
+    const { lean, reg, emit } = setup(keepFirstDropSecond);
+    await emit("session_start", {});
+    if (armed) lean.armJevCompaction({ strict: true });
+    vi.mocked(compact).mockClear();
+    const out: any = await emit("session_before_compact", compaction("manual", instructions));
+    expect(reg.calls).toHaveLength(1);
+    expect(out.compaction.details.cacheGuard.mode).toBe(armed ? "jev" : "filtered");
+    expect(vi.mocked(compact).mock.calls).toHaveLength(armed ? 0 : 1);
+    if (armed) {
+      const next: any = await emit("session_before_compact", compaction());
+      expect(next.compaction.details.cacheGuard.mode).toBe("filtered");
+    }
+  }
 });
 
 test("a Jev compaction writes the summary in code, judged against the goal", async () => {

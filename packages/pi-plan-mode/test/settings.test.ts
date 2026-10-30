@@ -8,15 +8,141 @@ import {
   awaitPlanModeSettingsWrites,
   configuredAlwaysOffer,
   configuredImplementationModel,
+  configuredImplementationModelMap,
   configuredImplementationPlanRetention,
   configuredImplementationThinkingLevel,
   configuredPlanExportPath,
   configuredPlanModeToggleShortcut,
+  configuredScoutModel,
   DEFAULT_ALWAYS_OFFER,
   normalizePlanModeSettings,
   readPlanModeSettings,
+  serializeImplementationModelListMap,
+  serializeImplementationModelMap,
   updatePlanModeSettings,
 } from "../src/settings.js";
+
+test("implementation model maps migrate scalar strings and normalized objects to lists", () => {
+  const normalized = normalizePlanModeSettings({
+    implementationModelMap: {
+      " planner/one ": " provider/first:high ",
+      "planner/two": { provider: " provider ", modelId: " second ", thinkingLevel: "low" },
+      "planner/three": { provider: "provider", modelId: "third" },
+    },
+  });
+  assert.ok(normalized);
+  assert.deepEqual(configuredImplementationModelMap(normalized), {
+    "planner/one": [{ provider: "provider", modelId: "first", thinkingLevel: "high" }],
+    "planner/two": [{ provider: "provider", modelId: "second", thinkingLevel: "low" }],
+    "planner/three": [{ provider: "provider", modelId: "third" }],
+  });
+  assert.deepEqual(configuredImplementationModelMap({ thinkingLevel: "inherit" }), {});
+});
+
+test("implementation model lists preserve order, duplicates, empty overrides, and scalar scouts", () => {
+  const normalized = normalizePlanModeSettings({
+    implementationModelMap: {
+      "planner/one": ["provider/second:low", { provider: "provider", modelId: "first" }, "provider/second:high"],
+      "planner/disabled": [],
+    },
+    scoutModelMap: { "planner/one": "scout/model:high" },
+  });
+  assert.ok(normalized);
+  assert.deepEqual(normalized.implementationModelMap, {
+    "planner/one": [
+      { provider: "provider", modelId: "second", thinkingLevel: "low" },
+      { provider: "provider", modelId: "first" },
+      { provider: "provider", modelId: "second", thinkingLevel: "high" },
+    ],
+    "planner/disabled": [],
+  });
+  assert.deepEqual(configuredScoutModel(normalized, { provider: "planner", modelId: "one" }), {
+    provider: "scout",
+    modelId: "model",
+    thinkingLevel: "high",
+  });
+  assert.deepEqual(normalizePlanModeSettings({ implementationModelMap: {} })?.implementationModelMap, {});
+  for (const scout of [[], ["scout/model"], { provider: "scout", modelId: "model" }]) {
+    assert.equal(normalizePlanModeSettings({ scoutModelMap: { "planner/one": scout } }), undefined);
+  }
+});
+
+test("implementation model maps reject invalid maps, keys, scalar targets, and list members", () => {
+  for (const implementationModelMap of [null, [], "provider/model", { invalid: [] }, { "planner/one:high": [] }]) {
+    assert.equal(normalizePlanModeSettings({ implementationModelMap }), undefined);
+  }
+  for (const target of [
+    null,
+    undefined,
+    42,
+    true,
+    "",
+    "invalid",
+    {},
+    [],
+    { provider: "provider", modelId: "" },
+    { provider: "provider", modelId: "model", thinkingLevel: "inherit" },
+    { provider: "provider", modelId: "model", thinkingLevel: null },
+    { provider: "provider", modelId: "model", extra: true },
+  ]) {
+    assert.equal(
+      normalizePlanModeSettings({ implementationModelMap: { "planner/one": ["provider/valid", target] } }),
+      undefined,
+    );
+    if (!Array.isArray(target)) {
+      assert.equal(normalizePlanModeSettings({ implementationModelMap: { "planner/one": target } }), undefined);
+    }
+  }
+});
+
+test("implementation model lists serialize and round trip independently of scalar scouts and whole-map resets", async () => {
+  const map = {
+    "planner/one": [
+      { provider: "provider", modelId: "second", thinkingLevel: "low" as const },
+      { provider: "provider", modelId: "first" },
+    ],
+    "planner/disabled": [],
+  };
+  const serialized = { "planner/one": ["provider/second:low", "provider/first"], "planner/disabled": [] };
+  const scouts = { "planner/one": { provider: "scout", modelId: "model", thinkingLevel: "high" as const } };
+  assert.deepEqual(serializeImplementationModelListMap(map), serialized);
+  assert.deepEqual(serializeImplementationModelMap(scouts), { "planner/one": "scout/model:high" });
+  assert.deepEqual(normalizePlanModeSettings({ implementationModelMap: serialized })?.implementationModelMap, map);
+
+  const directory = await mkdtemp(join(tmpdir(), "pi-plan-mode-model-lists-"));
+  const settingsPath = join(directory, "pi-plan-mode.json");
+  const legacy = { implementationModelMap: { "planner/old": "provider/old" }, future: true };
+  try {
+    await writeFile(settingsPath, JSON.stringify(legacy));
+    assert.equal((await readPlanModeSettings(settingsPath)).kind, "loaded");
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), legacy);
+    await updatePlanModeSettings({ implementationModelMap: map, scoutModelMap: scouts }, { settingsPath });
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
+      future: true,
+      implementationModelMap: serialized,
+      scoutModelMap: { "planner/one": "scout/model:high" },
+    });
+    const loaded = await readPlanModeSettings(settingsPath);
+    assert.equal(loaded.kind, "loaded");
+    assert.deepEqual(loaded.kind === "loaded" && loaded.settings.implementationModelMap, map);
+    assert.deepEqual(loaded.kind === "loaded" && loaded.settings.scoutModelMap, scouts);
+    for (const reset of [null, {}]) {
+      await updatePlanModeSettings({ implementationModelMap: map }, { settingsPath });
+      await updatePlanModeSettings({ implementationModelMap: reset }, { settingsPath });
+      assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
+        future: true,
+        scoutModelMap: { "planner/one": "scout/model:high" },
+      });
+    }
+    await updatePlanModeSettings({ implementationModelMap: map, scoutModelMap: null }, { settingsPath });
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
+      future: true,
+      implementationModelMap: serialized,
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("Plan-mode settings validate inherit and fixed thinking levels", async () => {
   assert.deepEqual(normalizePlanModeSettings({}), { thinkingLevel: "inherit" });

@@ -32,7 +32,7 @@ const { ALLOW_ONCE, BLOCK, choiceLabels } = await jiti.import('../packages/pi-to
 const { CustomEditor } = await import(new URL('./modes/interactive/components/custom-editor.js', sdkUrl));
 const { sidebarScreen } = await import('./remote-clients/sidebar.mjs');
 const { TerminalPanel } = await jiti.import('../packages/pi-interactive-shell/src/panel.ts');
-const { handoffLabel, keepLabel, EDIT, KEEP } = await jiti.import('../packages/pi-plan-mode/src/inline-plan.ts');
+const { pickApproval, createApprovalState, handoffLabel, HERE: IMPLEMENT_HERE, COMPACT_HERE, EDIT, KEEP } = await jiti.import('../packages/pi-plan-mode/src/approval-picker.ts');
 const { choiceMenu, coldTitle } = await jiti.import('../packages/pi-cache-guard/src/index.ts');
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
@@ -115,11 +115,30 @@ async function approvalLines(width, spec = {}) {
   return lines;
 }
 
-// The widest first row: 42 characters, the most a Pi select row may have (docs/clients.md).
-const PLAN_CHOICES = [handoffLabel('Claude Sonnet 5.5', 'xhigh'), keepLabel('Claude Opus 5.5'), EDIT, KEEP];
-function selectorLines(width) {
-  const selector = new ExtensionSelectorComponent('Implement this plan?', PLAN_CHOICES, () => {}, () => {});
-  return selector.render(width);
+// Render the actual approval component, including the live effort key path.
+const PLAN_TARGETS = [
+  { target: { provider: 'anthropic', modelId: 'claude-opus-5-5', thinkingLevel: 'high' }, targetName: 'Claude Opus 5.5' },
+  { target: { provider: 'anthropic', modelId: 'claude-sonnet-5-5', thinkingLevel: 'high' }, targetName: 'Claude Sonnet 5.5' },
+];
+function planLabels(count) {
+  return [IMPLEMENT_HERE, COMPACT_HERE, ...PLAN_TARGETS.slice(0, count).map(t => handoffLabel(t.targetName, t.target.thinkingLevel)), EDIT, KEEP];
+}
+async function selectorLines(width, count, changed) {
+  let lines;
+  const models = [{ provider: 'anthropic', id: 'claude-fable-5-5', reasoning: true }, ...PLAN_TARGETS.map(t => ({ provider: t.target.provider, id: t.target.modelId, reasoning: true }))];
+  const ctx = {
+    hasUI: true, mode: 'tui',
+    modelRegistry: { getAvailable: () => models, find: (p, id) => models.find(m => m.provider === p && m.id === id) },
+    getScopedModels: () => [],
+    ui: { custom: factory => new Promise(() => {
+      const component = factory(tui, theme, kb, () => {});
+      if (changed) component.handleInput('\x1b[C');
+      lines = component.render(width);
+    }) },
+  };
+  void pickApproval(ctx, { planning: { provider: 'anthropic', modelId: 'claude-fable-5-5', thinkingLevel: 'high' }, targets: PLAN_TARGETS.slice(0, count) }, createApprovalState());
+  await new Promise(resolve => setTimeout(resolve, 0));
+  return lines;
 }
 
 // pi-cache-guard's cold-cache question as its input handler builds it, with model offers from a
@@ -150,7 +169,13 @@ const DIALOGS = [
     const rows = [...approvalOptions(spec.kind, spec.plural), 'Block with a message'];
     return { name, lines: (w) => approvalLines(w, spec), herdr: { options: rows.length, multi: false, labels: rows }, collie: { kind: 'prompt-select', wraps: rows } };
   }),
-  { name: 'pi select (plan approval)', lines: selectorLines, herdr: { options: 4, multi: false, labels: PLAN_CHOICES }, collie: { kind: 'prompt-select', options: 5, wraps: PLAN_CHOICES } },
+  ...[0, 1, 2].flatMap(count => [false, true].map(changed => ({
+    name: `plan approval (${count} targets${changed ? ', effort changed' : ''})`,
+    lines: w => selectorLines(w, count, changed),
+    question: `Implement this plan? ←/→ effort: ${changed ? 'off' : 'high'}`,
+    herdr: { options: 4 + count, multi: false, labels: planLabels(count) },
+    collie: { kind: 'prompt-select', options: 5 + count, labels: planLabels(count), wraps: planLabels(count) },
+  }))),
   { name: 'cache-guard cold cache', lines: (w) => coldCacheLines(w, plainMenu), herdr: { options: plainMenu.length, multi: false, labels: plainMenu }, collie: { kind: 'prompt-select', options: plainMenu.length + 1, wraps: plainMenu } },
   { name: 'cache-guard cold cache (model offers)', lines: coldCacheLines, herdr: { options: coldMenu.length, multi: false, labels: coldMenu }, collie: { kind: 'prompt-select', options: coldMenu.length + 1, wraps: coldMenu } },
 ];
@@ -255,6 +280,7 @@ screens.forEach((screen, i) => {
   if (h !== undefined) {
     if (h === null) problems.push('herdr-web-ui: no card');
     else {
+      if (dialog.question && h.question.replace(/\s+/g, ' ').trim() !== dialog.question) problems.push(`herdr-web-ui: question ${JSON.stringify(h.question)}`);
       if (dialog.herdr.multi !== undefined && h.multi !== dialog.herdr.multi) problems.push(`herdr-web-ui: multi_select ${h.multi}`);
       if (dialog.herdr.options !== undefined && h.options.length !== dialog.herdr.options) problems.push(`herdr-web-ui: options ${JSON.stringify(h.options)}`);
       else if (dialog.herdr.labels !== undefined && JSON.stringify(h.options) !== JSON.stringify(dialog.herdr.labels)) problems.push(`herdr-web-ui: labels ${JSON.stringify(h.options)}`);
@@ -267,6 +293,8 @@ screens.forEach((screen, i) => {
     const read = [];
     if (card?.kind !== wanted) read.push(`Collie: ${card?.kind ?? 'no card'}, wanted ${wanted}`);
     else if (wanted === dialog.collie.kind && dialog.collie.options !== undefined && card.options.length !== dialog.collie.options) read.push(`Collie: options ${JSON.stringify(card.options)}`);
+    if (card?.kind === wanted && dialog.question && card.question.replace(/\s+/g, ' ').trim() !== dialog.question) read.push(`Collie: question ${JSON.stringify(card.question)}`);
+    if (card?.kind === wanted && dialog.collie.labels && JSON.stringify(card.options.slice(0, dialog.collie.labels.length)) !== JSON.stringify(dialog.collie.labels)) read.push(`Collie: labels ${JSON.stringify(card.options)}`);
     if (dialog.collie.wraps && wrapsRow(dialog.collie.wraps, screen.width)) read.push(`an option is wider than ${screen.width - 4} columns, and Pi's own select wraps it with no gutter`);
     problems.push(...read);
   }

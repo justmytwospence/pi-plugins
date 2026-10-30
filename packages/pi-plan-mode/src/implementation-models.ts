@@ -92,14 +92,6 @@ export function snapshotAvailableImplementationModels(ctx: ExtensionContext): Av
 /** pi-subagents' channel (its src/index.ts ROLE_MODEL): which model and effort a role gets for a parent model. */
 export const ROLE_MODEL_CHANNEL = "subagents:role-model";
 
-/** The model pi-subagents gives its worker role for a session on `parent`; undefined without pi-subagents. */
-export function subagentWorkerModel(
-  events: { emit(channel: string, data: unknown): void },
-  parent: ModelSpec,
-): ModelSpec | undefined {
-  return subagentRoleModel(events, "worker", parent);
-}
-
 /** The model pi-subagents gives `role` for a session on `parent`; undefined without pi-subagents. */
 export function subagentRoleModel(
   events: { emit(channel: string, data: unknown): void },
@@ -126,32 +118,93 @@ export function subagentRoleModel(
   return { provider: spec.provider, modelId: spec.modelId, ...(level ? { thinkingLevel: level } : {}) };
 }
 
-export type ImplementationSource = "map" | "subagents" | "fallback";
+export type ImplementationSource = "map" | "default";
+export interface ImplementationChoice {
+  spec: ModelSpec;
+  source: ImplementationSource;
+}
 
-/**
- * The default implementing model for a plan written on `planModel`: its implementationModelMap entry,
- * then pi-subagents' worker model, then `fallback`. A candidate missing from a non-empty `available`
- * list is skipped.
- */
-export function implementationTarget(input: {
-  planModel: ModelSpec | undefined;
-  map: Readonly<Record<string, ModelSpec>> | undefined;
-  worker: ModelSpec | undefined;
-  fallback: ModelSpec | undefined;
-  available: readonly { provider: string; id: string }[];
-}): { spec: ModelSpec; source: ImplementationSource } | undefined {
-  const usable = (spec: ModelSpec) =>
-    input.available.length === 0 ||
-    input.available.some((model) => model.provider === spec.provider && model.id === spec.modelId);
-  const mapped = input.planModel ? input.map?.[formatModelKey(input.planModel)] : undefined;
-  if (mapped && usable(mapped)) {
-    const thinkingLevel = mapped.thinkingLevel ?? input.planModel?.thinkingLevel;
-    return {
-      spec: { provider: mapped.provider, modelId: mapped.modelId, ...(thinkingLevel ? { thinkingLevel } : {}) },
-      source: "map",
-    };
+type ModelFamily = "astra" | "sol" | "terra" | "fable" | "opus" | "sonnet";
+
+function familyOf(model: ImplementationModelOverride): { family: ModelFamily; generation: number[] } | undefined {
+  const match =
+    model.provider === "openai" || model.provider === "openai-codex"
+      ? /^gpt-(\d+(?:\.\d+)*)-(astra|sol|terra)$/u.exec(model.modelId)
+      : model.provider === "anthropic"
+        ? /^claude-(fable|opus|sonnet)-(\d+(?:-\d+)*)$/u.exec(model.modelId)
+        : undefined;
+  if (!match) return undefined;
+  const anthropic = model.provider === "anthropic";
+  const generation = (anthropic ? match[2] : match[1]) as string;
+  // Dated Anthropic snapshots are not generation IDs.
+  if (anthropic && generation.split("-").some((part) => /^\d{8}$/u.test(part))) return undefined;
+  return {
+    family: (anthropic ? match[1] : match[2]) as ModelFamily,
+    generation: generation.split(anthropic ? "-" : ".").map(Number),
+  };
+}
+
+function compareGeneration(left: number[], right: number[]) {
+  for (let index = 0; index < Math.max(left.length, right.length); index++) {
+    const difference = (left[index] ?? 0) - (right[index] ?? 0);
+    if (difference !== 0) return difference;
   }
-  if (input.worker && usable(input.worker)) return { spec: input.worker, source: "subagents" };
-  if (input.fallback) return { spec: input.fallback, source: "fallback" };
-  return undefined;
+  return 0;
+}
+
+const LOWER_FAMILIES: Partial<Record<ModelFamily, ModelFamily[]>> = {
+  astra: ["sol", "terra"],
+  sol: ["terra"],
+  fable: ["opus", "sonnet"],
+  opus: ["sonnet"],
+};
+
+/** Ordered, available, distinct handoff targets; explicit entries (including []) replace defaults. */
+export function implementationChoices(input: {
+  planModel: ModelSpec | undefined;
+  map: Readonly<Record<string, readonly ModelSpec[]>> | undefined;
+  available: readonly AvailableImplementationModel[];
+}): ImplementationChoice[] {
+  const planner = input.planModel;
+  if (!planner) return [];
+  const key = formatModelKey(planner);
+  const mapped = input.map !== undefined && Object.hasOwn(input.map, key);
+  let candidates: readonly ModelSpec[];
+  if (mapped) {
+    candidates = input.map?.[key] ?? [];
+  } else {
+    const planningFamily = familyOf(planner);
+    if (!planningFamily) return [];
+    candidates = (LOWER_FAMILIES[planningFamily.family] ?? []).flatMap((family) => {
+      const siblings = input.available.flatMap((model) => {
+        if (model.provider !== planner.provider) return [];
+        const spec = { provider: model.provider, modelId: model.id };
+        const recognized = familyOf(spec);
+        return recognized?.family === family ? [{ spec, generation: recognized.generation }] : [];
+      });
+      siblings.sort((left, right) => {
+        const leftSame = compareGeneration(left.generation, planningFamily.generation) === 0;
+        const rightSame = compareGeneration(right.generation, planningFamily.generation) === 0;
+        return (
+          Number(rightSame) - Number(leftSame) ||
+          compareGeneration(right.generation, left.generation) ||
+          (left.spec.modelId < right.spec.modelId ? -1 : left.spec.modelId > right.spec.modelId ? 1 : 0)
+        );
+      });
+      return siblings[0] ? [siblings[0].spec] : [];
+    });
+  }
+  const seen = new Set<string>();
+  return candidates.flatMap((spec) => {
+    const identity = formatModelKey(spec);
+    if (
+      sameModel(planner, spec) ||
+      seen.has(identity) ||
+      !input.available.some((model) => model.provider === spec.provider && model.id === spec.modelId)
+    ) {
+      return [];
+    }
+    seen.add(identity);
+    return [{ spec, source: mapped ? ("map" as const) : ("default" as const) }];
+  });
 }

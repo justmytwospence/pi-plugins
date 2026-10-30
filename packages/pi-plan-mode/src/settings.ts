@@ -107,8 +107,8 @@ export interface PlanModeSettings {
   toggleShortcut?: KeyId;
   /** Where inline plan mode writes plan files (default `~/.pi/agent/plans`). */
   plansDirectory?: string;
-  /** Planning model (`provider/modelId`) to the default implementation model for its plans. */
-  implementationModelMap?: Record<string, ModelSpec>;
+  /** Planning model (`provider/modelId`) to ordered implementation choices; `[]` disables defaults. */
+  implementationModelMap?: Record<string, ModelSpec[]>;
   /** Whether implementation keeps the planning conversation or starts a fresh session. */
   defaultImplementationContext?: ImplementationContextChoice;
   /** Planners A and B, preselected in /planners. */
@@ -157,7 +157,7 @@ export interface PlanModeSettingsPatch {
   defaultImplementationThinkingLevel?: PlanModeFixedThinkingLevel | null;
   defaultPlanExportPath?: string | null;
   toggleShortcut?: KeyId | null;
-  implementationModelMap?: Readonly<Record<string, ModelSpec>> | null;
+  implementationModelMap?: Readonly<Record<string, ModelSpec[]>> | null;
   defaultImplementationContext?: ImplementationContextChoice | null;
   planners?: readonly ModelSpec[] | null;
   scoutModelMap?: Readonly<Record<string, ModelSpec>> | null;
@@ -247,7 +247,7 @@ export function normalizePlanModeSettings(value: unknown): PlanModeSettings | un
     settings.safeSubcommands = safeSubcommands;
   }
   if (Object.hasOwn(value, "implementationModelMap")) {
-    const implementationModelMap = normalizeImplementationModelMap(Reflect.get(value, "implementationModelMap"));
+    const implementationModelMap = normalizeImplementationModelListMap(Reflect.get(value, "implementationModelMap"));
     if (!implementationModelMap) return undefined;
     settings.implementationModelMap = implementationModelMap;
   }
@@ -336,6 +336,39 @@ export function normalizePlanModeSettings(value: unknown): PlanModeSettings | un
     settings.planCompleteCommand = command;
   }
   return settings;
+}
+
+function normalizeImplementationModelListMap(value: unknown): Record<string, ModelSpec[]> | undefined {
+  if (!isSettingsDocument(value)) return undefined;
+  const entries: [string, ModelSpec[]][] = [];
+  for (const [key, target] of Object.entries(value)) {
+    const source = parseModelSpec(key);
+    if (!source || source.thinkingLevel) return undefined;
+    const specs: ModelSpec[] = [];
+    for (const item of Array.isArray(target) ? target : [target]) {
+      let spec: ModelSpec | undefined;
+      if (typeof item === "string") {
+        spec = parseModelSpec(item);
+      } else if (
+        isSettingsDocument(item) &&
+        !Object.keys(item).some((key) => key !== "provider" && key !== "modelId" && key !== "thinkingLevel")
+      ) {
+        const model = normalizeImplementationModel({ provider: item.provider, modelId: item.modelId });
+        if (!model) return undefined;
+        if (Object.hasOwn(item, "thinkingLevel")) {
+          if (!IMPLEMENTATION_THINKING_LEVELS.includes(item.thinkingLevel as PlanModeFixedThinkingLevel))
+            return undefined;
+          spec = { ...model, thinkingLevel: item.thinkingLevel as PlanModeFixedThinkingLevel };
+        } else {
+          spec = model;
+        }
+      }
+      if (!spec) return undefined;
+      specs.push(spec);
+    }
+    entries.push([`${source.provider}/${source.modelId}`, specs]);
+  }
+  return Object.fromEntries(entries);
 }
 
 function normalizeImplementationModelMap(value: unknown): Record<string, ModelSpec> | undefined {
@@ -451,6 +484,10 @@ function normalizeCommand(value: unknown): string[] | undefined {
     return undefined;
   }
   return [...value];
+}
+
+export function serializeImplementationModelListMap(map: Readonly<Record<string, ModelSpec[]>>) {
+  return Object.fromEntries(Object.entries(map).map(([key, specs]) => [key, specs.map(formatModelSpec)]));
 }
 
 export function serializeImplementationModelMap(map: Readonly<Record<string, ModelSpec>>) {
@@ -610,7 +647,7 @@ export function updatePlanModeSettings(
     ) {
       delete updated.implementationModelMap;
     } else if (patch.implementationModelMap !== undefined) {
-      updated.implementationModelMap = serializeImplementationModelMap(patch.implementationModelMap);
+      updated.implementationModelMap = serializeImplementationModelListMap(patch.implementationModelMap);
     }
     if (patch.defaultImplementationContext === null) delete updated.defaultImplementationContext;
     else if (patch.defaultImplementationContext !== undefined) {
@@ -836,7 +873,7 @@ export function configuredImplementationThinkingLevel(
   return settings.defaultImplementationThinkingLevel;
 }
 
-export function configuredImplementationModelMap(settings: PlanModeSettings): Record<string, ModelSpec> {
+export function configuredImplementationModelMap(settings: PlanModeSettings): Record<string, ModelSpec[]> {
   return settings.implementationModelMap ?? {};
 }
 

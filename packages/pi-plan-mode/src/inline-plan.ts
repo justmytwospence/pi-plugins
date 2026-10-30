@@ -22,10 +22,14 @@ import {
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
+import { createApprovalState, pickApproval } from "./approval-picker.js";
 import { editInTerminal, externalEditorCommand } from "./external-editor.js";
-import { implementationBrief, PLAN_STANDARD } from "./handoff.js";
+import { PLAN_STANDARD } from "./handoff.js";
+
+export { EDIT, HERE, handoffLabel, KEEP, OPTION_MAX } from "./approval-picker.js";
+
 import { holdBlocked } from "./herdr-blocked.js";
-import { type ModelSpec, sameModel } from "./implementation-models.js";
+import { type ModelSpec, type ModelSpecThinkingLevel, sameModel } from "./implementation-models.js";
 import { PlanMarkdown } from "./mermaid-art.js";
 import { planDiff, renderPlanDiff } from "./plan-diff.js";
 import { newPlanFile, plansDirectoryPath, readPlan } from "./plan-file.js";
@@ -65,40 +69,12 @@ export interface Approval {
   plan: string;
   planFile: string;
   edited: boolean;
+  thinkingLevel?: ModelSpecThinkingLevel;
 }
 
-/** Whether a handoff changes the model or its effort (else it is only a fresh context). */
+/** Whether a handoff changes model identity, independent of effort. */
 export function handsOffToAnotherModel(who: HandoffTarget): boolean {
-  return (
-    !sameModel(who.target, who.planning) ||
-    (who.target.thinkingLevel ?? undefined) !== (who.planning.thinkingLevel ?? undefined)
-  );
-}
-
-/** Every approval option must fit in this many characters (docs/clients.md): remote clients wrap rows without a gutter. */
-export const OPTION_MAX = 42;
-export const EDIT = "Edit the plan";
-export const KEEP = "No, keep planning";
-export const FRESH_CONTEXT = "Yes, in a fresh context";
-export const HERE = "Yes, implement it here";
-
-function clip(name: string, max: number) {
-  return name.length <= max ? name : `${name.slice(0, Math.max(0, max - 1))}…`;
-}
-
-export function handoffLabel(name: string, effort?: string): string {
-  const prefix = "Yes, hand off to ";
-  if (effort) {
-    const full = `${prefix}${name} (${effort})`;
-    if (full.length <= OPTION_MAX) return full;
-  }
-  return `${prefix}${clip(name, OPTION_MAX - prefix.length)}`;
-}
-
-export function keepLabel(name: string): string {
-  const prefix = "Yes, keep ";
-  const suffix = " on it";
-  return `${prefix}${clip(name, OPTION_MAX - prefix.length - suffix.length)}${suffix}`;
+  return !sameModel(who.target, who.planning);
 }
 
 export interface InlineHost {
@@ -108,7 +84,15 @@ export interface InlineHost {
   /** Run the plan-complete hook for an approved plan. */
   approved(plan: string, ctx: ExtensionContext): void;
   /** The model a handoff goes to and the planning model, with names; undefined without a session model. */
-  handoffTarget(ctx: ExtensionContext): HandoffTarget | undefined;
+  implementationChoices(ctx: ExtensionContext):
+    | {
+        planning: ModelSpec;
+        planningName: string;
+        targets: Array<{ target: ModelSpec; targetName: string }>;
+        defaultThinkingLevel?: ModelSpecThinkingLevel;
+      }
+    | undefined;
+  compactHere(approval: Approval): void;
   /** Hand the approved plan off once this turn ends (fresh context, `who.target`'s model). */
   handoff(approval: Approval, who: HandoffTarget | undefined): void;
   /** Implement it here, by the agent that planned it; returns the tool result's text. */
@@ -408,11 +392,8 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       }
       if (!ctx.hasUI) return text("There is no user to approve the plan. Stay in plan mode.");
       let edited = false;
-      const who = host.handoffTarget(ctx);
-      const handoffRow =
-        !who || !handsOffToAnotherModel(who) ? FRESH_CONTEXT : handoffLabel(who.targetName, who.target.thinkingLevel);
-      const hereRow = who ? keepLabel(who.planningName) : HERE;
-      const choices = () => [handoffRow, hereRow, EDIT, KEEP];
+      const models = host.implementationChoices(ctx);
+      const pickerState = createApprovalState();
       reviewViewport.begin(ctx, id);
       const releaseBlocked = holdBlocked(pi.events, "Review the plan");
       // The agent is waiting on the user: the Working row only takes a plan line.
@@ -425,8 +406,9 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             content: [{ type: "text", text: plan }],
             details: { plan, planFile, outcome: "pending", ...(previous ? { previous } : {}) } satisfies ExitDetails,
           } as never);
-          const choice = await ctx.ui.select("Implement this plan?", choices(), { signal });
-          if (choice === EDIT) {
+          const picked = await pickApproval(ctx, { ...models, targets: models?.targets ?? [] }, pickerState, signal);
+          const choice = picked?.choice;
+          if (choice?.kind === "edit") {
             // In your external editor when one is set (pi's externalEditor, or $VISUAL / $EDITOR),
             // else in pi's own.
             const command = externalEditorCommand(ctx.cwd);
@@ -446,7 +428,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             }
             continue;
           }
-          if (choice === undefined || choice === KEEP) {
+          if (choice === undefined || choice.kind === "keep") {
             // You say what should change in the chat, as your next message.
             const details: ExitDetails = { plan, planFile, outcome: "kept" };
             declined = plan;
@@ -461,20 +443,28 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
               terminate: true,
             } as never;
           }
-          const approval: Approval = { plan, planFile, edited };
+          const approval: Approval = { plan, planFile, edited, thinkingLevel: picked?.thinkingLevel };
           host.approved(plan, ctx);
           declined = undefined;
           // This result tells your agent it left plan mode.
           exitLocal(ctx, false);
           const mode = gate ? resumeMode() : undefined;
           if (mode) requestMode(mode);
-          if (choice === handoffRow) {
+          const who =
+            choice.kind === "handoff" && models
+              ? {
+                  ...models,
+                  target: { ...choice.target, thinkingLevel: picked?.thinkingLevel },
+                  targetName: choice.targetName,
+                }
+              : undefined;
+          if (who && handsOffToAnotherModel(who)) {
             host.handoff(approval, who);
             return {
               content: [
                 {
                   type: "text",
-                  text: `The user approved the plan and handed it off to ${who?.targetName ?? "a fresh context"}, which implements it in this session from the plan alone${who ? "; you stay on call to answer its questions" : ""}. Stop here and do nothing else.`,
+                  text: `The user approved the plan and handed it off to ${who.targetName}, which implements it in this session from the plan alone; you stay on call to answer its questions. Stop here and do nothing else.`,
                 },
               ],
               details: {
@@ -485,6 +475,19 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
                 ...(who ? { handoff: who.targetName } : {}),
                 ...(mode ? { mode } : {}),
               } satisfies ExitDetails,
+              terminate: true,
+            } as never;
+          }
+          if (choice.kind === "compact-here") {
+            host.compactHere(approval);
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: "The user approved the plan. Stop here; implementation continues in this session after compaction to the approved plan.",
+                },
+              ],
+              details: { plan, planFile, outcome: "approved", edited, ...(mode ? { mode } : {}) } satisfies ExitDetails,
               terminate: true,
             } as never;
           }

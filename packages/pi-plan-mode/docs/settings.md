@@ -8,10 +8,76 @@ The Settings step of `/planners` edits planners, efforts, subagent models, the t
 selection, rendered plans, completion review, the default implementation context, the export path, and the shortcut;
 everything else is edited in the file. An invalid file is ignored (defaults apply) and never overwritten.
 
+### Implementation choices and effort
+
+`implementationModelMap` maps an exact planning `provider/modelId` to an ordered list of handoff
+model specs. Specs accept an optional `:off|minimal|low|medium|high|xhigh|max` effort suffix:
+
+```json
+{
+  "implementationModelMap": {
+    "anthropic/claude-fable-5-1": [
+      "anthropic/claude-opus-5-5:high",
+      "anthropic/claude-sonnet-5-1:medium"
+    ],
+    "openai-codex/gpt-6-astra": []
+  },
+  "defaultImplementationThinkingLevel": "medium"
+}
+```
+
+Legacy scalar model specs are still accepted as one-element lists; existing normalized scalar
+objects are accepted too. No automatic rewrite is needed. Lists preserve order, including empty
+lists; invalid members invalidate the settings file. An explicit `[]` disables automatic handoff
+defaults for that exact planning model, not direct execution. A missing entry uses the built-in
+defaults; `null` resets the whole map. `scoutModelMap` remains a separate scalar mapping.
+
+Built-in defaults are provider-local, in this order:
+
+| Planning family | Handoff families |
+| --- | --- |
+| Astra | Sol, Terra |
+| Sol | Terra |
+| Fable | Opus, Sonnet |
+| Opus | Sonnet |
+| Sonnet, Terra, unrecognized | None |
+
+OpenAI families match `gpt-<numeric dotted generation>-astra|sol|terra` IDs on `openai` or
+`openai-codex`; Anthropic families match `claude-fable|opus|sonnet-<numeric dash generation>`
+IDs on `anthropic`. Defaults never cross provider IDs. Each target family prefers a same-generation
+sibling, otherwise the highest available numeric generation, with lexical model-ID tie breaking.
+Unrecognized aliases or snapshot formats do not generate defaults. Only available/scoped models
+are offered, even when that catalog is empty. Explicit mappings may cross providers and override
+defaults; unavailable, duplicate and same-model targets are filtered, preserving the first effort
+choice. There is no pi-subagents worker fallback or same-model pseudo-handoff.
+
+Inline approval always starts with **Yes, implement here**, then **Yes, compact plan and implement
+here**, followed by handoffs, Edit and Keep planning. Up/Down navigates, Left/Right adjusts effort
+on every execution option, Enter selects, and Esc/Ctrl+C cancels. Both direct rows share the model's
+effort selection; RPC uses separate action and effort selectors. `/planners` defaults to **Here**
+with the main session model even for a plan written by A or B; **Handoff** is offered only when the
+plan author's targets include a distinct available model. Its model row cycles those targets, and
+its effort row is adjustable with Left/Right in both modes.
+
+Direct execution retains the current effort by default. Handoffs use the target suffix first,
+then `defaultImplementationThinkingLevel`, then `medium`. Unsupported levels normalize to the
+greatest supported level no higher than requested, or the first supported level if none qualifies.
+Nonreasoning models have no effort adjustment. Approval changes are per approval, not saved
+settings; `/planners` retains per-model effort selections when changing modes. Model identity is
+provider plus model ID: changing effort alone is not a handoff.
+
+Direct execution is ordinary chat with normal implementation, verification and a final reply:
+no exec mode, seeded consultant, `ask_planner`, `finish_plan`, completion card/review or planner
+branch return. It may keep the conversation or compact to the approved plan in the same session,
+never a child. Actual distinct-model handoffs retain consultation and the exec/completion workflow.
+Inline handoffs compact in-session and retain planner return; `/planners` Handoff still supports
+an explicit fresh child. Its Here context choices are **keep conversation** and **compact to plan
+(same session)**; `defaultImplementationContext` (`keep` or `clear`) selects the default context.
+
 ### Completion review
 
 `completionReview` (boolean, default `true`) enables a targeted review by the on-call planner when
-`finish_plan` is called. Toggle it with **Completion review** in `/planners` Settings. The review is
+`finish_plan` is called after an actual handoff. Direct execution does not use this workflow. Toggle it with **Completion review** in `/planners` Settings. The review is
 an additional model turn, with its cost shown separately from implementation consultations. If disabled,
 the completion card remains but the review is skipped; if there is no planner on call, no review is made.
 

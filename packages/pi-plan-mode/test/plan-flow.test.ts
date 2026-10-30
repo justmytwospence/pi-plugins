@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
-import { initTheme } from "@earendil-works/pi-coding-agent";
+import { existsSync, writeFileSync } from "node:fs";
+import { type ExtensionContext, initTheme } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
-import { implementationBrief } from "../src/handoff.js";
+import { directImplementationBrief, implementationBrief } from "../src/handoff.js";
 import planMode from "../src/index.js";
 import type { PlannerSessionFactory } from "../src/planner/session.js";
+import type { PlanModeSettings } from "../src/settings.js";
 import { createCustomSelectorHarness, createMockContext, createMockPi } from "./support.js";
 
 initTheme("dark");
@@ -95,9 +96,11 @@ function setup(
     ask?: boolean;
     failFirst?: { model: string; error: string };
     login?: (providerId: string, show: (dialog: never) => void) => Promise<void>;
+    settings?: Partial<PlanModeSettings>;
+    thinkingLevel?: string;
   } = {},
 ) {
-  const mock = createMockPi({ thinkingLevel: "high" });
+  const mock = createMockPi({ thinkingLevel: options.thinkingLevel ?? "high" });
   const sessions = fakeSessions(options.ask, options.failFirst);
   const ready = planMode(mock.pi, {
     ...(options.login ? { login: options.login } : {}),
@@ -105,6 +108,7 @@ function setup(
       thinkingLevel: "inherit",
       planners: [{ provider: "anthropic", modelId: "claude-sonnet-5-5", thinkingLevel: "low" }],
       jevToolSelection: false,
+      ...options.settings,
     }),
     createSession: sessions.factory,
   });
@@ -134,6 +138,531 @@ function setup(
   (context.ctx as { sendUserMessage?: unknown }).sendUserMessage = async (text: string) => sent.push(text);
   return { mock, context, sessions, sent, ready, harness: () => harness };
 }
+
+async function implementationScreen(options: Parameters<typeof setup>[0] = {}) {
+  const state = setup(options);
+  await state.ready;
+  state.mock.entries.push({
+    customType: "plan-run",
+    data: {
+      id: "implementation-test",
+      createdAt: 1,
+      task: "approved task",
+      state: "active",
+      planners: [
+        {
+          id: "A",
+          spec: "anthropic/claude-sonnet-5-5:low",
+          name: SONNET.name,
+          plan: "# Exact A\n\nDo A.",
+          revision: 1,
+        },
+        { id: "B", spec: "anthropic/claude-opus-5-5:low", name: OPUS.name, plan: "# Exact B\n\nDo B.", revision: 1 },
+      ],
+      merged: { plan: "# Exact M\n\nDo M.", revision: 1, name: SONNET.name, spec: "anthropic/claude-sonnet-5-5" },
+    },
+  });
+  for (const handler of state.mock.events.get("session_start") ?? []) await handler({}, state.context.ctx);
+  const opened = state.mock.commands.get("planners")?.handler("", state.context.ctx);
+  await flush();
+  const app = state.harness();
+  assert.ok(app);
+  for (let index = 0; index < 5 && !/⏎ do it/u.test(app.render().join("\n")); index++) app.handleInput("\t");
+  app.handleInput("\r");
+  assert.match(app.render().join("\n"), /● Implement/u);
+  const focus = (label: string) => {
+    for (let index = 0; index < 10; index++) {
+      if (new RegExp(`${label}\\s+‹`, "u").test(app.render().join("\n"))) return;
+      app.handleInput("\u001b[B");
+    }
+    assert.fail(`Could not focus ${label}: ${app.render().join("\n")}`);
+  };
+  return { ...state, app, opened, focus };
+}
+
+for (const author of ["A", "B", "M"]) {
+  for (const clear of [false, true]) {
+    test(`/planners Here implements ${author} with ${clear ? "same-session compaction" : "conversation kept"}`, async () => {
+      const state = await implementationScreen();
+      const { mock, context, sessions, app, focus } = state;
+      let children = 0;
+      let compaction:
+        | { customInstructions: string; onComplete(result: unknown): void; onError(error: Error): void }
+        | undefined;
+      Object.assign(context.ctx, {
+        newSession: async () => {
+          children++;
+          return { cancelled: false };
+        },
+        compact: (options: typeof compaction) => {
+          compaction = options;
+        },
+      });
+      focus("Plan");
+      for (
+        let index = 0;
+        index < 3 && !new RegExp(`Plan\\s+‹ ${author}(?: | ·)`, "u").test(app.render().join("\n"));
+        index++
+      )
+        app.handleInput("\u001b[C");
+      assert.match(app.render().join("\n"), new RegExp(`Plan\\s+‹ ${author}(?: | ·)`, "u"));
+      assert.match(app.render().join("\n"), /Model\s+Claude Sonnet 5\.5/u, "Here always uses the main model");
+      focus("Effort");
+      app.handleInput("\u001b[D");
+      if (clear) {
+        focus("Context");
+        app.handleInput("\u001b[C");
+      }
+      app.handleInput("\r");
+      await state.opened;
+      await flush();
+      const plan = `# Exact ${author}\n\nDo ${author}.`;
+      if (clear) {
+        assert.ok(compaction);
+        assert.equal(mock.sentUserMessages.length, 0);
+        const before = mock.events.get("session_before_compact")?.[0];
+        assert.ok(before);
+        assert.equal(await before({ customInstructions: "ordinary compaction" }, context.ctx), undefined);
+        const result = (await before(
+          {
+            customInstructions: compaction.customInstructions,
+            signal: new AbortController().signal,
+            preparation: { tokensBefore: 1234 },
+          },
+          context.ctx,
+        )) as { compaction: { summary: string; firstKeptEntryId: null; tokensBefore: number; details: unknown } };
+        assert.match(result.compaction.summary, new RegExp(`# Exact ${author}`, "u"));
+        assert.ok(result.compaction.summary.endsWith(plan));
+        assert.equal(result.compaction.firstKeptEntryId, null);
+        assert.equal(result.compaction.tokensBefore, 1234);
+        compaction.onComplete(result.compaction);
+        compaction.onComplete(result.compaction);
+      }
+      const brief = mock.sentUserMessages.at(-1)?.text ?? "";
+      assert.ok(brief.endsWith(plan));
+      assert.match(brief, /reply normally/u);
+      assert.doesNotMatch(brief, /finish_plan|ask_planner|handed it to you/u);
+      assert.equal(mock.sentUserMessages.length, 1);
+      assert.equal(mock.thinkingLevel, "medium");
+      assert.equal(mock.setModels.length, 0);
+      assert.equal(children, 0);
+      assert.equal(sessions.prompts.length, 0, "no consultant prompt");
+      assert.ok(
+        !mock.entries.some(
+          (entry) => entry.customType === "plan-mode:exec" || entry.customType === "plan-implementation-runtime",
+        ),
+      );
+    });
+  }
+}
+
+for (const outcome of ["error", "cancel", "tree", "shutdown"] as const) {
+  test(`/planners direct compaction does not implement after ${outcome}`, async () => {
+    const state = await implementationScreen();
+    let compact:
+      | { customInstructions: string; onComplete(result: unknown): void; onError(error: Error): void }
+      | undefined;
+    Object.assign(state.context.ctx, {
+      compact: (options: typeof compact) => {
+        compact = options;
+      },
+    });
+    state.focus("Context");
+    state.app.handleInput("\u001b[C");
+    state.app.handleInput("\r");
+    await state.opened;
+    await flush();
+    assert.ok(compact);
+    const before = state.mock.events.get("session_before_compact")?.[0];
+    assert.ok(before);
+    const controller = new AbortController();
+    if (outcome === "cancel") controller.abort();
+    const override = await before(
+      { customInstructions: compact.customInstructions, signal: controller.signal, preparation: { tokensBefore: 10 } },
+      state.context.ctx,
+    );
+    if (outcome === "cancel") assert.deepEqual(override, { cancel: true });
+    if (outcome === "error" || outcome === "cancel") compact.onError(new Error("Compaction cancelled"));
+    else
+      for (const handler of state.mock.events.get(outcome === "tree" ? "session_tree" : "session_shutdown") ?? [])
+        await handler({}, state.context.ctx);
+    compact.onComplete({});
+    assert.equal(state.mock.sentUserMessages.length, 0);
+    assert.ok(!state.mock.entries.some((entry) => entry.customType === "plan-mode:exec"));
+    assert.equal(await before({ customInstructions: compact.customInstructions }, state.context.ctx), undefined);
+  });
+}
+
+type DirectCompactionResult = {
+  summary: string;
+  firstKeptEntryId: string | null;
+  details: { planMode: { direct: string } };
+};
+
+for (const cacheFirst of [false, true]) {
+  test(`/planners direct compaction preserves the exact brief with cache-guard ${cacheFirst ? "first" : "last"}`, async () => {
+    const state = await implementationScreen();
+    const { leanContext } = await import(new URL("../../pi-cache-guard/src/context.ts", import.meta.url).href);
+    const lean = leanContext(state.mock.pi);
+    lean.armJevCompaction({ strict: true });
+    let compact:
+      | { customInstructions: string; onComplete(result: unknown): void; onError(error: Error): void }
+      | undefined;
+    Object.assign(state.context.ctx, {
+      compact: (options: typeof compact) => {
+        compact = options;
+      },
+    });
+    state.focus("Context");
+    state.app.handleInput("\u001b[C");
+    state.app.handleInput("\r");
+    await state.opened;
+    await flush();
+    assert.ok(compact);
+    const handlers = [...(state.mock.events.get("session_before_compact") ?? [])];
+    assert.equal(handlers.length, 2, "compose the real plan-mode and cache-guard handlers");
+    if (cacheFirst) handlers.reverse();
+    let result: DirectCompactionResult | undefined;
+    for (const handler of handlers) {
+      const response = (await handler(
+        {
+          customInstructions: compact.customInstructions,
+          signal: new AbortController().signal,
+          preparation: { tokensBefore: 1234 },
+        },
+        state.context.ctx,
+      )) as { cancel?: boolean; compaction?: DirectCompactionResult } | undefined;
+      assert.notEqual(response?.cancel, true);
+      if (response?.compaction) result = response.compaction;
+    }
+    assert.ok(result);
+    assert.equal(
+      result.summary,
+      directImplementationBrief({ plan: "# Exact M\n\nDo M.", planFile: result.details.planMode.direct }),
+    );
+    assert.equal(result.firstKeptEntryId, null);
+    compact.onComplete(result);
+    compact.onComplete(result);
+    assert.equal(state.mock.sentUserMessages.length, 1);
+    assert.equal(state.mock.sentUserMessages[0]?.text, result.summary);
+    assert.equal(lean.lastFailure(), undefined);
+    // The reserved marker must not consume a previously armed quick compaction.
+    const cacheHandler = state.mock.events.get("session_before_compact")?.[1];
+    assert.ok(cacheHandler);
+    assert.deepEqual(await cacheHandler({ customInstructions: "ordinary" }, state.context.ctx), { cancel: true });
+  });
+}
+
+for (const replacement of ["summary", "firstKeptEntryId", "details"] as const) {
+  test(`/planners direct compaction stops when a third party replaces ${replacement}`, async () => {
+    const state = await implementationScreen();
+    let compact:
+      | { customInstructions: string; onComplete(result: unknown): void; onError(error: Error): void }
+      | undefined;
+    let attempts = 0;
+    Object.assign(state.context.ctx, {
+      compact: (options: typeof compact) => {
+        attempts++;
+        compact = options;
+      },
+    });
+    state.mock.events.get("session_before_compact")?.push(() => ({
+      compaction: {
+        summary: "Third-party summary",
+        firstKeptEntryId: "retained-entry",
+        tokensBefore: 1234,
+        details: { planMode: { direct: "another-plan.md" } },
+      },
+    }));
+    state.focus("Context");
+    state.app.handleInput("\u001b[C");
+    state.app.handleInput("\r");
+    await state.opened;
+    await flush();
+    assert.ok(compact);
+    const handlers = state.mock.events.get("session_before_compact") ?? [];
+    const event = {
+      customInstructions: compact.customInstructions,
+      signal: new AbortController().signal,
+      preparation: { tokensBefore: 1234 },
+    };
+    const planHandler = handlers[0];
+    const thirdPartyHandler = handlers[1];
+    assert.ok(planHandler);
+    assert.ok(thirdPartyHandler);
+    const intended = ((await planHandler(event, state.context.ctx)) as { compaction: DirectCompactionResult })
+      .compaction;
+    const override = ((await thirdPartyHandler(event, state.context.ctx)) as { compaction: DirectCompactionResult })
+      .compaction;
+    assert.ok(intended);
+    assert.ok(override);
+    // Change only one field, so every part of the completion contract is checked independently.
+    const result = { ...intended, [replacement]: override[replacement] };
+    compact.onComplete(result);
+    compact.onComplete(intended);
+    assert.equal(state.mock.sentUserMessages.length, 0);
+    assert.equal(attempts, 1, "a replaced compaction must not retry");
+    assert.ok(existsSync(intended.details.planMode.direct));
+    assert.ok(
+      state.context.notifications.some(
+        ({ message, level }) => level === "warning" && /replaced; implementation did not start/u.test(message),
+      ),
+    );
+    assert.equal(await handlers[0]?.(event, state.context.ctx), undefined);
+  });
+}
+
+const implementationMap = {
+  "anthropic/claude-sonnet-5-5": [{ provider: "anthropic", modelId: "claude-opus-5-5", thinkingLevel: "low" as const }],
+};
+
+test("/planners Here retains off effort and hides handoffs to the current session model", async () => {
+  const state = await implementationScreen({
+    thinkingLevel: "off",
+    settings: {
+      implementationModelMap: {
+        "anthropic/claude-sonnet-5-5": [],
+        "anthropic/claude-opus-5-5": [{ provider: "anthropic", modelId: "claude-sonnet-5-5" }],
+      },
+    },
+  });
+  assert.match(state.app.render().join("\n"), /Effort\s+off/u);
+  assert.doesNotMatch(state.app.render().join("\n"), /Mode\s+/u);
+  state.focus("Plan");
+  state.app.handleInput("\u001b[C");
+  state.app.handleInput("\u001b[C");
+  assert.doesNotMatch(state.app.render().join("\n"), /Mode\s+/u);
+  state.app.handleInput("\r");
+  await state.opened;
+  await flush();
+  assert.equal(state.mock.thinkingLevel, "off");
+  assert.equal(state.mock.setModels.length, 0);
+  assert.match(state.mock.sentUserMessages.at(-1)?.text ?? "", /reply normally/u);
+});
+
+test("/planners mode uses configured distinct targets and preserves effort across mode changes", async () => {
+  const state = await implementationScreen({ settings: { implementationModelMap: implementationMap } });
+  state.focus("Mode");
+  assert.match(state.app.render().join("\n"), /Mode\s+‹ Here ›/u);
+  state.app.handleInput("\u001b[C");
+  assert.match(state.app.render().join("\n"), /Model\s+Claude Opus 5\.5/u);
+  assert.match(state.app.render().join("\n"), /Effort\s+low/u);
+  state.focus("Effort");
+  state.app.handleInput("\u001b[C");
+  state.focus("Mode");
+  state.app.handleInput("\u001b[C");
+  assert.match(state.app.render().join("\n"), /Model\s+Claude Sonnet 5\.5/u);
+  assert.match(state.app.render().join("\n"), /Effort\s+high/u);
+  state.app.handleInput("\u001b[C");
+  assert.match(state.app.render().join("\n"), /Effort\s+medium/u);
+  state.app.handleInput("\r");
+  await state.opened;
+  await flush();
+  assert.equal(state.mock.setModels.length, 1);
+  assert.equal(state.mock.thinkingLevel, "medium");
+  assert.ok(state.mock.entries.some((entry) => entry.customType === "plan-mode:exec"));
+  assert.match(state.mock.sentUserMessages.at(-1)?.text ?? "", /finish_plan/u);
+});
+
+test("/planners genuine handoff retains the fresh-child path", async () => {
+  const state = await implementationScreen({ settings: { implementationModelMap: implementationMap } });
+  let child:
+    | { parentSession?: string; setup(manager: unknown): Promise<void>; withSession(ctx: unknown): Promise<void> }
+    | undefined;
+  Object.assign(state.context.ctx, {
+    waitForIdle: async () => {},
+    newSession: async (options: typeof child) => {
+      child = options;
+      return { cancelled: false };
+    },
+  });
+  state.focus("Mode");
+  state.app.handleInput("\u001b[C");
+  state.focus("Context");
+  state.app.handleInput("\u001b[C");
+  assert.match(state.app.render().join("\n"), /fresh session with only the plan/u);
+  state.app.handleInput("\r");
+  await state.opened;
+  await flush();
+  assert.ok(child);
+  assert.equal(child.parentSession, "/main.jsonl");
+  const entries: Array<{ type: string; customType: string; data: unknown }> = [];
+  await child.setup({
+    appendCustomEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
+  });
+  assert.equal(entries[0]?.customType, "plan-implementation-runtime");
+  assert.ok(!entries.some((entry) => entry.customType === "plan-mode:exec"), "exec waits for the model switch");
+  const fresh = createMockContext({ model: OPUS, sessionManager: { getBranch: () => entries } });
+  for (const handler of state.mock.events.get("session_start") ?? []) await handler({}, fresh.ctx);
+  assert.ok(state.mock.entries.some((entry) => entry.customType === "plan-mode:exec"));
+  let prompt = "";
+  await child.withSession({
+    ...(fresh.ctx as ExtensionContext),
+    sendUserMessage: async (text: string) => {
+      prompt = text;
+    },
+  });
+  assert.match(prompt, /finish_plan/u);
+  assert.match(prompt, /# Exact M/u);
+});
+
+for (const failure of ["false", "throw", "reject"] as const) {
+  test(`/planners ${failure} child model activation does not seed a consultant or start implementation`, async () => {
+    const state = await implementationScreen({ settings: { implementationModelMap: implementationMap } });
+    let child: { setup(manager: unknown): Promise<void>; withSession(ctx: unknown): Promise<void> } | undefined;
+    Object.assign(state.context.ctx, {
+      waitForIdle: async () => {},
+      newSession: async (options: typeof child) => {
+        child = options;
+        return { cancelled: false };
+      },
+    });
+    state.focus("Mode");
+    state.app.handleInput("\u001b[C");
+    state.focus("Context");
+    state.app.handleInput("\u001b[C");
+    state.app.handleInput("\r");
+    await state.opened;
+    await flush();
+    assert.ok(child);
+    const entries: Array<{ type: string; customType: string; data: unknown }> = [];
+    await child.setup({
+      appendCustomEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
+    });
+    state.mock.rawPi.setModel = () => {
+      if (failure === "throw") throw new Error("Switch failed");
+      return failure === "reject" ? Promise.reject(new Error("Switch failed")) : Promise.resolve(false);
+    };
+    const fresh = createMockContext({
+      model: SONNET,
+      modelRegistry: (state.context.ctx as ExtensionContext).modelRegistry,
+      sessionManager: { getBranch: () => entries },
+    });
+    for (const handler of state.mock.events.get("session_start") ?? []) await handler({}, fresh.ctx);
+    let prompts = 0;
+    await child.withSession({
+      ...(fresh.ctx as ExtensionContext),
+      sendUserMessage: async () => {
+        prompts++;
+      },
+    });
+    assert.equal(prompts, 0);
+    assert.ok(!state.mock.entries.some((entry) => entry.customType === "plan-mode:exec"));
+    const runtime = entries[0];
+    assert.ok(runtime);
+    assert.equal((runtime.data as { exec: { planner?: unknown } }).exec.planner, undefined);
+    assert.equal(state.mock.thinkingLevel, "high");
+    assert.ok(fresh.notifications.some((note) => /Implementation did not start/u.test(note.message)));
+  });
+}
+
+test("/planners a failed model switch never starts execution or seeds a consultant", async () => {
+  const state = await implementationScreen({ settings: { implementationModelMap: implementationMap } });
+  state.mock.rawPi.setModel = async () => false;
+  state.focus("Mode");
+  state.app.handleInput("\u001b[C");
+  state.app.handleInput("\r");
+  await state.opened;
+  await flush();
+  assert.equal(state.mock.sentUserMessages.length, 0);
+  assert.equal(state.sessions.prompts.length, 0);
+  assert.ok(!state.mock.entries.some((entry) => entry.customType === "plan-mode:exec"));
+  assert.ok(
+    state.context.notifications.some((note) =>
+      /Implementation did not start; approve the plan again/u.test(note.message),
+    ),
+  );
+});
+
+for (const stale of ["none", "tree", "shutdown", "abort"] as const) {
+  test(`/planners rejected model switch fails closed after ${stale}`, async () => {
+    const state = await implementationScreen({ settings: { implementationModelMap: implementationMap } });
+    const controller = new AbortController();
+    Object.assign(state.context.ctx, { signal: controller.signal });
+    let rejectSwitch: ((error: Error) => void) | undefined;
+    state.mock.rawPi.setModel = () =>
+      new Promise<boolean>((_resolve, reject) => {
+        rejectSwitch = reject;
+      });
+    let compacted = false;
+    Object.assign(state.context.ctx, {
+      compact: () => {
+        compacted = true;
+      },
+    });
+    state.focus("Mode");
+    state.app.handleInput("\u001b[C");
+    state.app.handleInput("\r");
+    await flush();
+    assert.ok(rejectSwitch);
+    if (stale === "abort") controller.abort();
+    else if (stale !== "none")
+      for (const handler of state.mock.events.get(stale === "tree" ? "session_tree" : "session_shutdown") ?? [])
+        await handler({}, state.context.ctx);
+    const notificationsBefore = state.context.notifications.length;
+    rejectSwitch(new Error("Switch rejected"));
+    await state.opened;
+    await flush();
+    assert.equal(state.mock.sentUserMessages.length, 0);
+    assert.equal(state.sessions.prompts.length, 0);
+    assert.equal(state.mock.thinkingLevel, "high");
+    assert.equal(compacted, false);
+    assert.ok(!state.mock.entries.some((entry) => entry.customType === "plan-mode:exec"));
+    const notifications = state.context.notifications.slice(notificationsBefore);
+    if (stale === "none")
+      assert.ok(
+        notifications.some((note) => /Implementation did not start; approve the plan again/u.test(note.message)),
+      );
+    else assert.equal(notifications.length, 0, "stale rejection must not notify the new context");
+  });
+}
+
+test("inline handoff returns to the planning leaf before the model-change entry", async () => {
+  const state = setup();
+  await state.ready;
+  let leaf = "planning-leaf";
+  const context = createMockContext({
+    mode: "rpc",
+    hasUI: true,
+    model: OPUS,
+    modelRegistry: (state.context.ctx as ExtensionContext).modelRegistry,
+    select: async (title: string, choices: string[]) =>
+      title === "Implementation effort" ? "high" : choices.find((choice) => choice.startsWith("Yes, hand off")),
+    sessionManager: {
+      getBranch: () => state.mock.entries.map((entry) => ({ type: "custom", ...entry })),
+      getLeafId: () => leaf,
+      buildSessionProjection: () => ({ messages: [{ role: "user", content: "plan it" }] }),
+    },
+  });
+  state.mock.rawPi.setModel = async () => {
+    // Real model switches append a model-change entry, advancing the branch leaf.
+    leaf = "model-change-leaf";
+    return true;
+  };
+  for (const handler of state.mock.events.get("session_start") ?? []) await handler({}, context.ctx);
+  await state.mock.commands.get("plan")?.handler("", context.ctx);
+  const inline = [...state.mock.entries].reverse().find((entry) => entry.customType === "plan-mode:inline");
+  assert.ok(inline);
+  writeFileSync((inline.data as { planFile: string }).planFile, "# Approved return plan");
+  const tool = state.mock.tools.find((candidate) => candidate.name === "exit_plan_mode");
+  assert.ok(tool);
+  await (tool.execute as (...args: unknown[]) => Promise<unknown>)("approval", {}, undefined, undefined, context.ctx);
+  let settled: unknown;
+  for (const handler of state.mock.events.get("agent_before_settle") ?? [])
+    settled = (await handler({ outcome: "completed" }, context.ctx)) ?? settled;
+  const result = settled as { entries: Array<{ customType?: string; data?: { returnTo?: string } }> };
+  assert.equal(leaf, "model-change-leaf");
+  assert.equal(result.entries[0]?.customType, "plan-mode:exec");
+  assert.equal(result.entries[0]?.data?.returnTo, "planning-leaf");
+});
+
+test("direct brief authorizes ordinary verification and a plain final response", () => {
+  const brief = directImplementationBrief({ plan: "# Approved", planFile: "/approved.md", edited: true });
+  assert.match(brief, /Implement it now in this conversation/u);
+  assert.match(brief, /reply normally/u);
+  assert.match(brief, /edited by the user/u);
+  assert.doesNotMatch(brief, /exec mode|finish_plan|ask_planner|consult|handoff/iu);
+});
 
 test("the implementation brief requires honest structured completion fields in every context", () => {
   for (const context of ["here", "fresh"] as const) {
@@ -359,14 +888,12 @@ test("/planners opens on the settings, goes through tools, plans with two planne
   await opened;
   await flush();
   assert.match(mock.sentUserMessages.at(-1)?.text ?? "", /# Merged plan/u);
-  const exec = mock.entries.filter((entry) => entry.customType === "plan-mode:exec").at(-1)?.data as {
-    active: boolean;
-    planFile: string;
-    planner?: unknown;
-  };
-  assert.equal(exec.active, true, "implementing starts exec mode");
-  assert.equal(exec.planner, undefined, "plan M kept in this conversation has no planner on call");
-  assert.ok(existsSync(exec.planFile), "the plan is written to a plan file");
+  assert.ok(!mock.entries.some((entry) => entry.customType === "plan-mode:exec"), "Here never starts exec mode");
+  const brief = mock.sentUserMessages.at(-1)?.text ?? "";
+  assert.doesNotMatch(brief, /finish_plan|ask_planner|handed it to you/u);
+  assert.match(brief, /reply normally/u);
+  const planFile = /The approved plan file is (.+)\./u.exec(brief)?.[1];
+  assert.ok(planFile && existsSync(planFile), "the plan is written to a plan file");
   const stored = mock.entries.filter((entry) => entry.customType === "plan-run").at(-1)?.data as {
     state: string;
     merged?: { plan: string; revision: number };

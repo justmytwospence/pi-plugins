@@ -13,6 +13,27 @@ export const HANDOFF_SUMMARY =
   "Planning is over: the user approved the plan and handed it off for implementation. The planning conversation is not in this context; the next message has the approved plan and how to implement it.";
 export const HANDOFF_MESSAGE_TYPE = "plan-mode-handoff";
 
+/** Ordinary execution in the current conversation, with a normal final response. */
+export function directImplementationBrief({
+  plan,
+  planFile,
+  edited,
+}: {
+  plan: string;
+  planFile?: string;
+  edited?: boolean;
+}): string {
+  return [
+    "The user approved the plan. Implement it now in this conversation.",
+    "Read each file before changing it, follow the approved steps and scope, and run the plan's verification. Ask the user if a decision is needed. When done, reply normally with the changes and verification results.",
+    ...(planFile ? ["", `The approved plan file is ${planFile}.`] : []),
+    "",
+    `## Approved plan${edited ? " (edited by the user)" : ""}`,
+    "",
+    plan,
+  ].join("\n");
+}
+
 export interface ImplementationBrief {
   plan: string;
   /** The plan file: the plan's current version, which amendments update. */
