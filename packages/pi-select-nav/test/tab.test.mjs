@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ACCEPT_NEXT, TASK_TAB, explicitCompletion, routePromptTab } from '../src/prompt-tab.ts';
+import { ACCEPT_NEXT, TASK_TAB, explicitCompletion, routePromptCtrlJ, routePromptTab } from '../src/prompt-tab.ts';
 import selectNav from '../src/index.ts';
 
 const surface = Symbol.for('pi-plugins.editor-surface.v1');
@@ -87,4 +87,13 @@ test('dialogs, embedded editors, modal operations, releases and Shift+Tab keep t
   }
   other[surface] = 'main';
   assert.deepEqual(routePromptTab('\t', other, main, () => {}), { consume: true });
+});
+
+test('ctrl+j enters the task panel only when one handles it, else stays a newline', () => {
+  const e = editor();
+  const calls = [];
+  assert.equal(routePromptCtrlJ('\n', e, e, (c, r) => calls.push([c, r.phase])), undefined);
+  assert.deepEqual(calls, [[TASK_TAB, 'active'], [TASK_TAB, 'enter']]);
+  assert.deepEqual(routePromptCtrlJ('\n', e, e, (_c, r) => { r.handled = r.phase === 'enter'; }), { consume: true });
+  assert.equal(routePromptCtrlJ('\n', editor('', true), editor(), () => assert.fail('autocomplete owns keys')), undefined);
 });

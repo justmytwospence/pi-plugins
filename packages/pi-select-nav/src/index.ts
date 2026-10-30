@@ -7,7 +7,7 @@
 //
 // Tab in the main prompt uses contextual suggestion/task routing (prompt-tab.ts).
 // The list-navigation rewrites leave these alone:
-//   - the main prompt editor, or any other editor that is itself the focused component
+//   - the main prompt editor (ctrl+j there enters the task panel when one exists, else stays a newline), or any other editor that is itself the focused component
 //     (ctrl+j = newline, ctrl+k = kill line), including active nested prose editors
 //   - key releases, which kitty-protocol terminals report separately: rewriting them would move
 //     twice per key
@@ -19,7 +19,7 @@
 //   - components listed in J_K_DENYLIST, for letter bindings the source check cannot see
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CURSOR_MARKER, isKeyRelease, matchesKey } from "@earendil-works/pi-tui";
-import { routePromptTab } from "./prompt-tab.ts";
+import { routePromptCtrlJ, routePromptTab } from "./prompt-tab.ts";
 
 export const INPUT_CONTEXT = Symbol.for("pi-plugins.input-context.v1");
 
@@ -178,6 +178,7 @@ export default function (pi: ExtensionAPI) {
       const focused = tui.getFocusedComponent();
       return routeShortcut(data, focused, main)
         ?? routePromptTab(data, focused, main, (channel, request) => pi.events.emit(channel, request))
+        ?? routePromptCtrlJ(data, focused, main, (channel, request) => pi.events.emit(channel, request))
         ?? routeInput(data, focused, tui.terminal?.columns ?? 80);
     });
   });

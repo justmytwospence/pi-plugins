@@ -44,3 +44,22 @@ export function routePromptTab(data: string, focused: unknown, main: unknown, em
   request(TASK_TAB, "enter");
   return { consume: true };
 }
+
+/**
+ * ctrl+j in the main prompt moves down into the task panel (tasks, subagents, notebooks) when one
+ * exists or is already selected; with none it is not consumed, so it stays a newline.
+ */
+export function routePromptCtrlJ(data: string, focused: unknown, main: unknown, emit: (channel: string, request: TabRequest) => void): { consume: true } | undefined {
+  if (isKeyRelease(data) || !matchesKey(data, "ctrl+j") || !focused || typeof focused !== "object") return undefined;
+  const editor = focused as Editor;
+  if (editor[SURFACE] === "embedded" || (focused !== main && editor[SURFACE] !== "main") || typeof editor.getText !== "function") return undefined;
+  const mode = editor[MODE]?.();
+  if (mode && mode.state !== "normal" && mode.state !== "insert") return undefined;
+  if (mode?.autocomplete || editor.isShowingAutocomplete?.()) return undefined;
+  for (const phase of ["active", "enter"] as const) {
+    const event: TabRequest = { handled: false, phase };
+    emit(TASK_TAB, event);
+    if (event.handled) return { consume: true };
+  }
+  return undefined;
+}
