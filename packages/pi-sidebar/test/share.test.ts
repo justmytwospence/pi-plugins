@@ -498,7 +498,7 @@ describe("HeadsUp with sharing", () => {
       return { ok: true, status: 200, json: async () => body, text: async () => "" };
     };
     const written: unknown[] = [];
-    const headsUp = new HeadsUp(pi as never, main, { deliver: () => false, askSidebar: () => true, draftWritten: (...args) => written.push(args), ...host }, {
+    const headsUp = new HeadsUp(pi as never, main, { deliver: () => {}, askSidebar: () => true, draftWritten: (...args) => written.push(args), ...host }, {
       knowledgeDir: path.join(dir, "k"), logFile: path.join(dir, "log"), run: async () => undefined, stream, now: () => now, env: { ...env, PI_SIDEBAR_DRAFTS_DIR: env.PI_SIDEBAR_DRAFTS_DIR ? path.join(dir, "drafts") : "" }, fetch,
       ...(share ? { share } : {}),
     });

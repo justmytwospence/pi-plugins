@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { MainState } from "../src/main-state.ts";
 import { runCheck } from "../src/headsup/check.ts";
 import { HeadsUp, headsUpChange } from "../src/headsup/headsup.ts";
-import { HEADSUP_ENTRY, headsUpDefault, headsUpFromBranch, HeadsUpStats, headsUpWhereDefault } from "../src/headsup/mode.ts";
+import { HEADSUP_ENTRY, headsUpDefault, headsUpFromBranch, HeadsUpStats } from "../src/headsup/mode.ts";
 import { proseMeasure, NoteState, quoteForMain } from "../src/headsup/note.ts";
 import { parseHeadsUp } from "../src/headsup/protocol.ts";
 import { isNoteMarker, noteMessages } from "../src/headsup/thread.ts";
@@ -300,7 +300,7 @@ describe("a heads-up check on another model", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "headsup-"));
     const { stream, calls } = foreignStream();
     let choice: any = { kind: "other", pattern: "anthropic/claude-fable-*", model: FABLE, label: "Claude Fable 5.1" };
-    const headsUp = new HeadsUp(pi as never, main, { deliver: () => true, askSidebar: () => true, model: () => choice }, {
+    const headsUp = new HeadsUp(pi as never, main, { deliver: () => {}, askSidebar: () => true, model: () => choice }, {
       knowledgeDir: dir, logFile: path.join(dir, "log"), run: async () => undefined, stream, now: () => 1000, env: {},
     });
     expect(await headsUp.check("turn")).toMatchObject({ outcome: "none" });
@@ -325,7 +325,7 @@ describe("HeadsUp in main", () => {
     const delivered: unknown[] = [];
     const dir = mkdtempSync(path.join(tmpdir(), "headsup-"));
     const { stream } = stubStream(reply);
-    const headsUp = new HeadsUp(pi as never, main, { deliver: (note) => { if (deliver) delivered.push(note); return deliver; }, askSidebar: (text) => { asked.push(text); return true; } }, {
+    const headsUp = new HeadsUp(pi as never, main, { deliver: (note) => { if (deliver) delivered.push(note); }, askSidebar: (text) => { asked.push(text); return true; } }, {
       knowledgeDir: dir,
       logFile: path.join(dir, "log"),
       run: async () => undefined,
@@ -364,12 +364,12 @@ describe("HeadsUp in main", () => {
     expect(headsUp.note.showing).toBe(false);
   });
 
-  it("hands the note to Sidebar when it is open, and /known marks it", async () => {
+  it("hands the note to Sidebar too, and /known marks it", async () => {
     const { headsUp, widgets, delivered, dir } = await setup(NOTE, true);
     await headsUp.check("turn");
     expect(delivered).toHaveLength(1);
-    expect(widgets).toHaveLength(0);
-    expect(headsUp.note.showing).toBe(false);
+    expect(widgets).toHaveLength(1);
+    expect(headsUp.note.showing).toBe(true);
     expect(await headsUp.markLastKnown()).toMatchObject({ topic: "skipped-tests" });
     expect(knownTopics(new ProfileStore(dir, "/repo").load(), 0).known[0]).toMatch(/^skipped-tests:/);
   });
@@ -394,38 +394,21 @@ describe("HeadsUp in main", () => {
     expect(headsUp.on).toBe(true);
   });
 
-  it("asks Sidebar to keep the note when it shows only in Sidebar", async () => {
+  it("shows the note in main and also hands it to Sidebar's host", async () => {
     const { headsUp, widgets } = await setup();
-    const onlySidebar: boolean[] = [];
-    (headsUp as any).host.deliver = (_note: unknown, only: boolean) => { onlySidebar.push(only); return only; };
-    headsUp.setOn(true, "sidebar");
+    const delivered: unknown[] = [];
+    (headsUp as any).host.deliver = (note: unknown) => { delivered.push(note); };
     await headsUp.check("turn");
-    expect(onlySidebar).toEqual([true]);
-    expect(widgets).toHaveLength(0);
+    expect(delivered).toEqual([expect.objectContaining({ topic: "skipped-tests" })]);
+    expect(widgets).toHaveLength(1);
+    expect(headsUp.note.showing).toBe(true);
   });
 
-  it("stores where notes go, defaulting from the env", async () => {
-    const { pi, headsUp } = await setup();
-    expect(headsUp.where).toBe("any");
-    headsUp.setOn(true, "sidebar");
-    expect(pi.entries.at(-1)).toMatchObject({ customType: HEADSUP_ENTRY, data: { on: true, where: "sidebar" } });
-    headsUp.restore([{ type: "custom", customType: HEADSUP_ENTRY, data: { version: 1, on: true, at: 1 } }], false);
-    expect(headsUp.where).toBe("any");
-    expect(headsUpWhereDefault({ PI_SIDEBAR_HEADSUP: "sidebar" })).toBe("sidebar");
+  it("treats the old sidebar-only setting as on", () => {
     expect(headsUpDefault({ PI_SIDEBAR_HEADSUP: "sidebar" })).toBe(true);
-    expect(headsUpChange("sidebar")).toEqual({ on: true, where: "sidebar" });
+    expect(headsUpChange("sidebar")).toBeUndefined();
+    expect(headsUpChange("on")).toEqual({ on: true });
     expect(headsUpChange("off")).toEqual({ on: false });
-  });
-
-  it("gives up a showing note to Sidebar, but not a dismissed one", async () => {
-    const { headsUp } = await setup();
-    await headsUp.check("turn");
-    expect(headsUp.take()).toMatchObject({ topic: "skipped-tests" });
-    expect(headsUp.note.showing).toBe(false);
-    await headsUp.check("turn");
-    headsUp.handleKey("0", true);
-    await new Promise((r) => setTimeout(r, 0));
-    expect(headsUp.take()).toBeUndefined();
   });
 
   it("checks at main's turn boundaries once a run is long", async () => {

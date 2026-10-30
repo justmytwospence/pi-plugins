@@ -58,7 +58,7 @@ export default function piSidebar(pi: ExtensionAPI) {
     description: "Open or hide Sidebar, a live read-only side chat beside this session (new | quiz | headsup | model | help)",
     getArgumentCompletions: (prefix: string) => {
       const models = sidebar.favorites().flatMap((f) => (f.model ? [`model ${f.model.id}`] : []));
-      return ["new", "quiz", "quiz next", "quiz progress", "quiz off", "headsup", "headsup on", "headsup sidebar", "headsup off", "model", "model same", ...models, "help"]
+      return ["new", "quiz", "quiz next", "quiz progress", "quiz off", "headsup", "headsup on", "headsup off", "model", "model same", ...models, "help"]
         .filter((a) => a.startsWith(prefix.trimStart()))
         .map((value) => ({ value, label: value }));
     },
@@ -69,7 +69,7 @@ export default function piSidebar(pi: ExtensionAPI) {
         const arg = sub.slice("headsup".length).trim();
         const change = headsUpChange(arg);
         if (change) {
-          sidebar.headsUp.setOn(change.on, change.where);
+          sidebar.headsUp.setOn(change.on);
           ctx.ui.notify(headsUpChanged(change), "info");
         } else if (arg === "") ctx.ui.notify(sidebar.headsUp.summary(), "info");
         else ctx.ui.notify(`Unknown /sidebar headsup argument "${arg}".\n${HEADSUP_HELP}`, "warning");

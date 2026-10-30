@@ -87,14 +87,14 @@ Quiz mode is a voluntary tutor for main's work. It never blocks main or git.
 
 ## Heads-up mode
 
-During main's longer runs, heads-up mode occasionally checks for one thing you should know but might have missed: an unstated tradeoff, a result that looks off, or a risk. When Sidebar is open, the note becomes part of its thread, after any answer in progress. Ask about it there, or type `/known` if you knew it. When Sidebar is closed, the note appears above main's editor, and opening Sidebar moves it into Sidebar's thread. With notes set to show only in Sidebar, a note found while Sidebar is closed goes straight into its thread and waits there. The example below is an illustration:
+During main's longer runs, heads-up mode occasionally checks for one thing you should know but might have missed: an unstated tradeoff, a result that looks off, or a risk. The note always appears above main's editor. Once Sidebar has been started in the session, the full note also becomes part of its thread, after any answer in progress; ask about it there, or type `/known` if you knew it. Heads-up never starts Sidebar by itself, and opening it adds the note showing to its thread. The example below is an illustration:
 
 ```
 ✦ heads up · risk: Main skipped the failing integration tests.
   1: Learn more   2: Knew this already   0: Dismiss
 ```
 
-- **Switch:** on by default. `/sidebar headsup off`, `on` or `sidebar` (notes only in Sidebar) sets it per session (stored in main's session), `/sidebar headsup` shows its cost so far, and `PI_SIDEBAR_HEADSUP` sets the default: `0` off, `sidebar` notes only in Sidebar.
+- **Switch:** on by default. `/sidebar headsup off` or `on` sets it per session (stored in main's session), `/sidebar headsup` shows its cost so far, and `PI_SIDEBAR_HEADSUP=0` starts sessions with it off.
 - **When:** at main's turn boundaries, once a run has 5 replies or has gone on for 2 minutes. Checks are at most 3 minutes apart, with one more at the end of a long run. A check is skipped when main's cache has probably expired.
 - **Answering above the editor:** type the digit on its own into main's empty editor.
   - **Learn more** shows an explanation the check already wrote. From there you can mark it understood, quote it into main's editor (**Ask main**), or ask Sidebar about it.

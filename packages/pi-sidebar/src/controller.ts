@@ -60,7 +60,7 @@ export const DRAFT_TIMEOUT_MS = 10 * 60_000;
 
 export const SIDEBAR_HEADSUP_HELP = [
   "/known          the last heads-up note was something you knew: it is not raised again",
-  "/headsup        heads-up mode's state and cost (on | sidebar | off)",
+  "/headsup        heads-up mode's state and cost (on | off)",
   "/post           publish the last share note's post on Bluesky (after a confirm); /post edit to change it first, /post <text> to publish that",
   "/draft          write a blog draft from the last share note (/draft outline for a section outline)",
 ].join("\n");
@@ -94,6 +94,8 @@ export class SidebarController {
   private resolvedChoice: { id: string; at: number; choice: ModelChoice } | undefined;
   /** Heads-up notes waiting for Sidebar to finish its answer. */
   private pendingNotes: HeadsUpNote[] = [];
+  /** Notes already put in Sidebar's thread, so opening Sidebar does not add one twice. */
+  private readonly delivered = new WeakSet<HeadsUpNote>();
   private flushTimer: ReturnType<typeof setTimeout> | undefined;
   private tui: FocusTui | undefined;
   private theme: Theme | undefined;
@@ -125,7 +127,7 @@ export class SidebarController {
     });
     this.main.onChange(() => this.render());
     this.headsUp = new HeadsUp(pi, this.main, {
-      deliver: (note, onlySidebar) => this.deliverNote(note, onlySidebar),
+      deliver: (note) => this.deliverNote(note),
       askSidebar: (text, ctx) => {
         this.openOrFocus(ctx);
         if (!this.isOpen) return false;
@@ -303,9 +305,12 @@ export class SidebarController {
     if (!this.isOpen) this.pi.events?.emit?.(SIDE_PANEL, { id: SIDE_PANEL_ID, open: true });
     if (!this.layout!.mount()) return false;
     this.startTicker();
-    // A note showing above main's editor moves into Sidebar's thread.
-    const shown = this.headsUp.take();
-    if (shown) this.pendingNotes.push(shown);
+    // A note showing above main's editor also goes into Sidebar's thread (it stays above the editor).
+    const shown = this.headsUp.note.phase === "dismissed" ? undefined : this.headsUp.note.note;
+    if (shown && !this.delivered.has(shown)) {
+      this.delivered.add(shown);
+      this.pendingNotes.push(shown);
+    }
     this.flushNotes();
     return true;
   }
@@ -615,16 +620,20 @@ export class SidebarController {
     if (wasOpen && ctx && this.open(ctx) && hadFocus) this.focusSidebar();
   }
 
+  /** Sidebar has been used in this session: it was opened, or its thread already has messages. */
+  private get started(): boolean {
+    return !!this.panel || this.agent.messages.length > 0;
+  }
+
   /**
-   * A heads-up note into Sidebar's thread, while Sidebar is open (or always, with `onlySidebar`). While
-   * it answers, the note waits for the answer to end. False when Sidebar is closed and the note may go
-   * above main's editor instead.
+   * A heads-up note into Sidebar's thread, only once Sidebar has been started (a note never starts
+   * it). While it answers, the note waits for the answer to end. Main shows the note either way.
    */
-  private deliverNote(note: HeadsUpNote, onlySidebar = false): boolean {
-    if (!this.isOpen && !onlySidebar) return false;
+  private deliverNote(note: HeadsUpNote): void {
+    if (!this.started) return;
+    this.delivered.add(note);
     this.pendingNotes.push(note);
     this.flushNotes();
-    return true;
   }
 
   private flushNotes(): void {
@@ -789,10 +798,10 @@ export class SidebarController {
     const sub = arg.trim().toLowerCase();
     const change = headsUpChange(sub);
     if (change) {
-      this.headsUp.setOn(change.on, change.where);
+      this.headsUp.setOn(change.on);
       this.panel?.notice({ kind: "info", text: headsUpChanged(change) });
     } else if (sub === "") this.noteLines(this.headsUp.summary().split("\n"));
-    else this.panel?.notice({ kind: "warning", text: `Unknown /headsup argument "${sub}": /headsup, /headsup on, /headsup sidebar, /headsup off.` });
+    else this.panel?.notice({ kind: "warning", text: `Unknown /headsup argument "${sub}": /headsup, /headsup on, /headsup off.` });
   }
 
   private async known(): Promise<void> {

@@ -647,29 +647,42 @@ describe("quiz mode", () => {
 
 describe("heads-up notes and Sidebar", () => {
   const NOTE = { topic: "t", kind: "risk" as const, text: "Careful.", detail: "Because." };
-  const deliver = (controller: SidebarController, onlySidebar: boolean) =>
-    (controller as unknown as { deliverNote(note: unknown, only: boolean): boolean }).deliverNote(NOTE, onlySidebar);
+  const deliver = (controller: SidebarController) =>
+    (controller as unknown as { deliverNote(note: unknown): void }).deliverNote(NOTE);
 
-  it("move a note showing above main's editor into Sidebar when it opens", () => {
+  it("keep a note showing above main's editor when Sidebar opens, and add it to the thread once", () => {
     const { controller, ctx } = setup();
     controller.main.bind(ctx as never);
     (controller.headsUp as any).show(NOTE, ctx);
     expect(controller.headsUp.note.showing).toBe(true);
     controller.toggle(ctx as never);
-    expect(controller.headsUp.note.showing).toBe(false);
+    expect(controller.headsUp.note.showing).toBe(true);
     expect(controller.agent.messages.at(-1)).toMatchObject({ role: "assistant" });
     expect(JSON.stringify(controller.agent.messages.at(-1))).toContain("Careful.");
+    const count = controller.agent.messages.length;
+    controller.toggle(ctx as never);
+    controller.toggle(ctx as never);
+    expect(controller.agent.messages).toHaveLength(count);
   });
 
-  it("go above main's editor while Sidebar is closed, unless notes show only in Sidebar", () => {
+  it("never start Sidebar's thread for a note", () => {
     const { controller, ctx } = setup();
     controller.main.bind(ctx as never);
-    expect(deliver(controller, false)).toBe(false);
+    deliver(controller);
     expect(controller.agent.messages).toHaveLength(0);
-    expect(deliver(controller, true)).toBe(true);
+    expect((controller as any).panel).toBeUndefined();
+  });
+
+  it("add a note to the thread once Sidebar has been started, even while it is closed", () => {
+    const { controller, ctx } = setup();
+    controller.main.bind(ctx as never);
+    controller.toggle(ctx as never);
+    controller.toggle(ctx as never);
+    expect(controller.isOpen).toBe(false);
+    deliver(controller);
     expect(JSON.stringify(controller.agent.messages)).toContain("Careful.");
     controller.toggle(ctx as never);
-    expect(panelOf(controller).chat.empty).toBe(false); // the panel built on open shows the thread, note included
+    expect(panelOf(controller).chat.empty).toBe(false);
   });
 });
 
