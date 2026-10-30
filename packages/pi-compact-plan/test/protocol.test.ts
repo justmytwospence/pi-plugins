@@ -38,6 +38,22 @@ describe("prompts", () => {
     expect(draftPrompt("  ")).toContain("infer the most likely next step");
   });
 
+  it("prohibits questions in automatic mode while retaining the goal and draft structure", () => {
+    const prompt = draftPrompt("ship it\nthen verify", true);
+    expect(prompt).toContain("ship it\nthen verify");
+    expect(prompt).toContain('{"questions": [], "draft": "..."}');
+    expect(prompt).toContain("questions: must be []");
+    expect(prompt).toContain("No questions will be asked");
+    expect(prompt).toContain("make reasonable assumptions from the session context");
+    for (const heading of ["Next task", "Preserve verbatim", "Preserve briefly", "Drop"]) {
+      expect(prompt).toContain(`**${heading}:**`);
+    }
+    expect(prompt).toContain("Be specific to this session, never generic");
+    expect(prompt).not.toContain("If you ask questions");
+    expect(draftPrompt("ship it")).toContain(`questions: 0 to ${MAX_QUESTIONS}`);
+    expect(draftPrompt("ship it")).toContain("If you ask questions, still write your best draft.");
+  });
+
   it("lists the answers and their notes", () => {
     expect(refinePrompt([{ question: "Keep A?", answer: "Drop it", note: "but keep its test" }])).toContain("Q: Keep A?\nA: Drop it\nNote: but keep its test");
   });

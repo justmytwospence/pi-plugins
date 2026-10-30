@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import piCompactPlan, { APPROVE, CANCEL, CHANGE, COMMAND, CONTINUE, CONTINUE_PROMPT, EDIT, messagesSince, SKIP, WRITE_OWN } from "../src/index.ts";
+import { describe, expect, it, vi } from "vitest";
+import piCompactPlan, { APPROVE, CANCEL, CHANGE, COMMAND, CONTINUE, CONTINUE_PROMPT, EDIT, messagesSince, PROMPT_COMMAND, SKIP, WRITE_OWN } from "../src/index.ts";
 import { ENTRY, OUTCOME_ENTRY } from "../src/view.ts";
 
 const SYSTEM = "You are pi, a coding agent.";
@@ -90,11 +90,143 @@ function setup(options: { replies: string[]; ui?: Partial<Record<string, any>>; 
   };
   const mainPayload = { model: model.id, system: [{ type: "text", text: SYSTEM }], tools: [{ name: "bash" }], messages: [{ role: "user", content: [{ type: "text", text: "fix the bug" }] }] };
   const sendMain = () => handlers.get("before_provider_request")?.forEach((h) => h({ payload: mainPayload }, ctx));
-  const run = (args: string) => commands.get(COMMAND).handler(args, ctx);
-  return { run, sendMain, requests, notes, compacts, handlers, ctx, entries, pi, sent, getEditor: () => editorText };
+  const run = (args: string, command = COMMAND) => commands.get(command).handler(args, ctx);
+  return { run, commands, sendMain, requests, notes, compacts, handlers, ctx, entries, pi, sent, getEditor: () => editorText };
 }
 
 const json = (draft: string, questions: unknown[] = []) => JSON.stringify({ questions, draft });
+
+describe("/compact-prompt", () => {
+  it("registers both commands and continues with the exact trimmed multiline prompt", async () => {
+    const t = setup({ replies: [json("Focus")] });
+    expect([...t.commands.keys()]).toEqual([COMMAND, PROMPT_COMMAND]);
+    await t.run("  ship it\n\n  keep this indentation  \nnext  ", PROMPT_COMMAND);
+    expect(t.requests).toHaveLength(1);
+    expect(t.compacts[0].customInstructions).toBe("Focus");
+    expect(t.sent).toEqual(["ship it\n\n  keep this indentation  \nnext"]);
+    expect(t.getEditor()).toBe("");
+    expect(t.entries.map((e) => e.customType)).toEqual([ENTRY, OUTCOME_ENTRY]);
+    expect(t.entries[0]!.data).toMatchObject({ goal: t.sent[0], draft: "Focus" });
+    expect(t.entries[1]!.data).toMatchObject({ status: "compacted", continued: true, draft: "Focus", cached: 99, tokens: 10000 });
+  });
+
+  it("ignores returned questions without opening any dialogs or asking the service", async () => {
+    const dialog = vi.fn(() => { throw new Error("No dialogs allowed"); });
+    const t = setup({
+      replies: [json("D", [{ question: "Keep A?", options: ["Keep", "Drop"] }])],
+      ui: { input: dialog, editor: dialog, select: dialog, custom: dialog },
+    });
+    const service = vi.fn();
+    t.pi.events.emit = (channel: string, data: any) => {
+      if (channel === "pi-plugins.ask-user-question.v1") data.ask = service;
+    };
+    await t.run("next", PROMPT_COMMAND);
+    expect(dialog).not.toHaveBeenCalled();
+    expect(service).not.toHaveBeenCalled();
+    expect(t.requests).toHaveLength(1);
+    expect(t.sent).toEqual(["next"]);
+  });
+
+  it("rejects blank input before waiting for idle or drafting", async () => {
+    const t = setup({ replies: [] });
+    t.ctx.waitForIdle = vi.fn();
+    t.ctx.ui.input = vi.fn();
+    await t.run(" \n\t ", PROMPT_COMMAND);
+    expect(t.notes).toEqual([["Usage: /compact-prompt <prompt>", "error"]]);
+    expect(t.ctx.waitForIdle).not.toHaveBeenCalled();
+    expect(t.ctx.ui.input).not.toHaveBeenCalled();
+    expect(t.requests).toHaveLength(0);
+    expect(t.entries).toHaveLength(0);
+    expect(t.compacts).toHaveLength(0);
+    expect(t.sent).toEqual([]);
+  });
+
+  it("waits for idle before drafting and retains the UI requirement", async () => {
+    const t = setup({ replies: [json("D")] });
+    t.ctx.waitForIdle = async () => expect(t.requests).toHaveLength(0);
+    t.ctx.hasUI = false;
+    await t.run("next", PROMPT_COMMAND);
+    expect(t.requests).toHaveLength(0);
+    t.ctx.hasUI = true;
+    await t.run("next", PROMPT_COMMAND);
+    expect(t.sent).toEqual(["next"]);
+  });
+
+  it("reuses the captured request and falls back when the splice is refused", async () => {
+    for (const failSplice of [false, true]) {
+      const t = setup({ replies: [json("D")], failSplice });
+      t.sendMain();
+      await t.run("next", PROMPT_COMMAND);
+      expect(t.requests).toHaveLength(failSplice ? 2 : 1);
+      expect(t.requests[0]!.options.onPayload).toBeTypeOf("function");
+      if (failSplice) expect(t.requests[1]!.options.onPayload).toBeUndefined();
+      else {
+        expect(t.requests[0]!.payload.system[0].text).toBe(SYSTEM);
+        expect(t.requests[0]!.payload.messages.at(-1).content[0].text).toContain('"questions": []');
+      }
+      expect(t.sent).toEqual(["next"]);
+    }
+  });
+
+  it("uses a plain request without a captured request", async () => {
+    const t = setup({ replies: [json("D")] });
+    await t.run("next", PROMPT_COMMAND);
+    expect(t.requests[0]!.options.onPayload).toBeUndefined();
+    expect(t.requests[0]!.context.systemPrompt).toBe(SYSTEM);
+    expect(t.requests[0]!.context.messages).toHaveLength(3);
+  });
+
+  it("reports drafting failure without compacting or continuing", async () => {
+    for (const fails of ["empty", "request"]) {
+      const t = setup({ replies: [""] });
+      if (fails === "request") t.ctx.modelRegistry.complete = async () => { throw new Error("offline"); };
+      await t.run("next", PROMPT_COMMAND);
+      expect(t.notes.at(-1)).toEqual([`compact-prompt: drafting failed (${fails === "empty" ? "the model sent an empty reply" : "offline"})`, "error"]);
+      expect(t.compacts).toHaveLength(0);
+      expect(t.entries).toHaveLength(0);
+      expect(t.sent).toEqual([]);
+    }
+  });
+
+  it("stops drafting with Escape and clears the working widget", async () => {
+    const widget = vi.fn();
+    let input: (data: string) => unknown = () => undefined;
+    const unsubscribe = vi.fn();
+    const t = setup({ replies: [], ui: { setWidget: widget, onTerminalInput: (fn: typeof input) => { input = fn; return unsubscribe; } } });
+    t.ctx.modelRegistry.complete = async (_model: any, _context: any, options: any) => {
+      expect(input("\u001b")).toEqual({ consume: true });
+      expect(options.signal.aborted).toBe(true);
+      return reply("D");
+    };
+    await t.run("next", PROMPT_COMMAND);
+    expect(t.notes.at(-1)).toEqual(["compact-prompt: stopped", "info"]);
+    expect(unsubscribe).toHaveBeenCalledOnce();
+    expect(widget.mock.calls.at(-1)).toEqual([COMMAND, undefined]);
+    expect(t.compacts).toHaveLength(0);
+    expect(t.sent).toEqual([]);
+  });
+
+  it("does not continue on compaction failure, including a late success callback", async () => {
+    const t = setup({ replies: [json("D")] });
+    t.ctx.compact = (o: any) => { o.onError(new Error("boom")); o.onComplete(); };
+    await t.run("next", PROMPT_COMMAND);
+    expect(t.entries.at(-1)!.data).toMatchObject({ status: "failed", error: "boom", continued: true });
+    expect(t.sent).toEqual([]);
+  });
+
+  it("waits for deferred compaction success and continues only once", async () => {
+    const t = setup({ replies: [json("D")] });
+    let callbacks: any;
+    t.ctx.compact = (o: any) => { callbacks = o; };
+    await t.run("next", PROMPT_COMMAND);
+    expect(t.sent).toEqual([]);
+    expect(t.entries.map((e) => e.customType)).toEqual([ENTRY]);
+    callbacks.onComplete();
+    callbacks.onComplete();
+    expect(t.sent).toEqual(["next"]);
+    expect(t.entries.map((e) => e.customType)).toEqual([ENTRY, OUTCOME_ENTRY]);
+  });
+});
 
 describe("/compact-plan", () => {
   it("drafts on the session's last request and compacts with the approved focus", async () => {

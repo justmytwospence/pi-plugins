@@ -32,7 +32,7 @@ export interface Answer {
 const TAG = "compact-plan";
 
 /** The first request: the user's goal, and what to send back. */
-export function draftPrompt(goal: string): string {
+export function draftPrompt(goal: string, automatic = false): string {
   const stated = goal.trim() || "(not stated: infer the most likely next step from the conversation, and say in the draft that you inferred it)";
   return `<${TAG}>
 The user is about to run /compact on this session. Compaction replaces the conversation so far with a summary written by another request; you are helping write the focus instructions that steer that summary. Do not call tools and do not continue the work.
@@ -40,9 +40,9 @@ The user is about to run /compact on this session. Compaction replaces the conve
 What the user will do after compacting: ${stated}
 
 Reply with only a JSON object, no code fence and no other text:
-{"questions": [{"question": "...", "header": "...", "options": [{"label": "...", "description": "..."}]}], "draft": "..."}
+${automatic ? '{"questions": [], "draft": "..."}' : '{"questions": [{"question": "...", "header": "...", "options": [{"label": "...", "description": "..."}]}], "draft": "..."}'}
 
-questions: 0 to ${MAX_QUESTIONS}, asked only when the answer would change what the summary must keep (for example whether an abandoned approach still matters, or whether some side issue is in scope). Usually []. Each has a header of 12 characters or fewer, and 2 to ${MAX_OPTIONS} options with a short label (1-5 words) and a one-line description of what choosing it means for the summary. The user can also answer in their own words or add a note to an option, so never add an "Other" option.
+${automatic ? 'questions: must be []. No questions will be asked. Do not ask for clarification; make reasonable assumptions from the session context.' : `questions: 0 to ${MAX_QUESTIONS}, asked only when the answer would change what the summary must keep (for example whether an abandoned approach still matters, or whether some side issue is in scope). Usually []. Each has a header of 12 characters or fewer, and 2 to ${MAX_OPTIONS} options with a short label (1-5 words) and a one-line description of what choosing it means for the summary. The user can also answer in their own words or add a note to an option, so never add an "Other" option.`}
 
 draft: the focus instructions, a Markdown list in this shape:
 - **Next task:** <the goal, sharpened with specifics from this session>
@@ -50,7 +50,7 @@ draft: the focus instructions, a Markdown list in this shape:
 - **Preserve briefly:** <background that is still relevant>
 - **Drop:** <dead ends, finished subtasks, noisy tool output>
 Nested items are fine where a part has several points.
-Be specific to this session, never generic. Under 250 words. If you ask questions, still write your best draft.
+Be specific to this session, never generic. Under 250 words.${automatic ? "" : " If you ask questions, still write your best draft."}
 </${TAG}>`;
 }
 

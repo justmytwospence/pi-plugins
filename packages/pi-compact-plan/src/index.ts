@@ -10,7 +10,7 @@
 // that is not possible (another API, no request since /tree or a compaction) it sends the session's
 // context as an ordinary request. Escape stops a request in flight.
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { convertToLlm, sessionEntryToContextMessages } from "@earendil-works/pi-coding-agent";
 import { matchesKey } from "@earendil-works/pi-tui";
 import { isAnswer, requestAsk, type ServiceQuestion } from "./ask-service.ts";
@@ -21,6 +21,7 @@ import { askText } from "./text-input.ts";
 import { type DraftEntry, type DraftState, DraftView, ENTRY, OUTCOME_ENTRY, type OutcomeEntry } from "./view.ts";
 
 export const COMMAND = "compact-plan";
+export const PROMPT_COMMAND = "compact-prompt";
 export const WIDGET = "compact-plan";
 export const WRITE_OWN = "Type your own answer";
 export const SKIP = "Skip this question";
@@ -310,136 +311,149 @@ export default function piCompactPlan(pi: ExtensionAPI) {
     return { action: "cancel" };
   }
 
-  pi.registerCommand(COMMAND, {
-    description: "Plan a compaction: say what comes next, answer any question, then approve the focus it drafts",
-    handler: async (args, ctx) => {
-      if (!ctx.hasUI) return;
-      await ctx.waitForIdle();
-      let goal = (args ?? "").trim();
-      if (!goal) {
-        const typed = await waiting("What will you do after compacting?", () =>
-          askText(pi, ctx, "What will you do after compacting?", {
-            hint: "enter submit (empty: let the session infer it) · esc then esc (or :q) cancel",
-            placeholder: "leave empty to let the session infer it",
-          }),
-        );
-        if (typed === undefined) return;
-        goal = typed.trim();
-      }
+  async function handle(args: string, ctx: ExtensionCommandContext, automatic = false) {
+    if (!ctx.hasUI) return;
+    const command = automatic ? PROMPT_COMMAND : COMMAND;
+    let goal = (args ?? "").trim();
+    if (automatic && !goal) {
+      ctx.ui.notify("Usage: /compact-prompt <prompt>", "error");
+      return;
+    }
+    await ctx.waitForIdle();
+    if (!goal) {
+      const typed = await waiting("What will you do after compacting?", () =>
+        askText(pi, ctx, "What will you do after compacting?", {
+          hint: "enter submit (empty: let the session infer it) · esc then esc (or :q) cancel",
+          placeholder: "leave empty to let the session infer it",
+        }),
+      );
+      if (typed === undefined) return;
+      goal = typed.trim();
+    }
 
-      const usage: Usage = { input: 0, cacheRead: 0, cacheWrite: 0 };
-      const ask = async (side: AgentMessage[], label: string) => {
-        const result = await working(ctx, label, (signal) => request(ctx, side, signal));
-        usage.input += result.usage.input;
-        usage.cacheRead += result.usage.cacheRead;
-        usage.cacheWrite += result.usage.cacheWrite;
-        return result.reply;
-      };
-      const failure = (error: unknown) => {
-        if (error instanceof Cancelled) ctx.ui.notify(`compact-plan: ${error.message === "stopped" ? "stopped" : "drafting timed out"}`, "info");
-        else ctx.ui.notify(`compact-plan: drafting failed (${error instanceof Error ? error.message : String(error)})`, "error");
-      };
+    const usage: Usage = { input: 0, cacheRead: 0, cacheWrite: 0 };
+    const ask = async (side: AgentMessage[], label: string) => {
+      const result = await working(ctx, label, (signal) => request(ctx, side, signal));
+      usage.input += result.usage.input;
+      usage.cacheRead += result.usage.cacheRead;
+      usage.cacheWrite += result.usage.cacheWrite;
+      return result.reply;
+    };
+    const failure = (error: unknown) => {
+      if (error instanceof Cancelled) ctx.ui.notify(`${command}: ${error.message === "stopped" ? "stopped" : "drafting timed out"}`, "info");
+      else ctx.ui.notify(`${command}: drafting failed (${error instanceof Error ? error.message : String(error)})`, "error");
+    };
 
-      // The side conversation so far; each revision continues it.
-      const side: AgentMessage[] = [userText(draftPrompt(goal))];
-      let plan: Plan;
-      try {
-        const first = await ask(side, "Drafting the compaction focus…");
-        side.push(first as AgentMessage);
-        const parsed = parsePlan(replyText(first));
-        if (!parsed) throw new Error("the model sent an empty reply");
-        plan = parsed;
-        if (plan.questions.length) {
-          const answers = await askQuestions(ctx, plan);
-          if (answers === undefined) {
-            ctx.ui.notify("Compaction cancelled", "info");
-            return;
-          }
-          if (answers.length) {
-            side.push(userText(refinePrompt(answers)));
-            const second = await ask(side, "Revising the draft with your answers…");
-            side.push(second as AgentMessage);
-            plan = parsePlan(replyText(second)) ?? plan;
-          }
+    // The side conversation so far; each revision continues it.
+    const side: AgentMessage[] = [userText(draftPrompt(goal, automatic))];
+    let plan: Plan;
+    try {
+      const first = await ask(side, "Drafting the compaction focus…");
+      side.push(first as AgentMessage);
+      const parsed = parsePlan(replyText(first));
+      if (!parsed) throw new Error("the model sent an empty reply");
+      plan = parsed;
+      if (!automatic && plan.questions.length) {
+        const answers = await askQuestions(ctx, plan);
+        if (answers === undefined) {
+          ctx.ui.notify("Compaction cancelled", "info");
+          return;
         }
-      } catch (error) {
-        failure(error);
-        return;
+        if (answers.length) {
+          side.push(userText(refinePrompt(answers)));
+          const second = await ask(side, "Revising the draft with your answers…");
+          side.push(second as AgentMessage);
+          plan = parsePlan(replyText(second)) ?? plan;
+        }
       }
+    } catch (error) {
+      failure(error);
+      return;
+    }
 
-      const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-      const state: DraftState = { goal, draft: plan.draft, status: "pending" };
-      states.set(id, state);
-      pi.appendEntry<DraftEntry>(ENTRY, { id, goal, draft: plan.draft });
-      const record = () => pi.appendEntry<OutcomeEntry>(OUTCOME_ENTRY, { id, ...state });
+    const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const state: DraftState = { goal, draft: plan.draft, status: "pending", ...(automatic ? { continued: true } : {}) };
+    states.set(id, state);
+    pi.appendEntry<DraftEntry>(ENTRY, { id, goal, draft: plan.draft });
+    const record = () => pi.appendEntry<OutcomeEntry>(OUTCOME_ENTRY, { id, ...state });
 
-      for (;;) {
-        state.status = "pending";
-        const review = await reviewChoice(ctx);
-        if (review.action === "none") continue;
-        if ((review.action === "approve" || review.action === "continue" || review.action === "edit") && review.note) {
-          state.draft = `${state.draft}\n- **Also:** ${review.note.replace(/\s*\n\s*/gu, " ")}`;
+    while (!automatic) {
+      state.status = "pending";
+      const review = await reviewChoice(ctx);
+      if (review.action === "none") continue;
+      if ((review.action === "approve" || review.action === "continue" || review.action === "edit") && review.note) {
+        state.draft = `${state.draft}\n- **Also:** ${review.note.replace(/\s*\n\s*/gu, " ")}`;
+        state.edited = true;
+      }
+      if (review.action === "approve") break;
+      if (review.action === "continue") {
+        state.continued = true;
+        break;
+      }
+      if (review.action === "edit") {
+        const edited = await waiting("Edit the compaction focus", () =>
+          askText(pi, ctx, "Edit the compaction focus", { initial: state.draft, hint: "enter save · esc in normal mode (or :q) discard changes" }),
+        );
+        if (edited?.trim() && edited.trim() !== state.draft) {
+          state.draft = edited.trim();
           state.edited = true;
         }
-        if (review.action === "approve") break;
-        if (review.action === "continue") {
-          state.continued = true;
-          break;
-        }
-        if (review.action === "edit") {
-          const edited = await waiting("Edit the compaction focus", () =>
-            askText(pi, ctx, "Edit the compaction focus", { initial: state.draft, hint: "enter save · esc in normal mode (or :q) discard changes" }),
-          );
-          if (edited?.trim() && edited.trim() !== state.draft) {
-            state.draft = edited.trim();
-            state.edited = true;
-          }
-          continue;
-        }
-        if (review.action === "change") {
-          const feedback = review.feedback;
-          state.status = "drafting";
-          try {
-            side.push(userText(revisePrompt(state.draft, feedback)));
-            const revised = await ask(side, "Revising the draft…");
-            side.push(revised as AgentMessage);
-            const next = parsePlan(replyText(revised));
-            if (!next) throw new Error("the model sent an empty reply");
-            state.draft = next.draft;
-            state.edited = false;
-          } catch (error) {
-            // Keep the conversation well formed: drop the unanswered request (and an empty reply).
-            while (side.length > 1 && side.at(-1)?.role !== "user") side.pop();
-            if (side.length > 1) side.pop();
-            failure(error);
-          }
-          continue;
-        }
-        // The card's status line says so; no notification on top.
-        state.status = "cancelled";
-        record();
-        return;
+        continue;
       }
+      if (review.action === "change") {
+        const feedback = review.feedback;
+        state.status = "drafting";
+        try {
+          side.push(userText(revisePrompt(state.draft, feedback)));
+          const revised = await ask(side, "Revising the draft…");
+          side.push(revised as AgentMessage);
+          const next = parsePlan(replyText(revised));
+          if (!next) throw new Error("the model sent an empty reply");
+          state.draft = next.draft;
+          state.edited = false;
+        } catch (error) {
+          // Keep the conversation well formed: drop the unanswered request (and an empty reply).
+          while (side.length > 1 && side.at(-1)?.role !== "user") side.pop();
+          if (side.length > 1) side.pop();
+          failure(error);
+        }
+        continue;
+      }
+      // The card's status line says so; no notification on top.
+      state.status = "cancelled";
+      record();
+      return;
+    }
 
-      const total = usage.input + usage.cacheRead + usage.cacheWrite;
-      state.tokens = total;
-      state.cached = total ? Math.round((usage.cacheRead / total) * 100) : 0;
-      state.status = "compacting";
-      ctx.compact({
-        customInstructions: state.draft,
-        onComplete: () => {
-          state.status = "compacted";
-          record();
-          if (state.continued) pi.sendUserMessage(goal || CONTINUE_PROMPT);
-          else if (goal && !ctx.ui.getEditorText().trim()) ctx.ui.setEditorText(goal);
-        },
-        onError: (error) => {
-          state.status = "failed";
-          state.error = error.message;
-          // Pi reports the error itself; the draft's status line records it.
-          record();
-        },
-      });
-    },
+    const total = usage.input + usage.cacheRead + usage.cacheWrite;
+    state.tokens = total;
+    state.cached = total ? Math.round((usage.cacheRead / total) * 100) : 0;
+    state.status = "compacting";
+    ctx.compact({
+      customInstructions: state.draft,
+      onComplete: () => {
+        if (state.status !== "compacting") return;
+        state.status = "compacted";
+        record();
+        if (state.continued) pi.sendUserMessage(goal || CONTINUE_PROMPT);
+        else if (goal && !ctx.ui.getEditorText().trim()) ctx.ui.setEditorText(goal);
+      },
+      onError: (error) => {
+        if (state.status !== "compacting") return;
+        state.status = "failed";
+        state.error = error.message;
+        // Pi reports the error itself; the draft's status line records it.
+        record();
+      },
+    });
+  }
+
+  pi.registerCommand(COMMAND, {
+    description: "Plan a compaction: say what comes next, answer any question, then approve the focus it drafts",
+    handler: (args, ctx) => handle(args, ctx),
+  });
+  pi.registerCommand(PROMPT_COMMAND, {
+    description: "Draft a compaction focus, compact, then continue with the supplied prompt without dialogs",
+    handler: (args, ctx) => handle(args, ctx, true),
   });
 }
