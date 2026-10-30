@@ -4,9 +4,25 @@
 
 Settings live in `<getAgentDir()>/pi-plan-mode.json` (normally `~/.pi/agent/pi-plan-mode.json`).
 The file may be a symlink; saves write through it, preserve unknown fields, and publish atomically.
-The Settings step of `/plan` edits planners, efforts, subagent models, the time limit, Jev tool
-selection, rendered plans, the default implementation context, the export path, and the shortcut;
+The Settings step of `/planners` edits planners, efforts, subagent models, the time limit, Jev tool
+selection, rendered plans, completion review, the default implementation context, the export path, and the shortcut;
 everything else is edited in the file. An invalid file is ignored (defaults apply) and never overwritten.
+
+### Completion review
+
+`completionReview` (boolean, default `true`) enables a targeted review by the on-call planner when
+`finish_plan` is called. Toggle it with **Completion review** in `/planners` Settings. The review is
+an additional model turn, with its cost shown separately from implementation consultations. If disabled,
+the completion card remains but the review is skipped; if there is no planner on call, no review is made.
+
+The colored **Implementation complete** card separates the implementer's required `report`,
+`verification` and `concerns` fields from the planner's assessment and consultation count.
+Verification, outstanding issues, verdict and count stay visible when collapsed; Ctrl+O expands
+only the longer implementation and assessment narratives. The reviewer inspects relevant files, working-tree changes and commit
+history, distinguishing inspected evidence from reported checks. It is instructed not to run tests or
+mutate files; its tool policy is not a sandbox. Failed or unavailable reviews are reported as such, not
+as success. The assessment is informational, not user approval or an automatic implementation of findings;
+`finish_plan` still ends exec mode.
 
 ### Rendered plans
 

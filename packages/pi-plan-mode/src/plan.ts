@@ -668,6 +668,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
 
   // Exec mode: following an approved plan, with the planner on call and finish_plan.
   const exec = registerExec(pi, {
+    completionReview: () => settings.completionReview !== false,
     // As capable as a /planners planner given every tool: toolsets (web, MCP), grants, subagents.
     consultantAccess: (ctx, planFile, spec) => {
       const toolsets = settings.plannerToolsets ?? {};
@@ -1472,6 +1473,18 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
             description: renderBlock
               ? `Show each finished plan as a styled page in its lane (drawn by terminal-browser). Unavailable here: ${renderBlock}.`
               : "Once a plan is in, its lane shows it as a styled page rendered by terminal-browser (diagrams included) instead of terminal text. \u2191/\u2193, PgUp/PgDn, Home/End and the wheel scroll it; \u2190/\u2192 still switch to the chat.",
+          },
+          {
+            id: "completion-review",
+            label: "Completion review",
+            value: () => (settings.completionReview === false ? "off" : "on"),
+            cycle: () => {
+              const next = settings.completionReview === false;
+              settings = { ...settings, completionReview: next };
+              saveSettings({ completionReview: next });
+            },
+            description:
+              "Ask the planner on call for a targeted completion assessment (an extra model turn, cost shown separately). It inspects evidence without running tests; this is not user approval. No planner on call means no review.",
           },
           {
             id: "context",

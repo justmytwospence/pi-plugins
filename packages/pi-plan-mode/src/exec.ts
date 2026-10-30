@@ -1,8 +1,8 @@
 // Exec mode: a mode of your main chat while an approved plan is being implemented. The footer shows
 // it where the permission mode is (status `plan-exec`; the permission mode underneath still decides
 // what runs), the planner that wrote the plan can stay on call through ask_planner, edits to files
-// the plan does not list get a note once, and finish_plan ends it with the user's acceptance or the
-// planner's review, both shown in the transcript. It is entered only by approving a plan (plan.ts
+// the plan does not list get a note once, and finish_plan ends it with a structured completion report
+// and an optional informational planner assessment, both shown in the transcript. It is entered only by approving a plan (plan.ts
 // calls `begin`; no key cycles to it) and ended by finish_plan, or replaced by approving a newer plan.
 import { execFile } from "node:child_process";
 import { relative, resolve } from "node:path";
@@ -20,10 +20,10 @@ import { type DiffLine, planDiff, planDiffText, renderPlanDiff } from "./plan-di
 import { inPlan, isPlanFile, planPaths, planTitle, readPlan, tildify } from "./plan-file.js";
 import { expandHome } from "./plan-hook.js";
 import { type PlannerAccessConfig, PlannerAgent } from "./planner/agent.js";
-import { CONSULT_WRAP_UP, consultMessage } from "./planner/prompt.js";
+import { CONSULT_WRAP_UP, consultMessage, reviewRequest, reviewVerdict } from "./planner/prompt.js";
 import { type PlannerSessionFactory, plannerSessionDir } from "./planner/session.js";
 import { formatCost } from "./planners.js";
-import { COLLAPSED_LINES, reviewStatusLine, reviewTitle } from "./review-card.js";
+import { COLLAPSED_LINES, type ReviewTone, reviewCard, reviewStatusLine, reviewTitle } from "./review-card.js";
 import type { Usage } from "./scout-process.js";
 
 export const EXEC_ENTRY = "plan-mode:exec";
@@ -57,6 +57,7 @@ export interface ExecHost {
   consultantAccess(ctx: ExtensionContext, planFile: string, spec: ModelSpec): PlannerAccessConfig;
   createSession?: PlannerSessionFactory;
   restoreModel(ctx: ExtensionContext, spec: ModelSpec): Promise<unknown>;
+  completionReview(): boolean;
 }
 
 export interface ExecController {
@@ -84,8 +85,20 @@ interface ChangeSummary {
   git?: string;
 }
 
+type CompletionAssessment =
+  | { state: "reviewed"; planner: string; narrative: string; verdict: "done" | "changes" | "unclear"; costUsd: number }
+  | { state: "disabled" }
+  | { state: "unavailable"; reason: string }
+  | { state: "failed"; reason: string; costUsd?: number };
+
 interface FinishDetails {
   report: string;
+  /** Optional only for completion messages saved before structured reports were introduced. */
+  verification?: string;
+  concerns?: string;
+  assessment?: CompletionAssessment;
+  pending?: boolean;
+  activity?: string;
   planFile: string;
   changes?: ChangeSummary;
   /** Who implemented it, e.g. `Claude Sonnet 5.5`. */
@@ -333,55 +346,165 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
   pi.registerTool({
     name: FINISH_TOOL,
     ...flags,
+    ...{ ccstyleOwnResult: true },
     label: "Finish plan",
     description:
-      "When the approved plan you are implementing is done and its verification passes: report what you did. This ends exec mode.",
+      "Finish implementing the approved plan: report what changed, verification results, and outstanding issues honestly. This ends exec mode even if the informational planner assessment finds changes needed.",
     promptSnippet: "Report an approved plan as done",
     promptGuidelines: [
-      "While implementing an approved plan, call finish_plan once it is done and its Verification passes, with your report.",
+      "When implementation of an approved plan is finished, call finish_plan with report, verification, and concerns. Include failed or unrun checks and remaining work; use concerns: None only when accurate.",
     ],
     parameters: {
       type: "object",
       additionalProperties: false,
-      required: ["report"],
+      required: ["report", "verification", "concerns"],
       properties: {
         report: {
           type: "string",
           minLength: 1,
-          description:
-            "Markdown: what you changed, the verification you ran and its results, and each deviation from the plan with how it was settled.",
+          description: "Markdown: what you changed.",
+        },
+        verification: {
+          type: "string",
+          minLength: 1,
+          description: "Checks and their results, including failures and anything not run.",
+        },
+        concerns: {
+          type: "string",
+          minLength: 1,
+          description: "Deviations, failures, and remaining work. Use None only when accurate.",
         },
       },
     } as never,
     renderCall: (_args, theme) => reviewTitle(theme, "Implementation complete"),
     renderResult: (result, options, theme) => renderFinish(result.details as FinishDetails | undefined, options, theme),
-    async execute(_id, params: unknown, _signal, _onUpdate, ctx) {
+    async execute(_id, params: unknown, signal, onUpdate, ctx) {
       hostCtx = ctx;
       const current = state;
       if (!current?.active) return text(NOT_ACTIVE);
-      const report =
-        typeof (params as { report?: unknown })?.report === "string"
-          ? (params as { report: string }).report.trim()
-          : "";
-      const changes = await summarizeChanges(current, touched, ctx.cwd);
-      const finished = current;
-      end(ctx);
-      const spec = parseModelSpec(finished.restore);
-      const now = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
-      const restored = Boolean(spec && now === finished.implementerModel);
-      if (spec && restored) await host.restoreModel(ctx, spec);
+      const fields = params as Record<string, unknown> | undefined;
+      const field = (key: string) => (typeof fields?.[key] === "string" ? fields[key].trim() : "");
+      const report = field("report");
+      const verification = field("verification");
+      const concerns = field("concerns");
+      if (!report || !verification || !concerns) {
+        return text(
+          "Retry finish_plan with nonempty report (what changed), verification (checks and results, including anything not run), and concerns (deviations, failures, and remaining work; use None only when accurate). Exec mode is still active.",
+        );
+      }
       const details: FinishDetails = {
         report,
-        planFile: finished.planFile,
-        changes,
-        implementer: finished.implementer,
-        ...(restored && finished.planner ? { returnedTo: finished.planner.name } : {}),
-        ...(finished.asks > 0 ? { asks: finished.asks, costUsd: finished.costUsd } : {}),
+        verification,
+        concerns,
+        planFile: current.planFile,
+        changes: await summarizeChanges(current, touched, ctx.cwd),
+        implementer: current.implementer,
+        asks: current.asks,
+        costUsd: current.costUsd,
       };
-      if (finished.returnTo && ctx.hasUI) pendingReturn = { leaf: finished.returnTo, details };
+      let usage: Usage | undefined;
+      try {
+        if (!host.completionReview()) details.assessment = { state: "disabled" };
+        else if (!current.planner) {
+          details.assessment = { state: "unavailable", reason: "No planner is on call." };
+        } else {
+          const planner = consultant(ctx);
+          if (!planner) {
+            details.assessment = { state: "unavailable", reason: "The planner's session is missing or invalid." };
+          } else {
+            const baseline = planner.stats.costUsd;
+            const progress = () => {
+              safely(() =>
+                onUpdate?.({
+                  content: [{ type: "text", text: "Planner reviewing…" }],
+                  details: { ...details, pending: true, activity: planner.stats.lastActivity },
+                } as never),
+              );
+            };
+            const unsubscribe = planner.subscribe(progress);
+            const controller = new AbortController();
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            let interrupted: "cancelled" | "timed out" | undefined;
+            let interrupt: (reason: "cancelled" | "timed out") => void = () => undefined;
+            const stopped = new Promise<undefined>((done) => {
+              interrupt = (reason) => {
+                interrupted = reason;
+                controller.abort();
+                void planner.stop().catch(() => undefined);
+                done(undefined);
+              };
+            });
+            const onAbort = () => interrupt("cancelled");
+            signal?.addEventListener("abort", onAbort, { once: true });
+            try {
+              progress();
+              timer = setTimeout(() => interrupt("timed out"), CONSULT_TIMEOUT_MS);
+              if (signal?.aborted) onAbort();
+              const result = interrupted
+                ? undefined
+                : await Promise.race([
+                    planner.consult(
+                      reviewRequest(report, {
+                        verification,
+                        concerns,
+                        planFile: current.planFile,
+                        changes: changeSummaryText(details.changes),
+                      }),
+                      ctx,
+                      "completion review",
+                      controller.signal,
+                    ),
+                    stopped,
+                  ]);
+              usage = result?.usage;
+              const costUsd = usage?.cost.total ?? Math.max(0, planner.stats.costUsd - baseline);
+              if (interrupted || signal?.aborted) {
+                details.assessment = {
+                  state: "failed",
+                  reason: `Planner review ${interrupted ?? "cancelled"}.`,
+                  costUsd,
+                };
+              } else if (result?.error) {
+                details.assessment = { state: "failed", reason: result.error, costUsd };
+              } else if (!result?.reply.trim()) {
+                details.assessment = { state: "failed", reason: "The planner returned an empty reply.", costUsd };
+              } else {
+                details.assessment = {
+                  state: "reviewed",
+                  planner: current.planner.name,
+                  narrative: result.reply.trim(),
+                  verdict: reviewVerdict(result.reply),
+                  costUsd,
+                };
+              }
+            } catch (error: unknown) {
+              details.assessment = {
+                state: "failed",
+                reason: error instanceof Error ? error.message : String(error),
+                costUsd: Math.max(0, planner.stats.costUsd - baseline),
+              };
+            } finally {
+              clearTimeout(timer);
+              unsubscribe();
+              signal?.removeEventListener("abort", onAbort);
+            }
+          }
+        }
+      } catch (error: unknown) {
+        details.assessment = { state: "failed", reason: error instanceof Error ? error.message : String(error) };
+      } finally {
+        end(ctx);
+      }
+      const spec = parseModelSpec(current.restore);
+      const now = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "";
+      const restored = Boolean(spec && now === current.implementerModel);
+      if (spec && restored) await host.restoreModel(ctx, spec);
+      if (restored && current.planner) details.returnedTo = current.planner.name;
+      if (current.returnTo && ctx.hasUI) pendingReturn = { leaf: current.returnTo, details };
       return {
-        content: [{ type: "text", text: "The implementation is reported and exec mode is over. Stop here." }],
+        content: [{ type: "text", text: `${finishMessageText(details)}\n\nExec mode is over. Stop here.` }],
         details,
+        ...(usage ? { usage } : {}),
         terminate: true,
       } as never;
     },
@@ -392,10 +515,8 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
   let pendingReturn: { leaf: string; details: FinishDetails } | undefined;
   pi.on("agent_settled", (event) => {
     if (!pendingReturn) return;
-    if (event.aborted) {
-      pendingReturn = undefined;
-      return;
-    }
+    // Keep the report available to /plan-back even when review cancellation aborts the turn.
+    if (event.aborted) return;
     pi.sendUserMessage(`/${BACK_COMMAND}`, { expandPromptTemplates: true });
   });
   pi.registerCommand(BACK_COMMAND, {
@@ -434,7 +555,12 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     },
   });
   pi.registerMessageRenderer<FinishDetails>(FINISH_MESSAGE_TYPE, (message, options, theme) =>
-    renderFinish(message.details, { expanded: options.expanded, isPartial: false }, theme),
+    reviewCard(
+      theme,
+      "Implementation complete",
+      renderFinish(message.details, { expanded: options.expanded, isPartial: false }, theme),
+      finishTone(message.details),
+    ),
   );
 
   // Tripwire: a note on the first edit of each file the plan does not list. It never blocks.
@@ -591,36 +717,126 @@ function renderFinish(
   options: { expanded: boolean; isPartial: boolean },
   theme: Theme,
 ) {
-  if (!details?.report) return new Container();
   const container = new Container();
-  if (details.headline) {
-    container.addChild(new Text(theme.fg("dim", theme.bold(`※ ${details.headline}`)), 0, 0));
-    container.addChild(new Spacer(1));
-  }
-  const lines = details.report.split("\n");
-  const folded = !options.expanded && lines.length > COLLAPSED_LINES;
-  const shown = folded ? lines.slice(0, COLLAPSED_LINES).join("\n") : details.report;
-  container.addChild(new PlanMarkdown(shown, getMarkdownTheme(), theme));
-  if (folded) {
-    const more = lines.length - COLLAPSED_LINES;
+  const section = (label: string, value: string, fold = false) => {
+    if (container.children.length > 0) container.addChild(new Spacer(1));
+    container.addChild(reviewTitle(theme, label));
+    const lines = value.split("\n");
+    const folded = fold && !options.expanded && lines.length > COLLAPSED_LINES;
     container.addChild(
-      new Text(theme.fg("dim", `… ${more} more line${more === 1 ? "" : "s"} (ctrl+o to expand)`), 0, 0),
+      new PlanMarkdown(folded ? lines.slice(0, COLLAPSED_LINES).join("\n") : value, getMarkdownTheme(), theme),
     );
+    if (folded) {
+      const more = lines.length - COLLAPSED_LINES;
+      container.addChild(
+        new Text(theme.fg("dim", `… ${more} more line${more === 1 ? "" : "s"} (ctrl+o to expand)`), 0, 0),
+      );
+    }
+  };
+  if (details?.headline) container.addChild(new Text(theme.fg("dim", theme.bold(`※ ${details.headline}`)), 0, 0));
+  section("What changed", details?.report || "Not provided.", true);
+  section("Verification", details?.verification || "Not provided; verification is unknown.");
+  section("Outstanding issues", details?.concerns || "Not provided; outstanding issues are unknown.");
+  section("Planner assessment", assessmentSummary(details));
+  if (details?.assessment?.state === "reviewed") {
+    const narrative = new Container();
+    const lines = details.assessment.narrative.split("\n");
+    const folded = !options.expanded && lines.length > COLLAPSED_LINES;
+    narrative.addChild(
+      new PlanMarkdown(
+        folded ? lines.slice(0, COLLAPSED_LINES).join("\n") : details.assessment.narrative,
+        getMarkdownTheme(),
+        theme,
+      ),
+    );
+    if (folded) {
+      const more = lines.length - COLLAPSED_LINES;
+      narrative.addChild(
+        new Text(theme.fg("dim", `… ${more} more line${more === 1 ? "" : "s"} (ctrl+o to expand)`), 0, 0),
+      );
+    }
+    container.addChild(narrative);
   }
-  for (const part of renderChanges(theme, details.changes)) container.addChild(part);
-  const who = details.implementer
-    ? details.returnedTo && details.returnedTo !== details.implementer
-      ? `${details.implementer} → ${details.returnedTo}`
-      : details.implementer
-    : undefined;
-  const asks =
-    details.asks && details.asks > 0
-      ? `${details.asks} ${details.asks === 1 ? "consultation" : "consultations"} with the planner${details.costUsd !== undefined ? ` · ${formatCost(details.costUsd)}` : ""}`
-      : undefined;
-  const context = [planTitle(details.planFile), who, asks].filter(Boolean).join(" · ");
+  for (const part of renderChanges(theme, details?.changes)) container.addChild(part);
   container.addChild(new Spacer(1));
-  container.addChild(new Text(reviewStatusLine(theme, { tone: "success", text: "✓ Finished", context }), 0, 0));
+  const tone = finishTone(details);
+  container.addChild(
+    new Text(
+      reviewStatusLine(theme, {
+        tone,
+        text: details?.pending
+          ? "Planner reviewing…"
+          : tone === "success"
+            ? "Finished · assessed done"
+            : tone === "error"
+              ? "Finished · attention needed"
+              : "Finished · review limitations",
+        context: finishContext(details),
+      }),
+      0,
+      0,
+    ),
+  );
   return container;
+}
+
+function finishTone(details: FinishDetails | undefined): ReviewTone {
+  if (details?.pending) return "pending";
+  const assessment = details?.assessment;
+  if (assessment?.state === "failed" || (assessment?.state === "reviewed" && assessment.verdict === "changes"))
+    return "error";
+  return assessment?.state === "reviewed" &&
+    assessment.verdict === "done" &&
+    details?.concerns?.trim().toLowerCase() === "none"
+    ? "success"
+    : "warning";
+}
+
+function assessmentSummary(details: FinishDetails | undefined): string {
+  if (details?.pending) return `Planner reviewing…${details.activity ? ` (${details.activity})` : ""}`;
+  const assessment = details?.assessment;
+  if (!assessment) return "Unavailable: no planner assessment was recorded.";
+  switch (assessment.state) {
+    case "disabled":
+      return "Disabled: automatic completion review is off.";
+    case "unavailable":
+      return `Unavailable: ${assessment.reason}`;
+    case "failed":
+      return `Review failed: ${assessment.reason}`;
+    case "reviewed": {
+      const verdict =
+        assessment.verdict === "done"
+          ? "done"
+          : assessment.verdict === "changes"
+            ? "changes needed"
+            : "unclear (no unambiguous final verdict)";
+      return `${assessment.planner} · Verdict: ${verdict}. Informational assessment, not user approval.`;
+    }
+  }
+}
+
+function finishContext(details: FinishDetails | undefined): string {
+  const asks = details?.asks ?? 0;
+  const assessment = details?.assessment;
+  const reviewCost = assessment && "costUsd" in assessment ? assessment.costUsd : undefined;
+  const who =
+    details?.returnedTo && details.returnedTo !== details.implementer
+      ? `${details.implementer ?? "Unknown implementer"} → ${details.returnedTo}`
+      : (details?.implementer ?? "Unknown implementer");
+  return [
+    details?.planFile ? planTitle(details.planFile) : "Plan",
+    who,
+    `${asks} ${asks === 1 ? "consultation" : "consultations"}${details?.costUsd !== undefined ? ` · ${formatCost(details.costUsd)}` : ""}`,
+    ...(reviewCost !== undefined ? [`review ${formatCost(reviewCost)}`] : []),
+  ].join(" · ");
+}
+
+function changeSummaryText(changes: ChangeSummary | undefined): string {
+  return [
+    `Files edited: ${changes?.edited.join(", ") || "none recorded"}`,
+    `Not in the plan: ${changes?.outside.join(", ") || "none recorded"}`,
+    `git diff against HEAD: ${changes?.git || "no summary available (does not rule out committed work)"}`,
+  ].join("\n");
 }
 
 /** pi-recap's one-line recap of the turn just ended, when it is loaded; undefined otherwise or when slow. */
@@ -651,24 +867,27 @@ async function recapHeadline(pi: ExtensionAPI, timeoutMs: number): Promise<strin
 
 /** What the planner reads once it is back: the implementer's report and what it touched. */
 function finishMessageText(details: FinishDetails): string {
-  const lines = [
-    `The plan was implemented${details.implementer ? ` by ${details.implementer}` : ""}. Its report:`,
+  return [
+    "Implementation complete",
+    ...(details.headline ? ["", details.headline] : []),
     "",
-    details.report || "(no report)",
-  ];
-  lines.push(
+    "What changed",
+    details.report || "Not provided.",
     "",
-    details.asks
-      ? `It consulted you ${details.asks} ${details.asks === 1 ? "time" : "times"} (ask_planner)${details.costUsd !== undefined ? `, costing ${formatCost(details.costUsd)}` : ""}.`
-      : "It did not consult you (ask_planner) while implementing.",
-  );
-  const changes = details.changes;
-  if (changes && changes.edited.length > 0) {
-    lines.push("", `Files edited: ${changes.edited.join(", ")}`);
-    if (changes.outside.length > 0) lines.push(`Not in the plan: ${changes.outside.join(", ")}`);
-    if (changes.git) lines.push(`git diff against HEAD: ${changes.git}`);
-  }
-  return lines.join("\n");
+    "Verification",
+    details.verification || "Not provided; verification is unknown.",
+    "",
+    "Outstanding issues",
+    details.concerns || "Not provided; outstanding issues are unknown.",
+    "",
+    "Planner assessment",
+    assessmentSummary(details),
+    ...(details.assessment?.state === "reviewed" ? [details.assessment.narrative] : []),
+    "",
+    changeSummaryText(details.changes),
+    "",
+    finishContext(details),
+  ].join("\n");
 }
 
 function text(value: string) {

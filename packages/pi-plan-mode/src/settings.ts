@@ -131,6 +131,8 @@ export interface PlanModeSettings {
   jevToolSelection?: boolean;
   /** /planners: a finished plan's lane shows it as a rendered page (terminal-browser embed); default true. */
   renderedPlans?: boolean;
+  /** Ask the existing planner on call for an informational completion assessment; default true. */
+  completionReview?: boolean;
   /**
    * Tools planners are always offered: preselected, and Jev scores them but never deselects them.
    * Each entry names a toolset, command grant, MCP server, or Other tool by id or name (`web`,
@@ -162,6 +164,7 @@ export interface PlanModeSettingsPatch {
   plannerTimeoutSeconds?: number | null;
   jevToolSelection?: boolean | null;
   renderedPlans?: boolean | null;
+  completionReview?: boolean | null;
 }
 export interface UpdatePlanModeSettingsOptions {
   settingsPath?: string;
@@ -306,6 +309,11 @@ export function normalizePlanModeSettings(value: unknown): PlanModeSettings | un
     const enabled = Reflect.get(value, "renderedPlans");
     if (typeof enabled !== "boolean") return undefined;
     settings.renderedPlans = enabled;
+  }
+  if (Object.hasOwn(value, "completionReview")) {
+    const enabled = Reflect.get(value, "completionReview");
+    if (typeof enabled !== "boolean") return undefined;
+    settings.completionReview = enabled;
   }
   if (Object.hasOwn(value, "jevThreshold")) {
     const threshold = Reflect.get(value, "jevThreshold");
@@ -622,6 +630,8 @@ export function updatePlanModeSettings(
     else if (patch.jevToolSelection !== undefined) updated.jevToolSelection = patch.jevToolSelection;
     if (patch.renderedPlans === null) delete updated.renderedPlans;
     else if (patch.renderedPlans !== undefined) updated.renderedPlans = patch.renderedPlans;
+    if (patch.completionReview === null) delete updated.completionReview;
+    else if (patch.completionReview !== undefined) updated.completionReview = patch.completionReview;
     const settings = normalizePlanModeSettings(updated);
     if (!settings) throw invalidSettingsError(settingsPath, "invalid settings shape");
     await publishSettings(settingsPath, updated, options.signal, options.beforeRename);

@@ -151,23 +151,44 @@ export function consultantSystemPrompt(planFile: string, toolNotes: readonly str
 export const CONSULT_WRAP_UP =
   "Time is almost up. Stop investigating and answer now with your best decision; amend the plan file first if your answer changes the plan.";
 
-/** What the planner on call is asked when the user wants its review of finished work. */
-export function reviewRequest(report: string) {
+/** A targeted, informational review by the existing planner on call, not a user approval gate. */
+export function reviewRequest(
+  report: string,
+  context?: { verification: string; concerns: string; planFile: string; changes: string },
+) {
   return [
-    "[From the implementing agent, which reports your plan as done. The user asked you to review the work before accepting it.]",
+    "[From the implementing agent, which reports your plan as done. Give a targeted completion assessment, not user approval.]",
     "",
-    "Review the implementation against your plan (the plan file has its current version): read the changes (git status, git diff) and the files they touch, and check every step and every Verification item. List only what is missing or wrong, each with the file and what to do. You cannot run the tests; say which checks the implementer must still run, if any. End with exactly one line: `Verdict: done` when nothing needs to change, or `Verdict: changes needed`.",
+    "Review the implementation against the current plan. Inspect relevant tracked files and commit history as well as git status and the working-tree diff: work may already be committed, so git diff HEAD alone is not sufficient. Give a concise assessment of what met the plan, evidence you actually inspected, deviations, and remaining risks. Explicitly distinguish implementer-reported checks from independently observed evidence, and state limitations where evidence cannot establish a claim. Do not modify any files (including the plan) or run tests, even if your tools or grants permit it. Identify changes still needed with the file and what to do. This is informational: do not start further implementation. End with exactly `Verdict: done` when nothing needs to change, or `Verdict: changes needed`.",
+    ...(context ? ["", `Plan file: ${context.planFile}`, "", "Change summary:", context.changes] : []),
     "",
-    "The implementer's report:",
+    "The implementer's report (what changed):",
     "",
     report.trim(),
+    ...(context
+      ? ["", "Implementer-reported verification:", context.verification, "", "Outstanding issues:", context.concerns]
+      : []),
   ].join("\n");
 }
 
-/** The planner's verdict on a review: its last `Verdict:` line; anything but `done` means changes. */
-export function reviewVerdict(reply: string): "done" | "changes" {
-  const matches = [...reply.matchAll(/^\s*`?verdict:\s*(done|changes needed)`?\s*$/gimu)];
-  return matches.at(-1)?.[1]?.toLowerCase() === "done" ? "done" : "changes";
+/** Only an unambiguous final verdict is an assessment; absent or malformed verdicts are unclear. */
+export function reviewVerdict(reply: string): "done" | "changes" | "unclear" {
+  const parse = (line: string) => {
+    const text = line.trim();
+    const bare = text.startsWith("`") && text.endsWith("`") ? text.slice(1, -1) : text;
+    return /^verdict:\s*(done|changes needed)$/iu.exec(bare)?.[1]?.toLowerCase();
+  };
+  const lines = reply.trim().split("\n");
+  const final = parse(lines.at(-1) ?? "");
+  if (!final) return "unclear";
+  if (
+    lines.some((line) => {
+      const verdict = parse(line);
+      return verdict !== undefined && verdict !== final;
+    })
+  )
+    return "unclear";
+  return final === "done" ? "done" : "changes";
 }
 
 /** What Write plan M (or Revise plan M, once there is one) asks your main agent to do. */

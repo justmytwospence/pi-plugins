@@ -126,9 +126,9 @@ describe("renderer gates", () => {
 });
 
 describe("own result rows", () => {
-  test("a tool with ccstyleOwnResult keeps its result row under the styled call row", async () => {
+  test.each(["bg_run", "finish_plan"])("%s with ccstyleOwnResult keeps its result row under the styled call row", async (name) => {
     const { createCcstyleTool } = await import("../src/renderer/default-mode.ts");
-    const own = { name: "bg_run", label: "Background", ccstyleOwnResult: true, renderResult: () => ({ render: () => ["↳ fit running · 45%"], invalidate() {} }) };
+    const own = { name, label: "Background", ccstyleOwnResult: true, renderResult: () => ({ render: () => ["↳ fit running · 45%"], invalidate() {} }) };
     const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t, bg: (_c: string, t: string) => t };
     const wrapped = createCcstyleTool(own, new Map() as any);
     for (const isPartial of [true, false]) {
@@ -235,13 +235,15 @@ describe("tool groups", () => {
   }
 
   test.each([
-    { before: ["todo"], after: ["bash"] },
-    { before: ["read", "todo"], after: ["bash", "read"] },
-  ])("exit_plan_mode stays standalone between $before and $after", async ({ before, after }) => {
+    { name: "exit_plan_mode", before: ["todo"], after: ["bash"] },
+    { name: "exit_plan_mode", before: ["read", "todo"], after: ["bash", "read"] },
+    { name: "finish_plan", before: ["todo"], after: ["bash"] },
+    { name: "finish_plan", before: ["read", "todo"], after: ["bash", "read"] },
+  ])("$name stays standalone between $before and $after", async ({ name, before, after }) => {
     const { hooks, root, tool } = await groupedTools(false);
     try {
       const preceding = before.map((name) => tool(name, [`✓ ${name}`]));
-      const exit = tool("exit_plan_mode", ["Plan", "Do it", "Waiting for approval"]);
+      const exit = tool(name, ["Plan", "Do it", "Waiting for approval"]);
       exit.isPartial = true;
       const following = after.map((name) => tool(name, [`✓ ${name}`]));
       for (const component of [...preceding, exit, ...following]) root.addChild(component);

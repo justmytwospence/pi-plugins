@@ -49,7 +49,7 @@ export function implementationBrief(brief: ImplementationBrief): string {
     "- Change only what it lists, and nothing under Out of scope.",
     `- When the plan does not fit what you find (a step cannot be done as written, a fact it states is wrong, a change it does not list is needed, or it leaves a choice open), do not improvise: ${deviation}`,
     "- Run its Verification as written, and fix what fails within the plan.",
-    "- When it is done and verified, call finish_plan with your report: what you changed, the verification results, and each deviation from the plan with how it was settled.",
+    "- When implementation is finished, call finish_plan with three required nonempty fields: report (what you changed), verification (checks and their results, including anything not run), and concerns (deviations and how they were settled, failures, and remaining work; use None only when accurate). Report failures honestly; the planner's completion assessment is informational, not user approval.",
   ];
   if (planFile) lines.push("", `The plan file is ${planFile}; reread it after an amendment or a compaction.`);
   lines.push("", `## Approved plan${edited ? " (edited by the user)" : ""}`, "", plan);

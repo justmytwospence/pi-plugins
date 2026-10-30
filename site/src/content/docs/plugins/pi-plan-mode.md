@@ -39,18 +39,18 @@ The approval returns the permission mode to what it was before planning (with pi
 
 ### Exec mode
 
-Approving a plan puts your chat in exec mode, a mode like the permission modes except that Shift+Tab never enters it: only an approved plan does, and it lasts until the work is accepted. The permission mode underneath (the one you were in before planning) still decides what runs, and Shift+Tab still changes it. With [pi-status-footer](/plugins/pi-status-footer/) the footer shows it in the mode's place on the permission-mode row, for example `exec mode on · auto · Claude Opus 5.5 on call · 2 asks · $0.31`. Plans are named by their first heading wherever you see them, never by their file name.
+Approving a plan puts your chat in exec mode, a mode like the permission modes except that Shift+Tab never enters it: only an approved plan does, and it lasts until `finish_plan` ends it or a newer approved plan replaces it. The permission mode underneath (the one you were in before planning) still decides what runs, and Shift+Tab still changes it. With [pi-status-footer](/plugins/pi-status-footer/) the footer shows it in the mode's place on the permission-mode row, for example `exec mode on · auto · Claude Opus 5.5 on call · 2 asks · $0.31`. Plans are named by their first heading wherever you see them, never by their file name.
 
 - **Planner on call.** After a handoff, the model that planned stays on call and your implementing agent gets `ask_planner`: it asks when the plan does not fit what it finds, and waits for a decision. The planner is a copy of the planning conversation, opened the first time it is asked, so it keeps its research context. It reads the current files, including the implementer's changes, and runs read-only commands, and it gets every tool a `/planners` planner can be given: your `plannerToolsets` (web research, MCP servers), command grants and read-only subagents. The only file it may write is the plan file. When its answer changes the plan it edits the file and adds a dated line under `## Amendments`, and the tool row shows the diff. Each ask is a planning-model turn over the planning context; its cost counts in the footer and the session totals.
 - **Keeping the planning model on it** has no planner on call: the implementer is the planner, so `ask_planner` is not offered.
 - **Unplanned files.** The first edit or write of each file the plan does not list (paths in backticks) gets a note appended to the tool result: ask the planner, or record the departure under `## Amendments` when there is none. Nothing is blocked, and a plan that names no paths gets no notes.
-- **`finish_plan`.** When the plan is done and its Verification passes, your agent calls `finish_plan` with its report. It ends exec mode without asking you and switches back to the planning model when the session is still on the one the handoff switched to. The card shows the report, the files the agent edited (flagging those the plan does not list) and the repository's diffstat. After an in-place handoff, a `/plan-back` command then runs by itself once the turn settles: it returns the session to the planning conversation (no model summary; the implementer's report is added there as a message the planner reads, drawn as the same card, headed by [pi-recap](https://pi-plugins.vercel.app/plugins/pi-recap/)'s one-line recap when that is loaded). If it cannot, it says so and `/tree` still reaches the planning branch.
+- **`finish_plan`.** When implementation is finished, the agent supplies three required nonempty fields: `report` (what changed), `verification` (checks and results, including checks not run), and `concerns` (deviations, failures and remaining work; `None` only when accurate). The colored **Implementation complete** card separates What changed, Verification, Outstanding issues and Planner assessment, followed by the plan, implementer and consultation count. Verification, outstanding issues, verdict and count remain visible even collapsed; Ctrl+O expands only the longer implementation and assessment narratives. By default, an on-call planner makes a targeted review in an additional model turn, with its cost shown separately from implementation consultations. It inspects relevant evidence, including files, working-tree changes and commit history, and distinguishes inspected evidence from reported checks. It is instructed not to run tests or mutate files; its tool policy is not a sandbox. With no planner on call, or with `completionReview` disabled, there is no assessment. Failed or unavailable reviews are reported honestly rather than treated as success. The assessment is informational, not user approval: `finish_plan` ends exec mode without asking you, and findings do not automatically trigger more implementation. It switches back to the planning model when the session is still on the one the handoff switched to. After an in-place handoff, a `/plan-back` command then runs by itself once the turn settles: it returns the session to the planning conversation (no model summary; the implementer's report is added there as a message the planner reads, drawn as the same card, headed by [pi-recap](https://pi-plugins.vercel.app/plugins/pi-recap/)'s one-line recap when that is loaded). If it cannot, it says so and `/tree` still reaches the planning branch.
 
 Approving a newer plan replaces exec mode. `enter_plan_mode` is refused while it is on; `/plan` and Shift+Tab still plan. A reload or resume restores it from the session.
 
 In Pi's fullscreen terminal mode, **Plan review** scrolls the main chat to the beginning of the plan when the approval picker opens, including for short plans. Scroll the chat to read the rest; ordinary redraws do not move you back. Editing the plan returns to its beginning, and closing review restores following the latest message. Regular terminal mode and RPC keep their usual presentation because Pi does not own their chat scrollback. Once you decide, a plan longer than 12 lines folds in the transcript (`… N more lines (ctrl+o to expand)`). [Compaction plan](/plugins/pi-compact-plan/) draws its compaction focus with the same review card.
 
-Plan mode itself makes no extra model requests; your agent plans on the session's model.
+Your agent plans on the session's model. An enabled completion review with a planner on call adds a separate model request.
 
 ## Enable, requirements, and costs
 
@@ -93,12 +93,13 @@ Choose **Implement…** to pick the plan (M first, once there is one) and review
 
 ## Settings and trusted capabilities
 
-Settings normally live at `~/.pi/agent/pi-plan-mode.json`. Common options are editable in the Settings step. This example chooses manual tool selection and a shorter planner-turn limit without assuming particular model IDs:
+Settings normally live at `~/.pi/agent/pi-plan-mode.json`. Common options are editable in the `/planners` Settings step, including the **Completion review** toggle (`completionReview`, default `true`). Turning it off skips the automatic review but keeps the completion card. This example chooses manual tool selection and a shorter planner-turn limit without assuming particular model IDs:
 
 ```json
 {
   "plannerTimeoutSeconds": 900,
   "jevToolSelection": false,
+  "completionReview": true,
   "alwaysOffer": [],
   "defaultImplementationContext": "keep",
   "defaultPlanExportPath": "PLAN.md",

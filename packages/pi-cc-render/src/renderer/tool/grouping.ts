@@ -35,7 +35,7 @@ import {
 	TOOL_GROUPING_PATCH_KEY as PATCH_KEY,
 } from "../../utils/patch-keys.ts";
 
-const NON_GROUPABLE = new Set(["edit", "write", "apply_patch", "exit_plan_mode"]);
+const NON_GROUPABLE = new Set(["edit", "write", "apply_patch", "exit_plan_mode", "finish_plan"]);
 
 type Patch = {
 	owner: object;

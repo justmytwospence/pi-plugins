@@ -187,6 +187,38 @@ test("Plan-mode settings validate fresh implementation runtime defaults", () => 
   }
 });
 
+test("completion review defaults on, validates booleans, and persists without losing other settings", async () => {
+  assert.notEqual(normalizePlanModeSettings({})?.completionReview, false);
+  for (const completionReview of [true, false]) {
+    assert.equal(normalizePlanModeSettings({ completionReview })?.completionReview, completionReview);
+  }
+  for (const completionReview of [null, "false", 0, [], {}]) {
+    assert.equal(normalizePlanModeSettings({ completionReview }), undefined);
+  }
+  const directory = await mkdtemp(join(tmpdir(), "pi-plan-mode-completion-review-"));
+  const settingsPath = join(directory, "pi-plan-mode.json");
+  try {
+    await writeFile(settingsPath, '{"future":{"kept":true},"thinkingLevel":"high"}\n');
+    for (const completionReview of [false, true]) {
+      await updatePlanModeSettings({ completionReview }, { settingsPath });
+      assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
+        future: { kept: true },
+        thinkingLevel: "high",
+        completionReview,
+      });
+      const loaded = await readPlanModeSettings(settingsPath);
+      assert.equal(loaded.kind === "loaded" && loaded.settings.completionReview, completionReview);
+    }
+    await updatePlanModeSettings({ completionReview: null }, { settingsPath });
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
+      future: { kept: true },
+      thinkingLevel: "high",
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("Plan-mode settings ignore unknown top-level fields", () => {
   assert.deepEqual(
     normalizePlanModeSettings({

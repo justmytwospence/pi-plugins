@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
+import { implementationBrief } from "../src/handoff.js";
 import planMode from "../src/index.js";
 import type { PlannerSessionFactory } from "../src/planner/session.js";
 import { createCustomSelectorHarness, createMockContext, createMockPi } from "./support.js";
@@ -133,6 +134,36 @@ function setup(
   (context.ctx as { sendUserMessage?: unknown }).sendUserMessage = async (text: string) => sent.push(text);
   return { mock, context, sessions, sent, ready, harness: () => harness };
 }
+
+test("the implementation brief requires honest structured completion fields in every context", () => {
+  for (const context of ["here", "fresh"] as const) {
+    const brief = implementationBrief({ plan: "# Plan", context });
+    assert.match(brief, /finish_plan with three required nonempty fields: report/u);
+    assert.match(brief, /verification \(checks and their results, including anything not run\)/u);
+    assert.match(brief, /concerns \(.*failures, and remaining work; use None only when accurate\)/u);
+    assert.match(brief, /informational, not user approval/u);
+  }
+});
+
+test("the Completion review settings row defaults on and toggles both ways", async () => {
+  const { mock, context, ready, harness } = setup();
+  await ready;
+  const opened = mock.commands.get("planners")?.handler("", context.ctx);
+  await flush();
+  const app = harness();
+  assert.ok(app);
+  assert.match(app.render().join("\n"), /Completion review\s+on/u);
+  for (let row = 0; row < 30 && !/Completion review\s+‹ on ›/u.test(app.render().join("\n")); row++) {
+    app.handleInput("\u001b[B");
+  }
+  assert.match(app.render().join("\n"), /Completion review\s+‹ on ›/u);
+  app.handleInput("\u001b[C");
+  assert.match(app.render().join("\n"), /Completion review\s+‹ off ›/u);
+  app.handleInput("\u001b[D");
+  assert.match(app.render().join("\n"), /Completion review\s+‹ on ›/u);
+  app.handleInput("\u001b");
+  await opened;
+});
 
 test("/planners opens on the settings, goes through tools, plans with two planners, and implements", async () => {
   const { mock, context, sessions, harness } = setup();
