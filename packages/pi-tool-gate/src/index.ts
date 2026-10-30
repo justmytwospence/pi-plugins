@@ -111,6 +111,7 @@ import { loadRules } from "./rules.ts";
 import { agentBeforeLatestUser, callerText, clip, clipTail, recentTexts, recentUserMessages } from "./transcript.ts";
 import { offerUserWords, resultText } from "./user-words.ts";
 import { callView } from "./view.ts";
+import { registerWorkflowRenderer, sendWorkflowTransition } from "./workflow-ui.ts";
 
 /** A declined call's result (Block). */
 export const DECLINED = "The user declined this call. Do not retry it; continue without it, or ask the user how to proceed.";
@@ -408,6 +409,7 @@ export function judgeStateOf(branch: readonly unknown[], call: Omit<JudgeInput, 
 }
 
 export default function toolGate(pi: ExtensionAPI) {
+  registerWorkflowRenderer(pi);
   // A message on a declined call is the user's words: pi-sticky-last-prompt pins it like a prompt.
   // Any tool can be declined, and blocked calls never reach tool_result, so read the result text.
   offerUserWords(pi, "*", ({ result }) => declinedMessage(result));
@@ -487,9 +489,13 @@ export default function toolGate(pi: ExtensionAPI) {
   const emit = (name: string, data: unknown) => {
     try { pi.events.emit(name, data); } catch { /* A listener's failure is its own. */ }
   };
-  const broadcastWorkflow = (source: WorkflowSource, previous?: WorkflowMode) => emit(WORKFLOW_CHANGED, {
-    mode: effectiveWorkflow(), ...(previous ? { previous } : {}), cycle: cycle(), ...(shortcut ? { key: shortcut } : {}), source,
-  });
+  const broadcastWorkflow = (source: WorkflowSource, previous?: WorkflowMode) => {
+    const mode = effectiveWorkflow();
+    emit(WORKFLOW_CHANGED, {
+      mode, ...(previous ? { previous } : {}), cycle: cycle(), ...(shortcut ? { key: shortcut } : {}), source,
+    });
+    if (source === "transition" && previous && previous !== mode) sendWorkflowTransition(pi, previous, mode);
+  };
   // Query destination state directly: neither the cached branch nor lifecycle listener order is authoritative.
   pi.events.on(WORKFLOW_QUERY, (data) => {
     const query = data as { entries?: unknown; cwd?: unknown; reply?: unknown } | undefined;

@@ -37,6 +37,7 @@ const { pickApproval, createApprovalState, handoffLabel, HERE: IMPLEMENT_HERE, C
 const { registerExec, FINISH_MESSAGE_TYPE } = await jiti.import('../packages/pi-plan-mode/src/exec.ts');
 const { createNegotiation } = await jiti.import('../packages/pi-plan-mode/src/negotiation.ts');
 const { renderFooter, absorbStatuses } = await jiti.import('../packages/pi-status-footer/src/index.ts');
+const { WORKFLOW_EXPLANATIONS } = await jiti.import('../packages/pi-status-footer/src/workflow-ui.ts');
 const { choiceMenu, coldTitle } = await jiti.import('../packages/pi-cache-guard/src/index.ts');
 const { registerTreeFork, FORK_TITLE, FORK_DESTINATIONS } = await jiti.import('../packages/pi-herdr/src/tree-fork.ts');
 
@@ -78,12 +79,24 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle' } = {})
     quotas: [], now: NOW, queued: false, borderGauge: true, phase,
     ...absorbed, statuses: absorbed.rest, compact,
   }, width, theme);
-  if (compact) assert.equal(lines.length, 1, 'blocked footer must stay one row');
-  else {
-    const plain = lines.map(stripVTControlCharacters);
-    const workflow = plain.filter(line => line.includes('Workflow'));
+  const plain = lines.map(stripVTControlCharacters);
+  const kind = absorbed.exec !== undefined ? 'exec' : absorbed.workflow?.kind;
+  const badge = kind ? `[${kind.toUpperCase()}]` : undefined;
+  assert.doesNotMatch(plain.join('\n'), /workflow: (work|chat|plan|exec)/iu, 'raw provider status must not leak into the footer');
+  if (compact) {
+    assert.equal(lines.length, 1, 'blocked footer must stay one row');
+    if (badge) assert.ok(plain[0].includes(badge), 'blocked footer keeps the uppercase workflow badge');
+    assert.ok(!plain[0].includes('Approvals'), 'blocked footer must not merge approvals into the workflow badge');
+  } else {
+    const workflow = plain.filter(line => /\[(WORK|CHAT|PLAN|EXEC)\]/u.test(line));
     const approvals = plain.filter(line => line.includes('Approvals'));
-    assert.equal(workflow.length, absorbed.workflow || absorbed.exec ? 1 : 0, 'Workflow keeps its own row, including exec fallback');
+    assert.equal(workflow.length, kind ? 1 : 0, 'workflow badge keeps its own row, including exec fallback');
+    if (badge) {
+      assert.ok(workflow[0].includes(badge), 'workflow row uses the uppercase mode badge');
+      assert.ok(!workflow[0].includes('Approvals'), 'approvals stay separate from workflow');
+      // Sidebar also probes smaller widths while measuring its layout; explanations may drop there.
+      if (!absorbed.exec && width >= 46) assert.ok(workflow[0].includes(WORKFLOW_EXPLANATIONS[kind]), `workflow row explains ${kind} at width ${width} when no exec detail replaces it: ${workflow[0]}`);
+    }
     assert.equal(approvals.length, absorbed.mode ? 1 : 0, 'Approvals keeps its own row');
     for (const [rows, icon] of [[workflow, '\uf0e8'], [approvals, '\uf510']]) {
       for (const line of rows) {
@@ -98,6 +111,15 @@ const footer = (width) => statusFooter(width, modeStatuses('plan', 'yolo'), { co
 const UNDERS = {
   footer: (width) => footer(width),
   'pill+footer': (width) => [theme.fg('muted', ' 1 task '), '', ...footer(width)],
+  ...Object.fromEntries(['work', 'chat', 'plan', 'exec'].flatMap(workflow => {
+    return ['idle', 'waiting'].flatMap(phase => {
+      const rows = width => statusFooter(width, modeStatuses(workflow, 'auto'), { compact: true, phase });
+      return [
+        [`${workflow} badge ${phase} footer`, rows],
+        [`${workflow} badge ${phase} pill+footer`, width => [theme.fg('muted', ' 1 task '), '', ...rows(width)]],
+      ];
+    });
+  })),
   'paused phase footer': (width) => phaseFooter(width),
 };
 
@@ -453,7 +475,7 @@ const FOOTERS = [
   ...['consulting', 'review 2', 'revising · 3 findings', 'paused · user needed', 'paused · review unavailable'].flatMap(phase => ['auto', 'yolo'].map(approval => ({
     name: `exec/${approval} ${phase}`, statuses: modeStatuses('exec', approval, phase),
   }))),
-  ...['work', 'plan'].map(workflow => ({ name: `standalone ${workflow}`, statuses: modeStatuses(workflow) })),
+  ...['work', 'chat', 'plan', 'exec'].map(workflow => ({ name: `standalone ${workflow}`, statuses: modeStatuses(workflow) })),
   { name: 'standalone exec', statuses: modeStatuses(undefined, undefined, 'review 2') },
   { name: 'approval provider only', statuses: modeStatuses(undefined, 'auto') },
   { name: 'no mode providers', statuses: new Map() },

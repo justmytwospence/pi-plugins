@@ -6,6 +6,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const manifest = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'));
 const components = manifest.pi.extensions.map(p => p.split('/')[2]);
 const identical = [
+  ['pi-status-footer','pi-tool-gate','pi-plan-mode'].map(p => `packages/${p}/src/workflow-ui.ts`),
   ['pi-bg','pi-subagents','pi-plan-mode','pi-herdr'].map(p => `packages/${p}/src/activity.ts`),
   ['pi-bg','pi-status-footer'].map(p => `packages/${p}/src/working-message.ts`),
   ['packages/pi-plan-mode/src/app/pi-chat.ts','packages/pi-sidebar/src/pi-chat.ts','packages/pi-subagents/src/ui/pi-chat.ts'],

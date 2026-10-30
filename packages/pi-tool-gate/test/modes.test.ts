@@ -437,6 +437,104 @@ describe("workflow guards precede approvals", () => {
   });
 });
 
+describe("visible workflow transitions", () => {
+  const markers = (h: ReturnType<typeof harness>) => h.messages.filter(({ message }) => message.customType === "workflow:transition");
+
+  test("commands, shortcuts, events and exec lifecycle mark genuine transitions only", async () => {
+    const { h, ctx } = await start(setup());
+    h.pi.events.emit(PLAN_PROVIDER, { planFile: "/tmp/plan.md" });
+    await h.commands.get("mode").handler("chat", ctx);
+    await h.shortcuts.get("shift+tab").handler(ctx);
+    h.pi.events.emit(WORKFLOW_SET, { mode: "work" });
+    h.pi.events.emit(WORKFLOW_CYCLE, {});
+    h.pi.events.emit(EXEC_CHANGED, { active: true, source: "transition" });
+    h.pi.events.emit(EXEC_CHANGED, { active: false, source: "transition" });
+    expect(markers(h)).toEqual([
+      ["work", "chat", "read-only discussion"],
+      ["chat", "plan", "research and plan only"],
+      ["plan", "work", "edits and actions"],
+      ["work", "chat", "read-only discussion"],
+      ["chat", "exec", "implementing approved plan"],
+      ["exec", "work", "edits and actions"],
+    ].map(([previous, mode, explanation]) => ({
+      message: {
+        customType: "workflow:transition", content: `${mode.toUpperCase()} · ${explanation}`,
+        display: true, details: { version: 1, previous, mode },
+      },
+      opts: { triggerTurn: false },
+    })));
+  });
+
+  test("startup, branch restores, queries, providers, approvals and repeated selections stay silent", async () => {
+    const { h, ctx, branch } = await start(setup([entry(WORKFLOW_ENTRY, { version: 1, mode: "chat" })]));
+    expect(markers(h)).toEqual([]);
+    for (const mode of ["plan", "exec", "work"] as const) {
+      branch.splice(0, branch.length, ...(mode === "exec"
+        ? [entry("plan-mode:exec", { active: true })]
+        : [entry(WORKFLOW_ENTRY, { version: 1, mode })]));
+      await h.emit("session_tree", {}, ctx);
+      expect(markers(h)).toEqual([]);
+    }
+    const reply = vi.fn();
+    h.pi.events.emit(WORKFLOW_QUERY, { entries: [entry(WORKFLOW_ENTRY, { version: 1, mode: "plan" })], cwd: ctx.cwd, reply });
+    expect(reply).toHaveBeenCalledWith(expect.objectContaining({ mode: "plan", source: "restore" }));
+    for (const planFile of ["/tmp/plan.md", "/tmp/plan.md", "/tmp/other-plan.md"]) h.pi.events.emit(PLAN_PROVIDER, { planFile });
+    for (const active of [true, false]) h.pi.events.emit(EXEC_CHANGED, { active, source: "restore" });
+    await h.commands.get("approvals").handler("yolo", ctx);
+    await h.shortcuts.get("alt+a").handler(ctx);
+    h.pi.events.emit(MODE_SET, { mode: "default" });
+    h.pi.events.emit(MODE_CYCLE, {});
+    await h.commands.get("mode").handler("work", ctx);
+    h.pi.events.emit(WORKFLOW_SET, { mode: "work" });
+    h.pi.events.emit(EXEC_CHANGED, { active: false, source: "transition" });
+    expect(markers(h)).toEqual([]);
+    h.pi.events.emit(EXEC_CHANGED, { active: true, source: "transition" });
+    expect(markers(h)).toHaveLength(1);
+    h.pi.events.emit(EXEC_CHANGED, { active: true, source: "transition" });
+    h.pi.events.emit(WORKFLOW_SET, { mode: "chat" });
+    expect(markers(h)).toHaveLength(1);
+  });
+
+  test.each([
+    ["work", "success", "edits and actions"],
+    ["chat", "thinkingLow", "read-only discussion"],
+    ["plan", "customMessageLabel", "research and plan only"],
+    ["exec", "warning", "implementing approved plan"],
+  ])("registered renderer styles %s as a bold badge with a muted explanation", (mode, role, explanation) => {
+    const { h } = setup();
+    const renderer = h.messageRenderers.get("workflow:transition");
+    expect(renderer).toBeTypeOf("function");
+    const theme = {
+      fg: vi.fn((role: string, text: string) => `<${role}>${text}</${role}>`),
+      bold: vi.fn((text: string) => `<bold>${text}</bold>`),
+    };
+    const previous = mode === "work" ? "exec" : "work";
+    const rendered = renderer!({ content: "fallback", details: { version: 1, previous, mode } }, { expanded: false }, theme);
+    expect(rendered.render(200).map((line: string) => line.trimEnd())).toEqual([`<bold><${role}>[${mode.toUpperCase()}]</${role}></bold><dim> · </dim><muted>${explanation}</muted>`]);
+    expect(theme.fg.mock.calls).toEqual([[role, `[${mode.toUpperCase()}]`], ["dim", " · "], ["muted", explanation]]);
+    expect(theme.bold.mock.calls).toEqual([[`<${role}>[${mode.toUpperCase()}]</${role}>`]]);
+  });
+
+  test.each([
+    undefined, null, {}, { version: 2, previous: "work", mode: "chat" },
+    { version: 1, previous: "invalid", mode: "chat" },
+    { version: 1, previous: "work", mode: "invalid" },
+    { version: 1, previous: "work", mode: "work" },
+    { version: 1, mode: "chat" }, { version: 1, previous: "work" },
+  ])("malformed transition details %j fall back to unstyled text", details => {
+    const { h } = setup();
+    const renderer = h.messageRenderers.get("workflow:transition")!;
+    const theme = { fg: vi.fn(), bold: vi.fn() };
+    for (const content of ["Fallback text", [
+      { type: "text", text: "Fallback " }, { type: "image", data: "ignored", mimeType: "image/png" }, { type: "text", text: "text" },
+    ]]) {
+      expect(renderer({ content, details }, {}, theme).render(200).map((line: string) => line.trimEnd())).toEqual(["Fallback text"]);
+    }
+    expect(theme.fg).not.toHaveBeenCalled();
+    expect(theme.bold).not.toHaveBeenCalled();
+  });
+});
+
 describe("workflow notices are independent of approvals", () => {
   test("chat notices are once-only and approval changes do not announce an exit", async () => {
     const { h, ctx } = await start(setup());
@@ -466,7 +564,9 @@ describe("workflow notices are independent of approvals", () => {
     const { h, ctx } = await start(setup());
     ctx.isIdle = () => false;
     await h.commands.get("mode").handler("chat", ctx);
-    expect(h.messages.at(-1)).toMatchObject({ opts: { deliverAs: "steer" }, message: { content: expect.stringMatching(/Chat mode is active/u) } });
+    const reminders = h.messages.filter(({ message }) => message.customType === "tool-gate:chat-notice");
+    expect(reminders).toHaveLength(1);
+    expect(reminders[0]).toMatchObject({ opts: { deliverAs: "steer" }, message: { display: false, content: expect.stringMatching(/Chat mode is active/u) } });
     expect(await h.emit("before_agent_start", { prompt: "x" }, ctx)).toBeUndefined();
   });
 });

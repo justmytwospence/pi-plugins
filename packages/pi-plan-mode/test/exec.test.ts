@@ -851,7 +851,24 @@ test("human answers survive reload and reach the next reviewer as user-provided 
 });
 test("failed return navigation persists and can be retried after reload", async () => {
   const s = await setup({ returnTo: "planning-leaf" });
+  const markers = () =>
+    s.mock.sentMessages.filter(
+      ({ message }) => (message as { customType?: string }).customType === "workflow:transition",
+    );
+  assert.deepEqual(markers(), []);
   await submit(s);
+  const completionMarkers = [
+    {
+      message: {
+        customType: "workflow:transition",
+        content: "WORK · edits and actions",
+        display: true,
+        details: { version: 1, previous: "exec", mode: "work" },
+      },
+      options: { triggerTurn: false },
+    },
+  ];
+  assert.deepEqual(markers(), completionMarkers);
   assert.equal(s.latest().pendingReturn?.leaf, "planning-leaf");
   const ctx = s.context.ctx as any;
   ctx.navigateTree = async () => {
@@ -860,12 +877,20 @@ test("failed return navigation persists and can be retried after reload", async 
   const back = s.mock.commands.get("plan-back")!;
   await back.handler("", ctx);
   assert.ok(s.latest().pendingReturn);
+  assert.deepEqual(markers(), completionMarkers);
   await s.emit("session_tree", {});
+  assert.deepEqual(markers(), completionMarkers);
   ctx.navigateTree = async (leaf: string) => {
     ctx.sessionManager.getLeafId = () => leaf;
   };
   await back.handler("", ctx);
-  assert.equal(s.mock.sentMessages.length, 1);
+  assert.equal(
+    s.mock.sentMessages.filter(
+      ({ message }) => (message as { customType?: string }).customType !== "workflow:transition",
+    ).length,
+    1,
+  );
+  assert.deepEqual(markers(), completionMarkers);
   assert.equal(s.latest().pendingReturn, undefined);
   const message = finishMessages(s).at(-1);
   assert.ok(message);
@@ -880,7 +905,24 @@ test("failed return navigation persists and can be retried after reload", async 
 });
 test("failed return after a real leaf switch does not restore the old retry record", async () => {
   const s = await setup({ returnTo: "planning-leaf" });
+  const markers = () =>
+    s.mock.sentMessages.filter(
+      ({ message }) => (message as { customType?: string }).customType === "workflow:transition",
+    );
+  assert.deepEqual(markers(), []);
   await submit(s);
+  const completionMarkers = [
+    {
+      message: {
+        customType: "workflow:transition",
+        content: "WORK · edits and actions",
+        display: true,
+        details: { version: 1, previous: "exec", mode: "work" },
+      },
+      options: { triggerTurn: false },
+    },
+  ];
+  assert.deepEqual(markers(), completionMarkers);
   const ctx = s.context.ctx as any;
   ctx.navigateTree = async () => {
     ctx.sessionManager.getLeafId = () => "other-branch";
@@ -888,11 +930,19 @@ test("failed return after a real leaf switch does not restore the old retry reco
   };
   await s.mock.commands.get("plan-back")!.handler("", ctx);
   assert.equal(s.latest().pendingReturn, undefined);
+  assert.deepEqual(markers(), completionMarkers);
   const entries = s.mock.entries.length;
   await s.mock.commands.get("plan-back")!.handler("", ctx);
+  assert.deepEqual(markers(), completionMarkers);
   await s.emit("agent_settled", { aborted: false });
   assert.equal(s.mock.entries.length, entries);
-  assert.equal(s.mock.sentMessages.length, 0);
+  assert.equal(
+    s.mock.sentMessages.filter(
+      ({ message }) => (message as { customType?: string }).customType !== "workflow:transition",
+    ).length,
+    0,
+  );
+  assert.deepEqual(markers(), completionMarkers);
   assert.equal(s.mock.sentUserMessages.length, 0);
 });
 

@@ -19,6 +19,7 @@ import { builtinMcpOwnsCommand, connectedMcpServers, countMcp, McpConfigReader, 
 import { SHOW_TIMER_AFTER_MS, WORKING_REFRESH_MS, WORKING_STATS_CHANNEL, workingMessage, WorkingStats, workingStatsService, type WorkingStatsRequest } from "./working.ts";
 import { WORKING_MESSAGE_EVENT, type WorkingMessageClaim } from "./working-message.ts";
 import { SESSION_CHROME_CHANNEL, type SessionChromeOverrides, type SessionChromeRequest } from "./session-chrome.ts";
+import { WORKFLOW_EXPLANATIONS, workflowBadge } from "./workflow-ui.ts";
 
 export * from "./mcp.ts";
 export * from "./working.ts";
@@ -937,6 +938,9 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   const identity = `${model}${reasoning ? `${sep}${reasoning}` : ""}`;
   const modeColor = s.mode ? MODE_COLORS[s.mode.kind] : "muted";
   const approval = s.mode && s.mode.kind !== "chat" && s.mode.kind !== "plan" ? s.mode : undefined;
+  // A defined exec detail (even empty) takes precedence over explicit and legacy workflow status.
+  const legacyWorkflow = s.mode?.kind === "chat" || s.mode?.kind === "plan" ? { kind: s.mode.kind, key: s.mode.key } : undefined;
+  const workflow: WorkflowStatus | undefined = s.exec !== undefined ? { kind: "exec" } : s.workflow ?? legacyWorkflow;
   rows.push(row(ICONS.project, (w) => fitSegments([
     { text: project, priority: 60 },
     { text: branch, short: branchShort, priority: g.conflicts ? 110 : 70 },
@@ -948,6 +952,7 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     const used = s.context.percent;
     const ctx = used === null ? "" : `${theme.fg("muted", "Context")} ${theme.bold(theme.fg(used < 70 ? "muted" : heat(used), percent(used)))}${theme.fg("dim", " used")}`;
     const compact = row(ICONS.project, (w) => fitSegments([
+      { text: workflow ? workflowBadge(theme, workflow.kind) : "", priority: 130 },
       { text: project, priority: 60 },
       { text: branch, short: branchShort, priority: 40 },
       { text: identity, short: model, priority: 100 },
@@ -965,16 +970,15 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
   // Gate judgments (including plan+yolo) attach only to the approvals row.
   const gateStatus = approval ? s.statuses.find((status) => /^Gate /.test(stripVTControlCharacters(status))) : undefined;
   const statuses = gateStatus ? s.statuses.filter((status) => status !== gateStatus) : s.statuses;
-  const legacyWorkflow = s.mode?.kind === "chat" || s.mode?.kind === "plan" ? { kind: s.mode.kind, key: s.mode.key } : undefined;
-  const workflow: WorkflowStatus | undefined = s.exec !== undefined ? { kind: "exec" } : s.workflow ?? legacyWorkflow;
   const negotiation = s.exec ? /^(implementing|consulting|review \d+|revising(?: · \d+ findings)?|paused(?: · (?:user needed|review unavailable))?)(?: · (.*))?$/u.exec(clean(s.exec)) : null;
   if (workflow) {
-    const state = `${theme.fg("muted", "Workflow")}${sep}${theme.fg(workflow.kind === "exec" ? "accent" : workflow.kind === "plan" ? "mdLink" : "success", workflow.kind)}`;
+    const badge = workflowBadge(theme, workflow.kind);
     const phase = negotiation?.[1] ?? (s.exec ? clean(s.exec).split(" · ")[0] : "");
     const detail = negotiation ? negotiation[2] : s.exec ? clean(s.exec).split(" · ").slice(1).join(" · ") : "";
     rows.push(row(ICONS.workflow, (w) => fitSegments([
-      { text: phase ? `${state}${sep}${theme.fg("muted", phase)}` : state, priority: 120 },
-      { text: detail ? theme.fg("muted", detail) : workflow.kind === "plan" ? theme.fg("muted", "read-only research") : workflow.kind === "chat" ? theme.fg("muted", "read-only discussion") : "", priority: 70 },
+      { text: badge, priority: 130 },
+      { text: phase ? theme.fg("muted", phase) : "", priority: 120 },
+      { text: theme.fg("muted", detail || WORKFLOW_EXPLANATIONS[workflow.kind]), priority: 70 },
       { text: theme.fg("dim", workflow.kind === "exec" ? "/plan-exec" : workflow.key ?? ""), priority: 30 },
     ], w, theme)));
   }

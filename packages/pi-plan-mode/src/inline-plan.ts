@@ -41,6 +41,7 @@ import { expandHome } from "./plan-hook.js";
 import { PlanReviewViewport } from "./plan-review-viewport.js";
 import { type ReviewStatus, reviewBody, reviewTitle } from "./review-card.js";
 import { findBlockedCommandSegment, readCommand, type SafeSubcommands } from "./tool-policy.js";
+import { registerWorkflowRenderer, sendWorkflowTransition, type WorkflowKind } from "./workflow-ui.js";
 
 export const MODE_CHANGED = "workflow-mode:changed";
 export const MODE_SET = "workflow-mode:set";
@@ -174,6 +175,7 @@ interface ExitDetails {
 }
 
 export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): InlinePlanMode {
+  registerWorkflowRenderer(pi);
   let state: InlineState = { active: false, told: false };
   /** pi-tool-gate owns the mode; its current mode and cycle. */
   let gate: { mode: string; cycle: string[] } | undefined;
@@ -185,6 +187,14 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   /** The plan the user last declined: a revision's review shows what changed since. */
   let declined: string | undefined;
   const reviewViewport = new PlanReviewViewport();
+  let presentedMode: WorkflowKind | undefined;
+  const effectiveMode = (): WorkflowKind => (host.executing() ? "exec" : state.active ? "plan" : "work");
+  const presentTransition = () => {
+    const mode = effectiveMode();
+    const previous = presentedMode;
+    presentedMode = mode;
+    if (!gate && previous && previous !== mode) sendWorkflowTransition(pi, previous, mode);
+  };
 
   const safely = (fn: () => void) => {
     try {
@@ -255,6 +265,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     tellNow(ctx);
     persist();
     updateStatus();
+    presentTransition();
   };
 
   const exitLocal = (ctx: ExtensionContext | undefined, told?: boolean) => {
@@ -265,6 +276,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     tellNow(ctx);
     persist();
     updateStatus();
+    presentTransition();
   };
 
   const requestMode = (mode: string) => safely(() => pi.events.emit(MODE_SET, { mode }));
@@ -338,10 +350,16 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     restored = true;
     branchAnchor = ctx.sessionManager.getLeafId?.() ?? undefined;
     updateStatus();
+    presentedMode = effectiveMode();
   };
   pi.on("session_start", (_event, ctx) => restore(ctx));
   pi.on("session_tree", (_event, ctx) => restore(ctx));
-  pi.events.on("workflow-mode:exec", () => updateStatus());
+  pi.events.on("workflow-mode:exec", (data) => {
+    updateStatus();
+    const source = (data as { source?: unknown } | undefined)?.source;
+    if (source === "restore") presentedMode = effectiveMode();
+    else if (source === "transition") presentTransition();
+  });
 
   pi.on("session_shutdown", () => {
     reviewViewport.end();
@@ -350,6 +368,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     hostCtx = undefined;
     restored = false;
     gate = undefined;
+    presentedMode = undefined;
   });
 
   pi.on("before_agent_start", (_event, ctx) => {

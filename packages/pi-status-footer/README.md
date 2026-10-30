@@ -19,9 +19,11 @@ tachometer (context), book (marimo), cogs (background), microchip (pressure), ar
 wand skills. In the notices row, the tool gate's shield marks its own notices; the first notice's icon leads the row, a
 bell otherwise. Without a Nerd Font they draw as placeholders;
 all labels and readings remain readable. Other status text is preserved.
-While a dialog holds `herdr:blocked`, the footer shrinks to one row (project, branch,
-model, reasoning and context) so herdr-web-ui can read the dialog, with room
-for an activity row such as pi-bg's tasks.
+While a dialog holds `herdr:blocked`, the footer shrinks to one row: workflow badge
+when available, project, branch, model, reasoning, context and any active phase.
+At narrow widths the badge and phase take priority; other details can shorten or
+disappear. This leaves herdr-web-ui room to read the dialog and an activity row
+such as pi-bg's tasks.
 
 ## Install
 
@@ -81,6 +83,14 @@ readings fresh; the working row is independent of the footer mode.
    disappearing at the right edge. Existing task widgets are not duplicated.
 4. Provider/account limits explicitly labeled as percent **used**, with reset
    countdowns when supported. Last, since they are usually the longest rows.
+
+The bold bracketed workflow badge is a landmark in the footer and on workflow
+transitions in the transcript: `[WORK]`, `[CHAT]`, `[PLAN]` or `[EXEC]`.
+Their theme roles are `success`, `thinkingLow`, `customMessageLabel` and
+`warning`, respectively; actual hues depend on the theme. Explanations, key hints
+and other secondary details stay subdued. Approvals remain a separate axis.
+
+Terminal labels and rows in this document are examples, not screenshots.
 
 ### Companion extensions
 

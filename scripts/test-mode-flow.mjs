@@ -45,6 +45,11 @@ try {
     { names: ['tool-gate', 'plan-mode'] }, { names: ['plan-mode', 'tool-gate'] },
     { names: ['tool-gate', 'plan-mode'], inlineActive: true },
     { names: ['plan-mode', 'tool-gate'], inlineActive: true },
+    ...[['tool-gate'], ['plan-mode'], ['tool-gate', 'plan-mode'], ['plan-mode', 'tool-gate']]
+      .flatMap(providers => Array.from({ length: providers.length + 1 }, (_, at) => ({
+        names: [...providers.slice(0, at), 'status-footer', ...providers.slice(at)],
+      }))).flatMap(testCase => testCase.names.includes('plan-mode') && testCase.names.includes('tool-gate')
+        ? [testCase, { ...testCase, inlineActive: true }] : [testCase]),
   ];
   const failures = [];
   for (const { names, inlineActive } of cases) {
@@ -121,8 +126,38 @@ try {
       const hasPlan = names.includes('plan-mode');
       const branchData = type => manager.getBranch().filter(entry => entry.type === 'custom' && entry.customType === type).at(-1)?.data;
       const workflow = () => /workflow: (\w+)/.exec(statuses.get('workflow-mode') ?? '')?.[1];
-      const check = (mode, approval = 'bypassPermissions') => {
+      const transitions = () => manager.getEntries().filter(entry => entry.type === 'custom_message'
+        && entry.customType === 'workflow:transition');
+      let checkedMode;
+      let checkedTransitions = 0;
+      let restoring = false;
+      const reload = async () => {
+        const before = structuredClone(transitions());
+        await session.reload();
+        assert.deepEqual(transitions(), before, `${label}: reload must not append visible transitions`);
+        restoring = true;
+      };
+      const check = (mode, approval = 'bypassPermissions', intermediate = []) => {
         assert.equal(workflow(), mode, `${label}: workflow status`);
+        const visible = transitions();
+        const changed = checkedMode !== undefined && checkedMode !== mode && !restoring;
+        const path = changed ? [checkedMode, ...intermediate, mode] : [];
+        assert.equal(visible.length, checkedTransitions + Math.max(0, path.length - 1),
+          `${label}: exactly one visible marker per live transition, none for startup, no-op, approvals or restore`);
+        for (let i = 1; i < path.length; i++) {
+          const marker = visible[checkedTransitions + i - 1];
+          assert.equal(marker.display, true, 'workflow transitions are visible independently of agent reminders');
+          assert.deepEqual(marker.details, { version: 1, previous: path[i - 1], mode: path[i] });
+        }
+        for (const entry of manager.getEntries()) {
+          const message = entry.type === 'message' ? entry.message : entry;
+          if (['plan-mode-notice', 'tool-gate:chat-notice'].includes(message.customType)) {
+            assert.equal(message.display, false, 'agent workflow reminders stay hidden independently of visible transitions');
+          }
+        }
+        checkedMode = mode;
+        checkedTransitions = visible.length;
+        restoring = false;
         if (hasGate) {
           assert.equal(approvalEvents.at(-1)?.mode, approval, `${label}: approvals`);
           assert.deepEqual(approvalEvents.at(-1)?.cycle, ['auto', 'bypassPermissions']);
@@ -143,9 +178,12 @@ try {
       const restoreRecords = () => manager.getEntries().filter(entry => entry.type === 'custom'
         && ['tool-gate:workflow', 'plan-mode:inline'].includes(entry.customType)).map(entry => entry.id);
       const go = async target => {
+        const visibleBefore = structuredClone(transitions());
         const before = restoreRecords();
         assert.equal((await session.navigateTree(target.id, { summarize: false })).cancelled, false);
         assert.deepEqual(restoreRecords(), before, `${label}: restoration must not append workflow or inline records`);
+        assert.deepEqual(transitions(), visibleBefore, `${label}: tree navigation must not append visible transitions`);
+        restoring = true;
         const branch = manager.getBranch();
         assert.deepEqual(branch.slice(0, target.entryIds.length).map(entry => entry.id), target.entryIds,
           `${label}: restoration preserves the destination entry IDs and count`);
@@ -156,12 +194,15 @@ try {
       if (inlineActive) {
         check('plan');
         assert.equal(branchData('plan-mode:inline')?.active, true, 'startup preserves an existing standalone plan');
-        await session.reload();
+        await reload();
         check('plan');
         api.events.emit('workflow-mode:set', { mode: 'work' });
         api.events.emit('permission-mode:set', { mode: 'auto' });
       }
       check('work', 'auto');
+      api.events.emit('workflow-mode:set', { mode: 'work' });
+      api.events.emit('permission-mode:set', { mode: 'auto' });
+      check('work', 'auto'); // No-op setters must not create transcript markers.
       if (hasGate) {
         api.events.emit('permission-mode:cycle', {});
         check('work');
@@ -178,12 +219,13 @@ try {
         api.events.emit('workflow-mode:set', { mode: 'plan' });
         check('work');
         api.events.emit('workflow-mode:set', { mode: 'chat' });
+        check('chat');
         const chatLeaf = destination(manager.appendCustomEntry('test:chat-marker', {}));
         await go(workLeaf);
         check('work');
         await go(chatLeaf);
         check('chat');
-        await session.reload();
+        await reload();
         check('chat');
         assert.deepEqual(workflowEvents.at(-1)?.cycle, ['work', 'chat']);
       } else {
@@ -217,7 +259,7 @@ try {
         check('work');
         await go(planLeaf);
         check('plan');
-        await session.reload();
+        await reload();
         check('plan');
         if (hasGate) {
           assert.deepEqual(workflowEvents.at(-1)?.cycle, ['work', 'chat', 'plan']);
@@ -232,13 +274,16 @@ try {
         let result = await call('exit_plan_mode');
         assert.equal(result.details?.outcome, 'approved', JSON.stringify(result));
         check('work');
+        assert(manager.getEntries().some(entry => (entry.type === 'message' ? entry.message : entry).customType === 'plan-mode-notice'),
+          'real model turns exercise hidden reminders as well as visible transitions');
         assert.equal(session.model.id, planningId);
         assert.equal(session.thinkingLevel, 'high');
         assert(!session.getActiveToolNames().includes('finish_plan'), 'ordinary approval is not exec');
         assert.equal(branchData('plan-mode:exec')?.active, undefined);
-        await session.reload();
+        await reload();
         check('work');
         await session.prompt('/plan');
+        check('plan');
         writeFileSync(branchData('plan-mode:inline')?.planFile, '# Compact plan\n\nImplement locally.\n');
         approvalChoice = 'compact-here';
         result = await call('exit_plan_mode');
@@ -248,6 +293,7 @@ try {
         assert(!session.getActiveToolNames().includes('finish_plan'), 'compact-here is ordinary work');
         assert.equal(branchData('plan-mode:exec')?.active, undefined);
         await session.prompt('/plan');
+        check('plan');
         const handoffFile = branchData('plan-mode:inline')?.planFile;
         writeFileSync(handoffFile, '# Handoff plan\n\nImplement a local test.\n');
         approvalChoice = 'handoff';
@@ -258,7 +304,7 @@ try {
         assert.equal(requestedModels.at(-1), implementationId, 'handoff continues using the distinct model');
         assert.equal(branchData('plan-mode:exec')?.active, true);
         assert(session.getActiveToolNames().includes('finish_plan'));
-        check('exec');
+        check('exec', 'bypassPermissions', ['work']); // Approval exits plan before beginning implementation.
         const execLeaf = destination(manager.appendCustomEntry('test:exec-marker', {}));
         assert(execLeaf.entryIds.includes(planLeaf.id), 'plan target is an ancestor of exec');
         assert(execLeaf.entryIds.includes(workLeaf.id), 'work target is an ancestor of exec');
@@ -273,7 +319,7 @@ try {
         }
         await session.prompt('/plan');
         check('exec');
-        await session.reload();
+        await reload();
         check('exec');
         assert.equal(branchData('plan-mode:exec')?.active, true, 'reload does not durably complete exec');
         assert(session.getActiveToolNames().includes('finish_plan'));
@@ -300,7 +346,7 @@ try {
           check('plan');
           assert.equal(branchData('plan-mode:inline')?.active, true, `exec→${kind} plan stays active`);
           assert.equal(branchData('plan-mode:inline')?.planFile, planFile, `${kind} plan path is preserved`);
-          await session.reload();
+          await reload();
           check('plan');
           assert.deepEqual(manager.getBranch().map(entry => entry.id), target.entryIds,
             `${label}: ${kind} plan reload must not append records`);
@@ -514,11 +560,21 @@ try {
           assert.deepEqual(starts, [], 'failed activation sends no implementation brief');
           assert.deepEqual(requests, []);
         }
+        const visibleTransitions = () => fresh.sessionManager.getEntries().filter(entry => entry.type === 'custom_message'
+          && entry.customType === 'workflow:transition');
+        const initialTransitions = structuredClone(visibleTransitions());
+        assert.equal(initialTransitions.length, 1,
+          'fresh bootstrap emits one live transition into exec or recovery plan, not a startup marker');
+        assert.equal(initialTransitions[0].display, true);
+        assert.deepEqual(initialTransitions[0].details,
+          { version: 1, previous: 'work', mode: activation === 'success' ? 'exec' : 'plan' });
+        for (const entry of planNotices()) assert.equal(entry.message.display, false, 'fresh plan reminders stay hidden');
         const recovery = structuredClone(branch('plan-mode:inline'));
         const recoveryNotices = structuredClone(planNotices());
         const recoveryNotes = structuredClone(notes);
         for (let i = 0; i < 2; i++) {
           await fresh.reload();
+          assert.deepEqual(visibleTransitions(), initialTransitions, 'fresh reload must not append visible transitions');
           assert.equal(consumed().length, 1, 'reload must not consume or rerun bootstrap again');
           assert.equal(workflow(), activation === 'success' ? 'exec' : 'plan');
           checkApprovals();

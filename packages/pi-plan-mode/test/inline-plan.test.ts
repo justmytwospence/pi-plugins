@@ -151,6 +151,146 @@ async function setup(
   return { mock, context, selects, tool, emit, inline, gateEvents, plansDirectory, getLeafId, newSession, projection };
 }
 
+function workflowTransitions(mock: ReturnType<typeof createMockPi>) {
+  return mock.sentMessages.filter(
+    ({ message }) => (message as { customType?: string }).customType === "workflow:transition",
+  );
+}
+
+function transition(previous: string, mode: string, explanation: string) {
+  return {
+    message: {
+      customType: "workflow:transition",
+      content: `${mode.toUpperCase()} · ${explanation}`,
+      display: true,
+      details: { version: 1, previous, mode },
+    },
+    options: { triggerTurn: false },
+  };
+}
+
+function setupWorkflowLifecycle() {
+  const mock = createMockPi();
+  const context = createMockContext({ hasUI: true });
+  const ctx = context.ctx as ExtensionContext;
+  let executing = false;
+  const inline = registerInlinePlanMode(mock.pi, {
+    plansDirectory: () => mkdtempSync(join(tmpdir(), "workflow-plan-")),
+    safeSubcommands: () => undefined,
+    executing: () => executing,
+    toggleKey: () => undefined,
+    implementationChoices: () => undefined,
+    approved: vi.fn(),
+    compactHere: vi.fn(),
+    handoff: vi.fn(),
+    implementHere: () => "",
+  });
+  const emit = async (name: string) => {
+    for (const handler of mock.events.get(name) ?? []) await handler({}, ctx);
+  };
+  const exec = (active: boolean, source: "restore" | "transition") => {
+    executing = active;
+    mock.eventBus.emit("workflow-mode:exec", { active, source });
+  };
+  return { mock, context, ctx, inline, emit, exec };
+}
+
+test("standalone workflow badges describe work/plan/exec transitions once without triggering turns", async () => {
+  const h = await setup({ models: true, select: ["Yes, hand off to Claude Sonnet 5.5 (high)"] });
+  assert.deepEqual(workflowTransitions(h.mock), [], "startup is silent");
+  assert.ok(h.mock.messageRenderers.has("workflow:transition"));
+  await h.mock.commands.get("plan")?.handler("", h.context.ctx);
+  await h.mock.commands.get("plan")?.handler("", h.context.ctx);
+  assert.deepEqual(workflowTransitions(h.mock), [transition("work", "plan", "research and plan only")]);
+  writeFileSync(h.inline().planFile, "# Plan\n");
+  await h.tool(EXIT_TOOL).execute("approve", {}, undefined, undefined, h.context.ctx);
+  await h.emit("agent_before_settle", { outcome: "completed" });
+  await h.emit("agent_before_settle", { outcome: "completed" });
+  h.mock.eventBus.emit("workflow-mode:exec", { active: true, source: "transition" });
+  assert.deepEqual(workflowTransitions(h.mock), [
+    transition("work", "plan", "research and plan only"),
+    transition("plan", "work", "edits and actions"),
+    transition("work", "exec", "implementing approved plan"),
+  ]);
+  assert.equal(h.mock.sentUserMessages.length, 0, "badges do not send prompts");
+});
+
+test("standalone repeated plan and exec notifications do not duplicate badges", async () => {
+  const h = setupWorkflowLifecycle();
+  await h.emit("session_start");
+  h.inline.enter(h.ctx);
+  h.inline.enter(h.ctx);
+  h.inline.work(h.ctx);
+  h.inline.work(h.ctx);
+  h.exec(true, "transition");
+  h.exec(true, "transition");
+  h.exec(false, "transition");
+  h.exec(false, "transition");
+  assert.deepEqual(workflowTransitions(h.mock), [
+    transition("work", "plan", "research and plan only"),
+    transition("plan", "work", "edits and actions"),
+    transition("work", "exec", "implementing approved plan"),
+    transition("exec", "work", "edits and actions"),
+  ]);
+});
+
+for (const lifecycle of ["session_start", "session_tree"]) {
+  for (const mode of ["work", "plan", "exec"]) {
+    test(`${lifecycle} restores ${mode} silently and resets the badge baseline`, async () => {
+      const h = setupWorkflowLifecycle();
+      await h.emit("session_start");
+      h.inline.enter(h.ctx);
+      const before = structuredClone(h.mock.sentMessages);
+      Object.assign(h.ctx.sessionManager, {
+        getBranch: () => [{ type: "custom", customType: INLINE_ENTRY, data: { active: mode === "plan", told: true } }],
+      });
+      h.exec(mode === "exec", "restore");
+      await h.emit(lifecycle);
+      assert.deepEqual(h.mock.sentMessages, before, "restoration sends neither badges nor notices");
+      h.exec(mode === "exec", "transition");
+      assert.deepEqual(h.mock.sentMessages, before, "same restored mode is not a transition");
+      if (mode === "exec") h.exec(false, "transition");
+      else if (mode === "plan") h.inline.work(h.ctx);
+      else h.inline.enter(h.ctx);
+      assert.deepEqual(workflowTransitions(h.mock).slice(1), [
+        mode === "work"
+          ? transition("work", "plan", "research and plan only")
+          : transition(mode, "work", "edits and actions"),
+      ]);
+    });
+  }
+}
+
+test("the gate owns workflow badges, including plan approval and exec changes", async () => {
+  const h = await setup({ gate: true, models: true, select: ["Yes, hand off to Claude Sonnet 5.5 (high)"] });
+  await h.mock.commands.get("plan")?.handler("", h.context.ctx);
+  writeFileSync(h.inline().planFile, "# Plan\n");
+  await h.tool(EXIT_TOOL).execute("approve", {}, undefined, undefined, h.context.ctx);
+  await h.emit("agent_before_settle", { outcome: "completed" });
+  h.mock.eventBus.emit(MODE_CHANGED, { mode: "exec", source: "transition" });
+  h.mock.eventBus.emit("workflow-mode:exec", { active: true, source: "transition" });
+  assert.deepEqual(workflowTransitions(h.mock), [], "inline never duplicates the gate's badges");
+});
+
+test("shutdown and reload discard the previous gate and presented workflow", async () => {
+  const h = setupWorkflowLifecycle();
+  await h.emit("session_start");
+  h.mock.eventBus.emit(MODE_CHANGED, { mode: "plan", source: "transition" });
+  h.exec(true, "transition");
+  await h.emit("session_shutdown");
+  h.exec(false, "transition");
+  assert.deepEqual(workflowTransitions(h.mock), [], "shutdown discards the presented exec baseline");
+  await h.emit("session_start");
+  assert.deepEqual(workflowTransitions(h.mock), [], "reload does not announce the old exec to work change");
+  h.inline.enter(h.ctx);
+  h.inline.work(h.ctx);
+  assert.deepEqual(
+    workflowTransitions(h.mock),
+    [transition("work", "plan", "research and plan only"), transition("plan", "work", "edits and actions")],
+    "the previous gate cannot suppress standalone badges after reload",
+  );
+});
+
 for (const order of ["gate-first", "plan-first", "no-gate"] as const) {
   test(`early saved-plan entry survives later lifecycle restoration: ${order}`, async () => {
     const mock = createMockPi();
@@ -206,12 +346,16 @@ for (const order of ["gate-first", "plan-first", "no-gate"] as const) {
     assert.equal((mock.entries.at(-1)?.data as { active?: boolean } | undefined)?.active, true);
     assert.deepEqual(requests, order === "no-gate" ? [] : ["plan"]);
     assert.equal(mock.sentUserMessages.length, 0, "recovery never sends an implementation brief");
-    assert.equal(mock.sentMessages.length, 1, "later lifecycle restore does not duplicate the entry notice");
-    assert.equal((mock.sentMessages[0]?.message as { customType?: string } | undefined)?.customType, NOTICE_TYPE);
-    assert.equal(
-      (mock.sentMessages[0]?.message as { details?: { active?: boolean } } | undefined)?.details?.active,
-      true,
+    const notices = mock.sentMessages.filter(
+      ({ message }) => (message as { customType?: string }).customType === NOTICE_TYPE,
     );
+    assert.equal(notices.length, 1, "later lifecycle restore does not duplicate the entry notice");
+    assert.deepEqual(
+      workflowTransitions(mock),
+      order === "no-gate" ? [transition("work", "plan", "research and plan only")] : [],
+    );
+    assert.equal((notices[0]?.message as { customType?: string } | undefined)?.customType, NOTICE_TYPE);
+    assert.equal((notices[0]?.message as { details?: { active?: boolean } } | undefined)?.details?.active, true);
     const durable = structuredClone(mock.entries);
     for (const handler of mock.events.get("before_agent_start") ?? []) {
       assert.equal(await handler({ prompt: "review again" }, ctx), undefined, "entry was already announced");
