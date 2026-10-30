@@ -1,8 +1,77 @@
 import { describe, expect, test } from "vitest";
-import { alwaysAskBash, alwaysAskPath, bashKeys, gitCommand, isReadOnlyBash, READS_KEY, secretGitAdds, sedWrites, splitCommand, writeRedirects } from "../src/bash.ts";
+import { alwaysAskBash, alwaysAskPath, bashKeys, bashUnits, composeCommand, gitCommand, nestedCommands, isReadOnlyBash, READS_KEY, secretGitAdds, sedWrites, splitCommand, writeRedirects } from "../src/bash.ts";
 import { Downloads, downloadedRunReasons, scriptRuns, trackCommand } from "../src/downloads.ts";
 
 const cwd = "/Users/me/Projects/app";
+
+describe("parser hardening", () => {
+  test.each(["echo '<<true'", 'echo "<<true"', "echo \\<<true", "echo ok # <<true", "echo 'first\n<<true\nlast'", "cat <<<true"])("literal heredoc text does not hide following commands: %s", prefix => {
+    const command = `${prefix}\ncat .env\nrm -rf /`;
+    expect(alwaysAskBash(command, cwd)).toContain("touches credentials (.env)");
+    expect(alwaysAskBash(command, cwd).some(r => r.startsWith("deletes /"))).toBe(true);
+    expect(bashKeys(command)).toContain("rm");
+  });
+  test.each([
+    `cd /tmp; rm -rf ${cwd}`,
+    `cd /tmp; bash -c 'rm -rf ${cwd}'`,
+    `cd /tmp; echo $(rm -rf ${cwd})`,
+    `cd /tmp; cat <<EOF\n$(rm -rf ${cwd})\nEOF`,
+  ])("directory changes retain the original project hold: %s", command => {
+    expect(alwaysAskBash(command, cwd).some(r => r.startsWith("deletes "))).toBe(true);
+  });
+  test.each(["-oc pipefail", "-Oec extglob", "-co pipefail"])("shell option clusters keep scanning after option values: %s", options => {
+    const command = `bash ${options} 'rm -rf /'`;
+    expect(nestedCommands({ name: "bash", args: [...options.split(" "), "rm -rf /"] })).toEqual(["rm -rf /"]);
+    expect(alwaysAskBash(command, cwd).some(r => r.startsWith("deletes /"))).toBe(true);
+    expect(bashUnits(command).some(u => u.program?.name === "rm")).toBe(true);
+  });
+  test("exhausted eval analysis is opaque and held", () => {
+    const command = "eval ".repeat(32) + "rm -rf /";
+    expect(alwaysAskBash(command, cwd)).toContain("shell analysis depth exhausted (opaque command)");
+    expect(bashUnits(command).some(u => u.opaque && !u.read)).toBe(true);
+    expect(bashKeys(command)).toContain(`unparsed shell: ${command}`);
+  });
+  test.each(["echo $((1 + $(rm -rf /)))", 'echo "$((1 + `rm -rf /`))"', "cat <<EOF\n$(( $(rm -rf /) + 1 ))\nEOF", "echo $((1 + $((2 + $(rm -rf /)))))", "echo $((1 + $(rm -rf /)"])("arithmetic exposes executable effects: %s", command => {
+    expect(bashKeys(command)).toContain("rm");
+    expect(alwaysAskBash(command, cwd).some(r => r.startsWith("deletes /"))).toBe(true);
+  });
+  test("plain arithmetic and quoted input contain no executable unit", () => {
+    expect(bashKeys("echo $((1 + 2))")).toEqual([READS_KEY]);
+    expect(alwaysAskBash("echo '$(( $(rm -rf /) ))'", cwd)).toEqual([]);
+    expect(alwaysAskBash("cat <<'EOF'\n$(( $(rm -rf /) ))\nEOF", cwd)).toEqual([]);
+  });
+  test.each([['-c', '--'], ['-lc', '--'], ['-o', 'pipefail', '-c', '--'], ['-c', '-e']])("shell cursor %j", (...options) => {
+    expect(nestedCommands({ name: "bash", args: [...options, "rm -rf /"] })).toEqual(["rm -rf /"]);
+  });
+  test.each([["--", "-c", "rm -rf /"], ["file.sh", "-c", "rm -rf /"]])("script operands stop inline scanning %j", (...args) => {
+    expect(nestedCommands({ name: "bash", args })).toEqual([]);
+  });
+  test("Compose consumes options before choosing the verb", () => {
+    for (const args of [["-f", "up", "down"], ["-pup", "down"], ["--ansi", "never", "down"], ["--file=up", "-fdown", "up"]]) {
+      expect(composeCommand(args)?.sub).toBe(args.at(-1));
+      expect(bashKeys(`docker compose ${args.join(" ")}`)).toEqual([`docker compose ${args.at(-1)}`]);
+    }
+    for (const options of ["--mystery up", "--file", "--file=", "--ansi"]) {
+      expect(bashUnits(`docker compose ${options}`).some(u => u.opaque && !u.read)).toBe(true);
+    }
+  });
+  test("source survives substitution placeholders and opaque syntax cannot narrow", () => {
+    const command = 'echo $(rm tmp?); npm run "a b"';
+    expect(bashUnits(command).map(u => u.source)).toEqual(['echo $(rm tmp?)', 'npm run "a b"', 'rm tmp?']);
+    expect(bashUnits("bash --mystery -c 'rm x'")[0]).toMatchObject({ opaque: true, read: false, unparsed: true });
+    expect(bashUnits("echo $((1 + $(rm x)")[0]).toMatchObject({ opaque: true, read: false });
+    expect(isReadOnlyBash("ls \\")).toBe(false);
+    expect(isReadOnlyBash("bash --unknown -c ls", ["bash"])).toBe(false);
+    expect(bashUnits("sudo docker compose --unknown up")[0]).toMatchObject({ opaque: true, read: false });
+  });
+  test("depth exhaustion is opaque", () => {
+    const command = "echo $(".repeat(35) + "rm x" + ")".repeat(35);
+    expect(bashUnits(command).some(u => u.opaque)).toBe(true);
+    const nested = `bash -c '${command}'`;
+    expect(bashUnits(nested).some(u => u.opaque)).toBe(true);
+    expect(bashKeys(nested)).toContain(`unparsed shell: ${nested}`);
+  });
+});
 
 describe("splitCommand", () => {
   test("splits on separators but not inside quotes", () => {
@@ -462,6 +531,8 @@ describe("downloaded code", () => {
     ["cd sub && ./x", "sub/x"],
     ["bash -c './y'", "y"],
     ["v=$(./z)", "z"],
+    ["echo $((1 + $(./z)))", "z"],
+    ["bash -o pipefail -c -- './z'", "z"],
   ])("%s runs a script", (command, file) => {
     const files = runs(command);
     if (file === undefined) expect(files).toHaveLength(1);

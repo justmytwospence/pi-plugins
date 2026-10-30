@@ -180,30 +180,39 @@ export function splitCommand(command: string): string[][] {
 /** A simple command from `splitParts`: its tokens, and where its text starts in the command. */
 export interface Part {
   tokens: string[];
+  tokenStarts: number[];
   start: number;
+  end: number;
+  source: string;
+  opaque: boolean;
 }
 
 /** `splitCommand`, keeping where each part starts. */
 function splitParts(command: string): Part[] {
   const parts: Part[] = [];
   let tokens: string[] = [];
+  let tokenStarts: number[] = [];
+  let tokenStart = 0;
   let token = "";
   let inToken = false;
   let quote: '"' | "'" | undefined;
   let start = 0;
   /** Where the last unquoted, unescaped `>` is: only that one makes `>&` and `>|` redirects. */
   let redirectAt = -1;
+  let incomplete = false;
   const endToken = () => {
-    if (inToken) tokens.push(token);
+    if (inToken) { tokens.push(token); tokenStarts.push(tokenStart); }
     token = "";
     inToken = false;
   };
-  const endPart = () => {
+  const endPart = (end: number) => {
     endToken();
-    if (tokens.length) parts.push({ tokens, start });
+    if (tokens.length) parts.push({ tokens, tokenStarts, start, end, source: command.slice(start, end).trim(), opaque: quote !== undefined || incomplete });
     tokens = [];
+    tokenStarts = [];
   };
   for (let i = 0; i < command.length; i++) {
+    if (!inToken) tokenStart = i;
     const c = command[i] as string;
     if (quote) {
       if (c === quote) quote = undefined;
@@ -225,18 +234,19 @@ function splitParts(command: string): Part[] {
         inToken = true;
         continue;
       }
-      endPart();
+      endPart(i);
       if ((c === "|" || c === "&") && command[i + 1] === c) i++;
       start = i + 1;
     } else if (c === " " || c === "\t") {
       endToken();
     } else {
       if (c === ">") redirectAt = i;
+      if (c === "\\") incomplete = true;
       token += c;
       inToken = true;
     }
   }
-  endPart();
+  endPart(command.length);
   return parts;
 }
 
@@ -364,9 +374,9 @@ function plainShell(command: string): boolean {
 export function isReadOnlyBash(command: string, extra: readonly string[] = []): boolean {
   if (!plainShell(command)) return false;
   if (writeRedirects(command).length) return false;
-  const parts = splitCommand(command);
+  const parts = splitParts(command);
   if (parts.length === 0) return false;
-  return parts.every((tokens) => isReadOnlyPart(tokens, extra));
+  return parts.every((part) => !part.opaque && isReadOnlyPart(part.tokens, extra));
 }
 
 /** The sed scripts in `args`: the `-e`/`--expression` values, else the first operand. */
@@ -619,12 +629,29 @@ function readsDespiteArgs(name: string, args: readonly string[]): boolean {
   }
 }
 
+/** Compose global options, before its actual verb. Unknown syntax cannot name a safe key. */
+export function composeCommand(args: readonly string[]): { sub: string; args: string[]; index: number } | undefined {
+  const values = new Set(["-f", "--file", "-p", "--project-name", "--profile", "--project-directory", "--env-file", "--parallel", "--ansi", "--progress"]);
+  const flags = new Set(["--all-resources", "--compatibility", "--dry-run", "--help", "--version"]);
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (!a.startsWith("-")) return { sub: a, args: args.slice(i + 1), index: i };
+    const eq = a.indexOf("=");
+    if (values.has(eq < 0 ? a : a.slice(0, eq))) {
+      const value = eq < 0 ? args[++i] : a.slice(eq + 1);
+      if (!value || value.startsWith("-")) return undefined;
+    } else if (/^-[fp].+/u.test(a) || flags.has(a)) continue;
+    else return undefined;
+  }
+  return undefined;
+}
+
 /** Whether one simple command (from `splitCommand`) only reads. */
 function isReadOnlyPart(tokens: string[], extra: readonly string[]): boolean {
   const p = program(tokens);
   if (!p) return true;
   const { name, args } = p;
-  if (p.unsafe) return false;
+  if (p.unsafe || opaqueProgram(p)) return false;
   if (extra.includes(name)) return true;
   if (name === "git") {
     const g = gitCommand(args);
@@ -650,16 +677,10 @@ function isReadOnlyPart(tokens: string[], extra: readonly string[]): boolean {
       );
     }
     if (name === "journalctl") return !args.some((a) => /^--(vacuum|rotate|flush|sync|relinquish-var|smart-relinquish-var|setup-keys|update-catalog)/u.test(a));
-    if (name === "docker" && args[0] === "compose") {
-      let i = 1;
-      while (args[i]?.startsWith("-")) {
-        const opt = args[i++] as string;
-        if (["-f", "--file", "-p", "--project-name", "--profile", "--project-directory", "--env-file", "--parallel"].includes(opt)) i++;
-        else if (!/^--(?:file|project-name|profile|project-directory|env-file|parallel|ansi|progress)=/u.test(opt)) return false;
-      }
-      const sub = args[i];
-      return sub !== undefined && ["ps", "logs", "config", "ls", "images", "top", "version"].includes(sub) &&
-        !shortOption(args.slice(i + 1), "o") && !args.some((a) => /^--output(=|$)/u.test(a));
+    if ((name === "docker" || name === "podman") && args[0] === "compose") {
+      const compose = composeCommand(args.slice(1));
+      return compose !== undefined && ["ps", "logs", "config", "ls", "images", "top", "version"].includes(compose.sub) &&
+        !shortOption(compose.args, "o") && !compose.args.some((a) => /^--output(=|$)/u.test(a));
     }
     const words = args.filter((a) => !a.startsWith("-"));
     const sub = words[0];
@@ -750,19 +771,59 @@ export function unwrapSudo(args: string[]): { name: string; args: string[]; unsa
 export function nestedCommands(p: { name: string; args: string[] }): string[] {
   if (p.name === "eval") return p.args.length ? [p.args.join(" ")] : [];
   if (!SHELLS.has(p.name)) return [];
-  const i = p.args.findIndex((a) => /^-[a-zA-Z]*c/u.test(a));
-  const script = i >= 0 ? p.args[i + 1] : undefined;
-  return script ? [script] : [];
+  const { script } = shellCommand(p.args);
+  return script === undefined ? [] : [script];
+}
+
+function opaqueProgram(p: { name: string; args: string[] }): boolean {
+  if (p.name === "sudo" || p.name === "doas") {
+    const inner = unwrapSudo(p.args);
+    return inner !== undefined && opaqueProgram(inner);
+  }
+  return (SHELLS.has(p.name) && shellCommand(p.args).opaque) ||
+    ((p.name === "docker" || p.name === "podman") && p.args[0] === "compose" && !composeCommand(p.args.slice(1)));
+}
+
+function shellCommand(args: readonly string[]): { script?: string; opaque: boolean } {
+  let inline = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--") return inline ? { ...(args[i + 1] !== undefined ? { script: args[i + 1] } : {}), opaque: args[i + 1] === undefined } : { opaque: false };
+    if (!a.startsWith("-") && !a.startsWith("+")) return inline ? { script: a, opaque: false } : { opaque: false };
+    if (["--rcfile", "--init-file"].includes(a)) {
+      if (args[++i] === undefined) return { opaque: true };
+      continue;
+    }
+    if (/^--(?:rcfile|init-file)=.+/u.test(a) || ["--noprofile", "--norc", "--posix", "--login", "--restricted", "--verbose"].includes(a)) continue;
+    if (!/^[-+][a-zA-Z]+$/u.test(a)) return { opaque: true };
+    for (let j = 1; j < a.length; j++) {
+      const flag = a[j]!;
+      if (flag === "o" || flag === "O") {
+        // The value is the next argument, not the rest of this option cluster (`-oc pipefail`).
+        if (args[++i] === undefined) return { opaque: true };
+        continue;
+      }
+      if (!"abcefhiklmnprstuvxBCEHPT".includes(flag)) return { opaque: true };
+      if (flag === "c" && a[0] === "-") inline = true;
+    }
+  }
+  return { opaque: inline };
 }
 
 /**
  * Reasons this bash command must be put to the user whatever Jev says, or [] when none apply.
  * `branch` is the current git branch, for force-pushes without an explicit refspec.
+ * `project` stays fixed while `cwd` follows directory changes in nested commands.
  */
-export function alwaysAskBash(command: string, cwd: string, branch?: string, ignored: ReadonlySet<string> = new Set()): string[] {
+export function alwaysAskBash(command: string, cwd: string, branch?: string, ignored: ReadonlySet<string> = new Set(), depth = 0, project = cwd): string[] {
+  if (depth >= 32) return ["shell analysis depth exhausted (opaque command)"];
   const reasons: string[] = [];
-  const parts = splitCommand(command);
-  for (const tokens of parts) {
+  const { text: plain, expanding } = heredocs(command);
+  const { text, bodies } = extractSubstitutions(plain);
+  const parts = locatedParts(text, cwd);
+  for (const part of parts) {
+    const tokens = withoutKeywords(part.tokens);
+    const dir = part.dir;
     let p = program(tokens);
     if (!p) continue;
     if (p.name === "sudo" || p.name === "doas") {
@@ -774,7 +835,7 @@ export function alwaysAskBash(command: string, cwd: string, branch?: string, ign
     const { name, args } = p;
     if (name === "rm" || name === "rmdir" || name === "trash") {
       for (const target of args.filter((a) => !a.startsWith("-"))) {
-        if (isProtectedDir(path.resolve(cwd, expandHome(target)), cwd)) {
+        if (isProtectedDir(path.resolve(dir, expandHome(target)), project)) {
           reasons.push(`deletes ${target}, the project, your home directory, or a parent of either`);
           break;
         }
@@ -788,10 +849,15 @@ export function alwaysAskBash(command: string, cwd: string, branch?: string, ign
       const onMain = refs.length <= 1 && (branch === "main" || branch === "master");
       if (force && (mentionsMain || onMain)) reasons.push("force-pushes main/master");
     }
-    for (const nested of nestedCommands(p)) reasons.push(...alwaysAskBash(nested, cwd, branch, ignored));
+    for (const nested of nestedCommands(p)) reasons.push(...alwaysAskBash(nested, dir, branch, ignored, depth + 1, project));
+  }
+  for (const { body, at } of bodies) reasons.push(...alwaysAskBash(body, parts.findLast(p => p.start <= at)?.dir ?? cwd, branch, ignored, depth + 1, project));
+  for (const { body, at } of expanding) {
+    const outputAt = extractSubstitutions(plain.slice(0, at)).text.length;
+    for (const inner of heredocSubstitutions(body)) reasons.push(...alwaysAskBash(inner, parts.findLast(p => p.start <= outputAt)?.dir ?? cwd, branch, ignored, depth + 1, project));
   }
   if (/\b(curl|wget)\b[^|;&]*\|\s*(sudo\s+)?(ba|z|da|k)?sh\b/u.test(command)) reasons.push("pipes a download into a shell");
-  forEachPart(command, cwd, (tokens, dir) => {
+  forEachPart(text, cwd, (tokens, dir) => {
     const p = program(tokens);
     if (p && SECRET_SAFE.has(p.name)) return;
     const gitSub = p?.name === "git" ? gitCommand(p.args)?.sub : undefined;
@@ -904,26 +970,45 @@ export function withoutHeredocBodies(command: string): string {
  * The command with here-document bodies removed, and the bodies whose delimiter is unquoted
  * (`<<EOF`, not `<<'EOF'`): the shell expands `$(...)` and backticks in those before the command runs.
  */
-function heredocs(command: string): { text: string; expanding: string[] } {
+function heredocs(command: string): { text: string; expanding: { body: string; at: number }[] } {
   const out: string[] = [];
-  const pending: { delimiter: string; expands: boolean; lines: string[] }[] = [];
-  const expanding: string[] = [];
+  const pending: { delimiter: string; expands: boolean; lines: string[]; at: number }[] = [];
+  const expanding: { body: string; at: number }[] = [];
+  let quote: "'" | '"' | undefined;
   for (const line of command.split("\n")) {
     const open = pending[0];
     if (open) {
       if (line.trim() === open.delimiter) {
         pending.shift();
-        if (open.expands) expanding.push(open.lines.join("\n"));
+        if (open.expands) expanding.push({ body: open.lines.join("\n"), at: open.at });
       } else open.lines.push(line);
       continue;
     }
     out.push(line);
-    for (const m of line.matchAll(/<<-?\s*(\\?)(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2/gu)) {
-      pending.push({ delimiter: m[3] as string, expands: !m[1] && !m[2], lines: [] });
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (quote === "'") {
+        if (c === "'") quote = undefined;
+        continue;
+      }
+      if (c === "\\") { i++; continue; }
+      if (quote === '"') {
+        if (c === '"') quote = undefined;
+        continue;
+      }
+      if (c === "'" || c === '"') { quote = c; continue; }
+      if (c === "#" && (i === 0 || /[\s;|&()]/u.test(line[i - 1]!))) break;
+      if (c !== "<" || line[i + 1] !== "<") continue;
+      // A here-string is not a here-document, nor is quoted or escaped << text.
+      if (line[i + 2] === "<") { i += 2; continue; }
+      const m = /^<<-?\s*(\\?)(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2(?=$|[\s;|&<>])/u.exec(line.slice(i));
+      if (!m) continue;
+      pending.push({ delimiter: m[3] as string, expands: !m[1] && !m[2], lines: [], at: out.join("\n").length - line.length + i });
+      i += m[0].length - 1;
     }
   }
   // An unterminated body still runs its substitutions.
-  for (const open of pending) if (open.expands) expanding.push(open.lines.join("\n"));
+  for (const open of pending) if (open.expands) expanding.push({ body: open.lines.join("\n"), at: open.at });
   return { text: out.join("\n"), expanding };
 }
 
@@ -932,15 +1017,25 @@ function heredocs(command: string): { text: string; expanding: string[] } {
  * so only a backslash escapes; inside a substitution, quoting works as usual.
  */
 function heredocSubstitutions(body: string): string[] {
+  return substitutionCollector(body).bodies;
+}
+
+function substitutionCollector(body: string, depth = 0): { bodies: string[]; opaque: boolean } {
+  if (depth >= 32) return { bodies: [], opaque: true };
   const out: string[] = [];
+  let opaque = false;
   for (let i = 0; i < body.length; i++) {
     const c = body[i];
     if (c === "\\") {
       i++;
     } else if (c === "$" && body[i + 1] === "(") {
       const end = closingParen(body, i + 1);
-      // `$((...))` is arithmetic, not a command.
-      if (body[i + 2] !== "(") out.push(body.slice(i + 2, end));
+      if (end === body.length) opaque = true;
+      if (body[i + 2] === "(") {
+        const nested = substitutionCollector(body.slice(i + 3, end === body.length ? end : end - 1), depth + 1);
+        out.push(...nested.bodies);
+        opaque ||= nested.opaque;
+      } else out.push(body.slice(i + 2, end));
       i = end;
     } else if (c === "`") {
       let inner = "";
@@ -949,11 +1044,12 @@ function heredocSubstitutions(body: string): string[] {
         if (body[j] === "\\" && /[`$\\]/u.test(body[j + 1] ?? "")) j++;
         inner += body[j];
       }
+      if (j === body.length) opaque = true;
       out.push(inner);
       i = j;
     }
   }
-  return out;
+  return { bodies: out, opaque };
 }
 
 /**
@@ -973,6 +1069,10 @@ function partInfo(tokens: string[]): { key: string; invoked: string } | undefine
   // Project scripts (`bin/homelab status`) usually take subcommands too.
   const invoked = rest.find((t) => path.basename(t) === p.name) ?? "";
   const typed = invoked || p.name;
+  if ((p.name === "docker" || p.name === "podman") && p.args[0] === "compose") {
+    const compose = composeCommand(p.args.slice(1));
+    return compose && WORD.test(compose.sub) ? { key: `${p.name} compose ${compose.sub}`, invoked: typed } : undefined;
+  }
   const takesSubcommand = SUBCOMMAND_CLIS.has(p.name) || invoked.includes("/");
   if (first === undefined || !WORD.test(first) || !takesSubcommand) return { key: p.name, invoked: typed };
   if (!TWO_LEVEL.has(p.name)) return { key: `${p.name} ${first}`, invoked: typed };
@@ -982,6 +1082,10 @@ function partInfo(tokens: string[]): { key: string; invoked: string } | undefine
 
 /** A simple command as the permission rules see it (`bashUnits`). */
 export interface BashUnit {
+  source: string;
+  start: number;
+  end: number;
+  opaque: boolean;
   /** Its words, quotes removed, past the keywords that lead it (`do`, `then`). */
   words: string[];
   /** It only reads (as `isReadOnlyBash` counts a command). */
@@ -1011,18 +1115,25 @@ export interface BashUnit {
  */
 export function bashUnits(command: string, extraReadOnly: readonly string[] = []): BashUnit[] {
   const units: BashUnit[] = [];
-  const visit = (command: string, nested: boolean) => {
+  const visit = (command: string, nested: boolean, depth = 0) => {
+    if (depth >= 32) {
+      units.push({ source: command, start: 0, end: command.length, opaque: true, words: [], read: false, unparsed: true, unsafe: true, writes: false, nested });
+      return;
+    }
     const { text: plain, expanding } = heredocs(command);
-    const { text, bodies } = extractSubstitutions(plain);
-    for (const tokens of splitCommand(text)) {
+    const { text, bodies, offsets, opaque: substitutionsOpaque } = extractSubstitutions(plain);
+    const heredocOpaque = expanding.some(({ body }) => substitutionCollector(body).opaque);
+    for (const part of splitParts(text)) {
+      const tokens = part.tokens;
       if (NOT_COMMANDS.has(tokens[0] ?? "")) continue;
       let i = 0;
-      while (i < tokens.length && LEADING_KEYWORDS.has(tokens[i] as string)) i++;
+      while (i < tokens.length && tokens[i] !== "time" && LEADING_KEYWORDS.has(tokens[i] as string)) i++;
       const words = tokens.slice(i);
       if (!words.length) continue;
       const info = partInfo(tokens);
-      const read = isReadOnlyPart(words, extraReadOnly);
       const p = program(words);
+      const opaque = part.opaque || substitutionsOpaque || heredocOpaque || Boolean(p && opaqueProgram(p));
+      const read = !opaque && isReadOnlyPart(words, extraReadOnly);
       const g = p?.name === "git" ? gitCommand(p.args) : undefined;
       let runs = p;
       let inner: { name: string; args: string[] } | undefined;
@@ -1030,21 +1141,24 @@ export function bashUnits(command: string, extraReadOnly: readonly string[] = []
         runs = unwrapSudo(p.args);
         if (runs) inner = { name: runs.name, args: runs.args };
       }
+      const start = offsets[part.tokenStarts[i] ?? part.start] ?? 0;
+      const end = offsets[part.end] ?? plain.length;
       units.push({
+        source: plain.slice(start, end).trim(), start, end, opaque,
         words,
         read,
-        ...(info ? { key: info.key, invoked: info.invoked } : {}),
-        unparsed: !read && !info,
+        ...(info && !opaque ? { key: info.key, invoked: info.invoked } : {}),
+        unparsed: opaque || (!read && !info),
         unsafe: Boolean(p?.unsafe || g?.unsafeGlobal),
         writes: writeRedirects(words.join(" ")).length > 0,
         ...(p ? { program: { name: p.name, args: p.args } } : {}),
         ...(inner ? { inner } : {}),
         nested,
       });
-      for (const script of runs ? nestedCommands(runs) : []) visit(script, true);
+      for (const script of runs ? nestedCommands(runs) : []) visit(script, true, depth + 1);
     }
-    for (const { body } of bodies) visit(body, nested);
-    for (const body of expanding) for (const inner of heredocSubstitutions(body)) visit(inner, nested);
+    for (const { body } of bodies) visit(body, nested, depth + 1);
+    for (const { body } of expanding) for (const inner of heredocSubstitutions(body)) visit(inner, nested, depth + 1);
   };
   visit(command, false);
   return units;
@@ -1062,6 +1176,7 @@ export function bashKeys(command: string, extraReadOnly: readonly string[] = [])
   const keys = new Set<string>();
   let unparsed = false;
   for (const unit of bashUnits(command, extraReadOnly)) {
+    if (unit.opaque) { unparsed = true; continue; }
     if (unit.nested || unit.read) continue;
     if (unit.key) keys.add(unit.key);
     else if (unit.unparsed) unparsed = true;
@@ -1083,19 +1198,25 @@ export const SUBSTITUTED = "$(...)";
  * process substitution (`<(...)`, `>(...)`) outside quotes, replaced by `SUBSTITUTED`, and their
  * bodies with where each placeholder starts in the new text. Arithmetic (`$((...))`) becomes `0`.
  */
-export function extractSubstitutions(command: string): { text: string; bodies: { body: string; at: number }[] } {
+export function extractSubstitutions(command: string): { text: string; bodies: { body: string; at: number }[]; offsets: number[]; opaque: boolean } {
   const bodies: { body: string; at: number }[] = [];
+  const offsets: number[] = [];
+  let opaque = false;
   let text = "";
+  const append = (value: string, at: number) => {
+    for (let j = 0; j < value.length; j++) offsets.push(at);
+    text += value;
+  };
   let quote: "'" | '"' | undefined;
   for (let i = 0; i < command.length; i++) {
     const c = command[i] as string;
     if (quote === "'") {
       if (c === "'") quote = undefined;
-      text += c;
+      append(c, i);
       continue;
     }
     if (c === "\\") {
-      text += command.slice(i, i + 2);
+      append(command.slice(i, i + 2), i);
       i++;
       continue;
     }
@@ -1103,10 +1224,15 @@ export function extractSubstitutions(command: string): { text: string; bodies: {
     else if (!quote && (c === "'" || c === '"')) quote = c;
     else if (command[i + 1] === "(" && (c === "$" || (!quote && (c === "<" || c === ">")))) {
       const end = closingParen(command, i + 1);
-      if (c === "$" && command[i + 2] === "(") text += "0";
-      else {
+      if (end === command.length) opaque = true;
+      if (c === "$" && command[i + 2] === "(") {
+        const arithmetic = substitutionCollector(command.slice(i + 3, end === command.length ? end : end - 1));
+        for (const body of arithmetic.bodies) bodies.push({ body, at: text.length });
+        opaque ||= arithmetic.opaque;
+        append("0", i);
+      } else {
         bodies.push({ body: command.slice(i + 2, end), at: text.length });
-        text += SUBSTITUTED;
+        append(SUBSTITUTED, i);
       }
       i = end;
       continue;
@@ -1118,13 +1244,15 @@ export function extractSubstitutions(command: string): { text: string; bodies: {
         body += command[j];
       }
       bodies.push({ body, at: text.length });
-      text += SUBSTITUTED;
+      if (j === command.length) opaque = true;
+      append(SUBSTITUTED, i);
       i = j;
       continue;
     }
-    text += c;
+    append(c, i);
   }
-  return { text, bodies };
+  offsets.push(command.length);
+  return { text, bodies, offsets, opaque: opaque || quote !== undefined };
 }
 
 /** The index of the `)` closing the `(` at `open`, past quoted text and nested parentheses, or the end. */
@@ -1348,13 +1476,18 @@ export function bashPathAccess(
   const resolve = (dir: string, file: string) => path.resolve(dir, expandHome(file));
   /** `origin` is where the agent's call runs: a part elsewhere reads or writes its directory. */
   const visit = (command: string, cwd: string, origin: string) => {
-    const { text, bodies } = extractSubstitutions(withoutHeredocBodies(command));
+    const { text: plain, expanding } = heredocs(command);
+    const { text, bodies } = extractSubstitutions(plain);
     const parts = locatedParts(text, cwd);
     const partAt = (at: number) => parts.findLast((p) => p.start <= at);
     for (const { target, at } of redirectsAt(text)) if (target !== ">") writes.add(resolve(partAt(at)?.redirectDir ?? cwd, target));
     for (const part of parts) if (!part.cd) visitPart(part.tokens, part.dir, origin);
     // A substitution runs where the command around it runs.
     for (const { body, at } of bodies) visit(body, partAt(at)?.dir ?? cwd, origin);
+    for (const { body, at } of expanding) {
+      const outputAt = extractSubstitutions(plain.slice(0, at)).text.length;
+      for (const inner of heredocSubstitutions(body)) visit(inner, partAt(outputAt)?.dir ?? cwd, origin);
+    }
   };
   const visitPart = (raw: string[], dir: string, origin: string) => {
     // Redirects (collected by `visit`) are not arguments: `2>/dev/null`, `> out`.

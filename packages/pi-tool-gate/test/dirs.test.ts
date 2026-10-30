@@ -15,6 +15,12 @@ const app = path.join(P, "app");
 describe("bashPathAccess", () => {
   const access = (command: string, cwd = app) => bashPathAccess(command, cwd);
 
+  test("arithmetic substitutions keep their containing cwd, including heredocs", () => {
+    expect(access("cd ~/.config; echo $((1 + $(touch ./arithmetic)))").writes).toContain(`${H}/.config/arithmetic`);
+    expect(access("cd ~/.config; cat <<EOF\n$((1 + $(touch ./heredoc)))\nEOF").writes).toContain(`${H}/.config/heredoc`);
+    expect(access("cat <<'EOF'\n$(( $(touch ~/.config/quoted) ))\nEOF").writes).toEqual([]);
+  });
+
   test("read-only commands read what they name, relative to the directory they run in", () => {
     expect(access("cat ~/Projects/other/README.md")).toEqual({ reads: [`${P}/other/README.md`], writes: [] });
     expect(access("rg foo ../other src")).toEqual({ reads: [`${P}/other`], writes: [] });

@@ -1041,14 +1041,14 @@ export default function toolGate(pi: ExtensionAPI) {
 
       if (approval === "bypassPermissions" && effectiveWorkflow() !== "plan") {
         // Everything runs, except what a deny rule forbids, and removing /, home, the project or a
-        // parent of them (as Claude Code).
+        // parent of them (as Claude Code). Exhausted analysis cannot rule out such a removal.
         const call: Call = { tool, input, cwd: ctx.cwd, root: (await projectOf(ctx.cwd))[0], readOnlyCommands: config.readOnlyCommands };
         if (stale()) return staleResult();
         const forbidden = blocking(allRules, call);
         if (forbidden?.list === "deny") return deniedBy(tool, forbidden);
         if (!SHELL_TOOLS.has(tool)) return undefined;
         const command = String(input.command ?? "");
-        const critical = alwaysAskBash(command, ctx.cwd).filter((reason) => reason.startsWith("deletes "));
+        const critical = alwaysAskBash(command, ctx.cwd).filter((reason) => reason.startsWith("deletes ") || reason === "shell analysis depth exhausted (opaque command)");
         if (!critical.length) return undefined;
         held++;
         if (!ctx.hasUI) return { block: true, reason: `tool-gate held this call: it ${critical.join("; ")}. There is no user to approve it.` };

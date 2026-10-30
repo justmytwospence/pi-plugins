@@ -429,6 +429,10 @@ describe("workflow guards precede approvals", () => {
     expect(await h.emit("tool_call", call("write", { path: "/etc/hosts", content: "x" }), ctx)).toBeUndefined();
     ctx.ui.selectAnswers.push("Block");
     expect(await h.emit("tool_call", call("bash", { command: "rm -rf ~" }), ctx)).toMatchObject({ block: true });
+    for (const command of ["eval ".repeat(32) + "rm -rf /", `cd /tmp; rm -rf ${ctx.cwd}`, "bash -oc pipefail 'rm -rf /'", "echo '<<true'\nrm -rf /"]) {
+      ctx.ui.selectAnswers.push("Block");
+      expect(await h.emit("tool_call", call("bash", { command }), ctx)).toMatchObject({ block: true });
+    }
     expect(jev.calls).toHaveLength(0);
   });
 });

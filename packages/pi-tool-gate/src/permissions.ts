@@ -240,6 +240,42 @@ export function matchPath(pattern: PathPattern, file: string, root: string, exac
 
 const hasExpansion = (words: readonly string[]) => words.some((w) => /[$`]/u.test(w));
 
+const SHELL_RESERVED_WORDS = new Set([
+  "!", "case", "coproc", "do", "done", "elif", "else", "esac", "fi", "for", "function",
+  "if", "in", "select", "then", "time", "until", "while", "{", "}", "[[", "]]",
+]);
+
+/** Conservative proof that quote removal is the only shell operation on this argument list. */
+function literalShellArguments(source: string): boolean {
+  let quote: "'" | '"' | undefined;
+  let wordStart = 0;
+  for (let i = 0; i < source.length; i++) {
+    const c = source[i] as string;
+    if (quote === "'") {
+      if (c === "'") quote = undefined;
+      continue;
+    }
+    if (c === "\\") {
+      const next = source[++i];
+      if (next === undefined || next === "\n" || next === "\r") return false;
+      continue;
+    }
+    if (c === "$" || c === "`") return false;
+    if (quote === '"') {
+      if (c === '"') quote = undefined;
+      continue;
+    }
+    if (c === "'" || c === '"') quote = c;
+    else if (c === " " || c === "\t") {
+      // Bare reserved words can change shell grammar. Reject them in any position rather than
+      // trying to prove their grammatical role; quotes and escapes remain in the source slice.
+      if (SHELL_RESERVED_WORDS.has(source.slice(wordStart, i))) return false;
+      wordStart = i + 1;
+    } else if (/[*?\[\]{}~<>#;|&()\n\r]/u.test(c)) return false;
+  }
+  return quote === undefined && source.trim().length > 0 && !SHELL_RESERVED_WORDS.has(source.slice(wordStart));
+}
+
 function startsWith(prefix: readonly string[], words: readonly string[]): boolean {
   return prefix.length <= words.length && prefix.every((t, i) => t === words[i]);
 }
@@ -265,22 +301,28 @@ function formsOf(u: BashUnit, blocking: boolean): { argv: string[][]; key?: stri
 
 function unitMatches(rule: Rule, u: BashUnit, blocking: boolean): boolean {
   const c = rule.command;
-  if (!c?.tokens) return false;
+  if (!c?.tokens || (!blocking && u.opaque)) return false;
+  if (c.kind === "exact") {
+    // Expansion-bearing exact allows name only the whole call. Blocking rules may inspect an
+    // identically spelled command inside a compound or nested shell, without losing its source.
+    if (!blocking && (!literalShellArguments(c.text) || !literalShellArguments(u.source))) return false;
+    return sameCommand(c.text, u.source, formsOf(u, blocking).argv);
+  }
   const forms = formsOf(u, blocking);
   if (c.kind === "prefix") return forms.argv.some((f) => startsWith(c.tokens as string[], f)) || (forms.key !== undefined && startsWith(c.tokens, forms.key));
   // A wildcard pattern is matched against the command's words joined by single spaces; to allow, not
   // against a command with an expansion, whose words are not what runs.
-  if (c.kind === "glob") return forms.argv.some((f) => (blocking || !hasExpansion(f)) && c.re?.test(f.join(" ")) === true);
-  return forms.argv.some((f) => !hasExpansion(f) && sameWords(c.tokens as string[], f));
+  return forms.argv.some((f) => (blocking || !hasExpansion(f)) && c.re?.test(f.join(" ")) === true);
 }
 
 /** Whether an exact rule names this whole command: the same text, or the same single command in other spacing or quoting. */
-function sameCommand(rule: string, command: string): boolean {
+function sameCommand(rule: string, command: string, alternatives: readonly string[][] = []): boolean {
   if (rule.trim() === command.trim()) return true;
-  if (/[$`]/u.test(command) || /[$`]/u.test(rule)) return false;
+  if (!literalShellArguments(rule) || !literalShellArguments(command)) return false;
   const a = splitCommand(rule);
   const b = splitCommand(command);
-  return a.length === 1 && b.length === 1 && sameWords(normalizeWords(a[0] as string[]), normalizeWords(b[0] as string[]));
+  return a.length === 1 && b.length === 1 && [b[0] as string[], ...alternatives]
+    .some((words) => sameWords(normalizeWords(a[0] as string[]), normalizeWords(words)));
 }
 
 // ---- matching a call ------------------------------------------------------------------------
@@ -355,7 +397,17 @@ function blocks(r: Rule, call: Call): boolean {
  */
 export function ruleWarning(list: RuleList, rule: Rule): string | undefined {
   const c = rule.command;
-  if (list !== "allow" || c?.kind !== "glob") return undefined;
+  if (!c) return undefined;
+  if (c.kind === "exact" && !literalShellArguments(c.text)) {
+    return "contains shell syntax or incomplete quoting; exact matching requires identical source, and allow rules cover only the whole call";
+  }
+  if (c.kind === "prefix" && !literalShellArguments(c.text)) {
+    return "contains shell syntax or incomplete quoting; prefix words do not preserve expansion semantics";
+  }
+  if (c.kind === "glob" && /['"\\\\]/u.test(c.text)) {
+    return "contains quoting or escaping with a *; stars in permission rules are wildcards even when quoted or escaped";
+  }
+  if (list !== "allow" || c.kind !== "glob") return undefined;
   const before = c.text.slice(0, c.text.indexOf("*"));
   const words = before.split(" ").slice(0, -1).filter(Boolean);
   return words.length < 2 ? "has a * before the subcommand, so it allows any subcommand or program there" : undefined;
@@ -393,7 +445,7 @@ export function allowing(rules: readonly ScopedRule[], call: Call, exact = false
   const everything = mine.find((r) => bare(r.rule));
   if (everything) return [everything];
   const units = unitsOf(call).filter((u) => !u.nested);
-  if (!units.length || units.some((u) => u.unparsed)) return undefined;
+  if (!units.length || unitsOf(call).some((u) => u.opaque) || units.some((u) => u.unparsed)) return undefined;
   // Parts that do more than read need a rule. A call held only for a substitution or redirect, whose
   // parts all read, needs one for each of its commands.
   const acting = units.filter((u) => !u.read || u.writes);
@@ -448,7 +500,9 @@ function exactRule(command: string): string | undefined {
   const text = command.trim();
   // A `*` in a rule is a wildcard: a command with one cannot be named exactly.
   if (!text || text.includes("*")) return undefined;
-  return `Bash(${text})`;
+  const rule = `Bash(${text})`;
+  const parsed = parseRule(rule);
+  return parsed.ok && parsed.rule.command?.kind === "exact" ? rule : undefined;
 }
 
 /**
@@ -459,7 +513,11 @@ function exactRule(command: string): string | undefined {
 function unitRule(u: BashUnit): { rule: string; exact: boolean } | undefined {
   const name = u.program?.name ?? "";
   const keyWords = (u.key ?? "").split(" ");
-  const exact = () => (hasExpansion(u.words) || u.words.some((w) => w.includes("*")) ? undefined : { rule: `Bash(${normalizeWords(u.words).map(quoteWord).join(" ")})`, exact: true });
+  const exact = () => {
+    const rule = literalShellArguments(u.source) ? exactRule(u.source) : undefined;
+    return rule ? { rule, exact: true } : undefined;
+  };
+  if (u.opaque) return undefined;
   if (EXACT_PROGRAMS.has(name) || u.key?.startsWith("gh api") || runsInlineCode(u)) return exact();
   let words = keyWords;
   const typed = normalizeWords([u.invoked ?? name])[0] as string;
@@ -471,7 +529,11 @@ function unitRule(u: BashUnit): { rule: string; exact: boolean } | undefined {
     if (script === undefined || script.startsWith("-")) return exact();
     words = [name, script];
   }
-  return { rule: `Bash(${words.map(quoteWord).join(" ")}:*)`, exact: false };
+  // Copied words are not user-authored patterns. A literal star would turn this into a glob.
+  if (words.some((word) => word.includes("*"))) return exact();
+  const rule = `Bash(${words.map(quoteWord).join(" ")}:*)`;
+  const parsed = parseRule(rule);
+  return parsed.ok && parsed.rule.command?.kind === "prefix" ? { rule, exact: false } : exact();
 }
 
 /** The rules to offer for a shell call: one per key of `bashKeys`, each a prefix or, for risky programs, the exact command. */
@@ -480,7 +542,7 @@ export function suggestBash(command: string, readOnlyCommands: readonly string[]
   const heredoc = /<<-?\s*\\?['"]?[A-Za-z_]/u.test(command);
   const units = bashUnits(command, readOnlyCommands);
   const acting = units.filter((u) => !u.nested && !u.read);
-  if (!acting.length || acting.some((u) => u.unparsed)) return whole ? [whole] : [];
+  if (!acting.length || units.some((u) => u.opaque) || acting.some((u) => u.unparsed)) return whole ? [whole] : [];
   const rules = new Set<string>();
   for (const u of acting) {
     const r = unitRule(u);

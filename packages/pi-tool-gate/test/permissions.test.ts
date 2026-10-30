@@ -141,6 +141,81 @@ describe("prefix and exact commands", () => {
     expect(allows(expand, bash(`sh -c "echo $HOME"`))).toBeUndefined();
   });
 
+  test("exact comparison distinguishes literal arguments from shell syntax", () => {
+    for (const [literal, active] of [
+      ["'tmp?'", "tmp?"], ["'tmp[ab]'", "tmp[ab]"], ["'{a,b}'", "{a,b}"],
+      ["'~/tmp'", "~/tmp"], ["'>'", ">"], ["'#note'", "#note"],
+    ]) {
+      const text = `rm ${literal}`;
+      expect(allows(rules("allow", `Bash(${text})`), bash(`rm ${active}`)), active).toBeUndefined();
+      expect(blocking(rules("deny", `Bash(${text})`), bash(`echo ok; rm ${active}`)), active).toBeUndefined();
+    }
+    expect(allows(rules("allow", "Bash(rm 'tmp?')"), bash("cd x; rm tmp\\?"))).toBeDefined();
+    expect(allows(rules("allow", "Bash(rm tmp?)"), bash("rm tmp?"))).toBeDefined();
+    expect(allows(rules("allow", "Bash(rm tmp?)"), bash("cd x; rm tmp?"))).toBeUndefined();
+    expect(allows(rules("allow", "Bash(rm tmp?)"), bash("rm  tmp?"))).toBeUndefined();
+    expect(allows(rules("allow", "Bash(rm 'open)"), bash('rm "open'))).toBeUndefined();
+    expect(allows(rules("allow", "Bash(rm '$FILE')"), bash("rm \\$FILE"))).toBeDefined();
+    expect(allows(rules("allow", "Bash(rm '`date`')"), bash('rm "`date`"'))).toBeUndefined();
+    expect(blocking(rules("deny", "Bash(rm literal)"), bash("sudo rm literal"))?.list).toBe("deny");
+    expect(blocking(rules("deny", "Bash(rm 'tmp?')"), bash("sudo rm tmp?"))).toBeUndefined();
+  });
+
+  test("quoted reserved commands never authorize active shell keywords", () => {
+    for (const keyword of ["!", "time", "coproc"]) {
+      const literal = `'${keyword}' rm -rf /`;
+      const active = `${keyword} rm -rf /`;
+      expect(allows(rules("allow", `Bash(${literal})`), bash(active)), active).toBeUndefined();
+      expect(allows(rules("allow", `Bash(${active})`), bash(literal)), literal).toBeUndefined();
+      expect(allows(rules("allow", `Bash(${active})`), bash(active), true), active).toBeDefined();
+      for (const list of ["deny", "ask"] as const) {
+        expect(blocking(rules(list, `Bash(${literal})`), bash(active)), active).toBeUndefined();
+        expect(blocking(rules(list, `Bash(${active})`), bash(active))?.list, active).toBe(list);
+      }
+    }
+  });
+
+  test("literal source proof conservatively rejects bare reserved words but permits quoting", () => {
+    for (const keyword of [
+      "!", "case", "coproc", "do", "done", "elif", "else", "esac", "fi", "for", "function",
+      "if", "in", "select", "then", "time", "until", "while", "{", "}", "[[", "]]",
+    ]) {
+      const literal = `rm '${keyword}'`;
+      for (const active of [`rm ${keyword}`, `rm\t${keyword}\tfile`]) {
+        const parsed = rule("allow", `Bash(${active})`);
+        expect(ruleWarning("allow", parsed.rule), active).toBeDefined();
+        expect(allows([parsed], bash(active), true), active).toBeDefined();
+      }
+      expect(allows(rules("allow", `Bash(${literal})`), bash(`rm ${keyword}`), true), keyword).toBeUndefined();
+      for (const quoted of [`rm "${keyword}"`, `rm '${keyword}'`, `rm \\${keyword.split("").join("\\")}`]) {
+        expect(allows(rules("allow", `Bash(${literal})`), bash(quoted), true), quoted).toBeDefined();
+        expect(ruleWarning("allow", rule("allow", `Bash(${quoted})`).rule), quoted).toBeUndefined();
+      }
+    }
+    expect(allows(rules("allow", "Bash(rm 'time')"), bash('rm t"im"e'), true)).toBeDefined();
+    expect(allows(rules("allow", "Bash(rm sometime)"), bash('rm "sometime"'), true)).toBeDefined();
+  });
+
+  test("exact deny and ask inspect preserved compound and nested source", () => {
+    for (const list of ["deny", "ask"] as const) {
+      for (const command of ["echo ok; rm tmp?", "sh -c 'rm tmp?'", "echo $(rm tmp?)", "if true; then rm tmp?; fi"]) {
+        expect(blocking(rules(list, "Bash(rm tmp?)"), bash(command))?.list, command).toBe(list);
+        expect(blocking(rules(list, "Bash(rm tmp?)"), bash(command.replace("tmp?", '"tmp?"'))), command).toBeUndefined();
+      }
+    }
+    expect(blocking(rules("deny", "Bash(rm $FILE)"), bash("echo ok; rm $FILE"))?.list).toBe("deny");
+    expect(allows(rules("allow", "Bash(rm 0)"), bash("rm $((1 + 2))"))).toBeUndefined();
+  });
+
+  test("opaque analysis cannot use narrowed allows but still exposes confident commands to blockers", () => {
+    for (const command of ["docker compose --unknown up", "echo $((1 + $(git push)"]) {
+      expect(allows(rules("allow", "Bash(docker:*)", "Bash(echo:*)", "Bash(git push:*)"), bash(command)), command).toBeUndefined();
+      expect(suggest(bash(command)), command).toEqual([`Bash(${command})`]);
+    }
+    expect(blocking(rules("deny", "Bash(git push:*)"), bash("echo $((1 + $(git push)"))?.list).toBe("deny");
+    expect(blocking(rules("ask", "Bash(docker:*)"), bash("docker compose --unknown up"))?.list).toBe("ask");
+  });
+
   test("a bare tool rule covers every command", () => {
     expect(allows(rules("allow", "Bash"), bash("make deploy"))).toEqual(["Bash"]);
     expect(allows(rules("allow", "bash"), call("bg_run", { command: "make deploy", cwd: ROOT }))).toEqual(["Bash"]);
@@ -191,6 +266,16 @@ describe("wildcards anywhere, as in Claude Code", () => {
   test("an allow pattern does not match a command with an expansion; a deny pattern does", () => {
     expect(allows(rules("allow", "Bash(echo * done)"), bash("echo $X done"))).toBeUndefined();
     expect(blocking(rules("deny", "Bash(rm * $HOME)"), bash("rm -rf $HOME"))?.list).toBe("deny");
+  });
+
+  test("ambiguous persisted rules warn without being removed or narrowed", () => {
+    for (const list of ["allow", "deny", "ask"] as const) {
+      for (const text of ["Bash(rm tmp?)", "Bash(rm 'open)", "Bash(echo $HOME:*)", "Bash(python3 'a*.py':*)"]) {
+        const parsed = parseRule(text);
+        expect(parsed.ok, text).toBe(true);
+        if (parsed.ok) expect(ruleWarning(list, parsed.rule), text).toBeDefined();
+      }
+    }
   });
 
   test("an allow pattern with * before the subcommand is flagged; an exact suggestion is never a pattern", () => {
@@ -414,6 +499,21 @@ describe("suggested rules", () => {
     expect(s("uv run pytest -q")).toEqual(["Bash(uv run:*)"]);
   });
 
+  test("exact suggestions preserve expansion, redirect, quoting and wrapper source", () => {
+    for (const command of ["rm tmp?", "rm tmp[ab]", "rm {a,b}", "rm ~/tmp", "rm 'tmp?'", "rm tmp? > log", "time rm tmp?"]) {
+      expect(s(command), command).toEqual([`Bash(${command})`]);
+      expect(allows(rules("allow", ...s(command)), bash(command)), command).toBeDefined();
+    }
+    expect(s("cd x; rm tmp?")).toEqual(["Bash(cd x; rm tmp?)"]);
+  });
+
+  test("literal stars in copied script and executable names never become wildcards", () => {
+    for (const command of ["python3 'scripts/a*.py' --fast", "'./scripts/a*.sh' --fast"]) {
+      expect(s(command), command).toEqual([]);
+    }
+    expect(parseRule("Bash(python3 scripts/*.py:*)").ok).toBe(true);
+  });
+
   test("one rule per key, for a call with several", () => {
     expect(s("npm test && git push && rm -rf build")).toEqual(["Bash(git push:*)", "Bash(npm test:*)", "Bash(rm -rf build)"]);
     expect(s("echo \"$(git push origin $(npm publish))\"; npm test")).toEqual(["Bash(git push:*)", "Bash(npm publish:*)", "Bash(npm test:*)"]);
@@ -434,11 +534,11 @@ describe("suggested rules", () => {
     expect(s("nc -l 9000")).toEqual(["Bash(nc -l 9000)"]);
     expect(s("gh api repos/me/x/issues")).toEqual(["Bash(gh api repos/me/x/issues)"]);
     expect(s("sudo systemctl restart nginx")).toEqual(["Bash(sudo systemctl restart nginx)"]);
-    // Time and environment are not part of what the rule says.
-    expect(s("time rm -rf build")).toEqual(["Bash(rm -rf build)"]);
+    // Exact rules retain source, including wrappers.
+    expect(s("time rm -rf build")).toEqual(["Bash(time rm -rf build)"]);
     // Inline code and scripts fed on stdin.
     expect(s("python3 -c 'print(1)'")).toEqual(["Bash(python3 -c 'print(1)')"]);
-    expect(s("node -e \"console.log(1)\"")).toEqual(["Bash(node -e 'console.log(1)')"]);
+    expect(s("node -e \"console.log(1)\"")).toEqual(['Bash(node -e "console.log(1)")']);
     expect(s("bash -c 'git push'")).toEqual(["Bash(bash -c 'git push')"]);
     expect(s("sh -c 'make; make test'")).toEqual(["Bash(sh -c 'make; make test')"]);
     expect(s("python3")).toEqual(["Bash(python3)"]);
@@ -604,6 +704,17 @@ describe("rule files", () => {
     const { rules: found, ignored } = loadFileRules(cwd);
     expect(found.map((r) => r.text)).toEqual(["Bash(rm:*)", "Bash(git status)"]);
     expect(ignored.map((r) => r.raw)).toEqual(["WebFetch(domain:x)", "Bash()"]);
+  });
+
+  test("ambiguous persisted rules stay visible and produce warnings", () => {
+    const file = path.join(cwd, ".pi", "tool-gate.json");
+    const raw = ["Bash(rm tmp?)", "Bash(rm 'open)", "Bash(python3 'a*.py':*)"];
+    write(file, { permissions: { deny: raw } });
+    const loaded = loadFileRules(cwd);
+    expect(loaded.ignored).toEqual([]);
+    expect(loaded.rules.map((r) => r.raw)).toEqual(raw);
+    for (const r of loaded.rules) expect(ruleWarning(r.list, r.rule), r.raw).toBeDefined();
+    expect(JSON.parse(readFileSync(file, "utf8")).permissions.deny).toEqual(raw);
   });
 
   test("changes to a file are picked up", () => {
