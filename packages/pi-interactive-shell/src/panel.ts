@@ -1,6 +1,6 @@
 import { constants } from "node:os";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { type Component, type TUI, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { type Component, type TUI, type TuiMouseEvent, type TuiMouseEventResult, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { encodeInput } from "./input.ts";
 import { footerRows } from "./footer.ts";
 import { TerminalScreen } from "./screen.ts";
@@ -39,7 +39,8 @@ export class TerminalPanel {
   constructor(private readonly tui: TUI, private readonly theme: Theme,
     readonly command: string, private readonly cwd: string,
     private readonly done: (result: HandoffResult, snapshot?: Component) => void, private readonly spawn: PtyFactory = spawnPty,
-    private readonly autoClose = false, private readonly inline = false) {
+    private readonly autoClose = false, private readonly inline = false,
+    private readonly onStarted?: () => void) {
     this.width = Math.max(5, (tui.terminal?.columns ?? 80) - 2);
     const { cols, rows } = this.dimensions(this.width);
     this.screen = new TerminalScreen(cols, rows, () => { if (!this.closed) tui.requestRender(); }, data => {
@@ -83,6 +84,7 @@ export class TerminalPanel {
     try {
       const pty = await this.spawn(this.command, this.cwd, this.screen.terminal.cols, this.screen.terminal.rows);
       this.pty = pty;
+      this.onStarted?.();
       this.listeners.push(pty.onData(data => {
         if (this.closed) return;
         this.outstanding += data.length;
@@ -165,12 +167,12 @@ export class TerminalPanel {
     }
     if (this.prefix) {
       this.prefix = false;
-      if (data === "f") this.expanded = !this.expanded;
-      else if (data === "q") { if (this.ended) { void this.closeExited(); } else this.confirming = true; }
-      else if (data === "u") this.offset = Math.min(this.screen.maxScrollback, this.offset + Math.max(1, Math.floor(this.screen.terminal.rows / 2)));
-      else if (data === "d") this.offset = Math.max(0, this.offset - Math.max(1, Math.floor(this.screen.terminal.rows / 2)));
-      else if (data === "g") this.offset = this.screen.maxScrollback;
-      else if (data === "G") this.offset = 0;
+      if (matchesKey(data, "f")) this.expanded = !this.expanded;
+      else if (matchesKey(data, "q")) { if (this.ended) { void this.closeExited(); } else this.confirming = true; }
+      else if (matchesKey(data, "u")) this.offset = Math.min(this.screen.maxScrollback, this.offset + Math.max(1, Math.floor(this.screen.terminal.rows / 2)));
+      else if (matchesKey(data, "d")) this.offset = Math.max(0, this.offset - Math.max(1, Math.floor(this.screen.terminal.rows / 2)));
+      else if (matchesKey(data, "g")) this.offset = this.screen.maxScrollback;
+      else if (matchesKey(data, "shift+g") || data === "G") this.offset = 0;
       else if (matchesKey(data, "ctrl+]")) this.send("\x1d");
       this.tui.requestRender();
       return;
@@ -182,6 +184,14 @@ export class TerminalPanel {
     }
     const input = encodeInput(data, this.screen.terminal.modes);
     if (input !== undefined) { this.offset = 0; this.send(input); }
+  }
+
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (!this.inline || this.closed || this.closing || this.ended || event.type !== "wheel" ||
+      !Number.isFinite(event.wheelDelta) || !event.wheelDelta) return undefined;
+    this.offset = Math.max(0, Math.min(this.screen.maxScrollback, Math.round(this.offset - event.wheelDelta)));
+    this.tui.requestRender();
+    return { handled: true, render: true };
   }
 
   private send(data: string) {

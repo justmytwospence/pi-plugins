@@ -28,6 +28,7 @@ export function harness(options: { tools?: any[]; exec?: (cmd: string, args: str
   const handlers = new Map<string, Handler[]>();
   const eventHandlers = new Map<string, Set<(data: any) => void>>();
   const commands = new Map<string, any>();
+  const tools = new Map<string, any>();
   const shortcuts = new Map<string, any>();
   const entries: Array<{ customType: string; data: unknown }> = [];
   const messages: any[] = [];
@@ -40,7 +41,7 @@ export function harness(options: { tools?: any[]; exec?: (cmd: string, args: str
     },
     registerCommand: (name: string, options: any) => commands.set(name, options),
     registerShortcut: (key: string, options: any) => shortcuts.set(key, options),
-    registerTool: () => undefined,
+    registerTool: (tool: any) => tools.set(tool.name, tool),
     registerFlag: () => undefined,
     registerMessageRenderer: () => undefined,
     registerEntryRenderer: () => undefined,
@@ -87,10 +88,17 @@ export function harness(options: { tools?: any[]; exec?: (cmd: string, args: str
       setStatus: (key: string, text: string | undefined) => ui.status.set(key, text),
       custom: async () => undefined,
       editorText: "",
+      editorWrites: [] as string[],
+      theme: { fg: (_c: string, s: string) => s },
+      renderEditor: (width = 80) => editor.render(width),
+      focus: (component: any) => { focused = component; },
+      get editor() { return editor; },
+      get tui() { return tui; },
       widgets: new Map<string, any>(),
       inputHandlers: [] as Array<(data: string) => any>,
       getEditorText: () => ui.editorText,
       setEditorText: (text: string) => {
+        ui.editorWrites.push(text);
         ui.editorText = text;
       },
       setWidget: (key: string, content: any, opts?: any) => {
@@ -120,8 +128,9 @@ export function harness(options: { tools?: any[]; exec?: (cmd: string, args: str
         return w.content({}, { fg: (_c: string, s: string) => s, bold: (s: string) => s }).render(width);
       },
     };
-    const editor = { getText: () => ui.editorText, render: () => [], isShowingAutocomplete: () => false, [Symbol.for("pi-plugins.editor-surface.v1")]: "main" };
-    const tui = { terminal: { columns: 80 }, getFocusedComponent: () => editor, requestRender: () => undefined };
+    const editor = { getText: () => ui.editorText, render: (_width: number): string[] => [], isShowingAutocomplete: () => false, [Symbol.for("pi-plugins.editor-surface.v1")]: "main" };
+    let focused: any = editor;
+    const tui = { terminal: { columns: 80 }, getFocusedComponent: () => focused, requestRender: () => undefined };
     lastCtx = {
       cwd: "/Users/me/Projects/app",
       hasUI: true,
@@ -134,7 +143,7 @@ export function harness(options: { tools?: any[]; exec?: (cmd: string, args: str
     };
     return lastCtx;
   }
-  return { pi: pi as any, handlers, commands, shortcuts, entries, messages, emit, ctx, thinkingChanges, get thinking() { return thinking; } };
+  return { pi: pi as any, handlers, tools, commands, shortcuts, entries, messages, emit, ctx, thinkingChanges, get thinking() { return thinking; } };
 }
 
 export function userEntry(text: string) {

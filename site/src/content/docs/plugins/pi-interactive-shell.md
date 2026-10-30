@@ -8,7 +8,7 @@ plugin: pi-interactive-shell
 
 - **Use it for:** Run a command you need to interact with directly in Pi's embedded terminal panel.
 - **Enable:** Select `packages/pi-interactive-shell/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
-- **Controls:** Submit `!i <command>` yourself; `!!i <command>` also excludes it from model context. Ctrl+] prefixes panel controls; program keys otherwise reach the command.
+- **Controls:** Submit `!i <command>` yourself; `!!i <command>` also excludes it from model context. Ctrl+] prefixes panel controls; fullscreen supports live wheel scrolling. `/interactive-shell status` inspects availability without running a command.
 - **Settings:** No plugin-specific settings; uses `$SHELL` (fallback `/bin/sh`) and the session working directory.
 - **Requirements, cost & privacy:** Real, idle terminal TUI; native PTY dependencies; no model/classifier calls of its own. Session history contains the command and status, not terminal output or interactive keystrokes; external recording remains possible.
 - **Integrations & limits:** Optional next-prompt capability probe; exact, accepted and submitted model suggestions resume the agent with status only; manual commands return focus without resuming. No agent tool, detach, multiple terminals or background-job adoption. pi-bg is unchanged.
@@ -33,7 +33,9 @@ Pi opens a focused inline terminal in the chat transcript, roughly half the term
 
 The snapshot shows the earliest and latest retained buffer rows with a labeled `… N rows omitted …` row between them when needed. The count includes blank screen rows, not logical lines. The head is the earliest row still in xterm's bounded 1,000-line scrollback, not necessarily the command's original beginning. With no omission, or a very short panel, it shows the bottom viewport. This frame has no independent scrolling or input; use Pi's normal transcript navigation to revisit it.
 
-Inline insertion uses a guarded lookup of Pi's private transcript layout. If that layout is not recognized, the command uses the existing focused overlay instead. Manual fallback panels keep exited output until Enter or Esc dismisses them; exact accepted suggestions close automatically and continue with status only. The fallback does not leave an inline snapshot.
+Inline insertion uses a guarded lookup of Pi's private transcript layout. It is **inline-only**: if the layout is not recognized, the result is `inline terminal unavailable: <reason>; command was not run`. No process starts, no overlay substitutes for the panel, and this failure does not automatically continue the agent.
+
+Use `/interactive-shell status` to inspect availability, renderer mode, inline/unsupported layout, lookup source or reason, bounded layout diagnostics and the most recent actual handoff path. Inspection starts no process. Layout diagnostics contain component names/counts and lookup metadata, never document text, commands, terminal output or editor drafts.
 
 Only `!i <command>` selects this path. Plain `!<command>` retains Pi's normal behavior, including for programs that happen to need a terminal. There is no auto-detection, allowlist or interactive-command environment configuration. Do not load Pi's shipped interactive-shell example alongside this component: it handles the same user shell input and has different auto-detection behavior.
 
@@ -53,19 +55,19 @@ To control the panel, press **Ctrl+]**, then one of:
 | `g` / `G` | Scroll to top / end |
 | Ctrl+] | Send a literal Ctrl+] to the program |
 
-Scroll controls work while the command runs, not on the static final frame. Expanded inline mode remains in transcript flow; the fallback overlay's compact and expanded views leave room for the footer. Closing or tearing down the panel stops its process group, escalates termination when needed and disposes the terminal emulation.
+Scroll controls work while the command runs, not on the static final frame. In fullscreen mode, wheel/trackpad events inside the live panel scroll its terminal rows rather than the outer chat, even at the scrollback bounds. In regular mode use the keyboard controls; the terminal emulator owns wheel events. Wheel events are never forwarded to the child program. Expanded inline mode remains in transcript flow. Closing or tearing down the panel stops its process group, escalates termination when needed and disposes the terminal emulation.
 
 ## Optional next-prompt suggestion
 
-When [pi-next-prompt](/plugins/pi-next-prompt/) is enabled, it can probe for interactive-shell capability and suggest an explicit `!i <command>` next step. Without that capability, it must not assume the panel is available. There is no dependency requirement in either direction.
+When [pi-next-prompt](/plugins/pi-next-prompt/) is enabled, the model uses `offer_terminal` with a complete raw shell command to offer an editable `!i <command>` next step. The tool checks interactive-shell support and inline layout, and returns a concrete blocker if unavailable. Its `displayed` status acknowledges inclusion in Pi's ghost/widget component output within one second, not that you saw or accepted it. It never runs a command. There is no dependency requirement in either direction.
 
-Next-prompt owns the ghost text, acceptance keys and suggestion lifecycle. Press Tab or Right to copy a suggestion into the editor, review it, then press Enter yourself. Acceptance never executes the command, and a model-authored suggestion is not authorization. If you submit an accepted model-suggested `!i` draft exactly unchanged, the agent continues automatically on success, failure or cancellation using only the recorded status. It does not receive terminal output or keystrokes, including the retained snapshot. Manual, edited, externally offered and `!!i` commands also return focus immediately in inline mode, but do not automatically resume the agent. The interactive-shell component adds no separate suggestion UI.
+Next-prompt owns the ghost text, acceptance keys and suggestion lifecycle. An explicit offer can be visible while the agent is busy, but acceptance is disabled until the response finishes successfully; an aborted or failed response clears it. Press Tab or Right to copy a suggestion into the editor, review it, then press Enter yourself. Acceptance never executes the command, and a model-authored suggestion is not authorization. If you submit an accepted model-suggested `!i` draft exactly unchanged, the agent continues automatically on success, failure or cancellation using only the recorded status. It does not receive terminal output or keystrokes, including the retained snapshot. Manual, edited, externally offered and `!!i` commands also return focus immediately in inline mode, but do not automatically resume the agent. The interactive-shell component adds no separate suggestion UI.
 
 ## Foreground execution, not a background task
 
 The foreground command runs through your `$SHELL` (or `/bin/sh` when unset), with `-c`, the session working directory and a pseudoterminal. It has your normal OS permissions. The invoked program must be available in your environment.
 
-Pi's event processing and background monitoring can continue, and existing background OS processes keep running. **New agent requests are gated until the live handoff finishes** (or the fallback overlay is dismissed). A retained inline snapshot does not block requests.
+Pi's event processing and background monitoring can continue, and existing background OS processes keep running. **New agent requests are gated until the live handoff finishes**. A retained inline snapshot does not block requests.
 
 This component provides no model-callable tool, detach, multiple terminals or adoption of existing background jobs. [pi-bg](/plugins/pi-bg/) remains unchanged and owns its existing logged jobs, services and waiting behavior. Choose it when the agent needs captured output or asynchronous progress; choose `!i` when you need direct interaction. See [Background work & subagents](/recipes/background-work/).
 

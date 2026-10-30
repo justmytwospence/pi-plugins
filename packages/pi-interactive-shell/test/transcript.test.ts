@@ -1,6 +1,6 @@
 import { Container } from "@earendil-works/pi-tui";
 import { expect, test, vi } from "vitest";
-import { createFocusProxy, findChatContainer, TranscriptPanels } from "../src/transcript.ts";
+import { createFocusProxy, resolveTranscript, TranscriptPanels } from "../src/transcript.ts";
 
 const child = () => ({ render: () => ["unrelated"], invalidate() {} });
 function tree() {
@@ -14,15 +14,63 @@ function tree() {
 
 test("resolves only the expected private document/chat shape", () => {
   const { root, chat, document } = tree();
-  expect(findChatContainer(root)).toBe(chat);
+  expect(resolveTranscript(root)).toEqual({ chat, source: "document-root" });
   for (const invalid of [undefined, {}, { children: [] }, new Container(), { children: [document] }]) {
-    expect(findChatContainer(invalid)).toBeUndefined();
+    expect(resolveTranscript(invalid)).toHaveProperty("reason");
   }
   document.children[1] = child();
-  expect(findChatContainer(root)).toBeUndefined();
+  expect(resolveTranscript(root)).toHaveProperty("reason");
   document.children[1] = new Container();
   (chat as any).removeChild = undefined;
-  expect(findChatContainer(root)).toBeUndefined();
+  expect(resolveTranscript(root)).toHaveProperty("reason");
+});
+
+const view = (document: unknown, primary = true) => ({ primary, child: document, scrollTo() {} });
+
+test("fullscreen resolves the mounted primary transcript, never root or nested chats", () => {
+  const { document, chat } = tree();
+  const other = tree();
+  const tui = Object.assign(other.root, { mode: "fullscreen", getPrimaryScrollView: () => view(document) });
+  expect(resolveTranscript(tui)).toEqual({ chat, source: "primary-scroll-view" });
+});
+
+test("before first frame skips empty implicit view for Sidebar-style nested primary", () => {
+  const { document, chat } = tree();
+  const nested: any = { entries: [{ component: { children: [view(tree().document, false), view(document)] } }] };
+  nested.children = [nested]; // Cycle-safe.
+  const implicit = { render: () => [], invalidate() {} };
+  expect(resolveTranscript({ mode: "fullscreen", getPrimaryScrollView: () => view(implicit), layoutRoot: nested }))
+    .toEqual({ chat, source: "primary-scroll-view" });
+});
+
+test("ambiguous, absent and malformed primary views fail closed", () => {
+  const good = view(tree().document);
+  for (const layoutRoot of [{ children: [good, view(tree().document)] }, { children: [view(tree().document, false)] }, { children: [view(new Container())] }]) {
+    expect(resolveTranscript({ mode: "fullscreen", layoutRoot })).toHaveProperty("reason");
+  }
+  const malformed = new Container(); malformed.addChild(new Container());
+  expect(resolveTranscript({ mode: "fullscreen", getPrimaryScrollView: () => view(malformed), layoutRoot: { children: [good] } }))
+    .toMatchObject({ reason: "malformed primary transcript document" });
+  const empty = view(new Container());
+  for (const direct of [empty, view({ render: () => [], invalidate() {} })]) {
+    expect(resolveTranscript({ mode: "fullscreen", getPrimaryScrollView: () => direct, layoutRoot: { children: [direct, good] } }))
+      .toMatchObject({ reason: "malformed primary transcript document" });
+  }
+  expect(resolveTranscript({ mode: "fullscreen", getPrimaryScrollView: () => empty, layoutRoot: { children: [good] } }))
+    .toMatchObject({ reason: "malformed primary transcript document" });
+  // Arbitrary three-child documents without a primary view are not candidates.
+  expect(resolveTranscript({ mode: "fullscreen", layoutRoot: tree().root })).toHaveProperty("reason");
+});
+
+test("diagnostics contain only bounded component metadata, never document text", () => {
+  const secret = "SECRET command output editor draft";
+  const malformed = new Container(); malformed.addChild({ render: () => [secret], invalidate() {}, text: secret } as any);
+  const result = resolveTranscript({ mode: "fullscreen", getPrimaryScrollView: () => view(malformed), text: secret });
+  expect(result).toMatchObject({ shape: { rendererMode: "fullscreen", documentChildCount: 1, documentChildren: ["Object"], primaryLookup: true } });
+  expect(JSON.stringify(result)).not.toContain(secret);
+  const root = new Container(); for (let i = 0; i < 100; i++) root.addChild(child());
+  const info = resolveTranscript(root);
+  expect("shape" in info && info.shape.rootChildren).toHaveLength(12);
 });
 
 test("replaces at the same index and cleans up only owned snapshots", () => {

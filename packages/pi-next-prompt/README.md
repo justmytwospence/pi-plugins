@@ -1,6 +1,6 @@
 # pi-next-prompt
 
-A Pi extension that suggests the prompt you would most likely send next, like Claude Code's prompt suggestions. After a run, the suggestion appears as dim ghost text inside the empty editor, with no hint. `Tab` (or `Right`) fills it in; it is not sent. Typing hides it, and deleting what you typed brings it back, until you send a prompt. A draft already in the editor when the run ends does not lose the suggestion: it waits out of sight, and appears once you stash the draft (pi-stash's `Ctrl+S`) or delete it. With pi-stash and nothing stashed, `Ctrl+S` stashes the suggestion instead (`prompt:take-next` on `pi.events`).
+A Pi extension that suggests the prompt you would most likely send next, like Claude Code's prompt suggestions. After a run, an ordinary suggestion appears as dim ghost text inside the empty editor, with no hint. `Tab` (or `Right`) fills it in; it is not sent. Typing hides it, and deleting what you typed brings it back, until you send a prompt. A draft already in the editor when the run ends does not lose an ordinary tag suggestion: it waits out of sight, and appears once you stash the draft (pi-stash's `Ctrl+S`) or delete it. With pi-stash and nothing stashed, `Ctrl+S` stashes the suggestion instead (`prompt:take-next` on `pi.events`).
 
 It only appears when there is one obvious next step. Most turns show nothing.
 
@@ -40,11 +40,23 @@ No `npm install` is needed to run it: the package.json has no `dependencies`; Pi
 
 ## How it works
 
-- **The main model writes the suggestion.** In interactive terminal sessions, a short system prompt section (`next_prompt`) asks the model to end its final message with one line `<next>...</next>` only when exactly one concrete next step is obvious (short prose, but a command is always given whole, however long), and to leave it out when the task is done, when it needs your input, when several steps are equally likely, or after an error. No extra model request is made for the suggestion itself.
-- **Interactive commands belong in the suggestion.** When optional pi-interactive-shell is available, the model is instructed to offer a concrete command as `!i <command>`, not only in a code block. This includes requested manual tests even after implementation and automated checks are complete. Tab fills an editable draft; only Enter runs it. Credentials never go into a suggestion, and a command is never truncated to fit: the ghost text is clipped to the editor's width, but Tab fills in the whole command.
+- **The main model writes the suggestion.** In interactive terminal sessions, a short system prompt section (`next_prompt`) asks the model to end its final message with one line `<next>...</next>` for an ordinary nonterminal next step, only when exactly one concrete next step is obvious. It leaves the tag out when the task is done, when it needs your input, when several steps are equally likely, or after an error. No extra model request is made for the suggestion itself.
+- **Interactive commands use `offer_terminal`.** With optional pi-interactive-shell available, the model uses this model-only tool for interactive handoffs, including requested manual tests after implementation and automated checks. Its sole input is `command`: the raw, complete shell command, without an `!i` or `!!i` prefix. The tool prepends `!i ` and offers an editable suggestion; it never executes, submits or overwrites a draft. Quotes and internal whitespace are preserved exactly. Blank, boundary-whitespace (which Pi would strip on submission), multiline, control-character and prefixed inputs are rejected, as are suggestions exceeding a positive `maxChars`; commands are never truncated. The ghost may be clipped to the editor's width, but acceptance copies the whole command. Credentials never belong in a suggestion.
 - **The line never stays in context.** On `message_end`, every line that consists only of a `<next>...</next>` tag is removed before the message is stored, so the session file and every later request carry the answer without it. Tags inside a line of prose are left alone. While the answer streams, the line is visible for a moment before it is removed. The last tag in the latest assistant message wins; one before a tool call is superseded by the final answer. With `maxChars` above 0, a longer suggestion is dropped; the default, 0, sets no limit.
-- **Jev vets it.** [Jev](https://docs.typesafe.ai), through Pi's classifier models, is asked whether the suggestion is a concrete, non-generic next step that follows from the answer, is not already done, and is something you would plausibly send next. Its input is your last prompt (clipped to 1,500 characters), the tail of the answer (2,000 characters) and the suggestion. The suggestion is shown at probability >= `jev.threshold` (default 0.6). If Jev is off or unavailable (no classifier model or credentials, timeout, error), the suggestion is shown anyway.
-- **When it shows.** Only after a run that completed (not aborted or failed), only while the editor is empty (with a draft there, it is held until the editor is empty again), and only in the interactive terminal UI. Print mode, RPC mode and subagents get no instruction. Sending a prompt, a new run, compaction, switching models, navigating the session tree, starting a session, or `/next-prompt off` clears it.
+- **Jev vets ordinary tags.** [Jev](https://docs.typesafe.ai), through Pi's classifier models, is asked whether the suggestion is a concrete, non-generic next step that follows from the answer, is not already done, and is something you would plausibly send next. Its input is your last prompt (clipped to 1,500 characters), the tail of the answer (2,000 characters) and the suggestion. The suggestion is shown at probability >= `jev.threshold` (default 0.6). If Jev is off or unavailable (no classifier model or credentials, timeout, error), the suggestion is shown anyway.
+- **When ordinary tags show.** Only after a run that completed (not aborted or failed), only while the editor is empty (with a draft there, it is held until the editor is empty again), and only in the interactive terminal UI. Print mode, RPC mode and subagents get no instruction. Sending a prompt, a new run, compaction, switching models, navigating the session tree, starting a session, or `/next-prompt off` clears it.
+
+## Verified terminal offers
+
+`offer_terminal` waits at most one second for the ghost or fallback widget to include the suggestion in its actual component output. A `displayed` result acknowledges that render, not that you have seen or accepted it. A queued offer alone is not displayed. A `blocked` result is an explicit tool error with a concrete reason. The model must not claim it offered a command unless the result says `displayed`.
+
+An explicit offer can be visible while the agent is busy, but Tab/Right cannot accept it until the response settles successfully. Abort or failure clears it. Explicit offers bypass Jev, outrank automatic tags and survive a final answer with no tag. An identical still-visible explicit offer is idempotent; a different outstanding explicit offer or an external offer is a conflict, not permission to replace it.
+
+Blockers include disabled suggestions, non-TUI or unattached UI, a nonempty editor or non-main focus, missing interactive-shell support, unsupported inline layout, conflicting external or explicit offers, and render timeout, abort or reset. Draft entry, focus loss, reset or shutdown while awaiting acknowledgement clears the owned offer and returns blocked. Unsupported-layout errors include safe diagnostics (component names/counts, renderer mode and lookup reason), never commands, drafts or terminal output.
+
+After successful settlement, Tab/Right copies the suggestion; only Enter submits it. Submitting an accepted model-authored `!i` draft exactly unchanged allows pi-interactive-shell to continue the agent with status only, never terminal output or keystrokes. Manual, edited, externally offered and `!!i` commands do not automatically continue it.
+
+Interactive-shell is inline-only: an unsupported transcript layout produces an explicit command-not-run error, with no overlay fallback and no automatic continuation. `/interactive-shell status` reports availability, layout diagnostics and the last actual handoff path. Live fullscreen panels support wheel/trackpad scrolling; regular mode uses the Ctrl+] keyboard controls. After exit, retained head/tail snapshots are static and memory-only, may contain sensitive text, and can disappear on transcript clear/rebuild, reload, session switch or exit; they are not saved to session history or model context. See [pi-interactive-shell](../pi-interactive-shell/README.md) for controls and privacy limits.
 
 ## Keys and focus
 
@@ -52,7 +64,7 @@ The ghost text is drawn by wrapping the focused editor's `render` while a sugges
 
 The accept keys (`acceptKeys`, default `tab` and `right`) are taken only when all of these hold; otherwise they reach the focused component as usual:
 
-- a suggestion is shown and the editor is empty;
+- a suggestion is shown and the editor is empty; an explicit terminal offer also requires successful turn settlement;
 - the focused component is the main prompt editor (the one focused at session start, or one that reports the suite's `main` editor surface), not an embedded editor or a dialog;
 - the editor is not showing autocomplete, and, for a modal editor that reports its mode (pi-vim), it is in Normal or Insert state without autocomplete.
 
@@ -65,7 +77,7 @@ Existing drafts are preserved, and no available target means Tab does nothing.
 
 ## Commands
 
-- `/next-prompt` or `/next-prompt status`: on/off, instruction injection, the latest assistant's valid/invalid/omitted tag, settlement events, Jev approval/veto, terminal UI availability, current focus/draft blockers, and ghost/fallback/concealed offer. Approval is not the same as display. Diagnostics reset on a new run or session invalidation; they are memory-only and make no model calls. An omitted tag can be deliberate abstention, not necessarily an error.
+- `/next-prompt` or `/next-prompt status`: on/off, instruction injection, the latest assistant's valid/invalid/omitted tag, settlement events, Jev approval/veto, terminal UI availability, current focus/draft blockers, and ghost/fallback/concealed offer, plus explicit-offer state and its last render acknowledgement or blocker. Approval is not the same as display; a render acknowledgement is not user acceptance. Diagnostics reset on a new run or session invalidation; they are memory-only and make no model calls. An omitted tag can be deliberate abstention, not necessarily an error.
 - `/next-prompt on`, `/next-prompt off`: for this session. Off also drops the prompt section from later runs and clears any suggestion.
 
 ## Configuration
@@ -94,18 +106,18 @@ The `agents` locations are meant to be shared with the opencode and Claude Code 
 
 - Pi 1.0 or newer. Interactive terminal UI only.
 - The prompt section adds a few system prompt tokens to every interactive run, and a suggestion adds a short line of output tokens.
-- Jev vetting is optional. It needs a Pi with classifier models and a configured classifier model; Pi resolves the credentials (`TYPESAFE_API_KEY` for its `typesafe` provider). Each suggestion makes one classifier request, which can be billed. Set `jev.enabled` to `false` to skip it.
+- Jev vetting of ordinary tag suggestions is optional; explicit terminal offers bypass it. It needs a Pi with classifier models and a configured classifier model; Pi resolves the credentials (`TYPESAFE_API_KEY` for its `typesafe` provider). Each ordinary tag candidate makes one classifier request, which can be billed. Set `jev.enabled` to `false` to skip it.
 - On disk it reads only the settings files above and writes nothing. It rewrites assistant messages only to remove the tag lines.
 
 ## Optional integrations
 
-- Other extensions can offer a next prompt over Pi's event bus: `pi.events.emit("prompt:offer", { source, text })`, and withdraw it with `{ source }` and no text. An offer is shown only while Pi is idle, never replaces the model's own suggestion, and is cleared by the next prompt. Nothing is ever sent. pi-marimo uses it for new marimo-lens selections (`Use Lens to address S1 in fit.py`).
+- Other extensions can offer a next prompt over Pi's event bus: `pi.events.emit("prompt:offer", { source, text })`, and withdraw it with `{ source }` and no text. An offer is shown only while Pi is idle, never replaces the model's own suggestion, and is cleared by the next prompt. Busy-time requests are dropped, unlike explicit terminal offers. External offers bypass Jev but do not provide `offer_terminal`'s render acknowledgement or model-authored command continuation. Nothing is ever sent. pi-marimo uses it for new marimo-lens selections (`Use Lens to address S1 in fit.py`).
 - pi-vim, or any editor that reports the suite's editor surface and mode markers: the suggestion is offered only in its main editor in Normal or Insert state, and accepting calls its insert hook. Not required.
 
 ## Limitations
 
 - Drawing inside the editor wraps the editor's `render` method while a suggestion is shown, and reaches the TUI through a throwaway widget. Editors that draw no cursor get the fallback line.
-- If the model never emits the tag, nothing is shown; there is no separate suggestion request. `/next-prompt status` distinguishes this from a classifier veto or UI/focus blocker. Stored answers cannot prove omission: valid and invalid tag lines are stripped before persistence.
+- For ordinary nonterminal suggestions, if the model never emits the tag, nothing is shown; there is no separate suggestion request. A displayed explicit terminal offer instead survives a tagless final answer. `/next-prompt status` distinguishes this from a classifier veto or UI/focus blocker. Stored answers cannot prove omission: valid and invalid tag lines are stripped before persistence.
 - A finished implementation with pending rollout can still have one obvious next step; the instruction explicitly permits that suggestion, without making suggestions unconditional.
 
 ## Development

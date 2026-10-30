@@ -13,11 +13,88 @@ function container(value: unknown): value is ChatContainer {
   return Array.isArray(candidate.children) && typeof candidate.addChild === "function" && typeof candidate.removeChild === "function";
 }
 
-export function findChatContainer(tui: unknown): ChatContainer | undefined {
-  if (!container(tui)) return undefined;
-  const document = tui.children[0];
-  if (!container(document) || document.children.length !== 3 || !document.children.every(container)) return undefined;
-  return document.children[2] as unknown as ChatContainer;
+export interface LayoutShape {
+  rendererMode: "regular" | "fullscreen" | "unknown";
+  rootChildCount: number;
+  rootChildren: string[];
+  documentChildCount: number;
+  documentChildren: string[];
+  primaryLookup: boolean;
+  layoutRoot: boolean;
+}
+
+type Layout = { mode?: unknown; children?: unknown; layoutRoot?: unknown; getPrimaryScrollView?: () => unknown };
+const childrenOf = (value: unknown): unknown[] => {
+  const children = (value as { children?: unknown } | undefined)?.children;
+  return Array.isArray(children) ? children : [];
+};
+const names = (children: unknown[]) => children.slice(0, 12).map(child => {
+  const name = (child as { constructor?: { name?: unknown } } | undefined)?.constructor?.name;
+  return typeof name === "string" ? name.replace(/[^a-zA-Z0-9_$]/g, "").slice(0, 48) : "unknown";
+});
+export function layoutShape(tui: unknown, document?: unknown): LayoutShape {
+  const layout = (tui ?? {}) as Layout;
+  let candidate = document;
+  if (candidate === undefined) {
+    try {
+      candidate = layout.mode === "fullscreen"
+        ? (layout.getPrimaryScrollView?.() as { child?: unknown } | undefined)?.child
+        : childrenOf(tui)[0];
+    } catch { /* Diagnostics must not throw if a renderer lookup is unavailable. */ }
+  }
+  const root = childrenOf(tui), doc = childrenOf(candidate);
+  return {
+    rendererMode: layout.mode === "fullscreen" ? "fullscreen" : layout.mode === "regular" ? "regular" : "unknown",
+    rootChildCount: root.length, rootChildren: names(root),
+    documentChildCount: doc.length, documentChildren: names(doc),
+    primaryLookup: typeof layout.getPrimaryScrollView === "function", layoutRoot: !!layout.layoutRoot,
+  };
+}
+
+function documentChat(document: unknown): ChatContainer | undefined {
+  return container(document) && document.children.length === 3 && document.children.every(container)
+    ? document.children[2] as unknown as ChatContainer : undefined;
+}
+
+/** Resolve only Pi's primary transcript, never another extension's nested chat. */
+export function resolveTranscript(tui: unknown):
+  { chat: ChatContainer; source: "primary-scroll-view" | "document-root" } | { reason: string; shape: LayoutShape } {
+  const layout = (tui ?? {}) as Layout;
+  const reject = (reason: string, document?: unknown) => ({ reason, shape: layoutShape(tui, document) });
+  if (layout.mode === "fullscreen") {
+    let mounted: unknown;
+    try { mounted = layout.getPrimaryScrollView?.(); }
+    catch { return reject("primary scroll view lookup failed"); }
+    const document = (mounted as { child?: unknown } | undefined)?.child;
+    const chat = documentChat(document);
+    if (chat) return { chat, source: "primary-scroll-view" };
+    const seen = new Set<unknown>(), primary: { child?: unknown }[] = [];
+    const walk = (node: unknown, depth: number) => {
+      if (!node || typeof node !== "object" || seen.has(node) || depth > 8 || seen.size >= 10_000) return;
+      seen.add(node);
+      const value = node as { primary?: unknown; child?: unknown; scrollTo?: unknown; entries?: unknown };
+      if (value.primary === true && typeof value.scrollTo === "function") primary.push(value);
+      const entries = Array.isArray(value.entries) ? value.entries : [];
+      for (const entry of entries) walk((entry as { component?: unknown } | undefined)?.component, depth + 1);
+      for (const child of childrenOf(node)) walk(child, depth + 1);
+    };
+    walk(layout.layoutRoot, 0);
+    // The pre-frame implicit view is detached and has a render-only child without
+    // children. A mounted view or container-shaped child must fail closed.
+    if (mounted) {
+      const implicit = !seen.has(mounted) && !!document && typeof document === "object" &&
+        !("children" in document) && typeof (document as { render?: unknown }).render === "function";
+      if (!implicit) return reject("malformed primary transcript document", document);
+    }
+    if (primary.length > 1) return reject("ambiguous primary scroll views");
+    if (primary.length === 0) return reject("primary transcript scroll view not found", document);
+    const candidate = primary[0]!.child;
+    const found = documentChat(candidate);
+    return found ? { chat: found, source: "primary-scroll-view" } : reject("malformed primary transcript document", candidate);
+  }
+  const document = childrenOf(tui)[0];
+  const chat = container(tui) ? documentChat(document) : undefined;
+  return chat ? { chat, source: "document-root" } : reject("regular transcript document not found or malformed", document);
 }
 
 /** Own only frozen children, never Pi's status messages or other extensions' UI. */

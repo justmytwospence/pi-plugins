@@ -6,6 +6,7 @@
 // Jev vets it before it is shown and fails open.
 import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { type KeyId, type TUI, isKeyRelease, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
 import { loadConfig } from "./config.ts";
 import { type ClassifierQuestion, type JevConfig, askJev, bool } from "./jev.ts";
 import { INSTRUCTION, INTERACTIVE_INSTRUCTION, extractNext } from "./tag.ts";
@@ -139,6 +140,13 @@ export default function nextPrompt(pi: ExtensionAPI) {
   // A turn is running: offers from other extensions wait for the user's next idle moment.
   let busy = false;
   let generation = 0;
+  type Surface = "ghost" | "widget";
+  type OfferDetails = { status: "displayed" | "blocked"; text?: string; reason?: string; surface?: Surface; acceptAfterTurn?: boolean };
+  type ExplicitOffer = { id: number; text: string; surface?: Surface; acknowledged: boolean; finish?: (details: OfferDetails) => void };
+  let explicit: ExplicitOffer | undefined;
+  let lastExplicit = "none yet";
+  const blocked = (reason: string): OfferDetails => ({ status: "blocked", reason });
+  const displayed = (offer: ExplicitOffer): OfferDetails => ({ status: "displayed", text: offer.text, surface: offer.surface, acceptAfterTurn: busy });
   let lastVerdict = "";
   let lastTag = "none yet";
   let instruction = "not evaluated yet";
@@ -185,7 +193,13 @@ export default function nextPrompt(pi: ExtensionAPI) {
     ui?.setWidget(WIDGET_KEY, undefined);
   };
 
-  const hide = () => {
+  const hide = (reason = "offer cleared") => {
+    const previous = explicit;
+    explicit = undefined;
+    if (previous) {
+      lastExplicit = reason;
+      previous.finish?.(blocked(reason));
+    }
     offered = undefined;
     offerSource = undefined;
     conceal();
@@ -203,7 +217,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
   };
 
   /** Draw the suggestion inside the focused editor by wrapping its render. False if that is not possible. */
-  const ghost = (target: ExtensionUIContext) => {
+  const ghost = (target: ExtensionUIContext, observed?: (surface: Surface) => void) => {
     terminal = grabTui(target) ?? terminal;
     const tui = terminal;
     const editor = mainFocused();
@@ -215,14 +229,21 @@ export default function nextPrompt(pi: ExtensionAPI) {
     if (!render.call(editor, width).some(hasCursor)) return false;
     const own = Object.prototype.hasOwnProperty.call(editor, "render");
     const patch = { editor, render, wrapper: render, own, tui, enabled: true };
+    const owner = explicit;
     const wrapper = function (this: Renderable, w: number) {
       const lines = render.call(this, w);
-      if (!patch.enabled || !mainFocused() || shown === undefined || this.getText() !== "") return lines;
+      if (!patch.enabled) return lines;
+      if (!mainFocused() || this.getText() !== "") {
+        if (owner) queueMicrotask(() => { if (explicit === owner) hide("editor draft or focus changed"); });
+        return lines;
+      }
+      if (shown === undefined) return lines;
       const i = lines.findIndex(hasCursor);
       const line = i === -1 ? undefined : ghostLine(lines[i]!, shown, w, (s) => target.theme.fg("dim", s));
       if (line === undefined) return lines;
       const out = lines.slice();
       out[i] = line;
+      observed?.("ghost");
       return out;
     };
     editor.render = wrapper;
@@ -243,24 +264,120 @@ export default function nextPrompt(pi: ExtensionAPI) {
     hide();
   };
 
-  const show = (text: string) => {
+  const show = (text: string, observed?: (surface: Surface) => void) => {
     if (!ui) return;
     unpatch();
+    ui.setWidget(WIDGET_KEY, undefined);
+    const owner = explicit;
     offered = text;
     shown = text;
     const hint = `${keyLabel(config.acceptKeys[0] ?? "tab")} to accept`;
-    if (ghost(ui)) return;
+    if (ghost(ui, observed)) return;
     ui.setWidget(
       WIDGET_KEY,
       (_tui, theme) => ({
-        render: (width: number) => [truncateToWidth(`${theme.fg("dim", `→ ${text}`)}  ${theme.fg("muted", hint)}`, width)],
+        render: (width: number) => {
+          if (observed && (!active() || !mainFocused() || ui?.getEditorText() !== "" || shown !== text)) {
+            if (owner) queueMicrotask(() => { if (explicit === owner) hide("editor draft or focus changed"); });
+            return [];
+          }
+          const line = truncateToWidth(`${theme.fg("dim", `→ ${text}`)}  ${theme.fg("muted", hint)}`, width);
+          if (line.length > 0) observed?.("widget");
+          return [line];
+        },
         invalidate: () => {},
       }),
       { placement: "belowEditor" },
     );
   };
 
+  pi.registerTool({
+    name: "offer_terminal",
+    label: "Offer terminal command",
+    exposure: "model-only",
+    description: "Displays an editable !i suggestion, never executes it. Waits at most one second for a render acknowledgement; returns an explicit blocked reason if it cannot be displayed.",
+    promptGuidelines: [
+      "Use offer_terminal for interactive shell handoffs with the complete raw shell command (no !i prefix).",
+      "Never claim a command was offered unless offer_terminal returned status displayed. After a displayed result explain Tab/Right then Enter, available after the response finishes.",
+    ],
+    parameters: Type.Object({ command: Type.String({ minLength: 1 }) }),
+    async execute(_id, { command }, signal, _update, ctx) {
+      const result = (details: OfferDetails) => {
+        lastExplicit = details.status === "displayed" ? `displayed (${details.surface})` : details.reason!;
+        return {
+          content: [{ type: "text" as const, text: details.status === "displayed"
+            ? `Displayed editable suggestion: ${details.text}\nAfter the current response finishes, press Tab/Right to copy it, then Enter to run it. Nothing was executed.`
+            : `Terminal suggestion blocked: ${details.reason}` }],
+          details,
+          ...(details.status === "blocked" ? { isError: true } : {}),
+        };
+      };
+      if (!command.trim()) return result(blocked("command is empty"));
+      if (command !== command.trim()) return result(blocked("leading or trailing whitespace cannot be preserved by Pi's shell submission; command was not offered"));
+      if (/[\x00-\x1f\x7f-\x9f]/u.test(command)) return result(blocked("command contains control characters or line breaks"));
+      if (/^!!?i(?:\s|$)/u.test(command.trimStart())) return result(blocked("provide the raw command without !i or !!i prefix"));
+      const text = `!i ${command}`;
+      if (config.maxChars > 0 && text.length > config.maxChars) return result(blocked("command exceeds maxChars; shell commands are never truncated"));
+      if (!active()) return result(blocked("next-prompt is disabled"));
+      if (ctx.mode !== "tui" || !ctx.hasUI || !ui || !terminal) return result(blocked(`terminal UI is not attached (${uiState})`));
+      if (ui.getEditorText() !== "") {
+        if (explicit) hide("editor contains a draft");
+        return result(blocked("editor contains a draft"));
+      }
+      if (!mainFocused()) {
+        if (explicit) hide("main editor lost focus");
+        return result(blocked(`main editor is not focused (${focusState()})`));
+      }
+      if (signal?.aborted) return result(blocked("tool aborted"));
+      let shell: { available?: boolean; layout?: string; source?: string; reason?: string; shape?: unknown; rendererMode?: string } | undefined;
+      pi.events.emit("interactive-shell:inspect", { reply: (info: typeof shell) => { shell = info; } });
+      if (!shell) return result(blocked("interactive-shell support is missing"));
+      if (!shell.available || shell.layout !== "inline") return result(blocked(`interactive-shell unavailable: ${JSON.stringify(shell)}`));
+      if (offerSource !== undefined) return result(blocked("another extension owns the current offer"));
+      if (explicit) {
+        if (explicit.text !== text) return result(blocked("a different explicit offer is outstanding"));
+        if (explicit.acknowledged && shown === text) return result(displayed(explicit));
+        return result(blocked("identical explicit offer is still awaiting render acknowledgement"));
+      }
+      const offer: ExplicitOffer = { id: ++generation, text, acknowledged: false };
+      explicit = offer;
+      const details = await new Promise<OfferDetails>((resolve) => {
+        let finished = false;
+        const finish = (value: OfferDetails) => {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", abort);
+          offer.finish = undefined;
+          resolve(value);
+        };
+        const fail = (reason: string) => {
+          if (explicit === offer) hide(reason);
+          else finish(blocked(reason));
+        };
+        const abort = () => fail("tool aborted");
+        const timer = setTimeout(() => fail("no render acknowledgement within one second"), 1_000);
+        offer.finish = finish;
+        signal?.addEventListener("abort", abort, { once: true });
+        show(text, (surface) => {
+          queueMicrotask(() => {
+            if (finished) return;
+            if (explicit !== offer || generation !== offer.id || !active() || !mainFocused() || ui?.getEditorText() !== "" || shown !== text) {
+              fail("offer invalidated before render acknowledgement");
+              return;
+            }
+            offer.surface = surface;
+            offer.acknowledged = true;
+            finish(displayed(offer));
+          });
+        });
+      });
+      return result(details);
+    },
+  });
+
   const onKey = (data: string) => {
+    if (explicit && (!mainFocused() || ui?.getEditorText() !== "")) hide("editor draft or focus changed");
     if (offered === undefined || !ui || isKeyRelease(data) || !mainFocused()) return undefined;
     if (matchesKey(data, "tab")) {
       const navigation = { handled: false, phase: "active" };
@@ -268,6 +385,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
       if (navigation.handled) return { consume: true };
     }
     const accept = config.acceptKeys.some((key) => matchesKey(data, key as KeyId));
+    if (accept && explicit && (busy || !explicit.acknowledged)) return undefined;
     if (accept && shown !== undefined && ui.getEditorText() === "") {
       const text = shown;
       const modelSuggestion = offerSource === undefined;
@@ -285,7 +403,8 @@ export default function nextPrompt(pi: ExtensionAPI) {
     setTimeout(() => {
       if (mine !== generation || offered === undefined || !ui || !mainFocused()) return;
       const empty = ui.getEditorText() === "";
-      if (!empty) conceal();
+      if (!empty && explicit) hide("editor draft entered");
+      else if (!empty) conceal();
       else if (shown === undefined) show(offered);
     }, 0);
     return undefined;
@@ -303,7 +422,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
   pi.events.on("prompt:take-next", (data) => {
     const request = data as { text?: string } | undefined;
     if (!request || request.text !== undefined || shown === undefined || !ui) return;
-    if (ui.getEditorText() !== "" || !mainFocused()) return;
+    if (ui.getEditorText() !== "" || !mainFocused() || (explicit && (busy || !explicit.acknowledged))) return;
     request.text = shown;
     hide();
   });
@@ -413,6 +532,11 @@ export default function nextPrompt(pi: ExtensionAPI) {
     busy = false;
     const candidate = pending;
     pending = undefined;
+    if (explicit) {
+      if (outcome !== "completed") hide(`turn ${outcome ?? "not completed"}`);
+      else if (!active() || !ui || !mainFocused() || ui.getEditorText() !== "") hide("editor draft or focus changed");
+      return;
+    }
     if (!candidate || outcome !== "completed" || !active() || !ui) return;
     const mine = ++generation;
     vetState = "pending";
@@ -448,6 +572,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
         `Settlement: ${outcome ?? "not observed (agent_before_settle)"}; agent_settled ${settled ? "observed" : "not observed"}. Vet: ${vetState}. ` +
         `UI: ${uiState}. Focus: ${focusState()}${ui && !mainFocused() ? " (ghost/acceptance blocked)" : ""}. Editor: ${ui ? ui.getEditorText() === "" ? "empty" : "nonempty (display blocked)" : "unavailable"}. ` +
         `Offer: ${shown ? patched ? "ghost text" : "fallback widget" : offered ? "concealed" : "none"}. ` +
+        `Explicit: ${explicit ? `${explicit.id} ${explicit.acknowledged ? "rendered" : "awaiting render"}${busy ? " (accept after turn)" : ""}` : "none"}; last acknowledgement/blocker: ${lastExplicit}. ` +
         `Last suggestion: ${lastVerdict || "none yet"}.`,
         "info",
       );

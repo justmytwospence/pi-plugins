@@ -1,5 +1,5 @@
 import { beforeEach, expect, test, vi } from "vitest";
-import { CURSOR_MARKER, visibleWidth } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { TerminalPanel } from "../src/panel.ts";
 import { stopPty } from "../src/pty.ts";
 
@@ -78,6 +78,82 @@ test("program keys go to the PTY; prefix controls stay local", async () => {
   expect(h.panel.render(100).length).toBeGreaterThan(compact);
   expect(h.pty.resize).toHaveBeenLastCalledWith(96, 26);
   await h.panel.shutdown();
+});
+
+test("Kitty prefix controls scroll and resize without forwarding to the PTY", async () => {
+  const h = await setup(undefined, undefined, false, true);
+  h.data(Array.from({ length: 80 }, (_, i) => `row-${i}\r\n`).join(""));
+  await vi.waitFor(() => expect((h.panel as any).screen.maxScrollback).toBeGreaterThan(0));
+  const prefix = "\x1d";
+  const control = (key: string) => { h.panel.handleInput(prefix); h.panel.handleInput(key); };
+  const compact = h.panel.render(98).length;
+  control("\x1b[102u");
+  expect(h.panel.render(98).length).toBeGreaterThan(compact);
+  control("\x1b[117u");
+  expect((h.panel as any).offset).toBeGreaterThan(0);
+  control("\x1b[100u");
+  expect((h.panel as any).offset).toBe(0);
+  control("\x1b[113u");
+  expect(plain(h.panel.render(98))).toContain("Stop command?");
+  expect(stopPty).not.toHaveBeenCalled();
+  h.panel.handleInput("\x1b");
+  expect(plain(h.panel.render(98))).not.toContain("Stop command?");
+  expect(stopPty).not.toHaveBeenCalled();
+  control("\x1b[113u");
+  h.panel.handleInput("\r");
+  await vi.waitFor(() => expect(h.done).toHaveBeenCalledOnce());
+  expect(stopPty).toHaveBeenCalledExactlyOnceWith(h.pty);
+  expect(h.done.mock.calls[0][0].cancelled).toBe(true);
+  expect(h.pty.write).not.toHaveBeenCalled();
+  await h.panel.shutdown();
+});
+
+test.each(["\x1b[103;2u", "G"])("shifted G returns from the top to live output: %j", async end => {
+  const h = await setup(undefined, undefined, false, true);
+  try {
+    h.data(Array.from({ length: 80 }, (_, i) => `row-${i}\r\n`).join(""));
+    await (h.panel as any).screen.flush();
+    const max = (h.panel as any).screen.maxScrollback;
+    expect(max).toBeGreaterThan(0);
+    h.panel.handleInput("\x1d"); h.panel.handleInput("\x1b[103u");
+    expect((h.panel as any).offset).toBe(max);
+    h.panel.handleInput("\x1d"); h.panel.handleInput(end);
+    expect((h.panel as any).offset).toBe(0);
+    expect(h.pty.write).not.toHaveBeenCalled();
+  } finally {
+    await h.panel.shutdown();
+  }
+});
+
+test("inline wheel scrolls both directions, clamps and consumes edges without focus or PTY input", async () => {
+  const h = await setup(undefined, undefined, false, true);
+  h.data(Array.from({ length: 80 }, (_, i) => `row-${i}\r\n`).join(""));
+  await vi.waitFor(() => expect((h.panel as any).screen.maxScrollback).toBeGreaterThan(0));
+  const wheel = (delta: number): TuiMouseEvent => ({ type: "wheel", button: "none", x: 2, y: 2, screenX: 2, screenY: 2, width: 80, height: 20, shift: false, alt: false, ctrl: false, wheelDelta: delta });
+  const max = (h.panel as any).screen.maxScrollback;
+  const focus = h.panel.focused;
+  expect(h.panel.handleMouse(wheel(-2.6))).toEqual({ handled: true, render: true });
+  expect((h.panel as any).offset).toBe(3);
+  expect(h.panel.handleMouse(wheel(1.4))).toEqual({ handled: true, render: true });
+  expect((h.panel as any).offset).toBe(2);
+  expect(h.panel.handleMouse(wheel(-Infinity))).toBeUndefined();
+  expect(h.panel.handleMouse(wheel(NaN))).toBeUndefined();
+  expect(h.panel.handleMouse(wheel(0))).toBeUndefined();
+  expect(h.panel.handleMouse(wheel(-max * 2))).toEqual({ handled: true, render: true });
+  expect((h.panel as any).offset).toBe(max);
+  expect(h.panel.handleMouse(wheel(-1))).toEqual({ handled: true, render: true });
+  expect(h.panel.handleMouse(wheel(max * 2))).toEqual({ handled: true, render: true });
+  expect((h.panel as any).offset).toBe(0);
+  expect(h.panel.handleMouse(wheel(1))).toEqual({ handled: true, render: true });
+  expect(h.panel.handleMouse({ ...wheel(1), type: "click" })).toBeUndefined();
+  expect(h.panel.focused).toBe(focus);
+  expect(h.pty.write).not.toHaveBeenCalled();
+  h.exit();
+  await vi.waitFor(() => expect(h.done).toHaveBeenCalledOnce());
+  expect(h.panel.handleMouse(wheel(-1))).toBeUndefined();
+  const regular = await setup();
+  expect(regular.panel.handleMouse(wheel(-1))).toBeUndefined();
+  await regular.panel.shutdown();
 });
 
 test("native fd closure racing input or resize cannot crash the UI", async () => {
@@ -292,14 +368,78 @@ test("inline confirmed stop, exit and shutdown racing finish exactly once", asyn
 test.each([false, true])("shutdown before deferred start prevents spawn (inline %s)", async inline => {
   const done = vi.fn();
   const spawn = vi.fn();
+  const onStarted = vi.fn();
   const panel = new TerminalPanel({ terminal: { columns: 80, rows: 24 }, requestRender: vi.fn() } as any,
-    { fg: (_color: string, text: string) => text } as any, "true", "/tmp", done, spawn, false, inline);
+    { fg: (_color: string, text: string) => text } as any, "true", "/tmp", done, spawn, false, inline, onStarted);
   queueMicrotask(() => { void panel.start(); });
   await panel.shutdown();
   await panel.start();
   expect(spawn).not.toHaveBeenCalled();
+  expect(onStarted).not.toHaveBeenCalled();
   expect(done).toHaveBeenCalledOnce();
   expect(done.mock.calls[0]).toHaveLength(inline ? 2 : 1);
+});
+
+test.each([false, true])("onStarted observes the assigned PTY before immediate exit (shutdown pending %s)", async shutdownPending => {
+  let resolve!: (pty: any) => void;
+  const spawn = vi.fn(() => new Promise<any>(r => { resolve = r; }));
+  const done = vi.fn();
+  const order: string[] = [];
+  const listenerDispose = vi.fn();
+  const pty = {
+    write: vi.fn(), resize: vi.fn(),
+    onData: vi.fn(() => ({ dispose: listenerDispose })),
+    onExit: vi.fn(callback => {
+      order.push("exit");
+      callback({ exitCode: 127, signal: 0 });
+      return { dispose: listenerDispose };
+    }),
+  };
+  const onStarted = vi.fn(() => {
+    order.push("started");
+    expect((panel as any).pty).toBe(pty);
+    expect(pty.onData).not.toHaveBeenCalled();
+    expect(pty.onExit).not.toHaveBeenCalled();
+    expect(done).not.toHaveBeenCalled();
+  });
+  const panel = new TerminalPanel({ terminal: { columns: 80, rows: 24 }, requestRender: vi.fn() } as any,
+    { fg: (_color: string, text: string) => text } as any, "exit 127", "/tmp", done, spawn, false, true, onStarted);
+  const start = panel.start();
+  expect(panel.start()).toBe(start);
+  expect(onStarted).not.toHaveBeenCalled();
+  const shutdown = shutdownPending ? panel.shutdown() : undefined;
+  resolve(pty);
+  await start;
+  await Promise.all([shutdown, panel.shutdown(), panel.shutdown()]);
+  panel.dispose();
+  await panel.start();
+  expect(order).toEqual(["started", "exit"]);
+  expect(spawn).toHaveBeenCalledOnce();
+  expect(onStarted).toHaveBeenCalledOnce();
+  expect(stopPty).toHaveBeenCalledExactlyOnceWith(pty);
+  expect(done).toHaveBeenCalledOnce();
+  expect(done.mock.calls[0][0]).toMatchObject({ exitCode: 127, cancelled: false });
+  expect(listenerDispose).toHaveBeenCalledTimes(2);
+});
+
+test.each([false, true])("rejected PTY startup never calls onStarted (shutdown pending %s)", async shutdownPending => {
+  let reject!: (error: Error) => void;
+  const spawn = vi.fn(() => new Promise<any>((_resolve, r) => { reject = r; }));
+  const onStarted = vi.fn();
+  const done = vi.fn();
+  const panel = new TerminalPanel({ terminal: { columns: 80, rows: 24 }, requestRender: vi.fn() } as any,
+    { fg: (_color: string, text: string) => text } as any, "true", "/tmp", done, spawn, false, true, onStarted);
+  const start = panel.start();
+  const shutdown = shutdownPending ? panel.shutdown() : undefined;
+  reject(new Error("spawn rejected"));
+  await start;
+  await Promise.all([shutdown, panel.shutdown()]);
+  await panel.start();
+  expect(spawn).toHaveBeenCalledOnce();
+  expect(onStarted).not.toHaveBeenCalled();
+  expect(stopPty).not.toHaveBeenCalled();
+  expect(done).toHaveBeenCalledOnce();
+  expect(done.mock.calls[0][0]).toMatchObject({ output: "(interactive command: spawn rejected)", exitCode: 1 });
 });
 
 test("inline shutdown during pending startup captures output and finishes once", async () => {

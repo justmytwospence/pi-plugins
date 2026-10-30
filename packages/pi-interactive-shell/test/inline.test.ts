@@ -15,7 +15,7 @@ const status = { output: "(interactive command exited with code 0)", exitCode: 0
 function setup() {
   for (const stream of [process.stdin, process.stdout]) Object.defineProperty(stream, "isTTY", { configurable: true, value: true });
   const handlers = new Map<string, any>(), events = new Map<string, any>();
-  const pi = { on: (name: string, fn: any) => handlers.set(name, fn), sendMessage: vi.fn(), events: {
+  const pi = { registerCommand: vi.fn(), on: (name: string, fn: any) => handlers.set(name, fn), sendMessage: vi.fn(), events: {
     on: (name: string, fn: any) => events.set(name, fn), emit: vi.fn(),
   } };
   const chat = new Container(), document = new Container(), root = new Container();
@@ -23,7 +23,7 @@ function setup() {
   const tui = Object.assign(root, { requestRender: vi.fn() });
   let proxy: any;
   const custom = vi.fn((factory: any, _options?: unknown) => new Promise(resolve => { proxy = factory(tui, {}, {}, resolve); }));
-  const ctx = { mode: "tui", hasUI: true, isIdle: () => true, ui: { custom } };
+  const ctx = { mode: "tui", hasUI: true, isIdle: () => true, ui: { custom, setWidget: (_key: string, factory: any) => factory?.(tui) } };
   interactiveShell(pi as any); handlers.get("session_start")({}, ctx);
   return { pi, handlers, events, ctx, chat, custom, proxy: () => proxy,
     bash: (excluded = false) => handlers.get("user_bash")({ command: "i true", cwd: "/tmp", excludeFromContext: excluded }, ctx) };
@@ -33,14 +33,15 @@ test.each([false, true])("inline manual completion returns immediately with only
   const panel = { focused: false, render: () => ["live"], invalidate() {}, handleInput: vi.fn(), dispose: vi.fn(), shutdown: vi.fn() };
   const frozen = { render: () => ["PRIVATE DISPLAY"], invalidate() {} };
   let finish!: (result: typeof status, snapshot: typeof frozen) => void;
-  const handoff = vi.spyOn(handoffModule, "handoff").mockImplementation((_tui, _theme, _cmd, _cwd, done) => {
+  const handoff = vi.spyOn(handoffModule, "handoff").mockImplementation((_tui, _theme, _cmd, _cwd, done, _autoClose, _inline, onStarted) => {
+    onStarted?.();
     finish = done; return panel as any;
   });
   const h = setup();
   const before = new Container(), after = new Container(); h.chat.addChild(before);
   const running = h.bash(excluded); h.chat.addChild(after);
   expect(h.custom.mock.calls[0][1]).toEqual({ overlay: false });
-  expect(handoff.mock.calls[0].slice(5)).toEqual([true, true]);
+  expect(handoff.mock.calls[0].slice(5)).toEqual([true, true, expect.any(Function)]);
   expect(h.chat.children).toEqual([before, panel, after]);
   expect(h.proxy()).not.toBe(panel); expect(h.proxy().render(80)).toEqual([]);
   h.proxy().focused = true; expect(panel.focused).toBe(true);
@@ -54,7 +55,8 @@ test.each([false, true])("inline manual completion returns immediately with only
 
 test("exactly accepted inline suggestion continues once with status only", async () => {
   const frozen = { render: () => ["PRIVATE DISPLAY"], invalidate() {} };
-  vi.spyOn(handoffModule, "handoff").mockImplementation((_tui, _theme, _cmd, _cwd, done) => {
+  vi.spyOn(handoffModule, "handoff").mockImplementation((_tui, _theme, _cmd, _cwd, done, _autoClose, _inline, onStarted) => {
+    onStarted?.();
     queueMicrotask(() => done(status, frozen));
     return { render: () => [], invalidate() {}, dispose() {}, handleInput() {}, focused: true } as any;
   });
@@ -69,11 +71,17 @@ test("exactly accepted inline suggestion continues once with status only", async
   expect(h.pi.sendMessage).toHaveBeenCalledOnce();
 });
 
-test("shutdown during malformed-tree probe cannot launch fallback", async () => {
+test("malformed-tree failure is inline-only with no process or accepted continuation", async () => {
   const handoff = vi.spyOn(handoffModule, "handoff");
   const h = setup();
   h.ctx.ui.custom.mockImplementation((factory: any) => new Promise(resolve => { factory({}, {}, {}, resolve); }));
+  h.events.get("interactive-shell:suggestion-accepted")({ text: "!i true" });
   const running = h.bash();
+  const result = await running;
+  expect(result.result.output).toContain("command was not run");
+  await new Promise(resolve => setImmediate(resolve));
+  expect(h.pi.sendMessage).not.toHaveBeenCalled();
+  expect(h.custom.mock.calls[0][1]).toEqual({ overlay: false });
   await h.handlers.get("session_shutdown")();
   expect((await running).result.exitCode).toBe(1);
   expect(handoff).not.toHaveBeenCalled();

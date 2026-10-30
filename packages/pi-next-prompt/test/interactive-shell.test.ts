@@ -1,5 +1,13 @@
 import { mkdtempSync } from "node:fs";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
+vi.mock("../../pi-interactive-shell/src/handoff.ts", async importOriginal => ({
+  ...await importOriginal<typeof import("../../pi-interactive-shell/src/handoff.ts")>(),
+  handoff: (_tui: unknown, _theme: unknown, _command: string, _cwd: string, done: (value: unknown) => void,
+    _autoClose?: boolean, _inline?: boolean, onStarted?: () => void) => {
+    queueMicrotask(() => { onStarted?.(); done({ output: "(interactive command exited with code 0)", exitCode: 0, cancelled: false, truncated: false }); });
+    return { render: () => [], invalidate() {}, shutdown: async () => {}, dispose() {}, focused: false };
+  },
+}));
 import nextPrompt, { SECTION } from "../src/index.ts";
 import { INSTRUCTION, INTERACTIVE_INSTRUCTION } from "../src/tag.ts";
 const { default: interactiveShell } = await import(new URL("../../pi-interactive-shell/src/index.ts", import.meta.url).href);
@@ -13,17 +21,25 @@ afterEach(() => {
   });
 });
 
-async function setup(first: boolean, tty = true) {
+async function setup(first: boolean, tty = true, explicit = false) {
   for (const stream of [process.stdin, process.stdout]) Object.defineProperty(stream, "isTTY", { configurable: true, value: tty });
   const h = harness();
   for (const plugin of first ? [interactiveShell, nextPrompt] : [nextPrompt, interactiveShell]) plugin(h.pi);
   const jev = fakeJev(() => ({ useful: { type: "bool", probability: 0.9 } }));
   const ctx = h.ctx({ cwd: mkdtempSync("/tmp/handoff-next-"), modelRegistry: jev.registry, isIdle: () => true });
+  const container = (children: any[] = []): any => ({ children, addChild(child: any) { children.push(child); }, removeChild(child: any) { const i = children.indexOf(child); if (i >= 0) children.splice(i, 1); } });
+  Object.assign(ctx.ui.tui, container([container([container(), container(), container()])]), { mode: "regular" });
+  ctx.ui.custom = async (factory: any) => new Promise(resolve => { factory(ctx.ui.tui, ctx.ui.theme, {}, resolve); });
   await h.emit("session_start", {}, ctx);
   const sections: Record<string, string> = {};
   await h.emit("before_agent_start", { prompt: "do interactive step", systemPromptOptions: { sections } }, ctx);
   await h.emit("agent_start", {}, ctx);
-  await h.emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "Run this yourself.\n<next>!i sudo true</next>" }] } }, ctx);
+  if (explicit) {
+    const result = h.tools.get("offer_terminal").execute("offer", { command: "sudo true" }, undefined, undefined, ctx);
+    ctx.ui.widgetLines("next-prompt");
+    expect((await result).details.status).toBe("displayed");
+  }
+  await h.emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: explicit ? "Run this yourself after this response." : "Run this yourself.\n<next>!i sudo true</next>" }] } }, ctx);
   await h.emit("agent_before_settle", { outcome: "completed" }, ctx);
   await h.emit("agent_settled", {}, ctx);
   return { h, ctx, sections };
@@ -44,7 +60,6 @@ test.each([false, true])("optional capability and Tab-only acceptance work in bo
 
 test.each([false, true])("accepted draft resumes after unchanged submission in either registration order (%s)", async first => {
   const { h, ctx } = await setup(first);
-  ctx.ui.custom = async () => ({ output: "(interactive command exited with code 0)", exitCode: 0, cancelled: false, truncated: false });
   ctx.ui.press("\t");
   // Pi stops propagation at the first handler returning a bash result.
   for (const handler of h.handlers.get("user_bash")!) {
@@ -56,15 +71,39 @@ test.each([false, true])("accepted draft resumes after unchanged submission in e
   expect(h.messages[0].message.customType).toBe("interactive-shell-continuation");
 });
 
+test.each([false, true])("explicit verified tool acceptance resumes exactly once (%s)", async first => {
+  const { h, ctx } = await setup(first, true, true);
+  expect(ctx.ui.press("\t")).toBe(true);
+  expect(ctx.ui.editorText).toBe("!i sudo true");
+  for (let i = 0; i < 2; i++) {
+    for (const handler of h.handlers.get("user_bash")!) {
+      if (await handler({ command: "i sudo true", cwd: ctx.cwd, excludeFromContext: false }, ctx)) break;
+    }
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
+  expect(h.messages).toHaveLength(1);
+});
+
+test.each(["edited", "typed", "excluded"])("explicit provenance does not resume %s submissions", async kind => {
+  const { h, ctx } = await setup(false, true, true);
+  if (kind !== "typed") ctx.ui.press("\t");
+  const command = kind === "edited" ? "i sudo false" : "i sudo true";
+  for (const handler of h.handlers.get("user_bash")!) {
+    if (await handler({ command, cwd: ctx.cwd, excludeFromContext: kind === "excluded" }, ctx)) break;
+  }
+  await new Promise<void>(resolve => setImmediate(resolve));
+  expect(h.messages).toEqual([]);
+});
+
 test("handoff guidance explicitly covers commands and requested manual tests", () => {
-  expect(INTERACTIVE_INSTRUCTION).toContain("put `!i <shell command>` in the next tag, not only in prose or a code block");
+  expect(INTERACTIVE_INSTRUCTION).toContain("use offer_terminal with the complete raw shell command");
   expect(INTERACTIVE_INSTRUCTION).toContain("explicit requests to try or manually test an interactive feature");
   expect(INTERACTIVE_INSTRUCTION).toContain("pending next step even when implementation and automated checks are complete");
   expect(INTERACTIVE_INSTRUCTION).toContain("Tab only fills an editable draft and the user must press Enter to run it");
   expect(INTERACTIVE_INSTRUCTION).toContain("always give the complete command however long it is: never truncate");
   expect(INTERACTIVE_INSTRUCTION).toContain("static, memory-only output preview");
   expect(INTERACTIVE_INSTRUCTION).toContain("never sent to the model");
-  expect(INTERACTIVE_INSTRUCTION).toContain("fallback overlay requires manual dismissal");
+  expect(INTERACTIVE_INSTRUCTION).toContain("Unsupported layouts return an explicit blocked reason");
   expect(INTERACTIVE_INSTRUCTION).not.toContain("discarded on close");
 });
 
