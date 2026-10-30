@@ -34,7 +34,7 @@ const { CustomEditor } = await import(new URL('./modes/interactive/components/cu
 const { sidebarScreen } = await import('./remote-clients/sidebar.mjs');
 const { TerminalPanel } = await jiti.import('../packages/pi-interactive-shell/src/panel.ts');
 const { pickApproval, createApprovalState, handoffLabel, HERE: IMPLEMENT_HERE, COMPACT_HERE, EDIT, KEEP } = await jiti.import('../packages/pi-plan-mode/src/approval-picker.ts');
-const { registerExec } = await jiti.import('../packages/pi-plan-mode/src/exec.ts');
+const { registerExec, FINISH_MESSAGE_TYPE } = await jiti.import('../packages/pi-plan-mode/src/exec.ts');
 const { createNegotiation } = await jiti.import('../packages/pi-plan-mode/src/negotiation.ts');
 const { renderFooter, absorbStatuses } = await jiti.import('../packages/pi-status-footer/src/index.ts');
 const { choiceMenu, coldTitle } = await jiti.import('../packages/pi-cache-guard/src/index.ts');
@@ -74,6 +74,19 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle' } = {})
     ...absorbed, statuses: absorbed.rest, compact,
   }, width, theme);
   if (compact) assert.equal(lines.length, 1, 'blocked footer must stay one row');
+  else {
+    const plain = lines.map(stripVTControlCharacters);
+    const workflow = plain.filter(line => line.includes('Workflow'));
+    const approvals = plain.filter(line => line.includes('Approvals'));
+    assert.equal(workflow.length, absorbed.workflow || absorbed.exec ? 1 : 0, 'Workflow keeps its own row, including exec fallback');
+    assert.equal(approvals.length, absorbed.mode ? 1 : 0, 'Approvals keeps its own row');
+    for (const [rows, icon] of [[workflow, '\uf0e8'], [approvals, '\uf510']]) {
+      for (const line of rows) {
+        assert.ok(line.startsWith(`${width >= 60 ? ' ' : ''}${icon}  `), `mode row keeps its indentation and distinct icon: ${JSON.stringify(line)}`);
+        assert.equal(line.includes(icon === '\uf0e8' ? '\uf510' : '\uf0e8'), false, 'mode icons must not be shared');
+      }
+    }
+  }
   return lines;
 }
 const footer = (width) => statusFooter(width, modeStatuses('plan', 'yolo'), { compact: true, phase: 'waiting' });
@@ -348,6 +361,54 @@ for (const width of [46, 120, 180]) {
     for (const [under, options] of IDLE) {
       const { lines: screen } = sidebarScreen({ width, height: HEIGHT, dock: (w) => editor.render(w), footer: (w) => idleFooter(w, fixture), ...options });
       screens.push({ name: `idle editor ${fixture.name}`, width, under, idle: baseline, ansi: screen.join('\n') });
+    }
+  }
+}
+
+// Capture the returned completion renderer from the real registerExec API, rather than drawing a
+// lookalike card or calling renderFinish directly. Both expansion states live ahead of the idle
+// composer, through the same layout and reader checks as the normal-footer fixtures above.
+const messageRenderers = new Map();
+registerExec({
+  on() {}, registerTool() {}, registerCommand() {},
+  registerMessageRenderer: (name, renderer) => messageRenderers.set(name, renderer),
+  events: { emit() {} },
+}, { completionReview: () => true, completionMaxRevisions: () => 2 });
+const renderCompletion = messageRenderers.get(FINISH_MESSAGE_TYPE);
+assert.equal(typeof renderCompletion, 'function', 'registerExec must register its returned completion renderer');
+const completionDetails = {
+  completion: 'accepted', planFile: '/tmp/client-plan.md', implementer: 'Terra',
+  report: 'Updated the completion transcript fixture.\n\nThe registered message now appears above the idle editor, with both remote readers checking the composer. '.repeat(4),
+  verification: 'Ran the remote-client compatibility checks at narrow and wide widths.\n\nChecked Sidebar with main and Sidebar focus. '.repeat(4),
+  concerns: 'No outstanding implementation issues reported.',
+  asks: 2, costUsd: 0.02,
+  decision: {
+    outcome: 'accepted', summary: 'The compatibility fixture is complete.',
+    evidence: ['Expanded evidence marker: both remote readers checked.'],
+    limitations: ['No live phone interaction was performed.'], findings: [],
+  },
+  changes: { edited: ['scripts/test-remote-clients.mjs'], outside: [] },
+  negotiation: { attempts: 1, reviewCostUsd: 0.01, phase: 'accepted', history: [] },
+};
+for (const expanded of [false, true]) {
+  for (const width of [46, 120, 180]) {
+    const transcript = renderCompletion({
+      customType: FINISH_MESSAGE_TYPE, content: 'Returned implementation completion',
+      details: completionDetails, display: true,
+    }, { expanded }, theme);
+    const rendered = transcript.render(width).map(stripVTControlCharacters).join('\n');
+    assert.match(rendered.replace(/\s+/gu, ' '), /Updated the completion transcript fixture/u, 'actual returned message renders the implementer report');
+    assert.equal(rendered.includes('Expanded evidence marker'), expanded, 'only expanded completion shows detailed evidence');
+    assert.equal(/ctrl\+o to expand/iu.test(rendered), !expanded, 'concise completion offers expansion');
+    const baseline = screens.length;
+    for (const [under, options] of IDLE) {
+      const { lines: screen } = sidebarScreen({
+        width, height: HEIGHT, transcript, dock: w => editor.render(w),
+        footer: w => idleFooter(w, { statuses: modeStatuses('plan', 'auto') }), ...options,
+      });
+      const ansi = screen.join('\n');
+      assert.match(stripVTControlCharacters(ansi).replace(/\s+/gu, ' '), /Updated the completion transcript fixture/u, 'completion must be visible ahead of the composer, including with Sidebar');
+      screens.push({ name: `returned completion ${expanded ? 'expanded' : 'concise'}`, width, under, idle: baseline, ansi });
     }
   }
 }

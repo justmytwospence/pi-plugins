@@ -864,6 +864,7 @@ export const ICONS = {
   branch: "\ue725", // git branch
   model: "\u{f06a9}", // robot (Material Design; the Font Awesome robot draws wider than its neighbors)
   reasoning: "\uee9c", // brain
+  workflow: "\uf0e8", // sitemap (workflow)
   gate: "\uf510", // shield with check (pi-tool-gate)
   paused: "\u{f03e4}", // pause (Material Design): chat and plan mode, sent as ⏸
   running: "\u{f0211}", // fast forward (Material Design): the other modes, sent as ⏵⏵
@@ -971,7 +972,7 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     const state = `${theme.fg("muted", "Workflow")}${sep}${theme.fg(workflow.kind === "exec" ? "accent" : workflow.kind === "plan" ? "mdLink" : "success", workflow.kind)}`;
     const phase = negotiation?.[1] ?? (s.exec ? clean(s.exec).split(" · ")[0] : "");
     const detail = negotiation ? negotiation[2] : s.exec ? clean(s.exec).split(" · ").slice(1).join(" · ") : "";
-    rows.push(row(ICONS.gate, (w) => fitSegments([
+    rows.push(row(ICONS.workflow, (w) => fitSegments([
       { text: phase ? `${state}${sep}${theme.fg("muted", phase)}` : state, priority: 120 },
       { text: detail ? theme.fg("muted", detail) : workflow.kind === "plan" ? theme.fg("muted", "read-only research") : workflow.kind === "chat" ? theme.fg("muted", "read-only discussion") : "", priority: 70 },
       { text: theme.fg("dim", workflow.kind === "exec" ? "/plan-exec" : workflow.key ?? ""), priority: 30 },

@@ -16,12 +16,16 @@ import {
   assessmentSummary,
   type ChangeSummary,
   changeSummaryText,
+  decisionText,
   ExecCardRefresh,
   type FinishDetails,
   finishContext,
+  finishTitle,
   finishTone,
+  negotiationText,
   renderAsk,
   renderFinish,
+  responsesText,
 } from "./exec-cards.js";
 import { holdBlocked } from "./herdr-blocked.js";
 import { type ModelSpec, parseModelSpec } from "./implementation-models.js";
@@ -975,16 +979,13 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
   pi.registerMessageRenderer<FinishDetails>(FINISH_MESSAGE_TYPE, (message, options, theme) =>
     reviewCard(
       theme,
-      message.details?.completion === "stopped"
-        ? "Implementation stopped"
-        : message.details?.completion === "accepted"
-          ? "Accepted"
-          : message.details?.completion === "no_review"
-            ? "Completed without review"
-            : message.details?.completion === "user_override"
-              ? "Completed by user override"
-              : "Implementation review",
-      renderFinish(message.details, { expanded: options.expanded, isPartial: false }, theme, currentExchange),
+      finishTitle(message.details),
+      renderFinish(
+        message.details,
+        { expanded: options.expanded, isPartial: false, omitTitle: true },
+        theme,
+        currentExchange,
+      ),
       finishTone(message.details),
     ),
   );
@@ -1130,27 +1131,26 @@ function finishMessageText(details: FinishDetails): string {
           : details.completion === "stopped"
             ? "Implementation stopped"
             : "Implementation review",
-    ...(details.negotiation
-      ? [
-          "",
-          `Negotiation record (${details.negotiation.attempts} review rounds; cumulative review cost ${formatCost(details.negotiation.reviewCostUsd)}):`,
-          JSON.stringify(details.negotiation, null, 2),
-        ]
-      : []),
+    ...(details.negotiation ? ["", negotiationText(details.negotiation)] : []),
     ...(details.headline ? ["", details.headline] : []),
     "",
-    "What changed",
+    "What changed (implementer reported)",
     details.report || "Not provided.",
     "",
-    "Verification",
+    "Verification (implementer reported)",
     details.verification || "Not provided; verification is unknown.",
     "",
-    "Outstanding issues",
+    "Outstanding issues (implementer reported)",
     details.concerns || "Not provided; outstanding issues are unknown.",
     "",
     "Planner assessment",
     assessmentSummary(details),
-    ...(details.assessment?.state === "reviewed" ? [details.assessment.narrative] : []),
+    decisionText(details.decision),
+    responsesText(details.responses),
+    ...(details.previousFindings?.length ? [decisionText({ findings: details.previousFindings })] : []),
+    ...(details.error ? [`Review error: ${details.error}`] : []),
+    // Modern assessments also retain the raw protocol reply; its parsed decision is above.
+    ...(details.assessment?.state === "reviewed" && !details.decision ? [details.assessment.narrative] : []),
     ...(details.question ? ["", "User question", details.question] : []),
     ...(details.action ? ["", "Next action", details.action] : []),
     "",

@@ -1775,6 +1775,10 @@ test("exec negotiation phases stay on the workflow row, ahead of counts and cost
 });
 
 test("independent axes cover all workflows and approvals at phone and desktop widths", () => {
+  assert.equal(mod.ICONS.workflow, "\uf0e8");
+  assert.equal(mod.ICONS.gate, "\uf510");
+  assert.notEqual(mod.ICONS.workflow, mod.ICONS.gate);
+  assert.equal(visibleWidth(mod.ICONS.workflow), 1);
   for (const workflow of ["work", "chat", "plan", "exec"]) for (const approval of ["auto", "yolo"]) {
     const absorbed = mod.absorbStatuses(new Map([
       ["workflow-mode", `workflow: ${workflow}${workflow === "exec" ? "" : " (shift+tab to cycle)"}`],
@@ -1784,6 +1788,8 @@ test("independent axes cover all workflows and approvals at phone and desktop wi
     const s = { ...fixture(), ...absorbed, statuses: absorbed.rest };
     for (const width of [46, 120]) {
       const rows = mod.renderFooter(s, width, theme).map(plain);
+      assert.ok(rows[2].trimStart().startsWith(`${mod.ICONS.workflow} `), rows[2]);
+      assert.ok(rows[3].trimStart().startsWith(`${mod.ICONS.gate} `), rows[3]);
       assert.match(rows[2], new RegExp(`Workflow · ${workflow}`));
       assert.match(rows[3], new RegExp(`Approvals · ${approval}`));
       assert.ok(rows.every(row => visibleWidth(row) <= width));
@@ -1820,6 +1826,9 @@ test("legacy workflow fallback never invents approvals; explicit workflow and ex
       assert.ok(!rows.some(row => row.includes("Approvals")));
       if (entries.length) assert.match(rows[2], /Workflow · (plan|exec)/);
       else assert.ok(!rows.some(row => row.includes("Workflow")));
+      if (entries.length) assert.ok(rows[2].trimStart().startsWith(`${mod.ICONS.workflow} `), rows[2]);
+      assert.ok(rows.every(row => visibleWidth(row) <= width));
+      assert.equal(mod.renderFooter({ ...fixture(), ...a, statuses: a.rest, compact: true }, width, theme).length, 1);
     }
   }
   const a = absorb([["permission-mode", "⏵⏵ auto mode on (ctrl+a to cycle)"]]);

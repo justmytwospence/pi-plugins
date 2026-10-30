@@ -5,9 +5,11 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { test } from "vitest";
 import {
   type AskDetails,
+  completionPreview,
   ExecCardRefresh,
   type FinishDetails,
   finishTone,
+  negotiationText,
   renderAsk,
   renderFinish,
 } from "../src/exec-cards.js";
@@ -152,6 +154,58 @@ test("latest unresolved review exposes the exact question and requested findings
   assert.ok(text.includes("Does the human input test pass?"));
 });
 
+for (const width of [46, 120]) {
+  test(`unresolved, failed and exhausted reviews keep actionable details at ${width}`, () => {
+    for (const reason of ["failure", "interrupted", "user_needed", "exhausted"]) {
+      const details: FinishDetails = {
+        ...base,
+        report: "Report start.\n\n" + "Report remains visible.\n".repeat(20) + "Report final paragraph.",
+        decision:
+          reason === "failure" || reason === "interrupted"
+            ? undefined
+            : {
+                ...decision,
+                outcome: "user_needed",
+                question: "Can you verify the handshake?",
+                recommendation: "Perform the manual test before accepting.",
+              },
+        error: reason === "failure" || reason === "interrupted" ? `Exact ${reason} review error` : undefined,
+        negotiation: {
+          attempts: 3,
+          reviewCostUsd: 0.3,
+          phase: "paused",
+          history: [],
+          pause: {
+            reason,
+            action: "/plan-exec resume <answer> or /plan-exec retry; do not proceed automatically.",
+            question: "Is the manual check complete?",
+          },
+        },
+      };
+      const lines = renderFinish(details, options, theme, () => details).render(width);
+      assert.ok(lines.every((line) => visibleWidth(line) <= width));
+      const text = plain(lines).replace(/\s+/gu, " ");
+      for (const value of [
+        "Report final paragraph.",
+        "/plan-exec resume <answer>",
+        "/plan-exec retry",
+        "do not proceed automatically.",
+      ])
+        assert.ok(text.includes(value), value);
+      if (details.error) assert.ok(text.includes(details.error));
+      else
+        for (const value of [
+          finding.detail,
+          finding.requestedChange,
+          "Can you verify the handshake?",
+          "Perform the manual test before accepting.",
+        ])
+          assert.ok(text.includes(value), value);
+      assert.ok(!text.includes("What changed"));
+    }
+  });
+}
+
 test("confirmed override is amber even when the preceding review failed", () => {
   assert.equal(finishTone({ ...base, error: "Timed out", completion: "user_override" }), "warning");
   assert.equal(finishTone({ ...base, decision: undefined, error: "Timed out" }), "error");
@@ -186,6 +240,143 @@ test("zero-row card refresh proxy requests frames and disposes on end", () => {
   assert.equal(renders, 2);
 });
 
+test("literal completion previews normalize paragraphs and clip without inventing prose", () => {
+  assert.deepEqual(completionPreview("  First\n\n\nSecond\n\nThird  ", 3, 320), {
+    text: "First\n\nSecond…",
+    truncated: true,
+  });
+  assert.deepEqual(completionPreview("One two three four", 3, 12), { text: "One two…", truncated: true });
+  assert.deepEqual(completionPreview("Unchanged paragraph.", 3, 320), {
+    text: "Unchanged paragraph.",
+    truncated: false,
+  });
+});
+
+for (const width of [46, 120]) {
+  for (const completion of ["accepted", "no_review", "user_override", "stopped"] as const) {
+    test(`${completion} stays compact even live, and expands completely at ${width}`, () => {
+      const report = `Implemented readiness checks. ${"Transport behavior is preserved. ".repeat(20)}\n\nFull report tail.`;
+      const verification = `Tests passed locally. ${"Manual checks are not verified by the planner. ".repeat(15)}\n\nFull verification tail.`;
+      const concerns = `Human input remains untested.\n\nA substantive outstanding concern.\n\nFull concern tail.`;
+      const details: FinishDetails = {
+        ...base,
+        completion,
+        report,
+        verification,
+        concerns,
+        previousFindings: [finding],
+        responses: [{ id: "F1", status: "disputed", response: "Evidence checked in detail." }],
+        negotiation: {
+          attempts: 2,
+          reviewCostUsd: 0.25,
+          phase: "reviewing",
+          history: [
+            {
+              report: { report: "First report", verification: "First verification", concerns: "First concerns" },
+              decision,
+              costUsd: 0.1,
+            },
+            {
+              report: "Original legacy report",
+              error: "Original review error",
+              responses: [{ id: "F1", status: "addressed", response: "Original response" }],
+              costUsd: 0.15,
+            },
+          ],
+        },
+        changes: { edited: ["src/session.ts"], outside: ["extra.ts"], git: "2 files changed" },
+      };
+      const compactLines = renderFinish(details, options, theme, () => details).render(width);
+      assert.ok(compactLines.every((line) => visibleWidth(line) <= width));
+      const compact = plain(compactLines).replace(/\s+/gu, " ");
+      assert.ok(compact.includes("Implemented readiness checks."));
+      assert.ok(compact.includes("Tests passed locally."));
+      assert.ok(compact.includes("Human input remains untested."));
+      assert.ok(compact.includes("implementer reported"));
+      assert.equal(compact.match(/ctrl\+o to expand/gu)?.length, 1);
+      assert.equal(compact.match(/Implementation ·/gu)?.length, 1);
+      for (const hidden of [
+        "Full report tail",
+        "Full verification tail",
+        "Full concern tail",
+        "Review rounds",
+        "Reviewed evidence",
+        "consultations",
+        "$",
+        "src/session.ts",
+        "Original review error",
+      ])
+        assert.ok(!compact.includes(hidden), hidden);
+      assert.ok(compact.includes("…"));
+      if (completion !== "accepted") assert.ok(!compact.includes("· Accepted"));
+      const expandedLines = renderFinish(details, { ...options, expanded: true }, theme).render(width);
+      assert.ok(expandedLines.every((line) => visibleWidth(line) <= width));
+      const expanded = plain(expandedLines).replace(/\s+/gu, " ");
+      for (const full of [report, verification, concerns])
+        assert.ok(expanded.includes(full.replace(/\s+/gu, " ").trim()));
+      for (const value of [
+        "Reviewed evidence",
+        "Human input has not been tested.",
+        "Readiness handshake",
+        "Add the readiness handshake",
+        "Evidence checked in detail.",
+        "First report",
+        "First verification",
+        "First concerns",
+        "Original legacy report",
+        "Original review error",
+        "Original response",
+        "src/session.ts",
+        "extra.ts",
+        "2 files changed",
+        "2 reviews",
+      ])
+        assert.ok(expanded.includes(value), value);
+      assert.ok(!expanded.includes("ctrl+o to expand"));
+    });
+    test(`${completion} keeps final recovery instructions untruncated at ${width}`, () => {
+      const action = [
+        "Planning model restoration failed; select the model manually.",
+        "Check the model provider and credentials before selecting the planning model. ".repeat(6),
+        "Open /model and select the original planning model.",
+        "Then confirm its thinking level before continuing.",
+      ].join("\n\n");
+      const details: FinishDetails = { ...base, completion, action };
+      const lines = renderFinish(details, options, theme, () => details).render(width);
+      assert.ok(lines.every((line) => visibleWidth(line) <= width));
+      const text = plain(lines).replace(/\s+/gu, " ");
+      assert.ok(text.includes("Next action"));
+      assert.ok(text.includes(action.replace(/\s+/gu, " ")));
+    });
+    test(`${completion} missing values remain explicit at ${width}`, () => {
+      const details = { report: "", planFile: "old.md", completion };
+      const text = plain(renderFinish(details, options, theme).render(width)).replace(/\s+/gu, " ");
+      assert.ok(text.includes("Not provided; verification is unknown."));
+      assert.ok(text.includes("Not provided; outstanding issues are unknown."));
+    });
+  }
+}
+
+test("missing and legacy details remain readable without inferring finality", () => {
+  assert.ok(plain(renderFinish(undefined, options, theme).render(46)).includes("Implementation review unavailable"));
+  const legacy = {
+    ...base,
+    executionId: undefined,
+    exchangeId: undefined,
+    negotiation: undefined,
+    decision: { ...decision, outcome: "accepted" as const },
+  };
+  const text = plain(renderFinish(legacy, options, theme).render(120));
+  assert.ok(text.includes("Review 1"));
+  assert.ok(!text.includes("What changed"));
+  assert.ok(
+    negotiationText({ history: [{ report: "Raw historical report" }, null], pause: { question: "Recover?" } }).includes(
+      "Raw historical report",
+    ),
+  );
+  assert.ok(negotiationText({ history: null }).includes("0 review rounds"));
+});
+
 test("final totals distinguish consultation and cumulative review costs", () => {
   const details: FinishDetails = {
     ...base,
@@ -194,7 +385,7 @@ test("final totals distinguish consultation and cumulative review costs", () => 
     completion: "accepted",
     negotiation: { attempts: 3, reviewCostUsd: 0.3, phase: "reviewing", history: [{ decision, costUsd: 0.1 }] },
   };
-  const text = plain(renderFinish(details, options, theme).render(120));
+  const text = plain(renderFinish(details, { ...options, expanded: true }, theme).render(120));
   assert.ok(text.includes("2 consultations"));
   assert.ok(text.includes("3 reviews"));
   assert.ok(text.includes("Review rounds"));

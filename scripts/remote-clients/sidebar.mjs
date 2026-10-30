@@ -27,9 +27,10 @@ const fill = (text) => ({ render: () => [text], invalidate() {} });
 
 /**
  * One screen: main's layout root is the transcript (growing), then `dock` (a dialog or an editor,
- * given as width => lines), then `footer` (width => lines). Sidebar holds an answered exchange.
+ * given as width => lines), then `footer` (width => lines). `transcript` may supply a real message
+ * component ahead of the dock. Sidebar holds an answered exchange.
  */
-export function sidebarScreen({ width, height, dock, footer, collapsed = false, focused = true, open = true }) {
+export function sidebarScreen({ width, height, dock, footer, transcript = fill(' Earlier transcript in main.'), collapsed = false, focused = true, open = true }) {
   const tui = { terminal: { rows: height, columns: width }, requestRender() {}, setFocus() {} };
   const host = {
     status: () => [{ text: 'main: working' }],
@@ -48,7 +49,7 @@ export function sidebarScreen({ width, height, dock, footer, collapsed = false, 
     { role: 'assistant', content: [{ type: 'text', text: 'It is running the remote-client check over every dialog.' }], api: 'anthropic-messages', provider: 'anthropic', model: 'x', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: 'stop', timestamp: 0 },
   ], (text) => ({ text }));
   const main = new ownTui.VStack([
-    { component: fill(' Earlier transcript in main.'), basis: 0, grow: 1, minSize: 1 },
+    { component: transcript, basis: 0, grow: 1, minSize: 1 },
     { component: { render: (w) => dock(w), invalidate() {} }, basis: 'auto' },
     { component: { render: (w) => footer(w), invalidate() {} }, basis: 'auto' },
   ]);

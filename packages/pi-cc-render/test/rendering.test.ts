@@ -267,7 +267,7 @@ describe("tool groups", () => {
     }
   });
 
-  test.each(["ask_planner", "finish_plan"])("%s preserves colored owned partial and final bodies beside grouped tools", async (name) => {
+  test.each(["ask_planner", "finish_plan"])("%s preserves owned pending/actionable bodies and compact versus expanded final detail beside grouped tools", async (name) => {
     const { createCcstyleTool } = await import("../src/renderer/default-mode.ts");
     const { hooks, root, tool } = await groupedTools(false);
     const { initTheme } = await import("@earendil-works/pi-coding-agent");
@@ -278,12 +278,31 @@ describe("tool groups", () => {
     const cardsPath = new URL("../../pi-plan-mode/src/exec-cards.ts", import.meta.url).href;
     const { renderAsk, renderFinish } = await import(cardsPath);
     const options = { expanded: false, isPartial: true };
+    let completion: "accepted" | "no_review" | "user_override" | undefined;
+    const current = { executionId: "execution-1", exchangeId: "review-1", unresolvedReviewId: "review-1" };
     const owned = createCcstyleTool({
       name,
       ccstyleOwnResult: true,
       renderResult: (_result: unknown, opts: { expanded: boolean; isPartial: boolean }) => name === "ask_planner"
         ? renderAsk({ question: "Keep the approved scope?", planner: "Planner", number: 1, pending: opts.isPartial, reply: "Preserve the approved scope.", costUsd: 0.01 }, opts, cardTheme)
-        : renderFinish({ report: "Implemented approved scope.", verification: "Unit tests passed.", concerns: "None", planFile: "/tmp/plan.md", round: 1, pending: opts.isPartial, decision: opts.isPartial ? undefined : { outcome: "changes_requested", summary: "Preserve the approved scope.", evidence: [], limitations: [], findings: [{ id: "F1", title: "Scope boundary", detail: "Keep the agreed boundary.", requestedChange: "Remove unrelated changes." }] } }, opts, cardTheme),
+        : renderFinish({
+          ...current,
+          report: "Implemented approved scope.",
+          verification: "Unit tests passed.",
+          concerns: "Manual check not run.",
+          planFile: "/tmp/plan.md",
+          round: 1,
+          pending: opts.isPartial,
+          completion,
+          changes: { edited: ["owned-result-detail.ts"], outside: [] },
+          decision: opts.isPartial ? undefined : {
+            outcome: completion ? "accepted" : "changes_requested",
+            summary: "Preserve the approved scope.",
+            evidence: ["Reviewed owned-result evidence."],
+            limitations: ["Planner did not rerun checks."],
+            findings: completion ? [] : [{ id: "F1", title: "Scope boundary", detail: "Keep the agreed boundary.", requestedChange: "Remove unrelated changes." }],
+          },
+        }, opts, cardTheme, () => current),
     }, new Map() as any);
     const exchange = tool(name, []);
     exchange.isPartial = true;
@@ -299,9 +318,48 @@ describe("tool groups", () => {
           const lines = root.render(width);
           const text = plain(lines).join("\n");
           expect(text).toContain(isPartial ? (name === "ask_planner" ? "Planner thinking…" : "Reviewing") : "Preserve the approved scope.");
-          if (!isPartial && name === "finish_plan") expect(text).toContain("Scope boundary");
+          if (name === "finish_plan") {
+            expect(text).toContain("Implemented approved scope.");
+            expect(text).toContain("Unit tests passed.");
+            expect(text).toContain("Manual check not run.");
+            if (!isPartial) {
+              expect(text).toContain("Scope boundary");
+              expect(text).toContain("Keep the agreed boundary.");
+              expect(text).toContain("Remove unrelated changes.");
+            }
+          }
           expect(lines.some((line) => /\x1b\[[\d;]+m/.test(line))).toBe(true);
           expect(text).not.toContain("lines returned");
+        }
+        if (name === "finish_plan") {
+          for (const outcome of ["accepted", "no_review", "user_override"] as const) {
+            completion = outcome;
+            options.isPartial = exchange.isPartial = false;
+            const rendered: string[] = [];
+            for (const expanded of [false, true, false]) {
+              options.expanded = expanded;
+              const lines = root.render(width);
+              const text = plain(lines).join("\n");
+              rendered.push(text);
+              expect(text).toContain({
+                accepted: "Accepted",
+                no_review: "Completed without review",
+                user_override: "Completed by user override",
+              }[outcome]);
+              for (const value of ["Implemented approved scope.", "Unit tests passed.", "Manual check not run."])
+                expect(text).toContain(value);
+              for (const detail of ["Reviewed owned-result evidence.", "Planner did not rerun checks.", "owned-result-detail.ts"]) {
+                if (expanded) expect(text).toContain(detail);
+                else expect(text).not.toContain(detail);
+              }
+              if (!expanded) expect(text.toLowerCase()).toContain("ctrl+o");
+              expect(lines.some((line) => /\x1b\[[\d;]+m/.test(line))).toBe(true);
+              expect(text).not.toContain("lines returned");
+            }
+            expect(rendered[0]).toBe(rendered[2]);
+            expect(rendered[1].length).toBeGreaterThan(rendered[0].length);
+          }
+          completion = undefined;
         }
       }
     } finally {

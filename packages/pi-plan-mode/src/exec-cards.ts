@@ -222,31 +222,166 @@ export function finishContext(details: FinishDetails | undefined): string {
 }
 export function changeSummaryText(changes: ChangeSummary | undefined): string {
   return [
-    `Files edited: ${changes?.edited.join(", ") || "none recorded"}`,
-    `Not in the plan: ${changes?.outside.join(", ") || "none recorded"}`,
+    `Files edited: ${changes?.edited?.join(", ") || "none recorded"}`,
+    `Not in the plan: ${changes?.outside?.join(", ") || "none recorded"}`,
     `git diff against HEAD: ${changes?.git || "no summary available (does not rule out committed work)"}`,
   ].join("\n");
 }
 
+/** A literal preview, never a generated summary. Limits count logical, not wrapped, lines. */
+export function completionPreview(
+  text: string,
+  maxLines: number,
+  maxChars: number,
+): { text: string; truncated: boolean } {
+  const normalized = text
+    .trim()
+    .replace(/\r\n?/gu, "\n")
+    .replace(/\n[\t ]*\n(?:[\t ]*\n)*/gu, "\n\n");
+  if (maxLines <= 0 || maxChars <= 0) return { text: "", truncated: !!normalized };
+  const lines = normalized.split("\n").slice(0, Math.max(0, maxLines)).join("\n");
+  let preview = lines.slice(0, Math.max(0, maxChars));
+  const truncated = preview.length < normalized.length;
+  if (truncated) {
+    preview = preview.slice(0, Math.max(0, maxChars - 1)).trimEnd();
+    if (preview.length < lines.length && /\S/u.test(lines[preview.length] ?? "")) {
+      const boundary = preview.search(/\s+\S*$/u);
+      if (boundary > 0) preview = preview.slice(0, boundary);
+    }
+    preview = `${preview.trimEnd()}…`;
+  }
+  return { text: preview, truncated };
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+function string(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+function items(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+export function decisionText(value: unknown): string {
+  const decision = record(value);
+  return [
+    string(decision.outcome) && `Decision: ${string(decision.outcome)}`,
+    string(decision.summary),
+    ...["evidence", "limitations"].flatMap((key) =>
+      items(decision[key]).length
+        ? [
+            key === "evidence" ? "Reviewed evidence" : "Limitations",
+            ...items(decision[key]).map((item) => `- ${string(item)}`),
+          ]
+        : [],
+    ),
+    ...items(decision.findings).flatMap((value) => {
+      const finding = record(value);
+      return [
+        `Finding ${string(finding.id)}: ${string(finding.title)}`,
+        string(finding.detail),
+        `Requested change: ${string(finding.requestedChange)}`,
+      ];
+    }),
+    string(decision.question) && `Question: ${string(decision.question)}`,
+    string(decision.recommendation) && `Recommendation: ${string(decision.recommendation)}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+export function responsesText(value: unknown): string {
+  return items(value)
+    .map((value) => {
+      const response = record(value);
+      return `Response ${string(response.id)} (${string(response.status)}): ${string(response.response)}`;
+    })
+    .join("\n");
+}
+/** Readable substantive fields, with structural checks for historical persisted entries. */
+export function negotiationText(value: unknown): string {
+  const negotiation = record(value);
+  if (!Object.keys(negotiation).length) return "";
+  const pause = record(negotiation.pause);
+  return [
+    `Review history (${typeof negotiation.attempts === "number" ? negotiation.attempts : items(negotiation.history).length} review rounds; cumulative review cost ${formatCost(typeof negotiation.reviewCostUsd === "number" ? negotiation.reviewCostUsd : 0)})`,
+    string(negotiation.phase) && `Phase: ${string(negotiation.phase)}`,
+    typeof negotiation.revisionsUsed === "number" && `Revisions used: ${negotiation.revisionsUsed}`,
+    typeof negotiation.maxRevisions === "number" && `Revision limit: ${negotiation.maxRevisions}`,
+    typeof negotiation.revisionAuthorized === "boolean" && `Revision authorized: ${negotiation.revisionAuthorized}`,
+    ...items(negotiation.userAnswers).map((answer) => `User-provided answer: ${string(answer)}`),
+    ...items(negotiation.history).map((value, index) => {
+      const attempt = record(value);
+      const report = record(attempt.report);
+      return [
+        `Review ${index + 1}`,
+        "Implementer report",
+        typeof attempt.report === "string" ? attempt.report : string(report.report),
+        string(report.verification) && `Verification (implementer reported):\n${string(report.verification)}`,
+        string(report.concerns) && `Outstanding issues (implementer reported):\n${string(report.concerns)}`,
+        responsesText(attempt.responses),
+        decisionText(attempt.decision),
+        string(attempt.error) && `Review error: ${string(attempt.error)}`,
+        typeof attempt.costUsd === "number" && `Review cost: ${formatCost(attempt.costUsd)}`,
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+    }),
+    string(pause.reason) && `Pause reason: ${string(pause.reason)}`,
+    string(pause.action) && `Next action: ${string(pause.action)}`,
+    string(pause.question) && `Question: ${string(pause.question)}`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+export function finishTitle(details: FinishDetails | undefined): string {
+  if (!details) return "Implementation review unavailable";
+  return `${details.completion ? "Implementation" : `Review ${details.round ?? details.negotiation?.attempts ?? 1}`} · ${assessmentSummary(details)}`;
+}
+
 export function renderFinish(
   details: FinishDetails | undefined,
-  options: { expanded: boolean; isPartial: boolean },
+  options: { expanded: boolean; isPartial: boolean; omitTitle?: boolean },
   theme: Theme,
   current?: CurrentExchange,
 ): Component {
   return dynamic(() => {
     const body = new Container();
-    if (!details) return body;
+    if (!details) {
+      if (!options.omitTitle) body.addChild(reviewTitle(theme, finishTitle(details)));
+      return body;
+    }
     const live = isCurrent(details, current);
     // Old sessions without identity respect normal expansion, rather than guessing liveness.
-    const full = options.expanded || details.pending || live === true;
+    const full = options.expanded || (!details.completion && (details.pending || live === true));
     const label = assessmentSummary(details);
-    body.addChild(
-      reviewTitle(
+    if (!options.omitTitle) body.addChild(reviewTitle(theme, finishTitle(details)));
+    if (details.completion && !options.expanded) {
+      for (const [label, value] of [
+        ["What changed (implementer reported)", details.report || "Not provided."],
+        ["Verification (implementer reported)", details.verification || "Not provided; verification is unknown."],
+        [
+          "Outstanding issues (implementer reported)",
+          details.concerns || "Not provided; outstanding issues are unknown.",
+        ],
+      ])
+        section(body, theme, label, completionPreview(value, 3, 320).text);
+      // Recovery instructions must remain actionable without expanding the final report.
+      if (details.action) section(body, theme, "Next action", details.action);
+      body.addChild(new Spacer(1));
+      body.addChild(new Text(theme.fg("dim", "ctrl+o to expand"), 0, 0));
+      status(
+        body,
         theme,
-        `${details.completion ? "Implementation" : `Review ${details.round ?? details.negotiation?.attempts ?? 1}`} · ${label}`,
-      ),
-    );
+        {
+          accepted: "Reviewed",
+          no_review: "Review skipped",
+          user_override: "Review overridden",
+          stopped: "Not completed",
+        }[details.completion],
+        finishTone(details),
+      );
+      return body;
+    }
     if (details.headline) body.addChild(new Text(theme.fg("dim", details.headline), 0, 0));
     const narrative = new Container();
     section(narrative, theme, "Implementer report", details.report || "Not provided.");
@@ -259,7 +394,7 @@ export function renderFinish(
     section(
       narrative,
       theme,
-      "Outstanding issues",
+      "Outstanding issues (implementer reported)",
       details.concerns || "Not provided; outstanding issues are unknown.",
     );
     // Fold narrative text, not semantic outcome, findings or cost rows.
@@ -288,25 +423,39 @@ export function renderFinish(
         response ? `${response.status}: ${response.response}` : "No response recorded.",
       );
     }
+    const unmatchedResponses = details.responses?.filter(
+      (response) => !details.previousFindings?.some((finding) => finding.id === response.id),
+    );
+    if (unmatchedResponses?.length) section(body, theme, "Implementer responses", responsesText(unmatchedResponses));
     if (details.pending)
       section(body, theme, "Planner assessment", `Planner reviewing…${details.activity ? ` ${details.activity}` : ""}`);
     else if (details.decision) {
       if (full) {
         section(body, theme, "Planner assessment", details.decision.summary);
-        if (details.decision.evidence.length)
-          section(body, theme, "Reviewed evidence", details.decision.evidence.map((item) => `- ${item}`).join("\n"));
-        if (details.decision.limitations.length)
-          section(body, theme, "Limitations", details.decision.limitations.map((item) => `- ${item}`).join("\n"));
+        if (details.decision.evidence?.length)
+          section(
+            body,
+            theme,
+            "Reviewed evidence",
+            (details.decision.evidence ?? []).map((item) => `- ${item}`).join("\n"),
+          );
+        if (details.decision.limitations?.length)
+          section(
+            body,
+            theme,
+            "Limitations",
+            (details.decision.limitations ?? []).map((item) => `- ${item}`).join("\n"),
+          );
       } else {
         body.addChild(new Spacer(1));
         folded(
           body,
           theme,
-          `### Planner assessment\n${details.decision.summary}\n\n### Reviewed evidence\n${details.decision.evidence.map((item) => `- ${item}`).join("\n")}\n\n### Limitations\n${details.decision.limitations.map((item) => `- ${item}`).join("\n")}`,
+          `### Planner assessment\n${details.decision.summary}\n\n### Reviewed evidence\n${(details.decision.evidence ?? []).map((item) => `- ${item}`).join("\n")}\n\n### Limitations\n${(details.decision.limitations ?? []).map((item) => `- ${item}`).join("\n")}`,
           false,
         );
       }
-      for (const finding of details.decision.findings)
+      for (const finding of details.decision.findings ?? [])
         section(
           body,
           theme,
@@ -322,21 +471,10 @@ export function renderFinish(
     if (details.decision?.recommendation) section(body, theme, "Recommendation", details.decision.recommendation);
     const action = details.action ?? details.negotiation?.pause?.action;
     if (action) section(body, theme, "Next action", action);
-    if (details.completion && details.negotiation?.history.length) {
-      section(
-        body,
-        theme,
-        "Review rounds",
-        details.negotiation.history
-          .map(
-            (attempt, index) =>
-              `- Review ${index + 1}: ${attempt.decision?.summary ?? attempt.error ?? "No assessment"}${attempt.responses?.length ? `; ${attempt.responses.map((response) => `${response.id} ${response.status}: ${response.response}`).join("; ")}` : ""}`,
-          )
-          .join("\n"),
-      );
-    }
+    if (details.error) section(body, theme, "Review error", details.error);
+    if (full && details.negotiation) section(body, theme, "Review rounds", negotiationText(details.negotiation));
     if (full && details.changes) section(body, theme, "Changed files", changeSummaryText(details.changes));
-    const callCost = details.negotiation?.history.at((details.round ?? details.negotiation.attempts) - 1)?.costUsd;
+    const callCost = details.negotiation?.history?.at((details.round ?? details.negotiation.attempts) - 1)?.costUsd;
     status(
       body,
       theme,

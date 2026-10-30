@@ -13,7 +13,8 @@ with that session's directory, model, thinking level, context and cost, keeping 
 accounts and statuses (channel `pi-plugins.session-chrome.v1`, `src/session-chrome.ts`).
 Every footer row
 leads with a dim Nerd Font icon: folder (project), git branch, robot
-(model) with a brain before the reasoning level, tachometer (context), book (marimo), cogs (background), microchip (pressure), archive
+(model) with a brain before the reasoning level, sitemap (workflow), shield (approvals),
+tachometer (context), book (marimo), cogs (background), microchip (pressure), archive
 (stash), and hourglass (limits). On the context row a plug marks MCP and a magic
 wand skills. In the notices row, the tool gate's shield marks its own notices; the first notice's icon leads the row, a
 bell otherwise. Without a Nerd Font they draw as placeholders;
