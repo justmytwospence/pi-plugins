@@ -1,0 +1,23 @@
+default_permissions = "project"
+
+[mcp_servers.vercel]
+enabled = true
+
+[permissions.project]
+extends = "self"
+
+[permissions.project.workspace_roots]
+"/Users/spencerboucher/Projects/dotfiles" = true
+
+# Adding a herdr-* sibling requires updating the native lists here and in
+# .claude/settings.json; Pi and OpenCode use supported sibling globs.
+[permissions.project.filesystem]
+"/Users/spencerboucher/Projects/dotfiles" = "write"
+"/Users/spencerboucher/Projects/herdr-agentbox" = "read"
+"/Users/spencerboucher/Projects/herdr-focus-notify" = "read"
+"/Users/spencerboucher/Projects/herdr-machine0" = "read"
+"/Users/spencerboucher/Projects/herdr-menu" = "read"
+"/Users/spencerboucher/Projects/herdr-native-notify" = "read"
+"/Users/spencerboucher/Projects/herdr-plugins" = "read"
+"/Users/spencerboucher/Projects/herdr-repeat-navigation" = "read"
+"/Users/spencerboucher/Projects/herdr-web-ui" = "read"

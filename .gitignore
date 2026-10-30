@@ -1,5 +1,6 @@
 node_modules/
-.pi/
+.pi/tool-gate.local.json
+.claude/settings.local.json
 .trial/
 .DS_Store
 coverage/

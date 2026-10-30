@@ -1,0 +1,6 @@
+{
+  "directories": {
+    "read": ["~/Projects/herdr-*"],
+    "write": ["~/Projects/dotfiles"]
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "mcp": {
+    "vercel": {
+      "enabled": true
+    }
+  },
+  "permission": {
+    "external_directory": {
+      "{env:HOME}/Projects/herdr-*/**": "allow",
+      "{env:HOME}/Projects/dotfiles/**": "allow"
+    },
+    "edit": {
+      "*": "allow",
+      "{env:HOME}/Projects/herdr-*/**": "ask",
+      "{env:HOME}/Projects/dotfiles/**": "allow",
+      "{env:HOME}/Projects/pi-plugins/**": "allow"
+    }
+  }
+}
