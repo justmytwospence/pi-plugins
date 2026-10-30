@@ -28,7 +28,7 @@ At an idle Pi terminal prompt, type and submit, for example:
 
 Interact directly with the command in the focused overlay. When it exits, its output stays visible until you press Enter or Esc to dismiss the panel. Plain `!<command>` retains Pi's normal behavior, even for editors and other interactive programs. Only the explicit `!i` prefix selects the panel. `!!i <command>` uses the same panel with Pi's normal `!!` exclusion from model context.
 
-With optional [pi-next-prompt](https://pi-plugins.vercel.app/plugins/pi-next-prompt/), a capability probe lets it suggest an explicit `!i <command>` next step. Next-prompt owns all suggestion UI and acceptance behavior: press Tab to copy the ghost into the editor, review or edit it, then press Enter yourself. Accepting never executes it. Neither component requires the other, and neither imports the sibling to integrate.
+With optional [pi-next-prompt](https://pi-plugins.vercel.app/plugins/pi-next-prompt/), a capability probe lets it suggest an explicit `!i <command>` next step. Next-prompt owns the suggestion UI: press Tab or Right to copy the ghost into the editor, review it, then press Enter yourself. Acceptance never executes it. If you submit a model-suggested draft exactly unchanged, the panel closes automatically on success, failure or cancellation, and the agent continues automatically using only the recorded status. Terminal output and keystrokes remain private and are discarded on close. Manual, edited, externally offered and `!!i` commands retain the manual panel and do not automatically resume the agent. Neither component requires the other, and neither imports the sibling to integrate.
 
 ## Keys
 
@@ -42,7 +42,7 @@ While the command runs, program keys including Tab, Esc, Ctrl+C and Ctrl+D go to
 | `g` / `G` | Scroll to top / end |
 | Ctrl+] | Send a literal Ctrl+] to the program |
 
-After command exit, Enter or Esc dismisses the retained output. Closing/teardown stops the process group with escalation when needed and disposes the terminal emulation.
+For manual panels, Enter or Esc dismisses retained output after command exit. Closing/teardown stops the process group with escalation when needed and disposes the terminal emulation.
 
 ## Execution and limits
 
@@ -50,7 +50,7 @@ After command exit, Enter or Esc dismisses the retained output. Closing/teardown
 - Runs a foreground command through the user's `$SHELL` (fallback `/bin/sh`) with `-c`, the session working directory and a pseudoterminal. Commands retain your ordinary OS permissions.
 - Pi's event processing and background monitoring can continue, and existing background OS processes keep running. New agent requests are gated until the panel closes, including while exited output is retained.
 - Keyboard-first VT terminal support, not universal mouse, graphics or remote/phone-client support. There is no OSC 52/clipboard passthrough.
-- There is no detach, multiple-terminal management, background-job adoption, agent tool or automatic agent continuation. Close the panel and send another prompt if you want the agent to continue.
+- There is no detach, multiple-terminal management, background-job adoption or agent tool. For manual panels, close the panel and send another prompt if you want the agent to continue.
 - [pi-bg](https://pi-plugins.vercel.app/plugins/pi-bg/) is unchanged: use it for logged jobs and services rather than direct terminal interaction.
 
 ## History, privacy and cost

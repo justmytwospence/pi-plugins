@@ -6,7 +6,7 @@ import { stopPty } from "../src/pty.ts";
 vi.mock("../src/pty.ts", () => ({ spawnPty: vi.fn(), stopPty: vi.fn(async () => {}) }));
 beforeEach(() => vi.clearAllMocks());
 
-async function setup(factory?: any, command = "interactive-example") {
+async function setup(factory?: any, command = "interactive-example", autoClose = false) {
   let data!: (data: string) => void;
   let exit!: (event: any) => void;
   const dispose = vi.fn();
@@ -18,7 +18,7 @@ async function setup(factory?: any, command = "interactive-example") {
   const theme = { fg: (_color: string, text: string) => text };
   const done = vi.fn();
   const spawn = factory ?? vi.fn(async () => pty);
-  const panel = new TerminalPanel(tui as any, theme as any, command, "/tmp", done, spawn);
+  const panel = new TerminalPanel(tui as any, theme as any, command, "/tmp", done, spawn, autoClose);
   await panel.start();
   return { panel, pty, tui, done, spawn, dispose, data: (text: string) => data(text), exit: (code = 0, signal = 0) => exit({ exitCode: code, signal }) };
 }
@@ -132,6 +132,62 @@ test("startup failure stays readable, then closes with status only", async () =>
   h.panel.handleInput("\x1b");
   await vi.waitFor(() => expect(h.done).toHaveBeenCalledOnce());
   expect(h.done.mock.calls[0][0].exitCode).toBe(1);
+});
+
+test.each([
+  { code: 0, signal: 0, exitCode: 0, cancelled: false },
+  { code: 7, signal: 0, exitCode: 7, cancelled: false },
+  { code: 130, signal: 0, exitCode: 130, cancelled: true },
+  { code: 0, signal: 2, exitCode: 130, cancelled: true },
+])("auto-close returns status after flushing and stopping: %j", async ({ code, signal, exitCode, cancelled }) => {
+  const h = await setup(undefined, undefined, true);
+  const screen = (h.panel as any).screen;
+  const flush = vi.spyOn(screen, "flush");
+  const dispose = vi.spyOn(screen, "dispose");
+  let stopped!: () => void;
+  vi.mocked(stopPty).mockImplementationOnce(() => new Promise<void>(resolve => { stopped = resolve; }));
+  h.data("PRIVATE_FINAL_OUTPUT\r\n");
+  h.exit(code, signal);
+  await vi.waitFor(() => expect(stopPty).toHaveBeenCalledOnce());
+  expect(flush).toHaveBeenCalled();
+  expect(plain(h.panel.render(98))).toContain("PRIVATE_FINAL_OUTPUT");
+  expect(h.done).not.toHaveBeenCalled();
+  expect(dispose).not.toHaveBeenCalled();
+  stopped();
+  await vi.waitFor(() => expect(h.done).toHaveBeenCalledOnce());
+  expect(h.done.mock.calls[0][0]).toMatchObject({ exitCode, cancelled, truncated: false });
+  expect(JSON.stringify(h.done.mock.calls)).not.toContain("PRIVATE_FINAL_OUTPUT");
+  expect(h.dispose).toHaveBeenCalledTimes(2);
+  expect(dispose).toHaveBeenCalledOnce();
+  await Promise.all([h.panel.shutdown(), h.panel.shutdown()]);
+  h.panel.dispose();
+  h.exit(code, signal);
+  expect(stopPty).toHaveBeenCalledOnce();
+  expect(h.done).toHaveBeenCalledOnce();
+});
+
+test("auto-close finishes spawn failure without a dismissal", async () => {
+  const h = await setup(async () => { throw new Error("native startup failed"); }, undefined, true);
+  expect(h.done).toHaveBeenCalledExactlyOnceWith({
+    output: "(interactive command: native startup failed)", exitCode: 1, cancelled: false, truncated: false,
+  });
+  await h.panel.shutdown();
+  expect(h.done).toHaveBeenCalledOnce();
+});
+
+test("auto-close shutdown during startup remains idempotent", async () => {
+  let spawned!: (pty: any) => void;
+  const pending = new Promise<any>(resolve => { spawned = resolve; });
+  const done = vi.fn();
+  const panel = new TerminalPanel({ terminal: { columns: 80, rows: 24 }, requestRender: vi.fn() } as any,
+    { fg: (_color: string, text: string) => text } as any, "true", "/tmp", done, () => pending, true);
+  void panel.start();
+  const shutdown = panel.shutdown();
+  expect(panel.shutdown()).toBe(shutdown);
+  spawned({ onData: () => ({ dispose() {} }), onExit: () => ({ dispose() {} }), resize: vi.fn() });
+  await shutdown;
+  expect(stopPty).toHaveBeenCalledOnce();
+  expect(done).toHaveBeenCalledExactlyOnceWith({ output: "(interactive command stopped)", exitCode: 130, cancelled: true, truncated: false });
 });
 
 test("resize and prefix scrollback controls keep terminal output inside panel bounds", async () => {

@@ -38,7 +38,8 @@ export class TerminalPanel {
 
   constructor(private readonly tui: TUI, private readonly theme: Theme,
     readonly command: string, private readonly cwd: string,
-    private readonly done: (result: HandoffResult) => void, private readonly spawn: PtyFactory = spawnPty) {
+    private readonly done: (result: HandoffResult) => void, private readonly spawn: PtyFactory = spawnPty,
+    private readonly autoClose = false) {
     this.width = Math.max(5, (tui.terminal?.columns ?? 80) - 2);
     const { cols, rows } = this.dimensions(this.width);
     this.screen = new TerminalScreen(cols, rows, () => { if (!this.closed) tui.requestRender(); }, data => {
@@ -93,7 +94,11 @@ export class TerminalPanel {
       this.ended = true;
       this.result = failure(error instanceof Error ? error.message : String(error));
       this.screen.write(this.result.output);
-      this.tui.requestRender();
+      if (this.autoClose) {
+        await this.screen.flush();
+        await this.stop();
+        this.finish(this.result);
+      } else this.tui.requestRender();
     }
   }
 
@@ -110,7 +115,8 @@ export class TerminalPanel {
     await this.screen.flush();
     // Even a successful shell can leave descendants; this is not a detached job.
     await this.stop();
-    if (!this.closed) this.tui.requestRender();
+    if (this.autoClose) this.finish(this.result);
+    else if (!this.closed) this.tui.requestRender();
   }
 
   private stop() {

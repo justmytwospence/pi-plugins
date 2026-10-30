@@ -18,7 +18,8 @@ export const INTERACTIVE_INSTRUCTION =
   "Never include credentials, and always give the complete command however long it is: never truncate or abbreviate it. " +
   "Do not retry a command that may already have made changes without checking its state. " +
   "The command runs in the session working directory and returns only its exit status, not captured output; " +
-  "there is no automatic agent continuation afterward.";
+  "When the user accepts your suggested `!i` draft with Tab or Right and submits it exactly unchanged with Enter, the panel closes on success, failure, or cancellation and the agent continues automatically using only the status. " +
+  "Terminal output and keystrokes remain private and are discarded on close. Manually entered, edited, externally offered, and `!!i` commands retain manual panels and do not automatically resume the agent.";
 
 /** A line that is only a tag (surrounding whitespace allowed). */
 const TAG_LINE = /^[ \t]*<next>(.*?)<\/next>[ \t]*$/gmu;

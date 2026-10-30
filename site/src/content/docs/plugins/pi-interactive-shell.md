@@ -11,7 +11,7 @@ plugin: pi-interactive-shell
 - **Controls:** Submit `!i <command>` yourself; `!!i <command>` also excludes it from model context. Ctrl+] prefixes panel controls; program keys otherwise reach the command.
 - **Settings:** No plugin-specific settings; uses `$SHELL` (fallback `/bin/sh`) and the session working directory.
 - **Requirements, cost & privacy:** Real, idle terminal TUI; native PTY dependencies; no model/classifier calls of its own. Session history contains the command and status, not terminal output or interactive keystrokes; external recording remains possible.
-- **Integrations & limits:** Optional next-prompt capability probe; next-prompt owns suggestions. No agent tool, detach, multiple terminals, background-job adoption or automatic agent continuation. pi-bg is unchanged.
+- **Integrations & limits:** Optional next-prompt capability probe; exact, submitted model suggestions can close the panel and resume the agent with status only. No agent tool, detach, multiple terminals or background-job adoption. pi-bg is unchanged.
 
 ## Enable and requirements
 
@@ -29,7 +29,7 @@ At an idle Pi terminal prompt, explicitly submit a command such as:
 !i git add -p
 ```
 
-Pi opens a focused overlay in the lower half of the terminal, keeping the conversation visible. It does not clear the screen or stop Pi's TUI. Interact directly with the command, then exit normally. **Exited output stays in the panel until Enter or Esc dismisses it.** To continue the conversation, close the panel and send another prompt yourself; exiting the command does not automatically resume the agent.
+Pi opens a focused overlay in the lower half of the terminal, keeping the conversation visible. It does not clear the screen or stop Pi's TUI. Interact directly with the command, then exit normally. For manually submitted commands, **exited output stays in the panel until Enter or Esc dismisses it**. Close the panel and send another prompt to continue; these commands do not automatically resume the agent. The exact suggested handoff described below is an exception.
 
 Only `!i <command>` selects this path. Plain `!<command>` retains Pi's normal behavior, including for programs that happen to need a terminal. There is no auto-detection, allowlist or interactive-command environment configuration. Do not load Pi's shipped interactive-shell example alongside this component: it handles the same user shell input and has different auto-detection behavior.
 
@@ -49,13 +49,13 @@ To control the panel, press **Ctrl+]**, then one of:
 | `g` / `G` | Scroll to top / end |
 | Ctrl+] | Send a literal Ctrl+] to the program |
 
-After command exit, Enter or Esc dismisses retained output. Closing or tearing down the panel stops its process group, escalates termination when needed and disposes the terminal emulation.
+For manual panels, Enter or Esc dismisses retained output after command exit. Closing or tearing down the panel stops its process group, escalates termination when needed and disposes the terminal emulation.
 
 ## Optional next-prompt suggestion
 
 When [pi-next-prompt](/plugins/pi-next-prompt/) is enabled, it can probe for interactive-shell capability and suggest an explicit `!i <command>` next step. Without that capability, it must not assume the panel is available. There is no dependency requirement in either direction.
 
-Next-prompt owns the ghost text, acceptance keys and suggestion lifecycle. Press Tab to copy a suggestion into the editor, review or edit the command, then press Enter yourself. Tab never executes the command, and a model-authored suggestion is not authorization. The interactive-shell component adds no separate suggestion UI.
+Next-prompt owns the ghost text, acceptance keys and suggestion lifecycle. Press Tab or Right to copy a suggestion into the editor, review it, then press Enter yourself. Acceptance never executes the command, and a model-authored suggestion is not authorization. If you submit a model-suggested `!i` draft exactly unchanged, the panel closes automatically on success, failure or cancellation, and the agent continues automatically using only the recorded status. Terminal output and keystrokes remain private and are discarded on close. Manual, edited, externally offered and `!!i` commands retain manual panels and do not automatically resume the agent. The interactive-shell component adds no separate suggestion UI.
 
 ## Foreground execution, not a background task
 

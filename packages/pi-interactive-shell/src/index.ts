@@ -5,6 +5,17 @@ import { failure, handoff, interactiveCommand, type HandoffResult } from "./hand
 export default function interactiveShell(pi: ExtensionAPI) {
   const terminalAvailable = () => process.stdin.isTTY === true && process.stdout.isTTY === true;
   let available = false;
+  let sessionActive = false;
+  let generation = 0;
+  let acceptedDraft: string | undefined;
+  const clearAccepted = () => { acceptedDraft = undefined; generation++; };
+  pi.events.on("interactive-shell:suggestion-accepted", (data) => {
+    const text = (data as { text?: unknown } | undefined)?.text;
+    acceptedDraft = sessionActive && typeof text === "string" && text.startsWith("!i ") ? text : undefined;
+  });
+  pi.on("input", clearAccepted);
+  pi.on("session_tree", clearAccepted);
+  pi.on("agent_start", clearAccepted);
   let pending: Promise<HandoffResult> | undefined;
   let active: ReturnType<typeof handoff> | undefined;
   // Background completions may request a turn while the terminal belongs to the
@@ -16,9 +27,13 @@ export default function interactiveShell(pi: ExtensionAPI) {
     await new Promise<void>((resolve) => setImmediate(resolve));
   });
   pi.on("session_start", (_event, ctx) => {
+    clearAccepted();
+    sessionActive = true;
     available = ctx.mode === "tui" && ctx.hasUI && terminalAvailable();
   });
   pi.on("session_shutdown", async () => {
+    sessionActive = false;
+    clearAccepted();
     available = false;
     await active?.shutdown();
     await pending;
@@ -29,6 +44,9 @@ export default function interactiveShell(pi: ExtensionAPI) {
     if (available && typeof request?.reply === "function") request.reply();
   });
   pi.on("user_bash", async (event, ctx) => {
+    const autoClose = !event.excludeFromContext && `!${event.command}` === acceptedDraft;
+    clearAccepted();
+    const mine = generation;
     const command = interactiveCommand(event.command);
     if (command === undefined) return undefined;
     pi.events.emit("prompt:clear", {});
@@ -39,10 +57,22 @@ export default function interactiveShell(pi: ExtensionAPI) {
     if (pending || !ctx.isIdle()) return { result: failure("wait for the current operation to finish before handing over the terminal") };
     // Pi records this result and honors event.excludeFromContext for !!i itself.
     pending = ctx.ui.custom<HandoffResult>((tui, theme, _kb, done) => {
-      active = handoff(tui, theme, command, event.cwd, done);
+      active = handoff(tui, theme, command, event.cwd, done, autoClose);
       return active;
     }, { overlay: true, overlayOptions: () => active?.overlayOptions() ?? {} });
-    try { return { result: await pending }; }
+    try {
+      const result = await pending;
+      if (autoClose && sessionActive) setImmediate(() => {
+        if (!sessionActive || mine !== generation || !ctx.isIdle()) return;
+        generation++;
+        pi.sendMessage({
+          customType: "interactive-shell-continuation",
+          content: "The requested interactive command has finished. Continue based on its recorded exit status; its terminal output was not captured.",
+          display: false,
+        }, { triggerTurn: true });
+      });
+      return { result };
+    }
     finally { pending = undefined; active = undefined; }
   });
 }

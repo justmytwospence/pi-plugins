@@ -32,9 +32,28 @@ async function setup(first: boolean, tty = true) {
 test.each([false, true])("optional capability and Tab-only acceptance work in both registration orders (%s)", async first => {
   const { h, ctx, sections } = await setup(first);
   expect(sections[SECTION]).toBe(INSTRUCTION + INTERACTIVE_INSTRUCTION);
+  const accepted: unknown[] = [];
+  h.pi.events.on("interactive-shell:suggestion-accepted", (data: unknown) => accepted.push(data));
   expect(ctx.ui.press("\t")).toBe(true);
   expect(ctx.ui.editorText).toBe("!i sudo true");
+  expect(accepted).toEqual([{ text: "!i sudo true" }]);
+  ctx.ui.setEditorText("!i sudo false");
+  expect(ctx.ui.editorText).toBe("!i sudo false");
   expect(h.messages).toEqual([]);
+});
+
+test.each([false, true])("accepted draft resumes after unchanged submission in either registration order (%s)", async first => {
+  const { h, ctx } = await setup(first);
+  ctx.ui.custom = async () => ({ output: "(interactive command exited with code 0)", exitCode: 0, cancelled: false, truncated: false });
+  ctx.ui.press("\t");
+  // Pi stops propagation at the first handler returning a bash result.
+  for (const handler of h.handlers.get("user_bash")!) {
+    if (await handler({ command: "i sudo true", cwd: ctx.cwd, excludeFromContext: false }, ctx)) break;
+  }
+  expect(h.messages).toEqual([]);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  expect(h.messages).toHaveLength(1);
+  expect(h.messages[0].message.customType).toBe("interactive-shell-continuation");
 });
 
 test("handoff guidance explicitly covers commands and requested manual tests", () => {
@@ -63,6 +82,18 @@ test("an interceptor clears the offer even when it stops user_bash propagation",
   await h.handlers.get("user_bash")![0]({ command: "i", cwd: ctx.cwd }, ctx);
   expect(ctx.ui.press("\t")).toBe(false);
   expect(ctx.ui.editorText).toBe("");
+});
+
+test("external interactive offers stay editable without an acceptance marker", async () => {
+  const { h, ctx } = await setup(true);
+  await h.emit("input", {}, ctx);
+  const accepted: unknown[] = [];
+  h.pi.events.on("interactive-shell:suggestion-accepted", (data: unknown) => accepted.push(data));
+  h.pi.events.emit("prompt:offer", { source: "external", text: "!i sudo true" });
+  expect(ctx.ui.press("\t")).toBe(true);
+  expect(ctx.ui.editorText).toBe("!i sudo true");
+  expect(accepted).toEqual([]);
+  expect(h.messages).toEqual([]);
 });
 
 test("ordinary user bash also clears the offer", async () => {

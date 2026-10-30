@@ -270,8 +270,10 @@ export default function nextPrompt(pi: ExtensionAPI) {
     const accept = config.acceptKeys.some((key) => matchesKey(data, key as KeyId));
     if (accept && shown !== undefined && ui.getEditorText() === "") {
       const text = shown;
+      const modelSuggestion = offerSource === undefined;
       hide();
       ui.setEditorText(text);
+      if (modelSuggestion && text.startsWith("!i ")) pi.events.emit("interactive-shell:suggestion-accepted", { text });
       // The owned editor offers an optional local insertion hook; no submission occurs.
       const editor = mainFocused() as (Renderable & { [key: symbol]: unknown }) | undefined;
       const insert = editor?.[Symbol.for("pi-plugins.editor-insert.v1")];
