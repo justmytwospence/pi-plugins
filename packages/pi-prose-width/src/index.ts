@@ -20,6 +20,7 @@ import { Markdown, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 export const DEFAULT_MEASURE = 80;
 const STATE = Symbol.for("pi-prose-width");
 const SEEN = Symbol.for("pi-prose-width.version");
+const SKIP = Symbol.for("pi-prose-width.skip");
 
 type Token = { type: string; text?: string; tokens?: Token[]; items?: Token[] };
 type RenderToken = (this: Markdown, token: Token, width: number, ...rest: unknown[]) => string[];
@@ -89,6 +90,9 @@ export function install(measure: number): Installation {
     const shared = state;
 
     const patchedToken: RenderToken = function (token, width, ...rest) {
+      if ((this as Markdown & { [SKIP]?: unknown })[SKIP] === true) {
+        return renderToken.call(this, token, width, ...rest);
+      }
       const m = shared.measure;
       if (!shared.active || !m || width <= m || !PROSE.has(token.type) || holdsWideContent(token, m)) {
         return renderToken.call(this, token, width, ...rest);

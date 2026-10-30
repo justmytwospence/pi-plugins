@@ -68,6 +68,76 @@ describe("rendering", () => {
   });
 });
 
+describe("per-instance opt-out", () => {
+  const SKIP = Symbol.for("pi-prose-width.skip");
+  const markdown = (text = LONG) => new Markdown(text, 0, 0, theme) as Markdown & { [SKIP]?: unknown };
+
+  test.each([
+    LONG,
+    `## ${LONG}`,
+    `- ${LONG}\n  - ${LONG}\n    - ${LONG}`,
+    `> ${LONG}\n>\n> > ${LONG}`,
+    `> - ${LONG}\n>   - ${LONG}`,
+  ])("marked prose matches original full-width rendering: %s", (text) => {
+    const lease = install(0);
+    const original = markdown(text).render(120);
+    lease.setMeasure(72);
+    const marked = markdown(text);
+    marked[SKIP] = true;
+    expect(marked.render(120)).toEqual(original);
+    expect(widest(marked.render(120))).toBeGreaterThan(72);
+    expect(widest(markdown(text).render(120))).toBeLessThanOrEqual(72);
+    expect(widest(marked.render(50))).toBeLessThanOrEqual(50);
+  });
+
+  test("only true opts out and changing the marker requires invalidation", () => {
+    const md = markdown();
+    md[SKIP] = "true";
+    const constrained = md.render(120);
+    expect(widest(constrained)).toBeLessThanOrEqual(72);
+    md[SKIP] = true;
+    expect(md.render(120)).toEqual(constrained);
+    md.invalidate();
+    const full = md.render(120);
+    expect(widest(full)).toBeGreaterThan(72);
+    delete md[SKIP];
+    expect(md.render(120)).toEqual(full);
+    md.invalidate();
+    expect(md.render(120)).toEqual(constrained);
+  });
+
+  test("measure changes still invalidate marked and normal instances", () => {
+    const lease = install(72);
+    const marked = markdown();
+    marked[SKIP] = true;
+    const normal = markdown();
+    const full = marked.render(120);
+    expect(widest(normal.render(120))).toBeLessThanOrEqual(72);
+    const invalidate = vi.spyOn(marked, "invalidate");
+    lease.setMeasure(40);
+    expect(marked.render(120)).toEqual(full);
+    expect(invalidate).toHaveBeenCalledOnce();
+    expect(widest(normal.render(120))).toBeLessThanOrEqual(40);
+    lease.setMeasure(0);
+    expect(marked.render(120)).toEqual(full);
+    expect(normal.render(120)).toEqual(full);
+  });
+
+  test("the instance marker survives plugin shutdown and reload", () => {
+    const marked = markdown();
+    marked[SKIP] = true;
+    const normal = markdown();
+    const full = marked.render(120);
+    expect(widest(normal.render(120))).toBeLessThanOrEqual(72);
+    for (const lease of leases.splice(0)) lease.dispose();
+    expect(marked.render(120)).toEqual(full);
+    expect(normal.render(120)).toEqual(full);
+    install(40);
+    expect(marked.render(120)).toEqual(full);
+    expect(widest(normal.render(120))).toBeLessThanOrEqual(40);
+  });
+});
+
 describe("ownership and lifecycle", () => {
   test("last release restores prototypes and invalidates already-rendered Markdown", () => {
     for (const lease of leases.splice(0)) lease.dispose();

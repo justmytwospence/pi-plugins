@@ -1,6 +1,6 @@
 # pi-prose-width
 
-Wraps prose in Pi's transcript at a readable measure, 80 columns by default, while fenced code blocks and tables keep the full width of the terminal. It applies to every Markdown Pi draws: assistant and user messages, thinking, and extensions' Markdown.
+Wraps prose in Pi's transcript at a readable measure, 80 columns by default, while fenced code blocks and tables keep the full width of the terminal. It applies to Markdown Pi draws: assistant and user messages, thinking, and extensions' Markdown, unless an instance explicitly opts out.
 
 Example of the result (illustration, not a screenshot):
 
@@ -50,6 +50,19 @@ Pi's `Markdown` component (pi-tui) renders a message one top-level token at a ti
 - When the terminal is no wider than the measure, nothing changes.
 
 The patch is installed once per process; a `/reload` re-reads the configuration and only updates the measure. Changing the measure makes every `Markdown` component drop its cached lines, so existing messages rewrap the next time they are drawn.
+
+## Full-width embedded Markdown
+
+Extensions can opt an individual `Markdown` instance out of the prose measure, for example inside a width-managed panel:
+
+```ts
+const markdown = new Markdown(text, 0, 0, theme);
+Object.assign(markdown, { [Symbol.for("pi-prose-width.skip")]: true });
+```
+
+Only the literal value `true` opts out. All tokens, including nested lists and quotes, then use Pi's original rendering at the supplied width (not necessarily the terminal's full width). Other instances and the global measure are unaffected. This optional convention needs no import from or dependency on pi-prose-width; without the plugin, Pi simply ignores the marker.
+
+Set the marker before the first render. If you change or remove it after rendering, call `markdown.invalidate()` and request a UI redraw as usual; the marker does not automatically invalidate cached lines. Global measure changes and plugin shutdown/reload retain their normal cache invalidation behavior, and the instance marker survives reload.
 
 ## Commands
 
