@@ -6,6 +6,77 @@ import nextPrompt from "../src/index.ts";
 import { fakeJev, harness } from "./harness.ts";
 
 const PROMPT = "/marimo new examples/viewer-demo.py";
+// Parse only the text-free diagnostic suffix, never the offered text in legacy status fields.
+async function lifecycle(s: Awaited<ReturnType<typeof setup>>) {
+  await s.h.commands.get("next-prompt").handler("status", s.ctx);
+  const status = s.ctx.ui.notes.at(-1)!.message;
+  return {
+    state: JSON.parse(status.split("Lifecycle state: ")[1]!.split(". Last render before settlement:")[0]!),
+    before: JSON.parse(status.split("Last render before settlement: ")[1]!.split(". Last render after settlement:")[0]!),
+    after: JSON.parse(status.split("Last render after settlement: ")[1]!.split(". Lifecycle trace:")[0]!),
+    trace: JSON.parse(status.split("Lifecycle trace: ")[1]!),
+  };
+}
+
+test.each([false, true])("status does not render a pending prompt or create a receipt (ghost=%s)", async ghost => {
+  const s = await setup({ ghost });
+  const pending = s.execute();
+  const render = vi.spyOn(s.ctx.ui.editor, "render");
+  const info = await lifecycle(s);
+  expect(render).not.toHaveBeenCalled();
+  expect(info.before).toBeNull();
+  expect(info.after).toBeNull();
+  expect(info.trace.some((event: any) => event.event === "acknowledge")).toBe(false);
+  s.render();
+  expectDisplayed(await pending, PROMPT, ghost);
+});
+
+test.each(["dialog", "sidebar"])("transient %s focus after receipt has a concrete hide cause, not proof of post-turn visibility", async focus => {
+  for (const ghost of [false, true]) {
+    const s = await setup({ ghost });
+    await s.h.emit("agent_start", {}, s.ctx);
+    expectDisplayed(await s.offer(), PROMPT, ghost, true);
+    // Both surfaces are non-main focus, but no component names or text enter diagnostics.
+    const other = focus === "sidebar"
+      ? { [Symbol.for("pi-plugins.editor-surface.v1")]: "embedded", getText: () => "PRIVATE_SIDEBAR" }
+      : { render: () => ["PRIVATE_DIALOG"] };
+    s.ctx.ui.focus(other);
+    s.render();
+    await Promise.resolve(); // Existing ownership policy clears explicit offers on focus loss.
+    s.ctx.ui.focus(s.ctx.ui.editor);
+    await s.settle();
+    s.render();
+    const info = await lifecycle(s);
+    expect(info.before).toMatchObject({ visible: false, reason: "main editor lost focus", busy: true });
+    expect(info.after).toBeNull();
+    expect(info.trace).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: "acknowledge" }),
+      expect.objectContaining({ event: "hide", reason: "main editor lost focus" }),
+    ]));
+    expect(JSON.stringify(info)).not.toMatch(/PRIVATE|marimo|viewer-demo/);
+    expect(s.ctx.ui.press(TAB)).toBe(false);
+  }
+});
+
+test.each([false, true])("later agent run is a separate named removal after post-settlement prompt output (ghost=%s)", async ghost => {
+  const s = await setup({ ghost });
+  await s.h.emit("agent_start", {}, s.ctx);
+  await s.offer();
+  await s.h.emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "Final answer" }] } }, s.ctx);
+  s.render();
+  await s.settle();
+  expect((await lifecycle(s)).after).toBeNull();
+  s.render();
+  expect((await lifecycle(s)).after).toMatchObject({ visible: true, settled: true, busy: false });
+  await s.h.emit("agent_start", {}, s.ctx);
+  const info = await lifecycle(s);
+  const ack = info.trace.findIndex((event: any) => event.event === "acknowledge");
+  const removal = info.trace.findIndex((event: any, i: number) => i > ack && event.event === "hide" && event.reason === "agent_start");
+  expect(removal).toBeGreaterThan(ack);
+  if (ghost) expect(info.trace).toContainEqual(expect.objectContaining({ event: "patch-removal", reason: "agent_start" }));
+  expect(s.ctx.ui.press(TAB)).toBe(false);
+});
+
 const TAB = "\t";
 const RIGHT = "\x1b[C";
 const roots: string[] = [];
@@ -426,4 +497,243 @@ test("typing invalidates an explicit prompt permanently, not just until the edit
   expect(s.ctx.ui.press(TAB)).toBe(false);
   expect(s.ctx.ui.widgets.size).toBe(0);
   expect(s.ctx.ui.editorWrites).toEqual([]);
+});
+
+
+// Completed explicit offers keep their installed surface across temporary Sidebar focus.
+test.each([false, true])("completed offer suspends and resumes only on focused render (ghost=%s)", async ghost => {
+  const s = await setup({ ghost });
+  const baseRender = s.ctx.ui.editor.render;
+  await s.h.emit("agent_start", {}, s.ctx);
+  const text = PROMPT;
+  expect((await s.offer(text)).details.status).toBe("displayed");
+  await s.h.emit("agent_before_settle", { outcome: "completed" }, s.ctx);
+  await s.h.emit("agent_settled", {}, s.ctx);
+  s.render();
+  const installedRender = s.ctx.ui.editor.render;
+  const installedWidget = s.ctx.ui.widgets.get("next-prompt");
+  const accepted = vi.fn();
+  const insert = vi.fn();
+  s.h.pi.events.on("interactive-shell:suggestion-accepted", accepted);
+  s.ctx.ui.editor[Symbol.for("pi-plugins.editor-insert.v1")] = insert;
+  let sidebarDraft = "";
+  s.ctx.ui.focus({
+    [Symbol.for("pi-plugins.editor-surface.v1")]: "embedded",
+    getText: () => sidebarDraft,
+  });
+  // Even before the first unfocused repaint, neither acceptance nor stash may take it.
+  const sidebarTake: { text?: string } = {};
+  s.h.pi.events.emit("prompt:take-next", sidebarTake);
+  expect(sidebarTake.text).toBeUndefined();
+  expect(s.ctx.ui.press("\t")).toBe(false);
+  sidebarDraft = "PRIVATE_SIDEBAR_DRAFT";
+  expect(s.ctx.ui.press("x")).toBe(false);
+  for (let i = 0; i < 3; i++) {
+    expect(s.render()).toEqual(ghost ? baseRender(80) : []);
+  }
+  await vi.advanceTimersByTimeAsync(0);
+  expect(s.ctx.ui.editorText).toBe("");
+  expect(s.ctx.ui.editor.render).toBe(installedRender);
+  expect(s.ctx.ui.widgets.get("next-prompt")).toBe(installedWidget);
+  expect(s.ctx.ui.editorWrites).toEqual([]);
+  expect(insert).not.toHaveBeenCalled();
+  const suspended = await lifecycle(s);
+  expect(suspended.state).toMatchObject({ suspended: true, editorEmpty: true });
+  expect(suspended.after).toMatchObject({ visible: false, suspended: true });
+  expect(suspended.trace.filter((event: any) => event.event === "suspend")).toHaveLength(1);
+  s.ctx.ui.focus(s.ctx.ui.editor);
+  const returnedTake: { text?: string } = {};
+  s.h.pi.events.emit("prompt:take-next", returnedTake);
+  expect(returnedTake.text).toBeUndefined();
+  expect(s.ctx.ui.press("\t")).toBe(false); // Focus alone is not a shown frame.
+  const returnedAccept = { handled: false };
+  s.h.pi.events.emit("prompt:accept-next", returnedAccept);
+  expect(returnedAccept.handled).toBe(false);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(s.ctx.ui.editorWrites).toEqual([]);
+  // No revival keystroke: the retained normal render surface restores the offer.
+  expect(s.render()?.join("\n").replace(/\x1b\[[0-9;]*m/g, "")).toContain(text);
+  for (let i = 0; i < 5; i++) expect(s.render()?.join("\n").replace(/\x1b\[[0-9;]*m/g, "")).toContain(text);
+  const info = await lifecycle(s);
+  expect(info.state.suspended).toBe(false);
+  expect(info.after).toMatchObject({ visible: true, suspended: false, busy: false, settled: true });
+  expect(info.trace.filter((event: any) => event.event === "suspend")).toHaveLength(1);
+  expect(info.trace.filter((event: any) => event.event === "resume")).toHaveLength(1);
+  expect(info.trace.filter((event: any) => event.event === "acknowledge")).toHaveLength(1);
+  expect(JSON.stringify(info)).not.toContain("PRIVATE_SIDEBAR_DRAFT");
+  expect(s.ctx.ui.editor.render).toBe(installedRender);
+  expect(s.ctx.ui.widgets.get("next-prompt")).toBe(installedWidget);
+  expect(s.ctx.ui.press("\t")).toBe(true);
+  expect(s.ctx.ui.editorWrites).toEqual([text]);
+  expect(insert).toHaveBeenCalledTimes(1);
+  expect(accepted.mock.calls).toEqual([]);
+  expect(s.ctx.ui.press("\t")).toBe(false);
+  expect(s.ctx.ui.editorWrites).toEqual([text]);
+  expect(insert).toHaveBeenCalledTimes(1);
+  expect(s.h.messages).toEqual([]);
+});
+
+test.each([false, true])("main draft permanently invalidates a suspended offer (ghost=%s)", async ghost => {
+  for (const trigger of ["render", "input"]) {
+    const s = await setup({ ghost });
+    const baseRender = s.ctx.ui.editor.render;
+    await s.h.emit("agent_start", {}, s.ctx);
+    await s.offer();
+    await s.h.emit("agent_before_settle", { outcome: "completed" }, s.ctx);
+    await s.h.emit("agent_settled", {}, s.ctx);
+    s.ctx.ui.focus({ [Symbol.for("pi-plugins.editor-surface.v1")]: "embedded" });
+    s.render();
+    s.ctx.ui.editorText = "PRIVATE_MAIN_DRAFT";
+    if (trigger === "render") s.render();
+    else s.ctx.ui.press("x");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.ctx.ui.editorText).toBe("PRIVATE_MAIN_DRAFT");
+    expect(s.ctx.ui.editor.render).toBe(baseRender);
+    expect(s.ctx.ui.widgets.size).toBe(0);
+    s.ctx.ui.editorText = "";
+    s.ctx.ui.focus(s.ctx.ui.editor);
+    s.render();
+    expect(s.ctx.ui.press("\t")).toBe(false);
+    const take: { text?: string } = {};
+    s.h.pi.events.emit("prompt:take-next", take);
+    expect(take.text).toBeUndefined();
+    expect(s.ctx.ui.editorWrites).toEqual([]);
+  }
+});
+
+test.each([false, true])("focus loss remains strict before acknowledgement or while busy (ghost=%s)", async ghost => {
+  for (const stage of ["pending", "acknowledged", "before-settle"]) {
+    const s = await setup({ ghost });
+    const baseRender = s.ctx.ui.editor.render;
+    await s.h.emit("agent_start", {}, s.ctx);
+    const pending = stage === "pending" ? s.execute() : undefined;
+    if (stage !== "pending") await s.offer();
+    if (stage === "before-settle") await s.h.emit("agent_before_settle", { outcome: "completed" }, s.ctx);
+    s.ctx.ui.focus({ [Symbol.for("pi-plugins.editor-surface.v1")]: "embedded" });
+    s.render();
+    await vi.advanceTimersByTimeAsync(0);
+    if (pending) expect((await pending).details.status).toBe("blocked");
+    expect(s.ctx.ui.editor.render).toBe(baseRender);
+    expect(s.ctx.ui.widgets.size).toBe(0);
+    s.ctx.ui.focus(s.ctx.ui.editor);
+    await s.h.emit("agent_before_settle", { outcome: "completed" }, s.ctx);
+    await s.h.emit("agent_settled", {}, s.ctx);
+    s.render();
+    expect(s.ctx.ui.press("\t")).toBe(false);
+    expect(s.ctx.ui.editorWrites).toEqual([]);
+  }
+});
+
+test.each([false, true])("failed settlement never preserves an unfocused acknowledged offer (ghost=%s)", async ghost => {
+  for (const outcome of ["failed", "aborted"]) {
+    const s = await setup({ ghost });
+    const baseRender = s.ctx.ui.editor.render;
+    await s.h.emit("agent_start", {}, s.ctx);
+    await s.offer();
+    s.ctx.ui.focus({ [Symbol.for("pi-plugins.editor-surface.v1")]: "embedded" });
+    await s.h.emit("agent_before_settle", { outcome }, s.ctx);
+    await s.h.emit("agent_settled", {}, s.ctx);
+    expect(s.ctx.ui.editor.render).toBe(baseRender);
+    expect(s.ctx.ui.widgets.size).toBe(0);
+    s.ctx.ui.focus(s.ctx.ui.editor);
+    s.render();
+    expect(s.ctx.ui.press("\t")).toBe(false);
+    expect(s.ctx.ui.editorWrites).toEqual([]);
+  }
+});
+
+test.each([false, true])("reset and new turn dispose a suspended surface permanently (ghost=%s)", async ghost => {
+  for (const event of ["agent_start", "input", "user_bash", "prompt:clear", "session_tree", "model_select", "session_compact", "session_start", "session_shutdown", "off"]) {
+    const s = await setup({ ghost });
+    const baseRender = s.ctx.ui.editor.render;
+    await s.h.emit("agent_start", {}, s.ctx);
+    await s.offer();
+    await s.h.emit("agent_before_settle", { outcome: "completed" }, s.ctx);
+    await s.h.emit("agent_settled", {}, s.ctx);
+    s.ctx.ui.focus({ [Symbol.for("pi-plugins.editor-surface.v1")]: "embedded" });
+    s.render();
+    if (event === "prompt:clear") s.h.pi.events.emit(event, {});
+    else if (event === "off") await s.h.commands.get("next-prompt").handler("off", s.ctx);
+    else await s.h.emit(event, {}, s.ctx);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.ctx.ui.editor.render, event).toBe(baseRender);
+    expect(s.ctx.ui.widgets.size, event).toBe(0);
+    s.ctx.ui.focus(s.ctx.ui.editor);
+    s.render();
+    expect(s.ctx.ui.press("\t"), event).toBe(false);
+    const take: { text?: string } = {};
+    s.h.pi.events.emit("prompt:take-next", take);
+    expect(take.text, event).toBeUndefined();
+    expect(s.ctx.ui.editorWrites, event).toEqual([]);
+  }
+});
+
+test.each([false, true])("queued invalidation rechecks returned focus instead of clearing the current offer (ghost=%s)", async ghost => {
+  const s = await setup({ ghost });
+  await s.h.emit("agent_start", {}, s.ctx);
+  const pending = s.execute();
+  s.ctx.ui.focus({ [Symbol.for("pi-plugins.editor-surface.v1")]: "embedded" });
+  s.render(); // Queue a strict pre-ack invalidation, but focus returns in this stack.
+  s.ctx.ui.focus(s.ctx.ui.editor);
+  await Promise.resolve();
+  expect(s.render()?.length).toBeGreaterThan(0);
+  expect((await pending).details.status).toBe("displayed");
+  await s.h.emit("agent_before_settle", { outcome: "completed" }, s.ctx);
+  await s.h.emit("agent_settled", {}, s.ctx);
+  s.render();
+  expect(s.ctx.ui.press("\t")).toBe(true);
+  expect(s.ctx.ui.editorWrites).toHaveLength(1);
+});
+
+test.each([false, true])("stale render invalidation cannot erase a replacement offer (ghost=%s)", async ghost => {
+  const s = await setup({ ghost });
+  const pending = s.execute();
+  s.ctx.ui.focus({ [Symbol.for("pi-plugins.editor-surface.v1")]: "embedded" });
+  s.render(); // Old owner's invalidation has not run yet.
+  s.h.pi.events.emit("prompt:clear", {});
+  s.ctx.ui.focus(s.ctx.ui.editor);
+  const replacementText = "/replacement one  two";
+  const replacement = s.execute(replacementText);
+  s.render();
+  expect((await pending).details.status).toBe("blocked");
+  expect((await replacement).details.status).toBe("displayed");
+  await vi.advanceTimersByTimeAsync(0);
+  expect(s.ctx.ui.press("\t")).toBe(true);
+  expect(s.ctx.ui.editorWrites).toEqual([replacementText]);
+});
+
+
+test("focused ghost without a cursor remains suspended until output includes the offer", async () => {
+  const s = await setup({ ghost: true });
+  let cursor = true;
+  s.ctx.ui.editor.render = () => cursor ? ["\x1b[7m \x1b[0m"] : ["plain editor without cursor"];
+  await s.h.emit("agent_start", {}, s.ctx);
+  await s.offer();
+  await s.h.emit("agent_before_settle", { outcome: "completed" }, s.ctx);
+  await s.h.emit("agent_settled", {}, s.ctx);
+  s.ctx.ui.focus({ [Symbol.for("pi-plugins.editor-surface.v1")]: "embedded" });
+  s.render();
+  const installed = s.ctx.ui.editor.render;
+  cursor = false;
+  s.ctx.ui.focus(s.ctx.ui.editor);
+  for (let i = 0; i < 3; i++) expect(s.render()).toEqual(["plain editor without cursor"]);
+  const info = await lifecycle(s);
+  expect(info.state.suspended).toBe(true);
+  expect(info.after).toMatchObject({ visible: false, suspended: true });
+  expect(info.trace.filter((event: any) => event.event === "resume")).toHaveLength(0);
+  expect(s.ctx.ui.press("\t")).toBe(false);
+  const take: { text?: string } = {};
+  s.h.pi.events.emit("prompt:take-next", take);
+  expect(take.text).toBeUndefined();
+  expect(s.ctx.ui.editorWrites).toEqual([]);
+  cursor = true;
+  expect(s.render()?.join("\n").replace(/\x1b\[[0-9;]*m/g, "")).toContain(PROMPT);
+  expect(s.ctx.ui.editor.render).toBe(installed);
+  const resumed = await lifecycle(s);
+  expect(resumed.state.suspended).toBe(false);
+  expect(resumed.trace.filter((event: any) => event.event === "resume")).toHaveLength(1);
+  expect(resumed.trace.filter((event: any) => event.event === "acknowledge")).toHaveLength(1);
+  expect(s.ctx.ui.press("\t")).toBe(true);
+  expect(s.ctx.ui.editorWrites).toEqual([PROMPT]);
+  expect(s.ctx.ui.press("\t")).toBe(false);
 });

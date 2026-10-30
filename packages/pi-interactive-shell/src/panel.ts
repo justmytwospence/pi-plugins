@@ -11,6 +11,18 @@ export function failure(message: string): HandoffResult {
   return { output: `(interactive command: ${message})`, exitCode: 1, cancelled: false, truncated: false };
 }
 
+/** One styled UI row, distinct from the PTY's retained output cells. */
+export function omissionDivider(count: number, width: number, dim: (text: string) => string): string {
+  width = Math.max(0, Math.floor(width) || 0);
+  if (width === 0) return "";
+  const full = ` ${count} ${count === 1 ? "row" : "rows"} omitted `;
+  const short = ` ${count} omitted `;
+  const tiny = `…${count}…`;
+  const label = [full, short, tiny].find(value => visibleWidth(value) <= width) ?? truncateToWidth(tiny, width, "", true);
+  const remaining = width - visibleWidth(label);
+  return dim("─".repeat(Math.floor(remaining / 2)) + label + "─".repeat(Math.ceil(remaining / 2)));
+}
+
 const INPUT_CONTEXT = Symbol.for("pi-plugins.input-context.v1");
 
 export class TerminalPanel {
@@ -230,10 +242,19 @@ export class TerminalPanel {
 
   private snapshot(result: HandoffResult): Component {
     const { head, tail, omitted } = this.screen.headTail(this.screen.terminal.rows);
-    const content = [...head, ...(omitted ? [`… ${omitted} rows omitted …`] : []), ...tail];
+    const content = [...head, ...(omitted ? [""] : []), ...tail];
     const lines = this.frame(content, `exited ${result.exitCode}`, " Exited · output retained for this session");
+    const dividerIndex = 2 + head.length;
+    const capturedWidth = this.width;
     return {
-      render: width => lines.map(line => truncateToWidth(line, Math.max(0, width), "", true)),
+      render: width => lines.map((line, index) => {
+        if (omitted && index === dividerIndex) {
+          const bodyWidth = Math.max(0, Math.min(capturedWidth, width) - 4);
+          const border = this.theme.fg("accent", "│");
+          line = border + " " + omissionDivider(omitted, bodyWidth, text => this.theme.fg("dim", text)) + " " + border;
+        }
+        return truncateToWidth(line, Math.max(0, width), "", true);
+      }),
       invalidate() {},
     };
   }

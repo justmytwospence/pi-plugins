@@ -15,7 +15,7 @@ import time
 
 ROOT = Path(__file__).resolve().parent.parent
 PROBE = '''import { appendFileSync } from "node:fs";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { resolveTranscript } from "RESOLVER_PATH";
 export default function(pi) {
@@ -25,6 +25,10 @@ export default function(pi) {
   let todoTail;
   let beforeOffer;
   let priorSnapshots;
+  let settled = false;
+  let repaintRequested = false;
+  pi.on("agent_start", () => { settled = false; });
+  pi.on("agent_settled", () => { settled = true; });
   const todoState = () => {
     const document = tui?.getPrimaryScrollView?.()?.child;
     const children = document?.children ?? [];
@@ -83,6 +87,32 @@ export default function(pi) {
     off?.();
     off = ctx.ui.onTerminalInput(data => {
       if (data === "\\x1b[18~") { pi.sendUserMessage("/terminal-test-reload", {expandPromptTemplates: true}); return { consume: true }; }
+      if (data === "\\x1b[19~") { repaintRequested = true; tui.requestRender(true); return { consume: true }; }
+      if (data === "\\x1b[20~") {
+        // Read the last COMPOSED frame, never invoke editor/widget render here.
+        const main = tui.layoutRoot?.main ?? tui.layoutRoot;
+        const dock = main?.entries?.[1]?.component;
+        const find = box => box?.component === dock ? box :
+          (box?.children ?? []).map(find).find(Boolean);
+        const box = find(tui.currentLayout?.root);
+        const rect = box?.clip;
+        const screen = tui.getScreenLines?.() ?? [];
+        const region = rect ? screen.slice(rect.y, rect.y + rect.height)
+          .map(line => stripTerminalSequences(line).slice(rect.x, rect.x + rect.width)) : [];
+        const focus = tui.getFocusedComponent();
+        appendFileSync(process.env.HANDOFF_FRAME_PROBE, JSON.stringify({
+          settled, repaintRequested, frameAvailable: screen.length > 0, dockBounds: rect ?? null,
+          frameRows: screen.length, width: tui.terminal.columns,
+          suggestionVisible: region.some(line => line.includes(process.env.HANDOFF_COMMAND.slice(0, 24))),
+          exactDraft: ctx.ui.getEditorText() === process.env.HANDOFF_COMMAND,
+          emptyDraft: ctx.ui.getEditorText() === "",
+          vimMain: focus?.[Symbol.for("pi-plugins.editor-surface.v1")] === "main" &&
+            typeof focus?.[Symbol.for("pi-plugins.editor-mode.v1")] === "function",
+          sidebarOpen: !!tui.layoutRoot?.main,
+          mainFocused: focus?.[Symbol.for("pi-plugins.editor-surface.v1")] === "main",
+          calls, ...todoState(),
+        }) + "\\n");
+      }
       if (data !== "\\x1b[20~") return;
       const focus = tui.getFocusedComponent();
       const terminal = focus?.[Symbol.for("pi-plugins.input-context.v1")]?.() === "terminal";
@@ -146,7 +176,7 @@ finally:
 '''
 
 
-def run(mode):
+def run(mode, sidebar="closed", offer_only=False):
     with tempfile.TemporaryDirectory(prefix="pi-panel-pty-") as directory:
         temp = Path(directory)
         agent = temp / "agent"
@@ -161,11 +191,16 @@ def run(mode):
         menu = temp / "menu.py"
         menu.write_text(MENU)
         probe = temp / "probe.jsonl"
+        frame_probe = temp / "frames.jsonl"
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 110, 0, 0))
         env = {key: value for key, value in os.environ.items() if not any(token in key.upper() for token in ("API_KEY", "ACCESS_TOKEN", "AUTH_TOKEN", "HERDR", "TMUX"))}
         command = "!i read -s -p 'HANDOFF_INPUT: ' value; printf '\\nTERMINAL_ONLY:%s\\n' \"$value\""
         env.update({"TERM": "xterm-256color", "PI_CODING_AGENT_DIR": str(agent), "HANDOFF_PROBE": str(probe), "HANDOFF_COMMAND": command, "PI_OFFLINE": "1", "SHELL": "/bin/bash", "XDG_CONFIG_HOME": str(temp / "config")})
+        env.update({"HANDOFF_FRAME_PROBE": str(frame_probe), "PI_SIDEBAR_KEYS": "f6",
+                    "PI_SIDEBAR_FOCUS_KEYS": "f10", "PI_SIDEBAR_HEADSUP": "off",
+                    "PI_SIDEBAR_HEADSUP_DEBUG": "0", "PI_SIDEBAR_MODELS": "terminal-fixture/local",
+                    "PI_SIDEBAR_PREFS": str(temp / "sidebar.json")})
         sessions_dir = temp / "sessions"
         sessions_dir.mkdir()
         seed = sessions_dir / "seed.jsonl"
@@ -215,8 +250,8 @@ def run(mode):
                     if result["terminal"]:
                         assert not result["editorMounted"], result
                     return result
-                assert child.poll() is None, f"Pi exited: {child.returncode}: {transcript[-3000:]!r}"
-            raise AssertionError(f"No input probe: {transcript[-4000:]!r}")
+                assert child.poll() is None, {"piExited": True, "exitCode": child.returncode}
+            raise AssertionError({"inputProbeReceived": False})
 
         def send(keys):
             os.write(master, keys)
@@ -232,6 +267,9 @@ def run(mode):
         try:
             drain(3)
             assert not snapshot()["terminal"]
+            if sidebar != "closed":
+                send(b"\x1b[17~")  # Actual Sidebar open shortcut; no model request.
+                send(b"\x1b[21~")  # Return to main before asking for the offer.
             submit("Offer the local terminal fixture")
             offered = snapshot()
             deadline = time.monotonic() + 8
@@ -246,14 +284,73 @@ def run(mode):
                 }, offered
             entries = [json.loads(line) for line in seed.read_text().splitlines()]
             todo = next(e["message"] for e in entries if e.get("message", {}).get("toolName") == "todo")
-            assert not todo.get("isError"), todo
+            assert not todo.get("isError"), {"todoSucceeded": False}
             offer = next(e["message"] for e in entries if e.get("message", {}).get("toolName") == "offer_terminal")
-            assert offer["details"]["status"] == "displayed" and not offer.get("isError"), offer
-            assert offer["details"]["text"] == command, offer
+            assert offer["details"]["status"] == "displayed" and not offer.get("isError"), {"offerDisplayed": False}
+            assert offer["details"]["text"] == command, {"offeredExactCommand": False}
             assert "OFFER_FINAL_WITHOUT_TAG" in seed.read_text()
+            if mode == "fullscreen":
+                def frame():
+                    count = len(frame_probe.read_text().splitlines()) if frame_probe.exists() else 0
+                    os.write(master, b"\x1b[20~")
+                    deadline = time.monotonic() + 8
+                    while time.monotonic() < deadline:
+                        drain(0.1)
+                        if frame_probe.exists() and len(frame_probe.read_text().splitlines()) > count:
+                            return json.loads(frame_probe.read_text().splitlines()[-1])
+                    raise AssertionError("No read-only composed-frame probe")
+
+                state = frame()
+                deadline = time.monotonic() + 8
+                while not state["settled"] and time.monotonic() < deadline:
+                    drain(0.2)
+                    state = frame()
+                drain(0.5)  # Drain rendering scheduled by the actual agent_settled event.
+                state = frame()
+                assert state["settled"] and state["vimMain"] and state["mainFocused"], state
+                assert state["sidebarOpen"] == (sidebar != "closed"), state
+                assert state["frameAvailable"] and state["dockBounds"], state
+                assert state["suggestionVisible"] and state["emptyDraft"], state
+                assert all(state[key] for key in ("todoTailAtThree", "todoTailLast", "todoTailVisible")), state
+                returned = state
+                if sidebar == "transient":
+                    send(b"\x1b[21~")
+                    away = frame()
+                    assert away["sidebarOpen"] and not away["mainFocused"] and not away["suggestionVisible"], away
+                    send(b"\x1b[21~")
+                    returned = frame()
+                    assert returned["mainFocused"], returned
+                send(b"\x1b[19~")  # Unrelated full repaint, not an editor render call.
+                repainted = frame()
+                assert repainted["repaintRequested"] and repainted["settled"], repainted
+                fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 36, 120, 0, 0))
+                os.kill(child.pid, signal.SIGWINCH)
+                drain(0.5)
+                resized = frame()
+                assert resized["width"] == 120, resized
+                fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 110, 0, 0))
+                os.kill(child.pid, signal.SIGWINCH)
+                drain(0.5)
             send(b"\t")
             accepted = snapshot()
+            if mode == "fullscreen":
+                evidence = {"offerDisplayed": True, "settledVisible": state["suggestionVisible"],
+                            "returnedVisible": returned["suggestionVisible"],
+                            "repaintedVisible": repainted["suggestionVisible"],
+                            "resizedVisible": resized["suggestionVisible"],
+                            "exactDraft": accepted["exactDraft"], "mainFocused": resized["mainFocused"],
+                            "emptyBeforeTab": resized["emptyDraft"],
+                            "dockBounds": resized["dockBounds"], "frameRows": resized["frameRows"],
+                            "todoTailPreserved": resized["todoTailAtThree"] and resized["todoTailLast"] and resized["todoTailVisible"],
+                            "noExtraProviderCalls": accepted["calls"] == 3}
+                assert all(evidence[key] for key in ("settledVisible", "returnedVisible", "repaintedVisible",
+                                                    "resizedVisible", "exactDraft", "todoTailPreserved",
+                                                    "noExtraProviderCalls")), evidence
             assert accepted["exactDraft"] and not accepted["terminal"] and accepted["calls"] == 3, accepted
+            if offer_only:
+                print(json.dumps({"passed": True, "sidebarOpen": sidebar != "closed",
+                                  "transientFocus": sidebar == "transient", "exactDraft": accepted["exactDraft"]}))
+                return
             send(b"\r")
             compact = snapshot()
             assert compact["terminal"] and compact["ready"] and compact["height"] < 24, compact
@@ -284,7 +381,7 @@ def run(mode):
             send(b"\x1b")  # Let the host disambiguate literal Esc from an Alt chord.
             send(b"\x1d\x1d")
             send(b"\x04")
-            assert b"MENU_DONE:1b5b4209141b1d" in transcript, transcript[-6000:]
+            assert b"MENU_DONE:1b5b4209141b1d" in transcript, {"programKeysExact": False}
             completed()
             submit("!i for ((i=0;i<80;i++)); do printf 'SCROLL_%03d\\n' \"$i\"; done; read -r reply")
             assert snapshot()["scrollEnd"]
@@ -373,5 +470,12 @@ def run(mode):
 
 
 if __name__ == "__main__":
-    for mode in ("fullscreen", "regular"):
-        run(mode)
+    failures = []
+    for mode, sidebar, offer_only in (("fullscreen", "closed", False), ("regular", "closed", False),
+                                     ("fullscreen", "open", True), ("fullscreen", "transient", True)):
+        try:
+            run(mode, sidebar, offer_only)
+        except AssertionError as error:
+            failures.append({"fullscreen": mode == "fullscreen", "sidebarOpen": sidebar != "closed",
+                             "transientFocus": sidebar == "transient", "evidence": error.args})
+    assert not failures, failures

@@ -1,6 +1,6 @@
 import { beforeEach, expect, test, vi } from "vitest";
 import { CURSOR_MARKER, visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
-import { TerminalPanel } from "../src/panel.ts";
+import { omissionDivider, TerminalPanel } from "../src/panel.ts";
 import { stopPty } from "../src/pty.ts";
 
 vi.mock("../src/pty.ts", () => ({ spawnPty: vi.fn(), stopPty: vi.fn(async () => {}) }));
@@ -349,7 +349,8 @@ test.each([false, true])("inline exit auto-finishes with frozen head-tail before
   const text = plain(lines);
   expect(text).toContain("row0");
   expect(text).toContain("row39");
-  expect(text).toContain("… 30 rows omitted …");
+  expect(text).toContain("30 rows omitted");
+  expect(text).toContain("──");
   expect(text).toContain("Exited · output retained for this session");
   expect(lines.join("")).not.toContain(CURSOR_MARKER);
   expect(lines).toHaveLength(15);
@@ -359,6 +360,43 @@ test.each([false, true])("inline exit auto-finishes with frozen head-tail before
   await h.panel.shutdown();
   expect(snapshot.render(98)).toEqual(lines);
   expect(h.done).toHaveBeenCalledOnce();
+});
+
+test.each([0, 1, 2, 3, 5, 9, 20, 42, 43, 116])("omission divider fills exactly %i columns with centered responsive text", width => {
+  const divider = omissionDivider(30, width, text => `\x1b[2m${text}\x1b[0m`);
+  expect(visibleWidth(divider)).toBe(width);
+  if (width === 0) expect(divider).toBe("");
+  else expect(divider).toContain("\x1b[2m");
+  const raw = divider.replace(/\x1b\[[0-9;]*m/g, "");
+  if (width >= " 30 rows omitted ".length) {
+    expect(raw).toContain(" 30 rows omitted ");
+    const [left, right] = raw.split(" 30 rows omitted ");
+    expect(left).toMatch(/^─*$/);
+    expect(right).toMatch(/^─*$/);
+    expect(right.length - left.length).toBeGreaterThanOrEqual(0);
+    expect(right.length - left.length).toBeLessThanOrEqual(1);
+  } else if (width >= " 30 omitted ".length) expect(raw).toContain(" 30 omitted ");
+  else if (width >= "…30…".length) expect(raw).toContain("…30…");
+});
+
+test("singular divider and real output lookalikes remain distinct after resizing", async () => {
+  expect(omissionDivider(1, 40, s => s)).toContain("1 row omitted");
+  const h = await setup(undefined, undefined, false, true);
+  h.panel.render(120);
+  h.data(["1 row omitted", ...Array.from({ length: 45 }, (_, i) => `row${i}`)].join("\r\n"));
+  await (h.panel as any).screen.flush();
+  h.exit(0);
+  await vi.waitFor(() => expect(h.done).toHaveBeenCalledOnce());
+  const snapshot = h.done.mock.calls[0][1];
+  const wide = snapshot.render(120);
+  expect(plain(wide)).toContain("1 row omitted"); // Child output is unchanged.
+  expect(plain(wide)).toMatch(/─+\s+\d+ rows omitted\s+─+/);
+  for (const width of [46, 20, 9, 5]) {
+    const rows = snapshot.render(width);
+    expect(rows).toHaveLength(wide.length);
+    expect(rows.every((row: string) => visibleWidth(row) <= width)).toBe(true);
+    if (width === 46) expect(plain(rows)).toMatch(/─+\s+\d+ rows omitted\s+─+/);
+  }
 });
 
 test("inline spawn failure retains its readable final frame without dismissal", async () => {

@@ -135,6 +135,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
   /** The suggestion on offer until the next prompt is sent; `shown` is set while it is on screen. */
   let offered: string | undefined;
   let shown: string | undefined;
+  let suspended = false;
   // Which extension offered the current suggestion through `prompt:offer` (undefined: the model's own).
   let offerSource: string | undefined;
   // A turn is running: offers from other extensions wait for the user's next idle moment.
@@ -173,10 +174,33 @@ export default function nextPrompt(pi: ExtensionAPI) {
 
   const active = () => sessionOn && config.enabled;
 
-  const unpatch = () => {
+  // Memory-only scalar diagnostics; never capture suggestion, draft, key or rendered text.
+  const snapshot = () => ({
+    offerId: explicit?.id ?? null, generation, busy, settled, suspended,
+    focus: focusState().startsWith("editor mode ") ? "editor mode" : focusState(),
+    editorEmpty: ui ? ui.getEditorText() === "" : null,
+    patchCurrent: !!patched && patched.editor.render === patched.wrapper,
+  });
+  type Observation = ReturnType<typeof snapshot> & { surface: Surface; visible: boolean; reason: string };
+  let beforeSettlement: Observation | undefined;
+  let afterSettlement: Observation | undefined;
+  const trace: (ReturnType<typeof snapshot> & { event: string; reason: string })[] = [];
+  const record = (event: string, reason: string) => {
+    trace.push({ ...snapshot(), event, reason });
+    if (trace.length > 32) trace.shift();
+  };
+  const observe = (surface: Surface, visible: boolean, reason: string) => {
+    const observation = { ...snapshot(), surface, visible, reason };
+    if (settled) afterSettlement = observation;
+    else beforeSettlement = observation;
+  };
+  const editorBlocker = () => !mainFocused() ? "main editor lost focus" : "editor contains a draft";
+
+  const unpatch = (reason: string) => {
     if (!patched) return;
     const patch = patched;
     const { editor, render, wrapper, own, tui } = patch;
+    record("patch-removal", editor.render === wrapper ? reason : "render wrapper replaced");
     patch.enabled = false;
     patched = undefined;
     if (editor.render === wrapper) {
@@ -187,14 +211,17 @@ export default function nextPrompt(pi: ExtensionAPI) {
   };
 
   /** Take the suggestion off screen but keep it on offer, for when the editor is empty again. */
-  const conceal = () => {
-    if (shown === undefined) return;
+  const conceal = (reason: string) => {
+    if (shown === undefined && !suspended) return;
+    suspended = false;
+    record("conceal", reason);
     shown = undefined;
-    unpatch();
+    unpatch(reason);
     ui?.setWidget(WIDGET_KEY, undefined);
   };
 
-  const hide = (reason = "offer cleared") => {
+  const hide = (reason: string) => {
+    record("hide", reason);
     const previous = explicit;
     explicit = undefined;
     if (previous) {
@@ -203,7 +230,45 @@ export default function nextPrompt(pi: ExtensionAPI) {
     }
     offered = undefined;
     offerSource = undefined;
-    conceal();
+    conceal(reason);
+  };
+
+  const canSuspend = () => !!explicit?.acknowledged && settled && outcome === "completed" && !busy && active() && !!ui && ui.getEditorText() === "";
+  const suspend = () => {
+    if (suspended) return;
+    suspended = true;
+    shown = undefined;
+    record("suspend", "main editor lost focus");
+  };
+  const renderBlocker = () => !active() ? "disabled" : !ui ? "UI unavailable"
+    : ui.getEditorText() !== "" ? "editor contains a draft" : !mainFocused() ? "main editor lost focus" : undefined;
+  // A render can outlive its offer, and focus can return before its queued cleanup runs.
+  const queueInvalidation = (owner: ExplicitOffer) => {
+    const mine = generation;
+    queueMicrotask(() => {
+      if (explicit !== owner || generation !== mine) return;
+      const reason = renderBlocker();
+      if (!reason) return;
+      if (reason === "main editor lost focus" && canSuspend()) suspend();
+      else hide(reason);
+    });
+  };
+  const renderExplicit = (owner: ExplicitOffer, surface: Surface) => {
+    if (explicit !== owner || generation !== owner.id) return false;
+    const reason = renderBlocker();
+    if (reason) {
+      if (reason === "main editor lost focus" && canSuspend()) suspend();
+      else queueInvalidation(owner);
+      observe(surface, false, suspended ? "suspended" : reason);
+      return false;
+    }
+    return true;
+  };
+  const resume = (owner: ExplicitOffer | undefined, surface: Surface) => {
+    if (!owner || !suspended) return;
+    suspended = false;
+    shown = owner.text;
+    record("resume", surface);
   };
 
   /** Pi hands widget factories the TUI; a throwaway widget is the only way to reach it. */
@@ -234,27 +299,34 @@ export default function nextPrompt(pi: ExtensionAPI) {
     const wrapper = function (this: Renderable, w: number) {
       const lines = render.call(this, w);
       if (!patch.enabled) return lines;
+      if (owner && !renderExplicit(owner, "ghost")) return lines;
       if (!mainFocused() || this.getText() !== "") {
-        if (owner) queueMicrotask(() => { if (explicit === owner) hide("editor draft or focus changed"); });
+        observe("ghost", false, editorBlocker());
         return lines;
       }
-      if (shown === undefined) return lines;
+      const text = suspended ? owner?.text : shown;
+      if (text === undefined) { observe("ghost", false, "not shown"); return lines; }
       const i = lines.findIndex(hasCursor);
-      const line = i === -1 ? undefined : ghostLine(lines[i]!, shown, w, (s) => target.theme.fg("dim", s));
-      if (line === undefined) return lines;
+      const line = i === -1 ? undefined : ghostLine(lines[i]!, text, w, (s) => target.theme.fg("dim", s));
+      if (line === undefined) { observe("ghost", false, "no cursor"); return lines; }
+      resume(owner, "ghost");
       const out = lines.slice();
       out[i] = line;
+      observe("ghost", true, "included in component output");
       observed?.("ghost");
       return out;
     };
     editor.render = wrapper;
     patch.wrapper = wrapper;
     patched = patch;
+    record("patch-install", "ghost");
     tui.requestRender();
     return true;
   };
 
-  const reset = () => {
+  const reset = (reason: string) => {
+    record("reset", reason);
+    hide(reason);
     generation++;
     pending = undefined;
     outcome = undefined;
@@ -262,27 +334,31 @@ export default function nextPrompt(pi: ExtensionAPI) {
     lastTag = "none yet";
     lastVerdict = "";
     vetState = "not run";
-    hide();
   };
 
   const show = (text: string, observed?: (surface: Surface) => void) => {
     if (!ui) return;
-    unpatch();
+    unpatch("show replacement");
     ui.setWidget(WIDGET_KEY, undefined);
     const owner = explicit;
     offered = text;
     shown = text;
+    suspended = false;
+    record("show", explicit ? "explicit" : "automatic or external");
     const hint = `${keyLabel(config.acceptKeys[0] ?? "tab")} to accept`;
     if (ghost(ui, observed)) return;
     ui.setWidget(
       WIDGET_KEY,
       (_tui, theme) => ({
         render: (width: number) => {
-          if (observed && (!active() || !mainFocused() || ui?.getEditorText() !== "" || shown !== text)) {
-            if (owner) queueMicrotask(() => { if (explicit === owner) hide("editor draft or focus changed"); });
+          if (owner && !renderExplicit(owner, "widget")) return [];
+          if (observed && !suspended && shown !== text) {
+            observe("widget", false, "not shown");
             return [];
           }
           const line = truncateToWidth(`${theme.fg("dim", `→ ${text}`)}  ${theme.fg("muted", hint)}`, width);
+          if (line.length > 0) resume(owner, "widget");
+          observe("widget", line.length > 0, line.length > 0 ? "included in component output" : "empty output");
           if (line.length > 0) observed?.("widget");
           return [line];
         },
@@ -301,7 +377,10 @@ export default function nextPrompt(pi: ExtensionAPI) {
       return "editor contains a draft";
     }
     if (!mainFocused()) {
-      if (explicit) hide("main editor lost focus");
+      if (explicit) {
+        if (canSuspend()) suspend();
+        else hide("main editor lost focus");
+      }
       return `main editor is not focused (${focusState()})`;
     }
     if (signal?.aborted) return "tool aborted";
@@ -322,6 +401,9 @@ export default function nextPrompt(pi: ExtensionAPI) {
     }
     const offer: ExplicitOffer = { id: ++generation, kind, text, acknowledged: false };
     explicit = offer;
+    beforeSettlement = undefined;
+    afterSettlement = undefined;
+    record("create", kind);
     return new Promise<OfferDetails>((resolve) => {
       let finished = false;
       const finish = (value: OfferDetails) => {
@@ -349,6 +431,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
           }
           offer.surface = surface;
           offer.acknowledged = true;
+          record("acknowledge", surface);
           finish(displayed(offer));
         });
       });
@@ -424,7 +507,13 @@ export default function nextPrompt(pi: ExtensionAPI) {
   });
 
   const onKey = (data: string) => {
-    if (explicit && (!mainFocused() || ui?.getEditorText() !== "")) hide("editor draft or focus changed");
+    if (explicit) {
+      if (ui?.getEditorText() !== "") hide("editor contains a draft");
+      else if (!mainFocused()) {
+        if (canSuspend()) suspend();
+        else hide("main editor lost focus");
+      }
+    }
     if (offered === undefined || !ui || isKeyRelease(data) || !mainFocused()) return undefined;
     if (matchesKey(data, "tab")) {
       const navigation = { handled: false, phase: "active" };
@@ -436,7 +525,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
     if (accept && shown !== undefined && ui.getEditorText() === "") {
       const text = shown;
       const shellSuggestion = explicit ? explicit.kind === "terminal" : offerSource === undefined;
-      hide();
+      hide("accepted");
       ui.setEditorText(text);
       if (shellSuggestion && text.startsWith("!i ")) pi.events.emit("interactive-shell:suggestion-accepted", { text });
       // The owned editor offers an optional local insertion hook; no submission occurs.
@@ -451,8 +540,8 @@ export default function nextPrompt(pi: ExtensionAPI) {
       if (mine !== generation || offered === undefined || !ui || !mainFocused()) return;
       const empty = ui.getEditorText() === "";
       if (!empty && explicit) hide("editor draft entered");
-      else if (!empty) conceal();
-      else if (shown === undefined) show(offered);
+      else if (!empty) conceal("editor contains a draft");
+      else if (shown === undefined && !suspended) show(offered);
     }, 0);
     return undefined;
   };
@@ -471,7 +560,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
     if (!request || request.text !== undefined || shown === undefined || !ui) return;
     if (ui.getEditorText() !== "" || !mainFocused() || (explicit && (busy || !explicit.acknowledged))) return;
     request.text = shown;
-    hide();
+    hide("taken into stash");
   });
 
   const attach = (ctx: ExtensionContext) => {
@@ -494,12 +583,15 @@ export default function nextPrompt(pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => {
     config = loadConfig("next-prompt", DEFAULT_CONFIG, ctx.cwd);
     busy = false;
-    reset();
+    trace.length = 0;
+    beforeSettlement = undefined;
+    afterSettlement = undefined;
+    reset("session_start");
     attach(ctx);
   });
 
   pi.on("session_shutdown", () => {
-    reset();
+    reset("session_shutdown");
     unsubscribe?.();
     unsubscribe = undefined;
     ui = undefined;
@@ -508,17 +600,17 @@ export default function nextPrompt(pi: ExtensionAPI) {
     terminal = undefined;
   });
 
-  pi.on("session_tree", () => reset());
-  pi.on("model_select", () => reset());
-  pi.on("session_compact", () => reset());
+  pi.on("session_tree", () => reset("session_tree"));
+  pi.on("model_select", () => reset("model_select"));
+  pi.on("session_compact", () => reset("session_compact"));
   pi.on("input", () => {
-    reset();
+    reset("input");
     return undefined;
   });
   // Bang submissions bypass the ordinary input event. Never leave an old offer behind.
-  pi.on("user_bash", () => { reset(); return undefined; });
+  pi.on("user_bash", () => { reset("user_bash"); return undefined; });
   // A user_bash interceptor may stop propagation before our handler (any load order).
-  pi.events.on("prompt:clear", reset);
+  pi.events.on("prompt:clear", () => reset("prompt:clear"));
 
   pi.on("before_agent_start", (event, ctx) => {
     config = loadConfig("next-prompt", DEFAULT_CONFIG, ctx.cwd);
@@ -534,7 +626,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
 
   pi.on("agent_start", () => {
     busy = true;
-    reset();
+    reset("agent_start");
   });
 
   // Optional bus integration: another extension offers a next prompt while Pi is idle
@@ -546,14 +638,15 @@ export default function nextPrompt(pi: ExtensionAPI) {
     if (!source) return;
     const text = typeof request?.text === "string" ? request.text.replace(/\s+/g, " ").trim().slice(0, config.maxChars > 0 ? config.maxChars : undefined) : "";
     if (!text) {
-      if (offerSource === source) hide();
+      if (offerSource === source) hide("external withdrawal");
       return;
     }
     if (!active() || !ui || busy) return;
     if (offered !== undefined && offerSource === undefined) return;
     generation++;
+    record("create", "external");
     if (ui.getEditorText() === "") show(text);
-    else { conceal(); offered = text; }
+    else { conceal("editor contains a draft"); offered = text; }
     offerSource = source;
   });
 
@@ -571,17 +664,24 @@ export default function nextPrompt(pi: ExtensionAPI) {
 
   pi.on("agent_before_settle", (event) => {
     outcome = event.outcome;
+    record("before-settlement", ["completed", "failed", "aborted", "error"].includes(outcome) ? outcome : "other");
     return undefined;
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
     settled = true;
     busy = false;
+    record("settlement", outcome === "completed" ? "completed" : "not completed");
+    if (patched && patched.editor.render !== patched.wrapper) record("patch-replaced", "render wrapper replaced");
     const candidate = pending;
     pending = undefined;
     if (explicit) {
-      if (outcome !== "completed") hide(`turn ${outcome ?? "not completed"}`);
-      else if (!active() || !ui || !mainFocused() || ui.getEditorText() !== "") hide("editor draft or focus changed");
+      if (outcome !== "completed") hide(outcome === "failed" ? "turn failed" : outcome === "aborted" ? "turn aborted" : outcome === "error" ? "turn error" : "turn not completed");
+      else {
+        const reason = renderBlocker();
+        if (reason === "main editor lost focus" && canSuspend()) suspend();
+        else if (reason) hide(reason);
+      }
       return;
     }
     if (!candidate || outcome !== "completed" || !active() || !ui) return;
@@ -592,10 +692,11 @@ export default function nextPrompt(pi: ExtensionAPI) {
     vetState = verdict.show ? "approved" : "vetoed";
     lastVerdict = `"${candidate.suggestion}": ${vetState} (${verdict.reason})`;
     if (!verdict.show) return;
+    record("create", "automatic");
     // A draft in the editor: keep the suggestion on offer, out of sight, so it appears once the
     // editor is empty again (the draft stashed with pi-stash's Ctrl+S, or deleted).
     if (ui.getEditorText() === "") show(candidate.suggestion);
-    else { conceal(); offered = candidate.suggestion; offerSource = undefined; }
+    else { conceal("editor contains a draft"); offered = candidate.suggestion; offerSource = undefined; }
   });
 
   pi.registerCommand("next-prompt", {
@@ -606,7 +707,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
       const arg = args.trim();
       if (arg === "on" || arg === "off") {
         sessionOn = arg === "on";
-        if (!sessionOn) reset();
+        if (!sessionOn) reset("command off");
         ctx.ui.notify(`next-prompt ${arg} for this session`, "info");
         return;
       }
@@ -618,9 +719,13 @@ export default function nextPrompt(pi: ExtensionAPI) {
         `next-prompt ${active() ? "on" : "off"}. Instruction: ${instruction}. Latest assistant: ${lastTag}. ` +
         `Settlement: ${outcome ?? "not observed (agent_before_settle)"}; agent_settled ${settled ? "observed" : "not observed"}. Vet: ${vetState}. ` +
         `UI: ${uiState}. Focus: ${focusState()}${ui && !mainFocused() ? " (ghost/acceptance blocked)" : ""}. Editor: ${ui ? ui.getEditorText() === "" ? "empty" : "nonempty (display blocked)" : "unavailable"}. ` +
-        `Offer: ${shown ? patched ? "ghost text" : "fallback widget" : offered ? "concealed" : "none"}. ` +
+        `Offer: ${suspended ? "suspended" : shown ? patched ? "ghost text" : "fallback widget" : offered ? "concealed" : "none"}. ` +
         `Explicit: ${explicit ? `${explicit.kind} ${explicit.id} ${explicit.acknowledged ? "rendered" : "awaiting render"}${busy ? " (accept after turn)" : ""}` : "none"}; last acknowledgement/blocker: ${lastExplicit}. ` +
-        `Last suggestion: ${lastVerdict || "none yet"}.`,
+        `Last suggestion: ${lastVerdict || "none yet"}. ` +
+        `Lifecycle state: ${JSON.stringify(snapshot())}. ` +
+        `Last render before settlement: ${JSON.stringify(beforeSettlement ?? null)}. ` +
+        `Last render after settlement: ${JSON.stringify(afterSettlement ?? null)}. ` +
+        `Lifecycle trace: ${JSON.stringify(trace)}`,
         "info",
       );
     },
