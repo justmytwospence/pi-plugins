@@ -236,6 +236,8 @@ interface ActiveCall {
   runs: Run[];
   /** Its tasks that have not started yet. */
   notStarted: () => number;
+  /** True only while main awaits this foreground call. */
+  foreground?: () => boolean;
   /** The session is reloading: the runs go on without this call (a foreground call returns at once). */
   park: () => void;
   /** Ends the call's herdr:background hold while this runtime can still say so. */
@@ -403,6 +405,8 @@ export default function subagents(pi: ExtensionAPI) {
   let holdCount = 0;
   /** Tasks waiting for a free slot (parallel) or their turn (chain), by sync/async. */
   const queued = { async: 0, sync: 0 };
+  /** Independent calls still planning, before their tasks enter the queued roster. */
+  const preparing = new Set<object>();
   /** For each foreground run: move its whole call to the background. */
   const detachers = new Map<string, () => void>();
   /** Calls whose outcome is still owed (handoff.ts parks them at a reload). */
@@ -634,7 +638,10 @@ export default function subagents(pi: ExtensionAPI) {
       for (const item of items) for (const run of item.runs ?? []) consumedResults.add(run.id);
     });
   };
-  pi.on("agent_settled", (_event, c) => flushResults(c));
+  pi.on("agent_settled", (_event, c) => {
+    flushResults(c);
+    scheduleAutoView();
+  });
   pi.events.on("bg:external-consumed", (data) => {
     const id = (data as { id?: unknown } | undefined)?.id;
     if (typeof id !== "string" || !id.startsWith("subagent:")) return;
@@ -669,11 +676,55 @@ export default function subagents(pi: ExtensionAPI) {
     boundUI = ctx.ui;
     widget.setUI(ctx.ui);
     fleet.setUI(ctx.ui);
+    scheduleAutoView();
   };
   const refreshUI = () => {
     widget.update();
     fleet.update();
   };
+
+  /** Coalesce roster transitions; never infer main's state from child output or a timer. */
+  const waitingHolds = new Set<string>();
+  const autoDismissed = new Set<string>();
+  let autoViewing: string | undefined;
+  let autoCheck: ReturnType<typeof setImmediate> | undefined;
+  const scheduleAutoView = () => {
+    if (!live || autoCheck) return;
+    const owner = lifetime.signal;
+    autoCheck = setImmediate(() => {
+      autoCheck = undefined;
+      if (owner.aborted || !live) return;
+      const running = [...runs.values()].filter((run) => run.state.status === "running");
+      for (const id of autoDismissed) if (!running.some((run) => run.id === id)) autoDismissed.delete(id);
+      const run = running.length === 1 && preparing.size === 0 && queued.sync + queued.async === 0 ? running[0] : undefined;
+      const waiting = run && ([...activeCalls].some((call) => call.foreground?.() && call.runs.includes(run)) || sessionCtx?.isIdle?.() === true || waitingHolds.size > 0);
+      const eligible = boundUI && sessionCtx?.hasUI && sessionCtx.mode === "tui" && config.fleetView !== false && waiting ? run : undefined;
+      if (autoViewing && autoViewing !== eligible?.id) {
+        fleet.closeAutoView(autoViewing);
+        autoViewing = undefined;
+      }
+      if (!eligible || autoViewing || autoDismissed.has(eligible.id)) return;
+      if (fleet.autoOpen(eligible, {
+        onDismiss: (runId) => {
+          autoDismissed.add(runId);
+          if (autoViewing === eligible.id) autoViewing = undefined;
+        },
+        onInteraction: () => undefined,
+        onRejected: () => {
+          if (autoViewing === eligible.id) autoViewing = undefined;
+        },
+      })) autoViewing = eligible.id;
+    });
+  };
+  pi.events.on("herdr:waiting", (data) => {
+    if (!live) return;
+    const hold = data as { id?: unknown; active?: unknown } | undefined;
+    if (typeof hold?.id !== "string") return;
+    if (hold.active === true) waitingHolds.add(hold.id);
+    else if (hold.active === false) waitingHolds.delete(hold.id);
+    else return;
+    scheduleAutoView();
+  });
 
   /** Saves the run's state as a `subagents:run` entry; `ending` overrides how it ended (a run a session end stops). */
   const record = (run: Run, ending?: { status: RunView["status"]; error: string }) => {
@@ -777,6 +828,7 @@ export default function subagents(pi: ExtensionAPI) {
     link.ended = () => {
       record(run);
       refreshUI();
+      scheduleAutoView();
     };
     // It ended while parked: its final record is owed now.
     if (link.missedEnd) {
@@ -845,6 +897,7 @@ export default function subagents(pi: ExtensionAPI) {
     child.start();
     record(run);
     refreshUI();
+    scheduleAutoView();
     link.done = child.done.then((state) => {
       run.state = state;
       try {
@@ -958,6 +1011,10 @@ export default function subagents(pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => {
     lifetime.abort();
     lifetime = new AbortController();
+    if (autoCheck) clearImmediate(autoCheck);
+    autoCheck = undefined;
+    waitingHolds.clear();
+    preparing.clear();
     live = true;
     sessionCtx = ctx;
     config = loadConfig("pi-subagents", DEFAULT_CONFIG, ctx.cwd);
@@ -993,7 +1050,10 @@ export default function subagents(pi: ExtensionAPI) {
       });
     }
     refreshUI();
+    scheduleAutoView();
   });
+
+  pi.on("before_agent_start", () => { scheduleAutoView(); });
 
   // A prompt mentioning `@subagent:<name>`: tell the model which discovered agent that is and how to
   // delegate to it (an unknown name is named as such, with the agents that exist).
@@ -1016,6 +1076,12 @@ export default function subagents(pi: ExtensionAPI) {
   pi.on("session_shutdown", (event, ctx) => {
     const reason = (event as { reason?: string } | undefined)?.reason;
     lifetime.abort();
+    if (autoCheck) clearImmediate(autoCheck);
+    autoCheck = undefined;
+    autoViewing = undefined;
+    autoDismissed.clear();
+    waitingHolds.clear();
+    preparing.clear();
     holdFlush = false;
     // A reload keeps the children: the next runtime of this session adopts them (handoff.ts).
     const key = reason === "reload" ? sessionKey((ctx ?? sessionCtx)?.sessionManager) : undefined;
@@ -1147,13 +1213,26 @@ export default function subagents(pi: ExtensionAPI) {
         if (cancelled()) throw new Error("Cancelled before any subagent started.");
         if (!live || owner.signal.aborted) throw new Error("The session ended before any subagent started.");
         signal?.addEventListener("abort", abortPreparation);
+        const pending = {};
+        const endPreparation = () => {
+          if (preparing.delete(pending)) scheduleAutoView();
+        };
+        preparing.add(pending);
+        scheduleAutoView();
+        // Release even if a classifier ignores cancellation and never settles. Unique tokens keep
+        // a late completion from deleting a new session's independently preparing call.
+        prepSignal.addEventListener("abort", endPreparation, { once: true });
         let resolvedAll: Awaited<ReturnType<typeof plan>>;
         try {
           resolvedAll = await plan(ctx, items, discoverAgents(ctx.cwd), prepSignal, Boolean(fork));
         } catch (error) {
           signal?.removeEventListener("abort", abortPreparation);
           throw error;
+        } finally {
+          prepSignal.removeEventListener("abort", endPreparation);
+          endPreparation();
         }
+        // No await before execute() accounts for these tasks in queued, including worktree setup.
         if (cancelled() || owner.signal.aborted || !live) {
           signal?.removeEventListener("abort", abortPreparation);
           throw new Error(cancelled() ? "Cancelled before any subagent started." : "The session ended before any subagent started.");
@@ -1220,6 +1299,7 @@ export default function subagents(pi: ExtensionAPI) {
           mode,
           runs: started,
           notStarted: () => waiting,
+          foreground: () => !call.async && !call.parked,
           park: () => {
             call.parked = true;
             onPark();
@@ -1269,6 +1349,7 @@ export default function subagents(pi: ExtensionAPI) {
             // A chain that stopped early leaves steps that will never run.
             queued[kind()] -= waiting;
             waiting = 0;
+            scheduleAutoView();
             signal?.removeEventListener("abort", abortPreparation);
             refreshUI();
           }
@@ -1325,6 +1406,7 @@ export default function subagents(pi: ExtensionAPI) {
               if (r.state.status === "running") external(r);
             }
             refreshUI();
+            scheduleAutoView();
             resolve("detached");
           };
         });

@@ -1,9 +1,11 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, beforeAll, expect, test, vi } from "vitest";
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import { emptyUsage } from "../src/child.ts";
 import { FleetView, SUCCESS_HINT_MS, fleetRoster, renderFleet } from "../src/ui/fleet.ts";
-import { KEY, fakeRun, fakeUI, normalFocus, plain } from "./ui-helpers.ts";
+import { KEY, fakeRun, fakeUI, normalFocus, piCustom, plain } from "./ui-helpers.ts";
 
+beforeAll(() => initTheme("dark"));
 afterEach(() => vi.useRealTimers());
 
 const names = (roster: ReturnType<typeof fleetRoster>) => roster.map((e) => (e.kind === "main" ? "main" : e.kind === "run" ? e.run.agent : e.kind === "row" ? e.row.label : e.pill.label));
@@ -73,6 +75,174 @@ function setup() {
   fleet.update();
   return { ui, runs, fleet, steered, stopped, disable: () => (enabled = false) };
 }
+
+const autoCallbacks = () => ({ onDismiss: vi.fn(), onInteraction: vi.fn(), onRejected: vi.fn() });
+const settled = async () => { await Promise.resolve(); await Promise.resolve(); };
+
+test("auto-open requires enabled fleet, known main focus, empty draft and no owned viewer", async () => {
+  const { ui, fleet, runs, disable } = setup();
+  const callbacks = autoCallbacks();
+  ui.editorText = " ";
+  expect(fleet.autoOpen(runs[0]!, callbacks)).toBe(false);
+  expect(ui.editorText).toBe(" ");
+  ui.editorText = "";
+  for (const focus of [undefined, { handleInput() {} }, { getText() {}, setText() {}, [Symbol.for("pi-plugins.editor-surface.v1")]: "embedded", [Symbol.for("pi-plugins.input-context.v1")]: () => "editor" }]) {
+    ui.tui.focused = focus;
+    expect(fleet.autoOpen(runs[0]!, callbacks)).toBe(false);
+  }
+  normalFocus(ui);
+  const manual = fleet.show(ui, runs[0]!);
+  expect(fleet.autoOpen(runs[1]!, callbacks)).toBe(false);
+  fleet.closeAutoView(runs[0]!.id);
+  expect(ui.customs).toHaveLength(1);
+  ui.customs[0]!.component.handleInput(KEY.escape);
+  await manual;
+  disable();
+  expect(fleet.autoOpen(runs[0]!, callbacks)).toBe(false);
+  fleet.dispose();
+});
+
+test("a fleet-owned pill dialog blocks auto-open, including before its promise starts", async () => {
+  const ui = fakeUI();
+  normalFocus(ui);
+  let close = () => {};
+  const run = fakeRun();
+  const fleet = new FleetView({ runs: () => [], enabled: () => true, actions: () => ({}), sections: () => [{
+    id: "tasks", title: "tasks", entries: () => [], open: async () => {}, pill: () => ({ label: "tasks" }),
+    openDialog: () => new Promise<void>((resolve) => { close = resolve; }),
+  }] });
+  fleet.setUI(ui);
+  fleet.update();
+  ui.press(KEY.down);
+  ui.press(KEY.enter);
+  expect(fleet.autoOpen(run, autoCallbacks())).toBe(false);
+  await settled();
+  expect(fleet.autoOpen(run, autoCallbacks())).toBe(false);
+  close();
+  await settled();
+  fleet.dispose();
+});
+
+test("rebinding closes the old view and its late callback leaves the new binding intact", async () => {
+  const { ui, fleet, runs } = setup();
+  const old = autoCallbacks();
+  fleet.autoOpen(runs[0]!, old);
+  const next = fakeUI();
+  normalFocus(next);
+  fleet.setUI(next);
+  fleet.update();
+  expect(ui.customs).toHaveLength(0);
+  expect(ui.widgets.size).toBe(0);
+  expect(ui.inputHandlers.size).toBe(0);
+  expect(fleet.autoOpen(runs[1]!, autoCallbacks())).toBe(true);
+  await settled();
+  expect(next.customs).toHaveLength(1);
+  expect(old.onDismiss).not.toHaveBeenCalled();
+  fleet.dispose();
+  await settled();
+  expect(next.widgets.size).toBe(0);
+  expect(next.customs).toHaveLength(0);
+});
+
+test("untouched completion closes only the matching auto-view, idempotently, without dismissal", async () => {
+  const { ui, fleet, runs } = setup();
+  const callbacks = autoCallbacks();
+  expect(fleet.autoOpen(runs[0]!, callbacks)).toBe(true);
+  expect(fleet.autoOpen(runs[0]!, callbacks)).toBe(false);
+  fleet.closeAutoView(runs[1]!.id);
+  expect(ui.customs).toHaveLength(1);
+  runs[0]!.state.status = "done";
+  fleet.closeAutoView(runs[0]!.id);
+  fleet.closeAutoView(runs[0]!.id);
+  await settled();
+  expect(ui.customs).toHaveLength(0);
+  expect(callbacks.onDismiss).not.toHaveBeenCalled();
+  expect(callbacks.onInteraction).not.toHaveBeenCalled();
+  fleet.dispose();
+});
+
+test.each([KEY.up, "a", "\t"])("input %j makes an auto-view user-owned; closing notifies the coordinator", async (key) => {
+  const { ui, fleet, runs } = setup();
+  const callbacks = autoCallbacks();
+  expect(fleet.autoOpen(runs[0]!, callbacks)).toBe(true);
+  ui.customs[0]!.component.handleInput(key);
+  fleet.closeAutoView(runs[0]!.id);
+  fleet.closeAutoView(runs[1]!.id);
+  expect(ui.customs).toHaveLength(1);
+  expect(callbacks.onInteraction).toHaveBeenCalledTimes(1);
+  ui.customs[0]!.component.handleInput(KEY.escape);
+  // Reservation survives until the user-close callback reaches the coordinator.
+  expect(fleet.autoOpen(runs[0]!, callbacks)).toBe(false);
+  await settled();
+  expect(callbacks.onDismiss).toHaveBeenCalledTimes(1);
+  fleet.dispose();
+});
+
+test("Esc after switching an auto-view dismisses the currently viewed run", async () => {
+  const { ui, fleet, runs } = setup();
+  const callbacks = autoCallbacks();
+  fleet.autoOpen(runs[0]!, callbacks);
+  ui.customs[0]!.component.handleInput("\t");
+  ui.customs[0]!.component.handleInput(KEY.escape);
+  await settled();
+  expect(callbacks.onDismiss).toHaveBeenCalledExactlyOnceWith(runs[1]!.id);
+  fleet.dispose();
+});
+
+test("Esc immediately dismisses an auto-view and stale close cannot clear its replacement", async () => {
+  const { ui, fleet, runs } = setup();
+  const callbacks = autoCallbacks();
+  fleet.autoOpen(runs[0]!, callbacks);
+  ui.customs[0]!.component.handleInput(KEY.escape);
+  await settled();
+  expect(callbacks.onInteraction).toHaveBeenCalledTimes(1);
+  expect(callbacks.onDismiss).toHaveBeenCalledTimes(1);
+  fleet.autoOpen(runs[0]!, autoCallbacks());
+  fleet.closeAutoView(runs[0]!.id);
+  fleet.autoOpen(runs[1]!, autoCallbacks());
+  await settled();
+  expect(ui.customs).toHaveLength(1);
+  expect(fleet.autoOpen(runs[0]!, callbacks)).toBe(false);
+  fleet.closeAutoView(runs[1]!.id);
+  fleet.dispose();
+});
+
+test.each(["completion", "rebind", "dispose", "draft", "dialog"])("pending auto-open is safe after %s", async (reason) => {
+  vi.useFakeTimers();
+  const { ui, fleet, runs } = setup();
+  const baselineTimers = vi.getTimerCount();
+  let open = () => {};
+  let constructed: { dispose: ReturnType<typeof vi.spyOn> } | undefined;
+  const custom = piCustom(ui);
+  ui.custom = (factory, options) => new Promise((resolve, reject) => {
+    open = () => {
+      custom((...args) => {
+        const created = factory(...args);
+        constructed = { dispose: vi.spyOn(created, "dispose") };
+        return created;
+      }, options).then(resolve, reject);
+    };
+  });
+  const callbacks = autoCallbacks();
+  expect(fleet.autoOpen(runs[0]!, callbacks)).toBe(true);
+  expect(fleet.autoOpen(runs[1]!, callbacks)).toBe(false);
+  if (reason === "completion") fleet.closeAutoView(runs[0]!.id);
+  if (reason === "rebind") fleet.setUI(fakeUI());
+  if (reason === "dispose") fleet.dispose();
+  if (reason === "draft") ui.editorText = "new draft";
+  if (reason === "dialog") ui.tui.focused = { handleInput() {} };
+  open();
+  await settled();
+  await settled();
+  expect(ui.customs).toHaveLength(0);
+  expect(constructed!.dispose).toHaveBeenCalled();
+  expect(vi.getTimerCount()).toBe(reason === "dispose" ? 0 : baselineTimers);
+  expect(callbacks.onDismiss).not.toHaveBeenCalled();
+  expect(callbacks.onInteraction).not.toHaveBeenCalled();
+  if (reason === "draft") expect(ui.editorText).toBe("new draft");
+  fleet.dispose();
+  expect(vi.getTimerCount()).toBe(0);
+});
 
 test("Tab routing selects and cycles tasks through main without draft replacement", () => {
   const { ui, fleet, runs } = setup();

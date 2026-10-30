@@ -8,7 +8,7 @@
 // Ctrl+C twice on an empty editor stops it.
 // Adapted from tintinweb/pi-subagents (MIT): https://github.com/tintinweb/pi-subagents
 import { keyText } from "@earendil-works/pi-coding-agent";
-import { compositeTuiLine, getKeybindings, Editor, Loader, type Component, type EditorTheme, type Focusable, type TUI, type TuiMouseEvent, type TuiMouseEventResult, isKeyRelease, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { compositeTuiLine, getKeybindings, Editor, Loader, type Component, type EditorTheme, type Focusable, type OverlayHandle, type TUI, type TuiMouseEvent, type TuiMouseEventResult, isKeyRelease, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { leavesPromptDown, type ActivitySection } from "../activity.ts";
 import { contextTokens, type Conversation } from "../conversation.ts";
 import { type EditorModeContext, type EmbeddedEditor, type EditorFactoryOptions, type SuiteEditor, EDITOR_MODE, EDITOR_SURFACE, INPUT_CONTEXT, readEditorMode, requestEditorFactory } from "../editor-contract.ts";
@@ -137,6 +137,7 @@ export class SessionView implements Component, Focusable {
     private readonly keybindings?: Keybindings,
     private readonly source?: SessionSource,
     private readonly openSection?: (section: ActivitySection) => void,
+    private readonly onInteraction?: () => void,
   ) {
     this.run = run;
     this.loader = new Loader(tui as TUI, (text) => theme.fg("accent", text), (text) => theme.fg("muted", text), "Working");
@@ -261,7 +262,8 @@ export class SessionView implements Component, Focusable {
 
   /** Switch to `run`, or back to main (`undefined`). */
   switchTo(run: Run | undefined) {
-    if (run === this.run) return;
+    if (this.closed || run === this.run) return;
+    safe(() => this.onInteraction?.());
     if (!run) {
       this.close();
       return;
@@ -452,6 +454,8 @@ export class SessionView implements Component, Focusable {
   // ---- keys ----------------------------------------------------------------------------------------
 
   handleInput(data: string): void {
+    if (this.closed) return;
+    safe(() => this.onInteraction?.());
     if (isKeyRelease(data)) return;
     const autocomplete = Boolean(this.composer && (readEditorMode(this.composer)?.autocomplete || this.composer.isShowingAutocomplete?.()));
     if (!autocomplete && matchesKey(data, "tab")) return this.cycle(1);
@@ -517,6 +521,8 @@ export class SessionView implements Component, Focusable {
   }
 
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (this.closed) return undefined;
+    safe(() => this.onInteraction?.());
     if (event.type === "wheel") {
       this.scrollBy(event.wheelDelta ?? 0);
       return { handled: true };
@@ -716,7 +722,7 @@ function invoke(action: () => void | Promise<void>) {
 export interface ViewerUI {
   custom<T>(
     factory: (tui: TUI, theme: any, keybindings: any, done: (result: T) => void) => Component & { dispose?(): void },
-    options?: { overlay?: boolean; overlayOptions?: { anchor?: "center" | "top-left"; width?: `${number}%`; maxHeight?: `${number}%` } },
+    options?: { overlay?: boolean; overlayOptions?: { anchor?: "center" | "top-left"; width?: `${number}%`; maxHeight?: `${number}%` } | (() => { anchor?: "center" | "top-left"; width?: `${number}%`; maxHeight?: `${number}%` }); onHandle?: (handle: OverlayHandle) => void },
   ): Promise<T>;
 }
 
@@ -724,17 +730,54 @@ export interface ViewerUI {
  * Show `run`'s session full screen until you go back to main; `onOpen` gets a way to close it.
  * With a `source`, Tab and the list switch between main and its runs.
  */
-export function openViewer(ui: ViewerUI, run: Run, actions: ViewerActions = {}, onOpen?: (close: () => void) => void, source?: SessionSource): Promise<void> {
+export function openViewer(ui: ViewerUI, run: Run, actions: ViewerActions = {}, onOpen?: (close: () => void) => void, source?: SessionSource, onInteraction?: () => void, canInstall?: () => boolean): Promise<void> {
+  let view: SessionView | undefined;
+  let handle: OverlayHandle | undefined;
+  let cancelled = false;
   return ui.custom<void>(
     (tui, theme, keybindings, done) => {
-      onOpen?.(() => done(undefined));
       const openSection = (section: ActivitySection) => {
         void Promise.resolve()
           .then(() => section.openDialog?.(ui as never))
           .catch(() => undefined);
       };
-      return new SessionView(tui, run, theme, () => done(undefined), actions, keybindings, source, openSection);
+      const close = () => {
+        if (cancelled) return;
+        cancelled = true;
+        view?.dispose();
+        // Pi 1.2's custom done() blindly pops the last overlay, not this one.
+        // Remove only our entry, then give done() a non-capturing placeholder to
+        // pop synchronously. Pi 1.4 removes its own handle instead, so also hide
+        // the placeholder by handle (a no-op if 1.2 already popped it).
+        // A dialog above us keeps both its entry and focus;
+        // handle.hide() also retargets its previous focus away from this viewer.
+        // Before installation, reject in overlayOptions instead of calling done.
+        if (handle) {
+          handle.hide();
+          const placeholder = tui.showOverlay({ render: () => [], invalidate() {} }, { nonCapturing: true });
+          try {
+            done(undefined);
+          } finally {
+            placeholder.hide();
+          }
+        }
+      };
+      view = new SessionView(tui, run, theme, close, actions, keybindings, source, openSection, onInteraction);
+      onOpen?.(close);
+      return view;
     },
-    { overlay: true, overlayOptions: { anchor: "top-left", width: "100%", maxHeight: `${VIEWER_HEIGHT_PCT}%` } },
-  );
+    {
+      overlay: true,
+      // Pi resolves these options in the same callback as showOverlay, after awaiting
+      // the factory. This is the last safe check before it captures keyboard focus.
+      overlayOptions: () => {
+        if (cancelled || canInstall?.() === false) throw new Error("Viewer opening cancelled");
+        return { anchor: "top-left", width: "100%", maxHeight: `${VIEWER_HEIGHT_PCT}%` };
+      },
+      onHandle: (installed) => { handle = installed; },
+    },
+  ).catch((error) => {
+    view?.dispose();
+    throw error;
+  });
 }

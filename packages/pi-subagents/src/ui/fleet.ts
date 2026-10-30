@@ -189,6 +189,22 @@ export interface FleetSource extends Omit<SessionSource, "onSwitch"> {
   note?(now: number): string | undefined;
 }
 
+/** Coordinator notifications for an automatically opened conversation. */
+export interface AutoViewCallbacks {
+  /** The run being viewed at dismissal, which may differ from the one auto-opened. */
+  onDismiss(runId: string): void;
+  onInteraction(): void;
+  /** A pending open was rejected, not dismissed by the user; later events may retry. */
+  onRejected?(): void;
+}
+
+interface OwnedView {
+  key: string;
+  close?: () => void;
+  auto?: AutoViewCallbacks;
+  interacted?: boolean;
+}
+
 type KeyResult = { consume?: boolean; data?: string } | undefined;
 
 export class FleetView {
@@ -208,13 +224,17 @@ export class FleetView {
   private armedTarget: unknown;
   private viewing: string | undefined;
   private stopArmed = false;
-  private closeViewer: (() => void) | undefined;
+  /** Reserved before custom's factory runs, including pending opens and external dialogs. */
+  private viewer: OwnedView | undefined;
 
   constructor(private readonly source: FleetSource) {}
 
   setUI(ui: FleetUI): void {
     if (ui === this.ui) return;
+    this.releaseViewer();
     this.unsubscribeInput?.();
+    if (this.registered) this.ui?.setWidget(FLEET_KEY, undefined);
+    this.active = false;
     this.ui = ui;
     this.registered = false;
     this.tui = undefined;
@@ -301,7 +321,7 @@ export class FleetView {
   handleKey(data: string, enterWithTab = false): KeyResult {
     if (!this.ui || !this.source.enabled() || isKeyRelease(data)) return undefined;
     // The viewer owns the keyboard while it is open.
-    if (this.closeViewer) return undefined;
+    if (this.viewer) return undefined;
     // A dialog or another overlay has the keyboard; the editor's text is not what it seems.
     if (!this.editorFocused()) {
       if (this.active) this.deactivate();
@@ -434,27 +454,28 @@ export class FleetView {
     }
     const key = entryKey(entry);
     this.viewing = key;
-    const cleared = () => this.viewerClosed(key);
+    const view: OwnedView = { key };
+    const cleared = () => this.viewerClosed(view);
     if (entry.kind === "row") {
       // The row's own view (a notebook); it owns the keyboard until it closes, and the row is selected again after.
-      this.closeViewer = () => undefined;
+      this.viewer = view;
       const ui = this.ui;
       const { section, row } = entry;
       Promise.resolve()
-        .then(() => section.open(row.key, ui))
+        .then(() => (this.viewer === view ? section.open(row.key, ui) : undefined))
         .then(cleared, cleared);
       return;
     }
     if (entry.kind === "pill") {
       // The section's own dialog; it owns the keyboard until it closes.
       this.active = false;
+      this.viewer = view;
       if (!entry.section.openDialog) return cleared();
-      this.closeViewer = () => undefined;
       const ui = this.ui;
       const section = entry.section;
       // Never throws here: a bug in another extension must not leave the list owning no keys.
       Promise.resolve()
-        .then(() => section.openDialog?.(ui))
+        .then(() => (this.viewer === view ? section.openDialog?.(ui) : undefined))
         .then(cleared, cleared);
       return;
     }
@@ -466,7 +487,35 @@ export class FleetView {
    * Resolves when you are back in main.
    */
   show(ui: ViewerUI, run: Run): Promise<void> {
-    this.viewing = `run:${run.id}`;
+    return this.showRun(ui, run);
+  }
+
+  /** Reserve an untouched auto-view only when the actual main editor is available. */
+  autoOpen(run: Run, callbacks: AutoViewCallbacks): boolean {
+    if (!this.canAutoOpen() || this.viewer) return false;
+    this.active = false;
+    void this.showRun(this.ui!, run, callbacks);
+    return true;
+  }
+
+  /** Completion/roster changes must never close a manual or interacted view. */
+  closeAutoView(runId: string): void {
+    const view = this.viewer;
+    if (view?.auto && !view.interacted && view.key === `run:${runId}`) {
+      this.releaseViewer();
+      this.update();
+    }
+  }
+
+  private canAutoOpen(): boolean {
+    return Boolean(this.ui && this.source.enabled() && this.focused() != null && this.editorFocused() && this.ui.getEditorText() === "");
+  }
+
+  private showRun(ui: ViewerUI, run: Run, auto?: AutoViewCallbacks): Promise<void> {
+    this.releaseViewer();
+    const view: OwnedView = { key: `run:${run.id}`, auto };
+    this.viewer = view;
+    this.viewing = view.key;
     const src = this.source;
     const source: SessionSource = {
       runs: () => src.runs(),
@@ -479,18 +528,56 @@ export class FleetView {
       contextWindow: (model) => src.contextWindow?.(model),
       settings: () => src.settings?.() ?? {},
       onSwitch: (r) => {
-        this.viewing = `run:${r.id}`;
+        if (this.viewer !== view) return;
+        view.key = `run:${r.id}`;
+        this.viewing = view.key;
       },
     };
-    const cleared = () => this.viewerClosed(this.viewing ?? `run:${run.id}`);
-    return openViewer(ui, run, src.actions(run), (close) => {
-      this.closeViewer = close;
-    }, source).then(cleared, cleared);
+    const interacted = () => {
+      if (this.viewer !== view || !view.auto || view.interacted) return;
+      view.interacted = true;
+      this.invoke(() => view.auto!.onInteraction());
+    };
+    const cleared = () => this.viewerClosed(view);
+    try {
+      return openViewer(ui, run, src.actions(run), (close) => {
+        if (this.viewer !== view) {
+          // custom factories can arrive after close, UI rebinding or disposal. Let the
+          // factory finish constructing its component before disposing that stale overlay.
+          queueMicrotask(close);
+          return;
+        }
+        view.close = close;
+      }, source, interacted, auto ? () => this.viewer === view && this.canAutoOpen() : undefined).then(cleared, () => this.viewerRejected(view));
+    } catch {
+      // Keep failure notification asynchronous even for a throwing UI adapter:
+      // autoOpen's caller must first record the accepted reservation.
+      return Promise.resolve().then(() => this.viewerRejected(view));
+    }
   }
 
-  private viewerClosed(key: string) {
-    this.closeViewer = undefined;
+  /** Invalidate synchronously: a late factory or close cannot adopt/clear a newer view. */
+  private releaseViewer(): void {
+    const view = this.viewer;
+    this.viewer = undefined;
     this.viewing = undefined;
+    view?.close?.();
+  }
+
+  private viewerRejected(view: OwnedView): void {
+    if (this.viewer !== view) return;
+    this.viewer = undefined;
+    this.viewing = undefined;
+    if (view.auto) this.invoke(() => view.auto!.onRejected?.());
+    this.update();
+  }
+
+  private viewerClosed(view: OwnedView) {
+    if (this.viewer !== view) return;
+    const key = view.key;
+    this.viewer = undefined;
+    this.viewing = undefined;
+    if (view.auto) this.invoke(() => view.auto!.onDismiss(key.slice("run:".length)));
     // Back on the row just viewed, if it is still listed.
     const roster = this.roster();
     const index = roster.findIndex((e) => entryKey(e) === key);
@@ -503,11 +590,8 @@ export class FleetView {
     this.timer = undefined;
     this.unsubscribeInput?.();
     this.unsubscribeInput = undefined;
-    const close = this.closeViewer;
-    this.closeViewer = undefined;
-    this.viewing = undefined;
     try {
-      close?.();
+      this.releaseViewer();
       if (this.registered) this.ui?.setWidget(FLEET_KEY, undefined);
     } finally {
       this.registered = false;

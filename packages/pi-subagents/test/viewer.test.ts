@@ -2,17 +2,22 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import { initTheme } from "@earendil-works/pi-coding-agent";
-import { visibleWidth } from "@earendil-works/pi-tui";
-import { beforeAll, expect, test } from "vitest";
+import { InteractiveMode, initTheme } from "@earendil-works/pi-coding-agent";
+import { TuiMainScreen, type Terminal, visibleWidth } from "@earendil-works/pi-tui";
+import { beforeAll, expect, test, vi } from "vitest";
+import { InteractiveMode as InteractiveMode14, initTheme as initTheme14 } from "pi-coding-agent-1-4";
+import { TuiMainScreen as TuiMainScreen14 } from "pi-tui-1-4";
 import { transcriptWriter } from "../src/conversation.ts";
 import { recordedRun } from "../src/index.ts";
 import type { Run } from "../src/run.ts";
-import { type SessionSource, SessionView, openViewer } from "../src/ui/viewer.ts";
+import { type ViewerUI, type SessionSource, SessionView, openViewer } from "../src/ui/viewer.ts";
 import { KEY, fakeRun, fakeTui, fakeUI, plain } from "./ui-helpers.ts";
 
 // Pi's message and tool components draw with Pi's theme.
-beforeAll(() => initTheme("dark"));
+beforeAll(() => {
+  initTheme("dark");
+  initTheme14("dark");
+});
 
 const CTRL_C = "\x03";
 const SHIFT_TAB = "\x1b[Z";
@@ -52,6 +57,100 @@ const text = (lines: string[]) => lines.map((l) => stripVTControlCharacters(l).t
 const type = (v: SessionView, s: string) => {
   for (const ch of s) v.handleInput(ch);
 };
+
+test("interaction is reported before navigation, typing and Esc; render and output do not report it", async () => {
+  const ui = fakeUI();
+  const run = liveRun();
+  const inputs: string[] = [];
+  let current = "";
+  let closed = false;
+  const done = openViewer(ui, run, { steer: () => { expect(inputs.at(-1)).toBe(KEY.enter); return true; } }, undefined, undefined, () => {
+    expect(closed).toBe(false);
+    inputs.push(current);
+  });
+  void done.then(() => { closed = true; });
+  const view = ui.customs[0]!.component as SessionView;
+  view.render(100);
+  run.conversation.apply({ type: "message_end", message: { role: "assistant", content: [] } });
+  expect(inputs).toEqual([]);
+  for (const key of [KEY.up, "a", KEY.enter, KEY.escape]) {
+    current = key;
+    view.handleInput(key);
+    expect(inputs.at(-1)).toBe(key);
+  }
+  await done;
+  expect(inputs).toEqual([KEY.up, "a", KEY.enter, KEY.escape]);
+  view.handleInput("stale");
+  expect(inputs).toHaveLength(4);
+});
+
+test.each([
+  { version: "1.2", Mode: InteractiveMode, Screen: TuiMainScreen },
+  { version: "1.4", Mode: InteractiveMode14, Screen: TuiMainScreen14 },
+].flatMap((pi) => [undefined, false, true].map((nonCapturing) => ({ ...pi, nonCapturing }))))(
+  "Pi $version auto-close leaves no placeholder (dialog nonCapturing=$nonCapturing)",
+  async ({ Mode, Screen, nonCapturing }) => {
+  // Exercise each published Pi's custom lifecycle AND real TUI overlay stack:
+  // 1.2 pops the top entry; 1.4 removes its own handle.
+  const tui = new Screen({ rows: 40, columns: 100, hideCursor() {} } as Terminal);
+  // No terminal rendering loop is needed to exercise real overlay ownership/focus.
+  tui.requestRender = () => {};
+  const editor = { render: () => [], getText: () => "draft", invalidate() {} };
+  tui.setFocus(editor);
+  const host = { ui: tui, editor };
+  const ui: ViewerUI = {
+    custom: (factory, options) => (Mode.prototype as any).showExtensionCustom.call(host, factory, options),
+  };
+  let close!: () => void;
+  const viewerDone = openViewer(ui, liveRun(), {}, (fn) => { close = fn; });
+  // Pi awaits the factory before showOverlay/onHandle.
+  await Promise.resolve();
+  const viewer = tui.getFocusedComponent() as SessionView;
+  const dispose = vi.spyOn(viewer, "dispose");
+  let dialogDone!: () => void;
+  const dialog = { render: () => ["user dialog"], invalidate() {}, focused: false };
+  const dialogPromise = nonCapturing === undefined ? undefined : ui.custom<void>((_tui, _theme, _keys, done) => {
+    dialogDone = () => done(undefined);
+    return dialog;
+  }, { overlay: true, overlayOptions: { nonCapturing } } as never);
+  await Promise.resolve();
+  const focus = tui.getFocusedComponent();
+
+  close();
+  close(); // A stale automatic cancellation must not pop the dialog either.
+  await viewerDone;
+  expect(dispose).toHaveBeenCalled();
+  expect(tui.getFocusedComponent()).toBe(nonCapturing !== false ? editor : focus);
+  // Check ownership as well as hasOverlayEntries: a leaked blank placeholder
+  // must not hide behind the remaining dialog.
+  expect((tui as any).overlayStack.map((entry: any) => entry.component)).toEqual(dialogPromise ? [dialog] : []);
+  expect(tui.hasOverlayEntries).toBe(!!dialogPromise);
+  if (dialogPromise) {
+    expect(dialog.render()).toEqual(["user dialog"]);
+    dialogDone();
+    await dialogPromise;
+  }
+  expect(tui.hasOverlayEntries).toBe(false);
+  // The dialog's saved focus must no longer point at the disposed viewer.
+  expect(tui.getFocusedComponent()).toBe(editor);
+  dispose.mockRestore();
+});
+
+test("direct session switching and mouse input notify before processing, but same-run switching does not", () => {
+  const first = liveRun();
+  const second = liveRun();
+  const seen: Run[] = [];
+  const v = new SessionView(fakeTui() as never, first, plain, () => {}, {}, undefined, undefined, undefined, () => { seen.push(v.current); });
+  v.switchTo(first);
+  expect(seen).toEqual([]);
+  v.switchTo(second);
+  expect(seen).toEqual([first]);
+  v.handleMouse({ type: "wheel", x: 0, y: 0, wheelDelta: 1 } as never);
+  expect(seen).toEqual([first, second]);
+  v.switchTo(undefined);
+  expect(seen).toEqual([first, second, second]);
+  v.dispose();
+});
 
 test("a subagent's session draws as Pi draws main: transcript, working row, editor, list, footer", () => {
   const { v, runs } = setup();

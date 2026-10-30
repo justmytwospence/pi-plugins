@@ -1,4 +1,5 @@
 // Fakes for the UI tests: runs, a plain theme, a TUI and a ctx.ui.
+import { InteractiveMode } from "@earendil-works/pi-coding-agent";
 import { type ChildState, emptyUsage } from "../src/child.ts";
 import { Conversation } from "../src/conversation.ts";
 import type { Run } from "../src/run.ts";
@@ -26,7 +27,7 @@ export function fakeRun(over: { state?: Partial<ChildState> } & Partial<Omit<Run
 }
 
 export function fakeTui(rows = 40, columns = 100) {
-  const tui = { renders: 0, focused: undefined as unknown, terminal: { rows, columns }, requestRender: () => void tui.renders++, getFocusedComponent: () => tui.focused };
+  const tui = { renders: 0, focused: undefined as unknown, terminal: { rows, columns }, requestRender: () => void tui.renders++, showOverlay: (..._args: any[]) => ({ hide() {} }), getFocusedComponent: () => tui.focused };
   return tui;
 }
 
@@ -63,14 +64,21 @@ export function fakeUI(tui = fakeTui()) {
     notify: (message: string) => void ui.notes.push(message),
     custom(factory: CustomFactory, options: any): Promise<any> {
       return new Promise((resolve) => {
+        let removed = false;
         const close = (value?: unknown) => {
-          ui.customs.splice(ui.customs.indexOf(entry), 1);
+          if (removed) (tui as any).hideOverlay?.();
+          else ui.customs.splice(ui.customs.indexOf(entry), 1);
           entry.component.dispose?.();
           resolve(value);
         };
         const entry = { component: undefined as any, options, close };
         ui.customs.push(entry);
         entry.component = factory(tui, plain, undefined, close);
+        entry.options = { ...options, overlayOptions: typeof options?.overlayOptions === "function" ? options.overlayOptions() : options?.overlayOptions };
+        options?.onHandle?.({ hide() {
+          ui.customs.splice(ui.customs.indexOf(entry), 1);
+          removed = true;
+        } });
       });
     },
     /** Feed a key through the input listeners; true when one consumed it. */
@@ -91,6 +99,24 @@ export function normalFocus(ui: ReturnType<typeof fakeUI>): void {
     setText: (text: string) => { ui.editorText = text; },
     [Symbol.for("pi-plugins.editor-mode.v1")]: () => ({ state: "normal", mode: "normal", pending: "", ex: null, autocomplete: false }),
   };
+}
+
+/** Exercise Pi's real Promise.resolve(factory).then(install) and overlay close path. */
+export function piCustom(ui: ReturnType<typeof fakeUI>): typeof ui.custom {
+  const tui = Object.assign(ui.tui, {
+    showOverlay(component: any, options: any) {
+      const previous = tui.focused;
+      const entry = { component, options, close: () => {} };
+      ui.customs.push(entry);
+      if (!options?.nonCapturing) tui.focused = component;
+      return { hide() { ui.customs.splice(ui.customs.indexOf(entry), 1); }, previous };
+    },
+    hideOverlay() {
+      ui.customs.pop();
+    },
+  });
+  const host = { ui: tui, editor: { getText: () => ui.editorText } };
+  return (factory, options) => (InteractiveMode.prototype as any).showExtensionCustom.call(host, factory, options);
 }
 
 export const KEY = { up: "\x1b[A", down: "\x1b[B", left: "\x1b[D", enter: "\r", escape: "\x1b", backspace: "\x7f" };

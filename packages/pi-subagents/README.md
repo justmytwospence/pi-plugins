@@ -97,6 +97,10 @@ Claude Code's subagent panel, below the prompt: `main` and every running subagen
 
 ### Subagent sessions
 
+When exactly one subagent is running across all calls and no tasks are queued, its conversation opens automatically while main awaits a foreground subagent call, is idle, or holds a pi-bg wait (`herdr:waiting`). FleetView must be enabled, with main's editor focused and its draft empty; existing viewers and dialogs are never interrupted. Parallel startup is checked after the roster settles, and queued chains wait until their last task starts.
+
+An untouched automatic view returns to main when the run ends, another run starts, or main resumes work. Any input (including scrolling, navigation or typing) makes the view yours: it stays open on completion. Esc returns to main and prevents automatic reopening of that run until it ends. Manual viewing is unchanged.
+
 A run opens full screen as a session of its own, drawn as Pi draws main: its conversation in Pi's own message and tool components (Markdown, thinking as your `hideThinkingBlock` setting says, tool cards with Pi's renderers, including edit diffs), Pi's working row while it works, steering messages it has not read yet as `Steering: …`, your editor (pi-vim's when loaded, with your `editorPaddingX`), the subagent list main shows under its prompt with this session marked `◉`, and your footer. With pi-status-footer, the footer and the context gauge on the editor's borders describe the child (its model, thinking level, context share and cost); otherwise a footer in Pi's own layout does. Tool results keep up to 16,000 characters, and their details up to 16,000 characters of JSON.
 
 Pi runs one live session per process and every subagent is a separate process, so this is the same thing Claude Code's and Codex's subagent views are: main's screen drawn for another thread, which you switch to and from.

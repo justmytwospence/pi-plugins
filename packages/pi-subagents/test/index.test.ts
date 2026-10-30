@@ -1,10 +1,13 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { expect, test } from "vitest";
+import { initTheme } from "@earendil-works/pi-coding-agent";
+import { beforeAll, expect, test } from "vitest";
 import subagents, { DEFAULT_CONFIG, jevMark, promptGuidelines, readPressure, truncateOutput } from "../src/index.ts";
 import { fakeJev, harness } from "./harness.ts";
 import { fakeUI, normalFocus, plain } from "./ui-helpers.ts";
+
+beforeAll(() => initTheme("dark"));
 
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(path.join(tmpdir(), "subagents-agent-"));
 
@@ -94,6 +97,10 @@ test("b in FleetView moves a foreground call to the background; its result arriv
     normalFocus(ui);
     const call = tool.execute("t1", { task: "loop forever" }, undefined, undefined, ctx);
     await new Promise((r) => setTimeout(r, 100));
+    // Foreground waits now open their conversation. Esc returns to main and suppresses reopening.
+    expect(ui.customs).toHaveLength(1);
+    ui.customs[0]!.component.handleInput("\x1b");
+    await new Promise<void>((resolve) => setImmediate(resolve));
     expect(ui.press("\x1b[B")).toBe(true);
     expect(ui.render("subagents-fleet")[0]).toContain("b background");
     expect(ui.widgets.has("subagents")).toBe(false);
