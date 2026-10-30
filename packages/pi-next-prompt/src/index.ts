@@ -5,7 +5,7 @@
 // is stripped before the message is stored, so it never reaches the transcript or later context;
 // Jev vets it before it is shown and fails open.
 import type { ExtensionAPI, ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import { type KeyId, type TUI, isKeyRelease, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { type KeyId, type TUI, isKeyRelease, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { loadConfig } from "./config.ts";
 import { type ClassifierQuestion, type JevConfig, askJev, bool } from "./jev.ts";
@@ -107,6 +107,59 @@ export async function vet(registry: unknown, config: NextPromptConfig["jev"], pe
 
 type Block = { type?: string; text?: string };
 
+type DiagnosticState = {
+  offerId: number | null; generation: number; busy: boolean; settled: boolean; suspended: boolean;
+  focus: string; editorEmpty: boolean | null; patchCurrent: boolean;
+};
+type RenderObservation = DiagnosticState & { surface: "ghost" | "widget"; visible: boolean; reason: string };
+type DiagnosticEvent = DiagnosticState & { event: string; reason: string };
+export interface Diagnostics {
+  state: DiagnosticState;
+  before: RenderObservation | null;
+  after: RenderObservation | null;
+  trace: DiagnosticEvent[];
+  enabled: boolean; ui: string; offer: string; explicit: string; lastExplicit: string;
+  instruction: string; tag: string; vet: string; outcome: string | undefined; ready: boolean;
+}
+
+const offerLabel = (state: DiagnosticState) => state.offerId === null ? `generation ${state.generation}` : `offer #${state.offerId}/generation ${state.generation}`;
+const diagnosticFlags = (state: DiagnosticState) =>
+  `${state.busy ? "busy" : "idle"}/${state.settled ? "settled" : "unsettled"}; focus: ${state.focus}; editor: ${state.editorEmpty === null ? "unavailable" : state.editorEmpty ? "empty" : "nonempty"}; wrapper: ${state.patchCurrent ? "current" : "not current"}`;
+const renderObservation = (phase: string, observation: RenderObservation | null) => observation
+  ? `${phase} ${offerLabel(observation)}: ${observation.surface} ${observation.visible ? "included in component output" : `not included (${observation.reason})`}`
+  : `${phase}: not observed`;
+const wrapDiagnostics = (lines: string[], width: number) => lines.flatMap(line => wrapTextWithAnsi(line, Math.max(1, width))).join("\n");
+
+/** Pure presentation: never renders the editor or changes an offer. Lines may wrap on narrow screens. */
+export function statusLines(info: Diagnostics): string[] {
+  return [
+    `next-prompt ${info.enabled ? "on" : "off"}; UI: ${info.ui}`,
+    `Offer: ${info.offer}${info.explicit ? `; ${info.explicit}` : ""}`,
+    `Focus: ${info.state.focus}; editor: ${info.state.editorEmpty === null ? "unavailable" : info.state.editorEmpty ? "empty" : "nonempty (draft)"}`,
+    `Turn: ${info.state.busy ? "busy" : "idle"}, ${info.state.settled ? info.outcome ?? "settled" : info.outcome ? `${info.outcome} (before settlement)` : "not settled"}; acceptance: ${info.ready ? "ready" : "not ready"}`,
+    `Last explicit: ${info.lastExplicit}`,
+    `Render: ${renderObservation("before settlement", info.before)}; ${renderObservation("after settlement", info.after)}`,
+    `Automatic: instruction ${info.instruction}; ${info.tag}; vet ${info.vet}`,
+    "History: /next-prompt trace",
+  ];
+}
+
+/** Page one contains the newest four events, ordered chronologically within each page. */
+export function traceLines(info: Diagnostics, page: number): string[] {
+  const pages = Math.max(1, Math.ceil(info.trace.length / 4));
+  const end = info.trace.length - (page - 1) * 4;
+  const start = Math.max(0, end - 4);
+  return [
+    `next-prompt trace ${page}/${pages} (frozen snapshot)`,
+    ...info.trace.slice(start, end).map((event, index) =>
+      `${start + index + 1}. ${event.event} (${offerLabel(event)}): ${event.reason}; ${diagnosticFlags(event)}`),
+    ...(info.trace.length ? [] : ["No events retained."]),
+    `Render: ${renderObservation("before settlement", info.before)}`,
+    `Render: ${renderObservation("after settlement", info.after)}`,
+    ...(page < pages ? [`older: /next-prompt trace ${page + 1}`] : []),
+  ];
+}
+
 /** Strip the tag lines from an assistant message. Returns the replacement (if changed) and the suggestion. */
 export function processAssistant(message: { role?: string; content?: unknown }, maxChars: number) {
   if (message.role !== "assistant" || !Array.isArray(message.content)) return { suggestion: undefined, replacement: undefined };
@@ -149,7 +202,6 @@ export default function nextPrompt(pi: ExtensionAPI) {
   let lastExplicit = "none yet";
   const blocked = (reason: string): OfferDetails => ({ status: "blocked", reason });
   const displayed = (offer: ExplicitOffer): OfferDetails => ({ status: "displayed", kind: offer.kind, text: offer.text, surface: offer.surface, acceptAfterTurn: busy });
-  let lastVerdict = "";
   let lastTag = "none yet";
   let instruction = "not evaluated yet";
   let uiState = "not attached";
@@ -181,9 +233,9 @@ export default function nextPrompt(pi: ExtensionAPI) {
     editorEmpty: ui ? ui.getEditorText() === "" : null,
     patchCurrent: !!patched && patched.editor.render === patched.wrapper,
   });
-  type Observation = ReturnType<typeof snapshot> & { surface: Surface; visible: boolean; reason: string };
-  let beforeSettlement: Observation | undefined;
-  let afterSettlement: Observation | undefined;
+  let beforeSettlement: RenderObservation | undefined;
+  let afterSettlement: RenderObservation | undefined;
+  let traceSnapshot: Diagnostics | undefined;
   const trace: (ReturnType<typeof snapshot> & { event: string; reason: string })[] = [];
   const record = (event: string, reason: string) => {
     trace.push({ ...snapshot(), event, reason });
@@ -332,7 +384,6 @@ export default function nextPrompt(pi: ExtensionAPI) {
     outcome = undefined;
     settled = false;
     lastTag = "none yet";
-    lastVerdict = "";
     vetState = "not run";
   };
 
@@ -584,6 +635,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
     config = loadConfig("next-prompt", DEFAULT_CONFIG, ctx.cwd);
     busy = false;
     trace.length = 0;
+    traceSnapshot = undefined;
     beforeSettlement = undefined;
     afterSettlement = undefined;
     reset("session_start");
@@ -689,8 +741,9 @@ export default function nextPrompt(pi: ExtensionAPI) {
     vetState = "pending";
     const verdict = await vet(ctx.modelRegistry, config.jev, candidate);
     if (mine !== generation || !ui) return;
-    vetState = verdict.show ? "approved" : "vetoed";
-    lastVerdict = `"${candidate.suggestion}": ${vetState} (${verdict.reason})`;
+    vetState = !verdict.show ? "vetoed" : verdict.reason === "judge off" ? "disabled (shown)"
+      : verdict.reason.startsWith("judge unavailable") ? "unavailable (shown)"
+      : verdict.reason.startsWith("judge gave no answer") ? "no answer (shown)" : "approved";
     if (!verdict.show) return;
     record("create", "automatic");
     // A draft in the editor: keep the suggestion on offer, out of sight, so it appears once the
@@ -699,10 +752,27 @@ export default function nextPrompt(pi: ExtensionAPI) {
     else { conceal("editor contains a draft"); offered = candidate.suggestion; offerSource = undefined; }
   });
 
+  // Read-only copies also let the unit harness inspect scalar diagnostics without a JSON command.
+  const diagnostics = (): Diagnostics => ({
+    state: snapshot(),
+    before: beforeSettlement ? { ...beforeSettlement } : null,
+    after: afterSettlement ? { ...afterSettlement } : null,
+    trace: trace.map(event => ({ ...event })),
+    enabled: active(), ui: uiState,
+    offer: suspended ? "suspended" : shown ? patched ? "ghost text" : "fallback widget" : offered ? "concealed" : "none",
+    explicit: explicit ? `${explicit.kind} #${explicit.id} ${explicit.acknowledged ? "rendered" : "awaiting render"}` : "",
+    lastExplicit: lastExplicit.startsWith("terminal: interactive-shell unavailable:") ? "terminal: interactive-shell unavailable (see tool result)" : lastExplicit,
+    instruction, tag: lastTag, vet: vetState, outcome,
+    ready: active() && shown !== undefined && !!mainFocused() && ui?.getEditorText() === "" && (!explicit || (!busy && explicit.acknowledged)),
+  });
+  const notifyDiagnostics = (lines: string[], ctx: ExtensionContext) =>
+    // Pi's notification reserves a column on both sides of its text content.
+    ctx.ui.notify(wrapDiagnostics(lines, Math.max(1, (terminal?.terminal?.columns ?? 80) - 2)), "info");
+
   pi.registerCommand("next-prompt", {
-    description: "next-prompt: status, on, or off (this session)",
+    description: "next-prompt: status, trace [page], on, or off (this session)",
     getArgumentCompletions: (prefix: string) =>
-      ["status", "on", "off"].filter((o) => o.startsWith(prefix)).map((o) => ({ value: o, label: o })),
+      ["status", "trace", "trace 1", "on", "off"].filter((o) => o.startsWith(prefix)).map((o) => ({ value: o, label: o })),
     handler: async (args, ctx) => {
       const arg = args.trim();
       if (arg === "on" || arg === "off") {
@@ -711,25 +781,30 @@ export default function nextPrompt(pi: ExtensionAPI) {
         ctx.ui.notify(`next-prompt ${arg} for this session`, "info");
         return;
       }
-      if (arg && arg !== "status") {
-        ctx.ui.notify("Usage: /next-prompt [status|on|off]", "warning");
+      if (arg === "trace" || arg.startsWith("trace ")) {
+        const match = /^trace(?: ([1-9]\d*))?$/.exec(arg);
+        if (!match) {
+          ctx.ui.notify("Usage: /next-prompt trace [positive integer page]", "warning");
+          return;
+        }
+        if (arg === "trace" || !traceSnapshot) traceSnapshot = diagnostics();
+        const page = Number(match[1] ?? 1);
+        const pages = Math.max(1, Math.ceil(traceSnapshot.trace.length / 4));
+        if (!Number.isSafeInteger(page) || page > pages) {
+          ctx.ui.notify(`Trace page out of range: 1–${pages}`, "warning");
+          return;
+        }
+        notifyDiagnostics(traceLines(traceSnapshot, page), ctx);
         return;
       }
-      ctx.ui.notify(
-        `next-prompt ${active() ? "on" : "off"}. Instruction: ${instruction}. Latest assistant: ${lastTag}. ` +
-        `Settlement: ${outcome ?? "not observed (agent_before_settle)"}; agent_settled ${settled ? "observed" : "not observed"}. Vet: ${vetState}. ` +
-        `UI: ${uiState}. Focus: ${focusState()}${ui && !mainFocused() ? " (ghost/acceptance blocked)" : ""}. Editor: ${ui ? ui.getEditorText() === "" ? "empty" : "nonempty (display blocked)" : "unavailable"}. ` +
-        `Offer: ${suspended ? "suspended" : shown ? patched ? "ghost text" : "fallback widget" : offered ? "concealed" : "none"}. ` +
-        `Explicit: ${explicit ? `${explicit.kind} ${explicit.id} ${explicit.acknowledged ? "rendered" : "awaiting render"}${busy ? " (accept after turn)" : ""}` : "none"}; last acknowledgement/blocker: ${lastExplicit}. ` +
-        `Last suggestion: ${lastVerdict || "none yet"}. ` +
-        `Lifecycle state: ${JSON.stringify(snapshot())}. ` +
-        `Last render before settlement: ${JSON.stringify(beforeSettlement ?? null)}. ` +
-        `Last render after settlement: ${JSON.stringify(afterSettlement ?? null)}. ` +
-        `Lifecycle trace: ${JSON.stringify(trace)}`,
-        "info",
-      );
+      if (arg && arg !== "status") {
+        ctx.ui.notify("Usage: /next-prompt [status|trace [page]|on|off]", "warning");
+        return;
+      }
+      notifyDiagnostics(statusLines(diagnostics()), ctx);
     },
   });
+  return diagnostics;
 }
 
 function keyLabel(key: string) {

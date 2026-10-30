@@ -89,8 +89,11 @@ Existing drafts are preserved, and no available target means Tab does nothing.
 
 ## Commands
 
-- `/next-prompt` or `/next-prompt status`: on/off, instruction injection, the latest assistant's valid/invalid/omitted tag, settlement events, Jev approval/veto, terminal UI availability, current focus/draft blockers, and ghost/fallback/concealed offer, plus explicit-offer state and its last render acknowledgement or blocker. Approval is not the same as display; a render acknowledgement is not user acceptance. A bounded, text-free 32-transition trace names offer, render, settlement, suspension, and reset causes, with separate pre/post-settlement render observations; it persists across ordinary turns and resets on session replacement. Diagnostics are memory-only and make no model calls. An omitted tag can be deliberate abstention, not necessarily an error.
+- `/next-prompt` or `/next-prompt status`: a human-readable notification of at most eight logical lines (which may wrap to the terminal width), without suggestion text. It covers enabled/UI and current offer state, main focus and draft, turn and acceptance readiness, the last explicit offer outcome, pre- and post-settlement component-output observations tied to offer IDs, automatic tag/vetting state, and a trace hint. An omitted tag can be deliberate abstention, not necessarily an error.
+- `/next-prompt trace [page]`: inspect a numbered, text-free lifecycle trace, four events per page. The newest page comes first; events within each page are chronological. A bare `trace` freezes a new in-memory snapshot; numbered pages reuse it, capturing one first if none exists. Invalid or out-of-range pages produce a usage or range message. The single snapshot and the live 32-event ring survive ordinary turns and reset on session replacement.
 - `/next-prompt on`, `/next-prompt off`: for this session. Off also drops the prompt section from later runs and clears any suggestion.
+
+Diagnostics make no model calls or files, and inspection does not render the editor/widget or create an acknowledgement. Inclusion in component output is not proof that you saw or accepted an offer. Typing a diagnostic command can itself hide an offer; preceding evidence remains in the trace.
 
 ## Configuration
 

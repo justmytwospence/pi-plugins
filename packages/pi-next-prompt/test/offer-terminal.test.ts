@@ -4,16 +4,32 @@ import nextPrompt from "../src/index.ts";
 import { harness } from "./harness.ts";
 
 afterEach(() => vi.useRealTimers());
+
+test("readable terminal diagnostics omit command, draft, answer and shell JSON", async () => {
+  const s = await setup({ ghost: true });
+  await s.h.emit("agent_start", {}, s.ctx);
+  await s.offer("printf 'PRIVATE_COMMAND'");
+  await s.h.emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "PRIVATE_ANSWER" }] } }, s.ctx);
+  await s.h.emit("agent_before_settle", { outcome: "completed" }, s.ctx);
+  await s.h.emit("agent_settled", {}, s.ctx);
+  s.render();
+  s.ctx.ui.editorText = "PRIVATE_DRAFT";
+  s.ctx.ui.press("x");
+  for (const args of ["status", "trace"]) {
+    await s.h.commands.get("next-prompt").handler(args, s.ctx);
+    expect(s.ctx.ui.notes.at(-1)!.message).not.toMatch(/PRIVATE|printf|\{|\}/);
+  }
+  s.ctx.ui.editorText = "";
+  s.shell({ available: false, layout: "unsupported", reason: "malformed document", shape: { rootChildren: ["Container"] } });
+  expect((await s.execute()).details.status).toBe("blocked");
+  await s.h.commands.get("next-prompt").handler("status", s.ctx);
+  const status = s.ctx.ui.notes.at(-1)!.message;
+  expect(status).toContain("interactive-shell unavailable");
+  expect(status).not.toMatch(/\{|\}|rootChildren/);
+});
 async function diagnostics(s: Awaited<ReturnType<typeof setup>>) {
   await s.h.commands.get("next-prompt").handler("status", s.ctx);
-  const message = s.ctx.ui.notes.at(-1)!.message;
-  const field = (start: string, end: string) => JSON.parse(message.split(start)[1]!.split(end)[0]!);
-  return {
-    state: field("Lifecycle state: ", ". Last render before settlement:"),
-    before: field("Last render before settlement: ", ". Last render after settlement:"),
-    after: field("Last render after settlement: ", ". Lifecycle trace:"),
-    trace: JSON.parse(message.split("Lifecycle trace: ")[1]!),
-  };
+  return s.diagnostics();
 }
 
 test.each([false, true])("diagnostics distinguish mid-turn output, final answer and post-settlement output (ghost=%s)", async ghost => {
@@ -99,7 +115,7 @@ test("render-wrapper replacement is distinguishable from a successful receipt", 
 async function setup(options: { shell?: boolean; ghost?: boolean; maxChars?: number; context?: Record<string, unknown> } = {}) {
   vi.useFakeTimers();
   const h = harness();
-  nextPrompt(h.pi);
+  const diagnostics = nextPrompt(h.pi);
   const cwd = mkdtempSync("/tmp/offer-terminal-");
   if (options.maxChars !== undefined) {
     mkdirSync(`${cwd}/.pi`);
@@ -114,7 +130,7 @@ async function setup(options: { shell?: boolean; ghost?: boolean; maxChars?: num
   const execute = (command = "printf 'one  two'", signal?: AbortSignal) => tool.execute("call", { command }, signal, undefined, ctx);
   const render = () => options.ghost ? ctx.ui.renderEditor() : ctx.ui.widgetLines("next-prompt");
   const offer = async (command?: string) => { const promise = execute(command); render(); return await promise; };
-  return { h, ctx, tool, execute, render, offer, shell: (value: any) => { info = value; } };
+  return { h, ctx, tool, execute, render, offer, diagnostics, shell: (value: any) => { info = value; } };
 }
 
 test("model-only schema and guidelines require verified display", async () => {

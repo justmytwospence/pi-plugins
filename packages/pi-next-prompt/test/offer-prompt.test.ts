@@ -2,20 +2,165 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
-import nextPrompt from "../src/index.ts";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import nextPrompt, { statusLines, traceLines } from "../src/index.ts";
 import { fakeJev, harness } from "./harness.ts";
 
 const PROMPT = "/marimo new examples/viewer-demo.py";
-// Parse only the text-free diagnostic suffix, never the offered text in legacy status fields.
+
+async function notification(s: Awaited<ReturnType<typeof setup>>, args = "status") {
+  await s.h.commands.get("next-prompt").handler(args, s.ctx);
+  return s.ctx.ui.notes.at(-1)!.message as string;
+}
+
+const eventNumbers = (message: string) => [...message.matchAll(/^(\d+)\. /gm)].map(match => Number(match[1]));
+
+test.each([46, 120])("status and trace wrap safely at %i columns without render side effects", async width => {
+  const s = await setup({ ghost: true });
+  s.ctx.ui.tui.terminal.columns = width;
+  await s.h.emit("agent_start", {}, s.ctx);
+  const pending = s.execute("PRIVATE_PROMPT 日本語");
+  const original = s.ctx.ui.editor.render;
+  const render = vi.spyOn(s.ctx.ui.editor, "render");
+  const widget = vi.spyOn(s.ctx.ui, "widgetLines");
+  const before = s.diagnostics();
+  const status = await notification(s, "");
+  const trace = await notification(s, "trace");
+  expect(statusLines(before)).toHaveLength(8);
+  for (const text of [status, trace]) {
+    expect(text).not.toMatch(/PRIVATE|日本語|\{|\}|true|false/);
+    // Pi's notification reserves a column on either side before it wraps.
+    for (const line of text.split("\n")) expect(visibleWidth(line)).toBeLessThanOrEqual(width - 2);
+  }
+  expect(render).not.toHaveBeenCalled();
+  expect(widget).not.toHaveBeenCalled();
+  expect(s.diagnostics()).toEqual(before);
+  render.mockRestore();
+  expect(s.ctx.ui.editor.render).toBe(original);
+  s.render();
+  expectDisplayed(await pending, "PRIVATE_PROMPT 日本語", true, true);
+  expect(s.ctx.ui.editorWrites).toEqual([]);
+});
+
+test("status labels pending, ready, suspended, accepted and blocked offers without text", async () => {
+  const s = await setup();
+  expect(await notification(s)).toContain("Offer: none");
+  await s.h.emit("agent_start", {}, s.ctx);
+  const pending = s.execute();
+  expect(await notification(s)).toContain("awaiting render");
+  s.render();
+  await pending;
+  expect(await notification(s)).toContain("acceptance: not ready");
+  await s.settle();
+  s.render();
+  expect(await notification(s)).toContain("acceptance: ready");
+  s.ctx.ui.focus({});
+  s.render();
+  expect(await notification(s)).toContain("Offer: suspended");
+  s.ctx.ui.focus(s.ctx.ui.editor);
+  s.render();
+  expect(s.ctx.ui.press(TAB)).toBe(true);
+  expect(await notification(s)).toContain("Last explicit: accepted");
+  expectBlocked(await s.execute("PRIVATE_NEW_PROMPT"), "draft");
+  const blocked = await notification(s);
+  expect(blocked).toContain("editor contains a draft");
+  expect(blocked).not.toMatch(/marimo|viewer-demo|PRIVATE/);
+});
+
+test.each([
+  { jevEnabled: false, expected: "vet disabled (shown)" },
+  { jevEnabled: true, expected: "vet unavailable (shown)" },
+])("status distinguishes unvetted fail-open offers from classifier approval: $expected", async ({ jevEnabled, expected }) => {
+  const s = await setup({ jevEnabled, context: { modelRegistry: undefined } });
+  await s.h.emit("agent_start", {}, s.ctx);
+  await s.h.emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "Done.\n<next>PRIVATE_SUGGESTION</next>" }] } }, s.ctx);
+  await s.settle();
+  expect((await notification(s)).replace(/\s+/g, " ")).toContain(expected);
+  expect(await notification(s)).not.toContain("PRIVATE_SUGGESTION");
+});
+
+test("pure formatters keep old observation identities and handle empty history", async () => {
+  const s = await setup({ ghost: true });
+  await s.h.emit("agent_start", {}, s.ctx);
+  await s.offer();
+  await s.settle();
+  s.render();
+  const info = s.diagnostics();
+  const priorId = info.state.offerId!;
+  info.state.offerId = priorId + 100;
+  info.explicit = `prompt #${info.state.offerId} awaiting render`;
+  const lines = statusLines(info);
+  expect(lines).toHaveLength(8);
+  expect(lines[1]).toContain(`#${priorId + 100}`);
+  expect(lines[5]).toContain(`before settlement offer #${priorId}/`);
+  expect(lines[5]).toContain(`after settlement offer #${priorId}/`);
+  expect(lines[5]).toContain("included in component output");
+  expect(lines.join("\n")).not.toMatch(/user saw|user accepted|marimo/);
+  expect(traceLines({ ...info, trace: [], before: null, after: null }, 1)).toEqual([
+    "next-prompt trace 1/1 (frozen snapshot)", "No events retained.",
+    "Render: before settlement: not observed", "Render: after settlement: not observed",
+  ]);
+});
+
+test("trace paging is newest-first, chronological, bounded and frozen through navigation input", async () => {
+  const s = await setup({ ghost: true });
+  for (let i = 0; i < 10; i++) {
+    await s.h.emit("agent_start", {}, s.ctx);
+    await s.offer(`PRIVATE_${i}`);
+    await s.h.emit("input", { text: "PRIVATE_DRAFT" }, s.ctx);
+  }
+  expect(s.diagnostics().trace).toHaveLength(32);
+  const newest = await notification(s, "trace");
+  const older = await notification(s, "trace 2");
+  expect(eventNumbers(newest)).toEqual([29, 30, 31, 32]);
+  expect(eventNumbers(older)).toEqual([25, 26, 27, 28]);
+  expect(newest).toContain("older: /next-prompt trace 2");
+  for (let i = 0; i < 40; i++) await s.h.emit("input", { text: "/next-prompt trace 2" }, s.ctx);
+  expect(await notification(s, "trace 1")).toBe(newest);
+  expect(await notification(s, "trace 2")).toBe(older);
+  expect(eventNumbers(await notification(s, "trace 8"))).toEqual([1, 2, 3, 4]);
+  expect(await notification(s, "trace 8")).not.toContain("older:");
+  for (const arg of ["trace 0", "trace -1", "trace 1.5", "trace NaN", "trace 1 extra"]) {
+    expect(await notification(s, arg)).toContain("Usage:");
+    expect(s.ctx.ui.notes.at(-1)!.type).toBe("warning");
+  }
+  for (const arg of ["trace 9", "trace 9007199254740992"]) expect(await notification(s, arg)).toContain("out of range: 1–8");
+  const refreshed = await notification(s, "trace");
+  expect(refreshed).not.toBe(newest);
+  expect(refreshed).not.toMatch(/PRIVATE|marimo|viewer-demo/);
+  await s.h.emit("session_start", {}, s.ctx);
+  const fresh = await notification(s, "trace 1");
+  expect(eventNumbers(fresh)).toEqual([1, 2]);
+  expect(fresh).toContain("session_start");
+  expect(fresh).not.toContain("acknowledge");
+  expect(await notification(s, "trace 2")).toContain("out of range: 1–1");
+});
+
+test("automatic tag diagnostics never echo the vetted suggestion or request", async () => {
+  const s = await setup();
+  await s.h.emit("before_agent_start", { prompt: "PRIVATE_REQUEST", systemPromptOptions: { sections: {} } }, s.ctx);
+  await s.h.emit("agent_start", {}, s.ctx);
+  await s.h.emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "PRIVATE_ANSWER\n<next>PRIVATE_SUGGESTION</next>" }] } }, s.ctx);
+  await s.settle();
+  expect(s.jev.calls).toHaveLength(1);
+  for (const arg of ["status", "trace"]) expect(await notification(s, arg)).not.toMatch(/PRIVATE|suggestion.*:/);
+  expect(s.jev.calls).toHaveLength(1);
+});
+
+test("a first numbered trace captures a snapshot and completions advertise trace", async () => {
+  const s = await setup();
+  const first = await notification(s, "trace 1");
+  await s.h.emit("input", {}, s.ctx);
+  expect(await notification(s, "trace 1")).toBe(first);
+  expect(s.h.commands.get("next-prompt").getArgumentCompletions("tr")).toEqual(expect.arrayContaining([
+    { value: "trace", label: "trace" },
+  ]));
+  expect(await notification(s, "unexpected")).toContain("trace [page]");
+});
+// The factory's read-only scalar view keeps lifecycle assertions independent of notification wording.
 async function lifecycle(s: Awaited<ReturnType<typeof setup>>) {
   await s.h.commands.get("next-prompt").handler("status", s.ctx);
-  const status = s.ctx.ui.notes.at(-1)!.message;
-  return {
-    state: JSON.parse(status.split("Lifecycle state: ")[1]!.split(". Last render before settlement:")[0]!),
-    before: JSON.parse(status.split("Last render before settlement: ")[1]!.split(". Last render after settlement:")[0]!),
-    after: JSON.parse(status.split("Last render after settlement: ")[1]!.split(". Lifecycle trace:")[0]!),
-    trace: JSON.parse(status.split("Lifecycle trace: ")[1]!),
-  };
+  return s.diagnostics();
 }
 
 test.each([false, true])("status does not render a pending prompt or create a receipt (ghost=%s)", async ghost => {
@@ -94,6 +239,7 @@ async function setup(options: {
   ghost?: boolean;
   maxChars?: number;
   enabled?: boolean;
+  jevEnabled?: boolean;
   context?: Record<string, unknown>;
   attach?: boolean;
 } = {}) {
@@ -106,6 +252,7 @@ async function setup(options: {
   writeFileSync(join(cwd, ".pi", "next-prompt.json"), JSON.stringify({
     ...(options.maxChars === undefined ? {} : { maxChars: options.maxChars }),
     ...(options.enabled === undefined ? {} : { enabled: options.enabled }),
+    ...(options.jevEnabled === undefined ? {} : { jev: { enabled: options.jevEnabled } }),
   }));
   const h = harness();
   // A veto if called: explicit offers must bypass classification, not merely fail open.
@@ -113,7 +260,7 @@ async function setup(options: {
   const sendUserMessage = vi.fn();
   const executeCommand = vi.fn();
   Object.assign(h.pi, { sendUserMessage, executeCommand });
-  nextPrompt(h.pi);
+  const diagnostics = nextPrompt(h.pi);
   const ctx = h.ctx({ cwd, modelRegistry: jev.registry, ...options.context });
   if (options.ghost) ctx.ui.editor.render = () => ["\x1b[7m \x1b[0m"];
   if (options.attach !== false) await h.emit("session_start", {}, ctx);
@@ -127,7 +274,7 @@ async function setup(options: {
     await h.emit("agent_before_settle", { outcome }, ctx);
     await h.emit("agent_settled", {}, ctx);
   };
-  return { h, ctx, jev, tool, execute, terminal, render, offer, settle, sendUserMessage, executeCommand };
+  return { h, ctx, jev, tool, execute, terminal, render, offer, settle, sendUserMessage, executeCommand, diagnostics };
 }
 
 function expectBlocked(result: any, reason?: string) {

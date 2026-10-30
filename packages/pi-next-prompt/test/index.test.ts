@@ -293,20 +293,20 @@ test("/next-prompt off stops the instruction and the line", async () => {
 
 async function status(s: Awaited<ReturnType<typeof setup>>) {
   await s.h.commands.get("next-prompt").handler("status", s.ctx);
-  return s.ui.notes.at(-1).message as string;
+  return (s.ui.notes.at(-1).message as string).replace(/\s+/g, " ");
 }
 
 test("status distinguishes model omission from a veto and clears a previous verdict", async () => {
   const s = await setup(() => ({ useful: { type: "bool", probability: 0.1 } }));
   await s.run("go", ["Done.\n<next>Run tests</next>"]);
-  expect(await status(s)).toContain("Vet: vetoed");
+  expect(await status(s)).toContain("vet vetoed");
   await s.run("go", ["Looking.\n<next>Stale</next>", "All done."]);
   const diagnostic = await status(s);
-  expect(diagnostic).toContain("Instruction: injected");
+  expect(diagnostic).toContain("instruction injected");
   expect(diagnostic).toContain("no tag emitted (model omission/abstention)");
-  expect(diagnostic).toContain("Settlement: completed; agent_settled observed");
-  expect(diagnostic).toContain("Vet: not run");
-  expect(diagnostic).toContain("Last suggestion: none yet");
+  expect(diagnostic).toContain("Turn: idle, completed");
+  expect(diagnostic).toContain("vet not run");
+  expect(diagnostic).toContain("Offer: none");
   expect(s.jev.calls).toHaveLength(1);
 });
 
@@ -315,8 +315,8 @@ test("status distinguishes invalid tags and incomplete runs without classifying"
   await s.run("go", ["Done.\n<next>   </next>"]);
   expect(await status(s)).toContain("invalid tag (empty or over maxChars)");
   await s.run("go", ["Partial.\n<next>Continue</next>"], "aborted");
-  expect(await status(s)).toContain("Settlement: aborted");
-  expect(await status(s)).toContain("Latest assistant: valid tag");
+  expect(await status(s)).toContain("Turn: idle, aborted");
+  expect(await status(s)).toContain("valid tag");
   expect(s.jev.calls).toHaveLength(0);
 });
 
@@ -325,8 +325,8 @@ test("a draft conceals an approved suggestion until the editor is empty", async 
   s.ui.editorText = "existing draft";
   await s.run("go", ["Done.\n<next>Run tests</next>"]);
   const diagnostic = await status(s);
-  expect(diagnostic).toContain("Vet: approved");
-  expect(diagnostic).toContain("Editor: nonempty (display blocked)");
+  expect(diagnostic).toContain("vet approved");
+  expect(diagnostic).toContain("editor: nonempty (draft)");
   expect(diagnostic).toContain("Offer: concealed");
   expect(s.ui.widgets.size).toBe(0);
   expect(s.ui.press(TAB)).toBe(false);
@@ -345,9 +345,9 @@ test("status exposes unobserved settlement boundaries rather than implying a vet
   await s.h.emit("agent_start", {}, s.ctx);
   await s.h.emit("message_end", { message: assistant("Done.\n<next>Run tests</next>") }, s.ctx);
   await s.h.emit("agent_end", {}, s.ctx);
-  expect(await status(s)).toContain("not observed (agent_before_settle); agent_settled not observed");
+  expect(await status(s)).toContain("Turn: busy, not settled");
   await s.h.emit("agent_before_settle", { outcome: "completed" }, s.ctx);
-  expect(await status(s)).toContain("Settlement: completed; agent_settled not observed");
+  expect(await status(s)).toContain("Turn: busy, completed (before settlement)");
   expect(s.jev.calls).toHaveLength(0);
 });
 

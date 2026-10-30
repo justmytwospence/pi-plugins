@@ -8,7 +8,7 @@ plugin: pi-next-prompt
 
 - **Use it for:** Offer one automatic next step or a verified requested prompt/slash-command handoff, without a separate generation request.
 - **Enable:** Select `packages/pi-next-prompt/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
-- **Controls:** `/next-prompt` status/on/off; Tab/Right accept into an empty focused main editor, never submit.
+- **Controls:** `/next-prompt` status/on/off and `trace [page]`; Tab/Right accept into an empty focused main editor, never submit.
 - **Settings:** `next-prompt.json` shared/user/project layers; enabled, Tab/Right, no length limit (`maxChars`, 0); Jev timeout 1500 ms, threshold 0.6.
 - **Requirements, cost & privacy:** Pi 1.0+ TUI; normal input/output tokens for suggestion instruction; optional paid Jev sees suggestion/request/answer excerpts.
 - **Integrations & limits:** Optional Vim/select-nav and interactive-shell inspection. Model-only `offer_prompt`/`offer_terminal` acknowledge rendered suggestions; prompt offers need no shell support, and ordinary tags retain optional Jev vetting. Missing classifier shows unvetted tags; failed/aborted runs clear offers. Suggestions are not authorization.
@@ -65,10 +65,13 @@ Interactive-shell is inline-only. If Pi's private transcript layout is not recog
 
 ## Commands and configuration
 
-- `/next-prompt` or `/next-prompt status` reports enabled state, instruction/tag/settlement and Jev diagnostics, UI/focus/draft blockers, ghost/widget/concealed offers, explicit-offer state and its last render acknowledgement or blocker. Approval is not display, and render acknowledgement is not user acceptance. A bounded, text-free 32-transition trace records causes and separate pre/post-settlement render observations. It persists across ordinary turns, resets on session replacement, and makes no model calls.
+- `/next-prompt` or `/next-prompt status` shows a human-readable notification of at most eight logical lines, which may wrap to the terminal width, without suggestion text. It covers enabled/UI and current offer state, main focus and draft, turn and acceptance readiness, the last explicit offer outcome, pre- and post-settlement component-output observations tied to offer IDs, automatic tag/vetting state, and a trace hint.
+- `/next-prompt trace [page]` shows a numbered, text-free lifecycle trace, four events per page. The newest page comes first; events within each page are chronological. A bare `trace` freezes a new in-memory snapshot; numbered pages reuse it, capturing one first if none exists. Invalid or out-of-range pages produce a usage or range message. The single snapshot and the live 32-event ring survive ordinary turns and reset on session replacement.
 - `/next-prompt on` enables suggestions for the session, subject to settings.
 - `/next-prompt off` clears the suggestion and stops adding the instruction for subsequent runs.
 - Any other argument shows a usage warning.
+
+Diagnostics make no model calls or files, and inspection does not render the editor/widget or create an acknowledgement. Inclusion in component output is not proof that you saw or accepted an offer. Typing a diagnostic command can itself hide an offer; preceding evidence remains in the trace.
 
 Files merge in order: `~/.config/agents/next-prompt.json`, `~/.pi/agent/next-prompt.json`, `<project>/.agents/next-prompt.json`, then `<project>/.pi/next-prompt.json`. Shared user settings honor `$XDG_CONFIG_HOME`. Objects merge, while arrays and scalar values replace earlier values. A value whose type does not match the default (for example a string where a number belongs, or a non-finite number) is ignored.
 

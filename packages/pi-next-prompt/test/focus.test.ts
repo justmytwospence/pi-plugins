@@ -27,8 +27,8 @@ test('a modal never accepts into an empty main draft', async () => {
   const { h, ctx, focus } = await offered();
   focus({ render: () => [] });
   await h.commands.get('next-prompt').handler('status', ctx);
-  expect(ctx.ui.notes.at(-1).message).toContain('Focus: not main editor (ghost/acceptance blocked)');
-  expect(ctx.ui.notes.at(-1).message).toContain('Vet: approved');
+  expect(ctx.ui.notes.at(-1).message).toContain('Focus: not main editor; editor: empty');
+  expect(ctx.ui.notes.at(-1).message).toContain('vet unavailable (shown)');
   expect(ctx.ui.press('\t')).toBe(false);
   expect(ctx.ui.editorText).toBe('');
 });
@@ -38,7 +38,7 @@ test('embedded editors and autocomplete retain acceptance keys', async () => {
     if (embedded) focus({ ...main, [SURFACE]: 'embedded' });
     else main.isShowingAutocomplete = () => true;
     await h.commands.get('next-prompt').handler('status', ctx);
-    expect(ctx.ui.notes.at(-1).message).toContain(`Focus: ${embedded ? 'embedded editor' : 'autocomplete'} (ghost/acceptance blocked)`);
+    expect(ctx.ui.notes.at(-1).message).toContain(`Focus: ${embedded ? 'embedded editor' : 'autocomplete'}; editor: empty`);
     expect(ctx.ui.press('\t')).toBe(false);
     expect(ctx.ui.editorText).toBe('');
   }
@@ -48,7 +48,7 @@ test('EX, Visual and pending Normal operations own acceptance keys', async () =>
     const { h, ctx, main } = await offered();
     main[Symbol.for('pi-plugins.editor-mode.v1')] = () => ({ state });
     await h.commands.get('next-prompt').handler('status', ctx);
-    expect(ctx.ui.notes.at(-1).message).toContain(`Focus: editor mode ${state} (ghost/acceptance blocked)`);
+    expect(ctx.ui.notes.at(-1).message).toContain(`Focus: editor mode; editor: empty`);
     expect(ctx.ui.press('\t')).toBe(false);
     expect(ctx.ui.editorText).toBe('');
   }
@@ -80,7 +80,7 @@ test('RPC hasUI is not terminal UI', async () => {
   expect(options.sections).toEqual({});
   expect(ctx.ui.inputHandlers).toHaveLength(0);
   await h.commands.get('next-prompt').handler('status', ctx);
-  expect(ctx.ui.notes.at(-1).message).toContain('Instruction: not injected (not terminal UI (rpc))');
+  expect(ctx.ui.notes.at(-1).message).toContain('instruction not injected (not terminal UI (rpc))');
   expect(ctx.ui.notes.at(-1).message).toContain('UI: not terminal UI (rpc)');
 });
 
@@ -96,7 +96,7 @@ test('status reports unavailable focus inspection distinctly from model omission
   await h.emit('before_agent_start', { prompt: 'x', systemPromptOptions: options }, ctx);
   await h.commands.get('next-prompt').handler('status', ctx);
   expect(options.sections).toEqual({});
-  expect(ctx.ui.notes.at(-1).message).toContain('Instruction: not injected (focus inspection unavailable)');
-  expect(ctx.ui.notes.at(-1).message).toContain('Latest assistant: none yet');
+  expect(ctx.ui.notes.at(-1).message).toContain('instruction not injected (focus inspection unavailable)');
+  expect(ctx.ui.notes.at(-1).message).toContain('none yet');
   expect(ctx.ui.inputHandlers).toHaveLength(0);
 });
