@@ -40,9 +40,37 @@ function transport(handlers: Parameters<typeof fakeCall>[0] = {}) {
     "pane.layout": () => ({ result: { layout: { panes: [{ pane_id: "self", rect: { width: 200, height: 40 } }] } } }),
     "tab.create": () => ({ result: { root_pane: { pane_id: "new-pane" } } }),
     "pane.split": () => ({ result: { pane: { pane_id: "new-pane" } } }),
+    "workspace.create": () => ({ result: { workspace: { workspace_id: "new-workspace" }, root_pane: { pane_id: "new-pane" } } }),
+    "workspace.close": () => ({ result: {} }),
     "agent.start": () => ({ result: {} }),
     ...handlers,
   });
+}
+function assertDestination(fake: ReturnType<typeof transport>, destination: string, title = "Tree fork navigation") {
+  let method: string;
+  let params: Record<string, unknown>;
+  let methods: string[];
+  switch (destination) {
+    case FORK_DESTINATIONS[0]:
+      method = "tab.create";
+      params = { workspace_id: "source-workspace", cwd: "/checkout", label: title, focus: false };
+      methods = ["pane.get", method, "agent.start"];
+      break;
+    case FORK_DESTINATIONS[1]:
+      method = "pane.split";
+      params = { target_pane_id: "self", direction: "right", cwd: "/checkout", focus: false };
+      methods = ["pane.get", "pane.layout", method, "agent.start"];
+      break;
+    case FORK_DESTINATIONS[2]:
+      method = "workspace.create";
+      params = { cwd: "/checkout", label: title, focus: false };
+      methods = ["pane.get", method, "agent.start"];
+      break;
+    default: throw new Error(`Unexpected test destination: ${destination}`);
+  }
+  expect(fake.log.map((call) => call.method)).toEqual(methods);
+  expect(fake.of(method)).toEqual([{ method, params }]);
+  expect(fake.of("agent.start")[0].params.pane_id).toBe("new-pane");
 }
 function paneOptions(fake: ReturnType<typeof transport>) {
   return { call: fake.call, selfPane: "self", isCurrent: () => true, where: "tab" as const, cwd: "/checkout", name: "available-fork", title: "Tree fork navigation", file: "/sessions/fork.jsonl" };
@@ -126,8 +154,20 @@ test("registers both independent fork commands and tolerates registration-less h
   expect(f.pi.registerCommand).toHaveBeenCalledTimes(2);
   expect([...f.commands.keys()]).toEqual(["tree-fork", "fork-here"]);
   expect(f.command[0]).toBe("tree-fork");
-  expect(f.command[1].description).toBe("Fork a session-tree point into a new Herdr tab or split");
+  expect(FORK_DESTINATIONS).toEqual(["New tab", "Split beside this pane", "New space"]);
+  expect(f.command[1].description).toBe("Fork a session-tree point into a new Herdr tab, split or space");
+  expect(f.commands.get("fork-here")!.description).toBe("Fork the current session into a new Herdr tab, split or space");
   expect(() => registerTreeFork({} as ExtensionAPI, f.deps)).not.toThrow();
+});
+
+test.each(["tree-fork", "fork-here"] as const)("%s rejects unknown destinations before writing a file", async (command) => {
+  const f = fixture(); const files = readdirSync(f.dir);
+  f.ui.select.mockResolvedValue("Unknown destination");
+  await (command === "tree-fork" ? f.run() : f.runHere());
+  expect(f.ui.notify).toHaveBeenCalledWith(expect.any(String), "error");
+  expect(f.fake.log).toEqual([]); expect(readdirSync(f.dir)).toEqual(files);
+  expect(f.uniqueName).not.toHaveBeenCalled();
+  f.assertReleased(); f.assertUntouched();
 });
 
 test.each(["rpc", "print", "no-ui", "args", "unsaved", "empty"])("guards %s before opening either screen or creating files", async (guard) => {
@@ -180,7 +220,7 @@ test.each(FORK_DESTINATIONS)("opens %s at the inclusive current tip, idle, with 
     return f.fake.call(method, params, timeout);
   });
   await f.run("  ");
-  expect(f.ui.select).toHaveBeenCalledWith(FORK_TITLE, ["New tab", "Split beside this pane"]);
+  expect(f.ui.select).toHaveBeenCalledWith(FORK_TITLE, ["New tab", "Split beside this pane", "New space"]);
   expect(f.uniqueName).toHaveBeenCalledWith("tree-fork-navigation");
   const call = f.fake.of("agent.start")[0]; const file = call.params.args.at(-1) as string;
   expect(call.params).toEqual({ name: "available-fork", kind: "pi", pane_id: "new-pane", timeout_ms: 90_000, args: ["--name", "Tree fork navigation", "--model", "anthropic/current-model", "--thinking", "high", "--session", file] });
@@ -188,11 +228,22 @@ test.each(FORK_DESTINATIONS)("opens %s at the inclusive current tip, idle, with 
   const fork = SessionManager.open(file);
   expect(fork.getBranch().slice(0, -1)).toEqual(f.manager.getBranch(f.tip));
   expect(fork.getBranch().at(-1)).toMatchObject({ customType: FORK_BOUNDARY, parentId: f.tip });
-  expect(f.fake.log.map((c) => c.method)).toEqual(destination === FORK_DESTINATIONS[0] ? ["pane.get", "tab.create", "agent.start"] : ["pane.get", "pane.layout", "pane.split", "agent.start"]);
+  assertDestination(f.fake, destination);
   expect(f.ui.notify).toHaveBeenCalledWith("Fork opened: Tree fork navigation (available-fork, new-pane). Original session unchanged.", "info");
   f.assertReleased(); f.assertUntouched();
   const customCalls = f.ui.custom.mock.calls.length;
   f.ui.custom.mockResolvedValue(undefined); await f.run(); expect(f.ui.custom).toHaveBeenCalledTimes(customCalls + 1);
+});
+
+test("space launcher uses returned root pane and omits absent model/thinking", async () => {
+  const title = "Named fork";
+  const fake = transport({ "workspace.create": () => ({ result: { workspace: { workspace_id: "independent-space" }, root_pane: { pane_id: "space-root" } } }) });
+  await expect(openForkPane({ ...paneOptions(fake), where: "space", title })).resolves.toBe("space-root");
+  expect(fake.log).toEqual([
+    { method: "pane.get", params: { pane_id: "self" } },
+    { method: "workspace.create", params: { cwd: "/checkout", label: title, focus: false } },
+    { method: "agent.start", params: { name: "available-fork", kind: "pi", pane_id: "space-root", timeout_ms: 90_000, args: ["--name", title, "--session", "/sessions/fork.jsonl"] } },
+  ]);
 });
 
 test("tab launcher resolves the source workspace, supplies cwd/focus, and omits absent model/thinking", async () => {
@@ -215,6 +266,97 @@ test.each([
   expect(fake.of("pane.layout")[0].params).toEqual({ pane_id: "self" });
   expect(fake.of("pane.split")[0].params).toEqual({ target_pane_id: "self", direction, cwd: "/checkout", focus: false });
   expect(fake.of("tab.create")).toEqual([]);
+});
+
+test.each(["tree-fork", "fork-here"] as const)("%s space startup preserves recovery and only cleans up definitive no-starts", async (command) => {
+  for (const code of ["agent_not_ready", "timeout", "socket", "closed", "parse", "invalid_request", "agent_start_failed", "thrown"]) {
+    const f = fixture({ "agent.start": () => { if (code === "thrown") throw new Error("connection disappeared"); return failure(code); } });
+    f.ui.select.mockResolvedValue(FORK_DESTINATIONS[2]);
+    await (command === "tree-fork" ? f.run() : f.runHere("Recovery title"));
+    expect(f.fake.of("workspace.create")).toHaveLength(1); expect(f.fake.of("agent.start")).toHaveLength(1);
+    const closes = ["invalid_request", "agent_start_failed"].includes(code);
+    expect(f.fake.of("workspace.close")).toEqual(closes ? [{ method: "workspace.close", params: { workspace_id: "new-workspace" } }] : []);
+    expect(f.fake.of("pane.close")).toEqual([]);
+    const file = f.fake.of("agent.start")[0].params.args.at(-1) as string;
+    expect(readFileSync(file, "utf8")).toContain(FORK_BOUNDARY);
+    const error = f.ui.notify.mock.calls.find(([, level]) => level === "error")?.[0];
+    expect(error).toContain(`Session file retained: ${file}`);
+    expect(error).toContain("Fork space: new-workspace"); expect(error).toContain("Fork pane: new-pane");
+    if (code === "agent_not_ready") expect(error).toContain("waiting on a startup dialog; answer it in that pane");
+    f.assertReleased(); f.assertUntouched();
+    f.ui.select.mockResolvedValue(undefined);
+    await (command === "tree-fork" ? f.run() : f.runHere());
+    expect(f.ui.select).toHaveBeenCalledTimes(2); f.assertReleased();
+  }
+});
+
+test.each(["invalid_request", "timeout", "thrown"])("space create %s without IDs is never retried or closed", async (code) => {
+  const fake = transport({ "workspace.create": () => { if (code === "thrown") throw new Error("create connection disappeared"); return failure(code); } });
+  await expect(openForkPane({ ...paneOptions(fake), where: "space" })).rejects.toThrow(/Session file retained: \/sessions\/fork.jsonl/);
+  expect(fake.log.map(({ method }) => method)).toEqual(["pane.get", "workspace.create"]);
+});
+
+test("space create missing root pane closes only the returned workspace and reports its ID", async () => {
+  const fake = transport({ "workspace.create": () => ({ result: { workspace: { workspace_id: "partial-space" } } }) });
+  await expect(openForkPane({ ...paneOptions(fake), where: "space" })).rejects.toThrow(/Session file retained: \/sessions\/fork.jsonl.*Fork space: partial-space/);
+  expect(fake.log.map(({ method }) => method)).toEqual(["pane.get", "workspace.create", "workspace.close"]);
+  expect(fake.of("workspace.close")[0].params).toEqual({ workspace_id: "partial-space" });
+});
+
+test.each(["reply", "throw"])("space cleanup failure (%s) preserves the original error, recovery file and both IDs", async (kind) => {
+  const fake = transport({
+    "agent.start": () => failure("agent_start_failed"),
+    "workspace.close": () => { if (kind === "throw") throw new Error("close transport failed"); return failure("close_failed"); },
+  });
+  const error = await openForkPane({ ...paneOptions(fake), where: "space" }).catch((error: Error) => error.message);
+  expect(error).toContain("agent_start_failed"); expect(error).toContain("Session file retained: /sessions/fork.jsonl");
+  expect(error).toContain("Fork space: new-workspace"); expect(error).toContain("Fork pane: new-pane");
+  expect(error).toContain("Cleanup failed"); expect(error).toContain(kind === "throw" ? "close transport failed" : "close_failed");
+  expect(fake.of("workspace.close")).toEqual([{ method: "workspace.close", params: { workspace_id: "new-workspace" } }]);
+  expect(fake.of("pane.close")).toEqual([]);
+});
+
+test.each(["tree-fork", "fork-here"] as const)("%s runtime invalidation around space creation/start closes only an unstarted space", async (command) => {
+  for (const stage of ["pane.get", "workspace.create", "agent.start"]) {
+    const f = fixture(); f.ui.select.mockResolvedValue(FORK_DESTINATIONS[2]);
+    f.deps.call = (async (method, params, timeout) => {
+      const reply = await f.fake.call(method, params, timeout);
+      if (method === stage) f.stale();
+      return reply;
+    }) as Call;
+    await (command === "tree-fork" ? f.run() : f.runHere("Recovery title"));
+    expect(f.fake.of("workspace.create")).toHaveLength(stage === "pane.get" ? 0 : 1);
+    expect(f.fake.of("agent.start")).toHaveLength(stage === "agent.start" ? 1 : 0);
+    expect(f.fake.of("workspace.close")).toEqual(stage === "workspace.create" ? [{ method: "workspace.close", params: { workspace_id: "new-workspace" } }] : []);
+    expect(f.fake.of("pane.close")).toEqual([]);
+    expect(f.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/switched or reloaded.*Session file retained/), "error");
+    expect(f.ui.notify.mock.calls.some(([message]) => String(message).startsWith("Fork opened"))).toBe(false);
+    expect(readdirSync(f.dir)).toHaveLength(2);
+    f.assertReleased(); f.assertUntouched();
+  }
+});
+
+test.each(["tree-fork", "fork-here"] as const)("%s source identity invalidation after space creation closes the unstarted workspace", async (command) => {
+  const f = fixture(); f.ui.select.mockResolvedValue(FORK_DESTINATIONS[2]);
+  f.deps.call = (async (method, params, timeout) => {
+    const reply = await f.fake.call(method, params, timeout);
+    if (method === "workspace.create") vi.spyOn(f.manager, "getSessionId").mockReturnValue("replacement");
+    return reply;
+  }) as Call;
+  await (command === "tree-fork" ? f.run() : f.runHere());
+  expect(f.fake.of("agent.start")).toEqual([]); expect(f.fake.of("pane.close")).toEqual([]);
+  expect(f.fake.of("workspace.close")).toEqual([{ method: "workspace.close", params: { workspace_id: "new-workspace" } }]);
+  expect(f.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/switched or reloaded.*Session file retained: .*Fork space: new-workspace.*Fork pane: new-pane/), "error");
+  vi.restoreAllMocks(); f.assertReleased(); f.assertUntouched();
+});
+
+test("space busy retry exhaustion closes only the new workspace, without closing its group", async () => {
+  vi.useFakeTimers(); const fake = transport({ "agent.start": () => failure("agent_pane_busy") });
+  const result = expect(openForkPane({ ...paneOptions(fake), where: "space" })).rejects.toThrow(/agent_pane_busy.*Session file retained.*Fork space: new-workspace.*Fork pane: new-pane/);
+  await vi.runAllTimersAsync(); await result;
+  expect(fake.of("agent.start")).toHaveLength(31); expect(fake.of("workspace.create")).toHaveLength(1);
+  expect(fake.of("workspace.close")).toEqual([{ method: "workspace.close", params: { workspace_id: "new-workspace" } }]);
+  expect(fake.of("pane.close")).toEqual([]); expect(vi.getTimerCount()).toBe(0);
 });
 
 test.each(["pane.get", "pane.layout", "tab.create", "pane.split"])("requires valid replies/IDs from %s without starting or closing the source", async (method) => {
@@ -438,6 +580,7 @@ test.each([46, 120])("actual loader at %i columns completes once and disposes wi
 test.each([46, 120])("actual loader at %i columns cancels once, cleans up and ignores late results", async (width) => {
   vi.useFakeTimers();
   const f = fixture({}, width); const files = readdirSync(f.dir);
+  f.ui.select.mockResolvedValue(FORK_DESTINATIONS[2]);
   const result = deferred<{ stopReason: string; content: { type: string; text: string }[] }>();
   f.registry.complete.mockReturnValue(result.promise);
   const dispose = vi.spyOn(BorderedLoader.prototype, "dispose");
@@ -503,8 +646,7 @@ test.each(FORK_DESTINATIONS)("natural title stays separate from unique collision
   const start = f.fake.of("agent.start")[0].params;
   expect(start.name).toBe("tree-fork-navigation-2");
   expect(start.args.slice(0, 2)).toEqual(["--name", "Tree fork navigation"]);
-  if (destination === FORK_DESTINATIONS[0]) expect(f.fake.of("tab.create")[0].params.label).toBe("Tree fork navigation");
-  else expect(f.fake.of("tab.create")).toEqual([]);
+  assertDestination(f.fake, destination);
   expect(f.ui.notify).toHaveBeenCalledWith("Fork opened: Tree fork navigation (tree-fork-navigation-2, new-pane). Original session unchanged.", "info");
   f.assertReleased(); f.assertUntouched();
 });
@@ -624,8 +766,7 @@ test.each(FORK_DESTINATIONS)("fork-here opens %s at exact hidden compaction/cust
   expect(fork.getBranch().slice(0, -1)).toEqual(branch);
   expect(fork.getEntry(compaction)).toMatchObject({ summary: "Hidden summary", firstKeptEntryId: f.question, details: { preserved: true } });
   expect(fork.getBranch().at(-1)).toMatchObject({ customType: FORK_BOUNDARY, parentId: leaf, data: { entryId: leaf, sourceSessionId: before.id } });
-  expect(f.fake.log.map(({ method }) => method)).toEqual(destination === FORK_DESTINATIONS[0] ? ["pane.get", "tab.create", "agent.start"] : ["pane.get", "pane.layout", "pane.split", "agent.start"]);
-  expect(f.fake.of(destination === FORK_DESTINATIONS[0] ? "tab.create" : "pane.split")[0].params).toMatchObject({ cwd: "/checkout", focus: false });
+  assertDestination(f.fake, destination);
   expect(f.snapshot()).toEqual(before); f.assertReleased();
   f.assertNoSourceActions();
 });
@@ -667,7 +808,7 @@ test.each(FORK_DESTINATIONS)("fork-here explicit multiword title preserves case/
   expect(f.uniqueName).toHaveBeenCalledWith("oauth-callback-retries");
   const start = f.fake.of("agent.start")[0].params;
   expect(start.name).toBe("oauth-callback-retries-2"); expect(start.args.slice(0, 2)).toEqual(["--name", "OAuth  Callback Retries"]);
-  if (destination === FORK_DESTINATIONS[0]) expect(f.fake.of("tab.create")[0].params.label).toBe("OAuth  Callback Retries");
+  assertDestination(f.fake, destination, "OAuth  Callback Retries");
   expect(f.ui.notify).toHaveBeenCalledWith("Fork opened: OAuth  Callback Retries (oauth-callback-retries-2, new-pane). Original session unchanged.", "info");
   f.assertReleased(); f.assertUntouched();
 });
@@ -725,6 +866,7 @@ test.each(["destination", "loader"])("fork-here cancellation at %s releases hold
   const result = deferred<{ stopReason: string; content: { type: string; text: string }[] }>();
   if (stage === "destination") f.ui.select.mockResolvedValue(undefined);
   else {
+    f.ui.select.mockResolvedValue(FORK_DESTINATIONS[2]);
     f.registry.complete.mockReturnValue(result.promise);
     f.screens.loader.mockImplementation((loader) => { loader.handleInput("\u001b"); expect(loader.signal.aborted).toBe(true); });
   }

@@ -9,7 +9,7 @@ import { createTreeFork } from "./fork-session.ts";
 import { PI_CHILD } from "./session.ts";
 
 export const FORK_TITLE = "Open fork in Herdr?";
-export const FORK_DESTINATIONS = ["New tab", "Split beside this pane"];
+export const FORK_DESTINATIONS = ["New tab", "Split beside this pane", "New space"];
 
 interface ForkDependencies {
   call: Call;
@@ -23,7 +23,7 @@ interface PaneOptions {
   call: Call;
   selfPane: string;
   isCurrent(): boolean;
-  where: "tab" | "split";
+  where: "tab" | "split" | "space";
   cwd: string;
   name: string;
   title: string;
@@ -36,6 +36,7 @@ interface PaneOptions {
 export async function openForkPane(opts: PaneOptions): Promise<string> {
   const { call, selfPane, name, title, cwd, file } = opts;
   let paneId: string | undefined;
+  let workspaceId: string | undefined;
   let startAttempted = false;
   const assert = () => {
     if (!opts.isCurrent()) throw new Error("Source session switched or reloaded; fork startup stopped");
@@ -54,6 +55,11 @@ export async function openForkPane(opts: PaneOptions): Promise<string> {
       const split = await call("pane.split", { target_pane_id: selfPane, direction: splitDirection(me?.rect), cwd, focus: false });
       paneId = split.result?.pane?.pane_id;
       if (!paneId) throw new Error(`herdr could not split the pane: ${errorText(split)}`);
+    } else if (opts.where === "space") {
+      const space = await call("workspace.create", { cwd, label: title, focus: false });
+      workspaceId = space.result?.workspace?.workspace_id;
+      paneId = space.result?.root_pane?.pane_id;
+      if (space.error || !workspaceId || !paneId) throw new Error(`herdr could not create a space: ${errorText(space)}`);
     } else {
       const tab = await call("tab.create", { workspace_id: workspace, cwd, label: title, focus: false });
       paneId = tab.result?.root_pane?.pane_id;
@@ -86,8 +92,18 @@ export async function openForkPane(opts: PaneOptions): Promise<string> {
       return paneId;
     }
   } catch (error) {
-    if (paneId && !startAttempted) await call("pane.close", { pane_id: paneId });
-    throw new Error(`${error instanceof Error ? error.message : String(error)}. Session file retained: ${file}${paneId ? `. Fork pane: ${paneId}` : ""}`);
+    let cleanupError = "";
+    if (!startAttempted && (workspaceId || paneId)) {
+      try {
+        const closed = workspaceId
+          ? await call("workspace.close", { workspace_id: workspaceId })
+          : opts.where !== "space" ? await call("pane.close", { pane_id: paneId }) : undefined;
+        if (closed?.error) throw new Error(errorText(closed));
+      } catch (cleanup) {
+        cleanupError = `. Cleanup failed: ${cleanup instanceof Error ? cleanup.message : String(cleanup)}`;
+      }
+    }
+    throw new Error(`${error instanceof Error ? error.message : String(error)}. Session file retained: ${file}${workspaceId ? `. Fork space: ${workspaceId}` : ""}${paneId ? `. Fork pane: ${paneId}` : ""}${cleanupError}`);
   }
 }
 
@@ -97,7 +113,7 @@ export function registerTreeFork(pi: ExtensionAPI, deps: ForkDependencies): void
   for (const command of ["tree-fork", "fork-here"] as const) {
     const direct = command === "fork-here";
     pi.registerCommand(command, {
-      description: direct ? "Fork the current session into a new Herdr tab or split" : "Fork a session-tree point into a new Herdr tab or split",
+      description: direct ? "Fork the current session into a new Herdr tab, split or space" : "Fork a session-tree point into a new Herdr tab, split or space",
       handler: async (args, ctx) => {
         if (ctx.mode !== "tui" || !ctx.hasUI) return ctx.ui.notify(`/${command} requires interactive Pi in Herdr.`, "warning");
         if (!direct && args.trim()) return ctx.ui.notify("Usage: /tree-fork", "warning");
@@ -172,11 +188,15 @@ export function registerTreeFork(pi: ExtensionAPI, deps: ForkDependencies): void
             pi.events.emit("herdr:blocked", { active: false, id: hold });
           }
           if (!destination || entryId === undefined || title === undefined) return;
+          const where = destination === FORK_DESTINATIONS[0] ? "tab"
+            : destination === FORK_DESTINATIONS[1] ? "split"
+            : destination === FORK_DESTINATIONS[2] ? "space" : undefined;
+          if (!where) throw new Error("Unknown fork destination.");
           const name = await deps.uniqueName(slugName(title));
           assert();
           if (!requireIdle()) return;
           const forkFile = createTreeFork(file, sessionDir, cwd, entryId);
-          const paneId = await openForkPane({ call: deps.call, selfPane: deps.selfPane, isCurrent: current, where: destination === FORK_DESTINATIONS[0] ? "tab" : "split", cwd, name, title, file: forkFile, model, thinking });
+          const paneId = await openForkPane({ call: deps.call, selfPane: deps.selfPane, isCurrent: current, where, cwd, name, title, file: forkFile, model, thinking });
           assert();
           ctx.ui.notify(`Fork opened: ${title} (${name}, ${paneId}). Original session unchanged.`, "info");
         } catch (error) {

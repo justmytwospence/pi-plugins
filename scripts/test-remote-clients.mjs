@@ -359,7 +359,7 @@ async function treeForkLines(width, step, filter = 'default', command = 'tree-fo
         assert.ok(blocked, `/${command} destination must hold herdr:blocked`);
         assert.equal(title, 'Open fork in Herdr?');
         assert.equal(title, FORK_TITLE);
-        assert.deepEqual(options, ['New tab', 'Split beside this pane']);
+        assert.deepEqual(options, ['New tab', 'Split beside this pane', 'New space']);
         assert.deepEqual(options, FORK_DESTINATIONS);
         lines = new ExtensionSelectorComponent(title, options, () => {}, () => {}).render(width);
         return undefined;
