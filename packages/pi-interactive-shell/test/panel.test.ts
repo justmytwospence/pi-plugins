@@ -1,12 +1,12 @@
 import { beforeEach, expect, test, vi } from "vitest";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, visibleWidth } from "@earendil-works/pi-tui";
 import { TerminalPanel } from "../src/panel.ts";
 import { stopPty } from "../src/pty.ts";
 
 vi.mock("../src/pty.ts", () => ({ spawnPty: vi.fn(), stopPty: vi.fn(async () => {}) }));
 beforeEach(() => vi.clearAllMocks());
 
-async function setup(factory?: any, command = "interactive-example", autoClose = false) {
+async function setup(factory?: any, command = "interactive-example", autoClose = false, inline = false) {
   let data!: (data: string) => void;
   let exit!: (event: any) => void;
   const dispose = vi.fn();
@@ -18,7 +18,7 @@ async function setup(factory?: any, command = "interactive-example", autoClose =
   const theme = { fg: (_color: string, text: string) => text };
   const done = vi.fn();
   const spawn = factory ?? vi.fn(async () => pty);
-  const panel = new TerminalPanel(tui as any, theme as any, command, "/tmp", done, spawn, autoClose);
+  const panel = new TerminalPanel(tui as any, theme as any, command, "/tmp", done, spawn, autoClose, inline);
   await panel.start();
   return { panel, pty, tui, done, spawn, dispose, data: (text: string) => data(text), exit: (code = 0, signal = 0) => exit({ exitCode: code, signal }) };
 }
@@ -203,4 +203,116 @@ test("resize and prefix scrollback controls keep terminal output inside panel bo
   expect(lines.every(line => visibleWidth(line) <= 22)).toBe(true);
   expect(h.pty.resize).toHaveBeenLastCalledWith(18, 2);
   await h.panel.shutdown();
+});
+
+
+test("inline uses half the terminal including four frame rows, ignoring footer height", async () => {
+  const h = await setup(undefined, undefined, false, true);
+  (h.tui as any).children = [{ render: () => Array(8).fill("footer") }];
+  expect(h.panel.render(100)).toHaveLength(15);
+  expect(h.pty.resize).toHaveBeenLastCalledWith(96, 11);
+  h.panel.handleInput("typed");
+  expect(h.pty.write).toHaveBeenCalledWith("typed");
+  h.panel.handleInput("\x1d"); h.panel.handleInput("f");
+  expect(h.panel.render(100)).toHaveLength(30);
+  expect(h.pty.resize).toHaveBeenLastCalledWith(96, 26);
+  h.panel.handleInput("\x1d"); h.panel.handleInput("f");
+  expect(h.panel.render(100)).toHaveLength(15);
+  for (const rows of [1, 2, 5, 8, 14]) {
+    h.tui.terminal.rows = rows;
+    for (const width of [0, 1, 2, 4, 12]) {
+      const lines = h.panel.render(width);
+      expect(lines.length).toBeLessThanOrEqual(Math.max(1, Math.floor(rows / 2)));
+      expect(lines.every(line => visibleWidth(line) <= width)).toBe(true);
+      expect(h.pty.resize).toHaveBeenLastCalledWith(Math.max(1, width - 4), Math.max(1, Math.floor(rows / 2) - 4));
+    }
+  }
+  await h.panel.shutdown();
+});
+
+test.each([false, true])("inline exit auto-finishes with frozen head-tail before disposal (autoClose %s)", async autoClose => {
+  const h = await setup(undefined, undefined, autoClose, true);
+  h.panel.render(98);
+  h.data(Array.from({ length: 40 }, (_, i) => `row${i}`).join("\r\n"));
+  const screen = (h.panel as any).screen;
+  await screen.flush();
+  h.panel.handleInput("\x1d"); h.panel.handleInput("g");
+  expect(plain(h.panel.render(98))).toContain("row0");
+  const headTail = vi.spyOn(screen, "headTail");
+  const dispose = vi.spyOn(screen, "dispose");
+  h.exit(7);
+  await vi.waitFor(() => expect(h.done).toHaveBeenCalledOnce());
+  expect(headTail.mock.invocationCallOrder[0]).toBeLessThan(dispose.mock.invocationCallOrder[0]);
+  const [result, snapshot] = h.done.mock.calls[0];
+  expect(result.exitCode).toBe(7);
+  expect(JSON.stringify(result)).not.toContain("row");
+  expect(snapshot.handleInput).toBeUndefined();
+  expect(snapshot.focused).toBeUndefined();
+  const lines = snapshot.render(98);
+  const text = plain(lines);
+  expect(text).toContain("row0");
+  expect(text).toContain("row39");
+  expect(text).toContain("… 30 rows omitted …");
+  expect(text).toContain("Exited · output retained for this session");
+  expect(lines.join("")).not.toContain(CURSOR_MARKER);
+  expect(lines).toHaveLength(15);
+  for (const width of [0, 1, 4, 20, 200]) expect(snapshot.render(width).every((line: string) => visibleWidth(line) <= width)).toBe(true);
+  snapshot.invalidate();
+  h.panel.dispose();
+  await h.panel.shutdown();
+  expect(snapshot.render(98)).toEqual(lines);
+  expect(h.done).toHaveBeenCalledOnce();
+});
+
+test("inline spawn failure retains its readable final frame without dismissal", async () => {
+  const h = await setup(async () => { throw new Error("native startup failed"); }, undefined, false, true);
+  expect(h.done).toHaveBeenCalledOnce();
+  const [result, snapshot] = h.done.mock.calls[0];
+  expect(result.exitCode).toBe(1);
+  expect(plain(snapshot.render(98))).toContain("native startup failed");
+  expect(plain(snapshot.render(98))).toContain("Exited · output retained for this session");
+  await h.panel.shutdown();
+  expect(h.done).toHaveBeenCalledOnce();
+});
+
+test("inline confirmed stop, exit and shutdown racing finish exactly once", async () => {
+  const h = await setup(undefined, undefined, false, true);
+  h.data("last output");
+  h.panel.handleInput("\x1d"); h.panel.handleInput("q");
+  h.panel.handleInput("\r");
+  h.exit(130);
+  await h.panel.shutdown();
+  expect(h.done).toHaveBeenCalledOnce();
+  expect(stopPty).toHaveBeenCalledOnce();
+  const [result, snapshot] = h.done.mock.calls[0];
+  expect(result.cancelled).toBe(true);
+  expect(plain(snapshot.render(98))).toContain("last output");
+});
+
+test.each([false, true])("shutdown before deferred start prevents spawn (inline %s)", async inline => {
+  const done = vi.fn();
+  const spawn = vi.fn();
+  const panel = new TerminalPanel({ terminal: { columns: 80, rows: 24 }, requestRender: vi.fn() } as any,
+    { fg: (_color: string, text: string) => text } as any, "true", "/tmp", done, spawn, false, inline);
+  queueMicrotask(() => { void panel.start(); });
+  await panel.shutdown();
+  await panel.start();
+  expect(spawn).not.toHaveBeenCalled();
+  expect(done).toHaveBeenCalledOnce();
+  expect(done.mock.calls[0]).toHaveLength(inline ? 2 : 1);
+});
+
+test("inline shutdown during pending startup captures output and finishes once", async () => {
+  let spawned!: (pty: any) => void;
+  const pending = new Promise<any>(resolve => { spawned = resolve; });
+  const done = vi.fn();
+  const panel = new TerminalPanel({ terminal: { columns: 80, rows: 24 }, requestRender: vi.fn() } as any,
+    { fg: (_color: string, text: string) => text } as any, "true", "/tmp", done, () => pending, false, true);
+  void panel.start();
+  const shutdown = panel.shutdown();
+  spawned({ onData: () => ({ dispose() {} }), onExit: () => ({ dispose() {} }), resize: vi.fn() });
+  await shutdown;
+  expect(stopPty).toHaveBeenCalledOnce();
+  expect(done).toHaveBeenCalledOnce();
+  expect(done.mock.calls[0][1].render(80).join("")).not.toContain(CURSOR_MARKER);
 });

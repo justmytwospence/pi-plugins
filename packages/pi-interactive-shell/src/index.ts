@@ -1,12 +1,14 @@
 // Explicit foreground handoff; suggestion UI remains owned by optional pi-next-prompt.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { failure, handoff, interactiveCommand, type HandoffResult } from "./handoff.ts";
+import { createFocusProxy, findChatContainer, TranscriptPanels } from "./transcript.ts";
 
 export default function interactiveShell(pi: ExtensionAPI) {
   const terminalAvailable = () => process.stdin.isTTY === true && process.stdout.isTTY === true;
   let available = false;
   let sessionActive = false;
   let generation = 0;
+  const transcript = new TranscriptPanels();
   let acceptedDraft: string | undefined;
   const clearAccepted = () => { acceptedDraft = undefined; generation++; };
   pi.events.on("interactive-shell:suggestion-accepted", (data) => {
@@ -37,6 +39,7 @@ export default function interactiveShell(pi: ExtensionAPI) {
     available = false;
     await active?.shutdown();
     await pending;
+    transcript.clear();
   });
   // Probe during before_agent_start: the capability exists even though that run is busy.
   pi.events.on("interactive-shell:probe", (data) => {
@@ -56,10 +59,31 @@ export default function interactiveShell(pi: ExtensionAPI) {
     }
     if (pending || !ctx.isIdle()) return { result: failure("wait for the current operation to finish before handing over the terminal") };
     // Pi records this result and honors event.excludeFromContext for !!i itself.
-    pending = ctx.ui.custom<HandoffResult>((tui, theme, _kb, done) => {
-      active = handoff(tui, theme, command, event.cwd, done, autoClose);
-      return active;
-    }, { overlay: true, overlayOptions: () => active?.overlayOptions() ?? {} });
+    const requestGeneration = generation;
+    pending = (async (): Promise<HandoffResult> => {
+      const inline = await ctx.ui.custom<HandoffResult | undefined>((tui, theme, _kb, done) => {
+        const chat = findChatContainer(tui);
+        if (!chat) {
+          done(undefined);
+          return { render: () => [], invalidate() {} };
+        }
+        const panel = handoff(tui, theme, command, event.cwd, (result, snapshot) => {
+          if (snapshot) transcript.replace(chat, panel, snapshot);
+          tui.requestRender();
+          done(result);
+        }, true, true);
+        active = panel;
+        transcript.insert(chat, panel);
+        return createFocusProxy(panel);
+      }, { overlay: false });
+      if (inline !== undefined) return inline;
+      // A reset/shutdown between probing and fallback must not launch another PTY.
+      if (!sessionActive || generation !== requestGeneration) return failure("handoff cancelled");
+      return ctx.ui.custom<HandoffResult>((tui, theme, _kb, done) => {
+        active = handoff(tui, theme, command, event.cwd, done, autoClose);
+        return active;
+      }, { overlay: true, overlayOptions: () => active?.overlayOptions() ?? {} });
+    })();
     try {
       const result = await pending;
       if (autoClose && sessionActive) setImmediate(() => {

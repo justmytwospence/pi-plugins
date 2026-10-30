@@ -1,6 +1,6 @@
 import { constants } from "node:os";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { type TUI, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { type Component, type TUI, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { encodeInput } from "./input.ts";
 import { footerRows } from "./footer.ts";
 import { TerminalScreen } from "./screen.ts";
@@ -38,8 +38,8 @@ export class TerminalPanel {
 
   constructor(private readonly tui: TUI, private readonly theme: Theme,
     readonly command: string, private readonly cwd: string,
-    private readonly done: (result: HandoffResult) => void, private readonly spawn: PtyFactory = spawnPty,
-    private readonly autoClose = false) {
+    private readonly done: (result: HandoffResult, snapshot?: Component) => void, private readonly spawn: PtyFactory = spawnPty,
+    private readonly autoClose = false, private readonly inline = false) {
     this.width = Math.max(5, (tui.terminal?.columns ?? 80) - 2);
     const { cols, rows } = this.dimensions(this.width);
     this.screen = new TerminalScreen(cols, rows, () => { if (!this.closed) tui.requestRender(); }, data => {
@@ -60,12 +60,22 @@ export class TerminalPanel {
   }
 
   private dimensions(width: number) {
+    if (this.inline) {
+      const height = this.inlineHeight();
+      return { cols: Math.max(1, width - 4), rows: Math.max(1, height - 4) };
+    }
     const height = this.bounds().height;
     const panelHeight = this.expanded ? height : Math.min(height, Math.max(5, Math.floor(height * 0.55)));
     return { cols: Math.max(1, width - 4), rows: Math.max(1, panelHeight - 4) };
   }
 
+  private inlineHeight() {
+    const rows = Math.max(1, this.tui.terminal?.rows ?? 24);
+    return this.expanded ? rows : Math.max(1, Math.floor(rows / 2));
+  }
+
   start(): Promise<void> {
+    if (this.closed || this.closing) return Promise.resolve();
     return this.startPromise ??= this.startImpl();
   }
 
@@ -94,7 +104,7 @@ export class TerminalPanel {
       this.ended = true;
       this.result = failure(error instanceof Error ? error.message : String(error));
       this.screen.write(this.result.output);
-      if (this.autoClose) {
+      if (this.autoClose || this.inline) {
         await this.screen.flush();
         await this.stop();
         this.finish(this.result);
@@ -115,7 +125,7 @@ export class TerminalPanel {
     await this.screen.flush();
     // Even a successful shell can leave descendants; this is not a detached job.
     await this.stop();
-    if (this.autoClose) this.finish(this.result);
+    if (this.autoClose || this.inline) this.finish(this.result);
     else if (!this.closed) this.tui.requestRender();
   }
 
@@ -136,11 +146,13 @@ export class TerminalPanel {
 
   private finish(result: HandoffResult) {
     if (this.closed) return;
+    const snapshot = this.inline ? this.snapshot(result) : undefined;
     this.closed = true;
     this.queued = "";
     for (const listener of this.listeners.splice(0)) listener.dispose();
     this.screen.dispose();
-    this.done(result);
+    if (this.inline) this.done(result, snapshot);
+    else this.done(result);
   }
 
   handleInput(data: string) {
@@ -200,17 +212,37 @@ export class TerminalPanel {
       this.resizePty(cols, rows);
     }
     this.offset = Math.min(this.offset, this.screen.maxScrollback);
+    const content = this.screen.render(this.offset, this.focused && !this.confirming && !this.prefix && !this.ended);
+    const status = this.closing ? "stopping" : this.starting ? "starting" : this.ended ? `exited ${this.result?.exitCode ?? 1}` : "running";
+    const hint = this.confirming ? " Stop command? Enter stop · Esc return" : this.prefix ? " f size · q stop/close · u/d scroll · g/G top/end · Ctrl+] send" : this.ended ? " Enter/Esc close · Ctrl+] panel controls" : " Keyboard → command · Ctrl+] panel controls";
+    return this.frame(content, status, hint).map(line => truncateToWidth(line, Math.max(0, width), "", true));
+  }
+
+  private snapshot(result: HandoffResult): Component {
+    const { head, tail, omitted } = this.screen.headTail(this.screen.terminal.rows);
+    const content = [...head, ...(omitted ? [`… ${omitted} rows omitted …`] : []), ...tail];
+    const lines = this.frame(content, `exited ${result.exitCode}`, " Exited · output retained for this session");
+    return {
+      render: width => lines.map(line => truncateToWidth(line, Math.max(0, width), "", true)),
+      invalidate() {},
+    };
+  }
+
+  private frame(content: string[], status: string, hint: string): string[] {
     const innerWidth = this.width - 2;
     const pad = (text: string) => { const s = truncateToWidth(text, innerWidth); return s + " ".repeat(Math.max(0, innerWidth - visibleWidth(s))); };
     const border = (text: string) => this.theme.fg("accent", text);
-    const status = this.closing ? "stopping" : this.starting ? "starting" : this.ended ? `exited ${this.result?.exitCode ?? 1}` : "running";
     const title = ` Interactive terminal · ${status} `;
     const top = border("┌" + truncateToWidth(title, innerWidth) + "─".repeat(Math.max(0, innerWidth - visibleWidth(title))) + "┐");
     const displayCommand = this.command.replace(/[\x00-\x1f\x7f-\x9f]/g, char => `\\x${char.charCodeAt(0).toString(16).padStart(2, "0")}`);
     const command = border("│") + pad(` $ ${displayCommand}`) + border("│");
-    const lines = this.screen.render(this.offset, this.focused && !this.confirming && !this.prefix && !this.ended).map(line => border("│") + " " + line + " " + border("│"));
-    const hint = this.confirming ? " Stop command? Enter stop · Esc return" : this.prefix ? " f size · q stop/close · u/d scroll · g/G top/end · Ctrl+] send" : this.ended ? " Enter/Esc close · Ctrl+] panel controls" : " Keyboard → command · Ctrl+] panel controls";
-    return [top, command, ...lines, border("│") + pad(hint) + border("│"), border("└" + "─".repeat(innerWidth) + "┘")].slice(0, this.bounds().height);
+    const lines = content.map(line => border("│") + " " + padContent(line) + " " + border("│"));
+    function padContent(line: string) {
+      const width = Math.max(1, innerWidth - 2);
+      const text = truncateToWidth(line, width, "", true);
+      return text + " ".repeat(Math.max(0, width - visibleWidth(text)));
+    }
+    return [top, command, ...lines, border("│") + pad(hint) + border("│"), border("└" + "─".repeat(innerWidth) + "┘")].slice(0, this.inline ? this.inlineHeight() : this.bounds().height);
   }
 
   invalidate() { /* Rendering derives current theme and emulator state; no cached lines. */ }

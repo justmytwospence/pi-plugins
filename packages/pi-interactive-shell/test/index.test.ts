@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { AgentSession, createEventBus, ExtensionRunner, InteractiveMode, SessionManager } from "@earendil-works/pi-coding-agent";
 import { loadExtensions } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js";
 import { initTheme } from "../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js";
+import { Container } from "@earendil-works/pi-tui";
 import interactiveShell from "../src/index.ts";
 import * as handoffModule from "../src/handoff.ts";
 
@@ -48,7 +49,8 @@ test.each([false, true])("explicit handoffs use an overlay and event cwd; Pi own
   const h = harness();
   expect(await h.bash("i sudo true", exclude)).toEqual({ result });
   expect(spy).toHaveBeenCalledWith({}, {}, "sudo true", "/session/cwd", expect.any(Function), false);
-  expect(h.ctx.ui.custom.mock.calls[0][1].overlay).toBe(true);
+  expect(h.ctx.ui.custom.mock.calls[0][1].overlay).toBe(false);
+  expect(h.ctx.ui.custom.mock.calls[1][1].overlay).toBe(true);
   expect(h.pi.events.emit).toHaveBeenCalledWith("prompt:clear", {});
 });
 
@@ -75,6 +77,7 @@ test("agent starts wait for panel dismissal; reload stops the panel", async () =
   });
   const h = harness();
   const running = h.bash("i true");
+  await Promise.resolve();
   expect((await h.bash("i another-command")).result.exitCode).toBe(1);
   let started = false;
   const start = h.handlers.get("before_agent_start")().then(() => { started = true; });
@@ -224,6 +227,7 @@ test("rejected concurrent handoff consumes its marker and invalidates pending co
   const h = harness();
   h.accept();
   const running = h.bash("i true");
+  await Promise.resolve();
   h.accept("!i second");
   expect((await h.bash("i second")).result.exitCode).toBe(1);
   expect(spy).toHaveBeenCalledOnce();
@@ -232,6 +236,7 @@ test("rejected concurrent handoff consumes its marker and invalidates pending co
   await nextImmediate();
   expect(h.pi.sendMessage).not.toHaveBeenCalled();
   const manual = h.bash("i second");
+  await Promise.resolve();
   expect(spy.mock.calls[1][5]).toBe(false);
   finish(completed);
   await manual;
@@ -259,6 +264,7 @@ test("agent_start during the handoff suppresses continuation even if idle at dis
   const h = harness();
   h.accept();
   const running = h.bash("i true");
+  await Promise.resolve();
   await h.handlers.get("agent_start")({}, h.ctx);
   finish(completed);
   await running;
@@ -281,10 +287,14 @@ test("real Pi loader and interactive bash path record the result before continua
   const sendMessage = vi.fn(() => {
     const messages = manager.getEntries().filter(entry => entry.type === "message");
     expect(messages).toHaveLength(1);
-    expect((messages[0] as any).message).toMatchObject({ role: "bashExecution", command: "i exit 7", exitCode: 7 });
+    expect((messages[0] as any).message).toMatchObject({ role: "bashExecution", command: "i printf PRIVATE_DISPLAY; exit 7", exitCode: 7 });
   });
   runner.bindCore({ sendMessage } as any, { isIdle: () => true } as any);
-  const tui = { terminal: { columns: 80, rows: 24 }, requestRender() {} };
+  const chat = new Container();
+  const document = new Container();
+  document.addChild(new Container()); document.addChild(new Container()); document.addChild(chat);
+  const root = new Container(); root.addChild(document);
+  const tui = Object.assign(root, { terminal: { columns: 80, rows: 24 }, requestRender() {} });
   let panel: any;
   runner.setUIContext({ custom: (factory: any) => new Promise(resolve => {
     panel = factory(tui, { fg: (_color: string, text: string) => text }, {}, resolve);
@@ -297,14 +307,20 @@ test("real Pi loader and interactive bash path record the result before continua
   };
   const mode = Object.assign(Object.create(InteractiveMode.prototype), {
     runtimeHost: { session }, ui: tui, outputPad: 0,
-    chatContainer: { addChild() {} },
+    chatContainer: chat,
   });
   try {
     await runner.emit({ type: "session_start", reason: "startup" });
-    events.emit("interactive-shell:suggestion-accepted", { text: "!i exit 7" });
-    await mode.handleBashCommand("i exit 7");
+    events.emit("interactive-shell:suggestion-accepted", { text: "!i printf PRIVATE_DISPLAY; exit 7" });
+    await mode.handleBashCommand("i printf PRIVATE_DISPLAY; exit 7");
     expect(sendMessage).not.toHaveBeenCalled();
     expect(manager.getEntries().filter(entry => entry.type === "message")).toHaveLength(1);
+    expect(chat.children).toHaveLength(2); // Frozen terminal precedes Pi's normal status recorder.
+    expect(chat.children[0].render(80).join("\n")).toContain("output retained");
+    expect(chat.children[0].render(80).join("\n")).toContain("PRIVATE_DISPLAY");
+    const recorded = manager.getEntries().filter(entry => entry.type === "message").map(entry => (entry as any).message);
+    expect(recorded[0].output).not.toContain("PRIVATE_DISPLAY");
+    expect(JSON.stringify(manager.getEntries())).not.toContain("output retained");
     await nextImmediate();
     expect(sendMessage).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
       customType: "interactive-shell-continuation", display: false,
@@ -312,6 +328,6 @@ test("real Pi loader and interactive bash path record the result before continua
     expect(errors).toEqual([]);
   } finally {
     await runner.emit({ type: "session_shutdown", reason: "quit" });
-    await panel?.shutdown();
+    await panel?.shutdown?.();
   }
 }, 10_000);

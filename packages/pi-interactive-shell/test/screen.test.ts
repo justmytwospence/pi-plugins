@@ -338,3 +338,70 @@ test("disposes the emulator/listeners once and settles pending flushes", async (
   expect(screen.maxScrollback).toBe(0);
   expect(plain(screen)).toEqual(["        ", "        "]);
 });
+
+
+test.each([0, 1, 2, 3, 4, 5, 6])("head-tail uses the bottom viewport without scrollback at height %i", async height => {
+  const { screen } = create(8, 4);
+  screen.write("first\r\nsecond");
+  await screen.flush();
+  const result = screen.headTail(height);
+  expect(result.head).toEqual([]);
+  expect(result.omitted).toBe(0);
+  expect(result.tail).toEqual(screen.render(0, false).slice(4 - Math.min(height, 4)));
+  expect(result.tail.join("")).not.toContain(CURSOR_MARKER);
+});
+
+test.each([3, 4, 5, 6, 7, 8])("head-tail reserves one omission row and favors the tail at height %i", async height => {
+  const { screen } = create(8, 6);
+  screen.write(Array.from({ length: 12 }, (_, i) => `row${i}`).join("\r\n"));
+  await screen.flush();
+  const result = screen.headTail(height);
+  const head = Math.floor((height - 1) / 2);
+  const tail = height - 1 - head;
+  expect(result.head.map(line => stripTerminalSequences(line).trimEnd())).toEqual(Array.from({ length: head }, (_, i) => `row${i}`));
+  expect(result.tail.map(line => stripTerminalSequences(line).trimEnd())).toEqual(Array.from({ length: tail }, (_, i) => `row${12 - tail + i}`));
+  expect(result.omitted).toBe(12 - head - tail);
+  expect(result.head.length + result.tail.length + 1).toBe(height);
+});
+
+test("head-tail includes all rows when exactly fitting or larger, without omission", async () => {
+  const { screen } = create(8, 3);
+  screen.write("a\r\n\r\nc\r\nd\r\ne");
+  await screen.flush();
+  for (const height of [5, 6]) {
+    const result = screen.headTail(height);
+    expect(result.omitted).toBe(0);
+    expect(result.head).toEqual([]);
+    expect(result.tail.map(line => stripTerminalSequences(line).trimEnd())).toEqual(["a", "", "c", "d", "e"]);
+  }
+  expect(screen.headTail(3).omitted).toBe(3); // Blank buffer rows count too.
+  for (const height of [0, 1, 2]) {
+    expect(screen.headTail(height)).toEqual({ head: [], tail: screen.render(0, false).slice(3 - height), omitted: 0 });
+  }
+});
+
+test("head-tail preserves styles and sanitized cells, with no live cursor or raw escapes", async () => {
+  const { screen } = create(8, 3);
+  screen.write("\x1b[31mred\x1b[0m\x1b]52;c;PRIVATE\x07\r\n1\r\n2\r\n3\r\n\x1b[32mgreen");
+  await screen.flush();
+  const { head, tail, omitted } = screen.headTail(3);
+  expect(omitted).toBe(3);
+  expect(head[0]).toContain("\x1b[31mred");
+  expect(tail[0]).toContain("\x1b[32mgreen");
+  expect([...head, ...tail].join("")).not.toContain(CURSOR_MARKER);
+  expect([...head, ...tail].join("")).not.toContain("PRIVATE");
+  expect([...head, ...tail].every(line => visibleWidth(line) === 8)).toBe(true);
+});
+
+test("head-tail uses the bounded buffer's earliest rows after truncation and the active alternate screen", async () => {
+  const { screen } = create(10, 3);
+  screen.write(Array.from({ length: 1105 }, (_, i) => `row${i}`).join("\r\n"));
+  await screen.flush();
+  const result = screen.headTail(4);
+  expect(result.head.map(line => stripTerminalSequences(line).trimEnd())).toEqual(["row102"]);
+  expect(result.tail.map(line => stripTerminalSequences(line).trimEnd())).toEqual(["row1103", "row1104"]);
+  expect(result.omitted).toBe(1000);
+  screen.write("\x1b[?1049hALT");
+  await screen.flush();
+  expect(screen.headTail(3)).toEqual({ head: [], tail: screen.render(0, false), omitted: 0 });
+});

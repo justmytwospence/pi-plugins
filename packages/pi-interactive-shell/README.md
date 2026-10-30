@@ -1,6 +1,6 @@
 # pi-interactive-shell
 
-Run a command you explicitly submit with `!i <command>` in a focused terminal overlay inside Pi. The compact panel occupies the lower half, keeping the conversation visible without clearing the screen or stopping Pi's TUI. Both compact and expanded views leave the footer visible, adjusting to its height and terminal resizes. No command auto-detection and no agent-callable tool.
+Run a command you explicitly submit with `!i <command>` in a focused inline terminal in Pi's chat. The live panel is roughly half the terminal height and stays in the transcript's flow, not over the conversation. On exit, a static head-and-tail snapshot remains in chat and focus returns immediately to the editor. No command auto-detection and no agent-callable tool.
 
 Part of [Pi Plugins](https://github.com/justmytwospence/pi-plugins). Reference: <https://pi-plugins.vercel.app/plugins/pi-interactive-shell/>.
 
@@ -26,9 +26,9 @@ At an idle Pi terminal prompt, type and submit, for example:
 !i git add -p
 ```
 
-Interact directly with the command in the focused overlay. When it exits, its output stays visible until you press Enter or Esc to dismiss the panel. Plain `!<command>` retains Pi's normal behavior, even for editors and other interactive programs. Only the explicit `!i` prefix selects the panel. `!!i <command>` uses the same panel with Pi's normal `!!` exclusion from model context.
+Interact directly with the command in the focused inline panel. While it runs, the terminal temporarily replaces the editor's input handling; Pi restores the editor text and focus on completion. Every inline command returns focus immediately on exit, without Enter or Esc. Its static final frame remains in chat; it is not an independently scrollable terminal. Plain `!<command>` retains Pi's normal behavior, even for editors and other interactive programs. Only the explicit `!i` prefix selects the panel. `!!i <command>` uses the same panel with Pi's normal `!!` exclusion from model context.
 
-With optional [pi-next-prompt](https://pi-plugins.vercel.app/plugins/pi-next-prompt/), a capability probe lets it suggest an explicit `!i <command>` next step. Next-prompt owns the suggestion UI: press Tab or Right to copy the ghost into the editor, review it, then press Enter yourself. Acceptance never executes it. If you submit a model-suggested draft exactly unchanged, the panel closes automatically on success, failure or cancellation, and the agent continues automatically using only the recorded status. Terminal output and keystrokes remain private and are discarded on close. Manual, edited, externally offered and `!!i` commands retain the manual panel and do not automatically resume the agent. Neither component requires the other, and neither imports the sibling to integrate.
+With optional [pi-next-prompt](https://pi-plugins.vercel.app/plugins/pi-next-prompt/), a capability probe lets it suggest an explicit `!i <command>` next step. Next-prompt owns the suggestion UI: press Tab or Right to copy the ghost into the editor, review it, then press Enter yourself. Acceptance never executes it. If you submit an accepted model-suggested `!i` draft exactly unchanged, the agent continues automatically after success, failure or cancellation using only the recorded status, never terminal output or keystrokes. Manual, edited, externally offered and `!!i` commands also return editor focus immediately in inline mode, but do not automatically resume the agent: send another prompt to continue. Neither component requires the other, and neither imports the sibling to integrate.
 
 ## Keys
 
@@ -36,26 +36,28 @@ While the command runs, program keys including Tab, Esc, Ctrl+C and Ctrl+D go to
 
 | Key after Ctrl+] | Action |
 | --- | --- |
-| `f` | Toggle compact (lower half) / expanded view |
+| `f` | Toggle half-height / expanded inline view |
 | `q` | Confirm stopping the command and closing the panel |
 | `u` / `d` | Scroll up / down half a page |
 | `g` / `G` | Scroll to top / end |
 | Ctrl+] | Send a literal Ctrl+] to the program |
 
-For manual panels, Enter or Esc dismisses retained output after command exit. Closing/teardown stops the process group with escalation when needed and disposes the terminal emulation.
+Scrolling controls apply only while the command runs. The final snapshot shows the earliest and latest retained buffer rows, separated by `… N rows omitted …` when needed. These are screen rows, including blanks, not logical lines. The head is the earliest row still available in xterm's bounded 1,000-line scrollback, not necessarily the command's original beginning. Very short panels show only the bottom viewport. Use Pi's normal transcript navigation to revisit snapshots; the live panel is not pinned and does not force-scroll your view.
+
+If Pi's private transcript layout is not recognized, the command falls back to the existing focused overlay. Its compact/expanded views leave room for the footer. Manual fallback panels keep exited output until Enter or Esc dismisses them; exact accepted suggestions still close automatically and continue with status only. The fallback does not retain an inline snapshot. Closing/teardown stops the process group with escalation when needed and disposes the terminal emulation.
 
 ## Execution and limits
 
 - Requires a real terminal TUI and an idle session. RPC, print/headless modes and a busy agent cannot open the panel.
 - Runs a foreground command through the user's `$SHELL` (fallback `/bin/sh`) with `-c`, the session working directory and a pseudoterminal. Commands retain your ordinary OS permissions.
-- Pi's event processing and background monitoring can continue, and existing background OS processes keep running. New agent requests are gated until the panel closes, including while exited output is retained.
+- Pi's event processing and background monitoring can continue, and existing background OS processes keep running. New agent requests are gated until the live handoff finishes (or the fallback overlay is dismissed). A retained inline snapshot does not block requests.
 - Keyboard-first VT terminal support, not universal mouse, graphics or remote/phone-client support. There is no OSC 52/clipboard passthrough.
-- There is no detach, multiple-terminal management, background-job adoption or agent tool. For manual panels, close the panel and send another prompt if you want the agent to continue.
+- There is no detach, multiple-terminal management, background-job adoption or agent tool. After a manual inline command finishes, send another prompt if you want the agent to continue.
 - [pi-bg](https://pi-plugins.vercel.app/plugins/pi-bg/) is unchanged: use it for logged jobs and services rather than direct terminal interaction.
 
 ## History, privacy and cost
 
-Only the submitted command and completion/error status enter session history; the result is status-only, not captured terminal output or interactive keystrokes. The terminal screen and up to 1,000 scrollback lines remain in memory while the panel is open and are discarded on close. The extension does not write them to tool results, session history, model context or its own debug logs. The `!!i` form excludes the command/result from model context; it is not deletion from session history.
+Only the submitted command and completion/error status enter session history; the result is status-only, not captured terminal output or interactive keystrokes. The live screen and up to 1,000 scrollback lines are memory-only. After exit, only the bounded static snapshot remains in process memory; it can contain sensitive displayed text. A transcript clear/rebuild, reload, session switch or exit can remove it: this is not durable history. The extension does not write terminal output or keystrokes to tool results, session history, model context or its own debug logs. The `!!i` form excludes the command/result from model context; it is not deletion from session history.
 
 `!i` is an explicitly human-submitted shell command, not an agent tool call. pi-tool-gate's tool-call approvals do not apply; review the command before pressing Enter.
 

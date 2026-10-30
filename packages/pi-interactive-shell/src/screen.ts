@@ -183,6 +183,33 @@ export class TerminalScreen {
     return lines;
   }
 
+  /** Static, sanitized buffer rows; the omitted count includes blank screen rows. */
+  headTail(height: number): { head: string[]; tail: string[]; omitted: number } {
+    height = Math.max(0, Math.floor(height) || 0);
+    const rows = this.terminal.rows;
+    const total = this.maxScrollback + rows;
+    const slice = (start: number, count: number): string[] => {
+      const lines: string[] = [];
+      while (count > 0) {
+        const offset = Math.max(0, Math.min(this.maxScrollback, total - rows - start));
+        const skip = start - (this.maxScrollback - offset);
+        const chunk = this.render(offset, false).slice(skip, skip + count);
+        lines.push(...chunk);
+        start += chunk.length;
+        count -= chunk.length;
+      }
+      return lines;
+    };
+    if (total <= height) return { head: [], tail: slice(0, total), omitted: 0 };
+    if (!this.maxScrollback || height < 3) {
+      const count = Math.min(height, rows);
+      return { head: [], tail: this.render(0, false).slice(rows - count), omitted: 0 };
+    }
+    const head = Math.floor((height - 1) / 2);
+    const tail = height - 1 - head;
+    return { head: slice(0, head), tail: slice(total - tail, tail), omitted: total - head - tail };
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;

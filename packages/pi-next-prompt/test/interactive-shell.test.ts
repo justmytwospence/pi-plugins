@@ -62,6 +62,10 @@ test("handoff guidance explicitly covers commands and requested manual tests", (
   expect(INTERACTIVE_INSTRUCTION).toContain("pending next step even when implementation and automated checks are complete");
   expect(INTERACTIVE_INSTRUCTION).toContain("Tab only fills an editable draft and the user must press Enter to run it");
   expect(INTERACTIVE_INSTRUCTION).toContain("always give the complete command however long it is: never truncate");
+  expect(INTERACTIVE_INSTRUCTION).toContain("static, memory-only output preview");
+  expect(INTERACTIVE_INSTRUCTION).toContain("never sent to the model");
+  expect(INTERACTIVE_INSTRUCTION).toContain("fallback overlay requires manual dismissal");
+  expect(INTERACTIVE_INSTRUCTION).not.toContain("discarded on close");
 });
 
 test("no terminal means no handoff guidance", async () => {
