@@ -70,7 +70,7 @@ Rules settle specific calls in Claude Code's syntax and order: `deny` beats `ask
 
 Syntax, as in Claude Code:
 
-- `Bash(git push:*)` (or `Bash(git push *)`): the command and any arguments, by whole words (`git push`, `git push origin main`, not `git pushx`). `Bash(npm test)` is exactly that command. `Bash` alone is every shell command.
+- `Bash(git push:*)` (or `Bash(git push *)`): the command and any arguments, by whole words (`git push`, `git push origin main`, not `git pushx`). `Bash(npm test)` is exactly that command. A `*` anywhere else matches any text, spaces included, as in Claude Code: `Bash(git log * main)`, `Bash(*vercel*--prod*)`. `Bash` alone is every shell command. Put an allow pattern's `*` after the subcommand (`/gate rules` flags one before it); ask and deny patterns catch a flag wherever it is, so `Bash(vercel deploy *)` allowed with `Bash(*vercel*--prod*)` and `Bash(*vercel*--target*production*)` as ask rules runs preview deploys and asks about production.
 - `Edit(src/**)`, `Write(...)`, `Read(...)`: gitignore-style paths relative to the project, or `~/...` or absolute (`/etc/app/**`; `//etc/app/**` also works). A pattern with no slash matches at any depth. `Read` covers `read`, `grep`, `find` and `ls`.
 - A bare tool name: `web_fetch`, `mcp__server` (every tool of that server), `mcp__server__*`.
 
@@ -114,7 +114,7 @@ Project grants saved by earlier versions are read as rules without rewriting the
 
 The same: the three lists and their order, the `Bash`, `Edit`, `Write` and `Read` syntax, bare tool names with `mcp__server`, gitignore-style paths, and splitting compound commands so a rule for one part does not allow the rest.
 
-Different: only those four tools take a specifier (no `WebFetch(domain:...)`) and there is no managed scope; `*` is a wildcard only as a `Bash` prefix; a path starting with `/` is absolute here (Claude Code reads it relative to the project and uses `//` for absolute); `Edit` and `Write` allow rules cover their own tool; path rules do not look inside shell commands; ask rules do not apply in yolo mode; and the modes, classifier and directory policy are this plugin's own.
+Different: only those four tools take a specifier (no `WebFetch(domain:...)`) and there is no managed scope; a path starting with `/` is absolute here (Claude Code reads it relative to the project and uses `//` for absolute); `Edit` and `Write` allow rules cover their own tool; path rules do not look inside shell commands; ask rules do not apply in yolo mode; and the modes, classifier and directory policy are this plugin's own.
 
 ## Configuration and project rules
 

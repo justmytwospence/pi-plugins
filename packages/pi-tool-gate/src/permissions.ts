@@ -58,8 +58,12 @@ export interface Rule {
   text: string;
   /** `Bash`, `Edit`, `Write`, `Read`, or a tool name (with `*` wildcards; `mcp__server` covers the server's tools). */
   tool: string;
-  /** A command rule: a prefix (`git push:*`) or an exact command; `tokens` is the command as words when it is one simple command. */
-  command?: { kind: "prefix" | "exact"; text: string; tokens?: string[] };
+  /**
+   * A command rule: a prefix (`git push:*`), a wildcard pattern (`vercel *--prod*`: `*` anywhere,
+   * matching any text, spaces included; `re` is it compiled) or an exact command; `tokens` is the
+   * command as words when it is one simple command.
+   */
+  command?: { kind: "prefix" | "glob" | "exact"; text: string; tokens?: string[]; re?: RegExp };
   /** A path rule. */
   path?: PathPattern;
 }
@@ -112,6 +116,18 @@ function parseCommandRule(specifier: string): Parsed {
   const s = specifier.trim();
   if (s === "*") return { ok: true, rule: { text: "Bash", tool: "Bash" } };
   const head = s.endsWith(":*") || s.endsWith(" *") ? s.slice(0, -2).trim() : undefined;
+  // As in Claude Code, a `*` anywhere else is a wildcard too (`git log * main`, `* --version`, `ls*`);
+  // `:*` means a trailing ` *` only at the end.
+  if (head?.includes("*") || (head === undefined && s.includes("*"))) {
+    const parts = splitCommand(head === undefined ? s : `${head} *`);
+    if (parts.length !== 1) {
+      return { ok: false, error: "A rule with * names one command, for example Bash(git log * main); a compound command is matched part by part." };
+    }
+    const tokens = normalizeWords(parts[0] as string[]);
+    const re = new RegExp(`^${tokens.join(" ").split("*").map((p) => p.replace(/[.+?^${}()|[\]\\]/gu, "\\$&")).join("[\\s\\S]*")}$`, "u");
+    const text = head === undefined ? s : `${head} *`;
+    return { ok: true, rule: { text: `Bash(${text})`, tool: "Bash", command: { kind: "glob", text, tokens, re } } };
+  }
   if (head !== undefined) {
     const parts = splitCommand(head);
     if (!head || parts.length !== 1) {
@@ -252,6 +268,9 @@ function unitMatches(rule: Rule, u: BashUnit, blocking: boolean): boolean {
   if (!c?.tokens) return false;
   const forms = formsOf(u, blocking);
   if (c.kind === "prefix") return forms.argv.some((f) => startsWith(c.tokens as string[], f)) || (forms.key !== undefined && startsWith(c.tokens, forms.key));
+  // A wildcard pattern is matched against the command's words joined by single spaces; to allow, not
+  // against a command with an expansion, whose words are not what runs.
+  if (c.kind === "glob") return forms.argv.some((f) => (blocking || !hasExpansion(f)) && c.re?.test(f.join(" ")) === true);
   return forms.argv.some((f) => !hasExpansion(f) && sameWords(c.tokens as string[], f));
 }
 
@@ -327,6 +346,19 @@ function blocks(r: Rule, call: Call): boolean {
   }
   const file = fileOf(call);
   return file !== undefined && r.path !== undefined && matchPath(r.path, file, call.root ?? call.cwd);
+}
+
+/**
+ * Why an allow rule may cover more than it seems to, as Claude Code warns at startup: a `*` before
+ * the subcommand (`git * main`, `* --version`) lets it match any subcommand or program, including
+ * options that make the program run something else (`git -c core.fsmonitor=...`).
+ */
+export function ruleWarning(list: RuleList, rule: Rule): string | undefined {
+  const c = rule.command;
+  if (list !== "allow" || c?.kind !== "glob") return undefined;
+  const before = c.text.slice(0, c.text.indexOf("*"));
+  const words = before.split(" ").slice(0, -1).filter(Boolean);
+  return words.length < 2 ? "has a * before the subcommand, so it allows any subcommand or program there" : undefined;
 }
 
 /** The deny rule that stops the call, else the ask rule that makes it ask, else undefined. */
@@ -414,10 +446,9 @@ function quoteWord(word: string): string {
 /** The rule for exactly this command, or undefined when its text could not be read back as exact (a trailing `*`). */
 function exactRule(command: string): string | undefined {
   const text = command.trim();
-  if (!text) return undefined;
-  if (!/(?::| )\*$/u.test(text)) return `Bash(${text})`;
-  const parts = splitCommand(text);
-  return parts.length === 1 && !/[$`]/u.test(text) ? `Bash(${(parts[0] as string[]).map(quoteWord).join(" ")})` : undefined;
+  // A `*` in a rule is a wildcard: a command with one cannot be named exactly.
+  if (!text || text.includes("*")) return undefined;
+  return `Bash(${text})`;
 }
 
 /**
@@ -428,7 +459,7 @@ function exactRule(command: string): string | undefined {
 function unitRule(u: BashUnit): { rule: string; exact: boolean } | undefined {
   const name = u.program?.name ?? "";
   const keyWords = (u.key ?? "").split(" ");
-  const exact = () => (hasExpansion(u.words) ? undefined : { rule: `Bash(${normalizeWords(u.words).map(quoteWord).join(" ")})`, exact: true });
+  const exact = () => (hasExpansion(u.words) || u.words.some((w) => w.includes("*")) ? undefined : { rule: `Bash(${normalizeWords(u.words).map(quoteWord).join(" ")})`, exact: true });
   if (EXACT_PROGRAMS.has(name) || u.key?.startsWith("gh api") || runsInlineCode(u)) return exact();
   let words = keyWords;
   const typed = normalizeWords([u.invoked ?? name])[0] as string;

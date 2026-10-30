@@ -3,7 +3,7 @@
 // project's shared files and from `~/.config/agents` are read-only here: the answer names the file.
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { shown } from "./dirs.ts";
-import { type IgnoredRule, LISTS, parseRule, type Origin, type RuleList, type Scope, type ScopedRule, scopeLabel } from "./permissions.ts";
+import { type IgnoredRule, LISTS, parseRule, type Origin, type RuleList, ruleWarning, type Scope, type ScopedRule, scopeLabel } from "./permissions.ts";
 
 /** A folder the project or session may read or write beyond the policy: `dir:read:/abs`. */
 export interface DirGrant {
@@ -52,7 +52,12 @@ export function formatRules(store: RuleStore): string {
       const heading = r.origin.scope === "session" ? "session" : `${scopeLabel(r.origin)}: ${sourceOf(r.origin)}`;
       groups.set(heading, [...(groups.get(heading) ?? []), r]);
     }
-    for (const [heading, group] of groups) out.push(`  ${heading}`, ...group.map((r) => `    ${r.text}`));
+    for (const [heading, group] of groups) {
+      out.push(`  ${heading}`, ...group.map((r) => {
+        const warning = ruleWarning(r.list, r.rule);
+        return warning ? `    ${r.text} (warning: ${warning})` : `    ${r.text}`;
+      }));
+    }
   }
   const dirs = store.dirs();
   out.push("folders");
@@ -112,7 +117,8 @@ async function add(ctx: ExtensionContext, store: RuleStore, list: RuleList, text
     return false;
   }
   const where = SCOPES.find((s) => s.scope === scope)?.label.toLowerCase() ?? scope;
-  ctx.ui.notify(`Added to ${list}: ${parsed.rule.text} (${where}).`, "info");
+  const warning = ruleWarning(list, parsed.rule);
+  ctx.ui.notify(`Added to ${list}: ${parsed.rule.text} (${where}).${warning ? ` Warning: it ${warning}.` : ""}`, warning ? "warning" : "info");
   return true;
 }
 

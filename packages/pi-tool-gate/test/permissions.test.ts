@@ -7,6 +7,7 @@ import {
   allowing,
   allowsPath,
   blocking,
+  ruleWarning,
   type Call,
   describeOrigin,
   editUserRules,
@@ -143,6 +144,65 @@ describe("prefix and exact commands", () => {
   test("a bare tool rule covers every command", () => {
     expect(allows(rules("allow", "Bash"), bash("make deploy"))).toEqual(["Bash"]);
     expect(allows(rules("allow", "bash"), call("bg_run", { command: "make deploy", cwd: ROOT }))).toEqual(["Bash"]);
+  });
+});
+
+describe("wildcards anywhere, as in Claude Code", () => {
+  const blocks = (rs: ScopedRule[], command: string) => blocking(rs, bash(command))?.text;
+
+  test("a * anywhere matches any text, spaces included; :* is a trailing wildcard only at the end", () => {
+    const p = parseRule("Bash(git log * main)");
+    expect(p.ok && p.rule.command?.kind).toBe("glob");
+    expect(parseRule("Bash(vercel *--prod:*)").ok && (parseRule("Bash(vercel *--prod:*)") as { rule: { text: string } }).rule.text).toBe("Bash(vercel *--prod *)");
+    expect(parseRule("Bash(cd x && vercel *)").ok).toBe(false);
+    // Claude Code's table.
+    const log = rules("allow", "Bash(git log * main)");
+    for (const c of ["git log --oneline main", "git log -5 main"]) expect(allows(log, bash(c)), c).toEqual(["Bash(git log * main)"]);
+    for (const c of ["git log main", "git push origin main"]) expect(allows(log, bash(c)), c).toBeUndefined();
+    const version = rules("allow", "Bash(* --version)");
+    expect(allows(version, bash("node --version"))).toBeDefined();
+    expect(allows(version, bash("node -v"))).toBeUndefined();
+    const help = rules("allow", "Bash(* --help *)");
+    expect(allows(help, bash("npm --help x"))).toBeDefined();
+    expect(allows(help, bash("npm --help"))).toBeUndefined();
+    const ls = rules("allow", "Bash(ls*)");
+    expect(allows(ls, bash("lsof -i"))).toBeDefined();
+    expect(allows(rules("allow", "Bash(ls *)"), bash("lsof -i"))).toBeUndefined();
+  });
+
+  test("ask rules catch a flag wherever it is, nested and behind runners: preview deploys run, production asks", () => {
+    const set = [
+      ...rules("allow", "Bash(vercel deploy *)"),
+      ...rules("ask", "Bash(*vercel*--prod*)", "Bash(*vercel*--target*production*)", "Bash(vercel promote *)"),
+    ];
+    for (const c of ["vercel deploy --yes --non-interactive", "vercel deploy"]) {
+      expect(blocks(set, c), c).toBeUndefined();
+      expect(allows(set, bash(c)), c).toEqual(["Bash(vercel deploy:*)"]);
+    }
+    for (const c of [
+      "vercel deploy --prod", "vercel deploy --yes --prod", "vercel --prod", "vercel deploy --prod=true",
+      "vercel --cwd site deploy --prod", "npx vercel deploy --prod", "sh -c 'vercel deploy --yes --prod'",
+      "git push && vercel deploy --prod", "echo $(vercel deploy --prod)",
+    ]) expect(blocks(set, c), c).toBe("Bash(*vercel*--prod*)");
+    for (const c of ["vercel deploy --target=production", "vercel deploy --target production"]) expect(blocks(set, c), c).toBe("Bash(*vercel*--target*production*)");
+    expect(blocks(set, "vercel promote https://x.vercel.app")).toBe("Bash(vercel promote:*)");
+  });
+
+  test("an allow pattern does not match a command with an expansion; a deny pattern does", () => {
+    expect(allows(rules("allow", "Bash(echo * done)"), bash("echo $X done"))).toBeUndefined();
+    expect(blocking(rules("deny", "Bash(rm * $HOME)"), bash("rm -rf $HOME"))?.list).toBe("deny");
+  });
+
+  test("an allow pattern with * before the subcommand is flagged; an exact suggestion is never a pattern", () => {
+    const warn = (list: RuleList, t: string) => {
+      const p = parseRule(t);
+      return p.ok ? ruleWarning(list, p.rule) : "unparsed";
+    };
+    expect(warn("allow", "Bash(git * main)")).toMatch(/before the subcommand/u);
+    expect(warn("allow", "Bash(* --version)")).toMatch(/before the subcommand/u);
+    expect(warn("allow", "Bash(git log * main)")).toBeUndefined();
+    expect(warn("ask", "Bash(*vercel*--prod*)")).toBeUndefined();
+    expect(suggest(bash("rm -rf build/*"))).toEqual([]);
   });
 });
 
