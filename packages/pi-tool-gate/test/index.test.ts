@@ -4,7 +4,8 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { downloadsOf } from "../src/downloads.ts";
 import toolGate, { blockedBy, DECLINED, DECLINED_WITH_MESSAGE, DECLINED_WITH_MESSAGE_END, DEFAULT_CONFIG, scriptOfCall } from "../src/index.ts";
-import { assistantEntry, fakeJev, harness, userEntry } from "./harness.ts";
+import { APPROVAL_ENTRY, WORKFLOW_ENTRY } from "../src/modes.ts";
+import { assistantEntry, fakeJev, harness, usage, userEntry } from "./harness.ts";
 
 let configDir: string;
 beforeEach(() => {
@@ -49,6 +50,157 @@ function setup(answers: any, ctxOverrides: Record<string, unknown> = {}) {
 }
 
 const call = (toolName: string, input: Record<string, unknown>, id = "t1") => ({ type: "tool_call", toolCallId: id, toolName, input });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+// Keep the result genuinely pending: fakeJev's answer callback itself is synchronous.
+describe("pending decisions are invalidated by mode and branch changes", () => {
+  for (const change of ["workflow", "approval", "tree", "session", "shutdown"] as const) {
+    const transition = async ({ h, ctx, branch }: ReturnType<typeof setup>) => {
+      if (change === "workflow") await h.commands.get("mode").handler("chat", ctx);
+      else if (change === "approval") await h.commands.get("approvals").handler("yolo", ctx);
+      else if (change === "shutdown") await h.emit("session_shutdown", { type: "session_shutdown" }, ctx);
+      else {
+        branch.splice(0, branch.length, userEntry("A different branch"));
+        await h.emit(change === "session" ? "session_start" : "session_tree", { type: change === "session" ? "session_start" : "session_tree" }, ctx);
+      }
+    };
+    test(`a classification pending across ${change} is blocked without another judgment`, async () => {
+      const s = setup(safe);
+      await s.h.emit("session_start", { type: "session_start" }, s.ctx);
+      await s.h.emit("before_agent_start", { prompt: "x" }, s.ctx);
+      const entered = deferred<void>();
+      const result = deferred<any>();
+      const classify = vi.fn(async () => { entered.resolve(); return result.promise; });
+      (s.jev.registry as any).classify = classify;
+      const pending = s.h.emit("tool_call", call("bash", { command: "npm test" }), s.ctx);
+      await entered.promise;
+      await transition(s);
+      result.resolve({ model: "jev-latest", stopReason: "stop", answers: safe, usage: usage(300) });
+      expect(await pending).toMatchObject({ block: true, reason: expect.stringMatching(/modes changed.*reevaluated/su) });
+      expect(classify).toHaveBeenCalledTimes(1);
+      expect(s.h.entries.filter(e => e.customType === "tool-gate:decision")).toHaveLength(0);
+      expect(await s.h.emit("tool_result", { type: "tool_result", toolCallId: "t1", toolName: "bash", content: [], isError: false }, s.ctx)).toBeUndefined();
+    });
+    test(`an approval pending across ${change} cannot authorize or save an allow rule`, async () => {
+      const s = setup(safe);
+      await s.h.emit("session_start", { type: "session_start" }, s.ctx);
+      await s.h.commands.get("approvals").handler("manual", s.ctx);
+      const entered = deferred<void>();
+      const result = deferred<string>();
+      const select = vi.fn(async () => { entered.resolve(); return result.promise; });
+      s.ctx.ui.select = select;
+      const pending = s.h.emit("tool_call", call("bash", { command: "npm test" }), s.ctx);
+      await entered.promise;
+      await transition(s);
+      result.resolve("Allow rule for this session");
+      expect(await pending).toMatchObject({ block: true, reason: expect.stringMatching(/modes changed.*reevaluated/su) });
+      expect(select).toHaveBeenCalledTimes(1);
+      expect(s.jev.calls).toHaveLength(0);
+      await s.h.commands.get("mode").handler("work", s.ctx);
+      await s.h.commands.get("approvals").handler("manual", s.ctx);
+      s.ctx.ui.select = async () => "Block";
+      expect(await s.h.emit("tool_call", call("bash", { command: "npm test" }, "fresh"), s.ctx)).toMatchObject({ block: true });
+      expect(s.jev.calls).toHaveLength(0);
+    });
+  }
+
+  test.each(["workflow", "approval", "exec", "provider"])("authorized in-flight usage survives a same-branch %s change exactly once", async (change) => {
+    const { h, ctx } = setup(safe);
+    await h.emit("session_start", { type: "session_start" }, ctx);
+    expect(await h.emit("tool_call", call("bash", { command: "npm test" }), ctx)).toBeUndefined();
+    if (change === "workflow") await h.commands.get("mode").handler("chat", ctx);
+    else if (change === "approval") await h.commands.get("approvals").handler("yolo", ctx);
+    else h.pi.events.emit(change === "exec" ? "workflow-mode:exec" : "workflow-mode:plan-provider", change === "exec" ? { active: true, source: "transition" } : { planFile: "/tmp/plan.md" });
+    const result = { type: "tool_result", toolCallId: "t1", toolName: "bash", content: [], isError: false, usage: usage(100) };
+    expect(await h.emit("tool_result", result, ctx)).toMatchObject({ usage: { input: 400 } });
+    expect(await h.emit("tool_result", result, ctx)).toBeUndefined();
+  });
+
+  test("shutdown clears authorized in-flight usage", async () => {
+    const { h, ctx } = setup(safe);
+    await h.emit("session_start", { type: "session_start" }, ctx);
+    await h.emit("tool_call", call("bash", { command: "npm test" }), ctx);
+    await h.emit("session_shutdown", { type: "session_shutdown" }, ctx);
+    expect(await h.emit("tool_result", { type: "tool_result", toolCallId: "t1", toolName: "bash", content: [], isError: false }, ctx)).toBeUndefined();
+  });
+
+  test.each(["workflow", "tree"])("a workaround pending across %s cannot publish usage from an unauthorized call", async (change) => {
+    const { h, ctx, jev } = setup(risky);
+    await h.emit("session_start", { type: "session_start" }, ctx);
+    const entered = deferred<void>();
+    const result = deferred<any>();
+    const classify = (jev.registry as any).classify.bind(jev.registry);
+    (jev.registry as any).classify = async (model: unknown, context: any, options: any) => {
+      if (context.questions.workaround) { entered.resolve(); return result.promise; }
+      return classify(model, context, options);
+    };
+    const pending = h.emit("tool_call", call("bash", { command: "npm publish" }), ctx);
+    await entered.promise;
+    if (change === "workflow") await h.commands.get("mode").handler("chat", ctx);
+    else await h.emit("session_tree", { type: "session_tree" }, ctx);
+    result.resolve({ model: "jev-latest", stopReason: "stop", answers: workaround, usage: usage(700) });
+    expect(await pending).toMatchObject({ block: true, reason: expect.stringMatching(/modes changed/u) });
+    expect(await h.emit("tool_result", { type: "tool_result", toolCallId: "t1", toolName: "bash", content: [], isError: false }, ctx)).toBeUndefined();
+  });
+
+  test("a stale classification cannot overwrite usage authorized on the replacement branch", async () => {
+    const { h, ctx, jev } = setup(safe);
+    await h.emit("session_start", { type: "session_start" }, ctx);
+    const entered = deferred<void>();
+    const result = deferred<any>();
+    const classify = (jev.registry as any).classify.bind(jev.registry);
+    (jev.registry as any).classify = async () => { entered.resolve(); return result.promise; };
+    const pending = h.emit("tool_call", call("bash", { command: "npm test" }), ctx);
+    await entered.promise;
+    await h.emit("session_tree", { type: "session_tree" }, ctx);
+    (jev.registry as any).classify = classify;
+    expect(await h.emit("tool_call", call("bash", { command: "npm test" }), ctx)).toBeUndefined();
+    result.resolve({ model: "jev-latest", stopReason: "stop", answers: safe, usage: usage(700) });
+    expect(await pending).toMatchObject({ block: true, reason: expect.stringMatching(/modes changed/u) });
+    const finished = { type: "tool_result", toolCallId: "t1", toolName: "bash", content: [], isError: false };
+    expect(await h.emit("tool_result", finished, ctx)).toMatchObject({ usage: { input: 300 } });
+    expect(await h.emit("tool_result", finished, ctx)).toBeUndefined();
+  });
+
+  test("new sessions reset counters, pending usage and held retries", async () => {
+    const s = setup(safe);
+    await s.h.emit("session_start", { type: "session_start" }, s.ctx);
+    await s.h.emit("before_agent_start", { prompt: "x" }, s.ctx);
+    await s.h.emit("tool_call", call("bash", { command: "npm test" }, "old"), s.ctx);
+    await s.h.commands.get("approvals").handler("manual", s.ctx);
+    s.ctx.ui.selectAnswers.push("Block");
+    await s.h.emit("tool_call", call("bash", { command: "npm publish" }, "asked"), s.ctx);
+    await s.h.commands.get("approvals").handler("auto", s.ctx);
+    const held: any = await s.h.emit("tool_call", call("bash", { command: "git push --force origin main" }, "held"), s.ctx);
+    expect(held.block).toBe(true);
+    // Leave classifier usage pending immediately before switching sessions.
+    await s.h.emit("tool_call", call("bash", { command: "npm test" }, "old"), s.ctx);
+    expect(s.ctx.ui.status.get("tool-gate")).not.toBe("gate: 0 auto · 0 pushed back · 0 asked");
+    const fresh = s.h.ctx({ modelRegistry: s.jev.registry, sessionManager: { getBranch: () => [userEntry("New session")], getSessionId: () => "new-session" } });
+    await s.h.emit("session_start", { type: "session_start" }, fresh);
+    expect(fresh.ui.status.get("tool-gate")).toBe("gate: 0 auto · 0 pushed back · 0 asked");
+    expect(await s.h.emit("tool_result", { type: "tool_result", toolCallId: "old", toolName: "bash", content: [], isError: false }, fresh)).toBeUndefined();
+    const retry: any = await s.h.emit("tool_call", call("bash", { command: "git push --force origin main" }, "new-held"), fresh);
+    expect(retry).toMatchObject({ block: true, reason: expect.stringMatching(/make your case/u) });
+    expect(fresh.ui.selects).toHaveLength(0);
+  });
+
+  test("tree changes clear pending usage even when restored modes are identical", async () => {
+    const { h, ctx, branch } = setup(safe);
+    await h.emit("session_start", { type: "session_start" }, ctx);
+    await h.emit("tool_call", call("bash", { command: "npm test" }), ctx);
+    branch.splice(0, branch.length,
+      { type: "custom", customType: WORKFLOW_ENTRY, data: { version: 1, mode: "work" } },
+      { type: "custom", customType: APPROVAL_ENTRY, data: { version: 1, mode: "auto" } });
+    await h.emit("session_tree", { type: "session_tree" }, ctx);
+    expect(await h.emit("tool_result", { type: "tool_result", toolCallId: "t1", toolName: "bash", content: [], isError: false }, ctx)).toBeUndefined();
+  });
+});
 
 test("read-only calls pass without Jev", async () => {
   const { h, jev, ctx } = setup(safe);

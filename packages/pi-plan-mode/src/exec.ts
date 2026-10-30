@@ -1,6 +1,6 @@
 // Exec mode: a mode of your main chat while an approved plan is being implemented. The footer shows
-// it where the permission mode is (status `plan-exec`; the permission mode underneath still decides
-// what runs), the planner that wrote the plan can stay on call through ask_planner, edits to files
+// its phase/count/cost detail in status `plan-exec`; workflow-mode:exec publishes the lifecycle
+// independently of approvals. The planner can stay on call through ask_planner, edits to files
 // the plan does not list get a note once, and finish_plan ends it with a structured completion report
 // and bounded planner acceptance. Pauses keep the implementation context and require explicit user
 // recovery. It is entered only by approving a plan (plan.ts calls begin).
@@ -164,6 +164,10 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     }
   };
 
+  const publishActive = (source: "transition" | "restore" = "transition") => {
+    safely(() => pi.events.emit("workflow-mode:exec", { active: state?.active === true, source }));
+  };
+
   const begin = (ctx: ExtensionContext, next: ExecState, options: { record: boolean }) => {
     epoch++;
     cards.begin(ctx);
@@ -181,6 +185,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     if (options.record) persist();
     setTools();
     updateStatus(ctx);
+    publishActive();
   };
 
   const end = (ctx: ExtensionContext) => {
@@ -192,6 +197,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     noted.clear();
     setToolsActive(pi, EXEC_TOOLS, false);
     updateStatus(ctx);
+    publishActive();
   };
 
   const finalize = async (
@@ -275,6 +281,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     if (!state?.active) cards.end();
     setTools();
     updateStatus(ctx);
+    publishActive("restore");
   };
 
   pi.on("session_start", (_event, ctx) => restore(ctx));
@@ -283,6 +290,9 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     epoch++;
     cards.end();
     disposeAgent();
+    // Reload replaces this runtime, not the durable execution. Only release transient UI ownership.
+    const ctx = hostCtx;
+    if (ctx?.hasUI) safely(() => ctx.ui.setStatus(EXEC_STATUS_KEY, undefined));
     hostCtx = undefined;
   });
 

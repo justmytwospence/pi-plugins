@@ -71,7 +71,8 @@ export interface Snapshot {
   quotas: Quota[]; unavailableQuota?: string; statuses: string[]; now: number;
   /** Folded in from companion extensions' statuses when they are installed. */
   mode?: PermissionModeStatus;
-  /** pi-plan-mode's exec mode, shown as a mode: what follows `exec mode on · ` (empty when nothing does), e.g. `Claude Opus 5.5 on call · 2 asks`. */
+  workflow?: WorkflowStatus;
+  /** pi-plan-mode's exec workflow detail after `exec mode on · `, empty when no detail is published. */
   exec?: string;
   autoEffort?: boolean; autoEffortDetail?: string; lean?: string; cache?: string; extraBilled?: number;
   /** A prompt stashed by @saadjs/pi-stash; text is its content when readable. */
@@ -217,7 +218,16 @@ export function parseMarimoStatus(text: string): MarimoStatus | undefined {
   return status;
 }
 
-/** The permission mode (pi-tool-gate, or pi-plan-mode alone), as Claude Code labels it. */
+export interface WorkflowStatus {
+  kind: "work" | "chat" | "plan" | "exec";
+  key?: string;
+}
+export function parseWorkflowStatus(text: string): WorkflowStatus | undefined {
+  const match = /^workflow: (work|chat|plan|exec)(?: \((.+) to cycle\))?$/u.exec(text);
+  return match ? { kind: match[1] as WorkflowStatus["kind"], ...(match[2] ? { key: match[2] } : {}) } : undefined;
+}
+
+/** Approval status, including legacy combined workflow labels for migration. */
 export interface PermissionModeStatus {
   kind: "chat" | "manual" | "acceptEdits" | "plan" | "auto" | "bypass";
   /** `⏵⏵ auto mode on` */
@@ -232,14 +242,14 @@ const MODE_NAMES: Record<PermissionModeStatus["kind"], string> = {
   chat: "chat", manual: "manual", acceptEdits: "accept edits", plan: "plan", auto: "auto", bypass: "yolo",
 };
 export function parseModeStatus(text: string): PermissionModeStatus | undefined {
-  const match = /^(⏸|⏵⏵) (chat mode|manual mode|accept edits|plan mode|auto mode|yolo mode|bypass permissions) on(?: \((.+) to cycle\))?$/u.exec(text);
+  const match = /^(⏸|⏵⏵) (chat mode|manual mode|accept edits|plan mode|auto mode|yolo mode|bypass permissions) on(?: \((.+) to cycle\))?$/u.exec(text.replace(/ \(legacy\)(?= mode on| on)/u, ""));
   if (!match) return undefined;
   // ⏸ is one cell and ⏵⏵ two; the footer draws one same-width icon for either.
   const glyph = match[1] === "⏸" ? ICONS.paused : ICONS.running;
   return { kind: MODE_KINDS[match[2]], label: `${glyph} ${match[2]} on`, ...(match[3] ? { key: match[3] } : {}) };
 }
 
-export interface AbsorbedStatuses { mode?: PermissionModeStatus; exec?: string; autoEffort: boolean; autoEffortDetail?: string; lean?: string; cache?: string; extraBilled?: number; stashed?: boolean; marimo?: MarimoStatus[]; lens?: LensStatus; bg?: BgItem[]; pressure?: PressureItem[]; /** Another extension owns the `mcp` status. */ mcp?: boolean; rest: string[] }
+export interface AbsorbedStatuses { workflow?: WorkflowStatus; mode?: PermissionModeStatus; exec?: string; autoEffort: boolean; autoEffortDetail?: string; lean?: string; cache?: string; extraBilled?: number; stashed?: boolean; marimo?: MarimoStatus[]; lens?: LensStatus; bg?: BgItem[]; pressure?: PressureItem[]; /** Another extension owns the `mcp` status. */ mcp?: boolean; rest: string[] }
 // Statuses from our own companion extensions that read better inside the footer
 // rows they describe. Each is optional: absent extensions publish nothing, and a
 // status whose text no longer matches the expected shape falls through to the
@@ -254,8 +264,9 @@ export interface AbsorbedStatuses { mode?: PermissionModeStatus; exec?: string; 
 //   marimo-lens       (pi-marimo)               "lens: nb.py · S1 ..." -> its own row under the marimo row
 //   bg                (pi-bg)                   "bg: tests 2:14 · ..." -> its own row under that
 //   pressure          (pi-pressure)             "pressure: cpu 97 ↑ hot · ..." -> its own row under that
-//   permission-mode   (pi-tool-gate, pi-plan-mode) "⏵⏵ auto mode on (shift+tab to cycle)" -> the model row
-//   plan-exec        (pi-plan-mode) "exec mode on · Claude Opus 5.5 on call" -> the permission-mode row, in place of the mode (which follows it, dim)
+//   workflow-mode    (pi-tool-gate, pi-plan-mode) "workflow: plan (shift+tab to cycle)" -> Workflow
+//   permission-mode  (pi-tool-gate) "⏵⏵ auto mode on (alt+a to cycle)" -> Approvals
+//   plan-exec        (pi-plan-mode) "exec mode on · review 2" -> Workflow phase/detail
 // Everything else (plan, gate, mcp, ...) stays in the status row.
 export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: { claudeRow: boolean }): AbsorbedStatuses {
   const result: AbsorbedStatuses = { autoEffort: false, rest: [] };
@@ -290,8 +301,14 @@ export function absorbStatuses(statuses: ReadonlyMap<string, string>, options: {
     if (bg) { result.bg = bg; continue; }
     const pressure = key === "pressure" ? parsePressureStatus(plainText) : undefined;
     if (pressure) { result.pressure = pressure; continue; }
+    const workflow = key === "workflow-mode" ? parseWorkflowStatus(plainText) : undefined;
+    if (workflow) { result.workflow = workflow; continue; }
     const mode = key === "permission-mode" ? parseModeStatus(plainText) : undefined;
-    if (mode) { result.mode = mode; continue; }
+    if (mode) {
+      if (mode.kind === "chat" || mode.kind === "plan") result.workflow ??= { kind: mode.kind, ...(mode.key ? { key: mode.key } : {}) };
+      else result.mode = mode;
+      continue;
+    }
     const exec = key === "plan-exec" ? /^exec mode on(?: · (\S.*))?$/u.exec(plainText) : null;
     if (exec) { result.exec = exec[1] ?? ""; continue; }
     const plan = key === "plan" ? /^plan: (.+) \((\/plan(?:ners)?)\)$/.exec(plainText) : null;
@@ -918,7 +935,7 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     : "";
   const identity = `${model}${reasoning ? `${sep}${reasoning}` : ""}`;
   const modeColor = s.mode ? MODE_COLORS[s.mode.kind] : "muted";
-  const modeText = s.mode ? theme.fg(modeColor, clean(s.mode.label)) : "";
+  const approval = s.mode && s.mode.kind !== "chat" && s.mode.kind !== "plan" ? s.mode : undefined;
   rows.push(row(ICONS.project, (w) => fitSegments([
     { text: project, priority: 60 },
     { text: branch, short: branchShort, priority: g.conflicts ? 110 : 70 },
@@ -943,27 +960,27 @@ export function renderFooter(snapshot: Snapshot, width: number, theme: Paint): s
     { text: phaseText, priority: 120 },
     { text: s.queued ? theme.fg("warning", "queued") : "", priority: 115 },
   ], w, theme)));
-  // The permission mode gets its own row, and the gate's tally (published only in the
-  // modes where Jev judges) follows it there. The cycle-key hint is not shown.
-  const gateStatus = s.mode ? s.statuses.find((status) => /^Gate /.test(stripVTControlCharacters(status))) : undefined;
+  // Each provider owns its axis. Legacy chat/plan labels never invent approvals.
+  // Gate judgments (including plan+yolo) attach only to the approvals row.
+  const gateStatus = approval ? s.statuses.find((status) => /^Gate /.test(stripVTControlCharacters(status))) : undefined;
   const statuses = gateStatus ? s.statuses.filter((status) => status !== gateStatus) : s.statuses;
-  // Exec mode (pi-plan-mode) takes the mode's place, as another mode would; the permission mode
-  // underneath keeps deciding what runs, so it follows, dim, and Shift+Tab still changes it.
-  const exec = s.exec !== undefined;
-  const execText = exec ? theme.fg("accent", `${ICONS.running} exec mode on`) : "";
-  const underlying = exec && s.mode ? theme.fg("dim", ` · ${MODE_NAMES[s.mode.kind]}`) : "";
-  const execDetail = exec && s.exec ? theme.fg("muted", clean(s.exec)) : "";
-  const negotiation = exec && s.exec ? /^(implementing|consulting|review \d+|revising(?: · \d+ findings)?|paused(?: · (?:user needed|review unavailable))?)(?: · (.*))?$/u.exec(clean(s.exec)) : null;
-  if (s.mode || exec) rows.push(row(ICONS.gate, (w) => fitSegments(negotiation ? [
-    // Keep phase attached to the mode so fitting drops costs, never the useful phase first.
-    { text: `${execText}${sep}${theme.fg("muted", negotiation[1])}`, short: `${execText}${sep}${theme.fg("muted", negotiation[1].split(" · ")[0])}`, priority: 120 },
-    { text: negotiation[2] ? theme.fg("muted", negotiation[2]) : "", priority: 90 },
-    { text: s.mode ? theme.fg("dim", MODE_NAMES[s.mode.kind]) : "", priority: 40 },
-    { text: gateStatus ? gateStatus.replace(/[\r\n\t]/g, " ") : "", priority: 50 },
-  ] : [
-    { text: exec ? `${execText}${underlying}` : modeText, priority: 100 },
-    { text: execDetail, priority: 90 },
-    { text: gateStatus ? gateStatus.replace(/[\r\n\t]/g, " ") : "", priority: 50 },
+  const legacyWorkflow = s.mode?.kind === "chat" || s.mode?.kind === "plan" ? { kind: s.mode.kind, key: s.mode.key } : undefined;
+  const workflow: WorkflowStatus | undefined = s.exec !== undefined ? { kind: "exec" } : s.workflow ?? legacyWorkflow;
+  const negotiation = s.exec ? /^(implementing|consulting|review \d+|revising(?: · \d+ findings)?|paused(?: · (?:user needed|review unavailable))?)(?: · (.*))?$/u.exec(clean(s.exec)) : null;
+  if (workflow) {
+    const state = `${theme.fg("muted", "Workflow")}${sep}${theme.fg(workflow.kind === "exec" ? "accent" : workflow.kind === "plan" ? "mdLink" : "success", workflow.kind)}`;
+    const phase = negotiation?.[1] ?? (s.exec ? clean(s.exec).split(" · ")[0] : "");
+    const detail = negotiation ? negotiation[2] : s.exec ? clean(s.exec).split(" · ").slice(1).join(" · ") : "";
+    rows.push(row(ICONS.gate, (w) => fitSegments([
+      { text: phase ? `${state}${sep}${theme.fg("muted", phase)}` : state, priority: 120 },
+      { text: detail ? theme.fg("muted", detail) : workflow.kind === "plan" ? theme.fg("muted", "read-only research") : workflow.kind === "chat" ? theme.fg("muted", "read-only discussion") : "", priority: 70 },
+      { text: theme.fg("dim", workflow.kind === "exec" ? "/plan-exec" : workflow.key ?? ""), priority: 30 },
+    ], w, theme)));
+  }
+  if (approval) rows.push(row(ICONS.gate, (w) => fitSegments([
+    { text: `${theme.fg("muted", "Approvals")}${sep}${theme.fg(modeColor, MODE_NAMES[approval.kind] + (approval.kind === "manual" || approval.kind === "acceptEdits" ? " (legacy)" : ""))}`, priority: 120 },
+    { text: gateStatus ? clean(gateStatus) : "", short: gateStatus?.replace(/^Gate (\d+) auto · (\d+) pushed back · (\d+) asked$/u, "Gate $1/$2/$3"), priority: 60 },
+    { text: approval.key ? theme.fg("dim", clean(approval.key)) : "", priority: 30 },
   ], w, theme)));
 
   const context = s.context.percent;
@@ -1445,7 +1462,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       context: current.getContextUsage() ?? { tokens: null, contextWindow: current.model?.contextWindow ?? 0, percent: null },
       totals, cacheHit, git: { ...git, branch: git.branch ?? branch ?? undefined },
       quotas, unavailableQuota,
-      statuses: absorbed.rest, mode: absorbed.mode, exec: absorbed.exec, autoEffort: absorbed.autoEffort, autoEffortDetail: absorbed.autoEffortDetail, lean: absorbed.lean, cache: absorbed.cache, extraBilled: absorbed.extraBilled,
+      statuses: absorbed.rest, workflow: absorbed.workflow, mode: absorbed.mode, exec: absorbed.exec, autoEffort: absorbed.autoEffort, autoEffortDetail: absorbed.autoEffortDetail, lean: absorbed.lean, cache: absorbed.cache, extraBilled: absorbed.extraBilled,
       stash: absorbed.stashed ? { text: stashedPrompt() } : undefined,
       marimo: absorbed.marimo, lens: absorbed.lens, bg: absorbed.bg, pressure: absorbed.pressure, borderGauge, compact: blockedHolds > 0,
       // Yield to an extension that publishes its own mcp status (pi-mcp-adapter).

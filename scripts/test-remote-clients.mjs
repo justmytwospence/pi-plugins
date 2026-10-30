@@ -12,6 +12,7 @@
 // without Sidebar.
 // Overrides: HERDR_WEB_UI_DIR, COLLIE_DIR (a checkout with frames.toml support), COLLIE_FRAMES.
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -28,7 +29,7 @@ const themeModule = await import(new URL('./modes/interactive/theme/theme.js', s
 const jiti = createJiti(import.meta.url);
 const { QuestionDialog } = await jiti.import('../packages/pi-ask-user-question/src/dialog.ts');
 const { askApproval } = await jiti.import('../packages/pi-tool-gate/src/prompt.ts');
-const { ALLOW_ONCE, BLOCK, choiceLabels } = await jiti.import('../packages/pi-tool-gate/src/index.ts');
+const { default: toolGate, ALLOW_ONCE, BLOCK, choiceLabels } = await jiti.import('../packages/pi-tool-gate/src/index.ts');
 const { CustomEditor } = await import(new URL('./modes/interactive/components/custom-editor.js', sdkUrl));
 const { sidebarScreen } = await import('./remote-clients/sidebar.mjs');
 const { TerminalPanel } = await jiti.import('../packages/pi-interactive-shell/src/panel.ts');
@@ -56,7 +57,26 @@ setKeybindings(kb);
 const tui = { terminal: { rows: 40, columns: 120 }, requestRender() {} };
 
 // What stands under a dialog while it waits: pi-status-footer's one row, alone or under pi-bg's pill.
-const footer = (width) => [theme.fg('dim', ` pi-plugins · main · opus · Context 12% used · waiting`.slice(0, width))];
+const NOW = Date.now();
+const modeStatuses = (workflow, approval, phase) => new Map([
+  ...(workflow ? [['workflow-mode', `workflow: ${workflow}${workflow === 'exec' ? '' : ' (shift+tab to cycle)'}`]] : []),
+  ...(approval ? [['permission-mode', `⏵⏵ ${approval} mode on (alt+a to cycle)`]] : []),
+  ...(phase ? [['plan-exec', `exec mode on · ${phase} · 2 consultations · $0.02 consult · $0.01 review`]] : []),
+]);
+function statusFooter(width, statuses, { compact = false, phase = 'idle' } = {}) {
+  const absorbed = absorbStatuses(statuses, { claudeRow: false });
+  const lines = renderFooter({
+    cwd: '/tmp/pi-plugins', model: 'claude-opus-5-5', provider: 'anthropic', thinking: 'high', oauth: true,
+    context: { tokens: 24000, contextWindow: 200000, percent: 12 },
+    git: { project: 'pi-plugins', branch: 'main' },
+    totals: { input: 23000, output: 1500, cacheRead: 90000, cacheWrite: 400, cost: 1.24, compactions: 1, started: NOW - 60000 },
+    quotas: [], now: NOW, queued: false, borderGauge: true, phase,
+    ...absorbed, statuses: absorbed.rest, compact,
+  }, width, theme);
+  if (compact) assert.equal(lines.length, 1, 'blocked footer must stay one row');
+  return lines;
+}
+const footer = (width) => statusFooter(width, modeStatuses('plan', 'yolo'), { compact: true, phase: 'waiting' });
 const UNDERS = {
   footer: (width) => footer(width),
   'pill+footer': (width) => [theme.fg('muted', ' 1 task '), '', ...footer(width)],
@@ -199,18 +219,48 @@ async function overrideLines(width) {
 
 function phaseFooter(width) {
   assert.ok(overrideStatus, 'render the actual override command before its phase footer');
-  const absorbed = absorbStatuses(new Map([['plan-exec', overrideStatus]]), { claudeRow: false });
-  return renderFooter({
-    cwd: '/tmp/pi-plugins', model: 'claude-opus-5-5', provider: 'anthropic',
-    context: { tokens: 24000, contextWindow: 200000, percent: 12 },
-    git: { project: 'pi-plugins', branch: 'main' },
-    statuses: absorbed.rest, exec: absorbed.exec, phase: 'paused · user needed', compact: true,
-  }, width, theme);
+  const statuses = modeStatuses('exec', 'auto');
+  statuses.set('plan-exec', overrideStatus);
+  return statusFooter(width, statuses, { compact: true, phase: 'paused · user needed' });
+}
+
+// Capture Pi's native select while the real gate command holds its blocked signal. Cancel only
+// after rendering so these fixtures also verify that the queued picker releases the hold.
+async function gatePickerLines(width, command) {
+  const commands = new Map();
+  const events = new EventEmitter();
+  let blocked = false, lines;
+  events.on('herdr:blocked', ({ active }) => { blocked = active; });
+  toolGate({
+    on() {}, registerShortcut() {}, registerMessageRenderer() {},
+    registerCommand: (name, spec) => commands.set(name, spec), events,
+  });
+  events.emit('workflow-mode:plan-provider', { planFile: '/tmp/client-plan.md' });
+  await commands.get(command).handler('', {
+    hasUI: true, mode: 'tui', cwd: '/tmp/pi-plugins', isIdle: () => true,
+    ui: {
+      select: async (title, options) => {
+        assert.ok(blocked, `/${command} must hold herdr:blocked while selecting`);
+        assert.deepEqual(options, command === 'mode' ? ['Work', 'Chat', 'Plan'] : ['Auto', 'Yolo']);
+        lines = new ExtensionSelectorComponent(title, options, () => {}, () => {}).render(width);
+        return undefined;
+      },
+      notify: (message) => { throw new Error(message); },
+    },
+  });
+  assert.ok(lines, `actual /${command} must open a picker`);
+  assert.equal(blocked, false, `/${command} must release herdr:blocked`);
+  return lines;
 }
 
 // Each dialog, and what each client must make of it.
 const DIALOGS = [
   { name: 'plan exec override confirmation', lines: overrideLines, question: 'Finish without planner acceptance?', herdr: { options: 2, multi: false, labels: ['Finish without review', 'Keep paused'] }, collie: { kind: 'prompt-select', options: 3, labels: ['Finish without review', 'Keep paused'], wraps: ['Finish without review', 'Keep paused'] } },
+  ...[['mode', 'Workflow', ['Work', 'Chat', 'Plan']], ['approvals', 'Approvals', ['Auto', 'Yolo']]].map(([command, question, labels]) => ({
+    name: `/${command} picker`, lines: (w) => gatePickerLines(w, command), question,
+    herdr: { options: labels.length, multi: false, labels },
+    collie: { kind: 'prompt-select', options: labels.length + 1, labels, wraps: labels },
+  })),
   { name: 'ask single', lines: (w) => questionLines([question(false)], w), herdr: { options: 4, multi: false }, collie: { kind: 'prompt-select', options: 4 }, },
   { name: 'ask multi', lines: (w) => questionLines([question(true)], w), herdr: { multi: true }, collie: { kind: 'multi-select' }, },
   { name: 'tool-gate approval', lines: approvalLines, herdr: { options: 3, multi: false }, collie: { kind: 'prompt-select' }, },
@@ -264,15 +314,41 @@ for (const width of [46, 120, 180]) {
 // half focused): each client must read the last two as it reads the first.
 const editor = new CustomEditor({ ...tui, terminal: { rows: HEIGHT, columns: 180 } }, themeModule.getEditorTheme(), kb, { paddingX: 0 });
 editor.setText('next step');
-const idleFooter = (width) => [theme.fg('dim', ' pi-plugins · main · opus'.slice(0, width)), theme.fg('dim', ' Context 12% used · idle'.slice(0, width))];
+const FOOTERS = [
+  ...['work', 'chat', 'plan', 'exec'].flatMap(workflow => ['auto', 'yolo'].map(approval => ({
+    name: `${workflow}/${approval}`, statuses: modeStatuses(workflow, approval, workflow === 'exec' ? 'implementing' : undefined),
+  }))),
+  ...['consulting', 'review 2', 'revising · 3 findings', 'paused · user needed', 'paused · review unavailable'].flatMap(phase => ['auto', 'yolo'].map(approval => ({
+    name: `exec/${approval} ${phase}`, statuses: modeStatuses('exec', approval, phase),
+  }))),
+  ...['work', 'plan'].map(workflow => ({ name: `standalone ${workflow}`, statuses: modeStatuses(workflow) })),
+  { name: 'standalone exec', statuses: modeStatuses(undefined, undefined, 'review 2') },
+  { name: 'approval provider only', statuses: modeStatuses(undefined, 'auto') },
+  { name: 'no mode providers', statuses: new Map() },
+  // Eight notebook status slots plus the five core rows reach the deployed 13-row allowance,
+  // rather than merely comparing equally unreadable Sidebar baselines.
+  { name: 'high status count', statuses: modeStatuses('plan', 'yolo'), highStatus: true },
+];
+function idleFooter(width, fixture) {
+  if (!fixture.highStatus) return statusFooter(width, fixture.statuses);
+  const statuses = new Map(fixture.statuses);
+  for (let i = 1; i <= 8; i++) statuses.set(i === 1 ? 'marimo' : `marimo-${i}`, `marimo: analysis-${i}.py · disconnected`);
+  const absorbed = absorbStatuses(statuses, { claudeRow: false });
+  assert.equal(absorbed.marimo.length, 8);
+  const lines = statusFooter(width, statuses);
+  assert.equal(lines.length, 13, 'high-status idle fixture must exercise the full footer allowance');
+  return lines;
+}
 const IDLE = [['without Sidebar', { open: false }], ['Sidebar open, main focused', { focused: false }], ['Sidebar open, Sidebar focused', { focused: true }]];
 // Collie reads only main's side of Sidebar's split through frames.toml's panel_below and
 // panel_beside declarations (Collie fork 1.24.0-frames.18b43859 and later).
 for (const width of [46, 120, 180]) {
-  const baseline = screens.length;
-  for (const [under, options] of IDLE) {
-    const { lines: screen } = sidebarScreen({ width, height: HEIGHT, dock: (w) => editor.render(w), footer: idleFooter, ...options });
-    screens.push({ name: 'idle editor', width, under, idle: baseline, ansi: screen.join('\n') });
+  for (const fixture of FOOTERS) {
+    const baseline = screens.length;
+    for (const [under, options] of IDLE) {
+      const { lines: screen } = sidebarScreen({ width, height: HEIGHT, dock: (w) => editor.render(w), footer: (w) => idleFooter(w, fixture), ...options });
+      screens.push({ name: `idle editor ${fixture.name}`, width, under, idle: baseline, ansi: screen.join('\n') });
+    }
   }
 }
 
@@ -322,7 +398,10 @@ screens.forEach((screen, i) => {
     const h = results.herdr, c = results.collie;
     if (h && JSON.stringify(h[i]) !== JSON.stringify(h[screen.idle])) problems.push(`herdr-web-ui: ${JSON.stringify(h[i])}, without Sidebar ${JSON.stringify(h[screen.idle])}`);
     const kinds = (r) => JSON.stringify({ blocks: r.blocks.filter((b) => b.kind !== 'raw'), composer: r.composer, draft: r.draft });
+    if (h?.[i] !== null && h?.[i] !== undefined) problems.push(`herdr-web-ui: idle editor misidentified as question: ${JSON.stringify(h[i])}`);
     if (c) {
+      if (c[i].composer !== 'draft' || c[i].draft?.trim() !== 'next step') problems.push(`Collie: wanted draft composer containing "next step", got ${JSON.stringify({ composer: c[i].composer, draft: c[i].draft })}`);
+      if (c[i].blocks.some(b => b.kind !== 'raw')) problems.push(`Collie: idle editor misidentified as card: ${JSON.stringify(c[i].blocks)}`);
       if (kinds(c[i]) !== kinds(c[screen.idle])) problems.push(`Collie: ${kinds(c[i])}, without Sidebar ${kinds(c[screen.idle])}`);
     }
     report(label, problems);

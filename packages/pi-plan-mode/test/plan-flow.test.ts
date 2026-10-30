@@ -4,6 +4,7 @@ import { type ExtensionContext, initTheme } from "@earendil-works/pi-coding-agen
 import { test } from "vitest";
 import { directImplementationBrief, implementationBrief } from "../src/handoff.js";
 import planMode from "../src/index.js";
+import { INLINE_ENTRY, MODE_CHANGED, MODE_SET, PLAN_PROVIDER } from "../src/inline-plan.js";
 import type { PlannerSessionFactory } from "../src/planner/session.js";
 import type { PlanModeSettings } from "../src/settings.js";
 import { createCustomSelectorHarness, createMockContext, createMockPi } from "./support.js";
@@ -98,6 +99,7 @@ function setup(
     login?: (providerId: string, show: (dialog: never) => void) => Promise<void>;
     settings?: Partial<PlanModeSettings>;
     thinkingLevel?: string;
+    approval?: "auto" | "bypassPermissions";
     configureContext?: (ctx: ExtensionContext) => void;
   } = {},
 ) {
@@ -136,9 +138,23 @@ function setup(
       getSessionId: () => "main",
     },
   });
+  const workflowRequests: string[] = [];
+  const approvalRequests: string[] = [];
+  if (options.approval) {
+    mock.eventBus.on(MODE_SET, (data) => {
+      const mode = (data as { mode: string }).mode;
+      workflowRequests.push(mode);
+      mock.eventBus.emit(MODE_CHANGED, { mode, cycle: ["work", "chat", "plan"] });
+    });
+    mock.eventBus.on(PLAN_PROVIDER, () => {
+      mock.eventBus.emit(MODE_CHANGED, { mode: workflowRequests.at(-1) ?? "work", cycle: ["work", "chat", "plan"] });
+    });
+    mock.eventBus.on("permission-mode:set", (data) => approvalRequests.push((data as { mode: string }).mode));
+    mock.eventBus.emit("permission-mode:changed", { mode: options.approval, cycle: ["auto", "bypassPermissions"] });
+  }
   options.configureContext?.(context.ctx as ExtensionContext);
   (context.ctx as { sendUserMessage?: unknown }).sendUserMessage = async (text: string) => sent.push(text);
-  return { mock, context, sessions, sent, ready, harness: () => harness };
+  return { mock, context, sessions, sent, ready, workflowRequests, approvalRequests, harness: () => harness };
 }
 
 async function implementationScreen(options: Parameters<typeof setup>[0] & { planModel?: string } = {}) {
@@ -190,7 +206,8 @@ async function implementationScreen(options: Parameters<typeof setup>[0] & { pla
 for (const author of ["A", "B", "M"]) {
   for (const clear of [false, true]) {
     test(`/planners Here implements ${author} with ${clear ? "same-session compaction" : "conversation kept"}`, async () => {
-      const state = await implementationScreen();
+      const approval = clear ? "bypassPermissions" : "auto";
+      const state = await implementationScreen({ approval });
       const { mock, context, sessions, app, focus } = state;
       let children = 0;
       let compaction:
@@ -254,6 +271,8 @@ for (const author of ["A", "B", "M"]) {
       assert.equal(mock.setModels.length, 0);
       assert.equal(children, 0);
       assert.equal(sessions.prompts.length, 0, "no consultant prompt");
+      assert.equal(state.workflowRequests.at(-1), "work");
+      assert.deepEqual(state.approvalRequests, [], `${approval} approvals are untouched`);
       assert.ok(
         !mock.entries.some(
           (entry) => entry.customType === "plan-mode:exec" || entry.customType === "plan-implementation-runtime",
@@ -519,7 +538,8 @@ test("/planners implementation offers available Terra outside the planning short
   await opened;
 });
 
-test("/planners genuine handoff retains the fresh-child path", async () => {
+/** A child is initialized by a different extension runtime, with appends visible on its branch. */
+async function freshHandoff() {
   const state = await implementationScreen({ settings: { implementationModelMap: implementationMap } });
   let child:
     | { parentSession?: string; setup(manager: unknown): Promise<void>; withSession(ctx: unknown): Promise<void> }
@@ -541,75 +561,174 @@ test("/planners genuine handoff retains the fresh-child path", async () => {
   await flush();
   assert.ok(child);
   assert.equal(child.parentSession, "/main.jsonl");
-  const entries: Array<{ type: string; customType: string; data: unknown }> = [];
+  for (const handler of state.mock.events.get("session_shutdown") ?? []) await handler({}, state.context.ctx);
+  const oldSnapshot = () =>
+    structuredClone({
+      entries: state.mock.entries,
+      notifications: state.context.notifications,
+      statuses: [...state.context.statuses],
+      messages: state.mock.sentUserMessages,
+      models: state.mock.setModels,
+      thinkingLevel: state.mock.thinkingLevel,
+    });
+  const old = oldSnapshot();
+  const replacement = setup();
+  await replacement.ready;
   await child.setup({
-    appendCustomEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
+    appendCustomEntry: (customType: string, data: unknown) => replacement.mock.entries.push({ customType, data }),
   });
-  assert.equal(entries[0]?.customType, "plan-implementation-runtime");
-  assert.ok(!entries.some((entry) => entry.customType === "plan-mode:exec"), "exec waits for the model switch");
-  const fresh = createMockContext({ model: OPUS, sessionManager: { getBranch: () => entries } });
-  for (const handler of state.mock.events.get("session_start") ?? []) await handler({}, fresh.ctx);
-  assert.ok(state.mock.entries.some((entry) => entry.customType === "plan-mode:exec"));
-  let prompt = "";
-  await child.withSession({
-    ...(fresh.ctx as ExtensionContext),
-    sendUserMessage: async (text: string) => {
-      prompt = text;
-    },
+  assert.equal(replacement.mock.entries[0]?.customType, "plan-implementation-runtime");
+  assert.ok(!replacement.mock.entries.some((entry) => entry.customType === "plan-mode:exec"));
+  const event = async (name: string) => {
+    for (const handler of replacement.mock.events.get(name) ?? []) await handler({}, replacement.context.ctx);
+  };
+  const handoff = child;
+  const callback = (
+    model: typeof SONNET = OPUS,
+    sendUserMessage: (text: string) => Promise<unknown> = async () => {},
+  ) => handoff.withSession({ ...(replacement.context.ctx as ExtensionContext), model, sendUserMessage });
+  return { ...replacement, event, callback, assertOldUntouched: () => assert.deepEqual(oldSnapshot(), old) };
+}
+
+test("/planners fresh handoff begins exec in the replacement runtime exactly once and survives reload", async () => {
+  const fresh = await freshHandoff();
+  const publications: unknown[] = [];
+  fresh.mock.eventBus.on("workflow-mode:exec", (data) => publications.push(data));
+  await fresh.event("session_start");
+  assert.equal(fresh.mock.setModels.length, 1);
+  assert.deepEqual(
+    publications.filter((data) => (data as { source: string }).source === "transition"),
+    [{ active: true, source: "transition" }],
+  );
+  const exec = fresh.mock.entries.find((entry) => entry.customType === "plan-mode:exec");
+  assert.ok(exec);
+  assert.equal((exec.data as { active: boolean }).active, true);
+  const prompts: string[] = [];
+  await fresh.callback(OPUS, async (text) => {
+    prompts.push(text);
   });
-  assert.match(prompt, /finish_plan/u);
-  assert.match(prompt, /# Exact M/u);
+  await fresh.callback(OPUS, async (text) => {
+    prompts.push(text);
+  });
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0] ?? "", /finish_plan/u);
+  assert.match(prompts[0] ?? "", /# Exact M/u);
+  const entries = structuredClone(fresh.mock.entries);
+  const latest = entries.filter((entry) => entry.customType === "plan-mode:exec").at(-1)?.data as {
+    negotiation: { executionId: string };
+  };
+  assert.ok(latest.negotiation.executionId);
+  await fresh.event("session_shutdown");
+  await fresh.event("session_start");
+  assert.deepEqual(fresh.mock.entries.slice(0, entries.length), entries);
+  const restored = fresh.mock.entries.filter((entry) => entry.customType === "plan-mode:exec").at(-1)
+    ?.data as typeof latest;
+  assert.deepEqual(restored, latest, "reload preserves the initialized negotiation");
+  assert.equal(restored.negotiation.executionId, latest.negotiation.executionId);
+  assert.equal(fresh.mock.setModels.length, 1);
+  assert.equal(
+    fresh.mock.entries.filter((entry) => entry.customType === "plan-implementation-runtime-consumed").length,
+    1,
+  );
+  fresh.assertOldUntouched();
 });
 
-for (const failure of ["false", "throw", "reject"] as const) {
-  test(`/planners ${failure} child model activation does not seed a consultant or start implementation`, async () => {
-    const state = await implementationScreen({ settings: { implementationModelMap: implementationMap } });
-    let child: { setup(manager: unknown): Promise<void>; withSession(ctx: unknown): Promise<void> } | undefined;
-    Object.assign(state.context.ctx, {
-      waitForIdle: async () => {},
-      newSession: async (options: typeof child) => {
-        child = options;
-        return { cancelled: false };
-      },
-    });
-    state.focus("Mode");
-    state.app.handleInput("\u001b[C");
-    state.focus("Context");
-    state.app.handleInput("\u001b[C");
-    state.app.handleInput("\r");
-    await state.opened;
-    await flush();
-    assert.ok(child);
-    const entries: Array<{ type: string; customType: string; data: unknown }> = [];
-    await child.setup({
-      appendCustomEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
-    });
-    state.mock.rawPi.setModel = () => {
-      if (failure === "throw") throw new Error("Switch failed");
-      return failure === "reject" ? Promise.reject(new Error("Switch failed")) : Promise.resolve(false);
+for (const failure of [
+  "false",
+  "throw",
+  "reject",
+  "invalid",
+  "non-string",
+  "empty-provider",
+  "empty-model",
+  "effort",
+] as const) {
+  test(`/planners ${failure} child activation recovers only in the replacement runtime`, async () => {
+    const fresh = await freshHandoff();
+    const runtime = fresh.mock.entries[0]?.data as { model: unknown; exec: { planFile: string; planner?: unknown } };
+    const malformed: Record<string, unknown> = {
+      invalid: "invalid",
+      "non-string": { provider: "test", modelId: "model" },
+      "empty-provider": " /model",
+      "empty-model": "test/ ",
     };
-    const fresh = createMockContext({
-      model: SONNET,
-      modelRegistry: (state.context.ctx as ExtensionContext).modelRegistry,
-      sessionManager: { getBranch: () => entries },
-    });
-    for (const handler of state.mock.events.get("session_start") ?? []) await handler({}, fresh.ctx);
+    if (failure in malformed) runtime.model = malformed[failure];
+    else if (failure === "effort")
+      fresh.mock.rawPi.setThinkingLevel = () => {
+        throw new Error("Effort failed");
+      };
+    else
+      fresh.mock.rawPi.setModel = () => {
+        if (failure === "throw") throw new Error("Switch failed");
+        return failure === "reject" ? Promise.reject(new Error("Switch failed")) : Promise.resolve(false);
+      };
+    const publications: unknown[] = [];
+    fresh.mock.eventBus.on("workflow-mode:exec", (data) => publications.push(data));
+    await fresh.event("session_start");
     let prompts = 0;
-    await child.withSession({
-      ...(fresh.ctx as ExtensionContext),
-      sendUserMessage: async () => {
-        prompts++;
-      },
+    await fresh.callback(OPUS, async () => {
+      prompts++;
     });
-    assert.equal(prompts, 0);
-    assert.ok(!state.mock.entries.some((entry) => entry.customType === "plan-mode:exec"));
-    const runtime = entries[0];
-    assert.ok(runtime);
-    assert.equal((runtime.data as { exec: { planner?: unknown } }).exec.planner, undefined);
-    assert.equal(state.mock.thinkingLevel, "high");
-    assert.ok(fresh.notifications.some((note) => /Implementation did not start/u.test(note.message)));
+    assert.equal(prompts, 0, "even an apparently matching selected model cannot bypass missing exec");
+    assert.ok(!fresh.mock.entries.some((entry) => entry.customType === "plan-mode:exec"));
+    assert.ok(!publications.some((data) => (data as { active: boolean }).active));
+    const recovery = fresh.mock.entries.filter((entry) => entry.customType === INLINE_ENTRY).at(-1)?.data as {
+      active: boolean;
+      planFile: string;
+    };
+    assert.equal(recovery.active, true);
+    assert.equal(recovery.planFile, runtime.exec.planFile);
+    assert.equal(fresh.context.statuses.get("workflow-mode"), "workflow: plan");
+    assert.ok(fresh.context.notifications.some((note) => /Implementation did not start/u.test(note.message)));
+    assert.equal(runtime.exec.planner, undefined);
+    const entries = structuredClone(fresh.mock.entries);
+    await fresh.event("session_start");
+    assert.deepEqual(fresh.mock.entries, entries, "failed bootstrap is consumed too");
+    fresh.assertOldUntouched();
   });
 }
+
+for (const mismatch of ["model", "missing", "inactive", "planFile", "implementerModel"] as const) {
+  test(`fresh callback requires matching selected model and latest active exec: ${mismatch}`, async () => {
+    const fresh = await freshHandoff();
+    await fresh.event("session_start");
+    const entry = fresh.mock.entries.find((entry) => entry.customType === "plan-mode:exec");
+    assert.ok(entry);
+    if (mismatch === "missing") {
+      for (let index = fresh.mock.entries.length - 1; index >= 0; index--) {
+        if (fresh.mock.entries[index]?.customType === "plan-mode:exec") fresh.mock.entries.splice(index, 1);
+      }
+    } else if (mismatch !== "model") {
+      fresh.mock.entries.push({
+        customType: "plan-mode:exec",
+        data: { ...(entry.data as object), ...(mismatch === "inactive" ? { active: false } : { [mismatch]: "other" }) },
+      });
+    }
+    let prompts = 0;
+    await fresh.callback(mismatch === "model" ? SONNET : OPUS, async () => {
+      prompts++;
+    });
+    assert.equal(prompts, 0);
+    fresh.assertOldUntouched();
+  });
+}
+
+test("fresh callback reports send failure on fresh UI and leaves exec active without retrying", async () => {
+  const fresh = await freshHandoff();
+  await fresh.event("session_start");
+  const entries = structuredClone(fresh.mock.entries);
+  let attempts = 0;
+  const send = async () => {
+    attempts++;
+    throw new Error("Transport failed");
+  };
+  await fresh.callback(OPUS, send);
+  await fresh.callback(OPUS, send);
+  assert.equal(attempts, 1);
+  assert.deepEqual(fresh.mock.entries, entries);
+  assert.ok(fresh.context.notifications.some((note) => /Transport failed.*Exec remains active/u.test(note.message)));
+  fresh.assertOldUntouched();
+});
 
 test("/planners a failed model switch never starts execution or seeds a consultant", async () => {
   const state = await implementationScreen({ settings: { implementationModelMap: implementationMap } });
@@ -627,6 +746,14 @@ test("/planners a failed model switch never starts execution or seeds a consulta
       /Implementation did not start; approve the plan again/u.test(note.message),
     ),
   );
+  assert.equal(state.context.statuses.get("workflow-mode"), "workflow: plan");
+  assert.equal(state.context.statuses.get("permission-mode"), undefined);
+  const restored = state.mock.entries.filter((entry) => entry.customType === INLINE_ENTRY).at(-1)?.data as {
+    active: boolean;
+    planFile: string;
+  };
+  assert.equal(restored.active, true);
+  assert.ok(existsSync(restored.planFile), "failed handoff keeps the selected plan available for reapproval");
 });
 
 for (const stale of ["none", "tree", "shutdown", "abort"] as const) {

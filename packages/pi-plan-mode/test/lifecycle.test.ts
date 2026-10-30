@@ -8,7 +8,9 @@ import {
   ACTIVITY_SECTION,
   type ActivitySection,
 } from "../src/activity.js";
+import { EXEC_ENTRY } from "../src/exec.js";
 import planMode from "../src/index.js";
+import { INLINE_ENTRY } from "../src/inline-plan.js";
 import type { PlannerSessionFactory, PlannerSessionHandle } from "../src/planner/session.js";
 import { SUBAGENT_PROGRESS_KIND } from "../src/subagent-progress.js";
 import { createCustomSelectorHarness, createMockContext, createMockPi } from "./support.js";
@@ -143,19 +145,19 @@ test("factory awaits shortcut settings, and the plan-mode shortcut awaits sessio
   await tick();
   mock.eventBus.emit(ACTIVITY_HOST, {});
   assert.equal(offers, 0, "an initializing branch cannot offer its disposed source");
-  assert.equal(context.statuses.get("permission-mode"), undefined);
+  assert.equal(context.statuses.get("workflow-mode"), undefined);
   resolve(settings);
   await start;
   assert.equal(offers, 1);
   await pressed;
   // Without pi-tool-gate, the shortcut toggles plan mode in this conversation.
-  assert.equal(context.statuses.get("permission-mode"), "⏸ plan mode on (ctrl+alt+p to cycle)");
+  assert.equal(context.statuses.get("workflow-mode"), "workflow: plan (ctrl+alt+p to cycle)");
   assert.equal(mock.sentUserMessages.length, 0);
   for (const handler of mock.events.get("session_shutdown") ?? []) await handler({}, ctx);
   await shortcut.handler(ctx);
   assert.equal(
-    context.statuses.get("permission-mode"),
-    "⏸ plan mode on (ctrl+alt+p to cycle)",
+    context.statuses.get("workflow-mode"),
+    "workflow: plan (ctrl+alt+p to cycle)",
     "a stale runtime does nothing",
   );
 });
@@ -277,4 +279,108 @@ test("shutdown during planner creation disposes the late handle without promptin
   assert.equal(disposed, true);
   assert.equal(prompted, false);
   await f.event("session_shutdown");
+});
+
+function bootstrapRecord(model: unknown = "test/implementer:high") {
+  return {
+    customType: "plan-implementation-runtime",
+    data: {
+      model,
+      exec: {
+        active: true,
+        planFile: "/fixture/approved.md",
+        implementerModel: "test/implementer",
+        implementer: "Implementer",
+        asks: 0,
+        costUsd: 0,
+      },
+    },
+  };
+}
+
+async function bootstrapRuntime(entries: ReturnType<typeof createMockPi>["entries"]) {
+  const mock = createMockPi();
+  mock.rawPi.appendEntry = (customType, data) => {
+    entries.push({ customType, data });
+  };
+  const context = createMockContext({
+    mode: "tui",
+    hasUI: true,
+    model: { provider: "test", id: "planner", name: "Planner" },
+    modelRegistry: { find: () => ({ provider: "test", id: "implementer", name: "Implementer" }) },
+    sessionManager: { getBranch: () => entries.map((entry) => ({ type: "custom", ...entry })) },
+  });
+  await planMode(mock.pi, { readSettings: async () => settings });
+  const event = async (name: string) => {
+    for (const handler of mock.events.get(name) ?? []) await handler({}, context.ctx);
+  };
+  return { mock, context, event };
+}
+
+for (const superseded of ["branch", "shutdown", "workflow"] as const) {
+  test(`fresh bootstrap deferred activation cannot mutate after ${superseded}`, async () => {
+    const entries: ReturnType<typeof createMockPi>["entries"] = [bootstrapRecord()];
+    const f = await bootstrapRuntime(entries);
+    let resolve!: (result: boolean) => void;
+    const activation = new Promise<boolean>((done) => {
+      resolve = done;
+    });
+    let switches = 0;
+    f.mock.rawPi.setModel = () => {
+      switches++;
+      return activation;
+    };
+    const publications: unknown[] = [];
+    f.mock.eventBus.on("workflow-mode:exec", (data) => publications.push(data));
+    // Suspend the bootstrap handler, as runtime replacement can interrupt lifecycle dispatch.
+    const starting = f.mock.events.get("session_start")?.[0]?.({}, f.context.ctx);
+    await tick();
+    assert.equal(switches, 1);
+    assert.equal(entries.filter((entry) => entry.customType === "plan-implementation-runtime-consumed").length, 1);
+    if (superseded === "branch") {
+      entries.splice(0, entries.length);
+      await f.event("session_tree");
+    } else if (superseded === "workflow") {
+      f.mock.eventBus.emit("workflow-mode:changed", { mode: "chat", source: "transition" });
+    } else await f.event("session_shutdown");
+    const saved = structuredClone(entries);
+    const notices = structuredClone(f.context.notifications);
+    resolve(false);
+    await starting;
+    assert.deepEqual(entries, saved);
+    assert.deepEqual(f.context.notifications, notices);
+    assert.ok(!entries.some((entry) => entry.customType === EXEC_ENTRY || entry.customType === INLINE_ENTRY));
+    assert.ok(!publications.some((data) => (data as { source: string }).source === "transition"));
+  });
+}
+
+test("a consumed fresh bootstrap restores exec in a new runtime without activating or beginning again", async () => {
+  const entries: ReturnType<typeof createMockPi>["entries"] = [bootstrapRecord()];
+  const first = await bootstrapRuntime(entries);
+  await first.event("session_start");
+  const snapshots = entries.filter((entry) => entry.customType === EXEC_ENTRY);
+  assert.ok(snapshots.length >= 1);
+  const latest = snapshots.at(-1)?.data as { negotiation: { executionId: string } };
+  assert.ok(latest.negotiation.executionId);
+  await first.event("session_shutdown");
+  const saved = structuredClone(entries);
+  const reloaded = await bootstrapRuntime(entries);
+  reloaded.mock.rawPi.setModel = () => {
+    assert.fail("consumed bootstrap must not activate again");
+  };
+  const publications: unknown[] = [];
+  reloaded.mock.eventBus.on("workflow-mode:exec", (data) => publications.push(data));
+  await reloaded.event("session_start");
+  assert.deepEqual(entries.slice(0, saved.length), saved);
+  const restored = entries.filter((entry) => entry.customType === EXEC_ENTRY).at(-1)?.data as typeof latest;
+  assert.deepEqual(restored, latest);
+  assert.equal(restored.negotiation.executionId, latest.negotiation.executionId);
+  assert.equal(entries.filter((entry) => entry.customType === "plan-implementation-runtime-consumed").length, 1);
+  assert.ok(
+    publications.some((data) => {
+      const event = data as { active: boolean; source: string };
+      return event.active && event.source === "restore";
+    }),
+  );
+  assert.ok(!publications.some((data) => (data as { source: string }).source === "transition"));
 });

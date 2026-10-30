@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import { initTheme } from "@earendil-works/pi-coding-agent";
+import { type ExtensionContext, initTheme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { test, vi } from "vitest";
 import {
@@ -122,6 +122,8 @@ async function setup(
   } = {},
 ) {
   const mock = createMockPi();
+  const execEvents: unknown[] = [];
+  mock.rawPi.events.on("workflow-mode:exec", (data) => execEvents.push(data));
   const sessions = fakeSessions(
     options.script ??
       (() => ({
@@ -205,7 +207,7 @@ async function setup(
     return result as any;
   };
   const latest = () => mock.entries.filter((entry) => entry.customType === EXEC_ENTRY).at(-1)?.data as ExecState;
-  return { mock, context, tool, emit, latest, sessions, planFile, selects };
+  return { mock, context, tool, emit, latest, sessions, planFile, selects, execEvents };
 }
 
 test("a restored exec state turns its tools on and shows the footer status", async () => {
@@ -223,6 +225,72 @@ test("a restored exec state turns its tools on and shows the footer status", asy
     assert.equal(registered.defaultActive, false);
     assert.deepEqual(registered.annotations, { readOnlyHint: true });
   }
+});
+
+test("shutdown clears UI without ending exec, and a fresh runtime restores it", async () => {
+  const s = await setup({ returnTo: "planning-leaf" });
+  await s.tool(ASK_TOOL).execute("ask", { message: "Check the plan." }, undefined, undefined, s.context.ctx);
+  const saved = structuredClone(s.latest());
+  const entries = s.mock.entries.length;
+  await s.emit("session_shutdown", {});
+  await s.emit("session_shutdown", {});
+  assert.equal(s.context.statuses.get(EXEC_STATUS_KEY), undefined);
+  assert.equal(s.mock.entries.length, entries, "shutdown must not append a durable end");
+  assert.deepEqual(s.latest(), saved);
+  assert.deepEqual(
+    s.execEvents,
+    [{ active: true, source: "restore" }],
+    "shutdown must not publish an inactive execution",
+  );
+  assert.equal(s.mock.setModels.length, 0);
+  assert.equal(s.sessions.subscriptions, 0);
+  assert.equal(s.sessions.disposals, 1);
+
+  const replacement = createMockPi();
+  const events: unknown[] = [];
+  replacement.rawPi.events.on("workflow-mode:exec", (data) => events.push(data));
+  const restoreModel = vi.fn(async () => true);
+  const exec = registerExec(replacement.pi, {
+    consultantAccess: () => ({}) as never,
+    restoreModel,
+    completionReview: () => true,
+    completionMaxRevisions: () => 2,
+  });
+  for (const handler of replacement.events.get("session_start") ?? [])
+    await handler({ reason: "reload" }, s.context.ctx);
+  assert.equal(exec.active, true);
+  assert.deepEqual(events, [{ active: true, source: "restore" }]);
+  assert.ok(replacement.rawPi.getActiveTools().includes(FINISH_TOOL));
+  assert.ok(replacement.rawPi.getActiveTools().includes(ASK_TOOL));
+  assert.match(s.context.statuses.get(EXEC_STATUS_KEY) ?? "", /implementing · 1 consultations/u);
+  const restored = replacement.entries.at(-1)?.data as ExecState;
+  assert.deepEqual(restored, saved, "reload preserves identity, costs, return navigation and model state");
+  assert.equal(restoreModel.mock.calls.length, 0);
+});
+
+test("tree restore publishes only the active branch's authoritative exec state", async () => {
+  const s = await setup();
+  const active = structuredClone(s.latest());
+  const manager = (s.context.ctx as ExtensionContext).sessionManager;
+  const branch = manager.getBranch;
+  for (const data of [undefined, { ...active, active: false }, { active: "invalid" }, active]) {
+    manager.getBranch = () => (data ? [{ type: "custom", customType: EXEC_ENTRY, data }] : []) as never;
+    await s.emit("session_tree", {});
+    const expected = data === active;
+    assert.deepEqual(s.execEvents.at(-1), { active: expected, source: "restore" });
+    assert.equal(s.mock.rawPi.getActiveTools().includes(FINISH_TOOL), expected);
+    assert.equal(s.mock.rawPi.getActiveTools().includes(ASK_TOOL), expected);
+    assert.equal(Boolean(s.context.statuses.get(EXEC_STATUS_KEY)), expected);
+  }
+  manager.getBranch = branch;
+  assert.deepEqual(s.execEvents, [
+    { active: true, source: "restore" },
+    { active: false, source: "restore" },
+    { active: false, source: "restore" },
+    { active: false, source: "restore" },
+    { active: true, source: "restore" },
+  ]);
+  assert.equal(s.mock.setModels.length, 0);
 });
 
 test("without a planner on call, only finish_plan is active", async () => {
@@ -324,6 +392,13 @@ test("accepted first submission finalizes with exactly one review usage", async 
   assert.equal(s.latest().asks, 0);
   assert.equal(s.mock.setModels.length, 1);
   assert.equal(result.usage.cost.total, 0.05);
+  assert.deepEqual(s.execEvents, [
+    { active: true, source: "restore" },
+    { active: false, source: "transition" },
+  ]);
+  assert.equal(s.context.statuses.get(EXEC_STATUS_KEY), undefined);
+  assert.ok(!s.mock.rawPi.getActiveTools().includes(FINISH_TOOL));
+  assert.ok(!s.mock.rawPi.getActiveTools().includes(ASK_TOOL));
 });
 for (const status of ["addressed", "disputed"])
   test(status + " finding then acceptance preserves implementer context until acceptance", async () => {
@@ -403,6 +478,11 @@ test("unavailable planner pauses; disabled review completes without acceptance",
   const result = await submit(disabled);
   assert.equal(result.details.completion, "no_review");
   assert.equal(disabled.sessions.prompts.length, 0);
+  assert.deepEqual(s.execEvents, [{ active: true, source: "restore" }], "paused execution stays active");
+  assert.deepEqual(disabled.execEvents, [
+    { active: true, source: "restore" },
+    { active: false, source: "transition" },
+  ]);
 });
 test("explicit retry preserves costs and uses saved report", async () => {
   let calls = 0;
@@ -461,6 +541,10 @@ test("stale review after tree change does not charge or finalize new state", asy
   await pending;
   assert.equal(s.latest().active, true);
   assert.equal(s.latest().negotiation?.reviewCostUsd, 0);
+  assert.deepEqual(s.execEvents, [
+    { active: true, source: "restore" },
+    { active: true, source: "restore" },
+  ]);
 });
 test("override requires confirmation, stop abandons without completion", async () => {
   const s = await setup({ script: () => ({ reply: "invalid" }), select: ["Keep paused", "Finish without review"] });
@@ -473,6 +557,17 @@ test("override requires confirmation, stop abandons without completion", async (
   const stopped = await setup();
   await command(stopped, "stop");
   assert.equal(stopped.latest().active, false);
+  assert.equal(stopped.latest().completion?.completion, "stopped");
+  assert.deepEqual(stopped.execEvents, [
+    { active: true, source: "restore" },
+    { active: false, source: "transition" },
+  ]);
+  assert.deepEqual(s.execEvents, [
+    { active: true, source: "restore" },
+    { active: false, source: "transition" },
+  ]);
+  assert.equal(stopped.mock.setModels.length, 0, "stop does not restore the planning model");
+  assert.equal(stopped.context.statuses.get(EXEC_STATUS_KEY), undefined);
 });
 
 test("zero revision setting is snapshotted at legacy migration", async () => {
@@ -665,6 +760,12 @@ test("failed model restoration is recorded and not labeled returned", async () =
 test("record:false begin seeds its host transaction with fresh identity and snapshotted budget", () => {
   const mock = createMockPi();
   const ctx = createMockContext({ mode: "tui" }).ctx;
+  const execEvents: unknown[] = [];
+  mock.rawPi.events.on("workflow-mode:exec", (data) => {
+    assert.equal(exec.active, true);
+    assert.ok(mock.rawPi.getActiveTools().includes(FINISH_TOOL));
+    execEvents.push(data);
+  });
   const exec = registerExec(mock.pi, {
     consultantAccess: () => ({}) as never,
     restoreModel: async () => true,
@@ -685,4 +786,8 @@ test("record:false begin seeds its host transaction with fresh identity and snap
   const id = state.negotiation?.executionId;
   exec.begin(ctx, state, { record: false });
   assert.notEqual(state.negotiation?.executionId, id);
+  assert.deepEqual(execEvents, [
+    { active: true, source: "transition" },
+    { active: true, source: "transition" },
+  ]);
 });

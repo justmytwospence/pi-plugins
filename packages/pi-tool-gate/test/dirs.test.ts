@@ -417,7 +417,7 @@ EOF`;
     expect(await h.emit("tool_call", call("read", { path: "~/Projects/other/a.ts" }), ctx)).toBeUndefined();
   });
 
-  test("chat mode asks about reads outside instead of refusing them; yolo ignores the policy", async () => {
+  test("chat allows approved outside reads; yolo changes approvals without leaving chat", async () => {
     const { h, ctx } = setup();
     await h.emit("session_start", {}, ctx);
     await h.commands.get("mode").handler("chat", ctx);
@@ -425,7 +425,11 @@ EOF`;
     expect(await h.emit("tool_call", call("read", { path: "~/Projects/other/a.ts" }), ctx)).toBeUndefined();
     expect(ctx.ui.selects).toHaveLength(1);
     await h.commands.get("mode").handler("yolo", ctx);
-    expect(await h.emit("tool_call", call("write", { path: "~/Projects/other/a.ts", content: "" }, "t2"), ctx)).toBeUndefined();
+    const blocked: any = await h.emit("tool_call", call("write", { path: "~/Projects/other/a.ts", content: "" }, "t2"), ctx);
+    expect(blocked?.block).toBe(true);
+    expect(blocked.reason).toMatch(/^Chat mode is on:/u);
+    await h.commands.get("mode").handler("work", ctx);
+    expect(await h.emit("tool_call", call("write", { path: "~/Projects/other/a.ts", content: "" }, "t3"), ctx)).toBeUndefined();
   });
 
   test("/gate shows the policy", async () => {

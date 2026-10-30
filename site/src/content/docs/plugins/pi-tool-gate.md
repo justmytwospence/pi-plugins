@@ -1,6 +1,6 @@
 ---
 title: Tool gate
-description: Choose permission modes with an explicitly remapped Shift+Tab; auto mode combines fixed checks, paid Jev judgments and human approval.
+description: Choose workflow and approvals independently; auto combines fixed checks, paid Jev judgments and human approval.
 plugin: pi-tool-gate
 ---
 
@@ -8,12 +8,12 @@ plugin: pi-tool-gate
 
 - **Use it for:** Choose an approval policy for tool calls, escalating risky operations without treating the gate as a sandbox.
 - **Enable:** Select `packages/pi-tool-gate/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
-- **Controls:** `/mode`, `/gate`, `/gate rules`; Shift+Tab cycles only after remapping stock `app.thinking.cycle`, or choose another `cycleShortcut`.
+- **Controls:** `/mode`, `/approvals`, `/gate`, `/gate rules`; Shift+Tab cycles workflow after remapping stock `app.thinking.cycle`; Alt+A toggles approvals.
 - **Settings:** `tool-gate.json` shared/user/project layers, including `permissions` allow/ask/deny rules; default auto mode, paid Jev on, pushback on, 8000 ms classifier timeout (one retry on timeout).
 - **Requirements, cost & privacy:** Pi classifier/provider access for Jev; proposed arguments and clipped user intent can leave the machine. Fixed checks and manual mode are local.
 - **Integrations & limits:** Optional plan mode, footer and Herdr blocked state. The stock conflict skips shortcut registration; unavailable-classifier fallback is not fail-closed.
 
-Tool gate brings Claude Code's permission modes to Pi and, in auto mode, reduces routine approval interruptions while escalating risky calls. It is an approval policy inside Pi, **not a sandbox**, a complete secret scanner or a guarantee that every dangerous operation will be caught.
+Tool gate separates workflow from approvals and, in auto mode, reduces routine approval interruptions while escalating risky calls. It is an approval policy inside Pi, **not a sandbox**, a complete secret scanner or a guarantee that every dangerous operation will be caught.
 
 ## Enable and requirements
 
@@ -23,20 +23,15 @@ Classifier judgments require Pi 0.99 or newer and credentials for the configured
 
 **Jev calls are paid external requests.** Most gray-area calls require one judgment; an initially held call can make another request for a suggested workaround. Even a fixed-rule hold can use that workaround request. Classified calls add reported classifier usage to their tool result. Costs depend on volume and input, not just how many approval dialogs appear.
 
-## Permission modes
+## Workflow and approvals
 
-After an [explicit stock-key remap](/guides/keyboard/#resolve-the-two-stock-conflicts), Shift+Tab cycles the modes as in Claude Code (from auto: manual, accept edits, plan, auto); `/mode` switches directly or lists them. The footer shows the mode with Claude Code's labels.
+The independent defaults are **work + auto**. `/mode` selects work, chat or plan; after an [explicit stock-key remap](/guides/keyboard/#resolve-the-two-stock-conflicts), Shift+Tab cycles them. Plan requires [pi-plan-mode](/plugins/pi-plan-mode/); without it the cycle is work → chat → work. Chat blocks calls not recognized as reads. Plan allows edits to its plan file and judges shell commands through its existing policy under either approval setting. These are best-effort guards, not a sandbox; hints, configured bypasses and shell classification have limits.
 
-| Mode | Runs without asking |
-| --- | --- |
-| Chat (`chat mode on`) | Recognized reads only; every other call is blocked without asking, and the agent is told to talk and answer questions. No classifier requests. Opt in by adding `chat` to `modes`. |
-| Manual (`manual mode on`) | Recognized reads only; every other call asks, with rules to allow for the session, the project or everywhere. No classifier requests. |
-| Accept edits (`accept edits on`) | Reads, edits and writes inside the project, and `mkdir`, `touch`, `rm`, `rmdir`, `mv`, `cp` and `sed` on files inside the project. Other commands ask. |
-| Plan (`plan mode on`) | With [pi-plan-mode](/plugins/pi-plan-mode/) only. Edits are blocked except to its plan file; commands are judged as in auto mode. Approving the plan picks the next mode. |
-| Auto (`auto mode on`) | The default: the checks and judgments below. |
-| Yolo (`yolo mode on`) | Claude Code's bypass permissions mode: everything except removing `/`, top-level directories, home, the project or their parents. Opt in by adding `yolo` (or `bypassPermissions`) to `modes`, or use `/mode yolo`. |
+`/approvals` selects auto or yolo; Alt+A toggles them independently, including in plan or exec. Auto uses the checks below. Yolo bypasses ordinary approvals but not deny rules, critical-removal protections or chat/plan guards. Legacy manual and accept-edits remain explicit compatibility values and are restored from older sessions; Alt+A selects auto from either. `/mode auto|yolo|manual|accept-edits` changes approvals only.
 
-Without a UI, calls that would ask are blocked. Sessions remember their mode across resume; new sessions start in `defaultMode`. Pi's stock Shift+Tab is reserved for `app.thinking.cycle`; current Pi **skips** the conflicting extension shortcut. It does not override that action automatically. Move the stock action, for example to `alt+t` in `~/.pi/agent/keybindings.json`, or choose a different `cycleShortcut`, then `/reload`. `/mode` remains available without a shortcut.
+A distinct-model handoff enters exec; ordinary same-model approval returns to work. Exec is not in the cycle: `/plan-exec` shows status and `/plan-exec stop` leaves it. The active branch restores both axes and legacy combined records. Without a UI, calls that would ask are blocked.
+
+Pi's stock Shift+Tab is reserved for `app.thinking.cycle`; current Pi **skips** the conflicting extension shortcut. Move the stock action, for example to `alt+t`, or choose a different `workflowShortcut`, then `/reload`. `/mode` remains available without a shortcut.
 
 ## What runs and what is held in auto mode
 
@@ -56,7 +51,7 @@ By default, a held call first returns an explanation to the agent rather than as
 
 The interactive dialog shows the call and why it was held. Its rows are **Allow once**, then, when rules can name the call, **Allow rule for this session**, **in this project** and **everywhere**, **Edit the rule...**, then **Block** and **Block with a message**, whose text goes to the agent with the refusal. The rule itself is in the question (`Rule: Bash(git push:*)`), not in the rows, which stay under 42 characters so phone clients read them. Fixed-rule holds, including downloaded code, offer only Allow once and the blocks. Esc blocks; `n` opens the message field; Ctrl+O expands long content. Bash is displayed as a command, file edits as a diff, and other tool arguments as JSON. RPC and forwarded subagent questions use a simpler presentation.
 
-- `/mode [chat|manual|accept-edits|plan|auto|yolo]` switches the permission mode; with no argument it lists every mode.
+- `/mode [work|chat|plan]` selects workflow; `/approvals [auto|yolo]` selects approvals. Without arguments each opens a picker.
 - `/gate` or `/gate status` shows the mode, counts, classifier settings, project rules, permission rules and folder grant counts.
 - `/gate rules` lists the permission rules and folder grants by list and scope, and offers to remove or add one; `/gate rules list|add|remove ...` do the same with arguments. `/gate grants` is the same command.
 - `/gate on` switches to auto mode; `/gate off` to yolo mode.
@@ -140,7 +135,7 @@ This `.pi/tool-gate.json` keeps the standard checks but asks immediately instead
 }
 ```
 
-`defaultMode` (default `auto`) chooses the starting mode, `modes` the modes the cycle key steps through, while `/mode` still offers every mode (`["default", "acceptEdits", "plan", "auto"]`; for example `["chat", "plan", "auto"]`), and `cycleShortcut` its key (`shift+tab`; `""` for none, read after `/reload`). `enabled: false` starts sessions in yolo mode.
+`defaultWorkflow` and `defaultApproval` set new-session defaults (`work` and `auto`). Legacy `defaultMode` is a fallback for unset axes; restrictive legacy values remain supported. `modes` is deprecated and no longer determines either cycle. `workflowShortcut` defaults to `shift+tab`, falling back to legacy `cycleShortcut`; `approvalShortcut` defaults to `alt+a`. An empty string disables the respective key; reload after changing it. Duplicate keys register workflow only and report the collision. `enabled: false` defaults new sessions to yolo approvals unless `defaultApproval` overrides it.
 
 Overriding `allowTools` replaces the entire default list. Adding a tool there bypasses its ordinary checks, so do not treat it as a cosmetic preference. `readOnlyCommands` similarly extends trusted shell programs. The default allowance for `codemode` relies on Pi gating its nested tool calls separately.
 
@@ -159,4 +154,4 @@ Jev receives clipped recent user messages, the assistant message preceding the l
 
 When Jev is unavailable, gray-area calls use Pi's tool annotations: flagged calls ask in a UI, while other calls run. Without a UI, that unavailable-classifier path allows them. In contrast, fixed-rule holds and classifier-decided holds block retries when nobody can approve. Incomplete successful judgments can also allow a call. Do not use this extension as a fail-closed security boundary.
 
-Headless pi-subagents cancel approval dialogs and report a permission blocker to the parent; they never approve a gated action automatically. The `herdr:blocked` event marks an open dialog for a listening Herdr integration; without a listener it has no effect. Status footer shows the mode on its model row and preserves the gate's status notice, but is not required. See [Troubleshooting](/guides/troubleshooting/) and the [source and tests](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-tool-gate) for exact bypasses and fallback behavior.
+Headless pi-subagents cancel approval dialogs and report a permission blocker to the parent; they never approve a gated action automatically. The `herdr:blocked` event marks an open dialog for a listening Herdr integration; without a listener it has no effect. Status footer shows workflow and approvals separately and preserves the gate's status notice, but is not required. See [Troubleshooting](/guides/troubleshooting/) and the [source and tests](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-tool-gate) for exact bypasses and fallback behavior.

@@ -64,7 +64,8 @@ readings fresh; the working row is independent of the footer mode.
    branch name; detached HEAD shows `detached:<sha7>`. Outside a Git repository,
    the Git summary stays quiet and the project remains visible. Model and labeled
    reasoning level get their own left-aligned row immediately below. Waiting/errors
-   appear on that model row and take priority.
+   appear on that model row and take priority. Workflow and Approvals rows follow
+   when their respective providers publish them; neither is invented when absent.
 2. `Context 32% used`. The gauge itself is the editor's border lines, above and
    below the prompt: the used share of the width in heavy rule (accent, then the
    warning and error colors), the rest in the editor's own border color, so pi-vim's
@@ -89,8 +90,8 @@ instead of the status row:
 | --- | --- | --- |
 | pi-auto-effort | `effort: high (auto ↑)` | `reasoning high · auto ↑` on the model row (arrow and any `limited:` note kept) |
 | pi-cache-guard | `cache 4:12`, `cache cold` | `Cache 4:12` or `Cache ❄` on the context row (warm in green, cold in the warning color) |
-| pi-tool-gate (or pi-plan-mode alone) | `⏵⏵ auto mode on (shift+tab to cycle)` | the permission mode on its own row, in Claude Code's color for it, with one same-width pause or fast-forward Nerd Font icon in place of `⏸` / `⏵⏵`; the cycle-key hint is not shown, and the tool-gate tally follows the mode on that row |
-| pi-plan-mode | `exec mode on · Claude Opus 5.5 on call` (key `plan-exec`) | takes the permission mode's place on its row, with the mode dim after it (`exec mode on · auto`); the row is drawn for it even when there is no mode |
+| pi-tool-gate | `workflow: work (shift+tab to cycle)` and `⏵⏵ auto mode on (alt+a to cycle)` | separate Workflow and Approvals rows, with key hints and the gate tally on Approvals |
+| pi-plan-mode | workflow status and `plan-exec` detail | standalone work/plan workflow; during exec the Workflow row shows phase, counts and costs, while any Approvals row remains independent |
 | pi-cache-guard (Jev trimming, key `lean-context`) | `lean: −12k tok` | `Lean −12k tok` on the context row |
 | anthropic-billing-guard | `extra usage x3` | `3 requests billed to extra usage` on the Claude limits row |
 | @saadjs/pi-stash | `prompt stashed` | `Stashed · "first line…" +2 lines · ctrl+s to restore` as the top row, just under the editor |
@@ -102,7 +103,7 @@ instead of the status row:
 Without them nothing changes. A status whose text no longer has the expected shape,
 or a billing notice with no Claude limits row to attach to, stays in the status row
 unchanged, so a notice is never lost. Planner-run statuses stay in the status row; the tool-gate count joins the
-permission mode's row when there is one. The recognized tool-gate status displays as
+Approvals row when there is one. The recognized tool-gate status displays as
 `Gate 2 auto · 0 pushed back · 1 asked` (example). Recognized planner-run
 notices use `Plan A working · /planners` (example). Model-change and
 unconfirmed cache states display as `Cache ❄ · model changed` and

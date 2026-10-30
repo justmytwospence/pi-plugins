@@ -5,11 +5,10 @@
 // case. Project rules in `.agents/tool-gate-rules.md` (or `.pi/`) are checked on every judged
 // call. Without Jev the gate falls back to Pi's tool hints.
 //
-// That is auto mode, one of Claude Code's permission modes the gate owns (see modes.ts): manual
-// asks about everything that does more than read, accept edits also runs edits and filesystem
-// commands inside the project, yolo runs everything but critical removals, plan mode
-// (pi-plan-mode's) blocks edits until a plan is approved, and chat mode (the gate's own) runs
-// only read-only calls while you talk. Shift+Tab cycles them.
+// Workflow and approvals are independent (see modes.ts): Shift+Tab cycles work/chat/plan;
+// Alt+A toggles auto/yolo. Chat's read-only guard and plan's existing edit/command policy apply
+// under either approval setting. Plan commands still use the existing judge, not a shell sandbox.
+// Manual and accept-edits remain explicit legacy approval settings.
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -76,19 +75,36 @@ import {
 import { embeddedEditorFactory } from "./editor.ts";
 import { askApproval } from "./prompt.ts";
 import {
-  cycleOf,
+  APPROVAL_CYCLE,
+  APPROVAL_ENTRY,
+  EXEC_CHANGED,
+  EXEC_GUIDANCE,
+  WORKFLOW_CHANGED,
+  WORKFLOW_CYCLE,
+  WORKFLOW_ENTRY,
+  WORKFLOW_SET,
+  WORKFLOW_QUERY,
+  type WorkflowSource,
+  type WorkflowSnapshot,
+  WORKFLOW_STATUS_KEY,
+  workflowCycle,
+  workflowStatus,
+  restoreBranchModes,
+  parseApproval,
+  parseWorkflow,
+  parseLegacyCombinedMode,
+  nextWorkflow,
+  nextApproval,
+  type ApprovalMode,
+  type BaseWorkflowMode,
+  type WorkflowMode,
   MODE_CHANGED,
   MODE_CYCLE,
   MODE_DESCRIPTIONS,
-  MODE_ENTRY,
   MODE_NAMES,
   MODE_SET,
   MODE_STATUS_KEY,
-  MODES,
   modeStatus,
-  nextMode,
-  parseMode,
-  type PermissionMode,
   PLAN_PROVIDER,
 } from "./modes.ts";
 import { loadRules } from "./rules.ts";
@@ -134,10 +150,15 @@ export interface GateConfig extends Record<string, unknown> {
   pushBack: boolean;
   /** The mode a new session starts in: chat, manual, accept-edits, plan, auto or yolo. */
   defaultMode: string;
-  /** The modes the cycle key steps through (plan only with pi-plan-mode); `/mode` offers them all. */
+  /** Deprecated: ignored; workflow and approvals have independent fixed cycles. */
   modes: string[];
-  /** The key that cycles the modes; "" for none. */
+  /** Legacy fallback for workflowShortcut; "" disables. */
   cycleShortcut: string;
+  defaultWorkflow?: string;
+  defaultApproval?: string;
+  /** Explicit workflow key takes precedence over cycleShortcut; "" disables. */
+  workflowShortcut?: string;
+  approvalShortcut: string;
   /** Which directories this project reads and writes without asking (dirs.ts). */
   directories: DirectoriesConfig;
 }
@@ -157,6 +178,7 @@ export const DEFAULT_CONFIG: GateConfig = {
   defaultMode: "auto",
   modes: ["default", "acceptEdits", "plan", "auto"],
   cycleShortcut: "shift+tab",
+  approvalShortcut: "alt+a",
   directories: DEFAULT_DIRECTORIES,
 };
 
@@ -390,9 +412,14 @@ export default function toolGate(pi: ExtensionAPI) {
   // Any tool can be declined, and blocked calls never reach tool_result, so read the result text.
   offerUserWords(pi, "*", ({ result }) => declinedMessage(result));
   let config: GateConfig = DEFAULT_CONFIG;
-  let mode: PermissionMode = "auto";
-  /** The mode plan mode was entered from. */
-  let prePlanMode: PermissionMode | undefined;
+  let workflow: BaseWorkflowMode = "work";
+  let approval: ApprovalMode = "auto";
+  let execActive = false;
+  let revision = 0;
+  const effectiveWorkflow = (): WorkflowMode => execActive ? "exec" : workflow;
+  // A mode change cancels decisions, not the usage of tools already running on this branch.
+  const invalidate = () => { revision++; pushedBackThisTurn.clear(); };
+  const staleResult = () => ({ block: true, reason: "tool-gate blocked this call: modes changed; the call must be reevaluated." });
   /** pi-plan-mode is installed and offers plan mode; the plan file it may write. */
   let planProvider = false;
   let planFile: string | undefined;
@@ -427,104 +454,146 @@ export default function toolGate(pi: ExtensionAPI) {
     return info?.annotations;
   };
 
-  const shortcut = loadConfig("tool-gate", DEFAULT_CONFIG, process.cwd()).cycleShortcut.trim();
+  const keyConfig = loadConfig("tool-gate", DEFAULT_CONFIG, process.cwd());
+  const shortcut = (typeof keyConfig.workflowShortcut === "string" ? keyConfig.workflowShortcut
+    : typeof keyConfig.cycleShortcut === "string" ? keyConfig.cycleShortcut : "shift+tab").trim();
+  const approvalShortcut = (typeof keyConfig.approvalShortcut === "string" ? keyConfig.approvalShortcut : "alt+a").trim();
+  const duplicateShortcut = !!shortcut && shortcut.toLowerCase() === approvalShortcut.toLowerCase();
 
   const status = (ctx: ExtensionContext | undefined) => {
     if (!ctx?.hasUI) return;
     try {
-      ctx.ui.setStatus(MODE_STATUS_KEY, modeStatus(mode, shortcut || undefined));
+      ctx.ui.setStatus(WORKFLOW_STATUS_KEY, workflowStatus(effectiveWorkflow(), shortcut || undefined));
+      ctx.ui.setStatus(MODE_STATUS_KEY, modeStatus(approval, duplicateShortcut ? undefined : approvalShortcut || undefined));
       // Jev's counts matter where Jev judges: auto mode, and commands while planning.
       ctx.ui.setStatus(
         STATUS_KEY,
-        mode === "auto" || mode === "plan" ? `gate: ${auto} auto · ${pushedBack} pushed back · ${held} asked` : undefined,
+        approval === "auto" || effectiveWorkflow() === "plan" ? `gate: ${auto} auto · ${pushedBack} pushed back · ${held} asked` : undefined,
       );
     } catch {
       // A stale context after a session switch.
     }
   };
 
-  const configuredModes = () => config.modes.map(parseMode).filter((m): m is PermissionMode => m !== undefined);
-  const cycle = () => cycleOf(configuredModes(), { plan: planProvider });
-  const startMode = (): PermissionMode => {
-    if (!config.enabled) return "bypassPermissions";
-    const configured = parseMode(config.defaultMode) ?? "auto";
-    return configured === "plan" && !planProvider ? "auto" : configured;
+  const cycle = () => workflowCycle(planProvider);
+  const defaults = (config: GateConfig) => {
+    const legacy = parseLegacyCombinedMode(config.defaultMode);
+    return {
+      workflow: parseWorkflow(config.defaultWorkflow) ?? (legacy === "chat" || legacy === "plan" ? legacy : "work"),
+      approval: parseApproval(config.defaultApproval) ?? (!config.enabled ? "bypassPermissions" : parseApproval(legacy) ?? "auto"),
+      execActive: false,
+    } as const;
   };
-
-  const broadcast = (previous?: PermissionMode) => {
-    try {
-      pi.events.emit(MODE_CHANGED, { mode, ...(previous ? { previous } : {}), cycle: cycle(), ...(prePlanMode ? { prePlanMode } : {}) });
-    } catch {
-      // A listener's failure is its own.
-    }
+  const emit = (name: string, data: unknown) => {
+    try { pi.events.emit(name, data); } catch { /* A listener's failure is its own. */ }
   };
-
-  /** Switch modes; plan mode needs pi-plan-mode. Returns whether the mode is now `next`. */
-  const setMode = (next: PermissionMode, ctx: ExtensionContext | undefined = hostCtx): boolean => {
-    if (next === "plan" && !planProvider) return false;
-    const previous = mode;
-    if (next === previous) return true;
-    if (next === "plan") prePlanMode = previous;
-    else prePlanMode = undefined;
-    mode = next;
-    try {
-      pi.appendEntry(MODE_ENTRY, { mode });
-    } catch {
-      // No session to record it in.
-    }
+  const broadcastWorkflow = (source: WorkflowSource, previous?: WorkflowMode) => emit(WORKFLOW_CHANGED, {
+    mode: effectiveWorkflow(), ...(previous ? { previous } : {}), cycle: cycle(), ...(shortcut ? { key: shortcut } : {}), source,
+  });
+  // Query destination state directly: neither the cached branch nor lifecycle listener order is authoritative.
+  pi.events.on(WORKFLOW_QUERY, (data) => {
+    const query = data as { entries?: unknown; cwd?: unknown; reply?: unknown } | undefined;
+    if (!Array.isArray(query?.entries) || typeof query.cwd !== "string" || typeof query.reply !== "function") return;
+    const restored = restoreBranchModes(query.entries, defaults(loadConfig("tool-gate", DEFAULT_CONFIG, query.cwd)));
+    const snapshot: WorkflowSnapshot = {
+      mode: restored.execActive ? "exec" : restored.workflow,
+      cycle: cycle(), ...(shortcut ? { key: shortcut } : {}), source: "restore",
+    };
+    query.reply(snapshot);
+  });
+  const broadcastApproval = (previous?: ApprovalMode) => emit(MODE_CHANGED, {
+    mode: approval, ...(previous ? { previous } : {}), cycle: [...APPROVAL_CYCLE],
+  });
+  const persist = (entry: string, mode: string) => {
+    try { pi.appendEntry(entry, { version: 1, mode }); } catch { /* No session yet. */ }
+  };
+  const setWorkflow = (next: BaseWorkflowMode, ctx: ExtensionContext | undefined = hostCtx): boolean => {
+    if (execActive) { ctx?.ui.notify(EXEC_GUIDANCE, "warning"); return false; }
+    if (next === "plan" && !planProvider) { ctx?.ui.notify("Plan mode needs pi-plan-mode.", "warning"); return false; }
+    const previous = effectiveWorkflow();
+    if (next === workflow) return true;
+    workflow = next;
+    invalidate();
+    persist(WORKFLOW_ENTRY, workflow);
     status(ctx);
-    broadcast(previous);
+    broadcastWorkflow("transition", previous);
     tellChatNow(ctx);
     return true;
   };
-
-  const chatNotice = () => (mode === "chat" ? chatEnterText(shortcut) : chatExitText(mode));
-  const markChatTold = () => {
-    chatTold = mode === "chat";
-    try {
-      pi.appendEntry(CHAT_ENTRY, { told: chatTold });
-    } catch {
-      // No session to record it in.
-    }
+  const setApproval = (next: ApprovalMode, ctx: ExtensionContext | undefined = hostCtx) => {
+    if (approval === next) return;
+    const previous = approval;
+    approval = next;
+    invalidate();
+    persist(APPROVAL_ENTRY, approval);
+    status(ctx);
+    broadcastApproval(previous);
   };
-  /** Mid-turn, tell the agent about a chat mode change now; otherwise with your next message. */
+
+  const chatNotice = () => (effectiveWorkflow() === "chat" ? chatEnterText(shortcut) : chatExitText(effectiveWorkflow()));
+  const markChatTold = () => {
+    chatTold = effectiveWorkflow() === "chat";
+    try { pi.appendEntry(CHAT_ENTRY, { told: chatTold }); } catch { /* No session yet. */ }
+  };
+  /** Mid-turn, tell the agent about a workflow change now; otherwise with the next message. */
   const tellChatNow = (ctx: ExtensionContext | undefined) => {
-    if (!ctx || (mode === "chat") === chatTold) return;
+    if (!ctx || (effectiveWorkflow() === "chat") === chatTold) return;
     try {
       if (ctx.isIdle()) return;
       pi.sendMessage(
-        { customType: CHAT_ENTRY, content: chatNotice(), display: false, details: { active: mode === "chat" } },
+        { customType: CHAT_ENTRY, content: chatNotice(), display: false, details: { active: effectiveWorkflow() === "chat" } },
         { deliverAs: "steer" },
       );
-    } catch {
-      return;
-    }
+    } catch { return; }
     markChatTold();
   };
-
-  const cycleMode = (ctx: ExtensionContext | undefined = hostCtx) => setMode(nextMode(mode, cycle()), ctx);
-
-  pi.events.on(MODE_SET, (data) => {
-    const next = parseMode((data as { mode?: unknown } | undefined)?.mode);
-    if (next) setMode(next);
+  const cycleWorkflow = (ctx: ExtensionContext | undefined = hostCtx) => {
+    if (execActive) { ctx?.ui.notify(EXEC_GUIDANCE, "warning"); return; }
+    setWorkflow(nextWorkflow(workflow, planProvider) as BaseWorkflowMode, ctx);
+  };
+  pi.events.on(WORKFLOW_SET, (data) => {
+    const next = parseWorkflow((data as { mode?: unknown } | undefined)?.mode);
+    if (next) setWorkflow(next);
   });
-  pi.events.on(MODE_CYCLE, () => {
-    cycleMode();
+  pi.events.on(WORKFLOW_CYCLE, () => cycleWorkflow());
+  pi.events.on(MODE_SET, (data) => {
+    const next = parseApproval((data as { mode?: unknown } | undefined)?.mode);
+    if (next) setApproval(next);
+  });
+  pi.events.on(MODE_CYCLE, () => setApproval(nextApproval(approval)));
+  pi.events.on(EXEC_CHANGED, (data) => {
+    const event = data as { active?: unknown; source?: unknown } | undefined;
+    // Reconstruction is only a snapshot. Our lifecycle hook owns destination branch restoration.
+    if (event?.source !== "transition") return;
+    const active = event.active;
+    if (typeof active !== "boolean" || active === execActive) return;
+    const previous = effectiveWorkflow();
+    execActive = active;
+    if (!active) { workflow = "work"; persist(WORKFLOW_ENTRY, workflow); }
+    invalidate();
+    status(hostCtx);
+    broadcastWorkflow("transition", previous);
+    tellChatNow(hostCtx);
   });
   pi.events.on(PLAN_PROVIDER, (data) => {
     const file = (data as { planFile?: unknown } | undefined)?.planFile;
-    planFile = typeof file === "string" && file ? path.resolve(file) : planFile;
-    if (planProvider) return;
+    const nextFile = typeof file === "string" && file ? path.resolve(file) : undefined;
+    if (nextFile !== planFile) { planFile = nextFile; invalidate(); }
+    const available = planProvider;
     planProvider = true;
-    broadcast();
+    if (!available) broadcastWorkflow("restore");
   });
 
   if (shortcut) {
     pi.registerShortcut(shortcut as never, {
-      description: "Cycle permission modes (manual, accept edits, plan, auto)",
-      handler: async (ctx) => {
-        cycleMode(ctx);
-      },
+      description: "Cycle workflow (work, chat, plan)",
+      handler: async (ctx) => { cycleWorkflow(ctx); },
+    });
+  }
+  if (approvalShortcut && !duplicateShortcut) {
+    pi.registerShortcut(approvalShortcut as never, {
+      description: "Toggle approvals (auto, yolo)",
+      handler: async (ctx) => { setApproval(nextApproval(approval), ctx); },
     });
   }
 
@@ -584,7 +653,9 @@ export default function toolGate(pi: ExtensionAPI) {
   };
   /** Reload what is saved (this project's grants, the config files) and merge it with the session's rules. */
   const refreshRules = async (cwd: string) => {
+    const epoch = revision;
     const local = localGrants(loadGrants(await projectKey(cwd)), grantsFile());
+    if (epoch !== revision) return allRules;
     localRules = local.rules;
     localDirs = new Map(local.dirs.map((d) => [d.key, { key: d.key, access: d.access, dir: d.dir }]));
     const files = loadFileRules(cwd);
@@ -643,12 +714,15 @@ export default function toolGate(pi: ExtensionAPI) {
     q: { tool: string; input: Record<string, unknown>; held?: string; agentCase?: string; note?: string },
     offer: Offer | undefined,
   ): Promise<{ block?: boolean; reason?: string } | undefined> => {
+    const epoch = revision;
     const run = async () => {
+      if (epoch !== revision) return staleResult();
       let items = offer ? [...offer.items] : [];
       /** An edit that was not a rule, to show again with what is wrong with it. */
       let draft: string | undefined;
       let problem: string | undefined;
       const view = await callView(q.tool, q.input, ctx.cwd);
+      if (epoch !== revision) return staleResult();
       // Held only while the dialog is open, so queued approvals do not report blocked early.
       const label = clip(`Allow? ${describeCall(q.tool, q.input)}`.replace(/\s+/gu, " "), 60);
       for (;;) {
@@ -688,6 +762,7 @@ export default function toolGate(pi: ExtensionAPI) {
             editorFactory,
           ),
         );
+        if (epoch !== revision) return staleResult();
         problem = undefined;
         if (!answer) return { block: true, reason: DECLINED };
         if (answer.choice === ALLOW_ONCE) return undefined;
@@ -762,6 +837,8 @@ export default function toolGate(pi: ExtensionAPI) {
     ctx: ExtensionContext,
     h: {
       toolCallId: string;
+      revision: number;
+      recordUsage: (usage: ClassifierUsage) => void;
       tool: string;
       input: Record<string, unknown>;
       family: string;
@@ -775,6 +852,7 @@ export default function toolGate(pi: ExtensionAPI) {
       advice?: string;
     },
   ) => {
+    if (h.revision !== revision) return staleResult();
     const exact = `${h.tool}\0${JSON.stringify(h.input)}`;
     if (config.pushBack && !pushedBackThisTurn.has(exact) && !pushedBackThisTurn.has(h.family)) {
       pushedBackThisTurn.add(exact);
@@ -784,8 +862,9 @@ export default function toolGate(pi: ExtensionAPI) {
       let ideas: string[] = [];
       if (h.advice === undefined) {
         const suggestion = await askJev(ctx.modelRegistry, config.jev, { ...h.state, held_because: h.reason }, workaroundQuestion(), ctx.signal);
+        if (h.revision !== revision) return staleResult();
         ideas = suggestion.ok ? suggestions(suggestion.answers) : [];
-        if (suggestion.ok && suggestion.usage) pendingUsage.set(h.toolCallId, addUsage(pendingUsage.get(h.toolCallId), suggestion.usage));
+        if (suggestion.ok && suggestion.usage) h.recordUsage(suggestion.usage);
       }
       const noWorkaround = ideas[0] === WORKAROUNDS.user_only;
       const advice = h.advice !== undefined ? h.advice : noWorkaround
@@ -826,45 +905,53 @@ export default function toolGate(pi: ExtensionAPI) {
     }
   };
 
-  pi.on("session_tree", (_event, ctx) => {
-    rebuildDownloads(ctx);
-  });
-
-  pi.on("session_start", (_event, ctx) => {
+  const restore = (ctx: ExtensionContext, newSession: boolean) => {
+    invalidate();
+    pendingUsage.clear();
     hostCtx = ctx;
     config = loadConfig("tool-gate", DEFAULT_CONFIG, ctx.cwd);
     rebuildDownloads(ctx);
-    // A resumed session comes back in its mode; a new one starts in the configured mode.
-    const entries = ctx.sessionManager.getBranch() as Array<{ type?: string; customType?: string; data?: unknown }>;
-    const recorded = [...entries].reverse().find((entry) => entry.type === "custom" && entry.customType === MODE_ENTRY);
-    mode = parseMode((recorded?.data as { mode?: unknown } | undefined)?.mode) ?? startMode();
+    sessionRules = [];
+    sessionDirs.clear();
+    localDirs.clear();
+    localRules = [];
+    fileRules = [];
+    allRules = [];
+    ignoredRules = [];
+    gitInfo = undefined;
+    dialogs = Promise.resolve();
+    if (newSession) { auto = 0; held = 0; pushedBack = 0; warnedUnavailable = false; }
+    const entries = ctx.sessionManager.getBranch();
+    const restored = restoreBranchModes(entries, defaults(config));
+    workflow = restored.workflow;
+    approval = restored.approval;
+    execActive = restored.execActive;
     const told = [...entries].reverse().find((entry) => entry.type === "custom" && entry.customType === CHAT_ENTRY);
-    chatTold = (told?.data as { told?: unknown } | undefined)?.told === true;
-    prePlanMode = undefined;
+    chatTold = told?.type === "custom" && (told.data as { told?: unknown } | undefined)?.told === true;
+    if (duplicateShortcut) ctx.ui.notify("tool-gate: duplicate workflow and approval shortcut; registering workflow only.", "warning");
     status(ctx);
-    broadcast();
-  });
+    broadcastWorkflow("restore");
+    broadcastApproval();
+  };
+  pi.on("session_tree", (_event, ctx) => restore(ctx, false));
+  pi.on("session_start", (_event, ctx) => restore(ctx, true));
 
   pi.on("session_shutdown", () => {
+    invalidate();
+    pendingUsage.clear();
     hostCtx = undefined;
-    planProvider = false;
-    planFile = undefined;
   });
 
   pi.on("before_agent_start", (_event, ctx) => {
     config = loadConfig("tool-gate", DEFAULT_CONFIG, ctx.cwd);
     pushedBackThisTurn.clear();
     gitInfo = undefined;
-    // Plan mode restored without pi-plan-mode (uninstalled since): nothing could leave it.
-    if (mode === "plan" && !planProvider) {
-      mode = startMode() === "plan" ? "auto" : startMode();
-      status(ctx);
-      broadcast("plan");
-    }
-    if ((mode === "chat") === chatTold) return undefined;
+    // A removed plan provider must not strand a restored session in planning.
+    if (workflow === "plan" && !planProvider && !execActive) setWorkflow("work", ctx);
+    if ((effectiveWorkflow() === "chat") === chatTold) return undefined;
     const content = chatNotice();
     markChatTold();
-    return { message: { customType: CHAT_ENTRY, content, display: false, details: { active: mode === "chat" } } };
+    return { message: { customType: CHAT_ENTRY, content, display: false, details: { active: effectiveWorkflow() === "chat" } } };
   });
 
   const allow = (ctx: ExtensionContext) => {
@@ -883,7 +970,7 @@ export default function toolGate(pi: ExtensionAPI) {
     held++;
     status(ctx);
     if (!ctx.hasUI) {
-      return { block: true, reason: `${MODE_NAMES[mode]} mode needs the user's approval for this ${tool} call, and there is no user to ask.` };
+      return { block: true, reason: `${approval === "default" ? "manual" : approval === "acceptEdits" ? "accept edits" : MODE_NAMES[approval]} mode needs the user's approval for this ${tool} call, and there is no user to ask.` };
     }
     return ask(ctx, { tool, input, ...(p.kind === "ask" ? { held: p.reasons.join("; ") } : {}) }, p.offer);
   };
@@ -912,134 +999,161 @@ export default function toolGate(pi: ExtensionAPI) {
   };
 
   pi.on("tool_call", async (event, ctx) => {
-    const tool = event.toolName;
-    const input = event.input as Record<string, unknown>;
+    const epoch = revision;
+    const stale = () => epoch !== revision;
+    let callUsage: ClassifierUsage | undefined;
+    const recordUsage = (usage: ClassifierUsage) => { callUsage = addUsage(callUsage, usage); };
+    const decide = async () => {
+      const tool = event.toolName;
+      const input = event.input as Record<string, unknown>;
 
-    await refreshRules(ctx.cwd);
+      await refreshRules(ctx.cwd);
+      if (stale()) return staleResult();
 
-    if (mode === "bypassPermissions") {
-      // Everything runs, except what a deny rule forbids, and removing /, home, the project or a
-      // parent of them (as Claude Code).
-      const call: Call = { tool, input, cwd: ctx.cwd, root: (await projectOf(ctx.cwd))[0], readOnlyCommands: config.readOnlyCommands };
-      const forbidden = blocking(allRules, call);
-      if (forbidden?.list === "deny") return deniedBy(tool, forbidden);
-      if (!SHELL_TOOLS.has(tool)) return undefined;
-      const command = String(input.command ?? "");
-      const critical = alwaysAskBash(command, ctx.cwd).filter((reason) => reason.startsWith("deletes "));
-      if (!critical.length) return undefined;
-      held++;
-      if (!ctx.hasUI) return { block: true, reason: `tool-gate held this call: it ${critical.join("; ")}. There is no user to approve it.` };
-      return ask(ctx, { tool, input, held: critical.join("; ") }, undefined);
-    }
-
-    if (mode === "chat") {
-      // Talking, not acting: what the gate counts as read-only runs, nothing else does (an allow rule
-      // does not make a command read-only).
-      const p = await plan(tool, input, ctx.cwd);
-      if (p.kind === "deny") return deniedBy(tool, p.rule);
-      if (p.kind === "allow" && p.why !== ALLOWED_BY_RULE) return allow(ctx);
-      // A read outside the project's directories: yours to allow, as in manual mode.
-      if (p.kind === "ask" && p.readOnly) return askUser(ctx, tool, input, p);
-      return {
-        block: true,
-        reason:
-          `Chat mode is on: only read-only tools run, and this ${tool} call is not one. Do not retry it or work around it. ` +
-          `Answer from what you can read, or tell the user what you would do; they can switch modes (${shortcut || "/mode"}) to let you act.`,
-      };
-    }
-
-    if (mode === "plan" && (tool === "edit" || tool === "write")) {
-      const file = path.resolve(ctx.cwd, expandHome(String(input.path ?? "")));
-      if (planFile && file === planFile) return allow(ctx);
-      return {
-        block: true,
-        reason: `Plan mode is on: nothing may be edited until the user approves a plan.${planFile ? ` The only file you may write is the plan file, ${planFile}.` : ""}`,
-      };
-    }
-
-    const p = await plan(tool, input, ctx.cwd);
-
-    const ruled = ruleOutcome(ctx, event.toolCallId, tool, input, p);
-    if (ruled) return ruled.result;
-    if (p.kind === "allow") return allow(ctx);
-    if (p.kind === "deny") return undefined;
-
-    if (mode === "default") return askUser(ctx, tool, input, p);
-    if (mode === "acceptEdits") {
-      if (p.kind === "judge" && (await acceptsEdit(tool, input, ctx.cwd))) return allow(ctx);
-      return askUser(ctx, tool, input, p);
-    }
-
-    if (p.kind === "ask") {
-      const why = p.reasons.join("; ");
-      return hold(ctx, {
-        toolCallId: event.toolCallId,
-        tool,
-        input,
-        family: p.key,
-        reason: `tool-gate held this ${tool} call: it ${why}. Calls like this are always held, whatever the judge says.`,
-        summary: why,
-        offer: p.offer,
-        state: await judgeStateFor(ctx, tool, p.args, []),
-        advice: p.advice,
-      });
-    }
-
-    const rules = loadRules(ctx.cwd);
-    // A local script is judged by what it does: its content goes to the judge.
-    const script = scriptOfCall(tool, input, ctx.cwd, downloads);
-    const state = await judgeStateFor(ctx, tool, p.args, rules, script);
-    const outcome = await askJev(ctx.modelRegistry, config.jev, state, judgeQuestions(rules, { script: script !== undefined }), ctx.signal);
-
-    if (!outcome.ok) {
-      if (!warnedUnavailable && ctx.hasUI && !/off in settings/u.test(outcome.reason)) {
-        warnedUnavailable = true;
-        ctx.ui.notify(`tool-gate: judge unavailable (${outcome.reason}); asking for calls Pi's tool hints flag.`, "warning");
+      if (effectiveWorkflow() === "chat") {
+        // Talking, not acting: what the gate counts as read-only runs, nothing else does (an allow rule
+        // does not make a command read-only).
+        const p = await plan(tool, input, ctx.cwd);
+        if (stale()) return staleResult();
+        if (p.kind === "deny") return deniedBy(tool, p.rule);
+        if (p.kind === "allow" && p.why !== ALLOWED_BY_RULE) return allow(ctx);
+        // A read outside the project's directories: yours to allow, as in manual mode.
+        if (p.kind === "ask" && p.readOnly) return askUser(ctx, tool, input, p);
+        return {
+          block: true,
+          reason:
+            `Chat mode is on: only read-only tools run, and this ${tool} call is not one. Do not retry it or work around it. ` +
+            `Answer from what you can read, or tell the user what you would do; they can switch modes (${shortcut || "/mode"}) to let you act.`,
+        };
       }
-      const hints = annotations(tool);
-      const flagged =
-        hints?.destructiveHint === true ||
-        (!hints?.readOnlyHint && ((hints?.destructiveHint ?? true) || (hints?.openWorldHint ?? true)));
-      if (!flagged || !ctx.hasUI) {
+
+      if (effectiveWorkflow() === "plan" && (tool === "edit" || tool === "write")) {
+        const forbidden = blocking(allRules, { tool, input, cwd: ctx.cwd, root: (await projectOf(ctx.cwd))[0], readOnlyCommands: config.readOnlyCommands });
+        if (stale()) return staleResult();
+        if (forbidden?.list === "deny") return deniedBy(tool, forbidden);
+        const file = path.resolve(ctx.cwd, expandHome(String(input.path ?? "")));
+        if (planFile && file === planFile) return allow(ctx);
+        return {
+          block: true,
+          reason: `Plan mode is on: nothing may be edited until the user approves a plan.${planFile ? ` The only file you may write is the plan file, ${planFile}.` : ""}`,
+        };
+      }
+
+      if (approval === "bypassPermissions" && effectiveWorkflow() !== "plan") {
+        // Everything runs, except what a deny rule forbids, and removing /, home, the project or a
+        // parent of them (as Claude Code).
+        const call: Call = { tool, input, cwd: ctx.cwd, root: (await projectOf(ctx.cwd))[0], readOnlyCommands: config.readOnlyCommands };
+        if (stale()) return staleResult();
+        const forbidden = blocking(allRules, call);
+        if (forbidden?.list === "deny") return deniedBy(tool, forbidden);
+        if (!SHELL_TOOLS.has(tool)) return undefined;
+        const command = String(input.command ?? "");
+        const critical = alwaysAskBash(command, ctx.cwd).filter((reason) => reason.startsWith("deletes "));
+        if (!critical.length) return undefined;
+        held++;
+        if (!ctx.hasUI) return { block: true, reason: `tool-gate held this call: it ${critical.join("; ")}. There is no user to approve it.` };
+        return ask(ctx, { tool, input, held: critical.join("; ") }, undefined);
+      }
+
+      const p = await plan(tool, input, ctx.cwd);
+      if (stale()) return staleResult();
+
+      const ruled = ruleOutcome(ctx, event.toolCallId, tool, input, p);
+      if (ruled) return ruled.result;
+      if (p.kind === "allow") return allow(ctx);
+      if (p.kind === "deny") return undefined;
+
+      if (effectiveWorkflow() !== "plan" && approval === "default") return askUser(ctx, tool, input, p);
+      if (effectiveWorkflow() !== "plan" && approval === "acceptEdits") {
+        const accepted = p.kind === "judge" && (await acceptsEdit(tool, input, ctx.cwd));
+        if (stale()) return staleResult();
+        if (accepted) return allow(ctx);
+        return askUser(ctx, tool, input, p);
+      }
+
+      if (p.kind === "ask") {
+        const why = p.reasons.join("; ");
+        if (stale()) return staleResult();
+        return hold(ctx, {
+          toolCallId: event.toolCallId,
+          revision: epoch,
+          recordUsage,
+          tool,
+          input,
+          family: p.key,
+          reason: `tool-gate held this ${tool} call: it ${why}. Calls like this are always held, whatever the judge says.`,
+          summary: why,
+          offer: p.offer,
+          state: await judgeStateFor(ctx, tool, p.args, []),
+          advice: p.advice,
+        });
+      }
+
+      const rules = loadRules(ctx.cwd);
+      // A local script is judged by what it does: its content goes to the judge.
+      const script = scriptOfCall(tool, input, ctx.cwd, downloads);
+      const state = await judgeStateFor(ctx, tool, p.args, rules, script);
+      if (stale()) return staleResult();
+      const outcome = await askJev(ctx.modelRegistry, config.jev, state, judgeQuestions(rules, { script: script !== undefined }), ctx.signal);
+
+      if (stale()) return staleResult();
+      if (!outcome.ok) {
+        if (!warnedUnavailable && ctx.hasUI && !/off in settings/u.test(outcome.reason)) {
+          warnedUnavailable = true;
+          ctx.ui.notify(`tool-gate: judge unavailable (${outcome.reason}); asking for calls Pi's tool hints flag.`, "warning");
+        }
+        const hints = annotations(tool);
+        const flagged =
+          hints?.destructiveHint === true ||
+          (!hints?.readOnlyHint && ((hints?.destructiveHint ?? true) || (hints?.openWorldHint ?? true)));
+        if (!flagged || !ctx.hasUI) {
+          auto++;
+          status(ctx);
+          return undefined;
+        }
+        held++;
+        status(ctx);
+        return ask(ctx, { tool, input, note: `Judge unavailable: ${outcome.reason}` }, p.offer);
+      }
+
+      if (outcome.usage) recordUsage(outcome.usage);
+      const v = verdict(outcome.answers, rules, config.thresholds);
+      const action = !v || v.allow ? "allow" : "hold";
+      pi.appendEntry("tool-gate:decision", {
+        tool,
+        args: clip(p.args, 500),
+        scores: v?.scores,
+        failures: v?.failures,
+        action,
+        ...(script ? { script: script.path } : {}),
+        latencyMs: outcome.latencyMs,
+        inputTokens: outcome.usage?.input,
+      });
+
+      if (action === "allow") {
         auto++;
         status(ctx);
         return undefined;
       }
-      held++;
-      status(ctx);
-      return ask(ctx, { tool, input, note: `Judge unavailable: ${outcome.reason}` }, p.offer);
-    }
-
-    if (outcome.usage) pendingUsage.set(event.toolCallId, outcome.usage);
-    const v = verdict(outcome.answers, rules, config.thresholds);
-    const action = !v || v.allow ? "allow" : "hold";
-    pi.appendEntry("tool-gate:decision", {
-      tool,
-      args: clip(p.args, 500),
-      scores: v?.scores,
-      failures: v?.failures,
-      action,
-      ...(script ? { script: script.path } : {}),
-      latencyMs: outcome.latencyMs,
-      inputTokens: outcome.usage?.input,
-    });
-
-    if (action === "allow") {
-      auto++;
-      status(ctx);
-      return undefined;
-    }
-    const rules_ = v!.brokenRules.length ? ` (${v!.brokenRules.map((r) => `"${clip(r, 120)}"`).join(", ")})` : "";
-    return hold(ctx, {
-      toolCallId: event.toolCallId,
-      tool,
-      input,
-      family: p.key,
-      reason: steerReason(tool, v!),
-      summary: `${v!.failures.join("; ")}${rules_}`,
-      offer: p.offer,
-      state,
-    });
+      const rules_ = v!.brokenRules.length ? ` (${v!.brokenRules.map((r) => `"${clip(r, 120)}"`).join(", ")})` : "";
+      return hold(ctx, {
+        toolCallId: event.toolCallId,
+        revision: epoch,
+        recordUsage,
+        tool,
+        input,
+        family: p.key,
+        reason: steerReason(tool, v!),
+        summary: `${v!.failures.join("; ")}${rules_}`,
+        offer: p.offer,
+        state,
+      });
+    };
+    const result = await decide();
+    if (stale()) return staleResult();
+    // Publish usage only after authorization, so stale or blocked decisions cannot leave it behind.
+    if (!result?.block && callUsage) pendingUsage.set(event.toolCallId, callUsage);
+    return result;
   });
 
   pi.on("tool_result", (event, ctx) => {
@@ -1072,30 +1186,57 @@ export default function toolGate(pi: ExtensionAPI) {
       (dir === root || dir.startsWith(`${root}${path.sep}`));
   };
 
+  /** Pickers share the approval queue and blocked signal, including RPC's native select. */
+  const pick = async (ctx: ExtensionContext, title: string, choices: string[]) => {
+    const epoch = revision;
+    const run = async () => {
+      if (epoch !== revision) return undefined;
+      const result = await whileBlocked(pi.events, title, () => ctx.ui.select(title, choices));
+      return epoch === revision ? result : undefined;
+    };
+    const next = dialogs.then(run, run);
+    dialogs = next.catch(() => undefined);
+    return next;
+  };
   pi.registerCommand("mode", {
-    description: "Permission mode: chat, manual, accept-edits, plan, auto or yolo (no argument: pick one)",
-    getArgumentCompletions: (prefix: string) =>
-      MODES.filter((m) => m !== "plan" || planProvider)
-        .map((m) => MODE_NAMES[m])
-        .filter((name) => name.startsWith(prefix))
-        .map((name) => ({ value: name, label: name })),
+    description: "Workflow: work, chat or plan (no argument: pick one)",
+    getArgumentCompletions: (prefix: string) => cycle().filter((name) => name.startsWith(prefix)).map((name) => ({ value: name, label: name })),
+    handler: async (args, ctx) => {
+      hostCtx = ctx;
+      const arg = args.trim().toLowerCase();
+      if (arg === "exec") { ctx.ui.notify("Approving a distinct-model plan handoff enters exec. " + EXEC_GUIDANCE, "info"); return; }
+      const legacyApproval = parseApproval(arg);
+      if (legacyApproval) { setApproval(legacyApproval, ctx); return; }
+      if (arg) {
+        const next = parseWorkflow(arg);
+        if (next) setWorkflow(next, ctx);
+        else ctx.ui.notify("Usage: /mode [work|chat|plan].", "warning");
+        return;
+      }
+      if (execActive) { ctx.ui.notify(EXEC_GUIDANCE, "info"); return; }
+      if (!ctx.hasUI) { ctx.ui.notify(`Workflow: ${effectiveWorkflow()}. Usage: /mode [work|chat|plan].`, "info"); return; }
+      const choices = cycle();
+      const labels = choices.map((name) => name[0]!.toUpperCase() + name.slice(1));
+      const selected = await pick(ctx, "Workflow", labels);
+      const next = choices[labels.indexOf(selected ?? "")];
+      if (next) setWorkflow(next, ctx);
+    },
+  });
+  pi.registerCommand("approvals", {
+    description: "Approvals: auto or yolo (no argument: pick one)",
+    getArgumentCompletions: (prefix: string) => ["auto", "yolo"].filter((name) => name.startsWith(prefix)).map((name) => ({ value: name, label: name })),
     handler: async (args, ctx) => {
       hostCtx = ctx;
       const arg = args.trim();
-      let next = arg ? parseMode(arg) : undefined;
-      if (arg && !next) {
-        ctx.ui.notify(`Unknown mode "${arg}". Modes: ${MODES.map((m) => MODE_NAMES[m]).join(", ")}.`, "warning");
+      if (arg) {
+        const next = parseApproval(arg);
+        if (next) setApproval(next, ctx);
+        else ctx.ui.notify("Usage: /approvals [auto|yolo].", "warning");
         return;
       }
-      if (!next) {
-        const choices = MODES.filter((m) => m !== "plan" || planProvider);
-        const labels = choices.map((m) => `${m === mode ? "● " : "  "}${MODE_NAMES[m]} — ${MODE_DESCRIPTIONS[m]}`);
-        const picked = await ctx.ui.select("Permission mode", labels);
-        if (picked === undefined) return;
-        next = choices[labels.indexOf(picked)];
-        if (!next) return;
-      }
-      if (!setMode(next, ctx)) ctx.ui.notify("Plan mode needs pi-plan-mode.", "warning");
+      if (!ctx.hasUI) { ctx.ui.notify(`Approvals: ${MODE_NAMES[approval]}. Usage: /approvals [auto|yolo].`, "info"); return; }
+      const selected = await pick(ctx, "Approvals", ["Auto", "Yolo"]);
+      if (selected) setApproval(selected === "Auto" ? "auto" : "bypassPermissions", ctx);
     },
   });
 
@@ -1135,8 +1276,8 @@ export default function toolGate(pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       const arg = args.trim();
       if (arg === "on" || arg === "off") {
-        setMode(arg === "on" ? "auto" : "bypassPermissions", ctx);
-        ctx.ui.notify(arg === "on" ? "Auto mode on" : "Yolo mode on: every call runs", "info");
+        setApproval(arg === "on" ? "auto" : "bypassPermissions", ctx);
+        ctx.ui.notify(arg === "on" ? "Auto mode on" : "Yolo approvals on; workflow guards remain active", "info");
         return;
       }
       if (/^(rules|grants)(\s|$)/u.test(arg)) {
@@ -1149,7 +1290,7 @@ export default function toolGate(pi: ExtensionAPI) {
       const counts = (list: RuleList) => allRules.filter((r) => r.list === list).length;
       ctx.ui.notify(
         [
-          `Mode: ${MODE_NAMES[mode]} (${MODE_DESCRIPTIONS[mode]}) Cycle: ${cycle().map((m) => MODE_NAMES[m]).join(" → ")}.`,
+          `Workflow: ${effectiveWorkflow()} (${shortcut || "no key"}). Approvals: ${MODE_NAMES[approval]} (${MODE_DESCRIPTIONS[approval]}) (${duplicateShortcut ? "no key" : approvalShortcut || "no key"}).`,
           `${auto} auto-approved, ${pushedBack} pushed back, ${held} asked this session.`,
           `Jev: ${config.jev.enabled ? `${config.jev.provider}/${config.jev.model}` : "off"}; push-back ${config.pushBack ? "on" : "off"}.`,
           `${rules.length} project rule${rules.length === 1 ? "" : "s"} for Jev. Permission rules for ${shown(project)}: ` +
@@ -1169,10 +1310,10 @@ Chat mode is active. The user wants to talk: answer questions, explain, discuss 
 </system-reminder>`;
 }
 
-export function chatExitText(mode: PermissionMode) {
+export function chatExitText(mode: WorkflowMode) {
   return `<system-reminder>
 ## Exited chat mode
-You have left chat mode; the user switched to ${MODE_NAMES[mode]} mode.${mode === "plan" ? "" : " You may now make edits, run tools, and take actions the user asks for."}
+You have left chat mode; the user switched to ${mode} workflow.${mode === "plan" ? "" : " You may now make edits, run tools, and take actions the user asks for."}
 </system-reminder>`;
 }
 

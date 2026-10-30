@@ -8,6 +8,10 @@ The Settings step of `/planners` edits planners, efforts, subagent models, the t
 selection, rendered plans, completion review and revision limit, the default implementation context, the export path, and the shortcut;
 everything else is edited in the file. An invalid file is ignored (defaults apply) and never overwritten.
 
+### Workflow and shortcut
+
+`toggleShortcut` is unset by default. Without pi-tool-gate it toggles local work/plan; with the gate it cycles workflow, so do not configure it on the gate's own key. Gate's default Shift+Tab requires remapping Pi's stock `app.thinking.cycle`; Pi skips conflicting shortcuts. Gate's Alt+A changes approvals independently, including during planning and exec. Plan mode alone does not enforce approvals.
+
 ### Implementation choices and effort
 
 `implementationModelMap` maps an exact planning `provider/modelId` to an ordered list of handoff
@@ -91,7 +95,7 @@ Explicit recovery uses `/plan-exec` (without arguments, shows phase, findings an
 
 With `completionReview: false`, completion is explicitly **Completed without review**. Accepted, configured no-review and confirmed override are final outcomes; only then does normal model restoration and return-to-planning navigation run. If return navigation fails, the saved return remains retryable with `/plan-back`. Paused work survives reload; interrupted in-flight exchanges restore paused, without another paid request.
 
-Consultations and reviews are readable transcript cards: **Consultation N** shows Question, Planner decision and (when expanded) Plan amendment; pending calls show **Planner thinking…** and activity. **Review N** shows the submitted report and verification, previous findings paired with implementer responses, then the planner's evidence, limitations and findings. Pending exchanges and the latest unresolved review stay fully visible; older narratives fold to 12 lines and Ctrl+O expands the recorded exchange. Consultation summaries use the actual decision's first paragraph, not a generated success claim. Cards use explicit labels as well as semantic colors: green for accepted; amber for changes, user-needed, no-review or override; red for review failure. Unfinished work is never labeled Finished. The footer keeps `exec mode on · `, then the phase (`implementing`, `consulting`, `review N`, `revising · N findings` or `paused · user needed/review unavailable`), consultation count including zero, and separate cumulative consultation and review costs; no extra footer row is added. Final cards retain verification, accepted evidence, revision summaries and remaining limitations with separate consultation/review totals.
+Consultations and reviews are readable transcript cards: **Consultation N** shows Question, Planner decision and (when expanded) Plan amendment; pending calls show **Planner thinking…** and activity. **Review N** shows the submitted report and verification, previous findings paired with implementer responses, then the planner's evidence, limitations and findings. Pending exchanges and the latest unresolved review stay fully visible; older narratives fold to 12 lines and Ctrl+O expands the recorded exchange. Consultation summaries use the actual decision's first paragraph, not a generated success claim. Cards use explicit labels as well as semantic colors: green for accepted; amber for changes, user-needed, no-review or override; red for review failure. Unfinished work is never labeled Finished. The footer shows exec on the workflow row with its phase (`implementing`, `consulting`, `review N`, `revising · N findings` or `paused · user needed/review unavailable`), consultation count and separate cumulative consultation and review costs. Approvals remain on their own row when gate is present. Final cards retain verification, accepted evidence, revision summaries and remaining limitations with separate consultation/review totals.
 
 ### Rendered plans
 

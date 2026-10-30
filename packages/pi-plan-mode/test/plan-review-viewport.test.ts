@@ -140,6 +140,8 @@ function setup(plan: string, scrollbar: "always" | "hidden" = "always", withTodo
     executing: () => false,
     toggleKey: () => undefined,
   });
+  // Registering the inline unit directly still requires the real lifecycle initialization.
+  for (const handler of mock.events.get("session_start") ?? []) handler({}, ctx);
   inline.enter(ctx);
   writeFileSync(inline.planFile as string, plan);
   const definition = mock.tools.find((tool) => tool.name === EXIT_TOOL) as unknown as ToolDefinition;

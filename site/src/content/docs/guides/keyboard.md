@@ -132,7 +132,8 @@ These keys are **local to the named focused surface**, not global shortcuts. No 
 | Task / focus | Controls | Owner / configuration |
 | --- | --- | --- |
 | Enter plan mode in the main chat | `/plan [task]`; optionally a configured `toggleShortcut` | [pi-plan-mode](/plugins/pi-plan-mode/); no shortcut by default. With gate, the configured key cycles gate modes instead. |
-| Choose permission mode at the main prompt | `/mode [mode]`; Shift+Tab **after remapping the stock conflict** | [pi-tool-gate](/plugins/pi-tool-gate/), `cycleShortcut` (default `shift+tab`, empty string disables). |
+| Choose workflow at the main prompt | `/mode [work\|chat\|plan]`; Shift+Tab **after remapping the stock conflict** | [pi-tool-gate](/plugins/pi-tool-gate/), `workflowShortcut` (default `shift+tab`, empty string disables); plan requires pi-plan-mode. Exec is entered by a distinct-model handoff, not the cycle. |
+| Choose approvals at the main prompt | `/approvals [auto\|yolo]`; Alt+A | pi-tool-gate, `approvalShortcut` (default `alt+a`, empty string disables); independent of workflow, including exec. |
 | Move between planner lanes/actions | Tab / Shift+Tab | `/planners`; not effort/permission cycling inside that screen. |
 | Read a planner lane | Ctrl+U/D; Left/Right plan/chat on an empty line; Ctrl+O tool output; Ctrl+T thinking | Planner screen owns these; Ctrl+O and Ctrl+T match stock Pi. Typed input steers that lane. |
 | Answer a planner's question | Up/Down or j/k, digits jump, Enter picks; `Type something.` opens the answer line, Esc returns to the options; Left/Right between questions | The question owns the lane's keys until it is answered, also with pi-vim. |
@@ -180,7 +181,7 @@ With [pi-todo](/plugins/pi-todo/) selected, pi-select-nav can forward **Ctrl+Shi
 **Current Pi skips a suite shortcut that conflicts with these reserved stock actions. A startup warning is not an automatic override.**
 
 - **Ctrl+L:** move or disable `app.model.select` before clear-screen can register a working shortcut.
-- **Shift+Tab:** move or disable `app.thinking.cycle` before tool-gate's default `cycleShortcut` can work. Alternatively change `cycleShortcut` itself. `/mode` works without the key.
+- **Shift+Tab:** move or disable `app.thinking.cycle` before tool-gate's default `workflowShortcut` can work. Alternatively change `workflowShortcut` itself (`cycleShortcut` is its legacy fallback). `/mode` works without the key. During exec, use `/plan-exec` or `/plan-exec stop` rather than cycling.
 - Plan mode alone registers no shortcut. If you set `toggleShortcut` to Shift+Tab, resolve the same thinking conflict. With tool-gate, never also register plan mode on the gate's key.
 - **Customized todo key:** pi-todo's Ctrl+Shift+T default has no stock Ctrl+T conflict. If you change `collapseKey` to Ctrl+T, move or disable `app.thinking.toggle` first. A personal native Ctrl+Shift+T binding also requires moving that action or choosing another todo key.
 
@@ -246,7 +247,7 @@ When a key does the wrong thing:
 
 - Check **where focus is** and whether Vim is Insert, idle Normal, Visual, pending or EX. Try arrows and a plain Escape before assuming a global binding failed.
 - Run **`/hotkeys`** for effective main-editor/application keys; read startup “Skipping” diagnostics. Local dialog keys need their own help/reference, not `/hotkeys` alone.
-- Check the exact **action ID** in `keybindings.json`, or the correct plugin setting (`cycleShortcut`, `toggleShortcut`, `collapseKey`, `shortcut`, `acceptKeys`). Chords have no separate action ID.
+- Check the exact **action ID** in `keybindings.json`, or the correct plugin setting (`workflowShortcut`, `approvalShortcut`, `toggleShortcut`, `collapseKey`, `shortcut`, `acceptKeys`). Chords have no separate action ID.
 - After editing bindings, plugin settings or selection, use **`/reload`**. A private renderer/stdout patch or retained upstream stash may need a full restart for a clean baseline.
 - Remove duplicate standalone/upstream copies. For a minimal reproduction, load one component and then add companions back; see [troubleshooting](/guides/troubleshooting/#isolate-a-conflict).
 

@@ -1710,13 +1710,12 @@ test("the permission mode gets its own row in its color; plan runs point at /pla
   const s = { ...fixture(), mode: absorbed.mode, statuses: absorbed.rest };
   const rows = mod.renderFooter(s, 160, theme).map(plain);
   assert.match(rows[1], /opus-5\.5 · \uee9c reasoning xhigh$/);
-  // The cycle-key hint is not shown.
-  assert.equal(rows[2], " \uf510  \u{f0211} accept edits on");
+  assert.match(rows[2], /Approvals · accept edits \(legacy\) · shift\+tab/);
   // The gate's tally follows the mode on its row.
   const gated = { ...s, statuses: ["Gate 2 auto · 0 pushed back · 1 asked"] };
   const auto = { ...gated, mode: mod.parseModeStatus("⏵⏵ auto mode on (shift+tab to cycle)") };
   const autoRows = mod.renderFooter(auto, 160, theme).map(plain);
-  assert.equal(autoRows[2], " \uf510  \u{f0211} auto mode on · Gate 2 auto · 0 pushed back · 1 asked");
+  assert.match(autoRows[2], /Approvals · auto · Gate 2 auto · 0 pushed back · 1 asked · shift\+tab/);
   assert.equal(autoRows.filter((r) => r.includes("Gate")).length, 1);
   assert.equal(mod.parseModeStatus("⏸ plan mode on").kind, "plan");
   assert.equal(mod.parseModeStatus("⏸ plan mode on").label, "\u{f03e4} plan mode on");
@@ -1724,11 +1723,13 @@ test("the permission mode gets its own row in its color; plan runs point at /pla
   assert.equal(mod.parseModeStatus("⏸ chat mode on (shift+tab to cycle)").kind, "chat");
   assert.equal(mod.parseModeStatus("⏵⏵ yolo mode on (shift+tab to cycle)").kind, "bypass");
   assert.equal(mod.parseModeStatus("⏵⏵ bypass permissions on").kind, "bypass");
+  assert.equal(mod.parseModeStatus("⏸ manual (legacy) mode on").kind, "manual");
+  assert.equal(mod.parseModeStatus("⏵⏵ accept edits (legacy) on").kind, "acceptEdits");
   assert.equal(mod.parseModeStatus("plan mode please"), undefined);
   assert.deepEqual(mod.absorbStatuses(new Map([["permission-mode", "something else"]]), { claudeRow: false }).rest, ["something else"]);
 });
 
-test("pi-plan-mode's exec mode takes the permission mode's place on its row", () => {
+test("pi-plan-mode's exec workflow preserves a separate approvals row", () => {
   const absorbed = mod.absorbStatuses(new Map([
     ["permission-mode", "⏵⏵ auto mode on (shift+tab to cycle)"],
     ["plan-exec", "exec mode on · Claude Opus 5.5 on call"],
@@ -1736,16 +1737,19 @@ test("pi-plan-mode's exec mode takes the permission mode's place on its row", ()
   assert.equal(absorbed.exec, "Claude Opus 5.5 on call");
   assert.deepEqual(absorbed.rest, []);
   const s = { ...fixture(), mode: absorbed.mode, exec: absorbed.exec, statuses: absorbed.rest };
-  // The permission mode underneath still decides what runs, so it follows, dim.
-  assert.equal(mod.renderFooter(s, 160, theme).map(plain)[2], " \uf510  \u{f0211} exec mode on · auto · Claude Opus 5.5 on call");
+  const rows = mod.renderFooter(s, 160, theme).map(plain);
+  assert.match(rows[2], /Workflow · exec · Claude Opus 5.5 on call · \/plan-exec/);
+  assert.match(rows[3], /Approvals · auto · shift\+tab/);
   // Without a mode, or a planner on call, the row is still drawn.
-  assert.equal(mod.renderFooter({ ...s, mode: undefined }, 160, theme).map(plain)[2], " \uf510  \u{f0211} exec mode on · Claude Opus 5.5 on call");
+  const standalone = mod.renderFooter({ ...s, mode: undefined }, 160, theme).map(plain);
+  assert.match(standalone[2], /Workflow · exec · Claude Opus 5.5 on call/);
+  assert.ok(!standalone.some(row => row.includes("Approvals")));
   assert.equal(mod.absorbStatuses(new Map([["plan-exec", "exec mode on"]]), { claudeRow: false }).exec, "");
-  assert.equal(mod.renderFooter({ ...s, exec: "" }, 160, theme).map(plain)[2], " \uf510  \u{f0211} exec mode on · auto");
+  assert.match(mod.renderFooter({ ...s, exec: "" }, 160, theme).map(plain)[2], /Workflow · exec · \/plan-exec/);
   assert.deepEqual(mod.absorbStatuses(new Map([["plan-exec", "something else"]]), { claudeRow: false }).rest, ["something else"]);
 });
 
-test("exec negotiation phases stay on the existing mode row, ahead of counts and costs", () => {
+test("exec negotiation phases stay on the workflow row, ahead of counts and costs", () => {
   for (const phase of ["implementing", "consulting", "review 1", "review 3", "revising · 2 findings", "paused · user needed", "paused · review unavailable"]) {
     for (const count of [0, 2]) {
       const detail = `${phase} · ${count} consultations · $0.31 consult · $0.42 review`;
@@ -1760,13 +1764,81 @@ test("exec negotiation phases stay on the existing mode row, ahead of counts and
         const rows = mod.renderFooter(s, width, theme).map(plain);
         assert.equal(rows.length, mod.renderFooter({ ...s, exec: "" }, width, theme).length);
         assert.ok(rows.every(row => visibleWidth(row) <= width));
-        assert.match(rows[2], /exec mode on/);
+        assert.match(rows[2], /Workflow · exec/);
+        assert.match(rows[3], /Approvals · auto/);
         assert.ok(rows[2].includes(phase.split(" · ")[0]), `${width}: ${rows[2]}`);
         if (width === 120) assert.ok(rows[2].includes(detail), rows[2]);
         assert.equal(mod.renderFooter({ ...s, compact: true }, width, theme).length, 1);
       }
     }
   }
+});
+
+test("independent axes cover all workflows and approvals at phone and desktop widths", () => {
+  for (const workflow of ["work", "chat", "plan", "exec"]) for (const approval of ["auto", "yolo"]) {
+    const absorbed = mod.absorbStatuses(new Map([
+      ["workflow-mode", `workflow: ${workflow}${workflow === "exec" ? "" : " (shift+tab to cycle)"}`],
+      ["permission-mode", `⏵⏵ ${approval} mode on (alt+a to cycle)`],
+      ["tool-gate", "gate: 2 auto · 0 pushed back · 1 asked"],
+    ]), { claudeRow: false });
+    const s = { ...fixture(), ...absorbed, statuses: absorbed.rest };
+    for (const width of [46, 120]) {
+      const rows = mod.renderFooter(s, width, theme).map(plain);
+      assert.match(rows[2], new RegExp(`Workflow · ${workflow}`));
+      assert.match(rows[3], new RegExp(`Approvals · ${approval}`));
+      assert.ok(rows.every(row => visibleWidth(row) <= width));
+      assert.equal(rows.filter(row => row.includes("Gate")).length, 1);
+      if (width === 120) {
+        assert.match(rows[2], workflow === "exec" ? /\/plan-exec/ : /shift\+tab/);
+        assert.match(rows[3], /alt\+a/);
+        if (workflow === "plan") assert.match(rows[2], /read-only research/);
+      }
+      assert.equal(mod.renderFooter({ ...s, compact: true }, width, theme).length, 1);
+    }
+    const roles = [];
+    mod.renderFooter(s, 120, { fg: (role, text) => { roles.push([role, text]); return text; }, bold: text => text });
+    assert.ok(roles.some(([role, text]) => role === (approval === "yolo" ? "error" : "warning") && text === approval));
+  }
+});
+
+test("legacy workflow fallback never invents approvals; explicit workflow and exec detail win", () => {
+  const absorb = entries => mod.absorbStatuses(new Map(entries), { claudeRow: false });
+  for (const kind of ["chat", "plan"]) {
+    const legacy = absorb([["permission-mode", `⏸ ${kind} mode on (ctrl+w to cycle)`]]);
+    assert.deepEqual(legacy.workflow, { kind, key: "ctrl+w" });
+    assert.equal(legacy.mode, undefined);
+    const explicit = absorb([["workflow-mode", "workflow: work (alt+w to cycle)"], ["permission-mode", `⏸ ${kind} mode on`]]);
+    assert.deepEqual(explicit.workflow, { kind: "work", key: "alt+w" });
+    const rows = mod.renderFooter({ ...fixture(), ...legacy, statuses: legacy.rest }, 120, theme).map(plain);
+    assert.match(rows[2], /Workflow.*ctrl\+w/);
+    assert.ok(!rows.some(row => row.includes("Approvals")));
+  }
+  for (const entries of [[], [["workflow-mode", "workflow: plan"]], [["plan-exec", "exec mode on · review 2"]]]) {
+    const a = absorb(entries);
+    for (const width of [46, 120]) {
+      const rows = mod.renderFooter({ ...fixture(), ...a, statuses: a.rest }, width, theme).map(plain);
+      assert.ok(!rows.some(row => row.includes("Approvals")));
+      if (entries.length) assert.match(rows[2], /Workflow · (plan|exec)/);
+      else assert.ok(!rows.some(row => row.includes("Workflow")));
+    }
+  }
+  const a = absorb([["permission-mode", "⏵⏵ auto mode on (ctrl+a to cycle)"]]);
+  const rows = mod.renderFooter({ ...fixture(), ...a, statuses: a.rest }, 46, theme).map(plain);
+  assert.match(rows[2], /Approvals · auto · ctrl\+a/);
+  assert.ok(!rows.some(row => row.includes("Workflow")));
+  for (const width of [46, 120]) {
+    const custom = absorb([["workflow-mode", "workflow: work (alt+w to cycle)"], ["permission-mode", "⏵⏵ auto mode on (ctrl+a to cycle)"]]);
+    const rows = mod.renderFooter({ ...fixture(), ...custom, statuses: custom.rest }, width, theme).map(plain);
+    assert.match(rows[2], /Workflow · work · alt\+w/);
+    assert.match(rows[3], /Approvals · auto · ctrl\+a/);
+    const disabled = absorb([["workflow-mode", "workflow: work"], ["permission-mode", "⏵⏵ auto mode on"]]);
+    const disabledRows = mod.renderFooter({ ...fixture(), ...disabled, statuses: disabled.rest }, width, theme).map(plain);
+    assert.match(disabledRows[2], /Workflow · work$/);
+    assert.match(disabledRows[3], /Approvals · auto$/);
+  }
+  assert.deepEqual(mod.parseWorkflowStatus("workflow: chat"), { kind: "chat" });
+  assert.equal(mod.parseWorkflowStatus("workflow: unknown"), undefined);
+  for (const key of ["workflow-mode", "permission-mode", "plan-exec"]) assert.deepEqual(absorb([[key, "unknown status"]]).rest, ["unknown status"]);
 });
 
 test("a waiting dialog compacts the footer to one row for herdr-web-ui", () => {

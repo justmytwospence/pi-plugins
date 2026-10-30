@@ -3,16 +3,21 @@
 // write), then calls exit_plan_mode, which shows you the plan and asks who implements it: hand it
 // off to a cheaper model in this session (the host compacts the context down to the plan and
 // switches the model), keep the planning model on it, edit the plan first, or keep planning. The
-// permission mode returns to what it was before planning. Shift+Tab (pi-tool-gate's mode cycle) or /plan enters it.
-//
-// With pi-tool-gate installed, the gate owns the mode (manual, accept edits, plan, auto, bypass):
-// plan mode is one step of its Shift+Tab cycle, and it judges commands while planning (as Claude
-// Code's classifier does). Without it, this extension enforces a read-only shell itself and its
-// own shortcut (toggleShortcut) toggles plan mode. The contract is in pi-tool-gate's modes.ts:
-//   permission-mode:changed        gate -> all    { mode, previous?, cycle, prePlanMode? }
-//   permission-mode:set            any  -> gate   { mode }
-//   permission-mode:cycle          any  -> gate   {}
-//   permission-mode:plan-provider  plan -> gate   { planFile? }
+// workflow returns to work after approval, without changing approvals.
+// With pi-tool-gate installed, the gate owns workflow and judges planning commands. Without it,
+// this extension enforces a read-only shell and its configured shortcut toggles work/plan.
+// Event bus contract (shared with pi-tool-gate; no sibling imports):
+//   workflow-mode:set           any -> gate { mode: work|chat|plan } requests a base transition
+//   workflow-mode:cycle         any -> gate {} requests the next base workflow
+//   workflow-mode:changed       gate -> all { mode: work|chat|plan|exec, previous?, cycle: BaseWorkflowMode[], key?, source: transition|restore }
+//   workflow-mode:plan-provider plan -> gate { planFile? } announces plan support and its file
+//   workflow-mode:exec          plan -> gate { active: boolean, source: transition|restore } (not a public entry action)
+//   workflow-mode:query         any -> gate { entries: readonly unknown[], cwd: string, reply(snapshot): void }
+// Query synchronously reduces the supplied destination branch with cwd defaults, without side effects.
+// Restore publications are metadata snapshots, never requests to transition or persist.
+//   permission-mode:set         any -> gate { mode } requests approvals only
+//   permission-mode:cycle       any -> gate {} toggles auto/yolo
+//   permission-mode:changed     gate -> all { mode, previous?, cycle } publishes approvals only
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import {
@@ -37,11 +42,13 @@ import { PlanReviewViewport } from "./plan-review-viewport.js";
 import { type ReviewStatus, reviewBody, reviewTitle } from "./review-card.js";
 import { findBlockedCommandSegment, readCommand, type SafeSubcommands } from "./tool-policy.js";
 
-export const MODE_CHANGED = "permission-mode:changed";
-export const MODE_SET = "permission-mode:set";
-export const MODE_CYCLE = "permission-mode:cycle";
-export const PLAN_PROVIDER = "permission-mode:plan-provider";
-export const MODE_STATUS_KEY = "permission-mode";
+export const MODE_CHANGED = "workflow-mode:changed";
+export const MODE_SET = "workflow-mode:set";
+export const MODE_CYCLE = "workflow-mode:cycle";
+export const PLAN_PROVIDER = "workflow-mode:plan-provider";
+export const MODE_STATUS_KEY = "workflow-mode";
+export const EXEC_GUIDANCE =
+  "Exec is active. Use /plan-exec for its status and recovery actions, or /plan-exec stop to leave exec.";
 
 /** Whether plan mode is on, its plan file, and what your agent was last told. */
 export const INLINE_ENTRY = "plan-mode:inline";
@@ -106,7 +113,11 @@ export interface InlinePlanMode {
   readonly active: boolean;
   readonly planFile: string | undefined;
   /** Enter plan mode (through the gate when it is there). */
-  enter(ctx: ExtensionContext): void;
+  enter(ctx: ExtensionContext, planFile?: string): void;
+  /** Return to ordinary work without changing approvals. */
+  work(ctx: ExtensionContext): void;
+  /** A token invalidated by workflow/branch changes, for pending handoffs. */
+  readonly revision: number;
   /** Toggle (alone) or cycle (with the gate): what the shortcut does. */
   toggle(ctx: ExtensionContext): void;
 }
@@ -165,7 +176,9 @@ interface ExitDetails {
 export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): InlinePlanMode {
   let state: InlineState = { active: false, told: false };
   /** pi-tool-gate owns the mode; its current mode and cycle. */
-  let gate: { mode: string; cycle: string[]; prePlanMode?: string } | undefined;
+  let gate: { mode: string; cycle: string[] } | undefined;
+  let revision = 0;
+  let branchAnchor: string | undefined;
   /** Restored this session's state (so the gate's early broadcast does not clobber it). */
   let restored = false;
   let hostCtx: ExtensionContext | undefined;
@@ -183,13 +196,6 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
 
   const plansDir = () => plansDirectoryPath(host.plansDirectory());
 
-  /** The mode to return to after approval: the one before planning, else auto when it is in the cycle. */
-  const resumeMode = () => {
-    const before = gate?.prePlanMode;
-    if (before && ["default", "acceptEdits", "auto", "bypassPermissions"].includes(before)) return before;
-    return gate?.cycle.includes("auto") ? "auto" : "default";
-  };
-
   const persist = () => safely(() => pi.appendEntry(INLINE_ENTRY, { ...state }));
 
   const announce = () =>
@@ -200,7 +206,10 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     if (!ctx?.hasUI || gate) return;
     const key = host.toggleKey();
     safely(() =>
-      ctx.ui.setStatus(MODE_STATUS_KEY, state.active ? `⏸ plan mode on${key ? ` (${key} to cycle)` : ""}` : undefined),
+      ctx.ui.setStatus(
+        MODE_STATUS_KEY,
+        `workflow: ${host.executing() ? "exec" : state.active ? "plan" : "work"}${key && !host.executing() ? ` (${key} to cycle)` : ""}`,
+      ),
     );
   };
 
@@ -228,12 +237,20 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       ? enterPlanText(state.planFile as string, hasPlan(state.planFile), gate !== undefined)
       : exitPlanText(state.planFile, gate?.mode);
 
-  const enterLocal = (ctx: ExtensionContext | undefined) => {
-    if (state.active) return;
-    // A plan file per session: re-entering continues it, as Claude Code does.
-    state.planFile ??= newPlanFile(plansDir());
+  const allocatePlanFile = () => {
+    if (state.planFile) return;
+    state.planFile = newPlanFile(plansDir());
     safely(() => mkdirSync(dirname(state.planFile as string), { recursive: true }));
+    if (state.active) persist();
+    announce();
+  };
+
+  const enterLocal = (ctx: ExtensionContext | undefined) => {
+    // Restoration never allocates; a genuine entry (even into restored plan mode) may do so.
+    allocatePlanFile();
+    if (state.active) return;
     state.active = true;
+    revision++;
     announce();
     tellNow(ctx);
     persist();
@@ -243,6 +260,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   const exitLocal = (ctx: ExtensionContext | undefined, told?: boolean) => {
     if (!state.active) return;
     state.active = false;
+    revision++;
     if (told !== undefined) state.told = told;
     tellNow(ctx);
     persist();
@@ -251,29 +269,48 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
 
   const requestMode = (mode: string) => safely(() => pi.events.emit(MODE_SET, { mode }));
 
-  const enter = (ctx: ExtensionContext) => {
+  const enter = (ctx: ExtensionContext, planFile?: string) => {
+    // Fresh handoff recovery can precede our lifecycle handler. Be ready to persist
+    // the genuine transition before asking the gate to enter plan mode.
+    if (!restored) restore(ctx);
     hostCtx = ctx;
-    if (gate) {
-      requestMode("plan");
-      // The gate answers synchronously; if it did not take plan mode, enter on our own.
-      if (!state.active) enterLocal(ctx);
-    } else enterLocal(ctx);
+    if (host.executing() || gate?.mode === "exec") {
+      ctx.ui.notify(EXEC_GUIDANCE, "warning");
+      return;
+    }
+    if (planFile && planFile !== state.planFile) {
+      state.planFile = planFile;
+      persist();
+      announce();
+    }
+    if (gate) requestMode("plan");
+    else enterLocal(ctx);
   };
 
   pi.events.on(MODE_CHANGED, (data) => {
-    const event = data as { mode?: unknown; cycle?: unknown; prePlanMode?: unknown } | undefined;
-    if (typeof event?.mode !== "string") return;
+    const event = data as { mode?: unknown; cycle?: unknown; source?: unknown } | undefined;
+    if (typeof event?.mode !== "string" || !["work", "chat", "plan", "exec"].includes(event.mode)) return;
+    const previous = gate?.mode;
     gate = {
       mode: event.mode,
       cycle: Array.isArray(event.cycle) ? event.cycle.map(String) : [],
-      ...(typeof event.prePlanMode === "string" ? { prePlanMode: event.prePlanMode } : {}),
     };
+    if (event.source === "restore") return;
+    if (previous !== event.mode) revision++;
+    // A gate loaded first may broadcast while the host is already on another branch. Do not
+    // write an inline record or send a notice there before our own restoration runs.
+    const branch = hostCtx?.sessionManager.getBranch();
+    if (branchAnchor && !branch?.some((entry) => entry.id === branchAnchor)) restored = false;
     if (!restored) return;
     if (event.mode === "plan") enterLocal(hostCtx);
     else exitLocal(hostCtx);
+    branchAnchor = hostCtx?.sessionManager.getLeafId?.() ?? undefined;
   });
 
-  pi.on("session_start", (_event, ctx) => {
+  const restore = (ctx: ExtensionContext) => {
+    restored = false;
+    revision++;
+    reviewViewport.end();
     hostCtx = ctx;
     const entries = ctx.sessionManager.getBranch() as Array<{ type?: string; customType?: string; data?: unknown }>;
     const latest = [...entries].reverse().find((entry) => entry.type === "custom" && entry.customType === INLINE_ENTRY)
@@ -284,20 +321,32 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       ...(typeof latest?.planFile === "string" ? { planFile: latest.planFile } : {}),
     };
     declined = lastDeclined(entries);
-    restored = true;
-    // The gate is the source of truth for the mode when it is there.
-    if (gate) {
-      if (gate.mode === "plan") {
-        state.active = false;
-        enterLocal(ctx);
-      } else exitLocal(ctx);
-    }
+    // Query the destination itself, never the previous branch's cached gate mode. The
+    // responder is registered at factory time, so lifecycle handler order is irrelevant.
+    safely(() =>
+      pi.events.emit("workflow-mode:query", {
+        entries,
+        cwd: ctx.cwd,
+        reply: (snapshot: { mode: string; cycle?: string[] }) => {
+          gate = { mode: snapshot.mode, cycle: snapshot.cycle ?? [] };
+          state.active = snapshot.mode === "plan";
+        },
+      }),
+    );
+    // Announcing may elicit a gate's initial (pre-restore) broadcast. It is not a transition.
     announce();
+    restored = true;
+    branchAnchor = ctx.sessionManager.getLeafId?.() ?? undefined;
     updateStatus();
-  });
+  };
+  pi.on("session_start", (_event, ctx) => restore(ctx));
+  pi.on("session_tree", (_event, ctx) => restore(ctx));
+  pi.events.on("workflow-mode:exec", () => updateStatus());
 
   pi.on("session_shutdown", () => {
     reviewViewport.end();
+    revision++;
+    branchAnchor = undefined;
     hostCtx = undefined;
     restored = false;
     gate = undefined;
@@ -305,6 +354,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
 
   pi.on("before_agent_start", (_event, ctx) => {
     hostCtx = ctx;
+    if (restored && state.active) allocatePlanFile();
     if (state.told === state.active) return undefined;
     // Nothing to say on leaving if your agent never heard it was in plan mode.
     const content = noticeText();
@@ -345,10 +395,8 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     promptGuidelines: ENTER_GUIDELINES,
     parameters: { type: "object", additionalProperties: false, properties: {} } as never,
     async execute(_id, _params, _signal, _onUpdate, ctx) {
-      if (host.executing()) {
-        return text(
-          "You are implementing an approved plan (exec mode): follow it and call finish_plan when it is done; do not start planning again unless the user asks.",
-        );
+      if (host.executing() || gate?.mode === "exec") {
+        return text(EXEC_GUIDANCE);
       }
       if (state.active) return text("You are already in plan mode.");
       hostCtx = ctx;
@@ -417,6 +465,8 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       }
       if (!ctx.hasUI) return text("There is no user to approve the plan. Stay in plan mode.");
       const submittedPlan = plan;
+      const approvalRevision = revision;
+      const current = () => restored && revision === approvalRevision && state.active && !host.executing();
       let edited = false;
       const models = host.implementationChoices(ctx);
       const pickerState = createApprovalState();
@@ -439,7 +489,9 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             } satisfies ExitDetails,
           } as never);
           const picked = await pickApproval(ctx, { ...models, targets: models?.targets ?? [] }, pickerState, signal);
-          const choice = picked?.choice;
+          if (!current())
+            return text("Plan review expired because the workflow or branch changed. Approve the plan again.");
+          const choice = signal?.aborted ? undefined : picked?.choice;
           if (choice?.kind === "edit") {
             // In your external editor when one is set (pi's externalEditor, or $VISUAL / $EDITOR),
             // else in pi's own.
@@ -447,6 +499,9 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             const revised = command
               ? await editInTerminal(ctx.ui as never, command, plan, "plan.md")
               : await ctx.ui.editor("Edit the plan", plan);
+            if (!current())
+              return text("Plan review expired because the workflow or branch changed. Approve the plan again.");
+            if (signal?.aborted) continue;
             if (command && revised === undefined)
               ctx.ui.notify(`${command.split(" ")[0]} did not save the plan.`, "warning");
             if (revised?.trim() && revised.trim() !== plan) {
@@ -486,8 +541,8 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
           declined = undefined;
           // This result tells your agent it left plan mode.
           exitLocal(ctx, false);
-          const mode = gate ? resumeMode() : undefined;
-          if (mode) requestMode(mode);
+          const mode = "work";
+          if (gate) requestMode(mode);
           const who =
             choice.kind === "handoff" && models
               ? {
@@ -565,8 +620,20 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       return state.planFile;
     },
     enter,
+    work(ctx) {
+      hostCtx = ctx;
+      if (gate) requestMode("work");
+      else exitLocal(ctx, false);
+    },
+    get revision() {
+      return revision;
+    },
     toggle(ctx) {
       hostCtx = ctx;
+      if (host.executing() || gate?.mode === "exec") {
+        ctx.ui.notify(EXEC_GUIDANCE, "warning");
+        return;
+      }
       if (gate) safely(() => pi.events.emit(MODE_CYCLE, {}));
       else if (state.active) exitLocal(ctx);
       else enterLocal(ctx);
@@ -615,7 +682,7 @@ function renderExit(
             outcome === "handoff"
               ? `, handed off${details?.handoff ? ` to ${details.handoff}` : ""}`
               : ", implementing here"
-          }${details?.mode ? `, ${MODE_WORDS[details.mode] ?? details.mode}` : ""}`,
+          }${details?.mode && details.mode !== "work" ? `, ${MODE_WORDS[details.mode] ?? details.mode}` : ""}`,
         }
       : outcome === "fresh"
         ? { tone: "success", text: "✓ Approved, implementing in a fresh session" }

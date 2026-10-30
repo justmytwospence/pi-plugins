@@ -2,7 +2,7 @@
 
 A Pi extension that auto-approves tool calls, so you are only pulled in when a call is risky and the agent could not find a way around it. Fixed rules settle the clear cases without a model call (read-only calls run, a short list of dangerous calls is always held); [Jev](https://docs.typesafe.ai), through Pi's own classifier models, judges the gray zone. A held call is first blocked with an explanation and a suggested workaround for the agent; only if the agent retries it, or another held call of the same family, are you asked. Your own [permission rules](#permission-rules), in Claude Code's syntax (`Bash(git push:*)`, `Edit(src/**)`), allow, always ask about or deny specific calls, for the session, the project or everywhere.
 
-That is **auto mode**, one of the Claude Code permission modes the gate provides; Shift+Tab cycles them (see [Permission modes](#permission-modes)). It acts on every tool call (the `tool_call` event) and is not a sandbox: see [Limitations](#limitations).
+That is **auto approval**, independent of the current workflow (see [Workflow and approvals](#workflow-and-approvals)). It acts on every tool call (the `tool_call` event) and is not a sandbox: see [Limitations](#limitations).
 
 Part of [Pi Plugins](https://github.com/justmytwospence/pi-plugins). Reference: <https://pi-plugins.vercel.app/plugins/pi-tool-gate/>.
 
@@ -30,22 +30,15 @@ pi -e ./packages/pi-tool-gate
 
 No `npm install` is needed to run it: the package.json has no `dependencies`; Pi supplies its peer dependencies.
 
-## Permission modes
+## Workflow and approvals
 
-As in Claude Code, the mode decides what runs without asking you. Shift+Tab (`cycleShortcut`) steps through them, from auto to manual, then accept edits, plan, and back to auto; `/mode` picks one (`/mode` alone lists them). The footer shows the active one with Claude Code's labels.
+Workflow and approvals are independent. Defaults are **work + auto**. `/mode` selects work, chat or plan; Shift+Tab cycles work → chat → plan → work (without pi-plan-mode, plan is omitted). Work permits ordinary requested actions. Chat blocks calls not recognized as reads; plan permits editing its plan file and judges shell commands using the existing plan policy, even under yolo. These guards are not a sandbox: configured orchestration bypasses, tool hints and shell classification have limits. Plan requires [pi-plan-mode](../pi-plan-mode/).
 
-| Mode | Status | Runs without asking |
-| --- | --- | --- |
-| chat | `⏸ chat mode on` | Read-only calls only ([clear cases](#1-clear-cases-no-model-call)); everything else is blocked without asking you, and the agent is told it is there to talk and answer questions. No Jev calls. Not in the cycle unless you add it to `modes`. |
-| manual (`default`) | `⏸ manual mode on` | Reads only ([clear cases](#1-clear-cases-no-model-call)); everything else asks you, with [rules to allow](#the-approval-dialog) for the session, the project or everywhere. |
-| accept edits (`acceptEdits`) | `⏵⏵ accept edits on` | Reads, `edit`/`write` inside the project, and `mkdir`, `touch`, `rm`, `rmdir`, `mv`, `cp` and `sed` when every file they name is inside the project (after any `cd`; no redirects or expansions; `sed` without `w`/`e`). Credential files and the [always-held calls](#1-clear-cases-no-model-call) still ask. |
-| plan | `⏸ plan mode on` | Needs [pi-plan-mode](../pi-plan-mode/): edits are blocked except to its plan file; commands are judged as in auto mode. Approving the plan picks the next mode. |
-| auto | `⏵⏵ auto mode on` | Everything Jev and the fixed rules allow, below. The default. |
-| yolo (`bypassPermissions`) | `⏵⏵ yolo mode on` | Everything, except removing `/`, a top-level directory, home, the project or a parent of them. Claude Code's bypass permissions mode; `bypass` is accepted as an alias. Not in the cycle unless you add it to `modes`. |
+`/approvals` selects **auto** or **yolo**; Alt+A toggles them without changing workflow. Auto uses the checks below. Yolo bypasses ordinary approval checks, but deny rules and critical-removal protections remain, as do chat and plan guards. Legacy `manual` asks about non-read calls; `accept-edits` also permits qualifying in-project edits and filesystem commands. Both remain explicit compatibility arguments and are retained when restoring old sessions; Alt+A selects auto from either. `/mode auto|yolo|manual|accept-edits` is a compatibility alias for changing approvals only.
 
-Without a UI, a call that would ask you is blocked. The mode is saved in the session, so a resumed session comes back in it; a new session starts in `defaultMode`. Plan mode joins the cycle only when pi-plan-mode announces itself on Pi's event bus (contract in [`src/modes.ts`](./src/modes.ts)); other extensions can request a mode (`permission-mode:set`) or a cycle step (`permission-mode:cycle`) and follow changes (`permission-mode:changed`).
+Approving a distinct-model plan handoff enters **exec**, owned by pi-plan-mode; same-model execution returns to work. While exec is active, workflow cycling and `/plan` cannot leave it; use `/plan-exec` for status or `/plan-exec stop` to stop. Approvals remain independently changeable. Both axes restore from the active session branch, including legacy combined-mode records. Without a UI, calls that would ask are blocked.
 
-Pi binds Shift+Tab to its thinking-level cycle by default; the gate takes it over (Pi warns about the conflict at startup). Rebind `app.thinking.cycle` in `~/.pi/agent/keybindings.json` (for example to `alt+t`), or set `cycleShortcut` to another key.
+Pi reserves Shift+Tab for thinking-level cycling and skips a conflicting extension shortcut; it does not override the stock binding. Rebind `app.thinking.cycle` in `~/.pi/agent/keybindings.json` (for example to `alt+t`), or set `workflowShortcut` to another key. The event contracts are in [`src/modes.ts`](./src/modes.ts).
 
 ## How auto mode works
 
@@ -268,12 +261,13 @@ This is a heuristic over arguments. Paths a program builds at runtime are not se
 
 ## Commands
 
-- `/mode [chat|manual|accept-edits|plan|auto|yolo]`: switch modes; with no argument, pick one from a list of every mode.
-- `/gate` or `/gate status`: the mode and cycle, counts, Jev model, push-back setting, number of project rules, permission rules by list and folder grants.
+- `/mode [work|chat|plan]`: select workflow; without an argument, open the picker. Exec is entered only through a handoff.
+- `/approvals [auto|yolo]`: select approvals; without an argument, open the picker. Legacy `manual` and `accept-edits` arguments remain supported.
+- `/gate` or `/gate status`: both axes and keys, counts, Jev model, push-back setting, project rules, permission rules and folder grants.
 - `/gate rules [list | add | remove]`: [permission rules](#gate-rules) and folder grants: list them, pick one to remove it, or add one. `/gate grants` is the same.
 - `/gate on`, `/gate off`: auto mode, or yolo mode.
 
-The status line shows the mode (`permission-mode` key, `⏵⏵ auto mode on (shift+tab to cycle)`) and, in auto and plan mode, `gate: N auto · P pushed back · M asked`. Every call Jev judges is recorded in the session as a `tool-gate:decision` custom entry (tool, clipped arguments, scores, failures, action, latency, input tokens), for tuning thresholds. Jev's token usage is added to the gated tool's result.
+Separate `workflow-mode` and `permission-mode` statuses show the axes and their keys; the gate also reports `gate: N auto · P pushed back · M asked`. Every call Jev judges is recorded in the session as a `tool-gate:decision` custom entry (tool, clipped arguments, scores, failures, action, latency, input tokens), for tuning thresholds. Jev's token usage is added to the gated tool's result.
 
 ## Project rules
 
@@ -317,9 +311,10 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
   ],
   "readOnlyCommands": [],
   "pushBack": true,
-  "defaultMode": "auto",
-  "modes": ["default", "acceptEdits", "plan", "auto"],
-  "cycleShortcut": "shift+tab",
+  "defaultWorkflow": "work",
+  "defaultApproval": "auto",
+  "workflowShortcut": "shift+tab",
+  "approvalShortcut": "alt+a",
   "directories": {
     "enabled": true,
     "private": ["~/Projects", "~/Documents", "~/Desktop", "~/Downloads", "~/Library/Mobile Documents"],
@@ -332,10 +327,10 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
 }
 ```
 
-- `enabled`: `false` starts sessions in yolo mode.
-- `defaultMode`: the mode a new session starts in (`chat`, `manual`, `accept-edits`, `plan`, `auto`, `yolo`, or Claude Code's names).
-- `modes`: the modes the cycle key steps through (`/mode` still offers every mode), always in Claude Code's order with chat first; add `"yolo"` (or `"bypassPermissions"`) or `"chat"` to include them. For example `["chat", "plan", "auto"]` cycles chat, plan, auto.
-- `cycleShortcut`: the key that cycles modes, read at startup (changes after `/reload`); `""` for none.
+- `enabled`: `false` defaults new sessions to yolo approvals unless `defaultApproval` overrides it.
+- `defaultWorkflow` and `defaultApproval`: new-session defaults for each axis. Legacy `defaultMode` supplies fallback values where a new default is not set; restrictive legacy manual and accept-edits values are preserved.
+- `modes` is deprecated and no longer controls either cycle. `cycleShortcut` is a legacy fallback when `workflowShortcut` is not a string.
+- `workflowShortcut` and `approvalShortcut`: keys read at startup; `""` disables each. Reload after changing them. A duplicate key registers workflow only and reports the collision.
 - `jev`: the classifier model (`provider`/`model`, looked up among Pi's classifier models) and its timeout; `enabled: false` uses the hint fallback.
 - `thresholds`: the bars described above.
 - `allowTools`: tools that never need a decision. Setting it replaces the whole default list.
