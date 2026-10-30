@@ -25,6 +25,56 @@ test("resolves only the expected private document/chat shape", () => {
   expect(resolveTranscript(root)).toHaveProperty("reason");
 });
 
+test.each(["regular", "fullscreen"])("todo tail stays after chat during %s terminal insertion and snapshot replacement", mode => {
+  const { root, document, chat } = tree();
+  const todoTail = { render: () => ["todo"], invalidate() {} };
+  const secondTail = { render: () => ["another extension"], invalidate() {} };
+  document.addChild(todoTail);
+  const tui = mode === "fullscreen"
+    ? Object.assign(root, { mode, getPrimaryScrollView: () => view(document) }) : root;
+  const resolve = () => resolveTranscript(tui);
+  expect(resolve()).toEqual({ chat, source: mode === "fullscreen" ? "primary-scroll-view" : "document-root" });
+  const panels = new TranscriptPanels();
+  const live = child(), snapshot = child();
+  if (!("chat" in resolve())) throw new Error("expected chat");
+  panels.insert(chat, live);
+  panels.replace(chat, live, snapshot);
+  expect(chat.children).toEqual([snapshot]);
+  expect(document.children[2]).toBe(chat);
+  expect(document.children[3]).toBe(todoTail);
+  document.addChild(secondTail);
+  expect(resolve()).toHaveProperty("chat", chat);
+  expect(document.children.slice(3)).toEqual([todoTail, secondTail]);
+  document.removeChild(todoTail);
+  expect(resolve()).toHaveProperty("chat", chat);
+  document.addChild(todoTail);
+  expect(document.children.slice(3)).toEqual([secondTail, todoTail]);
+  panels.clear();
+  expect(chat.children).toEqual([]);
+  expect(document.children.slice(3)).toEqual([secondTail, todoTail]);
+});
+
+test("malformed core prefix or appended trailers never select another child as chat", () => {
+  const { root, document, chat } = tree();
+  const goodTail = child();
+  for (const bad of [undefined, null, {}, { render: () => [] }, { invalidate() {} }]) {
+    document.children.push(bad as any);
+    expect(resolveTranscript(root)).toHaveProperty("reason");
+    expect(resolveTranscript({ mode: "fullscreen", getPrimaryScrollView: () => view(document) })).toHaveProperty("reason");
+    document.children.pop();
+  }
+  document.addChild(goodTail);
+  for (const index of [0, 1, 2]) {
+    const original = document.children[index];
+    document.children[index] = child();
+    expect(resolveTranscript(root)).toHaveProperty("reason");
+    expect(resolveTranscript({ mode: "fullscreen", getPrimaryScrollView: () => view(document) })).toHaveProperty("reason");
+    document.children[index] = original!;
+  }
+  expect(resolveTranscript(root)).toHaveProperty("chat", chat);
+  expect(document.children[3]).toBe(goodTail);
+});
+
 const view = (document: unknown, primary = true) => ({ primary, child: document, scrollTo() {} });
 
 test("fullscreen resolves the mounted primary transcript, never root or nested chats", () => {

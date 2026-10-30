@@ -20,7 +20,23 @@ import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { resolveTranscript } from "RESOLVER_PATH";
 export default function(pi) {
   let off;
+  let tui;
   let calls = 0;
+  let todoTail;
+  let beforeOffer;
+  const todoState = () => {
+    const document = tui?.getPrimaryScrollView?.()?.child;
+    const children = document?.children ?? [];
+    const tail = children[3];
+    return {
+      documentChildren: children.length,
+      todoTailAtThree: !!tail && tail === todoTail,
+      todoTailLast: !!tail && children.at(-1) === tail,
+      todoTailPlain: !!tail && tail.constructor === Object && !Array.isArray(tail.children),
+      todoTailVisible: !!tail && typeof tail.render === "function" &&
+        tail.render(tui.terminal.columns).join("\\n").includes("PTY terminal regression"),
+    };
+  };
   pi.registerProvider("terminal-fixture", {
     baseUrl: "http://127.0.0.1:1", apiKey: "offline-fixture", api: "terminal-fixture",
     models: [{ id: "local", name: "Local PTY fixture", reasoning: false, input: ["text"],
@@ -28,10 +44,17 @@ export default function(pi) {
     streamSimple(model) {
       const stream = createAssistantMessageEventStream();
       calls++;
+      if (calls === 2) {
+        // Observe the real todo extension's mounted tail before offer_terminal runs.
+        todoTail = tui?.getPrimaryScrollView?.()?.child?.children?.[3];
+        beforeOffer = todoState();
+      }
       const content = calls === 1
-        ? [{ type: "toolCall", id: "terminal-offer", name: "offer_terminal", arguments: { command: process.env.HANDOFF_COMMAND.slice(3) } }]
-        : [{ type: "text", text: calls === 2 ? "OFFER_FINAL_WITHOUT_TAG" : "CONTINUATION_FINAL_SENTINEL" }];
-      const reason = calls === 1 ? "toolUse" : "stop";
+        ? [{ type: "toolCall", id: "terminal-todo", name: "todo", arguments: { action: "create", subject: "PTY terminal regression" } }]
+        : calls === 2
+          ? [{ type: "toolCall", id: "terminal-offer", name: "offer_terminal", arguments: { command: process.env.HANDOFF_COMMAND.slice(3) } }]
+          : [{ type: "text", text: calls === 3 ? "OFFER_FINAL_WITHOUT_TAG" : "CONTINUATION_FINAL_SENTINEL" }];
+      const reason = calls <= 2 ? "toolUse" : "stop";
       const message = { role: "assistant", content, api: model.api, provider: model.provider, model: model.id,
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: reason, timestamp: Date.now() };
@@ -42,7 +65,6 @@ export default function(pi) {
   pi.registerCommand("terminal-test-reload", {description: "Offline reload fixture", handler: async (_, ctx) => { await ctx.reload(); }});
   pi.on("session_shutdown", () => { off?.(); off = undefined; });
   pi.on("session_start", (_, ctx) => {
-    let tui;
     ctx.ui.setWidget("terminal-test-probe", t => { tui = t; return {render: () => [], invalidate(){}}; });
     ctx.ui.setWidget("terminal-test-probe", undefined);
     let editor;
@@ -78,6 +100,7 @@ export default function(pi) {
         exactDraft: ctx.ui.getEditorText() === process.env.HANDOFF_COMMAND,
         emptyDraft: ctx.ui.getEditorText() === "", terminal, height: lines.length,
         overlays: tui.hasOverlay(), editorMounted: mounted(editor), calls,
+        beforeOffer, ...todoState(),
         layout: resolved.source ?? resolved.reason, focus: focus?.constructor.name,
         retained, status, continuation,
         frozenScroll: rendered.some(text => text.includes("SCROLL_000") && text.includes("SCROLL_079")),
@@ -198,22 +221,32 @@ def run(mode):
             submit("Offer the local terminal fixture")
             offered = snapshot()
             deadline = time.monotonic() + 8
-            while offered["calls"] < 2 and time.monotonic() < deadline:
+            while offered["calls"] < 3 and time.monotonic() < deadline:
                 drain(0.2)
                 offered = snapshot()
-            assert offered["calls"] == 2, offered
+            assert offered["calls"] == 3, offered
+            if mode == "fullscreen":
+                assert offered["beforeOffer"] == {
+                    "documentChildren": 4, "todoTailAtThree": True, "todoTailLast": True,
+                    "todoTailPlain": True, "todoTailVisible": True,
+                }, offered
             entries = [json.loads(line) for line in seed.read_text().splitlines()]
+            todo = next(e["message"] for e in entries if e.get("message", {}).get("toolName") == "todo")
+            assert not todo.get("isError"), todo
             offer = next(e["message"] for e in entries if e.get("message", {}).get("toolName") == "offer_terminal")
             assert offer["details"]["status"] == "displayed" and not offer.get("isError"), offer
             assert offer["details"]["text"] == command, offer
             assert "OFFER_FINAL_WITHOUT_TAG" in seed.read_text()
             send(b"\t")
             accepted = snapshot()
-            assert accepted["exactDraft"] and not accepted["terminal"] and accepted["calls"] == 2, accepted
+            assert accepted["exactDraft"] and not accepted["terminal"] and accepted["calls"] == 3, accepted
             send(b"\r")
             compact = snapshot()
             assert compact["terminal"] and compact["ready"] and compact["height"] < 24, compact
             assert not compact["overlays"] and not compact["editorMounted"], compact
+            if mode == "fullscreen":
+                assert all(compact[key] for key in ("todoTailAtThree", "todoTailLast", "todoTailVisible")), compact
+                assert compact["documentChildren"] == 4, compact
             send(b"\x1df")
             assert snapshot()["height"] > compact["height"]
             send(b"\x1df")
@@ -221,7 +254,10 @@ def run(mode):
             completed()
             retained = snapshot()
             assert 0 <= retained["retained"] < retained["status"] < retained["continuation"], retained
-            assert retained["calls"] == 3, retained
+            assert retained["calls"] == 4, retained
+            if mode == "fullscreen":
+                assert all(retained[key] for key in ("todoTailAtThree", "todoTailLast", "todoTailPlain", "todoTailVisible")), retained
+                assert retained["documentChildren"] == 4, retained
             submit("!i read -s -p 'INTERRUPT_ME: ' value")
             send(b"\x03")
             completed()
@@ -292,7 +328,7 @@ def run(mode):
             assert "SCROLL_000" not in sessions and "SCROLL_079" not in sessions
             excluded = [json.loads(line) for line in sessions.splitlines() if "EXCLUDED_HANDOFF_OUTPUT" in line]
             assert excluded and all(item.get("message", {}).get("excludeFromContext") is True for item in excluded), excluded
-            print(f"PASS {mode}: real offer_terminal call, tagless final, exact Tab/Enter, single continuation, inline/editor ownership, retained head/tail, privacy, Ctrl+C, program keys, expansion, wheel/keyboard scroll, resize, stop, reload, ordinary bash and exclusion")
+            print(f"PASS {mode}: real todo/offer_terminal calls, active todo tail preserved, tagless final, exact Tab/Enter, single continuation, inline/editor ownership, retained head/tail, privacy, Ctrl+C, program keys, expansion, wheel/keyboard scroll, resize, stop, reload, ordinary bash and exclusion")
         finally:
             if child.poll() is None:
                 os.killpg(child.pid, signal.SIGKILL)

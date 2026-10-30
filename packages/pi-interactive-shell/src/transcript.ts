@@ -52,8 +52,11 @@ export function layoutShape(tui: unknown, document?: unknown): LayoutShape {
 }
 
 function documentChat(document: unknown): ChatContainer | undefined {
-  return container(document) && document.children.length === 3 && document.children.every(container)
-    ? document.children[2] as unknown as ChatContainer : undefined;
+  if (!container(document) || document.children.length < 3) return undefined;
+  const [header, resources, chat, ...trailers] = document.children;
+  if (!container(header) || !container(resources) || !container(chat)) return undefined;
+  if (!trailers.every(child => !!child && typeof child.render === "function" && typeof child.invalidate === "function")) return undefined;
+  return chat;
 }
 
 /** Resolve only Pi's primary transcript, never another extension's nested chat. */
