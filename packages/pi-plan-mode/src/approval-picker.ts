@@ -15,6 +15,7 @@ export const OPTION_MAX = 42;
 export const HERE = "Yes, implement here";
 export const COMPACT_HERE = "Yes, compact plan and implement here";
 export const EDIT = "Edit the plan";
+export const SAVE = "Save for later";
 export const KEEP = "No, keep planning";
 export const APPROVAL_QUESTION = "Implement this plan?";
 export const APPROVAL_HINT = "↑↓ navigate  enter select  escape/ctrl+c cancel";
@@ -34,6 +35,7 @@ export type ApprovalChoice =
   | { kind: "compact-here" }
   | { kind: "handoff"; target: ModelSpec; targetName: string }
   | { kind: "edit" }
+  | { kind: "save" }
   | { kind: "keep" };
 
 export interface ApprovalInput {
@@ -87,6 +89,7 @@ export class ApprovalPicker implements Component {
         model: target,
       })),
       { id: "edit", choice: { kind: "edit" }, label: EDIT },
+      { id: "save", choice: { kind: "save" }, label: SAVE },
       { id: "keep", choice: { kind: "keep" }, label: KEEP },
     ];
     if (!this.rows.some((row) => row.id === state.selectedId)) state.selectedId = "here";
@@ -141,7 +144,7 @@ export class ApprovalPicker implements Component {
   render(width: number): string[] {
     const row = this.selected;
     const effort =
-      row.choice.kind === "edit" || row.choice.kind === "keep"
+      row.choice.kind === "edit" || row.choice.kind === "save" || row.choice.kind === "keep"
         ? "Select an implementation choice to adjust effort"
         : !this.levels(row).length
           ? "Effort: not supported"

@@ -5,8 +5,8 @@
  *
  * Layout, from the top: a bold title ("Plan review" while waiting, "Plan" after), the document as
  * Markdown, a blank line, then one status line (muted while waiting, green once approved, yellow
- * when set aside, red on failure) with dim context after ` · `. Once decided, a long document folds
- * to its first lines until the transcript is expanded (ctrl+o).
+ * when set aside, red on failure, neutral once saved) with dim context after ` · `. Once decided,
+ * a long document folds to its first lines until the transcript is expanded (ctrl+o).
  *
  * A tool's result is already drawn on a tool background by Pi; `reviewCard` adds the same shell
  * (padded box, the background for the outcome) for hosts that are not tool rows, such as a custom
@@ -18,7 +18,7 @@ import { Box, type Component, Container, Spacer, Text } from "@earendil-works/pi
 /** Lines a decided document keeps before it folds. */
 export const COLLAPSED_LINES = 12;
 
-export type ReviewTone = "pending" | "success" | "warning" | "error";
+export type ReviewTone = "pending" | "success" | "warning" | "error" | "neutral";
 
 export interface ReviewStatus {
   tone: ReviewTone;
@@ -27,7 +27,13 @@ export interface ReviewStatus {
   context?: string;
 }
 
-const TONE_COLOR = { pending: "muted", success: "success", warning: "warning", error: "error" } as const;
+const TONE_COLOR = {
+  pending: "muted",
+  success: "success",
+  warning: "warning",
+  error: "error",
+  neutral: "muted",
+} as const;
 
 export function reviewStatusLine(theme: Theme, status: ReviewStatus): string {
   const context = status.context ? theme.fg("dim", ` · ${status.context}`) : "";

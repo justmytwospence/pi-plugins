@@ -43,13 +43,14 @@ No `npm install` is needed to run it: the package.json has no `dependencies`; Pi
 
 While plan mode is on:
 
-- Your agent is told (once, with your next message, or right away mid-turn) to research, ask you what it cannot find out, and write its plan to a **plan file**, `~/.pi/agent/plans/<two-words>.md` (`plansDirectory` moves it). One file per session: entering plan mode again continues it.
+- Your agent is told (once, with your next message, or right away mid-turn) to research, ask you what it cannot find out, and write its plan to a **plan file**, `~/.pi/agent/plans/<two-words>.md` (`plansDirectory` moves it). The working draft is allocated before its title is known; entering plan mode again continues it unless you saved it for later.
 - `edit` and `write` are blocked except for the plan file. Commands: with pi-tool-gate, the gate judges them as in auto mode (as Claude Code's classifier does while planning); without it, only read-only commands run (the [shell policy](./docs/settings.md)).
 - When the plan is ready, your agent calls `exit_plan_mode`. The plan shows in the chat (Mermaid diagrams drawn as terminal diagrams, top-down when a left-to-right chart is too wide) and you choose:
   - **Yes, implement here** (first and default): your current model implements it in this conversation, keeping the context.
   - **Yes, compact plan and implement here**: compact to the approved plan and implement with the same model in the same session, without creating a child session.
   - `Yes, hand off to <model> (<effort>)`: an available, distinct model implements it in this session. When this turn ends, the context is compacted down to the plan, the model is switched, and a collapsed handoff message (`ctrl+o` expands it) carries the plan and how to implement it; implementation starts at once.
   - **Edit the plan first**: edit it in your external editor (Pi's `externalEditor` setting, else `$VISUAL` / `$EDITOR`; a Markdown editor such as [edamame](https://github.com/mijowi/edamame) keeps it rendered while you edit), or in Pi's editor when none is set; the file is updated and you choose again. The approval tells your agent the plan was edited.
+  - **Save for later**: enter an editable, title-derived hyphenated filename; `.md` is automatic. A snapshot is written under `plansDirectory` (default `~/.pi/agent/plans/`), with `-2`, `-3`, etc. on collisions. The draft stays at its original path for historical references, but is no longer the active plan; your next planning task gets a new draft. This ends the turn without approving or implementing anything. To continue from the saved snapshot, prompt `/plan Continue from @/absolute/path/descriptive-plan.md` (a planning prompt, not automatic approval or a new import command).
   - **No, keep planning**: say what should change (or leave it empty, or press Esc, and say it in the chat). With an editor provider such as pi-vim the field is that editor (Enter or `:w` sends, Escape in Normal mode or `:q` cancels). Plan mode stays on.
 - Ordinary same-model approval returns to work without changing approvals. A distinct-model handoff enters exec. Leaving plan for chat does not permit edits.
 

@@ -181,9 +181,10 @@ function setup(plan: string, scrollbar: "always" | "hidden" = "always", withTodo
       ctx,
     );
   const picker = () => editorContainer.children[0] as Component;
-  const choose = (index = 0) => {
+  const choose = (index = 0, expected?: string) => {
     const selector = picker();
     for (let i = 0; i < index; i++) selector.handleInput?.("\x1b[B");
+    if (expected) expect(selector.render(64).map(stripTerminalSequences).join("\n")).toContain(`→ ${expected}`);
     selector.handleInput?.("\r");
   };
   const top = () =>
@@ -223,7 +224,7 @@ test.each([46, 120].flatMap((width) => [true, false].map((summary) => ({ width, 
     h.terminal.columns = width;
     const initial = h.run();
     await h.settle();
-    h.choose(3);
+    h.choose(4, "No, keep planning");
     await initial;
     writeFileSync(h.planFile, `# Revised beginning\n\n${longPlan}`);
     const revised = h.run(summary ? { changes: ["Use Redis for storage."] } : {});
@@ -457,7 +458,11 @@ test.each(["escape", "keep", "compact", "abort"])(
     h.frame(); // Leave an anchor microtask queued while the user dismisses review.
     if (ending === "escape") h.picker().handleInput?.("\x1b");
     else if (ending === "abort") abort.abort();
-    else h.choose(ending === "keep" ? 3 : 1);
+    else
+      h.choose(
+        ending === "keep" ? 4 : 1,
+        ending === "keep" ? "No, keep planning" : "Yes, compact plan and implement here",
+      );
     const final = await result;
     h.card.updateResult({ ...final, isError: false }, false);
     await h.settle();

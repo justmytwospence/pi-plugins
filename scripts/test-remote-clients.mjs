@@ -26,6 +26,7 @@ const { TuiBase } = await import(new URL('./tui.js', import.meta.resolve('@earen
 const sdkUrl = import.meta.resolve('@earendil-works/pi-coding-agent');
 const { KeybindingsManager } = await import(new URL('./core/keybindings.js', sdkUrl));
 const { ExtensionSelectorComponent } = await import(new URL('./modes/interactive/components/extension-selector.js', sdkUrl));
+const { ExtensionInputComponent } = await import(new URL('./modes/interactive/components/extension-input.js', sdkUrl));
 const themeModule = await import(new URL('./modes/interactive/theme/theme.js', sdkUrl));
 const jiti = createJiti(import.meta.url);
 const { QuestionDialog } = await jiti.import('../packages/pi-ask-user-question/src/dialog.ts');
@@ -41,7 +42,7 @@ const { sidebarScreen } = await import('./remote-clients/sidebar.mjs');
 const { TerminalPanel } = await jiti.import('../packages/pi-interactive-shell/src/panel.ts');
 const { HistoryPicker } = await jiti.import('../packages/pi-history-search/src/picker.ts');
 const { default: historySearch } = await jiti.import('../packages/pi-history-search/src/index.ts');
-const { pickApproval, createApprovalState, handoffLabel, HERE: IMPLEMENT_HERE, COMPACT_HERE, EDIT, KEEP } = await jiti.import('../packages/pi-plan-mode/src/approval-picker.ts');
+const { pickApproval, createApprovalState, handoffLabel, HERE: IMPLEMENT_HERE, COMPACT_HERE, EDIT, SAVE, KEEP } = await jiti.import('../packages/pi-plan-mode/src/approval-picker.ts');
 const { registerExec, FINISH_MESSAGE_TYPE } = await jiti.import('../packages/pi-plan-mode/src/exec.ts');
 const { createNegotiation } = await jiti.import('../packages/pi-plan-mode/src/negotiation.ts');
 const { renderFooter, absorbStatuses } = await jiti.import('../packages/pi-status-footer/src/index.ts');
@@ -193,7 +194,7 @@ const PLAN_TARGETS = [
   { target: { provider: 'anthropic', modelId: 'claude-sonnet-5-5', thinkingLevel: 'high' }, targetName: 'Claude Sonnet 5.5' },
 ];
 function planLabels(count) {
-  return [IMPLEMENT_HERE, COMPACT_HERE, ...PLAN_TARGETS.slice(0, count).map(t => handoffLabel(t.targetName, t.target.thinkingLevel)), EDIT, KEEP];
+  return [IMPLEMENT_HERE, COMPACT_HERE, ...PLAN_TARGETS.slice(0, count).map(t => handoffLabel(t.targetName, t.target.thinkingLevel)), EDIT, SAVE, KEEP];
 }
 async function selectorLines(width, count, changed) {
   let lines;
@@ -463,8 +464,8 @@ const DIALOGS = [
     name: `plan approval (${count} targets${changed ? ', effort changed' : ''})`,
     lines: w => selectorLines(w, count, changed),
     question: `Implement this plan? ←/→ effort: ${changed ? 'off' : 'high'}`,
-    herdr: { options: 4 + count, multi: false, labels: planLabels(count) },
-    collie: { kind: 'prompt-select', options: 5 + count, labels: planLabels(count), wraps: planLabels(count) },
+    herdr: { options: 5 + count, multi: false, labels: planLabels(count) },
+    collie: { kind: 'prompt-select', options: 6 + count, labels: planLabels(count), wraps: planLabels(count) },
   }))),
   { name: 'cache-guard cold cache', lines: (w) => coldCacheLines(w, plainMenu), herdr: { options: plainMenu.length, multi: false, labels: plainMenu }, collie: { kind: 'prompt-select', options: plainMenu.length + 1, wraps: plainMenu } },
   { name: 'cache-guard cold cache (model offers)', lines: coldCacheLines, herdr: { options: coldMenu.length, multi: false, labels: coldMenu }, collie: { kind: 'prompt-select', options: coldMenu.length + 1, wraps: coldMenu } },
@@ -490,6 +491,12 @@ for (const width of [46, 120, 180]) {
   tui.terminal.columns = width;
   for (const dialog of DIALOGS) {
     const lines = await dialog.lines(width);
+  {
+    name: 'plan save filename', question: 'Save plan as',
+    lines: width => new ExtensionInputComponent('Save plan as', 'client-plan', () => {}, () => {}).render(width),
+    herdr: { options: 1, multi: false, labels: ['Type your answer'] },
+    collie: { kind: 'unread-dialog' },
+  },
     for (const [under, rows] of Object.entries(UNDERS)) {
       const { lines: screen } = sidebarScreen({ width, height: HEIGHT, dock: () => lines, footer: rows, collapsed: true });
       screens.push({ name: dialog.name, width, under: `${under}, Sidebar open`, ansi: screen.join('\n') });
@@ -837,10 +844,18 @@ screens.forEach((screen, i) => {
     const card = c.blocks.find((b) => b.kind !== 'raw');
     const wanted = dialog.collie.kind;
     const read = [];
-    if (c.blocks.some(b => b.kind === 'unread-dialog')) read.push('Collie: ordinary question rendered as unread-dialog');
+    if (wanted === 'unread-dialog') {
+      // Native ctx.ui.input is an Escape-only mirrored dialog, not a Pi chat composer.
+      if (c.blocks.filter(b => b.kind !== 'raw').length !== 1 || card?.wholePane !== true ||
+        card?.cancel?.key !== 'Escape' || card?.cancel?.agent !== 'pi' ||
+        typeof card?.cancel?.signature !== 'string' || !card.cancel.signature.trim()) {
+        read.push(`Collie: filename input must be one Escape-only whole-pane mirror: ${JSON.stringify(c.blocks)}`);
+      }
+      if (['empty', 'draft'].includes(c.composer)) read.push(`Collie: filename input misidentified as composer: ${c.composer}`);
+    } else if (c.blocks.some(b => b.kind === 'unread-dialog')) read.push('Collie: ordinary question rendered as unread-dialog');
     if (card?.kind !== wanted) read.push(`Collie: ${card?.kind ?? 'no card'}, wanted ${wanted}`);
     else if (wanted === dialog.collie.kind && dialog.collie.options !== undefined && card.options.length !== dialog.collie.options) read.push(`Collie: options ${JSON.stringify(card.options)}`);
-    if (card?.kind === wanted && dialog.question && card.question.replace(/\s+/g, ' ').trim() !== dialog.question) read.push(`Collie: question ${JSON.stringify(card.question)}`);
+    if (card?.kind === wanted && wanted !== 'unread-dialog' && dialog.question && card.question.replace(/\s+/g, ' ').trim() !== dialog.question) read.push(`Collie: question ${JSON.stringify(card.question)}`);
     if (card?.kind === wanted && dialog.collie.labels && JSON.stringify(card.options.slice(0, dialog.collie.labels.length)) !== JSON.stringify(dialog.collie.labels)) read.push(`Collie: labels ${JSON.stringify(card.options)}`);
     if (dialog.collie.wraps && wrapsRow(dialog.collie.wraps, screen.width)) read.push(`an option is wider than ${screen.width - 4} columns, and Pi's own select wraps it with no gutter`);
     problems.push(...read);

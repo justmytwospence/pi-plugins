@@ -2,7 +2,7 @@
 // on, your agent researches read-only and writes its plan to a plan file (the only file it may
 // write), then calls exit_plan_mode, which shows you the plan and asks who implements it: hand it
 // off to a cheaper model in this session (the host compacts the context down to the plan and
-// switches the model), keep the planning model on it, edit the plan first, or keep planning. The
+// switches the model), keep the planning model on it, save a snapshot for later, edit the plan first, or keep planning. The
 // workflow returns to work after approval, without changing approvals.
 // With pi-tool-gate installed, the gate owns workflow and judges planning commands. Without it,
 // this extension enforces a read-only shell and its configured shortcut toggles work/plan.
@@ -31,12 +31,12 @@ import { createApprovalState, pickApproval } from "./approval-picker.js";
 import { editInTerminal, externalEditorCommand } from "./external-editor.js";
 import { PLAN_STANDARD } from "./handoff.js";
 
-export { EDIT, HERE, handoffLabel, KEEP, OPTION_MAX } from "./approval-picker.js";
+export { EDIT, HERE, handoffLabel, KEEP, OPTION_MAX, SAVE } from "./approval-picker.js";
 
 import { holdBlocked } from "./herdr-blocked.js";
 import { type ModelSpec, type ModelSpecThinkingLevel, sameModel } from "./implementation-models.js";
 import { PlanMarkdown } from "./mermaid-art.js";
-import { newPlanFile, plansDirectoryPath, readPlan } from "./plan-file.js";
+import { newPlanFile, planSlug, plansDirectoryPath, planTextTitle, readPlan, savePlanSnapshot } from "./plan-file.js";
 import { expandHome } from "./plan-hook.js";
 import { PlanReviewViewport } from "./plan-review-viewport.js";
 import { type ReviewStatus, reviewBody, reviewTitle } from "./review-card.js";
@@ -135,7 +135,7 @@ It is the only file you may write. Build the plan there as you go, with write an
 1. Explore: read the relevant code with read-only tools (and read-only subagents for broad searches, if you have them). Reuse what exists; find the functions and utilities a change should build on.
 2. Ask: when requirements, scope or a trade-off is unclear, ask the user (with your question tool, if you have one) rather than guessing. Do not ask what the code can tell you.
 3. Write the plan in the plan file to the standard under "The plan" below.
-4. On revised submissions, supply ${EXIT_TOOL}'s optional changes: 1–5 concise decision/scope changes since the declined plan, not copied paragraphs. Call ${EXIT_TOOL} when the plan is complete; it shows the plan to the user for approval. Do not ask "is this plan okay?" or "should I proceed?" any other way; that is what ${EXIT_TOOL} does.
+4. On revised submissions, supply ${EXIT_TOOL}'s optional changes: 1–5 concise decision/scope changes since the declined plan, not copied paragraphs. Call ${EXIT_TOOL} when the plan is complete; it shows the plan so the user can approve it, save it for later, edit it, or keep planning. Do not ask "is this plan okay?" or "should I proceed?" any other way; that is what ${EXIT_TOOL} does.
 
 ## The plan
 ${PLAN_STANDARD}
@@ -160,7 +160,8 @@ export const ENTER_GUIDELINES = [
 interface ExitDetails {
   plan?: string;
   planFile?: string;
-  outcome?: "pending" | "approved" | "fresh" | "handoff" | "kept";
+  savedFile?: string;
+  outcome?: "pending" | "approved" | "fresh" | "handoff" | "kept" | "saved";
   /** The permission mode requested on approval (older sessions: the one picked). */
   mode?: string;
   /** The model the plan was handed off to. */
@@ -438,8 +439,8 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     executionMode: "sequential",
     label: "Exit plan mode",
     description:
-      "In plan mode, once your plan is written to the plan file and complete: show it to the user and ask for approval to start implementing. It reads the plan file; optionally provide changes on revised submissions (concise decision/scope changes since the declined plan, not copied paragraphs). Do not use it for research questions, and do not ask for approval any other way.",
-    promptSnippet: "Ask the user to approve the plan in the plan file (plan mode only)",
+      "In plan mode, once your plan is complete: show it for the user to approve implementation, save for later, edit, or keep planning. It reads the plan file; optionally provide changes on revised submissions (concise decision/scope changes since the declined plan, not copied paragraphs). Do not use it for research questions, and do not ask for approval any other way.",
+    promptSnippet: "Show the plan for approval, saving, editing, or continued planning (plan mode only)",
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -534,6 +535,44 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
               }
             }
             continue;
+          }
+          if (choice?.kind === "save") {
+            if (signal?.aborted || !current())
+              return text("Plan review expired because the workflow or branch changed. Approve the plan again.");
+            const title = planSlug(planTextTitle(plan));
+            const suggestion = title === "plan" || title === "the-plan" ? "" : title;
+            ctx.ui.notify(`Save in ${plansDir()}; .md is added automatically.`, "info");
+            const name = await ctx.ui.input("Save plan as", suggestion);
+            if (signal?.aborted || !current())
+              return text("Plan review expired because the workflow or branch changed. Approve the plan again.");
+            if (name === undefined) continue;
+            let savedFile: string;
+            try {
+              if (signal?.aborted || !current())
+                return text("Plan review expired because the workflow or branch changed. Approve the plan again.");
+              savedFile = savePlanSnapshot(plansDir(), plan, name);
+            } catch (error: unknown) {
+              ctx.ui.notify(
+                `Could not save the plan: ${error instanceof Error ? error.message : String(error)}`,
+                "error",
+              );
+              continue;
+            }
+            declined = undefined;
+            state.planFile = undefined;
+            announce();
+            exitLocal(ctx, false);
+            if (gate) requestMode("work");
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Saved the plan for later at ${savedFile}. This is not approval to implement. Stop here and wait for the user's next request.`,
+                },
+              ],
+              details: { plan, planFile, savedFile, outcome: "saved", edited, mode: "work" } satisfies ExitDetails,
+              terminate: true,
+            } as never;
           }
           if (choice === undefined || choice.kind === "keep") {
             // You say what should change in the chat, as your next message.
@@ -668,7 +707,12 @@ function lastDeclined(entries: readonly unknown[]): string | undefined {
     if (message?.role !== "toolResult" || message.toolName !== EXIT_TOOL) continue;
     const details = message.details as ExitDetails | undefined;
     if (details?.outcome === "kept") return details.plan;
-    if (details?.outcome === "approved" || details?.outcome === "handoff" || details?.outcome === "fresh")
+    if (
+      details?.outcome === "approved" ||
+      details?.outcome === "handoff" ||
+      details?.outcome === "fresh" ||
+      details?.outcome === "saved"
+    )
       return undefined;
   }
   return undefined;
@@ -705,12 +749,14 @@ function renderExit(
         }
       : outcome === "fresh"
         ? { tone: "success", text: "✓ Approved, implementing in a fresh session" }
-        : outcome === "kept"
-          ? {
-              tone: "warning",
-              text: details?.feedback ? `Kept planning: ${details.feedback}` : "Kept planning",
-            }
-          : { tone: "pending", text: "Waiting for approval" };
+        : outcome === "saved"
+          ? { tone: "neutral", text: "Saved for later", context: details?.savedFile }
+          : outcome === "kept"
+            ? {
+                tone: "warning",
+                text: details?.feedback ? `Kept planning: ${details.feedback}` : "Kept planning",
+              }
+            : { tone: "pending", text: "Waiting for approval" };
   const card = reviewBody(theme, plan, status, options, (text) => new PlanMarkdown(text, getMarkdownTheme(), theme));
   // While it waits, one more row of the card's background under the status, above the question.
   const body = new Container();

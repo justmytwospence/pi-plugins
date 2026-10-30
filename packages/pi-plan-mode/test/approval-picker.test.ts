@@ -17,6 +17,7 @@ import {
   KEEP,
   OPTION_MAX,
   pickApproval,
+  SAVE,
 } from "../src/approval-picker.js";
 import type { ModelSpec, ModelSpecThinkingLevel } from "../src/implementation-models.js";
 
@@ -117,6 +118,27 @@ test("direct implementation is first/default and selection uses the Pi bindings"
   keep.component.handleInput(up);
   keep.component.handleInput("\r");
   assert.deepEqual(keep.done.mock.calls, [[{ choice: { kind: "keep" } }]]);
+});
+
+test("Save for later is between Edit and Keep and ignores effort keys", () => {
+  const { component, state, done, requestRender } = fixture();
+  component.handleInput(up); // Keep
+  component.handleInput(up); // Save
+  assert.equal(state.selectedId, "save");
+  const before = component.render(120);
+  const efforts = new Map(state.efforts);
+  const renders = requestRender.mock.calls.length;
+  assert.ok(before.join("\n").includes(`→ ${SAVE}`));
+  component.handleInput(left);
+  component.handleInput(right);
+  assert.deepEqual(component.render(120), before);
+  assert.deepEqual(state.efforts, efforts);
+  assert.equal(requestRender.mock.calls.length, renders);
+  component.handleInput(up);
+  assert.equal(state.selectedId, "edit");
+  component.handleInput(down);
+  component.handleInput("\r");
+  assert.deepEqual(done.mock.calls, [[{ choice: { kind: "save" } }]]);
 });
 
 test("left/right cycle only supported efforts; both direct rows share effort", () => {
@@ -322,17 +344,18 @@ test("standard Pi layout at 46 and 120 columns, zero/one/two targets and effort 
         assert.equal(lines[4], ` → ${HERE}`);
         assert.equal(lines[5], `   ${COMPACT_HERE}`);
         assert.equal(lines[6 + targets.length], `   ${EDIT}`);
-        assert.equal(lines[7 + targets.length], `   ${KEEP}`);
-        assert.equal(lines[8 + targets.length], "");
+        assert.equal(lines[7 + targets.length], `   ${SAVE}`);
+        assert.equal(lines[8 + targets.length], `   ${KEEP}`);
+        assert.equal(lines[9 + targets.length], "");
         assert.equal(
           lines
-            .slice(9 + targets.length, -2)
+            .slice(10 + targets.length, -2)
             .map((line) => line.trim())
             .join(" "),
           APPROVAL_HINT,
         );
         assert.equal(lines.at(-2), "");
-        assert.equal(lines.length, (width === 46 ? 13 : 12) + targets.length);
+        assert.equal(lines.length, (width === 46 ? 14 : 13) + targets.length);
       }
       component.dispose();
     }
@@ -374,7 +397,7 @@ test("RPC selects the action then supported effort; action cancellation declines
   assert.deepEqual(result, { choice: { kind: "here" }, thinkingLevel: "low" });
   assert.deepEqual(select.mock.calls[0]?.slice(0, 2), [
     APPROVAL_QUESTION,
-    [HERE, COMPACT_HERE, handoffLabel("Worker", "medium"), EDIT, KEEP],
+    [HERE, COMPACT_HERE, handoffLabel("Worker", "medium"), EDIT, SAVE, KEEP],
   ]);
   assert.deepEqual(select.mock.calls[1]?.[1], ["high", "off", "minimal", "low", "medium"]);
   for (const answers of [[undefined], [COMPACT_HERE, undefined, undefined]]) {
@@ -434,6 +457,14 @@ for (const stage of ["action", "effort", "back"] as const) {
     assert.ok(remove.mock.calls.some(([event]) => event === "abort"));
   });
 }
+
+test("RPC Save for later returns without an effort dialog for reasoning models", async () => {
+  const select = vi.fn<ExtensionContext["ui"]["select"]>().mockResolvedValueOnce(SAVE);
+  const state = createApprovalState();
+  assert.deepEqual(await pickApproval(rpcContext(select), input, state), { choice: { kind: "save" } });
+  assert.equal(state.selectedId, "save");
+  assert.equal(select.mock.calls.length, 1);
+});
 
 test("RPC handles nonexecution and nonreasoning choices without another selector", async () => {
   for (const label of [EDIT, KEEP, HERE]) {

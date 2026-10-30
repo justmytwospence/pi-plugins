@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { expandHome } from "./plan-hook.js";
@@ -89,7 +89,12 @@ export function planName(file: string): string {
  * marks removed and long titles cut, e.g. `Toy demo: greet.mjs CLI`. "the plan" when it has none.
  */
 export function planTitle(file: string, max = 60): string {
-  const line = readPlan(file)
+  return planTextTitle(readPlan(file), max);
+}
+
+/** The same title from reviewed text; untruncated unless a display limit is supplied. */
+export function planTextTitle(plan: string, max = Number.POSITIVE_INFINITY): string {
+  const line = plan
     .split("\n")
     .map((l) => l.trim())
     .find((l) => l && !/^(```|---)/u.test(l));
@@ -117,6 +122,61 @@ export function writePlanFile(directory: string, plan: string): string {
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, `${plan.trim()}\n`);
   return file;
+}
+
+/** A deterministic ASCII filename stem, without Markdown title markup. */
+export function planSlug(text: string): string {
+  return text
+    .replace(/^#+\s*/u, "")
+    .replace(/^plan\s*:\s*(?=\S)/iu, "")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/gu, "$1")
+    .replace(/[`*_~]/gu, "")
+    .normalize("NFKD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, "-")
+    .replace(/^-+|-+$/gu, "")
+    .slice(0, 80)
+    .replace(/-+$/u, "");
+}
+
+/** Save a private, collision-safe copy without mutating the working draft. */
+export function savePlanSnapshot(directory: string, plan: string, name: string): string {
+  // Validate before normalizing: a path must never silently turn into a filename.
+  if (/[/\\\p{Cc}]/u.test(name)) throw new Error("Enter a descriptive plan name.");
+  const stem = name.trim().replace(/\.md$/iu, "");
+  if (!stem || stem === "." || stem === "..") throw new Error("Enter a descriptive plan name.");
+  const slug = planSlug(stem);
+  if (!slug) throw new Error("Enter a descriptive plan name.");
+  const destination = resolve(directory);
+  mkdirSync(destination, { recursive: true });
+  for (let candidate = 1; candidate <= 1000; candidate++) {
+    const file = join(destination, `${slug}${candidate === 1 ? "" : `-${candidate}`}.md`);
+    let fd: number;
+    try {
+      fd = openSync(file, "wx", 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
+      throw error;
+    }
+    try {
+      try {
+        writeFileSync(fd, `${plan.trim()}\n`);
+      } finally {
+        closeSync(fd);
+      }
+    } catch (error) {
+      // Only this exclusively created file belongs to us, never a colliding candidate.
+      try {
+        unlinkSync(file);
+      } catch {
+        // Preserve the original I/O error if cleanup also fails.
+      }
+      throw error;
+    }
+    return file;
+  }
+  throw new Error("Could not find an available plan name after 1000 candidates.");
 }
 
 export function tildify(file: string) {
