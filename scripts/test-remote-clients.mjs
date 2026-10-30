@@ -55,6 +55,10 @@ initTheme('dark', false);
 const theme = themeModule.theme;
 const kb = new KeybindingsManager({});
 setKeybindings(kb);
+// The component's local install has its own pi-tui singleton; native filter keys must
+// use the same application bindings as the root-rendered dialogs.
+const herdrTui = await jiti.import('../packages/pi-herdr/node_modules/@earendil-works/pi-tui/dist/index.js');
+herdrTui.setKeybindings(kb);
 const tui = { terminal: { rows: 40, columns: 120 }, requestRender() {} };
 
 // What stands under a dialog while it waits: pi-status-footer's one row, alone or under pi-bg's pill.
@@ -269,7 +273,7 @@ async function gatePickerLines(width, command) {
 
 // Render both steps through the real /tree-fork command, cancelling before any file or pane
 // creation. The first step must remain Pi's native tree, not a select-shaped replacement.
-async function treeForkLines(width, step) {
+async function treeForkLines(width, step, filter = 'default') {
   const commands = new Map();
   const notifications = [];
   const events = new EventEmitter();
@@ -284,20 +288,63 @@ async function treeForkLines(width, step) {
     uniqueName: async () => { throw new Error('cancelled fixture must not create a fork'); },
   });
   const user = { type: 'message', id: 'user', parentId: null, timestamp: '2026-01-01T00:00:00Z', message: { role: 'user', content: 'Review the API design', timestamp: 0 } };
-  const assistant = { type: 'message', id: 'reply', parentId: 'user', timestamp: '2026-01-01T00:00:01Z', message: { role: 'assistant', content: [{ type: 'text', text: 'The API review is complete.' }], timestamp: 1 } };
+  const assistantMessage = (id, parentId, content, stopReason) => ({
+    type: 'message', id, parentId, timestamp: '2026-01-01T00:00:01Z',
+    message: {
+      role: 'assistant', content, stopReason, timestamp: 1,
+      api: 'openai-responses', provider: 'openai', model: 'fixture',
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    },
+  });
+  const tool = assistantMessage('tool', 'user', [
+    { type: 'text', text: 'INTERNAL_TOOL_REQUEST' },
+    { type: 'toolCall', id: 'call-1', name: 'bash', arguments: { command: 'INTERNAL_COMMAND' } },
+  ], 'toolUse');
+  const result = { type: 'message', id: 'result', parentId: 'tool', timestamp: '2026-01-01T00:00:02Z', message: { role: 'toolResult', toolCallId: 'call-1', toolName: 'bash', content: [{ type: 'text', text: 'INTERNAL_TOOL_RESULT' }], isError: false, timestamp: 2 } };
+  const commentary = assistantMessage('commentary', 'result', [{ type: 'text', text: 'INTERNAL_COMMENTARY', textSignature: JSON.stringify({ v: 1, phase: 'commentary' }) }], 'stop');
+  const assistant = assistantMessage('reply', 'commentary', [{ type: 'text', text: 'The API review is complete.', textSignature: JSON.stringify({ v: 1, phase: 'final_answer' }) }], 'stop');
+  const metadata = { type: 'custom', id: 'metadata', parentId: 'reply', timestamp: '2026-01-01T00:00:03Z', customType: 'INTERNAL_METADATA', data: { text: 'INTERNAL_TAIL' } };
+  const entries = [user, tool, result, commentary, assistant, metadata];
+  const tree = entries.reduceRight((children, entry) => [{ entry, children }], []);
+  const before = structuredClone(tree);
+  let customCalls = 0;
   await commands.get('tree-fork').handler('', {
     hasUI: true, mode: 'tui', cwd: '/tmp/pi-plugins',
     sessionManager: {
       getSessionFile: () => new URL(import.meta.url).pathname,
-      getTree: () => [{ entry: user, children: [{ entry: assistant, children: [] }] }],
-      getSessionId: () => 'fixture', getLeafId: () => 'reply', getSessionDir: () => '/tmp',
+      getTree: () => tree,
+      getBranch: id => {
+        const index = entries.findIndex(entry => entry.id === id);
+        assert.notEqual(index, -1, 'naming context must use an original entry');
+        return entries.slice(0, index + 1);
+      },
+      getLabel: () => undefined, getSessionName: () => 'API design review',
+      getSessionId: () => 'fixture', getLeafId: () => 'metadata', getSessionDir: () => '/tmp',
     },
     ui: {
       custom: async factory => {
+        assert.equal(++customCalls, 1, 'cancel before opening the naming loader');
         assert.ok(blocked, '/tree-fork tree must hold herdr:blocked');
         const picker = factory(tui, theme, kb, () => {});
-        assert.equal(picker.getTreeList().onLabelEdit, undefined, 'tree selection must disable label editing');
-        if (step === 'tree') lines = picker.render(width);
+        const list = picker.getTreeList();
+        assert.equal(list.onLabelEdit, undefined, 'tree selection must disable label editing');
+        assert.equal(list.getSelectedNode()?.entry.id, 'reply', 'trailing metadata maps to the completed answer');
+        assert.equal(list.getSelectedNode()?.entry.parentId, 'user', 'display skips hidden ancestry');
+        const assertProjection = () => {
+          const rendered = picker.render(width);
+          const text = rendered.map(stripVTControlCharacters).join('\n');
+          assert.ok(text.includes('Review the API design'), 'projected tree shows the user prompt');
+          assert.ok(text.includes('The API review is complete.'), 'projected tree shows the final answer');
+          assert.doesNotMatch(text, /INTERNAL_/, 'native filters cannot restore internal records');
+          return rendered;
+        };
+        assertProjection();
+        if (filter === 'all') {
+          picker.handleInput('\x01'); // Pi's native All filter, over the projected tree.
+          assert.match(picker.render(width).map(stripVTControlCharacters).join('\n'), /\[all\]/i);
+        }
+        const rendered = assertProjection();
+        if (step === 'tree') lines = rendered;
         return step === 'tree' ? undefined : 'reply';
       },
       select: async (title, options) => {
@@ -310,6 +357,9 @@ async function treeForkLines(width, step) {
       notify: message => notifications.push(message),
     },
   });
+  assert.deepEqual(tree, before, 'projecting and browsing must not change source entries or parent links');
+  assert.equal(assistant.parentId, 'commentary', 'source keeps its original internal ancestry');
+  assert.equal(customCalls, 1, 'cancellation never enters naming');
   assert.deepEqual(notifications, [], 'cancelled /tree-fork must not report an error');
   assert.ok(lines, `/tree-fork must render ${step}`);
   assert.equal(blocked, false, '/tree-fork cancellation must release herdr:blocked');
@@ -325,7 +375,9 @@ const DIALOGS = [
     collie: { kind: 'prompt-select', options: labels.length + 1, labels, wraps: labels },
   })),
   { name: '/tree-fork destination', lines: w => treeForkLines(w, 'destination'), question: FORK_TITLE, herdr: { options: FORK_DESTINATIONS.length, multi: false, labels: FORK_DESTINATIONS }, collie: { kind: 'prompt-select', options: FORK_DESTINATIONS.length + 1, labels: FORK_DESTINATIONS, wraps: FORK_DESTINATIONS } },
-  { name: '/tree-fork native tree', lines: w => treeForkLines(w, 'tree'), nativeTree: true },
+  ...['default', 'all'].map(filter => ({
+    name: `/tree-fork native tree (${filter})`, lines: w => treeForkLines(w, 'tree', filter), nativeTree: true,
+  })),
   { name: 'ask single', lines: (w) => questionLines([question(false)], w), herdr: { options: 4, multi: false }, collie: { kind: 'prompt-select', options: 4 }, },
   { name: 'ask multi', lines: (w) => questionLines([question(true)], w), herdr: { multi: true }, collie: { kind: 'multi-select' }, },
   { name: 'tool-gate approval', lines: approvalLines, herdr: { options: 3, multi: false }, collie: { kind: 'prompt-select' }, },
@@ -523,10 +575,17 @@ screens.forEach((screen, i) => {
   const dialog = DIALOGS.find((d) => d.name === screen.name);
   const h = results.herdr?.[i];
   if (dialog.nativeTree) {
-    // Native tree navigation is terminal-only: neither a question card nor a composer.
+    // Native tree navigation stays terminal-only. Collie may mirror the whole pane with
+    // its declared Escape control, but must not lift a selection card or partial dialog.
     const c = results.collie?.[i];
     if (h) problems.push(`herdr-web-ui: native tree misidentified as question: ${JSON.stringify(h)}`);
-    if (c?.blocks.some(b => b.kind !== 'raw')) problems.push(`Collie: native tree misidentified as card: ${JSON.stringify(c.blocks)}`);
+    if (c) {
+      const mirrors = c.blocks.filter(b => b.kind === 'unread-dialog');
+      if (mirrors.length > 1 || c.blocks.some(b => b.kind !== 'raw' && b.kind !== 'unread-dialog') || mirrors.some(b =>
+        b.wholePane !== true || b.cancel?.key !== 'Escape' || b.cancel?.agent !== 'pi' ||
+        typeof b.cancel?.signature !== 'string' || !b.cancel.signature.trim()
+      )) problems.push(`Collie: native tree must be raw or one Escape-only whole-pane mirror: ${JSON.stringify(c.blocks)}`);
+    }
     if (c && ['empty', 'draft'].includes(c.composer)) problems.push(`Collie: native tree misidentified as composer: ${c.composer}`);
     report(label, problems);
     return;
@@ -545,6 +604,7 @@ screens.forEach((screen, i) => {
     const card = c.blocks.find((b) => b.kind !== 'raw');
     const wanted = dialog.collie.kind;
     const read = [];
+    if (c.blocks.some(b => b.kind === 'unread-dialog')) read.push('Collie: ordinary question rendered as unread-dialog');
     if (card?.kind !== wanted) read.push(`Collie: ${card?.kind ?? 'no card'}, wanted ${wanted}`);
     else if (wanted === dialog.collie.kind && dialog.collie.options !== undefined && card.options.length !== dialog.collie.options) read.push(`Collie: options ${JSON.stringify(card.options)}`);
     if (card?.kind === wanted && dialog.question && card.question.replace(/\s+/g, ' ').trim() !== dialog.question) read.push(`Collie: question ${JSON.stringify(card.question)}`);

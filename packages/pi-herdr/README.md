@@ -139,11 +139,11 @@ Tabs and splits share files and are not isolated parallel editors. A separate fe
 
 ## Fork a tree point
 
-Fork names use the selected label or nearest ancestral user prompt (falling back to the session title or `conversation`), with numeric suffixes for collisions.
+`/tree-fork` opens Pi's native session-tree picker, then asks **Open fork in Herdr?**: **New tab** (default) or **Split beside this pane**. The picker shows nonempty user prompts (including image-only prompts) and completed text answers. It hides tool calls and results, commentary, thinking-only or empty answers, interrupted or incomplete responses, and other internal records. Its initial selection is the nearest visible ancestor of the current point, when one exists. Native search, folding and filters operate on these visible points; label editing is disabled. `/tree` keeps its usual behavior. A saved session with a visible fork point is required.
 
-`/tree-fork` opens Pi's native session-tree picker, then asks **Open fork in Herdr?**: **New tab** (default) or **Split beside this pane**. `/tree` keeps its usual behavior. The picker supports native search, folding and filters, but not label editing. A saved, nonempty session is required; cancelling either step creates no file or pane.
+A selected tree label becomes the new fork's title. Otherwise, after you confirm the destination, at most one small model request generates a semantic topic title from the selected ancestry. It uses the summary model and credentials (`PI_HERDR_SUMMARY_MODEL`; `PI_HERDR_SUMMARY=0` disables both summary and fork-naming calls). The request has a four-second limit. If it is unavailable, fails or returns an invalid title, the fallback is the existing session title, then a prompt-based title, then `Session fork`. Cancelling the picker, destination or naming creates no file or pane. The visible title is separate from the unique Herdr agent handle, which may have a numeric collision suffix. Existing panes keep their names; new forks receive the new titles after reload.
 
-The fork includes the selected entry and its ancestry, including assistant replies or the current tip: every selection means **continue after this entry**. A selected user message stays in the history and is not resubmitted. The new session inherits the current model and thinking level and normal conversation/extension context, but starts idle with an empty editor, no prompt and no model call. It is independent, not a child or subagent: it does not automatically report back or inherit ownership of the original session's children.
+The fork includes the selected entry and its original ancestry, including hidden tool and context entries: every selection means **continue after this entry**. A selected user message stays in the history and is not resubmitted. The new session inherits the current model and thinking level and normal conversation/extension context, but starts idle with an empty editor; no task is automatically sent to it. The ancillary naming request is not a turn in the fork. It is independent, not a child or subagent: it does not automatically report back or inherit ownership of the original session's children.
 
 The original conversation, editor draft and running response stay untouched, and focus stays in the original pane. The new tab or split uses the same Herdr workspace and working directory: **both sessions share checkout files**, not an isolated worktree or branch.
 
@@ -228,10 +228,10 @@ Holds pair `{ active: true }` with `{ active: false }`; a release without `id` e
 |---|---|
 | `PI_HERDR_PR` | `0` turns the `$pr` token off |
 | `PI_HERDR_CREW_REMOTE_MS` | how often a crew's coordinator compares its bases with the remote with `git ls-remote` (default `300000`, 5 minutes; at least 10 seconds; `0` never) |
-| `PI_HERDR_SUMMARY` | `0` keeps `$summary` but makes no model call (first sentence of the reply only) |
+| `PI_HERDR_SUMMARY` | `0` disables summary and fork-naming model calls; `$summary` uses the reply's first sentence |
 | `PI_HERDR_INBOX_RATE` | `<messages>/<seconds>`: how many messages one sender may have accepted without the user writing before the next ones are deferred to the user's next prompt (default `6/600`; `0` turns the guard off) |
 | `PI_HERDR_DRAFT_GUARD` | `0` turns the draft guard off (prompts other programs type join your draft, as without pi-herdr) |
-| `PI_HERDR_SUMMARY_MODEL` | `provider/id` for the turn summary; default the first of `anthropic/claude-haiku-5-5`, `anthropic/claude-haiku-4-5` with credentials |
+| `PI_HERDR_SUMMARY_MODEL` | `provider/id` for turn summaries and fork naming; default the first of `anthropic/claude-haiku-5-5`, `anthropic/claude-haiku-4-5` with credentials |
 | `HERDR_ENV`, `HERDR_SOCKET_PATH`, `HERDR_PANE_ID` | set by Herdr; pi-herdr is active only when `HERDR_ENV=1` and both others are set |
 
 There is no settings file.
@@ -243,7 +243,7 @@ There is no settings file.
 - `gh`, authenticated for the repository, for the `$pr` token (optional).
 - `git` for `where: "worktree"`.
 - A saved Herdr machine (`herdr machine add`, with API forwarding) for `machine`; pi-herdr runs `herdr --machine <label> ...` for it.
-- Each Herdr child is a full interactive Pi session using your configured model and credentials, billed like any session. pi-herdr's own model call is the `$summary` line: one small request per settled turn whose reply is longer than a line (Haiku, roughly 300 input and 20 output tokens, a few thousandths of a cent), through your configured credentials. `PI_HERDR_SUMMARY=0` turns it off. With pi-recap loaded, pi-recap makes that one request instead.
+- Each Herdr child is a full interactive Pi session using your configured model and credentials, billed like any session. pi-herdr also makes a bounded fork-naming request when needed (see [Fork a tree point](#fork-a-tree-point)). Its `$summary` model call is one small request per settled turn whose reply is longer than a line (Haiku, roughly 300 input and 20 output tokens, a few thousandths of a cent), through your configured credentials. `PI_HERDR_SUMMARY=0` disables both kinds of call. With pi-recap loaded, pi-recap makes that one request instead.
 - It saves coordination entries in Pi sessions, writes crew state under `<git-common-dir>/pi-crew/`, and `/tree-fork` creates a separate ordinary Pi session file without changing the source session file.
 
 ## Optional integrations

@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
-import { TreeSelectorComponent, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { BorderedLoader, TreeSelectorComponent, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { type Call, errorText, splitDirection } from "./core/herdr.ts";
 import { slugName } from "./core/children.ts";
-import { titleFromPrompt } from "./core/text.ts";
+import { captureForkNameContext, generateForkTitle } from "./fork-name.ts";
+import { projectForkTree } from "./fork-points.ts";
 import { createTreeFork } from "./fork-session.ts";
 import { PI_CHILD } from "./session.ts";
 
@@ -25,6 +26,7 @@ interface PaneOptions {
   where: "tab" | "split";
   cwd: string;
   name: string;
+  title: string;
   file: string;
   model?: string;
   thinking?: string;
@@ -32,7 +34,7 @@ interface PaneOptions {
 
 /** Launch an independent idle session. Never register child ownership or deliver input. */
 export async function openForkPane(opts: PaneOptions): Promise<string> {
-  const { call, selfPane, name, cwd, file } = opts;
+  const { call, selfPane, name, title, cwd, file } = opts;
   let paneId: string | undefined;
   let startAttempted = false;
   const assert = () => {
@@ -53,12 +55,12 @@ export async function openForkPane(opts: PaneOptions): Promise<string> {
       paneId = split.result?.pane?.pane_id;
       if (!paneId) throw new Error(`herdr could not split the pane: ${errorText(split)}`);
     } else {
-      const tab = await call("tab.create", { workspace_id: workspace, cwd, label: name, focus: false });
+      const tab = await call("tab.create", { workspace_id: workspace, cwd, label: title, focus: false });
       paneId = tab.result?.root_pane?.pane_id;
       if (!paneId) throw new Error(`herdr could not create a tab: ${errorText(tab)}`);
     }
     assert();
-    const args = [...PI_CHILD.args({ task: "", cwd, model: opts.model, thinking: opts.thinking }, name), "--session", file];
+    const args = [...PI_CHILD.args({ task: "", cwd, model: opts.model, thinking: opts.thinking }, title), "--session", file];
     for (let retry = 0; ; retry++) {
       assert();
       startAttempted = true;
@@ -89,21 +91,6 @@ export async function openForkPane(opts: PaneOptions): Promise<string> {
   }
 }
 
-/** Resolve only the selected ancestry, never the active leaf or a sibling branch. */
-export function treeForkName(manager: ExtensionCommandContext["sessionManager"], entryId: string): string {
-  let description = titleFromPrompt(manager.getLabel(entryId));
-  if (!description) {
-    for (const entry of manager.getBranch(entryId).slice().reverse()) {
-      if (entry.type !== "message" || entry.message.role !== "user") continue;
-      const content = entry.message.content;
-      const text = typeof content === "string" ? content : content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
-      description = titleFromPrompt(text);
-      if (description) break;
-    }
-  }
-  return slugName(`fork ${description ?? titleFromPrompt(manager.getSessionName()) ?? "conversation"}`);
-}
-
 export function registerTreeFork(pi: ExtensionAPI, deps: ForkDependencies): void {
   if (typeof pi.registerCommand !== "function") return;
   let running = false;
@@ -118,10 +105,9 @@ export function registerTreeFork(pi: ExtensionAPI, deps: ForkDependencies): void
         const manager = ctx.sessionManager;
         const file = manager.getSessionFile();
         if (!file || !existsSync(file) || statSync(file).size === 0) return ctx.ui.notify("Save this session before using /tree-fork.", "warning");
-        const tree = structuredClone(manager.getTree());
-        if (!tree.length) return ctx.ui.notify("This session tree is empty.", "warning");
+        const { tree, leafId: leaf, ids } = projectForkTree(structuredClone(manager.getTree()), manager.getLeafId());
+        if (!tree.length) return ctx.ui.notify("No user prompts or completed answers to fork from.", "warning");
         const sessionId = manager.getSessionId();
-        const leaf = manager.getLeafId();
         const sessionDir = manager.getSessionDir();
         const cwd = ctx.cwd;
         const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
@@ -133,7 +119,7 @@ export function registerTreeFork(pi: ExtensionAPI, deps: ForkDependencies): void
         const hold = `tree-fork:${randomUUID()}`;
         let entryId: string | undefined;
         let destination: string | undefined;
-        let wantedName: string | undefined;
+        let title: string | undefined;
         pi.events.emit("herdr:blocked", { active: true, id: hold, label: "Fork session tree" });
         try {
           entryId = await ctx.ui.custom<string | undefined>((tui, _theme, _kb, done) => {
@@ -143,19 +129,35 @@ export function registerTreeFork(pi: ExtensionAPI, deps: ForkDependencies): void
           });
           assert();
           if (entryId === undefined) return;
-          wantedName = treeForkName(manager, entryId);
+          if (!ids.has(entryId)) throw new Error("Selected entry is not an available fork point.");
+          const context = captureForkNameContext(manager, entryId);
           destination = await ctx.ui.select(FORK_TITLE, FORK_DESTINATIONS);
+          assert();
+          if (!destination) return;
+          title = await ctx.ui.custom<string | undefined>((tui, theme, _kb, done) => {
+            const loader = new BorderedLoader(tui, theme, "Naming fork…");
+            let settled = false;
+            const finish = (result: string | undefined) => {
+              if (settled) return;
+              settled = true;
+              loader.dispose();
+              done(result);
+            };
+            loader.onAbort = () => finish(undefined);
+            void generateForkTitle(ctx.modelRegistry, context, { signal: loader.signal }).then(finish, () => finish(undefined));
+            return loader;
+          });
           assert();
         } finally {
           pi.events.emit("herdr:blocked", { active: false, id: hold });
         }
-        if (!destination || entryId === undefined || wantedName === undefined) return;
-        const name = await deps.uniqueName(wantedName);
+        if (!destination || entryId === undefined || title === undefined) return;
+        const name = await deps.uniqueName(slugName(title));
         assert();
         const forkFile = createTreeFork(file, sessionDir, cwd, entryId);
-        const paneId = await openForkPane({ call: deps.call, selfPane: deps.selfPane, isCurrent: current, where: destination === FORK_DESTINATIONS[0] ? "tab" : "split", cwd, name, file: forkFile, model, thinking });
+        const paneId = await openForkPane({ call: deps.call, selfPane: deps.selfPane, isCurrent: current, where: destination === FORK_DESTINATIONS[0] ? "tab" : "split", cwd, name, title, file: forkFile, model, thinking });
         assert();
-        ctx.ui.notify(`Fork opened in ${name} (${paneId}). Original session unchanged.`, "info");
+        ctx.ui.notify(`Fork opened: ${title} (${name}, ${paneId}). Original session unchanged.`, "info");
       } catch (error) {
         // A disposed runtime cannot display a notification; retain the recovery error for live UIs.
         try { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); } catch { /* disposed */ }

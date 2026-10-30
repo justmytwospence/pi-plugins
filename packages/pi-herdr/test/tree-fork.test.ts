@@ -1,25 +1,30 @@
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { initTheme, SessionManager, TreeSelectorComponent, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { BorderedLoader, initTheme, SessionManager, TreeSelectorComponent, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { FORK_BOUNDARY } from "../src/fork-session.ts";
-import { FORK_DESTINATIONS, FORK_TITLE, openForkPane, registerTreeFork, treeForkName } from "../src/tree-fork.ts";
+import { FORK_DESTINATIONS, FORK_TITLE, openForkPane, registerTreeFork } from "../src/tree-fork.ts";
 import { fakeCall } from "./core/fake.ts";
+import { theme } from "../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js";
 import type { Call } from "../src/core/herdr.ts";
 
+type CustomFactory = (tui: unknown, theme: unknown, kb: unknown, done: (id: string | undefined) => void) => TreeSelectorComponent | BorderedLoader;
 initTheme("dark", false);
+
 const dirs: string[] = [];
 let previousKeybindings: KeybindingsManager;
 beforeEach(() => {
+  vi.stubEnv("PI_HERDR_SUMMARY", "1");
   previousKeybindings = getKeybindings();
   // Interactive Pi installs application bindings in addition to pi-tui's defaults.
-  setKeybindings(new KeybindingsManager({ ...TUI_KEYBINDINGS, "app.tree.editLabel": { defaultKeys: "shift+l", description: "Edit tree label" } }));
+  setKeybindings(new KeybindingsManager({ ...TUI_KEYBINDINGS, "app.tree.editLabel": { defaultKeys: "shift+l", description: "Edit tree label" }, "app.tree.filter.all": { defaultKeys: "ctrl+a", description: "All" }, "app.tree.filter.cycleForward": { defaultKeys: "ctrl+f", description: "Cycle" } }));
 });
 afterEach(() => {
   setKeybindings(previousKeybindings);
   vi.useRealTimers();
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -40,25 +45,54 @@ function transport(handlers: Parameters<typeof fakeCall>[0] = {}) {
   });
 }
 function paneOptions(fake: ReturnType<typeof transport>) {
-  return { call: fake.call, selfPane: "self", isCurrent: () => true, where: "tab" as const, cwd: "/checkout", name: "available-fork", file: "/sessions/fork.jsonl" };
+  return { call: fake.call, selfPane: "self", isCurrent: () => true, where: "tab" as const, cwd: "/checkout", name: "available-fork", title: "Tree fork navigation", file: "/sessions/fork.jsonl" };
 }
-function fixture(handlers: Parameters<typeof fakeCall>[0] = {}) {
+function fixture(handlers: Parameters<typeof fakeCall>[0] = {}, width = 120) {
   const dir = mkdtempSync(join(tmpdir(), "pi-herdr-tree-fork-")); dirs.push(dir);
   const manager = SessionManager.create("/checkout", dir);
   const question = manager.appendMessage({ role: "user", content: "Searchable question", timestamp: 1 });
+  const tool = manager.appendMessage({
+    role: "assistant", content: [{ type: "text", text: "Hidden tool request" }, { type: "toolCall", id: "tool-1", name: "bash", arguments: { command: "internal" } }],
+    api: "anthropic-messages", provider: "anthropic", model: "fixture",
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: "toolUse", timestamp: 1,
+  });
+  const toolResult = manager.appendMessage({ role: "toolResult", toolCallId: "tool-1", toolName: "bash", content: [{ type: "text", text: "Hidden tool result" }], isError: false, timestamp: 1 });
   const tip = manager.appendMessage({
     role: "assistant", content: [{ type: "text", text: "Current answer" }], api: "anthropic-messages", provider: "anthropic", model: "fixture",
     usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
     stopReason: "stop", timestamp: 2,
   });
+  const hiddenLeaf = manager.appendCustomEntry("hidden-tail", { text: "Hidden metadata" });
   const fake = transport(handlers);
+  const registry = {
+    find: vi.fn(() => ({ provider: "fixture", id: "small-model" })),
+    hasConfiguredAuth: vi.fn(() => true),
+    complete: vi.fn(async (_model: unknown, _context: unknown, _options?: { signal?: AbortSignal }) => ({ stopReason: "stop", content: [{ type: "text", text: "Tree fork navigation" }] })),
+  };
+  const screens = {
+    picker: vi.fn((_: TreeSelectorComponent, done: (id: string | undefined) => void) => done(tip)),
+    loader: vi.fn((_loader: BorderedLoader) => {}),
+    resolved: vi.fn((_screen: "picker" | "loader", _value: string | undefined) => {}),
+  };
+  const custom = async (factory: unknown): Promise<string | undefined> => new Promise((done) => {
+    const component = (factory as CustomFactory)({ terminal: { rows: 32, columns: width }, requestRender: () => {} }, theme, undefined, (value) => {
+      screens.resolved(component instanceof TreeSelectorComponent ? "picker" : "loader", value);
+      done(value);
+    });
+    if (component instanceof TreeSelectorComponent) screens.picker(component, done);
+    else {
+      expect(component).toBeInstanceOf(BorderedLoader);
+      screens.loader(component as BorderedLoader);
+    }
+  });
   const forbidden = Object.fromEntries(["abort", "fork", "navigateTree", "sendMessage", "sendUserMessage", "appendEntry", "setEditorText", "setEditorComponent"].map((name) => [name, vi.fn(() => { throw new Error(`Forbidden source action: ${name}`); })]));
   const ui = {
-    custom: vi.fn(async (_factory: unknown): Promise<string | undefined> => tip),
+    custom: vi.fn(custom),
     select: vi.fn(async (_title: string, _items: string[]): Promise<string | undefined> => FORK_DESTINATIONS[0]),
     notify: vi.fn(), ...forbidden,
   };
-  const ctx = { mode: "tui", hasUI: true, cwd: "/checkout", model: { provider: "anthropic", id: "current-model" }, sessionManager: manager, ui, ...forbidden };
+  const ctx = { mode: "tui", hasUI: true, cwd: "/checkout", model: { provider: "anthropic", id: "current-model" }, sessionManager: manager, modelRegistry: registry, ui, ...forbidden };
   const pi = { registerCommand: vi.fn(), getThinkingLevel: vi.fn(() => "high"), events: { emit: vi.fn() }, ...forbidden };
   let generation = 1;
   const uniqueName = vi.fn(async (_wanted: string) => "available-fork");
@@ -79,73 +113,8 @@ function fixture(handlers: Parameters<typeof fakeCall>[0] = {}) {
       expect(events.filter(([, e]) => !e.active && e.id === hold.id)).toHaveLength(1);
     }
   };
-  return { dir, manager, question, tip, fake, ctx, ui, pi, deps, command, run, uniqueName, snapshot, assertUntouched, holds, assertReleased, stale: () => { generation++; } };
+  return { dir, manager, question, tip, tool, toolResult, hiddenLeaf, registry, screens, custom, fake, ctx, ui, pi, deps, command, run, uniqueName, snapshot, assertUntouched, holds, assertReleased, stale: () => { generation++; } };
 }
-
-test("selected label takes priority over prompts and session title", () => {
-  const f = fixture();
-  f.manager.appendSessionInfo("Session title");
-  f.manager.appendLabelChange(f.tip, "\n/review\n  Fix: login retries!\nIgnored line");
-  expect(treeForkName(f.manager, f.tip)).toBe("fork-fix-login");
-});
-
-test("nearest textual user belongs to the selected ancestry, including a selected user or assistant tip", () => {
-  const f = fixture();
-  const selected = f.manager.appendMessage({ role: "user", content: [{ type: "text", text: "/command" }, { type: "text", text: "Repair cache eviction\nAnother line" }], timestamp: 3 });
-  f.manager.branch(f.question);
-  f.manager.appendMessage({ role: "user", content: "Unrelated sibling prompt", timestamp: 4 });
-  expect(treeForkName(f.manager, selected)).toBe("fork-repair-cache");
-  expect(treeForkName(f.manager, f.question)).toBe("fork-searchable-question");
-  expect(treeForkName(f.manager, f.tip)).toBe("fork-searchable-question");
-});
-
-test.each(["", " \n/command", [{ type: "image" as const, data: "AA==", mimeType: "image/png" }]])("skips empty or image-only user content %j and blank labels", (content) => {
-  const f = fixture();
-  const selected = f.manager.appendMessage({ role: "user", content, timestamp: 3 });
-  f.manager.appendLabelChange(selected, " \n ");
-  expect(treeForkName(f.manager, selected)).toBe("fork-searchable-question");
-});
-
-test.each([
-  { title: "Plan migrations!", expected: "fork-plan-migrations" },
-  { title: undefined, expected: "fork-conversation" },
-])("uses session title or generic fallback without user text: $expected", ({ title, expected }) => {
-  const f = fixture();
-  const manager = SessionManager.create("/checkout", f.dir);
-  const selected = manager.appendMessage({ role: "user", content: [], timestamp: 1 });
-  if (title) manager.appendSessionInfo(title);
-  expect(treeForkName(manager, selected)).toBe(expected);
-});
-
-test("punctuation, newlines and long labels produce bounded valid deterministic names", () => {
-  const f = fixture();
-  for (const label of ["123: fix!!!\nignored", "!!!", "Useful " + "longword".repeat(20), "x".repeat(100)]) {
-    f.manager.appendLabelChange(f.tip, label);
-    const name = treeForkName(f.manager, f.tip);
-    expect(name).toMatch(/^[a-z][a-z0-9_-]{0,23}$/u);
-    expect(name).toBe(treeForkName(f.manager, f.tip));
-    expect(name).not.toContain(f.tip);
-  }
-});
-
-test("generated name reaches the tab label and agent --name, snapshotted before awaits", async () => {
-  const f = fixture();
-  f.ui.select.mockImplementation(async () => {
-    f.manager.appendLabelChange(f.tip, "Later label");
-    f.manager.appendMessage({ role: "user", content: "Later active prompt", timestamp: 3 });
-    return FORK_DESTINATIONS[0];
-  });
-  f.uniqueName.mockImplementation(async (wanted) => {
-    f.manager.appendLabelChange(f.tip, "Even later label");
-    return wanted;
-  });
-  await f.run();
-  const name = "fork-searchable-question";
-  expect(f.uniqueName).toHaveBeenCalledWith(name);
-  expect(f.fake.of("tab.create")[0].params.label).toBe(name);
-  expect(f.fake.of("agent.start")[0].params).toMatchObject({ name, args: ["--name", name, "--model", "anthropic/current-model", "--thinking", "high", "--session", expect.any(String)] });
-  f.assertReleased();
-});
 
 test("registers only the independent tree-fork command and tolerates registration-less hosts", () => {
   const f = fixture();
@@ -162,7 +131,7 @@ test.each(["rpc", "print", "no-ui", "args", "unsaved", "empty"])("guards %s befo
   if (guard === "unsaved") vi.spyOn(f.manager, "getSessionFile").mockReturnValue(undefined);
   if (guard === "empty") vi.spyOn(f.manager, "getTree").mockReturnValue([]);
   await f.run(guard === "args" ? " unexpected " : "");
-  const expected = guard === "args" ? "Usage: /tree-fork" : guard === "unsaved" ? "Save this session before using /tree-fork." : guard === "empty" ? "This session tree is empty." : "/tree-fork requires interactive Pi in Herdr.";
+  const expected = guard === "args" ? "Usage: /tree-fork" : guard === "unsaved" ? "Save this session before using /tree-fork." : guard === "empty" ? "No user prompts or completed answers to fork from." : "/tree-fork requires interactive Pi in Herdr.";
   expect(f.ui.notify).toHaveBeenCalledWith(expected, "warning");
   expect(f.ui.custom).not.toHaveBeenCalled(); expect(f.ui.select).not.toHaveBeenCalled();
   expect(f.fake.log).toEqual([]); expect(f.uniqueName).not.toHaveBeenCalled(); expect(readdirSync(f.dir)).toEqual(files);
@@ -206,25 +175,26 @@ test.each(FORK_DESTINATIONS)("opens %s at the inclusive current tip, idle, with 
   });
   await f.run("  ");
   expect(f.ui.select).toHaveBeenCalledWith(FORK_TITLE, ["New tab", "Split beside this pane"]);
-  expect(f.uniqueName).toHaveBeenCalledWith("fork-searchable-question");
+  expect(f.uniqueName).toHaveBeenCalledWith("tree-fork-navigation");
   const call = f.fake.of("agent.start")[0]; const file = call.params.args.at(-1) as string;
-  expect(call.params).toEqual({ name: "available-fork", kind: "pi", pane_id: "new-pane", timeout_ms: 90_000, args: ["--name", "available-fork", "--model", "anthropic/current-model", "--thinking", "high", "--session", file] });
+  expect(call.params).toEqual({ name: "available-fork", kind: "pi", pane_id: "new-pane", timeout_ms: 90_000, args: ["--name", "Tree fork navigation", "--model", "anthropic/current-model", "--thinking", "high", "--session", file] });
   expect(start).toHaveBeenCalledWith("agent.start", call.params, 95_000);
   const fork = SessionManager.open(file);
-  expect(fork.getBranch().slice(0, -1)).toEqual(f.manager.getBranch());
+  expect(fork.getBranch().slice(0, -1)).toEqual(f.manager.getBranch(f.tip));
   expect(fork.getBranch().at(-1)).toMatchObject({ customType: FORK_BOUNDARY, parentId: f.tip });
   expect(f.fake.log.map((c) => c.method)).toEqual(destination === FORK_DESTINATIONS[0] ? ["pane.get", "tab.create", "agent.start"] : ["pane.get", "pane.layout", "pane.split", "agent.start"]);
-  expect(f.ui.notify).toHaveBeenCalledWith("Fork opened in available-fork (new-pane). Original session unchanged.", "info");
+  expect(f.ui.notify).toHaveBeenCalledWith("Fork opened: Tree fork navigation (available-fork, new-pane). Original session unchanged.", "info");
   f.assertReleased(); f.assertUntouched();
-  f.ui.custom.mockResolvedValue(undefined); await f.run(); expect(f.ui.custom).toHaveBeenCalledTimes(2);
+  const customCalls = f.ui.custom.mock.calls.length;
+  f.ui.custom.mockResolvedValue(undefined); await f.run(); expect(f.ui.custom).toHaveBeenCalledTimes(customCalls + 1);
 });
 
 test("tab launcher resolves the source workspace, supplies cwd/focus, and omits absent model/thinking", async () => {
   const fake = transport(); await expect(openForkPane(paneOptions(fake))).resolves.toBe("new-pane");
   expect(fake.log).toEqual([
     { method: "pane.get", params: { pane_id: "self" } },
-    { method: "tab.create", params: { workspace_id: "source-workspace", cwd: "/checkout", label: "available-fork", focus: false } },
-    { method: "agent.start", params: { name: "available-fork", kind: "pi", pane_id: "new-pane", timeout_ms: 90_000, args: ["--name", "available-fork", "--session", "/sessions/fork.jsonl"] } },
+    { method: "tab.create", params: { workspace_id: "source-workspace", cwd: "/checkout", label: "Tree fork navigation", focus: false } },
+    { method: "agent.start", params: { name: "available-fork", kind: "pi", pane_id: "new-pane", timeout_ms: 90_000, args: ["--name", "Tree fork navigation", "--session", "/sessions/fork.jsonl"] } },
   ]);
 });
 
@@ -275,7 +245,8 @@ test.each(["agent_not_ready", "timeout", "socket", "closed", "parse", "invalid_r
   expect(f.ui.notify).toHaveBeenCalledWith(expect.stringContaining(`Session file retained: ${file}. Fork pane: new-pane`), "error");
   if (code === "agent_not_ready") expect(f.ui.notify).toHaveBeenCalledWith(expect.stringContaining("waiting on a startup dialog; answer it in that pane"), "error");
   f.assertReleased(); f.assertUntouched();
-  f.ui.custom.mockResolvedValue(undefined); await f.run(); expect(f.ui.custom).toHaveBeenCalledTimes(2);
+  const customCalls = f.ui.custom.mock.calls.length;
+  f.ui.custom.mockResolvedValue(undefined); await f.run(); expect(f.ui.custom).toHaveBeenCalledTimes(customCalls + 1);
 });
 
 test.each(["tree", "destination", "name"])("runtime replacement during %s stops before file creation and releases holds", async (stage) => {
@@ -286,7 +257,8 @@ test.each(["tree", "destination", "name"])("runtime replacement during %s stops 
   await f.run(); expect(f.fake.log).toEqual([]); expect(readdirSync(f.dir)).toEqual(files);
   expect(f.ui.notify).toHaveBeenCalledWith(expect.stringContaining("switched or reloaded"), "error");
   f.assertReleased(); f.assertUntouched();
-  f.ui.custom.mockResolvedValue(undefined); await f.run(); expect(f.ui.custom).toHaveBeenCalledTimes(2);
+  const customCalls = f.ui.custom.mock.calls.length;
+  f.ui.custom.mockResolvedValue(undefined); await f.run(); expect(f.ui.custom).toHaveBeenCalledTimes(customCalls + 1);
 });
 
 test.each(["getSessionId", "getSessionFile"] as const)("source identity change (%s) cancels even when runtime generation is unchanged", async (method) => {
@@ -333,7 +305,8 @@ test("command runtime replacement during an in-flight start preserves the launch
   expect(f.ui.notify).toHaveBeenCalledWith(expect.stringContaining(`Session file retained: ${file}`), "error");
   expect(f.ui.notify.mock.calls.some(([message]) => String(message).startsWith("Fork opened"))).toBe(false);
   f.assertReleased(); f.assertUntouched();
-  f.ui.custom.mockResolvedValue(undefined); await f.run(); expect(f.ui.custom).toHaveBeenCalledTimes(2);
+  const customCalls = f.ui.custom.mock.calls.length;
+  f.ui.custom.mockResolvedValue(undefined); await f.run(); expect(f.ui.custom).toHaveBeenCalledTimes(customCalls + 1);
 });
 
 test("a thrown transport failure preserves the possibly running pane without retries", async () => {
@@ -357,9 +330,10 @@ test.each(["tree", "destination", "startup"])("rejects concurrent commands durin
   if (stage === "destination") f.ui.select.mockImplementationOnce(() => wait.promise);
   const first = f.run();
   if (stage === "startup") await started.promise; else await Promise.resolve();
-  await f.run(); expect(f.ui.notify).toHaveBeenCalledWith("/tree-fork is already open.", "warning"); expect(f.ui.custom).toHaveBeenCalledTimes(1);
+  await f.run(); expect(f.ui.notify).toHaveBeenCalledWith("/tree-fork is already open.", "warning"); expect(f.ui.custom).toHaveBeenCalledTimes(stage === "startup" ? 2 : 1);
   wait.resolve(stage === "tree" ? f.tip : FORK_DESTINATIONS[0]); await first;
-  f.ui.custom.mockResolvedValue(undefined); await f.run(); expect(f.ui.custom).toHaveBeenCalledTimes(2); f.assertReleased(); f.assertUntouched();
+  const customCalls = f.ui.custom.mock.calls.length;
+  f.ui.custom.mockResolvedValue(undefined); await f.run(); expect(f.ui.custom).toHaveBeenCalledTimes(customCalls + 1); f.assertReleased(); f.assertUntouched();
 });
 
 test.each(["tree", "destination", "name", "unpersisted"])("errors in %s release holds/concurrency without pane effects", async (stage) => {
@@ -370,13 +344,13 @@ test.each(["tree", "destination", "name", "unpersisted"])("errors in %s release 
   if (stage === "unpersisted") f.ui.custom.mockResolvedValueOnce("not-persisted");
   await f.run(); expect(f.ui.notify).toHaveBeenCalledWith(expect.any(String), "error");
   expect(readdirSync(f.dir)).toEqual(files); expect(f.fake.log).toEqual([]); f.assertReleased(); f.assertUntouched();
-  f.ui.custom.mockResolvedValue(undefined); await f.run(); expect(f.ui.custom).toHaveBeenCalledTimes(2);
+  const customCalls = f.ui.custom.mock.calls.length;
+  f.ui.custom.mockResolvedValue(undefined); await f.run(); expect(f.ui.custom).toHaveBeenCalledTimes(customCalls + 1);
 });
 
-test.each([46, 120])("native picker at %i columns starts focused at tip, searches/selects and disables label editing", async (width) => {
-  const f = fixture();
-  f.ui.custom.mockImplementation(async (factory) => new Promise<string | undefined>((done) => {
-    const picker = (factory as (tui: unknown, theme: unknown, kb: unknown, done: (id: string | undefined) => void) => TreeSelectorComponent)({ terminal: { rows: 32, columns: width } }, undefined, undefined, done);
+test.each([46, 120])("native projected picker at %i columns maps hidden tip, filters/searches without revealing internals and disables labels", async (width) => {
+  const f = fixture({}, width);
+  f.screens.picker.mockImplementation((picker) => {
     expect(picker).toBeInstanceOf(TreeSelectorComponent);
     picker.focused = true; expect(picker.focused).toBe(true);
     expect(picker.getTreeList().getSelectedNode()?.entry.id).toBe(f.tip);
@@ -386,22 +360,34 @@ test.each([46, 120])("native picker at %i columns starts focused at tip, searche
     const control = new TreeSelectorComponent(f.manager.getTree(), f.tip, 32, () => {}, () => {});
     const editLabel = vi.fn(); control.getTreeList().onLabelEdit = editLabel;
     control.handleInput("\u001b[108;2u"); expect(editLabel).toHaveBeenCalledTimes(1);
-    picker.handleInput("\u001b[108;2u"); // Kitty protocol shift+l: Pi's native edit-label binding.
+    picker.handleInput("\u001b[108;2u");
     expect(render()).not.toContain("Label (empty to remove)");
-    picker.handleInput("Searchable"); expect(picker.getTreeList().getSearchQuery()).toBe("Searchable");
-    expect(picker.getTreeList().getSelectedNode()?.entry.id).toBe(f.question); expect(render()).toContain("Searchable");
+    picker.handleInput("\u0001"); // Native All filter must only see projected records.
+    for (let i = 0; i < 6; i++) {
+      expect(render()).not.toMatch(/Hidden tool|Hidden metadata/);
+      picker.handleInput("\u0006");
+    }
+    picker.handleInput("\u0001");
+    picker.handleInput("Searchable");
+    expect(picker.getTreeList().getSearchQuery()).toBe("Searchable");
+    expect(picker.getTreeList().getSelectedNode()?.entry.id).toBe(f.question);
+    expect(render()).toContain("Searchable");
     picker.handleInput("\r");
-  }));
-  await f.run(); expect(f.ui.notify.mock.calls.filter(([, level]) => level === "error")).toEqual([]); expect(f.uniqueName).toHaveBeenCalledWith("fork-searchable-question"); f.assertReleased(); f.assertUntouched();
+  });
+  await f.run();
+  expect(f.ui.notify.mock.calls.filter(([, level]) => level === "error")).toEqual([]);
+  expect(f.uniqueName).toHaveBeenCalledWith("tree-fork-navigation");
+  expect(f.screens.loader).toHaveBeenCalledTimes(1); f.assertReleased(); f.assertUntouched();
 });
 
 test.each([46, 120])("native picker at %i columns clears search before escape cancels; snapshot is deep-cloned", async (width) => {
-  const f = fixture(); const files = readdirSync(f.dir);
-  f.ui.custom.mockImplementation(async (factory) => new Promise<string | undefined>((done) => {
-    const picker = (factory as (tui: unknown, theme: unknown, kb: unknown, done: (id: string | undefined) => void) => TreeSelectorComponent)({ terminal: { rows: 24, columns: width } }, undefined, undefined, done);
+  const f = fixture({}, width); const files = readdirSync(f.dir);
+  f.screens.picker.mockImplementation((picker) => {
     picker.focused = true;
     const selected = picker.getTreeList().getSelectedNode()!;
     expect(selected.entry).not.toBe(f.manager.getEntry(f.tip));
+    expect(selected.entry.parentId).toBe(f.question); // Hidden original tool ancestry is display-only.
+    expect(f.manager.getEntry(f.tip)?.parentId).toBe(f.toolResult);
     if (selected.entry.type === "message" && selected.entry.message.role === "assistant") {
       const content = selected.entry.message.content[0]; if (content.type === "text") content.text = "Snapshot only";
     }
@@ -410,7 +396,200 @@ test.each([46, 120])("native picker at %i columns clears search before escape ca
     expect(picker.getTreeList().getSearchQuery()).toBe(""); expect(f.ui.select).not.toHaveBeenCalled();
     expect(picker.render(width).every((line) => visibleWidth(line) <= width)).toBe(true);
     picker.focused = false; expect(picker.focused).toBe(false); picker.handleInput("\u001b");
-  }));
+  });
   await f.run(); expect(f.ui.notify.mock.calls.filter(([, level]) => level === "error")).toEqual([]);
-  expect(f.ui.select).not.toHaveBeenCalled(); expect(f.fake.log).toEqual([]); expect(readdirSync(f.dir)).toEqual(files); f.assertReleased(); f.assertUntouched();
+  expect(f.ui.select).not.toHaveBeenCalled(); expect(f.registry.complete).not.toHaveBeenCalled();
+  expect(f.fake.log).toEqual([]); expect(readdirSync(f.dir)).toEqual(files); f.assertReleased(); f.assertUntouched();
+});
+
+test.each([46, 120])("actual loader at %i columns completes once and disposes with hold released before startup", async (width) => {
+  vi.useFakeTimers();
+  const f = fixture({}, width);
+  const result = deferred<{ stopReason: string; content: { type: string; text: string }[] }>();
+  f.registry.complete.mockReturnValue(result.promise);
+  const dispose = vi.spyOn(BorderedLoader.prototype, "dispose");
+  f.screens.loader.mockImplementation((loader) => {
+    const lines = loader.render(width);
+    expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+    expect(lines.join("\n")).toContain("Naming fork…");
+    expect(lines.join("\n")).toContain("cancel");
+    expect(f.holds().map(([, hold]) => hold.active)).toEqual([true]);
+    expect(f.fake.log).toEqual([]);
+  });
+  f.deps.call = (async (method, params, timeout) => {
+    expect(f.holds().map(([, hold]) => hold.active)).toEqual([true, false]);
+    return f.fake.call(method, params, timeout);
+  }) as Call;
+  const run = f.run(); await vi.advanceTimersByTimeAsync(0);
+  expect(f.registry.complete).toHaveBeenCalledTimes(1);
+  result.resolve({ stopReason: "stop", content: [{ type: "text", text: "Tree fork navigation" }] });
+  await run;
+  expect(dispose).toHaveBeenCalledTimes(1);
+  expect(f.screens.resolved.mock.calls.filter(([screen]) => screen === "loader")).toEqual([["loader", "Tree fork navigation"]]);
+  expect(vi.getTimerCount()).toBe(0); f.assertReleased(); f.assertUntouched();
+});
+
+test.each([46, 120])("actual loader at %i columns cancels once, cleans up and ignores late results", async (width) => {
+  vi.useFakeTimers();
+  const f = fixture({}, width); const files = readdirSync(f.dir);
+  const result = deferred<{ stopReason: string; content: { type: string; text: string }[] }>();
+  f.registry.complete.mockReturnValue(result.promise);
+  const dispose = vi.spyOn(BorderedLoader.prototype, "dispose");
+  f.screens.loader.mockImplementation((loader) => {
+    expect(loader.render(width).every((line) => visibleWidth(line) <= width)).toBe(true);
+    expect(f.holds().map(([, hold]) => hold.active)).toEqual([true]);
+    loader.handleInput("\u001b"); loader.handleInput("\u001b");
+    expect(loader.signal.aborted).toBe(true);
+  });
+  await f.run();
+  expect(f.registry.complete.mock.calls[0][2]?.signal?.aborted).toBe(true);
+  expect(dispose).toHaveBeenCalledTimes(1);
+  expect(f.screens.resolved.mock.calls.filter(([screen]) => screen === "loader")).toEqual([["loader", undefined]]);
+  expect(vi.getTimerCount()).toBe(0);
+  const notifications = f.ui.notify.mock.calls.slice();
+  result.resolve({ stopReason: "stop", content: [{ type: "text", text: "Late title must not spawn" }] });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.ui.notify.mock.calls).toEqual(notifications);
+  expect(dispose).toHaveBeenCalledTimes(1);
+  expect(f.uniqueName).not.toHaveBeenCalled(); expect(f.fake.log).toEqual([]);
+  expect(readdirSync(f.dir)).toEqual(files); f.assertReleased(); f.assertUntouched();
+  f.screens.picker.mockImplementation((_picker, done) => done(undefined));
+  await f.run(); expect(f.screens.picker).toHaveBeenCalledTimes(2);
+});
+
+test.each(["pending", "completed"])("runtime replacement during naming (%s) prevents files and panes", async (stage) => {
+  const f = fixture(); const files = readdirSync(f.dir);
+  const dispose = vi.spyOn(BorderedLoader.prototype, "dispose");
+  if (stage === "pending") {
+    f.registry.complete.mockImplementation(async () => {
+      f.stale();
+      return { stopReason: "stop", content: [{ type: "text", text: "Tree fork navigation" }] };
+    });
+  } else {
+    f.ui.custom.mockImplementation((factory) => {
+      const value = f.custom(factory);
+      return f.ui.custom.mock.calls.length === 2 ? value.then((title) => { f.stale(); return title; }) : value;
+    });
+  }
+  await f.run();
+  expect(dispose).toHaveBeenCalledTimes(1);
+  expect(f.ui.notify).toHaveBeenCalledWith(expect.stringContaining("switched or reloaded"), "error");
+  expect(f.uniqueName).not.toHaveBeenCalled(); expect(f.fake.log).toEqual([]);
+  expect(readdirSync(f.dir)).toEqual(files); f.assertReleased(); f.assertUntouched();
+});
+
+test.each(["unavailable", "disabled"])("no-model fallback (%s) preserves natural source title", async (kind) => {
+  const f = fixture(); f.manager.appendSessionInfo("OAuth callback retries");
+  if (kind === "disabled") vi.stubEnv("PI_HERDR_SUMMARY", "0");
+  else f.registry.hasConfiguredAuth.mockReturnValue(false);
+  const before = f.snapshot(); await f.run();
+  expect(f.registry.complete).not.toHaveBeenCalled();
+  expect(f.uniqueName).toHaveBeenCalledWith("oauth-callback-retries");
+  expect(f.fake.of("tab.create")[0].params.label).toBe("OAuth callback retries");
+  expect(f.fake.of("agent.start")[0].params.args.slice(0, 2)).toEqual(["--name", "OAuth callback retries"]);
+  expect(f.snapshot()).toEqual(before); f.assertReleased();
+});
+
+test.each(FORK_DESTINATIONS)("natural title stays separate from unique collision slug in %s", async (destination) => {
+  const f = fixture(); f.ui.select.mockResolvedValue(destination);
+  f.uniqueName.mockResolvedValue("tree-fork-navigation-2"); await f.run();
+  expect(f.uniqueName).toHaveBeenCalledWith("tree-fork-navigation");
+  const start = f.fake.of("agent.start")[0].params;
+  expect(start.name).toBe("tree-fork-navigation-2");
+  expect(start.args.slice(0, 2)).toEqual(["--name", "Tree fork navigation"]);
+  if (destination === FORK_DESTINATIONS[0]) expect(f.fake.of("tab.create")[0].params.label).toBe("Tree fork navigation");
+  else expect(f.fake.of("tab.create")).toEqual([]);
+  expect(f.ui.notify).toHaveBeenCalledWith("Fork opened: Tree fork navigation (tree-fork-navigation-2, new-pane). Original session unchanged.", "info");
+  f.assertReleased(); f.assertUntouched();
+});
+
+test("context snapshots selected ancestry before destination despite source progress and metadata changes", async () => {
+  const f = fixture(); const original = structuredClone(f.manager.getBranch(f.tip));
+  f.ui.select.mockImplementation(async () => {
+    expect(f.registry.complete).not.toHaveBeenCalled();
+    f.manager.appendLabelChange(f.tip, "Future label must not win");
+    f.manager.appendSessionInfo("Future title");
+    f.manager.appendMessage({ role: "user", content: "Unrelated later prompt", timestamp: 3 });
+    return FORK_DESTINATIONS[0];
+  });
+  await f.run();
+  const payload = JSON.parse((f.registry.complete.mock.calls[0][1] as { messages: { content: { text: string }[] }[] }).messages[0].content[0].text);
+  expect(payload).toEqual({ dialogue: [{ role: "user", text: "Searchable question" }, { role: "assistant", text: "Current answer" }] });
+  expect(JSON.stringify(payload)).not.toMatch(/Hidden|Future|Unrelated/);
+  const args = f.fake.of("agent.start")[0].params.args as string[];
+  const fork = SessionManager.open(args.at(-1)!);
+  expect(fork.getBranch().filter((entry) => entry.type !== "label").slice(0, -1)).toEqual(original);
+  expect(fork.getBranch().find((entry) => entry.type === "label")).toMatchObject({ targetId: f.tip, label: "Future label must not win" });
+  expect(fork.getBranch().filter((entry) => entry.type === "message").map((entry) => entry.id)).toEqual([f.question, f.tool, f.toolResult, f.tip]);
+  f.assertReleased();
+});
+
+test.each(["tool", "toolResult", "hiddenLeaf", "missing"] as const)("rejects picker IDs absent from projected snapshot: %s", async (selected) => {
+  const f = fixture(); const files = readdirSync(f.dir);
+  f.screens.picker.mockImplementation((_picker, done) => done(selected === "missing" ? "not-persisted" : f[selected]));
+  await f.run();
+  expect(f.ui.notify).toHaveBeenCalledWith(expect.any(String), "error");
+  expect(f.ui.select).not.toHaveBeenCalled(); expect(f.screens.loader).not.toHaveBeenCalled();
+  expect(f.registry.complete).not.toHaveBeenCalled(); expect(f.fake.log).toEqual([]);
+  expect(readdirSync(f.dir)).toEqual(files); f.assertReleased(); f.assertUntouched();
+});
+
+test("newly appended visible IDs cannot be returned from the older picker snapshot", async () => {
+  const f = fixture();
+  f.screens.picker.mockImplementation((_picker, done) => done(f.manager.appendMessage({ role: "user", content: "New point", timestamp: 3 })));
+  await f.run();
+  expect(f.ui.notify).toHaveBeenCalledWith(expect.any(String), "error");
+  expect(f.ui.select).not.toHaveBeenCalled(); expect(f.registry.complete).not.toHaveBeenCalled();
+  expect(f.fake.log).toEqual([]); f.assertReleased();
+});
+
+test("internal-only persisted history warns before opening UI", async () => {
+  const f = fixture(); const manager = SessionManager.create("/checkout", f.dir);
+  manager.appendMessage({ role: "user", content: [], timestamp: 1 });
+  manager.appendCustomEntry("internal", {}); f.ctx.sessionManager = manager;
+  const files = readdirSync(f.dir); await f.run();
+  expect(f.ui.notify).toHaveBeenCalledWith("No user prompts or completed answers to fork from.", "warning");
+  expect(f.ui.custom).not.toHaveBeenCalled(); expect(f.holds()).toEqual([]);
+  expect(f.fake.log).toEqual([]); expect(readdirSync(f.dir)).toEqual(files);
+});
+
+test("concurrent commands while naming is pending do not open another picker and guard releases after cancel", async () => {
+  const f = fixture(); const entered = deferred<void>();
+  const result = deferred<{ stopReason: string; content: { type: string; text: string }[] }>();
+  f.registry.complete.mockReturnValue(result.promise);
+  let loader!: BorderedLoader;
+  f.screens.loader.mockImplementation((component) => { loader = component; entered.resolve(); });
+  const run = f.run(); await entered.promise;
+  await f.run();
+  expect(f.ui.notify).toHaveBeenCalledWith("/tree-fork is already open.", "warning");
+  expect(f.ui.custom).toHaveBeenCalledTimes(2);
+  expect(f.holds().map(([, hold]) => hold.active)).toEqual([true]);
+  loader.handleInput("\u001b"); await run;
+  expect(f.fake.log).toEqual([]); f.assertReleased(); f.assertUntouched();
+  f.screens.picker.mockImplementation((_picker, done) => done(undefined));
+  await f.run(); expect(f.screens.picker).toHaveBeenCalledTimes(2);
+  result.resolve({ stopReason: "stop", content: [{ type: "text", text: "Ignored late name" }] });
+});
+
+test("explicit selected label bypasses model and preserves its natural title", async () => {
+  const f = fixture(); f.manager.appendLabelChange(f.tip, "OAuth callback retries");
+  const before = f.snapshot(); await f.run();
+  expect(f.registry.complete).not.toHaveBeenCalled();
+  expect(f.uniqueName).toHaveBeenCalledWith("oauth-callback-retries");
+  expect(f.fake.of("tab.create")[0].params.label).toBe("OAuth callback retries");
+  expect(f.fake.of("agent.start")[0].params.args.slice(0, 2)).toEqual(["--name", "OAuth callback retries"]);
+  expect(f.snapshot()).toEqual(before); f.assertReleased();
+});
+
+test("current completed final tip remains selectable without trailing hidden metadata", async () => {
+  const f = fixture(); f.manager.branch(f.tip); const before = f.snapshot();
+  f.screens.picker.mockImplementation((picker) => {
+    expect(picker.getTreeList().getSelectedNode()?.entry.id).toBe(f.tip);
+    picker.handleInput("\r");
+  });
+  await f.run();
+  expect(f.fake.of("agent.start")).toHaveLength(1);
+  const file = f.fake.of("agent.start")[0].params.args.at(-1) as string;
+  expect(SessionManager.open(file).getBranch().at(-1)).toMatchObject({ parentId: f.tip });
+  expect(f.snapshot()).toEqual(before); f.assertReleased();
 });
