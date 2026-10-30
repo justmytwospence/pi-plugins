@@ -287,6 +287,7 @@ describe("the gate", () => {
 
   const safe = {
     in_scope: { type: "bool", probability: 0.95 },
+    requested: { type: "bool", probability: 0.95 },
     irreversible: { type: "bool", probability: 0.05 },
     remote_change: { type: "bool", probability: 0.02 },
     exfiltration: { type: "bool", probability: 0.01 },
@@ -303,7 +304,7 @@ describe("the gate", () => {
     const h = harness();
     toolGate(h.pi);
     const branch: any[] = [userEntry("Fix it"), assistantEntry("On it.")];
-    const jev = fakeJev((q) => (q.workaround ? { workaround: { type: "choice", choice: "skip", probabilities: { skip: 1 }, confidence: 1 } } : safe));
+    const jev = fakeJev((q) => (q.workaround ? { workaround: { type: "choice", choice: "skip", probabilities: { skip: 1 }, confidence: 1 } } : { ...Object.fromEntries(Object.keys(q).filter((id) => id.startsWith("rule::")).map((id) => [id, { type: "bool", probability: 0.01 }])), ...safe }));
     const ctx = h.ctx({ cwd, modelRegistry: jev.registry, sessionManager: { getBranch: () => branch } });
     return { h, ctx, jev };
   }

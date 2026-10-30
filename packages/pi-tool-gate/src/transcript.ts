@@ -13,7 +13,29 @@ export function messageText(content: unknown): string {
 
 interface EntryLike {
   type?: string;
+  customType?: string;
+  content?: unknown;
   message?: { role?: string; content?: unknown };
+}
+
+/**
+ * Latest approved-plan snapshot from sessionManager.getBranch(), never the full session tree.
+ * Custom messages store content directly on the entry; details.planFile is metadata, not a file
+ * to read. Any newer user entry invalidates the snapshot, even without text. Stateless
+ * reconstruction keeps session replacement and tree switches branch-local.
+ */
+export function approvedPlanOf(entries: readonly unknown[]): string | undefined {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i] as EntryLike;
+    if (entry?.type === "message" && entry.message?.role === "user") return undefined;
+    if (
+      entry?.type === "custom_message" &&
+      (entry.customType === "plan-mode-handoff" || entry.customType === "plan-mode-implementation")
+    ) {
+      return clip(messageText(entry.content), 12_000) || undefined;
+    }
+  }
+  return undefined;
 }
 
 /** The latest user message and the latest assistant text on the branch. */

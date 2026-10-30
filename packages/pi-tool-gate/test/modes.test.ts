@@ -23,6 +23,7 @@ afterEach(() => {
   rmSync(configDir, { recursive: true, force: true });
 });
 const safe = {
+  requested: { type: "bool", probability: 0.1 },
   in_scope: { type: "bool", probability: 0.95 }, irreversible: { type: "bool", probability: 0.05 },
   remote_change: { type: "bool", probability: 0.02 }, exfiltration: { type: "bool", probability: 0.01 },
   impact: { type: "score", score: 1, confidence: 0.9 },
@@ -42,6 +43,25 @@ function setup(branch: any[] = [userEntry("Fix the failing test")]) {
   return { h, jev, ctx, branch };
 }
 const start = async (s: ReturnType<typeof setup>) => { await s.h.emit("session_start", { type: "session_start" }, s.ctx); return s; };
+
+test.each(["auto", "manual", "accept-edits", "yolo"])("missing classifier preserves %s approval semantics", async (mode) => {
+  const s = await start(setup());
+  s.ctx.modelRegistry = undefined;
+  await s.h.commands.get("approvals").handler(mode, s.ctx);
+  const result = await s.h.emit("tool_call", call("bash", { command: "npm publish" }), s.ctx);
+  if (mode === "yolo") expect(result).toBeUndefined();
+  else expect(result).toMatchObject({ block: true });
+  expect(s.ctx.ui.selects).toHaveLength(mode === "manual" || mode === "accept-edits" ? 1 : 0);
+  expect(s.jev.calls).toHaveLength(0);
+});
+
+test.each(["chat", "plan", "work"])("missing classifier in %s workflow never silently permits mutations", async (mode) => {
+  const s = await start(setup());
+  s.ctx.modelRegistry = undefined;
+  s.h.pi.events.emit(PLAN_PROVIDER, { available: true, planFile: "/tmp/test-plan.md" });
+  await s.h.commands.get("mode").handler(mode, s.ctx);
+  expect(await s.h.emit("tool_call", call("bash", { command: "npm publish" }), s.ctx)).toMatchObject({ block: true });
+});
 
 describe("independent mode helpers and protocol", () => {
   test("parsers keep legacy migration explicit and exec lifecycle-owned", () => {

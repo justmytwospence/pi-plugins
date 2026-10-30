@@ -113,7 +113,7 @@ import {
   PLAN_PROVIDER,
 } from "./modes.ts";
 import { loadRules } from "./rules.ts";
-import { agentBeforeLatestUser, callerText, clip, clipTail, recentTexts, recentUserMessages } from "./transcript.ts";
+import { agentBeforeLatestUser, approvedPlanOf, callerText, clip, clipTail, recentTexts, recentUserMessages } from "./transcript.ts";
 import { offerUserWords, resultText } from "./user-words.ts";
 import { callView } from "./view.ts";
 import { registerWorkflowRenderer, sendWorkflowTransition } from "./workflow-ui.ts";
@@ -123,6 +123,8 @@ export const DECLINED = "The user declined this call. Do not retry it; continue 
 /** A declined call's result, around the user's message to the agent (Block with a message). */
 export const DECLINED_WITH_MESSAGE = "The user declined this call, with this message:\n\n";
 export const DECLINED_WITH_MESSAGE_END = "\n\nDo not retry the call as it was; follow the user's message.";
+/** Stable prefix for calls stopped because the classifier could not decide. */
+export const CLASSIFIER_UNAVAILABLE = "Automatic approval could not determine this call's safety. The call did not run.";
 
 /**
  * Who stopped a call, read from its result: the user (Block, Block with a message, or Esc), or
@@ -132,6 +134,7 @@ export function blockedBy(result: { content?: unknown; isError?: boolean }): "us
   if (!result.isError) return undefined;
   const text = resultText(result.content);
   if (text.startsWith(DECLINED) || text.startsWith(DECLINED_WITH_MESSAGE)) return "user";
+  if (text.startsWith(CLASSIFIER_UNAVAILABLE)) return "gate";
   if (/^(?:tool-gate held this |tool-gate blocked this |Chat mode is on: |Plan mode is on: |[a-z ]+ mode needs the user's approval for this )/u.test(text)) return "gate";
   return undefined;
 }
@@ -411,6 +414,7 @@ export function judgeStateOf(branch: readonly unknown[], call: Omit<JudgeInput, 
     userRequest: recentUserMessages(branch, 5).map((text, i, all) => clip(text, i === all.length - 1 ? 3_000 : 1_000)),
     agentBefore: clipTail(agentBeforeLatestUser(branch), 1_500),
     recentIntent: clipTail(recentTexts(branch).assistant, 2_000),
+    approvedPlan: approvedPlanOf(branch),
     ...call,
   });
 }
@@ -427,7 +431,7 @@ export default function toolGate(pi: ExtensionAPI) {
   let revision = 0;
   const effectiveWorkflow = (): WorkflowMode => execActive ? "exec" : workflow;
   // A mode change cancels decisions, not the usage of tools already running on this branch.
-  const invalidate = () => { revision++; pushedBackThisTurn.clear(); };
+  const invalidate = () => { revision++; pushedBackThisTurn.clear(); classifierFailures.clear(); };
   const staleResult = () => ({ block: true, reason: "tool-gate blocked this call: modes changed; the call must be reevaluated." });
   /** pi-plan-mode is installed and offers plan mode; the plan file it may write. */
   let planProvider = false;
@@ -456,7 +460,8 @@ export default function toolGate(pi: ExtensionAPI) {
   const pendingUsage = new Map<string, ClassifierUsage>();
   let gitInfo: Promise<{ branch: string; dirty: boolean } | undefined> | undefined;
   let dialogs: Promise<unknown> = Promise.resolve();
-  let warnedUnavailable = false;
+  /** Unavailable decisions never grant a family or saved rule. */
+  const classifierFailures = new Map<string, string>();
   let projectContext: ProjectContext | undefined;
   let projectLaunch: string | undefined;
   let policyLoadErrors: string[] = [];
@@ -984,7 +989,7 @@ export default function toolGate(pi: ExtensionAPI) {
     ignoredRules = [];
     gitInfo = undefined;
     dialogs = Promise.resolve();
-    if (newSession) { auto = 0; held = 0; pushedBack = 0; warnedUnavailable = false; warnedPolicy = false; }
+    if (newSession) { auto = 0; held = 0; pushedBack = 0; warnedPolicy = false; }
     await refreshRules(ctx.cwd);
     const entries = ctx.sessionManager.getBranch();
     const restored = restoreBranchModes(entries, defaults(config));
@@ -1011,6 +1016,7 @@ export default function toolGate(pi: ExtensionAPI) {
     hostCtx = ctx;
     await refreshRules(ctx.cwd);
     pushedBackThisTurn.clear();
+    classifierFailures.clear();
     gitInfo = undefined;
     // A removed plan provider must not strand a restored session in planning.
     if (workflow === "plan" && !planProvider && !execActive) setWorkflow("work", ctx);
@@ -1172,6 +1178,20 @@ export default function toolGate(pi: ExtensionAPI) {
         });
       }
 
+      const exactFailureKey = `${tool}\0${JSON.stringify(input)}`;
+      const previousFailure = classifierFailures.get(exactFailureKey);
+      if (previousFailure) {
+        if (!ctx.hasUI) return { block: true, reason: `${previousFailure}\nBlocked: there is no user to approve it.` };
+        return ask(ctx, { tool, input, held: previousFailure, agentCase: clip(callerText(ctx.sessionManager.getBranch(), event.toolCallId), 4_000) }, undefined);
+      }
+      const unavailable = (errorClass: string) => {
+        const reason = `${CLASSIFIER_UNAVAILABLE} (${errorClass})`;
+        classifierFailures.set(exactFailureKey, reason);
+        held++;
+        status(ctx);
+        pi.appendEntry("tool-gate:decision", { tool, args: clip(p.args, 500), action: "block", errorClass });
+        return { block: true, reason };
+      };
       const rules = loadRules(await contextFor(ctx.cwd));
       // A local script is judged by what it does: its content goes to the judge.
       const script = scriptOfCall(tool, input, ctx.cwd, downloads);
@@ -1181,27 +1201,20 @@ export default function toolGate(pi: ExtensionAPI) {
 
       if (stale()) return staleResult();
       if (!outcome.ok) {
-        if (!warnedUnavailable && ctx.hasUI && !/off in settings/u.test(outcome.reason)) {
-          warnedUnavailable = true;
-          ctx.ui.notify(`tool-gate: judge unavailable (${outcome.reason}); asking for calls Pi's tool hints flag.`, "warning");
-        }
-        const hints = annotations(tool);
-        const flagged =
-          hints?.destructiveHint === true ||
-          (!hints?.readOnlyHint && ((hints?.destructiveHint ?? true) || (hints?.openWorldHint ?? true)));
-        if (!flagged || !ctx.hasUI) {
-          auto++;
-          status(ctx);
-          return undefined;
-        }
-        held++;
-        status(ctx);
-        return ask(ctx, { tool, input, note: `Judge unavailable: ${outcome.reason}` }, p.offer);
+        // Expose stable classes, never raw provider messages which may contain credentials.
+        const errorClass = outcome.reason === "timed out" ? "ClassifierTimeoutError"
+          : outcome.reason === "cancelled" ? "ClassifierCancelledError"
+          : /classifier credentials|invalid API key/u.test(outcome.reason) ? "ClassifierCredentialsError"
+          : /no classifier model|no classifier models/u.test(outcome.reason) ? "ClassifierModelUnavailableError"
+          : /off in settings/u.test(outcome.reason) ? "ClassifierDisabledError"
+          : "ClassifierUnavailableError";
+        return unavailable(errorClass);
       }
 
       if (outcome.usage) recordUsage(outcome.usage);
       const v = verdict(outcome.answers, rules, config.thresholds);
-      const action = !v || v.allow ? "allow" : "hold";
+      if (!v) return unavailable("ClassifierInvalidAnswerError");
+      const action = v.allow ? "allow" : "hold";
       pi.appendEntry("tool-gate:decision", {
         tool,
         args: clip(p.args, 500),

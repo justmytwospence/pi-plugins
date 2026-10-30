@@ -23,6 +23,7 @@ afterEach(() => {
 
 const safe = {
   in_scope: { type: "bool", probability: 0.95 },
+  requested: { type: "bool", probability: 0.95 },
   irreversible: { type: "bool", probability: 0.05 },
   remote_change: { type: "bool", probability: 0.02 },
   exfiltration: { type: "bool", probability: 0.01 },
@@ -49,7 +50,7 @@ function setup(answers: unknown = safe, ctxOverrides: Record<string, unknown> = 
   const h = harness();
   toolGate(h.pi);
   const branch: any[] = [userEntry("Fix the failing test"), assistantEntry("I'll rerun the tests.")];
-  const jev = fakeJev((questions) => (questions.workaround ? workaround : answers));
+  const jev = fakeJev((questions) => (questions.workaround ? workaround : { ...Object.fromEntries(Object.keys(questions).filter((id) => id.startsWith("rule::")).map((id) => [id, { type: "bool", probability: 0.01 }])), ...(answers as Record<string, unknown>) }));
   const ctx = h.ctx({ cwd, modelRegistry: jev.registry, sessionManager: { getBranch: () => branch }, ...ctxOverrides });
   const judged = () => jev.calls.filter((c) => !c.questions.workaround).length;
   return { h, jev, ctx, branch, judged };

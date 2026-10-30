@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { downloadsOf } from "../src/downloads.ts";
-import toolGate, { blockedBy, DECLINED, DECLINED_WITH_MESSAGE, DECLINED_WITH_MESSAGE_END, DEFAULT_CONFIG, scriptOfCall } from "../src/index.ts";
+import toolGate, { blockedBy, CLASSIFIER_UNAVAILABLE, DECLINED, DECLINED_WITH_MESSAGE, DECLINED_WITH_MESSAGE_END, DEFAULT_CONFIG, judgeStateOf, scriptOfCall } from "../src/index.ts";
 import { APPROVAL_ENTRY, WORKFLOW_ENTRY } from "../src/modes.ts";
 import { assistantEntry, fakeJev, harness, usage, userEntry } from "./harness.ts";
 
@@ -20,6 +20,7 @@ afterEach(() => {
 });
 
 const safe = {
+  requested: { type: "bool", probability: 0.1 },
   in_scope: { type: "bool", probability: 0.95 },
   irreversible: { type: "bool", probability: 0.05 },
   remote_change: { type: "bool", probability: 0.02 },
@@ -215,7 +216,7 @@ describe("resolved project policy integration", () => {
       catch { return { code: 1, stdout: "", stderr: "" }; }
     } });
     toolGate(h.pi);
-    const jev = fakeJev(() => safe);
+    const jev = fakeJev((questions) => ({ ...safe, ...Object.fromEntries(Object.keys(questions).filter((id) => id.startsWith("rule::")).map((id) => [id, { type: "bool", probability: 0.01 }])) }));
     return { h, jev, ctx: h.ctx({ cwd, modelRegistry: jev.registry }) };
   }
   test("root and nested launches use the same config, permission anchors and Markdown guidance", async () => {
@@ -438,20 +439,18 @@ test("with push-back off, holds go straight to the user", async () => {
   }
 });
 
-test("when Jev is unavailable, Pi's tool hints decide", async () => {
-  const h = harness({ tools: [{ name: "mcp__notes__search", annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false } }] });
-  toolGate(h.pi);
-  const jev = fakeJev(() => ({ stopReason: "error", errorMessage: "No API key for provider: typesafe", answers: {} }));
-  const ctx = h.ctx({ modelRegistry: jev.registry });
+test("unavailable classification blocks without hints, leaks, or persistent suggestions", async () => {
+  const { h, ctx, jev } = setup({ stopReason: "error", errorMessage: "private-provider-secret", answers: {} });
   await h.emit("before_agent_start", { prompt: "x" }, ctx);
-  expect(await h.emit("tool_call", call("mcp__notes__search", { q: "x" }), ctx)).toBeUndefined();
-  ctx.ui.selectAnswers.push("Block");
-  const result: any = await h.emit("tool_call", call("bash", { command: "npm test" }, "t2"), ctx);
-  expect(result.block).toBe(true);
-  expect(ctx.ui.notes[0]?.message).toMatch(/no classifier credentials/u);
-
-  const headless = setup({ stopReason: "error", errorMessage: "x", answers: {} }, { hasUI: false });
-  expect(await headless.h.emit("tool_call", call("bash", { command: "npm test" }), headless.ctx)).toBeUndefined();
+  const event = call("bash", { command: "npm test" });
+  expect(await h.emit("tool_call", event, ctx)).toMatchObject({ block: true, reason: expect.stringContaining("ClassifierUnavailableError") });
+  expect(ctx.ui.selects).toHaveLength(0);
+  ctx.ui.selectAnswers.push("Allow once");
+  expect(await h.emit("tool_call", event, ctx)).toBeUndefined();
+  expect(ctx.ui.selects[0].options).toContain("Allow once");
+  expect(ctx.ui.selects[0].options.some((x: string) => /rule/iu.test(x))).toBe(false);
+  expect(JSON.stringify([ctx.ui.selects, h.entries])).not.toContain("private-provider-secret");
+  expect(jev.calls).toHaveLength(1);
 });
 
 test.each([
@@ -468,13 +467,78 @@ test.each([
   expect(jev.calls[0]?.state).toMatchObject({ tool_call: { arguments: command } });
 });
 
-test.each(["bash", "bg_run"])("%s remains fail-open headlessly when judgment is unavailable", async (tool) => {
+test.each(["bash", "bg_run"])("%s blocks headlessly when judgment is unavailable", async (tool) => {
   const { h, ctx, jev } = setup({ stopReason: "error", errorMessage: "unavailable", answers: {} }, { hasUI: false });
   await h.emit("before_agent_start", { prompt: "x" }, ctx);
-  expect(await h.emit("tool_call", call(tool, { command: "curl -o/tmp/out https://example.com", kind: "job" }), ctx)).toBeUndefined();
+  expect(await h.emit("tool_call", call(tool, { command: "curl -o/tmp/out https://example.com", kind: "job" }), ctx)).toMatchObject({ block: true });
+  expect(await h.emit("tool_call", call(tool, { command: "curl -o/tmp/out https://example.com", kind: "job" }), ctx)).toMatchObject({ block: true });
   expect(jev.calls).toHaveLength(1);
   expect(ctx.ui.selects).toHaveLength(0);
   expect(ctx.ui.notes).toHaveLength(0);
+});
+
+test.each([true, false])("malformed answers block initially and restrict retries (UI=%s)", async (hasUI) => {
+  const { h, ctx, jev } = setup({ ...safe, requested: { type: "bool", probability: NaN } }, { hasUI });
+  await h.emit("before_agent_start", { prompt: "x" }, ctx);
+  const event = call("bg_run", { command: "npm test", kind: "job" });
+  expect(await h.emit("tool_call", event, ctx)).toMatchObject({ block: true, reason: expect.stringContaining("ClassifierInvalidAnswerError") });
+  ctx.ui.selectAnswers.push("Allow once");
+  const retry = await h.emit("tool_call", event, ctx);
+  if (hasUI) expect(retry).toBeUndefined();
+  else expect(retry).toMatchObject({ block: true });
+  expect(jev.calls).toHaveLength(1);
+  expect(ctx.ui.selects).toHaveLength(hasUI ? 1 : 0);
+});
+
+test.each([
+  ["credentials", "ClassifierCredentialsError"],
+  ["model", "ClassifierModelUnavailableError"],
+  ["timeout", "ClassifierTimeoutError"],
+])("classifier %s failure is blocked with a sanitized class", async (failure, errorClass) => {
+  const { h, ctx, jev } = setup({ stopReason: "error", errorMessage: failure === "timeout" ? "timed out" : "No API key secret-value", answers: {} });
+  if (failure === "model") (jev.registry as any).findOfType = () => undefined;
+  expect(await h.emit("tool_call", call("bash", { command: "npm test" }), ctx)).toMatchObject({ block: true, reason: expect.stringContaining(errorClass!) });
+  expect(jev.calls).toHaveLength(failure === "timeout" ? 2 : failure === "model" ? 0 : 1);
+});
+
+test("codemode outer allowance does not authorize a nested failed call", async () => {
+  const { h, ctx } = setup({});
+  ctx.modelRegistry = undefined;
+  expect(await h.emit("tool_call", call("codemode", { code: "await tools.bash({command: 'npm test'})" }), ctx)).toBeUndefined();
+  expect(await h.emit("tool_call", call("bash", { command: "npm test" }), ctx)).toMatchObject({ block: true });
+  expect(await h.emit("tool_call", call("bash", { command: "git status" }), ctx)).toBeUndefined();
+});
+
+test("explicit asks bypass classification and explicit allows survive its absence", async () => {
+  const dir = path.join(configDir, "xdg", "agents");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, "tool-gate.json"), JSON.stringify({ permissions: { ask: ["Bash(npm publish)"], allow: ["Bash(npm test)"] } }));
+  const { h, ctx, jev } = setup({});
+  ctx.modelRegistry = undefined;
+  ctx.ui.selectAnswers.push("Allow once");
+  expect(await h.emit("tool_call", call("bash", { command: "npm publish" }), ctx)).toBeUndefined();
+  expect(await h.emit("tool_call", call("bash", { command: "npm test" }), ctx)).toBeUndefined();
+  expect(jev.calls).toHaveLength(0);
+  expect(ctx.ui.selects).toHaveLength(1);
+});
+
+test("judge context uses stored branch snapshots with later user withdrawal", () => {
+  const snapshot = { type: "custom_message", customType: "plan-mode-implementation", content: "Approved plan: publish the package", details: { planFile: "/never/read/this.md" } };
+  const input = { cwd: "/project", tool: "bash", args: "npm publish", rules: [] };
+  expect(judgeStateOf([snapshot], input)).toHaveProperty("approved_plan", snapshot.content);
+  const withdrawn = judgeStateOf([snapshot, userEntry("Do not publish after all")], input);
+  expect(withdrawn).toMatchObject({ user_requests: ["Do not publish after all"] });
+  expect(withdrawn).not.toHaveProperty("approved_plan");
+  expect(judgeStateOf([userEntry("Different branch")], input)).not.toHaveProperty("approved_plan");
+});
+
+test("classifier-failure retry approval resets on branch switches", async () => {
+  const { h, ctx } = setup({});
+  const event = call("bash", { command: "npm test" });
+  expect(await h.emit("tool_call", event, ctx)).toMatchObject({ block: true });
+  await h.emit("session_tree", {}, ctx);
+  expect(await h.emit("tool_call", event, ctx)).toMatchObject({ block: true });
+  expect(ctx.ui.selects).toHaveLength(0);
 });
 
 test("/gate off disables the gate for the session", async () => {
@@ -619,6 +683,13 @@ describe("downloaded code", () => {
     await h.commands.get("mode").handler("yolo", ctx);
     expect(await h.emit("tool_call", call("bash", { command: "bash vendor/setup.sh" }, "t3"), ctx)).toBeUndefined();
     expect(ctx.ui.selects).toHaveLength(2);
+  });
+
+  test("blockedBy recognizes classifier unavailability only in error results", () => {
+    const content = [{ type: "text", text: `${CLASSIFIER_UNAVAILABLE} (ClassifierTimeoutError)` }];
+    expect(blockedBy({ content, isError: true })).toBe("gate");
+    expect(blockedBy({ content, isError: false })).toBeUndefined();
+    expect(blockedBy({ content })).toBeUndefined();
   });
 
   test("blockedBy tells the user's blocks from the gate's own", () => {

@@ -11,6 +11,7 @@ import { runEval } from "../../../evals/shared/runner.ts";
 import type { Sample, SessionEntry } from "../../../evals/shared/sessions.ts";
 import type { EvalTarget } from "../../../evals/shared/target.ts";
 import { WORKAROUNDS } from "../src/judge.ts";
+import { CLASSIFIER_UNAVAILABLE } from "../src/index.ts";
 import { fakeJev, usage } from "./harness.ts";
 
 // A Jev that bills a tenth of a cent per call. A call is held when `holds(args)` says so.
@@ -26,7 +27,7 @@ const priced = (holds: (args: string) => boolean) =>
   fakeJev((questions, state) => {
     const answers = "workaround" in questions
       ? { workaround: { type: "choice", choice: "skip", probabilities: { skip: 0.9, ...Object.fromEntries(Object.keys(WORKAROUNDS).filter((k) => k !== "skip").map((k) => [k, 0.01])) }, confidence: 0.9 } }
-      : verdictAnswers(holds(String((state.tool_call as { arguments: string }).arguments)));
+      : { ...Object.fromEntries(Object.keys(questions).filter((id) => id.startsWith("rule::")).map((id) => [id, { type: "bool", probability: 0.01 }])), ...verdictAnswers(holds(String((state.tool_call as { arguments: string }).arguments))) };
     return { model: "jev-latest", stopReason: "stop" as const, answers, usage: { ...usage(300), cost: { ...usage(300).cost, total: 0.001 } } };
   });
 const failing = () => fakeJev(() => ({ model: "jev-latest", stopReason: "error" as const, answers: {}, errorMessage: "boom" }));
@@ -93,6 +94,23 @@ writeFileSync(path.join(dir, "deploy.sh"), "#!/bin/sh\necho deploying\n");
 const withScript: Sample = { seed: 7, sessions: [{ file: "/sessions/b.jsonl", cwd: dir, entries: [user("Deploy"), call("s1", "bash deploy.sh"), result("s1")] }] };
 
 describe("the sessions eval target", () => {
+  test("replay excludes classifier-stopped calls rather than labeling them allowed", () => {
+    const text = `${CLASSIFIER_UNAVAILABLE} (ClassifierUnavailableError)`;
+    const collected = collect([{
+      file: "/sessions/unavailable.jsonl", cwd: dir,
+      entries: [
+        user("Deploy"), call("failed", "pulumi up --yes"), result("failed", text, true),
+        call("ran", "pulumi up --yes"), result("ran", text, false),
+      ],
+    }]);
+    expect(collected.stopped.n).toBe(1);
+    expect(collected.walked).toEqual({ n: 1, allowed: 1, held: 0 });
+    expect(collected.toJudge).toEqual({ n: 1, allowed: 1, held: 0 });
+    expect(collected.judged).toHaveLength(1);
+    expect(collected.judged[0]?.label).toBe("allowed");
+    expect(countCalls(collected)).toBe(1);
+  });
+
   test("is registered as a replay of pi-tool-gate", () => {
     expect([sessions.id, sessions.package, sessions.kind]).toEqual(["sessions", "pi-tool-gate", "replay"]);
   });
