@@ -99,6 +99,8 @@ Every awaited reply is also outside work for [pi-bg](/plugins/pi-bg/): `bg_wait 
 
 ## Fork a tree point
 
+Fork names use the selected label or nearest ancestral user prompt (falling back to the session title or `conversation`), with numeric suffixes for collisions.
+
 Run `/tree-fork` in interactive Pi inside Herdr. First choose a point in Pi's native session-tree picker, with its usual search, folding and filters (label editing is disabled). Then **Open fork in Herdr?** offers **New tab** (default) or **Split beside this pane**. `/tree` is unchanged. The session must be saved and nonempty; cancelling either screen creates no file or pane.
 
 Every choice means **continue after this entry**: the fork includes the selected entry and its ancestry, including assistant replies and the current tip, without later descendants or sibling branches. Selecting a user message keeps it in history, not as an automatically resubmitted prompt.

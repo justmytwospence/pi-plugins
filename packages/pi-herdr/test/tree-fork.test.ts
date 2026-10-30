@@ -5,7 +5,7 @@ import { initTheme, SessionManager, TreeSelectorComponent, type ExtensionAPI, ty
 import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { FORK_BOUNDARY } from "../src/fork-session.ts";
-import { FORK_DESTINATIONS, FORK_TITLE, openForkPane, registerTreeFork } from "../src/tree-fork.ts";
+import { FORK_DESTINATIONS, FORK_TITLE, openForkPane, registerTreeFork, treeForkName } from "../src/tree-fork.ts";
 import { fakeCall } from "./core/fake.ts";
 import type { Call } from "../src/core/herdr.ts";
 
@@ -82,6 +82,71 @@ function fixture(handlers: Parameters<typeof fakeCall>[0] = {}) {
   return { dir, manager, question, tip, fake, ctx, ui, pi, deps, command, run, uniqueName, snapshot, assertUntouched, holds, assertReleased, stale: () => { generation++; } };
 }
 
+test("selected label takes priority over prompts and session title", () => {
+  const f = fixture();
+  f.manager.appendSessionInfo("Session title");
+  f.manager.appendLabelChange(f.tip, "\n/review\n  Fix: login retries!\nIgnored line");
+  expect(treeForkName(f.manager, f.tip)).toBe("fork-fix-login");
+});
+
+test("nearest textual user belongs to the selected ancestry, including a selected user or assistant tip", () => {
+  const f = fixture();
+  const selected = f.manager.appendMessage({ role: "user", content: [{ type: "text", text: "/command" }, { type: "text", text: "Repair cache eviction\nAnother line" }], timestamp: 3 });
+  f.manager.branch(f.question);
+  f.manager.appendMessage({ role: "user", content: "Unrelated sibling prompt", timestamp: 4 });
+  expect(treeForkName(f.manager, selected)).toBe("fork-repair-cache");
+  expect(treeForkName(f.manager, f.question)).toBe("fork-searchable-question");
+  expect(treeForkName(f.manager, f.tip)).toBe("fork-searchable-question");
+});
+
+test.each(["", " \n/command", [{ type: "image" as const, data: "AA==", mimeType: "image/png" }]])("skips empty or image-only user content %j and blank labels", (content) => {
+  const f = fixture();
+  const selected = f.manager.appendMessage({ role: "user", content, timestamp: 3 });
+  f.manager.appendLabelChange(selected, " \n ");
+  expect(treeForkName(f.manager, selected)).toBe("fork-searchable-question");
+});
+
+test.each([
+  { title: "Plan migrations!", expected: "fork-plan-migrations" },
+  { title: undefined, expected: "fork-conversation" },
+])("uses session title or generic fallback without user text: $expected", ({ title, expected }) => {
+  const f = fixture();
+  const manager = SessionManager.create("/checkout", f.dir);
+  const selected = manager.appendMessage({ role: "user", content: [], timestamp: 1 });
+  if (title) manager.appendSessionInfo(title);
+  expect(treeForkName(manager, selected)).toBe(expected);
+});
+
+test("punctuation, newlines and long labels produce bounded valid deterministic names", () => {
+  const f = fixture();
+  for (const label of ["123: fix!!!\nignored", "!!!", "Useful " + "longword".repeat(20), "x".repeat(100)]) {
+    f.manager.appendLabelChange(f.tip, label);
+    const name = treeForkName(f.manager, f.tip);
+    expect(name).toMatch(/^[a-z][a-z0-9_-]{0,23}$/u);
+    expect(name).toBe(treeForkName(f.manager, f.tip));
+    expect(name).not.toContain(f.tip);
+  }
+});
+
+test("generated name reaches the tab label and agent --name, snapshotted before awaits", async () => {
+  const f = fixture();
+  f.ui.select.mockImplementation(async () => {
+    f.manager.appendLabelChange(f.tip, "Later label");
+    f.manager.appendMessage({ role: "user", content: "Later active prompt", timestamp: 3 });
+    return FORK_DESTINATIONS[0];
+  });
+  f.uniqueName.mockImplementation(async (wanted) => {
+    f.manager.appendLabelChange(f.tip, "Even later label");
+    return wanted;
+  });
+  await f.run();
+  const name = "fork-searchable-question";
+  expect(f.uniqueName).toHaveBeenCalledWith(name);
+  expect(f.fake.of("tab.create")[0].params.label).toBe(name);
+  expect(f.fake.of("agent.start")[0].params).toMatchObject({ name, args: ["--name", name, "--model", "anthropic/current-model", "--thinking", "high", "--session", expect.any(String)] });
+  f.assertReleased();
+});
+
 test("registers only the independent tree-fork command and tolerates registration-less hosts", () => {
   const f = fixture();
   expect(f.pi.registerCommand).toHaveBeenCalledTimes(1);
@@ -141,7 +206,7 @@ test.each(FORK_DESTINATIONS)("opens %s at the inclusive current tip, idle, with 
   });
   await f.run("  ");
   expect(f.ui.select).toHaveBeenCalledWith(FORK_TITLE, ["New tab", "Split beside this pane"]);
-  expect(f.uniqueName).toHaveBeenCalledWith(`fork-${f.tip}`);
+  expect(f.uniqueName).toHaveBeenCalledWith("fork-searchable-question");
   const call = f.fake.of("agent.start")[0]; const file = call.params.args.at(-1) as string;
   expect(call.params).toEqual({ name: "available-fork", kind: "pi", pane_id: "new-pane", timeout_ms: 90_000, args: ["--name", "available-fork", "--model", "anthropic/current-model", "--thinking", "high", "--session", file] });
   expect(start).toHaveBeenCalledWith("agent.start", call.params, 95_000);
@@ -327,7 +392,7 @@ test.each([46, 120])("native picker at %i columns starts focused at tip, searche
     expect(picker.getTreeList().getSelectedNode()?.entry.id).toBe(f.question); expect(render()).toContain("Searchable");
     picker.handleInput("\r");
   }));
-  await f.run(); expect(f.ui.notify.mock.calls.filter(([, level]) => level === "error")).toEqual([]); expect(f.uniqueName).toHaveBeenCalledWith(`fork-${f.question}`); f.assertReleased(); f.assertUntouched();
+  await f.run(); expect(f.ui.notify.mock.calls.filter(([, level]) => level === "error")).toEqual([]); expect(f.uniqueName).toHaveBeenCalledWith("fork-searchable-question"); f.assertReleased(); f.assertUntouched();
 });
 
 test.each([46, 120])("native picker at %i columns clears search before escape cancels; snapshot is deep-cloned", async (width) => {

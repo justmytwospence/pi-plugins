@@ -139,6 +139,8 @@ Tabs and splits share files and are not isolated parallel editors. A separate fe
 
 ## Fork a tree point
 
+Fork names use the selected label or nearest ancestral user prompt (falling back to the session title or `conversation`), with numeric suffixes for collisions.
+
 `/tree-fork` opens Pi's native session-tree picker, then asks **Open fork in Herdr?**: **New tab** (default) or **Split beside this pane**. `/tree` keeps its usual behavior. The picker supports native search, folding and filters, but not label editing. A saved, nonempty session is required; cancelling either step creates no file or pane.
 
 The fork includes the selected entry and its ancestry, including assistant replies or the current tip: every selection means **continue after this entry**. A selected user message stays in the history and is not resubmitted. The new session inherits the current model and thinking level and normal conversation/extension context, but starts idle with an empty editor, no prompt and no model call. It is independent, not a child or subagent: it does not automatically report back or inherit ownership of the original session's children.

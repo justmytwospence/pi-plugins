@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
-import { TreeSelectorComponent, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { TreeSelectorComponent, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { type Call, errorText, splitDirection } from "./core/herdr.ts";
+import { slugName } from "./core/children.ts";
+import { titleFromPrompt } from "./core/text.ts";
 import { createTreeFork } from "./fork-session.ts";
 import { PI_CHILD } from "./session.ts";
 
@@ -87,6 +89,21 @@ export async function openForkPane(opts: PaneOptions): Promise<string> {
   }
 }
 
+/** Resolve only the selected ancestry, never the active leaf or a sibling branch. */
+export function treeForkName(manager: ExtensionCommandContext["sessionManager"], entryId: string): string {
+  let description = titleFromPrompt(manager.getLabel(entryId));
+  if (!description) {
+    for (const entry of manager.getBranch(entryId).slice().reverse()) {
+      if (entry.type !== "message" || entry.message.role !== "user") continue;
+      const content = entry.message.content;
+      const text = typeof content === "string" ? content : content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
+      description = titleFromPrompt(text);
+      if (description) break;
+    }
+  }
+  return slugName(`fork ${description ?? titleFromPrompt(manager.getSessionName()) ?? "conversation"}`);
+}
+
 export function registerTreeFork(pi: ExtensionAPI, deps: ForkDependencies): void {
   if (typeof pi.registerCommand !== "function") return;
   let running = false;
@@ -116,6 +133,7 @@ export function registerTreeFork(pi: ExtensionAPI, deps: ForkDependencies): void
         const hold = `tree-fork:${randomUUID()}`;
         let entryId: string | undefined;
         let destination: string | undefined;
+        let wantedName: string | undefined;
         pi.events.emit("herdr:blocked", { active: true, id: hold, label: "Fork session tree" });
         try {
           entryId = await ctx.ui.custom<string | undefined>((tui, _theme, _kb, done) => {
@@ -125,13 +143,14 @@ export function registerTreeFork(pi: ExtensionAPI, deps: ForkDependencies): void
           });
           assert();
           if (entryId === undefined) return;
+          wantedName = treeForkName(manager, entryId);
           destination = await ctx.ui.select(FORK_TITLE, FORK_DESTINATIONS);
           assert();
         } finally {
           pi.events.emit("herdr:blocked", { active: false, id: hold });
         }
-        if (!destination || entryId === undefined) return;
-        const name = await deps.uniqueName(`fork-${entryId}`);
+        if (!destination || entryId === undefined || wantedName === undefined) return;
+        const name = await deps.uniqueName(wantedName);
         assert();
         const forkFile = createTreeFork(file, sessionDir, cwd, entryId);
         const paneId = await openForkPane({ call: deps.call, selfPane: deps.selfPane, isCurrent: current, where: destination === FORK_DESTINATIONS[0] ? "tab" : "split", cwd, name, file: forkFile, model, thinking });
