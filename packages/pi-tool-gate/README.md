@@ -79,7 +79,7 @@ Edits, writes, other shell commands, and MCP or extension tools without a read-o
 - its impact if unwanted is 2.5 or more of 3 (lost data, leaked secrets, broken production);
 - or it is clearly unrelated to your request (in scope < 0.1) and its impact is 2 or more.
 
-Whatever you said, a call is held when it would send secrets or private data somewhere they are not for (>= 0.8; using an API key with its own API is normal use) or break a project rule (>= 0.7). Doubt about scope alone never holds a call. Jev sees your last five messages, the agent message your newest one replies to (so "yes" to "Want me to push?" counts as asking for the push), the agent's recent text, the working directory, the git branch and whether it is dirty, the call, and the project rules. If Jev's answer is incomplete the call is allowed. The design follows Claude Code's auto mode (allow by default; your request clears most holds).
+Whatever you said, a call is held when it would send secrets or private data somewhere they are not for (>= 0.8; using an API key with its own API is normal use) or break a project rule (>= 0.7). Doubt about scope alone never holds a call. Jev sees your last five messages, the agent message your newest one replies to (so "yes" to "Want me to push?" counts as asking for the push), the agent's recent text, the working directory, the git branch and whether it is dirty, the call, and the project rules. An incomplete or invalid verdict blocks the call. The design follows Claude Code's auto mode in allowing valid low-risk judgments by default, but is not complete Claude Code parity. An eligible approved-plan snapshot may also be sent as context, as described under [optional integrations](#optional-integrations).
 
 A shell call that runs a local script (`./deploy.sh`, `bash x.sh`, `python3 x.py`, the same forms as [downloaded code](#downloaded-code)) is judged by what the script does: the first such file that is a regular file of at most 64 KB, with no NUL byte in its first 8 KB and not downloaded in this session, goes to Jev as `script: { path, content }` (the path with `~`, the content clipped to 6,000 characters). Every question then tells Jev to judge the call by the script's content, read as code to evaluate and never as instructions to follow. The `tool-gate:decision` entry records the script's path.
 
@@ -93,7 +93,7 @@ Dialogs are shown one at a time. In Pi's terminal UI the dialog shows the call i
 
 ### Jev unavailable
 
-When Jev cannot answer (Jev off in settings, no classifier model, no credentials, an invalid key, a timeout or another error), the gate warns once and falls back to Pi's tool hints: with a UI it asks you about calls whose tool declares `destructiveHint: true`, or that lack `readOnlyHint` and do not declare both `destructiveHint: false` and `openWorldHint: false` (so tools with no hints are asked about); everything else is allowed. Without a UI every such call is allowed. The always-held rules still apply.
+When Jev cannot produce a complete valid verdict (including when disabled, missing credentials or a model, or after a timeout or error), a call routed to classification is blocked and does not run. An identical retry may offer Allow once in the UI, but no persistent rule is suggested solely because classification failed; headless retries remain blocked. Deterministically read-only and explicitly allowed calls still run, subject to other checks.
 
 ## Permission rules
 
@@ -113,7 +113,7 @@ A deny rule applies in every mode, yolo and chat mode included. An allow rule ne
 | --- | --- |
 | `Bash(git push:*)` or `Bash(git push *)` | The command `git push` with any arguments: `git push`, `git push origin main`, not `git pushx`. A prefix of whole words. |
 | `Bash(git log * main)`, `Bash(*vercel*--prod*)`, `Bash(ls*)` | A `*` anywhere else matches any text, spaces included, as in Claude Code: `git log --oneline main`, not `git log main`; `vercel deploy --yes --prod` and `npx vercel --prod`; `ls` and `lsof`. Matched against the command's words joined by single spaces. One simple command per rule. |
-| `Bash(npm test)` | Exactly that command: `npm test`, not `npm test -- --watch`. Compared as words, so quoting and spacing do not matter; a command with `$` or a backtick must match as written. |
+| `Bash(npm test)` | Exactly that command: `npm test`, not `npm test -- --watch`. Identical trimmed source matches; quoting and spacing normalize only when both sides are proven literal argument lists. Expansions, redirects, comments, compounds and incomplete quoting require source-aware matching. |
 | `Bash` or `Bash(*)` | Every shell command. |
 | `Edit(src/**)`, `Write(...)`, `Read(...)` | A file path, as in `.gitignore`: relative to the project (the git checkout of the working directory) or `~/` or absolute. See [paths](#paths). |
 | `web_fetch`, `mcp__server`, `mcp__server__*` | A tool by name. `mcp__server` covers every tool of that server; `*` in a name is a wildcard. |
@@ -128,6 +128,7 @@ The call is split into its simple commands (at `;`, `&&`, `||`, `|`, `&` and new
 - **Allow** must cover every command that does more than read. `Bash(git push:*)` allows `cd sub && git push origin x; ls`, not `git push && rm -rf x`. Read-only commands (`ls`, `cat`, `cd`, `echo`, `git status`, ...) need no rule, unless they redirect output to a file. Text run by `sh -c` is not covered by a rule for what is inside it: the `bash -c '...'` command itself must be allowed (the dialog offers its exact text). A call held only for a substitution or a redirect, whose commands all read, needs a rule for each of them (or the exact text).
 - **What a command is called** includes the program as typed (`bin/homelab`; `./bin/homelab` is the same, `./git` is not `git`), the program past assignments and wrappers (`time npm test` is `npm test`), and for a prefix rule the program and subcommand it names (`git -C ../x push` is `git push`, `docker compose -f a.yml up` is `docker compose up`). An allow rule does not look past an assignment or wrapper option that changes what runs (`PATH=... git push`, `git -c ...`, `env -S`), or a program named by a path of its own.
 - **A wildcard pattern** (`Bash(git log * main)`) matches the command as typed, past assignments and wrappers, or (deny and ask) as `sudo` runs it; it is not matched against the program-and-subcommand key, so `git -C x log -1 main` needs a pattern that allows for the option. An allow pattern never matches a command with `$` or a backtick.
+- **Opaque shell analysis** never gains a read-only or narrowed-prefix auto-allow. Deny and ask inspect confidently found commands; the unresolved remainder follows the normal approval or classification path.
 - **A command this cannot read as a program with arguments** (a program named by a substitution or variable, `export A=1`, `set -e`) is opened only by a rule naming the whole call.
 - **Always-held calls** (`sudo`, a force-push to main, a download piped to a shell, credential files, downloaded code) are never opened by a prefix rule, a bare tool rule or a wildcard path: only an exact rule does, `Bash(git push --force origin main)` for the whole command, `Edit(.env)` or `Read(.env)` for a credential file without wildcards. Downloaded code stays allow-once only, whatever the rule. Deny rules apply to all of them.
 
@@ -148,12 +149,12 @@ All scopes are added together; no scope overrides another's deny or ask.
 | Scope | Stored in | Changed by |
 | --- | --- | --- |
 | session | memory, never saved | the dialog, `/gate rules` |
-| project (this machine) | `~/.pi/agent/tool-gate/project-grants.json` (under `PI_CODING_AGENT_DIR`), keyed by the project's main checkout so its worktrees share it | the dialog, `/gate rules` |
-| project (shared) | `<project>/.agents/tool-gate.json` and `<project>/.pi/tool-gate.json`, `permissions` | you; read-only for `/gate rules` |
-| user | `~/.pi/agent/tool-gate.json` (`PI_CODING_AGENT_DIR` honored), `permissions` | the dialog, `/gate rules` |
+| project (local) | `<main>/.pi/tool-gate.local.json` | the dialog, `/gate rules` when configured for local saves |
+| project (shared) | `<active-root>/.agents/tool-gate.json` and `<active-root>/.pi/tool-gate.json`, `permissions` | you; dialog and `/gate rules` write `.pi/tool-gate.json` when configured for shared saves |
+| user | `~/.pi/agent/tool-gate.json` (`PI_CODING_AGENT_DIR` honored), `permissions` | the dialog, `/gate rules`, unless globals are managed |
 | user (shared) | `$XDG_CONFIG_HOME/agents/tool-gate.json` (default `~/.config/agents/`), `permissions` | you; read-only for `/gate rules` (it may be managed by another tool) |
 
-The machine-local project scope stays outside the repository because its rules and folder grants hold this machine's absolute paths. The files take Claude Code's `permissions` block:
+The active Git checkout root determines shared files even when launched in a subdirectory; linked worktrees use their own shared files and the main checkout's local file. Nested repositories are separate projects; outside Git the launch directory is used. Unresolvable main-checkout metadata blocks policy-requiring calls rather than guessing. The files take a Claude Code-style `permissions` block:
 
 ```json
 {
@@ -165,7 +166,7 @@ The machine-local project scope stays outside the repository because its rules a
 }
 ```
 
-The lists of all four files are added together (unlike the rest of `tool-gate.json`, where arrays replace). The `agents` files are read by the opencode and Claude Code ports of this plugin too, which ignore keys they do not know, and this package ignores the other keys Claude Code puts in a `permissions` block. Rules are re-read before each call.
+The permission lists from all files are added together; `directories.read` and `directories.write` are also additive and deduplicated, while other arrays replace. The `agents` files are read by the opencode and Claude Code ports of this plugin too, which ignore keys they do not know, and this package ignores the other keys Claude Code puts in a `permissions` block. Rules are re-read before each call.
 
 ### The approval dialog
 
@@ -184,7 +185,7 @@ Rule: Bash(git push:*)
   Block with a message
 ```
 
-- **This session**, **in this project** and **everywhere** add the rule to the `allow` list of the session, the machine-local project scope or your user file. If it cannot be saved (a user file that is not valid JSON), the call is allowed for the session and a warning says so.
+- **This session**, **in this project** and **everywhere** add the rule to the `allow` list of the session, configured project file or your user file. Managed globals hide the everywhere choice. If a save fails after approval, the call is allowed for this session only and a warning says so; an already malformed policy blocks permission-requiring calls before approval.
 - **Edit the rule...** opens the rule on a `›` line (one per line when there are several), checks it, and comes back to the dialog with the edited rule. A rule that is not one is refused with the reason and offered again as typed; Esc keeps the rule.
 - **The suggested rule** is today's key of the call as a prefix: program and subcommand when it takes one (`git push`, `docker compose up`, `gh repo create`, `bin/homelab status`), skipping `cd`, `echo`, loop headers and here-document text. For a call with several keys there is one rule each, all shown. A script runner names its script (`python3 scripts/x.py:*`, `node server.js:*`). `edit` and `write` offer their folder (`Edit(src/a/**)`; a file directly in the project, `Edit(./package.json)`), other tools their name (`web_fetch`, `mcp__server__tool`).
 - **No rule** is offered for a command containing `*`, which a rule would read as a wildcard.
@@ -196,7 +197,7 @@ Without Pi's terminal UI the same rows are a plain select, and Edit opens Pi's e
 
 ### `/gate rules`
 
-`/gate rules` prints every rule grouped by list and scope with the file it comes from (and the folder grants, and any rule it could not read), then a picker: pick a rule to remove it (session, this machine's project and your own user file; a rule from a shared file says which file to edit), or **Add a rule...** to choose the list, the scope and the rule. Arguments work too:
+`/gate rules` prints every rule grouped by list and scope with the file it comes from (and the folder grants, and any rule it could not read), then a picker: pick a rule to remove it (session, the writable project destination and, unless managed, your own user file; other files are named for manual editing), or **Add a rule...** to choose the list, the scope and the rule. Arguments work too:
 
 ```text
 /gate rules list
@@ -205,11 +206,11 @@ Without Pi's terminal UI the same rows are a plain select, and Edit opens Pi's e
 /gate rules remove allow Bash(git push:*) [--scope session|project|user]
 ```
 
-`--scope` is `session`, `project` (this machine's) or `user`; the default is `project`. `/gate grants` is the same command.
+`--scope` is `session`, `project` (the configured local or shared destination) or `user`; the default is `project`. With managed globals, user edits are refused: edit and deploy their source instead. `/gate grants` is the same command.
 
 ### Older saved grants
 
-The project grants saved before rules existed are read as rules, in the machine-local project scope, with no rewrite until you change one: `bash:<key>` is `Bash(<key>:*)`, `tool:<x>` is `<x>`, `edit:<dir>` and `write:<dir>` are `Edit(<dir>/**)` and `Write(<dir>/**)`, an `unparsed shell:` key is the exact command, and `dir:` keys stay folder grants. A grant for reads with substitutions or redirects has no rule that says it and is no longer used. New rules are saved in the same file as entries with a key such as `allow:Bash(git push:*)`, which an older version lists as a grant and ignores. Rules match a program as typed, so a grant for a script run by its path (`bin/homelab status`, saved as `homelab status`) no longer covers `bin/homelab status`; allow it again.
+The project grants saved before rules existed are read as rules, in the machine-local project scope, with no rewrite until you change one: `bash:<key>` is `Bash(<key>:*)`, `tool:<x>` is `<x>`, `edit:<dir>` and `write:<dir>` are `Edit(<dir>/**)` and `Write(<dir>/**)`, an `unparsed shell:` key is the exact command, and `dir:` keys stay folder grants. A grant for reads with substitutions or redirects has no rule that says it and is no longer used. New project rules and folder grants are saved in the configured project policy file; legacy grants remain readable and removable. Rules match a program as typed, so a grant for a script run by its path (`bin/homelab status`, saved as `homelab status`) no longer covers `bin/homelab status`; allow it again.
 
 ### Compared with Claude Code
 
@@ -222,7 +223,7 @@ Different:
 - `Edit` and `Write` allow rules cover their own tool (Claude Code's `Edit` covers every file-writing tool); deny and ask rules cover both.
 - Path rules apply to Pi's file tools, not to the paths in shell commands.
 - A prefix rule also matches through global options and wrappers (`git -C x push`, `time git push`) and sees through `sudo`, `sh -c`, `eval` and substitutions for deny and ask. Allow rules never open the calls the gate always holds, except an exact rule, and never downloaded code.
-- The scopes are session, this machine's project, the project's shared files and your user files (in Claude Code, user, project, local and managed). Ask rules do not apply in yolo mode (deny rules do).
+- The scopes are session, local and shared project files and user files; managed global writes are a separate setting, not Claude's managed organization scope. Ask rules do not apply in yolo mode (deny rules do).
 - Modes, the judge and the directory policy are this plugin's own; `permissions.defaultMode` and `additionalDirectories` are not read (`directories` is the folder policy).
 
 ## Directories
@@ -245,7 +246,7 @@ Pi has no directory boundary of its own, so the gate keeps one. In auto, manual 
 }
 ```
 
-Put a project's grants in its `.agents/tool-gate.json`, which the opencode and Claude Code ports read too:
+Put shared project grants in its `.pi/tool-gate.json` (the legacy `.agents/tool-gate.json` is also read):
 
 ```json
 { "directories": { "read": ["*"], "write": ["~/Projects/dotfiles"] } }
@@ -290,14 +291,15 @@ They are read in that order, duplicates dropped, at most 30. Files are re-read w
 
 ## Configuration
 
-`tool-gate.json` is read from these files, each merged on top of the last (objects merge, other values, including arrays, replace); a missing or invalid file is ignored:
+`tool-gate.json` is read from these files, each merged on top of the last. Missing files are normal; malformed policy blocks permission-requiring calls, with a narrow diagnostic read of the errored file subject to deny and credential checks:
 
 1. `$XDG_CONFIG_HOME/agents/tool-gate.json` (default `~/.config/agents/`)
 2. `~/.pi/agent/tool-gate.json` (`$PI_CODING_AGENT_DIR` honored)
 3. `<project>/.agents/tool-gate.json`
 4. `<project>/.pi/tool-gate.json`
+5. `<main>/.pi/tool-gate.local.json`
 
-The `agents` locations are shared with the opencode and Claude Code ports of this plugin; keys a port does not know are ignored. The `permissions` block (`allow`, `ask`, `deny`; see [permission rules](#permission-rules)) is the exception to the merge rule: the lists of every file are added together. Settings are reloaded at session start and before each agent run. The defaults:
+The `agents` locations are shared with the opencode and Claude Code ports of this plugin; keys a port does not know are ignored. The `permissions` lists and `directories.read`/`directories.write` are additive; other arrays replace. Empty directory lists do not revoke inherited grants. Settings are reloaded at session start and before each agent run. The defaults:
 
 ```json
 {
@@ -314,6 +316,7 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
   ],
   "readOnlyCommands": [],
   "pushBack": true,
+  "persistence": { "project": "local", "userWritable": true },
   "defaultWorkflow": "work",
   "defaultApproval": "auto",
   "workflowShortcut": "shift+tab",
@@ -334,36 +337,38 @@ The `agents` locations are shared with the opencode and Claude Code ports of thi
 - `defaultWorkflow` and `defaultApproval`: new-session defaults for each axis. Legacy `defaultMode` supplies fallback values where a new default is not set; restrictive legacy manual and accept-edits values are preserved.
 - `modes` is deprecated and no longer controls either cycle. `cycleShortcut` is a legacy fallback when `workflowShortcut` is not a string.
 - `workflowShortcut` and `approvalShortcut`: keys read at startup; `""` disables each. Reload after changing them. A duplicate key registers workflow only and reports the collision.
-- `jev`: the classifier model (`provider`/`model`, looked up among Pi's classifier models) and its timeout; `enabled: false` uses the hint fallback.
+- `jev`: the classifier model (`provider`/`model`, looked up among Pi's classifier models) and its timeout; `enabled: false` blocks calls requiring classification.
+- `persistence.project`: `local` (default) saves to the main checkout's `.pi/tool-gate.local.json`; `shared` saves to the active root's `.pi/tool-gate.json`. Saves are not committed automatically. `persistence.userWritable: false` manages global rules: the global save choice is hidden and user-scope edits are refused. Project files cannot override this user setting.
 - `thresholds`: the bars described above.
 - `allowTools`: tools that never need a decision. Setting it replaces the whole default list.
 - `readOnlyCommands`: extra programs treated as read-only in shell commands.
 - `pushBack`: `false` asks you on the first hold instead of blocking it once.
-- `directories`: the [directory policy](#directories). Its lists replace the defaults, so to add a private root, repeat the default ones.
+- `directories`: the [directory policy](#directories). Read and write grants are additive; other lists replace defaults, so to add a private root, repeat the default ones.
 
 ## Requirements and costs
 
-- Jev runs through Pi's classifier models (`ctx.modelRegistry.classify`), which needs Pi 0.99 or newer, and Pi's credentials for the provider (`TYPESAFE_API_KEY` for the default `typesafe` provider). Without them the hint fallback applies.
+- Jev runs through Pi's classifier models (`ctx.modelRegistry.classify`), which needs Pi 0.99 or newer, and Pi's credentials for the provider (`TYPESAFE_API_KEY` for the default `typesafe` provider). Without them calls requiring classification are blocked.
 - Each gray-zone call makes one Jev request; each held call makes one more for the workaround (also for always-held calls). These requests can be billed by the provider.
-- It runs `git branch --show-current`, `git status --porcelain`, `git check-ignore` and `git rev-parse --show-toplevel --git-common-dir` in the working directory, reads the target file of an edit or write to show a diff, and reads a local script a judged shell call runs (up to 64 KB) to send its content to Jev. It writes nothing to disk except `tool-gate:decision` entries in the Pi session.
+- It runs `git branch --show-current`, `git status --porcelain`, `git check-ignore` and `git rev-parse --show-toplevel --git-common-dir` in the working directory, reads the target file of an edit or write to show a diff, and reads a local script a judged shell call runs (up to 64 KB) to send its content to Jev. It also writes `tool-gate:decision` entries in the Pi session and saves rules or folder grants when selected.
 
 ## Optional integrations
 
 - **Herdr**: while an approval dialog is open, the gate emits `herdr:blocked` on Pi's event bus (`{ active: true, label: "Allow? bash: ..." }`, then `{ active: false }` when it closes), so Herdr's Pi integration shows the pane as blocked. Outside Herdr nothing listens.
 - **pi-bg**: `bg_run` is judged like `bash`, in its own `cwd`; the read-only `bg_*` tools are on the default allow list.
 - **pi-subagents**: a subagent's approval dialogs reach you through pi-subagents' dialog forwarding.
-- **pi-plan-mode**: provides plan mode in the cycle (above).
+- **pi-plan-mode**: provides plan mode in the cycle (above). The classifier may receive the active branch's stored approved-plan snapshot (up to 12,000 characters), not the mutable plan file. The next user message expires that snapshot; a new approval can establish another. It is context subordinate to current instructions and permission rules, not blanket permission.
 - **pi-status-footer**: shows workflow as a bold `WORK`, `CHAT`, `PLAN` or `EXEC` landmark, separate from Approvals and the gate tally. Badge hues depend on the theme; explanations and key hints stay subdued. During a blocked dialog the compact row retains the badge when available, subject to terminal width.
 
 ## Limitations
 
 - It is not a sandbox. It inspects tool names and arguments before a call; it does not confine what a command does once it runs. The read-only command rules are a parser's best effort over shell syntax, and Jev's judgment is probabilistic.
 - Tools in `allowTools` are never inspected. `codemode` is on the default list because the tools its scripts call are expected to be gated on their own; if they are not in your setup, remove it.
-- When Jev is unavailable and there is no UI, every call except the always-held ones is allowed.
+- Classifier failure blocks calls routed to classification, but bypasses and explicit rules still apply; this is not an OS security boundary.
 - Downloaded code is found by the forms above. Files whose names the command does not give (`gh release download` without `-O`, `-D` or `-p`, `curl -J`), files unpacked from a downloaded archive, downloads by other programs or tools, and a downloaded program run by bare name from `PATH` are not tracked.
 - A script's content is read when the call is judged; a script that changes it while it runs is not seen.
-- Session rules and folder grants are held in memory; this machine's project rules are saved outside the repository. The mode is saved in the session.
-- Permission rules match by words, not by what a program does: `Bash(rm -rf:*)` does not deny `rm -fr x` or `rm -r -f x`, and a rule for a script's name does not follow what the script runs. Path rules cover Pi's file tools, not the paths a shell command names. Treat deny rules as guardrails, not as a sandbox.
+- Session rules and folder grants are held in memory; project saves go to the configured local or shared project file. The mode is saved in the session.
+- Production string rules can catch identifiable commands and flags (for example blog production deploys, Git pushes and PR merges), but cannot enforce arbitrary scripts or API semantics. Preview commands may remain allowed; yolo bypasses ask rules. Use platform access controls as well.
+- Permission rules match command syntax, not what a program does: `Bash(rm -rf:*)` does not deny `rm -fr x` or `rm -r -f x`, and a rule for a script's name does not follow what the script runs. Path rules cover Pi's file tools, not the paths a shell command names. Treat deny rules as guardrails, not as a sandbox.
 
 ## Development
 
