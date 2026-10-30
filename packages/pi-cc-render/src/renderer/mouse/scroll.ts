@@ -160,8 +160,8 @@ function isSpacer(value: any): boolean {
 
 /**
  * Pi keeps a blank row between the transcript and the editor (a Spacer at the top of the above-editor
- * widget area). It sits outside the scrolling area, so cards cannot paint it and it shows as a gap under
- * them. Zero it, including the one Pi adds each time it rebuilds that area.
+ * widget area). Keep it for the prompt, but drop it while a dialog replaces the prompt: it sits outside
+ * the scrolling area, so a card cannot paint it and it shows as a gap between the card and the dialog.
  */
 export function hideDockSpacer(tui: any): void {
 	if (!tui) return;
@@ -169,13 +169,18 @@ export function hideDockSpacer(tui: any): void {
 		walkComponentTree(tui, (node: any) => {
 			if (node.layoutType !== "vstack" || !Array.isArray(node.entries) || node.entries.length < 6) return;
 			const above = node.entries[2]?.component;
+			const editor = node.entries[3]?.component;
 			if (!above || !Array.isArray(above.children) || typeof above.addChild !== "function") return;
-			for (const child of above.children) if (isSpacer(child)) child.setLines(0);
+			const wanted = () => {
+				const first = editor?.children?.[0];
+				return first && typeof first.getText !== "function" ? 0 : 1;
+			};
+			for (const child of above.children) if (isSpacer(child)) child.setLines(wanted());
 			if (above[DOCK_SPACER_KEY]) return false;
 			above[DOCK_SPACER_KEY] = true;
 			const addChild = above.addChild.bind(above);
 			above.addChild = (child: any, ...rest: any[]) => {
-				if (isSpacer(child)) child.setLines(0);
+				if (isSpacer(child)) child.setLines(wanted());
 				return addChild(child, ...rest);
 			};
 			return false;
