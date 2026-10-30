@@ -39,7 +39,9 @@ test('seed matching a remapped cancel action stays literal with the cursor at th
   try {
     const f = fixture(['other', 'qa', 'aq'], 'q', config);
     f.picker.focused = true;
-    assert.ok(f.picker.render(46).some((line) => line.includes(`search: q${CURSOR_MARKER}`)));
+    assert.ok(f.picker.render(46).some((line) => line.includes('search: q')));
+    assert.equal(f.picker.render(46).filter(line => line.includes(CURSOR_MARKER)).length, 1,
+      'one native dock anchor; subsequent typing verifies the filter cursor stays at the end');
     assert.deepEqual(f.results, []);
     f.send('a', 'enter');
     assert.deepEqual(f.results, ['qa']);
@@ -108,6 +110,8 @@ test('height-aware windows keep selection visible through navigation, resize and
     for (let i = 0; i < 35; i++) {
       const lines = f.picker.render(46, height);
       assert.ok(lines.length <= height, `height ${height}`);
+      assert.ok(lines.every(line => line.trim().length > 0), 'no blank viewport padding');
+      if (height >= 6) assert.ok(lines.includes('↑↓ move · Enter restore · Esc cancel'));
       if (height > 0) assert.equal(lines.filter(line => line.startsWith('› ')).length, 1);
       f.send('down');
     }

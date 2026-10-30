@@ -20,7 +20,7 @@ import path from 'node:path';
 import { createJiti } from 'jiti';
 import { initTheme } from '@earendil-works/pi-coding-agent';
 import { stripVTControlCharacters } from 'node:util';
-import { setKeybindings } from '@earendil-works/pi-tui';
+import { Container, Spacer, setKeybindings } from '@earendil-works/pi-tui';
 const { TuiBase } = await import(new URL('./tui.js', import.meta.resolve('@earendil-works/pi-tui')));
 
 const sdkUrl = import.meta.resolve('@earendil-works/pi-coding-agent');
@@ -32,6 +32,11 @@ const { QuestionDialog } = await jiti.import('../packages/pi-ask-user-question/s
 const { askApproval } = await jiti.import('../packages/pi-tool-gate/src/prompt.ts');
 const { default: toolGate, ALLOW_ONCE, BLOCK, choiceLabels } = await jiti.import('../packages/pi-tool-gate/src/index.ts');
 const { CustomEditor } = await import(new URL('./modes/interactive/components/custom-editor.js', sdkUrl));
+const { createChatViewport } = await import(new URL('./modes/interactive/chat-viewport.js', sdkUrl));
+const { renderLayoutFrame } = await import(new URL('./layout.js', import.meta.resolve('@earendil-works/pi-tui')));
+const { SidebarPanel } = await jiti.import('../packages/pi-sidebar/src/panel.ts');
+const { SplitRoot, dividerLines } = await jiti.import('../packages/pi-sidebar/src/layout.ts');
+const { DEFAULT_MIN_COLUMNS, DEFAULT_RATIO } = await jiti.import('../packages/pi-sidebar/src/config.ts');
 const { sidebarScreen } = await import('./remote-clients/sidebar.mjs');
 const { TerminalPanel } = await jiti.import('../packages/pi-interactive-shell/src/panel.ts');
 const { HistoryPicker } = await jiti.import('../packages/pi-history-search/src/picker.ts');
@@ -507,18 +512,22 @@ const FOOTERS = [
   { name: 'standalone exec', statuses: modeStatuses(undefined, undefined, 'review 2') },
   { name: 'approval provider only', statuses: modeStatuses(undefined, 'auto') },
   { name: 'no mode providers', statuses: new Map() },
-  // Eight notebook status slots plus the five core rows reach the deployed 13-row allowance,
-  // rather than merely comparing equally unreadable Sidebar baselines.
+  // Notebook status slots plus the five core rows reach the deployed 13-row allowance
+  // (including any activity pill/separator), rather than comparing unreadable baselines.
   { name: 'high status count', statuses: modeStatuses('plan', 'yolo'), highStatus: true },
 ];
-function idleFooter(width, fixture) {
+function idleFooter(width, fixture, activityRows = 0) {
   if (!fixture.highStatus) return statusFooter(width, fixture.statuses);
   const statuses = new Map(fixture.statuses);
-  for (let i = 1; i <= 8; i++) statuses.set(i === 1 ? 'marimo' : `marimo-${i}`, `marimo: analysis-${i}.py · disconnected`);
+  // frames.toml's status_rows bounds the whole region below the editor, including
+  // pi-bg's pill and separator, not just renderFooter's output. status_blank_rows
+  // permits that separator within the region; it does not extend the row budget.
+  const notebooks = 8 - activityRows;
+  for (let i = 1; i <= notebooks; i++) statuses.set(i === 1 ? 'marimo' : `marimo-${i}`, `marimo: analysis-${i}.py · disconnected`);
   const absorbed = absorbStatuses(statuses, { claudeRow: false });
-  assert.equal(absorbed.marimo.length, 8);
+  assert.equal(absorbed.marimo.length, notebooks);
   const lines = statusFooter(width, statuses);
-  assert.equal(lines.length, 13, 'high-status idle fixture must exercise the full footer allowance');
+  assert.equal(lines.length + activityRows, 13, 'high-status idle fixture must exercise the full combined status-row allowance');
   return lines;
 }
 const IDLE = [['without Sidebar', { open: false }], ['Sidebar open, main focused', { focused: false }], ['Sidebar open, Sidebar focused', { focused: true }]];
@@ -595,53 +604,159 @@ for (const width of [46, 120]) {
   await panel.shutdown();
 }
 
-// Exercise the real extension overlay, not just a picker replacing the editor dock.
-// A short centered overlay can otherwise leave a live editor frame/composer exposed below it.
-async function historyOverlayScreen(width, variant, base) {
-  const overlayTui = new TuiBase({ rows: HEIGHT, columns: width, hideCursor() {} });
-  overlayTui.requestRender = () => {};
-  const main = new CustomEditor(overlayTui, themeModule.getEditorTheme(), kb);
-  main.setText('Review');
-  overlayTui.setFocus(main);
+// Ordinary ctx.ui.custom replaces only editorContainer, as showExtensionCustom does.
+// Transcript, footer/activity and Sidebar remain in the real layout outside that dock.
+async function historyDockScreens(width, variant, rows, sidebar) {
+  const dockTui = new TuiBase({ rows: HEIGHT, columns: width, hideCursor() {} });
+  dockTui.requestRender = () => {};
+  const main = new CustomEditor(dockTui, themeModule.getEditorTheme(), kb);
+  main.setText('next step');
+  const editorContainer = new Container();
+  editorContainer.addChild(main);
+  dockTui.setFocus(main);
   const events = new Map(), commands = new Map();
   historySearch({
     on: (name, handler) => events.set(name, handler), registerShortcut() {},
     registerCommand: (name, spec) => commands.set(name, spec),
   });
-  let close;
+  // ExtensionRunner.withUIPrompt emits start/end around ordinary custom UI too.
+  // Sidebar's controller collapses on start, then restores its prior split on end.
+  let promptActive = false;
+  let picker, mounted;
+  const ready = new Promise(resolve => { mounted = resolve; });
   const ctx = { mode: 'tui', sessionManager: {
     getBranch: () => historyPrompts(variant).map((text, index) => ({ type: 'message', id: String(index), message: { role: 'user', content: text } })),
     getSessionId: () => 'remote-client-fixture', getLeafId: () => 'leaf',
   }, ui: {
-    getEditorText: () => main.getExpandedText(), setEditorText: () => assert.fail('cancel must not mutate the draft'),
+    getEditorText: () => main.getExpandedText(), setEditorText: text => main.setText(text),
     notify: message => assert.fail(message), onTerminalInput: () => () => {},
-    setWidget: (_key, factory) => { factory?.(overlayTui); },
-    custom: (factory, options) => new Promise(resolve => {
-      close = value => { overlayTui.hideOverlay(); resolve(value); };
-      const picker = factory(overlayTui, theme, kb, close);
-      overlayTui.showOverlay(picker, options.overlayOptions);
-      picker.handleInput('\x15'); // clear the real expanded draft seed via Input
-      if (variant === 'filtered') picker.handleInput('history');
-      if (variant === 'no-match') picker.handleInput('zzzz-no-match');
+    setWidget: (_key, factory) => { factory?.(dockTui); },
+    custom: (factory, options) => new Promise((resolve, reject) => {
+      assert.equal(options?.overlay ?? false, false, 'history must use ordinary custom UI, not an overlay');
+      promptActive = true;
+      const savedText = main.getText();
+      let closed = false;
+      const restore = () => {
+        editorContainer.clear();
+        editorContainer.addChild(main);
+        main.setText(savedText);
+        dockTui.setFocus(main);
+        dockTui.requestRender();
+      };
+      const close = value => {
+        if (closed) return;
+        closed = true;
+        restore();
+        promptActive = false;
+        resolve(value);
+        picker?.dispose?.();
+      };
+      Promise.resolve(factory(dockTui, theme, kb, close)).then(component => {
+        if (closed) return;
+        picker = component;
+        editorContainer.clear();
+        editorContainer.addChild(picker);
+        dockTui.setFocus(picker);
+        dockTui.requestRender();
+        picker.handleInput('\x15'); // clear the real expanded draft seed via Input
+        if (variant === 'filtered') picker.handleInput('history');
+        if (variant === 'no-match') picker.handleInput('zzzz-no-match');
+        mounted();
+      }).catch(error => { restore(); promptActive = false; reject(error); });
     }),
   } };
+  const component = render => ({ render, invalidate() {} });
+  const viewport = createChatViewport({
+    document: component(() => [' Earlier transcript in main.']),
+    pendingMessages: component(() => []), status: component(() => []),
+    widgetsAbove: new Spacer(1), editor: editorContainer,
+    widgetsBelow: component(() => []), footer: component(rows), scrollbar: 'never',
+  });
+  const panel = new SidebarPanel(dockTui, () => theme, {
+    status: () => [{ text: 'main: working' }],
+    submit() {}, confirm() {}, abort() {}, focusMain() {}, focusSidebar() {}, close() {},
+    isBusy: () => false, matchesToggle: () => false, matchesFocusSwitch: () => false,
+    toggleLabel: "ctrl+'", mainHidesThinking: () => false, cwd: '/tmp/pi-plugins',
+  });
+  panel.focused = sidebar.focused ?? true;
+  const root = sidebar.open === false ? viewport.root : new SplitRoot(viewport.root, panel.root, {
+    ratio: () => DEFAULT_RATIO, minColumns: DEFAULT_MIN_COLUMNS,
+    collapsed: () => promptActive || (sidebar.collapsed ?? false),
+    focused: () => panel.focused,
+    divider: (orientation, focused, w, length) => dividerLines(orientation, w, text => theme.fg('borderAccent', text), {
+      sidebar: focused, length, pointer: text => theme.bold(theme.fg('accent', text)),
+    }),
+  }, () => {});
+  let frame;
+  const render = () => {
+    // SplitRoot applies orientation changes from the next frame, just as in Pi.
+    renderLayoutFrame(root, width, HEIGHT, () => {});
+    frame = renderLayoutFrame(root, width, HEIGHT, () => {});
+    const lines = root instanceof SplitRoot ? root.dimUnfocused(frame.lines, frame) : frame.lines;
+    return lines.map(line => line.replace(/\x1b_pi:[^\x07]*\x07/gu, ''));
+  };
   await events.get('session_start')({}, ctx);
   const pending = commands.get('history-search').handler('', ctx);
-  const screen = overlayTui.compositeOverlays(base, width, HEIGHT);
-  assert.equal(screen.length, HEIGHT, 'real overlay occupies terminal height');
-  close(undefined);
+  await ready;
+  assert.equal(dockTui.getFocusedComponent(), picker, 'custom picker owns native focus');
+  const lines = render();
+  const plain = lines.map(stripVTControlCharacters).join('\n');
+  const findBox = box => box.component === editorContainer ? box : box.children.map(findBox).find(Boolean);
+  const editorBox = findBox(frame.root);
+  assert.ok(editorBox, 'native viewport includes the replaced editor container');
+  const dock = editorContainer.render(editorBox.rect.width).map(stripVTControlCharacters);
+  assert.ok(dock.length <= editorBox.rect.height, 'picker must fit the actual allocated editor dock, without clipped results or hints');
+  assert.ok(dock.length <= 13, 'history dock renders at most 13 rows, not viewport-sized padding');
+  assert.ok(dock.every(line => line.trim().length > 0), 'history dock has no blank padding rows');
+  assert.match(plain, /Earlier transcript in main\./u, 'conversation remains visible above the compact picker');
+  assert.ok(plain.indexOf('Earlier transcript in main.') < plain.indexOf('Prompt history'), 'conversation stays above the dock');
+  assert.match(plain, /Prompt history/u);
+  assert.match(plain, /↑↓ move · Enter restore · Esc cancel/u);
+  if (variant === 'filtered') {
+    assert.match(plain, /Fix the history picker/u);
+    assert.doesNotMatch(plain, /Review the API design/u);
+  }
+  if (variant === 'no-match') assert.match(plain, /No matches/u);
+  const matches = variant === 'no-match' ? [] : variant === 'filtered' ? ['Fix the history picker'] : historyPrompts(variant).toReversed();
+  for (let index = 0; index < matches.length; index++) {
+    if (index) picker.handleInput('\x1b[B');
+    const selectedScreen = render().map(stripVTControlCharacters).join('\n');
+    assert.match(selectedScreen, new RegExp(`${index + 1}/${matches.length}`), 'navigation keeps the selected result count visible');
+    const preview = stripVTControlCharacters(matches[index]).replace(/\s+/gu, ' ').replace(/[\x00-\x1f\x7f-\x9f]/gu, '');
+    assert.ok(selectedScreen.includes(`› ${preview.slice(0, 20)}`), 'navigation keeps the actual selected result visible in the composed dock');
+  }
+  picker.handleInput('\x1b');
   await pending;
+  assert.equal(main.getExpandedText(), 'next step', 'cancel preserves the complete draft');
+  assert.equal(dockTui.getFocusedComponent(), main, 'closing restores native main-editor focus');
+  assert.deepEqual(editorContainer.children, [main], 'closing restores the native editor-container child');
+  const restored = render();
   await events.get('session_shutdown')({}, ctx);
-  assert.equal(main.getText(), 'Review');
-  return screen;
+  return { lines, restored };
 }
+const HISTORY_SIDEBARS = [
+  ['without Sidebar', { open: false }],
+  ['Sidebar collapsed', { collapsed: true, focused: false }],
+  ['Sidebar expanded, main focused', { collapsed: false, focused: false }],
+  ['Sidebar expanded, Sidebar focused', { collapsed: false, focused: true }],
+];
+const HISTORY_FOOTERS = [
+  ...Object.entries(UNDERS),
+  ...FOOTERS.flatMap(fixture => [
+    [`normal ${fixture.name} footer`, w => idleFooter(w, fixture)],
+    [`normal ${fixture.name} pill+footer`, w => [theme.fg('muted', ' 1 task '), '', ...idleFooter(w, fixture, 2)]],
+  ]),
+];
 for (const width of [46, 120, 180]) {
   for (const variant of ['initial', 'filtered', 'no-match', 'long/Unicode']) {
-    for (const [under, rows] of Object.entries(UNDERS)) {
-      for (const sidebar of [false, true]) {
-        const { lines: base } = sidebarScreen({ width, height: HEIGHT, dock: w => editor.render(w), footer: rows, open: sidebar, collapsed: true });
-        const lines = await historyOverlayScreen(width, variant, base);
-        screens.push({ name: `prompt history (${variant})`, width, under: `${under}, real overlay${sidebar ? ', Sidebar open' : ''}`, ansi: lines.join('\n') });
+    for (const [under, rows] of HISTORY_FOOTERS) {
+      let restoredBaseline;
+      for (const [sidebarName, sidebar] of HISTORY_SIDEBARS) {
+        const { lines, restored } = await historyDockScreens(width, variant, rows, sidebar);
+        const context = `${under}, native dock, ${sidebarName}${sidebar.open === false ? '' : ' (collapsed during custom UI)'}`;
+        screens.push({ name: `prompt history (${variant})`, width, under: context, ansi: lines.join('\n') });
+        restoredBaseline ??= screens.length;
+        screens.push({ name: `idle editor after prompt history (${variant})`, width, under: context, idle: restoredBaseline, ansi: restored.join('\n') });
       }
     }
   }
@@ -652,8 +767,9 @@ const screensFile = path.join(dir, 'screens.json');
 writeFileSync(screensFile, JSON.stringify(screens.map((s) => ({ ...s, text: stripVTControlCharacters(s.ansi) }))));
 
 function probe(label, script, cwd, extra = []) {
-  const run = spawnSync('bun', [path.join(HERE, 'remote-clients', script), screensFile, ...extra], { cwd, encoding: 'utf8' });
-  if (run.status !== 0) throw new Error(`${label} probe failed:\n${run.stderr || run.stdout}`);
+  // The history/footer/Sidebar matrix exceeds spawnSync's default 1 MiB JSON output limit.
+  const run = spawnSync('bun', [path.join(HERE, 'remote-clients', script), screensFile, ...extra], { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  if (run.error || run.status !== 0) throw new Error(`${label} probe failed:\n${run.error?.message ?? (run.stderr || run.stdout)}`);
   return JSON.parse(run.stdout);
 }
 

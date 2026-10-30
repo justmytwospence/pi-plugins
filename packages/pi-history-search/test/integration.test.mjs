@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createJiti } from 'jiti';
-import { Editor, getKeybindings, setKeybindings, matchesKey, stripTerminalSequences, visibleWidth } from '@earendil-works/pi-tui';
+import { Container, Editor, getKeybindings, setKeybindings, matchesKey, stripTerminalSequences, visibleWidth } from '@earendil-works/pi-tui';
 const { TuiBase } = await import(new URL('./tui.js', import.meta.resolve('@earendil-works/pi-tui')));
 import { CustomEditor } from '@earendil-works/pi-coding-agent';
 const { KeybindingsManager } = await import(new URL('./core/keybindings.js', import.meta.resolve('@earendil-works/pi-coding-agent')));
+const { InteractiveMode } = await import(new URL('./modes/interactive/interactive-mode.js',
+  process.env.PI_TEST_SDK ? pathToFileURL(process.env.PI_TEST_SDK) : import.meta.resolve('@earendil-works/pi-coding-agent')));
 
 // Test-only sibling loading: runtime code has no dependency on pi-vim.
 const jiti = createJiti(import.meta.url, { alias: Object.fromEntries(
@@ -32,7 +34,7 @@ const entries = texts => texts.map((text, index) => ({
   timestamp: new Date(0).toISOString(), message: { role: 'user', content: [{ type: 'text', text }], timestamp: 0 },
 }));
 
-async function fixture(t, { vim = false, mode = 'tui', bindings = {}, draft = 'al' } = {}) {
+async function fixture(t, { vim = false, mode = 'tui', bindings = {}, draft = 'al', sdk = false } = {}) {
   const previous = getKeybindings();
   const keys = new KeybindingsManager({ 'tui.editor.historyPrevious': 'ctrl+p', 'tui.editor.historyNext': 'ctrl+n', ...bindings });
   setKeybindings(keys);
@@ -59,6 +61,15 @@ async function fixture(t, { vim = false, mode = 'tui', bindings = {}, draft = 'a
   assert.ok(main instanceof Editor, 'use the actual native Editor base, not a text stub');
   main.setText(draft);
   focus = main;
+  const dock = new Container();
+  dock.addChild(main);
+  const sdkHost = Object.setPrototypeOf({
+    get editor() { return main; }, set editor(value) { main = wire(value); },
+    defaultEditor: main, editorContainer: dock, keybindings: keys,
+    ui: { ...tui, setFocus(component) { focus = component; } },
+    extensionDialogs: [], programStatus: { setBlocked() {} },
+    disposeActiveSelector() {},
+  }, InteractiveMode.prototype);
   const ctx = { mode, sessionManager: {
     getBranch: () => { reads++; return branch; }, getSessionId: () => session, getLeafId: () => leaf,
   }, ui: {
@@ -72,10 +83,31 @@ async function fixture(t, { vim = false, mode = 'tui', bindings = {}, draft = 'a
     }; },
     custom: (factory, options) => {
       opens++; customOptions = options;
+      if (sdk) {
+        // Execute the SDK's real asynchronous factory/done/dispose path against
+        // the same native editor and dock used by dispatch and rendering tests.
+        return sdkHost.showExtensionCustom((...args) => {
+          picker = factory(...args);
+          const component = picker;
+          close = value => component.done(value);
+          return component;
+        }, options);
+      }
       return new Promise(resolve => {
-        const originalFocus = focus;
-        close = value => { focus = originalFocus; resolve(value); };
-        picker = factory(tui, theme, keys, value => close(value));
+        const savedText = main.getText();
+        let finished = false;
+        const nativeDone = value => {
+          if (finished) return;
+          finished = true;
+          dock.clear(); dock.addChild(main);
+          main.setText(savedText);
+          focus = main;
+          resolve(value);
+        };
+        picker = factory(tui, theme, keys, nativeDone);
+        const component = picker;
+        close = value => component.done(value);
+        dock.clear(); dock.addChild(picker);
         focus = picker;
         picker.focused = true;
       });
@@ -95,7 +127,7 @@ async function fixture(t, { vim = false, mode = 'tui', bindings = {}, draft = 'a
     }
     return results;
   };
-  return { ctx, tui, keys, main, notices, widgets, submissions, listeners, shortcuts, commands, emit, send, wire,
+  return { ctx, tui, keys, get main() { return main; }, dock, notices, widgets, submissions, listeners, shortcuts, commands, emit, send, wire,
     command: args => commands.get('history-search').handler(args, ctx),
     get picker() { return picker; }, get close() { return close; }, get pending() { return pending; },
     get opens() { return opens; }, get reads() { return reads; }, get removed() { return removed; },
@@ -103,6 +135,7 @@ async function fixture(t, { vim = false, mode = 'tui', bindings = {}, draft = 'a
     set focus(value) { focus = value; }, get focus() { return focus; },
     set branch(value) { branch = entries(value); }, set leaf(value) { leaf = value; }, set session(value) { session = value; },
     replace(editor) { main = wire(editor); focus = main; },
+    sdkReplace(editor) { sdkHost.setCustomEditorComponent(() => editor); },
   };
 }
 
@@ -226,10 +259,10 @@ test('non-TUI sessions, unavailable focus and repeated lifecycle cleanup leave n
   assert.equal(f.notices.at(-1).message, 'history-search: focus inspection unavailable; prefix navigation disabled');
 });
 
-test('native Ctrl+R dispatch opens one full-width overlay, cancellation is inert, accept never submits', async t => {
+test('native Ctrl+R dispatch opens one prompt dock, cancellation preserves text, accept never submits', async t => {
   const f = await fixture(t, { draft: '' });
   f.send(SEARCH); assert.equal(f.opens, 1);
-  assert.deepEqual(f.customOptions, { overlay: true, overlayOptions: { width: '100%' } });
+  assert.equal(f.customOptions, undefined);
   await f.command(''); assert.equal(f.opens, 1, 'concurrent command cannot open a second picker');
   f.send(ESC); await f.pending;
   assert.equal(f.main.getText(), ''); assert.deepEqual(f.submissions, []);
@@ -240,63 +273,220 @@ test('native Ctrl+R dispatch opens one full-width overlay, cancellation is inert
 });
 
 for (const columns of [46, 120]) for (const footerRows of [0, 12]) {
-  test(`actual overlay hides populated native editor at ${columns} columns with ${footerRows} footer rows`, async t => {
+  test(`ordinary custom dock stays compact at ${columns} columns with ${footerRows} footer rows`, async t => {
     const draft = 'private unsent draft';
     const f = await fixture(t, { draft });
-    const terminal = { rows: 30, columns, hideCursor() {} };
-    const ui = new TuiBase(terminal);
-    // Exercise the real TUI's layout/compositor without starting terminal I/O.
+    const ui = new TuiBase({ rows: 40, columns, hideCursor() {} });
     ui.requestRender = () => {};
-    ui.addChild(f.main);
+    ui.addChild({ render: () => ['CONVERSATION SENTINEL'], invalidate() {} });
+    ui.addChild(f.dock);
     ui.addChild({ render: () => Array.from({ length: footerRows }, (_, i) => `footer ${i}`), invalidate() {} });
-    ui.setFocus(f.main);
-    const plain = lines => lines.map(stripTerminalSequences);
-    const baseline = plain(ui.render(columns)).join('\n');
-    assert.ok(baseline.includes(draft));
-    assert.ok(baseline.includes('─'.repeat(columns)), 'the native editor frame is actually present underneath');
-    const setText = f.main.setText;
-    let writes = 0;
-    f.main.setText = function (text) { writes++; return setText.call(this, text); };
-    f.ctx.ui.custom = (factory, options) => new Promise(resolve => {
-      const picker = factory(ui, theme, f.keys, value => {
-        handle.hide();
-        f.focus = f.main;
-        resolve(value);
-      });
-      const handle = ui.showOverlay(picker, options.overlayOptions);
-      f.focus = picker;
-    });
     f.branch = Array.from({ length: 24 }, (_, i) => `history result ${i}`);
     const pending = f.command('');
-    const picker = ui.getFocusedComponent();
-    assert.equal(picker.focused, true);
-    assert.equal(picker[Symbol.for('pi-plugins.input-context.v1')](), 'filter');
-    picker.handleInput('\x15'); // clear the seeded filter, not the underlying draft
-    for (let i = 0; i < 23; i++) picker.handleInput('\x1b[B');
+    assert.equal(f.picker.focused, true);
+    f.send('\x15');
+    for (let i = 0; i < 23; i++) f.send('\x1b[B');
     for (const rows of [30, 8, 6, 3, 1, 40]) {
-      terminal.rows = rows;
-      const rendered = picker.render(columns);
-      assert.equal(rendered.length, rows, 'cover full height and clamp on short terminals after resize');
-      assert.ok(rendered.every(line => visibleWidth(line) === columns), 'including blank rows, cover full width');
-      const screen = plain(ui.compositeOverlays(ui.render(columns), columns, rows).slice(-rows)).join('\n');
-      if (rows >= 4) assert.ok(screen.includes('Prompt history'));
-      assert.ok(screen.includes('› history result 0'), 'selected last result stays visible after resize');
-      assert.ok(!screen.includes(draft), 'underlying unsent draft is obscured');
-      assert.ok(!screen.includes('─'.repeat(columns)), 'no native editor rule survives compositing');
-      assert.ok(!screen.includes('footer '), 'even high footers are covered');
+      const rendered = f.picker.render(columns, rows);
+      assert.ok(rendered.length <= Math.min(13, rows));
+      assert.ok(rendered.every(line => visibleWidth(line) <= columns));
+      assert.ok(rendered.every(line => stripTerminalSequences(line).trim().length > 0), 'no blank padding');
+      assert.ok(rendered.map(stripTerminalSequences).join('\n').includes('› history result 0'));
     }
-    picker.handleInput(ESC);
-    await pending;
-    assert.equal(ui.getFocusedComponent(), f.main);
-    assert.equal(f.main.getText(), draft);
-    assert.equal(writes, 0, 'cancel does not even restore the editor through setText');
+    const screen = ui.render(columns).map(stripTerminalSequences).join('\n');
+    assert.ok(screen.includes('CONVERSATION SENTINEL'));
+    if (footerRows) assert.ok(screen.includes('footer 0'));
+    assert.ok(!screen.includes(draft));
+    f.send(ESC); await pending;
+    assert.equal(f.focus, f.main);
+    assert.equal(f.main.getExpandedText(), draft);
     assert.deepEqual(f.submissions, []);
+  });
+}
+
+for (const draft of ['', 'multiline\ndraft', Array.from({ length: 12 }, (_, i) => `line ${i} ` + 'x'.repeat(100)).join('\n')]) {
+  test(`native cancellation preserves expanded draft of ${draft.length} characters`, async t => {
+    const f = await fixture(t, { draft: '' });
+    if (draft) f.send(`\x1b[200~${draft}\x1b[201~`);
+    if (draft.length > 1000) assert.match(f.main.getText(), /\[paste #/);
+    f.send(SEARCH, ESC); await f.pending;
+    assert.equal(f.main.getExpandedText(), draft);
+    assert.ok(!f.main.getText().includes('[paste #'));
+    assert.deepEqual(f.submissions, []);
+  });
+}
+
+for (const accept of [false, true]) for (const paste of [false, true]) {
+  test(`external ${paste ? 'collapsed paste' : 'draft'} survives ${accept ? 'stale acceptance' : 'cancel'}`, async t => {
+    const f = await fixture(t, { draft: '' });
+    f.send(SEARCH);
+    const text = paste ? 'external\n' + 'x'.repeat(1200) : 'external draft';
+    if (paste) f.main.handleInput(`\x1b[200~${text}\x1b[201~`);
+    else f.main.setText(text);
+    f.send(accept ? '\r' : ESC); await f.pending;
+    assert.equal(f.main.getExpandedText(), text);
+    assert.ok(!f.main.getText().includes('[paste #'));
+    assert.deepEqual(f.submissions, []);
+  });
+}
+
+for (const accept of [false, true]) for (const paste of [false, true]) {
+  test(`post-close ${paste ? 'collapsed paste' : 'edits'} survive ${accept ? 'acceptance' : 'cancel'} before the promise continuation`, async t => {
+    const f = await fixture(t, { draft: '', sdk: true });
+    f.send(SEARCH);
+    await Promise.resolve();
+    f.main.setText('changed while open');
+    f.send(accept ? '\r' : ESC);
+    const text = paste ? 'post-close\n' + 'x'.repeat(1200) : 'typed immediately after close';
+    f.main.setText('');
+    if (paste) f.main.handleInput(`\x1b[200~${text}\x1b[201~`);
+    else f.main.setText(text);
+    await f.pending;
+    assert.equal(f.main.getExpandedText(), text);
+    if (paste) assert.match(f.main.getText(), /\[paste #/u, 'guard must be removed synchronously at close');
+  });
+}
+
+for (const accept of [false, true]) {
+  test(`replacement editor draft survives ${accept ? 'stale acceptance' : 'cancel'}`, async t => {
+    const f = await fixture(t, { draft: 'al' });
+    f.send(SEARCH);
+    const close = f.close, pending = f.pending;
+    const replacement = new CustomEditor(f.tui, editorTheme, f.keys);
+    replacement[SURFACE] = 'main';
+    f.replace(replacement);
+    const draft = 'replacement\n' + 'x'.repeat(1200);
+    replacement.handleInput(`\x1b[200~${draft}\x1b[201~`);
+    close(accept ? 'stale selection' : undefined);
+    await pending;
+    assert.equal(replacement.getExpandedText(), draft);
+    assert.doesNotMatch(replacement.getText(), /\[paste #/u);
+  });
+}
+
+test('stacked ordinary custom UI cannot save dangling paste markers from history', async t => {
+  const f = await fixture(t, { draft: '' });
+  const draft = Array.from({ length: 12 }, (_, i) => `line ${i} ` + 'x'.repeat(100)).join('\n');
+  f.send(`\x1b[200~${draft}\x1b[201~`);
+  assert.match(f.main.getText(), /\[paste #/u);
+  f.send(SEARCH);
+  const closeHistory = f.close, pending = f.pending;
+  let closeStacked;
+  const stacked = f.ctx.ui.custom((_ui, _theme, _keys, done) => {
+    closeStacked = done;
+    return { render: () => ['another dialog'], invalidate() {} };
+  });
+  closeHistory(undefined);
+  await pending;
+  closeStacked(undefined);
+  await stacked;
+  assert.equal(f.main.getExpandedText(), draft);
+  assert.doesNotMatch(f.main.getText(), /\[paste #/u);
+});
+
+test('real SDK editor replacement releases copied draft listener and forwards new text', async t => {
+  const f = await fixture(t, { draft: '', sdk: true });
+  const changes = [];
+  const original = f.main.onChange = text => changes.push(text);
+  const initial = f.main;
+  f.send(SEARCH);
+  await Promise.resolve();
+  const closeHistory = f.close, pending = f.pending;
+  const replacement = new CustomEditor(f.tui, editorTheme, f.keys);
+  replacement[SURFACE] = 'main';
+  f.sdkReplace(replacement);
+  const draft = 'replacement\n' + 'x'.repeat(1200);
+  replacement.handleInput(`\x1b[200~${draft}\x1b[201~`);
+  assert.equal(replacement.getText(), draft);
+  closeHistory(undefined);
+  await pending;
+  assert.equal(initial.onChange, original);
+  assert.equal(replacement.onChange, original, 'remove guard copied by SDK replacement');
+  assert.equal(replacement.getExpandedText(), draft);
+  replacement.setText('!echo hello');
+  assert.equal(changes.at(-1), '!echo hello', 'original listener must receive the new editor text');
+});
+
+for (const accept of [false, true]) {
+  test(`fresh Vim SDK replacement retains external paste on ${accept ? 'stale acceptance' : 'cancel'}`, async t => {
+    const f = await fixture(t, { draft: '', sdk: true });
+    const changes = [];
+    f.main.onChange = text => changes.push(text);
+    f.send(SEARCH);
+    await Promise.resolve();
+    const closeHistory = f.close, pending = f.pending;
+    const replacement = new MainEditor(f.tui, editorTheme, f.keys);
+    t.after(() => replacement.dispose());
+    // Do not send any input before replacement: the first paste installs Vim's
+    // lazy hook around the SDK-copied listener and calls that listener unbound.
+    f.sdkReplace(replacement);
+    const draft = 'fresh Vim replacement\n' + 'x'.repeat(1200);
+    assert.doesNotThrow(() => replacement.handleInput(`\x1b[200~${draft}\x1b[201~`));
+    assert.equal(replacement.getText(), draft);
+    assert.deepEqual(changes, [draft], 'forward the expanded change exactly once');
+    let closeOther;
+    const other = f.ctx.ui.custom((_ui, _theme, _keys, done) => {
+      closeOther = done;
+      return { render: () => ['other ordinary dialog'], invalidate() {} };
+    });
+    await Promise.resolve();
+    closeHistory(accept ? 'stale selection' : undefined);
+    await pending;
+    closeOther(undefined);
+    await other;
+    assert.equal(replacement.getExpandedText(), draft);
+    assert.doesNotMatch(replacement.getText(), /\[paste #/u);
+    const later = '\npost-close ' + 'z'.repeat(1200);
+    assert.doesNotThrow(() => replacement.handleInput(`\x1b[200~${later}\x1b[201~`));
+    assert.equal(replacement.getExpandedText(), draft + later);
+    assert.match(replacement.getText(), /\[paste #/u, 'inactive copied guard must not expand subsequent pastes');
+    assert.equal(changes.at(-1), replacement.getText());
+    assert.deepEqual(f.submissions, []);
+    assert.deepEqual(f.notices, []);
+  });
+}
+
+for (const vim of [false, true]) for (const accept of [false, true]) {
+  test(`real SDK concurrent dialogs preserve external paste (${vim ? 'Vim' : 'native'}, ${accept ? 'stale accept' : 'cancel'})`, async t => {
+    const f = await fixture(t, { draft: '', sdk: true, vim });
+    const changes = [];
+    f.main.onChange = text => changes.push(text);
+    f.send(''); // Let optional Vim install its lazy change listener first.
+    const original = f.main.onChange;
+    f.send(SEARCH);
+    await Promise.resolve(); // SDK installs the factory's component asynchronously.
+    const closeHistory = f.close, pending = f.pending;
+    const draft = 'external while history is open\n' + 'x'.repeat(1200);
+    f.main.handleInput(`\x1b[200~${draft}\x1b[201~`);
+    assert.equal(f.main.getText(), draft, 'no raw marker can enter another dialog snapshot');
+    assert.deepEqual(changes, [draft], 'forward expanded change exactly once');
+    let closeOther, disposed = false;
+    const other = f.ctx.ui.custom((_ui, _theme, _keys, done) => {
+      closeOther = done;
+      return { render: () => ['other ordinary dialog'], invalidate() {}, dispose() { disposed = true; } };
+    });
+    await Promise.resolve();
+    closeHistory(accept ? 'stale selection' : undefined);
+    assert.equal(f.main.onChange, original, 'restore listener synchronously, not in the continuation');
+    await pending;
+    closeOther(undefined);
+    await other;
+    assert.ok(disposed, 'exercise SDK dispose path too');
+    assert.equal(f.main.getExpandedText(), draft);
+    assert.doesNotMatch(f.main.getText(), /\[paste #/u);
+    assert.deepEqual(f.submissions, []);
+    const later = '\npost-close ' + 'z'.repeat(1200);
+    f.main.handleInput(`\x1b[200~${later}\x1b[201~`);
+    assert.equal(f.main.getExpandedText(), draft + later);
+    assert.match(f.main.getText(), /\[paste #/u, 'normal native collapsing resumes after close');
   });
 }
 
 for (const change of ['draft', 'session', 'leaf', 'editor', 'tree', 'input', 'shutdown', 'restart']) {
   test(`stale picker cannot overwrite after ${change}`, async t => {
     const f = await fixture(t, { draft: '' });
+    const onChange = f.main.onChange;
+    const originalEditor = f.main;
     f.send(SEARCH); const pending = f.pending, oldClose = f.close;
     if (change === 'draft') f.main.setText('new draft');
     if (change === 'session') f.session = 'different';
@@ -307,6 +497,7 @@ for (const change of ['draft', 'session', 'leaf', 'editor', 'tree', 'input', 'sh
     if (change === 'shutdown') await f.emit('session_shutdown');
     if (change === 'restart') await f.emit('session_start');
     oldClose('stale selection'); await pending;
+    assert.equal(originalEditor.onChange, onChange, 'release draft guard even on lifecycle cancellation');
     assert.notEqual(f.main.getText(), 'stale selection');
     assert.deepEqual(f.submissions, []);
   });
@@ -318,8 +509,10 @@ test('shutdown closes outstanding picker and UI failures release the open guard'
   await f.emit('session_shutdown'); await pending;
   await f.emit('session_start');
   const custom = f.ctx.ui.custom;
+  const onChange = f.main.onChange;
   f.ctx.ui.custom = () => { throw new Error('UI failed'); };
   await f.command(''); assert.deepEqual(f.notices.at(-1), { message: 'history-search: UI failed', type: 'error' });
+  assert.equal(f.main.onChange, onChange, 'release draft guard when custom UI throws');
   f.ctx.ui.custom = custom;
   f.send(SEARCH); assert.equal(f.opens, 2); f.close(undefined); await f.pending;
 });

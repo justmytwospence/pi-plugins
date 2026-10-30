@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { getKeybindings, isKeyRelease, visibleWidth } from "@earendil-works/pi-tui";
+import { getKeybindings, isKeyRelease } from "@earendil-works/pi-tui";
 import { PrefixHistory, sessionPrompts } from "./history.ts";
 import { HistoryPicker } from "./picker.ts";
 
@@ -8,6 +8,8 @@ const MODE = Symbol.for("pi-plugins.editor-mode.v1");
 type Editor = {
   getText(): string;
   setText(text: string): void;
+  getExpandedText?(): string;
+  onChange?: (text: string) => void;
   isShowingAutocomplete?(): boolean;
   [SURFACE]?: unknown;
   [MODE]?: () => { state: string; autocomplete?: boolean };
@@ -81,22 +83,68 @@ export default function historySearch(pi: ExtensionAPI) {
     const draft = ctx.ui.getEditorText();
     const pending: { close?: () => void } = {};
     opening = pending;
+    let preClose: { text: string } | undefined;
+    // Ordinary custom dialogs snapshot getText(), then restore with setText(),
+    // clearing native paste storage. Keep this editor marker-free throughout
+    // our interaction, not just at opening: external pastes must be expanded
+    // before a concurrent dialog can snapshot them. This instance-local change
+    // listener is synchronous and forwards the existing listener exactly once.
+    // Close deactivates even copies nested inside a replacement editor's hook,
+    // and removes directly owned listeners (also on cancellation and failures).
+    const onChange = editor.onChange;
+    const guardedEditors = new Set([editor]);
+    let expanding = false;
+    let guarding = true;
+    function expandDraft(this: Editor | undefined, text: string) {
+      // Native replacement copies onChange, and Vim's lazy hook invokes that
+      // copy unbound. In that case the UI API still addresses the live editor;
+      // never fall back to reading/writing the obsolete opening editor.
+      const receiver = isEditor(this) ? this : undefined;
+      if (!guarding) { onChange?.call(receiver ?? editor, text); return; }
+      if (receiver) guardedEditors.add(receiver);
+      if (expanding) return;
+      const expanded = receiver ? receiver.getExpandedText?.() ?? text : ctx.ui.getEditorText();
+      const raw = receiver ? receiver.getText() : text;
+      if (raw !== expanded) {
+        expanding = true;
+        try {
+          if (receiver) receiver.setText(expanded);
+          else ctx.ui.setEditorText(expanded);
+        } finally { expanding = false; }
+      }
+      onChange?.call(receiver ?? editor, expanded);
+    }
+    const releaseDraft = () => {
+      guarding = false;
+      for (const guarded of guardedEditors) {
+        if (guarded.onChange === expandDraft) guarded.onChange = onChange;
+      }
+      guardedEditors.clear();
+    };
     try {
+      editor.onChange = expandDraft;
+      if (editor.getText() !== draft) ctx.ui.setEditorText(draft);
       const selected = await ctx.ui.custom<string | undefined>((ui, theme, keys, done) => {
-        pending.close = () => done(undefined);
-        const picker = new HistoryPicker(snapshot, draft.replace(/\s+/g, " "), theme, keys, () => ui.requestRender(), done);
-        const render = picker.render.bind(picker);
-        // OverlayOptions has no height: cover the viewport ourselves so a tall
-        // footer cannot leave the native editor frame exposed to remote clients.
-        picker.render = (width) => {
-          const height = Math.max(0, ui.terminal.rows);
-          const lines = render(width, height);
-          while (lines.length < height) lines.push("");
-          return lines.map((line) => line + " ".repeat(Math.max(0, width - visibleWidth(line))));
+        const close = (value: string | undefined) => {
+          if (preClose) return;
+          // Native done synchronously restores its opening snapshot into the
+          // *current* editor, which may have been replaced while we were open.
+          // Repair that restoration in the same stack, before subsequent input
+          // or another custom UI can observe/save it. Never repair after await:
+          // that would overwrite an edit made immediately after closing.
+          preClose = { text: ctx.ui.getEditorText() };
+          try {
+            done(value);
+            if (ctx.ui.getEditorText() !== preClose.text) ctx.ui.setEditorText(preClose.text);
+          } finally {
+            releaseDraft();
+          }
         };
+        pending.close = () => close(undefined);
+        const picker = new HistoryPicker(snapshot, draft.replace(/\s+/g, " "), theme, keys, () => ui.requestRender(), close);
         return picker;
-      }, { overlay: true, overlayOptions: { width: "100%" } });
-      if (selected !== undefined && generation === currentGeneration
+      });
+      if (selected !== undefined && preClose?.text === draft && generation === currentGeneration
         && ctx.sessionManager.getSessionId() === session && ctx.sessionManager.getLeafId() === leaf
         && focusedEditor() === editor && ctx.ui.getEditorText() === draft) {
         ctx.ui.setEditorText(selected);
@@ -105,6 +153,7 @@ export default function historySearch(pi: ExtensionAPI) {
     } catch (error) {
       ctx.ui.notify(`history-search: ${error instanceof Error ? error.message : String(error)}`, "error");
     } finally {
+      releaseDraft();
       if (opening === pending) opening = undefined;
     }
   }

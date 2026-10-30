@@ -1,7 +1,7 @@
 import { stripVTControlCharacters } from "node:util";
 import type { KeybindingsManager } from "@earendil-works/pi-coding-agent";
 import {
-  type Component, type Focusable, Input, fuzzyFilter, isKeyRelease,
+  type Component, type Focusable, CURSOR_MARKER, Input, fuzzyFilter, isKeyRelease,
   matchesKey, truncateToWidth,
 } from "@earendil-works/pi-tui";
 
@@ -104,12 +104,17 @@ export class HistoryPicker implements Component, Focusable {
     // can show the selection; normal viewports retain the full frame and hints.
     const lines: string[] = [];
     if (h >= 4) lines.push(t.fg("accent", `╭ ${t.bold("Prompt history")} ${"─".repeat(Math.max(0, w - 18))}╮`));
-    if (h >= 2) lines.push(...this.input.render(Math.max(1, w)));
+    // The ordinary custom dock is a native Container leaf. Pi clips that leaf
+    // around CURSOR_MARKER when its allocated height is smaller than its natural
+    // height. Anchor it to the selection, not the filter's first input row, so
+    // footer/status allocation cannot hide the item Enter would restore.
+    if (h >= 2) lines.push(...this.input.render(Math.max(1, w)).map(line =>
+      this.matches.length ? line.replaceAll(CURSOR_MARKER, "") : line));
     const footer: string[] = [];
     if (h >= 3 || (!this.matches.length && h > 0)) {
       footer.push(t.fg("dim", this.matches.length ? `${this.selected + 1}/${this.matches.length}` : "No matches"));
     }
-    if (h >= 6) footer.push(t.fg("dim", "↑/↓ move · Ctrl+R next · type to search · Enter restore · Esc cancel"));
+    if (h >= 6) footer.push(t.fg("dim", "↑↓ move · Enter restore · Esc cancel"));
     if (h >= 5) footer.push(t.fg("accent", `╰${"─".repeat(Math.max(0, w - 2))}╯`));
     this.visible = Math.max(1, Math.min(VISIBLE, h - lines.length - footer.length));
     const start = Math.max(0, Math.min(this.selected - Math.floor(this.visible / 2), this.matches.length - this.visible));
@@ -117,7 +122,15 @@ export class HistoryPicker implements Component, Focusable {
       const chosen = i === this.selected;
       lines.push(t.fg(chosen ? "accent" : "muted", `${chosen ? "›" : " "} ${preview(this.matches[i])}`));
     }
+    const selectedRow = lines.findIndex(line => stripVTControlCharacters(line).startsWith("› "));
     lines.push(...footer);
+    if (this.focused && selectedRow >= 0) {
+      // Leave one row of breathing room below the selected item. The native
+      // dock has a three-row minimum, which can itself be clipped by the root
+      // on tiny terminals; anchoring the following row keeps the item in view.
+      const anchor = Math.min(selectedRow + 1, lines.length - 1);
+      lines[anchor] = CURSOR_MARKER + lines[anchor];
+    }
     return lines.map((line) => truncateToWidth(line, w));
   }
 }

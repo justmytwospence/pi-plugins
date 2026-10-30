@@ -56,7 +56,9 @@ Press **Ctrl+R** in the focused native main editor or Vim Insert mode, or run **
 | Enter | Restore the full selected text without submitting; inert with no matches. |
 | Escape/Ctrl+C | Cancel immediately, even with a query; draft unchanged. |
 
-Configured Pi selection actions also work. Up to eight sanitized, whitespace-flattened previews are shown; acceptance restores the original multiline text, not the preview. Blank prompts are ignored and exact duplicate texts retain their newest occurrence. A changed session, branch leaf, editor or draft invalidates a pending selection rather than overwriting new work.
+The compact picker temporarily replaces the normal prompt area using native custom UI, not a floating overlay; the conversation stays visible above it, with the footer and Sidebar outside the picker. It uses the prompt area's width and at most 13 rows, without blank padding. Configured Pi selection actions also work. Normally up to eight sanitized, whitespace-flattened previews are shown (fewer on short terminals); acceptance restores the original multiline text, not the preview. Blank prompts are ignored and exact duplicate texts retain their newest occurrence. A changed session, branch leaf, editor or draft invalidates a pending selection rather than overwriting new work.
+
+Cancellation preserves the full draft text, including long pasted content. Collapsed pastes are expanded while the picker is open so concurrent native dialogs cannot save dangling paste markers. Native editor restoration may reset the cursor and undo history; the original visual paste markers need not survive.
 
 Empty history reports `No prompts in this session yet.`. Non-TUI commands report that the interactive terminal UI is required. The picker is terminal-operated like native tree navigation, not a model question: remote clients must not expose its search field as an editable prompt composer. Type, filter and select in the terminal.
 
