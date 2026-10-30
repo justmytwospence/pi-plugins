@@ -243,7 +243,7 @@ export class TerminalPanel {
   private snapshot(result: HandoffResult): Component {
     const { head, tail, omitted } = this.screen.headTail(this.screen.terminal.rows);
     const content = [...head, ...(omitted ? [""] : []), ...tail];
-    const lines = this.frame(content, `exited ${result.exitCode}`, " Exited · output retained for this session");
+    const lines = this.frame(content, `exited ${result.exitCode}`, " Exited · output retained for this session", false);
     const dividerIndex = 2 + head.length;
     const capturedWidth = this.width;
     return {
@@ -259,7 +259,7 @@ export class TerminalPanel {
     };
   }
 
-  private frame(content: string[], status: string, hint: string): string[] {
+  private frame(content: string[], status: string, hint: string, clipLive = true): string[] {
     const innerWidth = this.width - 2;
     const pad = (text: string) => { const s = truncateToWidth(text, innerWidth); return s + " ".repeat(Math.max(0, innerWidth - visibleWidth(s))); };
     const border = (text: string) => this.theme.fg("accent", text);
@@ -273,7 +273,8 @@ export class TerminalPanel {
       const text = truncateToWidth(line, width, "", true);
       return text + " ".repeat(Math.max(0, width - visibleWidth(text)));
     }
-    return [top, command, ...lines, border("│") + pad(hint) + border("│"), border("└" + "─".repeat(innerWidth) + "┘")].slice(0, this.inline ? this.inlineHeight() : this.bounds().height);
+    const frame = [top, command, ...lines, border("│") + pad(hint) + border("│"), border("└" + "─".repeat(innerWidth) + "┘")];
+    return clipLive ? frame.slice(0, this.inline ? this.inlineHeight() : this.bounds().height) : frame;
   }
 
   invalidate() { /* Rendering derives current theme and emulator state; no cached lines. */ }

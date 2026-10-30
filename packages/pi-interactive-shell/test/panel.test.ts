@@ -327,6 +327,27 @@ test.each([
   expect(h.tui.terminal.rows).toBe(30);
 });
 
+test.each([
+  { rows: 6, output: "", body: 0 },
+  { rows: 8, output: "one line", body: 1 },
+])("retained frame at $rows terminal rows keeps its bottom border after resizing", async ({ rows, output, body }) => {
+  const h = await setup(undefined, undefined, false, true);
+  h.tui.terminal.rows = rows;
+  const live = h.panel.render(98);
+  expect(live.length).toBeLessThan(4 + body); // Live viewport remains height-limited.
+  if (output) h.data(output);
+  h.exit(0);
+  await vi.waitFor(() => expect(h.done).toHaveBeenCalledOnce());
+  const snapshot = h.done.mock.calls[0][1];
+  const frozen = snapshot.render(98);
+  expect(frozen).toHaveLength(4 + body);
+  expect(plain([frozen.at(-2)!])).toContain("Exited · output retained for this session");
+  expect(plain([frozen.at(-1)!])).toMatch(/^└─+┘$/);
+  if (body) expect(plain(frozen)).toContain(output);
+  h.tui.terminal.rows = 30;
+  expect(snapshot.render(98)).toEqual(frozen);
+});
+
 test.each([false, true])("inline exit auto-finishes with frozen head-tail before disposal (autoClose %s)", async autoClose => {
   const h = await setup(undefined, undefined, autoClose, true);
   h.panel.render(98);
