@@ -576,6 +576,52 @@ test("dialog lifecycle and independent blocked holds defer automatic viewing", a
   await x.shutdown();
 });
 
+test.each(["before_agent_start", "agent_start", "turn_start"])("%s overrides lingering waits before the first main token", async (event) => {
+  const x = await setup();
+  normalFocus(x.ui);
+  x.ctx.isIdle = () => false;
+  await x.run({ ...explicit, task: "background worker", async: true });
+  await x.h.emit("tool_execution_start", { toolCallId: "old/wait", parentToolCallId: "old", toolName: "bg_wait" }, x.ctx);
+  x.h.pi.events.emit("herdr:waiting", { id: "lingering", active: true });
+  await checkpoint();
+  expect(x.ui.customs).toHaveLength(1);
+  await x.h.emit(event, { prompt: "continue working" }, x.ctx);
+  // Main gets the screen synchronously, before the deferred reconciliation runs.
+  expect(x.ui.customs).toHaveLength(0);
+  await checkpoint();
+  expect(x.ui.customs).toHaveLength(0);
+  // Neither an old nested tool settling nor non-assistant messages end request ownership.
+  await x.h.emit("tool_execution_end", { toolCallId: "old/wait", toolName: "bg_wait" }, x.ctx);
+  await x.h.emit("message_end", { message: { role: "toolResult" } }, x.ctx);
+  x.h.pi.events.emit("herdr:waiting", { id: "lingering", active: true });
+  await checkpoint();
+  expect(x.ui.customs).toHaveLength(0);
+  x.h.pi.events.emit("herdr:waiting", { id: "lingering", active: false });
+  await x.h.emit("message_end", { message: { role: "assistant" } }, x.ctx);
+  // A real subsequent wait is eligible again once main's response has finished.
+  x.h.pi.events.emit("herdr:waiting", { id: "new-wait", active: true });
+  await checkpoint();
+  expect(x.ui.customs).toHaveLength(1);
+  x.finish();
+  await x.shutdown();
+});
+
+test.each(["agent_end", "agent_settled"])("%s clears request ownership after an interrupted response", async (event) => {
+  const x = await setup();
+  normalFocus(x.ui);
+  x.ctx.isIdle = () => false;
+  await x.run({ ...explicit, task: "background worker", async: true });
+  await x.h.emit("turn_start", {}, x.ctx);
+  x.h.pi.events.emit("herdr:waiting", { id: "settling", active: true });
+  await checkpoint();
+  expect(x.ui.customs).toHaveLength(0);
+  await x.h.emit(event, {}, x.ctx);
+  await checkpoint();
+  expect(x.ui.customs).toHaveLength(1);
+  x.finish();
+  await x.shutdown();
+});
+
 test("a wait in a nested tool branch does not hide concurrent main work", async () => {
   const x = await setup();
   normalFocus(x.ui);

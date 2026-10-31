@@ -648,6 +648,7 @@ export default function subagents(pi: ExtensionAPI) {
     });
   };
   pi.on("agent_settled", (_event, c) => {
+    setMainRequestActive(false);
     flushResults(c);
     scheduleAutoView();
   });
@@ -694,6 +695,9 @@ export default function subagents(pi: ExtensionAPI) {
 
   /** Coalesce roster transitions; never infer main's state from child output or a timer. */
   const waitingHolds = new Set<string>();
+  // A nested wait may outlive the tool that started it. Such a hold must never hide
+  // main's next model request, including preparation/transport latency before its first token.
+  let mainRequestActive = false;
   const autoDismissed = new Set<string>();
   let autoViewing: string | undefined;
   let autoCheck: ReturnType<typeof setImmediate> | undefined;
@@ -714,7 +718,7 @@ export default function subagents(pi: ExtensionAPI) {
       const mainWorking = [...executingTools].some(([id, tool]) => !parents.has(id)
         && !(tool.name === "bg_wait" && waitingHolds.size > 0)
         && !foreground.some((call) => call.toolCallId === id));
-      const waiting = !mainWorking && run && (foreground.some((call) => call.runs.includes(run)) || sessionCtx?.isIdle?.() === true || waitingHolds.size > 0);
+      const waiting = !mainRequestActive && !mainWorking && run && (foreground.some((call) => call.runs.includes(run)) || sessionCtx?.isIdle?.() === true || waitingHolds.size > 0);
       const eligible = boundUI && sessionCtx?.hasUI && sessionCtx.mode === "tui" && config.fleetView !== false && !fleet.promptBlocked && waiting ? run : undefined;
       if (autoViewing && autoViewing !== eligible?.id) {
         fleet.closeAutoView(autoViewing);
@@ -736,6 +740,19 @@ export default function subagents(pi: ExtensionAPI) {
       })) autoViewing = eligible.id;
     });
   };
+  const setMainRequestActive = (active: boolean) => {
+    mainRequestActive = active;
+    if (active && autoViewing) {
+      // Yield before the first main token renders, not on a later periodic availability check.
+      fleet.closeAutoView(autoViewing);
+      autoViewing = undefined;
+    }
+    scheduleAutoView();
+  };
+  pi.on("message_end", (event) => {
+    if (event.message.role === "assistant") setMainRequestActive(false);
+  });
+  pi.on("agent_end", () => setMainRequestActive(false));
   pi.on("tool_execution_start", (event) => {
     if (!live) return;
     executingTools.set(event.toolCallId, { name: event.toolName, parent: event.parentToolCallId });
@@ -1095,6 +1112,7 @@ export default function subagents(pi: ExtensionAPI) {
     if (autoCheck) clearImmediate(autoCheck);
     autoCheck = undefined;
     waitingHolds.clear();
+    mainRequestActive = false;
     fleet.resetPrompts();
     executingTools.clear();
     preparing.clear();
@@ -1136,9 +1154,9 @@ export default function subagents(pi: ExtensionAPI) {
     scheduleAutoView();
   });
 
-  pi.on("before_agent_start", () => { scheduleAutoView(); });
-  pi.on("agent_start", () => { scheduleAutoView(); });
-  pi.on("turn_start", () => { scheduleAutoView(); });
+  pi.on("before_agent_start", () => setMainRequestActive(true));
+  pi.on("agent_start", () => setMainRequestActive(true));
+  pi.on("turn_start", () => setMainRequestActive(true));
 
   // A prompt mentioning `@subagent:<name>`: tell the model which discovered agent that is and how to
   // delegate to it (an unknown name is named as such, with the agents that exist).
@@ -1164,6 +1182,7 @@ export default function subagents(pi: ExtensionAPI) {
     if (autoCheck) clearImmediate(autoCheck);
     autoCheck = undefined;
     autoViewing = undefined;
+    mainRequestActive = false;
     autoDismissed.clear();
     executingTools.clear();
     waitingHolds.clear();
