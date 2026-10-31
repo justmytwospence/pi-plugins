@@ -6,6 +6,7 @@ import type { ContextSource, StartupContextSnapshot } from "./startup-context.ts
 
 export type ContextRectangle = { x: number; y: number; width: number; height: number; source: ContextSource };
 const positive = (sources: ContextSource[]) => sources.filter((source) => source.tokens > 0).sort((a, b) => b.tokens - a.tokens || a.id.localeCompare(b.id));
+const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 /** Split at the closest cumulative half, then divide the longest physical axis. */
 export function layoutContextTreemap(sources: ContextSource[], width: number, height: number): ContextRectangle[] {
@@ -128,10 +129,18 @@ export function renderContextTreemap(snapshot: StartupContextSnapshot, width: nu
 			const name = `${rect.source.label} ~${formatTokens(rect.source.tokens)}`;
 			if (rect.width >= visibleWidth(name) + 2 && rect.height > 0) {
 				let col = rect.x + 1;
-				for (const char of name) {
-					cells[rect.y]![col] = { char, category: rect.source.category };
-					for (let extra = 1; extra < visibleWidth(char); extra++) cells[rect.y]![col + extra] = { char: "", category: rect.source.category };
-					col += visibleWidth(char);
+				let previousCell: number | undefined;
+				for (const { segment } of graphemes.segment(name)) {
+					const cellWidth = visibleWidth(segment);
+					if (cellWidth === 0) {
+						if (previousCell !== undefined) cells[rect.y]![previousCell]!.char += segment;
+						continue;
+					}
+					if (col + cellWidth > rect.x + rect.width - 1 || col + cellWidth > width) break;
+					cells[rect.y]![col] = { char: segment, category: rect.source.category };
+					previousCell = col;
+					for (let extra = 1; extra < cellWidth; extra++) cells[rect.y]![col + extra] = { char: "", category: rect.source.category };
+					col += cellWidth;
 				}
 			}
 		}
@@ -145,7 +154,7 @@ export function renderContextTreemap(snapshot: StartupContextSnapshot, width: nu
 				output += category ? categoryStyle(theme, category).fill(text) : text;
 				i = end;
 			}
-			lines.push(output);
+			lines.push(fit(output, width));
 		}
 	}
 	if (window && width >= 24) {

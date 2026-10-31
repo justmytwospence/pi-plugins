@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseColor, visibleWidth } from "@earendil-works/pi-tui";
+import { parseColor, sliceByColumn, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import { capacitySegments, layoutContextTreemap, renderContextTreemap } from "../src/feature/shell/startup-treemap.ts";
 import { categoryStyle } from "../src/feature/shell/startup-style.ts";
 import type { ContextSource, StartupContextSnapshot } from "../src/feature/shell/startup-context.ts";
@@ -57,6 +57,23 @@ describe("context treemap", () => {
 		}
 		expect(capacitySegments(snapshot([source("a", 1)]), 46)).toEqual([]);
 		expect(capacitySegments(snapshot([source("a", 250)], 100), 100)).toEqual([{ category: "files", width: 100 }]);
+	});
+	it("paints whole graphemes without overwriting an adjacent tile or exceeding its width", () => {
+		const joined = "\u{1F469}\u200D\u{1F4BB}".repeat(6);
+		for (const label of ["e\u0301".repeat(6), joined]) {
+			const whole = renderContextTreemap(snapshot([source(label, 1000)], 200_000), 24, theme("dark"));
+			const wholeRow = stripTerminalSequences(whole[2]!);
+			expect(wholeRow).toContain(label);
+			expect(visibleWidth(whole[2]!)).toBeLessThanOrEqual(24);
+			const sources = [source(label, 700), source("T", 300, "tools")];
+			const tiles = layoutContextTreemap(sources, 46, 4);
+			const left = tiles.find((tile) => tile.source.id === label)!;
+			const right = tiles.find((tile) => tile.source.id === "T")!;
+			const row = stripTerminalSequences(renderContextTreemap(snapshot(sources, 200_000), 46, theme("dark"))[2]!);
+			expect(sliceByColumn(row, left.x, left.x + left.width)).toContain(label);
+			expect(sliceByColumn(row, right.x, right.x + right.width)).toContain("T ~300");
+			expect(visibleWidth(row)).toBeLessThanOrEqual(46);
+		}
 	});
 	it("uses 20% themed color on both light and dark; style rebuilds after theme changes", () => {
 		for (const name of ["dark", "light"]) {
