@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { type Component, type TUI, getKeybindings, isKeyRelease } from "@earendil-works/pi-tui";
+import { type Component, type TUI, getKeybindings, isKeyRelease, matchesKey } from "@earendil-works/pi-tui";
 import { PrefixHistory, sessionPrompts } from "./history.ts";
 import { HistoryPicker } from "./picker.ts";
 
@@ -257,13 +257,6 @@ export default function historySearch(pi: ExtensionAPI) {
     }
   }
 
-  pi.registerShortcut("ctrl+r", {
-    description: "Search session prompt history",
-    handler: async (ctx) => {
-      const editor = focusedEditor();
-      if (ctx.mode === "tui" && editor && eligible(editor, true)) await search(ctx);
-    },
-  });
   pi.registerCommand("history-search", {
     description: "Search prompts from this session",
     handler: async (args, ctx) => {
@@ -309,6 +302,15 @@ export default function historySearch(pi: ExtensionAPI) {
       lastFocus = focus;
       const editor = focusedEditor();
       if (!editor || !eligible(editor)) { reset(); return; }
+      // Pi checks registered shortcuts against all built-ins, including the
+      // selector-only session rename. Own Ctrl+R only at the main editor in
+      // Insert/native mode; selectors and Vim Normal redo keep their input.
+      if (matchesKey(data, "ctrl+r")) {
+        reset();
+        if (opening || !eligible(editor, true)) return;
+        void search(ctx);
+        return { consume: true };
+      }
       const keys = getKeybindings();
       const direction = keys.matches(data, "tui.editor.historyPrevious") ? -1
         : keys.matches(data, "tui.editor.historyNext") ? 1 : undefined;

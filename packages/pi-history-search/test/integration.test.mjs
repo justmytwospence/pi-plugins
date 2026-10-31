@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createJiti } from 'jiti';
 import { Container, Editor, getKeybindings, setKeybindings, matchesKey, stripTerminalSequences, visibleWidth } from '@earendil-works/pi-tui';
-const { TuiBase } = await import(new URL('./tui.js', import.meta.resolve('@earendil-works/pi-tui')));
+const tuiUrl = process.env.PI_TEST_SDK
+  ? pathToFileURL(createRequire(pathToFileURL(process.env.PI_TEST_SDK)).resolve('@earendil-works/pi-tui')).href
+  : import.meta.resolve('@earendil-works/pi-tui');
+const { TuiBase } = await import(new URL('./tui.js', tuiUrl));
 import { CustomEditor } from '@earendil-works/pi-coding-agent';
 const { KeybindingsManager } = await import(new URL('./core/keybindings.js', import.meta.resolve('@earendil-works/pi-coding-agent')));
 const { InteractiveMode } = await import(new URL('./modes/interactive/interactive-mode.js',
@@ -19,6 +23,12 @@ const { MainEditor } = await jiti.import(sibling('pi-vim', 'src', 'main-editor.t
 const { EmbeddedEditor } = await jiti.import(sibling('pi-vim', 'src', 'embedded-editor.ts'));
 const { setPiVimSettingsReaderForTests } = await jiti.import(sibling('pi-vim', 'src', 'engine', 'settings.ts'));
 setPiVimSettingsReaderForTests(() => ({}));
+
+const { initTheme } = await import(process.env.PI_TEST_SDK ? pathToFileURL(process.env.PI_TEST_SDK).href : '@earendil-works/pi-coding-agent');
+initTheme('dark', false);
+const selectorTui = await import(tuiUrl);
+const { SessionSelectorComponent } = await import(new URL('./modes/interactive/components/session-selector.js',
+  process.env.PI_TEST_SDK ? pathToFileURL(process.env.PI_TEST_SDK) : import.meta.resolve('@earendil-works/pi-coding-agent')));
 
 const SURFACE = Symbol.for('pi-plugins.editor-surface.v1');
 const MODE = Symbol.for('pi-plugins.editor-mode.v1');
@@ -122,6 +132,14 @@ async function fixture(t, { vim = false, mode = 'tui', bindings = {}, draft = 'a
       });
     },
   } };
+  const custom = ctx.ui.custom;
+  ctx.ui.custom = (...args) => {
+    const result = custom(...args);
+    // Wait past both native done and the search continuation, as the former
+    // registered shortcut promise did before terminal-listener dispatch.
+    pending = result.then(() => {}, () => {});
+    return result;
+  };
   install({ on: (event, handler) => events.set(event, handler),
     registerShortcut: (key, value) => shortcuts.set(key, value), registerCommand: (key, value) => commands.set(key, value) });
   const emit = event => events.get(event)?.({}, ctx);
@@ -150,7 +168,7 @@ async function fixture(t, { vim = false, mode = 'tui', bindings = {}, draft = 'a
 
 test('factory registrations, probe removal and native prefix boundaries use configured actions', async t => {
   const f = await fixture(t);
-  assert.equal(f.shortcuts.get('ctrl+r').description, 'Search session prompt history');
+  assert.equal(f.shortcuts.size, 0, 'selector-only Ctrl+R rename must not conflict');
   assert.equal(f.commands.get('history-search').description, 'Search prompts from this session');
   assert.deepEqual(f.widgets.map(([, active]) => active), [true, false]);
   assert.equal(f.listeners.size, 1);
@@ -657,6 +675,49 @@ test('real Vim engine dispatch: Insert searches; Normal Ctrl+R redoes without in
   f.close(undefined); await command;
 });
 
+for (const vim of [false, true]) {
+  test(`real TUI listener dispatch preserves selector rename (${vim ? 'Vim' : 'native'})`, async t => {
+    const f = await fixture(t, { vim, draft: '' });
+    const ui = new TuiBase({ rows: 30, columns: 80, hideCursor() {} });
+    ui.requestRender = () => {};
+    ui.doRender = () => {}; // TuiBase dispatch can schedule an immediate paint.
+    for (const listener of f.listeners) ui.addInputListener(listener);
+    const focus = component => { f.focus = component; ui.setFocus(component); };
+    const send = data => ui.handleTerminalInput(data);
+    focus(f.main);
+    send(SEARCH); assert.equal(f.opens, 1);
+    send(SEARCH); assert.equal(f.opens, 1, 'picker owns repeated Ctrl+R');
+    f.send(ESC); await f.pending;
+    if (vim) {
+      send('a'); send('b'); send(ESC); send('u');
+      assert.equal(f.main.getText(), '');
+      send(SEARCH);
+      assert.equal(f.main.getText(), 'ab', 'terminal listener must pass Normal redo through');
+      assert.equal(f.opens, 1);
+    }
+    const session = { id: 'test', path: '/tmp/history-search-test.jsonl', name: 'Before',
+      cwd: '/tmp', created: new Date(), modified: new Date(), messageCount: 1, firstMessage: 'test' };
+    const renamed = [];
+    const previousSelectorKeys = selectorTui.getKeybindings();
+    selectorTui.setKeybindings(f.keys);
+    t.after(() => selectorTui.setKeybindings(previousSelectorKeys));
+    const selector = new SessionSelectorComponent(async () => [session], async () => [session],
+      () => {}, () => {}, () => {}, () => {}, {
+        keybindings: f.keys, renameSession: async (...args) => renamed.push(args),
+      });
+    // Let the actual selector's asynchronous initial load settle.
+    await new Promise(resolve => setImmediate(resolve));
+    focus(selector);
+    send(SEARCH);
+    assert.equal(selector.mode, 'rename');
+    assert.equal(f.opens, 1, 'selector never opens history');
+    selector.renameInput.setValue('After');
+    send('\r');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(renamed, [[session.path, 'After']]);
+  });
+}
+
 test('real Vim EX, Visual, pending, autocomplete and embedded focus retain local ownership', async t => {
   const f = await fixture(t, { vim: true });
   for (const sequence of [[ESC, ':'], [ESC, 'v'], [ESC, 'd'], [ESC, '2']]) {
@@ -664,14 +725,13 @@ test('real Vim EX, Visual, pending, autocomplete and embedded focus retain local
     f.send(...sequence);
     assert.ok(['ex', 'visual', 'pending'].includes(f.main[MODE]().state));
     assert.equal(f.send(PREV)[0], undefined);
-    await f.shortcuts.get('ctrl+r').handler(f.ctx); // explicit handler guard, in addition to actual engine dispatch
-    f.send(SEARCH); assert.equal(f.opens, 0);
+    assert.equal(f.send(SEARCH)[0], undefined); assert.equal(f.opens, 0);
   }
   f.main[SNAPSHOT].restore({ version: 1, text: 'al', cursor: { line: 0, col: 0 }, mode: 'insert' });
   const autocomplete = f.main.isShowingAutocomplete;
   f.main.isShowingAutocomplete = () => true;
   assert.equal(f.send(PREV)[0], undefined);
-  await f.shortcuts.get('ctrl+r').handler(f.ctx); assert.equal(f.opens, 0);
+  assert.equal(f.send(SEARCH)[0], undefined); assert.equal(f.opens, 0);
   f.main.isShowingAutocomplete = autocomplete;
   const embedded = new EmbeddedEditor({ surface: 'embedded', tui: f.tui, theme: editorTheme, keybindings: f.keys, initialText: 'al' });
   t.after(() => embedded.dispose()); f.wire(embedded); f.focus = embedded;
