@@ -1,5 +1,5 @@
 import { InteractiveMode } from "@earendil-works/pi-coding-agent";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { sliceByColumn, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, test, vi } from "vitest";
 import {
   collectSections,
@@ -456,29 +456,19 @@ describe("startup resources", () => {
     }
   });
 
-  test("the quiet splash keeps its context watcher without swallowing native MCP warnings", async () => {
-    const { watchMcpState, stopStartupResources } = await import("../src/feature/shell/startup-resources.ts");
-    const { attachStartupHost, disposeStartupHost } = await import("../src/feature/shell/startup-state.ts");
+  test("quiet startup leaves native diagnostics alone and starts no map watcher", async () => {
+    const { replaceSections, stopStartupResources } = await import("../src/feature/shell/startup-resources.ts");
     const { mcpState } = await import("../src/feature/shell/mcp-servers.ts");
     vi.useFakeTimers();
-    const component = { render: () => [], invalidate() {} };
-    const mode = { sessionManager: { getSessionId: () => "quiet" }, loadedResourcesContainer: { children: [component] } };
-    const host = attachStartupHost(mode);
-    host.refresh = vi.fn();
-    const update = vi.fn();
+    const warning = { render: () => ["[Extension issues] failed"], invalidate() {} };
+    const mode = { shouldShowStartupDetails: () => false, loadedResourcesContainer: { children: [warning] } };
     try {
-      watchMcpState(mode, component, update, true);
-      expect(host.refresh).toHaveBeenCalledTimes(1);
-      await vi.advanceTimersByTimeAsync(2000);
-      expect(host.refresh).toHaveBeenCalledTimes(3);
-      expect(update).not.toHaveBeenCalled();
+      replaceSections(mode, { showDiagnosticsWhenQuiet: true });
+      expect(mode.loadedResourcesContainer.children).toEqual([warning]);
       expect(mcpState.mounted).toBe(false);
-      mode.loadedResourcesContainer.children.length = 0;
-      await vi.advanceTimersByTimeAsync(1000);
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       stopStartupResources();
-      disposeStartupHost(mode);
       vi.useRealTimers();
     }
   });
@@ -541,6 +531,23 @@ describe("startup resources", () => {
       "  ★ gpt-6.1-sol:high  922K",
     ]);
     expect(buildModelsSection([])).toBeUndefined();
+    const google = buildModelsSection([
+      { provider: "google", id: "antigravity-gemini-4-argon" },
+      { provider: "google", id: "antigravity-gemma-3" },
+      { provider: "google", id: "antigravity-claude-opus-5-5" },
+      { provider: "google", id: "antigravity-gpt-oss-120b-medium" },
+      { provider: "google", id: "gemini-3.5-pro" },
+      { provider: "anthropic", id: "claude-opus-5-5" },
+    ], [
+      { provider: "google", id: "antigravity-claude-opus-5-5" },
+      { provider: "google", id: "antigravity-gpt-oss-120b-medium" },
+      { provider: "google", id: "antigravity-gemini-4-argon" },
+      { provider: "google", id: "antigravity-gemma-3" },
+    ], { provider: "google", id: "antigravity-claude-opus-5-5" })!;
+    expect(google.groups.map((group) => group.label)).toEqual(["anthropic", "google"]);
+    expect(google.groups[1]!.items).toEqual(expect.arrayContaining(["antigravity-gemini-4-argon", "antigravity-gemma-3", "gemini-3.5-pro"]));
+    expect(google.groups[1]!.items.every((item) => !item.includes("claude") && !item.includes("gpt"))).toBe(true);
+    expect(google.groups[1]!.actions!.every((action) => action?.kind === "model" && action.provider === "google")).toBe(true);
     const mode = {
       session: {
         scopedModels: [],
@@ -588,12 +595,13 @@ describe("startup resources", () => {
     expect(formatContextWindow(undefined)).toBe("");
   });
 
-  test("a long column splits into sub-columns under its heading", async () => {
+  test("a long column uses quotient/remainder splits under its heading", async () => {
     const items = Array.from({ length: 10 }, (_, i) => `m${i}`);
     const lines = renderSection({ title: "C", count: items.length, layout: "columns", groups: [{ label: "p", items }] }, 80, plainTheme);
-    expect(lines).toHaveLength(7);
-    expect(lines[2]).toBe("  m0   m5");
-    expect(lines[4]).toBe("  m2   m7");
+    expect(lines).toHaveLength(6);
+    expect(lines[2]).toBe("  m0   m4   m7");
+    expect(lines[4]).toBe("  m2   m6   m9");
+    expect(lines[5]).toBe("  m3");
   });
 
   test("balanced one-scope MCP columns use available width without stealing metadata", async () => {
@@ -601,12 +609,13 @@ describe("startup resources", () => {
     for (const count of [4, 8, 10, 17]) {
       const section = buildMcpSection(Array.from({ length: count }, (_, n) => ({ name: `s${n}`, level: "user" as const })), () => "connected", undefined, () => 1)!;
       const wide = renderSection(section, 180, plainTheme);
-      const columns = Array.from({ length: Math.max(1, Math.floor(count / 3)) }, (_, i) => i + 1)
-        .filter((n) => n === 1 || count - (n - 1) * Math.ceil(count / n) >= 3).at(-1)!;
+      const columns = Math.max(1, Math.floor(count / 3));
       expect(wide).toHaveLength(2 + Math.ceil(count / columns));
       const firstData = wide[2]!;
       expect(firstData.split("connected · 1 tool").length - 1).toBe(columns);
       expect(wide[2]).toContain("connected · 1 tool");
+      if (count === 10) expect(wide.slice(2).map((line) => (line.match(/connected · 1 tool/g) ?? []).length)).toEqual([3, 3, 3, 1]);
+      if (count === 17) expect(wide.slice(2).map((line) => (line.match(/connected · 1 tool/g) ?? []).length)).toEqual([5, 5, 5, 2]);
       expect(wide.every((line) => visibleWidth(line) <= 180)).toBe(true);
       for (const width of [46, 120, 180]) {
         const lines = renderSection(section, width, plainTheme);
@@ -637,6 +646,34 @@ describe("startup resources", () => {
         expect(hit.row).toBeGreaterThan(0);
         expect(lines[hit.row]).toBeDefined();
         expect(visibleWidth(lines[hit.row]!)).toBeGreaterThan(hit.startCol);
+      }
+    }
+  });
+
+  test("all widths keep balanced sections and hit rectangles inside the viewport", async () => {
+    const { buildModelsSection, buildMcpSection } = await import("../src/feature/shell/startup-resources.ts");
+    const models = buildModelsSection([
+      ...Array.from({ length: 17 }, (_, n) => ({ provider: "google", id: `antigravity-gemini-${n}-flash`, contextWindow: 200_000 })),
+      { provider: "anthropic", id: "claude-opus-5-5", contextWindow: 1_048_576 },
+      { provider: "openai", id: "gpt-6.1-sol", contextWindow: 922_000 },
+    ], Array.from({ length: 17 }, (_, n) => ({ provider: "google", id: `antigravity-gemini-${n}-flash` })))!;
+    const mcp = buildMcpSection(Array.from({ length: 17 }, (_, n) => ({ name: `s${n}`, level: "user" as const })), () => "connected", undefined, () => 1)!;
+    const widths = [...Array.from({ length: 200 }, (_, n) => n + 1), 240];
+    for (const width of widths) for (const section of [models, mcp]) {
+      const { lines, hits } = layoutSection(section, width, plainTheme);
+      expect(lines.every((line) => visibleWidth(line) <= width), `${section.title} at ${width}`).toBe(true);
+      for (const hit of hits) {
+        expect(hit.row, `${section.title} at ${width}`).toBeGreaterThan(0);
+        expect(hit.row).toBeLessThan(lines.length);
+        expect(hit.startCol).toBeGreaterThanOrEqual(0);
+        expect(hit.endCol).toBeLessThanOrEqual(width);
+        expect(hit.endCol).toBeGreaterThan(hit.startCol);
+        expect(sliceByColumn(lines[hit.row]!, hit.startCol, hit.endCol).trim()).not.toBe("");
+      }
+      if (width >= 120) {
+        const unique = new Set(hits.map((hit) => JSON.stringify(hit.action)));
+        expect(unique.size, `${section.title} at ${width}`).toBe(section.count);
+        expect(lines[0]).toContain(`${section.title} ${section.count}`);
       }
     }
   });

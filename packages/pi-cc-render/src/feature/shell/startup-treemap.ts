@@ -105,7 +105,7 @@ function mapSources(sources: ContextSource[], width: number, height: number): Co
 	});
 }
 
-/** Header rendering only; collection and cache updates happen in the owner tick, never here. */
+/** Resource map rendering only; collection and cache updates happen in the owner tick, never here. */
 export function renderContextTreemap(snapshot: StartupContextSnapshot, width: number, theme: ContextTheme): string[] {
 	width = Math.max(0, Math.floor(width));
 	if (!width) return [];

@@ -1,4 +1,4 @@
-// Actual pi-cc-render header/resource renderers over Pi's real editor and native MCP manager view.
+// Actual pi-cc-render splash/resource renderers over Pi's real editor and native MCP manager view.
 // The manager is opened only to its first menu and cancelled: this fixture never changes MCP config.
 import assert from 'node:assert/strict';
 import { stripVTControlCharacters } from 'node:util';
@@ -31,29 +31,47 @@ const mcp = buildMcpSection([
   { name: 'example-docs', level: 'project' }, { name: 'example-search', level: 'project' },
 ], () => 'connected', () => undefined, () => 2);
 assert.ok(models && mcp, 'real resource builders must produce models and MCP sections');
+const resources = [
+  { title: 'Context', count: 1, layout: 'columns', category: 'files', groups: [{ label: 'project', items: ['AGENTS.md'], tokens: [900] }], tokens: 900, contextWindow: snapshot.contextWindow },
+  { title: 'Skills', count: 1, layout: 'grid', category: 'skills', groups: [{ label: 'user', items: ['example-skill'], tokens: [120] }], tokens: 120, contextWindow: snapshot.contextWindow },
+  { title: 'Prompts', count: 1, layout: 'grid', groups: [{ label: 'project', items: ['/review'] }] },
+  { title: 'Extensions', count: 1, layout: 'grid', category: 'tools', groups: [{ label: 'project', items: ['example-extension'] }] },
+];
 
 /** The same read-only splash, editor and footer dock in Pi's normal and Sidebar layouts. */
 export async function startupSplashScreens({ theme, getEditorTheme, kb, sidebarScreen, idleFooter, height }) {
   const screens = [];
-  const tui = { terminal: { rows: height, columns: 180 }, requestRender() {} };
+  // Sidebar stacks below main at phone width; leave enough rows for the full listing and dock.
+  const splashHeight = Math.max(height, 120);
+  const tui = { terminal: { rows: splashHeight, columns: 180 }, requestRender() {} };
   const editor = new CustomEditor(tui, getEditorTheme(), kb, { paddingX: 0 });
   editor.setText('next step');
   let focused = editor;
   const editorContainer = new Container();
   editorContainer.addChild(editor);
   const managerTui = { ...tui, setFocus: component => { focused = component; }, getFocusedComponent: () => focused };
+  // The native header is empty: Pi's startup listing owns Models, followed by the context map
+  // and the remaining resources in the transcript, above either dock.
   const transcript = { render: width => [
-    ...renderHeaderLines(width, theme, snapshot),
     ...renderSection(models, width, theme),
+    ...renderHeaderLines(width, theme, snapshot),
+    ...resources.flatMap(section => renderSection(section, width, theme)),
     ...renderSection(mcp, width, theme),
   ], invalidate() {} };
+  for (const width of [46, 120, 180]) {
+    const lines = transcript.render(width).map(stripVTControlCharacters);
+    const headings = ['Models', 'Sources · occupied context', 'Context', 'Skills', 'Prompts', 'Extensions', 'MCP'];
+    const positions = headings.map(heading => lines.findIndex(line => line.includes(heading)));
+    assert.ok(positions.every((position, index) => position >= 0 && (!index || position > positions[index - 1])),
+      `startup listing follows Models → map → resources at width ${width}: ${JSON.stringify(positions)}`);
+  }
   const sidebarOptions = [
     ['without Sidebar', { open: false }],
     ['Sidebar open, main focused', { focused: false }],
     ['Sidebar open, Sidebar focused', { focused: true }],
   ];
   const render = (width, dock, options) => {
-    const { lines } = sidebarScreen({ width, height, transcript, dock, footer: idleFooter, ...options });
+    const { lines } = sidebarScreen({ width, height: splashHeight, transcript, dock, footer: idleFooter, ...options });
     const text = stripVTControlCharacters(lines.join('\n'));
     assert.match(text, /Sources · occupied context/u, 'the real splash remains above the editor or MCP manager');
     assert.match(text, /Models/u, 'model resource rows are on screen');

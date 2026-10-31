@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DefaultResourceLoader, InteractiveMode, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Markdown } from "@earendil-works/pi-tui";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -78,7 +78,7 @@ describe("extension factory", () => {
     expect((InteractiveMode as any).prototype.init).toBe(second.installed);
   });
 
-  test("early paint uses a loading context map, while disabling the setting leaves the native header", async () => {
+  test("early paint suppresses the native banner, while disabling the setting leaves it intact", async () => {
     const { config } = await import("../src/config/config.ts");
     const { installEarlyStartupHeader } = await import("../src/feature/shell/startup-header.ts");
     const { disposeStartupHost } = await import("../src/feature/shell/startup-state.ts");
@@ -106,12 +106,12 @@ describe("extension factory", () => {
       const first = makeMode("early-1");
       await prototype.init.call(first.mode);
       expect(first.headers).toHaveLength(1);
-      expect(first.headers[0].render(46)[0]).toContain("Starting context · loading");
+      expect(first.headers[0].render(46)).toEqual([]);
       installEarlyStartupHeader();
       const second = makeMode("early-2");
       await prototype.init.call(second.mode);
       expect(second.headers).toHaveLength(1);
-      expect(second.headers[0].render(46)[0]).toContain("Starting context · loading");
+      expect(second.headers[0].render(46)).toEqual([]);
       config.showStartupHeader = false;
       const native = makeMode("early-native");
       await prototype.init.call(native.mode);
@@ -127,7 +127,7 @@ describe("extension factory", () => {
     }
   });
 
-  test("session_start reuses its header state and refresh hooks follow session replacement and shutdown", async () => {
+  test("session_start leaves the header empty while the resource owner retains session state", async () => {
     const { default: startupHeader, applyStartupHeader } = await import("../src/feature/shell/startup-header.ts");
     const { attachStartupHost, getStartupHost, disposeStartupHost } = await import("../src/feature/shell/startup-state.ts");
     const handlers = new Map<string, (event: any, ctx: any) => void>();
@@ -144,34 +144,28 @@ describe("extension factory", () => {
       setHeader: (value: any) => { factory = value; }, requestRender: () => renders++,
     } };
     try {
-      // A session_start keeps the same owner and installs the current snapshot's factory.
+      // session_start must not capture or rebind the resource owner's snapshot.
       handlers.get("session_start")!({}, ctx);
       expect(getStartupHost(id.value)).toBe(state);
-      expect(factory({}, ctx.ui.theme).render(120)[0]).toContain("Starting context");
-      state.contextSnapshot = snapshot;
-      let refreshed = 0;
-      state.refresh = () => { refreshed++; state.repaint?.(); };
-      for (const name of ["model_select", "session_tree", "session_compact", "agent_end", "agent_settled"]) {
-        handlers.get(name)!({}, ctx);
-      }
-      expect(refreshed).toBe(5);
-      expect(renders).toBeGreaterThanOrEqual(5);
+      expect(factory({}, ctx.ui.theme).render(120)).toEqual([]);
+      expect(state.contextSnapshot).toBe(snapshot);
+      expect(renders).toBe(0);
       id.value = "header-session-2";
       expect(attachStartupHost(mode)).toBe(state);
       expect(getStartupHost("header-session-1")).toBeUndefined();
       expect(getStartupHost(id.value)).toBe(state);
       handlers.get("session_shutdown")!({}, ctx);
-      expect(getStartupHost(id.value)).toBeUndefined();
+      expect(getStartupHost(id.value)).toBe(state);
       expect(factory).toBeUndefined();
-      // Explicit reinstall after disposal creates a fresh owner (not a leaked old callback).
+      // Header installation never creates or replaces the resource owner.
       applyStartupHeader(ctx);
-      expect(getStartupHost(id.value)).toBeUndefined();
+      expect(getStartupHost(id.value)).toBe(state);
     } finally {
       disposeStartupHost(mode);
     }
   });
 
-  test("session_start recovers an early header before Pi assigns its first session ID", async () => {
+  test("session_start does not bind to a missing session ID before resources exist", async () => {
     const { applyStartupHeader } = await import("../src/feature/shell/startup-header.ts");
     const { attachStartupHost, disposeStartupHost, getStartupHost } = await import("../src/feature/shell/startup-state.ts");
     let id: string | undefined;
@@ -185,10 +179,86 @@ describe("extension factory", () => {
       applyStartupHeader({ hasUI: true, sessionManager: manager, ui: {
         setHeader: (value: any) => { factory = value; }, requestRender() {},
       } });
-      expect(getStartupHost(id)).toBe(state);
+      expect(getStartupHost(id)).toBeUndefined();
       expect(factory).toBeTypeOf("function");
-      expect(factory({}, { fg: (_color: string, text: string) => text }).render(46)[0]).toContain("Starting context");
+      expect(factory({}, { fg: (_color: string, text: string) => text }).render(46)).toEqual([]);
+      expect(attachStartupHost(mode)).toBe(state);
+      expect(getStartupHost(id)).toBe(state);
     } finally { disposeStartupHost(mode); }
+  });
+
+  test("a session_start before resource installation still mounts a live map after Models", async () => {
+    const { applyStartupHeader } = await import("../src/feature/shell/startup-header.ts");
+    const { replaceSections, stopStartupResources } = await import("../src/feature/shell/startup-resources.ts");
+    const { attachStartupHost, disposeStartupHost } = await import("../src/feature/shell/startup-state.ts");
+    vi.useFakeTimers();
+    let id: string | undefined;
+    const content = "Known AGENTS content for the occupied context map.";
+    const file = { path: resolve(temp, "AGENTS.md"), content };
+    const manager = {
+      getSessionId: () => id, getLeafId: () => undefined, getCwd: () => temp,
+      buildSessionProjection: () => ({ messages: [] }),
+    };
+    const models = [
+      { provider: "anthropic", id: "claude-opus-5-5", contextWindow: 200_000 },
+      { provider: "openai", id: "gpt-6.1-sol", contextWindow: 1_048_576 },
+    ];
+    const loader = {
+      agentDir: temp,
+      getSystemPromptSource: () => undefined, getSystemPrompt: () => "",
+      getAppendSystemPromptSources: () => [], getAppendSystemPrompt: () => [],
+      getAgentsFiles: () => ({ agentsFiles: [file] }), getSkills: () => ({ skills: [] }),
+    };
+    const runner = {
+      createCommandContext: () => ({ getSystemPromptOptions: () => ({ contextFiles: [file], skills: [], selectedTools: ["read"], hiddenTools: [] }) }),
+      runtime: { mcpServers: { list: () => [] } }, getCommand: () => undefined,
+    };
+    const session: any = {
+      sessionManager: manager, resourceLoader: loader, extensionRunner: runner,
+      systemPrompt: `Introduction.\n${content}\nEnd.`, agent: { state: { tools: [] } },
+      _hiddenDeclarations: new Set<string>(), model: models[0], scopedModels: [],
+      modelRuntime: { getAvailableSnapshot: () => models }, getAllTools: () => [],
+      promptTemplates: [],
+    };
+    const mode: any = {
+      session, sessionManager: manager, loadedResourcesContainer: { children: [] as any[] },
+      settingsManager: { isProjectTrusted: () => false }, shouldShowStartupDetails: () => true,
+      formatContextPath: (path: string) => path.split("/").at(-1),
+      ui: { requestRender: () => undefined },
+    };
+    let header: any;
+    const native = () => ({ setExpanded() {}, state: { expanded: false }, render: () => ["[Context] native"] });
+    const lines = () => mode.loadedResourcesContainer.children.flatMap((child: any) => child.render(120)).join("\n");
+    try {
+      // This is the failing real-world ordering: the header event fires before a resource owner exists.
+      applyStartupHeader({ hasUI: true, sessionManager: manager, ui: { setHeader: (factory: any) => { header = factory; }, requestRender() {} } });
+      expect(header({}, { fg: (_color: string, text: string) => text, bold: (text: string) => text }).render(120)).toEqual([]);
+      mode.loadedResourcesContainer.children = [native()];
+      replaceSections(mode, { force: true, extensions: [] });
+      const first = lines();
+      expect(first.indexOf("Models 2")).toBeLessThan(first.indexOf("Starting context"));
+      expect(first.indexOf("Starting context")).toBeLessThan(first.indexOf("Context 1"));
+      expect(first).toContain("Sources · occupied context");
+      expect(first).not.toContain("loading");
+      expect(attachStartupHost(mode).contextSnapshot?.attribution.files).toBe(true);
+      expect(attachStartupHost(mode).resourceSections?.Context?.tokens).toBeGreaterThan(0);
+      session.model = models[1];
+      attachStartupHost(mode).refresh?.();
+      expect(lines()).toContain("/ 1M");
+      expect(lines()).toContain("gpt-6.1-sol ●");
+      id = "saved-session";
+      attachStartupHost(mode).refresh?.();
+      expect(lines()).not.toContain("loading");
+      // Pi clears and reconstructs the native sections on reload/resume; our insertion stays singular.
+      mode.loadedResourcesContainer.children = [native()];
+      replaceSections(mode, { force: true, extensions: [] });
+      expect(lines().match(/Sources · occupied context/g)).toHaveLength(1);
+      expect(lines().indexOf("Models 2")).toBeLessThan(lines().indexOf("Starting context"));
+    } finally {
+      stopStartupResources();
+      disposeStartupHost(mode);
+      vi.useRealTimers();
+    }
   });
 
   test("/ccstyle status reports the configuration and other arguments require the TUI", async () => {

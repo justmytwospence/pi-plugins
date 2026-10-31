@@ -2,8 +2,7 @@ import { InteractiveMode } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { config } from "../../config/config.ts";
 import { setStartupResourcesTheme } from "./startup-resources.ts";
-import { readStartupContext, type StartupContextSnapshot } from "./startup-context.ts";
-import { attachStartupHost, disposeStartupHost, getStartupHost, getStartupHostForManager, type StartupHostState } from "./startup-state.ts";
+import type { StartupContextSnapshot } from "./startup-context.ts";
 import { renderContextTreemap } from "./startup-treemap.ts";
 import {
 	EARLY_STARTUP_HEADER_PATCH,
@@ -11,11 +10,12 @@ import {
 	patchRegistry,
 } from "../../utils/patch-keys.ts";
 
-const LOADING: StartupContextSnapshot = {
-	stage: "initializing", modelLabel: "Model unknown", usedEstimate: 0, sources: [], attribution: { files: false, skills: false }, caveats: [],
+const emptyHeader = (_tui: unknown, theme: any) => {
+	setStartupResourcesTheme(() => theme);
+	return { render: (_width: number): string[] => [], invalidate() {} };
 };
 
-/** Explicit snapshot keeps collection out of the component's render path. */
+/** Explicit snapshot helper for rendering fixtures; the resource installer owns the live map. */
 export function renderHeaderLines(
 	width: number,
 	theme: Parameters<typeof renderContextTreemap>[2],
@@ -24,47 +24,10 @@ export function renderHeaderLines(
 	return renderContextTreemap(snapshot, width, theme);
 }
 
-function refreshHeader(state: StartupHostState): void {
-	const previous = state.contextSnapshot;
-	const next = readStartupContext(state.mode);
-	if (next.stage === "initializing" && previous && previous.stage !== "initializing") return;
-	if (JSON.stringify(previous) === JSON.stringify(next)) return;
-	state.contextSnapshot = next;
-	state.repaint?.();
-}
-
-/** Component factory for the host's setHeader: the theme is injected by the host. */
-function headerFactory(
-	getSnapshot: () => StartupContextSnapshot,
-	invalidateHeader?: () => void,
-): (tui: unknown, theme: any) => { render(width: number): string[]; invalidate(): void } {
-	return (_tui: unknown, theme: any) => {
-		setStartupResourcesTheme(() => theme);
-		return {
-			render(width: number): string[] {
-				return renderHeaderLines(width, theme, getSnapshot());
-			},
-			invalidate() { invalidateHeader?.(); },
-		};
-	};
-}
-
-function stateForContext(ctx: any): StartupHostState | undefined {
-	const id = ctx?.sessionManager?.getSessionId?.();
-	return (id ? getStartupHost(id) : undefined) ?? (ctx?.sessionManager ? getStartupHostForManager(ctx.sessionManager) : undefined);
-}
-
-/** Install into the existing header slot without replacing an early owner's snapshot. */
+/** Suppress the native banner; no snapshot lookup occurs before the resources are installed. */
 export function applyStartupHeader(ctx: any): void {
 	if (!ctx?.hasUI || typeof ctx.ui?.setHeader !== "function" || !config.showStartupHeader) return;
-	const state = stateForContext(ctx);
-	if (state) {
-		attachStartupHost(state.mode);
-		state.repaint = () => ctx.ui.requestRender?.();
-		if (state.refresh) state.refresh();
-		else refreshHeader(state);
-	}
-	ctx.ui.setHeader(headerFactory(() => state?.contextSnapshot ?? LOADING));
+	ctx.ui.setHeader(emptyHeader);
 }
 
 type EarlyHeaderPatch = {
@@ -110,11 +73,7 @@ function installHeaderContainerSwap(mode: any, patch: EarlyHeaderPatch): void {
 		if (!patch.active || !config.showStartupHeader || child !== mode.builtInHeader) return result;
 		if (typeof mode.setExtensionHeader !== "function") return result;
 		try {
-			const state = attachStartupHost(mode);
-			// A loading paint is valid until the session is ready. Never collect inside render().
-			refreshHeader(state);
-			state.repaint = () => mode.ui?.requestRender?.();
-			mode.setExtensionHeader(headerFactory(() => state.contextSnapshot ?? LOADING));
+			mode.setExtensionHeader(emptyHeader);
 		} catch {
 			// If swapping the header fails, leave Pi's native header intact.
 		}
@@ -135,22 +94,7 @@ export default function piStartupHeader(pi: ExtensionAPI) {
 		if (ctx.hasUI) setStartupResourcesTheme(() => ctx.ui.theme);
 		applyStartupHeader(ctx);
 	});
-
-	const onRefresh = pi.on.bind(pi) as (event: string, handler: (event: unknown, ctx: any) => void) => void;
-	for (const event of ["model_select", "session_tree", "session_compact", "agent_end", "agent_settled"] as const) {
-		onRefresh(event, (_event, ctx) => {
-			if (!config.showStartupHeader || !ctx.hasUI) return;
-			const state = stateForContext(ctx);
-			if (!state) return;
-			attachStartupHost(state.mode);
-			if (state.refresh) state.refresh();
-			else refreshHeader(state);
-		});
-	}
-
 	pi.on("session_shutdown", async (_event, ctx) => {
-		const state = stateForContext(ctx);
-		if (state) disposeStartupHost(state.mode);
 		if (ctx.hasUI) ctx.ui.setHeader(undefined);
 	});
 }

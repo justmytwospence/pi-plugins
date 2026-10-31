@@ -20,6 +20,7 @@ import {
 import { MCP_NOTIFY_PATCH, STARTUP_RESOURCES_PATCH, patchRegistry } from "../../utils/patch-keys.ts";
 import { categoryStyle, GLYPHS } from "./startup-style.ts";
 import { readStartupContext, type StartupContextSnapshot } from "./startup-context.ts";
+import { renderContextTreemap } from "./startup-treemap.ts";
 import { attachStartupHost, disposeStartupHost } from "./startup-state.ts";
 import { createInteractiveSection, createSplashActionController } from "./startup-interactions.ts";
 export { GLYPHS } from "./startup-style.ts";
@@ -322,7 +323,7 @@ export const COLUMN_MAX_ROWS = 8;
 type Cell = { name: string; count: string; color: string; action?: SplashAction };
 type CellHit = { row: number; startCol: number; endCol: number; action: SplashAction };
 type Block = { lines: string[]; hits: CellHit[]; width: number; height: number; columns: number };
-type Candidate = { columns: number; rows: number; width: number; widths: Array<{ name: number; count: number; total: number }> };
+type Candidate = { columns: number; rows: number; width: number; lengths: number[]; widths: Array<{ name: number; count: number; total: number }> };
 
 function candidateShapes(group: ResourceGroup, available: number, theme: StartupTheme, category?: ResourceSection["category"]): { cells: Cell[]; heading: string; shapes: Candidate[] } {
 	const heading = `${theme.fg("accent", group.label ?? "")} ${theme.fg("dim", String(group.items.length))}`;
@@ -338,11 +339,12 @@ function candidateShapes(group: ResourceGroup, available: number, theme: Startup
 	const shapes: Candidate[] = [];
 	for (let columns = 1; columns <= Math.max(1, Math.floor(cells.length / 3)); columns++) {
 		const rows = Math.ceil(cells.length / columns);
-		const actualColumns = Math.ceil(cells.length / Math.max(1, rows));
-		const lastColumn = cells.length - (columns - 1) * rows;
-		if (actualColumns !== columns || (columns > 1 && lastColumn < 3)) continue;
-		const widths = Array.from({ length: columns }, (_, index) => {
-			const items = cells.slice(index * rows, (index + 1) * rows);
+		const base = Math.floor(cells.length / columns);
+		const lengths = Array.from({ length: columns }, (_, index) => base + (index < cells.length % columns ? 1 : 0));
+		let offset = 0;
+		const widths = lengths.map((length) => {
+			const items = cells.slice(offset, offset + length);
+			offset += length;
 			const count = Math.max(0, ...items.map((cell) => visibleWidth(cell.count)));
 			const natural = Math.max(0, ...items.map((cell) => visibleWidth(cell.name)));
 			const name = columns === 1 ? Math.min(natural, Math.max(0, available - (count ? count + 2 : 0))) : natural;
@@ -350,7 +352,7 @@ function candidateShapes(group: ResourceGroup, available: number, theme: Startup
 			return { name, count, total: name + gap + count };
 		});
 		const width = Math.max(visibleWidth(heading), widths.reduce((sum, item) => sum + item.total, 0) + COLUMN_GAP * (columns - 1));
-		if (width <= available || columns === 1) shapes.push({ columns, rows, width: Math.min(available, width), widths });
+		if (width <= available || columns === 1) shapes.push({ columns, rows, width: Math.min(available, width), lengths, widths });
 	}
 	// A wider candidate with no height benefit can never improve a band.
 	return { cells, heading, shapes: shapes.filter((shape) => !shapes.some((other) => other !== shape && other.width <= shape.width && other.rows <= shape.rows && (other.width < shape.width || other.rows < shape.rows))) };
@@ -360,12 +362,13 @@ function columnBlock(shape: Candidate, cells: Cell[], heading: string, available
 	const width = Math.min(available, shape.width);
 	const lines = [truncateToWidth(heading, width)];
 	const hits: CellHit[] = [];
+	let offset = 0;
+	const starts = shape.lengths.map((length) => { const start = offset; offset += length; return start; });
 	for (let row = 0; row < shape.rows; row++) {
 		let line = "";
 		for (let column = 0; column < shape.columns; column++) {
 			if (column) line += " ".repeat(COLUMN_GAP);
-			const at = column * shape.rows + row;
-			const cell = cells[at];
+			const cell = row < shape.lengths[column]! ? cells[starts[column]! + row] : undefined;
 			const size = shape.widths[column]!;
 			if (!cell) { line += " ".repeat(size.total); continue; }
 			const start = visibleWidth(line);
@@ -929,6 +932,10 @@ export function buildModelsSection(
 	current?: { provider: string; id: string },
 ): ResourceSection | undefined {
 	const key = (model: { provider: string; id: string }) => `${model.provider}/${model.id}`;
+	// Google-billed cross-vendor Antigravity routes stay in Pi's registry, but not in this Google splash group.
+	const shown = (model: ModelEntry) => model.provider !== "google" || !model.id.startsWith("antigravity-") || /^antigravity-(gemini|gemma)-/.test(model.id);
+	available = available.filter(shown);
+	favorites = favorites.filter(shown);
 	const byKey = new Map(available.map((model) => [key(model), model]));
 	const favoriteKeys = new Set(favorites.map(key));
 	const providers = new Map<string, ModelEntry[]>();
@@ -1037,9 +1044,9 @@ function disposeStartupResources(): void {
 }
 
 /** Poll for as long as the splash exists, not just startup. Rendering itself performs no file I/O. */
-export function watchMcpState(mode: any, component: unknown, update: (entries: McpEntry[], statuses: ReadonlyMap<string, McpObservation>) => void, headerOnly = false): () => void {
+export function watchMcpState(mode: any, component: unknown, update: (entries: McpEntry[], statuses: ReadonlyMap<string, McpObservation>) => void): () => void {
 	stopStartupResources();
-	if (!headerOnly) mcpState.mount();
+	mcpState.mount();
 	const cache = new McpConfigCache();
 	const reader = new McpStatusReader();
 	let entries: McpEntry[] = [];
@@ -1049,7 +1056,6 @@ export function watchMcpState(mode: any, component: unknown, update: (entries: M
 	const tick = () => {
 		if (!alive()) { stop(); return; }
 		attachStartupHost(mode).refresh?.();
-		if (headerOnly) return;
 		entries = collectMcpEntries(mode, cache);
 		publish();
 		reader.refresh(mode?.session?.extensionRunner, publish);
@@ -1071,34 +1077,15 @@ export function watchMcpState(mode: any, component: unknown, update: (entries: M
 }
 
 /** Replaces collapsed native sections; the native expanded content and diagnostics remain untouched. */
-function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI): void {
+export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI): void {
 	stopStartupResources();
 	const children: any[] = mode?.loadedResourcesContainer?.children;
 	if (!Array.isArray(children)) return;
 	const titled = children.map((child) => [child, sectionTitle(child)] as const).filter(([, title]) => title);
 	const listing = (options as { force?: boolean } | undefined)?.force || mode.shouldShowStartupDetails?.() || titled.length > 0;
 	if (!listing) {
-		// The native quiet view has no resource headings. Keep one invisible watcher for the live header,
-		// without mounting the MCP status replacement or swallowing Pi's native warnings.
-		const host = attachStartupHost(mode);
-		mountedModes.add(mode);
-		host.onDispose?.();
-		host.onDispose = undefined;
-		let last = "";
-		host.refresh = () => {
-			const state = attachStartupHost(mode);
-			const snapshot = readStartupContext(mode);
-			const now = JSON.stringify(snapshot);
-			if (now !== last) {
-				last = now;
-				state.contextSnapshot = snapshot;
-				mode.ui?.requestRender?.();
-			}
-		};
-		host.refresh();
-		const sentinel = { render: () => [], invalidate() {} };
-		children.push(sentinel);
-		watchMcpState(mode, sentinel, () => {}, true);
+		// Quiet startup has no resource listing or map; retain Pi's native diagnostics untouched.
+		if (mountedModes.delete(mode)) disposeStartupHost(mode);
 		return;
 	}
 	const host = attachStartupHost(mode);
@@ -1145,8 +1132,18 @@ function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI): void {
 		};
 	const modelComponent = interactive(() => host.resourceSections?.Models);
 	const modelSpacer = { render: () => host.resourceSections?.Models ? [""] : [], invalidate() {} };
+	const mapComponent = {
+		render(width: number) {
+			return renderContextTreemap(host.contextSnapshot ?? {
+				stage: "initializing", modelLabel: "Model unknown", usedEstimate: 0, sources: [],
+				attribution: { files: false, skills: false }, caveats: [],
+			}, width, theme());
+		},
+		invalidate() {},
+	};
+	const mapSpacer = { render: () => [""], invalidate() {} };
 	const modelAt = titled.length ? children.indexOf(titled[0]![0]) : 0;
-	children.splice(modelAt, 0, modelComponent, modelSpacer);
+	children.splice(modelAt, 0, modelComponent, modelSpacer, mapComponent, mapSpacer);
 	const anchor = titled.find(([, title]) => title === "Extensions") ?? titled[titled.length - 1];
 	const mcpAt = anchor ? children.indexOf(anchor[0]) + 2 : children.length;
 	const component = interactive(section);

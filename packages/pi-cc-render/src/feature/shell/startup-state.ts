@@ -25,7 +25,7 @@ function sessionId(mode: any): string | undefined {
 export function attachStartupHost(mode: object): StartupHostState {
 	const id = sessionId(mode);
 	let state = byMode.get(mode);
-	if (state && state.sessionId === id) return state;
+	if (state && state.sessionId === (id ?? "")) return state;
 	if (state) {
 		if (bySession.get(state.sessionId) === state) bySession.delete(state.sessionId);
 		resetStartupContext(mode);
