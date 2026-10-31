@@ -8,12 +8,15 @@ import {
   completionPreview,
   ExecCardRefresh,
   type FinishDetails,
+  finishContext,
+  finishTitle,
   finishTone,
   negotiationText,
   renderAsk,
   renderFinish,
 } from "../src/exec-cards.js";
 import { planDiff } from "../src/plan-diff.js";
+import { type ReviewTone, reviewCard, reviewStatusLine } from "../src/review-card.js";
 
 initTheme("dark");
 const theme = {
@@ -96,7 +99,10 @@ for (const width of [46, 120]) {
       costUsd: 0.12,
     };
     const short = plain(renderAsk(details, options, theme).render(width));
-    assert.ok(short.includes("Consultation 2"));
+    assert.ok(short.includes("Consultation · Planner answered"));
+    assert.ok(!short.includes(details.question));
+    assert.ok(short.replace(/\s+/gu, " ").includes("ctrl+o for question and full response"));
+    assert.ok(short.includes("Astra · $0.12"));
     assert.ok(short.includes("Wait for readiness."));
     assert.ok(!short.includes("Keep the transport unchanged."));
     assert.ok(!short.includes("Plan amendment"));
@@ -222,15 +228,13 @@ for (const width of [46, 120]) {
       if (reason === "user_needed") {
         assert.ok(text.includes(question));
         assert.ok(text.includes("Perform the manual test before accepting."));
-        assert.ok(text.includes("Reply here."));
         assert.ok(text.indexOf(question) < text.indexOf("Report start."));
-        assert.ok(text.indexOf("Reply here.") < text.indexOf("Report start."));
+        assert.ok(text.indexOf("/plan-exec resume <answer>") < text.indexOf("Report start."));
       } else if (failed) {
         assert.ok(text.includes("Review did not finish"));
-        assert.ok(text.includes("No retry has been authorized."));
+        assert.ok(text.includes(error.replace(/\s+/gu, " ")));
       } else if (reason === "exhausted") {
         assert.ok(text.includes("Another revision needs your approval"));
-        assert.ok(text.includes("Allow one more attempt"));
       }
       const hidden = [
         "Report final paragraph.",
@@ -251,22 +255,214 @@ for (const width of [46, 120]) {
         "src/changed.ts",
         "extra.ts",
         "2 files changed",
-        "/plan-exec resume <answer>",
       ];
-      if (failed) hidden.push("Full error tail.");
+      if (details.negotiation?.pause) {
+        assert.ok(text.includes(details.negotiation.pause.action ?? ""));
+        assert.ok(!text.includes("No retry has been authorized."));
+        assert.ok(!text.includes("Allow one more attempt"));
+        assert.ok(!text.includes("Reply here."));
+      }
       for (const value of hidden) assert.ok(!text.includes(value), value);
       const expandedLines = renderFinish(details, { ...options, expanded: true }, theme, current).render(width);
       assert.ok(expandedLines.every((line) => visibleWidth(line) <= width));
       const expanded = plain(expandedLines).replace(/\s+/gu, " ");
-      for (const value of hidden.filter(
-        (value) => value !== "/plan-exec resume <answer>" || details.negotiation?.pause,
-      ))
-        assert.ok(expanded.includes(value), value);
+      for (const value of hidden) assert.ok(expanded.includes(value), value);
       if (failed) assert.ok(expanded.includes(error.replace(/\s+/gu, " ")));
       assert.ok(!expanded.includes("ctrl+o to expand"));
     });
   }
 }
+
+function themeSpy() {
+  const fg: { role: string; text: string }[] = [];
+  const bg: { role: string; text: string }[] = [];
+  return {
+    fg,
+    bg,
+    theme: {
+      fg: (role: string, text: string) => {
+        fg.push({ role, text });
+        return text;
+      },
+      bg: (role: string, text: string) => {
+        bg.push({ role, text });
+        return text;
+      },
+      bold: (text: string) => text,
+    } as Parameters<typeof renderFinish>[2],
+  };
+}
+
+for (const width of [46, 120]) {
+  test(`Unicode multiline consultations retain full details without mutating history at ${width}`, () => {
+    const details: AskDetails = {
+      executionId: "exec",
+      exchangeId: "ask1",
+      question: "如何握手？ 🧭\nKeep the existing transport?",
+      reply: "等待就绪 🧭 é.\nKeep this first paragraph line.\n\nFull response tail: 保留传输。",
+      planner: "Astra",
+      costUsd: 0.12,
+      number: 9,
+      changes: planDiff("# Old\n旧的", "# New\n新的 🧭"),
+    };
+    const before = JSON.stringify(details);
+    for (const exchangeId of ["ask1", "ask2"]) {
+      for (const expanded of [false, true]) {
+        const lines = renderAsk(details, { ...options, expanded }, theme, () => ({
+          executionId: "exec",
+          exchangeId,
+        })).render(width);
+        assert.ok(lines.every((line) => visibleWidth(line) <= width));
+        const text = plain(lines).replace(/\s+/gu, " ");
+        assert.ok(text.includes("Consultation · Planner answered"));
+        assert.ok(text.includes("等待就绪 🧭 é. Keep this first paragraph line."));
+        assert.ok(text.includes("Astra · $0.12"));
+        for (const value of [details.question, details.reply ?? ""]) {
+          assert.equal(text.includes(value.replace(/\s+/gu, " ")), expanded);
+        }
+        assert.equal(text.includes("Plan amendment"), expanded);
+        assert.equal(text.includes("新的 🧭"), expanded);
+        assert.equal(text.includes("ctrl+o for question and full response"), !expanded);
+      }
+    }
+    const pendingLines = renderAsk({ ...details, pending: true, activity: "读取文件 🧭" }, options, theme).render(
+      width,
+    );
+    assert.ok(pendingLines.every((line) => visibleWidth(line) <= width));
+    const pending = plain(pendingLines).replace(/\s+/gu, " ");
+    assert.ok(pending.includes(details.question.replace(/\s+/gu, " ")));
+    assert.ok(pending.includes("Planner thinking… 读取文件 🧭"));
+    assert.ok(!pending.includes("ctrl+o"));
+    for (const error of [undefined, "Unavailable: 网络错误\n\nFull diagnostic tail."]) {
+      const failed = { ...details, reply: "", error };
+      const lines = renderAsk(failed, options, theme).render(width);
+      assert.ok(lines.every((line) => visibleWidth(line) <= width));
+      const text = plain(lines).replace(/\s+/gu, " ");
+      assert.ok(text.includes("Consultation · Unavailable"));
+      assert.ok(text.includes((error ?? "The planner returned no decision.").replace(/\s+/gu, " ")));
+      assert.ok(!text.includes("如何握手"));
+      assert.ok(text.includes("Astra · $0.12"));
+    }
+    assert.equal(JSON.stringify(details), before);
+  });
+
+  test(`paused explicit actions win over helpers but historical cards stay safe at ${width}`, () => {
+    for (const reason of ["user_needed", "failure", "interrupted", "exhausted"]) {
+      for (const explicit of ["details", "pause", "default"] as const) {
+        const details: FinishDetails = {
+          ...base,
+          decision: undefined,
+          question: "继续执行？ 🧭\nCheck manually.",
+          error: reason === "failure" ? "失败\n\nExact diagnostic tail." : undefined,
+          action: explicit === "details" ? "Details recovery 🧭\n\nDo this exact step." : undefined,
+          negotiation: {
+            attempts: 1,
+            reviewCostUsd: 0,
+            phase: "paused",
+            history: [],
+            pause: {
+              reason,
+              action: explicit !== "default" ? "Pause recovery 🧭\n\nDo that exact step." : undefined,
+            },
+          },
+        };
+        const before = JSON.stringify(details);
+        let current = { executionId: "exec", exchangeId: "review1", phase: "paused" };
+        const mounted = renderFinish(details, options, theme, () => current);
+        const lines = mounted.render(width);
+        assert.ok(lines.every((line) => visibleWidth(line) <= width));
+        const text = plain(lines).replace(/\s+/gu, " ");
+        const expected =
+          details.action ??
+          details.negotiation?.pause?.action ??
+          (reason === "user_needed"
+            ? "Reply here."
+            : reason === "exhausted"
+              ? "Allow one more attempt"
+              : "No retry has been authorized.");
+        assert.ok(text.includes(expected.replace(/\s+/gu, " ")), expected);
+        if (explicit !== "default") {
+          for (const helper of ["Reply here.", "Allow one more attempt", "No retry has been authorized."])
+            assert.ok(!text.includes(helper));
+        }
+        if (explicit === "details") assert.ok(!text.includes("Pause recovery"));
+        current = { ...current, executionId: "other-exec" };
+        const historical = plain(mounted.render(width)).replace(/\s+/gu, " ");
+        assert.ok(historical.includes("Previous review"));
+        assert.ok(!historical.includes(expected.replace(/\s+/gu, " ")));
+        const expandedLines = renderFinish(details, { ...options, expanded: true }, theme, () => current).render(width);
+        assert.ok(expandedLines.every((line) => visibleWidth(line) <= width));
+        const expanded = plain(expandedLines).replace(/\s+/gu, " ");
+        assert.ok(expanded.includes(expected.replace(/\s+/gu, " ")));
+        if (details.negotiation?.pause?.action) assert.ok(expanded.includes("Pause recovery"));
+        assert.equal(JSON.stringify(details), before);
+      }
+    }
+  });
+
+  for (const tone of ["pending", "error", "success", "warning", "neutral"] as const) {
+    test(`${tone} uses semantic fg and one padded standalone shell at ${width}`, () => {
+      const spy = themeSpy();
+      const role = tone === "pending" || tone === "neutral" ? "muted" : tone;
+      assert.equal(reviewStatusLine(spy.theme, { tone, text: "Status", context: "Context" }), "Status · Context");
+      assert.deepEqual(spy.fg, [
+        { role: "dim", text: " · Context" },
+        { role, text: "Status" },
+      ]);
+      const details: FinishDetails = {
+        ...base,
+        completion: tone === "success" ? "accepted" : tone === "warning" ? "user_override" : undefined,
+        pending: tone === "pending",
+        decision: undefined,
+        error: tone === "error" ? "Exact error" : undefined,
+        report: "Changed 文件 🧭\n\nFull report tail.",
+      };
+      const body = renderFinish(details, { ...options, omitTitle: true }, spy.theme);
+      const toolLines = body.render(width);
+      assert.ok(toolLines.every((line) => visibleWidth(line) <= width));
+      assert.equal(spy.bg.length, 0);
+      const title = finishTitle(details);
+      assert.ok(!plain(toolLines).includes(title));
+      const shell = reviewCard(spy.theme, title, body, tone).render(width);
+      assert.ok(shell.every((line) => visibleWidth(line) === width));
+      assert.equal(plain(shell).replace(/\s+/gu, " ").split(title).length - 1, 1);
+      // Box samples its background once to detect theme changes, besides painting each row.
+      assert.equal(spy.bg.filter((call) => call.text !== "test").length, shell.length);
+      const slot = tone === "pending" ? "toolPendingBg" : tone === "error" ? "toolErrorBg" : "toolSuccessBg";
+      assert.ok(spy.bg.every((call) => call.role === slot));
+      assert.equal(shell[0].trim(), "");
+      assert.equal(shell.at(-1)?.trim(), "");
+      assert.ok(shell[1].startsWith(` ${title.split(" ")[0]}`));
+    });
+  }
+}
+
+test("tool status lines use outcome colors without painting a background", () => {
+  const cases: [FinishDetails, ReviewTone, string][] = [
+    [{ ...base, pending: true }, "pending", "Reviewing"],
+    [{ ...base, decision: undefined, error: "Failed" }, "error", "Review unavailable: Failed"],
+    [{ ...base, completion: "accepted" }, "success", "Reviewed"],
+    [{ ...base, completion: "no_review" }, "warning", "Review skipped"],
+    [{ ...base, completion: "user_override", error: "Failed" }, "warning", "Review overridden"],
+    [{ ...base, completion: "stopped" }, "warning", "Not completed"],
+  ];
+  for (const [details, tone, label] of cases) {
+    const spy = themeSpy();
+    renderFinish(details, options, spy.theme).render(120);
+    assert.ok(spy.fg.some((call) => call.role === (tone === "pending" ? "muted" : tone) && call.text === label));
+    assert.deepEqual(spy.bg, []);
+  }
+  for (const [extra, role, label] of [
+    [{ pending: true }, "muted", "Planner thinking…"],
+    [{ error: "Failed" }, "error", "Consultation unavailable"],
+    [{}, "warning", "Planner answered"],
+  ] as const) {
+    const spy = themeSpy();
+    renderAsk({ question: "Question", reply: "Reply", planner: "Astra", ...extra }, options, spy.theme).render(46);
+    assert.ok(spy.fg.some((call) => call.role === role && call.text === label));
+    assert.deepEqual(spy.bg, []);
+  }
+});
 
 test("confirmed override is amber even when the preceding review failed", () => {
   assert.equal(finishTone({ ...base, error: "Timed out", completion: "user_override" }), "warning");
@@ -348,14 +544,27 @@ for (const width of [46, 120]) {
         },
         changes: { edited: ["src/session.ts"], outside: ["extra.ts"], git: "2 files changed" },
       };
+      const before = JSON.stringify(details);
       const compactLines = renderFinish(details, options, theme, () => details).render(width);
       assert.ok(compactLines.every((line) => visibleWidth(line) <= width));
       const compact = plain(compactLines).replace(/\s+/gu, " ");
       assert.ok(compact.includes("Implemented readiness checks."));
       assert.ok(compact.includes("Tests passed locally."));
       assert.ok(compact.includes("Human input remains untested."));
-      assert.ok(compact.includes("implementer reported"));
-      assert.equal(compact.match(/ctrl\+o to expand/gu)?.length, 1);
+      for (const heading of ["Changed", "Verified", "Outstanding issues"]) assert.ok(compact.includes(heading));
+      assert.ok(!compact.includes("implementer reported"));
+      const title = `Implementation · ${
+        {
+          accepted: "Reviewed",
+          no_review: "Review skipped",
+          user_override: "Review overridden",
+          stopped: "Not completed",
+        }[completion]
+      }`;
+      assert.equal(finishTitle(details), title);
+      assert.ok(compact.includes(title));
+      assert.ok(compact.includes(finishContext(details)));
+      assert.equal(compact.match(/ctrl\+o for full report/gu)?.length, 1);
       assert.equal(compact.match(/Implementation ·/gu)?.length, 1);
       for (const hidden of [
         "Full report tail",
@@ -363,8 +572,6 @@ for (const width of [46, 120]) {
         "Full concern tail",
         "Review rounds",
         "Reviewed evidence",
-        "consultations",
-        "$",
         "src/session.ts",
         "Original review error",
       ])
@@ -394,7 +601,8 @@ for (const width of [46, 120]) {
         "2 reviews",
       ])
         assert.ok(expanded.includes(value), value);
-      assert.ok(!expanded.includes("ctrl+o to expand"));
+      assert.ok(!expanded.includes("ctrl+o"));
+      assert.equal(JSON.stringify(details), before);
     });
     test(`${completion} keeps final recovery instructions untruncated at ${width}`, () => {
       const action = [
@@ -447,9 +655,16 @@ test("final totals distinguish consultation and cumulative review costs", () => 
     completion: "accepted",
     negotiation: { attempts: 3, reviewCostUsd: 0.3, phase: "reviewing", history: [{ decision, costUsd: 0.1 }] },
   };
-  const text = plain(renderFinish(details, { ...options, expanded: true }, theme).render(120));
-  assert.ok(text.includes("2 consultations"));
-  assert.ok(text.includes("3 reviews"));
-  assert.ok(text.includes("Review rounds"));
-  assert.ok(text.includes("The readiness handshake is missing."));
+  for (const width of [46, 120]) {
+    for (const expanded of [false, true]) {
+      const lines = renderFinish({ ...details, returnedTo: "Astra" }, { ...options, expanded }, theme).render(width);
+      assert.ok(lines.every((line) => visibleWidth(line) <= width));
+      const text = plain(lines).replace(/\s+/gu, " ");
+      assert.ok(text.includes("Terra → Astra"));
+      assert.ok(text.includes("2 consultations · $0.10"));
+      assert.ok(text.includes("3 reviews · $0.30"));
+      assert.equal(text.includes("Review rounds"), expanded);
+      assert.equal(text.includes("The readiness handshake is missing."), expanded);
+    }
+  }
 });

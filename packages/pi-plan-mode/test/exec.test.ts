@@ -18,6 +18,7 @@ import {
   FINISH_TOOL,
   registerExec,
 } from "../src/exec.js";
+import * as execCards from "../src/exec-cards.js";
 import planMode from "../src/index.js";
 import type { PlannerSessionFactory, PlannerSessionOptions } from "../src/planner/session.js";
 import { createMockContext, createMockPi } from "./shared/support.js";
@@ -490,9 +491,9 @@ function assertFinishRenders(s: Awaited<ReturnType<typeof setup>>, result: Resul
           assert.ok(text.includes(normalize(result.details.action)));
         if (expanded) assertReadableHistory(text, result.details);
         else if (result.details.completion) {
-          assert.ok(text.includes("Verification (implementer reported)"));
-          assert.ok(text.includes("Outstanding issues (implementer reported)"));
-          assert.ok(text.includes("ctrl+o to expand"));
+          assert.ok(text.includes("Verified"));
+          assert.ok(text.includes("Outstanding issues"));
+          assert.ok(text.includes("ctrl+o for full report"));
           const outcomeStatus = {
             accepted: "Reviewed",
             no_review: "Review skipped",
@@ -518,7 +519,7 @@ test("active legacy acceptance restores in place with exactly one review usage",
   assert.equal(result.details.completion, "accepted");
   assertReadableHistory(resultText(result), result.details);
   assert.deepEqual(result.details.negotiation, s.latest().negotiation);
-  assertFinishRenders(s, result, "Implementation · Accepted");
+  assertFinishRenders(s, result, "Implementation · Reviewed");
   assert.equal(s.latest().negotiation?.attempts, 1);
   assert.equal(s.latest().negotiation?.reviewCostUsd, 0.05);
   assert.equal(s.latest().asks, 0);
@@ -622,7 +623,7 @@ test("later acceptance carries every substantive round into tool content without
   assert.deepEqual(first.details, initialDetails, "later reviews do not rewrite earlier result details");
   assertReadableHistory(resultText(accepted), accepted.details);
   await assertCompletedInPlace(s);
-  assertFinishRenders(s, accepted, "Implementation · Accepted");
+  assertFinishRenders(s, accepted, "Implementation · Reviewed");
 });
 
 test("completed registered renderers preview literal report text but retain the full report on expansion", async () => {
@@ -649,11 +650,11 @@ test("completed registered renderers preview literal report text but retain the 
         const text = normalize(lines.join("\n"));
         assert.ok(text.includes("Literal implementation opening."));
         assert.equal(text.includes("Final paragraph retained only on expansion."), expanded);
-        assert.equal(text.split("Implementation · Accepted").length - 1, 1);
+        assert.equal(text.split("Implementation · Reviewed").length - 1, 1);
         if (expanded) assertReadableHistory(text, result.details);
         else {
           assert.ok(text.includes("…"));
-          assert.ok(text.includes("ctrl+o to expand"));
+          assert.ok(text.includes("ctrl+o for full report"));
           assert.ok(!text.includes("Review history"));
           assert.ok(text.length < report.length, "collapsed card must not leak the full report");
         }
@@ -662,6 +663,101 @@ test("completed registered renderers preview literal report text but retain the 
   }
   assert.deepEqual(result.details, snapshot);
 });
+
+for (const [origin, outcome, title] of [
+  ["tool", "accepted", "Implementation · Reviewed"],
+  ["tool", "no_review", "Implementation · Review skipped"],
+  ["command", "user_override", "Implementation · Review overridden"],
+  ["command", "stopped", "Implementation · Not completed"],
+] as const)
+  test(`registered ${origin} completion renderer has one title and body: ${outcome}`, async () => {
+    const s = await setup({
+      completionReview: outcome !== "no_review",
+      script: () => ({ reply: origin === "tool" ? decision() : "invalid" }),
+    });
+    const report = {
+      report: "Unique changed evidence 界.\nSecond changed line.",
+      verification: "Unique verification evidence: targeted tests passed.",
+      concerns: "Unique outstanding evidence: live checks not run.",
+    };
+    const submitted = await submit(s, report);
+    if (origin === "command") {
+      if (outcome === "user_override") (s.context.ctx as any).ui.select = async () => "Finish without review";
+      await command(s, outcome === "stopped" ? "stop" : "accept");
+    }
+    const message = finishMessages(s).at(-1);
+    assert.equal(finishMessages(s).length, origin === "tool" ? 0 : 1);
+    const result = origin === "tool" ? submitted : { content: [], details: message.details };
+    assert.equal(result.details.completion, outcome);
+    const snapshot = structuredClone(result.details);
+    const tool = s.mock.tools.find((candidate) => candidate.name === FINISH_TOOL) as any;
+    const custom = s.mock.messageRenderers.get(FINISH_MESSAGE_TYPE);
+    assert.ok(custom);
+    assert.equal(typeof tool.renderCall, "function");
+    const renderFinish = vi.spyOn(execCards, "renderFinish");
+    try {
+      for (const expanded of [false, true]) {
+        for (const width of [46, 120]) {
+          const backgrounds: string[] = [];
+          const theme = {
+            ...plainTheme,
+            bg: (role: string, text: string) => {
+              backgrounds.push(role);
+              return text;
+            },
+          };
+          renderFinish.mockClear();
+          const toolContent = tool.renderResult(result, { expanded, isPartial: false }, theme);
+          assert.equal(renderFinish.mock.calls.length, 1, "tool delegates to the actual content renderer once");
+          assert.notEqual(renderFinish.mock.calls[0][1].omitTitle, true, "tool content owns its title");
+          const toolLines = toolContent.render(width) as string[];
+          assert.deepEqual(backgrounds, [], "Pi supplies the tool shell; content must not add another");
+          renderFinish.mockClear();
+          // Tool completions are not published twice; the fixture exercises the registered standalone path too.
+          const standalone = custom(
+            message ?? { customType: FINISH_MESSAGE_TYPE, content: resultText(result), details: result.details },
+            { expanded },
+            theme as never,
+          ) as { render(width: number): string[] };
+          assert.equal(renderFinish.mock.calls.length, 1, "standalone delegates to the actual content renderer once");
+          assert.equal(renderFinish.mock.calls[0][1].omitTitle, true, "only the standalone shell owns its title");
+          const standaloneLines = standalone.render(width);
+          assert.ok(backgrounds.length > 0, "standalone completion supplies its own shell");
+          assert.ok(backgrounds.every((role) => role === "toolSuccessBg"));
+          const toolText = normalize(toolLines.join("\n"));
+          const standaloneText = normalize(standaloneLines.join("\n"));
+          assert.equal(standaloneText, toolText, "standalone has exactly the same single title and content block");
+          for (const lines of [toolLines, standaloneLines]) {
+            assert.ok(
+              lines.every((line) => visibleWidth(line) <= width),
+              `overflow at ${width}`,
+            );
+            const text = normalize(lines.join("\n"));
+            assert.equal(text.split(title).length - 1, 1, "one outcome title");
+            for (const value of Object.values(report)) assert.ok(text.includes(normalize(value)));
+            if (!expanded) {
+              for (const marker of [
+                "Unique changed evidence",
+                "Unique verification evidence",
+                "Unique outstanding evidence",
+              ])
+                assert.equal(text.split(marker).length - 1, 1, "one copy of each content section");
+              assert.ok(text.includes("ctrl+o for full report"));
+            }
+          }
+          assert.equal(
+            normalize(standalone.render(width).join("\n")),
+            standaloneText,
+            "rerender does not append content",
+          );
+          assert.equal(normalize(toolContent.render(width).join("\n")), toolText);
+        }
+      }
+    } finally {
+      renderFinish.mockRestore();
+    }
+    assert.deepEqual(result.details, snapshot, "actual renderers preserve durable completion details");
+  });
 
 test("reusing a resolved finding ID pauses as a visible review failure", async () => {
   let calls = 0;
@@ -726,7 +822,7 @@ test("unavailable planner pauses; disabled review completes without acceptance",
   assertReadableHistory(resultText(result), result.details);
   assert.match(resultText(result), /Completed without review/u);
   assert.equal(result.details.returnedTo, opus.name);
-  assertFinishRenders(disabled, result, "Implementation · Completed without review");
+  assertFinishRenders(disabled, result, "Implementation · Review skipped");
   assert.equal(disabled.sessions.prompts.length, 0);
   assert.deepEqual(s.execEvents, [{ active: true, source: "restore" }], "paused execution stays active");
   assert.deepEqual(disabled.execEvents, [
@@ -830,12 +926,7 @@ test("override requires confirmation, stop abandons without completion", async (
   assert.ok(override);
   assertReadableHistory(override.content, override.details);
   assert.match(override.content, /Completed by user override/u);
-  assertFinishRenders(
-    s,
-    { content: [], details: override.details },
-    "Implementation · Completed by user override",
-    override,
-  );
+  assertFinishRenders(s, { content: [], details: override.details }, "Implementation · Review overridden", override);
   const stopped = await setup({ script: () => ({ reply: "invalid" }) });
   await submit(stopped);
   await command(stopped, "stop");
@@ -845,12 +936,7 @@ test("override requires confirmation, stop abandons without completion", async (
   assert.ok(message);
   assertReadableHistory(message.content, message.details);
   assert.match(message.content, /Implementation stopped/u);
-  assertFinishRenders(
-    stopped,
-    { content: [], details: message.details },
-    "Implementation · Implementation stopped",
-    message,
-  );
+  assertFinishRenders(stopped, { content: [], details: message.details }, "Implementation · Not completed", message);
   assert.deepEqual(stopped.execEvents, [
     { active: true, source: "restore" },
     { active: false, source: "transition" },
@@ -939,7 +1025,7 @@ test("inactive legacy pending return persists and can be explicitly retried afte
   assertFinishRenders(
     s,
     { content: [{ type: "text", text: message.content }], details: message.details },
-    "Implementation · Accepted",
+    "Implementation · Reviewed",
     message,
   );
 });
@@ -1147,7 +1233,7 @@ for (const origin of ["tool", "command"] as const)
       assertFinishRenders(
         s,
         result,
-        origin === "tool" ? "Implementation · Accepted" : "Implementation · Completed by user override",
+        origin === "tool" ? "Implementation · Reviewed" : "Implementation · Review overridden",
       );
       assert.doesNotMatch(resultText(result), /Claude Sonnet 5\.5 → Claude Opus/u);
     });

@@ -136,21 +136,29 @@ export function renderAsk(
     // need the full activity view. Consultations have no unresolved findings to keep expanded.
     void current;
     const full = options.expanded || details.pending;
-    body.addChild(reviewTitle(theme, `Consultation ${details.number ?? ""}`.trim()));
-    section(body, theme, "Question", details.question);
+    const unavailable = details.error || !details.reply?.trim();
+    body.addChild(
+      reviewTitle(
+        theme,
+        `Consultation · ${details.pending ? "Planner thinking…" : unavailable ? "Unavailable" : "Planner answered"}`,
+      ),
+    );
+    if (full) section(body, theme, "Question", details.question);
     if (details.pending) {
       section(body, theme, "Planner decision", `Planner thinking…${details.activity ? ` ${details.activity}` : ""}`);
     } else if (details.error || !details.reply?.trim()) {
-      section(body, theme, "Consultation unavailable", details.error || "The planner returned no decision.");
+      body.addChild(new PlanMarkdown(details.error || "The planner returned no decision.", getMarkdownTheme(), theme));
+      if (full && details.reply) section(body, theme, "Planner decision", details.reply);
     } else {
-      section(body, theme, "Planner decision", full ? details.reply : details.reply.split(/\n\s*\n/u)[0]);
-      if (!full && details.reply.includes("\n\n")) body.addChild(new Text(theme.fg("dim", "ctrl+o to expand"), 0, 0));
+      if (full) section(body, theme, "Planner decision", details.reply);
+      else body.addChild(new PlanMarkdown(details.reply.split(/\n\s*\n/u)[0], getMarkdownTheme(), theme));
     }
     if (full && details.changes?.length) {
       body.addChild(new Spacer(1));
       body.addChild(reviewTitle(theme, "Plan amendment"));
       body.addChild(new Text(renderPlanDiff(theme, details.changes), 0, 0));
     }
+    if (!full) body.addChild(new Text(theme.fg("dim", "ctrl+o for question and full response"), 0, 0));
     status(
       body,
       theme,
@@ -335,7 +343,16 @@ export function negotiationText(value: unknown): string {
 }
 export function finishTitle(details: FinishDetails | undefined): string {
   if (!details) return "Implementation review unavailable";
-  return `${details.completion ? "Implementation" : `Review ${details.round ?? details.negotiation?.attempts ?? 1}`} · ${assessmentSummary(details)}`;
+  if (details.completion)
+    return `Implementation · ${
+      {
+        accepted: "Reviewed",
+        no_review: "Review skipped",
+        user_override: "Review overridden",
+        stopped: "Not completed",
+      }[details.completion]
+    }`;
+  return `Review ${details.round ?? details.negotiation?.attempts ?? 1} · ${assessmentSummary(details)}`;
 }
 
 export function renderFinish(
@@ -382,18 +399,15 @@ export function renderFinish(
       );
     if (details.completion && !options.expanded) {
       for (const [label, value] of [
-        ["What changed (implementer reported)", details.report || "Not provided."],
-        ["Verification (implementer reported)", details.verification || "Not provided; verification is unknown."],
-        [
-          "Outstanding issues (implementer reported)",
-          details.concerns || "Not provided; outstanding issues are unknown.",
-        ],
+        ["Changed", details.report || "Not provided."],
+        ["Verified", details.verification || "Not provided; verification is unknown."],
+        ["Outstanding issues", details.concerns || "Not provided; outstanding issues are unknown."],
       ])
         section(body, theme, label, completionPreview(value, 3, 320).text);
       // Recovery instructions must remain actionable without expanding the final report.
-      if (details.action) section(body, theme, "Next action", details.action);
+      if (details.action ?? pause?.action) section(body, theme, "Next action", details.action ?? pause?.action ?? "");
       body.addChild(new Spacer(1));
-      body.addChild(new Text(theme.fg("dim", "ctrl+o to expand"), 0, 0));
+      body.addChild(new Text(theme.fg("dim", "ctrl+o for full report"), 0, 0));
       status(
         body,
         theme,
@@ -404,6 +418,7 @@ export function renderFinish(
           stopped: "Not completed",
         }[details.completion],
         finishTone(details),
+        finishContext(details),
       );
       return body;
     }
@@ -415,19 +430,23 @@ export function renderFinish(
         body,
         theme,
         previous ? "Previous outcome" : "Outcome",
-        full ? outcome : completionPreview(outcome, 3, 320).text,
+        full || details.error || details.assessment?.state === "failed" || details.assessment?.state === "unavailable"
+          ? outcome
+          : completionPreview(outcome, 3, 320).text,
       );
       const question = details.decision?.question ?? details.question ?? pause?.question;
       if (question) section(body, theme, previous ? "Previous question" : "Question for you", question);
       if (details.decision?.recommendation) section(body, theme, "Recommendation", details.decision.recommendation);
       const action =
-        reason === "user_needed"
+        details.action ??
+        pause?.action ??
+        (reason === "user_needed"
           ? "Reply here. Ask for clarification if you need it; answering lets implementation continue."
           : reason === "failure" || reason === "interrupted"
             ? "Ask to retry the review, or discuss what happened. No retry has been authorized."
             : reason === "exhausted"
               ? "Allow one more attempt, discuss the findings, or finish without review."
-              : (details.action ?? pause?.action);
+              : undefined);
       if (action && (!previous || full))
         section(body, theme, previous ? "Previous next action" : "Next action", action);
     }

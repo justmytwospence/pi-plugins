@@ -592,8 +592,9 @@ for (const width of [46, 120, 180]) {
 // lookalike card or calling renderFinish directly. Both expansion states live ahead of the idle
 // composer, through the same layout and reader checks as the normal-footer fixtures above.
 const messageRenderers = new Map();
+const completionTools = new Map();
 registerExec({
-  on() {}, registerTool() {}, registerCommand() {},
+  on() {}, registerTool: tool => completionTools.set(tool.name, tool), registerCommand() {},
   registerMessageRenderer: (name, renderer) => messageRenderers.set(name, renderer),
   events: { emit() {} },
 }, { completionReview: () => true, completionMaxRevisions: () => 2 });
@@ -622,7 +623,7 @@ for (const expanded of [false, true]) {
     const rendered = transcript.render(width).map(stripVTControlCharacters).join('\n');
     assert.match(rendered.replace(/\s+/gu, ' '), /Updated the completion transcript fixture/u, 'actual returned message renders the implementer report');
     assert.equal(rendered.includes('Expanded evidence marker'), expanded, 'only expanded completion shows detailed evidence');
-    assert.equal(/ctrl\+o to expand/iu.test(rendered), !expanded, 'concise completion offers expansion');
+    assert.equal(/ctrl\+o (?:to expand|for full report)/iu.test(rendered), !expanded, 'concise completion offers expansion');
     const baseline = screens.length;
     for (const [under, options] of IDLE) {
       const { lines: screen } = sidebarScreen({
@@ -632,6 +633,56 @@ for (const expanded of [false, true]) {
       const ansi = screen.join('\n');
       assert.match(stripVTControlCharacters(ansi).replace(/\s+/gu, ' '), /Updated the completion transcript fixture/u, 'completion must be visible ahead of the composer, including with Sidebar');
       screens.push({ name: `returned completion ${expanded ? 'expanded' : 'concise'}`, width, under, idle: baseline, ansi });
+    }
+  }
+}
+
+// Compact transcript cards must not steal the actual waiting dialog's question or options.
+// Reuse command selects and their existing parser contracts rather than lookalike dialogs.
+const renderReview = completionTools.get('finish_plan')?.renderResult;
+assert.equal(typeof renderReview, 'function', 'registerExec must register its review result renderer');
+const pausedDetails = {
+  planFile: completionDetails.planFile, implementer: 'Terra', round: 1,
+  report: 'Implemented the readiness check.', verification: 'Automated checks passed.',
+  concerns: 'Human verification is still needed.',
+  decision: {
+    outcome: 'user_needed', summary: 'Human verification is required.',
+    question: 'Did the browser readiness check pass?', recommendation: 'Provide human verification.',
+    evidence: ['Paused evidence marker: automated checks passed.'], limitations: [], findings: [],
+  },
+  negotiation: {
+    attempts: 1, reviewCostUsd: 0.01, phase: 'paused', history: [],
+    pause: { reason: 'user_needed', question: 'Did the browser readiness check pass?', action: 'Provide human verification.' },
+  },
+};
+for (const width of [46, 120]) {
+  tui.terminal.columns = width;
+  for (const paused of [false, true]) {
+    const dialog = DIALOGS.find(item => item.name === (paused ? 'plan exec user-needed menu' : '/mode picker'));
+    const lines = await dialog.lines(width);
+    const transcript = paused
+      ? renderReview({ content: [], details: pausedDetails }, { expanded: false, isPartial: false }, theme)
+      : renderCompletion({ customType: FINISH_MESSAGE_TYPE, content: 'Returned implementation completion', details: completionDetails, display: true }, { expanded: false }, theme);
+    const rendered = transcript.render(width).map(stripVTControlCharacters).join('\n').replace(/\s+/gu, ' ');
+    if (paused) {
+      assert.ok(rendered.includes(pausedDetails.decision.question), 'collapsed review keeps the exact human question');
+      assert.ok(rendered.includes(pausedDetails.decision.recommendation), 'collapsed review keeps the requested human action');
+      assert.ok(!rendered.includes('Paused evidence marker'), 'collapsed review hides detailed evidence');
+    } else {
+      assert.match(rendered, /Updated the completion transcript fixture/u, 'compact accepted completion keeps its report preview');
+      assert.ok(!rendered.includes('Expanded evidence marker'), 'compact accepted completion hides detailed evidence');
+    }
+    for (const open of [false, true]) {
+      const { lines: screen } = sidebarScreen({
+        width, height: Math.max(HEIGHT, transcript.render(width).length + lines.length + footer(width).length + 2),
+        transcript, dock: () => lines, footer, open, collapsed: true,
+      });
+      const ansi = screen.join('\n');
+      const plain = stripVTControlCharacters(ansi).replace(/\s+/gu, ' ');
+      const marker = paused ? pausedDetails.decision.question : 'Updated the completion transcript fixture.';
+      assert.ok(plain.includes(marker), 'compact transcript remains visible above the actual dialog');
+      assert.ok(plain.indexOf(marker) < plain.lastIndexOf(dialog.question), 'transcript precedes the waiting dialog');
+      screens.push({ name: dialog.name, width, under: `${paused ? 'paused user-needed review' : 'compact accepted completion'} transcript, ${open ? 'Sidebar open' : 'without Sidebar'}`, ansi });
     }
   }
 }
