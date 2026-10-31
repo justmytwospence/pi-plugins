@@ -91,27 +91,6 @@ describe("Sidebar's requests", () => {
     expect(events[0]).toMatchObject({ type: "sidebar_error", message: expect.stringMatching(/Nothing was spent/) });
   });
 
-  it("keeps a submitted anchor and subject immutable while focus and main's request change", async () => {
-    const { agent, state, cpi, cctx, aborted } = setup();
-    let status = 'Family revision=1; anchor="root"; captured subject="child-a"; current view="child-a".';
-    agent.family = { append() {}, extension() {}, capture: () => status, beginQuestion() {} };
-    const captured = agent.captureQuestion();
-    (agent as any).captured = captured;
-    const prefix = JSON.stringify(mainPayload());
-    (state.request!.payload as any).messages[0].content[0].text = "a different live root request";
-    status = 'Family revision=2; captured subject="child-b"; current view="child-b".';
-    const assembled = await cpi.emit("context_with_system", { messages: [] }, cctx);
-    const final = assembled.messages.at(-1).content[0].text;
-    expect(final).toContain('captured subject="child-a"');
-    expect(final).not.toContain("child-b");
-    const sent = await cpi.emit("before_provider_request", { payload: sidePayload() }, cctx);
-    expect(JSON.stringify(captured.snapshot.request!.payload)).toBe(prefix);
-    expect(sent.messages[0]).toEqual(mainPayload().messages[0]);
-    expect(sent.tools).toEqual(mainPayload().tools);
-    expect(sent.system).toEqual(mainPayload().system);
-    expect(aborted()).toBe(0);
-  });
-
   it("aborts when main and Sidebar are on different APIs", async () => {
     const { cpi, cctx, aborted } = setup({ api: "openai-responses" });
     await cpi.emit("context_with_system", { messages: [] }, cctx);
@@ -300,17 +279,6 @@ describe("helpers", () => {
 });
 
 describe("messages added outside a turn", () => {
-  it("uses family persistence rather than main's branch when attached", async () => {
-    const { pi, agent } = setup();
-    const saved: unknown[] = [];
-    agent.family = { append(messages) { saved.push(messages); }, extension() {}, capture: () => "", beginQuestion() {} };
-    const messages = [{ role: "user", content: "family exchange", timestamp: 1 }] as never[];
-    await agent.appendMessages(messages);
-    expect(saved).toEqual([messages]);
-    expect(pi.entries).toEqual([]);
-    expect(agent.messages).toEqual(messages);
-  });
-
   it("join the thread and are stored like an exchange", async () => {
     const { pi, agent } = setup();
     const note = [{ role: "user", content: [{ type: "text", text: "<sidebar-headsup-note>x" }], timestamp: 1 }] as never[];

@@ -79,7 +79,6 @@ export interface OptionsPageOptions {
 
 export class OptionsPage {
   cursor = 0;
-  focused = true;
   /** A single-line text row being edited in place. */
   private editing: { row: OptionRow; input: Input } | undefined;
   /** The box (multiline row) that has focus, if any. */
@@ -291,8 +290,6 @@ export class OptionsPage {
   }
 
   render(width: number): string[] {
-    if (this.editing) this.editing.input.focused = this.focused;
-    for (const [id, area] of this.areas) area.focused = this.focused && this.boxFocus?.id === id;
     const theme = this.theme;
     const height = this.options.rowsAvailable();
     const rows = this.visible();

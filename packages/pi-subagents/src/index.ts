@@ -24,7 +24,6 @@ import { CACHE_RETENTIONS, type CacheRetention, Child, type ChildState, answerSu
 import { agentDir, loadConfig } from "./config.ts";
 import { Conversation, type Message, messageText, readTranscript, transcriptWriter } from "./conversation.ts";
 import { type Mode, type OwedResult, type Parcel, type ParkedCall, adopt, isParked, park, sessionKey } from "./handoff.ts";
-import { discoverFamily } from "./family-contract.ts";
 import { type JevConfig, askJev } from "./jev.ts";
 import { runLabel, taskLabel } from "./label.ts";
 import { type AvailableModel, type ChoiceSource, DEFAULT_THRESHOLD, DEFAULT_TIER_DESCRIPTIONS, type Given, type Resolved, type Threshold, type Tier, agentDefaults, pickQuestions, providerTiers, readPicks, resolve } from "./pick.ts";
@@ -192,8 +191,6 @@ type Item = { agent?: string; task: string; label?: string; cwd?: string; model?
 
 export interface RunView {
   id: string;
-  familyId?: string;
-  agentId?: string;
   agent: string;
   task: string;
   label?: string;
@@ -251,8 +248,6 @@ function view(run: Run, withOutput = false): RunView {
   const s = run.state;
   return {
     id: run.id,
-    ...(run.familyId ? { familyId: run.familyId } : {}),
-    ...(run.agentId ? { agentId: run.agentId } : {}),
     agent: run.agent,
     task: run.task,
     label: runLabel(run),
@@ -302,8 +297,6 @@ export function recordedRun(v: RecordedRun): Run {
   usage.cost.total = v.cost ?? 0;
   return {
     id: v.id,
-    ...(v.familyId ? { familyId: v.familyId } : {}),
-    ...(v.agentId ? { agentId: v.agentId } : {}),
     agent: v.agent,
     task: v.task,
     label: runLabel(v),
@@ -386,9 +379,6 @@ function slug(text: string) {
 }
 
 export default function subagents(pi: ExtensionAPI) {
-  // Observation is installed by the explicit family extension, not this tool's depth-limited
-  // runtime. Keep the propagation contract available even when delegation is disabled.
-  answerSubagentEnvProbes(pi.events);
   // At the deepest level allowed, a subagent gets no subagent tool, so nesting cannot run away.
   const initial = loadConfig("pi-subagents", DEFAULT_CONFIG, process.cwd());
   if (subagentDepth() >= initial.maxDepth) return;
@@ -451,7 +441,6 @@ export default function subagents(pi: ExtensionAPI) {
   });
   let boundUI: ExtensionContext["ui"] | undefined;
   const fleet = new FleetView({
-    family: () => discoverFamily(pi.events),
     runs: () => [...runs.values()],
     enabled: () => config.fleetView !== false,
     actions: (run) => viewerActions(run, boundUI ?? { notify: () => undefined }),
@@ -558,6 +547,7 @@ export default function subagents(pi: ExtensionAPI) {
   const announce = () => {
     if (hosting && yieldedTo.size === 0) safely(() => pi.events.emit(ACTIVITY_HOST, { ...me }));
   };
+  answerSubagentEnvProbes(pi.events);
   pi.events.on(ACTIVITY_SECTION, (data) => {
     const section = (data as { section?: ActivitySection } | undefined)?.section;
     if (section && typeof section.pill === "function" && typeof section.setHosted === "function") accept(section);
@@ -844,23 +834,13 @@ export default function subagents(pi: ExtensionAPI) {
     run.link.ended = undefined;
   };
 
-  const startRun = async (
+  const startRun = (
     ctx: ExtensionContext,
     item: Item,
     resolved: Resolved,
-    options: { cwd: string; fork?: string; async: boolean; onUpdate: () => void; signal: AbortSignal; mayStart: () => boolean },
-  ): Promise<Run | undefined> => {
+    options: { cwd: string; fork?: string; async: boolean; onUpdate: () => void },
+  ): Run => {
     const id = shortId();
-    const prepared = await discoverFamily(pi.events)?.prepare({
-      kind: "subagent", label: taskLabel(item.task, item.label), operationId: id,
-    }, options.signal);
-    // Enrollment may cross a process boundary. Never spawn after cancellation/replacement,
-    // even when the optional service ignores its signal or resolves after a reload.
-    if (!options.mayStart()) {
-      prepared?.finish("stopped");
-      prepared?.dispose();
-      return undefined;
-    }
     const outputPath = path.join(agentDir(), "subagents", id, "output.md");
     const link: RunLink = { done: Promise.resolve() };
     const child = new Child({
@@ -874,8 +854,7 @@ export default function subagents(pi: ExtensionAPI) {
       ...(options.fork ? { forkSession: options.fork } : {}),
       cacheRetention: CACHE_RETENTIONS.includes(config.childCacheRetention) ? config.childCacheRetention : "short",
       sessionDir: path.join(agentDir(), "subagents", "sessions"),
-      extensions: prepared?.extensions,
-      env: { ...requestSubagentEnv(pi.events), ...prepared?.env },
+      env: requestSubagentEnv(pi.events),
       // Through the link, not this runtime: after a reload the adopting runtime hears it.
       onUpdate: (state) => {
         run.state = state;
@@ -885,7 +864,6 @@ export default function subagents(pi: ExtensionAPI) {
     });
     const run: Run = {
       id,
-      ...(prepared ? { familyId: prepared.membership.familyId, agentId: prepared.agentId } : {}),
       agent: resolved.agent.name,
       task: item.task,
       label: taskLabel(item.task, item.label),
@@ -905,39 +883,14 @@ export default function subagents(pi: ExtensionAPI) {
       outputPath,
       link,
     };
-    // Synchronous extension hooks (environment/editor providers) can also end the call.
-    if (!options.mayStart()) {
-      prepared?.finish("stopped");
-      prepared?.dispose();
-      return undefined;
-    }
     runs.set(id, run);
     bindRun(run, options.onUpdate);
-    try {
-      child.start();
-    } catch (error) {
-      runs.delete(id);
-      prepared?.finish("failed", error instanceof Error ? error.message : String(error));
-      prepared?.dispose();
-      throw error;
-    }
+    child.start();
     record(run);
     refreshUI();
     scheduleAutoView();
     link.done = child.done.then((state) => {
       run.state = state;
-      // Transport-only ownership: this remains valid while the run is parked, without
-      // retaining the old runtime's Pi/context in the observation lifecycle.
-      try {
-        prepared?.finish(state.status === "done" ? "done" : state.status === "stopped" ? "stopped" : "failed", state.error);
-      } catch {
-        // Observation failure must not prevent result persistence/delivery.
-      }
-      try {
-        prepared?.dispose();
-      } catch {
-        // Transport cleanup is independent of the old runtime's `live` flag.
-      }
       try {
         mkdirSync(path.dirname(outputPath), { recursive: true });
         writeFileSync(outputPath, state.output || state.error || "(no output)");
@@ -1303,16 +1256,9 @@ export default function subagents(pi: ExtensionAPI) {
           if (!mayStart()) return undefined;
           const cwd = await cwdFor(item);
           if (!mayStart()) return undefined;
-          const run = await startRun(ctx, item, r, { cwd, ...(fork ? { fork } : {}), async: call.async, onUpdate: update, signal: prepSignal, mayStart });
-          if (!run) return undefined;
           dequeue();
+          const run = startRun(ctx, item, r, { cwd, ...(fork ? { fork } : {}), async: call.async, onUpdate: update });
           started.push(run);
-          // Starting can itself synchronously trigger cancellation. A parked child belongs
-          // to its adopter; otherwise stop it before wiring this call's controls.
-          if (!mayStart()) {
-            if (!call.parked) run.child?.stop();
-            return run;
-          }
           if (call.async) external(run, chain);
           update();
           // A foreground run stops with the call, unless it has been moved to the background.

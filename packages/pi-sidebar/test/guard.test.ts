@@ -33,7 +33,7 @@ describe("judgeCall", () => {
 
   it("allows reading, web, codemode and its own background-job tools without asking Jev", async () => {
     const h = host();
-    for (const tool of ["read", "grep", "find", "ls", "web_search", "fetch_content", "get_search_content", "source_check", "web_enable", "codemode", "tool_search", "bg_wait", "bg_logs", "sidebar_agents", "sidebar_transcript"]) {
+    for (const tool of ["read", "grep", "find", "ls", "web_search", "fetch_content", "get_search_content", "source_check", "web_enable", "codemode", "tool_search", "bg_wait", "bg_logs"]) {
       expect((await judgeCall(tool, {}, h.host)).allowed, tool).toBe(true);
     }
     expect(h.asked).toEqual([]);
@@ -68,32 +68,6 @@ describe("judgeCall", () => {
     const offline = await judgeCall("mcp__notes__search", {}, host({ jev: false }).host);
     expect(offline.allowed).toBe(false);
     if (!offline.allowed) expect(offline.reason).toMatch(/could not be confirmed/);
-  });
-
-  it("refuses process control and workflow authority regardless of hints or Jev", async () => {
-    const tools = ["bg_kill", "ask_planner", "finish_plan", "continue_plan", "plan_ask_planner", "plan_submit_merged", "plan_mode_question", "plan_mode_complete"];
-    const h = host({ probability: 0, tools: Object.fromEntries(tools.map((name) => [name, { annotations: { readOnlyHint: true } }])) });
-    for (const tool of tools) expect((await judgeCall(tool, {}, h.host)).allowed, tool).toBe(false);
-    expect(h.asked).toEqual([]);
-  });
-
-  it("keeps observational subagent calls without guard propagation but rejects controls deterministically", async () => {
-    const h = host({ probability: 0, guarded: false, tools: { subagent: { annotations: { readOnlyHint: true } } } });
-    for (const action of ["status", "result"]) expect((await judgeCall("subagent", { action, id: "child" }, h.host)).allowed).toBe(true);
-    for (const action of ["steer", "stop", "resume", "unknown"]) expect((await judgeCall("subagent", { action, id: "child" }, h.host)).allowed).toBe(false);
-    expect((await judgeCall("subagent", { task: "research" }, h.host)).allowed).toBe(false);
-    expect(h.asked).toEqual([]);
-  });
-
-  it("refuses worktree creation for single, parallel and chained research", async () => {
-    const h = host({ probability: 0 });
-    for (const input of [{ task: "research", worktree: true }, { tasks: [{ task: "research", worktree: true }] }, { chain: [{ task: "research", worktree: true }] }]) {
-      expect((await judgeCall("subagent", input, h.host)).allowed).toBe(false);
-    }
-    for (const input of [{ task: "research", worktree: false }, { tasks: [{ task: "research" }] }, { chain: [{ task: "research" }] }]) {
-      expect((await judgeCall("subagent", input, h.host)).allowed).toBe(true);
-    }
-    expect(h.asked).toEqual([]);
   });
 
   it("starts subagents only when they will run under the same guard", async () => {

@@ -25,7 +25,6 @@ export interface AgentStats {
 }
 
 export interface SubagentMeta {
-  familyAgentId?: string;
   index: number;
   label: string;
   model: string;
@@ -143,7 +142,6 @@ export function createSubagentReporter(
 
 /** Main-session view of one subagent. */
 export interface SubagentView {
-  familyAgentId?: string;
   id: string;
   label: string;
   model: string;
@@ -168,7 +166,6 @@ export class SubagentTracker {
     if (!isProgressDetails(details)) return false;
     for (const scout of details.scouts) {
       const view = this.view(toolCallId, scout);
-      view.familyAgentId = scout.familyAgentId;
       view.label = scout.label;
       view.model = scout.model;
       view.task = scout.task;

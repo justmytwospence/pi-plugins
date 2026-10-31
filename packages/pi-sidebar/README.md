@@ -26,16 +26,6 @@ Sidebar needs Pi's fullscreen mode (`"tuiMode": "fullscreen"`). In regular mode,
 pi -e ./packages/pi-sidebar
 ```
 
-## Agent family
-
-Sidebar observes the current session and its explicitly enrolled planner, scout and subagent descendants, not every Pi in the same directory or on the same machine. One family owns the Sidebar thread, draft and model choice across `/tree`, `/reload` and an explicit fresh implementation handoff. Earlier answers remain visible when the branch changes. Main's manual `/new` and unrelated forks, clones or resumes start separate families; `/new` in Sidebar instead resets its thread.
-
-The main session (or the new implementer after handoff) anchors the request and cache. The agent currently viewed in the primary pane is the subject of a question; its anchor and subject are captured when you submit, even if you navigate while Sidebar answers. Switching views does not switch the thread or model. Status can be partial or unavailable, including for children already running before the upgrade; missing observation is not an empty family.
-
-In Sidebar's composer, `/agents` opens the roster, `/transcript [agent-id]` opens a read-only transcript, and `/context [agent-id]` attaches transcript context to the next question. Without an ID, the latter two use the viewed agent. `/context` is the fallback when codemode is unavailable. Only enrolled agents can be queried. Transcript details are retrieved on demand, not swept into every request: pages are capped at 64 KiB and automatic reads at 32 KiB per question. The final family status is capped at 4,000 characters and reports omissions or partial coverage. Retrieved text is quoted evidence, not instructions; image payloads and provider signatures are excluded.
-
-Sidebar remains observational: it cannot steer or stop agents or exercise planning authority. Human controls in the primary view remain available. Planner and subagent views compose with the split; closing Sidebar expands the current view, and closing that view returns to main without closing Sidebar.
-
 ## Use
 
 ```
@@ -118,9 +108,9 @@ Bind these only where your Pi sessions load pi-sidebar. A Pi without it ignores 
 The header shows, live, what main is doing and how much of Sidebar's last answer came from the cache. While a dialog waits in main (one that holds `herdr:blocked`, such as a question from main, or any Pi select, confirm, input or extension dialog), Sidebar steps aside so the dialog renders full width. That is what herdr-web-ui's and Collie's phone readers read. Sidebar comes back once the dialog is answered. With Sidebar open, Collie reads only main's side of the split, once its `frames.toml` declares Sidebar's dividers (`panel_below = { rule = "─", pointers = "▴▾" }` and `panel_beside = { rule = "│", pointers = "◂▸" }`, in Spencer's Collie fork). A phone send types into whichever side holds the keys; when that is Sidebar, Collie withholds Enter because main's editor does not read back the text.
 
 **Thread storage**
-- The family thread is stored separately from main's session and is never sent to main's model. Long tool results are cut before storage.
-- `/sidebar new` and `/new` in Sidebar start a fresh thread.
-- The family thread persists across `/tree`, `/reload` and explicit fresh implementation handoff; unrelated sessions are separate.
+- Sidebar's thread lives in main's session as hidden entries (never sent to main's model).
+- `/sidebar new` and `/new` mark a fresh thread.
+- The thread follows `/tree` in main, comes back after resume and `/reload`, and long tool results are cut before they are stored.
 
 Settings, read from the environment Pi starts with:
 
@@ -265,7 +255,7 @@ A model reads its own conclusions back as settled, so a second opinion is worth 
 *Illustration, not a screenshot.*
 
 - **Favorites** come from `PI_SIDEBAR_MODELS`, else Pi's `enabledModels`; only models you are logged in to are offered. A glob (`anthropic/claude-opus-*`) means its newest match. A favorite that is main's own model counts as `same`.
-- **The choice** belongs to the family and survives `/tree`, `/reload` and explicit fresh implementation handoff; `PI_SIDEBAR_MODEL` sets it for new families. The header names the model while it is not main's. Heads-up checks run on it too.
+- **The choice** is stored in main's session, so it follows `/tree` and comes back after resume and `/reload`; `PI_SIDEBAR_MODEL` sets it for new sessions. The header names the model while it is not main's. Heads-up checks run on it too.
 - **What it sees.** Its own system prompt (Pi's, with the project's context files) and tools, then its role note, then main's session as a transcript: the user's messages, main's replies, reasoning and tool calls, and tool results clipped to their first 1,200 and last 600 characters. The transcript arrives as user-side text in `<main-transcript>` parts, not as the model's own turns, so it reads it as someone else's work. It is told to read critically and to check claims against the code, which it can read itself. A turn whose tool calls are still running stays out of the transcript (the live status lists them).
 - **Its own cache.** Main's cache belongs to main's model, so the other model keeps one of its own. Its requests only ever grow at the end: each request adds main's activity since the last as a new part, placed where Sidebar's conversation stood at the time, so parts and Sidebar's exchanges interleave in the order they happened. On Anthropic, a breakpoint sits on the last block before the live status (and one on the newest part when a slot is free), in the style of the system prompt's, so with `PI_CACHE_RETENTION=long` the cache lasts an hour between questions. OpenAI caches prefixes by itself, routed by a session id derived from main's (`prompt_cache_key`), which stays the same when Sidebar's session is rebuilt.
 - **Cost.** The first question on a model reads main's transcript uncached, once; Sidebar asks first when that is 8k tokens or more. After that, each question reads everything before it from the cache: in a live test on Anthropic, a second question after main had moved on read 96% from the cache, with 764 tokens new. A compaction or `/tree` in main, a fresh Sidebar thread or a switch of model starts the layout over, which reads the transcript uncached once more.
@@ -278,7 +268,7 @@ Everything main can, except changing anything. Read-only does not change the too
 - **Allowed:** reading and search tools, web search and fetch (including `web_enable`), `codemode` (each nested call passes the guard too), `tool_search`, pi-bg's `bg_wait`/`bg_logs`/`bg_kill`, and any tool marked read-only (MCP's `readOnlyHint`).
 - **Shell commands** (`bash`, `powershell`, pi-bg's `bg_run`): run when they only read. The policy is plan mode's, loosened for reading: flags such as `rg -i`, globs, `2>/dev/null` and `2>&1`, input redirection, `cd`, and `$VAR` set earlier in the same command or from `HOME`, `PWD`, `USER` and `TMPDIR`. Writes, `sed -i`, command substitution and unknown variables are never cleared by the policy.
 - **Anything else** (an unfamiliar command, a tool without hints): one Jev judgment (`typesafe/jev-latest` through Pi's classifier models, 5 s timeout, retried once on timeout) of whether the call would change anything. It is refused at 50% or more, or when Jev is unavailable.
-- **Subagents:** Sidebar may start them with pi-subagents, and they run under the same guard. pi-subagents asks the `pi-plugins.subagent-env.v1` event channel for extra environment, and Sidebar adds `PI_SIDEBAR_GUARD=1`. With that set, pi-sidebar in the subagent installs the guard and family observer, not the Sidebar UI. An older pi-subagents that does not answer the channel's probe gets no subagents from Sidebar.
+- **Subagents:** Sidebar may start them with pi-subagents, and they run under the same guard. pi-subagents asks the `pi-plugins.subagent-env.v1` event channel for extra environment, and Sidebar adds `PI_SIDEBAR_GUARD=1`. With that set, pi-sidebar in the subagent installs only the guard. An older pi-subagents that does not answer the channel's probe gets no subagents from Sidebar.
 
 A refusal comes back to the model with its reason, and Sidebar tells you what to ask main instead. The guard judges calls; it is not a sandbox.
 

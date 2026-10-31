@@ -151,14 +151,12 @@ describe("heads-up note", () => {
     }
   });
 
-  it("lays out like pi-recap's line: text wraps in a block right of the label", () => {
+  it("lays out like pi-recap's line: hanging indent and the same wrap", () => {
     const state = new NoteState();
     state.show({ ...note, text: "word ".repeat(40).trim() });
     const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t } as never;
     const lines = state.lines(70, theme, 40);
-    const textCol = lines[0].indexOf("word");
-    expect(textCol).toBeGreaterThan(3);
-    expect(lines.slice(1, -1).every((line) => line.startsWith(" ".repeat(textCol) + "word"))).toBe(true);
+    expect(lines.slice(1, -1).every((line) => line.startsWith("   word"))).toBe(true);
     expect(Math.max(...lines.slice(0, -1).map(visibleWidth))).toBeLessThanOrEqual(3 + 40);
     state.apply({ type: "expand" }, 0);
     expect(state.lines(70, theme).at(-2)).toBe("   Why it matters.");

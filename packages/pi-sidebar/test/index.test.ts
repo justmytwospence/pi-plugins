@@ -501,7 +501,7 @@ describe("asking", () => {
     expect(ask).not.toHaveBeenCalled();
     expect(panel.pendingConfirm()).toMatchObject({ text: "what now?" });
     panel.input.handleInput("\r");
-    expect(ask).toHaveBeenCalledWith("what now?", true, expect.objectContaining({ snapshot: expect.objectContaining({ sessionId: "main-session" }) }));
+    expect(ask).toHaveBeenCalledWith("what now?", true);
     expect(panel.pendingConfirm()).toBeUndefined();
   });
 
@@ -525,7 +525,7 @@ describe("asking", () => {
     const abort = vi.spyOn(controller.agent, "abort").mockResolvedValue();
     const panel = panelOf(controller);
     panel.submit("what now?");
-    expect(ask).toHaveBeenCalledWith("what now?", false, expect.objectContaining({ snapshot: expect.objectContaining({ sessionId: "main-session" }) }));
+    expect(ask).toHaveBeenCalledWith("what now?", false);
     vi.spyOn(controller.agent, "busy", "get").mockReturnValue(true);
     panel.input.handleInput("\x1b");
     expect(abort).toHaveBeenCalledTimes(1);
@@ -569,65 +569,6 @@ describe("asking", () => {
   });
 });
 
-describe("family controller integration", () => {
-  it("keeps a hosted primary view through exactly-once raw toggles and native dialogs", async () => {
-    const { pi, controller, ctx, tui, mainEditor } = setup();
-    const original = tui.layoutRoot;
-    let input!: (text: string) => unknown;
-    (ctx.ui as any).onTerminalInput = (handler: typeof input) => { input = handler; return () => {}; };
-    await pi.emit("session_start", {}, ctx);
-    let done!: () => void;
-    const primary = leaf();
-    const shown = controller.family.service.view({ factory: (_t, _th, _kb, close) => { done = close; return primary; } });
-    await Promise.resolve();
-    expect(tui.focused).toBe(primary);
-    expect(input("\x14")).toEqual({ consume: true });
-    expect(controller.isOpen).toBe(true);
-    const panel = panelOf(controller);
-    panel.input.setText("preserved draft");
-    controller.focusMain();
-    expect(tui.focused).toBe(primary);
-    expect(input("\x14")).toEqual({ consume: true });
-    expect(controller.isOpen).toBe(false);
-    expect(tui.focused).toBe(primary);
-    input("\x14");
-    await pi.emit("ui_prompt_start", { kind: "select" }, ctx);
-    expect(tui.layoutRoot).toBe(original);
-    expect(tui.focused).toBe(mainEditor);
-    await pi.emit("ui_prompt_end", { kind: "select" }, ctx);
-    expect(tui.layoutRoot).toBeInstanceOf(SplitRoot);
-    expect(panel.input.getText()).toBe("preserved draft");
-    done();
-    await shown;
-    expect(controller.isOpen).toBe(true);
-    controller.close();
-    expect(tui.layoutRoot).toBe(original);
-    await pi.emit("session_shutdown", { reason: "quit" }, ctx);
-  });
-
-  it("captures the question subject before a confirmation and attaches context only to Sidebar", async () => {
-    const { pi, controller, ctx } = setup(OLD_ANSWER);
-    await pi.emit("session_start", {}, ctx);
-    controller.openOrFocus(ctx as never);
-    const prepared = await controller.family.service.prepare({ kind: "subagent", label: "child" });
-    const rootId = controller.family.membership!.agentId;
-    controller.family.service.focus(prepared.agentId);
-    const ask = vi.spyOn(controller.agent, "ask").mockResolvedValue();
-    const panel = panelOf(controller);
-    panel.submit("what is it doing?");
-    controller.family.service.focus(rootId);
-    panel.input.handleInput("\r");
-    expect(ask.mock.calls[0]![2]!.status).toContain(`captured subject=\"${prepared.agentId}\"`);
-    expect(ask.mock.calls[0]![2]!.status).toContain(`anchor=\"${rootId}\"`);
-    panel.submit("/context");
-    await new Promise(resolve => setTimeout(resolve, 0));
-    expect(controller.agent.nextContext).toContain(rootId);
-    expect(pi.entries.some(e => e.customType === "custom_message")).toBe(false);
-    prepared.finish("done"); prepared.dispose();
-    await pi.emit("session_shutdown", { reason: "quit" }, ctx);
-  });
-});
-
 describe("quiz mode", () => {
   const warm = (controller: SidebarController, ctx: unknown) => {
     controller.main.bind(ctx as never);
@@ -645,11 +586,11 @@ describe("quiz mode", () => {
     await flush();
     expect(controller.quiz.on).toBe(true);
     expect(pi.entries.at(-1)).toMatchObject({ customType: QUIZ_ENTRY, data: { version: 1, on: true } });
-    expect(ask).toHaveBeenCalledWith(QUIZ_START, false, expect.any(Object));
+    expect(ask).toHaveBeenCalledWith(QUIZ_START, false);
     expect(controller.agent.quiz?.role()).toBe(QUIZ_ROLE);
     panel.submit("/quiz next");
     await flush();
-    expect(ask).toHaveBeenLastCalledWith(QUIZ_NEXT, false, expect.any(Object));
+    expect(ask).toHaveBeenLastCalledWith(QUIZ_NEXT, false);
     panel.submit("/quiz");
     await flush();
     expect(controller.quiz.on).toBe(false);

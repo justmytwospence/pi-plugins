@@ -157,9 +157,7 @@ export class NoteState {
       return [fit(` ${theme.fg("dim", `${theme.bold(MARK)}${theme.bold(`heads up dismissed: `)}${CHOICES.dismissed}`)}`)];
     }
     const label = `${theme.fg("accent", theme.bold("heads up"))}${theme.fg("dim", ` · ${KIND_LABEL[note.kind]}: `)}`;
-    // The label never wraps; the text wraps in a block to its right, to the same right edge.
-    const indent = " ".repeat(visibleWidth(label));
-    const out = wrapTextWithAnsi(note.text, Math.max(1, room - indent.length)).map((line, i) => (i === 0 ? ` ${mark}${label}${line}` : `${hang}${indent}${line}`));
+    const out = wrapTextWithAnsi(`${label}${note.text}`, room).map((line, i) => `${i === 0 ? ` ${mark}` : hang}${line}`);
     if (this.phase === "detail" && note.detail) {
       for (const line of wrapTextWithAnsi(note.detail, room)) out.push(`${hang}${theme.fg("muted", line)}`);
     }

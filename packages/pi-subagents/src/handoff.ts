@@ -20,8 +20,6 @@ const KEY = Symbol.for("pi-subagents.runs.v1");
 /** One tool call whose result is still owed: its runs (ended or running) and what never started. */
 export interface ParkedCall {
   mode: Mode;
-  // Keep the original Run objects, including familyId/agentId. Adoption must never reserve
-  // replacement observation identities or dispose the still-running child's observer.
   runs: Run[];
   /** Tasks of the call that had not started at the reload; they never will. */
   notStarted: number;

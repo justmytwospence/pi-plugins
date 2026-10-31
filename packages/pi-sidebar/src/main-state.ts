@@ -1,8 +1,7 @@
 // What Sidebar knows about the main session, kept in memory in main's own process: its last
 // provider request exactly as sent (and which session entry it covered), and what it is doing this
 // second (running tools, finished parallel results, the reply it is writing).
-import { buildSessionContext, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { summarizeArgs } from "./transcript.ts";
 
 type Json = Record<string, unknown>;
@@ -48,16 +47,6 @@ export interface MainRequest {
   leafId: string | null;
   sentAt: number;
   payload: Json;
-}
-
-export interface MainSnapshot {
-  sessionId: string | undefined;
-  leafId: string | null;
-  revision: number;
-  request: MainRequest | undefined;
-  messages: AgentMessage[];
-  live: LiveState;
-  model?: string;
 }
 
 const STREAM_TAIL_CHARS = 600;
@@ -108,21 +97,10 @@ export class MainState {
   request: MainRequest | undefined;
   ctx: ExtensionContext | undefined;
   sessionId: string | undefined;
-  /** Compact observation only; no transcript sweep or extra heads-up request. */
-  familyStatus: (() => string) | undefined;
   readonly live: LiveState = { state: "idle", since: Date.now(), tools: [], finished: [] };
   private readonly listeners = new Set<() => void>();
 
-  private revision = 0;
-  private disposed = false;
-  private readonly unsubscribe: Array<() => void> = [];
-
-  constructor(api: ExtensionAPI, private readonly now = () => Date.now()) {
-    const pi = { on: ((event: string, handler: (...args: unknown[]) => unknown) => {
-      const off = (api.on as Function)(event, (...args: unknown[]) => this.disposed ? undefined : handler(...args));
-      if (typeof off === "function") this.unsubscribe.push(off);
-      return off;
-    }) as ExtensionAPI["on"] };
+  constructor(pi: ExtensionAPI, private readonly now = () => Date.now()) {
     pi.on("session_start", (_event, ctx) => this.bind(ctx));
     // After /tree or a compaction main's next request starts from a different history: the one in
     // memory no longer describes it, so Sidebar rebuilds from the session until main sends again.
@@ -144,7 +122,6 @@ export class MainState {
         sentAt: this.now(),
         payload: event.payload as Json,
       };
-      this.changed();
       return undefined;
     });
 
@@ -152,7 +129,7 @@ export class MainState {
       Object.assign(this.live, { state: "working", since: this.now(), tools: [], finished: [], streaming: undefined });
       this.changed();
     });
-    pi.on("agent_settled", () => {
+    pi.on("agent_end", () => {
       Object.assign(this.live, { state: "idle", since: this.now(), tools: [], finished: [], streaming: undefined });
       this.changed();
     });
@@ -164,7 +141,6 @@ export class MainState {
         .join("\n");
       if (!text) return;
       this.live.streaming = text.slice(-STREAM_TAIL_CHARS);
-      this.changed();
     });
     pi.on("message_end", (event) => {
       const message = event.message as { role: string; toolCallId?: string; usage?: Partial<Usage> };
@@ -249,33 +225,7 @@ export class MainState {
     return () => this.listeners.delete(listener);
   }
 
-  /** Detached data only: no session manager, UI, registry or provider runtime escapes. */
-  snapshot(): MainSnapshot {
-    const ctx = this.ctx;
-    return structuredClone({
-      sessionId: this.sessionId,
-      leafId: ctx?.sessionManager.getLeafId() ?? null,
-      revision: this.revision,
-      request: this.request,
-      messages: ctx ? buildSessionContext(ctx.sessionManager.getEntries() as never, ctx.sessionManager.getLeafId()).messages as AgentMessage[] : [],
-      live: this.live,
-      ...(ctx?.model ? { model: `${ctx.model.provider}/${ctx.model.id}` } : {}),
-    });
-  }
-
-  dispose(): void {
-    if (this.disposed) return;
-    this.disposed = true;
-    for (const off of this.unsubscribe.splice(0)) off();
-    this.listeners.clear();
-    this.ctx = undefined;
-    this.request = undefined;
-    this.familyStatus = undefined;
-  }
-
   private changed(): void {
-    if (this.disposed) return;
-    this.revision++;
     for (const listener of this.listeners) {
       try { listener(); } catch { /* a listener must not break main's events */ }
     }

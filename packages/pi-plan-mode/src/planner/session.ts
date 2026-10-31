@@ -34,8 +34,6 @@ export interface PlannerSessionOptions {
   skills: string[];
   /** The planner policy extension for this planner. */
   policy: ExtensionFactory;
-  /** Observation only: never loads Sidebar UI into a planner. */
-  observer?: ExtensionFactory;
   /** Appended to the system prompt. */
   appendSystemPrompt: string[];
   /** A new session seeded with these messages, or an existing session file to continue. */
@@ -49,7 +47,7 @@ export interface PlannerSessionHandle {
   /** The session's entries on its current branch (what you said to a planner goes to your main conversation). */
   entries?(): readonly unknown[];
   subscribe(listener: (event: AgentSessionEvent) => void): () => void;
-  dispose(): void | Promise<void>;
+  dispose(): void;
 }
 
 export type PlannerSessionFactory = (
@@ -91,16 +89,6 @@ export function writeSeededSession(cwd: string, dir: string, messages: readonly 
   return sessionManager.isPersisted() ? sessionManager.getSessionFile() : undefined;
 }
 
-/** Actual restored session identity, never a lane's display label. */
-export function readSessionId(file: string, cwd: string): string | undefined {
-  if (!existsSync(file)) return undefined;
-  try {
-    return SessionManager.open(file, undefined, cwd).getSessionId();
-  } catch {
-    return undefined;
-  }
-}
-
 /** The messages of a stored session's current branch; [] when it is missing or unreadable. */
 export function readSessionMessages(file: string, cwd: string): unknown[] {
   if (!existsSync(file)) return [];
@@ -131,7 +119,7 @@ async function openSession(host: ExtensionContext, options: PlannerSessionOption
     noSkills: options.skills.length === 0,
     additionalSkillPaths: options.skills,
     additionalExtensionPaths: paths,
-    extensionFactories: [options.policy, ...builtins, ...(options.observer ? [options.observer] : [])] as never,
+    extensionFactories: [options.policy, ...builtins] as never,
     appendSystemPrompt: options.appendSystemPrompt,
   });
   await loader.reload();
@@ -166,7 +154,7 @@ async function openSession(host: ExtensionContext, options: PlannerSessionOption
     file: sessionManager.getSessionFile(),
     entries: () => sessionManager.getBranch(),
     subscribe: (listener) => session.subscribe(listener),
-    dispose: () => shutdownSession(session),
+    dispose: () => void shutdownSession(session),
   };
 }
 

@@ -2,12 +2,6 @@
 
 Maintainer rules for keeping the suite's dialogs, footer and below-editor widgets readable by the phone clients that parse Pi's screen. The public overview is `site/src/content/docs/guides/clients.md`.
 
-## Sidebar family views
-
-Planner and subagent views compose in Sidebar's primary pane. Closing Sidebar expands the current view; closing the primary view returns to main with Sidebar still open. Native dialogs temporarily suspend the split and restore the prior view and focus. Sidebar is read-only; primary-view human controls are unchanged. Its roster covers explicitly enrolled family members, not unrelated same-directory or same-machine sessions, and can report partial or unavailable coverage.
-
-Changes to this composition require real-renderer coverage at 46, 120 and 180 columns, including navigation, resize, mouse, editors, dialogs and draft/focus restoration, and `npm run check:clients`. Check both clients for false composer/send targets as well as dialog parsing; do not add exceptions or claim validation before those checks pass.
-
 ## herdr-web-ui compatibility
 
 herdr-web-ui (devswha/herdr-web-ui, `server/prompt.ts`) turns a waiting Pi dialog into a phone card by reading the screen text. It has no configuration hook for dialogs. Every dialog that holds `herdr:blocked` must keep a layout it can read, or phones fall back to a bare Enter/Esc card:

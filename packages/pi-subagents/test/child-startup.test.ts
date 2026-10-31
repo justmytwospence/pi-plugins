@@ -27,17 +27,6 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-test("observer extensions and member environment reach the process independently of discovery", () => {
-  child = new Child({ task: "observed", cwd: process.cwd(), model: "p/m", thinking: "low", sessionDir: "/sessions",
-    invocation: { command: "fake", args: [] }, extensions: ["/family/observer.ts", "/guard.ts"],
-    env: { PI_FAMILY_MEMBER: "member-uuid", PI_SIDEBAR_GUARD: "1" },
-  }).start();
-  const [, args, options] = vi.mocked(spawn).mock.calls[0]!;
-  expect(args).toContain("--extension");
-  expect(args?.slice(0, 6)).toEqual(["--mode", "rpc", "--extension", "/family/observer.ts", "--extension", "/guard.ts"]);
-  expect(options?.env).toMatchObject({ PI_FAMILY_MEMBER: "member-uuid", PI_SIDEBAR_GUARD: "1", PI_SUBAGENT: "1" });
-});
-
 test("get_state is correlated before prompting; only Pi's path is captured once", async () => {
   const updates: Array<string | undefined> = [];
   start((s) => updates.push(s.sessionFile)).start();

@@ -33,14 +33,14 @@ test("actual native Editor retains h/j/k/l and Ctrl-U/D while Fleet is virtually
   } finally { fleet.dispose(); }
 });
 
-test.each([false, true])("native steering keeps edit keys and scrolls its allocated viewport (hosted: %s)", (hosted) => {
+test("native steering editor keeps its edit keys; PageUp/PageDown scroll half a page", () => {
   const tui = fakeTui(27);
   const run = fakeRun({ child: {} as never });
   const message = { role: "assistant", content: [{ type: "text", text: Array.from({ length: 100 }, (_, i) => `line ${i}`).join("\n\n") }] };
   run.conversation.apply({ type: "message_start", message });
   run.conversation.apply({ type: "message_end", message });
   let steered = "";
-  const viewer = new SessionView(tui as never, run, plain, () => undefined, { steer: (message) => { steered = message; return true; } }, { matches: () => false }, undefined, undefined, undefined, hosted ? () => ({ width: 100, height: 19 }) : undefined);
+  const viewer = new SessionView(tui as never, run, plain, () => undefined, { steer: (message) => { steered = message; return true; } }, { matches: () => false });
   viewer.focused = true;
   try {
     viewer.render(100);

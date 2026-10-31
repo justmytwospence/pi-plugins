@@ -10,7 +10,6 @@ import { TuiMainScreen as TuiMainScreen14 } from "pi-tui-1-4";
 import { transcriptWriter } from "../src/conversation.ts";
 import { recordedRun } from "../src/index.ts";
 import type { Run } from "../src/run.ts";
-import type { FamilyService } from "../src/family-contract.ts";
 import { type ViewerUI, type SessionSource, SessionView, openViewer } from "../src/ui/viewer.ts";
 import { KEY, fakeRun, fakeTui, fakeUI, plain } from "./ui-helpers.ts";
 
@@ -58,63 +57,6 @@ const text = (lines: string[]) => lines.map((l) => stripVTControlCharacters(l).t
 const type = (v: SessionView, s: string) => {
   for (const ch of s) v.handleInput(ch);
 };
-
-test.each([46, 120, 180])("family-hosted viewer uses allocated height, preserves drafts and publishes focus at width %i", async (width) => {
-  const ui = fakeUI(fakeTui(50, width));
-  const a = liveRun({ agentId: "a-uuid" });
-  const b = liveRun({ agentId: "b-uuid" });
-  const focus = vi.fn();
-  const overlay = vi.spyOn(ui.tui, "showOverlay");
-  let height = 17;
-  let view!: SessionView;
-  let closed = 0;
-  const family = {
-    focus,
-    view: ({ factory }) => new Promise<void>(resolve => {
-      view = factory(ui.tui as never, plain, undefined, () => { closed++; resolve(); }, () => ({ width, height })) as SessionView;
-    }),
-  } satisfies Partial<FamilyService>;
-  const source: SessionSource = { runs: () => [a, b], actions: () => ({ steer: () => true }), family: () => family as unknown as FamilyService };
-  const work = openViewer(ui, a, source.actions(a), undefined, source);
-  expect(ui.customs).toHaveLength(0);
-  view.focused = true;
-  type(view, "draft a");
-  expect(view.render(width)).toHaveLength(height);
-  view.switchTo(b);
-  type(view, "draft b");
-  view.switchTo(a);
-  expect(text(view.render(width))).toContain("draft a");
-  height = 8;
-  expect(view.render(width)).toHaveLength(height);
-  expect(ui.tui.terminal.rows).toBe(50);
-  for (const line of view.render(width)) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
-  view.switchTo(undefined);
-  await work;
-  expect(focus.mock.calls.map(call => call[0])).toEqual(["a-uuid", "b-uuid", "a-uuid", undefined]);
-  expect(closed).toBe(1);
-  expect(overlay).not.toHaveBeenCalled();
-  overlay.mockRestore();
-});
-
-test("a delayed family factory rechecks auto-view eligibility before creating a view", async () => {
-  const ui = fakeUI();
-  let factory!: Parameters<FamilyService["view"]>[0]["factory"];
-  let reject!: (error: Error) => void;
-  const focus = vi.fn();
-  const family = { focus, view: (options: Parameters<FamilyService["view"]>[0]) => {
-    factory = options.factory;
-    return new Promise<void>((_resolve, no) => { reject = no; });
-  } } as unknown as FamilyService;
-  let eligible = true;
-  const work = openViewer(ui, liveRun(), {}, undefined, { runs: () => [], actions: () => ({}), family: () => family }, undefined, () => eligible);
-  eligible = false;
-  const rejected = expect(work).rejects.toThrow("Viewer opening cancelled");
-  try { factory(ui.tui as never, plain, undefined, () => {}, () => ({ width: 100, height: 20 })); }
-  catch (error) { reject(error as Error); }
-  await rejected;
-  expect(focus).not.toHaveBeenCalled();
-  expect(ui.customs).toHaveLength(0);
-});
 
 test("interaction is reported before navigation, typing and Esc; render and output do not report it", async () => {
   const ui = fakeUI();

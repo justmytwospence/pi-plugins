@@ -1,6 +1,4 @@
-import { expect, test, vi } from "vitest";
-import subagents from "../src/index.ts";
-import { harness } from "./harness.ts";
+import { expect, test } from "vitest";
 import { SUBAGENT_ENV_CHANNEL, answerSubagentEnvProbes, requestSubagentEnv, type SubagentEnvRequest } from "../src/child.ts";
 
 function bus() {
@@ -26,21 +24,6 @@ test("listeners add environment for the next child; bad names and values are dro
   });
   expect(requestSubagentEnv(events)).toEqual({ PI_SIDEBAR_GUARD: "1" });
   expect(requestSubagentEnv(undefined)).toEqual({});
-});
-
-test("the propagation probe remains available at max depth without registering delegation", () => {
-  vi.stubEnv("PI_SUBAGENT_DEPTH", "999");
-  try {
-    const h = harness();
-    const events = bus();
-    h.pi.events = events;
-    const register = vi.spyOn(h.pi, "registerTool");
-    subagents(h.pi);
-    const probe: SubagentEnvRequest = { version: 1, env: {}, probe: true };
-    events.emit(SUBAGENT_ENV_CHANNEL, probe);
-    expect(probe.supported).toBe(true);
-    expect(register).not.toHaveBeenCalled();
-  } finally { vi.unstubAllEnvs(); }
 });
 
 test("a probe learns that subagents get the requested environment", () => {

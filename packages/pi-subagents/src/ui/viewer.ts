@@ -12,7 +12,6 @@ import { compositeTuiLine, getKeybindings, Editor, Loader, type Component, type 
 import { leavesPromptDown, type ActivitySection } from "../activity.ts";
 import { contextTokens, type Conversation } from "../conversation.ts";
 import { type EditorModeContext, type EmbeddedEditor, type EditorFactoryOptions, type SuiteEditor, EDITOR_MODE, EDITOR_SURFACE, INPUT_CONTEXT, readEditorMode, requestEditorFactory } from "../editor-contract.ts";
-import { discoverFamily, type FamilyService } from "../family-contract.ts";
 import { runLabel } from "../label.ts";
 import type { Run } from "../run.ts";
 import { type FleetEntry, fleetRoster, renderFleet } from "./fleet.ts";
@@ -35,8 +34,6 @@ export interface ViewerActions {
 
 /** What the view switches between and draws around a session: FleetView's source, plus Pi's settings. */
 export interface SessionSource {
-  /** Optional composition host, discovered in the current runtime. */
-  family?(): FamilyService | undefined;
   runs(): readonly Run[];
   actions(run: Run): ViewerActions;
   /** Whether the list under the editor shows (FleetView's setting). */
@@ -119,7 +116,6 @@ export class SessionView implements Component, Focusable {
   private readonly loader: Loader;
   private hasFocus = false;
   private closed = false;
-  private disposed = false;
   private stopArmed = false;
   /** The list under the editor has the keyboard. */
   private listActive = false;
@@ -142,8 +138,6 @@ export class SessionView implements Component, Focusable {
     private readonly source?: SessionSource,
     private readonly openSection?: (section: ActivitySection) => void,
     private readonly onInteraction?: () => void,
-    private readonly viewport?: () => { width: number; height: number },
-    private readonly family?: FamilyService,
   ) {
     this.run = run;
     this.loader = new Loader(tui as TUI, (text) => theme.fg("accent", text), (text) => theme.fg("muted", text), "Working");
@@ -248,7 +242,6 @@ export class SessionView implements Component, Focusable {
       this.refreshWorking();
     }
     this.openComposer(settings.editorPaddingX ?? 0);
-    safe(() => this.family?.focus(run.agentId));
   }
 
   private detach() {
@@ -613,7 +606,7 @@ export class SessionView implements Component, Focusable {
   render(width: number): string[] {
     if (width < 8) return [];
     const th = this.theme;
-    const rows = this.viewport ? Math.max(1, Math.floor(this.viewport().height)) : Math.max(4, Math.floor((this.tui.terminal.rows * VIEWER_HEIGHT_PCT) / 100));
+    const rows = Math.max(4, Math.floor((this.tui.terminal.rows * VIEWER_HEIGHT_PCT) / 100));
     if (!this.running()) this.loader.stop();
     // The run ended while shown: no more steering (an unsent draft is kept).
     if (this.composer && !this.canSteer()) this.closeComposer();
@@ -663,7 +656,7 @@ export class SessionView implements Component, Focusable {
       const column = Math.max(0, Math.floor((width - labelWidth) / 2));
       lines[viewport - 1] = safe(() => compositeTuiLine(lines[viewport - 1] ?? "", label, column, labelWidth, width)) ?? label;
     }
-    return [...lines, ...dock.slice(0, Math.max(0, rows - lines.length))];
+    return [...lines, ...dock.slice(0, rows - lines.length)];
   }
 
   invalidate(): void {
@@ -671,9 +664,6 @@ export class SessionView implements Component, Focusable {
   }
 
   dispose(): void {
-    if (this.disposed) return;
-    this.disposed = true;
-    safe(() => this.family?.focus(undefined));
     this.closed = true;
     clearInterval(this.timer);
     this.detach();
@@ -741,25 +731,6 @@ export interface ViewerUI {
  * With a `source`, Tab and the list switch between main and its runs.
  */
 export function openViewer(ui: ViewerUI, run: Run, actions: ViewerActions = {}, onOpen?: (close: () => void) => void, source?: SessionSource, onInteraction?: () => void, canInstall?: () => boolean): Promise<void> {
-  const family = source?.family?.() ?? (actions.events ? discoverFamily(actions.events) : undefined);
-  if (family) {
-    let hosted: SessionView | undefined;
-    let cancelled = false;
-    return family.view({ factory: (tui, theme, keybindings, done, viewport) => {
-      // A delayed host must not install an auto-view after eligibility changed.
-      if (cancelled || canInstall?.() === false) throw new Error("Viewer opening cancelled");
-      const close = () => {
-        if (cancelled) return;
-        cancelled = true;
-        hosted?.dispose();
-        done();
-      };
-      const openSection = (section: ActivitySection) => invoke(() => section.openDialog?.(ui as never));
-      hosted = new SessionView(tui, run, theme as Theme, close, actions, keybindings as Keybindings, source, openSection, onInteraction, viewport, family);
-      onOpen?.(close);
-      return hosted;
-    } }).finally(() => hosted?.dispose());
-  }
   let view: SessionView | undefined;
   let handle: OverlayHandle | undefined;
   let cancelled = false;

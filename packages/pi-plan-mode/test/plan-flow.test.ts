@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { type ExtensionContext, initTheme } from "@earendil-works/pi-coding-agent";
 import { onTestFinished, test } from "vitest";
-import { FAMILY_CHANNEL, FAMILY_ENTRY, type FamilyMembership, type FamilyRequest } from "../src/family-contract.js";
 import { directImplementationBrief, implementationBrief } from "../src/handoff.js";
 import planMode from "../src/index.js";
 import { INLINE_ENTRY, MODE_CHANGED, MODE_SET, PLAN_PROVIDER } from "../src/inline-plan.js";
@@ -662,66 +661,6 @@ test("/planners implementation offers available Terra outside the planning short
   app.handleInput("\u001b");
   await opened;
 });
-
-for (const outcome of ["success", "cancelled", "error", "ineligible"] as const) {
-  test(`fresh family handoff ${outcome} binds actual identity and disposes only cancelled reservations`, async () => {
-    const plansDirectory = mkdtempSync(join(tmpdir(), "family-handoff-"));
-    onTestFinished(() => rmSync(plansDirectory, { recursive: true, force: true }));
-    const state = await implementationScreen({
-      settings: { plansDirectory, implementationModelMap: implementationMap },
-    });
-    let cancelled = 0;
-    let starts = 0;
-    const membership: FamilyMembership = { version: 1, familyId: "family", agentId: "implementer" };
-    Object.defineProperty(membership, "cancel", {
-      enumerable: false,
-      value: () => {
-        cancelled++;
-      },
-    });
-    state.mock.eventBus.on(FAMILY_CHANNEL, (data) => {
-      (data as FamilyRequest).service = {
-        prepareHandoff: async () => {
-          if (outcome === "ineligible") {
-            for (const handler of state.mock.events.get("session_tree") ?? []) await handler({}, state.context.ctx);
-          }
-          return membership;
-        },
-      } as FamilyRequest["service"];
-    });
-    const entries: Array<{ customType: string; data: unknown }> = [];
-    Object.assign(state.context.ctx, {
-      waitForIdle: async () => {},
-      newSession: async (options: { setup(manager: unknown): Promise<void> }) => {
-        starts++;
-        if (outcome === "error") throw new Error("replacement failed");
-        if (outcome === "cancelled") return { cancelled: true };
-        await options.setup({
-          getSessionId: () => "actual-new-session",
-          appendCustomEntry: (customType: string, data: unknown) => entries.push({ customType, data }),
-        });
-        return { cancelled: false };
-      },
-    });
-    state.focus("Mode");
-    state.app.handleInput("\u001b[C");
-    state.focus("Context");
-    state.app.handleInput("\u001b[C");
-    state.app.handleInput("\r");
-    await state.opened;
-    await flush();
-    assert.equal(starts, outcome === "ineligible" ? 0 : 1);
-    assert.equal(cancelled, outcome === "success" ? 0 : 1);
-    if (outcome === "success") {
-      assert.deepEqual(entries.find((entry) => entry.customType === FAMILY_ENTRY)?.data, {
-        version: 1,
-        familyId: "family",
-        agentId: "implementer",
-        sessionId: "actual-new-session",
-      });
-    } else assert.equal(entries.length, 0);
-  });
-}
 
 /** A child is initialized by a different extension runtime, with appends visible on its branch. */
 async function freshHandoff(author = "M") {

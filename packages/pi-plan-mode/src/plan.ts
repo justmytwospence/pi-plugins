@@ -19,7 +19,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Component, EditorTheme, TUI } from "@earendil-works/pi-tui";
 import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION } from "./activity.js";
-import { openPlanningView } from "./app/frame.js";
+import { FULL_SCREEN } from "./app/frame.js";
 import { type LaneAction, type LaneInput, type LaneInputHooks, LanesPage } from "./app/lanes-page.js";
 import { type OptionRow, OptionsPage, type TextArea } from "./app/options-page.js";
 import { RenderedPlans, renderedPlansUnavailable } from "./app/plan-embed.js";
@@ -35,7 +35,6 @@ import {
 } from "./editor-contract.js";
 import { EXEC_ENTRY, type ExecState, registerExec } from "./exec.js";
 import { editExternally, externalEditorCommand, prepareEditor } from "./external-editor.js";
-import { discoverFamily, FAMILY_ENTRY, type FamilyMembership } from "./family-contract.js";
 import { directImplementationBrief, HANDOFF_MESSAGE_TYPE, implementationBrief } from "./handoff.js";
 import { HERDR_BLOCKED_CHANNEL, holdBlocked, holdWorking, isOwnEmit } from "./herdr-blocked.js";
 import {
@@ -206,7 +205,7 @@ type ThinkingLevel = NonNullable<ModelSpec["thinkingLevel"]>;
 export default async function plan(pi: ExtensionAPI, dependencies: PlanDependencies = {}): Promise<void> {
   let settings: PlanModeSettings = { thinkingLevel: "inherit" };
   let run: PlanRun | undefined;
-  let app: { close(): void; render(): void; hosted: boolean } | undefined;
+  let app: { close(): void; render(): void } | undefined;
   /**
    * Planners a restart cut off (or that had failed) when the run was restored: nothing resumes them
    * by itself; the planning screen offers to, and the status line says so.
@@ -451,8 +450,6 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       return [
         new PlannerAgent({
           id: stored.id,
-          family: discoverFamily(pi.events),
-          familyOperationId: `plan:${latest.id}:${stored.id}`,
           restored: true,
           spec,
           name: stored.name,
@@ -484,9 +481,6 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       mergerShown: false,
     };
     run.mergerShown = mergerDue(run);
-    for (const agent of agents) {
-      if (discoverFamily(pi.events)) void agent.observe(ctx);
-    }
     for (const agent of run.agents) {
       saved.set(agent.id, savedSignature(agent));
       if (agent.plan) notifiedPlans.set(agent.id, agent.revision);
@@ -602,7 +596,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     if (isOwnEmit()) return;
     const active = (data as { active?: unknown } | undefined)?.active === true;
     foreignBlocked = Math.max(0, foreignBlocked + (active ? 1 : -1));
-    if (!active || !app || app.hosted) return;
+    if (!active || !app) return;
     app.close();
     hostCtx?.ui.notify("Your session is asking you something. /planners brings the planning screen back.", "info");
   });
@@ -984,12 +978,10 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       return;
     }
     const epoch = branchEpoch;
-    const family = discoverFamily(pi.events);
-    await openPlanningView(ctx, family, (tui, theme, keybindings, done, viewport) => {
-      const rows = () => Math.max(1, viewport().height);
+    await ctx.ui.custom<void>((tui, theme, keybindings, done) => {
+      const rows = () => Math.max(12, (tui as unknown as { terminal?: { rows?: number } }).terminal?.rows ?? 40);
       const render = () => tui.requestRender();
-      let page: Component & { typing?: boolean; focused?: boolean } = undefined as never;
-      let focused = true;
+      let page: Component & { typing?: boolean } = undefined as never;
       const ticker = setInterval(() => {
         if (run?.agents.some((agent) => agent.working)) render();
       }, 250);
@@ -1034,11 +1026,10 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
         (page as { dispose?(): void } | undefined)?.dispose?.();
         renders.dispose();
         app = undefined;
-        family?.focus(undefined);
         updateStatus();
         done();
       };
-      app = { close, render, hosted: family !== undefined };
+      app = { close, render };
       updateStatus();
 
       /**
@@ -1133,7 +1124,6 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
         }
         (page as { dispose?(): void } | undefined)?.dispose?.();
         page = next;
-        page.focused = focused;
         render();
       };
 
@@ -1944,8 +1934,6 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
         const epoch = branchEpoch;
         const agent = new PlannerAgent({
           id,
-          family: discoverFamily(pi.events),
-          familyOperationId: `plan:${run.id}:${id}`,
           spec,
           name: catalog.name(spec),
           cwd: context.cwd,
@@ -1977,46 +1965,25 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
         [EDITOR_SURFACE]: string;
         [INPUT_CONTEXT](): string;
         [EDITOR_MODE](): unknown;
-        focused: boolean;
       } = {
-        get focused() {
-          return focused;
-        },
-        set focused(value: boolean) {
-          focused = value;
-          if (page) page.focused = value;
-        },
-        render: (width) => {
-          if (closed || epoch !== branchEpoch) return [];
-          publishFocus();
-          return page.render(width).slice(0, rows());
-        },
+        render: (width) => (!closed && epoch === branchEpoch ? page.render(width) : []),
         invalidate: () => {
           if (!closed && epoch === branchEpoch) page.invalidate?.();
         },
         handleInput: (data) => {
-          if (!closed && epoch === branchEpoch) {
-            page.handleInput?.(data);
-            publishFocus();
-          }
+          if (!closed && epoch === branchEpoch) page.handleInput?.(data);
         },
         dispose: close,
         [EDITOR_SURFACE]: "embedded",
         [INPUT_CONTEXT]: () => readInputContext(page) ?? "list",
         [EDITOR_MODE]: () => readEditorMode(page),
       };
-      const publishFocus = () => {
-        if (page instanceof LanesPage) family?.focus(page.viewedAgentId());
-      };
       (component as { handleMouse?: unknown }).handleMouse = (event: unknown) => {
-        if (!closed && epoch === branchEpoch) {
-          const result = (page as { handleMouse?(event: unknown): unknown }).handleMouse?.(event);
-          publishFocus();
-          return result;
-        }
+        if (!closed && epoch === branchEpoch)
+          return (page as { handleMouse?(event: unknown): unknown }).handleMouse?.(event);
       };
       return component;
-    });
+    }, FULL_SCREEN as never);
   }
 
   // --- Talking and implementing --------------------------------------------------------------
@@ -2189,23 +2156,12 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     const planFile = state.planFile;
     const implementerModel = state.implementerModel;
     let sent = false;
-    let membership: FamilyMembership | undefined;
     try {
       await ctx.waitForIdle();
       if (!runtimeActive || epoch !== branchEpoch || workflowRevision !== inline.revision) return;
-      membership = await discoverFamily(pi.events)?.prepareHandoff();
-      if (!runtimeActive || epoch !== branchEpoch || workflowRevision !== inline.revision) {
-        membership?.cancel?.();
-        return;
-      }
       const result = await ctx.newSession({
         ...(parentSession ? { parentSession } : {}),
         setup: async (sessionManager) => {
-          if (membership)
-            sessionManager.appendCustomEntry(FAMILY_ENTRY, {
-              ...membership,
-              sessionId: sessionManager.getSessionId(),
-            });
           sessionManager.appendCustomEntry(RUNTIME_ENTRY, {
             model: formatModelSpec(target),
             exec: state,
@@ -2232,12 +2188,8 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           }
         },
       });
-      if (result.cancelled) {
-        membership?.cancel?.();
-        recover();
-      }
+      if (result.cancelled) recover();
     } catch (error: unknown) {
-      membership?.cancel?.();
       if (runtimeActive && epoch === branchEpoch && workflowRevision === inline.revision) {
         ctx.ui.notify(`Could not start a fresh session: ${errorText(error)}`, "error");
         recover();

@@ -1,11 +1,8 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { test, vi } from "vitest";
-import { FAMILY_CHANNEL, type FamilyRequest, type PreparedAgent } from "../src/family-contract.js";
-import { plannerExtension } from "../src/planner/extension.js";
+import { test } from "vitest";
 import { PLANNER_ENV } from "../src/planners.js";
-import * as scoutProcess from "../src/scout-process.js";
 import { formatScoutResults, normalizeScoutTasks, runScout, SCOUT_MODEL_ENV, scoutArgs } from "../src/scout-process.js";
 import { normalizePlanModeSettings } from "../src/settings.js";
 
@@ -150,113 +147,6 @@ test("a scout returns its last report and usage, without inheriting the planner 
     ]),
     /Ran 2 read-only subagents on p\/m\.[\s\S]*## 1\. a\n\nA[\s\S]*## 2\. b \(timeout\)/u,
   );
-});
-
-test("scouts explicitly load observation under --no-extensions and merge its environment", async () => {
-  const observation = {
-    agentId: "scout-uuid",
-    membership: { version: 1, familyId: "family", agentId: "scout-uuid" },
-    observer: () => undefined,
-    extensions: ["/observer.ts"],
-    env: { FAMILY_TEST: "member" },
-    finish: vi.fn(),
-    dispose: vi.fn(),
-  } satisfies PreparedAgent;
-  const spawned = fakeSpawn((child) => {
-    child.emitEvent({
-      type: "message_end",
-      message: {
-        role: "assistant",
-        content: [{ type: "text", text: "report" }],
-        stopReason: "stop",
-      },
-    });
-    child.exit(0);
-  });
-  await runScout({
-    observation,
-    spec: { provider: "p", modelId: "m" },
-    task: { label: "x", task: "y" },
-    cwd: "/repo",
-    extensions: ["/research.ts"],
-    spawnProcess: spawned.spawnProcess,
-    piCommand: { command: "pi", args: [] },
-  });
-  assert.equal(spawned.calls[0]?.env.FAMILY_TEST, "member");
-  assert.ok(spawned.calls[0]?.args.includes("--no-session"));
-  assert.ok(spawned.calls[0]?.args.includes("--no-extensions"));
-  assert.ok(spawned.calls[0]?.args.includes("/observer.ts"));
-  assert.ok(spawned.calls[0]?.args.includes("/research.ts"));
-  assert.deepEqual(observation.finish.mock.calls, [["done", undefined]]);
-  assert.equal(observation.dispose.mock.calls.length, 1);
-
-  const cancelled = new AbortController();
-  cancelled.abort();
-  const noSpawn = fakeSpawn(() => undefined);
-  const result = await runScout({
-    observation,
-    spec: { provider: "p", modelId: "m" },
-    task: { label: "x", task: "y" },
-    cwd: "/repo",
-    signal: cancelled.signal,
-    spawnProcess: noSpawn.spawnProcess,
-  });
-  assert.equal(result.status, "cancelled");
-  assert.equal(noSpawn.calls.length, 0);
-});
-
-test("planner scouts enroll as descendants and carry UUIDs through compact view metadata", async () => {
-  const observation = {
-    agentId: "descendant",
-    membership: { version: 1, familyId: "family", agentId: "descendant" },
-    observer: () => undefined,
-    extensions: ["/observer.ts"],
-    env: {},
-    finish: () => {},
-    dispose: () => {},
-  } satisfies PreparedAgent;
-  const prepare = vi.fn(async () => observation);
-  const run = vi.spyOn(scoutProcess, "runScout").mockResolvedValue({
-    label: "look",
-    status: "done",
-    report: "found",
-    usage: scoutProcess.emptyUsage(),
-  });
-  try {
-    let execute!: (...args: unknown[]) => Promise<unknown>;
-    plannerExtension({
-      tools: new Set(),
-      grantPrefixes: [],
-      guardExtensionPath: "/guard.ts",
-      scouts: { spec: { provider: "p", modelId: "m" }, extensions: [], tools: [] },
-      ask: async () => undefined,
-      onPlan: () => {},
-    })({
-      registerTool: (tool: { name: string; execute: typeof execute }) => {
-        if (tool.name === "plan_subagents") execute = tool.execute;
-      },
-      on: () => {},
-      events: {
-        emit: (channel: string, data: FamilyRequest) => {
-          assert.equal(channel, FAMILY_CHANNEL);
-          data.service = { prepare } as unknown as FamilyRequest["service"];
-        },
-      },
-    } as never);
-    const updates: Array<{ details: { scouts: Array<{ familyAgentId?: string }> } }> = [];
-    await execute(
-      "call",
-      { tasks: [{ label: "look", task: "find" }] },
-      undefined,
-      (update: (typeof updates)[number]) => updates.push(update),
-      { cwd: "/repo" },
-    );
-    assert.equal(prepare.mock.calls.length, 1);
-    assert.equal(run.mock.calls[0]?.[0].observation, observation);
-    assert.equal(updates.at(-1)?.details.scouts[0]?.familyAgentId, "descendant");
-  } finally {
-    run.mockRestore();
-  }
 });
 
 test("scoutModelMap normalizes like the implementation map", () => {

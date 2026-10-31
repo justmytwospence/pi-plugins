@@ -6,9 +6,6 @@ import type { ChoiceSource, Resolved, Tier } from "./pick.ts";
 
 export interface Run {
   id: string;
-  /** Optional Sidebar family identity; labels and run IDs are not family identities. */
-  familyId?: string;
-  agentId?: string;
   agent: string;
   task: string;
   /** Short task name; optional for records from before labels existed. */

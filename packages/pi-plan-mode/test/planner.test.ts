@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { test, vi } from "vitest";
-import type { FamilyService, PreparedAgent } from "../src/family-contract.js";
 import { consultantAccess, otherTools, otherToolsNode, resolveAccess } from "../src/planner/access.js";
 import { type PlannerAccessConfig, PlannerAgent } from "../src/planner/agent.js";
 import { plannerExtension } from "../src/planner/extension.js";
@@ -198,98 +197,6 @@ function agent(factory: PlannerSessionFactory, extra: Partial<ConstructorParamet
     ...extra,
   });
 }
-
-test("restored planners enroll asynchronously and load only the family observer without prompting", async () => {
-  const sessions = fakeSessions(async () => undefined);
-  const observer = () => undefined;
-  let ready!: (value: PreparedAgent) => void;
-  const reservation = new Promise<PreparedAgent>((resolve) => {
-    ready = resolve;
-  });
-  const observation = {
-    agentId: "planner-uuid",
-    observer,
-    extensions: [],
-    env: {},
-    membership: { version: 1, familyId: "family", agentId: "planner-uuid" },
-    finish: vi.fn(),
-    dispose: vi.fn(),
-  } satisfies PreparedAgent;
-  const planner = agent(sessions.factory, {
-    restored: true,
-    sessionFile: "/sessions/restored.jsonl",
-    family: { prepare: () => reservation } as unknown as FamilyService,
-  });
-  // Mirrors session_start: do not await kernel startup within serial event dispatch.
-  const attached = planner.observe({} as never);
-  assert.equal(sessions.created.length, 0);
-  ready(observation);
-  await attached;
-  assert.equal(planner.familyAgentId, "planner-uuid");
-  assert.equal(sessions.created[0]?.observer, observer);
-  assert.deepEqual(sessions.created[0]?.storage, { kind: "open", file: "/sessions/restored.jsonl" });
-  assert.equal(sessions.sent.length, 0);
-  planner.dispose();
-  assert.equal(observation.dispose.mock.calls.length, 1);
-});
-
-test("planner observation remains attached until final shutdown archival finishes", async () => {
-  const sessions = fakeSessions(async () => undefined);
-  let archived!: () => void;
-  const shutdown = new Promise<void>((resolve) => {
-    archived = resolve;
-  });
-  const observation = {
-    agentId: "archive",
-    membership: { version: 1, familyId: "family", agentId: "archive" },
-    observer: () => undefined,
-    extensions: [],
-    env: {},
-    finish: vi.fn(),
-    dispose: vi.fn(),
-  } satisfies PreparedAgent;
-  const planner = agent(
-    async (host, options) => ({
-      ...(await sessions.factory(host, options)),
-      dispose: () => shutdown,
-    }),
-    { observation },
-  );
-  await planner.observe({} as never);
-  planner.dispose();
-  assert.equal(observation.dispose.mock.calls.length, 0, "shutdown observer can still read the in-memory manager");
-  archived();
-  await flush();
-  assert.equal(observation.dispose.mock.calls.length, 1);
-  assert.equal(observation.finish.mock.calls.length, 1);
-});
-
-test("stopping during family enrollment prevents a late planner session", async () => {
-  const sessions = fakeSessions(async () => undefined);
-  let ready!: (value: PreparedAgent) => void;
-  const reservation = new Promise<PreparedAgent>((resolve) => {
-    ready = resolve;
-  });
-  const observation = {
-    agentId: "late",
-    observer: () => undefined,
-    extensions: [],
-    env: {},
-    membership: { version: 1, familyId: "family", agentId: "late" },
-    finish: vi.fn(),
-    dispose: vi.fn(),
-  } satisfies PreparedAgent;
-  const planner = agent(sessions.factory, { family: { prepare: () => reservation } as unknown as FamilyService });
-  const started = planner.start("task", {} as never);
-  await planner.stop();
-  ready(observation);
-  await started;
-  assert.equal(sessions.created.length, 0);
-  assert.equal(sessions.sent.length, 0);
-  assert.equal(observation.finish.mock.calls[0]?.[0], "stopped");
-  assert.equal(observation.dispose.mock.calls.length, 1);
-  planner.dispose();
-});
 
 test("a planner starts its own session seeded with your conversation, works, and submits a plan", async () => {
   const { factory, created } = fakeSessions(async (_prompt, run) => {

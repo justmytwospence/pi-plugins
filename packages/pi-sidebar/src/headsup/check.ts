@@ -100,7 +100,7 @@ export async function sideRequest(input: SideInput): Promise<SideReply> {
 
   const delta = mainDelta(ctx.sessionManager.getEntries() as never, request.leafId, ctx.sessionManager.getLeafId());
   if (delta.skipped) return { outcome: "skipped", reason: delta.skipped };
-  const liveText = [describeLive(main.live, delta, now), main.familyStatus?.()].filter(Boolean).join("\n");
+  const liveText = describeLive(main.live, delta, now);
   const messages = convertToLlm(sideMessages(delta.messages, input.instructions, input.status(liveText), now));
 
   let spliceError: string | undefined;
@@ -175,7 +175,7 @@ async function foreignRequest(input: SideInput, foreign: ForeignCheck): Promise<
   if (!ctx) return { outcome: "skipped", reason: "main's session is not ready" };
   const view = foreign.parts.build(replayMessages(ctx, false).messages, foreign.model.contextWindow, now);
   if (view.messages.length === 0) return { outcome: "skipped", reason: "main's session has nothing to read yet" };
-  const liveText = [describeLive(main.live, { messages: [], pending: view.pending }, now), main.familyStatus?.()].filter(Boolean).join("\n");
+  const liveText = describeLive(main.live, { messages: [], pending: view.pending }, now);
   const intro = foreignHeadsUpIntro({ sidebar: foreign.label, main: mainLabel(ctx) });
   const messages = convertToLlm(sideMessages(view.messages, `${intro}\n\n${input.instructions}`, input.status(liveText), now));
   const stream: StreamFn = input.stream ?? ((m, c, o) => ctx.modelRegistry.streamSimple(m as never, c as never, o as never));

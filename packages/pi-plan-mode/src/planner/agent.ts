@@ -4,7 +4,6 @@
 import { randomUUID } from "node:crypto";
 import type { AgentSessionEvent, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { PiChat, piChatTheme } from "../app/pi-chat.js";
-import type { FamilyService, PreparedAgent } from "../family-contract.js";
 import { formatModelSpec, type ModelSpec } from "../implementation-models.js";
 import { describeToolArgs, PlannerTrace } from "../planner-trace.js";
 import { buildPlannerConversation, buildPlannerTranscript, PLANNER_SEED_END_ENTRY } from "../planners.js";
@@ -17,7 +16,6 @@ import {
   type PlannerSessionFactory,
   type PlannerSessionHandle,
   readSessionEntries,
-  readSessionId,
 } from "./session.js";
 
 /** Fraction of the time limit after which a working planner is asked to wrap up. */
@@ -89,12 +87,6 @@ export interface PlannerAgentOptions {
   restored?: boolean;
   onChange(): void;
   createSession?: PlannerSessionFactory;
-  /** Optional family service; only its observer is loaded in the planner session. */
-  family?: FamilyService;
-  familyKind?: "planner" | "consultant" | "reviewer";
-  /** Stable logical operation across restoration, unlike this runtime's stop token. */
-  familyOperationId?: string;
-  observation?: PreparedAgent;
 }
 
 export class PlannerAgent {
@@ -119,17 +111,6 @@ export class PlannerAgent {
   sessionFile: string | undefined;
 
   private handle: PlannerSessionHandle | undefined;
-  private observation: PreparedAgent | undefined;
-  private enrollment = new AbortController();
-
-  get familyAgentId(): string | undefined {
-    return this.observation?.agentId;
-  }
-
-  /** Attach restored idle planners without starting a model request. */
-  async observe(host: ExtensionContext): Promise<void> {
-    await this.open(host);
-  }
   /** Your session's context, kept from when its own session opened (for model lookups). */
   private host: ExtensionContext | undefined;
   private opening: Promise<PlannerSessionHandle | undefined> | undefined;
@@ -146,7 +127,6 @@ export class PlannerAgent {
 
   constructor(private readonly options: PlannerAgentOptions) {
     this.id = options.id;
-    this.observation = options.observation;
     this.spec = options.spec;
     this.name = options.name;
     this.subagents = new SubagentTracker(options.id);
@@ -290,8 +270,6 @@ export class PlannerAgent {
   async stop() {
     if (this.disposed) return;
     this.turnEpoch++;
-    // A stopped turn may continue in this same session; finish belongs to its lifetime.
-    if (!this.handle) this.enrollment.abort();
     this.pending?.resolve(undefined);
     this.pending = undefined;
     this.clearTimers();
@@ -312,8 +290,6 @@ export class PlannerAgent {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
-    if (!this.handle) this.enrollment.abort();
-    const phase = this.working ? "stopped" : this.status === "failed" ? "failed" : "done";
     this.settle();
     this.clearTimers();
     this.pending?.resolve(undefined);
@@ -321,33 +297,19 @@ export class PlannerAgent {
     this.unsubscribe?.();
     this.listeners.clear();
     this.subagents.cancel();
-    if (this.handle || !this.opening) this.releaseObservation(this.handle, phase);
+    try {
+      this.handle?.dispose();
+    } catch {
+      // Already gone.
+    }
     this.handle = undefined;
     if (this.working) this.status = "stopped";
-  }
-
-  /** Keep the observer attached through shutdown so it can archive the final projection. */
-  private releaseObservation(handle: PlannerSessionHandle | undefined, phase: "done" | "failed" | "stopped") {
-    const observation = this.observation;
-    this.observation = undefined;
-    const release = () => {
-      observation?.finish(phase, this.error);
-      observation?.dispose();
-    };
-    try {
-      const closing = handle?.dispose();
-      if (closing) void closing.then(release, release);
-      else release();
-    } catch {
-      release();
-    }
   }
 
   private open(host: ExtensionContext) {
     if (this.disposed) return Promise.resolve(undefined);
     this.host = host;
     if (this.handle) return Promise.resolve(this.handle);
-    if (this.enrollment.signal.aborted) this.enrollment = new AbortController();
     this.opening ??= this.create(host);
     return this.opening;
   }
@@ -359,23 +321,6 @@ export class PlannerAgent {
     this.changed();
     const factory = this.options.createSession ?? createPlannerSession;
     try {
-      const signal = this.enrollment.signal;
-      this.observation ??= await this.options.family?.prepare(
-        {
-          kind: this.options.familyKind ?? "planner",
-          label: `${this.options.familyKind ?? "Planner"} ${this.id}: ${this.name}`,
-          operationId: this.options.familyOperationId ?? this.operationId,
-          ...(this.sessionFile ? { sessionId: readSessionId(this.sessionFile, this.options.cwd) } : {}),
-        },
-        signal,
-      );
-      if (this.disposed || signal.aborted || epoch !== this.turnEpoch) {
-        this.observation?.finish("stopped");
-        this.observation?.dispose();
-        this.observation = undefined;
-        this.opening = undefined;
-        return undefined;
-      }
       const policy: PlannerPolicy = {
         ...this.options.access.policy,
         ask: (questions, signal) => this.ask(questions, signal),
@@ -395,15 +340,13 @@ export class PlannerAgent {
         extensions: this.options.access.extensions,
         skills: this.options.access.skills,
         policy: plannerExtension(policy),
-        ...(this.observation ? { observer: this.observation.observer } : {}),
         appendSystemPrompt: this.options.access.systemPrompt,
         storage: this.sessionFile
           ? { kind: "open", file: this.sessionFile }
           : { kind: "new", dir: this.options.sessionDir, seed: this.options.seed },
       });
-      if (this.disposed || signal.aborted || epoch !== this.turnEpoch) {
-        this.releaseObservation(handle, "stopped");
-        this.opening = undefined;
+      if (this.disposed) {
+        handle.dispose();
         return undefined;
       }
       this.handle = handle;
@@ -415,7 +358,6 @@ export class PlannerAgent {
     } catch (error: unknown) {
       this.opening = undefined;
       if (epoch === this.turnEpoch) this.fail(error);
-      this.releaseObservation(undefined, this.disposed || epoch !== this.turnEpoch ? "stopped" : "failed");
       return undefined;
     }
   }
