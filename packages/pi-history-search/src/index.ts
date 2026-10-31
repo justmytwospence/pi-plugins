@@ -3,11 +3,37 @@ import { type Component, type TUI, getKeybindings, isKeyRelease } from "@earendi
 import { PrefixHistory, sessionPrompts } from "./history.ts";
 import { HistoryPicker } from "./picker.ts";
 
-// Resolve siblings of the SDK entry rather than a package subpath: Pi's
-// extension loader aliases the package name to that entry file.
-const tuiEntry = import.meta.resolve("@earendil-works/pi-tui");
-const { allocateStackSizes, visibleStackEntries } = await import(new URL("./components/stack.js", tuiEntry).href) as typeof import("@earendil-works/pi-tui/dist/components/stack.js");
-const { getLayoutNode } = await import(new URL("./layout-node.js", tuiEntry).href) as typeof import("@earendil-works/pi-tui/dist/layout-node.js");
+// Layout nodes are exposed through Pi's shared structural symbol. Avoid resolving
+// private SDK files: installed extensions only receive the public loader aliases.
+const LAYOUT_NODE = Symbol.for("@earendil-works/pi-tui/layout-node");
+type StackEntry = { component: Component; basis?: number | "auto"; grow?: number; shrink?: number; minSize?: number; maxSize?: number; visible?: (viewport: { width: number; height: number }) => boolean };
+function getLayoutNode(component: Component): { type: string; entries: StackEntry[]; gap: number } | undefined {
+  return (component as Component & { [LAYOUT_NODE]?: () => { type: string; entries: StackEntry[]; gap: number } })[LAYOUT_NODE]?.();
+}
+function visibleStackEntries(entries: StackEntry[], viewport: { width: number; height: number }): StackEntry[] {
+  return entries.filter(entry => entry.visible?.(viewport) ?? true);
+}
+function allocateStackSizes(entries: StackEntry[], intrinsic: number[], available: number, gap: number): number[] {
+  const sizes = entries.map((entry, i) => Math.max(entry.minSize ?? 0, Math.min(entry.maxSize ?? Number.MAX_SAFE_INTEGER, Math.max(0, Math.floor(typeof entry.basis === "number" ? entry.basis : intrinsic[i] ?? 0)))));
+  const target = Math.max(0, Math.floor(available) - Math.max(0, entries.length - 1) * gap);
+  let remaining = Math.abs(target - sizes.reduce((a, b) => a + b, 0));
+  const grow = sizes.reduce((a, b) => a + b, 0) < target;
+  while (remaining > 0) {
+    const candidates = entries.map((entry, i) => ({ entry, i })).filter(({ entry, i }) => grow ? (entry.grow ?? 0) > 0 && sizes[i] < (entry.maxSize ?? Number.MAX_SAFE_INTEGER) : (entry.shrink ?? 1) > 0 && sizes[i] > (entry.minSize ?? 0));
+    if (!candidates.length) break;
+    const weight = ({ entry, i }: { entry: StackEntry; i: number }) => grow ? entry.grow ?? 0 : (entry.shrink ?? 1) * Math.max(1, sizes[i]);
+    const total = candidates.reduce((sum, candidate) => sum + weight(candidate), 0);
+    let changed = 0;
+    for (const candidate of candidates) {
+      const { entry, i } = candidate;
+      const capacity = grow ? (entry.maxSize ?? Number.MAX_SAFE_INTEGER) - sizes[i] : sizes[i] - (entry.minSize ?? 0);
+      const delta = Math.min(remaining, capacity, Math.max(1, Math.floor(remaining * weight(candidate) / total)));
+      sizes[i] += grow ? delta : -delta; remaining -= delta; changed += delta;
+    }
+    if (!changed) break;
+  }
+  return sizes;
+}
 
 const SURFACE = Symbol.for("pi-plugins.editor-surface.v1");
 const MODE = Symbol.for("pi-plugins.editor-mode.v1");
