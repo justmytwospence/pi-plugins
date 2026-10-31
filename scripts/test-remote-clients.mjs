@@ -38,6 +38,7 @@ const { SidebarPanel } = await jiti.import('../packages/pi-sidebar/src/panel.ts'
 const { SplitRoot, dividerLines } = await jiti.import('../packages/pi-sidebar/src/layout.ts');
 const { DEFAULT_MIN_COLUMNS, DEFAULT_RATIO } = await jiti.import('../packages/pi-sidebar/src/config.ts');
 const { sidebarScreen, sidebarFamilyScreens } = await import('./remote-clients/sidebar.mjs');
+const { startupSplashScreens } = await import('./remote-clients/startup-splash.mjs');
 const { TerminalPanel } = await jiti.import('../packages/pi-interactive-shell/src/panel.ts');
 const { HistoryPicker } = await jiti.import('../packages/pi-history-search/src/picker.ts');
 const { default: historySearch } = await jiti.import('../packages/pi-history-search/src/index.ts');
@@ -604,6 +605,14 @@ for (const width of [46, 120, 180]) {
   }
 }
 
+// The startup map/resources stay above the real editor and the native MCP manager dock.
+// Both parsers must find only the actual editor when idle, never a map tile or manager control.
+const splashStart = screens.length;
+screens.push(...(await startupSplashScreens({
+  theme, getEditorTheme: themeModule.getEditorTheme, kb, sidebarScreen,
+  idleFooter: width => idleFooter(width, { statuses: modeStatuses('plan', 'auto') }), height: 64,
+})).map(screen => screen.idle === undefined ? screen : { ...screen, idle: screen.idle + splashStart }));
+
 // Capture the returned completion renderer from the real registerExec API, rather than drawing a
 // lookalike card or calling renderFinish directly. Both expansion states live ahead of the idle
 // composer, through the same layout and reader checks as the normal-footer fixtures above.
@@ -927,6 +936,20 @@ screens.forEach((screen, i) => {
     if (h) problems.push(`herdr-web-ui: terminal misidentified as question: ${JSON.stringify(h)}`);
     if (c?.blocks.some(block => block.kind !== 'raw')) problems.push(`Collie: terminal misidentified as card: ${JSON.stringify(c.blocks)}`);
     if (c && ['empty', 'draft'].includes(c.composer)) problems.push(`Collie: terminal misidentified as Pi composer: ${c.composer}`);
+    report(label, problems);
+    return;
+  }
+  if (screen.splash === 'manager') {
+    const h = results.herdr?.[i], c = results.collie?.[i];
+    if (h) problems.push(`herdr-web-ui: native manager misidentified as a question: ${JSON.stringify(h)}`);
+    if (c) {
+      const mirrors = c.blocks.filter(b => b.kind === 'unread-dialog');
+      if (mirrors.length > 1 || c.blocks.some(b => b.kind !== 'raw' && b.kind !== 'unread-dialog') || mirrors.some(b =>
+        (b.wholePane !== true && screen.under === 'without Sidebar') || b.cancel?.key !== 'Escape' || b.cancel?.agent !== 'pi' ||
+        typeof b.cancel?.signature !== 'string' || !b.cancel.signature.trim()
+      )) problems.push(`Collie: manager must be raw or an Escape-only mirror of main: ${JSON.stringify(c.blocks)}`);
+      if (['empty', 'draft'].includes(c.composer) || c.draft !== null) problems.push(`Collie: manager/map misidentified as an editable send target: ${JSON.stringify({ composer: c.composer, draft: c.draft })}`);
+    }
     report(label, problems);
     return;
   }

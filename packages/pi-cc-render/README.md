@@ -1,6 +1,6 @@
 # pi-cc-render
 
-Claude Code-style transcript rendering for Pi: one-line tool summaries that expand on click or Ctrl+O, consecutive tool calls grouped into a card, rich side-by-side or unified diffs for `edit` and `write`, a codemode call tree, syntax-highlighted `!` command output, compact thinking with the provider's summary as its title (when Pi hides thinking blocks; Ctrl+O opens it with the tool output, as in Claude Code), a per-turn tool summary, and a startup header. In fullscreen mode cards react to hover, click to expand, and a back-to-bottom button appears when you scroll up.
+Claude Code-style transcript rendering for Pi: one-line tool summaries that expand on click or Ctrl+O, consecutive tool calls grouped into a card, rich side-by-side or unified diffs for `edit` and `write`, a codemode call tree, syntax-highlighted `!` command output, compact thinking with the provider's summary as its title (when Pi hides thinking blocks; Ctrl+O opens it with the tool output, as in Claude Code), a per-turn tool summary, and a startup context map with interactive resource listings. In fullscreen mode cards react to hover, click to expand, and a back-to-bottom button appears when you scroll up.
 
 Example of a tool card and a grouped card (illustration, not a screenshot). A bash row says what the command does: a `# description` comment on its first line, else a summary of the parsed command (for example `Run check (npm), then git status in app`); short one-liners such as `ls -la` stay as they are:
 
@@ -79,7 +79,7 @@ Panel changes apply to the current transcript immediately and are saved. Feature
   "expandedPreviewMaxLines": 40, // max lines for expanded TaskList bodies
   "expandedCardBackground": "userMessageBg", // theme bg slot: userMessageBg, toolPendingBg, customMessageBg, selectedBg, searchMatchBg, toolSuccessBg, toolErrorBg
   "inputClip": 0, // path/command clip length in summaries; 0 = fit width, else 8..500
-  "showStartupHeader": true, // logo and tips header on new sessions, plus a Models section (one line per model under each provider with credentials, providers side by side and wrapping as Context's columns do: its current generation, i.e. the newest of each model family without aliases, dated snapshots or families a major version behind, plus the favorites from the model scope, starred and first, and the current model in green; each with its context window as vendors quote it, 1M, 128K, 922K), the Context/Skills/Prompts/Extensions listing regrouped by level (project, user, path; Context's levels as side-by-side columns) and a live MCP section (all configured servers, including disabled ones, with state and tool counts; see Startup splash below)
+  "showStartupHeader": true, // estimated context map and interactive Models/MCP startup listings; false keeps Pi's native header
   "scrollStepLines": 3, // fullscreen mouse wheel step (1..50)
 
   // diff
@@ -100,7 +100,11 @@ Panel changes apply to the current transcript immediately and are saved. Feature
 
 ### Startup splash
 
-The MCP section lists all configured servers, including `enabled: false`, grouped by project, user and extension. Like Models and Context, it uses adaptive columns: long groups split into subcolumns when width allows, and columns wrap on narrow terminals. Disabled server names are dim.
+The header maps **estimated occupied context**, not the whole model window. It separates known loaded System text, Files, advertised Skills, prepared visible Tools and MCP declarations, and retained History; it does not charge unused skill files, installed-but-undeclared tools or historical system messages again. The category colors identify sources, not server health. A separate capacity strip and `~used / window` percentage compare the estimate with the selected model's declared window; an unknown window or over-capacity estimate is labelled rather than hidden. Before retained history the title says “Starting context”; afterward it says “Context”. The estimate can change with the session, selected model and late tool availability, but is not a measured prefill or billing count: request hooks may add content later, provider framing/tokenization differs, and hidden or unavailable declarations cannot be safely attributed. The tiles are display-only and sit above the chat, never in the editor.
+
+Models are grouped alphabetically by provider ID. Favorites remain starred and first within each provider, and the current model retains its green marker. Models, Context and MCP use the same balanced, width-aware column layout, including single-scope MCP groups; short groups stay readable rather than splitting into one-entry columns. In fullscreen, an unmodified left click on a model selects it for **this session only**, not the global default. A favorite's displayed thinking suffix applies after successful selection. Switching is refused while a turn runs; use `/model` in regular mode. Model selection changes the active context window shown above.
+
+The MCP section lists all configured servers, including `enabled: false`, grouped by project, user and extension. Disabled server names are dim. In fullscreen, clicking a server opens Pi's native `/mcp` manager after a notification naming that server; it **does not focus the server**, toggle it, sign in or write configuration. Choose any action in the native manager yourself; those actions have Pi's normal persistence behavior. Clicks are refused during a running turn. `/mcp` is the keyboard path in regular mode.
 
 | Left marker | Right-hand status |
 | --- | --- |

@@ -14,6 +14,7 @@ import {
   layoutGrid,
   packageItemName,
   renderSection,
+  layoutSection,
   type ResourceEntry,
   type StartupTheme,
 } from "../src/feature/shell/startup-resources.ts";
@@ -133,7 +134,7 @@ describe("startup resources", () => {
               { path: "/work/BIG.md", content: "x".repeat(4000) },
             ],
           }),
-          getSkills: () => ({ skills: [{ name: "herdr", sourceInfo: { source: "local", scope: "user" } }] }),
+          getSkills: () => ({ skills: [{ name: "herdr", filePath: "/skill/herdr", sourceInfo: { source: "local", scope: "user" } }] }),
           getExtensions: () => ({
             extensions: [
               git("bg"),
@@ -144,19 +145,76 @@ describe("startup resources", () => {
         },
       },
     }).map(([key, value]) => [key, { value }])));
-    const sections = collectSections(mode);
+    const snapshot = {
+      stage: "starting" as const, modelLabel: "p/m", contextWindow: 200_000, usedEstimate: 1400,
+      attribution: { files: true, skills: true }, caveats: [], sources: [
+        { id: "files", category: "files" as const, label: "Files", tokens: 1300, children: [
+          { id: "file:/work/BIG.md", category: "files" as const, label: "BIG.md", tokens: 1000 },
+          { id: "file:/work/AGENTS.md", category: "files" as const, label: "AGENTS.md", tokens: 100 },
+          { id: "file:/h/.pi/agent/AGENTS.md", category: "files" as const, label: "AGENTS.md", tokens: 200 },
+        ] },
+        { id: "skills", category: "skills" as const, label: "Skills", tokens: 100, children: [
+          { id: "skill:/skill/herdr", category: "skills" as const, label: "herdr", tokens: 100 },
+        ] },
+      ],
+    };
+    const sections = collectSections(mode, undefined, snapshot);
     expect(sections.Context!.groups.map((group) => group.label)).toEqual(["project", "user"]);
     expect(sections.Context!.groups[0]!.items).toEqual(["BIG.md", "AGENTS.md"]);
     expect(sections.Context!.groups[0]!.tokens).toEqual([1000, 100]);
     expect(sections.Context!.groups[1]!.tokens).toEqual([200]);
     expect(sections.Context!.tokens).toBe(1300);
     expect(sections.Skills!.groups).toEqual([{ label: "user", items: ["herdr"], tokens: [expect.any(Number)] }]);
-    expect(sections.Skills!.tokens).toBeGreaterThan(0);
+    expect(sections.Skills!.tokens).toBe(100);
     expect(sections.Extensions!.count).toBe(3);
     expect(sections.Extensions!.groups.map((group) => group.label)).toEqual(["user"]);
     expect(sections.Extensions!.groups[0]!.items).toEqual(["worktree"]);
     expect(sections.Extensions!.groups[0]!.children!.map((group) => group.label)).toEqual([expect.stringContaining("repo")]);
     expect(sections.Extensions!.groups[0]!.children![0]!.items).toEqual(["bg", "todo"]);
+  });
+
+  test("matched costs deduplicate source IDs, and missing attribution suppresses costs without hiding inventory", () => {
+    const file = "/work/AGENTS.md";
+    const mode = {
+      sessionManager: { getCwd: () => "/work" },
+      session: { model: { contextWindow: 200_000 }, promptTemplates: [], resourceLoader: {
+        agentDir: "/home/agent", getSystemPromptSource: () => undefined, getAppendSystemPromptSources: () => [],
+        getAgentsFiles: () => ({ agentsFiles: [{ path: file, content: "AAA" }, { path: file, content: "AAA" }, { path: "/work/unused.md", content: "NOT IN PROMPT" }] }),
+        getSkills: () => ({ skills: [
+          { name: "one", filePath: "/work/one/SKILL.md", sourceInfo: {} },
+          { name: "one-copy", filePath: "/work/one/SKILL.md", sourceInfo: {} },
+          { name: "unused", filePath: "/work/unused/SKILL.md", sourceInfo: {} },
+        ] }),
+        getExtensions: () => ({ extensions: [] }),
+      } },
+      getScopeGroup: () => "project", isPackageSource: () => false,
+      formatContextPath: (value: string) => value.split("/").at(-1),
+    };
+    const attributed = {
+      stage: "unavailable" as const, modelLabel: "m", contextWindow: 200_000, usedEstimate: 12,
+      attribution: { files: true, skills: true }, caveats: ["Tool declarations unavailable."], sources: [
+        { id: "files", category: "files" as const, label: "Files", tokens: 9, children: [{ id: `file:${file}`, category: "files" as const, label: "AGENTS.md", tokens: 9 }] },
+        { id: "skills", category: "skills" as const, label: "Skills", tokens: 3, children: [{ id: "skill:/work/one/SKILL.md", category: "skills" as const, label: "one", tokens: 3 }] },
+      ],
+    };
+    const sections = collectSections(mode, undefined, attributed);
+    expect(sections.Context!.tokens).toBe(9);
+    expect(sections.Context!.groups[0]!.tokens).toEqual([9, 0, 0]);
+    expect(sections.Skills!.tokens).toBe(3);
+    expect(sections.Skills!.groups[0]!.tokens).toEqual([3, 0, 0]);
+    expect(sections.Context!.notes).toBeUndefined();
+    const empty = collectSections(mode, undefined, { ...attributed, usedEstimate: 0, sources: [] });
+    expect(empty.Context!.tokens).toBe(0);
+    expect(empty.Context!.groups[0]!.tokens).toEqual([0, 0, 0]);
+    expect(renderSection(empty.Context!, 80, plainTheme)[0]).toContain("~0 tok");
+    const missing = collectSections(mode, undefined, { ...attributed, attribution: { files: false, skills: false } });
+    for (const key of ["Context", "Skills"]) {
+      expect(missing[key]!.tokens).toBeUndefined();
+      expect(missing[key]!.notes).toEqual([{ text: "prompt attribution unavailable", color: "dim" }]);
+      expect(renderSection(missing[key]!, 80, plainTheme).join("\n")).not.toMatch(/~\d+ tok/);
+    }
+    expect(missing.Context!.count).toBe(3);
+    expect(missing.Skills!.count).toBe(3);
   });
 
   test("MCP servers are listed by the level they are configured at", async () => {
@@ -246,17 +304,17 @@ describe("startup resources", () => {
       (name) => (name === "obsidian" ? "http request failed" : undefined),
     )!;
     expect(renderSection(section, 100, plainTheme)).toEqual([
-      "MCP 3 · 1 needs sign-in, 1 failed, /mcp to fix",
-      "  project 1            user 2",
-      "  ● local  connected   ✕ obsidian         failed",
-      "                       ● vercel    needs sign-in",
+      "■ MCP 3 · 1 needs sign-in, 1 failed, /mcp to fix",
+      "  project 1              user 2",
+      "  ■ ● local  connected   ■ ✕ obsidian         failed",
+      "                         ■ ● vercel    needs sign-in",
       "  obsidian: http request failed",
     ]);
     expect(buildMcpSection([], () => undefined)).toBeUndefined();
     expect(renderSection(buildMcpSection([{ name: "a", level: "user" }], () => "connected")!, 80, plainTheme)).toEqual([
-      "MCP 1",
+      "■ MCP 1",
       "  user 1",
-      "  ● a  connected",
+      "  ■ ● a  connected",
     ]);
   });
 
@@ -316,12 +374,12 @@ describe("startup resources", () => {
   });
 
   test("MCP columns split long scopes and preserve right-hand states at narrow widths", async () => {
-    const { buildMcpSection, COLUMN_MAX_ROWS } = await import("../src/feature/shell/startup-resources.ts");
-    const entries = Array.from({ length: COLUMN_MAX_ROWS + 2 }, (_, i) => ({ name: `server-${i}`, level: "user" as const }));
+    const { buildMcpSection } = await import("../src/feature/shell/startup-resources.ts");
+    const entries = Array.from({ length: 10 }, (_, i) => ({ name: `server-${i}`, level: "user" as const }));
     const section = buildMcpSection(entries, () => "connected", undefined, () => 1)!;
     const wide = renderSection(section, 100, plainTheme);
-    expect(wide).toHaveLength(COLUMN_MAX_ROWS + 2);
-    expect(wide[2]).toMatch(/server-0.*server-8/);
+    expect(wide.length).toBeLessThan(entries.length + 2);
+    expect(wide[2]).toMatch(/server-0.*server-5/);
     const narrow = renderSection(section, 40, plainTheme);
     expect(narrow).toHaveLength(entries.length + 2);
     expect(narrow.slice(2).every((line) => line.endsWith("connected · 1 tool"))).toBe(true);
@@ -398,6 +456,33 @@ describe("startup resources", () => {
     }
   });
 
+  test("the quiet splash keeps its context watcher without swallowing native MCP warnings", async () => {
+    const { watchMcpState, stopStartupResources } = await import("../src/feature/shell/startup-resources.ts");
+    const { attachStartupHost, disposeStartupHost } = await import("../src/feature/shell/startup-state.ts");
+    const { mcpState } = await import("../src/feature/shell/mcp-servers.ts");
+    vi.useFakeTimers();
+    const component = { render: () => [], invalidate() {} };
+    const mode = { sessionManager: { getSessionId: () => "quiet" }, loadedResourcesContainer: { children: [component] } };
+    const host = attachStartupHost(mode);
+    host.refresh = vi.fn();
+    const update = vi.fn();
+    try {
+      watchMcpState(mode, component, update, true);
+      expect(host.refresh).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(host.refresh).toHaveBeenCalledTimes(3);
+      expect(update).not.toHaveBeenCalled();
+      expect(mcpState.mounted).toBe(false);
+      mode.loadedResourcesContainer.children.length = 0;
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      stopStartupResources();
+      disposeStartupHost(mode);
+      vi.useRealTimers();
+    }
+  });
+
   test("the attention warning is taken in once the MCP section is mounted, other messages pass through", async () => {
     const { installMcpNotify } = await import("../src/feature/shell/startup-resources.ts");
     const { mcpState } = await import("../src/feature/shell/mcp-servers.ts");
@@ -436,22 +521,24 @@ describe("startup resources", () => {
       [{ provider: "openai", id: "gpt-6.1-sol", thinkingLevel: "high" }, { provider: "anthropic", id: "claude-opus-5-5" }],
       { provider: "anthropic", id: "claude-opus-5-5" },
     )!;
-    expect(section.groups[1]!.marks![0]).toEqual({ ...GLYPHS.live, highlight: true });
-    expect(section.groups[1]!.prefixes![0]).toEqual(GLYPHS.favorite);
+    expect(section.groups.map((group) => group.label)).toEqual(["anthropic", "openai"]);
+    expect(section.groups[0]!.marks![0]).toEqual({ ...GLYPHS.live, highlight: true });
+    expect(section.groups[0]!.prefixes![0]).toEqual(GLYPHS.favorite);
+    expect(section.groups[1]!.actions![0]).toEqual({ kind: "model", provider: "openai", id: "gpt-6.1-sol", thinkingLevel: "high" });
     expect(renderSection(section, 80, plainTheme)).toEqual([
-      "Models 3 · ★ favorite",
-      "  openai 1                   anthropic 2",
-      "  ★ gpt-6.1-sol:high  922K   ★ claude-opus-5-5 ●  1M",
-      "                               claude-haiku-5-5   1M",
+      "Models 3",
+      "  anthropic 2               openai 1",
+      "  ★ claude-opus-5-5 ●  1M   ★ gpt-6.1-sol:high  922K",
+      "    claude-haiku-5-5   1M",
     ]);
     // Too narrow for both: providers wrap onto their own bands.
     expect(renderSection(section, 40, plainTheme)).toEqual([
-      "Models 3 · ★ favorite",
-      "  openai 1",
-      "  ★ gpt-6.1-sol:high  922K",
+      "Models 3",
       "  anthropic 2",
       "  ★ claude-opus-5-5 ●  1M",
       "    claude-haiku-5-5   1M",
+      "  openai 1",
+      "  ★ gpt-6.1-sol:high  922K",
     ]);
     expect(buildModelsSection([])).toBeUndefined();
     const mode = {
@@ -502,12 +589,56 @@ describe("startup resources", () => {
   });
 
   test("a long column splits into sub-columns under its heading", async () => {
-    const { COLUMN_MAX_ROWS } = await import("../src/feature/shell/startup-resources.ts");
-    const items = Array.from({ length: COLUMN_MAX_ROWS + 2 }, (_, i) => `m${i}`);
+    const items = Array.from({ length: 10 }, (_, i) => `m${i}`);
     const lines = renderSection({ title: "C", count: items.length, layout: "columns", groups: [{ label: "p", items }] }, 80, plainTheme);
-    expect(lines).toHaveLength(2 + COLUMN_MAX_ROWS);
-    expect(lines[2]).toBe("  m0   m8");
-    expect(lines[4]).toBe("  m2");
+    expect(lines).toHaveLength(7);
+    expect(lines[2]).toBe("  m0   m5");
+    expect(lines[4]).toBe("  m2   m7");
+  });
+
+  test("balanced one-scope MCP columns use available width without stealing metadata", async () => {
+    const { buildMcpSection } = await import("../src/feature/shell/startup-resources.ts");
+    for (const count of [4, 8, 10, 17]) {
+      const section = buildMcpSection(Array.from({ length: count }, (_, n) => ({ name: `s${n}`, level: "user" as const })), () => "connected", undefined, () => 1)!;
+      const wide = renderSection(section, 180, plainTheme);
+      const columns = Array.from({ length: Math.max(1, Math.floor(count / 3)) }, (_, i) => i + 1)
+        .filter((n) => n === 1 || count - (n - 1) * Math.ceil(count / n) >= 3).at(-1)!;
+      expect(wide).toHaveLength(2 + Math.ceil(count / columns));
+      const firstData = wide[2]!;
+      expect(firstData.split("connected · 1 tool").length - 1).toBe(columns);
+      expect(wide[2]).toContain("connected · 1 tool");
+      expect(wide.every((line) => visibleWidth(line) <= 180)).toBe(true);
+      for (const width of [46, 120, 180]) {
+        const lines = renderSection(section, width, plainTheme);
+        expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+      }
+    }
+  });
+
+  test("hit geometry matches emitted cells after bands, Unicode and truncation", async () => {
+    const { buildMcpSection } = await import("../src/feature/shell/startup-resources.ts");
+    const section = buildMcpSection([
+      { name: "界界-very-very-long", level: "project" },
+      { name: "small", level: "user" },
+      { name: "offline", level: "user", enabled: false },
+    ], (name) => name === "small" ? "connected" : "unknown")!;
+    for (const width of [12, 28, 46, 120, 180]) {
+      const { lines, hits } = layoutSection(section, width, plainTheme);
+      expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+      expect(hits.map((hit) => hit.action)).toEqual(expect.arrayContaining([
+        { kind: "mcp", name: "界界-very-very-long" },
+        { kind: "mcp", name: "small" },
+        { kind: "mcp", name: "offline" },
+      ]));
+      for (const hit of hits) {
+        expect(hit.startCol).toBeGreaterThanOrEqual(2);
+        expect(hit.endCol).toBeLessThanOrEqual(width);
+        expect(hit.endCol).toBeGreaterThan(hit.startCol);
+        expect(hit.row).toBeGreaterThan(0);
+        expect(lines[hit.row]).toBeDefined();
+        expect(visibleWidth(lines[hit.row]!)).toBeGreaterThan(hit.startCol);
+      }
+    }
   });
 
   test("formats token counts compactly", () => {
@@ -566,11 +697,38 @@ describe("startup resources", () => {
     expect(skillTokenColors([])).toEqual([]);
   });
 
+  test("long nested headings remain within the viewport in grid and lines modes", () => {
+    const heading = "a-very-long-package-name-界界界界";
+    for (const layout of ["grid", "lines"] as const) {
+      for (const width of [1, 12, 24, 25, 46]) {
+        const lines = renderSection({ title: "Skills", count: 1, layout, groups: [
+          { label: heading, items: ["child"] },
+        ] }, width, plainTheme);
+        expect(lines.every((line) => visibleWidth(line) <= width), `${layout} ${width}`).toBe(true);
+      }
+    }
+  });
+
   test("heading total is colored by share of the context window", () => {
     expect(windowShareColor(1000, undefined)).toBe("dim");
     expect(windowShareColor(2000, 200_000)).toBe("dim");
     expect(windowShareColor(6000, 200_000)).toBe("warning");
     expect(windowShareColor(12000, 200_000)).toBe("error");
+  });
+
+  test("context share colors recalculate against the selected model without changing category colors", () => {
+    const colored: StartupTheme = { fg: (name, text) => `<${name}>${text}</${name}>`, bold: (text) => text };
+    const section = {
+      title: "Context", count: 1, tokens: 10_000, contextWindow: 200_000,
+      category: "files" as const, layout: "columns" as const,
+      groups: [{ label: "user", items: ["SYSTEM.md"], tokens: [10_000] }],
+    };
+    const small = renderSection(section, 500, colored).join("\n");
+    const large = renderSection({ ...section, contextWindow: 1_000_000 }, 500, colored).join("\n");
+    expect(small).toContain("<warning>· ~10k tok</warning>");
+    expect(large).toContain("<dim>· ~10k tok</dim>");
+    expect(small).toContain("<mdLink>■</mdLink>");
+    expect(large).toContain("<mdLink>■</mdLink>");
   });
 
   test("groupEntries sorts measured entries by tokens, heaviest first, keeping estimates aligned", () => {

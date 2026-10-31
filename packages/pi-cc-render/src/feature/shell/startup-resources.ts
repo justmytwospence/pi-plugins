@@ -1,6 +1,6 @@
 import path from "node:path";
 import { InteractiveMode, getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { sliceByColumn, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { config } from "../../config/config.ts";
 import {
 	McpConfigCache,
@@ -18,6 +18,11 @@ import {
 	parseOutcomeMessage,
 } from "./mcp-servers.ts";
 import { MCP_NOTIFY_PATCH, STARTUP_RESOURCES_PATCH, patchRegistry } from "../../utils/patch-keys.ts";
+import { categoryStyle, GLYPHS } from "./startup-style.ts";
+import { readStartupContext, type StartupContextSnapshot } from "./startup-context.ts";
+import { attachStartupHost, disposeStartupHost } from "./startup-state.ts";
+import { createInteractiveSection, createSplashActionController } from "./startup-interactions.ts";
+export { GLYPHS } from "./startup-style.ts";
 
 /**
  * Readable replacement for the collapsed startup listing ([Context] / [Skills] / [Prompts] / [Extensions]).
@@ -65,7 +70,15 @@ export type ResourceGroup = {
 	right?: Array<string | ResourceMark | undefined>;
 	/** A color for the item's name itself, parallel to `items` (a switched-off server is dim). */
 	tones?: Array<string | undefined>;
+	/** Mouse actions parallel to items, never inferred from display names. */
+	actions?: Array<SplashAction | undefined>;
 };
+
+export type SplashAction =
+	| { kind: "model"; provider: string; id: string; thinkingLevel?: string }
+	| { kind: "mcp"; name: string };
+export type SplashHit = { row: number; startCol: number; endCol: number; action: SplashAction };
+export type SectionLayout = { lines: string[]; hits: SplashHit[] };
 
 /** `highlight` also paints the item itself in the mark's color. */
 export type ResourceMark = { text: string; color: string; highlight?: boolean };
@@ -83,6 +96,8 @@ export type ResourceSection = {
 	 */
 	layout: "lines" | "grid" | "columns";
 	groups: ResourceGroup[];
+	/** The source category swatch (never a connection-status indicator). */
+	category?: "files" | "skills" | "tools" | "mcp";
 	/** Shown after the heading in the warning color. */
 	attention?: string;
 	/** Shown after the heading, each part in its own color (a key to the section's marks). */
@@ -95,21 +110,6 @@ export type StartupTheme = {
 	fg(name: string, text: string): string;
 	bold(text: string): string;
 };
-
-/**
- * The splash's shared glyphs: green ● is live (the current model, a connected server), yellow ● needs
- * a sign-in, red ✕ failed, ◌ is pending, dim ○ is idle/disabled/unknown, ★ is a favorite. MCP puts state
- * glyphs on the left and explicit state/tool counts on the right; Models keeps its favorite star and
- * green current-model highlight distinct.
- */
-export const GLYPHS = {
-	live: { text: "●", color: "success" },
-	attention: { text: "●", color: "warning" },
-	failed: { text: "✕", color: "error" },
-	pending: { text: "◌", color: "dim" },
-	idle: { text: "○", color: "dim" },
-	favorite: { text: "★", color: "warning" },
-} as const satisfies Record<string, ResourceMark>;
 
 const SCOPE_ORDER: Scope[] = ["project", "user", "path"];
 const INDENT = 2;
@@ -316,88 +316,131 @@ function markedItems(group: ResourceGroup, theme: StartupTheme): string[] {
 	});
 }
 
-/** Most entries a column holds before it splits into side-by-side sub-columns under the same heading. */
+/** Kept for callers using the old constant; column splitting is now decided by width and row balance. */
 export const COLUMN_MAX_ROWS = 8;
 
-type Block = { lines: string[]; width: number };
+type Cell = { name: string; count: string; color: string; action?: SplashAction };
+type CellHit = { row: number; startCol: number; endCol: number; action: SplashAction };
+type Block = { lines: string[]; hits: CellHit[]; width: number; height: number; columns: number };
+type Candidate = { columns: number; rows: number; width: number; widths: Array<{ name: number; count: number; total: number }> };
 
-/** One group as a column block: its heading, then its entries (token counts right-aligned in each cell). */
-function columnBlock(group: ResourceGroup, available: number, ctx: RenderContext): Block {
-	const { theme } = ctx;
+function candidateShapes(group: ResourceGroup, available: number, theme: StartupTheme, category?: ResourceSection["category"]): { cells: Cell[]; heading: string; shapes: Candidate[] } {
 	const heading = `${theme.fg("accent", group.label ?? "")} ${theme.fg("dim", String(group.items.length))}`;
-	const names = markedItems(group, theme).map((name, index) => `${prefixText(group, index, theme)}${name}`);
-	const cells = names.map((name, index) => {
+	const cells: Cell[] = markedItems(group, theme).map((name, index) => {
 		const right = rightText(group, index);
-		return { name, count: right?.text || undefined, color: right?.color ?? "dim" };
+		return {
+			name: `${category ? `${categoryStyle(theme, category).swatch("■")} ` : ""}${prefixText(group, index, theme)}${name}`,
+			count: right?.text ?? "",
+			color: right?.color ?? "dim",
+			...(group.actions?.[index] ? { action: group.actions[index] } : {}),
+		};
 	});
-	const headingWidth = visibleWidth(heading);
-	const layout = (rows: number) => {
-		const columns: Array<typeof cells> = [];
-		for (let at = 0; at < cells.length; at += rows) columns.push(cells.slice(at, at + rows));
-		const widths = columns.map((column) => {
-			const count = Math.max(0, ...column.map((cell) => visibleWidth(cell.count ?? "")));
-			const natural = Math.max(...column.map((cell) => visibleWidth(cell.name)));
-			// When even one column is too wide, shorten the name first so status stays legible.
-			const name = columns.length === 1 ? Math.min(natural, Math.max(1, available - (count ? 2 + count : 0))) : natural;
-			return { name, count, total: name + (count ? 2 + count : 0) };
+	const shapes: Candidate[] = [];
+	for (let columns = 1; columns <= Math.max(1, Math.floor(cells.length / 3)); columns++) {
+		const rows = Math.ceil(cells.length / columns);
+		const actualColumns = Math.ceil(cells.length / Math.max(1, rows));
+		const lastColumn = cells.length - (columns - 1) * rows;
+		if (actualColumns !== columns || (columns > 1 && lastColumn < 3)) continue;
+		const widths = Array.from({ length: columns }, (_, index) => {
+			const items = cells.slice(index * rows, (index + 1) * rows);
+			const count = Math.max(0, ...items.map((cell) => visibleWidth(cell.count)));
+			const natural = Math.max(0, ...items.map((cell) => visibleWidth(cell.name)));
+			const name = columns === 1 ? Math.min(natural, Math.max(0, available - (count ? count + 2 : 0))) : natural;
+			const gap = name && count ? 2 : 0;
+			return { name, count, total: name + gap + count };
 		});
-		const width = Math.max(headingWidth, widths.reduce((sum, w) => sum + w.total, 0) + COLUMN_GAP * (columns.length - 1));
-		return { columns, widths, width };
-	};
-	let rows = Math.min(cells.length, COLUMN_MAX_ROWS);
-	let shape = layout(Math.max(1, rows));
-	while (shape.width > available && rows < cells.length) shape = layout(++rows);
-	const lines = [heading];
-	for (let row = 0; row < Math.max(1, rows) && cells.length > 0; row++) {
-		let line = "";
-		shape.columns.forEach((column, index) => {
-			const cell = column[row];
-			const w = shape.widths[index]!;
-			const pad = index === 0 ? "" : " ".repeat(COLUMN_GAP);
-			if (!cell) {
-				line += pad + " ".repeat(w.total);
-				return;
-			}
-			const count = cell.count ? theme.fg(cell.color, cell.count) : "";
-			const name = truncateToWidth(cell.name, w.name, "…");
-			const gap = " ".repeat(Math.max(0, w.total - visibleWidth(name) - visibleWidth(cell.count ?? "")));
-			line += pad + name + gap + count;
-		});
-		lines.push(line.trimEnd());
+		const width = Math.max(visibleWidth(heading), widths.reduce((sum, item) => sum + item.total, 0) + COLUMN_GAP * (columns - 1));
+		if (width <= available || columns === 1) shapes.push({ columns, rows, width: Math.min(available, width), widths });
 	}
-	return { lines, width: Math.min(available, shape.width) };
+	// A wider candidate with no height benefit can never improve a band.
+	return { cells, heading, shapes: shapes.filter((shape) => !shapes.some((other) => other !== shape && other.width <= shape.width && other.rows <= shape.rows && (other.width < shape.width || other.rows < shape.rows))) };
 }
 
-/** Groups as side-by-side column blocks, packed left to right and wrapped into bands that fit `width`. */
-function renderColumns(groups: ResourceGroup[], indent: number, ctx: RenderContext): string[] {
+function columnBlock(shape: Candidate, cells: Cell[], heading: string, available: number, theme: StartupTheme): Block {
+	const width = Math.min(available, shape.width);
+	const lines = [truncateToWidth(heading, width)];
+	const hits: CellHit[] = [];
+	for (let row = 0; row < shape.rows; row++) {
+		let line = "";
+		for (let column = 0; column < shape.columns; column++) {
+			if (column) line += " ".repeat(COLUMN_GAP);
+			const at = column * shape.rows + row;
+			const cell = cells[at];
+			const size = shape.widths[column]!;
+			if (!cell) { line += " ".repeat(size.total); continue; }
+			const start = visibleWidth(line);
+			const count = cell.count ? theme.fg(cell.color, cell.count) : "";
+			const name = truncateToWidth(cell.name, size.name, "…");
+			const gap = " ".repeat(Math.max(0, size.total - visibleWidth(name) - visibleWidth(cell.count)));
+			line += name + gap + count;
+			if (cell.action) {
+				const nameEnd = Math.min(width, start + visibleWidth(name));
+				const countStart = start + visibleWidth(name) + gap.length;
+				const countEnd = Math.min(width, countStart + visibleWidth(count));
+				if (nameEnd > start) hits.push({ row: row + 1, startCol: start, endCol: nameEnd, action: cell.action });
+				if (countEnd > countStart) hits.push({ row: row + 1, startCol: countStart, endCol: countEnd, action: cell.action });
+			}
+		}
+		lines.push(truncateToWidth(line.trimEnd(), width));
+	}
+	return { lines, hits, width, height: lines.length, columns: shape.columns };
+}
+
+type Band = { blocks: Block[]; width: number; height: number; splits: number; key: string };
+function compareChoices(a: { height: number; splits: number; bands: number; key: string }, b: typeof a): number {
+	return a.height - b.height || a.splits - b.splits || a.bands - b.bands || a.key.localeCompare(b.key);
+}
+
+/** Bounded width-DP for each contiguous band, then a partition DP across groups. */
+function layoutColumns(groups: ResourceGroup[], indent: number, ctx: RenderContext): SectionLayout {
 	const available = Math.max(1, ctx.width - indent);
-	const blocks = groups.map((group) => columnBlock(group, available, ctx));
-	const bands: Block[][] = [];
-	let used = 0;
-	for (const block of blocks) {
-		const band = bands[bands.length - 1];
-		if (band && used + COLUMN_GAP + block.width <= available) {
-			band.push(block);
-			used += COLUMN_GAP + block.width;
-		} else {
-			bands.push([block]);
-			used = block.width;
+	const options = groups.map((group) => {
+		const { cells, heading, shapes } = candidateShapes(group, available, ctx.theme, ctx.section.category);
+		return shapes.map((shape) => columnBlock(shape, cells, heading, available, ctx.theme));
+	});
+	const partition: Array<{ height: number; splits: number; bands: number; key: string; value: Band[] } | undefined> = Array(groups.length + 1).fill(undefined);
+	partition[groups.length] = { height: 0, splits: 0, bands: 0, key: "", value: [] };
+	for (let start = groups.length - 1; start >= 0; start--) {
+		let frontier = new Map<string, Band>([["0:0", { blocks: [], width: 0, height: 0, splits: 0, key: "" }]]);
+		for (let end = start; end < groups.length; end++) {
+			const next = new Map<string, Band>();
+			for (const band of frontier.values()) for (const block of options[end]!) {
+				const width = band.width + (band.blocks.length ? COLUMN_GAP : 0) + block.width;
+				if (width > available) continue;
+				const choice: Band = {
+					blocks: [...band.blocks, block], width,
+					height: Math.max(band.height, block.height), splits: band.splits + block.columns - 1,
+					key: `${band.key}${block.columns.toString().padStart(3, "0")}`,
+				};
+				const key = `${width}:${choice.height}`;
+				const old = next.get(key);
+				if (!old || compareChoices({ ...choice, bands: 1 }, { ...old, bands: 1 }) < 0) next.set(key, choice);
+			}
+			if (!next.size) break;
+			frontier = next;
+			const tail = partition[end + 1]!;
+			for (const band of frontier.values()) {
+				const choice = { height: band.height + tail.height, splits: band.splits + tail.splits, bands: 1 + tail.bands, key: band.key + tail.key, value: [band, ...tail.value] };
+				const best = partition[start];
+				if (!best || compareChoices(choice, best) < 0) partition[start] = choice;
+			}
 		}
 	}
 	const lines: string[] = [];
-	for (const band of bands) {
-		const height = Math.max(...band.map((block) => block.lines.length));
-		for (let row = 0; row < height; row++) {
+	const hits: SplashHit[] = [];
+	for (const band of partition[0]?.value ?? []) {
+		for (let row = 0; row < band.height; row++) {
 			let line = " ".repeat(indent);
-			band.forEach((block, index) => {
-				const text = block.lines[row] ?? "";
-				const last = index === band.length - 1;
-				line += last ? text : text + " ".repeat(block.width - visibleWidth(text) + COLUMN_GAP);
-			});
+			for (const block of band.blocks) {
+				const offset = visibleWidth(line);
+				const chunk = block.lines[row] ?? "";
+				line += chunk + " ".repeat(Math.max(0, block.width - visibleWidth(chunk)) + COLUMN_GAP);
+				for (const hit of block.hits) if (hit.row === row) hits.push({ row: lines.length, startCol: offset + hit.startCol, endCol: Math.min(ctx.width, offset + hit.endCol), action: hit.action });
+			}
 			lines.push(truncateToWidth(line.trimEnd(), ctx.width));
 		}
 	}
-	return lines;
+	return { lines, hits };
 }
 
 /** The marker column of a lines group: the marker and a space, or as many blanks; empty without markers. */
@@ -420,7 +463,8 @@ function renderGroupItems(group: ResourceGroup, indent: number, ctx: RenderConte
 	if (section.layout === "lines") {
 		const names = markedItems(group, theme);
 		return names.map((name, index) => {
-			const head = `${" ".repeat(indent)}${prefixText(group, index, theme)}${name}`;
+			const swatch = section.category ? `${categoryStyle(theme, section.category).swatch("■")} ` : "";
+			const head = `${" ".repeat(indent)}${swatch}${prefixText(group, index, theme)}${name}`;
 			const right = rightText(group, index);
 			if (!right?.text) return truncateToWidth(head, width);
 			const gap = " ".repeat(Math.max(2, ctx.countEnd - visibleWidth(head) - right.text.length));
@@ -431,16 +475,18 @@ function renderGroupItems(group: ResourceGroup, indent: number, ctx: RenderConte
 	const items = group.tokens
 		? group.items.map((item, index) => `${item} ${theme.fg(colors[index]!, lineCount(group.tokens![index]!))}`)
 		: markedItems(group, theme);
-	return layoutGrid(items, width, indent);
+	const swatch = section.category ? `${categoryStyle(theme, section.category).swatch("■")} ` : "";
+	return layoutGrid(items.map((item) => swatch + item), width, indent);
 }
 
 function renderGroup(group: ResourceGroup, indent: number, ctx: RenderContext): string[] {
 	const lines: string[] = [];
 	const nested = group.label !== undefined;
 	if (nested) {
-		lines.push(
+		lines.push(truncateToWidth(
 			`${" ".repeat(indent)}${ctx.theme.fg("accent", group.label!)} ${ctx.theme.fg("dim", String(groupCount(group)))}`,
-		);
+			ctx.width,
+		));
 	}
 	const inner = nested ? indent + INDENT : indent;
 	lines.push(...renderGroupItems(group, inner, ctx));
@@ -467,18 +513,15 @@ function countColumn(groups: ResourceGroup[], indent: number): number {
 	return names + 2 + counts;
 }
 
-export function renderSection(
-	section: ResourceSection,
-	width: number,
-	theme: StartupTheme,
-): string[] {
-	if (width <= 0) return [];
-	const cost = section.tokens
+export function layoutSection(section: ResourceSection, width: number, theme: StartupTheme): SectionLayout {
+	if (width <= 0) return { lines: [], hits: [] };
+	const cost = section.tokens !== undefined
 		? ` ${theme.fg(windowShareColor(section.tokens, section.contextWindow), `· ~${formatTokens(section.tokens)} tok`)}`
 		: "";
 	const attention = section.attention ? ` ${theme.fg("warning", `· ${section.attention}`)}` : "";
 	const legend = (section.legend ?? []).map((part) => ` ${theme.fg("dim", "·")} ${theme.fg(part.color, part.text)}`).join("");
-	const heading = `${theme.bold(theme.fg("mdHeading", section.title))} ${theme.fg("dim", String(section.count))}${cost}${attention}${legend}`;
+	const swatch = section.category ? `${categoryStyle(theme, section.category).swatch("■")} ` : "";
+	const heading = `${swatch}${theme.bold(theme.fg("mdHeading", section.title))} ${theme.fg("dim", String(section.count))}${cost}${attention}${legend}`;
 	const ctx: RenderContext = {
 		section,
 		width,
@@ -487,12 +530,20 @@ export function renderSection(
 		countEnd: countColumn(section.groups, INDENT),
 	};
 	const lines = [truncateToWidth(heading, width)];
-	if (section.layout === "columns") lines.push(...renderColumns(section.groups, INDENT, ctx));
-	else for (const group of section.groups) lines.push(...renderGroup(group, INDENT, ctx));
+	const hits: SplashHit[] = [];
+	if (section.layout === "columns") {
+		const columns = layoutColumns(section.groups, INDENT, ctx);
+		hits.push(...columns.hits.map((hit) => ({ ...hit, row: hit.row + 1 })));
+		lines.push(...columns.lines);
+	} else for (const group of section.groups) lines.push(...renderGroup(group, INDENT, ctx));
 	for (const note of section.notes ?? []) {
 		lines.push(truncateToWidth(`${" ".repeat(INDENT)}${theme.fg(note.color, note.text)}`, width));
 	}
-	return lines;
+	return { lines, hits: hits.filter((hit) => hit.endCol > hit.startCol && !!sliceByColumn(lines[hit.row] ?? "", hit.startCol, hit.endCol)) };
+}
+
+export function renderSection(section: ResourceSection, width: number, theme: StartupTheme): string[] {
+	return layoutSection(section, width, theme).lines;
 }
 
 // ---- Collecting entries from pi's InteractiveMode ----
@@ -530,66 +581,73 @@ function localExtensionName(label: string): string {
 }
 
 /** Builds the compact sections from the same data pi's own listing uses; sections with nothing in them are omitted. */
-export function collectSections(mode: any, options?: { extensions?: any[] }): Record<string, ResourceSection> {
+export function collectSections(mode: any, options?: { extensions?: any[] }, snapshot?: StartupContextSnapshot): Record<string, ResourceSection> {
 	const loader = mode.session.resourceLoader;
 	const sections: Record<string, ResourceSection> = {};
-	const contextWindow = mode.session?.model?.contextWindow as number | undefined;
+	const contextWindow = snapshot?.contextWindow;
+	const attributed = (category: "files" | "skills") => new Map(
+		snapshot?.sources.filter((source) => source.category === category).flatMap((source) => source.children ?? []).map((source) => [source.id, source.tokens] as const) ?? [],
+	);
+	const files = attributed("files");
+	const skillsCost = attributed("skills");
+	const seenFiles = new Set<string>();
+	const seenSkills = new Set<string>();
+	const once = (id: string, costs: Map<string, number>, seen: Set<string>) => {
+		if (seen.has(id)) return 0;
+		seen.add(id);
+		return costs.get(id) ?? 0;
+	};
+	const unavailable = [{ text: "prompt attribution unavailable", color: "dim" }];
 
 	const appendSources = loader.getAppendSystemPromptSources() as any[];
-	const appendTexts = (loader.getAppendSystemPrompt?.() ?? []) as string[];
 	const cwd = mode.sessionManager?.getCwd?.() as string | undefined;
 	const agentDir = (loader.agentDir as string | undefined) ?? getAgentDir();
-	const contextFiles: Array<{ path: string; tokens: number }> = [
-		...(loader.getSystemPromptSource()
-			? [{ path: loader.getSystemPromptSource().path, tokens: estimateTokens(loader.getSystemPrompt?.() ?? "") }]
-			: []),
-		...appendSources.map((file, index) => ({ path: file.path, tokens: estimateTokens(appendTexts[index] ?? "") })),
-		...(loader.getAgentsFiles().agentsFiles as any[]).map((file) => ({
-			path: file.path,
-			tokens: estimateTokens(file.content ?? ""),
-		})),
-	];
+	const contextFiles: Array<{ path: string; tokens?: number }> = [
+		...(loader.getSystemPromptSource() ? [{ path: loader.getSystemPromptSource().path }] : []),
+		...appendSources.map((file) => ({ path: file.path })),
+		...(loader.getAgentsFiles().agentsFiles as any[]).map((file) => ({ path: file.path })),
+	].map((file) => ({ ...file, ...(snapshot?.attribution.files ? { tokens: once(`file:${file.path}`, files, seenFiles) } : {}) }));
 	if (contextFiles.length > 0) {
-		const total = contextFiles.reduce((sum, file) => sum + file.tokens, 0);
+		const total = contextFiles.reduce((sum, file) => sum + (file.tokens ?? 0), 0);
 		const groups: ResourceGroup[] = [];
 		for (const scope of SCOPE_ORDER) {
 			// Largest first; equal sizes keep pi's order (stable sort).
 			const inScope = contextFiles
 				.filter((file) => contextScope(file.path, agentDir, cwd) === scope)
-				.sort((a, b) => b.tokens - a.tokens);
+				.sort((a, b) => (b.tokens ?? 0) - (a.tokens ?? 0));
 			if (inScope.length === 0) continue;
 			groups.push({
 				label: scope,
 				items: inScope.map((file) => mode.formatContextPath(file.path)),
-				tokens: inScope.map((file) => file.tokens),
+				...(snapshot?.attribution.files ? { tokens: inScope.map((file) => file.tokens ?? 0) } : {}),
 			});
 		}
 		sections.Context = {
 			title: "Context",
 			count: contextFiles.length,
-			tokens: total,
+			...(snapshot?.attribution.files ? { tokens: total } : { notes: unavailable }),
 			contextWindow,
 			layout: "columns",
 			groups,
+			category: "files",
 		};
 	}
 
 	const skills = loader.getSkills().skills as any[];
 	if (skills.length > 0) {
+		const entries = skills.map((skill) => ({
+			name: skill.name,
+			...(snapshot?.attribution.skills ? { tokens: once(`skill:${skill.filePath}`, skillsCost, seenSkills) } : {}),
+			...entryOrigin(mode, skill.sourceInfo),
+		}));
 		sections.Skills = {
 			title: "Skills",
 			count: skills.length,
-			tokens: skills.reduce((sum, skill) => sum + skillPromptTokens(skill), 0),
+			...(snapshot?.attribution.skills ? { tokens: entries.reduce((sum, entry) => sum + (entry.tokens ?? 0), 0) } : { notes: unavailable }),
 			contextWindow,
 			layout: "grid",
-			groups: groupEntries(
-				skills.map((skill) => ({
-					name: skill.name,
-					tokens: skillPromptTokens(skill),
-					...entryOrigin(mode, skill.sourceInfo),
-				})),
-				"name",
-			),
+			category: "skills",
+			groups: groupEntries(entries, "name"),
 		};
 	}
 
@@ -618,6 +676,7 @@ export function collectSections(mode: any, options?: { extensions?: any[] }): Re
 			title: "Extensions",
 			count: extensions.length,
 			layout: "grid",
+			category: "tools",
 			groups: groupEntries(
 				extensions.map((extension, index) => {
 					const origin = entryOrigin(mode, extension.sourceInfo);
@@ -698,6 +757,7 @@ export function buildMcpSection(
 		groups.push({
 			label: level,
 			items: inLevel.map((entry) => entry.name),
+			actions: inLevel.map((entry) => ({ kind: "mcp", name: entry.name })),
 			prefixes: states.map((state) => MCP_GLYPHS[state]),
 			tones: states.map((state) => state === "disabled" ? "dim" : undefined),
 			right,
@@ -709,6 +769,7 @@ export function buildMcpSection(
 		count: entries.length,
 		layout: "columns",
 		groups,
+		category: "mcp",
 		...(problems.length > 0 ? { attention: `${problems.join(", ")}, /mcp to fix` } : {}),
 		...(notes.length > 0 ? { notes } : {}),
 	};
@@ -887,12 +948,13 @@ export function buildModelsSection(
 	if (current && byKey.has(key(current))) add(byKey.get(key(current))!);
 	const count = [...providers.values()].reduce((sum, list) => sum + list.length, 0);
 	if (count === 0) return undefined;
-	const groups: ResourceGroup[] = [...providers].map(([provider, list]) => {
+	const groups: ResourceGroup[] = [...providers].sort(([a], [b]) => compareNames(a, b)).map(([provider, list]) => {
 		const marks = list.map((model) => (current && key(model) === key(current) ? CURRENT_MARK : undefined));
 		const prefixes = list.map((model) => (favoriteKeys.has(key(model)) ? FAVORITE_MARK : undefined));
 		return {
 			label: provider,
 			items: list.map((model) => (model.thinkingLevel ? `${model.id}:${model.thinkingLevel}` : model.id)),
+			actions: list.map((model) => ({ kind: "model", provider, id: model.id, ...(model.thinkingLevel ? { thinkingLevel: model.thinkingLevel } : {}) })),
 			right: list.map((model) => formatContextWindow(model.contextWindow)),
 			...(marks.some(Boolean) ? { marks } : {}),
 			...(prefixes.some(Boolean) ? { prefixes } : {}),
@@ -903,7 +965,6 @@ export function buildModelsSection(
 		count,
 		layout: "columns",
 		groups,
-		...(favorites.length > 0 ? { legend: [{ ...GLYPHS.favorite, text: `${GLYPHS.favorite.text} favorite` }] } : {}),
 	};
 }
 
@@ -957,6 +1018,11 @@ function sectionTitle(child: any): string | undefined {
 }
 
 let stopMcpWatch: (() => void) | undefined;
+const mountedModes = new Set<object>();
+
+function refreshStartupHosts(): void {
+	for (const mode of mountedModes) attachStartupHost(mode).refresh?.();
+}
 
 export function stopStartupResources(): void {
 	stopMcpWatch?.();
@@ -964,10 +1030,16 @@ export function stopStartupResources(): void {
 	mcpState.mounted = false;
 }
 
-/** Poll for as long as the splash exists, not just startup. Rendering itself performs no file I/O. */
-export function watchMcpState(mode: any, component: unknown, update: (entries: McpEntry[], statuses: ReadonlyMap<string, McpObservation>) => void): () => void {
+function disposeStartupResources(): void {
 	stopStartupResources();
-	mcpState.mount();
+	for (const mode of mountedModes) disposeStartupHost(mode);
+	mountedModes.clear();
+}
+
+/** Poll for as long as the splash exists, not just startup. Rendering itself performs no file I/O. */
+export function watchMcpState(mode: any, component: unknown, update: (entries: McpEntry[], statuses: ReadonlyMap<string, McpObservation>) => void, headerOnly = false): () => void {
+	stopStartupResources();
+	if (!headerOnly) mcpState.mount();
 	const cache = new McpConfigCache();
 	const reader = new McpStatusReader();
 	let entries: McpEntry[] = [];
@@ -976,6 +1048,8 @@ export function watchMcpState(mode: any, component: unknown, update: (entries: M
 	const publish = () => { if (alive()) update(entries, reader.statuses); };
 	const tick = () => {
 		if (!alive()) { stop(); return; }
+		attachStartupHost(mode).refresh?.();
+		if (headerOnly) return;
 		entries = collectMcpEntries(mode, cache);
 		publish();
 		reader.refresh(mode?.session?.extensionRunner, publish);
@@ -996,64 +1070,116 @@ export function watchMcpState(mode: any, component: unknown, update: (entries: M
 	return stop;
 }
 
-/** Swaps the collapsed rendering of each pi startup section for ours; the expanded rendering stays pi's. */
-function replaceSections(mode: any, options: unknown): void {
+/** Replaces collapsed native sections; the native expanded content and diagnostics remain untouched. */
+function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI): void {
 	stopStartupResources();
 	const children: any[] = mode?.loadedResourcesContainer?.children;
 	if (!Array.isArray(children)) return;
-	const titled = children.map((child) => [child, sectionTitle(child)] as const).filter(([, t]) => t);
-	if (titled.length === 0) return;
-	const sections = collectSections(mode, options as { extensions?: any[] } | undefined);
-	if (collectModelsSection(mode)) {
-		// First, ahead of Context: rendered live so the current mark follows model switches.
-		const at = children.indexOf(titled[0]![0]);
-		const render = (width: number) => {
-			const section = collectModelsSection(mode);
-			return section ? renderSection(section, width, hostTheme?.() ?? PLAIN_THEME) : [];
+	const titled = children.map((child) => [child, sectionTitle(child)] as const).filter(([, title]) => title);
+	const listing = (options as { force?: boolean } | undefined)?.force || mode.shouldShowStartupDetails?.() || titled.length > 0;
+	if (!listing) {
+		// The native quiet view has no resource headings. Keep one invisible watcher for the live header,
+		// without mounting the MCP status replacement or swallowing Pi's native warnings.
+		const host = attachStartupHost(mode);
+		mountedModes.add(mode);
+		host.onDispose?.();
+		host.onDispose = undefined;
+		let last = "";
+		host.refresh = () => {
+			const state = attachStartupHost(mode);
+			const snapshot = readStartupContext(mode);
+			const now = JSON.stringify(snapshot);
+			if (now !== last) {
+				last = now;
+				state.contextSnapshot = snapshot;
+				mode.ui?.requestRender?.();
+			}
 		};
-		children.splice(at, 0, { render, invalidate() {} }, { render: () => [""], invalidate() {} });
+		host.refresh();
+		const sentinel = { render: () => [], invalidate() {} };
+		children.push(sentinel);
+		watchMcpState(mode, sentinel, () => {}, true);
+		return;
 	}
-	// Keep an initially empty component too: an extension can register the first server after startup.
-	const anchor = titled.find(([, title]) => title === "Extensions") ?? titled[titled.length - 1]!;
-	const at = children.indexOf(anchor[0]);
+	const host = attachStartupHost(mode);
+	mountedModes.add(mode);
+	host.onDispose?.();
+	const controller = pi ? createSplashActionController(pi, mode, host) : undefined;
+	host.onDispose = () => controller?.dispose();
 	let mcpEntries: McpEntry[] = [];
 	let statuses: ReadonlyMap<string, McpObservation> = new Map();
-	let last = "";
+	let lastMcp = "";
+	let lastSnapshot = "";
+	let generation = host.generation;
 	const section = () => collectMcpSection(mode, mcpEntries, statuses);
-	const component = {
-		render(width: number) {
-			const current = section();
-			return current ? renderSection(current, width, hostTheme?.() ?? PLAIN_THEME) : [];
-		},
-		invalidate() {},
+	const theme = () => hostTheme?.() ?? PLAIN_THEME;
+	const refresh = () => {
+		const current = attachStartupHost(mode);
+		if (generation !== current.generation) { generation = current.generation; lastSnapshot = ""; lastMcp = ""; }
+		let changed = false;
+		const snapshot = readStartupContext(mode);
+		try {
+			const sections = collectSections(mode, options as { extensions?: any[] } | undefined, snapshot);
+			const model = collectModelsSection(mode);
+			if (model) sections.Models = model;
+			const now = JSON.stringify(sections);
+			if (now !== lastSnapshot) {
+				lastSnapshot = now;
+				current.resourceSections = sections;
+				changed = true;
+			}
+		} catch { /* During load Pi may not have a complete resource loader yet. */ }
+		if (JSON.stringify(snapshot) !== JSON.stringify(current.contextSnapshot)) {
+			current.contextSnapshot = snapshot;
+			changed = true;
+		}
+		if (changed) mode.ui?.requestRender?.();
 	};
+	host.refresh = refresh;
+	host.repaint = () => mode.ui?.requestRender?.();
+	refresh();
+	const interactive = (getSection: () => ResourceSection | undefined) =>
+		controller ? createInteractiveSection(getSection, theme, (action) => void controller.activate(action)) : {
+			render(width: number) { const section = getSection(); return section ? renderSection(section, width, theme()) : []; },
+			invalidate() {},
+		};
+	const modelComponent = interactive(() => host.resourceSections?.Models);
+	const modelSpacer = { render: () => host.resourceSections?.Models ? [""] : [], invalidate() {} };
+	const modelAt = titled.length ? children.indexOf(titled[0]![0]) : 0;
+	children.splice(modelAt, 0, modelComponent, modelSpacer);
+	const anchor = titled.find(([, title]) => title === "Extensions") ?? titled[titled.length - 1];
+	const mcpAt = anchor ? children.indexOf(anchor[0]) + 2 : children.length;
+	const component = interactive(section);
 	const spacer = { render: () => mcpEntries.length > 0 || statuses.size > 0 ? [""] : [], invalidate() {} };
-	children.splice(at + 2, 0, component, spacer);
+	children.splice(mcpAt, 0, component, spacer);
 	watchMcpState(mode, component, (entries, observed) => {
 		mcpEntries = entries;
 		statuses = observed;
 		const current = section();
 		const now = JSON.stringify(current);
-		// An empty placeholder must not absorb a warning it cannot display.
 		mcpState.mounted = !!current;
-		if (now !== last) {
-			last = now;
+		if (now !== lastMcp) {
+			lastMcp = now;
 			mode.ui?.requestRender?.();
 		}
 	});
 	for (const [child, title] of titled) {
-		const section = sections[title!];
-		if (!section) continue;
 		const expandedRender = child.render.bind(child);
-		child.render = (width: number) =>
-			child.state?.expanded
+		child.render = (width: number) => {
+			const section = host.resourceSections?.[title!];
+			return child.state?.expanded || !section
 				? expandedRender(width)
-				: renderSection(section, width, hostTheme?.() ?? PLAIN_THEME);
+				: renderSection(section, width, theme());
+		};
 	}
 }
 
 export function installStartupResources(pi?: ExtensionAPI): void {
-	pi?.on("session_shutdown", () => stopStartupResources());
+	pi?.on("session_shutdown", disposeStartupResources);
+	pi?.on("model_select", refreshStartupHosts);
+	pi?.on("session_tree", refreshStartupHosts);
+	pi?.on("session_compact", refreshStartupHosts);
+	pi?.on("agent_end", refreshStartupHosts);
 	const prototype = (InteractiveMode as any)?.prototype;
 	if (!prototype || typeof prototype.showLoadedResources !== "function") return;
 	const previous = patchRegistry.get<StartupResourcesPatch>(STARTUP_RESOURCES_PATCH);
@@ -1067,13 +1193,13 @@ export function installStartupResources(pi?: ExtensionAPI): void {
 			: prototype.showLoadedResources;
 	const patch: StartupResourcesPatch = {
 		active: true,
-		stop: stopStartupResources,
+		stop: disposeStartupResources,
 		original,
 		installed: function (this: any, ...args: any[]) {
 			const result = original.apply(this, args);
 			if (!patch.active || !config.showStartupHeader) return result;
 			try {
-				replaceSections(this, args[0]);
+				replaceSections(this, args[0], pi);
 			} catch {
 				// Fall back to pi's own listing rather than break startup.
 			}

@@ -5,6 +5,12 @@ description: What remote Pi clients can render, and where terminal access is sti
 
 The suite preserves rich desktop dialogs. There is no remote-client UI setting to switch: TUI sessions use terminal components, while RPC sessions use supported Pi dialogs. Terminal access and native chat controls are different capabilities.
 
+## Startup context map
+
+[pi-cc-render's startup map](/plugins/pi-cc-render/#startup-splash) shows estimated context as non-input tiles **above the chat**. A tile is not a composer or send target; the ordinary editor remains the only place to type a message. In fullscreen, model rows select a model for the current session and MCP rows open Pi's native manager; the manager's controls are separate from the map. Regular mode retains `/model` and `/mcp`.
+
+Client regression fixtures should show the actual splash alongside the editor and footer at 46, 120 and 180 columns, with Sidebar absent/open and the native MCP manager open/closed. Both herdr-web-ui and Collie parsers must find only the real editor and normal idle composer, with no false input or send target in the map. These are compatibility requirements, not a claim that the new fixtures or live clients have been validated.
+
 ## Herdr and herdr-web-ui
 
 Install Herdr's official Pi integration for lifecycle state and session identity. [pi-herdr](/plugins/pi-herdr/) adds metadata and orchestration; it does not replace that integration.

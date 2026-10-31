@@ -78,6 +78,119 @@ describe("extension factory", () => {
     expect((InteractiveMode as any).prototype.init).toBe(second.installed);
   });
 
+  test("early paint uses a loading context map, while disabling the setting leaves the native header", async () => {
+    const { config } = await import("../src/config/config.ts");
+    const { installEarlyStartupHeader } = await import("../src/feature/shell/startup-header.ts");
+    const { disposeStartupHost } = await import("../src/feature/shell/startup-state.ts");
+    const { EARLY_STARTUP_HEADER_PATCH, patchRegistry } = await import("../src/utils/patch-keys.ts");
+    const prototype = (InteractiveMode as any).prototype;
+    const savedInit = prototype.init;
+    const savedPatch = patchRegistry.get(EARLY_STARTUP_HEADER_PATCH);
+    const enabled = config.showStartupHeader;
+    const makeMode = (id: string) => {
+      const children: any[] = [];
+      const headers: Array<any> = [];
+      const mode: any = {
+        sessionManager: { getSessionId: () => id },
+        builtInHeader: { render: () => ["native"] },
+        headerContainer: { children, addChild(child: any) { children.push(child); } },
+        setExtensionHeader(factory: any) { headers.push(factory({}, { fg: (_c: string, text: string) => text })); },
+        ui: { requestRender() {} },
+      };
+      return { mode, children, headers };
+    };
+    try {
+      prototype.init = async function (this: any) { this.headerContainer.addChild(this.builtInHeader); };
+      patchRegistry.delete(EARLY_STARTUP_HEADER_PATCH);
+      installEarlyStartupHeader();
+      const first = makeMode("early-1");
+      await prototype.init.call(first.mode);
+      expect(first.headers).toHaveLength(1);
+      expect(first.headers[0].render(46)[0]).toContain("Starting context · loading");
+      installEarlyStartupHeader();
+      const second = makeMode("early-2");
+      await prototype.init.call(second.mode);
+      expect(second.headers).toHaveLength(1);
+      expect(second.headers[0].render(46)[0]).toContain("Starting context · loading");
+      config.showStartupHeader = false;
+      const native = makeMode("early-native");
+      await prototype.init.call(native.mode);
+      expect(native.children).toEqual([native.mode.builtInHeader]);
+      expect(native.headers).toHaveLength(0);
+      disposeStartupHost(first.mode);
+      disposeStartupHost(second.mode);
+    } finally {
+      config.showStartupHeader = enabled;
+      prototype.init = savedInit;
+      if (savedPatch) patchRegistry.install(EARLY_STARTUP_HEADER_PATCH, savedPatch);
+      else patchRegistry.delete(EARLY_STARTUP_HEADER_PATCH);
+    }
+  });
+
+  test("session_start reuses its header state and refresh hooks follow session replacement and shutdown", async () => {
+    const { default: startupHeader, applyStartupHeader } = await import("../src/feature/shell/startup-header.ts");
+    const { attachStartupHost, getStartupHost, disposeStartupHost } = await import("../src/feature/shell/startup-state.ts");
+    const handlers = new Map<string, (event: any, ctx: any) => void>();
+    startupHeader({ on: (name: string, handler: any) => handlers.set(name, handler) } as any);
+    const id = { value: "header-session-1" };
+    let renders = 0;
+    const mode = { sessionManager: { getSessionId: () => id.value }, ui: { requestRender: () => renders++ } };
+    const state = attachStartupHost(mode);
+    const snapshot = { stage: "starting" as const, modelLabel: "test/model", usedEstimate: 0, sources: [], attribution: { files: true, skills: true }, caveats: [] };
+    state.contextSnapshot = snapshot;
+    let factory: any;
+    const ctx = { hasUI: true, sessionManager: mode.sessionManager, ui: {
+      theme: { fg: (_color: string, text: string) => text },
+      setHeader: (value: any) => { factory = value; }, requestRender: () => renders++,
+    } };
+    try {
+      // A session_start keeps the same owner and installs the current snapshot's factory.
+      handlers.get("session_start")!({}, ctx);
+      expect(getStartupHost(id.value)).toBe(state);
+      expect(factory({}, ctx.ui.theme).render(120)[0]).toContain("Starting context");
+      state.contextSnapshot = snapshot;
+      let refreshed = 0;
+      state.refresh = () => { refreshed++; state.repaint?.(); };
+      for (const name of ["model_select", "session_tree", "session_compact", "agent_end", "agent_settled"]) {
+        handlers.get(name)!({}, ctx);
+      }
+      expect(refreshed).toBe(5);
+      expect(renders).toBeGreaterThanOrEqual(5);
+      id.value = "header-session-2";
+      expect(attachStartupHost(mode)).toBe(state);
+      expect(getStartupHost("header-session-1")).toBeUndefined();
+      expect(getStartupHost(id.value)).toBe(state);
+      handlers.get("session_shutdown")!({}, ctx);
+      expect(getStartupHost(id.value)).toBeUndefined();
+      expect(factory).toBeUndefined();
+      // Explicit reinstall after disposal creates a fresh owner (not a leaked old callback).
+      applyStartupHeader(ctx);
+      expect(getStartupHost(id.value)).toBeUndefined();
+    } finally {
+      disposeStartupHost(mode);
+    }
+  });
+
+  test("session_start recovers an early header before Pi assigns its first session ID", async () => {
+    const { applyStartupHeader } = await import("../src/feature/shell/startup-header.ts");
+    const { attachStartupHost, disposeStartupHost, getStartupHost } = await import("../src/feature/shell/startup-state.ts");
+    let id: string | undefined;
+    const manager = { getSessionId: () => id };
+    const mode = { sessionManager: manager };
+    const state = attachStartupHost(mode);
+    expect(state.sessionId).toBe("");
+    id = "assigned-later";
+    let factory: any;
+    try {
+      applyStartupHeader({ hasUI: true, sessionManager: manager, ui: {
+        setHeader: (value: any) => { factory = value; }, requestRender() {},
+      } });
+      expect(getStartupHost(id)).toBe(state);
+      expect(factory).toBeTypeOf("function");
+      expect(factory({}, { fg: (_color: string, text: string) => text }).render(46)[0]).toContain("Starting context");
+    } finally { disposeStartupHost(mode); }
+  });
+
   test("/ccstyle status reports the configuration and other arguments require the TUI", async () => {
     const extension = (await import("../src/index.ts")).default;
     const { pi, commands } = stubApi();
@@ -120,7 +233,7 @@ describe("Pi 1.2.0 resource loader", () => {
     expect(extension.tools.size).toBe(0);
     expect(extension.shortcuts.size).toBe(0);
     expect([...extension.handlers.keys()].sort()).toEqual([
-      "agent_end", "agent_settled", "agent_start", "before_agent_start", "input", "message_start", "message_update", "session_compact", "session_shutdown",
+      "agent_end", "agent_settled", "agent_start", "before_agent_start", "input", "message_start", "message_update", "model_select", "session_compact", "session_shutdown",
       "session_start", "session_tree", "tool_execution_end", "tool_execution_start",
     ]);
     const themes = loader.getThemes().themes.map((theme) => theme.name).sort();

@@ -416,7 +416,7 @@ export async function showCcstylePanel(
 			id: "showStartupHeader",
 			label: "Startup header",
 			description: config.showStartupHeader
-				? "Show the custom startup header (logo + tips) on new sessions."
+				? "Context map and interactive startup resources on new sessions."
 				: "Use Pi's native startup header instead.",
 			currentValue: config.showStartupHeader ? "on" : "off",
 			values: ["on", "off"],
@@ -591,7 +591,7 @@ export async function showCcstylePanel(
 					const enabled = value === "on";
 					updateConfig({ showStartupHeader: enabled });
 					startupHeaderSetting.description = config.showStartupHeader
-						? "Show the custom startup header (logo + tips) on new sessions."
+						? "Context map and interactive startup resources on new sessions."
 						: "Use Pi's native startup header instead.";
 					if (enabled) applyStartupHeader(ctx);
 					else clearStartupHeader(ctx);

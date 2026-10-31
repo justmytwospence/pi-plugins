@@ -394,16 +394,33 @@ describe("agent summary", () => {
 });
 
 describe("startup header", () => {
-  test("renders a two-column header that fits the width and a stacked one when narrow", async () => {
+  test("renders estimated occupied sources, category legend and a full-window strip at client widths", async () => {
     const { renderHeaderLines } = await import("../src/feature/shell/startup-header.ts");
-    const headerTheme = { ...theme, getFgAnsi: () => "\x1b[38;2;80;160;255m" };
-    const wide = renderHeaderLines(100, headerTheme);
-    expect(wide).toHaveLength(5);
-    expect(plain(wide).every((line) => line.length <= 100)).toBe(true);
-    expect(plain(wide).join("\n")).toContain("yours");
-    const narrow = renderHeaderLines(30, headerTheme);
-    expect(narrow.length).toBeGreaterThan(5);
-    expect(plain(narrow).every((line) => line.length <= 30)).toBe(true);
+    const snapshot = {
+      stage: "starting" as const, modelLabel: "provider/model", contextWindow: 200_000,
+      usedEstimate: 5_000,
+      attribution: { files: true, skills: true },
+      sources: [
+        { id: "system", category: "system" as const, label: "System", tokens: 3_000 },
+        { id: "files", category: "files" as const, label: "Files", tokens: 2_000 },
+      ],
+      caveats: ["Estimated from loaded content; request hooks and provider framing may add tokens."],
+    };
+    for (const width of [46, 120, 180]) {
+      const lines = renderHeaderLines(width, theme, snapshot);
+      const output = plain(lines).join("\n");
+      expect(output).toContain("Starting context");
+      expect(output).toContain("Sources · occupied context");
+      expect(output).toContain("System ~3k");
+      expect(output).toContain("Files ~2k");
+      expect(output).toContain("Available");
+      expect(output).not.toContain("There are many agent harnesses");
+      expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+    }
+    const retained = renderHeaderLines(120, theme, { ...snapshot, stage: "context" });
+    expect(plain(retained)[0]).toMatch(/^Context ·/);
+    const loading = renderHeaderLines(46, theme, { ...snapshot, stage: "initializing" });
+    expect(plain(loading)).toEqual(["Starting context · loading…"]);
   });
 });
 
