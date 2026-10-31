@@ -1,19 +1,19 @@
 ---
 title: Auto effort
-description: Adjust reasoning effort and the model tier to the task, within your bounds and subscription pressure.
+description: Adjust reasoning effort to the task, within your bounds and subscription pressure.
 plugin: pi-auto-effort
 ---
 
 ## Quick reference
 
-- **Use it for:** Adapt reasoning to task difficulty within a fixed range or your manual ceiling, and pick a model tier of the same provider: cheaper only while the cache is cold, back up to your own model whenever the work needs it.
+- **Use it for:** Adapt reasoning to task difficulty within a fixed range or your manual ceiling.
 - **Enable:** Select `packages/pi-auto-effort/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
-- **Controls:** `/auto-effort` status/limits/on/off, `bounds free|ceiling`, `models off|auto`. No global shortcut; stock thinking controls remain Pi's.
-- **Settings:** `auto-effort.json` shared/user/project layers; low floor, free bounds up to xhigh, threshold 0.5 to 0.85 with pressure, 1500 ms Jev timeout, mid-run checks normally every 3 tool turns, model choice on with Sonnet/Opus and Terra/Sol presets, go-aheads such as `yes` or `thanks` settled without a Jev call.
-- **Requirements, cost & privacy:** Optional paid Jev sees request/activity excerpts, with the agent's own words marked untrusted; unavailable judgments keep the level. Provider quota reads use credentials; reasoning and model changes affect cost/latency.
-- **Integrations & limits:** Optional footer; optional pi-cache-guard `cache:state` input and model offers in its cold-cache dialog; publishes `quota:pressure`. `--thinking` disables assessment. Explicit effort-update rewriting has its own switch; `/auto-effort off` does not disable it.
+- **Controls:** `/auto-effort` status/limits/on/off, `bounds free|ceiling`. No global shortcut; stock thinking controls remain Pi's.
+- **Settings:** `auto-effort.json` shared/user/project layers; low floor, free bounds up to xhigh, threshold 0.5 to 0.85 with pressure, 1500 ms Jev timeout, mid-run checks normally every 3 tool turns, go-aheads such as `yes` or `thanks` settled without a Jev call.
+- **Requirements, cost & privacy:** Optional paid Jev sees request/activity excerpts, with the agent's own words marked untrusted; unavailable judgments keep the level. Provider quota reads use credentials; reasoning changes affect cost/latency.
+- **Integrations & limits:** Optional footer; publishes `quota:pressure`. `--thinking` disables assessment. Explicit effort-update rewriting has its own switch; `/auto-effort off` does not disable it.
 
-Auto effort changes the thinking level, and by default the model within the same provider: a cheaper tier only while a switch is cheap, and back up to the model you chose whenever the work needs it (never above it automatically). Use it when a session alternates between routine edits and difficult reasoning. Set `models.mode` to `off` to keep the model you selected, and `policy.bounds` to `ceiling` to keep a manual upper bound on effort.
+Auto effort changes the thinking level, not the model you selected, and does not offer models in Cache guard's cold-cache dialog. Use it when a session alternates between routine edits and difficult reasoning. Set `policy.bounds` to `ceiling` to keep a manual upper bound on effort.
 
 ## Enable and requirements
 
@@ -27,7 +27,7 @@ Jev classification requires Pi 0.99 or newer and classifier credentials managed 
 
 Jev answers which of `low`, `medium`, `high` and `xhigh` the request needs, as a probability for each. `need(L)` is the probability that the work needs at least L. The level is the highest one within the bounds whose need is at least the threshold θ, else the floor. θ is `policy.threshold.relaxed` (0.5, the median of Jev's distribution, biased neither up nor down) with no subscription pressure, `tight` (0.85) at critical pressure, and halfway between at caution, so under pressure only work Jev is surer about gets higher levels. The level goes up as soon as a higher level clears θ, but goes down only once the current level's need is below θ minus `policy.hysteresis` (0.1), which keeps borderline answers from flip-flopping.
 
-Short acknowledgements keep the existing level and model. A message that is only a go-ahead or thanks is settled without asking Jev: after lowercasing and ignoring punctuation, every word must belong to one of the phrases `yes`, `y`, `yep`, `yeah`, `ok`, `okay`, `sure`, `go`, `go ahead`, `go for it`, `continue`, `proceed`, `do it`, `ship it`, `sounds good`, `looks good`, `lgtm`, `perfect`, `great`, `thanks`, `thank you`, `ty`, `cool` or `nice` (plus any in `prefilter.phrases`), and the message has at most four words. `Yes, go ahead!` matches; `yes please` and `go ahead and add tests` go to Jev, which also recognizes other go-aheads. The decision is recorded with reason `go-ahead`. Set `"prefilter": { "enabled": false }` to send every message to Jev, or add phrases:
+Short acknowledgements keep the existing level. A message that is only a go-ahead or thanks is settled without asking Jev: after lowercasing and ignoring punctuation, every word must belong to one of the phrases `yes`, `y`, `yep`, `yeah`, `ok`, `okay`, `sure`, `go`, `go ahead`, `go for it`, `continue`, `proceed`, `do it`, `ship it`, `sounds good`, `looks good`, `lgtm`, `perfect`, `great`, `thanks`, `thank you`, `ty`, `cool` or `nice` (plus any in `prefilter.phrases`), and the message has at most four words. `Yes, go ahead!` matches; `yes please` and `go ahead and add tests` go to Jev, which also recognizes other go-aheads. The decision is recorded with reason `go-ahead`. Set `"prefilter": { "enabled": false }` to send every message to Jev, or add phrases:
 
 ```json
 { "prefilter": { "enabled": true, "phrases": ["yes please", "carry on"] } }
@@ -41,53 +41,15 @@ Mid-run checks normally happen every three tool turns, or after a turn containin
 
 The current `effortUpdates.models` defaults are `openai-codex/gpt-6-astra`, `openai-codex/gpt-6.1-sol` and `openai-codex/gpt-6.1-terra`. For those entries, the extension keeps request-level effort stable and inserts `configuration_update` items for later changes. This rewriting remains active even with `/auto-effort off`; disable `effortUpdates.enabled` separately to stop it. Treat the list as implementation configuration, not a guarantee about every provider exposing similarly named models.
 
-## Model choice
-
-Model choice is on by default (`models.mode` `auto`; `off`, or `/auto-effort models off` for one session, keeps your model). The same Jev request also chooses a tier of the current provider, by the same threshold rule; the provider never changes. A provider without a `models.tiers` entry gets a built-in preset, resolved from the models Pi has credentials for:
-
-| Provider | balanced | strong |
-| --- | --- | --- |
-| `anthropic` | newest `claude-sonnet-*` | newest `claude-opus-*` |
-| `openai-codex` | newest `*-terra` | newest `*-sol` |
-
-Newest is a numeric-aware sort of the id, skipping dated snapshots (`-20250929`) when an undated alias exists. There is no `fast` tier in the presets. A `models.tiers` entry for a provider replaces its preset, and an empty entry turns model choice off for that provider.
-
-A switch re-sends the conversation without a cached prefix, so the two directions differ, and both happen only before a message you send:
-
-- **Down** to a cheaper tier only while a switch is cheap: the session's first message, a cold prompt cache (from pi-cache-guard's `cache:state` event when it is loaded, otherwise estimated from the last answer or Pi cache-warming refresh and the model's cache lifetime), or a context under `models.maxSwitchTokens` (30,000 tokens).
-- **Up** to a stronger tier, including back to your own model, on any message where the rule picks it, accepting one cache rewrite.
-
-An auto switch marks the status with `≈` and the model's short id. The model you pick by hand is remembered and never replaced by an auto pick: auto returns to it when its tier is picked, `/auto-effort off` returns to it, and no automatic pick goes above it, whatever the effort bounds (a model another extension set, such as plan mode's implementation model, counts as yours). Model choice is off when Pi was started with `--model`.
-
-```json
-{
-  "models": {
-    "mode": "auto",
-    "tiers": {
-      "anthropic": {
-        "fast": "anthropic/claude-haiku-4-5",
-        "balanced": "anthropic/claude-sonnet-4-5",
-        "strong": "anthropic/claude-opus-4-5"
-      }
-    }
-  }
-}
-```
-
-### In pi-cache-guard's cold-cache dialog
-
-When [Cache guard](/plugins/pi-cache-guard/) holds a prompt because the cache is cold, it emits `cache:model-offers` with `{ text, tokens, offers }` and awaits the promises listeners push onto `offers`. Auto effort, when it is on with model choice `auto` and two or more tiers, assesses the prompt, and offers every other tier's model, stronger ones too since you choose, as `{ model, label, recommended?, note? }`, recommending the automatic pick (either direction, since the cache is cold anyway) when it differs from the current model. After the dialog, cache guard emits `cache:model-choice` with `{ text, model }`: the chosen `provider/id`, or `null` when you send on the current model, compact, start fresh or keep the prompt. Auto effort applies that choice to the prompt with the same text, switching as an auto pick or staying, and makes no model choice of its own for it; the effort level is still set, from the dialog's assessment rather than a second Jev request. A choice for another text is discarded.
-
 ## Commands and configuration
 
 | Command | Effect |
 | --- | --- |
-| `/auto-effort` or `/auto-effort status` | Show level, bounds, the last need and θ, this session's counts, model choice and limits. |
+| `/auto-effort` or `/auto-effort status` | Show level, bounds, the last need and θ, this session's counts and limits. |
 | `/auto-effort limits` | Inspect usage windows and forecasts. |
 | `/auto-effort on` | Enable automatic effort for this session, subject to settings and `--thinking`. |
-| `/auto-effort off` | Disable it for this session and restore your manual level and model. |
+| `/auto-effort off` | Disable it for this session and restore your manual level. |
 | `/auto-effort bounds free` / `ceiling` | Set the bounds for this session. |
-| `/auto-effort models off` / `auto` | Set model choice for this session. |
 
 Configuration merges in this order: `~/.config/agents/auto-effort.json`, `~/.pi/agent/auto-effort.json`, `<project>/.agents/auto-effort.json`, then `<project>/.pi/auto-effort.json`. `$XDG_CONFIG_HOME` relocates the shared user directory. Objects merge; other values replace earlier ones.
 
@@ -123,8 +85,8 @@ After each assessment auto effort emits a `quota:pressure` event on Pi's extensi
 
 ## Fallbacks and optional integrations
 
-Missing credentials, timeouts or unusable classifier answers provide no new difficulty judgment, and the level and model stay as they are. `/auto-effort status` helps distinguish those cases, and counts this session's decisions: Jev assessments with their average latency, how many raised, lowered or held the level, failures, and go-aheads settled without a call, for example `Session: 14 assessments (avg 212 ms): 3 raised, 2 lowered, 8 held, 1 failed; 6 settled without a call (go-ahead).` Decision records are custom session entries, excluded from model context; the counts are rebuilt from those on the current branch when a session resumes or `/tree` moves.
+Missing credentials, timeouts or unusable classifier answers provide no new difficulty judgment, and the level stays as it is. `/auto-effort status` helps distinguish those cases, and counts this session's decisions: Jev assessments with their average latency, how many raised, lowered or held the level, failures, and go-aheads settled without a call, for example `Session: 14 assessments (avg 212 ms): 3 raised, 2 lowered, 8 held, 1 failed; 6 settled without a call (go-ahead).` Decision records are custom session entries, excluded from model context; the counts are rebuilt from those on the current branch when a session resumes or `/tree` moves.
 
-No sibling is required. [Status footer](/plugins/pi-status-footer/) folds effort status into its model row; the status reads like `effort: medium (auto ↑ free)`, with `≤high` (your manual level) instead of `free` in ceiling bounds. [Cache guard](/plugins/pi-cache-guard/) tells model choice when the cache is cold and offers its models in the cold-cache dialog. Manual changes from another extension, such as plan mode, count like your own (a ceiling in ceiling bounds, and always the model ceiling). Unsupported model levels remain subject to Pi's own model capabilities.
+No sibling is required. [Status footer](/plugins/pi-status-footer/) folds effort status into its model row; the status reads like `effort: medium (auto ↑ free)`, with `≤high` (your manual level) instead of `free` in ceiling bounds. Manual changes from another extension, such as plan mode, count like your own (a ceiling in ceiling bounds). Unsupported model levels remain subject to Pi's own model capabilities.
 
 For configuration or interaction problems, use [Troubleshooting](/guides/troubleshooting/). Review the [source and tests](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-auto-effort) for the exact policy and capability checks.

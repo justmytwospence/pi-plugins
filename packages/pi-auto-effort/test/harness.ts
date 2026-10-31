@@ -57,11 +57,6 @@ export function answers(depth: number | number[], ack = 0.05, extra: Record<stri
   return { depth: depthAnswer(depth), ack: { type: "bool", probability: ack }, ...extra };
 }
 
-export function tierAnswer(probabilities: Record<string, number>) {
-  const [choice] = Object.entries(probabilities).sort((a, b) => b[1] - a[1])[0] ?? ["?"];
-  return { type: "choice", choice, probabilities, confidence: Math.max(...Object.values(probabilities)) };
-}
-
 export function harness(options: { tools?: any[]; exec?: (cmd: string, args: string[]) => any } = {}) {
   const handlers = new Map<string, Handler[]>();
   const events: Array<{ channel: string; data: any }> = [];

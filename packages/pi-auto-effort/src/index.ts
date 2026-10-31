@@ -6,9 +6,7 @@
 // only on models that keep their prompt cache across an effort change (midrun.ts); on Codex GPT-6
 // models that means configuration_update items (effort-updates.ts). Subscription windows (Anthropic
 // 5h/7d, Codex primary/secondary) give the pressure (limits.ts), which is also published to other
-// extensions as `quota:pressure`. It also picks a model tier per message (models.ts): down only
-// while switching is cheap, up whenever the work needs it, and it offers models in pi-cache-guard's
-// cold-cache dialog (`cache:model-offers`, `cache:model-choice`).
+// extensions as `quota:pressure`.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isRecord, loadConfig } from "./config.ts";
 import { DEFAULT_EFFORT_UPDATES, type EffortUpdatesConfig, emptyState, restoreState, rewritePayload } from "./effort-updates.ts";
@@ -26,30 +24,6 @@ import {
   readCodexHeaders,
 } from "./limits.ts";
 import { DEFAULT_MID_RUN, MID_RUN_QUESTIONS, type MidRunConfig, globMatch, midRunSupported, runState, shouldAssess } from "./midrun.ts";
-import {
-  DEFAULT_MODELS,
-  type ModelPlan,
-  type ModelRef,
-  type ModelsConfig,
-  type ModelsMode,
-  TIER_NOTES,
-  cacheTtlMs,
-  canStepUp,
-  isModelsMode,
-  lastCacheActivity,
-  modelKey,
-  modelPlan,
-  modelsConfig,
-  parseModel,
-  pickTier,
-  shortModelId,
-  switchWindow,
-  tierOf,
-  tierQuestion,
-  tierRank,
-  tierTarget,
-  upperIndex,
-} from "./models.ts";
 import {
   type Bounds,
   DEFAULT_POLICY,
@@ -78,7 +52,6 @@ export interface EffortConfig extends Record<string, unknown> {
   limits: LimitsPolicy;
   midRun: MidRunConfig;
   effortUpdates: EffortUpdatesConfig;
-  models: ModelsConfig;
   prefilter: PrefilterConfig;
 }
 
@@ -89,7 +62,6 @@ export const DEFAULT_CONFIG: EffortConfig = {
   limits: DEFAULT_LIMITS,
   midRun: DEFAULT_MID_RUN,
   effortUpdates: DEFAULT_EFFORT_UPDATES,
-  models: DEFAULT_MODELS,
   prefilter: DEFAULT_PREFILTER,
 };
 
@@ -127,8 +99,6 @@ export interface AutoEffortDeps {
   now?: () => number;
   /** Abort a Codex usage request after this long (default 5 s). */
   codexTimeoutMs?: number;
-  /** Environment for the cache TTL estimate (default process.env). */
-  env?: NodeJS.ProcessEnv;
 }
 
 /** Payload of the `quota:pressure` event other extensions can listen for. */
@@ -141,36 +111,6 @@ export interface QuotaPressureEvent {
   label?: string;
 }
 
-/** One model pi-cache-guard's cold-cache dialog can offer. */
-export interface ModelOffer {
-  /** `provider/id`. */
-  model: string;
-  /** The registry's name, like "Claude Sonnet 5.5". */
-  label: string;
-  /** Jev's pick for the prompt (never the current model). */
-  recommended?: boolean;
-  /** A short reason, like "Jev: routine work". */
-  note?: string;
-}
-
-/**
- * Payload of `cache:model-offers`, emitted by pi-cache-guard before its cold-cache dialog. A
- * listener pushes a promise of offers onto `offers`; the dialog awaits them (with its own timeout).
- */
-export interface ModelOffersEvent {
-  /** The held prompt. */
-  text: string;
-  /** The context the prompt would re-cache. */
-  tokens: number;
-  offers: Array<Promise<ModelOffer[] | undefined>>;
-}
-
-/** Payload of `cache:model-choice`, emitted after the dialog: the chosen offer, or null for the current model. */
-export interface ModelChoiceEvent {
-  text: string;
-  model: string | null;
-}
-
 const NO_PRESSURE: Pressure = { tier: "none" };
 
 /** Settled by the pre-filter instead of a Jev answer: the level stays, with reason `go-ahead`. */
@@ -180,9 +120,6 @@ const STATE_ENTRY = "auto-effort:state";
 const UPDATES_ENTRY = "auto-effort:effort-updates";
 const STATUS_KEY = "auto-effort";
 export const PRESSURE_EVENT = "quota:pressure";
-export const CACHE_STATE_EVENT = "cache:state";
-export const MODEL_OFFERS_EVENT = "cache:model-offers";
-export const MODEL_CHOICE_EVENT = "cache:model-choice";
 
 const DEPTH_CRITERIA = {
   low: "A lookup, a trivial answer, or a mechanical change",
@@ -220,8 +157,6 @@ interface Entry {
   customType?: string;
   data?: unknown;
   thinkingLevel?: string;
-  provider?: string;
-  modelId?: string;
   message?: { role?: string; content?: unknown; toolName?: string; isError?: boolean; timestamp?: unknown; [key: string]: unknown };
 }
 
@@ -276,11 +211,6 @@ export function effortState(prompt: string, entries: readonly unknown[], options
 }
 
 /** True when the process was started with an explicit `--thinking` level (for example a subagent). */
-/** True when Pi was started with an explicit `--model`: model choice stays off. */
-export function modelPinnedByArgv(argv: readonly string[] = process.argv): boolean {
-  return argv.some((a) => a === "--model" || a.startsWith("--model="));
-}
-
 export function thinkingPinned(argv: readonly string[] = process.argv): boolean {
   return argv.some((a) => a === "--thinking" || a.startsWith("--thinking="));
 }
@@ -300,40 +230,8 @@ export function pressureTag(p: Pressure): string {
   return `${p.label ?? p.window ?? "?"} ${p.tier}`;
 }
 
-interface ModelCheck {
-  plan: ModelPlan;
-  /** Why switching is cheap now ("cache is cold"); undefined when only a step up is worth it. */
-  cheap: string | undefined;
-}
-
-interface ModelChoice {
-  tier?: string;
-  need?: Record<string, number>;
-  to: string;
-  why: string;
-  /** `chosen`: your pick in pi-cache-guard's cold-cache dialog. */
-  action: "keep" | "switched" | "missing" | "failed" | "chosen";
-}
-
-/** A Jev assessment made for pi-cache-guard's dialog, reused by the prompt it was made for. */
-interface Prefetch {
-  text: string;
-  /** The tiers its `tier` question covered. */
-  tiers: string;
-  outcome: Promise<JevOutcome>;
-}
-
-const tiersKey = (plan: ModelPlan) => plan.tiers.map(modelKey).join(",");
-
-interface RegistryModel {
-  provider: string;
-  id: string;
-  name?: string;
-}
-
 export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) {
   const now = deps.now ?? Date.now;
-  const env = deps.env ?? process.env;
   let config: EffortConfig = DEFAULT_CONFIG;
   // Your latest manual level: the ceiling in `ceiling` bounds, restored by /auto-effort off.
   let manualLevel = "high";
@@ -359,9 +257,8 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     record: (readings) => readings.forEach((r) => tracker("openai-codex").record(r)),
   });
   let sessionOn = true;
-  // `/auto-effort bounds ...` and `/auto-effort models ...` for this session; undefined follows the settings.
+  // `/auto-effort bounds ...` for this session; undefined follows the settings.
   let sessionBounds: Bounds | undefined;
-  let sessionModels: ModelsMode | undefined;
   let applying = false;
   // Our own setThinkingLevel calls also emit thinking_level_select, during or just after the call.
   let ownLevel: string | undefined;
@@ -374,27 +271,13 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
   // Request-level effort and configuration_update positions for this conversation.
   let updates = emptyState();
   const pinned = thinkingPinned();
-  // `pi --model` (a Herdr child, a script): the caller chose the model, so model choice stays off.
-  const modelPinned = modelPinnedByArgv();
   // Bumped when a prompt, session, branch, model, manual level or gate replaces the state a
   // Jev answer would apply to. Shutdown invalidates callbacks from the old runtime too.
   let generation = 0;
-  // The model you picked by hand, and the model auto picked instead (while it is in use).
-  let manualModel: ModelRef | undefined;
-  let autoModel: string | undefined;
-  let switchingModel = false;
-  // pi-cache-guard's latest `cache:state`, when it is loaded; else the time of the last answer.
-  let cacheState: { cold: boolean; tokens?: number; model?: string } | undefined;
-  let lastResponseAt: number | undefined;
-  // From pi-cache-guard's cold-cache dialog, for the prompt with the same text.
-  let prefetch: Prefetch | undefined;
-  let pendingChoice: ModelChoiceEvent | undefined;
 
   const active = () => sessionOn && config.enabled && !pinned;
   const policy = () => policyConfig(config.policy);
   const boundsMode = (): Bounds => sessionBounds ?? policy().bounds;
-  const models = () => modelsConfig(config.models);
-  const modelsMode = (): ModelsMode => sessionModels ?? models().mode;
 
   /** True when the model keeps its prompt cache across an effort change (mid-run or configuration_update). */
   const cacheSafe = (ctx: ExtensionContext) => midRunSupported(ctx.model, [...midRunConfig(config.midRun).models, ...updateModels(config)]);
@@ -420,10 +303,9 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     const direction = trend(current, manualLevel, lastNeed, lastTheta, policy(), bounds);
     const arrow = direction === "up" ? "↑" : direction === "down" ? "↓" : "→";
     const bound = bounds === "free" ? "free" : `≤${manualLevel}`;
-    const marker = autoModel ? ` ≈${shortModelId(autoModel)}` : "";
     const limited = limitsOn() && pressure.tier !== "none" ? `, limited: ${pressureLabel(pressure)}` : "";
     // pi-status-footer parses this: no parentheses inside the detail.
-    const detail = `${arrow} ${bound}${marker}${limited}`.replace(/[()]/gu, "");
+    const detail = `${arrow} ${bound}${limited}`.replace(/[()]/gu, "");
     ctx.ui.setStatus(STATUS_KEY, active() ? `effort: ${current} (auto ${detail})` : undefined);
   };
 
@@ -447,172 +329,6 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     return describeWindows(views, now()).map((line) => `limits: ${line}`);
   };
 
-  const currentRef = (ctx: ExtensionContext): ModelRef | undefined => (ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined);
-
-  /**
-   * True when the prompt cache has likely expired: pi-cache-guard's word, else the time since the
-   * last cache activity (an answer, or one of Pi's cache-warming refreshes after it).
-   */
-  const cold = (ctx: ExtensionContext) => {
-    // A cache that belongs to another model is no use to this one.
-    if (cacheState) return cacheState.cold || (cacheState.model !== undefined && ctx.model !== undefined && cacheState.model !== modelKey(ctx.model));
-    const onBranch = lastCacheActivity(ctx.sessionManager.getBranch());
-    const last = lastResponseAt === undefined ? onBranch : onBranch === undefined ? lastResponseAt : Math.max(lastResponseAt, onBranch);
-    if (last === undefined) return false;
-    return now() - last > cacheTtlMs(ctx.model as { promptCache?: { short?: number; long?: number } } | undefined, env);
-  };
-
-  /** The models Pi has credentials for. */
-  const available = (ctx: ExtensionContext): ModelRef[] => {
-    const registry = ctx.modelRegistry as { getAvailable?: () => Array<{ provider?: unknown; id?: unknown }> } | undefined;
-    try {
-      const list = registry?.getAvailable?.() ?? [];
-      return list.filter((m): m is ModelRef => typeof m?.provider === "string" && typeof m.id === "string").map((m) => ({ provider: m.provider, id: m.id }));
-    } catch {
-      return [];
-    }
-  };
-
-  /** The tiers for the current provider (configured, else its preset), or undefined when there is nothing to choose. */
-  const planFor = (ctx: ExtensionContext): ModelPlan | undefined => {
-    const current = currentRef(ctx);
-    if (!current) return undefined;
-    const settings = models();
-    return modelPlan(settings, current, manualModel ?? current, settings.tiers[current.provider] ? [] : available(ctx));
-  };
-
-  /** theta now, without advancing the limits' confirmations. */
-  const thetaNow = (ctx: ExtensionContext) => {
-    const provider = ctx.model?.provider;
-    const tier = limitsOn() && provider ? (trackers.get(provider)?.assess(now(), limits(), false).tier ?? "none") : "none";
-    return threshold(policy(), pressureValue(tier));
-  };
-
-  /**
-   * Model candidates for this message, when model choice is on: always while switching is cheap,
-   * else only when the bounds leave a stronger tier (a step down is not worth a cache rewrite).
-   */
-  const modelCheck = (ctx: ExtensionContext): ModelCheck | undefined => {
-    const current = currentRef(ctx);
-    if (modelsMode() === "off" || modelPinned || !current) return undefined;
-    const plan = planFor(ctx);
-    if (!plan) return undefined;
-    const branch = ctx.sessionManager.getBranch() as Entry[];
-    const first = !branch.some((e) => e.type === "message" && e.message?.role === "assistant");
-    const tokens = cacheState?.tokens ?? ctx.getContextUsage?.()?.tokens;
-    const cheap = switchWindow({ first, cold: cold(ctx), tokens, maxSwitchTokens: models().maxSwitchTokens });
-    // Automatic switches never go above the model you (or another extension) chose: `ceiling`.
-    return cheap || canStepUp(plan, current, "ceiling") ? { plan, cheap } : undefined;
-  };
-
-  const switchModel = async (ctx: ExtensionContext, model: RegistryModel): Promise<boolean> => {
-    switchingModel = true;
-    applying = true;
-    try {
-      return await pi.setModel(model as never);
-    } catch {
-      return false;
-    } finally {
-      switchingModel = false;
-      applying = false;
-      ownLevel = undefined;
-    }
-  };
-
-  const findModel = (ctx: ExtensionContext, ref: ModelRef): RegistryModel | undefined => {
-    const registry = ctx.modelRegistry as { find?: (provider: string, id: string) => RegistryModel | undefined } | undefined;
-    try {
-      return registry?.find?.(ref.provider, ref.id);
-    } catch {
-      return undefined;
-    }
-  };
-
-  /** Switches to `target` as an auto pick (your own model is a return home). */
-  const switchTo = async (ctx: ExtensionContext, target: ModelRef, record: Omit<ModelChoice, "action">, notice: string | undefined): Promise<ModelChoice> => {
-    const to = modelKey(target);
-    const found = findModel(ctx, target);
-    const name = found?.name ?? shortModelId(target.id);
-    if (!found) {
-      if (ctx.hasUI) ctx.ui.notify(`auto-effort: no model ${to} in the registry`, "warning");
-      return { ...record, action: "missing" };
-    }
-    if (!(await switchModel(ctx, found))) {
-      if (ctx.hasUI) ctx.ui.notify(`auto-effort: could not switch to ${name} (no credentials for ${target.provider})`, "warning");
-      return { ...record, action: "failed" };
-    }
-    const back = manualModel !== undefined && to === modelKey(manualModel);
-    autoModel = back ? undefined : to;
-    if (notice !== undefined && ctx.hasUI) ctx.ui.notify(back ? `auto-effort: back to ${name}; ${notice}` : `auto-effort: ${name} for this request; ${notice}`, "info");
-    return { ...record, action: "switched" };
-  };
-
-  /**
-   * Picks a tier by the threshold rule and switches to its model: a step down only while switching
-   * is cheap, a step up on any message (one cache rewrite).
-   */
-  const chooseModel = async (
-    ctx: ExtensionContext,
-    check: ModelCheck,
-    probabilities: Record<string, number> | undefined,
-    j: Judgment | undefined,
-    theta: number,
-    bounds: Bounds,
-  ): Promise<ModelChoice | undefined> => {
-    const current = currentRef(ctx);
-    if (!j || !probabilities || !current || j.ack > policy().ackThreshold) return undefined;
-    const { plan, cheap } = check;
-    const pick = pickTier(plan, probabilities, theta, bounds, current.provider);
-    const to = modelKey(pick.target);
-    const up = tierRank(pick.tier) > tierRank(tierOf(plan, current));
-    const record = { tier: pick.tier, need: pick.need, to, why: cheap ?? (up ? "harder request" : "cache is warm") };
-    if (to === modelKey(current) || (!cheap && !up)) return { ...record, action: "keep" };
-    return switchTo(ctx, pick.target, record, cheap ?? "harder request, one cache rewrite");
-  };
-
-  /** Applies your pick in pi-cache-guard's dialog: a model to switch to, or null to stay. */
-  const applyChoice = async (ctx: ExtensionContext, model: string | null): Promise<ModelChoice | undefined> => {
-    const current = currentRef(ctx);
-    if (!current) return undefined;
-    const record = { to: model ?? modelKey(current), why: "your choice" };
-    if (model === null) return { ...record, action: "keep" };
-    const target = parseModel(model, current.provider);
-    if (modelKey(target) === modelKey(current)) return { ...record, to: modelKey(target), action: "keep" };
-    const result = await switchTo(ctx, target, { ...record, to: modelKey(target) }, undefined);
-    return result.action === "switched" ? { ...result, action: "chosen" } : result;
-  };
-
-  /** The offers for pi-cache-guard's cold-cache dialog: every other tier's model within the bounds, Jev's pick recommended. */
-  const modelOffers = async (ctx: ExtensionContext, text: string, plan: ModelPlan): Promise<ModelOffer[] | undefined> => {
-    const current = currentRef(ctx);
-    if (!current) return undefined;
-    const outcome = askJev(ctx.modelRegistry, config.jev, effortState(text, ctx.sessionManager.getBranch()), { ...QUESTIONS, tier: tierQuestion(plan.tiers) });
-    prefetch = { text: text.trim(), tiers: tiersKey(plan), outcome };
-    const result = await outcome;
-    // You choose in the dialog, so every tier is offered, above your model too.
-    const bounds: Bounds = "free";
-    const j = judgment(result, true);
-    const probabilities = result.ok ? choice(result.answers, "tier")?.probabilities : undefined;
-    // The cache is cold anyway: Jev's pick may go either way.
-    const pick = j && probabilities && j.ack <= policy().ackThreshold ? pickTier(plan, probabilities, thetaNow(ctx), bounds, current.provider) : undefined;
-    const recommended = pick && modelKey(pick.target) !== modelKey(current) ? modelKey(pick.target) : undefined;
-    const seen = new Set([modelKey(current)]);
-    const offers: ModelOffer[] = [];
-    for (const tier of plan.tiers.slice(0, upperIndex(plan, bounds) + 1)) {
-      const target = tierTarget(plan, tier, current.provider);
-      const key = modelKey(target);
-      const found = seen.has(key) ? undefined : findModel(ctx, target);
-      seen.add(key);
-      if (!found) continue;
-      offers.push({
-        model: key,
-        label: found.name ?? shortModelId(target.id),
-        ...(key === recommended && pick ? { recommended: true, note: TIER_NOTES[pick.tier] } : {}),
-      });
-    }
-    return offers.length ? offers : undefined;
-  };
-
   /**
    * Rebuild the state from the current branch: its last `auto-effort:state` entry and the
    * effort-update positions. Called at session start and after /tree moves the leaf, since the
@@ -633,60 +349,16 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     counts = countsFromBranch(branch, STATE_ENTRY);
     lastNeed = isRecord(data?.need) ? numbers(data.need) : undefined;
     lastTheta = typeof data?.theta === "number" ? data.theta : undefined;
-    const current = currentRef(ctx);
-    manualModel = typeof data?.manualModel === "string" && current ? parseModel(data.manualModel, current.provider) : current;
-    autoModel = typeof data?.autoModel === "string" && current && modelKey(current) === data.autoModel ? data.autoModel : undefined;
     pressure = NO_PRESSURE;
-    // Own changes precede their state entry. Later thinking and model entries are manual choices
+    // Own changes precede their state entry. Later thinking entries are manual choices
     // that must survive a reload or /tree move even if no new assessment was saved yet.
     for (const entry of branch.slice(savedIndex + 1)) {
       if (entry.type === "thinking_level_change" && typeof entry.thinkingLevel === "string") manual(entry.thinkingLevel);
-      if (entry.type === "model_change" && typeof entry.provider === "string" && typeof entry.modelId === "string") {
-        manualModel = { provider: entry.provider, id: entry.modelId };
-        autoModel = undefined;
-      }
     }
-    const lastAnswer = branch.findLast((e) => e.type === "message" && e.message?.role === "assistant");
-    lastResponseAt = typeof lastAnswer?.message?.timestamp === "number" ? lastAnswer.message.timestamp : undefined;
-    prefetch = undefined;
-    pendingChoice = undefined;
     const savedUpdates = [...branch].reverse().find((e) => e.type === "custom" && e.customType === UPDATES_ENTRY);
     updates = restoreState(savedUpdates?.data);
     status(ctx);
   };
-
-  pi.events?.on?.(CACHE_STATE_EVENT, (data: unknown) => {
-    if (!isRecord(data) || typeof data.cold !== "boolean") return;
-    cacheState = {
-      cold: data.cold,
-      ...(typeof data.tokens === "number" && Number.isFinite(data.tokens) ? { tokens: data.tokens } : {}),
-      ...(typeof data.model === "string" ? { model: data.model } : {}),
-    };
-  });
-
-  // pi-cache-guard is about to ask about a cold cache: offer the tiers' models, Jev's pick recommended.
-  // The promise is pushed synchronously; the dialog awaits it with its own timeout.
-  pi.events?.on?.(MODEL_OFFERS_EVENT, (data: unknown) => {
-    if (!isRecord(data) || typeof data.text !== "string" || !data.text.trim() || !Array.isArray(data.offers)) return;
-    const ctx = latestCtx;
-    if (!ctx || !active() || modelsMode() !== "auto" || modelPinned) return;
-    // A go-ahead is settled without Jev (and keeps the model), so there is nothing to offer.
-    const filter = prefilterConfig(config.prefilter);
-    if (filter.enabled && isGoAhead(data.text, filter)) return;
-    try {
-      const plan = planFor(ctx);
-      if (plan) data.offers.push(modelOffers(ctx, data.text, plan).catch(() => undefined));
-    } catch {
-      // A context from a replaced runtime: nothing to offer.
-    }
-  });
-
-  // The dialog's answer: applied by the prompt with the same text.
-  pi.events?.on?.(MODEL_CHOICE_EVENT, (data: unknown) => {
-    if (!isRecord(data) || typeof data.text !== "string") return;
-    if (data.model !== null && (typeof data.model !== "string" || !data.model.trim())) return;
-    pendingChoice = { text: data.text.trim(), model: data.model === null ? null : data.model.trim() };
-  });
 
   pi.on("session_start", (_event, ctx) => {
     config = loadConfig("auto-effort", DEFAULT_CONFIG, ctx.cwd);
@@ -712,28 +384,16 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     return event.payload;
   });
 
-  pi.on("model_select", (event, ctx) => {
+  pi.on("model_select", (_event, ctx) => {
     pollCodex(ctx);
-    if (switchingModel) return;
     generation++;
     turnsSince = 0;
-    const model = (event as { model?: { provider?: unknown; id?: unknown } } | undefined)?.model;
-    if (model && typeof model.provider === "string" && typeof model.id === "string") manualModel = { provider: model.provider, id: model.id };
-    if (autoModel !== undefined) {
-      autoModel = undefined;
-      status(ctx);
-    }
-  });
-  pi.on("message_end", (event) => {
-    if ((event as { message?: { role?: string } }).message?.role === "assistant") lastResponseAt = now();
   });
   pi.on("agent_settled", (_event, ctx) => pollCodex(ctx));
   pi.on("session_shutdown", () => {
     generation++;
     latestCtx = undefined;
     ownLevel = undefined;
-    prefetch = undefined;
-    pendingChoice = undefined;
   });
 
   pi.on("after_provider_response", (event, ctx) => {
@@ -764,15 +424,14 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
   };
 
   /**
-   * Applies a judgment: the pressure gives theta, the policy picks a level (and, before a message,
-   * maybe a model), and the decision is recorded. `GO_AHEAD` (no Jev call) keeps the level and the model.
+   * Applies a judgment: the pressure gives theta, the policy picks a level, and the decision is
+   * recorded. `GO_AHEAD` (no Jev call) keeps the level.
    */
   const settle = async (
     ctx: ExtensionContext,
     outcome: JevOutcome | typeof GO_AHEAD,
     j: Judgment | undefined,
     extra: Record<string, unknown>,
-    model?: { check: ModelCheck; probabilities: Record<string, number> | undefined } | { chosen: ModelChoice },
   ) => {
     const current = pi.getThinkingLevel();
     const provider = ctx.model?.provider;
@@ -794,9 +453,6 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     lastTheta = decision.theta;
     lastReason = outcome === GO_AHEAD || outcome.ok ? decision.reason : `assessment unavailable: ${outcome.reason}`;
 
-    // The effort bounds do not apply to models: an automatic pick stays at or below your model.
-    const modelChoice = !model ? undefined : "chosen" in model ? model.chosen : await chooseModel(ctx, model.check, model.probabilities, j, decision.theta, "ceiling");
-    // A model switch can change the level (Pi's per-model default); the decision wins.
     if (decision.level !== pi.getThinkingLevel()) setLevel(decision.level);
     lastLevel = pi.getThinkingLevel();
     const data = {
@@ -812,9 +468,6 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
         ? { limit: { tier: pressure.tier, window: pressure.window, used: pressure.used, projected: pressure.projected, exhaustsAt: pressure.exhaustsAt } }
         : {}),
       ...(j ? { need: j.need, ack: j.ack } : {}),
-      ...(manualModel ? { manualModel: modelKey(manualModel) } : {}),
-      ...(autoModel ? { autoModel } : {}),
-      ...(modelChoice ? { model: modelChoice } : {}),
       ...(outcome !== GO_AHEAD && outcome.ok ? { latencyMs: outcome.latencyMs, inputTokens: outcome.usage?.input } : {}),
     };
     tally(counts, data);
@@ -829,37 +482,21 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     // ctx.signal can be a getter for the runtime's current operation. Keep this operation's
     // signal across the await rather than checking a later run's signal when the answer arrives.
     const signal = ctx.signal;
-    // What pi-cache-guard's dialog left for this prompt; anything for another text is dropped.
     const text = "prompt" in event && typeof event.prompt === "string" ? event.prompt.trim() : "";
-    const pre = prefetch && prefetch.text === text ? prefetch : undefined;
-    const chosen = pendingChoice && pendingChoice.text === text ? pendingChoice : undefined;
-    prefetch = undefined;
-    pendingChoice = undefined;
     if (!("prompt" in event) || !active() || !text || signal?.aborted) return;
     latestCtx = ctx;
     // Codex usage refreshes alongside the Jev call; the prompt never waits for it.
     pollCodex(ctx);
-    // Your pick in the dialog replaces auto's model choice for this prompt; the level is still set.
-    const picked = chosen ? await applyChoice(ctx, chosen.model) : undefined;
-    if (picked) status(ctx);
-    if (mine !== generation || signal?.aborted || !active()) return;
-    // "yes", "go ahead", "thanks": nothing to assess; the level and the model stay.
+    // "yes", "go ahead", "thanks": nothing to assess; the level stays.
     const filter = prefilterConfig(config.prefilter);
     if (filter.enabled && isGoAhead(text, filter)) {
-      await settle(ctx, GO_AHEAD, undefined, { phase: "prompt" }, picked ? { chosen: picked } : undefined);
+      await settle(ctx, GO_AHEAD, undefined, { phase: "prompt" });
       return;
     }
-    const check = chosen ? undefined : modelCheck(ctx);
-    const questions = check ? { ...QUESTIONS, tier: tierQuestion(check.plan.tiers) } : QUESTIONS;
-    // The dialog's assessment of this prompt is reused when it covered the same tiers.
-    const outcome =
-      pre && (!check || pre.tiers === tiersKey(check.plan))
-        ? await pre.outcome
-        : await askJev(ctx.modelRegistry, config.jev, effortState(event.prompt, ctx.sessionManager.getBranch()), questions, signal);
+    const outcome = await askJev(ctx.modelRegistry, config.jev, effortState(event.prompt, ctx.sessionManager.getBranch()), QUESTIONS, signal);
     if (mine !== generation || signal?.aborted || !active()) return;
     const j = judgment(outcome, true);
-    const probabilities = check && outcome.ok ? choice(outcome.answers, "tier")?.probabilities : undefined;
-    await settle(ctx, outcome, j, { phase: "prompt" }, picked ? { chosen: picked } : check ? { check, probabilities } : undefined);
+    await settle(ctx, outcome, j, { phase: "prompt" });
   });
 
   // Between tool turns, on models that take an effort change mid-conversation without losing the
@@ -883,10 +520,10 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
     await settle(ctx, outcome, judgment(outcome, false), { phase: "run", turn: event.turnIndex });
   });
 
-  const OPTIONS = ["status", "limits", "on", "off", "bounds ceiling", "bounds free", "models off", "models auto"];
+  const OPTIONS = ["status", "limits", "on", "off", "bounds ceiling", "bounds free"];
 
   pi.registerCommand("auto-effort", {
-    description: "auto-effort: status, limits, on, off, bounds ceiling|free, models off|auto (this session)",
+    description: "auto-effort: status, limits, on, off, bounds ceiling|free (this session)",
     getArgumentCompletions: (prefix: string) => OPTIONS.filter((o) => o.startsWith(prefix)).map((o) => ({ value: o, label: o })),
     handler: async (args, ctx) => {
       const [arg = "", value] = args.trim().split(/\s+/u);
@@ -896,10 +533,6 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
         generation++;
         if (!sessionOn) {
           if (pi.getThinkingLevel() !== manualLevel) setLevel(manualLevel);
-          if (autoModel && manualModel) {
-            const found = findModel(ctx, manualModel);
-            if (found && (await switchModel(ctx, found))) autoModel = undefined;
-          }
           if (pressure.tier !== "none") {
             pressure = NO_PRESSURE;
             emitPressure(ctx.model?.provider);
@@ -918,17 +551,6 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
         } else ctx.ui.notify(`auto-effort bounds: ${boundsMode()}. Use /auto-effort bounds ceiling or free.`, "info");
         return;
       }
-      if (arg === "models") {
-        if (isModelsMode(value)) {
-          sessionModels = value;
-          generation++;
-          status(ctx);
-          const provider = ctx.model?.provider;
-          const none = value !== "off" && provider && !planFor(ctx) ? `; no tiers for ${provider} (models.tiers, or a preset for anthropic and openai-codex)` : "";
-          ctx.ui.notify(`auto-effort models ${value} for this session${none}`, "info");
-        } else ctx.ui.notify(`auto-effort models: ${modelsMode()}. Use /auto-effort models off or auto.`, "info");
-        return;
-      }
       if (arg === "limits") {
         ctx.ui.notify(limitLines(ctx).join("\n"), "info");
         return;
@@ -940,7 +562,6 @@ export default function autoEffort(pi: ExtensionAPI, deps: AutoEffortDeps = {}) 
           `Bounds ${bounds} (${sessionBounds ? "this session" : "settings"}): ${boundsText(bounds, manualLevel, policy())}.`,
           jevLine(lastNeed, lastTheta ?? threshold(policy(), pressureValue(pressure.tier)), pressure, lastLevel, lastReason),
           describeCounts(counts),
-          modelsLine(modelsMode(), sessionModels !== undefined, planFor(ctx), manualModel, autoModel),
           ...limitLines(ctx),
         ].join("\n"),
         "info",
@@ -971,13 +592,4 @@ function jevLine(need: Record<string, number> | undefined, theta: number, pressu
     .map((l) => `need(${l})=${(need[l] ?? 0).toFixed(2)}`)
     .join(" ");
   return `Assessment: ${needs}, θ=${theta.toFixed(2)}${tag}${level ? ` → ${level}` : ""}${last}.`;
-}
-
-/** `Models: auto (settings): balanced claude-sonnet-5-5, strong claude-opus-5-5 (preset); your model anthropic/claude-opus-5-5.` */
-function modelsLine(mode: ModelsMode, session: boolean, plan: ModelPlan | undefined, manual: ModelRef | undefined, auto: string | undefined) {
-  const source = session ? "this session" : "settings";
-  if (mode === "off") return `Models: off (${source}).`;
-  const tiers = plan ? `${plan.tiers.map((t) => `${t.tier} ${t.id}`).join(", ")}${plan.preset ? " (preset)" : ""}` : "no tiers for this provider";
-  const yours = manual ? `; your model ${modelKey(manual)}` : "";
-  return `Models: ${mode} (${source}): ${tiers}${yours}${auto ? `, now ${auto}` : ""}.`;
 }
