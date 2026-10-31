@@ -36,7 +36,15 @@ export { EDIT, HERE, handoffLabel, KEEP, OPTION_MAX, SAVE } from "./approval-pic
 import { holdBlocked } from "./herdr-blocked.js";
 import { type ModelSpec, type ModelSpecThinkingLevel, sameModel } from "./implementation-models.js";
 import { PlanMarkdown } from "./mermaid-art.js";
-import { newPlanFile, planSlug, plansDirectoryPath, planTextTitle, readPlan, savePlanSnapshot } from "./plan-file.js";
+import {
+  newPlanFile,
+  planSlug,
+  plansDirectoryPath,
+  planTextTitle,
+  readPlan,
+  savePlanSnapshot,
+  writePlanFile,
+} from "./plan-file.js";
 import { expandHome } from "./plan-hook.js";
 import { promptPlanName } from "./plan-name-input.js";
 import { PlanReviewViewport } from "./plan-review-viewport.js";
@@ -62,6 +70,8 @@ export const EXIT_TOOL = "exit_plan_mode";
 interface InlineState {
   active: boolean;
   planFile?: string;
+  /** Only drafts allocated here are promoted on approval; legacy and explicit paths stay put. */
+  temporaryDraft?: boolean;
   /** Whether your agent was last told plan mode is on. */
   told: boolean;
 }
@@ -135,7 +145,7 @@ It is the only file you may write. Build the plan there as you go, with write an
 ## How to plan
 1. Explore: read the relevant code with read-only tools (and read-only subagents for broad searches, if you have them). Reuse what exists; find the functions and utilities a change should build on.
 2. Ask: when requirements, scope or a trade-off is unclear, ask the user (with your question tool, if you have one) rather than guessing. Do not ask what the code can tell you.
-3. Write the plan in the plan file to the standard under "The plan" below.
+3. Write the plan in the plan file to the standard under "The plan" below. Start with a concise first Markdown heading describing the actual task, not a generic "Plan" heading.
 4. On revised submissions, supply ${EXIT_TOOL}'s optional changes: 1–5 concise decision/scope changes since the declined plan, not copied paragraphs. Call ${EXIT_TOOL} when the plan is complete; it shows the plan so the user can approve it, save it for later, edit it, or keep planning. Do not ask "is this plan okay?" or "should I proceed?" any other way; that is what ${EXIT_TOOL} does.
 
 ## The plan
@@ -252,6 +262,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
   const allocatePlanFile = () => {
     if (state.planFile) return;
     state.planFile = newPlanFile(plansDir());
+    state.temporaryDraft = true;
     safely(() => mkdirSync(dirname(state.planFile as string), { recursive: true }));
     if (state.active) persist();
     announce();
@@ -294,6 +305,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     }
     if (planFile && planFile !== state.planFile) {
       state.planFile = planFile;
+      state.temporaryDraft = false;
       persist();
       announce();
     }
@@ -332,6 +344,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
     state = {
       active: latest?.active === true,
       told: latest?.told === true,
+      temporaryDraft: latest?.temporaryDraft === true,
       ...(typeof latest?.planFile === "string" ? { planFile: latest.planFile } : {}),
     };
     declined = lastDeclined(entries);
@@ -477,7 +490,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       if (!state.active || !state.planFile) {
         return text("You are not in plan mode. This tool only asks the user to approve a plan in plan mode.");
       }
-      const planFile = state.planFile;
+      let planFile = state.planFile;
       let plan = readPlan(planFile);
       if (!plan) {
         return text(
@@ -566,6 +579,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             }
             declined = undefined;
             state.planFile = undefined;
+            state.temporaryDraft = false;
             announce();
             exitLocal(ctx, false);
             if (gate) requestMode("work");
@@ -599,6 +613,20 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
               details,
               terminate: true,
             } as never;
+          }
+          if (state.temporaryDraft) {
+            try {
+              planFile = writePlanFile(plansDir(), plan);
+            } catch (error: unknown) {
+              ctx.ui.notify(`Could not save the approved plan: ${String(error)}`, "error");
+              return text(
+                "Could not save the approved plan. Stay in plan mode and approve it again after fixing the error.",
+              );
+            }
+            state.planFile = planFile;
+            state.temporaryDraft = false;
+            persist();
+            announce();
           }
           const approval: Approval = { plan, planFile, edited, thinkingLevel: picked?.thinkingLevel };
           host.approved(plan, ctx);

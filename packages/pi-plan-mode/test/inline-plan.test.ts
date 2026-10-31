@@ -779,7 +779,7 @@ test("/plan enters plan mode: only the plan file may be written, and only read-o
   await mock.commands.get("plan")?.handler("", context.ctx);
   const planFile = inline().planFile as string;
   assert.equal(inline().active, true);
-  assert.match(planFile, /\/[a-z]+-[a-z]+\.md$/u);
+  assert.match(planFile, /\/draft-\d+-[a-f0-9-]+\.md$/u);
   assert.equal(context.statuses.get("workflow-mode"), "workflow: plan");
   assert.equal(context.statuses.get("permission-mode"), undefined);
   assert.deepEqual(
@@ -894,8 +894,15 @@ for (const compact of [false, true]) {
     });
     await h.mock.commands.get("plan")?.handler("", h.context.ctx);
     const plan = "# Exact approved plan\n\n1. Preserve `literal` details.\n2. Verify once.";
-    writeFileSync(h.inline().planFile, `${plan}\n`);
+    const draft = h.inline().planFile;
+    writeFileSync(draft, `${plan}\n`);
     const result = await h.tool(EXIT_TOOL).execute("direct", {}, undefined, undefined, h.context.ctx);
+    const finalFile = join(h.plansDirectory, "exact-approved-plan.md");
+    assert.equal(result.details.planFile, finalFile);
+    assert.equal(h.inline().planFile, finalFile);
+    assert.equal(h.inline().temporaryDraft, false);
+    assert.equal(readFileSync(finalFile, "utf8"), `${plan}\n`);
+    assert.equal(readFileSync(draft, "utf8"), `${plan}\n`);
     assert.equal(result.details.outcome, "approved");
     assert.equal(result.terminate === true, compact);
     assert.equal(h.inline().active, false);
@@ -1601,6 +1608,117 @@ test("Edit the plan opens your external editor in pi's terminal, and saves what 
   assert.match(readFileSync(join(dir, "opened"), "utf8"), /plan\.md\n$/u, "a Markdown file");
   assert.equal(readFileSync(inline().planFile, "utf8"), "# Better plan\n\nDo it well.\n", "the plan file is updated");
 });
+
+for (const kind of ["direct", "compact", "handoff"] as const) {
+  test(`edited reviewed title is promoted for ${kind} with provider and continuation paths`, async () => {
+    const choice =
+      kind === "handoff"
+        ? "Yes, hand off to Claude Sonnet 5.5 (high)"
+        : kind === "compact"
+          ? "Yes, compact plan and implement here"
+          : "Yes, implement here";
+    const h = await setup({ gate: true, models: true, select: ["Edit the plan", choice, "high"] });
+    const ctx = h.context.ctx as ExtensionContext;
+    await h.mock.commands.get("plan")?.handler("", ctx);
+    const draft = h.inline().planFile;
+    writeFileSync(draft, "# Initial title\n");
+    writeFileSync(join(h.plansDirectory, "reviewed-retry-support.md"), "existing\n");
+    const previousEditor = process.env.EDITOR;
+    const previousVisual = process.env.VISUAL;
+    delete process.env.EDITOR;
+    delete process.env.VISUAL;
+    ctx.ui.editor = async () => "# Reviewed retry support\n\nExact reviewed content.";
+    let result: Awaited<ReturnType<Tool["execute"]>>;
+    try {
+      result = await h.tool(EXIT_TOOL).execute("edited", {}, undefined, undefined, ctx);
+    } finally {
+      if (previousEditor !== undefined) process.env.EDITOR = previousEditor;
+      if (previousVisual !== undefined) process.env.VISUAL = previousVisual;
+    }
+    const finalFile = join(h.plansDirectory, "reviewed-retry-support-2.md");
+    assert.equal(result.details.planFile, finalFile);
+    assert.equal(result.details.edited, true);
+    assert.equal(h.inline().planFile, finalFile);
+    assert.equal(h.inline().temporaryDraft, false);
+    assert.equal(h.gateEvents.filter((e) => e.channel === PLAN_PROVIDER).at(-1)?.data.planFile, finalFile);
+    assert.equal(readFileSync(finalFile, "utf8"), "# Reviewed retry support\n\nExact reviewed content.\n");
+    assert.ok(existsSync(draft));
+    assert.equal(readFileSync(join(h.plansDirectory, "reviewed-retry-support.md"), "utf8"), "existing\n");
+    const settled = await h.emit("agent_before_settle", { outcome: "completed" });
+    if (kind === "direct") assert.ok(result.content[0]?.text.includes(finalFile));
+    else {
+      assert.equal(settled.continue, true);
+      assert.equal(settled.entries.at(-1).details.planFile, finalFile);
+      assert.ok(settled.entries.at(-1).content.includes(finalFile));
+    }
+  });
+}
+
+test("promotion write failure preserves draft and planning state without implementation", async () => {
+  const h = await setup({ select: ["Yes, implement here"] });
+  await h.mock.commands.get("plan")?.handler("", h.context.ctx);
+  const draft = h.inline().planFile;
+  writeFileSync(draft, "# Retry support\n");
+  const writer = vi.spyOn(planFiles, "writePlanFile").mockImplementationOnce(() => {
+    throw new Error("disk full");
+  });
+  try {
+    const result = await h.tool(EXIT_TOOL).execute("fail", {}, undefined, undefined, h.context.ctx);
+    assert.match(result.content[0]?.text ?? "", /Stay in plan mode/u);
+  } finally {
+    writer.mockRestore();
+  }
+  assert.equal(h.inline().active, true);
+  assert.equal(h.inline().temporaryDraft, true);
+  assert.equal(h.inline().planFile, draft);
+  assert.equal(readFileSync(draft, "utf8"), "# Retry support\n");
+  assert.match(h.context.notifications.at(-1)?.message ?? "", /disk full/u);
+  assert.deepEqual(readdirSync(h.plansDirectory), [draft.split("/").at(-1)]);
+  assert.equal(await h.emit("agent_before_settle", { outcome: "completed" }), undefined);
+});
+
+test("adopting a different explicit path clears the allocated temporary marker", async () => {
+  const h = setupWorkflowLifecycle();
+  await h.emit("session_start");
+  h.inline.enter(h.ctx);
+  const draft = h.inline.planFile;
+  const explicit = join(mkdtempSync(join(tmpdir(), "explicit-plan-")), "draft-user-owned.md");
+  writeFileSync(explicit, "# Explicit task\n");
+  h.inline.enter(h.ctx, explicit);
+  Object.assign(h.ctx, { mode: "rpc" });
+  h.ctx.ui.select = async () => "Yes, implement here";
+  const exit = h.mock.tools.find((tool) => tool.name === EXIT_TOOL) as unknown as Tool;
+  const result = await exit.execute("explicit", {}, undefined, undefined, h.ctx);
+  assert.equal(result.details.planFile, explicit);
+  assert.equal(h.inline.planFile, explicit);
+  assert.notEqual(explicit, draft);
+  assert.equal(h.implementHere.mock.calls.length, 1);
+  assert.deepEqual(readdirSync(join(explicit, "..")), ["draft-user-owned.md"]);
+});
+
+for (const temporaryDraft of [undefined, false, true]) {
+  test(`restored temporaryDraft=${temporaryDraft} controls promotion, not filename prefix`, async () => {
+    const h = await setup({ select: ["Yes, implement here", "Yes, implement here"] });
+    const file = join(h.plansDirectory, "draft-user-name.md");
+    writeFileSync(file, "# Restored task\n");
+    (h.mock.pi as ExtensionAPI).appendEntry(INLINE_ENTRY, {
+      active: true,
+      told: true,
+      planFile: file,
+      ...(temporaryDraft === undefined ? {} : { temporaryDraft }),
+    });
+    await h.emit("session_tree", {});
+    const result = await h.tool(EXIT_TOOL).execute("restored", {}, undefined, undefined, h.context.ctx);
+    const expected = temporaryDraft ? join(h.plansDirectory, "restored-task.md") : file;
+    assert.equal(result.details.planFile, expected);
+    assert.equal(h.inline().temporaryDraft, false);
+    await h.mock.commands.get("plan")?.handler("", h.context.ctx);
+    await h.tool(EXIT_TOOL).execute("reapprove", {}, undefined, undefined, h.context.ctx);
+    assert.equal(h.inline().planFile, expected);
+    assert.equal(existsSync(join(h.plansDirectory, "restored-task-2.md")), false);
+    assert.equal(readFileSync(file, "utf8"), "# Restored task\n");
+  });
+}
 
 for (const outcome of ["approve", "cancel", "feedback", "edit", "throw", "abort"] as const) {
   test(`plan review releases its blocked hold after ${outcome}`, async () => {

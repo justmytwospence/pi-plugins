@@ -26,7 +26,7 @@ pi-plan-mode separates researching a change from implementing it, in two ways:
 
 `/plan` turns plan mode on and sends the task, if given, as your next message. With pi-tool-gate, plan is one of its [workflows](/plugins/pi-tool-gate/#workflow-and-approvals), independent of approvals; its cycle key reaches plan once the stock thinking-key conflict is resolved. Without the gate, `toggleShortcut` toggles it. Your agent can also enter plan mode itself through `enter_plan_mode` when a task deserves a plan first.
 
-While it is on, your agent writes its plan to a plan file, by default `~/.pi/agent/plans/<two-words>.md` (`plansDirectory`), allocated before its title is known. `edit` and `write` are blocked except for that file. With pi-tool-gate, shell commands are judged as in auto mode; without it, only the read-only shell policy runs. Other extension and MCP tools are not blocked; your agent is only instructed not to change anything with them.
+While it is on, your agent writes its plan to a unique temporary draft, by default `~/.pi/agent/plans/draft-<timestamp>-<uuid>.md` (`plansDirectory`), allocated before its title is known. The draft stays at that path while the agent writes, and the agent is asked for a concise, descriptive first Markdown heading. `edit` and `write` are blocked except for that file. With pi-tool-gate, shell commands are judged as in auto mode; without it, only the read-only shell policy runs. Other extension and MCP tools are not blocked; your agent is only instructed not to change anything with them.
 
 When the plan is complete, your agent calls `exit_plan_mode` directly. Plan tools are model-only: calling them inside `codemode` is prohibited because nested calls have no inline plan renderer. The plan appears in the conversation and you choose:
 
@@ -36,6 +36,8 @@ When the plan is complete, your agent calls `exit_plan_mode` directly. Plan tool
 - **Edit the plan first**: revise it in Pi's editor, then choose again.
 - **Save for later**: edit the hyphenated name suggested from the plan title; `.md` is added automatically. The snapshot goes under `plansDirectory` (default `~/.pi/agent/plans/`) and collisions get `-2`, `-3`, etc. The original working draft stays at its path for historical references, but the next planning task gets a fresh draft. Saving ends the turn without approving implementation. Continue later with `/plan Continue from @/absolute/path/descriptive-plan.md` as a planning prompt, not an import command or automatic approval.
 - **No, keep planning**: the turn ends and you say what should change in the chat. The agent answers there, and the next review starts with the lines that changed since the plan you declined.
+
+Approving a newly allocated temporary draft copies the exact final reviewed text (including your edits) to a title-derived file such as `add-api-rate-limiting.md`; implementation uses that copy. The original draft stays intact for historical references and recovery. Names use the first usable title, normalized to a hyphenated slug of at most 80 characters; missing, generic (`Plan` or `The Plan`) and non-ASCII-only titles fall back to `untitled-plan`. Collisions add `-2`, `-3`, etc. without overwriting files. Reapproval keeps the approved path; existing, restored legacy and user-provided paths are not renamed or replaced. **Save for later** honors the name you enter rather than forcing the title-derived suggestion.
 
 Up/Down navigates, Left/Right adjusts effort for every execution option (including both direct rows), Enter confirms, and Esc/Ctrl+C cancels. Both direct rows share the current model's effort selection. Direct effort defaults to the current effort; handoffs use a configured target suffix, then `defaultImplementationThinkingLevel`, then `medium`. Unsupported levels use the greatest supported level no higher than requested, else the first supported level. Nonreasoning models have no effort adjustment. Changes apply only to this approval, not saved defaults; RPC offers action and effort separately. Changing effort alone is not a handoff: model identity is provider plus model ID.
 
@@ -127,7 +129,9 @@ Choose **Implement…** to pick the plan (M first, once there is one), mode, eff
 
 Left/Right adjusts the effort row in both modes. Defaults and supported-level normalization match inline approval; switching modes preserves per-model effort selections.
 
-**Export…** picks a plan and a path and writes it to Markdown without initiating implementation. **Discard** stops the planners and drops the plans; Esc hides the screen and keeps them.
+Implementing M, A or B writes the selected plan's current text under `plansDirectory` using the same title-derived names, fallback and collision suffixes as inline approval.
+
+**Export…** picks a plan and an explicit path and writes it to Markdown without initiating implementation. Title-derived naming does not change that path; an existing destination still reports a collision rather than being overwritten. **Discard** stops the planners and drops the plans; Esc hides the screen and keeps them.
 
 ## Settings and trusted capabilities
 

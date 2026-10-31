@@ -12,6 +12,32 @@ everything else is edited in the file. An invalid file is ignored (defaults appl
 
 `toggleShortcut` is unset by default. Without pi-tool-gate it toggles local work/plan; with the gate it cycles workflow, so do not configure it on the gate's own key. Gate's default Shift+Tab requires remapping Pi's stock `app.thinking.cycle`; Pi skips conflicting shortcuts. Gate's Alt+A changes approvals independently, including during planning and exec. Plan mode alone does not enforce approvals.
 
+### Plan files and names
+
+`plansDirectory` sets where temporary drafts, approved plans, `/planners` implementation plans and
+**Save for later** snapshots are written (default `~/.pi/agent/plans`; `~` is expanded).
+Inline planning starts with a unique `draft-<timestamp>-<uuid>.md` path before a title exists.
+The draft is not renamed while the agent writes it; planning guidance requests a concise,
+descriptive first Markdown heading.
+
+On approval, a newly allocated temporary draft is copied to a descriptive file using the exact
+final reviewed text, including approval-editor changes. Implementation uses the new path; the
+original draft stays intact for historical references and recovery. The filename comes from the
+first usable title, normalized to a hyphenated slug of at most 80 characters. Missing, generic
+(`Plan` or `The Plan`) and non-ASCII-only titles use `untitled-plan`. Collisions add `-2`, `-3`,
+etc. without overwriting existing files. Reapproval keeps the approved path; existing,
+restored legacy and user-provided paths are not renamed or replaced.
+
+`/planners` implementation uses the same title-derived naming for the selected plan's current
+text. **Save for later** suggests a title-derived name but your edited name is authoritative;
+`.md` is automatic and collisions receive numeric suffixes. Saving leaves the original draft
+intact, ends planning without implementation and clears the active plan so the next task gets a
+new draft.
+
+`defaultPlanExportPath` sets the explicit export path (default `PLAN.md`, relative to the project).
+Export paths are not replaced by title-derived names, and exporting to an existing file still
+reports a collision rather than overwriting it.
+
 ### Implementation choices and effort
 
 `implementationModelMap` maps an exact planning `provider/modelId` to an ordered list of handoff

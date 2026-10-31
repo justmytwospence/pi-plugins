@@ -15,7 +15,15 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, test, vi } from "vitest";
-import { planSlug, planTextTitle, planTitle, savePlanSnapshot } from "../src/plan-file.js";
+import {
+  newPlanFile,
+  planFilenameStem,
+  planSlug,
+  planTextTitle,
+  planTitle,
+  savePlanSnapshot,
+  writePlanFile,
+} from "../src/plan-file.js";
 
 vi.mock("node:fs", async (importOriginal) => {
   const fs = await importOriginal<typeof import("node:fs")>();
@@ -75,6 +83,86 @@ test("slugs remove Markdown, decompose accents and retain only bounded ASCII wor
   for (const text of ["", "  ", "日本語", "🚀", "*** !!!"]) assert.equal(planSlug(text), "");
   assert.equal(planSlug("a".repeat(100)), "a".repeat(80));
   assert.equal(planSlug(`${"a".repeat(79)} more`), "a".repeat(79));
+});
+
+test("plan filename stems normalize descriptive titles without display truncation", () => {
+  for (const [text, expected] of [
+    ["# Plan: **Café** `CLI` & [résumé](https://example.com) ~~fix~~", "cafe-cli-resume-fix"],
+    ["  Hello... WORLD / version 2!  ", "hello-world-version-2"],
+    ["# Crème brûlée A\u030Angström ﬁ ＡＢＣ", "creme-brulee-angstrom-fi-abc"],
+    ["# 日本語 CLI 🚀", "cli"],
+    [`# ${"a".repeat(65)} ending`, `${"a".repeat(65)}-ending`],
+    [`# ${"a".repeat(100)}`, "a".repeat(80)],
+    [`# ${"é".repeat(100)} 日本語 🚀`, "e".repeat(80)],
+    [`# ${"a".repeat(79)} more`, "a".repeat(79)],
+  ]) {
+    assert.equal(planFilenameStem(text as string), expected);
+  }
+});
+
+test("generic or unusable plan titles fall back to untitled-plan", () => {
+  for (const text of ["", "  ", "# Plan", "# PLAN!", "# The plan", "# the-plan", "# ***", "# 日本語", "# 🚀"]) {
+    assert.equal(planFilenameStem(text), "untitled-plan");
+    const directory = temporaryDirectory();
+    assert.equal(writePlanFile(directory, text), join(directory, "untitled-plan.md"));
+  }
+});
+
+test("draft paths are unique even in the same millisecond and create nothing", () => {
+  const directory = join(temporaryDirectory(), "not-created");
+  const clock = vi.spyOn(Date, "now").mockReturnValue(123456789);
+  try {
+    const files = Array.from({ length: 100 }, () => newPlanFile(directory));
+    assert.equal(new Set(files).size, files.length);
+    for (const file of files) {
+      assert.match(file, /\/draft-123456789-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.md$/u);
+      assert.equal(existsSync(file), false);
+    }
+    assert.equal(existsSync(directory), false);
+    assert.equal(vi.mocked(openSync).mock.calls.length, 0);
+    assert.equal(vi.mocked(writeFileSync).mock.calls.length, 0);
+  } finally {
+    clock.mockRestore();
+  }
+});
+
+test("plan writes use descriptive private snapshots and never overwrite collisions or symlinks", () => {
+  const directory = join(temporaryDirectory(), "nested");
+  const text = " \n# Plan: Café CLI!\n\nKeep internal spacing.  \n ";
+  const first = writePlanFile(directory, text);
+  assert.equal(first, resolve(directory, "cafe-cli.md"));
+  assert.equal(readFileSync(first, "utf8"), "# Plan: Café CLI!\n\nKeep internal spacing.\n");
+  assert.equal(statSync(first).mode & 0o777, 0o600);
+  mkdirSync(join(directory, "cafe-cli-2.md"));
+  symlinkSync(first, join(directory, "cafe-cli-3.md"));
+  symlinkSync(join(directory, "missing.md"), join(directory, "cafe-cli-4.md"));
+  assert.equal(writePlanFile(directory, text), join(directory, "cafe-cli-5.md"));
+  assert.equal(readFileSync(first, "utf8"), "# Plan: Café CLI!\n\nKeep internal spacing.\n");
+  assert.equal(existsSync(join(directory, "missing.md")), false);
+});
+
+test("descriptive plan writes handle concurrent collisions and clean up partial writes", async () => {
+  const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+  const directory = temporaryDirectory();
+  vi.mocked(openSync).mockImplementationOnce((path, flags, mode) => {
+    fs.writeFileSync(path, "racing writer");
+    return fs.openSync(path, flags, mode);
+  });
+  assert.equal(writePlanFile(directory, "# Race"), join(directory, "race-2.md"));
+  assert.equal(readFileSync(join(directory, "race.md"), "utf8"), "racing writer");
+  assert.equal(readFileSync(join(directory, "race-2.md"), "utf8"), "# Race\n");
+  const error = new Error("disk full");
+  vi.mocked(writeFileSync).mockImplementationOnce((file) => {
+    fs.writeFileSync(file, "partial");
+    throw error;
+  });
+  assert.throws(
+    () => writePlanFile(directory, "# Race"),
+    (actual) => actual === error,
+  );
+  assert.deepEqual(readdirSync(directory).sort(), ["race-2.md", "race.md"]);
+  const descriptor = vi.mocked(closeSync).mock.calls.at(-1)?.[0];
+  assert.throws(() => fs.fstatSync(descriptor as number), { code: "EBADF" });
 });
 
 test("snapshots create private absolute files with exact trimmed text and preserve the draft", () => {

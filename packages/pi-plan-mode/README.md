@@ -43,7 +43,7 @@ No `npm install` is needed to run it: the package.json has no `dependencies`; Pi
 
 While plan mode is on:
 
-- Your agent is told (once, with your next message, or right away mid-turn) to research, ask you what it cannot find out, and write its plan to a **plan file**, `~/.pi/agent/plans/<two-words>.md` (`plansDirectory` moves it). The working draft is allocated before its title is known; entering plan mode again continues it unless you saved it for later.
+- Your agent is told (once, with your next message, or right away mid-turn) to research, ask you what it cannot find out, and write its plan to a **plan file**, `~/.pi/agent/plans/draft-<timestamp>-<uuid>.md` (`plansDirectory` moves it). This unique temporary draft is allocated before its title is known and stays at that path while the agent writes; entering plan mode again continues it unless you saved it for later. The agent is asked to use a concise, descriptive first Markdown heading.
 - `edit` and `write` are blocked except for the plan file. Commands: with pi-tool-gate, the gate judges them as in auto mode (as Claude Code's classifier does while planning); without it, only read-only commands run (the [shell policy](./docs/settings.md)).
 - When the plan is ready, your agent calls `exit_plan_mode`. The plan shows in the chat (Mermaid diagrams drawn as terminal diagrams, top-down when a left-to-right chart is too wide) and you choose:
   - **Yes, implement here** (first and default): your current model implements it in this conversation, keeping the context.
@@ -53,6 +53,8 @@ While plan mode is on:
   - **Save for later**: enter an editable, title-derived hyphenated filename; `.md` is automatic. A snapshot is written under `plansDirectory` (default `~/.pi/agent/plans/`), with `-2`, `-3`, etc. on collisions. The draft stays at its original path for historical references, but is no longer the active plan; your next planning task gets a new draft. This ends the turn without approving or implementing anything. To continue from the saved snapshot, prompt `/plan Continue from @/absolute/path/descriptive-plan.md` (a planning prompt, not automatic approval or a new import command).
   - **No, keep planning**: say what should change (or leave it empty, or press Esc, and say it in the chat). With an editor provider such as pi-vim the field is that editor (Enter or `:w` sends, Escape in Normal mode or `:q` cancels). Plan mode stays on.
 - Ordinary same-model approval returns to work without changing approvals. A distinct-model handoff enters exec. Leaving plan for chat does not permit edits.
+
+Approving a newly allocated temporary draft writes an exact copy of the final reviewed text (including your edits) to a descriptive filename derived from its first usable title, such as `add-api-rate-limiting.md`. Implementation uses that copy; the original draft stays intact for historical references and recovery. Names use an at-most-80-character slug, fall back to `untitled-plan` for missing, generic (`Plan` or `The Plan`), or non-ASCII-only titles, and add `-2`, `-3`, etc. on collisions without overwriting files. Reapproval keeps the approved path. Existing, restored legacy and user-provided plan paths are not renamed or replaced. **Save for later** uses the name you enter, not a forced title-derived name.
 
 When you decline and the agent revises a plan, approval shows a short **What changed** bullet summary followed by the full current plan in normal styling, not a red/green prose diff. Without a supplied summary it says **Plan revised since your last review.** First or identical submissions show no revision summary. Editing the plan in the approval dialog clears any stale agent summary; the full current plan is always authoritative.
 
@@ -189,6 +191,8 @@ Leaving Implement or Export with **back to the plans** returns to the actions ba
 You can keep talking to either planner in Review, too.
 
 ### 5. Implement
+
+Implementing M, A or B writes the selected plan's current text to a title-derived file under `plansDirectory`, using the same fallback and collision suffixes as inline approval. Explicit export paths remain unchanged; exporting to an existing file still reports a collision rather than overwriting it.
 
 The row page selects the **plan** (M, A or B), **mode**, **effort** and **context**. **Here** is the default mode: it always uses your main session's current model and effort, regardless of who wrote the selected plan. Context is **keep conversation** or **compact to plan (same session)**. Both are ordinary execution with a normal final reply, no exec mode, consultant or completion review, and no child session.
 

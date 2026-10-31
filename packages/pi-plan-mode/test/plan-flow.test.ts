@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { type ExtensionContext, initTheme } from "@earendil-works/pi-coding-agent";
-import { test } from "vitest";
+import { onTestFinished, test } from "vitest";
 import { directImplementationBrief, implementationBrief } from "../src/handoff.js";
 import planMode from "../src/index.js";
 import { INLINE_ENTRY, MODE_CHANGED, MODE_SET, PLAN_PROVIDER } from "../src/inline-plan.js";
@@ -219,7 +219,11 @@ for (const author of ["A", "B", "M"]) {
   for (const clear of [false, true]) {
     test(`/planners Here implements ${author} with ${clear ? "same-session compaction" : "conversation kept"}`, async () => {
       const approval = clear ? "bypassPermissions" : "auto";
-      const state = await implementationScreen({ approval });
+      const plansDirectory = mkdtempSync(join(tmpdir(), "plan-flow-names-"));
+      onTestFinished(() => rmSync(plansDirectory, { recursive: true, force: true }));
+      const existingFile = join(plansDirectory, `exact-${author.toLowerCase()}.md`);
+      writeFileSync(existingFile, "# Earlier plan\n\nKeep this content.\n");
+      const state = await implementationScreen({ approval, settings: { plansDirectory } });
       const { mock, context, sessions, app, focus } = state;
       let children = 0;
       let compaction:
@@ -276,6 +280,10 @@ for (const author of ["A", "B", "M"]) {
       }
       const brief = mock.sentUserMessages.at(-1)?.text ?? "";
       assert.ok(brief.endsWith(plan));
+      const planFile = join(plansDirectory, `exact-${author.toLowerCase()}-2.md`);
+      assert.equal(readFileSync(planFile, "utf8"), `${plan}\n`, "save the selected current plan text");
+      assert.equal(readFileSync(existingFile, "utf8"), "# Earlier plan\n\nKeep this content.\n");
+      assert.equal(brief, directImplementationBrief({ plan, planFile }));
       assert.match(brief, /reply normally/u);
       assert.doesNotMatch(brief, /finish_plan|ask_planner|handed it to you/u);
       assert.equal(mock.sentUserMessages.length, 1);
@@ -655,8 +663,34 @@ test("/planners implementation offers available Terra outside the planning short
 });
 
 /** A child is initialized by a different extension runtime, with appends visible on its branch. */
-async function freshHandoff() {
-  const state = await implementationScreen({ settings: { implementationModelMap: implementationMap } });
+async function freshHandoff(author = "M") {
+  const plansDirectory = mkdtempSync(join(tmpdir(), "plan-flow-fresh-names-"));
+  onTestFinished(() => rmSync(plansDirectory, { recursive: true, force: true }));
+  const targetModel = author === "B" ? { ...OPUS, id: "claude-haiku-4-5", name: "Claude Haiku 4.5" } : OPUS;
+  const state = await implementationScreen({
+    configureContext: (ctx) => {
+      const models = [SONNET, OPUS, targetModel];
+      Object.assign(ctx.modelRegistry, {
+        getAvailable: () => models,
+        find: (provider: string, id: string) => models.find((model) => model.provider === provider && model.id === id),
+      });
+    },
+    settings: {
+      plansDirectory,
+      implementationModelMap: {
+        ...implementationMap,
+        "anthropic/claude-opus-5-5": [{ provider: "anthropic", modelId: targetModel.id, thinkingLevel: "low" }],
+      },
+    },
+  });
+  state.focus("Plan");
+  for (
+    let index = 0;
+    index < 3 && !new RegExp(`Plan\\s+‹ ${author}(?: | ·)`, "u").test(state.app.render().join("\n"));
+    index++
+  )
+    state.app.handleInput("\u001b[C");
+  assert.match(state.app.render().join("\n"), new RegExp(`Plan\\s+‹ ${author}(?: | ·)`, "u"));
   let child:
     | { parentSession?: string; setup(manager: unknown): Promise<void>; withSession(ctx: unknown): Promise<void> }
     | undefined;
@@ -688,7 +722,14 @@ async function freshHandoff() {
       thinkingLevel: state.mock.thinkingLevel,
     });
   const old = oldSnapshot();
-  const replacement = setup();
+  const replacement = setup({
+    configureContext: (ctx) => {
+      Object.assign(ctx.modelRegistry, {
+        find: (provider: string, id: string) =>
+          [SONNET, OPUS, targetModel].find((model) => model.provider === provider && model.id === id),
+      });
+    },
+  });
   await replacement.ready;
   await child.setup({
     appendCustomEntry: (customType: string, data: unknown) => replacement.mock.entries.push({ customType, data }),
@@ -703,7 +744,39 @@ async function freshHandoff() {
     model: typeof SONNET = OPUS,
     sendUserMessage: (text: string) => Promise<unknown> = async () => {},
   ) => handoff.withSession({ ...(replacement.context.ctx as ExtensionContext), model, sendUserMessage });
-  return { ...replacement, event, callback, assertOldUntouched: () => assert.deepEqual(oldSnapshot(), old) };
+  return {
+    ...replacement,
+    targetModel,
+    event,
+    callback,
+    assertOldUntouched: () => assert.deepEqual(oldSnapshot(), old),
+  };
+}
+
+for (const author of ["A", "B", "M"]) {
+  test(`/planners fresh handoff saves the selected ${author} title and reuses its path`, async () => {
+    const fresh = await freshHandoff(author);
+    const bootstrap = fresh.mock.entries.find((entry) => entry.customType === "plan-implementation-runtime")?.data as {
+      exec: { planFile: string };
+    };
+    const planFile = bootstrap.exec.planFile;
+    const plan = `# Exact ${author}\n\nDo ${author}.`;
+    assert.equal(basename(planFile), `exact-${author.toLowerCase()}.md`);
+    assert.equal(readFileSync(planFile, "utf8"), `${plan}\n`);
+    await fresh.event("session_start");
+    const exec = fresh.mock.entries.filter((entry) => entry.customType === "plan-mode:exec").at(-1)?.data as {
+      planFile: string;
+    };
+    assert.equal(exec.planFile, planFile);
+    const prompts: string[] = [];
+    await fresh.callback(fresh.targetModel, async (text) => {
+      prompts.push(text);
+    });
+    assert.equal(prompts.length, 1);
+    assert.ok(prompts[0]?.includes(planFile));
+    assert.ok(prompts[0]?.endsWith(plan));
+    fresh.assertOldUntouched();
+  });
 }
 
 test("/planners fresh handoff begins exec in the replacement runtime exactly once and survives reload", async () => {

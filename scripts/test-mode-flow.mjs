@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createJiti } from 'jiti';
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
@@ -256,7 +256,9 @@ try {
         check('plan');
         const planFile = branchData('plan-mode:inline')?.planFile;
         assert(planFile, `${label}: plan path persisted`);
-        writeFileSync(planFile, '# Local plan\n\nImplement a local test.\n');
+        if (!inlineActive) assert.match(basename(planFile), /^draft-\d+-[a-f0-9-]+\.md$/u);
+        const reviewedPlan = '# Local plan\n\nImplement a local test.\n';
+        writeFileSync(planFile, reviewedPlan);
         const planLeaf = destination(manager.appendCustomEntry('test:plan-marker', {}));
         await go(workLeaf);
         check('work');
@@ -276,6 +278,13 @@ try {
         selectedEffort = 'high'; // Effort-only approval must remain ordinary work, not exec.
         let result = await call('exit_plan_mode');
         assert.equal(result.details?.outcome, 'approved', JSON.stringify(result));
+        const approvedFile = result.details.planFile;
+        assert.equal(approvedFile, inlineActive ? planFile : resolve(dir, 'plans/local-plan.md'));
+        assert.equal(branchData('plan-mode:inline')?.planFile, approvedFile, 'persist the approved provider path');
+        assert.equal(readFileSync(approvedFile, 'utf8'), reviewedPlan);
+        assert.equal(readFileSync(planFile, 'utf8'), reviewedPlan, 'approval leaves the original draft intact');
+        if (!inlineActive) assert.notEqual(approvedFile, planFile);
+        assert(JSON.stringify(requests.at(-1).messages).includes(approvedFile), 'normal continuation receives the approved path');
         check('work');
         assert(manager.getEntries().some(entry => (entry.type === 'message' ? entry.message : entry).customType === 'plan-mode-notice'),
           'real model turns exercise hidden reminders as well as visible transitions');
@@ -291,6 +300,8 @@ try {
         approvalChoice = 'compact-here';
         result = await call('exit_plan_mode');
         assert.equal(result.details?.outcome, 'approved', JSON.stringify(result));
+        assert.equal(result.details.planFile, approvedFile, 'compacting an already promoted plan retains its path');
+        assert.equal(readFileSync(approvedFile, 'utf8'), '# Compact plan\n\nImplement locally.\n');
         check('work');
         assert.equal(session.model.id, planningId);
         assert(!session.getActiveToolNames().includes('finish_plan'), 'compact-here is ordinary work');
@@ -308,6 +319,9 @@ try {
         selectedEffort = 'off';
         result = await call('exit_plan_mode');
         assert.equal(result.details?.outcome, 'handoff', JSON.stringify(result));
+        assert.equal(result.details.planFile, approvedFile, 'handoff reuses the previously approved path');
+        assert.equal(branchData('plan-mode:exec')?.planFile, approvedFile);
+        if (!inlineActive) assert.equal(readFileSync(planFile, 'utf8'), reviewedPlan, 'later revisions do not mutate the original draft');
         assert.equal(session.model.id, implementationId);
         assert.equal(requestedModels.at(-1), implementationId, 'handoff continues using the distinct model');
         assert.deepEqual(requests.slice(beforeHandoff).map(request => request.model), [planningId, implementationId],
@@ -765,6 +779,7 @@ try {
           assert.equal(exec()?.active, true);
           const approvedPlan = activation === 'keep-A'
             ? '# Planner A SDK plan\n\nImplement planner A locally.' : '# Fresh SDK plan\n\nImplement locally.';
+          assert.equal(basename(exec().planFile), activation === 'keep-A' ? 'planner-a-sdk-plan.md' : 'fresh-sdk-plan.md');
           assert.equal(readFileSync(exec().planFile, 'utf8').trim(), approvedPlan);
           assert(JSON.stringify(requests.at(-1).messages).includes(approvedPlan.split('\n')[0]),
             "executor receives the selected author's plan");
@@ -796,6 +811,8 @@ try {
         const workflow = () => /workflow: (\w+)/u.exec(statuses.get('workflow-mode') ?? '')?.[1];
         const consumed = () => branch('plan-implementation-runtime-consumed');
         const savedPlanFile = branch('plan-implementation-runtime').at(-1)?.data.exec?.planFile;
+        assert.equal(savedPlanFile, resolve(dir, 'plans/fresh-sdk-plan.md'));
+        assert.equal(readFileSync(savedPlanFile, 'utf8'), '# Fresh SDK plan\n\nImplement locally.\n');
         const planNotices = () => fresh.sessionManager.getEntries().filter(entry => entry.type === 'message'
           && entry.message.customType === 'plan-mode-notice');
         const checkRecovery = () => {
@@ -824,6 +841,7 @@ try {
           assert.deepEqual(transition, [{ owner: 2, active: true, source: 'transition' }]);
           const state = branch('plan-mode:exec').at(-1)?.data;
           assert.equal(state?.active, true);
+          assert.equal(state.planFile, savedPlanFile, 'fresh execution reuses the saved descriptive plan path');
           assert.equal(state.implementerModel, `anthropic/${implementationId}`);
           negotiation = structuredClone(state.negotiation);
           assert(negotiation?.executionId, 'fresh begin initializes negotiation identity');
