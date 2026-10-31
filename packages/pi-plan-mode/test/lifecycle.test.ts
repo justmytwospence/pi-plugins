@@ -8,7 +8,7 @@ import {
   ACTIVITY_SECTION,
   type ActivitySection,
 } from "../src/activity.js";
-import { EXEC_ENTRY } from "../src/exec.js";
+import { EXEC_ENTRY, type ExecState } from "../src/exec.js";
 import planMode from "../src/index.js";
 import { INLINE_ENTRY } from "../src/inline-plan.js";
 import type { PlannerSessionFactory, PlannerSessionHandle } from "../src/planner/session.js";
@@ -360,8 +360,9 @@ test("a consumed fresh bootstrap restores exec in a new runtime without activati
   await first.event("session_start");
   const snapshots = entries.filter((entry) => entry.customType === EXEC_ENTRY);
   assert.ok(snapshots.length >= 1);
-  const latest = snapshots.at(-1)?.data as { negotiation: { executionId: string } };
-  assert.ok(latest.negotiation.executionId);
+  const latest = snapshots.at(-1)?.data as ExecState;
+  assert.ok(latest.negotiation?.executionId);
+  assert.equal(latest.negotiation.maxRevisions, 2);
   await first.event("session_shutdown");
   const saved = structuredClone(entries);
   const reloaded = await bootstrapRuntime(entries);
@@ -374,7 +375,8 @@ test("a consumed fresh bootstrap restores exec in a new runtime without activati
   assert.deepEqual(entries.slice(0, saved.length), saved);
   const restored = entries.filter((entry) => entry.customType === EXEC_ENTRY).at(-1)?.data as typeof latest;
   assert.deepEqual(restored, latest);
-  assert.equal(restored.negotiation.executionId, latest.negotiation.executionId);
+  assert.equal(restored.negotiation?.executionId, latest.negotiation.executionId);
+  assert.equal(restored.negotiation?.maxRevisions, latest.negotiation.maxRevisions);
   assert.equal(entries.filter((entry) => entry.customType === "plan-implementation-runtime-consumed").length, 1);
   assert.ok(
     publications.some((data) => {
@@ -383,4 +385,40 @@ test("a consumed fresh bootstrap restores exec in a new runtime without activati
     }),
   );
   assert.ok(!publications.some((data) => (data as { source: string }).source === "transition"));
+});
+
+test("reload leaves an interrupted legacy exchange paused with its identity and budget intact", async () => {
+  const entries: ReturnType<typeof createMockPi>["entries"] = [bootstrapRecord()];
+  const first = await bootstrapRuntime(entries);
+  await first.event("session_start");
+  const saved = structuredClone(entries.filter((entry) => entry.customType === EXEC_ENTRY).at(-1)?.data as ExecState);
+  saved.returnTo = "legacy-planning-leaf";
+  const negotiation = saved.negotiation!;
+  negotiation.phase = "consulting";
+  negotiation.attempts = 2;
+  negotiation.revisionsUsed = 1;
+  negotiation.reviewCostUsd = 0.25;
+  negotiation.history = [1, 2].map((round) => ({
+    id: `${negotiation.executionId}:review:${round}`,
+    report: { report: "Implemented.", verification: "Unit tests passed.", concerns: "Live check not run." },
+    responses: [],
+    costUsd: 0.125,
+  }));
+  entries.push({ customType: EXEC_ENTRY, data: saved });
+  await first.event("session_shutdown");
+  const reloaded = await bootstrapRuntime(entries);
+  reloaded.mock.rawPi.setModel = () => assert.fail("reload must not change the model");
+  await reloaded.event("session_start");
+  const restored = entries.filter((entry) => entry.customType === EXEC_ENTRY).at(-1)?.data as ExecState;
+  assert.equal(restored.active, true);
+  assert.equal(restored.pendingReturn, undefined);
+  assert.equal(restored.returnTo, saved.returnTo);
+  assert.deepEqual(restored.negotiation, {
+    ...negotiation,
+    phase: "paused",
+    pause: { reason: "interrupted", action: "Exchange interrupted by reload; no paid request was retried." },
+  });
+  await reloaded.event("agent_settled");
+  assert.equal(reloaded.mock.sentUserMessages.length, 0);
+  assert.ok(reloaded.mock.rawPi.getActiveTools().includes("finish_plan"));
 });

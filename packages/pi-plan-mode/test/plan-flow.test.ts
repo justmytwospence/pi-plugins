@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { type ExtensionContext, initTheme } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
 import { directImplementationBrief, implementationBrief } from "../src/handoff.js";
 import planMode from "../src/index.js";
 import { INLINE_ENTRY, MODE_CHANGED, MODE_SET, PLAN_PROVIDER } from "../src/inline-plan.js";
-import type { PlannerSessionFactory } from "../src/planner/session.js";
+import { type PlannerSessionFactory, readSessionMessages, writeSeededSession } from "../src/planner/session.js";
 import type { PlanModeSettings } from "../src/settings.js";
 import { createCustomSelectorHarness, createMockContext, createMockPi } from "./support.js";
 
@@ -157,7 +159,9 @@ function setup(
   return { mock, context, sessions, sent, ready, workflowRequests, approvalRequests, harness: () => harness };
 }
 
-async function implementationScreen(options: Parameters<typeof setup>[0] & { planModel?: string } = {}) {
+async function implementationScreen(
+  options: Parameters<typeof setup>[0] & { planModel?: string; plannerFiles?: Record<string, string> } = {},
+) {
   const state = setup(options);
   await state.ready;
   state.mock.entries.push({
@@ -173,9 +177,17 @@ async function implementationScreen(options: Parameters<typeof setup>[0] & { pla
           spec: options.planModel ?? "anthropic/claude-sonnet-5-5:low",
           name: SONNET.name,
           plan: "# Exact A\n\nDo A.",
+          sessionFile: options.plannerFiles?.A,
           revision: 1,
         },
-        { id: "B", spec: "anthropic/claude-opus-5-5:low", name: OPUS.name, plan: "# Exact B\n\nDo B.", revision: 1 },
+        {
+          id: "B",
+          spec: "anthropic/claude-opus-5-5:low",
+          name: OPUS.name,
+          plan: "# Exact B\n\nDo B.",
+          sessionFile: options.plannerFiles?.B,
+          revision: 1,
+        },
       ],
       merged: {
         plan: "# Exact M\n\nDo M.",
@@ -441,6 +453,110 @@ for (const replacement of ["summary", "firstKeptEntryId", "details"] as const) {
 const implementationMap = {
   "anthropic/claude-sonnet-5-5": [{ provider: "anthropic", modelId: "claude-opus-5-5", thinkingLevel: "low" as const }],
 };
+
+for (const author of ["A", "B", "M"] as const) {
+  test(`/planners Handoff keeps the conversation for ${author} with its author on call`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "plan-flow-"));
+    const messages = (id: string) => [
+      { role: "user", content: `Private ${id} planning context` },
+      { role: "assistant", content: [{ type: "text", text: `Private ${id} reasoning` }] },
+    ];
+    let consultantFile: string | undefined;
+    try {
+      const plannerFiles: Record<string, string> = {};
+      for (const id of ["A", "B"]) {
+        const file = writeSeededSession(process.cwd(), dir, messages(id));
+        assert.ok(file);
+        plannerFiles[id] = file;
+      }
+      const implementer = { ...SONNET, id: "claude-haiku-4-5", name: "Claude Haiku 4.5" };
+      const targets = [{ provider: implementer.provider, modelId: implementer.id, thinkingLevel: "low" as const }];
+      const state = await implementationScreen({
+        plannerFiles,
+        settings: {
+          implementationModelMap: {
+            "anthropic/claude-sonnet-5-5": targets,
+            "anthropic/claude-opus-5-5": targets,
+          },
+        },
+        configureContext: (ctx) => {
+          const models = [SONNET, OPUS, implementer];
+          Object.assign(ctx.modelRegistry, {
+            getAvailable: () => models,
+            find: (provider: string, id: string) =>
+              models.find((model) => model.provider === provider && model.id === id),
+          });
+          Object.assign(ctx.sessionManager, { buildSessionProjection: () => ({ messages: messages("M") }) });
+        },
+      });
+      let children = 0;
+      let compactions = 0;
+      Object.assign(state.context.ctx, {
+        newSession: async () => {
+          children++;
+          return { cancelled: false };
+        },
+        compact: () => {
+          compactions++;
+        },
+      });
+      state.focus("Plan");
+      for (
+        let index = 0;
+        index < 3 && !new RegExp(`Plan\\s+‹ ${author}(?: | ·)`, "u").test(state.app.render().join("\n"));
+        index++
+      )
+        state.app.handleInput("\u001b[C");
+      assert.match(state.app.render().join("\n"), new RegExp(`Plan\\s+‹ ${author}(?: | ·)`, "u"));
+      state.focus("Mode");
+      state.app.handleInput("\u001b[C");
+      assert.match(state.app.render().join("\n"), /Mode\s+‹ Handoff ›/u);
+      assert.match(state.app.render().join("\n"), /Model\s+Claude Haiku 4\.5/u);
+      assert.match(state.app.render().join("\n"), /Context\s+this conversation, plus the plan/u);
+      state.app.handleInput("\r");
+      await state.opened;
+      await flush();
+      const exec = state.mock.entries.filter((entry) => entry.customType === "plan-mode:exec").at(-1)?.data as {
+        active: boolean;
+        planFile: string;
+        implementerModel: string;
+        restore: string;
+        restoreName: string;
+        returnTo?: string;
+        planner: { spec: string; name: string; sessionFile: string };
+      };
+      assert.ok(exec);
+      consultantFile = exec.planner?.sessionFile;
+      assert.equal(exec.active, true);
+      assert.equal(exec.implementerModel, "anthropic/claude-haiku-4-5");
+      assert.equal(exec.restore, "anthropic/claude-sonnet-5-5:high");
+      assert.equal(exec.restoreName, SONNET.name);
+      assert.equal(exec.returnTo, undefined);
+      assert.equal(exec.planner.name, author === "B" ? OPUS.name : SONNET.name);
+      assert.equal(
+        exec.planner.spec,
+        author === "B" ? "anthropic/claude-opus-5-5:low" : `anthropic/claude-sonnet-5-5${author === "A" ? ":low" : ""}`,
+      );
+      assert.ok(consultantFile && existsSync(consultantFile));
+      assert.notEqual(consultantFile, plannerFiles[author]);
+      assert.deepEqual(readSessionMessages(consultantFile, process.cwd()), messages(author));
+      assert.equal(state.mock.setModels.length, 1);
+      assert.equal(state.mock.thinkingLevel, "low");
+      assert.equal(state.mock.sentUserMessages.length, 1);
+      const brief = state.mock.sentUserMessages[0]?.text ?? "";
+      assert.ok(brief.endsWith(`# Exact ${author}\n\nDo ${author}.`));
+      assert.match(brief, /finish_plan/u);
+      assert.match(brief, /ask_planner/u);
+      assert.equal(children, 0);
+      assert.equal(compactions, 0);
+      assert.equal(state.sessions.prompts.length, 0, "seeding the consultant does not prompt it");
+      assert.ok(!state.mock.entries.some((entry) => entry.customType === "plan-implementation-runtime"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      if (consultantFile) rmSync(consultantFile, { force: true });
+    }
+  });
+}
 
 test("/planners Here retains off effort and hides handoffs to the current session model", async () => {
   const state = await implementationScreen({
@@ -799,7 +915,7 @@ for (const stale of ["none", "tree", "shutdown", "abort"] as const) {
   });
 }
 
-test("inline handoff returns to the planning leaf before the model-change entry", async () => {
+test("inline handoff keeps the planning branch when a model switch advances its leaf", async () => {
   const state = setup();
   await state.ready;
   let leaf = "planning-leaf";
@@ -832,10 +948,19 @@ test("inline handoff returns to the planning leaf before the model-change entry"
   let settled: unknown;
   for (const handler of state.mock.events.get("agent_before_settle") ?? [])
     settled = (await handler({ outcome: "completed" }, context.ctx)) ?? settled;
-  const result = settled as { entries: Array<{ customType?: string; data?: { returnTo?: string } }> };
+  const result = settled as {
+    entries: Array<{ type: string; customType?: string; data?: { returnTo?: string; restoreName?: string } }>;
+    continue: boolean;
+  };
   assert.equal(leaf, "model-change-leaf");
+  assert.equal(result.continue, true);
+  assert.deepEqual(
+    result.entries.map((entry) => entry.type),
+    ["custom", "custom_message"],
+  );
   assert.equal(result.entries[0]?.customType, "plan-mode:exec");
-  assert.equal(result.entries[0]?.data?.returnTo, "planning-leaf");
+  assert.equal(result.entries[0]?.data?.returnTo, undefined);
+  assert.equal(result.entries[0]?.data?.restoreName, "Claude Opus 5.5");
 });
 
 test("direct brief authorizes ordinary verification and a plain final response", () => {

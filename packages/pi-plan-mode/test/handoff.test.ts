@@ -5,7 +5,12 @@ import { enterPlanText } from "../src/inline-plan.js";
 import { writeMergedRequest } from "../src/planner/prompt.js";
 import { buildPlanModePrompt } from "../src/prompt.js";
 
-test("the plan standard is in every prompt that asks for a plan", () => {
+test("the self-contained plan standard is in every prompt that asks for a plan", () => {
+  assert.match(PLAN_STANDARD, /optionally in an explicitly fresh context with nothing but the plan/u);
+  assert.match(
+    PLAN_STANDARD,
+    /make every implementation decision in the plan yourself, after checking it in the code/u,
+  );
   assert.ok(enterPlanText("/p/calm-river.md", false, false).includes(PLAN_STANDARD));
   const prompt = buildPlanModePrompt();
   assert.ok(prompt.includes(PLAN_STANDARD));
@@ -14,6 +19,23 @@ test("the plan standard is in every prompt that asks for a plan", () => {
   assert.ok(merged.startsWith("Write plan M: merge the planners' plans"));
   assert.ok(merged.includes(PLAN_STANDARD));
   assert.match(writeMergedRequest(true), /to the same standard as before\.$/u);
+});
+
+test("here and fresh handoffs differ only in the explicit fresh-context claim", () => {
+  const options = { plan: "# P\n\n1. Implement it.", planFile: "/p/a.md", planner: "Claude Opus 5.5" };
+  const here = implementationBrief({ ...options, context: "here" });
+  const fresh = implementationBrief({ ...options, context: "fresh" });
+  const freshClaim = "; this message is all you have of the planning";
+  assert.ok(fresh.includes(freshClaim));
+  assert.ok(!here.includes(freshClaim));
+  assert.equal(fresh.replace(freshClaim, ""), here);
+  for (const brief of [here, fresh]) {
+    assert.match(brief, /read each file before you change it/u);
+    assert.match(brief, /ask the planner with ask_planner/u);
+    assert.match(brief, /Run its Verification as written/u);
+    assert.match(brief, /call finish_plan/u);
+    assert.ok(brief.endsWith(`## Approved plan\n\n${options.plan}`));
+  }
 });
 
 test("the handoff describes conversational recovery without bypassing review safeguards", () => {

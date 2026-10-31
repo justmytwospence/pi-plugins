@@ -74,9 +74,10 @@ Direct execution is ordinary chat with normal implementation, verification and a
 no exec mode, seeded consultant, `ask_planner`, `finish_plan`, completion card/review or planner
 branch return. It may keep the conversation or compact to the approved plan in the same session,
 never a child. Actual distinct-model handoffs retain consultation and the exec/completion workflow.
-Inline handoffs compact in-session and retain planner return; `/planners` Handoff still supports
-an explicit fresh child. Its Here context choices are **keep conversation** and **compact to plan
-(same session)**; `defaultImplementationContext` (`keep` or `clear`) selects the default context.
+Inline handoffs keep current-session history without forced compaction or planner-branch return;
+`/planners` Handoff also supports an explicit fresh child. Plan M has a seeded main-agent consultant
+for both keep-conversation and fresh-child handoffs. The `/planners` Here context choices are
+**keep conversation** and **compact to plan (same session)**; `defaultImplementationContext` (`keep` or `clear`) selects the default context.
 
 ### Completion review
 
@@ -92,7 +93,9 @@ If a review fails or is interrupted, a choice offers **Retry review**, **Discuss
 
 Choosing **Finish without review** requires confirmation in **Finish without planner acceptance?**; **Keep paused** cancels it. Confirmation produces **Completed by user override**, preserving findings and limitations, never **Accepted**. No interactive UI means no override. Stopping produces **Implementation stopped**, without claiming completion, restoring the model or returning to the planner.
 
-With `completionReview: false`, completion is explicitly **Completed without review**. Accepted, configured no-review and confirmed override are final outcomes; only then does normal model restoration and return-to-planning navigation run. If return navigation fails, the saved return remains retryable with `/plan-back`. Paused work survives reload; interrupted in-flight exchanges restore paused, without another paid request.
+With `completionReview: false`, completion is explicitly **Completed without review**. Accepted, configured no-review and confirmed override are final outcomes. On completion, the original main model is restored in place and the workflow returns to work, not plan; approvals stay unchanged. The current session retains its planning, implementation, consultation and review history: completion does not compact it or navigate back to a planning branch. Paused work survives reload; interrupted in-flight exchanges restore paused, without another paid request.
+
+Current-session handoffs retain conversation history by default. Only an explicitly selected **compact to plan** replaces context with the approved plan, and only an explicitly selected **fresh child** starts a separate session with the brief and plan. Pi's normal manual and automatic compaction still apply; plan mode does not replace ordinary compaction with a plan-only summary. `/plan-back` is an explicit-only compatibility command for legacy saved return targets, not an automatic completion step.
 
 Consultation and review cards show the current outcome, the exact question when your answer is needed, and what to do next. Reports and verification are previewed; findings show counts and titles. Pending exchanges show live activity. In Pi's terminal UI, Ctrl+O expands the full recorded details, including evidence, finding responses, errors, revision history and costs. Reported checks are not independently verified. The footer shows the exec phase, including when it is waiting for an answer, a review failed, approval is needed, or implementation is idle but not completed, alongside separate consultation and review costs. An idle or interrupted execution can be continued or redirected in conversation; it is not a completion.
 

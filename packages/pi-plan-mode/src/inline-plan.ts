@@ -1,8 +1,8 @@
 // Inline plan mode, as Claude Code does it: in your own conversation, no extra screen. While it is
 // on, your agent researches read-only and writes its plan to a plan file (the only file it may
 // write), then calls exit_plan_mode, which shows you the plan and asks who implements it: hand it
-// off to a cheaper model in this session (the host compacts the context down to the plan and
-// switches the model), keep the planning model on it, save a snapshot for later, edit the plan first, or keep planning. The
+// off to a cheaper model in this conversation (keeping its history and switching the model),
+// keep the planning model on it, save a snapshot for later, edit the plan first, or keep planning. The
 // workflow returns to work after approval, without changing approvals.
 // With pi-tool-gate installed, the gate owns workflow and judges planning commands. Without it,
 // this extension enforces a read-only shell and its configured shortcut toggles work/plan.
@@ -621,7 +621,7 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
               content: [
                 {
                   type: "text",
-                  text: `The user approved the plan and handed it off to ${who.targetName}, which implements it in this session from the plan alone; you stay on call to answer its questions. Stop here and do nothing else.`,
+                  text: `The user approved the plan and handed it off to ${who.targetName}. Implementation continues in this conversation with its history. You stay on call to answer its questions. Stop here and do nothing else.`,
                 },
               ],
               details: {

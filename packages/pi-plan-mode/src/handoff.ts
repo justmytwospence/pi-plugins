@@ -1,4 +1,4 @@
-export const PLAN_STANDARD = `The plan is a handoff. Once approved, it may be implemented by a cheaper model in a fresh context that has nothing but the plan, so make every implementation decision in the plan yourself, after checking it in the code: implementing it should be mechanical. Write these sections:
+export const PLAN_STANDARD = `The plan is a handoff. Once approved, it may be implemented by a cheaper model, optionally in an explicitly fresh context with nothing but the plan, so make every implementation decision in the plan yourself, after checking it in the code: implementing it should be mechanical. Write these sections:
 - Summary: two or three sentences on the goal and the approach, for the user's review.
 - Decisions: each choice that shapes the work, with the alternative you rejected and why, one line each.
 - Changes: every file to create or change, by its repository-relative path in backticks; for each, the functions, types and signatures to add or change, the exact behavior (inputs, outputs, edge cases, errors, user-facing text and names), and the existing code to reuse, as \`path:line\`.
@@ -8,9 +8,6 @@ export const PLAN_STANDARD = `The plan is a handoff. Once approved, it may be im
 - Handoff notes: facts you verified that the implementer would otherwise rediscover, pitfalls, and the parts of the plan most likely to be wrong.
 Before you submit it, reread it as its implementer would: any "consider", "e.g.", "or", "as needed", "if appropriate" or "TBD", and any file, function or command you have not checked, is a decision still open. Make it, or ask the user.`;
 
-/** The compaction summary a handoff leaves behind, before the brief. */
-export const HANDOFF_SUMMARY =
-  "Planning is over: the user approved the plan and handed it off for implementation. The planning conversation is not in this context; the next message has the approved plan and how to implement it.";
 export const HANDOFF_MESSAGE_TYPE = "plan-mode-handoff";
 
 /** Ordinary execution in the current conversation, with a normal final response. */

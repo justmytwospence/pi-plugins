@@ -118,6 +118,7 @@ async function setup(
     abortDelayMs?: number;
     hasUI?: boolean;
     restore?: boolean;
+    restoreName?: string;
     returnTo?: string;
     plan?: string;
     script?: (prompt: string) => ScriptReply | Promise<ScriptReply>;
@@ -196,6 +197,7 @@ async function setup(
           },
         }),
     ...(options.restore === false ? {} : { restore: "anthropic/claude-opus-5-5:high" }),
+    ...(options.restoreName ? { restoreName: options.restoreName } : {}),
     ...(options.returnTo ? { returnTo: options.returnTo } : {}),
     asks: 0,
     costUsd: 0,
@@ -395,6 +397,36 @@ const resultText = (result: Result) => result.content.map((part) => part.text).j
 const finishMessages = (s: Awaited<ReturnType<typeof setup>>) =>
   s.mock.sentMessages.map(({ message }) => message as any).filter((m) => m.customType === FINISH_MESSAGE_TYPE);
 
+/** New completions never navigate or publish a duplicate tool completion, even on settlement/reload. */
+async function assertCompletedInPlace(s: Awaited<ReturnType<typeof setup>>, messages = 0) {
+  assert.equal(s.latest().active, false);
+  assert.equal(s.latest().returnTo, undefined);
+  assert.equal(s.latest().pendingReturn, undefined);
+  const navigate = vi.fn(async () => undefined);
+  (s.context.ctx as any).navigateTree = navigate;
+  await s.emit("agent_settled", { aborted: false });
+  await s.emit("session_start", { reason: "reload" });
+  await s.mock.commands.get("plan-back")!.handler("", s.context.ctx as any);
+  await s.emit("agent_settled", { aborted: false });
+  assert.equal(navigate.mock.calls.length, 0);
+  assert.equal(s.mock.sentUserMessages.filter((message) => message.text === "/plan-back").length, 0);
+  assert.equal(finishMessages(s).length, messages);
+}
+
+/** Explicit pre-upgrade inactive fixture; new finalization must never create pendingReturn. */
+async function restoreLegacyPendingReturn(s: Awaited<ReturnType<typeof setup>>) {
+  const result = await submit(s);
+  const legacy = structuredClone(s.latest());
+  legacy.active = false;
+  legacy.returnTo = "planning-leaf";
+  legacy.pendingReturn = { leaf: "planning-leaf", details: structuredClone(result.details) };
+  s.mock.entries.push({ customType: EXEC_ENTRY, data: legacy });
+  await s.emit("session_tree", {});
+  await s.emit("agent_settled", { aborted: false });
+  assert.equal(s.mock.sentUserMessages.length, 0, "legacy recovery is explicit only");
+  assert.equal(finishMessages(s).length, 0);
+}
+
 /** Assert the model-visible prose, independently of the presentation helpers under test. */
 function assertReadableHistory(text: string, details: any) {
   const prose = normalize(text);
@@ -479,8 +511,8 @@ function assertFinishRenders(s: Awaited<ReturnType<typeof setup>>, result: Resul
   if (message) assert.deepEqual(message.details.negotiation, result.details.negotiation);
 }
 
-test("accepted first submission finalizes with exactly one review usage", async () => {
-  const s = await setup();
+test("active legacy acceptance restores in place with exactly one review usage", async () => {
+  const s = await setup({ returnTo: "legacy-planning-leaf" });
   const result = await submit(s);
   assert.equal(s.latest().active, false);
   assert.equal(result.details.completion, "accepted");
@@ -491,6 +523,7 @@ test("accepted first submission finalizes with exactly one review usage", async 
   assert.equal(s.latest().negotiation?.reviewCostUsd, 0.05);
   assert.equal(s.latest().asks, 0);
   assert.equal(s.mock.setModels.length, 1);
+  assert.equal(result.details.returnedTo, opus.name);
   assert.equal(result.usage.cost.total, 0.05);
   assert.deepEqual(s.execEvents, [
     { active: true, source: "restore" },
@@ -499,6 +532,7 @@ test("accepted first submission finalizes with exactly one review usage", async 
   assert.equal(s.context.statuses.get(EXEC_STATUS_KEY), undefined);
   assert.ok(!s.mock.rawPi.getActiveTools().includes(FINISH_TOOL));
   assert.ok(!s.mock.rawPi.getActiveTools().includes(ASK_TOOL));
+  await assertCompletedInPlace(s);
 });
 for (const status of ["addressed", "disputed"])
   test(status + " finding then acceptance preserves implementer context until acceptance", async () => {
@@ -518,7 +552,7 @@ for (const status of ["addressed", "disputed"])
     assert.equal(second.usage.cost.total, 0.05);
     assert.equal(s.latest().negotiation?.reviewCostUsd, 0.1);
   });
-test("later acceptance carries every substantive round into tool content and the returned custom message", async () => {
+test("later acceptance carries every substantive round into tool content without a duplicate completion", async () => {
   const finding = (id: string) => ({
     id,
     title: `Repair ${id}`,
@@ -587,31 +621,18 @@ test("later acceptance carries every substantive round into tool content and the
   assert.deepEqual(accepted.details.negotiation, s.latest().negotiation);
   assert.deepEqual(first.details, initialDetails, "later reviews do not rewrite earlier result details");
   assertReadableHistory(resultText(accepted), accepted.details);
-  const ctx = s.context.ctx as any;
-  ctx.navigateTree = async (leaf: string) => {
-    ctx.sessionManager.getLeafId = () => leaf;
-  };
-  await s.mock.commands.get("plan-back")!.handler("", ctx);
-  const message = finishMessages(s).at(-1);
-  assert.ok(message);
-  assertReadableHistory(message.content, message.details);
-  assert.deepEqual(message.details.negotiation, accepted.details.negotiation);
-  assertFinishRenders(s, accepted, "Implementation · Accepted", message);
+  await assertCompletedInPlace(s);
+  assertFinishRenders(s, accepted, "Implementation · Accepted");
 });
 
 test("completed registered renderers preview literal report text but retain the full report on expansion", async () => {
   const s = await setup({ returnTo: "planning-leaf" });
   const report = `Literal implementation opening. ${"Detailed implementation evidence. ".repeat(30)}\n\nFinal paragraph retained only on expansion.`;
   const result = await submit(s, { report });
-  const ctx = s.context.ctx as any;
-  ctx.navigateTree = async (leaf: string) => {
-    ctx.sessionManager.getLeafId = () => leaf;
-  };
-  await s.mock.commands.get("plan-back")!.handler("", ctx);
-  const message = finishMessages(s).at(-1);
-  assert.ok(message);
+  await assertCompletedInPlace(s);
+  // An explicit renderer fixture, not a second completion published by the tool.
+  const message = { customType: FINISH_MESSAGE_TYPE, content: resultText(result), details: result.details };
   assertReadableHistory(resultText(result), result.details);
-  assertReadableHistory(message.content, message.details);
   const tool = s.mock.tools.find((candidate) => candidate.name === FINISH_TOOL) as any;
   const custom = s.mock.messageRenderers.get(FINISH_MESSAGE_TYPE);
   assert.ok(custom);
@@ -704,21 +725,15 @@ test("unavailable planner pauses; disabled review completes without acceptance",
   assert.equal(result.details.completion, "no_review");
   assertReadableHistory(resultText(result), result.details);
   assert.match(resultText(result), /Completed without review/u);
-  const ctx = disabled.context.ctx as any;
-  ctx.navigateTree = async (leaf: string) => {
-    ctx.sessionManager.getLeafId = () => leaf;
-  };
-  await disabled.mock.commands.get("plan-back")!.handler("", ctx);
-  const message = finishMessages(disabled).at(-1);
-  assert.ok(message);
-  assertReadableHistory(message.content, message.details);
-  assertFinishRenders(disabled, result, "Implementation · Completed without review", message);
+  assert.equal(result.details.returnedTo, opus.name);
+  assertFinishRenders(disabled, result, "Implementation · Completed without review");
   assert.equal(disabled.sessions.prompts.length, 0);
   assert.deepEqual(s.execEvents, [{ active: true, source: "restore" }], "paused execution stays active");
   assert.deepEqual(disabled.execEvents, [
     { active: true, source: "restore" },
     { active: false, source: "transition" },
   ]);
+  await assertCompletedInPlace(disabled);
 });
 test("retry preserves the saved finding responses as well as report and accumulated costs", async () => {
   const reviews = [decision("changes_requested"), "invalid", decision()];
@@ -810,6 +825,7 @@ test("override requires confirmation, stop abandons without completion", async (
   await command(s, "accept");
   assert.equal(s.latest().active, false);
   assert.equal(s.latest().pendingReturn, undefined);
+  assert.equal(s.latest().completion?.returnedTo, opus.name);
   const override = finishMessages(s).at(-1);
   assert.ok(override);
   assertReadableHistory(override.content, override.details);
@@ -845,6 +861,7 @@ test("override requires confirmation, stop abandons without completion", async (
   ]);
   assert.equal(stopped.mock.setModels.length, 0, "stop does not restore the planning model");
   assert.equal(stopped.context.statuses.get(EXEC_STATUS_KEY), undefined);
+  await assertCompletedInPlace(s, 1);
 });
 
 test("zero revision setting is snapshotted at legacy migration", async () => {
@@ -872,14 +889,14 @@ test("human answers survive reload and reach the next reviewer as user-provided 
   assert.equal(result.details.completion, "accepted");
   assert.match(s.sessions.prompts.at(-1) ?? "", /User-provided answers.*User verified readiness manually/);
 });
-test("failed return navigation persists and can be retried after reload", async () => {
+test("inactive legacy pending return persists and can be explicitly retried after reload", async () => {
   const s = await setup({ returnTo: "planning-leaf" });
   const markers = () =>
     s.mock.sentMessages.filter(
       ({ message }) => (message as { customType?: string }).customType === "workflow:transition",
     );
   assert.deepEqual(markers(), []);
-  await submit(s);
+  await restoreLegacyPendingReturn(s);
   const completionMarkers = [
     {
       message: {
@@ -926,14 +943,14 @@ test("failed return navigation persists and can be retried after reload", async 
     message,
   );
 });
-test("failed return after a real leaf switch does not restore the old retry record", async () => {
+test("inactive legacy failed return after a real leaf switch does not restore the old retry record", async () => {
   const s = await setup({ returnTo: "planning-leaf" });
   const markers = () =>
     s.mock.sentMessages.filter(
       ({ message }) => (message as { customType?: string }).customType === "workflow:transition",
     );
   assert.deepEqual(markers(), []);
-  await submit(s);
+  await restoreLegacyPendingReturn(s);
   const completionMarkers = [
     {
       message: {
@@ -1062,7 +1079,7 @@ test("stale override confirmation cannot finalize a restored execution", async (
   assert.equal(s.latest().active, true);
   assert.equal(s.mock.setModels.length, 0);
 });
-test("no UI override refuses and no return leaf does not schedule navigation", async () => {
+test("no UI override refuses and completion never schedules navigation", async () => {
   const s = await setup({ hasUI: false, script: () => ({ reply: "invalid" }) });
   await submit(s);
   await command(s, "accept");
@@ -1087,7 +1104,7 @@ test("cancellation drains delayed abort usage exactly once before disposal", asy
   await submit(s);
   assert.equal(s.latest().negotiation?.reviewCostUsd, 0.05);
 });
-test("idle override explicitly schedules return and successful return clears source branch", async () => {
+test("idle command override restores in place and publishes exactly one completion", async () => {
   const s = await setup({
     returnTo: "planning",
     script: () => ({ reply: "invalid" }),
@@ -1095,35 +1112,87 @@ test("idle override explicitly schedules return and successful return clears sou
   });
   await submit(s);
   await command(s, "accept");
-  assert.ok(s.mock.sentUserMessages.some((m) => m.text === "/plan-back"));
-  const ctx = s.context.ctx as any;
-  ctx.navigateTree = async (leaf: string) => {
-    assert.equal(s.latest().pendingReturn, undefined, "source must be cleared before navigation");
-    ctx.sessionManager.getLeafId = () => leaf;
-  };
-  await s.mock.commands.get("plan-back")!.handler("", ctx);
-  await s.emit("session_tree", {});
-  await s.emit("agent_settled", { aborted: false });
-  assert.equal(s.mock.sentUserMessages.filter((m) => m.text === "/plan-back").length, 1);
+  assert.equal(s.mock.setModels.length, 1);
+  assert.equal(s.latest().completion?.returnedTo, opus.name);
+  await assertCompletedInPlace(s, 1);
 });
-for (const failure of ["false", "throw"] as const)
-  test(`failed model restoration (${failure}) stays actionable in the final card`, async () => {
-    const s = await setup({ returnTo: "planning" });
-    const restore = vi.fn(async () => {
-      if (failure === "throw") throw new Error("Model selection failed");
-      return false;
+for (const origin of ["tool", "command"] as const)
+  for (const failure of ["false", "throw"] as const)
+    test(`${origin} failed model restoration (${failure}) stays actionable in the final card`, async () => {
+      const s = await setup({
+        returnTo: "planning",
+        script: () => ({ reply: origin === "tool" ? decision() : "invalid" }),
+      });
+      if (origin === "command") await submit(s);
+      const restore = vi.fn(async () => {
+        if (failure === "throw") throw new Error("Model selection failed");
+        return false;
+      });
+      s.mock.rawPi.setModel = restore;
+      let result: Result;
+      if (origin === "tool") result = await submit(s);
+      else {
+        (s.context.ctx as any).ui.select = async () => "Finish without review";
+        await command(s, "accept");
+        const message = finishMessages(s).at(-1)!;
+        result = { content: [{ type: "text", text: message.content }], details: message.details };
+      }
+      assert.equal(restore.mock.calls.length, 1);
+      assert.equal(result.details.returnedTo, undefined);
+      assert.equal(result.details.action, "Planning model restoration failed; select the model manually.");
+      assert.equal(s.latest().completion?.action, result.details.action);
+      assert.equal(s.latest().pendingReturn, undefined);
+      await assertCompletedInPlace(s, origin === "tool" ? 0 : 1);
+      assertReadableHistory(resultText(result), result.details);
+      assertFinishRenders(
+        s,
+        result,
+        origin === "tool" ? "Implementation · Accepted" : "Implementation · Completed by user override",
+      );
+      assert.doesNotMatch(resultText(result), /Claude Sonnet 5\.5 → Claude Opus/u);
     });
-    s.mock.rawPi.setModel = restore;
-    const result = await submit(s);
-    assert.equal(restore.mock.calls.length, 1);
-    assert.equal(result.details.returnedTo, undefined);
-    assert.equal(result.details.action, "Planning model restoration failed; select the model manually.");
-    assert.equal(s.latest().completion?.action, result.details.action);
-    assert.match(s.latest().pendingReturn?.details.action ?? "", /restoration failed/);
-    assertReadableHistory(resultText(result), result.details);
-    assertFinishRenders(s, result, "Implementation · Accepted");
-    assert.doesNotMatch(resultText(result), /Claude Sonnet 5\.5 → Claude Opus/u);
-  });
+for (const origin of ["tool", "command"] as const)
+  for (const identity of ["named", "matching legacy", "different legacy", "manual"] as const)
+    test(`${origin} completion preserves restore identity: ${identity}`, async () => {
+      const s = await setup({
+        completionReview: false,
+        returnTo: "legacy-planning-leaf",
+        ...(identity === "named"
+          ? { restoreName: "Original planning model", plannerSpec: sonnet.provider + "/" + sonnet.id }
+          : {}),
+        ...(identity === "different legacy" ? { plannerSpec: sonnet.provider + "/" + sonnet.id } : {}),
+        script: () => ({ reply: "invalid" }),
+      });
+      if (identity === "manual")
+        (s.context.ctx as any).model = { provider: "test", id: "manual", name: "Manually chosen" };
+      let details: any;
+      if (origin === "tool") details = (await submit(s)).details;
+      else {
+        // Override follows the command completion path, with a saved report and explicit confirmation.
+        s.latest().negotiation!.phase = "paused";
+        s.latest().negotiation!.latestReport = completion;
+        s.latest().negotiation!.pause = { reason: "failure", action: "Retry explicitly." };
+        await s.emit("session_tree", {});
+        (s.context.ctx as any).ui.select = async () => "Finish without review";
+        await command(s, "accept");
+        details = finishMessages(s).at(-1)?.details;
+      }
+      assert.equal(details.completion, origin === "tool" ? "no_review" : "user_override");
+      assert.equal(s.mock.setModels.length, identity === "manual" ? 0 : 1);
+      assert.equal(
+        details.returnedTo,
+        identity === "manual"
+          ? undefined
+          : identity === "named"
+            ? "Original planning model"
+            : identity === "different legacy"
+              ? "anthropic/claude-opus-5-5"
+              : opus.name,
+      );
+      assert.equal(details.action, undefined);
+      await assertCompletedInPlace(s, origin === "tool" ? 0 : 1);
+    });
+
 test("record:false begin seeds its host transaction with fresh identity and snapshotted budget", () => {
   const mock = createMockPi();
   const ctx = createMockContext({ mode: "tui" }).ctx;
@@ -1427,6 +1496,10 @@ for (const action of ["stop", "accept"] as const)
     if (action === "stop") {
       assert.equal(s.latest().pendingReturn, undefined);
       assert.equal(s.mock.setModels.length, 0);
+    } else {
+      assert.equal(s.mock.setModels.length, 1);
+      assert.equal(result.details.returnedTo, opus.name);
+      await assertCompletedInPlace(s);
     }
   });
 

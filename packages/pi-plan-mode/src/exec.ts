@@ -73,9 +73,11 @@ export interface ExecState {
   /** `provider/id` the handoff switched to; "" when unknown */
   implementerModel: string;
   planner?: { spec: string; name: string; sessionFile: string };
-  /** Model spec to return to when finish_plan ends exec mode */
+  /** Model spec to restore when finish_plan ends exec mode. */
   restore?: string;
-  /** The planning conversation's last entry, which finish_plan navigates back to (in-place handoffs). */
+  /** Display name of the original main model, distinct from the consultant. */
+  restoreName?: string;
+  /** Legacy return leaf, retained only for parsing older active states. */
   returnTo?: string;
   asks: number;
   costUsd: number;
@@ -236,10 +238,9 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     usage?: Usage,
   ) => {
     if (!live(current, token)) return text("Execution changed; finalization discarded.");
-    if (current.returnTo && ctx.hasUI && details.completion !== "stopped") {
-      pendingReturn = { leaf: current.returnTo, details: structuredClone(details) };
-      current.pendingReturn = pendingReturn;
-    }
+    current.returnTo = undefined;
+    current.pendingReturn = undefined;
+    pendingReturn = undefined;
     current.completion = structuredClone(details);
     end(ctx);
     if (details.completion !== "stopped") {
@@ -253,17 +254,22 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
           /* The final report remains durable even when restoration fails. */
         }
         if (!live(current, token)) return text("Execution changed during model restoration.");
-        if (restored && current.planner) details.returnedTo = current.planner.name;
+        if (restored) {
+          const plannerSpec = parseModelSpec(current.planner?.spec);
+          details.returnedTo =
+            current.restoreName ??
+            (plannerSpec &&
+            current.planner &&
+            plannerSpec.provider === spec.provider &&
+            plannerSpec.modelId === spec.modelId
+              ? current.planner.name
+              : `${spec.provider}/${spec.modelId}`);
+        }
         if (!restored) details.action = "Planning model restoration failed; select the model manually.";
       }
     }
     if (live(current, token)) {
       current.completion = structuredClone(details);
-      persist();
-    }
-    if (pendingReturn && live(current, token)) {
-      pendingReturn.details = structuredClone(details);
-      current.pendingReturn = pendingReturn;
       persist();
     }
     return {
@@ -487,7 +493,6 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       }
       const result = await finalize(current, token, details, ctx);
       if (origin === "command" && live(current, token)) {
-        if (pendingReturn) pi.sendUserMessage(`/${BACK_COMMAND}`, { expandPromptTemplates: true });
         pi.sendMessage({
           customType: FINISH_MESSAGE_TYPE,
           content: finishMessageText(details),
@@ -1166,17 +1171,11 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     },
   });
 
-  // Back to the planning conversation: a tool cannot navigate the session tree, a command can, and a
-  // command sent once the turn has settled runs outside the streaming turn.
+  // Explicit recovery of legacy saved returns; normal completion stays on the current branch.
   pi.on("agent_settled", (event, ctx) => {
     replies.settled();
     busy = false;
     updateStatus(ctx);
-    if (pendingReturn) {
-      // Keep the report available to /plan-back even when review cancellation aborts the turn.
-      if (!event.aborted) pi.sendUserMessage(`/${BACK_COMMAND}`, { expandPromptTemplates: true });
-      return;
-    }
     if (!state?.active) return;
     const n = state.negotiation!;
     if (n.phase === "paused" && pauseShownThisRun) return;
@@ -1204,7 +1203,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       ),
   );
   pi.registerCommand(BACK_COMMAND, {
-    description: "Return to the planning conversation after an implementation (runs by itself)",
+    description: "Recover a saved legacy return to the planning branch (explicit only)",
     handler: async (_args, ctx) => {
       const back = pendingReturn;
       if (!back || !ctx.isIdle()) return;
@@ -1359,6 +1358,7 @@ function validState(data: unknown): ExecState | undefined {
     implementerModel: typeof entry.implementerModel === "string" ? entry.implementerModel : "",
     ...(valid ? { planner: { spec: planner.spec, name: planner.name, sessionFile: planner.sessionFile } } : {}),
     ...(typeof entry.restore === "string" ? { restore: entry.restore } : {}),
+    ...(typeof entry.restoreName === "string" ? { restoreName: entry.restoreName } : {}),
     ...(typeof entry.returnTo === "string" ? { returnTo: entry.returnTo } : {}),
     asks: Number.isSafeInteger(entry.asks) && entry.asks! >= 0 ? entry.asks! : 0,
     costUsd:

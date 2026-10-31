@@ -73,6 +73,7 @@ try {
       let callCount = 0;
       let selectedEffort;
       const requestedModels = [];
+      const requests = [];
       const services = await createAgentSessionServices({ cwd: dir, agentDir: temp, modelRuntime: models,
         settingsManager: SettingsManager.inMemory({ cacheWarming: 'off', compaction: { enabled: false } }),
         resourceLoaderOptions: { noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
@@ -93,12 +94,14 @@ try {
       ({ session } = await createAgentSessionFromServices({ services, sessionManager: manager,
         model: models.getModel('anthropic', planningId), thinkingLevel: 'off' }));
       const script = [];
-      session.agent.streamFunction = model => {
+      session.agent.streamFunction = (model, context) => {
+        requests.push({ model: model.id, messages: structuredClone(context.messages) });
         const stream = createAssistantMessageEventStream();
         requestedModels.push(model.id);
         const next = script.shift();
-        const content = next ? [{ type: 'toolCall', id: next.id, name: next.name, arguments: next.args }] : [{ type: 'text', text: 'Local response.' }];
-        const reason = next ? 'toolUse' : 'stop';
+        const content = next?.text ? [{ type: 'text', text: next.text }]
+          : next ? [{ type: 'toolCall', id: next.id, name: next.name, arguments: next.args }] : [{ type: 'text', text: 'Local response.' }];
+        const reason = next && !next.text ? 'toolUse' : 'stop';
         const message = { role: 'assistant', content, api: model.api, provider: model.provider, model: model.id,
           usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: reason, timestamp: Date.now() };
         queueMicrotask(() => { stream.push({ type: 'done', reason, message }); stream.end(message); });
@@ -168,7 +171,7 @@ try {
         const id = `local-${++callCount}`;
         script.push({ id, name, args });
         await session.prompt(`Local integration: ${name}`);
-        // Handoff compacts the active projection, but its approval result remains in history.
+        // Locate the actual tool result persisted by AgentSession.
         const result = manager.getEntries().filter(entry => entry.type === 'message').map(entry => entry.message)
           .filter(message => message.role === 'toolResult' && message.toolCallId === id).at(-1);
         assert(result, `${label}: ${name} executed through AgentSession: ${JSON.stringify(session.state.messages.slice(-2))}`);
@@ -296,12 +299,25 @@ try {
         check('plan');
         const handoffFile = branchData('plan-mode:inline')?.planFile;
         writeFileSync(handoffFile, '# Handoff plan\n\nImplement a local test.\n');
+        const planningMarker = `planning-history-${label}`;
+        await session.prompt(planningMarker);
+        const beforeHandoff = requests.length;
+        const compactions = () => manager.getEntries().filter(entry => entry.type === 'compaction');
+        const beforeCompactions = structuredClone(compactions());
         approvalChoice = 'handoff';
         selectedEffort = 'off';
         result = await call('exit_plan_mode');
         assert.equal(result.details?.outcome, 'handoff', JSON.stringify(result));
         assert.equal(session.model.id, implementationId);
         assert.equal(requestedModels.at(-1), implementationId, 'handoff continues using the distinct model');
+        assert.deepEqual(requests.slice(beforeHandoff).map(request => request.model), [planningId, implementationId],
+          'approval hands off directly without an extra planner turn');
+        const firstExecutor = requests[beforeHandoff + 1];
+        assert(JSON.stringify(firstExecutor.messages).includes(planningMarker), 'first executor sees planning history');
+        assert(firstExecutor.messages.some(message => message.role === 'toolResult'
+          && message.toolCallId === result.toolCallId && JSON.stringify(message.content) === JSON.stringify(result.content)),
+        'first executor sees the approval tool result');
+        assert.deepEqual(compactions(), beforeCompactions, 'handoff must not compact');
         assert.equal(branchData('plan-mode:exec')?.active, true);
         assert(session.getActiveToolNames().includes('finish_plan'));
         check('exec', 'bypassPermissions', ['work']); // Approval exits plan before beginning implementation.
@@ -364,6 +380,32 @@ try {
         await go(workLeaf);
         check('work');
         assert.equal(approvalCount, 3, 'one approval dialog per submission');
+        await go(execLeaf);
+        check('exec');
+        const implementationMarker = `implementation-history-${label}`;
+        script.push({ text: implementationMarker });
+        await session.prompt('Carry out the approved implementation.');
+        const completionReport = `completed-implementation-${label}`;
+        result = await call('finish_plan', { report: completionReport, verification: 'Local checks passed.', concerns: 'None.' });
+        check('work');
+        assert.equal(branchData('plan-mode:exec')?.active, false);
+        assert.equal(session.model.id, planningId, 'completion restores the planning model');
+        assert(!session.getActiveToolNames().includes('finish_plan'));
+        const activeHistory = JSON.stringify(manager.getBranch());
+        for (const marker of [planningMarker, implementationMarker, completionReport]) {
+          assert(activeHistory.includes(marker), `${label}: completion retains ${marker} on active branch`);
+        }
+        assert(manager.getBranch().some(entry => entry.type === 'message'
+          && entry.message.role === 'toolResult' && entry.message.toolCallId === result.toolCallId),
+        'completion result remains on the active branch');
+        const beforeFollowup = requests.length;
+        await session.prompt('What did we plan and implement?');
+        assert.equal(requests.length, beforeFollowup + 1);
+        assert.equal(requests.at(-1).model, planningId);
+        for (const marker of [planningMarker, implementationMarker, completionReport]) {
+          assert(JSON.stringify(requests.at(-1).messages).includes(marker), `restored model sees ${marker}`);
+        }
+        assert.deepEqual(compactions(), beforeCompactions, 'completion and follow-up must not compact');
       }
       assert.deepEqual(errors, [], label);
       await session.dispose();
@@ -578,8 +620,9 @@ try {
   // on the old extension objects (that would hide stale-context and load-order bugs).
   const { createCustomSelectorHarness } = await createJiti(import.meta.url).import('../packages/pi-plan-mode/test/support.ts');
   for (const names of [['tool-gate', 'plan-mode'], ['plan-mode', 'tool-gate']]) {
-    for (const activation of ['success', 'false', 'invalid', 'throw']) {
-      const label = `${names.join('+')}-fresh-${activation}`;
+    for (const activation of ['success', 'false', 'invalid', 'throw', 'keep-A', 'keep-M']) {
+      const keep = activation.startsWith('keep-');
+      const label = `${names.join('+')}-${keep ? activation : `fresh-${activation}`}`;
       let runtime;
       try {
         const dir = resolve(temp, label);
@@ -598,6 +641,7 @@ try {
         const events = [];
         const starts = [];
         const requests = [];
+        const script = [];
         let generation = 0;
         let api;
         let harness;
@@ -622,14 +666,18 @@ try {
           assert.deepEqual(services.resourceLoader.getExtensions().errors, [], label);
           const result = await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent,
             model: models.getModel('anthropic', planningId), thinkingLevel: 'off' });
-          result.session.agent.streamFunction = model => {
-            requests.push({ owner, model: model.id });
+          result.session.agent.streamFunction = (model, context) => {
+            requests.push({ owner, model: model.id, messages: structuredClone(context.messages) });
             const stream = createAssistantMessageEventStream();
-            const message = { role: 'assistant', content: [{ type: 'text', text: 'Local fresh implementation response.' }],
-              api: model.api, provider: model.provider, model: model.id, stopReason: 'stop', timestamp: Date.now(),
+            const next = script.shift();
+            const content = next ? [{ type: 'toolCall', id: `${label}-finish`, name: 'finish_plan', arguments: next }]
+              : [{ type: 'text', text: model.id === implementationId ? `implementation-marker-${label}` : `planning-response-${label}` }];
+            const reason = next ? 'toolUse' : 'stop';
+            const message = { role: 'assistant', content,
+              api: model.api, provider: model.provider, model: model.id, stopReason: reason, timestamp: Date.now(),
               usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
                 cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
-            queueMicrotask(() => { stream.push({ type: 'done', reason: 'stop', message }); stream.end(message); });
+            queueMicrotask(() => { stream.push({ type: 'done', reason, message }); stream.end(message); });
             return stream;
           };
           if (owner === 2 && activation === 'throw') result.session.setModel = async () => { throw new Error('Local activation failure'); };
@@ -639,7 +687,7 @@ try {
         manager.appendCustomEntry('tool-gate:approvals', { version: 1, mode: 'bypassPermissions' });
         manager.appendCustomEntry('plan-run', { id: label, createdAt: 1, task: 'approved local task', state: 'active',
           planners: [{ id: 'A', spec: `anthropic/${planningId}`, name: 'Local planner',
-            plan: '# Fresh SDK plan\n\nImplement locally.', revision: 1 }],
+            plan: '# Planner A SDK plan\n\nImplement planner A locally.', revision: 1 }],
           merged: { plan: '# Fresh SDK plan\n\nImplement locally.', revision: 1,
             name: 'Local planner', spec: `anthropic/${planningId}` } });
         runtime = await createAgentSessionRuntime(createRuntime, { cwd: dir, agentDir: temp, sessionManager: manager });
@@ -675,6 +723,10 @@ try {
         runtime.setRebindSession(bind);
         await bind(runtime.session);
         const original = runtime.session;
+        const planningMarker = `planner-history-${label}`;
+        if (keep) await original.prompt(planningMarker);
+        const beforeHandoff = requests.length;
+        const parentLeaf = manager.getLeafId();
         const opened = original.prompt('/planners');
         // Wait for the real command's asynchronous settings load to open its actual app.
         await boundedUntil(() => harness, `${label}: planner screen`);
@@ -688,13 +740,53 @@ try {
           }
           assert.fail(`Missing ${label}: ${harness.render().join('\n')}`);
         };
+        if (keep) {
+          focus('Plan');
+          const author = activation.slice(5);
+          if (!new RegExp(`Plan\\s+‹ ${author}\\b`, 'u').test(harness.render().join('\n'))) harness.handleInput('\u001b[C');
+          assert.match(harness.render().join('\n'), new RegExp(`Plan\\s+‹ ${author}\\b`, 'u'));
+        }
         focus('Mode');
         harness.handleInput('\u001b[C');
         focus('Context');
-        harness.handleInput('\u001b[C');
-        assert.match(harness.render().join('\n'), /fresh session with only the plan/u);
+        if (!keep) harness.handleInput('\u001b[C');
+        assert.match(harness.render().join('\n'), keep ? /this conversation, plus the plan/u : /fresh session with only the plan/u);
         harness.handleInput('\r');
         await opened;
+        if (keep) {
+          await boundedUntil(() => requests.length > beforeHandoff, `${label}: implementation request`);
+          await original.waitForIdle();
+          assert.equal(runtime.session, original, 'keep must retain the original runtime');
+          assert.equal(generation, 1);
+          assert.deepEqual(requests.slice(beforeHandoff).map(request => request.model), [implementationId],
+            'keep hands off directly without another planner turn');
+          assert(JSON.stringify(requests.at(-1).messages).includes(planningMarker));
+          const exec = () => manager.getBranch().filter(e => e.customType === 'plan-mode:exec').at(-1)?.data;
+          assert.equal(exec()?.active, true);
+          const approvedPlan = activation === 'keep-A'
+            ? '# Planner A SDK plan\n\nImplement planner A locally.' : '# Fresh SDK plan\n\nImplement locally.';
+          assert.equal(readFileSync(exec().planFile, 'utf8').trim(), approvedPlan);
+          assert(JSON.stringify(requests.at(-1).messages).includes(approvedPlan.split('\n')[0]),
+            "executor receives the selected author's plan");
+          const completionReport = `completion-marker-${label}`;
+          script.push({ report: completionReport, verification: 'Local checks passed.', concerns: 'None.' });
+          await original.prompt('Finish the implementation.');
+          assert.equal(exec()?.active, false);
+          assert.equal(original.model.id, planningId);
+          assert(manager.getBranch().some(entry => entry.id === parentLeaf), 'keep retains its ancestor');
+          for (const marker of [planningMarker, `implementation-marker-${label}`, completionReport]) {
+            assert(JSON.stringify(manager.getBranch()).includes(marker), 'keep completion retains both histories');
+          }
+          await original.prompt('Recall our plan and implementation.');
+          assert.equal(requests.at(-1).model, planningId);
+          for (const marker of [planningMarker, `implementation-marker-${label}`, completionReport]) {
+            assert(JSON.stringify(requests.at(-1).messages).includes(marker), 'restored model sees both histories');
+          }
+          assert.equal(manager.getEntries().some(entry => entry.type === 'compaction'), false);
+          assert.deepEqual(errors, [], label);
+          console.log(`PASS actual Pi /planners keep handoff: ${label}, completion and history continuity`);
+          continue;
+        }
         await withDeadline(switched, `${label}: runtime replacement`);
         assert.notEqual(runtime.session, original, 'handoff must replace, not reuse, the original runtime');
         assert.equal(generation, 2);
@@ -744,7 +836,7 @@ try {
           assert(starts[0].tools.includes('finish_plan'));
           assert.match(starts[0].prompt, /# Fresh SDK plan/u);
           assert.match(starts[0].prompt, /finish_plan/u);
-          assert.deepEqual(requests, [{ owner: 2, model: implementationId }]);
+          assert.deepEqual(requests.map(({ owner, model }) => ({ owner, model })), [{ owner: 2, model: implementationId }]);
         } else {
           assert.equal(workflow(), 'plan');
           assert.equal(fresh.model.id, planningId);
@@ -790,6 +882,19 @@ try {
         }
         assert.deepEqual(original.sessionManager.getEntries(), oldEntries, 'old runtime must never persist recovery after replacement');
         assert.equal(starts.length, activation === 'success' ? 1 : 0, 'reload never resends implementation');
+        if (activation === 'success') {
+          const childManager = fresh.sessionManager;
+          const childLeaf = childManager.getLeafId();
+          script.push({ report: `fresh-completion-${label}`, verification: 'Local checks passed.', concerns: 'None.' });
+          await fresh.prompt('Finish this child implementation.');
+          assert.equal(runtime.session, fresh, 'completion stays in the child runtime');
+          assert.equal(runtime.session.sessionManager, childManager, 'completion never returns to the parent manager');
+          assert.notEqual(childManager, manager);
+          assert(childManager.getBranch().some(entry => entry.id === childLeaf), 'completion retains the child branch');
+          assert.equal(branch('plan-mode:exec').at(-1)?.data.active, false);
+          assert(JSON.stringify(childManager.getBranch()).includes(`fresh-completion-${label}`));
+          assert.deepEqual(manager.getEntries(), oldEntries, 'child completion leaves parent unchanged');
+        }
         assert.deepEqual(errors, [], label);
         console.log(`PASS actual Pi /planners fresh handoff: ${label}, once-only bootstrap and reload`);
       } catch (error) {

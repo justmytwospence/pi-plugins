@@ -10,7 +10,7 @@ description: Compare plans deliberately, implement with a chosen context, then s
 /plan Add rate limiting to the public API
 ```
 
-For a focused problem, plan mode in your own conversation is enough: your agent researches read-only, writes a plan file and asks you to approve it, and you pick how implementation proceeds (in auto, accept-edits or manual mode with [pi-tool-gate](/plugins/pi-tool-gate/), or in a fresh session). With the gate, Shift+Tab also cycles into plan mode.
+For a focused problem, plan mode in your own conversation is enough: your agent researches read-only, writes a plan file and asks you to approve it. Implement here with the current model, explicitly compact to the plan in the same session, or hand off to a distinct model while retaining the conversation. Workflow and approvals are independent: with [pi-tool-gate](/plugins/pi-tool-gate/), Alt+A toggles auto/yolo approvals, and Shift+Tab cycles workflows after remapping Pi's stock thinking shortcut.
 
 When another approach is worth a second model session, use the planners screen instead:
 
@@ -37,11 +37,13 @@ Esc offers Hide, Stop planning or Back. Hiding keeps planners running. Reopen wi
 **Implement…** opens a page where you choose:
 
 - The plan: M (first, once there is one), A or B.
-- The model and effort for implementation.
-- **Keep:** the current conversation plus the chosen plan.
-- **Fresh:** a new session with the plan as its starting context.
+- The mode and effort: **Here** uses the main session's current model; **Handoff** offers available distinct-model targets.
+- For **Here**, **keep conversation** or explicitly **compact to plan (same session)**. Both use ordinary chat execution, without a consultant or completion review.
+- For **Handoff**, **keep conversation** or an explicitly selected **fresh child** with only the implementation brief and plan. Handoffs enter exec mode with consultation and completion review; A or B stays on call for its plan, and plan M gets a seeded main-agent consultant even with keep-conversation context.
 
-Keeping the conversation preserves the discussion. Fresh context avoids carrying the entire exploration, but anything essential must be in the plan. Exporting a plan writes a Markdown file; configured completion hooks can also run at implementation/export time.
+Current-session handoffs retain planning and implementation history, including consultations and review. On completion, the original main model is restored in place and the workflow returns to work, not plan, without changing approvals, compacting history or navigating back to a planning branch. `/plan-back` is explicit-only compatibility navigation for legacy saved return targets, not the normal completion path.
+
+Only explicit compact/fresh choices replace context or create a child session. Normal manual and automatic compaction still apply; plan mode does not substitute a plan-only summary for them. Anything essential for compact or fresh context must be in the plan. Exporting a plan writes a Markdown file; configured completion hooks can also run at implementation/export time.
 
 ## Review actual files
 

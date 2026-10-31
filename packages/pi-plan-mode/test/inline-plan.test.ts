@@ -993,8 +993,9 @@ test("aborting during a model switch never starts handoff implementation", async
   );
   assert.equal(h.projection.mock.calls.length, 0);
   assert.ok(h.getLeafId.mock.calls.length >= 1);
-  assert.equal(h.inline().active, true, "aborted model switch returns to plan");
-  assert.equal(h.context.statuses.get("workflow-mode"), "workflow: plan");
+  assert.deepEqual(h.mock.thinkingLevels, []);
+  assert.equal(h.inline().active, false, "aborted model switch must not recover into planning");
+  assert.equal(h.context.statuses.get("workflow-mode"), "workflow: work");
 });
 
 test("cancelling RPC effort returns to actions; action cancel does not approve or implement", async () => {
@@ -1194,7 +1195,7 @@ test("inline handoffs use authenticated availability, not the cycling shortlist"
   }
 });
 
-test("a handoff compacts the context down to the plan and continues on the target model, once", async () => {
+test("a handoff preserves history and continues on the target model with exactly two drafts, once", async () => {
   const { mock, context, tool, emit, inline, getLeafId } = await setup({
     models: true,
     select: ["Yes, hand off to Claude Sonnet 5.5 (high)"],
@@ -1212,28 +1213,47 @@ test("a handoff compacts the context down to the plan and continues on the targe
   assert.equal(result.details.outcome, "handoff");
   assert.equal(result.details.handoff, "Claude Sonnet 5.5");
   assert.equal(context.statuses.get("workflow-mode"), "workflow: work", "pending handoff is not exec");
-  assert.match(result.content[0]?.text ?? "", /you stay on call/u);
+  assert.match(result.content[0]?.text ?? "", /continues in this conversation with its history/u);
+  assert.match(result.content[0]?.text ?? "", /You stay on call/u);
+  const leafReads = getLeafId.mock.calls.length;
   const settled = await emit("agent_before_settle", { outcome: "completed" });
+  assert.deepEqual(Object.keys(settled).sort(), ["continue", "entries"], "no context edits");
   assert.equal(settled.continue, true);
+  assert.equal(settled.entries.length, 2, "only exec state and the conversational handoff brief");
   assert.equal(settled.entries[0].type, "custom");
   assert.equal(settled.entries[0].customType, "plan-mode:exec");
   assert.equal(settled.entries[0].data.active, true);
   assert.equal(context.statuses.get("workflow-mode"), "workflow: exec");
   assert.equal(context.statuses.get("permission-mode"), undefined);
-  assert.equal(settled.entries[0].data.returnTo, "planning-leaf", "return to the leaf before the model switch");
-  assert.ok(getLeafId.mock.calls.length >= 1);
+  assert.equal(Object.hasOwn(settled.entries[0].data, "returnTo"), false);
+  assert.equal(getLeafId.mock.calls.length, leafReads, "handoff does not capture a return-navigation anchor");
   assert.equal(settled.entries[0].data.planner.name, "Claude Opus 5.5");
   assert.equal(settled.entries[0].data.restore, "anthropic/claude-opus-5-5:off");
   assert.ok(existsSync(settled.entries[0].data.planner.sessionFile), "the seeded planner session is on disk");
-  assert.equal(settled.entries[1].type, "compaction");
-  assert.equal(settled.entries[1].firstKeptEntryId, null);
-  assert.equal(settled.entries[2].type, "custom_message");
-  assert.equal(settled.entries[2].customType, "plan-mode-handoff");
-  assert.equal(settled.entries[2].display, true);
-  assert.match(settled.entries[2].content, /ask_planner/u);
-  assert.match(settled.entries[2].content, /## Approved plan\n\n# Plan\n\n1\. Do it$/u);
-  assert.equal(settled.entries[2].details.implementer, "Claude Sonnet 5.5");
-  assert.equal(settled.entries[2].details.planner, "Claude Opus 5.5");
+  assert.equal(settled.entries[1].type, "custom_message");
+  assert.equal(settled.entries[1].customType, "plan-mode-handoff");
+  assert.equal(settled.entries[1].display, true);
+  assert.match(settled.entries[1].content, /ask_planner/u);
+  assert.match(settled.entries[1].content, /Claude Opus 5\.5 researched and decided it and is on call/u);
+  assert.doesNotMatch(settled.entries[1].content, /this message is all you have of the planning/u);
+  assert.match(settled.entries[1].content, /## Approved plan\n\n# Plan\n\n1\. Do it$/u);
+  assert.equal(settled.entries[1].details.implementer, "Claude Sonnet 5.5");
+  assert.equal(settled.entries[1].details.planner, "Claude Opus 5.5");
+  assert.equal(
+    settled.entries.some((entry: { type: string }) => entry.type === "compaction"),
+    false,
+  );
+  assert.equal((context.ctx as ExtensionContext).sessionManager.getSessionId(), "s");
+  assert.deepEqual(mock.sentUserMessages, []);
+  assert.ok(
+    mock.sentMessages.every(
+      ({ message, options }) =>
+        (message as { customType?: string }).customType === "workflow:transition" &&
+        (options as { triggerTurn?: boolean }).triggerTurn === false,
+    ),
+    "workflow notices must not queue another continuation",
+  );
+  assert.deepEqual(mock.thinkingLevels, ["high"]);
   assert.deepEqual(
     mock.setModels.map((model: any) => model.id),
     ["claude-sonnet-5-5"],
@@ -1381,34 +1401,55 @@ for (const gate of [false, true]) {
   });
 }
 
-for (const newer of ["chat", "tree"] as const) {
-  test(`pending failed handoff never overwrites a newer ${newer}`, async () => {
-    const h = await setup({ gate: true, models: true, select: ["Yes, hand off to Claude Sonnet 5.5 (high)"] });
-    await h.mock.commands.get("plan")?.handler("", h.context.ctx);
-    writeFileSync(h.inline().planFile, "# Plan\n");
-    await h.tool(EXIT_TOOL).execute("approve", {}, undefined, undefined, h.context.ctx);
-    let resolveSwitch!: (value: boolean) => void;
-    h.mock.rawPi.setModel = () =>
-      new Promise<boolean>((resolve) => {
-        resolveSwitch = resolve;
+for (const switched of [false, true]) {
+  for (const newer of ["workflow", "navigation", "shutdown", "abort"] as const) {
+    test(`deferred ${switched ? "successful" : "failed"} handoff switch is invalidated by ${newer}`, async () => {
+      const h = await setup({ gate: true, models: true, select: ["Yes, hand off to Claude Sonnet 5.5 (high)"] });
+      await h.mock.commands.get("plan")?.handler("", h.context.ctx);
+      writeFileSync(h.inline().planFile, "# Plan\n");
+      await h.tool(EXIT_TOOL).execute("approve", {}, undefined, undefined, h.context.ctx);
+      const abort = new AbortController();
+      (h.context.ctx as ExtensionContext).signal = abort.signal;
+      let resolveSwitch!: (value: boolean) => void;
+      let switchStarted!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        switchStarted = resolve;
       });
-    const settling = h.emit("agent_before_settle", { outcome: "completed" });
-    if (newer === "chat") h.mock.eventBus.emit(MODE_CHANGED, { mode: "chat", cycle: ["work", "chat", "plan"] });
-    else {
-      h.getLeafId.mockReturnValue("other-leaf");
-      Object.assign((h.context.ctx as ExtensionContext).sessionManager, { getBranch: () => [] });
-      await h.emit("session_tree", {});
-    }
-    const transitions = h.gateEvents.length;
-    resolveSwitch(false);
-    assert.equal(await settling, undefined);
-    assert.equal(h.inline().active, false);
-    assert.equal(h.gateEvents.length, transitions, "recovery must not request plan on newer state");
-    assert.equal(
-      h.mock.entries.some((entry) => entry.customType === "plan-mode:exec"),
-      false,
-    );
-  });
+      h.mock.rawPi.setModel = () =>
+        new Promise<boolean>((resolve) => {
+          resolveSwitch = resolve;
+          switchStarted();
+        });
+      const settling = h.emit("agent_before_settle", { outcome: "completed" });
+      await ready;
+      if (newer === "workflow") h.mock.eventBus.emit(MODE_CHANGED, { mode: "chat", cycle: ["work", "chat", "plan"] });
+      else if (newer === "navigation") {
+        h.getLeafId.mockReturnValue("other-leaf");
+        Object.assign((h.context.ctx as ExtensionContext).sessionManager, { getBranch: () => [] });
+        await h.emit("session_tree", {});
+      } else if (newer === "shutdown") await h.emit("session_shutdown", {});
+      else abort.abort();
+      const transitions = h.gateEvents.length;
+      const entries = h.mock.entries.length;
+      const statuses = [...h.context.statuses];
+      resolveSwitch(switched);
+      assert.equal(await settling, undefined);
+      assert.equal(await h.emit("agent_before_settle", { outcome: "completed" }), undefined, "no delayed continuation");
+      assert.equal(h.inline().active, false);
+      assert.equal(h.gateEvents.length, transitions, "recovery must not request plan on newer state");
+      assert.equal(h.mock.entries.length, entries, "no stale exec state is persisted");
+      assert.deepEqual([...h.context.statuses], statuses);
+      assert.deepEqual(h.mock.thinkingLevels, [], "stale success must not change effort");
+      assert.equal(h.projection.mock.calls.length, 0, "no consultant is seeded");
+      assert.equal(h.newSession.mock.calls.length, 0);
+      assert.deepEqual(h.mock.sentMessages, []);
+      assert.deepEqual(h.mock.sentUserMessages, []);
+      assert.equal(
+        h.mock.entries.some((entry) => entry.customType === "plan-mode:exec"),
+        false,
+      );
+    });
+  }
 }
 
 test("restore queries destination entries and cwd, ignores cached exec, and defers missing plan allocation", async () => {

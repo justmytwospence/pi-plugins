@@ -35,7 +35,7 @@ import {
 } from "./editor-contract.js";
 import { EXEC_ENTRY, type ExecState, registerExec } from "./exec.js";
 import { editExternally, externalEditorCommand, prepareEditor } from "./external-editor.js";
-import { directImplementationBrief, HANDOFF_MESSAGE_TYPE, HANDOFF_SUMMARY, implementationBrief } from "./handoff.js";
+import { directImplementationBrief, HANDOFF_MESSAGE_TYPE, implementationBrief } from "./handoff.js";
 import { HERDR_BLOCKED_CHANNEL, holdBlocked, holdWorking, isOwnEmit } from "./herdr-blocked.js";
 import {
   formatModelKey,
@@ -736,8 +736,8 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     toggleKey: () => configuredPlanModeToggleShortcut(settings),
   });
 
-  // An approved plan handed off: once the turn that approved it ends, compact the context down to
-  // the plan, switch the model and continue with the implementation brief.
+  // An approved plan handed off: once the turn that approved it ends, preserve its history,
+  // switch the model and continue with the implementation brief.
   pi.on("agent_before_settle", async (event, ctx) => {
     const operation = pendingOperation;
     pendingOperation = undefined;
@@ -795,15 +795,13 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       who.target,
       approval.thinkingLevel ?? who.target.thinkingLevel ?? settings.defaultImplementationThinkingLevel ?? "medium",
     );
-    const returnTo = ctx.sessionManager.getLeafId?.() ?? undefined;
-    if (
-      !(await applyRuntime(ctx, target)) ||
-      operation.epoch !== branchEpoch ||
-      !runtimeActive ||
-      ctx.signal?.aborted ||
-      operation.workflowRevision !== inline.revision
-    ) {
-      recover();
+    const live = () =>
+      runtimeActive &&
+      operation.epoch === branchEpoch &&
+      operation.workflowRevision === inline.revision &&
+      !ctx.signal?.aborted;
+    if (!(await applyRuntime(ctx, target, live)) || !live()) {
+      if (live()) recover();
       return undefined;
     }
     let sessionFile: string | undefined;
@@ -831,7 +829,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       implementerModel: formatModelKey(target),
       ...(planner ? { planner } : {}),
       restore: formatModelSpec(who.planning),
-      ...(returnTo ? { returnTo } : {}),
+      restoreName: who.planningName,
       asks: 0,
       costUsd: 0,
     };
@@ -840,18 +838,12 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       entries: [
         { type: "custom" as const, customType: EXEC_ENTRY, data: execState },
         {
-          type: "compaction" as const,
-          summary: HANDOFF_SUMMARY,
-          firstKeptEntryId: null,
-          details: { planMode: { handoff: approval.planFile } },
-        },
-        {
           type: "custom_message" as const,
           customType: HANDOFF_MESSAGE_TYPE,
           content: implementationBrief({
             plan: approval.plan,
             planFile: approval.planFile,
-            context: "fresh",
+            context: "here",
             ...(planner ? { planner: planner.name } : {}),
             edited: approval.edited,
           }),
@@ -2032,14 +2024,10 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     }
     // A failed switch must never silently turn a handoff into ordinary execution.
     const workflowRevision = inline.revision;
-    if (
-      context !== "clear" &&
-      (!(await applyRuntime(ctx, target)) ||
-        epoch !== branchEpoch ||
-        !runtimeActive ||
-        workflowRevision !== inline.revision)
-    ) {
-      if (runtimeActive && epoch === branchEpoch && workflowRevision === inline.revision) inline.enter(ctx, planFile);
+    const live = () =>
+      runtimeActive && epoch === branchEpoch && workflowRevision === inline.revision && !ctx.signal?.aborted;
+    if (context !== "clear" && (!(await applyRuntime(ctx, target, live)) || !live())) {
+      if (live()) inline.enter(ctx, planFile);
       return;
     }
     disposeRun("implemented");
@@ -2052,7 +2040,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           name: source.name,
           messages: readSessionMessages(authorFile, ctx.cwd),
         };
-      } else if (source.id === MERGED_ID && context === "clear") {
+      } else if (source.id === MERGED_ID) {
         const spec = source.spec ?? before;
         if (spec)
           consultant = {
@@ -2074,7 +2062,9 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
       implementer: catalog.name(target),
       implementerModel: formatModelKey(target),
       ...(planner ? { planner } : {}),
-      ...(before && !sameModel(before, target) ? { restore: formatModelSpec(before) } : {}),
+      ...(before && !sameModel(before, target)
+        ? { restore: formatModelSpec(before), restoreName: catalog.name(before) }
+        : {}),
       asks: 0,
       costUsd: 0,
     };
