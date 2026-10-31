@@ -102,8 +102,9 @@ test("rejects missing and empty source paths without initializing or modifying t
   expect(() => createTreeFork(missing, dir, "/repo", "entry")).toThrow(/source session is not persisted/);
   expect(existsSync(missing)).toBe(false);
   const empty = join(dir, "empty.jsonl"); writeFileSync(empty, "", { mode: 0o640 });
+  const originalMode = statSync(empty).mode & 0o777;
   expect(() => createTreeFork(empty, dir, "/repo", "entry")).toThrow(/source session is not persisted/);
   expect(readFileSync(empty, "utf8")).toBe("");
-  expect(statSync(empty).mode & 0o777).toBe(0o640);
+  expect(statSync(empty).mode & 0o777).toBe(originalMode);
   expect(readdirSync(dir)).toEqual(["empty.jsonl"]);
 });
