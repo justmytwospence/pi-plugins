@@ -114,96 +114,158 @@ for (const width of [46, 120]) {
   });
 }
 
-test("mounted exchanges fold at render time and never mutate historical details", () => {
-  let current = { executionId: "exec", exchangeId: "review1" };
-  const details: FinishDetails = {
-    ...base,
-    report: Array.from({ length: 25 }, (_, i) => `Report line ${i}`).join("\n\n"),
-    previousFindings: [finding],
-    responses: [{ id: "F1", status: "addressed", response: "Added a readiness test." }],
-  };
-  const before = JSON.stringify(details);
-  const mounted = renderFinish(details, options, theme, () => current);
-  assert.ok(plain(mounted.render(120)).includes("Report line 24"));
-  current = { executionId: "exec", exchangeId: "review2" };
-  const old = plain(mounted.render(120));
-  assert.ok(!old.includes("Report line 24"));
-  assert.ok(old.includes("ctrl+o to expand"));
-  assert.ok(old.includes("Readiness handshake"));
-  assert.ok(old.includes("Added a readiness test."));
-  assert.equal(JSON.stringify(details), before);
-  assert.ok(
-    plain(renderFinish(details, { ...options, expanded: true }, theme, () => current).render(120)).includes(
-      "Report line 24",
-    ),
-  );
-});
-
-test("latest unresolved review exposes the exact question and requested findings", () => {
-  const details = {
-    ...base,
-    decision: {
-      ...decision,
-      outcome: "user_needed" as const,
-      question: "Does the human input test pass?",
-      recommendation: "Test with a real user.",
-    },
-  };
-  const text = plain(renderFinish(details, options, theme, () => details).render(46));
-  assert.ok(text.includes("Add the readiness handshake"));
-  assert.ok(text.includes("Does the human input test pass?"));
-});
-
 for (const width of [46, 120]) {
-  test(`unresolved, failed and exhausted reviews keep actionable details at ${width}`, () => {
-    for (const reason of ["failure", "interrupted", "user_needed", "exhausted"]) {
+  test(`mounted recovered reviews stop waiting without mutating historical details at ${width}`, () => {
+    let current = { executionId: "exec", exchangeId: "review1", phase: "paused" };
+    const details: FinishDetails = {
+      ...base,
+      decision: { ...decision, outcome: "user_needed", question: "Does the human input test pass?" },
+      report: Array.from({ length: 25 }, (_, i) => `Report line ${i}`).join("\n\n"),
+      previousFindings: [finding],
+      responses: [{ id: "F1", status: "addressed", response: "Added a readiness test." }],
+    };
+    const before = JSON.stringify(details);
+    const mounted = renderFinish(details, options, theme, () => current);
+    const waiting = plain(mounted.render(width));
+    assert.ok(waiting.includes("Waiting for your answer"));
+    assert.ok(!waiting.includes("Report line 24"));
+    // Recovery changes phase before another exchange is submitted.
+    current = { ...current, phase: "revising" };
+    for (const exchangeId of ["review1", "review2"]) {
+      current = { ...current, exchangeId };
+      const lines = mounted.render(width);
+      assert.ok(lines.every((line) => visibleWidth(line) <= width));
+      const old = plain(lines).replace(/\s+/gu, " ");
+      assert.ok(old.includes("Previous review"));
+      assert.ok(!old.includes("Waiting for your answer"));
+      assert.ok(!old.includes("Reply here."));
+      assert.ok(!old.includes("Report line 24"));
+      assert.ok(!old.includes("Added a readiness test."));
+      assert.ok(old.includes("ctrl+o to expand"));
+      assert.ok(old.includes("Readiness handshake"));
+      assert.ok(old.includes("Does the human input test pass?"));
+      const expanded = plain(
+        renderFinish(details, { ...options, expanded: true }, theme, () => current).render(width),
+      ).replace(/\s+/gu, " ");
+      assert.ok(expanded.includes("Report line 24"));
+      assert.ok(expanded.includes("Added a readiness test."));
+    }
+    assert.equal(JSON.stringify(details), before);
+  });
+
+  for (const reason of ["failure", "interrupted", "user_needed", "exhausted", "changes_requested", "pending"]) {
+    test(`${reason} review is compact and outcome-first, with full details on expansion at ${width}`, () => {
+      const failed = reason === "failure" || reason === "interrupted";
+      const question = `Can you verify the handshake? ${"Check the exact interactive behavior. ".repeat(12)}Report your result verbatim.`;
+      const error = `Exact ${reason} review error.\n\n${"Diagnostic details. ".repeat(30)}Full error tail.`;
       const details: FinishDetails = {
         ...base,
-        report: "Report start.\n\n" + "Report remains visible.\n".repeat(20) + "Report final paragraph.",
+        report: `Report start.\n\n${"Report detail. ".repeat(30)}\n\nReport final paragraph.`,
+        verification: `Verification start. ${"Reported automated checks. ".repeat(30)}\n\nVerification final paragraph.`,
+        concerns: "Concern start.\n\nConcern middle.\n\nConcern final paragraph.",
+        previousFindings: [finding],
+        responses: [{ id: "F1", status: "addressed", response: "Added a readiness test." }],
         decision:
-          reason === "failure" || reason === "interrupted"
+          failed || reason === "pending"
             ? undefined
             : {
                 ...decision,
-                outcome: "user_needed",
-                question: "Can you verify the handshake?",
-                recommendation: "Perform the manual test before accepting.",
+                outcome: reason === "user_needed" ? "user_needed" : "changes_requested",
+                question: reason === "user_needed" ? question : undefined,
+                recommendation: reason === "user_needed" ? "Perform the manual test before accepting." : undefined,
               },
-        error: reason === "failure" || reason === "interrupted" ? `Exact ${reason} review error` : undefined,
+        error: failed ? error : undefined,
+        pending: reason === "pending",
+        activity: reason === "pending" ? "reading src/session.ts" : undefined,
+        changes: { edited: ["src/changed.ts"], outside: ["extra.ts"], git: "2 files changed" },
         negotiation: {
-          attempts: 3,
+          attempts: 12,
           reviewCostUsd: 0.3,
-          phase: "paused",
-          history: [],
-          pause: {
-            reason,
-            action: "/plan-exec resume <answer> or /plan-exec retry; do not proceed automatically.",
-            question: "Is the manual check complete?",
-          },
+          phase: reason === "pending" ? "reviewing" : reason === "changes_requested" ? "revising" : "paused",
+          history: Array.from({ length: 12 }, (_, i) => ({
+            report: {
+              report: `Historical report ${i}`,
+              verification: `Historical verification ${i}`,
+              concerns: `Historical concerns ${i}`,
+            },
+            decision,
+            error: `Historical error ${i}`,
+            responses: [{ id: "F1", status: "addressed", response: `Historical response ${i}` }],
+          })),
+          pause:
+            reason === "pending" || reason === "changes_requested"
+              ? undefined
+              : {
+                  reason,
+                  action: "/plan-exec resume <answer> or /plan-exec retry; do not proceed automatically.",
+                },
         },
       };
-      const lines = renderFinish(details, options, theme, () => details).render(width);
+      const current = () => ({ ...details, phase: details.negotiation?.phase });
+      const lines = renderFinish(details, options, theme, current).render(width);
       assert.ok(lines.every((line) => visibleWidth(line) <= width));
       const text = plain(lines).replace(/\s+/gu, " ");
-      for (const value of [
+      const outcome = failed
+        ? `Exact ${reason} review error.`
+        : reason === "pending"
+          ? "Planner reviewing… reading src/session.ts"
+          : decision.summary;
+      assert.ok(text.includes(outcome), outcome);
+      assert.ok(text.indexOf(outcome) < text.indexOf("Report start."));
+      assert.ok(text.includes("Verification start."));
+      assert.ok(text.includes("Concern start."));
+      assert.equal(text.match(/ctrl\+o to expand/gu)?.length, 1);
+      if (!failed && reason !== "pending") {
+        assert.ok(text.includes("1 finding"));
+        assert.ok(text.includes(finding.title));
+      }
+      if (reason === "user_needed") {
+        assert.ok(text.includes(question));
+        assert.ok(text.includes("Perform the manual test before accepting."));
+        assert.ok(text.includes("Reply here."));
+        assert.ok(text.indexOf(question) < text.indexOf("Report start."));
+        assert.ok(text.indexOf("Reply here.") < text.indexOf("Report start."));
+      } else if (failed) {
+        assert.ok(text.includes("Review did not finish"));
+        assert.ok(text.includes("No retry has been authorized."));
+      } else if (reason === "exhausted") {
+        assert.ok(text.includes("Another revision needs your approval"));
+        assert.ok(text.includes("Allow one more attempt"));
+      }
+      const hidden = [
         "Report final paragraph.",
+        "Verification final paragraph.",
+        "Concern final paragraph.",
+        "Review rounds",
+        "Reviewed evidence",
+        finding.detail,
+        finding.requestedChange,
+        "Inspected src/session.ts",
+        "Human input has not been tested.",
+        "Added a readiness test.",
+        "Historical report 11",
+        "Historical verification 11",
+        "Historical concerns 11",
+        "Historical error 11",
+        "Historical response 11",
+        "src/changed.ts",
+        "extra.ts",
+        "2 files changed",
         "/plan-exec resume <answer>",
-        "/plan-exec retry",
-        "do not proceed automatically.",
-      ])
-        assert.ok(text.includes(value), value);
-      if (details.error) assert.ok(text.includes(details.error));
-      else
-        for (const value of [
-          finding.detail,
-          finding.requestedChange,
-          "Can you verify the handshake?",
-          "Perform the manual test before accepting.",
-        ])
-          assert.ok(text.includes(value), value);
-      assert.ok(!text.includes("What changed"));
-    }
-  });
+      ];
+      if (failed) hidden.push("Full error tail.");
+      for (const value of hidden) assert.ok(!text.includes(value), value);
+      const expandedLines = renderFinish(details, { ...options, expanded: true }, theme, current).render(width);
+      assert.ok(expandedLines.every((line) => visibleWidth(line) <= width));
+      const expanded = plain(expandedLines).replace(/\s+/gu, " ");
+      for (const value of hidden.filter(
+        (value) => value !== "/plan-exec resume <answer>" || details.negotiation?.pause,
+      ))
+        assert.ok(expanded.includes(value), value);
+      if (failed) assert.ok(expanded.includes(error.replace(/\s+/gu, " ")));
+      assert.ok(!expanded.includes("ctrl+o to expand"));
+    });
+  }
 }
 
 test("confirmed override is amber even when the preceding review failed", () => {

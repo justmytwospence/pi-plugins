@@ -16,6 +16,18 @@ test("the plan standard is in every prompt that asks for a plan", () => {
   assert.match(writeMergedRequest(true), /to the same standard as before\.$/u);
 });
 
+test("the handoff describes conversational recovery without bypassing review safeguards", () => {
+  const brief = implementationBrief({ plan: "# P", context: "here" });
+  assert.match(brief, /why you stopped, what is needed, and what happens after the answer/u);
+  assert.match(brief, /clarification is not authorization/u);
+  assert.match(brief, /continue_plan with action answer and its eligible replyId/u);
+  assert.match(brief, /only an explicit UI selection authorizes a retry or an extra revision attempt/u);
+  assert.match(brief, /dialog is canceled or unavailable, remain paused/u);
+  assert.match(brief, /do not work around the pause or reset the revision budget/u);
+  assert.match(brief, /evidence-backed disputes/u);
+  assert.doesNotMatch(brief, /\/plan-exec resume/u);
+});
+
 test("the implementation brief adapts to who wrote the plan and who answers questions", () => {
   const own = implementationBrief({ plan: "# P", planFile: "/p/a.md", context: "here", own: true });
   assert.ok(own.startsWith("The user approved your plan."));

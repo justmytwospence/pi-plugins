@@ -89,7 +89,7 @@ export interface FinishDetails extends ExchangeIdentity {
     pause?: { reason?: string; action?: string; question?: string };
   };
 }
-export type CurrentExchange = () => ExchangeIdentity | undefined;
+export type CurrentExchange = () => (ExchangeIdentity & { phase?: string }) | undefined;
 
 /** Mounted results consult current execution state on every frame; historical details stay immutable. */
 function dynamic(build: () => Component): Component {
@@ -350,11 +350,36 @@ export function renderFinish(
       if (!options.omitTitle) body.addChild(reviewTitle(theme, finishTitle(details)));
       return body;
     }
-    const live = isCurrent(details, current);
-    // Old sessions without identity respect normal expansion, rather than guessing liveness.
-    const full = options.expanded || (!details.completion && (details.pending || live === true));
-    const label = assessmentSummary(details);
-    if (!options.omitTitle) body.addChild(reviewTitle(theme, finishTitle(details)));
+    // Read once per frame so recovery updates mounted cards without changing stored details.
+    const exchange = current?.();
+    const live = isCurrent(details, current ? () => exchange : undefined);
+    const previous =
+      !details.completion &&
+      (live === false ||
+        (live === true && exchange?.phase !== undefined && exchange.phase !== "paused" && !details.pending));
+    const full = options.expanded;
+    const pause = details.negotiation?.pause;
+    const reason = pause?.reason ?? (details.decision?.outcome === "user_needed" ? "user_needed" : undefined);
+    const label = previous
+      ? `Previous review · ${assessmentSummary(details)}`
+      : !details.pending && !details.completion
+        ? reason === "user_needed"
+          ? "Waiting for your answer"
+          : reason === "exhausted"
+            ? "Another revision needs your approval"
+            : reason === "failure" || reason === "interrupted"
+              ? "Review did not finish"
+              : assessmentSummary(details)
+        : assessmentSummary(details);
+    if (!options.omitTitle)
+      body.addChild(
+        reviewTitle(
+          theme,
+          details.completion
+            ? finishTitle(details)
+            : `Review ${details.round ?? details.negotiation?.attempts ?? 1} · ${label}`,
+        ),
+      );
     if (details.completion && !options.expanded) {
       for (const [label, value] of [
         ["What changed (implementer reported)", details.report || "Not provided."],
@@ -382,7 +407,31 @@ export function renderFinish(
       );
       return body;
     }
-    if (details.headline) body.addChild(new Text(theme.fg("dim", details.headline), 0, 0));
+    if (!details.completion) {
+      const outcome = details.pending
+        ? `Planner reviewing…${details.activity ? ` ${details.activity}` : ""}`
+        : details.error || details.decision?.summary || assessmentSummary(details);
+      section(
+        body,
+        theme,
+        previous ? "Previous outcome" : "Outcome",
+        full ? outcome : completionPreview(outcome, 3, 320).text,
+      );
+      const question = details.decision?.question ?? details.question ?? pause?.question;
+      if (question) section(body, theme, previous ? "Previous question" : "Question for you", question);
+      if (details.decision?.recommendation) section(body, theme, "Recommendation", details.decision.recommendation);
+      const action =
+        reason === "user_needed"
+          ? "Reply here. Ask for clarification if you need it; answering lets implementation continue."
+          : reason === "failure" || reason === "interrupted"
+            ? "Ask to retry the review, or discuss what happened. No retry has been authorized."
+            : reason === "exhausted"
+              ? "Allow one more attempt, discuss the findings, or finish without review."
+              : (details.action ?? pause?.action);
+      if (action && (!previous || full))
+        section(body, theme, previous ? "Previous next action" : "Next action", action);
+    }
+    if (full && details.headline) body.addChild(new Text(theme.fg("dim", details.headline), 0, 0));
     const narrative = new Container();
     section(narrative, theme, "Implementer report", details.report || "Not provided.");
     section(
@@ -397,18 +446,29 @@ export function renderFinish(
       "Outstanding issues (implementer reported)",
       details.concerns || "Not provided; outstanding issues are unknown.",
     );
-    // Fold narrative text, not semantic outcome, findings or cost rows.
     if (full) body.addChild(narrative);
     else {
+      for (const [heading, value] of [
+        ["Implementer report", details.report || "Not provided."],
+        ["Verification (implementer reported)", details.verification || "Not provided; verification is unknown."],
+        [
+          "Outstanding issues (implementer reported)",
+          details.concerns || "Not provided; outstanding issues are unknown.",
+        ],
+      ])
+        section(body, theme, heading, completionPreview(value, 3, 320).text);
+      const findings = details.decision?.findings ?? details.previousFindings ?? [];
+      if (findings.length)
+        section(
+          body,
+          theme,
+          `${findings.length} ${findings.length === 1 ? "finding" : "findings"}`,
+          findings.map((finding) => `- ${finding.title}`).join("\n"),
+        );
       body.addChild(new Spacer(1));
-      folded(
-        body,
-        theme,
-        `### Implementer report\n${details.report}\n\n### Verification (implementer reported)\n${details.verification ?? "Not provided."}\n\n### Outstanding issues\n${details.concerns ?? "Not provided."}`,
-        false,
-      );
+      body.addChild(new Text(theme.fg("dim", "ctrl+o to expand"), 0, 0));
     }
-    for (const finding of details.previousFindings ?? []) {
+    for (const finding of full ? (details.previousFindings ?? []) : []) {
       const response = details.responses?.find((item) => item.id === finding.id);
       section(
         body,
@@ -426,35 +486,16 @@ export function renderFinish(
     const unmatchedResponses = details.responses?.filter(
       (response) => !details.previousFindings?.some((finding) => finding.id === response.id),
     );
-    if (unmatchedResponses?.length) section(body, theme, "Implementer responses", responsesText(unmatchedResponses));
-    if (details.pending)
+    if (full && unmatchedResponses?.length)
+      section(body, theme, "Implementer responses", responsesText(unmatchedResponses));
+    if (full && details.pending)
       section(body, theme, "Planner assessment", `Planner reviewing…${details.activity ? ` ${details.activity}` : ""}`);
-    else if (details.decision) {
-      if (full) {
-        section(body, theme, "Planner assessment", details.decision.summary);
-        if (details.decision.evidence?.length)
-          section(
-            body,
-            theme,
-            "Reviewed evidence",
-            (details.decision.evidence ?? []).map((item) => `- ${item}`).join("\n"),
-          );
-        if (details.decision.limitations?.length)
-          section(
-            body,
-            theme,
-            "Limitations",
-            (details.decision.limitations ?? []).map((item) => `- ${item}`).join("\n"),
-          );
-      } else {
-        body.addChild(new Spacer(1));
-        folded(
-          body,
-          theme,
-          `### Planner assessment\n${details.decision.summary}\n\n### Reviewed evidence\n${(details.decision.evidence ?? []).map((item) => `- ${item}`).join("\n")}\n\n### Limitations\n${(details.decision.limitations ?? []).map((item) => `- ${item}`).join("\n")}`,
-          false,
-        );
-      }
+    else if (full && details.decision) {
+      section(body, theme, "Planner assessment", details.decision.summary);
+      if (details.decision.evidence?.length)
+        section(body, theme, "Reviewed evidence", details.decision.evidence.map((item) => `- ${item}`).join("\n"));
+      if (details.decision.limitations?.length)
+        section(body, theme, "Limitations", details.decision.limitations.map((item) => `- ${item}`).join("\n"));
       for (const finding of details.decision.findings ?? [])
         section(
           body,
@@ -462,16 +503,21 @@ export function renderFinish(
           `${finding.id}: ${finding.title}`,
           full ? `${finding.detail}\n\nRequested change: ${finding.requestedChange}` : finding.title,
         );
-    } else if (details.assessment?.state === "reviewed") {
+    } else if (full && details.assessment?.state === "reviewed") {
       body.addChild(new Spacer(1));
       folded(body, theme, details.assessment.narrative, full);
     }
-    const question = details.decision?.question ?? details.question ?? details.negotiation?.pause?.question;
-    if (question) section(body, theme, "Question for you", question);
-    if (details.decision?.recommendation) section(body, theme, "Recommendation", details.decision.recommendation);
-    const action = details.action ?? details.negotiation?.pause?.action;
-    if (action) section(body, theme, "Next action", action);
-    if (details.error) section(body, theme, "Review error", details.error);
+    if (full) {
+      if (details.completion) {
+        const question = details.decision?.question ?? details.question ?? pause?.question;
+        if (question) section(body, theme, "Question for you", question);
+        if (details.decision?.recommendation) section(body, theme, "Recommendation", details.decision.recommendation);
+        if (!details.action && pause?.action) section(body, theme, "Next action", pause.action);
+      }
+      // Preserve stored recovery details even when the live presentation has moved on.
+      if (details.action) section(body, theme, "Recorded next action", details.action);
+      if (details.error) section(body, theme, "Review error", details.error);
+    }
     if (full && details.negotiation) section(body, theme, "Review rounds", negotiationText(details.negotiation));
     if (full && details.changes) section(body, theme, "Changed files", changeSummaryText(details.changes));
     const callCost = details.negotiation?.history?.at((details.round ?? details.negotiation.attempts) - 1)?.costUsd;

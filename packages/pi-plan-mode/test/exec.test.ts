@@ -9,8 +9,10 @@ import { test, vi } from "vitest";
 import {
   ASK_TOOL,
   CONSULT_TIMEOUT_MS,
+  CONTINUE_TOOL,
   EXEC_ENTRY,
   EXEC_STATUS_KEY,
+  EXEC_STATUS_MESSAGE_TYPE,
   type ExecState,
   FINISH_MESSAGE_TYPE,
   FINISH_TOOL,
@@ -217,9 +219,9 @@ test("a restored exec state turns its tools on and shows the footer status", asy
   assert.ok(mock.rawPi.getActiveTools().includes(FINISH_TOOL));
   assert.equal(
     context.statuses.get(EXEC_STATUS_KEY),
-    "exec mode on · implementing · 0 consultations · $0.00 consult · $0.00 review",
+    "exec mode on · idle · not completed · 0 consultations · $0.00 consult · $0.00 review",
   );
-  for (const name of [ASK_TOOL, FINISH_TOOL]) {
+  for (const name of [ASK_TOOL, FINISH_TOOL, CONTINUE_TOOL]) {
     const registered = mock.tools.find((candidate) => candidate.name === name) as any;
     assert.equal(registered.exposure, "model-only");
     assert.equal(registered.executionMode, "sequential");
@@ -263,7 +265,7 @@ test("shutdown clears UI without ending exec, and a fresh runtime restores it", 
   assert.deepEqual(events, [{ active: true, source: "restore" }]);
   assert.ok(replacement.rawPi.getActiveTools().includes(FINISH_TOOL));
   assert.ok(replacement.rawPi.getActiveTools().includes(ASK_TOOL));
-  assert.match(s.context.statuses.get(EXEC_STATUS_KEY) ?? "", /implementing · 1 consultations/u);
+  assert.match(s.context.statuses.get(EXEC_STATUS_KEY) ?? "", /idle · not completed · 1 consultations/u);
   const restored = replacement.entries.at(-1)?.data as ExecState;
   assert.deepEqual(restored, saved, "reload preserves identity, costs, return navigation and model state");
   assert.equal(restoreModel.mock.calls.length, 0);
@@ -294,13 +296,13 @@ test("tree restore publishes only the active branch's authoritative exec state",
   assert.equal(s.mock.setModels.length, 0);
 });
 
-test("without a planner on call, only finish_plan is active", async () => {
+test("without a planner on call, finish_plan and continue_plan remain active", async () => {
   const { mock, context } = await setup({ planner: false });
   assert.ok(!mock.rawPi.getActiveTools().includes(ASK_TOOL));
   assert.ok(mock.rawPi.getActiveTools().includes(FINISH_TOOL));
   assert.equal(
     context.statuses.get(EXEC_STATUS_KEY),
-    "exec mode on · implementing · 0 consultations · $0.00 consult · $0.00 review",
+    "exec mode on · idle · not completed · 0 consultations · $0.00 consult · $0.00 review",
   );
   const ask = mock.tools.find((candidate) => candidate.name === ASK_TOOL) as unknown as Tool;
   const result = await ask.execute("1", { message: "x" }, undefined, undefined, context.ctx);
@@ -452,7 +454,8 @@ function assertFinishRenders(s: Awaited<ReturnType<typeof setup>>, result: Resul
         const text = normalize(lines.join("\n"));
         assert.equal(text.split(title).length - 1, 1, `one outcome title at ${width}, expanded=${expanded}`);
         assert.ok(text.includes(normalize(result.details.report)));
-        if (result.details.action) assert.ok(text.includes(normalize(result.details.action)));
+        if (result.details.action && (expanded || result.details.completion))
+          assert.ok(text.includes(normalize(result.details.action)));
         if (expanded) assertReadableHistory(text, result.details);
         else if (result.details.completion) {
           assert.ok(text.includes("Verification (implementer reported)"));
@@ -551,7 +554,7 @@ test("later acceptance carries every substantive round into tool content and the
   });
   const initialDetails = structuredClone(first.details);
   assertReadableHistory(resultText(first), first.details);
-  assertFinishRenders(s, first, "Review 1 · Changes requested");
+  assertFinishRenders(s, first, "Review 1 · Previous review · Changes requested");
   const responses = [
     { id: "F-alpha", status: "addressed", response: "Added a failing-then-passing regression." },
     { id: "F-beta", status: "disputed", response: "Existing guard rejects this input; verified by test." },
@@ -564,7 +567,7 @@ test("later acceptance carries every substantive round into tool content and the
     responses,
   });
   assertReadableHistory(resultText(second), second.details);
-  assertFinishRenders(s, second, "Review 2 · User input needed");
+  assertFinishRenders(s, second, "Review 2 · Waiting for your answer");
   await command(s, "resume Operator verified readiness with deployment logs");
   const failed = await submit(s, {
     report: "Final implementation report.",
@@ -717,6 +720,23 @@ test("unavailable planner pauses; disabled review completes without acceptance",
     { active: false, source: "transition" },
   ]);
 });
+test("retry preserves the saved finding responses as well as report and accumulated costs", async () => {
+  const reviews = [decision("changes_requested"), "invalid", decision()];
+  const s = await setup({ script: () => ({ reply: reviews.shift()! }) });
+  await submit(s);
+  const responses = [{ id: "F1", status: "addressed", response: "Saved regression evidence." }];
+  await submit(s, { responses });
+  await command(s, "retry");
+  const result = await submit(s, {
+    report: "Replacement report",
+    responses: [{ id: "F1", status: "disputed", response: "Replacement evidence must not replace saved evidence." }],
+  });
+  assert.equal(result.details.report, completion.report);
+  assert.deepEqual(result.details.negotiation.history.at(-1).responses, responses);
+  assert.ok(Math.abs(s.latest().negotiation!.reviewCostUsd - 0.15) < 1e-9);
+  assert.equal(s.latest().negotiation?.revisionsUsed, 1);
+});
+
 test("explicit retry preserves costs and uses saved report", async () => {
   let calls = 0;
   const s = await setup({ script: () => ({ reply: ++calls === 1 ? "invalid" : decision() }) });
@@ -780,7 +800,10 @@ test("stale review after tree change does not charge or finalize new state", asy
   ]);
 });
 test("override requires confirmation, stop abandons without completion", async () => {
-  const s = await setup({ script: () => ({ reply: "invalid" }), select: ["Keep paused", "Finish without review"] });
+  const s = await setup({
+    script: () => ({ reply: "invalid" }),
+    select: [undefined, "Keep paused", "Finish without review"],
+  });
   await submit(s);
   await command(s, "accept");
   assert.equal(s.latest().active, true);
@@ -986,18 +1009,17 @@ test("paused tool-result cards expose reason-specific recovery at narrow and wid
           const text = stripVTControlCharacters(lines.join("\n")).replace(/\s+/gu, " ");
           if (expanded) assertReadableHistory(text, paused.details);
           assert.ok(text.includes("Next action"));
-          assert.ok(text.includes("/plan-exec accept"));
-          assert.ok(text.includes("/plan-exec stop"));
-          assert.ok(text.includes("No automatic retry"));
-          assert.ok(text.includes("agents cannot authorize recovery"));
+          if (!expanded) assert.doesNotMatch(text, /\/plan-exec/u);
           if (reason === "failure" || reason === "interrupted") {
-            assert.ok(text.includes("/plan-exec retry"));
-            assert.ok(!text.includes("/plan-exec resume"));
+            assert.ok(text.includes("Review did not finish"));
+            assert.ok(text.includes("No retry has been authorized."));
+          } else if (reason === "exhausted") {
+            assert.ok(text.includes("Another revision needs your approval"));
+            assert.ok(text.includes("Allow one more attempt"));
           } else {
-            assert.ok(text.includes("/plan-exec resume <answer>"));
-            assert.ok(!text.includes("/plan-exec retry"));
-            if (reason === "exhausted") assert.ok(text.includes("one extra revision-and-review cycle"));
-            else assert.ok(text.includes("Human check?"));
+            assert.ok(text.includes("Waiting for your answer"));
+            assert.ok(text.includes("Reply here."));
+            assert.ok(text.includes("Human check?"));
           }
         }
     }
@@ -1069,7 +1091,7 @@ test("idle override explicitly schedules return and successful return clears sou
   const s = await setup({
     returnTo: "planning",
     script: () => ({ reply: "invalid" }),
-    select: ["Finish without review"],
+    select: [undefined, "Finish without review"],
   });
   await submit(s);
   await command(s, "accept");
@@ -1136,3 +1158,411 @@ test("record:false begin seeds its host transaction with fresh identity and snap
     { active: true, source: "transition" },
   ]);
 });
+
+type Scenario = Awaited<ReturnType<typeof setup>>;
+const recover = (s: Scenario, action: string, replyId?: string, signal?: AbortSignal) =>
+  s
+    .tool(CONTINUE_TOOL)
+    .execute("continue", { action, ...(replyId ? { replyId } : {}) }, signal, undefined, s.context.ctx);
+const guidance = async (s: Scenario) => {
+  const messages = [{ role: "user", content: "Original conversation", timestamp: 1 }];
+  const before = structuredClone(messages);
+  const result = await s.emit("context", { messages });
+  assert.deepEqual(messages, before, "guidance must be request-local");
+  return result.messages.at(-1).content as string;
+};
+const eligibleId = async (s: Scenario) => (await guidance(s)).match(/replyId: (\S+)/u)?.[1];
+const deliver = async (s: Scenario, text: string, source = "interactive") => {
+  await s.emit("input", { text, source });
+  await s.emit("message_end", { message: { role: "user", content: [{ type: "text", text }] } });
+};
+const userPause = () =>
+  setup({
+    script: () => ({
+      reply: decision("user_needed", { question: "Did the manual check pass?", recommendation: "Ask the operator." }),
+    }),
+  });
+const statusMessages = (s: Scenario) =>
+  s.mock.sentMessages.filter(({ message }) => (message as any).customType === EXEC_STATUS_MESSAGE_TYPE);
+
+test("continue_plan schema and activation expose no model-authored answer field", async () => {
+  const s = await setup({ planner: false });
+  const tool = s.mock.tools.find((candidate) => candidate.name === CONTINUE_TOOL) as any;
+  assert.deepEqual(tool.parameters.required, ["action"]);
+  assert.deepEqual(tool.parameters.properties.action.enum, ["answer", "retry", "extend", "accept", "stop"]);
+  assert.equal(tool.parameters.additionalProperties, false);
+  assert.equal(tool.parameters.properties.answer, undefined);
+  assert.ok(s.mock.rawPi.getActiveTools().includes(CONTINUE_TOOL));
+  await submit(s);
+  await command(s, "stop");
+  assert.ok(!s.mock.rawPi.getActiveTools().includes(CONTINUE_TOOL));
+  assert.match(resultText(await recover(s, "stop")), /No approved plan/u);
+});
+
+for (const source of ["interactive", "rpc"])
+  test(`delivered ${source} answer is consumed verbatim without slash commands`, async () => {
+    const s = await userPause();
+    await submit(s);
+    const text = "  Yes, operator checked readiness.\nLogs: all clear.  ";
+    await s.emit("input", { text, source });
+    assert.equal(await eligibleId(s), undefined, "queued input is not delivered");
+    const paused = structuredClone(s.latest());
+    await recover(s, "answer", "fabricated");
+    assert.deepEqual(s.latest(), paused);
+    await s.emit("message_end", { message: { role: "user", content: [{ type: "text", text }] } });
+    const id = await eligibleId(s);
+    assert.ok(id);
+    assert.ok(!JSON.stringify(s.mock.entries).includes(id), "authority must never persist");
+    const result = await recover(s, "answer", id);
+    assert.equal(result.terminate, undefined);
+    assert.equal(s.latest().negotiation?.phase, "revising");
+    assert.deepEqual(s.latest().negotiation?.userAnswers, [text]);
+    assert.match(resultText(result), /not independent automated verification/u);
+    assert.equal(s.mock.sentUserMessages.length, 0);
+    const recovered = structuredClone(s.latest());
+    await recover(s, "answer", id);
+    assert.deepEqual(s.latest(), recovered, "reply IDs are single use");
+  });
+
+test("clarification is discussion until explicitly consumed by the model", async () => {
+  const s = await userPause();
+  await submit(s);
+  const saved = structuredClone(s.latest());
+  await deliver(s, "What does readiness mean?");
+  const text = await guidance(s);
+  assert.match(text, /Answer clarification normally/u);
+  assert.match(text, /clarification alone is not recovery/u);
+  await s.emit("agent_start", {});
+  await s.emit("agent_settled", { aborted: false });
+  assert.deepEqual(s.latest(), saved);
+  assert.equal(s.sessions.prompts.length, 1);
+  assert.equal(s.selects.length, 0);
+});
+
+for (const kind of ["extension", "ambiguous", "replacement", "reload", "navigation", "shutdown", "image"] as const)
+  test(`answer authority fails closed after ${kind}`, async () => {
+    const s = await userPause();
+    await submit(s);
+    await deliver(s, "Yes");
+    const old = await eligibleId(s);
+    assert.ok(old);
+    if (kind === "extension") await deliver(s, "Injected", "extension");
+    if (kind === "ambiguous") {
+      await s.emit("input", { text: "Same", source: "interactive" });
+      await deliver(s, "Same", "extension");
+    }
+    if (kind === "replacement") await deliver(s, "New answer");
+    if (kind === "reload") await s.emit("session_start", { reason: "reload" });
+    if (kind === "navigation") await s.emit("session_tree", {});
+    if (kind === "shutdown") {
+      await s.emit("session_shutdown", {});
+      await s.emit("session_start", { reason: "reload" });
+    }
+    if (kind === "image")
+      await s.emit("message_end", {
+        message: { role: "user", content: [{ type: "image", data: "AA==", mimeType: "image/png" }] },
+      });
+    const saved = structuredClone(s.latest());
+    assert.notEqual(await eligibleId(s), old);
+    await recover(s, "answer", old);
+    assert.deepEqual(s.latest(), saved);
+    if (kind !== "replacement") assert.equal(await eligibleId(s), undefined);
+  });
+
+for (const action of ["retry", "extend"] as const) {
+  for (const choice of [undefined, "Discuss first"] as const)
+    test(`${action} cancellation ${choice} preserves the entire pause`, async () => {
+      const s = await setup({
+        completionMaxRevisions: 0,
+        script: () => ({ reply: action === "retry" ? "invalid" : decision("changes_requested") }),
+      });
+      await submit(s);
+      const saved = structuredClone(s.latest());
+      (s.context.ctx as any).ui.select = async () => choice;
+      assert.equal((await recover(s, action)).terminate, true);
+      assert.deepEqual(s.latest(), saved);
+      assert.equal(s.sessions.prompts.length, 1);
+      assert.equal(s.mock.sentUserMessages.length, 0);
+    });
+  test(`${action} without UI cannot authorize recovery`, async () => {
+    const s = await setup({
+      hasUI: false,
+      completionMaxRevisions: 0,
+      script: () => ({ reply: action === "retry" ? "invalid" : decision("changes_requested") }),
+    });
+    await submit(s);
+    const saved = structuredClone(s.latest());
+    assert.match(resultText(await recover(s, action)), /No UI/u);
+    assert.deepEqual(s.latest(), saved);
+    assert.equal(s.selects.length, 0);
+  });
+}
+
+test("explicit UI extension authorizes exactly one extra cycle without resetting budget", async () => {
+  const s = await setup({
+    completionMaxRevisions: 0,
+    script: () => ({ reply: decision("changes_requested") }),
+    select: [undefined, "Allow one more attempt"],
+  });
+  await submit(s);
+  const n = structuredClone(s.latest().negotiation!);
+  const result = await recover(s, "extend");
+  assert.equal(result.terminate, undefined);
+  assert.equal(s.latest().negotiation?.revisionAuthorized, true);
+  assert.equal(s.latest().negotiation?.attempts, n.attempts);
+  assert.equal(s.latest().negotiation?.reviewCostUsd, n.reviewCostUsd);
+  await submit(s, { responses: [{ id: "F1", status: "addressed", response: "Fixed." }] });
+  assert.equal(s.latest().negotiation?.phase, "paused");
+  assert.equal(s.latest().negotiation?.revisionsUsed, 1);
+  assert.equal(s.latest().negotiation?.revisionAuthorized, false);
+  assert.equal(s.latest().negotiation?.maxRevisions, 0);
+  await submit(s);
+  assert.equal(s.sessions.prompts.length, 2);
+  assert.equal(s.mock.sentUserMessages.length, 0);
+});
+
+for (const reason of ["failure", "exhausted"] as const)
+  test(`new ${reason} automatically asks once, never on paused calls or restoration`, async () => {
+    const s = await setup({
+      completionMaxRevisions: 0,
+      script: () => ({ reply: reason === "failure" ? "invalid" : decision("changes_requested") }),
+    });
+    await submit(s);
+    assert.equal(s.selects.length, 1);
+    assert.deepEqual(s.selects[0].options, [
+      reason === "failure" ? "Retry review" : "Allow one more attempt",
+      "Discuss first",
+      "Finish without review",
+      "Stop implementation",
+    ]);
+    await submit(s);
+    await s.emit("agent_settled", { aborted: false });
+    await s.emit("session_start", { reason: "reload" });
+    await s.emit("session_tree", {});
+    await submit(s);
+    assert.equal(s.selects.length, 1);
+    assert.equal(s.sessions.prompts.length, 1);
+  });
+
+test("automatic retry preserves the saved report, cost and nonterminating current turn", async () => {
+  let calls = 0;
+  const s = await setup({
+    script: () => ({ reply: ++calls === 1 ? "invalid" : decision() }),
+    select: ["Retry review"],
+  });
+  const first = await submit(s);
+  assert.equal(first.terminate, undefined);
+  assert.equal(s.latest().negotiation?.phase, "implementing");
+  assert.equal(s.sessions.prompts.length, 1, "authorization itself must not spend");
+  const accepted = await submit(s, { report: "Replacement", verification: "Replacement", concerns: "Replacement" });
+  assert.equal(accepted.details.report, completion.report);
+  assert.equal(accepted.details.verification, completion.verification);
+  assert.equal(accepted.details.concerns, completion.concerns);
+  assert.equal(accepted.details.completion, "accepted");
+  assert.equal(s.latest().negotiation?.reviewCostUsd, 0.1);
+  assert.equal(s.latest().negotiation?.revisionsUsed, 0);
+  assert.equal(s.mock.sentUserMessages.length, 0);
+});
+
+test("aborted review suppresses automatic recovery UI", async () => {
+  const s = await setup({ script: () => new Promise(() => {}) });
+  const controller = new AbortController();
+  const pending = submit(s, {}, controller.signal);
+  await vi.waitFor(() => assert.equal(s.sessions.prompts.length, 1));
+  controller.abort();
+  assert.equal((await pending).terminate, true);
+  assert.equal(s.selects.length, 0);
+  assert.equal(s.latest().negotiation?.phase, "paused");
+});
+
+for (const interruption of ["navigation", "abort"] as const)
+  test(`stale recovery selection after ${interruption} cannot mutate or continue`, async () => {
+    const s = await setup({ script: () => ({ reply: "invalid" }) });
+    await submit(s);
+    let resolve!: (value: string) => void;
+    (s.context.ctx as any).ui.select = () =>
+      new Promise((done) => {
+        resolve = done;
+      });
+    const controller = new AbortController();
+    const pending = recover(s, "retry", undefined, controller.signal);
+    await vi.waitFor(() => assert.equal(typeof resolve, "function"));
+    if (interruption === "navigation") await s.emit("session_tree", {});
+    else controller.abort();
+    const saved = structuredClone(s.latest());
+    resolve("Retry review");
+    await pending;
+    assert.deepEqual(s.latest(), saved);
+    assert.equal(s.mock.sentUserMessages.length, 0);
+  });
+
+for (const action of ["stop", "accept"] as const)
+  test(`model ${action} requires confirmation and preserves honest final labeling`, async () => {
+    const s = await setup({
+      returnTo: "planning",
+      script: () => ({
+        reply: decision("user_needed", {
+          question: "Manual check?",
+          recommendation: "Ask user.",
+          limitations: ["Not independently verified."],
+        }),
+      }),
+    });
+    await submit(s);
+    const saved = structuredClone(s.latest());
+    assert.equal((await recover(s, action)).terminate, true);
+    assert.deepEqual(s.latest(), saved);
+    const positive = action === "stop" ? "Stop implementation" : "Finish without review";
+    (s.context.ctx as any).ui.select = async (title: string, choices: string[]) => {
+      assert.equal(title, action === "stop" ? "Stop implementation?" : "Finish without planner acceptance?");
+      assert.deepEqual(choices, [positive, action === "stop" ? "Keep working" : "Keep paused"]);
+      return positive;
+    };
+    const result = await recover(s, action);
+    assert.equal(result.details.completion, action === "stop" ? "stopped" : "user_override");
+    assert.equal(result.terminate, true);
+    assert.deepEqual(result.details.decision.limitations, ["Not independently verified."]);
+    assert.equal(s.latest().active, false);
+    assert.equal(s.mock.sentUserMessages.length, 0);
+    if (action === "stop") {
+      assert.equal(s.latest().pendingReturn, undefined);
+      assert.equal(s.mock.setModels.length, 0);
+    }
+  });
+
+test("bare command shows active status, paused choices and retains explicit compatibility validation", async () => {
+  const s = await userPause();
+  await command(s, "");
+  assert.equal(s.selects.length, 0);
+  assert.match(s.context.notifications.at(-1)?.message ?? "", /idle; completion has not been confirmed/u);
+  await submit(s);
+  await command(s, "");
+  assert.deepEqual(s.selects.at(-1)?.options, ["Answer in chat", "Finish without review", "Stop implementation"]);
+  const saved = structuredClone(s.latest());
+  for (const args of ["retry extra", "accept extra", "stop extra", "resume", "unknown"]) await command(s, args);
+  assert.deepEqual(s.latest(), saved);
+  await command(s, "resume Operator confirmed it");
+  assert.deepEqual(s.latest().negotiation?.userAnswers, ["Operator confirmed it"]);
+  assert.equal(s.mock.sentUserMessages.length, 1);
+});
+
+test("settled, not agent_end, publishes nontriggering idle/interrupted status; finalization suppresses it", async () => {
+  const s = await setup();
+  assert.ok(s.mock.messageRenderers.has(EXEC_STATUS_MESSAGE_TYPE));
+  await s.emit("agent_start", {});
+  assert.match(s.context.statuses.get(EXEC_STATUS_KEY) ?? "", /implementing/u);
+  await s.emit("agent_end", {});
+  assert.equal(statusMessages(s).length, 0);
+  await s.emit("agent_settled", { aborted: false });
+  const idle = statusMessages(s).at(-1);
+  assert.ok(idle);
+  assert.match((idle.message as { content: string }).content, /idle; completion has not been confirmed/u);
+  assert.deepEqual(statusMessages(s).at(-1)?.options, { triggerTurn: false });
+  await s.emit("agent_start", {});
+  await s.emit("agent_settled", { aborted: true });
+  const interrupted = statusMessages(s).at(-1);
+  assert.ok(interrupted);
+  assert.match((interrupted.message as { content: string }).content, /was interrupted/u);
+  await submit(s);
+  const count = statusMessages(s).length;
+  await s.emit("agent_settled", { aborted: false });
+  assert.equal(statusMessages(s).length, count);
+});
+
+test("pause status is not duplicated in its run but reappears after discussion moves it out of view", async () => {
+  const s = await userPause();
+  await s.emit("agent_start", {});
+  await submit(s);
+  assert.match(s.context.statuses.get(EXEC_STATUS_KEY) ?? "", /waiting for answer/u);
+  await s.emit("agent_settled", { aborted: false });
+  assert.equal(statusMessages(s).length, 0);
+  await s.emit("agent_start", {});
+  await s.emit("agent_settled", { aborted: false });
+  assert.equal(statusMessages(s).length, 1);
+  assert.match((statusMessages(s)[0].message as any).content, /Waiting for your answer/u);
+  assert.match((statusMessages(s)[0].message as any).content, /Did the manual check pass\?/u);
+});
+
+test("wrong-phase actions and conversational retry requests grant no authority", async () => {
+  const s = await setup();
+  const saved = structuredClone(s.latest());
+  for (const action of ["answer", "retry", "extend", "accept"]) await recover(s, action, "invented");
+  assert.deepEqual(s.latest(), saved);
+  assert.equal(s.selects.length, 0);
+  const failed = await setup({ script: () => ({ reply: "invalid" }) });
+  await submit(failed);
+  const paused = structuredClone(failed.latest());
+  await deliver(failed, "Retry and finish without review if it fails again");
+  await guidance(failed);
+  await recover(failed, "answer", "invented");
+  await recover(failed, "extend");
+  assert.deepEqual(failed.latest(), paused);
+  assert.equal(failed.selects.length, 1);
+});
+
+for (const action of ["stop", "accept"] as const)
+  test(`no-UI model ${action} leaves state unchanged`, async () => {
+    const s = await setup({ hasUI: false, script: () => ({ reply: "invalid" }) });
+    await submit(s);
+    const saved = structuredClone(s.latest());
+    assert.match(resultText(await recover(s, action)), /UI confirmation is required/u);
+    assert.deepEqual(s.latest(), saved);
+  });
+
+test("an older pause answer cannot authorize a later reviewer question", async () => {
+  const s = await userPause();
+  await submit(s);
+  await deliver(s, "Yes");
+  const old = await eligibleId(s);
+  assert.ok(old);
+  await recover(s, "answer", old);
+  await submit(s);
+  const saved = structuredClone(s.latest());
+  assert.equal(await eligibleId(s), undefined);
+  await recover(s, "answer", old);
+  assert.deepEqual(s.latest(), saved);
+});
+
+for (const outcome of ["throw", "cancel", "positive", "navigate"] as const)
+  test(`dialog blocked hold releases exactly once on ${outcome}`, async () => {
+    const s = await setup({ script: () => ({ reply: "invalid" }) });
+    await submit(s);
+    const holds: any[] = [];
+    s.mock.rawPi.events.on("herdr:blocked", (data) => holds.push(data));
+    (s.context.ctx as any).ui.select = async () => {
+      if (outcome === "throw") throw new Error("UI unavailable");
+      if (outcome === "navigate") await s.emit("session_tree", {});
+      return outcome === "positive" || outcome === "navigate" ? "Retry review" : undefined;
+    };
+    await recover(s, "retry");
+    assert.equal(holds.length, 2);
+    assert.equal(holds[0].active, true);
+    assert.deepEqual(holds[1], { active: false });
+    assert.equal(s.latest().negotiation?.phase, outcome === "positive" ? "implementing" : "paused");
+  });
+
+test("automatic extension returns control without spending or resetting counters", async () => {
+  const s = await setup({
+    completionMaxRevisions: 0,
+    script: () => ({ reply: decision("changes_requested") }),
+    select: ["Allow one more attempt"],
+  });
+  const result = await submit(s);
+  assert.equal(result.terminate, undefined);
+  assert.equal(s.latest().negotiation?.phase, "revising");
+  assert.equal(s.latest().negotiation?.revisionAuthorized, true);
+  assert.equal(s.latest().negotiation?.attempts, 1);
+  assert.equal(s.latest().negotiation?.reviewCostUsd, 0.05);
+  assert.equal(s.sessions.prompts.length, 1);
+  assert.equal(s.mock.sentUserMessages.length, 0);
+});
+
+for (const exhausted of [false, true])
+  test(`paused footer distinguishes ${exhausted ? "approval needed" : "review failed"}`, async () => {
+    const s = await setup({
+      completionMaxRevisions: 0,
+      script: () => ({ reply: exhausted ? decision("changes_requested") : "invalid" }),
+    });
+    await submit(s);
+    assert.ok(s.context.statuses.get(EXEC_STATUS_KEY)?.includes(exhausted ? "approval needed" : "review failed"));
+  });

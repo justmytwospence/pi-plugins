@@ -27,6 +27,7 @@ import {
   renderFinish,
   responsesText,
 } from "./exec-cards.js";
+import { ExecReplyTracker, pausePresentation, recoveryChoices } from "./exec-interaction.js";
 import { holdBlocked } from "./herdr-blocked.js";
 import { type ModelSpec, parseModelSpec } from "./implementation-models.js";
 import {
@@ -58,7 +59,9 @@ export const ASK_TOOL = "ask_planner";
 export const BACK_COMMAND = "plan-back";
 export const FINISH_MESSAGE_TYPE = "plan-mode-finish";
 export const FINISH_TOOL = "finish_plan";
-export const EXEC_TOOLS = [FINISH_TOOL, ASK_TOOL] as const;
+export const CONTINUE_TOOL = "continue_plan";
+export const EXEC_STATUS_MESSAGE_TYPE = "plan-mode-exec-status";
+export const EXEC_TOOLS = [FINISH_TOOL, ASK_TOOL, CONTINUE_TOOL] as const;
 /** Per question to the planner on call. */
 export const CONSULT_TIMEOUT_MS = 10 * 60_000;
 
@@ -101,6 +104,14 @@ const NOT_ACTIVE = "No approved plan is being implemented.";
 export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
   let state: ExecState | undefined;
   let epoch = 0;
+  let busy = false;
+  let pauseShownThisRun = false;
+  const replies = new ExecReplyTracker();
+  const dialogs = new Set<AbortController>();
+  const cancelDialogs = () => {
+    for (const controller of dialogs) controller.abort();
+    dialogs.clear();
+  };
   const cards = new ExecCardRefresh();
   const currentExchange = () => {
     const n = state?.active ? state.negotiation : undefined;
@@ -109,6 +120,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       ? {
           executionId: n.executionId,
           exchangeId: n.latestExchangeId,
+          phase: n.phase,
           unresolvedReviewId: last?.decision && last.decision.outcome !== "accepted" ? last.id : undefined,
         }
       : undefined;
@@ -139,11 +151,17 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       const phase =
         n?.phase === "reviewing"
           ? `review ${n.attempts}`
-          : n?.phase === "revising"
+          : n?.phase === "revising" && busy
             ? `revising · ${outstanding(n).length} findings`
             : n?.phase === "paused"
-              ? `paused · ${n.pause?.reason === "user_needed" || n.pause?.reason === "exhausted" ? "user needed" : "review unavailable"}`
-              : (n?.phase ?? "implementing");
+              ? n.pause?.reason === "user_needed"
+                ? "waiting for answer"
+                : n.pause?.reason === "exhausted"
+                  ? "approval needed"
+                  : "review failed"
+              : busy
+                ? (n?.phase ?? "implementing")
+                : "idle · not completed";
       text = `exec mode on · ${phase} · ${state.asks} consultations · ${formatCost(state.costUsd)} consult · ${formatCost(n?.reviewCostUsd ?? 0)} review`;
     }
     safely(() => ctx.ui.setStatus(EXEC_STATUS_KEY, text));
@@ -156,11 +174,12 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
   };
 
   const setTools = () => {
-    setToolsActive(pi, [FINISH_TOOL], Boolean(state?.active));
+    setToolsActive(pi, [FINISH_TOOL, CONTINUE_TOOL], Boolean(state?.active));
     setToolsActive(pi, [ASK_TOOL], Boolean(state?.active && state.planner));
   };
 
   const persist = () => {
+    replies.sync(state?.active ? state.negotiation : undefined);
     if (state) {
       state.touched = [...touched];
       const snapshot = structuredClone(state);
@@ -174,6 +193,10 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
 
   const begin = (ctx: ExtensionContext, next: ExecState, options: { record: boolean }) => {
     epoch++;
+    replies.invalidate();
+    cancelDialogs();
+    busy = !ctx.isIdle();
+    pauseShownThisRun = false;
     cards.begin(ctx);
     pendingReturn = undefined;
     hostCtx = ctx;
@@ -195,6 +218,7 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
   const end = (ctx: ExtensionContext) => {
     if (!state) return;
     state.active = false;
+    cancelDialogs();
     cards.end();
     persist();
     disposeAgent();
@@ -260,6 +284,10 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
 
   const restore = (ctx: ExtensionContext) => {
     epoch++;
+    replies.invalidate();
+    cancelDialogs();
+    busy = !ctx.isIdle();
+    pauseShownThisRun = false;
     cards.begin(ctx);
     hostCtx = ctx;
     disposeAgent();
@@ -292,6 +320,10 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
   pi.on("session_tree", (_event, ctx) => restore(ctx));
   pi.on("session_shutdown", () => {
     epoch++;
+    replies.invalidate();
+    cancelDialogs();
+    busy = false;
+    pauseShownThisRun = false;
     cards.end();
     disposeAgent();
     // Reload replaces this runtime, not the durable execution. Only release transient UI ownership.
@@ -334,6 +366,275 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     defaultActive: false,
     annotations: { readOnlyHint: true },
   } as const;
+
+  type Action = "retry" | "resume" | "accept" | "stop";
+  type Origin = "command" | "tool";
+  type ActionResult = {
+    content: Array<{ type: "text"; text: string }>;
+    details: FinishDetails | undefined;
+    terminate?: boolean;
+  };
+  const pausedResult = (message: string): ActionResult => ({
+    content: [{ type: "text", text: message }],
+    details: undefined,
+    terminate: true,
+  });
+
+  // Dialogs own no durable authority. A branch change, recovery or abort invalidates their answer.
+  const select = async (
+    current: ExecState,
+    token: number,
+    n: NegotiationState,
+    ctx: ExtensionContext,
+    origin: Origin,
+    title: string,
+    choices: string[],
+    signal?: AbortSignal,
+  ) => {
+    const pause = n.pause;
+    const phase = n.phase;
+    const valid = () =>
+      live(current, token) &&
+      current.active &&
+      current.negotiation === n &&
+      n.phase === phase &&
+      n.pause === pause &&
+      !signal?.aborted &&
+      !ctx.signal?.aborted &&
+      (origin !== "command" || ctx.isIdle());
+    if (!ctx.hasUI || !valid()) return undefined;
+    const controller = new AbortController();
+    dialogs.add(controller);
+    const signals = [controller.signal, signal, ctx.signal].filter(
+      (value): value is AbortSignal => value !== undefined,
+    );
+    const dialogSignal = AbortSignal.any(signals);
+    const release = holdBlocked(pi.events, title);
+    let onAbort: () => void = () => undefined;
+    try {
+      const aborted = new Promise<undefined>((resolve) => {
+        onAbort = () => resolve(undefined);
+        dialogSignal.addEventListener("abort", onAbort, { once: true });
+        if (dialogSignal.aborted) onAbort();
+      });
+      // Native selectors close on abort. Race as well so a stale/missing UI implementation cannot
+      // retain the blocked hold after navigation, shutdown or recovery elsewhere.
+      const answer = await Promise.race([ctx.ui.select(title, choices, { signal: dialogSignal }), aborted]);
+      return !dialogSignal.aborted && valid() ? answer : undefined;
+    } catch {
+      return undefined;
+    } finally {
+      dialogSignal.removeEventListener("abort", onAbort);
+      dialogs.delete(controller);
+      release();
+    }
+  };
+
+  const applyAction = async (
+    current: ExecState,
+    token: number,
+    action: Action,
+    ctx: ExtensionContext,
+    origin: Origin,
+    answer?: string,
+    signal?: AbortSignal,
+  ): Promise<ActionResult> => {
+    const n = current.negotiation!;
+    if (!live(current, token) || !current.active || signal?.aborted || ctx.signal?.aborted)
+      return pausedResult("Execution changed or was interrupted; no action taken.");
+    if (action === "stop" || action === "accept") {
+      if (action === "accept" && n.phase !== "paused") return text("Only a paused execution can be overridden.");
+      if (action === "accept" || origin === "tool") {
+        const title = action === "accept" ? "Finish without planner acceptance?" : "Stop implementation?";
+        const positive = action === "accept" ? "Finish without review" : "Stop implementation";
+        const selected = await select(
+          current,
+          token,
+          n,
+          ctx,
+          origin,
+          title,
+          [positive, action === "accept" ? "Keep paused" : "Keep working"],
+          signal,
+        );
+        if (selected !== positive)
+          return pausedResult(
+            ctx.hasUI
+              ? "No change authorized. Discuss what is needed next."
+              : "A UI confirmation is required; no change authorized.",
+          );
+      }
+      const details: FinishDetails = {
+        ...(n.latestReport ??
+          (action === "stop"
+            ? {
+                report: "Implementation stopped.",
+                verification: "Not provided.",
+                concerns: "Execution abandoned; no completion claimed.",
+              }
+            : { report: "No report submitted.", verification: "Unknown.", concerns: "Unreviewed." })),
+        planFile: current.planFile,
+        negotiation: structuredClone(n),
+        decision: n.history.at(-1)?.decision,
+        completion: action === "stop" ? "stopped" : "user_override",
+        executionId: n.executionId,
+        asks: current.asks,
+        costUsd: current.costUsd,
+      };
+      if (action === "stop") {
+        current.pendingReturn = undefined;
+        pendingReturn = undefined;
+      }
+      const result = await finalize(current, token, details, ctx);
+      if (origin === "command" && live(current, token)) {
+        if (pendingReturn) pi.sendUserMessage(`/${BACK_COMMAND}`, { expandPromptTemplates: true });
+        pi.sendMessage({
+          customType: FINISH_MESSAGE_TYPE,
+          content: finishMessageText(details),
+          details,
+          display: true,
+        });
+      }
+      return result;
+    }
+    try {
+      current.negotiation = recoverNegotiation(n, action);
+    } catch (error) {
+      return text(String(error));
+    }
+    cancelDialogs();
+    if (action === "resume" && answer !== undefined) {
+      current.negotiation.userAnswers ??= [];
+      current.negotiation.userAnswers.push(answer);
+    }
+    disposeAgent();
+    persist();
+    updateStatus(ctx);
+    const findings = outstanding(current.negotiation)
+      .map((f) => `${f.id}: ${f.title}\n${f.detail}\nRequested: ${f.requestedChange}`)
+      .join("\n\n");
+    const instructions =
+      action === "retry"
+        ? "The user authorized one retry of the interrupted/failed completion review. Resubmit finish_plan using the saved report and finding responses; do not make unrelated changes. No revision counts were reset."
+        : `The user resumed this implementation.${answer !== undefined ? ` User-provided evidence/answer (not independent automated verification): ${answer}` : " One additional revision-and-review cycle was authorized; no counters were reset."}\nOutstanding findings:\n${findings}\nContinue implementation in the existing context, then submit finish_plan with per-finding responses. Further extensions require explicit user approval.`;
+    if (origin === "command") pi.sendUserMessage(instructions);
+    return text(instructions);
+  };
+
+  const recoveryMenu = async (
+    current: ExecState,
+    token: number,
+    ctx: ExtensionContext,
+    origin: Origin,
+    signal?: AbortSignal,
+  ): Promise<ActionResult> => {
+    const n = current.negotiation!;
+    if (n.phase !== "paused") return text("Implementation remains active; completion has not been confirmed.");
+    const choices = recoveryChoices(n);
+    const selected = await select(
+      current,
+      token,
+      n,
+      ctx,
+      origin,
+      pauseText(n),
+      choices.map((c) => c.label),
+      signal,
+    );
+    if (!live(current, token) || current.negotiation !== n || signal?.aborted || ctx.signal?.aborted)
+      return pausedResult("Execution changed or was interrupted; no recovery authorized.");
+    const action = choices.find((c) => c.label === selected)?.action;
+    if (!action || action === "discuss" || action === "answer")
+      return pausedResult(!ctx.hasUI ? `${pauseText(n)}\nNo UI is available; no recovery authorized.` : pauseText(n));
+    return applyAction(current, token, action === "extend" ? "resume" : action, ctx, origin, undefined, signal);
+  };
+
+  pi.registerTool({
+    name: CONTINUE_TOOL,
+    ...flags,
+    label: "Continue plan",
+    description:
+      "Resolve a paused implementation. Consume a delivered human answer by replyId, or ask for explicit UI authorization to retry, extend, finish without review or stop. Discussion and clarification do not authorize recovery.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      required: ["action"],
+      properties: {
+        action: { type: "string", enum: ["answer", "retry", "extend", "accept", "stop"] },
+        replyId: { type: "string" },
+      },
+    } as never,
+    async execute(_id, params: unknown, signal, _onUpdate, ctx) {
+      hostCtx = ctx;
+      const current = state;
+      if (!current?.active) return text(NOT_ACTIVE);
+      if (signal?.aborted || ctx.signal?.aborted) return pausedResult("Interrupted; no recovery authorized.");
+      const token = epoch;
+      const n = current.negotiation!;
+      const { action, replyId } = (params ?? {}) as { action?: string; replyId?: unknown };
+      if (action === "answer") {
+        if (n.phase !== "paused" || n.pause?.reason !== "user_needed" || typeof replyId !== "string")
+          return text("A fresh delivered user answer and its current replyId are required; no change made.");
+        const reply = replies.consume(n, replyId);
+        if (!reply)
+          return text(
+            "A fresh trusted textual user answer is needed; this replyId is missing, stale or ineligible. No change made.",
+          );
+        return applyAction(current, token, "resume", ctx, "tool", reply.text, signal);
+      }
+      if (action === "retry" || action === "extend") {
+        const matches =
+          n.phase === "paused" &&
+          (action === "extend"
+            ? n.pause?.reason === "exhausted"
+            : n.pause?.reason === "failure" || n.pause?.reason === "interrupted");
+        if (!matches) return text("This recovery action is not available for the current phase; no change made.");
+        return recoveryMenu(current, token, ctx, "tool", signal);
+      }
+      if (action === "accept" || action === "stop")
+        return applyAction(current, token, action, ctx, "tool", undefined, signal);
+      return text("Choose answer, retry, extend, accept or stop.");
+    },
+  });
+
+  pi.on("input", (event) => {
+    replies.input(state?.active ? state.negotiation : undefined, event);
+  });
+  pi.on("message_end", (event) => {
+    replies.messageEnd(state?.active ? state.negotiation : undefined, event);
+  });
+  pi.on("context", (event) => {
+    if (!state?.active) return;
+    const n = state.negotiation!;
+    const reply = replies.eligible(n);
+    const guidance = [
+      "An approved plan is being implemented. Human questions do not cancel the task; answer them normally. Follow explicit requests to pause. Keep human-facing explanations concise; do not dump review history or advertise recovery commands.",
+      n.phase === "paused"
+        ? `${pauseText(n)}\nDo not implement while awaiting this decision. Answer clarification normally. Call continue_plan(action=answer, replyId) only when an eligible reply resolves the pending reviewer question; clarification alone is not recovery. Never interpret conversational text as retry, extension or unreviewed-completion authorization; those require a native selection.`
+        : "Continue the approved implementation unless the user changes direction. Completion requires finish_plan and the existing review safeguards.",
+      reply
+        ? `Eligible delivered human reply: ${JSON.stringify(reply.text)}\nreplyId: ${reply.id}`
+        : "No eligible delivered textual reply is available. If attribution failed or several inputs were queued, ask: Please send your answer once more now that the conversation has stopped. No slash command is needed.",
+    ].join("\n\n");
+    return {
+      messages: [
+        ...event.messages,
+        {
+          role: "custom" as const,
+          customType: "plan-mode-exec-guidance",
+          content: guidance,
+          display: false,
+          timestamp: Date.now(),
+        },
+      ],
+    };
+  });
+  pi.on("agent_start", (_event, ctx) => {
+    if (!busy) pauseShownThisRun = false;
+    busy = true;
+    hostCtx = ctx;
+    updateStatus(ctx);
+  });
 
   pi.registerTool({
     name: ASK_TOOL,
@@ -545,7 +846,10 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       const token = epoch;
       let n = current.negotiation!;
       if (n.phase === "paused") {
+        pauseShownThisRun = true;
         const previous = n.history.at(-1);
+        if (!live(current, token) || current.negotiation !== n || signal?.aborted || ctx.signal?.aborted)
+          return pausedResult("Execution changed or was interrupted; no action taken.");
         const details: FinishDetails = {
           ...(n.latestReport ?? {
             report: "No report submitted.",
@@ -582,8 +886,11 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       } catch (error) {
         return text(String(error));
       }
+      const previousAttempt = n.history.at(-1);
       const saved = n.latestReport;
-      const submission = n.history.at(-1)?.error && saved ? saved : { report, verification, concerns };
+      const retryingSaved = Boolean(previousAttempt?.error && saved);
+      const submission = retryingSaved && saved ? saved : { report, verification, concerns };
+      if (retryingSaved && previousAttempt?.responses) responses = structuredClone(previousAttempt.responses);
       const changes = await summarizeChanges(current, touched, ctx.cwd);
       if (!live(current, token)) return text("Execution changed; submission discarded.");
       const details: FinishDetails = {
@@ -765,6 +1072,30 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
         details.completion = "accepted";
         return await finalize(current, token, details, ctx, usage);
       }
+      if (n.phase === "paused") {
+        pauseShownThisRun = true;
+        if (n.pause?.reason === "failure" || n.pause?.reason === "exhausted") {
+          // Show the durable outcome before asking once. Already-paused calls and restores never enter here.
+          safely(() => onUpdate?.({ content: [{ type: "text", text: pauseText(n) }], details } as never));
+          if (!signal?.aborted && !ctx.signal?.aborted) {
+            const result = await recoveryMenu(current, token, ctx, "tool", signal);
+            if (!live(current, token)) return text("Execution changed; discarded stale recovery choice.");
+            return {
+              ...result,
+              content: result.details
+                ? result.content
+                : [
+                    {
+                      type: "text",
+                      text: `${finishMessageText(details)}\n\n${result.content.map((part) => part.text).join("\n")}`,
+                    },
+                  ],
+              details: result.details ?? details,
+              ...(usage ? { usage } : {}),
+            } as never;
+          }
+        }
+      }
       return {
         content: [
           {
@@ -780,7 +1111,8 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
   });
 
   pi.registerCommand("plan-exec", {
-    description: "Inspect or explicitly recover a paused implementation: retry, resume <answer>, accept, stop",
+    description:
+      "Show implementation status or paused recovery choices; compatibility: retry, resume <answer>, accept, stop",
     handler: async (args, ctx) => {
       const current = state;
       if (!current?.active) {
@@ -790,122 +1122,87 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
       const token = epoch;
       const n = current.negotiation!;
       const [action, ...words] = args.trim().split(/\s+/u);
-      const findings = outstanding(n)
-        .map((f) => `${f.id}: ${f.title}\n${f.detail}\nRequested: ${f.requestedChange}`)
-        .join("\n\n");
-      if (!action) {
-        ctx.ui.notify(`${n.phase}\n${findings}\n${pauseText(n)}`, "info");
+      if (!action && (n.phase !== "paused" || !ctx.isIdle())) {
+        ctx.ui.notify(
+          n.phase === "paused"
+            ? pauseText(n)
+            : busy
+              ? `Implementation active · ${n.phase}. Completion has not been confirmed.`
+              : "Implementation is idle; completion has not been confirmed. Reply to continue or change direction.",
+          "info",
+        );
         return;
       }
       if (!ctx.isIdle()) {
         ctx.ui.notify("Wait until the implementer is idle.", "warning");
         return;
       }
-      if ((action === "stop" || action === "accept") && words.length) {
-        ctx.ui.notify("Usage: /plan-exec [retry | resume <answer> | accept | stop]", "warning");
-        return;
-      }
-      if (action === "stop") {
-        const report = n.latestReport ?? {
-          report: "Implementation stopped.",
-          verification: "Not provided.",
-          concerns: "Execution abandoned; no completion claimed.",
-        };
-        const details: FinishDetails = {
-          ...report,
-          planFile: current.planFile,
-          negotiation: structuredClone(n),
-          completion: "stopped",
-          executionId: n.executionId,
-        };
-        current.pendingReturn = undefined;
-        pendingReturn = undefined;
-        await finalize(current, token, details, ctx);
-        if (live(current, token))
-          pi.sendMessage({
-            customType: FINISH_MESSAGE_TYPE,
-            content: finishMessageText(details),
-            details,
-            display: true,
-          });
-        return;
-      }
-      if (action === "accept") {
-        if (n.phase !== "paused") {
-          ctx.ui.notify("Only a paused execution can be overridden.", "warning");
-          return;
-        }
-        if (!ctx.hasUI) {
-          ctx.ui.notify("A UI confirmation is required; execution remains paused.", "warning");
-          return;
-        }
-        const release = holdBlocked(pi.events, "Finish without planner acceptance?");
-        let answer: string | undefined;
-        try {
-          answer = await ctx.ui.select("Finish without planner acceptance?", ["Finish without review", "Keep paused"]);
-        } finally {
-          release();
-        }
-        if (!live(current, token) || answer !== "Finish without review" || !ctx.isIdle()) return;
-        const details: FinishDetails = {
-          ...(n.latestReport ?? { report: "No report submitted.", verification: "Unknown.", concerns: "Unreviewed." }),
-          planFile: current.planFile,
-          negotiation: structuredClone(n),
-          decision: n.history.at(-1)?.decision,
-          completion: "user_override",
-          executionId: n.executionId,
-          asks: current.asks,
-          costUsd: current.costUsd,
-        };
-        await finalize(current, token, details, ctx);
-        if (live(current, token) && pendingReturn)
-          pi.sendUserMessage(`/${BACK_COMMAND}`, { expandPromptTemplates: true });
-        if (live(current, token))
-          pi.sendMessage({
-            customType: FINISH_MESSAGE_TYPE,
-            content: finishMessageText(details),
-            details,
-            display: true,
-          });
-        return;
-      }
       if (
-        (action !== "retry" && action !== "resume") ||
-        (action === "retry" && words.length) ||
-        (action === "resume" && !words.join(" ").trim())
+        action &&
+        (!["retry", "resume", "accept", "stop"].includes(action) ||
+          (action !== "resume" && words.length > 0) ||
+          (action === "resume" && !words.join(" ").trim()))
       ) {
         ctx.ui.notify("Usage: /plan-exec [retry | resume <answer> | accept | stop]", "warning");
         return;
       }
-      try {
-        current.negotiation = recoverNegotiation(n, action);
-      } catch (error) {
-        ctx.ui.notify(String(error), "warning");
-        return;
-      }
-      if (action === "resume") {
-        current.negotiation.userAnswers ??= [];
-        current.negotiation.userAnswers.push(words.join(" "));
-      }
-      disposeAgent();
-      persist();
-      updateStatus(ctx);
-      pi.sendUserMessage(
-        action === "retry"
-          ? "The user authorized one retry of the interrupted/failed completion review. Resubmit finish_plan using the saved report and finding responses; do not make unrelated changes. No revision counts were reset."
-          : `The user resumed this implementation. User-provided evidence/answer (not independent automated verification): ${words.join(" ")}\nOutstanding findings:\n${findings}\nAddress these in the existing context, then submit finish_plan with per-finding responses. An exhausted budget gets one additional revision-and-review cycle only; further extensions require another explicit /plan-exec resume command.`,
-      );
+      const result = action
+        ? await applyAction(
+            current,
+            token,
+            action as Action,
+            ctx,
+            "command",
+            action === "resume" ? words.join(" ") : undefined,
+          )
+        : await recoveryMenu(current, token, ctx, "command");
+      // Preserve silent confirmation cancellation and command continuation behavior. Only status
+      // requests and refused actions need a notification; obsolete dialogs must not post anywhere.
+      const refused =
+        ((action === "retry" || action === "resume") && current.negotiation === n) ||
+        (action === "accept" && (!ctx.hasUI || n.phase !== "paused"));
+      if (live(current, token) && current.active && (!action || refused))
+        ctx.ui.notify(result.content.map((part) => part.text).join("\n"), refused ? "warning" : "info");
     },
   });
 
   // Back to the planning conversation: a tool cannot navigate the session tree, a command can, and a
   // command sent once the turn has settled runs outside the streaming turn.
-  pi.on("agent_settled", (event) => {
-    if (!pendingReturn) return;
-    // Keep the report available to /plan-back even when review cancellation aborts the turn.
-    if (event.aborted) return;
-    pi.sendUserMessage(`/${BACK_COMMAND}`, { expandPromptTemplates: true });
+  pi.on("agent_settled", (event, ctx) => {
+    replies.settled();
+    busy = false;
+    updateStatus(ctx);
+    if (pendingReturn) {
+      // Keep the report available to /plan-back even when review cancellation aborts the turn.
+      if (!event.aborted) pi.sendUserMessage(`/${BACK_COMMAND}`, { expandPromptTemplates: true });
+      return;
+    }
+    if (!state?.active) return;
+    const n = state.negotiation!;
+    if (n.phase === "paused" && pauseShownThisRun) return;
+    pi.sendMessage(
+      {
+        customType: EXEC_STATUS_MESSAGE_TYPE,
+        content:
+          n.phase === "paused"
+            ? pauseText(n)
+            : event.aborted
+              ? "Implementation was interrupted. Reply to continue or change direction."
+              : "Implementation is idle; completion has not been confirmed. Reply to continue or change direction.",
+        display: true,
+      },
+      { triggerTurn: false },
+    );
   });
+  pi.registerMessageRenderer(
+    EXEC_STATUS_MESSAGE_TYPE,
+    (message, _options, theme) =>
+      new Text(
+        theme.fg("muted", typeof message.content === "string" ? message.content : "Implementation remains active."),
+        0,
+        0,
+      ),
+  );
   pi.registerCommand(BACK_COMMAND, {
     description: "Return to the planning conversation after an implementation (runs by itself)",
     handler: async (_args, ctx) => {
@@ -1161,13 +1458,9 @@ function finishMessageText(details: FinishDetails): string {
 }
 
 function pauseText(n: NegotiationState): string {
-  const recovery =
-    n.pause?.reason === "failure" || n.pause?.reason === "interrupted"
-      ? "/plan-exec retry to authorize one review retry using the saved report."
-      : n.pause?.reason === "exhausted"
-        ? "/plan-exec resume <answer> to provide evidence and authorize one extra revision-and-review cycle."
-        : "/plan-exec resume <answer> to provide the requested user answer or evidence and resume implementation.";
-  return `Exec ${n.phase}. ${n.pause?.action ?? ""}${n.pause?.question ? `\nQuestion: ${n.pause.question}` : ""}\nUser recovery: ${recovery}\nOr /plan-exec accept for a confirmed unreviewed override, or /plan-exec stop to abandon execution without claiming completion. No automatic retry; agents cannot authorize recovery.`;
+  if (n.phase !== "paused") return `Implementation active · ${n.phase}. Completion has not been confirmed.`;
+  const presentation = pausePresentation(n);
+  return [presentation.title, presentation.question, presentation.reason, presentation.next].filter(Boolean).join("\n");
 }
 
 function text(value: string) {

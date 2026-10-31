@@ -129,7 +129,13 @@ const UNDERS = {
       ];
     });
   })),
-  'paused phase footer': (width) => phaseFooter(width),
+  ...Object.fromEntries(['waiting for answer', 'review failed', 'approval needed', 'idle · not completed'].flatMap(phase => {
+    const rows = width => statusFooter(width, modeStatuses('exec', 'auto', phase), { compact: true, phase });
+    return [
+      [`exec ${phase} footer`, rows],
+      [`exec ${phase} pill+footer`, width => [theme.fg('muted', ' 1 task '), '', ...rows(width)]],
+    ];
+  })),
 };
 
 const question = (multiSelect, options = 3) => ({
@@ -241,48 +247,62 @@ function coldCacheLines(width, menu = coldMenu) {
   return selector.render(width);
 }
 
-// Exercise the actual command's ctx.ui.select call, not a copy of its question/options.
-let overrideStatus;
-async function overrideLines(width) {
+// Exercise real registerExec command/tool selects, not copies of their questions/options.
+const EXEC_SELECTS = [
+  { name: 'override confirmation', reason: 'user_needed', command: 'accept', question: 'Finish without planner acceptance?', labels: ['Finish without review', 'Keep paused'] },
+  { name: 'failure recovery', reason: 'failure', command: '', question: 'Review did not finish\nThe review service was unavailable.\nAsk to retry the review, or discuss what happened. No retry has been authorized.', labels: ['Retry review', 'Discuss first', 'Finish without review', 'Stop implementation'] },
+  { name: 'exhausted recovery', reason: 'exhausted', command: '', question: 'Another revision needs your approval\nRevisions used: 2. Outstanding findings: 0.\nAllow one more attempt, discuss the findings, or finish without review.', labels: ['Allow one more attempt', 'Discuss first', 'Finish without review', 'Stop implementation'] },
+  { name: 'user-needed menu', reason: 'user_needed', command: '', question: 'Waiting for your answer\nDid the browser readiness check pass?\nProvide human verification.\nReply here. Ask for clarification if you need it; answering lets implementation continue.', labels: ['Answer in chat', 'Finish without review', 'Stop implementation'] },
+  { name: 'stop confirmation', reason: 'user_needed', tool: 'stop', question: 'Stop implementation?', labels: ['Stop implementation', 'Keep working'] },
+];
+async function execSelectLines(width, spec) {
   const commands = new Map();
   const handlers = new Map();
-  let lines, selected = false;
+  const tools = new Map();
+  const events = new EventEmitter();
+  let blocked = false, lines, selected = false, status;
+  events.on('herdr:blocked', ({ active }) => { blocked = active; });
   const pi = {
-    on: (name, handler) => handlers.set(name, handler), registerTool() {}, registerMessageRenderer() {},
+    on: (name, handler) => handlers.set(name, handler),
+    registerTool: spec => tools.set(spec.name, spec), registerMessageRenderer() {},
     registerCommand: (name, spec) => commands.set(name, spec),
     getActiveTools: () => [], setActiveTools() {}, appendEntry() {},
-    events: { emit() {} },
+    events,
   };
   const ctx = {
     hasUI: true, mode: 'tui', isIdle: () => true,
     ui: {
-      setStatus: (key, value) => { if (key === 'plan-exec') overrideStatus = value; },
-      notify: (message) => { throw new Error(message); },
+      setStatus: (key, value) => { if (key === 'plan-exec') status = value; },
+      notify: () => {}, // A canceled bare-command menu reports its paused status.
       select: async (title, options) => {
+        assert.equal(selected, false, 'execution fixture must open exactly one select');
         selected = true;
+        assert.ok(blocked, 'execution select must hold herdr:blocked');
+        assert.deepEqual(options, spec.labels);
+        assert.ok(!wrapsRow(options, 46), 'execution select labels must fit the phone width');
+        assert.equal(title, spec.question, 'execution select must explain the current pause or confirmation');
         lines = new ExtensionSelectorComponent(title, options, () => {}, () => {}).render(width);
-        return 'Keep paused';
+        return undefined;
       },
     },
   };
   const exec = registerExec(pi, { completionReview: () => true, completionMaxRevisions: () => 2 });
   const negotiation = createNegotiation('remote-client-fixture', 2);
   negotiation.phase = 'paused';
-  negotiation.pause = { reason: 'user_needed', action: 'Provide human verification.', question: 'Did the browser readiness check pass?' };
+  negotiation.pause = { reason: spec.reason, action: spec.reason === 'failure' ? 'The review service was unavailable.' : 'Provide human verification.', ...(spec.reason === 'user_needed' ? { question: 'Did the browser readiness check pass?' } : {}) };
+  if (spec.reason === 'exhausted') negotiation.revisionsUsed = 2;
+  const before = structuredClone(negotiation);
   ctx.sessionManager = { getBranch: () => [{ type: 'custom', customType: 'plan-mode:exec', data: { active: true, planFile: '/tmp/client-plan.md', implementer: 'Terra', implementerModel: 'openai-codex/gpt-6.1-terra', asks: 0, costUsd: 0, negotiation } }] };
   await handlers.get('session_start')({}, ctx);
-  await commands.get('plan-exec').handler('accept', ctx);
-  assert.ok(selected, 'actual /plan-exec accept must open a confirmation');
-  assert.ok(exec.active, 'declining the fixture confirmation must leave execution paused');
-  assert.match(overrideStatus, /^exec mode on · paused · user needed/u);
+  if (spec.tool) await tools.get('continue_plan').execute('client-stop', { action: spec.tool }, undefined, undefined, ctx);
+  else await commands.get('plan-exec').handler(spec.command, ctx);
+  assert.ok(selected, 'actual execution action must open a select');
+  assert.ok(exec.active, 'canceling the fixture select must leave execution paused');
+  assert.deepEqual(negotiation, before, 'canceling must not authorize recovery or alter the pause');
+  assert.equal(blocked, false, 'execution select must release herdr:blocked');
+  const phase = spec.reason === 'user_needed' ? 'waiting for answer' : spec.reason === 'exhausted' ? 'approval needed' : 'review failed';
+  assert.ok(status.startsWith(`exec mode on · ${phase} ·`), 'actual execution status must describe its pause');
   return lines;
-}
-
-function phaseFooter(width) {
-  assert.ok(overrideStatus, 'render the actual override command before its phase footer');
-  const statuses = modeStatuses('exec', 'auto');
-  statuses.set('plan-exec', overrideStatus);
-  return statusFooter(width, statuses, { compact: true, phase: 'paused · user needed' });
 }
 
 // Capture Pi's native select while the real gate command holds its blocked signal. Cancel only
@@ -444,7 +464,11 @@ function historyLines(width, variant) {
 
 // Each dialog, and what each client must make of it.
 const DIALOGS = [
-  { name: 'plan exec override confirmation', lines: overrideLines, question: 'Finish without planner acceptance?', herdr: { options: 2, multi: false, labels: ['Finish without review', 'Keep paused'] }, collie: { kind: 'prompt-select', options: 3, labels: ['Finish without review', 'Keep paused'], wraps: ['Finish without review', 'Keep paused'] } },
+  ...EXEC_SELECTS.map(spec => ({
+    name: `plan exec ${spec.name}`, lines: width => execSelectLines(width, spec), question: spec.question.replace(/\s+/gu, ' ').trim(),
+    herdr: { options: spec.labels.length, multi: false, labels: spec.labels },
+    collie: { kind: 'prompt-select', options: spec.labels.length + 1, labels: spec.labels, wraps: spec.labels },
+  })),
   ...[['mode', 'Workflow', ['Work', 'Chat', 'Plan']], ['approvals', 'Approvals', ['Auto', 'Yolo']]].map(([command, question, labels]) => ({
     name: `/${command} picker`, lines: (w) => gatePickerLines(w, command), question,
     herdr: { options: labels.length, multi: false, labels },
@@ -526,7 +550,7 @@ const FOOTERS = [
   ...['work', 'chat', 'plan', 'exec'].flatMap(workflow => ['auto', 'yolo'].map(approval => ({
     name: `${workflow}/${approval}`, statuses: modeStatuses(workflow, approval, workflow === 'exec' ? 'implementing' : undefined),
   }))),
-  ...['consulting', 'review 2', 'revising · 3 findings', 'paused · user needed', 'paused · review unavailable'].flatMap(phase => ['auto', 'yolo'].map(approval => ({
+  ...['consulting', 'review 2', 'revising · 3 findings', 'waiting for answer', 'review failed', 'approval needed', 'idle · not completed'].flatMap(phase => ['auto', 'yolo'].map(approval => ({
     name: `exec/${approval} ${phase}`, statuses: modeStatuses('exec', approval, phase),
   }))),
   ...['work', 'chat', 'plan', 'exec'].map(workflow => ({ name: `standalone ${workflow}`, statuses: modeStatuses(workflow) })),
