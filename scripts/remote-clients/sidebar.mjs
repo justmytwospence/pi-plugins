@@ -20,7 +20,8 @@ ownTui.setKeybindings(new ownKeybindings.KeybindingsManager({}));
 const ownTheme = (await import(path.join(ownSdk, 'modes/interactive/theme/theme.js'))).theme;
 
 const { SidebarPanel } = await jiti.import(path.join(SIDEBAR, 'src/panel.ts'));
-const { SplitRoot, dividerLines } = await jiti.import(path.join(SIDEBAR, 'src/layout.ts'));
+const { SplitRoot, SplitLayout, dividerLines } = await jiti.import(path.join(SIDEBAR, 'src/layout.ts'));
+const { FamilyViewHost } = await jiti.import(path.join(SIDEBAR, 'src/family/view-host.ts'));
 const { DEFAULT_MIN_COLUMNS, DEFAULT_RATIO } = await jiti.import(path.join(SIDEBAR, 'src/config.ts'));
 
 const fill = (text) => ({ render: () => [text], invalidate() {} });
@@ -54,7 +55,7 @@ export function sidebarScreen({ width, height, dock, footer, transcript = fill('
     { component: { render: (w) => footer(w), invalidate() {} }, basis: 'auto' },
   ]);
   if (!open) return { lines: terminal(renderLayoutFrame(main, width, height, () => {}).lines), orientation: undefined };
-  const root = new SplitRoot(main, panel.root, {
+  const settings = {
     ratio: () => DEFAULT_RATIO,
     minColumns: DEFAULT_MIN_COLUMNS,
     collapsed: () => collapsed,
@@ -62,11 +63,64 @@ export function sidebarScreen({ width, height, dock, footer, transcript = fill('
     divider: (orientation, sidebarFocused, w, length) => dividerLines(orientation, w, (t) => ownTheme.fg('borderAccent', t), {
       sidebar: sidebarFocused, length, pointer: (t) => ownTheme.bold(ownTheme.fg('accent', t)),
     }),
-  }, () => {});
-  // The orientation follows the viewport from the next frame, as in Pi.
+  };
+  const root = new SplitRoot(main, panel.root, settings, () => {});
+  // Exercise the layout engine twice, as Pi does across initial render and invalidation.
   renderLayoutFrame(root, width, height, () => {});
   const frame = renderLayoutFrame(root, width, height, () => {});
-  return { lines: terminal(root.dimUnfocused(frame.lines, frame)), orientation: root.orientation };
+  return { lines: terminal(root.dimUnfocused(frame.lines, frame)), orientation: root.orientation,
+    fixture: { tui, main, panel, settings } };
+}
+
+/** Real hosted lifecycle screens. Read-only child/planner/scout fixtures intentionally have no
+ * main composer; a phone must never type into Sidebar's draft as if it were main's editor.
+ * Native dialogs use the supplied real Pi dock, not a lookalike question.
+ */
+export async function sidebarFamilyScreens(options) {
+  const { fixture: { tui, main, panel, settings } } = sidebarScreen(options);
+  let focus = null;
+  tui.layoutRoot = main;
+  tui.setLayoutRoot = root => { tui.layoutRoot = root; };
+  tui.setFocus = component => { focus = component; };
+  tui.getFocusedComponent = () => focus;
+  const host = new FamilyViewHost(tui, ownTheme, new ownKeybindings.KeybindingsManager({}));
+  const split = new SplitLayout(tui, panel.root, settings);
+  host.mountSplit(split);
+  const render = () => {
+    renderLayoutFrame(tui.layoutRoot, options.width, options.height, () => {});
+    const frame = renderLayoutFrame(tui.layoutRoot, options.width, options.height, () => {});
+    const lines = tui.layoutRoot instanceof SplitRoot ? tui.layoutRoot.dimUnfocused(frame.lines, frame) : frame.lines;
+    return terminal(lines);
+  };
+  let done;
+  const closed = host.view({ factory: (_tui, _theme, _kb, finish, viewport) => {
+    done = finish;
+    const text = new ownTui.Text(`${options.label}\nRead-only enrolled-agent transcript.`, 0, 0);
+    return {
+      render(width) {
+        const lines = text.render(width);
+        return [...lines, ...Array.from({ length: Math.max(0, viewport().height - lines.length) }, () => '')];
+      },
+      invalidate() { text.invalidate(); },
+    };
+  } });
+  await Promise.resolve();
+  const hosted = render();
+  host.unmountSplit();
+  const expanded = render();
+  host.mountSplit(split);
+  const localRestore = host.suspend('local');
+  const local = render();
+  localRestore();
+  const nativeRestore = host.suspend('native');
+  const native = render();
+  nativeRestore();
+  const restored = render();
+  done();
+  await closed;
+  const returned = render();
+  host.dispose();
+  return { hosted, expanded, local, native, restored, returned };
 }
 
 // Pi's cursor markers are APC sequences a terminal never shows; a screen reader never sees them.

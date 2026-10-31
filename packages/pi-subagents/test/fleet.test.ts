@@ -2,6 +2,8 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, expect, test, vi } from "vitest";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { emptyUsage } from "../src/child.ts";
+import type { FamilyService } from "../src/family-contract.ts";
+import type { SessionView } from "../src/ui/viewer.ts";
 import { FleetView, SUCCESS_HINT_MS, fleetRoster, renderFleet } from "../src/ui/fleet.ts";
 import { KEY, fakeRun, fakeUI, normalFocus, piCustom, plain } from "./ui-helpers.ts";
 
@@ -9,6 +11,30 @@ beforeAll(() => initTheme("dark"));
 afterEach(() => vi.useRealTimers());
 
 const names = (roster: ReturnType<typeof fleetRoster>) => roster.map((e) => (e.kind === "main" ? "main" : e.kind === "run" ? e.run.agent : e.kind === "row" ? e.row.label : e.pill.label));
+
+test("Fleet forwards the optional family host and closes it through done on disposal", async () => {
+  const ui = fakeUI();
+  const run = fakeRun({ agentId: "member-uuid" });
+  const focus = vi.fn();
+  const done = vi.fn();
+  let view!: SessionView;
+  const family = {
+    focus,
+    view: ({ factory }: Parameters<FamilyService["view"]>[0]) => new Promise<void>(resolve => {
+      view = factory(ui.tui as never, plain, undefined, () => { done(); resolve(); }, () => ({ width: 100, height: 20 })) as SessionView;
+    }),
+  } as unknown as FamilyService;
+  const fleet = new FleetView({ runs: () => [run], enabled: () => true, actions: () => ({}), family: () => family });
+  fleet.setUI(ui);
+  const work = fleet.show(ui, run);
+  expect(view.current).toBe(run);
+  expect(focus).toHaveBeenCalledWith("member-uuid");
+  expect(ui.customs).toHaveLength(0);
+  fleet.dispose();
+  await work;
+  expect(done).toHaveBeenCalledTimes(1);
+  expect(focus).toHaveBeenLastCalledWith(undefined);
+});
 
 test("the roster: main, running and viewed runs earliest first, failures until the next message or x; then pills", () => {
   const now = 100_000;

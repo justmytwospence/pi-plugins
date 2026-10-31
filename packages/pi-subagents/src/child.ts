@@ -96,6 +96,8 @@ export interface ChildOptions {
   cacheRetention?: CacheRetention;
   /** Command and leading args to run Pi; defaults to the running Pi. */
   invocation?: { command: string; args: string[] };
+  /** Explicit observation extensions, independent of normal extension discovery. */
+  extensions?: string[];
   /** Extra environment for the child (from the subagent-env contract). */
   env?: Record<string, string>;
 }
@@ -187,6 +189,7 @@ export const HEADLESS_PROMPT = "You are a headless report-back worker, not a hum
 
 export function childArgs(options: ChildOptions, promptFile?: string): string[] {
   const args = ["--mode", "rpc"];
+  for (const extension of options.extensions ?? []) args.push("--extension", extension);
   if (options.forkSession) args.push("--fork", options.forkSession);
   args.push("--session-dir", options.sessionDir);
   args.push("--model", options.model, "--thinking", options.thinking);

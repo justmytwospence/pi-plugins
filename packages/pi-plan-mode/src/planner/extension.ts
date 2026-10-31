@@ -11,6 +11,7 @@ import {
   PLAN_MODE_COMPLETE_TOOL_NAME,
   planModeCompleted,
 } from "../completion-tool.js";
+import { discoverFamily } from "../family-contract.js";
 import { formatModelSpec, type ModelSpec } from "../implementation-models.js";
 import {
   checkMcpResourceCall,
@@ -114,6 +115,7 @@ export function plannerExtension(policy: PlannerPolicy): ExtensionFactory {
 
     const scouts = policy.scouts;
     const running = new Set<ChildProcess>();
+    const lifetime = new AbortController();
     if (scouts) {
       pi.registerTool({
         name: PLAN_SUBAGENTS_TOOL_NAME,
@@ -121,6 +123,7 @@ export function plannerExtension(policy: PlannerPolicy): ExtensionFactory {
         description: `Run up to 6 read-only subagents in parallel on ${formatModelSpec(scouts.spec)} to investigate the codebase while planning. Each gets only its task text, can read and search files (no shell, no edits), and returns a report. Use it for broad or independent investigations; verify decisive facts yourself.`,
         parameters: PLAN_SUBAGENTS_PARAMS as never,
         async execute(_id, params: unknown, signal, onUpdate, ctx) {
+          signal = signal ? AbortSignal.any([signal, lifetime.signal]) : lifetime.signal;
           const parsed = normalizeScoutTasks(params);
           if (!parsed.ok) throw new Error(parsed.error);
           const metas: SubagentMeta[] = parsed.tasks.map((task, index) => ({
@@ -136,8 +139,20 @@ export function plannerExtension(policy: PlannerPolicy): ExtensionFactory {
           );
           reporter.flush();
           const results = await Promise.all(
-            parsed.tasks.map((task, index) =>
-              runScout({
+            parsed.tasks.map(async (task, index) => {
+              const observation = await discoverFamily(pi.events)?.prepare(
+                {
+                  kind: "scout",
+                  label: task.label,
+                  operationId: `${_id}:${index}`,
+                },
+                signal,
+              );
+              const meta = metas[index];
+              if (meta && observation) meta.familyAgentId = observation.agentId;
+              reporter.flush();
+              return runScout({
+                ...(observation ? { observation } : {}),
                 spec: scouts.spec,
                 task,
                 cwd: ctx.cwd,
@@ -160,8 +175,8 @@ export function plannerExtension(policy: PlannerPolicy): ExtensionFactory {
                 }
                 reporter.flush();
                 return result;
-              }),
-            ),
+              });
+            }),
           );
           const usage = emptyUsage();
           for (const result of results) addUsage(usage, result.usage);
@@ -173,6 +188,7 @@ export function plannerExtension(policy: PlannerPolicy): ExtensionFactory {
         },
       });
       pi.on("session_shutdown", () => {
+        lifetime.abort();
         for (const child of running) {
           try {
             child.kill("SIGKILL");

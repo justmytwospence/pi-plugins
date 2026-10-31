@@ -20,12 +20,21 @@ export interface LayoutTui {
   requestRender(force?: boolean): void;
 }
 
+/** Focus access used by the primary-view adapter (private on older Pi releases). */
+export interface PrimaryViewTui extends LayoutTui {
+  readonly terminal?: { readonly columns: number; readonly rows: number };
+  setFocus(component: Component | null): void;
+  getFocusedComponent?(): Component | null;
+}
+
 export function canSplit(tui: unknown): tui is LayoutTui & Required<Pick<LayoutTui, "setLayoutRoot">> {
   const t = tui as LayoutTui | undefined;
   return !!t && typeof t.setLayoutRoot === "function" && !!t.layoutRoot;
 }
 
 export interface SplitSettings {
+  /** Called before rendering primary with its actual allocated pane budget. */
+  primaryViewport?(viewport: { width: number; height: number }): void;
   /** Sidebar's share for an orientation. */
   ratio(orientation: Orientation): number;
   /** Divider drags: a new share while dragging (`final` on release), undefined to reset it. */
@@ -114,7 +123,7 @@ export function findTranscriptView(root: unknown): WheelView | undefined {
 
 /**
  * The re-rooted layout. Stack entries are sized on every frame from the viewport the layout passes to
- * `visible`; a change of orientation applies from the next frame.
+ * `visible`; the node's live type applies orientation changes in the same frame.
  */
 export class SplitRoot extends HStack {
   orientation: Orientation = "right";
@@ -131,6 +140,17 @@ export class SplitRoot extends HStack {
       { component: panel, basis: 0 },
     ]);
     this.divider = divider;
+    // Pi snapshots the stack node before evaluating entry visibility. Keep its type live so the
+    // viewport callback below can change axes in this very frame, not measure primary at a bogus
+    // width for one frame (especially harmful to viewport-aware editors on resize).
+    const symbol = Symbol.for("@earendil-works/pi-tui/layout-node");
+    const stack = this as unknown as Record<symbol, () => object>;
+    const layoutNode = stack[symbol]!;
+    Object.defineProperty(this, symbol, { value: () => {
+      const node = layoutNode.call(this);
+      Object.defineProperty(node, "type", { get: () => this.orientation === "right" ? "hstack" : "vstack" });
+      return node;
+    } });
     const entries = this.stackEntries();
     entries[0]!.visible = (viewport) => {
       this.resize(viewport);
@@ -144,7 +164,7 @@ export class SplitRoot extends HStack {
     return (this as unknown as { entries: MutableEntry[] }).entries;
   }
 
-  /** Size the three entries for this viewport; switch orientation for the next frame if needed. */
+  /** Size the three entries and switch orientation atomically for this viewport. */
   resize(viewport: { width: number; height: number }): void {
     const wanted = orientationFor(viewport.width, this.settings.minColumns);
     if (wanted !== this.orientation) {
@@ -159,10 +179,14 @@ export class SplitRoot extends HStack {
     if (this.settings.collapsed()) {
       Object.assign(entries[0]!, { basis: total, grow: 1, shrink: 1, minSize: 1 });
       this.split = { main: total, total };
+      this.settings.primaryViewport?.({ ...viewport });
       return;
     }
     const sizes = splitSizes(total, this.settings.ratio(this.orientation));
     this.split = { main: sizes.main, total };
+    this.settings.primaryViewport?.(this.orientation === "right"
+      ? { width: sizes.main, height: viewport.height }
+      : { width: viewport.width, height: sizes.main });
     Object.assign(entries[0]!, { basis: sizes.main, grow: 0, shrink: 0, minSize: 1 });
     Object.assign(entries[1]!, { basis: sizes.divider, grow: 0, shrink: 0, minSize: 1 });
     Object.assign(entries[2]!, { basis: sizes.side, grow: 0, shrink: 0, minSize: 1 });
@@ -248,13 +272,14 @@ export class SplitLayout {
   }
 
   /** Re-root Pi's layout; false when this renderer has no layout to split (regular mode). */
-  mount(): boolean {
-    if (this.mounted) return true;
+  mount(primary?: Component, primaryViewport?: (viewport: { width: number; height: number }) => void): boolean {
+    if (this.mounted && (!primary || this.root?.main === primary)) return true;
+    if (this.mounted) this.unmount();
     if (!canSplit(this.tui)) return false;
     const current = this.tui.layoutRoot!;
     // Pi replaced our root (or never had it): split whatever it shows now.
     this.original = current instanceof SplitRoot ? current.main : current;
-    this.root = new SplitRoot(this.original, this.panel, this.settings, () => this.tui.requestRender());
+    this.root = new SplitRoot(primary ?? this.original, this.panel, { ...this.settings, primaryViewport: primaryViewport ?? this.settings.primaryViewport }, () => this.tui.requestRender());
     this.tui.setLayoutRoot!(this.root);
     this.installDim();
     this.installClickFocus();

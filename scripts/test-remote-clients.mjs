@@ -37,7 +37,7 @@ const { renderLayoutFrame } = await import(new URL('./layout.js', import.meta.re
 const { SidebarPanel } = await jiti.import('../packages/pi-sidebar/src/panel.ts');
 const { SplitRoot, dividerLines } = await jiti.import('../packages/pi-sidebar/src/layout.ts');
 const { DEFAULT_MIN_COLUMNS, DEFAULT_RATIO } = await jiti.import('../packages/pi-sidebar/src/config.ts');
-const { sidebarScreen } = await import('./remote-clients/sidebar.mjs');
+const { sidebarScreen, sidebarFamilyScreens } = await import('./remote-clients/sidebar.mjs');
 const { TerminalPanel } = await jiti.import('../packages/pi-interactive-shell/src/panel.ts');
 const { HistoryPicker } = await jiti.import('../packages/pi-history-search/src/picker.ts');
 const { default: historySearch } = await jiti.import('../packages/pi-history-search/src/index.ts');
@@ -539,6 +539,22 @@ for (const width of [46, 120, 180]) {
       const { lines: screen } = sidebarScreen({ width, height: HEIGHT, dock: () => lines, footer: rows, collapsed: true });
       screens.push({ name: dialog.name, width, under: `${under}, Sidebar open`, ansi: screen.join('\n') });
     }
+  }
+}
+
+// Composable family primaries have no main send target; native dialogs temporarily use main's
+// real root and return to the exact same hosted primary without reconstructing it.
+for (const width of [46, 120, 180]) {
+  for (const label of ['running child', 'finished child', 'planner A', 'planner B', 'planner M', 'scout']) {
+    const states = await sidebarFamilyScreens({ width, height: HEIGHT, label, dock: () => [], footer });
+    for (const state of ['hosted', 'expanded', 'local', 'restored']) {
+      screens.push({ name: `family ${label} ${state}`, width, under: 'hosted primary', terminal: true, ansi: states[state].join('\n') });
+    }
+  }
+  for (const dialog of DIALOGS) {
+    const lines = await dialog.lines(width);
+    const states = await sidebarFamilyScreens({ width, height: HEIGHT, label: 'planner A', dock: () => lines, footer });
+    screens.push({ name: dialog.name, width, under: 'family primary native', ansi: states.native.join('\n') });
   }
 }
 

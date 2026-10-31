@@ -19,7 +19,7 @@ import {
   type ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { MainState } from "./main-state.ts";
+import type { MainSnapshot, MainState } from "./main-state.ts";
 import { GUARD_ENV, judgeCall, REFUSED_TOOLS, SUBAGENT_ENV_CHANNEL, type SubagentEnvRequest } from "./guard.ts";
 import { inertPayload, isStatusBlock, placeSideBreakpoint, requestedCacheTtlMs, splicePayload, SUPPORTED_APIS } from "./splice.ts";
 import { compactExchange, EXCHANGE_ENTRY } from "./thread.ts";
@@ -109,7 +109,21 @@ export function mainLabel(ctx: Pick<ExtensionContext, "model">): string {
   return model ? model.name?.trim() || model.id : "another model";
 }
 
+export interface QuestionCapture { snapshot: MainSnapshot; entries: unknown[]; status: string }
+
+export interface SidebarFamilyBinding {
+  append(messages: AgentMessage[]): void | Promise<void>;
+  extension: ExtensionFactory;
+  capture(): string;
+  beginQuestion(attachedBytes?: number): void;
+}
+
 export class SidebarAgent {
+  family: SidebarFamilyBinding | undefined;
+  /** Explicit attachment consumed once, never sent to main. */
+  nextContext: string | undefined;
+  private captured: QuestionCapture | undefined;
+  private queuedCaptures: Array<{ text: string; capture: QuestionCapture; attachedBytes: number }> = [];
   private session: AgentSession | undefined;
   private sessionModel: string | undefined;
   private creating: Promise<AgentSession> | undefined;
@@ -184,9 +198,11 @@ export class SidebarAgent {
   async appendMessages(messages: AgentMessage[]): Promise<void> {
     if (!this.idle) throw new Error("Sidebar is answering");
     this.thread = [...this.thread, ...messages];
-    try {
-      this.pi.appendEntry(EXCHANGE_ENTRY, { version: 1, messages, timestamp: this.now() });
-    } catch { /* main's session went away */ }
+    if (this.family) await this.family.append(messages);
+    else {
+      try { this.pi.appendEntry(EXCHANGE_ENTRY, { version: 1, messages, timestamp: this.now() }); }
+      catch { /* main's session went away */ }
+    }
     await this.dispose();
   }
 
@@ -237,18 +253,40 @@ export class SidebarAgent {
     return { kind: "send" };
   }
 
+  captureQuestion(): QuestionCapture {
+    const ctx = this.main.ctx;
+    if (!ctx) throw new Error("main's session is not ready yet");
+    return {
+      snapshot: this.main.snapshot(),
+      entries: structuredClone(ctx.sessionManager.getEntries()),
+      status: this.family?.capture() ?? "",
+    };
+  }
+
   /** Ask a question (after preflight, and confirmation where it asked for one). */
-  async ask(text: string, confirmed = false): Promise<void> {
+  async ask(text: string, confirmed = false, submitted?: QuestionCapture): Promise<void> {
     const ctx = this.main.ctx;
     if (!ctx) throw new Error("main's session is not ready yet");
     if (confirmed) this.missed = undefined;
+    const captured = submitted ?? this.captureQuestion();
+    const attachment = this.nextContext;
+    this.nextContext = undefined;
+    if (attachment) text += `\n\n${attachment}`;
+    if (!this.busy) this.captured = captured;
     const session = await this.ensureSession(ctx);
     if (session.isStreaming) {
-      await session.followUp(text);
+      // Switch only when this queued user message actually starts, never while its predecessor
+      // is answering. Each submitted question has its own immutable subject and retrieval budget.
+      this.queuedCaptures.push({ text, capture: captured, attachedBytes: attachment ? Buffer.byteLength(attachment) : 0 });
+      try { await session.followUp(text); }
+      catch (error) { this.queuedCaptures = this.queuedCaptures.filter(q => q.capture !== captured); throw error; }
       return;
     }
+    this.captured = captured;
+    this.family?.beginQuestion(attachment ? Buffer.byteLength(attachment) : 0);
     this.turnStart = session.messages.length;
-    await session.prompt(text);
+    try { await session.prompt(text); }
+    finally { this.captured = undefined; }
   }
 
   async abort(): Promise<void> {
@@ -261,6 +299,7 @@ export class SidebarAgent {
     this.session = undefined;
     this.creating = undefined;
     this.sessionModel = undefined;
+    this.queuedCaptures = [];
     if (!session) return;
     try { await session.abort(); } catch { /* already idle */ }
     try { await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" } as never); } catch { /* ignore */ }
@@ -271,7 +310,7 @@ export class SidebarAgent {
     const choice = this.modelChoice();
     if (choice.kind === "unavailable") throw new Error(`Sidebar's model ${choice.pattern} matches no model you are logged in to.`);
     const foreign: Foreign | undefined = choice.kind === "other" ? { model: choice.model, label: choice.label, ...(choice.thinking ? { thinking: choice.thinking } : {}) } : undefined;
-    const request = this.main.request;
+    const request = this.captured ? this.captured.snapshot.request : this.main.request;
     const model = foreign ? (foreign.model as NonNullable<ExtensionContext["model"]>) : request ? ctx.modelRegistry.find(request.provider, request.model) : ctx.model;
     if (!model) throw new Error("no model");
     const key = `${foreign ? `other:${foreign.thinking ?? ""}:` : ""}${model.provider}/${model.id}`;
@@ -307,7 +346,7 @@ export class SidebarAgent {
       // another model Sidebar's own prompt stands, so it loads the project's context files itself.
       noContextFiles: !foreign,
       additionalExtensionPaths: sources.paths,
-      extensionFactories: [this.policy(foreign), ...sources.builtins] as never,
+      extensionFactories: [this.policy(foreign), ...(this.family ? [this.family.extension] : []), ...sources.builtins] as never,
     });
     await loader.reload();
     const modelRuntime = await ModelRuntime.create();
@@ -326,7 +365,7 @@ export class SidebarAgent {
       modelRuntime,
       model,
       thinkingLevel: (foreign?.thinking ?? this.pi.getThinkingLevel()) as never,
-      tools: sources.names,
+      tools: [...sources.names, ...(this.family ? ["sidebar_agents", "sidebar_transcript"] : [])],
       resourceLoader: loader,
       sessionManager,
       settingsManager,
@@ -338,6 +377,18 @@ export class SidebarAgent {
 
   private handle(session: AgentSession, event: SidebarEvent): void {
     if (session !== this.session) return;
+    if (event.type === "message_start") {
+      const message = event.message as { role?: string; content?: unknown } | undefined;
+      if (message?.role === "user" && this.queuedCaptures.length) {
+        const text = typeof message.content === "string" ? message.content : Array.isArray(message.content)
+          ? message.content.filter(b => b?.type === "text").map(b => b.text).join("") : "";
+        if (text === this.queuedCaptures[0]!.text) {
+          const queued = this.queuedCaptures.shift()!;
+          this.captured = queued.capture;
+          this.family?.beginQuestion(queued.attachedBytes);
+        }
+      }
+    }
     if (event.type === "message_end") this.recordUsage(event.message as { role: string; usage?: Record<string, number> });
     if (event.type === "agent_end") {
       const added = session.messages.slice(this.turnStart) as AgentMessage[];
@@ -348,9 +399,12 @@ export class SidebarAgent {
         }
         const compact = compactExchange(added);
         this.thread = [...this.thread, ...compact];
-        try {
-          this.pi.appendEntry(EXCHANGE_ENTRY, { version: 1, messages: compact, timestamp: this.now() });
-        } catch { /* main's session went away */ }
+        if (this.family) {
+          Promise.resolve(this.family.append(compact)).catch((error) => this.emit({ type: "sidebar_error", message: `Could not persist Sidebar history: ${String(error)}` }));
+        } else {
+          try { this.pi.appendEntry(EXCHANGE_ENTRY, { version: 1, messages: compact, timestamp: this.now() }); }
+          catch { /* main's session went away */ }
+        }
       }
     }
     this.emit(event);
@@ -397,9 +451,18 @@ export class SidebarAgent {
         const ctx = this.main.ctx;
         if (!ctx) return undefined;
         const now = this.now();
-        const request = this.main.request;
-        const entries = ctx.sessionManager.getEntries() as never;
-        const leaf = ctx.sessionManager.getLeafId();
+        const captured = this.captured;
+        const request = captured ? captured.snapshot.request : this.main.request;
+        const entries = (captured?.entries ?? ctx.sessionManager.getEntries()) as never;
+        const leaf = captured ? captured.snapshot.leafId : ctx.sessionManager.getLeafId();
+        const live = captured?.snapshot.live ?? this.main.live;
+        const familyStatus = captured?.status ?? this.family?.capture() ?? "";
+        const extraStatus = [this.quiz?.status(), familyStatus].filter(Boolean).join("\n");
+        const replaySnapshot = (trim = true): MainDelta => {
+          if (!captured) return replayMessages(ctx, trim);
+          const messages = captured.snapshot.messages;
+          return trim ? trimOpenTurn(messages) : { messages, pending: [] };
+        };
         if (foreign) {
           // Another model: its role, then main's session as a transcript of someone else's work in
           // parts, interleaved with Sidebar's own exchanges as they happened, then the live status.
@@ -407,22 +470,22 @@ export class SidebarAgent {
           this.mode = "foreign";
           const leading = event.messages[0]?.role === "system" ? [event.messages[0]] : [];
           const thread = event.messages.slice(leading.length);
-          const view = this.parts.build(replayMessages(ctx, false).messages, foreign.model.contextWindow, now, newPartAt(thread));
+          const view = this.parts.build(replaySnapshot(false).messages, foreign.model.contextWindow, now, newPartAt(thread));
           this.foreignWarm = view.continued && this.foreignCacheWarm(foreign.model, now);
-          const status = statusMessage(describeLive(this.main.live, { messages: [], pending: view.pending }, now), now, this.quiz?.status());
+          const status = statusMessage(describeLive(live, { messages: [], pending: view.pending }, now), now, extraStatus);
           const role = foreignRoleMessage({ sidebar: foreign.label, main: mainLabel(ctx) }, now, this.quiz?.role());
           return { messages: [...leading, role, ...interleave(view.messages, view.threadAt, thread), status] };
         }
         if (request) {
           this.mode = "splice";
           const delta = mainDelta(entries, request.leafId, leaf);
-          const status = statusMessage(describeLive(this.main.live, delta, now), now, this.quiz?.status());
+          const status = statusMessage(describeLive(live, delta, now), now, extraStatus);
           return { messages: assembleContext(event.messages, delta.messages, roleMessage(now, this.quiz?.role()), status) };
         }
         this.mode = "replay";
-        const rebuilt = replayMessages(ctx);
+        const rebuilt = replaySnapshot();
         const replay = rebuilt.messages;
-        const status = statusMessage(describeLive(this.main.live, { messages: [], pending: rebuilt.pending }, now), now, this.quiz?.status());
+        const status = statusMessage(describeLive(live, { messages: [], pending: rebuilt.pending }, now), now, extraStatus);
         const role = roleMessage(now, this.quiz?.role());
         // Main's transcript starts with its prompt and tools once it has sent anything; before that,
         // Sidebar's own leading system message stands in.
@@ -446,8 +509,8 @@ export class SidebarAgent {
           this.foreignSent = { at: this.now(), model: modelKey(foreign.model), ttl: requestedCacheTtlMs(api, payload) };
           return payload;
         }
-        if (this.mode === "replay") return replayPayload(api, event.payload, cctx.sessionManager.getSessionId(), this.main.sessionId);
-        const request = this.main.request;
+        if (this.mode === "replay") return replayPayload(api, event.payload, cctx.sessionManager.getSessionId(), this.captured?.snapshot.sessionId ?? this.main.sessionId);
+        const request = this.captured ? this.captured.snapshot.request : this.main.request;
         if (this.mode !== "splice" || !request) return fail("there is no copy of main's last request");
         if (request.api !== api) return fail(`main is on the ${request.api} API and Sidebar on ${api}`);
         const result = splicePayload(api, request.payload, event.payload);
@@ -459,7 +522,7 @@ export class SidebarAgent {
       cpi.on("before_provider_headers", (event, cctx) => {
         // On another model Sidebar has its own cache, routed by its own (derived) session id.
         if (foreign) return;
-        const main = this.main.sessionId;
+        const main = this.captured?.snapshot.sessionId ?? this.main.sessionId;
         const own = cctx.sessionManager.getSessionId();
         if (!main || !own || main === own) return;
         for (const [key, value] of Object.entries(event.headers)) {

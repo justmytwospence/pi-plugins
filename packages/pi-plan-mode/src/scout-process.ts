@@ -1,4 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import type { PreparedAgent } from "./family-contract.js";
 import { formatModelSpec, type ModelSpec } from "./implementation-models.js";
 import { MCP_GATEWAY_TOOL } from "./mcp-tools.js";
 import { piSpawnCommand } from "./pi-command.js";
@@ -160,6 +161,7 @@ export function scoutArgs(
 }
 
 export interface RunScoutOptions {
+  observation?: PreparedAgent;
   spec: ModelSpec;
   task: ScoutTask;
   cwd: string;
@@ -199,6 +201,8 @@ export function runScout(options: RunScoutOptions): Promise<ScoutResult> {
       untrack?.();
       const report = lastText.trim();
       const status = terminal ?? (report && !error ? "done" : "failed");
+      options.observation?.finish(status === "done" ? "done" : status === "failed" ? "failed" : "stopped", error);
+      options.observation?.dispose();
       resolve({
         label: options.task.label,
         status,
@@ -231,7 +235,7 @@ export function runScout(options: RunScoutOptions): Promise<ScoutResult> {
     timer.unref?.();
 
     const pi = options.piCommand ?? piSpawnCommand();
-    const env: NodeJS.ProcessEnv = { ...process.env, PI_SKIP_VERSION_CHECK: "1" };
+    const env: NodeJS.ProcessEnv = { ...process.env, ...options.observation?.env, PI_SKIP_VERSION_CHECK: "1" };
     delete env[PLANNER_ENV];
     delete env[SCOUT_MODEL_ENV];
     delete env[EXTRA_TOOLS_ENV];
@@ -240,13 +244,18 @@ export function runScout(options: RunScoutOptions): Promise<ScoutResult> {
     delete env[SCOUT_MCP_ALLOW_ENV];
     delete env[MCP_ALLOW_ENV];
     if (options.mcpAllow) env[MCP_ALLOW_ENV] = JSON.stringify(options.mcpAllow);
+    if (options.signal?.aborted) {
+      terminal = "cancelled";
+      finish();
+      return;
+    }
     try {
       child = (options.spawnProcess ?? spawn)(
         pi.command,
         [
           ...pi.args,
           ...scoutArgs(options.spec, options.task.task, {
-            ...(options.extensions ? { extensions: options.extensions } : {}),
+            extensions: [...(options.extensions ?? []), ...(options.observation?.extensions ?? [])],
             ...(options.tools ? { tools: options.tools } : {}),
             ...(options.mcpAllow ? { mcpAllow: options.mcpAllow } : {}),
             ...(options.mcpAllow && options.guardExtensionPath

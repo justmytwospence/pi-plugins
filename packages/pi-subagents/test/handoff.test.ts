@@ -8,9 +8,10 @@ import { afterEach, expect, test, vi } from "vitest";
 import { Child } from "../src/child.ts";
 import { transcriptWriter } from "../src/conversation.ts";
 import { ADOPT_TIMEOUT_MS, adopt, isParked } from "../src/handoff.ts";
-import subagents, { RESUME_FOOTER, RESUME_HEADING, recordedStatus, resumeTask } from "../src/index.ts";
+import subagents, { RESUME_FOOTER, RESUME_HEADING, recordedRun, recordedStatus, resumeTask } from "../src/index.ts";
 import { harness } from "./harness.ts";
 import { fakeUI } from "./ui-helpers.ts";
+import { FAMILY_CHANNEL, type PreparedAgent } from "../src/family-contract.ts";
 
 const explicit = { agent: "general", model: "p/m", thinking: "low" };
 const tick = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
@@ -43,7 +44,7 @@ function session() {
   const sessionManager = { getBranch: () => entries.map((e) => ({ type: "custom", ...e })), getSessionFile: () => file, getSessionId: () => `id-${sessions}` };
   const records = (id: string) => entries.filter((e) => e.customType === "subagents:run" && e.data.id === id).map((e) => e.data);
 
-  async function runtime() {
+  async function runtime(prepared?: PreparedAgent) {
     const h = harness();
     let tool: any;
     /** pi.* calls made after this runtime's session_shutdown: pi would throw on each. */
@@ -54,7 +55,10 @@ function session() {
     h.pi.appendEntry = (customType: string, data: unknown) => { if (ended) stale.push(`appendEntry ${customType}`); else entries.push({ customType, data }); };
     const send = h.pi.sendMessage;
     h.pi.sendMessage = (message: any, opts: any) => { if (ended) stale.push("sendMessage"); else send(message, opts); };
-    h.pi.events = { emit: (name: string, data: any) => { if (ended) stale.push(`emit ${name}`); else events.push({ name, data }); }, on: () => () => undefined };
+    h.pi.events = { emit: (name: string, data: any) => { if (ended) stale.push(`emit ${name}`); else {
+      events.push({ name, data });
+      if (name === FAMILY_CHANNEL && prepared) data.service = { prepare: async () => prepared };
+    } }, on: () => () => undefined };
     subagents(h.pi);
     const ui = fakeUI();
     const ctx = h.ctx({ cwd, ui, model: { provider: "p", id: "m" }, isIdle: () => true, sessionManager });
@@ -112,6 +116,33 @@ test.each(["after adoption", "while parked"])("a reload hands a running async ru
   // The new runtime recorded how it ended, and pi-bg hears of it there.
   expect(s.records(id).at(-1)).toMatchObject({ status: "done" });
   expect(second.events.some((e) => e.name === "bg:external" && e.data.id === `subagent:${id}` && e.data.state === "done")).toBe(true);
+  await second.shutdown("quit");
+});
+
+test.each(["parked", "adopted"])("family IDs and observation survive reload and finish while %s without stale calls", async (when) => {
+  const s = session();
+  const prepared: PreparedAgent = {
+    agentId: "member-uuid", membership: { version: 1, familyId: "family-uuid", agentId: "member-uuid" },
+    observer: () => undefined, extensions: ["/observer.ts"], env: {}, finish: vi.fn(), dispose: vi.fn(),
+  };
+  const first = await s.runtime(prepared);
+  const result = await first.run({ ...explicit, task: "keep observation", async: true });
+  const id = result.details.runs[0].id;
+  expect(s.records(id).at(-1)).toMatchObject({ familyId: "family-uuid", agentId: "member-uuid" });
+  await first.shutdown("reload");
+  expect(prepared.dispose).not.toHaveBeenCalled();
+  if (when === "parked") { (s.children[0] as any).finish("done"); await tick(); }
+  // The replacement has no prepare service: adoption must not reserve a second identity.
+  const second = await s.runtime();
+  if (when === "adopted") { (s.children[0] as any).finish("done"); await tick(); }
+  await macrotask();
+  expect(s.children).toHaveLength(1);
+  expect(s.records(id).at(-1)).toMatchObject({ familyId: "family-uuid", agentId: "member-uuid", status: "done" });
+  expect(recordedRun(s.records(id).at(-1))).toMatchObject({ familyId: "family-uuid", agentId: "member-uuid" });
+  expect(prepared.finish).toHaveBeenCalledTimes(1);
+  expect(prepared.finish).toHaveBeenCalledWith("done", undefined);
+  expect(prepared.dispose).toHaveBeenCalledTimes(1);
+  expect(first.stale).toEqual([]);
   await second.shutdown("quit");
 });
 

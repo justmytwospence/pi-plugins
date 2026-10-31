@@ -21,6 +21,8 @@ On iPhone, web push requires iOS 16.4+, HTTPS, and installing the site through S
 
 See the [herdr-web-ui guide](https://github.com/devswha/herdr-web-ui/blob/main/docs/guide.md) for current setup and behavior.
 
+Sidebar can share the primary pane with planner and subagent views. Closing Sidebar expands the current view; closing that view returns to main without closing Sidebar. Native dialogs temporarily take the full width. The Sidebar conversation is read-only and belongs to the explicitly enrolled session family, not all sessions on the machine; it does not change the primary view's human controls. Family coverage may be partial or unavailable. See [pi-sidebar](/plugins/pi-sidebar/) for transcript retrieval and limits.
+
 ## Collie
 
 [Collie](https://github.com/AltanS/collie) also mirrors Herdr panes to a phone and reads a waiting Pi dialog off the screen. Single-choice questions, permission prompts and Pi's own selects (plan approval, cache-guard) show as buttons, and a lone multiple-choice question as checkboxes (its Other answer is typed in the terminal). A set of several questions shows Collie's Escape card, with the terminal for the answer.

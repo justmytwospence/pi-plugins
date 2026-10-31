@@ -39,7 +39,7 @@ export type LaneAgent = Pick<
   | "pending"
   | "error"
   | "answer"
->;
+> & { familyAgentId?: string };
 
 import {
   EDITOR_INSERT,
@@ -200,7 +200,17 @@ const MERGER_MIN_ROWS = 5;
 export class LanesPage {
   /** Index into the Tab targets: the lanes, then the merger pane (if any), then the actions bar. */
   focus = 0;
+  focused = true;
   private actionIndex = 0;
+  private lastViewedAgentId: string | undefined;
+
+  /** Actions keep the last conversation subject; M maps to the family's anchor. */
+  viewedAgentId(): string | undefined {
+    const target = this.focusedTarget();
+    if (target.kind !== "actions")
+      this.lastViewedAgentId = this.selectedSub(target.agent)?.familyAgentId ?? target.agent.familyAgentId;
+    return this.lastViewedAgentId;
+  }
   private modal: Modal | undefined;
   private readonly inputs = new Map<string, LaneInput>();
   private readonly showTrace = new Set<string>();
@@ -976,7 +986,7 @@ export class LanesPage {
     const question = asking ? this.questionLines(agent, width, Math.max(1, rows - 1 - subagents.length - 2 - 2)) : [];
     const composing = asking && this.questionCursor(agent).composing;
     const input = this.input(agent);
-    input.focused = focused && this.modal === undefined && (!asking || composing);
+    input.focused = this.focused && focused && this.modal === undefined && (!asking || composing);
     // The input grows to half the lane, leaving the title and at least two lines of chat.
     const inputRoom = Math.max(
       MAX_INPUT_LINES,

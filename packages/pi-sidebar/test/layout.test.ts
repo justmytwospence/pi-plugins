@@ -74,7 +74,7 @@ describe("SplitRoot", () => {
     expect(layoutType(root)).toBe("hstack");
   });
 
-  it("switches to a vertical split for a narrow viewport, from the next frame", async () => {
+  it("switches to a vertical split for a narrow viewport and requests a redraw", async () => {
     let renders = 0;
     const root = new SplitRoot(leaf(), leaf(), settings(), () => renders++);
     entries(root)[0]!.visible!({ width: 120, height: 40 });
@@ -204,6 +204,22 @@ describe("SplitLayout", () => {
     layout.unmount();
     expect(tui.layoutRoot).toBe(original);
     expect(layout.mounted).toBe(false);
+  });
+
+  it("mounts an explicit primary without losing the root it must restore", () => {
+    const original = leaf();
+    const tui = fakeTui(original);
+    const primary = leaf();
+    const viewport: Array<{ width: number; height: number }> = [];
+    const layout = new SplitLayout(tui, leaf(), settings());
+    layout.mount(primary, (budget) => viewport.push(budget));
+    const root = tui.layoutRoot as SplitRoot;
+    expect(root.main).toBe(primary);
+    root.resize({ width: 180, height: 40 });
+    root.resize({ width: 46, height: 30 });
+    expect(viewport).toEqual([{ width: 89, height: 40 }, { width: 46, height: 14 }]);
+    layout.unmount();
+    expect(tui.layoutRoot).toBe(original);
   });
 
   it("splits Pi's new root when Pi replaced it", () => {

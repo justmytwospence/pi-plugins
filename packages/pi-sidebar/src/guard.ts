@@ -19,6 +19,14 @@ export const REFUSED_TOOLS = new Set([
   "exit_plan_mode",
   "herdr",
   "herdr_child",
+  "bg_kill",
+  "ask_planner",
+  "finish_plan",
+  "continue_plan",
+  "plan_ask_planner",
+  "plan_submit_merged",
+  "plan_mode_question",
+  "plan_mode_complete",
 ]);
 
 /** Tools that only read or look things up. Nested codemode calls reach this guard one by one. */
@@ -36,7 +44,8 @@ export const READ_ONLY_TOOLS = new Set([
   "codemode",
   "bg_wait",
   "bg_logs",
-  "bg_kill",
+  "sidebar_agents",
+  "sidebar_transcript",
 ]);
 
 /** Tools whose effect is the shell command they run. */
@@ -69,10 +78,19 @@ export async function judgeCall(toolName: string, input: unknown, host: GuardHos
   const info = host.tool(toolName);
   if (info?.annotations?.destructiveHint === true) return refuse(`${toolName} is marked destructive, so it was not run.`);
   if (READ_ONLY_TOOLS.has(toolName)) return { allowed: true };
-  if (info?.annotations?.readOnlyHint === true) return { allowed: true, why: "read-only hint" };
   if (toolName === SUBAGENT_TOOL) {
+    const args = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    const action = args.action ?? "run";
+    // Control authority cannot be granted by hints or a probabilistic judgment.
+    if (action === "status" || action === "result") return { allowed: true };
+    if (action !== "run") return refuse(`subagent action=${String(action)} controls an agent, so it was not run.`);
+    if (args.worktree !== undefined && args.worktree !== false) return refuse("subagent worktree creation changes git state, so it was not run.");
+    for (const items of [args.tasks, args.chain]) {
+      if (Array.isArray(items) && items.some((item) => item && typeof item === "object" && "worktree" in item && item.worktree !== false && item.worktree !== undefined)) return refuse("subagent worktree creation changes git state, so it was not run.");
+    }
     return host.subagentsGuarded() ? { allowed: true } : refuse("subagents here would not run under Sidebar's guard (pi-subagents is too old), so none was started.");
   }
+  if (info?.annotations?.readOnlyHint === true) return { allowed: true, why: "read-only hint" };
   if (COMMAND_TOOLS.has(toolName)) {
     const command = readCommand(input);
     const blocked = toolName === "powershell"

@@ -662,12 +662,12 @@ export function collectMcpSection(mode: any, entries: McpEntry[] = collectMcpEnt
 
 export type ModelEntry = { provider: string; id: string; thinkingLevel?: string };
 
-const CURRENT_MARK: ResourceMark = { text: "●", color: "accent", highlight: true };
+const CURRENT_MARK: ResourceMark = { text: "●", color: "success", highlight: true };
 
 /**
  * The models section: the session's model scope (enabledModels or --models) when one is set, else every model
  * with credentials, grouped by provider in the order given, each scoped model with its thinking level and the
- * session's model highlighted with an accent dot.
+ * session's model highlighted in green (accent is the provider subheader color).
  */
 export function buildModelsSection(
 	models: ModelEntry[],
