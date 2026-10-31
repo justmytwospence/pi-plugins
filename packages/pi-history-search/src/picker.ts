@@ -1,7 +1,7 @@
 import { stripVTControlCharacters } from "node:util";
 import type { KeybindingsManager } from "@earendil-works/pi-coding-agent";
 import {
-  type Component, type Focusable, CURSOR_MARKER, Input, fuzzyFilter, isKeyRelease,
+  type Component, type Focusable, Input, fuzzyFilter, isKeyRelease,
   matchesKey, truncateToWidth,
 } from "@earendil-works/pi-tui";
 
@@ -29,7 +29,7 @@ export class HistoryPicker implements Component, Focusable {
   private readonly keybindings: KeybindingsManager;
   private readonly requestRender: () => void;
   private readonly done: (text: string | undefined) => void;
-  private readonly terminalHeight: () => number;
+  private readonly availableHeight: (width: number) => number;
 
   get focused(): boolean { return this.input.focused; }
   set focused(value: boolean) { this.input.focused = value; }
@@ -42,13 +42,13 @@ export class HistoryPicker implements Component, Focusable {
     keybindings: KeybindingsManager,
     requestRender: () => void,
     done: (text: string | undefined) => void,
-    terminalHeight: () => number = () => Infinity,
+    availableHeight: (width: number) => number = () => Infinity,
   ) {
     this.theme = theme;
     this.keybindings = keybindings;
     this.requestRender = requestRender;
     this.done = done;
-    this.terminalHeight = terminalHeight;
+    this.availableHeight = availableHeight;
     this.prompts = [...prompts];
     // Bracketed paste inserts literal text with the cursor at the end, independent
     // of configured selection/cursor actions that might match the draft itself.
@@ -102,40 +102,26 @@ export class HistoryPicker implements Component, Focusable {
   render(width: number, height = Infinity): string[] {
     const w = Math.max(0, width);
     const t = this.theme;
-    // Native fullscreen reserves one transcript row and a three-row editor
-    // minimum, even on a three-row terminal: the root clips the dock's last
-    // row. Collapse to the chosen result first instead of moving its cursor
-    // onto an unrelated row to coax the leaf's cursor-follow clipping.
-    const h = Math.max(0, Math.floor(this.terminalHeight() <= 3 ? Math.min(height, 1) : height));
-    // Drop decoration before results on tiny terminals. Even a one-row viewport
-    // can show the selection; normal viewports retain the full frame and hints.
-    const lines: string[] = [];
+    const h = Math.max(0, Math.floor(Math.min(height, this.availableHeight(w))));
+    // Fullscreen clips the Container's prefix, so keep the essential pair first.
+    // Regular mode instead shows the bottom terminal.rows lines: bound our
+    // natural height to the viewport minus the live below-editor/footer rows.
+    // Input alone owns CURSOR_MARKER and the matching fake/hardware cursor.
+    const lines: string[] = h > 0 ? this.input.render(Math.max(1, w)) : [];
+    if (h >= 2) lines.push(this.matches.length
+      ? t.fg("accent", `› ${preview(this.matches[this.selected])}`)
+      : t.fg("dim", "No matches"));
     if (h >= 4) lines.push(t.fg("accent", `╭ ${t.bold("Prompt history")} ${"─".repeat(Math.max(0, w - 18))}╮`));
-    // The ordinary custom dock is a native Container leaf; the layout only
-    // renders it at intrinsic height and clips around CURSOR_MARKER. Keep that
-    // marker on the chosen result so both clipping and host cursor position
-    // identify the item Enter restores.
-    if (h >= 2) lines.push(...this.input.render(Math.max(1, w)).map(line =>
-      this.matches.length ? line.replaceAll(CURSOR_MARKER, "") : line));
     const footer: string[] = [];
-    if (h >= 3 || (!this.matches.length && h > 0)) {
-      footer.push(t.fg("dim", this.matches.length ? `${this.selected + 1}/${this.matches.length}` : "No matches"));
-    }
+    if (h >= 3) footer.push(t.fg("dim", `${this.matches.length ? this.selected + 1 : 0}/${this.matches.length}`));
     if (h >= 6) footer.push(t.fg("dim", "↑↓ move · Enter restore · Esc cancel"));
     if (h >= 5) footer.push(t.fg("accent", `╰${"─".repeat(Math.max(0, w - 2))}╯`));
-    this.visible = Math.max(1, Math.min(VISIBLE, h - lines.length - footer.length));
+    this.visible = Math.max(1, Math.min(VISIBLE, h - lines.length - footer.length + 1));
     const start = Math.max(0, Math.min(this.selected - Math.floor(this.visible / 2), this.matches.length - this.visible));
     for (let i = start; h > 0 && i < Math.min(this.matches.length, start + this.visible); i++) {
-      const chosen = i === this.selected;
-      lines.push(t.fg(chosen ? "accent" : "muted", `${chosen ? "›" : " "} ${preview(this.matches[i])}`));
+      if (i !== this.selected && h >= 2) lines.push(t.fg("muted", `  ${preview(this.matches[i])}`));
     }
-    const selectedRow = lines.findIndex(line => stripVTControlCharacters(line).startsWith("› "));
     lines.push(...footer);
-    if (this.focused && selectedRow >= 0) {
-      // Even hosts that expose a hidden hardware cursor must never show a
-      // second caret on an unrelated row. Input retains its software caret.
-      lines[selectedRow] = CURSOR_MARKER + lines[selectedRow];
-    }
     return lines.map((line) => truncateToWidth(line, w));
   }
 }

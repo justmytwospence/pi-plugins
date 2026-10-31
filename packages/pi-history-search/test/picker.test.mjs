@@ -13,19 +13,16 @@ function fixture(prompts = ['recent', 'older'], query = '', config = {}) {
   return { picker, send, results, renders: () => renders };
 }
 
-test('three-row native root collapses to the visible chosen result and expands after resize', () => {
-  let height = 3;
-  const picker = new HistoryPicker(['recent', 'older'], '', theme,
-    new KeybindingsManager(TUI_KEYBINDINGS), () => {}, () => {}, () => height);
+test('query and chosen result precede all optional chrome', () => {
+  const { picker, send } = fixture();
   picker.focused = true;
-  assert.deepEqual(picker.render(46), [`${CURSOR_MARKER}› recent`]);
-  picker.handleInput(keys.down);
-  assert.deepEqual(picker.render(46), [`${CURSOR_MARKER}› older`]);
-  height = 40;
-  const lines = picker.render(46);
-  assert.ok(lines.some(line => line.startsWith('search: ')));
-  assert.ok(lines.includes(`${CURSOR_MARKER}› older`));
-  assert.ok(lines.includes('  recent'));
+  for (const height of [1, 2, 3, 8, Infinity]) {
+    const lines = picker.render(46, height);
+    assert.ok(lines[0].startsWith('search: '));
+    if (height >= 2) assert.equal(lines[1], '› recent');
+  }
+  send('down');
+  assert.equal(picker.render(46, 2)[1], '› older');
 });
 
 test('empty query keeps recency; fuzzy query ranks best first with stable recency ties', () => {
@@ -127,13 +124,13 @@ test('height-aware windows keep selection visible through navigation, resize and
       assert.ok(lines.length <= height, `height ${height}`);
       assert.ok(lines.every(line => line.trim().length > 0), 'no blank viewport padding');
       if (height >= 6) assert.ok(lines.includes('↑↓ move · Enter restore · Esc cancel'));
-      if (height > 0) assert.equal(lines.filter(line => line.startsWith('› ')).length, 1);
+      if (height >= 2) assert.equal(lines.filter(line => line.startsWith('› ')).length, 1);
       f.send('down');
     }
     for (let i = 0; i < 35; i++) {
       f.send('up');
       const lines = f.picker.render(46, height);
-      if (height > 0) assert.equal(lines.filter(line => line.startsWith('› ')).length, 1);
+      if (height >= 2) assert.equal(lines.filter(line => line.startsWith('› ')).length, 1);
     }
   }
   f.picker.render(46, 8); // five chrome rows leave a three-result page
@@ -145,14 +142,14 @@ test('height-aware windows keep selection visible through navigation, resize and
   f.send('pageUp');
   assert.ok(f.picker.render(46, 6).includes('› prompt 3'));
   f.send('prompt 29');
-  assert.ok(f.picker.render(46, 1).includes('› prompt 29'));
+  assert.ok(f.picker.render(46, 2).includes('› prompt 29'));
   f.send('enter');
   assert.deepEqual(f.results, ['prompt 29']);
   const empty = fixture([], '');
   for (const height of [0, 1, 2, 3, 8]) {
     const lines = empty.picker.render(46, height);
     assert.ok(lines.length <= height);
-    if (height > 0) assert.ok(lines.includes('No matches'));
+    if (height >= 2) assert.ok(lines.includes('No matches'));
   }
 });
 
@@ -185,7 +182,7 @@ test('focus propagates cursor marker and every row fits narrow/wide Unicode widt
   }
 });
 
-test('focused marker anchors the selected-row chevron', () => {
+test('focused marker belongs only to the query through navigation and clipping', () => {
   const f = fixture(Array.from({ length: 20 }, (_, i) => `prompt ${i}`));
   f.picker.focused = true;
   for (const height of [Infinity, 13, 8, 6, 3, 2, 1]) {
@@ -193,10 +190,9 @@ test('focused marker anchors the selected-row chevron', () => {
       const lines = f.picker.render(46, height);
       const cursors = lines.filter(line => line.includes(CURSOR_MARKER));
       assert.equal(cursors.length, 1);
-      const selection = lines.findIndex(line => line.replaceAll(CURSOR_MARKER, '').startsWith('› '));
-      assert.ok(selection >= 0, 'the actual selected row remains visible');
-      assert.equal(lines.findIndex(line => line.includes(CURSOR_MARKER)), selection);
-      assert.ok(lines[selection].startsWith(`${CURSOR_MARKER}› `), 'native cursor anchors the selected-row chevron');
+      assert.equal(cursors[0], lines[0]);
+      assert.ok(cursors[0].startsWith('search: '));
+      if (height >= 2) assert.ok(lines[1].startsWith('› '));
       f.send('down');
     }
     f.send('up');

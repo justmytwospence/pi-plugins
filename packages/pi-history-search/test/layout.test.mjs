@@ -11,8 +11,7 @@ const theme = { fg: (_color, text) => text, bold: text => text };
 const prompts = Array.from({ length: 20 }, (_, i) => `history result ${i}`);
 
 function fixture(footerRows = 5) {
-  let terminalHeight = 40;
-  const picker = new HistoryPicker(prompts, '', theme, new KeybindingsManager(TUI_KEYBINDINGS), () => {}, () => {}, () => terminalHeight);
+  const picker = new HistoryPicker(prompts, '', theme, new KeybindingsManager(TUI_KEYBINDINGS), () => {}, () => {});
   picker.focused = true;
   // The SDK's ordinary-custom dock is a Container, not a VStack or overlay.
   const editor = new Container();
@@ -22,7 +21,6 @@ function fixture(footerRows = 5) {
   const { root } = createChatViewport({ document, editor, footer,
     pendingMessages: new Container(), status: new Container(), scrollbar: 'hidden' });
   const paint = (height, width) => {
-    terminalHeight = height;
     return renderLayoutFrame(root, width, height, () => {});
   };
   return { picker, editor, paint };
@@ -33,6 +31,8 @@ function assertSelected(frame, index) {
   const lines = frame.lines.map(stripTerminalSequences);
   assert.equal(lines.filter(line => line.startsWith('› ')).length, 1, lines.join('\n'));
   assert.ok(lines.includes(`› history result ${index}`), lines.join('\n'));
+  assert.equal(lines.findIndex(line => line.startsWith('› ')), lines.findIndex(line => line.startsWith('search: ')) + 1);
+  assert.ok(frame.lines.filter(line => line.includes('\x1b_pi:c\x07')).every(line => stripTerminalSequences(line).startsWith('search: ')));
 }
 
 for (const width of [46, 120, 180]) for (const footerRows of [0, 5, 13]) {

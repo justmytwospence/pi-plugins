@@ -295,12 +295,15 @@ for (const columns of [46, 120]) for (const footerRows of [0, 12]) {
     assert.equal(f.picker.focused, true);
     f.send('\x15');
     for (let i = 0; i < 23; i++) f.send('\x1b[B');
-    for (const rows of [30, 8, 6, 3, 1, 40]) {
+    for (const rows of [30, 8, 6, 3, 2, 1, 40]) {
       const rendered = f.picker.render(columns, rows);
       assert.ok(rendered.length <= Math.min(13, rows));
       assert.ok(rendered.every(line => visibleWidth(line) <= columns));
       assert.ok(rendered.every(line => stripTerminalSequences(line).trim().length > 0), 'no blank padding');
-      assert.ok(rendered.map(stripTerminalSequences).join('\n').includes('› history result 0'));
+      const text = rendered.map(stripTerminalSequences).join('\n');
+      assert.ok(text.includes('search:'));
+      if (rows >= 2) assert.ok(text.includes('› history result 0'));
+      else assert.ok(!text.includes('history result'), 'one-row viewport shows only the query');
     }
     const screen = ui.render(columns).map(stripTerminalSequences).join('\n');
     assert.ok(screen.includes('CONVERSATION SENTINEL'));
@@ -528,75 +531,78 @@ test('shutdown closes outstanding picker and UI failures release the open guard'
 
 for (const hardwareCursor of [true, false]) {
   for (const sdk of [false, true]) for (const accept of [false, true]) {
-    test(`hardware cursor restores before native done and continuation (${hardwareCursor}, ${sdk ? 'SDK' : 'fixture'}, ${accept ? 'accept' : 'cancel'})`, async t => {
+    test(`hardware cursor preference stays unchanged through native done and continuation (${hardwareCursor}, ${sdk ? 'SDK' : 'fixture'}, ${accept ? 'accept' : 'cancel'})`, async t => {
       const f = await fixture(t, { draft: '', hardwareCursor, sdk });
+      const setCursor = f.tui.setShowHardwareCursor;
+      f.tui.setShowHardwareCursor = () => assert.fail('history-search must not set the hardware cursor preference');
       const custom = f.ctx.ui.custom;
       let doneCalls = 0, continued = false;
       f.ctx.ui.custom = (factory, options) => custom((ui, theme, keys, done) => {
-        assert.equal(ui.getShowHardwareCursor(), hardwareCursor, 'do not hide before the custom factory runs');
+        assert.equal(ui.getShowHardwareCursor(), hardwareCursor, 'preference is unchanged before the custom factory runs');
         const component = factory(ui, theme, keys, value => {
           doneCalls++;
-          assert.equal(ui.getShowHardwareCursor(), hardwareCursor, 'restore synchronously before native done');
+          assert.equal(ui.getShowHardwareCursor(), hardwareCursor, 'preference is unchanged before native done');
           assert.equal(continued, false);
           done(value);
         });
-        assert.equal(ui.getShowHardwareCursor(), false, 'hide while the picker owns the dock');
+        assert.equal(ui.getShowHardwareCursor(), hardwareCursor, 'preference is unchanged while the picker owns the dock');
         return component;
       }, options);
       f.send(SEARCH);
       if (sdk) await Promise.resolve();
       const pending = f.pending.then(() => { continued = true; });
-      assert.equal(f.tui.getShowHardwareCursor(), false);
+      assert.equal(f.tui.getShowHardwareCursor(), hardwareCursor);
       f.send(accept ? '\r' : ESC);
       assert.equal(doneCalls, 1);
       assert.equal(f.tui.getShowHardwareCursor(), hardwareCursor);
-      assert.equal(continued, false, 'restoration must not wait for the pending search');
+      assert.equal(continued, false, 'native done must not wait for the pending search');
       assert.equal(f.main.getText(), '', 'acceptance is still pending');
       await pending;
       assert.equal(f.main.getText(), accept ? 'alpha new' : '');
       assert.equal(f.tui.getShowHardwareCursor(), hardwareCursor);
       // A finally from the old search must not overwrite a subsequent setting.
-      f.tui.setShowHardwareCursor(!hardwareCursor);
+      setCursor(!hardwareCursor);
       f.close(undefined);
       assert.equal(f.tui.getShowHardwareCursor(), !hardwareCursor, 'late duplicate close is inert');
     });
   }
 
   for (const event of ['input', 'session_tree', 'session_shutdown', 'session_start']) {
-    test(`hardware cursor restores synchronously on ${event} (initial ${hardwareCursor})`, async t => {
+    test(`hardware cursor preference stays unchanged on ${event} (initial ${hardwareCursor})`, async t => {
       const f = await fixture(t, { draft: '', hardwareCursor });
+      const setCursor = f.tui.setShowHardwareCursor;
+      f.tui.setShowHardwareCursor = () => assert.fail('history-search must not set the hardware cursor preference');
       f.send(SEARCH);
       const pending = f.pending, close = f.close;
-      assert.equal(f.tui.getShowHardwareCursor(), false);
+      assert.equal(f.tui.getShowHardwareCursor(), hardwareCursor);
       const emitted = f.emit(event);
-      assert.equal(f.tui.getShowHardwareCursor(), hardwareCursor, 'event restores before its promise continuation');
-      f.tui.setShowHardwareCursor(!hardwareCursor);
+      assert.equal(f.tui.getShowHardwareCursor(), hardwareCursor, 'event leaves preference unchanged before its promise continuation');
+      setCursor(!hardwareCursor);
       await emitted;
       await pending;
       close('stale selection');
-      assert.equal(f.tui.getShowHardwareCursor(), !hardwareCursor, 'finally and stale close cannot restore twice');
+      assert.equal(f.tui.getShowHardwareCursor(), !hardwareCursor, 'finally and stale close cannot overwrite an external preference change');
       assert.equal(f.main.getText(), '');
     });
   }
 
   for (const failure of ['factory', 'async UI']) {
-    test(`hardware cursor restores after ${failure} failure (initial ${hardwareCursor})`, async t => {
+    test(`hardware cursor preference stays unchanged after ${failure} failure (initial ${hardwareCursor})`, async t => {
       const f = await fixture(t, { draft: '', hardwareCursor });
       const custom = f.ctx.ui.custom;
-      const setCursor = f.tui.setShowHardwareCursor;
+      f.tui.setShowHardwareCursor = () => assert.fail('history-search must not set the hardware cursor preference');
+      const onChange = f.main.onChange;
       const error = new Error(`${failure} failed`);
       if (failure === 'factory') {
-        // Throw inside the factory after the public setter has mutated state.
-        // Restoration must be registered before a fallible hide operation.
-        let failed = false;
-        f.tui.setShowHardwareCursor = enabled => {
-          setCursor(enabled);
-          if (!enabled && !failed) { failed = true; throw error; }
-        };
+        f.ctx.ui.custom = (factory, options) => custom((...args) => {
+          factory(...args);
+          assert.equal(f.tui.getShowHardwareCursor(), hardwareCursor);
+          throw error;
+        }, options);
       } else {
         f.ctx.ui.custom = async factory => {
           factory(f.tui, theme, f.keys, () => assert.fail('rejected UI must not call done'));
-          assert.equal(f.tui.getShowHardwareCursor(), false);
+          assert.equal(f.tui.getShowHardwareCursor(), hardwareCursor);
           await Promise.resolve();
           throw error;
         };
@@ -604,33 +610,36 @@ for (const hardwareCursor of [true, false]) {
       await f.command('');
       assert.equal(f.tui.getShowHardwareCursor(), hardwareCursor);
       assert.deepEqual(f.notices.at(-1), { message: `history-search: ${error.message}`, type: 'error' });
-      f.tui.setShowHardwareCursor = setCursor;
+      assert.equal(f.main.onChange, onChange, 'failure releases the draft guard');
       f.ctx.ui.custom = custom;
       f.send(SEARCH);
-      assert.equal(f.tui.getShowHardwareCursor(), false, 'failure releases the open guard');
+      assert.equal(f.tui.getShowHardwareCursor(), hardwareCursor, 'reopening leaves preference unchanged');
+      assert.equal(f.opens, failure === 'factory' ? 2 : 1, 'failure releases the open guard');
       f.send(ESC);
       await f.pending;
       assert.equal(f.tui.getShowHardwareCursor(), hardwareCursor);
     });
   }
 
-  test(`hardware cursor restores even when native done throws (initial ${hardwareCursor})`, async t => {
+  test(`hardware cursor preference stays unchanged when native done throws (initial ${hardwareCursor})`, async t => {
     const f = await fixture(t, { draft: '', hardwareCursor });
+    const setCursor = f.tui.setShowHardwareCursor;
+    f.tui.setShowHardwareCursor = () => assert.fail('history-search must not set the hardware cursor preference');
     let picker;
     f.ctx.ui.custom = factory => new Promise(resolve => {
       picker = factory(f.tui, theme, f.keys, () => {
-        assert.equal(f.tui.getShowHardwareCursor(), hardwareCursor, 'restore before throwing native done');
+        assert.equal(f.tui.getShowHardwareCursor(), hardwareCursor, 'preference is unchanged before throwing native done');
         resolve(undefined);
         throw new Error('native done failed');
       });
     });
     const pending = f.command('');
-    assert.equal(f.tui.getShowHardwareCursor(), false);
+    assert.equal(f.tui.getShowHardwareCursor(), hardwareCursor);
     assert.throws(() => picker.handleInput(ESC), /native done failed/);
     assert.equal(f.tui.getShowHardwareCursor(), hardwareCursor);
-    f.tui.setShowHardwareCursor(!hardwareCursor);
+    setCursor(!hardwareCursor);
     await pending;
-    assert.equal(f.tui.getShowHardwareCursor(), !hardwareCursor, 'finally does not restore again after done throws');
+    assert.equal(f.tui.getShowHardwareCursor(), !hardwareCursor, 'finally cannot overwrite an external change after done throws');
   });
 }
 

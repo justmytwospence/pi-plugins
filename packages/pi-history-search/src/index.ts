@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { getKeybindings, isKeyRelease } from "@earendil-works/pi-tui";
+import { type Component, type TUI, getKeybindings, isKeyRelease } from "@earendil-works/pi-tui";
 import { PrefixHistory, sessionPrompts } from "./history.ts";
 import { HistoryPicker } from "./picker.ts";
 
@@ -15,6 +15,24 @@ type Editor = {
   [MODE]?: () => { state: string; autocomplete?: boolean };
 };
 type Tui = { getFocusedComponent(): unknown; requestRender(): void };
+
+/** Regular mode mounts ordinary custom UI in the scrollback component tree. */
+function pickerHeight(ui: TUI, picker: Component, width: number): number {
+  if (ui.mode !== "regular") return Infinity;
+  function following(node: Component): number | undefined {
+    if (node === picker) return 0;
+    const children = (node as Component & { children?: Component[] }).children;
+    if (!Array.isArray(children)) return;
+    for (let i = 0; i < children.length; i++) {
+      const rows = following(children[i]);
+      if (rows !== undefined) {
+        return rows + children.slice(i + 1).reduce((sum, child) => sum + child.render(width).length, 0);
+      }
+    }
+  }
+  const below = following(ui);
+  return below === undefined ? Infinity : Math.max(0, ui.terminal.rows - below);
+}
 
 function isEditor(value: unknown): value is Editor {
   return typeof value === "object" && value !== null
@@ -84,7 +102,6 @@ export default function historySearch(pi: ExtensionAPI) {
     const pending: { close?: () => void } = {};
     opening = pending;
     let preClose: { text: string } | undefined;
-    let restoreHardwareCursor = () => {};
     // Ordinary custom dialogs snapshot getText(), then restore with setText(),
     // clearing native paste storage. Keep this editor marker-free throughout
     // our interaction, not just at opening: external pastes must be expanded
@@ -126,19 +143,7 @@ export default function historySearch(pi: ExtensionAPI) {
       editor.onChange = expandDraft;
       if (editor.getText() !== draft) ctx.ui.setEditorText(draft);
       const selected = await ctx.ui.custom<string | undefined>((ui, theme, keys, done) => {
-        // The picker marker is a clipping anchor, not the filter's caret.
-        // Own the TUI setting here so close, errors and lifecycle cancellation
-        // restore it even when the component never gets another render.
-        const showHardwareCursor = ui.getShowHardwareCursor();
-        let restored = false;
-        restoreHardwareCursor = () => {
-          if (restored) return;
-          ui.setShowHardwareCursor(showHardwareCursor);
-          restored = true;
-        };
-        ui.setShowHardwareCursor(false);
         const close = (value: string | undefined) => {
-          restoreHardwareCursor();
           if (preClose) return;
           // Native done synchronously restores its opening snapshot into the
           // *current* editor, which may have been replaced while we were open.
@@ -154,8 +159,8 @@ export default function historySearch(pi: ExtensionAPI) {
           }
         };
         pending.close = () => close(undefined);
-        const picker = new HistoryPicker(snapshot, draft.replace(/\s+/g, " "), theme, keys, () => ui.requestRender(), close,
-          () => ui.terminal.rows);
+        const picker: HistoryPicker = new HistoryPicker(snapshot, draft.replace(/\s+/g, " "), theme, keys,
+          () => ui.requestRender(), close, (width) => pickerHeight(ui, picker, width));
         return picker;
       });
       if (selected !== undefined && preClose?.text === draft && generation === currentGeneration
@@ -167,7 +172,6 @@ export default function historySearch(pi: ExtensionAPI) {
     } catch (error) {
       ctx.ui.notify(`history-search: ${error instanceof Error ? error.message : String(error)}`, "error");
     } finally {
-      restoreHardwareCursor();
       releaseDraft();
       if (opening === pending) opening = undefined;
     }
