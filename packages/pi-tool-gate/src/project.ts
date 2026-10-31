@@ -34,7 +34,7 @@ export async function resolveProject(cwd: string, exec: ExtensionAPI["exec"]): P
   try {
     const launch = realpathSync(cwd);
     // Control the diagnostic locale, not the user's Git discovery configuration.
-    const identified = await exec("env", ["LC_ALL=C", "git", "-C", cwd, "rev-parse", "--path-format=absolute", "--show-toplevel"], { timeout: 2_000 });
+    const identified = await exec("env", ["LC_ALL=C", "git", "-C", cwd, "rev-parse", "--show-toplevel"], { timeout: 2_000 });
     if (identified.killed || identified.code !== 0) {
       if (identified.killed || identified.code !== 128 || identified.stdout !== "" ||
           !/^fatal: not a git repository \(or any of the parent directories\): \.git\n?$/u.test(identified.stderr)) {
@@ -46,19 +46,21 @@ export async function resolveProject(cwd: string, exec: ExtensionAPI["exec"]): P
     // Query paths separately: line splitting or trimming corrupts valid Git path names.
     const git = async (dir: string, args: string[]) => {
       const out = await exec("git", ["-C", dir, ...args], { timeout: 2_000 });
-      if (out.code !== 0) throw new Error("Git metadata lookup failed");
+      if (out.killed || out.code !== 0) throw new Error("Git metadata lookup failed");
       return out.stdout;
     };
-    const canonicalOutputPath = (output: string) => {
+    const canonicalOutputPath = (output: string, dir: string, allowRelative = false) => {
       // Git appends exactly one LF; any preceding whitespace belongs to the path.
       if (!output.endsWith("\n")) throw new Error("Invalid Git path metadata");
       const value = output.slice(0, -1);
-      if (!path.isAbsolute(value) || value.includes("\0")) throw new Error("Invalid Git path metadata");
-      return realpathSync(value);
+      if (!value || value.includes("\0") || (!allowRelative && !path.isAbsolute(value))) {
+        throw new Error("Invalid Git path metadata");
+      }
+      return realpathSync(path.resolve(dir, value));
     };
-    const root = canonicalOutputPath(identified.stdout);
-    const gitDir = canonicalOutputPath(await git(cwd, ["rev-parse", "--absolute-git-dir"]));
-    const commonDir = canonicalOutputPath(await git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]));
+    const root = canonicalOutputPath(identified.stdout, launch);
+    const gitDir = canonicalOutputPath(await git(cwd, ["rev-parse", "--absolute-git-dir"]), launch);
+    const commonDir = canonicalOutputPath(await git(cwd, ["rev-parse", "--git-common-dir"]), launch, true);
     if (gitDir === commonDir) return { cwd: launch, root, main: root, isGit: true };
 
     const worktrees = await git(cwd, ["worktree", "list", "--porcelain", "-z"]);
@@ -74,9 +76,9 @@ export async function resolveProject(cwd: string, exec: ExtensionAPI["exec"]): P
     if (!path.isAbsolute(mainPath)) throw new Error("Invalid main checkout path");
     const verify = async (candidate: string) => {
       const main = realpathSync(candidate);
-      if (canonicalOutputPath(await git(main, ["rev-parse", "--path-format=absolute", "--show-toplevel"])) !== main ||
-          canonicalOutputPath(await git(main, ["rev-parse", "--absolute-git-dir"])) !== commonDir ||
-          canonicalOutputPath(await git(main, ["rev-parse", "--path-format=absolute", "--git-common-dir"])) !== commonDir) {
+      if (canonicalOutputPath(await git(main, ["rev-parse", "--show-toplevel"]), main) !== main ||
+          canonicalOutputPath(await git(main, ["rev-parse", "--absolute-git-dir"]), main) !== commonDir ||
+          canonicalOutputPath(await git(main, ["rev-parse", "--git-common-dir"]), main, true) !== commonDir) {
         throw new Error("Main checkout does not identify the same Git common directory");
       }
       return main;

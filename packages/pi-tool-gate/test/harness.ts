@@ -31,7 +31,7 @@ export function harness(options: { tools?: any[]; exec?: (cmd: string, args: str
   // performs its real filesystem ancestor checks; custom executors always win.
   if (options.nonGitCwd !== undefined) realpathSync(options.nonGitCwd);
   const discovery = options.nonGitCwd === undefined ? [] : [
-    "LC_ALL=C", "git", "-C", options.nonGitCwd, "rev-parse", "--path-format=absolute", "--show-toplevel",
+    "LC_ALL=C", "git", "-C", options.nonGitCwd, "rev-parse", "--show-toplevel",
   ];
   const handlers = new Map<string, Handler[]>();
   const commands = new Map<string, any>();

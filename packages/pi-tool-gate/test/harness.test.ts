@@ -10,7 +10,7 @@ beforeEach(() => {
   cwd = realpathSync(mkdtempSync(path.join(tmpdir(), "gate-harness-")));
 });
 afterEach(() => rmSync(cwd, { recursive: true, force: true }));
-const discovery = (dir: string) => ["LC_ALL=C", "git", "-C", dir, "rev-parse", "--path-format=absolute", "--show-toplevel"];
+const discovery = (dir: string) => ["LC_ALL=C", "git", "-C", dir, "rev-parse", "--show-toplevel"];
 const generic = { code: 1, stdout: "", stderr: "", killed: false };
 
 test("non-Git mode explicitly recognizes only its declared cwd and discovery command", async () => {

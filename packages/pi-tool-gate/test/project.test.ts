@@ -48,6 +48,10 @@ test("root and subdirectory launches use the same real Git checkout root", async
   expect(await resolveProject(root, exec)).toEqual({ cwd: root, root, main: root, isGit: true });
   expect(await resolveProject(cwd, exec)).toEqual({ cwd, root, main: root, isGit: true });
   expect(projectFiles(await resolveProject(cwd, exec))).toEqual(projectFiles(await resolveProject(root, exec)));
+  // Git 2.30 returns a relative common-dir such as ../.. for nested launches.
+  const common = await git(cwd, "rev-parse", "--git-common-dir");
+  expect(common.stdout.trim()).not.toMatch(/^\//);
+  expect(realpathSync(path.resolve(cwd, common.stdout.slice(0, -1)))).toBe(path.join(root, ".git"));
 });
 
 test("linked worktrees use active shared policy and main local policy, including nested launches", async () => {
@@ -105,7 +109,7 @@ test("only a normal controlled-locale non-Git diagnostic permits fallback", asyn
   const cwd = setup();
   const failed = vi.fn<ExtensionAPI["exec"]>().mockResolvedValue(nonGit);
   expect(await resolveProject(cwd, failed)).toEqual({ cwd, root: cwd, main: cwd, isGit: false });
-  expect(failed).toHaveBeenCalledWith("env", ["LC_ALL=C", "git", "-C", cwd, "rev-parse", "--path-format=absolute", "--show-toplevel"], { timeout: 2_000 });
+  expect(failed).toHaveBeenCalledWith("env", ["LC_ALL=C", "git", "-C", cwd, "rev-parse", "--show-toplevel"], { timeout: 2_000 });
 });
 
 test.each([
@@ -313,10 +317,36 @@ test("direct main uses separate canonical metadata queries without listing workt
   const spy = vi.fn(exec);
   expect((await resolveProject(root, spy)).main).toBe(root);
   expect(spy.mock.calls.map(call => call[1])).toEqual([
-    ["LC_ALL=C", "git", "-C", root, "rev-parse", "--path-format=absolute", "--show-toplevel"],
+    ["LC_ALL=C", "git", "-C", root, "rev-parse", "--show-toplevel"],
     ["-C", root, "rev-parse", "--absolute-git-dir"],
-    ["-C", root, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    ["-C", root, "rev-parse", "--git-common-dir"],
   ]);
+});
+
+test("Git 2.30's echoed unknown path-format flag cannot be accepted as a top-level path", async () => {
+  const cwd = setup();
+  await git(cwd, "init");
+  const outdated: ExtensionAPI["exec"] = async (command, args, options) => {
+    const result = await exec(command, args, options);
+    if (args.includes("--show-toplevel")) result.stdout = `--path-format=absolute\n${cwd}\n`;
+    return result;
+  };
+  await expect(resolveProject(cwd, outdated)).rejects.toThrow("Policy resolution failed");
+});
+
+test("killed or empty Git metadata never identifies a project", async () => {
+  const cwd = setup();
+  await git(cwd, "init");
+  for (const metadata of [
+    { stdout: `${cwd}/.git\n`, killed: true },
+    { stdout: "\n", killed: false },
+  ]) {
+    const intercepted: ExtensionAPI["exec"] = async (command, args, options) => {
+      if (args.includes("--absolute-git-dir")) return { code: 0, stderr: "", ...metadata };
+      return exec(command, args, options);
+    };
+    await expect(resolveProject(cwd, intercepted)).rejects.toThrow("Policy resolution failed");
+  }
 });
 
 test("successful initial lookup with invalid path metadata is not a non-Git fallback", async () => {
