@@ -1,15 +1,13 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type Component, type TUI, getKeybindings, isKeyRelease } from "@earendil-works/pi-tui";
-import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
 import { PrefixHistory, sessionPrompts } from "./history.ts";
 import { HistoryPicker } from "./picker.ts";
 
 // Resolve siblings of the SDK entry rather than a package subpath: Pi's
 // extension loader aliases the package name to that entry file.
-const tuiEntry = createRequire(import.meta.url).resolve("@earendil-works/pi-tui");
-const { allocateStackSizes, visibleStackEntries } = await import(new URL("./components/stack.js", pathToFileURL(tuiEntry)).href) as typeof import("@earendil-works/pi-tui/dist/components/stack.js");
-const { getLayoutNode } = await import(new URL("./layout-node.js", pathToFileURL(tuiEntry)).href) as typeof import("@earendil-works/pi-tui/dist/layout-node.js");
+const tuiEntry = import.meta.resolve("@earendil-works/pi-tui");
+const { allocateStackSizes, visibleStackEntries } = await import(new URL("./components/stack.js", tuiEntry).href) as typeof import("@earendil-works/pi-tui/dist/components/stack.js");
+const { getLayoutNode } = await import(new URL("./layout-node.js", tuiEntry).href) as typeof import("@earendil-works/pi-tui/dist/layout-node.js");
 
 const SURFACE = Symbol.for("pi-plugins.editor-surface.v1");
 const MODE = Symbol.for("pi-plugins.editor-mode.v1");
