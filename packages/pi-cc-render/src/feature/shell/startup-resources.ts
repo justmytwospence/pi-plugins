@@ -569,6 +569,61 @@ export function collectMcpSection(mode: any, entries: McpEntry[] = collectMcpEnt
 	);
 }
 
+// ---- Models (pi only prints the scope as one line before the TUI starts) ----
+
+export type ModelEntry = { provider: string; id: string; thinkingLevel?: string };
+
+const CURRENT_MARK: ResourceMark = { text: "current", color: "accent" };
+
+/**
+ * The models section: the session's model scope (enabledModels or --models) when one is set, else every model
+ * with credentials, grouped by provider in the order given, each scoped model with its thinking level and the
+ * session's model marked current.
+ */
+export function buildModelsSection(
+	models: ModelEntry[],
+	current?: { provider: string; id: string },
+	scoped = false,
+): ResourceSection | undefined {
+	if (models.length === 0) return undefined;
+	const providers = new Map<string, ModelEntry[]>();
+	for (const model of models) providers.set(model.provider, [...(providers.get(model.provider) ?? []), model]);
+	const groups: ResourceGroup[] = [...providers].map(([provider, list]) => {
+		const marks = list.map((model) =>
+			current && model.provider === current.provider && model.id === current.id ? CURRENT_MARK : undefined,
+		);
+		return {
+			label: provider,
+			items: list.map((model) => (model.thinkingLevel ? `${model.id}:${model.thinkingLevel}` : model.id)),
+			...(marks.some(Boolean) ? { marks } : {}),
+		};
+	});
+	return { title: scoped ? "Models" : "Models (all available)", count: models.length, layout: "grid", groups };
+}
+
+/** The session's models as a section; undefined when there are none or pi's model API is missing. */
+export function collectModelsSection(mode: any): ResourceSection | undefined {
+	try {
+		const session = mode?.session;
+		const scopedModels = (session?.scopedModels ?? []) as Array<{ model: any; thinkingLevel?: string }>;
+		const scoped = scopedModels.length > 0;
+		const models: ModelEntry[] = scoped
+			? scopedModels.map((entry) => ({
+					provider: entry.model.provider,
+					id: entry.model.id,
+					...(entry.thinkingLevel ? { thinkingLevel: entry.thinkingLevel } : {}),
+				}))
+			: ([...(session?.modelRuntime?.getAvailableSnapshot?.() ?? [])] as any[]).map((model) => ({
+					provider: model.provider,
+					id: model.id,
+				}));
+		const current = session?.model ? { provider: session.model.provider, id: session.model.id } : undefined;
+		return buildModelsSection(models, current, scoped);
+	} catch {
+		return undefined;
+	}
+}
+
 // ---- Wiring ----
 
 type StartupResourcesPatch = {
@@ -624,6 +679,15 @@ function replaceSections(mode: any, options: unknown): void {
 	const titled = children.map((child) => [child, sectionTitle(child)] as const).filter(([, t]) => t);
 	if (titled.length === 0) return;
 	const sections = collectSections(mode, options as { extensions?: any[] } | undefined);
+	if (collectModelsSection(mode)) {
+		// First, ahead of Context: rendered live so the current mark follows model switches.
+		const at = children.indexOf(titled[0]![0]);
+		const render = (width: number) => {
+			const section = collectModelsSection(mode);
+			return section ? renderSection(section, width, hostTheme?.() ?? PLAIN_THEME) : [];
+		};
+		children.splice(at, 0, { render, invalidate() {} }, { render: () => [""], invalidate() {} });
+	}
 	const mcpEntries = collectMcpEntries(mode);
 	if (mcpEntries.length > 0) {
 		// Right after Extensions (else the last titled section), followed by the same one-line spacer pi uses.

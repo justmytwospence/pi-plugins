@@ -278,6 +278,39 @@ describe("startup resources", () => {
     expect(shown[2]).toBe("MCP configuration needs attention:\n  config: /x: bad\nRun /mcp to fix.");
   });
 
+  test("the models section groups by provider and marks the current model", async () => {
+    const { buildModelsSection, collectModelsSection } = await import("../src/feature/shell/startup-resources.ts");
+    const section = buildModelsSection(
+      [
+        { provider: "anthropic", id: "opus", thinkingLevel: "high" },
+        { provider: "anthropic", id: "sonnet" },
+        { provider: "openai", id: "gpt" },
+      ],
+      { provider: "anthropic", id: "sonnet" },
+      true,
+    )!;
+    expect(renderSection(section, 100, plainTheme)).toEqual([
+      "Models 3",
+      "  anthropic 2",
+      "    opus:high        sonnet current",
+      "  openai 1",
+      "    gpt",
+    ]);
+    expect(buildModelsSection([])).toBeUndefined();
+    const mode = {
+      session: {
+        scopedModels: [],
+        model: { provider: "p", id: "b" },
+        modelRuntime: { getAvailableSnapshot: () => [{ provider: "p", id: "a" }, { provider: "p", id: "b" }] },
+      },
+    };
+    expect(renderSection(collectModelsSection(mode)!, 80, plainTheme)).toEqual([
+      "Models (all available) 2",
+      "  p 2",
+      "    a           b current",
+    ]);
+  });
+
   test("formats token counts compactly", () => {
     expect(formatTokens(210)).toBe("210");
     expect(formatTokens(1000)).toBe("1k");
