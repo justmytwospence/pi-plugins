@@ -291,10 +291,17 @@ describe("startup resources", () => {
     )!;
     expect(renderSection(section, 100, plainTheme)).toEqual([
       "Models 3",
+      "  anthropic 2   openai 1",
+      "  opus:high     gpt",
+      "  sonnet ●",
+    ]);
+    expect(renderSection(section, 22, plainTheme)).toEqual([
+      "Models 3",
       "  anthropic 2",
-      "    opus:high        sonnet current",
+      "  opus:high",
+      "  sonnet ●",
       "  openai 1",
-      "    gpt",
+      "  gpt",
     ]);
     expect(buildModelsSection([])).toBeUndefined();
     const mode = {
@@ -307,8 +314,18 @@ describe("startup resources", () => {
     expect(renderSection(collectModelsSection(mode)!, 80, plainTheme)).toEqual([
       "Models (all available) 2",
       "  p 2",
-      "    a           b current",
+      "  a",
+      "  b ●",
     ]);
+  });
+
+  test("a long column splits into sub-columns under its heading", async () => {
+    const { buildModelsSection, COLUMN_MAX_ROWS } = await import("../src/feature/shell/startup-resources.ts");
+    const models = Array.from({ length: COLUMN_MAX_ROWS + 2 }, (_, i) => ({ provider: "p", id: `m${i}` }));
+    const lines = renderSection(buildModelsSection(models, undefined, true)!, 80, plainTheme);
+    expect(lines).toHaveLength(2 + COLUMN_MAX_ROWS);
+    expect(lines[2]).toBe("  m0   m8");
+    expect(lines[4]).toBe("  m2");
   });
 
   test("formats token counts compactly", () => {
@@ -324,9 +341,9 @@ describe("startup resources", () => {
         title: "Context",
         count: 2,
         tokens: 1500,
-        layout: "lines",
+        layout: "columns",
         groups: [
-          { label: "project", items: ["a.md"], tokens: [100] },
+          { label: "project", items: ["a.md", "b.md"], tokens: [100, 20] },
           { label: "user", items: ["~/big.md"], tokens: [1400] },
         ],
       },
@@ -335,10 +352,9 @@ describe("startup resources", () => {
     );
     expect(lines).toEqual([
       "Context 2 · ~1.5k tok",
-      "  project 1",
-      "    a.md       ~100",
-      "  user 1",
-      "    ~/big.md  ~1.4k",
+      "  project 2    user 1",
+      "  a.md  ~100   ~/big.md  ~1.4k",
+      "  b.md   ~20",
     ]);
   });
 

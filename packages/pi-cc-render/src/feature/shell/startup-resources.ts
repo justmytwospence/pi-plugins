@@ -55,7 +55,8 @@ export type ResourceGroup = {
 	marks?: Array<ResourceMark | undefined>;
 };
 
-export type ResourceMark = { text: string; color: string };
+/** `highlight` also paints the item itself in the mark's color. */
+export type ResourceMark = { text: string; color: string; highlight?: boolean };
 
 export type ResourceSection = {
 	title: string;
@@ -64,8 +65,11 @@ export type ResourceSection = {
 	tokens?: number;
 	/** The model's context window, when known; colors the heading total by its share of it. */
 	contextWindow?: number;
-	/** "lines" lists one entry per line (context files); "grid" packs short names into columns. */
-	layout: "lines" | "grid";
+	/**
+	 * "lines" lists one entry per line; "grid" packs short names into columns; "columns" puts each group side
+	 * by side as its own column (heading on top, entries under it), wrapping to a new band when out of width.
+	 */
+	layout: "lines" | "grid" | "columns";
 	groups: ResourceGroup[];
 	/** Shown after the heading in the warning color. */
 	attention?: string;
@@ -271,6 +275,95 @@ function lineCount(tokens: number): string {
 	return `~${formatTokens(tokens)}`;
 }
 
+function markedItems(group: ResourceGroup, theme: StartupTheme): string[] {
+	if (!group.marks) return group.items;
+	return group.items.map((item, index) => {
+		const mark = group.marks![index];
+		if (!mark) return item;
+		const shown = mark.highlight ? theme.bold(theme.fg(mark.color, item)) : item;
+		return `${shown} ${theme.fg(mark.color, mark.text)}`;
+	});
+}
+
+/** Most entries a column holds before it splits into side-by-side sub-columns under the same heading. */
+export const COLUMN_MAX_ROWS = 8;
+
+type Block = { lines: string[]; width: number };
+
+/** One group as a column block: its heading, then its entries (token counts right-aligned in each cell). */
+function columnBlock(group: ResourceGroup, available: number, ctx: RenderContext): Block {
+	const { theme } = ctx;
+	const heading = `${theme.fg("accent", group.label ?? "")} ${theme.fg("dim", String(group.items.length))}`;
+	const names = markedItems(group, theme);
+	const counts = group.tokens?.map(lineCount);
+	const cells = names.map((name, index) => ({ name, count: counts?.[index] }));
+	const headingWidth = visibleWidth(heading);
+	const layout = (rows: number) => {
+		const columns: Array<typeof cells> = [];
+		for (let at = 0; at < cells.length; at += rows) columns.push(cells.slice(at, at + rows));
+		const widths = columns.map((column) => {
+			const name = Math.max(...column.map((cell) => visibleWidth(cell.name)));
+			const count = Math.max(0, ...column.map((cell) => cell.count?.length ?? 0));
+			return { name, count, total: name + (count ? 2 + count : 0) };
+		});
+		const width = Math.max(headingWidth, widths.reduce((sum, w) => sum + w.total, 0) + COLUMN_GAP * (columns.length - 1));
+		return { columns, widths, width };
+	};
+	let rows = Math.min(cells.length, COLUMN_MAX_ROWS);
+	let shape = layout(Math.max(1, rows));
+	while (shape.width > available && rows < cells.length) shape = layout(++rows);
+	const lines = [heading];
+	for (let row = 0; row < Math.max(1, rows) && cells.length > 0; row++) {
+		let line = "";
+		shape.columns.forEach((column, index) => {
+			const cell = column[row];
+			const w = shape.widths[index]!;
+			const pad = index === 0 ? "" : " ".repeat(COLUMN_GAP);
+			if (!cell) {
+				line += pad + " ".repeat(w.total);
+				return;
+			}
+			const count = cell.count ? theme.fg("dim", cell.count) : "";
+			const gap = " ".repeat(w.total - visibleWidth(cell.name) - (cell.count?.length ?? 0));
+			line += pad + cell.name + gap + count;
+		});
+		lines.push(line.trimEnd());
+	}
+	return { lines, width: shape.width };
+}
+
+/** Groups as side-by-side column blocks, packed left to right and wrapped into bands that fit `width`. */
+function renderColumns(groups: ResourceGroup[], indent: number, ctx: RenderContext): string[] {
+	const available = Math.max(1, ctx.width - indent);
+	const blocks = groups.map((group) => columnBlock(group, available, ctx));
+	const bands: Block[][] = [];
+	let used = 0;
+	for (const block of blocks) {
+		const band = bands[bands.length - 1];
+		if (band && used + COLUMN_GAP + block.width <= available) {
+			band.push(block);
+			used += COLUMN_GAP + block.width;
+		} else {
+			bands.push([block]);
+			used = block.width;
+		}
+	}
+	const lines: string[] = [];
+	for (const band of bands) {
+		const height = Math.max(...band.map((block) => block.lines.length));
+		for (let row = 0; row < height; row++) {
+			let line = " ".repeat(indent);
+			band.forEach((block, index) => {
+				const text = block.lines[row] ?? "";
+				const last = index === band.length - 1;
+				line += last ? text : text + " ".repeat(block.width - visibleWidth(text) + COLUMN_GAP);
+			});
+			lines.push(truncateToWidth(line.trimEnd(), ctx.width));
+		}
+	}
+	return lines;
+}
+
 function renderGroupItems(group: ResourceGroup, indent: number, ctx: RenderContext): string[] {
 	const { section, width, theme } = ctx;
 	if (section.layout === "lines") {
@@ -285,12 +378,7 @@ function renderGroupItems(group: ResourceGroup, indent: number, ctx: RenderConte
 	const colors = group.tokens ? skillTokenColors(group.tokens, ctx.allTokens) : [];
 	const items = group.tokens
 		? group.items.map((item, index) => `${item} ${theme.fg(colors[index]!, lineCount(group.tokens![index]!))}`)
-		: group.marks
-			? group.items.map((item, index) => {
-					const mark = group.marks![index];
-					return mark ? `${item} ${theme.fg(mark.color, mark.text)}` : item;
-				})
-			: group.items;
+		: markedItems(group, theme);
 	return layoutGrid(items, width, indent);
 }
 
@@ -342,7 +430,8 @@ export function renderSection(
 		countEnd: countColumn(section.groups, INDENT),
 	};
 	const lines = [heading];
-	for (const group of section.groups) lines.push(...renderGroup(group, INDENT, ctx));
+	if (section.layout === "columns") lines.push(...renderColumns(section.groups, INDENT, ctx));
+	else for (const group of section.groups) lines.push(...renderGroup(group, INDENT, ctx));
 	for (const note of section.notes ?? []) {
 		lines.push(truncateToWidth(`${" ".repeat(INDENT)}${theme.fg(note.color, note.text)}`, width));
 	}
@@ -423,7 +512,7 @@ export function collectSections(mode: any, options?: { extensions?: any[] }): Re
 			count: contextFiles.length,
 			tokens: total,
 			contextWindow,
-			layout: "lines",
+			layout: "columns",
 			groups,
 		};
 	}
@@ -573,12 +662,12 @@ export function collectMcpSection(mode: any, entries: McpEntry[] = collectMcpEnt
 
 export type ModelEntry = { provider: string; id: string; thinkingLevel?: string };
 
-const CURRENT_MARK: ResourceMark = { text: "current", color: "accent" };
+const CURRENT_MARK: ResourceMark = { text: "●", color: "accent", highlight: true };
 
 /**
  * The models section: the session's model scope (enabledModels or --models) when one is set, else every model
  * with credentials, grouped by provider in the order given, each scoped model with its thinking level and the
- * session's model marked current.
+ * session's model highlighted with an accent dot.
  */
 export function buildModelsSection(
 	models: ModelEntry[],
@@ -598,7 +687,7 @@ export function buildModelsSection(
 			...(marks.some(Boolean) ? { marks } : {}),
 		};
 	});
-	return { title: scoped ? "Models" : "Models (all available)", count: models.length, layout: "grid", groups };
+	return { title: scoped ? "Models" : "Models (all available)", count: models.length, layout: "columns", groups };
 }
 
 /** The session's models as a section; undefined when there are none or pi's model API is missing. */
