@@ -154,7 +154,8 @@ export default function historySearch(pi: ExtensionAPI) {
           }
         };
         pending.close = () => close(undefined);
-        const picker = new HistoryPicker(snapshot, draft.replace(/\s+/g, " "), theme, keys, () => ui.requestRender(), close);
+        const picker = new HistoryPicker(snapshot, draft.replace(/\s+/g, " "), theme, keys, () => ui.requestRender(), close,
+          () => ui.terminal.rows);
         return picker;
       });
       if (selected !== undefined && preClose?.text === draft && generation === currentGeneration

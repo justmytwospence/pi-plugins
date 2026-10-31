@@ -29,6 +29,7 @@ export class HistoryPicker implements Component, Focusable {
   private readonly keybindings: KeybindingsManager;
   private readonly requestRender: () => void;
   private readonly done: (text: string | undefined) => void;
+  private readonly terminalHeight: () => number;
 
   get focused(): boolean { return this.input.focused; }
   set focused(value: boolean) { this.input.focused = value; }
@@ -41,11 +42,13 @@ export class HistoryPicker implements Component, Focusable {
     keybindings: KeybindingsManager,
     requestRender: () => void,
     done: (text: string | undefined) => void,
+    terminalHeight: () => number = () => Infinity,
   ) {
     this.theme = theme;
     this.keybindings = keybindings;
     this.requestRender = requestRender;
     this.done = done;
+    this.terminalHeight = terminalHeight;
     this.prompts = [...prompts];
     // Bracketed paste inserts literal text with the cursor at the end, independent
     // of configured selection/cursor actions that might match the draft itself.
@@ -99,15 +102,19 @@ export class HistoryPicker implements Component, Focusable {
   render(width: number, height = Infinity): string[] {
     const w = Math.max(0, width);
     const t = this.theme;
-    const h = Math.max(0, Math.floor(height));
+    // Native fullscreen reserves one transcript row and a three-row editor
+    // minimum, even on a three-row terminal: the root clips the dock's last
+    // row. Collapse to the chosen result first instead of moving its cursor
+    // onto an unrelated row to coax the leaf's cursor-follow clipping.
+    const h = Math.max(0, Math.floor(this.terminalHeight() <= 3 ? Math.min(height, 1) : height));
     // Drop decoration before results on tiny terminals. Even a one-row viewport
     // can show the selection; normal viewports retain the full frame and hints.
     const lines: string[] = [];
     if (h >= 4) lines.push(t.fg("accent", `╭ ${t.bold("Prompt history")} ${"─".repeat(Math.max(0, w - 18))}╮`));
-    // The ordinary custom dock is a native Container leaf. Pi clips that leaf
-    // around CURSOR_MARKER when its allocated height is smaller than its natural
-    // height. Anchor it to the selection, not the filter's first input row, so
-    // footer/status allocation cannot hide the item Enter would restore.
+    // The ordinary custom dock is a native Container leaf; the layout only
+    // renders it at intrinsic height and clips around CURSOR_MARKER. Keep that
+    // marker on the chosen result so both clipping and host cursor position
+    // identify the item Enter restores.
     if (h >= 2) lines.push(...this.input.render(Math.max(1, w)).map(line =>
       this.matches.length ? line.replaceAll(CURSOR_MARKER, "") : line));
     const footer: string[] = [];
@@ -125,12 +132,9 @@ export class HistoryPicker implements Component, Focusable {
     const selectedRow = lines.findIndex(line => stripVTControlCharacters(line).startsWith("› "));
     lines.push(...footer);
     if (this.focused && selectedRow >= 0) {
-      // Layout only: index.ts hides the hardware cursor while this picker is
-      // active; Input's fake cursor remains the visible filter caret. Leave a
-      // row below the selection so the native dock's three-row minimum still
-      // keeps the selected item visible when the root clips tiny terminals.
-      const anchor = Math.min(selectedRow + 1, lines.length - 1);
-      lines[anchor] = CURSOR_MARKER + lines[anchor];
+      // Even hosts that expose a hidden hardware cursor must never show a
+      // second caret on an unrelated row. Input retains its software caret.
+      lines[selectedRow] = CURSOR_MARKER + lines[selectedRow];
     }
     return lines.map((line) => truncateToWidth(line, w));
   }

@@ -13,6 +13,21 @@ function fixture(prompts = ['recent', 'older'], query = '', config = {}) {
   return { picker, send, results, renders: () => renders };
 }
 
+test('three-row native root collapses to the visible chosen result and expands after resize', () => {
+  let height = 3;
+  const picker = new HistoryPicker(['recent', 'older'], '', theme,
+    new KeybindingsManager(TUI_KEYBINDINGS), () => {}, () => {}, () => height);
+  picker.focused = true;
+  assert.deepEqual(picker.render(46), [`${CURSOR_MARKER}› recent`]);
+  picker.handleInput(keys.down);
+  assert.deepEqual(picker.render(46), [`${CURSOR_MARKER}› older`]);
+  height = 40;
+  const lines = picker.render(46);
+  assert.ok(lines.some(line => line.startsWith('search: ')));
+  assert.ok(lines.includes(`${CURSOR_MARKER}› older`));
+  assert.ok(lines.includes('  recent'));
+});
+
 test('empty query keeps recency; fuzzy query ranks best first with stable recency ties', () => {
   const recent = fixture(['a___b', 'ab', 'Ab']);
   recent.send('enter');
@@ -170,7 +185,7 @@ test('focus propagates cursor marker and every row fits narrow/wide Unicode widt
   }
 });
 
-test('focused marker is only a following-row layout anchor, not a selection caret', () => {
+test('focused marker anchors the selected-row chevron', () => {
   const f = fixture(Array.from({ length: 20 }, (_, i) => `prompt ${i}`));
   f.picker.focused = true;
   for (const height of [Infinity, 13, 8, 6, 3, 2, 1]) {
@@ -179,8 +194,9 @@ test('focused marker is only a following-row layout anchor, not a selection care
       const cursors = lines.filter(line => line.includes(CURSOR_MARKER));
       assert.equal(cursors.length, 1);
       const selection = lines.findIndex(line => line.replaceAll(CURSOR_MARKER, '').startsWith('› '));
-      assert.equal(lines.findIndex(line => line.includes(CURSOR_MARKER)), Math.min(selection + 1, lines.length - 1));
-      assert.ok(!lines.some(line => line.includes(`›${CURSOR_MARKER}`)));
+      assert.ok(selection >= 0, 'the actual selected row remains visible');
+      assert.equal(lines.findIndex(line => line.includes(CURSOR_MARKER)), selection);
+      assert.ok(lines[selection].startsWith(`${CURSOR_MARKER}› `), 'native cursor anchors the selected-row chevron');
       f.send('down');
     }
     f.send('up');

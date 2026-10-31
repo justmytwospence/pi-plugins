@@ -11,7 +11,8 @@ const theme = { fg: (_color, text) => text, bold: text => text };
 const prompts = Array.from({ length: 20 }, (_, i) => `history result ${i}`);
 
 function fixture(footerRows = 5) {
-  const picker = new HistoryPicker(prompts, '', theme, new KeybindingsManager(TUI_KEYBINDINGS), () => {}, () => {});
+  let terminalHeight = 40;
+  const picker = new HistoryPicker(prompts, '', theme, new KeybindingsManager(TUI_KEYBINDINGS), () => {}, () => {}, () => terminalHeight);
   picker.focused = true;
   // The SDK's ordinary-custom dock is a Container, not a VStack or overlay.
   const editor = new Container();
@@ -20,7 +21,10 @@ function fixture(footerRows = 5) {
   const footer = { render: () => Array.from({ length: footerRows }, (_, i) => `footer ${i}`), invalidate() {} };
   const { root } = createChatViewport({ document, editor, footer,
     pendingMessages: new Container(), status: new Container(), scrollbar: 'hidden' });
-  const paint = (height, width) => renderLayoutFrame(root, width, height, () => {});
+  const paint = (height, width) => {
+    terminalHeight = height;
+    return renderLayoutFrame(root, width, height, () => {});
+  };
   return { picker, editor, paint };
 }
 
