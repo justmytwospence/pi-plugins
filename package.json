@@ -75,7 +75,7 @@
     "@earendil-works/pi-coding-agent": "1.2.0"
   },
   "scripts": {
-    "test": "node scripts/test-loader.mjs && node scripts/test-shortcuts.mjs && node scripts/test-contracts.mjs && node scripts/test-question-flow.mjs && node scripts/test-lifecycle.mjs && node scripts/test-family-sidebar.mjs && node scripts/test-mode-flow.mjs && node --test \"evals/shared/*.test.ts\"",
+    "test": "node scripts/test-loader.mjs && node scripts/test-shortcuts.mjs && node scripts/test-contracts.mjs && node scripts/test-question-flow.mjs && node scripts/test-dialog-focus.mjs && node scripts/test-lifecycle.mjs && node scripts/test-family-sidebar.mjs && node scripts/test-mode-flow.mjs && node --test \"evals/shared/*.test.ts\"",
     "check": "npm test && node scripts/check-components.mjs",
     "eval": "node scripts/eval.mjs",
     "eval:dry": "node scripts/eval-dry.mjs",

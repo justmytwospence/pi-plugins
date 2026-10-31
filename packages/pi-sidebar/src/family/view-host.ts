@@ -66,9 +66,10 @@ export class FamilyViewHost {
       if (this.active !== view) return;
       this.active = undefined;
       const focus = this.requestedOpen ? view.focus : this.originalFocus;
-      if (this.suspendedFocus === view.component || !this.requestedOpen) this.suspendedFocus = focus;
+      if (view.component && this.suspendedFocus === view.component) this.suspendedFocus = focus;
       this.render();
-      if (!this.suspended && !this.disposed) this.tui.setFocus(focus);
+      // Closing an auto-view must not take input away from Sidebar or a live dialog.
+      if (!this.disposed && view.component && this.tui.getFocusedComponent?.() === view.component) this.tui.setFocus(focus);
       resolve();
     };
     this.active = view;
@@ -101,16 +102,21 @@ export class FamilyViewHost {
   }
 
   /** Native dialogs need main's real dock; planner-local questions keep their primary screen.
-   * Call before starting a dialog, and invoke the returned release in finally. Nesting is safe.
+   * Prompt-start dispatch may arrive after Pi installs a dialog, so it owns focus throughout.
+   * Invoke the returned release in finally. Nesting is safe.
    */
   suspend(kind: "native" | "local"): () => void {
     if (this.disposed) return () => {};
-    if (!this.suspended) this.suspendedFocus = this.tui.getFocusedComponent?.() ?? null;
+    if (!this.suspended) {
+      // A late native event must never save an already-installed (soon disposed) dialog.
+      // A prior local hold, however, captured the real pre-dialog focus and keeps it.
+      this.suspendedFocus = kind === "native"
+        ? this.active?.component ?? this.originalFocus
+        : this.tui.getFocusedComponent?.() ?? null;
+    }
     const token = Symbol(kind);
-    const focus = this.tui.getFocusedComponent?.() ?? null;
     this.suspensions.set(token, kind);
     this.render();
-    if (kind === "native") this.tui.setFocus(this.originalFocus);
     let released = false;
     return () => {
       if (released) return;
@@ -118,11 +124,16 @@ export class FamilyViewHost {
       this.suspensions.delete(token);
       if (this.disposed) return;
       this.render();
+      const focus = this.tui.getFocusedComponent?.() ?? null;
       if (!this.suspended) {
-        this.tui.setFocus(this.suspendedFocus);
+        // Pi restores its editor when its dialog closes. Only replace host-owned focus;
+        // another dialog or an explicitly focused external component must keep input.
+        if (focus === this.originalFocus || focus === this.active?.component || focus === this.suspendedFocus) {
+          this.tui.setFocus(this.suspendedFocus);
+        }
         this.suspendedFocus = null;
-      } else if (kind === "native" && !this.nativeSuspended) {
-        this.tui.setFocus(focus === this.active?.component ? focus : this.active?.component ?? this.originalFocus);
+      } else if (kind === "native" && !this.nativeSuspended && focus === this.originalFocus) {
+        this.tui.setFocus(this.active?.component ?? this.originalFocus);
       }
     };
   }

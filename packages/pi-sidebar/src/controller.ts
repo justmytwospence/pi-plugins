@@ -460,7 +460,9 @@ export class SidebarController {
     const tui = this.tui;
     if (!tui) return;
     if (this.panel) this.panel.focused = false;
-    if (this.viewHost?.hasView) this.viewHost.focusPrimary();
+    // The host knows whether a primary view is still mounted. mainFocus may be a
+    // disposed subagent view that closed while Sidebar (or a dialog) had focus.
+    if (this.viewHost) this.viewHost.focusPrimary();
     else tui.setFocus(this.mainFocus);
     tui.requestRender();
   }

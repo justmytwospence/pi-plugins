@@ -591,9 +591,12 @@ describe("family controller integration", () => {
     expect(controller.isOpen).toBe(false);
     expect(tui.focused).toBe(primary);
     input("\x14");
+    const dialog = leaf();
+    tui.setFocus(dialog); // Pi may install the dialog before prompt-start is dispatched.
     await pi.emit("ui_prompt_start", { kind: "select" }, ctx);
     expect(tui.layoutRoot).toBe(original);
-    expect(tui.focused).toBe(mainEditor);
+    expect(tui.focused).toBe(dialog);
+    tui.setFocus(mainEditor); // Pi closes the dialog before emitting prompt-end.
     await pi.emit("ui_prompt_end", { kind: "select" }, ctx);
     expect(tui.layoutRoot).toBeInstanceOf(SplitRoot);
     expect(panel.input.getText()).toBe("preserved draft");
@@ -602,6 +605,39 @@ describe("family controller integration", () => {
     expect(controller.isOpen).toBe(true);
     controller.close();
     expect(tui.layoutRoot).toBe(original);
+    await pi.emit("session_shutdown", { reason: "quit" }, ctx);
+  });
+
+  it.each([false, true])("returns to the live main editor after a hosted view closes (dialog: %s)", async (dialogOpen) => {
+    const { pi, controller, ctx, tui, mainEditor } = setup();
+    await pi.emit("session_start", {}, ctx);
+    let done!: () => void;
+    let disposed = false;
+    const primary = { ...leaf(), dispose: () => { disposed = true; } };
+    const shown = controller.family.service.view({ factory: (_t, _th, _kb, close) => { done = close; return primary; } });
+    await Promise.resolve();
+    controller.openOrFocus(ctx as never);
+    const panel = panelOf(controller);
+    panel.input.setText("keep Sidebar draft");
+    expect(tui.focused).toBe(panel.input);
+    if (dialogOpen) {
+      pi.events.emit("herdr:blocked", { active: true });
+      await pi.emit("ui_prompt_start", { kind: "select" }, ctx);
+      tui.setFocus(leaf()); // Pi installs and focuses the native dialog.
+    }
+    done();
+    await shown;
+    expect(disposed).toBe(true);
+    if (dialogOpen) {
+      tui.setFocus(mainEditor); // Pi restores its editor when the dialog closes.
+      await pi.emit("ui_prompt_end", { kind: "select" }, ctx);
+      pi.events.emit("herdr:blocked", { active: false });
+    }
+    expect(tui.focused).toBe(panel.input);
+    controller.focusMain();
+    expect(tui.focused).toBe(mainEditor);
+    expect(tui.focused).not.toBe(primary);
+    expect(panel.input.getText()).toBe("keep Sidebar draft");
     await pi.emit("session_shutdown", { reason: "quit" }, ctx);
   });
 

@@ -102,7 +102,7 @@ describe.each([46, 120, 180])("family primary at %i columns", (width) => {
     expect(f.layout.mounted).toBe(false);
     const native = f.host.suspend("native");
     expect(f.tui.layoutRoot).toBe(f.original);
-    expect(f.tui.getFocusedComponent()).toBe(f.editor);
+    expect(f.tui.getFocusedComponent()).toBe(primary);
     native();
     expect(f.render().lines.join("\n")).toContain("planner");
     local();
@@ -133,6 +133,144 @@ it("keeps requested-close and main focus when a primary finishes during a native
   expect(f.tui.layoutRoot).toBe(f.original);
   expect(f.tui.getFocusedComponent()).toBe(f.editor);
   expect(f.host.sidebarRequestedOpen).toBe(false);
+});
+
+describe.each([false, true])("native focus with Sidebar open=%s", (open) => {
+  it("does not capture a late dialog or restore it after Pi closes it", () => {
+    const f = fixture();
+    if (open) f.host.mountSplit(f.layout);
+    const dialog = leaf("native dialog");
+    f.tui.setFocus(dialog);
+    const release = f.host.suspend("native");
+    expect(f.tui.getFocusedComponent()).toBe(dialog);
+    expect(f.tui.layoutRoot).toBe(f.original);
+    f.tui.setFocus(f.editor); // Pi removes the dialog and restores its editor first.
+    release();
+    expect(f.tui.getFocusedComponent()).toBe(f.editor);
+    expect(f.layout.mounted).toBe(open);
+  });
+
+  it("preserves an external dialog when a native hold ends before that dialog", () => {
+    const f = fixture();
+    if (open) f.host.mountSplit(f.layout);
+    const release = f.host.suspend("native");
+    const dialog = leaf("still-open dialog");
+    f.tui.setFocus(dialog);
+    release();
+    expect(f.tui.getFocusedComponent()).toBe(dialog);
+  });
+});
+
+it("restores a hosted view, not a late native dialog, after Pi restores its editor", async () => {
+  const f = fixture();
+  f.host.mountSplit(f.layout);
+  const primary = leaf("primary");
+  let done!: () => void;
+  const closed = f.host.view({ factory: (_t, _theme, _kb, finish) => { done = finish; return primary; } });
+  await Promise.resolve();
+  const dialog = leaf("dialog");
+  f.tui.setFocus(dialog);
+  const release = f.host.suspend("native");
+  expect(f.tui.getFocusedComponent()).toBe(dialog);
+  f.tui.setFocus(f.editor);
+  release();
+  expect(f.tui.getFocusedComponent()).toBe(primary);
+  done();
+  await closed;
+});
+
+it.each([false, true])("keeps a local hold's prior Sidebar focus across nested native releases (dialog still open=%s)", async (dialogOpen) => {
+  const f = fixture();
+  f.host.mountSplit(f.layout);
+  let done!: () => void;
+  const primary = leaf("primary");
+  const closed = f.host.view({ factory: (_t, _theme, _kb, finish) => { done = finish; return primary; } });
+  await Promise.resolve();
+  f.tui.setFocus(f.sidebar);
+  const local = f.host.suspend("local");
+  const outerDialog = leaf("outer dialog");
+  f.tui.setFocus(outerDialog);
+  const outer = f.host.suspend("native");
+  const innerDialog = leaf("inner dialog");
+  f.tui.setFocus(innerDialog);
+  const inner = f.host.suspend("native");
+  inner();
+  expect(f.tui.getFocusedComponent()).toBe(innerDialog);
+  f.tui.setFocus(dialogOpen ? outerDialog : f.editor);
+  outer(); // A remaining local hold must not redirect a still-open dialog to primary.
+  expect(f.tui.getFocusedComponent()).toBe(dialogOpen ? outerDialog : primary);
+  if (dialogOpen) f.tui.setFocus(f.editor);
+  local();
+  expect(f.tui.getFocusedComponent()).toBe(f.sidebar);
+  expect(f.layout.mounted).toBe(true);
+  done();
+  await closed;
+  expect(f.tui.getFocusedComponent()).toBe(f.sidebar);
+});
+
+it.each(["sidebar", "external"] as const)("keeps %s focus when an auto-view closes", async (target) => {
+  const f = fixture();
+  f.host.mountSplit(f.layout);
+  let done!: () => void;
+  const closed = f.host.view({ factory: (_t, _theme, _kb, finish) => { done = finish; return leaf("primary"); } });
+  await Promise.resolve();
+  const focus = target === "sidebar" ? f.sidebar : leaf("external");
+  f.tui.setFocus(focus);
+  done();
+  await closed;
+  expect(f.host.hasView).toBe(false);
+  expect(f.tui.getFocusedComponent()).toBe(focus);
+  expect((f.tui.layoutRoot as SplitRoot).main).toBe(f.original);
+});
+
+it.each([false, true])("invalidates closing-view focus without stealing a suspended dialog (local=%s)", async (localHold) => {
+  const f = fixture();
+  f.host.mountSplit(f.layout);
+  f.tui.setFocus(f.sidebar);
+  let done!: () => void;
+  const closed = f.host.view({ factory: (_t, _theme, _kb, finish) => { done = finish; return leaf("primary"); } });
+  await Promise.resolve();
+  const local = localHold ? f.host.suspend("local") : undefined;
+  const dialog = leaf("dialog");
+  f.tui.setFocus(dialog);
+  const native = f.host.suspend("native");
+  done();
+  await closed;
+  expect(f.tui.getFocusedComponent()).toBe(dialog);
+  f.tui.setFocus(f.editor);
+  native();
+  local?.();
+  expect(f.tui.getFocusedComponent()).toBe(f.sidebar);
+  expect(f.host.hasView).toBe(false);
+  expect(f.layout.mounted).toBe(true);
+});
+
+it("preserves an external local return target when a fullscreen primary closes", async () => {
+  const f = fixture();
+  let done!: () => void;
+  const closed = f.host.view({ factory: (_t, _theme, _kb, finish) => { done = finish; return leaf("primary"); } });
+  await Promise.resolve();
+  const external = leaf("external");
+  f.tui.setFocus(external);
+  const local = f.host.suspend("local");
+  done();
+  await closed;
+  expect(f.tui.getFocusedComponent()).toBe(external);
+  local();
+  expect(f.tui.getFocusedComponent()).toBe(external);
+});
+
+it("drops a disposed primary even when it still owns focus during a local hold", async () => {
+  const f = fixture();
+  let done!: () => void;
+  const closed = f.host.view({ factory: (_t, _theme, _kb, finish) => { done = finish; return leaf("primary"); } });
+  await Promise.resolve();
+  const local = f.host.suspend("local");
+  done();
+  await closed;
+  expect(f.tui.getFocusedComponent()).toBe(f.editor);
+  local();
+  expect(f.tui.getFocusedComponent()).toBe(f.editor);
 });
 
 it("handles synchronous done, failed factories, disposal and stale completions", async () => {
