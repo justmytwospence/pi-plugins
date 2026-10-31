@@ -51,8 +51,12 @@ export type ResourceGroup = {
 	children?: ResourceGroup[];
 	/** Estimated tokens per item, parallel to `items`; present only when the section measures them. */
 	tokens?: number[];
-	/** A colored word after an item, parallel to `items` (grid layout); undefined entries have none. */
+	/** A colored word after an item, parallel to `items`; undefined entries have none. */
 	marks?: Array<ResourceMark | undefined>;
+	/** A one-character colored marker before an item (lines layout), parallel to `items`; blank where undefined. */
+	prefixes?: Array<ResourceMark | undefined>;
+	/** Right-aligned dim text after an item (lines layout), parallel to `items`, used when the group has no tokens. */
+	right?: string[];
 };
 
 /** `highlight` also paints the item itself in the mark's color. */
@@ -73,6 +77,8 @@ export type ResourceSection = {
 	groups: ResourceGroup[];
 	/** Shown after the heading in the warning color. */
 	attention?: string;
+	/** Shown after the heading, each part in its own color (a key to the section's marks). */
+	legend?: ResourceMark[];
 	/** Lines under the last group, indented, each in its own color (what went wrong, per server). */
 	notes?: ResourceMark[];
 };
@@ -364,15 +370,29 @@ function renderColumns(groups: ResourceGroup[], indent: number, ctx: RenderConte
 	return lines;
 }
 
+/** The marker column of a lines group: the marker and a space, or as many blanks; empty without markers. */
+function prefixText(group: ResourceGroup, index: number, theme: StartupTheme): string {
+	if (!group.prefixes) return "";
+	const mark = group.prefixes[index];
+	return mark ? `${theme.fg(mark.color, mark.text)} ` : " ".repeat(PREFIX_WIDTH);
+}
+
+function rightText(group: ResourceGroup, index: number): string | undefined {
+	return group.tokens ? lineCount(group.tokens[index]!) : group.right?.[index];
+}
+
+const PREFIX_WIDTH = 2;
+
 function renderGroupItems(group: ResourceGroup, indent: number, ctx: RenderContext): string[] {
 	const { section, width, theme } = ctx;
 	if (section.layout === "lines") {
-		return group.items.map((item, index) => {
-			const head = `${" ".repeat(indent)}${item}`;
-			if (!group.tokens) return truncateToWidth(head, width);
-			const count = lineCount(group.tokens[index]!);
-			const gap = " ".repeat(Math.max(2, ctx.countEnd - visibleWidth(head) - count.length));
-			return truncateToWidth(`${head}${gap}${theme.fg("dim", count)}`, width);
+		const names = markedItems(group, theme);
+		return names.map((name, index) => {
+			const head = `${" ".repeat(indent)}${prefixText(group, index, theme)}${name}`;
+			const right = rightText(group, index);
+			if (!right) return truncateToWidth(head, width);
+			const gap = " ".repeat(Math.max(2, ctx.countEnd - visibleWidth(head) - right.length));
+			return truncateToWidth(`${head}${gap}${theme.fg("dim", right)}`, width);
 		});
 	}
 	const colors = group.tokens ? skillTokenColors(group.tokens, ctx.allTokens) : [];
@@ -402,9 +422,12 @@ function countColumn(groups: ResourceGroup[], indent: number): number {
 	let counts = 0;
 	const visit = (group: ResourceGroup, at: number) => {
 		const inner = group.label !== undefined ? at + INDENT : at;
+		const prefix = group.prefixes ? PREFIX_WIDTH : 0;
 		group.items.forEach((item, index) => {
-			names = Math.max(names, inner + visibleWidth(item));
-			if (group.tokens) counts = Math.max(counts, lineCount(group.tokens[index]!).length);
+			const mark = group.marks?.[index];
+			names = Math.max(names, inner + prefix + visibleWidth(item) + (mark ? 1 + visibleWidth(mark.text) : 0));
+			const right = rightText(group, index);
+			if (right) counts = Math.max(counts, right.length);
 		});
 		for (const child of group.children ?? []) visit(child, inner);
 	};
@@ -421,7 +444,8 @@ export function renderSection(
 		? ` ${theme.fg(windowShareColor(section.tokens, section.contextWindow), `· ~${formatTokens(section.tokens)} tok`)}`
 		: "";
 	const attention = section.attention ? ` ${theme.fg("warning", `· ${section.attention}`)}` : "";
-	const heading = `${theme.bold(theme.fg("mdHeading", section.title))} ${theme.fg("dim", String(section.count))}${cost}${attention}`;
+	const legend = (section.legend ?? []).map((part) => ` ${theme.fg("dim", "·")} ${theme.fg(part.color, part.text)}`).join("");
+	const heading = `${theme.bold(theme.fg("mdHeading", section.title))} ${theme.fg("dim", String(section.count))}${cost}${attention}${legend}`;
 	const ctx: RenderContext = {
 		section,
 		width,
@@ -660,34 +684,169 @@ export function collectMcpSection(mode: any, entries: McpEntry[] = collectMcpEnt
 
 // ---- Models (pi only prints the scope as one line before the TUI starts) ----
 
-export type ModelEntry = { provider: string; id: string; thinkingLevel?: string };
+export type ModelEntry = { provider: string; id: string; contextWindow?: number; thinkingLevel?: string };
 
 const CURRENT_MARK: ResourceMark = { text: "●", color: "success", highlight: true };
+const FAVORITE_MARK: ResourceMark = { text: "★", color: "warning" };
 
 /**
- * The models section: the session's model scope (enabledModels or --models) when one is set, else every model
- * with credentials, grouped by provider in the order given, each scoped model with its thinking level and the
- * session's model highlighted in green (accent is the provider subheader color).
+ * A context window in the units vendors quote: binary for powers-of-two sizes (131072 is `128K`, 1048576 is
+ * `1M`), decimal otherwise (272000 is `272K`, 1050000 is `1.05M`).
+ */
+export function formatContextWindow(tokens: number | undefined): string {
+	if (!tokens || !Number.isFinite(tokens) || tokens <= 0) return "";
+	const binary = tokens % 1024 === 0;
+	const k = binary ? 1024 : 1000;
+	const m = k * k;
+	const trim = (value: number) => String(Number(value.toFixed(2)));
+	if (tokens >= m) return `${trim(tokens / m)}M`;
+	if (tokens >= k) return `${trim(tokens / k)}K`;
+	return String(tokens);
+}
+
+type ParsedModelId = {
+	/** The id with its version numbers taken out: models in one family differ only by version. */
+	family: string;
+	/** The model line: the id's leading word (gpt, claude, antigravity), when it has one. */
+	vendor?: string;
+	/** Major and minor version, when the id carries one. */
+	version?: [number, number];
+	/**
+	 * A moving alias (`-latest`), a dated snapshot or a billing lane (Muse's `-contributor`) of another entry, or
+	 * an image generator listed with the chat models: never a chat model of its own.
+	 */
+	alias: boolean;
+};
+
+/** Reads family, line and version from an id such as `claude-opus-4-5-20251101`, `gpt-6.1-sol` or `o4-mini`. */
+export function parseModelId(id: string): ParsedModelId {
+	let rest = id.toLowerCase();
+	// A dated snapshot (-20251101, -2024-05-13) or a moving alias (-latest) stands in for another entry.
+	const alias =
+		/[-_](\d{8}|\d{4}-\d{2}-\d{2})$/.test(rest) || /(^|[-_])(latest|contributor)$/.test(rest) || /(^|[-_])image([-_]|$)/.test(rest);
+	rest = rest.replace(/[-_](\d{8}|\d{4}-\d{2}-\d{2})$/, "");
+	const tokens = rest.split(/[-_/]/).filter(Boolean);
+	const family: string[] = [];
+	let version: [number, number] | undefined;
+	let minorPending = false;
+	for (const token of tokens) {
+		if (token === "latest") continue;
+		if (minorPending) {
+			minorPending = false;
+			// claude-opus-4-5: a bare small number right after a bare major is its minor version.
+			if (/^\d{1,2}$/.test(token)) {
+				version![1] = Number(token);
+				continue;
+			}
+		}
+		const match = version ? null : /^([a-z]*)(\d+)(?:\.(\d+))?([a-z]*)$/.exec(token);
+		// A size (120b, 27b) is part of the name, not a version.
+		if (!match || /^[bmk]$/.test(match[4]!)) {
+			family.push(token);
+			continue;
+		}
+		version = [Number(match[2]), match[3] === undefined ? 0 : Number(match[3])];
+		minorPending = match[3] === undefined && !match[1] && !match[4];
+		if (match[1]) family.push(match[1]);
+		if (match[4]) family.push(match[4]);
+	}
+	const first = tokens[0] ?? "";
+	return {
+		family: family.join("-"),
+		...(/^[a-z]{2,}$/.test(first) ? { vendor: first } : {}),
+		...(version ? { version } : {}),
+		alias,
+	};
+}
+
+function compareVersions(a: [number, number], b: [number, number]): number {
+	return a[0] - b[0] || a[1] - b[1];
+}
+
+/**
+ * The current generation of one provider's models: the newest version of every family, leaving out aliases,
+ * dated snapshots, billing lanes, image generators and families a generation behind. A line's generation is the newest major version among its
+ * families that have more than one version (else among all of them), so a family new in a later major (Gemini
+ * Argon 4 beside Flash 3.8) stays and a family last released a major ago (GPT-5.5 Pro beside GPT-6) goes.
+ * Ids without a leading word (o3, o4-mini) count toward the provider's main line.
+ */
+export function currentGeneration(ids: string[]): Set<string> {
+	const parsed = ids.map((id) => ({ id, ...parseModelId(id) })).filter((model) => !model.alias);
+	const vendors = new Map<string, number>();
+	for (const model of parsed) if (model.vendor) vendors.set(model.vendor, (vendors.get(model.vendor) ?? 0) + 1);
+	const main = [...vendors].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
+	const lines = new Map<string, Map<string, typeof parsed>>();
+	for (const model of parsed) {
+		const line = model.vendor ?? main;
+		const families = lines.get(line) ?? new Map<string, typeof parsed>();
+		families.set(model.family, [...(families.get(model.family) ?? []), model]);
+		lines.set(line, families);
+	}
+	const keep = new Set<string>();
+	for (const families of lines.values()) {
+		const versioned = [...families.values()].map((list) => list.filter((model) => model.version));
+		const majors = (lists: typeof versioned) => lists.flatMap((list) => list.map((model) => model.version![0]));
+		const multi = versioned.filter((list) => new Set(list.map((model) => model.version!.join("."))).size > 1);
+		const generation = Math.max(-Infinity, ...majors(multi.length > 0 ? multi : versioned));
+		for (const list of families.values()) {
+			const newest = list.reduce((best, model) =>
+				!best.version || (model.version && compareVersions(model.version, best.version) > 0) ? model : best,
+			);
+			if (!newest.version || newest.version[0] >= generation) keep.add(newest.id);
+		}
+	}
+	return keep;
+}
+
+/**
+ * The models section, one line per model under a heading per provider: every current-generation model of each
+ * provider with credentials, plus the favorites (enabledModels or --models, with any thinking level) and the
+ * session's model wherever they are. Favorites carry a star and come first in their provider, in the order they
+ * are configured; the session's model is highlighted in green. Every model shows its context window on the right.
  */
 export function buildModelsSection(
-	models: ModelEntry[],
+	available: ModelEntry[],
+	favorites: ModelEntry[] = [],
 	current?: { provider: string; id: string },
-	scoped = false,
 ): ResourceSection | undefined {
-	if (models.length === 0) return undefined;
+	const key = (model: { provider: string; id: string }) => `${model.provider}/${model.id}`;
+	const byKey = new Map(available.map((model) => [key(model), model]));
+	const favoriteKeys = new Set(favorites.map(key));
 	const providers = new Map<string, ModelEntry[]>();
-	for (const model of models) providers.set(model.provider, [...(providers.get(model.provider) ?? []), model]);
+	const add = (model: ModelEntry) => {
+		const list = providers.get(model.provider) ?? [];
+		if (!list.some((entry) => entry.id === model.id)) list.push(model);
+		providers.set(model.provider, list);
+	};
+	for (const favorite of favorites) add({ ...byKey.get(key(favorite)), ...favorite });
+	const availableProviders = new Map<string, ModelEntry[]>();
+	for (const model of available) availableProviders.set(model.provider, [...(availableProviders.get(model.provider) ?? []), model]);
+	for (const [, list] of availableProviders) {
+		const current = currentGeneration(list.map((model) => model.id));
+		const rest = list.filter((model) => current.has(model.id) && !favoriteKeys.has(key(model)));
+		for (const model of rest.sort((a, b) => compareNames(a.id, b.id))) add(model);
+	}
+	if (current && byKey.has(key(current))) add(byKey.get(key(current))!);
+	const count = [...providers.values()].reduce((sum, list) => sum + list.length, 0);
+	if (count === 0) return undefined;
 	const groups: ResourceGroup[] = [...providers].map(([provider, list]) => {
-		const marks = list.map((model) =>
-			current && model.provider === current.provider && model.id === current.id ? CURRENT_MARK : undefined,
-		);
+		const marks = list.map((model) => (current && key(model) === key(current) ? CURRENT_MARK : undefined));
+		const prefixes = list.map((model) => (favoriteKeys.has(key(model)) ? FAVORITE_MARK : undefined));
 		return {
 			label: provider,
 			items: list.map((model) => (model.thinkingLevel ? `${model.id}:${model.thinkingLevel}` : model.id)),
+			right: list.map((model) => formatContextWindow(model.contextWindow)),
 			...(marks.some(Boolean) ? { marks } : {}),
+			...(prefixes.some(Boolean) ? { prefixes } : {}),
 		};
 	});
-	return { title: scoped ? "Models" : "Models (all available)", count: models.length, layout: "columns", groups };
+	return {
+		title: "Models",
+		count,
+		layout: "lines",
+		groups,
+		...(favorites.length > 0 ? { legend: [{ text: "★ favorite", color: "warning" }] } : {}),
+	};
 }
 
 /** The session's models as a section; undefined when there are none or pi's model API is missing. */
@@ -695,19 +854,17 @@ export function collectModelsSection(mode: any): ResourceSection | undefined {
 	try {
 		const session = mode?.session;
 		const scopedModels = (session?.scopedModels ?? []) as Array<{ model: any; thinkingLevel?: string }>;
-		const scoped = scopedModels.length > 0;
-		const models: ModelEntry[] = scoped
-			? scopedModels.map((entry) => ({
-					provider: entry.model.provider,
-					id: entry.model.id,
-					...(entry.thinkingLevel ? { thinkingLevel: entry.thinkingLevel } : {}),
-				}))
-			: ([...(session?.modelRuntime?.getAvailableSnapshot?.() ?? [])] as any[]).map((model) => ({
-					provider: model.provider,
-					id: model.id,
-				}));
+		const favorites: ModelEntry[] = scopedModels.map((entry) => ({
+			provider: entry.model.provider,
+			id: entry.model.id,
+			...(entry.model.contextWindow ? { contextWindow: entry.model.contextWindow } : {}),
+			...(entry.thinkingLevel ? { thinkingLevel: entry.thinkingLevel } : {}),
+		}));
+		const available: ModelEntry[] = ([...(session?.modelRuntime?.getAvailableSnapshot?.() ?? [])] as any[]).map(
+			(model) => ({ provider: model.provider, id: model.id, contextWindow: model.contextWindow }),
+		);
 		const current = session?.model ? { provider: session.model.provider, id: session.model.id } : undefined;
-		return buildModelsSection(models, current, scoped);
+		return buildModelsSection(available, favorites, current);
 	} catch {
 		return undefined;
 	}

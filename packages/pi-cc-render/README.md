@@ -79,7 +79,7 @@ Panel changes apply to the current transcript immediately and are saved. Feature
   "expandedPreviewMaxLines": 40, // max lines for expanded TaskList bodies
   "expandedCardBackground": "userMessageBg", // theme bg slot: userMessageBg, toolPendingBg, customMessageBg, selectedBg, searchMatchBg, toolSuccessBg, toolErrorBg
   "inputClip": 0, // path/command clip length in summaries; 0 = fit width, else 8..500
-  "showStartupHeader": true, // logo and tips header on new sessions, plus a Models section (the model scope, else every available model, one column per provider, the current one highlighted with an accent dot), the Context/Skills/Prompts/Extensions listing regrouped by level (project, user, path; Context's levels as side-by-side columns) and an MCP section (servers by level, marked when they need a sign-in or failed; it replaces Pi's "MCP servers need attention" warning)
+  "showStartupHeader": true, // logo and tips header on new sessions, plus a Models section (one line per model under each provider with credentials: its current generation, i.e. the newest of each model family without aliases, dated snapshots or families a major version behind, plus the favorites from the model scope, starred and first, and the current model in green; each with its context window as vendors quote it, 1M, 128K, 922K), the Context/Skills/Prompts/Extensions listing regrouped by level (project, user, path; Context's levels as side-by-side columns) and an MCP section (servers by level, marked when they need a sign-in or failed; it replaces Pi's "MCP servers need attention" warning)
   "scrollStepLines": 3, // fullscreen mouse wheel step (1..50)
 
   // diff

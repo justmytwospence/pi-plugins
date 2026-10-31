@@ -278,51 +278,84 @@ describe("startup resources", () => {
     expect(shown[2]).toBe("MCP configuration needs attention:\n  config: /x: bad\nRun /mcp to fix.");
   });
 
-  test("the models section groups by provider and marks the current model", async () => {
+  test("the models section lists each provider's current generation, one per line, favorites starred", async () => {
     const { buildModelsSection, collectModelsSection } = await import("../src/feature/shell/startup-resources.ts");
+    const available = [
+      { provider: "anthropic", id: "claude-opus-5-5", contextWindow: 1_048_576 },
+      { provider: "anthropic", id: "claude-opus-4-8", contextWindow: 1_048_576 },
+      { provider: "anthropic", id: "claude-haiku-5-5", contextWindow: 1_048_576 },
+      { provider: "anthropic", id: "claude-haiku-4-5-20251001", contextWindow: 200_000 },
+      { provider: "openai", id: "gpt-6.1-sol", contextWindow: 922_000 },
+      { provider: "openai", id: "gpt-6-sol", contextWindow: 272_000 },
+      { provider: "openai", id: "gpt-5.5-pro", contextWindow: 1_050_000 },
+      { provider: "openai", id: "o4-mini", contextWindow: 200_000 },
+      { provider: "openai", id: "chat-latest", contextWindow: 400_000 },
+    ];
     const section = buildModelsSection(
-      [
-        { provider: "anthropic", id: "opus", thinkingLevel: "high" },
-        { provider: "anthropic", id: "sonnet" },
-        { provider: "openai", id: "gpt" },
-      ],
-      { provider: "anthropic", id: "sonnet" },
-      true,
+      available,
+      [{ provider: "openai", id: "gpt-6.1-sol", thinkingLevel: "high" }, { provider: "anthropic", id: "claude-opus-5-5" }],
+      { provider: "anthropic", id: "claude-opus-5-5" },
     )!;
-    expect(renderSection(section, 100, plainTheme)).toEqual([
-      "Models 3",
-      "  anthropic 2   openai 1",
-      "  opus:high     gpt",
-      "  sonnet ●",
-    ]);
-    expect(renderSection(section, 22, plainTheme)).toEqual([
-      "Models 3",
-      "  anthropic 2",
-      "  opus:high",
-      "  sonnet ●",
+    expect(renderSection(section, 80, plainTheme)).toEqual([
+      "Models 3 · ★ favorite",
       "  openai 1",
-      "  gpt",
+      "    ★ gpt-6.1-sol:high   922K",
+      "  anthropic 2",
+      "    ★ claude-opus-5-5 ●    1M",
+      "      claude-haiku-5-5     1M",
     ]);
     expect(buildModelsSection([])).toBeUndefined();
     const mode = {
       session: {
         scopedModels: [],
-        model: { provider: "p", id: "b" },
-        modelRuntime: { getAvailableSnapshot: () => [{ provider: "p", id: "a" }, { provider: "p", id: "b" }] },
+        model: { provider: "p", id: "alpha" },
+        modelRuntime: {
+          getAvailableSnapshot: () => [
+            { provider: "p", id: "alpha", contextWindow: 131_072 },
+            { provider: "p", id: "beta", contextWindow: 131_072 },
+          ],
+        },
       },
     };
-    expect(renderSection(collectModelsSection(mode)!, 80, plainTheme)).toEqual([
-      "Models (all available) 2",
-      "  p 2",
-      "  a",
-      "  b ●",
+    expect(renderSection(collectModelsSection(mode)!, 80, plainTheme)).toEqual(["Models 2", "  p 2", "    alpha ●  128K", "    beta     128K"]);
+  });
+
+  test("the current generation keeps the newest of each family and drops a generation behind", async () => {
+    const { currentGeneration, parseModelId } = await import("../src/feature/shell/startup-resources.ts");
+    const sorted = (ids: string[]) => [...currentGeneration(ids)].sort();
+    expect(
+      sorted(["claude-opus-4-5-20251101", "claude-opus-4-8", "claude-opus-5-5", "claude-sonnet-5", "claude-sonnet-5-5", "claude-fable-5-1"]),
+    ).toEqual(["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5"]);
+    expect(
+      sorted(["gpt-5.6-sol", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-astra", "gpt-5.6-cyber", "gpt-4o", "gpt-4o-2024-05-13", "o3", "o4-mini", "gpt-daybreak-blue-latest", "chat-latest"]),
+    ).toEqual(["gpt-6-astra", "gpt-6.1-sol"]);
+    // A family new in a later major does not retire a still-current one.
+    expect(sorted(["antigravity-gemini-3.5-flash", "antigravity-gemini-3.8-flash", "antigravity-gemini-4-argon", "antigravity-gpt-oss-120b-medium"])).toEqual([
+      "antigravity-gemini-3.8-flash",
+      "antigravity-gemini-4-argon",
+      "antigravity-gpt-oss-120b-medium",
     ]);
+    expect(parseModelId("claude-opus-4-5-20251101")).toEqual({ family: "claude-opus", vendor: "claude", version: [4, 5], alias: true });
+    expect(sorted(["muse-wonder-1.0", "muse-wonder-1.0-contributor", "muse-spark-1.2", "muse-spark-1.3", "muse-image-1.0"])).toEqual([
+      "muse-spark-1.3",
+      "muse-wonder-1.0",
+    ]);
+    expect(parseModelId("o4-mini")).toEqual({ family: "o-mini", version: [4, 0], alias: false });
+    expect(parseModelId("qwen3.8-27b")).toEqual({ family: "qwen-27b", version: [3, 8], alias: false });
+  });
+
+  test("context windows use the units vendors quote", async () => {
+    const { formatContextWindow } = await import("../src/feature/shell/startup-resources.ts");
+    expect([1_048_576, 131_072, 65_536, 922_000, 272_000, 1_050_000, 200_000, 1_000_000].map(formatContextWindow)).toEqual([
+      "1M", "128K", "64K", "922K", "272K", "1.05M", "200K", "1M",
+    ]);
+    expect(formatContextWindow(undefined)).toBe("");
   });
 
   test("a long column splits into sub-columns under its heading", async () => {
-    const { buildModelsSection, COLUMN_MAX_ROWS } = await import("../src/feature/shell/startup-resources.ts");
-    const models = Array.from({ length: COLUMN_MAX_ROWS + 2 }, (_, i) => ({ provider: "p", id: `m${i}` }));
-    const lines = renderSection(buildModelsSection(models, undefined, true)!, 80, plainTheme);
+    const { COLUMN_MAX_ROWS } = await import("../src/feature/shell/startup-resources.ts");
+    const items = Array.from({ length: COLUMN_MAX_ROWS + 2 }, (_, i) => `m${i}`);
+    const lines = renderSection({ title: "C", count: items.length, layout: "columns", groups: [{ label: "p", items }] }, 80, plainTheme);
     expect(lines).toHaveLength(2 + COLUMN_MAX_ROWS);
     expect(lines[2]).toBe("  m0   m8");
     expect(lines[4]).toBe("  m2");
