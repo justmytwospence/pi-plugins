@@ -103,23 +103,23 @@ export class HistoryPicker implements Component, Focusable {
     const w = Math.max(0, width);
     const t = this.theme;
     const h = Math.max(0, Math.floor(Math.min(height, this.availableHeight(w))));
-    // Fullscreen clips the Container's prefix, so keep the essential pair first.
-    // Regular mode instead shows the bottom terminal.rows lines: bound our
-    // natural height to the viewport minus the live below-editor/footer rows.
+    // Drop optional chrome on tiny screens, not the query or selected result.
     // Input alone owns CURSOR_MARKER and the matching fake/hardware cursor.
-    const lines: string[] = h > 0 ? this.input.render(Math.max(1, w)) : [];
-    if (h >= 2) lines.push(this.matches.length
-      ? t.fg("accent", `› ${preview(this.matches[this.selected])}`)
-      : t.fg("dim", "No matches"));
+    const lines: string[] = [];
     if (h >= 4) lines.push(t.fg("accent", `╭ ${t.bold("Prompt history")} ${"─".repeat(Math.max(0, w - 18))}╮`));
+    if (h > 0) lines.push(...this.input.render(Math.max(1, w)));
     const footer: string[] = [];
     if (h >= 3) footer.push(t.fg("dim", `${this.matches.length ? this.selected + 1 : 0}/${this.matches.length}`));
     if (h >= 6) footer.push(t.fg("dim", "↑↓ move · Enter restore · Esc cancel"));
     if (h >= 5) footer.push(t.fg("accent", `╰${"─".repeat(Math.max(0, w - 2))}╯`));
-    this.visible = Math.max(1, Math.min(VISIBLE, h - lines.length - footer.length + 1));
+    this.visible = Math.max(1, Math.min(VISIBLE, h - lines.length - footer.length));
     const start = Math.max(0, Math.min(this.selected - Math.floor(this.visible / 2), this.matches.length - this.visible));
-    for (let i = start; h > 0 && i < Math.min(this.matches.length, start + this.visible); i++) {
-      if (i !== this.selected && h >= 2) lines.push(t.fg("muted", `  ${preview(this.matches[i])}`));
+    if (h >= 2) {
+      if (!this.matches.length) lines.push(t.fg("dim", "No matches"));
+      for (let i = start; i < Math.min(this.matches.length, start + this.visible); i++) {
+        lines.push(t.fg(i === this.selected ? "accent" : "muted",
+          `${i === this.selected ? "› " : "  "}${preview(this.matches[i])}`));
+      }
     }
     lines.push(...footer);
     return lines.map((line) => truncateToWidth(line, w));

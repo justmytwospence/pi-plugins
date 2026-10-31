@@ -13,16 +13,50 @@ function fixture(prompts = ['recent', 'older'], query = '', config = {}) {
   return { picker, send, results, renders: () => renders };
 }
 
-test('query and chosen result precede all optional chrome', () => {
+test('height budgets preserve header, query, ordered results, and optional chrome', () => {
   const { picker, send } = fixture();
   picker.focused = true;
-  for (const height of [1, 2, 3, 8, Infinity]) {
-    const lines = picker.render(46, height);
-    assert.ok(lines[0].startsWith('search: '));
-    if (height >= 2) assert.equal(lines[1], '› recent');
-  }
   send('down');
-  assert.equal(picker.render(46, 2)[1], '› older');
+  for (const height of [0, 1, 2, 3, 4, 5, 6, 8, 13, 40, Infinity]) {
+    const lines = picker.render(46, height);
+    assert.ok(lines.length <= Math.min(height, 13));
+    if (!height) { assert.deepEqual(lines, []); continue; }
+    const queryRow = height >= 4 ? 1 : 0;
+    if (height >= 4) assert.match(lines[0], /^╭ Prompt history .*╮$/);
+    assert.ok(lines[queryRow].startsWith('search: '));
+    const capacity = Math.max(1, Math.min(8, height - (height >= 4 ? 2 : 1)
+      - Number(height >= 3) - Number(height >= 5) - Number(height >= 6)));
+    const results = height < 2 ? [] : capacity === 1 ? ['› older'] : ['  recent', '› older'];
+    assert.deepEqual(lines.slice(queryRow + 1, queryRow + 1 + results.length), results);
+    assert.equal(lines.includes('2/2'), height >= 3);
+    assert.equal(lines.includes('↑↓ move · Enter restore · Esc cancel'), height >= 6);
+    assert.equal(lines.some(line => /^╰─*╯$/.test(line)), height >= 5);
+    if (height === 1) assert.equal(lines.length, 1);
+    if (height === 2) assert.deepEqual(lines.slice(1), ['› older']);
+    if (height === 3) assert.deepEqual(lines.slice(1), ['› older', '2/2']);
+  }
+});
+
+test('result windows stay contiguous, centered, and boundary-clamped in both directions', () => {
+  const prompts = Array.from({ length: 20 }, (_, i) => `prompt ${19 - i}`);
+  for (const height of [2, 3, 4, 5, 6, 8, 13, 24, 40, Infinity]) {
+    const f = fixture(prompts);
+    const capacity = Math.max(1, Math.min(8, height - (height >= 4 ? 2 : 1)
+      - Number(height >= 3) - Number(height >= 5) - Number(height >= 6)));
+    const check = selected => {
+      const lines = f.picker.render(120, height);
+      const start = Math.max(0, Math.min(selected - Math.floor(capacity / 2), prompts.length - capacity));
+      assert.deepEqual(lines.filter(line => /^(› |  )prompt /.test(line)),
+        prompts.slice(start, start + capacity).map((prompt, offset) =>
+          `${start + offset === selected ? '› ' : '  '}${prompt}`));
+      assert.ok(lines.length <= Math.min(height, 13));
+      if (height >= 3) assert.ok(lines.includes(`${selected + 1}/20`));
+    };
+    for (let selected = 0; selected < 20; selected++) { check(selected); f.send('down'); }
+    check(19); // no wrapping at the end
+    for (let selected = 19; selected >= 0; selected--) { check(selected); f.send('up'); }
+    check(0); // no wrapping at the beginning
+  }
 });
 
 test('empty query keeps recency; fuzzy query ranks best first with stable recency ties', () => {
@@ -30,7 +64,10 @@ test('empty query keeps recency; fuzzy query ranks best first with stable recenc
   recent.send('enter');
   assert.deepEqual(recent.results, ['a___b']);
   const fuzzy = fixture(['a___b', 'ab', 'Ab'], 'ab');
-  fuzzy.send('enter');
+  assert.deepEqual(fuzzy.picker.render(46).filter(line => /^(› |  )/.test(line)), ['› ab', '  Ab', '  a___b']);
+  fuzzy.send('down');
+  assert.deepEqual(fuzzy.picker.render(46).filter(line => /^(› |  )/.test(line)), ['  ab', '› Ab', '  a___b']);
+  fuzzy.send('up', 'enter');
   assert.deepEqual(fuzzy.results, ['ab']);
   const tied = fixture(['AB', 'ab'], 'ab');
   tied.send('enter');
@@ -190,9 +227,9 @@ test('focused marker belongs only to the query through navigation and clipping',
       const lines = f.picker.render(46, height);
       const cursors = lines.filter(line => line.includes(CURSOR_MARKER));
       assert.equal(cursors.length, 1);
-      assert.equal(cursors[0], lines[0]);
+      assert.equal(cursors[0], lines[height >= 4 ? 1 : 0]);
       assert.ok(cursors[0].startsWith('search: '));
-      if (height >= 2) assert.ok(lines[1].startsWith('› '));
+      if (height >= 2) assert.equal(lines.filter(line => line.startsWith('› ')).length, 1);
       f.send('down');
     }
     f.send('up');

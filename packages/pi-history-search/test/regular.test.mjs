@@ -31,6 +31,50 @@ const editorTheme = { borderColor: identity, selectList: {
 } };
 const component = render => ({ render, invalidate() {} });
 
+
+function assertOrderedResults(lines, selected, query, normalScreen) {
+  const queryRow = lines.findIndex(line => /^search:(?: |$)/.test(line));
+  assert.ok(queryRow >= 0, lines.join('\n'));
+  const headerRow = lines.findIndex(line => line.startsWith('╭ '));
+  if (normalScreen) assert.ok(headerRow >= 0, 'normal screens retain the header');
+  if (headerRow >= 0) {
+    assert.match(lines[headerRow], /^╭ Prompt history .*╮$/);
+    assert.equal(queryRow, headerRow + 1, 'header immediately precedes query');
+  }
+  const rows = lines.flatMap((line, row) => {
+    const match = /^(› |  )history result (\d+)$/.exec(line);
+    return match ? [{ row, id: Number(match[2]), selected: match[1] === '› ' }] : [];
+  });
+  assert.ok(rows.length <= 8);
+  assert.equal(lines.filter(line => line.startsWith('› ')).length, selected === null || !rows.length ? 0 : 1);
+  if (selected === null) {
+    assert.equal(lines[queryRow + 1], 'No matches', lines.join('\n'));
+    assert.equal(rows.length, 0);
+  } else {
+    assert.ok(rows.length > 0, 'the selected result remains visible');
+    assert.deepEqual(rows.map(result => result.row),
+      Array.from({ length: rows.length }, (_, i) => queryRow + 1 + i),
+      'results form a contiguous block immediately after query');
+    assert.equal(rows.find(result => result.selected)?.id, selected, lines.join('\n'));
+    if (query === '') {
+      const index = 19 - selected;
+      const start = Math.max(0, Math.min(index - Math.floor(rows.length / 2), 20 - rows.length));
+      assert.deepEqual(rows.map(result => result.id),
+        Array.from({ length: rows.length }, (_, i) => 19 - start - i),
+        'empty-query results remain newest-first with a centered, boundary-clamped window');
+      assert.equal(rows.findIndex(result => result.selected), index - start,
+        'the chevron stays at the selected result’s actual ordered position');
+    }
+  }
+  if (normalScreen && selected !== null) assert.equal(rows.length, 8, 'normal screens show eight results');
+  const countRow = lines.findIndex(line => /^\d+\/\d+$/.test(line));
+  if (countRow >= 0) {
+    assert.ok(countRow > queryRow + rows.length, 'count follows the result block');
+    if (query === '') assert.equal(lines[countRow], `${selected === null ? 0 : 20 - selected}/20`);
+  }
+  return queryRow;
+}
+
 for (const hardwareCursor of [false, true]) for (const width of [46, 120]) {
   for (const [smallHeight, initialFooterRows] of [[8, 0], [8, 5], [20, 13]]) {
     test(`regular native custom xterm viewport (${width} columns, ${smallHeight} rows, ${initialFooterRows} footer rows, hardware ${hardwareCursor})`, async t => {
@@ -123,7 +167,7 @@ for (const hardwareCursor of [false, true]) for (const width of [46, 120]) {
         const text = lines.map(line => line.translateToString(true).trimEnd());
         const queryRow = text.indexOf(`search: ${query}`.trimEnd());
         assert.ok(queryRow >= 0, text.join('\n'));
-        assert.equal(text[queryRow + 1], selected === null ? 'No matches' : `› history result ${selected}`, text.join('\n'));
+        assertOrderedResults(text, selected, query, height - belowRows - footerRows >= 13);
         assert.deepEqual([buffer.cursorY, buffer.cursorX], [queryRow, column],
           'actual terminal cursor stays at the search editing column, never on the selection');
         assert.equal(ui.getShowHardwareCursor(), hardwareCursor);
@@ -152,10 +196,11 @@ for (const hardwareCursor of [false, true]) for (const width of [46, 120]) {
         assert.equal(ui.getFocusedComponent(), picker);
       }
 
-      await paint(19, 40);
+      for (const height of [24, 40, 50]) await paint(19, height);
       await paint(19, smallHeight);
       for (let selected = 18; selected >= 0; selected--) {
         picker.handleInput('\x1b[B');
+        await paint(selected, 40);
         await paint(selected, smallHeight);
       }
       await paint(0, 40);

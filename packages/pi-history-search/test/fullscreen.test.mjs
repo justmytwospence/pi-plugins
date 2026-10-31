@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createJiti } from 'jiti';
+import headless from '@xterm/headless';
 
 // Resolve *all* SDK and TUI imports against the requested installation, including
 // the TS editors loaded by jiti. Mixing a 1.2 Editor with a 1.4 renderer is not a
@@ -32,6 +33,50 @@ const editorTheme = { borderColor: identity, selectList: {
 } };
 const plain = lines => lines.map(stripTerminalSequences);
 
+
+function assertOrderedResults(lines, selected, query, normalScreen) {
+  const queryRow = lines.findIndex(line => /^search:(?: |$)/.test(line));
+  assert.ok(queryRow >= 0, lines.join('\n'));
+  const headerRow = lines.findIndex(line => line.startsWith('╭ '));
+  if (normalScreen) assert.ok(headerRow >= 0, 'normal screens retain the header');
+  if (headerRow >= 0) {
+    assert.match(lines[headerRow], /^╭ Prompt history .*╮$/);
+    assert.equal(queryRow, headerRow + 1, 'header immediately precedes query');
+  }
+  const rows = lines.flatMap((line, row) => {
+    const match = /^(› |  )history result (\d+)$/.exec(line);
+    return match ? [{ row, id: Number(match[2]), selected: match[1] === '› ' }] : [];
+  });
+  assert.ok(rows.length <= 8);
+  assert.equal(lines.filter(line => line.startsWith('› ')).length, selected === null || !rows.length ? 0 : 1);
+  if (selected === null) {
+    assert.equal(lines[queryRow + 1], 'No matches', lines.join('\n'));
+    assert.equal(rows.length, 0);
+  } else {
+    assert.ok(rows.length > 0, 'the selected result remains visible');
+    assert.deepEqual(rows.map(result => result.row),
+      Array.from({ length: rows.length }, (_, i) => queryRow + 1 + i),
+      'results form a contiguous block immediately after query');
+    assert.equal(rows.find(result => result.selected)?.id, selected, lines.join('\n'));
+    if (query === '') {
+      const index = 19 - selected;
+      const start = Math.max(0, Math.min(index - Math.floor(rows.length / 2), 20 - rows.length));
+      assert.deepEqual(rows.map(result => result.id),
+        Array.from({ length: rows.length }, (_, i) => 19 - start - i),
+        'empty-query results remain newest-first with a centered, boundary-clamped window');
+      assert.equal(rows.findIndex(result => result.selected), index - start,
+        'the chevron stays at the selected result’s actual ordered position');
+    }
+  }
+  if (normalScreen && selected !== null) assert.equal(rows.length, 8, 'normal screens show eight results');
+  const countRow = lines.findIndex(line => /^\d+\/\d+$/.test(line));
+  if (countRow >= 0) {
+    assert.ok(countRow > queryRow + rows.length, 'count follows the result block');
+    if (query === '') assert.equal(lines[countRow], `${selected === null ? 0 : 20 - selected}/20`);
+  }
+  return queryRow;
+}
+
 for (const hardwareCursor of [false, true]) for (const width of [46, 120, 180]) for (const footerRows of [0, 5, 13]) {
   test(`fullscreen native custom dock terminal writes (${width} columns, ${footerRows} footer rows, setting ${hardwareCursor})`, async t => {
     const previousKeys = getKeybindings();
@@ -39,11 +84,13 @@ for (const hardwareCursor of [false, true]) for (const width of [46, 120, 180]) 
     setKeybindings(keys);
     const restoreSettings = setPiVimSettingsReaderForTests(() => ({}));
     const writes = [];
+    const xterm = new headless.Terminal({ cols: width, rows: 40, allowProposedApi: true });
+    const write = data => { writes.push(data); xterm.write(data); };
     const terminal = {
       columns: width, rows: 40,
-      write: data => writes.push(data),
-      hideCursor: () => writes.push('\x1b[?25l'),
-      showCursor: () => writes.push('\x1b[?25h'),
+      write,
+      hideCursor: () => write('\x1b[?25l'),
+      showCursor: () => write('\x1b[?25h'),
       start() {}, stop() {},
     };
     const renderer = new TuiAltScreen(terminal, hardwareCursor);
@@ -65,6 +112,7 @@ for (const hardwareCursor of [false, true]) for (const width of [46, 120, 180]) 
     t.after(() => {
       main.dispose();
       renderer.stop();
+      xterm.dispose();
       restoreSettings();
       setKeybindings(previousKeys);
     });
@@ -102,8 +150,9 @@ for (const hardwareCursor of [false, true]) for (const width of [46, 120, 180]) 
     assert.equal(ui.hasOverlay(), false);
     assert.equal(ui.getShowHardwareCursor(), before);
 
-    function paint(selected, height, query = '', column = 9) {
+    async function paint(selected, height, query = '', column = 9) {
       terminal.rows = height;
+      xterm.resize(width, height);
       writes.length = 0;
       // A preflight render of the actual unfocused main editor must not acquire
       // the cursor. Keep this separate from the dock render, as in UI probes.
@@ -113,7 +162,15 @@ for (const hardwareCursor of [false, true]) for (const width of [46, 120, 180]) 
       const output = writes.join('');
       assert.match(output, before ? /\x1b\[\?25h/ : /\x1b\[\?25l/, 'native paint honors cursor preference');
       assert.equal(ui.getShowHardwareCursor(), before);
+      await new Promise(resolve => xterm.write('', resolve));
       const screen = renderer.getScreenLines();
+      const buffer = xterm.buffer.active;
+      const painted = Array.from({ length: height }, (_, row) => buffer.getLine(buffer.viewportY + row).translateToString(true));
+      const paintedQuery = painted.findIndex(line => /^search:(?: |$)/.test(line));
+      if (height >= 3) {
+        assert.ok(paintedQuery >= 0, painted.join('\n'));
+        assertOrderedResults(painted, selected, query, height - footerRows - 1 >= 13);
+      }
       assert.doesNotMatch(screen.join('\n'), /\x1b\[4(?::\d+)?m/, 'no software underline is painted');
       for (const line of screen) {
         if (!stripTerminalSequences(line).startsWith('search: ')) {
@@ -124,8 +181,9 @@ for (const hardwareCursor of [false, true]) for (const width of [46, 120, 180]) 
         ? line.startsWith('search: ') : line.trimEnd() === `search: ${query}`.trimEnd());
       assert.ok(queryRow >= 0, plain(screen).join('\n'));
       if (height <= 3) assert.equal(queryRow, 1, 'query occupies terminal row 2 after the native transcript minimum');
-      const selectedRow = plain(screen).findIndex(line => line === (selected === null ? 'No matches' : `› history result ${selected}`));
-      if (height >= 3) assert.equal(selectedRow, queryRow + 1, plain(screen).join('\n'));
+      if (height >= 3) assertOrderedResults(plain(screen), selected, query, height - footerRows - 1 >= 13);
+      assert.deepEqual([buffer.cursorY, buffer.cursorX], [paintedQuery, column - 1],
+        'actual terminal cursor stays at the query editing position');
       // Cursor hiding alone cannot prevent multiplexers from exposing its
       // position. Inspect the actual final terminal CUP, not just ?25l.
       const positions = [...output.matchAll(/\x1b\[(\d+);(\d+)H/g)];
@@ -140,29 +198,30 @@ for (const hardwareCursor of [false, true]) for (const width of [46, 120, 180]) 
         if (selected !== null) assert.equal(plain(screen).filter(line => /^.[ ]history result/.test(line)).length, 8);
       }
     }
-    paint(19, 40);
+    for (const height of [24, 40, 50]) await paint(19, height);
     for (let selected = 18; selected >= 0; selected--) {
       picker.handleInput('\x1b[B');
-      paint(selected, 8);
+      await paint(selected, 40);
+      await paint(selected, 8);
     }
-    for (const height of [40, 6, 4, 3, 2, 8, 40]) paint(0, height);
+    for (const height of [40, 6, 4, 3, 2, 8, 40]) await paint(0, height);
     picker.handleInput('history result 1');
-    paint(19, 8, 'history result 1', 25);
+    await paint(19, 8, 'history result 1', 25);
     picker.handleInput('\x1b[D');
-    paint(19, 3, 'history result 1', 24);
+    await paint(19, 3, 'history result 1', 24);
     picker.handleInput('x');
-    paint(null, 3, 'history result x1', 25);
+    await paint(null, 3, 'history result x1', 25);
     picker.handleInput('\r'); // No match is inert and focus stays in the query.
     assert.equal(ui.getFocusedComponent(), picker);
     picker.handleInput('\x7f');
-    paint(19, 4, 'history result 1', 24);
+    await paint(19, 4, 'history result 1', 24);
     picker.handleInput('\x15');
     picker.handleInput(`\x1b[200~${'界🙂e\u0301'.repeat(100)}\x1b[201~`);
     for (const height of [40, 8, 3, 2]) {
       for (let i = 0; i < 3; i++) {
-        const queryLine = picker.render(width)[0];
+        const queryLine = picker.render(width).find(line => stripTerminalSequences(line).startsWith('search: '));
         const column = visibleWidth(queryLine.slice(0, queryLine.indexOf(CURSOR_MARKER))) + 1;
-        paint(null, height, null, column);
+        await paint(null, height, null, column);
         picker.handleInput('\x1b[D');
       }
     }

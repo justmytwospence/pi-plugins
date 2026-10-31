@@ -1,7 +1,15 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type Component, type TUI, getKeybindings, isKeyRelease } from "@earendil-works/pi-tui";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 import { PrefixHistory, sessionPrompts } from "./history.ts";
 import { HistoryPicker } from "./picker.ts";
+
+// Resolve siblings of the SDK entry rather than a package subpath: Pi's
+// extension loader aliases the package name to that entry file.
+const tuiEntry = createRequire(import.meta.url).resolve("@earendil-works/pi-tui");
+const { allocateStackSizes, visibleStackEntries } = await import(new URL("./components/stack.js", pathToFileURL(tuiEntry)).href) as typeof import("@earendil-works/pi-tui/dist/components/stack.js");
+const { getLayoutNode } = await import(new URL("./layout-node.js", pathToFileURL(tuiEntry)).href) as typeof import("@earendil-works/pi-tui/dist/layout-node.js");
 
 const SURFACE = Symbol.for("pi-plugins.editor-surface.v1");
 const MODE = Symbol.for("pi-plugins.editor-mode.v1");
@@ -16,9 +24,57 @@ type Editor = {
 };
 type Tui = { getFocusedComponent(): unknown; requestRender(): void };
 
-/** Regular mode mounts ordinary custom UI in the scrollback component tree. */
-function pickerHeight(ui: TUI, picker: Component, width: number): number {
-  if (ui.mode !== "regular") return Infinity;
+const measuringHeights = new WeakMap<Component, number>();
+
+/** Match the native dock allocation before choosing the ordered result window. */
+export function pickerHeight(ui: TUI, picker: Component, width: number): number {
+  const measuring = measuringHeights.get(picker);
+  if (measuring !== undefined) return measuring;
+  // Compacting the picker changes its parent's intrinsic height, and therefore
+  // its share of a shrinking dock. Settle that allocation before painting;
+  // nested ancestor measurements render at the current candidate height.
+  let height = Infinity;
+  try {
+    for (;;) {
+      measuringHeights.set(picker, height);
+      const next = allocatedPickerHeight(ui, picker, width);
+      if (next >= height) return height;
+      height = next;
+    }
+  } finally { measuringHeights.delete(picker); }
+}
+
+function allocatedPickerHeight(ui: TUI, picker: Component, width: number): number {
+  if (ui.mode !== "regular") {
+    // The ordinary-custom Container does not forward its allocated height to
+    // render(). Walk the mounted layout with the SDK's own stack allocator;
+    // subtracting the footer's natural height would be wrong when it shrinks.
+    const roots = (ui as TUI & { getMountedRoots?(): Component[] }).getMountedRoots?.();
+    const viewport = { width, height: ui.terminal.rows };
+    function contains(node: Component): boolean {
+      return node === picker || ((node as Component & { children?: Component[] }).children ?? []).some(contains);
+    }
+    function allocated(node: Component, height: number): number {
+      if (node === picker) return height;
+      const layout = getLayoutNode(node);
+      if (layout?.type === "vstack") {
+        const entries = visibleStackEntries(layout.entries, viewport);
+        const index = entries.findIndex(entry => contains(entry.component));
+        if (index < 0) return Infinity;
+        const sizes = allocateStackSizes(entries, entries.map(entry => typeof entry.basis === "number"
+          ? entry.basis : entry.component.render(width).length), height, layout.gap);
+        return allocated(entries[index].component, sizes[index]);
+      }
+      // Native ordinary-custom mounts inside a plain Container, which clips
+      // its prefix. Account for any preceding children without reordering it.
+      const children = (node as Component & { children?: Component[] }).children ?? [];
+      const index = children.findIndex(contains);
+      return index < 0 ? Infinity : allocated(children[index], Math.max(0,
+        height - children.slice(0, index).reduce((sum, child) => sum + child.render(width).length, 0)));
+    }
+    const root = roots?.find(contains);
+    return root ? allocated(root, ui.terminal.rows) : Infinity;
+  }
   function following(node: Component): number | undefined {
     if (node === picker) return 0;
     const children = (node as Component & { children?: Component[] }).children;
