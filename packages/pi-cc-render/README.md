@@ -79,7 +79,7 @@ Panel changes apply to the current transcript immediately and are saved. Feature
   "expandedPreviewMaxLines": 40, // max lines for expanded TaskList bodies
   "expandedCardBackground": "userMessageBg", // theme bg slot: userMessageBg, toolPendingBg, customMessageBg, selectedBg, searchMatchBg, toolSuccessBg, toolErrorBg
   "inputClip": 0, // path/command clip length in summaries; 0 = fit width, else 8..500
-  "showStartupHeader": true, // logo and tips header on new sessions, plus a Models section (one line per model under each provider with credentials, providers side by side and wrapping as Context's columns do: its current generation, i.e. the newest of each model family without aliases, dated snapshots or families a major version behind, plus the favorites from the model scope, starred and first, and the current model in green; each with its context window as vendors quote it, 1M, 128K, 922K), the Context/Skills/Prompts/Extensions listing regrouped by level (project, user, path; Context's levels as side-by-side columns) and an MCP section (servers by level, marked when they need a sign-in or failed; it replaces Pi's "MCP servers need attention" warning)
+  "showStartupHeader": true, // logo and tips header on new sessions, plus a Models section (one line per model under each provider with credentials, providers side by side and wrapping as Context's columns do: its current generation, i.e. the newest of each model family without aliases, dated snapshots or families a major version behind, plus the favorites from the model scope, starred and first, and the current model in green; each with its context window as vendors quote it, 1M, 128K, 922K), the Context/Skills/Prompts/Extensions listing regrouped by level (project, user, path; Context's levels as side-by-side columns) and a live MCP section (all configured servers, including disabled ones, with state and tool counts; see Startup splash below)
   "scrollStepLines": 3, // fullscreen mouse wheel step (1..50)
 
   // diff
@@ -97,6 +97,24 @@ Panel changes apply to the current transcript immediately and are saved. Feature
   "dimThinkingText": false // dim thinking body text
 }
 ```
+
+### Startup splash
+
+The MCP section lists all configured servers, including `enabled: false`, grouped by project, user and extension. Like Models and Context, it uses adaptive columns: long groups split into subcolumns when width allows, and columns wrap on narrow terminals. Disabled server names are dim.
+
+| Left marker | Right-hand status |
+| --- | --- |
+| Green `●` | `connected · N tools`, or `connected` if the count is unavailable |
+| Dim `○` | `disabled`, `disconnected` or `unknown` |
+| Dim `◌` | `connecting` |
+| Yellow `●` | `needs sign-in` |
+| Red `✕` | `failed` |
+
+Models use the same shared glyphs, retaining the yellow `★` for favorites and the green highlight and `●` for the current model.
+
+The MCP listing refreshes for as long as the splash exists, including late state, tool-count and configuration changes. Configuration files are stat-checked on polling ticks and parsed only when changed, never during rendering. This updates the display only: Pi still needs `/reload` to apply externally edited MCP configuration; the splash neither applies configuration nor connects servers. Failure notes below the list replace Pi's per-server startup warning while the section is shown; configuration warnings remain. Use `/mcp` to resolve server problems.
+
+Live state comes from Pi 1.2–1.4's built-in `/mcp` command, source-checked as `builtin:mcp`, through read-only argument completions and its non-TUI status projection. This relies on private text formats, not a public structured status API. Tool presence alone does not establish health: zero-tool and resource-only servers can be connected, and unavailable state is shown as `unknown`. Changes to Pi's projections can make live status unavailable.
 
 ### Readable bash calls
 

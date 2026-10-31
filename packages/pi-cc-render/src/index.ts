@@ -28,7 +28,7 @@ export default function (pi: ExtensionAPI): void {
 	installFlushDockedBash();
 	installBashHighlight();
 	installEarlyStartupHeader();
-	installStartupResources();
+	installStartupResources(pi);
 	piStartupHeader(pi);
 
 	// render stack: the thinking controller is handed to the style layer as a query

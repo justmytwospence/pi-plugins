@@ -1,15 +1,18 @@
 import path from "node:path";
-import { InteractiveMode, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { InteractiveMode, getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { config } from "../../config/config.ts";
 import {
-	CONNECTING_GRACE_MS,
+	McpConfigCache,
+	McpStatusReader,
+	type McpObservation,
 	type McpEntry,
 	type McpLevel,
 	type McpStatus,
 	configWarning,
-	connectedNames,
 	loadMcpEntries,
+	normalizeMcpName,
+	toolCounts,
 	mcpState,
 	parseAttentionMessage,
 	parseOutcomeMessage,
@@ -55,8 +58,13 @@ export type ResourceGroup = {
 	marks?: Array<ResourceMark | undefined>;
 	/** A one-character colored marker before an item (lines and columns layouts), parallel to `items`; blank where undefined. */
 	prefixes?: Array<ResourceMark | undefined>;
-	/** Right-aligned dim text after an item (lines and columns layouts), parallel to `items`, used when the group has no tokens. */
-	right?: string[];
+	/**
+	 * Right-aligned text after an item (lines and columns layouts), parallel to `items`, used when the group has
+	 * no tokens: dim, or in its mark's color.
+	 */
+	right?: Array<string | ResourceMark | undefined>;
+	/** A color for the item's name itself, parallel to `items` (a switched-off server is dim). */
+	tones?: Array<string | undefined>;
 };
 
 /** `highlight` also paints the item itself in the mark's color. */
@@ -87,6 +95,21 @@ export type StartupTheme = {
 	fg(name: string, text: string): string;
 	bold(text: string): string;
 };
+
+/**
+ * The splash's shared glyphs: green ● is live (the current model, a connected server), yellow ● needs
+ * a sign-in, red ✕ failed, ◌ is pending, dim ○ is idle/disabled/unknown, ★ is a favorite. MCP puts state
+ * glyphs on the left and explicit state/tool counts on the right; Models keeps its favorite star and
+ * green current-model highlight distinct.
+ */
+export const GLYPHS = {
+	live: { text: "●", color: "success" },
+	attention: { text: "●", color: "warning" },
+	failed: { text: "✕", color: "error" },
+	pending: { text: "◌", color: "dim" },
+	idle: { text: "○", color: "dim" },
+	favorite: { text: "★", color: "warning" },
+} as const satisfies Record<string, ResourceMark>;
 
 const SCOPE_ORDER: Scope[] = ["project", "user", "path"];
 const INDENT = 2;
@@ -282,11 +305,13 @@ function lineCount(tokens: number): string {
 }
 
 function markedItems(group: ResourceGroup, theme: StartupTheme): string[] {
-	if (!group.marks) return group.items;
-	return group.items.map((item, index) => {
-		const mark = group.marks![index];
+	if (!group.marks && !group.tones) return group.items;
+	return group.items.map((raw, index) => {
+		const tone = group.tones?.[index];
+		const item = tone ? theme.fg(tone, raw) : raw;
+		const mark = group.marks?.[index];
 		if (!mark) return item;
-		const shown = mark.highlight ? theme.bold(theme.fg(mark.color, item)) : item;
+		const shown = mark.highlight ? theme.bold(theme.fg(mark.color, raw)) : item;
 		return `${shown} ${theme.fg(mark.color, mark.text)}`;
 	});
 }
@@ -301,15 +326,19 @@ function columnBlock(group: ResourceGroup, available: number, ctx: RenderContext
 	const { theme } = ctx;
 	const heading = `${theme.fg("accent", group.label ?? "")} ${theme.fg("dim", String(group.items.length))}`;
 	const names = markedItems(group, theme).map((name, index) => `${prefixText(group, index, theme)}${name}`);
-	const counts = group.tokens ? group.tokens.map(lineCount) : group.right;
-	const cells = names.map((name, index) => ({ name, count: counts?.[index] || undefined }));
+	const cells = names.map((name, index) => {
+		const right = rightText(group, index);
+		return { name, count: right?.text || undefined, color: right?.color ?? "dim" };
+	});
 	const headingWidth = visibleWidth(heading);
 	const layout = (rows: number) => {
 		const columns: Array<typeof cells> = [];
 		for (let at = 0; at < cells.length; at += rows) columns.push(cells.slice(at, at + rows));
 		const widths = columns.map((column) => {
-			const name = Math.max(...column.map((cell) => visibleWidth(cell.name)));
-			const count = Math.max(0, ...column.map((cell) => cell.count?.length ?? 0));
+			const count = Math.max(0, ...column.map((cell) => visibleWidth(cell.count ?? "")));
+			const natural = Math.max(...column.map((cell) => visibleWidth(cell.name)));
+			// When even one column is too wide, shorten the name first so status stays legible.
+			const name = columns.length === 1 ? Math.min(natural, Math.max(1, available - (count ? 2 + count : 0))) : natural;
 			return { name, count, total: name + (count ? 2 + count : 0) };
 		});
 		const width = Math.max(headingWidth, widths.reduce((sum, w) => sum + w.total, 0) + COLUMN_GAP * (columns.length - 1));
@@ -329,13 +358,14 @@ function columnBlock(group: ResourceGroup, available: number, ctx: RenderContext
 				line += pad + " ".repeat(w.total);
 				return;
 			}
-			const count = cell.count ? theme.fg("dim", cell.count) : "";
-			const gap = " ".repeat(w.total - visibleWidth(cell.name) - (cell.count?.length ?? 0));
-			line += pad + cell.name + gap + count;
+			const count = cell.count ? theme.fg(cell.color, cell.count) : "";
+			const name = truncateToWidth(cell.name, w.name, "…");
+			const gap = " ".repeat(Math.max(0, w.total - visibleWidth(name) - visibleWidth(cell.count ?? "")));
+			line += pad + name + gap + count;
 		});
 		lines.push(line.trimEnd());
 	}
-	return { lines, width: shape.width };
+	return { lines, width: Math.min(available, shape.width) };
 }
 
 /** Groups as side-by-side column blocks, packed left to right and wrapped into bands that fit `width`. */
@@ -377,8 +407,10 @@ function prefixText(group: ResourceGroup, index: number, theme: StartupTheme): s
 	return mark ? `${theme.fg(mark.color, mark.text)} ` : " ".repeat(PREFIX_WIDTH);
 }
 
-function rightText(group: ResourceGroup, index: number): string | undefined {
-	return group.tokens ? lineCount(group.tokens[index]!) : group.right?.[index];
+function rightText(group: ResourceGroup, index: number): ResourceMark | undefined {
+	if (group.tokens) return { text: lineCount(group.tokens[index]!), color: "dim" };
+	const right = group.right?.[index];
+	return typeof right === "string" ? { text: right, color: "dim" } : right;
 }
 
 const PREFIX_WIDTH = 2;
@@ -390,9 +422,9 @@ function renderGroupItems(group: ResourceGroup, indent: number, ctx: RenderConte
 		return names.map((name, index) => {
 			const head = `${" ".repeat(indent)}${prefixText(group, index, theme)}${name}`;
 			const right = rightText(group, index);
-			if (!right) return truncateToWidth(head, width);
-			const gap = " ".repeat(Math.max(2, ctx.countEnd - visibleWidth(head) - right.length));
-			return truncateToWidth(`${head}${gap}${theme.fg("dim", right)}`, width);
+			if (!right?.text) return truncateToWidth(head, width);
+			const gap = " ".repeat(Math.max(2, ctx.countEnd - visibleWidth(head) - right.text.length));
+			return truncateToWidth(`${head}${gap}${theme.fg(right.color, right.text)}`, width);
 		});
 	}
 	const colors = group.tokens ? skillTokenColors(group.tokens, ctx.allTokens) : [];
@@ -427,7 +459,7 @@ function countColumn(groups: ResourceGroup[], indent: number): number {
 			const mark = group.marks?.[index];
 			names = Math.max(names, inner + prefix + visibleWidth(item) + (mark ? 1 + visibleWidth(mark.text) : 0));
 			const right = rightText(group, index);
-			if (right) counts = Math.max(counts, right.length);
+			if (right?.text) counts = Math.max(counts, right.text.length);
 		});
 		for (const child of group.children ?? []) visit(child, inner);
 	};
@@ -440,6 +472,7 @@ export function renderSection(
 	width: number,
 	theme: StartupTheme,
 ): string[] {
+	if (width <= 0) return [];
 	const cost = section.tokens
 		? ` ${theme.fg(windowShareColor(section.tokens, section.contextWindow), `· ~${formatTokens(section.tokens)} tok`)}`
 		: "";
@@ -453,7 +486,7 @@ export function renderSection(
 		allTokens: allGroups(section.groups).flatMap((group) => group.tokens ?? []),
 		countEnd: countColumn(section.groups, INDENT),
 	};
-	const lines = [heading];
+	const lines = [truncateToWidth(heading, width)];
 	if (section.layout === "columns") lines.push(...renderColumns(section.groups, INDENT, ctx));
 	else for (const group of section.groups) lines.push(...renderGroup(group, INDENT, ctx));
 	for (const note of section.notes ?? []) {
@@ -605,40 +638,38 @@ export function collectSections(mode: any, options?: { extensions?: any[] }): Re
 
 const MCP_LEVELS: McpLevel[] = ["project", "user", "extension"];
 
-const MCP_MARKS: Record<Exclude<McpStatus, "connected">, ResourceMark> = {
-	"needs-auth": { text: "needs sign-in", color: "warning" },
-	failed: { text: "failed", color: "error" },
-	connecting: { text: "connecting", color: "dim" },
+const MCP_GLYPHS: Record<McpStatus, ResourceMark> = {
+	connected: GLYPHS.live,
+	"needs-auth": GLYPHS.attention,
+	failed: GLYPHS.failed,
+	connecting: GLYPHS.pending,
+	disabled: GLYPHS.idle,
+	disconnected: GLYPHS.idle,
+	unknown: GLYPHS.idle,
 };
 
 /** The servers configured for this session, each with the level it is active at. */
-export function collectMcpEntries(mode: any): McpEntry[] {
+export function collectMcpEntries(mode: any, cache?: McpConfigCache): McpEntry[] {
 	try {
 		const cwd = mode?.sessionManager?.getCwd?.() as string | undefined;
-		const registered = (mode?.session?.extensionRunner?.runtime?.mcpServers?.list?.() ?? []) as Array<{ name: string }>;
+		const registered = (mode?.session?.extensionRunner?.runtime?.mcpServers?.list?.() ?? []) as Array<{ name: string; config?: { enabled?: boolean } }>;
 		return loadMcpEntries({
 			userFile: path.join(getAgentDir(), "mcp.json"),
 			projectFile: cwd && mode?.settingsManager?.isProjectTrusted?.() ? path.join(cwd, ".pi", "mcp.json") : undefined,
-			registered: registered.map((server) => server.name),
+			registered,
+			cache,
 		});
 	} catch {
 		return [];
 	}
 }
 
-function connectedServers(mode: any): Set<string> {
-	try {
-		return connectedNames((mode?.session?.getAllTools?.() ?? []) as any[]);
-	} catch {
-		return new Set();
-	}
-}
-
-/** The MCP section: servers under the level they are configured at, with a mark on any that is not (yet) usable. */
+/** One entry per row, state on the left and explicit status/count on the right, in adaptive scope columns. */
 export function buildMcpSection(
 	entries: McpEntry[],
 	status: (name: string) => McpStatus | undefined,
 	detail: (name: string) => string | undefined = () => undefined,
+	tools: (name: string) => number | undefined = () => undefined,
 ): ResourceSection | undefined {
 	if (entries.length === 0) return undefined;
 	const sorted = [...entries].sort((a, b) => compareNames(a.name, b.name));
@@ -649,23 +680,34 @@ export function buildMcpSection(
 	for (const level of MCP_LEVELS) {
 		const inLevel = sorted.filter((entry) => entry.level === level);
 		if (inLevel.length === 0) continue;
-		const marks = inLevel.map((entry) => {
-			const state = status(entry.name);
+		const states = inLevel.map((entry) => entry.enabled === false ? "disabled" : status(entry.name) ?? "unknown");
+		const right = inLevel.map((entry, index): ResourceMark => {
+			const state = states[index]!;
 			if (state === "needs-auth") needAuth++;
 			if (state === "failed") {
 				failed++;
 				const why = detail(entry.name);
 				if (why) notes.push({ text: `${entry.name}: ${why}`, color: "error" });
 			}
-			return state && state !== "connected" ? MCP_MARKS[state] : undefined;
+			const count = state === "connected" ? tools(entry.name) : undefined;
+			const text = state === "connected" && count !== undefined
+				? `connected · ${count} tool${count === 1 ? "" : "s"}`
+				: state === "needs-auth" ? "needs sign-in" : state;
+			return { text, color: state === "needs-auth" ? "warning" : state === "failed" ? "error" : "dim" };
 		});
-		groups.push({ label: level, items: inLevel.map((entry) => entry.name), ...(marks.some(Boolean) ? { marks } : {}) });
+		groups.push({
+			label: level,
+			items: inLevel.map((entry) => entry.name),
+			prefixes: states.map((state) => MCP_GLYPHS[state]),
+			tones: states.map((state) => state === "disabled" ? "dim" : undefined),
+			right,
+		});
 	}
 	const problems = [needAuth && `${needAuth} need${needAuth === 1 ? "s" : ""} sign-in`, failed && `${failed} failed`].filter(Boolean);
 	return {
 		title: "MCP",
 		count: entries.length,
-		layout: "grid",
+		layout: "columns",
 		groups,
 		...(problems.length > 0 ? { attention: `${problems.join(", ")}, /mcp to fix` } : {}),
 		...(notes.length > 0 ? { notes } : {}),
@@ -673,12 +715,27 @@ export function buildMcpSection(
 }
 
 /** The configured MCP servers as a section, with their live state; undefined when none are configured. */
-export function collectMcpSection(mode: any, entries: McpEntry[] = collectMcpEntries(mode)): ResourceSection | undefined {
-	const connected = connectedServers(mode);
+export function collectMcpSection(
+	mode: any,
+	entries: McpEntry[] = collectMcpEntries(mode),
+	statuses: ReadonlyMap<string, McpObservation> = new Map(),
+): ResourceSection | undefined {
+	const effective = entries.map((entry) => {
+		const observed = statuses.get(normalizeMcpName(entry.name));
+		// The running session wins over disk (external edits still need /reload).
+		return observed ? { ...entry, enabled: observed.status !== "disabled" } : entry;
+	});
+	for (const name of statuses.keys()) {
+		if (!effective.some((entry) => normalizeMcpName(entry.name) === name)) effective.push({ name, level: "extension" });
+	}
+	let counts = new Map<string, number>();
+	try { counts = toolCounts(mode?.session?.getAllTools?.() ?? []); } catch { /* Runner replacing. */ }
+	const observation = (name: string) => statuses.get(normalizeMcpName(name));
 	return buildMcpSection(
-		entries,
-		(name) => mcpState.status(name, connected),
-		(name) => mcpState.detail(name),
+		effective,
+		(name) => observation(name)?.status ?? mcpState.status(name),
+		(name) => observation(name) ? observation(name)?.detail : mcpState.detail(name),
+		(name) => observation(name)?.tools ?? counts.get(normalizeMcpName(name)),
 	);
 }
 
@@ -686,8 +743,8 @@ export function collectMcpSection(mode: any, entries: McpEntry[] = collectMcpEnt
 
 export type ModelEntry = { provider: string; id: string; contextWindow?: number; thinkingLevel?: string };
 
-const CURRENT_MARK: ResourceMark = { text: "●", color: "success", highlight: true };
-const FAVORITE_MARK: ResourceMark = { text: "★", color: "warning" };
+const CURRENT_MARK: ResourceMark = { ...GLYPHS.live, highlight: true };
+const FAVORITE_MARK: ResourceMark = GLYPHS.favorite;
 
 /**
  * A context window in the units vendors quote: binary for powers-of-two sizes (131072 is `128K`, 1048576 is
@@ -846,7 +903,7 @@ export function buildModelsSection(
 		count,
 		layout: "columns",
 		groups,
-		...(favorites.length > 0 ? { legend: [{ text: "★ favorite", color: "warning" }] } : {}),
+		...(favorites.length > 0 ? { legend: [{ ...GLYPHS.favorite, text: `${GLYPHS.favorite.text} favorite` }] } : {}),
 	};
 }
 
@@ -875,6 +932,7 @@ export function collectModelsSection(mode: any): ResourceSection | undefined {
 
 type StartupResourcesPatch = {
 	active: boolean;
+	stop?: () => void;
 	original: (...args: any[]) => unknown;
 	installed: (...args: any[]) => unknown;
 };
@@ -898,29 +956,49 @@ function sectionTitle(child: any): string | undefined {
 	}
 }
 
-let mcpWatch: ReturnType<typeof setInterval> | undefined;
+let stopMcpWatch: (() => void) | undefined;
 
-/** Asks for a repaint when the set of connected servers changes, while connections are still settling. */
-function watchMcpState(mode: any): void {
-	if (mcpWatch) clearInterval(mcpWatch);
-	let last = [...connectedServers(mode)].sort().join(",");
-	const timer = setInterval(() => {
-		const now = [...connectedServers(mode)].sort().join(",");
-		if (now !== last) {
-			last = now;
-			mode?.ui?.requestRender?.();
-		}
-		if (Date.now() - mcpState.mountedAt > 2 * CONNECTING_GRACE_MS) {
-			clearInterval(timer);
-			if (mcpWatch === timer) mcpWatch = undefined;
-		}
-	}, 1000);
+export function stopStartupResources(): void {
+	stopMcpWatch?.();
+	stopMcpWatch = undefined;
+	mcpState.mounted = false;
+}
+
+/** Poll for as long as the splash exists, not just startup. Rendering itself performs no file I/O. */
+export function watchMcpState(mode: any, component: unknown, update: (entries: McpEntry[], statuses: ReadonlyMap<string, McpObservation>) => void): () => void {
+	stopStartupResources();
+	mcpState.mount();
+	const cache = new McpConfigCache();
+	const reader = new McpStatusReader();
+	let entries: McpEntry[] = [];
+	let stopped = false;
+	const alive = () => !stopped && config.showStartupHeader && mode?.loadedResourcesContainer?.children?.includes(component);
+	const publish = () => { if (alive()) update(entries, reader.statuses); };
+	const tick = () => {
+		if (!alive()) { stop(); return; }
+		entries = collectMcpEntries(mode, cache);
+		publish();
+		reader.refresh(mode?.session?.extensionRunner, publish);
+	};
+	const timer = setInterval(tick, 1000);
 	timer.unref?.();
-	mcpWatch = timer;
+	const stop = () => {
+		stopped = true;
+		clearInterval(timer);
+		reader.dispose();
+		if (stopMcpWatch === stop) {
+			stopMcpWatch = undefined;
+			mcpState.mounted = false;
+		}
+	};
+	stopMcpWatch = stop;
+	tick();
+	return stop;
 }
 
 /** Swaps the collapsed rendering of each pi startup section for ours; the expanded rendering stays pi's. */
 function replaceSections(mode: any, options: unknown): void {
+	stopStartupResources();
 	const children: any[] = mode?.loadedResourcesContainer?.children;
 	if (!Array.isArray(children)) return;
 	const titled = children.map((child) => [child, sectionTitle(child)] as const).filter(([, t]) => t);
@@ -935,21 +1013,34 @@ function replaceSections(mode: any, options: unknown): void {
 		};
 		children.splice(at, 0, { render, invalidate() {} }, { render: () => [""], invalidate() {} });
 	}
-	const mcpEntries = collectMcpEntries(mode);
-	if (mcpEntries.length > 0) {
-		// Right after Extensions (else the last titled section), followed by the same one-line spacer pi uses.
-		const anchor = titled.find(([, title]) => title === "Extensions") ?? titled[titled.length - 1]!;
-		const at = children.indexOf(anchor[0]);
-		const render = (width: number) => {
-			const section = collectMcpSection(mode, mcpEntries);
-			return section ? renderSection(section, width, hostTheme?.() ?? PLAIN_THEME) : [];
-		};
-		const component = { render, invalidate() {} };
-		const spacer = { render: () => [""], invalidate() {} };
-		children.splice(at + 2, 0, component, spacer);
-		mcpState.mount();
-		watchMcpState(mode);
-	}
+	// Keep an initially empty component too: an extension can register the first server after startup.
+	const anchor = titled.find(([, title]) => title === "Extensions") ?? titled[titled.length - 1]!;
+	const at = children.indexOf(anchor[0]);
+	let mcpEntries: McpEntry[] = [];
+	let statuses: ReadonlyMap<string, McpObservation> = new Map();
+	let last = "";
+	const section = () => collectMcpSection(mode, mcpEntries, statuses);
+	const component = {
+		render(width: number) {
+			const current = section();
+			return current ? renderSection(current, width, hostTheme?.() ?? PLAIN_THEME) : [];
+		},
+		invalidate() {},
+	};
+	const spacer = { render: () => mcpEntries.length > 0 || statuses.size > 0 ? [""] : [], invalidate() {} };
+	children.splice(at + 2, 0, component, spacer);
+	watchMcpState(mode, component, (entries, observed) => {
+		mcpEntries = entries;
+		statuses = observed;
+		const current = section();
+		const now = JSON.stringify(current);
+		// An empty placeholder must not absorb a warning it cannot display.
+		mcpState.mounted = !!current;
+		if (now !== last) {
+			last = now;
+			mode.ui?.requestRender?.();
+		}
+	});
 	for (const [child, title] of titled) {
 		const section = sections[title!];
 		if (!section) continue;
@@ -961,17 +1052,22 @@ function replaceSections(mode: any, options: unknown): void {
 	}
 }
 
-export function installStartupResources(): void {
+export function installStartupResources(pi?: ExtensionAPI): void {
+	pi?.on("session_shutdown", () => stopStartupResources());
 	const prototype = (InteractiveMode as any)?.prototype;
 	if (!prototype || typeof prototype.showLoadedResources !== "function") return;
 	const previous = patchRegistry.get<StartupResourcesPatch>(STARTUP_RESOURCES_PATCH);
-	if (previous) previous.active = false;
+	if (previous) {
+		previous.active = false;
+		previous.stop?.();
+	}
 	const original =
 		previous && prototype.showLoadedResources === previous.installed
 			? previous.original
 			: prototype.showLoadedResources;
 	const patch: StartupResourcesPatch = {
 		active: true,
+		stop: stopStartupResources,
 		original,
 		installed: function (this: any, ...args: any[]) {
 			const result = original.apply(this, args);
@@ -1015,7 +1111,7 @@ export function installMcpNotify(prototype: any): void {
 				try {
 					const report = parseAttentionMessage(message);
 					if (report) {
-						mcpState.record(report, connectedServers(this));
+						mcpState.record(report);
 						this.ui?.requestRender?.();
 						return report.configLines.length > 0
 							? original.call(this, configWarning(report), type, ...rest)
@@ -1023,7 +1119,7 @@ export function installMcpNotify(prototype: any): void {
 					}
 					const outcome = parseOutcomeMessage(message);
 					if (outcome) {
-						mcpState.outcome(outcome.name, outcome.state, connectedServers(this));
+						mcpState.outcome(outcome.name, outcome.state);
 						this.ui?.requestRender?.();
 					}
 				} catch {

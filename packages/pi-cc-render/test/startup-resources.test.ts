@@ -1,5 +1,6 @@
 import { InteractiveMode } from "@earendil-works/pi-coding-agent";
-import { describe, expect, test } from "vitest";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import { describe, expect, test, vi } from "vitest";
 import {
   collectSections,
   formatTokens,
@@ -185,18 +186,20 @@ describe("startup resources", () => {
           local: { command: "y" },
           gated: { enabled: true },
           tuned: { exposure: "direct" },
-          dash_name: { enabled: false },
+          "dash-name": { enabled: false },
         },
       }),
     );
     expect(loadMcpEntries({ userFile, projectFile, registered: ["a", "ext"] })).toEqual([
       { name: "a", level: "user" },
+      { name: "off", level: "user", enabled: false },
       { name: "gated", level: "project" },
       { name: "tuned", level: "user" },
+      { name: "dash-name", level: "user", enabled: false },
       { name: "local", level: "project" },
       { name: "ext", level: "extension" },
     ]);
-    expect(loadMcpEntries({ userFile })).toHaveLength(3);
+    expect(loadMcpEntries({ userFile })).toHaveLength(5);
     expect(loadMcpEntries({ userFile: join(dir, "missing.json") })).toEqual([]);
   });
 
@@ -214,21 +217,21 @@ describe("startup resources", () => {
     expect(parseOutcomeMessage('Reconnected to MCP server "v" (failed: no).')).toEqual({ name: "v", state: "failed" });
   });
 
-  test("server state: problems win, tools appearing later clear them, connecting fades after the grace period", async () => {
-    const { McpState, CONNECTING_GRACE_MS, parseAttentionMessage } = await import("../src/feature/shell/mcp-servers.ts");
+  test("notification fallback records explicit outcomes, never guesses a connection from tools or time", async () => {
+    const { McpState, parseAttentionMessage } = await import("../src/feature/shell/mcp-servers.ts");
     const state = new McpState();
-    state.mount(1000);
-    expect(state.status("a", new Set(), 1000)).toBe("connecting");
-    expect(state.status("a", new Set(["a"]), 1000)).toBe("connected");
-    expect(state.status("a", new Set(), 1000 + CONNECTING_GRACE_MS)).toBeUndefined();
-    state.record(parseAttentionMessage("MCP servers need attention:\n  a: needs sign-in\n  b: failed: boom\nRun /mcp to fix.")!, new Set(["b"]));
-    expect(state.status("a", new Set(), 1000)).toBe("needs-auth");
-    expect(state.status("c", new Set(), 1000)).toBeUndefined();
-    expect(state.status("a", new Set(["a"]), 1000)).toBe("connected");
-    expect(state.status("b", new Set(["b"]), 1000)).toBe("failed");
+    state.mount();
+    expect(state.status("a")).toBeUndefined();
+    state.record(parseAttentionMessage("MCP servers need attention:\n  a: needs sign-in\n  b: failed: boom\nRun /mcp to fix.")!);
+    expect(state.status("a")).toBe("needs-auth");
+    expect(state.status("c")).toBeUndefined();
+    expect(state.status("b")).toBe("failed");
     expect(state.detail("b")).toBe("boom");
-    state.outcome("b", "connected", new Set(["b"]));
-    expect(state.status("b", new Set(["b"]), 1000)).toBe("connected");
+    state.outcome("b", "connected");
+    expect(state.status("b")).toBe("connected");
+    expect(state.detail("b")).toBeUndefined();
+    state.mount();
+    expect(state.status("b")).toBeUndefined();
   });
 
   test("the MCP section groups by level and marks servers that need attention", async () => {
@@ -244,18 +247,155 @@ describe("startup resources", () => {
     )!;
     expect(renderSection(section, 100, plainTheme)).toEqual([
       "MCP 3 · 1 needs sign-in, 1 failed, /mcp to fix",
-      "  project 1",
-      "    local",
-      "  user 2",
-      "    obsidian failed        vercel needs sign-in",
+      "  project 1            user 2",
+      "  ● local  connected   ✕ obsidian         failed",
+      "                       ● vercel    needs sign-in",
       "  obsidian: http request failed",
     ]);
     expect(buildMcpSection([], () => undefined)).toBeUndefined();
     expect(renderSection(buildMcpSection([{ name: "a", level: "user" }], () => "connected")!, 80, plainTheme)).toEqual([
       "MCP 1",
       "  user 1",
-      "    a",
+      "  ● a  connected",
     ]);
+  });
+
+  test("MCP uses the splash glyphs, explicit states and disabled tones in scope columns", async () => {
+    const { buildMcpSection, GLYPHS } = await import("../src/feature/shell/startup-resources.ts");
+    const states = ["connected", "connecting", "disabled", "disconnected", "needs-auth", "failed", "unknown"] as const;
+    const section = buildMcpSection(
+      states.map((name) => ({ name, level: "user", ...(name === "disabled" ? { enabled: false } : {}) })),
+      (name) => name === "disabled" ? "connected" : states.find((state) => state === name),
+      () => undefined,
+      () => 0,
+    )!;
+    expect(section.layout).toBe("columns");
+    const group = section.groups[0]!;
+    const byName = (name: string) => group.items.indexOf(name);
+    expect(group.prefixes![byName("connected")]).toEqual(GLYPHS.live);
+    expect(group.prefixes![byName("connecting")]).toEqual(GLYPHS.pending);
+    expect(group.prefixes![byName("needs-auth")]).toEqual(GLYPHS.attention);
+    expect(group.prefixes![byName("failed")]).toEqual(GLYPHS.failed);
+    for (const name of ["disabled", "disconnected", "unknown"]) expect(group.prefixes![byName(name)]).toEqual(GLYPHS.idle);
+    expect(group.tones![byName("disabled")]).toBe("dim");
+    expect(group.right![byName("disabled")]).toEqual({ text: "disabled", color: "dim" });
+    expect(group.right![byName("connected")]).toEqual({ text: "connected · 0 tools", color: "dim" });
+    expect(group.right![byName("needs-auth")]).toEqual({ text: "needs sign-in", color: "warning" });
+    expect(group.right![byName("failed")]).toEqual({ text: "failed", color: "error" });
+    expect(renderSection(section, 80, plainTheme).join("\n")).toContain("disconnected");
+    expect(renderSection(section, 80, plainTheme).join("\n")).toContain("unknown");
+  });
+
+  test("MCP runtime state wins over disk and tool registrations, including zero-tool servers", async () => {
+    const { collectMcpSection } = await import("../src/feature/shell/startup-resources.ts");
+    const { mcpState } = await import("../src/feature/shell/mcp-servers.ts");
+    mcpState.mount();
+    const entries = [
+      { name: "live", level: "user", enabled: false },
+      { name: "off", level: "user" },
+      { name: "resource-only", level: "project" },
+      { name: "no-tools", level: "user" },
+      { name: "stale-tools", level: "user" },
+    ] as const;
+    const mode = { session: { getAllTools: () => [
+      { namespace: { name: "mcp__live" } },
+      { namespace: { name: "mcp__off" } },
+      { namespace: { name: "mcp__stale_tools" } },
+    ] } };
+    const section = collectMcpSection(mode, [...entries], new Map([
+      ["live", { status: "connected", tools: 7 }],
+      ["off", { status: "disabled" }],
+      ["resource_only", { status: "connected", tools: 0 }],
+    ]))!;
+    const text = renderSection(section, 100, plainTheme).join("\n");
+    expect(text).toMatch(/● live\s+connected · 7 tools/);
+    expect(text).toMatch(/○ off\s+disabled/);
+    expect(text).toMatch(/● resource-only\s+connected · 0 tools/);
+    expect(text).toMatch(/○ no-tools\s+unknown/);
+    expect(text).toMatch(/○ stale-tools\s+unknown/);
+  });
+
+  test("MCP columns split long scopes and preserve right-hand states at narrow widths", async () => {
+    const { buildMcpSection, COLUMN_MAX_ROWS } = await import("../src/feature/shell/startup-resources.ts");
+    const entries = Array.from({ length: COLUMN_MAX_ROWS + 2 }, (_, i) => ({ name: `server-${i}`, level: "user" as const }));
+    const section = buildMcpSection(entries, () => "connected", undefined, () => 1)!;
+    const wide = renderSection(section, 100, plainTheme);
+    expect(wide).toHaveLength(COLUMN_MAX_ROWS + 2);
+    expect(wide[2]).toMatch(/server-0.*server-8/);
+    const narrow = renderSection(section, 40, plainTheme);
+    expect(narrow).toHaveLength(entries.length + 2);
+    expect(narrow.slice(2).every((line) => line.endsWith("connected · 1 tool"))).toBe(true);
+    const long = buildMcpSection([{ name: "a-very-long-server-name-界界", level: "project" }], () => "needs-auth")!;
+    expect(renderSection(long, 28, plainTheme)[2]!.replace(/\x1b\[[0-9;]*m/g, "")).toMatch(/…\s+needs sign-in$/);
+    const ansi: StartupTheme = { fg: (_name, text) => `\x1b[32m${text}\x1b[39m`, bold: (text) => `\x1b[1m${text}\x1b[22m` };
+    for (const width of [0, 1, 2, 5, 15, 28, 40, 80, 140]) {
+      for (const current of [section, long]) {
+        expect(renderSection(current, width, ansi).every((line) => visibleWidth(line) <= width), `width ${width}`).toBe(true);
+      }
+    }
+  });
+
+  test("MCP polling follows late status/count/config updates without a startup deadline and stops on removal", async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { watchMcpState, collectMcpSection, stopStartupResources } = await import("../src/feature/shell/startup-resources.ts");
+    const dir = mkdtempSync(join(tmpdir(), "mcp-watch-"));
+    mkdirSync(join(dir, ".pi"));
+    vi.stubEnv("PI_CODING_AGENT_DIR", dir);
+    vi.useFakeTimers();
+    let status = "live: connected, 2 tools (codemode)";
+    let trusted = false;
+    const handler = vi.fn(async (_args, ctx) => ctx.ui.notify(status));
+    const runner = {
+      getCommand: () => ({ sourceInfo: { path: "builtin:mcp" }, handler }),
+      createCommandContext: () => ({ mode: "tui", ui: {} }),
+      runtime: { mcpServers: { list: () => [] } },
+    };
+    const component = {};
+    const mode = {
+      sessionManager: { getCwd: () => dir },
+      settingsManager: { isProjectTrusted: () => trusted },
+      session: { extensionRunner: runner, getAllTools: () => [] },
+      loadedResourcesContainer: { children: [component] },
+    };
+    let shown = "";
+    try {
+      writeFileSync(join(dir, "mcp.json"), JSON.stringify({ mcpServers: { live: { command: "x" }, off: { command: "x", enabled: false } } }));
+      writeFileSync(join(dir, ".pi", "mcp.json"), JSON.stringify({ mcpServers: { off: { enabled: true } } }));
+      watchMcpState(mode, component, (entries, states) => {
+        shown = renderSection(collectMcpSection(mode, entries, states)!, 100, plainTheme).join("\n");
+      });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(shown).toMatch(/live\s+connected · 2 tools/);
+      expect(shown).toMatch(/off\s+disabled/);
+      expect(shown).not.toContain("project 1");
+      await vi.advanceTimersByTimeAsync(65_000);
+      status = "live: disconnected, reconnects on next call (codemode)";
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(shown).toMatch(/○ live\s+disconnected/);
+      status = "live: connected, 3 tools (codemode)\noff: connected, 0 tools (codemode)";
+      trusted = true;
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(shown).toMatch(/live\s+connected · 3 tools/);
+      expect(shown).toMatch(/off\s+connected · 0 tools/);
+      expect(shown).toContain("project 1");
+      writeFileSync(join(dir, ".pi", "mcp.json"), JSON.stringify({ mcpServers: { off: { enabled: false } } }));
+      status = "live: connected, 3 tools (codemode)\noff: disabled (codemode)";
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(shown).toMatch(/○ off\s+disabled/);
+      expect(shown).not.toContain("project 1");
+      mode.loadedResourcesContainer.children.length = 0;
+      const calls = handler.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(handler).toHaveBeenCalledTimes(calls);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      stopStartupResources();
+      vi.useRealTimers();
+      vi.unstubAllEnvs();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("the attention warning is taken in once the MCP section is mounted, other messages pass through", async () => {
@@ -273,13 +413,13 @@ describe("startup resources", () => {
     mode.showExtensionNotify(warning, "warning");
     mode.showExtensionNotify("hello", "info");
     expect(shown).toEqual([warning, "hello"]);
-    expect(mcpState.status("obsidian", new Set())).toBe("failed");
+    expect(mcpState.status("obsidian")).toBe("failed");
     mode.showExtensionNotify("MCP servers need attention:\n  config: /x: bad\n  obsidian: failed\nRun /mcp to fix.", "warning");
     expect(shown[2]).toBe("MCP configuration needs attention:\n  config: /x: bad\nRun /mcp to fix.");
   });
 
   test("the models section lists each provider's current generation, one per line, favorites starred", async () => {
-    const { buildModelsSection, collectModelsSection } = await import("../src/feature/shell/startup-resources.ts");
+    const { buildModelsSection, collectModelsSection, GLYPHS } = await import("../src/feature/shell/startup-resources.ts");
     const available = [
       { provider: "anthropic", id: "claude-opus-5-5", contextWindow: 1_048_576 },
       { provider: "anthropic", id: "claude-opus-4-8", contextWindow: 1_048_576 },
@@ -296,6 +436,8 @@ describe("startup resources", () => {
       [{ provider: "openai", id: "gpt-6.1-sol", thinkingLevel: "high" }, { provider: "anthropic", id: "claude-opus-5-5" }],
       { provider: "anthropic", id: "claude-opus-5-5" },
     )!;
+    expect(section.groups[1]!.marks![0]).toEqual({ ...GLYPHS.live, highlight: true });
+    expect(section.groups[1]!.prefixes![0]).toEqual(GLYPHS.favorite);
     expect(renderSection(section, 80, plainTheme)).toEqual([
       "Models 3 · ★ favorite",
       "  openai 1                   anthropic 2",
