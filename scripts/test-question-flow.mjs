@@ -11,6 +11,8 @@ const jiti = createJiti(import.meta.url);
 const { QuestionDialog } = await jiti.import('../packages/pi-ask-user-question/src/dialog.ts');
 const { embeddedEditorFactory } = await jiti.import('../packages/pi-ask-user-question/src/editor.ts');
 const { EmbeddedEditor } = await jiti.import('../packages/pi-vim/src/embedded-editor.ts');
+const { FleetView } = await jiti.import('../packages/pi-subagents/src/ui/fleet.ts');
+const { PillView } = await jiti.import('../packages/pi-bg/src/pill.ts');
 const themeModule = await import(new URL('./modes/interactive/theme/theme.js', sdkUrl));
 const MODE = Symbol.for('pi-plugins.editor-mode.v1');
 const CONTEXT = Symbol.for('pi-plugins.input-context.v1');
@@ -124,4 +126,43 @@ try {
     }
   }
   console.log('PASS question free-text ownership, drafts, Vim re-entry and disposal through regular/fullscreen TUI input');
+
+  // Global task listeners must not mistake an open answer/note for main's prompt:
+  // otherwise Down selects a task and the next Enter opens it instead of answering.
+  for (const fullscreen of [false, true]) for (const host of ['fleet', 'pill']) for (const field of ['custom', 'notes']) {
+    const kb = new KeybindingsManager();
+    setKeybindings(kb);
+    const terminal = new MemoryTerminal();
+    const tui = fullscreen ? new TuiAltScreen(terminal, false, undefined, { mouse: false }) : new TuiMainScreen(terminal);
+    let opened = 0;
+    let result;
+    const ui = {
+      getEditorText: () => '',
+      onTerminalInput: listener => tui.addInputListener(listener),
+      setWidget: (_key, factory) => factory?.(tui, themeModule.theme),
+      custom: () => { opened++; return Promise.resolve(); },
+      theme: themeModule.theme,
+    };
+    const run = { id: 'running', agent: 'worker', state: { status: 'running', startedAt: Date.now() } };
+    const tasks = host === 'fleet'
+      ? new FleetView({ runs: () => [run], enabled: () => true, actions: () => ({}) })
+      : new PillView({ pill: () => ({ label: '1 task' }), open: () => { opened++; } }, 'question-test');
+    tasks.setUI(ui);
+    tasks.update();
+    const dialog = new QuestionDialog(tui, themeModule.theme, kb, [question()], value => { result = value; });
+    try {
+      tui.addChild(dialog);
+      tui.setFocus(dialog);
+      tui.start();
+      terminal.send(field === 'custom' ? '3' : 'n', ...(field === 'custom' ? ['\r'] : []));
+      assert.equal(dialog[CONTEXT](), 'editor');
+      if (host === 'fleet') assert.equal(tasks.autoOpen(run, { onDismiss() {}, onInteraction() {} }), false, 'an open field must block automatic subagent viewing');
+      terminal.send('\x1b[B', 'x', '\x1b[B', '\r');
+      assert.equal(opened, 0, `${host} stole Enter from ${field}`);
+      if (field === 'notes') terminal.send('\r');
+      assert.equal(result?.cancelled, false, `${host} blocked ${field} submission`);
+      assert.equal(field === 'custom' ? result.answers[0].answer : result.answers[0].notes, 'x');
+    } finally { tasks.dispose(); tui.stop(); }
+  }
+  console.log('PASS task panel and pill leave question-field navigation, Enter and auto-view ownership alone');
 } finally { setKeybindings(previous); }

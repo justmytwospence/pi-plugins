@@ -34,6 +34,7 @@ const NO_PREVIEW = "No preview for this option";
 const OWN_ANSWER = "Type your own answer";
 /** A multiple choice's typed-answer option. */
 const OTHER = "Other";
+const EDITOR_SURFACE = Symbol.for("pi-plugins.editor-surface.v1");
 
 interface Slot {
   /** The highlighted row: an option, or the "Type something." row after them. */
@@ -128,6 +129,9 @@ export class QuestionDialog implements Component, Focusable {
     this.syncFocus();
   }
 
+  // The focused wrapper owns an embedded answer/note editor, never the main prompt.
+  // Global task navigation and automatic subagent viewing must leave its keys alone.
+  readonly [EDITOR_SURFACE] = "embedded";
   [Symbol.for("pi-plugins.input-context.v1")]() { return this.editing ? "editor" : "list"; }
 
   // --- input -------------------------------------------------------------------------------
