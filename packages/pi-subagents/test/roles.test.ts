@@ -1,10 +1,10 @@
 // Roles, the Haiku guard, quota and the rate limit through the `subagent` tool, against fake Pi children.
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { RATE_LIMIT_ERROR, isRateLimit, setPiInvocation } from "../src/child.ts";
-import subagents, { effectiveConcurrency, promptGuidelines, resumable } from "../src/index.ts";
+import subagents, { promptGuidelines, resumable } from "../src/index.ts";
 import { fakeJev, harness } from "./harness.ts";
 import { fakeUI, plain } from "./ui-helpers.ts";
 
@@ -21,7 +21,7 @@ afterEach(() => {
   setPiInvocation(undefined);
 });
 
-async function setup(options: { answer?: (questions: Record<string, any>) => any; ctx?: Record<string, unknown>; fixture?: string } = {}) {
+async function setup(options: { answer?: (questions: Record<string, any>) => any; ctx?: Record<string, unknown>; fixture?: string; concurrency?: number } = {}) {
   setPiInvocation(fixture(options.fixture ?? "fake-pi-loop.mjs"));
   const jev = fakeJev((questions) => options.answer?.(questions) ?? {});
   const h = harness();
@@ -41,6 +41,10 @@ async function setup(options: { answer?: (questions: Record<string, any>) => any
     modelRegistry: { ...(jev.registry as object), getAll: () => claude },
     ...options.ctx,
   });
+  if (options.concurrency !== undefined) {
+    mkdirSync(path.join(ctx.cwd, ".pi"), { recursive: true });
+    writeFileSync(path.join(ctx.cwd, ".pi", "pi-subagents.json"), JSON.stringify({ concurrency: options.concurrency }));
+  }
   await h.emit("session_start", { type: "session_start" }, ctx);
   const send = (channel: string, data: unknown) => { for (const fn of listeners.get(channel) ?? []) fn(data); };
   return { h, jev, ctx, ui, send, tool: () => tool, stop: () => h.emit("session_shutdown", { type: "session_shutdown" }, ctx) };
@@ -82,22 +86,20 @@ test.each([
   await s.stop();
 });
 
-test("critical quota pressure on the parent's provider runs parallel tasks one at a time, and says so", async () => {
-  expect(effectiveConcurrency(4, undefined)).toBe(4);
-  expect(effectiveConcurrency(4, { provider: "anthropic", tier: "caution", p: 0.6 })).toBe(4);
-  expect(effectiveConcurrency(4, { provider: "anthropic", tier: "critical", p: 1 })).toBe(1);
-  const s = await setup();
-  s.send("quota:pressure", { provider: "openai-codex", tier: "critical", p: 1 });
-  const calm = await s.tool().execute("t1", { tasks: [{ task: "a", agent: "explorer" }, { task: "b", agent: "explorer" }], async: true }, undefined, undefined, s.ctx);
-  expect(calm.details.runs).toHaveLength(2);
-  expect(calm.content[0].text).not.toContain("one at a time");
-
-  s.send("quota:pressure", { provider: "anthropic", tier: "critical", p: 1, label: "5h 97%" });
-  const tasks = ["c", "d", "e"].map((task) => ({ task, agent: "explorer" }));
-  const tight = await s.tool().execute("t2", { tasks, async: true }, undefined, undefined, s.ctx);
-  expect(tight.details.runs).toHaveLength(1);
-  expect(tight.content[0].text).toContain("[Quota pressure on anthropic is critical (5h 97%): these 3 tasks run one at a time.]");
-  expect(s.ui.notes.some((n: any) => String(n.message ?? n).includes("one at a time"))).toBe(true);
+test.each([1, 2, 4])("critical quota pressure preserves configured parallel concurrency %i without a serialization notice", async (concurrency) => {
+  const s = await setup({ concurrency });
+  const tasks = ["a", "b", "c", "d", "e"].map((task) => ({ task, agent: "explorer" }));
+  for (const [index, pressure] of [
+    { provider: "openai-codex", tier: "critical", p: 1 },
+    { provider: "anthropic", tier: "caution", p: 0.6 },
+    { provider: "anthropic", tier: "critical", p: 1, label: "5h 97%" },
+  ].entries()) {
+    s.send("quota:pressure", pressure);
+    const result = await s.tool().execute(`t${index}`, { tasks, async: true }, undefined, undefined, s.ctx);
+    expect(result.details.runs).toHaveLength(concurrency);
+    expect(result.content[0].text).not.toContain("one at a time");
+  }
+  expect(s.ui.notes.some((n: any) => String(n.message ?? n).includes("one at a time"))).toBe(false);
   await s.stop();
 });
 

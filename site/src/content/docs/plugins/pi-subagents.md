@@ -28,7 +28,7 @@ Children need a working Pi runtime and access to their selected model providers.
 `action: "run"` is the default. Choose one task shape:
 
 - `task`: one self-contained assignment, with optional `label`, `agent`, `model`, and `thinking`.
-- `tasks`: parallel task objects, each accepting `task`, `label`, `agent`, `cwd`, `model`, and `thinking`. Defaults allow eight tasks with four executing concurrently; while the parent's provider is under `critical` quota pressure ([pi-auto-effort](/plugins/pi-auto-effort/)), they run one at a time and the result says so.
+- `tasks`: parallel task objects, each accepting `task`, `label`, `agent`, `cwd`, `model`, and `thinking`. Defaults allow eight tasks with four executing concurrently. Quota pressure ([pi-auto-effort](/plugins/pi-auto-effort/)) adjusts automatic model and effort picks, not the configured concurrency.
 - `chain`: sequential task objects. `{previous}` inserts the preceding output; the chain stops on its first failed step.
 
 Example arguments for independent read-only reconnaissance:

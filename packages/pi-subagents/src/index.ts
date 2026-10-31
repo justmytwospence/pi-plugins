@@ -147,15 +147,6 @@ export function readPressure(data: unknown): QuotaPressure | undefined {
   return { provider: d.provider, tier, p: Math.min(1, Math.max(0, d.p)), ...(typeof d.label === "string" ? { label: d.label } : {}) };
 }
 
-/**
- * Parallel tasks in flight at once: the configured number, or 1 while the parent's provider is under
- * `critical` quota pressure (a fan-out then only spends the last of the window faster).
- */
-export function effectiveConcurrency(configured: number, pressure: QuotaPressure | undefined): number {
-  if (pressure?.tier === "critical") return 1;
-  return Math.max(1, Number.isFinite(configured) ? Math.floor(configured) : 1);
-}
-
 /** ` (auto)`, or ` (auto, p=0.5)` for a pick made under quota pressure. */
 export function jevMark(on: boolean, pressure?: number): string {
   if (!on) return "";
@@ -1243,14 +1234,7 @@ export default function subagents(pi: ExtensionAPI) {
           throw new Error(failed.error);
         }
         const resolved = resolvedAll as Resolved[];
-        const parentProvider = ctx.model?.provider ?? "";
-        const quota = pressures.get(parentProvider);
-        const concurrency = effectiveConcurrency(config.concurrency, quota);
-        const quotaNote =
-          mode === "parallel" && items.length > 1 && concurrency === 1 && quota?.tier === "critical"
-            ? `[Quota pressure on ${parentProvider} is critical${quota.label ? ` (${quota.label})` : ""}: these ${items.length} tasks run one at a time.]`
-            : undefined;
-        if (quotaNote && ctx.hasUI) safely(() => ctx.ui.notify(`subagents: ${quotaNote.slice(1, -1)}`, "warning"));
+        const concurrency = Math.max(1, Number.isFinite(config.concurrency) ? Math.floor(config.concurrency) : 1);
 
         const started: Run[] = [];
         const details = (): Details => ({ mode, runs: started.map((r) => view(r)) });
@@ -1388,7 +1372,7 @@ export default function subagents(pi: ExtensionAPI) {
           // Let the runs start so their ids exist.
           await new Promise((r) => setTimeout(r, 50));
           return {
-            content: [{ type: "text", text: `Started ${mode} in the background${started.length ? `: ${ids()}` : ""}. Results arrive as messages; use action=status, steer, stop, or result with an id meanwhile.${hasBg() && started.length ? ` If nothing else is left to do, bg_wait ${started.map((r) => `subagent:${r.id}`).join(" or ")} waits inside your turn until it ends.` : ""}${quotaNote ? `\n\n${quotaNote}` : ""}` }],
+            content: [{ type: "text", text: `Started ${mode} in the background${started.length ? `: ${ids()}` : ""}. Results arrive as messages; use action=status, steer, stop, or result with an id meanwhile.${hasBg() && started.length ? ` If nothing else is left to do, bg_wait ${started.map((r) => `subagent:${r.id}`).join(" or ")} waits inside your turn until it ends.` : ""}` }],
             details: details(),
           };
         }
@@ -1440,7 +1424,7 @@ export default function subagents(pi: ExtensionAPI) {
         for (const r of started) detachers.delete(r.id);
         if (!done.length) throw new Error(signal?.aborted ? "Cancelled before any subagent started." : "No subagent started.");
         const skipped = items.length - done.length;
-        const text = `${mode === "chain" ? resultText(done.at(-1) as Run) : done.map(resultText).join("\n\n---\n\n")}${skipped > 0 && signal?.aborted ? `\n\n[Cancelled: ${skipped} queued task${skipped === 1 ? "" : "s"} never started.]` : ""}${quotaNote ? `\n\n${quotaNote}` : ""}`;
+        const text = `${mode === "chain" ? resultText(done.at(-1) as Run) : done.map(resultText).join("\n\n---\n\n")}${skipped > 0 && signal?.aborted ? `\n\n[Cancelled: ${skipped} queued task${skipped === 1 ? "" : "s"} never started.]` : ""}`;
         const allFailed = done.every((r) => r.state.status !== "done");
         return {
           content: [{ type: "text", text }],
