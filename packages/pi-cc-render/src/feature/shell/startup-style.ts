@@ -1,4 +1,4 @@
-import { backgroundAnsi, foregroundAnsi, mixColors, type Color, type TerminalColorMode } from "@earendil-works/pi-tui";
+import type { Color, TerminalColorMode } from "@earendil-works/pi-tui";
 
 export type ResourceMark = { text: string; color: string; highlight?: boolean };
 /** Connection and selection state, independent of source-category colors. */
@@ -32,19 +32,6 @@ export type ContextTheme = {
 };
 
 /** Resolve on each repaint: theme invalidation may replace concrete colors in-place. */
-export function categoryStyle(theme: ContextTheme, category: ContextCategory): {
-	swatch(text: string): string;
-	fill(text: string): string;
-} {
-	const token = CATEGORIES[category].foreground;
-	const color = theme.colors?.[token];
-	const background = theme.colors?.userMessageBg;
-	const labelColor = theme.colors?.text;
-	const mode = theme.getColorMode?.();
-	return {
-		swatch: (text) => theme.fg(token, text),
-		fill: (text) => color && background && labelColor && mode
-			? `${foregroundAnsi(labelColor, mode)}${backgroundAnsi(mixColors(background, color, 0.35), mode)}${text}\x1b[0m`
-			: theme.fg("text", text),
-	};
+export function categoryStyle(theme: ContextTheme, category: ContextCategory): { swatch(text: string): string } {
+	return { swatch: (text) => theme.fg(CATEGORIES[category].foreground, text) };
 }

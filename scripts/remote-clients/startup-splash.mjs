@@ -50,20 +50,24 @@ export async function startupSplashScreens({ theme, getEditorTheme, kb, sidebarS
   const editorContainer = new Container();
   editorContainer.addChild(editor);
   const managerTui = { ...tui, setFocus: component => { focused = component; }, getFocusedComponent: () => focused };
-  // The native header is empty: Pi's startup listing owns Models, followed by the context map
-  // and the remaining resources in the transcript, above either dock.
+  // The native header is empty: resources, including MCP, precede the context map and
+  // Models in Pi's startup transcript, above either editor or native manager dock.
   const transcript = { render: width => [
-    ...renderSection(models, width, theme),
-    ...renderHeaderLines(width, theme, snapshot),
-    ...resources.flatMap(section => renderSection(section, width, theme)),
+    ...resources.flatMap(section => [...renderSection(section, width, theme), '']),
     ...renderSection(mcp, width, theme),
+    '',
+    ...renderHeaderLines(width, theme, snapshot),
+    '',
+    ...renderSection(models, width, theme),
   ], invalidate() {} };
   for (const width of [46, 120, 180]) {
     const lines = transcript.render(width).map(stripVTControlCharacters);
-    const headings = ['Models', 'Starting context', 'Context', 'Skills', 'Prompts', 'Extensions', 'MCP'];
+    const headings = ['Context', 'Skills', 'Prompts', 'Extensions', 'MCP', 'Starting context', 'Models'];
     const positions = headings.map(heading => lines.findIndex(line => line.includes(heading)));
     assert.ok(positions.every((position, index) => position >= 0 && (!index || position > positions[index - 1])),
-      `startup listing follows Models → map → resources at width ${width}: ${JSON.stringify(positions)}`);
+      `startup listing follows resources → map → Models at width ${width}: ${JSON.stringify(positions)}`);
+    assert.match(lines[0], /Context/u, 'Context starts the listing without a leading blank');
+    assert.notEqual(lines.at(-1), '', 'Models ends the listing without a trailing blank');
   }
   const sidebarOptions = [
     ['without Sidebar', { open: false }],

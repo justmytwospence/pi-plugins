@@ -132,40 +132,46 @@ export function renderContextTreemap(snapshot: StartupContextSnapshot, width: nu
 	if (width < 24) {
 		appendWrapped(lines, [...totals(snapshot.sources)].map(([category, tokens]) => `${CATEGORIES[category].label} ~${formatTokens(tokens)}`), width);
 	} else if (snapshot.sources.length) {
-		const height = 2;
-		const cells: Array<Array<{ char: string; category?: ContextCategory }>> = Array.from({ length: height }, () => Array.from({ length: width }, () => ({ char: " " })));
-		const unlabeled: ContextSource[] = [];
-		for (const rect of categoryTiles(snapshot.sources, width, height)) {
-			for (let y = rect.y; y < rect.y + rect.height; y++) for (let x = rect.x; x < rect.x + rect.width; x++) cells[y]![x] = { char: " ", category: rect.source.category };
+		type Cell = { char: string; category?: ContextCategory };
+		const labels: Cell[] = Array.from({ length: width }, () => ({ char: " " }));
+		const bar: Cell[] = Array.from({ length: width }, () => ({ char: " " }));
+		const named = new Set<ContextCategory>();
+		const complete = new Set<ContextCategory>();
+		for (const rect of categoryTiles(snapshot.sources, width, 1)) {
+			for (let x = rect.x; x < rect.x + rect.width; x++) bar[x] = { char: "█", category: rect.source.category };
 			const full = `${rect.source.label} ~${formatTokens(rect.source.tokens)}`;
-			const name = rect.width >= visibleWidth(full) + 2 ? full : rect.width >= visibleWidth(rect.source.label) + 2 ? rect.source.label : "";
-			if (!name) unlabeled.push(rect.source);
-			let col = rect.x + 1;
-			for (const { segment } of graphemes.segment(name)) {
-				const cellWidth = visibleWidth(segment);
-				if (!cellWidth || col + cellWidth > rect.x + rect.width - 1 || col + cellWidth > width) break;
-				cells[rect.y]![col] = { char: segment, category: rect.source.category };
-				for (let extra = 1; extra < cellWidth; extra++) cells[rect.y]![col + extra] = { char: "", category: rect.source.category };
-				col += cellWidth;
+			const label = rect.width >= visibleWidth(full) + 2 ? full : rect.width >= visibleWidth(rect.source.label) + 2 ? rect.source.label : "";
+			if (label) {
+				named.add(rect.source.category);
+				if (label === full) complete.add(rect.source.category);
+				let col = rect.x + 1;
+				for (const { segment } of graphemes.segment(label)) {
+					const cellWidth = visibleWidth(segment);
+					if (!cellWidth || col + cellWidth > rect.x + rect.width - 1) break;
+					labels[col] = { char: segment, category: rect.source.category };
+					for (let extra = 1; extra < cellWidth; extra++) labels[col + extra] = { char: "", category: rect.source.category };
+					col += cellWidth;
+				}
 			}
-			if (rect.height > 1) for (const x of itemBreaks(snapshot.sources, rect)) {
-				// The divider stays inside the category's colored fill, never exposing the default background.
-				cells[rect.y + 1]![x] = { char: "│", category: rect.source.category };
-			}
+			for (const x of itemBreaks(snapshot.sources, rect)) bar[x] = { char: "┃", category: rect.source.category };
 		}
-		for (const row of cells) {
+		const paint = (cells: Cell[]) => {
 			let output = "";
-			for (let i = 0; i < row.length;) {
-				const category = row[i]!.category;
+			for (let i = 0; i < cells.length;) {
+				const category = cells[i]!.category;
 				let end = i + 1;
-				while (end < row.length && row[end]!.category === category) end++;
-				const text = row.slice(i, end).map((cell) => cell.char).join("");
-				output += category ? categoryStyle(theme, category).fill(text) : text;
+				while (end < cells.length && cells[end]!.category === category) end++;
+				const text = cells.slice(i, end).map((cell) => cell.char).join("");
+				output += category ? categoryStyle(theme, category).swatch(text) : text;
 				i = end;
 			}
-			lines.push(fit(output, width));
-		}
-		if (unlabeled.length) appendWrapped(lines, unlabeled.map((source) => `${source.label} ~${formatTokens(source.tokens)}`), width);
+			return fit(output, width);
+		};
+		if (named.size) lines.push(paint(labels));
+		lines.push(paint(bar));
+		const missing = [...totals(snapshot.sources)].filter(([category]) => !complete.has(category));
+		if (missing.length) appendWrapped(lines, missing.map(([category, tokens]) =>
+			categoryStyle(theme, category).swatch(`■ ${CATEGORIES[category].label} ~${formatTokens(tokens)}`)), width);
 	} else lines.push(fit("No attributed sources", width));
 	for (const caveat of snapshot.caveats) {
 		const words = caveat.split(" ");

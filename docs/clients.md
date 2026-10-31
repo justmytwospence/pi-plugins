@@ -2,11 +2,11 @@
 
 Maintainer rules for keeping the suite's dialogs, footer and below-editor widgets readable by the phone clients that parse Pi's screen. The public overview is `site/src/content/docs/guides/clients.md`.
 
-## Startup context map
+## Startup context chart
 
-pi-cc-render's estimated-context tiles sit above the chat. They are display-only, not an input frame or send target; only the real editor below the transcript accepts a draft. Fullscreen model rows can select a session model, and MCP rows can open the native manager, but neither turns a tile into an editor. The native manager temporarily owns its controls and then returns to the chat.
+pi-cc-render's estimated-context strip sits above the chat. It is display-only, not an input frame or send target; only the real editor below the transcript accepts a draft. Fullscreen model rows can select a session model, and MCP rows can open the native manager, but neither turns the chart into an editor. The native manager temporarily owns its controls and then returns to the chat.
 
-Regression fixtures for the actual splash + editor/footer should render at 46, 120 and 180 columns, with Sidebar absent/open and the native MCP manager open/closed. Feed each frame to **both** client parsers: each must identify only the real editor, preserve normal idle composition, and expose no false input/send target in the map. Check draft/focus restoration on manager close. Do not add remote-client exceptions for the tiles or report client validation until these fixtures and `npm run check:clients` pass.
+Regression fixtures for the actual splash + editor/footer should render at 46, 120 and 180 columns, with Sidebar absent/open and the native MCP manager open/closed. Feed each frame to **both** client parsers: each must identify only the real editor, preserve normal idle composition, and expose no false input/send target in the map. Check draft/focus restoration on manager close. Do not add remote-client exceptions for the chart or report client validation until these fixtures and `npm run check:clients` pass.
 
 ## Sidebar family views
 

@@ -1181,17 +1181,19 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 		},
 		invalidate() {},
 	};
-	const mapSpacer = { render: () => [""], invalidate() {} };
-	const modelAt = titled.length ? children.indexOf(titled[0]![0]) : 0;
-	// Pi puts a Spacer before its first section. Reuse it after the map instead of showing
-	// an unexplained blank line above Models and adding our own duplicate below the map.
-	const nativeSpacer = modelAt > 0 && children[modelAt - 1]?.constructor?.name === "Spacer";
-	children.splice(nativeSpacer ? modelAt - 1 : modelAt, 0, modelComponent, modelSpacer, mapComponent, ...(nativeSpacer ? [] : [mapSpacer]));
+	// Pi puts a Spacer before its first native section. The custom splash starts with
+	// Context, so only remove that leading blank while the splash is enabled.
+	if (config.showStartupHeader && children[0]?.constructor?.name === "Spacer" && children[1] === titled[0]?.[0]) {
+		children.shift();
+	}
 	const anchor = titled.find(([, title]) => title === "Extensions") ?? titled[titled.length - 1];
 	const mcpAt = anchor ? children.indexOf(anchor[0]) + 2 : children.length;
 	const component = interactive(section);
 	const spacer = { render: () => mcpEntries.length > 0 || statuses.size > 0 ? [""] : [], invalidate() {} };
 	children.splice(mcpAt, 0, component, spacer);
+	// Native sections (including diagnostics) end in a Spacer; when MCP is last its
+	// conditional spacer serves the same purpose. Neither leaves a blank after Models.
+	children.push(mapComponent, modelSpacer, modelComponent);
 	watchMcpState(mode, component, (entries, observed) => {
 		mcpEntries = entries;
 		statuses = observed;

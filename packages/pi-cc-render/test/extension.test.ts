@@ -229,7 +229,7 @@ describe("extension factory", () => {
     } finally { disposeStartupHost(mode); }
   });
 
-  test("a session_start before resource installation still mounts a live map after Models", async () => {
+  test("a session_start before resource installation still mounts resources, then a live map, then Models", async () => {
     const { applyStartupHeader } = await import("../src/feature/shell/startup-header.ts");
     const { replaceSections, stopStartupResources } = await import("../src/feature/shell/startup-resources.ts");
     const { attachStartupHost, disposeStartupHost } = await import("../src/feature/shell/startup-state.ts");
@@ -269,19 +269,45 @@ describe("extension factory", () => {
       ui: { requestRender: () => undefined },
     };
     let header: any;
-    const native = () => ({ setExpanded() {}, state: { expanded: false }, render: () => ["[Context] native"] });
-    const lines = () => mode.loadedResourcesContainer.children.flatMap((child: any) => child.render(120)).join("\n");
+    const native = (title: string) => ({ setExpanded() {}, state: { expanded: false }, render() {
+      return [`[${title}] ${this.state.expanded ? "expanded detail" : "native"}`];
+    } });
+    let context = native("Context");
+    const diagnostics = { render: () => ["[Extension issues] native diagnostic"] };
+    const nativeChildren = () => {
+      context = native("Context"); // Pi reconstructs native sections on resume.
+      return [
+        new Spacer(1), context, new Spacer(1), native("Skills"), new Spacer(1),
+        native("Prompts"), new Spacer(1), native("Extensions"), new Spacer(1),
+        diagnostics, new Spacer(1),
+      ];
+    };
+    const renderLines = () => mode.loadedResourcesContainer.children.flatMap((child: any) => child.render(120));
+    const lines = () => renderLines().join("\n");
     try {
       // This is the failing real-world ordering: the header event fires before a resource owner exists.
       applyStartupHeader({ hasUI: true, sessionManager: manager, ui: { setHeader: (factory: any) => { header = factory; }, requestRender() {} } });
       expect(header({}, { fg: (_color: string, text: string) => text, bold: (text: string) => text }).render(120)).toEqual([]);
-      mode.loadedResourcesContainer.children = [new Spacer(1), native()];
+      mode.loadedResourcesContainer.children = nativeChildren();
       replaceSections(mode, { force: true, extensions: [] });
-      expect(mode.loadedResourcesContainer.children[0].render(120)[0]).toContain("Models 2");
+      expect(mode.loadedResourcesContainer.children[0]).toBe(context);
       const first = lines();
-      expect(first.indexOf("Models 2")).toBeLessThan(first.indexOf("Starting context"));
-      expect(first.indexOf("Starting context")).toBeLessThan(first.indexOf("Context 1"));
+      const headings = ["Context 1", "[Skills] native", "[Prompts] native", "[Extensions] native", "[Extension issues] native diagnostic", "Starting context", "Models 2"];
+      const positions = headings.map((heading) => first.indexOf(heading));
+      expect(positions.every((position, index) => position >= 0 && (!index || position > positions[index - 1]!))).toBe(true);
+      const rows = renderLines();
+      const mapAt = rows.findIndex((row: string) => row.includes("Starting context"));
+      const modelsAt = rows.findIndex((row: string) => row.includes("Models 2"));
+      expect(rows[0]).toContain("Context 1");
+      expect(rows[mapAt - 1]).toBe("");
+      expect(rows[mapAt - 2]).not.toBe("");
+      expect(rows[modelsAt - 1]).toBe("");
+      expect(rows[modelsAt - 2]).not.toBe("");
+      expect(rows.at(-1)).not.toBe("");
       expect(first).toContain("Starting context ·");
+      context.state.expanded = true;
+      expect(lines()).toContain("[Context] expanded detail");
+      context.state.expanded = false;
       expect(first).not.toContain("Sources · occupied context");
       expect(first).not.toContain("loading");
       expect(attachStartupHost(mode).contextSnapshot?.attribution.files).toBe(true);
@@ -307,10 +333,13 @@ describe("extension factory", () => {
       attachStartupHost(mode).refresh?.();
       expect(lines()).not.toContain("loading");
       // Pi clears and reconstructs the native sections on reload/resume; our insertion stays singular.
-      mode.loadedResourcesContainer.children = [new Spacer(1), native()];
+      mode.loadedResourcesContainer.children = nativeChildren();
       replaceSections(mode, { force: true, extensions: [] });
+      expect(mode.loadedResourcesContainer.children[0]).toBe(context);
       expect(lines().match(/Starting context/g)).toHaveLength(1);
-      expect(lines().indexOf("Models 2")).toBeLessThan(lines().indexOf("Starting context"));
+      expect(lines().indexOf("[Extension issues] native diagnostic")).toBeLessThan(lines().indexOf("Starting context"));
+      expect(lines().indexOf("Starting context")).toBeLessThan(lines().indexOf("Models 2"));
+      expect(renderLines().at(-1)).not.toBe("");
     } finally {
       stopStartupResources();
       disposeStartupHost(mode);
