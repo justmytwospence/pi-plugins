@@ -60,7 +60,7 @@ export async function startupSplashScreens({ theme, getEditorTheme, kb, sidebarS
   ], invalidate() {} };
   for (const width of [46, 120, 180]) {
     const lines = transcript.render(width).map(stripVTControlCharacters);
-    const headings = ['Models', 'Sources · occupied context', 'Context', 'Skills', 'Prompts', 'Extensions', 'MCP'];
+    const headings = ['Models', 'Starting context', 'Context', 'Skills', 'Prompts', 'Extensions', 'MCP'];
     const positions = headings.map(heading => lines.findIndex(line => line.includes(heading)));
     assert.ok(positions.every((position, index) => position >= 0 && (!index || position > positions[index - 1])),
       `startup listing follows Models → map → resources at width ${width}: ${JSON.stringify(positions)}`);
@@ -73,7 +73,7 @@ export async function startupSplashScreens({ theme, getEditorTheme, kb, sidebarS
   const render = (width, dock, options) => {
     const { lines } = sidebarScreen({ width, height: splashHeight, transcript, dock, footer: idleFooter, ...options });
     const text = stripVTControlCharacters(lines.join('\n'));
-    assert.match(text, /Sources · occupied context/u, 'the real splash remains above the editor or MCP manager');
+    assert.match(text, /Starting context/u, 'the real splash remains above the editor or MCP manager');
     assert.match(text, /Models/u, 'model resource rows are on screen');
     assert.match(text, /MCP/u, 'MCP resource rows are on screen');
     return { ansi: lines.join('\n'), text };

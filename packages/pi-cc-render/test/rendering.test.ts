@@ -394,7 +394,7 @@ describe("agent summary", () => {
 });
 
 describe("startup header", () => {
-  test("renders estimated occupied sources, category legend and a full-window strip at client widths", async () => {
+  test("renders an occupied-context summary and colored category bar at client widths", async () => {
     const { renderHeaderLines } = await import("../src/feature/shell/startup-header.ts");
     const snapshot = {
       stage: "starting" as const, modelLabel: "provider/model", contextWindow: 200_000,
@@ -410,10 +410,11 @@ describe("startup header", () => {
       const lines = renderHeaderLines(width, theme, snapshot);
       const output = plain(lines).join("\n");
       expect(output).toContain("Starting context");
-      expect(output).toContain("Sources · occupied context");
+      expect(output).toContain("3% of 200K (~5k)");
       expect(output).toContain("System ~3k");
       expect(output).toContain("Files ~2k");
-      expect(output).toContain("Available");
+      expect(output).not.toContain("Sources ·");
+      expect(output).not.toContain("Capacity ·");
       expect(output).not.toContain("There are many agent harnesses");
       expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
     }

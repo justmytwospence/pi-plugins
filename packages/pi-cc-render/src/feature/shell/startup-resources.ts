@@ -946,11 +946,12 @@ export function buildModelsSection(
 	current?: { provider: string; id: string },
 ): ResourceSection | undefined {
 	const key = (model: { provider: string; id: string }) => `${model.provider}/${model.id}`;
-	// Google-billed cross-vendor Antigravity routes stay in Pi's registry, but not in this Google splash group.
-	const shown = (model: ModelEntry) => model.provider !== "google" || !model.id.startsWith("antigravity-") || /^antigravity-(gemini|gemma)-/.test(model.id);
+	// Only subscription-backed Antigravity Gemini/Gemma routes belong in this Google splash group.
+	// Native google/gemini-* entries may use an API key, so never substitute them for a missing route.
+	const shown = (model: ModelEntry) => model.provider !== "google" || /^antigravity-(gemini|gemma)-/.test(model.id);
 	available = available.filter(shown);
-	favorites = favorites.filter(shown);
 	const byKey = new Map(available.map((model) => [key(model), model]));
+	favorites = favorites.filter((model) => shown(model) && byKey.has(key(model)));
 	const favoriteKeys = new Set(favorites.map(key));
 	const providers = new Map<string, ModelEntry[]>();
 	const add = (model: ModelEntry) => {
@@ -974,7 +975,10 @@ export function buildModelsSection(
 		const prefixes = list.map((model) => (favoriteKeys.has(key(model)) ? FAVORITE_MARK : undefined));
 		return {
 			label: provider,
-			items: list.map((model) => (model.thinkingLevel ? `${model.id}:${model.thinkingLevel}` : model.id)),
+			items: list.map((model) => {
+				const label = provider === "google" ? model.id.replace(/^antigravity-/, "") : model.id;
+				return model.thinkingLevel ? `${label}:${model.thinkingLevel}` : label;
+			}),
 			actions: list.map((model) => ({ kind: "model", provider, id: model.id, ...(model.thinkingLevel ? { thinkingLevel: model.thinkingLevel } : {}) })),
 			right: list.map((model) => formatContextWindow(model.contextWindow)),
 			...(marks.some(Boolean) ? { marks } : {}),
@@ -990,7 +994,7 @@ export function buildModelsSection(
 }
 
 /** The session's models as a section; undefined when there are none or pi's model API is missing. */
-export function collectModelsSection(mode: any): ResourceSection | undefined {
+export function collectModelsSection(mode: any, verifiedGoogle: ModelEntry[] = []): ResourceSection | undefined {
 	try {
 		const session = mode?.session;
 		const scopedModels = (session?.scopedModels ?? []) as Array<{ model: any; thinkingLevel?: string }>;
@@ -1000,7 +1004,7 @@ export function collectModelsSection(mode: any): ResourceSection | undefined {
 			...(entry.model.contextWindow ? { contextWindow: entry.model.contextWindow } : {}),
 			...(entry.thinkingLevel ? { thinkingLevel: entry.thinkingLevel } : {}),
 		}));
-		const available: ModelEntry[] = ([...(session?.modelRuntime?.getAvailableSnapshot?.() ?? [])] as any[]).map(
+		const available: ModelEntry[] = ([...(session?.modelRuntime?.getAvailableSnapshot?.() ?? []), ...verifiedGoogle] as any[]).map(
 			(model) => ({ provider: model.provider, id: model.id, contextWindow: model.contextWindow }),
 		);
 		const current = session?.model ? { provider: session.model.provider, id: session.model.id } : undefined;
@@ -1112,6 +1116,27 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 	let lastMcp = "";
 	let lastSnapshot = "";
 	let generation = host.generation;
+	let verifiedGoogle: ModelEntry[] = [];
+	let checkedGoogleAt = -Infinity;
+	let checkingGoogle = false;
+	let googleRuntime: any;
+	const refreshGoogle = () => {
+		const runtime = mode.session?.modelRuntime;
+		if (googleRuntime !== runtime) { googleRuntime = runtime; verifiedGoogle = []; checkedGoogleAt = -Infinity; }
+		if (checkingGoogle || !runtime || typeof runtime.getAvailable !== "function" || typeof runtime.getModels !== "function") return;
+		const registered = runtime.getModels("google")?.some((model: ModelEntry) => /^antigravity-(gemini|gemma)-/.test(model.id));
+		const inSnapshot = runtime.getAvailableSnapshot?.()?.some((model: ModelEntry) => model.provider === "google" && /^antigravity-(gemini|gemma)-/.test(model.id));
+		if (!registered || inSnapshot || Date.now() - checkedGoogleAt < 15_000) return;
+		checkingGoogle = true;
+		checkedGoogleAt = Date.now();
+		// Pi's provider-scoped availability check is authenticated and read-only; unlike a full
+		// catalog refresh it does not replace getAvailableSnapshot(). Never use the static catalog.
+		void Promise.resolve().then(() => runtime.getAvailable("google")).then((models: ModelEntry[]) => {
+			if (!mountedModes.has(mode) || mode.session?.modelRuntime !== runtime) return;
+			verifiedGoogle = models.filter((model) => model.provider === "google" && /^antigravity-(gemini|gemma)-/.test(model.id));
+			refresh();
+		}).catch(() => { verifiedGoogle = []; }).finally(() => { checkingGoogle = false; });
+	};
 	const section = () => collectMcpSection(mode, mcpEntries, statuses);
 	const theme = () => hostTheme?.() ?? PLAIN_THEME;
 	const refresh = () => {
@@ -1121,8 +1146,9 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 		const snapshot = readStartupContext(mode);
 		try {
 			const sections = collectSections(mode, options as { extensions?: any[] } | undefined, snapshot);
-			const model = collectModelsSection(mode);
+			const model = collectModelsSection(mode, verifiedGoogle);
 			if (model) sections.Models = model;
+			refreshGoogle();
 			const now = JSON.stringify(sections);
 			if (now !== lastSnapshot) {
 				lastSnapshot = now;
@@ -1157,7 +1183,10 @@ export function replaceSections(mode: any, options: unknown, pi?: ExtensionAPI):
 	};
 	const mapSpacer = { render: () => [""], invalidate() {} };
 	const modelAt = titled.length ? children.indexOf(titled[0]![0]) : 0;
-	children.splice(modelAt, 0, modelComponent, modelSpacer, mapComponent, mapSpacer);
+	// Pi puts a Spacer before its first section. Reuse it after the map instead of showing
+	// an unexplained blank line above Models and adding our own duplicate below the map.
+	const nativeSpacer = modelAt > 0 && children[modelAt - 1]?.constructor?.name === "Spacer";
+	children.splice(nativeSpacer ? modelAt - 1 : modelAt, 0, modelComponent, modelSpacer, mapComponent, ...(nativeSpacer ? [] : [mapSpacer]));
 	const anchor = titled.find(([, title]) => title === "Extensions") ?? titled[titled.length - 1];
 	const mcpAt = anchor ? children.indexOf(anchor[0]) + 2 : children.length;
 	const component = interactive(section);

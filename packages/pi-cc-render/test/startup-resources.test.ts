@@ -547,13 +547,27 @@ describe("startup resources", () => {
     ], [
       { provider: "google", id: "antigravity-claude-opus-5-5" },
       { provider: "google", id: "antigravity-gpt-oss-120b-medium" },
-      { provider: "google", id: "antigravity-gemini-4-argon" },
+      { provider: "google", id: "antigravity-gemini-4-argon", thinkingLevel: "high" },
       { provider: "google", id: "antigravity-gemma-3" },
-    ], { provider: "google", id: "antigravity-claude-opus-5-5" })!;
+      { provider: "google", id: "antigravity-gemini-4-argon-old" }, // stale favorite must not create a ghost action
+    ], { provider: "google", id: "antigravity-gemini-4-argon" })!;
     expect(google.groups.map((group) => group.label)).toEqual(["anthropic", "google"]);
-    expect(google.groups[1]!.items).toEqual(expect.arrayContaining(["antigravity-gemini-4-argon", "antigravity-gemma-3", "gemini-3.5-pro"]));
-    expect(google.groups[1]!.items.every((item) => !item.includes("claude") && !item.includes("gpt"))).toBe(true);
-    expect(google.groups[1]!.actions!.every((action) => action?.kind === "model" && action.provider === "google")).toBe(true);
+    expect(google.groups[1]!.items).toEqual(["gemini-4-argon:high", "gemma-3"]);
+    expect(google.groups[1]!.prefixes![0]).toEqual(GLYPHS.favorite);
+    expect(google.groups[1]!.marks![0]).toEqual({ ...GLYPHS.live, highlight: true });
+    expect(google.groups[1]!.actions![0]).toEqual({ kind: "model", provider: "google", id: "antigravity-gemini-4-argon", thinkingLevel: "high" });
+    expect(google.groups[1]!.actions![1]).toEqual({ kind: "model", provider: "google", id: "antigravity-gemma-3" });
+    const nativeOnly = buildModelsSection([
+      { provider: "google", id: "gemini-4-argon" }, { provider: "google", id: "gemma-4-31b-it" },
+      { provider: "anthropic", id: "claude-opus-5-5" },
+    ], [{ provider: "google", id: "antigravity-gemini-4-argon" }])!;
+    expect(nativeOnly.groups.map((group) => group.label)).toEqual(["anthropic"]);
+    expect(buildModelsSection([{ provider: "google", id: "gemini-4-argon" }])).toBeUndefined();
+    let live = [{ provider: "anthropic", id: "claude-opus-5-5" }];
+    const lateMode = { session: { scopedModels: [], modelRuntime: { getAvailableSnapshot: () => live } } };
+    expect(collectModelsSection(lateMode)!.groups.map((group) => group.label)).toEqual(["anthropic"]);
+    live = [...live, { provider: "google", id: "antigravity-gemini-4-argon" }];
+    expect(collectModelsSection(lateMode)!.groups.map((group) => group.label)).toEqual(["anthropic", "google"]);
     const mode = {
       session: {
         scopedModels: [],

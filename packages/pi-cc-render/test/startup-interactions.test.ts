@@ -201,6 +201,10 @@ describe("session-only splash action controller", () => {
     expect(mode.maybeWarnAboutAnthropicSubscriptionAuth).toHaveBeenCalled();
     expect(host.refresh).toHaveBeenCalled();
     expect(ctx.ui.getEditorText()).toBe("unsent draft");
+    // The shortened Google display label never changes the native route used by a click.
+    await controller.activate({ kind: "model", provider: "google", id: "antigravity-gemini-4-argon" });
+    expect(ctx.modelRegistry.find).toHaveBeenCalledWith("google", "antigravity-gemini-4-argon");
+    expect(pi.setModel).toHaveBeenCalledWith({ provider: "google", id: "antigravity-gemini-4-argon" });
     expect(host.actionBusy).toBe(false);
   });
 

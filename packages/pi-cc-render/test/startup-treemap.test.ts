@@ -58,7 +58,7 @@ describe("context treemap", () => {
 		expect(capacitySegments(snapshot([source("a", 1)]), 46)).toEqual([]);
 		expect(capacitySegments(snapshot([source("a", 250)], 100), 100)).toEqual([{ category: "files", width: 100 }]);
 	});
-	it("shows compact category tiles, not unlabeled child tiles, with visible boundaries", () => {
+	it("shows one compact context summary and colored categories with meaningful internal splits", () => {
 		const joined = "\u{1F469}\u200D\u{1F4BB}".repeat(6);
 		const sources: ContextSource[] = [
 			{ id: "files", category: "files", label: "Files", tokens: 6500, children: [source(joined, 4800), source("e\u0301".repeat(6), 1700)] },
@@ -67,23 +67,32 @@ describe("context treemap", () => {
 			source("tools", 6300, "tools"),
 		];
 		const lines = renderContextTreemap(snapshot(sources, 1_048_576), 120, theme("light"));
-		const tiles = lines.slice(2, 4).map(stripTerminalSequences).join("\n");
+		const tiles = lines.slice(1, 3).map(stripTerminalSequences).join("\n");
 		for (const label of ["Files", "System", "Skills", "Tools"]) expect(tiles).toContain(label);
 		expect(tiles).toContain("│");
 		expect(tiles).not.toContain(joined);
-		expect(lines[4]).toContain("Capacity · 2% used · 98% Available");
-		expect(lines.slice(2, 4)).toHaveLength(2);
+		expect(lines[0]).toContain("2% of 1M (~18k)");
+		expect(lines.join("\n")).not.toContain("Capacity ·");
+		expect(lines.join("\n")).not.toContain("Sources ·");
+		expect(lines.slice(1, 3)).toHaveLength(2);
 		expect(lines.every((line) => visibleWidth(line) <= 120)).toBe(true);
 		const medium = renderContextTreemap(snapshot(sources, 1_048_576), 100, theme("light"));
 		for (const label of ["Files", "System", "Skills", "Tools"]) {
-			expect(medium.slice(2, 4).map(stripTerminalSequences).join("\n")).toContain(label);
+			expect(medium.slice(1, 3).map(stripTerminalSequences).join("\n")).toContain(label);
 		}
 		expect(medium.every((line) => visibleWidth(line) <= 100)).toBe(true);
 		const manyMcp = [source("one", 700, "mcp"), source("two", 300, "mcp")];
-		const mcpTile = stripTerminalSequences(renderContextTreemap(snapshot(manyMcp, 200_000), 46, theme("dark"))[2]!);
+		const mcpTile = stripTerminalSequences(renderContextTreemap(snapshot(manyMcp, 200_000), 46, theme("dark"))[1]!);
 		expect(mcpTile).toContain("MCP");
 		expect(mcpTile).not.toContain("one");
 		expect(mcpTile).not.toContain("two");
+		const childSplit = { ...snapshot([{ id: "files", label: "Files", category: "files" as const, tokens: 1000, children: [source("a", 500), source("b", 480), source("too small", 20)] }], 200_000) };
+		const split = renderContextTreemap(childSplit, 60, theme("light"))[2]!;
+		expect(stripTerminalSequences(split).match(/│/g)).toHaveLength(1);
+		expect(split.indexOf("│")).toBeGreaterThan(split.indexOf("\x1b[48;2"));
+		expect(split.indexOf("│")).toBeLessThan(split.lastIndexOf("\x1b[0m"));
+		const tiny = renderContextTreemap(snapshot([{ id: "files", label: "Files", category: "files", tokens: 1000, children: [source("a", 990), source("tiny one", 5), source("tiny two", 5)] }], 200_000), 60, theme("light"));
+		expect(stripTerminalSequences(tiny[2]!)).not.toContain("│");
 		const narrow = renderContextTreemap(snapshot(sources, 200_000), 24, theme("light"));
 		expect(narrow.join("\n")).toContain("Skills ~1.9k");
 		expect(narrow.every((line) => visibleWidth(line) <= 24)).toBe(true);
@@ -104,8 +113,7 @@ describe("context treemap", () => {
 			expect(lines[0]).toContain("250%");
 			expect(lines.filter((line) => visibleWidth(line) > width).map((line) => ({ width, length: visibleWidth(line), line }))).toEqual([]);
 			expect(lines.join("\n").includes("over by")).toBe(false); // Caveats are supplied by collector, not inferred during rendering.
-			if (width >= 26) expect(lines.join("\n")).toContain("Sources · occupied context");
-			else if (width >= 24) expect(lines[1]).toContain("Sources · occupied");
+			if (width >= 24) expect(lines.join("\n")).not.toContain("Sources · occupied context");
 		}
 		for (let width = 1; width <= 200; width++) {
 			const lines = renderContextTreemap(snapshot(sources, 200), width, theme("dark"));

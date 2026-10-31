@@ -1,5 +1,4 @@
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { VERSION } from "@earendil-works/pi-coding-agent";
 import { formatContextWindow, formatTokens } from "./startup-resources.ts";
 import { CATEGORIES, categoryStyle, type ContextCategory, type ContextTheme } from "./startup-style.ts";
 import type { ContextSource, StartupContextSnapshot } from "./startup-context.ts";
@@ -89,12 +88,32 @@ export function capacitySegments(snapshot: StartupContextSnapshot, width: number
 }
 
 function categoryTiles(sources: ContextSource[], width: number, height: number): ContextRectangle[] {
-	// Several MCP servers or source leaves can share a category. One visible tile per category
-	// keeps the map legible instead of painting many indistinguishable, unlabeled child tiles.
 	const categories: ContextSource[] = [...totals(sources)].map(([category, tokens]) => ({
 		id: category, category, label: CATEGORIES[category].label, tokens,
 	}));
 	return layoutContextTreemap(categories, width, height);
+}
+
+/** Mark only readable child-sized regions; collect tiny leaves into one unmarked remainder. */
+function itemBreaks(sources: ContextSource[], tile: ContextRectangle): number[] {
+	const leaves = positive(sources.filter((source) => source.category === tile.source.category)
+		.flatMap((source) => source.children?.length ? source.children : [source]));
+	if (leaves.length < 2 || tile.width < 9) return [];
+	const minimum = tile.source.tokens * 4 / tile.width;
+	const large = leaves.filter((leaf) => leaf.tokens >= minimum);
+	const other = leaves.filter((leaf) => leaf.tokens < minimum).reduce((sum, leaf) => sum + leaf.tokens, 0);
+	const weights = [...large.map((leaf) => leaf.tokens), ...(other >= minimum ? [other] : [])];
+	let consumed = 0;
+	let previous = 0;
+	const breaks: number[] = [];
+	for (const weight of weights.slice(0, -1)) {
+		consumed += weight;
+		const boundary = Math.round(tile.width * consumed / tile.source.tokens);
+		if (boundary - previous < 4 || tile.width - boundary < 4) continue;
+		breaks.push(tile.x + boundary);
+		previous = boundary;
+	}
+	return breaks;
 }
 
 /** Resource map rendering only; collection and cache updates happen in the owner tick, never here. */
@@ -105,41 +124,33 @@ export function renderContextTreemap(snapshot: StartupContextSnapshot, width: nu
 	if (snapshot.stage === "initializing") return [fit("Starting context · loading…", width)];
 	const window = snapshot.contextWindow;
 	const percent = window ? Math.round(snapshot.usedEstimate * 100 / window) : undefined;
-	const title = `${snapshot.stage === "starting" ? "Starting context" : "Context"} · ~${formatTokens(snapshot.usedEstimate)} / ${window ? formatContextWindow(window) : "window unknown"}${percent === undefined ? "" : ` · ${percent}%`}`;
-	const suffix = ` · ${snapshot.modelLabel} · pi ${VERSION}`;
+	const summary = `${snapshot.stage === "starting" ? "Starting context" : "Context"} · ${percent === undefined ? `~${formatTokens(snapshot.usedEstimate)} · window unknown` : `${percent}% of ${formatContextWindow(window)} (~${formatTokens(snapshot.usedEstimate)})`}`;
+	const title = `${summary} · ${snapshot.modelLabel}`;
 	const compact = `${snapshot.stage === "starting" ? "Start" : "Context"} · ~${formatTokens(snapshot.usedEstimate)}/${window ? formatContextWindow(window) : "?"}${percent === undefined ? "" : ` · ${percent}%`}`;
-	lines.push(fit(width < 24 ? `~${formatTokens(snapshot.usedEstimate)}${percent === undefined ? " · window unknown" : ` · ${percent}%`}` : visibleWidth(title + suffix) <= width ? title + suffix : visibleWidth(title) <= width ? title : compact, width));
+	lines.push(fit(width < 24 ? `~${formatTokens(snapshot.usedEstimate)}${percent === undefined ? " · window unknown" : ` · ${percent}%`}` : visibleWidth(title) <= width ? title : visibleWidth(summary) <= width ? summary : compact, width));
 	if (snapshot.stage === "unavailable") lines.push(fit("Context estimate unavailable or partial", width));
 	if (width < 24) {
 		appendWrapped(lines, [...totals(snapshot.sources)].map(([category, tokens]) => `${CATEGORIES[category].label} ~${formatTokens(tokens)}`), width);
-	} else {
-		lines.push(fit("Sources · occupied context", width));
+	} else if (snapshot.sources.length) {
 		const height = 2;
 		const cells: Array<Array<{ char: string; category?: ContextCategory }>> = Array.from({ length: height }, () => Array.from({ length: width }, () => ({ char: " " })));
+		const unlabeled: ContextSource[] = [];
 		for (const rect of categoryTiles(snapshot.sources, width, height)) {
 			for (let y = rect.y; y < rect.y + rect.height; y++) for (let x = rect.x; x < rect.x + rect.width; x++) cells[y]![x] = { char: " ", category: rect.source.category };
-			const labels = rect.height > 1
-				? [rect.source.label, `~${formatTokens(rect.source.tokens)}`]
-				: [`${rect.source.label} ~${formatTokens(rect.source.tokens)}`];
-			for (const [row, name] of labels.entries()) {
-				if (rect.width < visibleWidth(name) + 2) continue;
-				let col = rect.x + 1;
-				let previousCell: number | undefined;
-				for (const { segment } of graphemes.segment(name)) {
-					const cellWidth = visibleWidth(segment);
-					if (cellWidth === 0) {
-						if (previousCell !== undefined) cells[rect.y + row]![previousCell]!.char += segment;
-						continue;
-					}
-					if (col + cellWidth > rect.x + rect.width - 1 || col + cellWidth > width) break;
-					cells[rect.y + row]![col] = { char: segment, category: rect.source.category };
-					previousCell = col;
-					for (let extra = 1; extra < cellWidth; extra++) cells[rect.y + row]![col + extra] = { char: "", category: rect.source.category };
-					col += cellWidth;
-				}
+			const full = `${rect.source.label} ~${formatTokens(rect.source.tokens)}`;
+			const name = rect.width >= visibleWidth(full) + 2 ? full : rect.width >= visibleWidth(rect.source.label) + 2 ? rect.source.label : "";
+			if (!name) unlabeled.push(rect.source);
+			let col = rect.x + 1;
+			for (const { segment } of graphemes.segment(name)) {
+				const cellWidth = visibleWidth(segment);
+				if (!cellWidth || col + cellWidth > rect.x + rect.width - 1 || col + cellWidth > width) break;
+				cells[rect.y]![col] = { char: segment, category: rect.source.category };
+				for (let extra = 1; extra < cellWidth; extra++) cells[rect.y]![col + extra] = { char: "", category: rect.source.category };
+				col += cellWidth;
 			}
-			if (rect.x + rect.width < width && rect.width > 1) for (let y = rect.y; y < rect.y + rect.height; y++) {
-				cells[y]![rect.x + rect.width - 1] = { char: "│" };
+			if (rect.height > 1) for (const x of itemBreaks(snapshot.sources, rect)) {
+				// The divider stays inside the category's colored fill, never exposing the default background.
+				cells[rect.y + 1]![x] = { char: "│", category: rect.source.category };
 			}
 		}
 		for (const row of cells) {
@@ -154,21 +165,8 @@ export function renderContextTreemap(snapshot: StartupContextSnapshot, width: nu
 			}
 			lines.push(fit(output, width));
 		}
-	}
-	if (window && width >= 24) {
-		const usedPercent = Math.round(snapshot.usedEstimate * 100 / window);
-		const label = width >= 42
-			? `Capacity · ${usedPercent}% used · ${Math.max(0, 100 - usedPercent)}% Available`
-			: `Capacity · ${usedPercent}% used`;
-		const barWidth = Math.min(24, Math.max(0, width - visibleWidth(label) - 2));
-		const strip = capacitySegments(snapshot, barWidth).map((segment) => segment.category
-			? categoryStyle(theme, segment.category).swatch("█".repeat(segment.width))
-			: theme.fg("dim", "░".repeat(segment.width))).join("");
-		lines.push(fit(`${label}${barWidth ? `  ${strip}` : ""}`, width));
-	}
-	const key = [...totals(snapshot.sources)].map(([category, tokens]) => categoryStyle(theme, category).swatch(`■ ${CATEGORIES[category].label} ~${formatTokens(tokens)}`));
-	// Use visibleWidth so ANSI styling never changes wrap geometry.
-	appendWrapped(lines, key, width);
+		if (unlabeled.length) appendWrapped(lines, unlabeled.map((source) => `${source.label} ~${formatTokens(source.tokens)}`), width);
+	} else lines.push(fit("No attributed sources", width));
 	for (const caveat of snapshot.caveats) {
 		const words = caveat.split(" ");
 		let row = "";

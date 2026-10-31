@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DefaultResourceLoader, InteractiveMode, SettingsManager } from "@earendil-works/pi-coding-agent";
-import { Markdown } from "@earendil-works/pi-tui";
+import { Markdown, Spacer } from "@earendil-works/pi-tui";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -78,48 +78,90 @@ describe("extension factory", () => {
     expect((InteractiveMode as any).prototype.init).toBe(second.installed);
   });
 
-  test("early paint suppresses the native banner, while disabling the setting leaves it intact", async () => {
+  test("early paint hides only native header spacers, restores them on disable/shutdown, and reclaims the wrapper on reload", async () => {
     const { config } = await import("../src/config/config.ts");
-    const { installEarlyStartupHeader } = await import("../src/feature/shell/startup-header.ts");
-    const { disposeStartupHost } = await import("../src/feature/shell/startup-state.ts");
-    const { EARLY_STARTUP_HEADER_PATCH, patchRegistry } = await import("../src/utils/patch-keys.ts");
+    const { applyStartupHeader, clearStartupHeader, default: startupHeader, installEarlyStartupHeader } = await import("../src/feature/shell/startup-header.ts");
+    const { EARLY_STARTUP_HEADER_PATCH, EARLY_STARTUP_HEADER_SWAP_KEY, patchRegistry } = await import("../src/utils/patch-keys.ts");
     const prototype = (InteractiveMode as any).prototype;
     const savedInit = prototype.init;
     const savedPatch = patchRegistry.get(EARLY_STARTUP_HEADER_PATCH);
     const enabled = config.showStartupHeader;
     const makeMode = (id: string) => {
       const children: any[] = [];
-      const headers: Array<any> = [];
+      const headers: any[] = [];
+      let additions = 0;
       const mode: any = {
         sessionManager: { getSessionId: () => id },
         builtInHeader: { render: () => ["native"] },
-        headerContainer: { children, addChild(child: any) { children.push(child); } },
-        setExtensionHeader(factory: any) { headers.push(factory({}, { fg: (_c: string, text: string) => text })); },
-        ui: { requestRender() {} },
+        headerContainer: { children, addChild(child: any) { additions++; children.push(child); } },
+        setExtensionHeader(factory: any) {
+          const current = this.customHeader ?? this.builtInHeader;
+          const index = children.indexOf(current);
+          this.customHeader = factory?.({}, { fg: (_c: string, text: string) => text });
+          headers.push(this.customHeader);
+          if (index >= 0) children[index] = this.customHeader ?? this.builtInHeader;
+        },
       };
-      return { mode, children, headers };
+      const ctx = { hasUI: true, sessionManager: mode.sessionManager, ui: { setHeader: (factory: any) => mode.setExtensionHeader(factory) } };
+      const headerRows = () => children.slice(0, 3).flatMap((child: any) => child.render(46));
+      return { mode, children, headers, ctx, headerRows, additions: () => additions };
     };
     try {
-      prototype.init = async function (this: any) { this.headerContainer.addChild(this.builtInHeader); };
+      prototype.init = async function (this: any) {
+        this.headerContainer.addChild(new Spacer(1));
+        this.headerContainer.addChild(this.builtInHeader);
+        this.headerContainer.addChild(new Spacer(1));
+      };
       patchRegistry.delete(EARLY_STARTUP_HEADER_PATCH);
+      config.showStartupHeader = true;
       installEarlyStartupHeader();
       const first = makeMode("early-1");
       await prototype.init.call(first.mode);
+      // This is before session_start: neither of Pi's adjacent spacer rows may paint.
       expect(first.headers).toHaveLength(1);
       expect(first.headers[0].render(46)).toEqual([]);
+      expect(first.headerRows()).toEqual([]);
+      const unrelated = new Spacer(1);
+      first.mode.headerContainer.addChild(unrelated);
+      expect(unrelated.render(46)).toEqual([""]);
+      const firstSwap = first.mode.headerContainer[EARLY_STARTUP_HEADER_SWAP_KEY];
       installEarlyStartupHeader();
-      const second = makeMode("early-2");
-      await prototype.init.call(second.mode);
-      expect(second.headers).toHaveLength(1);
-      expect(second.headers[0].render(46)).toEqual([]);
+      const secondSwap = first.mode.headerContainer[EARLY_STARTUP_HEADER_SWAP_KEY];
+      expect(secondSwap.installed).not.toBe(firstSwap.installed);
+      expect(secondSwap.original).toBe(firstSwap.original);
+      expect(secondSwap.spacing).toBe(firstSwap.spacing);
+      expect(first.headerRows()).toEqual([]);
+      first.mode.headerContainer.addChild(new Spacer(1));
+      expect(first.additions()).toBe(5); // no stacked addChild calls or additional header rows
+      expect(first.headers).toHaveLength(1);
+      expect(first.headerRows()).toEqual([]);
+      expect(first.children[4].render(46)).toEqual([""]);
+
       config.showStartupHeader = false;
+      installEarlyStartupHeader(); // reload with the splash disabled restores the original counts
+      expect(first.children[0].render(46)).toEqual([""]);
+      expect(first.children[2].render(46)).toEqual([""]);
+      expect(first.mode.headerContainer[EARLY_STARTUP_HEADER_SWAP_KEY].original).toBe(firstSwap.original);
+      clearStartupHeader(first.ctx);
+      expect(first.headerRows()).toEqual(["", "native", ""]);
+      expect(unrelated.render(46)).toEqual([""]);
       const native = makeMode("early-native");
       await prototype.init.call(native.mode);
-      expect(native.children).toEqual([native.mode.builtInHeader]);
+      expect(native.headerRows()).toEqual(["", "native", ""]);
       expect(native.headers).toHaveLength(0);
-      disposeStartupHost(first.mode);
-      disposeStartupHost(second.mode);
+      config.showStartupHeader = true;
+      applyStartupHeader(native.ctx);
+      expect(native.headerRows()).toEqual([]);
+      expect(first.headerRows()).toEqual(["", "native", ""]);
+
+      const handlers = new Map<string, (event: any, ctx: any) => Promise<void>>();
+      startupHeader({ on: (name: string, handler: any) => handlers.set(name, handler) } as any);
+      await handlers.get("session_shutdown")!({}, native.ctx);
+      expect(native.headerRows()).toEqual(["", "native", ""]);
+      expect(first.headerRows()).toEqual(["", "native", ""]);
     } finally {
+      // Leave no mutated spacer or wrapper ownership behind for other tests.
+      clearStartupHeader({});
       config.showStartupHeader = enabled;
       prototype.init = savedInit;
       if (savedPatch) patchRegistry.install(EARLY_STARTUP_HEADER_PATCH, savedPatch);
@@ -233,26 +275,41 @@ describe("extension factory", () => {
       // This is the failing real-world ordering: the header event fires before a resource owner exists.
       applyStartupHeader({ hasUI: true, sessionManager: manager, ui: { setHeader: (factory: any) => { header = factory; }, requestRender() {} } });
       expect(header({}, { fg: (_color: string, text: string) => text, bold: (text: string) => text }).render(120)).toEqual([]);
-      mode.loadedResourcesContainer.children = [native()];
+      mode.loadedResourcesContainer.children = [new Spacer(1), native()];
       replaceSections(mode, { force: true, extensions: [] });
+      expect(mode.loadedResourcesContainer.children[0].render(120)[0]).toContain("Models 2");
       const first = lines();
       expect(first.indexOf("Models 2")).toBeLessThan(first.indexOf("Starting context"));
       expect(first.indexOf("Starting context")).toBeLessThan(first.indexOf("Context 1"));
-      expect(first).toContain("Sources · occupied context");
+      expect(first).toContain("Starting context ·");
+      expect(first).not.toContain("Sources · occupied context");
       expect(first).not.toContain("loading");
       expect(attachStartupHost(mode).contextSnapshot?.attribution.files).toBe(true);
       expect(attachStartupHost(mode).resourceSections?.Context?.tokens).toBeGreaterThan(0);
+      // An OAuth provider can be registered after Pi's initial available snapshot was taken.
+      // A read-only, provider-scoped availability check must populate the live Google group.
+      const google = { provider: "google", id: "antigravity-gemini-4-argon", contextWindow: 1_048_576 };
+      session.modelRuntime.getModels = () => [google];
+      session.modelRuntime.getAvailable = vi.fn(async () => [google]);
+      attachStartupHost(mode).refresh?.();
+      await vi.waitFor(() => expect(lines()).toContain("google 1"));
+      expect(session.modelRuntime.getAvailable).toHaveBeenCalledWith("google");
+      expect(lines()).toContain("gemini-4-argon");
+      expect(lines()).not.toContain("antigravity-gemini-4-argon");
+      session.modelRuntime.getAvailable.mockResolvedValueOnce([]); // OAuth access disappears
+      await vi.advanceTimersByTimeAsync(16_000);
+      expect(lines()).not.toContain("google 1");
       session.model = models[1];
       attachStartupHost(mode).refresh?.();
-      expect(lines()).toContain("/ 1M");
+      expect(lines()).toContain("of 1M");
       expect(lines()).toContain("gpt-6.1-sol ●");
       id = "saved-session";
       attachStartupHost(mode).refresh?.();
       expect(lines()).not.toContain("loading");
       // Pi clears and reconstructs the native sections on reload/resume; our insertion stays singular.
-      mode.loadedResourcesContainer.children = [native()];
+      mode.loadedResourcesContainer.children = [new Spacer(1), native()];
       replaceSections(mode, { force: true, extensions: [] });
-      expect(lines().match(/Sources · occupied context/g)).toHaveLength(1);
+      expect(lines().match(/Starting context/g)).toHaveLength(1);
       expect(lines().indexOf("Models 2")).toBeLessThan(lines().indexOf("Starting context"));
     } finally {
       stopStartupResources();
