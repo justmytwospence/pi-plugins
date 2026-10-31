@@ -38,6 +38,7 @@ import { type ModelSpec, type ModelSpecThinkingLevel, sameModel } from "./implem
 import { PlanMarkdown } from "./mermaid-art.js";
 import { newPlanFile, planSlug, plansDirectoryPath, planTextTitle, readPlan, savePlanSnapshot } from "./plan-file.js";
 import { expandHome } from "./plan-hook.js";
+import { promptPlanName } from "./plan-name-input.js";
 import { PlanReviewViewport } from "./plan-review-viewport.js";
 import { type ReviewStatus, reviewBody, reviewTitle } from "./review-card.js";
 import { findBlockedCommandSegment, readCommand, type SafeSubcommands } from "./tool-policy.js";
@@ -541,8 +542,13 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
               return text("Plan review expired because the workflow or branch changed. Approve the plan again.");
             const title = planSlug(planTextTitle(plan));
             const suggestion = title === "plan" || title === "the-plan" ? "" : title;
-            ctx.ui.notify(`Save in ${plansDir()}; .md is added automatically.`, "info");
-            const name = await ctx.ui.input("Save plan as", suggestion);
+            const restoreScrollKeys = reviewViewport.suspendScrollKeys();
+            let name: string | undefined;
+            try {
+              name = await promptPlanName(ctx, { suggestion, directory: plansDir() }, signal);
+            } finally {
+              restoreScrollKeys();
+            }
             if (signal?.aborted || !current())
               return text("Plan review expired because the workflow or branch changed. Approve the plan again.");
             if (name === undefined) continue;

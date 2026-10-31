@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -24,6 +24,7 @@ import { InteractiveMode } from "../node_modules/@earendil-works/pi-coding-agent
 import { createInteractiveTuiReference } from "../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/tui-renderer.js";
 import { renderLayoutFrame } from "../node_modules/@earendil-works/pi-tui/dist/layout.js";
 import { EXIT_TOOL, registerInlinePlanMode } from "../src/inline-plan.js";
+import { PlanNameInput } from "../src/plan-name-input.js";
 import { PlanReviewViewport } from "../src/plan-review-viewport.js";
 import { createMockContext, createMockPi } from "./shared/support.js";
 
@@ -170,11 +171,11 @@ function setup(plan: string, scrollbar: "always" | "hidden" = "always", withTodo
     return frame();
   };
   frame();
-  const run = (params: { changes?: string[] } = {}) =>
+  const run = (params: { changes?: string[] } = {}, signal?: AbortSignal) =>
     definition.execute(
       "review-id",
       params,
-      undefined,
+      signal,
       (update) => {
         card.updateResult({ ...update, isError: false }, true);
       },
@@ -343,6 +344,102 @@ test("ctrl+d and ctrl+u scroll the plan half a page while you decide, and only t
   h.choose();
   await result;
   expect(h.keyHandlers.size).toBe(0); // after the review, ctrl+u/ctrl+d are the editor's again
+});
+
+test.each(["\x0b", "\x15"])("filename editing receives %j instead of review scrolling", async (clear) => {
+  const h = setup(longPlan);
+  const result = h.run();
+  await h.settle();
+  h.choose(3, "Save for later");
+  await h.settle();
+  expect(h.picker()).toBeInstanceOf(PlanNameInput);
+  expect(h.picker().render(120).map(stripTerminalSequences).join("\n")).toContain("beginning-of-plan");
+  const position = h.scroll.scrollTop;
+  const send = (data: string) => {
+    expect(h.press(data)).toBe(false);
+    h.picker().handleInput?.(data);
+  };
+  if (clear === "\x0b") send("\x01"); // Ctrl+A, then Ctrl+K deletes the suggestion to the right.
+  send(clear); // Ctrl+U deletes it to the left from the initial end position.
+  expect(h.picker().render(120).map(stripTerminalSequences).join("\n")).not.toContain("beginning-of-plan");
+  send("replacement");
+  await h.settle();
+  expect(h.scroll.scrollTop).toBe(position);
+  send("\r");
+  const saved = await result;
+  const details = saved.details as { savedFile: string; outcome: string };
+  expect(details.outcome).toBe("saved");
+  expect(details.savedFile).toBe(join(h.planFile, "..", "replacement.md"));
+  expect(readFileSync(details.savedFile, "utf8").trim()).toBe(longPlan);
+  expect(existsSync(join(h.planFile, "..", "beginning-of-plan.md"))).toBe(false);
+  expect(h.keyHandlers.size).toBe(0);
+});
+
+test.each(["escape", "ctrl+c", "abort"])("filename %s releases suspended review keys", async (ending) => {
+  const h = setup(longPlan);
+  const controller = new AbortController();
+  const result = h.run({}, controller.signal);
+  await h.settle();
+  h.choose(3, "Save for later");
+  await h.settle();
+  expect(h.picker()).toBeInstanceOf(PlanNameInput);
+  const position = h.scroll.scrollTop;
+  expect(h.press("\x15")).toBe(false);
+  expect(h.press("\x04")).toBe(false);
+  expect(h.scroll.scrollTop).toBe(position);
+  if (ending === "abort") controller.abort();
+  else h.picker().handleInput?.(ending === "escape" ? "\x1b" : "\x03");
+  await h.settle();
+  if (ending !== "abort") {
+    expect(h.picker()).not.toBeInstanceOf(PlanNameInput);
+    expect(h.press("\x04")).toBe(true);
+    expect(h.scroll.scrollTop).toBe(position + Math.floor(h.scroll.viewportHeight / 2));
+    expect(h.press("\x15")).toBe(true);
+    expect(h.scroll.scrollTop).toBe(position);
+    h.picker().handleInput?.("\x1b");
+  }
+  await result;
+  expect(h.keyHandlers.size).toBe(0);
+  expect(h.widgets().size).toBe(0);
+  expect(h.scroll.isFollowingEnd).toBe(true);
+  // A subsequent review must not inherit the aborted filename prompt's suspension.
+  if (ending === "abort") {
+    const next = h.run();
+    await h.settle();
+    const start = h.scroll.scrollTop;
+    expect(h.press("\x04")).toBe(true);
+    expect(h.scroll.scrollTop).toBeGreaterThan(start);
+    expect(h.press("\x15")).toBe(true);
+    expect(h.scroll.scrollTop).toBe(start);
+    h.choose();
+    await next;
+  }
+});
+
+test("a stale branch review's release cannot resume a newer review's filename prompt", async () => {
+  const h = setup(longPlan);
+  const viewport = new PlanReviewViewport();
+  viewport.begin(h.ctx, "old-branch-review");
+  const releaseOld = viewport.suspendScrollKeys();
+  viewport.begin(h.ctx, "review-id"); // Branch replacement ends the old review first.
+  viewport.wrap("review-id", new Text(longPlan, 0, 0)).render(64);
+  await h.settle();
+  const releaseNew = viewport.suspendScrollKeys();
+  h.scroll.scrollTo(10, { disableFollow: true });
+  const start = h.scroll.scrollTop;
+  releaseOld();
+  releaseOld(); // Releases are idempotent, including after branch replacement.
+  expect(h.press("\x04")).toBe(false);
+  expect(h.press("\x15")).toBe(false);
+  expect(h.scroll.scrollTop).toBe(start);
+  releaseNew();
+  releaseOld();
+  expect(h.press("\x04")).toBe(true);
+  expect(h.scroll.scrollTop).toBeGreaterThan(start);
+  expect(h.press("\x15")).toBe(true);
+  expect(h.scroll.scrollTop).toBe(start);
+  viewport.end();
+  expect(h.keyHandlers.size).toBe(0);
 });
 
 test("manual scrolling is not overwritten by rerenders or resizing away from the start", async () => {

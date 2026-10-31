@@ -26,7 +26,6 @@ const { TuiBase } = await import(new URL('./tui.js', import.meta.resolve('@earen
 const sdkUrl = import.meta.resolve('@earendil-works/pi-coding-agent');
 const { KeybindingsManager } = await import(new URL('./core/keybindings.js', sdkUrl));
 const { ExtensionSelectorComponent } = await import(new URL('./modes/interactive/components/extension-selector.js', sdkUrl));
-const { ExtensionInputComponent } = await import(new URL('./modes/interactive/components/extension-input.js', sdkUrl));
 const themeModule = await import(new URL('./modes/interactive/theme/theme.js', sdkUrl));
 const jiti = createJiti(import.meta.url);
 const { QuestionDialog } = await jiti.import('../packages/pi-ask-user-question/src/dialog.ts');
@@ -42,7 +41,8 @@ const { sidebarScreen } = await import('./remote-clients/sidebar.mjs');
 const { TerminalPanel } = await jiti.import('../packages/pi-interactive-shell/src/panel.ts');
 const { HistoryPicker } = await jiti.import('../packages/pi-history-search/src/picker.ts');
 const { default: historySearch } = await jiti.import('../packages/pi-history-search/src/index.ts');
-const { pickApproval, createApprovalState, handoffLabel, HERE: IMPLEMENT_HERE, COMPACT_HERE, EDIT, SAVE, KEEP } = await jiti.import('../packages/pi-plan-mode/src/approval-picker.ts');
+const { ApprovalPicker, pickApproval, createApprovalState, handoffLabel, HERE: IMPLEMENT_HERE, COMPACT_HERE, EDIT, SAVE, KEEP } = await jiti.import('../packages/pi-plan-mode/src/approval-picker.ts');
+const { PlanNameInput } = await jiti.import('../packages/pi-plan-mode/src/plan-name-input.ts');
 const { registerExec, FINISH_MESSAGE_TYPE } = await jiti.import('../packages/pi-plan-mode/src/exec.ts');
 const { createNegotiation } = await jiti.import('../packages/pi-plan-mode/src/negotiation.ts');
 const { renderFooter, absorbStatuses } = await jiti.import('../packages/pi-status-footer/src/index.ts');
@@ -212,6 +212,18 @@ async function selectorLines(width, count, changed) {
   void pickApproval(ctx, { planning: { provider: 'anthropic', modelId: 'claude-fable-5-5', thinkingLevel: 'high' }, targets: PLAN_TARGETS.slice(0, count) }, createApprovalState());
   await new Promise(resolve => setTimeout(resolve, 0));
   return lines;
+}
+
+function planNameLines(width, edited = false) {
+  const component = new PlanNameInput({ suggestion: 'client-plan', directory: '/tmp/plans' }, theme, kb, () => {}, () => {});
+  try {
+    if (edited) component.handleInput('-revised');
+    const lines = component.render(width);
+    assert.ok(lines.map(stripVTControlCharacters).join('\n').includes(edited ? 'client-plan-revised' : 'client-plan'), 'filename must be editable text');
+    return lines;
+  } finally {
+    component.dispose();
+  }
 }
 
 // pi-cache-guard's cold-cache question as its input handler builds it, with model offers from a
@@ -467,12 +479,12 @@ const DIALOGS = [
     herdr: { options: 5 + count, multi: false, labels: planLabels(count) },
     collie: { kind: 'prompt-select', options: 6 + count, labels: planLabels(count), wraps: planLabels(count) },
   }))),
-  {
-    name: 'plan save filename', question: 'Save plan as',
-    lines: width => new ExtensionInputComponent('Save plan as', 'client-plan', () => {}, () => {}).render(width),
+  ...[false, true].map(edited => ({
+    name: `plan save filename (${edited ? 'edited' : 'prefilled'})`, question: 'Save plan as',
+    lines: width => planNameLines(width, edited),
     herdr: { options: 1, multi: false, labels: ['Type your answer'] },
     collie: { kind: 'unread-dialog' },
-  },
+  })),
   { name: 'cache-guard cold cache', lines: (w) => coldCacheLines(w, plainMenu), herdr: { options: plainMenu.length, multi: false, labels: plainMenu }, collie: { kind: 'prompt-select', options: plainMenu.length + 1, wraps: plainMenu } },
   { name: 'cache-guard cold cache (model offers)', lines: coldCacheLines, herdr: { options: coldMenu.length, multi: false, labels: coldMenu }, collie: { kind: 'prompt-select', options: coldMenu.length + 1, wraps: coldMenu } },
 ];
@@ -486,7 +498,9 @@ for (const width of [46, 120]) {
   for (const dialog of DIALOGS) {
     const lines = await dialog.lines(width);
     for (const [under, rows] of Object.entries(UNDERS)) {
-      screens.push({ name: dialog.name, width, under, ansi: [...lines, ...rows(width)].join('\n') });
+      screens.push({ name: dialog.name, width, under, ansi: [...lines, ...rows(width)].join('\n'),
+        ...(width === 46 && under === 'footer' && dialog.name === 'plan approval (0 targets)' ? { answer: { option_index: 3 } } : {}),
+        ...(width === 46 && under === 'footer' && dialog.name === 'plan save filename (prefilled)' ? { answer: { custom_text: 'phone-renamed' } } : {}) });
     }
   }
 }
@@ -785,6 +799,33 @@ if (herdrDir && existsSync(path.join(herdrDir, 'server/prompt.ts'))) results.her
 else console.log('SKIP herdr-web-ui: no installed bundle (HERDR_WEB_UI_DIR)');
 if (existsSync(path.join(collieDir, 'web/src/lib/frame-declarations.ts'))) results.collie = probe('Collie', 'collie.ts', path.join(collieDir, 'web'), [collieDir, framesFile]);
 else console.log('SKIP Collie: no checkout with frames.toml support (COLLIE_DIR)');
+
+if (results.herdr) {
+  for (const [index, screen] of screens.entries()) {
+    if (!screen.answer) continue;
+    const steps = results.herdr[index]?.answerSteps;
+    assert.ok(Array.isArray(steps), 'Client navigation must come from the parsed card');
+    const selected = [];
+    const component = screen.answer.option_index !== undefined
+      ? new ApprovalPicker({ targets: [] }, createApprovalState(), { efforts: () => [] }, theme, kb, () => {}, choice => selected.push(choice))
+      : new PlanNameInput({ suggestion: 'client-plan', directory: '/tmp/plans' }, theme, kb, () => {}, value => selected.push(value));
+    for (const step of steps) {
+      if ('text' in step) {
+        assert.equal(typeof step.text, 'string');
+        component.handleInput(step.text);
+        continue;
+      }
+      assert.ok(Array.isArray(step.keys) && Object.keys(step).length === 1, `Unsupported client navigation step: ${JSON.stringify(step)}`);
+      for (const name of step.keys) {
+        const key = { down: '\x1b[B', up: '\x1b[A', enter: '\r', 'ctrl+k': '\x0b', 'ctrl+u': '\x15' }[name];
+        assert.ok(key, `Unsupported client navigation key: ${name}`);
+        component.handleInput(key);
+      }
+    }
+    assert.deepEqual(selected, [screen.answer.option_index !== undefined ? { choice: { kind: 'save' } } : 'phone-renamed'], 'client navigation must submit exactly the intended Save action or replacement name');
+    component.dispose();
+  }
+}
 
 let failures = 0;
 screens.forEach((screen, i) => {

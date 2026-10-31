@@ -23,7 +23,8 @@ import {
   registerInlinePlanMode,
 } from "../src/inline-plan.js";
 import * as planFiles from "../src/plan-file.js";
-import { createMockContext, createMockPi } from "./shared/support.js";
+import { PlanNameInput } from "../src/plan-name-input.js";
+import { createCustomSelectorHarness, createMockContext, createMockPi } from "./shared/support.js";
 
 const opus = { provider: "anthropic", id: "claude-opus-5-5", name: "Claude Opus 5.5", reasoning: true };
 const sonnet = { provider: "anthropic", id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", reasoning: true };
@@ -155,7 +156,13 @@ async function setup(
 for (const gate of [false, true]) {
   for (const approval of ["auto", "bypassPermissions"]) {
     test(`Save for later leaves planning without implementation (${gate ? "gate" : "standalone"}, ${approval})`, async () => {
-      const h = await setup({ gate, approval, models: true, select: ["Save for later"], input: "My custom name.md" });
+      const h = await setup({
+        gate,
+        approval,
+        models: true,
+        select: ["Save for later", "Enter different name"],
+        input: "My custom name.md",
+      });
       const ctx = h.context.ctx as ExtensionContext;
       const permissions: unknown[] = [];
       h.mock.eventBus.on("permission-mode:set", (data) => permissions.push(data));
@@ -166,10 +173,16 @@ for (const gate of [false, true]) {
       writeFileSync(draft, `${plan}\n`);
       const input = vi.fn<ExtensionContext["ui"]["input"]>().mockResolvedValue("My custom name.md");
       ctx.ui.input = input;
-      const result = await h.tool(EXIT_TOOL).execute("save", {}, undefined, undefined, ctx);
+      const controller = new AbortController();
+      const result = await h.tool(EXIT_TOOL).execute("save", {}, controller.signal, undefined, ctx);
       const saved = join(h.plansDirectory, "my-custom-name.md");
-      assert.equal(input.mock.calls[0]?.[0], "Save plan as");
-      assert.equal(input.mock.calls[0]?.[1], "add-retry-support", "the title is an editable suggestion");
+      assert.match(input.mock.calls[0]?.[0] ?? "", /^Save plan as/u);
+      assert.ok(!input.mock.calls[0]?.[1], "renaming starts without a placeholder suggestion");
+      assert.equal(input.mock.calls[0]?.[2]?.signal, controller.signal);
+      assert.deepEqual(h.selects[1], {
+        title: "Save plan as add-retry-support.md",
+        options: ["Use suggested name", "Enter different name", "Cancel"],
+      });
       assert.equal(result.terminate, true);
       assert.deepEqual(result.details, {
         plan,
@@ -226,7 +239,7 @@ test("saving never calls the approval hook or any implementation host callback",
   const h = setupWorkflowLifecycle();
   await h.emit("session_start");
   Object.assign(h.ctx, { mode: "rpc" });
-  h.ctx.ui.select = async () => "Save for later";
+  h.ctx.ui.select = async (title) => (title === "Implement this plan?" ? "Save for later" : "Enter different name");
   h.ctx.ui.input = async () => "deferred";
   h.inline.enter(h.ctx);
   writeFileSync(h.inline.planFile as string, "# Deferred work\n");
@@ -247,13 +260,18 @@ for (const title of ["Plan", "The plan"]) {
     const input = vi.fn<ExtensionContext["ui"]["input"]>().mockResolvedValue(undefined);
     (h.context.ctx as ExtensionContext).ui.input = input;
     await h.tool(EXIT_TOOL).execute("generic-title", {}, undefined, undefined, h.context.ctx);
-    assert.equal(input.mock.calls[0]?.[1], "");
+    assert.ok(!input.mock.calls[0]?.[1]);
+    assert.equal(h.selects.length, 2, "no name-choice selector opens without a suggestion");
+    assert.equal(h.selects[1]?.title, "Implement this plan?");
     assert.equal(h.inline().active, true);
   });
 }
 
 test("Save for later snapshots user-edited review text, not the originally submitted plan", async () => {
-  const h = await setup({ select: ["Edit the plan", "Save for later"], input: "edited-snapshot" });
+  const h = await setup({
+    select: ["Edit the plan", "Save for later", "Enter different name"],
+    input: "edited-snapshot",
+  });
   await h.mock.commands.get("plan")?.handler("", h.context.ctx);
   const draft = h.inline().planFile;
   writeFileSync(draft, "# Original\n");
@@ -278,7 +296,7 @@ test("Save for later snapshots user-edited review text, not the originally submi
 
 for (const failure of ["cancel", "invalid-name", "write-error"] as const) {
   test(`Save for later ${failure} returns to review and preserves planning`, async () => {
-    const h = await setup({ gate: true, select: ["Save for later", "No, keep planning"] });
+    const h = await setup({ gate: true, select: ["Save for later", "Enter different name", "No, keep planning"] });
     await h.mock.commands.get("plan")?.handler("", h.context.ctx);
     const draft = h.inline().planFile;
     writeFileSync(draft, "# Still planning\n");
@@ -298,7 +316,7 @@ for (const failure of ["cancel", "invalid-name", "write-error"] as const) {
       save?.mockRestore();
     }
     assert.equal(result.details.outcome, "kept");
-    assert.equal(h.selects.length, 2);
+    assert.equal(h.selects.length, 3);
     assert.equal(h.inline().active, true);
     assert.equal(h.inline().planFile, draft);
     assert.equal(readFileSync(draft, "utf8"), "# Still planning\n");
@@ -315,9 +333,9 @@ for (const failure of ["cancel", "invalid-name", "write-error"] as const) {
   });
 }
 
-for (const interruption of ["branch", "workflow", "abort"] as const) {
+for (const interruption of ["branch", "workflow"] as const) {
   test(`pending save filename is invalidated by ${interruption}`, async () => {
-    const h = await setup({ gate: true, select: ["Save for later"] });
+    const h = await setup({ gate: true, select: ["Save for later", "Enter different name"] });
     await h.mock.commands.get("plan")?.handler("", h.context.ctx);
     const draft = h.inline().planFile;
     writeFileSync(draft, "# Old plan\n");
@@ -334,8 +352,7 @@ for (const interruption of ["branch", "workflow", "abort"] as const) {
       });
     const pending = h.tool(EXIT_TOOL).execute("stale-save", {}, controller.signal, undefined, h.context.ctx);
     await ready;
-    if (interruption === "abort") controller.abort();
-    else if (interruption === "workflow") h.mock.eventBus.emit(MODE_CHANGED, { mode: "chat", cycle: [] });
+    if (interruption === "workflow") h.mock.eventBus.emit(MODE_CHANGED, { mode: "chat", cycle: [] });
     else {
       h.getLeafId.mockReturnValue("other-branch");
       Object.assign((h.context.ctx as ExtensionContext).sessionManager, { getBranch: () => [] });
@@ -351,15 +368,112 @@ for (const interruption of ["branch", "workflow", "abort"] as const) {
     assert.equal(h.gateEvents.length, transitions);
     assert.equal(existsSync(join(h.plansDirectory, "must-not-save.md")), false);
     assert.equal(readFileSync(draft, "utf8"), "# Old plan\n");
-    if (interruption !== "branch") assert.equal(h.inline().active, interruption === "abort");
+    if (interruption !== "branch") assert.equal(h.inline().active, false);
     else assert.equal(await h.emit("tool_call", { toolName: "write", input: { path: "src/other.ts" } }), undefined);
+    assert.equal(await h.emit("agent_before_settle", { outcome: "completed" }), undefined);
+  });
+}
+
+for (const action of ["enter", "abort"] as const) {
+  test(`TUI save filename ${action} uses the live PlanNameInput and releases review resources`, async () => {
+    initTheme("dark", false);
+    const h = await setup({ gate: true });
+    const ctx = h.context.ctx as ExtensionContext;
+    Object.assign(ctx, { mode: "tui" });
+    await h.mock.commands.get("plan")?.handler("", ctx);
+    const draft = h.inline().planFile;
+    writeFileSync(draft, "# Suggested title\n\nKeep the details.\n");
+    const controller = new AbortController();
+    const holds: unknown[] = [];
+    h.mock.eventBus.on("herdr:blocked", (data) => holds.push(data));
+    const working = vi.fn<NonNullable<ExtensionContext["ui"]["setWorkingVisible"]>>();
+    ctx.ui.setWorkingVisible = working;
+    const removeKeys = vi.fn();
+    ctx.ui.onTerminalInput = vi.fn(() => removeKeys);
+    ctx.ui.input = async () => assert.fail("TUI must use its editable custom input");
+    ctx.ui.select = async () => assert.fail("TUI must use its custom approval picker");
+    let opened!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      opened = resolve;
+    });
+    let nameInput!: ReturnType<typeof createCustomSelectorHarness>;
+    let dialogs = 0;
+    ctx.ui.custom = (async (factory) => {
+      let isNameInput = false;
+      const harness = createCustomSelectorHarness((...args: Parameters<typeof factory>) => {
+        const component = factory(...args);
+        isNameInput = component instanceof PlanNameInput;
+        return component;
+      });
+      dialogs++;
+      try {
+        if (dialogs === 1) {
+          assert.equal(isNameInput, false);
+          harness.handleInput("tui.select.up"); // Keep planning.
+          harness.handleInput("tui.select.up"); // Save for later.
+          harness.handleInput("\r");
+        } else {
+          assert.equal(dialogs, 2, "abort must not reopen approval");
+          assert.equal(isNameInput, true);
+          harness.setFocused(true);
+          nameInput = harness;
+          opened();
+        }
+        return await harness.resultPromise;
+      } finally {
+        harness.dispose();
+      }
+    }) as ExtensionContext["ui"]["custom"];
+    const pending = h.tool(EXIT_TOOL).execute("live-name", {}, controller.signal, undefined, ctx);
+    await ready;
+    assert.match(stripVTControlCharacters(nameInput.render().join("\n")), /suggested-title/u);
+    assert.deepEqual(holds, [{ active: true, label: "Review the plan" }]);
+    assert.equal(removeKeys.mock.calls.length, 0);
+    const entries = h.mock.entries.length;
+    const transitions = h.gateEvents.length;
+    if (action === "enter") nameInput.handleInput("\r");
+    else controller.abort(); // The real input settles; no fake prompt resolver is invoked.
+    const result = await pending;
+    assert.deepEqual(holds, [{ active: true, label: "Review the plan" }, { active: false }]);
+    assert.deepEqual(working.mock.calls, [[false], [true]]);
+    assert.equal(removeKeys.mock.calls.length, 1);
+    assert.equal(
+      [...h.context.widgets.entries()].some(
+        ([key, value]) => key.startsWith("plan-review-viewport/") && value !== undefined,
+      ),
+      false,
+    );
+    assert.equal(dialogs, 2);
+    assert.equal(readFileSync(draft, "utf8"), "# Suggested title\n\nKeep the details.\n");
+    const saved = join(h.plansDirectory, "suggested-title.md");
+    if (action === "enter") {
+      assert.equal(result.details.outcome, "saved");
+      assert.equal(result.details.savedFile, saved);
+      assert.equal(readFileSync(saved, "utf8"), readFileSync(draft, "utf8"));
+      assert.equal(h.inline().active, false);
+    } else {
+      assert.match(result.content[0]?.text ?? "", /review expired/u);
+      assert.equal(result.details?.outcome, undefined);
+      assert.deepEqual(readdirSync(h.plansDirectory), [draft.split("/").at(-1)]);
+      assert.equal(h.mock.entries.length, entries);
+      assert.equal(h.gateEvents.length, transitions);
+      assert.equal(h.inline().active, true);
+      assert.equal(h.inline().planFile, draft);
+    }
+    assert.deepEqual(h.mock.setModels, []);
+    assert.deepEqual(h.mock.thinkingLevels, []);
+    assert.deepEqual(h.mock.sentUserMessages, []);
+    assert.equal(h.newSession.mock.calls.length, 0);
     assert.equal(await h.emit("agent_before_settle", { outcome: "completed" }), undefined);
   });
 }
 
 test("saving clears the declined baseline both immediately and after branch restore", async () => {
   for (const restore of [false, true]) {
-    const h = await setup({ select: ["No, keep planning", "Save for later", "No, keep planning"], input: "deferred" });
+    const h = await setup({
+      select: ["No, keep planning", "Save for later", "Enter different name", "No, keep planning"],
+      input: "deferred",
+    });
     await h.mock.commands.get("plan")?.handler("", h.context.ctx);
     const draft = h.inline().planFile;
     writeFileSync(draft, "# Declined baseline\n");
@@ -400,7 +514,7 @@ test("saving clears the declined baseline both immediately and after branch rest
 });
 
 test("a saved review renders the saved path neutrally rather than approval or pending status", async () => {
-  const h = await setup({ select: ["Save for later"], input: "rendered-save" });
+  const h = await setup({ select: ["Save for later", "Enter different name"], input: "rendered-save" });
   await h.mock.commands.get("plan")?.handler("", h.context.ctx);
   writeFileSync(h.inline().planFile, "# Saved document\n\nKeep the details.");
   const result = await h.tool(EXIT_TOOL).execute("render-save", {}, undefined, undefined, h.context.ctx);

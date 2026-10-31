@@ -25,6 +25,7 @@ interface Review {
   removeKeys?(): void;
   jump: boolean;
   queued: boolean;
+  suspendedKeys: number;
   wasAtStart?: boolean;
   dimensions?: string;
   anchor?: number;
@@ -84,6 +85,7 @@ export class PlanReviewViewport {
       id,
       jump: true,
       queued: false,
+      suspendedKeys: 0,
       removeWidget: () => ctx.ui.setWidget(widget, undefined),
     };
     this.review = review;
@@ -93,7 +95,7 @@ export class PlanReviewViewport {
       review.removeKeys = ctx.ui.onTerminalInput((data) => {
         const up = matchesKey(data, "ctrl+u") || getKeybindings().matches(data, "tui.altScreen.halfPageUp");
         const down = matchesKey(data, "ctrl+d") || getKeybindings().matches(data, "tui.altScreen.halfPageDown");
-        if ((!up && !down) || this.review !== review) return undefined;
+        if ((!up && !down) || this.review !== review || review.suspendedKeys > 0) return undefined;
         return this.scrollHalf(review, up ? -1 : 1) ? { consume: true } : undefined;
       });
     } catch {
@@ -113,6 +115,19 @@ export class PlanReviewViewport {
 
   restart(): void {
     if (this.review) this.review.jump = true;
+  }
+
+  /** Let the filename editor own Ctrl+U/D until its prompt closes. */
+  suspendScrollKeys(): () => void {
+    const review = this.review;
+    if (!review) return () => {};
+    review.suspendedKeys++;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      review.suspendedKeys--;
+    };
   }
 
   wrap(id: string, component: Component): Component {

@@ -4,11 +4,20 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 
 const [screensFile, bundle] = process.argv.slice(2) as [string, string];
-const { parseInteractivePrompt } = await import(path.join(bundle, "server/prompt.ts"));
-const screens: { text: string }[] = JSON.parse(readFileSync(screensFile, "utf8"));
-const cards = screens.map(({ text }) => {
+const { parseInteractivePrompt, answerKeys } = await import(path.join(bundle, "server/prompt.ts"));
+const screens: { text: string; answer?: { option_index?: number; custom_text?: string } }[] = JSON.parse(readFileSync(screensFile, "utf8"));
+const cards = screens.map(({ text, answer }) => {
   const card = parseInteractivePrompt("pi", text);
-  if (card === null) return null;
-  return { question: card.question, multi: card.multi_select === true, options: (card.options ?? []).map((o: { label?: string }) => o.label ?? String(o)) };
+  if (card === null) {
+    if (answer) throw new Error("The requested answer has no parsed card.");
+    return null;
+  }
+  const answerSteps = answer ? answerKeys(card, answer) : undefined;
+  return {
+    question: card.question,
+    multi: card.multi_select === true,
+    options: (card.options ?? []).map((o: { label?: string }) => o.label ?? String(o)),
+    ...(answerSteps ? { answerSteps } : {}),
+  };
 });
 console.log(JSON.stringify(cards));
