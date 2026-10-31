@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import promptStash, { LEASE, STASH_KEY, STASH_OWNER, WRAPPER, adoptStash } from "../src/index.ts";
-import { CTRL_S, flush, harness } from "./harness.ts";
+import { CTRL_S, FakeEditor, flush, harness } from "./harness.ts";
 import { legacyPromptStash } from "./legacy.ts";
 
 const globals = globalThis as Record<symbol, unknown>;
@@ -84,6 +84,10 @@ test.each([
   expect(globals[STASH_KEY]).toBe(legacy.stash);
   expect(legacy.stash.value).toBe(draft);
   await next.emit("session_shutdown", {}, replacement.ctx);
+  expect(old.writes).toEqual([]);
+  expect(next.writes).toEqual([]);
+  expect(s.manager.getEntries()).toEqual([]);
+  expect(replacement.manager.getEntries()).toEqual([]);
 });
 
 test.each(["legacy-first", "suite-first"])("live legacy duplicate stays the only key/event handler (%s)", async (order) => {
@@ -138,6 +142,8 @@ test.each(["legacy-first", "suite-first"])("live legacy duplicate stays the only
   await h.emit("session_shutdown", {}, s.ctx);
   expect(s.factory()).toBe(factory); // Inactive suite must not tear down legacy's editor.
   expect(globals[STASH_KEY]).toBe(legacy.stash);
+  expect(h.writes).toEqual([]);
+  expect(s.manager.getEntries()).toEqual([]);
 });
 
 test("unknown legacy state never acquires or releases another suite instance's lease", async () => {
@@ -157,4 +163,49 @@ test("unknown legacy state never acquires or releases another suite instance's l
   expect(globals[LEASE]).toBe(otherLease);
   expect(globals[STASH_KEY]).toBe(legacy.stash);
   expect(legacy.stash.value).toBe("retained draft");
+  expect(h.writes).toEqual([]);
+  expect(s.manager.getEntries()).toEqual([]);
+});
+
+test("an inactive suite duplicate never appends records or clears the active owner's stash", async () => {
+  const active = harness();
+  promptStash(active.pi);
+  const first = active.session();
+  await active.emit("session_start", {}, first.ctx);
+  first.state.main.setText("active owner's draft");
+  first.state.main.handleInput(CTRL_S);
+  const saved = first.manager.getEntries();
+  expect(active.writes).toEqual([{
+    customType: "pi-stash.state", data: { version: 1, prompt: { text: "active owner's draft" } },
+  }]);
+  const stash = globals[STASH_KEY];
+  const lease = globals[LEASE];
+  first.ui.setEditorComponent(() => new FakeEditor()); // The lease survives a hidden wrapper.
+
+  const duplicate = harness();
+  promptStash(duplicate.pi);
+  const second = duplicate.session({ manager: first.manager });
+  second.state.main.setText("duplicate current draft");
+  await duplicate.emit("session_start", {}, second.ctx);
+  expect(second.notes.at(-1)?.message).toMatch(/another pi-stash instance is active/);
+  expect(second.factory()).toBe(second.baseFactory);
+  second.state.main.handleInput(CTRL_S);
+  expect(second.state.main.getText()).toBe("duplicate current draft");
+  expect(second.state.main.keys).toEqual([CTRL_S]);
+  second.state.main.setText("");
+  await duplicate.emit("model_select", {}, second.ctx);
+  await duplicate.emit("thinking_level_select", {}, second.ctx);
+  await duplicate.emit("session_shutdown", {}, second.ctx);
+  await flush();
+  expect(second.state.main.getText()).toBe("");
+  expect(duplicate.writes).toEqual([]);
+  expect(second.writes).toEqual([]);
+  expect(first.manager.getEntries()).toEqual(saved);
+  expect(globals[STASH_KEY]).toBe(stash);
+  expect((stash as { value: string }).value).toBe("active owner's draft");
+  expect(globals[LEASE]).toBe(lease);
+
+  await active.emit("session_shutdown", {}, first.ctx);
+  expect(active.writes).toHaveLength(1);
+  expect(first.manager.getEntries()).toEqual(saved);
 });

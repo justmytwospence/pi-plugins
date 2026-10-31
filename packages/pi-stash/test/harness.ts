@@ -6,6 +6,56 @@ type Handler = (event: unknown, ctx: unknown) => unknown;
 export const CTRL_S = "\x13";
 export const ENTER = "\r";
 
+/** The public SessionManager surface used here; real SDK managers can be supplied too. */
+export interface TestSessionManager {
+  getSessionId(): string;
+  getSessionFile(): string | undefined;
+  getEntries(): unknown[];
+  appendCustomEntry(customType: string, data?: unknown): string;
+}
+
+export interface CustomWrite {
+  customType: string;
+  data: unknown;
+}
+
+let nextSessionId = 0;
+
+/** Mutable session history with a distinct, stable identity, including across harnesses. */
+export class FakeSessionManager implements TestSessionManager {
+  readonly id: string;
+  readonly file: string | undefined;
+  readonly entries: unknown[];
+  readonly writes: CustomWrite[] = [];
+  private nextEntryId = 0;
+
+  constructor(options: { id?: string; file?: string | null; entries?: Iterable<unknown> } = {}) {
+    const unique = ++nextSessionId;
+    this.id = options.id ?? `session-${unique}`;
+    this.file = options.file === null ? undefined : (options.file ?? `/fake/sessions/session-${unique}.jsonl`);
+    this.entries = [...(options.entries ?? [])];
+    this.nextEntryId = this.entries.length;
+  }
+
+  getSessionId(): string {
+    return this.id;
+  }
+  getSessionFile(): string | undefined {
+    return this.file;
+  }
+  getEntries(): unknown[] {
+    return [...this.entries];
+  }
+  appendCustomEntry(customType: string, data?: unknown): string {
+    const id = `${this.id}-custom-${++this.nextEntryId}`;
+    const previous = this.entries.at(-1);
+    const parentId = previous && typeof previous === "object" && "id" in previous ? previous.id : null;
+    this.entries.push({ type: "custom", id, parentId, timestamp: new Date().toISOString(), customType, data });
+    this.writes.push({ customType, data });
+    return id;
+  }
+}
+
 /** The native editor shape pi-stash wraps; `/commands` are cleared by the fake Pi submit. */
 export class FakeEditor {
   text = "";
@@ -59,6 +109,19 @@ export function markEmbedded<T extends object>(editor: T): T {
 }
 
 export function harness() {
+  const writes: CustomWrite[] = [];
+  const managerWrites = new WeakMap<TestSessionManager, CustomWrite[]>();
+  let currentManager: TestSessionManager | undefined;
+  let writeError: unknown;
+  let failWrites = false;
+  const writesFor = (manager: TestSessionManager): CustomWrite[] => {
+    let records = managerWrites.get(manager);
+    if (!records) {
+      records = [];
+      managerWrites.set(manager, records);
+    }
+    return records;
+  };
   const handlers = new Map<string, Handler[]>();
   const listeners = new Map<string, Array<(data: unknown) => void>>();
   const events = {
@@ -72,6 +135,15 @@ export function harness() {
   };
   const pi = {
     events,
+    appendEntry: (customType: string, data?: unknown): void => {
+      if (writeError !== undefined) throw writeError;
+      if (failWrites) throw new Error("Injected session write failure");
+      if (!currentManager) throw new Error("No session manager is active");
+      currentManager.appendCustomEntry(customType, data);
+      const record = { customType, data };
+      writes.push(record);
+      writesFor(currentManager).push(record);
+    },
     on: (event: string, handler: Handler) => {
       handlers.set(event, [...(handlers.get(event) ?? []), handler]);
       return () => undefined;
@@ -80,11 +152,23 @@ export function harness() {
     registerShortcut: () => undefined,
   };
   async function emit(event: string, payload: unknown, ctx: unknown) {
+    // A replacement manager may exist before outgoing shutdown, but only an emitted
+    // lifecycle event makes it active. Shutdown writes still belong to its outgoing ctx.
+    if (event === "session_start" || event === "session_shutdown") {
+      currentManager = (ctx as { sessionManager: TestSessionManager }).sessionManager;
+    }
     for (const handler of handlers.get(event) ?? []) await handler(payload, ctx);
   }
 
   /** One interactive session: Pi's main editor, focus, and the editor-factory slot. */
-  function session(options: { mode?: string; hasUI?: boolean; base?: () => FakeEditor; late?: string[] } = {}) {
+  function session<Manager extends TestSessionManager = FakeSessionManager>(options: {
+    mode?: string;
+    hasUI?: boolean;
+    base?: () => FakeEditor;
+    late?: string[];
+    manager?: Manager;
+  } = {}) {
+    const manager = (options.manager ?? new FakeSessionManager()) as Manager;
     const notes: Array<{ message: string; type?: string }> = [];
     const status = new Map<string, string | undefined>();
     const submitted: string[] = [];
@@ -141,16 +225,22 @@ export function harness() {
       getEditorText: () => state.main.getText(),
       setEditorText: (text: string) => state.main.setText(text),
     };
-    const ctx = { mode: options.mode ?? "tui", hasUI: options.hasUI ?? true, ui };
+    const ctx = { mode: options.mode ?? "tui", hasUI: options.hasUI ?? true, sessionManager: manager, ui };
     // An editor-replacing extension (pi-vim) loaded before pi-stash: the factory pi-stash wraps.
     const baseFactory = () => options.base?.() ?? new FakeEditor();
     ui.setEditorComponent(baseFactory);
     /** Create an editor through the installed factory outside Pi's main slot (an embedder). */
     const embed = () => factory!(tui, {}, keybindings);
-    return { ctx, ui, notes, status, submitted, state, tui, keybindings, shell, late, embed, baseFactory, factory: () => factory };
+    return { ctx, manager, writes: writesFor(manager), ui, notes, status, submitted, state, tui, keybindings, shell, late, embed, baseFactory, factory: () => factory };
   }
 
-  return { pi: pi as never, events, emit, session };
+  return {
+    pi: pi as never, events, emit, session, writes,
+    get writeError(): unknown { return writeError; },
+    set writeError(error: unknown) { writeError = error; },
+    get failWrites(): boolean { return failWrites; },
+    set failWrites(fail: boolean) { failWrites = fail; },
+  };
 }
 
 export const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 5));

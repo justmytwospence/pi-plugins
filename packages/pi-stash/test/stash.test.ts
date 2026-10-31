@@ -3,7 +3,7 @@ import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { EDITOR_SNAPSHOT, STASH_CHANNEL, TAKE_NEXT_CHANNEL, type StashRequest, type TakeNextRequest } from "../src/contract.ts";
 import { isShellAction, isTemporaryAction, PromptStash } from "../src/core.ts";
 import promptStash, { LEASE, OWNER, STASH_KEY, STASH_OWNER, STATUS_ID, STATUS_TEXT, WRAPPER, adoptStash, capture } from "../src/index.ts";
-import { CTRL_S, ENTER, FakeEditor, SnapshotEditor, flush, harness, markEmbedded } from "./harness.ts";
+import { CTRL_S, ENTER, FakeEditor, FakeSessionManager, SnapshotEditor, flush, harness, markEmbedded } from "./harness.ts";
 
 const globals = globalThis as Record<symbol, unknown>;
 
@@ -185,15 +185,45 @@ test("model and thinking selection restore only into an empty editor", async () 
   expect(s.state.main.getText()).toBe("draft");
 });
 
-test("a stashed prompt survives into the next session start and fills its empty editor", async () => {
+test("a stashed prompt stays stashed through same-session reload until Ctrl+S", async () => {
   const { h, s } = await start();
   s.state.main.setText("carry me");
   s.state.main.handleInput(CTRL_S);
   await h.emit("session_shutdown", {}, s.ctx);
-  const next = h.session();
+  const next = h.session({ manager: s.manager });
   await h.emit("session_start", {}, next.ctx);
+  expect(next.state.main.getText()).toBe("");
+  expect(next.status.get(STATUS_ID)).toBe(STATUS_TEXT);
+  expect((globals[STASH_KEY] as PromptStash).value).toBe("carry me");
+  expect(h.writes).toHaveLength(1); // Unchanged reload does not append another snapshot.
+  next.state.main.handleInput(CTRL_S);
   expect(next.state.main.getText()).toBe("carry me");
   expect(next.status.get(STATUS_ID)).toBeUndefined();
+});
+
+test("a fresh session starts empty without consuming the previous session's saved stash", async () => {
+  const { h, s } = await start();
+  s.state.main.setText("saved in the original session");
+  s.state.main.handleInput(CTRL_S);
+  const saved = s.manager.getEntries();
+  await h.emit("session_shutdown", {}, s.ctx);
+  const next = h.session();
+  expect(next.manager.getSessionId()).not.toBe(s.manager.getSessionId());
+  expect(next.manager.getSessionFile()).not.toBe(s.manager.getSessionFile());
+  await h.emit("session_start", {}, next.ctx);
+  expect(next.state.main.getText()).toBe("");
+  expect(next.status.get(STATUS_ID)).toBeUndefined();
+  expect((globals[STASH_KEY] as PromptStash).hasPrompt).toBe(false);
+  expect(next.writes).toEqual([]);
+  expect(s.manager.getEntries()).toEqual(saved);
+
+  await h.emit("session_shutdown", {}, next.ctx);
+  const resumed = h.session({ manager: s.manager });
+  await h.emit("session_start", { reason: "resume" }, resumed.ctx);
+  expect(resumed.state.main.getText()).toBe("");
+  expect(resumed.status.get(STATUS_ID)).toBe(STATUS_TEXT);
+  resumed.state.main.handleInput(CTRL_S);
+  expect(resumed.state.main.getText()).toBe("saved in the original session");
 });
 
 // ─── main only, never embedded ───
@@ -313,7 +343,7 @@ test("shutdown cancels a pending restoration and later keys are plain pass-throu
   expect(wrapped.getText()).toBe("after");
 });
 
-test("a fresh extension restores a cursor/mode snapshot after session replacement", async () => {
+test("a fresh extension retains a same-session cursor/mode snapshot until Ctrl+S", async () => {
   const { h, s } = await start({ base: () => new SnapshotEditor() });
   const editor = s.state.main as SnapshotEditor;
   editor.setText("carry snapshot");
@@ -323,22 +353,29 @@ test("a fresh extension restores a cursor/mode snapshot after session replacemen
   await h.emit("session_shutdown", {}, s.ctx);
   const nextHarness = harness();
   promptStash(nextHarness.pi);
-  const next = nextHarness.session({ base: () => new SnapshotEditor() });
+  const next = nextHarness.session({ manager: s.manager, base: () => new SnapshotEditor() });
   await nextHarness.emit("session_start", {}, next.ctx);
   const restored = next.state.main as SnapshotEditor;
+  expect(restored.text).toBe("");
+  expect(restored.restored).toEqual([]);
+  expect(next.status.get(STATUS_ID)).toBe(STATUS_TEXT);
+  expect(nextHarness.writes).toEqual([]);
+  restored.handleInput(CTRL_S);
   expect(restored.text).toBe("carry snapshot");
   expect(restored.mode).toBe("normal");
   expect(restored.cursor.col).toBe(4);
 });
 
-test("replacement without shutdown uses the live context and does not restore over a new draft", async () => {
+test("same-session replacement without shutdown protects a new draft until an explicit swap", async () => {
   const { h, s } = await start();
   s.state.main.setText("carry");
   s.state.main.handleInput(CTRL_S);
-  const next = h.session();
+  const next = h.session({ manager: s.manager });
   next.state.main.setText("new draft");
   await h.emit("session_start", {}, next.ctx);
   expect(next.state.main.getText()).toBe("new draft");
+  expect(next.status.get(STATUS_ID)).toBe(STATUS_TEXT);
+  expect(h.writes).toHaveLength(1);
   next.state.main.handleInput(CTRL_S);
   expect(next.state.main.getText()).toBe("carry");
   expect((globals[STASH_KEY] as PromptStash).value).toBe("new draft");
@@ -445,19 +482,37 @@ test("a fork's session start holds the draft until Pi sets the forked editor tex
   s.state.main.setText("draft");
   s.state.main.handleInput(CTRL_S);
   submit(s, "/fork");
+  const parentEntries = s.manager.getEntries();
+  const childManager = new FakeSessionManager({ entries: parentEntries });
   await h.emit("session_shutdown", { reason: "fork" }, s.ctx);
-  const next = h.session();
+  const next = h.session({ manager: childManager });
+  expect(next.manager.getSessionId()).not.toBe(s.manager.getSessionId());
+  expect(next.manager.getSessionFile()).not.toBe(s.manager.getSessionFile());
   await h.emit("session_start", { reason: "fork" }, next.ctx);
   await settled();
   expect(next.state.main.getText()).toBe("");
+  expect((globals[STASH_KEY] as PromptStash).held).toBe(true);
+  expect(next.writes).toEqual([{ customType: "pi-stash.state", data: { version: 1, prompt: { text: "draft" } } }]);
   next.state.main.setText("selected message"); // Pi, after the fork
   await flush();
   expect(next.state.main.getText()).toBe("selected message");
   expect((globals[STASH_KEY] as PromptStash).value).toBe("draft");
+  expect((globals[STASH_KEY] as PromptStash).held).toBe(true);
   await flush(); // onSubmit is wrapped a microtask after creation
   next.state.main.handleInput(ENTER);
   await flush();
   expect(next.state.main.getText()).toBe("draft");
+  expect((globals[STASH_KEY] as PromptStash).held).toBe(false);
+  expect(next.writes.at(-1)).toEqual({ customType: "pi-stash.state", data: { version: 1, prompt: null } });
+  expect(s.manager.getEntries()).toEqual(parentEntries); // Child consumption never clears the parent.
+
+  await h.emit("session_shutdown", {}, next.ctx);
+  const parent = h.session({ manager: s.manager });
+  await h.emit("session_start", { reason: "resume" }, parent.ctx);
+  expect(parent.state.main.getText()).toBe("");
+  expect((globals[STASH_KEY] as PromptStash).value).toBe("draft");
+  parent.state.main.handleInput(CTRL_S);
+  expect(parent.state.main.getText()).toBe("draft");
 });
 
 test("a clone's session start restores once Pi has cleared the editor", async () => {
@@ -465,12 +520,24 @@ test("a clone's session start restores once Pi has cleared the editor", async ()
   s.state.main.setText("draft");
   s.state.main.handleInput(CTRL_S);
   submit(s, "/clone");
+  const parentEntries = s.manager.getEntries();
+  const childManager = new FakeSessionManager({ entries: parentEntries });
   await h.emit("session_shutdown", { reason: "fork" }, s.ctx);
-  const next = h.session();
+  const next = h.session({ manager: childManager });
+  expect(next.manager.getSessionId()).not.toBe(s.manager.getSessionId());
+  expect(next.manager.getSessionFile()).not.toBe(s.manager.getSessionFile());
   await h.emit("session_start", { reason: "fork" }, next.ctx);
+  expect(next.state.main.getText()).toBe("");
+  expect((globals[STASH_KEY] as PromptStash).held).toBe(true);
   next.state.main.setText(""); // Pi, after the clone
   await flush();
   expect(next.state.main.getText()).toBe("draft");
+  expect((globals[STASH_KEY] as PromptStash).held).toBe(false);
+  expect(next.writes).toEqual([
+    { customType: "pi-stash.state", data: { version: 1, prompt: { text: "draft" } } },
+    { customType: "pi-stash.state", data: { version: 1, prompt: null } },
+  ]);
+  expect(s.manager.getEntries()).toEqual(parentEntries);
 });
 
 test("a slash command never restores while a dialog or extension UI covers the editor", async () => {
@@ -505,22 +572,35 @@ for (const command of ["/copy", "/export out.html", "/share", "/import in.jsonl"
   });
 }
 
-test("an import's replacement session restores once Pi has cleared the editor", async () => {
+test("an import's replacement loads only the destination's own stash and waits for Ctrl+S", async () => {
   const { h, s } = await start({ late: ["/import in.jsonl"] });
   s.state.main.setText("draft");
   s.state.main.handleInput(CTRL_S);
+  const outgoingEntries = s.manager.getEntries();
   submit(s, "/import in.jsonl");
   expect((globals[STASH_KEY] as PromptStash).awaitText).toBe(true);
+  const imported = new FakeSessionManager({ entries: [{
+    type: "custom", customType: "pi-stash.state", data: { version: 1, prompt: { text: "imported draft" } },
+  }] });
   await h.emit("session_shutdown", { reason: "resume" }, s.ctx);
-  const next = h.session();
+  const next = h.session({ manager: imported });
   await h.emit("session_start", { reason: "resume" }, next.ctx);
   await settled();
   expect(next.state.main.getText()).toBe("");
+  expect((globals[STASH_KEY] as PromptStash).value).toBe("imported draft");
+  expect((globals[STASH_KEY] as PromptStash).awaitText).toBe(false);
+  expect(next.status.get(STATUS_ID)).toBe(STATUS_TEXT);
   s.late.resolve?.(); // the old submit finishes after the switch; its clear is stale
   await flush();
   next.state.main.setText(""); // Pi, after the import
   await flush();
-  expect(next.state.main.getText()).toBe("draft");
+  expect(next.state.main.getText()).toBe("");
+  expect((globals[STASH_KEY] as PromptStash).value).toBe("imported draft");
+  expect(next.writes).toEqual([]);
+  expect(s.manager.getEntries()).toEqual(outgoingEntries);
+  next.state.main.handleInput(CTRL_S);
+  expect(next.state.main.getText()).toBe("imported draft");
+  expect(s.manager.getEntries()).toEqual(outgoingEntries);
 });
 
 test("late shell completion cannot restore into a replacement session", async () => {
@@ -529,13 +609,20 @@ test("late shell completion cannot restore into a replacement session", async ()
   s.state.main.handleInput(CTRL_S);
   s.state.main.setText("!ls");
   s.state.main.handleInput(ENTER);
+  const outgoingEntries = s.manager.getEntries();
   const next = h.session();
   next.state.main.setText("new draft");
   await h.emit("session_start", {}, next.ctx);
   s.shell.resolve?.();
   await flush();
   expect(next.state.main.getText()).toBe("new draft");
-  expect((globals[STASH_KEY] as PromptStash).value).toBe("draft");
+  expect((globals[STASH_KEY] as PromptStash).hasPrompt).toBe(false);
+  expect(next.status.get(STATUS_ID)).toBeUndefined();
+  expect(next.writes).toEqual([]);
+  expect(s.manager.getEntries()).toEqual(outgoingEntries);
+  expect(outgoingEntries.at(-1)).toMatchObject({
+    type: "custom", customType: "pi-stash.state", data: { version: 1, prompt: { text: "draft" } },
+  });
 });
 
 test("embedded submits never trigger an automatic restore", async () => {
