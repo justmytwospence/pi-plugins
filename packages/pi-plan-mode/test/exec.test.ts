@@ -19,6 +19,7 @@ import {
   registerExec,
 } from "../src/exec.js";
 import * as execCards from "../src/exec-cards.js";
+import { FAMILY_CHANNEL, type FamilyRequest, type PreparedAgent } from "../src/family-contract.js";
 import planMode from "../src/index.js";
 import type { PlannerSessionFactory, PlannerSessionOptions } from "../src/planner/session.js";
 import { createMockContext, createMockPi } from "./shared/support.js";
@@ -214,6 +215,41 @@ async function setup(
   };
   const latest = () => mock.entries.filter((entry) => entry.customType === EXEC_ENTRY).at(-1)?.data as ExecState;
   return { mock, context, tool, emit, latest, sessions, planFile, selects, execEvents };
+}
+
+for (const purpose of ["consultant", "reviewer"] as const) {
+  test(`exec explicitly enrolls the ${purpose} with its observer`, async () => {
+    const s = await setup();
+    const observer = () => undefined;
+    const prepare = vi.fn(
+      async () =>
+        ({
+          agentId: "exec-uuid",
+          membership: { version: 1, familyId: "family", agentId: "exec-uuid" },
+          observer,
+          extensions: [],
+          env: {},
+          finish: () => {},
+          dispose: () => {},
+        }) satisfies PreparedAgent,
+    );
+    s.mock.rawPi.events.on(FAMILY_CHANNEL, (data) => {
+      (data as FamilyRequest).service = { prepare } as unknown as FamilyRequest["service"];
+    });
+    await s
+      .tool(purpose === "consultant" ? ASK_TOOL : FINISH_TOOL)
+      .execute(
+        "family",
+        purpose === "consultant" ? { message: "Check the plan." } : completion,
+        undefined,
+        undefined,
+        s.context.ctx,
+      );
+    assert.equal(prepare.mock.calls.length, 1);
+    assert.equal((prepare.mock.calls[0] as unknown as [{ kind: string }])[0].kind, purpose);
+    assert.equal(s.sessions.created[0]?.observer, observer);
+    await s.emit("session_shutdown", {});
+  });
 }
 
 test("a restored exec state turns its tools on and shows the footer status", async () => {

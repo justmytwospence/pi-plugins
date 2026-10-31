@@ -9,6 +9,14 @@ It acts only while plan mode is on, when you run `/plan` or `/planners` (or pres
 
 Part of [Pi Plugins](https://github.com/justmytwospence/pi-plugins). Reference: <https://pi-plugins.vercel.app/plugins/pi-plan-mode/>. Started as a fork of [`@narumitw/pi-plan-mode`](https://github.com/narumiruna/pi-extensions/tree/main/packages/pi-plan-mode); see [License](#license).
 
+## Sidebar integration
+
+With pi-sidebar enabled, planners, reviewers and scouts are explicitly enrolled in the current session family. Sidebar stays alongside the planning view; selecting a lane or scout changes the subject of a question, not the main/implementer request and cache anchor. The subject and anchor are fixed at submission. The family keeps one Sidebar thread, draft and model through `/tree`, `/reload` and an explicit fresh implementation handoff; unrelated sessions, even in the same checkout, are separate. Observation can be partial or unavailable, including for children already running before the upgrade.
+
+Restored idle planners attach for observation without resuming paid work. Scouts keep `--no-session`; their observer archives the final in-memory projected transcript, not the lossy progress preview. Keyboard or mouse lane selection and scout navigation update the subject; settings and actions retain the last meaningful focus. Closing Sidebar expands the same planning page without clearing drafts. Native main-session dialogs temporarily suspend a hosted planning view; without Sidebar, the existing fullscreen overlay remains the fallback. Cancelled fresh-session handoffs discard their family reservations.
+
+Sidebar is read-only and adds no planning authority; the human's primary-view controls remain unchanged. In Sidebar, `/agents` opens the roster, `/transcript [agent-id]` views a transcript and `/context [agent-id]` attaches it to the next question, including when codemode is unavailable. Transcript pages are capped at 64 KiB, automatic reads at 32 KiB per question; missing or truncated coverage is explicit. See the pi-sidebar README for scope and limits.
+
 ## Install
 
 Install the suite and select only this component. Merge this object into the `packages` array of `~/.pi/agent/settings.json` (or a trusted project's `.pi/settings.json`):

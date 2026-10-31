@@ -6,6 +6,8 @@
 // transcript with that model's own cache); it never changes anything, and it asks before a request
 // would re-read main's context uncached.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { installEnvironmentObserver } from "./family/observer.ts";
+import { OBSERVER_ENV } from "./family/protocol.ts";
 import { FOCUS_KEYS_ENV, KEYS_ENV, parseFocusKeys, parseKeys } from "./config.ts";
 import { subagentsGuarded } from "./child.ts";
 import { MODEL_HELP, QUIZ_HELP, SIDEBAR_HEADSUP_HELP, SidebarController } from "./controller.ts";
@@ -43,6 +45,11 @@ const COMMAND_HELP = [
 ].join("\n");
 
 export default function piSidebar(pi: ExtensionAPI) {
+  if (process.env[OBSERVER_ENV]) {
+    installEnvironmentObserver(pi);
+    if (process.env[GUARD_ENV] === "1") installGuardOnly(pi);
+    return;
+  }
   if (process.env[GUARD_ENV] === "1") return installGuardOnly(pi);
   const keys = parseKeys(process.env[KEYS_ENV]);
   const sidebar = new SidebarController(pi, keys, parseFocusKeys(process.env[FOCUS_KEYS_ENV]));

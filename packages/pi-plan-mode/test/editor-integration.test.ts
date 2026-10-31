@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { stripVTControlCharacters } from "node:util";
-import { type ExtensionCommandContext, initTheme } from "@earendil-works/pi-coding-agent";
+import { type ExtensionCommandContext, InteractiveMode, initTheme } from "@earendil-works/pi-coding-agent";
+import { type Terminal, TuiMainScreen } from "@earendil-works/pi-tui";
+import { InteractiveMode as InteractiveMode14, initTheme as initTheme14 } from "pi-coding-agent-1-4";
+import { TuiMainScreen as TuiMainScreen14 } from "pi-tui-1-4";
 import { test } from "vitest";
+import { openPlanningView } from "../src/app/frame.js";
 import { type LaneInput, LanesPage } from "../src/app/lanes-page.js";
 import { PiChat, piChatTheme } from "../src/app/pi-chat.js";
 import {
@@ -14,6 +18,8 @@ import {
   readInputContext,
   type SuiteEditor,
 } from "../src/editor-contract.js";
+import { FAMILY_CHANNEL, type FamilyRequest, type FamilyService } from "../src/family-contract.js";
+import { HERDR_BLOCKED_CHANNEL } from "../src/herdr-blocked.js";
 import planMode from "../src/index.js";
 import type { PlannerAgent } from "../src/planner/agent.js";
 import { PlannerTrace } from "../src/planner-trace.js";
@@ -21,6 +27,7 @@ import { SubagentTracker } from "../src/subagent-progress.js";
 import { createCustomSelectorHarness, createMockContext, createMockPi } from "./support.js";
 
 initTheme("dark");
+initTheme14("dark");
 const theme = {
   fg: (_color: string, text: string) => text,
   bg: (_color: string, text: string) => text,
@@ -92,6 +99,126 @@ function laneAdapter(editor: SuiteEditor): LaneInput {
     [EDITOR_MODE]: () => readEditorMode(editor),
     dispose: () => editor.dispose(),
   };
+}
+
+for (const { version, Mode, Screen } of [
+  { version: "1.2", Mode: InteractiveMode, Screen: TuiMainScreen },
+  { version: "1.4", Mode: InteractiveMode14, Screen: TuiMainScreen14 },
+]) {
+  test(`Pi ${version} fallback planning closes through done and restores main focus`, async () => {
+    const screen = new Screen({ rows: 40, columns: 120, hideCursor() {} } as Terminal);
+    screen.requestRender = () => {};
+    const editor = { render: () => [], getText: () => "main draft", invalidate() {} };
+    screen.setFocus(editor);
+    const host = { ui: screen, editor };
+    const ui = {
+      custom: (factory: unknown, options: unknown) =>
+        (
+          Mode.prototype as unknown as { showExtensionCustom: (...args: unknown[]) => Promise<void> }
+        ).showExtensionCustom.call(host, factory, options),
+    };
+    let close!: () => void;
+    const opened = openPlanningView({ ui } as never, undefined, (_tui, _theme, _keys, done, viewport) => {
+      close = done;
+      assert.equal(viewport().height, 40);
+      return { render: () => ["planning"], invalidate() {} };
+    });
+    await tick();
+    // 1.2's custom API pops its top overlay: fallback steps aside before the dialog mounts.
+    // 1.4 owns its overlay handle and also supports closing underneath an existing dialog.
+    if (version === "1.2") {
+      close();
+      await opened;
+    }
+    let dialogDone!: () => void;
+    const dialog = { render: () => ["native question"], invalidate() {} };
+    const waiting = ui.custom(
+      (_tui: unknown, _theme: unknown, _keys: unknown, done: () => void) => {
+        dialogDone = done;
+        return dialog;
+      },
+      { overlay: true },
+    );
+    await tick();
+    if (version === "1.4") {
+      close();
+      await opened;
+    }
+    assert.equal(screen.hasOverlayEntries, true);
+    assert.equal(screen.getFocusedComponent(), dialog);
+    dialogDone();
+    await waiting;
+    assert.equal(screen.hasOverlayEntries, false);
+    assert.equal(screen.getFocusedComponent(), editor);
+  });
+}
+
+for (const width of [46, 120, 180]) {
+  test(`hosted lanes use allocated viewport and retain drafts and family subject at ${width} columns`, async () => {
+    const a = agent();
+    Object.assign(a, { familyAgentId: "planner-uuid" });
+    a.subagents.apply("call", {
+      kind: "plan-subagents-progress",
+      version: 1,
+      scouts: [
+        {
+          index: 0,
+          label: "scout",
+          model: "p/m",
+          task: "look",
+          state: "running",
+          startedAt: 1,
+          familyAgentId: "scout-uuid",
+        },
+      ],
+      events: [],
+    });
+    let height = 20;
+    let page!: LanesPage;
+    let close!: () => void;
+    const family = {
+      view: async ({ factory }) => {
+        page = (await factory(
+          tui as never,
+          theme,
+          undefined,
+          () => {},
+          () => ({ width, height }),
+        )) as LanesPage;
+      },
+    } satisfies Partial<FamilyService>;
+    await openPlanningView(
+      {
+        ui: {
+          custom: () => {
+            throw new Error("must not overlay");
+          },
+        },
+      } as never,
+      family as FamilyService,
+      (_tui, _theme, _keys, done, viewport) => {
+        close = done;
+        return new LanesPage(theme, { ...laneOptions(a, () => {}), rowsAvailable: () => viewport().height });
+      },
+    );
+    assert.equal(page.viewedAgentId(), "planner-uuid");
+    page.render(width);
+    page.handleInput("\x0e");
+    assert.equal(page.viewedAgentId(), "scout-uuid");
+    page.handleInput("\x1b");
+    assert.equal(page.viewedAgentId(), "planner-uuid");
+    for (const char of "draft") page.handleInput(char);
+    assert.match(page.render(width).join("\n"), /draft/u);
+    height = 35;
+    page.render(width);
+    height = 20;
+    assert.equal(page.render(width).length, 20);
+    assert.match(page.render(width).join("\n"), /draft/u);
+    page.handleInput("\t");
+    assert.equal(page.viewedAgentId(), "planner-uuid", "actions retain meaningful focus");
+    page.dispose();
+    close();
+  });
 }
 
 test("actual pi-vim embedded lane preserves Insert, Visual, pending, EX and autocomplete input ownership", async () => {
@@ -199,6 +326,53 @@ test("native lane drafts keep native Ctrl+U instead of scrolling, empty read-onl
   } finally {
     page.dispose();
   }
+});
+
+test("the planning app delegates native-dialog suspension to the family host without discarding its page", async () => {
+  const mock = createMockPi();
+  let app!: ReturnType<typeof createCustomSelectorHarness>;
+  let height = 22;
+  const family = {
+    focus: () => {},
+    view: async ({ factory }) => {
+      app = createCustomSelectorHarness(
+        (tui: unknown, theme: unknown, keys: unknown, done: () => void) =>
+          factory(tui as never, theme, keys, done, () => ({ width: 120, height })),
+        120,
+        undefined,
+        50,
+      );
+      await app.resultPromise;
+    },
+  } satisfies Partial<FamilyService>;
+  mock.eventBus.on(FAMILY_CHANNEL, (data) => {
+    (data as FamilyRequest).service = family as unknown as FamilyService;
+  });
+  const ctx = createMockContext({
+    mode: "tui",
+    hasUI: true,
+    model: { provider: "test", id: "model", name: "Model A" },
+    modelRegistry: { getAvailable: () => [{ provider: "test", id: "model", name: "Model A" }] },
+    custom: () => {
+      throw new Error("hosted planning must not create a fullscreen overlay");
+    },
+  }).ctx as ExtensionCommandContext;
+  await planMode(mock.pi, { readSettings: async () => ({ thinkingLevel: "inherit", jevToolSelection: false }) });
+  const opened = mock.commands.get("planners")?.handler("keep this task", ctx);
+  await tick();
+  assert.equal(app.isFocusable, true);
+  assert.ok(app.render().length <= 22);
+  mock.eventBus.emit(HERDR_BLOCKED_CHANNEL, { active: true, label: "Native question" });
+  assert.equal(app.result, undefined);
+  assert.match(app.render().join("\n"), /keep this task/u);
+  app.setFocused(false);
+  height = 35;
+  app.render();
+  mock.eventBus.emit(HERDR_BLOCKED_CHANNEL, { active: false, label: "Native question" });
+  app.setFocused(true);
+  assert.match(app.render().join("\n"), /keep this task/u);
+  app.dispose();
+  await opened;
 });
 
 test("/plan discovers the actual embedded factory for task and lane editors and disposes both", async () => {

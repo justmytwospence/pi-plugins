@@ -523,6 +523,7 @@ export class FleetView {
     this.viewing = view.key;
     const src = this.source;
     const source: SessionSource = {
+      family: () => src.family?.(),
       runs: () => src.runs(),
       actions: (r) => src.actions(r),
       enabled: () => src.enabled(),

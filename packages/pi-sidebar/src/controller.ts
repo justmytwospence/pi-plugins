@@ -2,8 +2,8 @@
 // thread stored in main's session.
 import path from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
-import { matchesKey, type Component, type TUI } from "@earendil-works/pi-tui";
-import { ago, SidebarAgent, type SidebarEvent } from "./child.ts";
+import { getKeybindings, matchesKey, type Component, type TUI } from "@earendil-works/pi-tui";
+import { ago, SidebarAgent, type QuestionCapture, type SidebarEvent } from "./child.ts";
 import { MIN_COLUMNS_ENV, parseMinColumns, parseRatio, PREFS_ENV, RATIO_ENV } from "./config.ts";
 import { canSplit, dividerLines, muteEditorBorders, SplitLayout } from "./layout.ts";
 import { MainState } from "./main-state.ts";
@@ -18,6 +18,9 @@ import { draftMessages, hiddenPrompt, isNoteMarker, noteMessages, turnReply, typ
 import { QUIZ_ENTRY, QuizMode, quizFromBranch } from "./quiz/mode.ts";
 import { QUIZ_NEXT, QUIZ_ROLE, QUIZ_START } from "./quiz/prompt.ts";
 import { RESET_ENTRY, threadFromBranch } from "./thread.ts";
+import { SidebarHost } from "./family/host.ts";
+import { FamilyViewHost } from "./family/view-host.ts";
+import { FamilyRetrievalBudget, readFamilyTranscript } from "./family/tools.ts";
 import {
   cycleChoice,
   favoritePatterns,
@@ -75,6 +78,10 @@ type FocusTui = TUI & { getFocusedComponent?(): Component | null };
 export class SidebarController {
   readonly main: MainState;
   readonly agent: SidebarAgent;
+  readonly family: SidebarHost;
+  private viewHost: FamilyViewHost | undefined;
+  private nativeSuspensions: Array<() => void> = [];
+  private blockedSuspensions: Array<() => void> = [];
   /** Quiz mode: questions on main's changes, graded into a per-repository knowledge profile. */
   readonly quiz = new QuizMode(process.env[KNOWLEDGE_ENV] ?? path.join(getAgentDir(), "pi-sidebar", "knowledge"));
   /** Heads-up mode: occasional checks for one thing worth knowing, shown above main's editor. */
@@ -94,6 +101,7 @@ export class SidebarController {
   private resolvedChoice: { id: string; at: number; choice: ModelChoice } | undefined;
   /** Heads-up notes waiting for Sidebar to finish its answer. */
   private pendingNotes: HeadsUpNote[] = [];
+  private pendingQuestion: { text: string; capture: QuestionCapture } | undefined;
   /** Notes already put in Sidebar's thread, so opening Sidebar does not add one twice. */
   private readonly delivered = new WeakSet<HeadsUpNote>();
   private flushTimer: ReturnType<typeof setTimeout> | undefined;
@@ -118,6 +126,14 @@ export class SidebarController {
   constructor(private readonly pi: ExtensionAPI, private readonly keys: string[], private readonly focusKeys: string[] = []) {
     this.main = new MainState(pi);
     this.agent = new SidebarAgent(pi, this.main);
+    this.family = new SidebarHost(pi, this.main, async (options) => {
+      const ctx = this.main.ctx;
+      if (!ctx) throw new Error("The family host is not ready");
+      this.ensureViewHost(ctx);
+      if (!this.viewHost) throw new Error("Family views require Pi's fullscreen terminal UI");
+      await this.viewHost.view(options);
+    });
+    this.main.familyStatus = () => this.family.binding.capture();
     this.agent.onEvent((event) => this.onAgentEvent(event));
     this.agent.modelChoice = () => this.sidebarModel();
     this.agent.quiz = { role: () => (this.quiz.on ? QUIZ_ROLE : undefined), status: () => this.quiz.status() };
@@ -152,10 +168,12 @@ export class SidebarController {
     // Sidebar like a `herdr:blocked` hold, also for dialogs that hold none: remote clients
     // (herdr-web-ui, Collie) read the dialog off a full-width screen.
     pi.on("ui_prompt_start", () => {
+      this.nativeSuspensions.push(this.viewHost?.suspend("native") ?? (() => {}));
       this.prompts++;
       this.render();
     });
     pi.on("ui_prompt_end", () => {
+      this.nativeSuspensions.pop()?.();
       this.prompts = Math.max(0, this.prompts - 1);
       this.render();
     });
@@ -178,7 +196,10 @@ export class SidebarController {
       await this.restore(ctx, true);
     });
     pi.on("session_tree", async (_event, ctx) => this.restore(ctx, false));
-    pi.on("session_shutdown", async () => {
+    pi.on("session_shutdown", async (event) => {
+      const reopen = this.isOpen;
+      const sidebarFocused = !!this.panel?.focused;
+      this.family.preferences({ model: this.modelSetting, draft: this.panel?.input.getText() ?? this.family.kernel?.draft ?? "" });
       this.releaseInput?.();
       this.releaseInput = undefined;
       this.headsUp.dispose();
@@ -186,10 +207,15 @@ export class SidebarController {
       this.flushTimer = undefined;
       this.pendingNotes = [];
       this.close();
+      this.viewHost?.dispose();
+      this.viewHost = undefined;
       this.panel?.dispose();
       this.panel = undefined;
       this.tui = undefined;
       await this.agent.dispose();
+      this.family.preferences({ open: reopen, sidebarFocused });
+      await this.family.dispose(event.reason);
+      this.main.dispose();
     });
     // pi-reload-all asks before reloading: a reload would close Sidebar and drop its draft or reply.
     pi.events?.on?.("reload-all:probe", (data: unknown) => {
@@ -201,6 +227,8 @@ export class SidebarController {
     pi.events?.on?.(HERDR_BLOCKED, (data: unknown) => {
       const active = (data as { active?: unknown } | undefined)?.active === true;
       this.blocked = Math.max(0, this.blocked + (active ? 1 : -1));
+      if (active) this.blockedSuspensions.push(this.viewHost?.suspend("local") ?? (() => {}));
+      else this.blockedSuspensions.pop()?.();
       this.render();
     });
     // One right-hand panel at a time: another plugin's (pi-marimo's docked notebook) closes Sidebar, and opening Sidebar closes it.
@@ -213,7 +241,7 @@ export class SidebarController {
   }
 
   get isOpen(): boolean {
-    return !!this.layout?.mounted;
+    return !!this.layout?.mounted || !!this.viewHost?.sidebarRequestedOpen;
   }
 
   matchesToggle(data: string): boolean {
@@ -309,7 +337,9 @@ export class SidebarController {
       });
     }
     if (!this.isOpen) this.pi.events?.emit?.(SIDE_PANEL, { id: SIDE_PANEL_ID, open: true });
-    if (!this.layout!.mount()) return false;
+    if (!(this.viewHost ? this.viewHost.mountSplit(this.layout!) : this.layout!.mount())) return false;
+    if (this.family.kernel?.draft && this.panel?.input.getText() === "") this.panel.input.setText(this.family.kernel.draft);
+    this.family.preferences({ open: true });
     this.startTicker();
     // A note showing above main's editor also goes into Sidebar's thread (it stays above the editor).
     const shown = this.headsUp.note.phase === "dismissed" ? undefined : this.headsUp.note.note;
@@ -330,8 +360,10 @@ export class SidebarController {
     this.releaseInput = undefined;
     if (ctx.mode !== "tui" || typeof ctx.ui.onTerminalInput !== "function") return;
     this.hostTui = this.probe(ctx) ?? this.hostTui;
+    this.ensureViewHost(ctx);
     this.releaseInput = ctx.ui.onTerminalInput((data) => {
-      if (this.headsUp.note.showing && this.headsUp.handleKey(data, this.editorIdle(ctx))) return { consume: true };
+      if (this.matchesToggle(data)) { this.toggle(ctx); return { consume: true }; }
+      if (!this.viewHost?.hasView && this.headsUp.note.showing && this.headsUp.handleKey(data, this.editorIdle(ctx))) return { consume: true };
       if (this.sidebarTyping()) {
         const prompt = this.injected.observe(data, this.panel!.input.getText() === "", (d) => matchesKey(d, "enter"));
         if (prompt !== undefined) {
@@ -394,10 +426,12 @@ export class SidebarController {
   }
 
   close(): void {
+    if (this.panel) this.family.preferences({ draft: this.panel.input.getText(), open: false });
     if (!this.layout) return;
     const hadFocus = !!this.panel?.focused;
     const was = this.isOpen;
-    this.layout.unmount();
+    if (this.viewHost) this.viewHost.unmountSplit();
+    else this.layout.unmount();
     if (was) this.pi.events?.emit?.(SIDE_PANEL, { id: SIDE_PANEL_ID, open: false });
     this.stopTicker();
     if (hadFocus) this.focusMain();
@@ -426,14 +460,16 @@ export class SidebarController {
     const tui = this.tui;
     if (!tui) return;
     if (this.panel) this.panel.focused = false;
-    tui.setFocus(this.mainFocus);
+    if (this.viewHost?.hasView) this.viewHost.focusPrimary();
+    else tui.setFocus(this.mainFocus);
     tui.requestRender();
   }
 
   /** Start a fresh thread; earlier exchanges stay in main's session history. */
   async reset(): Promise<void> {
     await this.agent.abort();
-    this.pi.appendEntry(RESET_ENTRY, { timestamp: Date.now() });
+    if (this.family.kernel) await this.family.reset();
+    else this.pi.appendEntry(RESET_ENTRY, { timestamp: Date.now() });
     await this.agent.setThread([]);
     this.rebuild();
   }
@@ -442,12 +478,22 @@ export class SidebarController {
     this.main.bind(ctx);
     const branch = ctx.sessionManager.getBranch();
     this.headsUp.restore(branch, newSession);
-    this.modelSetting = modelFromBranch(branch)?.model ?? modelDefault();
+    if (newSession) {
+      await this.family.start(ctx);
+      this.agent.family = this.family.binding;
+    }
+    this.modelSetting = this.family.kernel?.model ?? modelFromBranch(branch)?.model ?? modelDefault();
     this.resolvedChoice = undefined;
     this.pendingNotes = [];
-    await this.agent.setThread(threadFromBranch(branch));
+    if (newSession || !this.family.kernel) await this.agent.setThread(this.family.kernel?.messages ?? threadFromBranch(branch));
     await this.quiz.restore(quizFromBranch(branch), ctx.cwd).catch(() => {});
+    const reopen = newSession && this.family.kernel?.open;
+    const sidebarFocused = this.family.kernel?.sidebarFocused;
     this.rebuild();
+    if (reopen && this.open(ctx)) {
+      if (sidebarFocused) this.focusSidebar();
+      else this.focusMain();
+    }
   }
 
   private availableModels(): ModelLike[] {
@@ -490,6 +536,7 @@ export class SidebarController {
   /** Switch Sidebar's model for this session (stored in main's session). */
   setModel(setting: string): string {
     this.modelSetting = setting;
+    this.family.preferences({ model: setting });
     this.resolvedChoice = undefined;
     const entry: ModelEntry = { version: 1, model: setting, at: Date.now() };
     try { this.pi.appendEntry(MODEL_ENTRY, entry); } catch { /* main's session went away */ }
@@ -816,7 +863,14 @@ export class SidebarController {
   }
 
   private submit(text: string): void {
+    this.family.preferences({ draft: "" });
     if (text === "/close") return this.close();
+    if (text === "/agents") { this.roster(); return; }
+    if (/^\/(transcript|context)(?:\s|$)/.test(text)) {
+      const [command, agentId] = text.trim().split(/\s+/);
+      void this.familyTranscript(agentId, command === "/context");
+      return;
+    }
     if (text === "/known") {
       void this.known();
       return;
@@ -854,6 +908,7 @@ export class SidebarController {
 
   /** A question for Sidebar's agent, after its cache preflight. */
   question(text: string): void {
+    this.pendingQuestion = this.main.ctx ? { text, capture: this.agent.captureQuestion() } : undefined;
     const check = this.agent.preflight();
     if (check.kind === "refuse") {
       this.panel?.notice({ kind: "warning", text: `Not sent: ${check.reason}` });
@@ -878,12 +933,14 @@ export class SidebarController {
   }
 
   private send(text: string, confirmed: boolean): void {
+    const capture = this.pendingQuestion?.text === text ? this.pendingQuestion.capture : undefined;
+    this.pendingQuestion = undefined;
     this.panel?.clearNotice();
     this.panel?.scrollToEnd();
     const failed = (error: unknown) => this.panel?.notice({ kind: "error", text: error instanceof Error ? error.message : String(error) });
     const cwd = this.main.ctx?.cwd;
     if (!this.quiz.on || !cwd) {
-      this.agent.ask(text, confirmed).catch(failed);
+      this.agent.ask(text, confirmed, capture).catch(failed);
       return;
     }
     // Quiz mode measures main's changes before each question; the status carries them.
@@ -892,7 +949,7 @@ export class SidebarController {
       .catch(() => {})
       .then(() => {
         this.quiz.sent();
-        return this.agent.ask(text, confirmed);
+        return this.agent.ask(text, confirmed, capture);
       })
       .catch(failed);
   }
@@ -938,6 +995,41 @@ export class SidebarController {
     return parts;
   }
 
+  private ensureViewHost(ctx: ExtensionContext): void {
+    if (this.viewHost || ctx.mode !== "tui") return;
+    const tui = this.hostTui ?? this.probe(ctx);
+    if (!tui || !canSplit(tui)) return;
+    this.hostTui = tui;
+    this.viewHost = new FamilyViewHost(tui as never, this.theme ?? ctx.ui.theme, getKeybindings());
+  }
+
+  private roster(): void {
+    const snapshot = this.family.snapshot();
+    if (!snapshot || !this.panel) return this.say("Family observation unavailable.", "warning");
+    this.panel.openPicker({
+      title: "Family agents (read-only subject)",
+      items: snapshot.agents.map(a => ({ value: a.agentId, label: `${a.label} · ${a.phase}`, description: `${a.agentId} · ${a.coverage}` })),
+      selected: Math.max(0, snapshot.agents.findIndex(a => a.agentId === snapshot.focusId)),
+      onSelect: id => { this.family.service.focus(id); this.say(`Sidebar subject: ${id}. /context attaches its transcript to your next question.`, "info"); },
+    });
+  }
+
+  private async familyTranscript(id: string | undefined, attach: boolean): Promise<void> {
+    const snapshot = this.family.snapshot();
+    const agentId = id ?? snapshot?.focusId;
+    if (!agentId || !snapshot?.agents.some(a => a.agentId === agentId)) return this.say("Agent unavailable: not enrolled in this family.", "warning");
+    const page = await readFamilyTranscript(this.family, { agentId, limitChars: 24_000 }, new FamilyRetrievalBudget());
+    if (page.unavailable) return this.say(page.unavailable, "warning");
+    const evidence = `Agent ${agentId}, transcript revision ${page.revision}, coverage ${page.coverage}:\n${page.text}${page.nextCursor ? "\n[More transcript omitted.]" : ""}`;
+    if (attach) {
+      this.agent.nextContext = evidence;
+      this.say(`Transcript from ${agentId} attached to the next Sidebar question only.`, "info");
+    } else {
+      this.noteLines(evidence.split("\n"));
+      this.panel?.scrollToEnd();
+    }
+  }
+
   private probe(ctx: ExtensionContext): FocusTui | undefined {
     let tui: FocusTui | undefined;
     try {
@@ -954,6 +1046,7 @@ export class SidebarController {
   }
 
   private render(): void {
+    if (this.panel && this.isOpen) this.family.preferences({ draft: this.panel.input.getText() });
     if (this.isOpen) this.tui?.requestRender();
   }
 

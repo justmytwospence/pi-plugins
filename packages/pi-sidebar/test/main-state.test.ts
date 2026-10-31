@@ -81,8 +81,27 @@ describe("MainState", () => {
     await pi.emit("message_end", { message: { role: "assistant", usage: { input: 10, output: 2, cacheRead: 90, cacheWrite: 0 } } }, ctx);
     expect(state.promptTokens()).toBe(100);
     await pi.emit("agent_end", {}, ctx);
+    expect(state.live.state).toBe("working");
+    await pi.emit("agent_settled", {}, ctx);
     expect(state.live.state).toBe("idle");
     expect(changes.length).toBeGreaterThan(3);
+  });
+
+  it("returns detached projected snapshots and ignores events after disposal", async () => {
+    const pi = new FakePi();
+    const state = new MainState(pi as never);
+    const { ctx } = fakeCtx();
+    await pi.emit("session_start", {}, ctx);
+    await pi.emit("agent_start", {}, ctx);
+    const snapshot = state.snapshot();
+    snapshot.live.tools.push({ id: "fake", name: "read", summary: "", startedAt: 0 });
+    expect(state.live.tools).toEqual([]);
+    const revision = snapshot.revision;
+    state.dispose();
+    await pi.emit("agent_settled", {}, ctx);
+    expect(state.live.state).toBe("working");
+    expect(state.snapshot().revision).toBe(revision);
+    expect(state.ctx).toBeUndefined();
   });
 
   it("previews long results", () => {

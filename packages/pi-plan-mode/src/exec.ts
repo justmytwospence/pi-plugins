@@ -28,6 +28,7 @@ import {
   responsesText,
 } from "./exec-cards.js";
 import { ExecReplyTracker, pausePresentation, recoveryChoices } from "./exec-interaction.js";
+import { discoverFamily } from "./family-contract.js";
 import { holdBlocked } from "./herdr-blocked.js";
 import { type ModelSpec, parseModelSpec } from "./implementation-models.js";
 import {
@@ -348,6 +349,9 @@ export function registerExec(pi: ExtensionAPI, host: ExecHost): ExecController {
     agentPurpose = purpose;
     agent = new PlannerAgent({
       id: "P",
+      family: discoverFamily(pi.events),
+      familyKind: purpose === "review" ? "reviewer" : "consultant",
+      familyOperationId: `exec:${state.negotiation?.executionId ?? state.planFile}:${purpose}`,
       spec,
       name: planner.name,
       cwd: ctx.cwd,

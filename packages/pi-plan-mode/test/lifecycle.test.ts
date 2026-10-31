@@ -9,9 +9,10 @@ import {
   type ActivitySection,
 } from "../src/activity.js";
 import { EXEC_ENTRY, type ExecState } from "../src/exec.js";
+import { FAMILY_CHANNEL, type FamilyRequest, type FamilyService, type PreparedAgent } from "../src/family-contract.js";
 import planMode from "../src/index.js";
 import { INLINE_ENTRY } from "../src/inline-plan.js";
-import type { PlannerSessionFactory, PlannerSessionHandle } from "../src/planner/session.js";
+import type { PlannerSessionFactory, PlannerSessionHandle, PlannerSessionOptions } from "../src/planner/session.js";
 import { SUBAGENT_PROGRESS_KIND } from "../src/subagent-progress.js";
 import { createCustomSelectorHarness, createMockContext, createMockPi } from "./support.js";
 
@@ -35,8 +36,12 @@ function record(id: string) {
   };
 }
 
-async function fixture() {
+async function fixture(family?: FamilyService) {
   const mock = createMockPi();
+  if (family)
+    mock.eventBus.on(FAMILY_CHANNEL, (data) => {
+      (data as FamilyRequest).service = family;
+    });
   let branch = [record("one")];
   let app: ReturnType<typeof createCustomSelectorHarness> | undefined;
   const ctx = createMockContext({
@@ -56,7 +61,9 @@ async function fixture() {
   let prompts = 0;
   let disposed = 0;
   const sinks: Array<(event: unknown) => void> = [];
-  const createSession: PlannerSessionFactory = async () => {
+  const created: PlannerSessionOptions[] = [];
+  const createSession: PlannerSessionFactory = async (_host, options) => {
+    created.push(options);
     let emit = (_event: unknown) => {};
     let streaming = false;
     return {
@@ -96,6 +103,7 @@ async function fixture() {
     ctx,
     sections,
     sinks,
+    created,
     event,
     branch: (id: string) => {
       branch = [record(id)];
@@ -118,6 +126,30 @@ async function fixture() {
     },
   };
 }
+
+test("restored planner enrollment does not block later Sidebar session_start initialization", async () => {
+  let initialize!: (value: PreparedAgent) => void;
+  const pending = new Promise<PreparedAgent>((resolve) => {
+    initialize = resolve;
+  });
+  const observation = {
+    agentId: "restored-uuid",
+    membership: { version: 1, familyId: "family", agentId: "restored-uuid" },
+    observer: () => undefined,
+    extensions: [],
+    env: {},
+    finish: () => {},
+    dispose: () => {},
+  } satisfies PreparedAgent;
+  const f = await fixture({ prepare: () => pending } as unknown as FamilyService);
+  assert.equal(f.created.length, 0, "plan-mode session_start returns before Sidebar binds");
+  initialize(observation);
+  await tick();
+  assert.equal(f.created.length, 1);
+  assert.equal(f.created[0]?.observer, observation.observer);
+  assert.equal(f.prompts, 0, "restored enrollment never resumes a paid turn");
+  await f.event("session_shutdown");
+});
 
 test("factory awaits shortcut settings, and the plan-mode shortcut awaits session initialization", async () => {
   const mock = createMockPi();
