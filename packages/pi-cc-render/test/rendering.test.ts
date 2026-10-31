@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { stripTerminalSequences } from "@earendil-works/pi-tui";
+import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
 // The config module reads its file at import time; isolate it from the real home directory.
@@ -138,6 +138,215 @@ describe("own result rows", () => {
     const plain = createCcstyleTool({ ...own, ccstyleOwnResult: undefined }, new Map() as any);
     const generic = plain.renderResult({ content: [{ type: "text", text: "Started" }] }, { expanded: false, isPartial: false }, theme, { state: {} }).render(80);
     expect(stripTerminalSequences(generic[0])).toMatch(/1 line returned/);
+  });
+});
+
+describe("real Pi execution cards with cc-render", () => {
+  // Public contract with managed excludeRenderers; never read the private dotfiles checkout.
+  const exclusions = ["ask_planner", "finish_plan"];
+  const question = "Keep the approved scope?";
+  const args = {
+    ask_planner: { message: question },
+    finish_plan: { report: "Implemented approved scope.", verification: "Unit tests passed.", concerns: "Manual check not run." },
+  };
+
+  async function fixture() {
+    const { ToolExecutionComponent, initTheme } = await import("@earendil-works/pi-coding-agent");
+    initTheme("dark", false);
+    const base = import.meta.resolve("@earendil-works/pi-coding-agent");
+    const { theme: nativeTheme } = await import(new URL("./modes/interactive/theme/theme.js", base).href);
+    const { CustomMessageComponent } = await import(new URL("./modes/interactive/components/custom-message.js", base).href);
+    // Dynamic sibling import keeps its implementation out of this package's rootDir.
+    const { registerExec } = await import(new URL("../../pi-plan-mode/src/exec.ts", import.meta.url).href);
+    const tools = new Map<string, any>();
+    const messages = new Map<string, any>();
+    registerExec({
+      on() {},
+      registerCommand() {},
+      registerTool: (definition: any) => tools.set(definition.name, definition),
+      registerMessageRenderer: (name: string, renderer: any) => messages.set(name, renderer),
+      events: { on() {}, emit() {} },
+    } as any, {} as any);
+    const { config } = await import("../src/config/config.ts");
+    const { installDefaultMode } = await import("../src/renderer/default-mode.ts");
+    const saved = { mode: config.mode, excludeRenderers: config.excludeRenderers };
+    const ui = { requestRender() {} };
+    const make = (name: keyof typeof args) => new ToolExecutionComponent(name, `${name}-composed`, args[name], {}, tools.get(name), ui as any, "/tmp");
+    return { tools, messages, nativeTheme, CustomMessageComponent, config, installDefaultMode, saved, make };
+  }
+
+  function details(name: keyof typeof args, state: "pending" | "success" | "error") {
+    return name === "ask_planner"
+      ? { question, planner: "Planner", number: 1, pending: state === "pending", reply: "Preserve the approved scope.", ...(state === "error" ? { error: "Consultation failed." } : {}) }
+      : {
+        ...args.finish_plan, planFile: "/tmp/plan.md", round: 1, pending: state === "pending",
+        changes: { edited: ["composed-detail.ts"], outside: [] },
+        ...(state === "error" ? {
+          error: "Review failed.",
+          action: "Ask to retry the review.",
+          negotiation: { phase: "paused", attempts: 1, pause: { reason: "failure", action: "Ask to retry the review." } },
+        } : {}),
+        ...(state === "success" ? { completion: "accepted" } : {}),
+        decision: { outcome: "accepted", summary: "Preserve the approved scope.", evidence: ["Reviewed composed evidence."], limitations: ["Planner did not rerun checks."], findings: [] },
+      };
+  }
+
+  // Count only the rendered tree, not unused shell variants allocated by native Pi.
+  // Sibling lockfiles may load distinct Box constructors, so instanceof is insufficient.
+  function shells(component: any): number {
+    return Number(component.constructor.name === "Box") + (component.children ?? []).reduce((n: number, child: any) => n + shells(child), 0)
+      + (component.child ? shells(component.child) : 0);
+  }
+
+  function expectNativeShell(component: any, width: number, nativeTheme: any, color: string) {
+    const lines: string[] = component.render(width);
+    expect(shells(component)).toBe(1);
+    expect(lines[0]).toBe(""); // Pi's sole inter-message spacer is outside the shell.
+    const background = nativeTheme.getBgAnsi(color);
+    expect(background).toMatch(/\x1b\[/);
+    const painted = lines.slice(1);
+    expect(painted.length).toBeGreaterThan(2);
+    expect(painted[0]).toBe(nativeTheme.bg(color, " ".repeat(width)));
+    expect(painted.at(-1)).toBe(nativeTheme.bg(color, " ".repeat(width)));
+    for (const line of painted) {
+      expect(visibleWidth(line)).toBe(width);
+      // Inspect the emitted SGR stream, including text and right padding: an arbitrary
+      // foreground escape is not evidence that the native background was painted.
+      let active = "";
+      for (const part of line.split(/(\x1b\[[\d;]*m)/)) {
+        if (part.startsWith("\x1b[")) {
+          const codes = part.slice(2, -1).split(";").map(Number);
+          for (let i = 0; i < codes.length; i++) {
+            const code = codes[i];
+            if (code === 0 || code === 49) active = "";
+            else if ((code >= 40 && code <= 47) || (code >= 100 && code <= 107)) active = `\x1b[${code}m`;
+            else if (code === 38 || code === 48 || code === 58) {
+              const length = codes[i + 1] === 2 ? 5 : 3;
+              if (code === 48) active = `\x1b[${codes.slice(i, i + length).join(";")}m`;
+              i += length - 1; // RGB/index values are not independent SGR commands.
+            }
+          }
+        } else if (visibleWidth(stripTerminalSequences(part)) > 0) expect(active).toBe(background);
+      }
+    }
+    return plain(lines).join("\n");
+  }
+
+  test.each(["ask_planner", "finish_plan"] as const)("%s retains original call/result and one native semantic shell", async (name) => {
+    const f = await fixture();
+    f.config.mode = "on";
+    f.config.excludeRenderers = exclusions;
+    const patch = f.installDefaultMode(new Map() as any);
+    try {
+      for (const state of ["pending", "success", "error"] as const) {
+        const component = f.make(name);
+        component.markExecutionStarted();
+        component.updateResult({ content: [{ type: "text", text: "MODEL_ONLY_RESULT" }], details: details(name, state), isError: state === "error" }, state === "pending");
+        for (const expanded of [false, true, false]) {
+          component.setExpanded(expanded);
+          expect((component as any).getCallRenderer()).toBe(f.tools.get(name).renderCall);
+          expect((component as any).getResultRenderer()).toBe(f.tools.get(name).renderResult);
+          expect((component as any).getRenderShell()).toBe("default");
+          for (const width of [46, 120]) {
+            const text = expectNativeShell(component, width, f.nativeTheme, { pending: "toolPendingBg", success: "toolSuccessBg", error: "toolErrorBg" }[state]);
+            const call = plain((component as any).callRendererComponent.render(width - 2)).join("\n");
+            expect(call).toContain(name === "ask_planner" ? question : "Implementation review");
+            expect(call).not.toMatch(/"(?:message|report|verification|concerns)"\s*:/);
+            expect(text).not.toContain(JSON.stringify(args[name]));
+            expect(text).not.toMatch(/"(?:message|report|verification|concerns)"\s*:/);
+            expect(text).not.toContain("MODEL_ONLY_RESULT");
+            expect(text).not.toContain("lines returned");
+            expect(text).toContain(name === "ask_planner"
+              ? { pending: "Planner thinking…", success: "Planner answered", error: "Consultation unavailable" }[state]
+              : { pending: "Reviewing", success: expanded ? "Accepted" : "Reviewed", error: "Review did not finish" }[state]);
+            if (name === "finish_plan") {
+              for (const value of Object.values(args.finish_plan)) expect(text).toContain(value);
+              if (state === "error") expect(text).toContain("Ask to retry the review.");
+              if (expanded && state !== "pending") {
+                expect(text).toContain("Reviewed composed evidence.");
+                expect(text).toContain("Planner did not rerun checks.");
+                expect(text).toContain("composed-detail.ts");
+              }
+              if (state === "success") {
+                for (const detail of ["Reviewed composed evidence.", "Planner did not rerun checks.", "composed-detail.ts"])
+                  if (expanded) expect(text).toContain(detail);
+                  else expect(text).not.toContain(detail);
+                if (!expanded) expect(text.toLowerCase()).toContain("ctrl+o");
+              }
+            } else {
+              if (expanded || state === "pending") expect(text).toContain("Question");
+              if (state === "error") expect(text).toContain("Consultation failed.");
+              if (state === "success") expect(text).toContain("Preserve the approved scope.");
+            }
+          }
+        }
+      }
+    } finally {
+      patch.shutdown();
+      Object.assign(f.config, f.saved);
+    }
+  });
+
+  test("negative controls: missing or alias-only exclusions reproduce cc-render takeover and raw completion args", async () => {
+    const f = await fixture();
+    f.config.mode = "on";
+    const patch = f.installDefaultMode(new Map() as any);
+    try {
+      for (const excluded of [[], ["plan_ask_planner"]]) {
+        f.config.excludeRenderers = excluded;
+        for (const name of exclusions as Array<keyof typeof args>) {
+          const component = f.make(name);
+          component.markExecutionStarted();
+          component.updateResult({ content: [], details: details(name, "success"), isError: false });
+          expect((component as any).getCallRenderer()).not.toBe(f.tools.get(name).renderCall);
+          expect((component as any).getResultRenderer()).not.toBe(f.tools.get(name).renderResult);
+          expect((component as any).getRenderShell()).toBe("self");
+          for (const width of [46, 120]) {
+            const lines = component.render(width);
+            expect(shells(component)).toBe(0);
+            expect(lines.join("\n")).not.toContain(f.nativeTheme.getBgAnsi("toolSuccessBg"));
+            const text = plain(lines).join("\n");
+            expect(text).toContain(name === "ask_planner" ? "Ask planner" : "Finish plan");
+            const call = plain((component as any).callRendererComponent.render(width)).join("\n");
+            expect(call).not.toContain(name === "ask_planner" ? "Consultation ·" : "Implementation review");
+            if (name === "finish_plan" && width === 120) expect(text).toContain('"report":');
+          }
+        }
+      }
+    } finally {
+      patch.shutdown();
+      Object.assign(f.config, f.saved);
+    }
+  });
+
+  test("cc-render off and standalone custom completion each retain exactly one native-colored shell", async () => {
+    const f = await fixture();
+    f.config.mode = "off";
+    f.config.excludeRenderers = [];
+    const patch = f.installDefaultMode(new Map() as any);
+    try {
+      for (const state of ["pending", "success", "error"] as const) {
+        const color = { pending: "toolPendingBg", success: "toolSuccessBg", error: "toolErrorBg" }[state];
+        const completion = new f.CustomMessageComponent({ customType: "plan-mode-finish", content: "", details: details("finish_plan", state) }, f.messages.get("plan-mode-finish"));
+        const tools = (["ask_planner", "finish_plan"] as const).map((name) => {
+          const component = f.make(name);
+          component.updateResult({ content: [], details: details(name, state), isError: state === "error" }, state === "pending");
+          return component;
+        });
+        for (const expanded of [false, true]) {
+          for (const component of [...tools, completion]) {
+            component.setExpanded(expanded);
+            for (const width of [46, 120]) {
+              const text = expectNativeShell(component, width, f.nativeTheme, color);
+              expect(text).not.toMatch(/"(?:message|report|verification|concerns)"\s*:/);
+            }
+          }
+        }
+      }
+    } finally {
+      patch.shutdown();
+      Object.assign(f.config, f.saved);
+    }
   });
 });
 
@@ -324,8 +533,13 @@ describe("tool groups", () => {
             expect(text).toContain("Manual check not run.");
             if (!isPartial) {
               expect(text).toContain("Scope boundary");
-              expect(text).toContain("Keep the agreed boundary.");
-              expect(text).toContain("Remove unrelated changes.");
+              expect(text).not.toContain("Keep the agreed boundary.");
+              expect(text).not.toContain("Remove unrelated changes.");
+              options.expanded = true;
+              const expandedText = plain(root.render(width)).join("\n");
+              expect(expandedText).toContain("Keep the agreed boundary.");
+              expect(expandedText).toContain("Remove unrelated changes.");
+              options.expanded = false;
             }
           }
           expect(lines.some((line) => /\x1b\[[\d;]+m/.test(line))).toBe(true);
@@ -342,9 +556,9 @@ describe("tool groups", () => {
               const text = plain(lines).join("\n");
               rendered.push(text);
               expect(text).toContain({
-                accepted: "Accepted",
-                no_review: "Completed without review",
-                user_override: "Completed by user override",
+                accepted: expanded ? "Accepted" : "Reviewed",
+                no_review: expanded ? "Completed without review" : "Review skipped",
+                user_override: expanded ? "Completed by user override" : "Review overridden",
               }[outcome]);
               for (const value of ["Implemented approved scope.", "Unit tests passed.", "Manual check not run."])
                 expect(text).toContain(value);
