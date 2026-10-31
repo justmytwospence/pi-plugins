@@ -11,7 +11,7 @@
 // identified idle Normal mode; native and Insert editors keep their text/edit keys. A modal state
 // change, autocomplete or another focused surface releases the virtual selection immediately.
 // Adapted from tintinweb/pi-subagents (MIT): https://github.com/tintinweb/pi-subagents
-import { type TUI, isKeyRelease, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { type TUI, isKeyRelease, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { type ActivityEntry, type ActivityPill, type ActivitySection, focusedComponent, leavesPromptDown, mainEditorFocused, readEditorMode, stoppable as rowStoppable } from "../activity.ts";
 import type { Run } from "../run.ts";
 import { runLabel } from "../label.ts";
@@ -94,13 +94,9 @@ export interface FleetFrame {
   theme: Theme & { inverse?(text: string): string };
 }
 
-/** Keep each task on one full-width line; move stats below only when they do not fit. */
+/** Keep each task on one line, truncating its identity before the right-aligned stats. */
 function taskRows(prefix: string, identity: string, metadata: string, width: number): string[] {
-  const left = prefix + identity;
-  if (visibleWidth(left) + visibleWidth(metadata) + 1 <= width) return [rightAlign(left, metadata, width)];
-  const lines = [truncateToWidth(left, width)];
-  if (metadata) lines.push(rightAlign("", metadata, width));
-  return lines;
+  return [rightAlign(prefix + identity, metadata, width)];
 }
 
 export function renderFleet({ roster, selected, current, active, stopArmed, canBackground, normalKeys = true, note, now, width, theme }: FleetFrame): string[] {

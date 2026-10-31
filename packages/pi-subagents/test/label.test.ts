@@ -62,16 +62,17 @@ test("long descriptions truncate in the fleet but still wrap intact in the above
   const label = "Investigate authentication failures after session renewal and identify the precise source of stale cached credentials";
   const run = fakeRun({ label, agent: "general" });
   expect(taskLabel("unused", label)).toBe(label);
-  for (const width of [24, 50, 200]) {
+  for (const width of [24, 46, 120, 200]) {
     const fleet = renderFleet({ roster: fleetRoster([run], 1_000), selected: 1, active: true, now: 1_000, width, theme: plain });
     const task = fleet[2]!.replace(/\x1b\[[0-9;]*m/gu, "");
     if (width < 200) {
-      expect(task).toBe(` ● ${label}`.slice(0, width - 3) + "...");
-      expect(fleet).toHaveLength(5); // hint, main, task, stats, spacer
+      const stats = "1s · ↓ 0 tokens";
+      expect(task).toBe(` ● ${label}`.slice(0, width - visibleWidth(stats) - 4) + `... ${stats}`);
     } else {
       expect(task).toContain(`${label}  general`);
-      expect(fleet).toHaveLength(4); // stats fit beside the task
     }
+    expect(fleet).toHaveLength(4); // hint, main, task with stats, spacer
+    expect(task).toMatch(/1s · ↓ 0 tokens$/u);
     expect(fleet.every((line) => visibleWidth(line) <= width)).toBe(true);
     const widget = renderSection({ runs: [run], queued: 0, now: 1_000, frame: 0, width, theme: plain, maxLines: 3 });
     expect(widget.lines.join("\n").replace(/\s+/gu, " ")).toContain(label);
@@ -82,8 +83,9 @@ test("long descriptions truncate in the fleet but still wrap intact in the above
   }
   const wide = fakeRun({ label: "界".repeat(90) });
   const fleet = renderFleet({ roster: fleetRoster([wide], 0), selected: 1, active: true, now: 0, width: 50, theme: plain });
-  expect(fleet[2]?.match(/界/gu)).toHaveLength(22);
-  expect(fleet).toHaveLength(5);
+  expect(fleet[2]?.match(/界/gu)).toHaveLength(14);
+  expect(fleet[2]).toMatch(/0s · ↓ 0 tokens$/u);
+  expect(fleet).toHaveLength(4);
   expect(fleet.every((line) => visibleWidth(line) <= 50)).toBe(true);
 });
 
