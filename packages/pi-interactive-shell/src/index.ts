@@ -1,7 +1,7 @@
 // Explicit foreground handoff; suggestion UI remains owned by optional pi-next-prompt.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { failure, handoff, interactiveCommand, type HandoffResult } from "./handoff.ts";
-import { createFocusProxy, layoutShape, resolveTranscript, TranscriptPanels } from "./transcript.ts";
+import { createFocusProxy, hideDuplicateStatus, layoutShape, resolveTranscript, TranscriptPanels } from "./transcript.ts";
 
 export default function interactiveShell(pi: ExtensionAPI) {
   const terminalAvailable = () => process.stdin.isTTY === true && process.stdout.isTTY === true;
@@ -104,7 +104,10 @@ export default function interactiveShell(pi: ExtensionAPI) {
       }
       const { chat } = resolved;
       const panel = handoff(tui, theme, command, event.cwd, (result, snapshot) => {
-        if (snapshot) transcript.replace(chat, panel, snapshot);
+        if (snapshot) {
+          transcript.replace(chat, panel, snapshot);
+          hideDuplicateStatus(chat, snapshot, event.command, result, () => tui.requestRender());
+        }
         tui.requestRender();
         done(result);
       }, true, true, () => { started = true; lastHandoff = `inline (${resolved.source})`; });

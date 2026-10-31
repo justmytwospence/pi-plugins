@@ -1,6 +1,7 @@
+import { BashExecutionComponent, initTheme } from "@earendil-works/pi-coding-agent";
 import { Container } from "@earendil-works/pi-tui";
 import { expect, test, vi } from "vitest";
-import { createFocusProxy, resolveTranscript, TranscriptPanels } from "../src/transcript.ts";
+import { createFocusProxy, hideDuplicateStatus, resolveTranscript, TranscriptPanels } from "../src/transcript.ts";
 
 const child = () => ({ render: () => ["unrelated"], invalidate() {} });
 function tree() {
@@ -147,6 +148,43 @@ test("a clear or rebuild never resurrects a removed live panel or snapshot", () 
   const next = child(); panels.insert(chat, next); panels.replace(chat, next, child());
   chat.clear(); const unrelated = child(); chat.addChild(unrelated);
   panels.clear(); expect(chat.children).toEqual([unrelated]);
+});
+
+test.each([
+  { exitCode: 0, cancelled: false }, { exitCode: 1, cancelled: false }, { exitCode: 130, cancelled: true },
+])("hides only the newly appended matching card (%j)", async completion => {
+  initTheme("dark", false);
+  const { chat } = tree();
+  const result = { ...completion, output: "status only", truncated: false as const };
+  const card = (command = "i true", output = result.output) => {
+    const component = new BashExecutionComponent(command, { requestRender() {} } as any);
+    component.appendOutput(output); component.setComplete(result.exitCode, result.cancelled);
+    return component;
+  };
+  const old = card(), snapshot = child(), render = vi.fn();
+  chat.addChild(old); chat.addChild(snapshot);
+  hideDuplicateStatus(chat, snapshot, "i true", result, render);
+  const ordinary = card("true"), differentOutput = card("i true", "different result"), duplicate = card();
+  chat.addChild(ordinary); chat.addChild(differentOutput); chat.addChild(duplicate);
+  await new Promise(resolve => setImmediate(resolve));
+  expect(chat.children).toEqual([old, snapshot, ordinary, differentOutput]);
+  expect(render).toHaveBeenCalledOnce();
+});
+
+test.each(["cleared", "ambiguous"])("keeps native history if the preview is %s", async state => {
+  initTheme("dark", false);
+  const { chat } = tree(), snapshot = child(), render = vi.fn();
+  const result = { output: "status", exitCode: 0, cancelled: false, truncated: false as const };
+  chat.addChild(snapshot);
+  hideDuplicateStatus(chat, snapshot, "i true", result, render);
+  if (state === "cleared") chat.clear();
+  const cards = Array.from({ length: state === "ambiguous" ? 2 : 1 }, () => {
+    const card = new BashExecutionComponent("i true", { requestRender() {} } as any);
+    card.appendOutput(result.output); card.setComplete(0, false); chat.addChild(card); return card;
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  for (const card of cards) expect(chat.children).toContain(card);
+  expect(render).not.toHaveBeenCalled();
 });
 
 test("focus proxy has zero rows and forwards only focus/input/disposal", () => {

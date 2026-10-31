@@ -1,4 +1,5 @@
 import type { Component } from "@earendil-works/pi-tui";
+import type { HandoffResult } from "./handoff.ts";
 
 /** Unsupported Pi 1.4.0 document tree; fail closed if its shape changes. */
 export interface ChatContainer {
@@ -100,7 +101,30 @@ export function resolveTranscript(tui: unknown):
   return chat ? { chat, source: "document-root" } : reject("regular transcript document not found or malformed", document);
 }
 
-/** Own only frozen children, never Pi's status messages or other extensions' UI. */
+/** Hide only the newly appended native status card when its preview is retained.
+ * Pi appends and records the user_bash result after our handler resolves. Defer
+ * until then; never change the result or suppress cards reconstructed on reload.
+ * Private component fields are checked conservatively: layout/API drift leaves
+ * the native card visible rather than removing an unrelated transcript entry.
+ */
+export function hideDuplicateStatus(chat: ChatContainer, snapshot: Component, command: string, result: HandoffResult, requestRender: () => void) {
+  const existing = new Set(chat.children);
+  setImmediate(() => {
+    if (!chat.children.includes(snapshot)) return;
+    const matches = chat.children.filter(child => {
+      if (existing.has(child) || child.constructor.name !== "BashExecutionComponent") return false;
+      const card = child as unknown as { command?: string; outputLines?: string[]; exitCode?: number; status?: string };
+      const status = result.cancelled ? "cancelled" : result.exitCode !== 0 ? "error" : "complete";
+      return card.command === command && card.exitCode === result.exitCode && card.status === status &&
+        Array.isArray(card.outputLines) && card.outputLines.join("\n") === result.output;
+    });
+    if (matches.length !== 1) return;
+    chat.removeChild(matches[0]!);
+    requestRender();
+  });
+}
+
+/** Own frozen children; native history remains managed by Pi. */
 export class TranscriptPanels {
   private readonly snapshots = new Map<Component, ChatContainer>();
 

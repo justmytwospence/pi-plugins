@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { expect, test, vi } from "vitest";
-import { createFocusProxy, resolveTranscript, TranscriptPanels } from "../src/transcript.ts";
+import { createFocusProxy, hideDuplicateStatus, resolveTranscript, TranscriptPanels } from "../src/transcript.ts";
 import { TerminalPanel } from "../src/panel.ts";
 
 // The emulator and panel are real; no child process or process-tree signalling.
@@ -190,7 +190,7 @@ runtimeTest("the lifecycle contract requires an installed Pi 1.4.0 (or PI_INTERA
 
 for (const renderer of ["regular", "fullscreen"] as const) {
   for (const nested of renderer === "fullscreen" ? [false, true] : [false]) {
-    runtimeTest(`${renderer}: populated${nested ? " nested" : ""} transcript retains head/tail before the bash card and assistant reply`, async () => {
+    runtimeTest(`${renderer}: populated${nested ? " nested" : ""} transcript retains head/tail without a duplicate bash card before the assistant reply`, async () => {
       const h = harness(renderer, { populated: true, primaryRoot: renderer === "fullscreen", nested });
       const panels = new TranscriptPanels();
       let data!: (text: string) => void;
@@ -221,6 +221,7 @@ for (const renderer of ["regular", "fullscreen"] as const) {
           expect(frozen).toBeDefined();
           snapshot = frozen;
           panels.replace(resolved.chat, panel, frozen!);
+          hideDuplicateStatus(resolved.chat, frozen!, "i retained-output-fixture", result, () => tui.requestRender());
           done(result);
         }, async () => pty, true, true);
         panels.insert(resolved.chat, panel);
@@ -246,8 +247,8 @@ for (const renderer of ["regular", "fullscreen"] as const) {
         expect(h.mode.ui.getFocusedComponent()).toBe(h.editor);
         expect(h.chat.children).toEqual([h.resumed, snapshot]);
 
-        // Pi's normal status-only bash result and a later assistant message must
-        // append after the frozen panel, not replace it or move it to an overlay.
+        // Pi still records/appends its normal status-only result. Only its
+        // redundant display is removed while the richer snapshot remains.
         const card = new BashExecutionComponent("i retained-output-fixture", h.mode.ui);
         card.appendOutput(result.output);
         card.setComplete(result.exitCode, result.cancelled);
@@ -259,13 +260,15 @@ for (const renderer of ["regular", "fullscreen"] as const) {
             cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
         });
         h.chat.addChild(assistant);
-        expect(h.chat.children).toEqual([h.resumed, snapshot, card, assistant]);
+        await mounted();
+        expect(h.chat.children).toEqual([h.resumed, snapshot, assistant]);
         const transcript = h.document.render(80).join("\n");
-        for (const marker of ["resumed user message", "retained-row-01", "rows omitted", "retained-row-60", result.output, "Subsequent assistant response"]) {
+        for (const marker of ["resumed user message", "retained-row-01", "rows omitted", "retained-row-60", "Subsequent assistant response"]) {
           expect(transcript).toContain(marker);
         }
-        expect(transcript.indexOf("retained-row-60")).toBeLessThan(transcript.indexOf(result.output));
-        expect(transcript.indexOf(result.output)).toBeLessThan(transcript.indexOf("Subsequent assistant response"));
+        expect(transcript).not.toContain(result.output);
+        expect(transcript).not.toContain("$ i retained-output-fixture");
+        expect(transcript.indexOf("retained-row-60")).toBeLessThan(transcript.indexOf("Subsequent assistant response"));
         h.terminal.setSize(80, 60);
         h.terminal.writes.length = 0;
         h.mode.ui.renderNow();
@@ -277,7 +280,12 @@ for (const renderer of ["regular", "fullscreen"] as const) {
         expect(h.mode.extensionDialogs).toEqual([]);
         expect(dispose).toHaveBeenCalledTimes(2);
         panels.clear();
-        expect(h.chat.children).toEqual([h.resumed, card, assistant]);
+        expect(h.chat.children).toEqual([h.resumed, assistant]);
+        // A history rebuild has no memory-only snapshot; its native status card
+        // must remain visible, with no persistent/global renderer suppression.
+        h.chat.addChild(card);
+        await mounted();
+        expect(h.document.render(80).join("\n")).toContain(result.output);
       } finally {
         if (panel) await panel.shutdown();
         await promise;

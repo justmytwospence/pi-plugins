@@ -1,3 +1,4 @@
+import { BashExecutionComponent, initTheme } from "@earendil-works/pi-coding-agent";
 import { Container } from "@earendil-works/pi-tui";
 import { afterEach, expect, test, vi } from "vitest";
 import interactiveShell from "../src/index.ts";
@@ -49,7 +50,14 @@ test.each([false, true])("inline manual completion returns immediately with only
   finish(status, frozen);
   expect(await running).toEqual({ result: status });
   expect(h.chat.children).toEqual([before, frozen, after]);
-  await new Promise(resolve => setImmediate(resolve)); expect(h.pi.sendMessage).not.toHaveBeenCalled();
+  // Match Pi's user_bash continuation: append/display and record the unchanged
+  // result after our handler returns, for both !i and !!i.
+  initTheme("dark", false);
+  const card = new BashExecutionComponent("i true", { requestRender() {} } as any, excluded);
+  h.chat.addChild(card); card.appendOutput(status.output); card.setComplete(status.exitCode, status.cancelled);
+  await new Promise(resolve => setImmediate(resolve));
+  expect(h.chat.children).toEqual([before, frozen, after]);
+  expect(h.pi.sendMessage).not.toHaveBeenCalled();
   await h.handlers.get("session_shutdown")(); expect(h.chat.children).toEqual([before, after]);
 });
 
