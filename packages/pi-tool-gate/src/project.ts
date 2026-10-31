@@ -29,6 +29,41 @@ function verifyNonGit(launch: string): void {
   }
 }
 
+function parseMainWorktreeNul(output: string): string {
+  const end = output.indexOf("\0\0");
+  if (end < 0) throw new Error("Missing main checkout metadata");
+  const fields = output.slice(0, end).split("\0");
+  const first = fields[0];
+  if (!first?.startsWith("worktree ") || fields.includes("bare") ||
+      fields.slice(1).some(field => field.startsWith("worktree "))) {
+    throw new Error("Invalid or bare main checkout metadata");
+  }
+  const mainPath = first.slice("worktree ".length);
+  if (!path.isAbsolute(mainPath)) throw new Error("Invalid main checkout path");
+  return mainPath;
+}
+
+function parseMainWorktreeLegacy(output: string): string {
+  // Old Git writes raw, unquoted paths. Validate the WHOLE listing, but do not
+  // mistake this grammar for proof of path boundaries: a path can forge records.
+  if (!output.endsWith("\n\n")) throw new Error("Incomplete legacy worktree listing");
+  const records = output.slice(0, -2).split("\n\n");
+  let mainPath = "";
+  const paths = new Set<string>();
+  for (const record of records) {
+    const fields = record.split("\n");
+    const candidate = fields[0]?.startsWith("worktree ") ? fields[0].slice(9) : "";
+    if (fields.length !== 3 || !path.isAbsolute(candidate) || paths.has(candidate) || /[\x00-\x1f\x7f]/u.test(candidate) ||
+        !/^HEAD (?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/u.test(fields[1]!) ||
+        !(fields[2] === "detached" || /^branch refs\/[^\s\x00-\x1f\x7f]+$/u.test(fields[2]!))) {
+      throw new Error("Invalid or ambiguous legacy worktree listing");
+    }
+    paths.add(candidate);
+    if (!mainPath) mainPath = candidate;
+  }
+  return mainPath;
+}
+
 /** Shared policy belongs to the active checkout; local approvals belong to its main checkout. */
 export async function resolveProject(cwd: string, exec: ExtensionAPI["exec"]): Promise<ProjectContext> {
   try {
@@ -63,17 +98,26 @@ export async function resolveProject(cwd: string, exec: ExtensionAPI["exec"]): P
     const commonDir = canonicalOutputPath(await git(cwd, ["rev-parse", "--git-common-dir"]), launch, true);
     if (gitDir === commonDir) return { cwd: launch, root, main: root, isGit: true };
 
-    const worktrees = await git(cwd, ["worktree", "list", "--porcelain", "-z"]);
-    const end = worktrees.indexOf("\0\0");
-    if (end < 0) throw new Error("Missing main checkout metadata");
-    const fields = worktrees.slice(0, end).split("\0");
-    const first = fields[0];
-    if (!first?.startsWith("worktree ") || fields.includes("bare") ||
-        fields.slice(1).some(field => field.startsWith("worktree "))) {
-      throw new Error("Invalid or bare main checkout metadata");
+    // Keep raw status/stderr: only Git's specific old-version diagnostic permits
+    // a retry. A timeout, malformed successful output or any other error must deny.
+    const list = (nul: boolean) => exec("env", ["LC_ALL=C", "git", "-C", cwd, "worktree", "list", "--porcelain", ...(nul ? ["-z"] : [])], { timeout: 2_000 });
+    let listing = await list(true);
+    const legacy = !listing.killed && listing.code === 129 &&
+      /^error: unknown switch `z'\n(?:usage: [\s\S]*)?$/u.test(listing.stderr);
+    if (legacy) listing = await list(false);
+    if (listing.killed || listing.code !== 0) throw new Error("Git metadata lookup failed");
+    const mainPath = legacy ? parseMainWorktreeLegacy(listing.stdout) : parseMainWorktreeNul(listing.stdout);
+    if (legacy) {
+      // Raw newline injection can mimic even a complete valid listing. Only a
+      // canonical main/.git directory (not a gitfile or symlink) proves the main
+      // boundary independently of those lines. Separate git dirs/submodules do
+      // not have that proof on old Git; never infer a checkout from their names.
+      const candidate = realpathSync(mainPath);
+      const metadata = path.join(candidate, ".git");
+      if (commonDir !== metadata || !lstatSync(metadata).isDirectory()) {
+        throw new Error("Unprovable legacy main checkout boundary");
+      }
     }
-    const mainPath = first.slice("worktree ".length);
-    if (!path.isAbsolute(mainPath)) throw new Error("Invalid main checkout path");
     const verify = async (candidate: string) => {
       const main = realpathSync(candidate);
       if (canonicalOutputPath(await git(main, ["rev-parse", "--show-toplevel"]), main) !== main ||

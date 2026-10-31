@@ -94,7 +94,11 @@ All scopes are added together.
 | User | `~/.pi/agent/tool-gate.json` | Yes, unless globals are managed |
 | User, shared | `~/.config/agents/tool-gate.json` | No: it names the file |
 
-The active Git checkout root supplies shared policy even from a subdirectory; linked worktrees use their own shared files and the main checkout's local file. Nested repositories are separate projects; outside Git the launch directory is used. If the main checkout cannot be resolved reliably, policy-requiring calls are blocked rather than guessing. The files use a Claude Code-style `permissions` block. Permission lists and `directories.read`/`directories.write` are additive; other arrays replace. The opencode and Claude Code ports read the same shared files and ignore the block.
+The active Git checkout root supplies shared policy even from a subdirectory; linked worktrees use their own shared files and the main checkout's local file. Nested repositories are separate projects; outside Git the launch directory is used. If the main checkout cannot be resolved reliably, policy-requiring calls are blocked rather than guessing.
+
+Worktree discovery prefers modern Git's NUL-delimited porcelain output, retaining support for newline-containing paths and existing separate-Git-directory/submodule layouts. On older Git (including 2.30), only an exact unsupported-`-z` diagnostic (exit 129, not killed) triggers a retry with line-oriented porcelain; timeouts, other errors and malformed NUL output never trigger a retry. The fallback validates the complete, unquoted listing, including record fields and final terminators, and accepts only a verified main checkout whose canonical common directory is exactly `<main>/.git` and whose `.git` is an actual directory, not a symlink. Ordinary spaces and Unicode are supported; ambiguous or control-character paths, malformed or bare records, symlinked `.git`, separate Git directories and submodules are rejected by the legacy fallback. Unsupported layouts block policy-requiring calls rather than guessing or falling back to the launch directory.
+
+The files use a Claude Code-style `permissions` block. Permission lists and `directories.read`/`directories.write` are additive; other arrays replace. The opencode and Claude Code ports read the same shared files and ignore the block.
 
 ```json
 {

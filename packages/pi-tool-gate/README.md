@@ -154,7 +154,11 @@ All scopes are added together; no scope overrides another's deny or ask.
 | user | `~/.pi/agent/tool-gate.json` (`PI_CODING_AGENT_DIR` honored), `permissions` | the dialog, `/gate rules`, unless globals are managed |
 | user (shared) | `$XDG_CONFIG_HOME/agents/tool-gate.json` (default `~/.config/agents/`), `permissions` | you; read-only for `/gate rules` (it may be managed by another tool) |
 
-The active Git checkout root determines shared files even when launched in a subdirectory; linked worktrees use their own shared files and the main checkout's local file. Nested repositories are separate projects; outside Git the launch directory is used. Unresolvable main-checkout metadata blocks policy-requiring calls rather than guessing. The files take a Claude Code-style `permissions` block:
+The active Git checkout root determines shared files even when launched in a subdirectory; linked worktrees use their own shared files and the main checkout's local file. Nested repositories are separate projects; outside Git the launch directory is used. Unresolvable main-checkout metadata blocks policy-requiring calls rather than guessing.
+
+Worktree discovery prefers modern Git's NUL-delimited porcelain output, retaining support for newline-containing paths and existing separate-Git-directory/submodule layouts. On older Git (including 2.30), only an exact unsupported-`-z` diagnostic (exit 129, not killed) triggers a retry with line-oriented porcelain; timeouts, other errors and malformed NUL output never trigger a retry. The fallback validates the complete, unquoted listing, including record fields and final terminators, and accepts only a verified main checkout whose canonical common directory is exactly `<main>/.git` and whose `.git` is an actual directory, not a symlink. Ordinary spaces and Unicode are supported; ambiguous or control-character paths, malformed or bare records, symlinked `.git`, separate Git directories and submodules are rejected by the legacy fallback. Unsupported layouts block policy-requiring calls rather than guessing or falling back to the launch directory.
+
+The files take a Claude Code-style `permissions` block:
 
 ```json
 {

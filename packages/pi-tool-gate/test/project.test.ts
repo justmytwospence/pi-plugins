@@ -23,6 +23,17 @@ const exec: ExtensionAPI["exec"] = async (command, args, options) => {
     return { stdout: out.stdout ?? "", stderr: out.stderr ?? "", code: out.code ?? 1, killed: out.killed ?? false };
   }
 };
+const unsupportedZ = { stdout: "", stderr: "error: unknown switch `z'\nusage: git worktree list [--porcelain]\n", code: 129, killed: false };
+// Only intercept the unsupported option; exercise actual Git metadata and legacy listings.
+function legacyExec(output?: string, failure = unsupportedZ): ExtensionAPI["exec"] {
+  return async (command, args, options) => {
+    if (args.includes("--porcelain") && args.includes("-z")) return { ...failure };
+    if (args.includes("--porcelain") && output !== undefined) {
+      return { stdout: output, stderr: "", code: 0, killed: false };
+    }
+    return exec(command, args, options);
+  };
+}
 const fsOriginalLstat = (await vi.importActual<typeof import("node:fs")>("node:fs")).lstatSync;
 const dirs: string[] = [];
 afterEach(() => {
@@ -309,6 +320,166 @@ test.each(["relative", "worktree-specific", "worktree-fallback", "mismatched", "
   } else {
     await expect(resolveProject(root, isolated)).rejects.toThrow("Policy resolution failed");
   }
+});
+
+async function linkedFixture(name = "main", separate = false) {
+  const dir = setup();
+  const main = path.join(dir, name);
+  const root = path.join(dir, "linked ü ");
+  mkdirSync(main);
+  await git(main, "init", ...(separate ? ["--separate-git-dir", path.join(dir, "metadata")] : []));
+  await commit(main);
+  await git(main, "worktree", "add", "-b", "linked", root);
+  return { dir, main, root };
+}
+const oid = "a".repeat(40);
+const record = (file: string) => `worktree ${file}\nHEAD ${oid}\nbranch refs/heads/main\n\n`;
+
+test.each(["main", " main ü 中  "])("legacy Git resolves ordinary linked checkouts (%s)", async name => {
+  const { main, root } = await linkedFixture(name);
+  const cwd = path.join(root, "nested");
+  mkdirSync(cwd);
+  const spy = vi.fn(legacyExec());
+  expect(await resolveProject(root, spy)).toEqual({ cwd: root, root, main, isGit: true });
+  expect(await resolveProject(cwd, spy)).toEqual({ cwd, root, main, isGit: true });
+  expect(spy).toHaveBeenCalledWith("env", ["LC_ALL=C", "git", "-C", root, "worktree", "list", "--porcelain", "-z"], { timeout: 2_000 });
+  expect(spy).toHaveBeenCalledWith("env", ["LC_ALL=C", "git", "-C", root, "worktree", "list", "--porcelain"], { timeout: 2_000 });
+});
+
+test.each([
+  { ...unsupportedZ, code: 1 },
+  { ...unsupportedZ, code: 128 },
+  { ...unsupportedZ, killed: true },
+  { ...unsupportedZ, code: 0 },
+  { ...unsupportedZ, stderr: "" },
+  { ...unsupportedZ, stderr: "error: unknown option `z'\n" },
+  { ...unsupportedZ, stderr: "error: unknown switch `x'\n" },
+  { ...unsupportedZ, stderr: "prefix error: unknown switch `z'\n" },
+])("legacy fallback requires the exact unsupported-option failure: %j", async failure => {
+  const { root } = await linkedFixture();
+  const spy = vi.fn(legacyExec(undefined, failure));
+  await expect(resolveProject(root, spy)).rejects.toThrow("Policy resolution failed");
+  expect(spy.mock.calls.filter(call => call[1].includes("--porcelain") && !call[1].includes("-z"))).toHaveLength(0);
+});
+
+test.each(["ETIMEDOUT", "unavailable"])("legacy discovery does not retry exceptions (%s)", async message => {
+  const { root } = await linkedFixture();
+  const spy = vi.fn<ExtensionAPI["exec"]>(async (command, args, options) => {
+    if (args.includes("--porcelain")) throw new Error(message);
+    return exec(command, args, options);
+  });
+  await expect(resolveProject(root, spy)).rejects.toThrow("Policy resolution failed");
+  expect(spy.mock.calls.filter(call => call[1].includes("--porcelain"))).toHaveLength(1);
+});
+
+test.each([
+  ["empty", () => ""],
+  ["missing terminator", (p: string) => record(p).slice(0, -1)],
+  ["relative", () => record("relative")],
+  ["empty path", () => record("")],
+  ["bare", (p: string) => `worktree ${p}\nbare\n\n`],
+  ["bad oid", (p: string) => record(p).replace(oid, "abc")],
+  ["missing HEAD", (p: string) => record(p).replace(`HEAD ${oid}\n`, "")],
+  ["duplicate HEAD", (p: string) => record(p).replace(`HEAD ${oid}`, `HEAD ${oid}\nHEAD ${oid}`)],
+  ["duplicate branch", (p: string) => record(p).replace("branch refs/heads/main", "branch refs/heads/main\ndetached")],
+  ["missing branch", (p: string) => record(p).replace("branch refs/heads/main\n", "")],
+  ["duplicate records", (p: string) => record(p) + record(p)],
+  ["invalid branch", (p: string) => record(p).replace("refs/heads/main", "main")],
+  ["extra field", (p: string) => record(p).replace("\n\n", "\nlocked\n\n")],
+  ["extra record", (p: string) => record(p) + `worktree ${p}\nHEAD abc\n\n`],
+  ["extra blank", (p: string) => record(p) + "\n"],
+  ["newline", (p: string) => record(p + "\nextra")],
+  ...["\r", "\t", "\0", "\x01", "\x1f", "\x7f"].map(c => [JSON.stringify(c), (p: string) => record(p + c)] as const),
+] as const)("legacy listing rejects %s without non-Git fallback or approval writes", async (_name, listing) => {
+  const { dir, main, root } = await linkedFixture();
+  await expect(resolveProject(root, legacyExec(listing(main)))).rejects.toThrow("Policy resolution failed");
+  expect(fs.existsSync(path.join(main, ".pi"))).toBe(false);
+  expect(fs.existsSync(path.join(root, ".pi"))).toBe(false);
+  expect(fs.readdirSync(dir).sort()).toEqual([path.basename(root), "main"].sort());
+});
+
+test("legacy grammar permits full SHA-256 and detached records", async () => {
+  const { main, root } = await linkedFixture();
+  const listing = record(main).replace(oid, "B".repeat(64)).replace("branch refs/heads/main", "detached") + record(root);
+  expect((await resolveProject(root, legacyExec(listing))).main).toBe(main);
+});
+
+test.each(["\n", "\r", "\t", "\x01", "\x7f"])("legacy raw control-character paths fail closed (%j)", async control => {
+  const { main, root } = await linkedFixture(`main${control}checkout`);
+  // Git 2.30 prints raw paths, regardless of newer Git's quoting behavior.
+  await expect(resolveProject(root, legacyExec(record(main) + record(root)))).rejects.toThrow("Policy resolution failed");
+});
+
+test.each([false, true])("legacy separate-git-dir rejects even structured newline injection (injected=%s)", async injected => {
+  const { main, root } = await linkedFixture("main", true);
+  await git(main, "config", "--local", "core.worktree", main);
+  // An apparent complete record can be a prefix of a raw newline-containing path.
+  const listing = injected ? record(main) + record(root) : undefined;
+  await expect(resolveProject(root, legacyExec(listing))).rejects.toThrow("Policy resolution failed");
+});
+
+test("legacy raw main path can forge complete records but cannot prove a main boundary", async () => {
+  const dir = setup();
+  const decoy = path.join(dir, "decoy");
+  const tail = path.join(dir, "tail");
+  // Git 2.30 emits this path as two perfectly grammatical records. Parsing or
+  // C-style unquoting alone cannot establish that decoy is the main checkout.
+  const main = `${decoy}\nHEAD ${oid}\nbranch refs/heads/forged\n\nworktree ${tail}`;
+  mkdirSync(main, { recursive: true });
+  mkdirSync(decoy);
+  await git(main, "init", "--separate-git-dir", path.join(dir, "metadata"));
+  await commit(main);
+  await git(main, "config", "--local", "core.worktree", main);
+  const root = path.join(dir, "linked");
+  await git(main, "worktree", "add", "-b", "linked", root);
+  writeFileSync(path.join(decoy, ".git"), `gitdir: ${path.join(dir, "metadata")}\n`);
+  await expect(resolveProject(root, legacyExec(record(main) + record(root)))).rejects.toThrow("Policy resolution failed");
+});
+
+test("legacy symlinked main .git is not proof of the raw path boundary", async () => {
+  const { dir, main, root } = await linkedFixture();
+  const metadata = path.join(dir, "metadata");
+  fs.renameSync(path.join(main, ".git"), metadata);
+  symlinkSync(metadata, path.join(main, ".git"), "dir");
+  // The original linked gitfile still resolves through main/.git's symlink.
+  // Git now lists the moved administrative directory, so record its mapping.
+  await git(main, "config", "--local", "core.worktree", main);
+  expect((await resolveProject(root, exec)).main).toBe(main);
+  const old = vi.fn(legacyExec(record(main) + record(root)));
+  await expect(resolveProject(root, old)).rejects.toThrow("Policy resolution failed");
+  expect(old.mock.calls.some(call => call[1].includes("--porcelain") && !call[1].includes("-z"))).toBe(true);
+});
+
+test.each([
+  { stdout: "", stderr: "lookup failed", code: 128, killed: false },
+  { stdout: "", stderr: "", code: 0, killed: true },
+])("legacy retry errors still fail closed: %j", async failure => {
+  const { root } = await linkedFixture();
+  const old = legacyExec();
+  const intercepted: ExtensionAPI["exec"] = async (command, args, options) => {
+    if (args.includes("--porcelain") && !args.includes("-z")) return failure;
+    return old(command, args, options);
+  };
+  await expect(resolveProject(root, intercepted)).rejects.toThrow("Policy resolution failed");
+});
+
+test("malformed successful modern output never triggers legacy retry", async () => {
+  const { root } = await linkedFixture();
+  const spy = vi.fn(legacyExec(undefined, { stdout: "malformed", stderr: "", code: 0, killed: false }));
+  await expect(resolveProject(root, spy)).rejects.toThrow("Policy resolution failed");
+  expect(spy.mock.calls.filter(call => call[1].includes("--porcelain"))).toHaveLength(1);
+});
+
+test("legacy submodule linked worktrees fail closed", async () => {
+  const { dir, main: source } = await linkedFixture();
+  const parent = path.join(dir, "parent");
+  mkdirSync(parent);
+  await git(parent, "init");
+  await git(parent, "-c", "protocol.file.allow=always", "submodule", "add", source, "module");
+  const main = path.join(parent, "module");
+  const root = path.join(dir, "module-linked");
+  await git(main, "worktree", "add", "-b", "module-linked", root);
+  await expect(resolveProject(root, legacyExec())).rejects.toThrow("Policy resolution failed");
 });
 
 test("direct main uses separate canonical metadata queries without listing worktrees", async () => {
