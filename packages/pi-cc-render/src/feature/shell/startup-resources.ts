@@ -53,9 +53,9 @@ export type ResourceGroup = {
 	tokens?: number[];
 	/** A colored word after an item, parallel to `items`; undefined entries have none. */
 	marks?: Array<ResourceMark | undefined>;
-	/** A one-character colored marker before an item (lines layout), parallel to `items`; blank where undefined. */
+	/** A one-character colored marker before an item (lines and columns layouts), parallel to `items`; blank where undefined. */
 	prefixes?: Array<ResourceMark | undefined>;
-	/** Right-aligned dim text after an item (lines layout), parallel to `items`, used when the group has no tokens. */
+	/** Right-aligned dim text after an item (lines and columns layouts), parallel to `items`, used when the group has no tokens. */
 	right?: string[];
 };
 
@@ -300,9 +300,9 @@ type Block = { lines: string[]; width: number };
 function columnBlock(group: ResourceGroup, available: number, ctx: RenderContext): Block {
 	const { theme } = ctx;
 	const heading = `${theme.fg("accent", group.label ?? "")} ${theme.fg("dim", String(group.items.length))}`;
-	const names = markedItems(group, theme);
-	const counts = group.tokens?.map(lineCount);
-	const cells = names.map((name, index) => ({ name, count: counts?.[index] }));
+	const names = markedItems(group, theme).map((name, index) => `${prefixText(group, index, theme)}${name}`);
+	const counts = group.tokens ? group.tokens.map(lineCount) : group.right;
+	const cells = names.map((name, index) => ({ name, count: counts?.[index] || undefined }));
 	const headingWidth = visibleWidth(heading);
 	const layout = (rows: number) => {
 		const columns: Array<typeof cells> = [];
@@ -799,7 +799,8 @@ export function currentGeneration(ids: string[]): Set<string> {
 }
 
 /**
- * The models section, one line per model under a heading per provider: every current-generation model of each
+ * The models section, one line per model under a heading per provider, providers side by side as far as the
+ * width allows (the columns layout Context uses): every current-generation model of each
  * provider with credentials, plus the favorites (enabledModels or --models, with any thinking level) and the
  * session's model wherever they are. Favorites carry a star and come first in their provider, in the order they
  * are configured; the session's model is highlighted in green. Every model shows its context window on the right.
@@ -843,7 +844,7 @@ export function buildModelsSection(
 	return {
 		title: "Models",
 		count,
-		layout: "lines",
+		layout: "columns",
 		groups,
 		...(favorites.length > 0 ? { legend: [{ text: "★ favorite", color: "warning" }] } : {}),
 	};

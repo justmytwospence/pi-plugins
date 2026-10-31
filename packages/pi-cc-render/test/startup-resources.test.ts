@@ -298,11 +298,18 @@ describe("startup resources", () => {
     )!;
     expect(renderSection(section, 80, plainTheme)).toEqual([
       "Models 3 · ★ favorite",
+      "  openai 1                   anthropic 2",
+      "  ★ gpt-6.1-sol:high  922K   ★ claude-opus-5-5 ●  1M",
+      "                               claude-haiku-5-5   1M",
+    ]);
+    // Too narrow for both: providers wrap onto their own bands.
+    expect(renderSection(section, 40, plainTheme)).toEqual([
+      "Models 3 · ★ favorite",
       "  openai 1",
-      "    ★ gpt-6.1-sol:high   922K",
+      "  ★ gpt-6.1-sol:high  922K",
       "  anthropic 2",
-      "    ★ claude-opus-5-5 ●    1M",
-      "      claude-haiku-5-5     1M",
+      "  ★ claude-opus-5-5 ●  1M",
+      "    claude-haiku-5-5   1M",
     ]);
     expect(buildModelsSection([])).toBeUndefined();
     const mode = {
@@ -317,7 +324,7 @@ describe("startup resources", () => {
         },
       },
     };
-    expect(renderSection(collectModelsSection(mode)!, 80, plainTheme)).toEqual(["Models 2", "  p 2", "    alpha ●  128K", "    beta     128K"]);
+    expect(renderSection(collectModelsSection(mode)!, 80, plainTheme)).toEqual(["Models 2", "  p 2", "  alpha ●  128K", "  beta     128K"]);
   });
 
   test("the current generation keeps the newest of each family and drops a generation behind", async () => {
