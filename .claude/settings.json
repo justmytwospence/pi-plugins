@@ -1,24 +1,24 @@
 {
   "permissions": {
     "additionalDirectories": [
-      "/Users/spencerboucher/Projects/dotfiles"
+      "~/Projects/dotfiles"
     ],
     "allow": [
-      "Read(//Users/spencerboucher/Projects/herdr-agentbox/**)",
-      "Read(//Users/spencerboucher/Projects/herdr-focus-notify/**)",
-      "Read(//Users/spencerboucher/Projects/herdr-machine0/**)",
-      "Read(//Users/spencerboucher/Projects/herdr-menu/**)",
-      "Read(//Users/spencerboucher/Projects/herdr-native-notify/**)",
-      "Read(//Users/spencerboucher/Projects/herdr-plugins/**)",
-      "Read(//Users/spencerboucher/Projects/herdr-repeat-navigation/**)",
-      "Read(//Users/spencerboucher/Projects/herdr-web-ui/**)",
-      "Read(//Users/spencerboucher/Projects/dotfiles/**)"
+      "Read(~/Projects/herdr-agentbox/**)",
+      "Read(~/Projects/herdr-focus-notify/**)",
+      "Read(~/Projects/herdr-machine0/**)",
+      "Read(~/Projects/herdr-menu/**)",
+      "Read(~/Projects/herdr-native-notify/**)",
+      "Read(~/Projects/herdr-plugins/**)",
+      "Read(~/Projects/herdr-repeat-navigation/**)",
+      "Read(~/Projects/herdr-web-ui/**)",
+      "Read(~/Projects/dotfiles/**)"
     ]
   },
   "sandbox": {
     "filesystem": {
       "allowWrite": [
-        "/Users/spencerboucher/Projects/dotfiles"
+        "~/Projects/dotfiles"
       ]
     }
   }

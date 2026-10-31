@@ -7,17 +7,17 @@ enabled = true
 extends = "self"
 
 [permissions.project.workspace_roots]
-"/Users/spencerboucher/Projects/dotfiles" = true
+"~/Projects/dotfiles" = true
 
 # Adding a herdr-* sibling requires updating the native lists here and in
 # .claude/settings.json; Pi and OpenCode use supported sibling globs.
 [permissions.project.filesystem]
-"/Users/spencerboucher/Projects/dotfiles" = "write"
-"/Users/spencerboucher/Projects/herdr-agentbox" = "read"
-"/Users/spencerboucher/Projects/herdr-focus-notify" = "read"
-"/Users/spencerboucher/Projects/herdr-machine0" = "read"
-"/Users/spencerboucher/Projects/herdr-menu" = "read"
-"/Users/spencerboucher/Projects/herdr-native-notify" = "read"
-"/Users/spencerboucher/Projects/herdr-plugins" = "read"
-"/Users/spencerboucher/Projects/herdr-repeat-navigation" = "read"
-"/Users/spencerboucher/Projects/herdr-web-ui" = "read"
+"~/Projects/dotfiles" = "write"
+"~/Projects/herdr-agentbox" = "read"
+"~/Projects/herdr-focus-notify" = "read"
+"~/Projects/herdr-machine0" = "read"
+"~/Projects/herdr-menu" = "read"
+"~/Projects/herdr-native-notify" = "read"
+"~/Projects/herdr-plugins" = "read"
+"~/Projects/herdr-repeat-navigation" = "read"
+"~/Projects/herdr-web-ui" = "read"
