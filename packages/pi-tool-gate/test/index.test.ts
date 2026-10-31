@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -39,11 +39,14 @@ const workaround = {
 };
 
 function setup(answers: any, ctxOverrides: Record<string, unknown> = {}) {
-  const h = harness();
+  const cwd = (ctxOverrides.cwd as string | undefined) ?? path.join(configDir, "app");
+  mkdirSync(cwd, { recursive: true });
+  const h = harness({ nonGitCwd: cwd });
   toolGate(h.pi);
   const branch: any[] = [userEntry("Fix the failing test"), assistantEntry("I'll rerun the tests.")];
   const jev = fakeJev((questions) => (questions.workaround ? workaround : answers));
   const ctx = h.ctx({
+    cwd,
     modelRegistry: jev.registry,
     sessionManager: { getBranch: () => branch },
     ...ctxOverrides,
@@ -183,7 +186,7 @@ describe("pending decisions are invalidated by mode and branch changes", () => {
     // Leave classifier usage pending immediately before switching sessions.
     await s.h.emit("tool_call", call("bash", { command: "npm test" }, "old"), s.ctx);
     expect(s.ctx.ui.status.get("tool-gate")).not.toBe("gate: 0 auto · 0 pushed back · 0 asked");
-    const fresh = s.h.ctx({ modelRegistry: s.jev.registry, sessionManager: { getBranch: () => [userEntry("New session")], getSessionId: () => "new-session" } });
+    const fresh = s.h.ctx({ cwd: s.ctx.cwd, modelRegistry: s.jev.registry, sessionManager: { getBranch: () => [userEntry("New session")], getSessionId: () => "new-session" } });
     await s.h.emit("session_start", { type: "session_start" }, fresh);
     expect(fresh.ui.status.get("tool-gate")).toBe("gate: 0 auto · 0 pushed back · 0 asked");
     expect(await s.h.emit("tool_result", { type: "tool_result", toolCallId: "old", toolName: "bash", content: [], isError: false }, fresh)).toBeUndefined();
@@ -253,6 +256,41 @@ describe("resolved project policy integration", () => {
     expect(JSON.parse(readFileSync(path.join(root, ".pi", "tool-gate.local.json"), "utf8"))).toEqual({ unrelated: 7, permissions: { allow: ["web_fetch", "Bash(npm publish:*)"] } });
     expect(s.jev.calls).toHaveLength(0);
   });
+});
+
+test.each([
+  "exception", "timeout", "ownership", "unknown", "damaged metadata", "inaccessible metadata",
+])("initial Git discovery failure (%s) blocks calls and permission-state writes", async kind => {
+  const root = realpathSync(configDir);
+  if (kind === "damaged metadata") {
+    mkdirSync(path.join(root, ".git"));
+  } else if (kind === "inaccessible metadata") {
+    // A symlink loop yields an uncertain probe rather than absence.
+    symlinkSync(".git", path.join(root, ".git"));
+  }
+  const h = harness({ exec: () => {
+    if (kind === "exception") throw new Error("unavailable");
+    return {
+      code: 128, stdout: "", killed: kind === "timeout",
+      stderr: kind === "ownership" ? "fatal: detected dubious ownership in repository\n"
+        : kind === "unknown" ? "unknown error\n"
+          : "fatal: not a git repository (or any of the parent directories): .git\n",
+    };
+  } });
+  toolGate(h.pi);
+  const jev = fakeJev(() => safe);
+  const ctx = h.ctx({ cwd: root, modelRegistry: jev.registry });
+  ctx.ui.selectAnswers.push("Allow rule in this project");
+  await h.emit("session_start", {}, ctx);
+  await h.emit("before_agent_start", { prompt: "x" }, ctx);
+  for (const tool of ["read", "bash", "tool_search"]) {
+    expect(await h.emit("tool_call", call(tool, { path: "source.ts", command: "npm publish" }), ctx)).toMatchObject({ block: true, reason: expect.stringContaining("Policy resolution error") });
+  }
+  expect(ctx.ui.selects).toHaveLength(0);
+  expect(jev.calls).toHaveLength(0);
+  for (const file of ["tool-gate.json", "tool-gate.local.json"]) {
+    expect(() => readFileSync(path.join(root, ".pi", file))).toThrow();
+  }
 });
 
 test("invalid Git main-checkout metadata blocks calls without writing local state", async () => {
@@ -356,9 +394,8 @@ test("when Jev sees no workaround, the agent is told it is the user's decision",
 });
 
 test("project rules are judged and quoted back", async () => {
-  const { h, jev, ctx } = setup({ ...safe, "rule::0": { type: "bool", probability: 0.95 } });
-  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
-  const dir = mkdtempSync("/tmp/gate-");
+  const dir = path.join(configDir, "rules-project");
+  const { h, jev, ctx } = setup({ ...safe, "rule::0": { type: "bool", probability: 0.95 } }, { cwd: dir });
   mkdirSync(`${dir}/.pi`);
   writeFileSync(`${dir}/.pi/tool-gate-rules.md`, "- Never edit files under dist/.\n");
   ctx.cwd = dir;

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -14,7 +14,7 @@ import { fakeJev, harness, userEntry } from "./harness.ts";
 
 let configDir: string;
 beforeEach(() => {
-  configDir = mkdtempSync(path.join(tmpdir(), "pi-tool-gate-modes-"));
+  configDir = realpathSync(mkdtempSync(path.join(tmpdir(), "pi-tool-gate-modes-")));
   vi.stubEnv("XDG_CONFIG_HOME", path.join(configDir, "xdg"));
   vi.stubEnv("PI_CODING_AGENT_DIR", path.join(configDir, "pi"));
 });
@@ -36,10 +36,12 @@ function configure(config: Record<string, unknown>) {
   writeFileSync(path.join(configDir, "xdg", "agents", "tool-gate.json"), JSON.stringify(config));
 }
 function setup(branch: any[] = [userEntry("Fix the failing test")]) {
-  const h = harness();
+  const cwd = path.join(configDir, "app");
+  mkdirSync(cwd, { recursive: true });
+  const h = harness({ nonGitCwd: cwd });
   toolGate(h.pi);
   const jev = fakeJev(() => safe);
-  const ctx = h.ctx({ modelRegistry: jev.registry, sessionManager: { getBranch: () => branch } });
+  const ctx = h.ctx({ cwd, modelRegistry: jev.registry, sessionManager: { getBranch: () => branch } });
   return { h, jev, ctx, branch };
 }
 const start = async (s: ReturnType<typeof setup>) => { await s.h.emit("session_start", { type: "session_start" }, s.ctx); return s; };

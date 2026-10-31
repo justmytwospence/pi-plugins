@@ -47,7 +47,7 @@ const write = (file: string, value: unknown) => {
 
 /** A gate in a temp project; a fresh `setup()` is a new session in the same project. */
 function setup(answers: unknown = safe, ctxOverrides: Record<string, unknown> = {}) {
-  const h = harness();
+  const h = harness({ nonGitCwd: (ctxOverrides.cwd as string | undefined) ?? cwd });
   toolGate(h.pi);
   const branch: any[] = [userEntry("Fix the failing test"), assistantEntry("I'll rerun the tests.")];
   const jev = fakeJev((questions) => (questions.workaround ? workaround : { ...Object.fromEntries(Object.keys(questions).filter((id) => id.startsWith("rule::")).map((id) => [id, { type: "bool", probability: 0.01 }])), ...(answers as Record<string, unknown>) }));

@@ -301,7 +301,7 @@ describe("the gate", () => {
       mkdirSync(path.join(configDir, "xdg", "agents"), { recursive: true });
       writeFileSync(path.join(configDir, "xdg", "agents", "tool-gate.json"), JSON.stringify({ directories }));
     }
-    const h = harness();
+    const h = harness({ nonGitCwd: cwd });
     toolGate(h.pi);
     const branch: any[] = [userEntry("Fix it"), assistantEntry("On it.")];
     const jev = fakeJev((q) => (q.workaround ? { workaround: { type: "choice", choice: "skip", probabilities: { skip: 1 }, confidence: 1 } } : { ...Object.fromEntries(Object.keys(q).filter((id) => id.startsWith("rule::")).map((id) => [id, { type: "bool", probability: 0.01 }])), ...safe }));
@@ -412,12 +412,12 @@ describe("the gate", () => {
     const hint = "Edit its source in ~/Projects/dotfiles instead.";
     const { h, ctx, jev } = setup(
       { derived: ["~/.config", "~/.local/bin", "~/.pi/agent"].map((p) => ({ path: p, hint })), exemptCommands: ["chezmoi apply"] },
-      `${P}/pi-plugins/packages/pi-tool-gate`,
+      path.join(configDir, "pi-plugins", "packages", "pi-tool-gate"),
     );
     await h.emit("session_start", {}, ctx);
     await h.emit("before_agent_start", { prompt: "x" }, ctx);
     const loop = `cd ~/.pi/agent/subagents; for r in nv5qou 342xs3; do echo "== $r"; ls -la $r; wc -l $r/messages.jsonl 2>/dev/null; tail -c 600 $r/output.md 2>/dev/null; done`;
-    const sessions = String.raw`cd ~/Projects/pi-plugins/packages/pi-tool-gate; rg -n "appendEntry\(" src/index.ts | head; rg -n "export function (commandKeys|keyOf|callKey|similar)" -A3 src/bash.ts src/index.ts | head -20; ls ~/.pi/agent/sessions | wc -l; find ~/.pi/agent/sessions -name '*.jsonl' -mtime -14 | wc -l; f=$(ls -t $(find ~/.pi/agent/sessions -name '*.jsonl') | sed -n 3p); python3 - "$f" <<'EOF'
+    const sessions = String.raw`cd ${ctx.cwd}; rg -n "appendEntry\(" src/index.ts | head; rg -n "export function (commandKeys|keyOf|callKey|similar)" -A3 src/bash.ts src/index.ts | head -20; ls ~/.pi/agent/sessions | wc -l; find ~/.pi/agent/sessions -name '*.jsonl' -mtime -14 | wc -l; f=$(ls -t $(find ~/.pi/agent/sessions -name '*.jsonl') | sed -n 3p); python3 - "$f" <<'EOF'
 import json,sys,collections
 c=collections.Counter()
 for l in open(sys.argv[1]):

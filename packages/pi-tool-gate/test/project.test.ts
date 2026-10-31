@@ -1,11 +1,17 @@
 import { execFile } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import * as fs from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, expect, test, vi } from "vitest";
 import { projectFiles, projectSaveFile, resolveProject } from "../src/project.ts";
+
+vi.mock("node:fs", async importOriginal => {
+  const original = await importOriginal<typeof import("node:fs")>();
+  return { ...original, lstatSync: vi.fn(original.lstatSync) };
+});
 
 const run = promisify(execFile);
 const exec: ExtensionAPI["exec"] = async (command, args, options) => {
@@ -17,8 +23,12 @@ const exec: ExtensionAPI["exec"] = async (command, args, options) => {
     return { stdout: out.stdout ?? "", stderr: out.stderr ?? "", code: out.code ?? 1, killed: out.killed ?? false };
   }
 };
+const fsOriginalLstat = (await vi.importActual<typeof import("node:fs")>("node:fs")).lstatSync;
 const dirs: string[] = [];
 afterEach(() => {
+  vi.mocked(fs.lstatSync).mockReset();
+  vi.mocked(fs.lstatSync).mockImplementation(fsOriginalLstat);
+  vi.unstubAllEnvs();
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 function setup() {
@@ -89,13 +99,73 @@ test("symlink launches resolve cwd, root and main to real paths", async () => {
   expect(await resolveProject(link, exec)).toEqual({ cwd: root, root, main: root, isGit: true });
 });
 
-test("unavailable or non-Git initial lookup falls back using the pi.exec signature", async () => {
+const nonGit = { stdout: "", stderr: "fatal: not a git repository (or any of the parent directories): .git\n", code: 128, killed: false };
+
+test("only a normal controlled-locale non-Git diagnostic permits fallback", async () => {
   const cwd = setup();
-  const failed = vi.fn<ExtensionAPI["exec"]>().mockRejectedValue(new Error("unavailable"));
+  const failed = vi.fn<ExtensionAPI["exec"]>().mockResolvedValue(nonGit);
   expect(await resolveProject(cwd, failed)).toEqual({ cwd, root: cwd, main: cwd, isGit: false });
-  expect(failed).toHaveBeenCalledWith("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--show-toplevel"], { timeout: 2_000 });
-  failed.mockResolvedValue({ stdout: "", stderr: "", code: 128, killed: false });
-  expect((await resolveProject(cwd, failed)).isGit).toBe(false);
+  expect(failed).toHaveBeenCalledWith("env", ["LC_ALL=C", "git", "-C", cwd, "rev-parse", "--path-format=absolute", "--show-toplevel"], { timeout: 2_000 });
+});
+
+test.each([
+  { ...nonGit, killed: true },
+  { ...nonGit, code: 1 },
+  { ...nonGit, stderr: "" },
+  { ...nonGit, stderr: "fatal: detected dubious ownership in repository at '/repo'\n" },
+  { ...nonGit, stderr: `${nonGit.stderr}unknown error\n` },
+  { ...nonGit, stdout: "unexpected" },
+  { ...nonGit, code: 0, killed: true },
+])("uncertain initial discovery fails closed: %j", async result => {
+  await expect(resolveProject(setup(), vi.fn().mockResolvedValue(result))).rejects.toThrow("Policy resolution failed");
+});
+
+test.each(["unavailable", "ETIMEDOUT"])("initial lookup exception (%s) is a resolution error", async message => {
+  await expect(resolveProject(setup(), vi.fn().mockRejectedValue(new Error(message)))).rejects.toThrow("Policy resolution failed");
+});
+
+test.each(["directory", "gitfile", "broken link"]) ("damaged ancestor .git %s blocks fallback", async kind => {
+  const root = setup();
+  const cwd = path.join(root, "nested");
+  mkdirSync(cwd);
+  const metadata = path.join(root, ".git");
+  if (kind === "directory") mkdirSync(metadata);
+  else if (kind === "gitfile") writeFileSync(metadata, "gitdir: /missing/gate-metadata\n");
+  else symlinkSync(path.join(root, "missing"), metadata);
+  // Real Git errors must block too, including those indistinguishable from non-Git.
+  await expect(resolveProject(cwd, exec)).rejects.toThrow("Policy resolution failed");
+  await expect(resolveProject(cwd, vi.fn().mockResolvedValue(nonGit))).rejects.toThrow("Policy resolution failed");
+});
+
+test.each(["objects", "refs", "config"])("apparent bare metadata (%s) blocks fallback", async entry => {
+  const root = setup();
+  const cwd = path.join(root, "nested");
+  mkdirSync(cwd);
+  writeFileSync(path.join(root, "HEAD"), "ref: refs/heads/main\n");
+  writeFileSync(path.join(root, entry), "damaged metadata");
+  await expect(resolveProject(cwd, vi.fn().mockResolvedValue(nonGit))).rejects.toThrow("Policy resolution failed");
+});
+
+test.each(["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM"])("explicit %s blocks fallback even when empty", async key => {
+  vi.stubEnv(key, "");
+  await expect(resolveProject(setup(), vi.fn().mockResolvedValue(nonGit))).rejects.toThrow("Policy resolution failed");
+});
+
+test.each(["EACCES", "EPERM", "EIO", "ENOTDIR"])("uncertain ancestor probes (%s) block fallback", async code => {
+  const cwd = setup();
+  const original = fsOriginalLstat;
+  vi.mocked(fs.lstatSync).mockImplementation((...args: Parameters<typeof fs.lstatSync>) => {
+    if (args[0] === path.join(path.dirname(cwd), ".git")) throw Object.assign(new Error("probe failed"), { code });
+    return original(...args);
+  });
+  await expect(resolveProject(cwd, vi.fn().mockResolvedValue(nonGit))).rejects.toThrow("Policy resolution failed");
+});
+
+test("negative metadata scan reaches filesystem root and never selects an ancestor", async () => {
+  const cwd = setup();
+  const spy = vi.mocked(fs.lstatSync);
+  expect((await resolveProject(cwd, vi.fn().mockResolvedValue(nonGit))).root).toBe(cwd);
+  expect(spy).toHaveBeenCalledWith(path.join(path.parse(cwd).root, ".git"));
 });
 
 async function commit(cwd: string) {
@@ -243,7 +313,7 @@ test("direct main uses separate canonical metadata queries without listing workt
   const spy = vi.fn(exec);
   expect((await resolveProject(root, spy)).main).toBe(root);
   expect(spy.mock.calls.map(call => call[1])).toEqual([
-    ["-C", root, "rev-parse", "--path-format=absolute", "--show-toplevel"],
+    ["LC_ALL=C", "git", "-C", root, "rev-parse", "--path-format=absolute", "--show-toplevel"],
     ["-C", root, "rev-parse", "--absolute-git-dir"],
     ["-C", root, "rev-parse", "--path-format=absolute", "--git-common-dir"],
   ]);

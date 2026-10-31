@@ -1,3 +1,5 @@
+import { realpathSync } from "node:fs";
+
 // A minimal fake of Pi's extension API: records handlers, commands, entries and UI calls.
 type Handler = (event: any, ctx: any) => unknown;
 
@@ -24,7 +26,13 @@ export function usage(input: number) {
   return { input, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: input, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 }
 
-export function harness(options: { tools?: any[]; exec?: (cmd: string, args: string[]) => any } = {}) {
+export function harness(options: { tools?: any[]; exec?: (cmd: string, args: string[]) => any; nonGitCwd?: string } = {}) {
+  // Opt in only for an existing isolated non-Git fixture. resolveProject still
+  // performs its real filesystem ancestor checks; custom executors always win.
+  if (options.nonGitCwd !== undefined) realpathSync(options.nonGitCwd);
+  const discovery = options.nonGitCwd === undefined ? [] : [
+    "LC_ALL=C", "git", "-C", options.nonGitCwd, "rev-parse", "--path-format=absolute", "--show-toplevel",
+  ];
   const handlers = new Map<string, Handler[]>();
   const commands = new Map<string, any>();
   const shortcuts = new Map<string, any>();
@@ -49,7 +57,14 @@ export function harness(options: { tools?: any[]; exec?: (cmd: string, args: str
     registerEntryRenderer: () => undefined,
     getFlag: () => undefined,
     getAllTools: () => options.tools ?? [],
-    exec: async (cmd: string, args: string[]) => options.exec?.(cmd, args) ?? { code: 1, stdout: "", stderr: "", killed: false },
+    exec: async (cmd: string, args: string[]) => {
+      if (options.exec) return options.exec(cmd, args) ?? { code: 1, stdout: "", stderr: "", killed: false };
+      if (options.nonGitCwd !== undefined && cmd === "env" && args.length === discovery.length &&
+          args.every((arg, index) => arg === discovery[index])) {
+        return { code: 128, stdout: "", stderr: "fatal: not a git repository (or any of the parent directories): .git\n", killed: false };
+      }
+      return { code: 1, stdout: "", stderr: "", killed: false };
+    },
     appendEntry: (customType: string, data: unknown) => entries.push({ customType, data }),
     sendMessage: (message: any, opts: any) => messages.push({ message, opts }),
     getThinkingLevel: () => thinking,

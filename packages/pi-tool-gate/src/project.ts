@@ -1,27 +1,49 @@
-import { realpathSync } from "node:fs";
+import { lstatSync, realpathSync } from "node:fs";
 import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export type ProjectContext = { cwd: string; root: string; main: string; isGit: boolean };
 
-function realPath(dir: string): string {
-  try { return realpathSync(dir); } catch { return path.resolve(dir); }
+const discoveryOverrides = [
+  "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+];
+
+/** Negative evidence only: never infer a checkout from filesystem metadata. */
+function verifyNonGit(launch: string): void {
+  if (discoveryOverrides.some(key => process.env[key] !== undefined)) {
+    throw new Error("Git discovery environment override");
+  }
+  const exists = (file: string) => {
+    try { lstatSync(file); return true; } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw cause;
+    }
+  };
+  for (let dir = launch; ; dir = path.dirname(dir)) {
+    if (exists(path.join(dir, ".git"))) throw new Error("Unresolved Git metadata");
+    if (exists(path.join(dir, "HEAD")) &&
+        ["objects", "refs", "config"].some(name => exists(path.join(dir, name)))) {
+      throw new Error("Apparent bare Git metadata");
+    }
+    if (path.dirname(dir) === dir) break;
+  }
 }
 
 /** Shared policy belongs to the active checkout; local approvals belong to its main checkout. */
 export async function resolveProject(cwd: string, exec: ExtensionAPI["exec"]): Promise<ProjectContext> {
-  const launch = realPath(cwd);
-  const fallback: ProjectContext = { cwd: launch, root: launch, main: launch, isGit: false };
-  // Query paths separately: line splitting or trimming corrupts valid Git path names.
-  let identified;
   try {
-    identified = await exec("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--show-toplevel"], { timeout: 2_000 });
-  } catch {
-    return fallback;
-  }
-  if (identified.code !== 0) return fallback;
-
-  try {
+    const launch = realpathSync(cwd);
+    // Control the diagnostic locale, not the user's Git discovery configuration.
+    const identified = await exec("env", ["LC_ALL=C", "git", "-C", cwd, "rev-parse", "--path-format=absolute", "--show-toplevel"], { timeout: 2_000 });
+    if (identified.killed || identified.code !== 0) {
+      if (identified.killed || identified.code !== 128 || identified.stdout !== "" ||
+          !/^fatal: not a git repository \(or any of the parent directories\): \.git\n?$/u.test(identified.stderr)) {
+        throw new Error("Git discovery failed");
+      }
+      verifyNonGit(launch);
+      return { cwd: launch, root: launch, main: launch, isGit: false };
+    }
+    // Query paths separately: line splitting or trimming corrupts valid Git path names.
     const git = async (dir: string, args: string[]) => {
       const out = await exec("git", ["-C", dir, ...args], { timeout: 2_000 });
       if (out.code !== 0) throw new Error("Git metadata lookup failed");

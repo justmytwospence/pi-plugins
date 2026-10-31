@@ -46,7 +46,9 @@ const call = (toolName: string, input: Record<string, unknown>, id = "t1") => ({
 function actualGit(cwd: string) {
   const h = harness({ exec: (cmd, args) => {
     // Only repository discovery executes; matrix commands remain fake tool-call events.
-    if (cmd !== "git") throw new Error(`Unexpected executable: ${cmd}`);
+    if (cmd !== "git" && !(cmd === "env" && JSON.stringify(args) === JSON.stringify([
+      "LC_ALL=C", "git", "-C", cwd, "rev-parse", "--path-format=absolute", "--show-toplevel",
+    ]))) throw new Error(`Unexpected executable: ${cmd}`);
     try { return { code: 0, stdout: execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }), stderr: "" }; }
     catch { return { code: 1, stdout: "", stderr: "" }; }
   } });
