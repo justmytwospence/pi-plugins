@@ -44,7 +44,7 @@ export function categoryStyle(theme: ContextTheme, category: ContextCategory): {
 	return {
 		swatch: (text) => theme.fg(token, text),
 		fill: (text) => color && background && labelColor && mode
-			? `${foregroundAnsi(labelColor, mode)}${backgroundAnsi(mixColors(background, color, 0.2), mode)}${text}\x1b[0m`
+			? `${foregroundAnsi(labelColor, mode)}${backgroundAnsi(mixColors(background, color, 0.35), mode)}${text}\x1b[0m`
 			: theme.fg("text", text),
 	};
 }

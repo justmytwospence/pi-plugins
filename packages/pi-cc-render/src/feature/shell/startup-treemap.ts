@@ -88,21 +88,13 @@ export function capacitySegments(snapshot: StartupContextSnapshot, width: number
 	return segments;
 }
 
-function mapSources(sources: ContextSource[], width: number, height: number): ContextRectangle[] {
-	const categories = layoutContextTreemap(sources, width, height);
-	return categories.flatMap((tile) => {
-		const children = positive(tile.source.children ?? []);
-		if (!children.length || tile.width < 12 || tile.height < 2) return [tile];
-		const minimum = tile.source.tokens / (tile.width * tile.height);
-		const large = children.filter((item) => item.tokens >= minimum);
-		const tiny = children.filter((item) => item.tokens < minimum);
-		if (tiny.length) {
-			const weight = tiny.reduce((n, item) => n + item.tokens, 0);
-			if (weight * tile.width * tile.height < tile.source.tokens) return [tile];
-			large.push({ id: `${tile.source.id}:other`, category: tile.source.category, label: `Other ${tiny.length}`, tokens: weight, children: tiny });
-		}
-		return layoutContextTreemap(large, tile.width, tile.height).map((child) => ({ ...child, x: child.x + tile.x, y: child.y + tile.y }));
-	});
+function categoryTiles(sources: ContextSource[], width: number, height: number): ContextRectangle[] {
+	// Several MCP servers or source leaves can share a category. One visible tile per category
+	// keeps the map legible instead of painting many indistinguishable, unlabeled child tiles.
+	const categories: ContextSource[] = [...totals(sources)].map(([category, tokens]) => ({
+		id: category, category, label: CATEGORIES[category].label, tokens,
+	}));
+	return layoutContextTreemap(categories, width, height);
 }
 
 /** Resource map rendering only; collection and cache updates happen in the owner tick, never here. */
@@ -122,26 +114,32 @@ export function renderContextTreemap(snapshot: StartupContextSnapshot, width: nu
 		appendWrapped(lines, [...totals(snapshot.sources)].map(([category, tokens]) => `${CATEGORIES[category].label} ~${formatTokens(tokens)}`), width);
 	} else {
 		lines.push(fit("Sources · occupied context", width));
-		const height = width >= 48 ? 4 : 2;
+		const height = 2;
 		const cells: Array<Array<{ char: string; category?: ContextCategory }>> = Array.from({ length: height }, () => Array.from({ length: width }, () => ({ char: " " })));
-		for (const rect of mapSources(snapshot.sources, width, height)) {
+		for (const rect of categoryTiles(snapshot.sources, width, height)) {
 			for (let y = rect.y; y < rect.y + rect.height; y++) for (let x = rect.x; x < rect.x + rect.width; x++) cells[y]![x] = { char: " ", category: rect.source.category };
-			const name = `${rect.source.label} ~${formatTokens(rect.source.tokens)}`;
-			if (rect.width >= visibleWidth(name) + 2 && rect.height > 0) {
+			const labels = rect.height > 1
+				? [rect.source.label, `~${formatTokens(rect.source.tokens)}`]
+				: [`${rect.source.label} ~${formatTokens(rect.source.tokens)}`];
+			for (const [row, name] of labels.entries()) {
+				if (rect.width < visibleWidth(name) + 2) continue;
 				let col = rect.x + 1;
 				let previousCell: number | undefined;
 				for (const { segment } of graphemes.segment(name)) {
 					const cellWidth = visibleWidth(segment);
 					if (cellWidth === 0) {
-						if (previousCell !== undefined) cells[rect.y]![previousCell]!.char += segment;
+						if (previousCell !== undefined) cells[rect.y + row]![previousCell]!.char += segment;
 						continue;
 					}
 					if (col + cellWidth > rect.x + rect.width - 1 || col + cellWidth > width) break;
-					cells[rect.y]![col] = { char: segment, category: rect.source.category };
+					cells[rect.y + row]![col] = { char: segment, category: rect.source.category };
 					previousCell = col;
-					for (let extra = 1; extra < cellWidth; extra++) cells[rect.y]![col + extra] = { char: "", category: rect.source.category };
+					for (let extra = 1; extra < cellWidth; extra++) cells[rect.y + row]![col + extra] = { char: "", category: rect.source.category };
 					col += cellWidth;
 				}
+			}
+			if (rect.x + rect.width < width && rect.width > 1) for (let y = rect.y; y < rect.y + rect.height; y++) {
+				cells[y]![rect.x + rect.width - 1] = { char: "│" };
 			}
 		}
 		for (const row of cells) {
@@ -158,13 +156,15 @@ export function renderContextTreemap(snapshot: StartupContextSnapshot, width: nu
 		}
 	}
 	if (window && width >= 24) {
-		let strip = "";
-		for (const segment of capacitySegments(snapshot, width)) {
-			let content = " ".repeat(segment.width);
-			if (!segment.category && segment.width >= 11) content = ` Available `.padEnd(segment.width);
-			strip += segment.category ? categoryStyle(theme, segment.category).fill(content) : theme.fg("dim", content);
-		}
-		lines.push(strip);
+		const usedPercent = Math.round(snapshot.usedEstimate * 100 / window);
+		const label = width >= 42
+			? `Capacity · ${usedPercent}% used · ${Math.max(0, 100 - usedPercent)}% Available`
+			: `Capacity · ${usedPercent}% used`;
+		const barWidth = Math.min(24, Math.max(0, width - visibleWidth(label) - 2));
+		const strip = capacitySegments(snapshot, barWidth).map((segment) => segment.category
+			? categoryStyle(theme, segment.category).swatch("█".repeat(segment.width))
+			: theme.fg("dim", "░".repeat(segment.width))).join("");
+		lines.push(fit(`${label}${barWidth ? `  ${strip}` : ""}`, width));
 	}
 	const key = [...totals(snapshot.sources)].map(([category, tokens]) => categoryStyle(theme, category).swatch(`■ ${CATEGORIES[category].label} ~${formatTokens(tokens)}`));
 	// Use visibleWidth so ANSI styling never changes wrap geometry.
@@ -174,7 +174,7 @@ export function renderContextTreemap(snapshot: StartupContextSnapshot, width: nu
 		let row = "";
 		for (const word of words) {
 			const next = row ? `${row} ${word}` : word;
-			if (visibleWidth(next) > width && row) { lines.push(theme.fg("dim", row)); row = word; }
+			if (visibleWidth(next) > width && row) { lines.push(theme.fg("dim", fit(row, width))); row = word; }
 			else row = next;
 		}
 		if (row) lines.push(theme.fg("dim", fit(row, width)));

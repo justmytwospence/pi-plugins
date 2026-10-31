@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseColor, sliceByColumn, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
+import { backgroundAnsi, mixColors, parseColor, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import { capacitySegments, layoutContextTreemap, renderContextTreemap } from "../src/feature/shell/startup-treemap.ts";
 import { categoryStyle } from "../src/feature/shell/startup-style.ts";
 import type { ContextSource, StartupContextSnapshot } from "../src/feature/shell/startup-context.ts";
@@ -58,28 +58,41 @@ describe("context treemap", () => {
 		expect(capacitySegments(snapshot([source("a", 1)]), 46)).toEqual([]);
 		expect(capacitySegments(snapshot([source("a", 250)], 100), 100)).toEqual([{ category: "files", width: 100 }]);
 	});
-	it("paints whole graphemes without overwriting an adjacent tile or exceeding its width", () => {
+	it("shows compact category tiles, not unlabeled child tiles, with visible boundaries", () => {
 		const joined = "\u{1F469}\u200D\u{1F4BB}".repeat(6);
-		for (const label of ["e\u0301".repeat(6), joined]) {
-			const whole = renderContextTreemap(snapshot([source(label, 1000)], 200_000), 24, theme("dark"));
-			const wholeRow = stripTerminalSequences(whole[2]!);
-			expect(wholeRow).toContain(label);
-			expect(visibleWidth(whole[2]!)).toBeLessThanOrEqual(24);
-			const sources = [source(label, 700), source("T", 300, "tools")];
-			const tiles = layoutContextTreemap(sources, 46, 4);
-			const left = tiles.find((tile) => tile.source.id === label)!;
-			const right = tiles.find((tile) => tile.source.id === "T")!;
-			const row = stripTerminalSequences(renderContextTreemap(snapshot(sources, 200_000), 46, theme("dark"))[2]!);
-			expect(sliceByColumn(row, left.x, left.x + left.width)).toContain(label);
-			expect(sliceByColumn(row, right.x, right.x + right.width)).toContain("T ~300");
-			expect(visibleWidth(row)).toBeLessThanOrEqual(46);
+		const sources: ContextSource[] = [
+			{ id: "files", category: "files", label: "Files", tokens: 6500, children: [source(joined, 4800), source("e\u0301".repeat(6), 1700)] },
+			source("system", 3300, "system"),
+			source("skills", 1900, "skills"),
+			source("tools", 6300, "tools"),
+		];
+		const lines = renderContextTreemap(snapshot(sources, 1_048_576), 120, theme("light"));
+		const tiles = lines.slice(2, 4).map(stripTerminalSequences).join("\n");
+		for (const label of ["Files", "System", "Skills", "Tools"]) expect(tiles).toContain(label);
+		expect(tiles).toContain("│");
+		expect(tiles).not.toContain(joined);
+		expect(lines[4]).toContain("Capacity · 2% used · 98% Available");
+		expect(lines.slice(2, 4)).toHaveLength(2);
+		expect(lines.every((line) => visibleWidth(line) <= 120)).toBe(true);
+		const medium = renderContextTreemap(snapshot(sources, 1_048_576), 100, theme("light"));
+		for (const label of ["Files", "System", "Skills", "Tools"]) {
+			expect(medium.slice(2, 4).map(stripTerminalSequences).join("\n")).toContain(label);
 		}
+		expect(medium.every((line) => visibleWidth(line) <= 100)).toBe(true);
+		const manyMcp = [source("one", 700, "mcp"), source("two", 300, "mcp")];
+		const mcpTile = stripTerminalSequences(renderContextTreemap(snapshot(manyMcp, 200_000), 46, theme("dark"))[2]!);
+		expect(mcpTile).toContain("MCP");
+		expect(mcpTile).not.toContain("one");
+		expect(mcpTile).not.toContain("two");
+		const narrow = renderContextTreemap(snapshot(sources, 200_000), 24, theme("light"));
+		expect(narrow.join("\n")).toContain("Skills ~1.9k");
+		expect(narrow.every((line) => visibleWidth(line) <= 24)).toBe(true);
 	});
-	it("uses 20% themed color on both light and dark; style rebuilds after theme changes", () => {
+	it("uses stronger themed color on both light and dark; style rebuilds after theme changes", () => {
 		for (const name of ["dark", "light"]) {
 			const current = theme(name);
 			const style = categoryStyle(current, "files");
-			expect(style.fill("x")).toContain("\x1b[");
+			expect(style.fill("x")).toContain(backgroundAnsi(mixColors(current.colors.userMessageBg, current.colors.mdLink, 0.35), "truecolor"));
 			expect(style.swatch("■")).toContain("■");
 			expect(style.fill("x")).not.toBe(categoryStyle(theme(name === "dark" ? "light" : "dark"), "files").fill("x"));
 		}
@@ -93,6 +106,10 @@ describe("context treemap", () => {
 			expect(lines.join("\n").includes("over by")).toBe(false); // Caveats are supplied by collector, not inferred during rendering.
 			if (width >= 26) expect(lines.join("\n")).toContain("Sources · occupied context");
 			else if (width >= 24) expect(lines[1]).toContain("Sources · occupied");
+		}
+		for (let width = 1; width <= 200; width++) {
+			const lines = renderContextTreemap(snapshot(sources, 200), width, theme("dark"));
+			expect(lines.every((line) => visibleWidth(line) <= width), `width ${width}`).toBe(true);
 		}
 		const initial = renderContextTreemap({ ...snapshot([], undefined), stage: "initializing" }, 12, theme("light"));
 		expect(initial).toHaveLength(1);

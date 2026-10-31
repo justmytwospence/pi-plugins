@@ -20,6 +20,12 @@ import {
 } from "../src/feature/shell/startup-resources.ts";
 
 const plainTheme: StartupTheme = { fg: (_name, text) => text, bold: (text) => text };
+const screenshotModels = [
+  ...["claude-3-7-sonnet-20250219", "claude-3-7-haiku-20250219", "claude-3-7-opus-20250219", "claude-3-7-fable-20250219"].map((id) => ({ provider: "anthropic", id, contextWindow: 200_000 })),
+  { provider: "lmstudio", id: "qwen3-coder-32b-instruct", contextWindow: 131_072 },
+  { provider: "mtplx", id: "muse-wonder-1.0-extended", contextWindow: 200_000 },
+  ...["gpt-6.1-sol-preview:high", "gpt-6.1-cyber-preview", "gpt-6.1-astra-preview", "gpt-6.1-pro-preview"].map((id) => ({ provider: "openai", id, contextWindow: 272_000 })),
+];
 
 describe("startup resources", () => {
   test("packageItemName reduces package paths to the extension name", () => {
@@ -595,6 +601,33 @@ describe("startup resources", () => {
     expect(formatContextWindow(undefined)).toBe("");
   });
 
+  test("screenshot-sized Models pack ordered providers into independently placed vertical stacks", async () => {
+    const { buildModelsSection } = await import("../src/feature/shell/startup-resources.ts");
+    // Favorites keep every inventory entry, including IDs that happen to resemble aliases or versions.
+    const section = buildModelsSection(screenshotModels, screenshotModels)!;
+    expect(section.groups.map((group) => [group.label, group.items.length])).toEqual([
+      ["anthropic", 4], ["lmstudio", 1], ["mtplx", 1], ["openai", 4],
+    ]);
+    const { lines, hits } = layoutSection(section, 100, plainTheme);
+    expect(lines).toHaveLength(8); // Section heading + two seven-row stacks, not two five-row horizontal bands.
+    expect(lines[1]).toContain("anthropic 4");
+    expect(lines[1]).toContain("mtplx 1");
+    expect(lines[6]).toContain("lmstudio 1");
+    expect(lines[3]).toContain("openai 4"); // The right stack starts openai beneath mtplx.
+    expect(lines[2]).toContain("muse-wonder-1.0-extended");
+    expect(lines[7]).toContain("gpt-6.1-pro-preview");
+    expect(new Set(hits.map((hit) => JSON.stringify(hit.action))).size).toBe(10);
+    for (const [provider, rows] of [["anthropic", [2, 3, 4, 5]], ["lmstudio", [7]], ["mtplx", [2]], ["openai", [4, 5, 6, 7]]] as const) {
+      expect([...new Set(hits.filter((hit) => hit.action.kind === "model" && hit.action.provider === provider).map((hit) => hit.row))].sort((a, b) => a - b)).toEqual(rows);
+    }
+    const firstColumn = hits.filter((hit) => hit.action.kind === "model" && ["anthropic", "lmstudio"].includes(hit.action.provider));
+    const secondColumn = hits.filter((hit) => hit.action.kind === "model" && ["mtplx", "openai"].includes(hit.action.provider));
+    const leftEdge = Math.max(...firstColumn.map((hit) => hit.endCol));
+    const rightEdge = Math.min(...secondColumn.map((hit) => hit.startCol));
+    expect(leftEdge + 3).toBeLessThanOrEqual(rightEdge);
+    expect(sliceByColumn(lines[2]!, leftEdge, rightEdge - leftEdge).trim()).toBe("");
+  });
+
   test("a long column uses quotient/remainder splits under its heading", async () => {
     const items = Array.from({ length: 10 }, (_, i) => `m${i}`);
     const lines = renderSection({ title: "C", count: items.length, layout: "columns", groups: [{ label: "p", items }] }, 80, plainTheme);
@@ -631,8 +664,9 @@ describe("startup resources", () => {
       { name: "small", level: "user" },
       { name: "offline", level: "user", enabled: false },
     ], (name) => name === "small" ? "connected" : "unknown")!;
-    for (const width of [12, 28, 46, 120, 180]) {
-      const { lines, hits } = layoutSection(section, width, plainTheme);
+    const ansi: StartupTheme = { fg: (_name, text) => `\x1b[32m${text}\x1b[39m`, bold: (text) => `\x1b[1m${text}\x1b[22m` };
+    for (const theme of [plainTheme, ansi]) for (const width of [12, 28, 46, 120, 180]) {
+      const { lines, hits } = layoutSection(section, width, theme);
       expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
       expect(hits.map((hit) => hit.action)).toEqual(expect.arrayContaining([
         { kind: "mcp", name: "界界-very-very-long" },
@@ -645,7 +679,7 @@ describe("startup resources", () => {
         expect(hit.endCol).toBeGreaterThan(hit.startCol);
         expect(hit.row).toBeGreaterThan(0);
         expect(lines[hit.row]).toBeDefined();
-        expect(visibleWidth(lines[hit.row]!)).toBeGreaterThan(hit.startCol);
+        expect(visibleWidth(sliceByColumn(lines[hit.row]!, hit.startCol, hit.endCol - hit.startCol))).toBeGreaterThan(0);
       }
     }
   });
@@ -658,21 +692,43 @@ describe("startup resources", () => {
       { provider: "openai", id: "gpt-6.1-sol", contextWindow: 922_000 },
     ], Array.from({ length: 17 }, (_, n) => ({ provider: "google", id: `antigravity-gemini-${n}-flash` })))!;
     const mcp = buildMcpSection(Array.from({ length: 17 }, (_, n) => ({ name: `s${n}`, level: "user" as const })), () => "connected", undefined, () => 1)!;
+    const stacked = buildModelsSection(screenshotModels, screenshotModels)!;
     const widths = [...Array.from({ length: 200 }, (_, n) => n + 1), 240];
-    for (const width of widths) for (const section of [models, mcp]) {
-      const { lines, hits } = layoutSection(section, width, plainTheme);
+    for (const width of widths) for (const section of [models, mcp, stacked]) {
+      const layout = layoutSection(section, width, plainTheme);
+      const { lines, hits } = layout;
+      expect(layoutSection(section, width, plainTheme), `${section.title} deterministic at ${width}`).toEqual(layout);
       expect(lines.every((line) => visibleWidth(line) <= width), `${section.title} at ${width}`).toBe(true);
+      const actions = new Map<string, typeof hits>();
       for (const hit of hits) {
         expect(hit.row, `${section.title} at ${width}`).toBeGreaterThan(0);
         expect(hit.row).toBeLessThan(lines.length);
         expect(hit.startCol).toBeGreaterThanOrEqual(0);
         expect(hit.endCol).toBeLessThanOrEqual(width);
         expect(hit.endCol).toBeGreaterThan(hit.startCol);
-        expect(sliceByColumn(lines[hit.row]!, hit.startCol, hit.endCol).trim()).not.toBe("");
+        expect(sliceByColumn(lines[hit.row]!, hit.startCol, hit.endCol - hit.startCol).trim()).not.toBe("");
+        const key = JSON.stringify(hit.action);
+        actions.set(key, [...(actions.get(key) ?? []), hit]);
+      }
+      for (const cells of actions.values()) {
+        expect(new Set(cells.map((hit) => hit.row)).size, `${section.title} duplicate row at ${width}`).toBe(1);
+        expect(cells.length, `${section.title} duplicate cell at ${width}`).toBeLessThanOrEqual(2);
+      }
+      for (let row = 0; row < lines.length; row++) {
+        const rectangles = hits.filter((hit) => hit.row === row).sort((a, b) => a.startCol - b.startCol);
+        for (let i = 1; i < rectangles.length; i++) {
+          const previous = rectangles[i - 1]!;
+          const current = rectangles[i]!;
+          expect(current.startCol, `${section.title} overlapping hits at ${width}`).toBeGreaterThanOrEqual(previous.endCol);
+          // The name/status gap is inactive; a different stack may have a heading between actions.
+          if (JSON.stringify(previous.action) === JSON.stringify(current.action)) {
+            expect(sliceByColumn(lines[row]!, previous.endCol, current.startCol - previous.endCol).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").trim(), `${section.title} active gap at ${width}`).toBe("");
+          }
+        }
       }
       if (width >= 120) {
-        const unique = new Set(hits.map((hit) => JSON.stringify(hit.action)));
-        expect(unique.size, `${section.title} at ${width}`).toBe(section.count);
+        const expected = section.groups.flatMap((group) => group.actions ?? []).map((action) => JSON.stringify(action));
+        expect([...actions.keys()].sort(), `${section.title} missing/repeated action at ${width}`).toEqual(expected.sort());
         expect(lines[0]).toContain(`${section.title} ${section.count}`);
       }
     }

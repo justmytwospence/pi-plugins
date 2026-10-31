@@ -92,8 +92,8 @@ export type ResourceSection = {
 	/** The model's context window, when known; colors the heading total by its share of it. */
 	contextWindow?: number;
 	/**
-	 * "lines" lists one entry per line; "grid" packs short names into columns; "columns" puts each group side
-	 * by side as its own column (heading on top, entries under it), wrapping to a new band when out of width.
+	 * "lines" lists one entry per line; "grid" packs short names into columns; "columns" stacks
+	 * contiguous groups vertically in width-bounded columns (each group may split its entries).
 	 */
 	layout: "lines" | "grid" | "columns";
 	groups: ResourceGroup[];
@@ -389,59 +389,73 @@ function columnBlock(shape: Candidate, cells: Cell[], heading: string, available
 	return { lines, hits, width, height: lines.length, columns: shape.columns };
 }
 
-type Band = { blocks: Block[]; width: number; height: number; splits: number; key: string };
-function compareChoices(a: { height: number; splits: number; bands: number; key: string }, b: typeof a): number {
-	return a.height - b.height || a.splits - b.splits || a.bands - b.bands || a.key.localeCompare(b.key);
+type Stack = { blocks: Block[]; width: number; height: number; splits: number; key: string };
+type StackChoice = { width: number; height: number; splits: number; stacks: number; key: string; value: Stack[] };
+function compareChoices(a: { height: number; splits: number; stacks: number; key: string }, b: typeof a): number {
+	return a.height - b.height || a.splits - b.splits || a.stacks - b.stacks || a.key.localeCompare(b.key);
 }
 
-/** Bounded width-DP for each contiguous band, then a partition DP across groups. */
+/** Width/height frontiers keep only the best split count at each state, never expanding shape combinations. */
 function layoutColumns(groups: ResourceGroup[], indent: number, ctx: RenderContext): SectionLayout {
 	const available = Math.max(1, ctx.width - indent);
 	const options = groups.map((group) => {
 		const { cells, heading, shapes } = candidateShapes(group, available, ctx.theme, ctx.section.category);
 		return shapes.map((shape) => columnBlock(shape, cells, heading, available, ctx.theme));
 	});
-	const partition: Array<{ height: number; splits: number; bands: number; key: string; value: Band[] } | undefined> = Array(groups.length + 1).fill(undefined);
-	partition[groups.length] = { height: 0, splits: 0, bands: 0, key: "", value: [] };
+	// A suffix choice records used width and its tallest stack; within that state fewer splits,
+	// then fewer stacks wins. An ordered stack has the maximum width and summed heights of its groups.
+	const partition: Array<Map<string, StackChoice>> = Array.from({ length: groups.length + 1 }, () => new Map());
+	partition[groups.length]!.set("0:0", { width: 0, height: 0, splits: 0, stacks: 0, key: "", value: [] });
 	for (let start = groups.length - 1; start >= 0; start--) {
-		let frontier = new Map<string, Band>([["0:0", { blocks: [], width: 0, height: 0, splits: 0, key: "" }]]);
+		let frontier = new Map<string, Stack>([["0:0", { blocks: [], width: 0, height: 0, splits: 0, key: "" }]]);
 		for (let end = start; end < groups.length; end++) {
-			const next = new Map<string, Band>();
-			for (const band of frontier.values()) for (const block of options[end]!) {
-				const width = band.width + (band.blocks.length ? COLUMN_GAP : 0) + block.width;
-				if (width > available) continue;
-				const choice: Band = {
-					blocks: [...band.blocks, block], width,
-					height: Math.max(band.height, block.height), splits: band.splits + block.columns - 1,
-					key: `${band.key}${block.columns.toString().padStart(3, "0")}`,
+			const next = new Map<string, Stack>();
+			for (const stack of frontier.values()) for (const block of options[end]!) {
+				const width = Math.max(stack.width, block.width);
+				const choice: Stack = {
+					blocks: [...stack.blocks, block], width,
+					height: stack.height + block.height, splits: stack.splits + block.columns - 1,
+					key: `${stack.key}${block.columns.toString().padStart(3, "0")},`,
 				};
 				const key = `${width}:${choice.height}`;
 				const old = next.get(key);
-				if (!old || compareChoices({ ...choice, bands: 1 }, { ...old, bands: 1 }) < 0) next.set(key, choice);
+				if (!old || choice.splits < old.splits || (choice.splits === old.splits && choice.key < old.key)) next.set(key, choice);
 			}
-			if (!next.size) break;
 			frontier = next;
-			const tail = partition[end + 1]!;
-			for (const band of frontier.values()) {
-				const choice = { height: band.height + tail.height, splits: band.splits + tail.splits, bands: 1 + tail.bands, key: band.key + tail.key, value: [band, ...tail.value] };
-				const best = partition[start];
-				if (!best || compareChoices(choice, best) < 0) partition[start] = choice;
+			for (const stack of frontier.values()) for (const tail of partition[end + 1]!.values()) {
+				const width = stack.width + (tail.stacks ? COLUMN_GAP + tail.width : 0);
+				if (width > available) continue;
+				const choice: StackChoice = {
+					width, height: Math.max(stack.height, tail.height), splits: stack.splits + tail.splits,
+					stacks: 1 + tail.stacks, key: `${stack.key}|${tail.key}`, value: [stack, ...tail.value],
+				};
+				const key = `${choice.width}:${choice.height}`;
+				const old = partition[start]!.get(key);
+				if (!old || compareChoices(choice, old) < 0) partition[start]!.set(key, choice);
 			}
 		}
 	}
+	const best = [...partition[0]!.values()].sort(compareChoices)[0];
 	const lines: string[] = [];
 	const hits: SplashHit[] = [];
-	for (const band of partition[0]?.value ?? []) {
-		for (let row = 0; row < band.height; row++) {
-			let line = " ".repeat(indent);
-			for (const block of band.blocks) {
-				const offset = visibleWidth(line);
-				const chunk = block.lines[row] ?? "";
-				line += chunk + " ".repeat(Math.max(0, block.width - visibleWidth(chunk)) + COLUMN_GAP);
-				for (const hit of block.hits) if (hit.row === row) hits.push({ row: lines.length, startCol: offset + hit.startCol, endCol: Math.min(ctx.width, offset + hit.endCol), action: hit.action });
+	for (let row = 0; row < (best?.height ?? 0); row++) {
+		let line = " ".repeat(indent);
+		for (const [index, stack] of (best?.value ?? []).entries()) {
+			const offset = visibleWidth(line);
+			let at = row;
+			let block: Block | undefined;
+			for (const candidate of stack.blocks) {
+				if (at < candidate.height) { block = candidate; break; }
+				at -= candidate.height;
 			}
-			lines.push(truncateToWidth(line.trimEnd(), ctx.width));
+			const chunk = block?.lines[at] ?? "";
+			line += chunk;
+			if (index < best!.value.length - 1) line += " ".repeat(Math.max(0, stack.width - visibleWidth(chunk)) + COLUMN_GAP);
+			for (const hit of block?.hits ?? []) if (hit.row === at) {
+				hits.push({ row: row, startCol: offset + hit.startCol, endCol: Math.min(ctx.width, offset + hit.endCol), action: hit.action });
+			}
 		}
+		lines.push(truncateToWidth(line.trimEnd(), ctx.width));
 	}
 	return { lines, hits };
 }
@@ -542,7 +556,7 @@ export function layoutSection(section: ResourceSection, width: number, theme: St
 	for (const note of section.notes ?? []) {
 		lines.push(truncateToWidth(`${" ".repeat(INDENT)}${theme.fg(note.color, note.text)}`, width));
 	}
-	return { lines, hits: hits.filter((hit) => hit.endCol > hit.startCol && !!sliceByColumn(lines[hit.row] ?? "", hit.startCol, hit.endCol)) };
+	return { lines, hits: hits.filter((hit) => hit.endCol > hit.startCol && !!sliceByColumn(lines[hit.row] ?? "", hit.startCol, hit.endCol - hit.startCol)) };
 }
 
 export function renderSection(section: ResourceSection, width: number, theme: StartupTheme): string[] {
@@ -920,8 +934,8 @@ export function currentGeneration(ids: string[]): Set<string> {
 }
 
 /**
- * The models section, one line per model under a heading per provider, providers side by side as far as the
- * width allows (the columns layout Context uses): every current-generation model of each
+ * The models section, one line per model under a heading per provider, with providers in ordered
+ * vertical column stacks (the columns layout Context uses): every current-generation model of each
  * provider with credentials, plus the favorites (enabledModels or --models, with any thinking level) and the
  * session's model wherever they are. Favorites carry a star and come first in their provider, in the order they
  * are configured; the session's model is highlighted in green. Every model shows its context window on the right.
