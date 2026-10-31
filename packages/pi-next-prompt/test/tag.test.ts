@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { INSTRUCTION, PROMPT_OFFER_INSTRUCTION, extractNext } from "../src/tag.ts";
+import { INSTRUCTION, INTERACTIVE_INSTRUCTION, PROMPT_OFFER_INSTRUCTION, extractNext } from "../src/tag.ts";
 
 test("a last tag line is removed and becomes the suggestion", () => {
   expect(extractNext("Edited a.ts.\n\n<next>Run the tests</next>")).toEqual({ text: "Edited a.ts.", suggestion: "Run the tests", found: true });
@@ -38,10 +38,20 @@ test("explicit handoffs require the tool and a displayed receipt independently o
   expect(PROMPT_OFFER_INSTRUCTION).toContain("Only status displayed");
   expect(PROMPT_OFFER_INSTRUCTION).toContain("not inserted until the user accepts");
   expect(PROMPT_OFFER_INSTRUCTION).toContain("Do not rely on prose or a <next> tag");
-  expect(PROMPT_OFFER_INSTRUCTION).toContain("Tab/Right then Enter after the response finishes");
+  expect(PROMPT_OFFER_INSTRUCTION).toContain("Tab/Right to copy the suggestion immediately into an editable draft");
+  expect(PROMPT_OFFER_INSTRUCTION).toContain("Enter is a separate submission");
+  expect(PROMPT_OFFER_INSTRUCTION).not.toContain("after the response finishes");
+  expect(PROMPT_OFFER_INSTRUCTION).not.toContain("Wait for the current response to finish");
   expect(PROMPT_OFFER_INSTRUCTION).toContain("On blocked, state the blocker");
   expect(PROMPT_OFFER_INSTRUCTION).toContain("Shell handoffs use offer_terminal");
   expect(PROMPT_OFFER_INSTRUCTION).toContain("Never include credentials");
+});
+
+test("terminal offers allow immediate draft acceptance but require waiting before interactive execution", () => {
+  expect(INTERACTIVE_INSTRUCTION).toContain("Acceptance is available once displayed");
+  expect(INTERACTIVE_INSTRUCTION).toContain("Tab only fills an editable draft and the user must press Enter to run it");
+  expect(INTERACTIVE_INSTRUCTION).toContain("Wait for the current response to finish before pressing Enter to run an interactive command");
+  expect(INTERACTIVE_INSTRUCTION).not.toContain("Acceptance becomes available after the response finishes");
 });
 
 test("the instruction is short", () => {

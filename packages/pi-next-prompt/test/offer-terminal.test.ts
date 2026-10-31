@@ -39,6 +39,7 @@ test.each([false, true])("diagnostics distinguish mid-turn output, final answer 
   const mid = await diagnostics(s);
   expect(mid.before).toMatchObject({ visible: true, busy: true, settled: false });
   expect(mid.after).toBeNull();
+  expect(mid.ready).toBe(true);
   expect(mid.trace.map((event: any) => event.event)).toEqual(expect.arrayContaining(["create", "show", "acknowledge"]));
   if (ghost) expect(mid.trace.some((event: any) => event.event === "patch-install")).toBe(true);
   await s.h.emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "PRIVATE_FINAL" }] } }, s.ctx);
@@ -115,6 +116,9 @@ test("render-wrapper replacement is distinguishable from a successful receipt", 
 async function setup(options: { shell?: boolean; ghost?: boolean; maxChars?: number; context?: Record<string, unknown> } = {}) {
   vi.useFakeTimers();
   const h = harness();
+  const sendUserMessage = vi.fn();
+  const executeCommand = vi.fn();
+  Object.assign(h.pi, { sendUserMessage, executeCommand });
   const diagnostics = nextPrompt(h.pi);
   const cwd = mkdtempSync("/tmp/offer-terminal-");
   if (options.maxChars !== undefined) {
@@ -130,7 +134,7 @@ async function setup(options: { shell?: boolean; ghost?: boolean; maxChars?: num
   const execute = (command = "printf 'one  two'", signal?: AbortSignal) => tool.execute("call", { command }, signal, undefined, ctx);
   const render = () => options.ghost ? ctx.ui.renderEditor() : ctx.ui.widgetLines("next-prompt");
   const offer = async (command?: string) => { const promise = execute(command); render(); return await promise; };
-  return { h, ctx, tool, execute, render, offer, diagnostics, shell: (value: any) => { info = value; } };
+  return { h, ctx, tool, execute, render, offer, diagnostics, sendUserMessage, executeCommand, shell: (value: any) => { info = value; } };
 }
 
 test("model-only schema and guidelines require verified display", async () => {
@@ -138,7 +142,11 @@ test("model-only schema and guidelines require verified display", async () => {
   expect(tool.exposure).toBe("model-only");
   expect(tool.label).toBe("Offer terminal command");
   expect(tool.parameters.properties.command).toMatchObject({ type: "string", minLength: 1 });
-  expect(tool.promptGuidelines.join(" ")).toContain("status displayed");
+  const guidelines = tool.promptGuidelines.join(" ");
+  expect(guidelines).toContain("status displayed");
+  expect(guidelines).toContain("Tab/Right to copy the suggestion immediately into an editable draft");
+  expect(guidelines).toContain("Enter is a separate submission");
+  expect(guidelines).toContain("Wait for the current response to finish before pressing Enter to run an interactive command.");
 });
 
 test.each(["", "  ", " true", "true ", "one\ntwo", "one\rtwo", "one\x1btwo", "one\x00two", "!i true", "!!i true"])("rejects invalid input %j", async command => {
@@ -156,8 +164,11 @@ test.each([false, true])("acknowledges only actual output, preserving raw shell 
   expect(done).toBe(false); // Neither the widget factory nor the ghost cursor preflight is a render.
   expect(render()?.length).toBeGreaterThan(0);
   const result = await promise;
-  expect(result.details).toMatchObject({ status: "displayed", kind: "terminal", text: `!i ${command}`, surface: ghost ? "ghost" : "widget" });
-  expect(result.content[0].text).toContain(`!i ${command}`);
+  expect(result.details).toEqual({ status: "displayed", kind: "terminal", text: `!i ${command}`, surface: ghost ? "ghost" : "widget", acceptAfterTurn: false });
+  expect(result.content).toEqual([{
+    type: "text",
+    text: `Displayed editable suggestion: !i ${command}\nPress Tab/Right to copy it into an editable draft now. Wait for the current response to finish before pressing Enter to run it. Nothing was executed.`,
+  }]);
   expect(ctx.ui.editorWrites).toEqual([]);
 });
 
@@ -200,11 +211,46 @@ test("blocked states report concrete reasons", async () => {
   }
 });
 
-test("busy offer is visible, outranks tags and survives tagless final answer; settlement enables acceptance", async () => {
-  const { h, ctx, offer } = await setup();
+test.each([false, true].flatMap(ghost => ["\t", "\x1b[C"].map(key => ({ ghost, key }))))("busy terminal acceptance immediately copies an acknowledged draft without execution (ghost=$ghost, key=$key)", async ({ ghost, key }) => {
+  const s = await setup({ ghost });
+  const command = "sh -c 'printf \"one  two 日本語\"'";
+  const text = `!i ${command}`;
+  const accepted = vi.fn();
+  const insert = vi.fn();
+  s.h.pi.events.on("interactive-shell:suggestion-accepted", accepted);
+  s.ctx.ui.editor[Symbol.for("pi-plugins.editor-insert.v1")] = insert;
+  await s.h.emit("agent_start", {}, s.ctx);
+  const pending = s.execute(command);
+  expect(s.diagnostics().ready).toBe(false);
+  expect(s.ctx.ui.press(key)).toBe(false);
+  s.render();
+  expect(s.ctx.ui.press(key)).toBe(false); // A queued acknowledgement is not a receipt yet.
+  expect(s.ctx.ui.editorWrites).toEqual([]);
+  const result = await pending;
+  expect(result.details).toEqual({ status: "displayed", kind: "terminal", text, surface: ghost ? "ghost" : "widget", acceptAfterTurn: false });
+  expect(result.content[0].text).toBe(`Displayed editable suggestion: ${text}\nPress Tab/Right to copy it into an editable draft now. Wait for the current response to finish before pressing Enter to run it. Nothing was executed.`);
+  expect(s.diagnostics().state.busy).toBe(true);
+  expect(s.diagnostics().ready).toBe(true);
+  expect(s.ctx.ui.press(key)).toBe(true);
+  expect(s.ctx.ui.editorText).toBe(text);
+  expect(s.ctx.ui.editorWrites).toEqual([text]);
+  expect(insert).toHaveBeenCalledTimes(1);
+  expect(accepted.mock.calls).toEqual([[{ text }]]);
+  expect(s.ctx.ui.press(key)).toBe(false);
+  expect(s.ctx.ui.editorWrites).toEqual([text]);
+  expect(insert).toHaveBeenCalledTimes(1);
+  expect(accepted).toHaveBeenCalledTimes(1);
+  expect(s.diagnostics().ready).toBe(false);
+  expect(s.sendUserMessage).not.toHaveBeenCalled();
+  expect(s.executeCommand).not.toHaveBeenCalled();
+  expect(s.h.messages).toEqual([]);
+});
+
+test("unaccepted busy offer outranks tags and survives tagless successful final answer", async () => {
+  const { h, ctx, offer, diagnostics } = await setup();
   await h.emit("agent_start", {}, ctx);
-  expect((await offer("true")).details.acceptAfterTurn).toBe(true);
-  expect(ctx.ui.press("\t")).toBe(false);
+  expect((await offer("true")).details.acceptAfterTurn).toBe(false);
+  expect(diagnostics().ready).toBe(true);
   expect(ctx.ui.editorWrites).toEqual([]);
   const tagged: any = await h.emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "Done\n<next>Other</next>" }] } }, ctx);
   expect(tagged.message.content[0].text).toBe("Done");
@@ -219,7 +265,7 @@ test("busy offer is visible, outranks tags and survives tagless final answer; se
   expect(h.messages).toEqual([]);
 });
 
-test.each(["aborted", "failed"])("unsuccessful settlement clears explicit offer (%s)", async outcome => {
+test.each(["aborted", "failed", "error"])("unsuccessful settlement clears explicit offer (%s)", async outcome => {
   const { h, ctx, offer } = await setup();
   await h.emit("agent_start", {}, ctx);
   await offer();

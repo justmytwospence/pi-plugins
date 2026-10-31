@@ -34,6 +34,21 @@ for (const nextFirst of [true, false]) test(`Tab accepts next before tasks regar
   pill.setUI(ctx.ui); pill.update();
   h.pi.events.on(TASK_TAB, (request: any) => { if (!request.handled) request.handled = pill.tab(request.phase === "active"); });
   try {
+    await h.emit("agent_start", {}, ctx);
+    const text = "Review Tab routing before the response finishes";
+    const result = h.tools.get("offer_prompt").execute("offer", { text }, undefined, undefined, ctx);
+    expect(ctx.ui.widgetLines("next-prompt")?.join("\n")).toContain(text);
+    expect((await result).details).toMatchObject({ status: "displayed", surface: "widget", acceptAfterTurn: false });
+    expect(ctx.ui.press("\t")).toBe(true);
+    expect(ctx.ui.editorText).toBe(text);
+    expect(ctx.ui.editorWrites).toEqual([text]);
+    expect(pill.isSelected).toBe(false);
+    expect(opened).toBe(0);
+    expect(h.messages).toEqual([]);
+    await h.emit("agent_before_settle", { outcome: "completed" }, ctx);
+    await h.emit("agent_settled", {}, ctx);
+    ctx.ui.editorText = "";
+    await h.emit("agent_start", {}, ctx);
     await h.emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "Done.\n<next>Run tests</next>" }] } }, ctx);
     await h.emit("agent_before_settle", { outcome: "completed" }, ctx);
     await h.emit("agent_settled", {}, ctx);
@@ -52,6 +67,8 @@ for (const nextFirst of [true, false]) test(`Tab accepts next before tasks regar
     await h.emit("agent_settled", {}, ctx);
     expect(ctx.ui.press("\t")).toBe(true);
     expect(ctx.ui.editorText).toBe("");
+    expect(pill.isSelected).toBe(true);
+    expect(opened).toBe(0);
     expect(ctx.ui.press("\x1b")).toBe(true);
     expect(ctx.ui.press("\t")).toBe(true);
     expect(ctx.ui.editorText).toBe("Check results");

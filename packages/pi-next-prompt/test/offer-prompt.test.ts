@@ -38,7 +38,7 @@ test.each([46, 120])("status and trace wrap safely at %i columns without render 
   render.mockRestore();
   expect(s.ctx.ui.editor.render).toBe(original);
   s.render();
-  expectDisplayed(await pending, "PRIVATE_PROMPT 日本語", true, true);
+  expectDisplayed(await pending, "PRIVATE_PROMPT 日本語", true);
   expect(s.ctx.ui.editorWrites).toEqual([]);
 });
 
@@ -47,10 +47,13 @@ test("status labels pending, ready, suspended, accepted and blocked offers witho
   expect(await notification(s)).toContain("Offer: none");
   await s.h.emit("agent_start", {}, s.ctx);
   const pending = s.execute();
-  expect(await notification(s)).toContain("awaiting render");
+  const awaitingRender = await notification(s);
+  expect(awaitingRender).toContain("awaiting render");
+  expect(awaitingRender).toContain("acceptance: not ready");
   s.render();
   await pending;
-  expect(await notification(s)).toContain("acceptance: not ready");
+  expect(await notification(s)).toContain("Turn: busy");
+  expect(await notification(s)).toContain("acceptance: ready");
   await s.settle();
   s.render();
   expect(await notification(s)).toContain("acceptance: ready");
@@ -60,7 +63,9 @@ test("status labels pending, ready, suspended, accepted and blocked offers witho
   s.ctx.ui.focus(s.ctx.ui.editor);
   s.render();
   expect(s.ctx.ui.press(TAB)).toBe(true);
-  expect(await notification(s)).toContain("Last explicit: accepted");
+  const accepted = await notification(s);
+  expect(accepted).toContain("Last explicit: accepted");
+  expect(accepted).toContain("acceptance: not ready");
   expectBlocked(await s.execute("PRIVATE_NEW_PROMPT"), "draft");
   const blocked = await notification(s);
   expect(blocked).toContain("editor contains a draft");
@@ -180,7 +185,7 @@ test.each(["dialog", "sidebar"])("transient %s focus after receipt has a concret
   for (const ghost of [false, true]) {
     const s = await setup({ ghost });
     await s.h.emit("agent_start", {}, s.ctx);
-    expectDisplayed(await s.offer(), PROMPT, ghost, true);
+    expectDisplayed(await s.offer(), PROMPT, ghost);
     // Both surfaces are non-main focus, but no component names or text enter diagnostics.
     const other = focus === "sidebar"
       ? { [Symbol.for("pi-plugins.editor-surface.v1")]: "embedded", getText: () => "PRIVATE_SIDEBAR" }
@@ -240,6 +245,7 @@ async function setup(options: {
   maxChars?: number;
   enabled?: boolean;
   jevEnabled?: boolean;
+  jevProbability?: number;
   context?: Record<string, unknown>;
   attach?: boolean;
 } = {}) {
@@ -255,8 +261,8 @@ async function setup(options: {
     ...(options.jevEnabled === undefined ? {} : { jev: { enabled: options.jevEnabled } }),
   }));
   const h = harness();
-  // A veto if called: explicit offers must bypass classification, not merely fail open.
-  const jev = fakeJev(() => ({ useful: { type: "bool", probability: 0 } }));
+  // A veto by default: explicit offers must bypass classification, not merely fail open.
+  const jev = fakeJev(() => ({ useful: { type: "bool", probability: options.jevProbability ?? 0 } }));
   const sendUserMessage = vi.fn();
   const executeCommand = vi.fn();
   Object.assign(h.pi, { sendUserMessage, executeCommand });
@@ -286,12 +292,12 @@ function expectBlocked(result: any, reason?: string) {
   expect(result.content).toEqual([{ type: "text", text: `Prompt suggestion blocked: ${result.details.reason}` }]);
 }
 
-function expectDisplayed(result: any, text: string, ghost = false, busy = false) {
-  expect(result.details).toEqual({ status: "displayed", kind: "prompt", text, surface: ghost ? "ghost" : "widget", acceptAfterTurn: busy });
+function expectDisplayed(result: any, text: string, ghost = false) {
+  expect(result.details).toEqual({ status: "displayed", kind: "prompt", text, surface: ghost ? "ghost" : "widget", acceptAfterTurn: false });
   expect(result.isError).not.toBe(true);
   expect(result.content).toEqual([{
     type: "text",
-    text: `Displayed editable suggestion: ${text}\nAfter this response finishes, press Tab/Right to copy it into your prompt, then Enter to submit it. Nothing was submitted.`,
+    text: `Displayed editable suggestion: ${text}\nPress Tab/Right to copy it into your prompt now, then Enter to submit it. Nothing was submitted.`,
   }]);
 }
 
@@ -312,7 +318,9 @@ test("registers the model-only exact-text prompt tool and verified-handoff guida
   const guidelines = tool.promptGuidelines.join(" ");
   expect(guidelines).toContain("offer_prompt");
   expect(guidelines).toContain("status displayed");
-  expect(guidelines).toContain("Tab/Right then Enter");
+  expect(guidelines).toContain("Tab/Right to copy the suggestion immediately into an editable draft");
+  expect(guidelines).toContain("Enter is a separate submission");
+  expect(guidelines).not.toContain("Wait for the current response to finish");
   expect(guidelines).toMatch(/blocker/i);
   expect(guidelines).toMatch(/secret|credential/i);
 });
@@ -564,32 +572,140 @@ test.each(["input", "session_tree", "model_select", "session_compact", "session_
   expect(s.ctx.ui.editorWrites).toEqual([]);
 });
 
-test.each([TAB, RIGHT])("completed settlement, not agent_end or before_settle, enables full-text insertion (%j)", async key => {
-  const s = await setup();
+const acceptanceCases = [false, true].flatMap(ghost => [TAB, RIGHT].flatMap(key =>
+  ["acknowledged", "agent_end", "agent_before_settle", "agent_settled"].map(stage => ({ ghost, key, stage }))));
+
+test.each(acceptanceCases)("acknowledged full-text insertion is draft-only at $stage (ghost=$ghost, key=$key)", async ({ ghost, key, stage }) => {
+  const s = await setup({ ghost });
+  const text = `${PROMPT} one  two '日本語'`;
   const accepted = vi.fn();
   s.h.pi.events.on("interactive-shell:suggestion-accepted", accepted);
   const insert = vi.fn(function (this: unknown) {
     expect(this).toBe(s.ctx.ui.editor);
-    expect(s.ctx.ui.editorText).toBe(PROMPT);
+    expect(s.ctx.ui.editorText).toBe(text);
   });
   s.ctx.ui.editor[Symbol.for("pi-plugins.editor-insert.v1")] = insert;
   await s.h.emit("agent_start", {}, s.ctx);
-  expectDisplayed(await s.offer(), PROMPT, false, true);
-  expect(s.ctx.ui.press(key)).toBe(false);
-  await s.h.emit("agent_end", {}, s.ctx);
-  expect(s.ctx.ui.press(key)).toBe(false);
-  await s.h.emit("agent_before_settle", { outcome: "completed" }, s.ctx);
-  expect(s.ctx.ui.press(key)).toBe(false);
+  expectDisplayed(await s.offer(text), text, ghost);
+  if (stage !== "acknowledged") await s.h.emit("agent_end", {}, s.ctx);
+  if (["agent_before_settle", "agent_settled"].includes(stage)) await s.h.emit("agent_before_settle", { outcome: "completed" }, s.ctx);
+  if (stage === "agent_settled") await s.h.emit("agent_settled", {}, s.ctx);
   expect(s.ctx.ui.editorWrites).toEqual([]);
   expect(insert).not.toHaveBeenCalled();
-  await s.h.emit("agent_settled", {}, s.ctx);
+  expect(s.diagnostics().ready).toBe(true);
   expect(s.ctx.ui.press(key)).toBe(true);
-  expect(s.ctx.ui.editorWrites).toEqual([PROMPT]);
+  expect(s.ctx.ui.editorWrites).toEqual([text]);
   expect(insert).toHaveBeenCalledTimes(1);
   expect(accepted).not.toHaveBeenCalled();
   expect(s.ctx.ui.widgets.size).toBe(0);
   expect(s.ctx.ui.press(key)).toBe(false);
+  expect(s.ctx.ui.editorWrites).toEqual([text]);
   expect(insert).toHaveBeenCalledTimes(1);
+  expect(s.diagnostics().ready).toBe(false);
+  expectNoSubmission(s);
+});
+
+test.each([false, true])("busy stash takes only acknowledged text, once, without editing or submitting (ghost=%s)", async ghost => {
+  const s = await setup({ ghost });
+  const text = `${PROMPT} one  two '日本語'`;
+  const insert = vi.fn();
+  const accepted = vi.fn();
+  s.ctx.ui.editor[Symbol.for("pi-plugins.editor-insert.v1")] = insert;
+  s.h.pi.events.on("interactive-shell:suggestion-accepted", accepted);
+  await s.h.emit("agent_start", {}, s.ctx);
+  const pending = s.execute(text);
+  const take = () => {
+    const request: { text?: string } = {};
+    s.h.pi.events.emit("prompt:take-next", request);
+    return request;
+  };
+  expect(take()).toEqual({});
+  expect(s.ctx.ui.press(TAB)).toBe(false);
+  s.render();
+  // Output alone is not acknowledgement until its queued ownership recheck succeeds.
+  expect(take()).toEqual({});
+  expect(s.ctx.ui.press(RIGHT)).toBe(false);
+  expectDisplayed(await pending, text, ghost);
+  const alreadyTaken = { text: "existing stash" };
+  s.h.pi.events.emit("prompt:take-next", alreadyTaken);
+  expect(alreadyTaken.text).toBe("existing stash");
+  expect(take()).toEqual({ text });
+  expect(take()).toEqual({});
+  expect(s.ctx.ui.press(TAB)).toBe(false);
+  expect(s.ctx.ui.editorText).toBe("");
+  expect(s.ctx.ui.editorWrites).toEqual([]);
+  expect(insert).not.toHaveBeenCalled();
+  expect(accepted).not.toHaveBeenCalled();
+  expect(s.diagnostics().ready).toBe(false);
+  expectNoSubmission(s);
+});
+
+const consumptionCases = [false, true].flatMap(ghost => ["prompt", "terminal"].flatMap(kind =>
+  ["accept", "stash"].map(consume => ({ ghost, kind, consume }))));
+
+test.each(consumptionCases)("early $kind $consume suppresses final-tag resurrection until a new run (ghost=$ghost)", async ({ ghost, kind, consume }) => {
+  // This classifier would approve a conflicting candidate if settlement wrongly vetted it.
+  const s = await setup({ ghost, jevProbability: 0.9 });
+  s.h.pi.events.on("interactive-shell:inspect", ({ reply }: any) => reply({ available: true, layout: "inline" }));
+  await s.h.emit("agent_start", {}, s.ctx);
+  const text = kind === "prompt" ? PROMPT : "!i printf 'one  two'";
+  const pending = kind === "prompt" ? s.execute(text) : s.terminal(text.slice(3));
+  s.render();
+  expect((await pending).details.status).toBe("displayed");
+  if (consume === "accept") {
+    expect(s.ctx.ui.press(TAB)).toBe(true);
+    expect(s.ctx.ui.editorText).toBe(text);
+    expect(s.ctx.ui.editorWrites).toEqual([text]);
+    // Even deleting or stashing an accepted draft cannot revive a later automatic tag.
+    s.ctx.ui.editorText = "";
+  } else {
+    const request: { text?: string } = {};
+    s.h.pi.events.emit("prompt:take-next", request);
+    expect(request.text).toBe(text);
+    expect(s.ctx.ui.editorWrites).toEqual([]);
+  }
+  const writes = [...s.ctx.ui.editorWrites];
+  const result: any = await s.h.emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "Done.\n<next>Conflicting automatic suggestion</next>" }] } }, s.ctx);
+  expect(result.message.content[0].text).toBe("Done.");
+  await s.settle();
+  expect(s.jev.calls).toEqual([]);
+  expect(s.diagnostics().vet).toBe("not run");
+  expect(s.diagnostics().offer).toBe("none");
+  s.render();
+  expect(s.ctx.ui.press(TAB)).toBe(false);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(s.ctx.ui.editorText).toBe("");
+  expect(s.ctx.ui.editorWrites).toEqual(writes);
+  expect(s.ctx.ui.widgets.size).toBe(0);
+  expectNoSubmission(s);
+
+  await s.h.emit("agent_start", {}, s.ctx);
+  await s.h.emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "Ready.\n<next>Fresh automatic suggestion</next>" }] } }, s.ctx);
+  await s.settle();
+  expect(s.jev.calls).toHaveLength(1);
+  expect(s.ctx.ui.press(TAB)).toBe(true);
+  expect(s.ctx.ui.editorText).toBe("Fresh automatic suggestion");
+  expectNoSubmission(s);
+});
+
+test.each([false, true].flatMap(ghost => ["completed", "failed", "aborted", "error"].map(outcome => ({ ghost, outcome }))))("$outcome settlement preserves a busy-accepted draft without further writes (ghost=$ghost)", async ({ ghost, outcome }) => {
+  const s = await setup({ ghost });
+  const insert = vi.fn();
+  s.ctx.ui.editor[Symbol.for("pi-plugins.editor-insert.v1")] = insert;
+  await s.h.emit("agent_start", {}, s.ctx);
+  await s.offer();
+  expect(s.ctx.ui.press(RIGHT)).toBe(true);
+  expect(s.ctx.ui.editorWrites).toEqual([PROMPT]);
+  await s.h.emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "Done.\n<next>Conflicting automatic suggestion</next>" }] } }, s.ctx);
+  await s.h.emit("agent_end", {}, s.ctx);
+  await s.settle(outcome);
+  s.render();
+  expect(s.ctx.ui.press(TAB)).toBe(false);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(s.ctx.ui.editorText).toBe(PROMPT);
+  expect(s.ctx.ui.editorWrites).toEqual([PROMPT]);
+  expect(insert).toHaveBeenCalledTimes(1);
+  expect(s.jev.calls).toEqual([]);
   expectNoSubmission(s);
 });
 

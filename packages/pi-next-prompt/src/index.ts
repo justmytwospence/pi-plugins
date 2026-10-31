@@ -185,6 +185,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
   let pending: Pending | undefined;
   let outcome: string | undefined;
   let settled = false;
+  let explicitTakenThisTurn = false;
   /** The suggestion on offer until the next prompt is sent; `shown` is set while it is on screen. */
   let offered: string | undefined;
   let shown: string | undefined;
@@ -201,7 +202,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
   let explicit: ExplicitOffer | undefined;
   let lastExplicit = "none yet";
   const blocked = (reason: string): OfferDetails => ({ status: "blocked", reason });
-  const displayed = (offer: ExplicitOffer): OfferDetails => ({ status: "displayed", kind: offer.kind, text: offer.text, surface: offer.surface, acceptAfterTurn: busy });
+  const displayed = (offer: ExplicitOffer): OfferDetails => ({ status: "displayed", kind: offer.kind, text: offer.text, surface: offer.surface, acceptAfterTurn: false });
   let lastTag = "none yet";
   let instruction = "not evaluated yet";
   let uiState = "not attached";
@@ -383,6 +384,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
     pending = undefined;
     outcome = undefined;
     settled = false;
+    explicitTakenThisTurn = false;
     lastTag = "none yet";
     vetState = "not run";
   };
@@ -493,7 +495,8 @@ export default function nextPrompt(pi: ExtensionAPI) {
     kind === "terminal"
       ? "Use offer_terminal for interactive shell handoffs with the complete raw shell command (no !i prefix)."
       : "Use offer_prompt for requested prompt or Pi slash command handoffs with the complete exact text, including when asked to put it in the prompt. Shell handoffs use offer_terminal.",
-    `Never claim a suggestion was offered unless offer_${kind} returned status displayed. After a displayed result explain Tab/Right then Enter, available after the response finishes; displayed is not inserted.`,
+    `Never claim a suggestion was offered unless offer_${kind} returned status displayed. After a displayed result explain Tab/Right to copy the suggestion immediately into an editable draft; Enter is a separate submission.`,
+    ...(kind === "terminal" ? ["Wait for the current response to finish before pressing Enter to run an interactive command."] : []),
     "If blocked, name the blocker and print the complete proposed text as a fallback without claiming it is in the editor. Never include secrets.",
   ];
 
@@ -514,7 +517,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
       lastExplicit = details.status === "displayed" ? `prompt displayed (${details.surface})` : `prompt: ${details.reason}`;
       return {
         content: [{ type: "text" as const, text: details.status === "displayed"
-          ? `Displayed editable suggestion: ${details.text}\nAfter this response finishes, press Tab/Right to copy it into your prompt, then Enter to submit it. Nothing was submitted.`
+          ? `Displayed editable suggestion: ${details.text}\nPress Tab/Right to copy it into your prompt now, then Enter to submit it. Nothing was submitted.`
           : `Prompt suggestion blocked: ${details.reason}` }],
         details,
         ...(details.status === "blocked" ? { isError: true } : {}),
@@ -535,7 +538,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
         lastExplicit = details.status === "displayed" ? `terminal displayed (${details.surface})` : `terminal: ${details.reason}`;
         return {
           content: [{ type: "text" as const, text: details.status === "displayed"
-            ? `Displayed editable suggestion: ${details.text}\nAfter the current response finishes, press Tab/Right to copy it, then Enter to run it. Nothing was executed.`
+            ? `Displayed editable suggestion: ${details.text}\nPress Tab/Right to copy it into an editable draft now. Wait for the current response to finish before pressing Enter to run it. Nothing was executed.`
             : `Terminal suggestion blocked: ${details.reason}` }],
           details,
           ...(details.status === "blocked" ? { isError: true } : {}),
@@ -572,10 +575,11 @@ export default function nextPrompt(pi: ExtensionAPI) {
       if (navigation.handled) return { consume: true };
     }
     const accept = config.acceptKeys.some((key) => matchesKey(data, key as KeyId));
-    if (accept && explicit && (busy || !explicit.acknowledged)) return undefined;
+    if (accept && explicit && !explicit.acknowledged) return undefined;
     if (accept && shown !== undefined && ui.getEditorText() === "") {
       const text = shown;
       const shellSuggestion = explicit ? explicit.kind === "terminal" : offerSource === undefined;
+      if (explicit) explicitTakenThisTurn = true;
       hide("accepted");
       ui.setEditorText(text);
       if (shellSuggestion && text.startsWith("!i ")) pi.events.emit("interactive-shell:suggestion-accepted", { text });
@@ -609,8 +613,9 @@ export default function nextPrompt(pi: ExtensionAPI) {
   pi.events.on("prompt:take-next", (data) => {
     const request = data as { text?: string } | undefined;
     if (!request || request.text !== undefined || shown === undefined || !ui) return;
-    if (ui.getEditorText() !== "" || !mainFocused() || (explicit && (busy || !explicit.acknowledged))) return;
+    if (ui.getEditorText() !== "" || !mainFocused() || (explicit && !explicit.acknowledged)) return;
     request.text = shown;
+    if (explicit) explicitTakenThisTurn = true;
     hide("taken into stash");
   });
 
@@ -736,6 +741,8 @@ export default function nextPrompt(pi: ExtensionAPI) {
       }
       return;
     }
+    // Consuming an explicit offer already chose this run's handoff, even if the editor is empty again.
+    if (explicitTakenThisTurn) return;
     if (!candidate || outcome !== "completed" || !active() || !ui) return;
     const mine = ++generation;
     vetState = "pending";
@@ -763,7 +770,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
     explicit: explicit ? `${explicit.kind} #${explicit.id} ${explicit.acknowledged ? "rendered" : "awaiting render"}` : "",
     lastExplicit: lastExplicit.startsWith("terminal: interactive-shell unavailable:") ? "terminal: interactive-shell unavailable (see tool result)" : lastExplicit,
     instruction, tag: lastTag, vet: vetState, outcome,
-    ready: active() && shown !== undefined && !!mainFocused() && ui?.getEditorText() === "" && (!explicit || (!busy && explicit.acknowledged)),
+    ready: active() && shown !== undefined && !!mainFocused() && ui?.getEditorText() === "" && (!explicit || explicit.acknowledged),
   });
   const notifyDiagnostics = (lines: string[], ctx: ExtensionContext) =>
     // Pi's notification reserves a column on both sides of its text content.

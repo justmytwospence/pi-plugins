@@ -1,18 +1,20 @@
 import { mkdtempSync } from "node:fs";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 vi.mock("../../pi-interactive-shell/src/handoff.ts", async importOriginal => ({
   ...await importOriginal<typeof import("../../pi-interactive-shell/src/handoff.ts")>(),
-  handoff: (_tui: unknown, _theme: unknown, _command: string, _cwd: string, done: (value: unknown) => void,
+  handoff: vi.fn((_tui: unknown, _theme: unknown, _command: string, _cwd: string, done: (value: unknown) => void,
     _autoClose?: boolean, _inline?: boolean, onStarted?: () => void) => {
     queueMicrotask(() => { onStarted?.(); done({ output: "(interactive command exited with code 0)", exitCode: 0, cancelled: false, truncated: false }); });
     return { render: () => [], invalidate() {}, shutdown: async () => {}, dispose() {}, focused: false };
-  },
+  }),
 }));
 import nextPrompt, { SECTION } from "../src/index.ts";
 import { INSTRUCTION, INTERACTIVE_INSTRUCTION, PROMPT_OFFER_INSTRUCTION } from "../src/tag.ts";
 const { default: interactiveShell } = await import(new URL("../../pi-interactive-shell/src/index.ts", import.meta.url).href);
+const { handoff } = await import(new URL("../../pi-interactive-shell/src/handoff.ts", import.meta.url).href);
 import { fakeJev, harness } from "./harness.ts";
 
+beforeEach(() => { vi.mocked(handoff).mockClear(); });
 const original = [process.stdin, process.stdout].map(stream => Object.getOwnPropertyDescriptor(stream, "isTTY"));
 afterEach(() => {
   [process.stdin, process.stdout].forEach((stream, i) => {
@@ -21,28 +23,32 @@ afterEach(() => {
   });
 });
 
-async function setup(first: boolean, tty = true, explicit = false) {
+async function setup(first: boolean, tty = true, explicit = false, options: { isIdle?: () => boolean; settle?: boolean } = {}) {
   for (const stream of [process.stdin, process.stdout]) Object.defineProperty(stream, "isTTY", { configurable: true, value: tty });
   const h = harness();
   for (const plugin of first ? [interactiveShell, nextPrompt] : [nextPrompt, interactiveShell]) plugin(h.pi);
   const jev = fakeJev(() => ({ useful: { type: "bool", probability: 0.9 } }));
-  const ctx = h.ctx({ cwd: mkdtempSync("/tmp/handoff-next-"), modelRegistry: jev.registry, isIdle: () => true });
+  const ctx = h.ctx({ cwd: mkdtempSync("/tmp/handoff-next-"), modelRegistry: jev.registry, isIdle: options.isIdle ?? (() => true) });
   const container = (children: any[] = []): any => ({ children, addChild(child: any) { children.push(child); }, removeChild(child: any) { const i = children.indexOf(child); if (i >= 0) children.splice(i, 1); } });
   Object.assign(ctx.ui.tui, container([container([container(), container(), container()])]), { mode: "regular" });
-  ctx.ui.custom = async (factory: any) => new Promise(resolve => { factory(ctx.ui.tui, ctx.ui.theme, {}, resolve); });
+  ctx.ui.custom = vi.fn(async (factory: any) => new Promise(resolve => { factory(ctx.ui.tui, ctx.ui.theme, {}, resolve); }));
   await h.emit("session_start", {}, ctx);
   const sections: Record<string, string> = {};
   await h.emit("before_agent_start", { prompt: "do interactive step", systemPromptOptions: { sections } }, ctx);
   await h.emit("agent_start", {}, ctx);
   if (explicit) {
     const result = h.tools.get("offer_terminal").execute("offer", { command: "sudo true" }, undefined, undefined, ctx);
-    ctx.ui.widgetLines("next-prompt");
-    expect((await result).details.status).toBe("displayed");
+    expect(ctx.ui.widgetLines("next-prompt")?.join("\n")).toContain("!i sudo true");
+    expect((await result).details).toMatchObject({ status: "displayed", surface: "widget", acceptAfterTurn: false });
   }
-  await h.emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: explicit ? "Run this yourself after this response." : "Run this yourself.\n<next>!i sudo true</next>" }] } }, ctx);
-  await h.emit("agent_before_settle", { outcome: "completed" }, ctx);
-  await h.emit("agent_settled", {}, ctx);
-  return { h, ctx, sections };
+  const settle = async () => {
+    await h.emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: explicit ? "Run this yourself." : "Run this yourself.\n<next>!i sudo true</next>" }] } }, ctx);
+    await h.emit("agent_end", {}, ctx);
+    await h.emit("agent_before_settle", { outcome: "completed" }, ctx);
+    await h.emit("agent_settled", {}, ctx);
+  };
+  if (options.settle !== false) await settle();
+  return { h, ctx, sections, settle };
 }
 
 test.each([false, true])("optional capability and Tab-only acceptance work in both registration orders (%s)", async first => {
@@ -82,6 +88,80 @@ test.each([false, true])("explicit verified tool acceptance resumes exactly once
     await new Promise<void>(resolve => setImmediate(resolve));
   }
   expect(h.messages).toHaveLength(1);
+});
+
+test.each([false, true])("busy explicit acceptance only drafts, then unchanged idle submission hands off and resumes once (%s)", async first => {
+  let idle = false;
+  const { h, ctx, settle } = await setup(first, true, true, { isIdle: () => idle, settle: false });
+  const accepted: unknown[] = [];
+  h.pi.events.on("interactive-shell:suggestion-accepted", (data: unknown) => accepted.push(data));
+  expect(ctx.isIdle()).toBe(false);
+  expect(ctx.ui.press("\t")).toBe(true);
+  expect(ctx.ui.editorText).toBe("!i sudo true");
+  expect(ctx.ui.editorWrites).toEqual(["!i sudo true"]);
+  expect(accepted).toEqual([{ text: "!i sudo true" }]);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  expect(ctx.ui.custom).not.toHaveBeenCalled();
+  expect(handoff).not.toHaveBeenCalled();
+  expect(h.messages).toEqual([]);
+
+  idle = true;
+  await settle();
+  expect(ctx.ui.editorText).toBe("!i sudo true");
+  expect(ctx.ui.editorWrites).toEqual(["!i sudo true"]);
+  expect(ctx.ui.custom).not.toHaveBeenCalled();
+  expect(handoff).not.toHaveBeenCalled();
+  expect(h.messages).toEqual([]);
+  let result: unknown;
+  for (const handler of h.handlers.get("user_bash")!) {
+    result = await handler({ command: ctx.ui.editorText.slice(1), cwd: ctx.cwd, excludeFromContext: false }, ctx);
+    if (result) break;
+  }
+  expect(result).toMatchObject({ result: { exitCode: 0 } });
+  expect(ctx.ui.custom).toHaveBeenCalledOnce();
+  expect(handoff).toHaveBeenCalledExactlyOnceWith(ctx.ui.tui, ctx.ui.theme, "sudo true", ctx.cwd, expect.any(Function), true, true, expect.any(Function));
+  expect(h.messages).toEqual([]);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  expect(h.messages).toEqual([{
+    message: {
+      customType: "interactive-shell-continuation",
+      content: expect.any(String),
+      display: false,
+    },
+    opts: { triggerTurn: true },
+  }]);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  expect(handoff).toHaveBeenCalledOnce();
+  expect(h.messages).toHaveLength(1);
+});
+
+test.each([false, true])("busy user_bash rejects the accepted draft without launching, continuing or retrying at settlement (%s)", async first => {
+  let idle = false;
+  const { h, ctx, settle } = await setup(first, true, true, { isIdle: () => idle, settle: false });
+  expect(ctx.ui.press("\t")).toBe(true);
+  expect(ctx.ui.editorText).toBe("!i sudo true");
+  let result: unknown;
+  for (const handler of h.handlers.get("user_bash")!) {
+    result = await handler({ command: ctx.ui.editorText.slice(1), cwd: ctx.cwd, excludeFromContext: false }, ctx);
+    if (result) break;
+  }
+  expect(result).toEqual({ result: {
+    output: expect.stringContaining("wait for the current operation"),
+    exitCode: 1,
+    cancelled: false,
+    truncated: false,
+  } });
+  expect(ctx.ui.custom).not.toHaveBeenCalled();
+  expect(handoff).not.toHaveBeenCalled();
+  expect(h.messages).toEqual([]);
+
+  idle = true;
+  await settle();
+  await new Promise<void>(resolve => setImmediate(resolve));
+  expect(ctx.ui.editorText).toBe("!i sudo true");
+  expect(ctx.ui.custom).not.toHaveBeenCalled();
+  expect(handoff).not.toHaveBeenCalled();
+  expect(h.messages).toEqual([]);
 });
 
 test.each(["edited", "typed", "excluded"])("explicit provenance does not resume %s submissions", async kind => {

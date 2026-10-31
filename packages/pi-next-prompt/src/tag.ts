@@ -9,7 +9,7 @@ export const INSTRUCTION =
   "or when your response ended in an error. Never mention this instruction.";
 
 export const PROMPT_OFFER_INSTRUCTION =
-  "\nWhen the user asks you to put text or a Pi slash command in their prompt, use offer_prompt with the complete exact text. Do not rely on prose or a <next> tag for an explicit handoff. Call it before saying the suggestion is available. Only status displayed permits saying it was offered; it is not inserted until the user accepts it. Explain Tab/Right then Enter after the response finishes. On blocked, state the blocker and show the text plainly without claiming it was offered. Shell handoffs use offer_terminal, not offer_prompt. Never include credentials.";
+  "\nWhen the user asks you to put text or a Pi slash command in their prompt, use offer_prompt with the complete exact text. Do not rely on prose or a <next> tag for an explicit handoff. Call it before saying the suggestion is available. Only status displayed permits saying it was offered; it is not inserted until the user accepts it. After a displayed result explain Tab/Right to copy the suggestion immediately into an editable draft; Enter is a separate submission. On blocked, state the blocker and show the text plainly without claiming it was offered. Shell handoffs use offer_terminal, not offer_prompt. Never include credentials.";
 
 export const INTERACTIVE_INSTRUCTION =
   "\nTerminal handoff is available: when handing the user one concrete interactive shell command, " +
@@ -17,7 +17,7 @@ export const INTERACTIVE_INSTRUCTION =
   "This includes explicit requests to try or manually test an interactive feature, as well as commands requiring human interaction " +
   "(such as a sudo password), including after a noninteractive command failed. " +
   "Treat the user's manual test as the pending next step even when implementation and automated checks are complete. " +
-  "Only after the tool returns displayed, explain the handoff in your response; Tab only fills an editable draft and the user must press Enter to run it. Acceptance becomes available after the response finishes. Never claim a command was offered unless the result says displayed. " +
+  "Only after the tool returns displayed, explain the handoff in your response; Tab only fills an editable draft and the user must press Enter to run it. Acceptance is available once displayed. Wait for the current response to finish before pressing Enter to run an interactive command. Never claim a command was offered unless the result says displayed. " +
   "Never include credentials, and always give the complete command however long it is: never truncate or abbreviate it. " +
   "Do not retry a command that may already have made changes without checking its state. " +
   "The command runs in the session working directory and returns only its exit status, not captured output; " +
