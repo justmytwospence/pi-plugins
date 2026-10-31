@@ -2,8 +2,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { Editor } from "@earendil-works/pi-tui";
-import { type ActivityEntry, type ActivitySection, EDITOR_MODE, INPUT_CONTEXT, leavesPromptDown, mainEditorFocused, stableKey } from "../src/activity.ts";
+import { type ActivityEntry, type ActivitySection, captureMainEditor, EDITOR_MODE, EDITOR_SURFACE, INPUT_CONTEXT, leavesPromptDown, mainEditorFocused, stableKey } from "../src/activity.ts";
 import { TasksDialog } from "../src/dialog.ts";
 import { LogViewer } from "../src/viewer.ts";
 import { PillView } from "../src/pill.ts";
@@ -12,9 +13,227 @@ import { fakeCtx, fakePi } from "./fake.ts";
 
 const theme = { fg: (_: string, s: string) => s, bold: (s: string) => s };
 const tui = { requestRender: () => {}, terminal: { rows: 27 } };
+const nativeEditor = () => new CustomEditor(tui as any, { borderColor: (s: string) => s } as any, { matches: () => false } as any);
 const entry = (key: string, startedAt: number): ActivityEntry => ({ key, startedAt, label: key, detail: "", stats: "", status: "running" });
 const source = (id: string, entries: () => ActivityEntry[], stop?: ActivitySection["stop"]): ActivitySection => ({ id, title: id, entries, open: async () => {}, ...(stop ? { stop } : {}) });
 const options = (sections: ActivitySection[]) => ({ sections: () => sections, ownId: "bg", canFollow: false });
+
+
+describe("positive main-editor ownership", () => {
+  const methods = { getText: () => "", setText: (_text: string) => {} };
+  const native = { ...methods, onExtensionShortcut: undefined };
+  const cases: Array<[string, unknown, boolean, boolean]> = [
+    ["null", null, false, false],
+    ["unknown", undefined, false, false],
+    ["primitive", "editor", false, false],
+    ["empty object", {}, false, false],
+    ["editor shape only", { ...methods }, false, false],
+    ["editor context only", { [INPUT_CONTEXT]: () => "editor" }, false, false],
+    ["unmarked editor wrapper", { ...methods, [INPUT_CONTEXT]: () => "editor" }, false, false],
+    ["native declaration without a handler", native, true, false],
+    ["native shortcut handler", { ...methods, onExtensionShortcut: () => false }, true, false],
+    ["inherited native declaration", Object.assign(Object.create({ onExtensionShortcut: undefined }), methods), true, false],
+    ["explicit main", { ...methods, [EDITOR_SURFACE]: "main" }, true, true],
+    ["explicit main editor", { ...methods, [EDITOR_SURFACE]: "main", [INPUT_CONTEXT]: () => "editor" }, true, true],
+    ["explicit embedded", { ...native, [EDITOR_SURFACE]: "embedded" }, false, false],
+    ["embedded wrapper", { ...methods, [EDITOR_SURFACE]: "embedded", [INPUT_CONTEXT]: () => "editor" }, false, false],
+    ["main marker without methods", { [EDITOR_SURFACE]: "main" }, false, false],
+    ["main without getText", { setText: methods.setText, [EDITOR_SURFACE]: "main" }, false, false],
+    ["main without setText", { getText: methods.getText, [EDITOR_SURFACE]: "main" }, false, false],
+    ["native without getText", { setText: methods.setText, onExtensionShortcut: undefined }, false, false],
+    ["native without setText", { getText: methods.getText, onExtensionShortcut: undefined }, false, false],
+    ["foreign explicit context", { ...native, [EDITOR_SURFACE]: "main", [INPUT_CONTEXT]: "other" }, false, false],
+    ["unreadable context", { ...native, [INPUT_CONTEXT]: () => { throw new Error("unavailable"); } }, false, false],
+    ["foreign explicit surface", { ...native, [EDITOR_SURFACE]: "other" }, false, false],
+    ["unreadable surface", { ...native, get [EDITOR_SURFACE]() { throw new Error("unavailable"); } }, false, false],
+    ...(["filter", "list", "viewer"] as const).map((context): [string, unknown, boolean, boolean] =>
+      [context, { ...native, [EDITOR_SURFACE]: "main", [INPUT_CONTEXT]: () => context }, false, false]),
+  ];
+
+  it.each(cases)("%s requires positive identity and editor methods", (_name, focused, captures, explicit) => {
+    const main = captureMainEditor(focused);
+    expect(main).toBe(captures ? focused : undefined);
+    expect(mainEditorFocused(focused)).toBe(explicit);
+    expect(mainEditorFocused(focused, main)).toBe(captures);
+  });
+
+  it("matches only the captured instance and rechecks its ownership and methods", () => {
+    const focused = { ...native };
+    const main = captureMainEditor(focused);
+    expect(mainEditorFocused(focused, main)).toBe(true);
+    expect(mainEditorFocused({ ...native }, main)).toBe(false);
+    expect(mainEditorFocused({ ...methods, [INPUT_CONTEXT]: () => "editor" }, main)).toBe(false);
+    Object.assign(focused, { [EDITOR_SURFACE]: "embedded" });
+    expect(mainEditorFocused(focused, main)).toBe(false);
+    Object.assign(focused, { [EDITOR_SURFACE]: "main", [INPUT_CONTEXT]: () => "filter" });
+    expect(mainEditorFocused(focused, main)).toBe(false);
+    Object.assign(focused, { [INPUT_CONTEXT]: () => "editor", getText: undefined });
+    expect(mainEditorFocused(focused, main)).toBe(false);
+  });
+
+  it("captures a real native CustomEditor even before its shortcut callback is assigned", () => {
+    const editor = new CustomEditor(
+      { requestRender: () => {} } as any,
+      { borderColor: (s: string) => s } as any,
+      { matches: () => false } as any,
+    );
+    expect("onExtensionShortcut" in editor).toBe(true);
+    expect(editor.onExtensionShortcut).toBeUndefined();
+    expect(captureMainEditor(editor)).toBe(editor);
+    expect(mainEditorFocused(editor)).toBe(false);
+    expect(mainEditorFocused(editor, captureMainEditor(editor))).toBe(true);
+  });
+
+  it.each([undefined, null, {}, { getLines: () => [""], getCursor: () => ({ line: 0, col: 0 }) }])(
+    "never leaves a prompt whose text is unavailable: %s",
+    (focused) => {
+      expect(leavesPromptDown(focused, "\x1b[B", true, false)).toBe(false);
+      expect(leavesPromptDown(focused, "j", false, true)).toBe(false);
+    },
+  );
+
+  it("keeps cursor, history, autocomplete and unfinished modal input in the editor", () => {
+    const editor = { ...methods, getText: () => "draft", getCursor: () => ({ line: 0, col: 5 }) };
+    expect(leavesPromptDown(editor, "\x1b[B", true, false)).toBe(true);
+    expect(leavesPromptDown({ ...editor, getCursor: () => ({ line: 0, col: 2 }) }, "\x1b[B", true, false)).toBe(false);
+    expect(leavesPromptDown({ ...editor, historyIndex: 0 }, "\x1b[B", true, false)).toBe(false);
+    expect(leavesPromptDown({ ...editor, isShowingAutocomplete: () => true }, "\x1b[B", true, false)).toBe(false);
+    for (const state of ["ex", "pending", "visual"]) {
+      expect(leavesPromptDown({ ...editor, [EDITOR_MODE]: () => ({ state }) }, "\x1b[B", true, false)).toBe(false);
+    }
+  });
+});
+
+
+describe("independent Pill prompt ownership", () => {
+  it("captures before work exists, removes the probe, and retains identity across hidden widgets", () => {
+    const c = fakeCtx("/w");
+    const setWidget = vi.spyOn(c.ctx.ui, "setWidget");
+    let visible = false;
+    const pill = new PillView({ pill: () => visible ? { label: "one task" } : undefined, open: vi.fn() }, "pi-bg-pill");
+    try {
+      pill.setUI(c.ctx.ui as any);
+      expect(setWidget.mock.calls.map(([key, content]) => [key, typeof content])).toEqual([
+        ["pi-bg-pill-probe", "function"], ["pi-bg-pill-probe", "undefined"],
+      ]);
+      expect(c.widgets.size).toBe(0);
+      pill.update();
+      expect(pill.tab()).toBe(false);
+      // A later visible widget is constructed while a native dialog owns the keyboard.
+      const dialog = new Editor(tui as any, { borderColor: (s: string) => s } as any);
+      for (let i = 0; i < 2; i++) {
+        c.state.focused = dialog;
+        visible = true;
+        pill.update();
+        expect(c.widgetLines()).toEqual([" ○ one task"]);
+        expect(c.press("\x1b[B")).toBe(false);
+        expect(pill.tab()).toBe(false);
+        c.state.focused = c.main;
+        expect(c.press("\x1b[B")).toBe(true);
+        visible = false;
+        pill.update();
+        expect(pill.isSelected).toBe(false);
+      }
+      expect(setWidget.mock.calls.filter(([key, content]) => key.endsWith("-probe") && content)).toHaveLength(1);
+    } finally { pill.dispose(); }
+  });
+
+  it.each<[string, unknown]>([
+    ["unknown", undefined],
+    ["unmarked field wrapper", { [INPUT_CONTEXT]: () => "editor", getText: () => "", setText: () => {} }],
+    ["native dialog editor", new Editor(tui as any, { borderColor: (s: string) => s } as any)],
+    ["embedded surface", { [INPUT_CONTEXT]: () => "editor", [EDITOR_SURFACE]: "embedded", getText: () => "", setText: () => {}, onExtensionShortcut: undefined }],
+    ["different native editor", nativeEditor()],
+  ])("yields Down/Enter/Tab to %s after virtual selection", (_name, focused) => {
+    const c = fakeCtx("/w");
+    const open = vi.fn();
+    const pill = new PillView({ pill: () => ({ label: "work" }), open }, "pi-bg-pill");
+    try {
+      pill.setUI(c.ctx.ui as any); pill.update();
+      for (const key of ["\x1b[B", "\r", "\t"]) {
+        c.state.focused = c.main;
+        expect(c.press("\x1b[B")).toBe(true);
+        c.state.focused = focused;
+        pill.setUI(c.ctx.ui as any); // A singleton UI is not a new binding.
+        pill.update(); c.widgetLines();
+        expect(key === "\t" ? pill.tab() : c.press(key)).toBe(false);
+        expect(pill.isSelected).toBe(false);
+      }
+      expect(open).not.toHaveBeenCalled();
+      c.state.focused = c.main;
+      expect(c.press("\x1b[B")).toBe(true);
+      expect(c.press("\r")).toBe(true);
+      expect(open).toHaveBeenCalledOnce();
+    } finally { pill.dispose(); }
+  });
+
+  it("retains native main when Fleet returns the same UI during a dialog, without adopting the dialog", () => {
+    const c = fakeCtx("/w", nativeEditor());
+    const pill = new PillView({ pill: () => ({ label: "work" }), open: vi.fn() }, "pi-bg-pill");
+    try {
+      pill.setUI(c.ctx.ui as any); pill.update();
+      expect(c.press("\x1b[B")).toBe(true);
+      // This is how pi-bg's setHosted toggle detaches and reattaches its independent pill.
+      pill.setUI(undefined);
+      expect(c.widgets.size).toBe(0);
+      expect(c.press("\x1b[B")).toBe(false);
+      // Even a different component with the native declaration must not replace the cached owner.
+      c.state.focused = { [INPUT_CONTEXT]: () => "editor", getText: () => "", setText: () => {}, onExtensionShortcut: undefined };
+      pill.setUI(c.ctx.ui as any); pill.update();
+      expect(pill.tab()).toBe(false);
+      expect(c.press("\x1b[B")).toBe(false);
+      c.state.focused = c.main;
+      pill.setUI(c.ctx.ui as any); pill.update(); c.widgetLines();
+      // Restoration needs no rebind: this is still the main captured before Fleet took hosting.
+      expect(c.press("\x1b[B")).toBe(true);
+      expect(c.press("\r")).toBe(true);
+    } finally { pill.dispose(); }
+  });
+
+  it("ignores removed probes and stale factories/listeners when the UI singleton is rebound", () => {
+    const c = fakeCtx("/w");
+    const widgets = vi.spyOn(c.ctx.ui, "setWidget");
+    const inputs = vi.spyOn(c.ctx.ui, "onTerminalInput");
+    const pill = new PillView({ pill: () => ({ label: "work" }), open: vi.fn() }, "pi-bg-pill");
+    try {
+      pill.setUI(c.ctx.ui as any); pill.update();
+      const oldProbe = widgets.mock.calls.find(([key]) => key.endsWith("-probe"))![1];
+      const oldFactory = c.widgets.get("pi-bg-pill");
+      const oldInput = inputs.mock.calls[0]![0];
+      const foreign = nativeEditor();
+      // Even before disposal a probe already removed in finally cannot change ownership.
+      oldProbe({ ...c.tui, getFocusedComponent: () => foreign }, theme);
+      expect(c.press("\x1b[B")).toBe(true);
+      pill.dispose();
+      pill.setUI(c.ctx.ui as any); pill.update();
+      oldProbe({ ...c.tui, getFocusedComponent: () => foreign }, theme);
+      expect(oldFactory({ ...c.tui, getFocusedComponent: () => foreign }, theme).render(80)).toEqual([]);
+      expect(oldInput("\x1b[B")).toBeUndefined();
+      c.state.focused = foreign;
+      expect(c.press("\x1b[B")).toBe(false);
+      c.state.focused = c.main;
+      expect(c.press("\x1b[B")).toBe(true);
+      // A new session has a different UI identity and independently captures its own native main.
+      const next = fakeCtx("/next", nativeEditor());
+      pill.setUI(next.ctx.ui as any); pill.update();
+      next.state.focused = c.main;
+      expect(next.press("\x1b[B")).toBe(false);
+      next.state.focused = next.main;
+      expect(next.press("\x1b[B")).toBe(true);
+    } finally { pill.dispose(); }
+  });
+
+  it("removes its temporary probe even if focus capture throws", () => {
+    const c = fakeCtx("/w");
+    vi.spyOn(c.tui, "getFocusedComponent").mockImplementation(() => { throw new Error("unavailable focus"); });
+    const pill = new PillView({ pill: () => ({ label: "work" }), open: vi.fn() }, "pi-bg-pill");
+    try {
+      expect(() => pill.setUI(c.ctx.ui as any)).toThrow("unavailable focus");
+      expect(c.widgets.size).toBe(0);
+      expect(c.press("\x1b[B")).toBe(false);
+    } finally { pill.dispose(); }
+  });
+});
 
 describe("activity contract and dialog", () => {
   it("keeps all four suite-resident package-local protocol copies byte-identical", () => {
@@ -157,9 +376,9 @@ it("scrolls shell logs a half page with Ctrl-U/D and a full page with Page keys"
 });
 
 it("Tab can select a background pill with a draft, cycle safely and return with Esc", () => {
-  const editor = new Editor(tui as any, { borderColor: (s: string) => s } as any);
+  const editor = nativeEditor();
   editor.setText("keep this draft");
-  const c = fakeCtx("/w"); const open = vi.fn();
+  const c = fakeCtx("/w", editor); const open = vi.fn();
   const pill = new PillView({ pill: () => ({ label: "1 task" }), open }, "pi-bg-pill");
   pill.setUI(c.ctx.ui as any); pill.update();
   c.widgets.get("pi-bg-pill")({ ...tui, getFocusedComponent: () => editor }, theme).render(100);
@@ -179,8 +398,8 @@ it("Tab can select a background pill with a draft, cycle safely and return with 
 });
 
 it("the local pill leaves typed navigation letters to the native editor", () => {
-  const editor = new Editor(tui as any, { borderColor: (s: string) => s } as any);
-  const c = fakeCtx("/w");
+  const editor = nativeEditor();
+  const c = fakeCtx("/w", editor);
   const open = vi.fn();
   const pill = new PillView({ pill: () => ({ label: "work" }), open }, "pi-bg-pill");
   pill.setUI(c.ctx.ui as any);
@@ -202,7 +421,7 @@ it("the local pill leaves typed navigation letters to the native editor", () => 
 it("a real pi-vim main editor yields only idle navigation; pending/visual/EX/embedded focus stays owned", async () => {
   const { MainEditor } = await import(new URL("../../pi-vim/src/index.ts", import.meta.url).href);
   const editor = new MainEditor(tui, { ...theme, borderColor: (s: string) => s }, { matches: () => false });
-  const c = fakeCtx("/w");
+  const c = fakeCtx("/w", editor);
   const liveTui = { ...tui, getFocusedComponent: () => editor };
   const pill = new PillView({ pill: () => ({ label: "one shell" }), open: () => {} }, "pi-bg-pill");
   pill.setUI(c.ctx.ui as any);
@@ -230,9 +449,9 @@ it("a real pi-vim main editor yields only idle navigation; pending/visual/EX/emb
 });
 
 it("a pill with rows: ↓ selects the first row, ↑↓ move through rows and label, Enter opens the row, Esc and ↑ past the first go back", async () => {
-  const editor = new Editor(tui as any, { borderColor: (s: string) => s } as any);
+  const editor = nativeEditor();
   editor.setText("draft");
-  const c = fakeCtx("/w");
+  const c = fakeCtx("/w", editor);
   const open = vi.fn();
   const openRow = vi.fn();
   const rows = [
@@ -280,7 +499,7 @@ it("a pill with rows: ↓ selects the first row, ↑↓ move through rows and la
 it("x twice stops the selected running row in pi-vim normal mode, and a row that cannot be stopped is not offered", async () => {
   const { MainEditor } = await import(new URL("../../pi-vim/src/index.ts", import.meta.url).href);
   const editor = new MainEditor(tui, { ...theme, borderColor: (s: string) => s }, { matches: () => false });
-  const c = fakeCtx("/w");
+  const c = fakeCtx("/w", editor);
   const stopRow = vi.fn(async () => {});
   const rows = [
     { key: "a", label: "a.py", detail: "idle", status: "done" as const, stats: "", startedAt: 0 },
@@ -341,8 +560,8 @@ it("a row with its own styled line draws it after the dot, which is filled while
 });
 
 it("going back out of a row's view selects that row again, not the prompt", async () => {
-  const editor = new Editor(tui as any, { borderColor: (s: string) => s } as any);
-  const c = fakeCtx("/w");
+  const editor = nativeEditor();
+  const c = fakeCtx("/w", editor);
   let close!: () => void;
   const openRow = vi.fn(() => new Promise<void>((resolve) => { close = resolve; }));
   const rows = ["a", "b", "c"].map((k) => ({ key: k, label: `${k}.py`, detail: "", status: "done" as const, stats: "", startedAt: 0 }));

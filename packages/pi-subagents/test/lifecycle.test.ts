@@ -8,7 +8,7 @@ import subagents from "../src/index.ts";
 import { FAMILY_CHANNEL, type FamilyService, type PreparedAgent } from "../src/family-contract.ts";
 import { SUBAGENT_ENV_CHANNEL } from "../src/child.ts";
 import { harness } from "./harness.ts";
-import { fakeUI, normalFocus, piCustom } from "./ui-helpers.ts";
+import { fakeUI, normalFocus } from "./ui-helpers.ts";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -231,37 +231,21 @@ test("async main must become idle; Esc suppresses reopening for that run", async
   await x.shutdown();
 });
 
-test.each(["draft", "dialog", "custom rejection", "custom throw"])("a pending open rejected by %s can retry at the next lifecycle event", async (reason) => {
+test.each(["draft", "dialog", "overlay failure"])("an automatic open blocked by %s retries when availability returns", async (reason) => {
   const x = await setup();
   normalFocus(x.ui);
   x.ctx.isIdle = () => true;
-  const original = x.ui.custom;
-  const custom = piCustom(x.ui);
   const dialog = { handleInput() {}, render: () => ["dialog"] };
-  let disposed = vi.fn();
-  x.ui.custom = (factory, options) => {
-    if (reason === "custom rejection") return Promise.reject(new Error("UI unavailable"));
-    if (reason === "custom throw") throw new Error("UI unavailable");
-    return custom((...args) => {
-      const component = factory(...args);
-      const dispose = component.dispose.bind(component);
-      component.dispose = disposed = vi.fn(() => dispose());
-      // Runs after the factory's guard, before Pi's installation callback.
-      queueMicrotask(() => {
-        if (reason === "draft") x.ui.editorText = "new draft";
-        else (x.ui.tui as any).showOverlay(dialog, {});
-      });
-      return component;
-    }, options);
-  };
+  const original = x.ui.tui.showOverlay;
+  if (reason === "draft") x.ui.editorText = "new draft";
+  if (reason === "dialog") x.ui.tui.focused = dialog;
+  if (reason === "overlay failure") x.ui.tui.showOverlay = () => { throw new Error("UI unavailable"); };
   await x.run({ ...explicit, task: "retry", async: true });
   await checkpoint();
-  expect(x.ui.customs.map((entry) => entry.component)).toEqual(reason === "dialog" ? [dialog] : []);
-  if (reason === "draft" || reason === "dialog") expect(disposed).toHaveBeenCalled();
+  expect(x.ui.customs).toHaveLength(0);
   if (reason === "dialog") expect(x.ui.tui.focused).toBe(dialog);
   if (reason === "draft") expect(x.ui.editorText).toBe("new draft");
-  x.ui.customs.length = 0;
-  x.ui.custom = original;
+  x.ui.tui.showOverlay = original;
   x.ui.editorText = "";
   normalFocus(x.ui);
   await x.h.emit("agent_settled", {}, x.ctx);
@@ -311,14 +295,14 @@ test("a second call closes an untouched auto-view; two-to-one opens the survivor
   await x.shutdown();
 });
 
-test.each([1, 2])("parallel startup and queued tasks never select an arbitrary run (concurrency %i)", async (concurrency) => {
+test.each([1, 2])("only active workers count through queued batches (concurrency %i)", async (concurrency) => {
   const x = await setup(concurrency);
   normalFocus(x.ui);
   x.ctx.isIdle = () => false;
   const work = x.run({ tasks: ["first", "last"].map((task) => ({ ...explicit, task })) });
   await x.spawned.promise;
   await checkpoint();
-  expect(x.ui.customs).toHaveLength(0);
+  expect(x.ui.customs).toHaveLength(concurrency === 1 ? 1 : 0);
   x.finish();
   await checkpoint();
   expect(x.children).toHaveLength(2);
@@ -330,7 +314,7 @@ test.each([1, 2])("parallel startup and queued tasks never select an arbitrary r
   await x.shutdown();
 });
 
-test.each(["classifier", "worktree"])("independent calls do not auto-open during delayed %s preparation", async (phase) => {
+test.each(["classifier", "worktree"])("only the running worker counts during delayed %s preparation", async (phase) => {
   const entered = deferred<void>();
   const gate = deferred<any>();
   const x = await setup(1, () => { entered.resolve(); return gate.promise; });
@@ -344,7 +328,7 @@ test.each(["classifier", "worktree"])("independent calls do not auto-open during
   await x.spawned.promise;
   await checkpoint();
   expect(x.children).toHaveLength(1);
-  expect(x.ui.customs).toHaveLength(0);
+  expect(x.ui.customs).toHaveLength(1);
   gate.resolve(phase === "classifier" ? { stopReason: "stop", answers: {} } : { code: 0, stdout: x.ctx.cwd, stderr: "" });
   await checkpoint();
   expect(x.children).toHaveLength(2);
@@ -360,7 +344,7 @@ test.each(["classifier", "worktree"])("independent calls do not auto-open during
   await x.shutdown();
 });
 
-test("aborting an independently planning call releases eligibility before its classifier returns", async () => {
+test("aborting an independently planning call preserves the sole active worker view", async () => {
   const x = await setup();
   normalFocus(x.ui);
   x.ctx.isIdle = () => false;
@@ -374,7 +358,7 @@ test("aborting an independently planning call releases eligibility before its cl
   const first = x.run({ ...explicit, task: "ready" });
   await x.spawned.promise;
   await checkpoint();
-  expect(x.ui.customs).toHaveLength(0);
+  expect(x.ui.customs).toHaveLength(1);
   abort.abort();
   await checkpoint();
   expect(x.ui.customs).toHaveLength(1);
@@ -386,7 +370,7 @@ test("aborting an independently planning call releases eligibility before its cl
   await x.shutdown();
 });
 
-test("failed independent preparation releases the surviving run's eligibility", async () => {
+test("failed independent preparation preserves the sole active worker view", async () => {
   const entered = deferred<void>();
   const gate = deferred<any>();
   const x = await setup(1, () => { entered.resolve(); return gate.promise; });
@@ -398,7 +382,7 @@ test("failed independent preparation releases the surviving run's eligibility", 
   const first = x.run({ ...explicit, task: "ready" });
   await x.spawned.promise;
   await checkpoint();
-  expect(x.ui.customs).toHaveLength(0);
+  expect(x.ui.customs).toHaveLength(1);
   gate.resolve({ code: 1, stdout: "", stderr: "failure" });
   await rejected;
   await checkpoint();
@@ -424,7 +408,7 @@ test("planning failure does not leave a preparation guard behind", async () => {
   await x.shutdown();
 });
 
-test("old classifier completion cannot clear a new session's preparing roster", async () => {
+test("old classifier completion cannot change a new session's active worker view", async () => {
   const x = await setup();
   normalFocus(x.ui);
   x.ctx.isIdle = () => false;
@@ -441,11 +425,11 @@ test("old classifier completion cannot clear a new session's preparing roster", 
   const first = x.run({ ...explicit, task: "ready" });
   await x.spawned.promise;
   await checkpoint();
-  expect(x.ui.customs).toHaveLength(0);
+  expect(x.ui.customs).toHaveLength(1);
   gates[0]!.resolve({ stopReason: "stop", answers: {} });
   await rejected;
   await checkpoint();
-  expect(x.ui.customs).toHaveLength(0);
+  expect(x.ui.customs).toHaveLength(1);
   gates[1]!.resolve({ stopReason: "stop", answers: {} });
   await checkpoint();
   expect(x.children).toHaveLength(2);
@@ -459,43 +443,226 @@ test("old classifier completion cannot clear a new session's preparing roster", 
   await x.shutdown();
 });
 
-test("interacting preserves an auto-view through completion and other runs", async () => {
+test.each(["draft", "\x1b[A"])("interaction %j never pins an automatic view", async (key) => {
   const x = await setup();
   normalFocus(x.ui);
   x.ctx.isIdle = () => true;
   await x.run({ ...explicit, task: "one", async: true });
   const view = x.ui.customs[0]!.component;
-  view.handleInput("draft");
+  view.handleInput(key);
   await x.run({ ...explicit, task: "two", async: true });
-  expect(x.ui.customs[0]!.component).toBe(view);
-  x.finish();
+  expect(x.ui.customs).toHaveLength(0);
   x.finish(1);
   await checkpoint();
-  expect(x.ui.customs[0]!.component).toBe(view);
+  expect(x.ui.customs).toHaveLength(1);
+  x.finish();
+  await checkpoint();
+  expect(x.ui.customs).toHaveLength(0);
   await x.shutdown();
 });
 
-test.each([0, 1])("Esc after switching from A to B suppresses B, not A (run %i ends)", async (ended) => {
+test("an explicitly opened view survives worker completion and main resuming", async () => {
+  const x = await setup();
+  normalFocus(x.ui);
+  x.ctx.isIdle = () => false;
+  const started = await x.run({ ...explicit, task: "manual", async: true });
+  const opened = x.h.commands.get("subagents").handler(started.details.runs[0].id, x.ctx);
+  await checkpoint();
+  const viewer = x.ui.customs[0]!.component;
+  x.finish();
+  await checkpoint();
+  await x.h.emit("agent_start", {}, x.ctx);
+  await checkpoint();
+  expect(x.ui.customs[0]!.component).toBe(viewer);
+  viewer.handleInput("\x1b");
+  await opened;
+  await x.shutdown();
+});
+
+test.each([false, true])("Escape from a live manual view suppresses auto-reopening (switched=%s)", async (switched) => {
+  const x = await setup();
+  normalFocus(x.ui);
+  let idle = false;
+  x.ctx.isIdle = () => idle;
+  const first = await x.run({ ...explicit, task: "manual first", async: true });
+  if (switched) await x.run({ ...explicit, task: "manual second", async: true });
+  const opened = x.h.commands.get("subagents").handler(first.details.runs[0].id, x.ctx);
+  await checkpoint();
+  const viewer = x.ui.customs[0]!.component;
+  if (switched) {
+    viewer.handleInput("\t");
+    x.finish();
+  }
+  idle = true;
+  await x.h.emit("agent_settled", {}, x.ctx);
+  await checkpoint();
+  expect(x.ui.customs[0]!.component).toBe(viewer);
+  x.ui.dispatch("\x1b");
+  await opened;
+  await checkpoint();
+  await x.h.emit("agent_settled", {}, x.ctx);
+  await checkpoint();
+  expect(x.ui.customs).toHaveLength(0);
+  x.finish(switched ? 1 : 0);
+  await x.shutdown();
+});
+
+test.each(["before_agent_start", "agent_start", "turn_start"])("%s returns an interacted automatic view to main", async (event) => {
+  const x = await setup();
+  normalFocus(x.ui);
+  let idle = true;
+  x.ctx.isIdle = () => idle;
+  await x.run({ ...explicit, task: "automatic", async: true });
+  x.ui.customs[0]!.component.handleInput("draft");
+  idle = false;
+  await x.h.emit(event, { prompt: "continue" }, x.ctx);
+  await checkpoint();
+  expect(x.ui.customs).toHaveLength(0);
+  x.finish();
+  await x.shutdown();
+});
+
+test.each(["done", "failed", "stopped"])("an interacted worker returning %s automatically returns to main", async (status) => {
   const x = await setup();
   normalFocus(x.ui);
   x.ctx.isIdle = () => true;
-  await x.run({ ...explicit, task: "A", async: true });
-  const viewer = x.ui.customs[0]!.component;
-  // Own A's view before B starts, so the two-run roster does not close it.
-  viewer.handleInput("\x1b[A");
-  await x.run({ ...explicit, task: "B", async: true });
-  expect(x.ui.customs[0]!.component).toBe(viewer);
-  viewer.handleInput("\t");
-  viewer.handleInput("\x1b");
+  await x.run({ ...explicit, task: "finishes", async: true });
+  x.ui.customs[0]!.component.handleInput("draft");
+  (x.children[0] as any).finish(status);
   await checkpoint();
   expect(x.ui.customs).toHaveLength(0);
-  x.finish(ended);
-  await checkpoint();
-  // With A gone B stays dismissed; with B gone A is still eligible.
-  expect(x.ui.customs).toHaveLength(ended === 0 ? 0 : 1);
-  x.finish(1 - ended);
+  await x.shutdown();
+});
+
+test("each queued chain step follows its sole active worker", async () => {
+  const x = await setup();
+  normalFocus(x.ui);
+  x.ctx.isIdle = () => false;
+  const work = x.run({ chain: ["first", "second", "third"].map(task => ({ ...explicit, task })) });
+  await x.spawned.promise;
+  for (let step = 0; step < 3; step++) {
+    await checkpoint();
+    expect(x.ui.customs).toHaveLength(1);
+    expect(x.ui.customs[0]!.component.current.task).toBe(["first", "second", "third"][step]);
+    x.finish(step);
+  }
+  await work;
   await checkpoint();
   expect(x.ui.customs).toHaveLength(0);
+  await x.shutdown();
+});
+
+test("dialog lifecycle and independent blocked holds defer automatic viewing", async () => {
+  const x = await setup();
+  normalFocus(x.ui);
+  x.ctx.isIdle = () => true;
+  await x.h.emit("ui_prompt_start", {}, x.ctx);
+  x.h.pi.events.emit("herdr:blocked", { id: "approval", active: true });
+  await x.run({ ...explicit, task: "waiting safely", async: true });
+  expect(x.ui.customs).toHaveLength(0);
+  await x.h.emit("ui_prompt_end", {}, x.ctx);
+  await checkpoint();
+  expect(x.ui.customs).toHaveLength(0);
+  x.h.pi.events.emit("herdr:blocked", { id: "approval", active: false });
+  await checkpoint();
+  expect(x.ui.customs).toHaveLength(1);
+  await x.h.emit("ui_prompt_start", {}, x.ctx);
+  await checkpoint();
+  expect(x.ui.customs).toHaveLength(0);
+  await x.h.emit("ui_prompt_end", {}, x.ctx);
+  await checkpoint();
+  expect(x.ui.customs).toHaveLength(1);
+  x.finish();
+  await x.shutdown();
+});
+
+test("a wait in a nested tool branch does not hide concurrent main work", async () => {
+  const x = await setup();
+  normalFocus(x.ui);
+  x.ctx.isIdle = () => false;
+  await x.run({ ...explicit, task: "background worker", async: true });
+  await x.h.emit("tool_execution_start", { toolCallId: "code", toolName: "codemode" }, x.ctx);
+  await x.h.emit("tool_execution_start", { toolCallId: "code/wait", parentToolCallId: "code", toolName: "bg_wait" }, x.ctx);
+  x.h.pi.events.emit("herdr:waiting", { id: "wait", active: true });
+  await checkpoint();
+  expect(x.ui.customs).toHaveLength(1);
+  await x.h.emit("tool_execution_start", { toolCallId: "code/build", parentToolCallId: "code", toolName: "bash" }, x.ctx);
+  await checkpoint();
+  expect(x.ui.customs).toHaveLength(0);
+  await x.h.emit("tool_execution_end", { toolCallId: "code/build", toolName: "bash" }, x.ctx);
+  await checkpoint();
+  expect(x.ui.customs).toHaveLength(1);
+  x.h.pi.events.emit("herdr:waiting", { id: "wait", active: false });
+  await checkpoint();
+  expect(x.ui.customs).toHaveLength(0);
+  x.finish();
+  await x.shutdown();
+});
+
+test("a foreground worker is a wait, but a concurrent main tool keeps main visible", async () => {
+  const x = await setup();
+  normalFocus(x.ui);
+  x.ctx.isIdle = () => false;
+  await x.h.emit("tool_execution_start", { toolCallId: "run", toolName: "subagent" }, x.ctx);
+  const work = x.run({ ...explicit, task: "foreground worker" });
+  await x.spawned.promise;
+  await checkpoint();
+  expect(x.ui.customs).toHaveLength(1);
+  await x.h.emit("tool_execution_start", { toolCallId: "check", toolName: "bash" }, x.ctx);
+  await checkpoint();
+  expect(x.ui.customs).toHaveLength(0);
+  await x.h.emit("tool_execution_end", { toolCallId: "check", toolName: "bash" }, x.ctx);
+  await checkpoint();
+  expect(x.ui.customs).toHaveLength(1);
+  x.finish();
+  await work;
+  await x.h.emit("tool_execution_end", { toolCallId: "run", toolName: "subagent" }, x.ctx);
+  await checkpoint();
+  expect(x.ui.customs).toHaveLength(0);
+  await x.shutdown();
+});
+
+test("anonymous blocked holds are reference-counted independently of named holds", async () => {
+  const x = await setup();
+  normalFocus(x.ui);
+  x.ctx.isIdle = () => true;
+  const hold = (active: boolean, id?: string) => x.h.pi.events.emit("herdr:blocked", { active, ...(id ? { id } : {}) });
+  hold(true);
+  hold(true);
+  hold(true, "named");
+  await x.run({ ...explicit, task: "behind planner questions", async: true });
+  expect(x.ui.customs).toHaveLength(0);
+  hold(false);
+  hold(false, "named");
+  await checkpoint();
+  expect(x.ui.customs).toHaveLength(0);
+  hold(false);
+  await checkpoint();
+  expect(x.ui.customs).toHaveLength(1);
+  // Extra legacy releases are clamped rather than poisoning the next acquisition.
+  hold(false);
+  hold(true);
+  await checkpoint();
+  expect(x.ui.customs).toHaveLength(0);
+  hold(false);
+  await checkpoint();
+  expect(x.ui.customs).toHaveLength(1);
+  x.finish();
+  await x.shutdown();
+});
+
+test("clearing a main draft retries automatic viewing without another worker event", async () => {
+  const x = await setup();
+  normalFocus(x.ui);
+  x.ctx.isIdle = () => true;
+  x.ui.editorText = "main draft";
+  await x.run({ ...explicit, task: "draft protected", async: true });
+  expect(x.ui.customs).toHaveLength(0);
+  x.ui.press("\x15");
+  x.ui.editorText = "";
+  await checkpoint();
+  expect(x.ui.customs).toHaveLength(1);
+  x.finish();
   await x.shutdown();
 });
 

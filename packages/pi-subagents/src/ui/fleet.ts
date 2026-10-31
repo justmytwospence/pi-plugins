@@ -12,12 +12,13 @@
 // change, autocomplete or another focused surface releases the virtual selection immediately.
 // Adapted from tintinweb/pi-subagents (MIT): https://github.com/tintinweb/pi-subagents
 import { type TUI, isKeyRelease, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import { type ActivityEntry, type ActivityPill, type ActivitySection, focusedComponent, leavesPromptDown, mainEditorFocused, readEditorMode, stoppable as rowStoppable } from "../activity.ts";
+import { type ActivityEntry, type ActivityPill, type ActivitySection, captureMainEditor, focusedComponent, leavesPromptDown, mainEditorFocused, readEditorMode, stoppable as rowStoppable } from "../activity.ts";
 import type { Run } from "../run.ts";
 import { runLabel } from "../label.ts";
 import { displayTokens } from "../run.ts";
 import { type Theme, dimAll, elapsedMs, formatCost, formatCount, formatElapsed, jev, modelAndEffort, rightAlign, statusIcon } from "./format.ts";
 import { type SessionSource, type ViewerActions, type ViewerUI, openViewer } from "./viewer.ts";
+import { ViewerPromptState } from "./viewer-overlay.ts";
 
 const FLEET_KEY = "subagents-fleet";
 /** Subagent rows shown at once; the rest scroll. */
@@ -34,9 +35,11 @@ export type FleetEntry =
   | { kind: "row"; section: ActivitySection; row: ActivityEntry };
 
 /** What a stop on this entry would act on: a run's session, a row's stop token. A change cancels the arming. */
-const targetOf = (e: FleetEntry | undefined): unknown => (e?.kind === "run" ? (e.run.child ?? e.run) : e?.kind === "row" ? (e.row.stopToken ?? "") : undefined);
+export const fleetStopTarget = (e: FleetEntry | undefined): unknown => (e?.kind === "run" ? (e.run.child ?? e.run) : e?.kind === "row" ? (e.row.stopToken ?? "") : undefined);
 
-const entryKey = (e: FleetEntry) => (e.kind === "run" ? `run:${e.run.id}` : e.kind === "pill" ? `pill:${e.section.id}` : e.kind === "row" ? `row:${e.section.id}\0${e.row.key}` : "main");
+export const fleetEntryKey = (e: FleetEntry) => (e.kind === "run" ? `run:${e.run.id}` : e.kind === "pill" ? `pill:${e.section.id}` : e.kind === "row" ? `row:${e.section.id}\0${e.row.key}` : "main");
+const targetOf = fleetStopTarget;
+const entryKey = fleetEntryKey;
 
 /** A failed or stopped run the user has not seen yet: it ended after their last message and is not dismissed. */
 export function held(run: Run, dismissedAt: number, dismissed: ReadonlySet<string>): boolean {
@@ -192,13 +195,18 @@ export interface FleetSource extends Omit<SessionSource, "onSwitch"> {
   dismiss?(runId: string): void | Promise<void>;
   /** The dim line under the list, if any (`/tasks to see subagents` after a success). */
   note?(now: number): string | undefined;
+  /** Recheck automatic following after focus/draft availability changes. */
+  onAvailability?(): void;
+  /** A user closed any worker view, including one opened manually. */
+  onReturnMain?(runId: string): void;
 }
 
 /** Coordinator notifications for an automatically opened conversation. */
 export interface AutoViewCallbacks {
   /** The run being viewed at dismissal, which may differ from the one auto-opened. */
   onDismiss(runId: string): void;
-  onInteraction(): void;
+  /** An explicit switch to another worker makes this a manual view. */
+  onManual(): void;
   /** A pending open was rejected, not dismissed by the user; later events may retry. */
   onRejected?(): void;
 }
@@ -207,7 +215,6 @@ interface OwnedView {
   key: string;
   close?: () => void;
   auto?: AutoViewCallbacks;
-  interacted?: boolean;
 }
 
 type KeyResult = { consume?: boolean; data?: string } | undefined;
@@ -215,6 +222,9 @@ type KeyResult = { consume?: boolean; data?: string } | undefined;
 export class FleetView {
   private ui: FleetUI | undefined;
   private tui: TUI | undefined;
+  private mainEditor: unknown;
+  private readonly prompts = new ViewerPromptState();
+  private availabilityCheck: ReturnType<typeof setImmediate> | undefined;
   private unsubscribeInput: (() => void) | undefined;
   private registered = false;
   private timer: ReturnType<typeof setInterval> | undefined;
@@ -229,7 +239,7 @@ export class FleetView {
   private armedTarget: unknown;
   private viewing: string | undefined;
   private stopArmed = false;
-  /** Reserved before custom's factory runs, including pending opens and external dialogs. */
+  /** Reserved before view installation, including pending opens and external dialogs. */
   private viewer: OwnedView | undefined;
 
   constructor(private readonly source: FleetSource) {}
@@ -243,7 +253,25 @@ export class FleetView {
     this.ui = ui;
     this.registered = false;
     this.tui = undefined;
-    this.unsubscribeInput = ui.onTerminalInput((data) => this.handleKey(data));
+    this.mainEditor = undefined;
+    // Capture the actual main editor at binding, never a later focused dialog.
+    let probing = true;
+    try {
+      ui.setWidget(`${FLEET_KEY}-probe`, (tui) => {
+        if (probing && this.ui === ui) {
+          this.tui = tui;
+          this.mainEditor = captureMainEditor(focusedComponent(tui));
+        }
+        return { render: () => [], invalidate() {} };
+      });
+    } finally {
+      probing = false;
+      ui.setWidget(`${FLEET_KEY}-probe`, undefined);
+    }
+    this.unsubscribeInput = ui.onTerminalInput((data) => {
+      this.scheduleAvailability();
+      return this.handleKey(data);
+    });
   }
 
   private roster() {
@@ -267,14 +295,44 @@ export class FleetView {
     this.selectedKey = roster[index] ? entryKey(roster[index] as FleetEntry) : undefined;
   }
 
+  /** Native prompts and explicit blocked holds take priority over task navigation. */
+  setPromptActive(active: boolean): void {
+    this.prompts.setPromptActive(active);
+    if (this.prompts.blocked) this.deactivate();
+    else this.update();
+    this.scheduleAvailability();
+  }
+
+  setBlocked(id: string | undefined, active: boolean): void {
+    this.prompts.setBlocked(id, active);
+    if (this.prompts.blocked) this.deactivate();
+    else this.update();
+    this.scheduleAvailability();
+  }
+
+  get promptBlocked(): boolean { return this.prompts.blocked; }
+
+  resetPrompts(): void { this.prompts.reset(); }
+
+  private scheduleAvailability(): void {
+    if (!this.ui || this.availabilityCheck) return;
+    this.availabilityCheck = setImmediate(() => {
+      this.availabilityCheck = undefined;
+      if (!this.ui) return;
+      this.prompts.reconcile();
+      this.source.onAvailability?.();
+    });
+  }
+
   update(): void {
     if (!this.ui) return;
+    this.prompts.reconcile();
     const roster = this.roster();
     const note = this.source.note?.(Date.now());
-    if (!this.source.enabled() || (!roster.length && !note)) {
+    // Native dialogs reserve their bottom-of-screen hint/footer shape for phone clients too.
+    if (!this.source.enabled() || this.prompts.blocked || (!roster.length && !note)) {
       if (this.registered) this.ui.setWidget(FLEET_KEY, undefined);
       this.registered = false;
-      this.tui = undefined;
       if (this.timer) clearInterval(this.timer);
       this.timer = undefined;
       this.active = false;
@@ -284,7 +342,10 @@ export class FleetView {
     this.reselect(roster);
     if (!roster.length) this.active = false;
     if (!this.timer) {
-      this.timer = setInterval(() => this.update(), TICK_MS);
+      this.timer = setInterval(() => {
+        this.update();
+        this.source.onAvailability?.();
+      }, TICK_MS);
       this.timer.unref?.();
     }
     if (this.registered) {
@@ -325,6 +386,10 @@ export class FleetView {
   /** `{ consume: true }` for the keys the list takes; undefined lets a key through. */
   handleKey(data: string, enterWithTab = false): KeyResult {
     if (!this.ui || !this.source.enabled() || isKeyRelease(data)) return undefined;
+    if (this.prompts.blocked) {
+      if (this.active) this.deactivate();
+      return undefined;
+    }
     // The viewer owns the keyboard while it is open.
     if (this.viewer) return undefined;
     // A dialog or another overlay has the keyboard; the editor's text is not what it seems.
@@ -441,7 +506,7 @@ export class FleetView {
 
   /** Whether the main prompt has the keyboard (activity.ts: the component's reported context, else pi's editor shape). */
   private editorFocused(): boolean {
-    return mainEditorFocused(this.focused());
+    return mainEditorFocused(this.focused(), this.mainEditor);
   }
 
   private deactivate() {
@@ -495,7 +560,7 @@ export class FleetView {
     return this.showRun(ui, run);
   }
 
-  /** Reserve an untouched auto-view only when the actual main editor is available. */
+  /** Reserve an automatic view only when the actual main editor is available. */
   autoOpen(run: Run, callbacks: AutoViewCallbacks): boolean {
     if (!this.canAutoOpen() || this.viewer) return false;
     this.active = false;
@@ -503,17 +568,19 @@ export class FleetView {
     return true;
   }
 
-  /** Completion/roster changes must never close a manual or interacted view. */
+  /** Completion/roster changes close automatic views, even after typing or scrolling. */
   closeAutoView(runId: string): void {
     const view = this.viewer;
-    if (view?.auto && !view.interacted && view.key === `run:${runId}`) {
+    if (view?.auto && view.key === `run:${runId}`) {
       this.releaseViewer();
       this.update();
     }
   }
 
   private canAutoOpen(): boolean {
-    return Boolean(this.ui && this.source.enabled() && this.focused() != null && this.editorFocused() && this.ui.getEditorText() === "");
+    const modal = readEditorMode(this.focused());
+    const autocomplete = modal?.autocomplete || (this.focused() as { isShowingAutocomplete?: () => boolean } | undefined)?.isShowingAutocomplete?.();
+    return Boolean(this.ui && this.source.enabled() && !this.active && !this.prompts.blocked && this.editorFocused() && this.ui.getEditorText() === "" && !autocomplete && (!modal || modal.state === "normal" || modal.state === "insert"));
   }
 
   private showRun(ui: ViewerUI, run: Run, auto?: AutoViewCallbacks): Promise<void> {
@@ -535,14 +602,12 @@ export class FleetView {
       settings: () => src.settings?.() ?? {},
       onSwitch: (r) => {
         if (this.viewer !== view) return;
+        const auto = view.auto;
+        view.auto = undefined;
         view.key = `run:${r.id}`;
         this.viewing = view.key;
+        if (auto) this.invoke(() => auto.onManual());
       },
-    };
-    const interacted = () => {
-      if (this.viewer !== view || !view.auto || view.interacted) return;
-      view.interacted = true;
-      this.invoke(() => view.auto!.onInteraction());
     };
     const cleared = () => this.viewerClosed(view);
     try {
@@ -554,7 +619,7 @@ export class FleetView {
           return;
         }
         view.close = close;
-      }, source, interacted, auto ? () => this.viewer === view && this.canAutoOpen() : undefined).then(cleared, () => this.viewerRejected(view));
+      }, source, undefined, auto ? () => this.viewer === view && this.canAutoOpen() : undefined, this.prompts).then(cleared, () => this.viewerRejected(view));
     } catch {
       // Keep failure notification asynchronous even for a throwing UI adapter:
       // autoOpen's caller must first record the accepted reservation.
@@ -583,6 +648,7 @@ export class FleetView {
     const key = view.key;
     this.viewer = undefined;
     this.viewing = undefined;
+    if (key.startsWith("run:")) this.invoke(() => this.source.onReturnMain?.(key.slice("run:".length)));
     if (view.auto) this.invoke(() => view.auto!.onDismiss(key.slice("run:".length)));
     // Back on the row just viewed, if it is still listed.
     const roster = this.roster();
@@ -592,6 +658,8 @@ export class FleetView {
   }
 
   dispose(): void {
+    if (this.availabilityCheck) clearImmediate(this.availabilityCheck);
+    this.availabilityCheck = undefined;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     this.unsubscribeInput?.();
@@ -602,8 +670,10 @@ export class FleetView {
     } finally {
       this.registered = false;
       this.tui = undefined;
+      this.mainEditor = undefined;
       this.active = false;
       this.ui = undefined;
+      this.prompts.reset();
     }
   }
 }

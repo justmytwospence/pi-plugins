@@ -177,7 +177,8 @@ export function dismissable(section: ActivitySection, entry: ActivityEntry): boo
  * Whether a key that moves down should leave the prompt for the list under it, as in Claude Code:
  * the prompt is empty, or its cursor sits at the end of its last line and no history entry is being
  * browsed (otherwise the editor moves the cursor first). With pi-vim, `j` in normal mode counts too.
- * `editor` is the focused component (pi's editor, or pi-vim's).
+ * `editor` is the positively identified main editor (pi's editor, or pi-vim's); unreadable text
+ * never grants permission to leave it.
  */
 export function leavesPromptDown(editor: unknown, data: string, isDown: boolean, isJ: boolean): boolean {
   const e = editor as {
@@ -189,7 +190,7 @@ export function leavesPromptDown(editor: unknown, data: string, isDown: boolean,
     getMode?: () => string;
   } | null;
   void data;
-  if (!e || typeof e.getText !== "function") return isDown;
+  if (!e || typeof e.getText !== "function") return false;
   // A modal editor of the suite (pi-vim) reports its state; `j` leaves only from idle Normal mode.
   const modal = readEditorMode(e);
   if (modal) {
@@ -216,7 +217,7 @@ export function leavesPromptDown(editor: unknown, data: string, isDown: boolean,
  * sibling). Components tell global listeners what input they own through these registry symbols:
  * - `INPUT_CONTEXT`: a method returning `"editor"` (a prompt), `"filter"` (a search field), `"list"`
  *   (a selection list) or `"viewer"` (read-only scrolling content). A component without it has an
- *   unknown context, and a view under the prompt falls back to its own heuristic.
+ *   unknown context. Global listeners require positive main-editor ownership, never context alone.
  * - `EDITOR_SURFACE`: a property on an editor, `"main"` or `"embedded"` (one inside a screen).
  * - `EDITOR_MODE`: a method on a modal editor returning its state (`normal`, `insert`, `pending`...).
  * Views that own the keyboard (dialogs, viewers) report their own context the same way.
@@ -278,18 +279,45 @@ export function focusedComponent(tui: unknown): unknown {
   return typeof t?.getFocusedComponent === "function" ? t.getFocusedComponent() : t?.focusedComponent;
 }
 
+/** Editor methods and no explicitly foreign ownership; shape alone never identifies main. */
+function promptEditor(focused: unknown): focused is Record<PropertyKey, unknown> {
+  if (typeof focused !== "object" || focused === null) return false;
+  try {
+    const c = focused as Record<PropertyKey, unknown>;
+    const value = c[INPUT_CONTEXT];
+    const context = typeof value === "function" ? value.call(focused) : value;
+    const surface = c[EDITOR_SURFACE];
+    return (
+      (context === undefined || context === "editor") &&
+      (surface === undefined || surface === "main") &&
+      typeof c.getText === "function" &&
+      typeof c.setText === "function"
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Whether the main prompt has the keyboard, so a view under it may take arrow keys: a component
- * reporting its context answers (`"editor"` on a `"main"` surface, or on no marked surface); else
- * pi's editor has `getText` and `setText` while its dialogs and overlays do not. Unknown focus
- * counts as the editor.
+ * Capture main once when binding a UI, never from a later widget render or arbitrary input.
+ * pi-vim marks its main surface; native CustomEditor declares `onExtensionShortcut` even before
+ * a handler is assigned. Plain editors and unmarked dialog wrappers are not main.
  */
-export function mainEditorFocused(focused: unknown): boolean {
-  if (focused == null) return true;
-  const context = readInputContext(focused);
-  if (context) return context === "editor" && readEditorSurface(focused) !== "embedded";
-  const c = focused as { getText?: unknown; setText?: unknown };
-  return typeof c.getText === "function" && typeof c.setText === "function";
+export function captureMainEditor(focused: unknown): unknown | undefined {
+  if (!promptEditor(focused)) return undefined;
+  try {
+    return readEditorSurface(focused) === "main" || "onExtensionShortcut" in focused ? focused : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether main positively owns the keyboard: an explicit main surface or the captured main
+ * instance, both with editor methods. Unknown focus and an unmarked `editor` context fail closed.
+ */
+export function mainEditorFocused(focused: unknown, main?: unknown): boolean {
+  return promptEditor(focused) && (readEditorSurface(focused) === "main" || focused === main);
 }
 
 export interface EventBus {

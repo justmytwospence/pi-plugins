@@ -5,7 +5,7 @@ import { emptyUsage } from "../src/child.ts";
 import type { FamilyService } from "../src/family-contract.ts";
 import type { SessionView } from "../src/ui/viewer.ts";
 import { FleetView, SUCCESS_HINT_MS, fleetRoster, renderFleet } from "../src/ui/fleet.ts";
-import { KEY, fakeRun, fakeUI, normalFocus, piCustom, plain } from "./ui-helpers.ts";
+import { KEY, fakeRun, fakeUI, normalFocus, plain } from "./ui-helpers.ts";
 
 beforeAll(() => initTheme("dark"));
 afterEach(() => vi.useRealTimers());
@@ -117,20 +117,20 @@ test.each([46, 120])("unicode and styled fleet activity tasks do not wrap at %i 
   }
 });
 
-function setup() {
+function setup(family?: FamilyService) {
   const ui = fakeUI();
   normalFocus(ui);
   const runs = [fakeRun({ agent: "scout", label: "Find config", child: {} as never, state: { startedAt: Date.now() } }), fakeRun({ agent: "worker", label: "Fix config", child: {} as never, state: { startedAt: Date.now() + 1 } })];
   let enabled = true;
   const steered: string[] = [];
   const stopped: string[] = [];
-  const fleet = new FleetView({ runs: () => runs, enabled: () => enabled, actions: (run) => ({ steer: (m) => steered.push(m) > 0, stop: () => void stopped.push(run.agent) }) });
+  const fleet = new FleetView({ family: () => family, runs: () => runs, enabled: () => enabled, actions: (run) => ({ steer: (m) => steered.push(m) > 0, stop: () => void stopped.push(run.agent) }) });
   fleet.setUI(ui);
   fleet.update();
   return { ui, runs, fleet, steered, stopped, disable: () => (enabled = false) };
 }
 
-const autoCallbacks = () => ({ onDismiss: vi.fn(), onInteraction: vi.fn(), onRejected: vi.fn() });
+const autoCallbacks = () => ({ onDismiss: vi.fn(), onManual: vi.fn(), onRejected: vi.fn() });
 const settled = async () => { await Promise.resolve(); await Promise.resolve(); };
 
 test("auto-open requires enabled fleet, known main focus, empty draft and no owned viewer", async () => {
@@ -153,6 +153,47 @@ test("auto-open requires enabled fleet, known main focus, empty draft and no own
   await manual;
   disable();
   expect(fleet.autoOpen(runs[0]!, callbacks)).toBe(false);
+  fleet.dispose();
+});
+
+test("automatic return preserves the worker draft without putting it in main", async () => {
+  const { ui, fleet, runs } = setup();
+  fleet.autoOpen(runs[0]!, autoCallbacks());
+  ui.customs[0]!.component.handleInput("unsent worker draft");
+  fleet.closeAutoView(runs[0]!.id);
+  await settled();
+  expect(ui.editorText).toBe("");
+  const manual = fleet.show(ui, runs[0]!);
+  expect((ui.customs[0]!.component as any).composer.getText()).toBe("unsent worker draft");
+  fleet.dispose();
+  await manual;
+});
+
+test("automatic viewing cannot steal a virtually selected Fleet list", () => {
+  const { ui, fleet, runs } = setup();
+  expect(ui.press(KEY.down)).toBe(true);
+  expect(fleet.autoOpen(runs[0]!, autoCallbacks())).toBe(false);
+  expect(ui.press(KEY.escape)).toBe(true);
+  expect(fleet.autoOpen(runs[0]!, autoCallbacks())).toBe(true);
+  fleet.dispose();
+});
+
+test("a native prompt releases virtual selection before any key can reach Fleet", () => {
+  const { ui, fleet } = setup();
+  expect(ui.press(KEY.down)).toBe(true);
+  fleet.setPromptActive(true);
+  expect(ui.widgets.has("subagents-fleet")).toBe(false);
+  for (const key of [KEY.down, KEY.left, KEY.enter, KEY.escape, "x", "b", "\t"]) expect(ui.press(key)).toBe(false);
+  fleet.setPromptActive(false);
+  expect(ui.widgets.has("subagents-fleet")).toBe(true);
+  expect(ui.press(KEY.enter)).toBe(false);
+  fleet.dispose();
+});
+
+test("an unmarked editor-like dialog is never confused with captured main", () => {
+  const { ui, fleet } = setup();
+  ui.tui.focused = { getText: () => "", setText() {}, [Symbol.for("pi-plugins.input-context.v1")]: () => "editor" };
+  for (const key of [KEY.down, KEY.left, KEY.enter, KEY.escape]) expect(ui.press(key)).toBe(false);
   fleet.dispose();
 });
 
@@ -211,35 +252,35 @@ test("untouched completion closes only the matching auto-view, idempotently, wit
   await settled();
   expect(ui.customs).toHaveLength(0);
   expect(callbacks.onDismiss).not.toHaveBeenCalled();
-  expect(callbacks.onInteraction).not.toHaveBeenCalled();
+  expect(callbacks.onManual).not.toHaveBeenCalled();
   fleet.dispose();
 });
 
-test.each([KEY.up, "a", "\t"])("input %j makes an auto-view user-owned; closing notifies the coordinator", async (key) => {
+test.each([KEY.up, "a", "\x1b[97;1:3u"])("input %j does not pin an automatic view", async (key) => {
   const { ui, fleet, runs } = setup();
   const callbacks = autoCallbacks();
   expect(fleet.autoOpen(runs[0]!, callbacks)).toBe(true);
   ui.customs[0]!.component.handleInput(key);
   fleet.closeAutoView(runs[0]!.id);
-  fleet.closeAutoView(runs[1]!.id);
-  expect(ui.customs).toHaveLength(1);
-  expect(callbacks.onInteraction).toHaveBeenCalledTimes(1);
-  ui.customs[0]!.component.handleInput(KEY.escape);
-  // Reservation survives until the user-close callback reaches the coordinator.
-  expect(fleet.autoOpen(runs[0]!, callbacks)).toBe(false);
   await settled();
-  expect(callbacks.onDismiss).toHaveBeenCalledTimes(1);
+  expect(ui.customs).toHaveLength(0);
+  expect(callbacks.onManual).not.toHaveBeenCalled();
+  expect(callbacks.onDismiss).not.toHaveBeenCalled();
   fleet.dispose();
 });
 
-test("Esc after switching an auto-view dismisses the currently viewed run", async () => {
+test("explicitly switching to another run makes an automatic view manual", async () => {
   const { ui, fleet, runs } = setup();
   const callbacks = autoCallbacks();
   fleet.autoOpen(runs[0]!, callbacks);
   ui.customs[0]!.component.handleInput("\t");
+  expect(callbacks.onManual).toHaveBeenCalledTimes(1);
+  fleet.closeAutoView(runs[0]!.id);
+  fleet.closeAutoView(runs[1]!.id);
+  expect(ui.customs).toHaveLength(1);
   ui.customs[0]!.component.handleInput(KEY.escape);
   await settled();
-  expect(callbacks.onDismiss).toHaveBeenCalledExactlyOnceWith(runs[1]!.id);
+  expect(callbacks.onDismiss).not.toHaveBeenCalled();
   fleet.dispose();
 });
 
@@ -249,7 +290,7 @@ test("Esc immediately dismisses an auto-view and stale close cannot clear its re
   fleet.autoOpen(runs[0]!, callbacks);
   ui.customs[0]!.component.handleInput(KEY.escape);
   await settled();
-  expect(callbacks.onInteraction).toHaveBeenCalledTimes(1);
+  expect(callbacks.onManual).not.toHaveBeenCalled();
   expect(callbacks.onDismiss).toHaveBeenCalledTimes(1);
   fleet.autoOpen(runs[0]!, autoCallbacks());
   fleet.closeAutoView(runs[0]!.id);
@@ -263,20 +304,17 @@ test("Esc immediately dismisses an auto-view and stale close cannot clear its re
 
 test.each(["completion", "rebind", "dispose", "draft", "dialog"])("pending auto-open is safe after %s", async (reason) => {
   vi.useFakeTimers();
-  const { ui, fleet, runs } = setup();
-  const baselineTimers = vi.getTimerCount();
   let open = () => {};
-  let constructed: { dispose: ReturnType<typeof vi.spyOn> } | undefined;
-  const custom = piCustom(ui);
-  ui.custom = (factory, options) => new Promise((resolve, reject) => {
+  let constructed: SessionView | undefined;
+  const family = { view: ({ factory }: Parameters<FamilyService["view"]>[0]) => new Promise<void>((resolve, reject) => {
     open = () => {
-      custom((...args) => {
-        const created = factory(...args);
-        constructed = { dispose: vi.spyOn(created, "dispose") };
-        return created;
-      }, options).then(resolve, reject);
+      try {
+        constructed = factory(ui.tui as never, plain, undefined, resolve, () => ({ width: 100, height: 20 })) as SessionView;
+      } catch (error) { reject(error); }
     };
-  });
+  }) } as unknown as FamilyService;
+  const { ui, fleet, runs } = setup(family);
+  const baselineTimers = vi.getTimerCount();
   const callbacks = autoCallbacks();
   expect(fleet.autoOpen(runs[0]!, callbacks)).toBe(true);
   expect(fleet.autoOpen(runs[1]!, callbacks)).toBe(false);
@@ -289,10 +327,10 @@ test.each(["completion", "rebind", "dispose", "draft", "dialog"])("pending auto-
   await settled();
   await settled();
   expect(ui.customs).toHaveLength(0);
-  expect(constructed!.dispose).toHaveBeenCalled();
+  expect(constructed).toBeUndefined();
   expect(vi.getTimerCount()).toBe(reason === "dispose" ? 0 : baselineTimers);
   expect(callbacks.onDismiss).not.toHaveBeenCalled();
-  expect(callbacks.onInteraction).not.toHaveBeenCalled();
+  expect(callbacks.onManual).not.toHaveBeenCalled();
   if (reason === "draft") expect(ui.editorText).toBe("new draft");
   fleet.dispose();
   expect(vi.getTimerCount()).toBe(0);
@@ -346,7 +384,7 @@ test("↓ at an empty prompt enters the list; arrows select; Esc or ↑ past mai
   // A dialog has the keyboard: hands off.
   ui.tui.focused = { handleInput: () => undefined };
   expect(ui.press(KEY.down)).toBe(false);
-  ui.tui.focused = { getText: () => "", setText: () => undefined };
+  normalFocus(ui);
   expect(ui.press(KEY.down)).toBe(true);
   fleet.dispose();
 });
@@ -577,6 +615,7 @@ test("↓ leaves a draft for the list once the cursor is at its end; vim's j doe
     getCursor: () => editor.cursor,
     historyIndex: -1,
     getMode: () => editor.mode,
+    [Symbol.for("pi-plugins.editor-surface.v1")]: "main",
     [Symbol.for("pi-plugins.editor-mode.v1")]: () => ({ state: editor.mode, mode: editor.mode, pending: "", ex: null, autocomplete: false }),
   };
   ui.editorText = editor.text;

@@ -178,6 +178,7 @@ test("actual pi-bg input callback catches an asynchronous child interrupt or dis
 test("actual pi-subagents FleetView opens a child pill without focusing its pane and yields to viewers and filters", async () => {
   const x = childrenFixture();
   const d = detailsUI();
+  d.focus({ getText: () => "", setText() {}, onExtensionShortcut: undefined });
   let widget: any;
   let input: any;
   const ui = { ...d.ui, theme, getEditorText: () => "", onTerminalInput: (fn: any) => { input = fn; return () => { input = undefined; }; }, setWidget: (_key: string, factory: any) => { widget = factory?.(d.tui, theme); } };

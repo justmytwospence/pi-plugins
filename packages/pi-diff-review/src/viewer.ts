@@ -28,6 +28,8 @@ import { parseScopeArgs, type ResolvedScope, type ScopeRequest } from "./scopes.
 import { type EditorDrafts, type FileChecks, fileKey, isChecked, pruneChecks, type Turn } from "./session.ts";
 import { newThreadId, type Thread } from "./threads.ts";
 
+const EDITOR_SURFACE = Symbol.for("pi-plugins.editor-surface.v1");
+
 export interface ReviewData {
 	root: string;
 	scope: ResolvedScope;
@@ -257,6 +259,8 @@ export class DiffViewer implements Component, Focusable {
 		this.closeEditor();
 		this.host.persist();
 	}
+
+	readonly [EDITOR_SURFACE] = "embedded";
 
 	[INPUT_CONTEXT](): "editor" | "filter" | "list" | "viewer" {
 		if (this.panel.kind === "editor") return "editor";

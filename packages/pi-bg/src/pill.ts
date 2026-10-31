@@ -9,7 +9,7 @@
 // prompt, or pi-bg's pill for pi-marimo.
 // pi-marimo (its own repository, justmytwospence/pi-marimo) keeps an identical copy as src/pill.ts; change it in both.
 import { type TUI, type TuiMouseEvent, type TuiMouseEventResult, isKeyRelease, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { type ActivityEntry, type ActivityPill, focusedComponent, leavesPromptDown, mainEditorFocused, readEditorMode } from "./activity.ts";
+import { type ActivityEntry, type ActivityPill, captureMainEditor, focusedComponent, leavesPromptDown, mainEditorFocused, readEditorMode } from "./activity.ts";
 
 export interface Theme {
   fg(color: string, text: string): string;
@@ -107,6 +107,9 @@ type KeyResult = { consume?: boolean; data?: string } | undefined;
 export class PillView {
   private ui: PillUI | undefined;
   private tui: TUI | undefined;
+  private main: unknown;
+  /** Hosting toggles detach the pill, not the session's main editor. Never replace a UI's owner. */
+  private readonly mains = new WeakMap<PillUI, unknown>();
   private registered = false;
   private selected = false;
   /** The selected slot (pillSlots) and the row `x` has armed. */
@@ -130,7 +133,25 @@ export class PillView {
     this.dispose();
     const generation = this.generation;
     this.ui = ui;
-    if (ui) this.unsubscribe = ui.onTerminalInput((data) => generation === this.generation ? this.handleKey(data) : undefined);
+    if (!ui) return;
+    // Acquire focus independently of the visible pill: it may have no work yet, or have just
+    // returned from Fleet hosting. Never learn a new owner from a later widget render.
+    const probe = `${this.key}-probe`;
+    let probing = true;
+    try {
+      ui.setWidget(probe, (tui) => {
+        if (probing && generation === this.generation) {
+          this.tui = tui;
+          if (!this.mains.has(ui)) this.mains.set(ui, captureMainEditor(focusedComponent(tui)));
+          this.main = this.mains.get(ui);
+        }
+        return { render: () => [], invalidate: () => undefined };
+      });
+    } finally {
+      probing = false;
+      ui.setWidget(probe, undefined);
+    }
+    this.unsubscribe = ui.onTerminalInput((data) => generation === this.generation ? this.handleKey(data) : undefined);
   }
 
   update(): void {
@@ -147,8 +168,7 @@ export class PillView {
     }
     ui.setWidget(
       this.key,
-      (tui, factoryTheme: Theme) => {
-        if (generation === this.generation) this.tui = tui;
+      (_tui, factoryTheme: Theme) => {
         return {
           render: (width: number) => {
             if (generation !== this.generation) return [];
@@ -190,8 +210,7 @@ export class PillView {
     }
     if (!this.selected) {
       const focused = this.focused();
-      // Without a view of the editor, only an empty prompt is safe to leave.
-      const down = focused ? leavesPromptDown(focused, data, matchesKey(data, "down"), data === "j") : matchesKey(data, "down") && this.ui.getEditorText() === "";
+      const down = leavesPromptDown(focused, data, matchesKey(data, "down"), data === "j");
       const mode = readEditorMode(focused);
       const tab = enterWithTab && matchesKey(data, "tab") && !mode?.autocomplete
         && !(focused as { isShowingAutocomplete?: () => boolean } | undefined)?.isShowingAutocomplete?.()
@@ -299,9 +318,9 @@ export class PillView {
     return focusedComponent(this.tui);
   }
 
-  /** Whether the main prompt has the keyboard (activity.ts: the component's reported context, else pi's editor shape). */
+  /** Only the explicit main surface or this binding's captured main may yield navigation. */
   private editorFocused(): boolean {
-    return mainEditorFocused(this.focused());
+    return mainEditorFocused(this.focused(), this.main);
   }
 
   private hide(): void {
@@ -309,7 +328,6 @@ export class PillView {
     this.selected = false;
     this.armed = undefined;
     this.registered = false;
-    this.tui = undefined;
     if (registered) this.ui?.setWidget(this.key, undefined);
   }
 
@@ -322,8 +340,10 @@ export class PillView {
     this.ui = undefined;
     this.unsubscribe = undefined;
     this.selected = false;
+    this.armed = undefined;
     this.registered = false;
     this.tui = undefined;
+    this.main = undefined;
     try {
       if (registered) ui?.setWidget(this.key, undefined);
     } finally {

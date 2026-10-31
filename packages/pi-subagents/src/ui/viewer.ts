@@ -9,13 +9,15 @@
 // Adapted from tintinweb/pi-subagents (MIT): https://github.com/tintinweb/pi-subagents
 import { keyText } from "@earendil-works/pi-coding-agent";
 import { compositeTuiLine, getKeybindings, Editor, Loader, type Component, type EditorTheme, type Focusable, type OverlayHandle, type TUI, type TuiMouseEvent, type TuiMouseEventResult, isKeyRelease, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { leavesPromptDown, type ActivitySection } from "../activity.ts";
+import { dismissable, leavesPromptDown, stoppable, type ActivitySection } from "../activity.ts";
 import { contextTokens, type Conversation } from "../conversation.ts";
 import { type EditorModeContext, type EmbeddedEditor, type EditorFactoryOptions, type SuiteEditor, EDITOR_MODE, EDITOR_SURFACE, INPUT_CONTEXT, readEditorMode, requestEditorFactory } from "../editor-contract.ts";
 import { discoverFamily, type FamilyService } from "../family-contract.ts";
 import { runLabel } from "../label.ts";
 import type { Run } from "../run.ts";
-import { type FleetEntry, fleetRoster, renderFleet } from "./fleet.ts";
+import { type FleetEntry, fleetEntryKey, fleetRoster, fleetStopTarget, renderFleet } from "./fleet.ts";
+import { mountViewerOverlay, type ViewerPromptState } from "./viewer-overlay.ts";
+import { acquireViewportInput } from "./viewport-input.ts";
 import { type Theme, formatCost, formatCount, statusIcon } from "./format.ts";
 import { PiChat } from "./pi-chat.ts";
 
@@ -104,6 +106,8 @@ function requestService<T>(events: ViewerActions["events"], channel: string, val
 /** Drafts per run, so switching away and back keeps what you were typing. */
 const drafts = new Map<string, string>();
 
+export type ViewerSectionEntry = Extract<FleetEntry, { kind: "row" | "pill" }>;
+
 type Composer = (EmbeddedEditor & { getText?(): string; setText?(text: string): void; isShowingAutocomplete?(): boolean }) | SuiteEditor;
 
 export class SessionView implements Component, Focusable {
@@ -124,7 +128,9 @@ export class SessionView implements Component, Focusable {
   /** The list under the editor has the keyboard. */
   private listActive = false;
   private listSelected = 0;
-  private listStopArmed = false;
+  private listSelectedKey: string | undefined;
+  private listStopArmed: { key: string; target: unknown } | undefined;
+  private readonly releaseViewportInput: () => void;
   /** Transcript scrolling: the first shown line, and whether it follows new output. */
   private scrollTop = 0;
   private follow = true;
@@ -140,12 +146,13 @@ export class SessionView implements Component, Focusable {
     private readonly initialActions: ViewerActions = {},
     private readonly keybindings?: Keybindings,
     private readonly source?: SessionSource,
-    private readonly openSection?: (section: ActivitySection) => void,
+    private readonly openSection?: (entry: ViewerSectionEntry) => void | Promise<void>,
     private readonly onInteraction?: () => void,
     private readonly viewport?: () => { width: number; height: number },
     private readonly family?: FamilyService,
   ) {
     this.run = run;
+    this.releaseViewportInput = viewport || family ? acquireViewportInput(tui, this) : () => {};
     this.loader = new Loader(tui as TUI, (text) => theme.fg("accent", text), (text) => theme.fg("muted", text), "Working");
     this.loader.stop();
     this.attach(run);
@@ -215,7 +222,7 @@ export class SessionView implements Component, Focusable {
     const keys = this.keybindings ?? safeKeybindings();
     if (keys) {
       try {
-        if (keys.matches(data, id)) return true;
+        return keys.matches(data, id);
       } catch {
         // An unknown id in an older Pi.
       }
@@ -229,6 +236,7 @@ export class SessionView implements Component, Focusable {
     this.follow = true;
     this.scrollTop = 0;
     this.stopArmed = false;
+    this.listStopArmed = undefined;
     const settings = safe(() => this.source?.settings?.()) ?? {};
     this.chat = new PiChat(() => this.theme as never, { cwd: run.cwd || process.cwd(), userMessagesFromEvents: true, requestRender: () => this.tui.requestRender() });
     if (settings.hideThinkingBlock) this.chat.setThinkingHidden(true);
@@ -413,64 +421,102 @@ export class SessionView implements Component, Focusable {
   private enterList() {
     const roster = this.roster();
     this.listActive = true;
-    this.listStopArmed = false;
-    this.listSelected = Math.max(0, roster.findIndex((e) => e.kind === "run" && e.run === this.run));
+    this.listStopArmed = undefined;
+    this.selectList(roster, Math.max(0, roster.findIndex((e) => e.kind === "run" && e.run === this.run)));
     if (this.composer) this.composer.focused = false;
     this.tui.requestRender();
   }
 
   private leaveList() {
     this.listActive = false;
-    this.listStopArmed = false;
+    this.listStopArmed = undefined;
     if (this.composer) this.composer.focused = this.hasFocus;
     this.tui.requestRender();
   }
 
+  private selectList(roster: FleetEntry[], index: number) {
+    this.listSelected = Math.max(0, Math.min(index, roster.length - 1));
+    this.listSelectedKey = roster[this.listSelected] && fleetEntryKey(roster[this.listSelected]!);
+  }
+
+  private reconcileList(roster: FleetEntry[]) {
+    const index = roster.findIndex((entry) => fleetEntryKey(entry) === this.listSelectedKey);
+    this.selectList(roster, index < 0 ? this.listSelected : index);
+    const entry = roster[this.listSelected];
+    if (!entry || this.listStopArmed?.key !== fleetEntryKey(entry) || this.listStopArmed?.target !== fleetStopTarget(entry) || !this.listStoppable(entry)) {
+      this.listStopArmed = undefined;
+    }
+  }
+
+  private listStoppable(entry: FleetEntry): boolean {
+    return entry.kind === "run" ? this.running(entry.run) && Boolean(this.actions(entry.run).stop)
+      : entry.kind === "row" && stoppable(entry.section, entry.row);
+  }
+
   private listKey(data: string) {
     const roster = this.roster();
-    this.listSelected = Math.min(this.listSelected, Math.max(0, roster.length - 1));
+    this.reconcileList(roster);
     const entry = roster[this.listSelected];
     const armed = this.listStopArmed;
-    this.listStopArmed = false;
+    this.listStopArmed = undefined;
     if (matchesKey(data, "escape") || matchesKey(data, "h")) return this.leaveList();
     if (matchesKey(data, "up") || matchesKey(data, "k")) {
       if (this.listSelected === 0) return this.leaveList();
-      this.listSelected--;
+      this.selectList(roster, this.listSelected - 1);
     } else if (matchesKey(data, "down") || matchesKey(data, "j")) {
-      this.listSelected = Math.min(roster.length - 1, this.listSelected + 1);
+      this.selectList(roster, this.listSelected + 1);
     } else if (matchesKey(data, "enter") || matchesKey(data, "l")) {
       if (!entry) return;
-      if (entry.kind === "pill") {
-        safe(() => this.openSection?.(entry.section));
+      if (entry.kind === "pill" || entry.kind === "row") {
+        invoke(() => this.openSection?.(entry));
+        this.tui.requestRender();
         return;
       }
-      this.listActive = false;
+      this.leaveList();
       this.switchTo(entry.kind === "run" ? entry.run : undefined);
       return;
-    } else if (matchesKey(data, "x") && entry?.kind === "run") {
-      if (this.running(entry.run)) {
-        if (armed) invoke(() => this.actions(entry.run).stop?.());
-        else this.listStopArmed = true;
-      } else if (entry.run !== this.run) invoke(() => this.source?.dismiss?.(entry.run.id));
+    } else if (matchesKey(data, "x") && entry) {
+      if (this.listStoppable(entry)) {
+        if (armed) invoke(() => entry.kind === "run" ? this.actions(entry.run).stop?.() : entry.kind === "row" ? entry.section.stop?.(entry.row.key) : undefined);
+        else this.listStopArmed = { key: fleetEntryKey(entry), target: fleetStopTarget(entry) };
+      } else if (entry.kind === "run" && !this.running(entry.run) && entry.run !== this.run) invoke(() => this.source?.dismiss?.(entry.run.id));
+      else if (entry.kind === "row" && dismissable(entry.section, entry.row)) invoke(() => entry.section.dismiss?.(entry.row.key));
     } else if (matchesKey(data, "b") && entry?.kind === "run" && this.actions(entry.run).canBackground?.()) {
       this.actions(entry.run).background?.();
-    } else return;
+    }
     this.tui.requestRender();
   }
 
   // ---- keys ----------------------------------------------------------------------------------------
 
   handleInput(data: string): void {
-    if (this.closed) return;
+    if (this.closed || isKeyRelease(data)) return;
     safe(() => this.onInteraction?.());
-    if (isKeyRelease(data)) return;
-    const autocomplete = Boolean(this.composer && (readEditorMode(this.composer)?.autocomplete || this.composer.isShowingAutocomplete?.()));
-    if (!autocomplete && matchesKey(data, "tab")) return this.cycle(1);
-    if (!autocomplete && matchesKey(data, "shift+tab")) return this.cycle(-1);
+    if (this.listActive) this.reconcileList(this.roster());
+    const composer = this.composer;
+    const mode = composer && readEditorMode(composer);
+    const autocomplete = Boolean(composer && (mode?.autocomplete || composer.isShowingAutocomplete?.()));
+    // Modal/completion input belongs wholly to the composer, never session navigation.
+    if (!this.listActive && composer && (autocomplete || mode?.state === "ex" || mode?.state === "pending" || mode?.state === "visual")) {
+      this.stopArmed = false;
+      composer.handleInput(data);
+      this.tui.requestRender();
+      return;
+    }
+    if (this.listActive && !matchesKey(data, "x")) this.listStopArmed = undefined;
+    if (matchesKey(data, "tab")) return this.cycle(1);
+    if (matchesKey(data, "shift+tab")) return this.cycle(-1);
     // Ctrl+J/Ctrl+K too (over the editor's newline and kill-line, which have other keys).
-    if (!autocomplete && matchesKey(data, "ctrl+j")) return this.cycle(1);
-    if (!autocomplete && matchesKey(data, "ctrl+k")) return this.cycle(-1);
+    if (matchesKey(data, "ctrl+j")) return this.cycle(1);
+    if (matchesKey(data, "ctrl+k")) return this.cycle(-1);
     if (this.listActive) return this.listKey(data);
+    // Native/Insert editors keep editing; idle Normal uses the embedded scroll callback.
+    if (composer && (matchesKey(data, "ctrl+u") || matchesKey(data, "ctrl+d"))) {
+      this.stopArmed = false;
+      composer.handleInput(data);
+      this.tui.requestRender();
+      return;
+    }
     if (this.key(data, "app.tools.expand", "ctrl+o")) {
       this.chat.setExpanded(!this.chat.isExpanded);
       return;
@@ -487,9 +533,7 @@ export class SessionView implements Component, Focusable {
     if (this.key(data, "tui.altScreen.lineDown")) return this.scrollBy(1);
     if (this.key(data, "tui.altScreen.bottom", "ctrl+end")) return this.scrollTo("bottom");
     if (this.key(data, "tui.altScreen.top", "ctrl+home")) return this.scrollTo("top");
-    const composer = this.composer;
     if (!composer) return this.viewerKey(data);
-    const mode = readEditorMode(composer);
     const text = safe(() => (composer as { getText?(): string }).getText?.()) ?? "";
     // Ctrl+C clears the editor; on an empty one, twice stops the child (main's Esc, which here goes back).
     if (this.key(data, "app.clear", "ctrl+c") && (!mode || mode.state === "normal" || mode.state === "insert")) {
@@ -530,6 +574,7 @@ export class SessionView implements Component, Focusable {
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (this.closed) return undefined;
     safe(() => this.onInteraction?.());
+    this.listStopArmed = undefined;
     if (event.type === "wheel") {
       this.scrollBy(event.wheelDelta ?? 0);
       return { handled: true };
@@ -626,6 +671,9 @@ export class SessionView implements Component, Focusable {
       for (const q of queued) dock.push(truncateToWidth(` ${th.fg("dim", `Steering: ${q.replace(/\s+/gu, " ")}`)}`, width));
     }
     dock.push("");
+    // Navigation destinations above the composer, not dialog-action hints in its footer.
+    // The editor owns input here; this is not a waiting select/confirmation screen.
+    if (this.listShown() && !this.listActive) dock.push(truncateToWidth(` ${th.fg("dim", `esc main · tab/shift+tab sessions · ↓ list`)}`, width));
     if (this.composer) {
       let lines = safeRender(this.composer, width);
       if (!lines.length) lines = [""];
@@ -634,13 +682,12 @@ export class SessionView implements Component, Focusable {
     if (this.stopArmed && this.canStop()) dock.push(truncateToWidth(` ${th.fg("error", `${keyLabel("app.clear", "ctrl+c")} again to stop ${runLabel(this.run)}`)}`, width));
     if (this.listShown()) {
       const roster = this.roster();
+      this.reconcileList(roster);
       const current = roster.findIndex((e) => e.kind === "run" && e.run === this.run);
       const selected = this.listActive ? this.listSelected : current;
       const entry = roster[selected];
       const canBackground = entry?.kind === "run" && Boolean(safe(() => this.actions(entry.run).canBackground?.()));
-      // How to get back, since nothing else on this screen says it is not main.
-      if (!this.listActive) dock.push(truncateToWidth(` ${th.fg("dim", `esc back to main · tab/shift+tab switch · ↓ list`)}`, width));
-      dock.push(...renderFleet({ roster, selected, current, active: this.listActive, stopArmed: this.listStopArmed, canBackground, normalKeys: true, now: Date.now(), width, theme: th }));
+      dock.push(...renderFleet({ roster, selected, current, active: this.listActive, stopArmed: Boolean(this.listStopArmed), canBackground, normalKeys: true, now: Date.now(), width, theme: th }));
     } else dock.push("");
     dock.push(...this.footerLines(width));
 
@@ -673,6 +720,7 @@ export class SessionView implements Component, Focusable {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.releaseViewportInput();
     safe(() => this.family?.focus(undefined));
     this.closed = true;
     clearInterval(this.timer);
@@ -730,6 +778,7 @@ function invoke(action: () => void | Promise<void>) {
 
 /** The part of `ctx.ui` the view uses. */
 export interface ViewerUI {
+  setWidget(key: string, content: ((tui: TUI, theme: any) => Component) | undefined): void;
   custom<T>(
     factory: (tui: TUI, theme: any, keybindings: any, done: (result: T) => void) => Component & { dispose?(): void },
     options?: { overlay?: boolean; overlayOptions?: { anchor?: "center" | "top-left"; width?: `${number}%`; maxHeight?: `${number}%` } | (() => { anchor?: "center" | "top-left"; width?: `${number}%`; maxHeight?: `${number}%` }); onHandle?: (handle: OverlayHandle) => void },
@@ -740,7 +789,7 @@ export interface ViewerUI {
  * Show `run`'s session full screen until you go back to main; `onOpen` gets a way to close it.
  * With a `source`, Tab and the list switch between main and its runs.
  */
-export function openViewer(ui: ViewerUI, run: Run, actions: ViewerActions = {}, onOpen?: (close: () => void) => void, source?: SessionSource, onInteraction?: () => void, canInstall?: () => boolean): Promise<void> {
+export function openViewer(ui: ViewerUI, run: Run, actions: ViewerActions = {}, onOpen?: (close: () => void) => void, source?: SessionSource, onInteraction?: () => void, canInstall?: () => boolean, promptState?: ViewerPromptState): Promise<void> {
   const family = source?.family?.() ?? (actions.events ? discoverFamily(actions.events) : undefined);
   if (family) {
     let hosted: SessionView | undefined;
@@ -754,59 +803,14 @@ export function openViewer(ui: ViewerUI, run: Run, actions: ViewerActions = {}, 
         hosted?.dispose();
         done();
       };
-      const openSection = (section: ActivitySection) => invoke(() => section.openDialog?.(ui as never));
+      const openSection = (entry: ViewerSectionEntry) => invoke(() => entry.kind === "row" ? entry.section.open(entry.row.key, ui) : entry.section.openDialog?.(ui));
       hosted = new SessionView(tui, run, theme as Theme, close, actions, keybindings as Keybindings, source, openSection, onInteraction, viewport, family);
       onOpen?.(close);
       return hosted;
     } }).finally(() => hosted?.dispose());
   }
-  let view: SessionView | undefined;
-  let handle: OverlayHandle | undefined;
-  let cancelled = false;
-  return ui.custom<void>(
-    (tui, theme, keybindings, done) => {
-      const openSection = (section: ActivitySection) => {
-        void Promise.resolve()
-          .then(() => section.openDialog?.(ui as never))
-          .catch(() => undefined);
-      };
-      const close = () => {
-        if (cancelled) return;
-        cancelled = true;
-        view?.dispose();
-        // Pi 1.2's custom done() blindly pops the last overlay, not this one.
-        // Remove only our entry, then give done() a non-capturing placeholder to
-        // pop synchronously. Pi 1.4 removes its own handle instead, so also hide
-        // the placeholder by handle (a no-op if 1.2 already popped it).
-        // A dialog above us keeps both its entry and focus;
-        // handle.hide() also retargets its previous focus away from this viewer.
-        // Before installation, reject in overlayOptions instead of calling done.
-        if (handle) {
-          handle.hide();
-          const placeholder = tui.showOverlay({ render: () => [], invalidate() {} }, { nonCapturing: true });
-          try {
-            done(undefined);
-          } finally {
-            placeholder.hide();
-          }
-        }
-      };
-      view = new SessionView(tui, run, theme, close, actions, keybindings, source, openSection, onInteraction);
-      onOpen?.(close);
-      return view;
-    },
-    {
-      overlay: true,
-      // Pi resolves these options in the same callback as showOverlay, after awaiting
-      // the factory. This is the last safe check before it captures keyboard focus.
-      overlayOptions: () => {
-        if (cancelled || canInstall?.() === false) throw new Error("Viewer opening cancelled");
-        return { anchor: "top-left", width: "100%", maxHeight: `${VIEWER_HEIGHT_PCT}%` };
-      },
-      onHandle: (installed) => { handle = installed; },
-    },
-  ).catch((error) => {
-    view?.dispose();
-    throw error;
-  });
+  return mountViewerOverlay(ui, (tui, theme, keybindings, close) => {
+    const openSection = (entry: ViewerSectionEntry) => invoke(() => entry.kind === "row" ? entry.section.open(entry.row.key, ui) : entry.section.openDialog?.(ui));
+    return new SessionView(tui, run, theme, close, actions, keybindings, source, openSection, onInteraction);
+  }, { height: VIEWER_HEIGHT_PCT, onOpen, canInstall, promptState });
 }

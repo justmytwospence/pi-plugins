@@ -61,7 +61,7 @@ function session(staleMessage = "Extension context has been invalidated") {
   const setWidget = c.ctx.ui.setWidget;
   const remove = vi.fn();
   vi.spyOn(c.ctx.ui, "setWidget").mockImplementation((key, widget) => {
-    if (!widget) remove();
+    if (!widget && key === "pi-bg-pill") remove();
     return setWidget(key, widget);
   });
   return { ...c, ctx, reads, remove, invalidate: () => { invalid = true; } };

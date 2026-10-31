@@ -103,9 +103,11 @@ Claude Code's subagent panel, below the prompt: `main` and every running subagen
 
 ### Subagent sessions
 
-When exactly one subagent is running across all calls and no tasks are queued, its conversation opens automatically while main awaits a foreground subagent call, is idle, or holds a pi-bg wait (`herdr:waiting`). FleetView must be enabled, with main's editor focused and its draft empty; existing viewers and dialogs are never interrupted. Parallel startup is checked after the roster settles, and queued chains wait until their last task starts.
+When exactly one subagent is running across all calls, its conversation opens automatically while main awaits a foreground subagent call, is idle, or holds a pi-bg wait (`herdr:waiting`). Only active workers count: finished history and queued future tasks do not, so a queued chain or concurrency-one batch follows each running step. FleetView must be enabled, with main's editor focused, its draft empty, and no autocomplete or unfinished modal command; existing viewers and dialogs are never interrupted. Parallel startup is checked after the roster settles. A wait in one parallel tool branch does not hide another tool still working in main.
 
-An untouched automatic view returns to main when the run ends, another run starts, or main resumes work. Any input (including scrolling, navigation or typing) makes the view yours: it stays open on completion. Esc returns to main and prevents automatic reopening of that run until it ends. Manual viewing is unchanged.
+An automatic view returns to main when the run ends (including failure or stopping), another worker becomes active, or main resumes work. Scrolling, typing and steering do not pin it. Unsent worker drafts stay with that worker, never main. Esc returns to main and prevents automatic reopening of that run until it ends. Explicitly opening a view or switching to another worker makes it manual: it stays open on completion.
+
+Main's questions and approvals always take priority. A standalone manual viewer temporarily hides while a dialog owns the screen and keyboard, then restores the same view, draft and scroll position; a Sidebar-hosted view uses the family host's suspension. Fleet and the independent background-task pill navigate only from the positively identified main editor, never an answer, note, approval-message or diff-comment field.
 
 A run opens as a session of its own (in the primary pane when Sidebar is open), drawn as Pi draws main: its conversation in Pi's own message and tool components (Markdown, thinking as your `hideThinkingBlock` setting says, tool cards with Pi's renderers, including edit diffs), Pi's working row while it works, steering messages it has not read yet as `Steering: …`, your editor (pi-vim's when loaded, with your `editorPaddingX`), the subagent list main shows under its prompt with this session marked `◉`, and your footer. With pi-status-footer, the footer and the context gauge on the editor's borders describe the child (its model, thinking level, context share and cost); otherwise a footer in Pi's own layout does. Tool results keep up to 16,000 characters, and their details up to 16,000 characters of JSON.
 
@@ -114,14 +116,14 @@ Pi runs one live session per process and every subagent is a separate process, s
 | key | action |
 |---|---|
 | typing, Enter | steer the running child (pi-vim: Enter, `:w`, `:wq` or `:x`) |
-| Tab, Shift+Tab; Ctrl+J, Ctrl+K | next or previous session in the list's order (main, then the runs); past the ends is main. While autocomplete is open these keys go to it. Ctrl+J and Ctrl+K replace the editor's newline and kill-line here (Shift+Enter still adds a line) |
+| Tab, Shift+Tab; Ctrl+J, Ctrl+K | next or previous session in the list's order (main, then the runs); past the ends is main. While autocomplete, EX, a pending Vim command or Visual mode owns the composer, these keys go to it. Ctrl+J and Ctrl+K replace the editor's newline and kill-line here (Shift+Enter still adds a line) |
 | Esc | back to main. With pi-vim, Esc leaves Insert mode first if you have typed something, then goes back from Normal mode. A dim `esc back to main · tab/shift+tab switch · ↓ list` line over the list says so |
 | `↓` at the editor's end | into the list: `↑`/`↓` or `k`/`j` select, Enter or `l` switches (main goes back), `x` twice stops, `x` dismisses an ended run, `b` moves a foreground run to the background, Esc, `h` or `↑` past the top return to the editor |
 | Ctrl+C | clear the editor; on an empty editor, twice stops the child |
 | your `tui.altScreen.*` scroll keys (half page, page, top, bottom), PageUp/PageDown, mouse wheel | scroll the conversation; pi-vim's Ctrl+U/Ctrl+D in idle Normal mode scroll half a page |
 | your `app.tools.expand` (Ctrl+O) and `app.thinking.toggle` | expand tool output, show or hide thinking |
 
-A run that has ended has no editor: a line says how it ended (`✗ failed: …`), `↑`/`↓`, `j`/`k`, Ctrl+U/Ctrl+D, Home/End scroll, `↓` at the end enters the list, and Esc or `q` goes back. A draft you leave in one session is still there when you come back to it. The view follows new output until you scroll up.
+A run that has ended has no editor: a line says how it ended (`✗ failed: …`), `↑`/`↓`, `j`/`k`, Ctrl+U/Ctrl+D, Home/End scroll, `↓` at the end enters the list, and Esc or `q` goes back. A draft you leave in one session is still there when you come back to it. The view follows new output until you scroll up. Configured viewport bindings respect rebinding and disabling; Ctrl+U/Ctrl+D stay with the composer outside idle Normal mode. Paging a Sidebar-hosted worker scrolls that worker, not main's hidden transcript. Stop confirmation belongs to the selected row and its current worker: a changing roster never transfers an armed stop to another target.
 
 ### Widget
 

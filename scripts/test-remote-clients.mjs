@@ -39,6 +39,7 @@ const { SplitRoot, dividerLines } = await jiti.import('../packages/pi-sidebar/sr
 const { DEFAULT_MIN_COLUMNS, DEFAULT_RATIO } = await jiti.import('../packages/pi-sidebar/src/config.ts');
 const { sidebarScreen, sidebarFamilyScreens } = await import('./remote-clients/sidebar.mjs');
 const { startupSplashScreens } = await import('./remote-clients/startup-splash.mjs');
+const { subagentScreens } = await import('./remote-clients/subagents.mjs');
 const { TerminalPanel } = await jiti.import('../packages/pi-interactive-shell/src/panel.ts');
 const { HistoryPicker } = await jiti.import('../packages/pi-history-search/src/picker.ts');
 const { default: historySearch } = await jiti.import('../packages/pi-history-search/src/index.ts');
@@ -613,6 +614,17 @@ screens.push(...(await startupSplashScreens({
   idleFooter: width => idleFooter(width, { statuses: modeStatuses('plan', 'auto') }), height: 64,
 })).map(screen => screen.idle === undefined ? screen : { ...screen, idle: screen.idle + splashStart }));
 
+// Actual running/ended SessionViews, their native select, and the restored child/main composers.
+// Keep these alongside the synthetic family-host matrix: both clients read the full native frame.
+const subagentsStart = screens.length;
+screens.push(...(await subagentScreens({
+  height: HEIGHT, footer, idleFooter: width => idleFooter(width, { statuses: modeStatuses('plan', 'auto') }),
+  sessionFooter: (session, width, childTheme) => renderFooter({
+    ...session, quotas: [], now: NOW, statuses: [], oauth: false,
+    git: { project: 'pi-plugins', branch: 'main' },
+  }, width, childTheme),
+})).map(screen => screen.idle === undefined ? screen : { ...screen, idle: screen.idle + subagentsStart }));
+
 // Capture the returned completion renderer from the real registerExec API, rather than drawing a
 // lookalike card or calling renderFinish directly. Both expansion states live ahead of the idle
 // composer, through the same layout and reader checks as the normal-footer fixtures above.
@@ -935,7 +947,7 @@ screens.forEach((screen, i) => {
     const h = results.herdr?.[i], c = results.collie?.[i];
     if (h) problems.push(`herdr-web-ui: terminal misidentified as question: ${JSON.stringify(h)}`);
     if (c?.blocks.some(block => block.kind !== 'raw')) problems.push(`Collie: terminal misidentified as card: ${JSON.stringify(c.blocks)}`);
-    if (c && ['empty', 'draft'].includes(c.composer)) problems.push(`Collie: terminal misidentified as Pi composer: ${c.composer}`);
+    if (c && (['empty', 'draft'].includes(c.composer) || c.draft !== null)) problems.push(`Collie: terminal misidentified as Pi composer: ${JSON.stringify({ composer: c.composer, draft: c.draft })}`);
     report(label, problems);
     return;
   }
@@ -955,19 +967,21 @@ screens.forEach((screen, i) => {
   }
   if (screen.idle !== undefined) {
     // An idle screen reads as the same screen without Sidebar does.
+    const expectedDraft = screen.expectedDraft ?? 'next step';
     const h = results.herdr, c = results.collie;
     if (h && JSON.stringify(h[i]) !== JSON.stringify(h[screen.idle])) problems.push(`herdr-web-ui: ${JSON.stringify(h[i])}, without Sidebar ${JSON.stringify(h[screen.idle])}`);
     const kinds = (r) => JSON.stringify({ blocks: r.blocks.filter((b) => b.kind !== 'raw'), composer: r.composer, draft: r.draft });
     if (h?.[i] !== null && h?.[i] !== undefined) problems.push(`herdr-web-ui: idle editor misidentified as question: ${JSON.stringify(h[i])}`);
     if (c) {
-      if (c[i].composer !== 'draft' || c[i].draft?.trim() !== 'next step') problems.push(`Collie: wanted draft composer containing "next step", got ${JSON.stringify({ composer: c[i].composer, draft: c[i].draft })}`);
+      if (c[i].composer !== 'draft' || c[i].draft?.trim() !== expectedDraft) problems.push(`Collie: wanted draft composer containing ${JSON.stringify(expectedDraft)}, got ${JSON.stringify({ composer: c[i].composer, draft: c[i].draft })}`);
       if (c[i].blocks.some(b => b.kind !== 'raw')) problems.push(`Collie: idle editor misidentified as card: ${JSON.stringify(c[i].blocks)}`);
       if (kinds(c[i]) !== kinds(c[screen.idle])) problems.push(`Collie: ${kinds(c[i])}, without Sidebar ${kinds(c[screen.idle])}`);
     }
     report(label, problems);
     return;
   }
-  const dialog = DIALOGS.find((d) => d.name === screen.name);
+  const dialog = screen.dialog ?? DIALOGS.find((d) => d.name === screen.name);
+  assert.ok(dialog, `${label}: missing dialog expectation`);
   const h = results.herdr?.[i];
   if (dialog.terminalPicker) {
     // Tree navigation and searchable prompt history stay terminal-only. Collie may mirror the whole pane with

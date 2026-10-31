@@ -39,6 +39,8 @@ import {
 import { beginComposition, type EditorCreator, editorOwnsCancel, inline, type ProseEditor } from "./editor.ts";
 import type { CallView } from "./view.ts";
 
+const EDITOR_SURFACE = Symbol.for("pi-plugins.editor-surface.v1");
+
 /** The extra row that refuses with a message; also `n` in the terminal dialog. */
 export const BLOCK_WITH_MESSAGE = "Block with a message";
 
@@ -297,6 +299,8 @@ class ApprovalDialog implements Component {
     this.hasFocus = value;
     this.message.focused = value && this.editing;
   }
+
+  readonly [EDITOR_SURFACE] = "embedded";
 
   /** Tells key-remapping extensions (pi-select-nav) that this dialog handles its own keys. */
   [Symbol.for("pi-plugins.input-context.v1")]() {

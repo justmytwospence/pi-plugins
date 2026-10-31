@@ -11,6 +11,12 @@ The suite preserves rich desktop dialogs. There is no remote-client UI setting t
 
 Client regression fixtures should show the actual splash alongside the editor and footer at 46, 120 and 180 columns, with Sidebar absent/open and the native MCP manager open/closed. Both herdr-web-ui and Collie parsers must find only the real editor and normal idle composer, with no false input or send target in the map. These are compatibility requirements, not a claim that the new fixtures or live clients have been validated.
 
+## Subagent views and questions
+
+A subagent viewer must yield both screen and keyboard to main's questions and approvals. Once the dialog closes, a manually opened viewer restores its worker draft and scroll position; returning to main preserves main's separate draft. Fleet shortcuts belong to the main prompt, not answer, note, approval-message or comment fields.
+
+Regression coverage uses real running and ended subagent views at 46, 120 and 180 columns, standalone and hosted beside Sidebar. It checks visible dialogs with both phone parsers and actual terminal input dispatch, including paging the focused worker. Read-only views expose no composer; a running worker's steering draft must not be confused with main's or Sidebar's draft. Parser checks do not replace testing the live clients.
+
 ## Herdr and herdr-web-ui
 
 Install Herdr's official Pi integration for lifecycle state and session identity. [pi-herdr](/plugins/pi-herdr/) adds metadata and orchestration; it does not replace that integration.

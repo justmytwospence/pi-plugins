@@ -38,13 +38,18 @@ export function fakePi() {
   return { pi, handlers, tools, commands, sent, emitted, bus, renderers };
 }
 
-export function fakeCtx(cwd: string) {
+export function fakeCtx(cwd: string, focused?: unknown) {
   const status = new Map<string, string | undefined>();
   const notes: string[] = [];
   const working: (string | undefined)[] = [];
   /** Every setWorkingVisible call, in order. */
   const visible: boolean[] = [];
-  const state = { pending: false, editorText: "", busy: false };
+  const state = { pending: false, editorText: "", busy: false, focused: undefined as unknown };
+  // Native CustomEditor declares this property even before Pi assigns its shortcut handler.
+  const main = focused ?? { getText: () => state.editorText, setText: (text: string) => { state.editorText = text; }, onExtensionShortcut: undefined };
+  state.focused = main;
+  const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t, inverse: (t: string) => `[${t}]` };
+  const tui = { requestRender: () => {}, terminal: { rows: 40 }, getFocusedComponent: () => state.focused };
   const inputs = new Set<(data: string) => { consume?: boolean } | undefined>();
   const widgets = new Map<string, any>();
   const opened: any[] = [];
@@ -57,7 +62,12 @@ export function fakeCtx(cwd: string) {
     isIdle: () => !state.busy,
     ui: {
       setStatus: (k: string, v: string | undefined) => status.set(k, v),
-      setWidget: (k: string, v: any) => (v ? widgets.set(k, v) : widgets.delete(k)),
+      setWidget: (k: string, v: any) => {
+        const result = v ? widgets.set(k, v) : widgets.delete(k);
+        // Pi invokes widget factories synchronously, including temporary TUI probes.
+        if (typeof v === "function") v(tui, theme);
+        return result;
+      },
       notify: (m: string) => notes.push(m),
       setWorkingMessage: (m?: string) => working.push(m),
       setWorkingVisible: (v: boolean) => visible.push(v),
@@ -74,8 +84,6 @@ export function fakeCtx(cwd: string) {
       getEditorText: () => state.editorText,
     },
   };
-  const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t, inverse: (t: string) => `[${t}]` };
-  const tui = { requestRender: () => {}, terminal: { rows: 40 } };
   /** The widget's current lines, rendered at `width` with a plain theme. */
   const widgetLines = (key = "pi-bg-pill", width = 200): string[] | undefined => widgets.get(key)?.(tui, theme).render(width);
   /** The widget component itself, to send it mouse events. */
@@ -87,7 +95,7 @@ export function fakeCtx(cwd: string) {
     const o = opened[index];
     return o ? o.factory(tui, theme, undefined, o.resolve) : undefined;
   };
-  return { ctx, status, notes, working, visible, state, widgets, widgetLines, widgetComponent, opened, press, overlay, theme };
+  return { ctx, status, notes, working, visible, state, main, tui, widgets, widgetLines, widgetComponent, opened, press, overlay, theme };
 }
 
 export async function until(cond: () => boolean, ms = 5_000): Promise<void> {

@@ -3,8 +3,9 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, expect, test, vi } from "vitest";
-import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION, type ActivitySection } from "../src/activity.ts";
+import { afterEach, describe, expect, it, test, vi } from "vitest";
+import { CustomEditor } from "@earendil-works/pi-coding-agent";
+import { ACTIVITY_CHANGED, ACTIVITY_GONE, ACTIVITY_HOST, ACTIVITY_SECTION, type ActivitySection, captureMainEditor, EDITOR_MODE, EDITOR_SURFACE, INPUT_CONTEXT, leavesPromptDown, mainEditorFocused } from "../src/activity.ts";
 import subagents from "../src/index.ts";
 import { RunsWidget } from "../src/ui/widget.ts";
 import { harness } from "./harness.ts";
@@ -12,6 +13,92 @@ import { fakeRun, fakeUI, normalFocus } from "./ui-helpers.ts";
 
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(path.join(tmpdir(), "subagents-agent-"));
 afterEach(() => vi.useRealTimers());
+
+describe("positive main-editor ownership", () => {
+  const methods = { getText: () => "", setText: (_text: string) => {} };
+  const native = { ...methods, onExtensionShortcut: undefined };
+  const cases: Array<[string, unknown, boolean, boolean]> = [
+    ["null", null, false, false],
+    ["unknown", undefined, false, false],
+    ["primitive", "editor", false, false],
+    ["empty object", {}, false, false],
+    ["editor shape only", { ...methods }, false, false],
+    ["editor context only", { [INPUT_CONTEXT]: () => "editor" }, false, false],
+    ["unmarked editor wrapper", { ...methods, [INPUT_CONTEXT]: () => "editor" }, false, false],
+    ["native declaration without a handler", native, true, false],
+    ["native shortcut handler", { ...methods, onExtensionShortcut: () => false }, true, false],
+    ["inherited native declaration", Object.assign(Object.create({ onExtensionShortcut: undefined }), methods), true, false],
+    ["explicit main", { ...methods, [EDITOR_SURFACE]: "main" }, true, true],
+    ["explicit main editor", { ...methods, [EDITOR_SURFACE]: "main", [INPUT_CONTEXT]: () => "editor" }, true, true],
+    ["explicit embedded", { ...native, [EDITOR_SURFACE]: "embedded" }, false, false],
+    ["embedded wrapper", { ...methods, [EDITOR_SURFACE]: "embedded", [INPUT_CONTEXT]: () => "editor" }, false, false],
+    ["main marker without methods", { [EDITOR_SURFACE]: "main" }, false, false],
+    ["main without getText", { setText: methods.setText, [EDITOR_SURFACE]: "main" }, false, false],
+    ["main without setText", { getText: methods.getText, [EDITOR_SURFACE]: "main" }, false, false],
+    ["native without getText", { setText: methods.setText, onExtensionShortcut: undefined }, false, false],
+    ["native without setText", { getText: methods.getText, onExtensionShortcut: undefined }, false, false],
+    ["foreign explicit context", { ...native, [EDITOR_SURFACE]: "main", [INPUT_CONTEXT]: "other" }, false, false],
+    ["unreadable context", { ...native, [INPUT_CONTEXT]: () => { throw new Error("unavailable"); } }, false, false],
+    ["foreign explicit surface", { ...native, [EDITOR_SURFACE]: "other" }, false, false],
+    ["unreadable surface", { ...native, get [EDITOR_SURFACE]() { throw new Error("unavailable"); } }, false, false],
+    ...(["filter", "list", "viewer"] as const).map((context): [string, unknown, boolean, boolean] =>
+      [context, { ...native, [EDITOR_SURFACE]: "main", [INPUT_CONTEXT]: () => context }, false, false]),
+  ];
+
+  it.each(cases)("%s requires positive identity and editor methods", (_name, focused, captures, explicit) => {
+    const main = captureMainEditor(focused);
+    expect(main).toBe(captures ? focused : undefined);
+    expect(mainEditorFocused(focused)).toBe(explicit);
+    expect(mainEditorFocused(focused, main)).toBe(captures);
+  });
+
+  it("matches only the captured instance and rechecks its ownership and methods", () => {
+    const focused = { ...native };
+    const main = captureMainEditor(focused);
+    expect(mainEditorFocused(focused, main)).toBe(true);
+    expect(mainEditorFocused({ ...native }, main)).toBe(false);
+    expect(mainEditorFocused({ ...methods, [INPUT_CONTEXT]: () => "editor" }, main)).toBe(false);
+    Object.assign(focused, { [EDITOR_SURFACE]: "embedded" });
+    expect(mainEditorFocused(focused, main)).toBe(false);
+    Object.assign(focused, { [EDITOR_SURFACE]: "main", [INPUT_CONTEXT]: () => "filter" });
+    expect(mainEditorFocused(focused, main)).toBe(false);
+    Object.assign(focused, { [INPUT_CONTEXT]: () => "editor", getText: undefined });
+    expect(mainEditorFocused(focused, main)).toBe(false);
+  });
+
+  it("captures a real native CustomEditor even before its shortcut callback is assigned", () => {
+    const editor = new CustomEditor(
+      { requestRender: () => {} } as any,
+      { borderColor: (s: string) => s } as any,
+      { matches: () => false } as any,
+    );
+    expect("onExtensionShortcut" in editor).toBe(true);
+    expect(editor.onExtensionShortcut).toBeUndefined();
+    expect(captureMainEditor(editor)).toBe(editor);
+    expect(mainEditorFocused(editor)).toBe(false);
+    expect(mainEditorFocused(editor, captureMainEditor(editor))).toBe(true);
+  });
+
+  it.each([undefined, null, {}, { getLines: () => [""], getCursor: () => ({ line: 0, col: 0 }) }])(
+    "never leaves a prompt whose text is unavailable: %s",
+    (focused) => {
+      expect(leavesPromptDown(focused, "\x1b[B", true, false)).toBe(false);
+      expect(leavesPromptDown(focused, "j", false, true)).toBe(false);
+    },
+  );
+
+  it("keeps cursor, history, autocomplete and unfinished modal input in the editor", () => {
+    const editor = { ...methods, getText: () => "draft", getCursor: () => ({ line: 0, col: 5 }) };
+    expect(leavesPromptDown(editor, "\x1b[B", true, false)).toBe(true);
+    expect(leavesPromptDown({ ...editor, getCursor: () => ({ line: 0, col: 2 }) }, "\x1b[B", true, false)).toBe(false);
+    expect(leavesPromptDown({ ...editor, historyIndex: 0 }, "\x1b[B", true, false)).toBe(false);
+    expect(leavesPromptDown({ ...editor, isShowingAutocomplete: () => true }, "\x1b[B", true, false)).toBe(false);
+    for (const state of ["ex", "pending", "visual"]) {
+      expect(leavesPromptDown({ ...editor, [EDITOR_MODE]: () => ({ state }) }, "\x1b[B", true, false)).toBe(false);
+    }
+  });
+});
+
 
 /** A source like pi-bg's: a pill, a dialog. */
 function fakeTasks(label = "2 tasks") {

@@ -14,6 +14,12 @@ Planner and subagent views compose in Sidebar's primary pane. Closing Sidebar ex
 
 Changes to this composition require real-renderer coverage at 46, 120 and 180 columns, including navigation, resize, mouse, editors, dialogs and draft/focus restoration, and `npm run check:clients`. Check both clients for false composer/send targets as well as dialog parsing; do not add exceptions or claim validation before those checks pass.
 
+## Subagent input ownership
+
+Subagent fixtures must use the real `SessionView`, not only a padded transcript stand-in. At 46, 120 and 180 columns, cover running and ended workers, standalone overlays and family-hosted views, native dialogs opening over them, restored worker drafts and return to main's original draft. Read-only viewers expose no composer; a steerable viewer exposes only its own draft, never main's or Sidebar's. Both client parsers must continue reading the visible question while a worker view is suspended.
+
+Input checks must dispatch through Pi's real terminal pipeline on supported SDK versions: direct `handleInput()` tests cannot detect an earlier viewport listener stealing keys or a hidden dialog accepting Enter. Cover editor modes, draft/focus restoration, paging the focused worker, list identity changes and prompt-handler registration order. A standalone viewer must not hold a long-lived native custom-prompt lifecycle that prevents subsequent dialogs from emitting their own start/end events.
+
 ## herdr-web-ui compatibility
 
 herdr-web-ui (devswha/herdr-web-ui, `server/prompt.ts`) turns a waiting Pi dialog into a phone card by reading the screen text. It has no configuration hook for dialogs. Every dialog that holds `herdr:blocked` must keep a layout it can read, or phones fall back to a bare Enter/Esc card:

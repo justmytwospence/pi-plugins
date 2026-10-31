@@ -225,6 +225,8 @@ interface Details {
 
 /** A tool call whose outcome is still owed: what a `/reload` parks for the next runtime. */
 interface ActiveCall {
+  /** Correlates a foreground wait with Pi's tool lifecycle, including nested tool calls. */
+  toolCallId?: string;
   mode: Mode;
   /** Its runs so far, ended or running. */
   runs: Run[];
@@ -412,6 +414,7 @@ export default function subagents(pi: ExtensionAPI) {
   const detachers = new Map<string, () => void>();
   /** Calls whose outcome is still owed (handoff.ts parks them at a reload). */
   const activeCalls = new Set<ActiveCall>();
+  const executingTools = new Map<string, { name: string; parent?: string }>();
 
   const widgetMode = (): WidgetMode => (WIDGET_MODES.includes(config.widget) ? config.widget : "off");
   /** Other extensions' sources whose pills end FleetView (pi-bg's tasks), while we host them. */
@@ -454,6 +457,11 @@ export default function subagents(pi: ExtensionAPI) {
     family: () => discoverFamily(pi.events),
     runs: () => [...runs.values()],
     enabled: () => config.fleetView !== false,
+    onAvailability: () => scheduleAutoView(),
+    onReturnMain: (runId) => {
+      autoDismissed.add(runId);
+      if (autoViewing === runId) autoViewing = undefined;
+    },
     actions: (run) => viewerActions(run, boundUI ?? { notify: () => undefined }),
     sections: hostedSections,
     dismissedAt: () => dismissedAt,
@@ -697,9 +705,17 @@ export default function subagents(pi: ExtensionAPI) {
       if (owner.aborted || !live) return;
       const running = [...runs.values()].filter((run) => run.state.status === "running");
       for (const id of autoDismissed) if (!running.some((run) => run.id === id)) autoDismissed.delete(id);
-      const run = running.length === 1 && preparing.size === 0 && queued.sync + queued.async === 0 ? running[0] : undefined;
-      const waiting = run && ([...activeCalls].some((call) => call.foreground?.() && call.runs.includes(run)) || sessionCtx?.isIdle?.() === true || waitingHolds.size > 0);
-      const eligible = boundUI && sessionCtx?.hasUI && sessionCtx.mode === "tui" && config.fleetView !== false && waiting ? run : undefined;
+      // Only active workers count; a concurrency-one batch/chain follows each live step.
+      const run = running.length === 1 ? running[0] : undefined;
+      const foreground = [...activeCalls].filter((call) => call.foreground?.());
+      // A wait in one parallel branch does not make another running main tool idle. Parent
+      // orchestrators count through their active children, so codemode awaiting bg_wait works.
+      const parents = new Set([...executingTools.values()].map((tool) => tool.parent).filter(Boolean));
+      const mainWorking = [...executingTools].some(([id, tool]) => !parents.has(id)
+        && !(tool.name === "bg_wait" && waitingHolds.size > 0)
+        && !foreground.some((call) => call.toolCallId === id));
+      const waiting = !mainWorking && run && (foreground.some((call) => call.runs.includes(run)) || sessionCtx?.isIdle?.() === true || waitingHolds.size > 0);
+      const eligible = boundUI && sessionCtx?.hasUI && sessionCtx.mode === "tui" && config.fleetView !== false && !fleet.promptBlocked && waiting ? run : undefined;
       if (autoViewing && autoViewing !== eligible?.id) {
         fleet.closeAutoView(autoViewing);
         autoViewing = undefined;
@@ -710,13 +726,40 @@ export default function subagents(pi: ExtensionAPI) {
           autoDismissed.add(runId);
           if (autoViewing === eligible.id) autoViewing = undefined;
         },
-        onInteraction: () => undefined,
+        onManual: () => {
+          autoDismissed.add(eligible.id);
+          if (autoViewing === eligible.id) autoViewing = undefined;
+        },
         onRejected: () => {
           if (autoViewing === eligible.id) autoViewing = undefined;
         },
       })) autoViewing = eligible.id;
     });
   };
+  pi.on("tool_execution_start", (event) => {
+    if (!live) return;
+    executingTools.set(event.toolCallId, { name: event.toolName, parent: event.parentToolCallId });
+    scheduleAutoView();
+  });
+  pi.on("tool_execution_end", (event) => {
+    executingTools.delete(event.toolCallId);
+    scheduleAutoView();
+  });
+  pi.on("ui_prompt_start", () => {
+    fleet.setPromptActive(true);
+    scheduleAutoView();
+  });
+  pi.on("ui_prompt_end", () => {
+    fleet.setPromptActive(false);
+    scheduleAutoView();
+  });
+  pi.events.on("herdr:blocked", (data) => {
+    if (!live) return;
+    const hold = data as { id?: unknown; active?: unknown } | undefined;
+    if (typeof hold?.active !== "boolean" || (hold.id !== undefined && typeof hold.id !== "string")) return;
+    fleet.setBlocked(hold.id, hold.active);
+    scheduleAutoView();
+  });
   pi.events.on("herdr:waiting", (data) => {
     if (!live) return;
     const hold = data as { id?: unknown; active?: unknown } | undefined;
@@ -1052,6 +1095,8 @@ export default function subagents(pi: ExtensionAPI) {
     if (autoCheck) clearImmediate(autoCheck);
     autoCheck = undefined;
     waitingHolds.clear();
+    fleet.resetPrompts();
+    executingTools.clear();
     preparing.clear();
     live = true;
     sessionCtx = ctx;
@@ -1092,6 +1137,8 @@ export default function subagents(pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", () => { scheduleAutoView(); });
+  pi.on("agent_start", () => { scheduleAutoView(); });
+  pi.on("turn_start", () => { scheduleAutoView(); });
 
   // A prompt mentioning `@subagent:<name>`: tell the model which discovered agent that is and how to
   // delegate to it (an unknown name is named as such, with the agents that exist).
@@ -1118,6 +1165,7 @@ export default function subagents(pi: ExtensionAPI) {
     autoCheck = undefined;
     autoViewing = undefined;
     autoDismissed.clear();
+    executingTools.clear();
     waitingHolds.clear();
     preparing.clear();
     holdFlush = false;
@@ -1334,6 +1382,7 @@ export default function subagents(pi: ExtensionAPI) {
         /** Set for a foreground call: it returns at once when a reload parks its runs. */
         let onPark: () => void = () => undefined;
         const active: ActiveCall = {
+          toolCallId: _toolCallId,
           mode,
           runs: started,
           notStarted: () => waiting,

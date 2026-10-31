@@ -3,13 +3,16 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { InteractiveMode, initTheme } from "@earendil-works/pi-coding-agent";
-import { TuiMainScreen, type Terminal, visibleWidth } from "@earendil-works/pi-tui";
+import { KeybindingsManager } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js";
+import { TuiMainScreen, type Terminal, setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
 import { beforeAll, expect, test, vi } from "vitest";
 import { InteractiveMode as InteractiveMode14, initTheme as initTheme14 } from "pi-coding-agent-1-4";
 import { TuiMainScreen as TuiMainScreen14 } from "pi-tui-1-4";
 import { transcriptWriter } from "../src/conversation.ts";
 import { recordedRun } from "../src/index.ts";
 import type { Run } from "../src/run.ts";
+import type { ActivityEntry, ActivitySection } from "../src/activity.ts";
+import { INPUT_CONTEXT } from "../src/editor-contract.ts";
 import type { FamilyService } from "../src/family-contract.ts";
 import { type ViewerUI, type SessionSource, SessionView, openViewer } from "../src/ui/viewer.ts";
 import { KEY, fakeRun, fakeTui, fakeUI, plain } from "./ui-helpers.ts";
@@ -18,6 +21,7 @@ import { KEY, fakeRun, fakeTui, fakeUI, plain } from "./ui-helpers.ts";
 beforeAll(() => {
   initTheme("dark");
   initTheme14("dark");
+  setKeybindings(new KeybindingsManager());
 });
 
 const CTRL_C = "\x03";
@@ -127,7 +131,7 @@ test("interaction is reported before navigation, typing and Esc; render and outp
     inputs.push(current);
   });
   void done.then(() => { closed = true; });
-  const view = ui.customs[0]!.component as SessionView;
+  const view = ui.overlays[0]!.component as SessionView;
   view.render(100);
   run.conversation.apply({ type: "message_end", message: { role: "assistant", content: [] } });
   expect(inputs).toEqual([]);
@@ -146,10 +150,10 @@ test.each([
   { version: "1.2", Mode: InteractiveMode, Screen: TuiMainScreen },
   { version: "1.4", Mode: InteractiveMode14, Screen: TuiMainScreen14 },
 ].flatMap((pi) => [undefined, false, true].map((nonCapturing) => ({ ...pi, nonCapturing }))))(
-  "Pi $version auto-close leaves no placeholder (dialog nonCapturing=$nonCapturing)",
+  "Pi $version owned overlay closes without disturbing dialog (nonCapturing=$nonCapturing)",
   async ({ Mode, Screen, nonCapturing }) => {
-  // Exercise each published Pi's custom lifecycle AND real TUI overlay stack:
-  // 1.2 pops the top entry; 1.4 removes its own handle.
+  // Real TUI stack ownership plus native custom-dialog disposal, not input dispatch.
+  // The viewer owns a direct handle; only the dialog uses Pi's custom lifecycle.
   const tui = new Screen({ rows: 40, columns: 100, hideCursor() {} } as Terminal);
   // No terminal rendering loop is needed to exercise real overlay ownership/focus.
   tui.requestRender = () => {};
@@ -157,11 +161,11 @@ test.each([
   tui.setFocus(editor);
   const host = { ui: tui, editor };
   const ui: ViewerUI = {
+    setWidget: (_key, factory) => { factory?.(tui as never, plain); },
     custom: (factory, options) => (Mode.prototype as any).showExtensionCustom.call(host, factory, options),
   };
   let close!: () => void;
   const viewerDone = openViewer(ui, liveRun(), {}, (fn) => { close = fn; });
-  // Pi awaits the factory before showOverlay/onHandle.
   await Promise.resolve();
   const viewer = tui.getFocusedComponent() as SessionView;
   const dispose = vi.spyOn(viewer, "dispose");
@@ -177,7 +181,7 @@ test.each([
   close();
   close(); // A stale automatic cancellation must not pop the dialog either.
   await viewerDone;
-  expect(dispose).toHaveBeenCalled();
+  expect(dispose).toHaveBeenCalledTimes(1);
   expect(tui.getFocusedComponent()).toBe(nonCapturing !== false ? editor : focus);
   // Check ownership as well as hasOverlayEntries: a leaked blank placeholder
   // must not hide behind the remaining dialog.
@@ -225,7 +229,8 @@ test("a subagent's session draws as Pi draws main: transcript, working row, edit
   expect(out).toContain("Working");
   // The editor's rules, then the list (this session marked), then the footer.
   expect(out).toMatch(/─{20}\n.*\n─{20}[^]*○ main\n ◉ Find where the config is loaded  scout/u);
-  expect(out).toContain("esc back to main · tab/shift+tab switch · ↓ list");
+  expect(out).toContain("esc main · tab/shift+tab sessions · ↓ list");
+  expect(out).toMatch(/esc main[^\n]*\n─{20}/u);
   expect(out).toContain("claude-haiku-5 • low");
   expect(out).toContain(`/tmp • ${"Find where the config is loaded"}`);
   // The transcript sits at the top; the editor and footer at the bottom.
@@ -362,11 +367,11 @@ test("openViewer shows an overlay that re-renders on new messages and resolves o
   const ui = fakeUI();
   const run = liveRun();
   const closed = openViewer(ui, run);
-  expect(ui.customs[0]?.options).toMatchObject({ overlay: true, overlayOptions: { anchor: "top-left", width: "100%", maxHeight: "100%" } });
+  expect(ui.overlays[0]?.options).toMatchObject({ anchor: "top-left", width: "100%", maxHeight: "100%" });
   const before = ui.tui.renders;
   run.conversation.apply({ type: "message_start", message: { role: "assistant", content: [] } });
   expect(ui.tui.renders).toBeGreaterThan(before);
-  ui.customs[0]?.component.handleInput(KEY.escape);
+  ui.overlays[0]?.component.handleInput(KEY.escape);
   await closed;
   const after = ui.tui.renders;
   run.conversation.apply({ type: "message_end", message: { role: "assistant", content: [] } });
@@ -400,4 +405,118 @@ test("a recorded run opens from its saved conversation, or else its task and out
   expect(out).toContain("◉ t");
   expect(out).toContain("? lost");
   v.dispose();
+});
+
+test("Enter on the current row restores composer focus and preserves its cursor", () => {
+  const { v, calls, runs } = setup();
+  type(v, "draft");
+  v.handleInput(KEY.down);
+  const composer = (v as any).composer;
+  const cursor = composer.getCursor();
+  expect(composer.focused).toBe(false);
+  v.handleInput(KEY.enter);
+  expect(v[INPUT_CONTEXT]()).toBe("editor");
+  expect(composer.focused).toBe(true);
+  expect(composer.getCursor()).toEqual(cursor);
+  v.handleInput(KEY.enter);
+  expect(calls.steer).toEqual([[runs[0]!.id, "draft"]]);
+  expect(calls.done).toBe(0);
+  v.dispose();
+});
+
+test("list selection follows a stable key through roster insertions and falls back when removed", () => {
+  const a = liveRun({ state: { startedAt: 10 } });
+  const b = liveRun({ state: { startedAt: 20 } });
+  const { v, runs, calls } = setup([a, b]);
+  v.handleInput(KEY.down); v.handleInput("j");
+  const c = liveRun({ state: { startedAt: 5 } });
+  runs.unshift(c);
+  v.render(100);
+  expect((v as any).listSelectedKey).toBe(`run:${b.id}`);
+  v.handleInput(KEY.enter);
+  expect(v.current).toBe(b);
+  expect(calls.switched).toEqual([b.id]);
+  v.dispose();
+});
+
+test.each(["removed", "completed", "child-replaced", "same-id-replaced"])("stop confirmation cannot transfer after %s", change => {
+  const a = liveRun({ state: { startedAt: 10 } });
+  const b = liveRun({ state: { startedAt: 20 } });
+  const c = liveRun({ state: { startedAt: 30 } });
+  const { v, runs, calls } = setup([a, b, c]);
+  v.handleInput(KEY.down); v.handleInput("j"); v.handleInput("x");
+  expect(text(v.render(100))).toContain("x again");
+  if (change === "removed") runs.splice(1, 1);
+  if (change === "completed") b.state.status = "done";
+  if (change === "child-replaced") b.child = {} as never;
+  if (change === "same-id-replaced") runs[1] = liveRun({ id: b.id, state: { startedAt: 20 } });
+  expect(text(v.render(100))).not.toContain("x again");
+  v.handleInput("x");
+  expect(calls.stop).toEqual([]);
+  v.handleInput("x");
+  expect(calls.stop).toEqual([change === "removed" || change === "completed" ? c.id : b.id]);
+  v.dispose();
+});
+
+test.each(["?", KEY.up, KEY.escape, "\t"])("non-confirming list key %j clears stop arming", key => {
+  const { v, calls } = setup([liveRun({ state: { startedAt: 10 } }), liveRun({ state: { startedAt: 20 } })]);
+  v.handleInput(KEY.down); v.handleInput("x");
+  expect(text(v.render(100))).toContain("x again");
+  v.handleInput(key);
+  expect((v as any).listStopArmed).toBeUndefined();
+  expect(calls.stop).toEqual([]);
+  v.dispose();
+});
+
+test.each([false, true])("row/pill opening stays in the viewer and routes to the section (hosted=%s)", async hosted => {
+  const ui = fakeUI();
+  const run = liveRun();
+  const row: ActivityEntry = { key: "notebook", label: "Notebook", detail: "", status: "running", stats: "", startedAt: 1, stopToken: "kernel-1" };
+  const section: ActivitySection = {
+    id: "notebooks", title: "Notebooks", entries: () => [row], pill: () => ({ label: "1 notebook", rows: [row] }),
+    open: vi.fn(async () => {}), openDialog: vi.fn(async () => {}), stop: vi.fn(), dismiss: vi.fn(),
+  };
+  let view!: SessionView;
+  const family = { focus() {}, view: ({ factory }: Parameters<FamilyService["view"]>[0]) => new Promise<void>(resolve => {
+    view = factory(ui.tui as never, plain, new KeybindingsManager(), resolve, () => ({ width: 100, height: 30 })) as SessionView;
+  }) } as unknown as FamilyService;
+  const source: SessionSource = { runs: () => [run], actions: () => ({ steer: () => true }), enabled: () => true, sections: () => [section], family: () => hosted ? family : undefined };
+  let close!: () => void;
+  const work = openViewer(ui, run, source.actions(run), fn => { close = fn; }, source);
+  if (!hosted) view = ui.overlays[0]!.component;
+  view.focused = true;
+  view.handleInput(KEY.down); view.handleInput("j");
+  view.handleInput(KEY.enter);
+  expect(section.open).toHaveBeenCalledWith("notebook", ui);
+  expect(view.current).toBe(run);
+  expect(view[INPUT_CONTEXT]()).toBe("list");
+  view.handleInput("x");
+  row.stopToken = "kernel-2";
+  view.render(100);
+  expect(text(view.render(100))).not.toContain("x again");
+  view.handleInput("x"); expect(section.stop).not.toHaveBeenCalled();
+  view.handleInput("x"); expect(section.stop).toHaveBeenCalledWith("notebook");
+  row.status = "done";
+  view.handleInput("x"); expect(section.dismiss).toHaveBeenCalledWith("notebook");
+  view.handleInput("j"); view.handleInput(KEY.enter);
+  expect(section.openDialog).toHaveBeenCalledWith(ui);
+  expect(view.current).toBe(run);
+  close(); await work;
+});
+
+test.each([false, true])("row open failure is contained without closing the viewer (async=%s)", async asynchronous => {
+  const run = liveRun();
+  const ui = fakeUI();
+  const row: ActivityEntry = { key: "row", label: "Row", detail: "", status: "running", stats: "", startedAt: 1 };
+  const open = asynchronous ? async () => { throw new Error("async open"); } : () => { throw new Error("sync open"); };
+  const section: ActivitySection = { id: "test", title: "Test", entries: () => [row], pill: () => ({ label: "", rows: [row] }), open };
+  let close!: () => void;
+  const work = openViewer(ui, run, { steer: () => true }, fn => { close = fn; }, { runs: () => [run], actions: () => ({ steer: () => true }), enabled: () => true, sections: () => [section] });
+  const view = ui.overlays[0]!.component as SessionView;
+  view.handleInput(KEY.down); view.handleInput("j");
+  expect(() => view.handleInput(KEY.enter)).not.toThrow();
+  await Promise.resolve(); await Promise.resolve();
+  expect(ui.overlays[0]!.component).toBe(view);
+  expect(view[INPUT_CONTEXT]()).toBe("list");
+  close(); await work;
 });
