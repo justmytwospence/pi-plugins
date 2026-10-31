@@ -467,6 +467,12 @@ const DIALOGS = [
     herdr: { options: 5 + count, multi: false, labels: planLabels(count) },
     collie: { kind: 'prompt-select', options: 6 + count, labels: planLabels(count), wraps: planLabels(count) },
   }))),
+  {
+    name: 'plan save filename', question: 'Save plan as',
+    lines: width => new ExtensionInputComponent('Save plan as', 'client-plan', () => {}, () => {}).render(width),
+    herdr: { options: 1, multi: false, labels: ['Type your answer'] },
+    collie: { kind: 'unread-dialog' },
+  },
   { name: 'cache-guard cold cache', lines: (w) => coldCacheLines(w, plainMenu), herdr: { options: plainMenu.length, multi: false, labels: plainMenu }, collie: { kind: 'prompt-select', options: plainMenu.length + 1, wraps: plainMenu } },
   { name: 'cache-guard cold cache (model offers)', lines: coldCacheLines, herdr: { options: coldMenu.length, multi: false, labels: coldMenu }, collie: { kind: 'prompt-select', options: coldMenu.length + 1, wraps: coldMenu } },
 ];
@@ -491,12 +497,6 @@ for (const width of [46, 120, 180]) {
   tui.terminal.columns = width;
   for (const dialog of DIALOGS) {
     const lines = await dialog.lines(width);
-  {
-    name: 'plan save filename', question: 'Save plan as',
-    lines: width => new ExtensionInputComponent('Save plan as', 'client-plan', () => {}, () => {}).render(width),
-    herdr: { options: 1, multi: false, labels: ['Type your answer'] },
-    collie: { kind: 'unread-dialog' },
-  },
     for (const [under, rows] of Object.entries(UNDERS)) {
       const { lines: screen } = sidebarScreen({ width, height: HEIGHT, dock: () => lines, footer: rows, collapsed: true });
       screens.push({ name: dialog.name, width, under: `${under}, Sidebar open`, ansi: screen.join('\n') });
