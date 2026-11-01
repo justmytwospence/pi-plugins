@@ -1,7 +1,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { afterEach, expect, test, vi } from "vitest";
 import nextPrompt from "../src/index.ts";
-import { harness } from "./harness.ts";
+import { fakeJev, harness } from "./harness.ts";
 
 afterEach(() => vi.useRealTimers());
 
@@ -137,13 +137,35 @@ async function setup(options: { shell?: boolean; ghost?: boolean; maxChars?: num
   return { h, ctx, tool, execute, render, offer, diagnostics, sendUserMessage, executeCommand, shell: (value: any) => { info = value; } };
 }
 
-test("model-only schema and guidelines require verified display", async () => {
+function expectQueued(result: any, command = "printf 'one  two'", reason = "editor contains a draft") {
+  const text = `!i ${command}`;
+  expect(result.details).toEqual({ status: "queued", kind: "terminal", text, reason });
+  expect(result.isError).toBeUndefined();
+  expect(result.content).toEqual([{
+    type: "text",
+    text: `Queued editable suggestion: ${text}\nYour existing draft is unchanged. Once the editor is empty and the suggestion appears, press Tab/Right to copy it into an editable draft. Wait for the current response to finish before pressing Enter to run it. Nothing was executed.`,
+  }]);
+}
+
+function expectNoExecution(s: Awaited<ReturnType<typeof setup>>) {
+  expect(s.sendUserMessage).not.toHaveBeenCalled();
+  expect(s.executeCommand).not.toHaveBeenCalled();
+  expect(s.h.messages).toEqual([]);
+}
+
+test("model-only schema and guidelines distinguish verified display, queueing and blockers", async () => {
   const { tool } = await setup();
   expect(tool.exposure).toBe("model-only");
   expect(tool.label).toBe("Offer terminal command");
+  expect(tool.description).toBe("Offer an editable !i suggestion, never execute it. Returns queued behind an existing draft; otherwise waits up to one second for render acknowledgement and returns displayed or a concrete blocker.");
   expect(tool.parameters.properties.command).toMatchObject({ type: "string", minLength: 1 });
   const guidelines = tool.promptGuidelines.join(" ");
-  expect(guidelines).toContain("status displayed");
+  expect(guidelines).toContain("status displayed permits claiming a visible offer");
+  expect(guidelines).toContain("On status queued");
+  expect(guidelines).toContain("clear or stash the draft to reveal it");
+  expect(guidelines).toContain("Do not claim it was displayed or inserted");
+  expect(guidelines).toMatch(/blocker/i);
+  expect(guidelines).toMatch(/secret|credential/i);
   expect(guidelines).toContain("Tab/Right to copy the suggestion immediately into an editable draft");
   expect(guidelines).toContain("Enter is a separate submission");
   expect(guidelines).toContain("Wait for the current response to finish before pressing Enter to run an interactive command.");
@@ -197,10 +219,9 @@ test("timeout and abort clear owned offers", async () => {
 });
 
 test("blocked states report concrete reasons", async () => {
-  for (const mode of ["disabled", "draft", "focus", "external", "missing", "unsupported", "rpc", "unattached", "limit"]) {
+  for (const mode of ["disabled", "focus", "external", "missing", "unsupported", "rpc", "unattached", "limit"]) {
     const s = await setup({ shell: mode !== "missing", context: mode === "rpc" ? { mode: "rpc" } : mode === "unattached" ? { hasUI: false } : {}, maxChars: mode === "limit" ? 4 : undefined });
     if (mode === "disabled") await s.h.commands.get("next-prompt").handler("off", s.ctx);
-    if (mode === "draft") s.ctx.ui.editorText = "draft";
     if (mode === "focus") s.ctx.ui.focus({});
     if (mode === "external") s.h.pi.events.emit("prompt:offer", { source: "other", text: "external" });
     if (mode === "unsupported") s.shell({ available: false, layout: "unsupported", reason: "malformed document", shape: { rootChildren: ["Container"] }, rendererMode: "fullscreen" });
@@ -209,6 +230,160 @@ test("blocked states report concrete reasons", async () => {
     expect(result.details.reason, mode).toBeTruthy();
     if (mode === "unsupported") expect(result.details.reason).toContain("malformed document");
   }
+});
+
+test.each([false, true])("preexisting draft queues an exact terminal suggestion without rendering or execution (ghost=%s)", async ghost => {
+  const jev = fakeJev(() => ({ useful: { type: "bool", probability: 0.9 } }));
+  const s = await setup({ ghost, context: { modelRegistry: jev.registry } });
+  const command = "sh -c 'printf \"one  two 日本語\"'";
+  const text = `!i ${command}`;
+  const draft = "PRIVATE_DRAFT  日本語\nsecond line";
+  s.ctx.ui.edit(draft);
+  const original = s.ctx.ui.editor.render;
+  const timerCount = vi.getTimerCount();
+  expectQueued(await s.execute(command), command);
+  expect(vi.getTimerCount()).toBe(timerCount);
+  expect(s.ctx.ui.editor.render).toBe(original);
+  expect(s.ctx.ui.widgets.size).toBe(0);
+  for (const key of ["\t", "\x1b[C"]) expect(s.ctx.ui.press(key)).toBe(false);
+  const take: { text?: string } = {};
+  s.h.pi.events.emit("prompt:take-next", take);
+  expect(take).toEqual({});
+  expect(s.ctx.ui.editorText).toBe(draft);
+  expect(s.ctx.ui.editorWrites).toEqual([]);
+  expect(jev.calls).toEqual([]);
+  expectNoExecution(s);
+  s.ctx.ui.setEditorText("");
+  await vi.advanceTimersByTimeAsync(0);
+  expect(s.render()?.join("").replace(/\x1b\[[0-9;]*m/g, "")).toContain(text);
+  expect(s.ctx.ui.press("\t")).toBe(false);
+  await Promise.resolve();
+  expect(s.ctx.ui.press("\x1b[C")).toBe(true);
+  expect(s.ctx.ui.editorWrites).toEqual(["", text]);
+  expectNoExecution(s);
+});
+
+test.each([false, true])("queued terminal repeats retain ownership and wait for actual later output (ghost=%s)", async ghost => {
+  const s = await setup({ ghost });
+  s.ctx.ui.edit("PRIVATE_DRAFT");
+  const first = await s.execute("true");
+  expectQueued(first, "true");
+  const before = s.diagnostics();
+  expect(await s.execute("true")).toEqual(first);
+  expect(s.diagnostics()).toEqual(before);
+  expect((await s.execute("false")).details.reason).toContain("different explicit");
+  const conflict = await s.h.tools.get("offer_prompt").execute("prompt", { text: "/different" }, undefined, undefined, s.ctx);
+  expect(conflict.details.reason).toContain("different explicit");
+  s.h.pi.events.emit("prompt:offer", { source: "other", text: "external" });
+  s.h.pi.events.emit("prompt:offer", { source: "other" });
+  s.ctx.ui.edit("");
+  await vi.advanceTimersByTimeAsync(0);
+  expectQueued(await s.execute("true"), "true", "awaiting render acknowledgement");
+  expect(s.diagnostics().state.offerId).toBe(before.state.offerId);
+  expect(s.diagnostics().trace.filter((event: any) => event.event === "create")).toHaveLength(1);
+  expect(s.diagnostics().trace.filter((event: any) => event.event === "acknowledge")).toEqual([]);
+  s.render();
+  await Promise.resolve();
+  const displayed = await s.execute("true");
+  expect(displayed.details).toEqual({ status: "displayed", kind: "terminal", text: "!i true", surface: ghost ? "ghost" : "widget", acceptAfterTurn: false });
+  s.ctx.ui.edit("restored draft");
+  await vi.advanceTimersByTimeAsync(0);
+  expectQueued(await s.execute("true"), "true");
+  s.ctx.ui.edit("");
+  await vi.advanceTimersByTimeAsync(0);
+  s.render();
+  await Promise.resolve();
+  expect(s.diagnostics().trace.filter((event: any) => event.event === "acknowledge")).toHaveLength(1);
+  expect(s.ctx.ui.press("\t")).toBe(true);
+  expect(s.ctx.ui.editorText).toBe("!i true");
+});
+
+test.each([false, true])("queued terminal has no deadline or lingering abort listener (ghost=%s)", async ghost => {
+  const s = await setup({ ghost });
+  const controller = new AbortController();
+  s.ctx.ui.edit("draft");
+  expectQueued(await s.execute("true", controller.signal), "true");
+  controller.abort();
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(s.diagnostics().offer).toBe("concealed");
+  s.ctx.ui.edit("");
+  await vi.advanceTimersByTimeAsync(0);
+  s.render();
+  await Promise.resolve();
+  expect(s.ctx.ui.press("\t")).toBe(true);
+  expect(s.ctx.ui.editorWrites).toEqual(["!i true"]);
+  expectNoExecution(s);
+});
+
+test.each([false, true])("queued terminal diagnostics remain private and never manufacture output (ghost=%s)", async ghost => {
+  const s = await setup({ ghost });
+  s.ctx.ui.edit("PRIVATE_DRAFT");
+  expectQueued(await s.execute("printf 'PRIVATE_COMMAND'"), "printf 'PRIVATE_COMMAND'");
+  await vi.advanceTimersByTimeAsync(0);
+  const render = vi.spyOn(s.ctx.ui.editor, "render");
+  const widget = vi.spyOn(s.ctx.ui, "widgetLines");
+  const before = s.diagnostics();
+  for (const args of ["status", "trace"]) {
+    await s.h.commands.get("next-prompt").handler(args, s.ctx);
+    expect(s.ctx.ui.notes.at(-1).message).not.toMatch(/PRIVATE|printf|\{|\}/);
+  }
+  expect(render).not.toHaveBeenCalled();
+  expect(widget).not.toHaveBeenCalled();
+  expect(s.diagnostics()).toEqual(before);
+  expect(before.lastExplicit).toBe("terminal queued behind draft");
+  expect(before.explicit).toContain("queued");
+  expect(before.trace.length).toBeLessThanOrEqual(32);
+  expect(before.trace.filter((event: any) => event.event === "acknowledge")).toEqual([]);
+  expect(s.ctx.ui.editorWrites).toEqual([]);
+});
+
+test.each(["input", "session_tree", "model_select", "session_compact", "session_shutdown", "session_start", "user_bash", "agent_start", "prompt:clear", "off"])("reset drops a queued terminal and its scheduled clear (%s)", async event => {
+  const s = await setup();
+  s.ctx.ui.edit("draft");
+  expectQueued(await s.execute());
+  s.ctx.ui.edit("");
+  if (event === "prompt:clear") s.h.pi.events.emit(event, {});
+  else if (event === "off") await s.h.commands.get("next-prompt").handler("off", s.ctx);
+  else await s.h.emit(event, {}, s.ctx);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(s.render()).toBeUndefined();
+  expect(s.ctx.ui.press("\t")).toBe(false);
+  expect(s.diagnostics().state.offerId).toBeNull();
+  expect(s.ctx.ui.editorWrites).toEqual([]);
+  expectNoExecution(s);
+});
+
+test.each(["completed", "failed", "aborted", "error"])("queued terminal settlement retains only successful ownership (%s)", async outcome => {
+  const s = await setup();
+  await s.h.emit("agent_start", {}, s.ctx);
+  s.ctx.ui.edit("draft");
+  expectQueued(await s.execute());
+  await s.h.emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "Done\n<next>Conflicting automatic suggestion</next>" }] } }, s.ctx);
+  await s.h.emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "Final without tag" }] } }, s.ctx);
+  await s.h.emit("agent_before_settle", { outcome }, s.ctx);
+  await s.h.emit("agent_settled", {}, s.ctx);
+  s.ctx.ui.edit("");
+  await vi.advanceTimersByTimeAsync(0);
+  s.render();
+  await Promise.resolve();
+  expect(s.ctx.ui.press("\t")).toBe(outcome === "completed");
+  expect(s.ctx.ui.editorWrites).toEqual(outcome === "completed" ? ["!i printf 'one  two'"] : []);
+  expectNoExecution(s);
+});
+
+test.each(["missing", "unsupported", "invalid", "limit"])("terminal validation is still blocked behind drafts (%s)", async mode => {
+  const s = await setup({ shell: mode !== "missing", maxChars: mode === "limit" ? 4 : undefined });
+  s.ctx.ui.edit("PRIVATE_DRAFT");
+  if (mode === "unsupported") s.shell({ available: false, layout: "unsupported", reason: "unsupported fixture" });
+  const result = await s.execute(mode === "invalid" ? "!i true" : "true");
+  expect(result.details.status).toBe("blocked");
+  expect(result.isError).toBe(true);
+  expect(result.details.reason).toContain({ missing: "missing", unsupported: "unsupported fixture", invalid: "prefix", limit: "maxChars" }[mode]);
+  expect(s.diagnostics().state.offerId).toBeNull();
+  expect(s.ctx.ui.widgets.size).toBe(0);
+  expect(s.ctx.ui.editorText).toBe("PRIVATE_DRAFT");
+  expect(s.ctx.ui.editorWrites).toEqual([]);
+  expectNoExecution(s);
 });
 
 test.each([false, true].flatMap(ghost => ["\t", "\x1b[C"].map(key => ({ ghost, key }))))("busy terminal acceptance immediately copies an acknowledged draft without execution (ghost=$ghost, key=$key)", async ({ ghost, key }) => {
@@ -292,24 +467,61 @@ test.each(["input", "session_tree", "model_select", "session_compact", "session_
   expect(ctx.ui.widgets.size).toBe(0);
 });
 
-test.each([false, true])("draft/focus changes before render never acknowledge (focus=%s)", async focus => {
-  const { execute, render, ctx } = await setup();
-  const promise = execute();
-  if (focus) ctx.ui.focus({});
-  else ctx.ui.editorText = "my draft";
-  render();
+test.each([false, true])("focus changes before render never acknowledge (ghost=%s)", async ghost => {
+  const s = await setup({ ghost });
+  const promise = s.execute();
+  s.ctx.ui.focus({});
+  s.render();
   expect((await promise).details.status).toBe("blocked");
-  expect(ctx.ui.widgets.size).toBe(0);
+  expect(s.ctx.ui.widgets.size).toBe(0);
+  expect(s.diagnostics().trace.filter((event: any) => event.event === "acknowledge")).toEqual([]);
 });
 
-test("queued render acknowledgement rechecks draft and generation", async () => {
-  const { execute, render, ctx } = await setup({ ghost: true });
-  const promise = execute();
-  render();
-  ctx.ui.editorText = "draft entered after output";
+test.each([false, true])("live draft arrival completes a terminal waiter without a render (ghost=%s)", async ghost => {
+  const s = await setup({ ghost });
+  const pending = s.execute();
+  const render = vi.spyOn(s.ctx.ui.editor, "render");
+  const widget = vi.spyOn(s.ctx.ui, "widgetLines");
+  s.ctx.ui.edit("PRIVATE_DRAFT before output");
+  expectQueued(await pending);
+  expect(render).not.toHaveBeenCalled();
+  expect(widget).not.toHaveBeenCalled();
+  expect(s.ctx.ui.widgets.size).toBe(0);
+  expect(s.diagnostics().trace.filter((event: any) => event.event === "acknowledge")).toEqual([]);
+  await vi.advanceTimersByTimeAsync(1_000);
+  s.ctx.ui.edit("");
   await vi.advanceTimersByTimeAsync(0);
-  expect((await promise).details.status).toBe("blocked");
-  expect(ctx.ui.editorText).toBe("draft entered after output");
+  s.render();
+  await Promise.resolve();
+  expect(s.ctx.ui.press("\t")).toBe(true);
+  expect(s.ctx.ui.editorWrites).toEqual(["!i printf 'one  two'"]);
+  expectNoExecution(s);
+});
+
+test.each([false, true])("draft before output or racing acknowledgement queues terminal ownership (ghost=%s)", async ghost => {
+  for (const rendered of [false, true]) {
+    const s = await setup({ ghost });
+    const promise = s.execute();
+    if (rendered) s.render();
+    // Bypass the observer to check live guards, not just deferred reconciliation.
+    s.ctx.ui.editorText = "PRIVATE_DRAFT entered after output";
+    if (!rendered) expect(s.render()?.join("") ?? "").not.toContain("printf");
+    expectQueued(await promise);
+    expect(s.ctx.ui.editorText).toBe("PRIVATE_DRAFT entered after output");
+    expect(s.ctx.ui.editorWrites).toEqual([]);
+    expect(s.ctx.ui.widgets.size).toBe(0);
+    expect(s.diagnostics().trace.filter((event: any) => event.event === "acknowledge")).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    s.ctx.ui.edit("");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.ctx.ui.press("\t")).toBe(false);
+    s.render();
+    await Promise.resolve();
+    expect(s.diagnostics().trace.filter((event: any) => event.event === "acknowledge")).toHaveLength(1);
+    expect(s.ctx.ui.press("\t")).toBe(true);
+    expect(s.ctx.ui.editorWrites).toEqual(["!i printf 'one  two'"]);
+    expectNoExecution(s);
+  }
 });
 
 test("pending duplicate is blocked without invalidating the original; status records acknowledgement", async () => {
@@ -355,24 +567,48 @@ test("only terminal offers inspect shell support and preserve guard ordering", a
   const inspect = vi.fn(({ reply }: any) => reply({ available: false, reason: "fixture unavailable" }));
   h.pi.events.on("interactive-shell:inspect", inspect);
   ctx.ui.editorText = "draft";
-  expect((await execute("true")).details.reason).toBe("editor contains a draft");
-  expect(inspect).not.toHaveBeenCalled();
-  ctx.ui.editorText = "";
   expect((await execute("true")).details.reason).toContain("fixture unavailable");
   expect(inspect).toHaveBeenCalledTimes(1);
+  // Non-draft eligibility checks still run ahead of the optional inspector.
+  ctx.ui.focus({});
+  expect((await execute("true")).details.reason).toContain("focused");
+  expect(inspect).toHaveBeenCalledTimes(1);
+  ctx.ui.focus(ctx.ui.editor);
+  ctx.ui.editorText = "";
   const pending = h.tools.get("offer_prompt").execute("prompt", { text: "/fixture" }, undefined, undefined, ctx);
   ctx.ui.widgetLines("next-prompt");
   expect((await pending).details.status).toBe("displayed");
   expect(inspect).toHaveBeenCalledTimes(1);
 });
 
-test("normal typing invalidates an explicit offer rather than reappearing", async () => {
-  const { offer, ctx } = await setup();
-  await offer();
-  ctx.ui.press("x", "x");
-  await vi.advanceTimersByTimeAsync(0);
-  ctx.ui.editorText = "";
-  expect(ctx.ui.press("\t")).toBe(false);
+test.each([false, true])("normal typing conceals an acknowledged terminal offer and clearing reveals it (ghost=%s)", async ghost => {
+  const s = await setup({ ghost });
+  const accepted = vi.fn();
+  s.h.pi.events.on("interactive-shell:suggestion-accepted", accepted);
+  await s.h.emit("agent_start", {}, s.ctx);
+  await s.offer();
+  const owner = s.diagnostics().state.offerId;
+  for (const draft of ["x", "restored  draft 日本語", "swapped draft"]) {
+    s.ctx.ui.edit(draft);
+    expect(s.render()?.join("") ?? "").not.toContain("printf");
+    expect(s.ctx.ui.press("\t")).toBe(false);
+    const take: { text?: string } = {};
+    s.h.pi.events.emit("prompt:take-next", take);
+    expect(take).toEqual({});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.ctx.ui.widgets.size).toBe(0);
+    expect(s.ctx.ui.editorText).toBe(draft);
+    expect(s.diagnostics().state.offerId).toBe(owner);
+    s.ctx.ui.edit("");
+    await vi.advanceTimersByTimeAsync(0);
+    s.render();
+  }
+  expect(s.diagnostics().state.busy).toBe(true);
+  expect(s.diagnostics().trace.filter((event: any) => event.event === "acknowledge")).toHaveLength(1);
+  expect(s.ctx.ui.press("\t")).toBe(true);
+  expect(s.ctx.ui.editorWrites).toEqual(["!i printf 'one  two'"]);
+  expect(accepted.mock.calls).toEqual([[{ text: "!i printf 'one  two'" }]]);
+  expectNoExecution(s);
 });
 
 
@@ -449,7 +685,7 @@ test.each([false, true])("completed offer suspends and resumes only on focused r
   expect(s.h.messages).toEqual([]);
 });
 
-test.each([false, true])("main draft permanently invalidates a suspended offer (ghost=%s)", async ghost => {
+test.each([false, true])("main draft conceals a suspended terminal offer until cleared with main focus (ghost=%s)", async ghost => {
   for (const trigger of ["render", "input"]) {
     const s = await setup({ ghost });
     const baseRender = s.ctx.ui.editor.render;
@@ -466,14 +702,18 @@ test.each([false, true])("main draft permanently invalidates a suspended offer (
     expect(s.ctx.ui.editorText).toBe("PRIVATE_MAIN_DRAFT");
     expect(s.ctx.ui.editor.render).toBe(baseRender);
     expect(s.ctx.ui.widgets.size).toBe(0);
-    s.ctx.ui.editorText = "";
+    s.ctx.ui.edit("");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.ctx.ui.widgets.size).toBe(0);
     s.ctx.ui.focus(s.ctx.ui.editor);
+    s.ctx.ui.press("\x1b[A");
+    await vi.advanceTimersByTimeAsync(0);
     s.render();
-    expect(s.ctx.ui.press("\t")).toBe(false);
-    const take: { text?: string } = {};
-    s.h.pi.events.emit("prompt:take-next", take);
-    expect(take.text).toBeUndefined();
     expect(s.ctx.ui.editorWrites).toEqual([]);
+    expect(s.diagnostics().trace.filter((event: any) => event.event === "acknowledge")).toHaveLength(1);
+    expect(s.ctx.ui.press("\t")).toBe(true);
+    expect(s.ctx.ui.editorWrites).toEqual(["!i printf 'one  two'"]);
+    expectNoExecution(s);
   }
 });
 

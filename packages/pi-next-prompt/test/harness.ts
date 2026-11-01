@@ -97,9 +97,14 @@ export function harness(options: { tools?: any[]; exec?: (cmd: string, args: str
       widgets: new Map<string, any>(),
       inputHandlers: [] as Array<(data: string) => any>,
       getEditorText: () => ui.editorText,
+      /** Simulate a user edit, without recording a programmatic editor write. */
+      edit: (text: string) => {
+        ui.editorText = text;
+        editor.onChange?.call(editor, text);
+      },
       setEditorText: (text: string) => {
         ui.editorWrites.push(text);
-        ui.editorText = text;
+        ui.edit(text);
       },
       setWidget: (key: string, content: any, opts?: any) => {
         if (typeof content === "function") content(tui, { fg: (_c: string, s: string) => s, bold: (s: string) => s });
@@ -117,7 +122,7 @@ export function harness(options: { tools?: any[]; exec?: (cmd: string, args: str
         for (const handler of ui.inputHandlers) {
           if (handler(data)?.consume) return true;
         }
-        ui.editorText += typed;
+        if (typed !== "") ui.edit(ui.editorText + typed);
         return false;
       },
       /** The rendered widget lines, with a plain theme. */
@@ -128,7 +133,14 @@ export function harness(options: { tools?: any[]; exec?: (cmd: string, args: str
         return w.content({}, { fg: (_c: string, s: string) => s, bold: (s: string) => s }).render(width);
       },
     };
-    const editor = { getText: () => ui.editorText, render: (_width: number): string[] => [], isShowingAutocomplete: () => false, [Symbol.for("pi-plugins.editor-surface.v1")]: "main" };
+    const editor = {
+      getText: () => ui.editorText,
+      setText: (text: string) => ui.edit(text),
+      onChange: undefined as ((text: string) => void) | undefined,
+      render: (_width: number): string[] => [],
+      isShowingAutocomplete: () => false,
+      [Symbol.for("pi-plugins.editor-surface.v1")]: "main",
+    };
     let focused: any = editor;
     const tui = { terminal: { columns: 80 }, getFocusedComponent: () => focused, requestRender: () => undefined };
     lastCtx = {

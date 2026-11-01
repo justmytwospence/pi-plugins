@@ -20,11 +20,12 @@ function assistant(text: string, extra: any[] = []) {
   return { role: "assistant", content: [{ type: "thinking", thinking: "hm" }, { type: "text", text }, ...extra], stopReason: "stop" };
 }
 
-async function setup(answer: (q: any, s: any) => any = () => ({ useful: { type: "bool", probability: 0.9 } })) {
+async function setup(answer: (q: any, s: any) => any = () => ({ useful: { type: "bool", probability: 0.9 } }), ghost = false) {
   const h = harness();
-  nextPrompt(h.pi);
+  const diagnostics = nextPrompt(h.pi);
   const jev = fakeJev(answer);
   const ctx = h.ctx({ modelRegistry: jev.registry, cwd: mkdtempSync("/tmp/next-prompt-cwd-") });
+  if (ghost) ctx.ui.editor.render = () => ["\x1b[7m \x1b[0m"];
   await h.emit("session_start", { type: "session_start" }, ctx);
   /** One run: prompt, assistant messages, settle with `outcome`. */
   const run = async (prompt: string, texts: string[], outcome = "completed") => {
@@ -42,7 +43,7 @@ async function setup(answer: (q: any, s: any) => any = () => ({ useful: { type: 
     await h.emit("agent_settled", { type: "agent_settled" }, ctx);
     return { options, replaced };
   };
-  return { h, ctx, jev, run, ui: ctx.ui };
+  return { h, ctx, jev, run, ui: ctx.ui, diagnostics };
 }
 
 test("the instruction is added as one prompt section", async () => {
@@ -331,13 +332,103 @@ test("a draft conceals an approved suggestion until the editor is empty", async 
   expect(s.ui.widgets.size).toBe(0);
   expect(s.ui.press(TAB)).toBe(false);
   expect(s.ui.editorText).toBe("existing draft");
-  // pi-stash's Ctrl+S clears the editor as the key reaches it; the suggestion takes its place.
-  s.ui.press("\x13");
-  s.ui.editorText = "";
-  await new Promise((r) => setTimeout(r, 0));
+  // Simulate pi-stash's programmatic clear, with no terminal key to trigger reconciliation.
+  s.ui.setEditorText("");
+  await Promise.resolve();
+  expect(s.ui.editorWrites).toEqual([""]);
   expect(s.ui.widgetLines("next-prompt")).toEqual(["→ Run tests  Tab to accept"]);
   expect(s.ui.press(TAB)).toBe(true);
   expect(s.ui.editorText).toBe("Run tests");
+});
+
+test.each([false, true].flatMap(ghost => ["automatic", "external"].map(kind => ({ ghost, kind }))))("$kind proposal reveals through programmatic edits without another key (ghost=$ghost)", async ({ ghost, kind }) => {
+  const s = await setup(undefined, ghost);
+  const text = "Run the tests";
+  const render = () => ghost ? s.ui.renderEditor() : s.ui.widgetLines("next-prompt");
+  s.ui.setEditorText("PRIVATE_INITIAL_DRAFT");
+  if (kind === "automatic") await s.run("go", [`Done.\n<next>${text}</next>`]);
+  else s.h.pi.events.emit("prompt:offer", { source: "fixture", text });
+  expect(s.diagnostics().offer).toBe("concealed");
+  expect(s.ui.widgets.size).toBe(0);
+  expect(s.ui.press(TAB)).toBe(false);
+  expect(s.ui.editorText).toBe("PRIVATE_INITIAL_DRAFT");
+  const clearWrites = ["PRIVATE_INITIAL_DRAFT", ""];
+  s.ui.setEditorText("");
+  await Promise.resolve();
+  expect(render()?.join("").replace(/\x1b\[[0-9;]*m/g, "")).toContain(text);
+  expect(s.ui.editorWrites).toEqual(clearWrites);
+  for (const draft of ["PRIVATE_RESTORED_DRAFT", "PRIVATE_SWAPPED_DRAFT"]) {
+    s.ui.setEditorText(draft);
+    // Output cannot leak a ghost/widget frame between the write and observer microtask.
+    expect(render()?.join("") ?? "").not.toContain(text);
+    const take: { text?: string } = {};
+    s.h.pi.events.emit("prompt:take-next", take);
+    expect(take).toEqual({});
+    expect(s.ui.press(RIGHT)).toBe(false);
+    await Promise.resolve();
+    expect(s.ui.widgets.size).toBe(0);
+    expect(s.diagnostics().offer).toBe("concealed");
+    expect(s.ui.editorText).toBe(draft);
+    s.ui.setEditorText("");
+    await Promise.resolve();
+    expect(render()?.join("").replace(/\x1b\[[0-9;]*m/g, "")).toContain(text);
+    clearWrites.push(draft, "");
+    expect(s.ui.editorWrites).toEqual(clearWrites);
+  }
+  expect(s.jev.calls).toHaveLength(kind === "automatic" ? 1 : 0);
+  expect(s.ui.press(TAB)).toBe(true);
+  expect(s.ui.editorWrites).toEqual([...clearWrites, text]);
+  expect(s.h.messages).toEqual([]);
+  await s.h.emit("session_shutdown", {}, s.ctx);
+});
+
+test.each([false, true])("external withdrawal prevents a scheduled clear from revealing the old offer (ghost=%s)", async ghost => {
+  const s = await setup(undefined, ghost);
+  s.ui.edit("private draft");
+  s.h.pi.events.emit("prompt:offer", { source: "fixture", text: "Withdrawn offer" });
+  s.ui.setEditorText("");
+  s.h.pi.events.emit("prompt:offer", { source: "fixture" });
+  await Promise.resolve();
+  const render = () => ghost ? s.ui.renderEditor() : s.ui.widgetLines("next-prompt");
+  expect(render()?.join("") ?? "").not.toContain("Withdrawn");
+  expect(s.diagnostics().offer).toBe("none");
+  expect(s.ui.widgets.size).toBe(0);
+  expect(s.ui.press(TAB)).toBe(false);
+  expect(s.ui.editorWrites).toEqual([""]);
+  expect(s.jev.calls).toEqual([]);
+  await s.h.emit("session_shutdown", {}, s.ctx);
+});
+
+test.each([false, true])("programmatic clear and replacement keep the latest external offer only (ghost=%s)", async ghost => {
+  const s = await setup(undefined, ghost);
+  s.ui.edit("draft");
+  s.h.pi.events.emit("prompt:offer", { source: "fixture", text: "Old proposal" });
+  s.ui.edit("");
+  s.h.pi.events.emit("prompt:offer", { source: "fixture", text: "New proposal" });
+  s.ui.edit("restored draft");
+  s.ui.edit("");
+  await Promise.resolve();
+  const lines = ghost ? s.ui.renderEditor() : s.ui.widgetLines("next-prompt");
+  expect(lines?.join("").replace(/\x1b\[[0-9;]*m/g, "")).toContain("New proposal");
+  expect(lines?.join("")).not.toContain("Old proposal");
+  expect(s.ui.press(TAB)).toBe(true);
+  expect(s.ui.editorWrites).toEqual(["New proposal"]);
+  await s.h.emit("session_shutdown", {}, s.ctx);
+});
+
+test("harness user and programmatic edits emit onChange with the live editor receiver", () => {
+  const h = harness();
+  const { ui } = h.ctx();
+  const calls: Array<{ receiver: unknown; text: string }> = [];
+  ui.editor.onChange = function (this: unknown, text: string) { calls.push({ receiver: this, text }); };
+  ui.edit("user draft");
+  ui.setEditorText("programmatic draft");
+  ui.editor.setText("editor draft");
+  ui.press("x", "x");
+  ui.editorText = "direct race write";
+  expect(calls).toEqual(["user draft", "programmatic draft", "editor draft", "editor draftx"].map(text => ({ receiver: ui.editor, text })));
+  expect(ui.editorWrites).toEqual(["programmatic draft"]);
+  expect(ui.editorText).toBe("direct race write");
 });
 
 test("status exposes unobserved settlement boundaries rather than implying a veto", async () => {

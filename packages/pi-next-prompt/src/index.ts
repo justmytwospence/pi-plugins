@@ -60,7 +60,7 @@ export function ghostLine(line: string, text: string, width: number, dim: (s: st
 
 const SURFACE = Symbol.for("pi-plugins.editor-surface.v1");
 const MODE = Symbol.for("pi-plugins.editor-mode.v1");
-type Renderable = { render(width: number): string[]; getText(): string; isShowingAutocomplete?(): boolean; [SURFACE]?: string; [MODE]?: () => { state: string; autocomplete?: boolean } };
+type Renderable = { render(width: number): string[]; getText(): string; onChange?: (text: string) => void; isShowingAutocomplete?(): boolean; [SURFACE]?: string; [MODE]?: () => { state: string; autocomplete?: boolean } };
 
 export const QUESTIONS: Record<string, ClassifierQuestion> = {
   useful: {
@@ -197,8 +197,8 @@ export default function nextPrompt(pi: ExtensionAPI) {
   let generation = 0;
   type Surface = "ghost" | "widget";
   type OfferKind = "prompt" | "terminal";
-  type OfferDetails = { status: "displayed" | "blocked"; kind?: OfferKind; text?: string; reason?: string; surface?: Surface; acceptAfterTurn?: boolean };
-  type ExplicitOffer = { id: number; kind: OfferKind; text: string; surface?: Surface; acknowledged: boolean; finish?: (details: OfferDetails) => void };
+  type OfferDetails = { status: "displayed" | "queued" | "blocked"; kind?: OfferKind; text?: string; reason?: string; surface?: Surface; acceptAfterTurn?: boolean };
+  type ExplicitOffer = { id: number; kind: OfferKind; text: string; surface?: Surface; acknowledged: boolean; queued: boolean; finish?: (details: OfferDetails) => void };
   let explicit: ExplicitOffer | undefined;
   let lastExplicit = "none yet";
   const blocked = (reason: string): OfferDetails => ({ status: "blocked", reason });
@@ -209,6 +209,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
   let vetState = "not run";
   let mainEditor: Renderable | undefined;
   let terminal: TUI | undefined;
+  let observedMainEditors = new WeakSet<Renderable>();
   let patched: { editor: Renderable; render: Renderable["render"]; wrapper: Renderable["render"]; own: boolean; tui: TUI; enabled: boolean } | undefined;
 
   const focusedEditor = () => (terminal as (TUI & { getFocusedComponent?(): unknown }) | undefined)?.getFocusedComponent?.() as Renderable | undefined;
@@ -216,7 +217,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
     const focused = focusedEditor();
     if (!focused) return "unavailable";
     if (focused[SURFACE] === "embedded") return "embedded editor";
-    if (focused !== mainEditor && focused[SURFACE] !== "main") return "not main editor";
+    if (focused !== mainEditor && focused[SURFACE] !== "main" && !observedMainEditors.has(focused)) return "not main editor";
     if (focused.isShowingAutocomplete?.()) return "autocomplete";
     const mode = focused[MODE]?.();
     if (mode?.autocomplete) return "autocomplete";
@@ -226,6 +227,65 @@ export default function nextPrompt(pi: ExtensionAPI) {
   const mainFocused = (): Renderable | undefined => focusState() === "main editor" ? focusedEditor() : undefined;
 
   const active = () => sessionOn && config.enabled;
+
+  // Observe the editor, not the ghost patch: concealed offers have no render surface.
+  // Editors can inherit callbacks during replacement, and other plugins can wrap ours.
+  const changeBindings = new Set<{
+    enabled: boolean; previous: Renderable["onChange"]; wrapper: NonNullable<Renderable["onChange"]>;
+    editors: Map<Renderable, boolean>;
+  }>();
+  let visibilityToken: object | undefined;
+  const scheduleVisibility = () => {
+    if (offered === undefined || !ui || visibilityToken) return;
+    const token = visibilityToken = {};
+    const mine = generation;
+    const target = ui;
+    queueMicrotask(() => {
+      if (visibilityToken !== token) return;
+      visibilityToken = undefined;
+      if (mine === generation && ui === target) reconcileVisibility();
+    });
+  };
+  const bindEditorChanges = (editor: Renderable) => {
+    observedMainEditors.add(editor);
+    for (const binding of changeBindings) {
+      if (binding.enabled && editor.onChange === binding.wrapper) {
+        if (!binding.editors.has(editor)) binding.editors.set(editor, Object.hasOwn(editor, "onChange"));
+        return;
+      }
+    }
+    const previous = editor.onChange;
+    const binding = {
+      enabled: true, previous, wrapper: onChange,
+      editors: new Map([[editor, Object.hasOwn(editor, "onChange")]]),
+    };
+    function onChange(this: Renderable | undefined, text: string): void {
+      if (binding.enabled && this && typeof this.getText === "function" && !binding.editors.has(this)) {
+        binding.editors.set(this, Object.hasOwn(this, "onChange"));
+        // Pi transfers the main editor's callback to replacement editors before
+        // setting their text. That lineage identifies unmarked native replacements.
+        observedMainEditors.add(this);
+      }
+      try { previous?.call(this, text); }
+      finally { if (binding.enabled) scheduleVisibility(); }
+    }
+    changeBindings.add(binding);
+    editor.onChange = binding.wrapper;
+  };
+  const releaseEditorChanges = () => {
+    visibilityToken = undefined;
+    observedMainEditors = new WeakSet();
+    // Newest first: restore a chain of directly owned wrappers without leaving an active copy.
+    for (const binding of [...changeBindings].reverse()) {
+      binding.enabled = false;
+      for (const [editor, own] of binding.editors) {
+        if (editor.onChange !== binding.wrapper) continue;
+        if (own) editor.onChange = binding.previous;
+        else delete editor.onChange;
+      }
+    }
+    changeBindings.clear();
+  };
 
   // Memory-only scalar diagnostics; never capture suggestion, draft, key or rendered text.
   const snapshot = () => ({
@@ -274,6 +334,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
   };
 
   const hide = (reason: string) => {
+    visibilityToken = undefined;
     record("hide", reason);
     const previous = explicit;
     explicit = undefined;
@@ -284,6 +345,25 @@ export default function nextPrompt(pi: ExtensionAPI) {
     offered = undefined;
     offerSource = undefined;
     conceal(reason);
+  };
+
+  const queued = (offer: ExplicitOffer): OfferDetails => ({
+    status: "queued", kind: offer.kind, text: offer.text,
+    reason: ui?.getEditorText() !== "" ? "editor contains a draft" : "awaiting render acknowledgement",
+  });
+  const concealDraft = () => {
+    conceal("editor contains a draft");
+    if (!explicit) return;
+    if (!explicit.queued) record("queue", "editor contains a draft");
+    explicit.queued = true;
+    explicit.finish?.(queued(explicit));
+  };
+  const reconcileVisibility = () => {
+    if (!active() || !ui || offered === undefined) return;
+    const editor = mainFocused();
+    if (editor) bindEditorChanges(editor);
+    if (ui.getEditorText() !== "") concealDraft();
+    else if (editor && shown === undefined && !suspended) show(offered);
   };
 
   const canSuspend = () => !!explicit?.acknowledged && settled && outcome === "completed" && !busy && active() && !!ui && ui.getEditorText() === "";
@@ -302,7 +382,8 @@ export default function nextPrompt(pi: ExtensionAPI) {
       if (explicit !== owner || generation !== mine) return;
       const reason = renderBlocker();
       if (!reason) return;
-      if (reason === "main editor lost focus" && canSuspend()) suspend();
+      if (reason === "editor contains a draft") concealDraft();
+      else if (reason === "main editor lost focus" && canSuspend()) suspend();
       else hide(reason);
     });
   };
@@ -322,6 +403,24 @@ export default function nextPrompt(pi: ExtensionAPI) {
     suspended = false;
     shown = owner.text;
     record("resume", surface);
+  };
+
+  // Keep acknowledgement independent of the tool waiter: a queued receipt can precede
+  // the first actual output by arbitrarily long, and must not manufacture that output.
+  const acknowledgeExplicit = (owner: ExplicitOffer, surface: Surface) => {
+    if (owner.acknowledged) return;
+    queueMicrotask(() => {
+      if (explicit !== owner || generation !== owner.id || owner.acknowledged) return;
+      if (ui?.getEditorText() !== "") { concealDraft(); return; }
+      if (!active() || !mainFocused() || shown !== owner.text) {
+        hide("offer invalidated before render acknowledgement");
+        return;
+      }
+      owner.surface = surface;
+      owner.acknowledged = true;
+      record("acknowledge", surface);
+      owner.finish?.(displayed(owner));
+    });
   };
 
   /** Pi hands widget factories the TUI; a throwaway widget is the only way to reach it. */
@@ -354,6 +453,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
       if (!patch.enabled) return lines;
       if (owner && !renderExplicit(owner, "ghost")) return lines;
       if (!mainFocused() || this.getText() !== "") {
+        if (this.getText() !== "") scheduleVisibility();
         observe("ghost", false, editorBlocker());
         return lines;
       }
@@ -389,12 +489,16 @@ export default function nextPrompt(pi: ExtensionAPI) {
     vetState = "not run";
   };
 
-  const show = (text: string, observed?: (surface: Surface) => void) => {
+  const show = (text: string) => {
     if (!ui) return;
+    const editor = mainFocused();
+    if (editor) bindEditorChanges(editor);
+    offered = text;
+    if (ui.getEditorText() !== "") { concealDraft(); return; }
     unpatch("show replacement");
     ui.setWidget(WIDGET_KEY, undefined);
     const owner = explicit;
-    offered = text;
+    const observed = owner ? (surface: Surface) => acknowledgeExplicit(owner, surface) : undefined;
     shown = text;
     suspended = false;
     record("show", explicit ? "explicit" : "automatic or external");
@@ -405,7 +509,12 @@ export default function nextPrompt(pi: ExtensionAPI) {
       (_tui, theme) => ({
         render: (width: number) => {
           if (owner && !renderExplicit(owner, "widget")) return [];
-          if (observed && !suspended && shown !== text) {
+          if (ui?.getEditorText() !== "") {
+            scheduleVisibility();
+            observe("widget", false, "editor contains a draft");
+            return [];
+          }
+          if (!suspended && shown !== text) {
             observe("widget", false, "not shown");
             return [];
           }
@@ -425,10 +534,6 @@ export default function nextPrompt(pi: ExtensionAPI) {
   const explicitBlocker = (signal: AbortSignal | undefined, ctx: ExtensionContext): string | undefined => {
     if (!active()) return "next-prompt is disabled";
     if (ctx.mode !== "tui" || !ctx.hasUI || !ui || !terminal) return `terminal UI is not attached (${uiState})`;
-    if (ui.getEditorText() !== "") {
-      if (explicit) hide("editor contains a draft");
-      return "editor contains a draft";
-    }
     if (!mainFocused()) {
       if (explicit) {
         if (canSuspend()) suspend();
@@ -449,14 +554,21 @@ export default function nextPrompt(pi: ExtensionAPI) {
     if (offerSource !== undefined) return failDetails("another extension owns the current offer");
     if (explicit) {
       if (explicit.kind !== kind || explicit.text !== text) return failDetails("a different explicit offer is outstanding");
+      if (ui?.getEditorText() !== "") { concealDraft(); return queued(explicit); }
       if (explicit.acknowledged && shown === text) return displayed(explicit);
+      if (explicit.queued) return queued(explicit);
       return failDetails("identical explicit offer is still awaiting render acknowledgement");
     }
-    const offer: ExplicitOffer = { id: ++generation, kind, text, acknowledged: false };
+    visibilityToken = undefined;
+    const offer: ExplicitOffer = { id: ++generation, kind, text, acknowledged: false, queued: false };
     explicit = offer;
     beforeSettlement = undefined;
     afterSettlement = undefined;
     record("create", kind);
+    if (ui?.getEditorText() !== "") {
+      show(text);
+      return queued(offer);
+    }
     return new Promise<OfferDetails>((resolve) => {
       let finished = false;
       const finish = (value: OfferDetails) => {
@@ -475,19 +587,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
       const timer = setTimeout(() => fail("no render acknowledgement within one second"), 1_000);
       offer.finish = finish;
       signal?.addEventListener("abort", abort, { once: true });
-      show(text, (surface) => {
-        queueMicrotask(() => {
-          if (finished) return;
-          if (explicit !== offer || generation !== offer.id || !active() || !mainFocused() || ui?.getEditorText() !== "" || shown !== text) {
-            fail("offer invalidated before render acknowledgement");
-            return;
-          }
-          offer.surface = surface;
-          offer.acknowledged = true;
-          record("acknowledge", surface);
-          finish(displayed(offer));
-        });
-      });
+      show(text);
     });
   };
 
@@ -495,7 +595,8 @@ export default function nextPrompt(pi: ExtensionAPI) {
     kind === "terminal"
       ? "Use offer_terminal for interactive shell handoffs with the complete raw shell command (no !i prefix)."
       : "Use offer_prompt for requested prompt or Pi slash command handoffs with the complete exact text, including when asked to put it in the prompt. Shell handoffs use offer_terminal.",
-    `Never claim a suggestion was offered unless offer_${kind} returned status displayed. After a displayed result explain Tab/Right to copy the suggestion immediately into an editable draft; Enter is a separate submission.`,
+    `Only offer_${kind} status displayed permits claiming a visible offer. After a displayed result explain Tab/Right to copy the suggestion immediately into an editable draft; Enter is a separate submission.`,
+    "On status queued, explain that the suggestion is waiting underneath the current draft: clear or stash the draft to reveal it, then Tab/Right accepts once it appears. Do not claim it was displayed or inserted.",
     ...(kind === "terminal" ? ["Wait for the current response to finish before pressing Enter to run an interactive command."] : []),
     "If blocked, name the blocker and print the complete proposed text as a fallback without claiming it is in the editor. Never include secrets.",
   ];
@@ -504,7 +605,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
     name: "offer_prompt",
     label: "Offer prompt",
     exposure: "model-only",
-    description: "Display an editable prompt or Pi slash command, never submit it. Waits up to one second for render acknowledgement and returns displayed or a concrete blocker.",
+    description: "Offer an editable prompt or Pi slash command, never submit it. Returns queued behind an existing draft; otherwise waits up to one second for render acknowledgement and returns displayed or a concrete blocker.",
     promptGuidelines: offerGuidelines("prompt"),
     parameters: Type.Object({ text: Type.String({ minLength: 1 }) }),
     async execute(_id, { text }, signal, _update, ctx) {
@@ -514,11 +615,14 @@ export default function nextPrompt(pi: ExtensionAPI) {
       else if (/[\x00-\x1f\x7f-\x9f\u2028\u2029]/u.test(text)) reason = "prompt contains control characters or line breaks";
       else if (text.startsWith("!")) reason = "Shell-prefixed input is not supported here; use offer_terminal for an interactive shell handoff";
       const details: OfferDetails = reason ? { ...blocked(reason), kind: "prompt" } : await offerExplicit("prompt", text, signal, ctx);
-      lastExplicit = details.status === "displayed" ? `prompt displayed (${details.surface})` : `prompt: ${details.reason}`;
+      lastExplicit = details.status === "displayed" ? `prompt displayed (${details.surface})`
+        : details.status === "queued" ? "prompt queued behind draft" : `prompt: ${details.reason}`;
       return {
         content: [{ type: "text" as const, text: details.status === "displayed"
           ? `Displayed editable suggestion: ${details.text}\nPress Tab/Right to copy it into your prompt now, then Enter to submit it. Nothing was submitted.`
-          : `Prompt suggestion blocked: ${details.reason}` }],
+          : details.status === "queued"
+            ? `Queued editable suggestion: ${details.text}\nYour existing draft is unchanged. Once the editor is empty and the suggestion appears, press Tab/Right to copy it into your prompt, then Enter to submit it. Nothing was submitted.`
+            : `Prompt suggestion blocked: ${details.reason}` }],
         details,
         ...(details.status === "blocked" ? { isError: true } : {}),
       };
@@ -529,17 +633,20 @@ export default function nextPrompt(pi: ExtensionAPI) {
     name: "offer_terminal",
     label: "Offer terminal command",
     exposure: "model-only",
-    description: "Displays an editable !i suggestion, never executes it. Waits at most one second for a render acknowledgement; returns an explicit blocked reason if it cannot be displayed.",
+    description: "Offer an editable !i suggestion, never execute it. Returns queued behind an existing draft; otherwise waits up to one second for render acknowledgement and returns displayed or a concrete blocker.",
     promptGuidelines: offerGuidelines("terminal"),
     parameters: Type.Object({ command: Type.String({ minLength: 1 }) }),
     async execute(_id, { command }, signal, _update, ctx) {
       const result = (details: OfferDetails) => {
         details = { ...details, kind: "terminal" };
-        lastExplicit = details.status === "displayed" ? `terminal displayed (${details.surface})` : `terminal: ${details.reason}`;
+        lastExplicit = details.status === "displayed" ? `terminal displayed (${details.surface})`
+          : details.status === "queued" ? "terminal queued behind draft" : `terminal: ${details.reason}`;
         return {
           content: [{ type: "text" as const, text: details.status === "displayed"
             ? `Displayed editable suggestion: ${details.text}\nPress Tab/Right to copy it into an editable draft now. Wait for the current response to finish before pressing Enter to run it. Nothing was executed.`
-            : `Terminal suggestion blocked: ${details.reason}` }],
+            : details.status === "queued"
+              ? `Queued editable suggestion: ${details.text}\nYour existing draft is unchanged. Once the editor is empty and the suggestion appears, press Tab/Right to copy it into an editable draft. Wait for the current response to finish before pressing Enter to run it. Nothing was executed.`
+              : `Terminal suggestion blocked: ${details.reason}` }],
           details,
           ...(details.status === "blocked" ? { isError: true } : {}),
         };
@@ -561,8 +668,10 @@ export default function nextPrompt(pi: ExtensionAPI) {
   });
 
   const onKey = (data: string) => {
+    const focused = mainFocused();
+    if (focused) bindEditorChanges(focused);
     if (explicit) {
-      if (ui?.getEditorText() !== "") hide("editor contains a draft");
+      if (ui?.getEditorText() !== "") concealDraft();
       else if (!mainFocused()) {
         if (canSuspend()) suspend();
         else hide("main editor lost focus");
@@ -593,10 +702,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
     const mine = generation;
     setTimeout(() => {
       if (mine !== generation || offered === undefined || !ui || !mainFocused()) return;
-      const empty = ui.getEditorText() === "";
-      if (!empty && explicit) hide("editor draft entered");
-      else if (!empty) conceal("editor contains a draft");
-      else if (shown === undefined && !suspended) show(offered);
+      reconcileVisibility();
     }, 0);
     return undefined;
   };
@@ -620,6 +726,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
   });
 
   const attach = (ctx: ExtensionContext) => {
+    releaseEditorChanges();
     unsubscribe?.();
     unsubscribe = undefined;
     uiState = ctx.mode !== "tui" ? `not terminal UI (${ctx.mode})` : !ctx.hasUI ? "no UI" : "terminal UI";
@@ -633,7 +740,16 @@ export default function nextPrompt(pi: ExtensionAPI) {
     }
     const focused = (terminal as (TUI & { getFocusedComponent?(): unknown }) | undefined)?.getFocusedComponent?.() as Renderable | undefined;
     mainEditor = focused && typeof focused.getText === "function" && focused[SURFACE] !== "embedded" ? focused : undefined;
-    if (ui) unsubscribe = ui.onTerminalInput(onKey);
+    if (ui) {
+      unsubscribe = ui.onTerminalInput(onKey);
+      if (mainEditor) bindEditorChanges(mainEditor);
+      const target = ui;
+      queueMicrotask(() => {
+        if (ui !== target) return;
+        const editor = mainFocused();
+        if (editor) bindEditorChanges(editor);
+      });
+    }
   };
 
   pi.on("session_start", (_event, ctx) => {
@@ -649,6 +765,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
 
   pi.on("session_shutdown", () => {
     reset("session_shutdown");
+    releaseEditorChanges();
     unsubscribe?.();
     unsubscribe = undefined;
     ui = undefined;
@@ -700,10 +817,10 @@ export default function nextPrompt(pi: ExtensionAPI) {
     }
     if (!active() || !ui || busy) return;
     if (offered !== undefined && offerSource === undefined) return;
+    visibilityToken = undefined;
     generation++;
     record("create", "external");
-    if (ui.getEditorText() === "") show(text);
-    else { conceal("editor contains a draft"); offered = text; }
+    show(text);
     offerSource = source;
   });
 
@@ -736,7 +853,8 @@ export default function nextPrompt(pi: ExtensionAPI) {
       if (outcome !== "completed") hide(outcome === "failed" ? "turn failed" : outcome === "aborted" ? "turn aborted" : outcome === "error" ? "turn error" : "turn not completed");
       else {
         const reason = renderBlocker();
-        if (reason === "main editor lost focus" && canSuspend()) suspend();
+        if (reason === "editor contains a draft") concealDraft();
+        else if (reason === "main editor lost focus" && canSuspend()) suspend();
         else if (reason) hide(reason);
       }
       return;
@@ -755,8 +873,8 @@ export default function nextPrompt(pi: ExtensionAPI) {
     record("create", "automatic");
     // A draft in the editor: keep the suggestion on offer, out of sight, so it appears once the
     // editor is empty again (the draft stashed with pi-stash's Ctrl+S, or deleted).
-    if (ui.getEditorText() === "") show(candidate.suggestion);
-    else { conceal("editor contains a draft"); offered = candidate.suggestion; offerSource = undefined; }
+    offerSource = undefined;
+    show(candidate.suggestion);
   });
 
   // Read-only copies also let the unit harness inspect scalar diagnostics without a JSON command.
@@ -767,7 +885,7 @@ export default function nextPrompt(pi: ExtensionAPI) {
     trace: trace.map(event => ({ ...event })),
     enabled: active(), ui: uiState,
     offer: suspended ? "suspended" : shown ? patched ? "ghost text" : "fallback widget" : offered ? "concealed" : "none",
-    explicit: explicit ? `${explicit.kind} #${explicit.id} ${explicit.acknowledged ? "rendered" : "awaiting render"}` : "",
+    explicit: explicit ? `${explicit.kind} #${explicit.id} ${explicit.acknowledged ? "rendered" : explicit.queued ? "queued; awaiting render" : "awaiting render"}` : "",
     lastExplicit: lastExplicit.startsWith("terminal: interactive-shell unavailable:") ? "terminal: interactive-shell unavailable (see tool result)" : lastExplicit,
     instruction, tag: lastTag, vet: vetState, outcome,
     ready: active() && shown !== undefined && !!mainFocused() && ui?.getEditorText() === "" && (!explicit || explicit.acknowledged),

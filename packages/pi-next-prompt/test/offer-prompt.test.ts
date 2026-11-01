@@ -42,7 +42,7 @@ test.each([46, 120])("status and trace wrap safely at %i columns without render 
   expect(s.ctx.ui.editorWrites).toEqual([]);
 });
 
-test("status labels pending, ready, suspended, accepted and blocked offers without text", async () => {
+test("status labels pending, ready, suspended, accepted and queued offers without text", async () => {
   const s = await setup();
   expect(await notification(s)).toContain("Offer: none");
   await s.h.emit("agent_start", {}, s.ctx);
@@ -66,10 +66,12 @@ test("status labels pending, ready, suspended, accepted and blocked offers witho
   const accepted = await notification(s);
   expect(accepted).toContain("Last explicit: accepted");
   expect(accepted).toContain("acceptance: not ready");
-  expectBlocked(await s.execute("PRIVATE_NEW_PROMPT"), "draft");
-  const blocked = await notification(s);
-  expect(blocked).toContain("editor contains a draft");
-  expect(blocked).not.toMatch(/marimo|viewer-demo|PRIVATE/);
+  expectQueued(await s.execute("PRIVATE_NEW_PROMPT"), "PRIVATE_NEW_PROMPT");
+  const queued = await notification(s);
+  expect(queued).toContain("Offer: concealed");
+  expect(queued).toContain("prompt queued behind draft");
+  expect(queued).toContain("acceptance: not ready");
+  expect(queued).not.toMatch(/marimo|viewer-demo|PRIVATE/);
 });
 
 test.each([
@@ -301,6 +303,15 @@ function expectDisplayed(result: any, text: string, ghost = false) {
   }]);
 }
 
+function expectQueued(result: any, text = PROMPT, reason = "editor contains a draft") {
+  expect(result.details).toEqual({ status: "queued", kind: "prompt", text, reason });
+  expect(result.isError).toBeUndefined();
+  expect(result.content).toEqual([{
+    type: "text",
+    text: `Queued editable suggestion: ${text}\nYour existing draft is unchanged. Once the editor is empty and the suggestion appears, press Tab/Right to copy it into your prompt, then Enter to submit it. Nothing was submitted.`,
+  }]);
+}
+
 function expectNoSubmission(s: Awaited<ReturnType<typeof setup>>) {
   expect(s.sendUserMessage).not.toHaveBeenCalled();
   expect(s.executeCommand).not.toHaveBeenCalled();
@@ -312,12 +323,15 @@ test("registers the model-only exact-text prompt tool and verified-handoff guida
   expect(tool.name).toBe("offer_prompt");
   expect(tool.exposure).toBe("model-only");
   expect(tool.label).toBe("Offer prompt");
-  expect(tool.description).toBe("Display an editable prompt or Pi slash command, never submit it. Waits up to one second for render acknowledgement and returns displayed or a concrete blocker.");
+  expect(tool.description).toBe("Offer an editable prompt or Pi slash command, never submit it. Returns queued behind an existing draft; otherwise waits up to one second for render acknowledgement and returns displayed or a concrete blocker.");
   expect(tool.parameters.properties.text).toMatchObject({ type: "string", minLength: 1 });
   expect(tool.parameters.required).toContain("text");
   const guidelines = tool.promptGuidelines.join(" ");
   expect(guidelines).toContain("offer_prompt");
   expect(guidelines).toContain("status displayed");
+  expect(guidelines).toMatch(/queued/i);
+  expect(guidelines).toMatch(/clear.*stash|stash.*clear/i);
+  expect(guidelines).toContain("Do not claim it was displayed or inserted");
   expect(guidelines).toContain("Tab/Right to copy the suggestion immediately into an editable draft");
   expect(guidelines).toContain("Enter is a separate submission");
   expect(guidelines).not.toContain("Wait for the current response to finish");
@@ -400,14 +414,13 @@ test("unlimited offers retain the full text even when rendered output is clipped
   expect(s.ctx.ui.editorText).toBe(text);
 });
 
-test.each(["disabled", "config-disabled", "rpc", "print", "no-ui", "unattached", "focus", "embedded", "autocomplete", "vim-autocomplete", "draft", "external"])("concrete blocker protects the editor and ownership (%s)", async mode => {
+test.each(["disabled", "config-disabled", "rpc", "print", "no-ui", "unattached", "focus", "embedded", "autocomplete", "vim-autocomplete", "external"])("concrete blocker protects the editor and ownership (%s)", async mode => {
   const s = await setup({
     enabled: mode === "config-disabled" ? false : undefined,
     attach: mode !== "unattached",
     context: mode === "rpc" || mode === "print" ? { mode } : mode === "no-ui" ? { hasUI: false } : {},
   });
   if (mode === "disabled") await s.h.commands.get("next-prompt").handler("off", s.ctx);
-  if (mode === "draft") s.ctx.ui.editorText = "my existing draft";
   if (mode === "focus") s.ctx.ui.focus({});
   if (mode === "embedded") s.ctx.ui.focus({ [Symbol.for("pi-plugins.editor-surface.v1")]: "embedded" });
   if (mode === "autocomplete") s.ctx.ui.editor.isShowingAutocomplete = () => true;
@@ -416,15 +429,249 @@ test.each(["disabled", "config-disabled", "rpc", "print", "no-ui", "unattached",
   const result = await s.execute();
   const reason = mode.includes("disabled") ? "disabled"
     : ["rpc", "print", "no-ui", "unattached"].includes(mode) ? "UI"
-    : mode === "draft" ? "draft" : mode === "external" ? "another extension" : "focused";
+    : mode === "external" ? "another extension" : "focused";
   expectBlocked(result, reason);
   expect(s.ctx.ui.editorWrites).toEqual([]);
-  if (mode === "draft") expect(s.ctx.ui.editorText).toBe("my existing draft");
   if (mode === "external") {
     expect(s.ctx.ui.press(TAB)).toBe(true);
     expect(s.ctx.ui.editorText).toBe("external owner text");
   } else expect(s.ctx.ui.widgets.size).toBe(0);
   expectNoSubmission(s);
+});
+
+test.each([false, true])("preexisting draft queues exact prompt immediately without mounting or accepting (ghost=%s)", async ghost => {
+  const s = await setup({ ghost });
+  const draft = "PRIVATE_DRAFT  日本語\nsecond line";
+  const text = `${PROMPT} one  two '日本語'`;
+  s.ctx.ui.edit(draft);
+  const original = s.ctx.ui.editor.render;
+  const timerCount = vi.getTimerCount();
+  expectQueued(await s.execute(text), text);
+  expect(vi.getTimerCount()).toBe(timerCount);
+  expect(s.ctx.ui.editor.render).toBe(original);
+  expect(s.ctx.ui.widgets.size).toBe(0);
+  for (const key of [TAB, RIGHT]) expect(s.ctx.ui.press(key)).toBe(false);
+  const take: { text?: string } = {};
+  s.h.pi.events.emit("prompt:take-next", take);
+  expect(take).toEqual({});
+  expect(s.ctx.ui.editorText).toBe(draft);
+  expect(s.ctx.ui.editorWrites).toEqual([]);
+  expect(s.jev.calls).toEqual([]);
+  expect(s.diagnostics().offer).toBe("concealed");
+  expect(s.diagnostics().ready).toBe(false);
+  expectNoSubmission(s);
+
+  // No later key is necessary when deletion or pi-stash clears the editor.
+  s.ctx.ui.edit("");
+  await vi.advanceTimersByTimeAsync(0);
+  expect(s.render()?.join("").replace(/\x1b\[[0-9;]*m/g, "")).toContain(text);
+  expect(s.ctx.ui.press(TAB)).toBe(false); // Actual output still needs its ownership recheck.
+  await Promise.resolve();
+  expectDisplayed(await s.execute(text), text, ghost);
+  expect(s.ctx.ui.press(RIGHT)).toBe(true);
+  expect(s.ctx.ui.editorWrites).toEqual([text]);
+  expectNoSubmission(s);
+});
+
+test.each([false, true])("queued repeats are idempotent before and after clearing, not fake acknowledgements (ghost=%s)", async ghost => {
+  const s = await setup({ ghost });
+  s.ctx.ui.edit("PRIVATE_DRAFT");
+  const first = await s.execute();
+  expectQueued(first);
+  const before = s.diagnostics();
+  for (let i = 0; i < 3; i++) expect(await s.execute()).toEqual(first);
+  expect(s.diagnostics()).toEqual(before);
+  expectBlocked(await s.execute("conflicting prompt"), "different explicit");
+  s.h.pi.events.on("interactive-shell:inspect", ({ reply }: any) => reply({ available: true, layout: "inline" }));
+  expect((await s.terminal()).details).toMatchObject({ status: "blocked", reason: expect.stringContaining("different explicit") });
+  s.h.pi.events.emit("prompt:offer", { source: "other", text: "conflicting external" });
+  s.h.pi.events.emit("prompt:offer", { source: "other" });
+  expect(s.diagnostics().state.offerId).toBe(before.state.offerId);
+  s.ctx.ui.edit("");
+  await vi.advanceTimersByTimeAsync(0);
+  expectQueued(await s.execute(), PROMPT, "awaiting render acknowledgement");
+  expect(s.diagnostics().trace.filter((event: any) => event.event === "create")).toHaveLength(1);
+  expect(s.diagnostics().trace.filter((event: any) => event.event === "acknowledge")).toHaveLength(0);
+  s.render();
+  await Promise.resolve();
+  expectDisplayed(await s.execute(), PROMPT, ghost);
+  s.ctx.ui.edit("restored draft");
+  await vi.advanceTimersByTimeAsync(0);
+  expectQueued(await s.execute());
+  expect(s.diagnostics().trace.filter((event: any) => event.event === "acknowledge")).toHaveLength(1);
+  s.ctx.ui.edit("");
+  await vi.advanceTimersByTimeAsync(0);
+  s.render();
+  await Promise.resolve();
+  expect(s.ctx.ui.press(TAB)).toBe(true);
+  expect(s.ctx.ui.editorText).toBe(PROMPT);
+});
+
+test.each([false, true])("queued prompt outlives a render deadline and releases its original abort listener (ghost=%s)", async ghost => {
+  const s = await setup({ ghost });
+  const controller = new AbortController();
+  s.ctx.ui.edit("draft");
+  expectQueued(await s.execute(PROMPT, controller.signal));
+  controller.abort(); // The successful queued receipt has already completed the call.
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(s.diagnostics().offer).toBe("concealed");
+  s.ctx.ui.setEditorText("");
+  await vi.advanceTimersByTimeAsync(0);
+  expect(s.ctx.ui.press(TAB)).toBe(false);
+  s.render();
+  await Promise.resolve();
+  expect(s.ctx.ui.press(TAB)).toBe(true);
+  expect(s.ctx.ui.editorWrites).toEqual(["", PROMPT]);
+});
+
+test.each([false, true])("live draft arrival completes a pending prompt waiter without any render (ghost=%s)", async ghost => {
+  const s = await setup({ ghost });
+  const pending = s.execute();
+  const render = vi.spyOn(s.ctx.ui.editor, "render");
+  const widget = vi.spyOn(s.ctx.ui, "widgetLines");
+  s.ctx.ui.edit("PRIVATE_DRAFT before output");
+  expectQueued(await pending);
+  expect(render).not.toHaveBeenCalled();
+  expect(widget).not.toHaveBeenCalled();
+  expect(s.ctx.ui.widgets.size).toBe(0);
+  expect(s.diagnostics().trace.filter((event: any) => event.event === "acknowledge")).toEqual([]);
+  await vi.advanceTimersByTimeAsync(1_000);
+  s.ctx.ui.edit("");
+  await vi.advanceTimersByTimeAsync(0);
+  s.render();
+  await Promise.resolve();
+  expect(s.ctx.ui.press(TAB)).toBe(true);
+  expect(s.ctx.ui.editorWrites).toEqual([PROMPT]);
+  expectNoSubmission(s);
+});
+
+test.each([false, true])("draft before first output or between output and acknowledgement queues and later acknowledges once (ghost=%s)", async ghost => {
+  for (const rendered of [false, true]) {
+    const s = await setup({ ghost });
+    const controller = new AbortController();
+    const pending = s.execute(PROMPT, controller.signal);
+    if (rendered) s.render();
+    // Direct writes deliberately bypass onChange to exercise renderer/acknowledgement guards.
+    s.ctx.ui.editorText = "PRIVATE_RACING_DRAFT";
+    if (!rendered) expect(s.render()?.join("") ?? "").not.toContain("marimo");
+    expectQueued(await pending);
+    expect(s.diagnostics().trace.filter((event: any) => event.event === "acknowledge")).toHaveLength(0);
+    expect(s.ctx.ui.editorText).toBe("PRIVATE_RACING_DRAFT");
+    expect(s.ctx.ui.editorWrites).toEqual([]);
+    expect(s.ctx.ui.widgets.size).toBe(0);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(1_000);
+    s.ctx.ui.setEditorText("");
+    await vi.advanceTimersByTimeAsync(0);
+    const before = s.diagnostics();
+    await notification(s);
+    expect(s.diagnostics()).toEqual(before);
+    expect(s.diagnostics().ready).toBe(false);
+    s.render();
+    await Promise.resolve();
+    expectDisplayed(await s.execute(), PROMPT, ghost);
+    for (let i = 0; i < 5; i++) s.render();
+    expect(s.diagnostics().trace.filter((event: any) => event.event === "acknowledge")).toHaveLength(1);
+    expect(s.ctx.ui.press(TAB)).toBe(true);
+    expectNoSubmission(s);
+  }
+});
+
+test.each([false, true])("concealed queued diagnostics are text-free and cannot render or acknowledge (ghost=%s)", async ghost => {
+  const s = await setup({ ghost });
+  s.ctx.ui.edit("PRIVATE_DRAFT");
+  expectQueued(await s.execute("PRIVATE_PROMPT"), "PRIVATE_PROMPT");
+  await vi.advanceTimersByTimeAsync(0);
+  const editorRender = vi.spyOn(s.ctx.ui.editor, "render");
+  const widgetRender = vi.spyOn(s.ctx.ui, "widgetLines");
+  const before = s.diagnostics();
+  expect(statusLines(before)).toHaveLength(8);
+  for (const args of ["status", "trace"]) expect(await notification(s, args)).not.toMatch(/PRIVATE|marimo|viewer-demo/);
+  expect(s.diagnostics()).toEqual(before);
+  expect(editorRender).not.toHaveBeenCalled();
+  expect(widgetRender).not.toHaveBeenCalled();
+  expect(before.explicit).toMatch(/queued|concealed/);
+  expect(before.lastExplicit).toBe("prompt queued behind draft");
+  expect(before.trace.length).toBeLessThanOrEqual(32);
+  expect(before.trace.filter((event: any) => event.event === "acknowledge")).toEqual([]);
+  expect(s.ctx.ui.editorWrites).toEqual([]);
+});
+
+test.each(["input", "session_tree", "model_select", "session_compact", "session_shutdown", "session_start", "user_bash", "agent_start", "prompt:clear", "off"])("reset drops queued ownership and stale clear cannot reveal it (%s)", async event => {
+  const s = await setup();
+  s.ctx.ui.edit("draft");
+  expectQueued(await s.execute());
+  s.ctx.ui.edit(""); // Reconciliation is scheduled, but the reset wins this stack.
+  if (event === "prompt:clear") s.h.pi.events.emit(event, {});
+  else if (event === "off") await s.h.commands.get("next-prompt").handler("off", s.ctx);
+  else await s.h.emit(event, {}, s.ctx);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(s.render()).toBeUndefined();
+  expect(s.ctx.ui.widgets.size).toBe(0);
+  expect(s.ctx.ui.press(TAB)).toBe(false);
+  expect(s.diagnostics().state.offerId).toBeNull();
+  expect(s.ctx.ui.editorWrites).toEqual([]);
+});
+
+test.each(["Final without tag", "Done\n<next>Conflicting automatic suggestion</next>"])("queued explicit prompt survives successful settlement over automatic tags: %j", async text => {
+  const s = await setup();
+  await s.h.emit("agent_start", {}, s.ctx);
+  s.ctx.ui.edit("PRIVATE_DRAFT");
+  expectQueued(await s.execute());
+  await s.h.emit("message_end", { message: { role: "assistant", content: [{ type: "text", text }] } }, s.ctx);
+  await s.settle();
+  expect(s.jev.calls).toEqual([]);
+  expect(s.diagnostics().offer).toBe("concealed");
+  expect(s.ctx.ui.editorText).toBe("PRIVATE_DRAFT");
+  s.ctx.ui.setEditorText("");
+  await vi.advanceTimersByTimeAsync(0);
+  s.render();
+  await Promise.resolve();
+  expect(s.ctx.ui.press(TAB)).toBe(true);
+  expect(s.ctx.ui.editorText).toBe(PROMPT);
+});
+
+test.each(["failed", "aborted", "error", undefined])("unsuccessful or unobserved settlement drops a queued prompt (%s)", async outcome => {
+  const s = await setup();
+  await s.h.emit("agent_start", {}, s.ctx);
+  s.ctx.ui.edit("draft");
+  expectQueued(await s.execute());
+  if (outcome !== undefined) await s.h.emit("agent_before_settle", { outcome }, s.ctx);
+  await s.h.emit("agent_settled", {}, s.ctx);
+  s.ctx.ui.edit("");
+  await vi.advanceTimersByTimeAsync(0);
+  expect(s.ctx.ui.widgets.size).toBe(0);
+  expect(s.ctx.ui.press(TAB)).toBe(false);
+  expect(s.diagnostics().state.offerId).toBeNull();
+  expect(s.jev.calls).toEqual([]);
+});
+
+test.each(["dialog", "embedded", "autocomplete"])("queued ownership still invalidates on non-draft focus loss (%s)", async focus => {
+  const s = await setup();
+  s.ctx.ui.edit("draft");
+  expectQueued(await s.execute());
+  s.ctx.ui.edit("");
+  await vi.advanceTimersByTimeAsync(0);
+  if (focus === "autocomplete") s.ctx.ui.editor.isShowingAutocomplete = () => true;
+  else s.ctx.ui.focus(focus === "embedded" ? { [Symbol.for("pi-plugins.editor-surface.v1")]: "embedded" } : {});
+  s.ctx.ui.press("x");
+  await vi.advanceTimersByTimeAsync(0);
+  s.ctx.ui.editor.isShowingAutocomplete = () => false;
+  s.ctx.ui.focus(s.ctx.ui.editor);
+  s.ctx.ui.edit("");
+  await vi.advanceTimersByTimeAsync(0);
+  expect(s.ctx.ui.widgets.size).toBe(0);
+  expect(s.ctx.ui.press(TAB)).toBe(false);
+});
+
+test.each(["!i true", " leading", "line\nbreak", `${PROMPT} over limit`])("invalid prompt remains blocked behind a draft: %j", async text => {
+  const s = await setup({ maxChars: PROMPT.length });
+  s.ctx.ui.edit("private draft");
+  expectBlocked(await s.execute(text));
+  expect(s.diagnostics().state.offerId).toBeNull();
+  expect(s.ctx.ui.editorText).toBe("private draft");
+  expect(s.ctx.ui.editorWrites).toEqual([]);
+  expect(s.jev.calls).toEqual([]);
 });
 
 test("an unavailable shell inspector is never consulted by prompt offers", async () => {
@@ -524,34 +771,29 @@ test.each(["prompt", "terminal"])("cross-tool conflicts preserve the first expli
   expectNoSubmission(s);
 });
 
-test.each([false, true])("focus/draft invalidation before actual output never acknowledges (ghost=%s)", async ghost => {
-  for (const change of ["focus", "draft"]) {
-    const s = await setup({ ghost });
-    const pending = s.execute();
-    if (change === "focus") s.ctx.ui.focus({});
-    else s.ctx.ui.editorText = "draft before output";
-    s.render();
-    expectBlocked(await pending);
-    expect(s.ctx.ui.widgets.size).toBe(0);
-    expect(s.ctx.ui.editorWrites).toEqual([]);
-    if (change === "draft") expect(s.ctx.ui.editorText).toBe("draft before output");
-  }
+test.each([false, true])("focus invalidation before actual output never acknowledges (ghost=%s)", async ghost => {
+  const s = await setup({ ghost });
+  const pending = s.execute();
+  s.ctx.ui.focus({});
+  s.render();
+  expectBlocked(await pending, "focus");
+  expect(s.ctx.ui.widgets.size).toBe(0);
+  expect(s.ctx.ui.editorWrites).toEqual([]);
+  expect(s.diagnostics().trace.filter((event: any) => event.event === "acknowledge")).toEqual([]);
 });
 
-test.each([false, true])("queued acknowledgement rechecks focus, draft and generation (ghost=%s)", async ghost => {
-  for (const change of ["focus", "draft", "generation", "abort"]) {
+test.each([false, true])("queued acknowledgement rechecks focus, generation and abort (ghost=%s)", async ghost => {
+  for (const change of ["focus", "generation", "abort"]) {
     const s = await setup({ ghost });
     const controller = new AbortController();
     const pending = s.execute(PROMPT, controller.signal);
     s.render(); // Observation queues acknowledgement; it is not yet a success receipt.
     if (change === "focus") s.ctx.ui.focus({});
-    if (change === "draft") s.ctx.ui.editorText = "draft after output";
     if (change === "generation") s.h.pi.events.emit("prompt:clear", {});
     if (change === "abort") controller.abort();
     expectBlocked(await pending);
     expect(s.ctx.ui.widgets.size).toBe(0);
     expect(s.ctx.ui.editorWrites).toEqual([]);
-    if (change === "draft") expect(s.ctx.ui.editorText).toBe("draft after output");
     if (change === "generation") {
       expectDisplayed(await s.offer("New generation"), "New generation", ghost);
       expect(s.ctx.ui.press(TAB)).toBe(true);
@@ -735,31 +977,43 @@ test.each(["Final without tag", "Done\n<next>Conflicting automatic suggestion</n
   expectNoSubmission(s);
 });
 
-test.each(["focus", "draft"])("post-acknowledgement focus/draft changes cannot overwrite user input (%s)", async change => {
+test("post-acknowledgement focus loss before settlement still withdraws the offer", async () => {
   const s = await setup();
   await s.offer();
-  if (change === "focus") s.ctx.ui.focus({});
-  else s.ctx.ui.editorText = "my later draft";
+  s.ctx.ui.focus({});
   expect(s.ctx.ui.press(TAB)).toBe(false);
   expect(s.ctx.ui.editorWrites).toEqual([]);
-  if (change === "draft") expect(s.ctx.ui.editorText).toBe("my later draft");
   s.ctx.ui.focus(s.ctx.ui.editor);
-  s.ctx.ui.editorText = "";
   expect(s.ctx.ui.press(TAB)).toBe(false);
 });
 
-test("typing invalidates an explicit prompt permanently, not just until the editor is empty", async () => {
-  const s = await setup();
+test.each([false, true])("typing conceals the same acknowledged prompt across repeated clear/restore cycles (ghost=%s)", async ghost => {
+  const s = await setup({ ghost });
+  await s.h.emit("agent_start", {}, s.ctx);
   await s.offer();
-  expect(s.ctx.ui.press("x", "x")).toBe(false);
-  await vi.advanceTimersByTimeAsync(0);
-  expect(s.ctx.ui.widgets.size).toBe(0);
-  s.ctx.ui.editorText = "";
-  s.ctx.ui.press("\x7f");
-  await vi.advanceTimersByTimeAsync(0);
-  expect(s.ctx.ui.press(TAB)).toBe(false);
-  expect(s.ctx.ui.widgets.size).toBe(0);
-  expect(s.ctx.ui.editorWrites).toEqual([]);
+  const owner = s.diagnostics().state.offerId;
+  for (const draft of ["x", "restored  draft 日本語", "swapped draft"]) {
+    s.ctx.ui.edit(draft);
+    // Live text suppresses output and acceptance before deferred reconciliation.
+    expect(s.render()?.join("") ?? "").not.toContain("marimo");
+    expect(s.ctx.ui.press(TAB)).toBe(false);
+    const take: { text?: string } = {};
+    s.h.pi.events.emit("prompt:take-next", take);
+    expect(take).toEqual({});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.ctx.ui.widgets.size).toBe(0);
+    expect(s.diagnostics().state.offerId).toBe(owner);
+    expect(s.ctx.ui.editorText).toBe(draft);
+    s.ctx.ui.edit("");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.render()?.join("").replace(/\x1b\[[0-9;]*m/g, "")).toContain(PROMPT);
+    expect(s.diagnostics().state.offerId).toBe(owner);
+  }
+  expect(s.diagnostics().trace.filter((event: any) => event.event === "acknowledge")).toHaveLength(1);
+  expect(s.diagnostics().state.busy).toBe(true);
+  expect(s.ctx.ui.press(RIGHT)).toBe(true);
+  expect(s.ctx.ui.editorWrites).toEqual([PROMPT]);
+  expectNoSubmission(s);
 });
 
 
@@ -836,7 +1090,7 @@ test.each([false, true])("completed offer suspends and resumes only on focused r
   expect(s.h.messages).toEqual([]);
 });
 
-test.each([false, true])("main draft permanently invalidates a suspended offer (ghost=%s)", async ghost => {
+test.each([false, true])("main draft conceals a suspended offer until cleared with main focus (ghost=%s)", async ghost => {
   for (const trigger of ["render", "input"]) {
     const s = await setup({ ghost });
     const baseRender = s.ctx.ui.editor.render;
@@ -853,14 +1107,17 @@ test.each([false, true])("main draft permanently invalidates a suspended offer (
     expect(s.ctx.ui.editorText).toBe("PRIVATE_MAIN_DRAFT");
     expect(s.ctx.ui.editor.render).toBe(baseRender);
     expect(s.ctx.ui.widgets.size).toBe(0);
-    s.ctx.ui.editorText = "";
+    s.ctx.ui.edit("");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.ctx.ui.widgets.size).toBe(0); // Empty but still outside main focus.
     s.ctx.ui.focus(s.ctx.ui.editor);
+    s.ctx.ui.press("\x1b[A"); // Compatibility reconciliation after focus returns.
+    await vi.advanceTimersByTimeAsync(0);
     s.render();
-    expect(s.ctx.ui.press("\t")).toBe(false);
-    const take: { text?: string } = {};
-    s.h.pi.events.emit("prompt:take-next", take);
-    expect(take.text).toBeUndefined();
     expect(s.ctx.ui.editorWrites).toEqual([]);
+    expect(s.diagnostics().trace.filter((event: any) => event.event === "acknowledge")).toHaveLength(1);
+    expect(s.ctx.ui.press("\t")).toBe(true);
+    expect(s.ctx.ui.editorWrites).toEqual([PROMPT]);
   }
 });
 
@@ -946,6 +1203,23 @@ test.each([false, true])("queued invalidation rechecks returned focus instead of
   s.render();
   expect(s.ctx.ui.press("\t")).toBe(true);
   expect(s.ctx.ui.editorWrites).toHaveLength(1);
+});
+
+test.each([false, true])("stale clear reconciliation cannot suppress a replacement queued owner's reveal (ghost=%s)", async ghost => {
+  const s = await setup({ ghost });
+  s.ctx.ui.edit("first draft");
+  expectQueued(await s.execute());
+  s.ctx.ui.edit("");
+  s.h.pi.events.emit("prompt:clear", {});
+  s.ctx.ui.edit("replacement draft");
+  const replacementText = "/replacement one  two";
+  expectQueued(await s.execute(replacementText), replacementText);
+  s.ctx.ui.edit("");
+  await vi.advanceTimersByTimeAsync(0);
+  expect(s.render()?.join("").replace(/\x1b\[[0-9;]*m/g, "")).toContain(replacementText);
+  await Promise.resolve();
+  expect(s.ctx.ui.press(TAB)).toBe(true);
+  expect(s.ctx.ui.editorWrites).toEqual([replacementText]);
 });
 
 test.each([false, true])("stale render invalidation cannot erase a replacement offer (ghost=%s)", async ghost => {

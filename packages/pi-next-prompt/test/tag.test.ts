@@ -33,9 +33,9 @@ test("long suggestions are offered whole unless maxChars caps them; empty ones a
   expect(extractNext("Done.\n<next>abcdef</next>", 5)).toEqual({ text: "Done.", found: true });
 });
 
-test("explicit handoffs require the tool and a displayed receipt independently of optional tags", () => {
+test("explicit handoffs require the tool and a displayed receipt to claim visibility independently of tags", () => {
   expect(PROMPT_OFFER_INSTRUCTION).toContain("use offer_prompt with the complete exact text");
-  expect(PROMPT_OFFER_INSTRUCTION).toContain("Only status displayed");
+  expect(PROMPT_OFFER_INSTRUCTION).toContain("Only status displayed permits claiming a visible offer");
   expect(PROMPT_OFFER_INSTRUCTION).toContain("not inserted until the user accepts");
   expect(PROMPT_OFFER_INSTRUCTION).toContain("Do not rely on prose or a <next> tag");
   expect(PROMPT_OFFER_INSTRUCTION).toContain("Tab/Right to copy the suggestion immediately into an editable draft");
@@ -45,6 +45,26 @@ test("explicit handoffs require the tool and a displayed receipt independently o
   expect(PROMPT_OFFER_INSTRUCTION).toContain("On blocked, state the blocker");
   expect(PROMPT_OFFER_INSTRUCTION).toContain("Shell handoffs use offer_terminal");
   expect(PROMPT_OFFER_INSTRUCTION).toContain("Never include credentials");
+});
+
+test.each([
+  ["prompt", PROMPT_OFFER_INSTRUCTION],
+  ["terminal", INTERACTIVE_INSTRUCTION],
+])("%s queued guidance is distinct from display or insertion", (_kind, instruction) => {
+  expect(instruction).toContain("On status queued");
+  expect(instruction).toContain("waiting underneath the current draft");
+  expect(instruction).toContain("clear or stash the draft to reveal it");
+  expect(instruction).toContain("Tab/Right accepts once it appears");
+  expect(instruction).toContain("Do not claim it was displayed or inserted");
+  expect(instruction).toContain("Never include credentials");
+});
+
+test("blocked terminal guidance still names the blocker without executing or exposing private interaction", () => {
+  expect(INTERACTIVE_INSTRUCTION).toContain("Only displayed permits claiming a visible command offer");
+  expect(INTERACTIVE_INSTRUCTION).toContain("Unsupported layouts return an explicit blocked reason and do not run the command");
+  expect(INTERACTIVE_INSTRUCTION).toContain("Terminal output and keystrokes are never sent to the model");
+  expect(INTERACTIVE_INSTRUCTION).toContain("complete command however long it is: never truncate or abbreviate it");
+  expect(INTERACTIVE_INSTRUCTION).toContain("Do not retry a command that may already have made changes without checking its state");
 });
 
 test("terminal offers allow immediate draft acceptance but require waiting before interactive execution", () => {

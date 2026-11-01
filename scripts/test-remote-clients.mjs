@@ -53,6 +53,7 @@ const { renderPill } = await jiti.import('../packages/pi-bg/src/pill.ts');
 const { WORKFLOW_EXPLANATIONS } = await jiti.import('../packages/pi-status-footer/src/workflow-ui.ts');
 const { choiceMenu, coldTitle } = await jiti.import('../packages/pi-cache-guard/src/index.ts');
 const { registerTreeFork, FORK_TITLE, FORK_DESTINATIONS } = await jiti.import('../packages/pi-herdr/src/tree-fork.ts');
+const { nextPromptScreens } = await import('./remote-clients/next-prompt.mjs');
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const herdrDir = process.env.HERDR_WEB_UI_DIR ?? latest(path.join(homedir(), '.local/share/herdr-web-ui'), /^remote-v\d+$/);
@@ -783,6 +784,13 @@ for (const width of [46, 120]) {
   }
 }
 
+// Retained next-prompt offers use the real editor and ghost/fallback widgets, never extra inputs.
+const nextPromptStart = screens.length;
+screens.push(...(await nextPromptScreens({
+  theme, getEditorTheme: themeModule.getEditorTheme, kb, sidebarScreen,
+  idleFooter: width => idleFooter(width, { statuses: modeStatuses('plan', 'auto') }), height: HEIGHT,
+})).map(screen => screen.idle === undefined ? screen : { ...screen, idle: screen.idle + nextPromptStart }));
+
 // A terminal is not a question or an editable Pi composer. Its frame deliberately
 // differs from editor/dialog frames; keyboard interaction is terminal-only for now.
 for (const width of [46, 120]) {
@@ -1031,13 +1039,14 @@ screens.forEach((screen, i) => {
   }
   if (screen.idle !== undefined) {
     // An idle screen reads as the same screen without Sidebar does.
-    const expectedDraft = screen.expectedDraft ?? 'next step';
+    const expectedComposer = screen.expectedComposer ?? 'draft';
+    const expectedDraft = Object.hasOwn(screen, 'expectedDraft') ? screen.expectedDraft : 'next step';
     const h = results.herdr, c = results.collie;
     if (h && JSON.stringify(h[i]) !== JSON.stringify(h[screen.idle])) problems.push(`herdr-web-ui: ${JSON.stringify(h[i])}, without Sidebar ${JSON.stringify(h[screen.idle])}`);
     const kinds = (r) => JSON.stringify({ blocks: r.blocks.filter((b) => b.kind !== 'raw'), composer: r.composer, draft: r.draft });
     if (h?.[i] !== null && h?.[i] !== undefined) problems.push(`herdr-web-ui: idle editor misidentified as question: ${JSON.stringify(h[i])}`);
     if (c) {
-      if (c[i].composer !== 'draft' || c[i].draft?.trim() !== expectedDraft) problems.push(`Collie: wanted draft composer containing ${JSON.stringify(expectedDraft)}, got ${JSON.stringify({ composer: c[i].composer, draft: c[i].draft })}`);
+      if (c[i].composer !== expectedComposer || (c[i].draft?.trim() ?? null) !== expectedDraft) problems.push(`Collie: wanted ${expectedComposer} composer containing ${JSON.stringify(expectedDraft)}, got ${JSON.stringify({ composer: c[i].composer, draft: c[i].draft })}`);
       if (c[i].blocks.some(b => b.kind !== 'raw')) problems.push(`Collie: idle editor misidentified as card: ${JSON.stringify(c[i].blocks)}`);
       if (kinds(c[i]) !== kinds(c[screen.idle])) problems.push(`Collie: ${kinds(c[i])}, without Sidebar ${kinds(c[screen.idle])}`);
     }

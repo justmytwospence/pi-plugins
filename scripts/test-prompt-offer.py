@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import pty
+import re
 import select
 import shutil
 import signal
@@ -16,7 +17,7 @@ import time
 
 ROOT = Path(__file__).resolve().parent.parent
 TEXT = "/prompt-offer-test one  two"
-DRAFT = "existing draft stays unchanged"
+DRAFT = "existing α draft  stays unchanged"
 PROBE = r'''import { appendFileSync, existsSync } from "node:fs";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 export default function(pi) {
@@ -59,6 +60,7 @@ export default function(pi) {
         emptyDraft: ctx.ui.getEditorText() === "",
         exactDraft: ctx.ui.getEditorText() === process.env.PROMPT_TEXT,
         unchangedDraft: ctx.ui.getEditorText() === process.env.PROMPT_DRAFT,
+        exactStash: globalThis[Symbol.for("@saadjs/pi-stash/prompt")]?.entry?.text === process.env.PROMPT_DRAFT,
         started: calls > 0, final: calls === 2, settled,
         noOverlay: !tui.hasOverlay(),
         noShellCommand: !pi.getCommands().some(c => c.name === "interactive-shell")
@@ -69,7 +71,8 @@ export default function(pi) {
 }'''
 
 
-def run(mode, preexisting):
+def run(mode, scenario):
+    preexisting = scenario in ("clear", "stash")
     with tempfile.TemporaryDirectory(prefix="pi-prompt-pty-") as directory:
         temp = Path(directory)
         agent = temp / "agent"
@@ -89,7 +92,8 @@ def run(mode, preexisting):
                 "--no-themes", "--no-context-files", "--no-approve", "--session-dir", str(sessions),
                 "--tui-mode", mode, "--provider", "prompt-fixture", "--model", "local"]
         # Explicit entries, never the suite: interactive-shell must not be loaded.
-        for entry in (ROOT / "packages/pi-next-prompt/src/index.ts", ROOT / "packages/pi-vim/src/index.ts", fixture):
+        for entry in (ROOT / "packages/pi-next-prompt/src/index.ts", ROOT / "packages/pi-vim/src/index.ts",
+                      ROOT / "packages/pi-stash/src/index.ts", fixture):
             args.extend(["-e", str(entry)])
         master, slave = pty.openpty()
         child = None
@@ -138,6 +142,18 @@ def run(mode, preexisting):
         def entries():
             return [json.loads(line) for path in sessions.rglob("*.jsonl") for line in path.read_text().splitlines()]
 
+        def reveals(keys):
+            # Only inspect fresh terminal output: tool-result text earlier in the transcript
+            # cannot count as the revealed ghost, and this never calls render from the probe.
+            offset = len(transcript)
+            send(keys)
+            output = transcript[offset:].decode("utf-8", errors="replace")
+            output = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output)
+            output = re.sub(r"\x1b_[^\x07]*\x07", "", output)
+            assert TEXT in output, f"No actual revealed ghost after {keys!r}: {output[-3000:]!r}"
+            assert snapshot()["emptyDraft"]
+            assert not sentinel.exists(), "Revealing an offer executed the slash command"
+
         try:
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 110, 0, 0))
             child = subprocess.Popen(args, stdin=slave, stdout=slave, stderr=slave, cwd=temp, env=env, preexec_fn=own_terminal)
@@ -162,31 +178,48 @@ def run(mode, preexisting):
             assert "PROMPT_FINAL_WITHOUT_TAG" in finals, finals
             assert b"PROMPT_FINAL_WITHOUT_TAG" in transcript, transcript[-4000:]
             assert not sentinel.exists(), "Tool call executed the slash command"
+            assert not offer.get("isError"), offer
+            assert offer["details"]["text"] == TEXT and offer["details"]["kind"] == "prompt", offer
             if preexisting:
-                assert offer["details"]["status"] == "blocked" and offer.get("isError"), offer
-                assert "draft" in offer["details"]["reason"].lower() or "empty" in offer["details"]["reason"].lower(), offer
+                assert offer["details"] == {"status": "queued", "kind": "prompt", "text": TEXT,
+                                             "reason": "editor contains a draft"}, offer
+                assert b"Queued editable suggestion:" in transcript, transcript[-4000:]
                 assert state["unchangedDraft"], state
-                send(b"\t")
-                assert snapshot()["unchangedDraft"]
-                assert not sentinel.exists(), "Blocked offer executed"
             else:
-                assert offer["details"]["status"] == "displayed" and not offer.get("isError"), offer
-                assert offer["details"]["text"] == TEXT and offer["details"]["kind"] == "prompt", offer
+                assert offer["details"]["status"] == "displayed", offer
                 assert b"Displayed editable suggestion:" in transcript, transcript[-4000:]
                 assert offer["details"]["surface"] == "ghost", offer
-                assert TEXT.encode() in transcript, transcript[-4000:]
                 assert state["emptyDraft"], state
+                if scenario == "later":
+                    send(DRAFT.encode())
+                    assert snapshot()["unchangedDraft"]
+            if scenario != "none":
                 send(b"\t")
-                accepted = snapshot()
-                assert accepted["exactDraft"] and accepted["final"], accepted
-                assert not sentinel.exists(), "Tab executed the slash command"
-                send(b"\r")
-                assert snapshot()["emptyDraft"]
-                assert sentinel.exists(), "Enter did not invoke the slash command"
-                assert [json.loads(line) for line in sentinel.read_text().splitlines()] == [{"args": "one  two"}]
-                drain(0.5)
-                assert len(sentinel.read_text().splitlines()) == 1, "Repeated slash invocation"
-            print(f"PASS {mode} {'preexisting draft blocked unchanged' if preexisting else 'displayed ghost, tagless final, exact Tab draft, Enter once with exact arguments'}")
+                assert snapshot()["unchangedDraft"], "Tab overwrote a real unsent draft"
+                assert not sentinel.exists(), "Hidden offer executed"
+                if scenario == "stash":
+                    reveals(b"\x13")
+                    assert snapshot()["exactStash"], "Ctrl+S did not preserve the real draft"
+                    send(b"\x13")
+                    assert snapshot()["unchangedDraft"], "Ctrl+S did not restore the exact original draft"
+                    send(b"\t")
+                    assert snapshot()["unchangedDraft"], "Restored draft did not conceal the offer"
+                    reveals(b"\x13")
+                    assert snapshot()["exactStash"], "Restashing changed the original draft"
+                else:
+                    reveals(b"\x15")
+            send(b"\t")
+            accepted = snapshot()
+            assert accepted["exactDraft"] and accepted["final"], accepted
+            assert not sentinel.exists(), "Tab executed the slash command"
+            send(b"\r")
+            after_enter = snapshot()
+            assert after_enter["unchangedDraft" if scenario == "stash" else "emptyDraft"], after_enter
+            assert sentinel.exists(), "Enter did not invoke the slash command"
+            assert [json.loads(line) for line in sentinel.read_text().splitlines()] == [{"args": "one  two"}]
+            drain(0.5)
+            assert len(sentinel.read_text().splitlines()) == 1, "Repeated slash invocation"
+            print(f"PASS {mode} {scenario}: retained/revealed ghost, tagless final, exact Tab draft, Enter once")
         finally:
             if child is not None and child.poll() is None:
                 os.killpg(child.pid, signal.SIGKILL)
@@ -199,9 +232,9 @@ def run(mode, preexisting):
 if __name__ == "__main__":
     if not shutil.which("pi") or not shutil.which("node"):
         raise SystemExit("Required: pi and node on PATH (this regression must not skip)")
-    for package in ("pi-next-prompt", "pi-vim"):
+    for package in ("pi-next-prompt", "pi-vim", "pi-stash"):
         if not (ROOT / "packages" / package / "node_modules").is_dir():
             raise SystemExit(f"Required: npm ci in packages/{package} (respect release-age policy)")
     for mode in ("regular", "fullscreen"):
-        for preexisting in (False, True):
-            run(mode, preexisting)
+        for scenario in ("none", "clear", "stash", "later"):
+            run(mode, scenario)
