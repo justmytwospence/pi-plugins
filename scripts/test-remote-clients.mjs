@@ -286,7 +286,7 @@ const PLAN_TARGETS = [
 function planLabels(count) {
   return [IMPLEMENT_HERE, COMPACT_HERE, ...PLAN_TARGETS.slice(0, count).map(t => handoffLabel(t.targetName, t.target.thinkingLevel)), EDIT, SAVE, KEEP];
 }
-async function selectorLines(width, count, changed, linked = false, fresh = false) {
+async function selectorLines(width, count, changed, linked = false, fresh = false, recommendedThinkingLevel, effortDefaultKey) {
   let lines;
   const models = [{ provider: 'anthropic', id: 'claude-fable-5-5', reasoning: true }, ...PLAN_TARGETS.map(t => ({ provider: t.target.provider, id: t.target.modelId, reasoning: true }))];
   const ctx = {
@@ -302,6 +302,7 @@ async function selectorLines(width, count, changed, linked = false, fresh = fals
   void pickApproval(ctx, {
     planning: { provider: 'anthropic', modelId: linked ? PLAN_TARGETS[0].target.modelId : 'claude-fable-5-5', thinkingLevel: 'high' },
     targets: PLAN_TARGETS.slice(0, count),
+    recommendedThinkingLevel, effortDefaultKey,
     ...(linked ? { intent: 'linked-execution', flow: flowSnapshot('plan'), ...(fresh ? { freshTarget: PLAN_TARGETS[0] } : {}) } : {}),
   }, createApprovalState());
   await new Promise(resolve => setTimeout(resolve, 0));
@@ -569,6 +570,16 @@ const DIALOGS = [
       name: `linked plan approval (same-model worker${fresh ? ', fresh available' : ''}${changed ? ', effort changed' : ''})`,
       lines: w => selectorLines(w, 1, changed, true, fresh),
       question: `Implement this plan? Linked worker: anthropic/claude-opus-5-5. ←/→ effort: ${changed ? 'off' : 'high'}`,
+      herdr: { options: labels.length, multi: false, labels },
+      collie: { kind: 'prompt-select', options: labels.length + 1, labels, wraps: labels },
+    };
+  })),
+  ...[false, true].flatMap(linked => [false, true].map(changed => {
+    const labels = linked ? [LINKED_EXECUTE, LINKED_COMPACT, EDIT, SAVE, KEEP] : planLabels(1);
+    return {
+      name: `${linked ? 'linked plan approval (same-model worker' : 'plan approval (1 target'}, recommended${changed ? ', effort changed' : ''})`,
+      lines: w => selectorLines(w, 1, changed, linked, false, 'low', 'recommended-fixture'),
+      question: `Implement this plan? ${linked ? 'Linked worker: anthropic/claude-opus-5-5. ' : ''}←/→ effort: ${changed ? 'medium' : 'low'}`,
       herdr: { options: labels.length, multi: false, labels },
       collie: { kind: 'prompt-select', options: labels.length + 1, labels, wraps: labels },
     };

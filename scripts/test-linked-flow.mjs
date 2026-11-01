@@ -176,9 +176,16 @@ export default function (pi) {
     await authHook?.();
     return checkAuth(...args);
   };
-  for (const method of ['stream', 'complete', 'completeSimple', 'streamDeferred', 'fetchDeferred', 'generateImages', 'classify']) {
+  for (const method of ['stream', 'complete', 'completeSimple', 'streamDeferred', 'fetchDeferred', 'generateImages']) {
     models[method] = forbid(`inference ${method}`, inferenceAttempts);
   }
+  // Approval now requests a one-shot effort default. Keep this lifecycle fixture
+  // offline and exercise unavailable-classifier fallback, never a paid transport.
+  models.classify = async (_model, context) => {
+    assert.deepEqual(Object.keys(context.questions), ['effort']);
+    assert.equal(context.state.phase, 'implementation');
+    return { answers: {}, stopReason: 'error', errorMessage: 'Offline effort classifier fixture' };
+  };
   models.streamSimple = model => {
     assert(localModels.some(local => modelRef(local) === modelRef(model)), 'only a local transport can run');
     localResponses++;
@@ -1247,6 +1254,7 @@ export default function (pi) {
         assert.match(screen(), /compact to plan/u);
         test.harness.handleInput('\u001b[C');
         assert.match(screen(), /fresh session with only the plan/u);
+        await until(() => !screen().includes('choosing...'), 'implementation effort default');
         const before = test.requests.length;
         test.harness.handleInput('\r');
         await opened;

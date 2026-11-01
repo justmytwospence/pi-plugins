@@ -753,6 +753,175 @@ test("RPC puts the normalized per-model effort first so Enter retains the defaul
   });
 });
 
+test("recommendations initialize direct rows and normalize per model, including inherited off", () => {
+  for (const inherited of ["high", "off"] as const) {
+    const { component, done } = fixture({
+      input: {
+        ...input,
+        planning: { ...planner, thinkingLevel: inherited },
+        recommendedThinkingLevel: "xhigh",
+        effortDefaultKey: "a",
+      },
+    });
+    assert.match(component.render(120).join("\n"), /effort: high/u);
+    component.handleInput(down);
+    component.handleInput("\r");
+    assert.equal(done.mock.calls[0]?.[0]?.thinkingLevel, "high");
+  }
+  const nonreasoning = fixture({ input: { ...input, recommendedThinkingLevel: "high" }, efforts: () => [undefined] });
+  nonreasoning.component.handleInput("\r");
+  assert.equal(nonreasoning.done.mock.calls[0]?.[0]?.thinkingLevel, undefined);
+});
+
+test("independent handoff suffix and setting precede recommendation", () => {
+  for (const [suffix, setting, expected] of [
+    ["low", "high", "low"],
+    [undefined, "low", "low"],
+    [undefined, undefined, "high"],
+  ] as const) {
+    const { component, done } = fixture({
+      input: {
+        ...input,
+        recommendedThinkingLevel: "high",
+        effortDefaultKey: "a",
+        defaultThinkingLevel: setting,
+        targets: [{ target: { ...target, thinkingLevel: suffix }, targetName: "Worker" }],
+      },
+    });
+    component.handleInput(down);
+    component.handleInput(down);
+    component.handleInput("\r");
+    assert.equal(done.mock.calls[0]?.[0]?.thinkingLevel, expected);
+  }
+});
+
+test("linked in-place recommendation and isolated fresh precedence", () => {
+  for (const [setting, recommendation, freshExpected] of [
+    ["low", "high", "low"],
+    [undefined, "high", "high"],
+    [undefined, undefined, "medium"],
+  ] as const) {
+    const linked = {
+      ...linkedInput({ ...target, thinkingLevel: "medium" }),
+      freshTarget: { target: { ...target, thinkingLevel: "medium" as const }, targetName: "Worker" },
+      defaultThinkingLevel: setting,
+      recommendedThinkingLevel: recommendation,
+      effortDefaultKey: "a",
+    };
+    const { component, done } = fixture({ input: linked });
+    assert.ok(
+      component
+        .render(120)
+        .join("\n")
+        .includes(`effort: ${recommendation ?? "medium"}`),
+    );
+    component.handleInput(right); // only in-place changes
+    component.handleInput(down);
+    assert.ok(
+      component
+        .render(120)
+        .join("\n")
+        .includes(`effort: ${recommendation === "high" ? "low" : "high"}`),
+    );
+    component.handleInput(down);
+    assert.ok(component.render(120).join("\n").includes(`effort: ${freshExpected}`));
+    component.handleInput("\r");
+    assert.equal(done.mock.calls[0]?.[0]?.thinkingLevel, freshExpected);
+  }
+});
+
+test("linked fresh falls back to the worker suggestion when System 1 cannot recommend effort", () => {
+  const linked = {
+    ...linkedInput({ ...target, thinkingLevel: "medium" as const }),
+    freshTarget: { target: { ...target, thinkingLevel: "medium" as const }, targetName: "Worker" },
+    defaultThinkingLevel: "low" as const,
+    effortDefaultKey: "classifier-fallback",
+  };
+  const fallback = fixture({ input: linked });
+  fallback.component.handleInput(down);
+  fallback.component.handleInput(down);
+  assert.match(fallback.component.render(120).join("\n"), /effort: medium/u);
+  fallback.component.handleInput("\r");
+  assert.equal(fallback.done.mock.calls[0]?.[0]?.thinkingLevel, "medium");
+
+  const recommended = fixture({ input: { ...linked, recommendedThinkingLevel: "high" } });
+  recommended.component.handleInput(down);
+  recommended.component.handleInput(down);
+  assert.match(recommended.component.render(120).join("\n"), /effort: low/u);
+  recommended.component.dispose();
+});
+
+test("linked keyed fallback ignores fresh setting in-place and retains fresh edits independently", () => {
+  const state = createApprovalState();
+  const linked = {
+    ...linkedInput(),
+    freshTarget: { target, targetName: "Worker" },
+    defaultThinkingLevel: "low" as const,
+    effortDefaultKey: "a",
+  };
+  const first = fixture({ state, input: linked });
+  assert.match(first.component.render(120).join("\n"), /effort: medium/u);
+  first.component.handleInput(right); // in-place high
+  first.component.handleInput(down);
+  first.component.handleInput(down);
+  assert.match(first.component.render(120).join("\n"), /effort: low/u);
+  first.component.handleInput(right); // fresh medium
+  first.component.dispose();
+  const next = fixture({ state, input: { ...linked, recommendedThinkingLevel: "low", effortDefaultKey: "b" } });
+  assert.match(next.component.render(120).join("\n"), /effort: medium/u);
+  next.component.handleInput(up);
+  assert.match(next.component.render(120).join("\n"), /effort: high/u);
+  next.component.dispose();
+});
+
+test("revised recommendation replaces only automatic defaults while manual edits and action survive reordering", () => {
+  const state = createApprovalState();
+  const first = fixture({ state, input: { ...input, recommendedThinkingLevel: "low", effortDefaultKey: "first" } });
+  first.component.handleInput(right); // direct low -> medium
+  first.component.handleInput(up); // keep
+  first.component.handleInput(up); // save
+  first.component.handleInput(up); // edit
+  first.component.handleInput("\r");
+  const other = { target: { ...target, modelId: "other" }, targetName: "Other" };
+  const next = fixture({
+    state,
+    input: {
+      ...input,
+      targets: [other, ...input.targets],
+      recommendedThinkingLevel: "high",
+      effortDefaultKey: "second",
+    },
+  });
+  assert.equal(state.selectedId, "edit");
+  assert.equal(state.efforts.get(JSON.stringify(["test", "planner"])), "medium");
+  assert.equal(state.efforts.get(JSON.stringify(["test", "worker"])), "high");
+  assert.equal(state.efforts.get(JSON.stringify(["test", "other"])), "high");
+  next.component.dispose();
+});
+
+test("RPC offers recommended effort first and retains explicit selection across keys", async () => {
+  const state = createApprovalState();
+  const select = vi
+    .fn<ExtensionContext["ui"]["select"]>()
+    .mockResolvedValueOnce(HERE)
+    .mockImplementationOnce(async (_question, options) => {
+      assert.equal(options[0], "low");
+      return "medium";
+    });
+  assert.equal(
+    (
+      await pickApproval(
+        rpcContext(select),
+        { ...input, recommendedThinkingLevel: "low", effortDefaultKey: "a" },
+        state,
+      )
+    )?.thinkingLevel,
+    "medium",
+  );
+  const next = fixture({ state, input: { ...input, recommendedThinkingLevel: "high", effortDefaultKey: "b" } });
+  assert.match(next.component.render(120).join("\n"), /effort: medium/u);
+});
+
 test("no UI and pre-aborted signals never open a dialog; abort propagates to RPC selects", async () => {
   const select = vi.fn<ExtensionContext["ui"]["select"]>();
   const controller = new AbortController();

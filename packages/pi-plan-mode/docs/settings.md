@@ -10,7 +10,7 @@ everything else is edited in the file. An invalid file is ignored (defaults appl
 
 ### System 1 tool selection
 
-`jevToolSelection` (default `true`) controls automatic tool preselection for either System 1 backend; `jevThreshold` remains the preselection threshold. `jevProvider` and `jevModel` are compatibility overrides for Jev only. `/system1` configures the suite-wide order of Jev and OpenAI Decisions (Jev only by default); Decisions requires the `pi-system1` component and an isolated `/login system1-openai` API key or `SYSTEM1_OPENAI_API_KEY`, not subscription OAuth. Before selecting Decisions, claim eligible [Pro API credits](https://developers.openai.com/api/docs/guides/chatgpt-api-credits) in an organization with no purchased balance, auto-recharge or paid continuation. Pi cannot verify entitlement or funding. Requests can be billed. Operational failures can advance to the next configured backend with a notification; valid judgments and safety refusals do not trigger failover. The Tools step retains its fallback preselection when the chain is exhausted. Default `alwaysOffer` includes `system1_judge` and legacy `jev`; an explicit list replaces the defaults.
+`jevToolSelection` (default `true`) controls automatic tool preselection for either System 1 backend; `jevThreshold` remains the preselection threshold. `jevProvider` and `jevModel` are compatibility overrides for Jev only, for both tool selection and implementation-effort recommendations. The latter are independent of `jevToolSelection`. `/system1` configures the suite-wide order of Jev and OpenAI Decisions (Jev only by default); Decisions requires the `pi-system1` component and an isolated `/login system1-openai` API key or `SYSTEM1_OPENAI_API_KEY`, not subscription OAuth. Before selecting Decisions, claim eligible [Pro API credits](https://developers.openai.com/api/docs/guides/chatgpt-api-credits) in an organization with no purchased balance, auto-recharge or paid continuation. Pi cannot verify entitlement or funding. Requests can be billed. Operational failures can advance to the next configured backend with a notification; valid judgments and safety refusals do not trigger failover. The Tools step retains its fallback preselection when the chain is exhausted. Default `alwaysOffer` includes `system1_judge` and legacy `jev`; an explicit list replaces the defaults.
 
 ### Workflow and shortcut
 
@@ -93,8 +93,14 @@ with the main session model even for a plan written by A or B; **Handoff** is of
 plan author's targets include a distinct available model. Its model row cycles those targets, and
 its effort row is adjustable with Left/Right in both modes.
 
-Direct execution retains the current effort by default. Handoffs use the target suffix first,
-then `defaultImplementationThinkingLevel`, then `medium`. Unsupported levels normalize to the
+Before approval, System 1 recommends an implementation effort, including for the same model. Manual
+choices win. Direct execution and Linked keep/compact use the recommendation before inherited
+effort. Independent handoffs use the target suffix, then an explicit `defaultImplementationThinkingLevel`,
+then the recommendation, then `medium`. Linked fresh uses an explicit `defaultImplementationThinkingLevel`,
+then the recommendation, then the worker suggestion or existing fallback. If classification is unavailable,
+the existing defaults apply: Linked fresh retains the worker suggestion before the configured fallback.
+This one-shot default neither requires pi-auto-effort nor changes its ongoing policy.
+Unsupported levels normalize to the
 greatest supported level no higher than requested, or the first supported level if none qualifies.
 Nonreasoning models have no effort adjustment. Approval changes are per approval, not saved
 settings; `/planners` retains per-model effort selections when changing modes. Model identity is

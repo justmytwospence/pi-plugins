@@ -41,6 +41,11 @@ import { discoverFreshHandoff } from "./fresh-handoff.js";
 import { directImplementationBrief, HANDOFF_MESSAGE_TYPE, implementationBrief } from "./handoff.js";
 import { HERDR_BLOCKED_CHANNEL, holdBlocked, holdWorking, isOwnEmit } from "./herdr-blocked.js";
 import {
+  type ImplementationEffortPick,
+  type ImplementationEffortRequest,
+  pickImplementationEffort,
+} from "./implementation-effort.js";
+import {
   formatModelKey,
   formatModelSpec,
   type ImplementationContextChoice,
@@ -124,6 +129,7 @@ export interface PlanDependencies {
   readSettings?(): Promise<PlanModeSettings>;
   createSession?: PlannerSessionFactory;
   pickTools?: typeof pickToolsWithJev;
+  pickImplementationEffort?: typeof pickImplementationEffort;
   /** Log in to a provider again, showing the login dialog through `show`; rejects if it fails. */
   login?(providerId: string, show: (dialog: Component) => void): Promise<void>;
 }
@@ -652,6 +658,68 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     };
   };
 
+  /** A one-shot UI default, fenced independently of the eventual execution transition. */
+  const implementationEffortRequest = (
+    ctx: ExtensionContext,
+    planText: string,
+    conversation: string,
+  ): ImplementationEffortRequest => {
+    const config = {
+      provider: settings.jevProvider?.trim() || DEFAULT_JEV_PROVIDER,
+      model: settings.jevModel?.trim() || DEFAULT_JEV_MODEL,
+    };
+    const selection = resolveSystem1Target(config);
+    const selectionEpoch = system1Epoch;
+    const epoch = branchEpoch;
+    const session = ctx.sessionManager.getSessionId?.();
+    const anchor = ctx.sessionManager.getLeafId?.();
+    const model = JSON.stringify(sessionSpecOf(ctx));
+    const flow = queryFlow(pi.events);
+    const isCurrent = () =>
+      runtimeActive &&
+      epoch === branchEpoch &&
+      selectionEpoch === system1Epoch &&
+      resolveSystem1Target({
+        provider: settings.jevProvider?.trim() || DEFAULT_JEV_PROVIDER,
+        model: settings.jevModel?.trim() || DEFAULT_JEV_MODEL,
+      }).key === selection.key &&
+      ctx.sessionManager.getSessionId?.() === session &&
+      (!session || !anchor || ctx.sessionManager.getBranch().some((entry) => entry.id === anchor)) &&
+      JSON.stringify(sessionSpecOf(ctx)) === model &&
+      queryFlow(pi.events)?.revision === flow?.revision &&
+      queryFlow(pi.events)?.operatingMode === flow?.operatingMode;
+    return {
+      key: JSON.stringify([
+        planText,
+        conversation,
+        config,
+        selection.key,
+        selectionEpoch,
+        epoch,
+        session,
+        model,
+        flow?.revision,
+      ]),
+      isCurrent,
+      pick: async (signal) => {
+        if (signal?.aborted || !isCurrent()) return { kind: "fallback", reason: "cancelled" };
+        try {
+          const result = await (dependencies.pickImplementationEffort ?? pickImplementationEffort)({
+            plan: planText,
+            conversation,
+            cwd: ctx.cwd,
+            registry: ctx.modelRegistry,
+            ...config,
+            signal,
+          });
+          return !signal?.aborted && isCurrent() ? result : { kind: "fallback", reason: "cancelled" };
+        } catch {
+          return { kind: "fallback", reason: "implementation effort is unavailable" };
+        }
+      },
+    };
+  };
+
   /** Stop old work without saving into the newly selected branch. */
   const clearBranch = () => {
     freshApproval = undefined;
@@ -773,6 +841,12 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     safeSubcommands: () => settings.safeSubcommands,
     plansDirectory: () => settings.plansDirectory,
     approved: (plan, ctx) => hook(ctx, { id: "plan", name: "plan", revision: 1, plan, spec: undefined }),
+    implementationEffort: (ctx, approvedPlan) =>
+      implementationEffortRequest(
+        ctx,
+        approvedPlan.plan,
+        buildPlannerTranscript(ctx.sessionManager.getBranch(), 4_000),
+      ),
     implementationChoices: (ctx, approvedPlan) => {
       const planning = sessionSpecOf(ctx);
       if (!planning) return undefined;
@@ -785,6 +859,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           planningName: catalog.name(planning),
           intent: "linked-execution" as const,
           flow: structuredClone(flow),
+          defaultThinkingLevel: settings.defaultImplementationThinkingLevel,
           ...(worker &&
           discoverFreshHandoff(pi.events, {
             sessionManager: ctx.sessionManager,
@@ -1210,7 +1285,11 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
     const family = discoverFamily(pi.events);
     await openPlanningView(ctx, family, (tui, theme, keybindings, done, viewport) => {
       const rows = () => Math.max(1, viewport().height);
-      const render = () => tui.requestRender();
+      let refreshImplementation: (() => void) | undefined;
+      const render = () => {
+        refreshImplementation?.();
+        tui.requestRender();
+      };
       let page: Component & { typing?: boolean; focused?: boolean } = undefined as never;
       let focused = true;
       const ticker = setInterval(() => {
@@ -1966,8 +2045,15 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
         const worker = linkedImplementationChoice(flow, implementationCatalog.available);
         let mode: "here" | "handoff" = linked ? "handoff" : "here";
         let context: ImplementationContextChoice | "compact" = configuredImplementationContext(settings);
-        let effortTouched = false;
         const efforts = new Map<string, ModelSpec>();
+        const effortCache = new Map<string, Promise<ImplementationEffortPick>>();
+        let recommendation: ThinkingLevel | undefined;
+        let effortPending = false;
+        let effortController: AbortController | undefined;
+        let effortRequest: ImplementationEffortRequest | undefined;
+        let effortCacheKey: string | undefined;
+        let effortRevision = 0;
+        let alive = true;
         const choices = () =>
           linked
             ? worker
@@ -1980,20 +2066,88 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
               })
                 .map(({ spec }) => spec)
                 .filter((spec) => !sessionSpec || !sameModel(spec, sessionSpec));
+        const pinnedEffort = (spec: ModelSpec, direct = false): ThinkingLevel | undefined =>
+          direct || (linked && context !== "clear")
+            ? undefined
+            : linked
+              ? recommendation === undefined
+                ? (spec.thinkingLevel ?? settings.defaultImplementationThinkingLevel)
+                : settings.defaultImplementationThinkingLevel
+              : (spec.thinkingLevel ?? settings.defaultImplementationThinkingLevel);
         const remembered = (spec: ModelSpec, direct = false) =>
           efforts.get(formatModelKey(spec)) ??
           normalizedSpec(
             ctx,
             spec,
-            direct || (linked && context !== "clear")
-              ? sessionLevel
-              : (spec.thinkingLevel ?? settings.defaultImplementationThinkingLevel ?? "medium"),
+            pinnedEffort(spec, direct) ??
+              recommendation ??
+              (direct || (linked && context !== "clear") ? sessionLevel : (spec.thinkingLevel ?? "medium")),
           );
         const here = sessionSpec ?? firstPlanner;
         let target = remembered(worker?.spec ?? here, !linked);
-        const remember = () => efforts.set(formatModelKey(target), target);
+        const rawTarget = () =>
+          mode === "here"
+            ? here
+            : linked
+              ? (worker?.spec ?? here)
+              : (choices().find((spec) => sameModel(spec, target)) ?? target);
+        const refreshEffort = () => {
+          target = remembered(rawTarget(), mode === "here");
+        };
+        const defaultPending = () =>
+          effortPending &&
+          !efforts.has(formatModelKey(target)) &&
+          pinnedEffort(rawTarget(), mode === "here") === undefined &&
+          implementationCatalog.efforts(target).some((level) => level !== undefined);
+        const authorCurrent = () =>
+          ready().some(
+            (source) => source.id === author.id && source.revision === author.revision && source.plan === author.plan,
+          );
+        const chooseEffort = () => {
+          effortController?.abort();
+          if (effortPending && effortCacheKey) effortCache.delete(effortCacheKey);
+          const controller = new AbortController();
+          effortController = controller;
+          const revision = ++effortRevision;
+          recommendation = undefined;
+          effortPending = false;
+          refreshEffort();
+          const request = implementationEffortRequest(
+            ctx,
+            author.plan,
+            [run?.task, buildPlannerTranscript(ctx.sessionManager.getBranch(), 4_000)].filter(Boolean).join("\n\n"),
+          );
+          effortRequest = request;
+          const needsDefault = (spec: ModelSpec, direct: boolean) =>
+            !efforts.has(formatModelKey(spec)) &&
+            (direct ||
+              (spec.thinkingLevel === undefined && settings.defaultImplementationThinkingLevel === undefined)) &&
+            implementationCatalog.efforts(spec).some((level) => level !== undefined);
+          if (
+            linked
+              ? !worker || !needsDefault(worker.spec, true)
+              : ![here, ...choices()].some((spec, index) => needsDefault(spec, index === 0))
+          )
+            return;
+          const key = JSON.stringify([author.id, author.revision, request.key]);
+          effortCacheKey = key;
+          let pending = effortCache.get(key);
+          if (!pending) {
+            pending = request.pick(controller.signal);
+            effortCache.set(key, pending);
+          }
+          effortPending = true;
+          void pending.then((result) => {
+            if (!alive || revision !== effortRevision) return;
+            effortPending = false;
+            if (!controller.signal.aborted && request.isCurrent() && authorCurrent()) {
+              recommendation = result.kind === "system1" ? result.thinkingLevel : undefined;
+              refreshEffort();
+            }
+            if (!closed && epoch === branchEpoch) render();
+          });
+        };
         const resetTarget = () => {
-          remember();
           const offered = choices();
           if (!offered.length && linked) return;
           if (!offered.length) mode = "here";
@@ -2010,6 +2164,7 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
               const index = list.findIndex((source) => source.id === author.id);
               author = list[(index + direction + list.length) % list.length] ?? author;
               resetTarget();
+              chooseEffort();
             },
             description: "Which plan to implement.",
             hidden: () => ready().length < 2,
@@ -2031,7 +2186,6 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
             value: () => (linked && !worker ? "unavailable" : implementationCatalog.name(target)),
             cycle: (direction) => {
               if (linked || mode === "here") return;
-              remember();
               const offered = choices();
               const index = offered.findIndex((spec) => sameModel(spec, target));
               const next = offered[(index + direction + offered.length) % offered.length];
@@ -2046,7 +2200,9 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
             label: "Effort",
             value: () =>
               implementationCatalog.efforts(target).some(Boolean)
-                ? effortText(theme, target.thinkingLevel)
+                ? defaultPending()
+                  ? theme.fg("dim", "choosing...")
+                  : effortText(theme, target.thinkingLevel)
                 : theme.fg("dim", "n/a"),
             cycle: (direction) => {
               const levels = implementationCatalog
@@ -2055,10 +2211,10 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
               if (levels.length) {
                 const index = Math.max(0, levels.indexOf(target.thinkingLevel ?? sessionLevel));
                 target = { ...target, thinkingLevel: levels[(index + direction + levels.length) % levels.length] };
-                effortTouched = true;
+                efforts.set(formatModelKey(target), target);
               }
             },
-            description: "How hard the implementing model thinks.",
+            description: "System 1 picks the default from the plan. Left/Right overrides it for this approval.",
           },
           {
             id: "context",
@@ -2083,22 +2239,14 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
                 : context === "clear"
                   ? "keep"
                   : "clear";
-              if (linked && worker && !effortTouched) {
-                target = normalizedSpec(
-                  ctx,
-                  worker.spec,
-                  context === "clear"
-                    ? (worker.spec.thinkingLevel ?? settings.defaultImplementationThinkingLevel ?? "medium")
-                    : sessionLevel,
-                );
-              }
+              refreshEffort();
             },
             description: linked
               ? "Retain this conversation, compact to the approved plan, or start a fresh child with only the plan."
               : "Here keeps the same session. Handoff can instead start a fresh child with only the plan.",
           },
         ];
-        return new OptionsPage(theme, {
+        const implementationPage = new OptionsPage(theme, {
           title: "Implement",
           context: () => `plan ${author.id}`,
           step: "Implement",
@@ -2114,7 +2262,11 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           next: {
             label: linked ? "Execute with linked worker" : "implement",
             run: () => {
-              if (linked && !worker) return;
+              if ((linked && !worker) || defaultPending()) return;
+              if (!authorCurrent() || !effortRequest?.isCurrent()) {
+                ctx.ui.notify("Implementation choice expired; reopen Implement to approve it again.", "warning");
+                return;
+              }
               close();
               void implement(ctx, author, target, context, mode, linkedFlow);
             },
@@ -2123,6 +2275,26 @@ export default async function plan(pi: ExtensionAPI, dependencies: PlanDependenc
           rowsAvailable: rows,
           requestRender: render,
         });
+        // Planner updates arrive through app.render(), before the next screen paint.
+        // Refresh here rather than initiating classifier work inside component.render().
+        const refresh = () => {
+          if (!alive) return;
+          const latest = ready().find((source) => source.id === author.id);
+          if (!latest || (latest.revision === author.revision && latest.plan === author.plan)) return;
+          author = latest;
+          resetTarget();
+          chooseEffort();
+        };
+        refreshImplementation = refresh;
+        const dispose = implementationPage.dispose.bind(implementationPage);
+        implementationPage.dispose = () => {
+          alive = false;
+          if (refreshImplementation === refresh) refreshImplementation = undefined;
+          effortController?.abort();
+          dispose();
+        };
+        chooseEffort();
+        return implementationPage;
       };
 
       // --- Export ------------------------------------------------------------------------------

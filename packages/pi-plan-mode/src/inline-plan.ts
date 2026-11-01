@@ -35,8 +35,10 @@ import { PLAN_STANDARD } from "./handoff.js";
 export { EDIT, HERE, handoffLabel, KEEP, OPTION_MAX, SAVE } from "./approval-picker.js";
 
 import { holdBlocked } from "./herdr-blocked.js";
+import type { ImplementationEffortPick, ImplementationEffortRequest } from "./implementation-effort.js";
 import { type ModelSpec, type ModelSpecThinkingLevel, sameModel } from "./implementation-models.js";
 import { PlanMarkdown } from "./mermaid-art.js";
+import { modelCatalog } from "./model-catalog.js";
 import {
   newPlanFile,
   planSlug,
@@ -123,6 +125,8 @@ export interface InlineHost {
         freshTarget?: { target: ModelSpec; targetName: string };
       }
     | undefined;
+  /** A task-level default only; callers retain manual effort choices and approval freshness. */
+  implementationEffort?(ctx: ExtensionContext, plan: Pick<Approval, "plan" | "planFile">): ImplementationEffortRequest;
   compactHere(approval: Approval): void;
   /** Hand the approved plan off once this turn ends (fresh context, `who.target`'s model). */
   handoff(approval: Approval, who: HandoffTarget | undefined, ctx: ExtensionContext): void;
@@ -594,6 +598,20 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
       if (approvalFlow?.operatingMode === "linked" && !models?.freshTarget)
         ctx.ui.notify("For a fresh conversation, use /planners.", "info");
       const pickerState = createApprovalState();
+      const effortCache = new Map<string, Promise<ImplementationEffortPick>>();
+      const catalog = modelCatalog(ctx, "available");
+      const reasoning = (spec: ModelSpec | undefined) =>
+        spec && catalog.efforts(spec).some((level) => level !== undefined);
+      const needsEffortDefault =
+        approvalFlow?.operatingMode === "linked"
+          ? models?.targets.some(({ target }) => reasoning(target))
+          : reasoning(
+              models?.planning ?? (ctx.model ? { provider: ctx.model.provider, modelId: ctx.model.id } : undefined),
+            ) ||
+            models?.targets.some(
+              ({ target }) =>
+                reasoning(target) && target.thinkingLevel === undefined && models.defaultThinkingLevel === undefined,
+            );
       reviewViewport.begin(ctx, id);
       const releaseBlocked = holdBlocked(pi.events, "Review the plan");
       // The agent is waiting on the user: the Working row only takes a plan line.
@@ -612,18 +630,36 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
               ...(previous ? { previous, ...(changes ? { changes: [...changes] } : {}) } : {}),
             } satisfies ExitDetails,
           } as never);
+          const request = needsEffortDefault ? host.implementationEffort?.(ctx, { plan, planFile }) : undefined;
+          let effort: ImplementationEffortPick | undefined;
+          if (request) {
+            let pending = effortCache.get(request.key);
+            if (!pending) {
+              pending = request.pick(signal);
+              effortCache.set(request.key, pending);
+            }
+            effort = await pending;
+            if (!current() || readPlan(planFile) !== plan || (!signal?.aborted && !request.isCurrent()))
+              return text(
+                "Plan review expired because the plan, workflow, branch, model or System 1 changed. Approve the plan again.",
+              );
+          }
           const picked = await pickApproval(
             ctx,
             {
               ...models,
+              ...(request ? { effortDefaultKey: request.key } : {}),
+              ...(effort?.kind === "system1" ? { recommendedThinkingLevel: effort.thinkingLevel } : {}),
               ...(approvalFlow?.operatingMode === "linked" ? { intent: "linked-execution" as const } : {}),
               targets: models?.targets ?? [],
             },
             pickerState,
             signal,
           );
-          if (!current() || readPlan(planFile) !== plan)
-            return text("Plan review expired because the plan, workflow or branch changed. Approve the plan again.");
+          if (!current() || readPlan(planFile) !== plan || (!signal?.aborted && request && !request.isCurrent()))
+            return text(
+              "Plan review expired because the plan, workflow, branch, model or System 1 changed. Approve the plan again.",
+            );
           const choice = signal?.aborted ? undefined : picked?.choice;
           if (choice?.kind === "edit") {
             // In your external editor when one is set (pi's externalEditor, or $VISUAL / $EDITOR),
@@ -632,8 +668,10 @@ export function registerInlinePlanMode(pi: ExtensionAPI, host: InlineHost): Inli
             const revised = command
               ? await editInTerminal(ctx.ui as never, command, plan, "plan.md")
               : await ctx.ui.editor("Edit the plan", plan);
-            if (!current())
-              return text("Plan review expired because the workflow or branch changed. Approve the plan again.");
+            if (!current() || (!signal?.aborted && request && !request.isCurrent()))
+              return text(
+                "Plan review expired because the workflow, branch, model or System 1 changed. Approve the plan again.",
+              );
             if (signal?.aborted) continue;
             if (command && revised === undefined)
               ctx.ui.notify(`${command.split(" ")[0]} did not save the plan.`, "warning");

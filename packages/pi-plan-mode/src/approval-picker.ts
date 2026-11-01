@@ -53,6 +53,8 @@ export interface ApprovalInput {
   planning?: ModelSpec;
   targets: Array<{ target: ModelSpec; targetName: string }>;
   defaultThinkingLevel?: ModelSpecThinkingLevel;
+  recommendedThinkingLevel?: ModelSpecThinkingLevel;
+  effortDefaultKey?: string;
   intent?: "independent" | "linked-execution";
   flow?: FlowState;
   /** Only advertised when the optional approved-plan host handoff is available. */
@@ -68,18 +70,34 @@ export interface ApprovalResult {
 export interface ApprovalState {
   selectedId: string;
   efforts: Map<string, ModelSpecThinkingLevel | undefined>;
+  manuallyAdjusted: Set<string>;
+  effortDefaultKey?: string;
 }
 
 export function createApprovalState(): ApprovalState {
-  return { selectedId: "here", efforts: new Map() };
+  return { selectedId: "here", efforts: new Map(), manuallyAdjusted: new Set() };
 }
 
 const modelId = (spec: ModelSpec) => JSON.stringify([spec.provider, spec.modelId]);
 type Row = { id: string; choice: ApprovalChoice; label: string; model?: ModelSpec };
-// Fresh starts with the worker suggestion; editing its effort must not change in-place effort.
+// Fresh has its own default and manual overrides; edits must not change in-place effort.
 const effortId = (row: Row) =>
   `${row.choice.kind === "handoff" && row.choice.context === "clear" ? "fresh:" : ""}${row.model ? modelId(row.model) : ""}`;
 type Catalog = Pick<ReturnType<typeof modelCatalog>, "efforts">;
+
+function initialEffort(row: Row, input: ApprovalInput, linked: boolean): ModelSpecThinkingLevel | undefined {
+  const recommended = input.recommendedThinkingLevel;
+  if (row.choice.kind !== "handoff") return recommended ?? input.planning?.thinkingLevel;
+  if (!linked) return row.model?.thinkingLevel ?? input.defaultThinkingLevel ?? recommended ?? "medium";
+  if (row.choice.context === "clear") {
+    if (recommended !== undefined)
+      return input.defaultThinkingLevel ?? recommended ?? row.model?.thinkingLevel ?? "medium";
+    return row.model?.thinkingLevel ?? input.defaultThinkingLevel ?? "medium";
+  }
+  // In the new host input the configured setting belongs only to fresh execution.
+  const fallback = input.effortDefaultKey === undefined ? input.defaultThinkingLevel : undefined;
+  return recommended ?? row.model?.thinkingLevel ?? fallback ?? "medium";
+}
 
 /** A single inline Pi-layout component, also exported for remote-client rendering fixtures. */
 export class ApprovalPicker implements Component {
@@ -135,14 +153,17 @@ export class ApprovalPicker implements Component {
     ];
     this.rows = [...executionRows, ...remainingRows] as [Row, ...Row[]];
     if (!this.rows.some((row) => row.id === state.selectedId)) state.selectedId = this.rows[0].id;
+    if (input.effortDefaultKey !== undefined && input.effortDefaultKey !== state.effortDefaultKey) {
+      for (const id of state.efforts.keys()) {
+        if (!state.manuallyAdjusted.has(id)) state.efforts.delete(id);
+      }
+      state.effortDefaultKey = input.effortDefaultKey;
+    }
     for (const row of this.rows) {
       if (!row.model) continue;
       const id = effortId(row);
       const levels = this.levels(row);
-      const initial =
-        row.choice.kind === "handoff"
-          ? (row.model.thinkingLevel ?? input.defaultThinkingLevel ?? "medium")
-          : input.planning?.thinkingLevel;
+      const initial = initialEffort(row, input, linked);
       state.efforts.set(id, normalizeEffort(state.efforts.has(id) ? state.efforts.get(id) : initial, levels));
     }
     signal?.addEventListener("abort", this.onAbort, { once: true });
@@ -258,7 +279,10 @@ export class ApprovalPicker implements Component {
             ? 0
             : levels.length - 1
           : (current + (matchesKey(data, "right") ? 1 : -1) + levels.length) % levels.length;
-      this.state.efforts.set(effortId(row), levels[next]);
+      if (levels[next] !== this.effort(row)) {
+        this.state.efforts.set(effortId(row), levels[next]);
+        this.state.manuallyAdjusted.add(effortId(row));
+      }
     } else {
       return; // The review viewport's independent Ctrl+U/D listener remains in charge.
     }
@@ -295,6 +319,7 @@ export class ApprovalPicker implements Component {
           effortId(row),
           selectedEffort === "Model default" ? undefined : (selectedEffort as ModelSpecThinkingLevel),
         );
+        this.state.manuallyAdjusted.add(effortId(row));
       }
       return this.result(row);
     }

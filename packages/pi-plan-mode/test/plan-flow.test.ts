@@ -6,6 +6,7 @@ import { type ExtensionContext, initTheme } from "@earendil-works/pi-coding-agen
 import { onTestFinished, test } from "vitest";
 import { FAMILY_CHANNEL, FAMILY_ENTRY, type FamilyMembership, type FamilyRequest } from "../src/family-contract.js";
 import { directImplementationBrief, implementationBrief } from "../src/handoff.js";
+import type { ImplementationEffortPick, pickImplementationEffort } from "../src/implementation-effort.js";
 import planMode from "../src/index.js";
 import { INLINE_ENTRY, MODE_CHANGED, MODE_SET, PLAN_PROVIDER } from "../src/inline-plan.js";
 import type { JevToolPick, pickToolsWithJev } from "../src/jev-tool-picker.js";
@@ -123,6 +124,7 @@ function setup(
     approval?: "auto" | "bypassPermissions";
     configureContext?: (ctx: ExtensionContext) => void;
     pickTools?: typeof pickToolsWithJev;
+    pickImplementationEffort?: typeof pickImplementationEffort;
   } = {},
 ) {
   const mock = createMockPi({ thinkingLevel: options.thinkingLevel ?? "high" });
@@ -130,6 +132,8 @@ function setup(
   const ready = planMode(mock.pi, {
     ...(options.login ? { login: options.login } : {}),
     ...(options.pickTools ? { pickTools: options.pickTools } : {}),
+    pickImplementationEffort:
+      options.pickImplementationEffort ?? (async () => ({ kind: "fallback", reason: "fixture unavailable" })),
     readSettings: async () => ({
       thinkingLevel: "inherit",
       planners: [{ provider: "anthropic", modelId: "claude-sonnet-5-5", thinkingLevel: "low" }],
@@ -395,6 +399,7 @@ async function implementationScreen(
   for (let index = 0; index < 5 && !/⏎ do it/u.test(app.render().join("\n")); index++) app.handleInput("\t");
   app.handleInput("\r");
   assert.match(app.render().join("\n"), /● Implement/u);
+  if (!options.pickImplementationEffort) await flush();
   const focus = (label: string) => {
     for (let index = 0; index < 10; index++) {
       if (new RegExp(`${label}\\s+‹`, "u").test(app.render().join("\n"))) return;
@@ -404,6 +409,257 @@ async function implementationScreen(
   };
   return { ...state, app, opened, focus };
 }
+
+function effortPick(thinkingLevel: "low" | "medium" | "high" | "xhigh"): ImplementationEffortPick {
+  const target = resolveSystem1Target({ provider: "typesafe", model: "jev-latest" });
+  assert.ok(target.ok);
+  return {
+    kind: "system1",
+    thinkingLevel,
+    backend: "jev",
+    provider: "typesafe",
+    model: "jev-latest",
+    selectionKey: target.key,
+  };
+}
+
+function deferredEffort() {
+  const calls: Array<{
+    input: Parameters<typeof pickImplementationEffort>[0];
+    finish: (result: ImplementationEffortPick) => void;
+  }> = [];
+  const pick: typeof pickImplementationEffort = (input) => new Promise((finish) => calls.push({ input, finish }));
+  return { calls, pick };
+}
+
+for (const manual of [false, true]) {
+  test(`/planners refreshes a live plan revision and ${manual ? "retains manual effort" : "reclassifies the default"}`, async () => {
+    const requests = deferredEffort();
+    const state = await implementationScreen({ pickImplementationEffort: requests.pick });
+    if (manual) {
+      state.focus("Effort");
+      state.app.handleInput("\u001b[D"); // inherited high -> medium while the first default is pending
+    }
+    const submit = state.mock.tools.find((tool) => tool.name === "plan_submit_merged");
+    assert.ok(submit && typeof submit.execute === "function");
+    await submit.execute(
+      "revised-plan",
+      { plan: "# Revised M\n\nExecute the new revision." },
+      undefined,
+      undefined,
+      state.context.ctx,
+    );
+    assert.match(state.app.render().join("\n"), /M \(merged\).*v2/u);
+    // A manual default needs no new judgment for Here, but other unpinned offered
+    // models can still need one; either way an old result cannot replace it.
+    requests.calls[0]?.finish(effortPick("low"));
+    for (const call of requests.calls.slice(1)) call.finish(effortPick("high"));
+    await flush();
+    if (manual) assert.match(state.app.render().join("\n"), /Effort\s+‹ medium ›/u);
+    else {
+      assert.equal(requests.calls.length, 2);
+      assert.equal(requests.calls[1]?.input.plan, "# Revised M\n\nExecute the new revision.");
+      assert.match(state.app.render().join("\n"), /Effort\s+high/u);
+    }
+    state.app.handleInput("\r");
+    await state.opened;
+    await flush();
+    assert.equal(state.mock.thinkingLevel, manual ? "medium" : "high");
+    assert.match(state.mock.sentUserMessages.at(-1)?.text ?? "", /# Revised M/u);
+  });
+}
+
+for (const clear of [false, true]) {
+  test(`/planners Here recommends effort for the same model with ${clear ? "compact" : "kept"} context`, async () => {
+    const requests = deferredEffort();
+    const state = await implementationScreen({ pickImplementationEffort: requests.pick });
+    assert.equal(requests.calls.length, 1);
+    assert.equal(requests.calls[0]?.input.plan, "# Exact M\n\nDo M.");
+    assert.match(requests.calls[0]?.input.conversation ?? "", /approved task/u);
+    assert.match(state.app.render().join("\n"), /choosing\.\.\./u);
+    state.app.handleInput("\r");
+    assert.equal(state.mock.sentUserMessages.length, 0, "a pending untouched default cannot be approved");
+    requests.calls[0]?.finish(effortPick("low"));
+    await flush();
+    assert.match(state.app.render().join("\n"), /Effort\s+low/u);
+    let compact: { onComplete(result: unknown): void; customInstructions: string } | undefined;
+    Object.assign(state.context.ctx, {
+      compact: (options: typeof compact) => {
+        compact = options;
+      },
+    });
+    if (clear) {
+      state.focus("Context");
+      state.app.handleInput("\u001b[C");
+    }
+    state.app.handleInput("\r");
+    await state.opened;
+    await flush();
+    if (clear) {
+      assert.ok(compact);
+      const before = compactionDispatcher(state.mock);
+      assert.ok(before);
+      const result = (await before(
+        {
+          customInstructions: compact.customInstructions,
+          signal: new AbortController().signal,
+          preparation: { tokensBefore: 10 },
+        },
+        state.context.ctx,
+      )) as { compaction: unknown };
+      compact.onComplete(result.compaction);
+    }
+    assert.equal(state.mock.thinkingLevel, "low");
+    assert.equal(state.mock.setModels.length, 0);
+    assert.equal(state.mock.sentUserMessages.length, 1);
+  });
+}
+
+test("/planners reclassifies authors and caches results without calls on mode, model or context cycling", async () => {
+  const requests = deferredEffort();
+  const state = await implementationScreen({
+    pickImplementationEffort: requests.pick,
+    settings: { implementationModelMap: implementationMap },
+  });
+  requests.calls[0]?.finish(effortPick("low"));
+  await flush();
+  state.focus("Mode");
+  state.app.handleInput("\u001b[C");
+  state.focus("Context");
+  state.app.handleInput("\u001b[C");
+  state.focus("Mode");
+  state.app.handleInput("\u001b[C");
+  assert.equal(requests.calls.length, 1);
+  state.focus("Plan");
+  state.app.handleInput("\u001b[C");
+  assert.equal(requests.calls.length, 2);
+  assert.match(requests.calls[1]?.input.plan ?? "", /# Exact A/u);
+  requests.calls[1]?.finish(effortPick("xhigh"));
+  await flush();
+  assert.match(state.app.render().join("\n"), /Effort\s+high/u, "normalize xhigh to supported high");
+  state.app.handleInput("\u001b[D");
+  await flush();
+  assert.equal(requests.calls.length, 2, "returning to an unchanged plan reuses its cached recommendation");
+  assert.match(state.app.render().join("\n"), /Effort\s+low/u);
+  for (const handler of state.mock.events.get("session_shutdown") ?? []) await handler({}, state.context.ctx);
+  await state.opened;
+});
+
+test("/planners manual effort wins a pending race and permits approval", async () => {
+  const requests = deferredEffort();
+  const state = await implementationScreen({ pickImplementationEffort: requests.pick });
+  state.focus("Effort");
+  state.app.handleInput("\u001b[D");
+  assert.match(state.app.render().join("\n"), /Effort\s+‹ medium ›/u);
+  state.app.handleInput("\r");
+  await state.opened;
+  requests.calls[0]?.finish(effortPick("xhigh"));
+  await flush();
+  assert.equal(state.mock.thinkingLevel, "medium");
+  assert.equal(state.mock.sentUserMessages.length, 1);
+});
+
+test("/planners remembers manual effort per model while configured handoff effort beats recommendation", async () => {
+  const requests = deferredEffort();
+  const state = await implementationScreen({
+    pickImplementationEffort: requests.pick,
+    settings: { implementationModelMap: implementationMap },
+  });
+  requests.calls[0]?.finish(effortPick("xhigh"));
+  await flush();
+  state.focus("Effort");
+  state.app.handleInput("\u001b[D");
+  assert.match(state.app.render().join("\n"), /Effort\s+‹ medium ›/u);
+  state.focus("Mode");
+  state.app.handleInput("\u001b[C");
+  assert.match(state.app.render().join("\n"), /Effort\s+low/u);
+  state.focus("Effort");
+  state.app.handleInput("\u001b[C");
+  state.focus("Context");
+  state.app.handleInput("\u001b[C");
+  state.focus("Mode");
+  state.app.handleInput("\u001b[C");
+  assert.match(state.app.render().join("\n"), /Effort\s+medium/u);
+  state.app.handleInput("\u001b[C");
+  assert.match(state.app.render().join("\n"), /Effort\s+medium/u);
+  assert.equal(requests.calls.length, 1);
+  for (const handler of state.mock.events.get("session_shutdown") ?? []) await handler({}, state.context.ctx);
+  await state.opened;
+});
+
+test("/planners default handoff setting wins and manual choices survive model cycling", async () => {
+  const haiku = { ...SONNET, id: "claude-haiku-4-5", name: "Claude Haiku 4.5" };
+  const requests = deferredEffort();
+  const state = await implementationScreen({
+    pickImplementationEffort: requests.pick,
+    settings: {
+      defaultImplementationThinkingLevel: "low",
+      implementationModelMap: {
+        "anthropic/claude-sonnet-5-5": [
+          { provider: OPUS.provider, modelId: OPUS.id },
+          { provider: haiku.provider, modelId: haiku.id },
+        ],
+      },
+    },
+    configureContext: (ctx) => {
+      const models = [SONNET, OPUS, haiku];
+      Object.assign(ctx.modelRegistry, {
+        getAvailable: () => models,
+        find: (provider: string, id: string) => models.find((model) => model.provider === provider && model.id === id),
+      });
+    },
+  });
+  requests.calls[0]?.finish(effortPick("high"));
+  await flush();
+  state.focus("Mode");
+  state.app.handleInput("\u001b[C");
+  assert.match(state.app.render().join("\n"), /Effort\s+low/u);
+  state.focus("Effort");
+  state.app.handleInput("\u001b[C");
+  state.focus("Model");
+  state.app.handleInput("\u001b[C");
+  assert.match(state.app.render().join("\n"), /Effort\s+low/u);
+  state.focus("Effort");
+  state.app.handleInput("\u001b[C");
+  state.app.handleInput("\u001b[C");
+  state.focus("Model");
+  state.app.handleInput("\u001b[D");
+  assert.match(state.app.render().join("\n"), /Effort\s+medium/u);
+  state.app.handleInput("\u001b[C");
+  assert.match(state.app.render().join("\n"), /Effort\s+high/u);
+  assert.equal(requests.calls.length, 1);
+  for (const handler of state.mock.events.get("session_shutdown") ?? []) await handler({}, state.context.ctx);
+  await state.opened;
+});
+
+for (const stale of ["dispose", "tree", "backend"] as const) {
+  test(`/planners ignores a late recommendation after ${stale}`, async () => {
+    const requests = deferredEffort();
+    const state = await implementationScreen({ pickImplementationEffort: requests.pick });
+    if (stale === "dispose") state.app.handleInput("\u001b");
+    else if (stale === "backend") state.mock.eventBus.emit(SYSTEM1_CHANGED, {});
+    else for (const handler of state.mock.events.get("session_tree") ?? []) await handler({}, state.context.ctx);
+    requests.calls[0]?.finish(effortPick("low"));
+    await flush();
+    assert.equal(state.mock.thinkingLevel, "high");
+    assert.equal(state.mock.sentUserMessages.length, 0);
+    if (stale === "dispose") assert.equal(requests.calls[0]?.input.signal?.aborted, true);
+    else assert.doesNotMatch(state.app.render().join("\n"), /Effort\s+low/u);
+    for (const handler of state.mock.events.get("session_shutdown") ?? []) await handler({}, state.context.ctx);
+    await state.opened;
+  });
+}
+
+test("/planners unavailable recommendation preserves the inherited baseline", async () => {
+  const requests = deferredEffort();
+  const state = await implementationScreen({ thinkingLevel: "off", pickImplementationEffort: requests.pick });
+  requests.calls[0]?.finish({ kind: "fallback", reason: "unavailable" });
+  await flush();
+  assert.match(state.app.render().join("\n"), /Effort\s+off/u);
+  state.app.handleInput("\r");
+  await state.opened;
+  assert.equal(state.mock.thinkingLevel, "off");
+});
 
 for (const author of ["A", "B", "M"]) {
   for (const clear of [false, true]) {
@@ -772,6 +1028,7 @@ test("/planners Here retains off effort and hides handoffs to the current sessio
   state.focus("Plan");
   state.app.handleInput("\u001b[C");
   state.app.handleInput("\u001b[C");
+  await flush();
   assert.doesNotMatch(state.app.render().join("\n"), /Mode\s+/u);
   state.app.handleInput("\r");
   await state.opened;
@@ -1548,6 +1805,7 @@ test("/planners opens on the settings, goes through tools, plans with two planne
   screen = app.render().join("\n");
   assert.match(screen, /● Implement/u);
   assert.match(screen, /M \(merged\) · Claude Sonnet 5\.5/u);
+  await flush();
   app.handleInput("\r");
   await opened;
   await flush();

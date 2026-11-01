@@ -23,9 +23,11 @@ import {
   queryFlow,
 } from "../src/flow-contract.js";
 import { FRESH_HANDOFF_CHANNEL, type FreshHandoffRequest } from "../src/fresh-handoff.js";
+import type { pickImplementationEffort } from "../src/implementation-effort.js";
 import planMode from "../src/index.js";
 import { ENTER_TOOL, EXIT_TOOL, INLINE_ENTRY, MODE_CHANGED, MODE_SET } from "../src/inline-plan.js";
 import * as plannerSessions from "../src/planner/session.js";
+import type { PlanModeSettings } from "../src/settings.js";
 import { createCustomSelectorHarness, createMockContext, createMockPi } from "./support.js";
 
 initTheme("dark");
@@ -150,7 +152,14 @@ function coordinator(mock: MockPi, ctx: ExtensionCommandContext) {
 }
 
 async function fixture(
-  options: { choice?: string; planners?: boolean; thinkingLevel?: "high" | "off"; fresh?: boolean } = {},
+  options: {
+    choice?: string;
+    planners?: boolean;
+    thinkingLevel?: "high" | "off";
+    fresh?: boolean;
+    settings?: Partial<PlanModeSettings>;
+    pickImplementationEffort?: typeof pickImplementationEffort;
+  } = {},
 ) {
   const directory = mkdtempSync(join(tmpdir(), "linked-plan-lifecycle-"));
   const mock = createMockPi({
@@ -246,6 +255,8 @@ async function fixture(
     rmSync(directory, { recursive: true, force: true });
   });
   await planMode(mock.pi, {
+    pickImplementationEffort:
+      options.pickImplementationEffort ?? (async () => ({ kind: "fallback", reason: "classifier unavailable" })),
     readSettings: async () => ({
       thinkingLevel: "inherit",
       jevToolSelection: false,
@@ -254,6 +265,7 @@ async function fixture(
       completionReview: false,
       // An available free target must still not leak into Linked choices.
       implementationModelMap: { "test/sol": [{ provider: OTHER.provider, modelId: OTHER.id }] },
+      ...options.settings,
     }),
     createSession: async () => {
       throw new Error("Lifecycle tests must not start a real planner session.");
@@ -464,8 +476,90 @@ for (const choice of [KEEP, COMPACT]) {
   });
 }
 
+for (const choice of [KEEP, COMPACT]) {
+  test(`same-model linked '${choice}' approves the recommendation before entering Exec once`, async () => {
+    const recommendation = deferred<Awaited<ReturnType<typeof pickImplementationEffort>>>();
+    const requested = deferred<void>();
+    const picker = vi.fn<typeof pickImplementationEffort>(async (input) => {
+      requested.resolve();
+      assert.equal(input.plan, PLAN.trim());
+      return recommendation.promise;
+    });
+    const f = await fixture({ choice, pickImplementationEffort: picker });
+    await f.plan();
+    const levelsBefore = [...f.mock.thinkingLevels];
+    const reviewing = f.tool(EXIT_TOOL);
+    await requested.promise;
+    assert.equal(f.selections.length, 0, "approval waits for the recommendation");
+    assert.equal(f.inline()?.active, true);
+    assert.equal(await f.guard(), true);
+    f.assertNoExec();
+    recommendation.resolve({
+      kind: "system1",
+      thinkingLevel: "low",
+      backend: "jev",
+      provider: "typesafe",
+      model: "jev-latest",
+      selectionKey: "typesafe/jev-latest",
+    });
+    const approved = await reviewing;
+    assert.equal((approved as { terminate?: boolean }).terminate, true);
+    assert.equal(picker.mock.calls.length, 1);
+    assert.equal(f.selections[1]?.title, "Implementation effort");
+    assert.equal(f.selections[1]?.choices[0], "low");
+    assert.deepEqual(f.mock.thinkingLevels, levelsBefore, "opening and approving do not apply effort");
+    assert.equal(await f.guard(), true);
+    f.assertNoExec();
+    const settled = await f.settle();
+    assert.equal(settled?.continue, true);
+    assert.equal(settled?.entries?.filter((entry) => entry.type === "compaction").length, choice === COMPACT ? 1 : 0);
+    assert.deepEqual(f.mock.thinkingLevels.slice(levelsBefore.length), ["low"]);
+    assert.equal(f.mock.thinkingLevel, "low");
+    assert.equal(f.flow.snapshot().workflow, "exec");
+    assert.equal(f.flow.commits.length, 1);
+    assert.equal(await f.guard(), false);
+    assert.equal(await f.settle(), undefined);
+    assert.equal(f.flow.executions.length, 1);
+    assert.deepEqual(f.mock.thinkingLevels.slice(levelsBefore.length), ["low"]);
+    f.assertNoEscape();
+  });
+}
+
+test("flow revision changing while the effort recommendation is pending expires approval", async () => {
+  const recommendation = deferred<Awaited<ReturnType<typeof pickImplementationEffort>>>();
+  const requested = deferred<void>();
+  const f = await fixture({
+    pickImplementationEffort: async () => {
+      requested.resolve();
+      return recommendation.promise;
+    },
+  });
+  await f.plan();
+  const levelsBefore = [...f.mock.thinkingLevels];
+  const reviewing = f.tool(EXIT_TOOL);
+  await requested.promise;
+  f.flow.revise();
+  recommendation.resolve({
+    kind: "system1",
+    thinkingLevel: "low",
+    backend: "jev",
+    provider: "typesafe",
+    model: "jev-latest",
+    selectionKey: "typesafe/jev-latest",
+  });
+  const result = await reviewing;
+  assert.match(result.content.map((part) => (part.type === "text" ? part.text : "")).join("\n"), /expired/iu);
+  assert.deepEqual(f.selections, []);
+  assert.deepEqual(f.mock.thinkingLevels, levelsBefore);
+  assert.equal(f.inline()?.active, true);
+  assert.equal(await f.guard(), true);
+  assert.equal(await f.settle(), undefined);
+  f.assertNoExec();
+  f.assertNoEscape();
+});
+
 for (const thinkingLevel of ["high", "off"] as const) {
-  test(`in-place linked execution retains ${thinkingLevel} rather than the medium worker suggestion`, async () => {
+  test(`in-place linked execution retains ${thinkingLevel} rather than the medium worker suggestion when classification is unavailable`, async () => {
     const f = await fixture({ thinkingLevel });
     await f.plan();
     await f.tool(EXIT_TOOL);
@@ -595,14 +689,15 @@ test("failed linked worker activation keeps Plan active without a continuation",
   f.assertNoEscape();
 });
 
-async function implementationScreen() {
-  const f = await fixture({ planners: true });
+async function implementationScreen(options: { settings?: Partial<PlanModeSettings> } = {}) {
+  const f = await fixture({ planners: true, ...options });
   const opened = f.mock.commands.get("planners")?.handler("", f.ctx);
   await vi.waitFor(() => assert.ok(f.app()));
   const app = f.app();
   for (let index = 0; index < 5 && !/⏎ do it/u.test(app.render().join("\n")); index++) app.handleInput("\t");
   app.handleInput("\r");
   assert.match(app.render().join("\n"), /● Implement/u);
+  await vi.waitFor(() => assert.doesNotMatch(app.render().join("\n"), /choosing\.\.\./u));
   const focus = (label: string) => {
     for (let index = 0; index < 10; index++) {
       if (new RegExp(`${label}\\s+‹`, "u").test(app.render().join("\n"))) return;
@@ -612,6 +707,18 @@ async function implementationScreen() {
   };
   return { ...f, app, opened, focus };
 }
+
+test("/planners Linked fresh retains the worker suggestion when classification is unavailable", async () => {
+  const f = await implementationScreen({ settings: { defaultImplementationThinkingLevel: "low" } });
+  f.focus("Context");
+  f.app.handleInput("\u001b[C");
+  f.app.handleInput("\u001b[C");
+  assert.match(f.app.render().join("\n"), /fresh session with only the plan/u);
+  assert.match(f.app.render().join("\n"), /Effort\s+medium/u);
+  Object.assign(f.ctx, { newSession: async () => ({ cancelled: true }) });
+  f.app.handleInput("\r");
+  await f.opened;
+});
 
 for (const policy of ["keep", "compact", "fresh"] as const) {
   test(`/planners Linked offers only worker execution with ${policy} context policy`, async () => {

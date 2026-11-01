@@ -10,6 +10,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { test, vi } from "vitest";
+import type { pickImplementationEffort } from "../src/implementation-effort.js";
 import planMode from "../src/index.js";
 import {
   ENTER_TOOL,
@@ -26,6 +27,7 @@ import {
 import * as planFiles from "../src/plan-file.js";
 import { PlanNameInput } from "../src/plan-name-input.js";
 import { settingsCycles } from "../src/settings-cycle.js";
+import { SYSTEM1_CHANGED } from "../src/system1.js";
 import { createCustomSelectorHarness, createMockContext, createMockPi } from "./shared/support.js";
 
 const opus = { provider: "anthropic", id: "claude-opus-5-5", name: "Claude Opus 5.5", reasoning: true };
@@ -51,12 +53,15 @@ async function setup(
     toggleShortcut?: "alt+p";
     switchFails?: boolean;
     implementationModelMap?: Record<string, Array<{ provider: string; modelId: string }>>;
+    pickImplementationEffort?: typeof pickImplementationEffort;
   } = {},
 ) {
   const mock = createMockPi();
   if (options.switchFails) (mock.pi as ExtensionAPI).setModel = async () => false;
   const plansDirectory = options.plansDirectory ?? mkdtempSync(join(tmpdir(), "plans-"));
   await planMode(mock.pi, {
+    pickImplementationEffort:
+      options.pickImplementationEffort ?? (async () => ({ kind: "fallback", reason: "offline" })),
     readSettings: async () => ({
       thinkingLevel: "inherit" as const,
       jevToolSelection: false,
@@ -153,6 +158,176 @@ async function setup(
   };
   const inline = () => mock.entries.filter((entry) => entry.customType === INLINE_ENTRY).at(-1)?.data as any;
   return { mock, context, selects, tool, emit, inline, gateEvents, plansDirectory, getLeafId, newSession, projection };
+}
+
+const recommendedEffort = {
+  kind: "system1" as const,
+  thinkingLevel: "low" as const,
+  backend: "jev" as const,
+  provider: "typesafe" as const,
+  model: "jev-latest" as const,
+  selectionKey: "test-selection",
+};
+
+for (const compact of [false, true]) {
+  test(`recommended direct ${compact ? "compact" : "keep"} effort is approved without switching models`, async () => {
+    const pick = vi.fn<typeof pickImplementationEffort>().mockResolvedValue(recommendedEffort);
+    const h = await setup({ models: true, pickImplementationEffort: pick });
+    const ctx = h.context.ctx as ExtensionContext;
+    ctx.ui.select = async (title, choices) => {
+      assert.deepEqual(h.mock.thinkingLevels, [], "opening review does not apply the recommendation");
+      if (title === "Implementation effort") {
+        assert.equal(choices[0], "low");
+        return choices[0];
+      }
+      return compact ? "Yes, compact plan and implement here" : "Yes, implement here";
+    };
+    ctx.ui.input = async () => assert.fail("approval needs no extra user prompt");
+    await h.mock.commands.get("plan")?.handler("", ctx);
+    const plan = "# Exact plan\n\nKeep the literal details.";
+    writeFileSync(h.inline().planFile, `${plan}\n`);
+    const result = await h.tool(EXIT_TOOL).execute("recommend", {}, undefined, undefined, ctx);
+    assert.equal(pick.mock.calls.length, 1);
+    assert.equal(pick.mock.calls[0]?.[0].plan, plan);
+    assert.equal(result.details.outcome, "approved");
+    await h.emit("agent_before_settle", { outcome: "completed" });
+    assert.deepEqual(h.mock.thinkingLevels, ["low"]);
+    assert.deepEqual(h.mock.setModels, []);
+    assert.deepEqual(h.mock.sentUserMessages, []);
+  });
+}
+
+test("a model change during Edit expires the original approval rather than rebasing old choices", async () => {
+  const pick = vi.fn<typeof pickImplementationEffort>().mockResolvedValue(recommendedEffort);
+  const h = await setup({ models: true, pickImplementationEffort: pick });
+  const ctx = h.context.ctx as ExtensionContext;
+  ctx.ui.select = async () => "Edit the plan";
+  ctx.ui.editor = async () => {
+    Object.assign(ctx, { model: { ...opus, id: "different-model" } });
+    return "# Edited plan";
+  };
+  const editor = process.env.EDITOR;
+  const visual = process.env.VISUAL;
+  delete process.env.EDITOR;
+  delete process.env.VISUAL;
+  try {
+    await h.mock.commands.get("plan")?.handler("", ctx);
+    writeFileSync(h.inline().planFile, "# Original\n");
+    const result = await h.tool(EXIT_TOOL).execute("edit-model", {}, undefined, undefined, ctx);
+    assert.match(result.content[0].text, /expired.*model/u);
+    assert.equal(pick.mock.calls.length, 1, "do not refresh the model fence while retaining old choices");
+    assert.deepEqual(h.mock.thinkingLevels, []);
+    assert.deepEqual(h.mock.setModels, []);
+    assert.equal(h.inline().active, true);
+  } finally {
+    if (editor === undefined) delete process.env.EDITOR;
+    else process.env.EDITOR = editor;
+    if (visual === undefined) delete process.env.VISUAL;
+    else process.env.VISUAL = visual;
+  }
+});
+
+for (const action of ["cancel", "edit", "save"] as const) {
+  test(`${action} after recommendation never applies effort`, async () => {
+    const pick = vi.fn<typeof pickImplementationEffort>().mockResolvedValue(recommendedEffort);
+    const h = await setup({ models: true, pickImplementationEffort: pick, input: "saved-plan" });
+    const ctx = h.context.ctx as ExtensionContext;
+    let calls = 0;
+    ctx.ui.select = async () => {
+      if (calls++ > 0) return action === "save" ? "Enter different name" : undefined;
+      return action === "edit" ? "Edit the plan" : action === "save" ? "Save for later" : undefined;
+    };
+    ctx.ui.editor = async () => "# Edited plan";
+    const editor = process.env.EDITOR;
+    const visual = process.env.VISUAL;
+    delete process.env.EDITOR;
+    delete process.env.VISUAL;
+    try {
+      await h.mock.commands.get("plan")?.handler("", ctx);
+      writeFileSync(h.inline().planFile, "# Original\n");
+      await h.tool(EXIT_TOOL).execute("nonmutation", {}, undefined, undefined, ctx);
+    } finally {
+      if (editor !== undefined) process.env.EDITOR = editor;
+      if (visual !== undefined) process.env.VISUAL = visual;
+    }
+    assert.ok(pick.mock.calls.length > 0);
+    assert.deepEqual(h.mock.thinkingLevels, []);
+    assert.deepEqual(h.mock.setModels, []);
+    assert.equal(await h.emit("agent_before_settle", { outcome: "completed" }), undefined);
+  });
+}
+
+for (const changed of [false, true]) {
+  test(`editing ${changed ? "changed" : "unchanged"} plan ${changed ? "reclassifies exact text" : "reuses cached result"}`, async () => {
+    const pick = vi.fn<typeof pickImplementationEffort>().mockResolvedValue(recommendedEffort);
+    const h = await setup({ models: true, pickImplementationEffort: pick });
+    const ctx = h.context.ctx as ExtensionContext;
+    let actions = 0;
+    ctx.ui.select = async (title, choices) =>
+      title === "Implementation effort" ? choices[0] : actions++ === 0 ? "Edit the plan" : "Yes, implement here";
+    ctx.ui.editor = async () => (changed ? "# Revised\n\nExact new text." : "# Original");
+    const editor = process.env.EDITOR;
+    const visual = process.env.VISUAL;
+    delete process.env.EDITOR;
+    delete process.env.VISUAL;
+    try {
+      await h.mock.commands.get("plan")?.handler("", ctx);
+      writeFileSync(h.inline().planFile, "# Original\n");
+      await h.tool(EXIT_TOOL).execute("edit-recommend", {}, undefined, undefined, ctx);
+    } finally {
+      if (editor !== undefined) process.env.EDITOR = editor;
+      if (visual !== undefined) process.env.VISUAL = visual;
+    }
+    assert.deepEqual(
+      pick.mock.calls.map(([input]) => input.plan),
+      changed ? ["# Original", "# Revised\n\nExact new text."] : ["# Original"],
+    );
+    assert.deepEqual(h.mock.thinkingLevels, ["low"]);
+  });
+}
+
+for (const invalidation of ["branch", "model", "backend", "plan", "abort"] as const) {
+  test(`pending recommendation rejects ${invalidation} before approval`, async () => {
+    let resolve!: (value: typeof recommendedEffort) => void;
+    let started!: () => void;
+    const ready = new Promise<void>((done) => {
+      started = done;
+    });
+    const pick = vi.fn<typeof pickImplementationEffort>().mockImplementation(() => {
+      started();
+      return new Promise((done) => {
+        resolve = done;
+      });
+    });
+    const h = await setup({ models: true, pickImplementationEffort: pick });
+    const ctx = h.context.ctx as ExtensionContext;
+    const controller = new AbortController();
+    const select = vi.fn(async () => undefined);
+    ctx.ui.select = select;
+    await h.mock.commands.get("plan")?.handler("", ctx);
+    writeFileSync(h.inline().planFile, "# Original\n");
+    const pending = h.tool(EXIT_TOOL).execute("stale-recommend", {}, controller.signal, undefined, ctx);
+    await ready;
+    assert.equal(select.mock.calls.length, 0);
+    if (invalidation === "branch") {
+      h.getLeafId.mockReturnValue("other");
+      Object.assign(ctx.sessionManager, { getBranch: () => [] });
+      await h.emit("session_tree", {});
+    } else if (invalidation === "model") ctx.model = sonnet as ExtensionContext["model"];
+    else if (invalidation === "backend") h.mock.eventBus.emit(SYSTEM1_CHANGED, {});
+    else if (invalidation === "plan") writeFileSync(h.inline().planFile, "# Unapproved\n");
+    else controller.abort();
+    resolve(recommendedEffort);
+    const result = await pending;
+    assert.notEqual(result.details?.outcome, "approved");
+    if (invalidation !== "abort") {
+      assert.match(result.content[0]?.text ?? "", /review expired/iu);
+      assert.equal(select.mock.calls.length, 0);
+    }
+    assert.deepEqual(h.mock.thinkingLevels, []);
+    assert.deepEqual(h.mock.setModels, []);
+    assert.equal(await h.emit("agent_before_settle", { outcome: "completed" }), undefined);
+  });
 }
 
 for (const gate of [false, true]) {

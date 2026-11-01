@@ -100,6 +100,7 @@ export interface PlanModeSettings {
   defaultPlanTools?: string[];
   implementationPlanRetention?: ImplementationPlanRetention;
   defaultImplementationModel?: ImplementationModelOverride;
+  /** Explicit Independent handoff effort after a target suffix, or Linked fresh effort, before System 1. */
   defaultImplementationThinkingLevel?: PlanModeFixedThinkingLevel;
   defaultPlanExportPath?: string;
   safeSubcommands?: SafeSubcommands;
@@ -144,9 +145,9 @@ export interface PlanModeSettings {
   alwaysOffer?: string[];
   /** Jev probability at or above which a tool is preselected (default 0.5). */
   jevThreshold?: number;
-  /** Pi classifier provider for tool selection (default typesafe). */
+  /** Jev provider for tool selection and implementation-effort defaults (default typesafe). */
   jevProvider?: string;
-  /** Classifier model for tool selection (default jev-latest). */
+  /** Jev model for tool selection and implementation-effort defaults (default jev-latest). */
   jevModel?: string;
   /** Command (argv) run with Claude-style hook JSON on stdin whenever a plan is accepted. */
   planCompleteCommand?: string[];

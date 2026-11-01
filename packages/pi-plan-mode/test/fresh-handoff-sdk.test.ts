@@ -294,6 +294,7 @@ async function fixture(options: { effort?: "high" | "off"; cancelReplacement?: b
         };
       });
       await planMode(pi, {
+        pickImplementationEffort: async () => ({ kind: "fallback", reason: "offline SDK fixture" }),
         readSettings: async () => ({
           thinkingLevel: "inherit",
           plansDirectory: join(directory, "plans"),
