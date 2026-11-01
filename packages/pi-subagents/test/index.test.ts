@@ -106,28 +106,28 @@ test("b in FleetView moves a foreground call to the background; its result arriv
     expect(ui.widgets.has("subagents")).toBe(false);
     expect(ui.press("b")).toBe(true);
     const result = await call;
-    expect(result.content[0].text).toMatch(/^The user moved this single to the background: \w+ \(loop forever · general, p\/m, high\)/u);
+    expect(result.content[0].text).toMatch(/^The user moved this single to the background: \w+ \(loop forever · general, p\/m \(parent\), medium\): parent fallback: no usable role or tier mapping for p/u);
     // Now a background run: still listed below the prompt (no widget above it by default), and b is no longer offered.
     expect(ui.widgets.has("subagents")).toBe(false);
     expect(ui.render("subagents-fleet")[0]).not.toContain("b background");
     expect(h.messages).toHaveLength(0);
     await h.commands.get("subagents").handler("stop all", ctx);
     await new Promise((r) => setTimeout(r, 200));
-    expect(h.messages[0]?.message.content).toMatch(/^Subagent "loop forever" stopped after \d+s:\n\n\[loop forever · general · p\/m · high · stopped\]/u);
+    expect(h.messages[0]?.message.content).toMatch(/^Subagent "loop forever" stopped after \d+s:\n\n\[loop forever · general · p\/m \(parent\) · medium · stopped\][\s\S]*parent fallback: no usable role or tier mapping for p/u);
     await h.emit("session_shutdown", { type: "session_shutdown" }, ctx);
   } finally {
     setPiInvocation(undefined);
   }
 });
 
-test.each([["fast", "luna"], ["balanced", "terra"], ["strong", "sol"]])("a Sol parent routes Jev's %s tier within OpenAI (%s) despite legacy Anthropic defaults", async (tier, name) => {
+test.each([["fast", "luna"], ["balanced", "terra"], ["strong", "sol"], ["premium", "astra"]])("a Sol parent routes Jev's %s tier within OpenAI (%s) despite legacy Anthropic defaults", async (tier, name) => {
   const { setPiInvocation } = await import("../src/child.ts");
   setPiInvocation({ command: process.execPath, args: [path.join(import.meta.dirname, "fixtures", "fake-pi-loop.mjs")] });
   try {
     const cwd = mkdtempSync(path.join(tmpdir(), "subagents-routing-"));
     mkdirSync(path.join(cwd, ".pi"));
     writeFileSync(path.join(cwd, ".pi", "pi-subagents.json"), JSON.stringify({
-      tiers: { fast: "anthropic/claude-haiku-5", balanced: "anthropic/claude-fable-5-1", strong: "anthropic/claude-opus-5-5" },
+      tiers: { fast: "anthropic/claude-haiku-5", balanced: "anthropic/claude-fable-5-1", strong: "anthropic/claude-opus-5-5", premium: "anthropic/claude-fable-5-1" },
     }));
     const jev = fakeJev(() => ({ tier: { type: "choice", choice: tier, confidence: 1, probabilities: {} } }));
     const h = harness();
@@ -136,12 +136,12 @@ test.each([["fast", "luna"], ["balanced", "terra"], ["strong", "sol"]])("a Sol p
     subagents(h.pi);
     const ctx = h.ctx({ cwd, ui: fakeUI(), model: { provider: "openai-codex", id: "gpt-6.1-sol" },
       modelRegistry: { ...jev.registry as object, getAll: () => [
-        { provider: "openai-codex", id: "gpt-6.1-sol" }, { provider: "openai-codex", id: "gpt-6.1-luna" }, { provider: "openai-codex", id: "gpt-6.1-terra" },
+        { provider: "openai-codex", id: "gpt-6.1-sol" }, { provider: "openai-codex", id: "gpt-6.1-luna" }, { provider: "openai-codex", id: "gpt-6.1-terra" }, { provider: "openai-codex", id: "gpt-6.1-astra" },
       ] },
     });
     await h.emit("session_start", { type: "session_start" }, ctx);
     const result = await tool.execute("t1", { task: "route me", async: true }, undefined, undefined, ctx);
-    expect(jev.calls[0]?.questions).toHaveProperty("tier");
+    expect(Object.keys(jev.calls[0]?.questions.tier.criteria ?? {})).toEqual(["fast", "balanced", "strong", "premium"]);
     expect(result.content[0].text).toContain(`openai-codex/gpt-6.1-${name}`);
     await h.emit("session_shutdown", { type: "session_shutdown" }, ctx);
   } finally {
@@ -171,6 +171,80 @@ test.each([["fast", "claude-haiku-5"], ["balanced", "claude-sonnet-5-5"], ["stro
   } finally {
     setPiInvocation(undefined);
   }
+});
+
+test("one registered tier selects deterministically without a tier question or model classifier provenance", async () => {
+  const { setPiInvocation } = await import("../src/child.ts");
+  setPiInvocation({ command: process.execPath, args: [path.join(import.meta.dirname, "fixtures", "fake-pi-loop.mjs")] });
+  try {
+    const jev = fakeJev(() => ({ effort: { type: "choice", choice: "high", confidence: 1, probabilities: { high: 1 } } }));
+    const h = harness();
+    let tool: any;
+    h.pi.registerTool = (value: unknown) => void (tool = value);
+    subagents(h.pi);
+    const ctx = h.ctx({ ui: fakeUI(), cwd: mkdtempSync(path.join(tmpdir(), "subagents-one-candidate-")), model: { provider: "openai", id: "gpt-6-astra" },
+      modelRegistry: { ...jev.registry as object, getAll: () => [{ provider: "openai", id: "gpt-6-luna" }] } });
+    await h.emit("session_start", { type: "session_start" }, ctx);
+    const run = await tool.execute("t", { task: "simple", agent: "general", async: true }, undefined, undefined, ctx);
+    expect(jev.calls).toHaveLength(1);
+    expect(Object.keys(jev.calls[0]!.questions)).toEqual(["effort"]);
+    expect(run.details.runs[0]).toMatchObject({ model: "openai/gpt-6-luna", thinking: "high", source: { model: "tier", thinking: "jev" }, byJev: { model: false, thinking: true } });
+    await h.emit("session_shutdown", { type: "session_shutdown" }, ctx);
+  } finally { setPiInvocation(undefined); }
+});
+
+test("custom model fixed plus classified effort, explicit effort plus classified model, and fully fixed calls", async () => {
+  const { setPiInvocation } = await import("../src/child.ts");
+  setPiInvocation({ command: process.execPath, args: [path.join(import.meta.dirname, "fixtures", "fake-pi-loop.mjs")] });
+  try {
+    const cwd = mkdtempSync(path.join(tmpdir(), "subagents-fixed-dimensions-"));
+    mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
+    writeFileSync(path.join(cwd, ".pi", "agents", "fixed.md"), "---\nname: fixed\ndescription: fixed\nmodel: openai/gpt-6.1-terra\n---\nA custom agent");
+    const jev = fakeJev(() => ({ tier: { type: "choice", choice: "premium", confidence: 1, probabilities: { premium: 1 } }, effort: { type: "choice", choice: "high", confidence: 1, probabilities: { high: 1 } } }));
+    const h = harness();
+    let tool: any;
+    h.pi.registerTool = (value: unknown) => void (tool = value);
+    subagents(h.pi);
+    const ctx = h.ctx({ cwd, ui: fakeUI(), model: { provider: "openai", id: "gpt-6-astra" }, modelRegistry: { ...jev.registry as object,
+      getAll: () => ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra"].map((id) => ({ provider: "openai", id })) } });
+    await h.emit("session_start", { type: "session_start" }, ctx);
+    const custom = await tool.execute("t1", { task: "fixed model", agent: "fixed", async: true }, undefined, undefined, ctx);
+    expect(Object.keys(jev.calls[0]!.questions)).toEqual(["effort"]);
+    expect(custom.details.runs[0]).toMatchObject({ model: "openai/gpt-6.1-terra", thinking: "high", source: { model: "profile", thinking: "jev" } });
+    const effort = await tool.execute("t2", { task: "fixed effort", agent: "worker", thinking: "low", async: true }, undefined, undefined, ctx);
+    expect(Object.keys(jev.calls[1]!.questions)).toEqual(["tier"]);
+    expect(effort.details.runs[0]).toMatchObject({ model: "openai/gpt-6-astra", thinking: "low", source: { model: "tier", thinking: "explicit" } });
+    const count = jev.calls.length;
+    const both = await tool.execute("t3", { task: "both fixed", agent: "fixed", thinking: "medium", async: true }, undefined, undefined, ctx);
+    expect(jev.calls).toHaveLength(count);
+    expect(both.details.runs[0]).toMatchObject({ model: "openai/gpt-6.1-terra", thinking: "medium", source: { model: "profile", thinking: "explicit" } });
+    const explicit = await tool.execute("t4", { task: "both explicit", agent: "worker", model: "openai/gpt-6-luna", thinking: "low", async: true }, undefined, undefined, ctx);
+    expect(jev.calls).toHaveLength(count);
+    expect(explicit.details.runs[0]).toMatchObject({ model: "openai/gpt-6-luna", thinking: "low", source: { model: "explicit", thinking: "explicit" } });
+    await h.emit("session_shutdown", { type: "session_shutdown" }, ctx);
+  } finally { setPiInvocation(undefined); }
+});
+
+test("a duplicate classifier ID cannot supply thinking metadata for the physical chat choice", async () => {
+  const { setPiInvocation } = await import("../src/child.ts");
+  setPiInvocation({ command: process.execPath, args: [path.join(import.meta.dirname, "fixtures", "fake-pi-loop.mjs")] });
+  try {
+    const jev = fakeJev(() => ({ tier: { type: "choice", choice: "fast", confidence: 1, probabilities: { fast: 1 } }, effort: { type: "choice", choice: "high", confidence: 1, probabilities: { high: 1 } } }));
+    const h = harness();
+    let tool: any;
+    h.pi.registerTool = (value: unknown) => void (tool = value);
+    subagents(h.pi);
+    const ctx = h.ctx({ ui: fakeUI(), cwd: mkdtempSync(path.join(tmpdir(), "subagents-duplicate-chat-")), model: { provider: "openai", id: "gpt-6-astra" }, modelRegistry: { ...jev.registry as object,
+      getAll: () => [
+        { provider: "openai", id: "gpt-6-luna", type: "classifier", reasoning: false },
+        { provider: "openai", id: "gpt-6-luna", type: "chat", reasoning: true },
+        { provider: "openai", id: "gpt-6.1-terra", type: "chat", reasoning: true },
+      ] } });
+    await h.emit("session_start", { type: "session_start" }, ctx);
+    const result = await tool.execute("t", { task: "look up a symbol", agent: "worker", async: true }, undefined, undefined, ctx);
+    expect(result.details.runs[0]).toMatchObject({ model: "openai/gpt-6-luna", thinking: "high", source: { model: "tier", thinking: "jev" } });
+    await h.emit("session_shutdown", { type: "session_shutdown" }, ctx);
+  } finally { setPiInvocation(undefined); }
 });
 
 test("a foreground call returns the child's answer and usage, and offers no detach after", async () => {
@@ -230,7 +304,8 @@ test("delegation picks the first prompt guideline (economical by default); a pro
   expect(promptGuidelines(undefined)[0]).toBe(economical[0]);
   expect(promptGuidelines("nonsense")[0]).toBe(economical[0]);
   expect(economical[0]).toMatch(/^Delegate work that can run in parallel/u);
-  expect(economical[0]).toContain("no model, so the role's cheaper model is picked");
+  expect(economical[0]).toContain("task-calibrated");
+  expect(economical[0]).not.toContain("role's cheaper model is picked");
   expect(promptGuidelines("conservative")[0]).toMatch(/^Prefer direct work for routine investigation/u);
   expect(economical.slice(1)).toEqual(promptGuidelines("conservative").slice(1));
 

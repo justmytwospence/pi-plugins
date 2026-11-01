@@ -14,6 +14,7 @@ import profiles from "../packages/pi-subagents/eval/profiles.target.ts";
 import rank from "../packages/pi-copy/eval/rank.target.ts";
 import replay from "../packages/pi-auto-effort/eval/replay.target.ts";
 import replayFile from "../packages/pi-tool-gate/eval/replay-file.target.ts";
+import routing from "../packages/pi-subagents/eval/routing.target.ts";
 import sessions from "../packages/pi-tool-gate/eval/sessions.target.ts";
 import vet from "../packages/pi-next-prompt/eval/vet.target.ts";
 // Add the other targets' imports here, alphabetical by id.
@@ -29,6 +30,7 @@ export const targets: readonly EvalTarget[] = [
   rank,
   replay,
   replayFile,
+  routing,
   sessions,
   vet,
   // Add the other targets here, in the same order as the imports.

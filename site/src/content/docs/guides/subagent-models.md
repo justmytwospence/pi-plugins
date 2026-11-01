@@ -1,9 +1,9 @@
 ---
 title: Choosing subagent models
-description: What OpenAI and Anthropic say each model is for, what that costs, and how the pi-subagents roles use it.
+description: Vendor positioning, routing policy, and unmeasured limits for task-calibrated subagent models.
 ---
 
-[pi-subagents](/plugins/pi-subagents/) runs each delegated task on a model and an effort level. This page records what the two labs say about their current models, as of 2026-10-29, so the built-in roles rest on something checkable. Everything in the tables is a vendor statement or a vendor price. It was not measured here, and benchmark claims are marketing until you test them on your own work. Claims that could not be confirmed from a primary source are listed at the end.
+[pi-subagents](/plugins/pi-subagents/) runs each delegated task on a model and an effort level. The Anthropic/OpenAI positioning and prices below are from vendor sources checked as of 2026-10-29, not measurements by this suite; benchmark claims remain vendor claims. Google/Meta sources and the suite's own routing policy follow. Capability tiers and fallback roles are maintainer choices, not vendor recommendations or measured model equivalences. A 72-call Jev fixture calibration recorded routing-label agreement, not actual coding success or cost savings; its results appear below.
 
 ## What the labs say
 
@@ -40,20 +40,41 @@ Estimated Codex subscription allowance, in local messages per five hours on Plus
 
 OpenAI gives no per-sub-task table. Its guidance is model-level: Astra when quality matters most, Sol to balance cost, Terra and Luna when price-sensitive, and the effort advice above ("most tasks do not need Max or Ultra").
 
-## Roles in pi-subagents
+### Google and Muse Code
 
-The built-in roles pin a model and an effort per provider. The picker chooses a role, so a role's model does not depend on how hard Jev rates the task. These are this suite's defaults, derived from the tables above and from the maintainer's own run history. They are not the labs' recommendations.
+As of the same 2026-10-29 policy review, Google's [model directory](https://ai.google.dev/gemini-api/docs/models) describes Flash-Lite as the fast, lower-cost family, Flash as balancing speed and capability, and Pro as aimed at complex reasoning/coding. Its [Gemini 3.8 Flash page](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash) positions Flash for long-horizon software engineering and agent workflows at Flash speed. These are Google claims about API models, **not** evidence that a subscription Antigravity route has the same cost or capability ordering. `Argon` and `antigravity-` are registered route/model names in the Pi setup, not Google API performance comparisons. A stable numeric ID in the registry is required for automatic Google routing; preview, experimental, media and unversioned variants are excluded by policy.
 
-| Role | Anthropic | Codex | Why |
-|---|---|---|---|
-| explorer | Sonnet 5.5, low | Luna, high | Recon and search. Haiku is avoided because exploration often passes 100k tokens, where its price multiplies by 5. Luna is OpenAI's focused-task model and starts at `high`. |
-| worker | Sonnet 5.5, medium | Sol 6.1, medium | A clear spec: Sonnet's stated sweet spot; Sol for balanced coding. |
-| reviewer | Opus 5.5, high | Sol 6.1, high | Careful review; Opus is the lab's stated code-review result. |
-| researcher | Sonnet 5.5, medium | Terra 6.1, medium | Web and documents; Terra is positioned for clear communication. |
-| writer | Sonnet 5.5, medium | Terra 6.1, medium | Documents and write-ups. |
-| planner | Opus 5.5, high | Sol 6.1, high | Design and hard analysis without edits. |
+Meta's [models guide](https://dev.meta.ai/docs/models) positions Wonder for complex, long-running software engineering and orchestration, and Spark for higher-volume, latency- or cost-sensitive work such as subagent tasks. Meta's [Spark page](https://dev.meta.ai/models/muse-spark) describes Spark 1.3 as optimized for agentic workflows and coding; its benchmarks are vendor-reported, not measured here. The guide distinguishes **Standard** (content not used for model training) from **Contributor** (content may be used to train Meta models for a usage/price benefit). Automatic Muse picks use versioned Standard IDs, `muse-spark-1.3` and `muse-wonder-1.0` when registered—not `-contributor` variants, unverified Wonder Full IDs or image models. The bare `muse-spark` alias follows the bridge's catalog default (currently Wonder), so it is not a safe automatic Spark pin. There is no verified registered Muse premium candidate in this setup; an explicit model override remains possible.
 
-Astra and Fable are never chosen automatically: Astra's allowance is small, and Fable accounted for most of the maintainer's subagent spend on read-only work. Pass `model` to use one.
+Subscription-backed Antigravity and local MTPLX/LM Studio can report zero pricing. That is not evidence of zero marginal usage, equal capability, a ranked local model family, or cost per completed task. The suite does not infer capability from price metadata.
+
+## Routing policy (not a measured ranking)
+
+Built-in roles supply task/tool scope and **fallback** model/effort baselines when Jev has no usable answer. Their assignments are not fixed pins or ceilings. For each delegated task, model capability and reasoning effort are judged independently: a hard task can merit a registered Astra/Fable premium candidate, while a straightforward task can use a cheaper tier even under `worker` or `reviewer`. A premium model does not imply xhigh effort, and a cheap model can need high effort. Neither a long specification, required tests, role name nor parent-project importance alone justifies escalation. User/project agent-file pins stay fixed; explicit call arguments win separately for each field.
+
+| Automatic route | `fast` | `balanced` | `strong` | optional `premium` |
+|---|---|---|---|---|
+| `anthropic` | Haiku | Sonnet | Opus | Fable |
+| `openai`, `openai-codex` | Luna | Terra | Sol | Astra |
+| `google/gemini-*` (plain) | stable versioned Flash-Lite | stable versioned Flash | stable versioned Argon/Pro | — |
+| `google/antigravity-gemini-*` | stable versioned Flash | stable versioned Flash | stable versioned Argon/Pro | — |
+| `google/antigravity-claude-*` | Sonnet | Sonnet | Opus | — |
+| `muse-code` | versioned Standard Spark | versioned Standard Spark | versioned Standard Wonder | — |
+
+These are **suite policy families**, not equivalent capability ratings between vendors. Only registered, physical-chat candidates of the selected route are offered; a missing premium family is omitted, and duplicate models across tiers are intentional when no verified intermediate exists. OpenAI and legacy Codex share policy but retain their own provider IDs. Under provider `google`, plain Gemini, Antigravity Gemini and Antigravity Claude retain separate prefixes; an Antigravity model must never silently become a direct Google API pick. Unknown/local providers receive no invented hierarchy: if no mapping works, retain the parent with a visible fallback notice, while effort can still be classified. The synchronous `subagents:role-model` service has no task to judge and returns the applicable role baseline without Jev; it cannot predict a future task's adaptive pick.
+
+| Role | Anthropic | OpenAI / Codex | Google Gemini | Muse Code | Unknown/local effort |
+|---|---|---|---|---|---|
+| explorer | Sonnet 5.5 / low | Luna 6 / high | Flash 3.8 / low | Spark 1.3 / low | low |
+| worker | Sonnet 5.5 / medium | Sol 6.1 / medium | Flash 3.8 / medium | Spark 1.3 / medium | medium |
+| researcher | Sonnet 5.5 / medium | Terra 6.1 / medium | Flash 3.8 / medium | Spark 1.3 / medium | medium |
+| writer | Sonnet 5.5 / medium | Terra 6.1 / medium | Flash 3.8 / medium | Spark 1.3 / medium | medium |
+| reviewer | Opus 5.5 / high | Sol 6.1 / high | Argon 4 / high | Wonder 1.0 / high | high |
+| planner | Opus 5.5 / high | Sol 6.1 / high | Argon 4 / high | Wonder 1.0 / high | high |
+
+Antigravity Gemini uses the Google column with `antigravity-`-prefixed IDs; Antigravity Claude uses the Anthropic column under provider `google`, also prefixing IDs. `general` falls back to balanced/medium. Unavailable baseline models use a registered same-route family if possible, then balanced/medium; no model mapping keeps the parent visibly. Effort is clamped to supported levels when a registered model is chosen, except an explicit thinking argument follows Pi's usual pass-through behavior.
+
+The `routing` eval checks 24 fixed task/provider cases crossed over Anthropic, OpenAI, Antigravity Gemini and Muse. Its first live three-repeat run made **72 Jev classifier calls**: 68/72 tier matches (94.4%), 72/72 effort matches (100%), 68/72 joint matches (94.4%), and 24/24 hard-task matches (100%). There were no failed calls, routine premium/xhigh picks, or hard-task fast/balanced picks. The four misses were specified-implementation tasks routed `fast` rather than `balanced`/`strong` (three Anthropic, one OpenAI). The recorded spend was $0.0000, meaning no nonzero cost was reported—not that the paid calls were free. Acceptance thresholds passed, so the reserved 24-call full-matrix follow-up was **not** run. `npm run -s eval -- routing --dry` plans calls without spending. These observed fixture-routing results do **not** measure coding quality, task success, or cost savings. The separate `profiles` replay compares baselines when classification is unavailable, not adaptive routing.
 
 ## What was not verified
 
@@ -62,5 +83,6 @@ Astra and Fable are never chosen automatically: Astra's allowance is small, and 
 - That Sonnet 5.5 or Sol over-refuses benign security work. Both labs document cyber safeguards that can stop legitimate tasks; reports of specific refusals are anecdotes.
 - That small models degrade past 100k tokens. Only Haiku's price change is documented.
 - Which model each lab would pick for scouting, review or planning. Neither says; the role table is inferred from the model-level statements.
-- Whether Pi passes every effort and thinking option through for these ids.
+- Whether Pi passes every effort and thinking option through for these ids, including the newer Google/Muse routes.
 - Full benchmark tables. The announcements show headline deltas, and several charts were not readable as text.
+- Comparative completion quality across providers or the cost per finished delegated task under adaptive routing. The planned routing eval does not execute coding models.

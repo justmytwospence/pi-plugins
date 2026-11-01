@@ -60,6 +60,22 @@ test("finished rows show a status icon; the queue gets a row; nothing to show is
   expect(renderWidget({ runs: [], queued: 0, now: 0, frame: 0, width: 80, theme: plain })).toEqual([]);
 });
 
+test.each([46, 120, 180])("fallback and legitimate premium widget rows fit the same budget at %i columns", (width) => {
+  const fallback = fakeRun({ model: "openai/gpt-6-astra", thinking: "medium", source: { model: "default", thinking: "profile" }, note: "parent fallback: no usable role or tier mapping for openai" });
+  const premium = fakeRun({ model: "openai/gpt-6-astra", thinking: "xhigh", source: { model: "tier", thinking: "jev" }, tier: "premium", byJev: { agent: false, model: true, thinking: true } });
+  const lines = renderWidget({ runs: [fallback, premium], queued: 0, now: 1_000, frame: 0, width, theme: plain });
+  expect(lines).toHaveLength(6); // original header, two rows per running task, trailing spacer.
+  expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+  expect(lines[1]).toContain("scout");
+  expect(lines[3]).toContain("scout");
+  if (width >= 120) {
+    expect(lines[1]).toContain("gpt-6-astra (parent) · medium");
+    expect(lines[3]).toContain("gpt-6-astra (auto) · xhigh (auto)");
+    expect(lines[3]).not.toContain("(parent)");
+  }
+  expect(lines.some((line) => line.includes("select") || line.includes("stop"))).toBe(false);
+});
+
 test("too many runs collapse into +N more, running first; lines fit the width", () => {
   const runs = [...Array.from({ length: 6 }, () => fakeRun({ label: "Task" })), fakeRun({ label: "Done", state: { status: "done", endedAt: 1 } })];
   const lines = renderWidget({ runs, queued: 0, now: 2, frame: 0, width: 40, theme: plain });

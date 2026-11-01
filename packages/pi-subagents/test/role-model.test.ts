@@ -96,13 +96,53 @@ test("roleModel gives the role's profile on the parent's provider", () => {
   expect(roleModel(request, BUILTIN_AGENTS, DEFAULT_CONFIG, [sonnet, opus], "low")).toEqual({ model: "anthropic/claude-sonnet-5-5", thinking: "medium", source: "profile" });
 });
 
+test.each([
+  ["openai/gpt-6-astra", ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra"], "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6.1-sol"],
+  ["google/gemini-4-argon", ["gemini-3.8-flash", "gemini-4-argon"], "gemini-3.8-flash", "gemini-3.8-flash", "gemini-4-argon"],
+  ["google/antigravity-gemini-4-argon", ["antigravity-gemini-3.8-flash", "antigravity-gemini-4-argon"], "antigravity-gemini-3.8-flash", "antigravity-gemini-3.8-flash", "antigravity-gemini-4-argon"],
+  ["google/antigravity-claude-opus-5-5", ["antigravity-claude-sonnet-5-5", "antigravity-claude-opus-5-5"], "antigravity-claude-sonnet-5-5", "antigravity-claude-sonnet-5-5", "antigravity-claude-opus-5-5"],
+  ["muse-code/muse-wonder-1.0", ["muse-spark-1.3", "muse-wonder-1.0"], "muse-spark-1.3", "muse-spark-1.3", "muse-wonder-1.0"],
+] as const)("taskless role discovery on %s returns the route-local baseline", (parentModel, ids, general, worker, planner) => {
+  const provider = parentModel.split("/")[0]!;
+  const available = ids.map((id) => ({ provider, id }));
+  for (const [role, id, thinking, source] of [
+    ["general", general, "medium", "tier"],
+    ["worker", worker, "medium", "profile"],
+    ["planner", planner, "high", "profile"],
+  ]) {
+    expect(roleModel({ role, parent: parentModel }, BUILTIN_AGENTS, DEFAULT_CONFIG, available, "xhigh"))
+      .toEqual({ model: `${provider}/${id}`, thinking, source });
+  }
+});
+
+test.each(["general", "worker", "planner"])("taskless %s discovery on an unknown provider keeps parent with role effort", (role) => {
+  expect(roleModel({ role, parent: "lmstudio/qwen" }, BUILTIN_AGENTS, DEFAULT_CONFIG, [{ provider: "lmstudio", id: "qwen" }], "xhigh"))
+    .toEqual({ model: "lmstudio/qwen", thinking: role === "planner" ? "high" : "medium", source: "default" });
+});
+
+test("taskless singleton discovery retains worker baseline provenance and rejects an unavailable parent", () => {
+  expect(roleModel({ role: "worker", parent, availableModels: [sonnet] }, BUILTIN_AGENTS, DEFAULT_CONFIG, [sonnet, opus], "xhigh"))
+    .toEqual(workerReply);
+  expect(roleModel({ role: "worker", parent, availableModels: [opus] }, BUILTIN_AGENTS, DEFAULT_CONFIG, [sonnet, opus], "xhigh"))
+    .toEqual({ model: parent, thinking: "medium", source: "default" });
+  const unrelated = { provider: "anthropic", id: "unrelated" };
+  expect(roleModel({ role: "worker", parent: "anthropic/missing", availableModels: [unrelated] }, BUILTIN_AGENTS, DEFAULT_CONFIG, [sonnet, unrelated], "xhigh"))
+    .toBeUndefined();
+});
+
+test("an unavailable custom model does not erase its same-provider effort pin in taskless discovery", () => {
+  const pinned = { ...WORKER, source: "user" as const, models: { anthropic: { model: "anthropic/not-registered", thinking: "high" } } };
+  expect(roleModel({ role: "worker", parent, availableModels: [opus] }, [GENERAL, pinned], DEFAULT_CONFIG, [opus], "low"))
+    .toEqual({ model: parent, thinking: "high", source: "default" });
+});
+
 test("roleModel falls back to the balanced tier", () => {
   const config = { ...DEFAULT_CONFIG, providerTiers: { p: { balanced: "p/mid" } } };
-  expect(roleModel({ role: "worker", parent: "p/big", thinking: "high" }, BUILTIN_AGENTS, config, [], "low")).toEqual({ model: "p/mid", thinking: "high", source: "tier" });
+  expect(roleModel({ role: "worker", parent: "p/big", thinking: "high" }, BUILTIN_AGENTS, config, [], "low")).toEqual({ model: "p/mid", thinking: "medium", source: "tier" });
 });
 
 test("roleModel falls back to the parent's model and the fallback effort", () => {
-  expect(roleModel({ role: "worker", parent: "q/x" }, BUILTIN_AGENTS, DEFAULT_CONFIG, [], "low")).toEqual({ model: "q/x", thinking: "low", source: "default" });
+  expect(roleModel({ role: "worker", parent: "q/x" }, BUILTIN_AGENTS, DEFAULT_CONFIG, [], "low")).toEqual({ model: "q/x", thinking: "medium", source: "default" });
 });
 
 test("roleModel ignores requests it cannot answer", () => {
@@ -117,7 +157,7 @@ test("omitting availability preserves unregistered profile and file defaults", (
   expect(roleModel({ role: "worker", parent }, BUILTIN_AGENTS, DEFAULT_CONFIG, [], "low")).toEqual(workerReply);
   const agents = [{ ...WORKER, models: undefined, model: "p/file" }];
   expect(roleModel({ role: "worker", parent: "p/parent" }, agents, DEFAULT_CONFIG, [], "low"))
-    .toEqual({ model: "p/file", thinking: "low", source: "profile" });
+    .toEqual({ model: "p/file", thinking: "medium", source: "profile" });
 });
 
 test.each(badAvailability.map((value) => [value]))("roleModel rejects malformed availability: %j", (availableModels) => {
@@ -153,8 +193,8 @@ test("an unavailable profile falls through to balanced, then an available parent
   const ask = (availableModels: readonly RegistryModel[]) => roleModel(
     { role: "worker", parent, availableModels }, BUILTIN_AGENTS, config, [sonnet, opus, mid], "low",
   );
-  expect(ask([mid, opus])).toEqual({ model: "anthropic/custom-mid", thinking: "low", source: "tier" });
-  expect(ask([opus])).toEqual({ model: parent, thinking: "low", source: "default" });
+  expect(ask([mid, opus])).toEqual({ model: "anthropic/custom-mid", thinking: "medium", source: "tier" });
+  expect(ask([opus])).toEqual({ model: parent, thinking: "medium", source: "default" });
 });
 
 test("file defaults, provider tiers, legacy tiers and parent are tried only when available", () => {
@@ -163,7 +203,7 @@ test("file defaults, provider tiers, legacy tiers and parent are tried only when
   const config = { ...DEFAULT_CONFIG, tiers: { balanced: "p/legacy" }, providerTiers: { p: { balanced: "p/tier" } } };
   for (const [offset, source] of ["profile", "tier", "tier", "default"].entries()) {
     expect(roleModel({ role: "worker", parent: "p/parent", availableModels: models.slice(offset) }, agents, config, models, "low"))
-      .toEqual({ model: `p/${models[offset]!.id}`, thinking: "low", source });
+      .toEqual({ model: `p/${models[offset]!.id}`, thinking: "medium", source });
   }
   expect(agents[0]!.model).toBe("p/file");
   expect(config.providerTiers.p.balanced).toBe("p/tier");
@@ -187,7 +227,7 @@ test("profiles, file defaults and configured tiers never cross provider", () => 
   const agents = [{ ...WORKER, models: { p: { model: "other/model", thinking: "high" } }, model: "other/model" }];
   const config = { ...DEFAULT_CONFIG, tiers: { balanced: "other/model" }, providerTiers: { p: { balanced: "other/model" } } };
   const ask = (availableModels: RegistryModel[]) => roleModel({ role: "worker", parent: "p/parent", availableModels }, agents, config, [foreign, own], "low");
-  expect(ask([foreign, own])).toEqual({ model: "p/parent", thinking: "low", source: "default" });
+  expect(ask([foreign, own])).toEqual({ model: "p/parent", thinking: "medium", source: "default" });
   expect(ask([foreign])).toBeUndefined();
 });
 
@@ -197,7 +237,7 @@ test.each([
   const excluded = { ...sonnet, ...metadata };
   const availableModels = [{ ...sonnet, api: "anthropic-messages", type: "chat" }, opus];
   expect(roleModel({ role: "worker", parent, availableModels }, BUILTIN_AGENTS, DEFAULT_CONFIG, [excluded, opus], "low"))
-    .toEqual({ model: parent, thinking: "low", source: "default" });
+    .toEqual({ model: parent, thinking: "medium", source: "default" });
   expect(roleModel({ role: "worker", parent, availableModels: [sonnet] }, BUILTIN_AGENTS, DEFAULT_CONFIG, [excluded], "low")).toBeUndefined();
 });
 
@@ -250,7 +290,7 @@ test("the bus rejects invalid requests and preserves a pre-filled reply", async 
   const reply: NonNullable<RoleModelRequest["reply"]> = { model: "other/model", thinking: "off", source: "default" };
   expect(r.ask({ reply }).reply).toBe(reply);
   expect(r.ask({ availableModels: [] }).reply).toBeUndefined();
-  expect(r.ask({ availableModels: [opus] }).reply).toEqual({ model: parent, thinking: "xhigh", source: "default" });
+  expect(r.ask({ availableModels: [opus] }).reply).toEqual({ model: parent, thinking: "medium", source: "default" });
 });
 
 test("destination agent discovery honors project over user over built-in without leaking between cwd queries", async () => {
@@ -306,7 +346,7 @@ test("reload replaces the role provider even when old synchronous bus listeners 
   const fresh = runtime(a, [opus], events);
   expect(fresh.ask().reply).toBeUndefined();
   await fresh.start();
-  expect(fresh.ask({ thinking: "low" }).reply).toEqual({ model: parent, thinking: "low", source: "default" });
+  expect(fresh.ask({ thinking: "low" }).reply).toEqual({ model: parent, thinking: "medium", source: "default" });
   await fresh.stop();
   expect(fresh.ask().reply).toBeUndefined();
   expect(ready).toEqual([{ ready: true }, { ready: false }, { ready: true }, { ready: false }]);
@@ -325,7 +365,7 @@ test.each(["shutdown", "new context", "same context restart"])("a role query can
   expect(r.ask().reply).toBeUndefined();
   expect(reentered).toBeDefined();
   await reentered;
-  expect(r.ask({ thinking: "low" }).reply).toEqual(transition === "shutdown" ? undefined : { model: parent, thinking: "low", source: "default" });
+  expect(r.ask({ thinking: "low" }).reply).toEqual(transition === "shutdown" ? undefined : { model: parent, thinking: "medium", source: "default" });
 });
 
 test.each(["shutdown", "new context"])("startup interrupted by %s cannot publish stale readiness", async (transition) => {
@@ -341,5 +381,5 @@ test.each(["shutdown", "new context"])("startup interrupted by %s cannot publish
   await reentered;
   expect(r.events.emit.mock.calls.filter(([channel]) => channel === ROLE_MODEL_READY))
     .toEqual([[ROLE_MODEL_READY, { ready: transition !== "shutdown" }]]);
-  expect(r.ask({ thinking: "low" }).reply).toEqual(transition === "shutdown" ? undefined : { model: parent, thinking: "low", source: "default" });
+  expect(r.ask({ thinking: "low" }).reply).toEqual(transition === "shutdown" ? undefined : { model: parent, thinking: "medium", source: "default" });
 });

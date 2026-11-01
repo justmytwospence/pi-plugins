@@ -1,17 +1,18 @@
 import { type AgentDef, type ProfileModel, THINKING_LEVELS } from "./agents.ts";
 import { type ClassifierAnswer, type ClassifierQuestion, choice } from "./jev.ts";
+import { type Tier, providerPolicy, routeBuiltinProfile } from "./provider-policy.ts";
+export type { Tier } from "./provider-policy.ts";
 
-export type Tier = "fast" | "balanced" | "strong";
 /** Tiers and efforts, weakest first: the order the threshold rule climbs. */
-export const TIERS = ["fast", "balanced", "strong"] as const;
+export const TIERS = ["fast", "balanced", "strong", "premium"] as const;
 export const EFFORTS = ["low", "medium", "high", "xhigh"] as const;
 
 /** The effort question's options, one description each. */
 export const EFFORT_DESCRIPTIONS: Record<(typeof EFFORTS)[number], string> = {
-  low: "A lookup, a search, or a mechanical change",
-  medium: "A routine change or a clear question",
-  high: "A multi-step change, debugging with clear symptoms, or design in a known pattern",
-  xhigh: "Subtle design, a cross-cutting change, hard debugging, or correctness-critical work",
+  low: "Lookup, search, summarization, or mechanical work with settled steps.",
+  medium: "Specified implementation, tests, documentation, or ordinary debugging with clear symptoms.",
+  high: "Substantial reasoning within the delegated task, including interacting changes, nontrivial review, or design in known patterns.",
+  xhigh: "Genuinely difficult unresolved reasoning requiring sustained analysis within this task; not just many files, a long specification, or an important surrounding project.",
 };
 
 /**
@@ -61,16 +62,7 @@ export interface TierConfig {
   descriptions: Record<Tier, string>;
 }
 
-/**
- * Built-in tier models per provider, as id patterns over Pi's registry: the newest registered match
- * fills a tier nothing is configured for. A provider without presets uses the parent's model.
- */
-export const TIER_PRESETS: Record<string, Record<Tier, RegExp>> = {
-  anthropic: { fast: /^claude-haiku-/u, balanced: /^claude-sonnet-/u, strong: /^claude-opus-/u },
-  "openai-codex": { fast: /-luna$/u, balanced: /-terra$/u, strong: /-sol$/u },
-};
-/** Each tier's id suffix, where a preset prefers the parent's own generation (`gpt-6.1-sol` -> `gpt-6.1-luna`). */
-const GENERATIONS: Record<string, Record<Tier, string>> = { "openai-codex": { fast: "luna", balanced: "terra", strong: "sol" } };
+/** Numeric-aware model ordering ignores a dated suffix when comparing families. */
 const DATED = /-(\d{8})$/u;
 
 /**
@@ -96,25 +88,31 @@ export function providerTiers(
   parentModel: string,
   configured: Partial<Record<Tier, string>>,
   byProvider: Record<string, Partial<Record<Tier, string>>> = {},
-  available: readonly { provider: string; id: string }[] = [],
+  available: readonly AvailableModel[] = [],
 ): Partial<Record<Tier, string>> {
   const provider = parentModel.split("/")[0]!;
   const sameProvider = (model: string | undefined) => model?.startsWith(`${provider}/`) ? model : undefined;
   const parentId = parentModel.slice(provider.length + 1);
-  const presets = Object.hasOwn(TIER_PRESETS, provider) ? TIER_PRESETS[provider] : undefined;
-  const suffixes = Object.hasOwn(GENERATIONS, provider) ? GENERATIONS[provider] : undefined;
+  const policy = providerPolicy(parentModel);
+  const physical = physicalChatModels(available);
+  const configuredModel = (model: string | undefined) => {
+    const same = sameProvider(model);
+    return same && (!available.length || physical.some((item) => `${item.provider}/${item.id}` === same)) ? same : undefined;
+  };
+  const suffixes = policy?.generationSuffixes;
   const generation = suffixes ? new RegExp(`-(${Object.values(suffixes).join("|")})$`, "u") : undefined;
   const preset = (tier: Tier) => {
-    const pattern = presets?.[tier];
+    const pattern = policy?.tiers[tier];
     if (!pattern) return undefined;
-    const ids = available.filter((m) => m.provider === provider && pattern.test(m.id)).map((m) => m.id).sort(newestFirst);
-    const sibling = suffixes && generation?.test(parentId) ? parentId.replace(generation, `-${suffixes[tier]}`) : undefined;
+    const ids = physical.filter((m) => m.provider === provider && pattern.test(m.id)).map((m) => m.id).sort(newestFirst);
+    const suffix = suffixes?.[tier];
+    const sibling = suffix && generation?.test(parentId) ? parentId.replace(generation, `-${suffix}`) : undefined;
     const id = (sibling && ids.includes(sibling) ? sibling : undefined) ?? ids[0];
     return id ? `${provider}/${id}` : undefined;
   };
   const models: Partial<Record<Tier, string>> = {};
-  for (const tier of ["fast", "balanced", "strong"] as const) {
-    const model = sameProvider(byProvider[provider]?.[tier]) ?? sameProvider(configured[tier]) ?? preset(tier);
+  for (const tier of TIERS) {
+    const model = configuredModel(byProvider[provider]?.[tier]) ?? configuredModel(configured[tier]) ?? preset(tier);
     if (model) models[tier] = model;
   }
   return models;
@@ -124,8 +122,15 @@ export function providerTiers(
 export interface AvailableModel {
   provider: string;
   id: string;
+  api?: string;
+  type?: string;
   reasoning?: boolean;
   thinkingLevelMap?: Record<string, string | null | undefined>;
+}
+
+/** Only physical chat models may be selected automatically; accept older registries without type/API. */
+export function physicalChatModels(models: readonly AvailableModel[]): AvailableModel[] {
+  return models.filter((model) => (model.type === undefined || model.type === "chat") && model.api !== "pi-virtual");
 }
 
 /** The thinking levels a registered model supports, as Pi computes them (`getSupportedThinkingLevels`). */
@@ -152,33 +157,35 @@ export function clampThinking(level: string, model: AvailableModel | undefined):
 }
 
 /**
- * A role's profile model on `provider`, checked against the registry: used as is when registered or
- * when the registry lists nothing for the provider; else the newest registered model of the same
- * preset family (a stale Sonnet id becomes the newest Sonnet); else none (the tier rules apply).
+ * A profile model must be a registered physical chat model when the registry has entries. With
+ * an entirely unknown legacy registry it is used as written; otherwise a stale family profile
+ * resolves to its newest registered peer, or yields no model.
  */
 export function profileModel(entry: ProfileModel | undefined, provider: string, available: readonly AvailableModel[] = []): ProfileModel | undefined {
   if (!entry || !entry.model.startsWith(`${provider}/`)) return undefined;
   const id = entry.model.slice(provider.length + 1);
-  const registered = available.filter((m) => m.provider === provider);
-  if (!registered.length || registered.some((m) => m.id === id)) return entry;
-  const presets = Object.hasOwn(TIER_PRESETS, provider) ? TIER_PRESETS[provider] : undefined;
-  const family = presets ? Object.values(presets).find((pattern) => pattern.test(id)) : undefined;
+  const registered = physicalChatModels(available).filter((m) => m.provider === provider);
+  if (!available.length || registered.some((m) => m.id === id)) return entry;
+  const family = Object.values(providerPolicy(entry.model)?.tiers ?? {}).find((pattern) => pattern.test(id));
   const newest = family ? registered.map((m) => m.id).filter((m) => family.test(m)).sort(newestFirst)[0] : undefined;
   return newest ? { ...entry, model: `${provider}/${newest}` } : undefined;
 }
 
 /**
- * What an agent fixes for a parent on `parentModel`'s provider: its profile model there, else its
- * `model` when on that provider (an implicit model never leaves the parent's provider), and the
- * profile's thinking, else the agent's, clamped to what the model supports when it is registered.
+ * Baselines for a role on the parent's provider: a registered routed profile or explicit agent-file
+ * model, plus its role effort. Built-in profiles may follow known provider aliases; user files do not.
  */
 export function agentDefaults(agent: AgentDef, parentModel: string, available: readonly AvailableModel[] = []): { model?: string; thinking?: string } {
   const provider = parentModel.split("/")[0]!;
-  const entry = agent.models && Object.hasOwn(agent.models, provider) ? agent.models[provider] : undefined;
-  const fromProfile = profileModel(entry, provider, available);
+  const policy = agent.source === "builtin" ? providerPolicy(parentModel) : undefined;
+  const key = policy?.profileProvider ?? provider;
+  const entry = agent.models && Object.hasOwn(agent.models, key) ? agent.models[key] : undefined;
+  const fromProfile = profileModel(entry && policy ? routeBuiltinProfile(entry, parentModel, policy) : entry, provider, available);
   const model = fromProfile?.model ?? (agent.model?.startsWith(`${provider}/`) ? agent.model : undefined);
-  let thinking = fromProfile?.thinking ?? agent.thinking;
-  if (thinking && model) thinking = clampThinking(thinking, available.find((m) => `${m.provider}/${m.id}` === model));
+  // A custom profile's authored effort remains fixed even if its model is unavailable; a
+  // malformed cross-provider profile cannot pin effort on this provider.
+  const authored = agent.source !== "builtin" && entry?.model.startsWith(`${provider}/`) ? entry.thinking : undefined;
+  const thinking = fromProfile?.thinking ?? authored ?? agent.thinking;
   return { ...(model ? { model } : {}), ...(thinking ? { thinking } : {}) };
 }
 
@@ -205,10 +212,16 @@ export function haikuGuard(fastModel: string | undefined, info: RunContextInfo =
 }
 
 export const DEFAULT_TIER_DESCRIPTIONS: Record<Tier, string> = {
-  fast: "Lookups, searches, reading and summarizing code or docs, scripted or mechanical edits, running checks and reporting results",
-  balanced: "Implementing a precisely specified change, ordinary implementation, debugging with clear symptoms, code reviews, multi-source research",
-  strong: "Only when a mistake is costly and the task is genuinely hard: subtle design, hard debugging without clear symptoms, cross-cutting correctness-critical changes",
+  fast: "Lookups, extraction, concise summaries, scripted or mechanical changes, and running prescribed checks; little unresolved judgment.",
+  balanced: "Specified implementation, ordinary debugging with clear symptoms, documentation, focused review, and multi-source research with a clear question.",
+  strong: "Substantial unresolved reasoning within this task: interacting changes, difficult review, nontrivial design, or debugging whose cause is not yet known.",
+  premium: "Exceptional unresolved difficulty where the flagship model's extra capability is justified: subtle cross-system correctness, unusually hard debugging, or consequential architecture with unresolved trade-offs. Not merely a lengthy specification or routine implementation in a critical project.",
 };
+
+/** User/project pins suppress classification; built-in role models and efforts are only baselines. */
+export function fixedAgentDefaults(agent: AgentDef | undefined, parentModel: string, available: readonly AvailableModel[]): { model?: string; thinking?: string } {
+  return agent && agent.source !== "builtin" ? agentDefaults(agent, parentModel, available) : {};
+}
 
 /** What the caller or the agent file already decided; Jev fills only the gaps. */
 export interface Given {
@@ -218,8 +231,8 @@ export interface Given {
 }
 
 /**
- * The Jev questions for the gaps in `given`, or {} when nothing is left to decide. Fill `given` with
- * what a named agent fixes (`agentDefaults`), so a profiled role is not asked for a tier or effort.
+ * The Jev questions for the gaps in `given`. Include only user/project fixed defaults in `given`;
+ * built-in profiles are fallback baselines and must not suppress task-specific classification.
  */
 export function pickQuestions(given: Given, agents: readonly AgentDef[], tiers: TierConfig, askTier: boolean): Record<string, ClassifierQuestion> {
   const questions: Record<string, ClassifierQuestion> = {};
@@ -230,17 +243,19 @@ export function pickQuestions(given: Given, agents: readonly AgentDef[], tiers: 
       criteria: Object.fromEntries(agents.map((a) => [a.name, a.description])),
     };
   }
-  if (!given.model && askTier) {
+  const guidance = "Judge only the delegated task in task. parent_request is context for interpreting it, not additional work this agent owns. Choose the least costly capability and effort sufficient to complete the task reliably. A role name, long specification, many files, mandatory tests, or an important parent project does not by itself justify escalation. Do not trade away necessary capability merely to save cost. Model capability and reasoning effort are independent decisions.";
+  const offered = TIERS.filter((tier) => Boolean(tiers.models[tier]));
+  if (!given.model && askTier && offered.length > 1) {
     questions.tier = {
       type: "choice",
-      instructions: "How capable a model does `task` need?",
-      criteria: tiers.descriptions,
+      instructions: `${guidance} How capable a model does task need?`,
+      criteria: Object.fromEntries(offered.map((tier) => [tier, `${tiers.descriptions[tier]} Candidate: ${tiers.models[tier]}.`])),
     };
   }
   if (!given.thinking) {
     questions.effort = {
       type: "choice",
-      instructions: "How much careful reasoning does `task` need from the agent doing it?",
+      instructions: `${guidance} How much careful reasoning does task need from the agent doing it?`,
       criteria: { ...EFFORT_DESCRIPTIONS },
     };
   }
@@ -260,16 +275,19 @@ export interface Picks {
  * option whose P(it or stronger) reaches theta(pressure), else the lowest. Quota pressure on the
  * parent's provider (0..1) raises the bar, so picks move toward cheaper tiers and lower efforts.
  */
-export function readPicks(answers: Record<string, ClassifierAnswer>, options: { pressure?: number; threshold?: Threshold } = {}): Picks {
+export function readPicks(answers: Record<string, ClassifierAnswer>, options: { pressure?: number; threshold?: Threshold; tiers?: readonly Tier[] } = {}): Picks {
   const picks: Picks = {};
   const pressure = Number.isFinite(options.pressure) ? Math.min(1, Math.max(0, options.pressure!)) : 0;
   const bar = theta(pressure, options.threshold);
   const role = choice(answers, "role");
   if (role && role.confidence >= 0.5) picks.agent = role.choice;
+  const tiers = options.tiers ?? TIERS;
+  const valid = (offered: readonly string[], answer: ReturnType<typeof choice>) =>
+    answer && (offered.includes(answer.choice) || offered.some((name) => Number.isFinite(answer.probabilities?.[name]) && answer.probabilities[name]! > 0));
   const tier = choice(answers, "tier");
-  if (tier) picks.tier = climb(TIERS, tier, bar);
+  if (tiers.length && valid(tiers, tier)) picks.tier = climb(tiers, tier!, bar);
   const effort = choice(answers, "effort");
-  if (effort) picks.thinking = climb(EFFORTS, effort, bar);
+  if (valid(EFFORTS, effort)) picks.thinking = climb(EFFORTS, effort!, bar);
   if (pressure > 0 && (picks.tier || picks.thinking)) picks.pressure = pressure;
   return picks;
 }
@@ -278,7 +296,7 @@ export function readPicks(answers: Record<string, ClassifierAnswer>, options: { 
 export interface ChoiceSource {
   /** explicit: the call's argument; profile: the agent's profile or file; tier: the automatic tier pick; default: the parent's. */
   model: "explicit" | "profile" | "tier" | "default";
-  /** explicit: the call's argument; profile: the agent's profile or file; jev: Jev's effort pick; default: the parent's. */
+  /** explicit: the call's argument; profile: role/file fallback; jev: task judgment; default: safe medium fallback. */
   thinking: "explicit" | "profile" | "jev" | "default";
 }
 
@@ -293,7 +311,7 @@ export interface Resolved {
   source: ChoiceSource;
   /** The quota pressure Jev's model or effort pick was made under, when above 0. */
   pressure?: number;
-  /** Why the pick differs from Jev's answer (the Haiku guard), for display. */
+  /** Why a selected tier changed or why the parent's model was used, for display. */
   note?: string;
 }
 
@@ -302,13 +320,13 @@ export interface ResolveOptions {
   available?: readonly AvailableModel[];
   /** The run's context, for the Haiku guard. */
   context?: RunContextInfo;
+  /** Task routing uses a sole candidate; synchronous role-baseline discovery does not. */
+  selectSingleTier?: boolean;
 }
 
 /**
- * Precedence for each choice: explicit arguments, then the agent (its profile for the parent's
- * provider, else its own `model` and `thinking`), then Jev, then defaults (`general`, the balanced
- * tier, the parent's model and thinking level). A role whose profile fixes the model and thinking
- * ignores Jev's tier and effort answers.
+ * Independent model/effort precedence: explicit call, custom agent pin, task classification,
+ * built-in role baseline, balanced/medium fallback, then the parent model with a visible note.
  */
 export function resolve(
   given: Given,
@@ -331,29 +349,51 @@ export function resolve(
   // Agent files are defaults too: switching the main session's provider must not silently
   // launch children against a different subscription. Only an explicit call model may do that.
   const defaults = agentDefaults(agent, parent.model, options.available);
-  const provider = parent.model.split("/")[0];
-  let model = given.model ?? defaults.model;
+  const fixed = fixedAgentDefaults(agent, parent.model, options.available ?? []);
+  const provider = parent.model.split("/")[0]!;
+  const offered = TIERS.filter((name) => tiers.models[name]?.startsWith(`${provider}/`));
+  const validPick = picks?.tier && offered.includes(picks.tier) ? picks.tier : undefined;
+  let model = given.model ?? fixed.model;
   let tier: Tier | undefined;
-  const source: ChoiceSource = { model: given.model ? "explicit" : defaults.model ? "profile" : "default", thinking: given.thinking ? "explicit" : defaults.thinking ? "profile" : "default" };
+  const source: ChoiceSource = { model: given.model ? "explicit" : fixed.model ? "profile" : "default", thinking: given.thinking ? "explicit" : fixed.thinking ? "profile" : "default" };
   let note: string | undefined;
-  if (!model) {
-    tier = picks?.tier ?? "balanced";
+  if (!model && validPick) {
+    tier = validPick;
     if (tier === "fast") {
       note = haikuGuard(tiers.models.fast, options.context);
       if (note) tier = "balanced";
     }
-    const tierModel = tiers.models[tier]?.startsWith(`${provider}/`) ? tiers.models[tier] : undefined;
-    model = tierModel ?? parent.model;
-    byJev.model = picks?.tier !== undefined && tierModel !== undefined;
-    if (tierModel) source.model = "tier";
+    model = tiers.models[tier]?.startsWith(`${provider}/`) ? tiers.models[tier] : undefined;
+    if (model) { source.model = "tier"; byJev.model = true; }
   }
-  let thinking = given.thinking ?? defaults.thinking;
-  if (!thinking && picks?.thinking) {
+  if (!model && !validPick && options.selectSingleTier !== false && !given.model && !fixed.model && offered.length === 1) {
+    tier = offered[0];
+    if (tier === "fast") {
+      note = haikuGuard(tiers.models.fast, options.context);
+      if (note) tier = "balanced";
+    }
+    model = tiers.models[tier];
+    if (model) source.model = "tier";
+  }
+  if (!model && defaults.model) { model = defaults.model; source.model = "profile"; }
+  if (!model && tiers.models.balanced?.startsWith(`${provider}/`)) {
+    model = tiers.models.balanced;
+    tier = "balanced";
+    source.model = "tier";
+  }
+  if (!model) {
+    model = parent.model;
+    note = [note, `parent fallback: no usable role or tier mapping for ${provider}`].filter(Boolean).join("; ");
+  }
+  let thinking = given.thinking ?? fixed.thinking;
+  if (!thinking && picks?.thinking && EFFORTS.includes(picks.thinking as (typeof EFFORTS)[number])) {
     thinking = picks.thinking;
     byJev.thinking = true;
     source.thinking = "jev";
   }
-  thinking ??= parent.thinking;
+  if (!thinking && defaults.thinking) { thinking = defaults.thinking; source.thinking = "profile"; }
+  thinking ??= "medium";
+  if (!given.thinking) thinking = clampThinking(thinking, physicalChatModels(options.available ?? []).find((m) => `${m.provider}/${m.id}` === model));
   const pressure = picks?.pressure && (byJev.model || byJev.thinking) ? picks.pressure : undefined;
   return { agent, model, thinking, byJev, source, ...(tier ? { tier } : {}), ...(pressure ? { pressure } : {}), ...(note ? { note } : {}) };
 }

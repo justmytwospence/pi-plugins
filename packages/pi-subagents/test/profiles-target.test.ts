@@ -85,6 +85,14 @@ describe("the profiles eval target", () => {
     expect(implied(explorer, runs[0]!)).toEqual({ model: "anthropic/claude-sonnet-5-5", thinking: "low", profiled: true });
     expect(implied(explorer, runs[3]!)).toEqual({ model: "openai-codex/gpt-6-luna", thinking: "high", profiled: true });
     expect(implied(BUILTIN_AGENTS[0], runs[0]!)).toEqual({ model: "anthropic/claude-fable-5-1", thinking: "high", profiled: false });
+    // The parent ID carries the Antigravity route; a provider/_ placeholder loses it.
+    expect(implied(explorer, { ...runs[0]!, model: "google/antigravity-gemini-4-argon" })).toEqual({ model: "google/antigravity-gemini-3.8-flash", thinking: "low", profiled: true });
+    expect(implied(explorer, { ...runs[0]!, model: "muse-code/muse-wonder-1.0" })).toEqual({ model: "muse-code/muse-spark-1.3", thinking: "low", profiled: true });
+    expect(implied(explorer, { ...runs[0]!, model: "lmstudio/qwen", thinking: "high" })).toEqual({ model: "lmstudio/qwen", thinking: "low", profiled: false });
+    expect(implied(explorer, { ...runs[0]!, model: "lmstudio/qwen", thinking: "high" }, [{ provider: "lmstudio", id: "qwen", reasoning: false }]))
+      .toEqual({ model: "lmstudio/qwen", thinking: "off", profiled: false });
+    expect(implied(explorer, runs[0]!, [{ provider: "anthropic", id: "claude-sonnet-5-5", reasoning: false }]))
+      .toEqual({ model: "anthropic/claude-sonnet-5-5", thinking: "off", profiled: true });
     const medians = costPerTurn(runs);
     expect(medians.get("anthropic/claude-sonnet-5-5")).toEqual({ perTurn: 0.05, runs: 1 });
     expect(estimate(runs[0]!, "anthropic/claude-sonnet-5-5", medians)).toEqual({ cost: 0.5, priced: true });
@@ -109,6 +117,7 @@ describe("the profiles eval target", () => {
     expect(text).toMatch(/^total\s+4\s+100%\s+\$3\.65\s+\$2\.15\s+estimated\/actual 0\.59$/mu);
     expect(text).toContain("3 runs would get another agent than they had; 1 runs are estimated at their actual cost");
     expect(text).toContain("cannot judge answer quality");
+    expect(text).toContain("compares role baselines when classification is unavailable, not a prediction of adaptive routing or task quality");
     expect(text).toContain("Model chosen by: not recorded (4 runs predate the source record).");
     expect(text).toMatch(/spend: \$0\.0040 over 4 calls/u);
     const [recorded] = last("profiles", 1, r.env);

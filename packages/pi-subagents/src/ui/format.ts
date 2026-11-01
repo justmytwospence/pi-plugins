@@ -61,10 +61,15 @@ export function jev(on: boolean, theme: Theme, pressure?: number): string {
   return theme.fg("dim", pressure && pressure > 0 ? ` (auto, p=${pressure.toFixed(1)})` : " (auto)");
 }
 
-/** `claude-haiku-5 (Jev) · low (Jev)`: the model and effort, marking Jev's picks. */
+/** Highlight a parent-model fallback without mistaking a deliberate same-model pick for one. */
+export function modelSourceMark(source: { model?: string } | undefined, theme: Theme): string {
+  return source?.model === "default" ? theme.fg("warning", " (parent)") : "";
+}
+
+/** Model and effort with automatic-selection and parent-fallback provenance. */
 export function modelAndEffort(run: Run, theme: Theme, full = false): string {
   const model = run.state.model ?? run.model;
-  return `${full ? model : shortModel(model)}${jev(run.byJev.model, theme, run.pressure)} · ${run.thinking}${jev(run.byJev.thinking, theme, run.pressure)}`;
+  return `${full ? model : shortModel(model)}${jev(run.byJev.model, theme, run.pressure)}${modelSourceMark(run.source, theme)} · ${run.thinking}${jev(run.byJev.thinking, theme, run.pressure)}`;
 }
 
 /** The task's first line, whitespace collapsed, clipped. */

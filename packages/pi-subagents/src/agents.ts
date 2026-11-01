@@ -32,11 +32,11 @@ export interface AgentDef {
 
 const READ_ONLY_TOOLS = ["read", "grep", "find", "ls", "bash"];
 const NO_CHANGES = "Do not implement fixes or modify files. Use bash only for inspection, never for commands that change files or repository state. Your no-change policy is an instruction, not a filesystem sandbox.";
-const SONNET = "anthropic/claude-sonnet-5-5";
-const OPUS = "anthropic/claude-opus-5-5";
-const profile = (anthropic: string, anthropicThinking: string, codex: string, codexThinking: string): Record<string, ProfileModel> => ({
-  anthropic: { model: anthropic, thinking: anthropicThinking },
-  "openai-codex": { model: codex, thinking: codexThinking },
+type RoleProfile = Record<"anthropic" | "openai" | "google" | "muse-code", readonly [id: string, thinking: string]>;
+/** Built-in model/effort baselines, used only when task classification cannot choose. */
+const profile = (values: RoleProfile): Record<string, ProfileModel> => ({
+  ...Object.fromEntries(Object.entries(values).map(([provider, [id, thinking]]) => [provider, { model: `${provider}/${id}`, thinking }])),
+  "openai-codex": { model: `openai-codex/${values.openai[0]}`, thinking: values.openai[1] },
 });
 
 export const GENERAL: AgentDef = {
@@ -50,7 +50,8 @@ export const EXPLORER: AgentDef = {
   name: "explorer",
   description: "Read-only recon of a codebase: find files, symbols and call sites, trace how something works, and report findings with file and line references, without editing",
   tools: [...READ_ONLY_TOOLS],
-  models: profile(SONNET, "low", "openai-codex/gpt-6-luna", "high"),
+  models: profile({ anthropic: ["claude-sonnet-5-5", "low"], openai: ["gpt-6-luna", "high"], google: ["gemini-3.8-flash", "low"], "muse-code": ["muse-spark-1.3", "low"] }),
+  thinking: "low",
   prompt: `You are a codebase explorer. Locate the relevant files and symbols, trace actual behavior, and return concise findings with file paths and line references. Distinguish evidence from assumptions and identify anything unresolved. ${NO_CHANGES}`,
   source: "builtin",
 };
@@ -58,7 +59,8 @@ export const EXPLORER: AgentDef = {
 export const WORKER: AgentDef = {
   name: "worker",
   description: "Implement a clearly specified change: edit code, apply a decided change across files, write tests to a given spec, run checks and fix what fails",
-  models: profile(SONNET, "medium", "openai-codex/gpt-6.1-sol", "medium"),
+  models: profile({ anthropic: ["claude-sonnet-5-5", "medium"], openai: ["gpt-6.1-sol", "medium"], google: ["gemini-3.8-flash", "medium"], "muse-code": ["muse-spark-1.3", "medium"] }),
+  thinking: "medium",
   prompt: "You are an implementation worker. Carry out the specified change completely and within its scope: edit the files, follow the repository's conventions, and run the relevant checks and tests, fixing what fails. Do not widen the scope or redesign beyond the spec; when the spec is ambiguous or a decision is needed, stop and report the blocker instead of guessing. Report the files you changed with a brief summary, the checks you ran and their results, and anything left unresolved.",
   source: "builtin",
 };
@@ -67,7 +69,8 @@ export const REVIEWER: AgentDef = {
   name: "reviewer",
   description: "Independent review of a diff, branch or change for bugs, regressions, security risks and missing tests; reports evidence without fixing anything",
   tools: [...READ_ONLY_TOOLS],
-  models: profile(OPUS, "high", "openai-codex/gpt-6.1-sol", "high"),
+  models: profile({ anthropic: ["claude-opus-5-5", "high"], openai: ["gpt-6.1-sol", "high"], google: ["gemini-4-argon", "high"], "muse-code": ["muse-wonder-1.0", "high"] }),
+  thinking: "high",
   prompt: `You are an independent code reviewer. Inspect the requested changes and surrounding execution paths for actionable bugs, regressions, security risks, and missing tests. Prioritize concrete correctness issues over stylistic preferences. For each finding, give severity, a file and line reference, the failing scenario, and supporting evidence. Distinguish confirmed issues from uncertainty; say explicitly when no actionable issues were found. ${NO_CHANGES}`,
   source: "builtin",
 };
@@ -75,7 +78,8 @@ export const REVIEWER: AgentDef = {
 export const RESEARCHER: AgentDef = {
   name: "researcher",
   description: "Research outside the codebase: search the web and documentation about libraries, APIs, versions, tools and vendor guidance, and answer with sources",
-  models: profile(SONNET, "medium", "openai-codex/gpt-6.1-terra", "medium"),
+  models: profile({ anthropic: ["claude-sonnet-5-5", "medium"], openai: ["gpt-6.1-terra", "medium"], google: ["gemini-3.8-flash", "medium"], "muse-code": ["muse-spark-1.3", "medium"] }),
+  thinking: "medium",
   prompt: "You are a researcher. Answer the question from primary sources: official documentation, source code, release notes and vendor pages, preferring current ones. Cite a URL or file path for every claim, give versions and dates where they matter, and distinguish confirmed facts from inference and from conflicting sources. Do not modify the repository unless the task asks for it. Give a concise answer first, then the evidence.",
   source: "builtin",
 };
@@ -83,7 +87,8 @@ export const RESEARCHER: AgentDef = {
 export const WRITER: AgentDef = {
   name: "writer",
   description: "Produce or rewrite a written document: documentation, READMEs, changelogs, reports, summaries of documents or code and other write-ups (not for explaining a concept or answering a question)",
-  models: profile(SONNET, "medium", "openai-codex/gpt-6.1-terra", "medium"),
+  models: profile({ anthropic: ["claude-sonnet-5-5", "medium"], openai: ["gpt-6.1-terra", "medium"], google: ["gemini-3.8-flash", "medium"], "muse-code": ["muse-spark-1.3", "medium"] }),
+  thinking: "medium",
   prompt: "You are a writer. Produce the requested text (documentation, a summary, a report or another write-up) for its stated audience: accurate, concise, and in the style of the surrounding documents. Check facts against the code or sources instead of inventing them, and mark anything you could not verify. Edit only the files the task names; return the text, or a summary of your changes when you edited files.",
   source: "builtin",
 };
@@ -92,7 +97,8 @@ export const PLANNER: AgentDef = {
   name: "planner",
   description: "Design and hard analysis without edits: write an implementation plan, weigh approaches, trade-offs and risks, or work out a subtle problem before anyone changes code",
   tools: [...READ_ONLY_TOOLS],
-  models: profile(OPUS, "high", "openai-codex/gpt-6.1-sol", "high"),
+  models: profile({ anthropic: ["claude-opus-5-5", "high"], openai: ["gpt-6.1-sol", "high"], google: ["gemini-4-argon", "high"], "muse-code": ["muse-wonder-1.0", "high"] }),
+  thinking: "high",
   prompt: `You are a planner. Read the relevant code, weigh the alternatives and their trade-offs, and return the recommended approach as concrete steps with the files involved, the risks, and how to verify each step. Distinguish evidence from assumptions and list open questions. Do not implement the plan. ${NO_CHANGES}`,
   source: "builtin",
 };

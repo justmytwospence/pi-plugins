@@ -26,26 +26,33 @@ const parent = { model: "provider/model", thinking: "medium" };
 
 const ROLES = ["general", "explorer", "worker", "reviewer", "researcher", "writer", "planner"];
 
-test("ships seven roles: general without a profile, the others with Anthropic and Codex models and fixed efforts", () => {
+test("ships seven roles with per-provider fallback profiles and provider-independent fallback effort", () => {
   const agents = discoverAgents(project);
   expect(agents.map((agent) => agent.name)).toEqual(ROLES);
   expect(agents).toEqual(BUILTIN_AGENTS);
-  const profiles = Object.fromEntries(agents.map((a) => [a.name, a.models && { anthropic: `${a.models.anthropic?.model}:${a.models.anthropic?.thinking}`, codex: `${a.models["openai-codex"]?.model}:${a.models["openai-codex"]?.thinking}` }]));
+  const profiles = Object.fromEntries(agents.map((a) => [a.name, a.models && Object.fromEntries(Object.entries(a.models).map(([provider, entry]) => [provider, `${entry.model}:${entry.thinking}`]))]));
+  const baseline = (anthropic: string, openai: string, google: string, muse: string, effort: string) => ({
+    anthropic: `anthropic/${anthropic}:${effort}`,
+    openai: `openai/${openai}:${effort}`,
+    "openai-codex": `openai-codex/${openai}:${effort}`,
+    google: `google/${google}:${effort}`,
+    "muse-code": `muse-code/${muse}:${effort}`,
+  });
   expect(profiles).toEqual({
     general: undefined,
-    explorer: { anthropic: "anthropic/claude-sonnet-5-5:low", codex: "openai-codex/gpt-6-luna:high" },
-    worker: { anthropic: "anthropic/claude-sonnet-5-5:medium", codex: "openai-codex/gpt-6.1-sol:medium" },
-    reviewer: { anthropic: "anthropic/claude-opus-5-5:high", codex: "openai-codex/gpt-6.1-sol:high" },
-    researcher: { anthropic: "anthropic/claude-sonnet-5-5:medium", codex: "openai-codex/gpt-6.1-terra:medium" },
-    writer: { anthropic: "anthropic/claude-sonnet-5-5:medium", codex: "openai-codex/gpt-6.1-terra:medium" },
-    planner: { anthropic: "anthropic/claude-opus-5-5:high", codex: "openai-codex/gpt-6.1-sol:high" },
+    explorer: { ...baseline("claude-sonnet-5-5", "gpt-6-luna", "gemini-3.8-flash", "muse-spark-1.3", "low"), openai: "openai/gpt-6-luna:high", "openai-codex": "openai-codex/gpt-6-luna:high" },
+    worker: baseline("claude-sonnet-5-5", "gpt-6.1-sol", "gemini-3.8-flash", "muse-spark-1.3", "medium"),
+    reviewer: baseline("claude-opus-5-5", "gpt-6.1-sol", "gemini-4-argon", "muse-wonder-1.0", "high"),
+    researcher: baseline("claude-sonnet-5-5", "gpt-6.1-terra", "gemini-3.8-flash", "muse-spark-1.3", "medium"),
+    writer: baseline("claude-sonnet-5-5", "gpt-6.1-terra", "gemini-3.8-flash", "muse-spark-1.3", "medium"),
+    planner: baseline("claude-opus-5-5", "gpt-6.1-sol", "gemini-4-argon", "muse-wonder-1.0", "high"),
   });
   for (const agent of agents) {
     expect(agent.source).toBe("builtin");
     expect(agent.model).toBeUndefined();
-    expect(agent.thinking).toBeUndefined();
-    // No profile for this provider: the tier rules, here the parent's model and thinking.
-    expect(resolve({ agent: agent.name }, agents, undefined, tiers, parent)).toMatchObject(parent);
+    expect(agent.thinking).toBe(agent.name === "general" ? undefined : ["explorer"].includes(agent.name) ? "low" : ["reviewer", "planner"].includes(agent.name) ? "high" : "medium");
+    // No known hierarchy on this provider: retain the parent model visibly, not its effort.
+    expect(resolve({ agent: agent.name }, agents, undefined, tiers, parent)).toMatchObject({ model: parent.model, thinking: agent.thinking ?? "medium", source: { model: "default", thinking: agent.thinking ? "profile" : "default" }, note: "parent fallback: no usable role or tier mapping for provider" });
     if (agent.name !== "general") expect(agent.prompt).toMatch(/^You are an? /u);
   }
   for (const name of ["general", "worker", "researcher", "writer"]) expect(agents.find((a) => a.name === name)?.tools).toBeUndefined();

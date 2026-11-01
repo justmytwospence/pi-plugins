@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { RATE_LIMIT_ERROR, isRateLimit, setPiInvocation } from "../src/child.ts";
-import subagents, { promptGuidelines, resumable } from "../src/index.ts";
+import subagents, { promptGuidelines, recordedRun, resumable } from "../src/index.ts";
 import { fakeJev, harness } from "./harness.ts";
 import { fakeUI, plain } from "./ui-helpers.ts";
 
@@ -21,9 +21,9 @@ afterEach(() => {
   setPiInvocation(undefined);
 });
 
-async function setup(options: { answer?: (questions: Record<string, any>) => any; ctx?: Record<string, unknown>; fixture?: string; concurrency?: number } = {}) {
+async function setup(options: { answer?: (questions: Record<string, any>, state: Record<string, unknown>) => any; ctx?: Record<string, unknown>; fixture?: string; concurrency?: number } = {}) {
   setPiInvocation(fixture(options.fixture ?? "fake-pi-loop.mjs"));
-  const jev = fakeJev((questions) => options.answer?.(questions) ?? {});
+  const jev = fakeJev((questions, state) => options.answer?.(questions, state) ?? {});
   const h = harness();
   let tool: any;
   const listeners = new Map<string, Array<(data: unknown) => void>>();
@@ -50,19 +50,21 @@ async function setup(options: { answer?: (questions: Record<string, any>) => any
   return { h, jev, ctx, ui, send, tool: () => tool, stop: () => h.emit("session_shutdown", { type: "session_shutdown" }, ctx) };
 }
 
-test("a named profiled role asks Jev nothing; general asks the tier and effort; an implicit role ignores them", async () => {
+test("named built-ins are task-calibrated, general asks model and effort, and implicit roles retain their answers", async () => {
   const s = await setup({ answer: (questions) => Object.fromEntries(Object.keys(questions).map((id) => [id, choice(id === "role" ? "worker" : id === "tier" ? "strong" : "xhigh")])) });
   const explorer = await s.tool().execute("t1", { task: "find the config loader", agent: "explorer", async: true }, undefined, undefined, s.ctx);
-  expect(s.jev.calls).toHaveLength(0);
-  expect(explorer.details.runs[0]).toMatchObject({ agent: "explorer", model: "anthropic/claude-sonnet-5-5", thinking: "low", byJev: { agent: false, model: false, thinking: false } });
+  expect(Object.keys(s.jev.calls[0]!.questions)).toEqual(["tier", "effort"]);
+  expect(explorer.details.runs[0]).toMatchObject({ agent: "explorer", model: "anthropic/claude-opus-5-5", thinking: "xhigh", source: { model: "tier", thinking: "jev" }, byJev: { agent: false, model: true, thinking: true } });
+  expect(s.jev.calls[0]!.state).toMatchObject({ task: "find the config loader", role: "explorer" });
 
   const general = await s.tool().execute("t2", { task: "something odd", agent: "general", async: true }, undefined, undefined, s.ctx);
-  expect(Object.keys(s.jev.calls[0]!.questions)).toEqual(["tier", "effort"]);
+  expect(Object.keys(s.jev.calls[1]!.questions)).toEqual(["tier", "effort"]);
   expect(general.details.runs[0]).toMatchObject({ model: "anthropic/claude-opus-5-5", thinking: "xhigh", byJev: { model: true, thinking: true } });
 
   const implicit = await s.tool().execute("t3", { task: "implement the spec in PLAN.md", async: true }, undefined, undefined, s.ctx);
-  expect(Object.keys(s.jev.calls[1]!.questions)).toEqual(["role", "tier", "effort"]);
-  expect(implicit.details.runs[0]).toMatchObject({ agent: "worker", model: "anthropic/claude-sonnet-5-5", thinking: "medium", byJev: { agent: true, model: false, thinking: false } });
+  expect(Object.keys(s.jev.calls[2]!.questions)).toEqual(["role", "tier", "effort"]);
+  expect(s.jev.calls[2]!.state.role).toBe("auto");
+  expect(implicit.details.runs[0]).toMatchObject({ agent: "worker", model: "anthropic/claude-opus-5-5", thinking: "xhigh", byJev: { agent: true, model: true, thinking: true } });
   await s.stop();
 });
 
@@ -72,6 +74,86 @@ test("on a Codex parent the same roles take Codex models, never Anthropic ones",
   (s.ctx.modelRegistry as { getAll: () => unknown[] }).getAll = () => [...claude, ...codex];
   const result = await s.tool().execute("t1", { tasks: [{ task: "a", agent: "explorer" }, { task: "b", agent: "reviewer" }, { task: "c", agent: "writer" }], async: true }, undefined, undefined, s.ctx);
   expect(result.details.runs.map((r: any) => `${r.model} ${r.thinking}`)).toEqual(["openai-codex/gpt-6-luna high", "openai-codex/gpt-6.1-sol high", "openai-codex/gpt-6.1-terra medium"]);
+  await s.stop();
+});
+
+test("five concurrent Astra-parent workers independently route mechanical through hard tasks and classifier failure", async () => {
+  const openai = ["gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra"].map((id) => ({ provider: "openai", id }));
+  const decisions: Record<string, [string, string]> = {
+    mechanical: ["fast", "low"], specified: ["balanced", "medium"], substantive: ["strong", "high"], hard: ["premium", "xhigh"],
+  };
+  const s = await setup({ concurrency: 5, ctx: { model: { provider: "openai", id: "gpt-6-astra" } }, answer: (_questions, state) => {
+    const decision = decisions[String(state.task)];
+    return decision ? { tier: choice(decision[0]), effort: choice(decision[1]) } : { stopReason: "error", error: "classifier offline" };
+  } });
+  (s.ctx.modelRegistry as { getAll: () => unknown[] }).getAll = () => openai;
+  const result = await s.tool().execute("batch", { tasks: ["mechanical", "specified", "substantive", "hard", "failure"].map((task) => ({ task, agent: "worker" })), async: true }, undefined, undefined, s.ctx);
+  expect(result.details.runs).toHaveLength(5);
+  expect(s.jev.calls).toHaveLength(5);
+  for (const call of s.jev.calls) {
+    expect(Object.keys(call.questions)).toEqual(["tier", "effort"]);
+    expect(call.state.role).toBe("worker");
+  }
+  expect(result.details.runs.map((r: any) => [r.model, r.thinking])).toEqual([
+    ["openai/gpt-6-luna", "low"], ["openai/gpt-6.1-terra", "medium"], ["openai/gpt-6.1-sol", "high"], ["openai/gpt-6-astra", "xhigh"], ["openai/gpt-6.1-sol", "medium"],
+  ]);
+  for (const run of result.details.runs.slice(0, 4)) expect(run).toMatchObject({ source: { model: "tier", thinking: "jev" }, byJev: { model: true, thinking: true } });
+  expect(result.details.runs[3]).not.toHaveProperty("note");
+  expect(result.details.runs[4]).toMatchObject({ source: { model: "profile", thinking: "profile" }, byJev: { model: false, thinking: false } });
+  const records = s.h.entries.filter((e) => e.customType === "subagents:run").map((e) => e.data as any);
+  for (const run of result.details.runs) expect(records.find((r) => r.id === run.id)).toMatchObject({ model: run.model, source: run.source });
+  await s.stop();
+});
+
+test.each([
+  ["google", "antigravity-gemini-4-argon", ["antigravity-gemini-3.8-flash", "antigravity-gemini-4-argon"], "antigravity-gemini-4-argon"],
+  ["muse-code", "muse-wonder-1.0", ["muse-spark-1.3", "muse-wonder-1.0"], "muse-wonder-1.0"],
+] as const)("%s selection stays within its route, with no fabricated premium candidate", async (provider, parent, ids, strong) => {
+  const s = await setup({ ctx: { model: { provider, id: parent } }, answer: () => ({ tier: choice("strong"), effort: choice("high") }) });
+  (s.ctx.modelRegistry as { getAll: () => unknown[] }).getAll = () => ids.map((id) => ({ provider, id }));
+  const result = await s.tool().execute("t1", { task: "difficult review", agent: "worker", async: true }, undefined, undefined, s.ctx);
+  expect(Object.keys(s.jev.calls[0]!.questions.tier.criteria)).toEqual(["fast", "balanced", "strong"]);
+  expect(result.details.runs[0]).toMatchObject({ model: `${provider}/${strong}`, thinking: "high", source: { model: "tier", thinking: "jev" } });
+  await s.stop();
+});
+
+test("explicit model and effort independently suppress only their question; a custom pin suppresses both", async () => {
+  const s = await setup({ answer: () => ({ tier: choice("fast"), effort: choice("low") }) });
+  const model = await s.tool().execute("t1", { task: "model fixed", agent: "worker", model: "anthropic/claude-opus-5-5", async: true }, undefined, undefined, s.ctx);
+  expect(Object.keys(s.jev.calls[0]!.questions)).toEqual(["effort"]);
+  expect(model.details.runs[0]).toMatchObject({ model: "anthropic/claude-opus-5-5", thinking: "low", source: { model: "explicit", thinking: "jev" } });
+  const effort = await s.tool().execute("t2", { task: "effort fixed", agent: "worker", thinking: "xhigh", async: true }, undefined, undefined, s.ctx);
+  expect(Object.keys(s.jev.calls[1]!.questions)).toEqual(["tier"]);
+  expect(effort.details.runs[0]).toMatchObject({ model: "anthropic/claude-haiku-5", thinking: "xhigh", source: { model: "tier", thinking: "explicit" } });
+  const cwd = s.ctx.cwd as string;
+  mkdirSync(path.join(cwd, ".pi", "agents"), { recursive: true });
+  writeFileSync(path.join(cwd, ".pi", "agents", "pinned.md"), "---\nname: pinned\ndescription: Pinned\nmodels:\n  anthropic: claude-sonnet-5-5:high\n---\nPinned agent");
+  const before = s.jev.calls.length;
+  const pinned = await s.tool().execute("t3", { task: "pinned", agent: "pinned", async: true }, undefined, undefined, s.ctx);
+  expect(s.jev.calls).toHaveLength(before);
+  expect(pinned.details.runs[0]).toMatchObject({ model: "anthropic/claude-sonnet-5-5", thinking: "high", source: { model: "profile", thinking: "profile" } });
+  await s.stop();
+});
+
+test("unknown provider fallback is visible in plain start/result, rendered metadata and persisted reconstruction", async () => {
+  const s = await setup({ ctx: { model: { provider: "lmstudio", id: "qwen" } }, answer: () => ({ effort: choice("high") }) });
+  (s.ctx.modelRegistry as { getAll: () => unknown[] }).getAll = () => [{ provider: "lmstudio", id: "qwen", type: "chat" }];
+  const result = await s.tool().execute("fallback", { task: "review a tiny change", agent: "worker", async: true }, undefined, undefined, s.ctx);
+  const note = "parent fallback: no usable role or tier mapping for lmstudio";
+  expect(result.details.runs[0]).toMatchObject({ model: "lmstudio/qwen", thinking: "high", source: { model: "default", thinking: "jev" }, note });
+  expect(result.content[0].text).toContain(note);
+  expect(s.tool().renderResult(result, { expanded: false }, plain).render(120).join("\n")).toContain("qwen (parent)");
+  const record = s.h.entries.filter((e) => e.customType === "subagents:run").map((e) => e.data as any).find((r) => r.id === result.details.runs[0].id);
+  expect(record).toMatchObject({ source: { model: "default", thinking: "jev" }, note });
+  expect(recordedRun(record)).toMatchObject({ source: { model: "default", thinking: "jev" }, note, model: "lmstudio/qwen" });
+  const liveResult = await s.tool().execute("live-result", { action: "result", id: result.details.runs[0].id }, undefined, undefined, s.ctx);
+  expect(liveResult.content[0].text).toContain("lmstudio/qwen (parent)");
+  expect(liveResult.content[0].text).toContain(note);
+  const saved = { ...record, id: `recorded-${record.id}` };
+  s.ctx.sessionManager.getBranch = () => [{ type: "custom", customType: "subagents:run", data: saved }];
+  const recordedResult = await s.tool().execute("recorded-result", { action: "result", id: saved.id }, undefined, undefined, s.ctx);
+  expect(recordedResult.content[0].text).toContain("lmstudio/qwen (parent)");
+  expect(recordedResult.content[0].text).toContain(note);
   await s.stop();
 });
 

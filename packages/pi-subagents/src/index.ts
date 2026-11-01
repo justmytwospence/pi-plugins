@@ -2,9 +2,8 @@
 // One tool, `subagent`: run a single task, parallel tasks, or a chain (with `{previous}`), in the
 // foreground or async, with fresh or forked context, optionally in a new worktree; then status,
 // steer, stop, and result by run id. When the call leaves the agent, model, or effort open, Jev
-// (through Pi's own classifier models) picks them: the agent definition (a role's profile then fixes
-// the model and effort on the parent's provider), else a model tier from your settings and a thinking
-// level.
+// (through Pi's own classifier models) judges model capability and effort independently for the
+// task. Built-in roles supply fallback baselines; explicit and user-authored agent pins stay fixed.
 //
 // With pi-bg installed the two work as one (activity.ts): pi-bg's background tasks are a section of
 // the subagents panel and are listed in FleetView, and async runs are outside work pi-bg's bg_wait
@@ -27,14 +26,14 @@ import { type Mode, type OwedResult, type Parcel, type ParkedCall, adopt, isPark
 import { discoverFamily } from "./family-contract.ts";
 import { type JevConfig, askJev } from "./jev.ts";
 import { runLabel, taskLabel } from "./label.ts";
-import { type AvailableModel, type ChoiceSource, DEFAULT_THRESHOLD, DEFAULT_TIER_DESCRIPTIONS, type Given, type Resolved, type Threshold, type Tier, agentDefaults, pickQuestions, providerTiers, readPicks, resolve } from "./pick.ts";
+import { type AvailableModel, type ChoiceSource, DEFAULT_THRESHOLD, DEFAULT_TIER_DESCRIPTIONS, type Given, type Resolved, type Threshold, type Tier, fixedAgentDefaults, pickQuestions, providerTiers, readPicks, resolve } from "./pick.ts";
 import { REFERENCE_TYPE, type RunRef, compactTranscript, referenceContext, runAutocomplete } from "./references.ts";
 import { type Run, type RunLink, displayTokens, transcriptPath } from "./run.ts";
 import { computeStats, formatStats, latestPerRun, readAllRuns, runRecords } from "./stats.ts";
 import { clip, recentTexts } from "./transcript.ts";
 import { FleetView, SUCCESS_HINT_MS } from "./ui/fleet.ts";
 import type { ViewerActions } from "./ui/viewer.ts";
-import { elapsedMs, formatCount, formatElapsed, shortModel } from "./ui/format.ts";
+import { elapsedMs, formatCount, formatElapsed, modelSourceMark, shortModel } from "./ui/format.ts";
 import { RunsWidget, WIDGET_MODES, type WidgetMode } from "./ui/widget.ts";
 
 /** How readily the main agent delegates: `economical` (default) or `conservative`. */
@@ -80,10 +79,10 @@ export const DEFAULT_CONFIG: SubagentsConfig = {
 const CONSERVATIVE_GUIDELINE =
   "Prefer direct work for routine investigation, diagnosis, and verification. Do not delegate merely because work is long or multistep, or commission a redundant audit of work you are already doing. Delegate only genuinely independent tasks with a clear payoff or when requested; when delegating report-back work, use headless subagents rather than interactive Herdr sessions.";
 const ECONOMICAL_GUIDELINE =
-  "Delegate work that can run in parallel, is larger than one context, or is routine with a long tail (a settled change applied across files, tests to a given spec, mechanical refactors, running checks and fixing what fails): give it a precise, self-contained spec and no model, so the role's cheaper model is picked, then review the result (diff, check output) instead of redoing it. Otherwise keep the work in this session, at lower effort when it is routine: cheaper subagents trade cost for a few points of pass rate, and a spec about as long as the work, judgment calls, or work that needs this conversation's context belong here. Do not commission redundant audits of work you are already doing; use headless subagents rather than interactive Herdr sessions for report-back work.";
+  "Delegate work that can run in parallel, is larger than one context, or is routine with a long tail (a settled change applied across files, tests to a given spec, mechanical refactors, running checks and fixing what fails): give it a precise, self-contained spec and leave model and effort open for task-calibrated selection, then review the result (diff, check output) instead of redoing it. Otherwise keep the work in this session, at lower effort when it is routine: cheaper subagents trade cost for a few points of pass rate, and a spec about as long as the work, judgment calls, or work that needs this conversation's context belong here. Do not commission redundant audits of work you are already doing; use headless subagents rather than interactive Herdr sessions for report-back work.";
 /** The built-in roles, one line each; shared by both delegation settings. */
 const ROLES_GUIDELINE =
-  "Choosing a role (omit agent to have one picked): explorer for search, recon and tracing code; worker to implement a clear spec and run checks; reviewer for an independent review of changes; researcher for web and docs questions; writer for docs, summaries and write-ups; planner for design and hard analysis without edits; general for anything else (its model follows the task's difficulty).";
+  "Choosing a role (omit agent to have one picked): explorer for search and tracing; worker for specified implementation and checks; reviewer for independent review; researcher for web and docs; writer for documentation; planner for design and hard analysis without edits; general for anything else. Built-in role model and effort are fallbacks, not fixed assignments: leave both open to fit the delegated task.";
 
 /** The `subagent` tool's prompt guidelines for a `delegation` setting (anything unknown is the default, economical). */
 export function promptGuidelines(delegation: unknown): string[] {
@@ -154,7 +153,7 @@ export function roleModel(
   }
   const tiers = { models: providerTiers(request.parent, config.tiers, config.providerTiers, available), descriptions: config.tierDescriptions };
   const thinking = request.thinking || fallbackThinking;
-  const resolved = resolve({ agent: request.role }, agents, undefined, tiers, { model: request.parent, thinking }, { available });
+  const resolved = resolve({ agent: request.role }, agents, undefined, tiers, { model: request.parent, thinking }, { available, selectSingleTier: false });
   if ("error" in resolved || !resolved.model || (allowed && !allowed.has(resolved.model))) return undefined;
   return { model: resolved.model, thinking: resolved.thinking, source: resolved.source.model };
 }
@@ -193,8 +192,8 @@ const TaskItem = Type.Object({
   task: Type.String({ description: "The complete, self-contained task" }),
   label: Type.Optional(Type.String({ description: "Short task name for lists and headings; omit to derive from the task" })),
   cwd: Type.Optional(Type.String({ description: "Working directory for this task" })),
-  model: Type.Optional(Type.String({ description: "provider/model. Leave empty: the agent's role brings its own model and effort. Set only when the user named a model or the task needs a different one; explicit models may cross providers" })),
-  thinking: Type.Optional(Type.String({ description: "off|minimal|low|medium|high|xhigh|max. Leave empty: the role brings its own effort. Set only when the user named a level or the task needs a different one" })),
+  model: Type.Optional(Type.String({ description: "provider/model. Leave empty for task-calibrated capability selection; built-in roles supply fallbacks. Specify to override deliberately, including across providers" })),
+  thinking: Type.Optional(Type.String({ description: "off|minimal|low|medium|high|xhigh|max. Leave empty for independent task-calibrated effort selection; specify to override deliberately" })),
 });
 
 const Params = Type.Object({
@@ -212,8 +211,8 @@ const Params = Type.Object({
   context: Type.Optional(Type.Union([Type.Literal("fresh"), Type.Literal("fork")], { description: "fresh (default) or fork this conversation" })),
   worktree: Type.Optional(Type.Boolean({ description: "Run each task in a new git worktree, only when the user requests a worktree or branch isolation; otherwise ask (default false)" })),
   cwd: Type.Optional(Type.String({ description: "Working directory (default: the session's)" })),
-  model: Type.Optional(Type.String({ description: "provider/model. Leave empty: the agent's role brings its own model and effort. Set only when the user named a model or the task needs a different one; explicit models may cross providers" })),
-  thinking: Type.Optional(Type.String({ description: "off|minimal|low|medium|high|xhigh|max. Leave empty: the role brings its own effort. Set only when the user named a level or the task needs a different one" })),
+  model: Type.Optional(Type.String({ description: "provider/model. Leave empty for task-calibrated capability selection; built-in roles supply fallbacks. Specify to override deliberately, including across providers" })),
+  thinking: Type.Optional(Type.String({ description: "off|minimal|low|medium|high|xhigh|max. Leave empty for independent task-calibrated effort selection; specify to override deliberately" })),
   id: Type.Optional(Type.String({ description: "Run id (or prefix) for status, steer, stop, result, resume" })),
   message: Type.Optional(Type.String({ description: "Steering message for steer" })),
 });
@@ -234,7 +233,7 @@ export interface RunView {
   source?: ChoiceSource;
   /** The quota pressure Jev's model or effort pick was made under, when above 0. */
   pressure?: number;
-  /** Why the pick differs from Jev's answer (the Haiku guard). */
+  /** Why a tier changed or the parent model was inherited. */
   note?: string;
   status: ChildState["status"];
   /** Native child history, when Pi reported its session path. */
@@ -880,14 +879,14 @@ export default function subagents(pi: ExtensionAPI) {
     return Promise.all(
       items.map(async (item) => {
         const given: Given = { ...(item.agent ? { agent: item.agent } : {}), ...(item.model ? { model: item.model } : {}), ...(item.thinking ? { thinking: item.thinking } : {}) };
-        // A named role with a profile fixes the model and effort: Jev is not asked for them.
+        // User-authored pins suppress only their own dimension; built-in roles are baselines.
         const named = item.agent ? agents.find((a) => a.name === item.agent) : undefined;
-        const fixed = named ? agentDefaults(named, parent.model, available) : {};
+        const fixed = fixedAgentDefaults(named, parent.model, available);
         const questions = pickQuestions({ ...fixed, ...given }, agents, tiers, askTier);
         let picks: ReturnType<typeof readPicks> | undefined;
         if (Object.keys(questions).length) {
-          const outcome = await askJev(ctx.modelRegistry, config.jev, { task: clip(item.task, 6_000), parent_request: parentRequest || "(none)" }, questions, signal);
-          if (outcome.ok) picks = readPicks(outcome.answers, { pressure: pressureFor(parent.model.split("/")[0]!), threshold: config.jev.threshold });
+          const outcome = await askJev(ctx.modelRegistry, config.jev, { task: clip(item.task, 6_000), parent_request: parentRequest || "(none)", role: given.agent ?? "auto" }, questions, signal);
+          if (outcome.ok) picks = readPicks(outcome.answers, { pressure: pressureFor(parent.model.split("/")[0]!), threshold: config.jev.threshold, tiers: Object.keys(questions.tier?.criteria ?? {}) as Tier[] });
         }
         const resolved = resolve(given, agents, picks, tiers, parent, { available, context });
         if ("error" in resolved) return resolved;
@@ -1131,10 +1130,10 @@ export default function subagents(pi: ExtensionAPI) {
 
   const resultText = (run: Run) => {
     const s = run.state;
-    const head = `[${runLabel(run)} · ${run.agent} · ${s.model ?? run.model} · ${run.thinking} · ${s.status}${s.error ? `: ${clip(s.error, 300)}` : ""}]`;
+    const head = `[${runLabel(run)} · ${run.agent} · ${s.model ?? run.model}${run.source?.model === "default" ? " (parent)" : ""} · ${run.thinking} · ${s.status}${s.error ? `: ${clip(s.error, 300)}` : ""}]`;
     const limited = s.status === "failed" && isRateLimit(s.error) ? interruptedNote(run) : undefined;
     // A blank line keeps the Markdown answer from running into the header when it is rendered.
-    return `${head}\n\n${truncateOutput(s.output || "(no output)", run.outputPath)}${limited ? `\n\n${limited}` : ""}`;
+    return `${head}\n\n${truncateOutput(s.output || "(no output)", run.outputPath)}${run.note ? `\n\n${run.note}` : ""}${limited ? `\n\n${limited}` : ""}`;
   };
 
   const usageOf = (list: Run[]): Usage => list.reduce((sum, r) => addUsage(sum, r.state.usage), emptyUsage());
@@ -1264,7 +1263,7 @@ export default function subagents(pi: ExtensionAPI) {
       name: "subagent",
       label: "Subagent",
       description:
-        "Each subagent adds its own context and token usage: delegate work that runs in parallel, exceeds one context, or is routine with a long tail; keep the rest in this session. action=run (default): a single `task`, parallel `tasks`, or a `chain` whose steps can use {previous}. Pass a role as `agent` (explorer, worker, reviewer, researcher, writer, planner; general follows the task's difficulty) and leave `model` and `thinking` empty: the role brings its own model and effort. Set them only when the user named one or the task needs something other than the role's. `async: true` returns run ids at once and delivers each result as a message. action=status|steer|stop|result|resume take `id` (steer also `message`); resume continues a stopped or lost run, or one that hit the rate limit, as a new one.",
+        "Each subagent adds its own context and token usage: delegate work that runs in parallel, exceeds one context, or is routine with a long tail; keep the rest in this session. action=run (default): a single `task`, parallel `tasks`, or a `chain` whose steps can use {previous}. Pass a role as `agent` (explorer, worker, reviewer, researcher, writer, planner; general follows the task's difficulty) and leave `model` and `thinking` empty for independent task-calibrated selection (built-in roles provide fallbacks). Set them only for deliberate overrides. `async: true` returns run ids at once and delivers each result as a message. action=status|steer|stop|result|resume take `id` (steer also `message`); resume continues a stopped or lost run, or one that hit the rate limit, as a new one.",
       promptSnippet: "Delegate self-contained tasks to subagents with their own context windows",
       promptGuidelines: promptGuidelines(delegation),
       parameters: Params,
@@ -1319,7 +1318,8 @@ export default function subagents(pi: ExtensionAPI) {
           if (action === "result") {
             if (found.live && run.state.status !== "running") consumedResults.add(run.id);
             const output = savedOutput(run);
-            const text = `[${runLabel(run)} · ${run.agent} · ${run.state.status}]\n\n${truncateOutput(output || "(no output yet)", run.outputPath)}${note ? `\n\n${note}` : ""}`;
+            const provenance = run.source?.model === "default" ? ` · ${run.model} (parent) · ${run.thinking}` : "";
+            const text = `[${runLabel(run)} · ${run.agent}${provenance} · ${run.state.status}]\n\n${truncateOutput(output || "(no output yet)", run.outputPath)}${run.note ? `\n\n${run.note}` : ""}${note ? `\n\n${note}` : ""}`;
             const shown = { ...view(run, true), ...(output ? { output: clip(output, 2_000) } : {}) };
             return { content: [{ type: "text", text }], details: { mode: "single", runs: [shown] } as Details };
           }
@@ -1524,7 +1524,7 @@ export default function subagents(pi: ExtensionAPI) {
             });
         };
 
-        const ids = () => started.map((r) => `${r.id} (${runLabel(r)} · ${r.agent}, ${r.model}, ${r.thinking})`).join(", ");
+        const ids = () => started.map((r) => `${r.id} (${runLabel(r)} · ${r.agent}, ${r.model}${r.source?.model === "default" ? " (parent)" : ""}, ${r.thinking})${r.note ? `: ${r.note}` : ""}`).join(", ");
 
         activeCalls.add(active);
         if (call.async) {
@@ -1625,7 +1625,7 @@ export default function subagents(pi: ExtensionAPI) {
         const rows: Row[] = [];
         for (const r of d.runs) {
           rows.push({
-            left: `${icon(r.status)} ${theme.fg("accent", runLabel(r))}${sep}${r.agent}${jev(r.byJev.agent)}${sep}${shortModel(r.model)}${jev(r.byJev.model, r.pressure)}${r.note ? theme.fg("dim", ` (${r.note})`) : ""}${sep}${r.thinking}${jev(r.byJev.thinking, r.pressure)}`,
+            left: `${icon(r.status)} ${theme.fg("accent", runLabel(r))}${sep}${r.agent}${jev(r.byJev.agent)}${sep}${shortModel(r.model)}${jev(r.byJev.model, r.pressure)}${modelSourceMark(r.source, theme)}${r.note ? theme.fg("dim", ` (${r.note})`) : ""}${sep}${r.thinking}${jev(r.byJev.thinking, r.pressure)}`,
             right: [formatElapsed(r.seconds * 1000), `${r.turns} turns`, ...(r.cost ? [`$${r.cost.toFixed(3)}`] : []), r.id],
           });
           const detail = r.error

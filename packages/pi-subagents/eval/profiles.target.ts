@@ -13,7 +13,7 @@ import { type Session, shuffle } from "../../../evals/shared/sessions.ts";
 import { type AgentDef, BUILTIN_AGENTS } from "../src/agents.ts";
 import { DEFAULT_CONFIG } from "../src/index.ts";
 import { askJev } from "../src/jev.ts";
-import { type AvailableModel, DEFAULT_TIER_DESCRIPTIONS, agentDefaults, pickQuestions, readPicks } from "../src/pick.ts";
+import { type AvailableModel, DEFAULT_TIER_DESCRIPTIONS, agentDefaults, clampThinking, physicalChatModels, pickQuestions, readPicks } from "../src/pick.ts";
 import { SOURCES, modelSource } from "../src/stats.ts";
 import { clip } from "../src/transcript.ts";
 
@@ -101,8 +101,10 @@ export function costPerTurn(runs: readonly RecordedRun[]): Map<string, { perTurn
 /** What a role implies for a run: its profile model and effort on the run's provider, else the run's own (general, no profile). */
 export function implied(role: AgentDef | undefined, run: RecordedRun, available: readonly AvailableModel[] = []): { model: string; thinking: string; profiled: boolean } {
   const provider = run.model.split("/")[0] ?? "";
-  const fixed = role && provider ? agentDefaults(role, `${provider}/_`, available) : {};
-  return fixed.model ? { model: fixed.model, thinking: fixed.thinking ?? run.thinking, profiled: true } : { model: run.model, thinking: run.thinking, profiled: false };
+  const fixed = role && provider ? agentDefaults(role, run.model, available) : {};
+  const model = fixed.model ?? run.model;
+  const metadata = physicalChatModels(available).find((candidate) => `${candidate.provider}/${candidate.id}` === model);
+  return { model, thinking: clampThinking(fixed.thinking ?? run.thinking, metadata), profiled: Boolean(fixed.model) };
 }
 
 /** The run's cost on `model`: the actual cost on the same model, else its turns at the model's median per turn, else the actual cost (unpriced). */
@@ -118,7 +120,7 @@ const pct = (n: number) => `${Math.round(n * 100)}%`;
 
 export default defineEval({
   id: "profiles",
-  title: "Replay your subagent runs: the roles they get, and the cost of the role profiles",
+  title: "Replay role baselines (not adaptive routing)",
   package: "pi-subagents",
   kind: "replay",
 
@@ -173,7 +175,7 @@ export default defineEval({
       b.runs++;
       b.actual += run.cost;
       b.estimated += est.cost;
-      const label = next.profiled ? `${next.model} ${next.thinking}` : "unchanged";
+      const label = next.model !== run.model || next.thinking !== run.thinking ? `${next.model} ${next.thinking}` : "unchanged";
       b.implied.set(label, (b.implied.get(label) ?? 0) + 1);
       buckets.set(role, b);
       actual += run.cost;
@@ -197,6 +199,7 @@ export default defineEval({
     const perTurn = [...medians].sort((a, b) => b[1].runs - a[1].runs).map(([model, m]) => `  ${model}: ${usd(m.perTurn)}/turn over ${m.runs} runs`);
     const report = [
       `profiles: EVAL_SEED=${seed}, ${n} of ${all.length} recorded runs in ${sessions.length} sessions (at most ${MAX_RUNS})`,
+      "This replay compares role baselines when classification is unavailable, not a prediction of adaptive routing or task quality.",
       ctx.table(rows),
       `${changedAgent} runs would get another agent than they had; ${unpriced} runs are estimated at their actual cost for lack of per-turn data on the implied model.`,
       sourceLine,

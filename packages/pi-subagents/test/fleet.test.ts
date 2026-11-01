@@ -89,6 +89,27 @@ test("rows: the selection, stats flush right, a status icon once finished, and s
   expect(renderFleet({ roster: [], selected: 0, active: false, now: 0, width: 60, theme: plain })).toEqual([]);
 });
 
+test.each([46, 120, 180])("fallback and deliberate premium Fleet rows preserve stats, compact provenance and existing controls at %i columns", (width) => {
+  const fallback = fakeRun({ agent: "worker", task: "Inherited model", model: "openai/gpt-6-astra", thinking: "medium", note: "parent fallback: no usable role or tier mapping for openai", source: { model: "default", thinking: "profile" }, state: { startedAt: 0 } });
+  const premium = fakeRun({ agent: "worker", task: "Hard problem", model: "openai/gpt-6-astra", thinking: "xhigh", tier: "premium", byJev: { agent: false, model: true, thinking: true }, source: { model: "tier", thinking: "jev" }, state: { startedAt: 1 } });
+  const roster = fleetRoster([fallback, premium], 10_000);
+  const lines = renderFleet({ roster, selected: 1, active: false, now: 10_000, width, theme: plain });
+  expect(lines).toHaveLength(4); // main, two task rows, existing spacer; no extra control.
+  expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+  expect(visibleWidth(lines[1]!)).toBe(width);
+  expect(visibleWidth(lines[2]!)).toBe(width);
+  expect(lines[1]).toContain("↓ 0 tokens");
+  expect(lines[2]).toContain("↓ 0 tokens");
+  if (width >= 120) {
+    expect(lines[1]).toContain("gpt-6-astra (parent) · medium");
+    expect(lines[2]).toContain("gpt-6-astra (auto) · xhigh (auto)");
+    expect(lines[2]).not.toContain("(parent)");
+  }
+  const active = renderFleet({ roster, selected: 1, active: true, now: 10_000, width, theme: plain });
+  expect(active[0]).toContain("view");
+  expect(active).toHaveLength(5); // one existing navigation hint, same rows.
+});
+
 test.each([46, 120])("long fleet tasks truncate before same-row status and stats at %i columns", (width) => {
   const run = fakeRun({ task: "Find config ".repeat(40), state: { status: "failed", startedAt: 0, endedAt: 60_000 } });
   const lines = renderFleet({ roster: fleetRoster([run], 60_000, undefined, [], 0), selected: 0, active: false, now: 60_000, width, theme: plain });

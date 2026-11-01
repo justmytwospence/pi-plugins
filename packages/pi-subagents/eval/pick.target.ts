@@ -38,7 +38,7 @@ export const CASES: Array<{ task: string; role: string }> = [
 ];
 
 /** The questions for a task with nothing given: the role, the tier and the effort (the same for every case). */
-const questions = () => pickQuestions({}, AGENTS, { models: { fast: "x", strong: "y" }, descriptions: DEFAULT_TIER_DESCRIPTIONS }, true);
+const questions = () => pickQuestions({}, AGENTS, { models: { fast: "x", balanced: "y", strong: "z", premium: "w" }, descriptions: DEFAULT_TIER_DESCRIPTIONS }, true);
 
 const slug = (role: string, index: number) => `${String(index + 1).padStart(2, "0")}-${role}`;
 

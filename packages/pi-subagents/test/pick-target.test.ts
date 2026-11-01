@@ -70,6 +70,17 @@ describe("the pick eval target", () => {
     expect(recorded).toMatchObject({ calls: 19, metrics: { cases: 19, correct: 19, accuracy: 1, misses: 0, "correct.01-explorer": 1 } });
   });
 
+  test("the synthetic tier question offers all four choices, including balanced and premium", async () => {
+    const offered: string[][] = [];
+    const fake = fakeJev((questions, state) => {
+      offered.push(Object.keys(questions.tier.criteria));
+      return routed(questions, state, expected);
+    });
+    const r = run(["pick"], fake.registry);
+    expect(await r.code).toBe(0);
+    expect(offered).toEqual(Array.from({ length: CASES.length }, () => ["fast", "balanced", "strong", "premium"]));
+  });
+
   test("a task routed to the wrong agent is a miss and fails the target", async () => {
     const fake = fakeJev((questions, state) => routed(questions, state, () => "explorer"));
     const r = run(["pick", "--json"], fake.registry);

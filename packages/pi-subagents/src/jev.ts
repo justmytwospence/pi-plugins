@@ -62,12 +62,12 @@ export interface JevConfig {
 
 export type JevOutcome =
   | { ok: true; answers: Record<string, ClassifierAnswer>; usage?: ClassifierUsage; model: string; latencyMs: number }
-  | { ok: false; reason: string };
+  | { ok: false; reason: string; usage?: ClassifierUsage };
 
 /**
  * Ask Jev one question set. Never throws: every failure is `{ ok: false, reason }`. A timed-out
- * attempt is retried once with a fresh timeout: Jev's latency spikes now and then, and Pi does not
- * retry classifier timeouts itself.
+ * attempt is retried once with a fresh timeout by default: Jev's latency spikes now and then, and
+ * Pi does not retry classifier timeouts itself. Budgeted evaluations can disable the retry.
  */
 export async function askJev(
   registry: unknown,
@@ -75,6 +75,7 @@ export async function askJev(
   state: Record<string, unknown>,
   questions: Record<string, ClassifierQuestion>,
   signal?: AbortSignal,
+  options: { retryTimeout?: boolean } = {},
 ): Promise<JevOutcome> {
   if (!config.enabled) return { ok: false, reason: "the classifier is off in settings" };
   const reg = registry as Partial<ClassifierRegistry> | undefined;
@@ -90,7 +91,7 @@ export async function askJev(
   if (!model) return { ok: false, reason: `no classifier model ${config.provider}/${config.model}` };
   const started = Date.now();
   let outcome = await attempt(reg as ClassifierRegistry, model, config, state, questions, signal);
-  if (!outcome.ok && outcome.reason === "timed out" && !signal?.aborted) {
+  if (!outcome.ok && outcome.reason === "timed out" && !signal?.aborted && options.retryTimeout !== false) {
     outcome = await attempt(reg as ClassifierRegistry, model, config, state, questions, signal);
   }
   if (!outcome.ok) return outcome;
@@ -111,14 +112,14 @@ async function attempt(
   state: Record<string, unknown>,
   questions: Record<string, ClassifierQuestion>,
   signal?: AbortSignal,
-): Promise<{ ok: true; result: ClassifierResult } | { ok: false; reason: string }> {
+): Promise<{ ok: true; result: ClassifierResult } | { ok: false; reason: string; usage?: ClassifierUsage }> {
   try {
     const result = await reg.classify(model as never, { state, questions }, {
       timeoutMs: config.timeoutMs,
       ...(signal ? { signal } : {}),
     });
     if (result.stopReason !== "stop") {
-      return { ok: false, reason: describe(result.stopReason, result.errorMessage) };
+      return { ok: false, reason: describe(result.stopReason, result.errorMessage), ...(result.usage ? { usage: result.usage } : {}) };
     }
     return { ok: true, result };
   } catch (error) {
