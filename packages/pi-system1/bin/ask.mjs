@@ -42,7 +42,7 @@ async function main() {
   const alias = {};
   // Each public path is resolved from the installed SDK, not from this component's dev tree.
   // Explicit subpath aliases also avoid appending provider paths to the root index.js alias.
-  for (const specifier of ["@earendil-works/pi-ai/providers/openai", "@earendil-works/pi-ai/api/openai-decisions", "@earendil-works/pi-ai"]) {
+  for (const specifier of ["@earendil-works/pi-ai/providers/all", "@earendil-works/pi-ai"]) {
     try { alias[specifier] = fileURLToPath(hostJiti.esmResolve(specifier)); } catch {
       // No accidental dev-SDK fallback on older installed hosts. The optional provider factory
       // handles missing native APIs and leaves Jev usable.

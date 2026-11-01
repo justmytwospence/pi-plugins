@@ -246,7 +246,7 @@ describe("plain Node installed-host bootstrap", () => {
     expect(output.module).toBe(fileURLToPath(new URL("../src/cli.ts", import.meta.url)));
     expect(output.runtime).toEqual({ allowModelNetwork: false, refreshOnCreate: false });
     expect(Object.keys(output.options.alias)).toEqual([
-      "@earendil-works/pi-ai/providers/openai", "@earendil-works/pi-ai/api/openai-decisions", "@earendil-works/pi-ai",
+      "@earendil-works/pi-ai/providers/all", "@earendil-works/pi-ai",
     ]);
     expect(Object.values(output.options.alias).every((value) => (value as string).startsWith(sdk))).toBe(true);
   });
@@ -259,7 +259,7 @@ describe("plain Node installed-host bootstrap", () => {
     const ai = join(hostModules, "@earendil-works", "pi-ai");
     mkdirSync(ai, { recursive: true });
     writeFileSync(join(ai, "package.json"), JSON.stringify({ name: "@earendil-works/pi-ai", type: "module", exports: {
-      ".": "./index.js", "./providers/openai": "./openai.js", "./api/openai-decisions": "./decisions.js",
+      ".": "./index.js", "./providers/all": "./all.js",
     } }));
     writeFileSync(join(ai, "index.js"), `
       export function envApiKeyAuth(name, envVars) { return { name, envVars }; }
@@ -268,11 +268,12 @@ describe("plain Node installed-host bootstrap", () => {
         classify: (model, context, options) => input.classifiers[model.api].classify(model, context, options),
       }; }
     `);
-    writeFileSync(join(ai, "openai.js"), `
-      export function openaiProvider() { return { getAllModels: () => [{
+    writeFileSync(join(ai, "all.js"), `
+      import { classify } from "./decisions.js";
+      export function builtinProviders() { return [{ id: "openai", classify, getAllModels: () => [{
         type: "classifier", id: "gpt-6-luna", provider: "openai", api: "openai-decisions",
         baseUrl: "https://api.openai.com/v1", name: "Fake native metadata",
-      }] }; }
+      }] }]; }
     `);
     writeFileSync(join(ai, "decisions.js"), `
       export async function classify(model, context, options) {

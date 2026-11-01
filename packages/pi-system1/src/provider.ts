@@ -17,16 +17,21 @@ function nativeTarget(model: unknown): model is ClassifierModel<"openai-decision
 /** Optional on older Pi hosts: Jev must remain usable without the native Decisions APIs. */
 export async function createDecisionsProvider(): Promise<Provider | undefined> {
   try {
-    const [{ createProvider, envApiKeyAuth }, { openaiProvider }, { classify }] = await Promise.all([
+    // Pi explicitly aliases providers/all for extensions. Arbitrary provider/API
+    // subpaths are swallowed by its root compatibility alias in the real loader.
+    const [{ createProvider, envApiKeyAuth }, { builtinProviders }] = await Promise.all([
       import("@earendil-works/pi-ai"),
-      import("@earendil-works/pi-ai/providers/openai"),
-      import("@earendil-works/pi-ai/api/openai-decisions"),
+      import("@earendil-works/pi-ai/providers/all"),
     ]);
     if (typeof createProvider !== "function" || typeof envApiKeyAuth !== "function" ||
-        typeof openaiProvider !== "function" || typeof classify !== "function") return undefined;
-    const native = openaiProvider().getAllModels?.().find((model) =>
+        typeof builtinProviders !== "function") return undefined;
+    const nativeProvider = builtinProviders().find((provider) => provider.id === "openai");
+    const native = nativeProvider?.getAllModels?.().find((model) =>
       model.type === "classifier" && model.id === MODEL && model.api === "openai-decisions");
-    if (!native || native.type !== "classifier") return undefined;
+    // Provider.classify is wire dispatch, not Models.classify/auth resolution.
+    // The host still resolves credentials for system1-openai before invoking it.
+    const classify = nativeProvider?.classify?.bind(nativeProvider);
+    if (!native || native.type !== "classifier" || !classify) return undefined;
     // Use only the classifier catalog metadata, never the built-in provider's chat/auth/headers.
     const { headers: _headers, ...metadata } = native;
     const provider = createProvider({

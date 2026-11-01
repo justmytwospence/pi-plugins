@@ -33,8 +33,7 @@ async function runtime(values: Record<string, Credential> = {}, env: Record<stri
 
 afterEach(() => {
   vi.doUnmock("@earendil-works/pi-ai");
-  vi.doUnmock("@earendil-works/pi-ai/providers/openai");
-  vi.doUnmock("@earendil-works/pi-ai/api/openai-decisions");
+  vi.doUnmock("@earendil-works/pi-ai/providers/all");
   vi.resetModules();
   vi.restoreAllMocks();
 });
@@ -171,11 +170,11 @@ describe("isolated native provider", () => {
   });
 
   it("returns undefined on unsupported module paths or missing classifier catalog", async () => {
-    vi.doMock("@earendil-works/pi-ai/api/openai-decisions", () => { throw new Error("private unsafe import failure"); });
+    vi.doMock("@earendil-works/pi-ai/providers/all", () => { throw new Error("private unsafe import failure"); });
     expect(await (await import("../src/provider.js")).createDecisionsProvider()).toBeUndefined();
-    vi.doUnmock("@earendil-works/pi-ai/api/openai-decisions");
+    vi.doUnmock("@earendil-works/pi-ai/providers/all");
     vi.resetModules();
-    vi.doMock("@earendil-works/pi-ai/providers/openai", () => ({ openaiProvider: () => ({ getAllModels: () => [] }) }));
+    vi.doMock("@earendil-works/pi-ai/providers/all", () => ({ builtinProviders: () => [{ id: "openai", getAllModels: () => [] }] }));
     expect(await (await import("../src/provider.js")).createDecisionsProvider()).toBeUndefined();
   });
 });

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { createJiti } from 'jiti';
 
@@ -53,6 +53,31 @@ function registry({ native = true, pending = false } = {}) {
 }
 
 try {
+  // The real extension loader aliases Pi AI package roots to its compatibility module.
+  // A plain jiti/unit import is not equivalent: unsupported subpaths can silently fail.
+  const sdkEntry = process.env.PI_TEST_SDK || import.meta.resolve('@earendil-works/pi-coding-agent');
+  const sdkUrl = sdkEntry.startsWith('file:') ? sdkEntry : pathToFileURL(sdkEntry).href;
+  const { loadExtensions, createExtensionRuntime } = await import(new URL('./core/extensions/loader.js', sdkUrl));
+  const extensionRuntime = createExtensionRuntime();
+  const loaded = await loadExtensions([resolve(root, 'packages/pi-system1/src/index.ts')], dir, undefined, extensionRuntime);
+  assert.deepEqual(loaded.errors, [], 'the actual SDK loader accepts the extension');
+  const provider = extensionRuntime.pendingNativeProviderRegistrations.find(entry => entry.provider.id === 'system1-openai')?.provider;
+  assert.ok(provider, 'the actual SDK loader must register the Decisions login provider, not only the tool');
+  assert.equal(typeof provider.auth.apiKey?.login, 'function');
+  assert.equal(provider.auth.oauth, undefined);
+  const { InteractiveMode } = await import(new URL('./modes/interactive/interactive-mode.js', sdkUrl));
+  const interactive = Object.create(InteractiveMode.prototype);
+  Object.defineProperty(interactive, 'session', { value: { modelRuntime: {
+    getProviders: () => [provider], getProviderAuthStatus: () => ({ configured: false }), isUsingOAuth: () => false,
+  } } });
+  const loginPrompts = [];
+  interactive.showApiKeyLoginDialog = async (id, name) => { loginPrompts.push({ id, name }); };
+  interactive.showLoginDialog = () => assert.fail('Decisions must not start an OAuth login');
+  interactive.showLoginProviderSelector = () => assert.fail('the exact provider ID must not fall through to provider search');
+  await interactive.handleLoginCommand('system1-openai');
+  assert.deepEqual(loginPrompts, [{ id: 'system1-openai', name: 'OpenAI Decisions (API credits)' }]);
+  console.log('PASS actual SDK loader and /login system1-openai API-key prompt routing (no credentials or network)');
+
   const adapters = [];
   for (const name of ['auto-effort', 'copy', 'next-prompt', 'subagents', 'tool-gate']) {
     const { askJev } = await jiti.import(`../packages/pi-${name}/src/jev.ts`);
