@@ -212,18 +212,20 @@ labeled.
 - **Codex acct:** ChatGPT-plan limits from `GET https://chatgpt.com/backend-api/wham/usage`,
   the endpoint Codex CLI's `/status` uses. Authenticated with Pi's own `openai-codex`
   OAuth login (via `modelRegistry.getApiKeyForProvider`, so Pi handles refresh) and
-  the account id in that token, so it always describes the account Pi bills.
+  the account id in that token. Modern `openai` sessions show this separate Codex
+  account row while inference remains on the selected OpenAI model.
   The URL is fixed; the token is never sent anywhere else. Named pools in
   `additional_rate_limits` (for example a reserve model) keep their API names.
-  Polled at most every 5 minutes, and at most every minute after a turn or model
-  switch; only while a Codex model is active (or `/status all`). The reading is
-  shared by every Pi session on the account through
-  `${XDG_CACHE_HOME:-~/.cache}/pi-status-footer/codex-usage-<account>.json` (one
-  fetches under a lock; a reading under a minute old is never refetched). Between
-  polls, the `codex.rate_limits` event Codex streams before each response on Pi's
-  default WebSocket transport (seen through `provider_stream_event`), or the
-  `x-codex-*` headers on the SSE transport, update the main windows. No model call is made. Failures keep the
-  last reading, which then shows as stale.
+  The shared reader reuses fresh readings for 5 minutes while an OpenAI or Codex
+  model is active (or `/status all`). Pi sessions on the same account share
+  `${XDG_CACHE_HOME:-~/.cache}/pi-subscription-usage/openai-codex-<account-digest>.json`,
+  with a lock coordinating fetches. Each refresh rechecks Pi's legacy login;
+  missing or changed authentication clears the previous account's reading.
+  Passive Codex events and response headers request revalidation through this
+  reader rather than publishing account-unidentified payloads. No model call is
+  made. Failed refreshes may reuse a same-account reading only while it remains
+  under ten minutes old and none of its windows is reset-due; otherwise limits
+  are unavailable.
 - **stale:** cache/header snapshot is at least ten minutes old or its reset time
   has passed. Never assume the provider reset a quota to zero without fresh data.
 - **extra:** shared Claude account extra usage enabled/disabled state. An old spent

@@ -37,6 +37,15 @@ try {
       break;
     }
   }
+  if (!process.exitCode) {
+    const result = spawnSync('npm', ['run', 'check'], {
+      cwd: join(root, 'packages/pi-subscription-usage'), stdio: 'inherit', env,
+    });
+    if (result.error || result.status !== 0) {
+      console.error(`FAIL pi-subscription-usage check${result.error ? `: ${result.error.message}` : ''}`);
+      process.exitCode = result.status || 1;
+    }
+  }
 } finally {
   rmSync(agentDir, { recursive: true, force: true });
 }

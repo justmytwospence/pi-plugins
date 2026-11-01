@@ -5,7 +5,32 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { stripVTControlCharacters as plain } from "node:util";
-import { test, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, test, vi } from "vitest";
+
+// Never consult a developer's login/cache or let an unstubbed request escape.
+// Claude's macOS Keychain fallback is a child process, so shadow it as well.
+const sandbox = await mkdtemp(path.join(os.tmpdir(), "pi-footer-offline-"));
+const isolatedEnv = ["HOME", "XDG_CACHE_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_STATUSLINE_CACHE_DIR", "PI_STATUS_FOOTER_CLAUDE_USAGE_CMD", "PATH"];
+const originalEnv = new Map(isolatedEnv.map((key) => [key, process.env[key]]));
+await writeFile(path.join(sandbox, "security"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+process.env.HOME = sandbox;
+process.env.XDG_CACHE_HOME = sandbox;
+process.env.CLAUDE_CONFIG_DIR = path.join(sandbox, "claude");
+process.env.CLAUDE_STATUSLINE_CACHE_DIR = path.join(sandbox, "claude-cache");
+delete process.env.PI_STATUS_FOOTER_CLAUDE_USAGE_CMD;
+process.env.PATH = `${sandbox}${path.delimiter}${process.env.PATH ?? ""}`;
+const originalFetch = globalThis.fetch;
+let unexpectedRequests = [];
+const offlineFetch = async (url) => { unexpectedRequests.push(String(url)); throw new Error("Unstubbed footer request"); };
+beforeEach(() => { unexpectedRequests = []; globalThis.fetch = offlineFetch; });
+afterEach(() => { assert.deepEqual(unexpectedRequests, [], "all footer requests must use a synthetic transport"); });
+afterAll(async () => {
+  globalThis.fetch = originalFetch;
+  for (const [key, value] of originalEnv) {
+    if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  }
+  await rm(sandbox, { recursive: true, force: true });
+});
 
 const modules = fileURLToPath(new URL("../node_modules/@earendil-works/", import.meta.url));
 const root = path.join(modules, "pi-coding-agent");
@@ -770,7 +795,7 @@ function host(entries = [], cwd = os.tmpdir(), mode = "tui", nativeBranch = null
     mode, cwd, model: { provider: "openai-codex", id: "gpt-6-astra", contextWindow: 200000, reasoning: true },
     sessionManager: { getEntries: () => entries, getBranch: () => entries, getSessionId: () => "footer-test", getLeafId: () => entries.at(-1)?.id ?? null },
     modelRegistry: { isUsingOAuth: () => true,
-      getApiKeyForProvider: async (p) => p === "openai-codex" ? jwt({ "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" } }) : undefined },
+      getApiKeyForProvider: async () => undefined },
     isIdle: () => true, hasPendingMessages: () => false, isProjectTrusted: () => trusted,
     getContextUsage: () => ({ tokens: null, percent: null, contextWindow: 200000 }),
     ui: {
@@ -799,6 +824,16 @@ function host(entries = [], cwd = os.tmpdir(), mode = "tui", nativeBranch = null
     get footer() { return footer; }, get disposed() { return disposed; }, get paints() { return paints; },
   };
 }
+
+function syntheticCodex(h, account = "acct-1") {
+  h.ctx.modelRegistry.getApiKeyForProvider = async (provider) => provider === "openai-codex"
+    ? jwt({ "https://api.openai.com/auth": { chatgpt_account_id: account } }) : undefined;
+  return h;
+}
+
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+const footerText = (h, width = 180) => h.footer.render(width).map(plain).join("\n");
+const quotaResponse = (used = 25) => new Response(JSON.stringify(codexUsage(used, Date.now())));
 
 // Native status changes request a frame without a public status-change event.
 // The footer coalesces discovery after that frame; the subsequent frame is fresh.
@@ -972,8 +1007,8 @@ test("factory is inert in non-TUI modes and does not replace the editor", async 
   }
 });
 
-// Hold OAuth lookup open so shutdown must cancel both owned timer handles.
-// All quota IO is isolated; saved callbacks can be invoked after cancellation.
+// Hold OAuth lookup open so shutdown must abort the shared reader as well as
+// cancel footer timers. The reader clears its own deadline asynchronously.
 async function withLifecycleHost(run) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "pi-footer-cleanup-"));
   const oldHome = process.env.HOME, oldCache = process.env.CLAUDE_STATUSLINE_CACHE_DIR;
@@ -1002,8 +1037,17 @@ async function withLifecycleHost(run) {
   };
   globalThis.fetch = async (...args) => { fetches.push(args); throw new Error("Unexpected quota fetch"); };
   const realAbort = AbortController.prototype.abort, realKill = ChildProcess.prototype.kill;
+  let abortDepth = 0;
   const abortSpy = vi.spyOn(AbortController.prototype, "abort").mockImplementation(function (...args) {
-    aborted.add(this); realAbort.apply(this, args); cleanup("abort");
+    aborted.add(this);
+    abortDepth++;
+    try { realAbort.apply(this, args); }
+    finally {
+      abortDepth--;
+      // Inject failures in footer-owned cleanup, not the reader's nested signal
+      // listener (EventTarget rethrows listener failures out of band).
+      if (abortDepth) steps.push("abort"); else cleanup("abort");
+    }
   });
   const killSpy = vi.spyOn(ChildProcess.prototype, "kill").mockImplementation(function (...args) {
     killed.add(this); const result = realKill.apply(this, args); cleanup("child"); return result;
@@ -1064,10 +1108,10 @@ async function withLifecycleHost(run) {
 
 function savedLifecycleCallbacks(f) {
   const factory = f.h.editorFactory, editor = factory(), footer = f.h.footer;
-  const tick = f.savedIntervals.at(-1).callback, timeout = f.savedTimeouts.at(-1).callback;
+  const tick = f.savedIntervals.at(-1).callback;
   const branch = f.branches.at(-1);
   return () => {
-    tick(); timeout(); branch();
+    tick(); branch();
     assert.deepEqual(footer.render(120), []);
     footer.dispose();
     assert.equal(editor.renderTopBorder(10, 0), "original-top");
@@ -1088,16 +1132,19 @@ for (const fault of ["dispose", "footer", "all"]) {
       const failing = fault === "all" ? ["abort", "child", "dispose", "footer"] : [fault];
       for (const step of failing) failures.set(step, new Error(`${step} failed`));
       steps.length = 0;
-      const expectedSteps = ["interval", "interval", "timeout", "abort", "child", "child", "child", "dispose", "footer"];
-      const expectedErrors = expectedSteps.filter((step) => failures.has(step)).map((step) => failures.get(step));
+      const expectedSteps = ["interval", "interval", "abort", "abort", "child", "child", "child", "dispose", "footer"];
+      const expectedErrors = expectedSteps.filter((step, index) => failures.has(step) &&
+        (step !== "abort" || index === expectedSteps.lastIndexOf("abort"))).map((step) => failures.get(step));
       assert.throws(() => h.handlers.get("session_shutdown")({}, old.ctx), (error) => {
         if (expectedErrors.length === 1) assert.equal(error, expectedErrors[0]);
         else { assert.ok(error instanceof AggregateError); assert.deepEqual(error.errors, expectedErrors); }
         return true;
       });
-      assert.deepEqual(steps, expectedSteps, "timers cancel before every fallible cleanup attempt");
+      assert.deepEqual(steps, expectedSteps, "footer timers cancel and the reader is aborted before fallible UI cleanup");
+      await settle();
+      assert.deepEqual(steps, [...expectedSteps, "timeout"], "the shared reader releases its own deadline");
       assert.equal(intervals.size, 0); assert.equal(timeouts.size, 0);
-      assert.equal(aborted.size, 1); assert.equal(killed.size, 3);
+      assert.equal(aborted.size, 2); assert.equal(killed.size, 3);
 
       old.state.valid = false;
       steps.length = 0;
@@ -1115,7 +1162,7 @@ for (const fault of ["dispose", "footer", "all"]) {
       assert.doesNotThrow(invokeSaved);
       assert.equal(old.state.reads, reads); assert.equal(fresh.state.reads, freshReads);
       assert.equal(h.paints, freshPaints); assert.equal(aborted.size, freshAborts); assert.equal(killed.size, freshKills);
-      assert.deepEqual(steps, [], "stale timeouts cannot abort their old controller again");
+      assert.deepEqual(steps, [], "retired footer callbacks cannot abort their old reader again");
       assert.equal(intervals.size, 2); assert.equal(timeouts.size, 1);
       assert.ok(h.footer.render(120).length > 0);
     });
@@ -1134,17 +1181,19 @@ for (const invalidated of [false, true]) {
       f.steps.length = 0;
       const fresh = f.newContext();
       assert.doesNotThrow(() => f.h.handlers.get("session_start")({}, fresh.ctx));
+      await settle();
       assert.equal(f.intervals.size, 2); assert.equal(f.timeouts.size, 1);
-      assert.equal(f.aborted.size, 1); assert.equal(f.killed.size, 3);
+      assert.equal(f.aborted.size, 2); assert.equal(f.killed.size, 3);
       assert.equal(f.h.disposed, 0, "prior unsubscribe threw, but its local disposer detached first");
       assert.ok(f.h.footer.render(120).length > 0);
       const reads = old.state.reads, freshReads = fresh.state.reads, paints = f.h.paints, cleanupSteps = f.steps.slice();
       assert.doesNotThrow(invokeSaved);
       assert.equal(old.state.reads, reads); assert.equal(fresh.state.reads, freshReads); assert.equal(f.h.paints, paints);
       assert.deepEqual(f.steps, cleanupSteps);
-      assert.deepEqual(f.steps.slice(0, 3), ["interval", "interval", "timeout"]);
+      assert.deepEqual(f.steps.slice(0, 4), ["interval", "interval", "abort", "abort"]);
       f.failures.clear();
       f.h.handlers.get("session_shutdown")({}, fresh.ctx);
+      await settle();
       assert.equal(f.intervals.size, 0); assert.equal(f.timeouts.size, 0);
       assert.equal(f.h.footer, undefined);
     });
@@ -1196,11 +1245,12 @@ test("a saved editor wrapper never invokes a foreign factory bound to an invalid
   });
 });
 
-test("an old OAuth lookup resolving after reload cannot fetch or clear the fresh timeout/controller", async () => {
+test("an old OAuth lookup after reload cannot fetch or clear the fresh shared-reader deadline", async () => {
   await withLifecycleHost(async (f) => {
     const old = f.newContext();
     f.h.handlers.get("session_start")({}, old.ctx);
     const oldTimeout = f.savedTimeouts.at(-1);
+    await settle(); // The shared reader invokes registry resolution in a microtask.
     f.h.handlers.get("session_shutdown")({}, old.ctx);
     old.state.valid = false;
     const fresh = f.newContext();
@@ -1212,11 +1262,13 @@ test("an old OAuth lookup resolving after reload cannot fetch or clear the fresh
     assert.equal(f.timeouts.size, 1); assert.ok(f.timeouts.has(currentTimeout));
     assert.ok(!f.timeouts.has(oldTimeout));
     assert.equal(f.intervals.size, 2);
-    assert.equal(f.aborted.size, 1);
+    assert.equal(f.aborted.size, 2, "shutdown cancelled both footer and shared-reader controllers");
     currentTimeout.callback();
-    assert.equal(f.aborted.size, 2, "the fresh controller remains owned after old finally runs");
+    await settle();
+    assert.equal(f.aborted.size, 3, "the fresh reader's deadline remains independently owned");
+    assert.equal(f.timeouts.size, 0);
     f.h.handlers.get("session_shutdown")({}, fresh.ctx);
-    assert.equal(f.timeouts.size, 0); assert.equal(f.intervals.size, 0);
+    assert.equal(f.intervals.size, 0);
   });
 });
 
@@ -1235,6 +1287,7 @@ test("normal repeated shutdown and reload leave fresh timers and no stale callba
       assert.ok(current.state.reads > reads); assert.ok(f.h.paints > paints, "current timer still works");
       saved.push(savedLifecycleCallbacks(f));
       f.h.handlers.get("session_shutdown")({}, current.ctx);
+      await settle();
       assert.equal(f.intervals.size, 0); assert.equal(f.timeouts.size, 0);
       assert.equal(f.h.footer, undefined);
       current.state.valid = false;
@@ -1262,12 +1315,12 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
   const usedPercent = 25;
   globalThis.fetch = async (url, init) => {
     fetches.push({ url, headers: init.headers });
-    return { ok: true, json: async () => codexUsage(usedPercent, Date.now() + 30_000) };
+    return quotaResponse(usedPercent);
   };
   const settle = () => new Promise((resolve) => setImmediate(resolve));
   let h;
   try {
-    h = host([], dir);
+    h = syntheticCodex(host([], dir), "lifecycle-account");
     const configured = [
       { provider: "anthropic", id: "claude-opus-5-5" },
       { provider: "openai-codex", id: "gpt-6-astra" },
@@ -1301,17 +1354,18 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
     assert.doesNotMatch(plain(h.footer.render(120)[1]), /\(auto\)/);
     await vi.waitFor(() => assert.equal(fetches.length, 1));
     assert.equal(fetches[0].url, "https://chatgpt.com/backend-api/wham/usage");
-    assert.equal(fetches[0].headers["chatgpt-account-id"], "acct-1");
+    assert.equal(fetches[0].headers["chatgpt-account-id"], "lifecycle-account");
     assert.match(h.footer.render(120).join("\n"), /Codex\s+week 25% used · resets in 1d0h · gpt-reserve 0% used/);
     assert.doesNotMatch(h.footer.render(120).join("\n"), /Claude/);
     await h.handlers.get("after_provider_response")({ headers: {
       "x-codex-primary-used-percent": "45", "x-codex-primary-window-minutes": "10080" } }, h.ctx);
-    assert.match(h.footer.render(120).join("\n"), /Codex\s+week 45% used.*gpt-reserve 0%/);
+    await settle();
+    assert.match(h.footer.render(120).join("\n"), /Codex\s+week 25% used.*gpt-reserve 0%/, "identity-free headers only refresh the verified reading");
     for (const timer of timers) timer.callback();
     await settle();
     assert.equal(fetches.length, 1, "usage endpoint is throttled");
     await h.handlers.get("model_select")({}, h.ctx);
-    assert.match(h.footer.render(120).join("\n"), /week 45%/, "account limits survive a model switch");
+    assert.match(h.footer.render(120).join("\n"), /week 25%/, "account limits survive a model switch");
     await h.commands.get("status").handler("all", h.ctx);
     assert.match(h.footer.render(120).join("\n"), /Claude · limits unavailable/);
     await h.commands.get("status").handler("native", h.ctx);
@@ -1326,7 +1380,7 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
     assert.ok(h.footer);
     h.ctx.model = { provider: "radius", id: "balanced", reasoning: false };
     await h.handlers.get("model_select")({}, h.ctx);
-    assert.doesNotMatch(h.footer.render(120).join("\n"), /Claude|Codex|45%/);
+    assert.doesNotMatch(h.footer.render(120).join("\n"), /Claude|Codex|25%/);
     await h.commands.get("status").handler("all", h.ctx);
     assert.match(h.footer.render(120).join("\n"), /Claude · limits unavailable · \+1 more/, "/status all uses only one additional row in provider order");
     await h.commands.get("status").handler("on", h.ctx);
@@ -1342,7 +1396,7 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
     assert.match(details, /Recorded tokens: 100 input, 20 output, 300 cache reads, 100 cache writes/);
     assert.match(details, /Tracked Git changes:/);
     assert.match(details, /Git status: outside a Git repository/);
-    assert.match(details, /openai-codex \(Codex subscription\): week 25% used/, "details includes additional sources that cannot fit in the footer");
+    assert.match(details, /openai-codex \(Codex account\): week 25% used/, "details includes additional sources that cannot fit in the footer");
     await h.handlers.get("session_shutdown")({}, h.ctx);
     assert.equal(timers.size, 0); assert.equal(h.footer, undefined);
     const paints = h.paints;
@@ -1397,36 +1451,288 @@ test("Claude limits use Pi's own subscription login, with no Claude Code login, 
   }
 });
 
-test("Codex limits are shared across sessions and follow the streamed rate-limit event", async () => {
+test("Codex sessions share verified readings; identity-free events refresh without ingesting payloads", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "pi-footer-codex-"));
   const oldXdg = process.env.XDG_CACHE_HOME;
   process.env.XDG_CACHE_HOME = dir;
   const realFetch = globalThis.fetch, fetches = [];
   globalThis.fetch = async (url, init) => {
     fetches.push({ url, headers: init.headers });
-    return { ok: true, json: async () => codexUsage(25, Date.now() + 30_000) };
+    return quotaResponse();
   };
   const hosts = [];
   try {
-    const first = host([], dir); hosts.push(first);
+    const first = syntheticCodex(host([], dir), "shared-account"); hosts.push(first);
     await first.handlers.get("session_start")({}, first.ctx);
     await vi.waitFor(() => assert.match(first.footer.render(160).join("\n"), /Codex\s+week 25% used.*gpt-reserve 0%/));
     assert.equal(fetches.length, 1);
     await first.handlers.get("provider_stream_event")({ provider: "openai-codex", data: { type: "response.created" } }, first.ctx);
     await first.handlers.get("provider_stream_event")({ provider: "openai-codex", data: { type: "codex.rate_limits",
       rate_limits: { primary: { used_percent: 46, window_minutes: 10080, reset_at: Date.now() / 1000 + 86400 } }, additional_rate_limits: null } }, first.ctx);
-    assert.match(first.footer.render(160).join("\n"), /Codex\s+week 46% used.*gpt-reserve 0%/, "named pools survive the event");
+    await settle();
+    assert.match(first.footer.render(160).join("\n"), /Codex\s+week 25% used.*gpt-reserve 0%/, "event values cannot acquire the current account's identity");
     // A second session on the same account reads the shared reading instead of fetching.
-    await vi.waitFor(async () => assert.match(await (await import("node:fs/promises")).readFile(path.join(dir, "pi-status-footer", "codex-usage-acct-1.json"), "utf8"), /"used_percent":46/));
-    const second = host([], dir); hosts.push(second);
+    const second = syntheticCodex(host([], dir), "shared-account"); hosts.push(second);
     await second.handlers.get("session_start")({}, second.ctx);
-    await vi.waitFor(() => assert.match(second.footer.render(160).join("\n"), /Codex\s+week 46% used.*gpt-reserve 0%/));
+    await vi.waitFor(() => assert.match(second.footer.render(160).join("\n"), /Codex\s+week 25% used.*gpt-reserve 0%/));
     assert.equal(fetches.length, 1, "the shared reading is fresh, so no second fetch");
   } finally {
     for (const h of hosts) await h.handlers.get("session_shutdown")({}, h.ctx);
     globalThis.fetch = realFetch;
     if (oldXdg === undefined) delete process.env.XDG_CACHE_HOME; else process.env.XDG_CACHE_HOME = oldXdg;
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// Modern inference stays separate from the legacy account-only source. Every
+// fixture has its own cache home and synthetic registry/transport; no host login.
+async function withOpenAIAccount(run) {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "pi-footer-openai-"));
+  const oldCache = process.env.XDG_CACHE_HOME;
+  const realFetch = globalThis.fetch;
+  process.env.XDG_CACHE_HOME = dir;
+  const h = host([], dir), resolutions = [], fetches = [];
+  const state = { account: "account-A", token: undefined, rejected: false };
+  const model = { provider: "openai", id: "gpt-modern", contextWindow: 200000, reasoning: true };
+  h.ctx.model = model;
+  h.ctx.modelRegistry.getAvailable = () => [model]; // Zero legacy inference models.
+  h.ctx.modelRegistry.getProvider = (id) => ({ getModels: () => id === "openai" ? [model] : [] });
+  h.ctx.modelRegistry.getApiKeyForProvider = async (provider) => {
+    resolutions.push(provider);
+    assert.equal(provider, "openai-codex", "quota resolution may ask only for the separate legacy login");
+    if (state.rejected) throw new Error("synthetic registry rejection");
+    return state.token ?? (state.account ? jwt({ "https://api.openai.com/auth": { chatgpt_account_id: state.account } }) : undefined);
+  };
+  h.pi.setModel = () => { assert.fail("account refresh must not select an inference model"); };
+  h.pi.sendUserMessage = () => { assert.fail("account refresh must not prompt inference"); };
+  globalThis.fetch = async (url, init) => {
+    assert.equal(url, "https://chatgpt.com/backend-api/wham/usage");
+    const account = init.headers["chatgpt-account-id"];
+    assert.equal(init.headers.Authorization, `Bearer ${jwt({ "https://api.openai.com/auth": { chatgpt_account_id: account } })}`);
+    fetches.push({ url, init, account });
+    const body = codexUsage(account === "account-B" ? 67 : 25, Date.now());
+    body.additional_rate_limits[0].limit_name = account === "account-B" ? "B-reserve" : "A-reserve";
+    return new Response(JSON.stringify(body));
+  };
+  try { await run({ h, state, resolutions, fetches, model }); }
+  finally {
+    await h.handlers.get("session_shutdown")({}, h.ctx);
+    await settle();
+    globalThis.fetch = realFetch;
+    if (oldCache === undefined) delete process.env.XDG_CACHE_HOME; else process.env.XDG_CACHE_HOME = oldCache;
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+test("modern OpenAI uses one cached Codex account row with zero legacy models and no child render I/O", async () => {
+  await withOpenAIAccount(async ({ h, resolutions, fetches, model }) => {
+    await h.handlers.get("session_start")({}, h.ctx);
+    await vi.waitFor(() => assert.match(footerText(h), /Codex\s+week 25% used.*A-reserve/));
+    await h.commands.get("status").handler("on", h.ctx);
+    await settle();
+    assert.equal(fetches.length, 1);
+    assert.deepEqual([...new Set(resolutions)], ["openai-codex"]);
+    assert.equal(h.ctx.model, model);
+    assert.match(footerText(h), /gpt-modern/);
+    assert.equal(h.ctx.model.provider, "openai");
+    assert.equal(h.footer.render(180).filter((line) => /Codex/.test(plain(line))).length, 1);
+    assert.doesNotMatch(footerText(h), /OpenAI · limits unavailable|diagnostic|unverified|warning/i);
+    const chrome = { version: 1 };
+    h.pi.events.emit("pi-plugins.session-chrome.v1", chrome);
+    const child = { cwd: h.ctx.cwd, provider: "openai", model: "gpt-child", thinking: "low",
+      context: { tokens: 10, contextWindow: 1000, percent: 1 }, totals: fixture().totals };
+    const before = { resolutions: resolutions.length, fetches: fetches.length };
+    h.ctx.modelRegistry.getAvailable = () => { assert.fail("child render must not discover providers"); };
+    h.ctx.modelRegistry.getApiKeyForProvider = () => { assert.fail("render must not resolve auth"); };
+    for (const width of [46, 120, 180]) {
+      for (let i = 0; i < 3; i++) {
+        const rows = chrome.service.footer(child, width, theme).map(plain);
+        assert.equal(rows.filter((line) => /Codex/.test(line)).length, 1);
+        assert.match(rows.join("\n"), /25% used/);
+        assert.doesNotMatch(rows.join("\n"), /ctrl\+|alt\+|warning|diagnostic/i);
+        assert.ok(rows.every((line) => visibleWidth(line) <= width));
+        h.footer.render(width);
+      }
+    }
+    assert.deepEqual({ resolutions: resolutions.length, fetches: fetches.length }, before);
+    assert.deepEqual(h.notices, ["Custom footer enabled"], "only the ordinary /status on confirmation, no account-mapping notice");
+  });
+});
+
+for (const auth of ["missing", "rejected", "malformed", "no-account-claim"]) {
+  test(`modern OpenAI with ${auth} legacy auth is unavailable without a fallback`, async () => {
+    await withOpenAIAccount(async ({ h, state, resolutions, fetches }) => {
+      if (auth === "missing") state.account = undefined;
+      if (auth === "rejected") state.rejected = true;
+      if (auth === "malformed") state.token = "synthetic-not-a-jwt";
+      if (auth === "no-account-claim") state.token = jwt({ sub: "synthetic-user" });
+      await h.handlers.get("session_start")({}, h.ctx);
+      await vi.waitFor(async () => {
+        await h.commands.get("status").handler("details", h.ctx);
+        assert.match(h.notices.at(-1), /openai-codex \(Codex account\): limits unavailable: (?:Pi's subscription OAuth credential is unavailable|Account quota is unavailable)/);
+      });
+      assert.deepEqual([...new Set(resolutions)], ["openai-codex"]);
+      assert.equal(fetches.length, 0);
+      for (const width of [46, 120, 180]) {
+        const text = footerText(h, width);
+        assert.equal(text.split("\n").filter((line) => /Codex/.test(line)).length, 1);
+        assert.match(text, /Codex · limits unavailable/);
+        assert.doesNotMatch(text, /OpenAI · limits unavailable|0% used|diagnostic|unverified/i);
+      }
+    });
+  });
+}
+
+test("all-mode and details deduplicate OpenAI/Codex aliases, keep two rows and count remaining sources", async () => {
+  await withOpenAIAccount(async ({ h, model }) => {
+    const configured = [model, { provider: "openai-codex", id: "legacy-model" },
+      { provider: "alpha", id: "remote" }, { provider: "beta", id: "remote" }, { provider: "gamma", id: "remote" }];
+    h.ctx.modelRegistry.getAvailable = () => configured;
+    h.ctx.modelRegistry.getProvider = (id) => ({ getModels: () => configured.filter((entry) => entry.provider === id) });
+    await h.handlers.get("session_start")({}, h.ctx);
+    await vi.waitFor(() => assert.match(footerText(h), /week 25% used/));
+    await h.commands.get("status").handler("all", h.ctx);
+    await settle();
+    for (const width of [46, 120, 180]) {
+      const rows = h.footer.render(width).map(plain);
+      assert.equal(rows.filter((line) => /Codex|limits unavailable/.test(line)).length, 2);
+      assert.equal(rows.filter((line) => /Codex/.test(line)).length, 1);
+      assert.match(rows.join("\n"), /alpha · limits unavailable · \+2 more/);
+      assert.doesNotMatch(rows.join("\n"), /OpenAI · limits unavailable/);
+    }
+    const before = h.notices.length;
+    await h.commands.get("status").handler("details", h.ctx);
+    assert.equal(h.notices.length, before + 1, "details is the only notice");
+    const details = h.notices.at(-1);
+    assert.match(details, /Model: openai\/gpt-modern/);
+    assert.equal(details.split("\n").filter((line) => line.startsWith("openai-codex (")).length, 1);
+    assert.match(details, /openai-codex \(Codex account\): week 25% used/);
+    for (const id of ["alpha", "beta", "gamma"]) assert.match(details, new RegExp(`^${id} \\(`, "m"));
+    assert.doesNotMatch(details, /^openai \(|Diagnostic Codex|applicability to modern OpenAI|Codex quota only/im);
+    const accountLine = details.split("\n").find((line) => line.startsWith("openai-codex ("));
+    assert.doesNotMatch(accountLine, /diagnostic|unverified|disclaimer/i);
+  });
+});
+
+test("Codex refresh rechecks unchanged identity, clears auth loss and never lends A's pools to B", async () => {
+  await withOpenAIAccount(async ({ h, state, resolutions, fetches }) => {
+    await h.handlers.get("session_start")({}, h.ctx);
+    await vi.waitFor(() => assert.match(footerText(h), /25% used.*A-reserve/));
+    const previousResolutions = resolutions.length;
+    await h.handlers.get("model_select")({}, h.ctx);
+    await vi.waitFor(() => assert.ok(resolutions.length >= previousResolutions + 2));
+    assert.equal(fetches.length, 1, "unchanged identity uses the shared five-minute cache");
+    state.account = undefined;
+    await h.handlers.get("model_select")({}, h.ctx);
+    await vi.waitFor(() => assert.match(footerText(h), /Codex · limits unavailable/));
+    assert.doesNotMatch(footerText(h), /25% used|A-reserve/);
+    state.account = "account-B";
+    await h.handlers.get("model_select")({}, h.ctx);
+    await vi.waitFor(() => assert.match(footerText(h), /67% used.*B-reserve/));
+    assert.doesNotMatch(footerText(h), /25% used|A-reserve/);
+    assert.deepEqual(fetches.map((call) => call.account), ["account-A", "account-B"]);
+    await h.commands.get("status").handler("details", h.ctx);
+    assert.doesNotMatch(h.notices.at(-1), /25% used|A-reserve/);
+  });
+});
+
+for (const transition of ["account-change", "reload"]) {
+  test(`a late Codex transport ignoring abort cannot publish across ${transition}`, async () => {
+    await withOpenAIAccount(async ({ h, state, fetches }) => {
+      const transport = globalThis.fetch;
+      let release;
+      globalThis.fetch = async (url, init) => {
+        if (init.headers["chatgpt-account-id"] !== "account-A") return transport(url, init);
+        fetches.push({ account: "account-A", init });
+        return new Promise((resolve) => { release = resolve; }); // Deliberately ignores signal.
+      };
+      await h.handlers.get("session_start")({}, h.ctx);
+      await vi.waitFor(() => assert.equal(typeof release, "function"));
+      const oldFooter = h.footer;
+      state.account = "account-B";
+      if (transition === "reload") {
+        await h.handlers.get("session_shutdown")({}, h.ctx);
+        await h.handlers.get("session_start")({}, h.ctx);
+        await vi.waitFor(() => assert.match(footerText(h), /67% used.*B-reserve/));
+        assert.equal(fetches[0].init.signal.aborted, true);
+        assert.deepEqual(oldFooter.render(180), []);
+      } else {
+        await h.handlers.get("model_select")({}, h.ctx);
+      }
+      release(quotaResponse(91));
+      if (transition === "account-change") {
+        await vi.waitFor(async () => {
+          await h.commands.get("status").handler("details", h.ctx);
+          assert.match(h.notices.at(-1), /subscription account changed during the quota read/);
+        });
+        assert.match(footerText(h), /Codex · limits unavailable/);
+        await h.handlers.get("model_select")({}, h.ctx);
+      }
+      await vi.waitFor(() => assert.match(footerText(h), /67% used.*B-reserve/));
+      await settle();
+      assert.doesNotMatch(footerText(h), /91% used|A-reserve/);
+    });
+  });
+}
+
+test("modern OpenAI headers and stream events never update or refresh the legacy Codex observation", async () => {
+  await withOpenAIAccount(async ({ h, resolutions, fetches }) => {
+    await h.handlers.get("session_start")({}, h.ctx);
+    await vi.waitFor(() => assert.match(footerText(h), /25% used.*A-reserve/));
+    const before = resolutions.length;
+    await h.handlers.get("after_provider_response")({ headers: {
+      "x-codex-primary-used-percent": "93", "x-codex-primary-window-minutes": "10080" } }, h.ctx);
+    await h.handlers.get("provider_stream_event")({ provider: "openai", data: { type: "codex.rate_limits",
+      rate_limits: { primary: { used_percent: 94, window_minutes: 10080 } } } }, h.ctx);
+    await settle();
+    assert.equal(resolutions.length, before);
+    assert.equal(fetches.length, 1);
+    assert.match(footerText(h), /25% used.*A-reserve/);
+    assert.doesNotMatch(footerText(h), /93%|94%/);
+  });
+});
+
+test("legacy Codex headers and events revalidate identity instead of assigning passive data to another account", async () => {
+  await withOpenAIAccount(async ({ h, state, resolutions, fetches }) => {
+    await h.handlers.get("session_start")({}, h.ctx);
+    await vi.waitFor(() => assert.match(footerText(h), /25% used.*A-reserve/));
+    h.ctx.model = { ...h.ctx.model, provider: "openai-codex" };
+    state.account = undefined;
+    const before = resolutions.length;
+    await h.handlers.get("after_provider_response")({ headers: {
+      "x-codex-primary-used-percent": "93", "x-codex-primary-window-minutes": "10080" } }, h.ctx);
+    await vi.waitFor(() => assert.match(footerText(h), /Codex · limits unavailable/));
+    assert.ok(resolutions.length > before, "headers trigger an identity-safe refresh");
+    assert.doesNotMatch(footerText(h), /25%|93%|A-reserve/);
+    state.account = "account-B";
+    await h.handlers.get("provider_stream_event")({ provider: "openai-codex", data: { type: "codex.rate_limits",
+      rate_limits: { primary: { used_percent: 94, window_minutes: 10080 } } } }, h.ctx);
+    await vi.waitFor(() => assert.match(footerText(h), /67% used.*B-reserve/));
+    assert.doesNotMatch(footerText(h), /25%|93%|94%|A-reserve/);
+    assert.deepEqual(fetches.map((call) => call.account), ["account-A", "account-B"]);
+  });
+});
+
+test("OpenAI's single Codex row preserves ready, unavailable, stale, reset-due and blocked layouts", () => {
+  const ready = { provider: "openai-codex", source: "Codex account", state: "ready", observedAt: now,
+    windows: [{ label: "week", used: 25, reset: now + 86400_000, observedAt: now }] };
+  const states = [
+    [ready, /week 25% used/],
+    [{ ...ready, state: "unavailable", windows: [], observedAt: undefined }, /Codex · limits unavailable/],
+    [{ ...ready, observedAt: now - 11 * 60_000, windows: [{ ...ready.windows[0], observedAt: now - 11 * 60_000 }] }, /stale/],
+    [{ ...ready, windows: [{ ...ready.windows[0], reset: now - 1 }] }, /reset due/],
+  ];
+  for (const [observation, expected] of states) for (const width of [46, 120, 180]) {
+    const snapshot = { ...fixture(), provider: "openai", model: "gpt-modern", quotas: [], providerUsage: [observation] };
+    const rows = mod.renderFooter(snapshot, width, theme).map(plain);
+    assert.equal(rows.filter((line) => /Codex/.test(line)).length, 1);
+    assert.match(rows.join("\n"), expected);
+    assert.doesNotMatch(rows.join("\n"), /OpenAI · limits unavailable|diagnostic|unverified/i);
+    assert.ok(rows.every((line) => visibleWidth(line) <= width));
+    const blocked = mod.renderFooter({ ...snapshot, compact: true }, width, theme).map(plain);
+    assert.equal(blocked.length, 1);
+    assert.ok(visibleWidth(blocked[0]) <= width);
+    assert.doesNotMatch(blocked[0], /Codex|ctrl\+|alt\+|limits unavailable|diagnostic/i);
   }
 });
 
@@ -2423,9 +2729,9 @@ test("provider snapshots distinguish local and remote sources and bound all-mode
   h.ctx.modelRegistry.getProvider = (id) => ({ getModels: () => configured.filter((model) => model.provider === id) });
   try {
     await h.handlers.get("session_start")({}, h.ctx);
-    await vi.waitFor(() => assert.match(plain(h.footer.render(180).join("\n")), /OpenAI · limits unavailable/));
+    await vi.waitFor(() => assert.match(plain(h.footer.render(180).join("\n")), /Codex · limits unavailable/));
     await h.commands.get("status").handler("details", h.ctx);
-    assert.match(h.notices.at(-1), /openai \(OpenAI subscription\): limits unavailable.*https:\/\/chatgpt\.com\/settings\/usage/);
+    assert.match(h.notices.at(-1), /openai-codex \(Codex account\): limits unavailable/);
     await h.commands.get("status").handler("all", h.ctx);
     await vi.waitFor(() => assert.match(plain(h.footer.render(180).join("\n")), /alpha · limits unavailable · \+1 more/));
     for (const width of [46, 120, 180]) {
@@ -2434,7 +2740,7 @@ test("provider snapshots distinguish local and remote sources and bound all-mode
       assert.ok(lines.every((line) => visibleWidth(line) <= width));
     }
     await h.commands.get("status").handler("details", h.ctx);
-    for (const id of ["openai", "alpha", "beta", "local"]) assert.match(h.notices.at(-1), new RegExp(`${id} \\(`));
+    for (const id of ["openai-codex", "alpha", "beta", "local"]) assert.match(h.notices.at(-1), new RegExp(`${id} \\(`));
     assert.match(h.notices.at(-1), /alpha \(alpha\): limits unavailable: Subscription allowance is not exposed for API key authentication/);
     assert.match(h.notices.at(-1), /local \(Local inference\): no account quota/);
     await h.commands.get("status").handler("on", h.ctx);

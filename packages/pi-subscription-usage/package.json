@@ -1,0 +1,24 @@
+{
+  "name": "@justmytwospence/pi-subscription-usage",
+  "version": "0.1.2",
+  "description": "Read-only subscription quota parsers and collectors for Pi.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "check": "npm run typecheck && npm test",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^7.0.0",
+    "vitest": "^5.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/justmytwospence/pi-plugins",
+    "directory": "packages/pi-subscription-usage"
+  }
+}

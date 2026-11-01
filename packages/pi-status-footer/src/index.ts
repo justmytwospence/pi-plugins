@@ -10,6 +10,7 @@
 // set. Changes take effect with /reload.
 import { execFile, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readCodexUsage } from "@justmytwospence/pi-subscription-usage";
 import { mkdir, readFile, rename, rmdir, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -34,17 +35,17 @@ export * from "./mcp.ts";
 export * from "./working.ts";
 export * from "./session-chrome.ts";
 
+/** Account-display aliases do not change inference providers or routing eligibility. */
+export function accountUsageProvider(provider: string): string {
+  return provider === "openai" ? "openai-codex" : provider;
+}
+
 const STATE_KEY = "personal-status-footer";
 const QUOTA_STALE_MS = 10 * 60_000;
 const GIT_TTL_MS = 3_000;
 const TICK_MS = 15_000;
 // Built-in MCP exposes no status; its tools and mcp.json are polled instead.
 const MCP_TICK_MS = 5_000;
-// Codex CLI's own /status source. Hardcoded so the token never follows a custom
-// provider baseUrl anywhere else.
-const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
-const CODEX_TTL_MS = 5 * 60_000;
-const CODEX_ACTIVE_TTL_MS = 60_000;
 const CODEX_JWT_CLAIM = "https://api.openai.com/auth";
 // Claude Code's own /status source. Readings for Claude Code's login are cached
 // where Claude's status line keeps them; readings for Pi's login get their own file.
@@ -1336,9 +1337,9 @@ export default function statusFooter(pi: ExtensionAPI): void {
     notify: (message, type) => ctx?.ui.notify(message, type),
     refresh: () => requestRender?.(),
   });
-  let codexBusy = false, codexChecked = 0, codexAbort: AbortController | undefined;
-  let codexTimeout: ReturnType<typeof setTimeout> | undefined, codexAccount: string | undefined;
-  let claude: Quota | undefined, claudeHeaders: Quota | undefined, codex: Quota | undefined;
+  let codexBusy = false, codexAbort: AbortController | undefined;
+  let claude: Quota | undefined, claudeHeaders: Quota | undefined;
+  let codex: ProviderUsage | undefined;
   let claudePiAccount = false;
   let usageCollector = createProviderUsageCollector();
   const providerReadings = new Map<string, ProviderUsage>();
@@ -1354,7 +1355,6 @@ export default function statusFooter(pi: ExtensionAPI): void {
   // Claude Code's login, shared with its status line; Pi's login (one per machine) separately.
   const cacheFile = path.join(cacheDir, "oauth-usage.json");
   const piCacheFile = path.join(cacheDir, "pi-oauth-usage.json");
-  const footerCacheDir = path.join(process.env.XDG_CACHE_HOME ?? path.join(home, ".cache"), "pi-status-footer");
 
   const exec = (file: string, args: string[], cwd?: string): Promise<string | undefined> => new Promise((resolve) => {
     const child = execFile(file, args, { cwd, timeout: 4_000, maxBuffer: 2 * 1024 * 1024, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } }, (error, stdout) => {
@@ -1502,74 +1502,22 @@ export default function statusFooter(pi: ExtensionAPI): void {
       if (active && epoch === generation) requestRender?.();
     } finally { if (epoch === generation) quotaBusy = false; }
   };
-  // One reading per ChatGPT account, shared by every Pi session: whoever has the
-  // freshest (a usage fetch or a streamed event) writes it, the rest read it.
-  const codexFile = (account: string) => path.join(footerCacheDir, `codex-usage-${account.replace(/[^\w.-]/g, "_")}.json`);
-  const readCodexCache = async (account: string): Promise<{ updated: number; usage: RecordValue } | undefined> => {
-    try {
-      const data = record(JSON.parse(await readFile(codexFile(account), "utf8")));
-      const updated = number(data.updated);
-      return updated === undefined ? undefined : { updated, usage: record(data.usage) };
-    } catch { return undefined; }
-  };
-  const writeCodexCache = async (account: string, updated: number, usage: RecordValue) => {
-    try {
-      // A streamed event carries no named pools; keep those from the last fetch.
-      const pools = Array.isArray(usage.additional_rate_limits) && usage.additional_rate_limits.length ? undefined
-        : (await readCodexCache(account))?.usage.additional_rate_limits;
-      const file = codexFile(account), temporary = `${file}.${process.pid}.tmp`;
-      await mkdir(footerCacheDir, { recursive: true });
-      await writeFile(temporary, JSON.stringify({ updated, usage: pools ? { ...usage, additional_rate_limits: pools } : usage }));
-      await rename(temporary, file);
-    } catch { /* Sharing is best-effort; this session keeps its reading. */ }
-  };
-  const applyCodex = (parsed: Quota) => {
-    if (!parsed.windows.length || (codex && codex.updated >= parsed.updated)) return;
-    codex = mergeQuota(codex, parsed); requestRender?.();
-  };
-  // Same OAuth token and account Pi sends with each Codex request; Pi's registry
-  // refreshes it. A non-JWT key (no ChatGPT account) simply yields no reading.
-  const updateCodex = async (maxAge = CODEX_TTL_MS) => {
-    if (!active || !ctx || codexBusy || Date.now() - codexChecked < maxAge) return;
-    if (ctx.model?.provider !== "openai-codex" && !showAll) return;
-    codexBusy = true; codexChecked = Date.now();
-    const epoch = generation, controller = new AbortController();
+  // The shared reader owns identity checks, bounded I/O and account-isolated
+  // caching. Resolve identity on every refresh, even while a reading is fresh.
+  const updateCodex = async () => {
+    if (!active || !ctx || codexBusy) return;
+    if (accountUsageProvider(ctx.model?.provider ?? "") !== "openai-codex" && !showAll) return;
+    codexBusy = true;
+    const epoch = generation, context = ctx, controller = new AbortController();
     codexAbort = controller;
-    const timeout = setTimeout(() => {
-      if (active && epoch === generation && codexAbort === controller) controller.abort();
-    }, 5_000);
-    codexTimeout = timeout;
     try {
-      const token = await ctx.modelRegistry.getApiKeyForProvider("openai-codex");
-      const account = token ? codexAccountId(token) : undefined;
-      if (!token || !account || !active || epoch !== generation) return;
-      codexAccount = account;
-      const cached = await readCodexCache(account);
-      if (!active || epoch !== generation) return;
-      if (cached) applyCodex(parseCodexUsage(cached.usage, cached.updated));
-      // Even a forced refresh (startup, /status) trusts a reading under a minute old.
-      if (cached && Date.now() - cached.updated < Math.max(maxAge, CODEX_ACTIVE_TTL_MS)) return;
-      const lock = path.join(footerCacheDir, `.codex-fetch-${account.replace(/[^\w.-]/g, "_")}.lock`);
-      try {
-        await mkdir(footerCacheDir, { recursive: true });
-        try { if (Date.now() - (await stat(lock)).mtimeMs > CLAUDE_LOCK_STALE_MS) await rmdir(lock); } catch { /* no lock */ }
-        await mkdir(lock);
-      } catch { return; } // another session is fetching; its result lands in the cache
-      try {
-        const response = await fetch(CODEX_USAGE_URL, {
-          headers: { Authorization: `Bearer ${token}`, "chatgpt-account-id": account, originator: "pi", accept: "application/json" },
-          signal: controller.signal,
-        });
-        if (!response.ok) return;
-        const usage = record(await response.json()), updated = Date.now();
-        const parsed = parseCodexUsage(usage, updated);
-        if (!parsed.windows.length) return;
-        await writeCodexCache(account, updated, usage);
-        if (active && epoch === generation) { codex = parsed; requestRender?.(); }
-      } finally { await rmdir(lock).catch(() => undefined); }
-    } catch { /* Keep last good snapshot; its timestamp makes staleness visible. */ } finally {
-      clearTimeout(timeout);
-      if (codexTimeout === timeout) codexTimeout = undefined;
+      const reading = await readCodexUsage(context, { signal: controller.signal });
+      if (!active || epoch !== generation || ctx?.modelRegistry !== context.modelRegistry || codexAbort !== controller || controller.signal.aborted) return;
+      // Presentation names the account, not its applicability to inference.
+      // Never retain another account's windows when resolution is unavailable.
+      codex = { ...reading, source: "Codex account", reason: reading.state === "ready" ? undefined : reading.reason };
+      requestRender?.();
+    } finally {
       if (codexAbort === controller) codexAbort = undefined;
       if (epoch === generation) codexBusy = false;
     }
@@ -1698,16 +1646,15 @@ export default function statusFooter(pi: ExtensionAPI): void {
     const index = order.indexOf(id);
     return index < 0 ? order.length : index;
   };
-  const orderedProviders = () => [...providerModels.keys()].sort((a, b) => usageOrder(a) - usageOrder(b) || a.localeCompare(b));
+  const orderedProviders = () => [...new Set([...providerModels.keys()].map(accountUsageProvider))]
+    .sort((a, b) => usageOrder(a) - usageOrder(b) || a.localeCompare(b));
   const cachedUsage = (provider: string, modelId?: string): ProviderUsage => {
     if (provider === "anthropic") return claude ? {
       provider, source: claudePiAccount ? "Claude subscription" : "Claude Code account", state: "ready", observedAt: claude.updated,
       windows: claude.windows.map((window) => ({ ...window })),
     } : { provider, source: "Claude", state: "unavailable", windows: [], reason: "Anthropic subscription usage has not been observed." };
-    if (provider === "openai-codex") return codex ? {
-      provider, source: "Codex subscription", state: "ready", observedAt: codex.updated,
-      windows: codex.windows.map((window) => ({ ...window })),
-    } : { provider, source: "Codex", state: "unavailable", windows: [], reason: "Codex subscription usage has not been observed." };
+    if (provider === "openai-codex") return codex ??
+      { provider, source: "Codex account", state: "unavailable", windows: [], reason: "Codex subscription usage has not been observed." };
     const cached = providerReadings.get(provider);
     if (cached) return cached;
     if (provider === "google") return { provider, source: "Google Antigravity subscription", state: "unavailable", windows: [], reason: "Google quota has not been observed for the selected model." };
@@ -1717,6 +1664,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       { provider, source: provider, state: "unavailable", windows: [], reason: "Subscription usage has not been observed." };
   };
   const selectedUsage = (provider: string, modelId?: string) => {
+    provider = accountUsageProvider(provider);
     const forRow = (id: string, selected?: string): ProviderUsage => {
       const reading = cachedUsage(id, selected);
       if (id !== "google" || reading.state !== "ready") return reading;
@@ -1733,7 +1681,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     if (!active || !ctx) return;
     const context = ctx, epoch = generation;
     discoverProviders(context);
-    const ids = showAll ? orderedProviders() : [context.model?.provider].filter((id): id is string => !!id);
+    const ids = showAll ? orderedProviders() : [accountUsageProvider(context.model?.provider ?? "")].filter(Boolean);
     await Promise.all(ids.filter((id) => id !== "anthropic" && id !== "openai-codex").map(async (id) => {
       const model = providerModels.get(id);
       if (!model) return;
@@ -1774,10 +1722,6 @@ export default function statusFooter(pi: ExtensionAPI): void {
     if (provider === "anthropic" || showAll) {
       if (claude) quotas.push(claude); else unavailableQuota = "Claude acct";
     }
-    if (provider === "openai-codex") {
-      if (codex) quotas.unshift(codex);
-      else unavailableQuota = unavailableQuota ? `${unavailableQuota} / Codex acct` : "Codex acct";
-    } else if (showAll && codex) quotas.push(codex);
     const usage = selectedUsage(provider, current.model?.id);
     const absorbed = absorbStatuses(statuses, { claudeRow: quotas.some((q) => q.source === "Claude acct") });
     const controls: FooterControlState = {};
@@ -1823,10 +1767,6 @@ export default function statusFooter(pi: ExtensionAPI): void {
     if (session.provider === "anthropic" || showAll) {
       if (claude) quotas.push(claude); else unavailableQuota = "Claude acct";
     }
-    if (session.provider === "openai-codex") {
-      if (codex) quotas.unshift(codex);
-      else unavailableQuota = unavailableQuota ? `${unavailableQuota} / Codex acct` : "Codex acct";
-    } else if (showAll && codex) quotas.push(codex);
     const usage = selectedUsage(session.provider, session.model);
     return {
       ...main,
@@ -1966,7 +1906,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
   const stop = (restoreEditor = true) => {
     // Invalidate and detach everything locally before any cleanup can throw or
     // re-enter us. Saved callbacks must stay inert even after another start.
-    const context = ctx, interval = timer, timeout = codexTimeout, controller = codexAbort;
+    const context = ctx, interval = timer, controller = codexAbort;
     const footer = releaseFooter, editor = releaseEditor, input = releaseInput, processes = [...children];
     const runInterval = workingTimer, mcpInterval = mcpTimer, shownWorking = workingShown;
     cycles.cancel("footer closed");
@@ -1976,7 +1916,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     mainEditor = undefined; mainTui = undefined; mainKeys = undefined; releaseInput = undefined;
     refreshSnapshot = undefined; prepared = undefined; discoveredActions = {}; discoveredFlow = undefined; discoveredSystem1 = undefined;
     promptDepth = 0; blockedHolds = 0;
-    timer = undefined; codexTimeout = undefined; codexAbort = undefined;
+    timer = undefined; codexAbort = undefined;
     workingTimer = undefined; mcpTimer = undefined; runStarted = 0; workingShown = undefined; working.reset();
     workingClaims.clear();
     mcp = undefined; mcpBusy = false;
@@ -1990,7 +1930,6 @@ export default function statusFooter(pi: ExtensionAPI): void {
     if (interval !== undefined) cleanup(() => clearInterval(interval));
     if (runInterval !== undefined) cleanup(() => clearInterval(runInterval));
     if (mcpInterval !== undefined) cleanup(() => clearInterval(mcpInterval));
-    if (timeout !== undefined) cleanup(() => clearTimeout(timeout));
     if (context && shownWorking !== undefined) cleanup(() => context.ui.setWorkingMessage());
     if (controller) cleanup(() => controller.abort());
     for (const child of processes) cleanup(() => { child.kill(); });
@@ -2008,12 +1947,12 @@ export default function statusFooter(pi: ExtensionAPI): void {
     try { stop(); } catch { /* Shutdown still reports teardown errors. */ }
     if (context.mode !== "tui") return;
     ctx = context; active = true;
-    git = { ...emptyGit(), unavailable: true }; claude = undefined; claudeHeaders = undefined; codex = undefined; codexAccount = undefined; claudePiAccount = false;
-    gitBusy = quotaBusy = codexBusy = false; gitChecked = quotaChecked = codexChecked = 0;
+    git = { ...emptyGit(), unavailable: true }; claude = undefined; claudeHeaders = undefined; codex = undefined; claudePiAccount = false;
+    gitBusy = quotaBusy = codexBusy = false; gitChecked = quotaChecked = 0;
     phase = undefined;
     restorePreferences(context);
     account(); wrapEditor(context); attach();
-    void updateGit(true); void updateQuota(true); void updateCodex(0); void updateMcp(); void updateProviderUsage();
+    void updateGit(true); void updateQuota(true); void updateCodex(); void updateMcp(); void updateProviderUsage();
     const epoch = generation;
     mcpTimer = setInterval(() => { if (active && epoch === generation) void updateMcp(); }, MCP_TICK_MS);
     mcpTimer.unref();
@@ -2044,7 +1983,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
     if (!active) return;
     // Codex limits are per account, not per model; keep them across switches.
     ctx = context; phase = undefined;
-    account(); void updateQuota(true); void updateCodex(CODEX_ACTIVE_TTL_MS); void updateProviderUsage(); requestRender?.();
+    account(); void updateQuota(true); void updateCodex(); void updateProviderUsage(); requestRender?.();
   });
   pi.on("thinking_level_select", () => requestRender?.());
   pi.on("session_info_changed", () => requestRender?.());
@@ -2068,7 +2007,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
   });
   pi.on("agent_settled", (_event, context) => {
     if (!active) return;
-    ctx = context; account(); void updateGit(true); void updateQuota(); void updateCodex(CODEX_ACTIVE_TTL_MS); void updateMcp(); void updateProviderUsage();
+    ctx = context; account(); void updateGit(true); void updateQuota(); void updateCodex(); void updateMcp(); void updateProviderUsage();
     requestRender?.();
   });
   pi.on("ui_prompt_start", () => { if (active) { promptDepth++; phase = "waiting"; requestRender?.(); } });
@@ -2084,19 +2023,13 @@ export default function statusFooter(pi: ExtensionAPI): void {
       if (quota) { claudePiAccount = true; claudeHeaders = quota; claude = mergeQuota(claude, quota); requestRender?.(); }
       return;
     }
-    if (context.model?.provider !== "openai-codex") return;
-    const quota = parseCodexHeaders(event.headers, Date.now());
-    if (quota) { codex = mergeQuota(codex, quota); requestRender?.(); }
+    // Passive responses have no account identity. Revalidate through the reader
+    // rather than assigning a late response to a newly configured account.
+    if (context.model?.provider === "openai-codex") void updateCodex();
   });
-  // Runs for every streamed event, so it must stay cheap until the type matches.
   pi.on("provider_stream_event", (event) => {
-    if (!active || event.provider !== "openai-codex") return;
-    const usage = codexRateLimitsEvent(event.data);
-    if (!usage) return;
-    const updated = Date.now(), parsed = parseCodexUsage(usage, updated);
-    if (!parsed.windows.length) return;
-    codex = mergeQuota(codex, parsed); requestRender?.();
-    if (codexAccount) void writeCodexCache(codexAccount, updated, usage);
+    if (!active || event.provider !== "openai-codex" || !codexRateLimitsEvent(event.data)) return;
+    void updateCodex();
   });
   pi.registerCommand("status", {
     description: "Personal footer: on, native, all (show configured providers), details, working on|off, mcp on|off",
@@ -2107,7 +2040,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       if (command === "details") {
         const usage = context.getContextUsage();
         const providerIds = new Set(orderedProviders());
-        if (context.model?.provider) providerIds.add(context.model.provider);
+        if (context.model?.provider) providerIds.add(accountUsageProvider(context.model.provider));
         const accountDetails = [...providerIds].sort((a, b) => usageOrder(a) - usageOrder(b) || a.localeCompare(b)).flatMap((id) => {
           const selected = context.model?.provider === id ? context.model.id : providerModels.get(id)?.id;
           const cached = cachedUsage(id, selected);
@@ -2129,12 +2062,12 @@ export default function statusFooter(pi: ExtensionAPI): void {
           `Tracked Git changes: ${git.added} lines added, ${git.removed} removed. Session age: ${duration(Date.now() - totals.started)}; compactions: ${totals.compactions}.`,
           "OAuth identifies the authentication method, not guaranteed subscription billing. Git diff covers all uncommitted tracked changes, not just this agent.",
           "Claude acct comes from Anthropic's usage endpoint (as Claude Code /status) using Pi's own Claude login, refreshed every 5m and by each response's limit headers; without a Pi subscription login, from Claude Code's account (which can differ). Values are percent used; stale means >10m old or reset due.",
-          "Codex acct comes from ChatGPT's usage endpoint (as Codex CLI /status) using Pi's own Codex login, shared by all Pi sessions on the account; refreshed every 5m, or 1m around turns. Each request's streamed rate-limit event (or SSE headers) updates it in between.",
-          "Provider limits: subscription allowance is distinct from API throttles, balances and cost. Google local OAuth uses its internal read-only quota endpoint; vault custody has no quota capability. Muse CLI usage --json currently exposes availability only; successful window format remains unverified. OpenAI ChatGPT-plan windows are unavailable here.",
+          "Codex account comes from ChatGPT's usage endpoint using Pi's separate openai-codex login; shared account readings refresh every 5m. OpenAI sessions use this account row without changing the selected inference provider.",
+          "Provider limits: subscription allowance is distinct from API throttles, balances and cost. Google local OAuth uses its internal read-only quota endpoint; vault custody has no quota capability. Muse CLI usage --json currently exposes availability only; successful window format remains unverified.",
           ...accountDetails,
           `Working row: ${showWorking ? "on" : "off"} (streamed output tokens, estimated as chars/4 until the provider reports a count, and elapsed time after ${SHOW_TIMER_AFTER_MS / 1000}s). MCP chip: ${showMcp ? "on" : "off"} (built-in MCP servers with non-hidden tools over servers enabled in mcp.json; approximate, and absent when another extension publishes an mcp status).`,
           `Controls: ${JSON.stringify({ ...interactions.describe(), ...footerControls?.describe(), settingsCycle: cycles.snapshot() ? { phase: cycles.snapshot()!.phase, keys: cycles.snapshot()!.settings.map(setting => setting.key) } : undefined })}. This in-memory diagnostic records only the last pointer event, not text or account data.`,
-          "/status on: active provider only; /status all: also show configured remote providers (at most two rows, remaining sources in details); /status native: restore Pi footer; /status working on|off, /status mcp on|off. Choices survive reload/resume in this session.",
+          "/status on: active account source only; /status all: also show configured remote providers (at most two rows, remaining sources in details); /status native: restore Pi footer; /status working on|off, /status mcp on|off. Choices survive reload/resume in this session.",
         ].join("\n"), "info");
         return;
       }
@@ -2152,7 +2085,7 @@ export default function statusFooter(pi: ExtensionAPI): void {
       if (!["on", "native", "all"].includes(command)) { context.ui.notify("Usage: /status on|native|all|details|working on|off|mcp on|off", "warning"); return; }
       ctx = context; enabled = command !== "native"; showAll = command === "all";
       pi.appendEntry(STATE_KEY, { enabled, showAll, working: showWorking, mcp: showMcp });
-      attach(); if (enabled) { void updateGit(true); void updateQuota(true); void updateCodex(0); void updateProviderUsage(); }
+      attach(); if (enabled) { void updateGit(true); void updateQuota(true); void updateCodex(); void updateProviderUsage(); }
       context.ui.notify(enabled ? "Custom footer enabled" : "Native footer restored", "info");
     },
   });

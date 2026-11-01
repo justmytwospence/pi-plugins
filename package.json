@@ -64,6 +64,7 @@
     "typebox": "*"
   },
   "dependencies": {
+    "@justmytwospence/pi-subscription-usage": "file:packages/pi-subscription-usage",
     "@shikijs/cli": "^4.4.3",
     "@xterm/headless": "6.0.0",
     "grok-mermaid": "^0.2.2",

@@ -29,6 +29,9 @@
     "@earendil-works/pi-agent-core": "*",
     "typebox": "*"
   },
+  "dependencies": {
+    "@justmytwospence/pi-subscription-usage": "file:../pi-subscription-usage"
+  },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "1.2.0",
     "@earendil-works/pi-tui": "1.2.0",
