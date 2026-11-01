@@ -85,7 +85,7 @@ async function harness(options: { ui?: boolean; decisions?: boolean; credentials
     on: (name: string, fn: (event: unknown, ctx: ExtensionContext) => unknown) => { handlers.set(name, fn); return () => handlers.delete(name); },
   } as unknown as ExtensionAPI;
   await system1Extension(pi);
-  const fire = async (event: string) => { await handlers.get(event)?.({}, ctx); };
+  const fire = async (event: string, data: unknown = {}) => { await handlers.get(event)?.(data, ctx); };
   const command = async (args: string) => { await commands.get("system1")!.handler(args, ctx); };
   const close = async () => { await fire("session_shutdown"); };
   cleanup.push(close);
@@ -177,6 +177,49 @@ describe("registration and status", () => {
 });
 
 describe("picker and explicit activation", () => {
+  it.each([true, false])("handles its own real SDK prompt lifecycle before delayed end events (credentials=%s)", async (credentials) => {
+    const { ExtensionRunner } = await import(new URL("./core/extensions/runner.js", import.meta.resolve("@earendil-works/pi-coding-agent")).href);
+    const h = await harness({ credentials });
+    await h.start();
+    let releaseEnds!: () => void;
+    const endBarrier = new Promise<void>(resolve => { releaseEnds = resolve; });
+    const selections: { title: string; resolve(value: string | undefined): void }[] = [];
+    // Use Pi's actual select wrapper. Earlier extensions can delay delivery of the
+    // queued ui_prompt_end event beyond the select promise's resolution.
+    const runner = Object.assign(Object.create(ExtensionRunner.prototype), {
+      uiPromptDepth: 0,
+      emit: async (event: { type: string }) => {
+        if (event.type === "ui_prompt_end") await endBarrier;
+        else await Promise.resolve();
+        await h.fire(event.type, event);
+      },
+    });
+    const select = vi.fn((title: string) => new Promise<string | undefined>(resolve => { selections.push({ title, resolve }); }));
+    Object.assign(h.ctx.ui, runner.wrapUIPromptContext({ ...h.ctx.ui, select }));
+    const command = h.command("");
+    try {
+      await flush();
+      expect(selections).toHaveLength(1);
+      selections[0]!.resolve("OpenAI Decisions (Pro credits)");
+      await flush();
+      if (credentials) {
+        expect(selections).toHaveLength(2);
+        expect(selections[1]!.title).toBe(BILLING_CONFIRMATION);
+        selections[1]!.resolve("Use included credits");
+      } else {
+        expect(h.notify.mock.calls.at(-1)?.[0]).toContain("OpenAI Decisions unavailable");
+      }
+      await command;
+      expect(readSystem1Setting()).toMatchObject({ backend: credentials ? "openai-decisions" : "jev" });
+      expect(querySystem1State(h.events)).toMatchObject({ backend: credentials ? "openai-decisions" : "jev" });
+      expect(h.registry.classify).not.toHaveBeenCalled();
+    } finally {
+      releaseEnds();
+      for (const selection of selections) selection.resolve(undefined);
+      await command;
+      await flush();
+    }
+  });
   it.each([{ credentials: false, backend: "jev" }, { credentials: true, backend: "openai-decisions" }])("keeps picker headings visible at phone width: %j", async ({ credentials, backend }) => {
     write(backend);
     const h = await harness({ credentials });

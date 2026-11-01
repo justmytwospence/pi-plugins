@@ -49,7 +49,12 @@ export default async function system1Extension(pi: ExtensionAPI): Promise<void> 
   let debounce: ReturnType<typeof setTimeout> | undefined;
   let dialogOpen = false;
   let blockedDepth = 0;
+  // Counts foreign prompts only. Pi delivers native prompt-end events asynchronously,
+  // so our own select may have resolved before its end event reaches this extension.
   let promptDepth = 0;
+  const ownedPromptTitles = new Set<string>();
+  const ownsPrompt = (event: { kind?: string; title?: string }) => event.kind === "select" &&
+    typeof event.title === "string" && ownedPromptTitles.has(event.title);
 
   const guard = (ctx: ExtensionContext) => {
     const mine = generation;
@@ -88,18 +93,29 @@ export default async function system1Extension(pi: ExtensionAPI): Promise<void> 
     dialogOpen = false;
     blockedDepth = 0;
     promptDepth = 0;
+    ownedPromptTitles.clear();
   };
 
   const open = async (ctx: ExtensionContext, backend?: "jev" | "openai-decisions") => {
     const current = guard(ctx);
     if (!current() || dialogOpen || blockedDepth || promptDepth || !ctx.isIdle()) return;
     dialogOpen = true;
+    const ui = ctx.ui;
+    const pickerCtx: ExtensionContext = Object.create(ctx);
+    Object.defineProperty(pickerCtx, "ui", { value: {
+      ...ui,
+      select: (...args: Parameters<typeof ui.select>) => {
+        // Record ownership before Pi queues ui_prompt_start. Retain these bounded
+        // picker/confirmation titles until shutdown so late end events stay owned.
+        ownedPromptTitles.add(args[0]);
+        return ui.select(...args);
+      },
+    } });
     try {
-      // Our whileBlocked hold accounts for one; any additional hold or native prompt
-      // belongs to another dialog. Native select releases its prompt before resolving.
+      // Our whileBlocked hold accounts for one; foreign holds/prompts still cancel.
       const canApply = () => current() && ctx.isIdle() && blockedDepth <= 1 && promptDepth === 0;
-      if (backend) await selectSystem1Backend(pi, ctx, backend, canApply);
-      else await openSystem1Picker(pi, ctx, canApply);
+      if (backend) await selectSystem1Backend(pi, pickerCtx, backend, canApply);
+      else await openSystem1Picker(pi, pickerCtx, canApply);
       if (current()) await refresh(ctx);
     } finally {
       if (current()) dialogOpen = false;
@@ -118,8 +134,8 @@ export default async function system1Extension(pi: ExtensionAPI): Promise<void> 
     if (held === true) blockedDepth++;
     else if (held === false) blockedDepth = Math.max(0, blockedDepth - 1);
   });
-  pi.on("ui_prompt_start", () => { if (active) promptDepth++; });
-  pi.on("ui_prompt_end", () => { if (active) promptDepth = Math.max(0, promptDepth - 1); });
+  pi.on("ui_prompt_start", (event) => { if (active && !ownsPrompt(event)) promptDepth++; });
+  pi.on("ui_prompt_end", (event) => { if (active && !ownsPrompt(event)) promptDepth = Math.max(0, promptDepth - 1); });
 
   pi.events.on(FOOTER_ACTIONS_CHANNEL, (data: unknown) => {
     const request = data as Partial<FooterActionsRequest> | undefined;
