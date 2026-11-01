@@ -10,8 +10,10 @@ import type { Paint, Totals } from "./index.ts";
 
 export const SESSION_CHROME_CHANNEL = "pi-plugins.session-chrome.v1";
 
-/** Session-owned telemetry for a read-only view. Shared accounts/notices and directory-matched git
- * stay main's; main's controls, workflow, reasoning policy and cache state never carry over. */
+/** Session-owned telemetry for a read-only view. Provider usage comes from the main
+ * session's cached readings, selected for this physical provider/model without I/O.
+ * Shared notices and directory-matched git stay main's; main's controls, workflow,
+ * reasoning policy and cache state never carry over. */
 export interface SessionChromeOverrides {
   cwd: string;
   provider: string;

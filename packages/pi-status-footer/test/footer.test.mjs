@@ -1213,6 +1213,12 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
   let h;
   try {
     h = host([], dir);
+    const configured = [
+      { provider: "anthropic", id: "claude-opus-5-5" },
+      { provider: "openai-codex", id: "gpt-6-astra" },
+    ];
+    h.ctx.modelRegistry.getAvailable = () => configured;
+    h.ctx.modelRegistry.getProvider = (id) => ({ getModels: () => configured.filter((model) => model.provider === id) });
     h.statuses.set("plan", "PLAN mode");
     await h.handlers.get("session_start")({}, h.ctx);
     assert.equal(timers.size, 2, "the footer tick and the MCP poll");
@@ -1252,7 +1258,7 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
     await h.handlers.get("model_select")({}, h.ctx);
     assert.match(h.footer.render(120).join("\n"), /week 45%/, "account limits survive a model switch");
     await h.commands.get("status").handler("all", h.ctx);
-    assert.match(h.footer.render(120).join("\n"), /Claude\s+limits unavailable/);
+    assert.match(h.footer.render(120).join("\n"), /Claude · limits unavailable/);
     await h.commands.get("status").handler("native", h.ctx);
     assert.equal(h.footer, undefined);
     assert.ok(h.disposed >= 2);
@@ -1267,7 +1273,7 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
     await h.handlers.get("model_select")({}, h.ctx);
     assert.doesNotMatch(h.footer.render(120).join("\n"), /Claude|Codex|45%/);
     await h.commands.get("status").handler("all", h.ctx);
-    await vi.waitFor(() => assert.match(h.footer.render(120).join("\n"), /Codex\s+week/, "/status all shows Codex on other providers"));
+    assert.match(h.footer.render(120).join("\n"), /Claude · limits unavailable · \+1 more/, "/status all uses only one additional row in provider order");
     await h.commands.get("status").handler("on", h.ctx);
     h.entries.push({ type: "usage", usage: usage(4) });
     for (const timer of timers) timer.callback();
@@ -1281,6 +1287,7 @@ test("lifecycle: native fallback, mode persistence, provider isolation, reload a
     assert.match(details, /Recorded tokens: 100 input, 20 output, 300 cache reads, 100 cache writes/);
     assert.match(details, /Tracked Git changes:/);
     assert.match(details, /Git status: outside a Git repository/);
+    assert.match(details, /openai-codex \(Codex subscription\): week 25% used/, "details includes additional sources that cannot fit in the footer");
     await h.handlers.get("session_shutdown")({}, h.ctx);
     assert.equal(timers.size, 0); assert.equal(h.footer, undefined);
     const paints = h.paints;
@@ -1731,12 +1738,12 @@ test("the permission mode gets its own row in its color; plan runs point at /pla
   const s = { ...fixture(), mode: absorbed.mode, statuses: absorbed.rest };
   const rows = mod.renderFooter(s, 160, theme).map(plain);
   assert.match(rows[1], /opus-5\.5 · \uee9c reasoning xhigh$/);
-  assert.match(rows[2], /Approvals · accept edits \(legacy\) +shift\+tab$/);
+  assert.match(rows[2], /Approvals · accept edits \(legacy\) · shift\+tab$/);
   // The gate's tally follows the mode on its row.
   const gated = { ...s, statuses: ["Gate 2 auto · 0 pushed back · 1 asked"] };
   const auto = { ...gated, mode: mod.parseModeStatus("⏵⏵ auto mode on (shift+tab to cycle)") };
   const autoRows = mod.renderFooter(auto, 160, theme).map(plain);
-  assert.match(autoRows[2], /Approvals · auto · Gate 2 auto · 0 pushed back · 1 asked +shift\+tab$/);
+  assert.match(autoRows[2], /Approvals · auto · Gate 2 auto · 0 pushed back · 1 asked · shift\+tab$/);
   assert.equal(autoRows.filter((r) => r.includes("Gate")).length, 1);
   assert.equal(mod.parseModeStatus("⏸ plan mode on").kind, "plan");
   assert.equal(mod.parseModeStatus("⏸ plan mode on").label, "\u{f03e4} plan mode on");
@@ -1759,15 +1766,15 @@ test("pi-plan-mode's exec workflow preserves a separate approvals row", () => {
   assert.deepEqual(absorbed.rest, []);
   const s = { ...fixture(), mode: absorbed.mode, exec: absorbed.exec, statuses: absorbed.rest };
   const rows = mod.renderFooter(s, 160, theme).map(plain);
-  assert.match(rows[2], /\bEXEC\b · Claude Opus 5.5 on call +\/plan-exec$/);
+  assert.match(rows[2], /\bEXEC\b · Claude Opus 5.5 on call · \/plan-exec$/);
   assert.doesNotMatch(rows[2], /implementing approved plan/);
-  assert.match(rows[3], /Approvals · auto +shift\+tab$/);
+  assert.match(rows[3], /Approvals · auto · shift\+tab$/);
   // Without a mode, or a planner on call, the row is still drawn.
   const standalone = mod.renderFooter({ ...s, mode: undefined }, 160, theme).map(plain);
   assert.match(standalone[2], /\bEXEC\b · Claude Opus 5.5 on call/);
   assert.ok(!standalone.some(row => row.includes("Approvals")));
   assert.equal(mod.absorbStatuses(new Map([["plan-exec", "exec mode on"]]), { claudeRow: false }).exec, "");
-  assert.match(mod.renderFooter({ ...s, exec: "" }, 160, theme).map(plain)[2], /\bEXEC\b · implementing approved plan +\/plan-exec$/);
+  assert.match(mod.renderFooter({ ...s, exec: "" }, 160, theme).map(plain)[2], /\bEXEC\b · implementing approved plan · \/plan-exec$/);
   assert.deepEqual(mod.absorbStatuses(new Map([["plan-exec", "something else"]]), { claudeRow: false }).rest, ["something else"]);
 });
 
@@ -1901,13 +1908,13 @@ test("legacy workflow fallback never invents approvals; explicit workflow and ex
   }
   const a = absorb([["permission-mode", "⏵⏵ auto mode on (ctrl+a to cycle)"]]);
   const rows = mod.renderFooter({ ...fixture(), ...a, statuses: a.rest }, 46, theme).map(plain);
-  assert.match(rows[2], /Approvals · auto +ctrl\+a$/);
+  assert.match(rows[2], /Approvals · auto · ctrl\+a$/);
   assert.ok(!rows.some(row => /\b(WORK|CHAT|PLAN|EXEC)\b/.test(row)));
   for (const width of [46, 120]) {
     const custom = absorb([["workflow-mode", "workflow: work (alt+w to cycle)"], ["permission-mode", "⏵⏵ auto mode on (ctrl+a to cycle)"]]);
     const rows = mod.renderFooter({ ...fixture(), ...custom, statuses: custom.rest }, width, theme).map(plain);
     assert.match(rows[2], /\bWORK\b.*alt\+w/);
-    assert.match(rows[3], /Approvals · auto +ctrl\+a$/);
+    assert.match(rows[3], /Approvals · auto · ctrl\+a$/);
     const disabled = absorb([["workflow-mode", "workflow: work"], ["permission-mode", "⏵⏵ auto mode on"]]);
     const disabledRows = mod.renderFooter({ ...fixture(), ...disabled, statuses: disabled.rest }, width, theme).map(plain);
     assert.match(disabledRows[2], /\bWORK\b · edits and actions$/);
@@ -2050,7 +2057,7 @@ const controlledFixture = () => ({
 });
 const hitText = (layout, hit) => plain(sliceByColumn(layout.lines[hit.row], hit.startCol, hit.endCol - hit.startCol));
 
-test("final cell metadata selects only explicit values, never labels, icons, separators or key-rail padding", () => {
+test("final cell metadata selects only explicit values, never labels, icons, separators or inline-hint gaps", () => {
   const s = controlledFixture();
   s.model = "日本語-e\u0301-model";
   const layout = mod.layoutFooter(s, 180, getThemeByName("dark"));
@@ -2065,21 +2072,28 @@ test("final cell metadata selects only explicit values, never labels, icons, sep
     assert.ok(!/^\s|\s$/.test(hitText(layout, hit)), hitText(layout, hit));
     assert.ok(!hitText(layout, hit).includes(" · "));
   }
-  const rail = layout.hits.filter((hit) => ["alt+p", "ctrl+w", "ctrl+a"].includes(hitText(layout, hit)));
-  assert.deepEqual(rail.map((hit) => hit.endCol), [179, 179, 179]);
-  for (const hit of rail) assert.equal(plain(sliceByColumn(layout.lines[hit.row], hit.startCol - 2, 2)), "  ");
+  const hints = layout.hits.filter((hit) => ["alt+p", "ctrl+w", "ctrl+a"].includes(hitText(layout, hit)));
+  assert.ok(new Set(hints.map((hit) => hit.endCol)).size > 1, "hints follow their row content rather than sharing a right rail");
+  for (const hit of hints) {
+    assert.equal(plain(sliceByColumn(layout.lines[hit.row], hit.startCol - 3, 3)), " · ");
+    assert.match(plain(layout.lines[hit.row]), / · (?:alt\+p|ctrl\+w|ctrl\+a)$/u);
+  }
 });
 
 test("control-row hint reservation has the exact 18-cell threshold and never sacrifices state to a dangling key", () => {
   const s = controlledFixture();
   s.model = "sol"; s.thinking = undefined; s.actions = { "model.open": {} };
-  for (const width of [27, 28, 59, 60, 120, 180]) {
+  for (const width of [27, 28, 29, 59, 60, 120, 180]) {
     const layout = mod.layoutFooter(s, width, theme);
-    const hinted = width >= 28;
+    const hinted = width >= 29;
     assert.equal(layout.lines[1].endsWith("alt+p"), hinted, `width ${width}`);
     assert.ok(layout.lines[1].includes("sol"));
     assert.equal(layout.hits.filter((hit) => hit.row === 1).length, hinted ? 2 : 1);
-    if (hinted) assert.equal(visibleWidth(layout.lines[1]), width - (width >= 60 ? 1 : 0));
+    if (hinted) assert.match(plain(layout.lines[1]), /sol · alt\+p$/u);
+  }
+  for (let width = 1; width <= 240; width++) {
+    const rows = mod.layoutFooter(s, width, theme);
+    assert.ok(rows.lines.every((line) => visibleWidth(line) <= width), `overflow at ${width}`);
   }
   const tiny = mod.layoutFooter({ ...s, model: "日本語" }, 5, theme);
   assert.equal(tiny.hits.filter((hit) => hit.row === 1).length, 0, "a clipped model/ellipsis is inert");
@@ -2203,6 +2217,129 @@ test("snapshot and action discovery run outside render, coalesce, and retire old
   } finally { await h.handlers.get("session_shutdown")({}, h.ctx); }
 });
 
+test("provider usage layout preserves unknown windows and reset-due stale readings", () => {
+  const reading = { provider: "google", source: "Google Antigravity subscription", state: "ready", observedAt: now,
+    windows: [{ label: "5h", used: 30, reset: now + 3600_000 }, { label: "weekly", reset: now - 1 }] };
+  for (const width of [46, 120, 180]) {
+    const rows = mod.renderFooter({ ...fixture(), quotas: [], providerUsage: [reading] }, width, theme).map(plain);
+    assert.ok(rows.every((row) => visibleWidth(row) <= width));
+    const quota = rows.at(-1);
+    assert.match(quota, /Google/);
+    assert.match(quota, /stale.*reset due/);
+    if (width >= 120) {
+      assert.match(quota, /5h 30% used/);
+      assert.match(quota, /weekly unknown/);
+      assert.doesNotMatch(quota, /weekly 0%/);
+    }
+  }
+});
+
+test("provider snapshots select Google pools, child sources and invalidate changed identities without render I/O", async () => {
+  const realFetch = globalThis.fetch;
+  const calls = [];
+  let token = "ya29.firstToken", oauth = true, rendering = false;
+  const reset = new Date(Date.now() + 3600_000).toISOString();
+  globalThis.fetch = async (url, init) => {
+    assert.equal(rendering, false, "render must not start quota requests");
+    calls.push({ url, authorization: init.headers.Authorization });
+    const body = url.endsWith("loadCodeAssist") ? { cloudaicompanionProject: "project" } : { groups: [{ buckets: [
+      { bucketId: "gemini-5h", remainingFraction: 0.7, resetTime: reset },
+      { bucketId: "gemini-weekly", resetTime: reset },
+      { bucketId: "3p-5h", remainingFraction: init.headers.Authorization === "Bearer ya29.secondToken" ? 0.4 : 0.2, resetTime: reset },
+    ] }] };
+    return new Response(JSON.stringify(body), { status: 200 });
+  };
+  const h = host();
+  const gemini = { provider: "google", id: "antigravity-gemini-pro", contextWindow: 1000 };
+  const claude = { ...gemini, id: "antigravity-claude-sonnet" };
+  h.ctx.model = gemini;
+  h.ctx.modelRegistry.find = () => h.ctx.model;
+  h.ctx.modelRegistry.isUsingOAuth = () => oauth;
+  h.ctx.modelRegistry.getApiKeyForProvider = async () => { assert.equal(rendering, false); return token; };
+  try {
+    await h.handlers.get("session_start")({}, h.ctx);
+    await vi.waitFor(() => assert.match(plain(h.footer.render(180).join("\n")), /Google\s+5h 30% used.*weekly unknown/));
+    const chrome = { version: 1 };
+    h.pi.events.emit("pi-plugins.session-chrome.v1", chrome);
+    const child = { cwd: h.ctx.cwd, provider: "google", model: claude.id,
+      context: { tokens: 10, contextWindow: 1000, percent: 1 }, totals: fixture().totals };
+    const before = calls.length;
+    rendering = true;
+    try {
+      for (let i = 0; i < 5; i++) {
+        assert.match(plain(h.footer.render(180).join("\n")), /5h 30% used/);
+        const lines = chrome.service.footer(child, 180, theme).map(plain).join("\n");
+        assert.match(lines, /Google\s+5h 80% used/);
+        assert.doesNotMatch(lines, /30% used|weekly unknown/);
+      }
+    } finally { rendering = false; }
+    assert.equal(calls.length, before);
+    await h.commands.get("status").handler("details", h.ctx);
+    assert.match(h.notices.at(-1), /Gemini 5h 30% used/);
+    assert.match(h.notices.at(-1), /third-party 5h 80% used/);
+    assert.doesNotMatch(h.notices.at(-1), /ya29\.firstToken/);
+
+    oauth = false;
+    await h.handlers.get("model_select")({}, h.ctx);
+    await vi.waitFor(() => assert.match(plain(h.footer.render(180).join("\n")), /Google · limits unavailable/));
+    assert.doesNotMatch(plain(h.footer.render(180).join("\n")), /30% used|80% used/);
+    await h.commands.get("status").handler("details", h.ctx);
+    assert.match(h.notices.at(-1), /Vault custody/);
+    assert.doesNotMatch(h.notices.at(-1), /ya29\.firstToken|30% used/);
+
+    oauth = true; token = "ya29.secondToken"; h.ctx.model = claude;
+    await h.handlers.get("model_select")({}, h.ctx);
+    await vi.waitFor(() => assert.match(plain(h.footer.render(180).join("\n")), /Google\s+5h 60% used/));
+    assert.ok(calls.some((call) => call.authorization === "Bearer ya29.secondToken"));
+    assert.doesNotMatch(plain(h.footer.render(180).join("\n")), /30% used|80% used|weekly unknown/);
+    await h.commands.get("status").handler("details", h.ctx);
+    assert.doesNotMatch(h.notices.at(-1), /ya29\.(firstToken|secondToken)/);
+  } finally {
+    await h.handlers.get("session_shutdown")({}, h.ctx);
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("provider snapshots distinguish local and remote sources and bound all-mode rows", async () => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = () => { throw new Error("unexpected network request"); };
+  const h = host();
+  const configured = [
+    { provider: "openai", id: "gpt", contextWindow: 1000 },
+    { provider: "alpha", id: "remote", baseUrl: "https://api.example.invalid" },
+    { provider: "beta", id: "remote" },
+    { provider: "local", id: "local", baseUrl: "http://localhost:1234" },
+  ];
+  h.ctx.model = configured[0];
+  h.ctx.modelRegistry.getAvailable = () => configured;
+  h.ctx.modelRegistry.getProvider = (id) => ({ getModels: () => configured.filter((model) => model.provider === id) });
+  try {
+    await h.handlers.get("session_start")({}, h.ctx);
+    await vi.waitFor(() => assert.match(plain(h.footer.render(180).join("\n")), /OpenAI · limits unavailable/));
+    await h.commands.get("status").handler("details", h.ctx);
+    assert.match(h.notices.at(-1), /openai \(OpenAI subscription\): limits unavailable.*https:\/\/chatgpt\.com\/settings\/usage/);
+    await h.commands.get("status").handler("all", h.ctx);
+    await vi.waitFor(() => assert.match(plain(h.footer.render(180).join("\n")), /alpha · limits unavailable · \+1 more/));
+    for (const width of [46, 120, 180]) {
+      const lines = h.footer.render(width).map(plain);
+      assert.equal(lines.filter((line) => /limits unavailable|no account quota/.test(line)).length, 2);
+      assert.ok(lines.every((line) => visibleWidth(line) <= width));
+    }
+    await h.commands.get("status").handler("details", h.ctx);
+    for (const id of ["openai", "alpha", "beta", "local"]) assert.match(h.notices.at(-1), new RegExp(`${id} \\(`));
+    assert.match(h.notices.at(-1), /alpha \(alpha\): limits unavailable: Subscription allowance is not exposed for API key authentication/);
+    assert.match(h.notices.at(-1), /local \(Local inference\): no account quota/);
+    await h.commands.get("status").handler("on", h.ctx);
+    h.ctx.model = configured[3];
+    await h.handlers.get("model_select")({}, h.ctx);
+    await vi.waitFor(() => assert.match(plain(h.footer.render(180).join("\n")), /Local · no account quota/));
+    assert.doesNotMatch(plain(h.footer.render(180).join("\n")), /OpenAI|limits unavailable/);
+  } finally {
+    await h.handlers.get("session_shutdown")({}, h.ctx);
+    globalThis.fetch = realFetch;
+  }
+});
+
 test("child chrome clears main flow, mutable workflow, auto-effort and key metadata", async () => {
   const h = host();
   h.ctx.model = { provider: "test", id: "test", contextWindow: 1000 };
@@ -2223,8 +2360,9 @@ test("child chrome clears main flow, mutable workflow, auto-effort and key metad
       context: { tokens: 10, contextWindow: 1000, percent: 1 }, totals: fixture().totals };
     for (const width of [46, 120, 180]) {
       const lines = request.service.footer(session, width, theme);
-      assert.equal(lines.length, 3);
+      assert.equal(lines.length, 4, "read-only children select their own provider usage state");
       assert.match(lines[1], /child-model · .*reasoning low/);
+      assert.match(lines[3], /test · limits unavailable/);
       assert.doesNotMatch(lines.join("\n"), /EXEC|WORK|PLAN|Approvals|auto|ctrl\+w|ctrl\+a|alt\+p|plan-exec/);
       assert.ok(lines.every((line) => visibleWidth(line) <= width));
     }

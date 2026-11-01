@@ -62,10 +62,18 @@ export function fullscreenLeafAt(
 export function fullscreenContentWidth(box: any, terminalWidth: number): number {
 	for (let current = box; current; current = current.parent) {
 		if (typeof current.scrollView?.getContentWidth === "function") {
-			return Math.max(1, current.scrollView.getContentWidth(terminalWidth));
+			return Math.max(1, current.scrollView.getContentWidth(current.rect?.width ?? terminalWidth));
 		}
 	}
-	return terminalWidth;
+	return Math.max(1, Number(box?.rect?.width) || terminalWidth);
+}
+
+/** Fixed docks must not be measurement-rendered during transcript hit testing. */
+export function fullscreenIsScrolledContent(box: any): boolean {
+	for (let current = box; current; current = current.parent) {
+		if (current.scrollView) return true;
+	}
+	return false;
 }
 
 /** Whether the clicked column is the host scrollbar column (lets host dragging through). */

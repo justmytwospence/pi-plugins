@@ -96,7 +96,7 @@ const flowSnapshot = (workflow, blocked) => ({
   ...(blocked ? { blocked } : {}),
 });
 const activity = width => [...renderPill({ label: '1 task' }, false, width, theme), ''];
-function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, autoEffort } = {}) {
+function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, autoEffort, providerUsage, providerUsageMore } = {}) {
   const absorbed = absorbStatuses(statuses, { claudeRow: false });
   const actions = {
     'model.open': {}, 'reasoning.cycle': {},
@@ -111,7 +111,7 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, 
     git: { project: 'pi-plugins', branch: 'main' },
     totals: { input: 23000, output: 1500, cacheRead: 90000, cacheWrite: 400, cost: 1.24, compactions: 1, started: NOW - 60000 },
     quotas: [], now: NOW, queued: false, borderGauge: true, phase,
-    ...absorbed, statuses: absorbed.rest, compact, flow, actions,
+    ...absorbed, statuses: absorbed.rest, compact, flow, actions, providerUsage, providerUsageMore,
     primaryKeys: { model: kb.getKeys('app.model.select')[0], workflow: absorbed.workflow?.key, approvals: absorbed.mode?.key },
   };
   const layout = layoutFooter(snapshot, width, theme);
@@ -135,16 +135,26 @@ function statusFooter(width, statuses, { compact = false, phase = 'idle', flow, 
     if (badge) {
       assert.ok(workflow[0].includes(badge), 'workflow row uses the uppercase mode badge');
       assert.ok(!workflow[0].includes('Approvals'), 'approvals stay separate from workflow');
-      // The reserved key rail can displace Exec's explanation at phone width; the
-      // badge and status/recovery command remain. Sidebar also probes smaller widths.
+      // Hints yield before critical state at narrow widths; Sidebar also probes smaller widths.
       if (!linked && !absorbed.exec && width >= (kind === 'exec' ? 120 : 46)) assert.ok(workflow[0].includes(WORKFLOW_EXPLANATIONS[kind]), `workflow row explains ${kind} when space permits: ${workflow[0]}`);
       if (!linked && kind === 'exec' && width >= 46) assert.match(workflow[0], /\/plan-exec\s*$/u, 'Independent Exec offers status, never a workflow cycle');
       if (linked && !absorbed.exec && !flow.blocked && width >= 120) assert.match(workflow[0], /anthropic/u, 'Linked combines provider and workflow on one row');
     }
     assert.equal(approvals.length, absorbed.mode ? 1 : 0, 'Approvals keeps its own row');
     if (linked) {
-      assert.equal(lines.length, (absorbed.marimo?.length ?? 0) + 4, 'Linked removes only the duplicate model row');
+      assert.equal(lines.length, (absorbed.marimo?.length ?? 0) + 4 + (providerUsage?.length ?? 0), 'Linked removes only the duplicate model row');
       if (flow.blocked && width >= 46) assert.match(plain.join('\n'), /blocked/iu, 'an unavailable Linked flow must not look healthy');
+    }
+    // At full width each effective key follows its content directly, not a padded rail.
+    if (width >= 120) {
+      const controls = [[linked ? workflow[0] : plain.find(line => line.includes('reasoning')), snapshot.primaryKeys.model]];
+      if (!linked && workflow.length) controls.push([workflow[0], kind === 'exec' ? '/plan-exec' : snapshot.primaryKeys.workflow]);
+      if (approvals.length) controls.push([approvals[0], snapshot.primaryKeys.approvals]);
+      for (const [line, key] of controls) {
+        if (!key || !line) continue;
+        assert.ok(line.endsWith(` · ${key}`), `effective hint is an inline suffix: ${line}`);
+        assert.ok(!line.endsWith(`  · ${key}`), `no alignment padding before hint: ${line}`);
+      }
     }
     for (const [rows, icon] of [[workflow, '\uf0e8'], [approvals, '\uf510']]) {
       for (const line of rows) {
@@ -591,6 +601,15 @@ for (const width of [46, 120, 180]) {
 // half focused): each client must read the last two as it reads the first.
 const editor = new CustomEditor({ ...tui, terminal: { rows: HEIGHT, columns: 180 } }, themeModule.getEditorTheme(), kb, { paddingX: 0 });
 editor.setText('next step');
+const usageReady = { provider: 'google', source: 'Google Antigravity subscription', state: 'ready', observedAt: NOW, windows: [{ label: '5h', used: 25, reset: NOW + 3_600_000 }] };
+const usageUnavailable = { provider: 'openai', source: 'OpenAI subscription', state: 'unavailable', windows: [], reason: 'Subscription limits are unavailable.' };
+const usageLocal = { provider: 'ollama', source: 'Local inference', state: 'not-applicable', windows: [], reason: 'Local inference has no account quota.' };
+// Account data must not expand the dialog's one-row, noninteractive footer.
+for (const width of [46, 120, 180]) {
+  const blocked = statusFooter(width, modeStatuses('plan', 'auto'), { compact: true, providerUsage: [usageReady, usageUnavailable], providerUsageMore: 3 });
+  assert.equal(blocked.length, 1);
+  assert.doesNotMatch(stripVTControlCharacters(blocked[0]), /Google|OpenAI|\+3 more/u);
+}
 const FOOTERS = [
   ...['work', 'chat', 'plan', 'exec'].flatMap(workflow => ['auto', 'yolo'].map(approval => ({
     name: `${workflow}/${approval}`, statuses: modeStatuses(workflow, approval, workflow === 'exec' ? 'implementing' : undefined),
@@ -605,6 +624,11 @@ const FOOTERS = [
   // Notebook status slots plus the five core rows reach the deployed 13-row allowance
   // (including any activity pill/separator), rather than comparing unreadable baselines.
   { name: 'high status count', statuses: modeStatuses('plan', 'yolo'), highStatus: true },
+  { name: 'provider ready', statuses: modeStatuses('plan', 'auto'), providerUsage: [usageReady] },
+  { name: 'provider unavailable', statuses: modeStatuses('plan', 'auto'), providerUsage: [usageUnavailable] },
+  { name: 'provider local', statuses: modeStatuses('plan', 'auto'), providerUsage: [usageLocal] },
+  { name: 'status all providers', statuses: modeStatuses('plan', 'auto'), providerUsage: [usageReady, usageUnavailable], providerUsageMore: 3 },
+  { name: 'status all high status count', statuses: modeStatuses('plan', 'yolo'), providerUsage: [usageReady, usageUnavailable], providerUsageMore: 3, highStatus: true },
   ...['work', 'chat', 'plan', 'exec'].map(workflow => ({
     name: `Linked ${workflow}`, statuses: modeStatuses(workflow, 'auto', workflow === 'exec' ? 'implementing' : undefined),
     flow: flowSnapshot(workflow), autoEffort: true,
@@ -622,7 +646,7 @@ function idleFooter(width, fixture, activityRows = 0) {
   // pi-bg's pill and separator, not just renderFooter's output. status_blank_rows
   // permits that separator within the region; it does not extend the row budget.
   const coreRows = statusFooter(width, fixture.statuses, fixture).length;
-  assert.equal(coreRows, fixture.flow?.operatingMode === 'linked' ? 4 : 5, 'Independent and Linked keep their core row budgets');
+  assert.equal(coreRows, (fixture.flow?.operatingMode === 'linked' ? 4 : 5) + (fixture.providerUsage?.length ?? 0), 'provider rows count within the existing core row budget');
   const notebooks = 13 - coreRows - activityRows;
   for (let i = 1; i <= notebooks; i++) statuses.set(i === 1 ? 'marimo' : `marimo-${i}`, `marimo: analysis-${i}.py · disconnected`);
   const absorbed = absorbStatuses(statuses, { claudeRow: false });
@@ -642,6 +666,14 @@ const IDLE = [
 for (const width of [46, 120, 180]) {
   for (const fixture of FOOTERS) {
     for (const withActivity of [false, true]) {
+      const rendered = idleFooter(width, fixture, withActivity ? 2 : 0).map(stripVTControlCharacters).join('\n');
+      if (fixture.providerUsage?.length) {
+        assert.ok(fixture.providerUsage.length <= 2, 'at most two account rows');
+        if (fixture.providerUsage.includes(usageReady)) assert.match(rendered, /Google.*5h.*25%/u, 'ready usage keeps its measured percentage');
+        if (fixture.providerUsage.includes(usageUnavailable)) assert.match(rendered, /OpenAI.*limits unavailable/u, 'unavailable usage is explicit');
+        if (fixture.providerUsage.includes(usageLocal)) assert.match(rendered, /Local.*no account quota/u, 'local usage is not presented as a subscription');
+        if (fixture.providerUsageMore && width >= 120) assert.match(rendered, /OpenAI.*\+3 more/u, 'additional sources are counted on the second account row');
+      }
       const baseline = screens.length;
       for (const [under, options] of IDLE) {
         const rows = w => withActivity ? [...activity(w), ...idleFooter(w, fixture, 2)] : idleFooter(w, fixture);

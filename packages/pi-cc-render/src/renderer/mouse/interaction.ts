@@ -44,6 +44,7 @@ import {
 	collapsedHintHitbox,
 	fullscreenContentWidth,
 	fullscreenLeafAt,
+	fullscreenIsScrolledContent,
 	isScrollbarColumnAt,
 } from "./layout.ts";
 import {
@@ -383,6 +384,19 @@ function blocksOfficialCardToggle(component: any, event: any): boolean {
  * dragging to select text does not collapse; clicking the truncated header's show-more opens the full preview; the back-to-bottom button calls scrollToBottom.
  * The scrollbar column, rows with OSC8 links, non-tool areas, and collapsed card bodies are passed to the official handler.
  */
+function containsScrollButton(component: any, seen = new Set<any>()): boolean {
+	if (!component || typeof component !== "object" || seen.has(component)) return false;
+	if (component === getScrollButtonWidget()) return true;
+	seen.add(component);
+	return Array.isArray(component.children) && component.children.some((child: any) => containsScrollButton(child, seen));
+}
+
+function hitDockScrollButton(box: any, row: number): boolean {
+	if (!getScrollButtonVisible() || !containsScrollButton(box.component)) return false;
+	const line = box.lines?.[row];
+	return typeof line === "string" && stripTerminalSequencesPreservingLayout(line).includes("[ ↓");
+}
+
 function handleFullscreenToolClick(tui: any, packet: SgrMousePacket): boolean {
 	const layout = tui.currentLayout;
 	if (!layout?.root) return false;
@@ -392,6 +406,14 @@ function handleFullscreenToolClick(tui: any, packet: SgrMousePacket): boolean {
 	if (isScrollbarColumnAt(layout, x)) return false;
 	const hit = fullscreenLeafAt(layout, x, y);
 	if (!hit) return false;
+	if (!fullscreenIsScrolledContent(hit.box)) {
+		if (hitDockScrollButton(hit.box, hit.localRow)) {
+			scrollTranscriptToBottom(tui);
+			hideScrollButton(tui);
+			return true;
+		}
+		return false;
+	}
 	const width = Math.max(1, Number(tui.terminal?.columns) || 80);
 	// The layout tree renders content with the scroll's contentWidth (= width-1 when the scrollbar is shown);
 	// row lookup must use the same width, or wrapping differences misalign component rows.
@@ -511,7 +533,7 @@ function handleFullscreenToolHover(tui: any, packet: SgrMousePacket): void {
 			if (idx >= 0 && x >= idx && x <= idx + plain.length - 1) {
 				target = { kind: "button" };
 			}
-		} else if (typeof line === "string" && !/\x1b]8;/.test(line)) {
+		} else if (fullscreenIsScrolledContent(hit.box) && typeof line === "string" && !/\x1b]8;/.test(line)) {
 			const width = Math.max(1, Number(tui.terminal?.columns) || 80);
 			const contentWidth = fullscreenContentWidth(hit.box, width);
 			// Share the positioning algorithm with click, so hover's own row segments cannot drift from the real component tree.

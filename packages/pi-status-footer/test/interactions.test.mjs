@@ -40,11 +40,11 @@ function layout(width) {
   const value = "  ◇ \x1b[1m界é\x1b[22m · high";
   const hint = "alt+p";
   return {
-    lines: [value + " ".repeat(width - visibleWidth(value) - hint.length) + hint, "  Cache cold"],
+    lines: [value + " · " + hint, "  Cache cold"],
     hits: [
       { row: 0, startCol: 4, endCol: 7, action: "model.open" },
       { row: 0, startCol: 10, endCol: 14, action: "reasoning.cycle" },
-      { row: 0, startCol: width - hint.length, endCol: width, action: "model.open" },
+      { row: 0, startCol: visibleWidth(value) + 3, endCol: visibleWidth(value) + 3 + hint.length, action: "model.open" },
       { row: 1, startCol: 2, endCol: 12, action: "cache.status" },
     ],
   };
@@ -155,7 +155,7 @@ function fixture({ width = 120, sidebar = false, vim = false, regular = false, b
     release, dock, footer, kb, side, scroll, root, splitState, point, closeSelector, get selector() { return selector; } };
 }
 
-test("half-open ANSI/Unicode cell ranges and hint rail exclude icons, separators, padding and omitted segments", () => {
+test("half-open ANSI/Unicode cell ranges and inline hint exclude icons, separators, padding and omitted segments", () => {
   for (const width of [46, 120, 180]) {
     const activated = [];
     const component = createFooterComponent(layout, () => 1, () => true, (action) => { activated.push(action); });
@@ -184,6 +184,9 @@ test("width, snapshot/theme invalidation, generation and disposal reject stale h
   generation++;
   assert.equal(component.handleMouse(mouse(4, 0, 120)), undefined);
   component.render(120);
+  component.render(46); // a different-width measurement cannot retire the visible 120-column layout
+  assert.deepEqual(component.describe().layouts, [120, 46]);
+  assert.deepEqual(component.handleMouse(mouse(4, 0, 120)), { handled: true, render: false });
   available = false;
   assert.equal(component.handleMouse(mouse(4, 0, 120)), undefined);
   available = true;
@@ -198,10 +201,33 @@ test("width, snapshot/theme invalidation, generation and disposal reject stale h
   component.dispose();
   assert.equal(component.handleMouse(mouse(4, 0, 46)), undefined);
   assert.deepEqual(component.render(46), []);
-  assert.equal(activate.mock.calls.length, 1);
+  assert.equal(activate.mock.calls.length, 2);
   const duringRender = createFooterComponent(() => { generation++; return layout(46); }, () => generation, () => true, activate);
   duringRender.render(46);
   assert.equal(duringRender.handleMouse(mouse(4, 0, 46)), undefined);
+});
+
+test("generic release is accepted only after a matching unmodified left press", () => {
+  const activated = [];
+  const component = createFooterComponent(layout, () => 1, () => true, (action) => activated.push(action));
+  component.render(120);
+  const at = (type, button, extra = {}) => mouse(4, 0, 120, { type, button, ...extra });
+  assert.equal(component.handleMouse(at("click", "none")), undefined, "unpaired release is inert");
+  component.handleMouse(at("press", "left"));
+  component.handleMouse(at("release", "none"));
+  assert.deepEqual(component.handleMouse(at("click", "none")), { handled: true, render: false });
+  assert.deepEqual(activated, ["model.open"]);
+  assert.equal(component.handleMouse(at("click", "none")), undefined, "a press can activate only once");
+  for (const interruption of [at("drag", "left"), at("release", "none", { x: 5 }), at("press", "left", { shift: true })]) {
+    component.handleMouse(at("press", "left"));
+    component.handleMouse(interruption);
+    assert.equal(component.handleMouse(at("click", "none")), undefined);
+  }
+  component.handleMouse(at("press", "left"));
+  component.invalidate();
+  component.render(120);
+  assert.equal(component.handleMouse(at("click", "none")), undefined);
+  component.dispose();
 });
 
 test("normalized non-click, modified, double/triple, out-of-bounds and fractional gestures remain unhandled", () => {
@@ -246,7 +272,7 @@ for (const width of [46, 120, 180]) for (const sidebar of [false, true]) {
     f.tui.resetTextSelection();
     for (const modifier of [4, 8, 16]) f.terminal.click(x, y, modifier);
     f.terminal.click(0, y); // icon/padding
-    f.terminal.click(paneWidth - 7, y); // key rail padding
+    f.terminal.click(paneWidth - 7, y); // whitespace beyond the inline hint
     if (sidebar) {
       const sideRow = f.tui.getScreenLines().findIndex((line) => plain(line).includes("Sidebar"));
       f.terminal.click(width === 180 ? 93 : 3, sideRow);
@@ -420,19 +446,20 @@ test("regular-terminal mouse is not intercepted, while linked keyboard routing r
   assert.deepEqual(f.calls, ["flow"]);
 });
 
-test("idle policy covers all picker/mutation actions, leaving only read-only status inspections", async () => {
+test("busy controls explain why pickers wait; reversible settings and inspections remain usable", async () => {
   const f = fixture();
   f.state.idle = false;
-  for (const action of ["model.open", "reasoning.cycle", "workflow.cycle", "workflow.open", "flow.open", "approvals.open", "effort.toggle", "context.open", "context.skills", "mcp.open"]) {
-    assert.equal(f.controller.available(action), false, action);
+  for (const action of ["model.open", "workflow.cycle", "workflow.open", "flow.open", "approvals.open", "context.open", "context.skills", "mcp.open"]) {
+    assert.equal(f.controller.available(action), true, action);
     await f.controller.activate(action);
+    assert.match(f.notify.mock.calls.at(-1)[0], /Wait for the current turn/);
   }
   assert.deepEqual(f.calls, []);
-  for (const action of ["cache.status", "execution.status"]) {
+  for (const action of ["reasoning.cycle", "effort.toggle", "cache.status", "execution.status"]) {
     assert.equal(f.controller.available(action), true, action);
     await f.controller.activate(action);
   }
-  assert.deepEqual(f.calls, ["cache", "execution"]);
+  assert.deepEqual(f.calls, ["native.reasoning", "effort", "cache", "execution"]);
 });
 
 test("serialization, errors, stale completion and recaptured generation are session-owned", async () => {

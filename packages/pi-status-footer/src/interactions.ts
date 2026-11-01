@@ -4,7 +4,7 @@ import type { FooterActionId, FooterActionsRequest } from "./footer-actions.ts";
 /** Zero-based, half-open terminal-cell bounds produced with the final rendered text. */
 export interface FooterHit { row: number; startCol: number; endCol: number; action: string }
 export interface FooterLayout { lines: string[]; hits: FooterHit[] }
-export type FooterComponent = Component & { dispose(): void };
+export type FooterComponent = Component & { dispose(): void; describe(): { layouts: number[]; lastMouse?: { type: string; button: string; x: number; y: number; width: number; reason: string } } };
 
 /**
  * Container/fullscreen routing supplies local coordinates. No terminal listeners, mouse
@@ -19,39 +19,59 @@ export function createFooterComponent(
   canActivate: (action: string) => boolean,
   activate: (action: string) => void | Promise<void>,
 ): FooterComponent {
-  let width: number | undefined;
   let generation: number | string | undefined;
-  let height = 0;
-  let hits: FooterHit[] = [];
+  const layouts = new Map<number, { height: number; hits: FooterHit[] }>();
+  let pending: { x: number; y: number; width: number; generation: number | string; action: string } | undefined;
+  let lastMouse: { type: string; button: string; x: number; y: number; width: number; reason: string } | undefined;
   let disposed = false;
-  const invalidate = () => { width = undefined; generation = undefined; height = 0; hits = []; };
+  const invalidate = () => { generation = undefined; layouts.clear(); pending = undefined; };
+  const describe = () => ({ layouts: [...layouts.keys()], lastMouse });
   return {
     render(nextWidth) {
-      invalidate();
       if (disposed) return [];
       const epoch = getGeneration();
+      if (generation !== epoch) invalidate();
       const layout = getLayout(nextWidth);
-      // Do not expose hits if the snapshot/session was replaced while computing the frame.
+      // A measurement render at a different width must not retire the visible hit map.
       if (epoch === getGeneration()) {
-        width = nextWidth;
         generation = epoch;
-        height = layout.lines.length;
-        hits = layout.hits.map((hit) => ({ ...hit }));
+        layouts.delete(nextWidth);
+        layouts.set(nextWidth, { height: layout.lines.length, hits: layout.hits.map((hit) => ({ ...hit })) });
+        if (layouts.size > 4) layouts.delete(layouts.keys().next().value!);
       }
       return layout.lines;
     },
     handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-      if (disposed || generation !== getGeneration() || width !== event.width ||
-        event.type !== "click" || event.button !== "left" || event.shift || event.alt || event.ctrl ||
-        (event.clickCount ?? 1) !== 1 || !Number.isInteger(event.x) || !Number.isInteger(event.y) ||
-        event.x < 0 || event.x >= event.width || event.y < 0 || event.y >= Math.min(height, event.height)) return undefined;
-      const hit = hits.find((candidate) => candidate.row === event.y &&
+      const note = (reason: string) => { lastMouse = { type: event.type, button: event.button, x: event.x, y: event.y, width: event.width, reason }; return undefined; };
+      if (disposed || generation !== getGeneration()) { pending = undefined; return note("stale generation"); }
+      const layout = layouts.get(event.width);
+      if (!layout) { pending = undefined; return note("missing layout width"); }
+      const valid = !event.shift && !event.alt && !event.ctrl && (event.clickCount ?? 1) === 1 &&
+        Number.isInteger(event.x) && Number.isInteger(event.y) && event.x >= 0 && event.x < event.width &&
+        event.y >= 0 && event.y < Math.min(layout.height, event.height);
+      const hit = valid ? layout.hits.find((candidate) => candidate.row === event.y &&
         candidate.startCol >= 0 && candidate.endCol <= event.width &&
-        event.x >= candidate.startCol && event.x < candidate.endCol);
-      if (!hit || !canActivate(hit.action)) return undefined;
+        event.x >= candidate.startCol && event.x < candidate.endCol) : undefined;
+      if (event.type === "press") {
+        pending = event.button === "left" && hit ? { x: event.x, y: event.y, width: event.width, generation, action: hit.action } : undefined;
+        return note(pending ? "press recorded" : "press ignored");
+      }
+      if (event.type === "release") {
+        if (!pending || !hit || pending.x !== event.x || pending.y !== event.y || pending.width !== event.width ||
+          pending.action !== hit.action || (event.button !== "none" && event.button !== "left")) pending = undefined;
+        return note(pending ? "matching release" : "release ignored");
+      }
+      if (event.type !== "click") { pending = undefined; return note("not a click"); }
+      const matchingPress = pending && pending.x === event.x && pending.y === event.y &&
+        pending.width === event.width && pending.generation === generation && pending.action === hit?.action;
+      pending = undefined;
+      if (!hit || (event.button !== "left" && !(event.button === "none" && matchingPress))) return note("invalid gesture or no hit");
+      if (!canActivate(hit.action)) return note("action unavailable or focus changed");
+      lastMouse = { type: event.type, button: event.button, x: event.x, y: event.y, width: event.width, reason: `activated ${hit.action}` };
       void activate(hit.action);
       return { handled: true, render: false };
     },
+    describe,
     invalidate,
     dispose() { disposed = true; invalidate(); },
   };
@@ -89,6 +109,7 @@ export interface FooterActionControllerOptions {
 export interface FooterActionController {
   activate(action: string): Promise<void>;
   available(action: string): boolean;
+  describe(): { bound: boolean; current: boolean; mainFocus: boolean; overlay: boolean | null; promptDepth: number; blockedHolds: number; idle: boolean; opening: boolean; actions: string[] };
   /** Capture actual main editor/TUI identities. Returns an ownership-safe release. */
   wrapEditor(editor: FooterEditor, tui: FooterTui): () => void;
   dispose(): void;
@@ -103,7 +124,7 @@ const commands: Record<FooterActionId | "model.open" | "reasoning.cycle", string
 };
 const isAction = (action: string): action is keyof typeof commands => Object.hasOwn(commands, action);
 // Status-only inspections may run during a turn; pickers and all mutations wait for idle.
-const needsIdle = (action: string) => action !== "cache.status" && action !== "execution.status";
+const needsIdle = (action: string) => !["cache.status", "execution.status", "reasoning.cycle", "effort.toggle"].includes(action);
 
 export function createFooterActionController(options: FooterActionControllerOptions): FooterActionController {
   let disposed = false;
@@ -138,7 +159,15 @@ export function createFooterActionController(options: FooterActionControllerOpti
   };
   const available = (action: string): boolean => {
     const owner = binding;
-    return current(owner) && !opening && ready(owner) && (!needsIdle(action) || options.isIdle()) && !!resolve(action, owner);
+    // A busy click is recognized so activate() can explain why its picker cannot open.
+    return current(owner) && !opening && ready(owner) && !!resolve(action, owner);
+  };
+  const describe = () => {
+    const owner = binding;
+    return { bound: !!owner, current: current(owner), mainFocus: !!owner && owner.tui.getFocusedComponent?.() === owner.editor,
+      overlay: owner && typeof owner.tui.hasOverlay === "function" ? owner.tui.hasOverlay() : null,
+      promptDepth: options.getPromptDepth(), blockedHolds: options.getBlocked(), idle: options.isIdle(),
+      opening: !!opening, actions: owner && current(owner) ? Object.keys(commands).filter((action) => !!resolve(action, owner)) : [] };
   };
   const activate = async (action: string): Promise<void> => {
     const owner = binding;
@@ -202,5 +231,5 @@ export function createFooterActionController(options: FooterActionControllerOpti
     editor.handleInput = handleInput;
     return release;
   };
-  return { activate, available, wrapEditor, dispose() { disposed = true; binding?.release(); } };
+  return { activate, available, describe, wrapEditor, dispose() { disposed = true; binding?.release(); } };
 }

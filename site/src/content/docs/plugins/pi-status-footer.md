@@ -8,7 +8,7 @@ plugin: pi-status-footer
 
 - **Use it for:** See project, Git, model, context, notices and account usage without replacing the editor.
 - **Enable:** Select `packages/pi-status-footer/src/index.ts` with [`pi config`](/guides/install/#enable-an-explicit-subset).
-- **Controls:** `/status` details/on/all/native/working/mcp; existing configured model/workflow/approval keys; visible value clicks in fullscreen Pi. No new global footer shortcut.
+- **Controls:** `/status` details/on/all/native/working/mcp; existing configured model/workflow/approval keys; visible value clicks in fullscreen Pi, subject to focus and input routing. No new global footer shortcut.
 - **Settings:** No JSON settings for modes; custom footer, active-provider limits, working stats and MCP chip on by default; selections persist in the session.
 - **Requirements, cost & privacy:** TUI; Git/quota sources optional, Nerd Font for icons. No inference calls. Authenticated usage requests send account credentials, not conversation text.
 - **Integrations & limits:** Optional companion actions, Linked workflow display and wait-message priority. Missing providers leave their controls absent. Load Vim before the footer. Regular terminals remain keyboard-operated; quota/cost estimates are not invoices and MCP is an approximation.
@@ -27,9 +27,9 @@ The footer runs in Pi's terminal UI; print, JSON and RPC sessions do not start i
 
 | Command | Effect |
 | --- | --- |
-| `/status` or `/status details` | Show measurements and explain their sources. |
+| `/status` or `/status details` | Show measurements, sources and unavailable reasons, plus controls diagnostics. |
 | `/status on` | Show the custom footer with active-provider limits only. |
-| `/status all` | Also show the other subscription account's limits. |
+| `/status all` | Also show other configured remote-provider readings within the footer's row budget. |
 | `/status native` | Immediately restore Pi's built-in footer. |
 | `/status working on` or `off` | Toggle the working-row statistics (default on). |
 | `/status mcp on` or `off` | Toggle the built-in MCP chip (default on). |
@@ -46,27 +46,27 @@ Terminal labels and rows on this page are examples, not screenshots.
 
 ### Control rows and key hints
 
-Each control row has one primary hint at its right edge: the first effective configured `app.model.select` key for the model/combined row, the provider's workflow key for Independent workflow, and its approval key for Approvals. An Independent Exec row uses `/plan-exec`, not a workflow-cycle key. The layout reserves space for the hint before fitting content, but drops hints at very narrow widths to retain critical state; core control rows never wrap. Context and other telemetry rows gain no invented global keys.
+Each control row has one primary hint immediately after its content, as a dim ` · <key>` suffix without alignment padding: the first effective configured `app.model.select` key for the model/combined row, the provider's workflow key for Independent workflow, and its approval key for Approvals. An Independent Exec row uses `/plan-exec`, not a workflow-cycle key. The layout reserves space for the hint before fitting content, but drops hints at very narrow widths to retain critical state; core control rows never wrap. Context and other telemetry rows gain no invented global keys.
 
 Simplified examples, omitting icons and other rows, with the [optional personal keymap](/guides/keyboard/#optional-personal-profile) (`alt+p` is not a suite default):
 
 **Independent — two model/workflow rows:**
 
 ```text
-gpt-6-sol · reasoning high · auto off                            alt+p
-WORK                                                        shift+tab
+gpt-6-sol · reasoning high · auto off · alt+p
+WORK · shift+tab
 ```
 
 **Linked — one combined row:**
 
 ```text
-WORK · openai-codex · gpt-6-sol · reasoning auto → high            alt+p
+WORK · openai-codex · gpt-6-sol · reasoning auto → high · alt+p
 ```
 
 Both modes retain a separate Approvals row, for example:
 
 ```text
-Approvals · auto                                                alt+a
+Approvals · auto · alt+a
 ```
 
 Linked uses one flow per available provider: Work/Chat use `general`, Plan uses `planner`, and approved Exec uses `worker`. Assignments are captured when selected; reselecting the same provider explicitly refreshes them. Reasoning stays independent: `reasoning auto → high` means auto effort is active; `reasoning high` is the manual form. When a toggle provider is available but off, `auto off` stays visible so it can be enabled again. A pinned or absent auto-effort provider supplies no toggle.
@@ -92,6 +92,8 @@ With the actual main editor focused in fullscreen Pi, a plain single left click 
 
 Only the visible value and its applicable trailing hint are hit targets. Padding, separators, omitted/truncated labels and row whitespace are inert. Resize or stale session state invalidates old targets. Dialogs, native selectors, overlays, blocked holds and another opening action suspend footer clicks; model/picker mutations also require idle. Selection, dragging, wheel and double-click gestures retain their existing owners. **Regular terminal mode stays keyboard-operated.**
 
+If a click does not work, inspect `/status details` for the current controls state, available layout widths and the last mouse event or refusal reason. Diagnostics retain only the latest event in memory, not draft text or credentials. Check focus, overlays and busy state, then verify in your actual fullscreen terminal: idle with Sidebar closed first, after `/reload`, and with Sidebar open. Isolated component tests alone cannot establish that the complete input path works in a particular terminal.
+
 Actions are optional capabilities, not synthetic prompts or draft replacements. Without the owner, information can remain visible but its action is absent: use `/context`, `/cache-guard status`, `/mcp`, `/mode`, `/approvals` or native controls as applicable. Context and Skills clicks require pi-context plus pi-cc-render's narrow read-only context-metadata bridge, because accurate prompt options are exposed only on the SDK's command context. Without that bridge, `/context` remains available and those click actions are omitted rather than showing an empty breakdown. Neither this metadata bridge nor pi-cc-render's MCP bridge requires its startup splash to be visible. Notebook names keep their existing terminal hyperlinks; this is not a new general mouse layer.
 
 Git uses `branch * ↑N ↓N !` (example; suffix terms are optional), with single
@@ -114,7 +116,7 @@ remains without a Git segment. Polling retains `--no-optional-locks`.
 
 Extension notices wrap onto their own row. Account limits appear last and explicitly show percent **used**. Narrow terminals shorten secondary segments rather than treating display width as a character count. Warning and error colors begin at 70% and 90% used.
 
-A useful inspection sequence is `/status all`, followed by `/status details` to check where each account reading came from, then `/status on` to return to the compact active-provider view.
+A useful inspection sequence is `/status all`, followed by `/status details` to check every discovered source, window and unavailable reason, then `/status on` to return to the compact active-provider view. The compact footer keeps at most two account rows; additional sources are counted rather than expanding the client row budget.
 
 ## Working row and MCP chip
 
@@ -132,7 +134,7 @@ Context is Pi's estimate against the actual model window. An unknown value, incl
 
 Estimated session cost uses recorded token-price usage, including tool, summary and warming records and abandoned branches. It is not an invoice or proof of subscription billing. Unreported external-agent work cannot be counted. Git line counts cover all uncommitted tracked changes against HEAD, not only this agent's edits; untracked files affect the changed-path summary but not those counts.
 
-Quota data becomes stale after ten minutes or when its reset time passes. Failed refreshes preserve the last reading and do not invent a reset to zero. Other providers retain ordinary session rows without fabricated quota information.
+Quota data becomes stale after ten minutes or when its reset time passes. Failed refreshes preserve the last reading and do not invent a reset to zero. Missing percentages remain unknown; subscription allowances, API throttles, balances and session cost are different measurements.
 
 ## Account data and configuration
 
@@ -140,12 +142,16 @@ Claude account readings come from `https://api.anthropic.com/api/oauth/usage` us
 
 Codex readings use Pi's own `openai-codex` OAuth login and its token's account identifier for `https://chatgpt.com/backend-api/wham/usage`. Polling ordinarily runs at most every five minutes, with a one-minute minimum around turns and model switches, only while Codex is active or `/status all` is selected. Pi sessions on the same account share one reading in `${XDG_CACHE_HOME:-~/.cache}/pi-status-footer/codex-usage-<account>.json`, fetched by one session at a time. Between polls, the rate-limit event Codex streams before each response (WebSocket transport) or its response headers (SSE transport) update the reading. Both usage requests have five-second timeouts and send authentication/account information, not conversation text or file contents.
 
+Modern `openai` ChatGPT-plan OAuth has no verified subscription-window endpoint here: its limits are unavailable, with [OpenAI usage settings](https://chatgpt.com/settings/usage) linked in details. Its token is not sent to the legacy Codex endpoint. Verified local Ollama or localhost inference shows `Local · no account quota` (example), not zero or unlimited; unknown remote providers and API-key accounts without subscription data show limits unavailable.
+
+For Google Antigravity, local OAuth can supply read-only project and quota information from internal provider endpoints; a missing project, refusal, unsupported response or vault-held credential without a quota capability is explicitly unavailable. The footer does not onboard a project or switch accounts. Muse availability comes from `PI_MUSE_BINARY` or `muse` via `usage --json`, using the CLI's own login and environment; it makes no model call. A missing CLI or null subscription allowance is unavailable. Successful non-null CLI allowance formats are not yet validated and also report unavailable with a reason; displaying Muse windows is deferred, not inferred from the MSP schema. Google and Muse readings are held in memory rather than a new credential-bearing disk cache.
+
 There is no plugin JSON settings file for the footer modes; use the commands above. Without a local Claude Code login, `PI_STATUS_FOOTER_CLAUDE_USAGE_CMD` can name an available command that prints usage JSON. That is an optional external integration, not a bundled command or an automatic remote connection.
 
 ## Optional integrations and limitations
 
 No companion is required. Auto effort contributes reasoning status; cache guard contributes its clock and trimming estimate. Background work, machine pressure and notebook statuses receive dedicated rows. Stash can show a restoration hint, and anthropic-billing-guard can annotate the Claude limits row. Unrecognized status shapes remain unchanged rather than disappearing; workflow/model layout follows Independent or Linked, with approvals separate; an extension's `mcp` status joins the context row, and planner-run notices stay in the general status row. Without the gate/role-default provider and supported guard, the footer does not invent a Linked flow. The remote-client status allowance remains 13 rows for the whole below-editor region, including activity pills and separators; Linked's shorter core does not enlarge that budget.
 
-Load an editor replacement that does not wrap its predecessor, such as pi-vim, before this footer. A wrapping editor integration such as pi-stash does not have that ordering restriction. Disable other footer owners or uncoordinated working-message writers before using `/reload`; pi-bg's wait messages are explicitly coordinated, not a conflict; otherwise it can replace this footer or working row after startup. pi-cc-extensions in particular is superseded by the suite and should not be enabled; [pi-cc-render](/plugins/pi-cc-render/) leaves the footer to this component.
+Load an editor replacement that does not wrap its predecessor, such as pi-vim, before this footer. A wrapping editor integration such as pi-stash does not have that ordering restriction. Disable other footer owners or uncoordinated working-message writers before using `/reload`; pi-bg's wait messages are explicitly coordinated, not a conflict; otherwise it can replace this footer or working row after startup. `/reload` is sufficient to replace footer controls; a full Pi restart should not be necessary. pi-cc-extensions in particular is superseded by the suite and should not be enabled; [pi-cc-render](/plugins/pi-cc-render/) leaves the footer to this component.
 
 Rendering itself performs no filesystem, subprocess or network work; asynchronous refreshes supply its data. This separation does not make the whole extension offline. For conflicts and missing readings, see [Troubleshooting](/guides/troubleshooting/) and the [source and tests](https://github.com/justmytwospence/pi-plugins/tree/main/packages/pi-status-footer).

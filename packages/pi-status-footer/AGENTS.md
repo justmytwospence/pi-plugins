@@ -16,15 +16,17 @@ Put one primary effective key hint at the end of each control row, using provide
 
 ## Visual consistency
 
-Preserve shared icon/inset alignment, quiet labels and separators, bold workflow/model landmarks, semantic warning/error colors and the right-hand key rail. Normal core rows do not wrap. Keep unknown, stale and cold states explicit; never present missing data as zero. Preserve meaningful state before low-priority detail/hints at narrow widths. Do not add decorative per-plugin styling that conflicts with this hierarchy.
+Preserve shared icon/inset alignment, quiet labels and separators, bold workflow/model landmarks, semantic warning/error colors and adjacent dim ` · <key>` hints without alignment padding. Normal core rows do not wrap. Keep unknown, stale and cold states explicit; never present missing data as zero. Preserve meaningful state before low-priority detail/hints at narrow widths. Do not add decorative per-plugin styling that conflicts with this hierarchy.
 
 ## Ownership and optional integration
 
 Plugins own behavior; the footer presents state and calls declared capabilities. No runtime sibling imports, rendered-string command parsing, fake user prompts or draft replacement to trigger actions. Absent providers yield absent controls. No I/O or model calls in rendering. Shared package-local contracts stay identical under contract tests.
 
+Keep subscription windows, API throttles, balances and costs distinct. Identify the actual source and account; missing, unsupported, stale or local-only data must not become zero or unlimited. Never use another provider's credentials or account as a quota fallback.
+
 ## Interaction correctness
 
-Hit regions derive from final ANSI/cell-aware layout. Ignore padding, separators, dropped segments and stale widths. Respect focus, dialogs, overlays, session generation, selection gestures and ordinary-terminal mouse ownership. Other-session chrome is read-only and never mutates main.
+Hit regions derive from final ANSI/cell-aware layout. Measurement renders at another width must not invalidate the visible layout; real resize, snapshot and lifecycle invalidation still discard stale geometry. Ignore padding, separators, dropped segments and stale widths. Respect focus, dialogs, overlays, session generation, selection gestures and ordinary-terminal mouse ownership. Other-session chrome is read-only and never mutates main.
 
 ## Verification and client contracts
 
